@@ -292,18 +292,50 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 //
 // `--judge=<dir>` anywhere in argv names the judge directory (<dir>/<prompt>.golden.safetensors);
 // take_judge removes it so the positional arguments keep their places.
-std::string take_judge(int& argc, char** argv) {
-  std::string dir;
+// `<prefix><value>` anywhere in argv: its value, removed from argv (the positional arguments keep
+// their places). Empty when absent.
+std::string take_flag(int& argc, char** argv, const std::string& prefix) {
+  std::string v;
   int w = 1;
   for (int r = 1; r < argc; ++r) {
     const std::string a = argv[r];
-    if (a.rfind("--judge=", 0) == 0)
-      dir = a.substr(8);
+    if (a.rfind(prefix, 0) == 0)
+      v = a.substr(prefix.size());
     else
       argv[w++] = argv[r];
   }
   argc = w;
-  return dir;
+  return v;
+}
+std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "--judge="); }
+
+// ---- accepted rows (operator ruling 2026-10-23, the fourth) -------------------------------
+// `--accept=<prompt>:<step>,...`: rows KNOWN to diverge from the judge, to be debugged on
+// 2026-10-26 (docs/box-day-plan.md, "Known divergences"). Such a row, if it fails, prints
+// kAcceptNote with its gap and does not fail the test; any other failing row still does; an
+// accepted row that passes prints "accepted row now passes - remove it". Set per registration in
+// tests/CMakeLists.txt, holding exactly the rows that failed on 2026-10-23.
+constexpr const char* kAcceptNote = "ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)";
+struct AcceptList {
+  std::vector<std::pair<std::string, uint32_t>> rows;
+  bool has(const std::string& prompt, uint32_t step) const {
+    return std::find(rows.begin(), rows.end(), std::make_pair(prompt, step)) != rows.end();
+  }
+};
+AcceptList take_accept(int& argc, char** argv) {
+  AcceptList a;
+  const std::string v = take_flag(argc, argv, "--accept=");
+  size_t i = 0;
+  while (i < v.size()) {
+    size_t j = v.find(',', i);
+    if (j == std::string::npos) j = v.size();
+    const std::string item = v.substr(i, j - i);
+    const size_t c = item.find(':');
+    CHECK(c != std::string::npos && c > 0 && c + 1 < item.size());
+    a.rows.emplace_back(item.substr(0, c), uint32_t(std::stoul(item.substr(c + 1))));
+    i = j + 1;
+  }
+  return a;
 }
 struct Judge {
   std::unique_ptr<Golden> g;

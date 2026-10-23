@@ -458,7 +458,25 @@ bitwise the engine's host references - `test_int8_sim.py`): `golden_gate_ornith_
 (the prompt forward through spec 5's h8 linears: rotation, per-token and per-column int8; key
 `oracle_ornith_f32_pfi8`). Made with the f32 judge: `f32_oracle.sh ~/b70-inference-server
 ornith-i8head` and `... ornith-pfi8` (`r10.oracle_f32` runs all three; each ~5 min, the same lock
-and 95 GB rule). A miss against them is a kernel error, not the variant's quantisation.
+and 95 GB rule). A miss against them is not the variant's quantisation.
+
+**Known divergences (operator ruling 2026-10-23, debug Monday 2026-10-26 evening).** Accepted per
+registration with `--accept=<prompt>:<step>,...` (tests/golden/golden_common.h): the row prints
+"ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)" with its judge gap and does not fail;
+any other failing row still fails; an accepted row that passes prints "accepted row now passes -
+remove it". The rows, and what is known (card 0, 2026-10-23):
+- `golden_gate_ornith_i8head` code 3 (judge gap 0.138, ulp 0.125), cjk 15 (0.125, ulp 0.0625).
+- `prefill_gate_ornith_l0-int8` prose 22 (0.469), cjk 15 (0.118). The same kernels at chunk 16
+  pass both; the GDN state is as far from the pfi8 judge at chunk 2048 as at 16 (0.99476 / 0.99484
+  prose), and the failing run's row-22 logits are the closer to the judge (cos 0.99709 / 0.99534).
+- `prefill_gate_ornith_l0_c16` (bf16) prose 18 (0.447), cjk 15: chunk widths 2048 / 64 / 32 / 16 / 8
+  leave the state's distance to f32 flat (0.996 prose) and flip the rows non-monotonically
+  (prose 18 wrong at 32 and 16, right at 8 and 2048) - chunk-boundary rounding of the GDN scan.
+- `k2_golden_i8head` prose 1 (0.136): gemv_i8w recomputed on the host from the device's own
+  hidden and int8 rows agrees to 4e-6 (`B70_K2_HEAD_CHECK`) - the divergence is the hidden state;
+  the bf16 head on it picks the judge's 1961.
+cjk 15 is a 3-4-way f32 near tie (four ids within 0.31) that different variants resolve
+differently.
 
 **Bars still to set for Ornith (runs written down, not made - 2026-10-23).**
 - `r16.m1` (`mtp_head_ornith_test`, per-row cosine >= 0.999): every reference argmax is in the
@@ -510,6 +528,7 @@ Flash stays the default (spec 18 §10.1, amended); the eager stages (`r14.golden
 printed, not failed on.
 The `*_i8head` K2 gates judge against `oracle-out-k2-f32-i8head` (k2_ref.py `--lm-head int8`; key
 `oracle_k2_f32_i8head`; `f32_oracle.sh ~/b70-inference-server k2-i8head`, made by `r14.oracle_f32`).
+Known divergence: `k2_golden_i8head` prose 1 is accepted until 2026-10-26 (session 4's "Known divergences").
 
 ### Session 6 - timed one-card rows, box idle
 
