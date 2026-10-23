@@ -81,7 +81,8 @@ class BoltEngine {
   std::vector<uint16_t> read_kv(uint32_t attn_index, uint32_t first, uint32_t count, bool v);
   // Both residual buffers of device `dev` (bf16 [2][hidden]: h0 then h1) - the ping-pong's state.
   std::vector<uint16_t> read_residuals(uint32_t dev);
-  // fp32 [vocab]: the last replay's logits (the last device's).
+  // fp32 [vocab]: the last replay's logits (the last device's) - spec 26c: after a commit(j, t), the verify's row j (the row t
+  // came from); after a plain step or a prefill, the decode scratch's.
   std::vector<float> read_logits();
   void read_logits_into(float* host);
   Control control(uint32_t dev) const;
@@ -269,6 +270,7 @@ class BoltEngine {
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   uint32_t verify_ids_[kVerifyRows] = {};
+  int logits_row_ = -1;   // read_logits' row: -1 the decode scratch's, j the verify scratch's row j (the last commit's)
   // Spec 25d: set by prepare_prefill (b70_bolt_prefill) - releases a prefill list waiting on a hand-off that will not come
   // and waits (bounded) for every prefill list to go idle; reset() calls it.
   std::function<bool()> pf_settle_;
