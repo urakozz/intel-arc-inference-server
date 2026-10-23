@@ -77,10 +77,16 @@ case "${1:-}" in
     have oracle_ornith "oracle-out-ornith/ with router_logits.L* (spec 15a)" test -d oracle-out-ornith
     have oracle_ornith_mtp "oracle-out-ornith-mtp/ (spec 15a's MTP head dump: mtp_head_ornith_test, M1)" \
       test -d oracle-out-ornith-mtp
+    have oracle_ornith_f32 "oracle-out-ornith-f32/{prose,code,cjk}.golden.safetensors (the f32 judge, operator ruling 2026-10-23: --with r10.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32/$p.golden.safetensors || exit 1; done'
     have k2 "K2-Horizon int4 checkpoint ${SNAP_K2:-?} (spec 18b; hf download, 21.8 GB)" \
       complete "${SNAP_K2:-/nonexistent}"
     have oracle_k2 "oracle-out-k2/{prose,code,cjk}.{ids,golden.safetensors} (spec 18a's real-weight run: --with r14.oracle)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2/$p.ids && test -s oracle-out-k2/$p.golden.safetensors || exit 1; done'
+    # Operator ruling 2026-10-23: the Ornith / K2 token gates' JUDGE - the f32 reference teacher-forced on
+    # the bf16 golden's tokens (tools/box_validate/f32_oracle.sh <data tree> ornith|k2; tests/golden/golden_common.h).
+    have oracle_k2_f32 "oracle-out-k2-f32/{prose,code,cjk}.golden.safetensors (the f32 judge: --with r14.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32/$p.golden.safetensors || exit 1; done'
     have kolibri "Kolibri-1 int4 checkpoint ${SNAP_KOLIBRI:-?} (spec 20b, decision 1 open; ~42.5 GB)" \
       complete "${SNAP_KOLIBRI:-/nonexistent}"
     # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).

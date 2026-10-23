@@ -169,6 +169,9 @@ void compare_route(const uint32_t* got_ids, const uint32_t* got_w_bits, const in
 }  // namespace
 
 int main(int argc, char** argv) {
+  // `--judge=<f32 dir>` (operator ruling 2026-10-23, golden_common.h): the token gate judges
+  // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
+  const std::string judge_dir = golden::take_judge(argc, argv);
   const std::string snap = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-k2";
   // Flags after the oracle dir, any order: `int8` (spec 9's head), `prefill` or
@@ -288,6 +291,9 @@ int main(int argc, char** argv) {
         }
       }
     }
+    const golden::Judge J =
+        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, rows);
+    uint32_t bf16_vs_f32 = 0, bf16_det_bad = 0;   // the bf16 golden as a diagnostic beside the judge
     uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
     int first_bad = -1;
     double logit_min = 1.0;
@@ -311,7 +317,13 @@ int main(int argc, char** argv) {
                     "(engine %.4f, golden %.4f)\n", j, row, lm.cos, lm.nb, lm.err, double(worst), at,
                     double(lg[at]), double(glog[size_t(row) * d.vocab + at]));
       }
-      const golden::GoldenDecision dec = golden::golden_decision(glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
+      // The verdict: the f32 judge's decision row when one is given (operator ruling 2026-10-23,
+      // golden_common.h), else the bf16 golden's. The bf16 golden's own verdict is printed.
+      const golden::GoldenDecision gdec = golden::golden_decision(glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
+      const golden::GoldenDecision dec =
+          J ? golden::golden_decision(J.row(row), std::min(J.V, d.vocab), d.vocab_used) : gdec;
+      if (J && dec.set[0] != gdec.set[0]) ++bf16_vs_f32;
+      if (J && gdec.determined() && got != gdec.set[0]) ++bf16_det_bad;
       if (dec.determined()) {
         ++det;
         if (got == dec.set[0]) ++det_ok;
@@ -321,11 +333,15 @@ int main(int argc, char** argv) {
         if (dec.contains(got)) ++tie_ok;
         else if (first_bad < 0) first_bad = int(j);
       }
-      if (got != uint32_t(gtok[j])) {
-        std::printf("  step %u: engine %u, golden %u (%s)\n", j, got, uint32_t(gtok[j]),
-                    dec.determined() ? "determined" : "tie row");
+      if (got != uint32_t(gtok[j]) || got != dec.set[0]) {
+        std::printf("  step %u: engine %u, golden %u%s (%s%s)\n", j, got, uint32_t(gtok[j]),
+                    J ? (", f32 judge " + std::to_string(dec.set[0])).c_str() : "",
+                    dec.determined() ? "determined" : "tie row",
+                    dec.contains(got) ? (J ? "; the f32 judge accepts the engine's" : "; in the argmax set")
+                                      : "; GATE");
         golden::print_top5("engine", lg.data(), d.vocab, d.vocab_used);
         golden::print_top5("golden", glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
+        if (J) golden::print_top5("f32", J.row(row), std::min(J.V, d.vocab), d.vocab_used);
       }
       eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
       check_routes(T + j);
@@ -397,6 +413,10 @@ int main(int argc, char** argv) {
     std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; "
                 "logits worst cosine %.6f\n", det_ok, det, tie_ok, ties,
                 ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(), logit_min);
+    if (J)
+      std::printf("  judged by the f32 reference %s; bf16 golden (diagnostic, not the gate): its argmax differs "
+                  "from the judge on %u of %u decision rows, against it the engine misses %u determined row(s)\n",
+                  judge_dir.c_str(), bf16_vs_f32, kGen, bf16_det_bad);
     if (!prefill && g.has("resid.L" + std::to_string(d.layers - 1))) {
       std::printf("  tap (MoE layers, min cosine over the prompt):");
       for (uint32_t l = d.dense_layers; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
@@ -412,12 +432,20 @@ int main(int argc, char** argv) {
   const auto [moe_rate, mova_rate] = route_rate();
   const double moe_got = moe_c.rows ? double(moe_c.ties + moe_c.bad) / double(moe_c.rows) : 0.0;
   const double mova_got = mova_c.rows ? double(mova_c.ties + mova_c.bad) / double(mova_c.rows) : 0.0;
-  std::printf("routing gate: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - the bf16 reference's own "
-              "rate against its f32 control%s\n", moe_got, moe_rate, mova_got, mova_rate,
-              moe_got <= moe_rate && mova_got <= mova_rate ? "" : "  ** FAIL **");
+  // Operator ruling 2026-10-23: K2's default decode attention stays flash, and the eager
+  // variant is RECORDED, not gated, on the routing rate - the number and the bar are printed,
+  // the test does not fail on them (its ctest label `diagnostic` says so). The token gate binds
+  // both.
+  const bool eager = runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager;
+  const bool route_ok = moe_got <= moe_rate && mova_got <= mova_rate;
+  std::printf("routing %s: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - the bf16 reference's own "
+              "rate against its f32 control%s\n", eager ? "(eager: RECORDED, not gated)" : "gate", moe_got,
+              moe_rate, mova_got, mova_rate, route_ok ? "" : (eager ? "  (above the bar)" : "  ** FAIL **"));
   CHECK(gate_ok);
-  CHECK(moe_got <= moe_rate);
-  CHECK(mova_got <= mova_rate);
+  if (!eager) {
+    CHECK(moe_got <= moe_rate);
+    CHECK(mova_got <= mova_rate);
+  }
   std::puts("k2_golden_test OK");
   return 0;
 }
