@@ -150,7 +150,13 @@ route's fp32 words within 2 ulp with the ids exact; the card is held bitwise by 
 `bolt_pf_run`: the portable Bolt prefill kernels (`nb_pf_mamba`'s seed / conv / dt / plain C B^T / SSD scan in fp32 and bf16
 state / gated norm, both tilings ten times each; `nb_pf_moe`'s sort / gather / dequant / combine; the chunk gather; 25c's kernels
 at M 2048) and Muse's prefill eager attention against `tests/kernels/bolt_pf_ref.h` - exact but where Apple's division sits in
-the chain, and the eager attention bitwise decode's `mg_attn_eager` on the same device (its DPAS kernels stay on the box).
+the chain, and the eager attention bitwise decode's `mg_attn_eager` on the same device (its DPAS kernels stay on the box). Spec 26b adds
+`lilicorr_run`: the LiLiCorr drafter's projection and draft lists (`df_prep` at its defines, `ll_attn` with the sinks,
+`ll_topk`'s top-8 with the chunked logsumexp, `ll_lattice`'s head, `ll_select`'s walk, `ll_gemv_bf16_g` for the exact
+arm's NVFP4 linears) at `tests/loader/lilicorr_dflash_fixture.safetensors`'s tiny shapes, the fixture's own NVFP4
+checkpoint read by `loader::LiliCheckpoint`, against `tests/kernels/lilicorr_ref.h` in the exact (bf16 head), int8 and -
+when `gemv.cl` builds on the device - int4 g64 arms; `ll_attn` alone at the window's edge and the ring's wrap, `ll_topk`
+alone on planted rows (ties, NaN, a -inf chunk, a huge value, three chunks).
 `clrun` inlines a
 source's local `#include "x.h"` itself (Apple's compiler intermittently failed to find them through `-I`). A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,

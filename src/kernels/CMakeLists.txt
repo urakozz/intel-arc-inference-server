@@ -2077,6 +2077,52 @@ endif()
 set(B70_LILICORR_P0_KERNELS ${B70_LILICORR_P0_KERNELS} CACHE INTERNAL "spec 26a's probe binaries (lilicorr_cost_names_test)")
 # ==== Spec 26a: LiLiCorr P0 ==== (end) ====
 
+# ==== Spec 26b: LiLiCorr on the card - the drafter ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec26b-lilicorr-drafter.md, Task 4. Additive only: no existing source is edited
+# and no existing name is built here (26a's block already builds the drafter's GEMVs at M 8 and the int8 head at M 7), so
+# every binary above keeps its name, its command line and its bytes (D0); nothing is bound without a LiLiCorr drafter
+# (runtime::dflash::LiliDrafter). At nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr's shapes beside Bolt
+# (kernels::dflash::kLiLiCorr, src/kernels/dflash_kernels.h):
+#   df_prep.cl         reused at H 4096, Q32 / KV2 x 128, FF 12288, conv 16 x 2, RING 1024, VOCAB 131072 (df_embed, df_norm,
+#                      the conv prepare / finish, df_silu_mul, df_qkv_prep, df_ctx_store)
+#   ll_attn.cl         df_attn's chain + the sink in the reduce, WIN 1024 over RING 1024 in PB 64 blocks, 8 q heads a part
+#   ll_topk.cl         the 8 best raw logits of each of the 7 mask rows + the row's logsumexp (32 chunks merged in order)
+#   ll_lattice.cl      the LiLiCorr head (56 lattice tokens, hidden 1024, 8 heads, the slot bias at offset 7)
+#   ll_select.cl       the walk over the lattice, the readback, ctrl.cur_token[1 + s]
+#   ll_gemv_bf16_g.cl  gemv_bf16 with an fp32 output scale - the exact arm's NVFP4 linears (fc, gate||up, down) at M 8
+#   gemv_bf16.cl       the bf16 target head at the 7 mask rows (--lm-head bf16; the int8 head's M 7 is 26a's)
+# The int8 / int4 g64 / bf16 GEMVs at M 8 (q||k||v, o, gate||up, down, fc, the conv projections, the context's k||v) are
+# 26a's (B70_LILICORR_P0's block), which this block requires.
+option(B70_LILICORR "build the LiLiCorr drafter variants (spec 26b)" ON)
+set(B70_LILICORR_KERNELS)
+if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
+  set(LL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
+  set(LCTL_DEFINES DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5 DCTL_AVALID=6)
+  add_ocloc_kernel(df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072 SOURCE ${LL_DIR}/df_prep.cl
+                   DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} M=8 H=4096 WG=256 EPS=1e-06f VOCAB=131072 GROUP=16 CTAPS=2
+                           INTER=12288 NH=32 NKV=2 HD=128 RING=1024)
+  add_ocloc_kernel(ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 SOURCE ${LL_DIR}/ll_attn.cl
+                   DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} M=8 NH=32 NKV=2 HD=128 RING=1024 WIN=1024 PB=64 HPW=8 WGA=128)
+  add_ocloc_kernel(ll_topk_R7_N131072_U131072_K8 SOURCE ${LL_DIR}/ll_topk.cl
+                   DEFINES R=7 N=131072 USED=131072 TOPK=8 CH=4096)
+  add_ocloc_kernel(ll_lattice_S7_K8_HL1024_LH8_B8 SOURCE ${LL_DIR}/ll_lattice.cl
+                   DEFINES ${LCTL_DEFINES} S=7 KC=8 HL=1024 LHEADS=8 BLK=8 RMAX=64 GW=64 KT=16 EPS=1e-06f FEPS=1e-05f)
+  add_ocloc_kernel(ll_select_S7_K8 SOURCE ${LL_DIR}/ll_select.cl DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} S=7 KC=8)
+  foreach(KN "24576 4096" "4096 24576" "12288 4096")   # fc, gate||up, down: N >= 2048 -> gemv_bf16's {64, 1} tiling
+    separate_arguments(KN)
+    list(GET KN 0 _k)
+    list(GET KN 1 _n)
+    add_ocloc_kernel(ll_gemv_bf16_g_M8_K${_k}_N${_n} SOURCE ${LL_DIR}/ll_gemv_bf16_g.cl DEFINES M=8 K=${_k} N=${_n})
+    list(APPEND B70_LILICORR_KERNELS kernel_ll_gemv_bf16_g_M8_K${_k}_N${_n})
+  endforeach()
+  add_gemv_bf16_variant(7 4096 131072 64 1)
+  list(APPEND B70_LILICORR_KERNELS kernel_df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072
+    kernel_ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 kernel_ll_topk_R7_N131072_U131072_K8
+    kernel_ll_lattice_S7_K8_HL1024_LH8_B8 kernel_ll_select_S7_K8 kernel_gemv_bf16_M7_K4096_N131072)
+endif()
+set(B70_LILICORR_KERNELS ${B70_LILICORR_KERNELS} CACHE INTERNAL "spec 26b's LiLiCorr drafter binaries (lilicorr_names_test)")
+# ==== Spec 26b: LiLiCorr on the card - the drafter ==== (end) ====
+
 # ==== Spec 13a: the batching probe (rows of different sequences) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
 # OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only

@@ -44,8 +44,9 @@ a tiny random MuseGlimmerAssistantModel at Muse's ratios: hidden 64, 2 layers, 8
 Spec 26b: the same for the LiLiCorr form (dflash_ref.py's "lilicorr", 26a's port of vLLM's models/lilicorr.py) - 26a's
 tiny drafter (tools/oracle/lilicorr_make_tiny.py: its names, NVFP4 packing and edges - a zero scale block, subnormal
 scales) at narrower widths so the file stays small: hidden 128, 2 layers, 4 / 1 heads x 32, FF 256, 6 taps of a
-hidden-128 target (fc 768 -> 128), conv groups of 16 (kernel projection 32 rows), window 16 (|q - k| <= 15), sinks,
-block 8, mask id 990, the head 64 wide / 2 layers / 4 heads / MLP 128 / factor 64 / top-8, over a synthetic target of
+hidden-128 target (fc 768 -> 128), conv groups of 8 (kernel projection 64 rows: a whole GEMV width), window 16
+(|q - k| <= 15), sinks, block 8, mask id 990, the head 64 wide / 2 layers / 4 heads / MLP 128 / factor 64 / top-8, over
+a synthetic target of
 vocab 1024 (embedding and head random bf16). The reference runs in float32 (its only mode):
   ckpt.<name>                     the tiny checkpoint's own tensors (U8 / F8_E4M3 / F32 NVFP4 triplets, BF16 the rest)
   target.embed / target.head bf16 [1024][128], taps bf16 [40][768]
@@ -261,7 +262,8 @@ def lilicorr_cfg() -> tuple:
     cfg = mk.tiny_config(vocab=LV, window=16)
     cfg.update({"hidden_size": 128, "num_attention_heads": 4, "num_key_value_heads": 1, "head_dim": 32,
                 "intermediate_size": 256})
-    cfg["dflash_config"].update({"lilicorr_hidden_size": 64, "lilicorr_num_heads": 4, "lilicorr_factor_dim": 64})
+    cfg["dflash_config"].update({"lilicorr_hidden_size": 64, "lilicorr_num_heads": 4, "lilicorr_factor_dim": 64,
+                                 "conv_group_size": 8})
     return cfg, mk
 
 

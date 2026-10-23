@@ -241,7 +241,7 @@ inline TopK topk_lse(const float* logits, uint32_t used, uint32_t k) {
   for (const dfref::Cand& x : c) {
     out.id.push_back(x.i);
     out.v.push_back(x.v);
-    out.lp.push_back(x.v - out.lse);
+    out.lp.push_back(x.i == dfref::kNoIdx ? -INFINITY : x.v - out.lse);
   }
   return out;
 }

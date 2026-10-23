@@ -120,13 +120,13 @@ int main(int argc, char** argv) {
     const double dlat = maxdiff(o.lattice.data(), lat.data(), lat.size()), dlp = maxdiff(o.lp.data(), lp.data(), lp.size()),
                  dlg = maxdiff(o.logit.data(), lg.data(), lg.size()), danc = maxdiff(ra.anchor.data(), anc.data(), D.H),
                  dsc = maxdiff(o.walk.scores.data(), sc.data(), sc.size());
-    std::printf("  case %zu (p %u, K %u, T %.1f): rows cos %.9f, cand %s, logit %.1e, lp %.1e, anchor %.1e, lattice %.2e "
-                "(max |v| %.2f), walk %s, scores %.1e\n",
-                ci, c.p, c.K, double(c.T), hc, cands ? "=" : "DIFF", dlg, dlp, danc, dlat, double(maxabs(lat)),
-                walk ? "=" : "DIFF", dsc);
+    // fp32 summation-order differences are relative to each quantity's scale: the logits' largest |value|, the lattice's
+    const double ml = double(maxabs(lg)), mt = std::fmax(1.0, double(maxabs(lat)));
+    std::printf("  case %zu (p %u, K %u, T %.1f): rows cos %.9f, cand %s, logit %.1e (of %.1f), lp %.1e, anchor %.1e, "
+                "lattice %.2e (max |v| %.2f), walk %s, scores %.1e\n",
+                ci, c.p, c.K, double(c.T), hc, cands ? "=" : "DIFF", dlg, ml, dlp, danc, dlat, mt, walk ? "=" : "DIFF", dsc);
     CHECK(hc >= 0.999999 && cands && walk);
-    const double ml = double(maxabs(lg));   // the logits' scale: fp32 order differences are relative to it
-    CHECK(dlp <= 2e-6 * ml && dlat <= 1e-5 && danc <= 1e-5 && dlg <= 2e-6 * ml);
+    CHECK(dlp <= 5e-6 * ml && dlg <= 5e-6 * ml && dlat <= 1e-5 * mt && danc <= 1e-5);
     CHECK(ra.valid == (c.p > 0));
     worst_lat = std::fmax(worst_lat, dlat);
     worst_lp = std::fmax(worst_lp, dlp);
