@@ -1,7 +1,9 @@
 # Spec 26c - LiLiCorr in Bolt's loop and server: verify at M <= 8 with taps on two cards, the Mamba state slots and the commit, the union-aware MoE verify, the prefill projection, snapshots with the ring, `--spec dflash` (D0, D2-D5)
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **65**. Built whatever 26a shows (the operator's ruling);
-`--spec dflash` becomes Bolt's default only on D5's rule.
+**Status (2026-10-23): built on the Mac** (branch `spec26c-lilicorr-engine-serving`; as built: spec 26 §14) - Tasks 1-7
+but Task 2 Step 3 (the replay lever: not built, §11) and Task 5's GEMM path (the 8-row replay fallback built); nothing run
+on a card - box queue row **65** (Session 14). Built whatever 26a shows (the operator's ruling); `--spec dflash` becomes Bolt's
+default only on D5's rule.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
