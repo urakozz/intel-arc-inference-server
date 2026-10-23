@@ -164,7 +164,8 @@ contribution, then card 1's) so both cards hold a **bitwise-identical residual**
 
 **The crossing is latency-bound, not bandwidth-bound** (derived; the operator's note, 2026-10-23): with
 fold-then-send, one Bolt crossing at M = 1 is 4096 x 2 B = **8 KiB in bf16** (16 KiB fp32): **~0.7 µs** of transfer at
-12 GB/s (1.4 µs fp32), so 88 folds move ~0.7 MB, **~60 µs a token** (~120 µs fp32) (derived, assumed peer rate). What a
+12 GB/s (1.4 µs fp32), so 88 folds move ~0.7 MB, **~60 µs a token** (~120 µs fp32; the MoE crossings' routed part
+adds 4-36 KiB each, at most ~0.12 ms more) (derived, assumed peer rate). What a
 crossing really costs is its **latency** - the peer write landing, the system-scope release, the peer card noticing
 the flag, the fold starting - times 89. At the published 6.6-10.8 µs a crossing that is **~0.6-1.0 ms** a token
 (derived from published): the whole of §3's budget. So P0 measures the **per-crossing latency** inside replayed lists
