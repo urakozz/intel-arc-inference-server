@@ -63,6 +63,7 @@
 #include "common/bf16.h"
 #include "golden_common.h"
 #include "kernels/k2_kernels.h"
+#include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "loader/k2_loader.h"
 #include "loader/snapshot.h"
@@ -273,7 +274,22 @@ int main(int argc, char** argv) {
       const uint32_t row = T - 1 + j;
       const uint32_t got = ctl->cur_token[0];
       const std::vector<float> lg = eng.read_logits();
-      logit_min = std::min(logit_min, golden::compare_f32(lg.data(), glog + size_t(row) * d.vocab, d.vocab, sa, sb).cos);
+      const golden::Metric lm = golden::compare_f32(lg.data(), glog + size_t(row) * d.vocab, d.vocab, sa, sb);
+      logit_min = std::min(logit_min, lm.cos);
+      if (lm.cos < 0.99) {   // a low row: where it is, and the largest single difference
+        uint32_t at = 0;
+        float worst = 0;
+        for (uint32_t v = 0; v < d.vocab; ++v) {
+          const float e = std::fabs(lg[v] - glog[size_t(row) * d.vocab + v]);
+          if (e > worst) {
+            worst = e;
+            at = v;
+          }
+        }
+        std::printf("  step %u (row %u): logits cosine %.6f, |golden| %.1f, |err| %.1f; worst |diff| %.3f at id %u "
+                    "(engine %.4f, golden %.4f)\n", j, row, lm.cos, lm.nb, lm.err, double(worst), at,
+                    double(lg[at]), double(glog[size_t(row) * d.vocab + at]));
+      }
       const golden::GoldenDecision dec = golden::golden_decision(glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
       if (dec.determined()) {
         ++det;
@@ -292,6 +308,68 @@ int main(int argc, char** argv) {
       }
       eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
       check_routes(T + j);
+      // Diagnostic: B70_K2_ATTN_CHECK=<prompt>:<row> - the LAST layer's decode attention of that
+      // row (its scratch still holds q, the gate and attn_out; the cache every row) against a
+      // double-precision softmax(q·k / sqrt(128)) · v and the same gate, on the device's inputs.
+      if (const char* chk = std::getenv("B70_K2_ATTN_CHECK"); chk && !prefill) {
+        const std::string s = chk;
+        const size_t c1 = s.find(':');
+        if (c1 != std::string::npos && s.substr(0, c1) == pname && std::stoul(s.substr(c1 + 1)) == T + j) {
+          l0::CmdList im = l0::CmdList::immediate(ctx);
+          const runtime::k2::K2Buffers& b = eng.buffers();
+          const uint32_t L = d.layers - 1, n = T + j + 1, HD = d.head_dim, KVN = d.kv_n();
+          std::vector<float> q(d.q_n()), g(d.q_n());
+          std::vector<uint16_t> out(d.q_n()), kk(size_t(n) * KVN), vv(size_t(n) * KVN);
+          im.copy(q.data(), b.attn_q.ptr(), q.size() * 4);
+          im.copy(g.data(), b.attn_gate.ptr(), g.size() * 4);
+          im.copy(out.data(), b.attn_out.ptr(), out.size() * 2);
+          im.copy(kk.data(), b.kv_k_layer(L), kk.size() * 2);
+          im.copy(vv.data(), b.kv_v_layer(L), vv.size() * 2);
+          double worst = 0, ab = 0, aa = 0, bb = 0, pmax = 0;
+          for (uint32_t h = 0; h < d.q_heads; ++h) {
+            const uint32_t kh = h / d.gqa();
+            std::vector<double> sc(n);
+            double mx = -1e300;
+            for (uint32_t p = 0; p < n; ++p) {
+              double a = 0;
+              for (uint32_t t = 0; t < HD; ++t)
+                a += double(q[h * HD + t]) * common::bf16_to_f32(kk[size_t(p) * KVN + kh * HD + t]);
+              sc[p] = a / std::sqrt(double(HD));
+              mx = std::max(mx, sc[p]);
+            }
+            double sum = 0;
+            for (double& v : sc) sum += (v = std::exp(v - mx));
+            pmax = std::max(pmax, *std::max_element(sc.begin(), sc.end()) / sum);
+            for (uint32_t t = 0; t < HD; ++t) {
+              double o = 0;
+              for (uint32_t p = 0; p < n; ++p) o += sc[p] / sum * common::bf16_to_f32(vv[size_t(p) * KVN + kh * HD + t]);
+              const double x = g[h * HD + t] * 0.6931471805599453;
+              const double sp = x > 20 ? g[h * HD + t] : std::log1p(std::exp(x)) / 0.6931471805599453;
+              const double want = o * sp, got = common::bf16_to_f32(out[h * HD + t]);
+              worst = std::max(worst, std::fabs(want - got) / std::max(std::fabs(want), 1e-3));
+              ab += want * got;
+              aa += want * want;
+              bb += got * got;
+            }
+          }
+          std::printf("  attention check, row %u layer %u (%s): attn_out vs double cos %.6f, worst rel %.3e; "
+                      "the most peaked head's max p %.6f\n", T + j, L,
+                      runtime::k2::k2_attn_name(runtime::k2::k2_attn()), ab / std::sqrt(aa * bb), worst, pmax);
+        }
+      }
+      // Diagnostic: B70_K2_DUMP=<prompt>:<row>:<file> writes that generated row's per-layer
+      // tap (bf16 [layers][hidden]) - two runs (B70_K2_ATTN=flash / eager) compared layer by layer.
+      if (const char* dump = std::getenv("B70_K2_DUMP"); dump && !prefill) {
+        const std::string s = dump;
+        const size_t c1 = s.find(':'), c2 = s.find(':', c1 + 1);
+        if (c1 != std::string::npos && c2 != std::string::npos && s.substr(0, c1) == pname &&
+            std::stoul(s.substr(c1 + 1, c2 - c1 - 1)) == T + j) {
+          const std::vector<uint16_t> tap = eng.read_debug_resid();
+          std::ofstream(s.substr(c2 + 1), std::ios::binary)
+              .write(reinterpret_cast<const char*>(tap.data()), std::streamsize(tap.size() * 2));
+          std::printf("  dumped row %u's per-layer tap to %s\n", T + j, s.substr(c2 + 1).c_str());
+        }
+      }
     }
     const bool ok = det_ok == det && tie_ok == ties;
     gate_ok = gate_ok && ok;
