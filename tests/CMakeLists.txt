@@ -1566,6 +1566,12 @@ if(B70_ORNITH)
   # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> ornith.
   set(B70_ORNITH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32"
     CACHE PATH "Ornith's f32 teacher-forced reference (the golden gates' judge)")
+  # ... and its quantisation-aware twins (tools/oracle/int8_sim.py; f32_oracle.sh ornith-i8head / ornith-pfi8):
+  # the int8 head, and the prompt forward through spec 5's l0-int8 linears.
+  set(B70_ORNITH_F32_I8HEAD_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head"
+    CACHE PATH "Ornith's f32 reference through the int8 head (the _i8head gate's judge)")
+  set(B70_ORNITH_F32_PFI8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-pfi8"
+    CACHE PATH "Ornith's f32 reference with the l0-int8 prefill linears (the l0-int8 prefill gates' judge)")
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
     CACHE PATH "Ornith's prompt ids (the committed ones: the int4 checkpoint's tokenizer gives them)")
   # The greedy argmax is Qwen3.8's argmax_stage1_M1 (vocab_used 248077, spec 15 §13); a||b is
@@ -1586,7 +1592,7 @@ if(B70_ORNITH)
   add_test(NAME golden_gate_ornith_test COMMAND golden_gate_test
     ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR})
   add_test(NAME golden_gate_ornith_i8head_test COMMAND golden_gate_test
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_DIR})
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_I8HEAD_DIR})
   set_tests_properties(golden_gate_ornith_test golden_gate_ornith_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 
@@ -1793,14 +1799,16 @@ if(B70_ORNITH)
   add_dependencies(prefill_split_test ${B70_ORNITH_PREFILL_KERNELS})
   foreach(b l0 l0-int8)
     set(_near 0)
+    set(_judge ${B70_ORNITH_F32_DIR})
     if(b STREQUAL "l0-int8")
+      set(_judge ${B70_ORNITH_F32_PFI8_DIR})   # the quantisation-aware f32 judge (int8_sim.py, 2026-10-23)
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
-      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR}
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
       prose,code,cjk 0 ${b} ${_near})
     add_test(NAME prefill_gate_ornith_${b}_c16_test COMMAND prefill_gate_test
-      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR}
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
       prose,code,cjk 16 ${b} ${_near})
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
@@ -1905,6 +1913,9 @@ if(B70_K2)
   # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> k2.
   set(B70_K2_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32"
     CACHE PATH "K2-Horizon's f32 teacher-forced reference (the golden gates' judge)")
+  # ... and its quantisation-aware twin for the int8 head (k2_ref.py --lm-head int8; f32_oracle.sh k2-i8head)
+  set(B70_K2_F32_I8HEAD_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head"
+    CACHE PATH "K2-Horizon's f32 reference through the int8 head (the *_i8head gates' judge)")
   foreach(t k2_decode_test k2_golden_test)
     if(t STREQUAL "k2_decode_test")
       add_executable(${t} runtime/${t}.cc)
@@ -1921,12 +1932,12 @@ if(B70_K2)
   add_test(NAME k2_decode_i8head_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
   add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
+  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8)
   # Spec 18 §10: the same gate through the EAGER attention (k2_attn_eager.cl, the reference's
   # bf16 chain) - the box's first session runs both pairs and compares (box-validation-queue
   # row 14).
   add_test(NAME k2_golden_eager_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
+  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8)
   set_tests_properties(k2_golden_eager_test k2_golden_eager_i8head_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
   set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
     k2_golden_eager_test k2_golden_eager_i8head_test
@@ -2022,7 +2033,7 @@ if(B70_K2)
   add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
   add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
     prefill:16)
-  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
+  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR}
     int8 prefill)
   set_tests_properties(k2_golden_prefill_test k2_golden_prefill_c16_test k2_golden_prefill_i8head_test
     PROPERTIES LABELS "checkpoint;golden;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -2340,7 +2351,7 @@ if(B70_K2 AND B70_KV8)
   add_test(NAME k2_decode_kv8_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
   add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
+  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8)
   add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
   add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
   add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
