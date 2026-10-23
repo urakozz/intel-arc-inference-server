@@ -5248,4 +5248,38 @@ target_include_directories(lilicorr_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(lilicorr_ref_test PRIVATE b70_dflash_loader b70_dflash_model)
 add_test(NAME lilicorr_ref_test COMMAND lilicorr_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/lilicorr_dflash_fixture.safetensors)
 set_tests_properties(lilicorr_ref_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 600)
+# Task 4: every binary the LiLiCorr lists bind (kernels::dflash::lilicorr_draft_variants, exact / int8 / int4 g64 x head
+# int8 / bf16) is built - by the kernels' Spec 26b B70_LILICORR lines or reused from 26a's (the GEMVs at M 8, the int8 head
+# at M 7) - and those lines build nothing unbound; kLiLiCorr is the vendored config beside Bolt. Host only.
+if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
+  set(_l26b_reused kernel_gemv_i8w_M7_K4096_N131072)
+  foreach(KN K4096_N4608 K4096_N4096 K4096_N24576 K12288_N4096 K24576_N4096 K4096_N1024 K4096_N512)
+    list(APPEND _l26b_reused kernel_gemv_i8w_M8_${KN} kernel_gemv_M8_${KN}_S1_L1)
+  endforeach()
+  list(APPEND _l26b_reused kernel_gemv_bf16_M8_K4096_N4608 kernel_gemv_bf16_M8_K4096_N4096
+    kernel_gemv_bf16_M8_K4096_N1024_C16_S16 kernel_gemv_bf16_M8_K4096_N512_C16_S16)
+  foreach(t ${B70_LILICORR_KERNELS} ${_l26b_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 26b: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(lilicorr_names_test kernels/lilicorr_names_test.cc)
+  target_include_directories(lilicorr_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lilicorr_names_test PRIVATE b70_dflash_model b70_bolt_model)
+  b70_target_kernel_dir(lilicorr_names_test)
+  add_test(NAME lilicorr_names_test COMMAND lilicorr_names_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json
+    ${B70_LILICORR_KERNELS} -- ${_l26b_reused})
+  set_tests_properties(lilicorr_names_test PROPERTIES LABELS "lilicorr;dflash")
+  # Task 4 on the card: every ll_* kernel at the drafter's shapes against the twin on random data (no checkpoint) -
+  # ll_gemv_bf16_g bitwise gemv_bf16 x gs, the sinks' attention within 1 bf16 ulp, the top-8 exact with its log-probs,
+  # the whole head chain's lattice, the walk greedy and sampled, the anchor row.
+  add_executable(lilicorr_kernels_test kernels/lilicorr_kernels_test.cc)
+  target_include_directories(lilicorr_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lilicorr_kernels_test PRIVATE b70_l0 b70_dflash_model)
+  b70_target_kernel_dir(lilicorr_kernels_test)
+  add_dependencies(lilicorr_kernels_test ${B70_LILICORR_KERNELS} kernel_gemv_bf16_M8_K24576_N4096
+    kernel_gemv_bf16_M8_K4096_N24576 kernel_gemv_bf16_M8_K12288_N4096)
+  add_test(NAME lilicorr_kernels_test COMMAND lilicorr_kernels_test)
+  set_tests_properties(lilicorr_kernels_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 900)
+endif()
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
