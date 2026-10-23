@@ -249,6 +249,27 @@ int main(int argc, char** argv) {
         ++gl;
       }
       std::printf("    worst: L%u at %.9f\n", v.gdn_min_layer, v.gdn_min_cos);
+      // Under a judge, the same states against the f32 reference's (diagnostic): how far this
+      // chunking's prompt state sits from exact arithmetic, comparable across chunk widths.
+      const std::string jp = judge_dir + "/" + pname + ".golden.safetensors";
+      if (!judge_dir.empty() && golden::exists(jp)) {
+        Golden jg(jp);
+        double jmin = 1.0;
+        uint32_t jl = 0;
+        std::printf("  gdn_state vs the f32 judge, per GDN layer (cos):");
+        for (uint32_t l = 0, gl = 0; l < kLayers; ++l) {
+          if (::model::ModelDesc::is_fa(l)) continue;
+          imm.copy(got.data(), static_cast<const uint8_t*>(eng.buffers().gdn_state.ptr()) +
+                                   size_t(gl) * gdn_stride,
+                   gdn_stride);
+          const Metric m = compare_f32(got.data(), jg.f32("gdn_state.L" + std::to_string(l), kGdnElems),
+                                       kGdnElems, sa, sb);
+          std::printf(" %u:%.6f", l, m.cos);
+          if (m.cos < jmin) jmin = m.cos, jl = l;
+          ++gl;
+        }
+        std::printf("\n    worst vs f32: L%u at %.9f\n", jl, jmin);
+      }
     }
 
     // ---- 3. the gate, unchanged in semantics --------------------------------
@@ -344,7 +365,8 @@ int main(int argc, char** argv) {
                   uint32_t(gtok[p]), jd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf, mark,
                   gam != gaf ? "  [golden argmax is a padding id]" : "",
                   forced ? "  [teacher-forced]" : "");
-      if (J) std::printf("  f32 %u%s", want, want != gam ? "  [bf16 golden != f32]" : "");
+      if (J) std::printf("  f32 %u%s f32cos %.6f", want, want != gam ? "  [bf16 golden != f32]" : "",
+                         compare_f32(dec.data(), jrow, Vj, sa, sb).cos);
       if (jr.near)
         std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
                     !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
