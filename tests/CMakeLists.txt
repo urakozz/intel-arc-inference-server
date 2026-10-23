@@ -5302,4 +5302,10 @@ if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
   add_test(NAME lilicorr_draft_test COMMAND lilicorr_draft_test ${B70_LILICORR_SNAPSHOT})
   set_tests_properties(lilicorr_draft_test PROPERTIES LABELS "checkpoint;lilicorr;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
+# Task 6: D1's host half - the twin drafting over tap dumps in tools/probe/dflash_d1 --model lilicorr's JSONL, for
+# tools/oracle/dflash_d1.py (tools/box_validate/dflash_d1.sh MODEL=lilicorr twin; on the Mac over 26a's tiny pair). A tool,
+# not a ctest: its inputs are generated data.
+add_executable(lilicorr_d1_twin kernels/lilicorr_d1_twin.cc)
+target_include_directories(lilicorr_d1_twin PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lilicorr_d1_twin PRIVATE b70_dflash_loader b70_bolt_loader b70_dflash_model)
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
