@@ -5213,3 +5213,14 @@ if(B70_LILICORR_P0 AND B70_BOLT)
   set_tests_properties(lilicorr_cost_names_test PROPERTIES LABELS lilicorr)
 endif()
 # ==== Spec 26a: LiLiCorr P0 (label lilicorr) ==== (end) ====
+
+# ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (begin) ====
+# Task 1: the descriptor's third form (model::DFlashForm::LiLiCorr) from the published config (vendored at
+# tests/model/lilicorr/), held to its kernels and to Bolt; 19b's rules on the Qwen3.8 drafter's config unchanged. Host only.
+add_executable(lilicorr_desc_test model/lilicorr_desc_test.cc)
+target_include_directories(lilicorr_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lilicorr_desc_test PRIVATE b70_dflash_model b70_bolt_model)
+add_test(NAME lilicorr_desc_test COMMAND lilicorr_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json
+  ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
+set_tests_properties(lilicorr_desc_test PROPERTIES LABELS "lilicorr;dflash")
+# ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
