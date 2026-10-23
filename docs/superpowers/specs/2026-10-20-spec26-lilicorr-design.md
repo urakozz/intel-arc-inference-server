@@ -2,7 +2,8 @@
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §10. **26a built on the Mac 2026-10-23** (§12 as built; §11 the P0 verdict - PENDING the
-box, its defaults PROVISIONAL); 26b / 26c not built.
+box, its defaults PROVISIONAL); **26b built on the Mac 2026-10-23** (§13 as built: the drafter on the card - nothing
+run on a card yet, row 64); 26c not built.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec26{a,b,c}-*.md` - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
 serving (D0, D2-D5). **Box queue rows 63-65** (spec 25 takes 57-62).
@@ -419,3 +420,104 @@ taps bitwise `run`'s h after blocks 1 / 2 / 4 / 6 / 9 / 10; taps one block early
 head and the real one: `lilicorr_vllm_check.py` runs both when the weights are cached), the acceptance
 tables, lookup on the real continuations, the union counts, the cost probe (no new binary compiled by ocloc), the
 projection with measured numbers, vLLM XPU with LiLiCorr. Every default in §11 is PROVISIONAL until then.
+
+## 13. 26b as built (2026-10-23; the Mac only - no card)
+
+Branch `spec26b-lilicorr-drafter`; box queue row 64 (Session 13 of `docs/box-day-plan.md`). kernel_cmdlines **+9 / -0 / ~0**;
+no existing `.cl` edited; nothing compiled by ocloc, nothing run on a card.
+
+**Built.** `model::DFlashForm::LiLiCorr` (`dflash_desc_from_config` reads `LiLiCorrDraftModel` through the vLLM DFlash 2
+rules - the block from the top level, sinks, the `lilicorr_*` widths, NVFP4's quantization_config only; `check_lilicorr`
+holds it to the kernels); `loader/nvfp4` (the decode, `f64_to_f16_rne`, `rtn_int4_g64_g`, `quantise_int8_tiled_g`);
+`loader::LiliCheckpoint` (`lilicorr_repack`: the names both ways - every linear BF16 or an NVFP4 triplet -, the three
+formats, the head as W'^T + g + bias), `loader/lilicorr_layout.h` (the bytes), `loader::load_lilicorr` /
+`lilicorr_embed_replica`; `DraftFormat::Exact` (`parse_lilicorr_draft_format`: exact | int8 | int4; the other drafters
+refuse it); the kernels `ll_attn`, `ll_topk`, `ll_lattice`, `ll_select`, `ll_gemv_bf16_g` (+ `df_prep` and the bf16 head at
+M 7 from new CMake lines; 26a's block supplies the M 8 GEMVs and the int8 head at M 7); `runtime::dflash::LiliDrafter`
+(`lilicorr_drafter`: `LiliBuffers`, the 116-launch draft list, the 9-launch projection with the anchor row, `LiliCtl` /
+`LiliDraftOut` in `dflash_control.h`), `lilicorr_sizes` (the buffers, the launch counts, the snapshot bytes, the key,
+`lili_bolt_reserve`); `draft_list_k` returns 7 for this form; the twin `tests/kernels/lilicorr_ref.h` and its fixture
+(`dflash_fixture.py --lilicorr`); D1's tools - `dflash_d1 --model lilicorr`, `dflash_d1.py`'s LiLiCorr form,
+`tests/kernels/lilicorr_d1_twin`, `dflash_d1.sh MODEL=lilicorr` (gpu / ref / twin). Tests: `lilicorr_desc_test`,
+`nvfp4_test`, `lilicorr_repack_test`, `lilicorr_ref_test`, `lilicorr_names_test`, `lilicorr_plan_test` (host);
+`lilicorr_kernels_test`, `lilicorr_draft_test` (card); `test_dflash_d1.py`'s `test_lilicorr_form`; `tools/mac/clrun/
+lilicorr_run` (mac_check section 5).
+
+**Measured on the Mac** (every number printed by the test named): NVFP4's 16 x 254 finite (code, scale) products exact in
+bf16 and f16, |W'| in [2^-10, 2688], the NaN scales refused naming `weight_scale[row][block]`; f64 -> f16 in one rounding
+(= the fp32 path on 200k floats; 1 + 2^-11 + 2^-40 rounds up where the two-step path ties to even); folding g into bf16
+before int4 moves 325 of 2048 words of a random tensor; the int8 codes are W''s whatever g (`nvfp4_test`). The real
+checkpoint through `LiliCheckpoint`: 179 tensors, 25 NVFP4 linears, held to Bolt (`lilicorr_repack_test`). The twin against
+dflash_ref.py's LiLiCorr form on the fixture's 10 cases (no context; the window's edge for rows 0 and 7; the 16-slot ring's
+wrap; K 7 / 3 / 1; the mask id as the anchor; two sampled walks with the slot-keyed seed): the 8 rows cosine 1.000000000,
+candidates and walks equal, the lattice within 1.3e-5 (|values| <= 2.8), logits / log-probs within 2.7e-5 (|logits| <= 23), the anchor within
+9.5e-7; the reference's `no_sink` and `anchor_p2` mutations reproduced by the twin within 3.7e-6 (the true lattice 1.7 /
+2.7 away) (`lilicorr_ref_test`). `lilicorr_run` on the Mac's GPU (Intel UHD 630): every `ll_*` kernel and both lists agree
+with the twin in the exact (bf16 head) and int8 arms - rows, anchor, candidates, lattice cosine 1.0000000, walks; `ll_attn`
+alone within 1 bf16 ulp at p 1..123; `ll_topk` exact on planted rows over 3 chunks (log-probs within 8e-8); gemv.cl's int4
+does not build there (as 23f). DERIVED (`lilicorr_plan_test`): the drafter at max_len 262144 is exact 2.377 GB / int8
+1.302 / int4 g64 0.797 (weights + 150.5 MB of buffers, 134 MB of it the RoPE table), and Bolt plans 262144 on two 32 GiB
+cards in every format beside the 1.07 GB replica (device 1: 26.9-28.5 of 34.4 GB).
+
+**D1's Mac half on 25a's tiny pair** (`bolt_ref.py taps` over the tiny Bolt `pattern12`, 26a's `oracle-out-lilicorr-tiny`;
+`lilicorr_d1_twin` + `dflash_d1.py`, 2 dumps x 16 anchors): the twin in **fp32** passes every D1 bar - sets 32 / 32, log-probs
+within 4.8e-6, the lattice 32 / 32 at cosine 1.0000000, walks 32 / 32, the anchor cosine 1.0000000: the pipeline (the dump
+format, the projection's window, the anchor at p - 1, the comparator) is right. The twin in the **engine's bf16 numerics**
+(the card's arithmetic: 19b's bf16 GEMV inputs, bf16 ring, bf16 attention / SiLU outputs) in every arm: sets 15-16 / 32
+tie-aware, walks 18-21 / 32, log-probs worst 1.7-1.9e-2 (of logits <= 5.4), the anchor cosine 1.0000000. **D1's 1e-3 log-prob
+bar and its 1e-3 tie tolerance sit below what bf16 activations move** (rows cosine ~0.99997, ~0.8 % relative; the tiny
+target's top-8 logits are within ~0.2 of each other): on the box the bar is expected to fail for numeric reasons unless the
+real drafter's margins are much larger. `dflash_d1.py --lp-bar` (`LP_BAR`) re-runs the comparison at another bar; the
+lattice, sets, walks and anchor are recorded either way. The levers, if r64.d1_ref shows the gap: relax the bar to the
+measured noise (e.g. 1e-2, a cosine on log-probs), or fp32-input GEMVs for the backbone (19b's note; bytes unchanged,
+speed unmeasured).
+
+**Rulings where this differs from the plan's text (each with its cost if wrong):**
+1. *LiLiCorr's checkpoint has its own host class* (`loader::LiliCheckpoint`, `lilicorr_repack.cc`) beside `DFlashCheckpoint`,
+   and its own device loader / buffers / lists (`load_lilicorr`, `LiliBuffers`, `build_lili_*`) - the plan modified
+   `dflash_{repack,loader,layout}`: the dtypes, names, head and readback differ wholesale; the 19b / 23f objects are
+   untouched (D0 by construction). *Cost:* two parallel code paths to maintain.
+2. *The tests are new executables* (`lilicorr_desc_test`, `lilicorr_repack_test`, `lilicorr_ref_test`, `lilicorr_names_test`,
+   `lilicorr_plan_test`, `lilicorr_kernels_test`, `lilicorr_draft_test`) instead of extending `dflash_test` / `dflash_ref_test` /
+   `dflash_names_test`; the twin is `lilicorr_ref.h` over `dflash_ref.h`. *Cost:* none.
+3. *The exact arm's output scale is per column* (`gs[N]`, 4 N bytes: 589,824 B over the backbone): gate||up is one GEMV over
+   two NVFP4 tensors with two g's. Numerically the per-tensor multiply. *Cost:* none.
+4. *The head's projections read fp32 inputs* (`ll_gemm`: the final-normed rows, the anchor, the head's own activations), not
+   19b's bf16 GEMV inputs - the plan's "lever" taken up front; the head is plain OpenCL C, so no bf16 copy is needed.
+   *Cost:* unmeasured speed (r63.cost timed bf16 GEMVs as its stand-in).
+5. *`ll_attn_part` runs 8 of a kv head's 16 q heads a work-group* (HPW 8): 16 x 8 q pairs would need 96 KB of local memory.
+   *Cost:* each ring block is read twice (5,120 B a position, negligible).
+6. *`LiliDrafter` is a `runtime::TapSink`*, not a `TapDrafter` (whose proposer side is Qwen3.8's 16-candidate readback and
+   `runtime::Engine`): its proposer is its own `draft(replay, k, T, seed)` returning `LiliDraftOut` (MuseDrafter's
+   precedent). *Cost:* none; 26c binds Bolt's verify through TapSink and the loop through `draft()`.
+7. *The draft list always walks all 7 slots* (dctl.k = `draft_list_k` = 7); the caller keeps the first K (§12 ruling 1). The
+   walk's noise is fp32 (`log(-log1p(-u))`, df_select's and vLLM's), the reference's double - a sampled pick can differ at
+   near-ties. *Cost:* none to the output distribution.
+8. *The anchor's validity is a control word* (`LiliCtl.anchor_valid`, DCTL 6): set by `projection()`, cleared by `reset()`, set
+   by `load_ring()` (a snapshot follows a projection). *Cost:* a restore of a snapshot taken before any projection reads a
+   zero anchor as valid (none is taken there: snapshots are at block ends after a prefill).
+9. *`bolt_sizes.*` is not modified*: `runtime::dflash::lili_bolt_reserve` fills 25b's `BoltReserve` (`drafter`,
+   `drafter_embed_replica`); b70_dflash_plan links b70_bolt_plan. *Cost:* none.
+10. *The fixture is narrower than 26a's tiny drafter* (hidden 128, 4 / 1 heads x 32, FF 256, conv groups of 8 - the kernel
+    projection a whole 64-column GEMV width -, the head 64 / 4 heads / factor 64) over a synthetic 1024-row target: 1.55 MB.
+    Re-running the script writes the same tensors; safetensors' header order varies. *Cost:* none.
+11. *dflash_d1.py's LiLiCorr reference rounds the head's input to bf16* (the engine's head reads `df_norm`'s bf16 copy;
+    `head_input` in the run line, fp32 for the twin's `--reference`); the log-prob bar is `--lp-bar`. *Cost:* none.
+12. *The RoPE table is 19b's fp32 [max_len + 8][128]* - 134 MB on device 1 at 262144 (counted). *Cost:* memory only.
+13. *The embedding replica* is uploaded by `loader::lilicorr_embed_replica` from the Bolt checkpoint's row-major tensor; who owns
+    it beside Bolt's engine is 26c's. *Cost:* none here.
+
+**PENDING (box, row 64):** the first ocloc build of the 9 binaries; `lilicorr_kernels_test` (ll_gemv_bf16_g bitwise
+gemv_bf16 x g, `ll_attn` within 1 ulp at p 5 .. 131000, `ll_topk` at 131072, the head chain's lattice cosine >= 0.99999 on
+random real-width weights, the walk greedy and sampled, `ll_anchor`); `lilicorr_draft_test` (the real drafter in three
+formats beside a synthetic target: launches, the projection across the ring's wrap, the anchor, a draft at p 1100, the
+replay, k 3, a sampled walk, the snapshot, a cold drafter, the host-timed draft); D1 per arm on 25a's tap dumps (opt-in
+r64.d1 / r64.d1_ref). Every default (int8, K 7, q `lattice`) stays §11's PROVISIONAL one until r63.
+
+**For 26c:** bind Bolt's verify lists through `TapSink` (taps 1 / 18 / 35 copied by device 0 into device 1's `taps()` before
+its hand-off; 51 / 68 / 85 on device 1), commit through `projection(pos, j + 1)` (<= 8 rows; the anchor follows), the
+prefill's last 1024 rows 8 a replay (Decision 7), snapshots with `ring_bytes()` (5,259,264 B: the ring + the anchor) and
+`key()` (`lili_drafter_key`, the form folded in); the sampled q is `softmax(LiliDraftOut.scores[s] / T)` on `cand[s]`
+(Decision 6) - the device's sampled walk already keys by slot; the replica's allocation (1.07 GB on device 1,
+`lili_bolt_reserve` counts it) and `--draft-format exact|int8|int4` (`parse_lilicorr_draft_format`, default int8) /
+`--spec-max 1..7` (LiliDrafter's `max_k`) are the CLI's.

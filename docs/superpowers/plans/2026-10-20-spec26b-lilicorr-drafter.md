@@ -1,7 +1,9 @@
 # Spec 26b - LiLiCorr on the card: the descriptor form, NVFP4 -> our formats at load, the sink attention, top-8 with log-probs, the lattice head and its walk, the draft and projection lists (D1)
 
-**Status (2026-10-20): planned; nothing built.** Box queue row **64**. Built whatever 26a shows; 26a's verdict picks the
-default format and K.
+**Status (2026-10-23): built on the Mac** (branch `spec26b-lilicorr-drafter`; spec 26 §13 as built): Tasks 1-5 and 7, Task 6's
+Mac half (D1's pipeline on 25a's tiny pair) - the card's halves (`lilicorr_kernels_test`, `lilicorr_draft_test`, D1 per arm)
+are box queue row **64** (Session 13), PENDING. Defaults are spec 26 §11's PROVISIONAL ones (`int8`, K 7, q `lattice`).
+(Planned 2026-10-20: built whatever 26a shows; 26a's verdict picks the default format and K.)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
