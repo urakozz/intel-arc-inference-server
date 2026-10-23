@@ -285,8 +285,9 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 // those models' token gates JUDGE against the f32 teacher-forced reference - the same weights in
 // float32, every generated step forced to the bf16 golden's token (ornith_ref.py --dtype f32
 // --force, k2_ref.py --mode f32 --force; tools/box_validate/f32_oracle.sh), so its logits rows
-// are the bf16 golden's contexts row for row - with the same tie rule (golden_decision) applied
-// to ITS logits. The bf16 golden stays a printed diagnostic beside it. Qwen3.8's and Agnes's
+// are the bf16 golden's contexts row for row - with the tie rule applied to ITS logits, widened
+// by the operator's second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
+// below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's and Agnes's
 // gates take no judge and are unchanged.
 //
 // `--judge=<dir>` anywhere in argv names the judge directory (<dir>/<prompt>.golden.safetensors);
@@ -311,6 +312,43 @@ struct Judge {
   explicit operator bool() const { return g != nullptr; }
   const float* row(uint32_t r) const { return logits + size_t(r) * V; }
 };
+// The judge's decision row (operator ruling 2026-10-23, the second): an f32 row whose top-2 gap
+// is within ONE bf16 ulp of its top logit counts as a tie - the set is every id within one ulp
+// of the top, and the engine passes the row if its id is in it. The ulp is
+// prefill_gate_test.cc's bf16_near_tie's: the spacing of bf16 values at |top|, 2^(e - 8) with
+// |top| = m 2^e, m in [0.5, 1) - between |top| / 256 and |top| / 128 (0.0625 at 12.4, 0.125 at
+// 17.9). `top` is the f32 argmax (the masked lowest index on an exact tie, as golden_decision);
+// `near` says the set exists only by this rule (the exact rule would call the row determined).
+double bf16_ulp_at(float v) {
+  int e = 0;
+  std::frexp(std::fabs(v), &e);
+  return std::ldexp(1.0, e - 8);
+}
+struct JudgedRow {
+  GoldenDecision d;      // set ascending; determined() == the row binds exactly
+  uint32_t top = 0;      // the judge's argmax
+  bool near = false;     // a tie only by the one-ulp rule
+  double gap = 0, ulp = 0;   // top - runner-up, and the ulp at top
+};
+JudgedRow judge_row(const float* row, uint32_t n, uint32_t used) {
+  JudgedRow j;
+  j.d = golden_decision(row, n, used);
+  j.top = j.d.set[0];
+  const uint32_t lim = n < used ? n : used;
+  j.ulp = bf16_ulp_at(row[j.top]);
+  double second = -INFINITY;
+  for (uint32_t i = 0; i < lim; ++i)
+    if (i != j.top && row[i] > second) second = row[i];
+  j.gap = double(row[j.top]) - second;
+  if (j.d.determined() && j.gap <= j.ulp) {
+    j.near = true;
+    j.d.set.clear();
+    for (uint32_t i = 0; i < lim; ++i)
+      if (double(row[j.top]) - double(row[i]) <= j.ulp) j.d.set.push_back(i);
+  }
+  return j;
+}
+
 // The judge of one prompt: the bf16 golden's rows, teacher-forced on exactly its `tokens` (a
 // judge forced on anything else would decide other contexts). Absent: SKIP (77), as an absent
 // golden is.

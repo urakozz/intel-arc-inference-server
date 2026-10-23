@@ -469,9 +469,13 @@ int main(int argc, char** argv) {
       // is given (jd / want), else the bf16 golden's as always.
       const bool ok = id == uint32_t(gtok[p]);
       const uint32_t jrow_i = p == 0 ? T - 1 : T + p - 1;
-      const GoldenDecision jd =
-          J ? golden_decision(J.row(jrow_i), std::min(J.V, Qwen35::kVocab), Qwen35::kVocabUsed) : gd;
-      const uint32_t want = jd.set[0];
+      // The judge's row with the one-bf16-ulp tie rule (golden_common.h judge_row); without a
+      // judge the bf16 golden's exact rule, unchanged.
+      golden::JudgedRow jr;
+      if (J) jr = golden::judge_row(J.row(jrow_i), std::min(J.V, Qwen35::kVocab), Qwen35::kVocabUsed);
+      else jr.d = gd, jr.top = gd.set[0];
+      const GoldenDecision& jd = jr.d;
+      const uint32_t want = jr.top;
       const bool jok = id == want;
       if (J && want != gam) ++bf16_vs_f32;
       if (J && gd.determined() && id != gam) ++bf16_det_bad;
@@ -498,6 +502,9 @@ int main(int argc, char** argv) {
                   forced ? "  [teacher-forced]" : "");
       if (J)
         std::printf("  f32 %u%s", want, want != gam ? "  [bf16 golden != f32]" : "");
+      if (jr.near)
+        std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
+                    !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
       std::printf("\n");
       if (!jok && int(p) == v.first_diverge) {
         std::printf("      first divergence at generated position %u: engine %u, %s %u"
