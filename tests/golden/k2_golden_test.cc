@@ -320,25 +320,33 @@ int main(int argc, char** argv) {
       // The verdict: the f32 judge's decision row when one is given (operator ruling 2026-10-23,
       // golden_common.h), else the bf16 golden's. The bf16 golden's own verdict is printed.
       const golden::GoldenDecision gdec = golden::golden_decision(glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
-      const golden::GoldenDecision dec =
-          J ? golden::golden_decision(J.row(row), std::min(J.V, d.vocab), d.vocab_used) : gdec;
-      if (J && dec.set[0] != gdec.set[0]) ++bf16_vs_f32;
+      // The judge's row with the one-bf16-ulp tie rule (golden_common.h judge_row, the operator's
+      // second ruling of 2026-10-23); without a judge the bf16 golden's exact rule.
+      golden::JudgedRow jr;
+      if (J) jr = golden::judge_row(J.row(row), std::min(J.V, d.vocab), d.vocab_used);
+      else jr.d = gdec, jr.top = gdec.set[0];
+      const golden::GoldenDecision& dec = jr.d;
+      if (J && jr.top != gdec.set[0]) ++bf16_vs_f32;
       if (J && gdec.determined() && got != gdec.set[0]) ++bf16_det_bad;
       if (dec.determined()) {
         ++det;
-        if (got == dec.set[0]) ++det_ok;
+        if (got == jr.top) ++det_ok;
         else if (first_bad < 0) first_bad = int(j);
       } else {
         ++ties;
         if (dec.contains(got)) ++tie_ok;
         else if (first_bad < 0) first_bad = int(j);
       }
-      if (got != uint32_t(gtok[j]) || got != dec.set[0]) {
-        std::printf("  step %u: engine %u, golden %u%s (%s%s)\n", j, got, uint32_t(gtok[j]),
-                    J ? (", f32 judge " + std::to_string(dec.set[0])).c_str() : "",
+      if (got != uint32_t(gtok[j]) || got != jr.top || jr.near) {
+        std::printf("  step %u: engine %u, golden %u%s (%s%s)", j, got, uint32_t(gtok[j]),
+                    J ? (", f32 judge " + std::to_string(jr.top)).c_str() : "",
                     dec.determined() ? "determined" : "tie row",
                     dec.contains(got) ? (J ? "; the f32 judge accepts the engine's" : "; in the argmax set")
                                       : "; GATE");
+        if (jr.near)
+          std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, dec.set.size(),
+                      got != jr.top && dec.contains(got) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
+        std::printf("\n");
         golden::print_top5("engine", lg.data(), d.vocab, d.vocab_used);
         golden::print_top5("golden", glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
         if (J) golden::print_top5("f32", J.row(row), std::min(J.V, d.vocab), d.vocab_used);
