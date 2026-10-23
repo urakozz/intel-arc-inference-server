@@ -301,6 +301,39 @@ int main(int argc, char** argv) {
       const uint32_t row = T - 1 + j;
       const uint32_t got = ctl->cur_token[0];
       const std::vector<float> lg = eng.read_logits();
+      // Diagnostic: B70_K2_HEAD_CHECK=<prompt>:<step> - the int8 head (gemv_i8w) of that decision
+      // row recomputed on the host from the device's own inputs: the final-normed hidden (x, bf16)
+      // and the head's int8 rows + fp32 scales as loaded (tiled [N/16][K/16][16 k][16 n]),
+      // (x . q) s in double, for the engine's top 2 and the judge's top.
+      if (const char* hc = std::getenv("B70_K2_HEAD_CHECK"); hc && int8) {
+        const std::string s = hc;
+        const size_t c1 = s.find(':');
+        if (c1 != std::string::npos && s.substr(0, c1) == pname && std::stoul(s.substr(c1 + 1)) == j) {
+          l0::CmdList im = l0::CmdList::immediate(ctx);
+          const loader::DeviceWeight& lm = *eng.model().lm_head;
+          const uint32_t K = d.hidden;
+          std::vector<uint16_t> x(K);
+          im.copy(x.data(), eng.buffers().x.ptr(), size_t(K) * 2);
+          std::vector<uint32_t> ids;
+          {
+            std::vector<uint32_t> o(d.vocab_used);
+            for (uint32_t i = 0; i < d.vocab_used; ++i) o[i] = i;
+            std::partial_sort(o.begin(), o.begin() + 2, o.end(), [&](uint32_t a, uint32_t b) { return lg[a] > lg[b]; });
+            ids = {o[0], o[1]};
+            if (J) ids.push_back(golden::judge_row(J.row(row), std::min(J.V, d.vocab), d.vocab_used).top);
+          }
+          for (uint32_t n : ids) {
+            std::vector<int8_t> tile(size_t(K) * 16);
+            float sc = 0;
+            im.copy(tile.data(), static_cast<const int8_t*>(lm.mem.ptr()) + size_t(n / 16) * K * 16, tile.size());
+            im.copy(&sc, static_cast<const float*>(lm.scales->ptr()) + n, 4);
+            double acc = 0;
+            for (uint32_t k = 0; k < K; ++k) acc += double(common::bf16_to_f32(x[k])) * tile[size_t(k) * 16 + n % 16];
+            std::printf("  head check step %u id %u: device %.6f, host (x . q) s %.6f (scale %.6g)\n", j, n,
+                        double(lg[n]), acc * sc, double(sc));
+          }
+        }
+      }
       const golden::Metric lm = golden::compare_f32(lg.data(), glog + size_t(row) * d.vocab, d.vocab, sa, sb);
       logit_min = std::min(logit_min, lm.cos);
       if (lm.cos < 0.99) {   // a low row: where it is, and the largest single difference
