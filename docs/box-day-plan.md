@@ -31,6 +31,7 @@ to it.
 | 10 | the rest of the suite | device 0 | `tools/box_validate.sh --only x` | 1 | 0.5-1 h |
 | 11 | Bolt on SergiioB's g128 checkpoint (row 57): the CPU reference, golden sets, the g128 A4 reference, the taps | box CPU, no card | `tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps` | 1 + 5 opt-in | hours, then days for `r57.a4_ref` (est.) |
 | 12 | **the Bolt BF16 window** (rows 57, 58): the BF16 original downloaded, our g64 quantisation, the BF16 references, gate Q and F6, then the BF16 original removed | **both** for `r58.tune`, else box CPU | §2, Session 12 | row 58's + 3 opt-in | ~3-6 days (est.) |
+| 13 | the LiLiCorr drafter on one card (row 64, plan 26b): the `ll_*` kernels, the draft / projection lists, D1 on 25a's taps | one card (either: `card` stages, §1.8), D1's reference box CPU | `tools/box_validate.sh --only r64 --with r64.d1,r64.d1_ref` | 4 + 2 opt-in | ~1-2 h card + D1's CPU half hours (est.) |
 
 **Total, the default set: ~40-63 h of box time, ~51 h central (est.)** - two to two and a half
 days if the sessions run back to back. Sessions 1-10 together run each of the 179 default
@@ -50,6 +51,9 @@ once; 9b adds ~3.5-6 h (est.) plus its CPU-lane data (§1.6) and, optionally, In
 checkpoint (41.9 GB). The BF16 original (149.8 GB) is downloaded **on the box only**, for Session 12, and
 removed after it: everything that reads it (row 58's quantisation, the BF16 golden sets, the BF16 A4
 reference, gate Q, F6) runs in that one window.
+
+**Added 2026-10-23: Session 13** for row 64 (plan 26b, the LiLiCorr drafter on the card). Its stages are one-card
+correctness (`card`, §1.8): they run beside the other card's stream; D1's reference half is box CPU.
 
 Row 20 (Kolibri-1 spec 20a, the quantisation) has no runbook stage and needs spec 20
 decision 1; it is not part of the box day. Everything on the real Kolibri int4 checkpoint
@@ -742,6 +746,25 @@ disk. **The short path** drops the BF16 A4 reference: gate Q and F6 then report 
 (no A4 column) and the window shrinks by those days; `r58.eval` and `r57.gateq` need
 `bolt_a4_ref` (both forms' A4) as written, so taking the short path means running them without
 that key, a change to make on the Mac before the window.
+
+### Session 13 - the LiLiCorr drafter on one card (row 64, plan 26b)
+
+```sh
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-lilicorr.log uvx --from huggingface_hub hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1'   # if row 63 did not
+tools/box_validate.sh --only r64                          # k0 (D0, after G0), host, k1 (lilicorr_kernels_test), draft
+tools/box_validate.sh --only r64.d1,r64.d1_ref            # D1: after Session 11's r57.taps (oracle_bolt_taps) and with bolt_g128
+```
+
+`r64.k1` is the first ocloc build of the 9 new binaries and every `ll_*` kernel against the twin on random data;
+`r64.draft` loads the REAL drafter in int8 / exact / int4 g64 beside a synthetic Bolt-shaped target (a random 1 GB
+embedding replica and int8 head - host RAM ~4 GB, ESTIMATED) and holds the lists to the twin over the card's ring. Both are
+`card`: either card, beside the other stream (§1.8). `r64.d1` reads only Bolt's embedding (as the replica) and lm_head
+(int8 at load) from SergiioB's g128 - one card, 1.6 GB of them beside the drafter's 0.8-2.4 GB (derived) - and drafts at 16 anchors of every 25a tap dump
+in three arms; `r64.d1_ref` is the box CPU's (the oracle image: dflash_ref.py's LiLiCorr form in fp32, ~1.1 B parameters
+a draft - hours, ESTIMATED). **Expect r64.d1_ref's log-prob bar (1e-3) to be the one at risk** (spec 26 §13: on the
+Mac the engine's bf16 numerics moved the tiny pair's log-probs by up to 1.7e-2 while the fp32 twin passed every bar);
+the table still records the sets, the lattice, the walks and the anchor - read them before calling a FAIL a bug, and
+`LP_BAR=1e-2` re-runs only the comparison. Hand back the lines row 64's rownote lists.
 
 ## 3. When time is short
 

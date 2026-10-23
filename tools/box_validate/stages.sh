@@ -4607,6 +4607,52 @@ st_r63_vllm_xpu() {
 }
 
 # ======================================================================================
+row 64 "spec 26b - LiLiCorr on the card: DFlashForm::LiLiCorr, NVFP4 decoded exactly into exact / int8 / int4 g64, the ll_* kernels (sinks, top-8 + lse, the lattice head and walk), the draft and projection lists (D1) (plan 26b)"
+rownote 64 "Download the drafter if row 63 did not (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1. r64.d1 also reads SergiioB's g128 (bolt_g128: only its embedding and lm_head) and 25a's tap dumps (oracle_bolt_taps, r57.taps)."
+rownote 64 "Written on the Mac (spec 26 §13): the descriptor, the NVFP4 decode (all 16 x 256 products, the real checkpoint's 25 linears read), the three formats from (W', g), the twin (tests/kernels/lilicorr_ref.h) against dflash_ref.py's LiLiCorr form on a tiny NVFP4 drafter (candidates and walks equal, the lattice within 1.3e-5 of |2.8|), every ll_* kernel on the Mac's GPU against the twin (tools/mac/clrun/lilicorr_run: exact and int8 arms agree; gemv.cl's int4 does not build there), D1's pipeline on 25a's tiny pair (the twin in fp32 passes every bar; in the engine's bf16 numerics the log-probs move by up to 1.7e-2 - spec 26 §13's caveat for r64.d1's 1e-3 bar). kernel_cmdlines +9 / -0 / ~0 - no existing .cl edited, none of the 9 compiled by ocloc. Every default is spec 26 §11's PROVISIONAL one (int8, K 7, q lattice) and switchable (--format / LiliDrafter's max_k)."
+rownote 64 "Hand back: r64.k1's lilicorr_kernels_test lines (ll_gemv_bf16_g bitwise gemv_bf16 x g, ll_attn's ulps, ll_topk, the head chain's lattice cosine, ll_select, ll_anchor), r64.draft's lilicorr_draft_test lines per format (launches, the projection's ulps and anchor cosine, the draft line, the replay / k 3 / sampled / snapshot / cold lines, the host-timed ms), r64.d1_ref's d1.md (one row per arm) and any FAIL lines."
+stage r64.k0     64 default cpu  -                                              g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +9 / -0 / ~0), every pre-existing binary identical, the suite (G0); 26b's edits to shared files: DFlashDesc's third form, DraftFormat::Exact (other drafters refuse it), draft_list_k's LiLiCorr case, dflash_d1's --model lilicorr"
+st_r64_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r64.host   64 default cpu  oracle_image                                   -        "host: lilicorr_desc_test, nvfp4_test, lilicorr_repack_test, lilicorr_ref_test (LiLiCorr), lilicorr_names_test, lilicorr_plan_test; test_dflash_d1.py (the LiLiCorr comparator) in the oracle image"
+st_r64_host() {
+  run_tests '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$'
+  jgrab host '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$' '^[0-9]\.|OK|PASS|drafter in'
+  chk "tools/oracle/run_in_container.sh 'python3 tools/oracle/test_dflash_d1.py'" "the D1 comparator's tests incl. the LiLiCorr form (oracle image)"
+  finish
+}
+stage r64.k1     64 default card -                                              r64.k0   "lilicorr_kernels_test: every ll_* kernel against the twin (the 9 new binaries' first ocloc build)"
+st_r64_k1() {
+  kbins df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072 ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 \
+    ll_topk_R7_N131072_U131072_K8 ll_lattice_S7_K8_HL1024_LH8_B8 ll_select_S7_K8 ll_gemv_bf16_g_M8_K24576_N4096 \
+    ll_gemv_bf16_g_M8_K4096_N24576 ll_gemv_bf16_g_M8_K12288_N4096 gemv_bf16_M7_K4096_N131072
+  run_tests '^lilicorr_kernels_test$' lilicorr
+  jgrab kernels '^lilicorr_kernels_test$' 'll_|differ|ulp|cosine|PASS|FAIL'
+  finish
+}
+stage r64.draft  64 default card lilicorr                                       r64.k1   "lilicorr_draft_test on one card: the draft, the projection, the ring round trip"
+st_r64_draft() {
+  x "build/tests/lilicorr_draft_test ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr} | tee $STATE/$STAGE.txt"
+  step_rc $? "lilicorr_draft_test (int8 / exact / int4 g64)"
+  grab_all draft '^--- |^LiLiCorr drafter:|^[1-6]\. |^lilicorr_draft_test' 60
+  finish
+}
+stage r64.d1     64 optin   card bolt_g128,lilicorr,oracle_bolt_taps            r64.draft "D1 per arm against dflash_ref.py's LiLiCorr form on the tap dumps - the engine's half: dflash_d1 --model lilicorr over oracle-out-bolt-taps (16 anchors a dump, the whole block, T 0), arms i8 / exact / i4 with the int8 head -> \$STATE/d1/d1.<arm>.jsonl"
+st_r64_d1() {
+  chk "MODEL=lilicorr SNAP_BOLT=\${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} tools/box_validate/dflash_d1.sh gpu $STATE/d1" "dflash_d1 (LiLiCorr) x 3 arms"
+  grab_all d1 '^dflash_d1|^LiLiCorr drafter:|^=== ' 20
+  finish
+}
+stage r64.d1_ref 64 optin   cpu  bolt_g128,lilicorr,oracle_bolt_taps,oracle_image r64.d1  "D1, the reference's half (box CPU, the oracle image): dflash_d1.py per arm - the 8 candidate sets tie-aware, their log-probs to 1e-3 (LP_BAR), the lattice cosine >= 0.9999 exact / 0.999 int8, int4 where the candidates agree, the walk equal at T 0, the anchor cosine >= 0.9999 -> \$STATE/d1/d1.md"
+st_r64_d1_ref() {
+  chk "MODEL=lilicorr SNAP_BOLT=\${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py (LiLiCorr) x 3 arms: D1"
+  grab_all d1-ref '^\| |^D1 |^  FAIL' 40
+  finish
+}
+
+# ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
 rownote 66 "Written blind on the Mac (docs/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
 rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison; Agnes runs its two layouts (2 slots with MTP; 4 with --mtp off)."
