@@ -459,6 +459,27 @@ inline MoeOut moe(const Route& rt, const uint16_t* lat, const uint32_t* blocks, 
   return o;
 }
 
+// --- spec 26c: the union-aware experts' schedule (src/kernels/bolt/nb_moe_union.cl nb_union) ----------------------------
+// The M x 9 (row, slot) pairs of a verify (pair p = row x 9 + slot, its id clamped to n_exp - 1 as the kernels do) grouped
+// by expert: the distinct experts ASCENDING (work-group set u takes the u-th), each with its pairs in (row, slot) order.
+// The per-pair arithmetic is moe()'s, unchanged - so the union's a / d / r ARE moe()'s rows; this is only who reads which
+// block (bolt_moe_union_test and nb_union_run hold the kernels' counting build and coverage to it).
+struct UnionExpert {
+  uint32_t expert = 0;
+  std::vector<uint32_t> pairs;
+};
+inline std::vector<UnionExpert> union_schedule(const uint32_t* ids /*[M][9]*/, uint32_t M, uint32_t n_exp) {
+  std::vector<UnionExpert> u;
+  for (uint32_t p = 0; p < M * kTopK; ++p) {
+    const uint32_t x = std::min(ids[p], n_exp - 1);
+    size_t at = 0;
+    while (at < u.size() && u[at].expert < x) ++at;
+    if (at == u.size() || u[at].expert != x) u.insert(u.begin() + long(at), UnionExpert{x, {}});
+    u[at].pairs.push_back(p);
+  }
+  return u;
+}
+
 // --- the fixture's int4 linears (tools/oracle/bolt_fixture.py int4_weight) ----------------------------------------------
 // Linear t as GPTQ qweight [K/8][N] + f16 scales [K/64][N]: nibble q(k, n) = hash(t, k x N + n, 8) % 16, scale (g, n) =
 // (-1)^(hash(t, g x N + n, 9) & 1) x (1 + ((hash >> 4) % 8) / 8) x 2^-shift - SIGNED, every (q - 8) x scale a bf16 value.

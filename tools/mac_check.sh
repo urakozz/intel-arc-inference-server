@@ -233,7 +233,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt bolt_pf batch_rows lilicorr; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt bolt_pf batch_rows lilicorr nb_union nb_slots; do
     # gdn_slots_run (spec 19c) needs no host source: the plain gdn_step kernel is its reference.
     # batch_rows_run (spec 13a) likewise: the production kernels stepping each sequence alone are its reference.
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table

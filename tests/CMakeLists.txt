@@ -5309,3 +5309,26 @@ add_executable(lilicorr_d1_twin kernels/lilicorr_d1_twin.cc)
 target_include_directories(lilicorr_d1_twin PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(lilicorr_d1_twin PRIVATE b70_dflash_loader b70_bolt_loader b70_dflash_model)
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
+
+# ==== Spec 26c: LiLiCorr in Bolt's loop and server (labels bolt, lilicorr) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-20-spec26c-lilicorr-engine-serving.md. Box queue row 65. Host tests run on the Mac
+# (tools/mac_check.sh); the card's are the box's (row 65's stages).
+# Task 1: every binary Bolt's verify lists bind at M = 1..8 (kernels::bolt::verify_variants) is built - by the kernels' Spec
+# 26c lines or reused by name (25c's M = 1 and test-only M 4 lines, 26a's M 2..8 GEMVs / routers / int8 heads / argmax stage
+# 1, 26b's bf16 head at M 7) - and the block builds nothing unbound but its counting build. Host only.
+if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
+  set(_l26c_reused ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_LILICORR_P0_KERNELS}
+    kernel_gemv_bf16_M7_K4096_N131072)
+  foreach(t ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
+    if(NOT TARGET ${t})
+      message(FATAL_ERROR "spec 26c: ${t} is not built (src/kernels/CMakeLists.txt)")
+    endif()
+  endforeach()
+  add_executable(bolt_verify_names_test kernels/bolt_verify_names_test.cc)
+  target_include_directories(bolt_verify_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_verify_names_test PRIVATE b70_bolt_model)
+  b70_target_kernel_dir(bolt_verify_names_test)
+  add_test(NAME bolt_verify_names_test COMMAND bolt_verify_names_test ${B70_BOLT_VERIFY_KERNELS} -- ${_l26c_reused})
+  set_tests_properties(bolt_verify_names_test PROPERTIES LABELS "bolt;lilicorr")
+endif()
+# ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====
