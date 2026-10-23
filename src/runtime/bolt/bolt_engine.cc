@@ -116,8 +116,11 @@ void BoltEngine::reset() {
     if (!settle(i))
       throw std::runtime_error("runtime::bolt::BoltEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
-  for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
+  for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);   // Control::gdn_live 0: slot 0 live
   if (link_) link_->zero(st(0).imm, st(1).imm);
+  if (vlink_) vlink_->zero(st(0).imm, st(1).imm);                      // spec 26c
+  if (drafter_) drafter_->reset(st(uint32_t(st_.size()) - 1).imm);    // spec 26c: a cold drafter
+  verify_k_ = kNoVerify;
   broken_ = false;
   drop_next_ = false;
 }
@@ -129,6 +132,7 @@ void BoltEngine::fail(const std::string& what) {
 
 void BoltEngine::step_once() {
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
+  if (st(0).ctl->gdn_live != 0) canonical_ssm();   // spec 26c: the plain list steps slot 0 in place
   Stage& last = st(uint32_t(st_.size()) - 1);
   const size_t pos = last.ctl->pos, n = last.ctl->n_active;
   if (pos + n > size_t(max_len_))
@@ -249,6 +253,11 @@ void BoltEngine::ingest(const std::vector<uint32_t>& ids) {
   for (uint32_t id : ids) {
     for (auto& s : st_) s->ctl->n_active = 1;
     set_token(id);
+    if (spec_on()) {   // spec 26c: one plain token through the M = 1 verify list (the slots, the drafter's ring)
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+      continue;
+    }
     step_once();
   }
 }
@@ -262,7 +271,12 @@ std::vector<uint32_t> BoltEngine::generate(uint32_t n, const std::function<void(
   for (uint32_t i = 0; i < n; ++i) {
     const uint32_t id = st(uint32_t(st_.size()) - 1).ctl->cur_token[0];
     const Clock::time_point f0 = Clock::now();
-    step_once();
+    if (spec_on()) {   // spec 26c: the plain token through the M = 1 verify list
+      verify(nullptr, 0);
+      commit(0, verify_ids()[0]);
+    } else {
+      step_once();
+    }
     fence_ms += ms_since(f0);
     out.push_back(id);
     if (on_token) on_token(id);
@@ -291,11 +305,15 @@ void BoltEngine::settle_all(const char* what) {
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
 }
 
-size_t BoltEngine::state_bytes() const { return state_snapshot_bytes(model_.desc, state_); }
+// Spec 26c: with a drafter, its ring and anchor after the target's state (spec 26 §6: +5,242,880 + 16,384 B, 19d's rule).
+size_t BoltEngine::state_bytes() const {
+  return state_snapshot_bytes(model_.desc, state_) + (drafter_ ? drafter_->ring_bytes() : 0);
+}
 size_t BoltEngine::kv_bytes(uint32_t n_pos) const { return kv_snapshot_bytes(model_.desc, n_pos); }
 
 void BoltEngine::save_state(void* host) {
   settle_all("save_state");
+  canonical_ssm();   // spec 26c: the state runs read slot 0
   auto* h = static_cast<uint8_t*>(host);
   for (const SnapRun& r : state_runs(model_.desc, model_.place, pos(), state_)) {
     if (r.zero)
@@ -304,6 +322,7 @@ void BoltEngine::save_state(void* host) {
       st(r.device).imm.copy(h, static_cast<const uint8_t*>(snap_mem(r.device, int(r.tensor)).ptr()) + r.offset, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->save_ring(st(uint32_t(st_.size()) - 1).imm, h);   // spec 26c: the ring, then the anchor
 }
 
 void BoltEngine::load_state(const void* host, uint32_t p) {
@@ -317,9 +336,12 @@ void BoltEngine::load_state(const void* host, uint32_t p) {
     st(r.device).imm.copy(static_cast<uint8_t*>(snap_mem(r.device, int(r.tensor)).ptr()) + r.offset, h, r.bytes);
     h += r.bytes;
   }
+  if (drafter_) drafter_->load_ring(st(uint32_t(st_.size()) - 1).imm, h);   // spec 26c
+  verify_k_ = kNoVerify;
   for (auto& s : st_) {
     s->ctl->pos = p;
     s->ctl->n_active = 0;
+    s->ctl->gdn_live = 0;   // spec 26c: the restored state is slot 0's
   }
 }
 
@@ -400,22 +422,32 @@ std::vector<uint16_t> BoltEngine::read_conv_ring(uint32_t mamba_index) {
 }
 
 std::vector<float> BoltEngine::read_ssm_state(uint32_t mamba_index) {
+  return read_ssm_slot(mamba_index, st(0).ctl->gdn_live);   // spec 26c: the live slot (0 without the verify lists)
+}
+
+std::vector<float> BoltEngine::read_ssm_slot(uint32_t mamba_index, uint32_t slot) {
   const model::BoltDesc& d = model_.desc;
+  if (slot >= kSpecSlots || (slot != 0 && !spec_on()))
+    throw std::out_of_range("read_ssm_slot: slot " + std::to_string(slot) + (spec_on() ? " of 8" : " without the verify lists"));
   for (uint32_t l = 0; l < d.layers; ++l) {
     if (!d.is_mamba(l) || d.mamba_index(l) != mamba_index) continue;
-    Stage& s = st(model_.place.device_of(l));
+    const uint32_t dev = model_.place.device_of(l);
+    Stage& s = st(dev);
+    const void* src = slot == 0 ? s.buffers.ssm_layer(l)
+                                : static_cast<const uint8_t*>(vb_[dev]->slots_layer(l)) +
+                                      size_t(slot - 1) * ssm_layer_bytes(d, state_);
     const size_t n = size_t(d.m_heads) * d.m_head_dim * d.m_state;
     std::vector<float> v(n);
     if (state_ == BoltState::Bf16) {
       std::vector<uint16_t> h(n);
-      s.imm.copy(h.data(), s.buffers.ssm_layer(l), n * 2);
+      s.imm.copy(h.data(), src, n * 2);
       for (size_t i = 0; i < n; ++i) v[i] = common::bf16_to_f32(h[i]);
     } else {
-      s.imm.copy(v.data(), s.buffers.ssm_layer(l), n * 4);
+      s.imm.copy(v.data(), src, n * 4);
     }
     return v;
   }
-  throw std::out_of_range("read_ssm_state: Mamba block " + std::to_string(mamba_index) + " of " +
+  throw std::out_of_range("read_ssm_slot: Mamba block " + std::to_string(mamba_index) + " of " +
                           std::to_string(d.mamba_layers()));
 }
 
@@ -461,6 +493,11 @@ MemoryComponents BoltEngine::memory_use(uint32_t dev) const {
   c.decode_state = b.control.size() + b.conv_ring.size() + b.ssm.size() + b.scratch_bytes() +
                    (taps_[dev] ? taps_[dev]->size() : 0) + (link_ ? link_->bytes(dev) : 0);
   c.prefill_scratch = dev < pf_dev_bytes_.size() ? pf_dev_bytes_[dev] : 0;   // spec 25d: after the first prefill
+  if (dev < vb_.size()) c.decode_state += vb_[dev]->bytes() + (vlink_ ? vlink_->bytes(dev) : 0);   // spec 26c
+  if (dev + 1 == st_.size()) {
+    if (drafter_) c.drafter = drafter_->bytes();   // spec 26c: its weights + buffers (the replica is the CLI's)
+    if (pf_taps_) c.prefill_scratch += pf_taps_->size();
+  }
   return c;
 }
 
@@ -471,6 +508,202 @@ std::string BoltEngine::memory_line() const {
     s += (i ? "\n" : "") + format_memory(label.c_str(), memory_use(i), st(i).ctx.memory_bytes());
   }
   return s;
+}
+
+// --- spec 26c: speculative decoding -----------------------------------------------------------------------------------------
+void BoltEngine::enable_spec(VerifyMoe moe) {
+  if (spec_on()) throw std::logic_error("runtime::bolt::BoltEngine::enable_spec: the verify lists are already on");
+  if (st_.size() == 2 && opt_.handoff != PpHandoff::Copy)
+    throw std::invalid_argument("--spec dflash / lookup on Nemotron 3.5 Bolt crosses the cards by the copy hand-off only "
+                                "(19d: the drafter's taps ride on its barrier; peer has no place for them) - drop "
+                                "--pipeline-handoff peer");
+  settle_all("enable_spec");
+  const model::BoltDesc& d = model_.desc;
+  for (uint32_t i = 0; i < st_.size(); ++i) {
+    vb_.push_back(std::make_unique<BoltVerifyBuffers>(st(i).ctx, d, model_.place, i, max_len_, attn_, state_));
+    if (vb_.back()->bytes() != verify_sizes(d, model_.place, i, max_len_, attn_, state_).total())
+      throw std::logic_error("runtime::bolt::BoltEngine::enable_spec: device " + std::to_string(i) +
+                             "'s verify buffers are not verify_sizes()'");
+  }
+  if (st_.size() == 2) {
+    vlink_ = std::make_unique<PipelineLink>(st(0).ctx, st(1).ctx, verify_landing_layout(d, model_.place), PpHandoff::Copy);
+    for (uint32_t i = 0; i < 2; ++i)
+      if (vlink_->bytes(i) != verify_link_bytes(d, model_.place, i))
+        throw std::logic_error("runtime::bolt::BoltEngine::enable_spec: the verify link is not verify_link_bytes()'");
+    vlink_->zero(st(0).imm, st(1).imm);
+  }
+  vsteps_.resize(st_.size());
+  for (auto& dev : vsteps_) dev.resize(kVerifyRows);
+  vmoe_ = moe;
+  verify_k_ = kNoVerify;
+}
+
+void BoltEngine::attach_drafter(TapSink& dr) {
+  const model::BoltDesc& d = model_.desc;
+  if (!spec_on())
+    throw std::logic_error("runtime::bolt::BoltEngine::attach_drafter: enable_spec first (the verify lists write its taps)");
+  if (drafter_) throw std::logic_error("runtime::bolt::BoltEngine::attach_drafter: a drafter is already attached");
+  if (dr.max_k() == 0 || dr.max_k() + 1 > kVerifyRows)
+    throw std::invalid_argument("runtime::bolt::BoltEngine::attach_drafter: the drafter drafts up to " +
+                                std::to_string(dr.max_k()) + ", the verify lists hold 8 rows (K 1..7)");
+  for (uint32_t t : dr.tap_layers())
+    if (t + 1 >= d.layers)
+      throw std::invalid_argument("runtime::bolt::BoltEngine::attach_drafter: the drafter taps block " + std::to_string(t) +
+                                  " of a " + std::to_string(d.layers) + "-block target (a tap block's output is folded by "
+                                  "a later block's norm)");
+  if (dr.taps().size() < size_t(kVerifyRows) * dr.tap_layers().size() * d.hidden * 2)
+    throw std::invalid_argument("runtime::bolt::BoltEngine::attach_drafter: the drafter's tap buffer is smaller than "
+                                "[8][taps][hidden] bf16");
+  settle_all("attach_drafter");
+  for (auto& dev : vsteps_)
+    for (auto& s : dev) s.reset();   // lookup's lists bound no taps: recaptured with them
+  drafter_ = &dr;
+  drafter_->reset(st(uint32_t(st_.size()) - 1).imm);
+}
+
+uint32_t BoltEngine::max_verify_k() const {
+  if (!spec_on()) return 0;
+  const uint32_t k = drafter_ ? std::min(drafter_->max_k(), kVerifyRows - 1) : kVerifyRows - 1;
+  const uint32_t p = pos();
+  if (size_t(p) + 1 >= size_t(max_len_)) return 0;
+  return std::min<uint32_t>(k, max_len_ - p - 1);
+}
+
+void BoltEngine::run_verify(uint32_t M) {
+  const model::BoltDesc& d = model_.desc;
+  const uint32_t nd = uint32_t(st_.size());
+  StageLink binding;
+  if (vlink_) binding = vlink_->binding(opt_.spin_limit);
+  for (uint32_t i = 0; i < nd; ++i) {
+    std::optional<CapturedStep>& s = vsteps_[i].at(M - 1);
+    if (s) continue;
+    VerifyBind v;
+    v.vb = vb_[i].get();
+    v.M = M;
+    v.union_moe = vmoe_ == VerifyMoe::Union;
+    if (drafter_) {
+      v.taps = &drafter_->taps();
+      v.tap_layers = &drafter_->tap_layers();
+    }
+    s.emplace(build_verify(st(i).ctx, model_.parts[i], d, st(i).buffers, model_.int8_head, vlink_ ? &binding : nullptr, v));
+  }
+  if (nd == 1) {
+    st(0).queue.execute(vsteps_[0][M - 1]->list, &st(0).fence);
+    st(0).fence.wait();
+    return;
+  }
+  vlink_->event->host_reset();
+  st(0).queue.execute(vsteps_[0][M - 1]->list, &st(0).fence);
+  pending_[0] = true;
+  st(1).queue.execute(vsteps_[1][M - 1]->list, &st(1).fence);
+  pending_[1] = true;
+  if (!settle(1)) {
+    vlink_->event->host_signal();   // release device 1 so its queue drains on garbage, then report
+    const bool drained = settle(1);
+    settle(0);
+    fail("device 1's M = " + std::to_string(M) + " verify did not finish within " + std::to_string(opt_.timeout_ms) +
+         " ms - device 0's rows never arrived (the verify link's event was not signalled; device 1 " +
+         (drained ? "released" : "did not drain either") + ")");
+  }
+  if (!settle(0)) fail("device 0's M = " + std::to_string(M) + " verify did not finish within " +
+                       std::to_string(opt_.timeout_ms) + " ms");
+}
+
+void BoltEngine::verify(const uint32_t* drafts, uint32_t k) {
+  if (!spec_on()) throw std::logic_error("runtime::bolt::BoltEngine::verify: no verify lists (enable_spec)");
+  if (broken_) throw std::runtime_error("runtime::bolt::BoltEngine::verify: a hand-off failed earlier; reset() first");
+  if (k > max_verify_k())
+    throw std::invalid_argument("runtime::bolt::BoltEngine::verify: k " + std::to_string(k) + " exceeds " +
+                                std::to_string(max_verify_k()) + " at pos " + std::to_string(pos()));
+  Control& c0 = *st(0).ctl;
+  Control& cl = *st(uint32_t(st_.size()) - 1).ctl;
+  const uint32_t n = cl.pos, x = cl.cur_token[0];
+  if (size_t(n) + k + 1 > size_t(max_len_))
+    throw std::runtime_error("runtime::bolt::BoltEngine::verify: pos " + std::to_string(n) + " + " + std::to_string(k + 1) +
+                             " rows exceeds max_len " + std::to_string(max_len_));
+  for (uint32_t i = 0; i < k; ++i) {
+    if (drafts[i] >= model_.desc.vocab)
+      throw std::invalid_argument("runtime::bolt::BoltEngine::verify: draft " + std::to_string(drafts[i]) +
+                                  " is outside the vocabulary");
+    c0.cur_token[1 + i] = drafts[i];   // the gather reads cur_token[0 .. k] on device 0
+  }
+  for (auto& s : st_) s->ctl->n_active = k + 1;
+  run_verify(k + 1);
+  for (uint32_t r = 0; r <= k; ++r) verify_ids_[r] = cl.out_token[r];
+  // argmax_stage2 advanced the last device's pos and wrote its last id into cur_token[0]: the host commits, so put both back.
+  cl.pos = n;
+  cl.cur_token[0] = x;
+  verify_k_ = k;
+  verify_pos_ = n;
+}
+
+void BoltEngine::read_verify_logits(float* host, uint32_t rows) {
+  if (verify_k_ == kNoVerify || rows == 0 || rows > verify_k_ + 1)
+    throw std::logic_error("runtime::bolt::BoltEngine::read_verify_logits: " + std::to_string(rows) +
+                           " rows after no verify / a verify of fewer");
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  st(last).imm.copy(host, vb_[last]->logits.ptr(), size_t(rows) * model_.desc.vocab * 4);
+}
+
+void BoltEngine::commit(uint32_t j, uint32_t next_token) {
+  Control& cl = *st(uint32_t(st_.size()) - 1).ctl;
+  if (verify_k_ == kNoVerify || cl.pos != verify_pos_)
+    throw std::logic_error("runtime::bolt::BoltEngine::commit: no verify at pos " + std::to_string(cl.pos));
+  if (j > verify_k_)
+    throw std::invalid_argument("runtime::bolt::BoltEngine::commit: j " + std::to_string(j) + " > k " +
+                                std::to_string(verify_k_));
+  if (next_token >= model_.desc.vocab)
+    throw std::invalid_argument("runtime::bolt::BoltEngine::commit: id " + std::to_string(next_token) +
+                                " is outside the vocabulary");
+  const uint32_t n = cl.pos;
+  verify_k_ = kNoVerify;
+  if (drafter_) replay_aux(drafter_->projection(n, j + 1));   // rows 0..j of the taps: positions n .. n + j
+  const uint32_t live = (cl.gdn_live + j) % kSpecSlots;       // the slot holding the state after row j
+  for (auto& s : st_) {
+    s->ctl->pos = n + j + 1;
+    s->ctl->cur_token[0] = next_token;
+    s->ctl->n_active = 1;
+    s->ctl->gdn_live = live;
+  }
+}
+
+void BoltEngine::replay_aux(l0::CmdList& list) {
+  Stage& s = st(uint32_t(st_.size()) - 1);
+  s.queue.execute(list, &s.fence);
+  s.fence.wait();
+}
+
+void BoltEngine::canonical_ssm() {
+  const uint32_t live = st(0).ctl->gdn_live;
+  if (live == 0) return;
+  if (!spec_on())
+    throw std::logic_error("runtime::bolt::BoltEngine: live SSM slot " + std::to_string(live) + " without the verify lists");
+  settle_all("canonical_ssm");
+  const model::BoltDesc& d = model_.desc;
+  const size_t bytes = ssm_layer_bytes(d, state_);
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    if (!d.is_mamba(l)) continue;
+    const uint32_t dev = model_.place.device_of(l);
+    st(dev).imm.copy(st(dev).buffers.ssm_layer(l),
+                     static_cast<const uint8_t*>(vb_[dev]->slots_layer(l)) + size_t(live - 1) * bytes, bytes);
+  }
+  for (auto& s : st_) s->ctl->gdn_live = 0;
+}
+
+size_t BoltEngine::verify_launches(uint32_t M) const {
+  size_t n = 0;
+  if (M == 0 || M > kVerifyRows) return 0;
+  for (const auto& dev : vsteps_)
+    if (dev[M - 1]) n += dev[M - 1]->kernel_count;
+  return n;
+}
+
+uint32_t BoltEngine::ssm_live() const { return st(0).ctl->gdn_live; }
+const l0::Mem& BoltEngine::control_mem(uint32_t dev) const { return st(dev).buffers.control; }
+const loader::DeviceWeight& BoltEngine::lm_head() const {
+  const loader::BoltDevicePart& p = model_.parts.back();
+  if (!p.head) throw std::logic_error("runtime::bolt::BoltEngine: the last device holds no lm_head");
+  return *p.head;
 }
 
 }  // namespace runtime::bolt
