@@ -363,6 +363,12 @@ class Capture {
     require(!kv8_ || attn_ == DecodeAttn::V2,
             "--kv-cache int8 decodes through attention v2 only (src/kernels/kv8.cl); "
             "B70_DECODE_ATTN=v1 reads a bf16 cache - unset it or use --kv-cache bf16");
+    // Spec 15c: a MoE model is built for decode attention v2 only. Said before v1's binaries
+    // are looked up: v1 is not compiled at a MoE model's heads at all, and the max_len lookup
+    // below would refuse it with a message about max_len instead (the box's first r10.refusals).
+    if (d_.is_moe())
+      require(attn_ == DecodeAttn::V2,
+              "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
     const std::vector<std::string> attn_bins =
         kv8_ ? std::vector<std::string>{kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
         : attn_ == DecodeAttn::V2
@@ -445,8 +451,6 @@ class Capture {
                   std::to_string(n_layers_));
       require(b_.moe != nullptr && b_.moe->size() >= moe_scratch_layout(d_).total,
               "the decode scratch has no MoE region of moe_scratch_layout()'s size");
-      require(attn_ == DecodeAttn::V2,
-              "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
     }
   }
 
