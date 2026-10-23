@@ -5122,9 +5122,15 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_mtp ${_bolt_serve_cfg} --mtp 1 EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_mtp_auto ${_bolt_serve_cfg} --mtp auto EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_spec_mtp ${_bolt_serve_cfg} --spec mtp EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup EXPECT "spec 26 (the LiLiCorr drafter)")
-  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash EXPECT "spec 26 (the LiLiCorr drafter)")
-  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "has none")
+  # Spec 26c: --spec lookup / dflash are served now (cli/bolt_spec.h); their refusals before the device, by name.
+  b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup --spec-max 9 EXPECT "expects 1..7")
+  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash --draft-format bf16
+    EXPECT "exact, int8 and int4")
+  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "need --spec dflash or --spec lookup")
+  b70_serve_reject(cli_reject_serve_bolt_dflash_peer ${_bolt_serve_cfg} --spec dflash --pipeline-handoff peer
+    EXPECT "copy hand-off only")
+  b70_serve_reject(cli_reject_serve_bolt_draft_q ${_bolt_serve_cfg} --draft-q lattice EXPECT "need --spec dflash")
+  set_tests_properties(cli_reject_serve_bolt_dflash_peer cli_reject_serve_bolt_draft_q PROPERTIES LABELS "bolt;lilicorr")
   b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
@@ -5331,4 +5337,23 @@ if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
   add_test(NAME bolt_verify_names_test COMMAND bolt_verify_names_test ${B70_BOLT_VERIFY_KERNELS} -- ${_l26c_reused})
   set_tests_properties(bolt_verify_names_test PROPERTIES LABELS "bolt;lilicorr")
 endif()
+# Task 4 / 6 (host): the speculative loop over a fake engine with BoltEngine's verify / commit and a fake LiLiCorr readback -
+# D2 greedy lossless (every K, varying K, truncated runs, lookup), Review Focus 3 (the drafter's ring / anchor after every
+# commit = a plain run's), D4 sampled exact (10^6 seeded iterations a case, both q forms, Bolt's filter and filter_probs, lookup's
+# point mass; a mutant residual caught), the deferred commit, Review Focus 4 (restores at block ends, the junction's sibling, a
+# drafter-less ring, the store root).
+add_executable(bolt_spec_test server/bolt_spec_test.cc)
+target_include_directories(bolt_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_spec_test PRIVATE b70_server b70_bolt_plan)
+add_test(NAME bolt_spec_test COMMAND bolt_spec_test)
+set_tests_properties(bolt_spec_test PROPERTIES LABELS "bolt;lilicorr" TIMEOUT 1200)
+# Tasks 1-2, 4, 6 (host): the verify lists' sizes, slots and launch counts, the prefill tail rule (Decision 7), the AdaptiveK
+# cost rows (DERIVED), b70-serve's --spec refusals and flag resolution (cli/bolt_spec.h), the plan with the verify lists and the
+# drafter on two cards in each format (DERIVED).
+add_executable(bolt_spec_plan_test runtime/bolt_spec_plan_test.cc)
+target_include_directories(bolt_spec_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(bolt_spec_plan_test PRIVATE b70_server b70_dflash_plan b70_dflash_loader PkgConfig::ZE)
+b70_target_kernel_dir(bolt_spec_plan_test)   # (kernels/kernels.h, reached through the engine header, wants the define)
+add_test(NAME bolt_spec_plan_test COMMAND bolt_spec_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json)
+set_tests_properties(bolt_spec_plan_test PROPERTIES LABELS "bolt;lilicorr")
 # ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====
