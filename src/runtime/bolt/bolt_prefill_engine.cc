@@ -170,6 +170,7 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   for (uint32_t i = 0; i < ndev; ++i)   // no decode step in flight writes the KV, the rings, the states or the Control
     require(settle(i), "device " + std::to_string(i) + "'s last decode step is still running");
   canonical_ssm();   // spec 26c: the scan reads and writes slot 0
+  logits_row_ = -1;  // spec 26c: the head writes the decode scratch's row
 
   prepare_prefill();
   BoltPrefillState& P = *pf_;
