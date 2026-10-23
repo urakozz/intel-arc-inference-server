@@ -169,6 +169,7 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                                                      " ids exceeds max_len " + std::to_string(max_len_) + " - the KV stops there");
   for (uint32_t i = 0; i < ndev; ++i)   // no decode step in flight writes the KV, the rings, the states or the Control
     require(settle(i), "device " + std::to_string(i) + "'s last decode step is still running");
+  canonical_ssm();   // spec 26c: the scan reads and writes slot 0
 
   prepare_prefill();
   BoltPrefillState& P = *pf_;
@@ -176,6 +177,16 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const char* env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
   const uint64_t tmo = P.timeout_ns;
+  // Spec 26c (Decision 7): with a drafter every chunk stages its tap rows inside the drafter's window (lili_prefill_r0) into
+  // the last device's staging - device 0's tap blocks write it across - and projects them after the chunk, before the block
+  // hook (so a snapshot at a block end carries the ring of the window before it). Copies a recording cannot hold.
+  if (drafter_) {
+    require(!replay, "a drafter's prefill taps are copies, which a recorded chunk cannot hold - unset B70_PREFILL_REPLAY");
+    const size_t bytes = prefill_taps_bytes(drafter_->window(), uint32_t(drafter_->tap_layers().size()), d.hidden);
+    if (!pf_taps_ || pf_taps_->size() != bytes)
+      pf_taps_ = std::make_unique<l0::Mem>(stage_ctx(ndev - 1), l0::MemKind::Device, bytes);
+  }
+  const uint32_t end_pos = base + uint32_t(ids.size());
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
     for (uint32_t i = 0; i < ndev; ++i) {
       stage_control(i)->pos = pos;
@@ -193,12 +204,17 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const PrefillResid last = prefill_resid_out(d, model_.place, ndev - 1);
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY). The tap (debug) is written
   // on the last chunk only and never under a recording (a copy is not recordable).
+  PrefillTaps dtaps;   // spec 26c: this chunk's (r0 set per chunk)
+  if (drafter_) {
+    dtaps.dst = pf_taps_->ptr();
+    dtaps.layers = &drafter_->tap_layers();
+  }
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C, bool last_chunk) {
     BoltPrefillState::Dev& D = *P.dev[i];
     l0::Mem* tap = !replay && last_chunk ? taps_[i].get() : nullptr;
     auto encode = [&] {
       prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager,
-                    prefill_resid_in(d, model_.place, i), tap);
+                    prefill_resid_in(d, model_.place, i), tap, drafter_ ? &dtaps : nullptr);
     };
     if (!replay) return encode();
     auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
@@ -217,6 +233,7 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     const uint32_t pos = base + uint32_t(off);
     C = prefill_chunk_rows(pos, ids.size() - off, chunk, hooked, kBlock);
     const bool last_chunk = off + C == ids.size();
+    if (drafter_) dtaps.r0 = lili_prefill_r0(pos, C, end_pos, drafter_->window(), hooked, kBlock);
     wait_all("before a chunk");   // before touching the ids buffer or a Control block
     std::memcpy(P.dev[0]->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     set_ctl(pos, C);
@@ -268,6 +285,8 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
              std::to_string(opt_.prefill_timeout_ms) + " ms");
     }
     const uint32_t end = pos + C;
+    // Spec 26c: the chunk's staged tap rows through the drafter's projection (every device idle: waited above).
+    if (drafter_ && dtaps.r0 < C) drafter_project_staged(pos + dtaps.r0, C - dtaps.r0);
     if (hooked && !last_chunk && end % kBlock == 0) {
       // A mid-prompt block end: the KV holds exactly [0, end), the rings the raw columns of end - 3 .. end - 1 and the
       // states the state after end - 1; say so in every Control before the hook runs, so a hook that throws leaves pos
@@ -293,6 +312,22 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (hooked) {   // the prompt end, the first generated id in cur_token (25e)
     const uint32_t end = base + uint32_t(ids.size());
     block_hook_(end, end % kBlock == 0);
+  }
+}
+
+// Spec 26c: the staged rows [n][taps][hidden] (pf_taps_, the last device) at positions pos .. pos + n - 1 through the drafter's
+// projection, 8 a replay - 26b's projection list (the GEMM path at M 1024 is not built: plan 26c Task 5's fallback). The ring
+// and the anchor then equal what one projection a row would leave (the list is row-local).
+void BoltEngine::drafter_project_staged(uint32_t pos, uint32_t n) {
+  const uint32_t last = devices() - 1;
+  const size_t row = drafter_->tap_layers().size() * size_t(model_.desc.hidden) * 2;
+  require(pf_taps_ && pf_taps_->size() >= size_t(n) * row, "the drafter's prefill staging holds fewer than " +
+                                                               std::to_string(n) + " rows");
+  for (uint32_t r = 0; r < n; r += kVerifyRows) {
+    const uint32_t g = std::min<uint32_t>(kVerifyRows, n - r);
+    stage_imm(last).copy(drafter_->taps().ptr(), static_cast<const uint8_t*>(pf_taps_->ptr()) + size_t(r) * row,
+                         size_t(g) * row);
+    replay_aux(drafter_->projection(pos + r, g));
   }
 }
 
