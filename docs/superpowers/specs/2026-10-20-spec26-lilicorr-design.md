@@ -3,7 +3,9 @@
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §10. **26a built on the Mac 2026-10-23** (§12 as built; §11 the P0 verdict - PENDING the
 box, its defaults PROVISIONAL); **26b built on the Mac 2026-10-23** (§13 as built: the drafter on the card - nothing
-run on a card yet, row 64); 26c not built.
+run on a card yet, row 64); **26c built on the Mac 2026-10-23** (§14 as built: Bolt's verify lists, the slots, the union
+MoE, the prefill tail, snapshots and `b70-serve --spec dflash|lookup` - nothing run on a card yet, row 65; `--spec dflash` is
+NOT Bolt's default until D5).
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec26{a,b,c}-*.md` - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
 serving (D0, D2-D5). **Box queue rows 63-65** (spec 25 takes 57-62).
@@ -521,3 +523,105 @@ prefill's last 1024 rows 8 a replay (Decision 7), snapshots with `ring_bytes()` 
 (Decision 6) - the device's sampled walk already keys by slot; the replica's allocation (1.07 GB on device 1,
 `lili_bolt_reserve` counts it) and `--draft-format exact|int8|int4` (`parse_lilicorr_draft_format`, default int8) /
 `--spec-max 1..7` (LiliDrafter's `max_k`) are the CLI's.
+
+## 14. 26c as built (2026-10-23; the Mac only - no card)
+
+Branch `spec26c-lilicorr-engine-serving`; box queue row 65 (Session 14 of `docs/box-day-plan.md`). kernel_cmdlines additions
+only (no existing `.cl` edited, no existing command line moved); nothing compiled by ocloc, nothing run on a card.
+
+**Built.** Kernels (the CMake spec 26c block, `B70_BOLT_VERIFY`): 25c's kernels at M = 2..8 by new lines (the norm sites, the
+gather of `cur_token[0..M-1]`, conv, gated norm, route, shared act, attention prep, the plain experts, the bf16 head; 26a's
+GEMVs / routers / int8 heads / argmax stage 1 and 25c's M 4 lines reused by name; Muse's `mg_attn` at M rows when the Muse block
+is off), `nb_ssm`'s slot build `_SL8` at every M (25c's `SPEC_SLOTS` define: 8 slots, `CTRL_LIVE` 19 = `Control::gdn_live`,
+`SPEC_SLOT_STRIDE` one block's state - slot 0 the block's own, slots 1..7 its copies side by side), and
+`src/kernels/bolt/nb_moe_union.cl` (`nb_moe_up_U` / `nb_moe_down_U` / `nb_moe_comb_U`: the union schedule derived per work-group
+in SLM from the M route rows, each distinct expert's tiles read once for all its (row, slot) pairs, the per-pair chains and the
+ascending-id combine nb_moe.cl's verbatim; the counting build `_CNT`); `kernels::bolt::verify_variants`. Runtime:
+`BoltVerifyBuffers` (the verify scratch at 8 rows, the slots, the union's down rows), `build_verify` (25c's walk over a scratch
+view; the six taps of every row after the fold that produces a tap block's output - device 0's into device 1's `taps()` before
+the copy hand-off's barrier; the verify link, a second `PipelineLink` at 8 rows), `BoltEngine::enable_spec / attach_drafter /
+verify / commit / max_verify_k / read_verify_logits / replay_aux / read_ssm_slot` (commit: the drafter's `projection(n, j + 1)`
+on device 1, then pos, the pending id and `gdn_live = (live + j) % 8` on both cards), the live slot moved back to slot 0
+(`canonical_ssm`) before a plain list, a prefill or a snapshot, `read_logits` after a commit reading the verify's row j, the
+prefill tail (`PrefillTaps`: each tap block's rows `lili_prefill_r0 .. C` copied by 2D copies into a staging on device 1, then
+26b's projection 8 rows a replay before the block hook), `state_bytes / save_state / load_state` with the ring and the anchor
+after the target's state. Server / CLI: `server::accept_sparse_rows` / `accept_point_mass_rows` (the rule over the caller's
+filter), `MtpCost::bolt_verify / bolt_lilicorr` (DERIVED, §11), `BoltEngineAdapterT`'s step_many / step_drafts / truncate_to /
+the deferred commit / drafter_key (inert without `spec_k`), `cli/bolt_spec.h` (`SpecArgs`, `check_spec`, `spec_cost`,
+`plan_terms`, `attach_drafter` - the replica from the Bolt checkpoint's own rows -, `draft_hooks`), `b70-serve <bolt> --spec
+dflash|lookup` (`--draft-model`, `--draft-format exact|int8|int4`, `--draft-q lattice|lattice+lp`, `--spec-max 1..7`,
+`--spec-cost`, `B70_BOLT_VERIFY_MOE=union|plain`; the startup's `spec dflash:` line names the drafter, its format and key).
+Tests: host `bolt_verify_names_test`, `bolt_spec_test`, `bolt_spec_plan_test` (+ `bolt_serve_args_test`'s new refusals); card
+`bolt_moe_union_test`, `bolt_verify_test`, `bolt_commit_test`, `bolt_dflash_test`, `bolt_dflash_prefill_test`,
+`bolt_dflash_prefix_gpu_test` (`tests/runtime/bolt_spec_rig.h`: a recording TapSink, session snapshots); Mac drivers
+`tools/mac/clrun/nb_union_run`, `nb_slots_run` (mac_check section 5).
+
+**Measured on the Mac** (every number printed by the test named): `nb_union_run` (UHD 630, DN_KS 1 for both forms): the union's
+a / down rows / r bitwise the plain M-row form and the twin in 10 cases - the same 9 experts in 8 rows, 72 disjoint, one expert
+in every row (65 distinct), random M 2..8 (14 .. 24 distinct) - and the counting build reads each chosen up block I / 64 times
+and down block 16 times, every other none. `nb_slots_run`: the M-row conv + the slot build bitwise the plain kernels at M 8 /
+5 / 4 (bf16 state) / 1 from live 5 / 7 / 3 / 4 (the ring wraps), every accepted count j = 0..7 continues as the plain run, the
+j + 1 mutant caught 9 / 9, 3dc6def360's ragged M 8 / 1 / 5 / 2 with commits 6 / 0 / 2 / 1 equal one plain run of the 13 accepted
+rows. `bolt_spec_test` (a fake engine with BoltEngine's contract and a fake readback): D2 at every K 1..7, K varying, truncated
+runs and lookup (600 ids each, 197 / 403 .. 295 / 2471 drafts accepted); Review Focus 3 after every commit; D4 at 10^6 iterations
+a case (lattice and lattice+lp q, Bolt's filter at T 1.0 / top-p 0.95 and filter_probs at T 0.7 / top-k 12 / top-p 0.8, lookup's
+point mass): p-values 0.022 .. 0.893 (n + 1) and 0.147 .. 0.786 (n + 2 | d_1 kept), every accepted draft one of its slot's
+candidates; the mutant residual chi2 48,617 (p 0.0000) - 92 s on the Mac; the deferred commit; Review Focus 4's bookkeeping.
+`bolt_spec_plan_test` (DERIVED from the descriptor): the slots 1,174,405,120 B (22 / 18 Mamba blocks on the cards), the verify
+scratch 14,839,296 B a card, the launches 653 at M 1 and 693 at M 2..8 with the union (653 plain), `--max-len auto` 262144 on two
+cards with `--spec dflash` in every format (device 1: exact 28.276 / int8 27.200 / int4 26.695 of 32.530 GB).
+
+**Rulings where this differs from the plan's text or a precedent (each with its cost if wrong):**
+1. *The verify scratch is its own allocation* (`BoltVerifyBuffers`, 8 rows) beside 25c's M = 1 scratch, made only by
+   `enable_spec`; the walk binds either through a scratch view. A plain run allocates and captures exactly 25c's (D0). *Cost:*
+   ~15 MB a card.
+2. *The verify lists bind no fused arm* (each is bitwise the as-built list, Decision 16). *Cost:* +120 launches a verify if r60
+   makes the arms the default.
+3. *The union MoE is three launches* (up, down into a per-pair buffer, the combine) - the plan named two; the combine cannot sit
+   in a per-expert work-group without atomics. *Cost:* +40 launches a verify at M > 1 (~0.1 ms, ESTIMATED).
+4. *With the verify lists on, every plain token is verify(0) + commit* (19c's / 23f's rule): the M = 1 verify list (the slot SSM,
+   the plain MoE) keeps the slots the state's home and the drafter's ring filled. *Cost:* a commit (and a projection replay
+   with a drafter) a plain token on the host.
+5. *The live slot goes back to slot 0 before a plain list, a prefill or a snapshot* (`canonical_ssm`: one 4 MiB copy a Mamba
+   block when live != 0, 168 MB - ~0.3 ms, ESTIMATED); snapshots hold slot 0, a restore sets live 0. *Cost:* one copy at a
+   request boundary.
+6. *Sampled requests walk on the host* over the readback's whole lattice (q = softmax(scores / T) in double, the request's
+   RNG; the device always walks greedily) - the handoff said the device's sampled walk. Exact by construction (the fp32 Gumbel
+   noise of `ll_select` never decides a sampled draft); `--draft-q lattice|lattice+lp` switches Decision 6's form. *Cost:*
+   none to the output; the device's sampled walk is unused (26b's tests cover it).
+7. *The acceptance filters with Bolt's own `filter_probs_top_p`* (`accept_sparse_rows`: the same rule; `filter_probs` sorts all
+   131072 rows, 17 ms a row). *Cost:* none (the same distribution, spec 25e's review I1).
+8. *A sampled request with a repetition penalty decodes plainly* (its p depends on ids a run has not committed). *Cost:* no
+   speculation for such requests (NVIDIA's defaults carry none).
+9. *The prefill's projection replays 26b's 8-row list* (Task 5's recorded fallback; the GEMM path at M 1024 is NOT built) over
+   the rows `lili_prefill_r0` names - the window of the call's end, and a chunk's last 1024 rows when it ends at a mid-prompt block
+   end - instead of every chunk's last 1024 (the same final ring; a chunk that ends elsewhere is overwritten). *Cost:* ~128
+   replays a 1024-row window (~25-35 ms a 2048-row chunk, ~6 %, ESTIMATED; r65.prefill / benchy measure); a GEMM path if it
+   matters.
+10. *`read_logits` after a commit reads the verify scratch's row j* (the row the pending id came from) - the sampled server path
+    draws the next id there. *Cost:* none.
+11. *The adapter detects BoltEngine's speculative calls* (`HasVerify`): 25e's host fakes compile and run unchanged; `spec_k` > 0
+    over an engine without them is refused. *Cost:* none.
+12. *`b70-decode` still refuses `--spec`* (b70-serve only); D2 on the card runs through the server's adapter
+    (`bolt_dflash_test`). *Cost:* no command-line A/B outside the server.
+13. *Two cards: a second `PipelineLink` (copy, 8 rows: 204,864 B on device 1)*; `--pipeline-handoff peer` with `--spec` is
+    refused by name (19d). *Cost:* none.
+14. *`--spec-min-match` / `--spec-history` are accepted with `--spec lookup` for Bolt* (25e refused every proposer flag).
+    *Cost:* none.
+15. *Decision 4's replay lever is not built* (§11: the derived slot-write share <= 10 % to M 7, 10.3 % at M 8). *Cost:* ~1.7 ms
+    a verify at M 8 if r63.cost measures more.
+16. *`MtpCost::bolt_lilicorr`'s union rows assume u(M) linear from 9 at M 1 to 30 at M 8* (ESTIMATED: §4's u = 30 at M 8 is the
+    only figure). *Cost:* AdaptiveK picks K on a wrong slope until r63.union / r63.cost replace it (`--spec-cost`).
+17. *New test executables and a second Mac driver* (`bolt_verify_names_test`, `bolt_spec_test`, `bolt_spec_plan_test`,
+    `nb_union_run` beside the plan's `nb_slots_run`); `bolt_verify_test` holds the verify rows to 25c's DECODE list (stronger
+    than M = 1 of the verify lists). *Cost:* none.
+18. *The branch is `spec26c-lilicorr-engine-serving`* (the plan: `spec26c-lilicorr-engine`). *Cost:* none.
+
+**PENDING (box, row 65):** the verify binaries' first ocloc build; `bolt_moe_union_test` (the union bitwise the plain form at
+the real shapes, DN_KS 2, every I; the counting build); `bolt_verify_*` (D3: logits, KV rows, ring columns, SSM slots and taps
+at M 1..8 bitwise 25c's decode steps, synthetic one card and SergiioB's two, union and plain); `bolt_commit_*` (Review Focus 1
+on both cards, 3dc6def360's cases); `bolt_dflash_*` (D2 on the golden prompts and the agentic transcript, every K and AdaptiveK;
+the tokens a verify per format - D5's acceptance); `bolt_dflash_prefill_test` (Decision 7; the prefill's ring vs the decode
+path's, the worst cosine); `bolt_dflash_prefix_gpu_test` (Review Focus 4); `r65.serve` (A4 identical, seeded sampled twice);
+opt-in `r65.benchy` (D5 - the default rule). Every default stays §11's PROVISIONAL one: `--draft-format int8`, `--spec-max 7`,
+`--draft-q lattice`, `B70_BOLT_VERIFY_MOE=union`; `--spec dflash` is an option until D5.

@@ -1028,6 +1028,26 @@ at TP 2 are PUBLISHED, his card, one self-reported run (his flags: fp8 KV, `--bl
 | the agentic transcript's prefix-cache hit rate | `tests/golden/prompts/bolt_agentic.json` as a live loop, three arms (default, `truncate_history_thinking` false, cache off) | pending; no bar - the miss at each new user message (`truncate_history_thinking`) and at a call whose arguments the model wrote unsorted is recorded with its divergence token | r62.agentic |
 | snapshot sizes | state 170,229,760 B (167,772,160 B of fp32 SSM states + 2,457,600 B of conv columns; 86,343,680 B with `B70_BOLT_SSM=bf16`), KV 8,192 B a position | derived, asserted by `bolt_snapshot_test` (host, measured on the Mac) and `bolt_snapshot_gpu_test` (card) | r62.snap_synth, r62.snapshot |
 
+## LiLiCorr on Bolt (spec 26)
+
+**Nothing here is measured on a card yet** (queue rows 63-65). NVIDIA's LiLiCorr drafter (a DFlash 2 backbone with sinks and a
+1024 window + a candidate-lattice head; 1,112,803,882 parameters, measured from the checkpoint on the Mac) drafts up to 7 ids
+a block on device 1; Bolt verifies them at M = K + 1 <= 8 rows (spec 26c). The costs are DERIVED (spec 26 §11, depth 4096,
+in units of one plain Bolt step of 5.524 GB): the verify at M = 1..8 with the plain M-row MoE 1.000 / 1.193 / 1.387 / 1.580 /
+1.773 / 1.966 / 2.160 / 2.353, with the union-aware MoE (each expert block read once a verify; u ESTIMATED linear from 9 at
+M 1 to 30 at M 8 - row 63's r63.union measures it) 1.000 / 1.085 / 1.169 / 1.254 / 1.339 / 1.423 / 1.508 / 1.593; one
+drafter block 0.500 (exact) / 0.306 (int8) / 0.214 (int4 g64). The expectation (ESTIMATED: SPEED-Bench's PUBLISHED
+acceptance at K 7 on the 24GB target, the int8 drafter, the union MoE): coding 5.26 tokens a verify -> ~2.8x plain,
+overall 4.30 -> ~2.3x, writing 3.41 -> ~1.8x (spec 26 §11).
+
+| what | configuration | number | stage |
+|---|---|---|---|
+| tokens a verify (D5's acceptance) per K 1..7 and AdaptiveK | `bolt_dflash_{int8,exact,int4}_test`: the golden short prose / short code prompts and the agentic transcript, greedy | pending | r65.d2 |
+| llama-benchy pp4096 tg256 depth 1; decode at depth 4k / 16k | b70-serve two cards, `--spec off` / `lookup` / `dflash` (int8, exact, int4; `B70_BOLT_VERIFY_MOE=plain`), `--no-cache --exact-tg --latency-mode generation` | pending | r65.benchy (opt-in) |
+| the agentic transcript as a live loop | the same arms, greedy and T 1.0 / top-p 0.95; per request the mean accepted length | pending - D5's rule: `dflash` becomes Bolt's default only if it beats `off` and `lookup` by >= 10 % here and loses nowhere by more than 3 % | r65.benchy (opt-in) |
+| the verify per M, the block per format | `probe_draft_cost --shapes bolt-lilicorr` | pending (replaces the derived rows above; `--spec-cost` meanwhile) | r63.cost |
+| memory with `--spec dflash` | the verify slots 1,174,405,120 B over the 40 Mamba blocks (7 x 4 MiB each), the verify scratch ~14.8 MB a card, the drafter 1.30 GB (int8, at 262144) + the replica 1.07 GB + the prefill staging 50 MB on device 1; `--max-len auto` 262144 in every format | derived (`bolt_spec_plan_test`, measured on the Mac) | r65.serve's memory lines |
+
 ## Correctness
 
 Numerics are gated, not eyeballed. The full protocol is in
