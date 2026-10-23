@@ -716,7 +716,7 @@ class K2Ref:
         return torch.cat([self.ar.linear(x, self.lm_head[a:a + chunk])
                           for a in range(0, self.lm_head.shape[0], chunk)], dim=-1)
 
-    def generate(self, ids, n: int, rec: Recorder | None = None, log=None):
+    def generate(self, ids, n: int, rec: Recorder | None = None, log=None, force=None):
         """Prompt forward, then n greedy steps through the cache. Returns (logits [T + n, V], tokens [n]),
         dump.py's convention: tokens[0] = argmax(logits[T - 1]); logits[T + j] consumed tokens[j]."""
         cache = self.new_cache()
@@ -727,7 +727,7 @@ class K2Ref:
             log(f"prompt forward ({len(ids)} ids): {time.time() - t:.1f}s")
         toks: list[int] = []
         for step in range(n):
-            nxt = int(torch.argmax(rows[-1][-1]))
+            nxt = int(torch.argmax(rows[-1][-1])) if force is None else int(force[step])   # force: teacher-forced (a control)
             toks.append(nxt)
             t = time.time()
             rows.append(self.forward([nxt], len(ids) + step, cache, rec))
@@ -831,7 +831,10 @@ def cmd_run(a) -> None:
           f"prompt {len(ids)} ids; gen {a.gen}", flush=True)
     ref = K2Ref(c, src, mode=a.mode)
     rec = Recorder(len(ids))
-    logits, toks = ref.generate(ids, a.gen, rec, log=lambda s: print(s, flush=True))
+    force = _read_ids(a.force) if a.force else None
+    if force is not None and len(force) < a.gen:
+        raise SystemExit(f"--force has {len(force)} ids, --gen is {a.gen}")
+    logits, toks = ref.generate(ids, a.gen, rec, log=lambda s: print(s, flush=True), force=force)
     out = rec.tensors(ref.ar)
     out["logits"] = logits.float().contiguous()
     out["tokens"] = torch.tensor(toks, dtype=torch.int32)
@@ -941,6 +944,7 @@ def main() -> None:
     r.add_argument("--gen", type=int, default=32)
     r.add_argument("--max-prompt", type=int, default=64)
     r.add_argument("--mode", choices=("bf16", "f32"), default="bf16")
+    r.add_argument("--force", help="ids to teacher-force instead of the greedy argmax (a control: its rows line up with another run's)")
     r.add_argument("--slow-dequant", action="store_true", help="dequant.py's torch path instead of the C++ one")
     h = sub.add_parser("hfcheck")
     h.add_argument("snapshot")

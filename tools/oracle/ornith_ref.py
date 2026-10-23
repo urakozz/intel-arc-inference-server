@@ -93,12 +93,12 @@ def mqm():
     return m
 
 
-def text_config(snapshot: str, experts: str = "grouped_mm"):
+def text_config(snapshot: str, experts: str = "grouped_mm", dtype=torch.bfloat16):
     with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
-        return text_config_from_dict(json.load(f), experts)
+        return text_config_from_dict(json.load(f), experts, dtype)
 
 
-def text_config_from_dict(d: dict, experts: str = "grouped_mm"):
+def text_config_from_dict(d: dict, experts: str = "grouped_mm", dtype=torch.bfloat16):
     """config.json's dict -> the Qwen3_5MoeTextConfig to build the model from (the
     quantization_config stays out: the weights are dequantised here, not by transformers)."""
     from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
@@ -109,7 +109,7 @@ def text_config_from_dict(d: dict, experts: str = "grouped_mm"):
         die("tie_word_embeddings is true; Ornith ships a separate lm_head")
     tc._attn_implementation = "eager"          # fp32 softmax, the contract (doc 03)
     tc._experts_implementation = experts       # recorded in the output (spec 15 §10)
-    tc.dtype = torch.bfloat16
+    tc.dtype = dtype      # bf16, the reference; float32 only for `run --dtype f32` (a control)
     return tc
 
 
@@ -167,8 +167,9 @@ class LazyExperts:
         E, I, H = tc.num_experts, tc.moe_intermediate_size, tc.hidden_size
         self.shape = ((E, 2 * I, H), (E, H, I))
         shared = len(self.keep) < tc.num_hidden_layers
-        self.gate_up = torch.empty(*self.shape[0], dtype=torch.bfloat16) if shared else None
-        self.down = torch.empty(*self.shape[1], dtype=torch.bfloat16) if shared else None
+        dt = tc.dtype     # bf16; float32 under `run --dtype f32` (the same bf16 weight values)
+        self.gate_up = torch.empty(*self.shape[0], dtype=dt) if shared else None
+        self.down = torch.empty(*self.shape[1], dtype=dt) if shared else None
         self.own: dict[int, tuple[torch.Tensor, torch.Tensor, set]] = {}
         self.lock = threading.Lock()
         self.filled = 0
@@ -186,8 +187,8 @@ class LazyExperts:
             return self.gate_up, self.down
         with self.lock:
             if layer not in self.own:
-                self.own[layer] = (torch.empty(*self.shape[0], dtype=torch.bfloat16),
-                                   torch.empty(*self.shape[1], dtype=torch.bfloat16), set())
+                self.own[layer] = (torch.empty(*self.shape[0], dtype=self.tc.dtype),
+                                   torch.empty(*self.shape[1], dtype=self.tc.dtype), set())
             return self.own[layer][:2]
 
     def buffers(self, layer: int):
@@ -248,6 +249,14 @@ def build_streamed(snapshot: str, tc, keep_dense=(), keep_experts=()):
     resident: dict[str, torch.Tensor] = {}
     _, lm_kind = _dump.convert(where, rest, 64, resident)
     print(f"lm_head: {lm_kind}")
+
+    def widen(sd: dict) -> dict:
+        """`run --dtype f32`: every bf16 tensor widened (exactly) to the model's float32; the
+        default bf16 run returns sd unchanged."""
+        if tc.dtype == torch.bfloat16:
+            return sd
+        return {k: (v.to(tc.dtype) if v.dtype == torch.bfloat16 else v) for k, v in sd.items()}
+    resident = widen(resident)
     lazy = LazyExperts(where, tc, keep_experts)
 
     def layer_sd(i: int) -> dict[str, torch.Tensor]:
@@ -257,7 +266,7 @@ def build_streamed(snapshot: str, tc, keep_dense=(), keep_experts=()):
         bad = [k for k in sd if not k.startswith(pre)]
         if bad:
             raise RuntimeError(f"layer {i}: {bad[:3]} outside {pre}")
-        out = {k[len(pre):]: v for k, v in sd.items()}
+        out = widen({k[len(pre):]: v for k, v in sd.items()})
         out["mlp.experts.gate_up_proj"], out["mlp.experts.down_proj"] = lazy.tensors(i)
         return out
 
@@ -482,7 +491,7 @@ def cmd_run(a) -> None:
     print(f"torch {torch.__version__}, intra-op threads {torch.get_num_threads()} "
           f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
     gs = _dump.check_quant_config(a.snapshot)
-    tc = text_config(a.snapshot, a.experts)
+    tc = text_config(a.snapshot, a.experts, torch.float32 if a.dtype == "f32" else torch.bfloat16)
     ids = [int(x) for x in open(a.prompt, encoding="utf-8").read().split()]
     if not ids or len(ids) > a.max_prompt:
         die(f"{a.prompt}: {len(ids)} ids (1..{a.max_prompt})")
@@ -520,10 +529,17 @@ def cmd_run(a) -> None:
         states[f"conv_state.L{i}"] = _dump.read_state(cache.layers[i], "conv_states",
                                                       f"conv_state.L{i}").detach()[0].clone()
     rows = [out.logits[0].float()]
+    forced = None
+    if a.force:
+        forced = [int(x) for x in open(a.force, encoding="utf-8").read().split()]
+        if len(forced) < a.gen:
+            die(f"{a.force}: {len(forced)} ids, --gen is {a.gen}")
     tokens: list[int] = []
     t2 = time.time()
     for step in range(a.gen):
         nxt = int(torch.argmax(rows[-1][-1]).item())
+        if forced is not None:      # --force: teacher-forced on another run's tokens (a control)
+            nxt = forced[step]
         tokens.append(nxt)
         with torch.no_grad():
             out = model(input_ids=torch.tensor([[nxt]]), past_key_values=cache, use_cache=True)
@@ -549,6 +565,7 @@ def cmd_run(a) -> None:
     print(gap_summary(tensors, tc.num_hidden_layers))
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt_ids": " ".join(map(str, ids)),
             "n_prompt": str(len(ids)), "gen": str(a.gen), "attn_implementation": "eager",
+            "dtype": a.dtype,
             "experts_implementation": str(impl), "group_size": str(gs),
             "model": "ornith (Qwen3_5MoeForCausalLM, int4 checkpoint dequantised, tools/oracle/ornith_ref.py)",
             "weights": "layer-streamed, routed experts on demand (tools/oracle/ornith_ref.py)"}
@@ -640,6 +657,13 @@ def main() -> None:
     r.add_argument("--gen", type=int, default=32)
     r.add_argument("--max-prompt", type=int, default=4096)
     r.add_argument("--experts", default="grouped_mm", choices=["grouped_mm", "eager"])
+    # A higher-precision CONTROL, not the reference: the same bf16 weight values held in float32
+    # and every activation in float32 (box 2026-10-23: is the engine's drift from the bf16
+    # reference larger than the bf16 reference's own distance from exact arithmetic?).
+    r.add_argument("--dtype", default="bf16", choices=["bf16", "f32"])
+    # The generated steps consume these ids instead of the argmax (`tokens` then records them):
+    # the control's rows line up with another golden file's rows, decision row for decision row.
+    r.add_argument("--force", help="file of whitespace-separated ids to teacher-force (>= --gen)")
     r.add_argument("--mtp-out")
     r.add_argument("--mtp-rows", type=int, default=32)
     r.add_argument("--mtp-experts", default="rtn", choices=["rtn", "bf16"])
