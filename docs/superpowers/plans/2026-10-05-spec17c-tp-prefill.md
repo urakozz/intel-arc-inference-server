@@ -1,37 +1,79 @@
-# Spec 17c - tensor parallel: prefill
+# Spec 17c - tensor parallel: Bolt prefill across two cards
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Conditions (operator, 2026-10-23):** this plan starts only after **plan 17b is merged and its row passed on the box**,
+which itself needed spec 17 §9's GO (P0 after `r22.devices` / `r22.p1`; Bolt's rows 59-62 passed; the crossing cost
+<= ~1 ms a token), **and after row 61's `r61.speed` has measured Bolt's two-card (`--pp 2`) prefill** - the choice
+below is made against that number (spec 17 §4.5) - and the operator says go.
 
-**Goal:** prefill under `--tp 2` by the option 17a chose: either TP prefill with the per-fold collective overlapped (and bf16 partials if 17a showed the accuracy cost acceptable), or the PP-hybrid (prefill as spec 16's chunk pipeline, decode as TP); T2 on prefill; D2.
+**Status (2026-10-23): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
+the 2026-10-05 version (Qwen3.8, the PP-hybrid against spec 16c) is in git history.
 
-**Architecture:** spec 17 §2 decision 4. **TP option:** the prefill step at per-card shapes, the row-parallel GEMMs' partials exchanged per fold on a copy engine overlapping the next column-parallel projection, folded in fixed order. **PP-hybrid option:** each card also holds the weights of its PP half in the full (unsliced) layout, or the layers are reshuffled after prefill; 17a's memory numbers decide which.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
-**Tech Stack:** C++17, OpenCL C, Level Zero, CMake/ctest.
+**Goal:** prefill under `b70-decode <bolt> --tp 2 --prefill` by the option Task 1 picks: **(T)** TP prefill - the
+chunk's crossings (32 MiB fp32 a crossing at C = 2048, derived) on a copy engine overlapped with the next projection,
+fp32 or bf16 by the accuracy gate; or **(H)** the hybrid - prefill as Bolt's `--pp 2` walk, decode as TP (each card
+holds both layouts, or the layers are reshuffled after prefill; the TP planner decides by memory). T2 on prefill; D2.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-spec17-tensor-parallel-design.md` (§2 decision 4, §4 T2, §5 D2). Needs 17b merged; for the PP-hybrid, spec 16c merged.
+**Architecture:** spec 17 §4.5. Bolt's `--pp 2` prefill is sequential (spec 25 §6.2), so TP prefill competes with one
+card's compute rate; the decision uses `r61.speed` (measured) and P0's `r68.prefill` (the measured crossing rate,
+overlapped and not).
+
+**Tech Stack:** C++17, OpenCL C, Level Zero, CMake / ctest.
+
+**Spec:** `docs/superpowers/specs/2026-10-05-spec17-tensor-parallel-design.md` (§4.5, §5 T2, §6 D2). Precedents: spec
+25d (`BoltEngine::prefill`, the `nb_pf_*` walk, the 64-grid chunk rule), spec 16c (per-chunk resources doubled, the
+back-pressure rule, bounded host waits).
+
+## Dependencies and branch points
+
+- Main with 17b merged; rows 61 (incl. `r61.speed`) and 69 passed. Branch **`spec17c-tp-prefill`** from main.
 
 ## Global Constraints
 
-- Both cards; branch `spec17c-tp-prefill` from main; box tree automatic; `tools/box.env` copied if missing, never committed; `oracle-out*` symlinked.
-- `--tp 1` unchanged. Lock once for both cards; detached, polled. Interleaved pairs, median of 3.
-- No `rm -rf`. Commit on the branch; no merge, no push.
+- Signed commits after every step; no merge, no push. Box tree automatic; `tools/box.env` never committed;
+  `oracle-out*` symlinked. No `rm -rf`.
+- `--tp 1` unchanged (G0). The chunk rule unchanged (a multiple of 64 on the absolute 64-grid).
+- **Every two-card stage is `gpu`**; idle box, interleaved pairs, median of 3.
 
 ## Review Focus
 
-1. **After prefill both cards hold exactly their decode-layout state** (their heads' KV and GDN state), whichever prefill option ran; T1's bitwise equality of the residual holds for the first decoded token.
-2. **T2 on prefill:** the golden gates' prefill path with `--tp 2` under the tie rule; `prefill_split_*` with `--tp 2`.
-3. **The overlap is real** (TP option): per-fold transfer time hidden behind compute, measured per layer.
-4. **Memory** (PP-hybrid option): the extra full-layout weights per card fit beside KV at the target max_len; the load report shows it.
-5. **Spec 7's block hook** under `--tp 2`: snapshots per card, taken when both cards hold the block.
+1. **After prefill each card holds exactly its decode-layout state** (its Mamba heads' SSM state and conv-ring channels,
+   its kv head's KV), whichever option ran; T1 holds for the first decoded token.
+2. **T2 on prefill:** against `--pp 2 --prefill` under spec 25's prefill bars (h taps, SSM state, logits cosine; routes
+   with near-ties); chunks of 512 / 1024 / 2048 and splits at multiples of 64 bitwise each other under `--tp 2`.
+3. **(T) the overlap is real:** per-chunk crossing time hidden behind compute, shown per block from timestamps.
+4. **(H) memory:** both layouts (or the reshuffle's peak) fit beside KV at the target max_len; the plan shows it.
+5. **The snapshot hook** (25e's) under `--tp 2` fires when both cards have finished the block.
 
 ---
 
-### Task 1: the chosen prefill path
+### Task 1: the choice (Mac + the box's numbers)
 
-- [ ] Implement 17a's option; `tests/prefill/tp_prefill_test.cc` (Review Focus 1, 2, 5). **Commit** `prefill: tensor-parallel prefill (<option>) (spec 17)`.
+- [ ] From `r61.speed` (Bolt `--pp 2` prefill, measured) and `r68.prefill` (the crossing rate), the derived (T) and (H)
+  rates at 886 / 8192 / 32000 / 65536; the choice and a proposed D2 bar written into spec 17 §4.5. Commit
+  `git commit -S -m "spec 17: Bolt's TP prefill option, from rows 61 and 68 (spec 17c)"`.
 
-### Task 2: speed
+### Task 2: the chosen path (Mac)
 
-- [ ] pp4096, pp32768, pp65536 with `--tp 2` vs one card and vs `--pp 2` (spec 16c); D2 per 17a's proposed bar; Review Focus 3 or 4. BENCHMARKS rows. **Commit** `spec 17c: TP prefill speed`.
+**Files:** `src/runtime/bolt/bolt_prefill*.{h,cc}`, `src/kernels/bolt/nb_pf_*.cl` (per-card variants only),
+`src/runtime/bolt/bolt_sizes.{h,cc}`, new `tests/prefill/bolt_tp_prefill_plan_test.cc` (host) and
+`tests/prefill/bolt_tp_prefill_test.cc` (cards).
 
-**Gate for the plan:** T2 on prefill, the split-prefill tests, D2 measured, `--tp 1` unchanged.
+- [ ] Failing tests (Review Focus 1, 2, 4, 5), implement, PASS on the Mac's host half. Commit
+  `git commit -S -m "prefill: Bolt prefill under --tp 2 (<option>) (spec 17c)"`.
+
+### Task 3: the box queue row (proposed 70, or the next free row)
+
+```text
+row 70 "spec 17c - Bolt prefill under tensor parallel (plan 17c)"
+stage r70.k0     70 default cpu -                     g0.sha,g0.bitwise,g0.suite "--tp 1 unchanged"
+stage r70.host   70 default cpu -                     -          "bolt_tp_prefill_plan_test"
+stage r70.synth  70 default gpu bolt_synth            r70.k0     "bolt_tp_prefill_test on the N 12 synthetics: Review Focus 1, 2, 5"
+stage r70.golden 70 default gpu bolt_g128,oracle_bolt r70.synth  "SergiioB's g128: T2 on prefill against --pp 2"
+stage r70.speed  70 optin   gpu bolt_g128             r70.golden "D2: --tp 2 vs --pp 2 prefill at 886 / 8192 / 32000 / 65536, idle, interleaved, median of 3; per-card busy time"
+```
+- [ ] Commit `git commit -S -m "docs: box queue row 70 - Bolt TP prefill (spec 17c)"`.
+
+**Gate for the plan:** T2 on prefill green against `--pp 2`, the chunk / split bitwise checks, D2 measured, `--tp 1`
+unchanged.

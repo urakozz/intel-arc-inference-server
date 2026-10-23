@@ -1,41 +1,106 @@
-# Spec 17b - tensor parallel: decode
+# Spec 17b - tensor parallel: Bolt decode across two cards
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Conditions (operator, 2026-10-23):** this plan starts only when **spec 17 §9 records GO** - P0 (plan 17a) ran after
+`r22.devices` / `r22.p1`, **Bolt's rows 59-62 passed**, and P0 measured one Bolt token's crossings at **<= ~1 ms**
+(spec 17 §3) - and the operator says go (one implementing plan at a time).
 
-**Goal:** `--tp 2` decode: the loader slices every linear per spec 17 §2's table, each card runs its captured list at per-card shapes, the row-parallel GEMVs' partials are folded across cards in a fixed order (17a's winning mechanism), the `lm_head` is split by vocabulary with an argmax exchange; T1, T2 (decode), T4; D1, D3.
+**Status (2026-10-23): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
+the 2026-10-05 version (Qwen3.8 in the main engine) is in git history. The dense models are not in this plan.
 
-**Architecture:** spec 17 §2-3. `ModelDesc` with `tp_rank` / `tp_size` deriving per-card shapes; the loader slices packed int4 g64 on group and head boundaries; capture per card; `prep_res_fold` (or a separate kernel, per 17a) waits on the peer flag and folds card 0's partials then card 1's.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
-**Tech Stack:** C++17, OpenCL C, Level Zero, CMake/ctest.
+**Goal:** `b70-decode <bolt> --tp 2`: each card holds its slice of every block (spec 17 §4.2) and runs its own captured
+list at per-card shapes; the crossings use P0's chosen mechanism and direction in a fixed fold order so both cards
+hold a bitwise-identical residual; the MoE by P0's scheme (spec 17 §4.3); the head split by vocabulary with the argmax
+exchange; T1, T2, T4; D1-Bolt, D3.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-spec17-tensor-parallel-design.md` (§2, §3, §4 T1, T2, T4, §5 D1, D3). Needs 17a's verdicts and spec 16b's multi-device engine.
+**Architecture:** spec 17 §4.1-§4.6, §4.9, §4.10. `model::BoltDesc` gains a `tp_rank` / `tp_size` view deriving every
+per-card shape; `loader::load_bolt` gains a TP placement (both devices hold every block, each its re-fused slice -
+`in_proj`'s five column ranges, `q‖k‖v`, `fc1‖shared_up` with the replicated fc1 part - and the replicated router,
+`fc1` / `fc2`, embedding, `norm_f`); `runtime::bolt::tp_plan` beside `runtime::bolt::plan` (plan == allocation);
+`BoltEngine` with one list per card, the crossing landing buffers (page-aligned, their own allocations), the fold
+kernel's TP form (`nb_res_norm` remote sources or the fold-then-send epilogue, per P0), the routed part of the MoE
+crossing.
+
+**Tech Stack:** C++17, OpenCL C, Level Zero, CMake / ctest.
+
+**Spec:** `docs/superpowers/specs/2026-10-05-spec17-tensor-parallel-design.md` (§4.1-§4.6, §4.9, §4.10, §5 T1 / T2 / T4,
+§6 D1-Bolt / D3, §9 the verdict). Precedents: spec 16b (one context over both cards, `pp_send` / `pp_recv`, bounded
+fences), spec 25b / 25c (the loader, `BoltEngine`, the `nb_*` family, B3's bars).
+
+## Dependencies and branch points
+
+- Main with 17a's verdict (GO) merged. Branch **`spec17b-tp-decode`** from main.
+- Box: rows 59-62 PASSed; `bolt_g128` and `oracle_bolt` present; the N 12 synthetics (`bolt_synth`).
 
 ## Global Constraints
 
-- Both cards; branch `spec17b-tp-decode` from main; box tree automatic; `tools/box.env` copied if missing, never committed; `oracle-out*` symlinked.
-- `--tp 1` (default) bitwise today's engine; its kernel binaries unchanged. `--tp 2` and `--pp 2` refused together. Lock once for both cards; detached, polled.
-- No `rm -rf`. Commit on the branch; no merge, no push.
+- Signed commits after every step; no merge, no push. Box tree automatic; `tools/box.env` copied if missing, never
+  committed; `oracle-out*` symlinked. No `rm -rf`.
+- **`--tp 1` is today's Bolt engine bit for bit:** every existing kernel binary unchanged (`tools/kernel_cmdlines`:
+  additions only; G0's sha). Per-card shape variants are new binaries.
+- `--tp 2` with `--pp 2`, `--replica`, `--pipeline-split` or `--pipeline-handoff` refused by name before any device.
+- **Every two-card stage is `gpu`** (`tools/gpu_lock.sh box`); host tests `cpu`. Timed arms: idle box, interleaved pairs
+  after a warm-up, median of 3; device 1's gap recorded.
+- Shapes only from `BoltDesc`; no Bolt constant in a kernel or a planner.
 
 ## Review Focus
 
-1. **Slicing on boundaries:** gate‖up rows 8704 per card = 136 g64 groups; head slices whole heads; the GDN qkv layout (q and k per k-head, v per v-head) regrouped per card correctly — a host test slices a synthetic packed tensor and checks each card's slice dequantises to the right rows.
-2. **T1:** both cards' residual streams byte-identical after every layer (a debug tap comparing them), golden prompts + 64 tokens.
-3. **T2:** against one card under the golden tie rule (not bitwise: summation order differs); the golden gates on `l0` / `l0-int8` with `--tp 2`.
-4. **The argmax exchange** picks the same id on both cards; ties to the lower id; sampled requests read both vocab halves or merge per-card top-k (spec 17 decision 3).
-5. **T4:** missing card, no peer access, fold timeout: clear errors, bounded waits.
+1. **Slicing on boundaries:** a host test slices synthetic packed tensors and checks each card's re-fused slice
+   dequantises to exactly the rows / columns spec 17 §4.2 names (heads 0-63 / 64-127; B / C groups 0-3 / 4-7; kv head
+   0 / 1; shared-expert halves; every K slice a whole number of g64 groups; EP's expert halves or intra-expert's I / 2).
+2. **T1:** after every block the two cards' residuals and MoE route sets byte-identical (a debug tap compares them),
+   golden prompts + 64 tokens; a route mismatch fails.
+3. **T2:** against `--pp 2` (bitwise one card's order) under the tie-aware gate and B3's bars (routes with near-ties,
+   the SSM state / h cosines), short / 4k / agentic.
+4. **The argmax exchange:** the same id on both cards, ties to the lower id.
+5. **T4:** a missing card, no peer access, a crossing timeout, a stale stamp: clear errors within the bound; the
+   engine marked failed until `reset()`.
 
 ---
 
-### Task 1: slicing and per-card shapes
+### Task 1: the TP view, the slices and the plan (Mac)
 
-- [ ] `ModelDesc` TP fields; loader slicing; host tests (Review Focus 1); kernel variants at per-card shapes (`tools/kernel_cmdlines`: one-card variants unchanged). **Commit** `loader: tensor-parallel slicing at load (spec 17)`.
+**Files:** `src/model/bolt.{h,cc}` (the TP view), `src/loader/bolt_loader.{h,cc}`, `src/loader/bolt_repack.{h,cc}`,
+`src/loader/bolt_layout.h`, `src/runtime/bolt/bolt_sizes.{h,cc}`, new `tests/loader/bolt_tp_slice_test.cc`,
+`tests/runtime/bolt_tp_plan_test.cc`.
 
-### Task 2: the folded collective and the head
+- [ ] **Step 1: failing tests** (Review Focus 1; the plan's bytes per card - spec 17 §4.6's ~22.5 GB derived - and
+  `--max-len auto` from the tighter card).
+- [ ] **Step 2: implement, PASS.** Commit `git commit -S -m "loader: Bolt sliced per card at load, the TP plan (spec 17b)"`.
 
-- [ ] The fold (17a's mechanism) in the captured lists; the vocab-split head and argmax exchange; `tests/runtime/tp_decode_test.cc` (Review Focus 2-5); replay determinism with `--tp 2`. **Commit** `runtime: decode across two cards with folded partials (spec 17, T1-T2)`.
+### Task 2: the crossing and the per-card lists (Mac)
 
-### Task 3: speed
+**Files:** `src/kernels/bolt/nb_prep.cl` (the fold's TP form), `src/kernels/bolt/nb_moe.cl` (the routed part of the
+crossing), `src/kernels/CMakeLists.txt` (per-card variants), `src/runtime/bolt/bolt_capture.{h,cc}`,
+`src/runtime/bolt/bolt_engine.{h,cc}`, `src/runtime/bolt/bolt_buffers.{h,cc}`, new `tests/runtime/bolt_tp_protocol_test.cc`
+(two host threads), `tests/kernels/bolt_tp_kernels_test.cc` (the twin: the TP fold = the one-card fold's sum in the
+fixed order).
 
-- [ ] D1: `--tp 2` vs one card at 4k / 32k / 128k (bar >= 1.6x at 4k); D3: `--tp 1` within 1 %. BENCHMARKS "Tensor parallel (spec 17)". **Commit** `spec 17b: TP decode speed`.
+- [ ] **Step 1: failing tests**, then implement; `tools/mac_check.sh --base main --kernels` (the new variants on the
+  Mac's OpenCL, INDICATIVE). Commit `git commit -S -m "runtime: Bolt decode across two cards - the crossing, the per-card lists, the head exchange (spec 17b)"`.
 
-**Gate for the plan:** T1 bitwise, T2 green, T4 refusals, replay bitwise, D1 / D3 measured, the full suite green at `--tp 1`.
+### Task 3: the CLI and the refusals (Mac)
+
+- [ ] `b70-decode <bolt> --tp 1|2` (`--tensor-parallel-size`), the exclusivity refusals, `cli_reject_tp_*` tests.
+  Commit `git commit -S -m "cli: b70-decode <bolt> --tp 2 and its refusals (spec 17b)"`.
+
+### Task 4: the box queue row (proposed 69, or the next free row)
+
+- [ ] Row and stages (`test_box_validate.py` passes):
+
+```text
+row 69 "spec 17b - Bolt decode under tensor parallel (plan 17b)"
+stage r69.k0      69 default cpu  -                    g0.sha,g0.bitwise,g0.suite "D3: --tp 1 is today's engine - every existing binary identical"
+stage r69.host    69 default cpu  -                    -          "bolt_tp_slice_test, bolt_tp_plan_test, bolt_tp_protocol_test, cli_reject_tp_*"
+stage r69.k1      69 default gpu  -                    r69.k0     "bolt_tp_kernels_test on both cards: the TP fold = the fixed-order sum, the routed crossing both forms"
+stage r69.synth   69 default gpu  bolt_synth           r69.k1     "bolt_tp_decode_test on the N 12 synthetics: plan == allocation per card, T1 per block, T2 vs --pp 2"
+stage r69.p4      69 default gpu  bolt_synth           r69.synth  "T4: missing card, no peer access, a dropped crossing, a stale stamp - bounded, named"
+stage r69.golden  69 default gpu  bolt_g128,oracle_bolt r69.synth "SergiioB's g128 under --tp 2: T1, T2 (B3 short / 4k / agentic) against --pp 2"
+stage r69.speed   69 optin   gpu  bolt_g128            r69.golden "D1-Bolt: --tp 2 vs --pp 2 at depth 886 / 8192 / 32000 / 65536, idle, interleaved, median of 3; bar >= 1.4x at 8192 (proposed)"
+rownote 69 "After spec 17 §9's GO. Every two-card stage is gpu."
+```
+- [ ] Commit `git commit -S -m "docs: box queue row 69 - Bolt TP decode (spec 17b)"`.
+
+**Gate for the plan:** host tests green; on the box T1 bitwise, T2 green against `--pp 2`, T4 bounded, D3 (G0), D1-Bolt
+measured and recorded in docs/BENCHMARKS.md "Tensor parallel (spec 17)".
