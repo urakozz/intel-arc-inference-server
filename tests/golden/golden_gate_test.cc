@@ -140,6 +140,9 @@ struct Verdict {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
+  // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
+  const std::string judge_dir = golden::take_judge(argc, argv);
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
@@ -147,6 +150,9 @@ int main(int argc, char** argv) {
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 4) CHECK(loader::parse_lm_head_form(argv[4], lm_head));
   std::printf("lm_head: %s\n", loader::lm_head_form_name(lm_head));
+  if (!judge_dir.empty())
+    std::printf("judge: the f32 teacher-forced reference %s (the tie rule on its logits); the bf16 golden "
+                "%s is printed beside it\n", judge_dir.c_str(), gdir.c_str());
 
   for (const char* p : kPrompts) {
     const std::string g = gdir + "/" + p + ".golden.safetensors";
@@ -405,6 +411,10 @@ int main(int argc, char** argv) {
       imm.copy(dec.data(), eng.buffers().logits.ptr(), size_t(Qwen35::kVocab) * sizeof(float));
     };
     read_logits();  // the row whose argmax is generated token 0: golden logits[T-1]
+    const golden::Judge J =
+        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, Lrows);
+    uint32_t bf16_vs_f32 = 0;   // decision rows where the bf16 golden's argmax is not the judge's
+    uint32_t bf16_det_bad = 0;  // the bf16 golden's own verdict (a diagnostic under a judge): determined rows missed
 
     // **Clause (iii) of the ruling: after a divergence the walk continues
     // TEACHER-FORCED.** A greedy sequence never recovers from one different
@@ -454,36 +464,50 @@ int main(int argc, char** argv) {
       CHECK_EQ(id, ea_dev);
       etok.push_back(id);
 
+      // `ok` is against the bf16 golden's token: it drives the teacher-forcing (the judge was
+      // forced on those tokens, so the engine must be too). The VERDICT is the judge's when one
+      // is given (jd / want), else the bf16 golden's as always.
       const bool ok = id == uint32_t(gtok[p]);
-      if (ok) ++v.exact;
-      if (gd.determined()) {
+      const uint32_t jrow_i = p == 0 ? T - 1 : T + p - 1;
+      const GoldenDecision jd =
+          J ? golden_decision(J.row(jrow_i), std::min(J.V, Qwen35::kVocab), Qwen35::kVocabUsed) : gd;
+      const uint32_t want = jd.set[0];
+      const bool jok = id == want;
+      if (J && want != gam) ++bf16_vs_f32;
+      if (J && gd.determined() && id != gam) ++bf16_det_bad;
+      if (jok) ++v.exact;
+      if (jd.determined()) {
         ++v.n_determined;
-        if (ok) ++v.det_exact;
+        if (jok) ++v.det_exact;
         else if (v.first_bad < 0) v.first_bad = int(p);
       } else {
         ++v.n_tie;
         v.tie_steps.push_back(p);
-        if (ok) ++v.tie_agree;
-        else if (gd.contains(id)) ++v.tie_member;
+        if (jok) ++v.tie_agree;
+        else if (jd.contains(id)) ++v.tie_member;
         else if (v.first_bad < 0) v.first_bad = int(p);   // not even a member: a real failure
       }
-      if (!ok && v.first_diverge < 0) v.first_diverge = int(p);
+      if (!jok && v.first_diverge < 0) v.first_diverge = int(p);
 
-      const char* mark = ok ? ""
-                            : (gd.determined() ? "  <== MISMATCH (determined - GATE)"
-                                               : "  <== differs, but the golden row is a TIE");
-      std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s\n", p, id,
-                  uint32_t(gtok[p]), gd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf,
+      const char* mark = jok ? ""
+                             : (jd.determined() ? "  <== MISMATCH (determined - GATE)"
+                                                : "  <== differs, but the judged row is a TIE");
+      std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s", p, id,
+                  uint32_t(gtok[p]), jd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf,
                   mark, gam != gaf ? "  [golden argmax is a padding id]" : "",
                   forced ? "  [teacher-forced]" : "");
-      if (!ok && int(p) == v.first_diverge) {
-        std::printf("      first divergence at generated position %u: engine %u, golden %u"
+      if (J)
+        std::printf("  f32 %u%s", want, want != gam ? "  [bf16 golden != f32]" : "");
+      std::printf("\n");
+      if (!jok && int(p) == v.first_diverge) {
+        std::printf("      first divergence at generated position %u: engine %u, %s %u"
                     "  (decision row = golden logits[%u], cos %.9f, relL2 %.3e)\n",
-                    p, id, uint32_t(gtok[p]), p == 0 ? T - 1 : T + p - 1, lm.cos, lm.rel);
-        if (!gd.determined()) {
-          std::printf("      the golden row is UNDETERMINED: %zu ids attain the maximum"
-                      " %.9f -", gd.set.size(), double(gd.value));
-          for (uint32_t i : gd.set) std::printf(" %u", i);
+                    p, id, J ? "f32 judge" : "golden", want, jrow_i, lm.cos, lm.rel);
+        if (J) print_top5("f32", J.row(jrow_i), std::min(J.V, Qwen35::kVocab), Qwen35::kVocabUsed);
+        if (!jd.determined()) {
+          std::printf("      the judged row is UNDETERMINED: %zu ids attain the maximum"
+                      " %.9f -", jd.set.size(), double(jd.value));
+          for (uint32_t i : jd.set) std::printf(" %u", i);
           std::printf("\n      the engine's %u is a member, so clause (ii) is satisfied; the"
                       " walk continues teacher-forced on the golden %u\n", id, uint32_t(gtok[p]));
         }
@@ -528,6 +552,10 @@ int main(int argc, char** argv) {
                 pname, v.det_exact, v.tie_agree, v.tie_member, v.n_determined, v.n_tie, kGen,
                 v.first_bad < 0 ? "" : "   ** GATE FAILURE **");
     std::printf("  legacy strict count (every row, tie-break included): %u/%u\n", v.exact, kGen);
+    if (J)
+      std::printf("  bf16 golden (diagnostic, not the gate): its argmax differs from the f32 judge on %u of %u "
+                  "decision rows; against it the engine misses %u determined row(s)\n",
+                  bf16_vs_f32, kGen, bf16_det_bad);
     std::printf("  engine:");
     for (uint32_t id : etok) std::printf(" %u", id);
     std::printf("\n  golden:");

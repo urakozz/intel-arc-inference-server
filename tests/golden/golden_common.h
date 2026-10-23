@@ -22,6 +22,7 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -276,5 +277,64 @@ std::vector<uint32_t> read_ids(const std::string& path) {
   return ids;
 }
 bool exists(const std::string& p) { return std::ifstream(p).good(); }
+
+// ---- the f32 judge (operator ruling 2026-10-23, Ornith and K2 only) ---------------------
+// The bf16 golden rounds where HF's bf16 model rounds; on Ornith and K2 its own determined rows
+// disagree with exact arithmetic on the same weights (box 2026-10-23: Ornith prose 18, cjk 14,
+// code 3; K2 prose 9), and the engine took exact arithmetic's token at the rows it "failed". So
+// those models' token gates JUDGE against the f32 teacher-forced reference - the same weights in
+// float32, every generated step forced to the bf16 golden's token (ornith_ref.py --dtype f32
+// --force, k2_ref.py --mode f32 --force; tools/box_validate/f32_oracle.sh), so its logits rows
+// are the bf16 golden's contexts row for row - with the same tie rule (golden_decision) applied
+// to ITS logits. The bf16 golden stays a printed diagnostic beside it. Qwen3.8's and Agnes's
+// gates take no judge and are unchanged.
+//
+// `--judge=<dir>` anywhere in argv names the judge directory (<dir>/<prompt>.golden.safetensors);
+// take_judge removes it so the positional arguments keep their places.
+std::string take_judge(int& argc, char** argv) {
+  std::string dir;
+  int w = 1;
+  for (int r = 1; r < argc; ++r) {
+    const std::string a = argv[r];
+    if (a.rfind("--judge=", 0) == 0)
+      dir = a.substr(8);
+    else
+      argv[w++] = argv[r];
+  }
+  argc = w;
+  return dir;
+}
+struct Judge {
+  std::unique_ptr<Golden> g;
+  const float* logits = nullptr;   // [rows][V] fp32
+  uint32_t V = 0;
+  explicit operator bool() const { return g != nullptr; }
+  const float* row(uint32_t r) const { return logits + size_t(r) * V; }
+};
+// The judge of one prompt: the bf16 golden's rows, teacher-forced on exactly its `tokens` (a
+// judge forced on anything else would decide other contexts). Absent: SKIP (77), as an absent
+// golden is.
+Judge open_judge(const std::string& dir, const std::string& prompt, const int32_t* gtok, uint32_t gen,
+                 uint32_t rows) {
+  Judge j;
+  const std::string path = dir + "/" + prompt + ".golden.safetensors";
+  if (!exists(path)) {
+    std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", path.c_str());
+    std::exit(77);
+  }
+  j.g = std::make_unique<Golden>(path);
+  CHECK_EQ(j.g->dim("logits", 2, 0), uint64_t(rows));
+  j.V = uint32_t(j.g->dim("logits", 2, 1));
+  j.logits = j.g->f32("logits", size_t(rows) * j.V);
+  CHECK_EQ(j.g->dim("tokens", 1, 0), uint64_t(gen));
+  const int32_t* jt = j.g->i32("tokens", gen);
+  for (uint32_t i = 0; i < gen; ++i)
+    if (jt[i] != gtok[i]) {
+      std::fprintf(stderr, "the f32 judge %s was not teacher-forced on the golden's tokens (step %u: %d vs %d)\n",
+                   path.c_str(), i, jt[i], gtok[i]);
+      std::exit(1);
+    }
+  return j;
+}
 
 }  // namespace golden

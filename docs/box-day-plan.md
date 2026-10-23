@@ -438,6 +438,35 @@ Estimate 3-5 h (row 10 ~1 h, row 13 ~1.5 h, row 16 ~1.5-2 h).
 **Check:** `r10.nockpt` (moe.cl's sub-group path and the 288-lane `moe_down` on the card for
 the first time), `r13.kernels` (grouped == dense bitwise) and `r16.kernels` PASS.
 
+**The f32 judge (operator ruling 2026-10-23).** Ornith's token gates (`golden_gate_ornith*` in
+`r10.gates`, `prefill_gate_ornith_*` in `r13.gates`) judge the engine against the f32 reference
+teacher-forced on the bf16 golden's tokens, `oracle-out-ornith-f32` (data key
+`oracle_ornith_f32`); the bf16 golden is printed beside it with its disagreements marked. Why:
+on the box's first run the bf16 golden's own determined rows disagreed with exact arithmetic
+(Ornith prose 18, cjk 14, code 3) and the engine had taken exact arithmetic's token where it
+"failed". Make it once, on the box CPU, before the session (or `--with r10.oracle_f32`):
+`tools/box_validate/f32_oracle.sh ~/b70-inference-server ornith` - ~1.5 min a prompt, peak RSS
+18-21 GiB, 22 threads under `/tmp/b70-cpu-model.lock`, SKIPs below MemAvailable 95 GB (70 GB kept
+for the other jobs + the run) - then `tools/box_validate/data.sh link ~/b70-inference-server
+<tree>`. Qwen3.8's and Agnes's gates take no judge.
+
+**Bars still to set for Ornith (runs written down, not made - 2026-10-23).**
+- `r16.m1` (`mtp_head_ornith_test`, per-row cosine >= 0.999): every reference argmax is in the
+  engine's top 2; only the cosine bar fails (worst 0.9878) and the bf16 golden's own main logits
+  are 0.9928 from f32 on the same rows. Needed: an f32 MTP-head reference - `ornith_ref.py run
+  --dtype f32 --force <oracle-out-ornith's tokens> --mtp-out <dir>` per prompt (the head on the
+  f32 run's hidden; the head's experts RTN as now). The code path needs a small extension first:
+  `mtp_head()` builds its experts in bf16 and would have to follow `--dtype f32`. Cost as the
+  f32 judge plus the head: ~2 min a prompt, ~22 GiB peak - fits beside the Bolt job under the
+  95 GB rule. The bar is then the bf16 M1 reference's own cosine to it.
+- `prefill_split_ornith_*` (Qwen3.8's provisional bars; fa0-3 rows 0.85-0.97 at rows 986 / 1104,
+  GDN L0 state 0.999998, multiples of 64 bitwise - Agnes's pattern): needed, as for Agnes, a CPU
+  reference over `long32k.ids[0, 2600)` for `prefill_split_test --oracle` - `dump.py`-style
+  logits for the listed rows, i.e. `ornith_ref.py` with a prompt of 2600 ids (`--max-prompt 2600
+  --gen 1`). Not measured for Ornith; K2's comparable 2600-id bf16 run took 66 min at 22 threads
+  (the run is mostly single-threaded in the expert loop) with 28.8 GiB peak; expect Ornith
+  similar (~1-1.5 h, ~30 GiB) - fits under the 95 GB rule, but not beside a second CPU job.
+
 ### Session 5 - K2-Horizon (rows 14, 15, 21, 25)
 
 ```sh
@@ -458,6 +487,17 @@ row 25 ~1.5 h with `r25.passkey` ~0.5 h).
 **Check:** `r14.k1` and `r15.k1` (the 45 K2 binaries' first run) PASS; then read `r14.oracle`'s
 gap distribution before trusting `r14.golden` at the proposed 1e-3 (§4). `r25.toolcall` SKIPs
 without `oracle-out-k2-a4/set` (§1.4).
+
+**Since the operator ruling of 2026-10-23:** K2's token gates (`r14.golden`, `r15.golden`,
+`r21.golden*`) judge against the f32 teacher-forced reference `oracle-out-k2-f32` (data key
+`oracle_k2_f32`; make it with `--with r14.oracle_f32` or by hand:
+`tools/box_validate/f32_oracle.sh ~/b70-inference-server k2`, ~2.5 min a prompt, ~17 GiB peak,
+the same lock and 95 GB rule as Ornith's, session 4), the bf16 golden printed beside it; the
+routing gate is a rate (the bf16 reference's own rate against f32: MoE 0.2010, MoVA 0.1096).
+Flash stays the default (spec 18 §10.1, amended); the eager stages (`r14.golden_eager`,
+`r15.golden_eager`, `r21.golden_eager`, and `k2_prefill_eager*` inside `r15.prefill` /
+`r21.prefill`) are DIAGNOSTIC: ctest label `diagnostic`, their routing / set / dense-worst bars
+printed, not failed on.
 
 ### Session 6 - timed one-card rows, box idle
 
