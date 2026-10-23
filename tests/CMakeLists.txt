@@ -5223,4 +5223,22 @@ target_link_libraries(lilicorr_desc_test PRIVATE b70_dflash_model b70_bolt_model
 add_test(NAME lilicorr_desc_test COMMAND lilicorr_desc_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json
   ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
 set_tests_properties(lilicorr_desc_test PROPERTIES LABELS "lilicorr;dflash")
+# Task 2: NVFP4 decoded exactly (loader/nvfp4.h - all 16 x 256 products, the NaN scales, f64 -> f16 in one rounding, the
+# int4 / int8 rules from (W', g)) and the loader's host half (loader::LiliCheckpoint) on a tiny synthetic checkpoint the
+# test writes (tests/loader/lilicorr_fixture.h): the names both ways, the three formats, the head always exact, the bytes
+# against the layout formula and spec 26 §4's derived figures; the real checkpoint's census when the HF cache holds it
+# (B70_LILICORR_SNAPSHOT, a repo id or a directory - the part SKIPs without it). Host only.
+set(B70_LILICORR_SNAPSHOT "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr" CACHE STRING
+  "the LiLiCorr drafter (HF cache repo id or a directory) for the lilicorr-labelled tests (spec 26b)")
+add_executable(nvfp4_test loader/nvfp4_test.cc)
+target_include_directories(nvfp4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(nvfp4_test PRIVATE b70_dflash_loader)
+add_test(NAME nvfp4_test COMMAND nvfp4_test)
+set_tests_properties(nvfp4_test PROPERTIES LABELS "lilicorr;dflash")
+add_executable(lilicorr_repack_test loader/lilicorr_repack_test.cc)
+target_include_directories(lilicorr_repack_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lilicorr_repack_test PRIVATE b70_dflash_loader b70_bolt_model)
+add_test(NAME lilicorr_repack_test COMMAND lilicorr_repack_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json
+  ${B70_LILICORR_SNAPSHOT})
+set_tests_properties(lilicorr_repack_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 600)
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====

@@ -43,7 +43,12 @@ struct DFlashHostLinear {
   std::vector<int8_t> i8;       // Int8
   std::vector<float> scales;    // Int8
   std::vector<uint32_t> int4;   // Int4: layout-1 tiles
-  size_t bytes() const { return bf16.size() * 2 + i8.size() + scales.size() * 4 + int4.size() * 4; }
+  // Spec 26b, DraftFormat::Exact over an NVFP4 linear (the LiLiCorr drafter): the fp32 output scale per column - each
+  // part's global g over its rows (ll_gemv_bf16_g: out = (W' x) x gs[n]); empty for every other linear.
+  std::vector<float> gs;
+  size_t bytes() const {
+    return bf16.size() * 2 + i8.size() + scales.size() * 4 + int4.size() * 4 + gs.size() * 4;
+  }
   model::GemvShape shape() const { return {K, N, 1, kind == model::WeightKind::Int4 ? 1u : 0u}; }
 };
 
