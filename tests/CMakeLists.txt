@@ -5356,4 +5356,69 @@ target_link_libraries(bolt_spec_plan_test PRIVATE b70_server b70_dflash_plan b70
 b70_target_kernel_dir(bolt_spec_plan_test)   # (kernels/kernels.h, reached through the engine header, wants the define)
 add_test(NAME bolt_spec_plan_test COMMAND bolt_spec_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json)
 set_tests_properties(bolt_spec_plan_test PROPERTIES LABELS "bolt;lilicorr")
+# On the cards (box only, queue row 65; SKIP 77 without the synthetic sets / SergiioB's export / the drafter):
+#   bolt_moe_union_test          Task 3: the union MoE bitwise the plain M-row form at the real shapes, the counting build
+#   bolt_verify_test             Task 1 (D3): verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV, ring columns,
+#                                SSM slots, taps), the launch count per M; union and plain
+#   bolt_commit_test             Task 2 (Review Focus 1): the live slot after commit j = the state after j + 1 steps on both
+#                                cards, 64 ids after it; 3dc6def360's M = 1 and ragged cases
+#   bolt_dflash_test             Task 4 (D2): --spec dflash greedy = --spec off on the golden prompts and the agentic set, K 1..7
+#                                and AdaptiveK, through the server's adapter with the real drafter
+#   bolt_dflash_prefill_test     Task 5 (Decision 7): the ring / anchor after prefill across chunk splits, complete at a block end
+#   bolt_dflash_prefix_gpu_test  Task 6 (Review Focus 4): restores at block ends, the junction's sibling, a ring of zeros
+if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
+  add_executable(bolt_moe_union_test kernels/bolt_moe_union_test.cc)
+  b70_target_kernel_dir(bolt_moe_union_test)
+  target_include_directories(bolt_moe_union_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(bolt_moe_union_test PRIVATE b70_l0 b70_bolt_model)
+  add_dependencies(bolt_moe_union_test ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
+  add_test(NAME bolt_moe_union_test COMMAND bolt_moe_union_test)
+  set_tests_properties(bolt_moe_union_test PROPERTIES LABELS "bolt;lilicorr" TIMEOUT 1800)
+  foreach(t bolt_verify_test bolt_commit_test)
+    add_executable(${t} runtime/${t}.cc)
+    b70_target_kernel_dir(${t})
+    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
+    target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_l0)
+    if(B70_PREFILL_ENABLED)
+      b70_link_prefill(${t})
+    endif()
+    add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
+      ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
+  endforeach()
+  add_test(NAME bolt_verify_synth_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128)
+  add_test(NAME bolt_verify_synth_plain_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 plain)
+  add_test(NAME bolt_verify_synth_b16_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 b16)
+  add_test(NAME bolt_verify_synth_eager_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 eager)
+  add_test(NAME bolt_verify_real_test COMMAND bolt_verify_test ${B70_BOLT_SNAPSHOT})
+  add_test(NAME bolt_verify_real_plain_test COMMAND bolt_verify_test ${B70_BOLT_SNAPSHOT} plain)
+  add_test(NAME bolt_commit_synth_test COMMAND bolt_commit_test ${B70_BOLT_SYNTH_DIR}/n12-g128)
+  add_test(NAME bolt_commit_synth_b16_test COMMAND bolt_commit_test ${B70_BOLT_SYNTH_DIR}/n12-g128 b16)
+  add_test(NAME bolt_commit_real_test COMMAND bolt_commit_test ${B70_BOLT_SNAPSHOT})
+  set_tests_properties(bolt_verify_synth_test bolt_verify_synth_plain_test bolt_verify_synth_b16_test bolt_verify_synth_eager_test
+    bolt_verify_real_test bolt_verify_real_plain_test bolt_commit_synth_test bolt_commit_synth_b16_test bolt_commit_real_test
+    PROPERTIES LABELS "checkpoint;bolt;lilicorr" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  if(B70_LILICORR)
+    foreach(t bolt_dflash_test bolt_dflash_prefill_test bolt_dflash_prefix_gpu_test)
+      add_executable(${t} runtime/${t}.cc)
+      b70_target_kernel_dir(${t})
+      target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
+      target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_dflash_runtime b70_dflash_loader b70_server b70_l0)
+      if(B70_PREFILL_ENABLED)
+        b70_link_prefill(${t})
+      endif()
+      add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
+        ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused} ${B70_LILICORR_KERNELS} ${_l26b_reused})
+    endforeach()
+    set(_l26c_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short_prose.ids
+      ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short_code.ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_agentic.ids)
+    foreach(f int8 exact int4)
+      add_test(NAME bolt_dflash_${f}_test COMMAND bolt_dflash_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT} ${_l26c_prompts}
+        --format ${f})
+    endforeach()
+    add_test(NAME bolt_dflash_prefill_test COMMAND bolt_dflash_prefill_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT})
+    add_test(NAME bolt_dflash_prefix_gpu_test COMMAND bolt_dflash_prefix_gpu_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT})
+    set_tests_properties(bolt_dflash_int8_test bolt_dflash_exact_test bolt_dflash_int4_test bolt_dflash_prefill_test
+      bolt_dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;bolt;lilicorr" SKIP_RETURN_CODE 77 TIMEOUT 10800)
+  endif()
+endif()
 # ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====
