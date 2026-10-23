@@ -5282,4 +5282,24 @@ if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
   add_test(NAME lilicorr_kernels_test COMMAND lilicorr_kernels_test)
   set_tests_properties(lilicorr_kernels_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 900)
 endif()
+# Task 5: the drafter's buffers, launch counts, snapshot bytes and key, draft_list_k, and Bolt's plan with the drafter and
+# its embedding replica on device 1 in each format. Host only.
+add_executable(lilicorr_plan_test runtime/lilicorr_plan_test.cc)
+target_include_directories(lilicorr_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lilicorr_plan_test PRIVATE b70_dflash_plan b70_dflash_loader b70_bolt_plan)
+add_test(NAME lilicorr_plan_test COMMAND lilicorr_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json)
+set_tests_properties(lilicorr_plan_test PROPERTIES LABELS "lilicorr;dflash")
+# Task 5 on the card: LiliDrafter's draft / projection lists with the REAL drafter (exact / int8 / int4 g64) beside a
+# synthetic target of Bolt's shapes, against the twin over the card's ring - the projection across the ring's wrap and the
+# anchor row, a draft at p 1100, determinism and the whole block at every K, a sampled walk, the ring's snapshot, a cold
+# drafter. SKIP 77 without the drafter (B70_LILICORR_SNAPSHOT).
+if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
+  add_executable(lilicorr_draft_test runtime/lilicorr_draft_test.cc)
+  b70_target_kernel_dir(lilicorr_draft_test)
+  target_include_directories(lilicorr_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(lilicorr_draft_test PRIVATE b70_dflash_runtime b70_dflash_loader)
+  add_dependencies(lilicorr_draft_test ${B70_LILICORR_KERNELS} ${_l26b_reused})
+  add_test(NAME lilicorr_draft_test COMMAND lilicorr_draft_test ${B70_LILICORR_SNAPSHOT})
+  set_tests_properties(lilicorr_draft_test PROPERTIES LABELS "checkpoint;lilicorr;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====

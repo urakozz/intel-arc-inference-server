@@ -118,9 +118,10 @@ inline llref::HeadLin head_lin(const loader::LiliHostHead& h) {
   return o;
 }
 
-// The LiLiCorr twin's weights: the drafter from `ck` in `f`, the fixture's target (embedding, head in `hf`), the ring
-// geometry (ring = window; `pb` offsets per context block).
-inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& ck, Form f, HeadForm hf, uint32_t pb) {
+// The LiLiCorr twin's drafter weights from `ck` in `f` (the target - embedding, head, mask row - left to the caller: the
+// fixture's, or a card test's synthetic one; V / used = the config's vocab), the ring geometry (ring = window; `pb` offsets
+// per context block). `threads`: the loader's quantiser threads (the result does not depend on it).
+inline llref::Weights drafter_weights(const loader::LiliCheckpoint& ck, Form f, uint32_t pb, unsigned threads = 1) {
   const model::DFlashDesc& d = ck.desc();
   llref::Weights w;
   llref::Dims& D = w.d;
@@ -131,8 +132,8 @@ inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& c
   D.NKV = d.kv_heads;
   D.HD = d.head_dim;
   D.I = d.inter;
-  D.V = uint32_t(fx.t.at("target.head").shape[0]);
-  D.used = uint32_t(std::stoul(fx.meta_str("vocab_used")));
+  D.V = d.vocab;
+  D.used = d.vocab;
   D.M = d.block;
   D.ring = d.max_window();
   D.win = d.max_window();
@@ -159,7 +160,7 @@ inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& c
   D.token_proj = loader::lili_has_token_proj(d);
   const loader::DraftFormat df = device_format(f);
   auto dev = [&](const loader::DFlashHostLinear& h) { return std::make_unique<loader::DFlashHostLinear>(h); };
-  std::unique_ptr<loader::DFlashHostLinear> fcd = f == Form::Reference || f == Form::Int4 ? nullptr : dev(ck.fc(df, 1));
+  std::unique_ptr<loader::DFlashHostLinear> fcd = f == Form::Reference || f == Form::Int4 ? nullptr : dev(ck.fc(df, threads));
   w.fc = glin(ck, {"fc"}, f, fcd.get());
   w.hidden_norm = ck.hidden_norm();
   w.final_norm = ck.final_norm();
@@ -170,7 +171,7 @@ inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& c
     llref::Layer y;
     auto one = [&](loader::DFlashLinear which, const std::vector<std::string>& bases) {
       std::unique_ptr<loader::DFlashHostLinear> h =
-          f == Form::Reference || f == Form::Int4 ? nullptr : dev(ck.layer_linear(l, which, df, 1));
+          f == Form::Reference || f == Form::Int4 ? nullptr : dev(ck.layer_linear(l, which, df, threads));
       return glin(ck, bases, f, h.get());
     };
     using DL = loader::DFlashLinear;
@@ -189,15 +190,6 @@ inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& c
     y.sink.assign(sk.begin() + long(l * d.q_heads), sk.begin() + long((l + 1) * d.q_heads));
     w.layers.push_back(std::move(y));
   }
-  // the target
-  const std::vector<uint16_t> head = fx.bf16("target.head");
-  const dffix::Form hff = hf == HeadForm::Reference ? dffix::Form::Reference
-                          : hf == HeadForm::Bf16    ? dffix::Form::Bf16
-                                                    : dffix::Form::Int8;
-  w.head = dffix::make_lin(head, D.H, D.V, hff, bf16_ksplit(D.V));
-  w.embed = fx.bf16("target.embed");
-  w.mask_row.resize(D.H);
-  for (uint32_t i = 0; i < D.H; ++i) w.mask_row[i] = dfref::bf(w.embed[size_t(d.mask_id) * D.H + i]);
   // the LiLiCorr head (always exact)
   using LH = loader::LiliHead;
   llref::Head& h = w.lil;
@@ -231,6 +223,29 @@ inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& c
   }
   h.out_norm = take(o.out_norm, D.Hl);
   h.anchor_norm = take(o.anchor_norm, D.Hl);
+  return w;
+}
+
+// The target's half: its bf16 [V][H] embedding (row-major) and head (`head` row-major [V][H], in `hf`); the mask row.
+inline void set_target(llref::Weights& w, uint32_t mask_id, std::vector<uint16_t> embed, const std::vector<uint16_t>& head,
+                       HeadForm hf, uint32_t used) {
+  llref::Dims& D = w.d;
+  D.V = uint32_t(head.size() / D.H);
+  D.used = used;
+  const dffix::Form hff = hf == HeadForm::Reference ? dffix::Form::Reference
+                          : hf == HeadForm::Bf16    ? dffix::Form::Bf16
+                                                    : dffix::Form::Int8;
+  w.head = dffix::make_lin(head, D.H, D.V, hff, bf16_ksplit(D.V));
+  w.embed = std::move(embed);
+  w.mask_row.resize(D.H);
+  for (uint32_t i = 0; i < D.H; ++i) w.mask_row[i] = dfref::bf(w.embed[size_t(mask_id) * D.H + i]);
+}
+
+// The fixture's whole twin: the drafter from `ck` in `f`, the fixture's target (embedding, head in `hf`).
+inline llref::Weights weights(const Fixture& fx, const loader::LiliCheckpoint& ck, Form f, HeadForm hf, uint32_t pb) {
+  llref::Weights w = drafter_weights(ck, f, pb);
+  set_target(w, ck.desc().mask_id, fx.bf16("target.embed"), fx.bf16("target.head"), hf,
+             uint32_t(std::stoul(fx.meta_str("vocab_used"))));
   return w;
 }
 
