@@ -40,13 +40,17 @@ bool exists(const std::string& p) { return bool(std::ifstream(p)); }
 }  // namespace
 
 const char* draft_format_name(DraftFormat f) {
-  return f == DraftFormat::Int8 ? "int8" : f == DraftFormat::Int4G64 ? "int4" : "bf16";
+  return f == DraftFormat::Int8 ? "int8" : f == DraftFormat::Int4G64 ? "int4" : f == DraftFormat::Exact ? "exact" : "bf16";
 }
 bool parse_draft_format(const std::string& s, DraftFormat& out) {
   if (s == "bf16") return out = DraftFormat::Bf16, true;
   if (s == "int8") return out = DraftFormat::Int8, true;
   if (s == "int4" || s == "int4g64") return out = DraftFormat::Int4G64, true;
   return false;
+}
+bool parse_lilicorr_draft_format(const std::string& s, DraftFormat& out) {
+  if (s == "exact") return out = DraftFormat::Exact, true;
+  return s != "bf16" && parse_draft_format(s, out);
 }
 
 std::string dflash_canon(const std::string& name) {
@@ -226,6 +230,7 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
     const uint16_t* src = bf16(p);
     rows.insert(rows.end(), src, src + (t.end - t.begin) / 2);
   }
+  if (f == DraftFormat::Exact) refuse(dir_, "--draft-format exact is the LiLiCorr drafter's (spec 26b): load bf16");
   DFlashHostLinear h;
   h.K = K;
   h.N = uint32_t(rows.size() / K);
