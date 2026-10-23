@@ -121,6 +121,7 @@ void BoltEngine::reset() {
   if (vlink_) vlink_->zero(st(0).imm, st(1).imm);                      // spec 26c
   if (drafter_) drafter_->reset(st(uint32_t(st_.size()) - 1).imm);    // spec 26c: a cold drafter
   verify_k_ = kNoVerify;
+  logits_row_ = -1;
   broken_ = false;
   drop_next_ = false;
 }
@@ -133,6 +134,7 @@ void BoltEngine::fail(const std::string& what) {
 void BoltEngine::step_once() {
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
   if (st(0).ctl->gdn_live != 0) canonical_ssm();   // spec 26c: the plain list steps slot 0 in place
+  logits_row_ = -1;                                 // spec 26c: this step's row is the decode scratch's
   Stage& last = st(uint32_t(st_.size()) - 1);
   const size_t pos = last.ctl->pos, n = last.ctl->n_active;
   if (pos + n > size_t(max_len_))
@@ -338,6 +340,7 @@ void BoltEngine::load_state(const void* host, uint32_t p) {
   }
   if (drafter_) drafter_->load_ring(st(uint32_t(st_.size()) - 1).imm, h);   // spec 26c
   verify_k_ = kNoVerify;
+  logits_row_ = -1;
   for (auto& s : st_) {
     s->ctl->pos = p;
     s->ctl->n_active = 0;
@@ -480,7 +483,13 @@ std::vector<float> BoltEngine::read_logits() {
   return v;
 }
 void BoltEngine::read_logits_into(float* host) {
-  Stage& s = st(uint32_t(st_.size()) - 1);
+  const uint32_t last = uint32_t(st_.size()) - 1;
+  Stage& s = st(last);
+  if (logits_row_ >= 0) {   // spec 26c: the last commit's row j of the verify scratch (the row its next id came from)
+    s.imm.copy(host, static_cast<const uint8_t*>(vb_[last]->logits.ptr()) + size_t(logits_row_) * model_.desc.vocab * 4,
+               size_t(model_.desc.vocab) * 4);
+    return;
+  }
   s.imm.copy(host, s.buffers.logits.ptr(), size_t(model_.desc.vocab) * 4);
 }
 
@@ -665,6 +674,7 @@ void BoltEngine::commit(uint32_t j, uint32_t next_token) {
     s->ctl->n_active = 1;
     s->ctl->gdn_live = live;
   }
+  logits_row_ = int(j);   // read_logits: the row next_token came from
 }
 
 void BoltEngine::replay_aux(l0::CmdList& list) {
