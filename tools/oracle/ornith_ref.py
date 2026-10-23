@@ -78,6 +78,53 @@ def _load(name: str):
 _dump = _load("dump")
 _stream = _dump._stream
 _dequant = _dump._dequant
+_int8 = _load("int8_sim")   # the quantisation-aware f32 judges (run --lm-head int8 / --sim-int8-prefill)
+
+
+def sim_int8_prefill(model, tc, lazy):
+    """spec 5's l0-int8 prefill on the prompt forward (operator ruling 2026-10-23, the judge of
+    prefill_gate_ornith_l0-int8*): every linear the engine's h8 path takes - GDN in_proj_qkv and
+    in_proj_z (the engine's fused qkv||z), out_proj; FA q / k / v (its fused qkv), o_proj; the
+    routed experts' gate||up and the shared expert's gate / up (one int8 gate||up array, block 256
+    the shared one) - computes with its input and its weight through int8_sim.fq_x / fq_w (the
+    rotation, per-token and per-column int8 codes, de-quantised). What stays bf16 there stays
+    exact here: in_proj_a / in_proj_b (the a||b bf16 copy), the router and the shared-expert gate
+    (bf16 GEMVs), every down projection, the head. Returns the switch: state["on"] while the
+    prompt forward runs; the decode steps after it are the engine's bf16 decode, unquantised."""
+    state = {"on": False}
+    F = torch.nn.functional
+
+    def patch(mod):
+        orig = mod.forward
+
+        def fwd(x):
+            if not state["on"]:
+                return orig(x)
+            return F.linear(_int8.fq_x(x), _int8.fq_w(mod.weight), mod.bias)
+        mod.forward = fwd
+
+    for i, layer in enumerate(model.model.layers):
+        if hasattr(layer, "linear_attn"):
+            for n in ("in_proj_qkv", "in_proj_z", "out_proj"):
+                patch(getattr(layer.linear_attn, n))
+        else:
+            for n in ("q_proj", "k_proj", "v_proj", "o_proj"):
+                patch(getattr(layer.self_attn, n))
+        patch(layer.mlp.shared_expert.gate_proj)
+        patch(layer.mlp.shared_expert.up_proj)
+
+        def experts_pre(_mod, args, i=i):
+            if not state["on"]:
+                return None
+            # LazyExperts' hook ran first (registered first) and filled the routed experts' bf16
+            # gate||up rows; replace each with its fake-quantised form (per output column over
+            # the hidden size), then the input with its fake-quantised rows.
+            gate_up, _down, _have = lazy.buffers(i)
+            for e in sorted(set(int(x) for x in args[1].reshape(-1).tolist())):
+                gate_up[e] = _int8.fq_w(gate_up[e])
+            return (_int8.fq_x(args[0]),) + tuple(args[1:])
+        layer.mlp.experts.register_forward_pre_hook(experts_pre)
+    return state
 
 LP = "model.language_model.layers."
 EXPERT_RE = re.compile(r"model\.language_model\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.qweight$")
@@ -496,6 +543,16 @@ def cmd_run(a) -> None:
     if not ids or len(ids) > a.max_prompt:
         die(f"{a.prompt}: {len(ids)} ids (1..{a.max_prompt})")
     model, pf, lazy = build_streamed(a.snapshot, tc)
+    if (a.lm_head == "int8" or a.sim_int8_prefill) and a.dtype != "f32":
+        die("--lm-head int8 / --sim-int8-prefill are quantisation-aware f32 judges: use them with --dtype f32")
+    if a.lm_head == "int8":   # spec 9's int8 head as loader/lm_head_int8.cc quantises it (int8_sim.py)
+        with torch.no_grad():
+            model.lm_head.weight = torch.nn.Parameter(_int8.int8_head_weight(model.lm_head.weight),
+                                                      requires_grad=False)
+        print("lm_head: int8 per row (loader/lm_head_int8.cc quantise_row_int8), de-quantised to f32")
+    sim = sim_int8_prefill(model, tc, lazy) if a.sim_int8_prefill else None
+    if sim is not None:
+        print("prompt forward: spec 5's l0-int8 linears simulated (int8_sim.py fq_x / fq_w)")
     impl = getattr(model.config, "_experts_implementation", None)
     print(f"config: {tc.num_hidden_layers} layers, {tc.num_experts} experts top-{tc.num_experts_per_tok}, "
           f"hidden {tc.hidden_size}, attn {tc._attn_implementation}, experts {impl}; "
@@ -516,8 +573,13 @@ def cmd_run(a) -> None:
                mixer.register_forward_hook(hook(f"mixer.L{i}")),
                layer.mlp.register_forward_hook(hook(f"mlp.L{i}"))]
     t1 = time.time()
+    if sim is not None:
+        sim["on"] = True
     with torch.no_grad():
         out = model(input_ids=torch.tensor([ids]), use_cache=True)
+    if sim is not None:
+        sim["on"] = False
+        lazy.layer = None   # the shared expert buffers hold fake-quantised rows: refill from here on
     for h in hs:
         h.remove()
     print(f"prompt forward {time.time() - t1:.1f}s ({lazy.filled} expert dequants)", flush=True)
@@ -565,7 +627,7 @@ def cmd_run(a) -> None:
     print(gap_summary(tensors, tc.num_hidden_layers))
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt_ids": " ".join(map(str, ids)),
             "n_prompt": str(len(ids)), "gen": str(a.gen), "attn_implementation": "eager",
-            "dtype": a.dtype,
+            "dtype": a.dtype, "lm_head": a.lm_head, "sim_int8_prefill": str(a.sim_int8_prefill),
             "experts_implementation": str(impl), "group_size": str(gs),
             "model": "ornith (Qwen3_5MoeForCausalLM, int4 checkpoint dequantised, tools/oracle/ornith_ref.py)",
             "weights": "layer-streamed, routed experts on demand (tools/oracle/ornith_ref.py)"}
@@ -664,6 +726,10 @@ def main() -> None:
     # The generated steps consume these ids instead of the argmax (`tokens` then records them):
     # the control's rows line up with another golden file's rows, decision row for decision row.
     r.add_argument("--force", help="file of whitespace-separated ids to teacher-force (>= --gen)")
+    # Quantisation-aware f32 judges (operator ruling 2026-10-23, tools/oracle/int8_sim.py), --dtype f32 only:
+    # the logits through the engine's per-row int8 head; the prompt forward through spec 5's int8 linears.
+    r.add_argument("--lm-head", choices=["bf16", "int8"], default="bf16")
+    r.add_argument("--sim-int8-prefill", action="store_true")
     r.add_argument("--mtp-out")
     r.add_argument("--mtp-rows", type=int, default=32)
     r.add_argument("--mtp-experts", default="rtn", choices=["rtn", "bf16"])

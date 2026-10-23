@@ -450,6 +450,16 @@ on the box's first run the bf16 golden's own determined rows disagreed with exac
 for the other jobs + the run) - then `tools/box_validate/data.sh link ~/b70-inference-server
 <tree>`. Qwen3.8's and Agnes's gates take no judge.
 
+**The quantisation-aware judges (operator ruling 2026-10-23, the third).** The int8 variants are
+judged against f32 math that applies the same int8 roundings (`tools/oracle/int8_sim.py`, its codes
+bitwise the engine's host references - `test_int8_sim.py`): `golden_gate_ornith_i8head` against
+`oracle-out-ornith-f32-i8head` (the per-row int8 head of `loader/lm_head_int8.cc`; key
+`oracle_ornith_f32_i8head`), `prefill_gate_ornith_l0-int8*` against `oracle-out-ornith-f32-pfi8`
+(the prompt forward through spec 5's h8 linears: rotation, per-token and per-column int8; key
+`oracle_ornith_f32_pfi8`). Made with the f32 judge: `f32_oracle.sh ~/b70-inference-server
+ornith-i8head` and `... ornith-pfi8` (`r10.oracle_f32` runs all three; each ~5 min, the same lock
+and 95 GB rule). A miss against them is a kernel error, not the variant's quantisation.
+
 **Bars still to set for Ornith (runs written down, not made - 2026-10-23).**
 - `r16.m1` (`mtp_head_ornith_test`, per-row cosine >= 0.999): every reference argmax is in the
   engine's top 2; only the cosine bar fails (worst 0.9878) and the bf16 golden's own main logits
@@ -498,6 +508,8 @@ Flash stays the default (spec 18 §10.1, amended); the eager stages (`r14.golden
 `r15.golden_eager`, `r21.golden_eager`, and `k2_prefill_eager*` inside `r15.prefill` /
 `r21.prefill`) are DIAGNOSTIC: ctest label `diagnostic`, their routing / set / dense-worst bars
 printed, not failed on.
+The `*_i8head` K2 gates judge against `oracle-out-k2-f32-i8head` (k2_ref.py `--lm-head int8`; key
+`oracle_k2_f32_i8head`; `f32_oracle.sh ~/b70-inference-server k2-i8head`, made by `r14.oracle_f32`).
 
 ### Session 6 - timed one-card rows, box idle
 
