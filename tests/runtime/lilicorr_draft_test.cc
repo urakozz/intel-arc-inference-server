@@ -12,7 +12,8 @@
 //      Focus 5: the twin's hidden_norm output of position 1099, cosine >= 0.9999999).
 //   2. A draft at p 1100 (rows past the ring's wrap, the window's edge at 1100 - 1023), anchor 1234, T 0, over the card's
 //      own ring and anchor: the 7 slots' candidate sets (tie-aware) and log-probs, the lattice's cosine >= 0.99999 where the
-//      candidates agree, the walk equal; ctrl.cur_token[1..7] = the drafts; the readback's k 7 / anchor / pos / validity.
+//      candidates agree, the walk equal; ctrl.cur_token[1..7] = the drafts; the readback's k 7 / anchor / pos / validity;
+//      the ring and the anchor bitwise as they were (Review Focus 5: the block's own K / V never reach the ring).
 //   3. Determinism: a second replay's readback is bitwise the first's; draft(k = 3) runs the same 8-row block (dctl.k 7 -
 //      spec 26 §12 ruling 1, 23f's finding) and its readback is bitwise the k = 7 one.
 //   4. A sampled walk (T 0.8, a 64-bit seed with its high word set): the twin's walk over the card's lattice, near-ties
@@ -208,6 +209,14 @@ int main(int argc, char** argv) {
                 "%s; %.3f ms host-timed\n", NPOS, sets, same, lpd, lc, walk ? "=" : "DIFFERS", ms);
     CHECK(sets == 7 && lc >= 0.99999 && walk && lpd <= 1e-3);
     CHECK(o.k == 7 && o.anchor == 1234 && o.pos == NPOS && o.anchor_valid == 1);
+    {   // Review Focus 5: the block's own K / V never reach the ring - a draft leaves the ring and the anchor as they were
+      std::vector<uint16_t> rk2(ring_elems), rv2(ring_elems);
+      std::vector<float> a2(H);
+      imm.copy(rk2.data(), b.ring_k.ptr(), ring_elems * 2);
+      imm.copy(rv2.data(), b.ring_v.ptr(), ring_elems * 2);
+      imm.copy(a2.data(), b.anchor.ptr(), size_t(H) * 4);
+      CHECK(rk2 == rk && rv2 == rv && a2 == anchor);
+    }
 
     // 3. determinism; k = 3 runs the same block
     const runtime::dflash::LiliDraftOut o2 = dr.draft(replay, 7);

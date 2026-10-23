@@ -11,8 +11,9 @@
 //   3. The bytes: every piece's host bytes sum to loader::lilicorr_weight_bytes in each format; the published config's
 //      derived bytes (spec 26 §4 / §12): exact 2.152 GB + the head 0.074, int8 1.077 + 0.074, int4 g64 0.572 + 0.074.
 //   4. The real checkpoint when the HF cache holds it (argv[2]: a repo id or a directory; SKIP that part otherwise):
-//      179 tensors, 25 NVFP4 linears, held to Bolt's shape; one backbone linear and one head linear decoded (W' exact,
-//      the int8 codes and the head's g).
+//      179 tensors, 25 NVFP4 linears, held to Bolt's shape; Review Focus 1's host half on EVERY one of the 25 - the exact
+//      arm's device form at 64 sampled output columns is the decoded W' (the backbone's gemv_bf16 tiles, the head's W'^T)
+//      with the tensor's g as its output scale; layers.0.mlp.down_proj's int8 codes = spec 9's of W'.
 #include <unistd.h>
 
 #include <cmath>
@@ -42,6 +43,11 @@ namespace fs = std::filesystem;
 namespace lx = lilicorr_fixture;
 
 namespace {
+
+// gemv_bf16's tile index of (k, n) (common::repack_bf16_tiled: [n / 16][k / 8][k % 8][n % 16]).
+size_t dfref_tile(uint32_t K, uint32_t k, uint32_t n) {
+  return ((size_t(n / 16) * (K / 8) + k / 8) * 8 + k % 8) * 16 + n % 16;
+}
 
 bool throws_with(const std::function<void()>& f, const std::string& needle) {
   try {
@@ -285,6 +291,63 @@ int main(int argc, char** argv) {
       CHECK(q.i8 == codes);
       const loader::LiliHostHead hp = real->head_linear(loader::LiliHead::PassHidden);
       CHECK(hp.K == 4096 && hp.N == 1024 && hp.gs[0] != 1.0f);
+      // Review Focus 1, the host half, on every NVFP4 tensor: the exact form at 64 sampled columns = W', its g the scale
+      size_t checked = 0, cols = 0;
+      const model::DFlashDesc& rd = real->desc();
+      auto sample = [&](uint32_t N, uint32_t i) { return uint32_t((uint64_t(N) * i * 2654435761ull >> 6) % N); };
+      for (uint32_t l = 0; l < rd.layers; ++l)
+        for (auto [which, parts] : {std::pair<loader::DFlashLinear, std::vector<std::string>>{
+                                        loader::DFlashLinear::GateUp, {"mlp.gate_proj", "mlp.up_proj"}},
+                                    {loader::DFlashLinear::Down, {"mlp.down_proj"}}}) {
+          const loader::DFlashHostLinear h = real->layer_linear(l, which, loader::DraftFormat::Exact);
+          uint32_t n0 = 0;
+          for (const std::string& part : parts) {
+            const loader::LiliDecoded pd = real->decoded("layers." + std::to_string(l) + "." + part);
+            CHECK(pd.nvfp4);
+            for (uint32_t i = 0; i < 64; ++i, ++cols) {
+              const uint32_t n = sample(pd.N, i);
+              CHECK(h.gs[n0 + n] == pd.g);
+              for (uint32_t k = 0; k < pd.K; ++k)
+                CHECK(h.bf16[dfref_tile(h.K, k, n0 + n)] == pd.wp[size_t(n) * pd.K + k]);
+            }
+            n0 += pd.N;
+            ++checked;
+          }
+        }
+      {
+        const loader::DFlashHostLinear h = real->fc(loader::DraftFormat::Exact);
+        const loader::LiliDecoded pd = real->decoded("fc");
+        for (uint32_t i = 0; i < 64; ++i, ++cols) {
+          const uint32_t n = sample(pd.N, i);
+          CHECK(h.gs[n] == pd.g);
+          for (uint32_t k = 0; k < pd.K; ++k) CHECK(h.bf16[dfref_tile(h.K, k, n)] == pd.wp[size_t(n) * pd.K + k]);
+        }
+        ++checked;
+      }
+      using LH = loader::LiliHead;
+      std::vector<std::pair<std::string, std::pair<LH, uint32_t>>> heads = {
+          {"lilicorr.token_proj", {LH::TokenProj, 0}}, {"lilicorr.pass_hidden_proj", {LH::PassHidden, 0}},
+          {"lilicorr.context_proj", {LH::ContextProj, 0}}};
+      for (uint32_t l = 0; l < rd.lil_layers; ++l) {
+        const std::string L = "lilicorr.layers." + std::to_string(l) + ".";
+        heads.push_back({L + "attn.out_proj", {LH::OutProj, l}});
+        heads.push_back({L + "mlp.up_proj", {LH::MlpUp, l}});
+        heads.push_back({L + "mlp.down_proj", {LH::MlpDown, l}});
+      }
+      for (const auto& [base, w] : heads) {
+        const loader::LiliHostHead h = real->head_linear(w.first, w.second);
+        const loader::LiliDecoded pd = real->decoded(base);
+        CHECK(pd.nvfp4 && h.K == pd.K && h.N == pd.N);
+        for (uint32_t i = 0; i < 64; ++i, ++cols) {
+          const uint32_t n = sample(pd.N, i);
+          CHECK(h.gs[n] == pd.g);
+          for (uint32_t k = 0; k < pd.K; ++k) CHECK(h.wt[size_t(k) * h.N + n] == pd.wp[size_t(n) * pd.K + k]);
+        }
+        ++checked;
+      }
+      CHECK_EQ(checked, size_t(25));
+      std::printf("   Review Focus 1 (host): every one of the %zu NVFP4 tensors' exact form at %zu sampled columns = W' "
+                  "decoded, its g the output scale\n", checked, cols);
       CHECK(real->backbone_nvfp4_rows() == loader::lili_nvfp4_rows_published(real->desc()));
       std::printf("4. the real checkpoint: 179 tensors, 25 NVFP4 linears, held to %s; layers.0.mlp.down_proj decoded "
                   "(g %.6g), its int8 codes = spec 9's of W'; pass_hidden_proj's g %.6g\n",
