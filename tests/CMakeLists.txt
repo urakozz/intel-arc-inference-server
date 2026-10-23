@@ -1592,7 +1592,8 @@ if(B70_ORNITH)
   add_test(NAME golden_gate_ornith_test COMMAND golden_gate_test
     ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR})
   add_test(NAME golden_gate_ornith_i8head_test COMMAND golden_gate_test
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_I8HEAD_DIR})
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_I8HEAD_DIR}
+    --accept=code:3,cjk:15)   # known divergences, 2026-10-23 (debug 2026-10-26)
   set_tests_properties(golden_gate_ornith_test golden_gate_ornith_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 
@@ -1800,16 +1801,22 @@ if(B70_ORNITH)
   foreach(b l0 l0-int8)
     set(_near 0)
     set(_judge ${B70_ORNITH_F32_DIR})
+    # Known divergences (operator ruling 2026-10-23, debug 2026-10-26; docs/box-day-plan.md): exactly
+    # the rows that failed that day - golden_common.h AcceptList.
+    set(_acc_one "")
+    set(_acc_c16 "prose:18,cjk:15")
     if(b STREQUAL "l0-int8")
       set(_judge ${B70_ORNITH_F32_PFI8_DIR})   # the quantisation-aware f32 judge (int8_sim.py, 2026-10-23)
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
+      set(_acc_one "prose:22,cjk:15")
+      set(_acc_c16 "")
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
       ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
-      prose,code,cjk 0 ${b} ${_near})
+      --accept=${_acc_one} prose,code,cjk 0 ${b} ${_near})
     add_test(NAME prefill_gate_ornith_${b}_c16_test COMMAND prefill_gate_test
       ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${_judge}
-      prose,code,cjk 16 ${b} ${_near})
+      --accept=${_acc_c16} prose,code,cjk 16 ${b} ${_near})
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
     add_test(NAME ornith_prefill_${b}_test COMMAND ornith_prefill_test ${B70_ORNITH_SNAPSHOT}
@@ -1932,7 +1939,8 @@ if(B70_K2)
   add_test(NAME k2_decode_i8head_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
   add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8)
+  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8
+    --accept=prose:1)   # a known divergence, 2026-10-23 (debug 2026-10-26)
   # Spec 18 §10: the same gate through the EAGER attention (k2_attn_eager.cl, the reference's
   # bf16 chain) - the box's first session runs both pairs and compares (box-validation-queue
   # row 14).

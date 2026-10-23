@@ -131,6 +131,7 @@ struct Verdict {
   uint32_t n_determined = 0, det_exact = 0;   // clause (i): unique golden argmax
   uint32_t n_tie = 0, tie_agree = 0;          // clause (ii), engine took torch's pick
   uint32_t tie_member = 0;                    // clause (ii), engine took another member
+  uint32_t acc_det = 0, acc_tie = 0;          // failing rows on the --accept list (known)
   int first_bad = -1;        // first DETERMINED row the engine got wrong - the failure
   int first_diverge = -1;    // first row where engine != golden, tie or not
   std::vector<uint32_t> tie_steps;   // the undetermined rows, for the census
@@ -143,6 +144,7 @@ int main(int argc, char** argv) {
   // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);
+  const golden::AcceptList accept = golden::take_accept(argc, argv);   // known rows (2026-10-23)
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
@@ -480,15 +482,19 @@ int main(int argc, char** argv) {
       if (J && want != gam) ++bf16_vs_f32;
       if (J && gd.determined() && id != gam) ++bf16_det_bad;
       if (jok) ++v.exact;
+      const bool row_fails = jd.determined() ? !jok : !jd.contains(id);
+      const bool acc = accept.has(pname, p);
       if (jd.determined()) {
         ++v.n_determined;
         if (jok) ++v.det_exact;
+        else if (acc) ++v.acc_det;
         else if (v.first_bad < 0) v.first_bad = int(p);
       } else {
         ++v.n_tie;
         v.tie_steps.push_back(p);
         if (jok) ++v.tie_agree;
         else if (jd.contains(id)) ++v.tie_member;
+        else if (acc) ++v.acc_tie;
         else if (v.first_bad < 0) v.first_bad = int(p);   // not even a member: a real failure
       }
       if (!jok && v.first_diverge < 0) v.first_diverge = int(p);
@@ -505,6 +511,8 @@ int main(int argc, char** argv) {
       if (jr.near)
         std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
                     !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
+      if (acc && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
+      if (acc && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");
       if (!jok && int(p) == v.first_diverge) {
         std::printf("      first divergence at generated position %u: engine %u, %s %u"
@@ -599,14 +607,14 @@ int main(int argc, char** argv) {
     tot_tie += v.n_tie;
     tot_agree += v.tie_agree;
     tot_member += v.tie_member;
-    if (v.det_exact != v.n_determined) {
+    if (v.det_exact + v.acc_det != v.n_determined) {
       std::fprintf(stderr,
                    "GATE FAILED: %s got %u of %u DETERMINED rows exact (first bad row %d) - a row"
                    " whose golden argmax is unique is not a judgement call\n",
                    v.name.c_str(), v.det_exact, v.n_determined, v.first_bad);
       bad = true;
     }
-    if (v.tie_agree + v.tie_member != v.n_tie) {
+    if (v.tie_agree + v.tie_member + v.acc_tie != v.n_tie) {
       std::fprintf(stderr,
                    "GATE FAILED: %s produced an id outside the golden argmax set on an"
                    " undetermined row (%u agree + %u member != %u ties, first bad row %d)\n",

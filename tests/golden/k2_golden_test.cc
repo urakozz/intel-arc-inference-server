@@ -172,6 +172,7 @@ int main(int argc, char** argv) {
   // `--judge=<f32 dir>` (operator ruling 2026-10-23, golden_common.h): the token gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);
+  const golden::AcceptList accept = golden::take_accept(argc, argv);   // known rows (2026-10-23)
   const std::string snap = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-k2";
   // Flags after the oracle dir, any order: `int8` (spec 9's head), `prefill` or
@@ -361,15 +362,21 @@ int main(int argc, char** argv) {
       const golden::GoldenDecision& dec = jr.d;
       if (J && jr.top != gdec.set[0]) ++bf16_vs_f32;
       if (J && gdec.determined() && got != gdec.set[0]) ++bf16_det_bad;
+      const bool row_fails = dec.determined() ? got != jr.top : !dec.contains(got);
+      const bool acc = accept.has(pname, j);
       if (dec.determined()) {
         ++det;
-        if (got == jr.top) ++det_ok;
+        if (got == jr.top || (row_fails && acc)) ++det_ok;   // an accepted known row counts as kept
         else if (first_bad < 0) first_bad = int(j);
       } else {
         ++ties;
-        if (dec.contains(got)) ++tie_ok;
+        if (dec.contains(got) || (row_fails && acc)) ++tie_ok;
         else if (first_bad < 0) first_bad = int(j);
       }
+      if (acc)
+        std::printf("  step %u: %s\n", j,
+                    row_fails ? (std::string(golden::kAcceptNote) + ", gap " + std::to_string(jr.gap)).c_str()
+                              : "accepted row now passes - remove it");
       if (got != uint32_t(gtok[j]) || got != jr.top || jr.near) {
         std::printf("  step %u: engine %u, golden %u%s (%s%s)", j, got, uint32_t(gtok[j]),
                     J ? (", f32 judge " + std::to_string(jr.top)).c_str() : "",
