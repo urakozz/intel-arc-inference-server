@@ -371,6 +371,33 @@ unpadded row's), p rounded to bf16, P·V in fp32. A score row per chunk is T x h
 sums; rounded p into a bf16 DPAS P·V - p is bf16, so the second GEMM takes it as is) rather than
 store them. Not needed unless the golden prefill rows fail where the decode rows pass.
 
+**Amendment, operator ruling 2026-10-23: the rule is judged against the f32 reference, and flash
+stays the default.** The rule above treats the bf16 golden as the truth. The box's first run
+(2026-10-23) showed it is not: k2_ref.py `--mode f32 --force <the golden's tokens>` (the same int4
+weights dequantised, every activation in float32, teacher-forced on the bf16 golden's own tokens
+so every row is the same context) disagrees with the bf16 golden's argmax on its own determined
+rows (prose step 9: f32 7211, bf16 705) and on 20.1 % of its MoE / 11.0 % of its MoVA route sets.
+Measured on 3 prompts x 32 rows, k2_golden_test:
+
+| | determined rows missed vs bf16 golden | vs f32 reference | routing sets differing (MoE / MoVA, vs bf16) |
+|---|---|---|---|
+| flash | 1 (prose 9: the engine's 7211 is f32's token) | **1** (prose 14: f32's top-2 gap 0.037, the engine took the bf16 golden's tie pick 2613) | 0.1923 / 0.1056 |
+| eager | 0 | **2** (from prose 9: eager follows the bf16 golden's rounding there) | 0.2038 / 0.1060 |
+
+Against the bf16 golden eager looks better; against exact arithmetic it is the other way round,
+so the clause "make eager the default if flash fails determined rows that eager passes" is now
+read against the **f32 reference**: flash misses fewer, and **flash stays the default**
+(`kDefaultK2Attn` unchanged). The cjk row 68 (BOS after `<|im_end|>` and EOS, every head fully
+peaked) reads logits cosine 0.71 under flash against both references (eager 0.98 / 0.994), but
+flash's attention there equals a double-precision softmax on its own inputs (cos 0.999997, last
+layer; `B70_K2_ATTN_CHECK`): an amplification of the rounding path, not a kernel defect. Eager
+stays built and selectable; its tests (`k2_golden_eager*`, `k2_prefill_eager*`, ctest label
+`diagnostic`) record the routing rate, the prefill-vs-decode set share and the dense-layer worst
+with their bars and do not fail on them; the token gate (judged by f32) still binds them.
+The token gates of K2 (and Ornith) judge against the f32 teacher-forced reference since the same
+ruling (tests/golden/golden_common.h `--judge=`, data `oracle-out-k2-f32` from
+`tools/box_validate/f32_oracle.sh`, stage r14.oracle_f32); the bf16 golden is printed beside it.
+
 ## 11. 18c as built blind (2026-10-05, branch `spec18c-k2-prefill`)
 
 Written on the Mac with the box unavailable: plan 18c Task 2 (kernels, the prefill step, the
