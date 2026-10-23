@@ -5241,4 +5241,11 @@ target_link_libraries(lilicorr_repack_test PRIVATE b70_dflash_loader b70_bolt_mo
 add_test(NAME lilicorr_repack_test COMMAND lilicorr_repack_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json
   ${B70_LILICORR_SNAPSHOT})
 set_tests_properties(lilicorr_repack_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 600)
+# Task 3: the host twin (tests/kernels/lilicorr_ref.h) against tools/oracle/dflash_ref.py's LiLiCorr form on its own
+# outputs (tests/loader/lilicorr_dflash_fixture.safetensors, tools/oracle/dflash_fixture.py --lilicorr). Host only.
+add_executable(lilicorr_ref_test kernels/lilicorr_ref_test.cc)
+target_include_directories(lilicorr_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lilicorr_ref_test PRIVATE b70_dflash_loader b70_dflash_model)
+add_test(NAME lilicorr_ref_test COMMAND lilicorr_ref_test ${CMAKE_CURRENT_SOURCE_DIR}/loader/lilicorr_dflash_fixture.safetensors)
+set_tests_properties(lilicorr_ref_test PROPERTIES LABELS "lilicorr;dflash" TIMEOUT 600)
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
