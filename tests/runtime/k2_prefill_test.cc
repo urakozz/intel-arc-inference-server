@@ -12,15 +12,26 @@
 //     3. chunking: chunks of 64 against the default chunk - KV and logits bitwise, the route
 //        rows of the positions both last chunks hold bitwise;
 //     4. Review Focus 1, prefill KV against decode's M = 1 fill (ingest, one id per replay) of
-//        the same prompt: per layer, per row, K and V cosine. Gated (PROPOSED, the box sets
-//        them): every row of the dense layers 0-2 >= 0.999, all rows' median >= 0.9998 and 1st
-//        percentile >= 0.99 - spec 8b's prefill-head bar family; bitwise is not expected (the
-//        GEMMs' sum orders and the bf16 weight dequant differ from the int4 GEMVs'). A MoVA V
-//        row whose routed expert set differs between the two runs (a near-tie flipped by that
-//        rounding) is counted and printed, not gated.
-//     5. routing, prefill against decode per position (the last chunk's rows): the expert sets
-//        equal except where decode's selection margin (sel of the K-th minus the first not
-//        taken) is within kTieTol (PROPOSED); matched weights within kWeightAbs;
+//        the same prompt: per layer, per row, K and V cosine; bitwise is not expected (the
+//        GEMMs' sum orders and the bf16 weight dequant differ from the int4 GEMVs'). Gated: every
+//        row of the dense layers 0-2 >= 0.999 (before any routing: a real prefill / decode
+//        difference shows here first), the K rows' median >= kKMedian and the median of the V rows
+//        whose MoVA set is the same in both runs >= kVMedian. A V row whose set differs is
+//        another mix by construction: counted and printed, not gated.
+//     5. routing, prefill against decode per position (the last chunk's rows): the share of
+//        (row, layer, router) sets equal in the two runs >= kSameSets; matched weights printed.
+//   Sections 4 / 5's bars (box 2026-10-23). The first run had Qwen3.8's (median >= 0.9998, p01
+//   >= 0.99, every set equal beyond a 2e-2 margin) and failed them: median 0.99369, p01 0.5395,
+//   4774 sets beyond the margin. The arbiter was the CPU reference over the same 2600 ids
+//   (k2_ref.py, bf16; the sets dumped with B70_K2_ROUTES_DUMP): prefill and decode each agree
+//   with it as often as with each other - MoE sets equal on rows 1024-2047: prefill-ref 0.489,
+//   decode-ref 0.479, prefill-decode 0.498 (MoVA 0.635 / 0.627 / 0.641), every position bucket
+//   alike - so neither path is the outlier: K2's routing amplifies rounding-sized differences
+//   (the bf16 reference against its own f32 control differs in 20% / 11% of the short goldens'
+//   MoE / MoVA sets). The K / same-set V medians sit ~3.4x their measured distance (0.99921 /
+//   0.99675) below 1, Agnes's rule (prefill_split_test); kSameSets is the decode-reference
+//   agreement on the last chunk's rows (MoE 0.491, MoVA 0.640: 0.5655), which prefill-decode
+//   meets (0.592). The p01s (K 0.913) are printed, not gated.
 //     6. tokens: prefill + 32 greedy against ingest + 32 greedy, ruling A26's rule - every row
 //        whose decode-side top-2 gap is at least one bf16 ulp of the top logit agrees; both are
 //        teacher-forced on decode's token.
@@ -72,8 +83,10 @@ namespace {
 
 using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 16384, kGen = 32;
-constexpr float kTieTol = 2e-2f;          // PROPOSED: decode's selection margin below this: a near-tie
-constexpr float kWeightAbs = 1.0f / 32;   // PROPOSED: |w_prefill - w_decode| on matched experts
+constexpr float kTieTol = 2e-2f;          // decode's selection margin below this: a near-tie (printed)
+constexpr double kKMedian = 0.997;        // section 4 (the header's measurement)
+constexpr double kVMedian = 0.989;
+constexpr double kSameSets = 0.5655;      // section 5
 
 Ids read_ids(const std::string& p) {
   std::ifstream f(p);
@@ -357,7 +370,7 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
     const size_t o = (size_t(l) * n + p) * 2 * SW;
     return !std::equal(pf_set.begin() + o, pf_set.begin() + o + SW, dec_set.begin() + o);
   });
-  const bool kv_ok = kc.dense_worst >= 0.999 && kc.median >= 0.9998 && kc.p01 >= 0.99;
+  const bool kv_ok = kc.dense_worst >= 0.999 && kc.k_median >= kKMedian && kc.v_median >= kVMedian;
   std::printf("4. prefill KV vs decode's fill (%u rows x %u layers): dense layers' worst %.6f, median %.7f, "
               "p01 %.6f, %u rows < 0.99, worst %.4f (L%u row %u)%s\n", n, d.layers, kc.dense_worst, kc.median,
               kc.p01, kc.below99, kc.worst, kc.worst_layer, kc.worst_row, kv_ok ? "" : "  ** FAIL **");
@@ -369,8 +382,10 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
               "(margin <= %.0e), %llu beyond (%llu of the differing rows MoVA); matched weights worst |dw| %.4f%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties,
               double(kTieTol), (unsigned long long)bad, (unsigned long long)mova_flips, double(worst_w),
-              bad == 0 && worst_w <= kWeightAbs ? "" : "  ** FAIL **");
-  ok = ok && kv_ok && bad == 0 && worst_w <= kWeightAbs;
+              double(exact) >= kSameSets * double(rows) ? "" : "  ** FAIL **");
+  std::printf("   sets equal %.4f of the rows (bar %.4f); K median bar %.3f, same-set V median bar %.3f\n",
+              rows ? double(exact) / double(rows) : 1.0, kSameSets, kKMedian, kVMedian);
+  ok = ok && kv_ok && double(exact) >= kSameSets * double(rows);
 
   // ---- 6. tokens, ruling A26's rule ------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);

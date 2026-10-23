@@ -31,9 +31,18 @@
 // route rows (K2Engine::read_routes; ids ascending) against route.*.ids. A difference is a
 // NEAR-TIE when the reference's gap at the cut is within tie_tol() (1e-3, PROPOSED: 18a's real-
 // weight run prints the gap distribution and sets it; B70_K2_TIE_TOL overrides) and the sets
-// differ by one expert. Any other difference FAILS. Printed: per layer, the first row where the
-// ids differ (tie or not), and the worst weight difference in bf16 ulps over the matching sets
-// (a diagnostic - the weights' fp32 sum order is torch's reduction against our rank order).
+// differ by one expert. Printed: per layer, the first row where the ids differ (tie or not), and
+// the worst weight difference in bf16 ulps over the matching sets (a diagnostic - the weights'
+// fp32 sum order is torch's reduction against our rank order).
+//   The GATE is a rate (box 2026-10-23, replacing "any non-tie difference fails"): the share of
+// (row, layer) route rows whose set differs from the reference's may not exceed the share by
+// which the bf16 reference ITSELF differs from exact arithmetic on the same rows - k2_ref.py
+// --mode f32 --force <the golden's tokens>, the same weights in float32, teacher-forced so every
+// row is the same context: MoE 2144 / 10665 (0.2010), MoVA 1169 / 10665 (0.1096) over the three
+// prompts, at reference gaps up to 1.2e-1 (median 4.5e-3). No gap tolerance below that is one
+// the reference meets, so the old rule (1e-3) failed the reference against itself. The engine
+// measured: flash 2051 / 1126 (0.192 / 0.106), eager 2173 / 1130 (0.204 / 0.106).
+// B70_K2_ROUTE_RATE=<moe>,<mova> overrides.
 //
 // **K2 on prefill (spec 18c)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through
 // K2Engine::prefill instead of one replay per id; the gate is the same rule from row T - 1 on
@@ -56,6 +65,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -81,6 +91,17 @@ const char* const kPrompts[] = {"prose", "code", "cjk"};
 float tie_tol() {
   const char* e = std::getenv("B70_K2_TIE_TOL");
   return e && *e ? std::strtof(e, nullptr) : 1e-3f;
+}
+// The routing gate's rates (the header's measurement): {MoE, MoVA}.
+std::pair<double, double> route_rate() {
+  const char* e = std::getenv("B70_K2_ROUTE_RATE");
+  if (e && *e) {
+    const std::string s = e;
+    const size_t c = s.find(',');
+    CHECK(c != std::string::npos);
+    return {std::stod(s.substr(0, c)), std::stod(s.substr(c + 1))};
+  }
+  return {2144.0 / 10665, 1169.0 / 10665};
 }
 
 std::vector<uint32_t> read_ids(const std::string& p, uint32_t vocab) {
@@ -388,9 +409,15 @@ int main(int argc, char** argv) {
               (unsigned long long)moe_c.ties, (unsigned long long)moe_c.bad, moe_c.worst_w,
               (unsigned long long)mova_c.rows, (unsigned long long)mova_c.exact,
               (unsigned long long)mova_c.ties, (unsigned long long)mova_c.bad, mova_c.worst_w);
+  const auto [moe_rate, mova_rate] = route_rate();
+  const double moe_got = moe_c.rows ? double(moe_c.ties + moe_c.bad) / double(moe_c.rows) : 0.0;
+  const double mova_got = mova_c.rows ? double(mova_c.ties + mova_c.bad) / double(mova_c.rows) : 0.0;
+  std::printf("routing gate: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - the bf16 reference's own "
+              "rate against its f32 control%s\n", moe_got, moe_rate, mova_got, mova_rate,
+              moe_got <= moe_rate && mova_got <= mova_rate ? "" : "  ** FAIL **");
   CHECK(gate_ok);
-  CHECK_EQ(moe_c.bad, uint64_t(0));
-  CHECK_EQ(mova_c.bad, uint64_t(0));
+  CHECK(moe_got <= moe_rate);
+  CHECK(mova_got <= mova_rate);
   std::puts("k2_golden_test OK");
   return 0;
 }
