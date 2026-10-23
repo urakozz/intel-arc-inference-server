@@ -4653,6 +4653,102 @@ st_r64_d1_ref() {
 }
 
 # ======================================================================================
+row 65 "spec 26c - LiLiCorr in Bolt's loop and server: verify M <= 8 with taps on two cards, Mamba state slots and the commit, the union-aware MoE, the prefill projection, snapshots with the ring, --spec dflash (D0, D2-D5) (plan 26c)"
+rownote 65 "Run rows 60-62 (Bolt) and 64 (the drafter on the card) first; the drafter is row 64's download (lilicorr), SergiioB's g128 row 57's (bolt_g128), the N 12 synthetics row 59's (bolt_synth). Every stage on the REAL checkpoint needs BOTH cards: its tests / commands set ZE_AFFINITY_MASK=0,1 themselves (the verify lists cross by the copy hand-off only)."
+rownote 65 "Written on the Mac (spec 26 §14): the verify lists at M = 1..8 (25c's walk over a verify scratch at 8 rows, the six taps of every row - device 0's crossing before the hand-off's barrier -, nb_ssm's slot build at every M, the commit moving Control::gdn_live on both cards), the union-aware MoE (nb_moe_union.cl: bitwise the plain M-row form on the Mac's GPU in 10 route cases, each block read once by the counting build), the drafter's prefill tail (each chunk's rows in its window, 8 a replay - the GEMM path NOT built), snapshots with the ring and the anchor, b70-serve --spec dflash|lookup for Bolt (cli/bolt_spec.h; NOT the default), MtpCost::bolt_lilicorr (DERIVED). Host tests: bolt_spec_test (D2 / D4 10^6 draws / Review Focus 3 and 4 over a fake engine), bolt_spec_plan_test. kernel_cmdlines additions only; no existing .cl edited; nothing compiled by ocloc, nothing run on a card. Defaults PROVISIONAL (spec 26 §11): --draft-format int8, --spec-max 7, --draft-q lattice, B70_BOLT_VERIFY_MOE=union."
+rownote 65 "Hand back: r65.d3's lines (bolt_moe_union_test per I / case, bolt_verify_*'s per M and MoE form, bolt_commit_*'s per j and the ragged line), r65.d2's 'tokens a verify' per K and format (D5's acceptance on the golden prompts and the agentic set), r65.prefill's worst cosine, r65.prefix's lines, r65.serve's IDENTICAL / SEEDED lines and the startup's 'spec dflash:' line, r65.benchy's tables (opt-in), any FAIL lines."
+stage r65.k0      65 default cpu  -                          g0.sha,g0.bitwise,g0.suite "D0: every pre-existing binary identical and the suite (G0) - 26c's edits to shared files: bolt_capture.cc (the walk over a scratch view; the decode list's commands unchanged), BoltEngine (enable_spec / verify / commit, the live slot, read_logits' row), bolt_prefill (defaulted drafter taps), bolt_serve.h (the adapter's spec paths, inert without spec_k), spec_accept / adaptive_k (additions), b70-serve's Bolt flags; Bolt's decode and prefill names (bolt_variant_names_test, bolt_pf_variant_names_test) and the verify names"
+st_r65_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  run_tests '^(bolt_variant_names_test|bolt_pf_variant_names_test|bolt_verify_names_test)$'
+  finish
+}
+stage r65.host    65 default cpu  -                          -        "host: bolt_spec_test (D2 / D4 / Review Focus 3 / 4 over a fake engine, 10^6 draws a case), bolt_spec_plan_test, bolt_verify_names_test, bolt_serve_args_test, bolt_snapshot_test, bolt_request_test, spec_accept_test, adaptive_k_test"
+st_r65_host() {
+  run_tests '^(bolt_spec_test|bolt_spec_plan_test|bolt_verify_names_test|bolt_serve_args_test|bolt_snapshot_test|bolt_request_test|spec_accept_test|adaptive_k_test)$'
+  jgrab host '^(bolt_spec_test|bolt_spec_plan_test)$' 'greedy|D4|p-value|mutant|snapshots|deferred|plan with|cost rows|verify launches|OK|PASS'
+  finish
+}
+stage r65.reject  65 default gpu  -                          -        "the --spec refusals before the device: b70-serve cli_reject_serve_bolt_{lookup,dflash,spec_max,dflash_peer,draft_q,draft_vocab,spec_mtp,mtp}, b70-decode cli_reject_bolt_spec (under the GPU lock: a refusal that regressed would open the devices)"
+st_r65_reject() {
+  run_tests '^cli_reject_(serve_bolt_(lookup|dflash|spec_max|dflash_peer|draft_q|draft_vocab|spec_mtp|mtp)|bolt_spec)$'
+  finish
+}
+stage r65.d3      65 default gpu  bolt_synth                 r65.k0   "D3 + Review Focus 1 + Decision 10 on the cards: the verify binaries' first ocloc build; bolt_moe_union_test (union = plain M-row, bitwise, every I; the counting build); bolt_verify_synth{,_plain,_b16,_eager}_test (N 12, one card) and bolt_verify_real{,_plain}_test (SergiioB's, two cards: SKIP without bolt_g128) - verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV rows, ring columns, SSM slots, taps), the launches per M; bolt_commit_{synth,synth_b16,real}_test - the live slot after commit j = the state after j + 1 steps on both cards, 64 ids after it, 3dc6def360's M 1 and ragged cases"
+st_r65_d3() {
+  kbins nb_ssm_M1_H128_P64_N128_G8_S1_SL8 nb_ssm_M8_H128_P64_N128_G8_S1_SL8 nb_ssm_M8_H128_P64_N128_G8_S1_B16_SL8 \
+    nb_moe_up_U_M8_I2560_L1024_T9 nb_moe_down_U_M8_I1536_L1024_T9 nb_moe_comb_U_M8_L1024_T9 nb_moe_up_M8_I2304_L1024_T9 \
+    nb_embed_gather_M8_K4096_V131072 nb_res_norm_M8_K4096_W8_S1_T1 nb_conv_M8_C10240_S1 gemv_bf16_M8_K4096_N131072 \
+    nb_moe_up_U_M8_I1536_L1024_T9_CNT nb_moe_down_U_M8_I1536_L1024_T9_CNT
+  run_tests '^(bolt_moe_union_test|bolt_verify_(synth|synth_plain|synth_b16|synth_eager|real|real_plain)_test|bolt_commit_(synth|synth_b16|real)_test)$'
+  jgrab d3 '^(bolt_moe_union_test|bolt_verify_.*|bolt_commit_.*)$' '^I [0-9]|^M [0-9]|^ragged|commit j|differ|DIFFER|SKIP|OK'
+  finish
+}
+stage r65.d2      65 default gpu  bolt_g128,lilicorr         r65.d3   "D2 on two cards: bolt_dflash_{int8,exact,int4}_test - --spec dflash greedy = --spec off token for token on the golden short prose / short code prompts and the agentic transcript, at every fixed K 1..7 and with AdaptiveK, through the server's adapter and the real drafter; the tokens a verify per K (MEASURED: D5's acceptance)"
+st_r65_d2() {
+  run_tests '^bolt_dflash_(int8|exact|int4)_test$'
+  jgrab d2 '^bolt_dflash_(int8|exact|int4)_test$' '^drafter:|tokens a verify|differs|OK'
+  finish
+}
+stage r65.prefill 65 default gpu  bolt_g128,lilicorr         r65.d3   "Decision 7 on two cards: bolt_dflash_prefill_test - the drafter's ring and anchor after prefills of 4096 / 5000 / 300 ids bitwise across chunks 2048 / 1024 / 512, complete at the block end 4096, and against the decode path at cosine >= 0.999 (the worst MEASURED)"
+st_r65_prefill() {
+  run_tests '^bolt_dflash_prefill_test$'
+  jgrab prefill '^bolt_dflash_prefill_test$' '^L [0-9]|cosine|differ|OK'
+  finish
+}
+stage r65.prefix  65 default gpu  bolt_g128,lilicorr         r65.prefill "Review Focus 4 on two cards: bolt_dflash_prefix_gpu_test - restores at 2048 / 4096 bitwise the cold run (ring, anchor, the first block's drafts, 32 ids), the junction's sibling (vLLM a608b6e6e0), a ring of zeros (the output unchanged), state_bytes + 5,259,264 B, the store root"
+st_r65_prefix() {
+  run_tests '^bolt_dflash_prefix_gpu_test$'
+  jgrab prefix '^bolt_dflash_prefix_gpu_test$' '^restore at|sibling|ring of zeros|differ|OK'
+  finish
+}
+stage r65.serve   65 default gpu  bolt_g128,lilicorr         r65.d2   "D2 / D4 by b70-serve <bolt> on two cards: the 36 A4 scenarios (tests/golden/toolcall-bolt, greedy, max_tokens 512) through --spec off / --spec dflash (AdaptiveK to 7) / --spec lookup - identical to --spec off; a seeded sampled request twice through --spec dflash with --draft-q lattice and lattice+lp; the startup's 'spec dflash:' line and the per-request 'dflash:' lines (tokens a verify)"
+st_r65_serve() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local dm="--draft-model ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr}"
+  local d=$STATE/$STAGE arm
+  for arm in "off|--spec off" "dflash|--spec dflash $dm" "lookup|--spec lookup"; do
+    chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $d/${arm%%|*}.r1 ${arm%%|*} 1 $snap --max-len 32768 ${arm#*|} -- --set tests/golden/toolcall-bolt --max-tokens 512 --stop-at-eos" "arm ${arm%%|*}"
+  done
+  chk "python3 tools/box_validate/serve_client.py compare --dir $d --ref off" "greedy output through --spec dflash / lookup identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py table --dir $d --ref off --metric wall_tps"
+  x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap --max-len 32768 --spec dflash $dm"
+  step_rc $? "b70-serve --spec dflash (q lattice): serves; the seeded sampled request twice"
+  x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap --max-len 32768 --spec dflash --draft-q lattice+lp $dm"
+  step_rc $? "b70-serve --spec dflash --draft-q lattice+lp: the seeded sampled request twice"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all ratio '^RATIO ' 10
+  grab_all dflash 'spec dflash:|dflash:|lookup:|SEEDED|memory' 30
+  finish
+}
+stage r65.benchy  65 optin   gpu-self bolt_g128,lilicorr,uvx r65.serve "D5 (spec 26 §7): llama-benchy through b70-serve <bolt> on two cards at the operator's flags (pp4096 tg256 depth 1, --no-cache --exact-tg --latency-mode generation; decode at depth 4k / 16k) and the agentic transcript as a live loop, --spec off / --spec lookup / --spec dflash (auto K) with the int8 drafter, then dflash with --draft-format exact / int4 and B70_BOLT_VERIFY_MOE=plain (the union's A/B), greedy and T 1.0 / top-p 0.95 - dflash becomes Bolt's default only if it beats both by >= 10 % on the agentic set and loses nowhere by more than 3 %"
+st_r65_benchy() {
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local dm="--draft-model ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr}" t=tests/golden/prompts/bolt_agentic.json
+  local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation" arm a e
+  idle r65-benchy-before
+  for arm in off lookup dflash dflash-exact dflash-int4 dflash-plain; do
+    e=""
+    case "$arm" in
+      off) a="--spec off" ;;
+      lookup) a="--spec lookup" ;;
+      dflash) a="--spec dflash $dm" ;;
+      dflash-exact) a="--spec dflash $dm --draft-format exact" ;;
+      dflash-int4) a="--spec dflash $dm --draft-format int4" ;;
+      dflash-plain) a="--spec dflash $dm"; e="B70_BOLT_VERIFY_MOE=plain " ;;
+    esac
+    chk "${e}WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "pp4096 tg256, $arm"
+    chk "${e}WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 1024 --tg 256 --depth 4096 16384 $f" "decode at depth 4k / 16k, $arm"
+    chk "${e}WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-$arm $snap $t --max-len 65536 $a" "the agentic transcript, $arm (greedy)"
+    chk "${e}WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"temperature\": 1.0, \"top_p\": 0.95}' tools/box_validate/agentic_run.sh $STATE/agentic-$arm-t1 $snap $t --max-len 65536 $a" "the agentic transcript, $arm (T 1.0 / top-p 0.95)"
+  done
+  idle r65-benchy-after
+  say "D5's rule (spec 26 §7): --spec dflash becomes Bolt's default only if it beats --spec off AND --spec lookup by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option. Record the tables, the per-request 'dflash:' lines (tokens a verify) and the verdict in docs/BENCHMARKS.md 'LiLiCorr on Bolt (spec 26)'"
+  grab_all benchy '^\| |dflash:|lookup:|hit rate|wall' 160
+  finish
+}
+
+# ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
 rownote 66 "Written blind on the Mac (docs/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
 rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison; Agnes runs its two layouts (2 slots with MTP; 4 with --mtp off)."
