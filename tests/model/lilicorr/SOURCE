@@ -1,0 +1,8 @@
+config.json in this directory is nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr@449d24140160b8e51871bfc0f0a7338abf640aa1's
+config.json, copied unchanged (a configuration file; sha256 4abd5788c431c59e5826daf5c1ec55e6448cc1ef0c6101226aec6ca68839137d).
+It describes the LiLiCorr drafter spec 26 builds on (`LiLiCorrDraftModel`: the DFlash 2 backbone with attention sinks and a
+1024 window, the LiLiCorr head, ModelOpt W4A16 NVFP4 at group 16).
+
+Licence: OpenMDW-1.1 (license: other, license_name: openmdw-1.1), as Bolt's own files in tests/model/bolt/ - spec 25 §1.5 /
+Decision 20 (operator, 2026-10-20: "it's published open weights, of course we can use it"): model files (configs) may be
+vendored. tests/model/lilicorr_desc_test.cc reads it (spec 26b Task 1).
