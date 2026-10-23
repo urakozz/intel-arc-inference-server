@@ -1562,6 +1562,10 @@ if(B70_ORNITH)
     CACHE STRING "Ornith int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
   set(B70_ORNITH_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith"
     CACHE PATH "The CPU-oracle golden set of Ornith (spec 15a), with router_logits.L* for R2")
+  # Operator ruling 2026-10-23: the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
+  # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> ornith.
+  set(B70_ORNITH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32"
+    CACHE PATH "Ornith's f32 teacher-forced reference (the golden gates' judge)")
   set(B70_ORNITH_PROMPTS_DIR "${CMAKE_SOURCE_DIR}/tests/golden/prompts"
     CACHE PATH "Ornith's prompt ids (the committed ones: the int4 checkpoint's tokenizer gives them)")
   # The greedy argmax is Qwen3.8's argmax_stage1_M1 (vocab_used 248077, spec 15 §13); a||b is
@@ -1580,9 +1584,9 @@ if(B70_ORNITH)
     kernel_moe_M1_E256_T8_D2048_I512)
   add_dependencies(golden_gate_test ${B70_ORNITH_DECODE_KERNELS})
   add_test(NAME golden_gate_ornith_test COMMAND golden_gate_test
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT})
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR})
   add_test(NAME golden_gate_ornith_i8head_test COMMAND golden_gate_test
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8)
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} int8 --judge=${B70_ORNITH_F32_DIR})
   set_tests_properties(golden_gate_ornith_test golden_gate_ornith_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 
@@ -1793,10 +1797,10 @@ if(B70_ORNITH)
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
-      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR}
       prose,code,cjk 0 ${b} ${_near})
     add_test(NAME prefill_gate_ornith_${b}_c16_test COMMAND prefill_gate_test
-      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT}
+      ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} ${B70_ORNITH_SNAPSHOT} --judge=${B70_ORNITH_F32_DIR}
       prose,code,cjk 16 ${b} ${_near})
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
@@ -1897,6 +1901,10 @@ add_test(NAME k2_plan_test COMMAND k2_plan_test)
 if(B70_K2)
   set(B70_K2_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2"
     CACHE PATH "The CPU-oracle golden set of K2-Horizon (spec 18a): <prompt>.ids + .golden.safetensors")
+  # Operator ruling 2026-10-23: the token gates' judge (tests/golden/golden_common.h, `--judge=`) -
+  # the f32 teacher-forced reference, tools/box_validate/f32_oracle.sh <data tree> k2.
+  set(B70_K2_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-f32"
+    CACHE PATH "K2-Horizon's f32 teacher-forced reference (the golden gates' judge)")
   foreach(t k2_decode_test k2_golden_test)
     if(t STREQUAL "k2_decode_test")
       add_executable(${t} runtime/${t}.cc)
@@ -1912,17 +1920,21 @@ if(B70_K2)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
   add_test(NAME k2_decode_i8head_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids int8)
-  add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
-  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
+  add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
   # Spec 18 §10: the same gate through the EAGER attention (k2_attn_eager.cl, the reference's
   # bf16 chain) - the box's first session runs both pairs and compares (box-validation-queue
   # row 14).
-  add_test(NAME k2_golden_eager_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
-  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
+  add_test(NAME k2_golden_eager_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
+  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
   set_tests_properties(k2_golden_eager_test k2_golden_eager_i8head_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
   set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
     k2_golden_eager_test k2_golden_eager_i8head_test
     PROPERTIES LABELS "checkpoint;golden;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  # Operator ruling 2026-10-23 (spec 18 §10.1): flash stays the default; the eager tests RECORD the
+  # routing rate / prefill-vs-decode set share / dense worst (printed with their bars, not
+  # failed on). Label `diagnostic` - the token gate still binds them.
+  set_property(TEST k2_golden_eager_test k2_golden_eager_i8head_test APPEND PROPERTY LABELS diagnostic)
 endif()
 # b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the
 # checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
@@ -1999,6 +2011,7 @@ if(B70_K2)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
   set_tests_properties(k2_prefill_test k2_prefill_i8head_test k2_prefill_eager_test prefill_split_k2_test
     PROPERTIES LABELS "checkpoint;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_property(TEST k2_prefill_eager_test APPEND PROPERTY LABELS diagnostic)   # see k2_golden_eager_test
 
   # K2 on prefill: 18b's golden test in its prefill mode (one chunk, and chunks of 16).
   target_link_libraries(k2_golden_test PRIVATE b70_k2_prefill)
@@ -2006,10 +2019,10 @@ if(B70_K2)
     b70_link_prefill(k2_golden_test)
   endif()
   add_dependencies(k2_golden_test ${B70_K2_PREFILL_KERNELS})
-  add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} prefill)
-  add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+  add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
+  add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
     prefill:16)
-  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+  add_test(NAME k2_golden_prefill_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
     int8 prefill)
   set_tests_properties(k2_golden_prefill_test k2_golden_prefill_c16_test k2_golden_prefill_i8head_test
     PROPERTIES LABELS "checkpoint;golden;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -2326,11 +2339,11 @@ if(B70_K2 AND B70_KV8)
   endforeach()
   add_test(NAME k2_decode_kv8_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
-  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
-  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} int8)
-  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR})
-  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} prefill)
-  add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR}
+  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
+  add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} int8)
+  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
+  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
+  add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
     prefill:16)
   add_test(NAME k2_prefill_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
@@ -2345,6 +2358,7 @@ if(B70_K2 AND B70_KV8)
   set_tests_properties(${_k2kv8_eager} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8;B70_K2_ATTN=eager")
   set_tests_properties(${_k2kv8_flash} ${_k2kv8_eager} PROPERTIES
     LABELS "checkpoint;golden;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  set_property(TEST ${_k2kv8_eager} APPEND PROPERTY LABELS diagnostic)   # see k2_golden_eager_test
 endif()
 # Passkey near the one-card int8 ceiling (opt-in, box, by hand): tools/probe/k2_passkey.sh.
 # ==== Spec 18e: K2-Horizon's int8 KV cache ================================ (end) ====

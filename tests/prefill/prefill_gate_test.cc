@@ -121,6 +121,9 @@ bool bf16_near_tie(const float* row, uint32_t used, uint32_t top1, uint32_t* sec
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
+  // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
+  const std::string judge_dir = golden::take_judge(argc, argv);
   const std::string gdir = argc > 1 ? argv[1] : "oracle-out";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
@@ -266,6 +269,9 @@ int main(int argc, char** argv) {
       imm.copy(dec.data(), src.ptr(), size_t(Qwen35::kVocab) * 4);
     };
     read_logits(/*from_prefill=*/true);
+    const golden::Judge J =
+        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, T + kGen);
+    uint32_t bf16_vs_f32 = 0, bf16_det_bad = 0;   // the bf16 golden as a diagnostic beside the judge
     runtime::Control* ctrl = eng.buffers().control.as<runtime::Control>();
     std::printf("  greedy %u:  step  engine  golden  det?  logit-cos   engine-argmax "
                 "golden-argmax (masked / full)\n", kGen);
@@ -288,16 +294,27 @@ int main(int argc, char** argv) {
       CHECK_EQ(id, ea_dev);
       etok.push_back(id);
 
+      // `ok` (the bf16 golden's token) drives the teacher-forcing; the verdict is the f32
+      // judge's when one is given (golden_common.h, operator ruling 2026-10-23), else the bf16
+      // golden's as always.
       const bool ok = id == uint32_t(gtok[p]);
-      if (ok) ++v.exact;
+      const uint32_t jrow_i = p == 0 ? T - 1 : T + p - 1;
+      const uint32_t Vj = J ? std::min(J.V, Qwen35::kVocab) : Vcmp;
+      const float* jrow = J ? J.row(jrow_i) : grow;
+      const GoldenDecision jd = J ? golden_decision(jrow, Vj, Qwen35::kVocabUsed) : gd;
+      const uint32_t want = jd.set[0];
+      const bool jok = id == want;
+      if (J && want != gam) ++bf16_vs_f32;
+      if (J && gd.determined() && id != gam) ++bf16_det_bad;
+      if (jok) ++v.exact;
       bool accepted_near_tie = false;
-      if (gd.determined()) {
+      if (jd.determined()) {
         ++v.n_determined;
         uint32_t second = 0;
-        if (ok) {
+        if (jok) {
           ++v.det_exact;
         } else if (v.near_tie < near_tie_allowed &&
-                   bf16_near_tie(grow, Qwen35::kVocabUsed, gam, &second) && id == second) {
+                   bf16_near_tie(jrow, Qwen35::kVocabUsed, want, &second) && id == second) {
           ++v.near_tie;
           accepted_near_tie = true;
         } else if (v.first_bad < 0) {
@@ -306,26 +323,29 @@ int main(int argc, char** argv) {
       } else {
         ++v.n_tie;
         v.tie_steps.push_back(p);
-        if (ok) ++v.tie_agree;
-        else if (gd.contains(id)) ++v.tie_member;
+        if (jok) ++v.tie_agree;
+        else if (jd.contains(id)) ++v.tie_member;
         else if (v.first_bad < 0) v.first_bad = int(p);
       }
-      if (!ok && v.first_diverge < 0) v.first_diverge = int(p);
+      if (!jok && v.first_diverge < 0) v.first_diverge = int(p);
 
       const char* mark =
-          ok ? ""
-             : accepted_near_tie
-                   ? "  <== near-tie ACCEPTED (engine = golden runner-up, margin <= 1 bf16 ulp)"
-                   : (gd.determined() ? "  <== MISMATCH (determined - GATE)"
-                                      : "  <== differs, but the golden row is a TIE");
-      std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s\n", p, id,
-                  uint32_t(gtok[p]), gd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf, mark,
+          jok ? ""
+              : accepted_near_tie
+                    ? "  <== near-tie ACCEPTED (engine = golden runner-up, margin <= 1 bf16 ulp)"
+                    : (jd.determined() ? "  <== MISMATCH (determined - GATE)"
+                                       : "  <== differs, but the judged row is a TIE");
+      std::printf("            %4u  %6u  %6u  %-4s  %.9f   %6u %6u %6u %s%s%s", p, id,
+                  uint32_t(gtok[p]), jd.determined() ? "yes" : "TIE", lm.cos, ea, gam, gaf, mark,
                   gam != gaf ? "  [golden argmax is a padding id]" : "",
                   forced ? "  [teacher-forced]" : "");
-      if (!ok && int(p) == v.first_diverge) {
-        std::printf("      first divergence at generated position %u: engine %u, golden %u"
+      if (J) std::printf("  f32 %u%s", want, want != gam ? "  [bf16 golden != f32]" : "");
+      std::printf("\n");
+      if (!jok && int(p) == v.first_diverge) {
+        std::printf("      first divergence at generated position %u: engine %u, %s %u"
                     "  (decision row = golden logits[%u], cos %.9f, relL2 %.3e)\n",
-                    p, id, uint32_t(gtok[p]), p == 0 ? T - 1 : T + p - 1, lm.cos, lm.rel);
+                    p, id, J ? "f32 judge" : "golden", want, jrow_i, lm.cos, lm.rel);
+        if (J) print_top5("f32", jrow, Vj, Qwen35::kVocabUsed);
         print_top5("engine", dec.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
         print_top5("golden", grow, V, Qwen35::kVocabUsed);
       }
@@ -357,6 +377,10 @@ int main(int argc, char** argv) {
     if (v.near_tie)
       std::printf("  %s: %u determined row(s) accepted as bf16 near-ties (argv[7] allows %u)\n",
                   pname.c_str(), v.near_tie, near_tie_allowed);
+    if (J)
+      std::printf("  bf16 golden (diagnostic, not the gate): its argmax differs from the f32 judge on %u of %u "
+                  "decision rows; against it the engine misses %u determined row(s)\n",
+                  bf16_vs_f32, kGen, bf16_det_bad);
     std::printf("  engine:");
     for (uint32_t id : etok) std::printf(" %u", id);
     std::printf("\n  golden:");
