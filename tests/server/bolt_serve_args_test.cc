@@ -56,16 +56,26 @@ int main() {
     f.spec = "mtp";
     CHECK(refuses([&] { check_serve_flags(f); }, "no MTP head"));
   }
-  for (const char* spec : {"lookup", "dflash"}) {
+  for (const char* spec : {"lookup", "dflash"}) {   // spec 26c: Bolt's proposers (cli/bolt_spec.h check_spec has their flags)
     ServeFlags f;
     f.spec = spec;
-    CHECK(refuses([&] { check_serve_flags(f); }, "spec 26 (the LiLiCorr drafter), not built yet"));
-    CHECK(refuses([&] { check_serve_flags(f); }, (std::string("--spec ") + spec).c_str()));
+    check_serve_flags(f);
   }
   {
     ServeFlags f;
-    f.proposer_tuning = true;
+    f.proposer_tuning = true;   // --mtp-max / --mtp-cost
     CHECK(refuses([&] { check_serve_flags(f); }, "has none"));
+    f.spec = "dflash";
+    CHECK(refuses([&] { check_serve_flags(f); }, "belong to an MTP head"));
+  }
+  {
+    ServeFlags f;
+    f.lookup_tuning = true;   // --spec-min-match / --spec-history
+    CHECK(refuses([&] { check_serve_flags(f); }, "need --spec lookup"));
+    f.spec = "dflash";
+    CHECK(refuses([&] { check_serve_flags(f); }, "need --spec lookup"));
+    f.spec = "lookup";
+    check_serve_flags(f);
   }
   {
     ServeFlags f;
