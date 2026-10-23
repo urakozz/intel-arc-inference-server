@@ -166,17 +166,48 @@ const uint32_t* pf_route(const std::vector<uint32_t>& r, uint32_t l, uint32_t wh
 struct KvCmp {
   double dense_worst = 1, median = 1, p01 = 1, worst = 1;
   uint32_t worst_layer = 0, worst_row = 0, below99 = 0;
+  // Section 4's breakdown (when `flip` is given): K rows alone, and V rows split by whether the
+  // row's MoVA expert set is the same in the two runs (a V row IS the routed value experts'
+  // mix, so a flipped set makes another vector by construction, not an error in the same one).
+  double k_median = 1, k_p01 = 1, k_worst = 1, v_median = 1, v_p01 = 1, v_worst = 1, flip_v_worst = 1;
+  uint32_t k_worst_layer = 0, k_worst_row = 0, v_worst_layer = 0, v_worst_row = 0, flips = 0;
 };
-KvCmp compare_kv(const model::K2Desc& d, const Snap& a, const Snap& b, uint32_t n) {
+double pct(std::vector<double>& v, size_t num, size_t den) {
+  if (v.empty()) return 1.0;
+  std::sort(v.begin(), v.end());
+  return v[v.size() * num / den];
+}
+KvCmp compare_kv(const model::K2Desc& d, const Snap& a, const Snap& b, uint32_t n,
+                 const std::function<bool(uint32_t, uint32_t)>& flip = nullptr) {
   KvCmp c;
   const size_t row = d.kv_n(), used = size_t(n) * row;
-  std::vector<double> all;
+  std::vector<double> all, ks, vs;
   all.reserve(size_t(d.layers) * n);
   for (uint32_t l = 0; l < d.layers; ++l)
     for (uint32_t p = 0; p < n; ++p) {
       const size_t ok = size_t(l) * used * 2 + size_t(p) * row, ov = ok + used;
-      const double v = std::min(cos_bf16(&a.kv[ok], &b.kv[ok], row), cos_bf16(&a.kv[ov], &b.kv[ov], row));
+      const double kc = cos_bf16(&a.kv[ok], &b.kv[ok], row), vc = cos_bf16(&a.kv[ov], &b.kv[ov], row);
+      const double v = std::min(kc, vc);
       all.push_back(v);
+      if (flip) {
+        ks.push_back(kc);
+        if (kc < c.k_worst) {
+          c.k_worst = kc;
+          c.k_worst_layer = l;
+          c.k_worst_row = p;
+        }
+        if (!d.is_dense(l) && flip(l, p)) {
+          ++c.flips;
+          c.flip_v_worst = std::min(c.flip_v_worst, vc);
+        } else {
+          vs.push_back(vc);
+          if (vc < c.v_worst) {
+            c.v_worst = vc;
+            c.v_worst_layer = l;
+            c.v_worst_row = p;
+          }
+        }
+      }
       if (d.is_dense(l)) c.dense_worst = std::min(c.dense_worst, v);
       if (v < c.worst) {
         c.worst = v;
@@ -188,6 +219,12 @@ KvCmp compare_kv(const model::K2Desc& d, const Snap& a, const Snap& b, uint32_t 
   std::sort(all.begin(), all.end());
   c.median = all[all.size() / 2];
   c.p01 = all[all.size() / 100];
+  if (flip) {
+    c.k_median = pct(ks, 1, 2);
+    c.k_p01 = pct(ks, 1, 100);
+    c.v_median = pct(vs, 1, 2);
+    c.v_p01 = pct(vs, 1, 100);
+  }
   return c;
 }
 
@@ -248,14 +285,41 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
   }
 
   // ---- 4 / 5. against decode's fill -------------------------------------------------------
-  e.reset();
   const uint32_t lastd = n - ((n - 1) / runtime::k2::kPfC) * runtime::k2::kPfC;
+  // Every row's expert sets on both sides, [layer][row][MoVA, MoE][8] sorted ids (MoVA's 4 then
+  // padding): the prefill's earlier chunks from a prefill that ends with that chunk (chunking
+  // is bitwise, section 3), its last chunk from `a`; decode's from each replay below. Section 4
+  // splits V rows by the MoVA set; B70_K2_ROUTES_DUMP=<prefix> writes both arrays
+  // (<prefix>.pf.bin / <prefix>.dec.bin, u32) for a comparison against a CPU reference's routes.
+  const size_t SW = 8;
+  std::vector<uint32_t> pf_set(size_t(d.layers) * n * 2 * SW, 0xFFFFFFFFu), dec_set(pf_set.size(), 0xFFFFFFFFu);
+  auto put = [&](std::vector<uint32_t>& dst, uint32_t l, uint32_t p, uint32_t w, const uint32_t* r) {
+    const uint32_t K = w ? d.top_k : d.value_top_k;
+    std::vector<uint32_t> s(r + kernels::k2::route::kIds, r + kernels::k2::route::kIds + K);
+    std::sort(s.begin(), s.end());
+    std::copy(s.begin(), s.end(), dst.begin() + ((size_t(l) * n + p) * 2 + w) * SW);
+  };
+  for (uint32_t c0 = 0; c0 < n - lastd; c0 += runtime::k2::kPfC) {
+    e.reset();
+    e.prefill(Ids(prompt.begin(), prompt.begin() + c0 + runtime::k2::kPfC));
+    const std::vector<uint32_t> r = e.read_prefill_routes();
+    for (uint32_t p = c0; p < c0 + runtime::k2::kPfC; ++p)
+      for (uint32_t l = d.dense_layers; l < d.layers; ++l)
+        for (uint32_t w = 0; w < 2; ++w) put(pf_set, l, p, w, pf_route(r, l, w, p - c0));
+  }
+  for (uint32_t p = n - lastd; p < n; ++p)
+    for (uint32_t l = d.dense_layers; l < d.layers; ++l)
+      for (uint32_t w = 0; w < 2; ++w) put(pf_set, l, p, w, pf_route(a.routes, l, w, p - (n - lastd)));
+  e.reset();
   uint64_t rows = 0, exact = 0, ties = 0, bad = 0, mova_flips = 0;
   float worst_w = 0;
   for (uint32_t p = 0; p < n; ++p) {
     e.ingest({prompt[p]});
-    if (p < n - lastd) continue;
     const std::vector<uint32_t> dr = e.read_routes();
+    for (uint32_t l = d.dense_layers; l < d.layers; ++l)
+      for (uint32_t w = 0; w < 2; ++w)
+        put(dec_set, l, p, w, dr.data() + (w ? runtime::k2::moe_route_at(l) : runtime::k2::mova_route_at(l)) / 4);
+    if (p < n - lastd) continue;
     for (uint32_t l = d.dense_layers; l < d.layers; ++l)
       for (uint32_t w = 0; w < 2; ++w) {
         const uint32_t K = w ? d.top_k : d.value_top_k;
@@ -282,11 +346,25 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
       }
   }
   const Snap dec = snap(e, imm, n, false);
-  const KvCmp kc = compare_kv(d, a, dec, n);
+  if (const char* pre = std::getenv("B70_K2_ROUTES_DUMP"); pre && *pre) {
+    std::ofstream(std::string(pre) + ".pf.bin", std::ios::binary)
+        .write(reinterpret_cast<const char*>(pf_set.data()), std::streamsize(pf_set.size() * 4));
+    std::ofstream(std::string(pre) + ".dec.bin", std::ios::binary)
+        .write(reinterpret_cast<const char*>(dec_set.data()), std::streamsize(dec_set.size() * 4));
+    std::printf("   routes dumped to %s.{pf,dec}.bin (u32 [%u layers][%u rows][MoVA, MoE][8])\n", pre, d.layers, n);
+  }
+  const KvCmp kc = compare_kv(d, a, dec, n, [&](uint32_t l, uint32_t p) {
+    const size_t o = (size_t(l) * n + p) * 2 * SW;
+    return !std::equal(pf_set.begin() + o, pf_set.begin() + o + SW, dec_set.begin() + o);
+  });
   const bool kv_ok = kc.dense_worst >= 0.999 && kc.median >= 0.9998 && kc.p01 >= 0.99;
   std::printf("4. prefill KV vs decode's fill (%u rows x %u layers): dense layers' worst %.6f, median %.7f, "
               "p01 %.6f, %u rows < 0.99, worst %.4f (L%u row %u)%s\n", n, d.layers, kc.dense_worst, kc.median,
               kc.p01, kc.below99, kc.worst, kc.worst_layer, kc.worst_row, kv_ok ? "" : "  ** FAIL **");
+  std::printf("   K rows: median %.7f, p01 %.6f, worst %.4f (L%u row %u); V rows with the same MoVA set: median "
+              "%.7f, p01 %.6f, worst %.4f (L%u row %u); %u (layer, row) MoVA sets differ (their V worst %.4f)\n",
+              kc.k_median, kc.k_p01, kc.k_worst, kc.k_worst_layer, kc.k_worst_row, kc.v_median, kc.v_p01, kc.v_worst,
+              kc.v_worst_layer, kc.v_worst_row, kc.flips, kc.flip_v_worst);
   std::printf("5. routing on the last chunk's %llu (row, layer, router) rows: %llu exact, %llu near-ties "
               "(margin <= %.0e), %llu beyond (%llu of the differing rows MoVA); matched weights worst |dw| %.4f%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties,
