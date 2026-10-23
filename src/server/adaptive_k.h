@@ -64,6 +64,21 @@ struct MtpCost {
   static constexpr double kMusePlainGB = 14.86, kMuseHeadInt8GB = 1.346;
   static constexpr double kMuseDrafterGB[3] = {5.112, 2.556, 1.358};
 
+  // Spec 26c: Nemotron 3.5 Bolt's rows, DERIVED (spec 26 §11's table over spec 25 §14's layout bytes, depth 4096; box row 63's
+  // r63.cost measures them, `--spec-cost` replaces either part). The verify at M = 1..8 with the plain M-row MoE: 1 + 0.1933 a
+  // row (the routed experts' 9 blocks, the slot writes, the head's row - 1.000 .. 2.353); with the union-aware MoE
+  // (Decision 10, the default) the experts NOT read again subtracted: (9 M - u(M)) x 40 x 2.5 MB over the 5.524 GB plain step,
+  // u(M) ESTIMATED linear from 9 at M 1 to 30 at M 8 (spec 26 §4's u = 30 - r63.union measures it) - M 8 1.593, §11's figure.
+  // The draft row flat in K (one 8-row block drafts all 7): exact 0.500, int8 0.306, int4 g64 0.214 plain steps (§11, the
+  // int8 head at the 7 mask rows included). The bf16 head adds its 0.537 GB to every verify (read once) and to the draft row.
+  // `drafter_format`: 0 exact, 1 int8, 2 int4 g64.
+  static MtpCost bolt_verify(bool i8_head, bool union_moe);
+  static MtpCost bolt_lilicorr(bool i8_head, unsigned drafter_format, bool union_moe);
+  static constexpr double kBoltPlainGB = 5.524, kBoltHeadInt8GB = 0.537, kBoltExpertGB = 0.0025;
+  static constexpr double kBoltPlainRow = 1.353 / 7;   // a verify row with the plain M-row MoE (§11: 2.353 at M 8)
+  static constexpr double kBoltDraft[3] = {0.500, 0.306, 0.214};
+  static constexpr double kBoltUnionM1 = 9.0, kBoltUnionM8 = 30.0;
+
   uint32_t max_k() const;              // the deepest K both lists cover
   double cost(uint32_t k) const;       // K = 0: 1 (a plain step)
 };

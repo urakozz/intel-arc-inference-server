@@ -23,8 +23,9 @@
 //     BoltEngine::prefill (chunks end at block ends), ingest for --prefix-split-last; the store keyed by Bolt's own root
 //     (kBoltStoreKey, the bf16-state arm another one: its snapshots are half the size), so no entry another model's engine made
 //     - or another state precision's - can ever hit;
-//   - no speculative decoding: mtp_k() and verify_k() stay 0 (no MTP head; spec 26's drafter is not built) - b70-serve refuses
-//     --mtp and --spec by name.
+//   - spec 26c: speculative decoding with `spec_k` > 0 - --spec dflash (LiLiCorr: step_many) or --spec lookup (step_drafts) over
+//     BoltEngine's verify lists (the adapter section below says how greedy and sampled acceptance run); without it every path
+//     is 25e's (mtp_k() and verify_k() 0). No MTP head: b70-serve refuses --mtp and --spec mtp by name.
 //
 // Also here, host-side and device-free: the generation defaults (Decision 12) and the flags b70-serve refuses for this model.
 #include <algorithm>
@@ -32,15 +33,18 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <random>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "runtime/dflash/dflash_control.h"   // spec 26c: LiliDraftOut (a plain struct)
 #include "server/deps.h"
 #include "server/openai.h"
 #include "server/spec_accept.h"
@@ -139,11 +143,13 @@ inline Generation resolve_generation(const nlohmann::json* snapshot, const nlohm
 // What b70-serve parsed that Bolt has no use for (the rest - --mtp, --spec, --kv-cache int8, the prefill backends, --device with
 // --pp 2, a split without --pp 2 - is cli/bolt_decode.h's check_args, shared with b70-decode), each refusal by name
 // (tests/server/bolt_request_test.cc, and cli_reject_serve_bolt_* through the binary on the box).
+// Spec 26c: --spec dflash / lookup and their flags (--spec-max, --spec-cost, --draft-model, --draft-format, --draft-q,
+// --spec-min-match, --spec-history) are cli/bolt_spec.h's (check_spec); what stays refused here is an MTP head's.
 struct ServeFlags {
   bool mtp = false;              // --mtp N | auto
   std::string spec;              // --spec's value ("" when not given): off | mtp | lookup | dflash
-  bool proposer_tuning = false;  // --mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost,
-                                 // --draft-model, --draft-format, --draft-q
+  bool proposer_tuning = false;  // --mtp-max, --mtp-cost (an MTP head's tuning)
+  bool lookup_tuning = false;    // --spec-min-match, --spec-history (prompt lookup's)
   bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
   bool qwen4exp_flags = false;   // --layers, --ple-dir, --tokenizer
 };
@@ -151,15 +157,14 @@ struct ServeFlags {
 inline void check_serve_flags(const ServeFlags& f) {
   if (f.mtp || f.spec == "mtp")
     throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp / --spec mtp");
-  if (f.spec == "dflash" || f.spec == "lookup")
-    throw std::runtime_error("--spec " + f.spec + ": Bolt's speculative decoding is spec 26 (the LiLiCorr drafter), not built yet");
   if (f.proposer_tuning)
-    throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, --draft-model, "
-                             "--draft-format and --draft-q belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
-                             "head; spec 26's drafter is not built)");
+    throw std::runtime_error("--mtp-max and --mtp-cost belong to an MTP head; Nemotron 3.5 Bolt has none (its proposers are "
+                             "--spec dflash / lookup, tuned by --spec-max and --spec-cost - spec 26)");
+  if (f.lookup_tuning && f.spec != "lookup")
+    throw std::runtime_error("--spec-min-match and --spec-history tune prompt lookup: they need --spec lookup");
   if (f.draft_vocab)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; Nemotron 3.5 "
-                             "Bolt has neither");
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; Nemotron 3.5 "
+                             "Bolt has neither (LiLiCorr reads its whole lm_head, spec 26)");
   if (f.qwen4exp_flags)
     throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); "
                              "this checkpoint is Nemotron 3.5 Bolt (b70-decode --layers is its development mode)");
@@ -224,17 +229,70 @@ inline server::FilteredProbs filter_probs_top_p(const float* logits, uint32_t vo
   return f;
 }
 
+// ---- spec 26c: the drafter as the adapter sees it ---------------------------------------------------------------------------
+// b70-serve binds a runtime::dflash::LiliDrafter beside the engine (cli/bolt_spec.h); the host test a fake. One block at the
+// engine's pos (the anchor its pending id) through the device's GREEDY walk; the readback carries every slot's 8 candidates,
+// their log-probs and the whole lattice [7][8 previous][8 next], so a sampled request walks on the host (below).
+struct BoltDraftHooks {
+  std::function<const runtime::dflash::LiliDraftOut&(uint32_t k)> draft;
+  bool on() const { return static_cast<bool>(draft); }
+};
+// The sampled draft distribution (spec 26 Decision 6, PROVISIONAL until r63.accept): `lattice` - q_s = softmax(realized / T)
+// over slot s's 8 candidates, realized = lattice[s][previous] (vLLM's) - or `lattice+lp` - softmax((realized + lp_s) / T), the
+// alternative 26a records. Either is lossless through accept_sparse; only acceptance moves.
+enum class BoltDraftQ { Lattice, LatticeLp };
+inline bool parse_bolt_draft_q(const std::string& v, BoltDraftQ& out) {
+  if (v == "lattice") out = BoltDraftQ::Lattice;
+  else if (v == "lattice+lp") out = BoltDraftQ::LatticeLp;
+  else return false;
+  return true;
+}
+inline const char* bolt_draft_q_name(BoltDraftQ q) { return q == BoltDraftQ::LatticeLp ? "lattice+lp" : "lattice"; }
+
 // ---- the adapter ------------------------------------------------------------------------------------------------------------
+// Spec 26c: speculative decoding (`spec_k` > 0) - `--spec dflash` (the LiLiCorr drafter: mtp_k() = --spec-max; step_many()
+// drafts a block through BoltDraftHooks, verifies at M = K + 1 and accepts on the host) or `--spec lookup` (verify_k():
+// step_drafts() over the server's prompt-lookup drafts). Greedy: the device's walk, then the longest prefix the target's argmax
+// agrees with (D2: the output is plain decode's). Sampled: the drafts are DRAWN HERE - the walk over the readback's lattice
+// (slot s's scores = lattice[s][previous], + lp under `lattice+lp`; q_s = server::dflash_q at the request's T), the request's
+// RNG - then server::accept_sparse_rows against the target's filtered p (filter_probs_top_p: the plain path's filter) - lossless
+// whatever q is (D4); lookup's point mass through accept_point_mass_rows. RNG order: the k draft draws, then the acceptance's
+// uniforms, then its one correction / bonus draw. The commit is deferred to the next call that touches the engine (truncate_to
+// may commit fewer), as Muse's; the pending id it leaves was CHOSEN by the acceptance (`decided_`), so the next step does not
+// draw it again. A request with a repetition penalty (sampled) decodes plainly: its p depends on ids a run has not committed.
+// Without spec_k every path is 25e's, byte for byte.
+// An engine with BoltEngine's speculative calls (verify / commit / ...): runtime::bolt::BoltEngine and the spec tests' fakes;
+// 25e's fakes have none, and the adapter steps them plainly.
+template <class E, class = void>
+struct HasVerify : std::false_type {};
+template <class E>
+struct HasVerify<E, std::void_t<decltype(std::declval<E&>().verify(static_cast<const uint32_t*>(nullptr), 0u)),
+                                decltype(std::declval<E&>().commit(0u, 0u))>> : std::true_type {};
+
 template <class Engine>
 struct BoltEngineAdapterT : server::EngineIface {
+  static constexpr bool kSpec = HasVerify<Engine>::value;
   // `vocab_used`: the tokenizer's id count (131072); ids at or above it are never emitted.
-  BoltEngineAdapterT(Engine& engine, uint32_t vocab_used) : eng(engine), vocab_used_(vocab_used), host_logits_(engine.vocab()) {
+  BoltEngineAdapterT(Engine& engine, uint32_t vocab_used, uint32_t spec_k = 0, bool lookup = false, BoltDraftHooks drafter = {},
+                     BoltDraftQ q = BoltDraftQ::Lattice)
+      : eng(engine), vocab_used_(vocab_used), host_logits_(engine.vocab()), k_(spec_k), lookup_(lookup),
+        df_(std::move(drafter)), q_(q) {
     if (vocab_used_ == 0 || vocab_used_ > engine.vocab())
       throw std::runtime_error("BoltEngineAdapter: vocab_used " + std::to_string(vocab_used_) +
                                " is outside Nemotron 3.5 Bolt's vocabulary (" + std::to_string(engine.vocab()) + " rows)");
+    if (k_ > kMaxK) throw std::runtime_error("BoltEngineAdapter: K " + std::to_string(k_) + " exceeds 7 (LiLiCorr's block - 1)");
+    if (lookup_ && df_.on()) throw std::runtime_error("BoltEngineAdapter: --spec dflash and --spec lookup: pick one");
+    if (k_ > 0 && !lookup_ && !df_.on())
+      throw std::runtime_error("BoltEngineAdapter: K > 0 without a proposer (--spec dflash or --spec lookup)");
+    if (k_ > 0 && !kSpec) throw std::runtime_error("BoltEngineAdapter: K > 0 over an engine without verify lists");
+    if (k_ > 0) spec_logits_.resize(size_t(kMaxK + 1) * engine.vocab());
   }
 
+  static constexpr uint32_t kMaxK = 7;   // LiLiCorr's block of 8 - 1 (runtime::bolt::kVerifyRows - 1)
+
   void reset() override {
+    pending_ = false;   // the session is discarded; nothing to commit
+    decided_ = false;
     eng.reset();
     new_request_ = true;
   }
@@ -242,45 +300,180 @@ struct BoltEngineAdapterT : server::EngineIface {
   // EngineAdapter's measurement line: the previous request's generation, printed when the next request's prefill starts.
   void prefill(const std::vector<uint32_t>& ids) override {
     report();
+    flush_commit();
     eng.prefill(ids);
     new_request_ = true;
+    decided_ = false;
     gen_start_ = std::chrono::steady_clock::now();
   }
 
   uint32_t step(const server::Sampling& sampling) override {
+    flush_commit();
     // The pending id is the argmax of the last replay (or of the prefill's head row). A sampled request replaces it with a draw
-    // from that same row; a greedy one keeps it unless it is a row the tokenizer does not define.
+    // from that same row; a greedy one keeps it unless it is a row the tokenizer does not define. Spec 26c: an id an acceptance
+    // chose (decided_) is kept as it is.
     const bool penalised = sampling.repetition_penalty != 1.0f && sampling.seen != nullptr;
-    if (new_request_) {
-      rng_.seed(sampling.has_seed ? sampling.seed : uint64_t(std::random_device{}()));
-      new_request_ = false;
+    begin_request(sampling);
+    if (!decided_) {
+      if (!sampling.greedy) choose_on_host(sampling, penalised);
+      else mask_pending();
     }
-    if (!sampling.greedy) choose_on_host(sampling, penalised);
-    else mask_pending();
+    decided_ = false;
     const uint32_t id = eng.generate(1)[0];
     ++gen_tokens_;
     return id;
   }
 
   uint32_t max_len() override { return eng.max_len(); }
-  uint32_t pos() override { return eng.pos(); }
+  uint32_t pos() override { return pending_ ? pending_pos_ + pending_j_ + 1 : eng.pos(); }
 
+  // --- spec 26c: speculative decoding ----------------------------------------------------------------------------------------
+  uint32_t mtp_k() override { return df_.on() ? k_ : 0; }
+  uint32_t verify_k() override { return lookup_ ? k_ : 0; }
+
+  // One LiLiCorr iteration at pos = n with x_n pending: the drafter's block (greedy: the device's walk; sampled: the host's walk
+  // over its lattice), verify at M = K + 1, accept on the host; returns x_n, d_1 .. d_j. The commit is deferred. (An engine
+  // without BoltEngine's verify / commit - 25e's host fakes - steps plainly: no spec_k is accepted for it.)
+  std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
+    if constexpr (kSpec) {
+      return step_many_spec(sampling, k_req);
+    } else {
+      (void)k_req;
+      return {step(sampling)};
+    }
+  }
+  std::vector<uint32_t> step_drafts(const server::Sampling& sampling, const Proposer& propose) override {
+    if constexpr (kSpec) {
+      return step_drafts_spec(sampling, propose);
+    } else {
+      (void)propose;
+      return {step(sampling)};
+    }
+  }
+
+  // Keep x_n, d_1 .. d_m of the last iteration (pos = n + m + 1), pending d_{m+1} (or the run's next id when m = j).
+  void truncate_to(uint32_t p) override {
+    if (!pending_) {
+      if (p == eng.pos()) return;
+      throw std::logic_error("BoltEngineAdapter::truncate_to: no speculative run to shorten");
+    }
+    if (p < pending_pos_ + 1 || p > pending_pos_ + pending_j_ + 1)
+      throw std::logic_error("BoltEngineAdapter::truncate_to: pos " + std::to_string(p) + " is outside the last run [" +
+                             std::to_string(pending_pos_ + 1) + ", " + std::to_string(pending_pos_ + pending_j_ + 1) + "]");
+    const uint32_t m = p - pending_pos_ - 1;
+    gen_tokens_ -= pending_j_ - m;
+    pending_ = false;
+    if constexpr (kSpec) eng.commit(m, m < pending_j_ ? pending_drafts_[m] : pending_next_);
+  }
+
+  void flush_commit() {
+    if (!pending_) return;
+    pending_ = false;
+    if constexpr (kSpec) eng.commit(pending_j_, pending_next_);
+  }
+
+  uint64_t drafter_key() override {
+    if constexpr (kSpec) return eng.drafter_key();
+    else return 0;
+  }
+  uint64_t spec_iterations() const { return iters_; }   // tests
+  uint64_t spec_accepted() const { return accepted_; }
+  uint64_t spec_drafted() const { return drafted_; }
+
+ private:
+  std::vector<uint32_t> step_many_spec(const server::Sampling& sampling, uint32_t k_req) {
+    flush_commit();
+    const bool penalised = sampling.repetition_penalty != 1.0f && sampling.seen != nullptr;
+    uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
+    if (!df_.on() || vocab_used_ < eng.vocab() || (penalised && !sampling.greedy)) k = 0;   // plain (masked / penalised) steps
+    ++iters_at_k_[k];
+    if (k == 0) return {step(sampling)};
+    settle_pending(sampling);
+    const uint32_t n = eng.pos(), x = eng.pending();
+    const runtime::dflash::LiliDraftOut& o = df_.draft(k);
+    std::vector<uint32_t> drafts(k);
+    server::AcceptResult a{};
+    if (sampling.greedy) {
+      for (uint32_t j = 0; j < k; ++j) drafts[j] = o.ids[j];
+      eng.verify(drafts.data(), k);
+      a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
+    } else {
+      const float T = server::dflash_temperature(sampling);
+      server::SparseQ q[kMaxK];
+      uint32_t prev = 0;
+      for (uint32_t j = 0; j < k; ++j) {   // the walk: slot j's scores are the lattice row of slot j - 1's pick
+        float v[runtime::dflash::LiliDraftOut::kTopK];
+        for (uint32_t c = 0; c < runtime::dflash::LiliDraftOut::kTopK; ++c)
+          v[c] = o.lattice[j][prev][c] + (q_ == BoltDraftQ::LatticeLp ? o.lp[j][c] : 0.0f);
+        q[j] = server::dflash_q(o.cand[j], v, runtime::dflash::LiliDraftOut::kTopK, T);
+        prev = draw_index(q[j]);
+        drafts[j] = o.cand[j][prev];
+      }
+      eng.verify(drafts.data(), k);
+      eng.read_verify_logits(spec_logits_.data(), k + 1);
+      a = server::accept_sparse_rows(spec_logits_.data(), q, drafts.data(), k, eng.vocab(), row_filter(sampling), rng_);
+    }
+    return keep(n, x, drafts, k, a);
+  }
+
+  // One lookup iteration (spec 19e's contract): propose(x_n) -> d_1 .. d_k, verify, accept (greedy: argmax; sampled: the point
+  // mass, lossless).
+  std::vector<uint32_t> step_drafts_spec(const server::Sampling& sampling, const Proposer& propose) {
+    flush_commit();
+    const bool penalised = sampling.repetition_penalty != 1.0f && sampling.seen != nullptr;
+    begin_request(sampling);
+    if (!lookup_ || vocab_used_ < eng.vocab() || (penalised && !sampling.greedy)) {
+      ++iters_at_k_[0];
+      return {step(sampling)};
+    }
+    settle_pending(sampling);
+    const uint32_t x = eng.pending();
+    const std::vector<uint32_t> d = propose(x);
+    const uint32_t k = std::min<uint32_t>({uint32_t(d.size()), k_, eng.max_verify_k()});
+    ++iters_at_k_[k];
+    if (k == 0) return {step(sampling)};
+    const uint32_t n = eng.pos();
+    std::vector<uint32_t> drafts(d.begin(), d.begin() + k);
+    eng.verify(drafts.data(), k);
+    server::AcceptResult a{};
+    if (sampling.greedy) {
+      a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
+    } else {
+      eng.read_verify_logits(spec_logits_.data(), k + 1);
+      a = server::accept_point_mass_rows(spec_logits_.data(), drafts.data(), k, eng.vocab(), row_filter(sampling), rng_);
+    }
+    return keep(n, x, drafts, k, a);
+  }
+
+ public:
   // --- spec 7 (plan 25e Review Focus 4) -----------------------------------------------------------------------------------
   uint32_t block() override { return Engine::kBlock; }
   size_t state_bytes() override { return eng.state_bytes(); }
   size_t kv_bytes(uint32_t n) override { return eng.kv_bytes(n); }
   uint64_t kv_form() override { return store_key(eng.bf16_state()); }
-  void save_state(void* host) override { eng.save_state(host); }
+  // Spec 26c: a deferred commit is made before a save (the request-end snapshot follows a run the server kept whole); a restore
+  // discards it, as reset() does.
+  void save_state(void* host) override {
+    flush_commit();
+    eng.save_state(host);
+  }
   void load_state(const void* host, uint32_t p) override {
+    pending_ = false;
+    decided_ = false;
     eng.load_state(host, p);
     new_request_ = true;
   }
-  void save_kv(uint32_t b, uint32_t e, void* host) override { eng.save_kv(b, e, host); }
+  void save_kv(uint32_t b, uint32_t e, void* host) override {
+    flush_commit();
+    eng.save_kv(b, e, host);
+  }
   void load_kv(uint32_t b, uint32_t e, const void* host) override { eng.load_kv(b, e, host); }
   void set_block_hook(BlockHook hook) override { eng.set_block_hook(std::move(hook)); }
   void ingest(const std::vector<uint32_t>& ids) override {
+    flush_commit();
     eng.ingest(ids);
     new_request_ = true;
+    decided_ = false;
   }
 
   // The pending id for a sampled request, chosen from the logits row the engine left: penalised first (HF's order: the repetition
@@ -304,6 +497,16 @@ struct BoltEngineAdapterT : server::EngineIface {
   }
 
   void report() {
+    if (k_ > 0 && iters_ > 0) {   // spec 26c: the previous request's speculative line (the mean accepted length is D5's)
+      std::fprintf(stderr, "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), %.3f tokens a verify, iterations at K "
+                   "0..7:", lookup_ ? "lookup" : "dflash", k_, (unsigned long long)iters_, (unsigned long long)accepted_,
+                   (unsigned long long)drafted_, drafted_ ? double(accepted_) / double(drafted_) : 0.0,
+                   1.0 + double(accepted_) / double(iters_));
+      for (uint32_t k = 0; k <= kMaxK; ++k) std::fprintf(stderr, "%s%llu", k ? "/" : " ", (unsigned long long)iters_at_k_[k]);
+      std::fprintf(stderr, "\n");
+    }
+    iters_ = accepted_ = drafted_ = 0;
+    for (auto& c : iters_at_k_) c = 0;
     if (gen_tokens_ == 0) return;
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - gen_start_).count();
     std::fprintf(stderr, "gen: %u tokens, %.3f ms, %.4f ms/token\n", gen_tokens_, ms, ms / gen_tokens_);
@@ -317,6 +520,58 @@ struct BoltEngineAdapterT : server::EngineIface {
   Engine& eng;
 
  private:
+  // A request's first step (after a prefill, an ingest, a restore or a reset) seeds the RNG: from its seed, or the random device.
+  void begin_request(const server::Sampling& sampling) {
+    if (new_request_) {
+      rng_.seed(sampling.has_seed ? sampling.seed : uint64_t(std::random_device{}()));
+      new_request_ = false;
+    }
+  }
+  // Spec 26c: the pending id before a speculative iteration - step()'s choice (sampled: drawn from the row the engine left;
+  // greedy: masked), unless an acceptance chose it.
+  void settle_pending(const server::Sampling& sampling) {
+    begin_request(sampling);
+    if (!decided_) {
+      if (!sampling.greedy) choose_on_host(sampling, false);
+      else mask_pending();
+    }
+    decided_ = true;
+  }
+  server::RowFilter row_filter(const server::Sampling& sampling) const {
+    const uint32_t used = vocab_used_;
+    return [used, sampling](const float* row) { return filter_probs_top_p(row, used, sampling); };
+  }
+  // One candidate index from a sparse q (in order; the last positive one on a rounding shortfall).
+  uint32_t draw_index(const server::SparseQ& q) {
+    const double u = std::uniform_real_distribution<double>(0.0, 1.0)(rng_);
+    double acc = 0.0;
+    uint32_t last = 0;
+    for (uint32_t c = 0; c < q.n; ++c) {
+      if (!(q.probs[c] > 0.0)) continue;
+      last = c;
+      acc += q.probs[c];
+      if (u < acc) return c;
+    }
+    return last;
+  }
+  // The iteration's bookkeeping: the deferred commit and the ids returned.
+  std::vector<uint32_t> keep(uint32_t n, uint32_t x, const std::vector<uint32_t>& drafts, uint32_t k,
+                             const server::AcceptResult& a) {
+    pending_ = true;
+    decided_ = true;
+    pending_pos_ = n;
+    pending_j_ = a.accepted;
+    pending_next_ = a.next_token;
+    pending_drafts_ = drafts;
+    ++iters_;
+    drafted_ += k;
+    accepted_ += a.accepted;
+    std::vector<uint32_t> out{x};
+    out.insert(out.end(), drafts.begin(), drafts.begin() + a.accepted);
+    gen_tokens_ += static_cast<uint32_t>(out.size());
+    return out;
+  }
+
   uint32_t vocab_used_;
   std::vector<float> host_logits_;
   std::mt19937_64 rng_;
@@ -324,6 +579,18 @@ struct BoltEngineAdapterT : server::EngineIface {
   uint32_t gen_tokens_ = 0;
   uint64_t masked_ = 0, sampled_ = 0;
   std::chrono::steady_clock::time_point gen_start_{};
+  // Spec 26c.
+  uint32_t k_ = 0;
+  bool lookup_ = false;
+  BoltDraftHooks df_;
+  BoltDraftQ q_ = BoltDraftQ::Lattice;
+  std::vector<float> spec_logits_;   // [K + 1][vocab]: the verify rows' raw logits (sampled acceptance)
+  bool pending_ = false;             // a run's commit is deferred
+  bool decided_ = false;             // the pending id was chosen by an acceptance / step(): never drawn again
+  uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
+  std::vector<uint32_t> pending_drafts_;
+  uint64_t iters_ = 0, drafted_ = 0, accepted_ = 0;
+  uint64_t iters_at_k_[kMaxK + 1] = {};
 };
 
 }  // namespace cli::bolt
