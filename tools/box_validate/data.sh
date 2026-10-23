@@ -79,6 +79,10 @@ case "${1:-}" in
       test -d oracle-out-ornith-mtp
     have oracle_ornith_f32 "oracle-out-ornith-f32/{prose,code,cjk}.golden.safetensors (the f32 judge, operator ruling 2026-10-23: --with r10.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32/$p.golden.safetensors || exit 1; done'
+    have oracle_ornith_f32_i8head "oracle-out-ornith-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r10.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32-i8head/$p.golden.safetensors || exit 1; done'
+    have oracle_ornith_f32_pfi8 "oracle-out-ornith-f32-pfi8/{prose,code,cjk}.golden.safetensors (the l0-int8 prefill's quantisation-aware f32 judge: --with r10.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-ornith-f32-pfi8/$p.golden.safetensors || exit 1; done'
     have k2 "K2-Horizon int4 checkpoint ${SNAP_K2:-?} (spec 18b; hf download, 21.8 GB)" \
       complete "${SNAP_K2:-/nonexistent}"
     have oracle_k2 "oracle-out-k2/{prose,code,cjk}.{ids,golden.safetensors} (spec 18a's real-weight run: --with r14.oracle)" \
@@ -87,6 +91,8 @@ case "${1:-}" in
     # the bf16 golden's tokens (tools/box_validate/f32_oracle.sh <data tree> ornith|k2; tests/golden/golden_common.h).
     have oracle_k2_f32 "oracle-out-k2-f32/{prose,code,cjk}.golden.safetensors (the f32 judge: --with r14.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32/$p.golden.safetensors || exit 1; done'
+    have oracle_k2_f32_i8head "oracle-out-k2-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r14.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head/$p.golden.safetensors || exit 1; done'
     have kolibri "Kolibri-1 int4 checkpoint ${SNAP_KOLIBRI:-?} (spec 20b, decision 1 open; ~42.5 GB)" \
       complete "${SNAP_KOLIBRI:-/nonexistent}"
     # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).
