@@ -82,7 +82,6 @@ void check_sizes_qwen38() {
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q).eager(), size_t{699514776});
-  CHECK_EQ(s.dequant, size_t{356515840});
   CHECK_EQ(s.slab, size_t{35651584});
   CHECK_EQ(s.pf_s, size_t{805306368});
   CHECK_EQ(s.pf_p, size_t{402653184});
@@ -280,14 +279,11 @@ void check_paths() {
   CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden);
   CHECK_EQ(mtp.prefill_lazy, s.slab);
   CHECK_EQ(mtp.model, base.model + kMtpWeights);
-  // l0: the slab always, no Int8State. sycl-tla: dequant + the composed S / P.
+  // l0: the slab always, no Int8State.
   runtime::PrefillPath l0{true, PrefillBackend::L0, false};
   const runtime::MemoryPlan pl0 = runtime::plan(q, 65536, false, kQwenInt8Weights, l0);
   CHECK_EQ(pl0.prefill_lazy, s.slab);
   CHECK_EQ(pl0.int8, size_t{0});
-  runtime::PrefillPath sycl{true, PrefillBackend::SyclTla, false};
-  const runtime::MemoryPlan psy = runtime::plan(q, 65536, false, kQwenInt8Weights, sycl);
-  CHECK_EQ(psy.prefill_lazy, s.dequant + s.pf_s + s.pf_p);
   // Composed attention on l0-int8: 6 x 2048 x (4 + 2) B = 73,728 B per position.
   runtime::PrefillPath comp{true, PrefillBackend::L0Int8, true};
   const runtime::MemoryPlan pc = runtime::plan(q, 65536, false, kQwenInt8Weights, comp);

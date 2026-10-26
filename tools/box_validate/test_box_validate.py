@@ -1055,14 +1055,12 @@ class DriverTest(unittest.TestCase):
         # Ornith prefills since 15d and is served since 15e: nothing expects those refusals
         self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
         self.assertNotIn("spec 15e/", out)
-        self.assertRegex(out, r"b70-serve \S+ --port \d+ --max-len 16384 --prefill-backend sycl-tla\n"
-                              r" +\(must exit non-zero without a crash, printing /prefills on the L0 backends only/\)")
         # K2: b70-serve serves it since 18d (row 25) and refuses --mtp before the device; 18c's CLI
         # rejects in row 15, 18b's in row 14
         self.assertIn("--mtp 1\n      (must exit non-zero without a crash, printing /K2-Horizon has no MTP head/)", out)
         self.assertNotIn("is not served yet", out)
         self.assertIn("--re '^cli_reject_mtp_k2$'", out)
-        self.assertIn("--re '^cli_reject_k2_(prefill_length_int8|prefill_sycl)$'", out)
+        self.assertIn("--re '^cli_reject_k2_prefill_length_int8$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
         # Ornith's binaries since spec 15 §13 (the int4 checkpoint): Qwen3.8's greedy argmax
         # (vocab_used 248077) and the int4 a||b, in the binary checks of rows 10, 13 and 16
@@ -1149,7 +1147,7 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(order, ["pre", "r26.k0", "r26.host", "r26.k1", "r26.reject", "r26.prefill", "r26.split",
                                  "r26.golden", "r26.golden_eager", "r26.pp", "r26.cli", "r26.real", "r26.speed"])
         self.assertIn("--re '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'", out)
-        self.assertIn("--re '^cli_reject_kolibri_prefill_(int8|sycl|chunk)$'", out)
+        self.assertIn("--re '^cli_reject_kolibri_prefill_(int8|chunk)$'", out)
         self.assertIn("kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER", out)
         self.assertIn("--prefill-length 131072 --tg 16 --max-len 140000 --lm-head int8", out)
         self.assertNotIn("r26.speed", re.findall(r"^--- (\S+)", self.run_driver("--dry-run", "--only", "r26").stdout, re.M))
@@ -1161,7 +1159,7 @@ class DriverTest(unittest.TestCase):
                                  "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden", "r27.agnes",
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
-        self.assertIn("--re '^cli_reject_serve_pp(_kolibri|_value|_device|_sycl|_split_alone|_handoff_value)?$'", out)
+        self.assertIn("--re '^cli_reject_serve_pp(_kolibri|_value|_device|_split_alone|_handoff_value)?$'", out)
         self.assertIn("env ZE_AFFINITY_MASK=0,1 ctest", out)
         self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--pp 2 --mtp 3' timeout 3600 build/tests/golden_server_test", out)
         self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --pp 2 --mtp auto --prefix-split-last")

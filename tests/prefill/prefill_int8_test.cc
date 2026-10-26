@@ -245,7 +245,6 @@ int main(int argc, char** argv) {
     CHECK(same_logits);
     CHECK(same_state);
   }
-  CHECK(!eng.prefill_sycl_side_created());
   std::puts("prefill_int8_test OK");
   return 0;
 }

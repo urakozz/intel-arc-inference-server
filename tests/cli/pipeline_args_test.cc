@@ -82,7 +82,7 @@ void check_rename() {
 void check_refusals() {
   cli::PipelineArgs one;   // --pp 1 (the default) refuses nothing of its own
   cli::check_pipeline(one, {});
-  cli::check_pipeline(one, {true, true, true, true, true, runtime::PrefillBackend::SyclTla, true});
+  cli::check_pipeline(one, {true, true, true, true, true, true});
   cli::PipelineArgs sub = one;
   sub.have_split = true;
   CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-split belongs to --pp 2"));
@@ -94,29 +94,18 @@ void check_refusals() {
   two.devices = 2;
   cli::check_pipeline(two, {});   // --ids / --bench --depth, nothing else: accepted
   cli::PipelineContext c;
-  // Spec 16c: --prefill and --bench --prefill-length run the two-card pipeline - on l0 and
-  // l0-int8 with the flash attention; sycl-tla and the composed attention are refused.
-  for (const runtime::PrefillBackend b : {runtime::PrefillBackend::L0, runtime::PrefillBackend::L0Int8}) {
-    c = {};
-    c.prefill = true;
-    c.prefill_backend = b;
-    cli::check_pipeline(two, c);
-    c.prefill = false;
-    c.bench_prefill = true;
-    cli::check_pipeline(two, c);
-    c.composed_attn = true;
-    CHECK(says([&] { cli::check_pipeline(two, c); }, "flash attention only"));
-  }
+  // Spec 16c: --prefill and --bench --prefill-length run the two-card pipeline with the flash
+  // attention; the composed attention is refused.
   c = {};
   c.prefill = true;
-  c.prefill_backend = runtime::PrefillBackend::SyclTla;
-  CHECK(says([&] { cli::check_pipeline(two, c); }, "not sycl-tla"));
+  cli::check_pipeline(two, c);
   c.prefill = false;
   c.bench_prefill = true;
-  CHECK(says([&] { cli::check_pipeline(two, c); }, "--prefill-backend l0 or l0-int8"));
-  c = {};
-  c.prefill_backend = runtime::PrefillBackend::SyclTla;   // no prefill: nothing to refuse
+  cli::check_pipeline(two, c);
   c.composed_attn = true;
+  CHECK(says([&] { cli::check_pipeline(two, c); }, "flash attention only"));
+  c = {};
+  c.composed_attn = true;   // no prefill: nothing to refuse
   cli::check_pipeline(two, c);
   c = {};
   c.mtp = true;
@@ -181,9 +170,6 @@ void check_serve() {
   c = {};
   c.device = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
-  c = {};
-  c.prefill_backend = runtime::PrefillBackend::SyclTla;
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "not sycl-tla"));
   c = {};
   c.composed_attn = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "flash attention only"));

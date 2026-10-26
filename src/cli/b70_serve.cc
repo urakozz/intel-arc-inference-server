@@ -126,21 +126,21 @@ void usage() {
                "                 (ultra_v3's rules), the OpenAI reasoning_effort maps onto them (none|minimal -> thinking\n"
                "                 off, low|medium -> medium_effort, high -> default); Qwen3-Coder XML tool calls; hybrid\n"
                "                 prefix-cache snapshots (SSM states + conv columns + KV at 2048-position block ends);\n"
-               "                 --mtp, --spec, --kv-cache int8 and --prefill-backend l0-int8|sycl-tla are refused.\n"
+               "                 --mtp, --spec, --kv-cache int8 and --prefill-backend l0-int8 are refused.\n"
                "                 UNVALIDATED on the cards (queue row 62)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
                "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
                "                             --max-len auto fits both cards; the prefix cache, --mtp /\n"
                "                             --spec (the MTP head on device 1), --kv-cache int8 and\n"
-               "                             --lm-head work as on one card. Not with --device or a\n"
-               "                             sycl-tla prefill. UNVALIDATED on the cards (queue row 27)\n"
+               "                             --lm-head work as on one card. Not with --device.\n"
+               "                             UNVALIDATED on the cards (queue row 27)\n"
                "                 [--pipeline-split auto|N]   --pp 2: device 0 runs layers [0, N)\n"
                "                             (auto, the default: the split whose heavier card holds the\n"
                "                             fewest bytes, with the MTP head and the cache's shadows)\n"
                "                 [--pipeline-handoff copy|peer]   --pp 2: how the residual crosses\n"
                "                             (copy, the default: a device copy and a cross-device event)\n"
-               "                 [--prefill-backend sycl-tla|l0|l0-int8]   Default: l0-int8.\n"
+               "                 [--prefill-backend l0|l0-int8]   Default: l0.\n"
                "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
                "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
                "                                        host memory, not VRAM), GiB. auto (default):\n"
@@ -710,7 +710,7 @@ struct PipeServe {
   bool mtp_auto = false, spec_lookup = false, default_mtp_costs = true;
   uint32_t spec_min_match = 3, spec_max = 3, spec_history = 0;
   bool have_pp_backend = false;
-  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0Int8;
+  runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   runtime::PrefillPath pp_path;
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
@@ -1008,7 +1008,7 @@ int run(int argc, char** argv) {
     if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
     runtime::PrefillBackend bolt_backend{};
     if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, bolt_backend))
-      throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
+      throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
     if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
     options.chat_format = server::ChatFormat::bolt();
     BoltServe bs;
@@ -1124,8 +1124,7 @@ int run(int argc, char** argv) {
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg +
-                             "'");
+    throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
 
   // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -
   // dispatched here, before the Qwen family's kv-cache and --pp rules (its own, cli::kolibri::check_args,
@@ -1210,12 +1209,11 @@ int run(int argc, char** argv) {
   }
 
   // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
-  // without --pp 2, --device, a sycl-tla prefill, the composed attention, prefill replay and
+  // without --pp 2, --device, the composed attention, prefill replay and
   // profiling - before the snapshot is even resolved; the model's own follow below.
   cli::ServePipelineContext pipe_ctx;
   pipe_ctx.device = device != l0::Context::kFromEnv;
   pipe_ctx.mtp = mtp_k > 0 || mtp_auto || spec_lookup;
-  pipe_ctx.prefill_backend = pp_path.backend;
   pipe_ctx.composed_attn = pp_path.composed_attn;
   {
     const char* replay = std::getenv("B70_PREFILL_REPLAY");
@@ -1255,7 +1253,7 @@ int run(int argc, char** argv) {
       throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), "
                                            "not ") + runtime::prefill_backend_name(pp_backend) +
                                ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and "
-                               "K2's hidden is 2560; sycl-tla has no K2 walk - --prefill-backend "
+                               "K2's hidden is 2560 - --prefill-backend "
                                "l0, or omit it");
     K2Serve k2;
     k2.path = path;
@@ -1372,9 +1370,8 @@ int run(int argc, char** argv) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", prefill backend %s (SYCL component %s), mtp %s%u, lm_head %s%s%s, kv cache %s\n",
-               runtime::prefill_backend_name(engine.prefill_backend()),
-               runtime::prefill::sycl_available() ? "on" : "off", mtp_auto ? "auto, max " : "",
+  std::fprintf(stderr, ", prefill backend %s, mtp %s%u, lm_head %s%s%s, kv cache %s\n",
+               runtime::prefill_backend_name(engine.prefill_backend()), mtp_auto ? "auto, max " : "",
                mtp_k, loader::lm_head_form_name(lm_head),
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",

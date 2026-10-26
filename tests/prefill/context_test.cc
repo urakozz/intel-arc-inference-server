@@ -1,10 +1,6 @@
-// The prefill execution context: one ze_context, one lazy SYCL side (spec 2.1
+// The prefill execution context: one ze_context, one immediate list (spec 2.1
 // §3.5). Needs a B70 and the `noop` / `pf_probe_chain` binaries and nothing
-// else -- no checkpoint, so no ctest label, and it is built and run in EVERY
-// configuration: `Context` itself is g++-compiled and links only b70_l0, and
-// nothing in this file ever calls `sycl()`, so linking libb70_prefill.so (when
-// the component is on) proves has_sycl() still reads false rather than
-// exercising the ABI boundary.
+// else -- no checkpoint, so no ctest label.
 //
 // **The 9,000-launch chain is the point of this file.** `gdn_chunk` appends ten
 // kernels that feed each other through device buffers with no events between
@@ -80,7 +76,6 @@ int main() {
   CHECK(cx.l0_list() != nullptr);
   CHECK_EQ(cx.launches(), size_t{0});
   cx.wait();
-  CHECK(!cx.has_sycl());   // a pure-L0 Context never builds the SYCL side
 
   l0::Module mod(ctx, kernels::path("noop"));
   l0::Kernel k = mod.kernel("noop");

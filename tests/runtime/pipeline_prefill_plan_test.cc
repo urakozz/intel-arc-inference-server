@@ -245,14 +245,11 @@ void check_plan() {
            runtime::int8_scale_bytes(model::qwen38(), 0, 29) + runtime::int8_scale_bytes(model::qwen38(), 29, 64));
   CHECK_EQ(runtime::int8_scale_bytes(model::ornith()),
            runtime::int8_scale_bytes(model::ornith(), 0, 20) + runtime::int8_scale_bytes(model::ornith(), 20, 40));
-  // The refusals: no composed attention and no sycl-tla under the pipeline.
+  // The refusal: no composed attention under the pipeline.
   const runtime::PpWeights w = runtime::pp_weights(model::qwen38(), WeightKind::Bf16);
   runtime::PrefillPath composed = path(PrefillBackend::L0);
   composed.composed_attn = true;
   CHECK(throws([&] { runtime::pp_plan(model::qwen38(), 32, 16384, w, KvCache::Bf16, composed); }));
-  CHECK(throws([&] {
-    runtime::pp_plan(model::qwen38(), 32, 16384, w, KvCache::Bf16, path(PrefillBackend::SyclTla));
-  }));
   // b70-decode's prefill runs: auto split and length with the prefill planned (the bf16 head,
   // the default l0-int8 backend) - derived, printed for the report.
   const runtime::PpChoice c = runtime::pp_auto_split_and_len(model::qwen38(), w, kTwo, kReserve, 262144,

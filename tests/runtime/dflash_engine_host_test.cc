@@ -151,12 +151,11 @@ void refusal_case() {
       if (std::string(e.what()).find(what) != std::string::npos) ++refused;
     }
   };
-  expect({true, runtime::PrefillBackend::SyclTla, false}, false, "sycl-tla");
   expect({true, runtime::PrefillBackend::L0Int8, false}, true, "B70_PREFILL_REPLAY");
-  CHECK(refused == 2);
+  CHECK(refused == 1);
   cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {true, runtime::PrefillBackend::L0Int8, false}, false);
-  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {false, runtime::PrefillBackend::SyclTla, false}, true);
-  std::printf("check_engine: sycl-tla prefill and B70_PREFILL_REPLAY refused before the device\n");
+  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {false, runtime::PrefillBackend::L0, false}, true);
+  std::printf("check_engine: B70_PREFILL_REPLAY refused before the device\n");
 }
 
 }  // namespace

@@ -191,7 +191,7 @@ struct Config {
 int main(int argc, char** argv) {
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0Int8;
-  if (argc > 2) CHECK(runtime::parse_prefill_backend(argv[2], backend) && runtime::is_l0(backend));
+  if (argc > 2) CHECK(runtime::parse_prefill_backend(argv[2], backend));
   const loader::LmHeadForm lm = argc > 3 && std::string(argv[3]) == "int8" ? loader::LmHeadForm::Int8
                                                                            : loader::LmHeadForm::Checkpoint;
   const runtime::KvCache kv = runtime::default_kv_cache();

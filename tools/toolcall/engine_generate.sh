@@ -4,7 +4,7 @@
 # For every scenario in <set dir>/manifest.json: check the .ids file's SHA-256
 # against the manifest (the bf16 and engine runs must see byte-identical ids),
 # run b70-decode with 192 greedy ids through the prefill path on <backend>
-# (l0, l0-int8 once plan 5b lands, or sycl-tla), save its stdout as
+# (l0 or l0-int8), save its stdout as
 # <out>/<name>.<backend>.ids and decode it with the snapshot's tokenizer into
 # <out>/<name>.<backend>.txt (special tokens kept). Scenarios whose two outputs
 # exist are skipped. Device: pass ZE_AFFINITY_MASK as usual.

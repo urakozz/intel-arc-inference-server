@@ -20,7 +20,7 @@
 //                          copy hand-off's event orders)
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
 //   B70_DECODE_ATTN=v1     decode attention v1 is not built at M = 5..8
-//   sycl-tla prefill, B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
+//   B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
 #include <cstdint>
@@ -63,14 +63,11 @@ inline void check_flags(const Args& a) {
 
 // The engine's refusals (see the header). `path` / `prefill_replay` (B70_PREFILL_REPLAY=1): what
 // Engine::prefill would otherwise refuse per request, after the load - the drafter's prefill taps are copies on the
-// L0 list, which sycl-tla's walk and a recorded chunk cannot hold. Spec 19d: `pipeline_served` - the caller serves
+// L0 list, which a recorded chunk cannot hold. Spec 19d: `pipeline_served` - the caller serves
 // --pp 2 with the drafter (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
 inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, const runtime::PrefillPath& path = {},
                          bool prefill_replay = false, bool pipeline_served = false, bool peer = false) {
   if (!a.on) return;
-  if (path.prefill && !runtime::is_l0(path.backend))
-    throw std::runtime_error("--spec dflash prefills on the l0 / l0-int8 backends only (the drafter's taps are copies "
-                             "on the L0 list): drop --prefill-backend sycl-tla");
   if (path.prefill && prefill_replay)
     throw std::runtime_error("--spec dflash: the drafter's prefill taps are copies, which a recorded chunk cannot "
                              "hold - unset B70_PREFILL_REPLAY");

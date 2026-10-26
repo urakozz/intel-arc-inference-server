@@ -135,7 +135,6 @@ int main(int argc, char** argv) {
       std::fflush(stdout);
     }
   }
-  CHECK(!engine.prefill_sycl_side_created());
   // The other half of the dispatch proof: the entry a scan launch was really
   // built with, read back after the walk rather than before it.
   CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);

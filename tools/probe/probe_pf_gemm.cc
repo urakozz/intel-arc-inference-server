@@ -1,19 +1,15 @@
 // P-A: our own OpenCL C bf16 DPAS GEMM (`pf_gemm_bf16.cl`) on the Level Zero
-// list, timed and checked against `gemm_bf16` (sycl-tla, the C2 control) on
-// identical inputs, same harness -- so any harness-level difference cancels.
+// list, timed, and checked against the sampled host reference. Until 2026-10-27 it was
+// also timed and checked against `gemm_bf16` (sycl-tla, the C2 control); that arm left with
+// the sycl-tla backend (operator ruling) and the recorded comparison stands.
 //
 // Pre-registration: docs/probe-prefill-vllm-parity-2026-09-14.md addendum
 // §A3.1 / §A4, committed before this file was built or run. Protocol: 8
 // replays, first 3 discarded, median of the last 5, 4 enqueues/replay, one
 // discarded warm-up -- the project standard every prefill probe uses.
 //
-// This probe is a plain g++ translation unit (no SYCL of its own): the OpenCL
-// kernel is launched through the raw L0 immediate list
-// (`runtime::prefill::Context::launch`), and the control is the pre-built
-// `gemm_bf16` entry point behind `runtime::prefill::gemm.h`, which is
-// SYCL-free at this boundary (implemented in the icpx-linked
-// libb70_prefill.so). Needs B70_PREFILL_ENABLED, exactly like
-// probe_dequant_slab.
+// The OpenCL kernel is launched through the raw L0 immediate list
+// (`runtime::prefill::Context::launch`).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -34,7 +30,6 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "runtime/prefill/context.h"
-#include "runtime/prefill/gemm.h"
 
 namespace {
 
@@ -182,32 +177,10 @@ Timed time_pf(runtime::prefill::Context& cx, l0::Kernel& k, uint32_t M, uint32_t
   return {ms, 2.0 * double(M) * K * N / (ms * 1e9)};
 }
 
-Timed time_c2(runtime::prefill::Context& cx, uint32_t M, uint32_t K, uint32_t N,
-             const uint16_t* A, const uint16_t* B, float* C) {
-  auto once = [&] {
-    for (int e = 0; e < kEnqueues; ++e) runtime::prefill::gemm_bf16(cx, {M, K, N}, A, B, C);
-    cx.wait();
-  };
-  once();
-  std::vector<double> samples;
-  for (int r = 0; r < kReplays; ++r) {
-    const auto t0 = std::chrono::steady_clock::now();
-    once();
-    if (r >= kDropped)
-      samples.push_back(
-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
-              .count() /
-          kEnqueues);
-  }
-  const double ms = median(std::move(samples));
-  return {ms, 2.0 * double(M) * K * N / (ms * 1e9)};
-}
-
 struct CellResult {
   const char* shape;
   uint32_t M;
-  Timed pf, c2;
-  bool bitwise_vs_c2 = false;
+  Timed pf;
   bool determinism = false;
   Ratio ratio;
 };
@@ -224,7 +197,6 @@ CellResult run_cell(l0::Context& l0ctx, runtime::prefill::Context& cx, l0::Kerne
   l0::Mem db(l0ctx, l0::MemKind::Device, b_n * sizeof(uint16_t));
   l0::Mem c_pf1(l0ctx, l0::MemKind::Device, c_bytes);
   l0::Mem c_pf2(l0ctx, l0::MemKind::Device, c_bytes);
-  l0::Mem c_ref(l0ctx, l0::MemKind::Device, c_bytes);
   {
     l0::CmdList up = l0::CmdList::immediate(l0ctx);
     up.copy(da.ptr(), a.data(), a_n * sizeof(uint16_t));
@@ -248,17 +220,11 @@ CellResult run_cell(l0::Context& l0ctx, runtime::prefill::Context& cx, l0::Kerne
     res.determinism = bitwise_equal(l0ctx, c_pf1.ptr(), c_pf2.ptr(), c_bytes);
   }
 
-  // --- correctness: pf vs C2 (gemm_bf16), same inputs ---
-  runtime::prefill::gemm_bf16(cx, {M, shape.K, shape.N}, da.as<uint16_t>(), db.as<uint16_t>(),
-                              c_ref.as<float>());
-  cx.wait();
-  res.bitwise_vs_c2 = bitwise_equal(l0ctx, c_pf1.ptr(), c_ref.ptr(), c_bytes);
-  if (!res.bitwise_vs_c2)
-    res.ratio = sampled_reference_check(l0ctx, c_pf1.ptr(), a, b, M, shape.K, shape.N);
+  // --- correctness: pf vs the sampled host reference ---
+  res.ratio = sampled_reference_check(l0ctx, c_pf1.ptr(), a, b, M, shape.K, shape.N);
 
-  // --- timing: pf and the C2 control, same harness ---
+  // --- timing ---
   res.pf = time_pf(cx, kpf, M, shape.K, shape.N, da.ptr(), db.ptr(), c_pf1.ptr());
-  res.c2 = time_c2(cx, M, shape.K, shape.N, da.as<uint16_t>(), db.as<uint16_t>(), c_ref.as<float>());
   return res;
 }
 
@@ -266,7 +232,7 @@ CellResult run_cell(l0::Context& l0ctx, runtime::prefill::Context& cx, l0::Kerne
 
 int main() {
   try {
-    std::printf("# P-A: pf_gemm_bf16 (our OpenCL C DPAS GEMM) vs gemm_bf16 (sycl-tla, C2 control)\n");
+    std::printf("# P-A: pf_gemm_bf16 (our OpenCL C DPAS GEMM) vs the sampled host reference\n");
     std::printf("# ZE_AFFINITY_MASK=%s\n", env_or_unset("ZE_AFFINITY_MASK"));
     std::printf("# %d replays, discard first %d, median of last %d; %d enqueues/replay; "
                 "one discarded warm-up.\n",
@@ -277,21 +243,18 @@ int main() {
     l0::Module mod(l0ctx, kernels::path("pf_gemm_bf16"));
     l0::Kernel kpf = mod.kernel("pf_gemm_bf16");
 
-    std::printf("\n| shape | K×N | M | pf ms | pf TFLOP/s | C2 ms | C2 TFLOP/s | pf/C2 | "
-                "bitwise vs C2 | max ratio (bar %.0f) | determinism |\n", kBar);
-    std::printf("|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---|\n");
+    std::printf("\n| shape | K×N | M | pf ms | pf TFLOP/s | max ratio (bar %.0f) | determinism |\n",
+                kBar);
+    std::printf("|---|---:|---:|---:|---:|---:|---|\n");
     bool all_ok = true;
     for (const Shape& shape : kShapes) {
       std::vector<uint32_t> ms = {2048};
       if (std::string(shape.name) == "gate‖up") ms.assign(std::begin(kGateUpMs), std::end(kGateUpMs));
       for (uint32_t M : ms) {
         const CellResult r = run_cell(l0ctx, cx, kpf, shape, M);
-        all_ok = all_ok && r.determinism && (r.bitwise_vs_c2 || r.ratio.within_bar);
-        std::printf("| %s | %u×%u | %u | %.3f | %.2f | %.3f | %.2f | %.4f | %s | %.3f | %s |\n",
-                    shape.name, shape.K, shape.N, M, r.pf.ms, r.pf.tflops, r.c2.ms, r.c2.tflops,
-                    r.pf.tflops / r.c2.tflops,
-                    r.bitwise_vs_c2 ? "**bitwise identical**" : "differs", r.ratio.max_ratio,
-                    r.determinism ? "bitwise" : "**FAILED**");
+        all_ok = all_ok && r.determinism && r.ratio.within_bar;
+        std::printf("| %s | %u×%u | %u | %.3f | %.2f | %.3f | %s |\n", shape.name, shape.K, shape.N,
+                    M, r.pf.ms, r.pf.tflops, r.ratio.max_ratio, r.determinism ? "bitwise" : "**FAILED**");
         std::fflush(stdout);
       }
     }

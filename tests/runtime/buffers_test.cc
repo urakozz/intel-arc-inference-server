@@ -83,12 +83,11 @@
 // the three cross-checks are docs/prefill-l1-preregistration-2026-09-05.md §1.
 //
 // Spec 2.1 §3.3 (this file's S1): the bf16 dequant scratch (356,515,840 B,
-// [5120][34816]) is no longer a fixed member of this table -- it is
-// `dequant_buffer()`, allocated lazily on first use, same as the new
-// `slab_buffer()` (17408 x 1024 x 2 B = 35,651,584 B, the L0 backend's
-// expansion). `bytes()` below is therefore 356,515,840 B smaller than plan
-// 6c/6d's total; `lazy_bytes()` reports whichever of the two a session has
-// actually built.
+// [5120][34816]) is no longer a member of this table (it was the sycl-tla
+// backend's, removed 2026-10-27); `slab_buffer()` (17408 x 1024 x 2 B =
+// 35,651,584 B, the L0 backend's expansion) is allocated lazily on first use.
+// `bytes()` below is therefore 356,515,840 B smaller than plan 6c/6d's total;
+// `lazy_bytes()` reports whichever lazy buffers a session has actually built.
 //
 //   ids          2048 x 4 B                                    =         8,192
 //   resid        2048 x 5120 x 2 B                             =    20,971,520
@@ -124,7 +123,7 @@
 //
 // Cross-checks, each of which fails loudly if a row above is wrong:
 //   * the 6b-owned rows alone (everything but the six pf_* ones, and now also
-//     without the lazy dequant scratch) = 598,654,872;
+//     without the dequant scratch) = 598,654,872;
 //   * the six pf_* rows = 1,308,819,456, plan 6d-composed's "total added" line
 //     exactly (pf_kt excluded: transB measured native and bitwise identical,
 //     commit 792e1dd, so the transpose fallback is not built); the four still
@@ -153,10 +152,9 @@ static void check_prefill_scratch(l0::Context& ctx) {
   CHECK_EQ(&pf.pf_s_buffer(), &pf.pf_s_buffer());   // built once
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184});
   CHECK_EQ(pf.bytes(), size_t{699514776});          // lazy buffers are not in bytes()
-  CHECK_EQ(pf.dequant_buffer().size(), size_t{356515840});
   // 17408 x 1024 x 2 B (derived: qwen38().intermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
   CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
-  CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 356515840 + 35651584});
+  CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 35651584});
   CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
   CHECK_EQ(runtime::PrefillScratch::kGdnChunk, 64u);
   CHECK_EQ(pf.s_heads(), 6u);
