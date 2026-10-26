@@ -71,6 +71,39 @@ repack, no second copy) and writes exactly the partials `gemv` writes, so every 
    into `prep.cl`; `Capture::check_sizes` asserts it). A different S is taken only if P0 measures it >= 5 % faster at
    M = 8 for that shape, with the consumer variant it needs.
 
+### 2.1 Prior art: oneDNN's Xe2 int4 decode GEMM
+
+oneDNN (public source; its gemmstone `kernel.db` entries for s4 x f16 on BMG, i.e. our silicon) already ships a small-n
+int4 GEMM. What it does for **n <= 16 token rows** (read from the source, published by others; nothing of it measured
+here):
+
+- **The weights are the DPAS A operand, the tokens the B operand (n columns).** A B tile is 16 columns wide on Xe2, so
+  n = 1..16 tokens cost the **same DPAS count**; it runs DPAS even at n = 1.
+- **A work-group of row-subgroups x K-slices, split-K inside the work-group, an SLM reduction** of the slices at the
+  end: n <= 8 - 2 row-subgroups x 8 K-slices, no B prefetch; n = 9..16 - 8 x 4, with a 128-k prefetch.
+- **K interleaved in chunks** = lcm(load size, prefetch stride, group_k / wgK), so neighbouring slices read adjacent
+  cache lines and each group's scales load once per chunk.
+- **int4 dequantised in registers inside the k-loop, before DPAS** (no SLM for weights), by the **magic-exponent
+  trick**: s4 xor 0x8888 -> u4; OR the nibble into the mantissa of the 16-bit magic 0x4300 (= 128 + x, exact); one add of
+  -(128 + 8); multiply by the group scale.
+- **Weights streamed with 2D block loads and a deep 2D block prefetch (80-160 k ahead)**, a split barrier every 128 k,
+  and **256-GRF mode** when the register footprint needs it.
+- **Pitfall (reported with it):** GRF-mode flags not applied froze an Xe2 card. Every 256-GRF binary of ours sets the
+  option on its ocloc line (`-cl-intel-256-GRF-per-thread`, as `pf_moe_gemm` does) and the probe checks the built
+  binary's GRF mode before a timed arm runs.
+
+**What we take, and how P0 decides:** §2's sketch above puts the weights on the B side (a sub-group owns 16 output
+columns; rows in blocks of 8 on A, so M = 9..16 needs a second DPAS row block). oneDNN's orientation - **weights on A,
+tokens on B** - covers M <= 16 in one DPAS column block, so its DPAS count is flat to 16, and its output is the
+transposed tile (`C[N][M]`, written to our `[(s M + m) N + n]` partials by the store). **P0 times both orientations**
+(plan 28a's arms `wB` and `wA`), and for the winner the levers above one at a time: the in-work-group split-K with the
+SLM reduction against our grid split-K (which keeps today's consumers), the magic-exponent dequant against our shift
+dequant (`GEMV_DEQ_SHIFT`), 2D block loads and prefetch depth, and the GRF mode. The production kernel takes the
+orientation and levers P0 measures fastest at M = 8 summed over a token. Property R must hold in the chosen form: with
+an **in-work-group** split-K the SLM reduction order is fixed by the work-group shape, so R holds only if that shape is
+the same for every M >= 2 (oneDNN switches shape at n = 9 - we may not, or rows 9..16 would differ from rows 1..8: P0
+measures the cost of one shape for all M).
+
 **The DPAS type (P0 decides):** **bf16** x dequantised-bf16 (above), or **i8 x i4** (activations quantised to int8 per
 row, weights int4 straight into the mixed-precision DPAS). The decode step is bandwidth-bound, so the type changes the
 ALU work, not the bytes; the i8 arm also needs a per-row activation quantisation and - for accuracy - the h8 rotation
@@ -170,7 +203,8 @@ list at M = 1..8 for the non-GEMV share.
 - **NO-GO** - recorded, spec 28 parked - when (c) fails, or (b) is above 1.6, or (a) above 1.5. The attribution then
   names the next lever (the attention's per-row walk, the GDN slot writes - spec 19 §11's replay-state lever - or the
   head).
-- **Recorded, not gating:** M = 2 / 4 / 16 per shape; S per shape at M = 8; the i8 x i4 arm and the choice of type;
+- **Recorded, not gating:** the orientation (weights on B or on A, §2.1) and each oneDNN lever's effect; M = 2 / 4 / 16
+  per shape; S per shape at M = 8; the i8 x i4 arm and the choice of type;
   `gemm_sm` at M = 1 against `gemv` (if it is as fast, §8 question 1); depth 32768's non-GEMV share.
 
 ## 7. Stages

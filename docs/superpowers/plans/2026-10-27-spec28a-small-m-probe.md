@@ -13,7 +13,9 @@ and the GO / NO-GO line in spec 28 §9.
 **Architecture:** spec 28 §1-§3, §6. A new probe `tools/probe/probe_small_m` (C++ / Level Zero, one card) with its
 stand-in kernels in `tools/probe/probe_small_m.cl` (spec 28 §2's kernel: dequant once per 64-row group, DPAS over row
 blocks of 8, the group scale in fp32, split-K partials in `gemv`'s layout; compile-time M, K, N, S, LAYOUT, TYPE =
-bf16 | i8i4); today's `gemv` / `gemv_i8w` binaries as the control (at M = 16 a probe-only `gemv` build - `gemv.cl` is
+bf16 | i8i4, ORIENT = wB | wA, and the oneDNN levers of spec 28 §2.1 as switches - SPLITK = grid | wg (in-work-group
+K-slices with an SLM reduction, one work-group shape for every M), DEQ = shift | magic (the 0x4300 magic-exponent
+dequant), PREFETCH = 0 | depth in k (2D block prefetch), GRF = 128 | 256); today's `gemv` / `gemv_i8w` binaries as the control (at M = 16 a probe-only `gemv` build - `gemv.cl` is
 generic in M; production stops at 8); a host fp64 reference shared with 28b (`tests/kernels/gemm_sm_ref.h`).
 `probe_verify_m`'s profiled-list section (1b) gains M = 5..8 through the M8 lists `probe_mtp_steps` already builds
 (`B70_VERIFY_M8`).
@@ -43,6 +45,9 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
   lock, interleaved pairs after a warm-up, **median of 5** with the range for kernels, of 3 for whole steps. Detached
   and polled (`tools/probe/detach.sh`).
 - Every number written with its grade (spec 28's legend).
+- **256-GRF builds carry the option on their ocloc line** (`-cl-intel-256-GRF-per-thread`) and the probe reads the built
+  binary's GRF mode back before any timed arm (oneDNN's reported pitfall: GRF-mode flags not applied froze an Xe2
+  card - spec 28 §2.1). A mismatch exits before the card runs it.
 
 ## Review Focus
 
@@ -69,7 +74,7 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
   declaration, not an emulation)
 
 **Interfaces:** `probe_small_m shapes|numerics [--shape qkvz|out|qkv|o|gateup|down|head|ab|all] [--m 1,2,4,8,16]
-[--type bf16|i8i4] [--s N] [--rounds 5] [--device 0]`.
+[--type bf16|i8i4] [--orient wB|wA] [--splitk grid|wg] [--deq shift|magic] [--prefetch K] [--grf 128|256] [--s N] [--rounds 5] [--device 0]`.
 
 - [ ] **Step 1: failing tests** - `gemm_sm_ref_test` (the reference = `gemv`'s host twin within 1 fp32 ulp of the sum;
   layouts 0 / 1; the head's per-column scale).
@@ -81,7 +86,10 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
 
 - [ ] **Step 1:** every shape (spec 28 §6's list, with its layer count) at M = 1 / 2 / 4 / 8 / 16: control against
   each stand-in type, interleaved pairs, median of 5; ms per call, GB/s against the shape's bytes, the ratio to the
-  control at M = 1. Then at M = 8 the S sweep for each shape (S dividing K / 64). Record in
+  control at M = 1. Then at M = 8, for each shape: both orientations (`wB`: weights on B, our sketch; `wA`: weights on A, tokens on B -
+  oneDNN's, spec 28 §2.1); for the faster one the levers one at a time - `--splitk wg` against `grid` (the in-work-group
+  shapes 2 x 8 and 8 x 4 of oneDNN, and the one shape kept for every M that property R needs), `--deq magic` against
+  `shift`, `--prefetch` 0 / 80 / 160, `--grf 256`; and the S sweep (S dividing K / 64) for grid split-K. Record in
   `docs/probe-small-m-gemm-<date>.md` §1. Commit
   `git commit -S -m "probe: Qwen3.8's decode linears at M = 1..16, gemv against small-M DPAS (spec 28a)"`.
 
