@@ -1,12 +1,12 @@
 # Host-only configuration (B70_HOST_ONLY=ON, preset `mac-host`): configure, build and
 # ctest the tests that need no Level Zero device, on a machine without a Level Zero
-# runtime, ocloc or icpx - the Mac. docs/18-mac-checks.md has the why; the short form:
+# runtime or ocloc - the Mac. docs/18-mac-checks.md has the why; the short form:
 #
 # **The test list is derived, not listed.** tests/CMakeLists.txt is shared by every
 # branch in flight, and a parallel list of "the host tests" would drift the day
 # somebody adds a test. So this file changes no registration at all. It stands in for
-# the three things the full build needs from the box (the Level Zero package, ocloc,
-# icpx), records every add_test as it happens, DISABLES each test that needs a device
+# the two things the full build needs from the box (the Level Zero package and
+# ocloc), records every add_test as it happens, DISABLES each test that needs a device
 # or box-only data at the end of the directory that added it, and - last, from the
 # top-level CMakeLists.txt (b70_host_only_finish) - writes the reasons to
 # <build>/host_only_skipped.txt and takes everything else out of `all`. A plain `ctest`
@@ -14,7 +14,7 @@
 # ctest does not count as a failure.
 #
 # **What makes a test a device test** (any one is enough):
-#   - its target links b70_l0, b70_runtime, b70_prefill_host or b70_prefill directly
+#   - its target links b70_l0, b70_runtime or b70_prefill_host directly
 #     (b70_loader also links b70_l0 transitively, but the loader's host tests use only
 #     its pure parts - static-archive linking pulls in no Level Zero object for them,
 #     and a test that DID call into the device would fail to link here, which is the
@@ -53,12 +53,6 @@ if(NOT EXISTS "${_ho_l0_root}/level_zero/ze_api.h")
 endif()
 add_library(PkgConfig::ZE INTERFACE IMPORTED GLOBAL)
 set_target_properties(PkgConfig::ZE PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_ho_l0_root}")
-
-# The SYCL prefill component is icpx-only; AUTO already finds no icpx on a Mac, and
-# ON cannot mean anything here.
-if(B70_PREFILL STREQUAL "ON")
-  message(FATAL_ERROR "B70_HOST_ONLY=ON with B70_PREFILL=ON: the SYCL component needs icpx")
-endif()
 
 # ocloc stand-in: no binary is produced, but kernel_<name> exists so every
 # add_dependencies(... kernel_<name>) in the tree still resolves (and marks the
@@ -105,7 +99,7 @@ endfunction()
 function(_b70_ho_target_reason tgt out)
   set(reason "")
   get_target_property(libs ${tgt} LINK_LIBRARIES)
-  foreach(l IN ITEMS b70_l0 b70_runtime b70_prefill_host b70_prefill)
+  foreach(l IN ITEMS b70_l0 b70_runtime b70_prefill_host)
     if(libs AND l IN_LIST libs)
       set(reason "links ${l} (Level Zero device)")
       break()
