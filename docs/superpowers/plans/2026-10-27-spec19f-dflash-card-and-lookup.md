@@ -1,7 +1,8 @@
 # Spec 19f - DFlash on the card (the `dflash_kernels_test` fix, rows 54-56), then prompt lookup inside DFlash
 
 **Conditions:** this plan starts after **plan 28b** (spec 28's build) is merged, when the operator says go (one
-implementing plan at a time). Task 1 (the fix) does not need 28b's code and may be pulled forward by the operator.
+implementing plan at a time). Task 1 (the fix) does not need 28b's code and may be pulled forward by the operator. **2026-10-27: pulled forward by the
+operator - Task 1 (the fix, rows 54-56) runs early, before spec 28; Tasks 2+ still wait for 28b.**
 
 **Status (2026-10-27): PLANNED - second in the Qwen speed track.** Nothing built. The fix re-runs the existing rows
 **54-56**; the lookup-in-DFlash mode is box queue row **70** (spec 28's header lists the track's rows 68-75). K up to 15

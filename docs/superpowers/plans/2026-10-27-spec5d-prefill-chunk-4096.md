@@ -75,16 +75,16 @@ operator rules on (open question 1 below). Every byte is recomputed, not doubled
   pp4096 >= +5 % and no depth slower by more than 1 %**; expected +8-15 % (estimated). Below +5 %: 4096 stays opt-in
   (`--prefill-chunk 4096` with the cap) and the record says why.
 
-## Open questions for the operator
+## Open questions for the operator (decided 2026-10-27: both as proposed)
 
 1. **Context against speed:** (i) context first - `--max-len auto` plans at chunk 2048 and 4096 is used only when the
    memory is there anyway (an explicit `--max-len` below the auto value, or a model / KV form that already reaches
-   262144); (ii) speed first - 4096 always, `--max-len auto` ~12k (bf16 KV) / ~24k (int8 KV) shorter. **Proposed: (i).**
+   262144); (ii) speed first - 4096 always, `--max-len auto` ~12k (bf16 KV) / ~24k (int8 KV) shorter. **Proposed: (i).** **Decided (operator, 2026-10-27): (i).**
 2. **The prefix cache's granularity under 4096 chunks:** (A) keep `kBlock` 2048 for hashing and the KV ranges, take the
    state snapshot only at chunk ends that are block ends (every 4096 under a 4096 chunk); a hit at an odd block resumes
    from the previous state point and re-prefills <= 2048 positions (~1 s at worst, derived) - request-end snapshots,
    which agentic turns resume from, are unaffected; (B) keep the hooked path at 2048 (the gain only for cold, unhooked
-   prefill - not the server); (C) `kBlock` 4096 (coarser reuse everywhere). **Proposed: (A)**, after Task 2 reads how
+   prefill - not the server); (C) `kBlock` 4096 (coarser reuse everywhere). **Proposed: (A)** - **decided (operator, 2026-10-27): (A)**, after Task 2 reads how
    `PrefixCache::reserve` / the lookup treat a block end without a state.
 
 ---

@@ -223,9 +223,9 @@ docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they m
 **Open decisions (operator):**
 1. **M = 1 through `gemm_sm` too?** If P0 measures it as fast as `gemv`, one kernel for every M would make every row
    bitwise across all M (N3 down to M = 1) - at the price of new decode numerics for plain decode and a new golden
-   baseline (G0 is no longer bitwise). Proposed: **no** - keep M = 1 bitwise, as the operator asked.
+   baseline (G0 is no longer bitwise). Proposed: **no** - keep M = 1 bitwise, as the operator asked. **Decided (operator, 2026-10-27): no.**
 2. **bf16 or i8 x i4:** by §2's rule (expected bf16).
-3. **Agnes in 28b or a follow-on:** proposed **in 28b** (same capture, its PROVISIONAL S copied as for `gemv`).
+3. **Agnes in 28b or a follow-on:** proposed **in 28b** - **decided (operator, 2026-10-27): in 28b** (same capture, its PROVISIONAL S copied as for `gemv`).
 
 ## 9. P0 verdict
 

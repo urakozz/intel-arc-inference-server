@@ -167,8 +167,8 @@ for Qwen3.8.
   flight (layer l of chunk i + 1 needs only chunk i's state at layer l) - is the first option 17c measures, beside
   §4.5's hybrid (prefill as `--pp 2`, decode as TP) and plain TP prefill.
 - **Speed bars (§6 for dense, sharpened):** **D1-dense:** `--tp 2` plain against one card plain (the ceiling check,
-  >= 1.35x proposed) and **`--tp 2 --mtp auto` against one card `--mtp auto` (the bar: >= 1.25x on the tool-call set,
-  proposed)**; `--tp 2 --spec dflash` against one card `--spec dflash` once 19f has passed; the replica mode on the
+  >= 1.35x, decided by the operator 2026-10-27) and **`--tp 2 --mtp auto` against one card `--mtp auto` (the bar: >= 1.25x on the tool-call set,
+  decided by the operator 2026-10-27)**; `--tp 2 --spec dflash` against one card `--spec dflash` once 19f has passed; the replica mode on the
   multi-session workload is recorded when spec 13 §10 exists.
 - **Gates:** §5's T1-T4 unchanged; T2 is against one card under the golden tie rule (Qwen3.8 fits one card).
 - **Batching (spec 13b) under TP:** still out of scope (§8).
