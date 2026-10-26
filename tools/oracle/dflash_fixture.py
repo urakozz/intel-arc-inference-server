@@ -38,24 +38,6 @@ a tiny random MuseGlimmerAssistantModel at Muse's ratios: hidden 64, 2 layers, 8
   muse.case{i}.{hidden f32 [16][64] (all 16 rows), cand i32 [K][16], unary f32 [K][16] (raw logits), ids i32 [K]}
   muse.norm.{src bf16 [4][64], w bf16 [64], out bf16 [4][64]}   _m_norm in bfloat16 (the two roundings)
   metadata: config_muse, vocab_used, cases
-
-    dflash_fixture.py --lilicorr [--out tests/loader/lilicorr_dflash_fixture.safetensors]
-
-Spec 26b: the same for the LiLiCorr form (dflash_ref.py's "lilicorr", 26a's port of vLLM's models/lilicorr.py) - 26a's
-tiny drafter (tools/oracle/lilicorr_make_tiny.py: its names, NVFP4 packing and edges - a zero scale block, subnormal
-scales) at narrower widths so the file stays small: hidden 128, 2 layers, 4 / 1 heads x 32, FF 256, 6 taps of a
-hidden-128 target (fc 768 -> 128), conv groups of 8 (kernel projection 64 rows: a whole GEMV width), window 16
-(|q - k| <= 15), sinks, block 8, mask id 990, the head 64 wide / 2 layers / 4 heads / MLP 128 / factor 64 / top-8, over
-a synthetic target of
-vocab 1024 (embedding and head random bf16). The reference runs in float32 (its only mode):
-  ckpt.<name>                     the tiny checkpoint's own tensors (U8 / F8_E4M3 / F32 NVFP4 triplets, BF16 the rest)
-  target.embed / target.head bf16 [1024][128], taps bf16 [40][768]
-  lil.ctx.fc f32 [40][128]; lil.ctx.k{l} / lil.ctx.v{l} f32 [40][1][32]   context_kv over positions 0..39
-  lil.case{i}.{hidden f32 [8][128] (all 8 rows), cand i32 [7][8], logit f32 [7][8], lp f32 [7][8], lattice f32
-              [7][8][8], anchor f32 [128] (zeros when invalid), chosen i32 [K], ids i32 [K], scores f32 [K][8]}
-  lil.nvfp4.<base>.{wp bf16 [N][K], g f32 [1]}   nvfp4_decode of three of the linears (W' and g kept apart)
-  lil.mut.{no_sink, anchor_p2}.lattice f32 [7][8][8]   case 3 under the reference's test-only mutations
-  metadata: config_lilicorr, vocab_used, cases
 """
 from __future__ import annotations
 
@@ -237,93 +219,13 @@ def main_muse(out_path: str) -> None:
     print(f"wrote {out_path}: {len(out)} tensors, {os.path.getsize(out_path)} bytes")
 
 
-# Spec 26b: (p, anchor, K, T, seed) - no context (p 0: the anchor invalid), the window's edge for row 0 and row 7 (p 15 /
-# 16 / 17 with window 16), the 16-slot ring's wrap (p 30 / 39 / 40), K 7 / 3 / 1 (prefixes of one walk), the mask id as
-# the anchor, sampled walks (the seed's high word set: the slot keys seed ^ (s << 32)).
-LIL_CASES = [
-    {"p": 0, "anchor": 7, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 1, "anchor": 11, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 15, "anchor": 123, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 16, "anchor": 4, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 17, "anchor": 300, "K": 3, "T": 0.0, "seed": 0},
-    {"p": 30, "anchor": 990, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 39, "anchor": 77, "K": 1, "T": 0.0, "seed": 0},
-    {"p": 40, "anchor": 512, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 23, "anchor": 9, "K": 7, "T": 0.8, "seed": 1234567},
-    {"p": 33, "anchor": 410, "K": 6, "T": 1.3, "seed": (5 << 32) | 77},
-]
-LV, LTH = 1024, 128
-
-
-def lilicorr_cfg() -> tuple:
-    spec = importlib.util.spec_from_file_location("lilicorr_make_tiny", os.path.join(_HERE, "lilicorr_make_tiny.py"))
-    mk = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mk)
-    cfg = mk.tiny_config(vocab=LV, window=16)
-    cfg.update({"hidden_size": 128, "num_attention_heads": 4, "num_key_value_heads": 1, "head_dim": 32,
-                "intermediate_size": 256})
-    cfg["dflash_config"].update({"lilicorr_hidden_size": 64, "lilicorr_num_heads": 4, "lilicorr_factor_dim": 64,
-                                 "conv_group_size": 8})
-    return cfg, mk
-
-
-def main_lilicorr(out_path: str) -> None:
-    cfg_d, mk = lilicorr_cfg()
-    ckpt = mk.make_tensors(cfg_d, seed=26)
-    torch.manual_seed(20261023)
-    embed = bf(LV, 128, std=0.5)
-    head = bf(LV, 128, std=0.5)
-    taps_ids = cfg_d["dflash_config"]["target_layer_ids"]
-    taps = {i: bf(N, LTH, std=1.0) for i in taps_ids}
-    pos = torch.arange(N)
-    out = {f"ckpt.{k}": v for k, v in ckpt.items()}
-    out.update({"target.embed": embed, "target.head": head, "taps": torch.cat([taps[i] for i in taps_ids], -1)})
-    meta = {"vocab_used": str(LV), "cases": json.dumps(LIL_CASES), "config_lilicorr": json.dumps(cfg_d)}
-    cfg = ref.config_from_dict(cfg_d)
-    tens = ref._read_nvfp4_tensors(dict(ckpt), cfg_d["quantization_config"])
-    d = ref.Drafter(cfg, dict(tens), embed, head)
-    for base in ("fc", "layers.1.mlp.down_proj", "lilicorr.layers.0.attn.out_proj"):
-        out[f"lil.nvfp4.{base}.wp"] = tens[base + ".weight"].to(torch.bfloat16)
-        out[f"lil.nvfp4.{base}.g"] = torch.tensor([float(tens[base + ref.G_SUFFIX])], dtype=torch.float32)
-    ctx = d.context_kv(taps, pos)
-    out["lil.ctx.fc"] = ctx.fc.float().contiguous()
-    for i in range(cfg.n_layers):
-        out[f"lil.ctx.k{i}"] = ctx.k[i].float().contiguous()
-        out[f"lil.ctx.v{i}"] = ctx.v[i].float().contiguous()
-    for ci, c in enumerate(LIL_CASES):
-        o = d.draft_block(c["anchor"], c["p"], c["K"], ctx, temperature=c["T"], seed=c["seed"] if c["T"] > 0 else None)
-        p = f"lil.case{ci}."
-        out[p + "hidden"] = o.hidden.float().contiguous()
-        out[p + "cand"] = o.cand_ids.to(torch.int32).contiguous()
-        lg = d.head_logits(o.hidden[1:])
-        out[p + "logit"] = torch.gather(lg, 1, o.cand_ids).float().contiguous()
-        out[p + "lp"] = o.log_probs.float().contiguous()
-        out[p + "lattice"] = o.lattice.float().contiguous()
-        out[p + "anchor"] = o.anchor.float().contiguous()
-        out[p + "chosen"] = o.chosen.to(torch.int32).contiguous()
-        out[p + "ids"] = o.ids.to(torch.int32).contiguous()
-        out[p + "scores"] = o.scores.float().contiguous()
-    c = LIL_CASES[3]
-    for m in ("no_sink", "anchor_p2"):
-        d.mut = {m}
-        out[f"lil.mut.{m}.lattice"] = d.draft_block(c["anchor"], c["p"], c["K"], ctx).lattice.float().contiguous()
-    d.mut = set()
-    from safetensors.torch import save_file
-    save_file({k: v.contiguous().clone() for k, v in out.items()}, out_path, metadata=meta)
-    print(f"wrote {out_path}: {len(out)} tensors, {os.path.getsize(out_path)} bytes")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out")
     ap.add_argument("--muse", action="store_true", help="spec 23f: the Muse-Glimmer assistant's fixture")
-    ap.add_argument("--lilicorr", action="store_true", help="spec 26b: the LiLiCorr drafter's fixture")
     a = ap.parse_args()
     if a.muse:
         main_muse(a.out or "tests/loader/muse_dflash_fixture.safetensors")
-        return
-    if a.lilicorr:
-        main_lilicorr(a.out or "tests/loader/lilicorr_dflash_fixture.safetensors")
         return
     a.out = a.out or "tests/loader/dflash_ref_fixture.safetensors"
     torch.manual_seed(20261016)

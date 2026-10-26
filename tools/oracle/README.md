@@ -27,11 +27,9 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `check.sh` | Re-reads the three written files in a separate process and prints the block quoted under "Sanity checks" below. |
 | `stream.py` | Layer-streamed weights for `dump.py --stream` / `mtp_ref.py --dump --stream` (spec 14, the Mac path below): the model on `meta`, embed/norm/lm_head resident, each decoder layer materialised by a forward pre-hook and dropped after its forward; plus a bit-exact C++ `dequant_t`, the single-thread grouped conv1d, and a hold mode (a layer stays materialised until every sequence of a layer-major batch has run it). |
 | `dflash_ref.py` | Spec 19a: the CPU reference of the DFlash / DFlash 2 drafters (config reader, drafter + target embed/head loader incl. the W4A16 drafter, `context_kv`, `draft_block`); `test_dflash_ref.py` checks it on tiny random weights. "The DFlash reference" below. |
-| `lilicorr_make_tiny.py` | Spec 26a: a tiny random LiLiCorr drafter in the checkpoint's own names and NVFP4 packing (2 layers at hidden 256, the head at 64, window 16, taps 1 / 2 / 4 / 6 / 9 / 10 of 25a's tiny Bolt) - `dflash_ref.py`'s LiLiCorr form reads it. "The LiLiCorr form" below. |
-| `lilicorr_vllm_check.py` | Spec 26a: `dflash_ref.py`'s LiLiCorr head against vLLM's own `LiLiCorrHead` on CPU (a one-rank gloo group, unquantised fp32 weights): the lattice bitwise or the max |diff| and its reason; runs where vLLM imports (the box's vLLM image), SKIP 77 elsewhere. |
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
-| `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. `MODEL=muse` (spec 23f) and `MODEL=lilicorr` (spec 26a: check / accept / lookup / union) are the later drafters' P0s. |
+| `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. `MODEL=muse` (spec 23f) is the later drafter's P0. |
 | `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
 | `k2_taps.py` | The EAGLE3 K2 P0: `k2_ref.py` over [prompt + K2's recorded continuation], one forward per source: the aux taps (the INPUT of K2 layers 2 / 24 / 45), the pre-norm final hidden, K2's greedy, top-16, and the MoE / MoVA routes. `test_k2_taps.py`: the tap points bitwise against the vendored model with the vLLM plugin's capture emulated. |
 | `eagle3_accept.py` | The EAGLE3 K2 P0: teacher-forced acceptance (K = 1..5, arms bf16 / int8 / int8h / int4h), spec 19e's prompt lookup on the same anchors, and the summary with the derived speed-up. `test_eagle3_accept.py`. |
@@ -468,30 +466,6 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
   -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_ref.py
 ```
 
-**The LiLiCorr form (spec 26a, 2026-10-23).** A config with `architectures: [LiLiCorrDraftModel]`
-(`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` @ `449d2414`) reads as `DFlashConfig(form="lilicorr", version=2)`:
-vLLM's DFlash 2 backbone (5 layers, 32 q / 2 kv x 128, every layer sliding at `|q - k| <= 1023`, non-causal, the two grouped
-convolutions) with attention sinks, `block_size` 8 from the top level, and vLLM 3901d56800's `LiLiCorrHead` in place of the
-candidate selector (`V/models/lilicorr.py`; spec 26 §2). Its parts, each tested on a tiny random drafter
-(`lilicorr_make_tiny.py`) over a synthetic target (`test_lilicorr_*` in `test_dflash_ref.py`):
-- **NVFP4, exactly** (`nvfp4_decode`): `weight` U8 [N][K/2] (k = 2i in the low nibble), `weight_scale` F8_E4M3 [N][K/16],
-  `weight_scale_2` the fp32 g. W' = s_b x e is held as float32 holding bf16-exact values and g rides beside it
-  (`<base>.weight_global` -> `Drafter.g`), applied to the linear's OUTPUT (`Drafter._lin`: `g x (x W'^T) + b`). All
-  16 x 254 finite (code, scale) products are exact in bf16 and f16 (|W'| in [2^-10, 2688]); the two NaN scale codes are
-  refused naming the tensor and element.
-- **The block** is always 8 rows (anchor + 7 masks) and the head always scores 7 slots, so K = 1..7 are prefixes of one
-  walk (spec 26 §5.3; vLLM runs a K-row block at K < 7 - not this form).
-- **Candidates**: the target head's top 8 per mask row (ties to the lower id), log-probs over the WHOLE vocabulary.
-- **The anchor**: `hidden_norm(fc(taps))` at p - 1 (`ContextKV.anchor_row`; `LiLiCorrSession` keeps it as the newest
-  committed row), `anchor_valid` true.
-- **The lattice** [7][8 previous][8 next] x 8.0: slot 0 = `start` broadcast over the previous index, slot s = `pair[s - 1]`;
-  the slot bias at the trained offset 7 for any number of slots; the walk reads the lattice alone from previous 0; sampled
-  draws keyed `seed ^ (slot << 32)` (vLLM 3901d56800's `spec_step_seed`), position p + s, the candidate id.
-- `Drafter.mut` holds test-only mutations (each Review Focus item of plan 26a must move the lattice or the drafts).
-`load_drafter(dir, embed=..., lm_head=...)` takes Bolt's embedding / head (`read_target_embed_head` reads
-`language_model.{model,backbone}.embeddings.weight` and `language_model.lm_head.weight`). The tests take ~10 s in
-`agnes-ref-img`; the real config is checked from the HF cache when present.
-
 ### The DFlash P0 (spec 19a Tasks 2-3, 2026-10-06)
 
 Two scripts and a driver, on the Mac:
@@ -532,16 +506,6 @@ Tests (tiny models, a minute; `dflash_p0.sh`'s `check` step runs both):
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dump_taps.py
 docker run --rm --memory 6g -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/oracle/test_dflash_accept.py
 ```
-
-**The LiLiCorr P0 (spec 26a, 2026-10-23; queue row 63).** `MODEL=lilicorr tools/oracle/dflash_p0.sh` over bolt_ref.py's
-tap dumps (`oracle-out-bolt-taps/dumps`, `bolt_oracle.sh <data> taps`): `check` (test_dflash_ref.py, test_dflash_accept.py
-- the tiny pair: 25a's tiny Bolt tapped at `--tap-layers 1,2,4,6,9,10` + `lilicorr_make_tiny.py`), `accept`
-(`dflash_accept.py run --model bolt-lilicorr`: arms `exact` / `int8` / `int4g64` and their int8-head forms; K 1..7 from one
-8-row block an anchor; the sampled estimate for q `lattice` and `lattice+lp` at T 1.0 / top-p 0.95, no top-k; SKIP 77 while
-the drafter's weights are not in the cache), `lookup` (`lookup_accept.py --dumps --max-k 7`), `union`
-(`tools/spec/expert_union.py` over the golden runs' route records) -> `oracle-out-lilicorr-p0/`. Decision 1's cross-check
-`lilicorr_vllm_check.py` needs vLLM itself (not importable in `agnes-ref-img`): the box's vLLM image (r63.vllmref). The record:
-`docs/probe-lilicorr-2026-10-23.md`.
 
 ### The EAGLE3 K2 P0 (2026-10-08)
 
@@ -907,7 +871,7 @@ Subcommands (`bolt_ref.py <cmd> -h`): `run <snapshot> --prompt <ids> --out <p>.g
 generated row, `tokens`, `nll`; the log prints the 9th / 10th `sel` gap per block - `B70_BOLT_TIE_TOL`'s evidence,
 Decision 11 - and the SSM state magnitudes); `ppl` (no BOS: the template writes none); `hfcheck <snapshot> --layers N
 [--dtype fp32|bf16]` (the port against its restated chain `port_forward` - BITWISE or exit 1 - and R's torch fallback,
-recorded); `taps` (dump_taps' format, `tap_from = n_prompt - 1024`, LiLiCorr's window); `facts` (`bolt_facts.py`);
+recorded); `facts` (`bolt_facts.py`);
 `gateq` (`bolt_gateq.py`). `--layers N` needs an attention block among the first N (N >= 8): R's cache takes the
 length from one (R:247-253).
 
@@ -937,7 +901,7 @@ docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF
 ```
 
 **Real weights** (`tools/box_validate/bolt_oracle.sh <data> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|
-taps|gateq`, queue row 57, the box CPU; `DRY_RUN=1` prints every command, the RAM floor and the ESTIMATED times). The
+gateq`, queue row 57, the box CPU; `DRY_RUN=1` prints every command, the RAM floor and the ESTIMATED times). The
 checkpoints are downloaded by hand, PINNED (a newer revision's remote code is refused by its sha256): `hf download
 SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997`
 (41.9 GB) and `hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff`
@@ -946,8 +910,7 @@ container (40 GB) runs `tests` only. `golden` -> `oracle-out-bolt/` (the g128 fo
 reference every B3 gate reads, `--taps`), `golden-bf16` -> `oracle-out-bolt-bf16/`, `export <dir>` ->
 `oracle-out-bolt-<name>/` (25q's export, 25b's synthetics), `a4` / `a4-bf16` -> `oracle-out-bolt-a4/<name>.{int4,bf16}.*`
 (`tools/toolcall/a4_ref.sh bolt`, the committed set `tests/golden/toolcall-bolt`: key-sorted, reasoning on,
-`medium_effort`; 2048 new ids; score with `score.py --format qwen-think`), `taps` -> `oracle-out-bolt-taps/dumps/`
-(spec 26a's input), `gateq` -> `oracle-out-bolt-a4/{gateq.json,gateq.log}` (`bolt_gateq.py`, Decision 3: recorded).
+`medium_effort`; 2048 new ids; score with `score.py --format qwen-think`), `gateq` -> `oracle-out-bolt-a4/{gateq.json,gateq.log}` (`bolt_gateq.py`, Decision 3: recorded).
 `BOLT_KEEP=all` keeps the dense blocks resident once read (~13.6 GB bf16) - a decode-heavy run's lever;
 `BOLT_EXPERT_CACHE_GB` (oracle_generate) / `--expert-cache-gb` (run) an LRU of dequantised experts.
 Facts: `bolt_facts.py` (`docs/probe-bolt-2026-10-21.md`); golden prompts `tests/golden/prompts/bolt_{short,short_prose,

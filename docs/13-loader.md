@@ -1061,9 +1061,8 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica: unlike LFM2's tied head).
 - **The memory plan before the first allocation** (`runtime::bolt::plan`, `src/runtime/bolt/`): per device its blocks'
   weights (the loader asserts its allocation equals `loader::bolt::device_weight_bytes`), KV for its attention blocks at
-  `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds x (1 + verify slots), the
-  raw-xBC rings, caller-given decode / prefill scratch and - on the last device - spec 26's drafter and its embedding replica,
-  the 1.5 GB reserve. The split is `runtime::pp_balance` over the blocks' weights alone: **48** (device 0 holds blocks 0-47 -
+  `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds, the
+  raw-xBC rings, caller-given decode / prefill scratch and the 1.5 GB reserve. The split is `runtime::pp_balance` over the blocks' weights alone: **48** (device 0 holds blocks 0-47 -
   22 Mamba, 5 attention - and the embedding: 19,928,067,776 B; device 1 blocks 48-87, norm_f and the int8 head: 20,540,610,880
   B). `--max-len auto` is the largest multiple of 256 that fits every device and is at most `max_position_embeddings`
   (262144): on two 32 GiB cards with the scratch, the drafter, its replica and 7 verify slots all reserved it is 262144

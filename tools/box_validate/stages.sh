@@ -4121,13 +4121,6 @@ st_r57_a4_bf16() {
   grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
   finish
 }
-stage r57.taps       57 optin   cpu  bolt_g128,oracle_image       r57.golden  "tap dumps for spec 26a -> oracle-out-bolt-taps (prose / code / agentic; a4/* after r57.a4_ref)"
-st_r57_taps() {
-  chk "tools/box_validate/bolt_oracle.sh $DATA taps" "the tap dumps (dump_taps' format)"
-  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
-  grab_all taps 'taps|sources|wall|SKIPPED' 40
-  finish
-}
 stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_bf16  "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
 st_r57_gateq() {
   chk "tools/box_validate/bolt_oracle.sh $DATA gateq" "gate Q (a recorded measurement, Decision 3)"
@@ -4554,122 +4547,6 @@ qwen-l0 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536
   finish
 }
 
-row 63 "spec 26a - LiLiCorr P0: the reference (dflash_ref.py's LiLiCorr form, NVFP4 decoded exactly, cross-checked against vLLM's head), acceptance on our Bolt, the expert union, the verify / block costs, the projection (plan 26a)"
-rownote 63 "Download the drafter (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1"
-rownote 63 "Written on the Mac (spec 26 §12, docs/probe-lilicorr-2026-10-23.md): the reference's LiLiCorr form is tested on a tiny random drafter (lilicorr_make_tiny.py) - NVFP4's 16 x 254 finite products exact in bf16 and f16, every Review Focus item a mutation that moves the lattice or the drafts - and end to end on 25a's tiny Bolt (bolt_ref.py taps --tap-layers 1,2,4,6,9,10). the real drafter's weights were read on the Mac (decoded exactly, 1,112,803,882 parameters) but never beside Bolt's taps; vLLM is not importable in the Mac's oracle image, so Decision 1's cross-check is r63.vllmref's. kernel_cmdlines +99 / -0 / ~0 (Bolt's 7 GEMVs, nb_router, the int8 head and argmax stage 1 at M = 2..8; the expert stand-in; the drafter at M 8 in three formats; the LiLiCorr head's bf16 shapes) - no existing .cl edited, none of them has been compiled by ocloc."
-rownote 63 "P0 gates nothing (the operator's 2026-10-15 ruling: 26b / 26c are built whatever it shows); it sets the defaults (spec 26 §11): the drafter format (Decision 2: int8 unless int4 g64 is within 0.05 of exact's E_K at the chosen K), K_max, the q form (Decision 6), the replay lever (Decision 4: built only if the slot writes exceed 10 % of a verify at the chosen K), the union MoE's expectation (Decision 10) and 26c's AdaptiveK cost row. Order: r57.golden + r57.taps (+ r57.a4_ref for the a4/* dumps) first; r63.accept and r63.union on the CPU; r63.cost on one card; then r63.verdict by hand."
-rownote 63 "Hand back: r63.accept's oracle-out-lilicorr-p0/accept/summary.md (E_K per corpus and arm, alpha per depth, the sampled table with the censored / short counts) + lookup.txt; r63.union's union.txt / union.gen.txt (u per M and E bucket, the routed bytes); r63.cost's table (the verify per M at 4096 / 65536, by part, the time per expert block, the state rate, the three blocks and the LiLiCorr head alone); r63.vllmref's lines (the lattice BITWISE or the max |diff| with its reason); r63.verdict's project.md; r63.vllm_xpu's mean acceptance length (or its error)."
-stage r63.k0        63 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +99 / -0 / ~0 (no existing .cl edited)"
-st_r63_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
-stage r63.host      63 default cpu oracle_image              -        "test_dflash_ref.py (LiLiCorr), test_dflash_accept.py (the tiny pair), test_lilicorr_p0_project.py, test_expert_union.py; host: lilicorr_cost_names_test"
-st_r63_host() {
-  run_tests '^lilicorr_cost_names_test$'
-  chk "IMAGE=\${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} SITE=oracle-out-q4exp-site MODEL=lilicorr STEPS=check tools/oracle/dflash_p0.sh" \
-    "the reference's and the acceptance's tests in the oracle image (the tiny pair: 25a's tiny Bolt + lilicorr_make_tiny)"
-  chk "python3 tools/spec/test_lilicorr_p0_project.py && python3 tools/spec/test_expert_union.py" "the projection's and the union's tests"
-  jgrab host '^lilicorr_cost_names_test$' 'OK|names'
-  x "grep -hE 'mutation|nvfp4:|tiny pair|lilicorr batch|int8 arm|int4 arm|^ok' oracle-out-lilicorr-p0/test_dflash_ref.log oracle-out-lilicorr-p0/test_dflash_accept.log | head -60"
-  finish
-}
-stage r63.vllmref   63 optin   cpu vllm_image                -        "lilicorr_vllm_check.py in the vLLM image: the head bitwise in fp32"
-st_r63_vllmref() {
-  chk "ORACLE_IMAGE=\${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} tools/oracle/run_in_container.sh 'python3 tools/oracle/lilicorr_vllm_check.py'" \
-    "dflash_ref's LiLiCorr head against vLLM's own LiLiCorrHead on CPU tensors (Decision 1; SKIP 77 when the image's vLLM has no models/lilicorr.py - then by hand with --vllm-src <a 3901d56800 checkout inside the tree>)"
-  grab_all vllmref '^S [0-9]|^OK|^FAIL|^vLLM|^note|SKIP_REASON' 12
-  finish
-}
-stage r63.accept    63 optin   cpu oracle_bolt_taps,lilicorr,bolt_g128,oracle_image - "E_K per corpus and arm, lookup (hours): MODEL=lilicorr dflash_p0.sh accept + lookup over oracle-out-bolt-taps/dumps -> oracle-out-lilicorr-p0/{accept/summary.md,lookup.txt}"
-st_r63_accept() {
-  x "free -g | head -2"
-  chk "IMAGE=\${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} SITE=oracle-out-q4exp-site MODEL=lilicorr STEPS='accept lookup' tools/oracle/dflash_p0.sh" \
-    "the LiLiCorr acceptance (arms exact / int8 / int4g64 and their int8-head forms, K 1..7 from one 8-row block, sampled q lattice / lattice+lp) and the lookup baseline"
-  x "cat oracle-out-lilicorr-p0/accept/summary.md oracle-out-lilicorr-p0/lookup.txt 2>/dev/null | head -160"
-  grab_all accept '^\| |E_7|lookup|censored' 120
-  finish
-}
-stage r63.union     63 default cpu oracle_bolt               -        "the expert union of M = 2..8 consecutive rows from the golden runs' route records (expert_union.py: u per M and E bucket, the routed bytes union vs plain) -> oracle-out-lilicorr-p0/union{,.gen}.{txt,json}"
-st_r63_union() {
-  chk "MODEL=lilicorr STEPS=union tools/oracle/dflash_p0.sh" "the expert union over oracle-out-bolt (and oracle-out-bolt-taps.partial/sources when r57.taps left its golden runs)"
-  grab_all union '^\| [0-9]|^block\(I\)|rows \(from' 30
-  finish
-}
-stage r63.cost      63 default gpu -                         r63.k0   "probe_draft_cost --shapes bolt-lilicorr at 4096 / 65536"
-st_r63_cost() {
-  kbins gemv_M8_K4096_N18560_S1_L0 nb_router_M8_K4096 gemv_i8w_M8_K4096_N131072 nb_argmax_stage1_M8_V131072 \
-    gemv_M1_K1024_N2304_S1_L1 gemv_M8_K24576_N4096_S1_L1 gemv_i8w_M8_K24576_N4096 gemv_bf16_M8_K24576_N4096 \
-    gemv_bf16_M8_K1024_N3072 gemv_bf16_M1_K1024_N1024_C16_S16
-  idle r63-cost
-  x "uptime"
-  chk "build/tools/probe/probe_draft_cost --shapes bolt-lilicorr --mmax 8 --depth 4096,65536 --calls 10 --rounds 3 | tee $STATE/r63.cost.txt" \
-    "Bolt's verify at M = 1..8 (by part; plain experts; the state's slot / replay terms) and one LiLiCorr block per format, interleaved pairs, medians of 3"
-  grab_all cost '^\||^probe_draft_cost|^the (M = 1|state|experts)' 80
-  finish
-}
-stage r63.verdict   63 manual  -   -                         r63.accept "lilicorr_p0_project.py: the defaults into spec 26 (not a gate)"
-st_r63_verdict() {
-  say "python3 tools/spec/lilicorr_p0_project.py --accept oracle-out-lilicorr-p0/accept --dumps oracle-out-bolt-taps/dumps --probe \$STATE/r63.cost.txt --depth 4096 --plain-ms <r60.speed's plain step at depth 4096, ms> --union oracle-out-lilicorr-p0/union.json --md oracle-out-lilicorr-p0/project.md --json oracle-out-lilicorr-p0/project.json"
-  say "python3 tools/spec/lilicorr_p0_project.py --accept oracle-out-lilicorr-p0/accept --sampled lattice --probe \$STATE/r63.cost.txt --depth 4096 --plain-ms <the same> --union oracle-out-lilicorr-p0/union.json   # the sampled form (T 1.0 / top-p 0.95)"
-  say "# then write spec 26 §11 (P0 verdict) with the table and the defaults, and docs/probe-lilicorr-2026-10-23.md §3-§5 with the box's tables"
-  finish
-}
-stage r63.vllm_xpu  63 manual  gpu bolt_g128,lilicorr        -        "optional: vLLM XPU serving Bolt with LiLiCorr - external acceptance figure"
-st_r63_vllm_xpu() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
-  local lil='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr/snapshots/449d24140160b8e51871bfc0f0a7338abf640aa1'
-  say "spec 26 Decision 12 (optional, by hand, both cards, the GPU lock held): in the vLLM XPU image (\${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}) serve SergiioB's checkpoint as its README does (TP 2, --dtype bfloat16, the card's b70/ patches) plus --speculative-config '{\"method\":\"dflash\",\"model\":\"$lil\",\"num_speculative_tokens\":7,\"rejection_sample_method\":\"standard\"}' (add \"draft_sample_method\":\"probabilistic\" for the T 1.0 arm); model $snap"
-  say "if it starts: send the 36 A4 prompts (tests/golden/toolcall-bolt, greedy and T 1.0 / top-p 0.95) and the agentic transcript (tests/golden/prompts/bolt_agentic.json) and record vLLM's 'SpecDecoding metrics: Mean acceptance length' lines beside r63.accept's E_7 (the card says SM120 only: if it refuses or crashes, record the error and close the step - no patches)"
-  finish
-}
-
-# ======================================================================================
-row 64 "spec 26b - LiLiCorr on the card: DFlashForm::LiLiCorr, NVFP4 decoded exactly into exact / int8 / int4 g64, the ll_* kernels (sinks, top-8 + lse, the lattice head and walk), the draft and projection lists (D1) (plan 26b)"
-rownote 64 "Download the drafter if row 63 did not (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1. r64.d1 also reads SergiioB's g128 (bolt_g128: only its embedding and lm_head) and 25a's tap dumps (oracle_bolt_taps, r57.taps)."
-rownote 64 "Written on the Mac (spec 26 §13): the descriptor, the NVFP4 decode (all 16 x 256 products, the real checkpoint's 25 linears read), the three formats from (W', g), the twin (tests/kernels/lilicorr_ref.h) against dflash_ref.py's LiLiCorr form on a tiny NVFP4 drafter (candidates and walks equal, the lattice within 1.3e-5 of |2.8|), every ll_* kernel on the Mac's GPU against the twin (tools/mac/clrun/lilicorr_run: exact and int8 arms agree; gemv.cl's int4 does not build there), D1's pipeline on 25a's tiny pair (the twin in fp32 passes every bar; in the engine's bf16 numerics the log-probs move by up to 1.7e-2 - spec 26 §13's caveat for r64.d1's 1e-3 bar). kernel_cmdlines +9 / -0 / ~0 - no existing .cl edited, none of the 9 compiled by ocloc. Every default is spec 26 §11's PROVISIONAL one (int8, K 7, q lattice) and switchable (--format / LiliDrafter's max_k)."
-rownote 64 "Hand back: r64.k1's lilicorr_kernels_test lines (ll_gemv_bf16_g bitwise gemv_bf16 x g, ll_attn's ulps, ll_topk, the head chain's lattice cosine, ll_select, ll_anchor), r64.draft's lilicorr_draft_test lines per format (launches, the projection's ulps and anchor cosine, the draft line, the replay / k 3 / sampled / snapshot / cold lines, the host-timed ms), r64.d1_ref's d1.md (one row per arm) and any FAIL lines."
-stage r64.k0     64 default cpu  -                                              g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +9 / -0 / ~0), every pre-existing binary identical, the suite (G0); 26b's edits to shared files: DFlashDesc's third form, DraftFormat::Exact (other drafters refuse it), draft_list_k's LiLiCorr case, dflash_d1's --model lilicorr"
-st_r64_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
-stage r64.host   64 default cpu  oracle_image                                   -        "host: lilicorr_desc_test, nvfp4_test, lilicorr_repack_test, lilicorr_ref_test (LiLiCorr), lilicorr_names_test, lilicorr_plan_test; test_dflash_d1.py (the LiLiCorr comparator) in the oracle image"
-st_r64_host() {
-  run_tests '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$'
-  jgrab host '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$' '^[0-9]\.|OK|PASS|drafter in'
-  chk "tools/oracle/run_in_container.sh 'python3 tools/oracle/test_dflash_d1.py'" "the D1 comparator's tests incl. the LiLiCorr form (oracle image)"
-  finish
-}
-stage r64.k1     64 default card -                                              r64.k0   "lilicorr_kernels_test: every ll_* kernel against the twin (the 9 new binaries' first ocloc build)"
-st_r64_k1() {
-  kbins df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072 ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 \
-    ll_topk_R7_N131072_U131072_K8 ll_lattice_S7_K8_HL1024_LH8_B8 ll_select_S7_K8 ll_gemv_bf16_g_M8_K24576_N4096 \
-    ll_gemv_bf16_g_M8_K4096_N24576 ll_gemv_bf16_g_M8_K12288_N4096 gemv_bf16_M7_K4096_N131072
-  run_tests '^lilicorr_kernels_test$' lilicorr
-  jgrab kernels '^lilicorr_kernels_test$' 'll_|differ|ulp|cosine|PASS|FAIL'
-  finish
-}
-stage r64.draft  64 default card lilicorr                                       r64.k1   "lilicorr_draft_test on one card: the draft, the projection, the ring round trip"
-st_r64_draft() {
-  x "build/tests/lilicorr_draft_test ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr} | tee $STATE/$STAGE.txt"
-  step_rc $? "lilicorr_draft_test (int8 / exact / int4 g64)"
-  grab_all draft '^--- |^LiLiCorr drafter:|^[1-6]\. |^lilicorr_draft_test' 60
-  finish
-}
-stage r64.d1     64 optin   card bolt_g128,lilicorr,oracle_bolt_taps            r64.draft "D1 per arm against dflash_ref.py's LiLiCorr form on the tap dumps - the engine's half: dflash_d1 --model lilicorr over oracle-out-bolt-taps (16 anchors a dump, the whole block, T 0), arms i8 / exact / i4 with the int8 head -> \$STATE/d1/d1.<arm>.jsonl"
-st_r64_d1() {
-  chk "MODEL=lilicorr SNAP_BOLT=\${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} tools/box_validate/dflash_d1.sh gpu $STATE/d1" "dflash_d1 (LiLiCorr) x 3 arms"
-  grab_all d1 '^dflash_d1|^LiLiCorr drafter:|^=== ' 20
-  finish
-}
-stage r64.d1_ref 64 optin   cpu  bolt_g128,lilicorr,oracle_bolt_taps,oracle_image r64.d1  "D1, the reference's half (box CPU, the oracle image): dflash_d1.py per arm - the 8 candidate sets tie-aware, their log-probs to 1e-3 (LP_BAR), the lattice cosine >= 0.9999 exact / 0.999 int8, int4 where the candidates agree, the walk equal at T 0, the anchor cosine >= 0.9999 -> \$STATE/d1/d1.md"
-st_r64_d1_ref() {
-  chk "MODEL=lilicorr SNAP_BOLT=\${SNAP_BOLT:-SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py (LiLiCorr) x 3 arms: D1"
-  grab_all d1-ref '^\| |^D1 |^  FAIL' 40
-  finish
-}
-
 # ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
 rownote 66 "Written blind on the Mac (docs/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
@@ -4724,8 +4601,8 @@ st_r66_chunk() {
 
 # ======================================================================================
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash / bolt / lilicorr labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / muse / dflash / bolt labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp muse dflash bolt lilicorr'
+  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp muse dflash bolt'
   finish
 }

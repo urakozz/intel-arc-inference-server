@@ -13,34 +13,26 @@
 // Spec 25b Task 5: Nemotron 3.5 Bolt's memory plan as device-free arithmetic - the split by bytes (runtime::pp_balance, spec
 // 16b's rule, not a second one) and `--max-len auto` (the largest multiple of 256 that fits EVERY device and is at most
 // max_position_embeddings, 262144 - Decision 14). Host only (tests/runtime/bolt_plan_test.cc). 25c adds the decode scratch and
-// the launch counts, 25d the prefill scratch, spec 26 the drafter and the verify slots: the BoltReserve below carries them
-// as caller-given terms (0 until then) so this plan's shape does not change under them.
+// the launch counts, 25d the prefill scratch: the BoltReserve below carries them as caller-given terms.
 //
 // Per device, the terms (all derived from model::BoltDesc and loader/bolt_layout.h - the plan IS the allocation, the loader
 // asserts `weights` against the same formula):
 //   weights         loader::bolt::device_weight_bytes (its blocks, the embedding on device 0, norm_f + the head on the last)
 //   kv              its attention blocks' K and V at max_len (bf16; 8,192 B a position over all 8 blocks)
-//   ssm             one SSM state (fp32) per Mamba block it holds, x (1 + verify_slots) (spec 19c / 26's per-row slots)
+//   ssm             one SSM state (fp32) per Mamba block it holds
 //   conv_rings      its Mamba blocks' raw-xBC ring (16 slots)
 //   decode_scratch, prefill_scratch   per device (25c / 25d fill them)
-//   drafter, drafter_embed_replica    on the LAST device only (spec 26: the drafter and the 1.07 GB embedding replica its
-//                                     gather needs there)
 //   reserve         runtime::kDefaultReserveGb (1.5 GB) unless given
 namespace runtime::bolt {
 
 struct BoltReserve {
   size_t decode_scratch = 0, prefill_scratch = 0;     // bytes, charged to every device
-  size_t drafter = 0, drafter_embed_replica = 0;      // bytes, charged to the last device
-  uint32_t verify_slots = 0;                          // EXTRA SSM state slots (spec 26 / 19c: 7), charged to every device
   bool bf16_state = false;                            // spec 25c, Decision 2's arm: the SSM state in bf16 (half the bytes)
 };
 
 struct DevicePlan {
-  size_t weights = 0, kv = 0, ssm = 0, conv_rings = 0, decode_scratch = 0, prefill_scratch = 0, drafter = 0,
-         drafter_embed_replica = 0, reserve = 0;
-  size_t total() const {
-    return weights + kv + ssm + conv_rings + decode_scratch + prefill_scratch + drafter + drafter_embed_replica + reserve;
-  }
+  size_t weights = 0, kv = 0, ssm = 0, conv_rings = 0, decode_scratch = 0, prefill_scratch = 0, reserve = 0;
+  size_t total() const { return weights + kv + ssm + conv_rings + decode_scratch + prefill_scratch + reserve; }
 };
 
 struct BoltPlan {
@@ -73,7 +65,7 @@ uint32_t pp_split(const model::BoltDesc& d, bool int8_head = true);
 std::string describe(const DevicePlan& p, size_t device_bytes = 0);
 
 // ==== spec 25c: the decode list's switches, scratch and launch counts (begin) ==========================================
-inline constexpr uint32_t kM = 1;   // the decode list is M = 1 (the M-row verify lists are spec 26c's)
+inline constexpr uint32_t kM = 1;   // the decode list is M = 1
 
 // Which decode attention every capture binds - Muse's flash mg_attn (the default, held to fp64) or its eager form (the
 // reference's bf16 chain, ONE launch): `B70_BOLT_ATTN=flash|eager`; unset or empty is the default; anything else throws.

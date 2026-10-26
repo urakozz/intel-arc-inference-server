@@ -751,7 +751,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 -
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
 - **Request.** Image / video / audio content parts are refused (text only).
 
-**Limits.** No `--mtp` (no MTP head), no `--spec` (spec 26), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
+**Limits.** No `--mtp` (no MTP head), no `--spec` (no drafter), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
 Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` / `sycl-tla` refused), context at most 262144, `--layers`
 is `b70-decode`'s development mode only, `--device` refused with `--pp 2`.
 

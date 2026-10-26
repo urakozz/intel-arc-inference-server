@@ -33,23 +33,15 @@ namespace loader {
 // n-tile-major subgroup tiles (common/repack.h repack_int4_layout1), so a row range such as the context projection's
 // k||v rows of q||k||v is a contiguous sub-range of the weight, as in the other two forms; S 1: the GEMV writes the
 // [M][N] rows the df_* kernels read).
-//
-// Spec 26b adds Exact - the LiLiCorr drafter's NVFP4 linears as W' (bf16, exact) in gemv_bf16's tiles plus the tensor's
-// global g as an fp32 output scale per column (loader/nvfp4.h, src/kernels/dflash/ll_gemv_bf16_g.cl); its BF16 linears are
-// Bf16's tiles. Only the LiLiCorr loader builds it (parse_lilicorr_draft_format); the other drafters' `--draft-format`
-// spellings are unchanged.
-enum class DraftFormat { Bf16, Int8, Int4G64, Exact };
-const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8" | "int4" | "exact"
+enum class DraftFormat { Bf16, Int8, Int4G64 };
+const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8" | "int4"
 bool parse_draft_format(const std::string& s, DraftFormat& out);   // also "int4g64"
-// Spec 26b: the LiLiCorr drafter's spellings - "exact" | "int8" | "int4" (also "int4g64"); "bf16" is not one (its NVFP4
-// linears have no bf16 form short of folding g, which is not exact - spec 26 §3).
-bool parse_lilicorr_draft_format(const std::string& s, DraftFormat& out);
 
 // One linear's device bytes: bf16 K N x 2; int8 K N + 4 N (the scales); int4 g64 layout 1 (N / 16) x (K / 64) tiles
 // of 136 u32 (K / 2 N + K / 32 N: the nibbles and the f16 scales, 4.25 bits a weight).
 inline size_t dflash_linear_bytes(uint32_t K, uint32_t N, DraftFormat f) {
   if (f == DraftFormat::Int4G64) return size_t(N / 16) * (K / 64) * 136 * 4;
-  return (f == DraftFormat::Bf16 || f == DraftFormat::Exact) ? size_t(K) * N * 2 : size_t(K) * N + size_t(N) * 4;
+  return f == DraftFormat::Bf16 ? size_t(K) * N * 2 : size_t(K) * N + size_t(N) * 4;
 }
 
 struct DFlashBytes {

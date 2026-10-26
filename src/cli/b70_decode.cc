@@ -1028,7 +1028,7 @@ int run(int argc, char** argv) {
   // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
   // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
   // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --mtp (no MTP
-  // head), --spec (spec 26), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
+  // head), --spec (no drafter), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
   if (cli::bolt::is_bolt(path)) {
     if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Nemotron 3.5 Bolt takes --layers N");
     cli::bolt::DecodeArgs ba;

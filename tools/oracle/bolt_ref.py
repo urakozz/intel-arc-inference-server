@@ -21,7 +21,6 @@ bolt_remote.continue_forward (R's kernel path has no such branch).
     bolt_ref.py ppl <snapshot> [--text NAME=FILE ...] [--ids NAME=FILE ...] [--layers N] [--max-tokens T]
     bolt_ref.py hfcheck <snapshot> --layers N [--prompt <ids>] [--n 2048] [--gen 4] [--dtype bf16|fp32]
     bolt_ref.py facts ...      (bolt_facts.py)
-    bolt_ref.py taps <snapshot> --source NAME:IDS:N_PROMPT [...] --out DIR     (dump_taps' format, spec 26a's input)
     bolt_ref.py gateq --ref DIR --cand DIR [--a4-ref DIR --a4-cand DIR]        (spec 25 B5's table)
 
 `run`'s golden layout (rows are absolute positions; `h_row0` / `logits_row0` in the metadata):
@@ -62,7 +61,7 @@ import torch.nn.functional as F  # noqa: E402
 
 PINNED_TRANSFORMERS = "5.19.0"
 REMOTE_SHA = "de290021078450c4d5042f66dd74b8eecf1d3eb3"        # modeling_nemotron_h.py's HF blob (git sha1)
-TAP_LAYERS = (1, 18, 35, 51, 68, 85)                            # LiLiCorr's target layers (spec 26)
+TAP_LAYERS = (1, 18, 35, 51, 68, 85)                            # run --taps: the residual after these blocks
 FIRST_ATTENTION = 7
 LONG_PROMPT = 4096
 INT4 = (".qweight", ".qzeros", ".scales")
@@ -702,10 +701,10 @@ class Recorder:
     ascending, w, sel top 10, the 9th-10th gap, the sum); taps after TAP_LAYERS (every row, with `taps`). The SSM /
     conv states after the prompt come from the cache (mamba_states). Rows are bucketed by `key` (layer_major's item)."""
 
-    def __init__(self, model, cfg: dict, h_from: int = 0, acts: bool = True, taps: bool = False, tap_layers=None):
+    def __init__(self, model, cfg: dict, h_from: int = 0, acts: bool = True, taps: bool = False):
         self.cfg, self.h_from, self.acts = cfg, h_from, acts
         self.n = len(cfg["block_configs"])
-        self.taps = [i for i in (tap_layers or TAP_LAYERS) if i < self.n] if taps else []
+        self.taps = [i for i in TAP_LAYERS if i < self.n] if taps else []
         self.key = 0
         self.base: dict = {}
         self.rows: dict = {}
@@ -859,7 +858,7 @@ def cmd_run(a) -> None:
           f"moe), hidden {cfg['hidden_size']}, weights {a.weights} ({model.bolt_ckpt.trunk} trunk), {a.dtype}, mamba path "
           f"{a.path}, cache {a.cache}; prompt {T} ids, chunk {chunk or 'whole'}; h from row {h_from}, logits from row "
           f"{log_from}; built {time.time() - t0:.1f}s", flush=True)
-    rec = Recorder(model, cfg, h_from=h_from, taps=a.taps, tap_layers=parse_tap_layers(a.tap_layers))
+    rec = Recorder(model, cfg, h_from=h_from, taps=a.taps)
     rows, nll = [], torch.empty(max(T - 1, 0))
     ids_t = torch.tensor(ids)
 
@@ -1193,111 +1192,6 @@ def cmd_hfcheck(a) -> None:
 
 
 # ------------------------------------------------------------------------------------------------
-# taps: dump_taps' format over [prompt + continuation] (spec 26a's input)
-
-TAP_WINDOW = 1024            # LiLiCorr's context window (spec 26): rows older than n_prompt - 1024 are never read
-
-
-def parse_tap_layers(s: str | None) -> list[int]:
-    """--tap-layers (spec 26a): the blocks whose residual is tapped; default LiLiCorr's TAP_LAYERS. A tiny model taps its
-    own blocks (lilicorr_make_tiny.py's 1, 2, 4, 6, 9, 10 on the 12-block tiny Bolt)."""
-    if not s:
-        return list(TAP_LAYERS)
-    out = [int(x) for x in s.split(",") if x]
-    if out != sorted(set(out)):
-        die(f"--tap-layers {s}: strictly increasing block ids")
-    return out
-
-
-def tap_from_of(n_prompt: int, window: int = TAP_WINDOW) -> int:
-    return max(0, n_prompt - window)
-
-
-def parse_tap_sources(specs) -> list[dict]:
-    out = []
-    for s in specs or []:
-        parts = s.split(":")
-        if len(parts) != 3:
-            die(f"--source {s}: want NAME:IDS:N_PROMPT")
-        name, path, n = parts
-        if "/" not in name:
-            die(f"--source {s}: the name must be corpus/label")
-        ids = read_ids(path)
-        if not 1 <= int(n) < len(ids):
-            die(f"--source {s}: N_PROMPT {n} of {len(ids)} ids")
-        out.append({"name": name, "ids": ids, "n_prompt": int(n)})
-    return out
-
-
-def parse_golden_sources(specs) -> list[dict]:
-    """--golden NAME:PROMPT_IDS:GOLDEN - the prompt followed by the golden run's greedy `tokens` (its continuation)."""
-    from safetensors import safe_open
-    out = []
-    for s in specs or []:
-        parts = s.split(":")
-        if len(parts) != 3 or "/" not in parts[0]:
-            die(f"--golden {s}: want corpus/label:PROMPT_IDS:GOLDEN")
-        prompt = read_ids(parts[1])
-        with safe_open(parts[2], framework="pt") as h:
-            toks = h.get_tensor("tokens").tolist()
-            if int(h.metadata()["n_prompt"]) != len(prompt):
-                die(f"--golden {s}: the golden's n_prompt {h.metadata()['n_prompt']} != {len(prompt)} prompt ids")
-        if not toks:
-            die(f"--golden {s}: the golden has no generated tokens")
-        out.append({"name": parts[0], "ids": prompt + toks, "n_prompt": len(prompt)})
-    return out
-
-
-def cmd_taps(a) -> None:
-    mt = _load("muse_taps")
-    dt = _load("dump_taps")
-    sources = parse_tap_sources(a.source) + parse_golden_sources(a.golden)
-    if not sources:
-        die("no --source")
-    os.makedirs(a.out, exist_ok=True)
-    todo = [s for s in sources if not os.path.exists(os.path.join(a.out, dt.file_name(s["name"])))]
-    toks = sum(len(s["ids"]) for s in todo)
-    tl = parse_tap_layers(a.tap_layers)
-    print(f"{len(sources)} sources, {len(sources) - len(todo)} already dumped, {toks} ids to teacher-force; taps after "
-          f"blocks {tl}, tap_from = n_prompt - {a.window}", flush=True)
-    for s in todo:
-        print(f"  {s['name']}: {len(s['ids'])} ids ({s['n_prompt']} prompt), tap_from "
-              f"{tap_from_of(s['n_prompt'], a.window)}", flush=True)
-    if a.dry_run or not todo:
-        return
-    t0 = time.time()
-    cfg = config(a.snapshot, a.layers)
-    model = build_streamed(a.snapshot, cfg, a.weights, keep=parse_keep(a.keep, cfg))
-    for s in todo:
-        ts = time.time()
-        f = tap_from_of(s["n_prompt"], a.window)
-        rec = Recorder(model, cfg, acts=False, taps=True, tap_layers=tl)
-        parts = []
-
-        def on_logits(r0, lg):
-            for b0 in range(0, lg.shape[0], 256):
-                ra = r0 + b0
-                rb = lg[b0:b0 + 256]
-                k = max(0, f - ra)
-                if k < rb.shape[0]:
-                    parts.append(mt.row_stats(rb[k:], rb[k:], a.topk))
-        try:
-            forward_chunks(model, s["ids"], auto_chunk(len(s["ids"]), a.chunk), new_cache(model), rec, on_logits)
-            t = rec.tensors()
-        finally:
-            rec.remove()
-        res = {k: torch.cat([p[k] for p in parts]) for k in ("greedy", "top_ids", "top_logits", "lse")}
-        res["taps"] = {L: t[f"tap.L{L}"][f:].contiguous() for L in rec.taps}
-        meta = {"snapshot": os.path.abspath(a.snapshot), "weights": a.weights, "transformers": PINNED_TRANSFORMERS,
-                "source": "teacher-forced (bolt_ref.py taps)", "vocab_used": str(cfg["vocab_size"]),
-                "chunk": str(auto_chunk(len(s["ids"]), a.chunk)), "window": str(a.window)}
-        dt.save_dump(os.path.join(a.out, dt.file_name(s["name"])), s["name"], s["ids"], s["n_prompt"], f, res, meta)
-        print(f"  {s['name']}: {time.time() - ts:.0f} s", flush=True)
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(f"wall {time.time() - t0:.0f} s, peak RSS {rss / 2**30 if sys.platform == 'darwin' else rss / 2**20:.1f} GiB")
-
-
-# ------------------------------------------------------------------------------------------------
 
 def cmd_facts(a) -> None:
     _load("bolt_facts").main(a.rest)
@@ -1327,7 +1221,6 @@ def main() -> None:
     r.add_argument("--logits-tail", type=int, default=1024, help="keep logits from row T - L (-1: all)")
     r.add_argument("--act-tail", type=int, default=256, help="keep h past 4096 ids from row T - A")
     r.add_argument("--taps", action="store_true", help="tap.L{1,18,35,51,68,85} for every row")
-    r.add_argument("--tap-layers", default="", help="the tapped blocks (default 1,18,35,51,68,85; spec 26a's tiny pair)")
     r.add_argument("--cache", default="fp32", choices=["fp32", "bf16"], help="the SSM / conv cache dtype (Decision 2)")
     r.add_argument("--path", default="kernel", choices=["kernel", "torch"], help="the Mamba path (torch: R's fallback)")
     r.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
@@ -1349,22 +1242,12 @@ def main() -> None:
     h.add_argument("--n", type=int, default=2048)
     h.add_argument("--gen", type=int, default=4)
     h.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
-    t = sub.add_parser("taps")
-    common(t)
-    t.add_argument("--source", action="append", default=[], help="NAME:IDS:N_PROMPT (NAME corpus/label)")
-    t.add_argument("--golden", action="append", default=[],
-                   help="NAME:PROMPT_IDS:GOLDEN - the prompt + that golden run's greedy tokens")
-    t.add_argument("--out", required=True)
-    t.add_argument("--topk", type=int, default=64)
-    t.add_argument("--window", type=int, default=TAP_WINDOW)
-    t.add_argument("--tap-layers", default="", help="the tapped blocks (default 1,18,35,51,68,85; spec 26a's tiny pair)")
-    t.add_argument("--dry-run", action="store_true")
     f = sub.add_parser("facts", add_help=False)
     f.add_argument("rest", nargs=argparse.REMAINDER)
     q = sub.add_parser("gateq", add_help=False)
     q.add_argument("rest", nargs=argparse.REMAINDER)
     a = ap.parse_args()
-    {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "taps": cmd_taps, "facts": cmd_facts,
+    {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "facts": cmd_facts,
      "gateq": cmd_gateq}[a.cmd](a)
 
 

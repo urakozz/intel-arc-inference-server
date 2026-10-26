@@ -13,9 +13,6 @@ weights), a tiny target (embedding / head) and a dump in dump_taps.py's format, 
 5. Spec 23f, the Muse-Glimmer form (dflash_fixture.py's Muse weights, block 16, window 16 inclusive): records from
    the reference itself pass at K 15 on the int4 g64 / int8 head arm and on the bf16 / capped-q arm; a changed id
    fails the walk; the bf16 reference does not pass the int4 arm's records (the arm is applied).
-6. Spec 26b, the LiLiCorr form (dflash_fixture.py --lilicorr's tiny NVFP4 drafter): records from the reference itself pass
-   at the exact / int8 / int4 arms (the lattice compared on all three drafts); a changed id, a moved log-prob, a scaled
-   lattice and another position's anchor row each fail their bar; the exact reference fails the int4 arm's records.
 """
 import copy
 import json
@@ -188,77 +185,6 @@ def test_muse_form():
         run, recs, dumps, drafter, target = _muse_world(tmp, "int4", "int8")
         run_b = dict(run, format="bf16", head="bf16")
         ok, st = _eval(tmp, run_b, recs, dumps, drafter, target)
-        assert not ok, st
-
-
-def _lilicorr_world(tmp, fmt, head):
-    """Spec 26b: dflash_fixture.py --lilicorr's tiny drafter (26a's lilicorr_make_tiny at narrow widths, NVFP4) over a tiny
-    target, one dump; records from the reference itself at the arm (the "engine")."""
-    from safetensors.torch import save_file
-    cfg, mk = fx.lilicorr_cfg()
-    drafter = os.path.join(tmp, "ldrafter")
-    target = os.path.join(tmp, "ltarget")
-    dumps = os.path.join(tmp, "ldumps")
-    for p in (drafter, target, dumps):
-        os.makedirs(p, exist_ok=True)
-    save_file(mk.make_tensors(cfg, seed=26), os.path.join(drafter, "model.safetensors"), metadata={"format": "pt"})
-    with open(os.path.join(drafter, "config.json"), "w") as f:
-        json.dump(cfg, f)
-    torch.manual_seed(13)
-    H = cfg["hidden_size"]
-    embed, hd = fx.bf(fx.LV, H, std=0.5), fx.bf(fx.LV, H, std=0.5)
-    save_file({"model.embed_tokens.weight": embed, "lm_head.weight": hd}, os.path.join(target, "model.safetensors"))
-    with open(os.path.join(target, "config.json"), "w") as f:
-        json.dump({"architectures": ["Tiny"]}, f)
-    n, n_prompt = 48, 24
-    taps = cfg["dflash_config"]["target_layer_ids"]
-    ids = torch.randint(0, fx.LV, (n,)).tolist()
-    res = {"greedy": torch.zeros(n, dtype=torch.int32), "top_ids": torch.zeros(n, 4, dtype=torch.int32),
-           "top_logits": torch.zeros(n, 4), "lse": torch.zeros(n), "taps": {i: fx.bf(n, H, std=1.0) for i in taps}}
-    dt.save_dump(os.path.join(dumps, "l.taps.safetensors"), "tiny/l", ids, n_prompt, 0, res, {})
-    run = {"form": "lilicorr", "head_input": "bf16", "format": fmt, "head": head, "draft_vocab": 0, "vocab_used": fx.LV,
-           "k": 7, "launches": [116, 9], "load": "test", "v_ids": []}
-    d = d1.lilicorr_reference(run, drafter, target)
-    dump = dt.load_dump(os.path.join(dumps, "l.taps.safetensors"))
-    ctx = d.context_kv({i: dump["taps"][i] for i in d.cfg.target_layer_ids}, torch.arange(0, n))
-    recs = []
-    for p in (24, 33, 40):
-        o = d.draft_block(ids[p], p, 7, ctx)
-        lg = d.head_logits(o.hidden[1:])
-        recs.append({"dump": "tiny/l", "p": p, "anchor": ids[p], "k": 7, "ids": o.ids.tolist(),
-                     "chosen": o.chosen.tolist(), "cand": o.cand_ids.tolist(), "lp": o.log_probs.tolist(),
-                     "logit": torch.gather(lg, 1, o.cand_ids).tolist(), "lattice": o.lattice.tolist(),
-                     "anchor_row": o.anchor.tolist()})
-    return run, recs, dumps, drafter, target
-
-
-def test_lilicorr_form():
-    """Spec 26b: records from dflash_ref's LiLiCorr form itself pass every bar at the exact / int8 / int4 arms; a changed
-    id fails the walk, a moved log-prob the lp bar, a scaled lattice the lattice bar, an anchor row of another position
-    the anchor bar; the exact reference does not pass the int4 arm's records (the arm is applied)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        for fmt in ("exact", "int8", "int4"):
-            run, recs, dumps, drafter, target = _lilicorr_world(tmp, fmt, "int8")
-            ok, st = _eval(tmp, run, recs, dumps, drafter, target)
-            assert ok and st["n"] == 3 and st["compared"] == 3 and st["worst_lattice"] > 0.9999999, (fmt, st)
-        bad = copy.deepcopy(recs)
-        bad[1]["ids"][4] = (bad[1]["ids"][4] + 1) % fx.LV
-        ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        assert not ok and st["walk"] == 2, st
-        bad = copy.deepcopy(recs)
-        bad[0]["lp"][2][3] += 0.01
-        ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        assert not ok and st["worst_lp"] > 0.009, st
-        bad = copy.deepcopy(recs)
-        bad[2]["lattice"] = [[[v * (1.3 if j % 2 else 0.7) for j, v in enumerate(row)] for row in sl]
-                             for sl in bad[2]["lattice"]]
-        ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        assert not ok and st["lattice"] == 2, st
-        bad = copy.deepcopy(recs)
-        bad[0]["anchor_row"] = recs[1]["anchor_row"]
-        ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        assert not ok and st["worst_anchor"] < 0.9999, st
-        ok, st = _eval(tmp, dict(run, format="exact"), recs, dumps, drafter, target)
         assert not ok, st
 
 

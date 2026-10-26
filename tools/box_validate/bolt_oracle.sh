@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference runs (lfm2moe_oracle.sh's / muse_oracle.sh's shape), ON THE BOX
 # CPU - the Mac runs `tests` only (the real checkpoints need more RAM than its 40 GB container cap; BOLT_REF_MIN_GB).
-#   tools/box_validate/bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|taps|gateq
+#   tools/box_validate/bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq
 #
 # Every mode runs tools/oracle/bolt_ref.py (the checkpoint's own remote code, layer-streamed, its Mamba mixers on the
 # kernel path through bolt_mamba_ops, an fp32 SSM / conv cache) in the oracle image (tools/oracle/run_in_container.sh)
@@ -26,11 +26,6 @@
 #   a4 / a4-bf16 tools/toolcall/a4_ref.sh bolt set + ref FORM=int4 / FORM=bf16 (36 scenarios, greedy, 2048 new ids,
 #                reasoning on, batched) -> <data>/oracle-out-bolt-a4/<name>.{int4,bf16}.{ids,txt,gap} (DAYS,
 #                ESTIMATED; resumable per scenario); score.py --format qwen-think once both exist
-#   taps         spec 26a's input: tap dumps (dump_taps' format: tap.L{1,18,35,51,68,85}, greedy, top-64, lse;
-#                tap_from = n_prompt - 1024) over [prompt + the g128 reference's greedy continuation]: prose / code
-#                (bolt_short_prose / _code, a golden run at --gen BOLT_TAPS_GEN 512), agentic (bolt_agentic at the
-#                same), a4/* (36, the int4 A4 continuation's first BOLT_TAPS_GEN ids, when mode a4 left them)
-#                -> <data>/oracle-out-bolt-taps/dumps/ (resumable per source)
 #   gateq        tools/oracle/bolt_gateq.py kl (teacher-forced over the BF16 A4 continuations + prose / code / 4k)
 #                and verdict -> <data>/oracle-out-bolt-a4/{gateq.json,gateq.log}: spec 25 B5's table, a RECORDED
 #                measurement (Decision 3)
@@ -45,14 +40,14 @@
 # BOLT_LOCK (/tmp/b70-cpu-model.lock: one model job on the Mac's CPU at a time).
 # Env: SNAP_BOLT (models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym), SNAP_BOLT_BF16
 #      (models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16), BOLT_PROMPTS, BOLT_BF16_PROMPTS, BOLT_GEN (32),
-#      BOLT_TAPS_GEN (512), BOLT_REF_MIN_GB, BOLT_FP32_GB, BOLT_KEEP ('' | all: blocks resident once read),
+#      BOLT_REF_MIN_GB, BOLT_FP32_GB, BOLT_KEEP ('' | all: blocks resident once read),
 #      BOLT_MEM_GB, BOLT_LOCK, BOLT_LOCK_HELD, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|taps|gateq"
+MODES="tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq"
 [ $# -ge 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2" arg="${3:-}"
-case "$mode" in tests|ppl|hfcheck|golden|golden-bf16|a4|a4-bf16|taps|gateq) ;;
+case "$mode" in tests|ppl|hfcheck|golden|golden-bf16|a4|a4-bf16|gateq) ;;
   export) [ -n "$arg" ] || { echo "bolt_oracle: export needs the export's directory" >&2; exit 2; } ;;
   *) echo "bolt_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;;
 esac
@@ -61,8 +56,8 @@ mac=0
 dry="${DRY_RUN:-0}"
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 export HF_CACHE="${HF_CACHE:-$hf}"    # run_in_container.sh mounts HF_CACHE at /hf: the cache this script reads
-gen="${BOLT_GEN:-32}" tgen="${BOLT_TAPS_GEN:-512}"
-[[ "$gen" =~ ^[0-9]+$ && "$tgen" =~ ^[0-9]+$ ]] || { echo "bolt_oracle: BOLT_GEN / BOLT_TAPS_GEN" >&2; exit 2; }
+gen="${BOLT_GEN:-32}"
+[[ "$gen" =~ ^[0-9]+$ ]] || { echo "bolt_oracle: BOLT_GEN" >&2; exit 2; }
 keep="${BOLT_KEEP:-}"
 [ -z "$keep" ] || [[ "$keep" =~ ^(all|[0-9,]+)$ ]] || { echo "bolt_oracle: BOLT_KEEP=$keep" >&2; exit 2; }
 prompts="${BOLT_PROMPTS:-bolt_short bolt_4k bolt_agentic bolt_32k}"
@@ -121,7 +116,7 @@ if [ "$dry" = 1 ]; then
   echo "    ~1.5-2 h | bolt_32k (16 chunks; eager scores up to [32][2048][32768] fp32 ~8.6 GB a layer call) ~4-6 h"
   echo "    golden-bf16: x ~1.5 (no dequant, 150 GB read a pass from the page cache or disk) | ppl ~1 h a form"
   echo "    hfcheck --layers 12 ~15 min a form | a4: 36 x (~2k-id prompt + up to 2048 steps), batched 4: ~2-4 days a form"
-  echo "    taps: ~4 golden runs at --gen $tgen + ~36 x 2.5k ids teacher-forced: ~1 day | gateq: 72 teacher-forced passes ~1 day"
+  echo "    gateq: 72 teacher-forced passes ~1 day"
 fi
 if [ "$dry" != 1 ] && [ "${avail:-0}" -lt "$need" ]; then
   echo "SKIP_REASON bolt_oracle: $memwhat ${avail:-0} GB < BOLT_REF_MIN_GB $need (the real checkpoints need the box)"
@@ -131,7 +126,7 @@ miss() { echo "SKIP_REASON bolt_oracle: $1"; exit 77; }
 if [ "$dry" != 1 ]; then
   case "$mode" in
     tests) small "$INT4" || miss "the pinned snapshot's small files are not in $hf/hub (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')" ;;
-    golden|taps) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d2...: 41.9 GB, df -h ~ first)" ;;
+    golden) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d2...: 41.9 GB, df -h ~ first)" ;;
     a4) complete "$INT4" || miss "$INT4 is absent or incomplete (41.9 GB)" ;;
     golden-bf16|a4-bf16) complete "$BF16" || miss "$BF16 is absent or incomplete (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 56702103...: 149.8 GB, df -h ~ first)" ;;
     gateq) { complete "$INT4" && complete "$BF16"; } || miss "gate Q needs both $INT4 and $BF16 complete (41.9 + 149.8 GB)" ;;
@@ -267,37 +262,6 @@ case "$mode" in
         python3 tools/toolcall/score.py --format qwen-think "$out" "$f" "$f" | tail -2
       fi
     fi
-    ;;
-  taps)
-    out="$data/oracle-out-bolt-taps" part=oracle-out-bolt-taps.partial
-    [ "$dry" = 1 ] || mkdir -p "$out/dumps" "$out/sources" "$part"
-    srcs=()
-    # prose / code / agentic: a golden run at --gen $tgen (its greedy continuation), then teacher-forced below
-    for pc in bolt_short_prose:prose bolt_short_code:code bolt_agentic:agentic; do
-      p=${pc%%:*} c=${pc#*:}
-      [ -s "$out/dumps/${c}__$p.taps.safetensors" ] && { echo "bolt_oracle: taps $c/$p kept"; continue; }
-      golden "$INT4" "$part/sources" "$part/g" "$p" "$tgen" "--weights int4 --act-tail 0 --logits-tail 1" || continue
-      srcs+=(--golden "$c/$p:/ws/tests/golden/prompts/$p.ids:/ws/$part/sources/$p.golden.safetensors")
-    done
-    a4="$data/oracle-out-bolt-a4"
-    if [ "$dry" != 1 ] && [ "$(ls "$a4"/*.int4.ids 2>/dev/null | wc -l)" -ne 36 ]; then
-      echo "bolt_oracle: taps a4/* SKIPPED - the 36 int4 A4 continuations are not in $a4 (mode a4 first)"
-    else
-      for f in tests/golden/toolcall-bolt/*.ids; do
-        n=$(basename "$f" .ids)
-        [ -s "$out/dumps/a4__$n.taps.safetensors" ] && continue
-        np=$(wc -w < "$f" | tr -d ' ')
-        [ "$dry" = 1 ] || { tr -s ' \n' ' ' < "$f"; tr -s ' \n' ' ' < "$a4/$n.int4.ids" | cut -d' ' -f1-"$tgen"; echo; } > "$part/$n.ids"
-        srcs+=(--source "a4/$n:/ws/$part/$n.ids:$np")
-      done
-    fi
-    if [ ${#srcs[@]} -gt 0 ]; then
-      echo "bolt_oracle: taps - $(( ${#srcs[@]} / 2 )) sources teacher-forced ($(date '+%F %T'))"
-      in_box "$INT4" "python3 tools/oracle/bolt_ref.py taps \"\$SNAP\" --weights int4 $kflag ${srcs[*]} --out /ws/$part/dumps \
-        > /ws/$part/taps.log 2>&1" || { echo "bolt_oracle: taps FAILED"; tail -20 "$part/taps.log" 2>/dev/null; rc=1; }
-      [ "$dry" = 1 ] || for d in "$part"/dumps/*.taps.safetensors; do [ -s "$d" ] && mv -f "$d" "$out/dumps/"; done
-    fi
-    [ "$dry" = 1 ] || ls -la "$out/dumps"
     ;;
   gateq)
     out="$data/oracle-out-bolt-a4"

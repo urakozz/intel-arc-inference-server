@@ -1906,8 +1906,8 @@ if(B70_BOLT)
     add_ocloc_kernel(nb_moe_down_M1_I${I}_L1024_T9 SOURCE ${NB_CL}/nb_moe.cl
                      DEFINES M=1 MOE_I=${I} UP_KS=4 DN_KS=2 ${NB_DEPS})
   endforeach()
-  # Test-only (bolt_kernels_test, Review Focus 1-2): M = 4 rows a launch - the M-row form spec 26c's verify lists use; no
-  # decode list binds them.
+  # Test-only (bolt_kernels_test, Review Focus 1-2): M = 4 rows a launch - the M-row form; no decode list binds
+  # them.
   add_ocloc_kernel(nb_conv_M4_C10240_S1 SOURCE ${NB_CL}/nb_mamba.cl DEFINES ${CTRL_DEFINES} M=4 CONV_S=1 ${NB_DEPS})
   foreach(C 0 1)
     foreach(B 0 1)
@@ -2004,124 +2004,6 @@ if(B70_BOLT)
   endif()
 endif()
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (end) ====
-
-# ==== Spec 26a: LiLiCorr P0 - Bolt's verify at M rows, one LiLiCorr block ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-20-spec26a-lilicorr-p0.md, Task 4 (tools/probe/probe_draft_cost.cc --shapes
-# bolt-lilicorr; the shapes in tools/probe/draft_cost_shapes.h's bolt_lilicorr namespace). Additive only: no existing
-# source is edited and no existing name is built here, so every binary above keeps its name, command line and bytes (B0).
-#   the verify at M = 2..8   Bolt's 7 int4 GEMVs at model::BoltDesc::linears' {S 1, layout} (25b's PROVISIONAL cells; M = 1
-#                            is 25c's), 25c's nb_router at M rows, the int8 head and argmax stage 1 at M rows - 26c's verify
-#                            lists will bind the same names
-#   the expert stand-in      ONE routed expert as two layout-1 GEMVs at I 2304 (the 40 blocks' average 2 x I x 544 B is
-#                            2.500 MB; I 2304 gives 2.507 MB): up K 1024 N 2304, down K 2304 N 1024, M 1
-#   one LiLiCorr block       the drafter's linears at M = 8 in int4 g64 (layout 1, S 1), int8 and bf16 (spec 26 §3's exact
-#                            arm reads W' as bf16 - its g is one fp32 multiply on the output), the int8 head at the 7
-#                            draft rows (the verify's M = 7 build) with argmax stage 1 as the top-8 + logsumexp stand-in,
-#                            and the LiLiCorr head's projections in bf16 at 8 / 7 / 1 rows (56 rows as 7 launches of 8)
-option(B70_LILICORR_P0 "build spec 26a's verify-at-M and LiLiCorr block cost variants (probe_draft_cost)" ON)
-set(B70_LILICORR_P0_KERNELS)
-if(B70_LILICORR_P0 AND B70_BOLT)
-  foreach(M 2 3 4 5 6 7 8)
-    foreach(KNL "4096 18560 0" "8192 4096 1" "4096 4608 0" "4096 4096 1" "4096 6400 0" "1024 4096 1" "5376 4096 1")
-      separate_arguments(KNL)
-      list(GET KNL 0 _k)
-      list(GET KNL 1 _n)
-      list(GET KNL 2 _l)
-      add_gemv_variant(${M} ${_k} ${_n} 1 ${_l})
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M${M}_K${_k}_N${_n}_S1_L${_l})
-    endforeach()
-    add_ocloc_kernel(nb_router_M${M}_K4096 SOURCE ${NB_CL}/nb_moe.cl DEFINES M=${M} ROUTER_K=4096 ${NB_DEPS})
-    add_gemv_i8w_variant(${M} 4096 131072)
-    add_ocloc_kernel(nb_argmax_stage1_M${M}_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES} M=${M})
-    list(APPEND B70_LILICORR_P0_KERNELS kernel_nb_router_M${M}_K4096 kernel_gemv_i8w_M${M}_K4096_N131072
-      kernel_nb_argmax_stage1_M${M}_V131072)
-  endforeach()
-  add_gemv_variant(1 1024 2304 1 1)     # the expert stand-in's up
-  add_gemv_variant(1 2304 1024 1 1)     # and down
-  list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M1_K1024_N2304_S1_L1 kernel_gemv_M1_K2304_N1024_S1_L1)
-  # The drafter (nvidia/...-24GB-LiLiCorr: hidden 4096, 32 q / 2 kv x 128, FF 12288, fc 6 x 4096 -> 4096, the two conv
-  # kernel projections 4096 -> 1024, the commit's ctx k||v 4096 -> 512) at the block's 8 rows.
-  foreach(KN "4096 1024" "4096 4608" "4096 4096" "4096 24576" "12288 4096" "4096 512" "24576 4096")
-    separate_arguments(KN)
-    list(GET KN 0 _k)
-    list(GET KN 1 _n)
-    if(NOT (_k EQUAL 4096 AND _n EQUAL 4096))   # o_proj's gemv_M8_K4096_N4096_S1_L1 is Bolt's o_proj at M 8 (above)
-      add_gemv_variant(8 ${_k} ${_n} 1 1)
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_M8_K${_k}_N${_n}_S1_L1)
-    endif()
-    add_gemv_i8w_variant(8 ${_k} ${_n})
-    list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_i8w_M8_K${_k}_N${_n})
-    if(_n LESS 2048)   # kernels::gemv_bf16_tiling: N / 64 < 32 work-groups -> {16, 16}
-      add_gemv_bf16_variant(8 ${_k} ${_n} 16 16)
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M8_K${_k}_N${_n}_C16_S16)
-    else()
-      add_gemv_bf16_variant(8 ${_k} ${_n} 64 1)
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M8_K${_k}_N${_n})
-    endif()
-  endforeach()
-  # The LiLiCorr head (hidden 1024, 2 layers, MLP 2048, factor 1024; always bf16 - Decision 3): the shapes not above.
-  foreach(MKN "8 1024 3072" "8 1024 1024" "8 1024 2048" "8 2048 1024" "7 4096 1024" "1 4096 1024" "1 1024 1024")
-    separate_arguments(MKN)
-    list(GET MKN 0 _m)
-    list(GET MKN 1 _k)
-    list(GET MKN 2 _n)
-    if(_n LESS 2048)
-      add_gemv_bf16_variant(${_m} ${_k} ${_n} 16 16)
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M${_m}_K${_k}_N${_n}_C16_S16)
-    else()
-      add_gemv_bf16_variant(${_m} ${_k} ${_n} 64 1)
-      list(APPEND B70_LILICORR_P0_KERNELS kernel_gemv_bf16_M${_m}_K${_k}_N${_n})
-    endif()
-  endforeach()
-endif()
-set(B70_LILICORR_P0_KERNELS ${B70_LILICORR_P0_KERNELS} CACHE INTERNAL "spec 26a's probe binaries (lilicorr_cost_names_test)")
-# ==== Spec 26a: LiLiCorr P0 ==== (end) ====
-
-# ==== Spec 26b: LiLiCorr on the card - the drafter ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-20-spec26b-lilicorr-drafter.md, Task 4. Additive only: no existing source is edited
-# and no existing name is built here (26a's block already builds the drafter's GEMVs at M 8 and the int8 head at M 7), so
-# every binary above keeps its name, its command line and its bytes (D0); nothing is bound without a LiLiCorr drafter
-# (runtime::dflash::LiliDrafter). At nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr's shapes beside Bolt
-# (kernels::dflash::kLiLiCorr, src/kernels/dflash_kernels.h):
-#   df_prep.cl         reused at H 4096, Q32 / KV2 x 128, FF 12288, conv 16 x 2, RING 1024, VOCAB 131072 (df_embed, df_norm,
-#                      the conv prepare / finish, df_silu_mul, df_qkv_prep, df_ctx_store)
-#   ll_attn.cl         df_attn's chain + the sink in the reduce, WIN 1024 over RING 1024 in PB 64 blocks, 8 q heads a part
-#   ll_topk.cl         the 8 best raw logits of each of the 7 mask rows + the row's logsumexp (32 chunks merged in order)
-#   ll_lattice.cl      the LiLiCorr head (56 lattice tokens, hidden 1024, 8 heads, the slot bias at offset 7)
-#   ll_select.cl       the walk over the lattice, the readback, ctrl.cur_token[1 + s]
-#   ll_gemv_bf16_g.cl  gemv_bf16 with an fp32 output scale - the exact arm's NVFP4 linears (fc, gate||up, down) at M 8
-#   gemv_bf16.cl       the bf16 target head at the 7 mask rows (--lm-head bf16; the int8 head's M 7 is 26a's)
-# The int8 / int4 g64 / bf16 GEMVs at M 8 (q||k||v, o, gate||up, down, fc, the conv projections, the context's k||v) are
-# 26a's (B70_LILICORR_P0's block), which this block requires.
-option(B70_LILICORR "build the LiLiCorr drafter variants (spec 26b)" ON)
-set(B70_LILICORR_KERNELS)
-if(B70_LILICORR AND B70_LILICORR_P0 AND B70_BOLT)
-  set(LL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
-  set(LCTL_DEFINES DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5 DCTL_AVALID=6)
-  add_ocloc_kernel(df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072 SOURCE ${LL_DIR}/df_prep.cl
-                   DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} M=8 H=4096 WG=256 EPS=1e-06f VOCAB=131072 GROUP=16 CTAPS=2
-                           INTER=12288 NH=32 NKV=2 HD=128 RING=1024)
-  add_ocloc_kernel(ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 SOURCE ${LL_DIR}/ll_attn.cl
-                   DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} M=8 NH=32 NKV=2 HD=128 RING=1024 WIN=1024 PB=64 HPW=8 WGA=128)
-  add_ocloc_kernel(ll_topk_R7_N131072_U131072_K8 SOURCE ${LL_DIR}/ll_topk.cl
-                   DEFINES R=7 N=131072 USED=131072 TOPK=8 CH=4096)
-  add_ocloc_kernel(ll_lattice_S7_K8_HL1024_LH8_B8 SOURCE ${LL_DIR}/ll_lattice.cl
-                   DEFINES ${LCTL_DEFINES} S=7 KC=8 HL=1024 LHEADS=8 BLK=8 RMAX=64 GW=64 KT=16 EPS=1e-06f FEPS=1e-05f)
-  add_ocloc_kernel(ll_select_S7_K8 SOURCE ${LL_DIR}/ll_select.cl DEFINES ${CTRL_DEFINES} ${LCTL_DEFINES} S=7 KC=8)
-  foreach(KN "24576 4096" "4096 24576" "12288 4096")   # fc, gate||up, down: N >= 2048 -> gemv_bf16's {64, 1} tiling
-    separate_arguments(KN)
-    list(GET KN 0 _k)
-    list(GET KN 1 _n)
-    add_ocloc_kernel(ll_gemv_bf16_g_M8_K${_k}_N${_n} SOURCE ${LL_DIR}/ll_gemv_bf16_g.cl DEFINES M=8 K=${_k} N=${_n})
-    list(APPEND B70_LILICORR_KERNELS kernel_ll_gemv_bf16_g_M8_K${_k}_N${_n})
-  endforeach()
-  add_gemv_bf16_variant(7 4096 131072 64 1)
-  list(APPEND B70_LILICORR_KERNELS kernel_df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072
-    kernel_ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 kernel_ll_topk_R7_N131072_U131072_K8
-    kernel_ll_lattice_S7_K8_HL1024_LH8_B8 kernel_ll_select_S7_K8 kernel_gemv_bf16_M7_K4096_N131072)
-endif()
-set(B70_LILICORR_KERNELS ${B70_LILICORR_KERNELS} CACHE INTERNAL "spec 26b's LiLiCorr drafter binaries (lilicorr_names_test)")
-# ==== Spec 26b: LiLiCorr on the card - the drafter ==== (end) ====
 
 # ==== Spec 13a: the batching probe (rows of different sequences) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
