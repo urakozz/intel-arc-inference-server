@@ -8,7 +8,6 @@
 #include <string>
 
 #include "kernels/prefill/pf_kernels.h"
-#include "runtime/prefill/backend.h"
 #include "runtime/prefill/gemm.h"
 #include "runtime/prefill/profile.h"
 
@@ -71,16 +70,11 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
                                   std::to_string(s.max_len));
   require(s.max_len % 8 == 0, "max_len " + std::to_string(s.max_len) +
                                   " is not a multiple of 8; it is both GEMMs' row pitch");
-  // sycl-tla's 2D block loads move 8 bf16 at a time, so `gemm_bf16_batched`
-  // requires N (of QK^T) and K (of PV) to be multiples of 8. The rounded-up
-  // width is what both GEMMs use; `pf_softmax_causal` writes an exact +0.0 in
-  // columns [depth, npad) so the PV contraction over them contributes nothing,
-  // and it never READS a score there, so whatever the QK^T GEMM computed out of
-  // unwritten cache rows cannot reach a number. `max_len` is a multiple of 8 on
-  // every path that gets here (it is the KV allocation's own extent), and the
-  // rounding therefore never leaves the allocation.
-  const bool l0 = is_l0(backend);
-  if (l0 && attn_mode() == AttnMode::Flash) {
+  // The depth pads to pf_gemm's 256 tile; the rounded-up width is what both GEMMs use.
+  // `pf_softmax_causal` writes an exact +0.0 in columns [depth, npad) so the PV contraction
+  // over them contributes nothing, and it never READS a score there, so whatever the QK^T
+  // GEMM computed out of unwritten cache rows cannot reach a number.
+  if (attn_mode() == AttnMode::Flash) {
     // Spec 6: one launch for all four kv groups, no score scratch. pf_o's layout is the
     // composed path's ([24][rows][256], stride rows * 256, rows = pad256(C)), so
     // pf_attn_gate is unchanged. The kernel reads the cache rows [0, pos + C) only and masks
@@ -97,16 +91,13 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     profile_wait(cx, Phase::kAttnFlash);
     return;
   }
-  if (!l0)
-    require(gemm_bf16_supports_transb(),
-            "this build has no ColumnMajor-B chain, so QK^T cannot read the KV cache in place");
-  // Spec 2.1 §3.4 (L0): the depth pads to 256 -- pf_gemm's tile -- and every per-head slot is
-  // strided by the 256-padded row count. sycl-tla keeps spec 2's 8-padding and C-row slots.
+  // Spec 2.1 §3.4: the depth pads to 256 -- pf_gemm's tile -- and every per-head slot is
+  // strided by the 256-padded row count.
   const uint32_t rows = attn_rows(C, backend);
-  const uint32_t npad = l0 ? pad256(depth) : (depth + 7u) & ~7u;
+  const uint32_t npad = pad256(depth);
   require(npad <= s.max_len, "the padding of depth " + std::to_string(depth) + " exceeds max_len " +
                                  std::to_string(s.max_len));
-  if (l0) require(s.max_len % 256 == 0, "the L0 backend needs max_len % 256 == 0 (spec 2.1 §3.1)");
+  require(s.max_len % 256 == 0, "the L0 backend needs max_len % 256 == 0 (spec 2.1 §3.1)");
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(rows) * ld;           // one head slot of pf_s / pf_p
   const size_t stride_h = size_t(rows) * kHeadDim;     // one q-head of pf_o
@@ -120,7 +111,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   uint16_t* P = pf_p.as<uint16_t>();
   float* O = s.pf_o.as<float>();
 
-  // Spec S3 (`2026-09-22-prefill-parity-program-design.md` §3), L0 only: row `m`
+  // Spec S3 (`2026-09-22-prefill-parity-program-design.md` §3): row `m`
   // is the query at absolute position `pos + m`, so the causal bound puts every
   // score it can use in columns [0, pos + m]. One GEMM of N = `npad` therefore
   // computes, on the second chunk, roughly half its columns for the mask to
@@ -157,56 +148,39 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     // read in place (transB). N is the padded causal depth; the softmax reads only [0, pos+m].
     const uint16_t* qj = q + size_t(j) * group * kHeadDim;
     const uint16_t* kj = kv_k + size_t(j) * kHeadDim;
-    if (l0) {
-      for (uint32_t b = 0; b < blocks; ++b) {
-        const uint32_t r0 = b * kPfGemmTile, r1 = std::min(r0 + kPfGemmTile, C);
-        GemmBatch qk{};
-        qk.M = r1 - r0;  qk.K = kHeadDim;  qk.N = std::min(npad, pad256(pos + r1));
-        qk.L = group;
-        qk.lda = q_row;  qk.ldb = kv_row;  qk.ldc = ld;
-        qk.strideA = kHeadDim;  qk.strideB = 0;  qk.strideC = stride_l;
-        gemm_l0(cx, kc, qk, qj + size_t(r0) * q_row, kj, S + size_t(r0) * ld, /*transB=*/true);
-      }
-      // Diagnostic only; the timed path has no wait here. One wait for the whole
-      // block loop, so the phase keeps its meaning and gains no perturbation:
-      // `take_launch_metrics` drains every block's GPU time into this row.
-      profile_wait(cx, Phase::kAttnQk);
-    } else {
+    for (uint32_t b = 0; b < blocks; ++b) {
+      const uint32_t r0 = b * kPfGemmTile, r1 = std::min(r0 + kPfGemmTile, C);
       GemmBatch qk{};
-      qk.M = C;  qk.K = kHeadDim;  qk.N = npad;  qk.L = group;
+      qk.M = r1 - r0;  qk.K = kHeadDim;  qk.N = std::min(npad, pad256(pos + r1));
+      qk.L = group;
       qk.lda = q_row;  qk.ldb = kv_row;  qk.ldc = ld;
       qk.strideA = kHeadDim;  qk.strideB = 0;  qk.strideC = stride_l;
-      attn_qk_sycl(cx, qk, qj, kj, S);    // includes the SYCL -> L0 wait (A24)
+      gemm_l0(cx, kc, qk, qj + size_t(r0) * q_row, kj, S + size_t(r0) * ld, /*transB=*/true);
     }
+    // Diagnostic only; the timed path has no wait here. One wait for the whole
+    // block loop, so the phase keeps its meaning and gains no perturbation:
+    // `take_launch_metrics` drains every block's GPU time into this row.
+    profile_wait(cx, Phase::kAttnQk);
 
     // Unchanged, and deliberately so: the softmax sees the whole chunk at once,
     // reads only the causal prefix of each row, and zero-fills to `npad`.
     cx.launch(kc(kernels::pf_attn_variant(q_heads, kv_heads), "pf_softmax_causal"), C, group, 1,
               {PtrArg(S), PtrArg(P), arg_val(pos), arg_val(npad), arg_val(ld),
                arg_val(uint32_t(stride_l))});
-    if (l0) profile_wait(cx, Phase::kAttnSm);
+    profile_wait(cx, Phase::kAttnSm);
 
     // O[l][m][d] = sum_n P[l][m][n] . v[n][j][d]; K is the padded depth, whose extra P columns
     // the softmax wrote as exact +0.0 (spec §3.4's invariant on the KV rows they multiply).
-    // ONE launch on both backends -- see the occupancy measurement above.
+    // ONE launch -- see the occupancy measurement above.
     GemmBatch pv{};
     pv.M = C;  pv.K = npad;  pv.N = kHeadDim;  pv.L = group;
     pv.lda = ld;  pv.ldb = kv_row;  pv.ldc = kHeadDim;
     pv.strideA = stride_l;  pv.strideB = 0;  pv.strideC = stride_h;
     const uint16_t* vj = kv_v + size_t(j) * kHeadDim;
     float* oj = O + size_t(j) * group * stride_h;
-    if (l0) {
-      gemm_l0(cx, kc, pv, P, vj, oj, /*transB=*/false);
-      profile_wait(cx, Phase::kAttnPv);
-    } else {
-      timed_wait(cx, Phase::kAttnSm);     // L0 -> SYCL
-      attn_pv_sycl(cx, pv, P, vj, oj);
-      // Otherwise the next group's QK wait also consumes this group's PV.
-      // The final group is drained by the mandatory boundary below.
-      if (j + 1 < kv_heads) profile_wait(cx, Phase::kAttnPv);
-    }
+    gemm_l0(cx, kc, pv, P, vj, oj, /*transB=*/false);
+    profile_wait(cx, Phase::kAttnPv);
   }
-  if (!l0) timed_wait(cx, Phase::kAttnPv); // SYCL -> L0, for the gate launch next
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, uint32_t rows,
@@ -219,11 +193,7 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 
 // --- spec 12b: the int8 KV cache -------------------------------------------------------
 
-void require_kv8_path(PrefillBackend backend) {
-  if (!is_l0(backend))
-    throw std::runtime_error(
-        "runtime::prefill: --kv-cache int8 prefills on the L0 backends only (l0, l0-int8): "
-        "sycl-tla's attention is the composed bf16 path, which has no int8 form");
+void require_kv8_path(PrefillBackend) {
   if (attn_mode() != AttnMode::Flash)
     throw std::runtime_error(
         "runtime::prefill: --kv-cache int8 prefills through the flash attention only: "

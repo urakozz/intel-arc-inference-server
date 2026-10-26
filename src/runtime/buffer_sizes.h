@@ -218,7 +218,7 @@ struct PrefillScratchSizes {
   size_t ids, resid, x, partials, ab_out, norm_sumsq, gdn_o, mixer_out, logits, argmax_part,
       gdn_xb, gdn_seed, gdn_g, gdn_beta, gdn_A, gdn_A2, gdn_w, gdn_u, pf_q, pf_attn, pf_o,
       pf_rowsum;
-  size_t dequant, slab, pf_s, pf_p;   // lazy
+  size_t slab, pf_s, pf_p;   // lazy
   size_t moe = 0;   // spec 15d: MoePrefillLayout::total, eager on a MoE model, 0 when dense
   size_t eager() const {
     return ids + resid + x + partials + ab_out + norm_sumsq + gdn_o + mixer_out + logits +

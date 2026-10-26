@@ -10,7 +10,6 @@
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/prefill/attn.h"
-#include "runtime/prefill/backend.h"
 #include "runtime/prefill/dequant.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
@@ -20,19 +19,10 @@
 #include "runtime/prefill/profile.h"
 
 // The per-chunk walk: `capture.cc`'s decode order (`:472-591`), at runtime `M`,
-// at S = 1, with the int4 GEMVs replaced by the two-pass
-// `dequant_to_bf16` -> `gemm_bf16` (rulings A23/A24) and the attention replaced
-// by the composed path (ruling A14).
-//
-// **The one structural difference from `capture.cc`, and it is not cosmetic.**
-// A captured decode list is 774 launches on ONE queue with a single submit; this
-// walk interleaves two runtimes on one hardware compute queue. Every
-// `dequant -> gemm` and every `gemm -> consumer` boundary is a host
-// `Context::wait()` because there is nothing else on this device to order them
-// with (A24, Probe B: `zeDeviceGetCommandQueueGroupProperties` reports exactly
-// one COMPUTE group with `numQueues = 1`). The waits are counted and reported
-// (`step_chunk_waits()`) rather than hidden, because at a measured 22.35 us
-// each they are a real term in the chunk's cost.
+// at S = 1, with the int4 GEMVs replaced by the slab walk of `linear_l0` (spec 2.1 S2) or
+// spec 5's h8 walk, and the attention by `attn_chunk` (flash, or the composed path of
+// ruling A14). Every launch is on the one in-order Level Zero list; the timed path has no
+// host wait inside a chunk.
 namespace runtime::prefill {
 namespace {
 
@@ -75,15 +65,10 @@ const void* at_const(const l0::Mem& m, size_t off) {
   return static_cast<const uint8_t*>(m.ptr()) + off;
 }
 
-// One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The sycl-tla side is
-// spec 2's two-pass path unchanged (backend_sycl.cc); the L0 side is S2's slab walk; the
-// l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
+// One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The l0 side is S2's
+// slab walk; the l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q) {
-  if (backend == PrefillBackend::SyclTla) {
-    linear_sycl(cx, kc, s, w, x, M);
-    return;
-  }
   if (backend == PrefillBackend::L0Int8) {
     linear_i8(cx, kc, s, *q, w, x, M);
     return;
@@ -133,7 +118,6 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
                  PrefillBackend backend, Int8State* q, const Walk& w, uint32_t& gdn, uint32_t& fa,
                  const PrefillTaps* taps = nullptr) {
   const model::ModelDesc& d = *m.desc;
-  const bool l0 = is_l0(backend);
   const bool kv8 = kv.form == KvCache::Int8;
   const size_t gdn_state_stride =
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
@@ -226,7 +210,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
 
     // The MLP half, identical in both layer kinds.
     //
-    // **Parity program S2(a), L0 only: the normed activations go to
+    // **Parity program S2(a): the normed activations go to
     // `mixer_out`, not `x`.** The fused gate||up GEMM reads its A operand row m
     // at pitch 5120 and writes x row m at pitch I (17408 / 19456) in the SAME kernel, so the
     // two cannot share a buffer: work-group 0's x rows would overwrite A rows
@@ -235,7 +219,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     // is bf16 [kC][6144] and its last reader -- out_proj / o_proj -- is three
     // launches back, so it is free and large enough for [pad256(C)][5120].
     // spec 5: the int8 gate||up exists only in the fused form, whatever silu_fused() says.
-    const bool fuse = l0 && (backend == PrefillBackend::L0Int8 || silu_fused());
+    const bool fuse = backend == PrefillBackend::L0Int8 || silu_fused();
     void* const mlp_x = fuse ? s.mixer_out.ptr() : s.x.ptr();
     pf_res_norm(cx, kc, s, 1u, at_const(small.norms, s.desc().small_layout().norms_off_post),
                 s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride hidden
@@ -303,11 +287,10 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   require(kv.bytes() == kv_k_mem.size(), "kv_k stride x " + fa_n + " FA layers != its allocation");
   require(kv.bytes() == kv_v_mem.size(), "kv_v stride x " + fa_n + " FA layers != its allocation");
   if (kv8) require_kv8_path(backend);
-  // Spec 15d: a MoE model's FFN is the grouped-expert block (moe.cc), L0 backends only.
+  // Spec 15d: a MoE model's FFN is the grouped-expert block (moe.cc).
   if (d.is_moe())
-    require(is_l0(backend) && m.moe.size() == d.layers,
-            "a mixture-of-experts model prefills on the L0 backends (l0, l0-int8) with every "
-            "layer's expert blocks loaded");
+    require(m.moe.size() == d.layers, "a mixture-of-experts model prefills with every layer's "
+                                      "expert blocks loaded");
   require(gdn_state_stride * d.gdn_layers == gdn_state_mem.size(),
           "gdn_state stride x " + gdn_n + " GDN layers != its allocation");
   require(conv_ring_stride * d.gdn_layers == conv_ring_mem.size(),
@@ -331,7 +314,6 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 const PpStage& st, const PrefillTaps* taps) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
-  require(is_l0(backend), "a pipeline stage prefills on the L0 backends only (l0, l0-int8)");
   require(attn_mode() == AttnMode::Flash,
           "a pipeline stage runs the flash attention only (B70_PREFILL_ATTN=composed has no "
           "two-card walk)");
@@ -517,54 +499,27 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 
 // --- the launch arithmetic, derived from the walk above ---------------------
 //
-// Per GDN layer, L0 launches: 2 (res_norm) + 1 (dequant qkv||z) + 1 (a||b)
-//   + 10 (gdn_chunk) + 1 (dequant out_proj) + 2 (res_norm) + 1 (dequant
-//   gate||up) + 1 (silu_mul) + 1 (dequant down) = 20.
-// Per FA layer, L0 launches: 2 + 1 (dequant qkv) + 1 (attn_prep)
-//   + 4 (one softmax per kv group) + 1 (attn_gate) + 1 (dequant o_proj) + 2
-//   + 1 (dequant gate||up) + 1 (silu_mul) + 1 (dequant down) = 15.
-// Boundary: 1 (embed).  Chunk total: 1 + 48.20 + 16.15 = 1201.
+// Per layer, the launches that are not the four int4 linears': GDN 2 (res_norm) + 1 (a||b)
+//   + 10 (gdn_chunk) + 2 (res_norm) + 1 (silu_mul) = 16; FA 2 + 1 (attn_prep) + the
+//   attention + 1 (attn_gate) + 2 + 1 (silu_mul). Boundary: 1 (embed).
 // `step_head` adds 5 once per prefill: 2 (final norm) + 1 (lm_head) + 2 (argmax).
-//
-// **Only one term depends on C**, and it is new in spec S3: the L0 backend's
-// attention issues its QK^T GEMM per row block of 256 rows rather than once per
-// chunk, so an FA layer costs `attn_chunk_launches(C, L0)` there instead of a
-// constant. Everything else is still C-free -- the runtime-M rule, one binary
-// set for every `--prefill-chunk` -- and sycl-tla's arithmetic is untouched.
-namespace {
-// sycl-tla, spec 2's arithmetic (unchanged): per GDN layer 20 L0 launches, 4 SYCL GEMMs,
-// 8 waits; per FA layer 15 launches, 4 + 2 x 4 GEMMs, 17 waits; 1 embed.
-constexpr size_t kGdnLayerLaunches = 2 + 1 + 1 + kGdnChunkLaunches + 1 + 2 + 1 + 1 + 1;
-// Spec 15b: the FA terms are per kv-head (4 on Qwen3.8), so per descriptor.
-size_t fa_layer_launches(const model::ModelDesc& d) {
-  return 2 + 1 + kAttnPrepLaunches + attn_chunk_launches_sycl(d) + kAttnGateLaunches + 1 + 2 +
-         1 + 1 + 1;
-}
-constexpr size_t kGdnLayerGemms = 4;
-size_t fa_layer_gemms(const model::ModelDesc& d) { return 4 + 2 * size_t(d.fa_kv_heads); }
-constexpr size_t kGdnLayerWaits = 2 * 4;
-size_t fa_layer_waits(const model::ModelDesc& d) { return 2 * 4 + 2 * size_t(d.fa_kv_heads) + 1; }
-// L0 (spec 2.1 S2): the four dequant launches of a layer become 2 x (N / 1024) launches per
-// linear -- GDN: qkv||z 32 + out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 +
-// o_proj 10 + 68 + 10 = 116 (Qwen3.8; spec 14: gate||up is 2 x 38 = 76 on Agnes, so 128 /
-// 124 - `slab_launches` reads the descriptor's rows).
-// L0 (spec 2.1 S3): attention's two GEMMs per kv group are L0 launches now, no SYCL GEMM and
-// no host wait remains -- 1 + 48 x 136 + 16 x 135 = 8689 at one row block (spec §3.3).
-// L0 (parity program S3): QK^T is issued per row block of 256 rows (P·V is not -- see
-// attn.cc), so an FA layer is 131 + 4 x blocks launches -- 135 at C <= 256, 163 at
-// C = 2048. A chunk is then 1 + 48 x 136 + 16 x (131 + 4 x blocks): 8689 at C <= 256 and
-// 9137 at C = 2048 (derived).
+// L0 (spec 2.1 S2): each int4 linear is 2 x (N / 1024) slab launches -- GDN: qkv||z 32 +
+// out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 + o_proj 10 + 68 + 10 = 116
+// (Qwen3.8; spec 14: gate||up is 2 x 38 = 76 on Agnes, so 128 / 124 - `slab_launches` reads
+// the descriptor's rows).
+// L0 (parity program S3): the composed attention issues QK^T per row block of 256 rows (P·V
+// is not -- see attn.cc), so it is 4 x (2 + blocks) launches -- the one term that depends on C.
 // L0 (parity program S2a): `pf_silu_mul` is fused into the gate||up slab GEMM's epilogue,
-// so EVERY layer loses exactly one launch -- 135 per GDN layer and 130 + 4 x blocks per FA
-// layer. A chunk is 8625 at C <= 256 and 9073 at C = 2048 (derived; -64 = -1 per layer).
-// sycl-tla keeps its own `pf_silu_mul` launch and its arithmetic is untouched.
+// so EVERY layer loses exactly one launch.
 // L0 (spec 6, plan 6b): in Flash mode -- the default, `attn_mode()` -- attention is ONE
-// `pf_flash_attn` launch per FA layer in place of 4 x (2 + blocks), so an FA layer is
-// 123 launches whatever C is, and a chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C
-// (derived; l0-int8 8705). `B70_PREFILL_ATTN=composed` restores the counts above.
+// `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
+// chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8705).
+// `B70_PREFILL_ATTN=composed` gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
 // `silu_fused()` is the one term that is not a property of the shape: it is a
 // diagnostic selector, and the arithmetic follows the walk rather than the
 // default so that a `=0` session's counter still matches its own prediction.
+namespace {
+constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
 // The 2 x N / 1024 slab launches of one layer kind's four int4 linears.
 size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind) {
   size_t n = 0;
@@ -573,16 +528,14 @@ size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind) {
   return n;
 }
 size_t l0_gdn_layer_launches(const model::ModelDesc& d) {
-  return kGdnLayerLaunches - 4 + slab_launches(d, model::LayerKind::GDN) -
-         (silu_fused() ? 1 : 0);
+  return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN) - (silu_fused() ? 1 : 0);
 }
 size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
-  return fa_layer_launches(d) - 4 + slab_launches(d, model::LayerKind::FA) -
-         attn_chunk_launches_sycl(d) + attn_chunk_launches(d, C, PrefillBackend::L0) -
-         (silu_fused() ? 1 : 0);
+  return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0) + kAttnGateLaunches +
+         2 + 1 + slab_launches(d, model::LayerKind::FA) - (silu_fused() ? 1 : 0);
 }
 }  // namespace
-// Spec 15d, a MoE model on an L0 backend. Per layer: the input norm 2, the mixer's two
+// Spec 15d, a MoE model. Per layer: the input norm 2, the mixer's two
 // int4 linears (2 x N / 1024 slab launches each, plus the quantiser per linear on
 // l0-int8), the mixer itself (GDN: a||b + gdn_chunk; FA: attn_prep + attention + gate),
 // the post-attention norm 2 and moe_chunk_launches. Ornith at C <= 2048, flash:
@@ -603,9 +556,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
 }  // namespace
 
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
-  if (d.is_moe()) return is_l0(b) ? moe_step_chunk_launches(d, b, C) : 0;
-  if (b == PrefillBackend::SyclTla)
-    return 1 + d.gdn_layers * kGdnLayerLaunches + d.fa_layers * fa_layer_launches(d);
+  if (d.is_moe()) return moe_step_chunk_launches(d, b, C);
   const size_t base =
       1 + d.gdn_layers * l0_gdn_layer_launches(d) + d.fa_layers * l0_fa_layer_launches(d, C);
   if (b != PrefillBackend::L0Int8) return base;
@@ -615,10 +566,9 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   // counts one pf_silu_mul per layer the int8 walk never issues.
   return base + size_t(d.layers) * 4 - (silu_fused() ? 0 : d.layers);
 }
-// Spec 16c: one layer's launches on an L0 backend, the terms step_chunk_launches adds up.
+// Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            model::LayerKind kind) {
-  if (!is_l0(b)) return 0;
   const bool gdn = kind == model::LayerKind::GDN;
   if (d.is_moe()) {
     auto lin = [&](LinearId id) {
@@ -642,15 +592,6 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   n -= st.has_embed() ? 0 : 1;   // layer `first`'s pf_res_fold ran on the previous device
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold
   return n;
-}
-
-size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerGemms + d.fa_layers * fa_layer_gemms(d)
-                                      : 0;
-}
-size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b) {
-  return b == PrefillBackend::SyclTla ? d.gdn_layers * kGdnLayerWaits + d.fa_layers * fa_layer_waits(d)
-                                      : 0;
 }
 
 }  // namespace runtime::prefill

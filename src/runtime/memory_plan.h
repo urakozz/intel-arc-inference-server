@@ -60,12 +60,10 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // What a session's prefill allocates, which is a property of the backend and the
 // attention path (PrefillScratch's lazy accessors, Engine::prepare_prefill):
 //
-//   l0-int8 (default)   Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
+//   l0 (default)        the slab ([intermediate][1024] bf16), every int4 linear.
+//   l0-int8             Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
 //                       model also every layer's expert gate||up array, spec 15d); the L0
 //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).
-//   l0                  the slab ([intermediate][1024] bf16), every int4 linear.
-//   sycl-tla            the bf16 dequant scratch and, its attention always being the
-//                       composed path, pf_s / pf_p.
 //   composed attention  (B70_PREFILL_ATTN=composed on an L0 backend) pf_s / pf_p:
 //                       [GQA group][kC][max_len] fp32 + bf16 - 73,728 B per position
 //                       on Qwen3.8, the only prefill scratch that scales with max_len.
@@ -75,7 +73,7 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // ruling R7 keeps every prefill allocation lazy, so it plans none of them.
 struct PrefillPath {
   bool prefill = true;
-  PrefillBackend backend = PrefillBackend::L0Int8;
+  PrefillBackend backend = PrefillBackend::L0;
   bool composed_attn = false;
 };
 

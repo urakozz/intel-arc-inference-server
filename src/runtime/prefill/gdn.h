@@ -39,11 +39,8 @@ namespace runtime::prefill {
 //     deviation explicitly ("the same deviation 6b took for `gdn_chunk`") when
 //     granting it to `attn_chunk`. The tensor contract above is unchanged.
 //   * `KernelCache& kc` - plan 6b Task 2 put binary loading on `Context` as
-//     `Context::kernel(variant, entry, wg)`. It cannot live there: `Context`'s
-//     methods are compiled by icpx into libb70_prefill.so, which deliberately
-//     links no project archive, and `l0::Module`/`l0::Kernel` are `b70_l0`
-//     symbols. The cache is the same object, relocated to the g++ side; see
-//     `kernels.h`.
+//     `Context::kernel(variant, entry, wg)`; the cache lives beside `Context`
+//     instead (`kernels.h`).
 //
 // Ten launches per call, in the order `gdn.cc` lists them. `C` must be in
 // (0, PrefillScratch::kC]; anything else throws.

@@ -127,12 +127,6 @@ size_t PrefillScratch::bytes() const {
          pf_rowsum.size() + (moe ? moe->size() : 0);
 }
 
-l0::Mem& PrefillScratch::dequant_buffer() {
-  if (!dequant_)
-    dequant_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device,
-                                         sizes(max_len, *desc_).dequant);
-  return *dequant_;
-}
 l0::Mem& PrefillScratch::slab_buffer() {
   if (!slab_)
     slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_).slab);
@@ -149,7 +143,7 @@ l0::Mem& PrefillScratch::pf_p_buffer() {
   return *pf_p_;
 }
 size_t PrefillScratch::lazy_bytes() const {
-  return (dequant_ ? dequant_->size() : 0) + (slab_ ? slab_->size() : 0) +
+  return (slab_ ? slab_->size() : 0) +
          (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0);
 }
 

@@ -23,13 +23,11 @@
 namespace runtime {
 
 // The prefill path's per-engine state: `runtime::prefill::Context` (the L0
-// immediate list and the SYCL queue) and its `KernelCache`. **Incomplete here
-// on purpose.** Everything that touches it -- `Engine::prefill`,
-// `prefill_launches`, and the deleter -- is compiled into `b70_prefill_host`
-// and linked only by a target that calls `b70_link_prefill()`. `b70_runtime`
-// is linked by every decode binary and test, and none of those may acquire a
-// dependency on libb70_prefill.so (cmake/prefill.cmake's whole argument), so
-// the member below is a `unique_ptr` with a FUNCTION-POINTER deleter: that
+// immediate list) and its `KernelCache`. **Incomplete here on purpose.** Everything
+// that touches it -- `Engine::prefill`, `prefill_launches`, and the deleter -- is
+// compiled into `b70_prefill_host`. `b70_runtime` is linked by every decode binary
+// and test, and none of those needs the prefill walk, so the member below is a
+// `unique_ptr` with a FUNCTION-POINTER deleter: that
 // instantiation needs no complete type and emits no reference to any prefill
 // symbol in a translation unit that never calls `prefill()`.
 struct PrefillEngine;
@@ -108,18 +106,14 @@ class Engine {
   // Non-null only after the first prefill(); for the tests and the CLI report.
   const PrefillScratch* prefill_scratch() const { return pf_.get(); }
   // Context::launches() -- the L0 launches this engine's prefill path has
-  // appended since the first prefill(). 0 before it. The SYCL GEMMs are not on
-  // that list and are NOT counted; `runtime::prefill::step_chunk_gemms()` is.
+  // appended since the first prefill(). 0 before it.
   size_t prefill_launches() const;
 
-  // Spec 2.1: the backend prefill() runs. Unset means the build's default
-  // (runtime::prefill::default_prefill_backend(), defined in b70_prefill_host). It may change
+  // Spec 2.1: the backend prefill() runs. Unset means the default, l0
+  // (runtime::prefill::default_prefill_backend()). It may change
   // between prefill() calls -- persistent state is shared, scratch is per backend.
   void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; }
   PrefillBackend prefill_backend() const;          // defined in engine_prefill.cc
-  // True once this engine's prefill Context has built its SYCL side. The L0 backend never
-  // does; the equivalence test asserts it (spec §5 S3).
-  bool prefill_sycl_side_created() const;         // defined in engine_prefill.cc
 
   // Experimental pure-L0 whole-chunk replay. Off by default; an explicit
   // setting overrides B70_PREFILL_REPLAY=1. Recordings retain frozen (pos,C)

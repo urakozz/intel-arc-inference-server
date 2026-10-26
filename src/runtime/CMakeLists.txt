@@ -31,10 +31,8 @@ if(B70_BATCH_PROBE)
   target_compile_definitions(b70_runtime PUBLIC B70_BATCH_PROBE=1)
 endif()
 
-# The prefill path's host half - its own archive, so nothing that links
-# b70_runtime acquires a dependency on libb70_prefill.so. Built in EVERY
-# configuration (spec 2.1 §3.5): only libb70_prefill.so itself - the SYCL
-# component - is optional (cmake/prefill.cmake).
+# The prefill path's host half - its own archive, so a decode-only target that links
+# b70_runtime links nothing of the prefill walk (spec 2.1 §3.5).
 add_subdirectory(prefill)
 
 # Spec 18b: K2-Horizon's runtime (K2Engine, its capture and its planner) - its own directory.

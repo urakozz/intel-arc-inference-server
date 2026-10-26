@@ -131,7 +131,7 @@ size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device);
 // linears only) in int8, and the prefill hand-off (runtime/pipeline_prefill_plan.h:
 // pp_prefill_link_bytes - device 1's two landing slots) in decode_state, as `prefill_link`.
 // The block-end shadows a prefix cache's hook needs are not planned (b70-serve's pipeline is
-// spec 16d). The composed attention and sycl-tla have no pipeline walk: refused.
+// spec 16d). The composed attention has no pipeline walk: refused.
 // `pp_no_prefill()` (the default everywhere) is spec 16b's decode-only plan, unchanged.
 inline PrefillPath pp_no_prefill() {
   PrefillPath p;

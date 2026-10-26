@@ -10,12 +10,9 @@
 #include <vector>
 
 #include "l0/event.h"
-#include "runtime/prefill/sycl_side.h"
 
-// The prefill Context's Level Zero half (spec 2.1 §3.5). Before spec 2.1 this file was
-// src/sycl/context.cc and built a SYCL queue in its constructor; the queue is now a SyclSide
-// created on the first sycl() call, so a chunk on the L0 backend never touches SYCL and this
-// translation unit compiles with g++ in every build.
+// The prefill Context: the Level Zero immediate list every prefill launch goes on (spec 2.1
+// §3.5).
 namespace runtime::prefill {
 namespace {
 void zc(ze_result_t r, const char* what) {
@@ -100,7 +97,6 @@ struct Context::Impl {
   ze_context_handle_t ctx;
   ze_device_handle_t dev;
   ze_command_list_handle_t list;
-  SyclSide* sycl = nullptr;   // lazily created; owned
   size_t launches = 0;
   std::unique_ptr<LaunchProfiler> profiler;
   Recording* recording = nullptr;  // non-owning, only during capture callback
@@ -119,7 +115,7 @@ Context::Context(ze_context_handle_t ze_ctx, ze_device_handle_t ze_dev) {
   qd.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
   ze_command_list_handle_t list = nullptr;
   zc(zeCommandListCreateImmediate(ze_ctx, ze_dev, &qd, &list), "zeCommandListCreateImmediate");
-  p_ = new Impl{ze_ctx, ze_dev, list, nullptr, 0, nullptr};
+  p_ = new Impl{ze_ctx, ze_dev, list, 0, nullptr};
   const char* profile = std::getenv("B70_PREFILL_PROFILE");
   if (profile && std::strcmp(profile, "1") == 0) {
     try {
@@ -140,23 +136,14 @@ Context::~Context() {
     zeCommandQueueSynchronize(p_->replay_queue, UINT64_MAX);
     zeCommandQueueDestroy(p_->replay_queue);
   }
-  if (p_->sycl) sycl_side_destroy(p_->sycl);
   zeCommandListDestroy(p_->list);
   delete p_;
 }
 
 void Context::wait() {
   if (p_->recording) throw std::runtime_error("prefill capture: wait inside recording");
-  if (p_->sycl) sycl_side_wait(p_->sycl);
   zc(zeCommandListHostSynchronize(p_->list, UINT64_MAX), "zeCommandListHostSynchronize");
 }
-
-SyclSide& Context::sycl() {
-  if (p_->recording) throw std::runtime_error("prefill capture: SYCL inside recording");
-  if (!p_->sycl) p_->sycl = sycl_side_create(p_->ctx, p_->dev);
-  return *p_->sycl;
-}
-bool Context::has_sycl() const { return p_->sycl != nullptr; }
 
 void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz,
                      std::initializer_list<KernelArg> args, l0::Event* signal) {
@@ -242,7 +229,6 @@ void Context::timestamp(uint64_t* dst) {
 
 bool Context::wait_for(uint64_t timeout_ns) {
   if (p_->recording) throw std::runtime_error("prefill capture: wait inside recording");
-  if (p_->sycl) throw std::runtime_error("prefill::Context::wait_for: the SYCL side has no bounded wait");
   const ze_result_t r = zeCommandListHostSynchronize(p_->list, timeout_ns);
   if (r == ZE_RESULT_NOT_READY) return false;
   zc(r, "zeCommandListHostSynchronize (bounded)");
@@ -289,7 +275,7 @@ Context::Recording::~Recording() {
 }
 
 std::unique_ptr<Context::Recording> Context::capture(const std::function<void()>& encode) {
-  if (p_->recording || p_->profiler || p_->sycl)
+  if (p_->recording || p_->profiler)
     throw std::runtime_error("prefill capture: requires an unprofiled, non-recording L0 context");
   wait();
   auto recording = std::unique_ptr<Recording>(new Recording(this));
@@ -311,7 +297,7 @@ std::unique_ptr<Context::Recording> Context::capture(const std::function<void()>
 }
 
 void Context::replay(const Recording& recording) {
-  if (recording.owner_ != this || p_->recording || p_->profiler || p_->sycl)
+  if (recording.owner_ != this || p_->recording || p_->profiler)
     throw std::runtime_error("prefill replay: requires its owning, unprofiled L0 context");
   wait();
   if (!p_->replay_queue) {

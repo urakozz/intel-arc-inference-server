@@ -86,7 +86,7 @@ void profile_report(const char* label, double wall_ms) {
                  wall_ms);
   std::fprintf(stderr,
                "  wait_ms is residual host synchronization time, not phase execution time.\n"
-               "  L0_gpu_ms is kernel timestamp duration; SYCL kernels are not timestamped.\n"
+               "  L0_gpu_ms is kernel timestamp duration.\n"
                "  L0_submit_ms covers Context::launch, including event creation on first use.\n"
                "  GPU and host columns overlap: do not add them. Timestamp reads and other\n"
                "  host work are included only in call wall. Compare an independent unprofiled\n"

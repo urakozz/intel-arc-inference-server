@@ -266,7 +266,7 @@ class PipelineEngine {
   void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
   // Everything prefill() sets up before its first chunk (each device's scratch, context,
   // and on l0-int8 its own linears' column scales). Idempotent. Refuses, by name, what has
-  // no two-card walk: sycl-tla, B70_PREFILL_ATTN=composed, B70_PREFILL_REPLAY=1,
+  // no two-card walk: B70_PREFILL_ATTN=composed, B70_PREFILL_REPLAY=1,
   // B70_PREFILL_PROFILE=1.
   void prepare_prefill();
   void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; pf_backend_set_ = true; }
@@ -339,7 +339,7 @@ class PipelineEngine {
   // Spec 16c: null until prepare_prefill(). Declared after stages_ and link_, so it goes
   // first (its lists settle before the buffers they use are freed).
   std::unique_ptr<PipelinePrefillBase> pf_;
-  PrefillBackend pf_backend_ = PrefillBackend::L0Int8;
+  PrefillBackend pf_backend_ = PrefillBackend::L0;
   bool pf_backend_set_ = false;
   BlockHook block_hook_;
   PrefillStats pf_stats_;
