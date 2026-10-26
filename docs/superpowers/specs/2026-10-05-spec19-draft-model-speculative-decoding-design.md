@@ -2,6 +2,10 @@
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 
+**Status (2026-10-27):** 19a-19e merged; 19b-19d built blind and **not yet passing on the card** (`r54.kernels` failed
+2026-10-23, blocking rows 54-56). Next: plan 19f after spec 28's 28b - the fix, rows 54-56, then prompt lookup inside
+DFlash; K up to 15 only after spec 28 (§13).
+
 **Order:** independent of specs 14-18 for Qwen3.8 (it needs spec 8's verify and commit, which are
 merged). Ornith's drafter comes after spec 15c; K2-Horizon after spec 18b (§3, §8).
 
@@ -528,3 +532,75 @@ and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpower
 - **Not in 19d:** Ornith's DFlash (v1) drafter (a full-attention layer and a 16-row block - its stage), a batched runtime
   engine (spec 13b), int8 KV / v1 attention at M = 5..8, the replay-state lever (§11), the measured cost table (row 29).
 
+
+## 13. Amendment - 2026-10-27: DFlash on the card first, then prompt lookup inside DFlash; K up to 15 after spec 28
+
+**The ruling (operator, 2026-10-27):** Qwen3.8-27B is the top target, and its speed track runs in this order: spec 28
+(the small-M verify GEMM), **then this spec on the card**, then spec 17's TP probe on Qwen3.8, then prefill chunk 4096
+(plan 5d). The plan for this amendment is **`docs/superpowers/plans/2026-10-27-spec19f-dflash-card-and-lookup.md`**
+(box row **70**, the speed track's rows being 68-75 - spec 28's header); it starts after plan 28b, when the operator
+says go.
+
+**Where DFlash stands (2026-10-27):** 19b-19d are built blind and merged; none of it has run correctly on a card. The
+box run of **2026-10-23** (main 4c491f8, the one-card batch) **failed `r54.kernels`** - `dflash_kernels_test`, the first
+ocloc build and the first card run of the `df_*` kernels at the drafter's real shapes - which **blocks rows 54-56**
+(`r54.load` / `r54.draft` / `r54.d1`, every `r55.*`, every `r56.*`). The same run skipped `r54.d1` for missing data (19a's
+tap dumps, data key `oracle_dflash_dumps`: a `--push-data` from the Mac). `r29.cost` (verify at M = 5..8) has not run;
+spec 28's plan 28a measures it. **The plan's first task is that fix** - from the failing lines of the 2026-10-23 log,
+confirmed on today's main first - and then rows 54, 55 and 56 in order, D1-D5 as §6 states them, with D3 as amended
+below.
+
+**D3 after spec 28.** From plan 28b on, every verify list at M >= 2 binds `gemm_sm` (spec 28 §2), whose rows are not
+bitwise M = 1's (DPAS accumulation order). D3 ("M = 5..8 verify rows bitwise M = 1") becomes **spec 28 N4's bars at
+M = 2..8** (logits and GDN slots cosine >= 0.99999 against M = 1, the 64-token continuation after a partial commit)
+**plus property R** (each row bitwise across every M >= 2 and whatever the other rows hold). D2 (greedy lossless, zero
+non-tie divergences under the golden tie rule) is unchanged and is what carries the user-visible guarantee.
+
+### 13.1 Prompt lookup inside DFlash (an opt-in mode, measured against plain DFlash)
+
+**The evidence (published by others; nothing of it measured here):** vllm-sly-radiance (a public vLLM ROCm image, one
+AMD R9700) runs DFlash2 at k = 7 with prompt lookup inside it at ~154 t/s on Qwen3.8-27B, and publishes the policy and
+its gain: **+57 to +116 % on far-copy / edit prompts at 8k-99k of context**, measured by them. Our own 19e numbers
+(§9) say lookup alone does not replace MTP on A4 (0.92x of `--mtp auto`, derived) - the point of this mode is the
+other way round: DFlash stays the proposer, and lookup takes over only where it is near-certain and DFlash is blind.
+
+**The policy (theirs, adopted as written; constants in code, not flags):**
+- **ENTER** lookup when the matcher (`server::PromptLookup`, §9) finds a continuation match of **>= 8 tokens** whose
+  source lies **beyond the drafter's 2048-token window** (source position < pos - 2048). Inside the window the drafter
+  attends to the text itself; beyond it, DFlash cannot see it and lookup can.
+- **STAY** while each lookup verify accepts **>= 3** drafts; **EXIT** to DFlash on the first verify below that.
+- **Full-depth lookup verify:** while in lookup, the verify carries K = `--spec-max` lookup drafts (7 today, up to 15
+  after spec 28 - §13.2), capped by the match's remaining length - not AdaptiveK's DFlash-tuned K.
+- **The drafter while in lookup:** the draft pass is **skipped** (saving its ~0.17-0.2 plain steps a verify, derived,
+  docs/probe-dflash-2026-10-08.md §3); the **commit-side projection still runs** on the accepted rows' taps (the tap
+  verify list writes them whatever proposed the drafts), so the ring stays current and the exit to DFlash is warm.
+- **Sampling:** a lookup draft is a point mass - §9's `accept_point_mass`; DFlash drafts keep `accept_sparse`.
+
+**Our form:** `--spec dflash-lookup` - one more value of the existing `--spec` (decision 3), no new flag; it needs
+`--draft-model` exactly as `--spec dflash` does. **Measured against plain `--spec dflash`** (and `--mtp auto` beside it)
+through `b70-serve`, greedy, rotated rounds, median of 3, idle box:
+- **the edit / copy set** (new, built from this repository's own files, no external data): agent turns that re-emit a
+  file or a large part of the context after an edit - "apply this change and output the whole file", a rename across a
+  function, quoting a tool's output back - at depths **8k / 32k / 64k / 99k**, 3 prompts each; and the opencode
+  recording when it exists (D5's corpus);
+- **A4 and the golden prompts** (no-loss check).
+
+**The bar (proposed):** `dflash-lookup` **replaces** plain `dflash` (it becomes what `--spec dflash` does, and the extra
+value is removed again) when it is **>= +20 % on the edit / copy set (median over prompts)** and **loses <= 3 %** on A4
+and golden; **between +5 % and +20 %** it stays opt-in and the operator decides; **below +5 %** it is dropped. D2
+(greedy lossless) and D4 (sampling exact) hold for it as for every proposer.
+
+### 13.2 K up to 15 with an adaptive odd-width ladder - only after spec 28
+
+The same source publishes **K up to 15** with an adaptive odd-width ladder of verify widths (**+10 % on code / json /
+math**, their measurement), although Qwen3.8's DFlash2 drafter was trained on blocks of 8 and still pays at 16.
+**Not before spec 28's 28b has measured verify(16):** on today's per-row GEMV, 16 rows would cost ~4.4 plain steps
+(derived from the +0.22 a row extrapolation) and no acceptance pays that. What K <= 15 costs besides the verify
+(each a task of the plan that builds it - plan 19g, not written):
+- GDN state slots: 16 instead of 8 (+8 x 151 MB = **+1.2 GB**, derived), or spec 19 §11's replay-state lever;
+- the conv ring's depth (`kConvRing` 16 >= M + 3 fails at M = 16: 32);
+- the drafter's kernels at 16 rows (`df_prep_M8`, `df_attn_M8`, `df_select_M8`, the head's top-16 at 15 rows) and the
+  target's verify kernels at M = 9..16 (attention v2, `gdn_step` slots, the head through `gemm_sm_i8w`); `kv8.cl`'s
+  decode is built for M <= 4 and stays refused with `--kv-cache int8`;
+- `MtpCost::dflash` and AdaptiveK over the ladder, from measured verify(M) only.
+The ladder's widths and switching rule are taken from the published policy when plan 19g is written.
