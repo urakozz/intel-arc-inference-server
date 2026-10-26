@@ -137,26 +137,6 @@ only). K2's tokenizer (`tokenizer.json`, BPE + NFC + a BOS post-processor) passe
 and three chat renders whose ids equal HF's - the template writes the BOS, so the prompt is
 encoded without special tokens (one BOS, id 0).
 
-**Muse-Glimmer-30B (spec 23e).** The template is the ORIGINAL's `chat_template.jinja`
-(`meta-models/Muse-Glimmer-30B`, sha256 `cfc67e5f...`, 9992 B, vendored at `tests/tokenizer/muse/`);
-both int4 repos ship an older one (`114f55eb...`), which `b70-serve` refuses unless `--chat-template FILE`
-names a template (`chat::Template(dir, file)`; `source_sha256()` is what is checked). It renders byte for
-byte as transformers 5.19.0's `apply_chat_template` on 26 message lists (`muse_templates.json`,
-`tools/tokenizer/dump_muse.py`; `template_muse_test`) after one more minja patch: the tool-call capability
-probe also accepts `name="argument_needle"` (ATEM writes argument names as an attribute), else minja
-rewrote the call history into JSON content. `strftime_now` is minja's (the host's local date; a test fixes
-the clock with `set_clock`). **One BOS:** the template writes `<|begin_of_text|>` and the tokenizer's
-post-processor would add another; the server encodes the render without special tokens (as
-`apply_chat_template(tokenize=True)`), and `muse_tokenizer_test` asserts exactly one 200000, at position 0,
-in every render's ids. The tokenizer (`tokenizer.json`, `c9dbee66...`, the `\p{M}` split of spec 21e) passes
-the text set, corpus.txt's digests and the 16 named tokens both ways. The OUTPUT is read by
-`server::MuseOutputStream` (`server/toolcall_muse.h`): the prompt ends in `<|start|>assistant`, so the model
-writes each message's recipient - reasoning in `to=self`, content in `to=user`, ATEM calls in tool channels -
-held to transformers' `tokenizer.parse_response` (the checkpoint's `response_template`) on complete turns,
-except where spec 23 decides otherwise (several reasoning blocks joined; schema-first argument typing; the
-`ns.ns` collapse), and to vLLM's selection rule on damaged ones; every split of the text streams to the same
-result.
-
 `tok::Streamer` is the hold-and-flush incremental detokeniser described under
 "Streaming detokenisation" below.
 

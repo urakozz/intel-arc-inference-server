@@ -144,12 +144,12 @@ the live slot after the commit is exactly the state after row j and three new ro
 stale slots and conv-ring positions of the rejected rows are never read); no host source. Spec 25c adds `bolt_run`:
 every `nb_*` kernel and fused arm (the norm sites incl. the two-source fold, the conv ring, the SSM step in its fp32,
 bf16-state, `_C` and `SPEC_SLOTS` builds, the gated norm, router, route, experts up / `_R` / down, the shared act, the
-attention prep, the gather, the argmax) and Muse's `mg_attn_eager` at Bolt's shape against `tests/kernels/bolt_ref.h`
+attention prep, the gather, the argmax) and `mg_attn_eager` (spec 23c's kernel, Decision 15) at Bolt's shape against `tests/kernels/bolt_ref.h`
 on `bolt_fixture.h` - exact, except where Apple's division is not correctly rounded (conv and gnorm within 1 ulp, the
 route's fp32 words within 2 ulp with the ids exact; the card is held bitwise by `bolt_kernels_test`). Spec 25d adds
 `bolt_pf_run`: the portable Bolt prefill kernels (`nb_pf_mamba`'s seed / conv / dt / plain C B^T / SSD scan in fp32 and bf16
 state / gated norm, both tilings ten times each; `nb_pf_moe`'s sort / gather / dequant / combine; the chunk gather; 25c's kernels
-at M 2048) and Muse's prefill eager attention against `tests/kernels/bolt_pf_ref.h` - exact but where Apple's division sits in
+at M 2048) and `mg_pf_flash_attn`'s eager build (spec 23d's) against `tests/kernels/bolt_pf_ref.h` - exact but where Apple's division sits in
 the chain, and the eager attention bitwise decode's `mg_attn_eager` on the same device (its DPAS kernels stay on the box).
 `clrun` inlines a
 source's local `#include "x.h"` itself (Apple's compiler intermittently failed to find them through `-I`). A new

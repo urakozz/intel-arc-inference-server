@@ -14,11 +14,7 @@ cache and MTP head 21e - all blind, its box rows 31-34 pending) but served
 **truncated** (`--layers N`): the whole model needs spec 22's expert-offload
 tier. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the
 original's split adds `\p{M}`, and Intel's interim checkpoint ships Qwen3.8's
-file). Muse-Glimmer-30B (`muse_glimmer`, spec 23: a dense 52-layer model, 39 sliding-window
-layers of 2048 keys and 13 full NoPE ones, an attention output gate, a softcapped head, Harmony-style channels
-with ATEM XML tool calls) is built through serving (decode 23c, prefill 23d, `b70-serve` 23e - blind, box rows
-43-46 pending) on ONE card, Vishva007's int4 g64 export used as-is; it is served with the original's chat
-template (the int4 repos ship an older one: `--chat-template`). What each one runs, and with which flags:
+file). What each one runs, and with which flags:
 [19-running-models.md](19-running-models.md).
 
 ## The checkpoint

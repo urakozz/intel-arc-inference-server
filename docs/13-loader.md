@@ -904,94 +904,6 @@ in `tests/loader/ct/`.
   the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and takes
   `--tokenizer FILE`.
 
-## Muse-Glimmer-30B (spec 23b): either GPTQ spelling, the fused GEMVs, the vision skip
-
-`loader::load_muse_glimmer` (`src/loader/muse_{layout.h,repack.*,loader.*}`) is a loader BESIDE the others; it
-reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
-`LinearSrc::classify`, the int8 head and the existing GEMV repack (`common::repack_int4_layout0_cols`), and touches
-none of their files. The int4 layouts' byte formulas moved to `loader/int4_layout.h` (shared by `moe_layout.h`,
-`kolibri1_layout.h` - byte-identical aliases, static_asserted - and `muse_layout.h`).
-
-- **The checkpoint is Vishva007's, used as is (spec 23 §3.3), in EITHER spelling of the one export**:
-  `-AutoRound` (`quant_method` auto-round, `packing_format` auto_round:auto_gptq, no `g_idx` - 1459 text names)
-  or `-AutoRound-GPTQ` (`quant_method` gptq, `desc_act` false, `g_idx` = i // 64 - 1875 text names). The spelling
-  is read from the names (any text `.g_idx`) and every linear is then held to it; `QuantConfig::parse` refuses
-  another arithmetic by name (`desc_act` true, a group but 64 / 128, bits but 4, asymmetric), the auto-round
-  spelling with `g_idx` tensors (an activation order nobody declared) and any compressed-tensors linear.
-  `assert_quant_invariants` proves every `qzeros` word 0x77777777 and every `g_idx` before a byte is repacked.
-- **Eight int4 linears a layer, four GEMVs** (int4 GPTQ layout 0, `MuseGlimmerDesc::linear`): `q || gate || k ||
-  v` 6656 -> 8704 (gate at column 4096, k at 8192, v at 8448), `o_proj`, `gate || up` 6656 -> 39936 (concatenated,
-  up at 19968), `down`; 257,081,344 B a layer. The four centered norms are the bf16 `w` widened to fp32 bit for
-  bit (the kernels add the 1 in fp32, as the reference does), one [4][hidden] block a layer.
-- **Names both ways.** The text names are exactly `muse_expected_names` (= `muse_ref.expected_names` of the
-  spelling); the vision tower, adapter and projection (`model.vision_{tower,adapter,projection}.*`, 809 tensors
-  on the real checkpoint) are skipped BY NAME and counted in the load line; any other name throws naming it;
-  every text tensor is read once (`unconsumed()` empty), the later layers' consumed by design with `--layers N`.
-- **The plan before the first allocation**: `runtime::muse::plan_at` + `require_fits` at the 1.5 GB reserve
-  against each device's memory. Device 0 holds the embedding (gathered), the last device the final norm and the
-  head - int8 + fp32 row scales built at load (spec 9; 1,345,639,680 B) or bf16 tiled. One card, int8 head:
-  17,409,096,960 B; the load line: `Muse-Glimmer-30B: 52 layers (int4 g64, ... spelling), 809 vision tensors
-  skipped, head int8, devices 1, 17409096960 B`.
-
-## LFM2.5-24B-A2B (spec 24b): two expert spellings, the tied head from the embedding tiles
-
-`loader::load_lfm2moe` (`src/loader/lfm2moe_{layout.h,repack.*,loader.*}`) is a loader BESIDE the others; it
-reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
-`LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`, and touches none of their files. Every int4
-linear draws BOTH of `loader/int4_layout.h`'s layouts, per linear, from `model::Lfm2MoeDesc::linears(l)`'s
-`shape.layout` (review fix, I1 - an earlier draft of this paragraph claimed layout 1 everywhere; that was
-false): layout 1 (the shared subgroup-tiled form) for `in_proj`, attention `out_proj` / the dense
-down-projection (every N = hidden row-count linear) and the routed experts (`gate_up`, `down`); layout 0 (the
-GPTQ-native `.qweight`/`.scales` pair) for the fused attention `q||k||v` and the fused dense `gate||up`. `S` is
-1 everywhere (PROVISIONAL - plan 24c sweeps it; 24c's GEMV kernel must branch on each linear's `layout` the
-same way, and `GEMV_BLOCK2D` is layout-0-only). Both layouts are byte-count-identical for every linear here (N
-% 16 == 0, K % 64 == 0), so this choice changes no byte figure below, only which kernel variant 24c's prefill
-and decode paths must call for each linear.
-
-- **Our one export, either expert spelling.** Spec 24 §5's AutoRound export is the only form read (no checkpoint
-  arm switch like Kolibri's attention, no vendored third-party spelling like Muse's): every `nn.Linear` int4 g64
-  sym, auto_round:auto_gptq. The routed experts may be named `experts.E.{w1,w3,w2}` (the checkpoint's own,
-  transformers' fusion order) or `experts.E.{gate_proj,up_proj,down_proj}` (AutoRound's generic unfusing) -
-  `detect_expert_names` reads whichever the FIRST expert tensor uses and holds every other expert to it, all or
-  nothing; a checkpoint mixing both is refused naming the mix.
-- **`in_proj`'s B/C/x order, and the arm-c permutation.** A conv layer's `in_proj` (2048 -> 6144) packs its
-  output columns `[0, 2048) B`, `[2048, 4096) C`, `[4096, 6144) x` - `repack_in_proj(..., conv_tiles=false)` is
-  the plain `repack_int4_layout1_cols` of that one tensor. `conv_tiles=true` (spec 24 §4.1's fused decode arm)
-  permutes whole 16-column tiles into 16-channel groups `[B 16 | C 16 | x 16]`, channel tile by channel tile - a
-  tile-granularity permutation of the false layout, not a re-quantisation.
-- **Gate tile then up tile, interleaved in 16s.** Every expert's `gate_up` block is `cols_interleave16(w1, w3)`
-  (or `gate_proj, up_proj`) then layout-1, exactly Kolibri's / Ornith's convention: output n_tile `2t` is gate's
-  column tile `t`, n_tile `2t + 1` is up's. No router padding (64 experts is already a multiple of 16 for
-  `gemv_bf16`'s tiles - unlike Kolibri's 384, which pads to 512).
-- **The tied head, built from the embedding's own bytes.** No `lm_head.*` tensor is required (`tie_word_embeddings`
-  true); an optional one is checked bitwise against `model.embed_tokens.weight` and skipped, or refused naming
-  both if it differs. The embedding is uploaded once, in `gemv_bf16`'s tiled layout, on device 0 (the gather);
-  the int8 head (spec 9's rule, `quantise_int8_tiled`) is built from the SAME host-mmapped bf16 bytes and
-  uploaded on the last device. With a bf16 head on a LAST device that is not device 0 (`--pp 2`), that device
-  gets its own replica of the tiles (524,288,000 B) - the one case where the embedding is not "kept once": for
-  24c, `LfmDevicePart::embed_tiles` on that last device is the head's own weights (the gather for its device's
-  layers plus `lm_head`'s matmul both read it), never a second allocation to tell apart from `embed_tiles` on
-  device 0.
-- **The conv tap order (for 24c).** `conv.conv.weight` is `[hidden][1][conv_taps]` (`conv_taps` = 3); tap index
-  0 is the OLDEST position and multiplies `Bx[t - 2]`, tap 2 is the newest and multiplies `Bx[t]` (spec 24 §2.5:
-  `c_b = rne(Σ_{j=0..2} w_j · Bx_b[t - 2 + j])`, taps ascending). `small_block(d, layer).conv_taps` stores them
-  in that same ascending order, widened to fp32 bit-for-bit (`widen_small`) - 24c's decode kernel must read tap
-  0 against the ring's oldest slot, not its newest, or the conv runs backwards.
-- **Names both ways.** The text names are exactly `lfm_expected_names` (ground-truthed against
-  `tools/oracle/lfm2moe_ref.py`'s `expected_names`, built in 24a from transformers 5.19.0 itself - attention's
-  output projection is `self_attn.out_proj`, not `o_proj`; the final norm is `model.embedding_norm.weight`, not
-  `model.norm`); every tensor is read exactly once (`unconsumed()` empty), the later layers' consumed by design
-  with `--layers N`.
-- **The memory plan before the first allocation**: `load_lfm2moe` calls `require_fits(runtime::lfm2moe::plan(...),
-  devices[dev]->memory_bytes())` for every device before any upload (review fix, I2 - this used to happen only
-  inside the planner's own test, never from the loader itself). Reserve 1.5 GB. One card, int8 head, at the
-  trained context (131072): weights 13,391,129,088 B (13.391 GB - routed experts 12,192,841,728, the other int4
-  linears 399,932,928, routers 9,961,472, the embedding 524,288,000, the int8 head 262,656,000, the 40 layers'
-  small blocks 1,448,960), KV 2,684,354,560 B, the conv rings 1,966,080 B. `--max-len auto` is the largest
-  multiple of 256 that fits and is at most 131072 (`max_position_embeddings`); an explicit value above it is
-  refused naming that key. The two-card split (`pp_split`) balances layer weights alone (`runtime::pp_balance`),
-  device 0's embedding and the last device's final norm / head counted as each side's fixed overhead.
-
 ## Nemotron 3.5 Bolt (spec 25b): the exact relaxations, signed scales, one layout from two sources
 
 Bolt's shipping checkpoint (SergiioB's AutoRound g128 GPTQ export, spec 25 §1.3) needs two loader relaxations and an
@@ -1058,7 +970,7 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   real ones.
 - **The untied head.** `language_model.lm_head.weight` is its own bf16 tensor: the int8 head (spec 9, Decision 18) is
   quantised from it on the last device, or its own bf16 tiles are uploaded (`--lm-head bf16`: 1,073,741,824 B against the
-  int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica: unlike LFM2's tied head).
+  int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica).
 - **The memory plan before the first allocation** (`runtime::bolt::plan`, `src/runtime/bolt/`): per device its blocks'
   weights (the loader asserts its allocation equals `loader::bolt::device_weight_bytes`), KV for its attention blocks at
   `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds, the
