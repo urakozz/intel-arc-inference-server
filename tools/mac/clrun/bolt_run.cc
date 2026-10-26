@@ -345,7 +345,7 @@ void mamba_checks(clrun::Device& dev) {
       }
     }
   }
-  {   // SPEC_SLOTS 4 (spec 26c's slot form): M = 3 rows from live slot 2 - slot (2 + m) % 4 holds the state after row m
+  {   // SPEC_SLOTS 4 (the slot form): M = 3 rows from live slot 2 - slot (2 + m) % 4 holds the state after row m
     const uint32_t SL = 4, live = 2;
     const size_t n = in.S0.size();
     clrun::Program p(dev, "src/kernels/bolt/nb_mamba.cl",

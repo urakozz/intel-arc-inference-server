@@ -751,39 +751,11 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 -
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
 - **Request.** Image / video / audio content parts are refused (text only).
 
-**Speculative decoding (spec 26c, never run on a B70 - queue row 65).** `--spec dflash` drafts with NVIDIA's LiLiCorr
-(`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr`: a DFlash 2 drafter with a candidate-lattice head; one 8-row block
-drafts up to 7 ids) on device 1 beside the target's lm_head, with a 1.07 GB embedding replica there; Bolt verifies them at
-M = K + 1 <= 8 rows (each row bitwise a decode step - D3), the six taps of every row feed the drafter, the Mamba state of every
-row lands in its own slot and the commit moves the live slot. `--spec lookup` verifies the server's prompt-lookup drafts
-through the same lists. Neither is the default: `--spec dflash` becomes Bolt's default only on spec 26's D5 rule (>= 10 %
-over `off` and `lookup` on the agentic set, nowhere worse than 3 %).
-
-```sh
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --spec dflash            # int8 drafter, K <= 7 (AdaptiveK)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec dflash --draft-format exact --spec-max 4 --draft-q lattice+lp
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec lookup
-```
-
-- `--draft-model PATH` (default the published LiLiCorr; never downloaded here), `--draft-format exact|int8|int4` (exact: W'
-  bf16 with the NVFP4 global scale on the output, 2.15 GB; int8 per row, 1.08 GB - the PROVISIONAL default; int4 g64, 0.57 GB;
-  the LiLiCorr head exact in every format), `--draft-q lattice|lattice+lp` (the sampled draft distribution; lattice the
-  PROVISIONAL default), `--spec-max 1..7` (7), `--spec-cost SPEC` (the AdaptiveK table; default `MtpCost::bolt_lilicorr`,
-  DERIVED from spec 26 §11). Greedy is lossless (the output is `--spec off`'s); a sampled request draws its drafts on the host
-  from the lattice and accepts them against Bolt's own filtered p - lossless whatever q is. A sampled request with a
-  repetition penalty decodes plainly.
-- The prefix cache's snapshots carry the drafter's ring and anchor (+5.26 MB, after the target's state; the store key
-  names the drafter), and every prefill projects the prompt rows inside the drafter's 1024-row window (a block end's ring is
-  complete, Decision 7).
-- Refused: `--pipeline-handoff peer` with `--spec` (the taps ride on the copy hand-off), `--draft-format bf16`,
-  `--draft-vocab`, `--mtp-max` / `--mtp-cost`, `B70_PREFILL_REPLAY=1` with `--spec dflash`. `b70-decode` decodes plainly.
-
-**Limits.** No `--mtp` (no MTP head), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
+**Limits.** No `--mtp` (no MTP head), no `--spec` (spec 26), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
 Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` / `sycl-tla` refused), context at most 262144, `--layers`
 is `b70-decode`'s development mode only, `--device` refused with `--pp 2`.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
-`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_VERIFY_MOE` (`union` | `plain`: the verify's routed experts,
-spec 26c), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
+`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
 `B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`), `B70_BOLT_SNAPSHOT` (`template_bolt_test`'s,
 `bolt_tokenizer_test`'s and `bolt_request_test`'s snapshot).

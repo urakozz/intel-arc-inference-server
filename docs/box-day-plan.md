@@ -55,9 +55,6 @@ reference, gate Q, F6) runs in that one window.
 **Added 2026-10-23: Session 13** for row 64 (plan 26b, the LiLiCorr drafter on the card). Its stages are one-card
 correctness (`card`, §1.8): they run beside the other card's stream; D1's reference half is box CPU.
 
-**Added 2026-10-23: Session 14** for row 65 (plan 26c, LiLiCorr drafting Bolt on both cards). Its card stages are `gpu`
-(Bolt takes both cards); D5's `r65.benchy` is opt-in and timed (box idle).
-
 Row 20 (Kolibri-1 spec 20a, the quantisation) has no runbook stage and needs spec 20
 decision 1; it is not part of the box day. Everything on the real Kolibri int4 checkpoint
 (spec 20b, which does not exist yet) is recorded SKIP "missing data" in session 9 -
@@ -840,26 +837,6 @@ Mac the engine's bf16 numerics moved the tiny pair's log-probs by up to 1.7e-2 w
 the table still records the sets, the lattice, the walks and the anchor - read them before calling a FAIL a bug, and
 `LP_BAR=1e-2` re-runs only the comparison. Hand back the lines row 64's rownote lists.
 
-### Session 14 - LiLiCorr drafting Bolt on both cards (row 65, plan 26c)
-
-```sh
-tools/box_validate.sh --only r65.k0,r65.host,r65.reject   # D0 (after G0), the host tests, the --spec refusals
-tools/box_validate.sh --only r65.d3                       # D3 / Review Focus 1 / Decision 10: synthetic one card, SergiioB's two
-tools/box_validate.sh --only r65.d2,r65.prefill,r65.prefix,r65.serve   # D2, Decision 7, Review Focus 4, the server (two cards)
-tools/box_validate.sh --only r65.benchy                   # opt-in, box idle: D5 (decides whether --spec dflash is Bolt's default)
-```
-
-Run after Sessions 11 (SergiioB's g128 and its golden sets) and 13 (row 64: the drafter's first ocloc build and D1). Every
-stage but `r65.k0` / `r65.host` / `r65.reject` is `gpu`: Bolt runs on two cards (§1.8), the synthetic N 12 half of
-`r65.d3` on one card inside the same stage. `r65.d3` is the verify binaries' first ocloc build (the `_SL8` SSM, the union
-MoE, the M = 2..8 rows of 25c's kernels, Muse's attention at M rows when the Muse block is off); its tests restore one
-state many times (save / load_state + _kv, 170 MB a restore). `r65.d2` loads the drafter three times (int8 / exact / int4,
-~1-2.4 GB on device 1 beside the 1.07 GB replica - DERIVED, spec 26 §4) and runs the three golden prompts at every K 1..7
-and AdaptiveK - the per-K "tokens a verify" lines are D5's acceptance on the golden prompts. `r65.benchy` is the timed
-row: box idle (§1.7), six arms (off, lookup, dflash int8 / exact / int4, dflash with `B70_BOLT_VERIFY_MOE=plain`) x
-llama-benchy and the agentic transcript (greedy and T 1.0 / top-p 0.95) - hours, ESTIMATED. Hand back the lines row 65's
-rownote lists; §4's row for D5 says what they decide.
-
 ## 3. When time is short
 
 ### 3.1 Never skip
@@ -941,10 +918,6 @@ named stage.
 | `--mem-reserve-gb` 1.5 | `r7.serve` (device memory via xpu-smi while a fresh server is up) | confirm, or tune after a long operator session |
 | `--prefix-cache-gb auto` | `r9.auto` (startup line and its /proc/meminfo inputs) | confirm the chosen size |
 | MTP embedding on device 1 | `r27.serve`, `r27.s3` memory lines | already **decided: replicate** (operator, 2026-10-07); the box only confirms it fits |
-| Bolt's `--spec dflash` default (spec 26 D5) | opt-in `r65.benchy` (llama-benchy + the agentic transcript per arm); `r65.d2`'s tokens a verify | `dflash` becomes Bolt's default only if it beats `--spec off` AND `--spec lookup` by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option |
-| LiLiCorr's `--draft-format`, `--spec-max`, `--draft-q` defaults (spec 26 §11) | `r63.accept` (E_K per arm, the q forms), `r65.benchy`'s exact / int4 arms | int4 g64 if its E_K is within 0.05 of exact's at the chosen K (Decision 2), else int8; K_max from AdaptiveK's picks; `lattice+lp` only if r63 shows it ahead |
-| `MtpCost::bolt_lilicorr` / `bolt_verify` (DERIVED) | `r63.cost` (verify per M, the block), `r63.union` (u per M) | replace the derived rows (`--spec-cost` meanwhile) |
-| the union MoE / the replay lever (Decisions 10 / 4) | `r65.benchy`'s `dflash-plain` arm; `r63.cost`'s slot-write share | keep the union unless the plain form is not slower; build the read-only verify + replay only if the slot writes exceed 10 % of a verify at the chosen K |
 
 ## 5. Known risks
 

@@ -4962,7 +4962,7 @@ set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
 # (25c's cli_reject_bolt_prefill / _prefill_length - --prefill naming spec 25d - are gone: Bolt prefills now; 25d's refusals
 # are the spec 25d block's cli_reject_bolt_prefill_*.)
 b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
-b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "spec 26")
+b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "has no speculative decoding")
 b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
 
@@ -5155,15 +5155,9 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_mtp ${_bolt_serve_cfg} --mtp 1 EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_mtp_auto ${_bolt_serve_cfg} --mtp auto EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_spec_mtp ${_bolt_serve_cfg} --spec mtp EXPECT "no MTP head")
-  # Spec 26c: --spec lookup / dflash are served now (cli/bolt_spec.h); their refusals before the device, by name.
-  b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup --spec-max 9 EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash --draft-format bf16
-    EXPECT "exact, int8 and int4")
-  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "need --spec dflash or --spec lookup")
-  b70_serve_reject(cli_reject_serve_bolt_dflash_peer ${_bolt_serve_cfg} --spec dflash --pipeline-handoff peer
-    EXPECT "copy hand-off only")
-  b70_serve_reject(cli_reject_serve_bolt_draft_q ${_bolt_serve_cfg} --draft-q lattice EXPECT "need --spec dflash")
-  set_tests_properties(cli_reject_serve_bolt_dflash_peer cli_reject_serve_bolt_draft_q PROPERTIES LABELS "bolt;lilicorr")
+  b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup EXPECT "has no speculative decoding")
+  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash EXPECT "has no speculative decoding")
+  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "has none")
   b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
@@ -5348,110 +5342,3 @@ add_executable(lilicorr_d1_twin kernels/lilicorr_d1_twin.cc)
 target_include_directories(lilicorr_d1_twin PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(lilicorr_d1_twin PRIVATE b70_dflash_loader b70_bolt_loader b70_dflash_model)
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
-
-# ==== Spec 26c: LiLiCorr in Bolt's loop and server (labels bolt, lilicorr) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-20-spec26c-lilicorr-engine-serving.md. Box queue row 65. Host tests run on the Mac
-# (tools/mac_check.sh); the card's are the box's (row 65's stages).
-# Task 1: every binary Bolt's verify lists bind at M = 1..8 (kernels::bolt::verify_variants) is built - by the kernels' Spec
-# 26c lines or reused by name (25c's M = 1 and test-only M 4 lines, 26a's M 2..8 GEMVs / routers / int8 heads / argmax stage
-# 1, 26b's bf16 head at M 7) - and the block builds nothing unbound but its counting build. Host only.
-if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
-  set(_l26c_reused ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_LILICORR_P0_KERNELS}
-    kernel_gemv_bf16_M7_K4096_N131072)
-  foreach(t ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
-    if(NOT TARGET ${t})
-      message(FATAL_ERROR "spec 26c: ${t} is not built (src/kernels/CMakeLists.txt)")
-    endif()
-  endforeach()
-  add_executable(bolt_verify_names_test kernels/bolt_verify_names_test.cc)
-  target_include_directories(bolt_verify_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(bolt_verify_names_test PRIVATE b70_bolt_model)
-  b70_target_kernel_dir(bolt_verify_names_test)
-  add_test(NAME bolt_verify_names_test COMMAND bolt_verify_names_test ${B70_BOLT_VERIFY_KERNELS} -- ${_l26c_reused})
-  set_tests_properties(bolt_verify_names_test PROPERTIES LABELS "bolt;lilicorr")
-endif()
-# Task 4 / 6 (host): the speculative loop over a fake engine with BoltEngine's verify / commit and a fake LiLiCorr readback -
-# D2 greedy lossless (every K, varying K, truncated runs, lookup), Review Focus 3 (the drafter's ring / anchor after every
-# commit = a plain run's), D4 sampled exact (10^6 seeded iterations a case, both q forms, Bolt's filter and filter_probs, lookup's
-# point mass; a mutant residual caught), the deferred commit, Review Focus 4 (restores at block ends, the junction's sibling, a
-# drafter-less ring, the store root).
-add_executable(bolt_spec_test server/bolt_spec_test.cc)
-target_include_directories(bolt_spec_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(bolt_spec_test PRIVATE b70_server b70_bolt_plan)
-add_test(NAME bolt_spec_test COMMAND bolt_spec_test)
-set_tests_properties(bolt_spec_test PROPERTIES LABELS "bolt;lilicorr" TIMEOUT 1200)
-# Tasks 1-2, 4, 6 (host): the verify lists' sizes, slots and launch counts, the prefill tail rule (Decision 7), the AdaptiveK
-# cost rows (DERIVED), b70-serve's --spec refusals and flag resolution (cli/bolt_spec.h), the plan with the verify lists and the
-# drafter on two cards in each format (DERIVED).
-add_executable(bolt_spec_plan_test runtime/bolt_spec_plan_test.cc)
-target_include_directories(bolt_spec_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(bolt_spec_plan_test PRIVATE b70_server b70_dflash_plan b70_dflash_loader PkgConfig::ZE)
-b70_target_kernel_dir(bolt_spec_plan_test)   # (kernels/kernels.h, reached through the engine header, wants the define)
-add_test(NAME bolt_spec_plan_test COMMAND bolt_spec_plan_test ${CMAKE_CURRENT_SOURCE_DIR}/model/lilicorr/config.json)
-set_tests_properties(bolt_spec_plan_test PROPERTIES LABELS "bolt;lilicorr")
-# On the cards (box only, queue row 65; SKIP 77 without the synthetic sets / SergiioB's export / the drafter):
-#   bolt_moe_union_test          Task 3: the union MoE bitwise the plain M-row form at the real shapes, the counting build
-#   bolt_verify_test             Task 1 (D3): verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV, ring columns,
-#                                SSM slots, taps), the launch count per M; union and plain
-#   bolt_commit_test             Task 2 (Review Focus 1): the live slot after commit j = the state after j + 1 steps on both
-#                                cards, 64 ids after it; 3dc6def360's M = 1 and ragged cases
-#   bolt_dflash_test             Task 4 (D2): --spec dflash greedy = --spec off on the golden prompts and the agentic set, K 1..7
-#                                and AdaptiveK, through the server's adapter with the real drafter
-#   bolt_dflash_prefill_test     Task 5 (Decision 7): the ring / anchor after prefill across chunk splits, complete at a block end
-#   bolt_dflash_prefix_gpu_test  Task 6 (Review Focus 4): restores at block ends, the junction's sibling, a ring of zeros
-if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
-  add_executable(bolt_moe_union_test kernels/bolt_moe_union_test.cc)
-  b70_target_kernel_dir(bolt_moe_union_test)
-  target_include_directories(bolt_moe_union_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(bolt_moe_union_test PRIVATE b70_l0 b70_bolt_model)
-  add_dependencies(bolt_moe_union_test ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
-  add_test(NAME bolt_moe_union_test COMMAND bolt_moe_union_test)
-  set_tests_properties(bolt_moe_union_test PROPERTIES LABELS "bolt;lilicorr" TIMEOUT 1800)
-  foreach(t bolt_verify_test bolt_commit_test)
-    add_executable(${t} runtime/${t}.cc)
-    b70_target_kernel_dir(${t})
-    target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
-    target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_l0)
-    if(B70_PREFILL_ENABLED)
-      b70_link_prefill(${t})
-    endif()
-    add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
-      ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
-  endforeach()
-  add_test(NAME bolt_verify_synth_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128)
-  add_test(NAME bolt_verify_synth_plain_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 plain)
-  add_test(NAME bolt_verify_synth_b16_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 b16)
-  add_test(NAME bolt_verify_synth_eager_test COMMAND bolt_verify_test ${B70_BOLT_SYNTH_DIR}/n12-g128 eager)
-  add_test(NAME bolt_verify_real_test COMMAND bolt_verify_test ${B70_BOLT_SNAPSHOT})
-  add_test(NAME bolt_verify_real_plain_test COMMAND bolt_verify_test ${B70_BOLT_SNAPSHOT} plain)
-  add_test(NAME bolt_commit_synth_test COMMAND bolt_commit_test ${B70_BOLT_SYNTH_DIR}/n12-g128)
-  add_test(NAME bolt_commit_synth_b16_test COMMAND bolt_commit_test ${B70_BOLT_SYNTH_DIR}/n12-g128 b16)
-  add_test(NAME bolt_commit_real_test COMMAND bolt_commit_test ${B70_BOLT_SNAPSHOT})
-  set_tests_properties(bolt_verify_synth_test bolt_verify_synth_plain_test bolt_verify_synth_b16_test bolt_verify_synth_eager_test
-    bolt_verify_real_test bolt_verify_real_plain_test bolt_commit_synth_test bolt_commit_synth_b16_test bolt_commit_real_test
-    PROPERTIES LABELS "checkpoint;bolt;lilicorr" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-  if(B70_LILICORR)
-    foreach(t bolt_dflash_test bolt_dflash_prefill_test bolt_dflash_prefix_gpu_test)
-      add_executable(${t} runtime/${t}.cc)
-      b70_target_kernel_dir(${t})
-      target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
-      target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_dflash_runtime b70_dflash_loader b70_server b70_l0)
-      if(B70_PREFILL_ENABLED)
-        b70_link_prefill(${t})
-      endif()
-      add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
-        ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused} ${B70_LILICORR_KERNELS} ${_l26b_reused})
-    endforeach()
-    set(_l26c_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short_prose.ids
-      ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short_code.ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_agentic.ids)
-    foreach(f int8 exact int4)
-      add_test(NAME bolt_dflash_${f}_test COMMAND bolt_dflash_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT} ${_l26c_prompts}
-        --format ${f})
-    endforeach()
-    add_test(NAME bolt_dflash_prefill_test COMMAND bolt_dflash_prefill_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT})
-    add_test(NAME bolt_dflash_prefix_gpu_test COMMAND bolt_dflash_prefix_gpu_test ${B70_BOLT_SNAPSHOT} ${B70_LILICORR_SNAPSHOT})
-    set_tests_properties(bolt_dflash_int8_test bolt_dflash_exact_test bolt_dflash_int4_test bolt_dflash_prefill_test
-      bolt_dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;bolt;lilicorr" SKIP_RETURN_CODE 77 TIMEOUT 10800)
-  endif()
-endif()
-# ==== Spec 26c: LiLiCorr in Bolt's loop and server ==== (end) ====

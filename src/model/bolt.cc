@@ -231,7 +231,7 @@ void check_bolt_config(const common::json::Value& c) {
   opt_u32(m, "expand", 2);
   need_u32(m, "max_position_embeddings");
 
-  // MTP: Bolt has none (the drafter is spec 26's, separate).
+  // MTP: Bolt has none.
   opt_u32(m, "num_nextn_predict_layers", 0);
   if (const common::json::Value* v = get(m, "mtp_block_configs"); v && !(v->is_array() && v->arr().empty()))
     bad("'mtp_block_configs' is " + show(*v) + ", the descriptor needs []");

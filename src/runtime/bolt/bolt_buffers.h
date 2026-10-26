@@ -52,29 +52,4 @@ struct BoltBuffers {
   void zero(l0::CmdList& imm);
 };
 
-// Spec 26c: one device's verify allocations (runtime/bolt/bolt_sizes.h verify_sizes sizes every one): the verify lists'
-// scratch at kVerifyRows rows - the same names as BoltBuffers' decode scratch, so the capture binds either -, the SSM state
-// slots 1..7 of each Mamba block it holds (slot 0 is BoltBuffers::ssm's own: nb_ssm's `_SL8` build reads the live slot and
-// writes slot (live + m) % 8) and the union MoE's down rows. Allocated only with --spec dflash / lookup.
-struct BoltVerifyBuffers {
-  BoltVerifyBuffers(l0::Context& ctx, const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t device,
-                    uint32_t max_len, BoltAttn attn, BoltState state);
-  l0::Mem h0, h1, x, slices, xc, y, g, logits_r, routes, lat, sh, moe_a, moe_r, attn_q, attn_part, attn_out, ones, logits,
-      argmax_part;
-  std::unique_ptr<l0::Mem> attn_scores;   // eager only: fp32 [8][32][max_len]
-  l0::Mem slots;                          // [its Mamba blocks][7][128][64][128] (fp32, or bf16 under the arm)
-  l0::Mem moe_d;                          // bf16 [8][9][1024]: the union's per-pair down rows
-  const model::BoltDesc& desc;
-  model::BoltPlacement placement;
-  uint32_t device, max_len;
-  BoltAttn attn;
-  BoltState state;
-  static constexpr uint32_t rows = kVerifyRows;
-
-  // Block `layer`'s slots 1..7 (nb_ssm's `state_spec`: slot s at + (s - 1) x one state); it must be a Mamba block here.
-  void* slots_layer(uint32_t layer) const;
-  size_t scratch_bytes() const;
-  size_t bytes() const { return scratch_bytes() + slots.size() + moe_d.size(); }
-};
-
 }  // namespace runtime::bolt
