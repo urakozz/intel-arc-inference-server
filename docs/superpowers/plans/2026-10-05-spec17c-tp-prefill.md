@@ -1,11 +1,17 @@
 # Spec 17c - tensor parallel: Bolt prefill across two cards
 
-**Conditions (operator, 2026-10-23):** this plan starts only after **plan 17b is merged and its row passed on the box**,
+**Conditions (operator, 2026-10-23; for Bolt - superseded for Qwen3.8 by the 2026-10-27 status below):** this plan starts only after **plan 17b is merged and its row passed on the box**,
 which itself needed spec 17 §9's GO (P0 after `r22.devices` / `r22.p1`; Bolt's rows 59-62 passed; the crossing cost
 <= ~1 ms a token), **and after row 61's `r61.speed` has measured Bolt's two-card (`--pp 2`) prefill** - the choice
 below is made against that number (spec 17 §4.5) - and the operator says go.
 
-**Status (2026-10-23): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
+**Status (2026-10-27): PARKED -> after 17b (rewritten for Qwen3.8) has passed its row.** Retargeted to Qwen3.8 first
+(spec 17 §R2): prefill under `--tp 2` for the main engine, the external two-B70 engine's chunked wavefront (one chunk's
+all-reduce overlapped with the next chunk's compute) measured first, beside the hybrid (prefill as `--pp 2`, decode as
+TP) and plain TP prefill; the baselines are one card and row 23's two-card `--pp 2` prefill (`r23.s2_*`) (spec 17
+§R2.8, §4.5). Box queue row **73**. The 2026-10-23 Bolt-first text below is kept for Bolt's later TP plan.
+
+**Status (2026-10-23, superseded 2026-10-27): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
 the 2026-10-05 version (Qwen3.8, the PP-hybrid against spec 16c) is in git history.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.

@@ -1,11 +1,18 @@
 # Spec 17d - tensor parallel: Bolt's snapshots, LiLiCorr, sampling, the server, the record
 
-**Conditions (operator, 2026-10-23):** this plan starts only after **plans 17b and 17c are merged and their rows passed**
+**Conditions (operator, 2026-10-23; for Bolt - superseded for Qwen3.8 by the 2026-10-27 status below):** this plan starts only after **plans 17b and 17c are merged and their rows passed**
 (which needed spec 17 §9's GO: P0 after `r22.devices` / `r22.p1`; Bolt's rows 59-62 passed; the crossing cost <= ~1 ms
 a token), and - for Task 2 - after **spec 26c (LiLiCorr in the engine) has passed its row** on `--pp 2`; and the
 operator says go.
 
-**Status (2026-10-23): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
+**Status (2026-10-27): PARKED -> after 17b and 17c (rewritten for Qwen3.8) have passed their rows.** Retargeted to
+Qwen3.8 first (spec 17 §R2): snapshots in the one-card host layout, MTP and DFlash under `--tp 2` (the MTP head TP'd or
+replicated by 17b's measurement; the DFlash drafter replicated - spec 17 §R2.8), sampling over the split vocabulary,
+`b70-serve --tp 2`, T3, D1-dense / D4 against one card's `--mtp auto` and `--spec dflash`, the record. Box queue row
+**74**. The 2026-10-23 Bolt-first text below is kept for Bolt's later TP plan; its LiLiCorr task (Task 2) is void -
+spec 26 was dropped on 2026-10-27.
+
+**Status (2026-10-23, superseded 2026-10-27): PARKED - begins on the conditions above.** Rewritten 2026-10-23 for Bolt first (spec 17 §R);
 the 2026-10-05 version (Qwen3.8: spec 7 per card, MTP, `{card 0 part, card 1 part}` entries) is in git history.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
