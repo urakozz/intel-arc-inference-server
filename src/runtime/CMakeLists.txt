@@ -50,8 +50,6 @@ add_subdirectory(qwen4exp)
 # directory, beside the engines it serves (19c wires it into runtime::Engine).
 add_subdirectory(dflash)
 
-# Spec 24b Task 5: LFM2.5-24B-A2B's memory plan (24c adds its engine) - its own directory.
-add_subdirectory(lfm2moe)
 
 # Spec 25b Task 5: Nemotron 3.5 Bolt's memory plan (25c adds its engine) - its own directory.
 add_subdirectory(bolt)

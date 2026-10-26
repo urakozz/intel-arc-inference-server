@@ -21,13 +21,7 @@
 #                                                   to Qwen3.8's, so a scenario's ids differ only where
 #                                                   the split does - the log (and $OUT/set/SAME) says
 #                                                   how many of the 36 are Qwen3.8's ids exactly
-#   tools/toolcall/a4_ref.sh lfm2moe set              spec 24a: make_set.py --from tests/golden/toolcall
-#                                                   on LFM2.5-24B-A2B's snapshot (its tokenizer and
-#                                                   chat_template.jinja; the history calls become
-#                                                   pythonic through the template, key-sorted as
-#                                                   b70-serve renders them) with transformers 5.19.0;
-#                                                   tests/golden/toolcall-lfm2moe is the committed copy
-#   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp|lfm2moe> ref  the reference: oracle_generate.py over $OUT/set
+#   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp> ref  the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
 #   tools/toolcall/a4_ref.sh <ornith|k2> status    what is done
 #   tools/toolcall/a4_ref.sh bolt set|ref|status    spec 25a: `set` copies the committed set
@@ -69,13 +63,6 @@
 #           <tag>.{ids,txt,gap} beside the full run's .bf16.* (<tag> the file name without mask- and
 #           .safetensors; DONE.mask-<tag> when complete); the file is copied into the run's directory
 #           (the container mounts only this tree). ONLY= runs a fold's scenarios on its fold's mask.
-#   lfm2moe tools/oracle/lfm2moe_ref.py's layer-streamed model (spec 24a) on the bf16 ORIGINAL
-#           (LiquidAI/LFM2.5-24B-A2B, 47.96 GB; MODEL_DIR=<an int4 export> for the engine-format
-#           reference, `--weights` follows the checkpoint), 2048 new ids (the prompt ends in <think>: every
-#           reply reasons first), transformers 5.19.0 from the qwen4exp site (SITE as for qwen4exp).
-#           Score with `score.py --format pythonic` (0 parse failures of the reference). LFM_LAYERS=N
-#           truncates (a test run). FOREGROUND=1 runs the Mac's container attached (a caller holding the
-#           Mac's one-model-job lock, lfm2moe_oracle.sh a4, waits for it).
 # Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
 # tools/toolcall/score.py <dir> bf16 <engine runs> (box-validation-queue rows 16 / 25).
 #
@@ -121,7 +108,7 @@
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
-# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK; lfm2moe: SITE, LFM_LAYERS;
+# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK;
 # bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -132,7 +119,6 @@ case "$m" in
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
   qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-192} ;;
-  lfm2moe) repo=LiquidAI/LFM2.5-24B-A2B; new=${NEW_TOKENS:-2048} ;;
   bolt)   # spec 25a: FORM int4 (SergiioB's g128, the served checkpoint) | bf16 (the original) | both (the box)
     FORM=${FORM:-both}
     case "$FORM" in
@@ -228,7 +214,6 @@ else
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
   [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
-  [ "$m" = lfm2moe ] && cmd_ref="$cmd_ref --model lfm2moe"
   [ "$m" = bolt ] && cmd_ref="$cmd_ref --model bolt --weights $FORM"
   BATCH=${BATCH:-auto}
   RESIDENT=${RESIDENT:-auto}
@@ -259,12 +244,12 @@ fi
 # reference's knobs passed through.
 pre=""
 q4env=()
-if [ "$m" = qwen4exp ] || [ "$m" = lfm2moe ] || [ "$m" = bolt ]; then
+if [ "$m" = qwen4exp ] || [ "$m" = bolt ]; then
   if [ $mac = 1 ]; then SITE=${SITE:-oracle-out-q4exp/site}; else SITE=${SITE:-oracle-out-q4exp-site}; fi
   [[ "$SITE" =~ ^[A-Za-z0-9_./-]+$ ]] && [ "${SITE#/}" = "$SITE" ] || {
     echo "a4_ref: SITE is a directory inside this tree (got $SITE)" >&2; exit 2; }
   pre="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && "
-  for v in Q4_LAYERS Q4_PLE LFM_LAYERS BOLT_LAYERS BOLT_EXPERT_CACHE_GB; do
+  for v in Q4_LAYERS Q4_PLE BOLT_LAYERS BOLT_EXPERT_CACHE_GB; do
     x=${!v:-}
     [ -n "$x" ] || continue
     [[ "$x" =~ ^[A-Za-z0-9_.:/-]+$ ]] || { echo "a4_ref: $v=$x" >&2; exit 2; }
@@ -324,7 +309,7 @@ fi
 [ $inside = 1 ] || { echo "a4_ref: on the Mac OUT must be a directory inside this tree (got $OUT)" >&2; exit 2; }
 mkdir -p "$OUT/set"
 IMAGE=${IMAGE:-agnes-ref-img:latest}
-if [ "$m" = lfm2moe ] || [ "$m" = bolt ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # LFM2.5: the Mac cap (spec 24a)
+if [ "$m" = bolt ]; then MEM=${MEM:-40g}; else MEM=${MEM:-28g}; fi   # Bolt: the Mac cap (spec 25a)
 others=$(docker ps --filter "ancestor=$IMAGE" --format '{{.Names}}' | grep -vx "$NAME" || true)
 if [ -n "$others" ] && [ "${FORCE:-0}" != 1 ]; then
   echo "a4_ref: another $IMAGE container is running ($others): wait for it, or FORCE=1" >&2; exit 2
@@ -336,7 +321,7 @@ if [ -n "${MODEL_DIR:-}" ]; then mount=(-v "${MODEL_DIR%/}":/snap:ro); S=/snap; 
 run=(docker run --name "$NAME" --memory "$MEM" --memory-swap "$MEM" "${mount[@]}" -v "$PWD":/ws -w /ws
      -e HF_HOME=/tmp/hf -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/tmp/torch_ext
      -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" ${q4env[@]+"${q4env[@]}"})
-if [ "$step" = set ] && { [ "$m" = qwen4exp ] || [ "$m" = lfm2moe ]; }; then   # the site first, then the set
+if [ "$step" = set ] && [ "$m" = qwen4exp ]; then   # the site first, then the set
   "${run[@]}" --rm --entrypoint sh "$IMAGE" -c "$pre$cmd_set $S /ws/$OUT/set"
   [ "$m" = qwen4exp ] && same_ids "$OUT/set"
   exit 0

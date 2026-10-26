@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Spec 25b: the Nemotron 3.5 Bolt synthetic real-width checkpoints and their Python tests (lfm2moe_oracle.sh's synth-ckpt /
-# synth-tests shape) - ON THE BOX CPU, and on the Mac (the Mac holds /tmp/b70-cpu-model.lock, one model job at a time).
+# Spec 25b: the Nemotron 3.5 Bolt synthetic real-width checkpoints and their Python tests (the synth-ckpt /
+# synth-tests shape of the other models' oracle scripts) - ON THE BOX CPU, and on the Mac (the Mac holds /tmp/b70-cpu-model.lock, one model job at a time).
 #   tools/box_validate/bolt_synth.sh <data tree> synth-ckpt|synth-tests
 #
 #   synth-ckpt   tools/quantize/bolt/make_synth.py for each N in BOLT_SYNTH_LAYERS (default "8 12": N 8 the host tests',

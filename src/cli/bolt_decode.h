@@ -2,7 +2,7 @@
 // Spec 25c: b70-decode's Nemotron 3.5 Bolt path - the CLI dispatches on config.json's model_type nemotron_h_omni over
 // llm_config.model_type nemotron_h_puzzle (loader::is_bolt_checkpoint) and runs runtime::bolt::BoltEngine on two cards
 // (the real model's default: 40.46 GB of weights - Decision 4) or one (a synthetic or --layers N checkpoint that fits).
-// cli/lfm2moe_decode.h's shape:
+// cli/kolibri_decode.h's shape:
 //
 //   --ids F --n N        the prompt one decode replay per id, then N greedy ids on stdout
 //   --bench [--depth N] [--tg N]   depth N of the bench prompt ingested, N decoded and timed (the bench row on stdout)
@@ -357,7 +357,7 @@ int run_decode(const DecodeArgs& a) {
               devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
                            std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
-  // Spec 25d: the pp row, a second line as the LFM2 / Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
+  // Spec 25d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
     std::printf("| b70-decode %s bolt %s-head %s ssm-%s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha,
                 a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_state_name(eng.state()),

@@ -1,7 +1,0 @@
-<|startoftext|><|im_start|>system
-You are a coding agent. Be concise.
-List of tools: [{"function": {"description": "Read a file from disk.", "name": "read_file", "parameters": {"properties": {"limit": {"type": "integer"}, "offset": {"type": "integer"}, "path": {"description": "Absolute path", "type": "string"}}, "required": ["path"], "type": "object"}}, "type": "function"}, {"function": {"description": "Search file contents (regex).", "name": "grep", "parameters": {"properties": {"flags": {"items": {"type": "string"}, "type": "array"}, "include": {"type": "string"}, "pattern": {"type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}, {"function": {"description": "Run a shell command: quotes ' \" and backslash \\ and a newline\nin the description.", "name": "bash", "parameters": {"properties": {"command": {"type": "string"}, "env": {"additionalProperties": {"type": "string"}, "type": "object"}, "timeout": {"type": "number"}}, "required": ["command"], "type": "object"}}, "type": "function"}]<|im_end|>
-<|im_start|>user
-Find where the planner reads the layer table.<|im_end|>
-<|im_start|>assistant
-<think>

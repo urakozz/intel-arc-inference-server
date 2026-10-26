@@ -28,8 +28,6 @@
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
-#include "cli/lfm2moe_decode.h"   // spec 24c: is_lfm2moe, check_args, settle
-#include "cli/lfm2moe_serve.h"    // spec 24e: Lfm2MoeEngineAdapterT
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -443,116 +441,6 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
                runtime::kolibri::kol_attn_name(engine.attention()), loader::lm_head_form_name(da.lm_head),
                defaults.greedy ? "greedy" : "sampled", defaults.temperature, defaults.top_p, defaults.top_k,
                runtime::kolibri::state_positions(engine.model().desc));
-  return listen_until_stopped(server, options);
-}
-
-// Spec 24e: LFM2.5-24B-A2B served - runtime::lfm2moe::Lfm2MoeEngine (one card by default, spec 24 decision 10; or two, spec
-// 16b's pieces as 24c / 24d built them) behind cli::lfm2moe::Lfm2MoeEngineAdapterT (the conv-ring rows + attention-KV prefix
-// snapshots, host sampling with the repetition penalty), LFM2's chat format (server::ChatFormat::lfm2(): the template's
-// kwargs, reasoning keyed on the prompt's <think>, pythonic tool calls), its EOS from generation_config.json and that file's
-// sampling defaults (sampled, T 0.1, top-k 50, penalty 1.05). b70-decode's flow (cli/lfm2moe_decode.h run_decode): the
-// refusals before the device (cli::lfm2moe::check_args, run()'s own for the proposers), both cards in one Level Zero context
-// with peer access when --pp 2, the placement and max_len planned before the load with the prefill scratch (every request
-// prefills), each layer loaded straight onto its device. B70_LFM_TOKENIZER_JSON names a tokenizer.json other than the
-// snapshot's; B70_LFM_PENALTY_GREEDY=1 routes a greedy request that carries a repetition penalty through the host.
-struct Lfm2MoeServe {
-  std::string snapshot_dir;
-  cli::lfm2moe::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
-  bool prefix_auto = true;
-  uint32_t prefix_cache_gb = 0;
-};
-
-int serve_lfm2moe(const Lfm2MoeServe& a, server::Options options) {
-  namespace rl = runtime::lfm2moe;
-  const cli::lfm2moe::DecodeArgs& da = a.args;
-  const model::Lfm2MoeDesc pre = loader::lfm2moe_checkpoint_desc(a.snapshot_dir);
-  cli::lfm2moe::check_args(da, pre);
-  cli::lfm2moe::check_serve_max_len(da, pre);   // the trained 131072, before the device
-  // The switches, read once (a bad value throws before the device).
-  const rl::LfmAttn attn = rl::lfm_attn();
-  const rl::LfmFuse fuse = rl::lfm_fuse();
-  const char* pg = std::getenv("B70_LFM_PENALTY_GREEDY");
-  const bool penalty_greedy = pg != nullptr && std::string(pg) == "1";
-  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
-  server::Sampling defaults;
-  {
-    std::ifstream g(a.snapshot_dir + "generation_config.json");
-    if (!g) throw std::runtime_error("cannot open '" + a.snapshot_dir + "generation_config.json'");
-    nlohmann::json gj;
-    g >> gj;
-    try {
-      defaults = server::generation_sampling(gj);
-      options.stop_strings = server::generation_stop_strings(gj);
-    } catch (const std::invalid_argument& error) {
-      throw std::runtime_error(error.what());
-    }
-  }
-  const char* tj = std::getenv("B70_LFM_TOKENIZER_JSON");
-  const std::string tokenizer_json = tj != nullptr && *tj != '\0' ? std::string(tj) : a.snapshot_dir + "tokenizer.json";
-  const uint32_t devs = da.pipe.devices;
-  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
-  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
-  std::vector<l0::Context*> ctx = {c0.get()};
-  if (c1) ctx.push_back(c1.get());
-  const std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : 0};
-  if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
-  else
-    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
-                 c0->eu_count(), c1->name().c_str(), c1->eu_count());
-  if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
-                             "hand-offs write it (docs/10-the-box.md)");
-  const std::pair<model::LfmPlacement, uint32_t> pl = cli::lfm2moe::settle(pre, da, dev);
-  const uint32_t max_len = pl.second;
-  loader::LfmLoadOptions lo;
-  lo.int8_head = da.int8_head;
-  lo.conv_tiles = fuse.conv;   // the arm conv reads in_proj in the conv-tile layout
-  lo.max_len = max_len;
-  loader::LfmLoaded model = [&] {
-    StdoutToStderr redirect;
-    return loader::load_lfm2moe(ctx, a.snapshot_dir, lo, pl.first);
-  }();
-  runtime::PipelineOptions opt;
-  opt.handoff = da.pipe.handoff;
-  rl::Lfm2MoeEngine engine(ctx, std::move(model), max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse);
-  engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
-  std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
-  TokAdapter tokenizer(tokenizer_json);
-  if (tokenizer.vocab_used() != pre.vocab_used)
-    std::fprintf(stderr, "note: %s defines %u ids, LFM2.5-24B-A2B's published tokenizer %u (the head has %u rows); sampling "
-                         "masks from %u, and a greedy argmax on a row without a token takes the masked row's argmax\n",
-                 tokenizer_json.c_str(), tokenizer.vocab_used(), pre.vocab_used, engine.vocab(), tokenizer.vocab_used());
-  TemplateAdapter chat_template(a.snapshot_dir);
-  cli::lfm2moe::Lfm2MoeEngineAdapterT<rl::Lfm2MoeEngine> engine_adapter(engine, tokenizer.vocab_used(), penalty_greedy);
-  options.eos_ids = eos;
-  options.sampling_defaults = defaults;
-  // Pinned host memory of the one context both cards share: either device's copies reach it.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc =
-      make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
-  server::Server server({tokenizer, chat_template, engine_adapter}, options);
-  const std::string placement =
-      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
-                      std::to_string(engine.split()) + ": device 0 layers [0, " + std::to_string(engine.split()) +
-                      "), device 1 [" + std::to_string(engine.split()) + ", " +
-                      std::to_string(engine.model().desc.layers) + "))"
-                : std::string("--pp 1");
-  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
-               options.host.c_str(), options.port, max_len);
-  print_eos(eos);
-  std::fprintf(stderr,
-               ", LFM2.5-24B-A2B (%s chat format), %s, prefill backend l0 (chunk %u), attention %s (B70_LFM_ATTN), fuse %s "
-               "(B70_LFM_FUSE), mtp none, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-p %.2f top-k %u "
-               "repetition penalty %.2f (host sampler%s), prefix snapshots: the two conv-ring rows of %u conv layers + the "
-               "attention layers' KV\n",
-               options.chat_format.name(), placement.c_str(), rl::kPfC, rl::lfm_attn_name(engine.attention()),
-               rl::lfm_fuse_name(engine.fuse()).c_str(), loader::lm_head_form_name(da.int8_head ? loader::LmHeadForm::Int8
-                                                                                              : loader::LmHeadForm::Checkpoint),
-               defaults.greedy ? "greedy" : "sampled", defaults.temperature, defaults.top_p, defaults.top_k,
-               defaults.repetition_penalty, penalty_greedy ? "; B70_LFM_PENALTY_GREEDY=1: greedy requests too" : "",
-               engine.model().desc.conv_layers());
   return listen_until_stopped(server, options);
 }
 
@@ -1149,46 +1037,6 @@ int run(int argc, char** argv) {
   if (!generation_config_file.empty())
     throw std::runtime_error("--generation-config is built for Nemotron 3.5 Bolt only (spec 25e); the other served models read "
                              "their snapshot's generation_config.json");
-  // Spec 24e: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine behind
-  // cli::lfm2moe::Lfm2MoeEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
-  // proposer, kv-cache and --pp rules (its own: cli::lfm2moe::check_args, and what it has none of below, replace them), as
-  // b70-decode dispatches it. A path that does not resolve is not LFM2: the flow below reports it.
-  if (cli::lfm2moe::is_lfm2moe(path)) {
-    cli::lfm2moe::ServeFlags flags;
-    flags.mtp = mtp_k > 0 || mtp_auto;
-    flags.spec = spec_arg;
-    flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
-                            dflash.have_format;
-    flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
-    flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
-    flags.chat_template = !chat_template_file.empty();
-    cli::lfm2moe::check_serve_flags(flags);
-    if (options.host.empty()) throw std::runtime_error("--host must not be empty");
-    if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
-    runtime::PrefillBackend lfm_backend{};
-    if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, lfm_backend))
-      throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" + pp_backend_arg + "'");
-    if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
-    options.chat_format = server::ChatFormat::lfm2();
-    Lfm2MoeServe ls;
-    ls.snapshot_dir = loader::resolve_snapshot(path);
-    cli::lfm2moe::DecodeArgs& la = ls.args;
-    la.path = ls.snapshot_dir;
-    la.max_len = max_len_arg;   // auto by default: the largest that fits, at most 131072
-    la.reserve = mem_reserve;
-    la.device = device;
-    la.int8_head = lm_head == loader::LmHeadForm::Int8;   // int8 by default (spec 9), as every served model
-    la.pipe = pipe;
-    la.prefill = true;          // every request prefills: the plan carries the prefill scratch
-    la.pp_backend_given = have_pp_backend;
-    la.pp_backend = lfm_backend;
-    la.mtp = false;             // refused above
-    la.kv8 = kv_cache == runtime::KvCache::Int8;
-    la.layers = false;          // refused above
-    ls.prefix_auto = prefix_auto;
-    ls.prefix_cache_gb = prefix_cache_gb;
-    return serve_lfm2moe(ls, options);
-  }
   // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
   const bool spec_lookup = spec_arg == "lookup";
   dflash.on = spec_arg == "dflash";   // spec 19c

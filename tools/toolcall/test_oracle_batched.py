@@ -21,9 +21,6 @@ layers and a QSA layer, the PLE in bf16): qwen4exp_ref.py needs transformers 5.1
 site first on PYTHONPATH (`PYTHONPATH=<site> python3 tools/toolcall/test_oracle_batched.py test_qwen4exp`); it says
 SKIP under another version, and the others need 5.15 (Ornith's layer_major refuses another).
 
-test_lfm2moe (spec 24a) the same on the downloaded tiny yujiepan/lfm2-moe-tiny-random (bf16, the original's names):
-lfm2moe_ref.py needs transformers 5.19.0 too (`... test_oracle_batched.py test_lfm2moe` with the site).
-
 test_cli_resume runs oracle_generate.py's main on a tiny Ornith set: --batch 1 into one directory,
 --batch 3 into another with one scenario already present (skipped, untouched), the .ids / .txt
 files equal; and --batch auto prints the memory plan.
@@ -108,24 +105,6 @@ def qwen4exp_snapshot(tmp: str):
         return "qwen4_exp", json.load(f)["text_config"]["vocab_size"]
 
 
-def lfm2moe_snapshot(tmp: str):
-    """Spec 24a: the downloaded tiny yujiepan/lfm2-moe-tiny-random (bf16, the original's per-expert w1 / w3 / w2 names:
-    what the A4 reference loads from LFM2.5's bf16 original), copied into tmp. Not lfm2moe_make_tiny's pattern8: with
-    its unit-scale tied embedding a random model's greedy continuation repeats its last id, so no EOS set stops two
-    sequences at different points."""
-    import glob
-    hf = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-    snaps = [c for root in (hf, "/hf", os.path.expanduser("~/.cache/huggingface"))
-             for c in sorted(glob.glob(os.path.join(root, "hub", "models--yujiepan--lfm2-moe-tiny-random", "snapshots",
-                                                    "*")))]
-    if not snaps:
-        raise SkipTiny("yujiepan/lfm2-moe-tiny-random is not in the HF cache (hf download, 10 MB)")
-    for fn in ("config.json", "generation_config.json", "model.safetensors"):
-        shutil.copyfile(os.path.join(snaps[0], fn), os.path.join(tmp, fn))
-    with open(os.path.join(tmp, "config.json"), encoding="utf-8") as f:
-        return "lfm2_moe", json.load(f)["vocab_size"]
-
-
 class SkipTiny(Exception):
     pass
 
@@ -144,7 +123,7 @@ def bolt_snapshot(tmp: str):
 
 
 SNAPSHOTS = {"ornith": ornith_snapshot, "k2": k2_snapshot, "kolibri": kolibri_snapshot, "qwen4exp": qwen4exp_snapshot,
-             "lfm2moe": lfm2moe_snapshot, "bolt": bolt_snapshot}
+             "bolt": bolt_snapshot}
 
 
 # --------------------------------------------------------------------------------------------
@@ -198,7 +177,7 @@ class Counter:
 
     def __init__(self, runner, mtype: str):
         self.layers = self.experts = 0
-        if mtype == "qwen3_5_moe" or mtype in OG.Q4_TYPES or mtype in OG.LFM_TYPES or mtype in OG.BOLT_TYPES:
+        if mtype == "qwen3_5_moe" or mtype in OG.Q4_TYPES or mtype in OG.BOLT_TYPES:
             pf = runner.pf
             orig = pf.layer_sd
 
@@ -311,19 +290,6 @@ def test_qwen4exp():
     os.environ.pop("Q4_LAYERS", None)
     os.environ["Q4_PLE"] = "bf16"
     check("qwen4exp")
-
-
-def test_lfm2moe():
-    import transformers
-    if transformers.__version__ != "5.19.0":
-        print(f"  SKIP: transformers {transformers.__version__} (lfm2moe_ref.py needs 5.19.0: the qwen4exp site first "
-              "on PYTHONPATH)")
-        return
-    os.environ.pop("LFM_LAYERS", None)
-    try:
-        check("lfm2moe")
-    except SkipTiny as e:
-        print(f"  SKIP: {e}")
 
 
 # --------------------------------------------------------------------------------------------
@@ -458,8 +424,7 @@ def test_bolt():
         print(f"  SKIP: {e}")
 
 
-TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp, test_lfm2moe,
-         test_bolt]
+TESTS = [test_plan_real_configs, test_ornith, test_k2, test_kolibri, test_cli_resume, test_qwen4exp, test_bolt]
 
 
 def main() -> None:

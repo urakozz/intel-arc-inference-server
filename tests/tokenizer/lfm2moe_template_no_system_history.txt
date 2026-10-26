@@ -1,8 +1,0 @@
-<|startoftext|><|im_start|>user
-Find where the planner reads the layer table.<|im_end|>
-<|im_start|>assistant
-Done.<|im_end|>
-<|im_start|>user
-Again.<|im_end|>
-<|im_start|>assistant
-<think>

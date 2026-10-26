@@ -17,7 +17,7 @@ function(add_ocloc_kernel NAME)
   get_filename_component(src "${K_SOURCE}" NAME)
   string(REPLACE ";" " " d "${K_DEFINES}")
   string(REPLACE ";" " " o "${K_OPTIONS}")
-  # An option naming a path inside the tree (24c's -I<src/kernels/lfm2moe>) is the same command line in every
+  # An option naming a path inside the tree (25c's -I<src/kernels/bolt>) is the same command line in every
   # checkout: spell the tree's root as <tree>, so two trees compare by what they build, not where they sit.
   string(REPLACE "${_kc_tree}" "<tree>" o "${o}")
   file(APPEND ${CMAKE_BINARY_DIR}/kernels.txt "${NAME} | ${src} | ${d} | ${o}\n")

@@ -730,7 +730,7 @@ def test_rms_norm():
     xf = h.float()
     two = nrm.weight * (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + nrm.variance_epsilon)).to(BF)
     assert not torch.equal(two, nrm(h))
-    print("  rms_norm = NemotronHRMSNorm bitwise (one rounding); the two-rounding (LFM2-style) variant differs")
+    print("  rms_norm = NemotronHRMSNorm bitwise (one rounding); the two-rounding variant differs")
 
 
 def test_nope():

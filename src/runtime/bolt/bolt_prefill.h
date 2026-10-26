@@ -12,7 +12,7 @@
 #include "runtime/prefill/kernels.h"
 
 // Spec 25d: Nemotron 3.5 Bolt's prefill - one chunk of at most kPfC positions through one device's blocks on the Level Zero
-// list (spec 25 §6.2; the LFM2 / Kolibri arrangement, runtime/lfm2moe/lfm2moe_prefill.h), no host wait inside it. The walk,
+// list (spec 25 §6.2; the Kolibri arrangement, runtime/kolibri/kolibri_prefill.h), no host wait inside it. The walk,
 // per chunk on a device (bolt_sizes.h counts it: prefill_device_launches):
 //
 //   device 0     nb_pf_embed_gather (the chunk's ids -> h0)                                                           1

@@ -1,8 +1,0 @@
-<|startoftext|><|im_start|>user
-Größe 東京 😀 é́ ​ tab	here<|im_end|>
-<|im_start|>assistant
-✓ done<|im_end|>
-<|im_start|>user
-ß<|im_end|>
-<|im_start|>assistant
-<think>

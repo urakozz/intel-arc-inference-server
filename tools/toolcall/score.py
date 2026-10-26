@@ -1,6 +1,6 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|qwen-think|hermes|pythonic] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|qwen-think|hermes] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
@@ -26,23 +26,6 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       (optional whitespace, then <think> ... </think>) is skipped first, and an output that ends
       inside it is 'reasoning'. Arguments are kept as JSON values and compared as such.
 
-  pythonic (LFM2.5-24B-A2B, spec 24; `--format pythonic`): the prompt ends in <think>, so the output OPENS
-      inside reasoning, closed by </think> (an output that ends inside it is 'reasoning'; a block inside the
-      reasoning is reasoning text). Then <|tool_call_start|>[name(k=v, ...), ...]<|tool_call_end|>: a list of
-      calls with keyword arguments whose values are Python literals, read by a safe literal parser (never
-      eval): strings in single, double or triple quotes, ints, floats, True / False / None and JSON's true /
-      false / null, lists, tuples, dicts, nested. Escapes are the template's inverse per context
-      (chat_template.jinja's format_arg_value): a TOP-LEVEL string decodes only a doubled backslash, its own
-      quote's escape, n and r; a string inside a list / dict (written by tojson) decodes JSON's set; every
-      other backslash is kept verbatim. A quote closes a string only when what follows (after whitespace) is
-      , ) ] } : or the end of the block, so 'it's here' is one string; when the rest then fails to parse,
-      the last quote that closed is kept in its string and the parse retried (once per quote: code such as
-      'if __name__ == '__main__':' survives). A bare call without the brackets is one call; a lone positional
-      dict is the arguments; any other positional argument, or a name without a value, makes the call
-      'incomplete'. A block cut by the end of generation (no <|tool_call_end|>) counts the calls whose )
-      closed; an unfinished first call is 'incomplete'. The first block's first call wins; values compare as
-      JSON values (True == true, tuples == lists).
-
   qwen-think (Nemotron 3.5 Bolt, spec 25a; `--format qwen-think`): Qwen XML behind the reasoning the prompt
       opens - Bolt's prompt ends in `<think>\n`, so the output OPENS inside reasoning, closed by </think> (the
       ultra_v3 / deepseek_r1 reasoning parser's rule: everything up to and including a first <think>, if the
@@ -53,7 +36,7 @@ Two call syntaxes, told apart by their tags (the two sets share none):
       qwen3_coder parser too (the template writes values raw); </parameterized or </parameters> do not cut.
 
 Kinds: 'call', 'no call', 'incomplete' (a call opened and not closed, or one that does not
-parse), 'reasoning' (K2 / hermes / pythonic / qwen-think: generation ended inside the reasoning).
+parse), 'reasoning' (K2 / hermes / qwen-think: generation ended inside the reasoning).
 """
 import json
 import os
@@ -183,239 +166,6 @@ def parse_first_call_hermes(text: str):
     return ("call", got[0], got[1], len(calls))
 
 
-LFM_THINK_CLOSE = "</think>"
-LFM_START, LFM_END = "<|tool_call_start|>", "<|tool_call_end|>"
-_BS = chr(92)                                              # a backslash
-_TOP_ESC = {_BS: _BS, "n": "\n", "r": "\r"}                # + the string's own quote
-_JSON_ESC = {'"': '"', _BS: _BS, "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
-_WS = " \t\r\n"
-
-
-class _PyLit:
-    """The pythonic call list's literal parser (spec 24 §4.6, decision 7) over a block's body."""
-
-    CLOSERS = ",)]}:"
-    WORDS = {"True": True, "true": True, "False": False, "false": False, "None": None, "null": None}
-
-    def __init__(self, s: str):
-        self.s, self.i = s, 0
-        self.skip: set[int] = set()     # quotes kept in their string (quote recovery)
-        self.closed: list[int] = []     # quotes that closed a string, in order
-        self.done: list = []            # the calls that closed
-
-    def peek(self) -> str:
-        while self.i < len(self.s) and self.s[self.i] in _WS:
-            self.i += 1
-        return self.s[self.i] if self.i < len(self.s) else ""
-
-    def eat(self, c: str) -> None:
-        if self.peek() != c:
-            raise ValueError(f"expected {c!r} at {self.i}")
-        self.i += 1
-
-    def closes(self, j: int, extra: str = "") -> bool:
-        """A quote ending at j closes its string when the next non-space character is a closer or the end
-        (`extra`: a quoted NAME also closes before ( or =)."""
-        while j < len(self.s) and self.s[j] in _WS:
-            j += 1
-        return j >= len(self.s) or self.s[j] in self.CLOSERS + extra
-
-    def string(self, nested: bool, extra: str = "") -> str:
-        self.peek()
-        q = self.s[self.i]
-        triple = self.s.startswith(q * 3, self.i)
-        self.i += 3 if triple else 1
-        out = []
-        while True:
-            if self.i >= len(self.s):
-                raise ValueError("unterminated string")
-            c = self.s[self.i]
-            if c == _BS and self.i + 1 < len(self.s):
-                e = self.s[self.i + 1]
-                if nested and e == "u" and self.i + 6 <= len(self.s):
-                    out.append(chr(int(self.s[self.i + 2:self.i + 6], 16)))
-                    self.i += 6
-                    continue
-                table = _JSON_ESC if nested else dict(_TOP_ESC, **{q: q})
-                out.append(table[e] if e in table else c + e)   # anything else verbatim ("C:\Users", "\d")
-                self.i += 2
-                continue
-            if triple and self.s.startswith(q * 3, self.i):
-                self.i += 3
-                return "".join(out)
-            if not triple and c == q and self.i not in self.skip and self.closes(self.i + 1, extra):
-                self.closed.append(self.i)
-                self.i += 1
-                return "".join(out)
-            out.append(c)
-            self.i += 1
-
-    def name(self) -> str:
-        if self.peek() in ("'", '"'):
-            return self.string(False, "(=")
-        j = self.i
-        while self.i < len(self.s) and (self.s[self.i].isalnum() or self.s[self.i] in "_.-"):
-            self.i += 1
-        if j == self.i:
-            raise ValueError(f"expected a name at {j}")
-        return self.s[j:self.i]
-
-    def value(self, nested: bool, depth: int):
-        if depth > 64:
-            raise ValueError("nested deeper than 64")
-        c = self.peek()
-        if c in ("'", '"'):
-            return self.string(nested)
-        if c in "[(":
-            close = "]" if c == "[" else ")"
-            self.i += 1
-            out = []
-            while self.peek() != close:
-                out.append(self.value(True, depth + 1))
-                if self.peek() == ",":
-                    self.i += 1
-                elif self.peek() != close:
-                    raise ValueError("list separator")
-            self.i += 1
-            return out
-        if c == "{":
-            self.i += 1
-            out = {}
-            while self.peek() != "}":
-                k = self.value(True, depth + 1)
-                self.eat(":")
-                out[k if isinstance(k, str) else json.dumps(k)] = self.value(True, depth + 1)
-                if self.peek() == ",":
-                    self.i += 1
-                elif self.peek() != "}":
-                    raise ValueError("dict separator")
-            self.i += 1
-            return out
-        j = self.i
-        while self.i < len(self.s) and (self.s[self.i].isalnum() or self.s[self.i] in "+-._"):
-            self.i += 1
-        tok = self.s[j:self.i]
-        if tok in self.WORDS:
-            return self.WORDS[tok]
-        for conv in (int, float):
-            try:
-                return conv(tok)
-            except ValueError:
-                pass
-        raise ValueError(f"not a literal: {tok!r}")
-
-    def call(self):
-        name = self.name()
-        self.eat("(")
-        args, positional = {}, []
-        while self.peek() != ")":
-            if self.peek() in ("'", '"', "[", "(", "{") or self.peek().isdigit() or self.peek() in "+-.":
-                v = self.string(False, "=") if self.peek() in ("'", '"') else self.value(False, 1)
-                if self.peek() == "=" and isinstance(v, str):     # a quoted argument name: "path"="x"
-                    self.i += 1
-                    args[v] = self.value(False, 1)
-                else:
-                    positional.append(v)
-            else:
-                k = self.name()
-                if self.peek() != "=":
-                    raise ValueError(f"{k}: a name without '='")
-                self.i += 1
-                if self.peek() in (",", ")", ""):
-                    raise ValueError(f"{k}= without a value")
-                args[k] = self.value(False, 1)
-            if self.peek() == ",":
-                self.i += 1
-            elif self.peek() != ")":
-                raise ValueError("argument separator")
-        self.i += 1
-        if positional:
-            if len(positional) == 1 and isinstance(positional[0], dict) and not args:
-                return name, positional[0]
-            raise ValueError("a positional argument")
-        return name, args
-
-    def _calls(self) -> list:
-        bracket = self.peek() == "["
-        if bracket:
-            self.i += 1
-        while self.peek() not in ("]", ""):
-            self.done.append(self.call())
-            if self.peek() == ",":
-                self.i += 1
-        if bracket:
-            self.eat("]")
-        if self.peek() != "" or not self.done:
-            raise ValueError("text after the call list, or no call")
-        return self.done
-
-    def calls(self, partial: bool = False) -> list:
-        """The block's calls. Quote recovery (spec 24 §4.6): when a parse fails, a quote that closed a string in that
-        attempt is kept IN the string instead and the parse restarts - a depth-first search over which quotes to
-        keep, latest quote first, each quote kept at most once on a path and only quotes AFTER the last one kept
-        tried next (so every set of kept quotes is tried at most once), bounded by MAX_ATTEMPTS parses (the block's
-        length, at least 64). `partial` (generation ended inside the block): the calls whose ) closed, from the
-        attempt that closed the most; ValueError when none did."""
-        best: list = []
-        budget = [max(64, len(self.s))]
-
-        def attempt(skip: frozenset):
-            self.i, self.skip, self.closed, self.done = 0, set(skip), [], []
-            budget[0] -= 1
-            try:
-                return self._calls(), []
-            except (ValueError, IndexError):
-                return None, (list(self.done), list(self.closed))
-
-        def search(skip: frozenset, floor: int):
-            nonlocal best
-            got, info = attempt(skip)
-            if got is not None:
-                return got
-            done, closed = info
-            if len(done) > len(best):
-                best = done
-            for q in reversed(closed):            # the latest closing quote first
-                if budget[0] <= 0:
-                    return None
-                if q in skip or q <= floor:
-                    continue
-                r = search(skip | {q}, q)
-                if r is not None:
-                    return r
-            return None
-        got = search(frozenset(), -1)
-        if got is not None:
-            return got
-        if partial and best:
-            return best
-        raise ValueError("the call list does not parse")
-
-
-def parse_pythonic_block(body: str, partial: bool = False) -> list:
-    """The calls of one <|tool_call_start|> ... <|tool_call_end|> body: [(name, arguments dict)]; ValueError when
-    it does not parse. `partial`: the body was cut by the end of generation - the calls that closed."""
-    return _PyLit(body).calls(partial)
-
-
-def parse_first_call_pythonic(text: str):
-    """-> (kind, name, arguments, n_calls) for LFM2.5's output (its prompt ends in <think>)."""
-    end = text.find(LFM_THINK_CLOSE)
-    if end < 0:
-        return ("reasoning", None, {}, 0)
-    rest = text[end + len(LFM_THINK_CLOSE):]
-    a = rest.find(LFM_START)
-    if a < 0:
-        return ("no call", None, {}, 0)
-    b = rest.find(LFM_END, a)
-    try:   # no end tag: generation ended inside the block - the calls that closed count (spec 24 §4.6)
-        calls = parse_pythonic_block(rest[a + len(LFM_START):] if b < 0 else rest[a + len(LFM_START):b], b < 0)
-    except (ValueError, IndexError):
-        return ("incomplete", None, {}, 0)
-    name, args = calls[0]
-    return ("call", name, args, len(calls))
-
-
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
 
 
@@ -431,12 +181,10 @@ def parse_first_call_qwen_think(text: str):
 
 def parse_first_call(text: str, fmt: str = "auto"):
     """-> (kind, name, params, n_calls); kind is 'call', 'no call', 'incomplete' or (K2, hermes,
-    pythonic) 'reasoning'. fmt 'hermes' reads Kolibri-1's calls, 'pythonic' LFM2.5's; 'auto' (and
+    qwen-think) 'reasoning'. fmt 'hermes' reads Kolibri-1's calls, 'qwen-think' Bolt's; 'auto' (and
     'qwen') K2's tags when present, else Qwen XML."""
     if fmt == "qwen-think":
         return parse_first_call_qwen_think(text)
-    if fmt == "pythonic":
-        return parse_first_call_pythonic(text)
     if fmt == "hermes":
         return parse_first_call_hermes(text)
     if is_k2(text):
@@ -455,8 +203,8 @@ def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
     if args[:1] == ["--format"]:
-        if len(args) < 2 or args[1] not in ("qwen", "qwen-think", "hermes", "pythonic"):
-            sys.exit("--format expects qwen, qwen-think, hermes or pythonic")
+        if len(args) < 2 or args[1] not in ("qwen", "qwen-think", "hermes"):
+            sys.exit("--format expects qwen, qwen-think or hermes")
         fmt, args = args[1], args[2:]
     if len(args) < 3:
         sys.exit(__doc__)
@@ -486,7 +234,7 @@ def main() -> None:
     print()
     for c in cands:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
-    if fmt in ("hermes", "pythonic", "qwen-think"):   # KL4's / spec 24 F6's / 25 B5's bar: every reference call parses
+    if fmt in ("hermes", "qwen-think"):   # KL4's / 25 B5's bar: every reference call parses
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))

@@ -1,5 +1,5 @@
 // BoltEngine::prefill and its accessors - the only BoltEngine members not compiled into b70_bolt_runtime (bolt_engine.h says
-// why: LFM2's / Kolibri's arrangement, runtime/lfm2moe/lfm2moe_prefill_engine.cc).
+// why: Kolibri's arrangement, runtime/kolibri/kolibri_prefill_engine.cc).
 //
 // **One card:** each chunk is device 0's walk (bolt_prefill.cc) on its immediate list, then a wait.
 // **Two cards** (spec 16b's pieces, Decision 4; Kolibri's sequential hand-off per chunk, spec 20 §12): device 0's list runs

@@ -163,30 +163,6 @@ case "${1:-}" in
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
     have vllm_image "the vLLM XPU image ${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} (tools/probe/vllm_benchy.sh)" \
       docker image inspect "${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
-    # Queue row 48 (spec 24a, plan 24a): LFM2.5-24B-A2B's bf16 original (the reference's input,
-    # tools/box_validate/lfm2moe_oracle.sh), its golden sets and its A4 reference.
-    have lfm2moe_bf16 "LFM2.5-24B-A2B's bf16 original ${SNAP_LFM2MOE_BF16:-LiquidAI/LFM2.5-24B-A2B} (47.96 GB; hf download LiquidAI/LFM2.5-24B-A2B, df -h ~ first)" \
-      complete "${SNAP_LFM2MOE_BF16:-LiquidAI/LFM2.5-24B-A2B}"
-    have oracle_lfm2moe "oracle-out-lfm2moe/lfm2moe_{short,4k,agentic,32k}.{ids,golden.safetensors} (spec 24a: lfm2moe_oracle.sh golden)" \
-      bash -c 'for p in lfm2moe_short lfm2moe_4k lfm2moe_agentic lfm2moe_32k; do test -s oracle-out-lfm2moe/$p.ids && test -s oracle-out-lfm2moe/$p.golden.safetensors || exit 1; done'
-    have lfm2moe_a4_ref "oracle-out-lfm2moe-a4/ with LFM2.5's set and 36 <name>.bf16.txt (spec 24a: lfm2moe_oracle.sh a4 - the bf16 original's A4 reference, 24q / 24e score against it)" \
-      bash -c 'test -s oracle-out-lfm2moe-a4/set/manifest.json && test "$(ls oracle-out-lfm2moe-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
-    # Spec 24b Task 1 (queue row 50): the synthetic real-width checkpoints, both expert spellings.
-    have lfm2moe_synth "oracle-out-lfm2moe-synth/{w,proj}/ + {w,proj}.ACCEPTED (spec 24b: r50.synth - make_synth.py --layers 4)" \
-      bash -c 'for s in w proj; do test -s oracle-out-lfm2moe-synth/$s/model.safetensors.index.json && test -f oracle-out-lfm2moe-synth/$s.ACCEPTED || exit 1; done'
-    # Spec 24q (not built when 24b was written: r50.load_real SKIPs 77 until it exists).
-    have lfm2moe_rtn "LFM2.5-24B-A2B's RTN int4 g64 export (spec 24 §5: 24q's development checkpoint; not built yet)" \
-      bash -c 'false'
-    # Spec 24c (queue row 51): the synthetics' golden sets (r51.synth_golden: lfm2moe_oracle.sh export on each),
-    # 24q's golden sets on its exports, and its AutoRound export (none built yet).
-    have oracle_lfm2moe_synth "oracle-out-lfm2moe-{w,proj}/lfm2moe_{short,4k,agentic}.golden.safetensors (spec 24c: r51.synth_golden)" \
-      bash -c 'for s in w proj; do for p in lfm2moe_short lfm2moe_4k lfm2moe_agentic; do test -s oracle-out-lfm2moe-$s/$p.golden.safetensors || exit 1; done; done'
-    have oracle_lfm2moe_rtn "24q's golden sets on the RTN export (lfm2moe_oracle.sh export <the RTN export>; not built yet)" \
-      bash -c 'false'
-    have lfm2moe_ours "24q's AutoRound export ${SNAP_LFM2MOE_OURS:-urakozz/LFM2.5-24B-A2B-W4A16-g64-AutoRound-GPTQ} (not built yet)" \
-      complete "${SNAP_LFM2MOE_OURS:-/nonexistent}"
-    have oracle_lfm2moe_ours "24q's golden sets on the AutoRound export (not built yet)" \
-      bash -c 'false'
     # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - SergiioB's g128 checkpoint (the served one, Decision 3), the
     # BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
     # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision b9f381d2... / 56702103... (df -h ~ first);

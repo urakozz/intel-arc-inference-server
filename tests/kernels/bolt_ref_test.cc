@@ -147,7 +147,7 @@ void test_norm() {
         fine_diff += got != want;
       }
     }
-    if (!coarse) {   // ONE rounding: Kolibri's / LFM2's two-rounding chain differs somewhere
+    if (!coarse) {   // ONE rounding: Kolibri's two-rounding chain differs somewhere
       const float rstd = br::rstd_of(br::norm_sumsq(o.h_out.data()));
       for (uint32_t k = 0; k < H; ++k) one_vs_two += rne(rf(f32(o.h_out[k]) * rstd) * w[k]) != o.x[k];
     }

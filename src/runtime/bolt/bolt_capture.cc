@@ -423,7 +423,7 @@ class Walk {
     require(kb::argmax_groups() <= kb::kArgmaxWg, "argmax_stage2 folds at most 256 groups");
   }
 
-  // --- the hand-off (spec 16b's; lfm2moe_capture.cc's at every cut: h and the pending slices) ----------------------------
+  // --- the hand-off (spec 16b's, at every cut: h and the pending slices) -----------------------------------------------
   size_t h_bytes() const { return size_t(kM) * d_.hidden * 2; }
   size_t cut_slices_bytes() const { return size_t(cut_pending(d_, b_.placement).total()) * kM * d_.hidden * 4; }
   void check_link() const {

@@ -1,6 +1,0 @@
-<|startoftext|><|im_start|>system
-List of tools: [{"function": {"description": "Search file contents (regex).", "name": "grep", "parameters": {"properties": {"flags": {"items": {"type": "string"}, "type": "array"}, "include": {"type": "string"}, "pattern": {"type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}]<|im_end|>
-<|im_start|>user
-Find where the planner reads the layer table.<|im_end|>
-<|im_start|>assistant
-<think>

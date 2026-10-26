@@ -19,11 +19,6 @@
 #      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384).
 # K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's
 # engine; its backend is l0 (the only one K2 prefills on).
-# LFM2.5-24B-A2B (spec 24e, F6): the same line runs Lfm2MoeEngine (one card, l0) on the committed set tests/golden/toolcall-lfm2moe
-# (rendered by transformers 5.19.0 with the snapshot's chat_template.jinja, key-sorted as b70-serve renders); N_NEW defaults to 2048
-# (24a's reference length: the replies open with reasoning). b70-decode generates all N_NEW ids whatever the model says, so cut each
-# text at the first <|im_end|> before reading it (score.py --format pythonic does; tools/toolcall/lfm2moe_rules does and counts
-# the lenient readings). Score with `score.py --format pythonic`.
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"
@@ -38,7 +33,6 @@ PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
 [ -f "$SNAP/tokenizer.json" ] || { echo "$SNAP has no tokenizer.json" >&2; exit 2; }
 N_DEFAULT=192
-if grep -q '"model_type": *"lfm2_moe"' "$SNAP/config.json" 2> /dev/null; then N_DEFAULT=2048; fi
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)
 TOK_JSON=$(readlink -f "$SNAP/tokenizer.json")

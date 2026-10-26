@@ -28,13 +28,8 @@ budget - and renders from KEY-SORTED messages and tools: b70-serve holds a reque
 nlohmann::json, whose objects are sorted, so the server's render of the same request is
 these ids (tools/tokenizer/dump_k2.py's rule).
 
-LFM2.5-24B-A2B (model_type lfm2_moe, spec 24a) renders --from the same 36 conversations from KEY-SORTED messages
-and tools (b70-serve's order, as K2's), no template kwargs: its template writes the history calls as pythonic
-`<|tool_call_start|>[name(k=v)]<|tool_call_end|>` and ends the prompt in "<think>"; tools/toolcall/a4_ref.sh
-lfm2moe set writes tests/golden/toolcall-lfm2moe.
-
 Nemotron 3.5 Bolt (config.json model_type nemotron_h_omni, spec 25a Task 6) renders --from the same 36 conversations
-with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri / LFM2.5
+with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri
 (b70-serve's nlohmann::json), with enable_thinking TRUE (the template's default and the agentic mode: the prompt ends
 in `<|im_start|>assistant\n<think>\n`, every reply reasons first) and the default kwargs {"medium_effort": true}
 (K2's precedent for a reasoning-first model: the effort that keeps the reasoning inside the 2048-id budget;
@@ -60,10 +55,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 WORK = "/work"
 MIN_IDS, MAX_IDS = 800, 3000
-# --from re-renders the SAME conversations: another tokenizer may need fewer ids for them. LFM2.5's renders the
-# shortest scenario in 748 ids (spec 24a: 748..2460, 54768 in all), so its floor is lower; the conversations
+# --from re-renders the SAME conversations: another tokenizer may need more or fewer ids for them; the conversations
 # are unchanged.
-MIN_IDS_FROM = {"lfm2_moe": 600}
 # Spec 25a: Bolt's template writes every tool as an XML block with the Qwen3-Coder calling instructions: the same 36
 # conversations render to 1085..3098 ids (72,519 in all), so its ceiling is higher; the conversations are unchanged.
 MAX_IDS_FROM = {"nemotron_h_omni": 4096}
@@ -350,10 +343,7 @@ def load_tokenizer(snap: str):
 
 K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
-# Spec 24a: LFM2.5-24B-A2B (lfm2_moe) too - its schemas and call arguments reach the template key-sorted through
-# b70-serve (spec 24 §4.6's known limitation), so its A4 set is rendered that way; the history calls come out
-# pythonic through the template itself, and the prompt ends in "<think>" (the template always reasons).
-SORTED_MODELS = ("k2_horizon", "kolibri1", "lfm2_moe", "nemotron_h_omni")
+SORTED_MODELS = ("k2_horizon", "kolibri1", "nemotron_h_omni")
 # Spec 25a: Nemotron 3.5 Bolt - reasoning on (the template's default), medium effort (module docstring).
 BOLT_TYPES = ("nemotron_h_omni",)
 BOLT_KWARGS = {"medium_effort": True}
@@ -403,7 +393,7 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
                                     **kwargs)
         ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
-        lo, hi = MIN_IDS_FROM.get(mtype, MIN_IDS), MAX_IDS_FROM.get(mtype, MAX_IDS)
+        lo, hi = MIN_IDS, MAX_IDS_FROM.get(mtype, MAX_IDS)
         if not lo <= len(ids) <= hi:
             sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {lo} to {hi}")
         text = " ".join(map(str, ids)) + "\n"

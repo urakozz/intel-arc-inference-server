@@ -1,8 +1,0 @@
-<|startoftext|><|im_start|>system
-List of tools: [{"function": {"description": "Search file contents (regex).", "name": "grep", "parameters": {"properties": {"flags": {"items": {"type": "string"}, "type": "array"}, "include": {"type": "string"}, "pattern": {"type": "string"}}, "required": ["pattern"], "type": "object"}}, "type": "function"}]<|im_end|>
-<|im_start|>user
-list<|im_end|>
-<|im_start|>assistant
-<|tool_call_start|>[grep(flags=["it's", "say \"hi\"", "back\\slash", "line\nbreak", "tab\t", "é东", "/"], pattern='a')]<|tool_call_end|><|im_end|>
-<|im_start|>assistant
-<think>

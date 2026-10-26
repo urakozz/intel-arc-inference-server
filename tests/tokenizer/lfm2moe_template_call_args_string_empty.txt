@@ -1,6 +1,0 @@
-<|startoftext|><|im_start|>user
-strs<|im_end|>
-<|im_start|>assistant
-<|tool_call_start|>[a(), b(), c(), d()]<|tool_call_end|><|im_end|>
-<|im_start|>assistant
-<think>
