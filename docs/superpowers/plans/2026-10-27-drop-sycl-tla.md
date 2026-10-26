@@ -77,7 +77,7 @@ Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (
    own `sycl::queue` (no `Context::sycl()`, no libb70_prefill.so) and links the engine build's loader / model / l0
    archives. The engine build has no SYCL / icpx left at all. The stand-alone build is not part of mac_check or the box
    rows. To build it on the box, after the engine build in `build/`:
-   `cmake -S tools/probe/onednn -B build-onednn -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/2026.1/bin/icpx
+   `cmake -S tools/probe/onednn -B build-onednn -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx
    -DB70_BUILD_DIR=$PWD/build && cmake --build build-onednn`.
 2. **The L0 GEMM's oracle:** `pf_gemm_test` compares against a host reference (fp64 accumulate of the same bf16
    inputs) at the same shapes, with a stated cos / max-ulp tolerance derived from the reference's own error and written
@@ -131,4 +131,7 @@ Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (
   `--mtp off` 4); `memory_plan_test`'s spec 6 line pins the l0-int8 path it was measured on.
 - `--pp-backend` is not accepted by any CLI: it is refused naming `--prefill-backend` (`cli/renamed_flags.h`).
 - Box: row 76 (r76.tests, r76.speed) in stages.sh and the queue; r23.reject is gone (it held only the sycl refusal).
-- The stand-alone oneDNN probe build: `tools/probe/onednn/CMakeLists.txt` (§2.1 has the command).
+- The stand-alone oneDNN probe build: `tools/probe/onednn/CMakeLists.txt` (§2.1 has the command); built on the box
+  2026-10-27 with icpx 2026.2 and oneDNN 2026.1 (configure + build clean, libs resolve; not run).
+- On the box the SYCL component was already off on main: `B70_ICPX` pinned 2026.1, which is no longer installed
+  (2026.2 is), so `B70_PREFILL=AUTO` resolved to OFF - main's box build had no sycl-tla backend before this branch.

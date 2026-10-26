@@ -5,7 +5,7 @@ cmake_minimum_required(VERSION 3.22)
 # after an engine build, and is in neither tools/mac_check.sh nor the box rows:
 #
 #   cmake -S tools/probe/onednn -B build-onednn \
-#     -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/2026.1/bin/icpx -DB70_BUILD_DIR=$PWD/build
+#     -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/latest/bin/icpx -DB70_BUILD_DIR=$PWD/build
 #   cmake --build build-onednn && build-onednn/probe_gemm_onednn_int4 [--ckpt=<snapshot>]
 #
 # The probe makes its own in-order sycl::queue; it reads the checkpoint through the engine build's
@@ -20,7 +20,7 @@ endif()
 add_compile_options(-Wall -Wextra -Werror)
 
 set(B70_BUILD_DIR "" CACHE PATH "an engine build tree (its src/loader, src/model and src/l0 archives)")
-set(B70_ONEDNN_ROOT "/opt/intel/oneapi/dnnl/2026.0" CACHE PATH "oneDNN install (docs/10-the-box.md)")
+set(B70_ONEDNN_ROOT "/opt/intel/oneapi/dnnl/latest" CACHE PATH "oneDNN install (docs/10-the-box.md)")
 get_filename_component(B70_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 foreach(lib src/loader/libb70_loader.a src/model/libb70_model.a src/l0/libb70_l0.a)
   if(NOT EXISTS "${B70_BUILD_DIR}/${lib}")
@@ -38,7 +38,7 @@ get_filename_component(_icpx_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
 get_filename_component(_oneapi_root "${_icpx_bin}" DIRECTORY)
 get_filename_component(_oneapi_base "${_oneapi_root}/../.." ABSOLUTE)
 set(_oneapi_lib "${_oneapi_root}/lib")
-set(_umf_lib "${_oneapi_base}/umf/1.1/lib")
+set(_umf_lib "${_oneapi_base}/umf/latest/lib")
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
