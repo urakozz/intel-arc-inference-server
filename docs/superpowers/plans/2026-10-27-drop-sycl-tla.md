@@ -114,3 +114,21 @@ Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (
 - Box (own tree, `gpu_lock.sh`): build -j44 from a fresh build dir; r13.cli; Qwen3.8 and Ornith l0 / l0-int8 prefill
   rows; the changed reject rows; G0 (`g0.bitwise`) and the Qwen3.8 / Agnes / Ornith golden rows for the l0-int8 -> l0
   default move - a G0 diff is reported, never accepted (the operator's call).
+
+## 5. As built (2026-10-27)
+
+- Tasks 1-5 done on branch `drop-sycl-tla`. The engine build configures from scratch with no `B70_PREFILL*`, icpx or
+  SYCL cache entry (a fresh host-only configure has none; the box tree is new, so its first build is from scratch).
+- Beyond §1: `PrefillScratch::dequant_buffer()` and `PrefillScratchSizes::dequant` (the sycl-tla bf16 scratch) are
+  gone; `is_l0()` is gone (both backends are L0); `step_chunk_gemms` / `step_chunk_waits` are gone; the per-model
+  refusals and the pipeline checks lose their sycl-tla branch. `runtime/prefill/dequant.cc` (`dequant_to_bf16`, the
+  whole-matrix `pf_dequant_tile` walk) stays: L0 code, no runtime caller left - a follow-up may delete it.
+- `pf_gemm_test`: per element `|got - ref| / ulp32(sum |a b|) <= K` (the fp32 summation bound for any order) and per
+  case cos >= 0.999999, on a row sample (both ends of every 64-row block) and every column; the silu and determinism
+  checks stay device against device, bitwise. `attn_chunk_test`'s composed grid runs on the L0 backend.
+- The default move also moves derived memory: `batch_rows_test`'s spec 13 §9.1 layouts lose Int8State (Qwen3.8
+  0.087 GB, Agnes 0.099 GB of shared scratch; the largest batches are unchanged: Qwen3.8 MTP 4, Agnes MTP 2 /
+  `--mtp off` 4); `memory_plan_test`'s spec 6 line pins the l0-int8 path it was measured on.
+- `--pp-backend` is not accepted by any CLI: it is refused naming `--prefill-backend` (`cli/renamed_flags.h`).
+- Box: row 76 (r76.tests, r76.speed) in stages.sh and the queue; r23.reject is gone (it held only the sycl refusal).
+- The stand-alone oneDNN probe build: `tools/probe/onednn/CMakeLists.txt` (§2.1 has the command).
