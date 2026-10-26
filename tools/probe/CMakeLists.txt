@@ -1,5 +1,5 @@
-# SYCL probes (including probe_interop) are built by the icpx-only sub-project
-# src/sycl/CMakeLists.txt, not in this g++-compiled probe target list.
+# Every probe here is g++ / Level Zero. The one icpx probe (oneDNN's W4A16 matmul, a
+# reference target) has its own stand-alone build: tools/probe/onednn/CMakeLists.txt.
 add_executable(probe_bw probe_bw.cc)
 target_include_directories(probe_bw PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_bw PRIVATE b70_l0)
@@ -31,77 +31,64 @@ get_property(PF_DEQUANT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefil
              PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_dequant ${PF_DEQUANT_KERNELS})
 
-# The dequant-overlap lever (spec 2, plan 6c Task 4). Unlike P3 it needs BOTH
-# queues -- the L0 immediate list for pf_dequant_tile and the SYCL queue for
-# gemm_bf16 -- so it links libb70_prefill.so and lives under the same guard
-# every other prefill target uses. It contains no SYCL of its own, so it is a
-# plain g++ target here rather than one of src/sycl's icpx probes.
-if(B70_PREFILL_ENABLED)
-  # `runtime::prefill::Context` and `gemm_bf16*` now live in b70_prefill_host
-  # (spec 2.1 §3.5, ruling B5).
-  add_executable(probe_dequant_overlap probe_dequant_overlap.cc)
-  target_include_directories(probe_dequant_overlap PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_dequant_overlap PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(probe_dequant_overlap)
-  b70_target_kernel_dir(probe_dequant_overlap)
-  add_dependencies(probe_dequant_overlap kernel_pf_dequant_tile_K5120_N34816_L0_T0)
+# The dequant-overlap lever (spec 2, plan 6c Task 4): pf_dequant_tile on the L0
+# immediate list. `runtime::prefill::Context` lives in b70_prefill_host.
+add_executable(probe_dequant_overlap probe_dequant_overlap.cc)
+target_include_directories(probe_dequant_overlap PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_dequant_overlap PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(probe_dequant_overlap)
+add_dependencies(probe_dequant_overlap kernel_pf_dequant_tile_K5120_N34816_L0_T0)
 
-  # The L2-resident slab lever. Same shape as the overlap probe (gate‖up,
-  # K=5120, N=34816, M=2048) and the same two queues, so it links the same way.
-  #
-  # `pds_*` are PROBE kernels: `src/kernels/prefill/dequant.cl` is not touched,
-  # no runtime path binds them, and at NS == N with n0 == 0 the source IS that
-  # kernel's layout-0 / [K][N] path -- which is what makes the probe's C1'
-  # equivalence cell a control rather than a paraphrase. The width list here and
-  # `kWidths` in probe_dequant_slab.cc are two lists nothing checks against each
-  # other; a width whose binary is missing is named and refused at `l0::Module`.
-  set(PROBE_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_dequant_slab.cl)
-  set(PROBE_SLAB_TARGETS "")
-  foreach(NS 1024 2048 4096 34816)
-    add_ocloc_kernel(pds_K5120_N34816_NS${NS} SOURCE ${PROBE_SLAB_CL}
-                     DEFINES K=5120 N=34816 NS=${NS})
-    list(APPEND PROBE_SLAB_TARGETS kernel_pds_K5120_N34816_NS${NS})
-  endforeach()
+# The L2-resident slab lever. Same shape as the overlap probe (gate‖up,
+# K=5120, N=34816, M=2048), so it links the same way.
+#
+# `pds_*` are PROBE kernels: `src/kernels/prefill/dequant.cl` is not touched,
+# no runtime path binds them, and at NS == N with n0 == 0 the source IS that
+# kernel's layout-0 / [K][N] path -- which is what makes the probe's C1'
+# equivalence cell a control rather than a paraphrase. The width list here and
+# `kWidths` in probe_dequant_slab.cc are two lists nothing checks against each
+# other; a width whose binary is missing is named and refused at `l0::Module`.
+set(PROBE_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_dequant_slab.cl)
+set(PROBE_SLAB_TARGETS "")
+foreach(NS 1024 2048 4096 34816)
+  add_ocloc_kernel(pds_K5120_N34816_NS${NS} SOURCE ${PROBE_SLAB_CL}
+                   DEFINES K=5120 N=34816 NS=${NS})
+  list(APPEND PROBE_SLAB_TARGETS kernel_pds_K5120_N34816_NS${NS})
+endforeach()
 
-  add_executable(probe_dequant_slab probe_dequant_slab.cc)
-  target_include_directories(probe_dequant_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_dequant_slab PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(probe_dequant_slab)
-  b70_target_kernel_dir(probe_dequant_slab)
-  add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
-                   ${PROBE_SLAB_TARGETS})
+add_executable(probe_dequant_slab probe_dequant_slab.cc)
+target_include_directories(probe_dequant_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_dequant_slab PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(probe_dequant_slab)
+add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
+                 ${PROBE_SLAB_TARGETS})
 
-  # P-A (spec 2 addendum, docs/probe-prefill-vllm-parity-2026-09-14.md §A4):
-  # our own OpenCL C bf16 DPAS GEMM on the Level Zero list -- the go/no-go
-  # candidate for dropping sycl-tla from the prefill path. AOT at 256 GRF is
-  # MANDATORY (§A4.8): P2 measured a 33x loss without it, and zero spill does
-  # not mean good code. `pf_gemm_bf16.cl` is a probe-only kernel: no runtime
-  # path binds it and no existing kernel is touched. This target links
-  # b70_prefill (like probe_dequant_slab above) purely to call `gemm_bf16` as
-  # the C2 control beside every timed cell -- it contains no SYCL of its own.
-  add_ocloc_kernel(pf_gemm_bf16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_bf16.cl
-                   OPTIONS -cl-intel-256-GRF-per-thread)
+# P-A (spec 2 addendum, docs/probe-prefill-vllm-parity-2026-09-14.md §A4):
+# our own OpenCL C bf16 DPAS GEMM on the Level Zero list -- the go/no-go
+# candidate for dropping sycl-tla from the prefill path. AOT at 256 GRF is
+# MANDATORY (§A4.8): P2 measured a 33x loss without it, and zero spill does
+# not mean good code. `pf_gemm_bf16.cl` is a probe-only kernel: no runtime
+# path binds it and no existing kernel is touched.
+add_ocloc_kernel(pf_gemm_bf16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_bf16.cl
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
-  add_executable(probe_pf_gemm probe_pf_gemm.cc)
-  target_include_directories(probe_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_pf_gemm PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(probe_pf_gemm)
-  b70_target_kernel_dir(probe_pf_gemm)
-  add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
+add_executable(probe_pf_gemm probe_pf_gemm.cc)
+target_include_directories(probe_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_pf_gemm PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(probe_pf_gemm)
+add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
 
-  # P-B (docs/probe-prefill-vllm-parity-2026-09-14.md §A3.2): slab dequant +
-  # P-A's GEMM on ONE in-order L0 list, zero host waits. Runs only because
-  # P-A measured >= 128 (committed: 156.53 TFLOP/s). `pf_gemm_bf16_slab` is a
-  # second entry point in the SAME pf_gemm_bf16.cl / kernel_pf_gemm_bf16
-  # binary as P-A's already-gated kernel -- pf_gemm_bf16 itself is untouched.
-  add_executable(probe_pf_gemm_slab probe_pf_gemm_slab.cc)
-  target_include_directories(probe_pf_gemm_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_pf_gemm_slab PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(probe_pf_gemm_slab)
-  b70_target_kernel_dir(probe_pf_gemm_slab)
-  add_dependencies(probe_pf_gemm_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
-                   kernel_pf_gemm_bf16 ${PROBE_SLAB_TARGETS})
-endif()
+# P-B (docs/probe-prefill-vllm-parity-2026-09-14.md §A3.2): slab dequant +
+# P-A's GEMM on ONE in-order L0 list, zero host waits. Runs only because
+# P-A measured >= 128 (committed: 156.53 TFLOP/s). `pf_gemm_bf16_slab` is a
+# second entry point in the SAME pf_gemm_bf16.cl / kernel_pf_gemm_bf16
+# binary as P-A's already-gated kernel -- pf_gemm_bf16 itself is untouched.
+add_executable(probe_pf_gemm_slab probe_pf_gemm_slab.cc)
+target_include_directories(probe_pf_gemm_slab PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_pf_gemm_slab PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(probe_pf_gemm_slab)
+add_dependencies(probe_pf_gemm_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
+                 kernel_pf_gemm_bf16 ${PROBE_SLAB_TARGETS})
 
 # T6's M=2048 small-kernel check. These are probe-only ocloc binaries: no
 # runtime variant helper names them, so the decode and future prefill bindings
@@ -295,21 +282,18 @@ add_dependencies(probe_gemv ${PROBE_GEMV_LOADS_TARGETS})
 # than a paraphrase. 256 GRF is mandatory for anything sharing pf_gemm's tile
 # (P2 measured a 33x loss without it) and is carried on the compile line, the
 # only place an AOT build honours it.
-if(B70_PREFILL_ENABLED)
-  set(PROBE_FUSED_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_fused_dequant_gemm.cl)
-  add_ocloc_kernel(pfd_gemm_v1 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=1
-                   OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pfd_gemm_v2 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=2
-                   OPTIONS -cl-intel-256-GRF-per-thread)
+set(PROBE_FUSED_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_fused_dequant_gemm.cl)
+add_ocloc_kernel(pfd_gemm_v1 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pfd_gemm_v2 SOURCE ${PROBE_FUSED_CL} DEFINES FUSED=2
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
-  add_executable(probe_fused_dequant_gemm probe_fused_dequant_gemm.cc)
-  target_include_directories(probe_fused_dequant_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_fused_dequant_gemm PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(probe_fused_dequant_gemm)
-  b70_target_kernel_dir(probe_fused_dequant_gemm)
-  add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
-                   kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
-endif()
+add_executable(probe_fused_dequant_gemm probe_fused_dequant_gemm.cc)
+target_include_directories(probe_fused_dequant_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_fused_dequant_gemm PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(probe_fused_dequant_gemm)
+add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
+                 kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
 
 # --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
 # Record: docs/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
@@ -367,26 +351,23 @@ add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
 # at once (the int32 one is reset at every g64 boundary, the fp32 one is not),
 # which is 128 GRF of accumulator before a single operand register. At the
 # 128-GRF default it would measure the spill instead of the pipe.
-if(B70_PREFILL_ENABLED)
-  add_ocloc_kernel(pw4a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8.cl
-                   OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pw4a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8.cl
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
-  add_executable(probe_w4a8 probe_w4a8.cc)
-  target_include_directories(probe_w4a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_w4a8 PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0
-                        b70_model)
-  b70_link_prefill(probe_w4a8)
-  b70_target_kernel_dir(probe_w4a8)
-  # --capture drives the whole engine, so it needs every kernel binary, not
-  # just this probe's three. Taken as the two kernel directories' own target
-  # lists (probe_dequant's pattern) because `B70_PREFILL_KERNELS` is defined in
-  # tests/, which CMake adds after this directory.
-  get_property(W4A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
-               PROPERTY BUILDSYSTEM_TARGETS)
-  get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
-               PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
-endif()
+add_executable(probe_w4a8 probe_w4a8.cc)
+target_include_directories(probe_w4a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_w4a8 PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0
+                      b70_model)
+b70_target_kernel_dir(probe_w4a8)
+# --capture drives the whole engine, so it needs every kernel binary, not
+# just this probe's three. Taken as the two kernel directories' own target
+# lists (probe_dequant's pattern) because `B70_PREFILL_KERNELS` is defined in
+# tests/, which CMake adds after this directory.
+get_property(W4A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+             PROPERTY BUILDSYSTEM_TARGETS)
+get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
 
 # --- probe_w4a8_gsweep: the W4A8 group-size sweep (2026-09-23) ---------------
 # Record: docs/probe-w4a8-2026-09-23.md, the appended sweep section.
@@ -406,23 +387,20 @@ endif()
 # 256 GRF for the same reason `pw4a8` needs it: eight int32 accumulators and
 # eight fp32 accumulators live at once is 128 GRF of accumulator before a single
 # operand register, and the per-channel arm keeps both live over all 80 chunks.
-if(B70_PREFILL_ENABLED)
-  add_ocloc_kernel(pw4a8s SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8_gsweep.cl
-                   OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pw4a8s SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w4a8_gsweep.cl
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
-  add_executable(probe_w4a8_gsweep probe_w4a8_gsweep.cc)
-  target_include_directories(probe_w4a8_gsweep PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_w4a8_gsweep PRIVATE b70_prefill_host b70_runtime b70_loader
-                        b70_l0 b70_model)
-  b70_link_prefill(probe_w4a8_gsweep)
-  b70_target_kernel_dir(probe_w4a8_gsweep)
-  get_property(W4A8S_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
-               PROPERTY BUILDSYSTEM_TARGETS)
-  get_property(W4A8S_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
-               PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
-                   ${W4A8S_PF_KERNELS})
-endif()
+add_executable(probe_w4a8_gsweep probe_w4a8_gsweep.cc)
+target_include_directories(probe_w4a8_gsweep PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_w4a8_gsweep PRIVATE b70_prefill_host b70_runtime b70_loader
+                      b70_l0 b70_model)
+b70_target_kernel_dir(probe_w4a8_gsweep)
+get_property(W4A8S_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+             PROPERTY BUILDSYSTEM_TARGETS)
+get_property(W4A8S_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
+                 ${W4A8S_PF_KERNELS})
 
 # --- probe_w8a8: i8 x i8 k32 DPAS, per-channel int8 weights (2026-09-23) -----
 # Record: docs/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.
@@ -433,25 +411,22 @@ endif()
 # per-token activation quantiser with and without a 1024-block Hadamard
 # (`pw8_quant`, `pw8_quant_had`). Speed probe; no runtime path binds any of it.
 # 256 GRF: 64 int32 accumulator registers plus two 16-dword B fragments per lane.
-if(B70_PREFILL_ENABLED)
-  add_ocloc_kernel(pw8a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl
-                   OPTIONS -cl-intel-256-GRF-per-thread)
-  # The same source again at the default 128 GRF: the helpers (requant,
-  # quantisers) do not need 256, and 256 halves the threads per EU.
-  add_ocloc_kernel(pw8a8_g128 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl)
+add_ocloc_kernel(pw8a8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+# The same source again at the default 128 GRF: the helpers (requant,
+# quantisers) do not need 256, and 256 halves the threads per EU.
+add_ocloc_kernel(pw8a8_g128 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_w8a8.cl)
 
-  add_executable(probe_w8a8 probe_w8a8.cc)
-  target_include_directories(probe_w8a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_w8a8 PRIVATE b70_prefill_host b70_runtime b70_loader
-                        b70_l0 b70_model)
-  b70_link_prefill(probe_w8a8)
-  b70_target_kernel_dir(probe_w8a8)
-  get_property(W8A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
-               PROPERTY BUILDSYSTEM_TARGETS)
-  get_property(W8A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
-               PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A8_PF_KERNELS})
-endif()
+add_executable(probe_w8a8 probe_w8a8.cc)
+target_include_directories(probe_w8a8 PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_w8a8 PRIVATE b70_prefill_host b70_runtime b70_loader
+                      b70_l0 b70_model)
+b70_target_kernel_dir(probe_w8a8)
+get_property(W8A8_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+             PROPERTY BUILDSYSTEM_TARGETS)
+get_property(W8A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A8_PF_KERNELS})
 
 # --- probe_flash_attn: spec 6 P1, the flash-attention tile probe (2026-09-25) ---
 # Plan: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
@@ -460,79 +435,70 @@ endif()
 # The control is the production composed path (`runtime::prefill::attn_chunk`, L0
 # backend) on the same inputs; every arm is checked against an fp64 CPU reference
 # before it is timed. Probe-only: no runtime path binds `pfa`.
-if(B70_PREFILL_ENABLED)
-  # One binary per arm: KT (KV positions per tile), RPW (query rows per work-group per
-  # head), HPW (q-heads per work-group), QREG (Q held in registers). 256 GRF: the O
-  # accumulator alone is 128 GRF per sub-group. The list and `kArms` in
-  # probe_flash_attn.cc are two lists nothing checks against each other; a missing
-  # binary is reported by name.
-  set(PFA_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_flash_attn.cl)
-  set(PFA_TARGETS "")
-  foreach(arm "32 16 6 1" "32 32 6 1" "64 16 6 1" "32 16 3 1" "32 16 1 1" "32 16 6 0" "64 16 6 0" "32 32 3 1")
-    separate_arguments(f UNIX_COMMAND "${arm}")
-    list(GET f 0 KT)
-    list(GET f 1 R)
-    list(GET f 2 H)
-    list(GET f 3 QR)
-    add_ocloc_kernel(pfa_KT${KT}_R${R}_H${H}_Q${QR} SOURCE ${PFA_CL}
-                     DEFINES KT=${KT} RPW=${R} HPW=${H} QREG=${QR} OPTIONS -cl-intel-256-GRF-per-thread)
-    list(APPEND PFA_TARGETS kernel_pfa_KT${KT}_R${R}_H${H}_Q${QR})
-  endforeach()
+# One binary per arm: KT (KV positions per tile), RPW (query rows per work-group per
+# head), HPW (q-heads per work-group), QREG (Q held in registers). 256 GRF: the O
+# accumulator alone is 128 GRF per sub-group. The list and `kArms` in
+# probe_flash_attn.cc are two lists nothing checks against each other; a missing
+# binary is reported by name.
+set(PFA_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_flash_attn.cl)
+set(PFA_TARGETS "")
+foreach(arm "32 16 6 1" "32 32 6 1" "64 16 6 1" "32 16 3 1" "32 16 1 1" "32 16 6 0" "64 16 6 0" "32 32 3 1")
+  separate_arguments(f UNIX_COMMAND "${arm}")
+  list(GET f 0 KT)
+  list(GET f 1 R)
+  list(GET f 2 H)
+  list(GET f 3 QR)
+  add_ocloc_kernel(pfa_KT${KT}_R${R}_H${H}_Q${QR} SOURCE ${PFA_CL}
+                   DEFINES KT=${KT} RPW=${R} HPW=${H} QREG=${QR} OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND PFA_TARGETS kernel_pfa_KT${KT}_R${R}_H${H}_Q${QR})
+endforeach()
 
-  add_executable(probe_flash_attn probe_flash_attn.cc)
-  target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
-                        b70_l0 b70_model pthread)
-  b70_link_prefill(probe_flash_attn)
-  b70_target_kernel_dir(probe_flash_attn)
-  get_property(PFA_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
-               PROPERTY BUILDSYSTEM_TARGETS)
-  get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
-               PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_flash_attn ${PFA_TARGETS} ${PFA_KERNELS} ${PFA_PF_KERNELS})
-endif()
+add_executable(probe_flash_attn probe_flash_attn.cc)
+target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
+                      b70_l0 b70_model pthread)
+b70_target_kernel_dir(probe_flash_attn)
+get_property(PFA_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels
+             PROPERTY BUILDSYSTEM_TARGETS)
+get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
+             PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_flash_attn ${PFA_TARGETS} ${PFA_KERNELS} ${PFA_PF_KERNELS})
 
 # --- spec 7 P0 (2026-09-27): pinned host copies and the tail-prefill floor ---
 # Record: docs/probe-prefix-cache-2026-09-27.md.
 add_executable(probe_host_copy probe_host_copy.cc)
 target_include_directories(probe_host_copy PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_host_copy PRIVATE b70_l0)
-if(B70_PREFILL_ENABLED)
-  add_executable(probe_tail probe_tail.cc)
-  target_include_directories(probe_tail PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(probe_tail PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
-  b70_link_prefill(probe_tail)
-  b70_target_kernel_dir(probe_tail)
-  get_property(PT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
-  get_property(PT_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_tail ${PT_KERNELS} ${PT_PF_KERNELS})
-  # --- spec 7 S3 (plan 7b Task 3): the write-through cost of block snapshots ---
-  # Record: docs/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
-  add_executable(probe_writethrough probe_writethrough.cc)
-  target_include_directories(probe_writethrough PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(probe_writethrough PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
-  b70_link_prefill(probe_writethrough)
-  b70_target_kernel_dir(probe_writethrough)
-  add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
-  # --- spec 7 S1/S2 (plan 7c Task 4): time to first token at 60k through PrefixSession ---
-  # Record: docs/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
-  if(TARGET b70_tokenizer)
-    add_executable(probe_prefix_s12 probe_prefix_s12.cc)
-    target_include_directories(probe_prefix_s12 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(probe_prefix_s12 PRIVATE b70_server b70_tokenizer b70_prefill_host b70_runtime
-      b70_loader b70_model b70_l0 pthread)
-    b70_link_prefill(probe_prefix_s12)
-    b70_target_kernel_dir(probe_prefix_s12)
-    add_dependencies(probe_prefix_s12 ${PT_KERNELS} ${PT_PF_KERNELS})
-  endif()
-  # spec 7 C3: the tie-aware rule at a replay divergence (tools/prefix/replay_ab.sh)
-  add_executable(probe_tie_judge probe_tie_judge.cc)
-  target_include_directories(probe_tie_judge PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
-  target_link_libraries(probe_tie_judge PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
-  b70_link_prefill(probe_tie_judge)
-  b70_target_kernel_dir(probe_tie_judge)
-  add_dependencies(probe_tie_judge ${PT_KERNELS} ${PT_PF_KERNELS})
+add_executable(probe_tail probe_tail.cc)
+target_include_directories(probe_tail PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_tail PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_tail)
+get_property(PT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+get_property(PT_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_tail ${PT_KERNELS} ${PT_PF_KERNELS})
+# --- spec 7 S3 (plan 7b Task 3): the write-through cost of block snapshots ---
+# Record: docs/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
+add_executable(probe_writethrough probe_writethrough.cc)
+target_include_directories(probe_writethrough PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_writethrough PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_writethrough)
+add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
+# --- spec 7 S1/S2 (plan 7c Task 4): time to first token at 60k through PrefixSession ---
+# Record: docs/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
+if(TARGET b70_tokenizer)
+  add_executable(probe_prefix_s12 probe_prefix_s12.cc)
+  target_include_directories(probe_prefix_s12 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+  target_link_libraries(probe_prefix_s12 PRIVATE b70_server b70_tokenizer b70_prefill_host b70_runtime
+    b70_loader b70_model b70_l0 pthread)
+  b70_target_kernel_dir(probe_prefix_s12)
+  add_dependencies(probe_prefix_s12 ${PT_KERNELS} ${PT_PF_KERNELS})
 endif()
+# spec 7 C3: the tie-aware rule at a replay divergence (tools/prefix/replay_ab.sh)
+add_executable(probe_tie_judge probe_tie_judge.cc)
+target_include_directories(probe_tie_judge PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_tie_judge PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_tie_judge)
+add_dependencies(probe_tie_judge ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
 # Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
 # Record: docs/probe-mtp-2026-09-27.md. Needs -DB70_DECODE_EXTRA_M=ON (the M = 2..4
@@ -541,9 +507,6 @@ if(B70_DECODE_EXTRA_M)
   add_executable(probe_verify_m probe_verify_m.cc)
   target_include_directories(probe_verify_m PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(probe_verify_m PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(probe_verify_m)
-  endif()
   b70_target_kernel_dir(probe_verify_m)
   get_property(VM_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(VM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
@@ -555,9 +518,6 @@ if(B70_MTP)
   add_executable(probe_mtp_steps probe_mtp_steps.cc)
   target_include_directories(probe_mtp_steps PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_mtp_steps PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(probe_mtp_steps)
-  endif()
   get_property(MS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
@@ -569,9 +529,6 @@ if(B70_BATCH_PROBE)
   add_executable(probe_batch_step probe_batch_step.cc)
   target_include_directories(probe_batch_step PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_batch_step PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(probe_batch_step)
-  endif()
   get_property(BS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(BS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_batch_step ${BS_KERNELS} ${BS_PF_KERNELS})
@@ -644,11 +601,8 @@ target_link_libraries(probe_decode_attn PRIVATE b70_prefill_host b70_runtime b70
 b70_target_kernel_dir(probe_decode_attn)
 get_property(PDA_PROD_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_decode_attn ${PDA_TARGETS} ${PDA_PROD_KERNELS})
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(probe_decode_attn)
-  get_property(PDA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
-  add_dependencies(probe_decode_attn ${PDA_PF_KERNELS})
-endif()
+get_property(PDA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_decode_attn ${PDA_PF_KERNELS})
 
 # --- probe_lm_head_l1: spec 9 plan 9b, L1/L2 on the card (int8 head vs bf16 head, same
 # hidden, golden prompts teacher-forced). Record: docs/BENCHMARKS.md "int8 lm_head (spec 9)".
@@ -656,9 +610,6 @@ add_executable(probe_lm_head_l1 probe_lm_head_l1.cc)
 target_include_directories(probe_lm_head_l1 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
   ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(probe_lm_head_l1 PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(probe_lm_head_l1)
-endif()
 b70_target_kernel_dir(probe_lm_head_l1)
 get_property(LH_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_lm_head_l1 ${LH_KERNELS})

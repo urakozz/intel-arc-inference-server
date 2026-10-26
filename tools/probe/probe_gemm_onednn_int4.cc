@@ -9,9 +9,9 @@
 //
 // This probe calls oneDNN's plain C++ primitive API directly (no vllm-xpu-
 // kernels machinery: no GpuEngineManager/primitive cache, no torch) --
-// `dnnl::sycl_interop::make_engine/make_stream` over our OWN
-// `runtime::prefill::Context`'s sycl queue/context, exactly the integration
-// pattern Phase 1 §1.4 read out of vllm-xpu-kernels' `onednn_runtime.h`. The
+// `dnnl::sycl_interop::make_engine/make_stream` over the probe's own in-order
+// sycl queue, the integration pattern Phase 1 §1.4 read out of vllm-xpu-kernels'
+// `onednn_runtime.h`. Built stand-alone by icpx (tools/probe/onednn/CMakeLists.txt). The
 // weight layout is the K-contiguous-per-N repack Phase 1 §1.3 / A23 already
 // priced (`out[n·K/8+r] = qweight[r·N+n]`, no XOR: oneDNN carries GPTQ v1's
 // zero=8 as a scalar zero-point ATTRIBUTE, not a bit-flip on the weight).
@@ -32,18 +32,13 @@
 #include <oneapi/dnnl/dnnl.hpp>
 #include <oneapi/dnnl/dnnl_sycl.hpp>
 
-// dnnl.hpp does not touch printf, but keep the same discipline every other
-// SYCL probe in this tree uses.
+// dnnl.hpp does not touch printf, but keep the discipline the SYCL probes kept.
 #undef printf
 
 #include "common/bf16.h"
-#include "l0/context.h"
-#include "l0/memory.h"
 #include "loader/quant.h"
 #include "loader/safetensors.h"
 #include "loader/snapshot.h"
-#include "runtime/prefill/context.h"
-#include "runtime/prefill/context_sycl.h"
 
 using namespace dnnl;
 
@@ -248,14 +243,12 @@ int main(int argc, char** argv) {
       const std::string arg = argv[i];
       if (arg.rfind("--ckpt=", 0) == 0) snapshot = arg.substr(7);
     }
-    l0::Context l0ctx(0);
+    sycl::queue q(sycl::gpu_selector_v, sycl::property::queue::in_order{});
     std::printf("# P-C: oneDNN bf16_int4 matmul (vLLM's real prefill GEMM path, gemmstone JIT)\n");
-    std::printf("# L0 device: %s\n", l0ctx.name().c_str());
-    runtime::prefill::Context cx(l0ctx);
-    sycl::queue& q = runtime::prefill::sycl_queue(cx);
+    std::printf("# device: %s\n", q.get_device().get_info<sycl::info::device::name>().c_str());
     engine eng = sycl_interop::make_engine(q.get_device(), q.get_context());
     stream strm = sycl_interop::make_stream(eng, q);
-    std::printf("# oneDNN engine over our own prefill::Context queue (sycl_interop, USM)\n");
+    std::printf("# oneDNN engine over the probe's own in-order queue (sycl_interop, USM)\n");
 
     // --- correctness: identity extraction vs the oracle, real checkpoint ---
     bool correctness_ok = true;

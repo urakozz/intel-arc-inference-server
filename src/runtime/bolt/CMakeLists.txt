@@ -15,9 +15,7 @@ b70_target_kernel_dir(b70_bolt_runtime)
 
 # Spec 25d: Nemotron 3.5 Bolt's prefill (the chunk walk, its scratch, and BoltEngine::prefill's definitions) - its own
 # archive, as b70_kolibri_prefill is beside b70_kolibri_runtime: a target that never prefills Bolt links what it always
-# linked. It runs the prefill path's Level Zero half only (runtime::prefill::Context, KernelCache, gemm_l0), but Context's
-# object names the SYCL side's entry points (libb70_prefill.so when the component is built), so an executable linking this
-# calls b70_link_prefill when B70_PREFILL_ENABLED, as every b70_prefill_host user does.
+# linked. It runs the prefill path's Level Zero half (runtime::prefill::Context, KernelCache, gemm_l0).
 add_library(b70_bolt_prefill STATIC bolt_prefill.cc bolt_prefill_engine.cc)
 target_include_directories(b70_bolt_prefill PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_bolt_prefill PUBLIC b70_bolt_runtime b70_prefill_host)

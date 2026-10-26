@@ -40,74 +40,52 @@ target_include_directories(device_select_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(device_select_test PRIVATE b70_l0)
 add_test(NAME device_select_test COMMAND device_select_test)
 
-# The prefill execution context (spec 2.1 §3.5). `Context` is g++-only and
-# links only b70_l0 through b70_prefill_host, so this test is built and
-# registered in EVERY configuration (ruling B4). In the enabled build it ALSO
-# links libb70_prefill.so -- the test still proves !cx.has_sycl(), because
-# linking the .so creates no SYCL queue by itself.
+# The prefill execution context (spec 2.1 §3.5): the Level Zero list, through
+# b70_prefill_host.
 add_executable(context_test prefill/context_test.cc)
 target_include_directories(context_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(context_test PRIVATE b70_prefill_host b70_l0)
 b70_target_kernel_dir(context_test)
 add_dependencies(context_test kernel_noop kernel_pf_probe_chain)
 add_test(NAME context_test COMMAND context_test)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(context_test)
-endif()
 
-if(B70_PREFILL_ENABLED)
-  # The batched Xe bf16 GEMM (rulings A14/A15, plan 6d-composed Task 1). Same
-  # guard: it calls into libb70_prefill.so, so with -DB70_PREFILL=OFF this
-  # block does not exist and the suite is what it was. No kernel binaries -
-  # the only device code it runs is sycl-tla's. `Context` and
-  # `gemm_bf16_batched*` now live in b70_prefill_host (ruling B5).
-  add_executable(gemm_batched_test prefill/gemm_batched_test.cc)
-  target_include_directories(gemm_batched_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(gemm_batched_test PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(gemm_batched_test)
-  add_test(NAME gemm_batched_test COMMAND gemm_batched_test)
-  set_tests_properties(gemm_batched_test PROPERTIES TIMEOUT 1800)
+# Spec 2.1 S0: pf_gemm at every prefill shape against a host fp64 reference (bar 1, re-stated
+# 2026-10-27 as a cos / max-ulp bound: tests/prefill/pf_gemm_test.cc).
+add_executable(pf_gemm_test prefill/pf_gemm_test.cc)
+target_include_directories(pf_gemm_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pf_gemm_test PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(pf_gemm_test)
+add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm_T0_SILU
+                 kernel_pf_silu_mul)
+add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
+set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 
-  # Spec 2.1 S0: pf_gemm bitwise against sycl-tla at every prefill shape (bar 1).
-  add_executable(pf_gemm_test prefill/pf_gemm_test.cc)
-  target_include_directories(pf_gemm_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(pf_gemm_test PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(pf_gemm_test)
-  b70_target_kernel_dir(pf_gemm_test)
-  add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm_T0_SILU
-                   kernel_pf_silu_mul)
-  add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
-  set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
+add_executable(pf_int8_test prefill/pf_int8_test.cc)
+target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pf_int8_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_int8_test)
+add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
+                 kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
+                 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU kernel_pf_quant_had_K19456)
+add_test(NAME pf_int8_test COMMAND pf_int8_test)
 
-  add_executable(pf_int8_test prefill/pf_int8_test.cc)
-  target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(pf_int8_test PRIVATE b70_l0)
-  b70_target_kernel_dir(pf_int8_test)
-  add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
-                   kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
-                   kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU kernel_pf_quant_had_K19456)
-  add_test(NAME pf_int8_test COMMAND pf_int8_test)
+# Spec 6 K1 (plan 6b Task 1): pf_flash_attn against an fp64 reference.
+add_executable(pf_flash_attn_test prefill/pf_flash_attn_test.cc)
+target_include_directories(pf_flash_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(pf_flash_attn_test PRIVATE b70_l0)
+b70_target_kernel_dir(pf_flash_attn_test)
+add_dependencies(pf_flash_attn_test kernel_pf_flash_attn)
+add_test(NAME pf_flash_attn_test COMMAND pf_flash_attn_test)
+set_tests_properties(pf_flash_attn_test PROPERTIES TIMEOUT 1800)
 
-  # Spec 6 K1 (plan 6b Task 1): pf_flash_attn against an fp64 reference.
-  add_executable(pf_flash_attn_test prefill/pf_flash_attn_test.cc)
-  target_include_directories(pf_flash_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(pf_flash_attn_test PRIVATE b70_l0)
-  b70_target_kernel_dir(pf_flash_attn_test)
-  add_dependencies(pf_flash_attn_test kernel_pf_flash_attn)
-  add_test(NAME pf_flash_attn_test COMMAND pf_flash_attn_test)
-  set_tests_properties(pf_flash_attn_test PROPERTIES TIMEOUT 1800)
-
-  add_executable(linear_i8_test prefill/linear_i8_test.cc)
-  target_include_directories(linear_i8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(linear_i8_test PRIVATE b70_prefill_host b70_runtime b70_l0)
-  b70_link_prefill(linear_i8_test)
-  b70_target_kernel_dir(linear_i8_test)
-  add_dependencies(linear_i8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
-                   kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
-                   kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
-  add_test(NAME linear_i8_test COMMAND linear_i8_test)
-endif()
+add_executable(linear_i8_test prefill/linear_i8_test.cc)
+target_include_directories(linear_i8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(linear_i8_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+b70_target_kernel_dir(linear_i8_test)
+add_dependencies(linear_i8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
+                 kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
+                 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
+add_test(NAME linear_i8_test COMMAND linear_i8_test)
 
 # --- spec 3 T3: HTTP server (host-only mock tests) ---
 add_executable(openai_test server/openai_test.cc)
@@ -174,8 +152,7 @@ target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE
 target_link_libraries(protocol_test PRIVATE b70_server)
 add_test(NAME protocol_test COMMAND protocol_test)
 
-# P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels but
-# never the optional SYCL component, so it intentionally has no guard.
+# P3 is raw Level Zero/OpenCL C only: it requires a B70 and its kernels.
 add_executable(dequant_test prefill/dequant_test.cc)
 target_include_directories(dequant_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(dequant_test PRIVATE b70_l0)
@@ -206,8 +183,7 @@ set_tests_properties(pf_dequant_slab_test PROPERTIES TIMEOUT 900)
 
 # The runtime-`M`, S = 1 small kernels (spec 2, plan 6b Tasks 3-5). Like
 # dequant_test these are raw Level Zero and OpenCL C: they need a B70 and their
-# own binaries, never the optional SYCL component, so they carry no guard and no
-# label. Each also loads the DECODE binary it must be bit-identical to at M = 1,
+# own binaries, and carry no label. Each also loads the DECODE binary it must be bit-identical to at M = 1,
 # which is why the dependency lists below name both sides.
 #
 # `tests/kernels` is on the include path because the prefill references are
@@ -243,90 +219,81 @@ add_dependencies(pf_attn_test kernel_pf_gated_head kernel_pf_attn_prep
 add_test(NAME pf_attn_test COMMAND pf_attn_test)
 
 # gdn_chunk's kernels (plan 6b Tasks 6-8). These drive the prefill execution
-# context, so they carry the same B70_PREFILL_ENABLED guard context_test does:
-# with -DB70_PREFILL=OFF the whole gdn_chunk stream is absent and the suite is
-# exactly what it was. No checkpoint - one synthetic GDN layer.
-if(B70_PREFILL_ENABLED)
-  add_executable(gdn_conv_test prefill/gdn_conv_test.cc)
-  target_include_directories(gdn_conv_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(gdn_conv_test PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(gdn_conv_test)
-  b70_target_kernel_dir(gdn_conv_test)
-  add_dependencies(gdn_conv_test kernel_pf_gdn_conv)
-  add_test(NAME gdn_conv_test COMMAND gdn_conv_test)
-  set_tests_properties(gdn_conv_test PROPERTIES TIMEOUT 1800)
+# context. No checkpoint - one synthetic GDN layer.
+add_executable(gdn_conv_test prefill/gdn_conv_test.cc)
+target_include_directories(gdn_conv_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gdn_conv_test PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(gdn_conv_test)
+add_dependencies(gdn_conv_test kernel_pf_gdn_conv)
+add_test(NAME gdn_conv_test COMMAND gdn_conv_test)
+set_tests_properties(gdn_conv_test PROPERTIES TIMEOUT 1800)
 
-  add_executable(gdn_wy_test prefill/gdn_wy_test.cc)
-  target_include_directories(gdn_wy_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(gdn_wy_test PRIVATE b70_prefill_host b70_l0)
-  b70_link_prefill(gdn_wy_test)
-  b70_target_kernel_dir(gdn_wy_test)
-  add_dependencies(gdn_wy_test kernel_pf_gdn_wy)
-  add_test(NAME gdn_wy_test COMMAND gdn_wy_test)
-  set_tests_properties(gdn_wy_test PROPERTIES TIMEOUT 1800)
+add_executable(gdn_wy_test prefill/gdn_wy_test.cc)
+target_include_directories(gdn_wy_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gdn_wy_test PRIVATE b70_prefill_host b70_l0)
+b70_target_kernel_dir(gdn_wy_test)
+add_dependencies(gdn_wy_test kernel_pf_gdn_wy)
+add_test(NAME gdn_wy_test COMMAND gdn_wy_test)
+set_tests_properties(gdn_wy_test PROPERTIES TIMEOUT 1800)
 
-  # gdn_chunk end to end. It links b70_runtime for PrefillScratch (2.264 GB of
-  # device scratch, the production allocation) and drives decode's own
-  # gdn_step_M1 / prep_gated_head_M1 as the self-consistency oracle.
-  add_executable(gdn_chunk_test prefill/gdn_chunk_test.cc)
-  target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(gdn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
-  b70_link_prefill(gdn_chunk_test)
-  b70_target_kernel_dir(gdn_chunk_test)
-  add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
-    kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
-  add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
-  set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
-  add_test(NAME gdn_scan_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
-  # Since 2026-09-23 an unset selector binds the SPLIT scan (gdn.cc's
-  # `gdn_scan_entry`). This row is what fails if that default moves without the
-  # record and the gate evidence moving with it.
-  add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
-  add_test(NAME gdn_scan_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
-  add_test(NAME gdn_scan_split_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
-  set_tests_properties(gdn_scan_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=bad")
-  set_tests_properties(gdn_scan_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=")
-  set_tests_properties(gdn_scan_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=vector")
-  set_tests_properties(gdn_scan_split_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=dpas_split")
+# gdn_chunk end to end. It links b70_runtime for PrefillScratch (2.264 GB of
+# device scratch, the production allocation) and drives decode's own
+# gdn_step_M1 / prep_gated_head_M1 as the self-consistency oracle.
+add_executable(gdn_chunk_test prefill/gdn_chunk_test.cc)
+target_include_directories(gdn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(gdn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+b70_target_kernel_dir(gdn_chunk_test)
+add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
+  kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
+add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
+set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
+add_test(NAME gdn_scan_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
+# Since 2026-09-23 an unset selector binds the SPLIT scan (gdn.cc's
+# `gdn_scan_entry`). This row is what fails if that default moves without the
+# record and the gate evidence moving with it.
+add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
+add_test(NAME gdn_scan_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
+add_test(NAME gdn_scan_split_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
+set_tests_properties(gdn_scan_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=bad")
+set_tests_properties(gdn_scan_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=")
+set_tests_properties(gdn_scan_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=vector")
+set_tests_properties(gdn_scan_split_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=dpas_split")
 
-  # Stage S4's solve selector, registered parallel to the scan's four rows.
-  # The dispatch rows observe `KernelCache::kernels()` rather than the output:
-  # the two solve entries are bit-identical by construction, so an output
-  # comparison could not tell which one ran (gdn_chunk_test.cc,
-  # `check_solve_dispatch`). The full end-to-end run is registered a second
-  # time under the register selector so every band, boundary and determinism
-  # bar in the file is carried under both.
-  add_test(NAME gdn_solve_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
-  add_test(NAME gdn_solve_default_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
-  add_test(NAME gdn_solve_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
-  add_test(NAME gdn_solve_register_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-register)
-  add_test(NAME gdn_chunk_solve_register_test COMMAND gdn_chunk_test)
-  set_tests_properties(gdn_solve_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=bad")
-  set_tests_properties(gdn_solve_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=")
-  set_tests_properties(gdn_solve_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=vector")
-  set_tests_properties(gdn_solve_register_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register")
-  set_tests_properties(gdn_chunk_solve_register_test PROPERTIES
-    ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register" TIMEOUT 1800)
+# Stage S4's solve selector, registered parallel to the scan's four rows.
+# The dispatch rows observe `KernelCache::kernels()` rather than the output:
+# the two solve entries are bit-identical by construction, so an output
+# comparison could not tell which one ran (gdn_chunk_test.cc,
+# `check_solve_dispatch`). The full end-to-end run is registered a second
+# time under the register selector so every band, boundary and determinism
+# bar in the file is carried under both.
+add_test(NAME gdn_solve_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
+add_test(NAME gdn_solve_default_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
+add_test(NAME gdn_solve_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
+add_test(NAME gdn_solve_register_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-register)
+add_test(NAME gdn_chunk_solve_register_test COMMAND gdn_chunk_test)
+set_tests_properties(gdn_solve_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=bad")
+set_tests_properties(gdn_solve_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=")
+set_tests_properties(gdn_solve_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=vector")
+set_tests_properties(gdn_solve_register_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register")
+set_tests_properties(gdn_chunk_solve_register_test PROPERTIES
+  ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register" TIMEOUT 1800)
 
-  # The composed attention (ruling A14), end to end against decode's own
-  # reference. Same guard: it drives both the L0 list and sycl-tla's GEMM. No
-  # checkpoint -- one synthetic FA layer over a synthetic cache. The host
-  # reference is the expensive half (attn_ref::decode walks every block of a
-  # 4352-position cache twice, once per q dtype), hence the timeout.
-  add_executable(attn_chunk_test prefill/attn_chunk_test.cc)
-  target_include_directories(attn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
-  target_link_libraries(attn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
-  b70_link_prefill(attn_chunk_test)
-  b70_target_kernel_dir(attn_chunk_test)
-  add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn
-                   kernel_pf_gemm_T0 kernel_pf_gemm_T1)
-  add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
-  set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
-endif()
+# The composed attention (ruling A14), end to end against decode's own
+# reference. No checkpoint -- one synthetic FA layer over a synthetic cache. The host
+# reference is the expensive half (attn_ref::decode walks every block of a
+# 4352-position cache twice, once per q dtype), hence the timeout.
+add_executable(attn_chunk_test prefill/attn_chunk_test.cc)
+target_include_directories(attn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+target_link_libraries(attn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+b70_target_kernel_dir(attn_chunk_test)
+add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn
+                 kernel_pf_gemm_T0 kernel_pf_gemm_T1)
+add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
+set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
 
 # D3's scan-only arithmetic discriminator is direct Level Zero/OpenCL C, so it
 # must run in both configurations.  The fixtures make removal of either BF16
@@ -335,9 +302,6 @@ add_executable(gdn_scan_split_test prefill/gdn_scan_split_test.cc)
 target_include_directories(gdn_scan_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                            ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gdn_scan_split_test PRIVATE b70_prefill_host b70_l0)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(gdn_scan_split_test)
-endif()
 b70_target_kernel_dir(gdn_scan_split_test)
 add_dependencies(gdn_scan_split_test kernel_pf_gdn_scan)
 add_test(NAME gdn_scan_split_test COMMAND gdn_scan_split_test)
@@ -813,13 +777,8 @@ set_tests_properties(golden_gate_i8head_test PROPERTIES
   LABELS "checkpoint;golden" SKIP_RETURN_CODE 77 TIMEOUT 1800)
 
 # --- the prefill gates (spec 2 §6; spec 2.1 §2 bar 3) -------------------------------------
-# Registered HERE rather than in the B70_PREFILL_ENABLED block above because
-# these need B70_TEST_SNAPSHOT and B70_DECODE_LIST_KERNELS, both defined between
-# there and here.
-#
-# Built in EVERY configuration since spec 2.1 (b70_prefill_host always exists). The sycl-tla
-# registrations need libb70_prefill.so and stay under the guard; the l0 ones run everywhere,
-# which is how bar 3's "in a build without the SYCL component" is checked.
+# Registered HERE rather than beside the kernel tests above because these need
+# B70_TEST_SNAPSHOT and B70_DECODE_LIST_KERNELS, both defined between there and here.
 #
 # Every binary the prefill walk opens. The decode list is part of it because
 # `step_head`'s lm_head and its two argmax stages ARE decode's own M = 1
@@ -852,18 +811,12 @@ set(B70_PREFILL_KERNELS
 
 # The three spec 2 §6 gates. `tests/golden` is on the include path for
 # golden_common.h -- the decode gate's machinery, extracted verbatim, so the
-# prefill gate grades on the same code rather than on a copy of it. The three
-# BINARIES are built in every configuration; only `b70_link_prefill` (the
-# sycl-tla .so and its two rpaths) is conditional, which is plan 9b's ruling B4
-# pattern and what `context_test` above already does.
+# prefill gate grades on the same code rather than on a copy of it.
 foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay prefill_int8)
   add_executable(${t}_test prefill/${t}_test.cc)
   target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(${t}_test)
-  endif()
   add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
 endforeach()
 # Spec 6 K3a (plan 6b Task 4; redefined by the operator's 2026-09-26 ruling: flash no further
@@ -882,9 +835,6 @@ add_executable(flash_long_test prefill/flash_long_test.cc)
 target_include_directories(flash_long_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(flash_long_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(flash_long_test)
-endif()
 add_dependencies(flash_long_test ${B70_PREFILL_KERNELS})
 add_test(NAME flash_long_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT}
   ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
@@ -897,9 +847,6 @@ add_executable(prefill_split_test prefill/prefill_split_test.cc)
 target_include_directories(prefill_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(prefill_split_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(prefill_split_test)
-endif()
 add_dependencies(prefill_split_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 foreach(b l0 l0-int8)
   add_test(NAME prefill_split_${b}_test COMMAND prefill_split_test ${B70_TEST_SNAPSHOT}
@@ -912,9 +859,6 @@ add_executable(snapshot_test runtime/snapshot_test.cc)
 target_include_directories(snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(snapshot_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(snapshot_test)
-endif()
 add_dependencies(snapshot_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
@@ -976,102 +920,63 @@ add_test(NAME prefill_determinism_l0_test COMMAND prefill_determinism_test
 set_tests_properties(prefill_consistency_l0_test prefill_determinism_l0_test PROPERTIES
   LABELS "checkpoint;prefill" TIMEOUT 3600)
 
-if(B70_PREFILL_ENABLED)
-  # sycl-tla, the full build: the registrations exactly as before, the backend now
-  # explicit. `prose,code,cjk 0` are prefill_gate_test's own defaults for argv[4] and
-  # argv[5], spelled out because argv[6] cannot be reached past them.
-  #
-  # The gate checkpoint (bf16 lm_head) and RTN (int4 lm_head) -- one golden set
-  # per checkpoint (tools/oracle/README.md, "One golden set per checkpoint"), so
-  # two registrations and never one that takes whichever directory is lying
-  # around. The RTN registrations exist only while the RTN checkpoint does: it
-  # was deleted from the box on 2026-09-09 (ruling A31) and a missing snapshot
-  # is a load failure, not a golden-set SKIP.
-  add_test(NAME prefill_gate_test COMMAND prefill_gate_test
-    ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
-    prose,code,cjk 0 sycl-tla)
-  add_test(NAME prefill_consistency_test COMMAND prefill_consistency_test
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} sycl-tla)
-  add_test(NAME prefill_determinism_test COMMAND prefill_determinism_test
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} sycl-tla)
-  set_tests_properties(prefill_gate_test PROPERTIES
+# `Engine::prefill` end to end: the chunk walk, the Control handoff, the
+# launch arithmetic and the rejections (plan 6b Task 10), on the L0 backend; section 8
+# (ruling E1) measures the L0 chunk's live launch delta.
+add_executable(prefill_smoke_test prefill/prefill_smoke_test.cc)
+target_include_directories(prefill_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+                           ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prefill_smoke_test PRIVATE b70_prefill_host b70_runtime b70_loader
+                      b70_l0 b70_model)
+add_dependencies(prefill_smoke_test ${B70_PREFILL_KERNELS})
+add_test(NAME prefill_smoke_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(prefill_smoke_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
+
+# The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
+# It never went through `hf download`, so it is a plain path and not a cache
+# lookup; the same override rule as B70_TEST_SNAPSHOT applies.
+set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
+  CACHE PATH "The int4-lm_head checkpoint the RTN-labelled gates load")
+
+if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
+  add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_RTN_SNAPSHOT})
+  set_tests_properties(prefill_gate_rtn_test PROPERTIES
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_tests_properties(prefill_consistency_test prefill_determinism_test PROPERTIES
-    LABELS "checkpoint;prefill" TIMEOUT 3600)
+else()
+  message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
+endif()
 
-  # `Engine::prefill` end to end: the chunk walk, the Control handoff, the
-  # launch arithmetic and the rejections (plan 6b Task 10). Its sections 2-7 are
-  # sycl-tla's arithmetic and pin the backend themselves; section 8 (ruling E1)
-  # measures the L0 chunk's live launch delta. Both backends, so: under the guard.
-  add_executable(prefill_smoke_test prefill/prefill_smoke_test.cc)
-  target_include_directories(prefill_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-                             ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(prefill_smoke_test PRIVATE b70_prefill_host b70_runtime b70_loader
-                        b70_l0 b70_model)
-  b70_link_prefill(prefill_smoke_test)
-  add_dependencies(prefill_smoke_test ${B70_PREFILL_KERNELS})
-  add_test(NAME prefill_smoke_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT})
-  set_tests_properties(prefill_smoke_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
-
-  # Spec 2.1 bar 2: the two backends leave identical state (sign of zero excepted).
-  # Needs both backends, so it is registered only in the full build (spec 2.1 §4).
-  add_executable(prefill_backend_equivalence_test prefill/prefill_backend_equivalence_test.cc)
-  target_include_directories(prefill_backend_equivalence_test PRIVATE ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
-  target_link_libraries(prefill_backend_equivalence_test PRIVATE b70_prefill_host b70_runtime
-                        b70_loader b70_l0 b70_model)
-  b70_link_prefill(prefill_backend_equivalence_test)
-  add_dependencies(prefill_backend_equivalence_test ${B70_PREFILL_KERNELS})
-  add_test(NAME prefill_backend_equivalence_test COMMAND prefill_backend_equivalence_test
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT})
-  set_tests_properties(prefill_backend_equivalence_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 3600)
-
-  # The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
-  # It never went through `hf download`, so it is a plain path and not a cache
-  # lookup; the same override rule as B70_TEST_SNAPSHOT applies.
-  set(B70_RTN_SNAPSHOT "$ENV{HOME}/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64"
-    CACHE PATH "The int4-lm_head checkpoint the RTN-labelled gates load")
-
-  if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
-    add_test(NAME prefill_gate_rtn_test COMMAND prefill_gate_test
-      ${CMAKE_SOURCE_DIR}/oracle-out-rtn ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-      ${B70_RTN_SNAPSHOT})
-    set_tests_properties(prefill_gate_rtn_test PROPERTIES
-      LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  else()
-    message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
-  endif()
-
-  # Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
-  # (`tools/oracle/make_long_prompt.sh` builds 2820 from the three committed id
-  # streams) gated at C = 1024, so every chunk boundary is crossed in
-  # attention-over-cache AND in the GDN state carry.
-  #
-  # **Plan 6b marked this row "expected-limited under L1" and that limitation is
-  # GONE.** It was the retired `PrefillScratch::kAttnC = 64` sub-chunk of ruling
-  # R5; ruling A14's composed attention runs the whole chunk in one pass, and
-  # `prefill_gate_test` at chunk 16 and 1024 already measures 62/62 determined
-  # rows exact on the short prompts. What is still untested here and nowhere
-  # else is DEPTH: 2820 positions of chunked GDN carry against 141.
-  #
-  # `oracle-out-long` does not exist yet: producing it is one CPU run inside the
-  # reference container, and the L1-engine stage is barred from starting
-  # containers (its brief's operational rules). The test SKIPs (77) until the
-  # directory is there, which is the same contract the other three golden
-  # registrations use, and tools/oracle/README.md carries the one command.
-  if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
-    add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
-      ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-      ${B70_RTN_SNAPSHOT} long 1024)
-    set_tests_properties(prefill_gate_long_test PROPERTIES
-      LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-    # Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
-    add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
-      ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-      ${B70_RTN_SNAPSHOT} long 1024 l0-int8 1)
-    set_tests_properties(prefill_gate_long_int8_test PROPERTIES
-      LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-  endif()
+# Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
+# (`tools/oracle/make_long_prompt.sh` builds 2820 from the three committed id
+# streams) gated at C = 1024, so every chunk boundary is crossed in
+# attention-over-cache AND in the GDN state carry.
+#
+# **Plan 6b marked this row "expected-limited under L1" and that limitation is
+# GONE.** It was the retired `PrefillScratch::kAttnC = 64` sub-chunk of ruling
+# R5; ruling A14's composed attention runs the whole chunk in one pass, and
+# `prefill_gate_test` at chunk 16 and 1024 already measures 62/62 determined
+# rows exact on the short prompts. What is still untested here and nowhere
+# else is DEPTH: 2820 positions of chunked GDN carry against 141.
+#
+# `oracle-out-long` does not exist yet: producing it is one CPU run inside the
+# reference container, and the L1-engine stage is barred from starting
+# containers (its brief's operational rules). The test SKIPs (77) until the
+# directory is there, which is the same contract the other three golden
+# registrations use, and tools/oracle/README.md carries the one command.
+if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
+  add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_RTN_SNAPSHOT} long 1024)
+  set_tests_properties(prefill_gate_long_test PROPERTIES
+    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+  # Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
+  add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
+    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+    ${B70_RTN_SNAPSHOT} long 1024 l0-int8 1)
+  set_tests_properties(prefill_gate_long_int8_test PROPERTIES
+    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 endif()
 
 # --- b70-decode's host-side rejections ---------------------------------------
@@ -1153,9 +1058,9 @@ b70_cli_reject(cli_reject_tg_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 
 # "--prefill-backend belongs to --prefill-length and --prefill" (spec 2.1).
 b70_cli_reject(cli_reject_prefill_backend_with_ids ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
   --prefill-backend l0 EXPECT "--prefill-backend belongs to --prefill-length and --prefill")
-# "--prefill-backend expects sycl-tla, l0 or l0-int8".
+# "--prefill-backend expects l0 or l0-int8".
 b70_cli_reject(cli_reject_prefill_backend_value ${B70_NO_MODEL} --bench --prefill-length 64
-  --prefill-backend cuda EXPECT "--prefill-backend expects sycl-tla, l0 or l0-int8")
+  --prefill-backend cuda EXPECT "--prefill-backend expects l0 or l0-int8")
 # "unknown option" - anything starting with '-' the parse loop does not know.
 b70_cli_reject(cli_reject_unknown_flag ${B70_NO_MODEL} --bench --frobnicate)
 # "a snapshot directory or HF repo id is required" - no positional argument.
@@ -1192,10 +1097,7 @@ b70_cli_reject(cli_reject_repeats_zero ${B70_NO_MODEL} --profile --repeats 0
   EXPECT "--repeats 0 would profile nothing")
 # `--prefill-length` / `--prefill-chunk` / `--prefill` (spec 2, interfaces.md's CLI contract and
 # ruling A8; `--pp` / `--pp-chunk` until the 2026-10-06 rename).
-# These five are host-side argument validation and are compiled UNCONDITIONALLY
-# - with -DB70_PREFILL=OFF the flags still parse and still reject for these
-# reasons, so these cases grade the CLI's contract rather than the presence of
-# the SYCL component. Each names its message: "exit 1 before the device" is
+# These five are host-side argument validation. Each names its message: "exit 1 before the device" is
 # also what an unknown flag does, and without EXPECT these cases would pass on a
 # binary that had never heard of the flag.
 b70_cli_reject(cli_reject_prefill_length_without_bench ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
@@ -1299,16 +1201,12 @@ if(B70_TOKENIZER_ENABLED)
   # Host sampling (spec 3.5, plan 7d Task 5): the sampler function alone, over
   # synthetic logits rows -- no device, no checkpoint, no Engine instantiated.
   # It includes serve_adapters.h (where `sample()` and `EngineAdapter` live),
-  # so it links what b70-serve links -- b70_prefill_host unconditionally,
-  # b70_link_prefill under the same guard -- even though this test never
-  # constructs an EngineAdapter.
+  # so it links what b70-serve links (b70_prefill_host) even though this test
+  # never constructs an EngineAdapter.
   add_executable(sampling_test server/sampling_test.cc)
   target_include_directories(sampling_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(sampling_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
     b70_model b70_l0 b70_prefill_host)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(sampling_test)
-  endif()
   add_test(NAME sampling_test COMMAND sampling_test)
 
   # Spec 7 C2 (plan 7c Task 3): the prefix cache's request path on the card, cached against
@@ -1319,9 +1217,6 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
     b70_model b70_l0 b70_prefill_host)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(prefix_gpu_test)
-  endif()
   add_dependencies(prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
   # l0 takes the near-tie allowance of 1 too (operator ruling, spec 7 §8): sequence e's
   # row 30 flip (0.108 bf16 ulp) is the GDN chunk-boundary rounding class of
@@ -1363,9 +1258,6 @@ if(B70_MTP)
     target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
       ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
     target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-    if(B70_PREFILL_ENABLED)
-      b70_link_prefill(${t}_test)
-    endif()
     add_dependencies(${t}_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
   endforeach()
   # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump (SKIP without it).
@@ -1390,9 +1282,6 @@ if(B70_MTP)
       ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
     target_link_libraries(mtp_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
       b70_model b70_l0 b70_prefill_host)
-    if(B70_PREFILL_ENABLED)
-      b70_link_prefill(mtp_gpu_test)
-    endif()
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp"
@@ -1516,9 +1405,6 @@ get_property(_b70_plan_pf_kernels DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/pref
 add_executable(memory_plan_box_test runtime/memory_plan_box_test.cc)
 target_include_directories(memory_plan_box_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(memory_plan_box_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(memory_plan_box_test)
-endif()
 add_dependencies(memory_plan_box_test ${_b70_plan_kernels} ${_b70_plan_pf_kernels})
 add_test(NAME memory_plan_box_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT})
 set(_b70_plan_box_tests memory_plan_box_test)
@@ -1601,9 +1487,6 @@ if(B70_ORNITH)
   target_include_directories(ornith_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   # Engine::memory_use / memory_line live in b70_prefill_host (engine_prefill.cc), as for ornith_mtp_test.
   target_link_libraries(ornith_decode_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(ornith_decode_test)
-  endif()
   add_dependencies(ornith_decode_test ${B70_ORNITH_DECODE_KERNELS})
   add_test(NAME ornith_decode_test COMMAND ornith_decode_test ${B70_ORNITH_SNAPSHOT}
     ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR})
@@ -1792,9 +1675,6 @@ if(B70_ORNITH)
   target_include_directories(ornith_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(ornith_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(ornith_prefill_test)
-  endif()
   add_dependencies(ornith_prefill_test ${B70_ORNITH_PREFILL_KERNELS})
   add_dependencies(prefill_gate_test ${B70_ORNITH_PREFILL_KERNELS})
   add_dependencies(prefill_split_test ${B70_ORNITH_PREFILL_KERNELS})
@@ -2003,9 +1883,6 @@ if(B70_K2)
   add_executable(k2_pf_kernels_test kernels/k2_pf_kernels_test.cc)
   target_include_directories(k2_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(k2_pf_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(k2_pf_kernels_test)
-  endif()
   b70_target_kernel_dir(k2_pf_kernels_test)
   add_dependencies(k2_pf_kernels_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
   add_test(NAME k2_pf_kernels_test COMMAND k2_pf_kernels_test)
@@ -2015,9 +1892,6 @@ if(B70_K2)
   b70_target_kernel_dir(k2_prefill_test)
   target_include_directories(k2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(k2_prefill_test PRIVATE b70_k2_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(k2_prefill_test)
-  endif()
   add_dependencies(k2_prefill_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
   add_test(NAME k2_prefill_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
@@ -2034,9 +1908,6 @@ if(B70_K2)
 
   # K2 on prefill: 18b's golden test in its prefill mode (one chunk, and chunks of 16).
   target_link_libraries(k2_golden_test PRIVATE b70_k2_prefill)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(k2_golden_test)
-  endif()
   add_dependencies(k2_golden_test ${B70_K2_PREFILL_KERNELS})
   add_test(NAME k2_golden_prefill_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR} prefill)
   add_test(NAME k2_golden_prefill_c16_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR}
@@ -2049,8 +1920,6 @@ endif()
 # b70-decode's K2 prefill backends, before the device (tests/model/k2: config.json only).
 b70_cli_reject(cli_reject_k2_prefill_length_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --bench
   --prefill-length 64 --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
-b70_cli_reject(cli_reject_k2_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
-  --prefill --prefill-backend sycl-tla EXPECT "K2-Horizon prefills on the l0 backend only")
 # ==== Spec 18c: K2-Horizon prefill ========================================= (end) ====
 
 # ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
@@ -2159,9 +2028,6 @@ if(B70_ORNITH AND B70_MTP)
     target_include_directories(ornith_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
       ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
     target_link_libraries(ornith_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-    if(B70_PREFILL_ENABLED)
-      b70_link_prefill(ornith_mtp_test)
-    endif()
     add_dependencies(ornith_mtp_test ${_o15e_k} ${_o15e_pf})
     add_test(NAME ornith_mtp_test COMMAND ornith_mtp_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR} int8)
@@ -2247,9 +2113,6 @@ if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(k2_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_k2_prefill b70_runtime
     b70_loader b70_model b70_l0 b70_prefill_host)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(k2_prefix_gpu_test)
-  endif()
   add_dependencies(k2_prefix_gpu_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
   add_test(NAME k2_prefix_gpu_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
@@ -2344,9 +2207,6 @@ if(B70_K2 AND B70_KV8)
   add_executable(k2_kv8_kernels_test kernels/k2_kv8_kernels_test.cc)
   target_include_directories(k2_kv8_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(k2_kv8_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(k2_kv8_kernels_test)
-  endif()
   b70_target_kernel_dir(k2_kv8_kernels_test)
   add_dependencies(k2_kv8_kernels_test ${B70_K2_KV8_KERNELS} ${B70_K2_DECODE_KERNELS})
   add_test(NAME k2_kv8_kernels_test COMMAND k2_kv8_kernels_test)
@@ -2415,9 +2275,6 @@ add_executable(pp_decode_test runtime/pp_decode_test.cc)
 target_include_directories(pp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_decode_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(pp_decode_test)
-endif()
 add_dependencies(pp_decode_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
 add_test(NAME pp_decode_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT})
 add_test(NAME pp_decode_i8head_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT} int8)
@@ -2497,9 +2354,6 @@ add_executable(pp_prefill_test runtime/pp_prefill_test.cc)
 target_include_directories(pp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(pp_prefill_test)
-endif()
 add_dependencies(pp_prefill_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
 add_test(NAME pp_prefill_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8)
 add_test(NAME pp_prefill_l0_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0)
@@ -2508,9 +2362,6 @@ add_executable(pp_prefill_fail_test runtime/pp_prefill_fail_test.cc)
 target_include_directories(pp_prefill_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_prefill_fail_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-if(B70_PREFILL_ENABLED)
-  b70_link_prefill(pp_prefill_fail_test)
-endif()
 add_dependencies(pp_prefill_fail_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
 add_test(NAME pp_prefill_fail_test COMMAND pp_prefill_fail_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(pp_prefill_test pp_prefill_l0_test pp_prefill_i8head_test pp_prefill_fail_test
@@ -2522,13 +2373,8 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(pp_prefill)
 endif()
 
-# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline; what it
-# refuses before any device: a sycl-tla prefill (no two-card walk). B70_PREFILL_ATTN=composed
-# is refused the same way (pipeline_args_test; the registrations here pass no environment).
-b70_cli_reject(cli_reject_pipeline_prefill_sycl ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
-  --prefill --prefill-backend sycl-tla EXPECT "not sycl-tla")
-b70_cli_reject(cli_reject_pipeline_bench_prefill_sycl ${B70_NO_MODEL} --bench --prefill-length 64
-  --pp 2 --prefill-backend sycl-tla EXPECT "--prefill-backend l0 or l0-int8")
+# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline;
+# B70_PREFILL_ATTN=composed (no two-card walk) is refused before any device (pipeline_args_test).
 # ==== Spec 16c ============================================================= (end) ====
 
 # ==== Spec 16d: pipeline parallel integration (b70-serve --pp 2, MTP across the split) ====
@@ -2564,9 +2410,6 @@ if(B70_MTP)
   target_include_directories(pp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(pp_mtp_test)
-  endif()
   add_dependencies(pp_mtp_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels} kernel_pp_handoff)
   add_test(NAME pp_mtp_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT})
   add_test(NAME pp_mtp_i8head_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT} int8)
@@ -2587,9 +2430,6 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
     b70_model b70_l0 b70_prefill_host)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(pp_prefix_gpu_test)
-  endif()
   add_dependencies(pp_prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
   set(_pp_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
   add_test(NAME pp_prefix_gpu_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 0)
@@ -2620,14 +2460,12 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--pp is the pipeline-parallel size, 1 or 2")
   b70_serve_reject(cli_reject_serve_pp_device ${B70_NO_MODEL} --pipeline-parallel-size 2 --device 1
     EXPECT "--device names one card")
-  b70_serve_reject(cli_reject_serve_pp_sycl ${B70_NO_MODEL} --pp 2 --prefill-backend sycl-tla
-    EXPECT "not sycl-tla")
   b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --pipeline-split 20
     EXPECT "--pipeline-split belongs to --pp 2")
   b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --pp 2 --pipeline-handoff p2p
     EXPECT "--pipeline-handoff expects copy or peer")
   set_tests_properties(cli_reject_serve_pp_kolibri cli_reject_serve_pp_value cli_reject_serve_pp_device
-    cli_reject_serve_pp_sycl cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
+    cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
     PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
@@ -2824,9 +2662,6 @@ if(B70_KOLIBRI)
   add_executable(kolibri_pf_kernels_test kernels/kolibri_pf_kernels_test.cc)
   target_include_directories(kolibri_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(kolibri_pf_kernels_test PRIVATE b70_prefill_host b70_kolibri_loader b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(kolibri_pf_kernels_test)
-  endif()
   b70_target_kernel_dir(kolibri_pf_kernels_test)
   add_dependencies(kolibri_pf_kernels_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS}
     kernel_pf_gemm_T0_SILU)
@@ -2844,9 +2679,6 @@ if(B70_KOLIBRI)
   target_include_directories(kolibri_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(kolibri_prefill_test PRIVATE b70_kolibri_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(kolibri_prefill_test)
-  endif()
   add_dependencies(kolibri_prefill_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
   set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
   set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
@@ -2870,9 +2702,6 @@ if(B70_KOLIBRI)
   # KL2 on prefill: 20c's golden test in its prefill mode (one chunk, and chunks of 16), both synthetic arms,
   # eager, the int8 head; the real checkpoint on two cards after 20b.
   target_link_libraries(kolibri_golden_test PRIVATE b70_kolibri_prefill)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(kolibri_golden_test)
-  endif()
   add_dependencies(kolibri_golden_test ${B70_KOLIBRI_PREFILL_KERNELS})
   add_test(NAME kolibri_golden_prefill_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
     ${_kol_synth}/int4attn prefill)
@@ -2904,8 +2733,6 @@ endif()
 # only). 20c's cli_reject_kolibri_prefill (--prefill naming spec 20d) is gone: Kolibri prefills now.
 b70_cli_reject(cli_reject_kolibri_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --bench --prefill-length 64
   --prefill-backend l0-int8 EXPECT "1024-k Hadamard blocks")
-b70_cli_reject(cli_reject_kolibri_prefill_sycl ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
-  --prefill --prefill-backend sycl-tla EXPECT "sycl-tla has no Kolibri walk")
 b70_cli_reject(cli_reject_kolibri_prefill_chunk ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
   --prefill --prefill-chunk 4096 EXPECT "exceeds Kolibri-1's prefill chunk 2048")
 # ==== Spec 20d: Kolibri-1 prefill ==== (end) ====
@@ -2969,9 +2796,6 @@ if(B70_KOLIBRI)
   target_include_directories(kolibri_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(kolibri_snapshot_gpu_test PRIVATE b70_kolibri_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(kolibri_snapshot_gpu_test)
-  endif()
   add_dependencies(kolibri_snapshot_gpu_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
   set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
   set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
@@ -3201,9 +3025,6 @@ if(B70_Q4EXP)
   add_executable(qwen4exp_pf_kernels_test kernels/qwen4exp_pf_kernels_test.cc)
   target_include_directories(qwen4exp_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(qwen4exp_pf_kernels_test PRIVATE b70_prefill_host b70_qwen4exp_loader b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(qwen4exp_pf_kernels_test)
-  endif()
   b70_target_kernel_dir(qwen4exp_pf_kernels_test)
   add_dependencies(qwen4exp_pf_kernels_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pf_gemm_T0_SILU)
   add_test(NAME qwen4exp_pf_kernels_test COMMAND qwen4exp_pf_kernels_test)
@@ -3220,9 +3041,6 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(qwen4exp_prefill_test)
-  endif()
   add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
   set(_q4s ${B70_Q4EXP_SYNTH_DIR})
   set(_q4ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
@@ -3250,9 +3068,6 @@ if(B70_Q4EXP)
   # F3 on prefill: 21c's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on
   # both synthetic golden sets; Intel's --layers 18 after 21a's sets exist.
   target_link_libraries(qwen4exp_golden_test PRIVATE b70_qwen4exp_prefill)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(qwen4exp_golden_test)
-  endif()
   add_dependencies(qwen4exp_golden_test ${B70_Q4EXP_PREFILL_KERNELS})
   set(_q4g "")
   foreach(f ours intel)
@@ -3282,8 +3097,6 @@ endif()
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --bench --prefill-length 64 --prefill-backend l0-int8
   EXPECT "1024-k Hadamard blocks")
-b70_cli_reject(cli_reject_qwen4exp_prefill_sycl ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
-  --prefill-backend sycl-tla EXPECT "sycl-tla has no Qwen3.8-Flash-Next walk")
 b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B70_OK_IDS} --n 4 --prefill
   --prefill-chunk 4096 EXPECT "exceeds Qwen3.8-Flash-Next's prefill chunk 2048")
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill ==== (end) ====
@@ -3334,9 +3147,6 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_snapshot_gpu_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(qwen4exp_snapshot_gpu_test)
-  endif()
   add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
   set(_q4snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
   add_test(NAME qwen4exp_snapshot_gpu_synth_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
@@ -3406,9 +3216,6 @@ if(B70_Q4EXP AND B70_MTP)
   target_include_directories(qwen4exp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(qwen4exp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(qwen4exp_mtp_test)
-  endif()
   add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS}
     kernel_pp_handoff)
   set(B70_Q4EXP_MTP_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-mtp" CACHE PATH
@@ -3452,8 +3259,6 @@ if(TARGET b70-serve)
   b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "decision 8")
   b70_serve_reject(cli_reject_serve_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
-  b70_serve_reject(cli_reject_serve_qwen4exp_prefill_sycl ${_q4_cfg} --layers 4 --prefill-backend sycl-tla
-    EXPECT "sycl-tla has no Qwen3.8-Flash-Next walk")
   b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --pipeline-split 2
     EXPECT "--pipeline-split belongs to --pp 2")
   b70_serve_reject(cli_reject_serve_qwen4exp_tokenizer ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp-q38tok --layers 4
@@ -3462,7 +3267,7 @@ if(TARGET b70-serve)
     EXPECT "belong to Qwen3.8-Flash-Next")
   set_tests_properties(cli_reject_serve_qwen4exp_full cli_reject_serve_qwen4exp_mtp_auto cli_reject_serve_qwen4exp_spec_mtp
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
-    cli_reject_serve_qwen4exp_prefill_sycl cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
+    cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
 endif()
 # ==== Spec 21e: Qwen3.8-Flash-Next served ==== (end) ====
@@ -3615,9 +3420,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(dflash_engine_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
     b70_l0 b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(dflash_engine_test)
-  endif()
   add_dependencies(dflash_engine_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
@@ -3631,9 +3433,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(dflash_gpu_test PRIVATE b70_server b70_tokenizer b70_dflash_runtime b70_prefill_host
     b70_runtime b70_loader b70_model b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(dflash_gpu_test)
-  endif()
   add_dependencies(dflash_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
@@ -3668,13 +3467,11 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   # spec 19d: --pp 2 serves the drafter on device 1, on the copy hand-off only
   b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 --pipeline-handoff peer
     EXPECT "needs --pipeline-handoff copy")
-  b70_serve_reject(cli_reject_serve_dflash_sycl ${B70_NO_MODEL} --spec dflash --prefill-backend sycl-tla
-    EXPECT "drop --prefill-backend sycl-tla")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
     EXPECT "no DFlash drafter exists for K2-Horizon")
   set_tests_properties(cli_reject_serve_dflash_mtp cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
     cli_reject_serve_dflash_min_match cli_reject_serve_dflash_format cli_reject_serve_dflash_kv8
-    cli_reject_serve_dflash_pp cli_reject_serve_dflash_sycl cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
+    cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====
 # ==== Spec 19d: DFlash in the server ==== (begin) ====
@@ -3708,9 +3505,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(dflash_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_dflash_runtime b70_prefill_host
     b70_runtime b70_loader b70_model b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(dflash_prefix_gpu_test)
-  endif()
   add_dependencies(dflash_prefix_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_prefix_gpu_test COMMAND dflash_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
@@ -3725,9 +3519,6 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_dflash_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader b70_l0
     b70_model)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(pp_dflash_test)
-  endif()
   add_dependencies(pp_dflash_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS} kernel_pp_handoff)
   add_test(NAME pp_dflash_test COMMAND pp_dflash_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(pp_dflash_test PROPERTIES LABELS "checkpoint;dflash;pp" SKIP_RETURN_CODE 77
@@ -3991,9 +3782,6 @@ if(B70_BOLT)
   add_executable(bolt_pf_kernels_test kernels/bolt_pf_kernels_test.cc)
   target_include_directories(bolt_pf_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(bolt_pf_kernels_test PRIVATE b70_prefill_host b70_bolt_model b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(bolt_pf_kernels_test)
-  endif()
   b70_target_kernel_dir(bolt_pf_kernels_test)
   add_dependencies(bolt_pf_kernels_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_PREFILL_SPARE})
   add_test(NAME bolt_pf_kernels_test COMMAND bolt_pf_kernels_test)
@@ -4008,9 +3796,6 @@ if(B70_BOLT)
   target_include_directories(bolt_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(bolt_prefill_test PRIVATE b70_bolt_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(bolt_prefill_test)
-  endif()
   add_dependencies(bolt_prefill_test ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
     ${B70_BOLT_PREFILL_REUSED})
   set(_bolt_pf_tests)
@@ -4030,9 +3815,6 @@ if(B70_BOLT)
   # B3 on prefill: 25c's golden test in its prefill mode (one chunk a 2048, and chunks of 512), the synthetics' sets and
   # SergiioB's (two cards; 25a's golden sets, data key oracle_bolt); the _eager twin; the 32k prompt opt-in.
   target_link_libraries(bolt_golden_test PRIVATE b70_bolt_prefill)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(bolt_golden_test)
-  endif()
   add_dependencies(bolt_golden_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED})
   set(_bolt_gpf_tests)
   foreach(sp n12-g128 n12-g64x)
@@ -4065,8 +3847,6 @@ endif()
 # 25d's refusals, before the device (the vendored config.json is all the dispatch and the planner read).
 b70_cli_reject(cli_reject_bolt_prefill_int8 ${_bolt_cfg} --bench --prefill-length 64 --prefill-backend l0-int8
   EXPECT "int8 prefill for this family is out of scope")
-b70_cli_reject(cli_reject_bolt_prefill_sycl ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-backend sycl-tla
-  EXPECT "no Bolt walk")
 b70_cli_reject(cli_reject_bolt_prefill_chunk ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 4096
   EXPECT "exceeds Nemotron 3.5 Bolt's prefill chunk 2048")
 b70_cli_reject(cli_reject_bolt_prefill_chunk64 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --prefill --prefill-chunk 100
@@ -4141,7 +3921,6 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
     EXPECT "int8 prefill for this family is out of scope")
-  b70_serve_reject(cli_reject_serve_bolt_prefill_sycl ${_bolt_serve_cfg} --prefill-backend sycl-tla EXPECT "no Bolt walk")
   b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belong to Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_bolt_max_len ${_bolt_serve_cfg} --max-len 262145
     EXPECT "exceeds Nemotron 3.5 Bolt's trained context 262144")
@@ -4152,7 +3931,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--generation-config: cannot read")
   set_tests_properties(cli_reject_serve_bolt_mtp cli_reject_serve_bolt_mtp_auto cli_reject_serve_bolt_spec_mtp
     cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
-    cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_prefill_sycl cli_reject_serve_bolt_layers
+    cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_layers
     cli_reject_serve_bolt_max_len cli_reject_serve_bolt_device cli_reject_serve_bolt_split
     cli_reject_serve_bolt_generation_config PROPERTIES LABELS bolt)
 endif()
@@ -4178,9 +3957,6 @@ if(B70_BOLT)
   target_include_directories(bolt_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(bolt_snapshot_gpu_test PRIVATE b70_bolt_prefill b70_l0)
-  if(B70_PREFILL_ENABLED)
-    b70_link_prefill(bolt_snapshot_gpu_test)
-  endif()
   add_dependencies(bolt_snapshot_gpu_test ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
     ${B70_BOLT_PREFILL_REUSED})
   set(_bolt_snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_4k.ids)
