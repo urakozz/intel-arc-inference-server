@@ -574,6 +574,7 @@ std::vector<float> PipelineEngine::read_prefill_logits() const {
 void PipelineEngine::prepare_prefill() {
   const model::ModelDesc& d = *st(0).model.desc;
   model::require_prefill(d);
+  const PrefillBackend b = prefill_backend();
   if (prefill::attn_mode() != prefill::AttnMode::Flash)
     throw std::runtime_error("--pp 2 prefills with the flash attention only: "
                              "B70_PREFILL_ATTN=composed has no two-card walk (spec 16c)");

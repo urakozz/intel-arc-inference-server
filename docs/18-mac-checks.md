@@ -41,14 +41,14 @@ configure reports the tokenizer component OFF - including when a cached
 
 **1 host - the host tests, under ctest.** `cmake --preset mac-host`
 (`CMakePresets.json`) configures the real tree with `B70_HOST_ONLY=ON`, then
-builds and runs `ctest`. `cmake/host_only.cmake` replaces the three things the
+builds and runs `ctest`. `cmake/host_only.cmake` replaces the two things the
 full build takes from the box - the `level-zero` pkg-config package (an
-INTERFACE target carrying only the headers), `ocloc` (a stub
+INTERFACE target carrying only the headers) and `ocloc` (a stub
 `add_ocloc_kernel` that makes the `kernel_<name>` targets exist and produces
-nothing) and `icpx` (the SYCL component is off) - and then **derives** which
+nothing) - and then **derives** which
 tests can run instead of listing them. Every `add_test` is recorded, and at the
 end of `tests/` each test is DISABLED if its executable links `b70_l0`,
-`b70_runtime`, `b70_prefill_host` or `b70_prefill`; depends on a kernel binary or
+`b70_runtime` or `b70_prefill_host`; depends on a kernel binary or
 on `b70-decode`/`b70-serve`; carries the `checkpoint` label; is not an executable
 of the tree (the `b70_cli_reject` shell blocks, `tools/probe/*.sh`); names an
 absolute path that does not exist here; or reads the Qwen3.8 `tokenizer.json`
@@ -76,9 +76,9 @@ one of the two compilers emits can still separate them.
 `.cc` outside `third_party/` (src, tests, tools/probe) is compiled with
 `-fsyntax-only -std=c++17 -Wall -Wextra -Werror` and the include paths the targets
 use (`tools/mac/l0_syntax.sh`). This is the check the device code gets: it parses
-and type-checks against `ze_api.h`; it does not link and does not run. SYCL
-sources are skipped, by place (`src/sycl`, and every `tools/probe/<name>.cc`
-that `src/sycl/CMakeLists.txt` declares with `b70_sycl_probe`), by a direct
+and type-checks against `ze_api.h`; it does not link and does not run. SYCL /
+oneDNN sources (since 2026-10-27 only the stand-alone oneDNN probe,
+`tools/probe/probe_gemm_onednn_int4.cc`) are skipped, by a direct
 `#include <sycl/...>`-style line, or by the compiler's own "file not found" for
 one that reaches SYCL through a project header. Their headers exist only in the
 oneAPI install.

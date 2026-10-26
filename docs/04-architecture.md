@@ -5,8 +5,8 @@ and a Level Zero walk of our own OpenCL C kernels for prefill.**
 
 ## Language and toolchain
 
-- **C++17**, `g++` and CMake for everything on the decode path. `icpx` (oneAPI
-  DPC++) only for the optional SYCL reference backend.
+- **C++17**, `g++` and CMake for everything. No SYCL / icpx in the engine build
+  (the sycl-tla prefill backend was removed on 2026-10-27).
 - **Level Zero** is the runtime. Device kernels are OpenCL C compiled offline
   with `ocloc` to device binaries and loaded with `zeModuleCreate`.
 - **Python appears exactly once**, in `tools/`, for offline weight conversion,
@@ -49,7 +49,6 @@ src/
   runtime/     allocations, the captured decode command list, KV cache,
                sequence state; runtime/prefill/ for the prefill walk
   server/      HTTP, OpenAI schema, SSE streaming
-  sycl/        the optional sycl-tla reference backend, built only with icpx
   tokenizer/   leaf: HF `tokenizers` BPE encode/decode, chat template,
                streaming detokeniser - see doc 11. Host code, request path only
 third_party/   pinned header-only minja and nlohmann/json
@@ -139,10 +138,10 @@ Note the direction of the launch count: the Level Zero walk issues seven times
 as many launches and has *fewer* host stalls, not more. The worry that 8,689
 launches would cost host time in situ does not appear at all.
 
-sycl-tla stays selectable with `--prefill-backend sycl-tla` so the control can be
-re-run at any time, and `tests/prefill/prefill_backend_equivalence_test` holds
-the two paths **bitwise equal** on all five case families. The whole project
-also builds with no SYCL component at all.
+The sycl-tla control was removed on 2026-10-27 (operator ruling: our own kernels
+over library layers); until then `prefill_backend_equivalence_test` held the two
+paths **bitwise equal** on all five case families. `--prefill-backend` is `l0`
+(the default) or `l0-int8` (doc 17, opt-in).
 
 Two host-side rules follow from the list being asynchronous, and are stated once
 here rather than at each site:
@@ -153,8 +152,7 @@ here rather than at each site:
   both `Control` writes.
 - **`Engine::prefill` lives in its own translation unit**, not in the runtime
   library every decode binary and test links, so a binary that never calls
-  `prefill()` emits no reference to any prefill symbol. That is what keeps the
-  decode path linkable without the SYCL component present.
+  `prefill()` emits no reference to any prefill symbol.
 
 ### Attention under replay
 
@@ -183,9 +181,7 @@ have no such problem: their state is fixed-size.
 paths so they always land on the same physical card. The precedence contract,
 top wins:
 
-1. **`--device N`** - selects GPU `N`. Where SYCL is involved the engine binds
-   the *same* card by Level Zero handle interop (`sycl::make_device` from the
-   `ze_device_handle_t`), not by trusting a second selector to agree.
+1. **`--device N`** - selects GPU `N`.
 2. **`ONEAPI_DEVICE_SELECTOR=level_zero:N`** - the default when the flag is
    absent. The SYCL runtime honours it natively; the raw Level Zero path parses
    it itself, because Level Zero does not read it.

@@ -33,7 +33,7 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e), never run |
 | `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV, never run | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
-| prefill backends | `l0-int8` (default), `l0`, `sycl-tla` | `l0-int8`, `l0` | `l0-int8`, `l0` (`sycl-tla` refused) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` and `sycl-tla` refused) |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
 | `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
 | with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
@@ -121,7 +121,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/pr
 ```
 
 Startup prints the split (`split: auto -> N`), the plan per card and both cards' memory lines.
-Not with `--device`, `--prefill-backend sycl-tla` or `B70_PREFILL_ATTN=composed`.
+Not with `--device` or `B70_PREFILL_ATTN=composed`.
 
 ## Qwen3.8-27B
 
@@ -209,8 +209,8 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
   policy drops K on prose), `--draft-vocab off` (P0's free-looking ranked 32k was ranked in-sample; by id it loses up to
   1.4 tokens at K = 7 - r56.d5_dv measures it). `--spec` stays unset (= `--mtp`'s meaning): `dflash` becomes Qwen3.8's
   default only if it beats `--mtp auto` by >= 10 % on the opencode recording (D5, r56.d5_opencode).
-- **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`, `--prefill-backend
-  sycl-tla`, `B70_PREFILL_REPLAY=1`, `--pp 2 --pipeline-handoff peer`, `b70-decode --pp 2`, every other model.
+- **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`,
+  `B70_PREFILL_REPLAY=1`, `--pp 2 --pipeline-handoff peer`, `b70-decode --pp 2`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot (spec 19 decision 5 as ruled in 19d), so a
   conversation restored from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one; the store
   is keyed by the drafter. **Caveat:** a snapshot at a block end inside a long prefill holds the ring as that prefill
@@ -313,7 +313,7 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
-- Prefill runs on `l0-int8` and `l0`; `sycl-tla` is refused. Decode attention `v1`
+- Prefill runs on `l0` (the default) and `l0-int8`. Decode attention `v1`
   (`B70_DECODE_ATTN=v1`) and the composed prefill attention (`B70_PREFILL_ATTN=composed`)
   are not built for Ornith.
 - `--mtp auto` decides with Qwen3.8's cost table until the card measures Ornith's (the
@@ -375,7 +375,7 @@ B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
   decode-only with the bf16 head, ~49.9k with `--lm-head int8`, ~42.8k when the run
   prefills (bf16 head) - all derived. `b70-decode`'s default is 16384. Long context needs
   int8 KV or two cards (spec 18e, not built).
-- Prefill runs on `l0` only: `--prefill-backend l0-int8` and `sycl-tla` are refused by name.
+- Prefill runs on `l0` only: `--prefill-backend l0-int8` is refused by name.
   Omitting `--prefill-backend` is fine.
 - Refused: `--mtp` (no head), `--profile` (not built yet). `--kv-cache int8` is built (spec 18e,
   gates pending).
@@ -448,7 +448,7 @@ German A4-style tool-call set `tests/golden/toolcall-kolibri-de` (`tools/toolcal
 `score.py --format hermes` against the bf16 source's reference, `oracle_generate.py --model kolibri`).
 
 **Limits.** Prefill on `--prefill-backend l0` only (`l0-int8` refused: its h8 linears rotate in
-1024-k Hadamard blocks and the hidden is 2560; `sycl-tla` refused: no Kolibri walk), `--prefill-chunk`
+1024-k Hadamard blocks and the hidden is 2560), `--prefill-chunk`
 at most 2048; no `--mtp` / `--spec` (no head, no verify lists), `--kv-cache int8` refused (20 KiB a
 position: bf16 only), no `--profile`, `--device` refused with `--pp 2` (GPUs 0 and 1, `ZE_AFFINITY_MASK`
 picks them), context capped at the trained 262144 (decision 3) - `b70-decode` and `b70-serve` alike. The
@@ -513,7 +513,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $I --layers 37 --pp 2 --tokenizer
 ```
 
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
-blocks and the hidden is 2560; `sycl-tla`: no walk for this family), `--prefill-chunk` at most 2048; the two cards
+blocks and the hidden is 2560), `--prefill-chunk` at most 2048; the two cards
 cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is a later lever); MTP in `b70-serve`
 only (`b70-decode --mtp` refused; `--mtp auto` and `--draft-vocab` refused), the whole model refused in both CLIs
 (spec 22), bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
@@ -591,7 +591,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 -
 - **Request.** Image / video / audio content parts are refused (text only).
 
 **Limits.** No `--mtp` (no MTP head), no `--spec` (no drafter), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
-Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` / `sycl-tla` refused), context at most 262144, `--layers`
+Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` refused), context at most 262144, `--layers`
 is `b70-decode`'s development mode only, `--device` refused with `--pp 2`.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
