@@ -292,3 +292,13 @@ shared by both engine paths, so they are the int4 checkpoint's differences from
 bf16, not the int8 prefill's. The two scenarios where the engine paths differ
 (t4_comment-linear_l0, t5_test-loader) both go to `l0-int8`. With A1 to A4, B1
 and B2 all passed (A3 under the §8 ruling), spec 5 is complete.
+
+## 10. Amendment - 2026-10-27: prefill chunk 4096 (plan 5d)
+
+**Status (2026-10-27): PLANNED, nothing built** - the fourth item of the Qwen speed track (operator, 2026-10-27).
+`docs/superpowers/plans/2026-10-27-spec5d-prefill-chunk-4096.md` widens the chunk from 2048 to 4096 on the main
+engine: the h8 path rebuilds its rotated int8 slabs once per chunk (~30 % of a linear's time at 2048 rows, measured,
+docs/17-int8-prefill.md), so a 4096 chunk halves that share; **+8-15 % at pp4096, estimated**. Ruling A13 (2048) was
+taken on the bf16 GEMMs; the plan's P0 measures the int8 linears at 4096 rows first and stops if they are not >= 5 %
+cheaper per 4096 tokens. The scratch (+~0.76 GB a card with MTP, derived) goes through the planner as a session chunk
+cap; the gates of this spec are unchanged; box row 75.
