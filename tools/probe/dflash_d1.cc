@@ -4,7 +4,7 @@
 // tools/oracle/dflash_d1.py, which runs tools/oracle/dflash_ref.py on the SAME taps and holds the two to D1's bars
 // (top-16 sets tie-aware, scores cosine >= 0.9999 bf16 / >= 0.999 int8, walk ids equal at T = 0).
 //
-//   dflash_d1 <target snapshot> <drafter> <out.jsonl> [--model lilicorr] [--format int8|bf16|int4|exact] [--head int8|bf16]
+//   dflash_d1 <target snapshot> <drafter> <out.jsonl> [--format int8|bf16|int4] [--head int8|bf16]
 //             [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] [--anchors N] [--k K] [--max-len L]
 //             [--draft-q raw|capped] <dump.taps.safetensors>...
 //
@@ -23,16 +23,6 @@
 // 20 tanh(z x 0.196 / 20)); the projection 16 positions a replay from max(tap_from, first anchor - 2048) (the
 // window |q - k| <= 2048); anchors over n_prompt .. n - K - 1; every draft the whole 16-row block (MuseDrafter), its
 // first K rows written. The run line adds "form": "muse" and "q".
-//
-// Spec 26b: `--model lilicorr` runs nvidia/...-24GB-LiLiCorr through runtime::dflash::LiliDrafter beside a Bolt target
-// (`<target>` the Bolt checkpoint: only its embedding - uploaded row-major, the drafter's replica - and its lm_head, int8
-// built at load or bf16 tiles, are read; no 42 GB of blocks), --format exact|int8|int4 (default int8, spec 26 §11's
-// PROVISIONAL default), --head int8|bf16 (default int8); the projection 8 positions a replay from max(tap_from, first anchor
-// - 1023) (the window |q - k| <= 1023), the anchor row the last projected one (p - 1); anchors over n_prompt .. n - 8; every
-// draft the whole 8-row block with all 7 slots walked at T 0. A line adds the LiLiCorr readback: "lp" / "logit" [7][8]
-// (the candidates' log-probs and raw logits), "lattice" [7][8][8] and "anchor_row" [hidden] (the anchor buffer the head
-// read). The run line has "form": "lilicorr". Tap dumps: 25a's (bolt_ref.py --taps, 26a's dflash_p0.sh) or the engine's
-// own once 26c's verify list writes them - the same format.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -47,12 +37,8 @@
 #include "l0/context.h"
 #include "l0/fence.h"
 #include "l0/queue.h"
-#include "common/repack.h"
-#include "loader/bolt_loader.h"   // bolt_checkpoint_desc
-#include "loader/bolt_repack.h"
 #include "loader/dflash_loader.h"
 #include "loader/draft_vocab.h"
-#include "loader/lilicorr_loader.h"
 #include "loader/lm_head_int8.h"
 #include "loader/loader.h"
 #include "loader/muse_loader.h"
@@ -61,7 +47,6 @@
 #include "runtime/control.h"
 #include "runtime/dflash/dflash_buffers.h"
 #include "runtime/dflash/dflash_capture.h"
-#include "runtime/dflash/lilicorr_drafter.h"
 #include "runtime/dflash/muse_drafter.h"
 
 namespace {
@@ -214,110 +199,6 @@ int run_muse(l0::Context& ctx, const std::string& snap, const std::string& draft
   return 0;
 }
 
-// Spec 26b: the LiLiCorr arm (the header's note).
-int run_lilicorr(l0::Context& ctx, const std::string& snap, const std::string& drafter, const std::string& out_path,
-                 loader::DraftFormat fmt, loader::LmHeadForm head, uint32_t anchors, uint32_t max_len,
-                 const std::vector<std::string>& dumps) {
-  namespace rd = runtime::dflash;
-  const model::BoltDesc bd = loader::bolt_checkpoint_desc(snap);
-  const loader::SafetensorsSet set(snap.back() == '/' ? snap : snap + "/", true);
-  const std::string trunk = loader::bolt_trunk_prefix(set);
-  auto tensor = [&](const std::string& name) -> const uint16_t* {
-    const loader::TensorInfo& t = set.tensors().at(name);
-    if (t.dtype != "BF16" || t.shape != std::vector<uint64_t>{bd.vocab, bd.hidden})
-      throw std::runtime_error(name + " is not bf16 [vocab][hidden]");
-    return reinterpret_cast<const uint16_t*>(set.data(t));
-  };
-  const uint16_t* emb = tensor(trunk + "embeddings.weight");
-  const uint16_t* lm = tensor(loader::kBoltLmHead);
-  const l0::Mem embed = loader::lilicorr_embed_replica(ctx, emb, bd.vocab, bd.hidden);
-  l0::CmdList imm = l0::CmdList::immediate(ctx);
-  const uint32_t V = bd.vocab, H = bd.hidden;
-  loader::DeviceWeight hw{l0::Mem(ctx, l0::MemKind::Device, head == loader::LmHeadForm::Int8 ? size_t(V) * H : size_t(V) * H * 2),
-                          nullptr, {H, V, 1, 0},
-                          head == loader::LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16};
-  if (head == loader::LmHeadForm::Int8) {
-    std::vector<int8_t> q(size_t(V) * H);
-    std::vector<float> sc(V);
-    loader::quantise_int8_tiled(lm, H, V, q.data(), sc.data());
-    imm.copy(hw.mem.ptr(), q.data(), q.size());
-    hw.scales = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(V) * 4);
-    imm.copy(hw.scales->ptr(), sc.data(), sc.size() * 4);
-  } else {
-    std::vector<uint16_t> t(size_t(V) * H);
-    common::repack_bf16_tiled(lm, H, V, t.data());
-    imm.copy(hw.mem.ptr(), t.data(), t.size() * 2);
-  }
-  rd::LiliDrafter dr(ctx, loader::load_lilicorr(ctx, drafter, {bd.name, bd.layers, H, V}, embed, fmt), max_len);
-  l0::Mem control(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
-  std::memset(control.ptr(), 0, sizeof(runtime::Control));
-  dr.attach(ctx, embed, hw, control);
-  l0::Queue q(ctx);
-  l0::Fence fence(q);
-  auto replay = [&](l0::CmdList& list) {
-    q.execute(list, &fence);
-    fence.wait();
-  };
-  const uint32_t K = rd::LiliDraftOut::kSlots, KC = rd::LiliDraftOut::kTopK, ntap = uint32_t(dr.tap_layers().size()),
-                 M = kernels::dflash::kM;
-  std::ofstream out(out_path);
-  out << "{\"run\": {\"form\": \"lilicorr\", \"head_input\": \"bf16\", \"format\": \"" << loader::draft_format_name(fmt) << "\", \"head\": \""
-      << loader::lm_head_form_name(head) << "\", \"draft_vocab\": 0, \"vocab_used\": " << V << ", \"k\": " << K
-      << ", \"launches\": [" << dr.draft_step()->kernel_count << ", " << dr.project_step().kernel_count
-      << "], \"load\": \"" << dr.weights().line << "\", \"v_ids\": []}}\n";
-  double t_draft = 0;
-  size_t n_draft = 0;
-  std::vector<float> anchor(H);
-  for (const std::string& path : dumps) {
-    const Dump d = read_dump(path, H);
-    if (d.layers != dr.tap_layers()) throw std::runtime_error(path + ": tap layers differ from the drafter's");
-    if (d.n < M || d.n_prompt + M > d.n) continue;
-    const std::vector<uint32_t> ps = anchors_over(std::max(d.n_prompt, d.tap_from + 1), d.n - M, anchors);
-    dr.reset(imm);   // a cold ring per dump
-    const uint32_t reach = dr.window() - 1;
-    uint32_t next_pos = std::max(d.tap_from, ps.front() > reach ? ps.front() - reach : 0u);
-    for (uint32_t p : ps) {
-      while (next_pos < p) {   // project [next_pos, min(p, next_pos + 8)): the last one is p - 1, the anchor row
-        const uint32_t n = std::min(M, p - next_pos);
-        std::vector<uint16_t> rows(size_t(M) * ntap * H, 0);
-        for (uint32_t r = 0; r < n; ++r)
-          for (uint32_t i = 0; i < ntap; ++i)
-            std::memcpy(&rows[(size_t(r) * ntap + i) * H], &d.taps[i][size_t(next_pos + r - d.tap_from) * H], H * 2);
-        imm.copy(dr.taps().ptr(), rows.data(), rows.size() * 2);
-        replay(dr.projection(next_pos, n));
-        next_pos += n;
-      }
-      runtime::Control* c = control.as<runtime::Control>();
-      c->pos = p;
-      c->n_active = 1;
-      c->cur_token[0] = uint32_t(d.ids[p]);
-      const auto t0 = std::chrono::steady_clock::now();
-      const rd::LiliDraftOut& o = dr.draft(replay, K);
-      t_draft += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      ++n_draft;
-      imm.copy(anchor.data(), dr.buffers().anchor.ptr(), size_t(H) * 4);
-      std::string cand = "[", lp = "[", lg = "[", lat = "[";
-      for (uint32_t s = 0; s < K; ++s) {
-        cand += (s ? "," : "") + arr(o.cand[s], KC);
-        lp += (s ? "," : "") + farr(o.lp[s], KC);
-        lg += (s ? "," : "") + farr(o.logit[s], KC);
-        lat += s ? ",[" : "[";
-        for (uint32_t i = 0; i < KC; ++i) lat += (i ? "," : "") + farr(o.lattice[s][i], KC);
-        lat += "]";
-      }
-      out << "{\"dump\": \"" << d.name << "\", \"p\": " << p << ", \"anchor\": " << d.ids[p] << ", \"k\": " << K
-          << ", \"ids\": " << arr(o.ids, K) << ", \"chosen\": " << arr(o.chosen, K) << ", \"cand\": " << cand
-          << "], \"lp\": " << lp << "], \"logit\": " << lg << "], \"lattice\": " << lat << "], \"anchor_row\": "
-          << farr(anchor.data(), H) << "}\n";
-    }
-    std::printf("%s: %zu anchors\n", d.name.c_str(), ps.size());
-  }
-  std::printf("dflash_d1 (LiLiCorr, drafter %s, head %s): %zu drafts, %.3f ms a draft list (host-timed, one replay, fence "
-              "included); %s\n", loader::draft_format_name(fmt), loader::lm_head_form_name(head), n_draft,
-              n_draft ? 1e3 * t_draft / double(n_draft) : 0.0, out_path.c_str());
-  return 0;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -331,7 +212,7 @@ int main(int argc, char** argv) {
   loader::LmHeadForm head = loader::LmHeadForm::Int8;
   uint32_t dv = 0, anchors = 16, K = 0, max_len = 8192;
   runtime::dflash::MuseQ qf = runtime::dflash::MuseQ::Raw;
-  std::string dv_ids, model_flag, fmt_text;
+  std::string dv_ids;
   std::vector<std::string> dumps;
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
@@ -340,11 +221,8 @@ int main(int argc, char** argv) {
       return argv[++i];
     };
     if (a == "--format") {
-      fmt_text = next();
+      if (!loader::parse_draft_format(next(), fmt)) throw std::runtime_error("--format int8|bf16|int4");
       fmt_given = true;
-    } else if (a == "--model") {
-      model_flag = next();
-      if (model_flag != "lilicorr") throw std::runtime_error("--model lilicorr (the only named model, spec 26b)");
     } else if (a == "--draft-q") {
       if (!runtime::dflash::parse_muse_q(next(), qf)) throw std::runtime_error("--draft-q raw|capped");
     } else if (a == "--head") {
@@ -365,16 +243,6 @@ int main(int argc, char** argv) {
   }
   const std::string snap = loader::resolve_snapshot(target);
   l0::Context ctx(0);
-  if (model_flag == "lilicorr") {   // spec 26b
-    if (dv) throw std::runtime_error("--draft-vocab is not built for the LiLiCorr drafter (its candidates need the whole "
-                                     "vocabulary)");
-    if (K != 0 && K != 7) throw std::runtime_error("--k: the LiLiCorr draft is always the whole block (7)");
-    if (fmt_given && !loader::parse_lilicorr_draft_format(fmt_text, fmt))
-      throw std::runtime_error("--format exact|int8|int4 for the LiLiCorr drafter");
-    return run_lilicorr(ctx, snap, drafter, out_path, fmt_given ? fmt : loader::DraftFormat::Int8, head, anchors,
-                        max_len, dumps);
-  }
-  if (fmt_given && !loader::parse_draft_format(fmt_text, fmt)) throw std::runtime_error("--format int8|bf16|int4");
   if (loader::is_muse_checkpoint(snap)) {   // spec 23f
     if (dv) throw std::runtime_error("--draft-vocab is not built for Muse-Glimmer's drafter");
     if (!fmt_given) fmt = loader::DraftFormat::Int4G64;

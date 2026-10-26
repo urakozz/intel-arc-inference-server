@@ -230,8 +230,6 @@ case "${1:-}" in
       bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36'
     have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and 36 <name>.bf16.txt (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
       bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
-    have oracle_bolt_taps "oracle-out-bolt-taps/dumps/*.taps.safetensors (spec 25a: bolt_oracle.sh taps - prose / code / agentic, + a4/* after r57.a4_ref; spec 26a's input)" \
-      bash -c 'ls oracle-out-bolt-taps/dumps/*.taps.safetensors'
     # Spec 25b (queue row 59): the synthetic real-width checkpoints (bolt_synth.sh synth-ckpt: N 8 for the host tests, N 12
     # for the card tests - each in SergiioB's g128 spelling, its exact g64 expansion and a native g64), and our g64 export
     # (25q: not built when 25b was written; r59.load_rtn SKIPs 77 until it exists).
@@ -242,9 +240,6 @@ case "${1:-}" in
     # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
     have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
       bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
-    # Queue row 63 (spec 26a): the LiLiCorr drafter, pinned (962 MB; a revision-pinned download writes no refs/main).
-    have lilicorr "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 (962 MB: hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1)" \
-      complete "$(bolt_snap "" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr 449d24140160b8e51871bfc0f0a7338abf640aa1)"
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'

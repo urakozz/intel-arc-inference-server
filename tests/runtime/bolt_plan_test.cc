@@ -56,17 +56,13 @@ int main() {
     std::printf("bolt_plan_test: pp_split %u (heavier side %zu B)\n", split, best_mx);
   }
 
-  // --- the real descriptor on two 32 GiB cards: 262144 positions fit with spec 26's drafter and replica reserved ---------
+  // --- the real descriptor on two 32 GiB cards: 262144 positions fit with the scratch reserved ---------------------------
   {
-    // The caller's terms (placeholders until 25c / 25d / spec 26 measure them): decode scratch < 100 MB, prefill scratch
-    // ~1.5 GB a card, the int8 drafter 1.1 GB and its 1.07 GB embedding replica on device 1, 7 verify slots - ALL ESTIMATED
-    // (spec 25 §3), the plan's job is only to place them.
+    // The caller's terms (placeholders until 25c / 25d measure them): decode scratch < 100 MB, prefill scratch ~1.5 GB a card
+    // - ESTIMATED (spec 25 §3), the plan's job is only to place them.
     BoltReserve x;
     x.decode_scratch = size_t(100e6);
     x.prefill_scratch = size_t(1.5e9);
-    x.drafter = size_t(1.1e9);
-    x.drafter_embed_replica = bl::embed_tiled_bytes(d);
-    x.verify_slots = 7;
     const BoltPlan p = plan(d, 0, {card32, card32}, x);
     CHECK_EQ(p.place.devices, 2u);
     CHECK_EQ(p.place.split, split);
@@ -88,12 +84,10 @@ int main() {
       CHECK_EQ(pl.weights, w);
       CHECK_EQ(pl.weights, bl::device_weight_bytes(d, p.place, dev, true));          // the loader's allocation formula
       CHECK_EQ(pl.kv, size_t(attn) * 262144 * (2 * 128) * 2 * 2);                     // heads x head_dim x {K, V} x bf16
-      CHECK_EQ(pl.ssm, size_t(mamba) * (128ull * 64 * 128 * 4) * (1 + 7));            // 4 MiB fp32 a Mamba block, 8 slots
+      CHECK_EQ(pl.ssm, size_t(mamba) * (128ull * 64 * 128 * 4));                      // 4 MiB fp32 a Mamba block
       CHECK_EQ(pl.conv_rings, size_t(mamba) * 16 * 10240 * 2);
       CHECK_EQ(pl.decode_scratch, size_t(100e6));
       CHECK_EQ(pl.prefill_scratch, size_t(1.5e9));
-      CHECK_EQ(pl.drafter, dev == 1 ? size_t(1.1e9) : size_t(0));                    // the last device only
-      CHECK_EQ(pl.drafter_embed_replica, dev == 1 ? bl::embed_tiled_bytes(d) : size_t(0));
       CHECK_EQ(pl.reserve, size_t(1.5e9));
       CHECK(pl.total() <= card32);
       std::printf("  device %u (blocks [%u, %u), %u attention, %u Mamba): %s\n", dev, p.place.first(dev), p.place.end(dev), attn,
@@ -103,11 +97,10 @@ int main() {
     // the two devices partition the model: Σ weights = the model's
     CHECK_EQ(p.device[0].weights + p.device[1].weights, bl::weight_bytes(d, true));
 
-    // no drafter / scratch: the same split and length, and every term the placeholders add is exactly theirs
+    // no scratch: the same split and length, and every term the placeholders add is exactly theirs
     const BoltPlan q = plan(d, 0, {card32, card32});
     CHECK_EQ(q.max_len, p.max_len);
-    CHECK_EQ(p.device[1].total() - q.device[1].total(),
-             x.decode_scratch + x.prefill_scratch + x.drafter + x.drafter_embed_replica + 7 * bl::ssm_state_bytes(d, 18));
+    CHECK_EQ(p.device[1].total() - q.device[1].total(), x.decode_scratch + x.prefill_scratch);
   }
 
   // --- one 32 GiB card: refused naming the bytes and Decision 4 -----------------------------------------------------------
@@ -141,10 +134,9 @@ int main() {
     CHECK(!next_fits);   // p.max_len is the LARGEST that fits
     std::printf("  24 GB pair (scratch only): max_len auto = %u; device 1: %s\n", p.max_len,
                 describe(p.device[1], card24).c_str());
-    // the same pair with the drafter and its replica does not hold even 4096 positions: refused, naming a device
-    x.drafter = size_t(1.1e9);
-    x.drafter_embed_replica = bl::embed_tiled_bytes(d);
-    refused("device 1", [&] { plan(d, 0, {card24, card24}, x); });
+    // the same pair with 10 GB more scratch a card does not hold even 4096 positions: refused, naming a device
+    x.prefill_scratch += size_t(10e9);
+    refused("device 0", [&] { plan(d, 0, {card24, card24}, x); });
   }
 
   // --- explicit lengths ----------------------------------------------------------------------------------------------------

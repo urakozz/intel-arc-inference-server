@@ -20,9 +20,7 @@
 #              projection lists at the fixture's tiny shapes), muse_dflash (spec 23f: the same lists in
 #              Muse-Glimmer's form - 16 rows, mg_dflash.cl, the inclusive window) and gdn_slots (spec 19c: gdn_step's 8-slot verify
 #              build against the plain kernel, partial acceptance), lfm2moe (spec 24c) and bolt (spec 25c: the Bolt
-#              family's nb_* kernels and Muse's eager attention at Bolt's shape), lilicorr (spec 26b: the LiLiCorr
-#              drafter's lists - ll_* with the sinks, the top-8 + logsumexp, the head, the walk - at the fixture's tiny
-#              shapes, exact / int8 / int4 arms) built and run on the Mac's OpenCL GPU
+#              family's nb_* kernels and Muse's eager attention at Bolt's shape) built and run on the Mac's OpenCL GPU
 #              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
@@ -233,7 +231,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt bolt_pf batch_rows lilicorr; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt bolt_pf batch_rows; do
     # gdn_slots_run (spec 19c) needs no host source: the plain gdn_step kernel is its reference.
     # batch_rows_run (spec 13a) likewise: the production kernels stepping each sequence alone are its reference.
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
@@ -249,9 +247,6 @@ if [ $kernels = 1 ]; then
     [ "$d" = dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
     # muse_dflash_run (spec 23f): the same three (the Muse fixture through dflash_fixture_io.h).
     [ "$d" = muse_dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
-    # lilicorr_run (spec 26b): the fixture's checkpoint read by the loader's host half (LiliCheckpoint: the NVFP4 decode, the
-    # formats) - its sources and the descriptor's.
-    [ "$d" = lilicorr ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc $root/src/loader/snapshot.cc $root/src/loader/dflash_repack.cc $root/src/loader/nvfp4.cc $root/src/loader/lilicorr_repack.cc"
     # lfm2moe_run (spec 24c): lfm2moe_ref.h, its fixture and the loader's RoPE table (lfm_rope_table + the descriptor).
     [ "$d" = lfm2moe ] && extra="$root/src/loader/lfm2moe_rope.cc $root/src/loader/lfm2moe_repack.cc $root/src/model/lfm2moe.cc"
     # shellcheck disable=SC2086

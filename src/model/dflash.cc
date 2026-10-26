@@ -42,8 +42,7 @@ constexpr const char* kSliding = "sliding_attention";
 }  // namespace
 
 bool is_dflash_architecture(const std::string& a) {
-  return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kMuseAssistantArchitecture ||
-         a == kLiLiCorrArchitecture;
+  return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kMuseAssistantArchitecture;
 }
 
 namespace {
@@ -121,14 +120,6 @@ uint32_t DFlashDesc::max_window() const {
   return m;
 }
 
-namespace {
-// The vLLM forms' body (config_from_dict): DFlash / DFlash 2 - or, `lili` (spec 26b), the LiLiCorr form's backbone, which
-// lilicorr_desc_from_config below has already held to its own refusals (dflash_ref.py lilicorr_config_from_dict reads it
-// through the same rules: block_size from the top level when dflash_config has none, no selector, sinks allowed).
-DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture, bool lili);
-DFlashDesc lilicorr_desc_from_config(const Value& c);
-}  // namespace
-
 DFlashDesc dflash_desc_from_config(const Value& c) {
   if (!c.is_object()) refuse("config.json is not an object");
   if (const Value* mt = opt(c, "model_type"); mt && mt->is_string() && mt->str() == "muse_glimmer_assistant")
@@ -136,19 +127,13 @@ DFlashDesc dflash_desc_from_config(const Value& c) {
   if (const Value* a = opt(c, "architectures");
       a && a->is_array() && !a->arr().empty() && a->arr()[0].is_string() && a->arr()[0].str() == kMuseAssistantArchitecture)
     return muse_desc_from_config(c);
+  DFlashDesc d;
   const Value* arch = opt(c, "architectures");
   if (!arch || !arch->is_array() || arch->arr().empty() || !arch->arr()[0].is_string() ||
       !is_dflash_architecture(arch->arr()[0].str()))
     refuse("architectures[0] must be DFlashDraftModel or DFlash2DraftModel");
-  if (arch->arr()[0].str() == kLiLiCorrArchitecture) return lilicorr_desc_from_config(c);
-  return vllm_desc_from_config(c, arch->arr()[0].str(), false);
-}
-
-namespace {
-DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture, bool lili) {
-  DFlashDesc d;
-  d.architecture = architecture;
-  if (!lili && opt(c, "quantization_config"))
+  d.architecture = arch->arr()[0].str();
+  if (opt(c, "quantization_config"))
     refuse("quantization_config: a quantised drafter is not one of our formats - load the bf16 drafter "
            "(it is quantised at load: --draft-format int8)");
   // dc = eagle_config, overlaid by dflash_config (config_from_dict).
@@ -159,7 +144,7 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
       for (const auto& [kk, vv] : v->obj()) dco[kk] = vv;
     }
   const Value dc = Value::make_obj(dco);
-  d.version = (lili || d.architecture.find("DFlash2") != std::string::npos || dc.find("selector_rank") ||
+  d.version = (d.architecture.find("DFlash2") != std::string::npos || dc.find("selector_rank") ||
                dc.find("conv_kernel_size"))
                   ? 2
                   : 1;
@@ -178,9 +163,7 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
     refuse("use_aux_hidden_state=false (no fc) is not supported");
   if (bool_or(c, "attention_bias", false)) refuse("attention_bias=true is not supported");
   if (opt(dc, "attention_value_scale")) refuse("attention_value_scale is not supported");
-  if (lili)   // dflash_ref.py: dflash_config.attention_sink_bias, else add_swa_attention_sink_bias
-    d.sinks = bool_or(dc, "attention_sink_bias", bool_or(c, "add_swa_attention_sink_bias", false));
-  else if (bool_or(dc, "attention_sink_bias", bool_or(c, "add_swa_attention_sink_bias", false)))
+  if (bool_or(dc, "attention_sink_bias", bool_or(c, "add_swa_attention_sink_bias", false)))
     refuse("attention_sink_bias is not supported");
 
   d.layers = u32(c, "num_hidden_layers");
@@ -201,7 +184,7 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
   d.neox = bool_or(c, "is_neox_style", true);
   if (opt(c, "num_target_layers")) d.num_target_layers = u32(c, "num_target_layers");
 
-  d.block = (lili && !opt(dc, "block_size")) ? u32(c, "block_size") : u32(dc, "block_size");   // LiLiCorr: L:438
+  d.block = u32(dc, "block_size");
   if (d.block < 2) refuse("block_size must be at least 2 (an anchor and a mask row)");
   if (opt(dc, "mask_token_id"))
     d.mask_id = u32(dc, "mask_token_id");
@@ -254,13 +237,11 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
   if (d.v2()) {
     d.conv_group = u32(dc, "conv_group_size");
     d.conv_taps = u32(dc, "conv_kernel_size");
-    if (!lili) {   // LiLiCorr has no selector (its head scores the candidates): rank 0
-      d.sel_rank = u32(dc, "selector_rank");
-      d.sel_top_k = u32(dc, "selector_top_k");
-    }
+    d.sel_rank = u32(dc, "selector_rank");
+    d.sel_top_k = u32(dc, "selector_top_k");
     if (d.conv_group == 0 || d.hidden % d.conv_group) refuse("conv_group_size must divide hidden_size");
     if (d.conv_taps == 0) refuse("conv_kernel_size must be positive");
-    if (!lili && (d.sel_rank == 0 || d.sel_top_k == 0)) refuse("selector_rank / selector_top_k must be positive");
+    if (d.sel_rank == 0 || d.sel_top_k == 0) refuse("selector_rank / selector_top_k must be positive");
     d.in_scale = float(num_or(dc, "input_embedding_scale", 1.0));
     d.out_mult = float(num_or(dc, "output_multiplier", 1.0));
     d.softcap = float(num_or(dc, "final_logit_softcapping", 0.0));
@@ -271,70 +252,6 @@ DFlashDesc vllm_desc_from_config(const Value& c, const std::string& architecture
   if (d.softcap < 0.0f) refuse("final_logit_softcapping must not be negative");
   return d;
 }
-
-// Spec 26b: LiLiCorrDraftModel (V/models/lilicorr.py:428-476; dflash_ref.py lilicorr_config_from_dict).
-DFlashDesc lilicorr_desc_from_config(const Value& c) {
-  Value::Object dco;
-  if (const Value* v = opt(c, "dflash_config")) {
-    if (!v->is_object()) refuse("dflash_config is not an object");
-    dco = v->obj();
-  }
-  const Value dc = Value::make_obj(dco);
-  if (!bool_or(dc, "lilicorr_enabled", true))
-    refuse("dflash_config.lilicorr_enabled=false: LiLiCorrDraftModel requires the LiLiCorr head (V/models/lilicorr.py:436)");
-  if (bool_or(c, "has_own_lm_head", false) || bool_or(dc, "has_own_lm_head", false))
-    refuse("has_own_lm_head: LiLiCorr drafts with the target's lm_head (spec 26 §1)");
-  if (opt(c, "draft_vocab_size") && u32(c, "draft_vocab_size") != u32(c, "vocab_size"))
-    refuse("draft_vocab_size != vocab_size: the LiLiCorr candidates need the target's whole vocabulary "
-           "(V/models/lilicorr.py:472)");
-  const uint32_t topk = u32(dc, "lilicorr_candidate_topk");
-  if (topk == 0 || topk > 16 || (topk & (topk - 1)))
-    refuse("lilicorr_candidate_topk " + std::to_string(topk) + " is not a power of two <= 16 (V/models/lilicorr.py:143)");
-  if (!opt(dc, "conv_kernel_size") || !opt(dc, "conv_group_size") || u32(dc, "conv_kernel_size") == 0 ||
-      u32(dc, "conv_group_size") == 0)
-    refuse("conv_kernel_size / conv_group_size: LiLiCorr's backbone is DFlash 2's (its two grouped convolutions)");
-  if (opt(dc, "output_multiplier") && num_or(dc, "output_multiplier", 1.0) != 1.0)
-    refuse("dflash_config.output_multiplier: the LiLiCorr candidates are the target head's RAW logits (spec 26 §2.2)");
-  if (opt(dc, "final_logit_softcapping") && num_or(dc, "final_logit_softcapping", 0.0) != 0.0)
-    refuse("dflash_config.final_logit_softcapping: the LiLiCorr candidates are the target head's RAW logits (spec 26 §2.2)");
-  if (const Value* qc = opt(c, "quantization_config")) {
-    if (!qc->is_object()) refuse("quantization_config is not an object");
-    const Value* m = opt(*qc, "quant_method");
-    const Value* a = opt(*qc, "quant_algo");
-    if (!m || !m->is_string() || m->str() != "modelopt_fp4")
-      refuse("quantization_config.quant_method " + (m && m->is_string() ? m->str() : std::string("(none)")) +
-             ": only ModelOpt's NVFP4 (modelopt_fp4) is read - decoded exactly at load into our formats (spec 26 §3)");
-    if (!a || !a->is_string() || a->str() != "W4A16_NVFP4")
-      refuse("quantization_config.quant_algo " + (a && a->is_string() ? a->str() : std::string("(none)")) +
-             ": only W4A16_NVFP4 is read (spec 26 §3)");
-    if (u32(*qc, "group_size") != 16)
-      refuse("quantization_config.group_size " + std::to_string(u32(*qc, "group_size")) + ": NVFP4's group is 16");
-  }
-  DFlashDesc d = vllm_desc_from_config(c, kLiLiCorrArchitecture, true);
-  for (uint32_t l = 0; l < d.layers; ++l)
-    if (d.causal[l])
-      refuse("layer " + std::to_string(l) + " is causal: the trained LiLiCorr backbone is non-causal (causal: false)");
-  d.form = DFlashForm::LiLiCorr;
-  d.out_mult = 1.0f;
-  d.softcap = 0.0f;
-  d.cand_topk = topk;
-  d.sel_top_k = topk;
-  d.lil_hidden = opt(dc, "lilicorr_hidden_size") ? u32(dc, "lilicorr_hidden_size") : d.hidden;
-  d.lil_layers = u32(dc, "lilicorr_num_layers");
-  d.lil_heads = u32(dc, "lilicorr_num_heads");
-  d.lil_mlp = uint32_t(double(d.lil_hidden) * num_or(dc, "lilicorr_mlp_ratio", 0.0));   // int(hidden x ratio)
-  d.factor_dim = u32(dc, "lilicorr_factor_dim");
-  d.vector_eps = float(num_or(dc, "lilicorr_vector_eps", 0.0));
-  d.lil_logit_scale = float(num_or(dc, "lilicorr_logit_scale", 1.0));
-  if (d.lil_hidden == 0 || d.lil_layers == 0 || d.lil_heads == 0 || d.lil_mlp == 0 || d.factor_dim == 0)
-    refuse("a zero LiLiCorr width (lilicorr_hidden_size / num_layers / num_heads / mlp_ratio / factor_dim)");
-  if (d.lil_hidden % d.lil_heads)
-    refuse("lilicorr_hidden_size " + std::to_string(d.lil_hidden) + " is not a multiple of lilicorr_num_heads " +
-           std::to_string(d.lil_heads));
-  if (!(d.vector_eps > 0.0f)) refuse("lilicorr_vector_eps must be positive");
-  return d;
-}
-}  // namespace
 
 void check_dflash_target(const DFlashDesc& d, const ModelDesc& t, uint32_t target_vocab_rows) {
   check_dflash_target(d, DFlashTargetShape{t.name, t.layers, t.hidden, target_vocab_rows});
@@ -363,38 +280,6 @@ void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& t) {
   if (d.mask_id >= target_vocab_rows)
     bad("mask_token_id " + std::to_string(d.mask_id) + " is not a row of the target's embedding (< " +
         std::to_string(target_vocab_rows) + ")");
-}
-
-void check_lilicorr(const DFlashDesc& d) {
-  auto bad = [](const std::string& what) {
-    throw std::runtime_error("LiLiCorr drafter: " + what + " - the drafter's kernels are built for "
-                             "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr's shapes (kernels::dflash::kLiLiCorr)");
-  };
-  if (!d.lilicorr()) bad("architectures[0] is " + d.architecture + ", not LiLiCorrDraftModel");
-  if (d.layers != 5) bad("num_hidden_layers " + std::to_string(d.layers) + " is not 5");
-  if (d.hidden != 4096) bad("hidden_size " + std::to_string(d.hidden) + " is not 4096");
-  if (d.q_heads != 32 || d.kv_heads != 2 || d.head_dim != 128)
-    bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " + std::to_string(d.head_dim) +
-        " are not 32 / 2 x 128");
-  if (d.inter != 12288) bad("intermediate_size " + std::to_string(d.inter) + " is not 12288");
-  if (d.taps.size() != 6) bad("target_layer_ids holds " + std::to_string(d.taps.size()) + " layers, not 6");
-  if (d.block != 8) bad("block_size " + std::to_string(d.block) + " is not 8");
-  for (uint32_t l = 0; l < d.layers; ++l) {
-    if (d.window[l] != 1024 || d.window_inclusive)
-      bad("layer " + std::to_string(l) + "'s sliding_window " + std::to_string(d.window[l]) +
-          " is not 1024 (|q - k| <= 1023)");
-    if (d.causal[l]) bad("layer " + std::to_string(l) + " is causal");
-  }
-  if (!d.sinks) bad("attention_sink_bias is off (the kernels' reduce adds the sink)");
-  if (d.conv_taps != 2 || d.conv_group != 16)
-    bad("the convolutions are " + std::to_string(d.conv_taps) + " taps x groups of " + std::to_string(d.conv_group) +
-        ", not 2 x 16");
-  if (d.eps != 1e-6f) bad("rms_norm_eps is not 1e-6 (df_prep bakes it)");
-  if (d.cand_topk != 8) bad("lilicorr_candidate_topk " + std::to_string(d.cand_topk) + " is not 8");
-  if (d.lil_hidden != 1024 || d.lil_layers != 2 || d.lil_heads != 8 || d.lil_mlp != 2048 || d.factor_dim != 1024)
-    bad("the LiLiCorr head is " + std::to_string(d.lil_hidden) + " hidden / " + std::to_string(d.lil_layers) +
-        " layers / " + std::to_string(d.lil_heads) + " heads / MLP " + std::to_string(d.lil_mlp) + " / factor " +
-        std::to_string(d.factor_dim) + ", not 1024 / 2 / 8 / 2048 / 1024");
 }
 
 void check_muse_assistant(const DFlashDesc& d) {

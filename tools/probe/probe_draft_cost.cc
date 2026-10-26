@@ -5,8 +5,6 @@
 //
 //   probe_draft_cost [--calls 20] [--rounds 3] [--device 0] [--plain-ms <ms>]
 //   probe_draft_cost --shapes muse [--mmax 16] [--depth 4096,32768] [--calls 10] [--rounds 3] [--device 0]
-//   probe_draft_cost --shapes bolt-lilicorr [--mmax 8] [--depth 4096,65536] [--union M=p50/p90,...] [--calls 10]
-//                    [--rounds 3] [--device 0]
 //
 // No checkpoint: RANDOM WEIGHTS of the drafter's shapes (tools/probe/draft_cost_shapes.h,
 // from z-lab/Qwen3.8-27B-DFlash2's config and safetensors header), one allocation per
@@ -40,22 +38,6 @@
 // 1, S 1): 5 layers' q||k||v, o, gate||up, down, the commit's ctx k||v, fc once, and the int8 head over the 15 draft
 // rows (+ its top-16 is not a GEMV: not timed). NOT in the numbers: the norms, RoPE, the attention kernels' compute,
 // the split-K folds and the taps' copies (small against the weight streams).
-//
-// **`--shapes bolt-lilicorr` (spec 26a Task 4)**: Nemotron 3.5 Bolt's verify at M = 1..mmax rows on ONE card and one
-// LiLiCorr block (draft_cost_shapes.h's bolt_lilicorr namespace). The verify arm at M is model::BoltDesc's 88 blocks in
-// order - the 7 int4 GEMVs at the descriptor's {S, layout}, 25c's nb_router at each MoE block's E, the routed experts in
-// the PLAIN M-row form (9 M stand-in blocks a MoE block, each its own allocation: up K 1024 N 2304 + down K 2304 N 1024,
-// layout 1, the 40 blocks' average 2.5 MB) - then the int8 head and argmax stage 1 at M rows (~11.5 GB allocated). Also
-// timed: the same verify by part (Mamba / attention / MoE dense + routers / head), the experts alone at 9 and 72 blocks a
-// MoE block (the time per block, so the union-aware form at u distinct experts is DERIVED: 40 x u x it; `--union` prints
-// it for expert_union.py's p50 / p90 per M), the SSM state (nb_state_rmw: 40 x 4 MiB read + written - the slot form's
-// (1 + M) x 4 MiB and the replay form's 3 x 4 MiB a Mamba block are DERIVED at that rate, spec 26 Decision 4), and one
-// LiLiCorr block per drafter format (the drafter at 8 rows, the int8 head at the 7 draft rows + argmax stage 1 as the
-// top-8 + logsumexp stand-in, the bf16 LiLiCorr head's projections as 7 launches of 8 rows) and the LiLiCorr head alone.
-// Every arm against its M = 1 counterpart as interleaved pairs after a warm-up, medians. The attention term is ESTIMATED
-// from the KV bytes (8,192 B a position) at the M = 1 pass's bandwidth. NOT in the numbers: the norms, the conv / SSM /
-// gnorm / route / combine / attention kernels' compute and the launch gaps of the ~650 non-GEMV launches a step (the same
-// at every M): the ratio to M = 1 is of the GEMV-and-state part - the projection adds the plain step's rest.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -67,7 +49,6 @@
 #include <vector>
 
 #include "draft_cost_shapes.h"
-#include "kernels/bolt_kernels.h"
 #include "kernels/kernels.h"
 #include "kernels/muse_kernels.h"
 #include "l0/cmdlist.h"
@@ -77,7 +58,6 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "l0/queue.h"
-#include "model/bolt.h"
 #include "timer.h"
 
 namespace {
@@ -527,319 +507,17 @@ int run_muse(uint32_t calls, uint32_t rounds, uint32_t device, uint32_t mmax, co
   return 0;
 }
 
-// ---- spec 26a: Nemotron 3.5 Bolt's verify at M rows and one LiLiCorr block ------------------------------------------
-
-namespace dl = draft_cost::bolt_lilicorr;
-
-// "M=p50/p90,..." (--union: tools/spec/expert_union.py's u per M) -> {M: (p50, p90)}.
-std::vector<std::pair<uint32_t, std::pair<double, double>>> parse_union(const std::string& s) {
-  std::vector<std::pair<uint32_t, std::pair<double, double>>> v;
-  std::stringstream ss(s);
-  std::string item;
-  while (std::getline(ss, item, ',')) {
-    const size_t eq = item.find('='), sl = item.find('/');
-    if (eq == std::string::npos || sl == std::string::npos || sl < eq)
-      throw std::invalid_argument("--union M=p50/p90,... (expert_union.py's u per M), not " + item);
-    v.push_back({uint32_t(std::stoul(item.substr(0, eq))),
-                 {std::stod(item.substr(eq + 1, sl - eq - 1)), std::stod(item.substr(sl + 1))}});
-  }
-  return v;
-}
-
-int run_bolt_lilicorr(uint32_t calls, uint32_t rounds, uint32_t device, uint32_t mmax, const std::vector<uint32_t>& depths,
-                      const std::string& union_spec) {
-  namespace kb = kernels::bolt;
-  if (mmax < 1 || mmax > dl::kMaxM) throw std::invalid_argument("--mmax 1..8 for bolt-lilicorr (block 8)");
-  std::vector<std::pair<uint32_t, std::pair<double, double>>> uni;
-  if (!union_spec.empty()) uni = parse_union(union_spec);
-  const model::BoltDesc& d = model::bolt();
-  Probe P(device);
-  P.shared_out = size_t(dl::kMaxM) * dl::kVocab;   // the largest output: the head's M x 131072 logits
-  std::printf("device: %s\n", P.ctx.name().c_str());
-  std::printf("probe_draft_cost --shapes bolt-lilicorr: Bolt's verify at M = 1..%u rows on ONE card (%u Mamba / %u "
-              "attention / %u MoE blocks, the int8 head, argmax stage 1; the routed experts as 2.507 MB stand-in blocks) "
-              "and one LiLiCorr block (int4 g64 / int8 / bf16 + the bf16 LiLiCorr head); RANDOM weights of the real shapes "
-              "(timing only)\n",
-              mmax, d.mamba_layers(), d.attn_layers(), d.moe_layers());
-
-  // The weights, one allocation per site as the engine has them.
-  struct Site {
-    model::GemvShape s;
-    Weights w;
-  };
-  struct Block {
-    uint32_t layer;
-    std::vector<Site> gemvs;      // in execution order (MoE: fc1||shared_up, fc2, shared_down - the router apart)
-    uint32_t E = 0;
-    const l0::Mem* router = nullptr;
-    std::vector<std::pair<Weights, Weights>> experts;   // the stand-in pool (MoE blocks)
-  };
-  std::vector<Block> blocks;
-  for (uint32_t l = 0; l < d.layers; ++l) {
-    Block b;
-    b.layer = l;
-    for (const model::BoltLinear& L : d.linears(l)) {
-      if (L.id == model::BoltLinearId::ExpertUp || L.id == model::BoltLinearId::ExpertDown) continue;
-      if (L.id == model::BoltLinearId::Router) {
-        b.E = L.shape.N;
-        P.mems.push_back(random_mem(P.ctx, P.imm, size_t(L.shape.K) * L.shape.N * 2, Fill::Bf16, P.seed += 7, P.host));
-        b.router = P.mems.back().get();
-        continue;
-      }
-      b.gemvs.push_back({L.shape, P.weights(Fmt::Int4, L.shape.K, L.shape.N, L.shape.layout)});
-    }
-    if (d.is_moe(l))
-      for (uint32_t e = 0; e < dl::kPool; ++e)
-        b.experts.push_back({P.weights(Fmt::Int4, dl::kLatent, dl::kStandInI, 1),
-                             P.weights(Fmt::Int4, dl::kStandInI, dl::kLatent, 1)});
-    blocks.push_back(std::move(b));
-  }
-  const Weights head = P.weights(Fmt::Int8, dl::kHidden, dl::kVocab);
-  std::vector<const l0::Mem*> states;
-  for (uint32_t i = 0; i < d.mamba_layers(); ++i) {
-    P.mems.push_back(random_mem(P.ctx, P.imm, dl::kStateBytes, Fill::F32, P.seed += 7, P.host));
-    states.push_back(P.mems.back().get());
-  }
-  // argmax stage 1 reads its own logits buffer and writes the partials (not the shared GEMV scratch).
-  P.mems.push_back(random_mem(P.ctx, P.imm, size_t(dl::kMaxM) * dl::kVocab * 4, Fill::F32, P.seed += 7, P.host));
-  const l0::Mem* logits = P.mems.back().get();
-  P.mems.push_back(std::make_unique<l0::Mem>(P.ctx, l0::MemKind::Device, size_t(dl::kMaxM) * kb::argmax_groups() * 2 * 4));
-  const l0::Mem* part = P.mems.back().get();
-
-  auto router = [&](Arm& a, const Block& b, uint32_t M) {   // nb_router(x, w, logits, n_exp), grid (E / 16, M)
-    auto k = std::make_unique<l0::Kernel>(P.module(kb::router_variant(M)), "nb_router");
-    k->group_size(kb::kRouterWg);
-    k->arg_ptr(0, P.x_for(dl::kHidden, M)->ptr());
-    k->arg_ptr(1, b.router->ptr());
-    k->arg_ptr(2, P.out_for(size_t(M) * b.E)->ptr());
-    k->arg<uint32_t>(3, b.E);
-    a.list.launch(*k, b.E / 16, M);
-    a.mb += double(dl::kHidden) * b.E * 2 / 1e6;
-    P.kernels_owned.push_back(std::move(k));
-  };
-  auto argmax1 = [&](Arm& a, uint32_t M) {   // argmax_stage1(logits, part), grid (groups, M)
-    auto k = std::make_unique<l0::Kernel>(P.module(kb::argmax1_variant(M)), "argmax_stage1");
-    k->group_size(kb::kArgmaxWg);
-    k->arg_ptr(0, logits->ptr());
-    k->arg_ptr(1, part->ptr());
-    a.list.launch(*k, kb::argmax_groups(), M);
-    P.kernels_owned.push_back(std::move(k));
-  };
-  auto experts = [&](Arm& a, const Block& b, uint32_t n) {   // n stand-in blocks: up then down, M 1, distinct weights
-    if (n > b.experts.size()) throw std::logic_error("probe_draft_cost: more expert reads than the pool");
-    for (uint32_t e = 0; e < n; ++e) {
-      const auto& [up, dn] = b.experts[e];
-      P.append(a, P.make(Fmt::Int4, 1, dl::kLatent, dl::kStandInI, 1, up, 1), up.mb);
-      P.append(a, P.make(Fmt::Int4, 1, dl::kStandInI, dl::kLatent, 1, dn, 1), dn.mb);
-    }
-  };
-  enum Part : unsigned { kMamba = 1, kAttn = 2, kMoeDense = 4, kExperts = 8, kHead = 16, kAll = 31 };
-  auto verify_arm = [&](uint32_t M, unsigned parts, const std::string& name) {
-    Arm a{name, 0, l0::CmdList::regular(P.ctx), {}};
-    for (const Block& b : blocks) {
-      const bool moe = d.is_moe(b.layer), att = d.is_attention(b.layer);
-      const unsigned kind = moe ? kMoeDense : att ? kAttn : kMamba;
-      if (moe && (parts & kMoeDense)) router(a, b, M);
-      for (size_t i = 0; i < b.gemvs.size(); ++i) {
-        if (parts & kind) {
-          const Site& s = b.gemvs[i];
-          P.append(a, P.make(Fmt::Int4, M, s.s.K, s.s.N, s.s.S, s.w, s.s.layout), s.w.mb);
-        }
-        if (moe && i == 0 && (parts & kExperts)) experts(a, b, dl::kTopK * M);   // after fc1||shared_up: the plain form
-      }
-    }
-    if (parts & kHead) {
-      P.append(a, P.make(Fmt::Int8, M, dl::kHidden, dl::kVocab, 1, head), head.mb);
-      argmax1(a, M);
-    }
-    a.list.close();
-    return a;
-  };
-  struct VArm {
-    uint32_t M;
-    Arm arm;
-  };
-  std::vector<VArm> full;
-  const std::pair<unsigned, const char*> kParts[] = {
-      {kMamba, "Mamba GEMVs"}, {kAttn, "attention GEMVs"}, {kMoeDense, "MoE dense + routers"}, {kHead, "head + argmax 1"}};
-  std::vector<std::vector<VArm>> per(4);
-  for (uint32_t M = 1; M <= mmax; ++M) {
-    full.push_back({M, verify_arm(M, kAll, "verify M " + std::to_string(M) + " (plain experts: 9 M blocks)")});
-    for (size_t p = 0; p < 4; ++p)
-      per[p].push_back({M, verify_arm(M, kParts[p].first, std::string(kParts[p].second) + " M " + std::to_string(M))});
-  }
-  // The experts alone: 9 (M = 1) and 72 (M = 8's plain form) blocks a MoE block - the measured time per block.
-  Arm e9 = verify_arm(1, kExperts, "experts: 9 blocks a MoE block");
-  Arm e72{"experts: 72 blocks a MoE block", 0, l0::CmdList::regular(P.ctx), {}};
-  for (const Block& b : blocks)
-    if (d.is_moe(b.layer)) experts(e72, b, dl::kPool);
-  e72.list.close();
-  // The state: nb_state_rmw over every Mamba block's 4 MiB (read + write in place - the M = 1 step's state traffic).
-  Arm st{"state: 40 x 4 MiB read + written", 0, l0::CmdList::regular(P.ctx), {}};
-  {
-    const uint32_t n4 = uint32_t(dl::kStateBytes / 16);
-    for (const l0::Mem* s : states) {
-      auto k = std::make_unique<l0::Kernel>(P.module("nb_state_rmw_F32"), "nb_state_rmw");
-      k->group_size(256);
-      k->arg_ptr(0, s->ptr());
-      k->arg<uint32_t>(1, n4);
-      st.list.launch(*k, (n4 + 255) / 256);
-      st.mb += 2.0 * double(dl::kStateBytes) / 1e6;
-      P.kernels_owned.push_back(std::move(k));
-    }
-    st.list.close();
-  }
-  // One LiLiCorr block per format: the drafter at 8 rows, the int8 head at 7 + argmax stage 1 (top-8 + lse stand-in),
-  // the LiLiCorr head in bf16. And the head alone.
-  const Weights dhead = head;   // the target's head IS the drafter's (Decision 8: the drafter on the head's card)
-  auto lil_head = [&](Arm& a) {
-    for (const dl::HeadGemv& g : dl::kHeadGemvs)
-      for (unsigned c = 0; c < g.copies; ++c) {
-        const Weights w = P.weights(Fmt::Bf16, g.K, g.N);
-        for (unsigned r = 0; r < g.reps; ++r) P.append(a, P.make(Fmt::Bf16, g.M, g.K, g.N, 1, w), r == 0 ? w.mb : 0.0);
-      }
-  };
-  const Fmt fmts[] = {Fmt::Int4, Fmt::Int8, Fmt::Bf16};
-  std::vector<Arm> drafts;
-  for (Fmt f : fmts) {
-    Arm a{std::string("LiLiCorr block, drafter ") + fmt_name(f) + " + int8 head x7 + LiLiCorr head bf16", 0,
-          l0::CmdList::regular(P.ctx), {}};
-    for (unsigned l = 0; l < dl::kDraftLayers; ++l)
-      for (const draft_cost::Linear& L : dl::kDrafter)
-        if (L.per_layer) {
-          const Weights w = P.weights(f, L.K, L.N, 1);
-          P.append(a, P.make(f, dl::kDraftRows, L.K, L.N, 1, w, 1), w.mb);
-        }
-    for (const draft_cost::Linear& L : dl::kDrafter)
-      if (!L.per_layer) {
-        const Weights w = P.weights(f, L.K, L.N, 1);
-        P.append(a, P.make(f, dl::kDraftRows, L.K, L.N, 1, w, 1), w.mb);
-      }
-    P.append(a, P.make(Fmt::Int8, dl::kDraftHeadRows, dl::kHidden, dl::kVocab, 1, dhead), dhead.mb);
-    argmax1(a, dl::kDraftHeadRows);
-    lil_head(a);
-    a.list.close();
-    drafts.push_back(std::move(a));
-  }
-  Arm lh{"the LiLiCorr head alone (bf16, 56 / 7 / 1 rows)", 0, l0::CmdList::regular(P.ctx), {}};
-  lil_head(lh);
-  lh.list.close();
-  std::printf("allocated %.2f GB (random weights and buffers), %zu verify arms\n", P.allocated_gb(), full.size() * 5);
-
-  // Interleaved pairs after a warm-up: every arm against its own M = 1 counterpart (the full verify's for the experts,
-  // the state and the drafter arms), the order alternating with the round.
-  std::vector<Arm*> all;
-  for (VArm& v : full) all.push_back(&v.arm);
-  for (auto& vv : per)
-    for (VArm& v : vv) all.push_back(&v.arm);
-  for (Arm* x : {&e9, &e72, &st, &lh}) all.push_back(x);
-  for (Arm& x : drafts) all.push_back(&x);
-  for (Arm* x : all) P.run(*x, 2);
-  std::vector<double> ratio(all.size());
-  std::vector<std::vector<double>> ratios(all.size());
-  auto base_of = [&](size_t i) -> Arm& {
-    if (i < full.size()) return full.front().arm;
-    if (i < full.size() * 5) return per[(i - full.size()) / full.size()].front().arm;
-    return full.front().arm;
-  };
-  for (uint32_t r = 0; r < rounds; ++r)
-    for (size_t i = 0; i < all.size(); ++i) {
-      Arm& b = base_of(i);
-      double x, y;
-      if (r % 2 == 0) {
-        y = P.run(b, calls);
-        x = P.run(*all[i], calls);
-      } else {
-        x = P.run(*all[i], calls);
-        y = P.run(b, calls);
-      }
-      all[i]->ms.push_back(x);
-      ratios[i].push_back(x / y);
-    }
-  for (size_t i = 0; i < all.size(); ++i) ratio[i] = median(ratios[i]);
-
-  const double one_ms = median(full.front().arm.ms);
-  const double gbps = full.front().arm.mb / one_ms;   // MB / ms = GB/s
-  const double st_ms = median(st.ms);
-  const double st_rate = st.mb / st_ms;                // MB / ms over the state's read + write traffic
-  const double nm = double(d.mamba_layers()), block_ms = median(e72.ms) / (double(d.moe_layers()) * dl::kPool);
-  std::printf("probe_draft_cost --shapes bolt-lilicorr: %u calls x %u rounds, interleaved pairs against M = 1, medians\n",
-              calls, rounds);
-  std::printf("the M = 1 pass: %.3f ms over %.0f MB = %.0f GB/s (the attention estimate's bandwidth)\n", one_ms,
-              full.front().arm.mb, gbps);
-  std::printf("the state: %.3f ms for %u x 4 MiB read + written (%.0f GB/s) - the slot / replay terms below are DERIVED "
-              "at this rate\n",
-              st_ms, d.mamba_layers(), st_rate);
-  std::printf("the experts: 9 blocks a MoE block %.3f ms, 72 blocks %.3f ms (x %.2f for x 8 the blocks): %.4f ms a "
-              "2.507 MB block (from the 72) - the union-aware form at u distinct experts a MoE block = %u x u x that "
-              "(DERIVED)\n",
-              median(e9.ms), median(e72.ms), median(e72.ms) / median(e9.ms), block_ms, d.moe_layers());
-  // Table 1: the verify per M.
-  std::printf("| M | GEMVs + plain experts + head ms | x M = 1 (pairs) | state slots (1 + M) x 4 MiB ms | replay 3 x 4 MiB ms |");
-  for (uint32_t dp : depths) std::printf(" attn est. at %u ms | verify at %u ms | x M = 1 |", dp, dp);
-  std::printf("\n|---:|---:|---:|---:|---:|");
-  for (size_t i = 0; i < depths.size(); ++i) std::printf("---:|---:|---:|");
-  std::printf("\n");
-  for (size_t i = 0; i < full.size(); ++i) {
-    const uint32_t M = full[i].M;
-    const double ms = median(full[i].arm.ms);
-    const double slots = (1.0 + M) * nm * double(dl::kStateBytes) / 1e6 / st_rate;
-    const double replay = 3.0 * nm * double(dl::kStateBytes) / 1e6 / st_rate;
-    const double one_state = 2.0 * nm * double(dl::kStateBytes) / 1e6 / st_rate;   // M = 1: read + write in place
-    std::printf("| %u | %.3f | %.3f | %.3f | %.3f |", M, ms, ratio[i], slots, replay);
-    for (uint32_t dp : depths) {
-      const double attn = dl::kKvBytesPerPos * dp / 1e6 / gbps;
-      const double v = ms + attn + (M == 1 ? one_state : slots), v1 = one_ms + attn + one_state;
-      std::printf(" %.3f | %.3f | %.3f |", attn, v, v / v1);
-    }
-    std::printf("\n");
-  }
-  // Table 2: by part.
-  std::printf("| M |");
-  for (const auto& p : kParts) std::printf(" %s ms | x M = 1 |", p.second);
-  std::printf(" plain experts (full - parts) ms |\n|---:|");
-  for (size_t p = 0; p < 4; ++p) std::printf("---:|---:|");
-  std::printf("---:|\n");
-  for (size_t i = 0; i < full.size(); ++i) {
-    std::printf("| %u |", full[i].M);
-    double parts_ms = 0;
-    for (size_t p = 0; p < 4; ++p) {
-      const size_t k = full.size() + p * full.size() + i;
-      const double ms = median(all[k]->ms);
-      parts_ms += ms;
-      std::printf(" %.3f | %.3f |", ms, ratio[k]);
-    }
-    std::printf(" %.3f |\n", median(full[i].arm.ms) - parts_ms);
-  }
-  if (!uni.empty()) {
-    std::printf("| M | u p50 | u p90 | union experts p50 ms | p90 ms | plain experts 9 M ms (DERIVED at the same rate) |\n"
-                "|---:|---:|---:|---:|---:|---:|\n");
-    for (const auto& [M, u] : uni)
-      std::printf("| %u | %.2f | %.2f | %.3f | %.3f | %.3f |\n", M, u.first, u.second,
-                  d.moe_layers() * u.first * block_ms, d.moe_layers() * u.second * block_ms,
-                  d.moe_layers() * 9.0 * M * block_ms);
-  }
-  // Table 3: one block.
-  std::printf("| arm | ms | x the M = 1 verify's GEMVs (pairs) | weight MB | GB/s |\n|---|---:|---:|---:|---:|\n");
-  const size_t first_block = full.size() * 5 + 3;   // lh, then the three drafter formats (the order of `all`)
-  for (size_t i = first_block; i < all.size(); ++i) {
-    const double ms = median(all[i]->ms);
-    std::printf("| %s | %.3f | %.3f | %.0f | %.0f |\n", all[i]->name.c_str(), ms, ratio[i], all[i]->mb, all[i]->mb / ms);
-  }
-  return 0;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
   uint32_t calls = 20, rounds = 3, device = 0, mmax = 16;
   double plain_ms = 0;
-  std::string shapes = "qwen38", union_spec;
+  std::string shapes = "qwen38";
   std::vector<uint32_t> depths = {4096, 32768};
-  bool calls_given = false, depths_given = false, mmax_given = false;
+  bool calls_given = false;
   if (argc % 2 == 0) {
-    std::fprintf(stderr, "usage: probe_draft_cost [--shapes qwen38|muse|bolt-lilicorr] [--calls 20] [--rounds 3] [--device 0]"
-                         " [--plain-ms <ms>] [--mmax 16|8] [--depth 4096,32768] [--union M=p50/p90,...]\n");
+    std::fprintf(stderr, "usage: probe_draft_cost [--shapes qwen38|muse] [--calls 20] [--rounds 3] [--device 0]"
+                         " [--plain-ms <ms>] [--mmax 16] [--depth 4096,32768]\n");
     return 2;
   }
   for (int i = 1; i + 1 < argc; i += 2) {
@@ -851,13 +529,8 @@ int main(int argc, char** argv) {
     else if (a == "--device") device = uint32_t(std::stoul(argv[i + 1]));
     else if (a == "--plain-ms") plain_ms = std::stod(argv[i + 1]);
     else if (a == "--shapes") shapes = argv[i + 1];
-    else if (a == "--mmax") {
-      mmax = uint32_t(std::stoul(argv[i + 1]));
-      mmax_given = true;
-    } else if (a == "--depth") {
-      depths = parse_list(argv[i + 1]);
-      depths_given = true;
-    } else if (a == "--union") union_spec = argv[i + 1];
+    else if (a == "--mmax") mmax = uint32_t(std::stoul(argv[i + 1]));
+    else if (a == "--depth") depths = parse_list(argv[i + 1]);
     else {
       std::fprintf(stderr, "probe_draft_cost: unknown flag %s\n", a.c_str());
       return 2;
@@ -866,15 +539,8 @@ int main(int argc, char** argv) {
   if (calls == 0 || rounds == 0) return 2;
   try {
     if (shapes == "muse") return run_muse(calls_given ? calls : 10, rounds, device, mmax, depths);
-    if (shapes == "bolt-lilicorr")
-      return run_bolt_lilicorr(calls_given ? calls : 10, rounds, device, mmax_given ? mmax : 8,
-                               depths_given ? depths : std::vector<uint32_t>{4096, 65536}, union_spec);
-    if (!union_spec.empty()) {
-      std::fprintf(stderr, "probe_draft_cost: --union is --shapes bolt-lilicorr's\n");
-      return 2;
-    }
     if (shapes != "qwen38") {
-      std::fprintf(stderr, "probe_draft_cost: --shapes qwen38|muse|bolt-lilicorr, not %s\n", shapes.c_str());
+      std::fprintf(stderr, "probe_draft_cost: --shapes qwen38|muse, not %s\n", shapes.c_str());
       return 2;
     }
     return run_qwen38(calls, rounds, device, plain_ms);

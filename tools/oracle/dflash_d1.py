@@ -25,20 +25,6 @@ RTN or int4 g64 RTN simulated (dflash_accept.int8_simulate / int4g64_simulate - 
 target's head bf16 or int8 RTN; the whole 16-row block per draft (draft_block), the head's RAW logits on mask rows
 1..K (or, "q": "capped", 20 tanh(z x 0.19611613513818404 / 20) - the order is the raw one); greedy = argmax (the lowest
 id among equals). The bars are the same three (scores = the unary logits).
-
-Spec 26b: a run line with "form": "lilicorr" (tools/probe/dflash_d1 --model lilicorr beside a Bolt target, or the host twin
-tests/kernels/lilicorr_d1_twin) is held to dflash_ref.py's LiLiCorr form (26a's port of vLLM's models/lilicorr.py), float32:
-the drafter at the run's format - exact (W' + g, as decoded), int8 (dflash_accept.lil_int8_simulate: W''s codes, the row
-scale fp32(g x s')) or int4 g64 (lil_int4_simulate: rtn from g x W' in fp64) - its head always exact; the target's head
-bf16 or int8 RTN (dflash_accept.Head); the whole 8-row block, all 7 slots, T 0. D1's bars per draft (spec 26 §7):
-  sets     each slot's 8 candidates equal the reference's, tie-aware (an id one side lacks within max(1e-3, 1e-4 x |v|) of
-           the reference's 8th raw logit)
-  lp       the candidates' log-probs (aligned by id) within 1e-3
-  lattice  the lattice's cosine >= 0.9999 (exact) / 0.999 (int8, int4) - compared where both sides hold the same candidates
-           in the same order (another candidate list is another lattice; those drafts are counted, not compared)
-  walk     the 7 ids equal (T 0)
-  anchor   the anchor row the head read (the engine's anchor buffer) cosine >= 0.9999 to the reference's hidden_norm(fc(taps))
-           of p - 1
 """
 from __future__ import annotations
 
@@ -165,125 +151,14 @@ def muse_reference(run: dict, drafter_dir: str, target_dir: str):
     return d, draft
 
 
-def lilicorr_reference(run: dict, drafter_dir: str, target_dir: str):
-    """Spec 26b: dflash_ref's LiLiCorr drafter at the engine's arm (the module docstring), its head_logits the arm's head."""
-    ref = _load("dflash_ref")
-    acc = _load("dflash_accept")
-    acc._load_deps()
-    d = ref.load_drafter(drafter_dir, target_dir)
-    if d.cfg.form != "lilicorr":
-        raise SystemExit(f"the run line says form lilicorr; {drafter_dir} is not a LiLiCorr drafter")
-    if run["format"] == "int8":
-        acc.lil_int8_simulate(d)
-    elif run["format"] in ("int4", "int4g64"):
-        acc.lil_int4_simulate(d)
-    elif run["format"] != "exact":
-        raise SystemExit(f"format {run['format']}: exact, int8 or int4")
-    head = acc.Head(d.lm_head, int8=run["head"] == "int8")
-    import torch
-    # The engine's head reads the final norm's bf16 copy (df_norm's x - the verify list's head reads the same): the arm's
-    # head input, not a drafter error, so the reference rounds it too (--fp32-head-input keeps fp32, the plain port).
-    if run.get("head_input", "bf16") == "bf16":
-        d.head_logits = lambda h: head.logits(h.float().to(torch.bfloat16).float())
-    else:
-        d.head_logits = head.logits
-    return d
-
-
-def compare_lilicorr(rec: dict, out, logits_row, bar: float, lp_bar: float = 1e-3) -> dict:
-    """One LiLiCorr draft (the module docstring's five bars)."""
-    res = {"sets": True, "walk": True, "ties": 0, "lp": 0.0, "lattice": None, "anchor": 1.0}
-    same = True
-    for s in range(len(rec["cand"])):
-        e, r = rec["cand"][s], out.cand_ids[s].tolist()
-        rv = [float(x) for x in logits_row(s)[out.cand_ids[s]].tolist()]
-        edge = rv[-1]
-        tol = max(1e-3, 1e-4 * abs(edge))
-        only_e = [i for i in e if i not in r]
-        only_r = [i for i in r if i not in e]
-        if only_e or only_r:
-            lr = logits_row(s)
-            ok = all(abs(float(lr[i]) - edge) <= tol for i in only_e) and \
-                all(abs(rv[r.index(i)] - edge) <= tol for i in only_r)
-            res["sets"] &= ok
-            res["ties"] += int(ok)
-        same &= e == r
-        rl = dict(zip(r, out.log_probs[s].tolist()))
-        for c, v in zip(e, rec["lp"][s]):
-            if c in rl:
-                res["lp"] = max(res["lp"], abs(v - rl[c]))
-        res["walk"] &= rec["ids"][s] == int(out.ids[s])
-    if same:
-        flat = [x for sl in rec["lattice"] for row in sl for x in row]
-        res["lattice"] = cosine(flat, out.lattice.reshape(-1).tolist())
-    res["anchor"] = cosine(rec["anchor_row"], out.anchor.tolist())
-    res["ok"] = res["sets"] and res["walk"] and res["lp"] <= lp_bar and res["anchor"] >= 0.9999 and \
-        (res["lattice"] is None or res["lattice"] >= bar)
-    return res
-
-
-def evaluate_lilicorr(run: dict, recs: list, dumps_dir: str, drafter_dir: str, target_dir: str, md: str | None,
-                      log, lp_bar: float = 1e-3) -> tuple[bool, dict]:
-    import torch
-    dt = _load("dump_taps")
-    d = lilicorr_reference(run, drafter_dir, target_dir)
-    bar = 0.9999 if run["format"] == "exact" else 0.999
-    files = {dt.dump_header(path)["name"]: path for path in glob.glob(os.path.join(dumps_dir, "*.taps.safetensors"))}
-    by_dump = {}
-    for r in recs:
-        by_dump.setdefault(r["dump"], []).append(r)
-    n = n_ok = n_sets = n_walk = n_lat = n_cmp = ties = 0
-    worst_lat, worst_anchor, worst_lp = 1.0, 1.0, 0.0
-    fails = []
-    for name, rs in by_dump.items():
-        dump = dt.load_dump(files[name])
-        pos = torch.arange(dump["tap_from"], dump["n"])
-        ctx = d.context_kv({i: dump["taps"][i] for i in d.cfg.target_layer_ids}, pos)
-        for r in rs:
-            out = d.draft_block(r["anchor"], r["p"], r["k"], ctx)
-            c = compare_lilicorr(r, out, lambda j, out=out: d.head_logits(out.hidden[1 + j:2 + j])[0], bar, lp_bar)
-            n += 1
-            n_ok += c["ok"]
-            n_sets += c["sets"]
-            n_walk += c["walk"]
-            ties += c["ties"]
-            worst_lp = max(worst_lp, c["lp"])
-            worst_anchor = min(worst_anchor, c["anchor"])
-            if c["lattice"] is not None:
-                n_cmp += 1
-                n_lat += c["lattice"] >= bar
-                worst_lat = min(worst_lat, c["lattice"])
-            if not c["ok"]:
-                fails.append((name, r["p"], c))
-        log(f"{name}: {len(rs)} drafts")
-    table = (f"| arm | drafts | sets (tie-aware) | lp within {lp_bar:g} (worst) | lattice cos >= {bar} (compared) | walk equal | "
-             f"anchor cos (worst) | ties excused |\n|---|---:|---:|---:|---:|---:|---:|---:|\n"
-             f"| LiLiCorr {'twin ' + run.get('head_input', 'bf16') + ' head input, ' if run.get('twin') else ''}drafter "
-             f"{run['format']}, head {run['head']} | {n} | {n_sets} | {worst_lp:.2e} | "
-             f"{n_lat} / {n_cmp} (worst {worst_lat:.7f}) | {n_walk} | {worst_anchor:.7f} | {ties} |\n")
-    log(table)
-    for name, p, c in fails[:20]:
-        log(f"  FAIL {name} p {p}: sets {c['sets']}, walk {c['walk']}, lp {c['lp']:.2e}, lattice {c['lattice']}, "
-            f"anchor {c['anchor']:.7f}")
-    if md:
-        with open(md, "a") as f:
-            f.write(table)
-    ok = n > 0 and n_ok == n
-    log("D1 " + ("PASS" if ok else "FAIL") + f" ({run.get('load', '')})")
-    return ok, {"n": n, "ok": n_ok, "sets": n_sets, "walk": n_walk, "lattice": n_lat, "compared": n_cmp,
-                "worst_lattice": worst_lat, "worst_anchor": worst_anchor, "worst_lp": worst_lp, "ties": ties}
-
-
 def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md: str | None = None,
-             log=print, lp_bar: float = 1e-3) -> tuple[bool, dict]:
+             log=print) -> tuple[bool, dict]:
     import torch
     dt = _load("dump_taps")
     with open(d1_path) as f:
         lines = [json.loads(x) for x in f if x.strip()]
     run = lines[0]["run"]
     recs = lines[1:]
-    if run.get("form") == "lilicorr":   # spec 26b
-        return evaluate_lilicorr(run, recs, dumps_dir, drafter_dir, target_dir, md, log, lp_bar)
     muse = run.get("form") == "muse"
     if muse:
         d, muse_draft = muse_reference(run, drafter_dir, target_dir)
@@ -360,12 +235,11 @@ def main() -> None:
     ap.add_argument("--target", required=True, help="the target snapshot (its embed_tokens and lm_head)")
     ap.add_argument("--md")
     ap.add_argument("--threads", type=int, default=0)
-    ap.add_argument("--lp-bar", type=float, default=1e-3, help="spec 26b: the LiLiCorr log-probs' bar (spec 26 §7: 1e-3)")
     a = ap.parse_args()
     import torch
     if a.threads:
         torch.set_num_threads(a.threads)
-    ok, _ = evaluate(a.d1, a.dumps, a.drafter, a.target, a.md, log=lambda s: print(s, flush=True), lp_bar=a.lp_bar)
+    ok, _ = evaluate(a.d1, a.dumps, a.drafter, a.target, a.md, log=lambda s: print(s, flush=True))
     sys.exit(0 if ok else 1)
 
 

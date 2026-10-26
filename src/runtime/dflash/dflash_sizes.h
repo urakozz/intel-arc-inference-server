@@ -87,8 +87,7 @@ struct DFlashCtl;
 void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed);
 // Spec 23f: the dctl.k a draft list runs at for a caller that keeps k drafts - k (Qwen3.8's drafter: rows and keys
 // past k masked, vLLM's block of k + 1), or a Muse-form drafter's whole block (15: every row attends to all 16, as
-// transformers' DFlashTokenCandidateGenerator always drafts; the caller verifies the first k). Spec 26b: a LiLiCorr-form
-// drafter's whole block too (7: the head scores every slot, K = 1..7 are prefixes of one walk - spec 26 §12 ruling 1).
+// transformers' DFlashTokenCandidateGenerator always drafts; the caller verifies the first k).
 uint32_t draft_list_k(const model::DFlashDesc& d, uint32_t k);
 
 }  // namespace runtime::dflash
