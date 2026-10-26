@@ -88,8 +88,8 @@ json normalize_message(const json& message) {
   const json& content = message.at("content");
   if (content.is_array()) {
     for (const json& part : content) {
-      // Spec 23e: an image / video / audio part is refused by name - no served model loads its encoder (Muse-Glimmer's
-      // vision tower is out of scope, spec 23 §10). A text-bearing part of another type (input_text) stays text.
+      // Spec 23e: an image / video / audio part is refused by name - no served model loads its encoder (spec 23 §10's
+      // rule). A text-bearing part of another type (input_text) stays text.
       static const char* const kMedia[] = {"image", "image_url", "input_image", "video", "video_url", "input_video",
                                            "audio", "input_audio", "file", "input_file"};
       const bool media = part.is_object() && part.contains("type") && part.at("type").is_string() &&
@@ -115,7 +115,7 @@ json normalize_message(const json& message) {
         const std::string text = fn.at("arguments").get<std::string>();
         json parsed = text.empty() ? json::object() : json::parse(text, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object()) {
-          // Spec 23e (plan 23e Review Focus 5): name the call - a template that iterates the arguments (Muse's raises
+          // Spec 23e (plan 23e Review Focus 5): name the call - a template that iterates the arguments (it may raise
           // on a string) must never see one, and the client must see which call it sent wrong.
           const std::string name = fn.contains("name") && fn.at("name").is_string() ? fn.at("name").get<std::string>() : "";
           const std::string id = call.contains("id") && call.at("id").is_string() ? call.at("id").get<std::string>() : "";
@@ -139,8 +139,8 @@ Request parse_request(const std::string& body, bool chat) { return parse_request
 
 Sampling generation_sampling(const json& g) {
   // Spec 24e: a field the file does not name takes Hugging Face's GenerationConfig default (temperature 1.0, top_k 50,
-  // top_p 1.0, repetition_penalty 1.0), not Sampling{}'s request defaults (top_k 20, top_p 0.95). Kolibri-1's and
-  // Muse-Glimmer's files name all of temperature, top_p and top_k, so their resolved sampling is as before.
+  // top_p 1.0, repetition_penalty 1.0), not Sampling{}'s request defaults (top_k 20, top_p 0.95). Kolibri-1's file
+  // names all of temperature, top_p and top_k, so their resolved sampling is as before.
   Sampling s;
   s.temperature = 1.0f;
   s.top_k = 50;

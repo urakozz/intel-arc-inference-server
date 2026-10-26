@@ -67,7 +67,7 @@ std::string describe(const DevicePlan& p, size_t device_bytes = 0);
 // ==== spec 25c: the decode list's switches, scratch and launch counts (begin) ==========================================
 inline constexpr uint32_t kM = 1;   // the decode list is M = 1
 
-// Which decode attention every capture binds - Muse's flash mg_attn (the default, held to fp64) or its eager form (the
+// Which decode attention every capture binds - spec 23c's flash mg_attn (the default, held to fp64) or its eager form (the
 // reference's bf16 chain, ONE launch): `B70_BOLT_ATTN=flash|eager`; unset or empty is the default; anything else throws.
 enum class BoltAttn { Flash, Eager };
 BoltAttn parse_attn(const std::string& v);
@@ -193,7 +193,7 @@ size_t decode_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement
 // included), and their sum (spec 25 §6.1):
 //   device 0     nb_embed_gather
 //   a block      Mamba 6 (norm, in_proj, conv, ssm, gnorm, out_proj); attention 6 (norm, q||k||v, prep, decode, reduce,
-//                o) - eager 5 (Muse's mg_attn_eager is ONE launch, Decision 15); MoE 9 (norm, router, route,
+//                o) - eager 5 (spec 23c's mg_attn_eager is ONE launch, Decision 15); MoE 9 (norm, router, route,
 //                fc1||shared_up, sh_act, up, down, fc2, shared_down); the arms: conv -1 a Mamba block, router -1 and route
 //                -1 a MoE block
 //   last device  the final norm (norm_f, folding the last block), the head GEMV, the two argmax stages

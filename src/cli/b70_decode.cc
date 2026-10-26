@@ -40,7 +40,6 @@
 #include "cli/kolibri_decode.h"
 #include "cli/lfm2moe_decode.h"   // spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe)
 #include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
-#include "cli/muse_decode.h"
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
@@ -186,12 +185,6 @@ void usage() {
       "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2. Spec 21d:\n"
       "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
       "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
-      "  Muse-Glimmer-30B (model_type muse_glimmer, spec 23c): one card by default (--pp 2 for\n"
-      "                 capacity); --lm-head int8 is ITS default (bf16 on request); --layers N\n"
-      "                 development mode; --max-len at most 131072 (decision 6). The prompt is\n"
-      "                 decoded one replay per id: --prefill* (spec 23d), --mtp / --spec (23f),\n"
-      "                 --kv-cache int8 and --profile refused. B70_MUSE_ATTN=eager: the\n"
-      "                 reference's bf16 attention chain (A/B).\n"
       "  LFM2.5-24B-A2B (model_type lfm2_moe, spec 24c): one card by default (the model and its\n"
       "                 131072 positions fit one B70); --lm-head int8 is ITS default (bf16 reads\n"
       "                 the tied embedding tiles); --profile prints its per-launch anatomy. The\n"
@@ -810,13 +803,11 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
-  bool have_lm_head = false;   // spec 23c: Muse-Glimmer's head is int8 unless --lm-head bf16
-  bool have_spec = false;      // spec 23c: --spec is refused by name for Muse-Glimmer (23f's DFlash); else unknown
+  bool have_lm_head = false;   // LFM2.5 / Bolt: the head is int8 unless --lm-head bf16
+  bool have_spec = false;      // --spec: dflash (Qwen3.8); LFM2.5 / Bolt refuse it by name; else unknown
   std::string spec_arg;        // spec 19c: `dflash` runs the DFlash drafter (--ids); anything else is unknown
   cli::dflash::Args dflash;
   bool have_spec_max = false;
-  runtime::dflash::MuseQ draft_q = runtime::dflash::MuseQ::Raw;   // spec 23f: --draft-q (Muse-Glimmer only)
-  bool have_draft_q = false;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
   // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
   uint32_t mtp_k = 0;
@@ -914,7 +905,7 @@ int run(int argc, char** argv) {
       if (!loader::parse_lm_head_form(v, lm_head))
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
       have_lm_head = true;
-    } else if (a == "--spec") {   // spec 23c: parsed so Muse-Glimmer refuses it by name; spec 19c: dflash
+    } else if (a == "--spec") {   // spec 19c: dflash; LFM2.5 / Bolt refuse it by name
       spec_arg = value(i, "--spec");
       have_spec = true;
     } else if (a == "--spec-max") {   // spec 19c
@@ -923,16 +914,11 @@ int run(int argc, char** argv) {
     } else if (a == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (a == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only)
+    } else if (a == "--draft-format") {   // spec 19c
       const std::string v = value(i, "--draft-format");
       if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8, bf16 or int4, got '" + v + "'");
+        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
       dflash.have_format = true;
-    } else if (a == "--draft-q") {   // spec 23f: Muse-Glimmer only
-      const std::string v = value(i, "--draft-q");
-      if (!runtime::dflash::parse_muse_q(v, draft_q))
-        throw std::runtime_error("--draft-q expects raw or capped, got '" + v + "'");
-      have_draft_q = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
       throw std::runtime_error(cli::unknown_option(a));
@@ -1059,7 +1045,7 @@ int run(int argc, char** argv) {
     return cli::bolt::run_decode<StdoutToStderr>(ba);
   }
   // Spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine on one card (or two) -
-  // dispatched here, beside Kolibri-1 and Muse-Glimmer and before the Qwen engine's pipeline and kv-cache rules (its
+  // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its
   // own refusals, cli/lfm2moe_decode.h: the prefill's backend and chunk (spec 24d: l0 only, chunk <= 2048), --mtp /
   // --spec (no MTP head), int8 KV (decision 11), --layers). A path that does not resolve is not LFM2 - the flows below
   // report it.
@@ -1089,53 +1075,8 @@ int run(int argc, char** argv) {
     la.layers = have_layers;
     return cli::lfm2moe::run_decode<StdoutToStderr>(la);
   }
-  // Spec 23c: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine on one card (or two) -
-  // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/muse_decode.h: the prefill's backend and chunk (spec 23d), --mtp / --spec, int8 KV (decision 8), --max-len above 131072
-  // (decision 6)). A path that does not resolve is not Muse - the flows below report it.
-  if (cli::muse::is_muse(path)) {
-    cli::muse::DecodeArgs ma;
-    ma.path = path;
-    ma.ids_path = ids_path;
-    ma.n = n;
-    ma.bench = bench;
-    ma.depth = depth;
-    ma.tg = tg;
-    ma.max_len = max_len_arg;
-    ma.device = device;
-    ma.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
-    ma.layers = layers;
-    ma.pipe = pipe;
-    ma.prefill = prefill;           // spec 23d: --ids through MuseEngine::prefill
-    ma.pp = have_prefill_len;       // --prefill-length N already set depth = N above
-    ma.pp_chunk = pp_chunk;
-    ma.pp_backend_given = have_pp_backend;
-    ma.pp_backend = pp_backend;
-    ma.mtp = mtp_on;
-    ma.spec = have_spec && spec_arg == "mtp";   // refused by name (no MTP head)
-    if (have_spec && spec_arg != "mtp" && spec_arg != "dflash" && spec_arg != "lookup" && spec_arg != "off")
-      throw std::runtime_error(cli::unknown_option("--spec"));
-    // Spec 23f: --spec dflash and the drafter's flags (cli/muse_spec.h).
-    cli::muse::SpecArgs& sa = ma.spec_args;
-    sa.spec = have_spec && (spec_arg == "dflash" || spec_arg == "lookup") ? spec_arg : "off";
-    if (dflash.have_model) sa.draft_model = dflash.model;
-    if (dflash.have_format) sa.format = dflash.format;
-    sa.have_model = dflash.have_model;
-    sa.have_format = dflash.have_format;
-    sa.q = draft_q;
-    sa.have_q = have_draft_q;
-    sa.have_max_k = have_spec_max;
-    if (have_spec_max) sa.max_k = dflash.max_k;
-    ma.kv8 = kv_cache == runtime::KvCache::Int8;
-    ma.profile = profile;
-    ma.layers_auto = layers_auto;
-    ma.ple_dir = !ple_dir.empty();
-    return cli::muse::run_decode<StdoutToStderr>(ma);
-  }
   // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card); every other --spec is unknown here.
   if (have_spec && spec_arg != "dflash") throw std::runtime_error(cli::unknown_option("--spec"));
-  if (have_draft_q)
-    throw std::runtime_error("--draft-q is Muse-Glimmer-30B's (spec 23f: the q of its assistant's 16 candidates)");
   dflash.on = spec_arg == "dflash";
   if (have_spec_max && !dflash.on) throw std::runtime_error("--spec-max needs --spec dflash");
   cli::dflash::check_flags(dflash);

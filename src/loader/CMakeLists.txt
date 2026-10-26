@@ -34,22 +34,13 @@ add_library(b70_qwen4exp_loader STATIC qwen4exp_repack.cc qwen4exp_ple.cc qwen4e
 target_include_directories(b70_qwen4exp_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_qwen4exp_loader PUBLIC b70_loader b70_qwen4exp_model b70_qwen4exp_plan b70_l0)
 
-# --- Spec 23b: Muse-Glimmer-30B ------------------------------------------------------------------
-# The Muse-Glimmer loader, beside the others (none touched): the host half (muse_repack.cc - no Level Zero, run on
-# any host by tests/loader/muse_repack_test.cc and muse_synth_host_test.cc) and the upload onto one or two devices
-# (muse_loader.cc). It links the host-only planner (b70_muse_plan): the load runs the plan and refuses what does not
-# fit before the first allocation.
-add_library(b70_muse_loader STATIC muse_repack.cc muse_loader.cc)
-target_include_directories(b70_muse_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
-target_link_libraries(b70_muse_loader PUBLIC b70_loader b70_muse_model b70_muse_plan b70_l0)
-
 # --- Spec 24b: LFM2.5-24B-A2B --------------------------------------------------------------------
 # The LFM2.5-24B-A2B loader, beside the others (none touched): the host half (lfm2moe_repack.cc,
 # lfm2moe_rope.cc - no Level Zero, run on any host by tests/loader/lfm2moe_repack_test.cc and
 # lfm2moe_rope_test.cc / lfm2moe_synth_host_test.cc) and the upload onto one or two devices
 # (lfm2moe_loader.cc, Task 4).
 # b70_lfm2moe_plan (src/runtime/lfm2moe): the memory plan - linked so load_lfm2moe can call
-# runtime::lfm2moe::require_fits before its first allocation (I2, muse_loader.cc's precedent).
+# runtime::lfm2moe::require_fits before its first allocation (I2).
 add_library(b70_lfm2moe_loader STATIC lfm2moe_repack.cc lfm2moe_rope.cc lfm2moe_loader.cc)
 target_include_directories(b70_lfm2moe_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_lfm2moe_loader PUBLIC b70_loader b70_lfm2moe_model b70_l0 b70_lfm2moe_plan)
@@ -67,7 +58,7 @@ target_link_libraries(b70_dflash_loader PUBLIC b70_loader b70_dflash_model b70_l
 # tests/loader/bolt_repack_test.cc and bolt_synth_host_test.cc; the checkpoint driver BoltCheckpoint is header-only in
 # bolt_loader.h) and the upload onto one or two devices (bolt_loader.cc, Task 5).
 # b70_bolt_plan (src/runtime/bolt): the memory plan - linked so load_bolt can call runtime::bolt::require_fits before its
-# first allocation (muse_loader.cc's / lfm2moe_loader.cc's precedent).
+# first allocation (lfm2moe_loader.cc's precedent).
 add_library(b70_bolt_loader STATIC bolt_repack.cc bolt_loader.cc)
 target_include_directories(b70_bolt_loader PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_bolt_loader PUBLIC b70_loader b70_bolt_model b70_l0 b70_bolt_plan)

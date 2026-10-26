@@ -16,7 +16,7 @@
 //      zeros in the padding columns [18560, 18688)
 //   5. 25c's per-row kernels at M 2048 (the norm folds _NF / _S1 / _S1_T1, the router, the route, the shared act, the
 //      attention prep) and nb_pf_embed_gather - bitwise the twin over 300 rows
-//   6. attention (Decision 15: Muse's mg_pf_flash_attn at Bolt's full NoPE layer): flash against fp64 at cosine >= 0.99999
+//   6. attention (Decision 15: spec 23d's mg_pf_flash_attn at Bolt's full NoPE layer): flash against fp64 at cosine >= 0.99999
 //      at depths 3000 / 65536 / 200000 (a 64-row chunk ending there); the eager build bitwise decode's eager rows (23d)
 #include <algorithm>
 #include <cmath>

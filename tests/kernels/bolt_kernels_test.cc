@@ -16,7 +16,7 @@
 //   6. nb_moe_up / nb_moe_down at I 1536 / 2048 / 2304 / 2560 over int4 experts with signed scales (each slot's id from
 //      the route row, ascending); the arm `route` (_R) against nb_route + nb_moe_up (Review Focus 5)
 //   7. nb_sh_act, nb_attn_prep at 0 / 262143, nb_embed_gather, the argmax at 131072 (maxima at 0 and 131071, ties low)
-//   8. attention (Decision 15: Muse's binaries, a ones gate): mg_attn_eager against the twin at 6 / 300 / 3000 keys;
+//   8. attention (Decision 15: spec 23c's binaries, a ones gate): mg_attn_eager against the twin at 6 / 300 / 3000 keys;
 //      mg_attn (flash) against fp64 at cosine >= 0.99999 at 1, 2, 300, 4096, 65536, 262143 keys
 #include <algorithm>
 #include <cmath>
@@ -523,7 +523,7 @@ void test_small(Dev& d) {
   std::printf("  7. nb_sh_act, nb_attn_prep at 0 / 262143, nb_embed_gather, the argmax at 131072 - bitwise\n");
 }
 
-// --- 8. attention (Muse's binaries, Decision 15) -------------------------------------------------------------------------
+// --- 8. attention (spec 23c's binaries, Decision 15) -------------------------------------------------------------------------
 void test_attention(Dev& d) {
   const uint32_t HD = br::kHd, KV = br::kKvHeads, QH = br::kQHeads;
   const std::vector<uint16_t> ones(size_t(QH) * HD, uint16_t(0x3F80));

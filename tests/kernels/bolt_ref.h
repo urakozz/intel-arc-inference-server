@@ -34,7 +34,7 @@
 //                 product rounded to fp32, then the add, ONE rounding (spec 25 §2.4, Decision 10)
 //   attn_prep()   nb_attn_prep: q / k / v = rne(Σ_s q||k||v slices), no norm, no position encoding (NoPE); q as fp32 of
 //                 the bf16 value (mg_attn's input), k / v rows at pos + m
-//   attention_eager() / attention_fp64()   Muse's twin (tests/kernels/muse_ref.h, Decision 15: the engine binds Muse's
+//   attention_eager() / attention_fp64()   mg_attn's twin (tests/kernels/mg_attn_ref.h, Decision 15: the engine binds
 //                 mg_attn / mg_attn_eager at Bolt's shape) on a full NoPE layer with no gate (a ones gate is exact)
 //   argmax()      argmax.cl's comparator at 131072 = vocab_used: strictly greater wins, a tie to the lower id
 //   embed_row()   nb_embed_gather: the token's row out of gemv_bf16's tiles
@@ -55,7 +55,7 @@
 #include "common/exp_torch.h"
 #include "common/repack.h"
 #include "kernels/moe_ref.h"    // f32 / rne / rf, the layout-1 tile_dot / split_dot
-#include "kernels/muse_ref.h"   // the attention twin (Muse's mg_attn at GQA 16 / head_dim 128, Decision 15)
+#include "kernels/mg_attn_ref.h"   // the attention twin (mg_attn at GQA 16 / head_dim 128, Decision 15)
 
 namespace boltref {
 
@@ -535,17 +535,17 @@ inline Prep attn_prep(const float* slices, uint32_t S, uint32_t M, uint32_t m) {
   return p;
 }
 
-// --- attention (Muse's twin on a full NoPE layer, no gate) ------------------------------------------------------------
+// --- attention (mg_attn's twin on a full NoPE layer, no gate) ---------------------------------------------------------
 // q [32][128] bf16, caches [rows][2][128] bf16, the query at `pos` (keys 0 .. pos): out [32][128] = rne(o).
 inline void attention_eager(const uint16_t* q, const uint16_t* kc, const uint16_t* vc, uint32_t pos, uint16_t* out) {
-  museref::attention_eager(q, kc, vc, pos, false, 0, nullptr, out);
+  mg_attn_ref::attention_eager(q, kc, vc, pos, out);
 }
-inline museref::EagerHead attention_eager_head(const uint16_t* q, const uint16_t* kc, const uint16_t* vc, uint32_t pos,
-                                               uint32_t h) {
-  return museref::attention_eager_head(q, kc, vc, pos, false, h, 0);
+inline mg_attn_ref::EagerHead attention_eager_head(const uint16_t* q, const uint16_t* kc, const uint16_t* vc, uint32_t pos,
+                                                   uint32_t h) {
+  return mg_attn_ref::attention_eager_head(q, kc, vc, pos, h);
 }
 inline void attention_fp64(const uint16_t* q, const uint16_t* kc, const uint16_t* vc, uint32_t pos, double* out) {
-  museref::attention_fp64(q, kc, vc, pos, false, 0, nullptr, out);
+  mg_attn_ref::attention_fp64(q, kc, vc, pos, out);
 }
 
 // --- the head's argmax and the gather ---------------------------------------------------------------------------

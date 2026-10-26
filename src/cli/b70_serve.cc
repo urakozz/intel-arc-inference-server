@@ -30,9 +30,6 @@
 #include "cli/kolibri_serve.h"
 #include "cli/lfm2moe_decode.h"   // spec 24c: is_lfm2moe, check_args, settle
 #include "cli/lfm2moe_serve.h"    // spec 24e: Lfm2MoeEngineAdapterT
-#include "cli/muse_decode.h"   // spec 23c: is_muse, check_args
-#include "cli/muse_serve.h"    // spec 23e: MuseEngineAdapterT, the template check
-#include "cli/muse_spec.h"     // spec 23f: --spec dflash / lookup for Muse-Glimmer
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
@@ -120,16 +117,6 @@ void usage() {
                "                 samples), the prefix cache, --mtp 1..3 / --spec lookup (--mtp auto,\n"
                "                 --draft-vocab and --kv-cache int8 are refused); prefill on l0 only.\n"
                "                 UNVALIDATED on the cards (queue row 34)\n"
-               "                 Muse-Glimmer-30B (spec 23e, model_type muse_glimmer): its own engine, ONE card by\n"
-               "                 default (--pp 2 for capacity), prefill on l0 only, --max-len auto -> up to 131072;\n"
-               "                 the original's chat template is required: [--chat-template FILE] (the Vishva007\n"
-               "                 repos ship an older chat_template.jinja - pass meta-models/Muse-Glimmer-30B's, it\n"
-               "                 is vendored at tests/tokenizer/muse/chat_template.jinja); reasoning in to=self,\n"
-               "                 ATEM tool calls, chat_template_kwargs reasoning_strength low|medium|high|xhigh\n"
-               "                 (the OpenAI reasoning_effort maps onto it); requests without temperature / top_k /\n"
-               "                 top_p sample with generation_config.json's 1.0 / 64 / 0.95 through the model's\n"
-               "                 softcap on the host; --mtp, --spec, --kv-cache int8 and --prefill-backend\n"
-               "                 l0-int8|sycl-tla are refused. UNVALIDATED on the cards (queue row 46)\n"
                "                 Nemotron 3.5 Bolt 74B-A9B (spec 25e, model_type nemotron_h_omni over nemotron_h_puzzle):\n"
                "                 its own engine on TWO cards by default (--pp 2, --pipeline-split / --pipeline-handoff;\n"
                "                 the whole model does not fit one), prefill on l0 only, --max-len auto -> up to 262144;\n"
@@ -701,127 +688,6 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
-// Spec 23e: Muse-Glimmer-30B served - runtime::muse::MuseEngine (one card by default, decision 7; or two, spec 16b's
-// pieces as 23c / 23d built them) behind cli::muse::MuseEngineAdapterT (the rings + full-KV prefix snapshots, host
-// sampling with the model's softcap), Muse's chat format (server::ChatFormat::muse(): the channels, ATEM calls,
-// reasoning_strength), the original's chat template (or --chat-template FILE), its EOS [200001, 200008], its sampling
-// defaults and stop_strings from generation_config.json. b70-decode's flow (cli/muse_decode.h run_decode): the
-// refusals before the device (cli::muse::check_args: --mtp, --spec, --kv-cache int8, the prefill backends, --max-len
-// above 131072, --device with --pp 2; then the template), the contexts, MuseEngine planning max_len (auto: the largest
-// that fits with the prefill scratch) and loading each layer straight onto its device.
-struct MuseServe {
-  std::string snapshot_dir;
-  cli::muse::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
-  std::string chat_template;    // --chat-template FILE ("" = the snapshot's, which must be the original's)
-  bool prefix_auto = true;
-  uint32_t prefix_cache_gb = 0;
-  uint32_t spec_min_match = 3, spec_history = 0;   // spec 23f: --spec lookup's
-};
-
-int serve_muse(const MuseServe& a, server::Options options) {
-  const cli::muse::DecodeArgs& da = a.args;
-  const model::MuseGlimmerDesc pre = loader::muse_checkpoint_desc(a.snapshot_dir, 0);
-  cli::muse::check_args(da, pre);
-  const cli::muse::TemplateChoice tc = cli::muse::check_serve_template(a.snapshot_dir, a.chat_template);
-  const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
-  server::Sampling defaults;
-  std::vector<std::string> stops;
-  {
-    std::ifstream g(a.snapshot_dir + "generation_config.json");
-    if (!g) throw std::runtime_error("cannot open '" + a.snapshot_dir + "generation_config.json'");
-    nlohmann::json gj;
-    g >> gj;
-    try {
-      defaults = server::generation_sampling(gj);   // decision 4: sampled, T 1.0, top-k 64, top-p 0.95
-      stops = server::generation_stop_strings(gj);
-    } catch (const std::invalid_argument& error) {
-      throw std::runtime_error(error.what());
-    }
-  }
-  // The model's logit transform rides with every sampled request (spec 23 §6.4) - a model property, never a request
-  // field; the adapter writes the same two constants into what it filters with.
-  defaults.logit_mult = pre.out_mult;
-  defaults.softcap = pre.softcap;
-  const uint32_t devs = da.pipe.devices;
-  if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
-  std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
-  std::vector<l0::Context*> ctx = {c0.get()};
-  if (c1) ctx.push_back(c1.get());
-  if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
-  else
-    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
-                 c0->eu_count(), c1->name().c_str(), c1->eu_count());
-  runtime::muse::MuseOptions o;
-  o.max_len = da.max_len.is_auto ? 0 : da.max_len.value;
-  o.int8_head = da.int8_head;
-  o.handoff = da.pipe.handoff;
-  o.split = devs == 2 && !da.pipe.split_auto ? da.pipe.split : 0;
-  o.prefill = true;   // every request prefills: plan the prefill scratch into max_len and the fit
-  const cli::muse::SpecArgs& sa = da.spec_args;
-  o.spec = cli::muse::engine_spec(sa, pre);   // spec 23f: the verify lists' rows and the drafter's planner term
-  std::unique_ptr<runtime::muse::MuseEngine> engine;
-  std::unique_ptr<runtime::dflash::MuseDrafter> drafter;
-  {
-    StdoutToStderr redirect;
-    engine = std::make_unique<runtime::muse::MuseEngine>(ctx, a.snapshot_dir, o);
-    if (sa.dflash()) drafter = cli::muse::attach_drafter(*engine, sa);   // before the adapter: snapshots carry its ring
-  }
-  engine->prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
-  if (sa.dflash()) {   // the server's --mtp auto loop over the drafter's cost table (AdaptiveK, K to --spec-max)
-    options.mtp_auto = true;
-    options.mtp_adaptive.max_k = sa.max_k;
-    options.mtp_adaptive.cost = cli::muse::spec_cost(sa, da.int8_head);
-    std::fprintf(stderr, "drafter: %s, %s, --draft-q %s, --spec-max %u, %zu B (%s)\n", sa.draft_model.c_str(),
-                 loader::draft_format_name(sa.format), runtime::dflash::muse_q_name(sa.q), sa.max_k, drafter->bytes(),
-                 drafter->weights().line.c_str());
-  } else if (sa.lookup()) {
-    options.spec_lookup = true;
-    options.lookup_min_match = a.spec_min_match;
-    options.lookup_history = a.spec_history;
-    options.lookup_adaptive.max_k = sa.max_k;
-    options.lookup_adaptive.cost = cli::muse::spec_cost(sa, da.int8_head).with_free_drafts();
-  }
-  std::fprintf(stderr, "%s\n%s\n", engine->plan().describe().c_str(), engine->memory_line().c_str());
-  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
-  if (tokenizer.vocab_used() != engine->vocab())
-    std::fprintf(stderr, "note: tokenizer.json defines %u ids, Muse-Glimmer's head has %u rows; sampling masks from %u\n",
-                 tokenizer.vocab_used(), engine->vocab(), tokenizer.vocab_used());
-  TemplateAdapter chat_template(a.snapshot_dir, tc.file);
-  cli::muse::MuseEngineAdapterT<runtime::muse::MuseEngine> engine_adapter(
-      *engine, tokenizer.vocab_used(), pre.out_mult, pre.softcap, sa.on() ? sa.max_k : 0, sa.lookup(),
-      drafter ? cli::muse::draft_hooks(*engine, *drafter) : cli::muse::MuseDraftHooks{});
-  options.chat_format = server::ChatFormat::muse();
-  options.eos_ids = eos;
-  options.sampling_defaults = defaults;
-  options.stop_strings = stops;
-  // Pinned host memory of the one context both cards share: either device's copies reach it.
-  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
-  server::Server server({tokenizer, chat_template, engine_adapter}, options);
-  const std::string placement =
-      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine->handoff()) + ", split " +
-                      std::to_string(engine->split()) + ": device 0 layers [0, " + std::to_string(engine->split()) +
-                      "), device 1 [" + std::to_string(engine->split()) + ", " +
-                      std::to_string(engine->weights().desc.layers) + "))"
-                : std::string("--pp 1 (one card)");
-  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u%s, eos ", options.served_model.c_str(),
-               options.host.c_str(), options.port, engine->max_len(), da.max_len.is_auto ? " (auto)" : "");
-  print_eos(eos);
-  std::fprintf(stderr,
-               ", Muse-Glimmer-30B (%s chat format, template %s sha256 %.8s%s), %s, prefill backend l0 (chunk %u), "
-               "attention %s (B70_MUSE_ATTN), spec %s, lm_head %s, kv cache bf16, sampling defaults %s T %.2f top-k %u "
-               "top-p %.2f softcap %.0f (host, fp32), stop_strings %zu, prefix snapshots: the rings' last %u positions + "
-               "the full layers' KV\n",
-               options.chat_format.name(), tc.file.empty() ? "<snapshot>/chat_template.jinja" : tc.file.c_str(),
-               tc.sha256.c_str(), tc.original ? " - the original's" : " - NOT the original's (--chat-template)",
-               placement.c_str(), runtime::muse::kPfC, runtime::muse::muse_attn_name(engine->attention()),
-               sa.dflash() ? "dflash (the assistant)" : sa.lookup() ? "lookup" : "off", da.int8_head ? "int8" : "bf16", defaults.greedy ? "greedy" : "sampled", defaults.temperature,
-               defaults.top_k, defaults.top_p, defaults.softcap, stops.size(), runtime::muse::state_positions(pre));
-  return listen_until_stopped(server, options);
-}
-
 // Spec 21e: Qwen3.8-Flash-Next served (--layers N until spec 22) - runtime::qwen4exp::Qwen4ExpEngine (one card or two:
 // spec 16b's pieces as 21c / 21d built them) behind spec 16d's cli::pp::PipelineEngineAdapterT (EngineAdapter's logic
 // over the engine's host calls: greedy and sampled steps, spec 7's prefix cache over the engine's snapshots, spec 8's
@@ -1091,8 +957,6 @@ int run(int argc, char** argv) {
   // Spec 19c: --spec dflash's drafter (cli/dflash_args.h); --spec-max / --spec-cost serve lookup and dflash.
   cli::dflash::Args dflash;
   bool have_spec_max = false, have_spec_cost = false;
-  runtime::dflash::MuseQ draft_q = runtime::dflash::MuseQ::Raw;   // spec 23f: --draft-q (Muse-Glimmer only)
-  bool have_draft_q = false;
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
@@ -1105,7 +969,7 @@ int run(int argc, char** argv) {
   uint32_t q4_layers = 0;
   bool q4_layers_auto = false, have_q4_layers = false;
   std::string q4_ple_dir, q4_tokenizer;
-  std::string chat_template_file;   // spec 23e: --chat-template FILE (Muse-Glimmer; spec 25e: Bolt too)
+  std::string chat_template_file;   // spec 25e: --chat-template FILE (Bolt)
   std::string generation_config_file;   // spec 25e: --generation-config FILE (Bolt)
 
   auto value = [&](int& i, const char* flag) -> std::string {
@@ -1161,8 +1025,7 @@ int run(int argc, char** argv) {
       have_mtp_tuning = true;
     } else if (arg == "--spec") {
       spec_arg = value(i, "--spec");
-      // Spec 23e: `dflash` is parsed so that Muse-Glimmer refuses it by name (its drafter is spec 23f's); every other
-      // model refuses it below with this same message.
+      // Spec 19c: `dflash` is Qwen3.8's drafter; every other model refuses it below by name.
       if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash")
         throw std::runtime_error("--spec expects off, mtp, lookup or dflash, got '" + spec_arg + "'");
     } else if (arg == "--spec-min-match") {
@@ -1179,16 +1042,11 @@ int run(int argc, char** argv) {
     } else if (arg == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (arg == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only)
+    } else if (arg == "--draft-format") {   // spec 19c
       const std::string v = value(i, "--draft-format");
       if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8, bf16 or int4, got '" + v + "'");
+        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
       dflash.have_format = true;
-    } else if (arg == "--draft-q") {   // spec 23f: Muse-Glimmer only
-      const std::string v = value(i, "--draft-q");
-      if (!runtime::dflash::parse_muse_q(v, draft_q))
-        throw std::runtime_error("--draft-q expects raw or capped, got '" + v + "'");
-      have_draft_q = true;
     } else if (arg == "--spec-history") {
       spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
       have_spec_tuning = true;
@@ -1227,7 +1085,7 @@ int run(int argc, char** argv) {
       q4_ple_dir = value(i, "--ple-dir");
     } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
       q4_tokenizer = value(i, "--tokenizer");
-    } else if (arg == "--chat-template") {   // spec 23e: Muse-Glimmer; spec 25e: Bolt
+    } else if (arg == "--chat-template") {   // spec 25e: Bolt
       chat_template_file = value(i, "--chat-template");
     } else if (arg == "--generation-config") {   // spec 25e: Bolt only
       generation_config_file = value(i, "--generation-config");
@@ -1254,7 +1112,7 @@ int run(int argc, char** argv) {
     flags.mtp = mtp_k > 0 || mtp_auto;
     flags.spec = spec_arg;
     flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
-                            dflash.have_format || have_draft_q;
+                            dflash.have_format;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
     cli::bolt::check_serve_flags(flags);
@@ -1300,7 +1158,7 @@ int run(int argc, char** argv) {
     flags.mtp = mtp_k > 0 || mtp_auto;
     flags.spec = spec_arg;
     flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
-                            dflash.have_format || have_draft_q;
+                            dflash.have_format;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
     flags.chat_template = !chat_template_file.empty();
@@ -1331,11 +1189,6 @@ int run(int argc, char** argv) {
     ls.prefix_cache_gb = prefix_cache_gb;
     return serve_lfm2moe(ls, options);
   }
-  // Spec 23f: Muse-Glimmer-30B's --spec dflash / lookup are its own (cli/muse_spec.h: K to 15, the assistant, one
-  // card) - the Qwen family's spec rules below skip it; its branch further down checks its own.
-  const bool muse = cli::muse::is_muse(path);
-  if (!muse && have_draft_q)
-    throw std::runtime_error("--draft-q is Muse-Glimmer-30B's (spec 23f: the q of its assistant's 16 candidates)");
   // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
   const bool spec_lookup = spec_arg == "lookup";
   dflash.on = spec_arg == "dflash";   // spec 19c
@@ -1346,16 +1199,14 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--spec-min-match and --spec-history need --spec lookup");
   if ((have_spec_max || have_spec_cost) && !spec_lookup && !dflash.on)
     throw std::runtime_error("--spec-max and --spec-cost need --spec lookup or --spec dflash");
-  if (!muse && have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
+  if (have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
     throw std::runtime_error("--spec-max expects 1..3 with --spec lookup");
-  if (!muse) {
-    if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
-    cli::dflash::check_flags(dflash);
-    // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
-    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
-                              pipe.handoff == runtime::PpHandoff::Peer);
-  }
-  if (spec_lookup && !muse) {
+  if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
+  cli::dflash::check_flags(dflash);
+  // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
+  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
+                            pipe.handoff == runtime::PpHandoff::Peer);
+  if (spec_lookup) {
     options.spec_lookup = true;
     options.lookup_min_match = spec_min_match;
     options.lookup_history = spec_history;
@@ -1410,10 +1261,10 @@ int run(int argc, char** argv) {
   // --mtp (K or auto), and the ranked list needs a size to fill. Checked here, before the
   // device is touched. The compact head is gathered from the head in either --lm-head
   // form; the loader refuses only a checkpoint that ships the head int4.
-  if (!muse && (draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
+  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto) or --spec dflash");
   // Spec 19c: the drafter's AdaptiveK policy (the server's --mtp auto loop, over the drafter's cost table).
-  if (dflash.on && !muse) {
+  if (dflash.on) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
     options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab, spec_cost_arg);
@@ -1436,51 +1287,10 @@ int run(int argc, char** argv) {
   // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
   // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --ple-dir / --tokenizer
   // belong to it alone.
-  // Spec 23e: Muse-Glimmer-30B (model_type muse_glimmer) runs runtime::muse::MuseEngine behind
-  // cli::muse::MuseEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
-  // kv-cache and --pp rules (its own, cli::muse::check_args, replace them), as b70-decode dispatches it. --chat-template
-  // and --spec dflash are parsed for it alone.
-  if (!muse && !chat_template_file.empty())
-    throw std::runtime_error("--chat-template is built for Muse-Glimmer-30B only (spec 23e: its checkpoints ship an "
-                             "older template); this checkpoint renders its own");
-  if (muse) {
-    if (have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty())
-      throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
-                               "spec 21e); this checkpoint is Muse-Glimmer-30B");
-    MuseServe ms;
-    ms.snapshot_dir = loader::resolve_muse_snapshot(path);
-    ms.chat_template = chat_template_file;
-    cli::muse::DecodeArgs& ma = ms.args;
-    ma.path = ms.snapshot_dir;
-    ma.max_len = max_len_arg;   // auto by default: the largest that fits, at most 131072 (decision 6)
-    ma.device = device;
-    ma.int8_head = lm_head == loader::LmHeadForm::Int8;   // int8 by default (spec 9), as every served model
-    ma.pipe = pipe;
-    ma.prefill = true;          // every request prefills: the plan carries the prefill scratch
-    ma.pp_backend_given = have_pp_backend;
-    ma.pp_backend = pp_backend;
-    ma.mtp = mtp_k > 0 || mtp_auto;
-    ma.spec = spec_arg == "mtp";   // refused by name (no MTP head)
-    ma.kv8 = kv_cache == runtime::KvCache::Int8;
-    // Spec 23f: --spec dflash / lookup and the drafter's flags (cli/muse_spec.h).
-    cli::muse::SpecArgs& sa = ma.spec_args;
-    sa.spec = spec_arg == "dflash" || spec_arg == "lookup" ? spec_arg : "off";
-    if (dflash.have_model) sa.draft_model = dflash.model;
-    if (dflash.have_format) sa.format = dflash.format;
-    sa.have_model = dflash.have_model;
-    sa.have_format = dflash.have_format;
-    sa.q = draft_q;
-    sa.have_q = have_draft_q;
-    sa.have_max_k = have_spec_max;
-    if (have_spec_max) sa.max_k = spec_max;
-    sa.cost = spec_cost_arg;
-    sa.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
-    ms.spec_min_match = spec_min_match;
-    ms.spec_history = spec_history;
-    ms.prefix_auto = prefix_auto;
-    ms.prefix_cache_gb = prefix_cache_gb;
-    return serve_muse(ms, options);
-  }
+  // --chat-template is Bolt's (dispatched above); every other served model renders its snapshot's template.
+  if (!chat_template_file.empty())
+    throw std::runtime_error("--chat-template is built for Nemotron 3.5 Bolt only (spec 25e); this checkpoint renders "
+                             "its own");
   if (cli::qwen4exp::is_qwen4exp(path)) {
     if (dflash.on)
       throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); "

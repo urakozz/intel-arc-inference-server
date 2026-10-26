@@ -49,7 +49,7 @@ struct TokAdapter : server::TokIface {
 
 struct TemplateAdapter : server::TemplateIface {
   explicit TemplateAdapter(const std::string& dir) : tmpl(dir) {}
-  // Spec 23e: b70-serve --chat-template FILE (Muse-Glimmer) - the template from `file` ("" = the snapshot's own).
+  // Spec 23e: b70-serve --chat-template FILE (Bolt, spec 25e) - the template from `file` ("" = the snapshot's own).
   TemplateAdapter(const std::string& dir, const std::string& file) : tmpl(dir, file) {}
 
   std::string render(const nlohmann::json& messages, const nlohmann::json& tools,

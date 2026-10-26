@@ -43,29 +43,6 @@ MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {
   return c;
 }
 
-MtpCost MtpCost::muse_verify(bool i8_head) {
-  MtpCost c = int8_head();
-  c.verify = {1.00, 1.18, 1.56, 1.79};
-  const double slope = (c.verify[3] - c.verify[1]) / 2;
-  while (c.verify.size() < 16) c.verify.push_back(std::round((c.verify.back() + slope) * 1000.0) / 1000.0);
-  if (!i8_head) {   // the bf16 head reads 1.346 GB more a row-block, in the int8 plain step's units
-    const double plain = kMusePlainGB + kMuseHeadInt8GB;
-    for (double& v : c.verify) v = v * kMusePlainGB / plain + kMuseHeadInt8GB / plain;
-  }
-  c.draft.assign(15, 0.0);
-  return c;
-}
-
-MtpCost MtpCost::muse_dflash(bool i8_head, unsigned drafter_format) {
-  if (drafter_format > 2) throw std::invalid_argument("MtpCost::muse_dflash: drafter format 0..2");
-  MtpCost c = muse_verify(i8_head);
-  const double head = i8_head ? kMuseHeadInt8GB : 2 * kMuseHeadInt8GB;
-  const double plain = i8_head ? kMusePlainGB : kMusePlainGB + kMuseHeadInt8GB;
-  const double d = std::round((kMuseDrafterGB[drafter_format] + head) / plain * 1000.0) / 1000.0;
-  c.draft.assign(15, d);
-  return c;
-}
-
 MtpCost MtpCost::with_free_drafts() const {
   MtpCost c = *this;
   c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);

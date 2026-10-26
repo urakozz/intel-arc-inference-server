@@ -7,8 +7,6 @@
 //
 //   norm()          df_norm: Σx² as WG lanes (i = lane, lane + WG, ... ascending) then a pairwise tree, rstd =
 //                   1 / sqrt(Σ / H + eps), h = (x · rstd) · w in fp32, x = bf16(h)
-//   norm2()         spec 23f, mg_df_norm (src/kernels/muse/mg_dflash.cl): the same Σ and rstd, then the Muse-Glimmer
-//                   assistant's two roundings - x = bf16(w · bf16(x · rstd)), h = f32(x)
 //   conv()          df_conv_prep / df_conv_add: out[r] = (base[0] + co[r][0][g]) x[r] + (base[1] + co[r][1][g]) x[r-1]
 //                   (the second term only for r >= 1: one row of look-back inside the block), g = i / group
 //   head_prep()     df_qkv_prep / df_ctx_store: a head's RMSNorm over head_dim (Σ² by a pairwise tree over the
@@ -24,13 +22,7 @@
 //                   rank summed in TOPK x QS lane slices then the QS partials ascending; argmax (ties: lower c) or
 //                   Gumbel-argmax: x = S / T - log(-log1p(-u)), u = murmur3(seed, p + j + 2^30, cand id) in fp32
 //   gemv_*()        the reused GEMVs' arithmetic: gemv_i8w (Σ q·x ascending, then · s), gemv_bf16 (Σ w·x
-//                   ascending; KSPLIT slices merged by the fixed pairwise tree), gemv_int4 (spec 23f: gemv.cl at
-//                   S 1 - per 64-k group eight 8-k dots summed in order, the group's sum x its f16 scale, groups
-//                   ascending)
-//
-// Spec 23f: Dims::muse is the Muse-Glimmer assistant's form (DFlashForm::Muse) - norm2 in Engine numerics, and the
-// block is always all 16 rows (transformers' DFlashTokenCandidateGenerator: every row and every block key whatever K
-// the caller reads; the engine's draft list runs at dctl.k = 15), the head raw (out_mult 1, no softcap), greedy.
+//                   ascending; KSPLIT slices merged by the fixed pairwise tree)
 //
 // draft() chains them in the capture's order (runtime/dflash/dflash_capture.cc) over host copies of the weights in
 // their device forms; with Numerics::Reference every activation stays fp32 and the GEMVs are fp32 dot products over
@@ -90,17 +82,6 @@ inline void norm(const float* src, const float* w, uint32_t H, float eps, float*
     const float v = (src[i] * rstd) * w[i];
     if (h) h[i] = v;
     if (x) x[i] = rne(v);
-  }
-}
-
-// mg_df_norm, one row (spec 23f): MuseGlimmerAssistantRMSNorm in bf16 - x-hat rounded, then w x it rounded.
-inline void norm2(const float* src, const float* w, uint32_t H, float eps, float* h, uint16_t* x) {
-  const float ss = wg_sumsq(src, H, kNormWg);
-  const float rstd = 1.0f / std::sqrt(ss / float(H) + eps);
-  for (uint32_t i = 0; i < H; ++i) {
-    const uint16_t y = rne(w[i] * rf(src[i] * rstd));
-    if (h) h[i] = bf(y);
-    if (x) x[i] = y;
   }
 }
 
@@ -402,33 +383,6 @@ inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit
   });
 }
 
-// gemv.cl (int4 g64, LAYOUT 1 or 0 - the same sums) at S 1 from the GPTQ-native form: qweight [K/8][N] (word (r, n)
-// holds k = 8r .. 8r + 7, k = 8r lowest) and f16 scales [K/64][N] - loader::rtn_int4_g64's output.
-inline void gemv_int4(const uint32_t* qw, const uint16_t* scales, uint32_t K, uint32_t N, const uint16_t* x,
-                      uint32_t M, float* out) {
-  std::vector<float> xf(size_t(M) * K);
-  for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
-  parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
-    for (uint32_t n = n0; n < n1; ++n)
-      for (uint32_t m = 0; m < M; ++m) {
-        const float* xr = &xf[size_t(m) * K];
-        float acc = 0.0f;
-        for (uint32_t g = 0; g < K / 64; ++g) {
-          float gacc = 0.0f;
-          for (uint32_t j = 0; j < 8; ++j) {
-            const uint32_t word = qw[size_t(g * 8 + j) * N + n];
-            float a = 0.0f;
-            for (uint32_t t = 0; t < 8; ++t)
-              a = a + float(int((word >> (4 * t)) & 0xFu) - 8) * xr[g * 64 + j * 8 + t];
-            gacc = gacc + a;
-          }
-          acc = acc + gacc * common::f16_to_f32(scales[size_t(g) * N + n]);
-        }
-        out[size_t(m) * N + n] = acc;
-      }
-  });
-}
-
 // --- the whole drafter --------------------------------------------------------------------------------------------
 enum class Numerics { Engine, Reference };
 
@@ -439,7 +393,6 @@ struct Dims {
   float eps = 1e-6f, in_scale = 1.0f, out_mult = 1.0f, softcap = 0.0f, scale = 0.0f;
   double theta = 1e6;
   bool causal = false;
-  bool muse = false;   // spec 23f: the Muse-Glimmer assistant's form (the header's note)
   uint32_t qn() const { return NH * HD; }
   uint32_t kvn() const { return NKV * HD; }
   uint32_t qkvn() const { return qn() + 2 * kvn(); }
@@ -456,8 +409,6 @@ struct Lin {
   std::vector<int8_t> i8;
   std::vector<float> scales;
   std::vector<float> f32;   // row-major [N][K] (Reference)
-  std::vector<uint32_t> q4; // spec 23f: int4 g64 qweight [K/8][N] + f16 scales [K/64][N] (gemv_int4)
-  std::vector<uint16_t> s4;
   // y [M][N] = W x for M rows; xb the bf16 rows (Engine), xf the fp32 rows (Reference).
   void apply(const uint16_t* xb, const float* xf, uint32_t M, float* y) const {
     if (!f32.empty()) {
@@ -469,8 +420,6 @@ struct Lin {
             y[size_t(m) * N + n] = a;
           }
       });
-    } else if (!q4.empty()) {
-      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y);
     } else if (!i8.empty()) {
       gemv_i8w(i8.data(), scales.data(), K, N, xb, M, y);
     } else {
@@ -516,10 +465,9 @@ inline void project(const Weights& w, Numerics nm, const uint16_t* taps, uint32_
   std::vector<float> f(size_t(n) * d.H), h(size_t(n) * d.H);
   std::vector<uint16_t> x(size_t(n) * d.H);
   w.fc.apply(taps, tf.data(), n, f.data());
-  const bool eng = nm == Numerics::Engine;
   for (uint32_t r = 0; r < n; ++r)
-    (d.muse && eng ? norm2 : norm)(&f[size_t(r) * d.H], w.hidden_norm.data(), d.H, d.eps, &h[size_t(r) * d.H],
-                                   &x[size_t(r) * d.H]);
+    norm(&f[size_t(r) * d.H], w.hidden_norm.data(), d.H, d.eps, &h[size_t(r) * d.H], &x[size_t(r) * d.H]);
+  const bool eng = nm == Numerics::Engine;
   for (uint32_t l = 0; l < d.layers; ++l) {
     std::vector<float> qkv(size_t(n) * d.qkvn());
     w.layers[l].qkv.apply(x.data(), h.data(), n, qkv.data());   // the k||v rows are the q||k||v rows [qn, qkvn)
@@ -565,10 +513,8 @@ inline DraftOut draft(const Weights& w, Numerics nm, const Ring& ring, const std
     (void)width;
   };
   auto norm_rows = [&](const std::vector<float>& src, const std::vector<float>& wt) {
-    for (uint32_t r = 0; r < M; ++r)
-      (d.muse && eng ? norm2 : norm)(&src[size_t(r) * H], wt.data(), H, d.eps, &h[size_t(r) * H], &x[size_t(r) * H]);
+    for (uint32_t r = 0; r < M; ++r) norm(&src[size_t(r) * H], wt.data(), H, d.eps, &h[size_t(r) * H], &x[size_t(r) * H]);
   };
-  const uint32_t Ka = d.muse ? M - 1 : K;   // the rows the attention runs (Muse: the whole block)
   const AttnDims ad = d.attn();
   std::vector<float> co, tmp, qkv(size_t(M) * d.qkvn()), q(size_t(M) * d.qn()), kb(size_t(M) * d.kvn()),
       vb(size_t(M) * d.kvn()), ao(size_t(M) * d.qn()), oo(size_t(M) * H), gu(size_t(M) * 2 * d.I),
@@ -602,7 +548,7 @@ inline DraftOut draft(const Weights& w, Numerics nm, const Ring& ring, const std
       }
     }
     const size_t lay = size_t(d.ring) * d.kvn();
-    attention(ad, q.data(), kb.data(), vb.data(), &ring.k[l * lay], &ring.v[l * lay], p, Ka, d.causal, ao.data());
+    attention(ad, q.data(), kb.data(), vb.data(), &ring.k[l * lay], &ring.v[l * lay], p, K, d.causal, ao.data());
     as_input(ao, d.qn(), xb);
     L.o.apply(xb.data(), ao.data(), M, oo.data());
     if (v2) {
@@ -639,6 +585,7 @@ inline DraftOut draft(const Weights& w, Numerics nm, const Ring& ring, const std
     } else {
       for (size_t i = 0; i < resid.size(); ++i) resid[i] = resid[i] + dn[i];
     }
+    (void)eng;
   }
   norm_rows(resid, w.final_norm);
   DraftOut out;

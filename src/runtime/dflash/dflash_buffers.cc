@@ -37,7 +37,6 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
       unary(dev(ctx, sz.unary)) {
   if (sz.co) co = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.co);
   if (sz.hid) hid = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.hid);
-  if (sz.vids) vids = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sz.vids);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
@@ -49,7 +48,6 @@ size_t DFlashBuffers::bytes() const {
     b += m->size();
   if (co) b += co->size();
   if (hid) b += hid->size();
-  if (vids) b += vids->size();
   return b;
 }
 
@@ -61,8 +59,7 @@ void DFlashBuffers::zero(l0::CmdList& imm) {
   if (hid) imm.fill(hid->ptr(), 0u, hid->size());
   std::memset(dctl.ptr(), 0, dctl.size());
   std::memset(out.ptr(), 0, out.size());
-  if (vids) std::memset(vids->ptr(), 0, vids->size());
-  const std::vector<float> t = rope_table(desc.theta, desc.head_dim, max_len + list_rows(desc));
+  const std::vector<float> t = rope_table(desc.theta, desc.head_dim, max_len + kernels::dflash::kM);
   imm.copy(rope.ptr(), t.data(), t.size() * 4);
 }
 

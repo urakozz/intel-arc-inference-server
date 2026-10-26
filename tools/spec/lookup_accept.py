@@ -19,12 +19,6 @@ recorded ids, what a prompt-lookup proposer would have had accepted. Inputs:
   call is complete. Re-encoding is how the reference is held; the model's own ids can
   differ where a text has two tokenisations.
 - `--ids-json FILE`: [{"name", "prompt_ids", "out_ids"}, ...] (any other source).
-- `--dumps DIR` (spec 23f Task 3): the tap dumps dflash_accept.py drafts over (tools/oracle/
-  dump_taps.py's / muse_taps.py's `*.taps.safetensors`): each dump's `ids` split at its
-  `n_prompt` - the SAME continuations the drafter is measured on; read without torch (the
-  safetensors header and the int32 `ids` tensor), the corpus (`name` before `/`) as the group.
-  `--max-k` up to 15 (Muse-Glimmer's block); with no `--verify-cost` the table is extended past
-  M = 8 by the same +0.305 a row (ESTIMATED - spec 23f Task 4's probe measures M = 1..16).
 
 **The protocol is the engine's** (runtime::Engine, spec 8 §3.3): at an iteration the pending
 id x_n is known (the previous verify's sample), the matcher holds prompt + output up to and
@@ -388,43 +382,6 @@ def load_logs(log_dir, seed_session=0):
     return seqs
 
 
-def read_dump_ids(path):
-    """(metadata, ids) of a dump_taps.py-format safetensors file, without torch: the 8-byte header length, the JSON
-    header (dtype / shape / data_offsets per tensor, __metadata__), then the raw little-endian data."""
-    import struct
-    with open(path, "rb") as f:
-        n = struct.unpack("<Q", f.read(8))[0]
-        hdr = json.loads(f.read(n))
-        e = hdr["ids"]
-        if e["dtype"] != "I32" or len(e["shape"]) != 1:
-            raise ValueError(f"{path}: ids is {e['dtype']} {e['shape']}, not I32 [N]")
-        a, b = e["data_offsets"]
-        f.seek(8 + n + a)
-        raw = f.read(b - a)
-    return hdr.get("__metadata__", {}), list(struct.unpack(f"<{len(raw) // 4}i", raw))
-
-
-def load_dumps(dump_dir):
-    seqs = []
-    for fn in sorted(os.listdir(dump_dir)):
-        if not fn.endswith(".taps.safetensors"):
-            continue
-        md, ids = read_dump_ids(os.path.join(dump_dir, fn))
-        n_prompt = int(md["n_prompt"])
-        name = md.get("name", fn[: -len(".taps.safetensors")].replace("__", "/"))
-        seqs.append({"name": name, "prompt_ids": ids[:n_prompt], "out_ids": ids[n_prompt:],
-                     "group": name.split("/")[0]})
-    return seqs
-
-
-def extend_verify(verify, max_k):
-    """The verify table to M = max_k + 1 rows, extended by the M = 2..4 slope (ESTIMATED past what is given)."""
-    v = list(verify)
-    while len(v) < max_k + 1:
-        v.append(round(v[-1] + VERIFY_SLOPE, 3))
-    return v
-
-
 def load_a4(a4_dir, expected_path, tokenizer_path):
     from tokenizers import Tokenizer   # only this source needs it
     tok = Tokenizer.from_file(tokenizer_path)
@@ -481,12 +438,11 @@ def report(seqs, label, args, out):
         r = res["grid"][f"{n},3"]
         print(f"| {n} | {r['verify_share']:.3f} | {r['accept_rate']:.3f} |")
     print("\n`--spec lookup` with spec 8 §10's policy (AdaptiveK, draft cost 0), K <= max:\n")
-    kcols = (3, 7) + ((args.max_k,) if args.max_k > 7 else ())
-    print("| n | " + " | ".join(f"K <= {k}{'*' if k > 3 else ''}" for k in kcols) + " |")
-    print("|---|" + "---|" * len(kcols))
+    print("| n | K <= 3 | K <= 7* |")
+    print("|---|---|---|")
     for n in ns:
         cells = []
-        for kmax in kcols:
+        for kmax in (3, 7):
             if kmax > args.max_k:
                 cells.append("-")
                 continue
@@ -547,7 +503,6 @@ def main(argv=None):
     ap.add_argument("--a4-expected", help="tests/server/toolcall_expected.json")
     ap.add_argument("--tokenizer", help="the checkpoint's tokenizer.json (for --a4)")
     ap.add_argument("--ids-json", action="append", default=[])
-    ap.add_argument("--dumps", action="append", default=[], help="a directory of *.taps.safetensors (spec 23f)")
     ap.add_argument("--max-match", type=int, default=64)
     ap.add_argument("--max-k", type=int, default=7)
     ap.add_argument("--mtp-accept", type=parse_floats, default=[0.92, 0.87, 0.82])
@@ -556,8 +511,6 @@ def main(argv=None):
     ap.add_argument("--mc-seeds", type=int, default=20)
     ap.add_argument("--json", help="write every number here")
     args = ap.parse_args(argv)
-    if args.verify_cost is VERIFY_EST and args.max_k > 7:
-        args.verify_cost = extend_verify(VERIFY_EST, args.max_k)
     args.verify = args.verify_cost
     if len(args.verify) < args.max_k + 1:
         ap.error(f"--verify-cost needs M = 1..{args.max_k + 1}")
@@ -574,14 +527,8 @@ def main(argv=None):
     for p in args.ids_json:
         with open(p, encoding="utf-8") as f:
             corpora.append((p, json.load(f)))
-    for d in args.dumps:
-        seqs = load_dumps(d)
-        groups = sorted({sq["group"] for sq in seqs})
-        corpora.append((f"tap dumps {d} (all)", seqs))
-        for g in groups:
-            corpora.append((f"tap dumps {d}: {g}", [sq for sq in seqs if sq["group"] == g]))
     if not corpora:
-        ap.error("no input: --a4, --log, --ids-json or --dumps")
+        ap.error("no input: --a4, --log or --ids-json")
     print(f"verify cost M = 1..{len(args.verify)}: " + " / ".join(f"{v:g}" for v in args.verify)
           + f" (plain steps); max match {args.max_match}")
     out = []

@@ -5,9 +5,9 @@
 // reused binaries built outside the block). Host only: a name the capture would ask for that no CMake line builds fails
 // here on the Mac, not at capture on the box; and nothing in the list is dead.
 //
-// Decision 15's check: the KV layout Muse's mg_attn reads ([pos][kv][128] K and V, kv-head j's row at (pos x 2 + j) x
-// 128 - src/kernels/muse/mg_attn.cl load_k / load_v) is the one nb_attn_prep writes (row x 256 + c, c = j x 128 + d -
-// src/kernels/bolt/nb_prep.cl), and its q input is fp32 [M][32][128]: the attention binaries are Muse's, by name.
+// Decision 15's check: the KV layout spec 23c's mg_attn reads ([pos][kv][128] K and V, kv-head j's row at (pos x 2 + j) x
+// 128 - src/kernels/bolt/mg_attn.cl load_k / load_v) is the one nb_attn_prep writes (row x 256 + c, c = j x 128 + d -
+// src/kernels/bolt/nb_prep.cl), and its q input is fp32 [M][32][128]: the attention binaries are spec 23c's, by name.
 #include <cstdio>
 #include <cstring>
 #include <set>

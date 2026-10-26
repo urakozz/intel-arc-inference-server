@@ -83,19 +83,6 @@ target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)
 endif()
-# Spec 23c: and Muse-Glimmer-30B's engine (runtime/muse, src/cli/muse_decode.h), dispatched on model_type; b70-serve
-# refuses the model by name (spec 23e serves it) and needs only the loader's model_type check for that.
-target_link_libraries(b70-decode PRIVATE b70_muse_runtime)
-if(TARGET b70-serve)
-  target_link_libraries(b70-serve PRIVATE b70_muse_runtime)
-endif()
-# Spec 23d: and Muse-Glimmer's prefill (b70_muse_prefill: MuseEngine::prefill, its walk and scratch).
-target_link_libraries(b70-decode PRIVATE b70_muse_prefill)
-# Spec 23e: b70-serve serves Muse-Glimmer-30B (src/cli/muse_serve.h; runtime::muse::MuseEngine behind
-# cli::muse::MuseEngineAdapterT, whose prefill every request runs). Appended, as the lines above.
-if(TARGET b70-serve)
-  target_link_libraries(b70-serve PRIVATE b70_muse_prefill)
-endif()
 # Spec 24c: and LFM2.5-24B-A2B's engine (runtime/lfm2moe, src/cli/lfm2moe_decode.h), dispatched on model_type;
 # b70-serve only recognises it to refuse it (spec 24e serves it) - the loader's is_lfm2moe_checkpoint.
 target_link_libraries(b70-decode PRIVATE b70_lfm2moe_runtime)

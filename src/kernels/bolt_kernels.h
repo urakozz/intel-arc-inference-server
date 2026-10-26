@@ -11,7 +11,7 @@
 // binary is prefixed `nb_` and carries in its name the defines its code depends on (a host / device disagreement names a
 // binary that does not exist and throws at capture). The reused kernels keep their own names where those carry every
 // shape (gemv_variant, gemv_bf16_variant, gemv_i8w_variant - kernels.h); argmax.cl takes `nb_` (the existing names carry
-// another vocabulary); the attention is Muse-Glimmer's binaries by name (Decision 15).
+// another vocabulary); the attention is spec 23c's binaries by name (Decision 15).
 //
 // The shapes are model::bolt()'s (hidden 4096, Mamba 128 heads x 64 / 8 groups / state 128 / conv 4, NoPE GQA 16 at
 // head_dim 128, the 1024 latent, the 5376 shared expert, top-9, vocab 131072); a capture checks its descriptor against
@@ -31,7 +31,7 @@ inline constexpr unsigned kRouterWg = 128, kRouteWg = 256;        // nb_router (
 inline constexpr unsigned kConvWg = 256, kSsmWg = 256, kSsmPw = 16, kGnormWg = 256, kActWg = 256, kPrepWg = 256,
                           kEmbedWg = 256;
 inline constexpr unsigned kArgmaxChunk = 1024, kArgmaxWg = 256;
-inline constexpr unsigned kAttnTgt = 64, kAttnWg = 128, kAttnPart = kHd + 2;   // Muse's mg_attn at T 64
+inline constexpr unsigned kAttnTgt = 64, kAttnWg = 128, kAttnPart = kHd + 2;   // spec 23c's mg_attn at T 64
 inline constexpr float kEps = 1e-5f;
 
 inline constexpr unsigned moe_up_wg() { return 64 * kUpKs; }                              // 256
@@ -75,7 +75,7 @@ inline std::string moe_down_variant(unsigned M, unsigned I) {
 }
 inline std::string sh_act_variant(unsigned M, unsigned S) { return "nb_sh_act" + m_(M) + "_L1024_SH5376" + s_(S); }
 inline std::string attn_prep_variant(unsigned M, unsigned S) { return "nb_attn_prep" + m_(M) + "_KV2" + s_(S); }
-// Decision 15: Muse-Glimmer's full (NoPE) decode attention at Q 32 KV 2 head_dim 128, TGT 64 - flash (mg_attn_decode +
+// Decision 15: spec 23c's full (NoPE) decode attention at Q 32 KV 2 head_dim 128, TGT 64 - flash (mg_attn_decode +
 // mg_attn_reduce, the gate a ones buffer) or eager (mg_attn_eager, ONE launch, its score row [M][32][max_len]).
 inline std::string attn_variant(unsigned M, bool eager) {
   return std::string(eager ? "mg_attn_eager" : "mg_attn") + m_(M) + "_T64_Q32KV2_F";
@@ -160,14 +160,14 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
 // the attention prep at S 1 - decode's chains row for row); the rest are reused sources at Bolt's shapes: prefill/
 // pf_dequant_slab.cl (a layout-1 linear of whole 1024-column slabs), 18c's k2/k2_pf_linear.cl (a layout-0 one, one
 // zero-padded tail slab where N is not whole slabs: in_proj 18560, q||k||v 4608, fc1||shared_up 6400), the shape-free
-// pf_gemm_T0 and Muse's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15).
+// pf_gemm_T0 and spec 23d's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15).
 inline constexpr unsigned kPfC = 2048, kPfSub = 64, kPfTm = 32, kPfSlab = 1024;
 inline constexpr unsigned kPfInLd = 18688;                        // pad256(18560): in_proj's prefill rows' pitch
 inline constexpr size_t kPfBatchBytes = size_t(512) << 20;        // one weight batch of bf16 expert blocks (Kolibri's)
 inline constexpr unsigned kPfSsdW = 16, kPfConvRows = 16;         // nb_pf_ssd's dims a work-group, nb_pf_conv's rows a
                                                                   // work-item (PROVISIONAL: r61.speed's phase table)
 inline constexpr unsigned kPfWg = 256, kPfDtWg = 128, kPfCbDpasWg = 64, kPfGatherWg = 64, kPfDequantWg = 16;
-inline constexpr unsigned kPfFlashRpw = 8, kPfFlashHpw = 4;       // mg_pf_flash_attn's rows / heads a work-group (Muse's)
+inline constexpr unsigned kPfFlashRpw = 8, kPfFlashHpw = 4;       // mg_pf_flash_attn's rows / heads a work-group (spec 23d's)
 // nb_pf_moe.cl's header words (H_*): [0] tiles used, [1] 0, [2] rows used, [3] C, [4 + e] expert e's rows (e < 512).
 namespace pf_hdr {
 inline constexpr unsigned kTiles = 0, kRows = 2, kC = 3, kCount = 4;

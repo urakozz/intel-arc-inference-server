@@ -182,7 +182,7 @@ int main() {
     // 40 Mamba x 6 + 8 attention x 6 + 40 MoE x 9 + the head's 5
     CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(40 * 6 + 8 * 6 + 40 * 9 + 5));
     CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(653));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Eager, none, copy), size_t(653 - 8));   // Muse's eager: ONE launch
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Eager, none, copy), size_t(653 - 8));   // spec 23c's eager: ONE launch
     CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, router, copy), size_t(653 - 40));
     CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, route, copy), size_t(653 - 40));
     CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, conv, copy), size_t(653 - 40));

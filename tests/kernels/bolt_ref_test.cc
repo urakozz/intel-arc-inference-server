@@ -540,7 +540,7 @@ void test_attention() {
     }();
     size_t pdiff = 0, odiff = 0;
     for (uint32_t h : heads) {
-      const museref::EagerHead e = br::attention_eager_head(q.data(), kk.data(), vv.data(), L - 1, h);
+      const mg_attn_ref::EagerHead e = br::attention_eager_head(q.data(), kk.data(), vv.data(), L - 1, h);
       if (ci < 3 && h == 0) {
         const std::vector<uint16_t> ws = br::hex16(fx::kAttnS[ci]), wp = br::hex16(fx::kAttnP[ci]);
         for (uint32_t i = 0; i < L; ++i) {

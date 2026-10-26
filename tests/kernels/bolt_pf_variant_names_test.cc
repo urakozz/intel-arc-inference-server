@@ -2,7 +2,7 @@
 // bolt_prefill.cc forms) for both attention forms and both SSM state precisions, on the real descriptor and the synthetic
 // N 12, plus the prefill head's (prefill_head_variants: decode's binaries), against the ones src/kernels/CMakeLists.txt's
 // spec 25d block builds (passed as arguments: tests/CMakeLists.txt's B70_BOLT_PREFILL_KERNELS, `kernel_<name>`; after the
-// first `--` the binaries built outside the block that a chunk binds - pf_gemm_T0, Muse's mg_pf_flash_attn pair, 25c's
+// first `--` the binaries built outside the block that a chunk binds - pf_gemm_T0, spec 23d's mg_pf_flash_attn pair, 25c's
 // decode binaries the head reuses -; after the second `--` the block's test-only builds: the second tiling). Host only.
 //
 // And 25c's decode names, pinned (plan 25d's B0: 25d adds binaries, it renames none): the decode list's union over every

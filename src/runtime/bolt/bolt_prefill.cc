@@ -17,7 +17,7 @@
 // bolt_prefill.cc - Nemotron 3.5 Bolt's prefill chunk on one device (bolt_prefill.h has the walk in one table). Every binding
 // site names the kernel it honours; argument orders are each __kernel's, in src/kernels/bolt/{nb_pf_mamba,nb_pf_moe,
 // nb_pf_moe_gemm,nb_pf_prep,nb_prep,nb_moe}.cl and the reused sources (prefill/pf_dequant_slab.cl, k2/k2_pf_linear.cl,
-// prefill/pf_gemm.cl, muse/mg_pf_attn.cl).
+// prefill/pf_gemm.cl, bolt/mg_pf_attn.cl).
 namespace runtime::bolt {
 namespace {
 
@@ -210,7 +210,7 @@ class Walk {
     r_.pending = 1;
   }
 
-  // NoPE attention (Decision 15): nb_attn_prep at M 2048 (K / V rows pos ..), Muse's mg_pf_flash_attn over the cache.
+  // NoPE attention (Decision 15): nb_attn_prep at M 2048 (K / V rows pos ..), spec 23d's mg_pf_flash_attn over the cache.
   void attention(uint32_t l, const loader::BoltLayer& L) {
     require(L.qkv && L.o_proj && L.qkv->shape.N == d_.qkv_n() && L.o_proj->shape.N == d_.hidden,
             "block " + std::to_string(l) + "'s attention linears");

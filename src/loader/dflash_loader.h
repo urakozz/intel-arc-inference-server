@@ -57,10 +57,5 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
                            uint32_t target_vocab_rows, const l0::Mem& target_embed, DraftFormat format,
                            unsigned threads = 0);
-// Spec 23f: the same against a target given by its shape alone (Muse-Glimmer's MuseGlimmerDesc is not a ModelDesc): its
-// name, layers, hidden and head rows. A Muse-form drafter's vocab (0 in its config) becomes the target's head rows;
-// DraftFormat::Int4G64 quantises every linear at load (loader/rtn.h) into gemv.cl's layout 1.
-DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::DFlashTargetShape& target,
-                           const l0::Mem& target_embed, DraftFormat format, unsigned threads = 0);
 
 }  // namespace loader

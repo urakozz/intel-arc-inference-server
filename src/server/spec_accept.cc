@@ -24,7 +24,7 @@ FilteredProbs filter_probs(const float* logits, uint32_t vocab_used, const Sampl
   idx.resize(k);
 
   const float temperature = s.temperature > 0.0f ? s.temperature : 1.0f;
-  // Spec 23e: the model's logit transform (Muse-Glimmer's multiplier and softcap, fp32) on the k candidates only - it
+  // Spec 23e: the model's logit transform (Sampling's multiplier and softcap, fp32) on the k candidates only - it
   // is monotone, so the top-k / top-p order by the raw logits is the transformed order. Unset (1, 0): the raw logits,
   // exactly as before.
   const bool shaped = s.softcap > 0.0f || s.logit_mult != 1.0f;

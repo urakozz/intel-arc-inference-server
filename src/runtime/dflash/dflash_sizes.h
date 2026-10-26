@@ -32,20 +32,14 @@
 //   hid          fp32 [M][selector rank] (DFlash 2)
 namespace runtime::dflash {
 
-// Spec 23f: a Muse-form drafter (model::DFlashForm::Muse) at its 16 rows (kernels/dflash_dims.h list_rows), the
-// 16-row readback (MuseDraftOut), the verify's ids buffer `vids` (u32 [16], shared: mg_df_select writes [anchor, the
-// drafts], the target's verify list reads it) and its ring of window + 1 slots in whole 64-offset blocks (2112).
 struct DFlashSizes {
   size_t dctl = 0, out = 0, rope = 0, ring_k = 0, ring_v = 0, taps = 0, resid = 0, h = 0, x = 0, xa = 0, gout = 0,
-         co = 0, q = 0, kb = 0, vb = 0, part = 0, kv = 0, logits = 0, tpart = 0, cand = 0, unary = 0, hid = 0,
-         vids = 0;
+         co = 0, q = 0, kb = 0, vb = 0, part = 0, kv = 0, logits = 0, tpart = 0, cand = 0, unary = 0, hid = 0;
   size_t total() const {
     return dctl + out + rope + ring_k + ring_v + taps + resid + h + x + xa + gout + co + q + kb + vb + part + kv +
-           logits + tpart + cand + unary + hid + vids;
+           logits + tpart + cand + unary + hid;
   }
 };
-// The lists' rows for a drafter: Qwen3.8's 8 (kernels::dflash::kM), a Muse-form drafter's 16.
-uint32_t list_rows(const model::DFlashDesc& d);
 
 // The drafter's RoPE table: [rows][head_dim] fp32, cos in the first half, sin in the second, angle = pos x
 // theta^(-2j / head_dim) in double, rounded once (tools/oracle/dflash_ref.py rope(); tests/kernels/dflash_ref.h
@@ -85,9 +79,5 @@ struct DFlashCtl;
 // which the 16-candidate readback cannot carry, so T != 0 is refused here (std::invalid_argument naming v1) rather
 // than drafted greedily under a sampled request's acceptance (19c's sampled rule would read the wrong q).
 void set_draft_params(DFlashCtl& c, const model::DFlashDesc& d, uint32_t k, float temperature, uint64_t seed);
-// Spec 23f: the dctl.k a draft list runs at for a caller that keeps k drafts - k (Qwen3.8's drafter: rows and keys
-// past k masked, vLLM's block of k + 1), or a Muse-form drafter's whole block (15: every row attends to all 16, as
-// transformers' DFlashTokenCandidateGenerator always drafts; the caller verifies the first k).
-uint32_t draft_list_k(const model::DFlashDesc& d, uint32_t k);
 
 }  // namespace runtime::dflash

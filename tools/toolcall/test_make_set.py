@@ -158,28 +158,6 @@ def _lfm_snapshot():
     return None
 
 
-def test_muse_defaults_sorted_and_recorded():
-    """Muse-Glimmer (spec 23a Task 5): reasoning_strength low + current_date, key-sorted, recorded per scenario."""
-    tok, out = run("muse_glimmer")
-    assert len(tok.calls) == 2
-    for c in tok.calls:
-        assert c["kwargs"] == make_set.MUSE_KWARGS == {"reasoning_strength": "low", "current_date": "2026-10-15"}
-        assert keys_sorted(c["msgs"]) and keys_sorted(c["tools"])
-        call = [m for m in c["msgs"] if m.get("tool_calls")][0]["tool_calls"][0]["function"]["arguments"]
-        assert isinstance(call, dict)                 # objects: the template raises on a JSON string (T:28-30)
-    sc = json.load(open(os.path.join(out, "t1_a.json"), encoding="utf-8"))
-    assert sc["chat_template_kwargs"] == make_set.MUSE_KWARGS
-
-
-def _muse_snapshot():
-    import glob
-    for hub in (os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"), "/hf/hub"):
-        for c in sorted(glob.glob(os.path.join(hub, "models--meta-models--Muse-Glimmer-30B", "snapshots", "*"))):
-            if os.path.exists(os.path.join(c, "chat_template.jinja")):
-                return c
-    return None
-
-
 def test_lfm2moe_render_is_apply_chat_template():
     """A scenario re-rendered with LFM2's own template: the set's ids are apply_chat_template's, which are
     tokenizer(text)'s for its text (byte for byte); the history call is pythonic. SKIPs without transformers 5.19.0
@@ -209,53 +187,6 @@ def test_lfm2moe_render_is_apply_chat_template():
         assert "<|tool_call_start|>[" in text and "List of tools: [" in text
         assert tok.decode(ids) == text
     print(f"  lfm2moe: 36 scenarios re-rendered; two checked byte for byte against apply_chat_template")
-
-
-def test_muse_render():
-    """With transformers 5.19.0 and the original's small files (the oracle image + the site; skipped on a bare host): two
-    scenarios of the real A4 set re-rendered for Muse are byte-identical to apply_chat_template on their key-sorted
-    messages with the recorded kwargs, hold ONE BOS (first) and no <|patch|>; the GPTQ repo's older template is refused."""
-    snap = _muse_snapshot()
-    try:
-        import transformers
-        ok = transformers.__version__ == "5.19.0"
-    except ImportError:
-        ok = False
-    if not (snap and ok):
-        print("  skip test_muse_render: needs transformers 5.19.0 and meta-models/Muse-Glimmer-30B's small files")
-        return
-    from transformers import AutoTokenizer
-    here = os.path.dirname(os.path.abspath(__file__))
-    src_set = os.path.join(here, "..", "..", "tests", "golden", "toolcall")
-    src, out = tempfile.TemporaryDirectory(), tempfile.TemporaryDirectory()
-    _TMP.extend([src, out])
-    names = ["t1_define-linear_l0", "t4_comment-box"]
-    for n in names:
-        for ext in ("json", "ids"):
-            with open(os.path.join(src_set, f"{n}.{ext}"), encoding="utf-8") as f:
-                open(os.path.join(src.name, f"{n}.{ext}"), "w", encoding="utf-8").write(f.read())
-    json.dump([{"name": n} for n in names], open(os.path.join(src.name, "manifest.json"), "w"))
-    make_set.retokenise(snap, src.name, out.name)
-    tok = AutoTokenizer.from_pretrained(snap)
-    for n in names:
-        sc = json.load(open(os.path.join(out.name, f"{n}.json"), encoding="utf-8"))
-        msgs, tools = json.loads(json.dumps([sc["messages"], sc["tools"]], sort_keys=True))
-        want = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True, tokenize=True, return_dict=False,
-                                       **sc["chat_template_kwargs"])
-        got = [int(x) for x in open(os.path.join(out.name, f"{n}.ids"), encoding="utf-8").read().split()]
-        assert got == list(want), n
-        assert got.count(200000) == 1 and got[0] == 200000 and 200092 not in got, n
-        text = tok.decode(got, skip_special_tokens=False)
-        assert "<atem:invoke name=" in text and text.endswith("<|start|>assistant"), n
-    gq = snap.replace("models--meta-models--Muse-Glimmer-30B", "models--Vishva007--Muse-Glimmer-30B-W4A16-AutoRound-GPTQ")
-    import glob
-    gq = sorted(glob.glob(os.path.join(os.path.dirname(gq), "*")))
-    if gq and os.path.exists(os.path.join(gq[0], "chat_template.jinja")):
-        try:
-            make_set.check_muse_template(gq[0])
-            raise AssertionError("the GPTQ repo's older template was accepted")
-        except SystemExit as e:
-            assert "cfc67e5f" in str(e)
 
 
 def test_bolt_defaults_sorted_thinking_on():
