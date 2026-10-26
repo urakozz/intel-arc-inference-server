@@ -176,24 +176,23 @@ struct PrefillScratch : PrefillScratchDims {
   // 0 until the composed path has run (spec 6).
   size_t pf_s_bytes() const { return pf_s_ ? pf_s_->size() : 0; }
 
-  // Spec 2.1 §3.3: the two backend expansions, allocated on first use (ruling R7's pattern one
+  // Spec 2.1 §3.3: the l0 backend's expansion, allocated on first use (ruling R7's pattern one
   // level down) so a session pays only for the backend it runs.
-  l0::Mem& dequant_buffer();   // sycl-tla: bf16 [5120][max int4 N] (Qwen3.8 356,515,840 B)
   l0::Mem& slab_buffer();      // L0: bf16 [widest int4 K][1024] (Qwen3.8 35,651,584 B = 17408*1024*2;
                                // spec 15d: Ornith's 4096, out_proj / o_proj)
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
-  // composed `attn_chunk` (sycl-tla, or L0 with B70_PREFILL_ATTN=composed). The default
+  // composed `attn_chunk` (B70_PREFILL_ATTN=composed). The default
   // flash path never touches them, so prefill scratch no longer scales with max_len.
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
-  size_t lazy_bytes() const;   // whichever of the four exist
+  size_t lazy_bytes() const;   // whichever of the three exist
 
  private:
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
                  const PrefillScratchSizes& s);   // the delegate
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
-  std::unique_ptr<l0::Mem> dequant_, slab_, pf_s_, pf_p_;
+  std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_;
 };
 
 // Spec 8 (plan 8b): the MTP head's state, allocated ONLY when the model carries the

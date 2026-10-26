@@ -574,12 +574,6 @@ std::vector<float> PipelineEngine::read_prefill_logits() const {
 void PipelineEngine::prepare_prefill() {
   const model::ModelDesc& d = *st(0).model.desc;
   model::require_prefill(d);
-  const PrefillBackend b = prefill_backend();
-  if (!is_l0(b))
-    throw std::runtime_error(std::string("--pp 2 prefills on the L0 backends (l0, l0-int8), not ") +
-                             prefill_backend_name(b) +
-                             ": sycl-tla's walk waits on the host between runtimes and has no "
-                             "two-card pipeline (spec 16c); --prefill-backend l0 or l0-int8");
   if (prefill::attn_mode() != prefill::AttnMode::Flash)
     throw std::runtime_error("--pp 2 prefills with the flash attention only: "
                              "B70_PREFILL_ATTN=composed has no two-card walk (spec 16c)");

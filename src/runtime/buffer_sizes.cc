@@ -256,11 +256,9 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.pf_attn = size_t{kC} * desc.fa_value_dim() * kBf16;
   s.pf_o = size_t{desc.fa_q_heads} * kC * Q::kFaHeadDim * kFp32;
   s.pf_rowsum = size_t{desc.fa_q_heads} * kC * kFp32;
-  // The lazy four (spec 2.1 §3.3, spec 6): sycl-tla's bf16 dequant [hidden][max int4 N];
-  // the L0 slab [intermediate][1024] (one pf_gemm slab of the widest K); the composed
-  // attention's S and P, [one GQA group][kC][max_len] fp32 and bf16 - the only prefill
-  // scratch that scales with max_len.
-  s.dequant = size_t{desc.hidden} * max_int4_n(desc) * kBf16;
+  // The lazy three (spec 2.1 §3.3, spec 6): the L0 slab [intermediate][1024] (one pf_gemm
+  // slab of the widest K); the composed attention's S and P, [one GQA group][kC][max_len]
+  // fp32 and bf16 - the only prefill scratch that scales with max_len.
   s.slab = size_t{slab_k(desc)} * kernels::kPfSlabWidth * kBf16;
   s.pf_s = size_t{desc.fa_gqa()} * kC * max_len * kFp32;
   s.pf_p = size_t{desc.fa_gqa()} * kC * max_len * kBf16;

@@ -2,12 +2,9 @@
 // `runtime::Engine` that are not compiled into `b70_runtime`.
 //
 // **Why they live here.** `b70_runtime` is linked by every decode binary and
-// every decode test, and cmake/prefill.cmake's whole arrangement is that none
-// of those acquires a dependency on libb70_prefill.so. `Engine::prefill` calls
-// into `runtime::prefill::Context` (an icpx-built .so symbol) and into
-// `gemm_bf16` (sycl-tla). Defining it in this archive keeps the split exact: a
-// target that never calls `prefill()` links what it always linked, and a target
-// that does calls `b70_link_prefill()` and gets the .so and the two rpaths.
+// every decode test; `Engine::prefill` calls into `runtime::prefill::Context` and the
+// prefill walk. Defining it in this archive keeps the split exact: a target that never
+// calls `prefill()` links what it always linked.
 // The member declarations stay in `runtime/engine.h`; only the definitions move.
 #include <algorithm>
 #include <cstdio>
@@ -61,8 +58,6 @@ PrefillBackend Engine::prefill_backend() const {
   return pf_backend_ ? *pf_backend_ : prefill::default_prefill_backend();
 }
 
-bool Engine::prefill_sycl_side_created() const { return pfx_ && pfx_->cx.has_sycl(); }
-
 MemoryComponents Engine::memory_use() const {
   MemoryComponents c;
   c.model = model_.report.total();
@@ -91,12 +86,8 @@ std::string Engine::memory_line() const {
 void Engine::prepare_prefill() {
   // A model the prefill path cannot run is refused here, before any prefill allocation,
   // by name (Engine::prefill calls this first). Spec 15d: a MoE model prefills through the
-  // grouped experts on the L0 backends; sycl-tla has no MoE path.
+  // grouped experts.
   model::require_prefill(*model_.desc);
-  if (model_.desc->is_moe() && !is_l0(prefill_backend()))
-    throw std::runtime_error("runtime::Engine::prefill: " + model_.desc->name +
-                             " (mixture of experts) prefills on the L0 backends only (l0, "
-                             "l0-int8); set_prefill_backend / --prefill-backend");
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
@@ -155,18 +146,13 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
 
   const PrefillBackend backend = prefill_backend();
-  if (backend == PrefillBackend::SyclTla && !prefill::sycl_available())
-    throw std::runtime_error("runtime::Engine::prefill: the sycl-tla backend needs the SYCL"
-                             " component, and this build has none; set_prefill_backend(L0)");
   const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
   const bool replay = pf_replay_.value_or(replay_env && std::strcmp(replay_env, "1") == 0);
-  if (replay && !is_l0(backend))
-    throw std::runtime_error("runtime::Engine::prefill: replay requires the L0 or l0-int8 backend");
 
   prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
   const prefill::AttnMode attn = prefill::attn_mode();
   // Spec 12b: an int8 cache is written and read by the flash path's kv8 twins only; refuse
-  // the composed path and sycl-tla here, before a chunk writes anything.
+  // the composed path here, before a chunk writes anything.
   if (persist_.kv_lay.form == KvCache::Int8) prefill::require_kv8_path(backend);
 
   // With a block hook (spec 7 §3.2) every chunk ends at a block end or at the prompt
@@ -187,9 +173,6 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   std::vector<std::vector<uint32_t>> df_sites;
   uint32_t df_from = 0;   // the first position tapped
   if (drafter_) {
-    if (!is_l0(backend))
-      throw std::runtime_error("runtime::Engine::prefill: a drafter's prefill taps run on the L0 backends only "
-                               "(l0, l0-int8)");
     if (replay)
       throw std::runtime_error("runtime::Engine::prefill: a drafter's prefill taps are copies, which a recorded "
                                "chunk cannot hold - unset B70_PREFILL_REPLAY with --spec dflash");
@@ -207,9 +190,6 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
   }
   if (mtp_) {
-    if (!is_l0(backend))
-      throw std::runtime_error("runtime::Engine::prefill: the MTP head's prefill runs on the L0"
-                               " backends only (pf_gemm)");
     mtp_normalise_live();
     verify_k_ = kNoVerify;
     if (!mtp_pf_hid_)

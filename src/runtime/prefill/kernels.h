@@ -12,15 +12,10 @@ namespace runtime::prefill {
 // The prefill path's module/kernel cache - plan 6b Task 2's `kernel(variant,
 // entry)`, living **beside** `Context` rather than on it.
 //
-// **Why it is not a member of `Context`.** `Context`'s methods are compiled by
-// icpx into `libb70_prefill.so`, and that .so deliberately links no project
-// archive (`context.h`'s header comment; `cmake/prefill.cmake` states the
-// reason - a g++ link of icpx objects silently drops the registered device
-// images, so the SYCL objects must be linked by icpx, and nothing in the decode
-// build may therefore be dragged in as -fPIC). `l0::Module` and `l0::Kernel`
-// are `b70_l0` symbols with out-of-line constructors. A `Context::kernel()`
-// returning `l0::Kernel&` would pull that archive into the .so and void the
-// split. This class is plain C++17, compiled by g++, and hands `Context` a
+// **Why it is not a member of `Context`.** It was placed here while `Context` was
+// compiled into a separate shared library (the sycl-tla backend's, gone since
+// 2026-10-27), and it stays: `l0::Module` and `l0::Kernel` are `b70_l0` symbols
+// with out-of-line constructors, and this class hands `Context` a
 // `ze_kernel_handle_t` through `l0::Kernel::handle()`, which is inline.
 //
 // Semantics are `runtime::Capture::kernel()`'s (`capture.cc:246-267`): one

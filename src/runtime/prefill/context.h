@@ -8,7 +8,6 @@
 
 #include "l0/context.h"
 #include "l0/kernel.h"
-#include "runtime/prefill/sycl_side.h"
 
 namespace l0 {
 class Event;
@@ -16,14 +15,10 @@ class Event;
 
 namespace runtime::prefill {
 
-// `Context` is host-side (g++): the Level Zero immediate list, `launch`, `wait` and the
-// launch counter. Its SYCL half is `SyclSide` (sycl_side.h), built by icpx into
-// libb70_prefill.so and reached only through `sycl()`, which creates it on first use (spec
-// 2.1 §3.5). `libb70_prefill.so` links no project archive and names no `Context` symbol --
-// it is a leaf the g++ host archive calls into through `gemm_sycl.h`'s SyclSide-taking
-// entry points, never the other way around. Including l0/context.h and l0/kernel.h here
-// costs no link dependency: the only members they touch (Context::handle(),
-// Context::device(), Kernel::handle()) are inline.
+// `Context` is host-side: the Level Zero immediate list, `launch`, `wait` and the launch
+// counter (spec 2.1 §3.5). Including l0/context.h and l0/kernel.h here costs no link
+// dependency: the only members they touch (Context::handle(), Context::device(),
+// Kernel::handle()) are inline.
 struct KernelArg {
   const void* ptr;
   size_t size;
@@ -75,12 +70,6 @@ class Context {
     launch(k.handle(), gx, gy, gz, args, signal);
   }
 
-  // Spec 2.1 §3.5: the SYCL side, built on first use. The L0 backend never calls sycl(), so a
-  // pure-L0 session never links a queue to the device -- has_sycl() is how the equivalence test
-  // proves that. wait() synchronises the SYCL queue first (when it exists) and then the list,
-  // spec 2's order.
-  SyclSide& sycl();
-  bool has_sycl() const;
   ze_context_handle_t ze_context() const;
   ze_device_handle_t ze_device() const;
   ze_command_list_handle_t l0_list() const;
@@ -100,8 +89,7 @@ class Context {
   void wait_event(ze_event_handle_t e);
   void timestamp(uint64_t* dst);
   // wait() with a bound: true once everything appended has completed, false when
-  // `timeout_ns` passed first (the list keeps running). L0 only: a session with a SYCL side
-  // has no bounded wait and throws.
+  // `timeout_ns` passed first (the list keeps running).
   bool wait_for(uint64_t timeout_ns);
   // Two of timestamp()'s values as milliseconds (the device's timer frequency and its
   // timestamp width, read once).
@@ -125,7 +113,7 @@ class Context {
   // Opt-in pure-L0 recording. Capture resolves pointer/scalar arguments but
   // executes nothing; replay reads current buffer contents and synchronizes
   // before returning. Kernels and referenced allocations must outlive the
-  // recording. Waits, SYCL, profiling and nested captures are rejected.
+  // recording. Waits, profiling and nested captures are rejected.
   class Recording {
    public:
     ~Recording();

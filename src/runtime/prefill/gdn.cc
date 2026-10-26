@@ -18,7 +18,7 @@
 // the ring slots launch 1 lifted; launch 3 rewrites `xb` in place after launch
 // 2 wrote it; launch 6 overwrites `A` with `T` and launch 7 reads that `T`;
 // launch 9 reads launches 7 and 8's outputs and is the only writer of
-// `gdn_state`. No events, no fences: `src/sycl/context.cc` creates the list
+// `gdn_state`. No events, no fences: `context.cc` creates the list
 // with ZE_COMMAND_QUEUE_FLAG_IN_ORDER and `tests/prefill/context_test.cc`'s
 // 1024-launch chain is the empirical check on that guarantee.
 //

@@ -2,7 +2,7 @@
 #include <cstdint>
 
 #include "runtime/prefill/context.h"
-#include "runtime/prefill/gemm.h"     // GemmBatch - the same problem description sycl-tla takes
+#include "runtime/prefill/gemm.h"     // GemmBatch
 #include "runtime/prefill/kernels.h"
 
 namespace runtime::prefill {

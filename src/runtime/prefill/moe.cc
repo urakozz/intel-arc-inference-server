@@ -54,7 +54,6 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
                uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q) {
   const model::ModelDesc& d = s.desc();
   require(d.is_moe() && s.moe != nullptr, "the prefill scratch has no MoE region (a dense model?)");
-  require(is_l0(backend), "a mixture-of-experts layer prefills on the L0 backends only (l0, l0-int8)");
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");

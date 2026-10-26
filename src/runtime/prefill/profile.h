@@ -9,8 +9,8 @@
 //
 // Context timestamps L0 kernels and records host launch submission separately.
 // A wait measures only residual synchronization after submission; the GPU can
-// already have executed while the host was submitting. SYCL kernels are not
-// covered by L0 events. None of these columns is interchangeable or additive.
+// already have executed while the host was submitting. None of these columns is
+// interchangeable or additive.
 //
 // Events and extra phase waits perturb the walk. The CLI supplies this SAME
 // instrumented call's wall time, not an independent plain run. The report must

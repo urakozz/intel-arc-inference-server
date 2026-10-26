@@ -18,18 +18,8 @@ class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
 // ONE chunk of at most `PrefillScratch::kC` positions, at absolute position
 // `pos`. The caller has already uploaded the chunk's ids into `s.ids` and set
 // `Control::{pos, n_active}` (after a `wait()`, because the L0 list is
-// asynchronous). This function walks all 64 layers.
-//
-// **It does NOT return without waiting.** Plan 6b Task 10 wrote `step_chunk` as
-// pure appending, which was true while every op was an L0 launch. It is not
-// true now: rulings A23/A24 put the int4 linears on the two-pass
-// `dequant_to_bf16` (L0) -> `gemm_bf16` (SYCL) path with a host `wait()`
-// between them, and A24 measured that the B70 has ONE compute queue, two
-// software queues, and no device-side cross-runtime dependency to order them
-// with. So the walk synchronises at every L0<->SYCL boundary, and the caller
-// gets a partially-drained list. That is a deviation from the plan's prose,
-// forced by a ruling that post-dates it, and it is the reason the walk's cost
-// carries a handoff term at all (656 waits per chunk at C > 0; see docs/15).
+// asynchronous). This function walks all 64 layers, appending to the L0 list
+// (pure appending: every op is an L0 launch, spec 2.1).
 //
 // The four persistent `l0::Mem&` are passed rather than reached through an
 // `Engine`, so this function holds no engine reference and is unit-testable.
@@ -41,7 +31,7 @@ class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
 //
 // `kv` (spec 12b) is kv_k_mem / kv_v_mem's layout (PersistentBuffers::kv_lay): at int8 the
 // FA layers write and read the int8 rows and scales through attn_*_kv8 (one launch each,
-// as the bf16 flash path), on the L0 backends' flash attention only.
+// as the bf16 flash path), on the flash attention only.
 //
 // `taps` (spec 19c, a drafter - runtime/tap_drafter.h): after the input fold of layer s (`resid` = layer s - 1's
 // output) the chunk's rows r0 .. C - 1 of every tap whose site is s go to `dst` laid out [row - r0][tap][hidden]
@@ -117,19 +107,15 @@ inline uint32_t mtp_kv_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 
 size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 
 // The launch arithmetic, derived from the walk itself rather than restated:
-// what `Context::launches()` advances by. SYCL GEMMs are NOT on the L0 list and
-// therefore not counted here; `step_chunk_gemms()` reports those separately.
-// `C` is the chunk width: since the parity program's S3 the L0 backend issues
-// attention's QK^T GEMM per 256-row block, so a chunk's launch count depends on
-// it (8689 at C <= 256, 9137 at C = 2048). sycl-tla ignores the argument.
+// what `Context::launches()` advances by. `C` is the chunk width: since the parity
+// program's S3 the composed attention issues its QK^T GEMM per 256-row block, so a chunk's
+// launch count depends on it there (8625 at C <= 256, 9073 at C = 2048).
 // Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
-// launch per FA layer and the L0 count no longer depends on C (8449; step.cc).
+// launch per FA layer and the count no longer depends on C (8449; step.cc).
 // Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C);
-size_t step_chunk_gemms(const model::ModelDesc& d, PrefillBackend b);   // SYCL GEMM calls per chunk (0 on L0 since S3)
-size_t step_chunk_waits(const model::ModelDesc& d, PrefillBackend b);   // host L0<->SYCL handoffs per chunk
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
-// Spec 16c: one layer's launches on an L0 backend (0 on sycl-tla), and a stage's: its
+// Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
 // the two stages add up to step_chunk_launches (the pipeline asserts it).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
