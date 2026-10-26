@@ -1,21 +1,177 @@
 # Spec 17 - tensor parallel over two B70s
 
-**Status:** **PARKED (operator, 2026-10-23): refreshed, retargeted at Nemotron 3.5 Bolt, parked.** Nothing of spec 17
-is built; no plan of it has started. Written 2026-10-05 as a Qwen3.8-first design for review; that text is kept as
-Appendix A, its stale claims marked in place. §R is the 2026-10-23 revision; §1-§9 are the corrected design and
-supersede Appendix A wherever they differ.
+**Status (2026-10-27): RETARGETED - Qwen3.8 first (operator, 2026-10-27); third in the Qwen speed track, after spec 28
+(plans 28a / 28b) and spec 19's plan 19f.** Nothing of spec 17 is built; no plan of it has started. **§R2 is the
+2026-10-27 revision**: for Qwen3.8 / Agnes it supersedes §R's ruling, §2's target order, §3's rule and §4.1-§4.2's
+Qwen3.8 rows wherever they differ. §R and §1-§9 are kept as written on 2026-10-23 (Bolt first): they stay the design for
+Bolt's later TP plan, minus the drafter (Bolt keeps no speculative decoding, §R2.1). Appendix A is the 2026-10-05 text.
 
-**Plans:** `docs/superpowers/plans/2026-10-05-spec17{a,b,c,d}-*.md` (rewritten 2026-10-23, Bolt first, each PARKED):
-17a the standalone P0 and the go / no-go rule, 17b decode on Bolt, 17c prefill on Bolt, 17d snapshots, speculation,
-serving and the record. Box queue row **68** is proposed for 17a (the next free row on 2026-10-23: rows 64 / 65 are
-spec 26's, 66 spec 13a's, 67 the prefill bandwidth profile); 17b-17d take the next free rows when they are built.
-Like spec 25's plans, these documents do not edit `tools/box_validate/stages.sh`: each plan describes its stages and
-adds them when it is built.
+**Status (2026-10-23, superseded 2026-10-27):** PARKED (operator, 2026-10-23): refreshed, retargeted at Nemotron 3.5
+Bolt, parked. Written 2026-10-05 as a Qwen3.8-first design for review; that text is kept as Appendix A, its stale claims
+marked in place. §R is the 2026-10-23 revision; §1-§9 are the corrected design and supersede Appendix A wherever they
+differ.
+
+**Plans:** `docs/superpowers/plans/2026-10-05-spec17{a,b,c,d}-*.md`. **17a was revised 2026-10-27 for Qwen3.8 first**
+(P0: both all-reduce routes, the go / no-go line of §R2.7; its 2026-10-23 Bolt tasks are kept below its revision for
+Bolt's later P0). 17b-17d keep their 2026-10-23 Bolt-first text under a 2026-10-27 status line; each is rewritten for the
+main engine (Qwen3.8, then Agnes) when 17a records GO. **Box rows (2026-10-27): 71 (17a), 72-74 (17b-17d)** - the next
+free rows after 67 once spec 28 (68 / 69) and plan 19f (70) took theirs; plan 5d is 75. The 2026-10-23 proposal of row
+68 for 17a is withdrawn (68 is plan 28a's). Like spec 25's plans, these documents do not edit
+`tools/box_validate/stages.sh`: each plan describes its stages and adds them when it is built.
+
+**Plans (2026-10-23, superseded 2026-10-27):** rewritten 2026-10-23, Bolt first, each PARKED: 17a the standalone P0
+and the go / no-go rule, 17b decode on Bolt, 17c prefill on Bolt, 17d snapshots, speculation, serving and the record.
+Box queue row 68 was proposed for 17a (the next free row on 2026-10-23: rows 64 / 65 were spec 26's, 66 spec 13a's, 67
+the prefill bandwidth profile).
 
 **Grades.** Every number is marked **measured** (on this box, by this repo, with the record cited), **derived** (from
 descriptors, configs or measured numbers by arithmetic shown here), **estimated** (a judgement), **assumed** (a
 placeholder for a number nobody has measured; every derived figure that uses one says so) or **published** (someone
-else's figure, cited).
+else's figure, cited). §R2's published figures come from **an external two-B70 engine (published numbers, not ours)**
+and from vllm-sly-radiance (public); neither is a bar by itself.
+
+## R2. Revision - 2026-10-27: Qwen3.8 first
+
+### R2.1 The ruling
+
+**The operator, 2026-10-27:** Qwen3.8-27B is the top target - its quality beats Bolt's. Bolt keeps **no speculative
+decoding** (spec 26's LiLiCorr drafter was dropped on 2026-10-27, with Bolt's `--spec dflash`). The Qwen speed track's
+order: spec 28 (small-M verify GEMM) -> spec 19 §13 (DFlash on the card, lookup inside it) -> **this spec's P0 on
+Qwen3.8** -> plan 5d (prefill chunk 4096). So:
+
+1. **Targets, in order: Qwen3.8 (then Agnes, the same engine and code), then Bolt, then Kolibri.** §R's condition
+   "Qwen3.8 / Agnes only if the two-card replica mode (spec 13 §10) loses to TP" is **withdrawn**; the replica mode
+   stays written for later, and `--tp 2`, `--pp 2` and `--replica` stay mutually exclusive (§4.9).
+2. **P0 (plan 17a) measures both all-reduce routes** (§R2.6) on Qwen3.8's counts and sizes and applies §R2.7's rule.
+   It runs in the box session after `r22.devices` / `r22.p1` (the first time two cards run in one process; if those
+   fail, 17a's probe still runs - it owns its context code - and the failure is recorded beside it). Bolt's rows 59-62
+   no longer gate it.
+3. **Building (17b-17d, rewritten for the main engine)** begins only on §R2.7's GO and the operator's go, after the
+   track's earlier plans.
+
+### R2.2 What changed since 2026-10-23
+
+| 2026-10-23 premise | the fact on 2026-10-27 |
+|---|---|
+| Bolt and Kolibri first; dense models only if the replica mode loses | Qwen3.8 first (the operator's quality ruling); Bolt second, without a drafter |
+| §4.8's drafter under TP is LiLiCorr on Bolt | LiLiCorr dropped; under TP the drafters are Qwen3.8's MTP head and DFlash2 (§R2.8) |
+| the crossing mechanism chosen among (a) / (b) / (c) inside the GPU (§4.1) | an external two-B70 engine publishes a working **host-staged** all-reduce that needs no P2P; P0 measures it beside the peer route (§R2.6) |
+| the verify step costs 1.17-2.6 plain steps, so TP + speculation pays the M-row cost twice | spec 28 aims to make the M-row verify nearly flat (target verify(8) <= 1.4); the TP crossing is latency-bound, so M rows a call cost little more (§R2.6, recorded at M = 8) |
+
+### R2.3 The evidence
+
+| fact | value | grade | source |
+|---|---|---|---|
+| Qwen3.8 plain decode, one card, int8 head | 31.21 t/s (~32.0 ms a step) | measured | spec 9, docs/BENCHMARKS.md |
+| one card, `--mtp auto` on the tool-call set | geomean 1.633x of plain (~49 t/s at those depths) | measured (1.633x); t/s derived | docs/BENCHMARKS.md "D1, greedy decode" |
+| the step's composition at M = 1 (profiled lists, shares) | int4 GEMVs 23.9 + head 4.4 of 33.3 ms (~85 %); attention + `gdn_step` 3.3 (~10 %); everything else 1.8 (~5 %) | measured 2026-09-27 (bf16 head then) | docs/probe-mtp-2026-09-27.md |
+| both cards' link | PCIe 3.0 x16 each | operator-stated | §1 |
+| BAR | **32 GB mapped on both cards** (`lspci`) | measured 2026-10-23 (operator, by hand) | §1 |
+| P2P | the box runs the operator's custom kernel with a P2P patch (7.3.0-rc4-b70-p2p); **our engine has never exercised P2P** | installed (measured); never exercised | §1; docs/10-the-box.md |
+| the external engine's split for Qwen3.8 | Megatron-style: column-parallel q / k / v, the GDN in-projections, gate_up; row-parallel o_proj, GDN out_proj, down; embedding, norms and head replicated; **2 all-reduces a layer = 128 a token, 20 KB fp32 each at decode** | published (an external two-B70 engine, not ours) | its published notes |
+| its all-reduce | **without P2P**: device -> pinned host, the CPU sums, the CPU writes the result into each card's own VRAM through its BAR; **~33 µs per 1-row all-reduce, ~4.2 ms a token** | published (the same) | the same |
+| its plain TP decode | **~31.5 t/s on FP8 weights** - twice our int4 bytes, so each of its cards reads about what our one card reads | published (the same) | the same |
+| its TP prefill | a chunked "wavefront": the all-reduce of one chunk overlapped with the next chunk's compute | published (the same) | the same |
+| a two-rank P2P all-reduce of 2-64 KiB inside a graph on two B70s | ~6.6-10.8 µs | published (host platform not stated) | §1's row |
+
+### R2.4 The derived ceiling: what TP can give Qwen3.8 at int4
+
+Per card, TP halves every split linear's bytes and the per-head work (GDN, attention), not the launch count or the
+small kernels; it adds 128 all-reduces and the head's argmax exchange a token.
+
+- GEMVs and head: 0.85 x 32.0 ms / 2 = 13.6 ms; at an **estimated ~90 %** of the full-width GEMVs' bandwidth (half
+  the work-groups a launch) **~15.1 ms** (derived, one estimated input);
+- attention + GDN at half the heads: 0.10 x 32.0 / 2 = 1.6 ms; everything else unchanged: 0.05 x 32.0 = 1.6 ms
+  (derived);
+- all-reduce at the external engine's published rate: 128 x 33 µs = **4.2 ms** (derived from published);
+- **~22.5 ms a token -> ~44 t/s plain at int4 on two cards** (derived; ~48 t/s if the half-width GEMVs keep full
+  bandwidth). At the published P2P latency (~7-11 µs a call: ~0.9-1.4 ms a token) it would be **~52-55 t/s** - the
+  peer route's prize, if the root complex carries it.
+
+**Against the right baseline (§6):** ~44 t/s plain TP is **below one card's `--mtp auto` on tool calls (~49 t/s)**. TP
+pays for Qwen3.8 only **with** speculation - `--tp 2 --mtp auto` / `--spec dflash` - where each verify's all-reduces
+carry M rows at nearly the same latency, and after spec 28 the M rows themselves are nearly free; and in **context**:
+per card the KV halves (64 -> 32 KiB a position at bf16, derived: 16 FA layers x 2 x 2 kv heads x 256 x 2 B) and so does
+the GDN state (151 -> 75.5 MB a sequence), while the weights drop from ~17.5 GB to ~10.5 GB a card (derived, embedding
+replicated) - so **262144 positions at bf16 KV fit with MTP or DFlash** (derived; one card today: ~201k, ~170k with
+`--mtp`, ~140k with the int8 DFlash drafter - docs/19-running-models.md, spec 19 §11; the TP planner states the real
+figure).
+
+### R2.5 The split for the GDN hybrid (Qwen3.8 and Agnes; from `ModelDesc` through a `tp_rank` / `tp_size` view)
+
+Head counts halve per rank; every K slice is a whole number of 64-groups; the fused layouts are **re-fused per card
+from that card's heads** at load, never sliced from the one-card buffer (§4.2's correction).
+
+| block | column-parallel, per card (Qwen3.8) | row-parallel -> all-reduce | replicated / local |
+|---|---|---|---|
+| GDN (48 layers; Agnes 54) | `qkv‖z` N 16384 -> **8192**: q 8 of 16 k-heads (1024) ‖ k (1024) ‖ v 24 of 48 v-heads (3072) ‖ z (3072), layout 1, re-fused; `a‖b` 24 + 24 of 48 + 48, zero-padded to the bf16 GEMV's 128; the conv over the card's 5120 of 10240 channels and its ring; `A_log` / `dt_bias` / the gated norm per v-head | `out_proj` K 6144 -> **3072** (48 groups) | the input norm |
+| FA (16 layers; Agnes 18) | `q‖k‖v` N 14336 -> **7168**: q‖gate 12 of 24 heads (6144) ‖ k 2 of 4 kv heads (512) ‖ v (512), re-fused; q_norm / k_norm per head; the card's KV (2 kv heads) | `o_proj` K 6144 -> **3072** (48 groups) | the input norm |
+| MLP (64; Agnes 72) | `gate‖up` N 34816 -> **17408** (8704 + 8704, interleaved in 16-column blocks per card); Agnes's folded gate‖up' 38912 -> 19456 | `down` K 17408 -> **8704** (136 groups); Agnes's down' 19456 -> 9728 (152) | the post-attention norm |
+| embedding, final norm | - | - | replicated (the embedding is a gather: no traffic) |
+| `lm_head` (int8) | vocabulary split, 124160 rows a card | the argmax exchange (§4.4) | - |
+
+**All-reduces a token:** 2 a layer -> **128 on Qwen3.8, 144 on Agnes**, + the head exchange. **Each is one fp32 row of
+the hidden width a row: 20 KiB** (5120 x 4 B; 2.5 MiB a token at M = 1), i.e. §4.1's fold-then-send form (b): each card
+folds its own split-K slices first, then the cross-card add runs in a **fixed order (card 0's row, then card 1's)** so
+both cards hold a bitwise-identical residual (T1). Remote partials (a) would be 80 KiB a row at S4 and are not measured
+for Qwen3.8.
+
+### R2.6 The all-reduce: two routes, both measured
+
+- **(P) Direct P2P peer writes** (needs the custom kernel's P2P patch): each card's fold-then-send kernel writes its
+  20 KiB row and a sequence stamp into the **peer's** landing buffer (a page-aligned allocation of its own); each card's
+  fold polls the stamp with system-scope atomics, then sums in the fixed order. Push (peer write) and pull (peer read
+  after a flag) both timed: peer traffic between two root ports of one Xeon E5 root complex may be slow or refused
+  (§1's risk). No host involvement; the published P2P latency (§R2.3's last row) is its prize.
+- **(H) Host-staged + own-BAR** (the external engine's route, no P2P): each card's kernel stores its row and stamp into
+  **pinned host memory**; a CPU thread (one pinned core, spinning) sees both stamps, sums in the fixed order in fp32,
+  and **writes the sum and a stamp into each card's own VRAM through its BAR** (32 GB mapped on both); each card's fold
+  polls its **local** stamp. How a CPU store reaches a Level Zero device allocation on this driver is P0's first
+  question (candidates: an exported device allocation mapped through the BAR; a host-visible device allocation if the
+  driver offers one). **(H') fallback:** if no such mapping works, the cards read the sum from pinned host memory (a
+  PCIe read a crossing) - timed as its own arm.
+- **Both routes:** stamps in device memory advanced by the kernels (replays with frozen arguments progress); data read
+  with system-scope loads; a stale or missing stamp detected and recorded, never consumed; every wait bounded (a
+  timeout is device state the host throws after the fence - T4).
+- **What P0 times:** the **per-call latency at 1 and 8 rows** (20 / 160 KiB), and the **per-token cost at 128 calls**
+  inside two replayed lists (one per card) minus the same lists without crossings; interleaved pairs after a warm-up,
+  median of 5, both cards idle; bitwise on both cards over 10^4 replays; for (H) the CPU core's load. **The external
+  engine's ~33 µs a call is the bar to beat.**
+
+### R2.7 P0's go / no-go rule (replaces §3 for Qwen3.8 / Agnes)
+
+- **GO** (17b may be rewritten and built, the operator asked) when ALL hold:
+  (a) **correctness:** the chosen route's all-reduce is bitwise identical on both cards over 10^4 replays and a stale
+  or missing write is detected, never consumed;
+  (b) **cost:** 128 all-reduces at M = 1, inside replayed lists, both cards idle, cost **<= ~4.0 ms a token** (measured)
+  on the chosen route;
+  (c) **the ceiling is reachable:** the derived plain TP decode - P0's measured per-card step at TP shapes (§R2.5's
+  per-card linears timed, the one-card list's other launches from its profile, halved where per head) plus (b) - is
+  **>= ~44 t/s** (§R2.4).
+- **The operator's call:** (b) between 4.0 and 5.0 ms, or (c) between 40 and 44 t/s.
+- **NO-GO** - TP stays parked for Qwen3.8, the record names the failed condition and the margin - when (a) fails, (b)
+  exceeds 5.0 ms, (c) is below 40 t/s, or a link trains below Gen3 x8.
+- **Recorded, not gating:** the per-call cost at M = 8 (verify rows); route (P) against (H) even when one alone passes;
+  the CPU load of (H); the prefill crossing at C = 2048 rows (opt-in; 40 MiB fp32 a crossing, derived) alone and
+  overlapped; Agnes's derived ceiling at 144 calls.
+- Bolt's rule (§3) is unchanged for Bolt's later P0, without its drafter.
+
+### R2.8 What else changes for Qwen3.8 under TP
+
+- **Speculation:** MTP's head is a dense layer at the main model's shapes: TP'd like a layer (2 more all-reduces a draft
+  step) or replicated (0.85 GB a card, no crossing) - 17b decides from P0's per-call cost. DFlash's drafter (int8, 2.05
+  GB) is **replicated** on both cards by default (both hold the identical residual, so its taps are local and both draft
+  the same ids - no crossing), or on one card if memory says so; its draft head over the split vocabulary uses §4.4's
+  merge. **Verify rows run through spec 28's `gemm_sm` at the per-card shapes**; every all-reduce carries M rows.
+- **Prefill:** the external engine's wavefront - chunk i + 1's layer l runs while chunk i's all-reduce at layer l is in
+  flight (layer l of chunk i + 1 needs only chunk i's state at layer l) - is the first option 17c measures, beside
+  §4.5's hybrid (prefill as `--pp 2`, decode as TP) and plain TP prefill.
+- **Speed bars (§6 for dense, sharpened):** **D1-dense:** `--tp 2` plain against one card plain (the ceiling check,
+  >= 1.35x proposed) and **`--tp 2 --mtp auto` against one card `--mtp auto` (the bar: >= 1.25x on the tool-call set,
+  proposed)**; `--tp 2 --spec dflash` against one card `--spec dflash` once 19f has passed; the replica mode on the
+  multi-session workload is recorded when spec 13 §10 exists.
+- **Gates:** §5's T1-T4 unchanged; T2 is against one card under the golden tie rule (Qwen3.8 fits one card).
+- **Batching (spec 13b) under TP:** still out of scope (§8).
 
 ## R. Revision - 2026-10-23: refresh, retarget at Bolt, park
 
@@ -71,7 +227,7 @@ used):
 | resizable BAR | **both cards have a 32 GB BAR mapped** (`lspci`: `[size=32G]`) | measured 2026-10-23 (operator, by hand) | recorded here first |
 | P2P kernel patch | installed: 7.3.0-rc4 with `b70-p2p-exp2` | measured (installed) 2026-10-22 | docs/10-the-box.md "Versions on the box" |
 | P2P exercised by our code | **never**: no two-card process of ours has run (rows 22 / 23 / 27 pending) | - | box-validation-queue.md |
-| PCIe link generation and width per card | **PCIe 3.0 x16, both cards** - **operator-stated** 2026-10-23, not read by `lspci` / `offload_links.sh` (spec 22a's `r36.links` is pending; 17a's `r68.links` records it); theoretical ~15.75 GB/s per direction (derived); both cards under one CPU root complex (Broadwell-EP, operator-stated) | operator-stated | the operator, 2026-10-23 |
+| PCIe link generation and width per card | **PCIe 3.0 x16, both cards** - **operator-stated** 2026-10-23, not read by `lspci` / `offload_links.sh` (spec 22a's `r36.links` is pending; 17a's `r68.links` records it [2026-10-27: row 71, `r71.links`]); theoretical ~15.75 GB/s per direction (derived); both cards under one CPU root complex (Broadwell-EP, operator-stated) | operator-stated | the operator, 2026-10-23 |
 | host <-> device copy rate, device 0 | H2D **12.2-12.9 GB/s**, D2H **14.2 GB/s** (pinned host) | measured 2026-09-27 | docs/probe-prefix-cache-2026-09-27.md |
 | peer copy rate (copy engine; kernel peer writes; **kernel peer reads**) | **not measured**. Peer traffic between two root ports of one Xeon E5 root complex can be far slower than host traffic, and peer reads slower than peer writes (estimated: a known risk of the platform) - P0 measures each | - | - |
 | **12 GB/s**, used for every transfer time below | **assumed** for peer traffic: the measured host <-> device rate above, not a peer measurement; every time derived from it scales with the measured peer rate | assumed | - |
@@ -102,7 +258,7 @@ launch-bound step gains less.
 ## 3. The park, and P0's go / no-go rule
 
 **When P0 (17a) runs:** after `r22.devices` and `r22.p1` PASS on the box. 17a is standalone: its own probe
-(`tools/probe/probe_tp`, its own kernels in `tools/probe/`), its own row (68, proposed), no dependency on spec 16a.
+(`tools/probe/probe_tp`, its own kernels in `tools/probe/`), its own row (68, proposed) [2026-10-27: row 71; §R2.7 is the rule for Qwen3.8], no dependency on spec 16a.
 It measures:
 
 1. **Links:** each card's PCIe generation and width, idle and under load, and every bridge to the root port
@@ -374,7 +530,7 @@ prefill gap recorded, not hidden.
 
 ## 7. Stages
 
-- **17a, P0 (row 68 proposed):** §3's measurements and the go / no-go line. Runs after `r22.devices`, `r22.p1`.
+- **17a, P0 (row 68 proposed) [2026-10-27: row 71, Qwen3.8 first - §R2]:** §3's measurements and the go / no-go line. Runs after `r22.devices`, `r22.p1`.
 - **17b, decode on Bolt:** the TP placement and planner, per-card slicing and re-fused layouts, per-card `nb_*`
   variants, the crossing, the head exchange, `b70-decode <bolt> --tp 2`; T1, T2, T4; D1-Bolt, D3. After GO.
 - **17c, prefill on Bolt:** the option §4.5 picks after row 61; T2 on prefill; D2.
