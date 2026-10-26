@@ -3,8 +3,8 @@
 **Ruling:** "Drop sycl-tla backend. l0 should be the default one, l0-int8 optional." Direct GPU calls (our Level Zero /
 OpenCL C kernels) over library layers. oneDNN is NOT part of this plan: `tools/probe/probe_gemm_onednn_int4.cc` stays.
 
-**Status (2026-10-27): DRAFT - BLOCKED on the operator (§2).** Inventory done (§1); nothing deleted. The inventory found
-three things outside the sycl-tla backend that depend on the SYCL component; each needs a ruling before Task 1.
+**Status (2026-10-27): IN PROGRESS.** Inventory done (§1); the three things outside the sycl-tla backend that depended
+on the SYCL component were ruled by the operator the same day (§2).
 
 > **For agentic workers:** one implementing agent, gates below are the review. Commit after every step (signed; `WIP:`
 > when it does not build). Handoff file at the worktree root when you stop.
@@ -71,21 +71,27 @@ r27.reject (1930-1932), r33.reject, r34.reject, r61.reject, r62.reject; README.m
 Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (argv[6]), `prefill_consistency_test`,
 `prefill_determinism_test`, `prefill_split_test`, `prefix_gpu_test`.
 
-## 2. Open (operator) - blocking
+## 2. Operator rulings (2026-10-27)
 
-1. **The oneDNN probe.** `probe_gemm_onednn_int4` is built only by the icpx sub-build and takes its `sycl::queue` from
-   `Context::sycl()` (libb70_prefill.so's SyclSide). Removing the icpx component unbuilds it. (A) keep a slim icpx
-   sub-build: `sycl_side.cc` + `Context::sycl()` + this one probe, no sycl-tla, no runtime backend; (B) remove the
-   component, keep the .cc in the tree unbuilt (or move its build to a stand-alone icpx CMake under tools/probe).
-2. **The L0 GEMM's oracle.** `pf_gemm_test` (spec 2.1 bar 1) and `attn_chunk_test` compare L0 bitwise to sycl-tla.
-   Proposal: `pf_gemm_test` against a host fp32 reference (fp64 accumulate, bound by the bf16 product error) at the same
-   shapes; `attn_chunk_test` drops its sycl grid (flash vs composed and the host reference stay).
+1. **The oneDNN probe** gets its own small stand-alone icpx build, `tools/probe/onednn/CMakeLists.txt`. It makes its
+   own `sycl::queue` (no `Context::sycl()`, no libb70_prefill.so) and links the engine build's loader / model / l0
+   archives. The engine build has no SYCL / icpx left at all. The stand-alone build is not part of mac_check or the box
+   rows. To build it on the box, after the engine build in `build/`:
+   `cmake -S tools/probe/onednn -B build-onednn -DCMAKE_CXX_COMPILER=/opt/intel/oneapi/compiler/2026.1/bin/icpx
+   -DB70_BUILD_DIR=$PWD/build && cmake --build build-onednn`.
+2. **The L0 GEMM's oracle:** `pf_gemm_test` compares against a host reference (fp64 accumulate of the same bf16
+   inputs) at the same shapes, with a stated cos / max-ulp tolerance derived from the reference's own error and written
+   in the test. `attn_chunk_test` drops its sycl-tla part (flash vs composed and the host reference stay).
 3. **The other SYCL probes** (probe_interop, probe_prefill_gemm, probe_prefill_attn, probe_gemm_int4_mixed,
-   probe_gdn_chunk, probe_pf_gdn_xe2 + vllm_shim) and the C2 arms of probe_pf_gemm / probe_dequant_overlap /
-   probe_dequant_slab. Proposal: delete the SYCL probes and vllm_shim (records stay in docs and git); drop the C2 arm
-   of the three g++ probes (P-A / P-B already recorded), or delete those three probes.
+   probe_gdn_chunk, probe_pf_gdn_xe2) and `src/sycl/vllm_shim` are deleted. probe_pf_gemm, probe_dequant_overlap and
+   probe_dequant_slab lose their sycl-tla comparison arm and keep the rest.
+4. **Defaults:** l0 for every model, even if slower; l0-int8 stays opt-in. The box report records (not a gate) the l0 vs
+   l0-int8 prefill rate for Qwen3.8 at pp2048 and pp8192: interleaved pairs after warm-up, median of 3.
+5. **G0 / golden diffs** are reported, never accepted here.
+6. `--prefill-backend sycl-tla` is an unknown value like any other; no dedicated test, stage or note; older specs and
+   plans are not touched.
 
-## 3. Tasks (after §2)
+## 3. Tasks
 
 1. CMake: delete `cmake/prefill.cmake` (or slim it, §2.1), `src/sycl/` (per §2.1/§2.3), the guard and every
    `b70_link_prefill` call (L0-only tests / probes become unconditional), `host_only.cmake`'s check, the preset entry.
