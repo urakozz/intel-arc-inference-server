@@ -1399,163 +1399,6 @@ if(B70_ORNITH AND B70_MTP)
 endif()
 # ==== Spec 15e ================================================================ (end) ====
 
-# ==== Spec 24c: LFM2.5-24B-A2B decode (model::lfm2moe()) ==== (begin) ====
-# Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
-# (tools/kernel_cmdlines' diff: additions only - F0). LFM2-only kernels live in src/kernels/lfm2moe/ and are named
-# `lfm_*` with every shape define in the name (src/kernels/lfm2moe_kernels.h is the host half). The reused sources at
-# LFM2's shapes - also the engine's binaries:
-#   gemv.cl        in_proj 2048x6144, out_proj / o_proj 2048x2048, q||k||v 2048x3072, dense gate||up 2048x23552,
-#                  dense down 11776x2048 - every S in {1, 2, 4, 8, 16} dividing K / 64 (184 k-groups at 11776: S <= 8)
-#                  and both layouts: P0's sweep (probe_lfm_step --sweep-s) times them all; the engine binds the
-#                  descriptor's {S, layout} (model::Lfm2MoeDesc::linears, PROVISIONAL)
-#   gemv_i8w.cl / gemv_bf16.cl   the tied head 2048 -> 128000 (int8 the default, spec 9; bf16 over the embedding tiles)
-#   argmax.cl      at VOCAB 128000, VOCAB_USED 125017 (the tokenizer's ids; rows 125017.. never win)
-# P0's stand-ins (plan 24c Task 1; no LFM2 kernel bound): moe.cl at E64 T4 D2048 I1536 (5 slots: the shared one is a
-# 65th block), Kolibri's attention at Q32KV8 (head_dim 128), kol_norm_finish at K 2048 over 8 work-groups, the
-# router as gemv_bf16 at N 64, and Ornith's prep_res_fold_M1_K2048_SP0_G20 (built here only without B70_ORNITH).
-option(B70_LFM2MOE "build the LFM2.5-24B-A2B decode variants (spec 24c)" ON)
-if(B70_LFM2MOE)
-  set(LFM_CL ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe)
-  foreach(L 0 1)
-    foreach(S 1 2 4 8 16)
-      add_gemv_variant(1 2048 6144 ${S} ${L})     # in_proj (B | C | x)
-      add_gemv_variant(1 2048 2048 ${S} ${L})     # conv out_proj, attention out_proj
-      add_gemv_variant(1 2048 3072 ${S} ${L})     # q||k||v
-      add_gemv_variant(1 2048 23552 ${S} ${L})    # dense gate||up (interleave16)
-      if(NOT S EQUAL 16)
-        add_gemv_variant(1 11776 2048 ${S} ${L})  # dense down
-      endif()
-    endforeach()
-  endforeach()
-  add_gemv_i8w_variant(1 2048 128000)             # the int8 head (spec 9), built from the embedding
-  add_gemv_bf16_variant(1 2048 128000 64 1)       # the bf16 head over the embedding tiles (--lm-head bf16)
-  set(LFM_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=128000 VOCAB_USED=125017)
-  add_ocloc_kernel(lfm_argmax_stage1_M1_V128000_U125017 SOURCE ${ARGMAX_CL} DEFINES ${LFM_ARGMAX_DEFINES} M=1)
-  add_ocloc_kernel(lfm_argmax_stage2_V128000 SOURCE ${ARGMAX_CL} DEFINES ${LFM_ARGMAX_DEFINES})
-  # --- P0's stand-ins (tools/probe/probe_lfm_step.cc only) ---
-  add_gemv_bf16_variant(1 2048 64 16 16)          # the router at gemv_bf16's tiny tiling
-  add_ocloc_kernel(moe_M1_E64_T4_D2048_I1536 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
-                   DEFINES UP_KS=4 DN_KS=2 M=1 EXPERTS=64 TOP_K=4 HIDDEN=2048 INTER=1536 ROUTER_N=80)
-  add_ocloc_kernel(kol_attn_prep_M1_N6144_S1_Q32KV8_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 QKV_N=6144 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=128 SLIDING=0 RING=0)
-  add_ocloc_kernel(kol_attn_M1_T${ATTN_V2_TGT}_Q32KV8_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_attn.cl
-                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8 WINDOW=0 RING=0)
-  add_ocloc_kernel(kol_norm_M1_K2048_G20_W8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl
-                   DEFINES M=1 K=2048 NORM_G=20 NORM_WGS=8)
-  if(NOT B70_ORNITH)
-    add_prep_res_fold(1 2048 0 20)
-  endif()
-  # --- the family kernels (src/kernels/lfm2moe/, kernels::lfm2moe's names; Task 3) ---
-  # lfm_prep.cl: the one-launch norm (fold + Σ + the two-rounding x; _NF only normalises) at 8 work-groups
-  # (kNormWgs, PROVISIONAL), over the split-K the descriptor gives out_proj / o_proj / the dense down (S 1 today:
-  # a re-pick adds its S here - lfm2moe_variant_names_test names the missing binary); SiLU x up at 11776; the
-  # attention prep at head_dim 64 (eps 1e-5, RoPE on every attention layer); the gather from the embedding tiles.
-  set(LFM_NORM_DEFINES M=1 K=2048 NORM_WGS=8 NORM_EPS=1e-5f)
-  add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_NF SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_NORM_DEFINES} NORM_S=0)
-  foreach(S 1)
-    add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_S${S} SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_NORM_DEFINES} NORM_S=${S})
-  endforeach()
-  add_ocloc_kernel(lfm_silu_mul_M1_I11776_S1 SOURCE ${LFM_CL}/lfm_prep.cl DEFINES M=1 SILU_I=11776 SILU_S=1)
-  add_ocloc_kernel(lfm_attn_prep_M1_S1_Q32KV8 SOURCE ${LFM_CL}/lfm_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=64 PREP_EPS=1e-5f)
-  add_ocloc_kernel(lfm_embed_gather_M1_K2048_V128000 SOURCE ${LFM_CL}/lfm_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 K=2048 EMBED_V=128000)
-  # lfm_conv.cl: the short conv over the Bx ring, after in_proj's S-slice GEMV.
-  add_ocloc_kernel(lfm_conv_M1_K2048_S1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 CONV_S=1)
-  # Test-only (lfm2moe_kernels_test, Review Focus 1): M = 4 rows a launch - the M-row form 24d's chunk walk and a
-  # future verify list use; no decode list binds it.
-  add_ocloc_kernel(lfm_conv_M4_K2048_S1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=4 HIDDEN=2048 CONV_S=1)
-  # lfm_moe.cl: the router (64 rows, lfm_router's order), the sigmoid-bf16 route, the 4-slot MoE with the fold.
-  # lfm_expert.h (the one expert address) sits beside it: -I the family's directory.
-  add_ocloc_kernel(lfm_router_M1_K2048_E64 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=1 ROUTER_E=64 ROUTER_K=2048)
-  add_ocloc_kernel(lfm_route_M1_E64_T4 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=1 ROUTE_E=64)
-  add_ocloc_kernel(lfm_moe_M1_E64_T4_D2048_I1536 SOURCE ${LFM_CL}/lfm_moe.cl
-                   DEFINES M=1 MOE_E=64 MOE_K=4 HIDDEN=2048 INTER=1536 UP_KS=4 DN_KS=2
-                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
-  # lfm_attn.cl (flash, the default) and lfm_attn_eager.cl (B70_LFM_ATTN=eager) at head_dim 64, GQA 4, TGT 32.
-  set(LFM_ATTN_DEFINES ${CTRL_DEFINES} M=1 TGT=32 Q_HEADS=32 KV_HEADS=8)
-  add_ocloc_kernel(lfm_attn_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn.cl DEFINES ${LFM_ATTN_DEFINES})
-  add_ocloc_kernel(lfm_attn_eager_M1_T32_Q32KV8 SOURCE ${LFM_CL}/lfm_attn_eager.cl DEFINES ${LFM_ATTN_DEFINES})
-  # --- the fused arms (B70_LFM_FUSE, spec 24 §4.5 / decision 6; Task 5) - each bitwise the as-built pair ---
-  # router: the 64 router rows inside a MoE layer's ffn_norm launch (4 more work-groups), at the mixer's split-K;
-  # route: the route recomputed in every gate||up work-group; conv: in_proj's GEMV (split-K 1, the conv-tile columns,
-  # in_proj's layout - 24b's descriptor: 1) with the conv as its epilogue.
-  foreach(S 1)
-    add_ocloc_kernel(lfm_res_norm_M1_K2048_W8_S${S}_R SOURCE ${LFM_CL}/lfm_prep.cl
-                     DEFINES ${LFM_NORM_DEFINES} NORM_S=${S} ROUTER_FUSED=1 ROUTER_E=64)
-  endforeach()
-  add_ocloc_kernel(lfm_moe_M1_E64_T4_D2048_I1536_R SOURCE ${LFM_CL}/lfm_moe.cl
-                   DEFINES M=1 MOE_E=64 MOE_K=4 HIDDEN=2048 INTER=1536 UP_KS=4 DN_KS=2 ROUTE_FUSED=1
-                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
-  add_ocloc_kernel(lfm_conv_in_M1_K2048_L1 SOURCE ${LFM_CL}/lfm_conv.cl DEFINES ${CTRL_DEFINES} M=1 HIDDEN=2048 CONV_IN_L=1)
-endif()
-# ==== Spec 24c: LFM2.5-24B-A2B decode ==== (end) ====
-
-# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (begin) ====
-# Additive only, as 24c's block: no existing source is edited, so every binary above (and in prefill/) keeps its name,
-# its command line and its bytes. New LFM2-only sources in src/kernels/lfm2moe/:
-#   lfm_pf_conv.cl    the short conv over a chunk (lfm_pf_conv_seed: the ring's two slots before the chunk into a flat
-#                     seed, a PRIOR launch; lfm_pf_conv: every row recomputes its predecessors' Bx, the chunk's last two
-#                     Bx into the ring) - plain and conv-tile in_proj columns (_T: the arm conv's load)
-#   lfm_pf_moe.cl     the 64-expert sort (uchar ids, one expert a lane, no shared block), gather, the dequant of a
-#                     weight batch (lfm_expert.h's address), the rank-order combine with the residual fold
-#   lfm_pf_attn.cl    flash attention at head_dim 64 over the growing cache (kol_pf_attn.cl's full path), and its eager
-#                     twin (B70_LFM_ATTN=eager); 256 GRF as kol_pf_attn / pf_flash_attn
-#   lfm_pf_prep.cl    the chunk's ids out of the tiled embedding
-# Reused at LFM2's shapes: 24c's lfm_prep.cl / lfm_moe.cl at M = 2048 (kernels::lfm2moe::kPfC: the norm _NF / _S1,
-# the router, the route, the attention prep at S 1 - decode's chains row for row), prefill/pf_dequant_slab.cl at each
-# int4 linear's {K, N, layout} as model::Lfm2MoeDesc::linears gives it (24b's PROVISIONAL picks: layout 1 for in_proj,
-# out_proj / o_proj and the dense down, 0 for q||k||v and the dense gate||up - a re-pick adds its line here and
-# lfm2moe_pf_variant_names_test names the missing binary), prefill/pf_moe_gemm.cl (gate||up 2048 x 3072 SiLU, down
-# 1536 x 2048) and the shape-free pf_gemm_T0 / pf_gemm_T0_SILU (prefill/CMakeLists.txt). What a chunk binds:
-# runtime/lfm2moe/lfm2moe_prefill.cc (derived in runtime/lfm2moe/lfm2moe_sizes.cc: 1259 launches at 40 layers).
-if(B70_LFM2MOE)
-  set(LFM_CL ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe)
-  set(LFM_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
-  add_ocloc_kernel(lfm_pf_embed_gather_K2048_V128000 SOURCE ${LFM_CL}/lfm_pf_prep.cl DEFINES K=2048 EMBED_V=128000)
-  foreach(T 0 1)
-    set(_n lfm_pf_conv_K2048_C2048)
-    if(T)
-      string(APPEND _n _T)
-    endif()
-    add_ocloc_kernel(${_n} SOURCE ${LFM_CL}/lfm_pf_conv.cl DEFINES ${CTRL_DEFINES} HIDDEN=2048 PF_C=2048 CONV_TILES=${T})
-  endforeach()
-  add_ocloc_kernel(lfm_pf_moe_E64_T4_D2048_I1536_TM32 SOURCE ${LFM_CL}/lfm_pf_moe.cl
-                   DEFINES PF_E=64 PF_K=4 PF_WG=64 PF_D=2048 PF_INTER=1536 TM=32 KC=2048
-                   DEPENDS ${LFM_CL}/lfm_expert.h OPTIONS -I${LFM_CL})
-  foreach(EG 0 1)
-    set(_n lfm_pf_attn_Q32KV8_HPW4_RPW16_KT64)
-    if(EG)
-      string(APPEND _n _EAGER)
-    endif()
-    add_ocloc_kernel(${_n} SOURCE ${LFM_CL}/lfm_pf_attn.cl
-                     DEFINES KT=64 RPW=16 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=0 EAGER=${EG}
-                     OPTIONS -cl-intel-256-GRF-per-thread)
-  endforeach()
-  # 24c's per-row kernels at M = kPfC (2048): every prefill linear is one unsplit GEMM, so the folds are S 1.
-  set(LFM_PF_NORM_DEFINES M=2048 K=2048 NORM_WGS=8 NORM_EPS=1e-5f)
-  add_ocloc_kernel(lfm_res_norm_M2048_K2048_W8_NF SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_PF_NORM_DEFINES} NORM_S=0)
-  add_ocloc_kernel(lfm_res_norm_M2048_K2048_W8_S1 SOURCE ${LFM_CL}/lfm_prep.cl DEFINES ${LFM_PF_NORM_DEFINES} NORM_S=1)
-  add_ocloc_kernel(lfm_router_M2048_K2048_E64 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=2048 ROUTER_E=64 ROUTER_K=2048)
-  add_ocloc_kernel(lfm_route_M2048_E64_T4 SOURCE ${LFM_CL}/lfm_moe.cl DEFINES M=2048 ROUTE_E=64)
-  add_ocloc_kernel(lfm_attn_prep_M2048_S1_Q32KV8 SOURCE ${LFM_CL}/lfm_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 QKV_S=1 Q_HEADS=32 KV_HEADS=8 HD=64 PREP_EPS=1e-5f)
-  # The reused prefill sources at LFM2's shapes (the descriptor's layouts).
-  foreach(row "2048 6144 1" "2048 2048 1" "2048 3072 0" "2048 23552 0" "11776 2048 1")
-    separate_arguments(f UNIX_COMMAND "${row}")
-    list(GET f 0 K)
-    list(GET f 1 N)
-    list(GET f 2 L)
-    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${LFM_PF_REUSE}/pf_dequant_slab.cl
-                     DEFINES K=${K} N=${N} LAYOUT=${L})
-  endforeach()
-  add_ocloc_kernel(pf_moe_gemm_K2048_N3072_SILU SOURCE ${LFM_PF_REUSE}/pf_moe_gemm.cl
-                   DEFINES K=2048 N=3072 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pf_moe_gemm_K1536_N2048 SOURCE ${LFM_PF_REUSE}/pf_moe_gemm.cl
-                   DEFINES K=1536 N=2048 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
-endif()
-# ==== Spec 24d: LFM2.5-24B-A2B prefill ==== (end) ====
-
 # ==== Spec 25c: Nemotron 3.5 Bolt decode ==== (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
 # (tools/kernel_cmdlines' diff: additions only - B0). Bolt-only kernels live in src/kernels/bolt/ and are named `nb_*`
@@ -1571,7 +1414,8 @@ endif()
 #                  (Decision 15: bound by name with a ones gate; spec 23c's kernels, kept with their names and command
 #                  lines when Muse-Glimmer was dropped, 2026-10-27, and moved here from src/kernels/muse/)
 # P0's stand-ins (plan 25c Task 1; tools/probe/probe_bolt_step.cc only): the routers as gemv_bf16 at each E, moe.cl at
-# E64 T8 D1024 I2048 (gated; a pool of 64 blocks + the shared slot), lfm_prep.cl's one-launch norm at K 4096, the
+# E64 T8 D1024 I2048 (gated; a pool of 64 blocks + the shared slot), lfm_prep.cl's one-launch norm at K 4096 (spec 24c's
+# source, kept in src/kernels/bolt/ for this stand-in when LFM2.5 was dropped, 2026-10-27), the
 # two-launch norm (prep_res_fold G16 + kol_norm_finish W16) for --pair, nb_probe.cl's state read-modify-write; the SSM
 # step is gdn_step_M1 (Qwen3.8's shape, built above) and the light slots noop.
 option(B70_BOLT "build the Nemotron 3.5 Bolt decode variants (spec 25c)" ON)
@@ -1606,7 +1450,7 @@ if(B70_BOLT)
   endforeach()
   add_ocloc_kernel(moe_M1_E64_T8_D1024_I2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/moe.cl
                    DEFINES UP_KS=4 DN_KS=2 M=1 EXPERTS=64 TOP_K=8 HIDDEN=1024 INTER=2048 ROUTER_N=80)
-  add_ocloc_kernel(lfm_res_norm_M1_K4096_W8_S1 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/lfm2moe/lfm_prep.cl
+  add_ocloc_kernel(lfm_res_norm_M1_K4096_W8_S1 SOURCE ${NB_CL}/lfm_prep.cl
                    DEFINES M=1 K=4096 NORM_WGS=8 NORM_EPS=1e-5f NORM_S=1)
   add_prep_res_fold(1 4096 0 16)
   add_ocloc_kernel(kol_norm_M1_K4096_G16_W16 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kolibri/kol_prep.cl

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference runs (lfm2moe_oracle.sh's shape), ON THE BOX
+# Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference runs (kolibri_oracle.sh's shape), ON THE BOX
 # CPU - the Mac runs `tests` only (the real checkpoints need more RAM than its 40 GB container cap; BOLT_REF_MIN_GB).
 #   tools/box_validate/bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq
 #

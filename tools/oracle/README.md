@@ -44,9 +44,6 @@ label) deliberately has **no `fla`**: the fallback path *is* the contract
 | `qwen4exp_env.sh`, `qwen4exp_requirements.txt` | transformers 5.19.0 + tokenizers 0.23.2 `pip --no-deps --target <dir>` beside the oracle image (the image is never changed); `PYTHONPATH=<dir>` first. |
 | `qwen4exp_tiny_check.py` | Spec 21a Task 1: the tiny model end to end in 5.19.0 (the layer-type remap, the experts implementation, cached vs uncached, the selection past 2051). |
 | `qwen4exp_facts.py` | Spec 21a Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. `docs/probe-qwen4exp-2026-10-09.md`. |
-| `lfm2moe_ref.py` | Spec 24a: the LFM2.5-24B-A2B (`lfm2_moe`) CPU reference - transformers **5.19.0**'s own `Lfm2MoeForCausalLM` (refused on another version), eager attention, layer-streamed, routed experts lazy (bf16 per expert from the original, or an int4 g64 export dequantised: the engine-format reference); `run` (golden layout), `ppl`, `hfcheck` (the restated ops chained against transformers' model), `facts`; `expected_names`, `layer_major`, the restated ops 24b / 24c import (`rms_norm`, `route`, `combine`, `expert_outputs`, `short_conv`, `dense_mlp`). `test_lfm2moe_ref.py` (F1, bitwise on the tiny models). "The LFM2.5-24B-A2B reference" below. |
-| `lfm2moe_make_tiny.py`, `lfm2moe_tiny_check.py` | Spec 24a: tiny variants the downloaded tiny lacks (`pattern8` - the real first eight layers at head_dim 64 -, `pattern8-fp32`, `ties`, `int4-g64` in both expert spellings + its dequantised twin; `test_lfm2moe_make_tiny.py`); the downloaded tiny end to end in 5.19.0. |
-| `lfm2moe_facts.py`, `lfm2moe_prompts.py` | Spec 24a: the facts (the rounding chain cited from the installed sources, shard headers, bytes, tokens, template renders, torch's tie order, the conv's accumulation; `docs/probe-lfm2moe-2026-10-15.md`); the golden prompts `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids`. |
 | `bolt_ref.py` | Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference - the checkpoint's OWN remote code (`modeling_nemotron_h.py`, imported from the pinned snapshot, sha256-checked, never vendored) through transformers **5.19.0**, its Mamba mixers on the KERNEL path (`cuda_kernels_forward`) with `bolt_mamba_ops`' plain-torch training kernels and an fp32 cache (spec 25 Decision 1), layer-streamed, routed experts lazy (SergiioB's g128 via the exact g64 expansion, our g64, or the BF16 original's `backbone` names); `run` (golden layout + `--taps`), `ppl`, `hfcheck` (the port = its restated chain bitwise; R's torch fallback recorded), `taps` (dump_taps' format), `facts`, `gateq`; `expected_names`, `layer_major`, `Recorder`, the restated ops 25b / 25c import (`rms_norm`, `route`, `combine`, `moe_block`, `mamba_seq` / `mamba_step`), `fallback_forward` (R's fallback with its rounding points as switches). `test_bolt_ref.py` (B1). "The Nemotron 3.5 Bolt reference" below. |
 | `bolt_remote.py`, `bolt_mamba_ops.py` | Spec 25a: the remote code's import under a private package with the `mamba_ssm` / `causal_conv1d` stub, the mixer's dispatch patch (kernel path or R's fallback per instance), the prompt continuation R lacks, the fp32 cache; the five training-kernel functions in plain torch (conv bias-first then taps oldest first, softplus threshold 20 and no dt clamp, the SSM update in mamba_ssm's order with a halving tree over the state, the SSD chunk scan, the gated norm over groups of 1024). |
 | `bolt_facts.py`, `bolt_prompts.py`, `bolt_gateq.py` | Spec 25a: the facts (63 citation anchors in R / N, both repos' shard headers and sampled tensors by HTTP range request, the dt-clamp census, tokens, 14 template renders as `tests/server/bolt_template_cases.json`, torch's tie order / GEMM row-count dependence / 9-element sum; `docs/probe-bolt-2026-10-21.md`); the golden prompts (no BOS); gate Q (`kl` teacher-forced over the BF16 A4 continuations, `verdict` with score.py's qwen-think reader - recorded, Decision 3). |
@@ -754,62 +751,6 @@ docker run --rm --memory 8g --cpus 4 -e PYTHONPATH=/ws/oracle-out-q4exp/site -v 
   agnes-ref-img:latest python3 tools/oracle/qwen4exp_ple_fixture.py oracle-out-q4exp/orig-small/config.json \
   tests/loader/qwen4exp_ple_fixture.h
 ```
-
-### The LFM2.5-24B-A2B reference (spec 24a, 2026-10-15)
-
-`lfm2moe_ref.py` runs **transformers 5.19.0**'s own `Lfm2MoeForCausalLM` (refused on another version; the same
-site as spec 21a: `tools/oracle/qwen4exp_env.sh <dir>`, `PYTHONPATH=<dir>` first) - eager attention (decision 13),
-the `grouped_mm` experts implementation 5.19.0 picks on torch 2.14.1 CPU, the torch conv path (`causal_conv1d` is
-not installed) - layer-streamed (`stream.attach`): the embedding (which is the tied head), `embedding_norm` and the
-rotary table resident, routed experts read on demand per expert - bf16 `experts.E.{w1,w3,w2}` from the original,
-or `qweight` / `scales` from our int4 g64 export (`--weights int4`, either expert spelling, `stream.dequant_t`): the
-engine-format reference. The restated ops (`rms_norm`, `route`, `expert_outputs` + `combine`, `short_conv`,
-`dense_mlp`) are each bitwise the module they restate; `port_forward` chains them into a whole forward and
-`hfcheck` holds it to transformers' model on any weights. Facts: `docs/probe-lfm2moe-2026-10-15.md`.
-
-Subcommands: `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N] [--weights
-bf16|int4] [--chunk C]` (the golden layout is in the module docstring: `h.L*` every row up to 4096 ids, else the
-last 256, `mixer.L*` / `ffn.L*` the last 256, `conv.L*` the state after the prompt, `route.{ids,w,sel,gap}.L*`
-every row and step, the last 1024 prompt rows' logits and every generated row, `tokens`, `nll`; the log prints
-the 4th / 5th `sel` gap per layer - `B70_LFM_TIE_TOL`'s evidence); `ppl`; `hfcheck <snapshot> --layers N`
-(bitwise or exit 1); `facts` (`lfm2moe_facts.py`). `--layers N` needs an attention layer among the first N (N >=
-3): transformers' `DynamicCache` takes the length from one.
-
-Tests (Mac, `agnes-ref-img` capped at 8 GB / 4 CPUs, measured 2026-10-15: ~15-25 min for all five files):
-
-```bash
-docker run --rm --memory 8g --memory-swap 8g --cpus 4 -e OMP_NUM_THREADS=3 -e HF_HUB_OFFLINE=1 \
-  -e PYTHONPATH=/ws/oracle-out-q4exp/site -e TORCH_EXTENSIONS_DIR=/ws/oracle-out-q4exp/torch-ext \
-  -v ~/.cache/huggingface:/hf:ro -e HF_HOME=/tmp/hf -v "$PWD":/ws -w /ws agnes-ref-img:latest sh -c \
-  'python3 tools/oracle/test_lfm2moe_make_tiny.py && python3 tools/oracle/test_lfm2moe_ref.py && \
-   python3 tools/toolcall/test_score.py && python3 tools/toolcall/test_make_set.py && \
-   python3 tools/toolcall/test_oracle_batched.py test_lfm2moe'
-```
-
-`test_lfm2moe_ref.py` (F1, all bitwise): the streamed reference = transformers un-streamed on `pattern8` (the
-real first eight layers at head_dim 64, biased routers) and the downloaded tiny, bf16 and fp32, 40 and 600 ids +
-8 cached steps (logits and every layer's residual); chunks of 1 / 2 / 3 / 64 / 255 and splits at 1..5 = one
-forward (conv states included); the router chain, planted ties (`route.gap == 0`, torch's order recorded), the
-combine in both orders, the short conv, the two-rounding norm, `embedding_norm` and the tie, int4 exports in
-both spellings = transformers on the dequantised twin, `--layers 3` / `2`, the port = transformers (chunks 0 /
-1 / 2 / 3 / 5 / 64), `expected_names` = the real index's 7610 names, the `run` layout.
-
-**Real weights** (`tools/box_validate/lfm2moe_oracle.sh <data> ppl|hfcheck|golden|export <dir>|a4`, queue row
-48; on the Mac too since 2026-10-15: `agnes-ref-img`, every container `--memory 40g` through
-`run_in_container.sh`'s `ORACLE_MEMORY`, the whole run under flock(2) on `/tmp/b70-cpu-model.lock` - one model job
-on the Mac's CPU at a time). `DRY_RUN=1` prints the commands and the times (measured on the Mac where run).
-Golden prompts: `tests/golden/prompts/lfm2moe_{short,4k,32k,agentic}.ids` (`lfm2moe_prompts.py`); the A4 set
-`tests/golden/toolcall-lfm2moe` (`a4_ref.sh lfm2moe set`); the A4 reference `a4_ref.sh lfm2moe ref` (2048 new ids,
-reasoning first; score with `score.py --format pythonic`).
-
-**The engine side of A4** (spec 24e, queue row 53): `tools/toolcall/engine_generate.sh <snapshot> tests/golden/toolcall-lfm2moe <out>
-l0` (b70-decode through the prefill path; `N_NEW` defaults to 2048 for `lfm2_moe`) writes `<name>.l0.{ids,txt}` beside the
-reference's `<name>.bf16.*`; `score.py --format pythonic <out> bf16 l0` compares the first call of each (decision 5's bar,
-PROPOSED: >= 33 / 36 with 0 parse failures), and `build/tests/lfm2moe_rules <out>/*.l0.txt` (tools/toolcall/lfm2moe_rules.cc) cuts
-each text at its first `<|im_end|>`, reads it with the server's own parser and prints how often each lenient reading fired
-(`PythonicRules`: quote_recovered, quoted_name, bare_call, json_literal, positional_dict, dropped_unfinished, stray_end) and how
-many tool-call blocks the parser left as content - decision 7's evidence; run it on the reference's `.bf16.txt` too (what the
-bf16 model itself writes).
 
 ### The Nemotron 3.5 Bolt reference (spec 25a, 2026-10-21)
 

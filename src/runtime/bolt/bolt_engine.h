@@ -19,7 +19,7 @@
 #include "runtime/memory_plan.h"
 #include "runtime/pipeline_engine.h"   // PipelineOptions, PipelineLink (spec 16b's, unchanged)
 
-// Spec 25c: Nemotron 3.5 Bolt's decode loop - LFM2's / Kolibri's engine (runtime/lfm2moe/lfm2moe_engine.h) for this family:
+// Spec 25c: Nemotron 3.5 Bolt's decode loop - Kolibri's engine (runtime/kolibri/kolibri_engine.h) for this family:
 // it owns the weights (each block on its device: loader::load_bolt's parts), one BoltBuffers and one captured list per
 // device, and a token is a replay of the lists. A prompt is fed one id per replay (`ingest`; 25d adds the chunked prefill,
 // 25e the snapshots and the server's calls). No MTP (the model has none).
@@ -38,7 +38,7 @@
 namespace runtime::bolt {
 
 // Spec 25d: prefill() and its accessors are DEFINED in b70_bolt_prefill (runtime/bolt/bolt_prefill_engine.cc), not in
-// b70_bolt_runtime - LFM2's / Kolibri's arrangement (runtime/lfm2moe/lfm2moe_engine.h): a target that never prefills links
+// b70_bolt_runtime - Kolibri's arrangement (runtime/kolibri/kolibri_engine.h): a target that never prefills links
 // what it always linked; one that does links b70_bolt_prefill. The prefill state is lazy (made by the first prefill or
 // prepare_prefill), so a decode-only engine holds exactly what it did.
 struct BoltPrefillState;   // runtime/bolt/bolt_prefill_engine.cc

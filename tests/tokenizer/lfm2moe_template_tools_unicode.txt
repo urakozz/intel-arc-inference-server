@@ -1,6 +1,0 @@
-<|startoftext|><|im_start|>system
-List of tools: [{"function": {"description": "Größe 東京 😀", "name": "unicode_tool", "parameters": {"properties": {}, "type": "object"}}, "type": "function"}, {"function": {"description": "Run a shell command: quotes ' \" and backslash \\ and a newline\nin the description.", "name": "bash", "parameters": {"properties": {"command": {"type": "string"}, "env": {"additionalProperties": {"type": "string"}, "type": "object"}, "timeout": {"type": "number"}}, "required": ["command"], "type": "object"}}, "type": "function"}]<|im_end|>
-<|im_start|>user
-hi<|im_end|>
-<|im_start|>assistant
-<think>

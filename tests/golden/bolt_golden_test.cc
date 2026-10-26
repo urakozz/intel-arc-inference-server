@@ -1,6 +1,6 @@
 // bolt_golden_test - spec 25 §9 B3 (decode): Nemotron 3.5 Bolt's engine against tools/oracle/bolt_ref.py (spec 25a, the
 // engine-format reference: the checkpoint's int4 dequantised) - one golden prompt x 32 greedy tokens - with the per-block
-// routing, SSM-state, conv-state and residual diagnostics. lfm2moe_golden_test's copy, Bolt's semantics.
+// routing, SSM-state, conv-state and residual diagnostics. kolibri_golden_test's shape, Bolt's semantics.
 //
 // **The golden files** (bolt_ref.py `run`; tools/box_validate/bolt_oracle.sh):
 //   <oracle dir>/<prompt>.ids (or tests/golden/prompts/<prompt>.ids)   no BOS (the template writes none)
@@ -33,7 +33,7 @@
 // binaries over the last row); the routing compares the last chunk's route rows; the h taps are the prefill's (row T - 1
 // of each block) and then the decode steps'; the SSM state and the conv columns are the prefill's. The bars are the decode
 // gate's (PROPOSED): prefill's linears round through bf16-dequantised weights in a DPAS order and its SSM is the SSD form -
-// both further from the reference than decode's chain, which the bars are meant to absorb (LFM2's / Kolibri's precedent).
+// both further from the reference than decode's chain, which the bars are meant to absorb (Kolibri's precedent).
 //
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
 //       [prefill | prefill:<chunk>]

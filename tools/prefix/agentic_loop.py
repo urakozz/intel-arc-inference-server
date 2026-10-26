@@ -5,7 +5,7 @@
     agentic_loop.py report <out.json> [<server --log-requests dir>]
 
 <transcript.json> is a chat session ({"messages": [...], "tools": [...]}: system, user, then assistant / tool turns -
-tests/golden/prompts/lfm2moe_agentic.json, 24a's). `run` plays the client's side of it: it sends [system, first user]
+tests/golden/prompts/bolt_agentic.json, 25a's). `run` plays the client's side of it: it sends [system, first user]
 and, after every response, appends the MODEL's own turn as an OpenAI client does - content, reasoning_content and
 tool_calls exactly as the server returned them - and then the next recorded tool result (in order, one per call
 the model made, whatever the model called; a turn with more calls than recorded results left wraps to the first of them, and

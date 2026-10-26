@@ -138,57 +138,6 @@ def test_english_set_unchanged_by_the_table():
     assert sc["messages"][1]["content"] == "I just changed /work/src/runtime/prefill/step.cc. Run the tests for this file."
 
 
-def test_lfm2moe_sorted_no_kwargs():
-    """Spec 24a Task 6: LFM2.5 (model_type lfm2_moe) renders from KEY-SORTED messages and tools - b70-serve's
-    nlohmann::json order (spec 24 §4.6) - with no template kwargs (its template always reasons)."""
-    tok, out = run("lfm2_moe")
-    assert len(tok.calls) == 2
-    for c in tok.calls:
-        assert c["kwargs"] == {} and keys_sorted(c["msgs"]) and keys_sorted(c["tools"])
-    assert "chat_template_kwargs" not in json.load(open(os.path.join(out, "t1_a.json"), encoding="utf-8"))
-
-
-def _lfm_snapshot():
-    import glob
-    hf = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-    for root in (hf, "/hf", os.path.expanduser("~/.cache/huggingface")):
-        for c in sorted(glob.glob(os.path.join(root, "hub", "models--LiquidAI--LFM2.5-24B-A2B", "snapshots", "*"))):
-            if os.path.exists(os.path.join(c, "chat_template.jinja")):
-                return c
-    return None
-
-
-def test_lfm2moe_render_is_apply_chat_template():
-    """A scenario re-rendered with LFM2's own template: the set's ids are apply_chat_template's, which are
-    tokenizer(text)'s for its text (byte for byte); the history call is pythonic. SKIPs without transformers 5.19.0
-    or the LFM2.5 snapshot's small files (the container with the qwen4exp site has both)."""
-    snap = _lfm_snapshot()
-    try:
-        import transformers
-        from transformers import AutoTokenizer
-    except ImportError:
-        print("  SKIP: no transformers")
-        return
-    if snap is None or transformers.__version__ != "5.19.0":
-        print(f"  SKIP: LFM2.5 snapshot {snap}, transformers {transformers.__version__}")
-        return
-    tok = AutoTokenizer.from_pretrained(snap)
-    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "golden", "toolcall")
-    out = tempfile.TemporaryDirectory()
-    _TMP.append(out)
-    make_set.retokenise(snap, src, out.name, tok=tok, mtype="lfm2_moe")
-    for name in ("t3_rename-linear_l0", "t6_usage-box"):
-        sc = json.load(open(os.path.join(out.name, f"{name}.json"), encoding="utf-8"))
-        msgs, tools = json.loads(json.dumps([sc["messages"], sc["tools"]], sort_keys=True))
-        text = tok.apply_chat_template(msgs, tools=tools, add_generation_prompt=True, tokenize=False)
-        ids = [int(x) for x in open(os.path.join(out.name, f"{name}.ids"), encoding="utf-8").read().split()]
-        assert ids == tok(text, add_special_tokens=False)["input_ids"], name
-        assert text.startswith("<|startoftext|><|im_start|>system\n") and text.endswith("<|im_start|>assistant\n<think>")
-        assert "<|tool_call_start|>[" in text and "List of tools: [" in text
-        assert tok.decode(ids) == text
-    print(f"  lfm2moe: 36 scenarios re-rendered; two checked byte for byte against apply_chat_template")
-
-
 def test_bolt_defaults_sorted_thinking_on():
     """Spec 25a Task 6: Bolt (nemotron_h_omni) renders key-sorted with enable_thinking TRUE and medium_effort, both
     recorded per scenario (the set's own scenarios say enable_thinking False: Qwen3.8's render)."""

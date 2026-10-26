@@ -1,6 +1,6 @@
 #pragma once
-// Spec 25e: Nemotron 3.5 Bolt behind b70-serve - runtime::bolt::BoltEngine as a server::EngineIface (LFM2's Lfm2MoeEngineAdapterT
-// shape, src/cli/lfm2moe_serve.h, for a hybrid Mamba / attention / MoE model). b70-serve instantiates it over BoltEngine (two
+// Spec 25e: Nemotron 3.5 Bolt behind b70-serve - runtime::bolt::BoltEngine as a server::EngineIface (src/cli/kolibri_serve.h's adapter
+// shape, for a hybrid Mamba / attention / MoE model). b70-serve instantiates it over BoltEngine (two
 // cards by default, Decision 4: the engine holds the placement); the template exists so the host test
 // (tests/runtime/bolt_snapshot_test.cc) runs the same adapter over a device-free engine with Bolt's real state and KV layouts.
 // This header names no Level Zero type.
@@ -13,7 +13,7 @@
 //     `vocab_used` guards a tokenizer that defines fewer (a greedy argmax on a row without a token takes the masked row's argmax);
 //   - the repetition penalty: a SAMPLED request with Sampling::repetition_penalty != 1 has the logits row penalised over the
 //     request's distinct prompt and output ids (server::apply_repetition_penalty, HF's rule) before the filters; a greedy request
-//     keeps the device argmax and ignores it (LFM2's rule). NVIDIA's defaults carry none;
+//     keeps the device argmax and ignores it (spec 24e's rule). NVIDIA's defaults carry none;
 //   - a SEEDED sampled request is reproducible: the RNG is re-seeded from the request's seed at its first step (the first step
 //     after a prefill, an ingest, a restore or a reset - every request begins with one of them); an unseeded request re-seeds from
 //     the random device, so it never continues an earlier seeded request's stream;

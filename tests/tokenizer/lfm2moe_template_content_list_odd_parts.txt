@@ -1,4 +1,0 @@
-<|startoftext|><|im_start|>user
-a{"text": "no type"}plain<image>{"type": "other", "x": 1}<|im_end|>
-<|im_start|>assistant
-<think>

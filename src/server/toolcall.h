@@ -44,8 +44,6 @@ struct OutputParser {
   virtual ~OutputParser() = default;
   virtual std::vector<Delta> push(const std::string& piece) = 0;  // a detokenised piece
   virtual std::vector<Delta> finish() = 0;                         // end of generation
-  // Spec 24e: per-request counters this parser keeps for --log-requests (null when it keeps none).
-  virtual nlohmann::json stats() const { return nullptr; }
 };
 
 // Incremental form of parse_output: the concatenation of the deltas of any split of

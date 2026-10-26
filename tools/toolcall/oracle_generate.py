@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model kolibri|qwen4exp|lfm2moe|bolt] [--weights bf16|int4]
+    oracle_generate.py [--model kolibri|qwen4exp|bolt] [--weights bf16|int4]
                        [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
                        [--expert-mask FILE]
@@ -43,14 +43,6 @@ The model follows config.json's model_type:
                     experts dequantised, its bf16 dense layers, the PLE rows from <snapshot>-ple-int8
                     when present (the engine's format; Q4_PLE overrides) - greedy through its own
                     cache; Q4_LAYERS=N truncates as the engine's --layers N does.
-  lfm2_moe          LFM2.5-24B-A2B (spec 24a; `--model lfm2moe` says so and checks it): tools/oracle/
-                    lfm2moe_ref.py's layer-streamed Lfm2MoeForCausalLM (transformers 5.19.0: the qwen4exp site
-                    first on PYTHONPATH) on the checkpoint given - the bf16 original (the A4 reference) or our int4
-                    g64 export dequantised (--weights int4: the engine-format reference); `--weights` defaults to
-                    the checkpoint's own form and is refused when it names the other - greedy through its own
-                    cache, eager attention; LFM_LAYERS=N truncates as the engine's --layers N does. Its prompts end
-                    in "<think>": every reply reasons first, so the A4 run uses 2048 new ids (a4_ref.sh), and an
-                    ESTIMATED wall for the set is printed before the run.
   nemotron_h_omni   Nemotron 3.5 Bolt 74B-A9B (spec 25a; `--model bolt` says so and checks it): tools/oracle/
                     bolt_ref.py's layer-streamed model - the checkpoint's own remote code, its Mamba mixers on the
                     kernel path through bolt_mamba_ops, an fp32 SSM / conv cache (transformers 5.19.0: the qwen4exp
@@ -91,7 +83,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RUN = "bf16"
 NEW_TOKENS = 192
 Q4_TYPES = ("qwen4_exp", "qwen4_exp_text")   # spec 21e: Qwen3.8-Flash-Next (a checkpoint, a text-only export)
-LFM_TYPES = ("lfm2_moe",)                     # spec 24a: LFM2.5-24B-A2B
 BOLT_TYPES = ("nemotron_h_omni",)             # spec 25a: Nemotron 3.5 Bolt 74B-A9B
 BOLT_EOS = {2, 11}                            # spec 25 Decision 12
 
@@ -243,24 +234,6 @@ def mem_model(mtype: str, cfg: dict) -> dict:
                 "per_seq": lambda T: state + T * nq * (2 * kvh * hd * 2 + c.get("index_head_dim", 128) * 2) + T * hc * H * 2,
                 "dense": dense, "experts": [ex] * L,
                 "what": f"KV bf16 + indexer keys in {nq} QSA layers + GDN state fp32 in {ng} ({state / 2**20:.0f} MiB)"}
-    if mtype in LFM_TYPES:              # spec 24a: LFM2.5 (lfm2moe_ref.py, bf16, eager attention, KV bf16)
-        L, H, V = cfg["num_hidden_layers"], cfg["hidden_size"], cfg["vocab_size"]
-        types = cfg["layer_types"][:L]
-        na = sum(1 for t in types if t == "full_attention")
-        nc = L - na
-        heads, kvh = cfg["num_attention_heads"], cfg["num_key_value_heads"]
-        hd = H // heads
-        E, I, Id, nd = cfg["num_experts"], cfg["moe_intermediate_size"], cfg["intermediate_size"], cfg["num_dense_layers"]
-        attn = H * (heads * hd + 2 * kvh * hd) + heads * hd * H
-        conv = 3 * H * H + H * H + 3 * H
-        dense = [2 * ((attn if t == "full_attention" else conv) + (3 * H * Id if i < nd else E * H) + 2 * H)
-                 for i, t in enumerate(types)]
-        ex = E * 3 * I * H * 2
-        return {"base": V * H * 2 + ex + 2 * max(dense),
-                "transient": lambda T: T * V * 2 + heads * T * T * 8 + 3 * T * H * 2 * 4,
-                "per_seq": lambda T: T * na * 2 * kvh * hd * 2 + nc * 3 * H * 2 + T * H * 2,
-                "dense": dense, "experts": [ex if i >= nd else 0 for i in range(L)],
-                "what": f"KV bf16 in {na} attention layers + the conv states of {nc}"}
     if mtype in BOLT_TYPES:             # spec 25a: Bolt (bolt_ref.py, bf16, eager attention, fp32 SSM / conv state)
         c = cfg.get("llm_config", cfg)
         blocks = c["block_configs"][: int(os.environ["BOLT_LAYERS"])] if os.environ.get("BOLT_LAYERS") else \
@@ -349,7 +322,6 @@ def mem_limit() -> int | None:
 # is minutes, and a pass of B prompts holds every other sequence for all B), so a few; K2's is
 # mostly the per-step dequant a pass shares, so more.
 MAX_AUTO_BATCH = {"qwen3_5_moe": 4, "k2_horizon": 8, "kolibri1": 4, "qwen4_exp": 4, "qwen4_exp_text": 4,
-                  "lfm2_moe": 8,
                   "nemotron_h_omni": 4}  # Bolt: 74 B of weights, a pass mostly expert dequant; 4 keeps the state small
 
 
@@ -488,38 +460,6 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
         return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
                                step_many=step_many, lazy=lazy, ref=model, pf=pf)
 
-    if mtype in LFM_TYPES:
-        # Spec 24a: LFM2.5-24B-A2B - tools/oracle/lfm2moe_ref.py's layer-streamed model (transformers 5.19.0), the bf16
-        # original or an int4 export dequantised (`weights`, default the checkpoint's form), greedy through its own cache.
-        # The batched path: layer_major's residual rows -> final_logits of each sequence's LAST row (the sequential step
-        # asks for the last row's logits only: logits_to_keep=1, the same one-row head).
-        LR = load("lfm2moe_ref")
-        cfg = LR.config(snap, int(os.environ["LFM_LAYERS"]) if os.environ.get("LFM_LAYERS") else None)
-        form = LR.Ckpt(snap).form()
-        kd = range(min(keep[0], cfg.num_hidden_layers))
-        ke = range(min(keep[1], cfg.num_hidden_layers))
-        model = LR.build_streamed(snap, cfg, weights or form, keep_dense=kd, keep_experts=ke)
-        print(f"LFM2.5 reference: lfm2moe_ref.py, {cfg.num_hidden_layers} layers, streamed, weights {weights or form}, "
-              f"experts {cfg._experts_implementation}, attn eager; resident once read: dense {len(kd)} layers, experts "
-              f"{len(ke)} layers", flush=True)
-        major = LR.layer_major(model)
-
-        def generate(ids, n, eos, on_row=None):
-            state = {"cache": None}
-
-            def step(chunk, pos):
-                with torch.no_grad():
-                    o = model(input_ids=torch.tensor([chunk]), past_key_values=state["cache"], use_cache=True,
-                              logits_to_keep=1)
-                state["cache"] = o.past_key_values
-                return o.logits[0, -1].float()
-            return greedy(step, ids, n, eos, watch(argmax, on_row))
-
-        def step_many(items):
-            return [LR.final_logits(model, R[-1:])[0].float() for R in major(items)]
-        return SimpleNamespace(generate=generate, new_state=lambda: {"cache": None}, argmax=argmax,
-                               step_many=step_many, lazy=model.lfm_lazy, ref=model, pf=model.lfm_pf)
-
     if mtype in BOLT_TYPES:
         # Spec 25a: Nemotron 3.5 Bolt - tools/oracle/bolt_ref.py's layer-streamed model (R's own code through
         # transformers 5.19.0, the Mamba kernel path through bolt_mamba_ops, an fp32 cache), the int4 checkpoint
@@ -588,11 +528,10 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                            step_many=OR.layer_major(model, pf), lazy=lazy, ref=model, pf=pf)
 
 
-MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "lfm2_moe", "nemotron_h_omni")
+MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "nemotron_h_omni")
 # --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
-# export qwen4_exp_text; spec 24a: lfm2moe)
-MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "lfm2moe": ("lfm2_moe",),
-          "bolt": BOLT_TYPES}
+# export qwen4_exp_text; spec 25a: bolt)
+MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "bolt": BOLT_TYPES}
 
 
 def checkpoint_form(snap: str) -> str:
@@ -693,8 +632,8 @@ def main() -> None:
         sys.exit(f"--model {a['model']}: {snap} is model_type {mtype!r}, not {' or '.join(MODELS[a['model']])}")
     if a["expert_mask"] and mtype not in Q4_TYPES:
         sys.exit(f"--expert-mask is Qwen3.8-Flash-Next's (qwen4_exp) only; {snap} is model_type {mtype!r}")
-    if a["weights"] and mtype not in LFM_TYPES + BOLT_TYPES:
-        sys.exit(f"--weights is LFM2.5's (lfm2_moe) and Bolt's (nemotron_h_omni) only; {snap} is model_type {mtype!r}")
+    if a["weights"] and mtype not in BOLT_TYPES:
+        sys.exit(f"--weights is Bolt's (nemotron_h_omni) only; {snap} is model_type {mtype!r}")
     if mtype in MOE_TYPES:
         moe_main(snap, out, todo, prompts, new_tokens, mtype, a["device"], a["batch"], a["keep"], a["expert_mask"],
                  a["weights"])
@@ -802,12 +741,6 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
         plan = batch_plan(mtype, cfg, [len(prompts[e["name"]]) for e in todo], new_tokens, mem_limit(), batch, keep)
         print(plan["text"], flush=True)
         b, kept = plan["batch"], (plan["keep_dense"], plan["keep_experts"])
-    if mtype in LFM_TYPES:   # spec 24a: the Mac measured 6-12 s a decode step and ~1.6 prompt ids/s at 4k (2026-10-15)
-        n_p = sum(len(prompts[e["name"]]) for e in todo)
-        print(f"ESTIMATED: {len(todo)} scenarios, {n_p} prompt ids and up to {len(todo) * new_tokens} new ids (reasoning "
-              f"first); at the Mac's measured 6-12 s a sequential decode step ~{len(todo) * new_tokens * 6 / 3600:.0f}-"
-              f"{len(todo) * new_tokens * 12 / 3600:.0f} h + the prompts ~{n_p / 1.6 / 3600:.0f} h, less batched (a pass "
-              f"reads each layer once for all sequences)", flush=True)
     t = time.time()
     runner = moe_runner(snap, mtype, device, kept, mask, weights)
     print(f"ready in {time.time() - t:.0f}s", flush=True)

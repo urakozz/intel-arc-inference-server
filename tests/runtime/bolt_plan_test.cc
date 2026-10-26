@@ -32,7 +32,7 @@ int main() {
   using namespace runtime::bolt;
   namespace bl = loader::bolt;
   const model::BoltDesc& d = model::bolt();
-  const size_t card32 = size_t(32) << 30;   // a B70's 32 GiB (the lfm2moe plan test's figure; the box's memory_bytes confirms)
+  const size_t card32 = size_t(32) << 30;   // a B70's 32 GiB (the box's memory_bytes confirms)
 
   // --- the split by bytes: pp_balance over the blocks' weights, the embedding / head as each side's fixed overhead -------
   const uint32_t split = pp_split(d);

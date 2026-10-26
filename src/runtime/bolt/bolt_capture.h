@@ -5,7 +5,7 @@
 #include "runtime/bolt/bolt_buffers.h"
 #include "runtime/capture.h"   // CapturedStep, StageLink, ProfileEvents - the same records
 
-// Spec 25c: one device's Nemotron 3.5 Bolt decode step, captured once and replayed per token - Kolibri's / LFM2's
+// Spec 25c: one device's Nemotron 3.5 Bolt decode step, captured once and replayed per token - Kolibri's
 // arrangement (a straight walk, every per-token value read from runtime::Control at execution, the expert ids produced and
 // consumed on the device) over the device's blocks [first, end) (spec 25 §6.1):
 //

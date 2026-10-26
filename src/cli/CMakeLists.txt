@@ -83,19 +83,6 @@ target_link_libraries(b70-decode PRIVATE b70_qwen4exp_prefill)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_qwen4exp_runtime b70_qwen4exp_prefill)
 endif()
-# Spec 24c: and LFM2.5-24B-A2B's engine (runtime/lfm2moe, src/cli/lfm2moe_decode.h), dispatched on model_type;
-# b70-serve only recognises it to refuse it (spec 24e serves it) - the loader's is_lfm2moe_checkpoint.
-target_link_libraries(b70-decode PRIVATE b70_lfm2moe_runtime)
-if(TARGET b70-serve)
-  target_link_libraries(b70-serve PRIVATE b70_lfm2moe_runtime)
-endif()
-# Spec 24d: and LFM2.5-24B-A2B's prefill (b70_lfm2moe_prefill: Lfm2MoeEngine::prefill, its walk and scratch).
-target_link_libraries(b70-decode PRIVATE b70_lfm2moe_prefill)
-# Spec 24e: b70-serve serves LFM2.5-24B-A2B (src/cli/lfm2moe_serve.h; runtime::lfm2moe::Lfm2MoeEngine behind
-# cli::lfm2moe::Lfm2MoeEngineAdapterT, whose prefill every request runs). Appended, as the lines above.
-if(TARGET b70-serve)
-  target_link_libraries(b70-serve PRIVATE b70_lfm2moe_prefill)
-endif()
 # Spec 25c: and Nemotron 3.5 Bolt's engine (runtime/bolt, src/cli/bolt_decode.h), dispatched on model_type.
 target_link_libraries(b70-decode PRIVATE b70_bolt_runtime)
 # Spec 25d: and Nemotron 3.5 Bolt's prefill (b70_bolt_prefill: BoltEngine::prefill, its walk and scratch).

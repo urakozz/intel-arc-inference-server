@@ -38,7 +38,6 @@
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
-#include "cli/lfm2moe_decode.h"   // spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe)
 #include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
 #include "cli/qwen4exp_decode.h"
 #include "cli/max_len.h"
@@ -185,13 +184,6 @@ void usage() {
       "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2. Spec 21d:\n"
       "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
       "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
-      "  LFM2.5-24B-A2B (model_type lfm2_moe, spec 24c): one card by default (the model and its\n"
-      "                 131072 positions fit one B70); --lm-head int8 is ITS default (bf16 reads\n"
-      "                 the tied embedding tiles); --profile prints its per-launch anatomy. The\n"
-      "                 prompt is decoded one replay per id: --prefill* (spec 24d), --mtp / --spec\n"
-      "                 (no MTP head), --kv-cache int8 (decision 11) and --layers refused.\n"
-      "                 B70_LFM_ATTN=eager: the reference's bf16 attention chain (A/B);\n"
-      "                 B70_LFM_FUSE=none|all|route,router,conv: the fused arms (bitwise none).\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
       "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
       "                 Never a bench row: every launch signals a host-visible event\n"
@@ -803,8 +795,8 @@ int run(int argc, char** argv) {
   bool have_pp_backend = false;
   // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
-  bool have_lm_head = false;   // LFM2.5 / Bolt: the head is int8 unless --lm-head bf16
-  bool have_spec = false;      // --spec: dflash (Qwen3.8); LFM2.5 / Bolt refuse it by name; else unknown
+  bool have_lm_head = false;   // Bolt: the head is int8 unless --lm-head bf16
+  bool have_spec = false;      // --spec: dflash (Qwen3.8); Bolt refuses it by name; else unknown
   std::string spec_arg;        // spec 19c: `dflash` runs the DFlash drafter (--ids); anything else is unknown
   cli::dflash::Args dflash;
   bool have_spec_max = false;
@@ -905,7 +897,7 @@ int run(int argc, char** argv) {
       if (!loader::parse_lm_head_form(v, lm_head))
         throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
       have_lm_head = true;
-    } else if (a == "--spec") {   // spec 19c: dflash; LFM2.5 / Bolt refuse it by name
+    } else if (a == "--spec") {   // spec 19c: dflash; Bolt refuses it by name
       spec_arg = value(i, "--spec");
       have_spec = true;
     } else if (a == "--spec-max") {   // spec 19c
@@ -1043,37 +1035,6 @@ int run(int argc, char** argv) {
     ba.spec = have_spec;
     ba.kv8 = kv_cache == runtime::KvCache::Int8;
     return cli::bolt::run_decode<StdoutToStderr>(ba);
-  }
-  // Spec 24c: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine on one card (or two) -
-  // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its
-  // own refusals, cli/lfm2moe_decode.h: the prefill's backend and chunk (spec 24d: l0 only, chunk <= 2048), --mtp /
-  // --spec (no MTP head), int8 KV (decision 11), --layers). A path that does not resolve is not LFM2 - the flows below
-  // report it.
-  if (cli::lfm2moe::is_lfm2moe(path)) {
-    cli::lfm2moe::DecodeArgs la;
-    la.path = path;
-    la.ids_path = ids_path;
-    la.n = n;
-    la.bench = bench;
-    la.profile = profile;
-    la.depth = depth;
-    la.tg = tg;
-    la.steps = steps;
-    la.repeats = repeats;
-    la.max_len = max_len_arg;
-    la.reserve = mem_reserve;
-    la.device = device;
-    la.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
-    la.pipe = pipe;
-    la.prefill = prefill;           // spec 24d: --ids through Lfm2MoeEngine::prefill
-    la.pp = have_prefill_len;       // --prefill-length N already set depth = N above
-    la.pp_chunk = pp_chunk;
-    la.pp_backend_given = have_pp_backend;
-    la.pp_backend = pp_backend;
-    la.mtp = mtp_on || have_mtp || have_spec;
-    la.kv8 = kv_cache == runtime::KvCache::Int8;
-    la.layers = have_layers;
-    return cli::lfm2moe::run_decode<StdoutToStderr>(la);
   }
   // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card); every other --spec is unknown here.
   if (have_spec && spec_arg != "dflash") throw std::runtime_error(cli::unknown_option("--spec"));

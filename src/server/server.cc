@@ -172,15 +172,6 @@ Server::Outcome Server::generate(const Request& r,
   } catch (const std::exception& error) {
     throw BadRequest(error.what());
   }
-  // Spec 24e (decision 8): LFM2.5's template always opens <think>; enable_thinking false is accepted and has no effect.
-  // The line is printed once per process: a client that always sends enable_thinking:false must not fill the log.
-  if (r.chat && opts_.chat_format.kind == ChatFormat::Kind::Lfm2 && !r.enable_thinking) {
-    static std::atomic<bool> told{false};
-    if (!told.exchange(true)) {
-      std::fprintf(stderr, "b70-serve: enable_thinking ignored: the template always reasons\n");
-      std::fflush(stderr);
-    }
-  }
   outcome.prompt_ids = deps_.tok.encode(prompt);
   const uint32_t max_len = deps_.engine.max_len();
   if (outcome.prompt_ids.empty()) throw BadRequest("prompt encodes to zero tokens");
@@ -368,7 +359,6 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
   if (outcome.finish_reason == "length") add_text(streamer->flush());
   if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
-  if (parser) outcome.parser_stats = parser->stats();
   flush_pending(true);
   if (eos_stop && !outcome.parsed.tool_calls.empty()) outcome.finish_reason = "tool_calls";
   outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
@@ -429,7 +419,6 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
       {"out_ids", outcome.out_ids},
       {"response_text", outcome.raw_text},
   };
-  if (!outcome.parser_stats.is_null()) record["parser"] = outcome.parser_stats;   // spec 24e: LFM2's parser.rules
   char name[32];
   std::snprintf(name, sizeof(name), "/%06llu.json",
                 static_cast<unsigned long long>(++impl_->next_log));
