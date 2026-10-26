@@ -1,6 +1,12 @@
 # Spec 23f - Muse-Glimmer's DFlash drafter: P0 (acceptance, verify cost, the stopping rule), then the engine
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - the DFlash v1 drafter in its Muse form: `src/kernels/muse/mg_dflash.cl`, `src/runtime/dflash/muse_drafter.h`, `src/runtime/dflash/muse_drafter.cc`, the Muse form of `src/model/dflash.h` / `src/model/dflash.cc`, `src/runtime/dflash/dflash_capture.cc` and `src/kernels/dflash_kernels.h`; int4 g64 drafter linears (`DraftFormat::Int4G64`, `src/loader/dflash_repack.cc`)
+> - tests: `tests/runtime/muse_dflash_test.cc`, `tests/loader/muse_assistant_test.cc`, `tests/kernels/muse_dflash_names_test.cc`, the Muse form of `tests/kernels/dflash_ref.h` and `tools/oracle/dflash_ref.py`
+> - dense attention: `src/kernels/muse/mg_attn.cl` (flash decode, sliding window over a ring or full NoPE, output gate), `src/kernels/muse/mg_attn_eager.cl`, prefill attention `src/kernels/muse/mg_pf_attn.cl` (DPAS flash + eager twin) - all three still live, byte-identical, in `src/kernels/bolt/` (Bolt binds them); their twins `tests/kernels/muse_ref.h`, `tests/kernels/muse_pf_ref.h` (the full-layer half lives on as `tests/kernels/mg_attn_ref.h`)
 
 **Status (2026-10-16): built on the Mac, both parts, on ONE branch `spec23f-muse-dflash` (the operator's 2026-10-15
 ruling: Part 2 built regardless of P0; P0 picks the defaults) - nothing of it has run on a card. Box queue row 47

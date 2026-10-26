@@ -1,6 +1,13 @@
 # Spec 23a - Muse-Glimmer-30B: the facts, the CPU reference, golden sets, the A4 set, gate Q
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - dense attention: `src/kernels/muse/mg_attn.cl` (flash decode, sliding window over a ring or full NoPE, output gate), `src/kernels/muse/mg_attn_eager.cl`, prefill attention `src/kernels/muse/mg_pf_attn.cl` (DPAS flash + eager twin) - all three still live, byte-identical, in `src/kernels/bolt/` (Bolt binds them); their twins `tests/kernels/muse_ref.h`, `tests/kernels/muse_pf_ref.h` (the full-layer half lives on as `tests/kernels/mg_attn_ref.h`)
+> - the between-GEMV kernels `src/kernels/muse/mg_prep.cl` (weight-less / centered norms, sandwich post-add, q / k prep, SiLU x up), `src/kernels/muse/mg_pf_prep.cl`, `src/kernels/muse/mg_argmax.cl`; host names `src/kernels/muse_kernels.h`; the GEMV cells at its dense shapes in `src/kernels/CMakeLists.txt`'s Spec 23c / 23d blocks
+> - the dense descriptor / layout / loader: `src/model/muse_glimmer.h`, `src/model/muse_glimmer.cc`, `src/loader/muse_layout.h`, `src/loader/muse_loader.h`, `src/loader/muse_loader.cc`, `src/loader/muse_repack.h`, `src/loader/muse_repack.cc`; the engine `src/runtime/muse/` (buffers, capture, prefill, sizes, RoPE)
+> - tests: `tests/kernels/muse_ref_test.cc`, `tests/kernels/muse_pf_ref_test.cc`, `tests/kernels/muse_kernels_test.cc`, `tests/kernels/muse_pf_kernels_test.cc`, `tests/loader/muse_layout_test.cc`, `tests/loader/muse_repack_test.cc`, `tests/loader/muse_load_checkpoint_test.cc`, `tests/loader/muse_synth_host_test.cc`, `tests/model/muse_glimmer_test.cc` (+ `tests/model/muse_glimmer/`), the oracle `tools/oracle/muse_ref.py`; `tests/CMakeLists.txt`'s Spec 23b-23e blocks
 
 **Status (2026-10-15): built on the Mac (branch `spec23a-muse-reference`) - Tasks 1-5 and 7's code done and their gates green; MG1 bitwise on the tiny variants AND on real weights (`hfcheck --layers 4`, the int4 checkpoint); golden sets made on the Mac for the two short prompts (spec 23 §12); the long golden sets, both perplexities on the bf16 form, the -GPTQ repo's g_idx scan and gate Q are box queue row 42's (box CPU only). Spec 23 §12 "23a as built".**
 

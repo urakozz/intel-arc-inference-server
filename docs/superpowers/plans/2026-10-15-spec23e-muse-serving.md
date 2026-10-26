@@ -1,6 +1,13 @@
 # Spec 23e - Muse-Glimmer-30B served: tokenizer, template, the channel / ATEM parser, reasoning strength, sampling with the softcap, prefix-cache snapshots
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - dense attention: `src/kernels/muse/mg_attn.cl` (flash decode, sliding window over a ring or full NoPE, output gate), `src/kernels/muse/mg_attn_eager.cl`, prefill attention `src/kernels/muse/mg_pf_attn.cl` (DPAS flash + eager twin) - all three still live, byte-identical, in `src/kernels/bolt/` (Bolt binds them); their twins `tests/kernels/muse_ref.h`, `tests/kernels/muse_pf_ref.h` (the full-layer half lives on as `tests/kernels/mg_attn_ref.h`)
+> - the between-GEMV kernels `src/kernels/muse/mg_prep.cl` (weight-less / centered norms, sandwich post-add, q / k prep, SiLU x up), `src/kernels/muse/mg_pf_prep.cl`, `src/kernels/muse/mg_argmax.cl`; host names `src/kernels/muse_kernels.h`; the GEMV cells at its dense shapes in `src/kernels/CMakeLists.txt`'s Spec 23c / 23d blocks
+> - the dense descriptor / layout / loader: `src/model/muse_glimmer.h`, `src/model/muse_glimmer.cc`, `src/loader/muse_layout.h`, `src/loader/muse_loader.h`, `src/loader/muse_loader.cc`, `src/loader/muse_repack.h`, `src/loader/muse_repack.cc`; the engine `src/runtime/muse/` (buffers, capture, prefill, sizes, RoPE)
+> - tests: `tests/kernels/muse_ref_test.cc`, `tests/kernels/muse_pf_ref_test.cc`, `tests/kernels/muse_kernels_test.cc`, `tests/kernels/muse_pf_kernels_test.cc`, `tests/loader/muse_layout_test.cc`, `tests/loader/muse_repack_test.cc`, `tests/loader/muse_load_checkpoint_test.cc`, `tests/loader/muse_synth_host_test.cc`, `tests/model/muse_glimmer_test.cc` (+ `tests/model/muse_glimmer/`), the oracle `tools/oracle/muse_ref.py`; `tests/CMakeLists.txt`'s Spec 23b-23e blocks
 
 **Status (2026-10-16): built on the Mac (branch `spec23e-muse-serving`): Tasks 1-4 and 7 done, Task 5 Step 1 done; Task 5 Step 2 and Task 6's runs (A4, passkey, llama-benchy) are the box's - queue row 46. What was built and where it departs from this plan: spec 23 §16 "23e as built" (the state is 81,748,992 B, not 81,747,968; both Vishva007 repos ship the older template; the A4 arm runs b70-decode on the set's ids; Step 2 is a stage).**
 

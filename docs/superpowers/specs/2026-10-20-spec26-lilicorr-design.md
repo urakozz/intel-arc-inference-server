@@ -1,6 +1,13 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in e21208c (26c) and b41c442 (26a / 26b); kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - sink attention: `src/kernels/dflash/ll_attn.cl` (the learned sink logit added in the softmax reduce); the top-k with the logsumexp `src/kernels/dflash/ll_topk.cl`; the bf16 GEMV with an fp32 output scale `src/kernels/dflash/ll_gemv_bf16_g.cl`; host names in `src/kernels/dflash_kernels.h`
+> - the NVFP4 decoder: `src/loader/nvfp4.h`, `src/loader/nvfp4.cc`, `tests/loader/nvfp4_test.cc`; NVFP4 into our formats `src/loader/lilicorr_repack.h`, `src/loader/lilicorr_repack.cc`, `tests/loader/lilicorr_repack_test.cc`
+> - twins and tests: `tests/kernels/lilicorr_ref.h`, `tests/kernels/lilicorr_ref_test.cc`, `tests/kernels/lilicorr_kernels_test.cc`; the oracle's LiLiCorr form (sinks) in `tools/oracle/dflash_ref.py`
+> - 26c: the union-aware M-row MoE `src/kernels/bolt/nb_moe_union.cl` (+ `tests/kernels/bolt_moe_union_test.cc`), Bolt's verify lists and Mamba state slots in `src/runtime/bolt/`, the serving glue `src/cli/bolt_spec.h`
 
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §10. **26a built on the Mac 2026-10-23** (§12 as built; §11 the P0 verdict - PENDING the

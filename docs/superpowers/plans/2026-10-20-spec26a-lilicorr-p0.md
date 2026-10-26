@@ -1,6 +1,12 @@
 # Spec 26a - LiLiCorr P0: the reference, teacher-forced acceptance on our Bolt, the verify and block costs, the projection (defaults, not a gate)
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in b41c442; kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - sink attention: `src/kernels/dflash/ll_attn.cl` (the learned sink logit added in the softmax reduce); the top-k with the logsumexp `src/kernels/dflash/ll_topk.cl`; the bf16 GEMV with an fp32 output scale `src/kernels/dflash/ll_gemv_bf16_g.cl`; host names in `src/kernels/dflash_kernels.h`
+> - the NVFP4 decoder: `src/loader/nvfp4.h`, `src/loader/nvfp4.cc`, `tests/loader/nvfp4_test.cc`; NVFP4 into our formats `src/loader/lilicorr_repack.h`, `src/loader/lilicorr_repack.cc`, `tests/loader/lilicorr_repack_test.cc`
+> - twins and tests: `tests/kernels/lilicorr_ref.h`, `tests/kernels/lilicorr_ref_test.cc`, `tests/kernels/lilicorr_kernels_test.cc`; the oracle's LiLiCorr form (sinks) in `tools/oracle/dflash_ref.py`
 
 **Status (2026-10-23): built on the Mac, branch `spec26a-lilicorr-p0` - the reference, the tooling, the probe, the
 projection and queue row 63 (spec 26 §12 "26a as built"); nothing on a card; the real drafter's weights read on the Mac

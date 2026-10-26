@@ -1,6 +1,11 @@
 # Spec 26c - LiLiCorr in Bolt's loop and server: verify at M <= 8 with taps on two cards, the Mamba state slots and the commit, the union-aware MoE verify, the prefill projection, snapshots with the ring, `--spec dflash` (D0, D2-D5)
 
 > DROPPED (operator, 2026-10-27): support removed from the engine in e21208c; kept for the record.
+>
+> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> commit that has all of it):
+> - 26c: the union-aware M-row MoE `src/kernels/bolt/nb_moe_union.cl` (+ `tests/kernels/bolt_moe_union_test.cc`), Bolt's verify lists and Mamba state slots in `src/runtime/bolt/`, the serving glue `src/cli/bolt_spec.h`
+> - sink attention: `src/kernels/dflash/ll_attn.cl` (the learned sink logit added in the softmax reduce); the top-k with the logsumexp `src/kernels/dflash/ll_topk.cl`; the bf16 GEMV with an fp32 output scale `src/kernels/dflash/ll_gemv_bf16_g.cl`; host names in `src/kernels/dflash_kernels.h`
 
 **Status (2026-10-23): built on the Mac** (branch `spec26c-lilicorr-engine-serving`; as built: spec 26 §14) - Tasks 1-7
 but Task 2 Step 3 (the replay lever: not built, §11) and Task 5's GEMM path (the 8-row replay fallback built); nothing run
