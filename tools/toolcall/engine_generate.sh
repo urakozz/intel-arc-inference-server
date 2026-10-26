@@ -19,11 +19,6 @@
 #      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384).
 # K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's
 # engine; its backend is l0 (the only one K2 prefills on).
-# Muse-Glimmer (spec 23e, MG5): the same line runs MuseEngine (one card, l0) on the committed set
-# tests/golden/toolcall-muse - its ids were rendered by transformers 5.19.0 with the ORIGINAL's template and the set's
-# reasoning_strength (make_set.py's MUSE_KWARGS), so the engine sees exactly the reference's bytes; N_NEW defaults to
-# 512 for it (23a's gate Q count: the replies open with a to=self channel). Score with `score.py --format atem`.
-# The server's path (template + parser) is held to this one by golden_server_test --chat (r46.chat).
 # LFM2.5-24B-A2B (spec 24e, F6): the same line runs Lfm2MoeEngine (one card, l0) on the committed set tests/golden/toolcall-lfm2moe
 # (rendered by transformers 5.19.0 with the snapshot's chat_template.jinja, key-sorted as b70-serve renders); N_NEW defaults to 2048
 # (24a's reference length: the replies open with reasoning). b70-decode generates all N_NEW ids whatever the model says, so cut each
@@ -43,7 +38,6 @@ PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
 [ -f "$SNAP/tokenizer.json" ] || { echo "$SNAP has no tokenizer.json" >&2; exit 2; }
 N_DEFAULT=192
-if grep -q '"model_type": *"muse_glimmer"' "$SNAP/config.json" 2> /dev/null; then N_DEFAULT=512; fi
 if grep -q '"model_type": *"lfm2_moe"' "$SNAP/config.json" 2> /dev/null; then N_DEFAULT=2048; fi
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)

@@ -99,18 +99,6 @@ class DFlashConfig:
     input_embedding_scale: float = 1.0
     output_multiplier: float = 1.0
     final_logit_softcapping: float = 0.0
-    # Spec 23f: the reference the semantics follow. "vllm" (DFlash / DFlash 2 above); "muse" =
-    # transformers 5.19.0's MuseGlimmerAssistantModel + DFlashTokenCandidateGenerator (the
-    # module docstring's "Muse-Glimmer form"): the window INCLUDES |q - k| == window
-    # (MU:142-152), the RMSNorm rounds x-hat to the model dtype before x w (A:50-55), the block
-    # is always block_size rows (rows past K computed and discarded), the drafts read the raw
-    # head rows (G:1658-1660) and embed the raw rows (G:1563-1579).
-    form: str = "vllm"
-    window_inclusive: bool = False      # |q - k| <= window (muse) or <= window - 1 (vllm)
-    norm_two_roundings: bool = False    # w x dtype(x-hat) (muse) or the fp32 product (vllm)
-    embed_norm: bool = False            # the target's weight-less embedding norm on the rows: never (G:1563-1579)
-    head_cap: bool = False              # the target's multiplier / softcap on the draft rows: never (G:1658)
-    q_scale: float = 1.0                # q x this after q_norm: 1 for the assistant (no qk_scale_factor, A:181-192)
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -151,46 +139,7 @@ def resolve_layer_attention(c: dict, i: int) -> tuple[int | None, bool]:
     return window, _layer_causal(c, i)
 
 
-MUSE_MODEL_TYPE = "muse_glimmer_assistant"
-MUSE_ARCH = "MuseGlimmerAssistantModel"
-
-
-def is_muse_config(c: dict) -> bool:
-    return c.get("model_type") == MUSE_MODEL_TYPE or MUSE_ARCH in (c.get("architectures") or [])
-
-
-def muse_config_from_dict(c: dict) -> DFlashConfig:
-    """MuseGlimmerAssistantConfig (AC:62-89): block_size, mask_token_id and target_layer_ids at the top level,
-    every layer sliding (layer_types) with `sliding_window`, non-causal (A:146), RoPE default at
-    rope_parameters.rope_theta (A:330-346), eps rms_norm_eps. The checkpoint carries no vocab_size: the vocabulary is
-    the target's (set by the Drafter from the shared embedding)."""
-    if c.get("hidden_act", "silu") != "silu":
-        raise NotImplementedError(f"hidden_act {c.get('hidden_act')}")
-    rp = c.get("rope_parameters") or {}
-    if rp.get("rope_type", "default") != "default":
-        raise NotImplementedError(f"rope_type {rp.get('rope_type')}")
-    n = int(c["num_hidden_layers"])
-    lt = c.get("layer_types") or ["sliding_attention"] * n
-    if any(t != SLIDING for t in lt):
-        raise NotImplementedError(f"a full-attention assistant layer ({lt}): the Muse form is all sliding")
-    ids = [int(i) for i in (c.get("target_layer_ids") or [1, 13, 25, 37, 49])]
-    if ids != sorted(ids) or len(set(ids)) != len(ids):
-        raise ValueError(f"target_layer_ids must be strictly increasing: {ids}")
-    hidden, nh = int(c["hidden_size"]), int(c["num_attention_heads"])
-    vocab = int(c.get("vocab_size") or 0)
-    w = int(c["sliding_window"])
-    return DFlashConfig(
-        version=1, hidden=hidden, n_layers=n, n_heads=nh, n_kv_heads=int(c["num_key_value_heads"]),
-        head_dim=int(c.get("head_dim") or hidden // nh), ffn=int(c["intermediate_size"]),
-        eps=float(c.get("rms_norm_eps", 1e-5)), rope_theta=float(rp.get("rope_theta", 500000.0)), neox=True,
-        vocab=vocab, draft_vocab=vocab, block_size=int(c.get("block_size", 16)),
-        mask_token_id=int(c.get("mask_token_id", 201818)), target_layer_ids=ids, windows=[w] * n,
-        causal=[False] * n, form="muse", window_inclusive=True, norm_two_roundings=True, raw=c)
-
-
 def config_from_dict(c: dict) -> DFlashConfig:
-    if is_muse_config(c):
-        return muse_config_from_dict(c)
     dc = dict(c.get("eagle_config") or {})
     dc.update(c.get("dflash_config") or {})
     arch = " ".join(c.get("architectures") or [])
@@ -404,7 +353,7 @@ def read_mask_embedding(drafter_dir: str, mask_token_id: int) -> torch.Tensor | 
 
 def load_drafter(drafter_dir: str, target_dir: str | None = None, *,
                  embed: torch.Tensor | None = None, lm_head: torch.Tensor | None = None,
-                 upcast_head: bool = False, dtype: torch.dtype = torch.float32) -> "Drafter":
+                 upcast_head: bool = False) -> "Drafter":
     """Drafter from a checkpoint directory. The embedding and head are the drafter's own if it
     ships them, else the target's (pass `target_dir`, or the tensors directly to share them
     between several drafters)."""
@@ -421,10 +370,7 @@ def load_drafter(drafter_dir: str, target_dir: str | None = None, *,
         embed = e if embed is None else embed
         lm_head = h if lm_head is None else lm_head
     mask = read_mask_embedding(drafter_dir, cfg.mask_token_id)
-    if cfg.form == "muse" and mask is not None:
-        raise ValueError("a Muse-Glimmer assistant ships no mask embedding (the mask row is the target's "
-                         f"embedding row {cfg.mask_token_id}); refusing {drafter_dir}/mask_embedding.pt")
-    return Drafter(cfg, t, embed, lm_head, mask_embedding=mask, upcast_head=upcast_head, dtype=dtype)
+    return Drafter(cfg, t, embed, lm_head, mask_embedding=mask, upcast_head=upcast_head)
 
 
 # --------------------------------------------------------------------------------------------
@@ -626,17 +572,12 @@ class Drafter:
 
     def __init__(self, cfg: DFlashConfig, tensors: dict[str, torch.Tensor], embed: torch.Tensor,
                  lm_head: torch.Tensor, mask_embedding: torch.Tensor | None = None,
-                 upcast_head: bool = False, dtype: torch.dtype = torch.float32):
+                 upcast_head: bool = False):
         self.cfg = cfg
-        # The Muse form computes in `dtype` exactly as transformers' modules do (bf16 = the checkpoint's own
-        # arithmetic, float32 = the D1 reference); the vLLM forms are float32 compute (dtype unused).
-        self.dtype = dtype if cfg.form == "muse" else torch.float32
-        if cfg.form == "muse" and cfg.vocab == 0:
-            cfg.vocab = cfg.draft_vocab = int(embed.shape[0])   # the assistant's config carries none: the target's
         keep = ("candidate_selector.predecessor_codebook", "candidate_selector.successor_codebook")
-        self.w = {n: (v if n in keep else v.to(self.dtype)) for n, v in tensors.items()}
+        self.w = {n: (v if n in keep else v.float()) for n, v in tensors.items()}
         self.embed = embed
-        self.lm_head = lm_head.to(self.dtype) if (upcast_head or cfg.form == "muse") else lm_head
+        self.lm_head = lm_head.float() if upcast_head else lm_head
         self.mask_embedding = None if mask_embedding is None else mask_embedding.float()
         self.d2t = self.w.pop("d2t", None)
         if self.d2t is not None:
@@ -707,8 +648,6 @@ class Drafter:
         for x in xs:
             if x.shape != (pos.shape[0], self.target_hidden):
                 raise ValueError(f"tap shape {tuple(x.shape)} != {(pos.shape[0], self.target_hidden)}")
-        if c.form == "muse":
-            return self._m_context_kv([taps[i] for i in c.target_layer_ids], pos)
         ctx = rms_norm(linear(torch.cat(xs, -1), self.w["fc.weight"]), self.w["hidden_norm.weight"], c.eps)
         ks, vs = [], []
         for i in range(c.n_layers):
@@ -842,8 +781,6 @@ class Drafter:
         c = self.cfg
         if not 1 <= K <= c.max_k:
             raise ValueError(f"K={K} outside 1..{c.max_k} (block_size {c.block_size})")
-        if c.form == "muse":
-            return self._m_draft_block(anchor_id, p, K, ctx, temperature, seed)
         h = self.forward_block(self.embed_block(anchor_id, K), p, ctx)
         hm = h[1:]
         T = temperature if temperature > 0 else 1.0
@@ -874,237 +811,3 @@ class Drafter:
         q = torch.softmax(logits.double() / T, -1).float()
         return DraftOut(ids=ids, cand_ids=cand, unary=unary, scores=unary, edges=None, chosen=chosen,
                         q=q, hidden=h, positions=torch.arange(p, p + K + 1))
-
-    # -- the Muse-Glimmer form (spec 23f): transformers 5.19.0's own ops, in self.dtype -------------
-    #
-    # Each line restates MuseGlimmerAssistantModel (A:) / DFlashTokenCandidateGenerator (G:) op for op, so in
-    # bfloat16 the arithmetic is the checkpoint's own and in float32 it is the D1 reference. MuseSession below drives
-    # these ops exactly as transformers' cache does (bitwise); draft_block is the stateless form over a ContextKV
-    # (every context position projected once, the window applied in the mask) that dflash_accept batches.
-
-    def _m_lin(self, x: torch.Tensor, name: str) -> torch.Tensor:
-        return torch.nn.functional.linear(x, self.w[name])
-
-    def _m_norm(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
-        """MuseGlimmerAssistantRMSNorm (A:50-55): x-hat in fp32, rounded to the input dtype, THEN w x it (two
-        roundings in bf16); norm_two_roundings False is the one-rounding form (tests: Review Focus 4)."""
-        dt = x.dtype
-        h = x.to(torch.float32)
-        h = h * torch.rsqrt(h.pow(2).mean(-1, keepdim=True) + self.cfg.eps)
-        if self.cfg.norm_two_roundings:
-            return w * h.to(dt)
-        return (w.float() * h).to(dt)
-
-    def _m_cos_sin(self, pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """MuseGlimmerAssistantRotaryEmbedding (A:340-356): fp32 inv_freq = 1 / theta^(2i / hd), freqs = pos x
-        inv_freq in fp32, emb = [freqs | freqs], cos / sin in fp32 then rounded to the dtype. [N, hd]."""
-        hd = self.cfg.head_dim
-        inv = 1.0 / (self.cfg.rope_theta ** (torch.arange(0, hd, 2, dtype=torch.float) / hd))
-        freqs = pos.to(torch.float32)[:, None] * inv[None, :]
-        emb = torch.cat((freqs, freqs), dim=-1)
-        return (emb.cos() * 1.0).to(self.dtype), (emb.sin() * 1.0).to(self.dtype)
-
-    @staticmethod
-    def _m_rot_half(x: torch.Tensor) -> torch.Tensor:
-        h = x.shape[-1] // 2
-        return torch.cat((-x[..., h:], x[..., :h]), dim=-1)
-
-    def _m_rope(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        """apply_rotary_pos_emb's lines (A:126-131): x [1, heads, L, hd] with cos / sin broadcast over the heads."""
-        return (x * cos) + (self._m_rot_half(x) * sin)
-
-    def _m_encode(self, taps: list) -> torch.Tensor:
-        """MuseGlimmerAssistantContextProjection (A:302-309): output_norm_enc(fc(cat(taps)))."""
-        x = torch.cat([t.to(self.dtype) for t in taps], dim=-1)
-        return self._m_norm(self._m_lin(x, "fc.weight"), self.w["hidden_norm.weight"])
-
-    def _m_heads(self, i: int, x: torch.Tensor, which: str) -> torch.Tensor:
-        """x [1, L, H] -> the layer's q / k / v heads [1, heads, L, hd], q / k normed (A:181-187); q x q_scale."""
-        c, L = self.cfg, f"layers.{i}.self_attn."
-        y = self._m_lin(x, L + which + "_proj.weight")
-        y = y.view(*x.shape[:-1], -1, c.head_dim).transpose(1, 2)
-        if which == "v":
-            return y
-        y = self._m_norm(y, self.w[L + which + "_norm.weight"])
-        if which == "q" and c.q_scale != 1.0:
-            y = y * c.q_scale
-        return y
-
-    def _m_visible(self, qpos: torch.Tensor, kpos: torch.Tensor, i: int) -> torch.Tensor:
-        """create_bidirectional_sliding_window_mask (MU:142-152): |q - k| <= window (window - 1 when not inclusive)."""
-        w = self.cfg.windows[i]
-        lim = w if self.cfg.window_inclusive else w - 1
-        return (qpos[:, None] - kpos[None, :]).abs() <= lim
-
-    def _m_attend(self, i: int, q, k, v, qpos, kpos) -> torch.Tensor:
-        """eager_attention_forward (A:80-102) + o_proj: q [1, nh, R, hd], k / v [1, nkv, Kv, hd] (roped)."""
-        c = self.cfg
-        g = c.n_heads // c.n_kv_heads
-        B, nkv, kv_len, hd = k.shape
-        if g > 1:   # repeat_kv (A:68-77)
-            k = k[:, :, None, :, :].expand(B, nkv, g, kv_len, hd).reshape(B, nkv * g, kv_len, hd)
-            v = v[:, :, None, :, :].expand(B, nkv, g, kv_len, hd).reshape(B, nkv * g, kv_len, hd)
-        s = torch.matmul(q, k.transpose(2, 3)) * (c.head_dim ** -0.5)
-        dt = q.dtype
-        mask = torch.where(self._m_visible(qpos, kpos, i), torch.tensor(0.0, dtype=dt), torch.finfo(dt).min)
-        s = s + mask[None, None]
-        p = torch.nn.functional.softmax(s, dim=-1, dtype=torch.float32).to(dt)
-        o = torch.matmul(p, v).transpose(1, 2).contiguous()
-        o = o.reshape(*o.shape[:2], -1)
-        return self._m_lin(o, f"layers.{i}.self_attn.o_proj.weight")
-
-    def _m_mlp(self, i: int, x: torch.Tensor) -> torch.Tensor:
-        L = f"layers.{i}.mlp."
-        return self._m_lin(torch.nn.functional.silu(self._m_lin(x, L + "gate_proj.weight")) *
-                           self._m_lin(x, L + "up_proj.weight"), L + "down_proj.weight")
-
-    def _m_embed(self, anchor_id: int) -> torch.Tensor:
-        """[anchor, mask x (block - 1)] as the target's RAW rows (G:1563-1579: the weight-less norm bypassed),
-        [1, block, H]; embed_norm True applies the target's norm (Review Focus 4's mutation)."""
-        c = self.cfg
-        ids = torch.tensor([anchor_id] + [c.mask_token_id] * (c.block_size - 1))
-        x = self.embed[ids].to(self.dtype)[None]
-        if c.embed_norm:   # MuseGlimmerRMSNorm without scale: x * pow(mean(x^2) + eps, -0.5) in fp32, one cast
-            xf = x.float()
-            x = (xf * torch.pow(xf.pow(2).mean(-1, keepdim=True) + c.eps, -0.5)).to(self.dtype)
-        return x
-
-    def _m_layers(self, x: torch.Tensor, qpos: torch.Tensor, kv) -> torch.Tensor:
-        """The decoder layers (A:253-269) and the final norm (A:444) over the block x [1, R, H] at qpos; kv(i, h)
-        returns this layer's (k, v [1, nkv, Kv, hd] roped, kpos [Kv]) given the block's normed rows h."""
-        c = self.cfg
-        cos, sin = self._m_cos_sin(qpos)
-        resid = x
-        for i in range(c.n_layers):
-            L = f"layers.{i}."
-            h = self._m_norm(resid, self.w[L + "input_layernorm.weight"])
-            q = self._m_rope(self._m_heads(i, h, "q"), cos[None, None], sin[None, None])
-            k, v, kpos = kv(i, h)
-            resid = resid + self._m_attend(i, q, k, v, qpos, kpos)
-            resid = resid + self._m_mlp(i, self._m_norm(resid, self.w[L + "post_attention_layernorm.weight"]))
-        return self._m_norm(resid, self.w["norm.weight"])
-
-    def _m_context_kv(self, taps: list, pos: torch.Tensor) -> ContextKV:
-        """Every given position's context K / V: c = encoder(taps) (A:405), per layer k = rope(k_norm(k_proj(c))),
-        v = v_proj(c) (A:177-192) - [N, nkv, hd] in the dtype; fc = c."""
-        ctx = self._m_encode([t[None] for t in taps])            # [1, N, H]
-        cos, sin = self._m_cos_sin(pos)
-        ks, vs = [], []
-        for i in range(self.cfg.n_layers):
-            k = self._m_rope(self._m_heads(i, ctx, "k"), cos[None, None], sin[None, None])
-            v = self._m_heads(i, ctx, "v")
-            ks.append(k[0].transpose(0, 1).contiguous())
-            vs.append(v[0].transpose(0, 1).contiguous())
-        return ContextKV(pos=pos, k=ks, v=vs, fc=ctx[0])
-
-    def _m_draft_block(self, anchor_id: int, p: int, K: int, ctx: ContextKV, temperature: float,
-                       seed: int | None) -> "DraftOut":
-        """The stateless block: 16 rows at p .. p + 15 (row 0 the anchor, rows 1..15 the mask), keys = the context
-        positions in [p - window, p - 1] plus the block's own (bidirectional); drafts = the RAW head on rows 1..K
-        (rows past K computed and discarded - the block is always block_size rows)."""
-        c = self.cfg
-        B = c.block_size
-        qpos = torch.arange(p, p + B)
-        lo = p - (c.windows[0] if c.window_inclusive else c.windows[0] - 1)
-        sel = (ctx.pos < p) & (ctx.pos >= lo)
-        cos, sin = self._m_cos_sin(qpos)
-
-        def kv(i, h):
-            kb = self._m_rope(self._m_heads(i, h, "k"), cos[None, None], sin[None, None])
-            vb = self._m_heads(i, h, "v")
-            kc = ctx.k[i][sel].transpose(0, 1)[None]
-            vc = ctx.v[i][sel].transpose(0, 1)[None]
-            return torch.cat([kc, kb], 2), torch.cat([vc, vb], 2), torch.cat([ctx.pos[sel], qpos])
-
-        with torch.no_grad():
-            h = self._m_layers(self._m_embed(anchor_id), qpos, kv)[0]
-            logits = torch.nn.functional.linear(h[1:], self.lm_head).float()          # [15, V] raw (G:1658)
-        return self._m_out(logits, h, p, K, temperature, seed)
-
-    def _m_out(self, logits: torch.Tensor, h: torch.Tensor, p: int, K: int, temperature: float,
-               seed: int | None) -> "DraftOut":
-        """DraftOut from the raw head rows of mask rows 1..K: greedy = torch.argmax (the lowest id among equals,
-        G:1685); sampled = gumbel_argmax over the head; q = softmax(raw / T) (decision 11's raw form)."""
-        c = self.cfg
-        lg = logits[:K]
-        keys = torch.arange(c.vocab)
-        if temperature == 0.0:
-            ids = lg.argmax(-1)
-        else:
-            ids = torch.tensor([gumbel_argmax(lg[j], keys, temperature, seed, p + j) for j in range(K)])
-        cand, unary = top_k_stable(lg, self.V1_TOP_K)
-        hit = cand == ids[:, None]
-        chosen = torch.where(hit.any(1), hit.float().argmax(1), torch.full((K,), -1))
-        T = temperature if temperature > 0 else 1.0
-        q = torch.softmax(lg.double() / T, -1).float()
-        return DraftOut(ids=ids, cand_ids=cand, unary=unary, scores=unary, edges=None, chosen=chosen, q=q,
-                        hidden=h, positions=torch.arange(p, p + c.block_size))
-
-
-class MuseSession:
-    """transformers 5.19.0's DFlashTokenCandidateGenerator + DFlashCache (G:1505-1688, CU:2192-2209 over
-    DynamicSlidingWindowLayer CU:212-325) for ONE sequence, op for op on the Drafter's Muse ops - BITWISE
-    transformers' candidate logits in bf16 and fp32 (test_dflash_ref.py::test_muse_equals_transformers).
-
-        s = MuseSession(drafter)
-        ids, logits = s.draft(taps_new, anchor_id)   # taps of the positions committed since the last draft
-
-    Per call: the previous block's 16 rows are cropped from every layer's cache (G:1620-1621; past the window only
-    the last window - 1 context rows are kept, CU:296-325), the new context rows are projected by the encoder, and
-    every layer projects k / v of [new context | block] in ONE linear (A:177-183), ropes them at [c .. p + 15]
-    (c = the context positions before this call, p = c + n the anchor's), appends them, and attends over the cache's
-    last window - 1 + n + 16 rows (CU:269-274) under |q - k| <= window. Returns the drafts (argmax of the raw head on
-    rows 1..15) and their raw logits [15, V] (float32)."""
-
-    def __init__(self, d: Drafter):
-        if d.cfg.form != "muse":
-            raise ValueError("MuseSession is the Muse-Glimmer form's (transformers') cache")
-        self.d = d
-        self.k: list = [None] * d.cfg.n_layers
-        self.v: list = [None] * d.cfg.n_layers
-        self.c = 0                    # committed context positions in the cache (cumulative_length minus the block)
-        self.block_in_cache = False
-
-    def crop(self) -> None:
-        """crop(-block): the block's rows go; at or past the window only the last window - 1 context rows stay."""
-        B, W = self.d.cfg.block_size, self.d.cfg.windows[0]
-        full = self.c + B >= W
-        for i in range(len(self.k)):
-            if full:
-                self.k[i] = self.k[i][:, :, -W + 1 - B:-B]
-                self.v[i] = self.v[i][:, :, -W + 1 - B:-B]
-            else:
-                self.k[i] = self.k[i][:, :, :-B]
-                self.v[i] = self.v[i][:, :, :-B]
-        self.block_in_cache = False
-
-    @torch.no_grad()
-    def draft(self, taps: dict, anchor_id: int):
-        d, c = self.d, self.d.cfg
-        if self.block_in_cache:
-            self.crop()
-        B, W = c.block_size, c.windows[0]
-        tl = [taps[i] for i in c.target_layer_ids]
-        n = tl[0].shape[0]
-        ctx = d._m_encode([t[None] for t in tl])                  # [1, n, H]
-        p = self.c + n
-        qpos = torch.arange(p, p + B)
-        allpos = torch.arange(self.c, p + B)
-        cos, sin = d._m_cos_sin(allpos)
-
-        def kv(i, h):
-            x = torch.cat([ctx, h], dim=1)
-            k = d._m_rope(d._m_heads(i, x, "k"), cos[None, None], sin[None, None])
-            v = d._m_heads(i, x, "v")
-            full_k = k if self.k[i] is None else torch.cat([self.k[i], k], dim=2)
-            full_v = v if self.v[i] is None else torch.cat([self.v[i], v], dim=2)
-            self.k[i], self.v[i] = full_k, full_v
-            nvis = W - 1 + n + B
-            ku, vu = full_k[:, :, -nvis:], full_v[:, :, -nvis:]
-            return ku, vu, torch.arange(p + B - ku.shape[2], p + B)
-
-        h = d._m_layers(d._m_embed(anchor_id), qpos, kv)
-        logits = torch.nn.functional.linear(h[:, 1:], d.lm_head)[0]
-        self.c = p
-        self.block_in_cache = True
-        return logits.argmax(-1), logits.float()

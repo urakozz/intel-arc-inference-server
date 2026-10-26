@@ -25,19 +25,6 @@ Contents (one safetensors file; the drafter's tensors under their checkpoint nam
                                                                same weights as a DFlash (v1) drafter (no convs, no
                                                                selector; its scores = unary, logit_scale 1)
   metadata: config_v2, config_v1 (config.json text), vocab_used, cases (JSON: [{p, anchor, K, T, seed}, ...])
-
-    dflash_fixture.py --muse [--out tests/loader/muse_dflash_fixture.safetensors]
-
-Spec 23f: the same for the Muse-Glimmer assistant's form (dflash_ref.py's "muse", bitwise transformers 5.19.0) -
-a tiny random MuseGlimmerAssistantModel at Muse's ratios: hidden 64, 2 layers, 8 / 2 heads x 16 (GQA 4), intermediate
-128, 5 taps {1, 3, 5, 7, 9} of a target of hidden 64 (fc 320 -> 64), vocab 512 (every id a token), mask id 500, block
-16, window 16 INCLUSIVE (|q - k| <= 16, so a 40-position context crosses it for row 0 and row 15), eps 1e-5, theta
-5e5, every GEMV width a multiple of 64 (the int4 g64 arm). The reference runs in float32 (the D1 form):
-  target.embed / target.head bf16 [512][64], taps bf16 [40][320], the drafter's tensors
-  muse.ctx.fc f32 [40][64]; muse.ctx.k{l} / muse.ctx.v{l} f32 [40][2][16]
-  muse.case{i}.{hidden f32 [16][64] (all 16 rows), cand i32 [K][16], unary f32 [K][16] (raw logits), ids i32 [K]}
-  muse.norm.{src bf16 [4][64], w bf16 [64], out bf16 [4][64]}   _m_norm in bfloat16 (the two roundings)
-  metadata: config_muse, vocab_used, cases
 """
 from __future__ import annotations
 
@@ -139,95 +126,10 @@ def masked_draft(d, anchor, p, K, ctx, T, seed):
         d.head_logits = orig
 
 
-MH, ML, MNH, MNKV, MHD, MI, MTAPS, MWIN, MBLOCK = 64, 2, 8, 2, 16, 128, [1, 3, 5, 7, 9], 16, 16
-# window edges for row 0 and row 15 (p 15 / 16 / 17, p 30 / 39 past a 32-slot ring's wrap), K 15 / 7 / 1, the mask id
-# as the anchor. Greedy only (a sampled Muse draft is drawn on the host from the readback).
-MUSE_CASES = [
-    {"p": 1, "anchor": 7, "K": 15, "T": 0.0, "seed": 0},
-    {"p": 15, "anchor": 123, "K": 15, "T": 0.0, "seed": 0},
-    {"p": 16, "anchor": 4, "K": 15, "T": 0.0, "seed": 0},
-    {"p": 17, "anchor": 300, "K": 7, "T": 0.0, "seed": 0},
-    {"p": 30, "anchor": 500, "K": 15, "T": 0.0, "seed": 0},
-    {"p": 39, "anchor": 77, "K": 1, "T": 0.0, "seed": 0},
-    {"p": 33, "anchor": 410, "K": 15, "T": 0.0, "seed": 0},
-]
-
-
-def muse_config() -> dict:
-    return {"architectures": ["MuseGlimmerAssistantModel"], "model_type": "muse_glimmer_assistant", "block_size": MBLOCK,
-            "head_dim": MHD, "hidden_act": "silu", "hidden_size": MH, "intermediate_size": MI,
-            "layer_types": ["sliding_attention"] * ML, "mask_token_id": MASK, "num_attention_heads": MNH,
-            "num_hidden_layers": ML, "num_key_value_heads": MNKV, "rms_norm_eps": 1e-05,
-            "rope_parameters": {"rope_theta": 500000.0, "rope_type": "default"}, "sliding_window": MWIN,
-            "target_layer_ids": MTAPS}
-
-
-def muse_weights() -> dict:
-    w = {"fc.weight": bf(MH, len(MTAPS) * TH, std=0.06), "hidden_norm.weight": bf(MH, std=0.1, mean=1.0),
-         "norm.weight": bf(MH, std=0.1, mean=1.0)}
-    for i in range(ML):
-        p = f"layers.{i}."
-        w.update({
-            p + "input_layernorm.weight": bf(MH, std=0.1, mean=1.0),
-            p + "post_attention_layernorm.weight": bf(MH, std=0.1, mean=1.0),
-            p + "self_attn.q_proj.weight": bf(MNH * MHD, MH, std=0.12),
-            p + "self_attn.k_proj.weight": bf(MNKV * MHD, MH, std=0.12),
-            p + "self_attn.v_proj.weight": bf(MNKV * MHD, MH, std=0.12),
-            p + "self_attn.o_proj.weight": bf(MH, MNH * MHD, std=0.08),
-            p + "self_attn.q_norm.weight": bf(MHD, std=0.1, mean=1.0),
-            p + "self_attn.k_norm.weight": bf(MHD, std=0.1, mean=1.0),
-            p + "mlp.gate_proj.weight": bf(MI, MH, std=0.12),
-            p + "mlp.up_proj.weight": bf(MI, MH, std=0.12),
-            p + "mlp.down_proj.weight": bf(MH, MI, std=0.08),
-        })
-    return w
-
-
-def main_muse(out_path: str) -> None:
-    torch.manual_seed(20261017)
-    w = muse_weights()
-    embed = bf(V, MH, std=0.5)
-    head = bf(V, MH, std=0.5)
-    taps = {i: bf(N, TH, std=1.0) for i in MTAPS}
-    pos = torch.arange(N)
-    out = {"target.embed": embed, "target.head": head, "taps": torch.cat([taps[i] for i in MTAPS], -1)}
-    out.update(w)
-    cfg_d = muse_config()
-    meta = {"vocab_used": str(V), "cases": json.dumps(MUSE_CASES), "config_muse": json.dumps(cfg_d)}
-    d = ref.Drafter(ref.config_from_dict(cfg_d), dict(w), embed, head, dtype=torch.float32)
-    ctx = d.context_kv(taps, pos)
-    out["muse.ctx.fc"] = ctx.fc.float().contiguous()
-    for i in range(ML):
-        out[f"muse.ctx.k{i}"] = ctx.k[i].float().contiguous()
-        out[f"muse.ctx.v{i}"] = ctx.v[i].float().contiguous()
-    for ci, c in enumerate(MUSE_CASES):
-        o = d.draft_block(c["anchor"], c["p"], c["K"], ctx)
-        p = f"muse.case{ci}."
-        out[p + "hidden"] = o.hidden.float().contiguous()
-        out[p + "cand"] = o.cand_ids.to(torch.int32).contiguous()
-        out[p + "unary"] = o.unary.float().contiguous()
-        out[p + "ids"] = o.ids.to(torch.int32).contiguous()
-    # the two-rounding norm in bfloat16 (the checkpoint's own arithmetic): a bf16 drafter's _m_norm
-    db = ref.Drafter(ref.config_from_dict(cfg_d), dict(w), embed, head, dtype=torch.bfloat16)
-    src = bf(4, MH, std=1.5)
-    nw = w["layers.0.input_layernorm.weight"]
-    out["muse.norm.src"] = src
-    out["muse.norm.w"] = nw
-    out["muse.norm.out"] = db._m_norm(src, nw).contiguous()
-    from safetensors.torch import save_file
-    save_file({k: v.contiguous().clone() for k, v in out.items()}, out_path, metadata=meta)
-    print(f"wrote {out_path}: {len(out)} tensors, {os.path.getsize(out_path)} bytes")
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out")
-    ap.add_argument("--muse", action="store_true", help="spec 23f: the Muse-Glimmer assistant's fixture")
+    ap.add_argument("--out", default="tests/loader/dflash_ref_fixture.safetensors")
     a = ap.parse_args()
-    if a.muse:
-        main_muse(a.out or "tests/loader/muse_dflash_fixture.safetensors")
-        return
-    a.out = a.out or "tests/loader/dflash_ref_fixture.safetensors"
     torch.manual_seed(20261016)
     w = weights()
     embed = bf(V, H, std=0.5)

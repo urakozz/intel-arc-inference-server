@@ -47,37 +47,4 @@ inline constexpr unsigned kNumLinears = sizeof(kLinears) / sizeof(kLinears[0]);
 // 32k draft vocabulary (spec 8 §11's compact head; P0's ranked V' = 32768).
 inline constexpr unsigned kHeadVocab[] = {248320, 32768};
 
-// Spec 23f Task 4 (`probe_draft_cost --shapes muse`): Muse-Glimmer-30B's verify and its drafter's block, from the two
-// config.json files (model::MuseGlimmerDesc, meta-models/Muse-Glimmer-30B-assistant @ e8192f3a; spec 23 §2 / §8.2):
-//   the verify at M = 1..16 rows   52 layers x the four int4 g64 layout-0 GEMVs at their PROVISIONAL S (23b / 23c:
-//                                  q||gate||k||v 6656 x 8704 S2, o_proj 4096 x 6656 S4, gate||up 6656 x 39936 S8,
-//                                  down 19968 x 6656 S4 - 13.37 GB), the int8 lm_head 6656 x 202048 and the two
-//                                  argmax stages (mg_argmax.cl) at M rows
-//   one drafter block at 16 rows   5 layers x q||k||v 6656 x 6144, o 4096 x 6656, gate||up 6656 x 39936, down
-//                                  19968 x 6656 and the commit's ctx k||v 6656 x 2048; fc 33280 x 6656 once; the
-//                                  target's int8 head over the 15 draft rows - in bf16, int8 and int4 g64 (layout 1,
-//                                  S 1: the engine's form - the [M][N] rows the df_* kernels read)
-namespace muse {
-inline constexpr unsigned kLayers = 52, kHidden = 6656, kVocab = 202048, kMaxM = 16;
-inline constexpr Linear kTarget[] = {
-    {"q||gate||k||v", 6656, 8704, true, 2},
-    {"o_proj", 4096, 6656, true, 4},
-    {"gate||up", 6656, 39936, true, 8},
-    {"down", 19968, 6656, true, 4},
-};
-inline constexpr unsigned kDraftLayers = 5, kDraftRows = 16, kDraftHeadRows = 15;
-inline constexpr Linear kDrafter[] = {
-    {"q||k||v", 6656, 6144, true, 1},
-    {"o_proj", 4096, 6656, true, 1},
-    {"gate||up", 6656, 39936, true, 1},
-    {"down", 19968, 6656, true, 1},
-    {"ctx k||v", 6656, 2048, true, 1},     // the commit's context projection
-    {"fc", 33280, 6656, false, 1},         // the commit's context projection (5 taps x 6656)
-};
-inline constexpr unsigned kNumDrafter = sizeof(kDrafter) / sizeof(kDrafter[0]);
-// The attention term (ESTIMATED from bytes, not timed): 13 full layers' K + V rows (13,312 B a position) and the 39
-// windows of 2048 rows (1024 B a row) - read once per verify whatever M (the rows of a kv head share the reads).
-inline constexpr double kFullKvBytesPerPos = 13312.0, kWindowBytes = 39.0 * 2048 * 1024;
-}  // namespace muse
-
 }  // namespace draft_cost

@@ -32,23 +32,18 @@ namespace runtime {
 
 class Engine;
 
-// Spec 23f: the target engine's side of a drafter, apart from the proposer's - what an engine's verify lists, commit,
-// prefill, reset and snapshots need (the methods below up to key()). runtime::muse::MuseEngine holds a TapSink (its
-// drafter is runtime::dflash::MuseDrafter, whose proposer side is its own: a 16-row readback); runtime::Engine and
-// runtime::PipelineEngine hold the TapDrafter below, which adds the Qwen3.8 proposer's calls.
-class TapSink {
+class TapDrafter {
  public:
-  virtual ~TapSink() = default;
-  // The largest K one draft makes (the verify lists then go up to M = max_k() + 1 rows: 8, Muse-Glimmer's 16).
+  virtual ~TapDrafter() = default;
+  // The largest K one draft makes (the verify lists then go up to M = max_k() + 1 <= 8 rows).
   virtual uint32_t max_k() const = 0;
   // The target layers whose OUTPUT is tapped (ascending, each < the target's layer count), and the tap buffer:
-  // bf16 [rows][tap_layers().size()][target hidden] (rows: 8, Muse-Glimmer's 16).
+  // bf16 [8][tap_layers().size()][target hidden].
   virtual const std::vector<uint32_t>& tap_layers() const = 0;
   virtual l0::Mem& taps() = 0;
   // Positions the drafter reads back from the newest one (its ring); prefill taps only the prompt's last window().
   virtual uint32_t window() const = 0;
-  // Rows 0..n-1 of taps() are positions pos .. pos + n - 1 (1 <= n <= the lists' rows: 8, Muse 16): writes the
-  // projection's control block and
+  // Rows 0..n-1 of taps() are positions pos .. pos + n - 1 (1 <= n <= 8): writes the projection's control block and
   // returns its captured list, which the caller replays next (and before anything rewrites taps()).
   virtual l0::CmdList& projection(uint32_t pos, uint32_t n) = 0;
   // A cold drafter: the ring and the scratch zeroed (Engine::reset).
@@ -65,10 +60,6 @@ class TapSink {
   // A 64-bit name for what the ring's bytes mean - the drafter's shapes, format and norm weights - which the prefix
   // store folds into every key, so a snapshot written beside one drafter is never restored beside another. Never 0.
   virtual uint64_t key() const = 0;
-};
-
-class TapDrafter : public TapSink {
- public:
 
   // The proposer's side, for the serving loop (cli EngineAdapter, b70-decode): one block of k drafts at the
   // engine's pos into Control.cur_token[1..k] - greedy at temperature 0, sampled at `temperature` with `seed` -

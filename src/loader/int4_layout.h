@@ -3,7 +3,7 @@
 #include <cstdint>
 
 // The int4 g64 GEMV layouts' byte counts (common/repack.h, src/kernels/gemv.cl) - ONE formula each, shared by
-// every model's layout header (moe_layout.h, kolibri1_layout.h, muse_layout.h; spec 23b moved them here from
+// every model's layout header (moe_layout.h, kolibri1_layout.h, ...; spec 23b moved them here from
 // moe_layout.h / kolibri1_layout.h unchanged - kolibri1_layout.h static_asserts its aliases byte-identical).
 //
 //   layout 0  GPTQ-native: words u32 [K/8][N] (8 nibbles of k along a word) + a separate f16 scales [K/64][N]

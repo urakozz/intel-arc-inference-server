@@ -11,7 +11,6 @@
 #include "common/json.h"
 #include "common/repack.h"
 #include "loader/lm_head_int8.h"
-#include "loader/rtn.h"
 #include "loader/snapshot.h"
 
 // dflash_repack.cc - the host half of the DFlash drafter loader (dflash_repack.h has the contract).
@@ -39,13 +38,10 @@ bool exists(const std::string& p) { return bool(std::ifstream(p)); }
 
 }  // namespace
 
-const char* draft_format_name(DraftFormat f) {
-  return f == DraftFormat::Int8 ? "int8" : f == DraftFormat::Int4G64 ? "int4" : "bf16";
-}
+const char* draft_format_name(DraftFormat f) { return f == DraftFormat::Int8 ? "int8" : "bf16"; }
 bool parse_draft_format(const std::string& s, DraftFormat& out) {
   if (s == "bf16") return out = DraftFormat::Bf16, true;
   if (s == "int8") return out = DraftFormat::Int8, true;
-  if (s == "int4" || s == "int4g64") return out = DraftFormat::Int4G64, true;
   return false;
 }
 
@@ -164,12 +160,6 @@ void DFlashCheckpoint::open_and_check() {
     }
   }
 
-  // Spec 23f: a Muse-Glimmer assistant ships no mask embedding (the mask row is the target's embedding row 201818,
-  // G:1551 / 1633-1638): one that ships a file is refused rather than guessed at.
-  if (d_.muse() && exists(dir_ + "mask_embedding.safetensors"))
-    refuse(dir_, "ships mask_embedding.safetensors: a Muse-Glimmer assistant embeds its mask with the target's row " +
-                     std::to_string(d_.mask_id) + " (transformers' DFlashTokenCandidateGenerator) - refusing to guess "
-                     "what the file would mean");
   // The mask embedding (Review Focus 4).
   if (exists(dir_ + "mask_embedding.safetensors")) {
     mask_path_ = dir_ + "mask_embedding.safetensors";
@@ -199,11 +189,7 @@ void DFlashCheckpoint::open_and_check() {
 }
 
 void DFlashCheckpoint::check_target(const model::ModelDesc& target, uint32_t target_vocab_rows) const {
-  check_target(model::DFlashTargetShape{target.name, target.layers, target.hidden, target_vocab_rows});
-}
-
-void DFlashCheckpoint::check_target(const model::DFlashTargetShape& target) const {
-  model::check_dflash_target(d_, target);
+  model::check_dflash_target(d_, target, target_vocab_rows);
   if (fc_k_ != d_.fc_k(target.hidden))
     refuse(dir_, "fc.weight's K " + std::to_string(fc_k_) + " is not " + std::to_string(d_.taps.size()) +
                      " taps x the target's hidden " + std::to_string(target.hidden));
@@ -234,14 +220,6 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
     h.kind = model::WeightKind::Bf16;
     h.bf16.resize(rows.size());
     common::repack_bf16_tiled(rows.data(), K, h.N, h.bf16.data());
-  } else if (f == DraftFormat::Int4G64) {
-    if (K % 64) refuse(dir_, "an int4 g64 linear's K is not a multiple of 64: " + parts[0]);
-    h.kind = model::WeightKind::Int4;
-    std::vector<uint32_t> qweight(size_t(K / 8) * h.N);
-    std::vector<uint16_t> scales(size_t(K / 64) * h.N);
-    rtn_int4_g64(rows.data(), K, h.N, qweight.data(), scales.data());
-    h.int4.resize(size_t(h.N / 16) * (K / 64) * 136);
-    common::repack_int4_layout1(qweight.data(), scales.data(), K, h.N, h.int4.data());
   } else {
     h.kind = model::WeightKind::Int8;
     h.i8.resize(rows.size());

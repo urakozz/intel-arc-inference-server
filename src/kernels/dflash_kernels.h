@@ -19,43 +19,26 @@ namespace kernels::dflash {
 
 // kM, kR, kTopK, kQs, kWg, kAttnPb, kAttnWg, kTopkChunk and the control block's indices: kernels/dflash_dims.h.
 
-// `M` the lists' rows (the block), `pb` df_attn's ring offsets a work-group, `win` df_attn's WIN define (its window
-// rule is |q - k| <= WIN - 1). Spec 23f: `muse` - meta-models/Muse-Glimmer-30B-assistant beside Muse-Glimmer-30B
-// (kMuse): DFlash v1 (no convolutions, no selector), eps 1e-5 (the "_E5" in its names), the block of 16, the window
-// |q - k| <= 2048 as WIN 2049 over a 2112-slot ring of PB 64 blocks (kernels/dflash_dims.h muse_ring), the target's
-// 202048-row head of which every row is a token; its norm and its per-row pick are mg_dflash.cl's (mg_df_norm,
-// mg_df_select: the assistant's two-rounding RMSNorm and a 16-row readback that writes the verify's ids buffer).
 struct Shape {
   unsigned H = 5120, I = 17408, NH = 32, NKV = 8, HD = 128, ring = 2048, win = 2048, group = 16, ctaps = 2;
   unsigned rank = 256, vocab = 248320, used = 248077;
-  unsigned M = kM, pb = kAttnPb;
-  bool muse = false;
-  constexpr unsigned R() const { return M - 1; }
 };
 inline constexpr Shape kQwen38{};
-inline constexpr Shape kMuse{6656, 19968, 32, 8, 128, muse_ring(2048), 2049, 0, 0, 0, 202048, 202048,
-                             kMuseM, kMuseAttnPb, true};
-static_assert(kMuse.ring == 2112, "the Muse ring is 33 blocks of 64");
 
 inline std::string s_(unsigned v) { return std::to_string(v); }
 inline std::string prep_variant(const Shape& s = kQwen38) {
-  if (s.muse)
-    return "df_prep_M" + s_(s.M) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
-           s_(s.HD) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) + "_E5";
   return "df_prep_M" + s_(kM) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab);
 }
 inline std::string attn_variant(const Shape& s = kQwen38) {
-  return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb);
+  return "df_attn_M" + s_(kM) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
+         s_(s.win) + "_P" + s_(kAttnPb);
 }
-// N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates; R: the
-// draft rows (Qwen3.8's 7, Muse's 15).
-inline std::string topk_variant(unsigned N, unsigned used, bool compact, unsigned R = kR) {
-  return "df_topk_R" + s_(R) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
+// N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
+inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
+  return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
 inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
-  if (s.muse) return "mg_dflash_M" + s_(s.M) + "_H" + s_(s.H) + "_K" + s_(kTopK) + "_E5";   // mg_df_norm + mg_df_select
   return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab)
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
@@ -64,11 +47,6 @@ inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
 // kernels::gemv_bf16_tiling gives N).
 inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N) {
   return int8 ? gemv_i8w_variant(M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
-}
-// Spec 23f: the three formats (`fmt` 0 bf16, 1 int8, 2 int4 g64: gemv.cl layout 1 at S 1, the [M][N] rows the df_*
-// kernels read).
-inline std::string linear_variant_fmt(unsigned fmt, unsigned M, unsigned K, unsigned N) {
-  return fmt == 2 ? gemv_variant(M, K, N, 1, 1) : linear_variant(fmt == 1, M, K, N);
 }
 
 // The draft vocabulary sizes (spec 8 §11's kDraftVocabSizes) the compact head's binaries exist for.
@@ -97,25 +75,6 @@ inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_hea
   const unsigned N = dv ? dv : s.vocab;
   v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, N) : gemv_bf16_variant(kR, s.H, N, gemv_bf16_tiling(N)));
   v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
-  return v;
-}
-
-// Spec 23f: every binary Muse-Glimmer's assistant's draft and projection lists bind, for a drafter format (`fmt`
-// linear_variant_fmt's) and the target's head form. No draft vocabulary (refused for Muse). tests/kernels/
-// muse_dflash_names_test.cc holds the union to the CMake Spec 23f block's B70_MUSE_DFLASH list.
-inline std::vector<std::string> muse_draft_variants(unsigned fmt, bool int8_head) {
-  const Shape& s = kMuse;
-  std::vector<std::string> v = {prep_variant(s), attn_variant(s), select_variant(false, s)};
-  for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
-                      {s.NH * s.HD, s.H},                                                    // o
-                      {s.H, 2 * s.I},                                                        // gate||up
-                      {s.I, s.H},                                                            // down
-                      {5 * s.H, s.H},                                                        // fc (5 taps)
-                      {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
-    v.push_back(linear_variant_fmt(fmt, s.M, K, N));
-  v.push_back(int8_head ? gemv_i8w_variant(s.R(), s.H, s.vocab)
-                        : gemv_bf16_variant(s.R(), s.H, s.vocab, gemv_bf16_tiling(s.vocab)));
-  v.push_back(topk_variant(s.vocab, s.used, false, s.R()));
   return v;
 }
 

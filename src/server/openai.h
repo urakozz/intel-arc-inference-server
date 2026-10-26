@@ -33,7 +33,7 @@ struct Request {
   Sampling sampling;
   std::string model;
   // Spec 23e: the OpenAI top-level `reasoning_effort` as sent (null when absent). Which models read it, and how, is
-  // the chat format's (Muse-Glimmer maps it onto chat_template_kwargs.reasoning_strength - spec 23 decision 3);
+  // the chat format's (Nemotron 3.5 Bolt maps it onto its template switches - spec 25 decision 13);
   // every other model ignores it, as before.
   nlohmann::json reasoning_effort;
 };

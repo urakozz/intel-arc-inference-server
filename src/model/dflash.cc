@@ -41,73 +41,7 @@ constexpr const char* kSliding = "sliding_attention";
 
 }  // namespace
 
-bool is_dflash_architecture(const std::string& a) {
-  return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kMuseAssistantArchitecture;
-}
-
-namespace {
-// Spec 23f: MuseGlimmerAssistantConfig (transformers 5.19.0 AC:62-89; dflash_ref.py muse_config_from_dict).
-DFlashDesc muse_desc_from_config(const Value& c) {
-  DFlashDesc d;
-  d.architecture = kMuseAssistantArchitecture;
-  d.form = DFlashForm::Muse;
-  d.window_inclusive = true;
-  d.norm_two_roundings = true;
-  d.version = 1;
-  if (opt(c, "quantization_config"))
-    refuse("quantization_config: a quantised drafter is not one of our formats - load the bf16 assistant "
-           "(it is quantised at load: --draft-format int8 / int4)");
-  if (const Value* a = opt(c, "hidden_act"); a && (!a->is_string() || a->str() != "silu"))
-    refuse("hidden_act must be silu");
-  d.theta = 500000.0;
-  if (const Value* rp = opt(c, "rope_parameters")) {
-    if (const Value* t = opt(*rp, "rope_type"); t && (!t->is_string() || t->str() != "default"))
-      refuse("rope_type must be default");
-    if (num_or(*rp, "partial_rotary_factor", 1.0) != 1.0) refuse("partial_rotary_factor must be 1.0");
-    d.theta = num_or(*rp, "rope_theta", 500000.0);
-  }
-  if (bool_or(c, "attention_bias", false)) refuse("attention_bias=true is not supported");
-  d.layers = u32(c, "num_hidden_layers");
-  d.hidden = u32(c, "hidden_size");
-  d.q_heads = u32(c, "num_attention_heads");
-  d.kv_heads = u32(c, "num_key_value_heads");
-  d.head_dim = opt(c, "head_dim") ? u32(c, "head_dim") : (d.q_heads ? d.hidden / d.q_heads : 0);
-  d.inter = u32(c, "intermediate_size");
-  d.vocab = opt(c, "vocab_size") ? u32(c, "vocab_size") : 0;   // the target's (check_dflash_target)
-  if (d.layers == 0 || d.hidden == 0 || d.q_heads == 0 || d.kv_heads == 0 || d.head_dim == 0 || d.inter == 0)
-    refuse("a zero width (num_hidden_layers / hidden_size / heads / head_dim / intermediate_size)");
-  if (d.q_heads % d.kv_heads) refuse("num_attention_heads must be a multiple of num_key_value_heads");
-  if (d.head_dim % 2) refuse("head_dim must be even (RoPE pairs)");
-  d.eps = float(num_or(c, "rms_norm_eps", 1e-5));
-  d.block = opt(c, "block_size") ? u32(c, "block_size") : 16;
-  if (d.block < 2) refuse("block_size must be at least 2 (an anchor and a mask row)");
-  d.mask_id = opt(c, "mask_token_id") ? u32(c, "mask_token_id") : 201818;
-  if (const Value* ids = opt(c, "target_layer_ids")) {
-    if (!ids->is_array() || ids->arr().empty()) refuse("target_layer_ids must be a non-empty list");
-    for (const Value& v : ids->arr()) {
-      if (!v.is_number() || v.num() < 0) refuse("target_layer_ids holds a non-integer");
-      const uint32_t i = uint32_t(v.num());
-      if (!d.taps.empty() && i <= d.taps.back()) refuse("target_layer_ids must be strictly increasing");
-      d.taps.push_back(i);
-    }
-  } else {
-    d.taps = {1, 13, 25, 37, 49};   // AC:89's default
-  }
-  const Value* lt = opt(c, "layer_types");
-  if (lt && (!lt->is_array() || lt->arr().size() != d.layers)) refuse("layer_types must list every layer");
-  const uint32_t w = u32(c, "sliding_window");
-  if (w == 0) refuse("sliding_window must be positive");
-  for (uint32_t i = 0; i < d.layers; ++i) {
-    if (lt && (!lt->arr()[i].is_string() || lt->arr()[i].str() != kSliding))
-      refuse("layer_types[" + std::to_string(i) + "] is not sliding_attention: a full-attention assistant layer needs "
-             "every position's context (not built)");
-    d.window.push_back(w);
-    d.causal.push_back(false);   // A:146 is_causal = False
-  }
-  d.out_mult = 1.0f;   // the raw head rows (G:1658)
-  return d;
-}
-}  // namespace
+bool is_dflash_architecture(const std::string& a) { return a == "DFlashDraftModel" || a == "DFlash2DraftModel"; }
 
 bool DFlashDesc::all_sliding() const {
   for (uint32_t w : window)
@@ -122,11 +56,6 @@ uint32_t DFlashDesc::max_window() const {
 
 DFlashDesc dflash_desc_from_config(const Value& c) {
   if (!c.is_object()) refuse("config.json is not an object");
-  if (const Value* mt = opt(c, "model_type"); mt && mt->is_string() && mt->str() == "muse_glimmer_assistant")
-    return muse_desc_from_config(c);
-  if (const Value* a = opt(c, "architectures");
-      a && a->is_array() && !a->arr().empty() && a->arr()[0].is_string() && a->arr()[0].str() == kMuseAssistantArchitecture)
-    return muse_desc_from_config(c);
   DFlashDesc d;
   const Value* arch = opt(c, "architectures");
   if (!arch || !arch->is_array() || arch->arr().empty() || !arch->arr()[0].is_string() ||
@@ -254,18 +183,13 @@ DFlashDesc dflash_desc_from_config(const Value& c) {
 }
 
 void check_dflash_target(const DFlashDesc& d, const ModelDesc& t, uint32_t target_vocab_rows) {
-  check_dflash_target(d, DFlashTargetShape{t.name, t.layers, t.hidden, target_vocab_rows});
-}
-
-void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& t) {
-  const uint32_t target_vocab_rows = t.vocab_rows;
   auto bad = [&](const std::string& what) {
     throw std::runtime_error("DFlash drafter does not fit the target " + t.name + ": " + what);
   };
   if (d.hidden != t.hidden)
     bad("hidden_size " + std::to_string(d.hidden) + " != the target's " + std::to_string(t.hidden) +
         " (the drafter shares its embedding and lm_head)");
-  if (d.vocab != target_vocab_rows && !(d.muse() && d.vocab == 0))
+  if (d.vocab != target_vocab_rows)
     bad("vocab_size " + std::to_string(d.vocab) + " != the target's lm_head rows " +
         std::to_string(target_vocab_rows));
   for (uint32_t i : d.taps)
@@ -280,27 +204,6 @@ void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& t) {
   if (d.mask_id >= target_vocab_rows)
     bad("mask_token_id " + std::to_string(d.mask_id) + " is not a row of the target's embedding (< " +
         std::to_string(target_vocab_rows) + ")");
-}
-
-void check_muse_assistant(const DFlashDesc& d) {
-  auto bad = [](const std::string& what) {
-    throw std::runtime_error("Muse-Glimmer drafter: " + what + " - the drafter's kernels are built for "
-                             "meta-models/Muse-Glimmer-30B-assistant's shapes (kernels::dflash::kMuse)");
-  };
-  if (!d.muse()) bad("architectures[0] is " + d.architecture + ", not MuseGlimmerAssistantModel");
-  if (d.layers != 5) bad("num_hidden_layers " + std::to_string(d.layers) + " is not 5");
-  if (d.hidden != 6656) bad("hidden_size " + std::to_string(d.hidden) + " is not 6656");
-  if (d.q_heads != 32 || d.kv_heads != 8 || d.head_dim != 128)
-    bad("heads " + std::to_string(d.q_heads) + " / " + std::to_string(d.kv_heads) + " x " +
-        std::to_string(d.head_dim) + " are not 32 / 8 x 128");
-  if (d.inter != 19968) bad("intermediate_size " + std::to_string(d.inter) + " is not 19968");
-  if (d.taps.size() != 5) bad("target_layer_ids holds " + std::to_string(d.taps.size()) + " layers, not 5");
-  if (d.block != 16) bad("block_size " + std::to_string(d.block) + " is not 16");
-  for (uint32_t l = 0; l < d.layers; ++l)
-    if (d.window[l] != 2048 || !d.window_inclusive)
-      bad("layer " + std::to_string(l) + "'s sliding_window " + std::to_string(d.window[l]) +
-          " is not 2048 (|q - k| <= 2048)");
-  if (d.eps != 1e-5f) bad("rms_norm_eps is not 1e-5");
 }
 
 }  // namespace model

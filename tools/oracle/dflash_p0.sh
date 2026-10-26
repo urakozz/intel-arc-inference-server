@@ -25,65 +25,8 @@
 #   rank     tools/draft_vocab/rank.py over the same sources -> OUT/draft_vocab.ranked.ids (the
 #            V' "-r" arms; in-sample, so an upper bound for a ranked V')
 #   accept   dflash_accept.py run, ARMS (default bf16,int8,int8h,w4a16), V' 32k/64k/128k on bf16
-#
-# MODEL=muse (spec 23f Task 3): Muse-Glimmer's assistant over muse_taps.py's dumps (DUMPS, default
-# oracle-out-muse-taps/dumps - tools/box_validate/muse_oracle.sh <data> taps makes them), OUT default
-# oracle-out-muse-p0; steps (STEPS, default "check accept lookup"):
-#   check    test_dflash_accept.py, test_muse_taps.py and test_dflash_ref.py (the Muse form against transformers
-#            5.19.0: SITE, default oracle-out-q4exp/site, first on PYTHONPATH)
-#   accept   dflash_accept.py run --model muse (ARMS default bf16,int8,int8h,int4g64,int4g64h,dflash2; K 1..15 from one
-#            block per anchor; the sampled estimate for q raw and capped) -> OUT/accept/{accept.*.json,summary.md}
-#   lookup   tools/spec/lookup_accept.py --dumps DUMPS --max-k 15 (n = 2..6) -> OUT/lookup.{txt,json}
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 2
-if [ "${MODEL:-qwen38}" = muse ]; then
-  OUT="${OUT:-oracle-out-muse-p0}"
-  DUMPS="${DUMPS:-oracle-out-muse-taps/dumps}"
-  SITE="${SITE:-oracle-out-q4exp/site}"
-  IMAGE="${IMAGE:-agnes-ref-img:latest}"
-  THREADS="${THREADS:-12}"
-  STEPS="${STEPS:-check accept lookup}"
-  ARMS="${ARMS:-bf16,int8,int8h,int4g64,int4g64h,dflash2}"
-  MEM="${MEM:-36g}"
-  HF="${HF_HOME:-$HOME/.cache/huggingface}"
-  DRY_RUN="${DRY_RUN:-}"
-  mkdir -p "$OUT"
-  exec > >(tee -a "$OUT/p0.log") 2>&1
-  echo "=== $(date '+%F %T') Muse DFlash P0: steps [$STEPS], arms $ARMS, dumps $DUMPS, out $OUT${DRY_RUN:+ (dry run)}"
-  [ -d "$DUMPS" ] || { echo "no $DUMPS (tools/box_validate/muse_oracle.sh <data> taps first)"; exit 2; }
-  dabs=$(cd "$DUMPS" && pwd -P) oabs=$(cd "$OUT" && pwd -P) sabs=""
-  [ -d "$SITE" ] && sabs=$(cd "$SITE" && pwd -P)
-  # One model computation on the Mac's CPU at a time: every container waits for the shared lock (fcntl, B70_CPU_LOCK).
-  lock=(python3 -c 'import fcntl, subprocess, sys
-f = open(sys.argv[1], "a+")
-fcntl.flock(f, fcntl.LOCK_EX)
-sys.exit(subprocess.run(sys.argv[2:]).returncode)' "${B70_CPU_LOCK:-/tmp/b70-cpu-model.lock}")
-  run() {
-    echo "--- $(date '+%T') $*"
-    /usr/bin/time -p "${lock[@]}" docker run --rm --memory "$MEM" --memory-swap "$MEM" -v "$HF":/hf:ro -v "$PWD":/ws \
-      -v "$dabs":/dumps:ro -v "$oabs":/out ${sabs:+-v "$sabs":/site:ro -e PYTHONPATH=/site} -e HF_HOME=/hf -e HF_HUB_OFFLINE=1 \
-      -e PYTHONUNBUFFERED=1 -e TQDM_DISABLE=1 -e OMP_NUM_THREADS="$THREADS" -e MKL_NUM_THREADS="$THREADS" -w /ws \
-      "$IMAGE" "$@"
-  }
-  has() { [[ " $STEPS " == *" $1 "* ]]; }
-  if has check; then
-    for t in test_dflash_accept test_muse_taps test_dflash_ref; do
-      run python3 "tools/oracle/$t.py" > "$OUT/$t.log" 2>&1 || { tail -20 "$OUT/$t.log"; echo "$t FAILED"; exit 1; }
-    done
-    echo "unit tests: PASS (logs in $OUT)"
-  fi
-  if has accept; then
-    run python3 tools/oracle/dflash_accept.py run --model muse --dumps /dumps --out-dir /out/accept \
-      --arms "$ARMS" --batch "${BATCH:-8}" ${DRY_RUN:+--dry-run} || { echo "accept FAILED"; exit 1; }
-  fi
-  if has lookup; then
-    python3 tools/spec/lookup_accept.py --dumps "$DUMPS" --max-k 15 --mc-seeds 4 --json "$OUT/lookup.json" \
-      > "$OUT/lookup.txt" || { echo "lookup FAILED"; exit 1; }
-    sed -n '/(all)/,/^Verify share/p' "$OUT/lookup.txt" | head -14
-  fi
-  echo "=== $(date '+%F %T') done"
-  exit 0
-fi
 OUT="${OUT:-oracle-out-19a}"
 REPO_ID="${REPO_ID:-Qwen/Qwen3.8-27B}"
 IMAGE="${IMAGE:-agnes-ref-img:latest}"      # python 3.12, torch 2.14.1+cpu, transformers 5.15.0

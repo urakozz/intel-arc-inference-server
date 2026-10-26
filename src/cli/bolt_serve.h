@@ -143,7 +143,7 @@ struct ServeFlags {
   bool mtp = false;              // --mtp N | auto
   std::string spec;              // --spec's value ("" when not given): off | mtp | lookup | dflash
   bool proposer_tuning = false;  // --mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost,
-                                 // --draft-model, --draft-format, --draft-q
+                                 // --draft-model, --draft-format
   bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
   bool qwen4exp_flags = false;   // --layers, --ple-dir, --tokenizer
 };
@@ -154,8 +154,8 @@ inline void check_serve_flags(const ServeFlags& f) {
   if (f.spec == "dflash" || f.spec == "lookup")
     throw std::runtime_error("--spec " + f.spec + ": Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
   if (f.proposer_tuning)
-    throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, --draft-model, "
-                             "--draft-format and --draft-q belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
+    throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, --draft-model "
+                             "and --draft-format belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
                              "head, no drafter)");
   if (f.draft_vocab)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; Nemotron 3.5 "

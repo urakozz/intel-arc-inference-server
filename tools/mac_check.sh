@@ -16,11 +16,10 @@
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
 #              -fsyntax-only with the Intel-extension shim (tools/mac/cl_syntax.sh).
 #   5 kernels  (--kernels only) gemv_i8w, argmax, pf_moe, k2, moe, kolibri, qwen4exp, offload (spec 22a: the
-#              table-addressed expert kernels), muse (spec 23c), dflash (spec 19b: the drafter's draft and
-#              projection lists at the fixture's tiny shapes), muse_dflash (spec 23f: the same lists in
-#              Muse-Glimmer's form - 16 rows, mg_dflash.cl, the inclusive window) and gdn_slots (spec 19c: gdn_step's 8-slot verify
+#              table-addressed expert kernels), dflash (spec 19b: the drafter's draft and
+#              projection lists at the fixture's tiny shapes) and gdn_slots (spec 19c: gdn_step's 8-slot verify
 #              build against the plain kernel, partial acceptance), lfm2moe (spec 24c) and bolt (spec 25c: the Bolt
-#              family's nb_* kernels and Muse's eager attention at Bolt's shape) built and run on the Mac's OpenCL GPU
+#              family's nb_* kernels and mg_attn_eager at Bolt's shape) built and run on the Mac's OpenCL GPU
 #              (gemv_i8w and argmax also at M = 8, spec 19a)
 #              against host references (tools/mac/clrun): INDICATIVE, not a B70 result.
 #
@@ -231,7 +230,7 @@ if [ $kernels = 1 ]; then
   bin=$out/clrun
   mkdir -p "$bin"
   ok=1 runs="" nfail=0 npass=0
-  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload muse dflash muse_dflash gdn_slots lfm2moe bolt bolt_pf batch_rows; do
+  for d in gemv_i8w argmax pf_moe k2 moe kolibri qwen4exp offload dflash gdn_slots lfm2moe bolt bolt_pf batch_rows; do
     # gdn_slots_run (spec 19c) needs no host source: the plain gdn_step kernel is its reference.
     # batch_rows_run (spec 13a) likewise: the production kernels stepping each sequence alone are its reference.
     # k2_run (spec 18b) checks against tests/kernels/k2_ref.h and builds the RoPE table
@@ -241,12 +240,8 @@ if [ $kernels = 1 ]; then
     # kolibri_run (spec 20c) likewise: kolibri_ref.h and the loader's RoPE table.
     [ "$d" = kolibri ] && extra="$root/src/loader/kolibri1_rope.cc $root/src/model/kolibri1.cc"
     # qwen4exp_run (spec 21c) needs no host source: qwen4exp_ref.h, its fixture and the PLE hash are headers.
-    # muse_run (spec 23c): muse_ref.h and the engine's RoPE table (runtime::muse::rope_table).
-    [ "$d" = muse ] && extra="$root/src/runtime/muse/muse_rope.cc"
     # dflash_run (spec 19b): the fixture's reader (safetensors.cc, the descriptor) and the int8 quantiser / gather.
     [ "$d" = dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
-    # muse_dflash_run (spec 23f): the same three (the Muse fixture through dflash_fixture_io.h).
-    [ "$d" = muse_dflash ] && extra="$root/src/loader/safetensors.cc $root/src/loader/lm_head_int8.cc $root/src/model/dflash.cc"
     # lfm2moe_run (spec 24c): lfm2moe_ref.h, its fixture and the loader's RoPE table (lfm_rope_table + the descriptor).
     [ "$d" = lfm2moe ] && extra="$root/src/loader/lfm2moe_rope.cc $root/src/loader/lfm2moe_repack.cc $root/src/model/lfm2moe.cc"
     # shellcheck disable=SC2086

@@ -13,7 +13,7 @@
 //                                  nb_ssm, the SPEC_SLOTS form (4 slots) against the in-place kernel; nb_gnorm
 //   src/kernels/bolt/nb_moe.cl     nb_router (E 496 and 240), nb_route on torch's logits and the crafted rows, nb_moe_up /
 //                                  _R / nb_moe_down over the fixture's int4 experts at E 240, I 1536
-//   src/kernels/muse/mg_attn_eager.cl   Muse's eager attention at Bolt's full NoPE layer with a ones gate (Decision 15)
+//   src/kernels/bolt/mg_attn_eager.cl   spec 23c's eager attention at Bolt's full NoPE layer with a ones gate (Decision 15)
 // mg_attn.cl's flash decode is not run: shuffles, sub-group reductions and 2D block reads.
 //
 // Bars: every kernel against the twin BITWISE (the twin's transcendentals are the kernels' own: Sleef's exp, fdlibm's
@@ -484,10 +484,10 @@ void moe_checks(clrun::Device& dev) {
   }
 }
 
-// --- Muse's eager attention at Bolt's full NoPE layer (Decision 15) -------------------------------------------------------
+// --- spec 23c's eager attention at Bolt's full NoPE layer (Decision 15) -------------------------------------------------------
 void attention_checks(clrun::Device& dev) {
   const uint32_t HD = br::kHd, KV = br::kKvHeads, QH = br::kQHeads;
-  clrun::Program p(dev, "src/kernels/muse/mg_attn_eager.cl",
+  clrun::Program p(dev, "src/kernels/bolt/mg_attn_eager.cl",
                    with(kCtrlDefs, {"M=1", "TGT=64", "Q_HEADS=32", "KV_HEADS=2", "WINDOW=0", "RING=0"}));
   for (uint32_t ci = 0; ci < 3; ++ci) {
     const uint32_t L = fx::kAttnL[ci];

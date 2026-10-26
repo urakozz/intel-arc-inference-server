@@ -24,19 +24,7 @@
 // conv group that does not divide the hidden size, a block below 2 rows.
 namespace model {
 
-// Spec 23f: whose semantics a drafter follows. Vllm: spec 19's (DFlash / DFlash 2 from vLLM's qwen3_dflash*.py - every
-// field below). Muse: transformers 5.19.0's MuseGlimmerAssistantModel + DFlashTokenCandidateGenerator
-// (meta-models/Muse-Glimmer-30B-assistant; tools/oracle/dflash_ref.py's "muse" form, bitwise transformers): a DFlash
-// v1 shape whose block is always `block` rows (row 0 the anchor, rows 1..block-1 the mask; K drafts are rows 1..K), the
-// window INCLUDES |q - k| == window (vLLM's is <= window - 1; spec 23 decision 13), the RMSNorm rounds x-hat to bf16
-// before x w (two roundings), the embedding is the target's RAW row and the drafts the RAW head rows (no multiplier,
-// no softcap). Its config.json carries no vocab_size: `vocab` is 0 until the target sets it (check_dflash_target).
-enum class DFlashForm : uint32_t { Vllm = 0, Muse = 1 };
-
 struct DFlashDesc {
-  DFlashForm form = DFlashForm::Vllm;
-  bool window_inclusive = false;        // Muse: |q - k| <= window; Vllm: <= window - 1
-  bool norm_two_roundings = false;      // Muse: w x bf16(x-hat); Vllm: bf16(x-hat x w)
   uint32_t version = 2;                 // 1 = DFlash, 2 = DFlash 2
   uint32_t layers = 0, hidden = 0, q_heads = 0, kv_heads = 0, head_dim = 0, inter = 0;
   uint32_t vocab = 0;                   // config.json vocab_size: the target's embedding / head rows
@@ -68,27 +56,12 @@ struct DFlashDesc {
   bool v2() const { return version == 2; }
   bool all_sliding() const;             // every layer has a window (a ring suffices)
   uint32_t max_window() const;          // the largest window (0 when none is sliding)
-  bool muse() const { return form == DFlashForm::Muse; }
-  // The context positions a block row reads back from the anchor: window (Muse: row 0 sees p - window .. p - 1) or
-  // window - 1 (Vllm).
-  uint32_t context_reach(uint32_t layer) const { return window.at(layer) - (window_inclusive ? 0 : 1); }
 };
 
-// The target a drafter is held to, by its parts (spec 23f: Muse-Glimmer's MuseGlimmerDesc is not a ModelDesc).
-struct DFlashTargetShape {
-  std::string name;
-  uint32_t layers = 0, hidden = 0;
-  uint32_t vocab_rows = 0;              // its lm_head's (and embedding's) rows
-};
-
-// config.json -> the descriptor (refusals above). `architectures[0]` must be DFlashDraftModel or DFlash2DraftModel
-// - or, spec 23f, MuseGlimmerAssistantModel (`model_type: muse_glimmer_assistant`): block_size, mask_token_id and
-// target_layer_ids at the top level (MuseGlimmerAssistantConfig, AC:62-89), every layer sliding (a full layer is
-// refused), non-causal, RoPE default at rope_parameters.rope_theta, rms_norm_eps; form Muse.
+// config.json -> the descriptor (refusals above). `architectures[0]` must be DFlashDraftModel or DFlash2DraftModel.
 DFlashDesc dflash_desc_from_config(const common::json::Value& config_json);
-// True for those three architectures (a CLI's dispatch reads only this).
+// True for those two architectures (a CLI's dispatch reads only this).
 bool is_dflash_architecture(const std::string& architecture);
-inline constexpr const char* kMuseAssistantArchitecture = "MuseGlimmerAssistantModel";
 
 // The drafter held to its target (spec 19 §2, plan 19b Task 1): it shares the target's embedding and lm_head, so
 // its hidden size must be the target's and its vocab_size the target's head rows (`target_vocab_rows`); every tap
@@ -96,12 +69,5 @@ inline constexpr const char* kMuseAssistantArchitecture = "MuseGlimmerAssistantM
 // hidden, a legal tap); a declared num_target_layers must equal target.layers; the mask id must be a row of the shared
 // embedding (< target_vocab_rows; Ornith's drafter masks with a padded row). Throws naming the key.
 void check_dflash_target(const DFlashDesc& d, const ModelDesc& target, uint32_t target_vocab_rows);
-// The same rules against a target given by its parts (spec 23f: Muse-Glimmer). A Muse-form drafter's vocab 0 means
-// "the target's" (its config has no vocab_size); every other rule as above.
-void check_dflash_target(const DFlashDesc& d, const DFlashTargetShape& target);
-// Spec 23f: the drafter is the one the Muse kernels are built for (kernels::dflash::kMuse) - before the device, each
-// refusal naming the key: the Muse form, 5 layers, hidden 6656, 32 / 8 heads x 128, intermediate 19968, 5 taps, a
-// block other than 16, a window other than 2048 (inclusive), rms_norm_eps other than 1e-5.
-void check_muse_assistant(const DFlashDesc& d);
 
 }  // namespace model

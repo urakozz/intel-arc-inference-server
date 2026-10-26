@@ -32,16 +32,6 @@
 //               goes to the template as it is (its parse_content concatenates the parts). EOS [124900], the sampling
 //               defaults (T 0.1, top-k 50, repetition penalty 1.05 - Options::sampling_defaults) and the host-side
 //               repetition penalty are b70-serve's / the engine adapter's.
-//   Muse        Muse-Glimmer-30B (model_type muse_glimmer, spec 23e): the original's chat_template.jinja; the
-//               template reads chat_template_kwargs (reasoning_strength low | medium | high | xhigh - the
-//               OpenAI top-level reasoning_effort is mapped onto it, spec 23 decision 3 -, current_date,
-//               knowledge_cutoff, tool_namespace_descriptions; anything else passes through unchecked); the
-//               generation prompt ends in "<|start|>assistant", so the MODEL writes each message's recipient
-//               and the output parser reads channels (reasoning in to=self, content in to=user, ATEM calls
-//               in tool channels - server/toolcall_muse.h). A message's list of text parts is concatenated
-//               (the template's own render_content does that; joining first keeps a part without "type").
-//               EOS [200001, 200008] (<|eom|> 200007 is NOT one), the sampling defaults (T 1.0, top-k 64,
-//               top-p 0.95) with the model's softcap, and generation_config.json's stop_strings are b70-serve's.
 //   Bolt        Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle, spec 25e): ChatML,
 //               the checkpoint's chat_template.jinja (no BOS; the system block is always rendered); the template reads the
 //               request's chat_template_kwargs (enable_thinking - default true -, medium_effort, truncate_history_thinking -
@@ -64,46 +54,40 @@
 namespace server {
 
 struct ChatFormat {
-  enum class Kind { Qwen, K2Horizon, Kolibri, Muse, Lfm2, Bolt };
+  enum class Kind { Qwen, K2Horizon, Kolibri, Lfm2, Bolt };
   Kind kind = Kind::Qwen;
 
-  // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1", "muse_glimmer" (or
-  // "muse_glimmer_text"), "lfm2_moe" and "nemotron_h_omni" reads as Qwen.
+  // config.json's model_type -> the format; anything but "k2_horizon", "kolibri1", "lfm2_moe" and "nemotron_h_omni"
+  // reads as Qwen.
   static ChatFormat for_model_type(const std::string& model_type);
   static ChatFormat k2_horizon() { return ChatFormat{Kind::K2Horizon}; }
   static ChatFormat kolibri() { return ChatFormat{Kind::Kolibri}; }
-  static ChatFormat muse() { return ChatFormat{Kind::Muse}; }
   static ChatFormat lfm2() { return ChatFormat{Kind::Lfm2}; }
   static ChatFormat bolt() { return ChatFormat{Kind::Bolt}; }
   const char* name() const;
   // The request's chat_template_kwargs reach the template beside enable_thinking.
   bool template_kwargs() const {
-    return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Muse || kind == Kind::Lfm2 ||
+    return kind == Kind::K2Horizon || kind == Kind::Kolibri || kind == Kind::Lfm2 ||
            kind == Kind::Bolt;
   }
-  // The template reads every message's content as a string (spec 20e: Kolibri-1; spec 23e: Muse-Glimmer).
-  bool string_content() const { return kind == Kind::Kolibri || kind == Kind::Muse; }
-  // What a list of text parts is joined with: "\n" (Kolibri: vLLM's "string" content format) or "" (Muse: its
-  // template's render_content concatenates text parts).
-  const char* content_join() const { return kind == Kind::Muse ? "" : "\n"; }
+  // The template reads every message's content as a string (spec 20e: Kolibri-1).
+  bool string_content() const { return kind == Kind::Kolibri; }
 };
 
 // The messages as this format's template reads them: with string_content(), a content that is a
-// list of text parts becomes their texts joined with content_join(); otherwise the messages unchanged.
+// list of text parts becomes their texts joined with "\n" (vLLM's "string" content format); otherwise the messages
+// unchanged.
 nlohmann::json template_messages(const ChatFormat& format, const nlohmann::json& messages);
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
 // (a bad value is the client's error, a 400): K2's tool_call_format and reasoning_effort;
 // Kolibri's reasoning_effort (a string of its seven, or null) and preserve_thinking (a bool); LFM2's preserve_thinking (a bool);
-// Muse's reasoning_strength (low | medium | high | xhigh), current_date / knowledge_cutoff (strings) and
-// tool_namespace_descriptions (an object of strings); Bolt's enable_thinking, medium_effort, truncate_history_thinking and
+// Bolt's enable_thinking, medium_effort, truncate_history_thinking and
 // force_nonempty_content (booleans). Throws std::invalid_argument naming the field.
 void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs);
 
-// Spec 23e: the kwargs this format's template gets for a request - its chat_template_kwargs, and for Muse the
-// OpenAI top-level `reasoning_effort` (null: absent) as reasoning_strength unless the kwargs name one already (spec
-// 23 decision 3; one of low | medium | high | xhigh, else std::invalid_argument naming reasoning_effort). Spec 25e: for
-// Bolt (decision 13) none | minimal -> enable_thinking false, low | medium -> medium_effort true, high | xhigh -> nothing,
+// The kwargs this format's template gets for a request - its chat_template_kwargs, and the OpenAI top-level
+// `reasoning_effort` (null: absent) mapped where a format has one. Spec 25e: for Bolt (decision 13) none | minimal -> enable_thinking false, low | medium -> medium_effort true, high | xhigh -> nothing,
 // each unless the kwargs name that key already (an explicit kwarg wins); anything else std::invalid_argument naming
 // reasoning_effort. Every other format: the kwargs unchanged (reasoning_effort ignored, as before).
 nlohmann::json request_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs,

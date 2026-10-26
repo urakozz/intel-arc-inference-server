@@ -688,7 +688,7 @@ endif()
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_executable(dflash_d1 dflash_d1.cc)
   target_include_directories(dflash_d1 PRIVATE ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(dflash_d1 PRIVATE b70_dflash_runtime b70_muse_loader b70_loader b70_l0)   # spec 23f: + Muse
+  target_link_libraries(dflash_d1 PRIVATE b70_dflash_runtime b70_loader b70_l0)
   b70_target_kernel_dir(dflash_d1)
   get_property(D1_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(dflash_d1 ${D1_KERNELS})
@@ -723,7 +723,7 @@ endif()
 # Nemotron 3.5 Bolt's decode step from EXISTING kernels at its shapes (tools/probe/bolt_step_shapes.h: 653 / 533 /
 # GEMV-only / noop lists and the SSM state's read-modify-write floor, interleaved; --sweep-s times every int4 shape at
 # every S and layout). Box queue row 60, stage r60.p0. Plain g++ / Level Zero; the binaries are src/kernels/
-# CMakeLists.txt's spec 25c block (and gdn_step_M1, noop, Muse's mg_attn - built above or by the Muse block).
+# CMakeLists.txt's spec 25c block (and gdn_step_M1, noop - built above).
 if(B70_BOLT)
   add_executable(probe_bolt_step probe_bolt_step.cc)
   target_include_directories(probe_bolt_step PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})

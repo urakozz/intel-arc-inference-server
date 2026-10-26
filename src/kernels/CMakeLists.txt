@@ -30,17 +30,6 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL
   elseif(L EQUAL 0 AND K EQUAL 19456 AND N EQUAL 5120 AND S EQUAL 4)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL
-  # Spec 23c, Muse-Glimmer-30B: PROVISIONAL cells, COPIED from the nearest Qwen3.8 production cells above
-  # (q||k||v 5120x14336 S2, out_proj 6144x5120 S4, gate||up 5120x34816 S8, down 17408x5120 S4), not measured;
-  # 23c Task 7's sweep (r44.sweeps) replaces them and model::MuseGlimmerDesc's S together.
-  elseif(L EQUAL 0 AND K EQUAL 6656 AND N EQUAL 8704 AND S EQUAL 2)
-    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL q||gate||k||v
-  elseif(L EQUAL 0 AND K EQUAL 4096 AND N EQUAL 6656 AND S EQUAL 4)
-    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL o_proj
-  elseif(L EQUAL 0 AND K EQUAL 6656 AND N EQUAL 39936 AND S EQUAL 8)
-    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL gate||up
-  elseif(L EQUAL 0 AND K EQUAL 19968 AND N EQUAL 6656 AND S EQUAL 4)
-    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL down
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -1410,218 +1399,6 @@ if(B70_ORNITH AND B70_MTP)
 endif()
 # ==== Spec 15e ================================================================ (end) ====
 
-# ==== Spec 23c: Muse-Glimmer-30B decode (model::muse_glimmer()) ==== (begin) ====
-# Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
-# (tools/kernel_cmdlines' diff: additions only - MG0). Muse-only kernels live in src/kernels/muse/ and are named
-# `mg_*` with every shape define in the name (src/kernels/muse_kernels.h is the host half); the reused sources run at
-# Muse's shapes:
-#   gemv.cl         the four int4 layout-0 GEMVs a layer: q||gate||k||v 6656x8704 S2, o_proj 4096x6656 S4,
-#                   gate||up 6656x39936 S8 (concatenated, up at column 19968), down 19968x6656 S4 - PROVISIONAL
-#                   cells (add_gemv_variant's Spec 23c rows) until 23c Task 7's sweep
-#   gemv_i8w.cl / gemv_bf16.cl   lm_head 6656 -> 202048 (int8 the default, spec 9; bf16)
-#   prep.cl         prep_res_fold with ZERO_RESID at K 6656, G 26 over a sub-block's S4 slices (o_proj's and down's:
-#                   the sandwich's own row and Σ²)
-#   argmax.cl       at the vocabulary 202048 (every id real: VOCAB_USED = VOCAB)
-# What a Muse decode list binds (runtime/muse/muse_capture.cc): 14 launches a layer under flash, 13 under
-# B70_MUSE_ATTN=eager, + mg_embed on device 0 + 4 at the head: 733 / 681 at 52 layers.
-option(B70_MUSE "build the Muse-Glimmer-30B decode variants (spec 23c)" ON)
-if(B70_MUSE)
-  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
-  add_gemv_variant(1 6656 8704 2 0)            # q||gate||k||v int4   PROVISIONAL S2 L0
-  add_gemv_variant(1 4096 6656 4 0)            # o_proj int4          PROVISIONAL S4 L0
-  add_gemv_variant(1 6656 39936 8 0)           # gate||up int4        PROVISIONAL S8 L0
-  add_gemv_variant(1 19968 6656 4 0)           # down int4            PROVISIONAL S4 L0
-  add_gemv_i8w_variant(1 6656 202048)          # lm_head int8 (spec 9, the default)
-  add_gemv_bf16_variant(1 6656 202048 64 1)    # lm_head bf16
-  # prep_res_fold ..._Z: o_proj's / down's S4 slices into the sub-block's own row and its Σ² (26 chunks of 256)
-  add_ocloc_kernel(prep_res_fold_M1_K6656_SP4_G26_Z SOURCE ${PREP_CL}
-                   DEFINES M=1 K=6656 S_PREV=4 FOLD_G=26 ZERO_RESID=1)
-  set(MG_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=202048 VOCAB_USED=202048)
-  add_ocloc_kernel(mg_argmax_stage1_M1_N202048_V202048 SOURCE ${ARGMAX_CL} DEFINES ${MG_ARGMAX_DEFINES} M=1)
-  add_ocloc_kernel(mg_argmax_stage2_N202048 SOURCE ${ARGMAX_CL} DEFINES ${MG_ARGMAX_DEFINES})
-  # mg_prep.cl: the embedding with its weight-less norm, the centered norm (and the plain-w final norm), the
-  # sandwich's post norm + residual add, the attention prep (weight-less q / k norms, q x 3.87, RoPE on sliding
-  # layers only, the gate's sigmoid, the ring or the NoPE cache), SiLU x up over the concatenated gate||up.
-  add_ocloc_kernel(mg_embed_M1_K6656_G26_V202048 SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 K=6656 EMBED_G=26 VOCAB=202048 IMG_TOKEN=200092 VID_TOKEN=200091)
-  add_ocloc_kernel(mg_norm_M1_K6656_G26_W26 SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES M=1 K=6656 NORM_G=26 NORM_WGS=26 NORM_EPS=1e-5f)
-  add_ocloc_kernel(mg_post_add_M1_K6656_G26 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=1 K=6656 POST_G=26 POST_EPS=1e-8f)
-  set(MG_HEADS Q_HEADS=32 KV_HEADS=2 HD=128 QK_SCALE=3.87f)
-  add_ocloc_kernel(mg_attn_prep_M1_N8704_S2_Q32KV2_R4096 SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 QGKV_N=8704 QGKV_S=2 ${MG_HEADS} SLIDING=1 RING=4096)
-  add_ocloc_kernel(mg_attn_prep_M1_N8704_S2_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=1 QGKV_N=8704 QGKV_S=2 ${MG_HEADS} SLIDING=0 RING=0)
-  add_ocloc_kernel(mg_silu_mul_M1_I19968_S8 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=1 SILU_I=19968 SILU_S=8)
-  # mg_attn.cl (flash, the default: kol_attn.cl's v2 structure at GQA 16 with the gate in the reduce, M <= 16 as a
-  # define) and mg_attn_eager.cl (B70_MUSE_ATTN=eager: the reference's bf16 chain, one launch), sliding (the
-  # 2048-key window through the 4096-slot ring) and full (NoPE). TGT 64: a window's 34 absolute 64-key blocks.
-  set(MG_ATTN_HEADS TGT=64 Q_HEADS=32 KV_HEADS=2)
-  add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn.cl
-                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=2048 RING=4096)
-  add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn.cl
-                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=0 RING=0)
-  add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn_eager.cl
-                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=2048 RING=4096)
-  add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn_eager.cl
-                   DEFINES ${CTRL_DEFINES} M=1 ${MG_ATTN_HEADS} WINDOW=0 RING=0)
-endif()
-# ==== Spec 23c: Muse-Glimmer-30B decode ==== (end) ====
-
-# ==== Spec 23d: Muse-Glimmer-30B prefill ==== (begin) ====
-# Additive only, as 23c's block: no existing source is edited, so every binary above (and in prefill/) keeps its name,
-# its command line and its bytes (MG0). New Muse-only sources in src/kernels/muse/:
-#   mg_pf_attn.cl   the prefill attention over a chunk: the flash build (kol_pf_attn.cl's DPAS walk at GQA 16 - the
-#                   2048-key window over the 4096-slot ring in absolute 64-key tiles, causal NoPE over the full cache)
-#                   and the eager build (B70_MUSE_ATTN=eager: plain OpenCL, bitwise decode's eager row)
-#   mg_pf_prep.cl   mg_pf_embed (mg_embed's chain over the chunk's ids) and mg_pf_attn_gate (decode's output gate)
-# Reused at Muse's shapes: mg_prep.cl at M = 2048 (kernels::muse::kPfC: the norms, the sandwich's post-add, the attention
-# prep and SiLU x up at S 1), prefill/pf_prep.cl's pf_res_fold _Z at K 6656 (o_proj's and down's own rows and Σ²),
-# k2/k2_pf_linear.cl (the int4 layout-0 slabs, a zero-padded tail where N is not whole 1024-column slabs) and the
-# shape-free pf_gemm_T0. What a Muse prefill chunk binds: runtime/muse/muse_prefill.cc (derived in muse_sizes.cc).
-if(B70_MUSE)
-  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
-  add_ocloc_kernel(mg_pf_embed_M2048_K6656_G26_V202048 SOURCE ${MG_CL}/mg_pf_prep.cl
-                   DEFINES M=2048 K=6656 EMBED_G=26 VOCAB=202048 IMG_TOKEN=200092 VID_TOKEN=200091)
-  add_ocloc_kernel(mg_pf_attn_gate_M2048_N4096 SOURCE ${MG_CL}/mg_pf_prep.cl DEFINES M=2048 GATE_N=4096)
-  add_ocloc_kernel(mg_norm_M2048_K6656_G26_W26 SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES M=2048 K=6656 NORM_G=26 NORM_WGS=26 NORM_EPS=1e-5f)
-  add_ocloc_kernel(mg_post_add_M2048_K6656_G26 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=2048 K=6656 POST_G=26 POST_EPS=1e-8f)
-  set(MG_PF_HEADS Q_HEADS=32 KV_HEADS=2 HD=128 QK_SCALE=3.87f)
-  add_ocloc_kernel(mg_attn_prep_M2048_N8704_S1_Q32KV2_R4096 SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 QGKV_N=8704 QGKV_S=1 ${MG_PF_HEADS} SLIDING=1 RING=4096)
-  add_ocloc_kernel(mg_attn_prep_M2048_N8704_S1_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
-                   DEFINES ${CTRL_DEFINES} M=2048 QGKV_N=8704 QGKV_S=1 ${MG_PF_HEADS} SLIDING=0 RING=0)
-  add_ocloc_kernel(mg_silu_mul_M2048_I19968_S1 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=2048 SILU_I=19968 SILU_S=1)
-  add_ocloc_kernel(pf_res_fold_K6656_SP1_G26_Z SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/prefill/pf_prep.cl
-                   DEFINES K=6656 S_PREV=1 FOLD_G=26 ZERO_RESID=1)
-  # The int4 linears' slabs (layout 0): q||gate||k||v (8 x 1024 + 512), o_proj (6 x 1024 + 512), gate||up (39 x 1024),
-  # down (6 x 1024 + 512).
-  foreach(row "6656 8704" "4096 6656" "6656 39936" "19968 6656")
-    separate_arguments(f UNIX_COMMAND "${row}")
-    list(GET f 0 K)
-    list(GET f 1 N)
-    add_ocloc_kernel(k2_pf_dequant_slab_K${K}_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl
-                     DEFINES K=${K} N=${N})
-  endforeach()
-  # The attention: sliding (the 2048-key window over the ring) and full (NoPE), flash (256 GRF, as kol_pf_attn) and
-  # eager (TGT 64: decode's eager_block target).
-  foreach(SL 1 0)
-    if(SL)
-      set(_n mg_pf_flash_attn_Q32KV2_W2048_R4096)
-      set(_w WINDOW=2048 RING=4096)
-    else()
-      set(_n mg_pf_flash_attn_Q32KV2_F)
-      set(_w WINDOW=0 RING=0)
-    endif()
-    add_ocloc_kernel(${_n} SOURCE ${MG_CL}/mg_pf_attn.cl
-                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 ${_w}
-                     OPTIONS -cl-intel-256-GRF-per-thread)
-    add_ocloc_kernel(${_n}_EAGER SOURCE ${MG_CL}/mg_pf_attn.cl DEFINES TGT=64 Q_HEADS=32 KV_HEADS=2 EAGER=1 ${_w})
-  endforeach()
-endif()
-# ==== Spec 23d: Muse-Glimmer-30B prefill ==== (end) ====
-
-# ==== Spec 23f: Muse-Glimmer-30B's verify lists and its DFlash drafter ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-15-spec23f-muse-dflash.md. Additive only, as 23c's / 23d's blocks: no existing
-# source is edited (MG0 / D0), so every binary above keeps its name, its command line and its bytes; nothing here is
-# bound without `--spec dflash` / `--spec lookup` on Muse-Glimmer (runtime::muse::MuseEngine's verify lists).
-#
-# B70_MUSE_VERIFY_M16 - the verify lists: 23c's decode walk at M = 1..16 rows (spec 23 decision 10: the anchor + up to
-# 15 drafts) with the taps of every row, reused sources at new M:
-#   gemv.cl         the four int4 layout-0 GEMVs at their PROVISIONAL S (add_gemv_variant applies the cells' defines at
-#                   every M: one row's chain is M-independent - D3)
-#   gemv_i8w.cl / gemv_bf16.cl   lm_head 6656 -> 202048
-#   prep.cl         prep_res_fold _Z at K 6656, G 26 over S4 slices
-#   mg_prep.cl      mg_norm, mg_post_add, mg_attn_prep (both kinds), mg_silu_mul
-#   mg_attn.cl / mg_attn_eager.cl   both kinds (M <= 16 is 23c's define)
-#   mg_pf_prep.cl   mg_pf_embed - the verify's ids [anchor, drafts] from a buffer (mg_embed reads Control::cur_token,
-#                   8 slots), mg_embed's chain line for line, at M = 1..16
-# and one new source, src/kernels/muse/mg_argmax.cl: argmax.cl's two stages at M <= 16 (argmax.cl caps M at 8 and
-# advances Control::pos) - stage 1 line for line, stage 2 writing every row's id to its own buffer (the host commits).
-option(B70_MUSE_VERIFY_M16 "build Muse-Glimmer's verify lists at M = 1..16 (spec 23f)" ON)
-if(B70_MUSE AND B70_MUSE_VERIFY_M16)
-  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
-  set(MG_VARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=202048 VOCAB_USED=202048)
-  foreach(MM RANGE 1 16)
-    if(MM GREATER 1)
-      add_gemv_variant(${MM} 6656 8704 2 0)
-      add_gemv_variant(${MM} 4096 6656 4 0)
-      add_gemv_variant(${MM} 6656 39936 8 0)
-      add_gemv_variant(${MM} 19968 6656 4 0)
-      add_gemv_i8w_variant(${MM} 6656 202048)
-      add_gemv_bf16_variant(${MM} 6656 202048 64 1)
-      add_ocloc_kernel(prep_res_fold_M${MM}_K6656_SP4_G26_Z SOURCE ${PREP_CL}
-                       DEFINES M=${MM} K=6656 S_PREV=4 FOLD_G=26 ZERO_RESID=1)
-      add_ocloc_kernel(mg_norm_M${MM}_K6656_G26_W26 SOURCE ${MG_CL}/mg_prep.cl
-                       DEFINES M=${MM} K=6656 NORM_G=26 NORM_WGS=26 NORM_EPS=1e-5f)
-      add_ocloc_kernel(mg_post_add_M${MM}_K6656_G26 SOURCE ${MG_CL}/mg_prep.cl
-                       DEFINES M=${MM} K=6656 POST_G=26 POST_EPS=1e-8f)
-      add_ocloc_kernel(mg_attn_prep_M${MM}_N8704_S2_Q32KV2_R4096 SOURCE ${MG_CL}/mg_prep.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} QGKV_N=8704 QGKV_S=2 Q_HEADS=32 KV_HEADS=2 HD=128
-                               QK_SCALE=3.87f SLIDING=1 RING=4096)
-      add_ocloc_kernel(mg_attn_prep_M${MM}_N8704_S2_Q32KV2_F SOURCE ${MG_CL}/mg_prep.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} QGKV_N=8704 QGKV_S=2 Q_HEADS=32 KV_HEADS=2 HD=128
-                               QK_SCALE=3.87f SLIDING=0 RING=0)
-      add_ocloc_kernel(mg_silu_mul_M${MM}_I19968_S8 SOURCE ${MG_CL}/mg_prep.cl DEFINES M=${MM} SILU_I=19968 SILU_S=8)
-      add_ocloc_kernel(mg_attn_M${MM}_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=64 Q_HEADS=32 KV_HEADS=2 WINDOW=2048 RING=4096)
-      add_ocloc_kernel(mg_attn_M${MM}_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=64 Q_HEADS=32 KV_HEADS=2 WINDOW=0 RING=0)
-      add_ocloc_kernel(mg_attn_eager_M${MM}_T64_Q32KV2_W2048_R4096 SOURCE ${MG_CL}/mg_attn_eager.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=64 Q_HEADS=32 KV_HEADS=2 WINDOW=2048 RING=4096)
-      add_ocloc_kernel(mg_attn_eager_M${MM}_T64_Q32KV2_F SOURCE ${MG_CL}/mg_attn_eager.cl
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=64 Q_HEADS=32 KV_HEADS=2 WINDOW=0 RING=0)
-    endif()
-    add_ocloc_kernel(mg_pf_embed_M${MM}_K6656_G26_V202048 SOURCE ${MG_CL}/mg_pf_prep.cl
-                     DEFINES M=${MM} K=6656 EMBED_G=26 VOCAB=202048 IMG_TOKEN=200092 VID_TOKEN=200091)
-    add_ocloc_kernel(mg_vargmax_stage1_M${MM}_N202048 SOURCE ${MG_CL}/mg_argmax.cl
-                     DEFINES ${MG_VARGMAX_DEFINES} M=${MM})
-  endforeach()
-  add_ocloc_kernel(mg_vargmax_stage2_N202048 SOURCE ${MG_CL}/mg_argmax.cl DEFINES ${MG_VARGMAX_DEFINES} M=16)
-endif()
-
-# B70_MUSE_DFLASH - the drafter (meta-models/Muse-Glimmer-30B-assistant: 5 sliding layers, hidden 6656, 32 q / 8 kv x
-# 128, FF 19968, block 16, window |q - k| <= 2048, eps 1e-5; kernels::dflash::kMuse, src/kernels/dflash_kernels.h):
-#   df_prep.cl   at its defines - df_embed (the target's RAW rows: in_scale 1), df_add, df_silu_mul, df_qkv_prep,
-#                df_ctx_store (ring slot pos % 2112); no convolutions (DFlash v1)
-#   df_attn.cl   the block's 16 rows over the ring + the block: WIN 2049 is the window |q - k| <= 2048 (df_attn's rule is
-#                <= WIN - 1), RING 2112 = 33 blocks of PB 64 (RING >= WIN; PB 64 keeps the local memory of 64 q pairs
-#                within 64 KB)
-#   df_topk.cl   the 16 best of the target head's 202048 logits for each of the 15 draft rows
-#   mg_dflash.cl mg_df_norm (the assistant's two-rounding RMSNorm) and mg_df_select (the per-row pick at 16 rows, the
-#                verify's ids buffer)
-# and the GEMVs at the block's 16 rows in the three formats (gemv_i8w / gemv_bf16 / gemv.cl int4 g64 layout 1 S 1:
-# q||k||v 6656 x 6144, o 4096 x 6656, gate||up 6656 x 39936, down 19968 x 6656, fc 33280 x 6656, the context's k||v
-# 6656 x 2048 - layout 1 is n-tile-major, so the k||v rows of q||k||v are a sub-range), the target's head at the 15
-# draft rows (int8 / bf16).
-option(B70_MUSE_DFLASH "build Muse-Glimmer's DFlash drafter variants (spec 23f)" ON)
-if(B70_MUSE AND B70_MUSE_VERIFY_M16 AND B70_MUSE_DFLASH)
-  set(MG_CL ${CMAKE_CURRENT_SOURCE_DIR}/muse)
-  set(DF_DIR ${CMAKE_CURRENT_SOURCE_DIR}/dflash)
-  set(MDCTL_DEFINES DCTL_K=0 DCTL_PPOS=1 DCTL_PN=2 DCTL_TEMP=3 DCTL_SEED_LO=4 DCTL_SEED_HI=5)
-  add_ocloc_kernel(df_prep_M16_H6656_I19968_Q32KV8_D128_R2112_V202048_E5 SOURCE ${DF_DIR}/df_prep.cl
-                   DEFINES ${CTRL_DEFINES} ${MDCTL_DEFINES} M=16 H=6656 WG=256 EPS=1e-05f VOCAB=202048
-                           INTER=19968 NH=32 NKV=8 HD=128 RING=2112)
-  add_ocloc_kernel(df_attn_M16_Q32KV8_D128_R2112_W2049_P64 SOURCE ${DF_DIR}/df_attn.cl
-                   DEFINES ${CTRL_DEFINES} ${MDCTL_DEFINES} M=16 NH=32 NKV=8 HD=128 RING=2112 WIN=2049 PB=64 WGA=128
-                           CAUSAL=0)
-  add_ocloc_kernel(df_topk_R15_N202048_U202048 SOURCE ${DF_DIR}/df_topk.cl DEFINES R=15 N=202048 USED=202048 TOPK=16
-                   CH=4096 COMPACT=0)
-  add_ocloc_kernel(mg_dflash_M16_H6656_K16_E5 SOURCE ${MG_CL}/mg_dflash.cl
-                   DEFINES ${CTRL_DEFINES} ${MDCTL_DEFINES} H=6656 WG=256 EPS=1e-05f SELECT=1 MAXR=16 TOPK=16)
-  foreach(row "6656 6144" "4096 6656" "6656 39936" "19968 6656" "33280 6656" "6656 2048")
-    separate_arguments(f UNIX_COMMAND "${row}")
-    list(GET f 0 K)
-    list(GET f 1 N)
-    add_gemv_i8w_variant(16 ${K} ${N})
-    add_gemv_bf16_variant(16 ${K} ${N} 64 1)
-    add_gemv_variant(16 ${K} ${N} 1 1)
-  endforeach()
-  # the target's head at the 15 draft rows (int8 / bf16) is the verify block's M = 15 lm_head
-endif()
-# ==== Spec 23f ==== (end) ====
-
 # ==== Spec 24c: LFM2.5-24B-A2B decode (model::lfm2moe()) ==== (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its command line and its bytes
 # (tools/kernel_cmdlines' diff: additions only - F0). LFM2-only kernels live in src/kernels/lfm2moe/ and are named
@@ -1790,8 +1567,9 @@ endif()
 #                  descriptor's {S, layout} (model::BoltDesc::linears, PROVISIONAL)
 #   gemv_i8w.cl / gemv_bf16.cl   the untied head 4096 -> 131072 (int8 the default, Decision 18; bf16 over its own tiles)
 #   argmax.cl      at VOCAB 131072 = VOCAB_USED (every row a token)
-#   mg_attn.cl / mg_attn_eager.cl   Muse-Glimmer's full (NoPE) decode attention at Q 32 KV 2 head_dim 128 - Bolt's exact
-#                  shape (Decision 15: bound by name with a ones gate; built here only when the Muse block is off)
+#   mg_attn.cl / mg_attn_eager.cl   the full (NoPE) decode attention at Q 32 KV 2 head_dim 128 - Bolt's exact shape
+#                  (Decision 15: bound by name with a ones gate; spec 23c's kernels, kept with their names and command
+#                  lines when Muse-Glimmer was dropped, 2026-10-27, and moved here from src/kernels/muse/)
 # P0's stand-ins (plan 25c Task 1; tools/probe/probe_bolt_step.cc only): the routers as gemv_bf16 at each E, moe.cl at
 # E64 T8 D1024 I2048 (gated; a pool of 64 blocks + the shared slot), lfm_prep.cl's one-launch norm at K 4096, the
 # two-launch norm (prep_res_fold G16 + kol_norm_finish W16) for --pair, nb_probe.cl's state read-modify-write; the SSM
@@ -1817,13 +1595,11 @@ if(B70_BOLT)
   set(NB_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=131072 VOCAB_USED=131072)
   add_ocloc_kernel(nb_argmax_stage1_M1_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES} M=1)
   add_ocloc_kernel(nb_argmax_stage2_V131072 SOURCE ${ARGMAX_CL} DEFINES ${NB_ARGMAX_DEFINES})
-  if(NOT B70_MUSE)
-    set(NB_MG_ATTN_HEADS TGT=64 Q_HEADS=32 KV_HEADS=2)
-    add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_attn.cl
-                     DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
-    add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_attn_eager.cl
-                     DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
-  endif()
+  set(NB_MG_ATTN_HEADS TGT=64 Q_HEADS=32 KV_HEADS=2)
+  add_ocloc_kernel(mg_attn_M1_T64_Q32KV2_F SOURCE ${NB_CL}/mg_attn.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
+  add_ocloc_kernel(mg_attn_eager_M1_T64_Q32KV2_F SOURCE ${NB_CL}/mg_attn_eager.cl
+                   DEFINES ${CTRL_DEFINES} M=1 ${NB_MG_ATTN_HEADS} WINDOW=0 RING=0)
   # --- P0's stand-ins (tools/probe/probe_bolt_step.cc only) ---
   foreach(E 240 304 368 432 496)
     add_gemv_bf16_variant(1 4096 ${E} 16 16)      # the routers at gemv_bf16's tiny tiling (fp32 logits)
@@ -1948,8 +1724,9 @@ endif()
 # prefill/pf_dequant_slab.cl for the N 4096 linears (out_proj 8192, o_proj 4096, fc2 1024, shared_down 5376 - both layouts,
 # so a P0 re-pick needs no new line); k2/k2_pf_linear.cl for the layout-0 linears that are not whole 1024-column slabs
 # (in_proj 18560, q||k||v 4608, fc1||shared_up 6400: one zero-padded tail slab); the shape-free pf_gemm_T0 (prefill/,
-# built there); Muse-Glimmer's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15: built here only when
-# the Muse block is off). What a Bolt prefill chunk binds: runtime/bolt/bolt_prefill.cc (derived in bolt_sizes.cc).
+# built there); mg_pf_attn.cl's mg_pf_flash_attn full (NoPE) build and its eager twin (Decision 15: spec 23d's kernel,
+# kept with its names and command lines when Muse-Glimmer was dropped, 2026-10-27). What a Bolt prefill chunk binds:
+# runtime/bolt/bolt_prefill.cc (derived in bolt_sizes.cc).
 if(B70_BOLT)
   set(NB_CL ${CMAKE_CURRENT_SOURCE_DIR}/bolt)
   set(NB_DEPS DEPENDS ${NB_CL}/nb_common.h ${NB_CL}/nb_expert.h OPTIONS -I${NB_CL})
@@ -1995,13 +1772,11 @@ if(B70_BOLT)
   foreach(N 18560 4608 6400)
     add_ocloc_kernel(k2_pf_dequant_slab_K4096_N${N} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/k2/k2_pf_linear.cl DEFINES K=4096 N=${N})
   endforeach()
-  if(NOT B70_MUSE)
-    add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_pf_attn.cl
-                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 WINDOW=0 RING=0
-                     OPTIONS -cl-intel-256-GRF-per-thread)
-    add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F_EAGER SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/muse/mg_pf_attn.cl
-                     DEFINES TGT=64 Q_HEADS=32 KV_HEADS=2 EAGER=1 WINDOW=0 RING=0)
-  endif()
+  add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F SOURCE ${NB_CL}/mg_pf_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=2 EAGER=0 WINDOW=0 RING=0
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(mg_pf_flash_attn_Q32KV2_F_EAGER SOURCE ${NB_CL}/mg_pf_attn.cl
+                   DEFINES TGT=64 Q_HEADS=32 KV_HEADS=2 EAGER=1 WINDOW=0 RING=0)
 endif()
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (end) ====
 

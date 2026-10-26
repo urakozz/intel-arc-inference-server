@@ -24,7 +24,7 @@
 
 // Spec 25b Tasks 4-5: Nemotron 3.5 Bolt on one or two B70s - the checkpoint's tensors in the layouts
 // loader/bolt_layout.h sizes (loader/bolt_repack.h is the host half). A loader BESIDE loader::load, load_k2,
-// load_kolibri1, load_qwen4exp, load_muse_glimmer and load_lfm2moe (their files untouched); the public pieces are reused -
+// load_kolibri1, load_qwen4exp and load_lfm2moe (their files untouched); the public pieces are reused -
 // resolve_snapshot, QuantConfig::parse, SafetensorsSet, assert_quant_invariants, LinearSrc::classify,
 // quantise_int8_tiled.
 //

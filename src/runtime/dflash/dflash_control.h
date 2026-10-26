@@ -37,11 +37,8 @@ static_assert(offsetof(DFlashCtl, k) == kernels::dflash::kDctlK * 4 &&
                   offsetof(DFlashCtl, seed_hi) == kernels::dflash::kDctlSeedHi * 4,
               "DFlashCtl and the CMake block's DCTL_DEFINES disagree");
 
-// The readback at MAXR rows (df_select.cl's / mg_dflash.cl's OUT_* words at their MAXR): Qwen3.8's drafter at 8
-// (DFlashDraftOut), spec 23f's Muse-Glimmer assistant at 16 (MuseDraftOut - mg_df_select writes it).
-template <uint32_t MAXR>
-struct DraftOutT {
-  static constexpr uint32_t kRows = MAXR, kTopK = kernels::dflash::kTopK;
+struct DFlashDraftOut {
+  static constexpr uint32_t kRows = kernels::dflash::kM, kTopK = kernels::dflash::kTopK;
   uint32_t k;                       // OUT_K: the K this replay drafted
   uint32_t anchor;                  // OUT_ANCHOR: ctrl.cur_token[0] when it ran
   uint32_t pos;                     // OUT_POS: ctrl.pos (the anchor's position)
@@ -52,15 +49,9 @@ struct DraftOutT {
   float unary[kRows][kTopK];        // OUT_UNARY: their head logits (x out_mult, softcapped)
   float scores[kRows][kTopK];       // OUT_SCORES: the selector's realized scores (v1: = unary)
 };
-using DFlashDraftOut = DraftOutT<kernels::dflash::kM>;
-using MuseDraftOut = DraftOutT<kernels::dflash::kMuseM>;
 static_assert(offsetof(DFlashDraftOut, ids) == 4 * 4 && offsetof(DFlashDraftOut, chosen) == 12 * 4 &&
                   offsetof(DFlashDraftOut, cand) == 20 * 4 && offsetof(DFlashDraftOut, unary) == (20 + 128) * 4 &&
                   offsetof(DFlashDraftOut, scores) == (20 + 256) * 4 && sizeof(DFlashDraftOut) == 404 * 4,
               "DFlashDraftOut and df_select.cl's OUT_* words disagree");
-static_assert(offsetof(MuseDraftOut, ids) == 4 * 4 && offsetof(MuseDraftOut, chosen) == 20 * 4 &&
-                  offsetof(MuseDraftOut, cand) == 36 * 4 && offsetof(MuseDraftOut, unary) == (36 + 256) * 4 &&
-                  offsetof(MuseDraftOut, scores) == (36 + 512) * 4 && sizeof(MuseDraftOut) == 804 * 4,
-              "MuseDraftOut and mg_dflash.cl's OUT_* words (MAXR 16) disagree");
 
 }  // namespace runtime::dflash

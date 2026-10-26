@@ -33,19 +33,11 @@ and tools (b70-serve's order, as K2's), no template kwargs: its template writes 
 `<|tool_call_start|>[name(k=v)]<|tool_call_end|>` and ends the prompt in "<think>"; tools/toolcall/a4_ref.sh
 lfm2moe set writes tests/golden/toolcall-lfm2moe.
 
-Muse-Glimmer (model_type muse_glimmer, spec 23a Task 5) renders with the ORIGINAL's chat_template.jinja
-(meta-models/Muse-Glimmer-30B, sha256 cfc67e5f...; a snapshot with another template - the GPTQ repo's older
-one - is refused: decision 1), ATEM calls from the arguments OBJECTS the set stores (the template raises on a
-JSON string), defaults {"reasoning_strength": "low", "current_date": "2026-10-15"} (K2's precedent for a
-reasoning-first model), KEY-SORTED like K2 / Kolibri (b70-serve's nlohmann::json). The plan's spelling
-    make_set.py --from <set dir> --model muse --tokenizer <bf16 snapshot> <out dir> [--kwargs JSON]
-is the same call.
-
 Nemotron 3.5 Bolt (config.json model_type nemotron_h_omni, spec 25a Task 6) renders --from the same 36 conversations
-with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri / Muse / LFM2.5
+with the checkpoint's own chat_template.jinja (sha256 6521afc7...), KEY-SORTED like K2 / Kolibri / LFM2.5
 (b70-serve's nlohmann::json), with enable_thinking TRUE (the template's default and the agentic mode: the prompt ends
 in `<|im_start|>assistant\n<think>\n`, every reply reasons first) and the default kwargs {"medium_effort": true}
-(K2's / Muse's precedent for a reasoning-first model: the effort that keeps the reasoning inside the 2048-id budget;
+(K2's precedent for a reasoning-first model: the effort that keeps the reasoning inside the 2048-id budget;
 Decision 13 maps reasoning_effort low / medium to it); each <name>.json records "enable_thinking": true and the kwargs.
 The history calls come out as Qwen3-Coder XML through the template. The plan's spelling
     make_set.py --from <set dir> --model bolt --tokenizer <Bolt snapshot> <out dir> [--kwargs JSON]
@@ -357,26 +349,15 @@ def load_tokenizer(snap: str):
 
 
 K2_KWARGS = {"tool_call_format": "xml", "reasoning_effort": "low"}
-MUSE_KWARGS = {"reasoning_strength": "low", "current_date": "2026-10-15"}
-MUSE_TEMPLATE_SHA = "cfc67e5f"      # the original's chat_template.jinja (spec 23 decision 1)
 # Models whose server render is of key-sorted objects (their template tests are recorded that way).
 # Spec 24a: LFM2.5-24B-A2B (lfm2_moe) too - its schemas and call arguments reach the template key-sorted through
 # b70-serve (spec 24 §4.6's known limitation), so its A4 set is rendered that way; the history calls come out
 # pythonic through the template itself, and the prompt ends in "<think>" (the template always reasons).
-SORTED_MODELS = ("k2_horizon", "kolibri1", "muse_glimmer", "lfm2_moe", "nemotron_h_omni")
+SORTED_MODELS = ("k2_horizon", "kolibri1", "lfm2_moe", "nemotron_h_omni")
 # Spec 25a: Nemotron 3.5 Bolt - reasoning on (the template's default), medium effort (module docstring).
 BOLT_TYPES = ("nemotron_h_omni",)
 BOLT_KWARGS = {"medium_effort": True}
 BOLT_TEMPLATE_SHA = "6521afc7"
-
-
-def check_muse_template(snap: str) -> None:
-    """Refuse a Muse snapshot whose chat_template.jinja is not the original's (the GPTQ repo ships an older one)."""
-    p = os.path.join(snap, "chat_template.jinja")
-    sha = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "absent"
-    if not sha.startswith(MUSE_TEMPLATE_SHA):
-        sys.exit(f"FATAL: {p} is sha256 {sha[:8]}..., not the original's {MUSE_TEMPLATE_SHA}... - render Muse-Glimmer "
-                 f"with meta-models/Muse-Glimmer-30B's small files (spec 23 decision 1)")
 
 
 def check_bolt_template(snap: str) -> None:
@@ -401,13 +382,10 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
     template variables (K2-Horizon's default K2_KWARGS); `tok` / `mtype` for the tests."""
     mtype = model_type(snap) if mtype is None else mtype
     k2 = mtype == "k2_horizon"
-    muse = mtype == "muse_glimmer"
     bolt = mtype in BOLT_TYPES
     sort = mtype in SORTED_MODELS
     if kwargs is None:
-        kwargs = dict(K2_KWARGS) if k2 else dict(MUSE_KWARGS) if muse else dict(BOLT_KWARGS) if bolt else {}
-    if muse and tok is None:
-        check_muse_template(snap)
+        kwargs = dict(K2_KWARGS) if k2 else dict(BOLT_KWARGS) if bolt else {}
     tok = load_tokenizer(snap) if tok is None else tok
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
@@ -503,10 +481,10 @@ def build_set(snap: str, out: str, lang: str = "en", tok=None, mtype: str | None
 
 def main() -> None:
     if len(sys.argv) in (8, 10) and sys.argv[1] == "--from" and sys.argv[3:7:2] == ["--model", "--tokenizer"]:
-        # the plans' spelling (spec 23a: --model muse; spec 25a: --model bolt) --tokenizer SNAP
-        want = {"muse": ("muse_glimmer",), "bolt": BOLT_TYPES}.get(sys.argv[4])
+        # the plan's spelling (spec 25a: --model bolt) --tokenizer SNAP
+        want = {"bolt": BOLT_TYPES}.get(sys.argv[4])
         if want is None:
-            sys.exit("--model expects muse or bolt (other models: --from <set> <snapshot> <out>)")
+            sys.exit("--model expects bolt (other models: --from <set> <snapshot> <out>)")
         if model_type(sys.argv[6]) not in want:
             sys.exit(f"FATAL: {sys.argv[6]} is not a {' / '.join(want)} snapshot")
         if sys.argv[4] == "bolt":

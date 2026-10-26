@@ -46,9 +46,6 @@ add_subdirectory(kolibri)
 # Spec 21b: Qwen3.8-Flash-Next's planner (21c adds its engine) - its own directory.
 add_subdirectory(qwen4exp)
 
-# Spec 23b: Muse-Glimmer-30B's planner (23c adds its engine) - its own directory.
-add_subdirectory(muse)
-
 # Spec 19b: the DFlash drafter's buffers, planner term and its two captured lists (draft, projection) - its own
 # directory, beside the engines it serves (19c wires it into runtime::Engine).
 add_subdirectory(dflash)

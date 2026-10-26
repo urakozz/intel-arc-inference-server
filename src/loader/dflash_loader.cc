@@ -25,8 +25,6 @@ std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void
 }
 DeviceWeight upload_linear(l0::Context& ctx, l0::CmdList& imm, const DFlashHostLinear& h, size_t& bytes) {
   bytes += h.bytes();
-  if (h.kind == model::WeightKind::Int4)   // spec 23f: layout-1 tiles, the scales inline (no separate allocation)
-    return DeviceWeight{upload(ctx, imm, h.int4.data(), h.int4.size() * 4), nullptr, h.shape(), model::WeightKind::Int4};
   if (h.kind == model::WeightKind::Int8) {
     DeviceWeight w{upload(ctx, imm, h.i8.data(), h.i8.size()), upload_u(ctx, imm, h.scales.data(), h.scales.size() * 4),
                    h.shape(), model::WeightKind::Int8};
@@ -54,20 +52,12 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
                            uint32_t vocab_rows, const l0::Mem& target_embed, DraftFormat format, unsigned threads) {
-  return load_drafter(ctx, snapshot_or_repo, model::DFlashTargetShape{target.name, target.layers, target.hidden, vocab_rows},
-                      target_embed, format, threads);
-}
-
-DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::DFlashTargetShape& target,
-                           const l0::Mem& target_embed, DraftFormat format, unsigned threads) {
   const auto t0 = std::chrono::steady_clock::now();
-  const uint32_t vocab_rows = target.vocab_rows;
   const DFlashCheckpoint ck(snapshot_or_repo);
-  ck.check_target(target);
+  ck.check_target(target, vocab_rows);
   if (target_embed.size() < size_t(vocab_rows) * target.hidden * 2)
     throw std::runtime_error("load_drafter: the target embedding is smaller than [vocab rows][hidden] bf16");
-  model::DFlashDesc d = ck.desc();
-  if (d.muse() && d.vocab == 0) d.vocab = vocab_rows;   // the assistant's config has none: the target's (spec 23f)
+  const model::DFlashDesc& d = ck.desc();
 
   DFlashWeights w;
   w.desc = d;
@@ -136,7 +126,7 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   std::snprintf(buf, sizeof buf,
                 "DFlash drafter: %s, %u layers, taps %s, block %u, %s (%s %.1f s), mask row from the %s, %zu B, %.1f s",
                 d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Bf16 ? "tiled at load" : "quantised at load", quant,
+                format == DraftFormat::Int8 ? "quantised at load" : "tiled at load", quant,
                 w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
   w.line = buf;
   std::printf("%s\n", buf);

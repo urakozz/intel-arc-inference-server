@@ -10,9 +10,6 @@ weights), a tiny target (embedding / head) and a dump in dump_taps.py's format, 
    cosine bar.
 3. A near tie at the 16th slot is excused (sets pass, counted as a tie).
 4. The int8 arm builds the reference with the int8-simulated drafter and head (records from it pass).
-5. Spec 23f, the Muse-Glimmer form (dflash_fixture.py's Muse weights, block 16, window 16 inclusive): records from
-   the reference itself pass at K 15 on the int4 g64 / int8 head arm and on the bf16 / capped-q arm; a changed id
-   fails the walk; the bf16 reference does not pass the int4 arm's records (the arm is applied).
 """
 import copy
 import json
@@ -134,58 +131,6 @@ def test_int8_arm():
         run, recs, dumps, drafter, target, _, _, _ = _world(tmp, "int8", "int8")
         ok, st = _eval(tmp, run, recs, dumps, drafter, target)
         assert ok, st
-
-
-def _muse_world(tmp, fmt, head, q="raw"):
-    from safetensors.torch import save_file
-    torch.manual_seed(11)
-    w = fx.muse_weights()
-    drafter = os.path.join(tmp, "mdrafter")
-    target = os.path.join(tmp, "mtarget")
-    dumps = os.path.join(tmp, "mdumps")
-    for p in (drafter, target, dumps):
-        os.makedirs(p, exist_ok=True)
-    save_file({k: v.contiguous() for k, v in w.items()}, os.path.join(drafter, "model.safetensors"))
-    with open(os.path.join(drafter, "config.json"), "w") as f:
-        json.dump(fx.muse_config(), f)
-    embed, hd = fx.bf(fx.V, fx.MH, std=0.5), fx.bf(fx.V, fx.MH, std=0.5)
-    save_file({"model.embed_tokens.weight": embed, "lm_head.weight": hd}, os.path.join(target, "model.safetensors"))
-    with open(os.path.join(target, "config.json"), "w") as f:
-        json.dump({"architectures": ["Tiny"]}, f)
-    n, n_prompt = 60, 24
-    ids = torch.randint(0, fx.V, (n,)).tolist()
-    res = {"greedy": torch.zeros(n, dtype=torch.int32), "top_ids": torch.zeros(n, 4, dtype=torch.int32),
-           "top_logits": torch.zeros(n, 4), "lse": torch.zeros(n),
-           "taps": {i: fx.bf(n, fx.TH, std=1.0) for i in fx.MTAPS}}
-    dt.save_dump(os.path.join(dumps, "m.taps.safetensors"), "tiny/m", ids, n_prompt, 0, res, {})
-    run = {"form": "muse", "q": q, "format": fmt, "head": head, "draft_vocab": 0, "vocab_used": fx.V, "k": 15,
-           "launches": [66, 8], "load": "test", "v_ids": []}
-    d, draft = d1.muse_reference(run, drafter, target)
-    dump = dt.load_dump(os.path.join(dumps, "m.taps.safetensors"))
-    ctx = d.context_kv({i: dump["taps"][i] for i in d.cfg.target_layer_ids}, torch.arange(0, n))
-    recs = []
-    for p in (24, 33, 44):
-        o, _ = draft(ids[p], p, 15, ctx)
-        recs.append({"dump": "tiny/m", "p": p, "anchor": ids[p], "k": 15, "ids": o.ids.tolist(),
-                     "chosen": [0] * 15, "cand": o.cand_ids.tolist(), "unary": o.unary.tolist(),
-                     "scores": o.scores.tolist()})
-    return run, recs, dumps, drafter, target
-
-
-def test_muse_form():
-    with tempfile.TemporaryDirectory() as tmp:
-        for fmt, head, q in (("int4", "int8", "raw"), ("bf16", "bf16", "capped")):
-            run, recs, dumps, drafter, target = _muse_world(tmp, fmt, head, q)
-            ok, st = _eval(tmp, run, recs, dumps, drafter, target)
-            assert ok and st["n"] == 3 and st["worst"] > 0.9999999, (fmt, st)
-            bad = copy.deepcopy(recs)
-            bad[1]["ids"][9] = (bad[1]["ids"][9] + 1) % fx.V
-            ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-            assert not ok and st["walk"] == 2, st
-        run, recs, dumps, drafter, target = _muse_world(tmp, "int4", "int8")
-        run_b = dict(run, format="bf16", head="bf16")
-        ok, st = _eval(tmp, run_b, recs, dumps, drafter, target)
-        assert not ok, st
 
 
 if __name__ == "__main__":

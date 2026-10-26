@@ -51,29 +51,6 @@ against dflash_ref.Drafter.draft_block row by row. Greedy (T = 0) only.
 
 Resumable: OUT/accept.<arm>.json is rewritten after every source and a re-run skips the sources
 it already holds. --dry-run prints the planned anchors, the FLOP and a memory estimate.
-
-**The Muse-Glimmer form (spec 23f Task 3, `--model muse`).** meta-models/Muse-Glimmer-30B-assistant
-(dflash_ref.py's form "muse") over muse_taps.py's dumps, beside the int4 target's embedding and
-head (Vishva007/Muse-Glimmer-30B-W4A16-AutoRound: the served checkpoint):
-  - the block is ALWAYS 16 rows (anchor + 15 mask rows, bidirectional): ONE forward per anchor
-    gives the drafts of every K = 1..15 (rows 1..K - forward_blocks_muse; the same anchors for
-    every K: n_prompt <= p <= N - --kmax, default 15);
-  - greedy drafts = argmax of the RAW head rows (G:1658, ties to the lower id) - the engine's;
-  - arms: bf16 (as shipped, float32 compute), int8 (per-row RTN, simulated as above), int4g64
-    (loader/rtn.h's rtn_int4_g64 restated: per output row and group of 64 k, s16 = f16(2 amax /
-    15), q = clamp(rint(w / s16) + 8, 0, 15), w' = (q - 8) s16 - spec 23 decision 9's format), and
-    `h` variants (int8h, int4g64h) with the target's head int8 per row (spec 9: the head the
-    engine serves Muse with by default); dflash2 = incoai/Muse-Glimmer-30B-DFlash2 (decision 12)
-    through the vLLM DFlash 2 path when it is in the cache and its taps are the dumps' - else
-    SKIPPED (never downloaded here);
-  - **the sampled estimate** (spec 8 §11 / mtp_accept.py's expected-acceptance formula): per
-    draft row j of anchor p, alpha_j = mean of sum_x min(p(x), q(x)) where p is the target's
-    capped row after p + j (the dump's top-64 capped logits) filtered at --temperature / --top-k /
-    --top-p (default generation_config.json's: 1.0 / 64 / 0.95) and q the draft row's top 16
-    (the engine's readback) at the same temperature - `--q raw` (softmax(raw / T): transformers'
-    form) and `--q capped` (the target's multiplier and softcap first: 20 tanh(z 0.196... / 20),
-    decision 11) both by default; E_K = 1 + sum prod alpha_j. Rows are counted wherever the
-    target row exists (the teacher-forced text stands for the accepted drafts).
 """
 import os
 import sys
@@ -376,184 +353,6 @@ def draft_batch(d, head, anchors, ps, K: int, ctx, masks: dict):
     return out
 
 
-# ------------------------------------------------------------------------------ the Muse-Glimmer form (spec 23f)
-
-
-def rtn_int4_g64(w):
-    """loader/rtn.h's rtn_int4_g64, restated: w [N][K] (bf16 values) -> q uint8 [N][K] in 0..15 and the f16 scales
-    [N][K/64]: per output row n and group of 64 k, amax = max |w|, s16 = f16(2 amax / 15) (round to nearest even,
-    subnormals kept), q = clamp(rint(w / f32(s16)) + 8, 0, 15) (q = 8 where s16 = 0). Dequant (q - 8) x s16."""
-    N, K = w.shape
-    if K % 64:
-        raise ValueError(f"int4 g64: K {K} is not a multiple of 64")
-    wf = w.float().reshape(N, K // 64, 64)
-    s16 = ((2.0 * wf.abs().amax(-1)) / 15.0).to(torch.float16)
-    s = s16.float()[..., None]
-    q = torch.where(s > 0, torch.round(wf / torch.where(s > 0, s, torch.ones_like(s))) + 8.0, torch.full_like(wf, 8.0))
-    q = q.clamp(0.0, 15.0)
-    return q.to(torch.uint8).reshape(N, K), s16
-
-
-def int4g64_dequant(w):
-    q, s16 = rtn_int4_g64(w)
-    N, K = w.shape
-    return ((q.float().reshape(N, K // 64, 64) - 8.0) * s16.float()[..., None]).reshape(N, K)
-
-
-def int4g64_simulate(drafter) -> int:
-    """Every drafter linear replaced by its int4 g64 RTN dequantisation (float32); the norms stay bf16-widened."""
-    n = 0
-    for name in list(drafter.w):
-        if name.endswith(LINEAR_SUFFIXES) and drafter.w[name].dim() == 2:
-            drafter.w[name] = int4g64_dequant(drafter.w[name]).to(drafter.w[name].dtype)
-            n += 1
-    return n
-
-
-def _muse_attend(d, i, q, k, v, vis):
-    """Drafter._m_attend with a per-block mask: q [B, nh, R, hd], k / v [B, nkv, Kv, hd], vis [B, R, Kv] bool."""
-    c = d.cfg
-    g = c.n_heads // c.n_kv_heads
-    B, nkv, kv_len, hd = k.shape
-    if g > 1:
-        k = k[:, :, None].expand(B, nkv, g, kv_len, hd).reshape(B, nkv * g, kv_len, hd)
-        v = v[:, :, None].expand(B, nkv, g, kv_len, hd).reshape(B, nkv * g, kv_len, hd)
-    s = torch.matmul(q, k.transpose(2, 3)) * (c.head_dim ** -0.5)
-    s = s.masked_fill(~vis[:, None], float("-inf"))
-    p = torch.softmax(s.float(), dim=-1).to(q.dtype)
-    o = torch.matmul(p, v).transpose(1, 2).contiguous()
-    return d._m_lin(o.reshape(B, o.shape[1], -1), f"layers.{i}.self_attn.o_proj.weight")
-
-
-def forward_blocks_muse(d, anchors, ps, ctx):
-    """B Muse blocks of 16 rows (row 0 the anchor at ps[b], rows 1..15 the mask at ps[b] + 1 ..), each over the
-    context positions in [ps[b] - window, ps[b] - 1] and its own rows (bidirectional) - Drafter._m_draft_block per
-    block, stacked. Returns the final-norm hidden [B, 16, H] in the drafter's dtype."""
-    c = d.cfg
-    B, R, W = len(anchors), c.block_size, c.windows[0]
-    lim = W if c.window_inclusive else W - 1
-    ids = torch.cat([torch.as_tensor(anchors, dtype=torch.long)[:, None],
-                     torch.full((B, R - 1), c.mask_token_id, dtype=torch.long)], 1)
-    x = d.embed[ids].to(d.dtype)                                              # [B, R, H]
-    ps = torch.as_tensor(ps, dtype=torch.long)
-    qpos = ps[:, None] + torch.arange(R)[None]                                # [B, R]
-    sel = (ctx.pos >= int(ps.min()) - lim) & (ctx.pos < int(ps.max()))
-    cpos = ctx.pos[sel]
-    vis_c = (cpos[None, None, :] < ps[:, None, None]) & ((qpos[:, :, None] - cpos[None, None, :]).abs() <= lim)
-    vis = torch.cat([vis_c, torch.ones(B, R, R, dtype=torch.bool)], -1)       # [B, R, Nc + R]
-    cos, sin = d._m_cos_sin(qpos.reshape(-1))
-    cos, sin = cos.view(B, 1, R, -1), sin.view(B, 1, R, -1)
-    resid = x
-    for i in range(c.n_layers):
-        L = f"layers.{i}."
-        h = d._m_norm(resid, d.w[L + "input_layernorm.weight"])
-        q = d._m_rope(d._m_heads(i, h, "q"), cos, sin)
-        kb = d._m_rope(d._m_heads(i, h, "k"), cos, sin)
-        vb = d._m_heads(i, h, "v")
-        kc = ctx.k[i][sel].permute(1, 0, 2)[None].expand(B, -1, -1, -1)
-        vc = ctx.v[i][sel].permute(1, 0, 2)[None].expand(B, -1, -1, -1)
-        resid = resid + _muse_attend(d, i, q, torch.cat([kc, kb], 2), torch.cat([vc, vb], 2), vis)
-        resid = resid + d._m_mlp(i, d._m_norm(resid, d.w[L + "post_attention_layernorm.weight"]))
-    return d._m_norm(resid, d.w["norm.weight"])
-
-
-def muse_draft_logits(d, head, anchors, ps, ctx):
-    """The raw head rows of mask rows 1..15 for B anchors: float32 [B, 15, V] (Head: bf16 / int8 rows)."""
-    h = forward_blocks_muse(d, anchors, ps, ctx)
-    B, R, H = h.shape
-    return head.logits(h[:, 1:].reshape(B * (R - 1), H)).view(B, R - 1, -1)
-
-
-def greedy_ids(logits):
-    """argmax over the last dim, the lowest id among equal maxima (torch.argmax's rule, made explicit)."""
-    best = logits.max(-1, keepdim=True).values
-    return torch.where(logits == best, torch.arange(logits.shape[-1]), logits.shape[-1]).min(-1).values
-
-
-def q_rows(logits, form: str, mult: float, cap: float, T: float, k: int = 16):
-    """The draft distribution the engine samples from (spec 23 decision 11): the row's top-k candidates (by raw logit,
-    ties lower id) with softmax(x / T) over x = the raw logit (`raw`) or 20 tanh(z mult / 20) (`capped`). Returns
-    (ids [R, k], probs [R, k])."""
-    ids, v = top_k_fast(logits, k)
-    if form == "capped":
-        v = torch.tanh(v * mult / cap) * cap
-    elif form != "raw":
-        raise ValueError(f"--q {form}: raw or capped")
-    return ids, torch.softmax(v.double() / T, -1)
-
-
-def p_rows(top_ids, top_logits, temp: float, top_k: int, top_p: float):
-    """The target's filtered distribution from the dump's capped top-64 (vLLM's order: temperature, top-k, top-p -
-    mtp_accept.filt). Returns (ids [R, k], probs [R, k])."""
-    k = min(top_k, top_logits.shape[1])
-    v = top_logits[:, :k].double() / temp
-    p = torch.softmax(v, -1)
-    cum = p.cumsum(-1)
-    p = p * ((cum - p) < top_p)
-    return top_ids[:, :k], p / p.sum(-1, keepdim=True)
-
-
-def overlap(pi, pp, qi, qp):
-    """sum_x min(p(x), q(x)) per row (the Leviathan rule's exact acceptance probability)."""
-    m = pi[:, :, None] == qi[:, None, :]
-    return (torch.minimum(pp[:, :, None], qp[:, None, :]) * m).sum((1, 2))
-
-
-def run_source_muse(d, head, dump, ks, batch: int, kmax: int, sp: dict, qforms):
-    """Per-K greedy stats (the same layout run_source writes) + per q form the sampled sums for one dump; one
-    forward per anchor batch gives every K."""
-    taps = dump["taps"]
-    f = dump["tap_from"]
-    ctx = d.context_kv({i: taps[i] for i in d.cfg.target_layer_ids}, torch.arange(f, dump["n"]))
-    x, g = dump["ids"], dump["greedy"]
-    anchors = anchors_of(dump["n_prompt"], dump["n"], kmax)
-    res = {}
-    if not anchors:
-        return res, 0
-    ps_all = torch.tensor(anchors)
-    R = d.cfg.block_size - 1
-    drafts = []
-    ssum = {qf: [0.0] * R for qf in qforms}
-    scnt = [0] * R
-    for b0 in range(0, len(anchors), batch):
-        ps = ps_all[b0:b0 + batch]
-        lg = muse_draft_logits(d, head, x[ps].tolist(), ps, ctx)              # [B, 15, V]
-        drafts.append(greedy_ids(lg))
-        for j in range(R):
-            rows = ps + j - f                                                 # the target's row after p + j
-            ok = (ps + j) <= dump["n"] - 1
-            if not bool(ok.any()):
-                continue
-            rr = rows[ok]
-            pi, pp = p_rows(dump["top_ids"][rr], dump["top_logits"][rr], sp["temp"], sp["top_k"], sp["top_p"])
-            scnt[j] += int(ok.sum())
-            for qf in qforms:
-                qi, qp = q_rows(lg[ok, j], qf, sp["mult"], sp["cap"], sp["temp"])
-                ssum[qf][j] += float(overlap(pi, pp, qi, qp).sum())
-    dr = torch.cat(drafts)                                                    # [A, 15]
-    for K in ks:
-        length, cens, counted, accepted = accept_rows(dr[:, :K], ps_all, x, g, f)
-        hist = torch.bincount(length[~cens], minlength=K + 1).tolist()
-        res[str(K)] = {"rows": len(anchors), "censored": int(cens.sum()), "hist": hist,
-                       "counted": counted, "accepted": accepted}
-    res["sampled"] = {qf: {"counted": scnt, "sum": ssum[qf]} for qf in qforms}
-    n_p = dump["n_prompt"]
-    agree = int((x[n_p:] == g[n_p - 1 - f: dump["n"] - 1 - f]).sum())
-    return res, agree
-
-
-def pool_sampled(entries, kmax: int) -> dict:
-    """{q form: {"alpha": [kmax], "E": [E_1..E_kmax]}} pooled over sources."""
-    out = {}
-    forms = sorted({qf for e in entries for qf in (e.get("sampled") or {})})
-    for qf in forms:
-        cnt = [sum(e["sampled"][qf]["counted"][j] for e in entries if "sampled" in e) for j in range(kmax)]
-        tot = [sum(e["sampled"][qf]["sum"][j] for e in entries if "sampled" in e) for j in range(kmax)]
-        alpha = [t / c if c else None for t, c in zip(tot, cnt)]
-        out[qf] = {"alpha": alpha, "E": [expected_tokens(alpha[:K]) for K in range(1, kmax + 1)], "counted": cnt}
-    return out
-
-
 # ------------------------------------------------------------------------------ acceptance
 
 
@@ -591,9 +390,8 @@ def expected_tokens(alphas):
     return e
 
 
-def anchors_of(n_prompt: int, n: int, kmax: int | None = None):
-    """The anchors every K is measured at: n_prompt <= p <= n - kmax (7 for the vLLM drafters, 15 for Muse's)."""
-    return list(range(n_prompt, n - (KMAX if kmax is None else kmax) + 1))
+def anchors_of(n_prompt: int, n: int):
+    return list(range(n_prompt, n - KMAX + 1))
 
 
 def run_source(d, head, dump, ks, masks, batch: int, log=print):
@@ -664,9 +462,6 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
         summary[variant] = {corp: pool(es, ks) for corp, es in groups.items()}
         for corp in groups:
             summary[variant][corp]["sources"] = len(groups[corp]) if corp != "all" else len(srcs)
-            sm = pool_sampled(groups[corp], ks[-1])
-            if sm:
-                summary[variant][corp]["sampled"] = sm
     lines = []
     corpora = sorted({c for v in summary.values() for c in v}, key=lambda c: (c == "all", c))
     for corp in corpora:
@@ -674,8 +469,7 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
         txt = (f", recorded text = bf16 greedy at {sum(a for a, _ in ag) / max(1, sum(t for _, t in ag)):.3f} "
                f"of {sum(t for _, t in ag)} ids") if ag else ""
         lines.append(f"\n### {corp}{txt}\n")
-        kx = ks[-1]
-        lines.append("| arm | rows | " + " | ".join(f"E_{K}" for K in ks) + f" | best K | alpha_1..{kx} at K = {kx} |")
+        lines.append("| arm | rows | " + " | ".join(f"E_{K}" for K in ks) + " | best K | alpha_1..7 at K = 7 |")
         lines.append("|---|---:|" + "---:|" * len(ks) + "---:|---|")
         for variant in sorted(summary, key=_arm_order):
             s = summary[variant].get(corp)
@@ -683,21 +477,10 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
                 continue
             es = [s[str(K)]["E"] if str(K) in s else None for K in ks]
             best = max((e, K) for e, K in zip(es, ks) if e is not None)
-            a7 = s.get(str(kx), {}).get("alpha") or []
+            a7 = s.get(str(KMAX), {}).get("alpha") or []
             rows = s.get(str(ks[0]), {}).get("rows", 0)
             lines.append(f"| {variant} | {rows} | " + " | ".join(f"{e:.2f}" if e is not None else "-" for e in es)
                          + f" | {best[1]} | " + " ".join(f"{a:.2f}" if a is not None else "-" for a in a7) + " |")
-        sampled = [(v, summary[v][corp]["sampled"]) for v in sorted(summary, key=_arm_order)
-                   if corp in summary[v] and "sampled" in summary[v][corp]]
-        if sampled:
-            lines.append(f"\nSampled (the expected-acceptance formula, q = the draft row's top 16 at T): E_K\n")
-            lines.append("| arm | q | " + " | ".join(f"E_{K}" for K in ks) + " | best K |")
-            lines.append("|---|---|" + "---:|" * len(ks) + "---:|")
-            for v, sm in sampled:
-                for qf, r in sm.items():
-                    es = [r["E"][K - 1] for K in ks]
-                    best = max((e, K) for e, K in zip(es, ks))
-                    lines.append(f"| {v} | {qf} | " + " | ".join(f"{e:.2f}" for e in es) + f" | {best[1]} |")
     text = "\n".join(lines)
     print(text)
     if md_out:
@@ -707,7 +490,7 @@ def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
 
 
 def _arm_order(v):
-    base = ["bf16", "int8", "int8h", "w4a16", "int4g64", "int4g64h", "dflash2"]
+    base = ["bf16", "int8", "int8h", "w4a16"]
     b = v.split("-")[0]
     return (base.index(b) if b in base else 9, v)
 
@@ -734,134 +517,7 @@ def dump_files(dumps_dir, pattern):
     return fs
 
 
-MUSE_ARMS = ("bf16", "int8", "int8h", "int4g64", "int4g64h", "dflash2")
-MUSE_DRAFTER = "meta-models/Muse-Glimmer-30B-assistant"
-MUSE_TARGETS = ("Vishva007/Muse-Glimmer-30B-W4A16-AutoRound", "Vishva007/Muse-Glimmer-30B-W4A16-AutoRound-GPTQ")
-MUSE_DFLASH2 = "incoai/Muse-Glimmer-30B-DFlash2"
-
-
-def muse_sampling(target_dir: str, a) -> dict:
-    """The sampled estimate's parameters: --temperature / --top-k / --top-p over generation_config.json's (Muse: 1.0 /
-    64 / 0.95, spec 23 decision 4), and the target's multiplier / softcap (text_config: 0.19611613513818404 / 20)."""
-    gc = {}
-    gp = os.path.join(target_dir, "generation_config.json")
-    if os.path.isfile(gp):
-        with open(gp, encoding="utf-8") as f:
-            gc = json.load(f)
-    with open(os.path.join(target_dir, "config.json"), encoding="utf-8") as f:
-        c = json.load(f)
-    tc = c.get("text_config", c)
-    return {"temp": a.temperature if a.temperature is not None else float(gc.get("temperature", 1.0)),
-            "top_k": a.top_k if a.top_k is not None else int(gc.get("top_k", 64)),
-            "top_p": a.top_p if a.top_p is not None else float(gc.get("top_p", 0.95)),
-            "mult": float(tc["output_multiplier"]), "cap": float(tc["final_logit_softcapping"])}
-
-
-def cmd_run_muse(a) -> None:
-    """--model muse: the Muse-Glimmer assistant's arms over muse_taps.py's dumps (module docstring)."""
-    arms = [s for s in a.arms.split(",") if s]
-    bad = [s for s in arms if s not in MUSE_ARMS]
-    if bad:
-        raise SystemExit(f"--model muse: unknown arms {bad} (of {MUSE_ARMS})")
-    kmax = a.kmax or 15
-    lo, _, hi = a.k.partition("-")
-    ks = list(range(int(lo), int(hi or lo) + 1))
-    if not (1 <= ks[0] and ks[-1] <= kmax <= 15):
-        raise SystemExit(f"--k within 1-{kmax} (the block's 15 drafts)")
-    qforms = [q for q in a.q.split(",") if q]
-    if any(q not in ("raw", "capped") for q in qforms):
-        raise SystemExit("--q takes raw,capped")
-    files = dump_files(a.dumps, a.sources)
-    os.makedirs(a.out_dir, exist_ok=True)
-    if not files:
-        raise SystemExit(f"no *.taps.safetensors in {a.dumps} (muse_oracle.sh <data> taps)")
-    _load_deps()
-    heads = [dt.dump_header(f) for f in files]
-    n_anchor = sum(len(anchors_of(int(h["n_prompt"]), int(h["n"]), kmax)) for h in heads)
-    gflop = n_anchor * (16 * 2 * 2.556e9 + 15 * 2 * 6656 * 202048) / 1e9
-    print(f"--model muse: {len(files)} dumps, {n_anchor} anchors (one 16-row block each: K 1..{kmax} from one "
-          f"forward); arms {arms}; q {qforms}; {gflop / 1e3:.1f} TFLOP a base arm, ~{gflop / ASSUMED_GFLOPS / 60:.0f} "
-          f"min at {ASSUMED_GFLOPS:.0f} GFLOP/s (assumed)")
-    print("memory (estimated): the drafter float32 10.2 GB (+ the bf16 load 5.1 GB transient), the target embedding "
-          "bf16 2.7 GB, the head float32 5.4 GB (h arms: int8 1.3 GB) -> ~20-24 GiB peak")
-    if a.dry_run:
-        return
-    torch.set_grad_enabled(False)
-    target = a.target
-    if target is None:
-        for rid in MUSE_TARGETS:
-            target = target or ref.find_snapshot(rid, ("config.json", "model.safetensors.index.json"))
-    drafter_dir = a.drafter or ref.find_snapshot(MUSE_DRAFTER, ("config.json", "model.safetensors"))
-    if target is None or drafter_dir is None:
-        raise SystemExit(f"target {target} / drafter {drafter_dir} not found in {ref.hf_hub_dir()}")
-    sp = muse_sampling(target, a)
-    t0 = time.time()
-    embed, head_w = ref.read_target_embed_head(target)
-    print(f"target embed / head {time.time() - t0:.0f} s ({target}); sampled at T {sp['temp']}, top-k {sp['top_k']}, "
-          f"top-p {sp['top_p']}; the target's cap {sp['mult']} / {sp['cap']}", flush=True)
-    for arm in arms:
-        out_path = os.path.join(a.out_dir, f"accept.{arm}.json")
-        state = {"arm": arm, "variants": {arm: {}}, "agree": {}, "meta": {}}
-        if os.path.isfile(out_path):
-            with open(out_path, encoding="utf-8") as f:
-                old = json.load(f)
-            state["variants"][arm].update(old["variants"].get(arm, {}))
-            state["agree"].update(old.get("agree", {}))
-        todo = [f for f in files if dt.dump_header(f)["name"] not in state["variants"][arm]]
-        if not todo:
-            print(f"[{arm}] done", flush=True)
-            continue
-        dd = None
-        if arm == "dflash2":
-            dd = a.dflash2 or ref.find_snapshot(MUSE_DFLASH2, ("config.json", "model.safetensors"))
-            if dd is None:
-                print(f"[{arm}] SKIP: {MUSE_DFLASH2} is not in the cache (decision 12's optional arm; never "
-                      "downloaded here)", flush=True)
-                continue
-            cfg2 = ref.read_config(dd)
-            layers = [int(x) for x in dt.dump_header(todo[0])["layers"].split(",")]
-            if not set(cfg2.target_layer_ids) <= set(layers):
-                print(f"[{arm}] SKIP: its taps {cfg2.target_layer_ids} are not the dumps' {layers}", flush=True)
-                continue
-        ta = time.time()
-        if dd is not None:
-            d = ref.load_drafter(dd, embed=embed, lm_head=head_w)
-        else:
-            d = ref.load_drafter(drafter_dir, embed=embed, lm_head=head_w, dtype=torch.float32)
-        base = arm[:-1] if arm.endswith("h") else arm
-        nq = int8_simulate(d) if base == "int8" else int4g64_simulate(d) if base == "int4g64" else 0
-        head = Head(head_w, int8=arm.endswith("h"))
-        state["meta"] = {"drafter": dd or drafter_dir, "target": target, "quantised": nq,
-                         "head": "int8" if head.int8 else "bf16", "ks": ks, "kmax": kmax, "batch": a.batch,
-                         "sampling": sp, "q": qforms, "threads": torch.get_num_threads()}
-        print(f"[{arm}] drafter loaded {time.time() - ta:.0f} s ({nq} linears quantised), head {state['meta']['head']}",
-              flush=True)
-        for fn in todo:
-            dump = dt.load_dump(fn)
-            ts = time.time()
-            if dd is not None:
-                r, agree = run_source(d, head, dump, [k for k in ks if k <= d.cfg.max_k], {arm: None}, a.batch)
-                r = r[arm]
-            else:
-                r, agree = run_source_muse(d, head, dump, ks, a.batch, kmax, sp, qforms)
-            state["variants"][arm][dump["name"]] = r
-            state["agree"][dump["name"]] = [agree, dump["n"] - dump["n_prompt"]]
-            with open(out_path + ".tmp", "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=1)
-            os.replace(out_path + ".tmp", out_path)
-            e = pool([r], ks)
-            es = " ".join("%.2f" % e[str(K)]["E"] for K in ks if str(K) in e)
-            print(f"[{arm}] {dump['name']}: {len(anchors_of(dump['n_prompt'], dump['n'], kmax))} anchors, E_K {es}; "
-                  f"{time.time() - ts:.0f} s", flush=True)
-        del d, head
-    files_out = sorted(glob.glob(os.path.join(a.out_dir, "accept.*.json")))
-    summarize(files_out, os.path.join(a.out_dir, "summary.md"), ks)
-    print(f"wall {time.time() - t0:.0f} s", flush=True)
-
-
 def cmd_run(a) -> None:
-    if getattr(a, "model", "qwen38") == "muse":
-        return cmd_run_muse(a)
     arms = [s for s in a.arms.split(",") if s]
     bad = [s for s in arms if s not in ("bf16", "int8", "int8h", "w4a16")]
     if bad:
@@ -992,27 +648,13 @@ def main() -> None:
     r.add_argument("--target")
     r.add_argument("--sources", help="fnmatch over the dump file names")
     r.add_argument("--dry-run", action="store_true")
-    # spec 23f: the Muse-Glimmer form
-    r.add_argument("--model", default="qwen38", choices=("qwen38", "muse"))
-    r.add_argument("--kmax", type=int, help="--model muse: the anchors leave this many drafts (default 15)")
-    r.add_argument("--q", default="raw,capped", help="--model muse: the sampled estimate's q forms")
-    r.add_argument("--temperature", type=float)
-    r.add_argument("--top-k", type=int)
-    r.add_argument("--top-p", type=float)
-    r.add_argument("--dflash2", help="--model muse: incoai/Muse-Glimmer-30B-DFlash2's snapshot (decision 12)")
     s = sub.add_parser("summary")
     s.add_argument("files", nargs="+")
     s.add_argument("--md")
-    s.add_argument("--kmax", type=int, default=KMAX)
     a = ap.parse_args()
     if a.cmd == "summary":
-        summarize(a.files, a.md, tuple(range(1, a.kmax + 1)))
+        summarize(a.files, a.md)
     else:
-        if a.model == "muse":
-            if a.arms == "bf16,int8,int8h,w4a16":
-                a.arms = ",".join(MUSE_ARMS)
-            if a.k == f"1-{KMAX}":
-                a.k = f"1-{a.kmax or 15}"
         cmd_run(a)
 
 

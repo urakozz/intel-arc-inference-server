@@ -156,8 +156,8 @@ Server::Outcome Server::generate(const Request& r,
   try {
     if (!r.chat) {
       prompt = r.prompt;
-    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), 20e (Kolibri-1), 23e (Muse)
-      // Spec 23e: Muse-Glimmer maps the top-level reasoning_effort onto reasoning_strength (decision 3).
+    } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), 20e (Kolibri-1), 25e (Bolt)
+      // Spec 25e: Bolt maps the top-level reasoning_effort onto its template switches (decision 13).
       const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);
       check_template_kwargs(opts_.chat_format, kwargs);
       // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not (Bolt: none /

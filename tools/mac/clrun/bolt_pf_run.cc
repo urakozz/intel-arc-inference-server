@@ -11,7 +11,7 @@
 //   src/kernels/bolt/nb_pf_prep.cl    nb_pf_embed_gather
 //   25c's nb_prep.cl / nb_moe.cl at M = 2048: the norm's two-source fold, the router, the route, the shared act, the
 //                                     attention prep over 300 rows
-//   src/kernels/muse/mg_pf_attn.cl    the EAGER build at Bolt's full NoPE layer: every row bitwise decode's eager row
+//   src/kernels/bolt/mg_pf_attn.cl    the EAGER build at Bolt's full NoPE layer: every row bitwise decode's eager row
 // Not run here: nb_pf_cb's DPAS build and nb_pf_moe_gemm (DPAS, 2D block I/O), mg_pf_flash_attn's flash build.
 //
 // Bars: the twin is fed the device's own upstream outputs, so every kernel is compared on its own inputs - BITWISE where
@@ -450,7 +450,7 @@ void row_checks(clrun::Device& dev) {
       q16[i] = rne(fval(true, 70, uint32_t(i), 9));
       q[i] = f32(q16[i]);
     }
-    clrun::Program p(dev, "src/kernels/muse/mg_pf_attn.cl", {"TGT=64", "Q_HEADS=32", "KV_HEADS=2", "EAGER=1", "WINDOW=0", "RING=0"});
+    clrun::Program p(dev, "src/kernels/bolt/mg_pf_attn.cl", {"TGT=64", "Q_HEADS=32", "KV_HEADS=2", "EAGER=1", "WINDOW=0", "RING=0"});
     clrun::Buffer dq(dev, q), dk(dev, kc), dv(dev, vc), dout(dev, size_t(Cr) * 4096 * 2);
     p.run("mg_pf_flash_attn", {32 * 128, Cr}, {128, 1}, dq, dk, dv, dout, pos, Cr);
     std::vector<uint16_t> want(size_t(Cr) * 4096);
@@ -460,7 +460,7 @@ void row_checks(clrun::Device& dev) {
     // bolt_pf_kernels_test holds the eager rows bitwise there) - an ulp in 1 / sum moves a p by an ulp, o by a few
     report16("mg_pf_flash_attn EAGER: rows 2990..3009 vs decode's eager twin", dout.read<uint16_t>(), want, 4);
     // vs decode's own eager kernel on this device (the same division): row by row, bitwise (23d's rule, Decision 15)
-    clrun::Program pd(dev, "src/kernels/muse/mg_attn_eager.cl",
+    clrun::Program pd(dev, "src/kernels/bolt/mg_attn_eager.cl",
                       with(kCtrlDefs, {"M=1", "TGT=64", "Q_HEADS=32", "KV_HEADS=2", "WINDOW=0", "RING=0"}));
     const std::vector<uint16_t> ones(4096, uint16_t(0x3F80));
     clrun::Buffer gb(dev, ones), sb(dev, size_t(32) * L * 4), ob(dev, size_t(4096) * 2);

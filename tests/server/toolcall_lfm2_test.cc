@@ -810,7 +810,6 @@ void chat_format() {
   CHECK(ChatFormat::for_model_type("qwen3_5").kind == ChatFormat::Kind::Qwen);
   CHECK(ChatFormat::for_model_type("lfm2").kind == ChatFormat::Kind::Qwen);
   CHECK(ChatFormat::for_model_type("kolibri1").kind == ChatFormat::Kind::Kolibri);
-  CHECK(ChatFormat::for_model_type("muse_glimmer").kind == ChatFormat::Kind::Muse);
   CHECK(ChatFormat::for_model_type("k2_horizon").kind == ChatFormat::Kind::K2Horizon);
 
   const json messages = json::parse(R"([{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}]},

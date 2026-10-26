@@ -18,13 +18,6 @@ D1's bars, per draft row:
   scores  per draft the realized scores' cosine (aligned by candidate id) >= 0.9999 (bf16 drafter) / 0.999 (int8)
   walk    the K draft ids equal (T = 0)
 Exit 0 when every draft passes all three. Prints a table (and writes it to --md).
-
-Spec 23f: a run line with "form": "muse" (tools/probe/dflash_d1 beside a Muse-Glimmer target) is held to
-dflash_ref.py's Muse-Glimmer form (bitwise transformers 5.19.0) in float32: the assistant bf16 as shipped, int8 per-row
-RTN or int4 g64 RTN simulated (dflash_accept.int8_simulate / int4g64_simulate - the loader's quantisers), the
-target's head bf16 or int8 RTN; the whole 16-row block per draft (draft_block), the head's RAW logits on mask rows
-1..K (or, "q": "capped", 20 tanh(z x 0.19611613513818404 / 20) - the order is the raw one); greedy = argmax (the lowest
-id among equals). The bars are the same three (scores = the unary logits).
 """
 from __future__ import annotations
 
@@ -115,42 +108,6 @@ def reference_drafter(run: dict, drafter_dir: str, target_dir: str):
     return d
 
 
-MUSE_CAP_MULT, MUSE_CAP = 0.19611613513818404, 20.0   # Muse-Glimmer-30B's text_config (spec 23 §1)
-
-
-def muse_reference(run: dict, drafter_dir: str, target_dir: str):
-    """Spec 23f: (d, draft) - dflash_ref's Muse-form drafter at the engine's arm, and draft(anchor, p, K, ctx) ->
-    (out, logits_row) with out's cand_ids / unary / scores / ids from the arm's head over the block's rows 1..K."""
-    import torch
-    from types import SimpleNamespace
-    ref = _load("dflash_ref")
-    acc = _load("dflash_accept")
-    acc._load_deps()
-    d = ref.load_drafter(drafter_dir, target_dir, dtype=torch.float32)
-    if d.cfg.form != "muse":
-        raise SystemExit(f"the run line says form muse; {drafter_dir} is not a Muse-Glimmer assistant")
-    if run["format"] == "int8":
-        acc.int8_simulate(d)
-    elif run["format"] in ("int4", "int4g64"):
-        acc.int4g64_simulate(d)
-    elif run["format"] != "bf16":
-        raise SystemExit(f"format {run['format']}: bf16, int8 or int4")
-    head = acc.Head(d.lm_head, int8=run["head"] == "int8")
-    capped = run.get("q", "raw") == "capped"
-
-    def draft(anchor, p, K, ctx):
-        out = d.draft_block(anchor, p, K, ctx)
-        lg = head.logits(out.hidden[1:K + 1].float())
-        ids = acc.greedy_ids(lg)
-        cand, unary = ref.top_k_stable(lg, 16)
-        if capped:
-            unary = torch.tanh(unary * MUSE_CAP_MULT / MUSE_CAP) * MUSE_CAP
-            lg = torch.tanh(lg * MUSE_CAP_MULT / MUSE_CAP) * MUSE_CAP
-        o = SimpleNamespace(cand_ids=cand, unary=unary, scores=unary.clone(), ids=ids, hidden=out.hidden)
-        return o, (lambda j: lg[j])
-    return d, draft
-
-
 def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md: str | None = None,
              log=print) -> tuple[bool, dict]:
     import torch
@@ -159,11 +116,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
         lines = [json.loads(x) for x in f if x.strip()]
     run = lines[0]["run"]
     recs = lines[1:]
-    muse = run.get("form") == "muse"
-    if muse:
-        d, muse_draft = muse_reference(run, drafter_dir, target_dir)
-    else:
-        d = reference_drafter(run, drafter_dir, target_dir)
+    d = reference_drafter(run, drafter_dir, target_dir)
     bar = 0.9999 if run["format"] == "bf16" else 0.999
 
     by_dump = {}
@@ -180,18 +133,6 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
         pos = torch.arange(dump["tap_from"], dump["n"])
         ctx = d.context_kv({i: dump["taps"][i] for i in d.cfg.target_layer_ids}, pos)
         for r in rs:
-            if muse:
-                out, logits_row = muse_draft(r["anchor"], r["p"], r["k"], ctx)
-                c = compare(r, out, logits_row)
-                n += 1
-                n_sets += c["sets"]
-                n_walk += c["walk"]
-                n_cos += c["cos"] >= bar
-                ties += c["ties"]
-                worst = min(worst, c["cos"])
-                if not (c["sets"] and c["walk"] and c["cos"] >= bar):
-                    fails.append((name, r["p"], c))
-                continue
             out = d.draft_block(r["anchor"], r["p"], r["k"], ctx)
 
             def logits_row(j, out=out):
@@ -213,8 +154,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
         log(f"{name}: {len(rs)} drafts")
     table = (f"| arm | drafts | top-16 sets (tie-aware) | scores cos >= {bar} | walk equal | worst cos | ties excused |\n"
              f"|---|---:|---:|---:|---:|---:|---:|\n"
-             f"| {'Muse-Glimmer ' if muse else ''}drafter {run['format']}, head {run['head']}"
-             f"{', q ' + run.get('q', 'raw') if muse else ''}, V' {run['draft_vocab'] or 'full'} | {n} | {n_sets} | "
+             f"| drafter {run['format']}, head {run['head']}, V' {run['draft_vocab'] or 'full'} | {n} | {n_sets} | "
              f"{n_cos} | {n_walk} | {worst:.7f} | {ties} |\n")
     log(table)
     for name, p, c in fails[:20]:

@@ -332,7 +332,7 @@ The lock protocol (`tools/gpu_lock.sh`'s header has it in full; flock(2) on file
   running card stage and then holds the whole box.
 - **Host RAM:** two engines load at once (each checkpoint read through the page cache) and each
   b70-serve's auto prefix cache pins up to 32 GiB, sized from MemAvailable at its start. Stages
-  that check a host-RAM budget (`free -g`: Muse's real checkpoint, Qwen3.8-Flash-Next's 51.8 GB
+  that check a host-RAM budget (`free -g`: Qwen3.8-Flash-Next's 51.8 GB
   PLE table) and the passkey probes (fixed `/tmp/*passkey` directories) stay `gpu`.
 
 Which sessions split (`tools/box_validate.sh --list --only <rows>` shows each stage's lock):
@@ -342,7 +342,7 @@ Which sessions split (`tools/box_validate.sh --list --only <rows>` shows each st
 | 3, 4 and 5 | device 0: session 3, then session 4; device 1: session 5 from the start | rows 14, 15, 21 are `card` + `cpu` only; `r13.cli` (timing rows) and `r25.passkey` take the whole box; `r14.oracle` (cpu, ~20 min) holds the cpu lock, so session 4's host stages wait for it |
 | 6, 6b, 6c, 7, 8, 9c | no split | timed / idle-graded / two-card |
 | 9, 9b | no split by default | the synthetic one-card gates are `card`, but `r24.pp` / `r26.pp` / `r28.*` / `r3x.pp` need both cards; a card-only device-1 stream of row 26 or 33 beside device 0's other rows is possible once row 24 / 32 has passed |
-| later rows (no session yet) | pairs of one-card families: `--only r44,r45` (Muse synthetic) on device 0 with `--device 1 --only r51,r52` (LFM2.5); `--only r54,r55,r56` (DFlash) with `--device 1 --only r60,r61` (Bolt synthetic) | `--skip` the timed stages (`r51.p0`, `r60.p0`, `r60.fuse` - all in the device-1 streams) and run those later on device 0 with the box idle; each row's two-card stages (`*.pp`, `*.synth_pp`, `r60.golden`, `r61.golden`, `r56.pp_serve`) take the whole box when they come |
+| later rows (no session yet) | pairs of one-card families: `--only r54,r55,r56` (DFlash) on device 0 with `--device 1 --only r60,r61` (Bolt synthetic) | `--skip` the timed stages (`r60.p0`, `r60.fuse` - in the device-1 stream) and run those later on device 0 with the box idle; each row's two-card stages (`*.pp`, `*.synth_pp`, `r60.golden`, `r61.golden`, `r56.pp_serve`) take the whole box when they come |
 
 ```sh
 # sessions 3-5 on two cards (the frozen worktree, G0 PASS in this state)

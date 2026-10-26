@@ -16,7 +16,7 @@
 //                (each block's Bolt bytes 9 x 2 x I x 544 over moe.cl's 9 x 3,342,336 - a byte scale, x 0.75 at I 2304)
 //   SSM step     gdn_step_M1 at Qwen3.8's shape (48 x 128 x 128 fp32 = 3 MiB of state read and written a block,
 //                against Bolt's 4 MiB): raw and x 4/3 PROPOSED; its own state buffer a block
-//   attention    Muse-Glimmer's mg_attn at Q 32 KV 2 head_dim 128 full (NoPE) - Bolt's EXACT shape (Decision 15:
+//   attention    spec 23c's mg_attn at Q 32 KV 2 head_dim 128 full (NoPE) - Bolt's EXACT shape (Decision 15:
 //                the engine binds these binaries): mg_attn_decode + mg_attn_reduce with a ones gate
 //   norm         lfm_res_norm at K 4096 over 8 work-groups at split-K 1 (lfm_prep.cl - the one-launch norm site the
 //                nb_res_norm family copies: every work-group folds the row and recomputes Σ), ONE launch a site;
@@ -79,7 +79,7 @@ constexpr size_t kTile = 544;   // a layout-1 tile: 128 u32 of nibbles + 8 u32 o
 inline size_t int4_bytes(uint32_t K, uint32_t N) { return size_t(N / 16) * (K / 64) * kTile; }
 constexpr size_t kGuBlock = size_t(2 * kMoeInter / 16) * (kMoeHidden / 64) * kTile;   // 2,228,224
 constexpr size_t kDnBlock = size_t(kMoeHidden / 16) * (kMoeInter / 64) * kTile;       // 1,114,112
-// Muse's mg_attn at Bolt's shape (mg_attn_M1_T64_Q32KV2_F).
+// spec 23c's mg_attn at Bolt's shape (mg_attn_M1_T64_Q32KV2_F).
 constexpr uint32_t kQHeads = 32, kKvHeads = 2, kHd = 128, kAttnTgt = 64, kAttnPart = kHd + 2;
 // gdn_step_M1 at Qwen3.8's shape: 48 v-heads x 128 x 128 fp32 (3 MiB), its buffers (gdn_step.cl's header).
 constexpr uint32_t kGdnHeads = 48, kGdnDim = 128, kGdnConv = 10240, kGdnQkvz = 16384, kGdnSmallFloats = 41008 + 48;

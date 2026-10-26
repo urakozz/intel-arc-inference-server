@@ -388,9 +388,7 @@ void test_real_bytes(const std::string& path) {
   loader::DraftFormat f;
   CHECK(loader::parse_draft_format("int8", f) && f == loader::DraftFormat::Int8);
   CHECK(loader::parse_draft_format("bf16", f) && f == loader::DraftFormat::Bf16);
-  // spec 23f: int4 (g64 RTN, Muse-Glimmer's assistant; Qwen3.8's CLI refuses it) parses; anything else does not
-  CHECK(loader::parse_draft_format("int4", f) && f == loader::DraftFormat::Int4G64);
-  CHECK(!loader::parse_draft_format("fp8", f) && !loader::parse_draft_format("int4g128", f));
+  CHECK(!loader::parse_draft_format("int4", f));
 }
 
 }  // namespace
