@@ -1,6 +1,5 @@
 #include "runtime/bolt/bolt_capture.h"
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -12,9 +11,8 @@
 #include "loader/bolt_layout.h"
 #include "runtime/control.h"
 
-// bolt_capture.cc - one device's Nemotron 3.5 Bolt decode list (bolt_capture.h has the walk in one table) and, spec 26c, its
-// verify lists at M rows (the same walk over the verify scratch). Every binding site names the kernel it honours; argument
-// orders are each __kernel's, in src/kernels/bolt/*.cl and the reused sources.
+// bolt_capture.cc - one device's Nemotron 3.5 Bolt decode list (bolt_capture.h has the walk in one table). Every binding
+// site names the kernel it honours; argument orders are each __kernel's, in src/kernels/bolt/*.cl and the reused sources.
 namespace runtime::bolt {
 namespace {
 
@@ -27,10 +25,6 @@ static_assert(offsetof(Control, pos) == kernels::ctrl_index::kPos * 4 &&
                   offsetof(Control, out_token) == kernels::ctrl_index::kOutToken * 4,
               "runtime::Control and CTRL_DEFINES disagree");
 static_assert(kM == 1, "the Bolt decode binaries are M = 1");
-// Spec 26c: the `_SL8` binaries read the live slot at CTRL_LIVE 19 (the CMake block's) - Control::gdn_live.
-static_assert(offsetof(Control, gdn_live) == 19 * 4, "the CMake spec 26c block's CTRL_LIVE is Control::gdn_live's word");
-static_assert(kVerifyRows == kb::kVerifyRows && kSpecSlots == kb::kSpecSlots,
-              "runtime/bolt/bolt_sizes.h and kernels/bolt_kernels.h disagree on the verify lists");
 
 uint8_t* at(const l0::Mem& m, size_t off) { return static_cast<uint8_t*>(m.ptr()) + off; }
 
@@ -39,27 +33,12 @@ void require(bool ok, const std::string& what) {
 }
 bool aligned64(const void* p) { return reinterpret_cast<uintptr_t>(p) % 64 == 0; }
 
-// The scratch a list binds: the decode list's (BoltBuffers, M = 1) or a verify list's (BoltVerifyBuffers, kVerifyRows) - the
-// same names, so one walk binds either.
-struct Scratch {
-  l0::Mem *h0, *h1, *x, *slices, *xc, *y, *g, *logits_r, *routes, *lat, *sh, *moe_a, *moe_r, *attn_q, *attn_part, *attn_out,
-      *ones, *logits, *argmax_part, *attn_scores;
-  uint32_t rows;
-};
-template <class B>
-Scratch scratch_of(B& b, uint32_t rows) {
-  return {&b.h0,   &b.h1,     &b.x,      &b.slices, &b.xc,       &b.y,        &b.g,        &b.logits_r,
-          &b.routes, &b.lat,  &b.sh,     &b.moe_a,  &b.moe_r,    &b.attn_q,   &b.attn_part, &b.attn_out,
-          &b.ones, &b.logits, &b.argmax_part, b.attn_scores.get(), rows};
-}
-
 class Walk {
  public:
-  Walk(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b, Scratch s,
-       BoltFuse fuse, bool int8_head, const StageLink* link, l0::Mem* tap, ProfileEvents* prof, uint32_t M = kM,
-       const VerifyBind* verify = nullptr)
-      : ctx_(ctx), part_(part), d_(d), b_(b), s_(s), fuse_(fuse), int8_(int8_head), link_(link), tap_(tap), prof_(prof),
-        M_(M), verify_(verify), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+  Walk(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b, BoltFuse fuse,
+       bool int8_head, const StageLink* link, l0::Mem* tap, ProfileEvents* prof)
+      : ctx_(ctx), part_(part), d_(d), b_(b), fuse_(fuse), int8_(int8_head), link_(link), tap_(tap), prof_(prof),
+        step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
     check();
@@ -76,15 +55,11 @@ class Walk {
     if (link_ && dev == 0) handoff_out();
     if (dev + 1 == b_.placement.devices) head();
     const PpHandoff hm = link_ ? link_->mode : kDefaultPpHandoff;
-    const size_t want = verify_ ? verify_device_launches(d_, b_.placement, dev, M_, b_.attn,
-                                                         verify_->union_moe ? VerifyMoe::Union : VerifyMoe::Plain)
-                                : device_launches(d_, b_.placement, dev, b_.attn, fuse_, hm);
-    require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s " +
-                                            (verify_ ? "M = " + std::to_string(M_) + " verify" : std::string("decode")) +
-                                            " list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                                            std::to_string(want) + " runtime::bolt::" +
-                                            (verify_ ? "verify_device_launches" : "device_launches") + " gives (" +
-                                            bolt_attn_name(b_.attn) + " attention, fuse " + bolt_fuse_name(fuse_) + ")");
+    const size_t want = device_launches(d_, b_.placement, dev, b_.attn, fuse_, hm);
+    require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s decode list has " +
+                                            std::to_string(step_.kernel_count) + " launches, not the " + std::to_string(want) +
+                                            " runtime::bolt::device_launches gives (" + bolt_attn_name(b_.attn) +
+                                            " attention, fuse " + bolt_fuse_name(fuse_) + ")");
     require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
     require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
     require(!prof_ || prof_->events.size() == step_.kernel_count, "a launch got no profiling event");
@@ -93,8 +68,6 @@ class Walk {
   }
 
  private:
-  bool union_moe() const { return verify_ && verify_->union_moe && M_ > 1; }
-
   void check() {
     // The kernels' shapes are Bolt's (kernels::bolt); a descriptor may differ only in its block count.
     require(d_.hidden == kb::kHidden && d_.m_heads == kb::kMHeads && d_.m_head_dim == kb::kMHeadDim &&
@@ -121,20 +94,18 @@ class Walk {
     const PersistentSizes ps = persistent_sizes(d_, b_.placement, b_.device, b_.max_len, b_.state);
     require(b_.kv_k.size() == ps.kv_k && b_.conv_ring.size() == ps.conv_ring && b_.ssm.size() == ps.ssm,
             "the persistent group is not persistent_sizes'");
-    require(M_ >= 1 && M_ <= s_.rows, "M = " + std::to_string(M_) + " exceeds the scratch's " + std::to_string(s_.rows) +
-                                          " rows");
-    const ScratchSizes ss = scratch_sizes(d_, b_.max_len, b_.attn, s_.rows);
-    require(s_.slices->size() == ss.slices && s_.routes->size() == ss.routes && s_.attn_part->size() == ss.attn_part &&
-                s_.h0->size() == ss.h0 && s_.h1->size() == ss.h1 && s_.moe_a->size() == ss.moe_a,
-            "the scratch is not runtime::bolt::scratch_sizes' at " + std::to_string(s_.rows) + " rows");
-    require(bool(s_.attn_scores) == (b_.attn == BoltAttn::Eager && d_.attn_layers() > 0),
+    const ScratchSizes ss = scratch_sizes(d_, b_.max_len, b_.attn);
+    require(b_.slices.size() == ss.slices && b_.routes.size() == ss.routes && b_.attn_part.size() == ss.attn_part &&
+                b_.h0.size() == ss.h0 && b_.h1.size() == ss.h1 && b_.moe_a.size() == ss.moe_a,
+            "the decode scratch is not runtime::bolt::scratch_sizes'");
+    require(bool(b_.attn_scores) == (b_.attn == BoltAttn::Eager && d_.attn_layers() > 0),
             "eager's score row exists exactly under eager");
     // Plan 25c's alignment rule: KV rows (256 B), ring rows (20,480 B), SSM state slices, expert blocks - 64 B bases.
     require(kv_layer_bytes(d_, b_.max_len) % 64 == 0 && ring_layer_bytes(d_) % 64 == 0 &&
                 ssm_layer_bytes(d_, b_.state) % 64 == 0 && (size_t(d_.m_conv_dim) * 2) % 64 == 0 &&
                 (size_t(d_.kv_n()) * 2) % 64 == 0,
             "a per-block slice is not a 64-byte multiple");
-    for (const l0::Mem* m : {&b_.kv_k, &b_.kv_v, &b_.conv_ring, &b_.ssm, s_.slices})
+    for (const l0::Mem* m : {&b_.kv_k, &b_.kv_v, &b_.conv_ring, &b_.ssm, &b_.slices})
       require(aligned64(m->ptr()), "a persistent / scratch base is not 64-byte aligned");
     for (uint32_t l = part_.first; l < part_.end; ++l)
       if (d_.is_moe(l)) {
@@ -144,52 +115,20 @@ class Walk {
                 "block " + std::to_string(l) + "'s expert blocks are not 64-byte aligned");
       }
     if (tap_) require(tap_->size() >= tap_bytes(d_), "the tap is smaller than [layers][M][hidden] bf16");
-    std::vector<std::string> need;
-    if (verify_) {
-      require(!tap_ && !prof_, "a verify list carries no debug tap and no profile");
-      require(!fuse_.any(), "a verify list binds no fused arm (each is bitwise the as-built list)");
-      require(!link_ || link_->mode == PpHandoff::Copy,
-              "a verify list crosses by the copy hand-off only (19d: the drafter's taps ride on its barrier) - peer is refused");
-      const BoltVerifyBuffers& vb = *verify_->vb;
-      require(vb.device == b_.device && vb.max_len == b_.max_len && vb.state == b_.state && vb.attn == b_.attn,
-              "the verify buffers are another device's / length's / state's");
-      const VerifySizes vs = verify_sizes(d_, b_.placement, b_.device, b_.max_len, b_.attn, b_.state);
-      require(vb.slots.size() == vs.slots && vb.moe_d.size() == vs.moe_d, "the verify buffers are not verify_sizes'");
-      require(aligned64(vb.slots.ptr()), "the slots' base is not 64-byte aligned");
-      if (verify_->taps) {
-        require(verify_->tap_layers && !verify_->tap_layers->empty(), "the drafter's taps without tap layers");
-        for (uint32_t t : *verify_->tap_layers)
-          require(t < d_.layers, "the drafter taps block " + std::to_string(t) + " of a " + std::to_string(d_.layers) +
-                                     "-block target");
-        require(verify_->taps->size() >= size_t(kVerifyRows) * verify_->tap_layers->size() * d_.hidden * 2,
-                "the drafter's tap buffer is smaller than [8][taps][hidden] bf16");
-      }
-      need = kb::verify_variants(d_, M_, int8_, b_.attn == BoltAttn::Eager, b_.state == BoltState::Bf16, verify_->union_moe);
-    } else {
-      kb::Arms arms;
-      arms.router = fuse_.router;
-      arms.route = fuse_.route;
-      arms.conv = fuse_.conv;
-      need = kb::decode_variants(d_, int8_, b_.attn == BoltAttn::Eager, link_ && link_->mode == PpHandoff::Peer,
-                                 b_.state == BoltState::Bf16, arms);
-    }
+    kb::Arms arms;
+    arms.router = fuse_.router;
+    arms.route = fuse_.route;
+    arms.conv = fuse_.conv;
+    const std::vector<std::string> need =
+        kb::decode_variants(d_, int8_, b_.attn == BoltAttn::Eager, link_ && link_->mode == PpHandoff::Peer,
+                            b_.state == BoltState::Bf16, arms);
     for (const std::string& v : need)   // a missing binary is named before a command is appended
-      require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with " +
-                                                          (verify_ ? "B70_BOLT_VERIFY=ON" : "B70_BOLT=ON"));
+      require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with B70_BOLT=ON");
   }
 
-  l0::Mem& h(int i) { return i ? *s_.h1 : *s_.h0; }
+  l0::Mem& h(int i) { return i ? b_.h1 : b_.h0; }
   void tap_row(uint32_t l, int buf) {
     step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), h(buf).ptr(), size_t(kM) * d_.hidden * 2);
-  }
-  // Spec 26c: block l's output, every row, into the drafter's taps [row][tap][hidden] (l one of its tap blocks).
-  void drafter_taps(uint32_t l) {
-    const std::vector<uint32_t>& tl = *verify_->tap_layers;
-    const auto it = std::find(tl.begin(), tl.end(), l);
-    if (it == tl.end()) return;
-    const size_t t = size_t(it - tl.begin()), row = size_t(d_.hidden) * 2;
-    for (uint32_t r = 0; r < M_; ++r)
-      step_.list.copy(at(*verify_->taps, (size_t(r) * tl.size() + t) * row), at(h(cur_), size_t(r) * row), row);
   }
 
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
@@ -221,39 +160,37 @@ class Walk {
 
   const float* small(uint32_t l, size_t off) const { return reinterpret_cast<const float*>(at(*part_.layer(l).small, off)); }
 
-  // nb_embed_gather(ctrl, tiles, h) - the gathered embedding of cur_token[0 .. M-1] becomes the residual h[cur]; nothing
-  // pending.
+  // nb_embed_gather(ctrl, tiles, h) - the gathered embedding becomes the residual h[cur]; nothing pending.
   void embed() {
-    l0::Kernel& k = kernel(kb::embed_variant(M_), "nb_embed_gather", kb::kEmbedWg);
+    l0::Kernel& k = kernel(kb::embed_variant(kM), "nb_embed_gather", kb::kEmbedWg);
     k.arg_ptr(0, b_.control.ptr());
     k.arg_ptr(1, part_.embed_tiles->ptr());
     k.arg_ptr(2, h(cur_).ptr());
-    launch(k, 1, M_);
+    launch(k, 1, kM);
     pending_ = {};
   }
 
   // nb_res_norm(h_in, slices, slices2, w, h_out, x[, router tiles, logits_r, n_exp]), grid (kNormWgs [+ E / 16], M): folds
   // the pending slices (h[cur] -> h[1 - cur], then cur flips) or only normalises (_NF). The folded h is the previous
-  // block's output: its tap row (debug) and, in a verify list, the drafter's taps of a tap block.
+  // block's output: its tap row.
   void norm(const float* w, const loader::DeviceWeight* router = nullptr, uint32_t n_exp = 0) {
     const BoltPending p = pending_;
     const int in = cur_, out = p.s1 ? 1 - cur_ : cur_;
-    const int folded = p.s1 ? pending_tap_ : -1;
-    l0::Kernel& k = kernel(kb::res_norm_variant(M_, p.s1, p.s2, router != nullptr), "nb_res_norm", kb::kNormWg);
+    l0::Kernel& k = kernel(kb::res_norm_variant(kM, p.s1, p.s2, router != nullptr), "nb_res_norm", kb::kNormWg);
     k.arg_ptr(0, h(in).ptr());
-    k.arg_ptr(1, s_.slices->ptr());
-    k.arg_ptr(2, at(*s_.slices, size_t(p.s1) * M_ * d_.hidden * 4));   // the second source right after the first's
+    k.arg_ptr(1, b_.slices.ptr());
+    k.arg_ptr(2, at(b_.slices, size_t(p.s1) * kM * d_.hidden * 4));   // the second source right after the first's
     k.arg_ptr(3, w);
     k.arg_ptr(4, h(out).ptr());
-    k.arg_ptr(5, s_.x->ptr());
+    k.arg_ptr(5, b_.x.ptr());
     if (router) {
       require(router->shape.K == d_.hidden && router->shape.N == n_exp && router->kind == model::WeightKind::Bf16,
               "the router is not bf16 [experts][hidden] tiles");
       k.arg_ptr(6, router->mem.ptr());
-      k.arg_ptr(7, s_.logits_r->ptr());
+      k.arg_ptr(7, b_.logits_r.ptr());
       k.arg<uint32_t>(8, n_exp);
     }
-    launch(k, kb::kNormWgs + (router ? n_exp / 16 : 0), M_);
+    launch(k, kb::kNormWgs + (router ? n_exp / 16 : 0), kM);
     // Review Focus 4: a fold writes the buffer it did not read; the next reader reads the one written.
     require(!p.s1 || &h(out) != &h(in), "a fold site would rewrite the buffer its work-groups read");
     cur_ = out;
@@ -261,7 +198,6 @@ class Walk {
       tap_row(uint32_t(pending_tap_), cur_);
       pending_tap_ = -1;
     }
-    if (verify_ && verify_->taps && folded >= 0) drafter_taps(uint32_t(folded));
     pending_ = {};
   }
 
@@ -271,12 +207,12 @@ class Walk {
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Int4, "a Bolt linear is int4 (spec 25 §5)");
     require(s.layout == 1 || bool(w.scales), "a layout-0 linear has no scales allocation");
-    require(s_.slices->size() >= off + size_t(s.S) * M_ * s.N * 4, "the slices are smaller than [S][M][N]");
-    l0::Kernel& k = kernel(kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout), "gemv", 64);
+    require(b_.slices.size() >= off + size_t(s.S) * kM * s.N * 4, "the slices are smaller than [S][M][N]");
+    l0::Kernel& k = kernel(kernels::gemv_variant(kM, s.K, s.N, s.S, s.layout), "gemv", 64);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());   // layout 1: not read
     k.arg_ptr(2, x);
-    k.arg_ptr(3, at(*s_.slices, off));
+    k.arg_ptr(3, at(b_.slices, off));
     launch(k, s.N / 64, s.S);
   }
 
@@ -296,50 +232,46 @@ class Walk {
     require(L.in_proj && L.out_proj && L.in_proj->shape.N == d_.m_inproj && L.out_proj->shape.K == d_.m_inner,
             "block " + std::to_string(l) + "'s Mamba linears");
     norm(small(l, sb.norm));
-    gemv(*L.in_proj, s_.x->ptr());
+    gemv(*L.in_proj, b_.x.ptr());
     const uint32_t S = L.in_proj->shape.S;
     if (!fuse_.conv) {   // nb_conv(ctrl, slices, cw, cb, ring, xc), grid (10240 / 256)
-      l0::Kernel& k = kernel(kb::conv_variant(M_, S), "nb_conv", kb::kConvWg);
+      l0::Kernel& k = kernel(kb::conv_variant(kM, S), "nb_conv", kb::kConvWg);
       k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, s_.slices->ptr());
+      k.arg_ptr(1, b_.slices.ptr());
       k.arg_ptr(2, small(l, sb.conv_w));
       k.arg_ptr(3, small(l, sb.conv_b));
       k.arg_ptr(4, b_.ring_layer(l));
-      k.arg_ptr(5, s_.xc->ptr());
+      k.arg_ptr(5, b_.xc.ptr());
       launch(k, d_.m_conv_dim / kb::kConvWg, 1);
     }
-    {   // nb_ssm(ctrl, slices, xc | cw, cb, ring, A, D, dt_bias, state, y[, state_spec]), grid (128 x 4); a verify list's is
-        // the slot build `_SL8` (slot 0 the block's state, slots 1..7 its verify copies)
-      const bool b16 = b_.state == BoltState::Bf16;
-      l0::Kernel& k = kernel(verify_ ? kb::ssm_slots_variant(M_, S, b16) : kb::ssm_variant(M_, S, fuse_.conv, b16), "nb_ssm",
-                             kb::kSsmWg);
+    {   // nb_ssm(ctrl, slices, xc | cw, cb, ring, A, D, dt_bias, state, y), grid (128 x 4)
+      l0::Kernel& k = kernel(kb::ssm_variant(kM, S, fuse_.conv, b_.state == BoltState::Bf16), "nb_ssm", kb::kSsmWg);
       uint32_t a = 0;
       k.arg_ptr(a++, b_.control.ptr());
-      k.arg_ptr(a++, s_.slices->ptr());
+      k.arg_ptr(a++, b_.slices.ptr());
       if (fuse_.conv) {
         k.arg_ptr(a++, small(l, sb.conv_w));
         k.arg_ptr(a++, small(l, sb.conv_b));
         k.arg_ptr(a++, b_.ring_layer(l));
       } else {
-        k.arg_ptr(a++, s_.xc->ptr());
+        k.arg_ptr(a++, b_.xc.ptr());
       }
       k.arg_ptr(a++, small(l, sb.A));
       k.arg_ptr(a++, small(l, sb.D));
       k.arg_ptr(a++, small(l, sb.dt_bias));
       k.arg_ptr(a++, b_.ssm_layer(l));
-      k.arg_ptr(a++, s_.y->ptr());
-      if (verify_) k.arg_ptr(a++, verify_->vb->slots_layer(l));
+      k.arg_ptr(a++, b_.y.ptr());
       launch(k, kb::ssm_groups(), 1);
     }
     {   // nb_gnorm(slices, y, w, out), grid (8, M)
-      l0::Kernel& k = kernel(kb::gnorm_variant(M_, S), "nb_gnorm", kb::kGnormWg);
-      k.arg_ptr(0, s_.slices->ptr());
-      k.arg_ptr(1, s_.y->ptr());
+      l0::Kernel& k = kernel(kb::gnorm_variant(kM, S), "nb_gnorm", kb::kGnormWg);
+      k.arg_ptr(0, b_.slices.ptr());
+      k.arg_ptr(1, b_.y.ptr());
       k.arg_ptr(2, small(l, sb.gnorm));
-      k.arg_ptr(3, s_.g->ptr());
-      launch(k, d_.m_inner / kb::kGnormGroup, M_);
+      k.arg_ptr(3, b_.g.ptr());
+      launch(k, d_.m_inner / kb::kGnormGroup, kM);
     }
-    gemv(*L.out_proj, s_.g->ptr());
+    gemv(*L.out_proj, b_.g.ptr());
     pending_ = {L.out_proj->shape.S, 0};
   }
 
@@ -347,50 +279,50 @@ class Walk {
     require(L.qkv && L.o_proj && L.qkv->shape.N == d_.qkv_n() && L.o_proj->shape.N == d_.hidden,
             "block " + std::to_string(l) + "'s attention linears");
     norm(small(l, sb.norm));
-    gemv(*L.qkv, s_.x->ptr());
+    gemv(*L.qkv, b_.x.ptr());
     void* kv_k = b_.k_layer(l);
     void* kv_v = b_.v_layer(l);
     {   // nb_attn_prep(ctrl, slices, attn_q, kv_k, kv_v), grid (ceil(4608 / 256), M)
-      l0::Kernel& k = kernel(kb::attn_prep_variant(M_, L.qkv->shape.S), "nb_attn_prep", kb::kPrepWg);
+      l0::Kernel& k = kernel(kb::attn_prep_variant(kM, L.qkv->shape.S), "nb_attn_prep", kb::kPrepWg);
       k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, s_.slices->ptr());
-      k.arg_ptr(2, s_.attn_q->ptr());
+      k.arg_ptr(1, b_.slices.ptr());
+      k.arg_ptr(2, b_.attn_q.ptr());
       k.arg_ptr(3, kv_k);
       k.arg_ptr(4, kv_v);
-      launch(k, (d_.qkv_n() + kb::kPrepWg - 1) / kb::kPrepWg, M_);
+      launch(k, (d_.qkv_n() + kb::kPrepWg - 1) / kb::kPrepWg, kM);
     }
-    const std::string v = kb::attn_variant(M_, b_.attn == BoltAttn::Eager);
+    const std::string v = kb::attn_variant(kM, b_.attn == BoltAttn::Eager);
     if (b_.attn == BoltAttn::Eager) {   // mg_attn_eager(ctrl, attn_q, kv_k, kv_v, gate, attn_s, attn_out, stride)
       l0::Kernel& k = kernel(v, "mg_attn_eager", kb::kAttnWg);
       k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, s_.attn_q->ptr());
+      k.arg_ptr(1, b_.attn_q.ptr());
       k.arg_ptr(2, kv_k);
       k.arg_ptr(3, kv_v);
-      k.arg_ptr(4, s_.ones->ptr());
-      k.arg_ptr(5, s_.attn_scores->ptr());
-      k.arg_ptr(6, s_.attn_out->ptr());
+      k.arg_ptr(4, b_.ones.ptr());
+      k.arg_ptr(5, b_.attn_scores->ptr());
+      k.arg_ptr(6, b_.attn_out.ptr());
       k.arg<uint32_t>(7, b_.max_len);
-      launch(k, d_.q_heads, M_);
+      launch(k, d_.q_heads, kM);
     } else {
       {   // mg_attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part), grid (kv heads, TGT)
         l0::Kernel& k = kernel(v, "mg_attn_decode", kb::kAttnWg);
         k.arg_ptr(0, b_.control.ptr());
-        k.arg_ptr(1, s_.attn_q->ptr());
+        k.arg_ptr(1, b_.attn_q.ptr());
         k.arg_ptr(2, kv_k);
         k.arg_ptr(3, kv_v);
-        k.arg_ptr(4, s_.attn_part->ptr());
+        k.arg_ptr(4, b_.attn_part.ptr());
         launch(k, d_.kv_heads, kb::kAttnTgt);
       }
       {   // mg_attn_reduce(ctrl, attn_part, gate, attn_out), grid (q heads, M) - the ones gate: rne(rne(o) x 1) = rne(o)
         l0::Kernel& k = kernel(v, "mg_attn_reduce", kb::kAttnWg);
         k.arg_ptr(0, b_.control.ptr());
-        k.arg_ptr(1, s_.attn_part->ptr());
-        k.arg_ptr(2, s_.ones->ptr());
-        k.arg_ptr(3, s_.attn_out->ptr());
-        launch(k, d_.q_heads, M_);
+        k.arg_ptr(1, b_.attn_part.ptr());
+        k.arg_ptr(2, b_.ones.ptr());
+        k.arg_ptr(3, b_.attn_out.ptr());
+        launch(k, d_.q_heads, kM);
       }
     }
-    gemv(*L.o_proj, s_.attn_out->ptr());
+    gemv(*L.o_proj, b_.attn_out.ptr());
     pending_ = {L.o_proj->shape.S, 0};
   }
 
@@ -402,85 +334,57 @@ class Walk {
             "block " + std::to_string(l) + "'s MoE block");
     require(E % 16 == 0 && E <= kb::kMaxExperts && E > kb::kTopK, "block " + std::to_string(l) + "'s E " + std::to_string(E));
     norm(small(l, sb.norm), fuse_.router ? L.router.get() : nullptr, E);
-    void* rt = at(*s_.routes, route_at(l, M_));
+    void* rt = at(b_.routes, route_at(l));
     const float* bias = small(l, sb.e_bias);
     if (!fuse_.router) {   // nb_router(x, w, logits, n_exp), grid (E / 16, M)
-      l0::Kernel& k = kernel(kb::router_variant(M_), "nb_router", kb::kRouterWg);
-      k.arg_ptr(0, s_.x->ptr());
+      l0::Kernel& k = kernel(kb::router_variant(kM), "nb_router", kb::kRouterWg);
+      k.arg_ptr(0, b_.x.ptr());
       k.arg_ptr(1, L.router->mem.ptr());
-      k.arg_ptr(2, s_.logits_r->ptr());
+      k.arg_ptr(2, b_.logits_r.ptr());
       k.arg<uint32_t>(3, E);
-      launch(k, E / 16, M_);
+      launch(k, E / 16, kM);
     }
     if (!fuse_.route) {   // nb_route(logits, bias, route, n_exp), grid (1, M)
-      l0::Kernel& k = kernel(kb::route_variant(M_), "nb_route", kb::kRouteWg);
-      k.arg_ptr(0, s_.logits_r->ptr());
+      l0::Kernel& k = kernel(kb::route_variant(kM), "nb_route", kb::kRouteWg);
+      k.arg_ptr(0, b_.logits_r.ptr());
       k.arg_ptr(1, bias);
       k.arg_ptr(2, rt);
       k.arg<uint32_t>(3, E);
-      launch(k, 1, M_);
+      launch(k, 1, kM);
     }
-    gemv(*L.fc1_shared_up, s_.x->ptr());
+    gemv(*L.fc1_shared_up, b_.x.ptr());
     {   // nb_sh_act(slices, lat, sh), grid (ceil(6400 / 256), M)
-      l0::Kernel& k = kernel(kb::sh_act_variant(M_, L.fc1_shared_up->shape.S), "nb_sh_act", kb::kActWg);
-      k.arg_ptr(0, s_.slices->ptr());
-      k.arg_ptr(1, s_.lat->ptr());
-      k.arg_ptr(2, s_.sh->ptr());
-      launch(k, (kb::kFc1N + kb::kActWg - 1) / kb::kActWg, M_);
+      l0::Kernel& k = kernel(kb::sh_act_variant(kM, L.fc1_shared_up->shape.S), "nb_sh_act", kb::kActWg);
+      k.arg_ptr(0, b_.slices.ptr());
+      k.arg_ptr(1, b_.lat.ptr());
+      k.arg_ptr(2, b_.sh.ptr());
+      launch(k, (kb::kFc1N + kb::kActWg - 1) / kb::kActWg, kM);
     }
-    if (union_moe()) {
-      {   // nb_moe_up_U(route, lat, w, a, n_exp), grid (M x 9 x I / 64): one work-group set per distinct expert
-        l0::Kernel& k = kernel(kb::moe_up_union_variant(M_, I), "nb_moe_up_U", kb::moe_up_wg());
-        k.arg_ptr(0, rt);
-        k.arg_ptr(1, s_.lat->ptr());
-        k.arg_ptr(2, L.experts->ptr());
-        k.arg_ptr(3, s_.moe_a->ptr());
-        k.arg<uint32_t>(4, E);
-        launch(k, kb::moe_up_union_groups(M_, I));
+    {   // nb_moe_up([logits, bias,] route, lat, w, a, n_exp), grid (9 x I / 64, M)
+      l0::Kernel& k = kernel(kb::moe_up_variant(kM, I, fuse_.route), "nb_moe_up", kb::moe_up_wg());
+      uint32_t a = 0;
+      if (fuse_.route) {
+        k.arg_ptr(a++, b_.logits_r.ptr());
+        k.arg_ptr(a++, bias);
       }
-      {   // nb_moe_down_U(route, a, w, d, n_exp), grid (M x 9 x 16): the per-pair down rows into the verify's moe_d
-        l0::Kernel& k = kernel(kb::moe_down_union_variant(M_, I), "nb_moe_down_U", kb::moe_down_union_wg());
-        k.arg_ptr(0, rt);
-        k.arg_ptr(1, s_.moe_a->ptr());
-        k.arg_ptr(2, L.experts->ptr());
-        k.arg_ptr(3, verify_->vb->moe_d.ptr());
-        k.arg<uint32_t>(4, E);
-        launch(k, kb::moe_down_union_groups(M_));
-      }
-      {   // nb_moe_comb_U(route, d, r), grid (1024 / 256, M): nb_moe_down's ascending-id combine
-        l0::Kernel& k = kernel(kb::moe_comb_union_variant(M_), "nb_moe_comb_U", kb::kCombWg);
-        k.arg_ptr(0, rt);
-        k.arg_ptr(1, verify_->vb->moe_d.ptr());
-        k.arg_ptr(2, s_.moe_r->ptr());
-        launch(k, kb::kLatent / kb::kCombWg, M_);
-      }
-    } else {
-      {   // nb_moe_up([logits, bias,] route, lat, w, a, n_exp), grid (9 x I / 64, M)
-        l0::Kernel& k = kernel(kb::moe_up_variant(M_, I, fuse_.route), "nb_moe_up", kb::moe_up_wg());
-        uint32_t a = 0;
-        if (fuse_.route) {
-          k.arg_ptr(a++, s_.logits_r->ptr());
-          k.arg_ptr(a++, bias);
-        }
-        k.arg_ptr(a++, rt);
-        k.arg_ptr(a++, s_.lat->ptr());
-        k.arg_ptr(a++, L.experts->ptr());
-        k.arg_ptr(a++, s_.moe_a->ptr());
-        k.arg<uint32_t>(a++, E);
-        launch(k, kb::moe_up_groups(I), M_);
-      }
-      {   // nb_moe_down(route, a, w, r, n_exp), grid (1024 / 16, M)
-        l0::Kernel& k = kernel(kb::moe_down_variant(M_, I), "nb_moe_down", kb::moe_down_wg());
-        k.arg_ptr(0, rt);
-        k.arg_ptr(1, s_.moe_a->ptr());
-        k.arg_ptr(2, L.experts->ptr());
-        k.arg_ptr(3, s_.moe_r->ptr());
-        k.arg<uint32_t>(4, E);
-        launch(k, kb::moe_down_groups(), M_);
-      }
+      k.arg_ptr(a++, rt);
+      k.arg_ptr(a++, b_.lat.ptr());
+      k.arg_ptr(a++, L.experts->ptr());
+      k.arg_ptr(a++, b_.moe_a.ptr());
+      k.arg<uint32_t>(a++, E);
+      launch(k, kb::moe_up_groups(I), kM);
     }
-    gemv(*L.fc2, s_.moe_r->ptr());
-    gemv(*L.shared_down, s_.sh->ptr(), size_t(L.fc2->shape.S) * M_ * d_.hidden * 4);   // right after fc2's slices
+    {   // nb_moe_down(route, a, w, r, n_exp), grid (1024 / 16, M)
+      l0::Kernel& k = kernel(kb::moe_down_variant(kM, I), "nb_moe_down", kb::moe_down_wg());
+      k.arg_ptr(0, rt);
+      k.arg_ptr(1, b_.moe_a.ptr());
+      k.arg_ptr(2, L.experts->ptr());
+      k.arg_ptr(3, b_.moe_r.ptr());
+      k.arg<uint32_t>(4, E);
+      launch(k, kb::moe_down_groups(), kM);
+    }
+    gemv(*L.fc2, b_.moe_r.ptr());
+    gemv(*L.shared_down, b_.sh.ptr(), size_t(L.fc2->shape.S) * kM * d_.hidden * 4);   // right after fc2's slices
     pending_ = {L.fc2->shape.S, L.shared_down->shape.S};
   }
 
@@ -488,48 +392,45 @@ class Walk {
     norm(static_cast<const float*>(part_.final_norm->ptr()));   // norm_f, folding the last block
     const loader::DeviceWeight& lm = *part_.head;
     require(lm.shape.N == d_.vocab && lm.shape.K == d_.hidden, "the head is not [vocab][hidden]");
-    const std::string hv = verify_ ? kb::verify_head_variant(M_, int8_) : kb::head_variant(int8_);
     if (int8_) {   // gemv_i8w(w, scales, x, out), grid (N / 64)
       require(bool(lm.scales), "the int8 head has no scales");
-      l0::Kernel& k = kernel(hv, "gemv_i8w", kernels::kGemvI8wCols);
+      l0::Kernel& k = kernel(kb::head_variant(true), "gemv_i8w", kernels::kGemvI8wCols);
       k.arg_ptr(0, lm.mem.ptr());
       k.arg_ptr(1, lm.scales->ptr());
-      k.arg_ptr(2, s_.x->ptr());
-      k.arg_ptr(3, s_.logits->ptr());
+      k.arg_ptr(2, b_.x.ptr());
+      k.arg_ptr(3, b_.logits.ptr());
       launch(k, d_.vocab / kernels::kGemvI8wCols);
     } else {   // gemv_bf16(w, x, out) over lm_head's own tiles (untied)
       const kernels::GemvBf16Tiling t = kernels::gemv_bf16_tiling(d_.vocab);
-      l0::Kernel& k = kernel(hv, "gemv_bf16", t.cols * t.ksplit);
+      l0::Kernel& k = kernel(kb::head_variant(false), "gemv_bf16", t.cols * t.ksplit);
       k.arg_ptr(0, lm.mem.ptr());
-      k.arg_ptr(1, s_.x->ptr());
-      k.arg_ptr(2, s_.logits->ptr());
+      k.arg_ptr(1, b_.x.ptr());
+      k.arg_ptr(2, b_.logits.ptr());
       launch(k, d_.vocab / t.cols);
     }
     {
-      l0::Kernel& k = kernel(kb::argmax1_variant(M_), "argmax_stage1", kb::kArgmaxWg);
-      k.arg_ptr(0, s_.logits->ptr());
-      k.arg_ptr(1, s_.argmax_part->ptr());
-      launch(k, kb::argmax_groups(), M_);
+      l0::Kernel& k = kernel(kb::argmax1_variant(kM), "argmax_stage1", kb::kArgmaxWg);
+      k.arg_ptr(0, b_.logits.ptr());
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, kb::argmax_groups(), kM);
     }
     {
       l0::Kernel& k = kernel(kb::argmax2_variant(), "argmax_stage2", kb::kArgmaxWg);
       k.arg_ptr(0, b_.control.ptr());
-      k.arg_ptr(1, s_.argmax_part->ptr());
+      k.arg_ptr(1, b_.argmax_part.ptr());
       launch(k, 1, 1);
     }
     require(kb::argmax_groups() <= kb::kArgmaxWg, "argmax_stage2 folds at most 256 groups");
   }
 
   // --- the hand-off (spec 16b's; lfm2moe_capture.cc's at every cut: h and the pending slices) ----------------------------
-  size_t h_bytes() const { return size_t(M_) * d_.hidden * 2; }
-  size_t cut_slices_bytes() const { return size_t(cut_pending(d_, b_.placement).total()) * M_ * d_.hidden * 4; }
+  size_t h_bytes() const { return size_t(kM) * d_.hidden * 2; }
+  size_t cut_slices_bytes() const { return size_t(cut_pending(d_, b_.placement).total()) * kM * d_.hidden * 4; }
   void check_link() const {
-    // A verify list's link is sized for kVerifyRows: its M rows fit (>=); the decode list's is exactly its own.
-    const bool fits = verify_ ? link_->sumsq_cap >= cut_slices_bytes() : link_->sumsq_cap == cut_slices_bytes();
-    require(link_->land_resid && link_->resid_cap >= h_bytes() && fits && (cut_slices_bytes() == 0 || link_->land_sumsq),
-            "the landing buffer does not hold " + std::to_string(h_bytes()) + " B of the rows and " +
-                std::string(verify_ ? "at least " : "exactly ") + std::to_string(cut_slices_bytes()) +
-                " B of pending slices");
+    require(link_->land_resid && link_->resid_cap >= h_bytes() && link_->sumsq_cap == cut_slices_bytes() &&
+                (cut_slices_bytes() == 0 || link_->land_sumsq),
+            "the landing buffer does not hold " + std::to_string(h_bytes()) + " B of the row and exactly " +
+                std::to_string(cut_slices_bytes()) + " B of pending slices");
     if (link_->mode == PpHandoff::Copy) require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
   }
   void handoff_out() {
@@ -538,7 +439,7 @@ class Walk {
     require(pending_.s1 == cp.s1 && pending_.s2 == cp.s2, "device 0's list ends with other slices pending than the cut's");
     if (link_->mode == PpHandoff::Copy) {
       step_.list.copy(link_->land_resid, h(cur_).ptr(), h_bytes());
-      if (cut_slices_bytes()) step_.list.copy(link_->land_sumsq, s_.slices->ptr(), cut_slices_bytes());
+      if (cut_slices_bytes()) step_.list.copy(link_->land_sumsq, b_.slices.ptr(), cut_slices_bytes());
       step_.list.barrier_signal(link_->event);
       return;
     }
@@ -546,7 +447,7 @@ class Walk {
     // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words), grid (1)
     l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
     k.arg_ptr(0, h(cur_).ptr());
-    k.arg_ptr(1, s_.slices->ptr());
+    k.arg_ptr(1, b_.slices.ptr());
     k.arg_ptr(2, link_->land_resid);
     k.arg_ptr(3, link_->land_sumsq);
     k.arg_ptr(4, link_->flag);
@@ -561,7 +462,7 @@ class Walk {
     if (link_->mode == PpHandoff::Copy) {
       step_.list.wait_event(link_->event);
       step_.list.copy(h(0).ptr(), link_->land_resid, h_bytes());
-      if (cut_slices_bytes()) step_.list.copy(s_.slices->ptr(), link_->land_sumsq, cut_slices_bytes());
+      if (cut_slices_bytes()) step_.list.copy(b_.slices.ptr(), link_->land_sumsq, cut_slices_bytes());
     } else {
       require(link_->flag && link_->recv_state && link_->spin_limit > 0,
               "the peer hand-off needs its flag, its state words and a spin bound");
@@ -572,7 +473,7 @@ class Walk {
       k.arg_ptr(2, link_->flag);
       k.arg_ptr(3, link_->recv_state);
       k.arg_ptr(4, h(0).ptr());
-      k.arg_ptr(5, s_.slices->ptr());
+      k.arg_ptr(5, b_.slices.ptr());
       k.arg<uint32_t>(6, static_cast<uint32_t>(h_bytes() / 4));
       k.arg<uint32_t>(7, static_cast<uint32_t>(cut_slices_bytes() / 4));
       k.arg<uint32_t>(8, link_->spin_limit);
@@ -586,18 +487,15 @@ class Walk {
   const loader::BoltDevicePart& part_;
   const model::BoltDesc& d_;
   BoltBuffers& b_;
-  Scratch s_;
   BoltFuse fuse_;
   bool int8_;
   const StageLink* link_;
   l0::Mem* tap_;
   ProfileEvents* prof_;
-  uint32_t M_;
-  const VerifyBind* verify_;
   CapturedStep step_;
   int layer_ = -1;
   int cur_ = 0;               // the residual's current buffer: h0 or h1
-  BoltPending pending_;       // split-K slices waiting in the scratch's slices for the next norm to fold
+  BoltPending pending_;       // split-K slices waiting in b_.slices for the next norm to fold
   int pending_tap_ = -1;      // the block whose output the next fold produces
   std::string pending_entry_, pending_variant_;
 };
@@ -606,16 +504,7 @@ class Walk {
 
 CapturedStep build(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b,
                    BoltFuse fuse, bool int8_head, const StageLink* link, l0::Mem* tap, ProfileEvents* prof) {
-  Walk w(ctx, part, d, b, scratch_of(b, kM), fuse, int8_head, link, tap, prof);
-  return w.run();
-}
-
-CapturedStep build_verify(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b,
-                          bool int8_head, const StageLink* link, const VerifyBind& v) {
-  if (v.M == 0 || v.M > kVerifyRows)
-    throw std::invalid_argument("runtime::bolt::build_verify: M " + std::to_string(v.M) + " outside 1..8");
-  if (!v.vb) throw std::invalid_argument("runtime::bolt::build_verify: no verify buffers");
-  Walk w(ctx, part, d, b, scratch_of(*v.vb, kVerifyRows), BoltFuse{}, int8_head, link, nullptr, nullptr, v.M, &v);
+  Walk w(ctx, part, d, b, fuse, int8_head, link, tap, prof);
   return w.run();
 }
 

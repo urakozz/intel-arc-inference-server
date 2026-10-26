@@ -23,7 +23,6 @@
 
 #include "cli/bolt_decode.h"    // spec 25c: is_bolt, check_args, settle
 #include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
-#include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/k2_serve_adapter.h"
@@ -142,12 +141,8 @@ void usage() {
                "                 (ultra_v3's rules), the OpenAI reasoning_effort maps onto them (none|minimal -> thinking\n"
                "                 off, low|medium -> medium_effort, high -> default); Qwen3-Coder XML tool calls; hybrid\n"
                "                 prefix-cache snapshots (SSM states + conv columns + KV at 2048-position block ends);\n"
-               "                 spec 26c: --spec dflash (the LiLiCorr drafter on device 1: [--draft-model PATH]\n"
-               "                 [--draft-format exact|int8|int4] (int8) [--draft-q lattice|lattice+lp] (lattice),\n"
-               "                 [--spec-max 1..7] (7) [--spec-cost SPEC]; NOT the default until box row 65's D5) or\n"
-               "                 --spec lookup, both over the verify lists at M <= 8 (B70_BOLT_VERIFY_MOE=union|plain);\n"
-               "                 --mtp, --kv-cache int8 and --prefill-backend l0-int8|sycl-tla are refused.\n"
-               "                 UNVALIDATED on the cards (queue rows 62, 65)\n"
+               "                 --mtp, --spec, --kv-cache int8 and --prefill-backend l0-int8|sycl-tla are refused.\n"
+               "                 UNVALIDATED on the cards (queue row 62)\n"
                "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
                "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
                "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
@@ -590,8 +585,6 @@ struct BoltServe {
   std::string generation_config;   // --generation-config FILE ("" = the snapshot's / published)
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
-  cli::bolt::SpecArgs spec_args;                    // spec 26c: --spec dflash / lookup (cli/bolt_spec.h)
-  uint32_t spec_min_match = 3, spec_history = 0;    // spec 26c: --spec lookup's
 };
 
 int serve_bolt(const BoltServe& a, server::Options options) {
@@ -604,13 +597,6 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   const rb::BoltAttn attn = rb::bolt_attn();
   const rb::BoltFuse fuse = rb::bolt_fuse();
   const rb::BoltState state = rb::bolt_state();
-  // Spec 26c: --spec dflash / lookup - the refusals, the verify's MoE form, the drafter's plan terms (its config.json and
-  // safetensors header), all before the device.
-  cli::bolt::SpecArgs sa = a.spec_args;
-  cli::bolt::check_spec(sa, cli::bolt::devices_of(da, pre), da.pipe.handoff, true);
-  const rb::VerifyMoe vmoe = sa.on() ? rb::bolt_verify_moe() : rb::VerifyMoe::Union;
-  cli::bolt::DecodeArgs dplan = da;
-  if (sa.on()) cli::bolt::plan_terms(sa, pre, da.max_len.is_auto ? pre.max_pos : da.max_len.value, dplan);
   // The generation defaults (Decision 12): the snapshot's generation_config.json when it carries sampling keys, else NVIDIA's
   // published values; --generation-config FILE is the operator's word.
   cli::bolt::Generation gen;
@@ -666,7 +652,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
                              "hand-offs write it (docs/10-the-box.md)");
-  const rb::BoltPlan pl = cli::bolt::settle(pre, dplan, dev);
+  const rb::BoltPlan pl = cli::bolt::settle(pre, da, dev);
   loader::BoltLoadOptions lo;
   lo.int8_head = da.int8_head;
   lo.max_len = pl.max_len;
@@ -678,38 +664,9 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   runtime::PipelineOptions opt;
   opt.handoff = da.pipe.handoff;
   rb::BoltEngine engine(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse, state);
-  // Spec 26c: the verify lists (their buffers; the lists on first use) and the drafter, before the adapter: snapshots carry
-  // its ring and anchor.
-  cli::bolt::BoltDrafter drafter;
-  if (sa.on()) engine.enable_spec(vmoe);
-  if (sa.dflash()) {
-    StdoutToStderr redirect;
-    drafter = cli::bolt::attach_drafter(engine, sa, a.snapshot_dir);
-  }
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
-  if (sa.dflash()) {   // the server's --mtp auto loop over the drafter's cost table (AdaptiveK, K to --spec-max)
-    options.mtp_auto = true;
-    options.mtp_adaptive.max_k = sa.max_k;
-    options.mtp_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
-    std::fprintf(stderr, "spec dflash: LiLiCorr %s, --draft-format %s (+ the head exact), --draft-q %s, --spec-max %u, the "
-                 "verify's MoE %s (B70_BOLT_VERIFY_MOE), drafter key %016llx, %zu B (%s) + the embedding replica %zu B on device "
-                 "%u - NOT Bolt's default (spec 26 D5: box row 65)\n", sa.draft_model.c_str(), loader::draft_format_name(sa.format),
-                 cli::bolt::bolt_draft_q_name(sa.q), sa.max_k, rb::verify_moe_name(vmoe),
-                 (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(), drafter.drafter->weights().line.c_str(),
-                 drafter.replica->size(), engine.devices() - 1);
-  } else if (sa.lookup()) {
-    options.spec_lookup = true;
-    options.lookup_min_match = a.spec_min_match;
-    options.lookup_history = a.spec_history;
-    options.lookup_adaptive.max_k = sa.max_k;
-    options.lookup_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
-    std::fprintf(stderr, "spec lookup: --spec-max %u, the verify's MoE %s (B70_BOLT_VERIFY_MOE)\n", sa.max_k,
-                 rb::verify_moe_name(vmoe));
-  }
-  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(
-      engine, tokenizer.vocab_used(), sa.on() ? sa.max_k : 0, sa.lookup(),
-      drafter.drafter ? cli::bolt::draft_hooks(engine, *drafter.drafter) : cli::bolt::BoltDraftHooks{}, sa.q);
+  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(engine, tokenizer.vocab_used());
   options.chat_format = server::ChatFormat::bolt();
   options.eos_ids = gen.eos;
   options.sampling_defaults = gen.sampling;
@@ -1136,7 +1093,6 @@ int run(int argc, char** argv) {
   bool have_spec_max = false, have_spec_cost = false;
   runtime::dflash::MuseQ draft_q = runtime::dflash::MuseQ::Raw;   // spec 23f: --draft-q (Muse-Glimmer only)
   bool have_draft_q = false;
-  std::string draft_format_arg, draft_q_arg;   // spec 26c: as given (Bolt's LiLiCorr resolves them: cli/bolt_spec.h)
   // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
@@ -1223,20 +1179,15 @@ int run(int argc, char** argv) {
     } else if (arg == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (arg == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only); spec 26c: exact (Bolt)
+    } else if (arg == "--draft-format") {   // spec 19c; spec 23f: int4 (Muse-Glimmer's assistant only)
       const std::string v = value(i, "--draft-format");
-      draft_format_arg = v;
-      if (!loader::parse_draft_format(v, dflash.format) && v != "exact")
-        throw std::runtime_error("--draft-format expects int8, bf16 or int4 (or exact: Nemotron 3.5 Bolt's LiLiCorr), got '" +
-                                 v + "'");
+      if (!loader::parse_draft_format(v, dflash.format))
+        throw std::runtime_error("--draft-format expects int8, bf16 or int4, got '" + v + "'");
       dflash.have_format = true;
-    } else if (arg == "--draft-q") {   // spec 23f: Muse-Glimmer; spec 26c: Bolt's lattice / lattice+lp
+    } else if (arg == "--draft-q") {   // spec 23f: Muse-Glimmer only
       const std::string v = value(i, "--draft-q");
-      draft_q_arg = v;
-      cli::bolt::BoltDraftQ bq;
-      if (!runtime::dflash::parse_muse_q(v, draft_q) && !cli::bolt::parse_bolt_draft_q(v, bq))
-        throw std::runtime_error("--draft-q expects raw or capped (or lattice / lattice+lp: Nemotron 3.5 Bolt's LiLiCorr), got '" +
-                                 v + "'");
+      if (!runtime::dflash::parse_muse_q(v, draft_q))
+        throw std::runtime_error("--draft-q expects raw or capped, got '" + v + "'");
       have_draft_q = true;
     } else if (arg == "--spec-history") {
       spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
@@ -1302,8 +1253,8 @@ int run(int argc, char** argv) {
     cli::bolt::ServeFlags flags;
     flags.mtp = mtp_k > 0 || mtp_auto;
     flags.spec = spec_arg;
-    flags.proposer_tuning = have_mtp_tuning;
-    flags.lookup_tuning = have_spec_tuning;
+    flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
+                            dflash.have_format || have_draft_q;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
     cli::bolt::check_serve_flags(flags);
@@ -1335,31 +1286,11 @@ int run(int argc, char** argv) {
     ba.layers = 0;              // refused above
     bs.prefix_auto = prefix_auto;
     bs.prefix_cache_gb = prefix_cache_gb;
-    // Spec 26c: --spec dflash / lookup and the drafter's flags (cli/bolt_spec.h), refused by name before the device.
-    cli::bolt::SpecArgs& sa = bs.spec_args;
-    sa.spec = spec_arg == "dflash" || spec_arg == "lookup" ? spec_arg : "off";
-    if (dflash.have_model) sa.draft_model = dflash.model;
-    sa.have_model = dflash.have_model;
-    sa.format_arg = draft_format_arg;
-    sa.q_arg = draft_q_arg;
-    sa.have_max_k = have_spec_max;
-    if (have_spec_max) sa.max_k = spec_max;
-    sa.cost = spec_cost_arg;
-    sa.draft_vocab = flags.draft_vocab;   // refused above already
-    sa.mtp_tuning = have_mtp_tuning;      // refused above already
-    bs.spec_min_match = spec_min_match;
-    bs.spec_history = spec_history;
     return serve_bolt(bs, options);
   }
   if (!generation_config_file.empty())
     throw std::runtime_error("--generation-config is built for Nemotron 3.5 Bolt only (spec 25e); the other served models read "
                              "their snapshot's generation_config.json");
-  if (draft_format_arg == "exact")
-    throw std::runtime_error("--draft-format exact is LiLiCorr's (Nemotron 3.5 Bolt, spec 26): this checkpoint's drafters take "
-                             "int8, bf16 or int4");
-  if (draft_q_arg == "lattice" || draft_q_arg == "lattice+lp")
-    throw std::runtime_error("--draft-q " + draft_q_arg + " is LiLiCorr's (Nemotron 3.5 Bolt, spec 26): Muse-Glimmer's assistant "
-                             "takes raw or capped");
   // Spec 24e: LFM2.5-24B-A2B (model_type lfm2_moe) runs runtime::lfm2moe::Lfm2MoeEngine behind
   // cli::lfm2moe::Lfm2MoeEngineAdapterT (one card by default, --pp 2 for capacity) - dispatched here, before the Qwen family's
   // proposer, kv-cache and --pp rules (its own: cli::lfm2moe::check_args, and what it has none of below, replace them), as

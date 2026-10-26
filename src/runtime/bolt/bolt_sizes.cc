@@ -234,9 +234,7 @@ PpLandingLayout landing_layout(const model::BoltDesc& d, const model::BoltPlacem
   return pp_landing_layout(size_t(kM) * d.hidden * 2, size_t(cut_pending(d, p).total()) * kM * d.hidden * 4);
 }
 
-ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn a) { return scratch_sizes(d, max_len, a, kM); }
-
-ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn a, uint32_t rows) {
+ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn a) {
   ScratchSizes s;
   size_t widest = 0;
   uint32_t max_i = 0;
@@ -252,7 +250,7 @@ ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn 
     moe = moe || d.is_moe(l);
     max_i = std::max(max_i, d.inter.at(l));
   }
-  const size_t M = rows;
+  const size_t M = kM;
   s.h0 = s.h1 = s.x = M * d.hidden * 2;
   s.slices = line(widest * M * 4);
   s.xc = line(mamba ? M * d.m_conv_dim * 2 : 0);
@@ -412,60 +410,6 @@ size_t prefill_chunk_launches(const model::BoltDesc& d, const model::BoltPlaceme
   return n;
 }
 
-
-// ==== spec 26c ===========================================================================================================
-VerifyMoe parse_verify_moe(const std::string& v) {
-  if (v.empty() || v == "union") return VerifyMoe::Union;
-  if (v == "plain") return VerifyMoe::Plain;
-  throw std::runtime_error("B70_BOLT_VERIFY_MOE=" + v + ": expected union or plain (spec 26 Decision 10)");
-}
-VerifyMoe bolt_verify_moe() {
-  const char* v = std::getenv("B70_BOLT_VERIFY_MOE");
-  return parse_verify_moe(v ? v : "");
-}
-const char* verify_moe_name(VerifyMoe m) { return m == VerifyMoe::Plain ? "plain" : "union"; }
-
-VerifySizes verify_sizes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len, BoltAttn a,
-                         BoltState st) {
-  VerifySizes v;
-  v.scratch = scratch_sizes(d, max_len, a, kVerifyRows);
-  const uint32_t mamba = device_blocks(d, p, dev, model::BoltBlock::Mamba);
-  const uint32_t moe = device_blocks(d, p, dev, model::BoltBlock::Moe);
-  v.slots = line(size_t(mamba) * kVerifySlots * ssm_layer_bytes(d, st));
-  v.moe_d = line(moe ? size_t(kVerifyRows) * kTopK * d.latent * 2 : 0);
-  return v;
-}
-PpLandingLayout verify_landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p) {
-  return pp_landing_layout(size_t(kVerifyRows) * d.hidden * 2, size_t(cut_pending(d, p).total()) * kVerifyRows * d.hidden * 4);
-}
-size_t verify_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
-  if (p.devices < 2) return 0;
-  return dev == 0 ? kPpStateWords * 4 : verify_landing_layout(d, p).total + kPpStateWords * 4;
-}
-size_t verify_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
-                            BoltAttn a, BoltState st) {
-  const VerifySizes v = verify_sizes(d, p, dev, max_len, a, st);
-  return v.scratch.total() + v.moe_d + verify_link_bytes(d, p, dev);
-}
-size_t verify_device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t M, BoltAttn a,
-                              VerifyMoe m) {
-  if (M == 0 || M > kVerifyRows)
-    throw std::invalid_argument("runtime::bolt::verify_device_launches: M " + std::to_string(M) + " outside 1..8");
-  size_t n = device_launches(d, p, dev, a, BoltFuse{}, PpHandoff::Copy);
-  if (M > 1 && m == VerifyMoe::Union) n += device_blocks(d, p, dev, model::BoltBlock::Moe);   // the combine
-  return n;
-}
-size_t verify_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t M, BoltAttn a, VerifyMoe m) {
-  size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += verify_device_launches(d, p, dev, M, a, m);
-  return n;
-}
-uint32_t lili_prefill_r0(uint32_t pos, uint32_t C, uint32_t end, uint32_t window, bool hooked, uint32_t block) {
-  const uint32_t stop = pos + C;
-  if (hooked && block != 0 && stop < end && stop % block == 0) return C > window ? C - window : 0;
-  const uint32_t from = end > window ? end - window : 0;
-  return from > pos ? std::min(C, from - pos) : 0;
-}
 
 // --- spec 25e: prefix-cache snapshots (the run lists; the engine copies them) ------------------------------------------------
 namespace {

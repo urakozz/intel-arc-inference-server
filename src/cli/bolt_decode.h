@@ -25,8 +25,8 @@
 // construction; the prefill follows the attention form and the state precision). B70_PREFILL_PROFILE=1 prints the prefill's
 // phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
 // device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 / sycl-tla and a
-// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --mtp (Bolt has no MTP head), --spec (spec 26:
-// LiLiCorr), --kv-cache int8 (Decision 17), --device with --pp 2.
+// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --mtp (Bolt has no MTP head), --spec (no
+// drafter either), --kv-cache int8 (Decision 17), --device with --pp 2.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -94,11 +94,6 @@ struct DecodeArgs {
   // What else was asked for, for the refusals.
   bool mtp = false, spec = false, kv8 = false;
   bool prefills() const { return prefill || pp; }
-  // Spec 26c (b70-serve --spec dflash / lookup, cli/bolt_spec.h plan_terms): the verify lists' terms in the plan - their
-  // scratch, the union MoE's rows and link on every card, the 7 SSM state slots (BoltReserve::verify_slots) - and the drafter's
-  // bytes (weights, buffers, prefill staging) and its embedding replica on the last card. b70-decode leaves them off.
-  bool verify_lists = false;
-  size_t drafter = 0, drafter_replica = 0;
 };
 
 // --pp's default: two cards for the whole model (Decision 4), one for a truncated / synthetic one.
@@ -124,8 +119,7 @@ inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
                              "and every chunk ends on that grid (spec 25d)");
   if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp");
   if (a.spec)
-    throw std::runtime_error("--spec: Bolt's speculative decoding (spec 26, the LiLiCorr drafter) is served by b70-serve "
-                             "--spec dflash / lookup; b70-decode decodes plainly");
+    throw std::runtime_error("--spec: Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Nemotron 3.5 Bolt's KV is bf16 (spec 25 Decision 17: 8 KiB a position)");
   const uint32_t devs = devices_of(a, d);
@@ -218,17 +212,8 @@ inline runtime::bolt::BoltPlan settle(const model::BoltDesc& d, const DecodeArgs
                                          : model::BoltPlacement::one(d);
   const uint32_t bound = a.max_len.is_auto ? d.max_pos : a.max_len.value;
   const size_t reserve = a.reserve ? a.reserve : size_t(runtime::kDefaultReserveGb * 1e9);
-  rb::BoltReserve extra = reserve_for(d, place, bound, at, st, a.prefills());
-  if (a.verify_lists) {   // spec 26c: the verify lists on every card, the drafter on the last
-    size_t v = 0;
-    for (uint32_t dev_i = 0; dev_i < place.devices; ++dev_i)
-      v = std::max(v, rb::verify_scratch_bytes(d, place, dev_i, bound, at, st));
-    extra.decode_scratch += v;
-    extra.verify_slots = rb::kVerifySlots;
-    extra.drafter = a.drafter;
-    extra.drafter_embed_replica = a.drafter_replica;
-  }
-  const rb::BoltPlan p = rb::plan(d, a.max_len.is_auto ? 0 : a.max_len.value, dev, extra,
+  const rb::BoltPlan p = rb::plan(d, a.max_len.is_auto ? 0 : a.max_len.value, dev,
+                                  reserve_for(d, place, bound, at, st, a.prefills()),
                                   devs == 2 ? std::optional<uint32_t>(place.split) : std::nullopt, reserve, a.int8_head);
   if (a.max_len.is_auto)
     std::fprintf(stderr, "max_len: auto -> %u (the largest multiple of 256 that fits every card; trained context %u)\n",

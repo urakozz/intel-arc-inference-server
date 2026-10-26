@@ -156,13 +156,7 @@ the chain, and the eager attention bitwise decode's `mg_attn_eager` on the same 
 arm's NVFP4 linears) at `tests/loader/lilicorr_dflash_fixture.safetensors`'s tiny shapes, the fixture's own NVFP4
 checkpoint read by `loader::LiliCheckpoint`, against `tests/kernels/lilicorr_ref.h` in the exact (bf16 head), int8 and -
 when `gemv.cl` builds on the device - int4 g64 arms; `ll_attn` alone at the window's edge and the ring's wrap, `ll_topk`
-alone on planted rows (ties, NaN, a -inf chunk, a huge value, three chunks). Spec 26c adds `nb_union_run`: the union-aware
-M-row MoE (`src/kernels/bolt/nb_moe_union.cl`) against the plain M-row `nb_moe.cl` and `tests/kernels/bolt_ref.h` at I 1536
-(DN_KS 1 for both - the Mac's 256-lane cap) on 10 route cases (the same nine experts in every row, 72 disjoint, one expert in
-every row, random M 2..8) - a / the down rows / r bitwise, and the counting build reading each chosen block once; and
-`nb_slots_run` (Review Focus 1, 19c's `gdn_slots_run` carried to Bolt): `nb_conv` at M rows + `nb_ssm`'s slot build
-(`SPEC_SLOTS 8`) against the plain M = 1 kernels - every row's slot and y bitwise at M 8 / 5 / 4 (bf16 state) / 1, every
-accepted count j = 0..7 continuing as the plain run, the j + 1 mutant caught, vLLM 3dc6def360's ragged M 8 / 1 / 5 / 2.
+alone on planted rows (ties, NaN, a -inf chunk, a huge value, three chunks).
 `clrun` inlines a
 source's local `#include "x.h"` itself (Apple's compiler intermittently failed to find them through `-I`). A new
 driver is a `tools/mac/clrun/<kernel>_run.cc` with a `main()` over `clrun::Device`,

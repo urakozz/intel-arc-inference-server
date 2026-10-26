@@ -116,7 +116,7 @@ inline size_t embed_row_index(uint32_t K, uint32_t k, uint32_t n) {
 inline size_t kv_bytes_per_position(const model::BoltDesc& d) {
   return size_t(d.attn_layers()) * d.kv_heads * d.head_dim * 2 * 2;
 }
-// One SSM state per Mamba layer: heads x head_dim x state fp32 (4 MiB), one slot (spec 26 / 19c's verify adds slots).
+// One SSM state per Mamba layer: heads x head_dim x state fp32 (4 MiB), one slot.
 inline size_t ssm_state_bytes(const model::BoltDesc& d, uint32_t layers) {
   return size_t(layers) * d.m_heads * d.m_head_dim * d.m_state * 4;
 }

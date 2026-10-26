@@ -1,7 +1,7 @@
 // Spec 25c Task 3 (B2): Nemotron 3.5 Bolt's decode kernels on the card, at the real shapes, against tests/kernels/
 // bolt_ref.h (and, where the fixture has them, 25a's reference's own values). Needs a B70, no checkpoint (synthetic
 // weights). Every binary here is one a decode list binds (kernels::bolt names), plus the block's test-only M = 4 builds
-// (the M-row form spec 26c's verify lists use). The twin's transcendentals are the kernels' own (Sleef's exp, fdlibm's
+// (the M-row form). The twin's transcendentals are the kernels' own (Sleef's exp, fdlibm's
 // log1p) and the card build rounds division and sqrt correctly, so every check is BITWISE but flash attention's.
 //
 //   1. nb_res_norm _NF on the fixture's rows (vs torch too), _S1, the MoE block's two-source _S1_T1 (vs torch's fold),

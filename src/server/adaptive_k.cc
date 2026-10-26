@@ -66,31 +66,6 @@ MtpCost MtpCost::muse_dflash(bool i8_head, unsigned drafter_format) {
   return c;
 }
 
-MtpCost MtpCost::bolt_verify(bool i8_head, bool union_moe) {
-  MtpCost c;
-  c.verify.clear();
-  for (uint32_t M = 1; M <= 8; ++M) {
-    double v = 1.0 + kBoltPlainRow * double(M - 1);
-    if (union_moe) {   // the experts the union does not read again (40 MoE blocks of 2.5 MB)
-      const double u = kBoltUnionM1 + (kBoltUnionM8 - kBoltUnionM1) * double(M - 1) / 7.0;
-      v -= (9.0 * M - u) * 40.0 * kBoltExpertGB / kBoltPlainGB;
-    }
-    if (!i8_head) v = (v * kBoltPlainGB + kBoltHeadInt8GB) / (kBoltPlainGB + kBoltHeadInt8GB);
-    c.verify.push_back(std::round(v * 1000.0) / 1000.0);
-  }
-  c.draft.assign(7, 0.0);
-  return c;
-}
-
-MtpCost MtpCost::bolt_lilicorr(bool i8_head, unsigned drafter_format, bool union_moe) {
-  if (drafter_format > 2) throw std::invalid_argument("MtpCost::bolt_lilicorr: drafter format 0..2");
-  MtpCost c = bolt_verify(i8_head, union_moe);
-  double d = kBoltDraft[drafter_format];
-  if (!i8_head) d = (d * kBoltPlainGB + kBoltHeadInt8GB) / (kBoltPlainGB + kBoltHeadInt8GB);
-  c.draft.assign(7, std::round(d * 1000.0) / 1000.0);
-  return c;
-}
-
 MtpCost MtpCost::with_free_drafts() const {
   MtpCost c = *this;
   c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);
