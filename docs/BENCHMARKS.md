@@ -961,52 +961,6 @@ layers that fit, or on the synthetic checkpoints (4 real-width layers), and says
 | MTP acceptance by depth, K <= 3 | the CPU reference on Intel's checkpoint, teacher-forced greedy, the engine's RTN head; `pre_fc_norm_hidden` single / per stream (decision 4), selection reused / fresh (decision 5) | pending (the engine's is spec 22's) | r34.accept |
 | prefix-cache snapshot | bytes and a restore's continuation, 48 layers | 115.7 MB state + 25,344 B a position (+ 21 KB / 2,112 B with the head; derived); restore bitwise pending | r34.snapshot |
 
-## Muse-Glimmer-30B (spec 23)
-
-**Nothing here is measured yet.** Muse-Glimmer-30B (`muse_glimmer`, Vishva007's int4 g64 export used as-is) runs its
-own engine (spec 23c's decode and 23d's prefill, built without the card: no Muse binary has been compiled). One card holds the whole
-model (17.41 GB of weights with the int8 head). The roofline is spec 23 §2's: 14.72 GB read a token plus 13,312 B a
-position on the 13 full layers and up to 81.8 MB of sliding windows - **39.7 / 38.7 / 35.7 t/s** at 590 GB/s (depth
-4096 / 32768 / 131072), ~30.8 t/s at Qwen3.8's 77.6 % of roofline (estimated). Launches a token: 733 (flash), 681
-(B70_MUSE_ATTN=eager), +2 with `--pipeline-handoff peer` (derived, asserted at capture).
-
-| what | configuration | number | stage |
-|---|---|---|---|
-| decode tg256 at depth 4096 / 32768 / 131072 | one B70, int8 head (default) and bf16 head, flash; bf16 KV | pending (roofline 39.7 / 38.7 / 35.7 t/s, derived) | r44.speed |
-| decode, eager attention | one B70, int8 head, depth 4096 / 32768 (the reference's bf16 chain, A/B) | pending | r44.speed |
-| decode across two cards | `--pp 2`, copy and peer, int8 head, depth 4096 / 32768 (capacity, not speed: decision 7) | pending | r44.speed |
-| the four int4 GEMVs' {S, layout} | q\|\|gate\|\|k\|\|v 6656x8704, o_proj 4096x6656, gate\|\|up 6656x39936, down 19968x6656: S 1 / 2 / 4 (8), L 0 / 1 | pending (PROVISIONAL S2 / S4 / S8 / S4 L0, Qwen3.8's nearest cells) | r44.sweeps |
-| memory per card | one card at `--max-len auto` (131072) | 17.41 GB weights + 1.745 GB KV + 0.164 GB rings + 0.070 GB decode scratch (derived) | r44.speed |
-| prefill pp 4096 / 16384 / 32768 (spec 23d) | one B70, `l0` backend (bf16 slabs + `pf_gemm_T0`, flash over the 4096-slot ring / NoPE), chunk 2048, int8 head; `b70-decode --bench --prefill-length N` | pending; 50.3 GFLOP a token in the linears (derived) - the bf16 `l0` walk's comparable is Qwen3.8's 1670.72 t/s at 4096 (2026-09-23, `## Prefill`) | r45.speed |
-| prefill across two cards | `--pp 2 --pipeline-split auto`, the chunk crosses by copy, sequentially (capacity, not speed) | pending | r45.speed |
-| prefill, eager attention | one B70, pp 4096 (`B70_MUSE_ATTN=eager`: the portable three-pass build, bitwise decode's eager rows - an A/B mode, not a speed path) | pending | r45.speed |
-| prefill memory per card | the chunk's scratch (partials [2048][39936] fp32 the largest), + the 27.3 MB landing on two cards | 0.599 GB a device (599,171,072 B, derived; one card still reaches 131072 with it, the int8 head and the int4 drafter: 22.845 GB of 32.53) | r45.speed |
-| prefill launches | a chunk at 52 layers; the head | 6969 (1 + 134 a layer) + 4 (derived, asserted at the walk) | r45.prefill |
-| served: llama-benchy pp4096 tg256 depth 1 (spec 23e) | `b70-serve <muse> --chat-template <the original's>`, one B70, int8 head, `--max-len 131072`, the operator's flags (`--no-cache --exact-tg --latency-mode generation`) | pending | r46.benchy |
-| served: prefix caching at depth 4k / 16k / 32k | the same server, cache on (`--enable-prefix-caching`): the state is the 39 rings' last 2047 positions (81,748,992 B, derived) + 13,312 B of KV a position | pending | r46.benchy |
-| served: decode at depth 4k / 32k / 130000 (~128k) | the same server, pp 512 tg 128 (130000 + 640 fits 131072) | pending (the roofline above) | r46.benchy |
-| MG5: A4 on the engine | the 36 Muse-rendered scenarios (`tests/golden/toolcall-muse`, reasoning_strength low), 512 greedy ids, `l0`, int8 and bf16 heads, against 23a's bf16 reference (`score.py --format atem`) | pending - the bar: no more parse failures than the bf16 reference's; first-call agreement recorded (beside gate Q's int4 CPU reference) | r46.a4 |
-| MG5: passkey at 131072 | `tools/probe/muse_passkey.sh`: 130000 ids + BOS at 5 / 50 / 95 %, one B70, int8 head, `--max-len 131072`; the decode speed at that depth (~1.74 GB of full-layer KV a token, derived) | pending - the bar: 3 / 3 | r46.passkey |
-| DFlash P0: acceptance E_K, K 1..15 (spec 23f) | `dflash_accept.py --model muse` teacher-forced over 23a's continuations, the assistant bf16 / int8 / int4 g64 RTN (+ the int8 head) | **Mac, 2 short prompts (18 anchors each)**: code E_15 9.33 (bf16) = 9.33 (int4 g64 + int8 head), 9.78 (int8 + int8 head); prose ~1.8; sampled (T 1.0 / top-k 64 / top-p 0.95) code E_15 5.58 with q raw vs 1.35 capped; the agentic sets pending | r47.accept |
-| DFlash P0: verify cost M = 1..16 and one drafter block | `probe_draft_cost --shapes muse` at depth 4096 / 32768, interleaved pairs, median of 3 | pending (derived: verify 1.00 1.18 1.56 1.79 + 0.305 a row; the block int4 0.182 / int8 0.263 / bf16 0.435 plain steps) | r47.cost |
-| served `--spec dflash` vs `--spec off` / `--spec lookup` (D5) | `b70-serve <muse> --chat-template <the original's>`, one B70, int8 head, llama-benchy pp4096 tg256 and decode at depth 4k / 16k, the agentic session | pending - the rule: dflash becomes the default only at >= 10 % over both on the agentic set and no loss > 3 % | r47.benchy |
-
-## LFM2.5-24B-A2B (spec 24)
-
-**Nothing here is measured yet.** LFM2.5-24B-A2B (`lfm2_moe`, re-quantised by us to int4 g64 - 24q's exports do not
-exist yet) runs its own engine (spec 24c's decode, 24d's prefill; no `lfm_*` binary has been compiled). One card holds
-the whole model and its 131072 positions (13.39 GB of weights with the int8 head + 2.68 GB of KV + 0.79 GB of prefill
-scratch, derived). Decode reads 1.43 GB a token plus 20,480 B of KV a position: a roofline of 411 t/s, ~220 t/s at
-depth 4096 ESTIMATED (spec 24 §3: many small kernels); 383 launches a token (277 with every fused arm).
-
-| what | configuration | number | stage |
-|---|---|---|---|
-| decode tg256 at depth 1024 / 4096 / 32768 / 130816 | one B70, int8 head, flash, `B70_LFM_FUSE` none / each arm / all (interleaved), bf16 head, eager | pending (roofline 411 t/s, ~220 t/s at 4096 ESTIMATED) | r51.speed |
-| prefill pp 4096 / 32768 (spec 24d) | one B70, `l0` backend (bf16 slabs + `pf_gemm_T0`, the grouped MoE on `pf_moe_gemm`, flash at head_dim 64), chunk 2048, int8 head; `b70-decode --bench --prefill-length N`; flash and eager interleaved | pending; ~6,000-7,000 t/s at pp 4096 ESTIMATED (plan 24d: the MoE dequant ~0.21 s a chunk over 38 layers, ~2.7 GB of traffic a layer, against ~0.1 s of DPAS) | r52.speed |
-| prefill phase table | `B70_PREFILL_PROFILE=1`, pp 4096: slab dequant / GEMM, the conv (`gdn_seed` / `gdn_conv` rows), attention prep / flash, the MoE's route / sort / gather / weights / GEMM / combine | pending - the dequant's share against the estimate above decides the next lever (the dequant fused into the grouped GEMM, or int8 prefill: spec 24 §11) | r52.speed |
-| prefill across two cards | `--pp 2`, the chunk crosses by copy (8 MB of h a chunk), sequentially (capacity, not speed) | pending | r52.speed |
-| prefill launches and memory | a chunk at 40 layers; the head; the scratch | 1259 (1 + 2 x 70 + 28 x 31 + 10 x 25) + 4; 788,687,408 B a device (the 512 MiB weight batch the largest) - derived, asserted at the walk and the plan test | r52.f4 |
-
 ## Nemotron 3.5 Bolt (spec 25)
 
 **Nothing here is measured on a card yet.** Bolt (`nemotron_h_omni` over `nemotron_h_puzzle`, SergiioB's int4 g128 export,

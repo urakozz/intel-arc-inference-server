@@ -1,5 +1,7 @@
 # Spec 24c - LFM2.5-24B-A2B decode: the launch-count P0 first, then the short conv, hd64 attention, the sigmoid-bf16 router and the 64 x 1536 MoE on one card, the fused arms, `--pp 2`
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status (2026-10-20): built on the Mac (branch `spec24c-lfm2moe-decode`), Tasks 1-7; not run on a card.** Box queue
 row **51** (rows 42-47 are spec 23's). Task 1 Step 4 (P0 on the card, `r51.p0`) and Task 8 (speed, `r51.speed`) are
 the box's, prepared as stages; every kernel's first compile and run is the box's. As built: spec 24 §14.

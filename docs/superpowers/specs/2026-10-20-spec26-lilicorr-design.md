@@ -1,5 +1,7 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in e21208c (26c) and b41c442 (26a / 26b); kept for the record.
+
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §10. **26a built on the Mac 2026-10-23** (§12 as built; §11 the P0 verdict - PENDING the
 box, its defaults PROVISIONAL); **26b built on the Mac 2026-10-23** (§13 as built: the drafter on the card - nothing

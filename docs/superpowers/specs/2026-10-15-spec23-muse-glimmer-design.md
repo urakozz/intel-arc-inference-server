@@ -1,5 +1,7 @@
 # Spec 23 - Muse-Glimmer-30B (text only) and its DFlash drafter on the B70
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status:** design, 2026-10-15, for operator review. Open decisions are marked **(decide)** (§11). Nothing is
 built. **Plans (2026-10-15):** `docs/superpowers/plans/2026-10-15-spec23{a,b,c,d,e,f}-*.md` - 23a reference, facts
 and golden sets; 23b descriptor, loader and synthetic checkpoints; 23c decode; 23d prefill; 23e serving; 23f the

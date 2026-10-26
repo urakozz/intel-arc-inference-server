@@ -1,5 +1,7 @@
 # Spec 23a - Muse-Glimmer-30B: the facts, the CPU reference, golden sets, the A4 set, gate Q
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-15): built on the Mac (branch `spec23a-muse-reference`) - Tasks 1-5 and 7's code done and their gates green; MG1 bitwise on the tiny variants AND on real weights (`hfcheck --layers 4`, the int4 checkpoint); golden sets made on the Mac for the two short prompts (spec 23 §12); the long golden sets, both perplexities on the bf16 form, the -GPTQ repo's g_idx scan and gate Q are box queue row 42's (box CPU only). Spec 23 §12 "23a as built".**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.

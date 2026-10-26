@@ -1,5 +1,7 @@
 # Spec 23b - Muse-Glimmer-30B: the descriptor, the loader, synthetic checkpoints, the memory plan
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-15): built on the Mac (branch `spec23b-muse-loader`): Tasks 1-6 done, every host test green, the synthetic 2-layer checkpoint ACCEPTED and read by the C++ host half, the real -AutoRound checkpoint through the host half (1459 text, 809 vision skipped, 0 unconsumed); the card's loads are box queue row 43. As built: spec 23 §13.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.

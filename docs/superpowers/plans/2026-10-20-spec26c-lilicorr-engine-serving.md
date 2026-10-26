@@ -1,5 +1,7 @@
 # Spec 26c - LiLiCorr in Bolt's loop and server: verify at M <= 8 with taps on two cards, the Mamba state slots and the commit, the union-aware MoE verify, the prefill projection, snapshots with the ring, `--spec dflash` (D0, D2-D5)
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in e21208c; kept for the record.
+
 **Status (2026-10-23): built on the Mac** (branch `spec26c-lilicorr-engine-serving`; as built: spec 26 §14) - Tasks 1-7
 but Task 2 Step 3 (the replay lever: not built, §11) and Task 5's GEMM path (the 8-row replay fallback built); nothing run
 on a card - box queue row **65** (Session 14). Built whatever 26a shows (the operator's ruling); `--spec dflash` becomes Bolt's

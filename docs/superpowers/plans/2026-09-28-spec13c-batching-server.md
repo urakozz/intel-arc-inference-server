@@ -29,7 +29,7 @@ Needs plan 13b and 13a's §7 decisions (chunk size, the budget rule, burst hold 
 
 ## Out of scope
 
-- `--batch > 1` with `--pp 2` (spec 13 §9.1 follow-on 4) - refused by name until its own plan; with `--replica`
+- `--batch > 1` with `--pp 2` (spec 13 §9.1 follow-on 2) - refused by name until its own plan; with `--replica`
   (§10). DFlash per slot (`--spec dflash --batch N`): the scheduler's hook exists (spec 19d), the engine side is spec
   19's own plan. Host-RAM offload of anything (§9.2).
 

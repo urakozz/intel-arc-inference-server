@@ -1,5 +1,7 @@
 # Spec 24b - LFM2.5-24B-A2B: the descriptor, the loader, synthetic checkpoints, the memory plan
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status (2026-10-17): Tasks 1-6 built on the Mac; box queue row 50 added.** Branch `spec24b-lfm2moe-loader`.
 Everything host-side is green (`tools/mac_check.sh`); nothing has run on a card (24b's own row, and 24q's RTN /
 AutoRound export, are the box's job). See spec 24 "24b as built" for the measured facts.

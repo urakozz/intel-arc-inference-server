@@ -1,5 +1,7 @@
 # Spec 24a - LFM2.5-24B-A2B (`lfm2_moe`): the facts, the CPU reference, golden sets, the A4 reference
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status (2026-10-15): built on the Mac (branch `spec24a-lfm2moe-reference`); spec 24 §12 "24a as built".** F1 bitwise on the tiny models; on the real bf16 weights (the Mac, 40 GB container): `hfcheck --layers 6` BITWISE, `ppl`, golden `lfm2moe_short` / `4k` / `agentic`. Box queue row **48** (rows 42-47 are spec 23's): the box image's tests, `lfm2moe_32k` and the A4 reference (above the Mac's 6 h rule).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.

@@ -1,5 +1,7 @@
 # Spec 24 - LiquidAI LFM2.5-24B-A2B (`lfm2_moe`) in the engine
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status:** design, 2026-10-15, for operator review. Open decisions are marked **(decide)** and collected in §10.
 Nothing is built.
 **Plans (2026-10-15):** `docs/superpowers/plans/2026-10-15-spec24{a,q,b,c,d,e}-*.md` - 24a facts and CPU reference,

@@ -1,5 +1,7 @@
 # Spec 23f - Muse-Glimmer's DFlash drafter: P0 (acceptance, verify cost, the stopping rule), then the engine
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-16): built on the Mac, both parts, on ONE branch `spec23f-muse-dflash` (the operator's 2026-10-15
 ruling: Part 2 built regardless of P0; P0 picks the defaults) - nothing of it has run on a card. Box queue row 47
 (`tools/box_validate.sh --only r47`). As built: spec 23 §17 "23f as built"; the rulings: the plan's SDD ledger.**

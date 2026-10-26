@@ -36,9 +36,9 @@ design §6) with the box's tables and the operator's §7 decisions.
 
 ## Out of scope
 
-- Batching over `--pp 2` (spec 13 §9.1 follow-on 4: Agnes at concurrency 4 on two cards) - after spec 16's rows 22,
+- Batching over `--pp 2` (spec 13 §9.1 follow-on 2: Agnes at concurrency 4 on two cards) - after spec 16's rows 22,
   23 and 27 pass and 13b-13c are done; its own plan.
-- The two-card replica mode (spec 13 §10). The MoE / Muse / LFM2.5 follow-ons (§9.1 1-3). DFlash per slot (spec 19
+- The two-card replica mode (spec 13 §10). The MoE follow-on (§9.1 1). DFlash per slot (spec 19
   §5's proposer per slot rides the same row table; its own plan).
 - Host-RAM offload of anything (§9.2): a layout that does not fit is refused (Task 1's message), never spilled.
 - MTP on in some slots and off in others: superseded by §9.2 (the engine's MTP setting holds for every slot).

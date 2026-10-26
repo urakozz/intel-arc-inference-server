@@ -1,5 +1,7 @@
 # Spec 23d - Muse-Glimmer-30B prefill: the `l0` chunk walk, windowed flash over the ring, NoPE flash
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-16): built on the Mac - branch `spec23d-muse-prefill`, every step committed; as built: spec 23 §15 ("23d as built"). Nothing has run on a card: box queue row 45 (`r45.*`) holds every ocloc build, MG2 on the card, MG3 / MG4 on prefill, two cards and the speed rows.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.

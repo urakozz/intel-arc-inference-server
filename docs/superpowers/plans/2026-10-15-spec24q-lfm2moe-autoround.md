@@ -1,5 +1,7 @@
 # Spec 24q - LFM2.5-24B-A2B: our AutoRound int4 g64 (the script, the recipe, F6), RTN g64 first
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status (2026-10-15): planned; nothing built.** Box queue row **49** (rows 42-47 are spec 23's). Parallel to 24b once
 24a's reference exists; its `rtn` stage comes first and is the development checkpoint of 24b-24d.
 

@@ -125,9 +125,9 @@ are not built.
    slots at 32768, **int8 KV** (spec 12b), MTP on in every slot. The KV form stays engine-wide (one form, so
    one `_KV8` kernel set); the addressing is per slot (a KV base and a max_len each).
 3. **Models: Qwen3.8 and Agnes first** (the dense hybrids sharing the decode kernels; Agnes's 54 GDN + 18 FA
-   layers from the descriptor, never a Qwen3.8 constant). The MoE models (Ornith, K2, LFM2.5, Muse, Bolt) are
-   per-model follow-ons: their rows route to different experts, so their cost model is spec 26's expert union
-   (plan 26a, `tools/spec/expert_union.py`), not §1's dense M-row table.
+   layers from the descriptor, never a Qwen3.8 constant). The MoE models (Ornith, K2, Bolt) are
+   per-model follow-ons: their rows route to different experts, so their cost model is the expert union of the M rows
+   (spec 26's method; that spec was dropped 2026-10-27), not §1's dense M-row table.
 4. **Concurrency on ONE card;** the second card stays free (pipeline parallel, long contexts, another model).
    The two-card replica mode is §10, written now and built later.
 
@@ -213,15 +213,12 @@ head + the MTP head (0.849 GB). All derived; nothing batched has run.
   attn_v2 shares across the rows (attn_v2.cl:35-36); rows of different slots each read their own KV (~1.08 GB a row at
   32k on Qwen3.8, derived). 13a measures the mixed-depth step.
 
-**Follow-ons (operator, 2026-10-23), in order, each its own plan after 13b-13c:**
+**Follow-ons (operator, 2026-10-23), in order, each its own plan after 13b-13c** (Muse-Glimmer and LFM2.5 were
+follow-ons 2 and 3 until their support was dropped, operator 2026-10-27):
 1. **Ornith** (MoE, 256 experts top-8): shares Qwen's decode list and already has M = 2..4 MoE lists (spec 15);
    ~1.6x / 2.2x at B = 2 / 4 by bytes (estimated; rows of different sequences route nearly independently, so the gain is
    the shared non-expert weights, not an expert union).
-2. **Muse-Glimmer** (dense, its own `MuseEngine` and `mg_*` kernels; sliding-window + NoPE attention; bf16 KV; DFlash,
-   no MTP): per-row slot addressing in `mg_attn_prep` / `mg_attn` (a ring base, a full-KV base and a position per row),
-   `step_spec` in MuseEngine, a DFlash ring and taps per slot. Memory is no constraint (4 x 128k fits, estimated).
-3. **LFM2.5** (MoE, 64 experts top-4): needs M-row lists first (kM = 1 today).
-4. **Batching over the pipeline (operator, 2026-10-23):** Agnes (and Qwen3.8 if it pays) at concurrency 4 on both cards
+2. **Batching over the pipeline (operator, 2026-10-23):** Agnes (and Qwen3.8 if it pays) at concurrency 4 on both cards
    under `--pp 2` - each card holds half the layers (~10 GB of Agnes's weights), so four 128k slots fit with room, and
    two groups of rows alternate between the stages so both cards work (the pipeline's only decode gain: at batch 1
    one card waits for the other). The row table in both stages of `runtime::PipelineEngine`, the group scheduling, the
@@ -238,7 +235,7 @@ layout the planner picks for the model (§9.1: Qwen3.8 four slots, Agnes two; a 
 `--batch` > 1 by name). **Batching never offloads to host RAM:** every slot's KV and state, the weights and the
 embedding stay on the card; when a layout does not fit, the planner shortens the short slots or refuses, it does not
 spill. (Host-RAM expert offload stays spec 22's, for Qwen3.8-Flash-Next alone.) `--batch` > 1 with `--pp 2` is §9.1
-follow-on 4; with the two-card replica mode, §10.
+follow-on 2; with the two-card replica mode, §10.
 
 **MTP trades against slots (operator, 2026-10-23).** With `--mtp off` a slot needs one GDN state instead of four, no
 head KV layer, and the card drops the MTP head (0.849 GB), so a model fits more slots. Agnes on one card, int8 KV
@@ -258,7 +255,7 @@ asked layout needs, the largest batch that fits with MTP on), so it holds for ev
 ```
 b70-serve: --batch 4 with MTP does not fit Agnes on one card: 128k + 3 x 32k needs 33.24 GB, the card has 31.03 GB
 (32.53 GB - 1.5 GB reserve). With MTP this card fits --batch 2. For --batch 4, either:
-  - add the second card and run pipeline parallel: --pp 2 (follow-on 4; both cards), or
+  - add the second card and run pipeline parallel: --pp 2 (follow-on 2; both cards), or
   - turn MTP off: --mtp off (128k + 3 x 32k fits, ~1.1 GB spare).
 ```
 

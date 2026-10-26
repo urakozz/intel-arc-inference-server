@@ -5,6 +5,11 @@ cost if wrong and collected in §12. 25a is built on the Mac (§13: the referenc
 weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25c is built on the Mac (§15: P0's
 harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25d is built on the Mac (§16: the SSD prefill, the walk; no card); 25e is built on the Mac (§17: the
 template / tokenizer fixtures, the output stream, the request path, `b70-serve <bolt>`, the hybrid snapshots; no card); 25q is not built.
+**2026-10-27 (operator):** spec 26 (LiLiCorr) was dropped and 26c's speculative serving on Bolt removed from the engine
+(e21208c: the verify lists, the Mamba state slots, the union MoE, `--spec dflash` / `lookup` on Bolt); Bolt's plain engine
+and plain serving (25c-25e) stay. Muse-Glimmer (spec 23) and LFM2.5 (spec 24), whose patterns this spec reuses, were
+dropped the same day; the kernels Bolt binds from them (`mg_attn*.cl`, `mg_pf_attn.cl`, and `lfm_prep.cl` for P0's
+stand-in) moved byte-identical to `src/kernels/bolt/`.
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.

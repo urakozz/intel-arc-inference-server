@@ -1,5 +1,7 @@
 # Spec 23e - Muse-Glimmer-30B served: tokenizer, template, the channel / ATEM parser, reasoning strength, sampling with the softcap, prefix-cache snapshots
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-16): built on the Mac (branch `spec23e-muse-serving`): Tasks 1-4 and 7 done, Task 5 Step 1 done; Task 5 Step 2 and Task 6's runs (A4, passkey, llama-benchy) are the box's - queue row 46. What was built and where it departs from this plan: spec 23 §16 "23e as built" (the state is 81,748,992 B, not 81,747,968; both Vishva007 repos ship the older template; the A4 arm runs b70-decode on the set's ids; Step 2 is a stage).**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.

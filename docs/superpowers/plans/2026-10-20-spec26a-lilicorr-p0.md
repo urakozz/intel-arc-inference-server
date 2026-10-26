@@ -1,5 +1,7 @@
 # Spec 26a - LiLiCorr P0: the reference, teacher-forced acceptance on our Bolt, the verify and block costs, the projection (defaults, not a gate)
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in b41c442; kept for the record.
+
 **Status (2026-10-23): built on the Mac, branch `spec26a-lilicorr-p0` - the reference, the tooling, the probe, the
 projection and queue row 63 (spec 26 §12 "26a as built"); nothing on a card; the real drafter's weights read on the Mac
 (decoded exactly, 1,112,803,882 parameters, the formats' bytes and weight error); the box still needs them (`hf download

@@ -1,5 +1,7 @@
 # Spec 24e - LFM2.5-24B-A2B served: tokenizer, template, the pythonic tool-call parser, `<think>`, sampling defaults and the repetition penalty, prefix-cache snapshots with the conv rings
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+
 **Status (2026-10-20): built on the Mac (branch `spec24e-lfm2moe-serving`; spec 24 §16 "24e as built"); nothing has run on a
 card.** Box queue row **53** (rows 42-47 are spec 23's). Built blind on the Mac after 24d; the host half (tokenizer, template,
 parser, sampler, snapshot layout, the server over a scripted and a fake engine) is tested on the Mac. The departures from this

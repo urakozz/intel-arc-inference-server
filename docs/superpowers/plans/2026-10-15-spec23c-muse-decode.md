@@ -1,5 +1,7 @@
 # Spec 23c - Muse-Glimmer-30B decode: kernels, the captured list, one card then two
 
+> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+
 **Status (2026-10-15): built on the Mac (branch `spec23c-muse-decode`): Tasks 1-8 done - the twin bitwise transformers 5.19.0 at the real widths, every `mg_prep` kernel and `mg_attn_eager` exact on the Mac's GPU (indicative), the engine, the CLI and the two-card path written and syntax-checked; no Muse binary compiled, nothing on a card: box queue row 44. As built: spec 23 §14.**
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking.
