@@ -23,7 +23,7 @@
 // A prefilling run plans the prefill scratch (and, on two cards, the prefill hand-off) into --layers auto, --max-len
 // auto and the fit.
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
-// Hadamard blocks; the hidden is 2560) / sycl-tla (no walk for this family), --prefill-chunk above 2048, --mtp
+// Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --mtp
 // (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
 // bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), --device N with --pp 2
 // (16b's rule: GPUs 0 and 1), and the whole model without --layers (spec 22).
@@ -129,9 +129,6 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
     throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only (spec 21d), not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and this model's hidden is 2560 - "
                              "--prefill-backend l0, or omit it");
-  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
-    throw std::runtime_error("Qwen3.8-Flash-Next prefills on the l0 backend only (spec 21d), not sycl-tla: sycl-tla has no "
-                             "Qwen3.8-Flash-Next walk - --prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::qwen4exp::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Qwen3.8-Flash-Next's prefill chunk " +
                              std::to_string(runtime::qwen4exp::kPfC) + " (the prefill scratch is sized for it)");

@@ -9,7 +9,7 @@
 //   --prefill-length N (--bench) depth N prefilled and timed (the pp row), then --tg decoded
 //   --prefill-chunk C  the chunk width, <= 2048 (kernels::kolibri::kPfC; the default)
 //   --prefill-backend l0  the only backend: l0-int8 (its h8 linears rotate in 1024-k Hadamard blocks and
-//                      Kolibri's hidden is 2560) and sycl-tla (no Kolibri walk) are refused by name
+//                      Kolibri's hidden is 2560) is refused by name
 //
 //   --pp N / --pipeline-parallel-size N   2 (Kolibri's DEFAULT: the real model holds ~42.5 GB of
 //                      weights at int4, one card 32.5 GB) or 1 - accepted only when the planner says the
@@ -19,7 +19,7 @@
 //                      runtime::pp_balance over Kolibri's per-layer bytes at the session's max_len
 //   --layers N         development mode (spec 20 §4): load only layers [0, N) of the checkpoint
 //   --lm-head bf16|int8, --max-len N|auto (under the trained 262144; above it is spec 20 decision 3)
-// Refused before the device, each by name: --prefill-backend l0-int8 / sycl-tla, --prefill-chunk above
+// Refused before the device, each by name: --prefill-backend l0-int8, --prefill-chunk above
 // 2048 (spec 20d), --mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position: bf16 only),
 // --profile (Task 8), --device N with --pp 2 (16b's rule: GPUs 0 and 1). A prefilling run plans the
 // prefill scratch (and, on two cards, the prefill hand-off) into --max-len and the fit.
@@ -105,9 +105,6 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
     throw std::runtime_error("Kolibri-1 prefills on the l0 backend only (spec 20d), not l0-int8: its h8 linears "
                              "rotate in whole 1024-k Hadamard blocks and Kolibri's hidden is 2560 - "
                              "--prefill-backend l0, or omit it");
-  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
-    throw std::runtime_error("Kolibri-1 prefills on the l0 backend only (spec 20d), not sycl-tla: sycl-tla has no "
-                             "Kolibri walk - --prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::kolibri::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Kolibri-1's prefill chunk " +
                              std::to_string(runtime::kolibri::kPfC) + " (the scratch and the 4096-slot ring's "

@@ -190,7 +190,7 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
 
   // The history: cache rows [0, pos) hold plausible bf16 activations, rows
   // [depth, kMaxLen) hold exact zeros. Both sides see the same bytes, so the
-  // GEMM's 8-element N padding reads zeros rather than whatever was resident.
+  // GEMM's 256-element depth padding reads zeros rather than whatever was resident.
   std::vector<uint16_t> kv_k(size_t(kMaxLen) * kKVH * kHD, 0);
   std::vector<uint16_t> kv_v(kv_k.size(), 0);
   {
@@ -257,11 +257,14 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
               " pf_q bit-identical to rne_bf16(fp32 attn_q) over %zu words (ruling A9 is one"
               " rounding at the store)\n", got_k.size(), got_q.size());
 
+  // The composed path on the L0 backend (until 2026-10-27 this grid ran on sycl-tla's GEMM,
+  // which pf_gemm matched bitwise - spec 2.1 bar 1). `rows` is pf_o's per-head slot stride,
+  // attn_rows(C, L0) = pad256(C) (spec 2.1 §3.4).
+  runtime::prefill::set_attn_mode_for_test(runtime::prefill::AttnMode::Composed);
   attn_chunk(d.cx, d.kc, d.s, pos, C, d.s.pf_q.as<uint16_t>(), dk.as<uint16_t>(),
-             dv.as<uint16_t>(), runtime::PrefillBackend::SyclTla);
-  // `rows` is pf_o's per-head slot stride; this test pins spec 2's attention on the sycl-tla
-  // path, where attn_rows(C, SyclTla) == C (spec 2.1 §3.4, Ruling D1).
-  attn_gate_chunk(d.cx, d.kc, d.s, C, C, dp.as<float>(), dout.as<uint16_t>());
+             dv.as<uint16_t>(), runtime::PrefillBackend::L0);
+  attn_gate_chunk(d.cx, d.kc, d.s, C, runtime::prefill::attn_rows(C, runtime::PrefillBackend::L0),
+                  dp.as<float>(), dout.as<uint16_t>());
   d.cx.wait();
   std::vector<uint16_t> got(size_t(C) * kOutN);
   d.imm.copy(got.data(), dout.ptr(), got.size() * 2);
@@ -288,7 +291,7 @@ Row case_attn(Dev& d, uint32_t pos, uint32_t C) {
 // Spec 6 (plan 6b Task 2): on the L0 backend, `attn_chunk` in Flash mode (pf_flash_attn,
 // one launch) against the same call in Composed mode, on the same random Q and K/V cache.
 // Bar: per-(row, head) cosine of pf_o >= 0.99999 on every row [0, C) and every head, and
-// no non-finite value. The composed path is the reference here, as sycl-tla is for pf_gemm.
+// no non-finite value. The composed path is the reference here.
 bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, uint32_t C) {
   using runtime::prefill::AttnMode;
   using runtime::prefill::attn_chunk;
@@ -360,7 +363,7 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
 // grid in the log (golden_gate_test's arrangement, and for its reason).
 int main() {
   Dev d;
-  // Spec 6: flash against composed on the L0 backend, before the sycl-tla grid below.
+  // Spec 6: flash against composed on the L0 backend, before the composed grid below.
   {
     bool ok = case_flash_vs_composed(d.ctx, d.imm, 16384, 2048);
     ok &= case_flash_vs_composed(d.ctx, d.imm, 777, 300);

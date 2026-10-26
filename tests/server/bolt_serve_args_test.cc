@@ -85,8 +85,6 @@ int main() {
     a.pp_backend_given = true;
     a.pp_backend = runtime::PrefillBackend::L0Int8;
     CHECK(refuses([&] { check_args(a, d); }, "int8 prefill for this family is out of scope"));
-    a.pp_backend = runtime::PrefillBackend::SyclTla;
-    CHECK(refuses([&] { check_args(a, d); }, "no Bolt walk"));
     a.pp_backend = runtime::PrefillBackend::L0;
     check_args(a, d);
   }

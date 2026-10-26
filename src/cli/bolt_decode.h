@@ -24,7 +24,7 @@
 // B70_BOLT_ATTN=flash|eager, B70_BOLT_FUSE=none|all|<router,route,conv> and B70_BOLT_SSM=fp32|bf16 pick the list (read at
 // construction; the prefill follows the attention form and the state precision). B70_PREFILL_PROFILE=1 prints the prefill's
 // phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
-// device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 / sycl-tla and a
+// device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 and a
 // --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --mtp (Bolt has no MTP head), --spec (no
 // drafter either), --kv-cache int8 (Decision 17), --device with --pp 2.
 #include <algorithm>
@@ -107,9 +107,6 @@ inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
   if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::L0Int8)
     throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only (spec 25d), not l0-int8: int8 prefill for "
                              "this family is out of scope (spec 25 §11) - --prefill-backend l0, or omit it");
-  if (a.pp_backend_given && a.pp_backend == runtime::PrefillBackend::SyclTla)
-    throw std::runtime_error("Nemotron 3.5 Bolt prefills on the l0 backend only (spec 25d), not sycl-tla: sycl-tla has no "
-                             "Bolt walk (no SSD scan, no latent MoE) - --prefill-backend l0, or omit it");
   if (a.pp_chunk > runtime::bolt::kPfC)
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Nemotron 3.5 Bolt's prefill chunk " +
                              std::to_string(runtime::bolt::kPfC) + " (the scratch is sized for it)");

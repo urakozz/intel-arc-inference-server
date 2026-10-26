@@ -1,10 +1,25 @@
-// pf_gemm (our DPAS GEMM on the L0 list) against sycl-tla's gemm_bf16_batched, BITWISE, at
-// every shape the prefill walk will hand it (spec 2.1 §2 bar 1). Only the LOGICAL rectangle
-// (rows < M, cols < N) is compared: pf_gemm computes 256-padded rows and columns that the
-// walk never reads. The one allowance is P·V at a depth that is not a multiple of 256: pf's
-// K is the padded depth and the extra P columns are exact +0.0, so a sum that sycl-tla
-// leaves at -0.0 can come out +0.0 (spec §3.4) -- counted and printed, never hidden.
+// pf_gemm (our DPAS GEMM on the L0 list) against a HOST fp64 reference at every shape the
+// prefill walk will hand it (spec 2.1 §2 bar 1; until 2026-10-27 the reference was sycl-tla's
+// gemm_bf16_batched, matched bitwise). Only the LOGICAL rectangle (rows < M, cols < N) is
+// compared: pf_gemm computes 256-padded rows and columns that the walk never reads. P·V's
+// device K is the 256-padded depth; the extra P columns are exact +0.0 and add nothing.
+//
+// **The tolerance, derived.** bf16 x bf16 products are exact in fp32 (8-bit significands), so
+// the device's only error is the fp32 accumulation of K exact products, in whatever order the
+// DPAS walk takes. For ANY summation order that error is at most gamma_(K-1) x S, S = sum |a b|
+// over the element's K terms (Higham, Accuracy and Stability §4.2), i.e. at most about K u S
+// with u = 2^-24, and u S <= ulp32(S). The reference's own error (fp64 sums of the same exact
+// products) is below 2^-40 S and is ignored. So, per element:
+//   max-ulp  |got - ref| / ulp32(S) <= K                              (the worst case; gated)
+// and over each case's compared rectangle:
+//   cosine(got, ref) >= 0.999999                                       (gated)
+// The cosine bar sits far outside the error's expected size - a random-walk accumulation
+// error is ~sqrt(K) u relative, so 1 - cos ~ K u^2 < 1e-10 here - and far inside what a
+// layout, offset or stride bug produces (cos near 0). The observed max-ulp is printed for the
+// record. The host reference runs on a row sample of the big shapes (`sample_rows`: both
+// ends of every 64-row block, so every 256-row tile boundary is in it) and every column.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -14,6 +29,7 @@
 #include <vector>
 
 #include "check.h"
+#include "common/bf16.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -80,12 +96,35 @@ Diff compare(const std::vector<float>& got, const std::vector<float>& ref, uint3
       }
   return d;
 }
-void verdict(const char* what, const Diff& d, bool allow_sign_zero) {
-  std::printf("  %-44s %s (%zu words differ, %zu sign-of-zero)\n", what,
-              d.words == 0 && (allow_sign_zero || d.sign_zero == 0) ? "bitwise" : "**DIFFERS**",
-              d.words, d.sign_zero);
-  CHECK_EQ(d.words, size_t(0));
-  if (!allow_sign_zero) CHECK_EQ(d.sign_zero, size_t(0));
+// The host reference's verdict for one case (see the file header's tolerance).
+constexpr double kCosBar = 0.999999;
+struct Tol {
+  double dot = 0, g2 = 0, r2 = 0, max_ulp = 0;
+  size_t n = 0;
+  void add(float got, double ref, double S) {
+    const double ulp = S > 0 ? std::ldexp(1.0, std::ilogb(S) - 23) : std::ldexp(1.0, -149);
+    max_ulp = std::max(max_ulp, std::fabs(double(got) - ref) / ulp);
+    dot += double(got) * ref;
+    g2 += double(got) * double(got);
+    r2 += ref * ref;
+    ++n;
+  }
+};
+void verdict(const char* what, const Tol& t, uint32_t K) {
+  const double cos = t.dot / std::sqrt(t.g2 * t.r2);
+  const bool ok = std::isfinite(cos) && cos >= kCosBar && t.max_ulp <= double(K);
+  std::printf("  %-44s %s (cos %.9f, max %.1f ulp of sum|ab|, bar %u; %zu words)\n", what,
+              ok ? "within" : "**OUTSIDE**", cos, t.max_ulp, K, t.n);
+  CHECK(ok);
+}
+float f32(uint16_t h) { return common::bf16_to_f32(h); }
+// Both ends of every 64-row block, and the last row: every 256-row tile boundary of pf_gemm is
+// sampled. All rows when there are at most 64.
+std::vector<uint32_t> sample_rows(uint32_t M) {
+  std::vector<uint32_t> r;
+  for (uint32_t m = 0; m < M; ++m)
+    if (M <= 64 || m % 64 == 0 || m % 64 == 63 || m == M - 1) r.push_back(m);
+  return r;
 }
 
 struct Dev {
@@ -101,29 +140,36 @@ void slab_case(Dev& d, uint32_t M, uint32_t K, uint32_t Nfull) {
   const std::vector<uint16_t> slab = random_bf16(size_t(K) * kSlab, 13 + Nfull);
   l0::Mem A = upload(d.ctx, a), B = upload(d.ctx, slab);
   l0::Mem Cpf(d.ctx, l0::MemKind::Device, size_t(Mp) * Nfull * 4);
-  l0::Mem Cref(d.ctx, l0::MemKind::Device, size_t(M) * kSlab * 4);
   const GemmBatch pf{M, K, kSlab, 1, K, kSlab, Nfull, 0, 0, 0};
   runtime::prefill::gemm_l0(d.cx, d.kc, pf, A.as<uint16_t>(), B.as<uint16_t>(),
                             Cpf.as<float>() + n0, false);
-  const GemmBatch ref{M, K, kSlab, 1, K, kSlab, kSlab, 0, 0, 0};
-  runtime::prefill::gemm_bf16_batched(d.cx, ref, A.as<uint16_t>(), B.as<uint16_t>(),
-                                      Cref.as<float>(), false);
   d.cx.wait();
   const std::vector<float> got = download(d.ctx, Cpf.ptr(), size_t(Mp) * Nfull);
-  const std::vector<float> want = download(d.ctx, Cref.ptr(), size_t(M) * kSlab);
-  std::vector<float> got_slab(size_t(M) * kSlab);
-  for (uint32_t m = 0; m < M; ++m)
-    std::memcpy(&got_slab[size_t(m) * kSlab], &got[size_t(m) * Nfull + n0], kSlab * 4);
+  Tol t;
+  std::vector<double> ref(kSlab), S(kSlab);
+  for (uint32_t m : sample_rows(M)) {
+    std::fill(ref.begin(), ref.end(), 0.0);
+    std::fill(S.begin(), S.end(), 0.0);
+    for (uint32_t k = 0; k < K; ++k) {
+      const double av = f32(a[size_t(m) * K + k]);
+      const uint16_t* b = &slab[size_t(k) * kSlab];
+      for (uint32_t n = 0; n < kSlab; ++n) {
+        const double p = av * f32(b[n]);
+        ref[n] += p;
+        S[n] += std::fabs(p);
+      }
+    }
+    for (uint32_t n = 0; n < kSlab; ++n) t.add(got[size_t(m) * Nfull + n0 + n], ref[n], S[n]);
+  }
   char name[96];
   std::snprintf(name, sizeof name, "slab M=%u K=%u N=%u @n0=%u", M, K, Nfull, n0);
-  verdict(name, compare(got_slab, want, 1, M, kSlab, 0, kSlab, 0, kSlab), false);
+  verdict(name, t, K);
 }
 
 // (d) Parity program S2(a): the gate||up slab walk with `pf_silu_mul` fused into each slab
 // GEMM's epilogue, against the unfused pair -- the same GEMM into fp32 `partials` followed
 // by `pf_silu_mul` -- on the SAME operands. Device against device, and bitwise: a host
 // reference would be grading the device's `exp` as well, which is not what is in question.
-// This is the cheap gate; `prefill_backend_equivalence_test` is the expensive one.
 void silu_case(Dev& d, uint32_t M) {
   constexpr uint32_t kK = 5120, kN = 34816, kX = kN / 2;   // gate||up's own shape
   constexpr uint32_t kSiluChunk = 4096;
@@ -170,8 +216,7 @@ void silu_case(Dev& d, uint32_t M) {
 // (b) Q·K^T: 6 q-heads of kv group 1 against the K cache in place (transB), N = depth.
 // (c) P·V: the same group's P against the V cache, K = depth (pf: padded to 256).
 void attention_case(Dev& d, uint32_t C, uint32_t depth) {
-  const uint32_t Mp = pad256(C), npad8 = (depth + 7u) & ~7u, npad256 = pad256(depth);
-  CHECK_EQ(depth % 8, 0u);   // the chosen depths keep sycl-tla's K/N a whole 8
+  const uint32_t Mp = pad256(C), npad256 = pad256(depth);
   const uint32_t j = 1;      // kv group 1: a non-zero base offset on every operand
   const std::vector<uint16_t> q = random_bf16(size_t(Mp) * 24 * kHd, 21 + C + depth);
   const std::vector<uint16_t> kc = random_bf16(size_t(kMaxLen) * 4 * kHd, 23 + depth);
@@ -182,35 +227,58 @@ void attention_case(Dev& d, uint32_t C, uint32_t depth) {
       std::fill(p.begin() + (size_t(l) * Mp + m) * kMaxLen + depth,
                 p.begin() + (size_t(l) * Mp + m) * kMaxLen + kMaxLen, uint16_t(0));
   l0::Mem Q = upload(d.ctx, q), KC = upload(d.ctx, kc), VC = upload(d.ctx, vc), P = upload(d.ctx, p);
-  const size_t s_pf = size_t(Mp) * kMaxLen, s_ref = size_t(C) * kMaxLen;
+  const size_t s_pf = size_t(Mp) * kMaxLen;
   l0::Mem Spf(d.ctx, l0::MemKind::Device, size_t(kGroup) * s_pf * 4);
-  l0::Mem Sref(d.ctx, l0::MemKind::Device, size_t(kGroup) * s_ref * 4);
-  const size_t o_pf = size_t(Mp) * kHd, o_ref = size_t(C) * kHd;
+  const size_t o_pf = size_t(Mp) * kHd;
   l0::Mem Opf(d.ctx, l0::MemKind::Device, size_t(kGroup) * o_pf * 4);
-  l0::Mem Oref(d.ctx, l0::MemKind::Device, size_t(kGroup) * o_ref * 4);
   const uint16_t* qb = Q.as<uint16_t>() + size_t(j) * kGroup * kHd;
   const uint16_t* kb = KC.as<uint16_t>() + size_t(j) * kHd;
   const uint16_t* vb = VC.as<uint16_t>() + size_t(j) * kHd;
 
   GemmBatch qk_pf{C, kHd, depth, kGroup, 24 * kHd, 4 * kHd, kMaxLen, kHd, 0, s_pf};
   runtime::prefill::gemm_l0(d.cx, d.kc, qk_pf, qb, kb, Spf.as<float>(), true);
-  GemmBatch qk_ref{C, kHd, npad8, kGroup, 24 * kHd, 4 * kHd, kMaxLen, kHd, 0, s_ref};
-  runtime::prefill::gemm_bf16_batched(d.cx, qk_ref, qb, kb, Sref.as<float>(), true);
   GemmBatch pv_pf{C, npad256, kHd, kGroup, kMaxLen, 4 * kHd, kHd, s_pf, 0, o_pf};
   runtime::prefill::gemm_l0(d.cx, d.kc, pv_pf, P.as<uint16_t>(), vb, Opf.as<float>(), false);
-  GemmBatch pv_ref{C, depth, kHd, kGroup, kMaxLen, 4 * kHd, kHd, s_pf, 0, o_ref};
-  runtime::prefill::gemm_bf16_batched(d.cx, pv_ref, P.as<uint16_t>(), vb, Oref.as<float>(), false);
   d.cx.wait();
 
+  // The host reference over the same host operands: q row m of head l is
+  // q[m][j*6 + l][:], the K / V cache row n of kv-head j is cache[n][j][:].
+  const std::vector<float> s_got = download(d.ctx, Spf.ptr(), size_t(kGroup) * s_pf);
+  const std::vector<float> o_got = download(d.ctx, Opf.ptr(), size_t(kGroup) * o_pf);
+  Tol tq, tp;
+  std::vector<double> ref(kHd), S(kHd);
+  for (uint32_t l = 0; l < kGroup; ++l)
+    for (uint32_t m : sample_rows(C)) {
+      const uint16_t* qr = &q[size_t(m) * 24 * kHd + (size_t(j) * kGroup + l) * kHd];
+      for (uint32_t n = 0; n < depth; ++n) {
+        const uint16_t* kr = &kc[(size_t(n) * 4 + j) * kHd];
+        double r = 0, s = 0;
+        for (uint32_t e = 0; e < kHd; ++e) {
+          const double x = double(f32(qr[e])) * f32(kr[e]);
+          r += x;
+          s += std::fabs(x);
+        }
+        tq.add(s_got[l * s_pf + size_t(m) * kMaxLen + n], r, s);
+      }
+      std::fill(ref.begin(), ref.end(), 0.0);
+      std::fill(S.begin(), S.end(), 0.0);
+      const uint16_t* pr = &p[(size_t(l) * Mp + m) * kMaxLen];
+      for (uint32_t n = 0; n < depth; ++n) {
+        const double pv = f32(pr[n]);
+        const uint16_t* vr = &vc[(size_t(n) * 4 + j) * kHd];
+        for (uint32_t e = 0; e < kHd; ++e) {
+          const double x = pv * f32(vr[e]);
+          ref[e] += x;
+          S[e] += std::fabs(x);
+        }
+      }
+      for (uint32_t e = 0; e < kHd; ++e) tp.add(o_got[l * o_pf + size_t(m) * kHd + e], ref[e], S[e]);
+    }
   char name[96];
   std::snprintf(name, sizeof name, "QK^T C=%u depth=%u (transB)", C, depth);
-  verdict(name, compare(download(d.ctx, Spf.ptr(), size_t(kGroup) * s_pf),
-                        download(d.ctx, Sref.ptr(), size_t(kGroup) * s_ref), kGroup, C, depth,
-                        s_pf, kMaxLen, s_ref, kMaxLen), false);
+  verdict(name, tq, kHd);
   std::snprintf(name, sizeof name, "PV   C=%u depth=%u (K padded %u)", C, depth, npad256);
-  verdict(name, compare(download(d.ctx, Opf.ptr(), size_t(kGroup) * o_pf),
-                        download(d.ctx, Oref.ptr(), size_t(kGroup) * o_ref), kGroup, C, kHd, o_pf,
-                        kHd, o_ref, kHd), /*allow_sign_zero=*/npad256 != depth);
+  verdict(name, tp, npad256);
 
   // Determinism: the same launch twice is bitwise, for BOTH variants -- pf_gemm_T1
   // (transB, QK^T above) and pf_gemm_T0 (untransposed, every linear and this P·V call).
@@ -245,8 +313,7 @@ void attention_case(Dev& d, uint32_t C, uint32_t depth) {
 
 int main() {
   Dev d;
-  CHECK(runtime::prefill::gemm_bf16_supports_transb());
-  std::puts("pf_gemm vs sycl-tla gemm_bf16_batched, bitwise over the logical rectangle:");
+  std::puts("pf_gemm vs a host fp64 reference over the logical rectangle (cos and max-ulp bars):");
   // Controller ruling: the brief's heterogeneous braced list of pairs will not deduce
   // under -Werror, so this is a typed array of the same five cells instead.
   const std::pair<uint32_t, uint32_t> shapes[] = {{5120, 16384}, {6144, 5120}, {5120, 34816},

@@ -162,7 +162,6 @@ int main(int argc, char** argv) {
   const std::string snap = argv[1], pdir = argv[2];
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0Int8;
   CHECK(runtime::parse_prefill_backend(argv[3], backend));
-  CHECK(runtime::is_l0(backend));
   const std::string gdir = argc > 4 ? argv[4] : "oracle-out-ornith";
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   if (argc > 5) CHECK(loader::parse_lm_head_form(argv[5], lm_head));

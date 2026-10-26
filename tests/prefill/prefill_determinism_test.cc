@@ -2,9 +2,9 @@
 // reset, **bitwise**.
 //
 // The claim is narrow and it is the one that makes every other prefill number
-// reproducible: no kernel on this path uses a floating-point atomic, the
-// sycl-tla GEMM is instantiated without split-K, and the walk's launch order is
-// fixed by an in-order L0 immediate list plus an in-order SYCL queue. So two
+// reproducible: no kernel on this path uses a floating-point atomic, no GEMM
+// splits K, and the walk's launch order is fixed by an in-order L0 immediate
+// list. So two
 // prefills of the same ids from the same zeroed state must leave the five
 // persistent buffers and `cur_token` byte for byte the same.
 //
@@ -20,7 +20,7 @@
 // this case exists to catch.
 //
 // argv: [1] prompt dir, [2] snapshot,
-//       [3] prefill backend, sycl-tla or l0 (default: the build's) -- spec 2.1
+//       [3] prefill backend, l0 or l0-int8 (default: l0) -- spec 2.1
 //       §2 bar 3 is this gate run on each backend (plan 9e Task 1).
 #include <cstdint>
 #include <cstdio>
@@ -96,7 +96,7 @@ void compare(const State& a, const State& b, const char* what) {
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
-  // argv[3]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
+  // argv[3]: the prefill backend (spec 2.1) -- l0 or l0-int8; default l0.
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));
 

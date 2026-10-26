@@ -119,33 +119,27 @@ int main(int argc, char** argv) {
 
   // ---- 2. one chunk ------------------------------------------------------
   const uint32_t kShort = 64;
-  // its launch arithmetic is sycl-tla's; the default flips to l0 at spec 2.1's close
-  eng.set_prefill_backend(runtime::PrefillBackend::SyclTla);
+  eng.set_prefill_backend(runtime::PrefillBackend::L0);
   eng.reset();
   eng.prefill(ids(kShort));
   CHECK_EQ(eng.pos(), kShort);
   CHECK(eng.prefill_scratch() != nullptr);
 
   // The launch arithmetic, pinned. `step_chunk_launches(model::qwen38(), )` is derived from the
-  // walk itself (src/runtime/prefill/step.cc's closing block) and
-  // docs/prefill-l1-engine-preregistration-2026-09-05.md §1 pre-registered its
-  // value at 1201 per chunk + 5 for the head, independent of C. If this ever
-  // differs, print both and re-derive the arithmetic from the walk - the number
-  // in the pre-registration is a prediction about the walk, not a target.
+  // walk itself (src/runtime/prefill/step.cc's closing block); one chunk from a fresh engine
+  // advances the counter by it + 5 for the head (8449 + 5 in Flash mode, 8625 + 5 composed, at
+  // this C). If this ever differs, print both and re-derive the arithmetic from the walk.
   const size_t per_chunk =
-      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::SyclTla, kShort);
+      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort);
   const size_t head = runtime::prefill::kStepHeadLaunches;
-  CHECK_EQ(per_chunk, size_t(1201));
+  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 8449 : 8625));
   CHECK_EQ(head, size_t(5));
   CHECK_EQ(eng.prefill_launches(), per_chunk + head);
-  std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk;"
-              " %zu SYCL GEMMs and %zu host waits per chunk (neither on the L0 counter)\n",
-              per_chunk, head, eng.prefill_launches(),
-              runtime::prefill::step_chunk_gemms(model::qwen38(), runtime::PrefillBackend::SyclTla),
-              runtime::prefill::step_chunk_waits(model::qwen38(), runtime::PrefillBackend::SyclTla));
+  std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk\n", per_chunk, head,
+              eng.prefill_launches());
   // S3: the L0 backend's linears are the slab walk (2 x N/1024 launches each) and its
-  // attention's two GEMMs per kv group are pf_gemm launches -- a chunk calls no SYCL and
-  // waits on the host nowhere (spec 2.1 §3.3 / §3.4).
+  // attention's two GEMMs per kv group are pf_gemm launches -- a chunk waits on the host
+  // nowhere (spec 2.1 §3.3 / §3.4).
   //
   // The parity program's S3 splits the QK^T GEMM into ROW BLOCKS of 256, so the count is
   // a function of C for the first time; S2a then fuses `pf_silu_mul` into the gate||up slab
@@ -177,8 +171,6 @@ int main(int argc, char** argv) {
       CHECK_EQ(drop, size_t(C == kShort ? 176 : C == 1000u ? 368 : 624));
     }
   runtime::prefill::set_attn_mode_for_test(env_mode);
-  CHECK_EQ(runtime::prefill::step_chunk_gemms(model::qwen38(), runtime::PrefillBackend::L0), size_t(0));
-  CHECK_EQ(runtime::prefill::step_chunk_waits(model::qwen38(), runtime::PrefillBackend::L0), size_t(0));
   // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
   // adds exactly one launch (the activation quantiser): 4 per layer, +256 per chunk.
   {
@@ -186,9 +178,7 @@ int main(int argc, char** argv) {
     CHECK(runtime::parse_prefill_backend("l0-int8", b) && b == runtime::PrefillBackend::L0Int8);
     CHECK(std::string(runtime::prefill_backend_name(runtime::PrefillBackend::L0Int8)) ==
           "l0-int8");
-    CHECK(runtime::is_l0(runtime::PrefillBackend::L0Int8) &&
-          runtime::is_l0(runtime::PrefillBackend::L0));
-    CHECK(!runtime::is_l0(runtime::PrefillBackend::SyclTla));
+    CHECK(!runtime::parse_prefill_backend("sycl-tla", b));
     for (uint32_t C : {kShort, 1000u, 2048u})
       CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0Int8, C),
                runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C) + 256);
@@ -196,12 +186,9 @@ int main(int argc, char** argv) {
                 runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0Int8, kShort),
                 kShort, runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0Int8, 2048));
   }
-  std::printf("L0 backend: %zu launches at C = %u and %zu at C = 2048 (8 QK^T row blocks),"
-              " %zu SYCL GEMMs, %zu host waits\n",
+  std::printf("L0 backend: %zu launches at C = %u and %zu at C = 2048 (8 QK^T row blocks)\n",
               runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort), kShort,
-              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048),
-              runtime::prefill::step_chunk_gemms(model::qwen38(), runtime::PrefillBackend::L0),
-              runtime::prefill::step_chunk_waits(model::qwen38(), runtime::PrefillBackend::L0));
+              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048));
 
   // ---- 3. the Control handoff, exactly as argmax_stage2 leaves it ---------
   const runtime::Control* c = eng.buffers().control.as<runtime::Control>();
@@ -243,8 +230,8 @@ int main(int argc, char** argv) {
                 "more ids than max_len");
 
   // ---- 8. the L0 backend's launch arithmetic, MEASURED (ruling E1) --------
-  // Sections 2-7 assert sycl-tla's 1201 + 5 against the live counter and state the
-  // L0 formula; nothing ran it. One chunk on L0 from a reset must advance the SAME
+  // Section 2 measured one chunk from a fresh engine; this one measures it again after
+  // sections 3-7 have used the engine. One chunk on L0 from a reset must advance the SAME
   // counter by `step_chunk_launches(model::qwen38(), L0, C) + kStepHeadLaunches` (8625 + 5 = 8630
   // at this C, derived from src/runtime/prefill/step.cc's closing block). The delta
   // is taken rather than the absolute, because `prefill_launches()` is cumulative

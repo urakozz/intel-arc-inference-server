@@ -8,8 +8,7 @@
 #   tools/box.sh dir             print the remote tree this checkout uses
 # Env: BOX (ssh target), REMOTE_DIR (relative to $HOME on the box; default from
 #      the branch, see tools/box_dir.sh), BOX_SUFFIX, JOBS,
-#      BUILD_DIR (default build; e.g. build-nosycl), CMAKE_ARGS (extra -D flags for
-#      the configure step).
+#      BUILD_DIR (default build), CMAKE_ARGS (extra -D flags for the configure step).
 set -euo pipefail
 # Machine address. Set BOX in the environment, or put it in tools/box.env
 # (untracked; copy tools/box.env.example). There is no default: a wrong
@@ -22,9 +21,8 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/box_dir.sh"
 REMOTE_DIR="$(b70_remote_dir "$(dirname "${BASH_SOURCE[0]:-$0}")/..")"
 JOBS="${JOBS:-44}"
-# A second configuration lives beside the first on the box (spec 2.1 §4:
-# build-nosycl is `cmake -DB70_PREFILL=OFF`). Both are named here rather than
-# hardcoded so one tree serves every configuration.
+# A second configuration can live beside the first on the box. Both are named here rather
+# than hardcoded so one tree serves every configuration.
 BUILD_DIR="${BUILD_DIR:-build}"
 CMAKE_ARGS="${CMAKE_ARGS:-}"
 cd "$(dirname "$0")/.."

@@ -17,7 +17,7 @@
 # C | ms | t/s |` -- beside the unchanged tg row. This script then medians
 # BOTH: the tg row on t/s as it always has, and the pp row on its own t/s. It
 # is exclusive with --depth for the same reason the CLI refuses the pair: the
-# prefilled ids ARE the depth. `--prefill-backend sycl-tla|l0|l0-int8` (spec 2.1 §3.5, spec 5)
+# prefilled ids ARE the depth. `--prefill-backend l0|l0-int8` (spec 2.1 §3.5, spec 5)
 # belongs to --prefill-length the same way --prefill-chunk does, and both PP_BACKEND (env) and
 # --prefill-backend (flag) are refused without it. (These were --pp, --pp-chunk and --pp-backend
 # until 2026-10-06, when b70-decode's --pp became vLLM's pipeline-parallel size; the old

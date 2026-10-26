@@ -100,14 +100,14 @@ void usage() {
       stderr,
       "usage:\n"
        "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]\n"
-       "                                        [--prefill-backend sycl-tla|l0|l0-int8]]\n"
+       "                                        [--prefill-backend l0|l0-int8]]\n"
        "                                        [--device N] [--max-len 16384|auto]\n"
       "                                        [--mtp off|1|2|3|auto]\n"
       "                                        [--pp 1|2 [--pipeline-split S]\n"
       "                                        [--pipeline-handoff H]]\n"
       "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --prefill-length N\n"
       "                                        [--prefill-chunk C]\n"
-      "                                        [--prefill-backend sycl-tla|l0|l0-int8]]\n"
+      "                                        [--prefill-backend l0|l0-int8]]\n"
       "                                        [--tg 256] [--device N] [--max-len 16384|auto]\n"
       "                                        [--pp 1|2 [--pipeline-split S]\n"
       "                                        [--pipeline-handoff H]]\n"
@@ -149,9 +149,9 @@ void usage() {
        "  --prefill-chunk C  --prefill-length or --prefill: positions per prefill chunk (default\n"
        "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
        "                 gate runs at 1024.\n"
-       "  --prefill-backend B  --prefill-length or --prefill: the GEMM backend, sycl-tla (spec 2),\n"
-       "                 l0 (spec 2.1, every GEMM on the Level Zero list) or l0-int8 (spec 5,\n"
-       "                 l0 with every int4 linear on the rotated int8 path). Default: l0-int8.\n"
+       "  --prefill-backend B  --prefill-length or --prefill: the GEMM backend, l0 (spec 2.1,\n"
+       "                 every GEMM on the Level Zero list; the default) or l0-int8 (spec 5, l0\n"
+       "                 with every int4 linear on the rotated int8 path).\n"
       "  --lm-head H    bf16 (default: the checkpoint's own head, byte-matched with vLLM) or\n"
       "                 int8 (spec 9: quantised per row at load). An int8 run's bench rows\n"
       "                 carry `int8-head` after the sha.\n"
@@ -164,9 +164,8 @@ void usage() {
       "                 --prefill-length run the two-card chunk pipeline (spec 16c: l0 / l0-int8,\n"
       "                 flash attention; each card's busy time on stderr); without them --ids\n"
       "                 ingests one replay per id. --mtp K|auto (--ids, spec 16d): the head on\n"
-      "                 device 1, the verify lists on both. Refused with --profile, --device and\n"
-      "                 a sycl-tla prefill. Both cards' memory lines on stderr; --max-len auto\n"
-      "                 fits both. (Before 2026-10-06 --pp was the bench's prefill length: that\n"
+      "                 device 1, the verify lists on both. Refused with --profile and --device.\n"
+      "                 Both cards' memory lines on stderr; --max-len auto fits both. (Before 2026-10-06 --pp was the bench's prefill length: that\n"
       "                 is --prefill-length now.)\n"
       "  --pipeline-split S  auto (default: the split whose heavier card holds the fewest bytes)\n"
       "                 or N: device 0 runs layers [0, N), device 1 the rest\n"
@@ -981,7 +980,7 @@ int run(int argc, char** argv) {
                              " decode path has no GEMM backend");
   runtime::PrefillBackend pp_backend{};
   if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--prefill-backend expects sycl-tla, l0 or l0-int8, got '" +
+    throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" +
                              pp_backend_arg + "'");
   if (!synthetic && !have_n) {
     usage();
@@ -1133,8 +1132,7 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --pp's refusals are argument-only, so they come before the device too.
   cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile,
-                             device != l0::Context::kFromEnv, pp_path.backend,
-                             pp_path.composed_attn});
+                             device != l0::Context::kFromEnv, pp_path.composed_attn});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what
@@ -1144,12 +1142,12 @@ int run(int argc, char** argv) {
     if (dflash.on)
       throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); K2-Horizon has none");
     // Spec 18c: K2 prefills (--prefill / --prefill-length) on the l0 backend only - the h8 path (l0-int8)
-    // rotates in 1024-k Hadamard blocks and K2's hidden is 2560; sycl-tla has no K2 walk.
+    // rotates in 1024-k Hadamard blocks and K2's hidden is 2560.
     if ((have_prefill_len || prefill) && have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
       throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), not ") +
                                runtime::prefill_backend_name(pp_backend) +
                                ": l0-int8's h8 linears need K in whole 1024-k Hadamard blocks and K2's "
-                               "hidden is 2560; sycl-tla has no K2 walk - --prefill-backend l0, or "
+                               "hidden is 2560 - --prefill-backend l0, or "
                                "omit it");
     if (profile)
       throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
@@ -1255,8 +1253,7 @@ int run(int argc, char** argv) {
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
   if (dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(ctx, dflash, model));
   // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the
-  // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built, on
-  // the L0 backends - Engine::prepare_prefill refuses sycl-tla by name).
+  // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built).
   if (have_prefill_len || prefill) model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
@@ -1296,9 +1293,7 @@ int run(int argc, char** argv) {
   size_t pp_launches_setup = 0;
   if (have_prefill_len || prefill) {
     if (have_pp_backend) eng.set_prefill_backend(pp_backend);
-    std::fprintf(stderr, "prefill backend: %s (SYCL component %s)\n",
-                 runtime::prefill_backend_name(eng.prefill_backend()),
-                 runtime::prefill::sycl_available() ? "on" : "off");
+    std::fprintf(stderr, "prefill backend: %s\n", runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
     pp_launches_setup = eng.prefill_launches();
   }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # tools/mac_check.sh - everything a Mac can check about this tree, in one command, without
-# the box: no Level Zero runtime, no ocloc, no icpx, no ssh. docs/18-mac-checks.md has
+# the box: no Level Zero runtime, no ocloc, no ssh. docs/18-mac-checks.md has
 # the full account of what each section proves and what it does not.
 #
 #   tools/mac_check.sh [--base REF] [--quick] [--allow-kernel-changes] [--kernels]
@@ -10,7 +10,7 @@
 #              DISABLED by the configuration, with reasons in build/mac-host/host_only_skipped.txt.
 #   2 l0       every C++ source (src/, tests/, tools/probe/) compiled -fsyntax-only with the
 #              box's warning flags against the Level Zero headers (tools/mac/l0_syntax.sh).
-#              SYCL / cutlass / oneDNN sources are skipped: their headers are on the box only.
+#              The oneDNN probe (SYCL / oneDNN headers, box only) is skipped.
 #   3 cmdlines tools/kernel_cmdlines on this tree and on REF: an existing variant's ocloc
 #              command line must not change or disappear (additions are listed, and fine).
 #   4 opencl   every distinct kernel variant command line through clang -x cl -cl-std=CL3.0
@@ -146,7 +146,7 @@ else
     row l0 FAIL "$counts" "logs in $out/l0/"
     grep '^FAIL' "$out/l0.txt" | cut -f2,3 | sed 's/^/    /' | cut -c1-200
   else
-    row l0 PASS "$counts" "skipped = SYCL/cutlass/oneDNN, icpx only ($(now | awk -v t=$t0 '{print $1-t}')s)"
+    row l0 PASS "$counts" "skipped = SYCL/oneDNN, icpx only ($(now | awk -v t=$t0 '{print $1-t}')s)"
   fi
   [ "$ns" != 0 ] && grep '^SKIP' "$out/l0.txt" | cut -f2,3 | sed 's/^/    skipped: /'
 fi

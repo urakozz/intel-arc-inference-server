@@ -22,7 +22,7 @@
 // Refused before the device, each by name: --mtp auto (and --spec mtp without --mtp K: auto's cost table is Qwen3.8's
 // and this family's verify cost is measured only on the truncated model - auto waits for spec 22's full-model numbers),
 // --draft-vocab (spec 8 §11's compact head is not built for this head), --kv-cache int8 (decision 8),
-// --prefill-backend l0-int8 / sycl-tla (b70-decode's messages), --pipeline-split / --pipeline-handoff without --pp 2,
+// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split / --pipeline-handoff without --pp 2,
 // --device with --pp 2, the whole model without --layers.
 #include <cstdint>
 #include <fstream>

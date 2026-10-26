@@ -61,7 +61,7 @@
 //      carry is exercised on a prompt that has a golden set.
 //
 // argv: [1] prompt dir, [2] snapshot,
-//       [3] prefill backend, sycl-tla or l0 (default: the build's) -- spec 2.1
+//       [3] prefill backend, l0 or l0-int8 (default: l0) -- spec 2.1
 //       §2 bar 3 is this gate run on each backend (plan 9e Task 1).
 //
 // If it fails after the arithmetic has been checked against `gdn_chunk_test`'s
@@ -246,7 +246,7 @@ struct Row {
 int main(int argc, char** argv) {
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
-  // argv[3]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
+  // argv[3]: the prefill backend (spec 2.1) -- l0 or l0-int8; default l0.
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 3) CHECK(runtime::parse_prefill_backend(argv[3], backend));
 

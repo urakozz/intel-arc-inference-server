@@ -793,12 +793,10 @@ st_r13_split() {
   jgrab split 'prefill_split_ornith' 'bitwise|cos|split|PASS|FAIL'
   finish
 }
-stage r13.cli 13 default gpu ornith r13.kernels "b70-decode <ornith> --prefill-length 512 runs on l0-int8 and l0 (--lm-head int8); --prefill-backend sycl-tla stops naming the L0 backends, in b70-decode and in b70-serve (which serves Ornith since 15e: row 16)"
+stage r13.cli 13 default gpu ornith r13.kernels "b70-decode <ornith> --prefill-length 512 runs on l0 (the default) and l0-int8 (--lm-head int8)"
 st_r13_cli() {
-  chk "$(bench_cmd "$SNAP_ORNITH" --prefill-length 512 --tg 16 --lm-head int8)" "b70-decode --prefill-length 512 (l0-int8)"
-  chk "$(bench_cmd "$SNAP_ORNITH" --prefill-length 512 --tg 16 --lm-head int8 --prefill-backend l0)" "b70-decode --prefill-length 512 --prefill-backend l0"
-  xfail "timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --bench --prefill-length 512 --tg 1 --prefill-backend sycl-tla" 'prefills on the L0 backends only' "--prefill-backend sycl-tla"
-  xfail "timeout 900 build/src/cli/b70-serve $SNAP_ORNITH --port $PORT --max-len 16384 --prefill-backend sycl-tla" 'prefills on the L0 backends only' "b70-serve --prefill-backend sycl-tla"
+  chk "$(bench_cmd "$SNAP_ORNITH" --prefill-length 512 --tg 16 --lm-head int8)" "b70-decode --prefill-length 512 (l0, the default)"
+  chk "$(bench_cmd "$SNAP_ORNITH" --prefill-length 512 --tg 16 --lm-head int8 --prefill-backend l0-int8)" "b70-decode --prefill-length 512 --prefill-backend l0-int8"
   grab_all rows '^\| b70-decode' 4
   grab_all pp '^pp: ' 2
   finish
@@ -806,8 +804,8 @@ st_r13_cli() {
 stage r13.p0 13 optin gpu ornith r13.kernels "P0 (plan 15d Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode --prefill-length 2048 on l0-int8 and l0 - the moe_* rows (router, route, sort, gather, requant / dequant, GEMM, combine) against the derived ~2.6 GB / layer / chunk of the separate pass"
 st_r13_p0() {
   idle before
-  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1 --lm-head int8)" "the l0-int8 prefill profile"
-  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1 --lm-head int8 --prefill-backend l0)" "the l0 prefill profile"
+  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1 --lm-head int8 --prefill-backend l0-int8)" "the l0-int8 prefill profile"
+  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1 --lm-head int8)" "the l0 prefill profile"
   idle after
   grab_all moe 'moe|MoE' 60
   grab_all idle '^IDLE '
@@ -818,8 +816,8 @@ st_r13_speed() {
   idle before
   local n arms="" ratios=""
   for n in 4096 32768 130816; do
-    arms="$arms pp$n-int8 '$(bench_cmd "$SNAP_ORNITH" --prefill-length $n --tg 256 --max-len 131072 --lm-head int8)'"
-    arms="$arms pp$n-l0 '$(bench_cmd "$SNAP_ORNITH" --prefill-length $n --tg 256 --max-len 131072 --lm-head int8 --prefill-backend l0)'"
+    arms="$arms pp$n-int8 '$(bench_cmd "$SNAP_ORNITH" --prefill-length $n --tg 256 --max-len 131072 --lm-head int8 --prefill-backend l0-int8)'"
+    arms="$arms pp$n-l0 '$(bench_cmd "$SNAP_ORNITH" --prefill-length $n --tg 256 --max-len 131072 --lm-head int8)'"
     ratios="$ratios --ratio pp$n-l0/pp$n-int8"
   done
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Ornith prefill arms"
@@ -953,10 +951,10 @@ st_r15_host() {
   run_tests '^(k2_pf_ref_test|k2_pf_variant_names_test|k2_plan_test)$'
   finish
 }
-stage r15.k1 15 default card - - "K1, no checkpoint: k2_pf_kernels_test (slab exact, linear cos 0.99999; norm / prep bit-exact; routers; MoE and MoVA grouped == dense bitwise - a 1-ulp difference is a finding; reversed chunk and replay bitwise; MoVA V rows cos 0.9999; flash attention against fp64 at 8 (pos, C) cases: default >= 0.99999, EAGER >= 0.9999 / 0.999, gated within 1 ulp); cli_reject_k2_prefill_length_int8, cli_reject_k2_prefill_sycl"
+stage r15.k1 15 default card - - "K1, no checkpoint: k2_pf_kernels_test (slab exact, linear cos 0.99999; norm / prep bit-exact; routers; MoE and MoVA grouped == dense bitwise - a 1-ulp difference is a finding; reversed chunk and replay bitwise; MoVA V rows cos 0.9999; flash attention against fp64 at 8 (pos, C) cases: default >= 0.99999, EAGER >= 0.9999 / 0.999, gated within 1 ulp); cli_reject_k2_prefill_length_int8"
 st_r15_k1() {
   run_tests '^k2_pf_kernels_test$' k2
-  run_tests '^cli_reject_k2_(prefill_length_int8|prefill_sycl)$'
+  run_tests '^cli_reject_k2_prefill_length_int8$'
   jgrab k1-prefill '^k2_pf_kernels_test$' 'cos|ulp|bit-exact|bitwise|grouped|dense|OK|PASS|FAIL'
   finish
 }
@@ -1454,7 +1452,7 @@ row 23 "spec 16c - pipeline parallel PREFILL across two B70s (--pp 2 --prefill /
 rownote 23 "After row 22: 16c's prefill hands off at 16b's cut (layer s's fold on device 0) through 16b's two hand-offs, so r22.devices and r22.p1 must pass first. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both cards free of other DRM holders for the speed stages."
 rownote 23 "S2 (spec 16 §5): pp32768 and pp65536 >= 1.7x one card, pp4096 >= 1.2x (estimates). Each --pp 2 arm prints each card's busy time ('pp: device N busy ...'): the pipeline runs at the slower card's rate, so the busy line says whether the byte-balanced auto split also balances time (the second card is ~3 % slower on prefill, docs/10); r23.split_sweep (opt-in) times the neighbouring splits."
 rownote 23 "pp131072 is opt-in (r23.s2_128k): one card at --max-len 131328 (the most it holds with the bf16 head at that length), --pp 2 at --max-len 262144 (the P3 / S3 configuration only two cards hold); ~2.5 min per one-card run."
-stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal; sycl-tla / composed refused)"
+stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal; composed refused)"
 st_r23_host() {
   run_tests '^(pipeline_prefill_plan_test|pp_prefill_protocol_test|pipeline_args_test)$'
   jgrab plan '^pipeline_prefill_plan_test$' 'chunks:|schedule:|landing:|split'
@@ -1464,11 +1462,6 @@ st_r23_host() {
 stage r23.r0 23 default cpu - g0.sha,g0.bitwise,g0.suite "--pp 1 is today's engine: 16c adds no kernel binary (pp_send / pp_recv are 16b's), every pre-existing binary identical and the suite bitwise (G0) - Engine::prefill's chunk rule now comes from runtime/prefill_chunks.h and step_chunk walks through walk_layers, both meant to be the same launches in the same order"
 st_r23_r0() {
   need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
-stage r23.reject 23 default gpu - r22.devices "the refusals before the device: --pp 2 with a sycl-tla prefill (--prefill and --prefill-length), cli_reject_pipeline_*_sycl"
-st_r23_reject() {
-  run_tests '^cli_reject_pipeline_(prefill|bench_prefill)_sycl$' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
 stage r23.p1 23 default gpu qwen r22.p1 "P1 / P2 (Review Focus 1-4): pp_prefill_test, _l0 and _i8head - 4103 ids (3 chunks), 32768 (16), 2 ids, a prefill_split continuation (2500 | 1603, chunk 1000), spec 7's hooks at 2048 / 4096 (from the shadows, the next chunk running) and 5000, a hook throwing at 2048, a one-card snapshot at 3000 continued on two cards - logits row, every layer's GDN state / conv ring / KV, both Control blocks and 16 decoded ids bitwise one card on device 0; copy and peer at the auto split, and the cuts at 5 and 62; each card's launches = step_stage_launches' arithmetic"
@@ -1828,9 +1821,9 @@ st_r26_k1() {
   jgrab k1-prefill '^kolibri_pf_kernels_test$' 'cos|ulp|bit-exact|bitwise|grouped|dense|OK|FAIL'
   finish
 }
-stage r26.reject 26 default card - - "the refusals before the device: cli_reject_kolibri_prefill_int8 (naming the 1024-k Hadamard blocks), _sycl (no Kolibri walk), _chunk (above 2048)"
+stage r26.reject 26 default card - - "the refusals before the device: cli_reject_kolibri_prefill_int8 (naming the 1024-k Hadamard blocks), _chunk (above 2048)"
 st_r26_reject() {
-  run_tests '^cli_reject_kolibri_prefill_(int8|sycl|chunk)$'
+  run_tests '^cli_reject_kolibri_prefill_(int8|chunk)$'
   finish
 }
 stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, immediate / recorded / replayed bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer)"
@@ -1927,9 +1920,9 @@ st_r27_k0() {
   need_ok r22.p1 r23.p1
   finish
 }
-stage r27.reject 27 default cpu - - "b70-serve's --pp refusals before the device: K2-Horizon (tests/model/k2) and Kolibri-1 (tests/model/kolibri1) by name, --pp 4096, --device with --pp 2, a sycl-tla prefill, --pipeline-split alone, a bad --pipeline-handoff"
+stage r27.reject 27 default cpu - - "b70-serve's --pp refusals before the device: K2-Horizon (tests/model/k2) and Kolibri-1 (tests/model/kolibri1) by name, --pp 4096, --device with --pp 2, --pipeline-split alone, a bad --pipeline-handoff"
 st_r27_reject() {
-  run_tests '^cli_reject_serve_pp(_kolibri|_value|_device|_sycl|_split_alone|_handoff_value)?$'
+  run_tests '^cli_reject_serve_pp(_kolibri|_value|_device|_split_alone|_handoff_value)?$'
   finish
 }
 stage r27.mtp 27 default gpu qwen r23.p1 "Review Focus 1-3: pp_mtp_test and _i8head - MTP across the split bitwise one card on device 0: the prose prefill (the head's KV filled on device 1), 64 speculative iterations (K 3, 1, 2, 0: every draft and verify logits row, the ids, the session incl. the live verify slot, the head's hidden row and KV layer), M2 on both engines (4 plain rows == one M = 4 verify), a 4103-id hooked prefill (spec 7 from the shadows), a one-card snapshot continued on two cards; copy and peer at the auto split, the cuts at 5 and 62; both Control blocks equal after every call; both memory lines (the embedding replica)"
@@ -2434,9 +2427,9 @@ st_r33_k1() {
   jgrab k1-prefill '^(qwen4exp_pf_kernels_test|qwen4exp_prefill_gdn_test)$' 'cos|ulp|bitwise|grouped|dense|gdn:|OK|FAIL'
   finish
 }
-stage r33.reject 33 default card - - "the refusals before the device (tests/model/qwen4exp: the model_type stub): cli_reject_qwen4exp_prefill_int8 (naming the 1024-k Hadamard blocks), _sycl (no walk), _chunk (above 2048); 21c's cli_reject_qwen4exp_prefill is gone"
+stage r33.reject 33 default card - - "the refusals before the device (tests/model/qwen4exp: the model_type stub): cli_reject_qwen4exp_prefill_int8 (naming the 1024-k Hadamard blocks), _chunk (above 2048); 21c's cli_reject_qwen4exp_prefill is gone"
 st_r33_reject() {
-  run_tests '^cli_reject_qwen4exp_prefill_(int8|sycl|chunk)$'
+  run_tests '^cli_reject_qwen4exp_prefill_(int8|chunk)$'
   finish
 }
 stage r33.prefill 33 default card oracle_q4exp_synth r33.k1,r32.k3 "F4 on prefill, one card: qwen4exp_prefill_synth_{ours,intel}_test, _eager_test (4500 ids of q4exp_4k: chunks at 0 (dense), 2048 (3 dense rows), 4096 (sparse)) - launches = prefill_chunk_launches per chunk + 6, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise (16 printed), Review Focus 5 (state, routes, selections and tokens against decode's fill, per layer), the injected run chunked == whole; prefill_split_qwen4exp_test (splits at 64 / 2048 bitwise, 2051 / 4097 within the bars)"
@@ -2568,9 +2561,9 @@ st_r34_k1() {
   run_tests '^qwen4exp_mtp_names_test$'
   finish
 }
-stage r34.reject 34 default card - - "the refusals before the device: cli_reject_serve_qwen4exp_{full (spec 22), mtp_auto, spec_mtp, draft_vocab, kv8, prefill_int8, prefill_sycl, split_alone, tokenizer (Qwen3.8's split)} and cli_reject_serve_layers_other (--layers for another model); 21c's cli_reject_qwen4exp_serve is gone"
+stage r34.reject 34 default card - - "the refusals before the device: cli_reject_serve_qwen4exp_{full (spec 22), mtp_auto, spec_mtp, draft_vocab, kv8, prefill_int8, split_alone, tokenizer (Qwen3.8's split)} and cli_reject_serve_layers_other (--layers for another model); 21c's cli_reject_qwen4exp_serve is gone"
 st_r34_reject() {
-  run_tests '^cli_reject_serve_(qwen4exp_(full|mtp_auto|spec_mtp|draft_vocab|kv8|prefill_int8|prefill_sycl|split_alone|tokenizer)|layers_other)$'
+  run_tests '^cli_reject_serve_(qwen4exp_(full|mtp_auto|spec_mtp|draft_vocab|kv8|prefill_int8|split_alone|tokenizer)|layers_other)$'
   finish
 }
 stage r34.snapshot 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F4 on the prefix cache, one card: qwen4exp_snapshot_gpu_synth_{,intel_,mtp_}test - save at block ends 2048 / 4096 and request ends 2049..2052 / 5000 / 1, load into a fresh engine, the continuation BITWISE a cold run's (logits, GDN state, conv and PLE rings, indexer tails and compressed keys, KV; with the head: its R, KV and keys, a K = 2 speculative continuation); Intel's --layers 18 when present"
@@ -3379,7 +3372,7 @@ st_r61_k1() {
   jgrab k1 '^bolt_pf_kernels_test$' 'bitwise|cosine|DPAS|grouped|slab|OK'
   finish
 }
-stage r61.reject    61 default gpu -                         -        "cli_reject_bolt_prefill_{int8,sycl,chunk,chunk64} - the l0-only backend, the 2048 chunk and its 64-grid, refused before the device"
+stage r61.reject    61 default gpu -                         -        "cli_reject_bolt_prefill_{int8,chunk,chunk64} - the l0-only backend, the 2048 chunk and its 64-grid, refused before the device"
 st_r61_reject() {
   run_tests '^cli_reject_bolt_prefill_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
@@ -3458,7 +3451,7 @@ st_r62_host() {
   chk "python3 tools/toolcall/bolt_parser_check.py --selftest build/tests/bolt_parse_dump tests/server/bolt_parse_cases.json && python3 tools/toolcall/test_serve_a4_texts.py && python3 tools/prefix/test_agentic_loop.py && python3 tools/box_validate/test_box_validate.py AgenticRunTest" "the parser checker's selftest, serve_a4_texts' and the agentic loop's Python tests"
   finish
 }
-stage r62.reject    62 default cpu  -                       -           "b70-serve's Bolt refusals before the device (tests/model/bolt: config.json only): --mtp, --spec mtp|lookup|dflash, the proposers' tuning flags, --draft-vocab, --kv-cache int8, --prefill-backend l0-int8|sycl-tla, the Qwen3.8-Flash-Next flags, --max-len 262145, --pp 2 --device 1, --pipeline-split / -handoff without --pp 2, --generation-config of a missing file"
+stage r62.reject    62 default cpu  -                       -           "b70-serve's Bolt refusals before the device (tests/model/bolt: config.json only): --mtp, --spec mtp|lookup|dflash, the proposers' tuning flags, --draft-vocab, --kv-cache int8, --prefill-backend l0-int8, the Qwen3.8-Flash-Next flags, --max-len 262145, --pp 2 --device 1, --pipeline-split / -handoff without --pp 2, --generation-config of a missing file"
 st_r62_reject() {
   run_tests '^cli_reject_serve_bolt_'
   finish

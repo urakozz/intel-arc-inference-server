@@ -22,7 +22,7 @@
 // argv: [1] golden dir, [2] prompt dir, [3] snapshot,
 //       [4] comma-separated prompt names (default "prose,code,cjk"),
 //       [5] prefill chunk width (default 0 = PrefillScratch::kC),
-//       [6] prefill backend, sycl-tla, l0 or l0-int8 (default: the build's),
+//       [6] prefill backend, l0 or l0-int8 (default: l0),
 //       [7] bf16 near-tie flips accepted per prompt (default 0; see main()).
 // Arguments 4 and 5 are what make the >= 2048-id multi-chunk gate of spec §6.2
 // a registration rather than a second binary (plan 6b Task 13 Step 6); argument
@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
   const std::string snap = argc > 3 ? argv[3] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::vector<std::string> prompts = split_commas(argc > 4 ? argv[4] : "prose,code,cjk");
   const uint32_t chunk = argc > 5 ? uint32_t(std::atoi(argv[5])) : 0u;
-  // argv[6]: the prefill backend (spec 2.1) -- sycl-tla or l0; default = the build's.
+  // argv[6]: the prefill backend (spec 2.1) -- l0 or l0-int8; default l0.
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
   if (argc > 6) CHECK(runtime::parse_prefill_backend(argv[6], backend));
   // argv[7]: near-tie flips allowed per prompt (default 0: the gate as it always

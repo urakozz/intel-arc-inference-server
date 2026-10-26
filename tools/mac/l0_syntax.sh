@@ -14,25 +14,15 @@
 # not that it links, and nothing about what it does on a device.
 #
 # SYCL / cutlass / oneDNN sources are SKIPPED, not failed: their headers exist only in
-# the oneAPI install on the box. A file is recognised by its place (src/sycl, or a
-# tools/probe/<name>.cc that src/sycl declares with b70_sycl_probe(<name>)), by a
-# direct `#include <sycl/...>`-style line, or - for one that pulls SYCL in through a
-# project header - by the compiler's own "'sycl/...' file not found".
+# the oneAPI install on the box (the one such source is the stand-alone oneDNN probe,
+# tools/probe/onednn). A file is recognised by a direct `#include <sycl/...>`-style line,
+# or - for one that pulls SYCL in through a project header - by the compiler's own
+# "'sycl/...' file not found".
 set -u
 
 if [ "${1:-}" = "--one" ]; then
   f=$2
   log="$B70_L0S_OUT/$(echo "$f" | sed 's|/|__|g').log"
-  case "$f" in
-    src/sycl/*) printf 'SKIP\t%s\tSYCL component (icpx only)\n' "$f"; exit 0 ;;
-    tools/probe/*.cc)
-      # The icpx probes are declared by src/sycl's b70_sycl_probe(<name>), and some
-      # reach SYCL only through an external header (sycl-tla, vLLM's xe2 kernels).
-      n=$(basename "$f" .cc)
-      if grep -qE "b70_sycl_probe\\($n[ )]" "$B70_L0S_ROOT/src/sycl/CMakeLists.txt"; then
-        printf 'SKIP\t%s\tSYCL probe (src/sycl/CMakeLists.txt, icpx only)\n' "$f"; exit 0
-      fi ;;
-  esac
   if grep -qE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<(sycl|cutlass|oneapi)/' "$B70_L0S_ROOT/$f"; then
     printf 'SKIP\t%s\tincludes SYCL/cutlass/oneDNN headers (icpx only)\n' "$f"; exit 0
   fi

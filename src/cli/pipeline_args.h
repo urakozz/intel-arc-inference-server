@@ -78,9 +78,8 @@ struct PipelineContext {
   bool mtp = false;          // --mtp K|auto (spec 16d: allowed with --pp 2)
   bool profile = false;      // --profile
   bool device = false;       // --device N
-  // Spec 16c: what a prefill would run on (read with prefill / bench_prefill only):
-  // --prefill-backend (or the build's default) and B70_PREFILL_ATTN=composed.
-  runtime::PrefillBackend prefill_backend = runtime::PrefillBackend::L0Int8;
+  // Spec 16c: what a prefill would run (read with prefill / bench_prefill only):
+  // B70_PREFILL_ATTN=composed.
   bool composed_attn = false;
 };
 
@@ -95,12 +94,7 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
     return;
   }
   // Spec 16c: --prefill and --bench --prefill-length run the two-card chunk pipeline, on the
-  // L0 backends' flash attention only.
-  if ((c.prefill || c.bench_prefill) && !runtime::is_l0(c.prefill_backend))
-    throw std::runtime_error(std::string("--pp 2 prefills on the L0 backends (l0, l0-int8), not ") +
-                             runtime::prefill_backend_name(c.prefill_backend) +
-                             ": sycl-tla's walk waits on the host between runtimes and has no "
-                             "two-card pipeline (spec 16c); --prefill-backend l0 or l0-int8");
+  // flash attention only.
   if ((c.prefill || c.bench_prefill) && c.composed_attn)
     throw std::runtime_error("--pp 2 prefills with the flash attention only: unset "
                              "B70_PREFILL_ATTN=composed (spec 16c)");

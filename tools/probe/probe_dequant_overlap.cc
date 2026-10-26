@@ -18,8 +18,12 @@
 // be queue 0 of group 0 serialise". `--ordinal O [--index I]` binds the
 // dequant to a DIFFERENT hardware queue and re-runs the identical battery;
 // `--enumerate-only` prints the queue groups and stops (no timing at all).
-// With no arguments the original single-list path runs unchanged, so the
-// record in that document stays reproducible from this same binary.
+// With no arguments the original single-list path runs unchanged.
+//
+// 2026-10-27: the sycl-tla GEMM is gone from the engine (operator ruling), and with it this
+// probe's GEMM arm - control B and the three batteries, which overlapped the dequant with
+// that GEMM. What stays is the queue-group enumeration, the binding rule and control A (the
+// dequant alone, on either list); the overlap verdict is the recorded one.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -38,7 +42,6 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "runtime/prefill/context.h"
-#include "runtime/prefill/gemm.h"
 
 namespace {
 
@@ -46,7 +49,6 @@ namespace {
 // at 1.5393 ms. Layout 0 is what the model selects for this matrix.
 constexpr uint32_t kK = 5120;
 constexpr uint32_t kN = 34816;
-constexpr uint32_t kM = 2048;  // PrefillScratch::kC (ruling A13)
 constexpr size_t kScratchBytes = size_t(kK) * kN * sizeof(uint16_t);  // 356,515,840
 constexpr int kLinears = 8;    // linears per battery
 constexpr int kReplays = 8;
@@ -72,11 +74,6 @@ double replay(F&& body) {
   return median(std::move(samples));
 }
 
-std::vector<uint32_t> host_words(const void* p, size_t bytes) {
-  std::vector<uint32_t> out(bytes / sizeof(uint32_t));
-  std::memcpy(out.data(), p, bytes);
-  return out;
-}
 
 // --- PROBE B: the queue groups, read verbatim from the driver ---------------
 // This function creates nothing, submits nothing and times nothing. Whatever
@@ -130,7 +127,7 @@ int main(int argc, char** argv) {
   }
 
   l0::Context ctx(0);
-  std::printf("# P-overlap: does the dequant hide behind the GEMM? (measured, iterate-grade)\n");
+  std::printf("# P-overlap: the dequant's queues and its time alone (measured, iterate-grade)\n");
   std::printf("# L0 device: %s\n", ctx.name().c_str());
 
   // --- PROBE B step 1: enumerate. Read-only, printed verbatim. --------------
@@ -225,8 +222,7 @@ int main(int argc, char** argv) {
     std::printf("alternate immediate list created on ordinal %d index %u "
                 "(IN_ORDER | ASYNCHRONOUS)\n", opt_ordinal, opt_index);
   }
-  std::printf("# shape: gate|up K=%u N=%u layout 0; GEMM at M=%u; scratch %zu B x 2\n", kK, kN, kM,
-              kScratchBytes);
+  std::printf("# shape: gate|up K=%u N=%u layout 0; scratch %zu B x 2\n", kK, kN, kScratchBytes);
   std::printf("# %d replays, discard first %d, median of last %d; one discarded warm-up.\n",
               kReplays, kDropped, kReplays - kDropped);
 
@@ -245,19 +241,8 @@ int main(int argc, char** argv) {
                    l0::Mem(ctx, l0::MemKind::Device, w1.scales.size() * sizeof(uint16_t))};
   l0::Mem scratch[2] = {l0::Mem(ctx, l0::MemKind::Device, kScratchBytes),
                         l0::Mem(ctx, l0::MemKind::Device, kScratchBytes)};
-  const size_t a_bytes = size_t(kM) * kK * sizeof(uint16_t);
-  const size_t c_bytes = size_t(kM) * kN * sizeof(float);
-  l0::Mem da(ctx, l0::MemKind::Device, a_bytes);
-  l0::Mem dc(ctx, l0::MemKind::Device, c_bytes);
   {
-    std::vector<uint16_t> a(size_t(kM) * kK);
-    uint32_t s = 0x9e3779b9u;
-    for (uint16_t& v : a) {
-      s ^= s << 13; s ^= s >> 17; s ^= s << 5;
-      v = uint16_t((s & 0x807fu) | 0x3e00u);  // exponent 124: |x| in [0.125, 0.25)
-    }
     l0::CmdList up = l0::CmdList::immediate(ctx);
-    up.copy(da.ptr(), a.data(), a_bytes);
     for (int i = 0; i < 2; ++i) {
       up.copy(dq[i].ptr(), weights[i]->qweight.data(),
               weights[i]->qweight.size() * sizeof(uint32_t));
@@ -303,12 +288,7 @@ int main(int argc, char** argv) {
     if (zeCommandListAppendLaunchKernel(alt, k, &g, nullptr, 0, nullptr) != ZE_RESULT_SUCCESS)
       std::abort();
   };
-  auto submit_gemm = [&](int slot) {
-    runtime::prefill::gemm_bf16(cx, {kM, kK, kN}, da.as<uint16_t>(),
-                                scratch[slot].as<uint16_t>(), dc.as<float>());
-  };
-  // Drains BOTH queues. Context::wait() covers the SYCL queue and the Context's
-  // own list; the alternate list is this probe's and nothing else waits on it.
+  // Drains the Context's own list and, when it exists, the alternate one.
   auto wait_all = [&] {
     cx.wait();
     if (alt && zeCommandListHostSynchronize(alt, UINT64_MAX) != ZE_RESULT_SUCCESS) std::abort();
@@ -323,108 +303,15 @@ int main(int argc, char** argv) {
   const size_t deq_read = w0.bytes();
   const double deq_gbps = double(deq_read + kScratchBytes) / (t_dequant * 1e6);
 
-  // --- control B: the GEMM alone -------------------------------------------
-  const double t_gemm = replay([&] {
-                          for (int i = 0; i < kLinears; ++i) submit_gemm(0);
-                          wait_all();
-                        }) /
-                        kLinears;
-  const double gemm_tflops = 2.0 * double(kM) * kK * kN / (t_gemm * 1e9);
-
-  std::printf("\n## controls (measured, iterate-grade)\n");
+  std::printf("\n## control (measured, iterate-grade)\n");
+  if (alt)
+    std::printf("dequant queue: **ordinal %d index %u** (alternate immediate list)\n", opt_ordinal,
+                opt_index);
+  else
+    std::printf("dequant queue: prefill::Context's own list (ordinal 0, index 0)\n");
   std::printf("| control | ms/launch | rate | reference |\n|---|---:|---:|---|\n");
   std::printf("| dequant gate‖up L0 [K][N] | %.3f | %.1f GB/s (r+w) | P3 measured 1.539 ms / "
               "293.1 GB/s |\n", t_dequant, deq_gbps);
-  std::printf("| gemm_bf16 gate‖up M=%u | %.3f | %.2f TFLOP/s | P2 measured 150.19 TFLOP/s |\n",
-              kM, t_gemm, gemm_tflops);
-
-  // --- battery 1: serial, one scratch (today's ordering) --------------------
-  const double t_serial = replay([&] {
-    for (int i = 0; i < kLinears; ++i) {
-      append_dequant(i, 0);
-      wait_all();
-      submit_gemm(0);
-      wait_all();
-    }
-  });
-  const std::vector<uint32_t> serial_c = [&] {
-    l0::Mem host(ctx, l0::MemKind::Host, c_bytes);
-    l0::CmdList::immediate(ctx).copy(host.ptr(), dc.ptr(), c_bytes);
-    return host_words(host.ptr(), c_bytes);
-  }();
-
-  // --- battery 2: double-buffered (plan 6c Task 4 Step 4's exact sequence) ---
-  // dequant `i` into slot `i&1` on the L0 list; GEMM `i-1` reading slot
-  // `(i-1)&1` on the SYCL queue; then ONE Context::wait() per iteration that
-  // drains both. The slot the GEMM reads is never the slot being written.
-  const double t_overlap = replay([&] {
-    append_dequant(0, 0);
-    for (int i = 1; i < kLinears; ++i) {
-      append_dequant(i, i & 1);
-      submit_gemm((i - 1) & 1);
-      wait_all();
-    }
-    submit_gemm((kLinears - 1) & 1);
-    wait_all();
-  });
-  const std::vector<uint32_t> overlap_c = [&] {
-    l0::Mem host(ctx, l0::MemKind::Host, c_bytes);
-    l0::CmdList::immediate(ctx).copy(host.ptr(), dc.ptr(), c_bytes);
-    return host_words(host.ptr(), c_bytes);
-  }();
-  const bool bitwise = serial_c == overlap_c;
-
-  // --- battery 3 (diagnostic, NOT the pre-registered cell) -------------------
-  // The same dependencies, the same two slots, only the SUBMISSION order
-  // swapped: the GEMM goes to the SYCL queue before the dequant is appended to
-  // the L0 list. If the device serialises whatever it sees first, this cell
-  // moves; if it serialises the two queues outright, it does not. It exists to
-  // name the mechanism behind battery 2's number, not to improve it -- the
-  // verdict against the pre-registration is battery 2's and stays battery 2's.
-  const double t_overlap_gemm_first = replay([&] {
-    append_dequant(0, 0);
-    for (int i = 1; i < kLinears; ++i) {
-      submit_gemm((i - 1) & 1);
-      append_dequant(i, i & 1);
-      wait_all();
-    }
-    submit_gemm((kLinears - 1) & 1);
-    wait_all();
-  });
-
-  // --- the verdict ----------------------------------------------------------
-  const double hidden = t_serial - t_overlap;
-  const double recovery = hidden / (kLinears * t_dequant);
-  std::printf("\n## batteries (%d linears each; measured, iterate-grade)\n", kLinears);
-  if (alt)
-    std::printf("dequant queue: **ordinal %d index %u** (alternate immediate list); "
-                "GEMM queue: the sycl::queue, as before\n", opt_ordinal, opt_index);
-  else
-    std::printf("dequant queue: prefill::Context's own list (ordinal 0, index 0) -- "
-                "the original battery\n");
-  std::printf("| battery | waits | ms total | ms/linear |\n|---|---:|---:|---:|\n");
-  std::printf("| serial, one scratch | %d | %.3f | %.3f |\n", 2 * kLinears, t_serial,
-              t_serial / kLinears);
-  std::printf("| double-buffered, two scratches | %d | %.3f | %.3f |\n", kLinears, t_overlap,
-              t_overlap / kLinears);
-  std::printf("| double-buffered, GEMM submitted first (diagnostic) | %d | %.3f | %.3f |\n",
-              kLinears, t_overlap_gemm_first, t_overlap_gemm_first / kLinears);
-  std::printf("\ndequant time in the batteries: %d x %.3f = %.3f ms\n", kLinears, t_dequant,
-              kLinears * t_dequant);
-  std::printf("hidden: %.3f ms; **recovery = %.3f** (pre-registered 0.6-0.9, accept >= 0.3)\n",
-              hidden, recovery);
-  std::printf("sum vs max model: serial ~ %d x (%.3f + %.3f) = %.3f ms; perfect overlap ~ "
-              "%d x max = %.3f ms (both derived)\n",
-              kLinears, t_dequant, t_gemm, kLinears * (t_dequant + t_gemm), kLinears,
-              kLinears * std::max(t_dequant, t_gemm));
-  std::printf("wait-count difference is %d fewer handoffs = %.3f ms at P1's measured 8.569 us "
-              "(derived) -- subtract it before crediting overlap\n",
-              kLinears, kLinears * 0.008569);
-  std::printf("diagnostic (GEMM-first submission order): recovery = %.3f -- reported to name the "
-              "mechanism, NOT as the verdict\n",
-              (t_serial - t_overlap_gemm_first) / (kLinears * t_dequant));
-  std::printf("overlapped battery output vs serial: %s\n",
-              bitwise ? "bitwise identical" : "**DIFFER -- this is a race, not a speed-up**");
   if (alt) zeCommandListDestroy(alt);
-  return bitwise ? 0 : 1;
+  return 0;
 }
