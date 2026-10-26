@@ -3622,9 +3622,9 @@ st_r66_chunk() {
 # ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
 rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
-stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, prefill_replay_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value"
+stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, prefill_replay_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
 st_r76_tests() {
-  run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|prefill_replay_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value)$'
+  run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|prefill_replay_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value|golden_server_test)$'
   jgrab pf-gemm '^pf_gemm_test$' 'within|OUTSIDE|bitwise|DIFFERS|OK'
   jgrab smoke '^prefill_smoke_test$' 'launch|8449|8454|8625|OK'
   finish
