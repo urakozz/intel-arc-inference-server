@@ -1350,7 +1350,7 @@ int run(int argc, char** argv) {
   // descriptor's vocab_used (argmax.cl VOCAB_USED). They agree on every model served:
   // Qwen3.8 248077, Agnes 248089, and Ornith 248077 - the int4 checkpoint's tokenizer.json
   // defines Qwen3.8's ids (spec 15 §13; the base checkpoint's stopped at </think>, 248070,
-  // which the descriptor masked from between 66a8923 and §13). A checkpoint whose
+  // which the descriptor masked from between 11ab54f and §13). A checkpoint whose
   // tokenizer.json and descriptor disagree is said once at startup
   // rather than discovered as an undecodable id.
   const model::ModelDesc& served = *engine.model().desc;

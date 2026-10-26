@@ -1,6 +1,6 @@
 # LFM2.5-24B-A2B (`lfm2_moe`) facts - spec 24a, 2026-10-15
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in 4822e3e; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 77d07ad; kept for the record.
 
 What spec 24's later stages are built against: the rounding chain of transformers **5.19.0**'s
 `Lfm2MoeForCausalLM` cited into the INSTALLED sources (`M:line` = `models/lfm2_moe/modeling_lfm2_moe.py`,

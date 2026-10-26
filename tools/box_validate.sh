@@ -18,8 +18,8 @@
 #                 later stages, so `--redo g0.suite` is what re-runs a test the suite ran
 #   --force       run past a G0 that has not passed (stop-the-line is the default)
 # Run control:
-#   --baseline REF   G0's reference build (default b32aaaf: main before the first blind code
-#                    commit, 5ffcb7c; `--baseline main` when validating a branch before merging)
+#   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
+#                    commit, a86dd86; `--baseline main` when validating a branch before merging)
 #   --state NAME     results directory on the box (default <sha>-vs-<baseline sha>); a new
 #                    commit starts a new state, `--state <old>` continues an old one
 #   --no-wait        launch and return (re-run the same command later to re-attach)
@@ -67,7 +67,7 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 die() { echo "box_validate.sh: $*" >&2; exit 2; }
 
 MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
-BASELINE_REF="${BASELINE_REF:-b32aaaf}" STATE_NAME=""
+BASELINE_REF="${BASELINE_REF:-ce36d2d}" STATE_NAME=""
 need() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in

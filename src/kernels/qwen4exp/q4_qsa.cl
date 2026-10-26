@@ -48,7 +48,7 @@
 // rows would overwrite slots (p % 8) its first rows still read for the block that straddles pos - so the ring is
 // updated by its own launch, q4_qsa_ring, after the prep: the last min(8, C) raw keys, what decode's ring holds
 // after the same ids. Unset (every 21c binary), IDX_LD is IDX_N and the tail write is the prep's, token for token
-// (commit 9a67889's rule: the preprocessed source of every existing binary is unchanged).
+// (commit 6499948's rule: the preprocessed source of every existing binary is unchanged).
 #ifdef QSA_PF
 #if M < 1 || M > 2048
 #error "q4_qsa: the prefill form is M = 1..2048 (kernels::qwen4exp::kPfC)"

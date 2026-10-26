@@ -4,7 +4,7 @@ Written 2026-10-07 on the Mac, without the box. This is the order in which to ru
 of [box-validation-queue.md](superpowers/plans/box-validation-queue.md) through
 `tools/box_validate.sh` (stages: `tools/box_validate/stages.sh`) once the box is back. Every
 stage id below comes from `tools/box_validate.sh --list` / `--dry-run [--with optin]` on main
-`97a519b` (180 default stages including `pre`, 43 opt-in, 12 manual; row 29's opt-in
+`1cd09eb` (180 default stages including `pre`, 43 opt-in, 12 manual; row 29's opt-in
 `r29.cost`, plan 19a Task 4's probe, makes 44). **Every time in this file is an estimate**:
 nothing here has been timed on the current tree. Where an estimate comes from is stated next
 to it.
@@ -69,7 +69,7 @@ expected, not a failure.
   stages (§1.6).
 - **State = commit x baseline.** Results live in
   `~/b70-validate/b70-inference-server-validate/<HEAD sha12>-vs-<baseline sha12>/`. Every
-  session must run from the **same commit** with the **same baseline** (default `b32aaaf`), or
+  session must run from the **same commit** with the **same baseline** (default `ce36d2d`), or
   G0 is not PASS in the new state and every later stage is SKIP "blocked". Hence the frozen
   worktree in §1.1. A fix pushed during the day is a new commit: either G0 again (~3 h) in the
   new state, or `--state <old name>` to keep adding to the old one (only for fixes that do not
@@ -95,7 +95,7 @@ expected, not a failure.
       git worktree add --detach ../b70-boxday main
       cp tools/box.env ../b70-boxday/tools/box.env      # untracked; never commit it, never print it
       cd ../b70-boxday
-      tools/box_validate.sh --dry-run | head -6          # tree <sha12>, baseline b32aaaf, state <sha12>-vs-b32aaafbc7e2
+      tools/box_validate.sh --dry-run | head -6          # tree <sha12>, baseline ce36d2d, state <sha12>-vs-ce36d2d786ee
       ```
       `git diff --quiet HEAD` must hold (a `-dirty` suffix in the state name means it did not).
       `LOCAL_DATA` (the `oracle-out-*` the driver can push) resolves to the main checkout
@@ -107,7 +107,7 @@ expected, not a failure.
 ### 1.2 The box: reachable, synced, preflight
 
 - [ ] `tools/box_validate.sh --only pre` - syncs the tree to `~/b70-inference-server-validate`,
-      extracts the baseline into `~/b70-inference-server-g0-b32aaafbc7e2`, and runs only the
+      extracts the baseline into `~/b70-inference-server-g0-ce36d2d786ee`, and runs only the
       preflight (minutes). Its `pre.log` shows `uptime`, `nproc`, `free -g`, `df -h ~`,
       `/dev/dri`, `ocloc`, `xpu-smi discovery`, the idle grade, and `have.env` - the
       `HAVE_<key>=0|1` list every stage's `needs` is checked against. Fetch it with
@@ -179,7 +179,7 @@ rsync -a ~/.cache/huggingface/hub/models--Aleph-Alpha--Kolibri-1-BF16 "$BOX:.cac
 | `oracle-out-ornith` | 481 MB | `r10.gates`, `r13.gates` (`oracle_ornith`) | ready |
 | `oracle-out-ornith-mtp` | 91 MB | `r16.m1` (`oracle_ornith_mtp`) | ready |
 | Kolibri-1-BF16 release, tokenizer and configs only | ~10 MB (tokenizer.json 9.5 MB; no weights) | `r24.oracle_synth` (make_synth copies them into each synthetic checkpoint; b70-serve needs them for `r28.*`), `r28.host`'s `kolibri_tokenizer_test` | ready |
-| `oracle-out-12a-qwen38` | 1.0 GB | no stage (the 12b tolerances are already in the tree, `6ee1d59`) | optional, record only |
+| `oracle-out-12a-qwen38` | 1.0 GB | no stage (the 12b tolerances are already in the tree, `0f13512`) | optional, record only |
 | `oracle-out-19a` | 1.3 GB | no stage | done (2026-10-08); optional, record only |
 | `oracle-out-ornith-a4`, `oracle-out-k2-a4`, `oracle-out-kolibri-a4` | - | `r16.a4`, `r25.toolcall` / `r25.a4`, `r28.a4` | **not made**: Ornith's being made on the Mac (2026-10-08, §5), K2's on the box CPU (`r25.a4_ref`, hours: ~1-1.5 days sequential, ~0.6-1 day with `a4_ref.sh`'s default `BATCH=auto RESIDENT=auto` - ESTIMATED), Kolibri's wherever 20b runs |
 
@@ -862,7 +862,7 @@ orchestrator): `r1.a4`, `r1.vllm`, `r4.g128`, `r10.p0_sweeps`, `r11.near_ties`, 
 `r14.sweeps`, `r15.p0_arms`, `r16.a4_ref`, `r18.ct`, `r24.sweeps`, `r26.p0`.
 
 Optional second G0: `r21.k0` lists `k2_moe.cl`'s pre-18e binaries as "not compared" because
-`b32aaaf` predates K2. `--baseline 6ee1d59` (main just before 18e) compares them, but it is a
+`ce36d2d` predates K2. `--baseline 0f13512` (main just before 18e) compares them, but it is a
 new state: another G0 (~3 h) before `--only r21.k0` can run in it. Defer.
 
 ## 4. What the results decide
@@ -880,7 +880,7 @@ named stage.
 | MTP cost tables (`MtpCost` defaults) | `r2.cost` (int8 head, verify M = 1..4, draft k = 1..3); at depth `r6.cost` (32k, 120k) | replace the defaults with the measured table |
 | draft-vocab default and draft shares | `r8.rows` (medians); `r8.cost` -> `kInt8DraftHeadShare` / `kBf16DraftHeadShare` | the default leaves `off` only if a size beats it by >= 2 % on A4 and loses nowhere (operator's ruling) |
 | Ornith `--mtp-cost` default and default K | `r16.cost` | an Ornith table beside Qwen3.8's |
-| int8 KV: tolerances and default | `r11.kernels` (gated flash rows, PROVISIONAL >= 0.9999 - the card's first run sets them; `flash_long_kv8_test` at 2e-3 per depth / 5e-4 averaged, set in `6ee1d59`), `r11.q2` (`kv8_vs_oracle_test` <= 1e-4), `r11.speed` (1.1x / 1.15x / 1.2x at 32k / 64k / 128k, prefill <= 3 % worse) | int8 the default only after every row-11 gate passes (plan 12b Task 4 Step 3) |
+| int8 KV: tolerances and default | `r11.kernels` (gated flash rows, PROVISIONAL >= 0.9999 - the card's first run sets them; `flash_long_kv8_test` at 2e-3 per depth / 5e-4 averaged, set in `0f13512`), `r11.q2` (`kv8_vs_oracle_test` <= 1e-4), `r11.speed` (1.1x / 1.15x / 1.2x at 32k / 64k / 128k, prefill <= 3 % worse) | int8 the default only after every row-11 gate passes (plan 12b Task 4 Step 3) |
 | K2 near-tie tolerance `B70_K2_TIE_TOL` | `r14.oracle`'s selection-gap distribution (MoE 8th / 9th, MoVA 4th / 5th) | 1e-3 proposed; the driver forwards `B70_K2_TIE_TOL` to `r14.golden`, `r15.golden`, `r15.cli` and the `r21.golden`, `r21.golden_eager`, `r21.golden_prefill` twins; re-run those with `--redo` once set |
 | K2 attention default (`kDefaultK2Attn`) | `r14.golden` vs `r14.golden_eager` (and `r21.golden` vs `r21.golden_eager` on int8 KV); eager's cost from opt-in `r15.speed`'s eager pairs | spec 18 §10.1: `eager` if flash fails determined rows that eager passes, or both pass and eager's routing diagnostic is strictly closer; otherwise `flash`; if eager wins and costs > ~3 % at 32k, a faster eager next |
 | K2 prefill bars (PROPOSED: KV rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing margin 2e-2) | `r15.prefill`'s printed distributions | set from the distribution |
@@ -927,7 +927,7 @@ named stage.
 - **`r25.toolcall` is default but its data is not made** (`oracle-out-k2-a4/set`): SKIP unless
   the set is made first (§1.4).
 - **A stale rownote:** row 11's note still says the int8-KV constants are provisional until the
-  Qwen3.8 repeat; they were replaced in `6ee1d59` (docs/probe-int8-kv-qwen38-2026-10-06.md).
+  Qwen3.8 repeat; they were replaced in `0f13512` (docs/probe-int8-kv-qwen38-2026-10-06.md).
   Only the gated flash rows of `kv8_kernels_test` remain PROVISIONAL.
 - **The idle grade is fragile:** a GNOME daemon or another agent's container appearing
   mid-session makes the timed rows ITERATE; the `IDLE after` line catches it, a re-run in a

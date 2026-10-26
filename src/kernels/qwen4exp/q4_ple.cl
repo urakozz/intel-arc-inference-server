@@ -106,7 +106,7 @@ inline uint n_rows(__global const uint* restrict ctrl) {
 // [C], the last argument) instead of Control's cur_token (8 slots), and the gather writes NO id-ring slot - a 2048-row
 // launch's rows would overwrite slots its first rows read for p - 1, p - 2 - so q4_pf_ple_ring (q4_pf_ple.cl) writes
 // the ring after the chunk's PLE block. Unset (every 21c binary), PLE_TOK(r) is Control's cur_token[r] and the ring
-// write is the gather's, token for token (commit 9a67889's rule).
+// write is the gather's, token for token (commit 6499948's rule).
 #ifdef PLE_PF
 #define PLE_TOK(r) ids[r]
 #else

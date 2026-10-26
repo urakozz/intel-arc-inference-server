@@ -138,7 +138,7 @@ it as `--every 4096`.
 ## 8. S1 and S2, measured (plan 7c)
 
 `tools/probe/probe_prefix_s12.cc`, branch `spec7c-server-prefix-cache` rebased on main at
-b7368b2 (spec 6c's `pf_flash_attn` changes included), Release, `l0-int8`, max_len 131072,
+f017897 (spec 6c's `pf_flash_attn` changes included), Release, `l0-int8`, max_len 131072,
 32 GiB pinned store, device 0 under the GPU lock. It drives the server's request path
 itself (`server::PrefixSession` over `EngineAdapter`, the code `b70-serve` runs, without
 HTTP or the tokenizer); a turn's time is `begin()` until it returns with the first
@@ -161,7 +161,7 @@ replay). The default path (no split), same build, load 8.55 to 11.87: **S1 1233.
 (1236.7, 1233.4, 1231.9), **S2 restore 347.7 ms** (352.1, 347.7, 345.0), S2 time to first
 token 1581.2 ms; the split costs about 60 ms of S1 (the extra decode replay at 60k).
 
-The same probe on the branch before the rebase (main at f170805, load 1.79 to 1.10)
+The same probe on the branch before the rebase (main at 7adfd35, load 1.79 to 1.10)
 measured S1 1504.9 ms (1504.9, 1504.9, 1505.0: 5 ms over the bar) and S2 restore 343.5 ms,
 cold H 51.9 s: the difference is main's spec 6c attention change at depth, not this plan.
 The restore matches §4's derived 319 ms plus the snapshot's partial KV; S1 matches §3's

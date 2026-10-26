@@ -57,7 +57,7 @@ Names names(const ModelDesc& d) {
           kernels::gemv_variant(1, ab4.K, ab4.N, ab4.S, ab4.layout)};
 }
 
-// main's names (c104247), spelled out: the Qwen3.8 binaries every list binds.
+// main's names (0024bd1), spelled out: the Qwen3.8 binaries every list binds.
 void check_main_names(const Names& n) {
   CHECK_EQ(n.embed, std::string("embed_gather_M1"));
   CHECK_EQ(n.gdn, std::string("gdn_step_M1"));

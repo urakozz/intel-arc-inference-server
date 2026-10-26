@@ -61,7 +61,7 @@ inline float silu_f32(float x) { return x / (1.0f + exp(-x)); }
 // 1 / (1 + exp_torch(-z)) (Sleef's expf u10 step for step - prep.cl's _SIG twin, 21c; the host twin is
 // tests/kernels/qwen4exp_ref.h gated_head_sig) and FP_CONTRACT off from here on in that binary only. Unset (every
 // other binary), GATED_ACT(z) is `silu_f32(z)`: the preprocessed source of every existing binary is token for token
-// what it was (commit 9a67889's rule).
+// what it was (commit 6499948's rule).
 #ifdef GDN_GATE_SIGMOID
 #pragma OPENCL FP_CONTRACT OFF
 inline float exp_torch(float d) {

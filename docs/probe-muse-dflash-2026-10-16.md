@@ -1,6 +1,6 @@
 # Probe: Muse-Glimmer-30B's DFlash drafter - P0 (spec 23f, 2026-10-16)
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 98c13ef; kept for the record.
 
 Spec 23 §8.3 / plan 23f Tasks 1-5: is `meta-models/Muse-Glimmer-30B-assistant` worth its verify on our card? Every
 number below is **measured on the Mac's CPU** unless marked ESTIMATED or DERIVED, and the Mac's sample is SMALL: the
