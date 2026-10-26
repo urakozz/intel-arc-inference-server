@@ -1,8 +1,8 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in e21208c (26c) and b41c442 (26a / 26b); kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 0219cc2 (26c) and 99adbb0 (26a / 26b); kept for the record.
 >
-> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> Reusable later (revive from git: `git show c57e08e:<path>` - c57e08e, this branch's parent on main, is the last
 > commit that has all of it):
 > - sink attention: `src/kernels/dflash/ll_attn.cl` (the learned sink logit added in the softmax reduce); the top-k with the logsumexp `src/kernels/dflash/ll_topk.cl`; the bf16 GEMV with an fp32 output scale `src/kernels/dflash/ll_gemv_bf16_g.cl`; host names in `src/kernels/dflash_kernels.h`
 > - the NVFP4 decoder: `src/loader/nvfp4.h`, `src/loader/nvfp4.cc`, `tests/loader/nvfp4_test.cc`; NVFP4 into our formats `src/loader/lilicorr_repack.h`, `src/loader/lilicorr_repack.cc`, `tests/loader/lilicorr_repack_test.cc`

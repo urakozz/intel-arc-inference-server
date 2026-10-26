@@ -10,7 +10,7 @@
 logits    the quantised model against the ORIGINAL bf16 model, the metrics of
           check_rotation.py. The yardstick on the 42-id prose prompt is the
           unrotated int4 g64 gate checkpoint: rel L2 7.77 %, worst cos 0.992587,
-          argmax 38/42, top-5 0.905 (commit 046f289).
+          argmax 38/42, top-5 0.905 (commit 470c5e8).
 actquant  one CPU forward of the quantised model with a hook on every linear of
           every decoder layer. For each, against y = x W^T with the model's own
           weights, it measures int8 activations, per-token symmetric:

@@ -19,7 +19,7 @@ until spec 20b's checkpoint exists.
 
 ## Dependencies and branch points
 
-- **Spec 16b (two-card decode) is merged** (`0792415..dd2fc87`; spec 16 §8 "16b as built"). 16a's probe has NOT run, so 16b ships both hand-offs, `copy` (default) and `peer`. Kolibri runs its own engine (as K2, which `runtime::PipelineEngine` refuses), so it cannot be a `PipelineEngine` stage pair; it **reuses 16b's pieces** and adds only what its descriptor and its size force:
+- **Spec 16b (two-card decode) is merged** (`d5e8076..f7131ee`; spec 16 §8 "16b as built"). 16a's probe has NOT run, so 16b ships both hand-offs, `copy` (default) and `peer`. Kolibri runs its own engine (as K2, which `runtime::PipelineEngine` refuses), so it cannot be a `PipelineEngine` stage pair; it **reuses 16b's pieces** and adds only what its descriptor and its size force:
 
   | 16b piece (on main) | how Kolibri uses it |
   |---|---|

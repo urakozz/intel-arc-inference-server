@@ -6,7 +6,7 @@ weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the
 harness, the `nb_*` kernels, `BoltEngine`, the arms; no card); 25d is built on the Mac (§16: the SSD prefill, the walk; no card); 25e is built on the Mac (§17: the
 template / tokenizer fixtures, the output stream, the request path, `b70-serve <bolt>`, the hybrid snapshots; no card); 25q is not built.
 **2026-10-27 (operator):** spec 26 (LiLiCorr) was dropped and 26c's speculative serving on Bolt removed from the engine
-(e21208c: the verify lists, the Mamba state slots, the union MoE, `--spec dflash` / `lookup` on Bolt); Bolt's plain engine
+(0219cc2: the verify lists, the Mamba state slots, the union MoE, `--spec dflash` / `lookup` on Bolt); Bolt's plain engine
 and plain serving (25c-25e) stay. Muse-Glimmer (spec 23) and LFM2.5 (spec 24), whose patterns this spec reuses, were
 dropped the same day; the kernels Bolt binds from them (`mg_attn*.cl`, `mg_pf_attn.cl`, and `lfm_prep.cl` for P0's
 stand-in) moved byte-identical to `src/kernels/bolt/`.

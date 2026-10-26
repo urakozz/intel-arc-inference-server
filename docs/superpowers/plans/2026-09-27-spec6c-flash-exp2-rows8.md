@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Branch `spec6c-flash-exp2-rows8` from main (231f41b or later); `tools/box.sh` then uses `~/b70-inference-server-spec6c` on the box automatically (`tools/box.sh dir` to check). If `tools/box.env` is missing in the worktree, copy it from `/Users/urakozz/CLionProjects/b70-inference-server/tools/box.env`; never commit it or its contents.
+- Branch `spec6c-flash-exp2-rows8` from main (f441ee6 or later); `tools/box.sh` then uses `~/b70-inference-server-spec6c` on the box automatically (`tools/box.sh dir` to check). If `tools/box.env` is missing in the worktree, copy it from `/Users/urakozz/CLionProjects/b70-inference-server/tools/box.env`; never commit it or its contents.
 - Other agents share the one-GPU box: **every GPU command runs under `flock ~/b70-gpu.lock`**, detached (`tools/probe/detach.sh ~/LOG flock ~/b70-gpu.lock <cmd>`), poll for `ALLDONE rc=`. Record `uptime` load with every timing table; if the load average is above 4, say so next to the numbers (a CPU oracle run may be active).
 - Timing: interleaved control/candidate pairs after a warm-up, median of 3 (memory: probe-timing-clock-state). The control is main's build in the base tree (`~/b70-inference-server`, `tools/box.sh` on main) or a second build of the merge base in your tree: say which.
 - No `rm -rf`. Commit on the branch; no merge, no push.

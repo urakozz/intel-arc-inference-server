@@ -1,6 +1,6 @@
 # Muse-Glimmer-30B - facts from the files and the source (2026-10-15)
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 98c13ef; kept for the record.
 
 Spec 23a (`docs/superpowers/plans/2026-10-15-spec23a-muse-reference.md`, Tasks 1-2), as far as the **small files,
 the shard headers and the source** decide it: both checkpoints' `config.json`, `generation_config.json`,

@@ -765,7 +765,7 @@ __kernel void pf_gemm_i8(__global const ushort* restrict xq16, __global const fl
 #endif  // PF_GEMM_I8
 ```
 
-The two `// ...` lines stand for **verbatim copies** of the probe text named in them. The executor copies them from `tools/probe/probe_w8a8.cl` (the `pw8_gemm` kernel, lines 73 to 176 at commit `1f8eae6`) and removes only `sig` and its store. `mb`, `nb` and `acc` are defined in that copied body.
+The two `// ...` lines stand for **verbatim copies** of the probe text named in them. The executor copies them from `tools/probe/probe_w8a8.cl` (the `pw8_gemm` kernel, lines 73 to 176 at commit `139d950`) and removes only `sig` and its store. `mb`, `nb` and `acc` are defined in that copied body.
 
 `CMakeLists.txt`:
 

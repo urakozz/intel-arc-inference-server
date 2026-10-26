@@ -12,7 +12,7 @@ expert kernels, read for their design and measured against in 18b; ours are writ
 replayed-list model (no host round trip).
 
 **History:** this spec carries forward **spec 4** (*K2-Horizon decode core on one B70*, 2026-09-14,
-commits `45a3115` / `d307d0e`, removed from the docs tree in `c197fb0`), which was designed with the
+commits `365c3c6` / `4f033bb`, removed from the docs tree in `6eb0f63`), which was designed with the
 operator section by section and parked "before we get prefill to vLLM level". That condition is met
 (pp4096 2125 against vLLM's 1610 t/s). Spec 4's reference semantics (§3 below), routing design and
 memory facts stand; this spec updates them for what the engine has gained since (specs 5-17).
@@ -216,7 +216,7 @@ contexts beyond what §4 decision 2 sets; training-only parts (the router's load
 
 Written on the Mac with the box unavailable: plan 18b Tasks 1-3; Task 4 (speed) and every run on
 the card are the box's (`docs/superpowers/plans/box-validation-queue.md`, the K2 row). Rebased on
-18a's reference (`912210e`) and aligned with `docs/probe-k2-2026-10-05.md`.
+18a's reference (`82cf7d1`) and aligned with `docs/probe-k2-2026-10-05.md`.
 
 **Structure (§5.1).** `model::K2Desc` / `model::k2()` (`src/model/k2_horizon.{h,cc}`: every number
 from the int4 checkpoint's `config.json` and safetensors headers; `check_k2_config` holds

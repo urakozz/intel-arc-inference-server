@@ -111,10 +111,10 @@ directly rather than through `llama-benchy`'s `pp` figure: **2544.043 ms for
 ### `llama-benchy`'s own `pp` figure against our server: fixed 2026-09-27
 
 `llama-benchy` derives `pp_throughput = prompt_tokens / (ttfr - latency)`, and `ttfr` is the
-arrival time of the first SSE frame carrying `choices` at all. Until a811ad1 (2026-09-27)
+arrival time of the first SSE frame carrying `choices` at all. Until 0b59fda (2026-09-27)
 `b70-serve` wrote the role-delta frame before `generate()` started, so `ttfr` measured
 time-to-role-frame and the derived `pp` came out in the millions of tokens per second. Since
-a811ad1 the role frame goes out with the first delta, after prefill, as vLLM sends it, and
+0b59fda the role frame goes out with the first delta, after prefill, as vLLM sends it, and
 `llama-benchy`'s `pp` reads the same way for both servers. `tg_throughput` was never affected.
 The matched prefill baseline above (1610.04 t/s) predates the fix and was measured directly: a
 non-streaming `/v1/completions` request, `max_tokens: 1`, over a prompt our own tokenizer counts
@@ -199,7 +199,7 @@ the first after a reboot; the paired ratio is the comparison that holds.
 The earlier measurement below is kept: it is what the one-time scale pass
 cost when it still ran inside the first request.
 
-2026-09-24, sha `04ce00c`, device 0, `tools/bench_decode.sh --prefill-length 4096
+2026-09-24, sha `fe20b9b`, device 0, `tools/bench_decode.sh --prefill-length 4096
 --prefill-backend <b> --runs 3`, taken as four interleaved passes (l0, int8, l0,
 int8). No process held a render node; a CPU-only container of another job was
 running, so the script graded every pass **ITERATE**.
@@ -476,7 +476,7 @@ tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probe-prefix-cache-2026
   The real recorded opencode session (C3) is pending; rerun with
   `tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3`.
 
-**llama-benchy, merged main 5d76b13 (2026-09-28, 21:18-21:29, load 1.0-4.2).** `uvx
+**llama-benchy, merged main cea0e6c (2026-09-28, 21:18-21:29, load 1.0-4.2).** `uvx
 llama-benchy --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching
 --exact-tg --latency-mode generation --runs 3` through `tools/probe/serve_benchy.sh`,
 `b70-serve --max-len 131072` (int8 `lm_head`, `--mtp 0`), `--prefix-cache-gb 0` against

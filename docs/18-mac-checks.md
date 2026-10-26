@@ -14,7 +14,7 @@ tools/mac_check.sh --allow-kernel-changes  # a branch that means to move a cmdli
 ```
 
 It prints a section per check, then a table, and exits non-zero if any section
-FAILs. Measured on the Intel MacBook Pro (i9-9980HK, 16 threads) at `36346cc`
+FAILs. Measured on the Intel MacBook Pro (i9-9980HK, 16 threads) at `4cdd0b7`
 plus this kit, `--kernels`, 80 s in all with the host build warm:
 
 | section | result on main | time |

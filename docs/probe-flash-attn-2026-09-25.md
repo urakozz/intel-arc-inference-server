@@ -12,7 +12,7 @@ matches the composed path, 1.004x, so **F1 is in doubt** on this tiling: see §3
 ## 1. P0, the baselines
 
 Box: one B70 (device 0, `ZE_AFFINITY_MASK=0`), idle at dispatch (no render-node
-holder, no container; `bench_decode.sh` graded every pp row RECORD). Tree: 60baa0e
+holder, no container; `bench_decode.sh` graded every pp row RECORD). Tree: 7b01e15
 (production unchanged; the "-dirty" rows differ only by the probe files).
 Backend: the build default, `l0-int8`. Script: `tools/probe/attn_baseline.sh`.
 

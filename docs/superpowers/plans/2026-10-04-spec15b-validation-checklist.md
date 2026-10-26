@@ -6,7 +6,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-spec15-ornith-moe-design.md` (§3 decision 2, §5 R0, §7 15b). **Plan:** `docs/superpowers/plans/2026-10-04-spec15b-model-desc-all-shapes.md`.
 
-**Order with spec 14:** main carries spec 14 **unvalidated on the card** (its checklist, `2026-10-03-spec14-validation-checklist.md`, is pending). Run spec 14's session on main first; this session's "main" reference below is the main build spec 14's session validated (or main at `c104247` if both run in one sitting, spec 14's G0 first). A failure here that also fails on main is spec 14's, not 15b's.
+**Order with spec 14:** main carries spec 14 **unvalidated on the card** (its checklist, `2026-10-03-spec14-validation-checklist.md`, is pending). Run spec 14's session on main first; this session's "main" reference below is the main build spec 14's session validated (or main at `0024bd1` if both run in one sitting, spec 14's G0 first). A failure here that also fails on main is spec 14's, not 15b's.
 
 **Branch commits (written on the Mac, nothing ran on a card):**
 
@@ -24,7 +24,7 @@
 | `model_desc_test` | Qwen3.8 and Agnes shapes, derived widths, small layout = `kQwen38Small`, MTP bytes 849,398,784, empty kernel suffixes; Ornith's row (40 / 30 / 10 layers, 2048, 16 / 2, 16 / 32, conv 8192, MoE 256 x top-8 x 512 + shared 512 with gate, vocab_used 248077) and `require_loadable` throwing "MoE not implemented (spec 15c)" |
 | `variant_names_test` | every shape-baking variant name the runtime builds equals main's at Qwen3.8 and Agnes; Ornith's carry `_D2048` / `_GK16V32` / `_Q16KV2` |
 | Level Zero syntax check (`-fsyntax-only`, open-source L0 headers) | 144/151 clean - the 7 SYCL / cutlass probes, as on main |
-| `tools/kernel_cmdlines` against main (`c104247`) | **identical**: default 271, `-DB70_AGNES_SWEEP=ON` 289, `-DB70_DECODE_EXTRA_M=ON` 271. No `.cl` source changed (`git diff c104247 -- 'src/kernels/*.cl' 'src/kernels/prefill/*.cl'` is empty), so the binaries should be byte-identical. |
+| `tools/kernel_cmdlines` against main (`0024bd1`) | **identical**: default 271, `-DB70_AGNES_SWEEP=ON` 289, `-DB70_DECODE_EXTRA_M=ON` 271. No `.cl` source changed (`git diff 0024bd1 -- 'src/kernels/*.cl' 'src/kernels/prefill/*.cl'` is empty), so the binaries should be byte-identical. |
 
 Nothing was linked against Level Zero and nothing ran on a GPU.
 

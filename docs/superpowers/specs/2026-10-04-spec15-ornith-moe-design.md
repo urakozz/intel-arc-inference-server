@@ -490,7 +490,7 @@ requests, nothing downloaded) and range-fetched tensor data; not run on the card
 | qzeros 0x77777777, g_idx identity k / 64 | all 60 a/b linears and 160 random other linears range-fetched: all hold | holds (the loader asserts all) |
 | non-quantised tensors bf16 | yes: embed, lm_head, norms, conv1d, A_log, dt_bias, routers, MTP head, vision | holds; config.json's top-level `dtype: float16` is the export's label (text_config bf16) |
 | MTP head (15e, read from the bf16 base's shard 16) | `model_extra_tensors.safetensors`: the same 785 bf16 tensors, names and 1,689,281,536 B | holds (RTN at load as built) |
-| tokenizer.json defines 248070 ids (66a8923) | **248077**: re-serialised by transformers 5.14.1 (19,989,325 B), added tokens 248044..248076 incl. the seven audio specials; vocab and merges identical to the base's | **did not hold - vocab_used 248077** |
+| tokenizer.json defines 248070 ids (11ab54f) | **248077**: re-serialised by transformers 5.14.1 (19,989,325 B), added tokens 248044..248076 incl. the seven audio specials; vocab and merges identical to the base's | **did not hold - vocab_used 248077** |
 | the committed golden prompt ids | prose / code / cjk tokenise to the committed ids (trailing newline stripped, as tokenize.py) with this tokenizer.json | holds (`B70_ORNITH_PROMPTS_DIR` unchanged) |
 | chat template (vendored, sha256 `182e77dd`) | `chat_template.jinja` byte-identical | holds; its tokenizer_config.json is a new 1,166 B one (no embedded template, same bos null / eos `<|im_end|>`) |
 | EOS from generation_config.json | `[248046, 248044]` | holds |

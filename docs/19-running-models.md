@@ -15,7 +15,7 @@ Most of what is on `main` was written while the box was unavailable and merged
 checks, a few kernels on the Mac's own GPU), never run on a B70. The queue of what still
 has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-validation-queue.md).
 
-- **Measured** below means the configuration ran on the card at or before `b32aaaf`, the
+- **Measured** below means the configuration ran on the card at or before `ce36d2d`, the
   last commit before the blind work. `main` is expected to give the same bits for
   Qwen3.8 (the descriptor refactor and the new models only add code paths); checking that
   is the queue's first step (G0) and has not happened yet.

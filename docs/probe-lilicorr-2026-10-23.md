@@ -1,6 +1,6 @@
 # Probe: LiLiCorr on our Bolt - P0 (spec 26a, 2026-10-23)
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in b41c442; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 99adbb0; kept for the record.
 
 Spec 26 §8 / plan 26a: what NVIDIA's LiLiCorr drafter (`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr` @
 `449d2414`) is worth on OUR Bolt (SergiioB's g128 dequantised - what we serve; LiLiCorr was trained against NVIDIA's 2-bit

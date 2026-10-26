@@ -50,7 +50,7 @@ Needs plan 13b and 13a's §7 decisions (chunk size, the budget rule, burst hold 
    inter-token gap of a decoding request while a 32k prompt prefills is recorded (13a predicts it: one chunk + one
    step).
 4. **Sampling seeds per request** stay reproducible regardless of what else is in the batch (the per-request RNG, the
-   adapters' re-arm since `82b212f`).
+   adapters' re-arm since `99e8018`).
 5. **The row budget:** the K per request (AdaptiveK) clipped so a step carries at most 8 rows, by the rule 13a's §7
    fixes; a lone request keeps its full K (`--mtp auto` unchanged at B = 1).
 6. **Queue full:** requests beyond N wait (bounded queue as today); a waiting request's prefix-cache plan is taken when

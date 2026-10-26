@@ -28,7 +28,7 @@
 //   q4_moe.cl             q4_route, q4_moe_gate_up, q4_moe_down               block reads under
 //                                                                             cl_intel_subgroups, plain otherwise
 // and prep.cl's prep_gated_head at -DGDN_GATE_SIGMOID=1 (the `_SIG` binary; every existing prep.cl binary's
-// command line and preprocessed source unchanged - commit 9a67889's rule).
+// command line and preprocessed source unchanged - commit 6499948's rule).
 //
 // Every sigmoid / SiLU in the q4_ kernels (and in prep_gated_head _SIG) is 1 / (1 + exp_torch(-x)) /
 // x / (1 + exp_torch(-x)): exp_torch is Sleef's expf u10 step for step (torch's Vectorized<float>::exp,
@@ -217,7 +217,7 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
 //   q4_pf_attn.cl   q4_pf_sparse_attn (DPAS over a gathered list)                               card only
 //   q4_pf_ple.cl    q4_pf_ple_gate, q4_pf_ple_conv, q4_pf_ple_ring                               plain OpenCL C
 // and three existing sources gain a define each, every existing binary's preprocessed source token for token as it
-// was (commit 9a67889's rule): prefill/pf_gated_head.cl GDN_GATE_SIGMOID (`pf_gated_head_SIG`), q4_qsa.cl QSA_PF
+// was (commit 6499948's rule): prefill/pf_gated_head.cl GDN_GATE_SIGMOID (`pf_gated_head_SIG`), q4_qsa.cl QSA_PF
 // (the M = kPfC prep without the in-launch ring write + q4_qsa_ring; `_PF`), q4_ple.cl PLE_PF (the gather's tokens
 // from the chunk's id buffer, no ring write; `_PF`).
 inline constexpr unsigned kPfC = 2048, kPfTm = 32, kPfSlab = 1024;

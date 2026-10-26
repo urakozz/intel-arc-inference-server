@@ -1,8 +1,8 @@
 # Spec 23e - Muse-Glimmer-30B served: tokenizer, template, the channel / ATEM parser, reasoning strength, sampling with the softcap, prefix-cache snapshots
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 98c13ef; kept for the record.
 >
-> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> Reusable later (revive from git: `git show c57e08e:<path>` - c57e08e, this branch's parent on main, is the last
 > commit that has all of it):
 > - dense attention: `src/kernels/muse/mg_attn.cl` (flash decode, sliding window over a ring or full NoPE, output gate), `src/kernels/muse/mg_attn_eager.cl`, prefill attention `src/kernels/muse/mg_pf_attn.cl` (DPAS flash + eager twin) - all three still live, byte-identical, in `src/kernels/bolt/` (Bolt binds them); their twins `tests/kernels/muse_ref.h`, `tests/kernels/muse_pf_ref.h` (the full-layer half lives on as `tests/kernels/mg_attn_ref.h`)
 > - the between-GEMV kernels `src/kernels/muse/mg_prep.cl` (weight-less / centered norms, sandwich post-add, q / k prep, SiLU x up), `src/kernels/muse/mg_pf_prep.cl`, `src/kernels/muse/mg_argmax.cl`; host names `src/kernels/muse_kernels.h`; the GEMV cells at its dense shapes in `src/kernels/CMakeLists.txt`'s Spec 23c / 23d blocks

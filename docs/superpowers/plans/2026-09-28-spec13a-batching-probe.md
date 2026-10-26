@@ -1,7 +1,7 @@
 # Spec 13a - batching: the probe
 
 **Status (2026-10-23): refreshed against spec 13 §9 / §9.1 / §9.2 (the operator's decisions of 2026-10-23, main at
-`e977458`) and BUILT on the Mac on branch `spec13a-batching-probe` - Tasks 1-4's Mac halves (the audit, the row builds,
+`a225083`) and BUILT on the Mac on branch `spec13a-batching-probe` - Tasks 1-4's Mac halves (the audit, the row builds,
 `build_rows`, `probe_batch_step`, the proposal skeleton, queue row 66). Nothing has run on a card: every measured cell of
 `docs/probe-batching-2026-10-23.md` is PENDING (box) until row 66 (`r66.check`, then the opt-in `r66.cost` /
 `r66.chunk` on an idle box).** The plan of 2026-09-28 (B = 2..4 plain rows, MTP out of scope,

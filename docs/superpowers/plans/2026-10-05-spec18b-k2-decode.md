@@ -11,7 +11,7 @@ the box validation queue's K2 row.
 
 **Goal:** K2 decodes through a replayed Level Zero list on one B70: model table, loader with flat per-layer expert buffers, K2's own kernels, spec 15's MoE kernels with K2's router, `K2Engine`; K0, K1, K2 (decode), K3 (replay); the decode speed rows.
 
-**Architecture:** spec 18 §5.1-5.2. The old plans carry most of the detail — **read them first**: `git show d307d0e:docs/superpowers/plans/2026-09-14-plan8b-spec4-model-loader.md` (model table, RoPE table, `load_k2`), `...plan8c-spec4-kernels.md` (grouped norm, SiLU·mul, router top-k, expert slots and combines, the attention trio), `...plan8e-spec4-engine-gate.md` (`K2Buffers`, capture, `K2Engine`, golden gate, CLI dispatch). **What changes against them:**
+**Architecture:** spec 18 §5.1-5.2. The old plans carry most of the detail — **read them first**: `git show 4f033bb:docs/superpowers/plans/2026-09-14-plan8b-spec4-model-loader.md` (model table, RoPE table, `load_k2`), `...plan8c-spec4-kernels.md` (grouped norm, SiLU·mul, router top-k, expert slots and combines, the attention trio), `...plan8e-spec4-engine-gate.md` (`K2Buffers`, capture, `K2Engine`, golden gate, CLI dispatch). **What changes against them:**
 - the 8 + 4 fixed **slot launches** become spec 15's single launches over all selected experts (MoE gate‖up for 8 + shared; down + combine + residual; MoVA's 4 value experts + combine), with the combine order a parameter (ascending id for K2);
 - the router top-k is spec 15's kernel parameterised for K2's formula (sigmoid, selection-only bias, × 2.5 after normalising, ascending id);
 - decode attention is spec 10's v2 at head_dim 128 / GQA 4 (old plan 8c Task 5's trio is replaced);

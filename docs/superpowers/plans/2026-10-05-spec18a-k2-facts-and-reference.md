@@ -21,7 +21,7 @@ reference are written and tested; nothing has run on real weights, the box or a 
 
 **Goal:** the facts K2's build depends on, re-checked against today's engine; a layer-streamed CPU reference of `modeling_k2_horizon.py` with per-layer MoE and MoVA routing dumps; golden sets on K2's tokenisation; the chat-template check.
 
-**Architecture:** the old stage-0 and oracle plans carried forward — **read them first for task detail**: `git show d307d0e:docs/superpowers/plans/2026-09-14-plan8a-spec4-stage0-facts.md` and `...plan8d-spec4-oracle.md`. What changes: the reference is **layer-streamed** with spec 14's `tools/oracle/stream.py` (the old plan materialised the whole dequantised model, ~87 GB estimated), it records MoVA and MoE expert ids and weights per layer and position, and the template check is added.
+**Architecture:** the old stage-0 and oracle plans carried forward — **read them first for task detail**: `git show 4f033bb:docs/superpowers/plans/2026-09-14-plan8a-spec4-stage0-facts.md` and `...plan8d-spec4-oracle.md`. What changes: the reference is **layer-streamed** with spec 14's `tools/oracle/stream.py` (the old plan materialised the whole dequantised model, ~87 GB estimated), it records MoVA and MoE expert ids and weights per layer and position, and the template check is added.
 
 **Tech Stack:** Python 3, torch 2.14.1 CPU, transformers 5.15.0 (the oracle image / the Mac's `agnes-ref` image), C++17 + Level Zero for the device facts.
 

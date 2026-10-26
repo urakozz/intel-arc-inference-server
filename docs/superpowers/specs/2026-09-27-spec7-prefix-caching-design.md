@@ -224,7 +224,7 @@ record for the operator's call before 7b.
 
 ## 8. Amendment: results (plan 7c, 2026-09-28)
 
-Built on branch `spec7c-server-prefix-cache` (rebased on main b7368b2). Records:
+Built on branch `spec7c-server-prefix-cache` (rebased on main f017897). Records:
 `docs/probe-prefix-cache-2026-09-27.md` §8 (S1, S2) and §9 (C3 on a synthetic session),
 `docs/BENCHMARKS.md` "Prefix caching (spec 7)".
 

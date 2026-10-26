@@ -1,8 +1,8 @@
 # Spec 23f - Muse-Glimmer's DFlash drafter: P0 (acceptance, verify cost, the stopping rule), then the engine
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in ef3f1d7; kept for the record.
+> DROPPED (operator, 2026-10-27): support removed from the engine in 98c13ef; kept for the record.
 >
-> Reusable later (revive from git: `git show 4c491f8:<path>` - 4c491f8, this branch's parent on main, is the last
+> Reusable later (revive from git: `git show c57e08e:<path>` - c57e08e, this branch's parent on main, is the last
 > commit that has all of it):
 > - the DFlash v1 drafter in its Muse form: `src/kernels/muse/mg_dflash.cl`, `src/runtime/dflash/muse_drafter.h`, `src/runtime/dflash/muse_drafter.cc`, the Muse form of `src/model/dflash.h` / `src/model/dflash.cc`, `src/runtime/dflash/dflash_capture.cc` and `src/kernels/dflash_kernels.h`; int4 g64 drafter linears (`DraftFormat::Int4G64`, `src/loader/dflash_repack.cc`)
 > - tests: `tests/runtime/muse_dflash_test.cc`, `tests/loader/muse_assistant_test.cc`, `tests/kernels/muse_dflash_names_test.cc`, the Muse form of `tests/kernels/dflash_ref.h` and `tools/oracle/dflash_ref.py`
@@ -80,7 +80,7 @@ Part 1's box halves (Task 2 Step 2, Task 3 Step 2, Task 4 Step 2, Task 5 on the 
 - Modify: `tools/oracle/dflash_accept.py` (`--kmax 15`; arms `bf16`, `int8` (per-channel RTN, simulated), `int4g64` (RTN with `loader/rtn.h`'s rule restated, simulated), `dflash2` (incoai's checkpoint through `dflash_ref`'s v2 path, decision 12); `--q raw|capped` for the sampled acceptance estimate), `tools/oracle/test_dflash_accept.py`, `tools/spec/lookup_accept.py` (a `--dumps` source: the same continuations), `tools/oracle/dflash_p0.sh` (a `muse` mode)
 
 - [x] **Step 1: failing tests** on the tiny pair: the batched acceptance equals per-anchor `draft_block` (as 19a's); `--kmax 15` with a 16-row block; the int4 g64 simulation equals `rtn_int4_g64`'s dequant on a fixture; `--q capped` applies the target's multiplier and softcap to the drafter's rows before the softmax. Implement, PASS. Commit `oracle: dflash_accept for Muse-Glimmer - K to 15, the int4 g64 arm, raw / capped q (spec 23f)`.
-- [ ] **Step 2 (box CPU):** per corpus (A4, code, prose, the agentic session) and arm: E_K for K = 1..15 (greedy), the per-depth acceptance, and the sampled estimate at T 1.0 / top-k 64 / top-p 0.95 for both q forms (spec 8 §11's expected-acceptance formula); lookup's E_K on the same continuations (`lookup_accept.py --dumps`, n = 3, K <= 15). Record in `docs/probe-muse-dflash-<date>.md`. Commit `probe: Muse-Glimmer DFlash acceptance on our prompts (spec 23f)`. **(Box: r47.accept (the Mac's half: 18d615f, docs/probe-muse-dflash-2026-10-16.md).)**
+- [ ] **Step 2 (box CPU):** per corpus (A4, code, prose, the agentic session) and arm: E_K for K = 1..15 (greedy), the per-depth acceptance, and the sampled estimate at T 1.0 / top-k 64 / top-p 0.95 for both q forms (spec 8 §11's expected-acceptance formula); lookup's E_K on the same continuations (`lookup_accept.py --dumps`, n = 3, K <= 15). Record in `docs/probe-muse-dflash-<date>.md`. Commit `probe: Muse-Glimmer DFlash acceptance on our prompts (spec 23f)`. **(Box: r47.accept (the Mac's half: 5127d71, docs/probe-muse-dflash-2026-10-16.md).)**
 
 ### Task 4: the verify cost at M = 1..16 and one block's draft cost (box GPU)
 
