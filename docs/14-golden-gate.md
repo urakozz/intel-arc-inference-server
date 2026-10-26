@@ -255,9 +255,10 @@ persistent buffer, then once more from a re-zeroed state.
 GDN state, the convolution ring, both KV caches, the control block and the
 logits, across two full chunks plus a ragged tail.
 
-And `prefill_backend_equivalence_test` holds the Level Zero and sycl-tla prefill
-paths **bitwise equal** - 0 words differing and 0 sign-of-zero differences on
-all five case families - so the backend selection cannot change a result.
+Until 2026-10-27 `prefill_backend_equivalence_test` held the Level Zero and
+sycl-tla prefill paths **bitwise equal** - 0 words differing and 0 sign-of-zero
+differences on all five case families; the sycl-tla backend and the test are gone
+since, and `pf_gemm_test` grades `pf_gemm` against a host fp64 reference.
 
 ## The third implementation
 

@@ -170,13 +170,12 @@ int main() {
   imm.copy(host.data(), buf.ptr(), buf.size());
   for (auto value : host) CHECK_EQ(value, 45168u);
   CHECK_EQ(cx.launches(), size_t{601});
-  for (int misuse = 0; misuse < 3; ++misuse) {
+  for (int misuse = 0; misuse < 2; ++misuse) {
     bool threw = false;
     try {
       auto invalid = cx.capture([&] {
         if (misuse == 0) cx.wait();
-        if (misuse == 1) (void)cx.sycl();
-        if (misuse == 2) (void)cx.capture([] {});
+        if (misuse == 1) (void)cx.capture([] {});
       });
     } catch (const std::exception&) { threw = true; }
     CHECK(threw);

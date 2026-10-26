@@ -21,7 +21,7 @@ parameter).
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
 | Rust | needed for the pinned `tokenizers` crate (doc 11). A user-local `rustup` with `--profile minimal` is enough; the build looks in `~/.cargo/bin` first and never changes `PATH`. The crate builds `oniguruma` from source through `cc`, so a working `/usr/bin/cc` is required |
-| oneAPI | only for the optional sycl-tla reference backend. `icpx` is usually **not** on `PATH` in a non-interactive shell, so source the environment script or use the full path |
+| oneAPI | not used by the engine build. Only the stand-alone oneDNN reference probe (`tools/probe/onednn/CMakeLists.txt`) needs `icpx`, which is usually **not** on `PATH` in a non-interactive shell, so pass its full path |
 
 The C++ side builds **natively on the host**. No container is needed for
 anything except the Python CPU oracle and the reference vLLM stack.
@@ -42,12 +42,8 @@ anything except the Python CPU oracle and the reference vLLM stack.
 
 The upgrade left the driver stack (IGC, compute runtime, Level Zero) unchanged, so every
 kernel binary and every measured row in BENCHMARKS still comes from the same compiler and
-runtime. Only the oneAPI compiler moved, and the build still pins 2026.1 by path
-(`B70_ICPX` in `cmake/prefill.cmake`): icpx builds only the optional SYCL prefill
-component, and keeping it fixed until a validation run is through means G0 compares code,
-not compilers. Moving to 2026.2 is its own change: set `B70_ICPX` to
-`/opt/intel/oneapi/compiler/2026.2/bin/icpx`, rebuild, and compare the SYCL prefill path's
-gates and rate against 2026.1.
+runtime. Only the oneAPI compiler moved, and since 2026-10-27 the engine build uses no
+oneAPI compiler at all (the sycl-tla prefill backend was removed).
 
 ## Driving a remote build
 
@@ -68,9 +64,8 @@ Two properties of that script are load-bearing rather than incidental.
 - **It syncs without `.git`.** So the remote tree cannot name the commit it is
   building. Anything that wants to record a revision has to be substituted by
   the *local* shell before the command crosses the ssh boundary.
-- **A second build directory lives beside the first.** The no-SYCL
-  configuration (`cmake -DB70_PREFILL=OFF`) is a `BUILD_DIR` rather than a
-  hardcoded path, so one tree serves every configuration.
+- **A second build directory can live beside the first.** It is a `BUILD_DIR`
+  rather than a hardcoded path, so one tree serves every configuration.
 
 **Long jobs must survive the ssh session.** Detach them
 (`setsid nohup <script> >/dev/null 2>&1 </dev/null &`) and poll the log. This is
@@ -96,12 +91,9 @@ under a benchmark.
 The contract is in [04-architecture.md](04-architecture.md) and it is worth
 repeating here because it is the thing that silently invalidates a measurement:
 
-1. `--device N` wins, and it governs **both** execution paths, so a SYCL
-   backend binds the same physical card by Level Zero handle rather than by a
-   second selector agreeing.
-2. `ONEAPI_DEVICE_SELECTOR=level_zero:N` is the fallback. The SYCL runtime
-   honours it natively; the raw Level Zero path parses it itself, because Level
-   Zero does not read it.
+1. `--device N` wins.
+2. `ONEAPI_DEVICE_SELECTOR=level_zero:N` is the fallback; the Level Zero path parses
+   it itself, because Level Zero does not read it.
 3. `ZE_AFFINITY_MASK` sits underneath both as a driver-level filter on which
    devices are enumerated at all. Under a mask, every index above refers to the
    masked view.

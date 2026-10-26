@@ -2143,14 +2143,12 @@ Two rules hold across the whole family and are not repeated per kernel:
   `S` in place when these kernels were first widened cost a measured 361 to
   473 ms per chunk against 130 ms at `S = 1`.
 
-The prefill path runs entirely on Level Zero. A chunk makes **no SYCL call and
-never waits on the host**; `sycl-tla` stays selectable as a reference backend
-with `--prefill-backend sycl-tla`, and the build also works with no SYCL component at
-all. Derived from the walk in `src/runtime/prefill/step.cc` and asserted by
+The prefill path runs entirely on Level Zero. A chunk **never waits on the host**
+(the sycl-tla reference backend was removed on 2026-10-27). Derived from the walk in `src/runtime/prefill/step.cc` and asserted by
 `prefill_smoke_test` through `Context::launches()`, a chunk at C = 2048 is
-**9073 L0 launches, 0 SYCL GEMMs and 0 host waits**; `step_head` adds 5 once per
-`prefill()`. Prefill scratch is 35,651,584 B, a tenth of what the SYCL path
-needed. Where the time goes, per phase, is in
+**9073 L0 launches and 0 host waits** (composed attention; 8449 with the default
+flash attention); `step_head` adds 5 once per `prefill()`. Prefill scratch is
+35,651,584 B, a tenth of what the removed SYCL path needed. Where the time goes, per phase, is in
 [BENCHMARKS.md](BENCHMARKS.md).
 
 ### The small kernels, transcribed from decode
@@ -2177,7 +2175,7 @@ scratch; `pf_gemm` multiplies the chunk's activations by that slab into the
 output columns it covers. For `n0 = 0, 1024, … < N` the pair alternates on
 `Context`'s in-order list with **no host wait** between the two, between slabs,
 or before the consumer (`src/runtime/prefill/linear_l0.cc`). `pf_dequant_tile`
-is the whole-matrix form the SYCL backend still uses.
+is the whole-matrix form the removed SYCL backend used (probes only now).
 
 The int4 contract is `gemv.cl`'s `GEMV_DEQ_SHIFT` path, `(q − 8) × scale` with
 the product in fp32 and exactly one RNE cast to bf16, so

@@ -124,13 +124,15 @@ void check_memory() {
   const auto mk = runtime::main_and_short;
   const runtime::BatchMemory qd = runtime::batch_memory(q, mk(4, 131072, 32768, true), KvCache::Int8, kQwenInt8Weights, kMtpWeights);
   print("Qwen3.8 1 x 131072 + 3 x 32768, MTP (decided)", qd);
+  // 2026-10-27: the prefill default is l0 (spec 13 §9.1 priced l0-int8): the shared scratch loses
+  // Int8State and keeps the slab, 0.087 GB less on Qwen3.8 and 0.099 GB less on Agnes than §9.1's rows.
   CHECK_NEAR(gb(qd.weights), 17.70, 0.015);
-  CHECK_NEAR(gb(qd.scratch), 0.87, 0.015);
-  CHECK_NEAR(gb(qd.total()), 29.10, 0.015);
-  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 1.93, 0.015);
+  CHECK_NEAR(gb(qd.scratch), 0.78, 0.015);
+  CHECK_NEAR(gb(qd.total()), 29.01, 0.015);
+  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 2.02, 0.015);
   const runtime::BatchMemory q4 = runtime::batch_memory(q, mk(4, 65536, 65536, true), KvCache::Int8, kQwenInt8Weights, kMtpWeights);
   print("Qwen3.8 4 x 65536, MTP", q4);
-  CHECK_NEAR((double(kBudget) - double(q4.total())) / kGB, 0.80, 0.015);
+  CHECK_NEAR((double(kBudget) - double(q4.total())) / kGB, 0.89, 0.015);
   print("Qwen3.8 1 x 131072 + 3 x 32768, MTP, bf16 KV",
         runtime::batch_memory(q, mk(4, 131072, 32768, true), KvCache::Bf16, kQwenInt8Weights, kMtpWeights));
   print("Qwen3.8 1 x 131072 (today's engine), MTP",
@@ -139,28 +141,28 @@ void check_memory() {
   const runtime::BatchMemory ad = runtime::batch_memory(a, mk(2, 131072, 32768, true), KvCache::Int8, kAgnesInt8Weights, kMtpWeights);
   print("Agnes 1 x 131072 + 1 x 32768, MTP (decided)", ad);
   CHECK_NEAR(gb(ad.weights), 20.52, 0.015);
-  CHECK_NEAR(gb(ad.scratch), 0.93, 0.015);
-  CHECK_NEAR(gb(ad.total()), 29.27, 0.015);
-  CHECK_NEAR((double(kBudget) - double(ad.total())) / kGB, 1.76, 0.015);
+  CHECK_NEAR(gb(ad.scratch), 0.83, 0.015);
+  CHECK_NEAR(gb(ad.total()), 29.17, 0.015);
+  CHECK_NEAR((double(kBudget) - double(ad.total())) / kGB, 1.86, 0.015);
   const runtime::BatchMemory a4 = runtime::batch_memory(a, mk(4, 131072, 32768, true), KvCache::Int8, kAgnesInt8Weights, kMtpWeights);
   print("Agnes 1 x 131072 + 3 x 32768, MTP", a4);
-  CHECK_NEAR(gb(a4.total()), 33.24, 0.015);
-  CHECK_NEAR((double(kBudget) - double(a4.total())) / kGB, -2.21, 0.015);
+  CHECK_NEAR(gb(a4.total()), 33.14, 0.015);
+  CHECK_NEAR((double(kBudget) - double(a4.total())) / kGB, -2.11, 0.015);
   const runtime::BatchMemory a4off = runtime::batch_memory(a, mk(4, 131072, 32768, false), KvCache::Int8, kAgnesInt8Weights, kMtpWeights);
   print("Agnes 1 x 131072 + 3 x 32768, --mtp off", a4off);
-  CHECK_NEAR(gb(a4off.total()), 29.81, 0.015);   // §9.2 says ~29.9 (its "~": an estimate this pins)
-  CHECK_NEAR((double(kBudget) - double(a4off.total())) / kGB, 1.22, 0.015);   // §9.2: ~1.1
+  CHECK_NEAR(gb(a4off.total()), 29.75, 0.015);   // §9.2 says ~29.9 (its "~": an estimate, on l0-int8)
+  CHECK_NEAR((double(kBudget) - double(a4off.total())) / kGB, 1.28, 0.015);   // §9.2: ~1.1
   std::vector<SlotSpec> main_only = mk(4, 131072, 32768, false);
   main_only[0].mtp = true;
   const runtime::BatchMemory a4main = runtime::batch_memory(a, main_only, KvCache::Int8, kAgnesInt8Weights, kMtpWeights);
   print("Agnes 1 x 131072 + 3 x 32768, MTP in the main slot only", a4main);
-  CHECK_NEAR(gb(a4main.total()), 31.50, 0.015);
-  CHECK_NEAR((double(kBudget) - double(a4main.total())) / kGB, -0.47, 0.015);
+  CHECK_NEAR(gb(a4main.total()), 31.41, 0.015);
+  CHECK_NEAR((double(kBudget) - double(a4main.total())) / kGB, -0.38, 0.015);
   std::vector<SlotSpec> three = mk(3, 131072, 32768, false);
   three[0].mtp = true;
   const runtime::BatchMemory a3main = runtime::batch_memory(a, three, KvCache::Int8, kAgnesInt8Weights, kMtpWeights);
   print("Agnes 1 x 131072 + 2 x 32768, MTP in the main slot only", a3main);
-  CHECK_NEAR(gb(a3main.total()), 30.10, 0.015);   // §9.1's considered alternative (0.93 GB spare)
+  CHECK_NEAR(gb(a3main.total()), 30.00, 0.015);   // §9.1's considered alternative (0.93 GB spare on l0-int8)
   print("Agnes 1 x 131072 + 2 x 32768, --mtp off",
         runtime::batch_memory(a, mk(3, 131072, 32768, false), KvCache::Int8, kAgnesInt8Weights, kMtpWeights));
   print("Agnes 1 x 131072 + 1 x 32768, MTP, bf16 KV",

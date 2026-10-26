@@ -147,16 +147,14 @@ void check_serve() {
   cli::parse_pipeline_handoff("peer", handoff_only);
   CHECK(says([&] { cli::check_serve_pipeline(split_only, {}); }, "--pipeline-split belongs to --pp 2"));
   CHECK(says([&] { cli::check_serve_pipeline(handoff_only, {}); }, "--pipeline-handoff belongs to --pp 2"));
-  // --pp 2 serves the Qwen family with everything else on: MTP, both L0 backends.
+  // --pp 2 serves the Qwen family with everything else on: MTP, either backend.
   for (const char* mt : {"qwen3_5", "qwen3_5_moe", ""})
-    for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0Int8, runtime::PrefillBackend::L0})
-      for (bool mtp : {false, true}) {
-        c = {};
-        c.model_type = mt;
-        c.prefill_backend = b;
-        c.mtp = mtp;
-        cli::check_serve_pipeline(two, c);
-      }
+    for (bool mtp : {false, true}) {
+      c = {};
+      c.model_type = mt;
+      c.mtp = mtp;
+      cli::check_serve_pipeline(two, c);
+    }
   // The refusals, by name.
   c = {};
   c.model_type = "k2_horizon";

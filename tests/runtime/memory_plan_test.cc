@@ -246,7 +246,8 @@ void check_sizes_ornith() {
 void check_spec6_line() {
   // Measured before spec 10, so with v1's attn_part: the plan reproduces it under v1.
   setenv("B70_DECODE_ATTN", "v1", 1);
-  const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights);
+  const runtime::PrefillPath i8{true, PrefillBackend::L0Int8, false};   // measured on l0-int8, then the default
+  const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
   unsetenv("B70_DECODE_ATTN");
   // With v2 (the default) the same engine plans 0.399 GB less decode state.
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,

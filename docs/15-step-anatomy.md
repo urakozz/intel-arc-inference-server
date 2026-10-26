@@ -1017,15 +1017,15 @@ rows so the kernel stops computing the masked half. Everything else is C-free,
 which is the return on the runtime-`M` rule, and one binary set serves every
 `--prefill-chunk` width.
 
-The `sycl-tla` backend, kept selectable as a control, is 1201 L0 launches, 384
-SYCL GEMMs and **656 host waits** per chunk, and its scratch is ten times
+The `sycl-tla` backend (a control until its removal on 2026-10-27) was 1201 L0 launches, 384
+SYCL GEMMs and **656 host waits** per chunk, and its scratch was ten times
 larger. Moving the linears onto Level Zero was worth **+6.76%** on prefill
 throughput in a same-session controlled comparison, and the whole of it is the
 linears: 1668.9 ms of `linear_l0` replaces 1816.5 ms of separate dequant plus
 SYCL GEMM, and 512 host waits per run disappear with them. The worry that 8000
 or 9000 launches would cost host time does not appear at all. Both backends and
-the per-phase table are in [BENCHMARKS.md](BENCHMARKS.md), and
-`prefill_backend_equivalence_test` holds them **bitwise** equal.
+the per-phase table are in [BENCHMARKS.md](BENCHMARKS.md); they were **bitwise**
+equal (`prefill_backend_equivalence_test`, removed with the backend).
 
 ### Where the time goes
 
