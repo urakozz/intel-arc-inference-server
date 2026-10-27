@@ -15,9 +15,13 @@
 //      the box (tools/oracle/dflash_d1.py).
 //   4. The pieces: the window bound per row (a key at p + r - WIN is invisible, at p + r - WIN + 1 visible), the conv's
 //      look-back (row 0 never reads row -1; row r reads r - 1 only), top-k's tie / NaN / mask rules, murmur3 against
-//      dflash_ref's values, the walk's tie rule.
+//      dflash_ref's values, the walk's tie rule, the attention's exp (attn_exp = df_exp: within 2 fp32 ulps).
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -148,6 +152,24 @@ void test_pieces() {
   };
   CHECK_NEAR(out[0], mean_of(13, 3), 1e-5);
   CHECK_NEAR(out[2 * 8], mean_of(15, 3), 1e-5);
+  // attn_exp (df_exp, spec 19f): every float in [-86, -2^-20] within 2 fp32 ulps of exp (in double, rounded); 0
+  // below -86 and at -inf, exactly 1 at 0, NaN through
+  {
+    int worst = 0;
+    size_t n = 0;
+    for (float x = -86.0f; x <= -0x1p-20f; x = std::nextafter(x, 0.0f), ++n) {
+      const float got = dfref::attn_exp(x), want = float(std::exp(double(x)));
+      int32_t a, b;
+      std::memcpy(&a, &got, 4);
+      std::memcpy(&b, &want, 4);
+      worst = std::max(worst, std::abs(a - b));
+    }
+    std::printf("attn_exp over %zu floats in [-86, -2^-20]: worst %d fp32 ulp of exp (bar 2)\n", n, worst);
+    CHECK(worst <= 2);
+    CHECK(dfref::attn_exp(0.0f) == 1.0f && dfref::attn_exp(-0.0f) == 1.0f);
+    CHECK(dfref::attn_exp(-86.5f) == 0.0f && dfref::attn_exp(-INFINITY) == 0.0f);
+    CHECK(std::isnan(dfref::attn_exp(NAN)));
+  }
   // the conv: row 0 reads no previous row; row r reads only r - 1
   {
     const uint32_t H = 4, G = 1;   // group 4: one coefficient per row and tap
