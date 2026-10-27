@@ -2867,7 +2867,7 @@ st_r54_d1() {
   grab_all d1 '^dflash_d1:|^DFlash drafter:|^=== ' 20
   finish
 }
-stage r54.d1_ref 54 default cpu qwen,dflash,oracle_dflash_dumps,oracle_image r54.d1 "D1, the reference's half (box CPU, the oracle image): tools/oracle/dflash_d1.py per arm - dflash_ref.py on the same taps, anchors and head form (int8 RTN simulated where the engine quantised), the vocab mask, V' masked; the bars: top-16 sets tie-aware, scores cosine >= 0.9999 (bf16) / 0.999 (int8), the walk equal. The table -> \$STATE/d1/d1.md"
+stage r54.d1_ref 54 default cpu qwen,dflash,oracle_dflash_dumps,oracle_image r54.d1 "D1, the reference's half (box CPU, the oracle image): tools/oracle/dflash_d1.py per arm - dflash_ref.py on the same taps, anchors and head form (int8 RTN simulated where the engine quantised), the vocab mask, V' masked; the bars: top-16 sets tie-aware and noise-aware (a swap within the row's own engine-vs-reference logit difference is a tie: operator, 2026-10-27), scores cosine >= 0.9999 (bf16) / 0.999 (int8), the walk equal. The table -> \$STATE/d1/d1.md"
 st_r54_d1_ref() {
   chk "SNAP_QWEN=$SNAP_QWEN tools/box_validate/dflash_d1.sh ref $STATE/d1" "dflash_d1.py x 3 arms: D1"
   grab_all d1-ref '^\| |^D1 |^  FAIL' 40
