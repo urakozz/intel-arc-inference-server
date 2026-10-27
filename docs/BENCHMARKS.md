@@ -846,13 +846,27 @@ Setup:
 
 ## DFlash (spec 19)
 
-**On the card since 2026-10-27 (plan 19f), rows 54-55 in part; no speed row has run.** `b70-serve --spec dflash`
+**On the card since 2026-10-27 (plan 19f); rows 54-56 ran 2026-10-27 (branch `dflash-bars`); D5 says: an option, not
+the default.** `b70-serve --spec dflash`
 drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers, int8 at load, beside the gate checkpoint's int8 head) from the
 target's own hidden states and verifies up to 8 rows at once (specs 19b-19d; box queue rows 54-56). The acceptance in
-"P0" is measured on the Mac CPU (spec 19a, `docs/probe-dflash-2026-10-08.md`); every speed is derived until the D5
-rows run. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
+"P0" is measured on the Mac CPU (spec 19a, `docs/probe-dflash-2026-10-08.md`); "D5" below is measured on the card. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
 
-### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`)
+### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
+
+**`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,
+the suite's 9 failures = main's own 9 (memory_plan_box x 4, k2_prefill x 2, k2_prefix_gpu x 2, bolt_pf_kernels_test;
+`dflash_engine_test`, `dflash_gpu_test`, `dflash_prefix_gpu_test` pass in it). r54.host / kernels / load / draft / d1
+PASS, **r54.d1_ref FAIL** (D1 below: the sets now pass in 585 / 587 / 586 of 592; the walks and scores bars, unchanged,
+fail in 1-4 drafts an arm). r55.host / kernels / engine (PF chunked 0.9998879 >= the ruled 0.9998) / gpu / serve /
+decode PASS. r56.host / engine / prefix / pp / pp_serve PASS; D5's arms ran (below; the opencode recording does not
+exist, so r56.d5_opencode SKIPs). r55.decode first failed on its own harness - `b70-decode --spec dflash` printed the
+drafter's load line on stdout ahead of the ids (the ids were identical) - fixed (the line goes to stderr like the
+target's) and re-run on the fixed head (`g0.build` redone in the same state); r56.pp first reused G0's one-card skip of
+`pp_dflash_test` - `junit.py todo` now re-runs a skipped result - and then passed on both cards (splits 29 and 20:
+ids, drafts, every verify's logits, the ring, the session and 3 hooked snapshots bitwise the one card's).
+
+The `dflash-fix` table (before the rulings):
 
 | stage | result | the numbers |
 |---|---|---|
@@ -866,7 +880,7 @@ rows run. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculativ
 | r55.gpu (the stage), r55.decode, r55.serve, r56.engine, r56.prefix, r56.pp, r56.pp_serve, D5 | not run | blocked behind r55.engine (each needs it PASS) |
 | G0 (D0) | sha FAIL (expected), bitwise PASS, suite 10 fails | sha: `df_attn` (the fix) + 49 `nb_*` that embed the tree's `-I` path (not this change); `g0.bitwise` 11 of 11 identical; the suite's other 9 failures (memory_plan_box x 4, k2_prefill x 2, k2_prefix_gpu x 2, bolt_pf_kernels_test) fail the same on main 01e9b51's build |
 
-**D1 (spec 19 §6), measured:**
+**D1 (spec 19 §6), measured (`dflash-fix`, the fixed 1.4e-3 tie window):**
 
 | arm | drafts | top-16 sets (tie-aware) | scores cos >= bar | walk equal | worst cos | ties excused |
 |---|---:|---:|---:|---:|---:|---:|
@@ -878,12 +892,26 @@ The set misses are boundary swaps: over all 4144 draft rows of the bf16 arm, 295
 0.012 (median) / 0.075 (max) logits from the reference's 16th logit (|v| ~ 14), while the engine's logits differ from
 the reference's by 0.078 (median of each row's largest difference over its common candidates; p90 0.18) - 290 of the
 295 swaps are inside their row's own logit difference (int8 arm: 322 rows, median 0.011 / max 0.093 from the edge,
-logit difference median 0.076, 315 of 322 inside). The comparator's tie window is max(1e-3, 1e-4 |v|) ~ 1.4e-3.
+logit difference median 0.076, 315 of 322 inside). The comparator's tie window was max(1e-3, 1e-4 |v|) ~ 1.4e-3.
+
+**D1 with the noise-aware tie (operator, 2026-10-27; `dflash-bars`):** a set miss is a tie when the swapped ids sit
+within max(1e-3, 1e-4 |v|, d_row) of the reference's 16th logit, d_row the row's own largest engine-vs-reference logit
+difference over its common candidates (`tools/oracle/dflash_d1.py`). Scores and walks bars unchanged.
+
+| arm | drafts | top-16 sets | scores cos >= bar | walk equal | worst cos | ties used (by d_row) |
+|---|---:|---:|---:|---:|---:|---:|
+| drafter int8, head int8 (bar 0.999) | 592 | 585 | 591 | 591 | 0.9958614 | 315 (285) |
+| drafter bf16, head bf16 (bar 0.9999) | 592 | 587 | 590 | 588 | 0.9572936 | 290 (267) |
+| int8, 32k draft vocabulary (bar 0.999) | 592 | 586 | 591 | 591 | 0.9959722 | 307 (282) |
+
+The 18 set misses left are swaps just outside their row's difference (gap 0.017-0.093 against d_row 0.014-0.065; at
+most 1.7 x). The walk / scores misses are the same drafts as before the ruling (selector choices 0.005-0.09 apart).
+D1 stays FAIL on the bars as written: the operator's call (the rows' D2 - the losslessness - passes everywhere).
 The walk differences (4 bf16, 1 int8) are choices 0.005-0.09 apart in selector scores of magnitude 12-36. The engine rounds
 every GEMV input to bf16 (spec 19 §10); plan 19b's lever is fp32-input GEMV variants. The bars are unchanged - the
 operator's call.
 
-**PF**: the window's worst rows are long32k positions 2091, 1564 / 1565, 987, 1051, 1212 - the positions
+**PF** (chunked bar 0.9998 since the operator's ruling of 2026-10-27; it was 0.9999): the window's worst rows are long32k positions 2091, 1564 / 1565, 987, 1051, 1212 - the positions
 `prefill_split_test`'s header records as the model's own amplifiers of a rounding-sized perturbation (its own split
 bar at l0 is median >= 0.9998) - and they move in every pair of paths (one call / chunks / decode) alike.
 
@@ -909,15 +937,22 @@ in-sample), by id it loses up to 1.4 at K = 7.
 
 ### D5, speed (bar: `--spec dflash` >= 1.10 x `--mtp auto` on the opencode recording, no loss > 3 % elsewhere)
 
+**Verdict (2026-10-27): DFlash stays an option, `--mtp auto` stays the Qwen3.8 default.** The bar's own measurement
+(the opencode recording) does not exist yet, and DFlash already loses more than 3 % to `--mtp auto` elsewhere: golden
+prose / cjk, every llama-benchy decode row (12-18 %) and every prefill row (3-21 %: the drafter's tap projection in the
+prefill tail). It wins on the A4 tool calls by 3 % - short of 10 %. Measured on card 0 (both cards for `--pp 2`),
+state `e89445916986-vs-0fb0cb914a37`, greedy, every arm's output identical to `--spec off` (39 / 39 each round).
+
 | what | configuration | number | stage |
 |---|---|---|---|
-| verify cost at M = 5..8 | `probe_mtp_steps`, int8 head, depth 4k / 32k, interleaved pairs | pending | r29.cost |
-| one draft block | `probe_draft_cost`, the int8 drafter + the head's 7 rows | pending (derived 0.17 plain steps) | r29.cost |
-| A4 + golden through b70-serve | `--spec off` / `--mtp auto` / `--spec dflash` (auto K) / `--spec dflash --spec-max 3`, `--max-len 16384`, int8 head, bf16 KV, greedy, max_tokens 256, 3 rotated rounds; decode t/s, RATIO dflash / mtp | pending - the expectation, not the bar | r56.d5_a4 |
-| the draft vocabulary | `--spec dflash` vs `--draft-vocab 32k` ranked (in-sample) and by id | pending | r56.d5_dv |
-| llama-benchy | row 41's matrix A at concurrency 1 and matrix D, `--max-len 40960`, off / mtp auto / dflash, 3 rotated rounds | pending | r56.d5_benchy |
-| **the opencode recording (the bar)** | `replay_ab.sh`, prefix cache on, max_len 131072, off / mtp auto / dflash, 3 rotated rounds | pending - **the recording does not exist yet** | r56.d5_opencode |
-| two cards | `--pp 2 --mtp auto` vs `--pp 2 --spec dflash`, A4 + golden | pending | r56.d5_pp |
+| verify cost at M = 5..8 | `probe_mtp_steps`, int8 head, depth 4k / 32k, interleaved pairs | not run (r29.cost, outside this run) | r29.cost |
+| one draft block | the draft list, host-timed replay (r54.draft) | 20.6 / 25.0 ms int8 (~0.7-0.85 of a 29.2 ms plain step, against the derived 0.17) | r54.draft |
+| A4 + golden through b70-serve | `--spec off` / `--mtp auto` / `--spec dflash` (auto K) / `--spec dflash --spec-max 3`, `--max-len 16384`, int8 head, bf16 KV, greedy, max_tokens 256, 3 rotated rounds; gen t/s geomean | dflash / mtp: **A4 1.033**, golden 0.791 (code 61.8 vs 60.0 t/s, prose 32.4 vs 44.5, cjk 28.9 vs 43.7); dflash3 / mtp 0.928 / 0.758; dflash / off 1.974 / 1.127 | r56.d5_a4 |
+| the draft vocabulary | `--spec dflash` vs `--draft-vocab 32k` ranked (in-sample) and by id | ranked / full: A4 1.043, golden 1.022; by id / full: A4 0.916, golden 1.022; ids identical | r56.d5_dv |
+| llama-benchy | row 41's matrix A at concurrency 1 and matrix D, `--max-len 40960`, off / mtp auto / dflash, 3 rounds in a Latin square, medians | tg128: off 33.9, mtp 47.9, dflash 42.1 (0.878 x mtp); tg128 @ d4096: 33.5 / 51.6 / 42.9 (0.831); tg128 @ d32768: 29.5 / 40.7 / 33.4 (0.822); pp512 628 / 603 / 478 (0.792); pp4096 1246 / 1231 / 1021 (0.829); pp512 @ d4096 1362 / 1347 / 1124 (0.835); pp512 @ d32768 1287 / 1282 / 1248 (0.973) | r56.d5_benchy |
+| **the opencode recording (the bar)** | `replay_ab.sh`, prefix cache on, max_len 131072, off / mtp auto / dflash, 3 rotated rounds | **not measured - the recording does not exist yet** (SKIP, missing data) | r56.d5_opencode |
+| two cards | `--pp 2 --mtp auto` vs `--pp 2 --spec dflash`, A4 + golden, 3 rounds | dflash / mtp: A4 1.033, golden 0.793 (code 68.4 vs 65.5, prose 35.1 vs 47.7, cjk 30.3 vs 46.7); ids identical | r56.d5_pp |
+| `--spec dflash` vs `--spec off` on one card (r55.serve, 1 round) | A4 + golden, max_tokens 192 | wall t/s 1.094 (A4) / 1.061 (golden); seeded sampling reproducible | r55.serve |
 | Ornith's DFlash (v1) drafter | the same rows on Ornith | not built (a full-attention drafter layer and a 16-row block: its own stage) | - |
 
 ### Memory (derived)
@@ -938,7 +973,7 @@ in-sample), by id it loses up to 1.4 at K = 7.
 | the ring across a restore (`dflash_prefix_test`) | a turn restored from its predecessor's request-end snapshot leaves the ring equal to the unbroken session's; a ring-less snapshot (19c's) is caught |
 | batching (`dflash_scheduler_test`) | 4 requests on 4 slots: ids = the plain scheduler's, each request's speculative record = its record alone |
 | `--pp 2` adapter (`pp_dflash_serve_test`) | greedy at K 7 / 3 / auto = plain; seeded sampling reproducible; a restored turn drafts as the unbroken one |
-| D2 / D3 / ring / --pp 2 bitwise on the card | pending (r55.engine, r55.gpu, r56.prefix, r56.pp) |
+| D2 / D3 / ring / --pp 2 bitwise on the card | measured 2026-10-27 - PASS (r55.engine, r55.gpu, r55.decode, r55.serve, r56.prefix, r56.pp, r56.pp_serve; "On the card" above) |
 
 ## Ornith 1.5 MoE (spec 15)
 
