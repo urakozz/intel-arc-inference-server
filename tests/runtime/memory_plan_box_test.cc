@@ -12,7 +12,7 @@
 // draft vocabulary from the snapshot's added tokens and the lowest ids, as b70-serve
 // builds it: the plan's `draft_vocab` term must equal the loader's compact head + id
 // table, and MtpBuffers' compact logits its MtpDims size. The lengths default to
-// "16384 auto". The default l0-int8 backend and the attention mode of
+// "16384 auto". The default l0 backend and the attention mode of
 // B70_PREFILL_ATTN (flash unless set) are planned and run. One short prefill runs
 // first, so the lazy buffers (the MTP prefill hidden rows, the slab on an MTP engine)
 // exist when the engine is measured. At `auto` the engine fills the card up to the
@@ -49,7 +49,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const bool is_auto = len_arg == "auto";
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const runtime::PrefillPath path{
-      true, runtime::PrefillBackend::L0Int8,
+      true, runtime::PrefillBackend::L0,   // the engine's default (drop-sycl-tla)
       runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed};
   loader::DraftVocabSpec dvs;
   if (o.draft_vocab != 0) {
