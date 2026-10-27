@@ -1249,9 +1249,13 @@ int run(int argc, char** argv) {
     StdoutToStderr redirect;
     return loader::load(ctx, path, cli::load_len(max_len_arg, trained), /*mtp=*/mtp_on, lm_head);
   }();
-  // Spec 19c: the drafter beside the target, before the plan.
+  // Spec 19c: the drafter beside the target, before the plan. Its load line goes to stderr like the target's (box
+  // row 55, 2026-10-27: on stdout it put a line ahead of the ids and r55.decode's cmp against the plain run failed).
   std::unique_ptr<cli::dflash::Loaded> drafter_load;
-  if (dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(ctx, dflash, model));
+  if (dflash.on) {
+    StdoutToStderr redirect;
+    drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(ctx, dflash, model));
+  }
   // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the
   // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built).
   if (have_prefill_len || prefill) model::require_prefill(*model.desc);
