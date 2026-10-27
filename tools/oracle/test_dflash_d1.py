@@ -8,7 +8,8 @@ weights), a tiny target (embedding / head) and a dump in dump_taps.py's format, 
 1. Records made by the reference itself (dflash_ref.draft_block, the same arm) pass every bar.
 2. A changed draft id fails the walk; a far candidate swapped into a row fails the sets; scaled scores fail the
    cosine bar.
-3. A near tie at the 16th slot is excused (sets pass, counted as a tie).
+3. A near tie at the 16th slot is excused (sets pass, counted as a tie); with the engine's unary on the record, a
+   swap within the row's own logit difference is excused too (operator, 2026-10-27), one beyond it is not.
 4. The int8 arm builds the reference with the int8-simulated drafter and head (records from it pass).
 """
 import copy
@@ -124,6 +125,17 @@ def test_near_tie_excused():
         lg[99] = logit_99
         c = d1.compare(rec, out, lambda j: lg)
         assert c["sets"] == excused and c["ties"] == int(excused) and c["walk"], (logit_99, c)
+    # The noise-aware tie (operator, 2026-10-27): with the engine's unary on the record, the window widens to the
+    # row's own logit difference over the common candidates - here 0.05 (slot 3) - so 99 at 0.04 from the 16th logit
+    # is excused (a noise tie), at 0.1 it is not.
+    eng_u = unary[0].tolist()[:15] + [15.0]
+    eng_u[3] += 0.05
+    rec["unary"] = [eng_u]
+    for logit_99, excused in ((14.96, True), (14.9, False)):
+        lg = torch.full((128,), -5.0)
+        lg[99] = logit_99
+        c = d1.compare(rec, out, lambda j: lg)
+        assert c["sets"] == excused and c["ties"] == int(excused) and c["noise_ties"] == int(excused), (logit_99, c)
 
 
 def test_int8_arm():

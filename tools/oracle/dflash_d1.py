@@ -13,8 +13,14 @@ rows at V''s ids, bitwise - spec 8 §11). Context: dump_taps.load_dump's taps fr
 draft_block(anchor, p, K) at T 0.
 
 D1's bars, per draft row:
-  sets    the engine's 16 candidates equal the reference's, tie-aware: an id only one side has must sit within
-          max(1e-3, 1e-4 x |v|) of the reference's 16th logit (an exact or near tie at the boundary)
+  sets    the engine's 16 candidates equal the reference's, tie-aware and noise-aware: an id only one side has must
+          sit within max(1e-3, 1e-4 x |v|, d_row) of the reference's 16th logit, where d_row is that row's own
+          engine-vs-reference logit difference (the largest |engine unary - reference unary| over the row's common
+          candidates). The noise term is the operator's ruling (2026-10-27, the spirit of the MoE gates' f32-judge
+          near-tie): measured on the card (plan 19f) every set miss was a swap at the 16th place, the swapped id a
+          median 0.012 (max 0.09) logits from the reference's 16th logit, while the engine's logits (bf16 GEMV inputs,
+          spec 19 §10) differ from the fp32 reference's by a median 0.078 a row - against a fixed window of ~1.4e-3.
+          The ties used are printed: all of them, and those only the row's difference excused.
   scores  per draft the realized scores' cosine (aligned by candidate id) >= 0.9999 (bf16 drafter) / 0.999 (int8)
   walk    the K draft ids equal (T = 0)
 Exit 0 when every draft passes all three. Prints a table (and writes it to --md).
@@ -56,7 +62,8 @@ def compare(rec: dict, out, logits_row) -> dict:
     """One draft: the engine's record against the reference's DraftOut. logits_row(j) -> the reference's masked
     (and scaled) unary logits of mask row j over the whole vocabulary (to judge an engine-only candidate)."""
     K = rec["k"]
-    res = {"sets": True, "walk": True, "ties": 0}
+    res = {"sets": True, "walk": True, "ties": 0, "noise_ties": 0, "gaps": []}
+    eng_u = rec.get("unary")
     eng_s, ref_s = [], []
     for j in range(K):
         e = rec["cand"][j]
@@ -68,10 +75,16 @@ def compare(rec: dict, out, logits_row) -> dict:
         only_r = [i for i in r if i not in e]
         if only_e or only_r:
             lr = logits_row(j)
-            ok = all(abs(float(lr[i]) - edge) <= tol for i in only_e) and \
-                all(abs(ru[r.index(i)] - edge) <= tol for i in only_r)
+            gap = max([abs(float(lr[i]) - edge) for i in only_e] + [abs(ru[r.index(i)] - edge) for i in only_r])
+            # d_row: this row's measured engine-vs-reference logit difference (operator, 2026-10-27; the docstring)
+            d_row = 0.0
+            if eng_u is not None:
+                d_row = max([abs(v - ru[r.index(c)]) for c, v in zip(e, eng_u[j]) if c in r], default=0.0)
+            ok = gap <= max(tol, d_row)
             res["sets"] &= ok
             res["ties"] += int(ok)
+            res["noise_ties"] += int(ok and gap > tol)
+            res["gaps"].append((gap, d_row))
         rs = dict(zip(r, out.scores[j].tolist()))
         for c, s in zip(e, rec["scores"][j]):
             if c in rs:
@@ -125,7 +138,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     files = {}
     for path in glob.glob(os.path.join(dumps_dir, "*.taps.safetensors")):
         files[dt.dump_header(path)["name"]] = path
-    n = n_sets = n_walk = n_cos = ties = 0
+    n = n_sets = n_walk = n_cos = ties = noise_ties = 0
     worst = 1.0
     fails = []
     for name, rs in by_dump.items():
@@ -148,23 +161,29 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
             n_walk += c["walk"]
             n_cos += c["cos"] >= bar
             ties += c["ties"]
+            noise_ties += c["noise_ties"]
             worst = min(worst, c["cos"])
             if not (c["sets"] and c["walk"] and c["cos"] >= bar):
                 fails.append((name, r["p"], c))
         log(f"{name}: {len(rs)} drafts")
-    table = (f"| arm | drafts | top-16 sets (tie-aware) | scores cos >= {bar} | walk equal | worst cos | ties excused |\n"
-             f"|---|---:|---:|---:|---:|---:|---:|\n"
+    table = (f"| arm | drafts | top-16 sets (tie- and noise-aware) | scores cos >= {bar} | walk equal | worst cos | "
+             f"ties excused | of them by the row's logit difference |\n"
+             f"|---|---:|---:|---:|---:|---:|---:|---:|\n"
              f"| drafter {run['format']}, head {run['head']}, V' {run['draft_vocab'] or 'full'} | {n} | {n_sets} | "
-             f"{n_cos} | {n_walk} | {worst:.7f} | {ties} |\n")
+             f"{n_cos} | {n_walk} | {worst:.7f} | {ties} | {noise_ties} |\n")
     log(table)
     for name, p, c in fails[:20]:
-        log(f"  FAIL {name} p {p}: sets {c['sets']}, walk {c['walk']}, cos {c['cos']:.7f}")
+        gaps = ", ".join(f"gap {g:.4f} > d_row {dr:.4f}" for g, dr in c["gaps"] if g > max(dr, 1e-3))
+        log(f"  FAIL {name} p {p}: sets {c['sets']}, walk {c['walk']}, cos {c['cos']:.7f}"
+            + (f" ({gaps})" if gaps else ""))
     if md:
         with open(md, "a") as f:
             f.write(table)
     ok = n > 0 and n_sets == n and n_walk == n and n_cos == n
+    log(f"D1 ties used: {ties} ({noise_ties} by the row's logit difference, operator 2026-10-27)")
     log("D1 " + ("PASS" if ok else "FAIL") + f" ({run.get('load', '')})")
-    return ok, {"n": n, "sets": n_sets, "walk": n_walk, "cos": n_cos, "worst": worst, "ties": ties}
+    return ok, {"n": n, "sets": n_sets, "walk": n_walk, "cos": n_cos, "worst": worst, "ties": ties,
+                "noise_ties": noise_ties}
 
 
 def main() -> None:
