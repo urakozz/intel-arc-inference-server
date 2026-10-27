@@ -444,6 +444,20 @@ int main(int argc, char** argv) {
       for (size_t x = 0; x < row && !any; ++x) any = one[i * row + x] != 0;
       nonzero &= any;
     }
+    // Informational (spec 19f): the window's worst rows by position. On long32k they are the positions the model
+    // itself amplifies a rounding-sized perturbation at (prefill_split_test's header: 987, 1050, 1212, 1565, 2091),
+    // and they move in every pair of paths (one / chunked / decode) alike.
+    for (const auto* o : {&chunked, &decode}) {
+      std::vector<std::pair<double, uint32_t>> cs(W);
+      for (uint32_t i = 0; i < W; ++i) {
+        const std::vector<float> fa = widen(o->data() + i * row, row), fb = widen(one.data() + i * row, row);
+        cs[i] = {cosine(fa.data(), fb.data(), row), n - W + i};
+      }
+      std::sort(cs.begin(), cs.end());
+      std::printf("PF %s vs one, the 6 worst rows:", o == &chunked ? "chunks of 1000" : "the decode path");
+      for (int k = 0; k < 6; ++k) std::printf(" %u (%.4f)", cs[k].second, cs[k].first);
+      std::printf("\n");
+    }
     const bool pf = split_bits && m_chunk >= 0.9999 && m_dec >= 0.999 && nonzero;
     std::printf("PF: the window's %u ring rows after prefill(%u): split at 1024 %s; chunks of 1000 median cos %.7f "
                 "(worst %.6f); the decode path median cos %.6f (worst %.6f); every row projected %s: %s\n",
