@@ -110,6 +110,8 @@ class JunitTest(Tmp):
         write(self.p("r.junit.xml"), junit_xml([("b_test", "notrun", "SKIP_RETURN_CODE=77", "")]))
         r = run("pick", self.p("tests.json"), "--re", "^b_test$", "--junit", self.p("*.junit.xml"))
         self.assertEqual(r.returncode, 77)                 # only skips: a skip
+        r = run("todo", self.p("tests.json"), "--re", "^(a_test|b_test)$", "--done", self.p("*.junit.xml"))
+        self.assertEqual(r.stdout.strip(), "^(b_test)$")   # a skip is run again
         r = run("pick", self.p("tests.json"), "--re", "^(a_test|b_test)$", "--junit", self.p("*.junit.xml"))
         self.assertEqual(r.returncode, 0)
         r = run("pick", self.p("tests.json"), "--re", "^nothing$", "--junit", self.p("*.junit.xml"))
