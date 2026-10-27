@@ -135,3 +135,14 @@ Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (
   2026-10-27 with icpx 2026.2 and oneDNN 2026.1 (configure + build clean, libs resolve; not run).
 - On the box the SYCL component was already off on main: `B70_ICPX` pinned 2026.1, which is no longer installed
   (2026.2 is), so `B70_PREFILL=AUTO` resolved to OFF - main's box build had no sycl-tla backend before this branch.
+- Box, 2026-10-27, tree f1c3fff vs main 981c6be, card 0 (card 1 busy with a quantisation: idle grade ITERATE), IGC
+  `/usr/lib/x86_64-linux-gnu/libigc.so.2` (the packaged one, first in `ldconfig -p`), both trees built in one stage:
+  g0.build PASS; g0.sha FAIL - 49 binaries differ only in the `-I<tree path>` string embedded in them (the `nb_*`
+  Bolt family and the probe kernels; checked on `nb_gnorm`: same size, 33 bytes, the path) + 19 probe binaries added
+  (main's box build had the SYCL guard off, which also hid those probes); g0.bitwise PASS (10 common gates identical;
+  `prefill_smoke_test` only in the branch: 8449 + 5 flash); r76.tests PASS (pf_gemm_test max 0.4 ulp of sum|ab|, cos
+  1.000000000 on every case); r13.gates, r13.cli, r15.k1, r23.host, r26 / r27 / r33 / r34 / r61 / r62 .reject PASS;
+  r13.prefill FAIL on both backends - the same failure on main's build (`ornith_prefill_l0_test` prose 28/29
+  determined rows, `_l0-int8_test` `cs.bad != 0`), so not this change.
+- r76.speed (record): Qwen3.8 prefill, l0 / l0-int8 = 0.779 at pp2048 (~1712 vs ~2194 t/s) and 0.780 at pp8192
+  (~1608 vs ~2059 t/s); decode unchanged (0.99).
