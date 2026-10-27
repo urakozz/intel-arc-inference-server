@@ -10,7 +10,6 @@
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/prefill/attn.h"
-#include "runtime/prefill/dequant.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
 #include "runtime/prefill/int8.h"
