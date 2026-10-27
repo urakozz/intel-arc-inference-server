@@ -862,7 +862,9 @@ rows run. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculativ
 | r54.d1 (engine half) | PASS | 592 drafts an arm (37 dumps x 16 anchors, K 7, T 0); 15.5 ms (i8), 16.9 ms (bf16), 12.7 ms (i8 + 32k vocabulary) a draft list, host-timed |
 | **r54.d1_ref (D1)** | **FAIL** | see D1 below |
 | r55.engine | **FAIL** (PF only) | L ok (774 launches a verify at M 1..8, draft 87, projection 8); D3 (pre-§13 form) **bitwise** at k = 1..7 (logits, GDN slots, taps) at n 1998 and 2062; T1 bitwise; P (partial commit, K 7 and 4, every j) bitwise, 64 further ids equal; SR (the ring across reset + restore) bitwise; D2 on the card 0 of 160 ids differ at K 7 / 3 / 1; RF3 yes; memory 21.254 GB of 32.530 at max_len 16384 (drafter 2.116 GB). **PF: split at 1024 bitwise, decode path median cos 0.999824 (bar 0.999), chunks of 1000 median cos 0.9998879 against the bar 0.9999** |
-| r55.gpu, r55.decode, r55.serve, r56.engine, r56.prefix, r56.pp, r56.pp_serve, D5 | not run | blocked behind r55.engine (each needs it PASS) |
+| `dflash_gpu_test` (r55.gpu's test, run by G0's suite) | PASS | D2 through `EngineAdapter` on the 3 golden prompts + 36 A4 scenarios at K 7 / 3 / auto: **0 divergences**; ids an iteration K 7 4.10, K 3 3.01, auto 3.52; RF1 (a truncated burst continued) = plain; a seeded sampled K 7 run twice bitwise |
+| r55.gpu (the stage), r55.decode, r55.serve, r56.engine, r56.prefix, r56.pp, r56.pp_serve, D5 | not run | blocked behind r55.engine (each needs it PASS) |
+| G0 (D0) | sha FAIL (expected), bitwise PASS, suite 10 fails | sha: `df_attn` (the fix) + 49 `nb_*` that embed the tree's `-I` path (not this change); `g0.bitwise` 11 of 11 identical; the suite's other 9 failures (memory_plan_box x 4, k2_prefill x 2, k2_prefix_gpu x 2, bolt_pf_kernels_test) fail the same on main 01e9b51's build |
 
 **D1 (spec 19 §6), measured:**
 

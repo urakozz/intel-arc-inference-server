@@ -276,9 +276,10 @@ from + - x (`df_exp` = `dfref::attn_exp`, within 1 fp32 ulp of exp): `df_attn` i
   sets too. Bar unchanged: the operator's call.
 - **D3 (this section's form; §13's applies after plan 28b):** M = 1..8 verify rows bitwise M = 1 - logits, GDN
   slots and taps, at two prompt lengths; partial commits bitwise. **PASS.**
-- **D2 on the card (`dflash_engine_test`):** 160 ids at K 7 / 3 / 1 equal the plain run at both lengths. The serving
-  D2 rows (r55.gpu, r55.serve, r55.decode) and everything in row 56 did not run: `r55.engine` fails one sub-bar of its
-  own, PF's chunked prefill tail (the window's ring rows, chunks of 1000 against one call: median cosine 0.9998879,
+- **D2 on the card:** `dflash_engine_test` - 160 ids at K 7 / 3 / 1 equal the plain run at both lengths;
+  `dflash_gpu_test` (run by G0's suite) - the golden + 36 A4 prompts through `EngineAdapter` at K 7 / 3 / auto, 0
+  divergences (4.10 / 3.01 / 3.52 ids an iteration). The stages r55.gpu, r55.serve, r55.decode and everything in row 56
+  did not run: `r55.engine` fails one sub-bar of its own, PF's chunked prefill tail (the window's ring rows, chunks of 1000 against one call: median cosine 0.9998879,
   bar 0.9999; the worst rows are the model's known amplifier positions of long32k).
 - **D4 / D5:** D4's host tests pass (r55.host); D5 not run.
 
