@@ -4,7 +4,8 @@
 #   tools/box_validate/dflash_d1.sh gpu <out dir>   the engine's half: build/tools/probe/dflash_d1 over 19a's tap dumps,
 #                                                    one JSONL per arm (the card; run it under the GPU lock)
 #   tools/box_validate/dflash_d1.sh ref <out dir>   the reference's half: tools/oracle/dflash_d1.py per arm in the oracle
-#                                                    image (CPU), D1's bars; the table appended to <out dir>/d1.md
+#                                                    image (CPU), D1's bars; the table appended to <out dir>/d1.md;
+#                                                    under /tmp/b70-cpu-model.lock (one CPU model job at a time)
 #
 # The arms (spec 19 decision 2 and §4 decision 6): i8 - the drafter int8 (quantised at load), the head int8; bf16 - the
 # drafter and the head bf16; i8dv32k - i8 over a 32768-id draft vocabulary (19a's ranked list).
@@ -46,6 +47,10 @@ case "$mode" in
     in_hf() { printf '/hf%s' "${1#"$HF"}"; }
     env_flags=(-e HF_HUB_OFFLINE=1 -e HOME=/scratch -e PYTHONUNBUFFERED=1)
     [ -n "${ORACLE_THREADS:-}" ] && env_flags+=(-e "OMP_NUM_THREADS=$ORACLE_THREADS" -e "MKL_NUM_THREADS=$ORACLE_THREADS")
+    # one model job on the box CPU at a time (~15 GB RSS a run), as f32_oracle.sh
+    exec 9> /tmp/b70-cpu-model.lock
+    echo "dflash_d1.sh: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
+    flock -x 9 || exit 1
     rc=0
     for arm in $ARMS; do
       echo "=== $(date '+%T') arm $arm: dflash_d1.py"
