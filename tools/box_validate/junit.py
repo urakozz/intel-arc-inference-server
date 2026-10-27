@@ -4,8 +4,8 @@ host python3 and on the Mac).
 
   junit.py names   TESTS_JSON [--re ERE] [--label L]... [--no-label L]... [--also-in JSON]
   junit.py todo    TESTS_JSON --re ERE [filters] --done GLOB
-        the selected tests with no result yet in the JUnit files GLOB matches, as one anchored
-        ctest -R alternation; empty output when every one has a result
+        the selected tests with no result yet in the JUnit files GLOB matches (or whose latest result
+        is a skip), as one anchored ctest -R alternation; empty output when every one has a result
   junit.py pick    TESTS_JSON --re ERE [filters] --junit GLOB
         the verdict over the selected tests, each at its latest result across GLOB (files in
         mtime order): exit 0 all passed, 1 a failure or a test with no result, 77 all skipped
@@ -154,7 +154,9 @@ def cmd_names(a):
 
 def cmd_todo(a):
     done = results([a.done]) if a.done else {}
-    todo = [n for n in select(a) if n not in done]
+    # a skip is not a result to reuse: a stage that runs a test where the suite could not (two cards, its own env -
+    # r56.pp's pp_dflash_test skipped in G0's one-card suite, box run 2026-10-27) runs it again
+    todo = [n for n in select(a) if n not in done or done[n][0] == SKIP]
     if todo:
         print(anchored(todo))
     return 0
