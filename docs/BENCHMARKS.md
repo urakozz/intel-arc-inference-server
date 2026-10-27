@@ -907,6 +907,9 @@ difference over its common candidates (`tools/oracle/dflash_d1.py`). Scores and 
 The 18 set misses left are swaps just outside their row's difference (gap 0.017-0.093 against d_row 0.014-0.065; at
 most 1.7 x). The walk / scores misses are the same drafts as before the ruling (selector choices 0.005-0.09 apart).
 D1 stays FAIL on the bars as written: the operator's call (the rows' D2 - the losslessness - passes everywhere).
+Since 87fc262 (operator, 2026-10-28) a set miss passes when its draft's walk is equal and its cosine meets the bar,
+which covers all 18. That comparator has not been re-run on the box. On these numbers D1 would still FAIL on the walks
+and scores (1 / 4 / 1 drafts).
 The walk differences (4 bf16, 1 int8) are choices 0.005-0.09 apart in selector scores of magnitude 12-36. The engine rounds
 every GEMV input to bf16 (spec 19 §10); plan 19b's lever is fp32-input GEMV variants. The bars are unchanged - the
 operator's call.
