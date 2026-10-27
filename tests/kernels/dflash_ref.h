@@ -14,7 +14,7 @@
 //   attention()     df_attn_part + df_attn_reduce: context keys in TGT blocks of PB ring offsets (offset t of block
 //                   b is position p - RING + b·PB + t, visible to row r iff >= 0 and >= p + r - (WIN - 1)), each
 //                   block's (m, l, acc) in ascending t; the reduce merges blocks ascending, then the block's own
-//                   rows 0..K (non-causal), and divides once
+//                   rows 0..K (non-causal), and divides once; every exp is attn_exp (df_exp), so it is bitwise
 //   silu_mul()      df_silu_mul: g / (1 + exp(-g)) · u
 //   topk()          df_topk_stage1/2: the TOPK largest (value desc, then index asc) over indices < used, NaN never
 //                   selected; values then · out_mult and, with a softcap, tanh(v / cap) · cap
@@ -26,7 +26,8 @@
 //
 // draft() chains them in the capture's order (runtime/dflash/dflash_capture.cc) over host copies of the weights in
 // their device forms; with Numerics::Reference every activation stays fp32 and the GEMVs are fp32 dot products over
-// the widened bf16 weights - dflash_ref.py's arithmetic up to summation order.
+// the widened bf16 weights - dflash_ref.py's arithmetic up to summation order and the attention's exp (attn_exp, within
+// 2 fp32 ulps of torch's).
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -57,6 +58,32 @@ inline float rf(float f) { return bf(rne(f)); }
 
 constexpr uint32_t kNoIdx = 0x7FFFFFFFu;
 constexpr uint32_t kDraftNoiseSalt = 1u << 30;
+
+// attn_exp - df_attn.cl's df_exp, the attention's softmax exp (spec 19f): Cephes' expf (n = rint(x · log2 e), a
+// two-constant Cody-Waite reduction, a degree-5 polynomial, the 2^n scale by the exponent field) from + - · only, so
+// the kernel and this twin are bitwise. The device's `exp` is not libm's: on the card 2026-10-27 it differed from
+// glibc's expf in ~45 % of the softmax arguments by 1-2 fp32 ulps, and an attention output that cancels toward 0
+// (random V, ~2048 keys: |out| ~ 1e-8 against a head RMS ~ 0.014) carried that into 2-45 bf16 ulps. Domain: the
+// softmax's x <= 0 (larger x are handled to 88); below -86 it returns 0 (exp(-86) = 4.4e-38 - the result stays a
+// normal float, so no denormal behaviour enters); NaN passes through. Within 2 fp32 ulps of exp (dflash_ref_test).
+inline float attn_exp(float x) {
+  if (x != x) return x;
+  if (x < -86.0f) return 0.0f;
+  if (x > 88.0f) return INFINITY;
+  const float n = std::nearbyint(x * 1.44269504088896341f);
+  const float r = (x - n * 0.693359375f) - n * -2.12194440e-4f;
+  float p = 1.9875691500e-4f;
+  p = p * r + 1.3981999507e-3f;
+  p = p * r + 8.3334519073e-3f;
+  p = p * r + 4.1665795894e-2f;
+  p = p * r + 1.6666665459e-1f;
+  p = p * r + 5.0000001201e-1f;
+  const float y = p * (r * r) + r + 1.0f;
+  const uint32_t sb = uint32_t(int32_t(n) + 127) << 23;
+  float scale;
+  std::memcpy(&scale, &sb, sizeof scale);
+  return y * scale;
+}
 
 // The work-group sizes the kernels reduce with (src/kernels/dflash/*.cl), which fix the summation trees.
 constexpr uint32_t kNormWg = 256;
@@ -150,7 +177,7 @@ struct AttnDims {
 // are zero). Output out [M][NH·HD] fp32 (the kernel rounds it to bf16).
 inline void attention(const AttnDims& a, const float* q, const float* kb, const float* vb, const float* ring_k,
                       const float* ring_v, uint32_t p, uint32_t K, bool causal, float* out,
-                      const std::function<float(float)>& expf_ = [](float x) { return std::exp(x); }) {
+                      const std::function<float(float)>& expf_ = attn_exp) {
   const uint32_t HD = a.HD, G = a.g();
   std::fill(out, out + size_t(a.M) * a.NH * HD, 0.0f);
   for (uint32_t h = 0; h < a.NH; ++h) {

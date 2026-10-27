@@ -9,8 +9,9 @@
 //   df_qkv_prep    q / k / v at positions 2041..2048 and 131065..131072: bitwise
 //   df_ctx_store   5 rows at proj_pos 2045 (slots 2045, 2046, 2047, 0, 1: the ring's wrap) bitwise; the 3 rows past
 //                  proj_n and every other slot untouched (Review Focus 1)
-//   df_attn        at p 5, 2046, 2047, 2048, 2049, 4100, 131000 and K 7 / 3 / 1: within 1 bf16 ulp of the twin
-//                  (exp), rows past K zero
+//   df_attn        at p 5, 2046, 2047, 2048, 2049, 4100, 131000 and K 7 / 3 / 1: bitwise the twin (both use df_exp /
+//                  dfref::attn_exp, not the device's exp - spec 19f: outputs that cancel toward 0 turned the device
+//                  exp's 1-2 fp32 ulps into up to 45 bf16 ulps), rows past K zero
 //   df_topk        the full head (248320, the mask at 248077, planted ties / NaN / -inf rows) and a 32768-id draft
 //                  vocabulary (indices mapped through an ascending id table): ids and values exact
 //   df_select      the walk at rank 256 over 248320-row codebooks, K 7: greedy - ids, choices, scores bitwise and
@@ -348,13 +349,14 @@ int check_attn(Dev& d, Bins& b) {
     dfref::attention({NH, NKV, HD, M, RING, S.win, kd::kAttnPb, scale}, q.data(), kb.data(), vb.data(), fk.data(),
                      fv.data(), p, K, false, want.data());
     const std::vector<uint16_t> got = d.read<uint16_t>(out, size_t(M) * QN);
-    int off = 0, e = 0;
+    int e = 0, worst = 0;
     for (size_t i = 0; i < got.size(); ++i) {
       const int u = ulps(got[i], rne(want[i]));
-      off += u != 0;
-      e += u > 1;
+      e += u != 0;
+      worst = std::max(worst, u);
     }
-    std::printf("df_attn at p %u, K %u: %d values 1 bf16 ulp off (exp), %d further (bar 0)\n", p, K, off, e);
+    std::printf("df_attn at p %u, K %u: %d of %zu values differ, worst %d bf16 ulp (bitwise bar)\n", p, K, e,
+                got.size(), worst);
     bad += e;
   }
   return bad;
