@@ -295,7 +295,8 @@ from + - x (`df_exp` = `dfref::attn_exp`, within 1 fp32 ulp of exp): `df_attn` i
   K 3 / the bf16 drafter), `b70-serve` (A4 + golden, every D5 round), `--pp 2` (`pp_dflash_test` bitwise at splits 29
   and 20; `b70-serve --pp 2` 39 / 39).
 - **D3 (pre-§13 form): PASS**; the cost table is not recorded (plan 28b does not exist).
-- **D5: an option, not the default.** The bar (the opencode recording) is not measured - the recording does not exist -
+- **D5: an option, not the default (closed, operator 2026-10-28: no opencode recording is made).** The bar (the
+  opencode recording) is not measured - the recording does not exist -
   and `--spec dflash` already loses more than 3 % to `--mtp auto` elsewhere: A4 tool calls 1.033 x, golden 0.791 x
   (prose and cjk ~0.66-0.73), llama-benchy decode 0.82-0.88 x and prefill 0.79-0.97 x (the tail's tap projection);
   `--pp 2` the same shape (1.033 / 0.793). The ranked 32k draft vocabulary adds 4 % on A4 (in-sample).
