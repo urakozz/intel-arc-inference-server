@@ -104,7 +104,9 @@ def test_self_passes_and_failures():
         far = next(i for i in range(500) if i not in bad[0]["cand"][2])
         bad[0]["cand"][2][15] = far
         ok, st = _eval(tmp, run, bad, dumps, drafter, target)
-        assert not ok and st["sets"] == 2, st
+        # A set miss alone passes when the walk is equal and the cosine meets the bar (operator, 2026-10-28).
+        assert st["sets"] == 2 and st["walk"] == 3 and ok == (st["cos"] == 3), st
+        assert st["set_excused"] == int(ok), st
         bad = copy.deepcopy(recs)
         bad[2]["scores"] = [[s * (1.5 if j % 2 else 0.5) for j, s in enumerate(row)] for row in bad[2]["scores"]]
         ok, st = _eval(tmp, run, bad, dumps, drafter, target)

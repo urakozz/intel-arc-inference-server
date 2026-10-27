@@ -23,7 +23,9 @@ D1's bars, per draft row:
           The ties used are printed: all of them, and those only the row's difference excused.
   scores  per draft the realized scores' cosine (aligned by candidate id) >= 0.9999 (bf16 drafter) / 0.999 (int8)
   walk    the K draft ids equal (T = 0)
-Exit 0 when every draft passes all three. Prints a table (and writes it to --md).
+A draft passes on walk and scores; a top-16 set miss beyond the tie window is reported but passes when the walk
+is equal and the scores' cosine meets its bar (operator, 2026-10-28: the misses measured were 16th-place swaps
+0.007-0.01 logits past d_row, cosine 0.999996). Exit 0 when every draft passes. Prints a table (and writes it to --md).
 """
 from __future__ import annotations
 
@@ -138,7 +140,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     files = {}
     for path in glob.glob(os.path.join(dumps_dir, "*.taps.safetensors")):
         files[dt.dump_header(path)["name"]] = path
-    n = n_sets = n_walk = n_cos = ties = noise_ties = 0
+    n = n_sets = n_walk = n_cos = ties = noise_ties = set_excused = 0
     worst = 1.0
     fails = []
     for name, rs in by_dump.items():
@@ -163,7 +165,9 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
             ties += c["ties"]
             noise_ties += c["noise_ties"]
             worst = min(worst, c["cos"])
-            if not (c["sets"] and c["walk"] and c["cos"] >= bar):
+            if c["walk"] and c["cos"] >= bar:
+                set_excused += not c["sets"]
+            else:
                 fails.append((name, r["p"], c))
         log(f"{name}: {len(rs)} drafts")
     table = (f"| arm | drafts | top-16 sets (tie- and noise-aware) | scores cos >= {bar} | walk equal | worst cos | "
@@ -179,11 +183,12 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     if md:
         with open(md, "a") as f:
             f.write(table)
-    ok = n > 0 and n_sets == n and n_walk == n and n_cos == n
+    ok = n > 0 and n_walk == n and n_cos == n
     log(f"D1 ties used: {ties} ({noise_ties} by the row's logit difference, operator 2026-10-27)")
+    log(f"D1 set misses passed on walk + cosine: {set_excused} (operator 2026-10-28)")
     log("D1 " + ("PASS" if ok else "FAIL") + f" ({run.get('load', '')})")
     return ok, {"n": n, "sets": n_sets, "walk": n_walk, "cos": n_cos, "worst": worst, "ties": ties,
-                "noise_ties": noise_ties}
+                "noise_ties": noise_ties, "set_excused": set_excused}
 
 
 def main() -> None:
