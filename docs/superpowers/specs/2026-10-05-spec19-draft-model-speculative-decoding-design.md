@@ -262,6 +262,26 @@ Every list is captured once and replayed. The host decides only j, exactly as sp
     opencode recording** and loses nowhere by more than 3 %;
   - otherwise it ships as an option.
 
+**Measured on the card, 2026-10-27 (plan 19f Tasks 1-2; BENCHMARKS "DFlash (spec 19)" has the tables).** The
+2026-10-23 `r54.kernels` FAIL was `df_attn` against its twin: the device's `exp` is not glibc's (1-2 fp32 ulps in ~45 %
+of the softmax arguments), and outputs cancelling toward 0 made that up to 45 bf16 ulps. Both now use one exp built
+from + - x (`df_exp` = `dfref::attn_exp`, within 1 fp32 ulp of exp): `df_attn` is bitwise its twin and
+`dflash_kernels_test` passes. Then:
+- **D0:** G0's binaries differ in `df_attn` (the fix) and in 49 `nb_*` binaries that embed their tree's `-I` path (the
+  same 49 as plan drop-sycl-tla's G0 the same day: not this change); `g0.bitwise` identical line for line.
+- **D1: FAIL on the sets bar** - 359 / 369 / 353 of 592 drafts (int8 / bf16 / int8 + 32k vocabulary); scores 591 /
+  590 / 591, walks 591 / 588 / 591. Every set miss measured is a boundary swap inside the engine's own logit
+  difference from the fp32 reference (bf16 GEMV inputs, §10): the swapped ids sit a median 0.012 logits from the 16th,
+  the logits differ by a median 0.078 a row, the tie window is ~1.4e-3. §10's lever (fp32-input GEMVs) applies to the
+  sets too. Bar unchanged: the operator's call.
+- **D3 (this section's form; §13's applies after plan 28b):** M = 1..8 verify rows bitwise M = 1 - logits, GDN
+  slots and taps, at two prompt lengths; partial commits bitwise. **PASS.**
+- **D2 on the card (`dflash_engine_test`):** 160 ids at K 7 / 3 / 1 equal the plain run at both lengths. The serving
+  D2 rows (r55.gpu, r55.serve, r55.decode) and everything in row 56 did not run: `r55.engine` fails one sub-bar of its
+  own, PF's chunked prefill tail (the window's ring rows, chunks of 1000 against one call: median cosine 0.9998879,
+  bar 0.9999; the worst rows are the model's known amplifier positions of long32k).
+- **D4 / D5:** D4's host tests pass (r55.host); D5 not run.
+
 ## 7. Stages
 
 - **19a. P0, no new kernels.** Ordered so the cheapest question is answered first:

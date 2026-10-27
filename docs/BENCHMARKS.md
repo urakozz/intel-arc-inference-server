@@ -846,11 +846,43 @@ Setup:
 
 ## DFlash (spec 19)
 
-**Nothing on the card is measured yet.** `b70-serve --spec dflash` drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers,
-int8 at load, beside the gate checkpoint's int8 head) from the target's own hidden states and verifies up to 8 rows at
-once (specs 19b-19d, built on the Mac; box queue rows 54-56). The acceptance below is measured on the Mac CPU (spec 19a,
-`docs/probe-dflash-2026-10-08.md`); every speed is derived until the D5 rows run. Spec:
-`docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
+**On the card since 2026-10-27 (plan 19f), rows 54-55 in part; no speed row has run.** `b70-serve --spec dflash`
+drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers, int8 at load, beside the gate checkpoint's int8 head) from the
+target's own hidden states and verifies up to 8 rows at once (specs 19b-19d; box queue rows 54-56). The acceptance in
+"P0" is measured on the Mac CPU (spec 19a, `docs/probe-dflash-2026-10-08.md`); every speed is derived until the D5
+rows run. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
+
+### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`)
+
+| stage | result | the numbers |
+|---|---|---|
+| r54.kernels | PASS | every `df_*` kernel at the drafter's shapes against the twin; `df_attn` now **bitwise** (its softmax exp is `df_exp`, the twin's `attn_exp` - the device's `exp` differed from glibc's by 1-2 fp32 ulps in ~45 % of the arguments, which outputs cancelling toward 0 turned into up to 45 bf16 ulps: the 2026-10-23 FAIL) |
+| r54.load | PASS | int8 2,053,464,064 B / bf16 3,849,364,480 B = the formula; every read-back = the host form |
+| r54.draft | PASS | 87 / 8 launches; at p 2053 rows cos 0.9999927 (int8) / 1.0000000 (bf16), sets and walks equal; the 32k draft vocabulary bitwise the full head; **the draft list 20.6 / 25.0 ms int8, 19.1 / 23.3 ms bf16** (host-timed replay, one fence - against spec 19's derived 0.17-0.2 plain steps) |
+| r54.d1 (engine half) | PASS | 592 drafts an arm (37 dumps x 16 anchors, K 7, T 0); 15.5 ms (i8), 16.9 ms (bf16), 12.7 ms (i8 + 32k vocabulary) a draft list, host-timed |
+| **r54.d1_ref (D1)** | **FAIL** | see D1 below |
+| r55.engine | **FAIL** (PF only) | L ok (774 launches a verify at M 1..8, draft 87, projection 8); D3 (pre-§13 form) **bitwise** at k = 1..7 (logits, GDN slots, taps) at n 1998 and 2062; T1 bitwise; P (partial commit, K 7 and 4, every j) bitwise, 64 further ids equal; SR (the ring across reset + restore) bitwise; D2 on the card 0 of 160 ids differ at K 7 / 3 / 1; RF3 yes; memory 21.254 GB of 32.530 at max_len 16384 (drafter 2.116 GB). **PF: split at 1024 bitwise, decode path median cos 0.999824 (bar 0.999), chunks of 1000 median cos 0.9998879 against the bar 0.9999** |
+| r55.gpu, r55.decode, r55.serve, r56.engine, r56.prefix, r56.pp, r56.pp_serve, D5 | not run | blocked behind r55.engine (each needs it PASS) |
+
+**D1 (spec 19 §6), measured:**
+
+| arm | drafts | top-16 sets (tie-aware) | scores cos >= bar | walk equal | worst cos | ties excused |
+|---|---:|---:|---:|---:|---:|---:|
+| drafter int8, head int8 (bar 0.999) | 592 | 359 | 591 | 591 | 0.9958614 | 30 |
+| drafter bf16, head bf16 (bar 0.9999) | 592 | 369 | 590 | 588 | 0.9572936 | 23 |
+| int8, 32k draft vocabulary (bar 0.999) | 592 | 353 | 591 | 591 | 0.9959722 | 25 |
+
+The set misses are boundary swaps: over all 4144 draft rows of the bf16 arm, 295 rows have one; the swapped ids sit
+0.012 (median) / 0.075 (max) logits from the reference's 16th logit (|v| ~ 14), while the engine's logits differ from
+the reference's by 0.078 (median of each row's largest difference over its common candidates; p90 0.18) - 290 of the
+295 swaps are inside their row's own logit difference. The comparator's tie window is max(1e-3, 1e-4 |v|) ~ 1.4e-3.
+The 4 walk differences (bf16) are choices 0.005-0.09 apart in selector scores of magnitude 12-36. The engine rounds
+every GEMV input to bf16 (spec 19 §10); plan 19b's lever is fp32-input GEMV variants. The bars are unchanged - the
+operator's call.
+
+**PF**: the window's worst rows are long32k positions 2091, 1564 / 1565, 987, 1051, 1212 - the positions
+`prefill_split_test`'s header records as the model's own amplifiers of a rounding-sized perturbation (its own split
+bar at l0 is median >= 0.9998) - and they move in every pair of paths (one call / chunks / decode) alike.
 
 ### P0, acceptance (measured, CPU reference, teacher-forced greedy)
 
