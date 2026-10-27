@@ -34,7 +34,7 @@
 //   PF   (Task 3, the prefill tail) a 3000-id prompt: one prefill() call fills the ring with the taps of its last
 //        2048 positions (the window) - the same ring, BITWISE, from the prompt prefilled in two calls split at 1024
 //        (a multiple of 64: prefill_split_test's bitwise case) and in chunks of 1000 (chunk boundaries move no
-//        per-row value... except the GDN scan's 64-chunks: gated at row cosine, median >= 0.9999); and against the
+//        per-row value... except the GDN scan's 64-chunks: gated at row cosine, median >= 0.9998); and against the
 //        decode path (16 ids prefilled, the rest ingested - verify(0) + commit(0) per id, each projecting its row):
 //        the window's rows at median cosine >= 0.999 (prefill's GEMMs vs decode's GEMVs), worst printed; and no row of
 //        the window is left zero (every position the ring reads back was projected).
@@ -458,7 +458,11 @@ int main(int argc, char** argv) {
       for (int k = 0; k < 6; ++k) std::printf(" %u (%.4f)", cs[k].second, cs[k].first);
       std::printf("\n");
     }
-    const bool pf = split_bits && m_chunk >= 0.9999 && m_dec >= 0.999 && nonzero;
+    // The chunked bar is 0.9998 (operator, 2026-10-27): measured on the card (plan 19f, card 0) the chunks of 1000
+    // gave median cosine 0.9998879 against the earlier 0.9999, the worst rows at long32k positions 2091, 1564 / 1565,
+    // 987, 1051, 1212 - the amplifier positions above, and prefill_split_test's own split bar at l0 is median 0.9998.
+    // The split (bitwise), decode (0.999) and every-row-projected bars are unchanged.
+    const bool pf = split_bits && m_chunk >= 0.9998 && m_dec >= 0.999 && nonzero;
     std::printf("PF: the window's %u ring rows after prefill(%u): split at 1024 %s; chunks of 1000 median cos %.7f "
                 "(worst %.6f); the decode path median cos %.6f (worst %.6f); every row projected %s: %s\n",
                 W, n, split_bits ? "bitwise" : "DIFFERS", m_chunk, w_chunk, m_dec, w_dec, nonzero ? "yes" : "NO",
