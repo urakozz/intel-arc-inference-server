@@ -875,8 +875,9 @@ rows run. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculativ
 The set misses are boundary swaps: over all 4144 draft rows of the bf16 arm, 295 rows have one; the swapped ids sit
 0.012 (median) / 0.075 (max) logits from the reference's 16th logit (|v| ~ 14), while the engine's logits differ from
 the reference's by 0.078 (median of each row's largest difference over its common candidates; p90 0.18) - 290 of the
-295 swaps are inside their row's own logit difference. The comparator's tie window is max(1e-3, 1e-4 |v|) ~ 1.4e-3.
-The 4 walk differences (bf16) are choices 0.005-0.09 apart in selector scores of magnitude 12-36. The engine rounds
+295 swaps are inside their row's own logit difference (int8 arm: 322 rows, median 0.011 / max 0.093 from the edge,
+logit difference median 0.076, 315 of 322 inside). The comparator's tie window is max(1e-3, 1e-4 |v|) ~ 1.4e-3.
+The walk differences (4 bf16, 1 int8) are choices 0.005-0.09 apart in selector scores of magnitude 12-36. The engine rounds
 every GEMV input to bf16 (spec 19 §10); plan 19b's lever is fp32-input GEMV variants. The bars are unchanged - the
 operator's call.
 
