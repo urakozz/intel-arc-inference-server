@@ -2838,7 +2838,7 @@ st_r54_host() {
     "the reference's and the D1 comparator's tests (oracle image)"
   finish
 }
-stage r54.kernels 54 default card - - "the 14 new binaries built (kbins: the first ocloc build of every df_* kernel) and dflash_kernels_test at the drafter's real shapes against the twin: embed / norm / convs / q-k-v prep / the ring store bitwise, SiLU and attention within 1 bf16 ulp (the window's edge and the ring's wrap: p 5 .. 131000, K 7 / 5 / 3 / 1), top-16 exact (ties, NaN, the mask, the draft vocabulary's map), the walk (greedy bitwise; sampled to near ties)"
+stage r54.kernels 54 default card - - "the 14 new binaries built (kbins: the first ocloc build of every df_* kernel) and dflash_kernels_test at the drafter's real shapes against the twin: embed / norm / convs / q-k-v prep / the ring store bitwise, SiLU within 1 bf16 ulp, attention bitwise (df_exp = the twin's attn_exp, spec 19f; the window's edge and the ring's wrap: p 5 .. 131000, K 7 / 5 / 3 / 1), top-16 exact (ties, NaN, the mask, the draft vocabulary's map), the walk (greedy bitwise; sampled to near ties)"
 st_r54_kernels() {
   kbins df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320 df_attn_M8_Q32KV8_D128_R2048_W2048_P128 \
     df_topk_R7_N248320_U248077 df_topk_R7_N32768_U32768_C df_topk_R7_N65536_U65536_C df_topk_R7_N131072_U131072_C \

@@ -1,6 +1,6 @@
 // df_attn.cl - spec 19b: the DFlash drafter's attention (spec 19 §2, §5 "Kernels"): the M block rows' queries over the
 // context ring (target-derived K / V of committed positions) plus the block's own K / V, non-causal inside the block.
-// Twin: tests/kernels/dflash_ref.h attention() (same order; FP_CONTRACT off).
+// Twin: tests/kernels/dflash_ref.h attention() (same order; FP_CONTRACT off; the same exp, df_exp = attn_exp): bitwise.
 //
 // **The window** (tools/oracle/dflash_ref.py, vLLM's non-causal sliding layer): a query at position q sees a key at
 // position k iff |q - k| <= WIN - 1. Block row r sits at p + r (p = ctrl.pos, the anchor's position), the context is
@@ -50,6 +50,27 @@ inline ushort f2bf(float f) {
 }
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
+// The softmax's exp - NOT the device's `exp`, which is not libm's (on the card it differed from the host's expf in
+// ~45 % of the softmax arguments by 1-2 fp32 ulps, and an output cancelling toward 0 turned that into up to 45 bf16
+// ulps against the twin - spec 19f). Cephes' expf from + - x, rint and an exponent-field scale: bitwise the twin's
+// dfref::attn_exp, within 2 fp32 ulps of exp. Domain x <= 0 (larger x handled to 88); below -86 it is 0, so the
+// result is always a normal float; NaN passes through.
+inline float df_exp(float x) {
+  if (x != x) return x;
+  if (x < -86.0f) return 0.0f;
+  if (x > 88.0f) return INFINITY;
+  const float n = rint(x * 1.44269504088896341f);
+  const float r = (x - n * 0.693359375f) - n * -2.12194440e-4f;
+  float p = 1.9875691500e-4f;
+  p = p * r + 1.3981999507e-3f;
+  p = p * r + 8.3334519073e-3f;
+  p = p * r + 4.1665795894e-2f;
+  p = p * r + 1.6666665459e-1f;
+  p = p * r + 5.0000001201e-1f;
+  const float y = p * (r * r) + r + 1.0f;
+  return y * as_float((uint)((int)n + 127) << 23);
+}
+
 __attribute__((reqd_work_group_size(WGA, 1, 1)))
 __kernel void df_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
                            __global const float* restrict q, __global const ushort* restrict ring_k,
@@ -88,7 +109,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     float l = 0.0f;
     for (uint t = 0; t < PB; ++t) {
       const float sc = s[pr * PB + t];
-      const float e = (m == -INFINITY || sc == -INFINITY) ? 0.0f : exp(sc - m);
+      const float e = (m == -INFINITY || sc == -INFINITY) ? 0.0f : df_exp(sc - m);
       s[pr * PB + t] = e;
       l = l + e;
     }
@@ -154,12 +175,12 @@ __kernel void df_attn_reduce(__global const uint* restrict ctrl, __global const 
     float l = 0.0f;
     for (uint b = 0; b < TGT; ++b) {
       const float mb = pb[(size_t)b * M * PART];
-      const float w = mb == -INFINITY ? 0.0f : exp(mb - m);
+      const float w = mb == -INFINITY ? 0.0f : df_exp(mb - m);
       wts[b] = w;
       l = l + pb[(size_t)b * M * PART + 1] * w;
     }
     for (uint j = 0; j < M; ++j) {
-      const float w = sb[j] == -INFINITY ? 0.0f : exp(sb[j] - m);
+      const float w = sb[j] == -INFINITY ? 0.0f : df_exp(sb[j] - m);
       wts[TGT + j] = w;
       l = l + w;
     }
