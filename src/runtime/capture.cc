@@ -369,13 +369,19 @@ class Capture {
     if (d_.is_moe())
       require(attn_ == DecodeAttn::V2,
               "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
-    const std::vector<std::string> attn_bins =
+    std::vector<std::string> attn_bins =
         kv8_ ? std::vector<std::string>{kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
         : attn_ == DecodeAttn::V2
             ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
             : std::vector<std::string>{
                   kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
                   kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads)};
+#if B70_BATCH_PROBE
+    // Spec 13a: a row list binds the `_ROWS` pair (attn_pair_rows), not the production one - which at M = 5..8 over
+    // int8 KV nothing builds (B70_KV8's decode block stops at M = 4).
+    if (mode_ == Mode::Rows)
+      attn_bins = {kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads)};
+#endif
     // attn_part is sized for one pair (DecodeScratchDims::sizes): v2's is a fixed 32 blocks
     // per row, v1's every block of the cache. Binding v1 over buffers sized for v2 would
     // write past the allocation, so refuse it here rather than corrupt memory on token 1.
