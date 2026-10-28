@@ -1701,8 +1701,10 @@ if(B70_ORNITH)
       --accept=${_acc_c16} prose,code,cjk 16 ${b} ${_near})
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
+    # Its routes and token rows go to the PLAIN f32 judge on both backends (operator, 2026-10-29: l0-int8 too,
+    # under the same no-further-from-f32-than-the-bf16-golden rule); the l0-int8 token gate keeps pfi8 above.
     add_test(NAME ornith_prefill_${b}_test COMMAND ornith_prefill_test ${B70_ORNITH_SNAPSHOT}
-      ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR} --judge=${_judge})
+      ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR} --judge=${B70_ORNITH_F32_DIR})
     set_tests_properties(prefill_gate_ornith_${b}_test prefill_gate_ornith_${b}_c16_test
       PROPERTIES LABELS "checkpoint;golden;prefill;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
     set_tests_properties(prefill_split_ornith_${b}_test ornith_prefill_${b}_test PROPERTIES
