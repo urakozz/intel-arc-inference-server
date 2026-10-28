@@ -1557,7 +1557,7 @@ endif()
 #                      walk's; both operands bf16) -, the scan (Y_diag, Y_off, the fp32 state on the vector path,
 #                      sub-chunk after sub-chunk), the gated norm at the prefill pitch. Tilings (Review Focus 4): SSD_W
 #                      dims a scan work-group, CONV_ROWS rows a conv work-item - W16_R16 the walk's (PROVISIONAL), W8_R4
-#                      the test's second tiling; `_B16` Decision 2's bf16 state (rounded once at the chunk's end)
+#                      the test's second tiling (both states); `_B16` Decision 2's bf16 state (rounded once at the chunk's end)
 #   nb_pf_moe.cl       the sort / gather of the chunk's REAL rows (no padding row routed), the expert dequant into bf16
 #                      batches, the ascending-id combine (decode's epilogue) - per I, E a kernel argument
 #   nb_pf_moe_gemm.cl  a family copy of prefill/pf_moe_gemm.cl's bf16 form: the up GEMM with the relu2 epilogue (K 1024,
@@ -1574,7 +1574,7 @@ endif()
 if(B70_BOLT)
   set(NB_CL ${CMAKE_CURRENT_SOURCE_DIR}/bolt)
   set(NB_DEPS DEPENDS ${NB_CL}/nb_common.h ${NB_CL}/nb_expert.h OPTIONS -I${NB_CL})
-  foreach(row "16 16 0" "8 4 0" "16 16 1")
+  foreach(row "16 16 0" "8 4 0" "16 16 1" "8 4 1")
     separate_arguments(f UNIX_COMMAND "${row}")
     list(GET f 0 W)
     list(GET f 1 R)
