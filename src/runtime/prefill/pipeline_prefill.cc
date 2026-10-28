@@ -151,8 +151,8 @@ struct PfDevice {
         cx(c),
         kc(c),
         scratch(c, max_len, d),
-        ctl(c, l0::MemKind::Shared, kDepth * sizeof(Control)),
-        ts(c, l0::MemKind::Shared, kDepth * 2 * sizeof(uint64_t)) {
+        ctl(c, l0::MemKind::Host, kDepth * sizeof(Control)),
+        ts(c, l0::MemKind::Host, kDepth * 2 * sizeof(uint64_t)) {
     for (auto& e : done) e = std::make_unique<l0::SyncEvent>(c, std::vector<const l0::Context*>{&c});
     std::memset(ctl.ptr(), 0, ctl.size());
   }
@@ -163,6 +163,11 @@ struct PfDevice {
   // Spec 5's h8 state, this device's linears' scales only. Declared after the context and
   // before nothing that names it.
   std::unique_ptr<prefill::Int8State> int8;
+  // Host USM, not Shared: the host writes chunk j + 1's Control and reads chunk j's stamps while
+  // the device runs the other slot, and the B70 has no concurrent shared-USM access
+  // (zeDeviceGetMemoryAccessProperties: sharedSingleDeviceAllocCapabilities lacks CONCURRENT) -
+  // under compute-runtime 26.35 such writes were lost (stamps never landing, pp_recv's state
+  // word stale: r23.p1's "flag at 3, expected 2"). The same for recv_state and mtp_ctl.
   l0::Mem ctl;   // Control [kDepth]: chunk j's pos / n_active in j % 2
   l0::Mem ts;    // uint64 [kDepth][2]: chunk j's walk start / end, device timestamps
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> done;
@@ -186,7 +191,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
         ids(d0, l0::MemKind::Host, size_t(kDepth) * PrefillScratch::kC * 4),
         landing(d1, l0::MemKind::Device, lay.total, kPpLandingAlign),
         send_seq(d0, l0::MemKind::Device, size_t(kDepth) * kPpStateWords * 4),
-        recv_state(d1, l0::MemKind::Shared, size_t(kDepth) * kPpStateWords * 4),
+        recv_state(d1, l0::MemKind::Host, size_t(kDepth) * kPpStateWords * 4),
         imm0(l0::CmdList::immediate(d0)),
         imm1(l0::CmdList::immediate(d1)) {
     dev[0] = std::make_unique<PfDevice>(d0, d, max_len);
@@ -270,7 +275,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
   l0::Mem ids;          // Host [kDepth][kC] u32: device 0's embed input, by chunk parity
   l0::Mem landing;      // device 1, written only by device 0
   l0::Mem send_seq;     // device 0: pp_send's counter per slot
-  l0::Mem recv_state;   // device 1, shared: pp_recv's state words per slot
+  l0::Mem recv_state;   // host USM (PfDevice::ctl's reason), device 1's: pp_recv's state words per slot
   l0::CmdList imm0, imm1;
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> ready;   // device 0 -> 1, per slot
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> hold;    // the back-pressure test's hook
@@ -295,7 +300,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
   void ensure_mtp(l0::Context& d1, const model::ModelDesc& d) {
     if (mtp_hid) return;
     mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d));
-    mtp_ctl = std::make_unique<l0::Mem>(d1, l0::MemKind::Shared, kDepth * sizeof(Control));
+    mtp_ctl = std::make_unique<l0::Mem>(d1, l0::MemKind::Host, kDepth * sizeof(Control));
     std::memset(mtp_ctl->ptr(), 0, mtp_ctl->size());
   }
   Control* head_control(uint32_t j) const { return mtp_ctl->as<Control>() + j % kDepth; }
