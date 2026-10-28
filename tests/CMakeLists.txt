@@ -1488,10 +1488,12 @@ if(B70_ORNITH)
   # Engine::memory_use / memory_line live in b70_prefill_host (engine_prefill.cc), as for ornith_mtp_test.
   target_link_libraries(ornith_decode_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
   add_dependencies(ornith_decode_test ${B70_ORNITH_DECODE_KERNELS})
+  # R2's judge is the f32 reference (the ruling above); the routes are teacher-forced, so the head form does not
+  # move them and both registrations take the checkpoint-head judge.
   add_test(NAME ornith_decode_test COMMAND ornith_decode_test ${B70_ORNITH_SNAPSHOT}
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR})
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} --judge=${B70_ORNITH_F32_DIR})
   add_test(NAME ornith_decode_i8head_test COMMAND ornith_decode_test ${B70_ORNITH_SNAPSHOT}
-    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} int8)
+    ${B70_ORNITH_ORACLE_DIR} ${B70_ORNITH_PROMPTS_DIR} int8 --judge=${B70_ORNITH_F32_DIR})
   set_tests_properties(ornith_decode_test ornith_decode_i8head_test PROPERTIES
     LABELS "checkpoint;golden;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()

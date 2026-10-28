@@ -16,8 +16,15 @@
 //      Needs `router_logits.L{l}` [rows][256] (and `shared_gate_logits.L{l}` [rows][1]
 //      for the shared gate) in the golden dumps - spec 15a's oracle writes them
 //      beside the usual tensors; without them R2 is skipped with a message.
+//      With `--judge=<dir>` (operator ruling 2026-10-23: Ornith's gates are judged by the
+//      f32 teacher-forced reference, tools/box_validate/f32_oracle.sh) the reference route
+//      is the f32 dump's: its router logits (F32) through the same formula, teacher-forced on
+//      the same tokens, and a near-tie is an 8th / 9th LOGIT gap within one bf16 ulp of the
+//      8th (golden_common.h's bf16_ulp_at: the engine rounds router logits to bf16 before the
+//      softmax, so a smaller gap may round either way). Beside it the bf16 golden's own
+//      routes are judged by the same rule - the reference's distance from exact arithmetic.
 //
-// argv: <snapshot> <oracle dir> <prompt ids dir> [lm_head form]. Exit 77 (SKIP) when
+// argv: <snapshot> <oracle dir> <prompt ids dir> [lm_head form] [--judge=<dir>]. Exit 77 (SKIP) when
 // the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ, spec 15 §13)
 // is not on this machine - the Mac and a box without it skip, they do not fail.
 #include <algorithm>
@@ -25,6 +32,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -77,44 +86,82 @@ Snapshot run_once(runtime::Engine& eng, l0::CmdList& imm, const std::vector<uint
 struct R2Count {
   uint64_t rows = 0, exact_sets = 0, near_ties = 0, bad_sets = 0, bad_weights = 0;
   float worst_w = 0;
+  uint64_t ref_bad = 0;   // --judge: the bf16 golden's own sets that differ from the judge's beyond the rule
 };
 
+// Logits row `r` of layer `l` (the experts, then the shared gate): the f32 judge's (F32) or the golden's (BF16).
+std::vector<float> router_row(const golden::Golden& g, bool f32, const model::ModelDesc& d, uint32_t l, uint32_t r,
+                              uint32_t rows) {
+  const model::MoeDesc& md = d.moe;
+  const std::string ls = std::to_string(l);
+  std::vector<float> lg(md.router_n(), 0.0f);
+  const bool have_sg = g.has("shared_gate_logits.L" + ls);
+  if (f32) {
+    const float* gl = g.f32("router_logits.L" + ls, size_t(rows) * md.experts);
+    std::copy(gl + size_t(r) * md.experts, gl + size_t(r + 1) * md.experts, lg.begin());
+    if (have_sg) lg[md.experts] = g.f32("shared_gate_logits.L" + ls, rows)[r];
+  } else {
+    const uint16_t* gl = g.bf16("router_logits.L" + ls, size_t(rows) * md.experts);
+    for (uint32_t e = 0; e < md.experts; ++e) lg[e] = common::bf16_to_f32(gl[size_t(r) * md.experts + e]);
+    if (have_sg) lg[md.experts] = common::bf16_to_f32(g.bf16("shared_gate_logits.L" + ls, rows)[r]);
+  }
+  return lg;
+}
+
+// The judge's near-tie: the top_k-th and (top_k + 1)-th f32 logits within one bf16 ulp of the former.
+bool ulp_near_tie(const std::vector<float>& lg, uint32_t experts, uint32_t top_k) {
+  std::vector<float> s(lg.begin(), lg.begin() + experts);
+  std::nth_element(s.begin(), s.begin() + top_k, s.end(), std::greater<float>());
+  const float l9 = s[top_k];
+  const float l8 = *std::min_element(s.begin(), s.begin() + top_k);
+  return double(l8) - double(l9) <= golden::bf16_ulp_at(l8);
+}
+
+// Two top_k sets (ids by rank): equal, or at a near-tie all but the boundary expert equal, or not.
+enum class SetCmp { Exact, Tie, Bad };
+SetCmp compare_sets(const uint32_t* got, const uint32_t* ref, uint32_t top_k, bool near_tie) {
+  std::vector<uint32_t> gs(got, got + top_k), rs(ref, ref + top_k);
+  std::sort(gs.begin(), gs.end());
+  std::sort(rs.begin(), rs.end());
+  if (gs == rs) return SetCmp::Exact;
+  if (!near_tie) return SetCmp::Bad;
+  std::vector<uint32_t> g7(got, got + top_k - 1), r7(ref, ref + top_k - 1);
+  std::sort(g7.begin(), g7.end());
+  std::sort(r7.begin(), r7.end());
+  return g7 == r7 ? SetCmp::Tie : SetCmp::Bad;
+}
+
 // One position: every layer's engine route row against the reference route of the
-// oracle's logits row `r` of that layer.
-void r2_position(const golden::Golden& g, const std::vector<uint8_t>& moe,
+// oracle's logits row `r` of that layer (with a judge: the f32 dump's, and the bf16
+// golden `g` judged beside the engine).
+void r2_position(const golden::Golden& g, const golden::Golden* judge, const std::vector<uint8_t>& moe,
                  const runtime::MoeScratchLayout& ml, const model::ModelDesc& d, uint32_t r,
                  uint32_t rows, R2Count& c, const char* pname, uint32_t pos) {
   const model::MoeDesc& md = d.moe;
   const moe_ref::Shape s{md.experts, md.top_k, d.hidden, md.expert_intermediate, md.router_n()};
-  std::vector<float> lg(md.router_n(), 0.0f);
   for (uint32_t l = 0; l < d.layers; ++l) {
-    const std::string ls = std::to_string(l);
-    const uint16_t* gl = g.bf16("router_logits.L" + ls, size_t(rows) * md.experts);
-    for (uint32_t e = 0; e < md.experts; ++e) lg[e] = common::bf16_to_f32(gl[size_t(r) * md.experts + e]);
-    const bool have_sg = g.has("shared_gate_logits.L" + ls);
-    lg[md.experts] =
-        have_sg ? common::bf16_to_f32(g.bf16("shared_gate_logits.L" + ls, rows)[r]) : 0.0f;
+    const std::vector<float> lg = router_row(judge ? *judge : g, judge != nullptr, d, l, r, rows);
     const moe_ref::Route want = moe_ref::route(lg.data(), s);
     const uint32_t* row = reinterpret_cast<const uint32_t*>(moe.data() + ml.route_at(l));   // m = 0
     ++c.rows;
     const float pk = want.p[md.top_k - 1];
-    const bool near_tie = (pk - want.p9) <= kR2TieRel * pk;
+    const bool near_tie = judge ? ulp_near_tie(lg, md.experts, md.top_k) : (pk - want.p9) <= kR2TieRel * pk;
+    if (judge) {
+      const moe_ref::Route b = moe_ref::route(router_row(g, false, d, l, r, rows).data(), s);
+      if (compare_sets(b.ids, want.ids, md.top_k, near_tie) == SetCmp::Bad) ++c.ref_bad;
+    }
     std::vector<uint32_t> got(row + moe_ref::kIds, row + moe_ref::kIds + md.top_k);
     std::vector<uint32_t> ref(want.ids, want.ids + md.top_k);
-    std::vector<uint32_t> gs = got, rs = ref;
-    std::sort(gs.begin(), gs.end());
-    std::sort(rs.begin(), rs.end());
-    if (gs == rs) {
+    const SetCmp cmp = compare_sets(got.data(), ref.data(), md.top_k, near_tie);
+    if (cmp == SetCmp::Exact) {
       ++c.exact_sets;
     } else if (near_tie) {
       ++c.near_ties;   // the boundary expert may be either: the other 7 must agree
-      std::vector<uint32_t> g7(got.begin(), got.end() - 1), r7(ref.begin(), ref.end() - 1);
-      std::sort(g7.begin(), g7.end());
-      std::sort(r7.begin(), r7.end());
-      if (g7 != r7) {
+      if (cmp == SetCmp::Bad) {
         ++c.bad_sets;
-        std::printf("  R2 %s pos %u L%u: top-%u differs beyond the near-tie\n", pname, pos, l,
-                    md.top_k - 1);
+        if (c.bad_sets <= 10)
+          std::printf("  R2 %s pos %u L%u: top-%u differs beyond the near-tie\n", pname, pos, l,
+                      md.top_k - 1);
       }
       continue;
     } else {
@@ -139,6 +186,14 @@ void r2_position(const golden::Golden& g, const std::vector<uint8_t>& moe,
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::string judge_dir;   // --judge=<dir>, anywhere after the positional arguments
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]).rfind("--judge=", 0) == 0) {
+      judge_dir = argv[i] + 8;
+      for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+      --argc;
+      break;
+    }
   const std::string snap = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-ornith";
   const std::string pdir = argc > 3 ? argv[3] : "tests/golden/prompts";
@@ -227,20 +282,43 @@ int main(int argc, char** argv) {
       const int32_t* gt = g.i32("tokens", ng);
       for (uint32_t i = 0; i < ng && feed.size() < rows; ++i) feed.push_back(uint32_t(gt[i]));
     }
+    // The judge decides the same contexts: teacher-forced on exactly the golden's tokens.
+    std::unique_ptr<golden::Golden> J;
+    if (!judge_dir.empty()) {
+      const std::string jpath = judge_dir + "/" + pname + ".golden.safetensors";
+      if (!golden::exists(jpath)) {
+        std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", jpath.c_str());
+        return 77;
+      }
+      J = std::make_unique<golden::Golden>(jpath);
+      CHECK(J->has("router_logits.L0"));
+      CHECK_EQ(J->dim("router_logits.L0", 2, 0), uint64_t(rows));
+      const uint32_t ng = uint32_t(g.dim("tokens", 1, 0));
+      CHECK_EQ(J->dim("tokens", 1, 0), uint64_t(ng));
+      CHECK(std::memcmp(J->i32("tokens", ng), g.i32("tokens", ng), size_t(ng) * 4) == 0);
+    }
     eng.reset();
     std::vector<uint8_t> moe(eng.buffers().moe->size());
     for (uint32_t p = 0; p < feed.size(); ++p) {
       eng.ingest({feed[p]});
       imm.copy(moe.data(), eng.buffers().moe->ptr(), moe.size());
-      r2_position(g, moe, ml, d, p, rows, c, pname, p);
+      r2_position(g, J.get(), moe, ml, d, p, rows, c, pname, p);
     }
   }
   if (any) {
-    std::printf("R2: %llu (position, layer) routes - %llu exact sets, %llu near-ties (8th/9th "
-                "within %.0e), %llu differing sets; weights worst %.3e relative, %llu beyond %.0e\n",
-                (unsigned long long)c.rows, (unsigned long long)c.exact_sets,
-                (unsigned long long)c.near_ties, kR2TieRel, (unsigned long long)c.bad_sets,
-                double(c.worst_w), (unsigned long long)c.bad_weights, kR2WeightRel);
+    if (judge_dir.empty())
+      std::printf("R2: %llu (position, layer) routes - %llu exact sets, %llu near-ties (8th/9th "
+                  "within %.0e), %llu differing sets; weights worst %.3e relative, %llu beyond %.0e\n",
+                  (unsigned long long)c.rows, (unsigned long long)c.exact_sets,
+                  (unsigned long long)c.near_ties, kR2TieRel, (unsigned long long)c.bad_sets,
+                  double(c.worst_w), (unsigned long long)c.bad_weights, kR2WeightRel);
+    else
+      std::printf("R2 judged by the f32 reference %s: %llu (position, layer) routes - %llu exact sets, %llu "
+                  "near-ties (8th/9th logits within 1 bf16 ulp), %llu differing sets; weights worst %.3e relative, "
+                  "%llu beyond %.0e; the bf16 golden against the same judge: %llu differing sets\n",
+                  judge_dir.c_str(), (unsigned long long)c.rows, (unsigned long long)c.exact_sets,
+                  (unsigned long long)c.near_ties, (unsigned long long)c.bad_sets, double(c.worst_w),
+                  (unsigned long long)c.bad_weights, kR2WeightRel, (unsigned long long)c.ref_bad);
     CHECK_EQ(c.bad_sets, uint64_t(0));
     CHECK_EQ(c.bad_weights, uint64_t(0));
   }
