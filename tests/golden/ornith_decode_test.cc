@@ -87,6 +87,8 @@ struct R2Count {
   uint64_t rows = 0, exact_sets = 0, near_ties = 0, bad_sets = 0, bad_weights = 0;
   float worst_w = 0;
   uint64_t ref_bad = 0;   // --judge: the bf16 golden's own sets that differ from the judge's beyond the rule
+  uint64_t ref_bad_weights = 0;   // ... and its matched weights beyond kR2WeightRel
+  float ref_worst_w = 0;
 };
 
 // Logits row `r` of layer `l` (the experts, then the shared gate): the f32 judge's (F32) or the golden's (BF16).
@@ -148,7 +150,15 @@ void r2_position(const golden::Golden& g, const golden::Golden* judge, const std
     const bool near_tie = judge ? ulp_near_tie(lg, md.experts, md.top_k) : (pk - want.p9) <= kR2TieRel * pk;
     if (judge) {
       const moe_ref::Route b = moe_ref::route(router_row(g, false, d, l, r, rows).data(), s);
-      if (compare_sets(b.ids, want.ids, md.top_k, near_tie) == SetCmp::Bad) ++c.ref_bad;
+      const SetCmp bc = compare_sets(b.ids, want.ids, md.top_k, near_tie);
+      if (bc == SetCmp::Bad) ++c.ref_bad;
+      if (bc == SetCmp::Exact)
+        for (uint32_t k = 0; k < md.top_k; ++k) {
+          const uint32_t j = uint32_t(std::find(want.ids, want.ids + md.top_k, b.ids[k]) - want.ids);
+          const float rel = std::fabs(b.w[k] - want.w[j]) / std::max(want.w[j], 1e-6f);
+          c.ref_worst_w = std::max(c.ref_worst_w, rel);
+          if (rel > kR2WeightRel) ++c.ref_bad_weights;
+        }
     }
     std::vector<uint32_t> got(row + moe_ref::kIds, row + moe_ref::kIds + md.top_k);
     std::vector<uint32_t> ref(want.ids, want.ids + md.top_k);
@@ -315,10 +325,12 @@ int main(int argc, char** argv) {
     else
       std::printf("R2 judged by the f32 reference %s: %llu (position, layer) routes - %llu exact sets, %llu "
                   "near-ties (8th/9th logits within 1 bf16 ulp), %llu differing sets; weights worst %.3e relative, "
-                  "%llu beyond %.0e; the bf16 golden against the same judge: %llu differing sets\n",
+                  "%llu beyond %.0e; the bf16 golden against the same judge: %llu differing sets, weights worst "
+                  "%.3e, %llu beyond\n",
                   judge_dir.c_str(), (unsigned long long)c.rows, (unsigned long long)c.exact_sets,
                   (unsigned long long)c.near_ties, (unsigned long long)c.bad_sets, double(c.worst_w),
-                  (unsigned long long)c.bad_weights, kR2WeightRel, (unsigned long long)c.ref_bad);
+                  (unsigned long long)c.bad_weights, kR2WeightRel, (unsigned long long)c.ref_bad,
+                  double(c.ref_worst_w), (unsigned long long)c.ref_bad_weights);
     CHECK_EQ(c.bad_sets, uint64_t(0));
     CHECK_EQ(c.bad_weights, uint64_t(0));
   }
