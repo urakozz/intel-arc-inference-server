@@ -27,6 +27,12 @@
 //     (last_logits.py, chunk 1000) moves those rows as far. They are printed as the worst.
 // The same bars hold against M = 1 decode (a different chain: recurrent GDN, fp32 q).
 //
+// **The f32 judge (operator ruling 2026-10-29).** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (tools/box_validate/
+// f32_refs.sh split: ornith_ref.py run --lean --dump-kv of ids[0, N), in f32 and in bf16) every engine run - the one
+// call, each split, decode - is held to "no further from f32 than the bf16 reference": each gated metric of
+// (f32, engine) at least that of (f32, bf16 reference). The fixed bars below then do not gate (they are printed);
+// the multiples of 64 stay bitwise.
+//
 // usage: prefill_split_test <snapshot> <ids> [backend l0|l0-int8] [N] [splits,..] [decode 0|1]
 //        prefill_split_test <snapshot> <ids> <backend> --oracle <dump.safetensors> <rows,..>
 //          diagnostic: row r's logits from a one-call prefill of ids[0, r], from two-call
@@ -38,6 +44,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -178,6 +185,44 @@ bool check(const Result& r, const Bars& b) {
   return pass;
 }
 
+// A reference dump as a Snap (B70_SPLIT_REFS): logits row 0, kv.{k,v}.L<i> in FA order (rounded to bf16, the cache's
+// type), gdn_state.L<i> in GDN order; the conv ring is not compared.
+Snap ref_snap(const std::string& path, uint32_t n) {
+  golden::Golden g(path);
+  Snap s;
+  const float* lg = g.f32("logits", size_t(g.dim("logits", 2, 0)) * Qwen35::kVocab);
+  s.logits.assign(lg, lg + Qwen35::kVocab);
+  std::vector<uint32_t> fa, gdn;
+  for (uint32_t l = 0; l < 256; ++l) {
+    if (g.has("kv.k.L" + std::to_string(l))) fa.push_back(l);
+    if (g.has("gdn_state.L" + std::to_string(l))) gdn.push_back(l);
+  }
+  CHECK_EQ(fa.size(), size_t(kFa));
+  CHECK_EQ(gdn.size(), size_t(kGdn));
+  s.kv.resize(size_t(2) * kFa * n * kRow);
+  for (int kv = 0; kv < 2; ++kv)
+    for (uint32_t f = 0; f < kFa; ++f) {
+      const float* src = g.f32(std::string(kv ? "kv.v.L" : "kv.k.L") + std::to_string(fa[f]), size_t(n) * kRow);
+      uint16_t* dst = s.kv.data() + (size_t(kv) * kFa + f) * n * kRow;
+      for (size_t i = 0; i < size_t(n) * kRow; ++i) dst[i] = common::f32_to_bf16(src[i]);
+    }
+  s.state.resize(size_t(kGdn) * kGdnLayer * 4);
+  for (uint32_t i = 0; i < kGdn; ++i)
+    std::memcpy(s.state.data() + size_t(i) * kGdnLayer * 4, g.f32("gdn_state.L" + std::to_string(gdn[i]), kGdnLayer),
+                kGdnLayer * 4);
+  return s;
+}
+// The judge's rule: every gated metric of (f32, engine) no lower than (f32, bf16 reference)'s.
+bool no_further(const Result& r, const Result& b) {
+  const bool pass = r.logits >= b.logits && r.shallow >= b.shallow && r.median >= b.median && r.p01 >= b.p01 &&
+                    r.gdn0 >= b.gdn0;
+  if (!pass)
+    std::printf("    ** FAIL ** further from f32 than the bf16 reference: logits %.6f / %.6f, fa0-%u worst %.6f / %.6f,"
+                " median %.7f / %.7f, p01 %.6f / %.6f, gdn L0 %.9f / %.9f\n", r.logits, b.logits, kShallow - 1,
+                r.shallow, b.shallow, r.median, b.median, r.p01, b.p01, r.gdn0, b.gdn0);
+  return pass;
+}
+
 std::vector<uint32_t> parse_list(const std::string& s) {
   std::vector<uint32_t> v;
   size_t i = 0;
@@ -311,6 +356,39 @@ int main(int argc, char** argv) {
   e.prefill(ids);
   const Snap ref = snap(e, imm, N);
   bool ok = true;
+  // The f32 judge (header): the bf16 reference's own distance first, then each engine run's.
+  std::unique_ptr<Snap> f32ref;
+  Result bf16_dist;
+  std::string f32p, bf16p;
+  if (const char* refs = std::getenv("B70_SPLIT_REFS")) {
+    const std::string r = refs;
+    const size_t c = r.find(',');
+    CHECK(c != std::string::npos);
+    f32p = r.substr(0, c);
+    bf16p = r.substr(c + 1);
+    if (!golden::exists(f32p) || !golden::exists(bf16p)) {
+      std::printf("  B70_SPLIT_REFS: %s absent (tools/box_validate/f32_refs.sh split) - the fixed bars apply\n", refs);
+      f32p.clear();
+    }
+  }
+  if (!f32p.empty()) {
+    f32ref = std::make_unique<Snap>(ref_snap(f32p, N));
+    bf16_dist = compare(*f32ref, ref_snap(bf16p, N), N, false);
+    print("bf16 ref/f32:", bf16_dist);
+    const Result one = compare(*f32ref, ref, N, false);
+    print("one call/f32:", one);
+    ok = no_further(one, bf16_dist) && ok;
+  }
+  // A run against the one call (the fixed bars, gating without a judge) and, with one, against f32.
+  auto judge = [&](const char* what, const Snap& two, const Bars& bars) {
+    const Result r = compare(ref, two, N, verbose);
+    print(what, r);
+    if (!f32ref) return check(r, bars);
+    (void)check(r, bars);
+    const Result rf = compare(*f32ref, two, N, false);
+    print("  vs f32:", rf);
+    return no_further(rf, bf16_dist);
+  };
   // The conv ring's slots other than the three live ones ((N-3..N-1) % 16) hold whatever
   // the last chunk that wrote them left, which nothing reads and which legitimately
   // differs with the chunking; the GDN state and the live slots must be equal.
@@ -352,9 +430,7 @@ int main(int argc, char** argv) {
       ok = ok && same;
       continue;
     }
-    const Result r = compare(ref, two, N, verbose);
-    print(what, r);
-    ok = check(r, split_bars) && ok;
+    ok = judge(what, two, split_bars) && ok;
   }
   if (with_decode) {
     // M = 1 decode over the first N - 1 ids, then the prefill of the last one: KV rows
@@ -362,9 +438,7 @@ int main(int argc, char** argv) {
     e.reset();
     e.ingest(Ids(ids.begin(), ids.end() - 1));
     e.prefill(Ids(ids.end() - 1, ids.end()));
-    const Result r = compare(ref, snap(e, imm, N), N, verbose);
-    print("decode M=1:", r);
-    ok = check(r, decode_bars) && ok;
+    ok = judge("decode M=1:", snap(e, imm, N), decode_bars) && ok;
   }
   std::printf("prefill_split_test %s\n", ok ? "OK" : "FAILED");
   return ok ? 0 : 1;

@@ -67,6 +67,7 @@
 #include <vector>
 
 #include "check.h"
+#include "forced_judge.h"
 #include "common/bf16.h"
 #include "common/kv8.h"   // spec 18e: the int8 cache dequantised for the comparisons
 #include "kernels/k2_kernels.h"
@@ -406,6 +407,14 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
       e.ingest({dtok[j]});
     }
   }
+  // Operator ruling 2026-10-29 (tests/golden/forced_judge.h): with B70_FORCED_JUDGE the rows are judged by the f32
+  // reference of this context (the prompt, teacher-forced on decode's ids): the prefill passes when the judge
+  // rejects no more of its ids than of decode's own.
+  const golden::ForcedJudge fj;
+  const std::string jkey = golden::ForcedJudge::key("k2prefill", prompt, dtok);
+  fj.dump(jkey, prompt, dtok);
+  const std::unique_ptr<golden::Golden> judge = fj.open(jkey, kGen, d.vocab);
+  uint32_t judge_pf = 0, judge_dec = 0;
   uint32_t agree = 0, det = 0, det_agree = 0;
   {
     e.reset();
@@ -413,6 +422,10 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
     runtime::Control* c = e.buffers().control.as<runtime::Control>();
     for (uint32_t j = 0; j < kGen; ++j) {
       const uint32_t got = c->cur_token[0];
+      if (judge) {
+        judge_pf += !golden::judge_accepts(*judge, j, got, d.vocab, d.vocab_used);
+        judge_dec += !golden::judge_accepts(*judge, j, dtok[j], d.vocab, d.vocab_used);
+      }
       agree += got == dtok[j];
       if (determined[j]) {
         ++det;
@@ -421,9 +434,13 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
       e.ingest({dtok[j]});   // teacher-forced on decode's token
     }
   }
+  const bool tok_ok = judge ? judge_pf <= judge_dec : det_agree == det;
   std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
-              det_agree == det ? "" : "  ** FAIL **");
-  ok = ok && det_agree == det;
+              tok_ok ? "" : "  ** FAIL **");
+  if (judge)
+    std::printf("   judged by the f32 reference (operator, 2026-10-29): it rejects %u of the prefill's ids, %u of"
+                " decode's%s\n", judge_pf, judge_dec, tok_ok ? "" : "  ** FAIL **");
+  ok = ok && (eager || tok_ok);   // eager: recorded (operator rulings 2026-10-23 #4, 2026-10-29)
   return ok ? 0 : 1;
 }
 

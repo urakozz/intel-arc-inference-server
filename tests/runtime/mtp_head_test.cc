@@ -13,10 +13,18 @@
 // Also here: an engine loaded WITHOUT the head allocates no MtpBuffers and throws on
 // every MTP call (the "MTP off is today's engine" half of Task 1's contract).
 //
+// The f32 judge (operator ruling 2026-10-29): with B70_MTP_JUDGE=<dir> (tools/box_validate/f32_refs.sh ornith-mtp:
+// <dir>/<name>.mtp.safetensors, the same rows from the f32 reference teacher-forced on the same continuation) a
+// row's verdict is taken against the f32 rows by the same rule - cosine >= 0.999 and the f32 argmax (its one-bf16-ulp
+// tie set, golden_common.h judge_row) among the top 2 - for the engine and for the bf16 reference alike, and the
+// engine passes when it misses no more rows than the bf16 reference does.
+//
 // usage: mtp_head_test <snapshot> <prompts dir> <ref dir> <cont dir>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -43,6 +51,23 @@ double cosine(const float* a, const float* b, size_t n) {
 }
 uint32_t argmax(const float* v, size_t n) {
   return uint32_t(std::max_element(v, v + n) - v);
+}
+// The row rule against a reference row: cosine >= 0.999 and the reference's argmax among x's top 2 (with a judge
+// row: any id of its one-ulp tie set).
+bool row_ok(const float* x, const float* ref, size_t V, size_t VU, bool tie_set) {
+  const uint32_t a = argmax(x, VU);
+  uint32_t b = a == 0 ? 1 : 0;
+  for (uint32_t v = 0; v < VU; ++v)
+    if (v != a && x[v] > x[b]) b = v;
+  bool in2;
+  if (tie_set) {
+    const golden::JudgedRow jr = golden::judge_row(ref, uint32_t(V), uint32_t(VU));
+    in2 = jr.d.contains(a) || jr.d.contains(b);
+  } else {
+    const uint32_t ra = argmax(ref, VU);
+    in2 = ra == a || ra == b;
+  }
+  return cosine(x, ref, VU) >= 0.999 && in2;
 }
 }  // namespace
 
@@ -88,6 +113,8 @@ int main(int argc, char** argv) {
   bool ok = true;
   double worst = 1.0, sum = 0;
   size_t rows_total = 0, top1 = 0;
+  const char* judge_dir = std::getenv("B70_MTP_JUDGE");
+  size_t judge_engine = 0, judge_bf16 = 0;   // rows missed against the f32 judge, by the engine / the bf16 reference
   for (const char* n : names) {
     golden::Golden ref(ref_dir + "/" + n + ".mtp.safetensors");
     const uint32_t R = uint32_t(ref.dim("logits", 2, 0));
@@ -96,6 +123,22 @@ int main(int argc, char** argv) {
     const int32_t* rnext = ref.i32("next", R);
     const std::vector<uint32_t> prompt = golden::read_ids(prompts + "/" + n + ".ids");
     const std::vector<uint32_t> cont = golden::read_ids(cont_dir + "/" + n + ".cont256.ids");
+    std::unique_ptr<golden::Golden> jg;
+    const float* jl = nullptr;
+    if (judge_dir) {
+      const std::string jp = std::string(judge_dir) + "/" + n + ".mtp.safetensors";
+      if (!golden::exists(jp)) {
+        std::fprintf(stderr, "SKIP: the f32 judge %s is missing (tools/box_validate/f32_refs.sh ornith-mtp)\n", jp.c_str());
+        return 77;
+      }
+      jg = std::make_unique<golden::Golden>(jp);
+      CHECK_EQ(jg->dim("logits", 2, 0), uint64_t(R));
+      jl = jg->f32("logits", size_t(R) * V);
+      for (uint32_t i = 0; i < R; ++i) {
+        CHECK_EQ(jg->i32("pos", R)[i], rpos[i]);
+        CHECK_EQ(jg->i32("next", R)[i], rnext[i]);
+      }
+    }
     CHECK(cont.size() > R);
     e.reset();
     e.prefill(prompt);
@@ -116,8 +159,17 @@ int main(int argc, char** argv) {
       for (uint32_t v = 0; v < VU; ++v)
         if (v != ea && got[v] > got[e2]) e2 = v;
       const bool in2 = ra == ea || ra == e2;
+      if (jl) {
+        const float* j = jl + size_t(i) * V;
+        const bool eng_ok = row_ok(got.data(), j, V, VU, true), bf_ok = row_ok(r, j, V, VU, true);
+        judge_engine += !eng_ok;
+        judge_bf16 += !bf_ok;
+        if (!eng_ok || !bf_ok)
+          std::printf("  row %u pos %d vs f32: engine cos %.6f %s, bf16 reference cos %.6f %s\n", i, rpos[i],
+                      cosine(got.data(), j, VU), eng_ok ? "ok" : "MISS", cosine(r, j, VU), bf_ok ? "ok" : "MISS");
+      }
       if (c < 0.999 || !in2) {
-        ok = false;
+        ok = jl != nullptr && ok;   // against the bf16 reference: printed; the f32 judge decides when present
         std::printf("  row %u pos %d: cos %.6f ref argmax %u engine top2 %u,%u  FAIL\n", i,
                     rpos[i], c, ra, ea, e2);
       }
@@ -130,6 +182,11 @@ int main(int argc, char** argv) {
     }
     worst = std::min(worst, pw);
     std::printf("%s: %u rows, worst cosine %.6f\n", n, R, pw);
+  }
+  if (judge_dir) {
+    ok = ok && judge_engine <= judge_bf16;
+    std::printf("M1 judged by the f32 reference %s (operator, 2026-10-29): the engine misses %zu rows, the bf16 "
+                "reference %zu\n", judge_dir, judge_engine, judge_bf16);
   }
   std::printf("M1: %zu rows, worst cosine %.6f, mean %.6f, top-1 agreement %zu/%zu -> %s\n",
               rows_total, worst, sum / rows_total, top1, rows_total, ok ? "PASS" : "FAIL");

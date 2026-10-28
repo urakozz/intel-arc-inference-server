@@ -33,6 +33,7 @@
 #include "check.h"
 #include "cli/k2_serve_adapter.h"
 #include "cli/serve_adapters.h"   // PinnedAlloc
+#include "forced_judge.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -208,15 +209,27 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
   }
 
   // The cold reference, teacher-forced to the cached run's ids.
+  // Operator ruling 2026-10-29 (tests/golden/forced_judge.h): with B70_FORCED_JUDGE the rows are judged by the f32
+  // reference of this context, and the cached run passes when the judge rejects no more of its ids than of the cold
+  // run's argmax.
+  const golden::ForcedJudge fj;
+  const std::string jkey = golden::ForcedJudge::key("k2prefix_" + want.name.substr(0, 1), final_prompt, cand_tok);
+  fj.dump(jkey, final_prompt, cand_tok);
   eng.reset();
   eng.prefill(final_prompt);
   const uint32_t V = eng.vocab();
+  const std::unique_ptr<golden::Golden> judge = fj.open(jkey, kGen, V);
+  uint32_t judge_cached = 0, judge_cold = 0;
   uint32_t det_exact = 0, near = 0, bad = 0, bitwise = 0, first_diff = kGen;
   for (uint32_t p = 0; p < kGen; ++p) {
     const std::vector<float> ref = eng.read_logits();
     bitwise += ref == cand_rows[p];
     const golden::GoldenDecision gd = golden::golden_decision(ref.data(), V, V);
     const uint32_t id = cand_tok[p];
+    if (judge) {
+      judge_cached += !golden::judge_accepts(*judge, p, id, V, V);
+      judge_cold += !golden::judge_accepts(*judge, p, gd.set[0], V, V);
+    }
     if (id != gd.set[0] && first_diff == kGen) first_diff = p;
     if (gd.determined()) {
       uint32_t second = 0;
@@ -235,7 +248,13 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
               "%u/%u logits rows bitwise the cold run's%s\n",
               want.name.c_str(), server::plan_kind_name(rep.kind), rep.restart, final_prompt.size(), det_exact,
               kGen, near, allowed, bad, first_diff == kGen ? "none" : std::to_string(first_diff).c_str(), bitwise,
-              kGen, bad == 0 && ok ? "" : "  ** FAIL **");
+              kGen, (judge ? judge_cached <= judge_cold : bad == 0) && ok ? "" : "  ** FAIL **");
+  if (judge) {
+    std::printf("  %s judged by the f32 reference (operator, 2026-10-29): it rejects %u of the cached run's ids, %u of"
+                " the cold run's%s\n", want.name.c_str(), judge_cached, judge_cold,
+                judge_cached <= judge_cold ? "" : "  ** FAIL **");
+    return ok && judge_cached <= judge_cold;
+  }
   return ok && bad == 0;
 }
 
