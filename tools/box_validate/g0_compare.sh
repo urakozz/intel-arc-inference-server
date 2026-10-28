@@ -41,6 +41,21 @@ for f in differ added removed; do
   [ -f "$out/$f.txt" ] || : > "$out/$f.txt"
   LC_ALL=C sort -o "$out/$f.txt" "$out/$f.txt"
 done
+# A binary whose command line names an absolute path (Bolt's -I<tree>/src/kernels/bolt) carries the tree's
+# root in its build options: compared again section by section with each root replaced (zebin_same.py).
+# Those equal then are listed in path_only.txt and do not fail G0.
+base_root=$(cd "$base/.." && pwd) head_root=$(cd "$head/.." && pwd)
+: > "$out/path_only.txt"
+if [ -s "$out/differ.txt" ] && [ "$base_root" != "$head_root" ]; then
+  here=$(cd "$(dirname "$0")" && pwd)
+  while IFS= read -r f; do
+    if python3 "$here/zebin_same.py" "$base/$f" "$head/$f" "$base_root" "$head_root"; then echo "$f" >> "$out/path_only.txt"; fi
+  done < "$out/differ.txt"
+  if [ -s "$out/path_only.txt" ]; then
+    LC_ALL=C comm -23 "$out/differ.txt" "$out/path_only.txt" > "$out/differ.txt.$$" && mv -f "$out/differ.txt.$$" "$out/differ.txt"
+    echo "G0 $(wc -l < "$out/path_only.txt" | tr -d ' ') binaries differ only by the tree's path in their build options (identical section by section)"
+  fi
+fi
 n_differ=$(wc -l < "$out/differ.txt" | tr -d ' ')
 n_removed=$(wc -l < "$out/removed.txt" | tr -d ' ')
 n_common=$(awk '{ print $2 }' "$out/baseline.sha" | LC_ALL=C sort | LC_ALL=C comm -12 - <(awk '{ print $2 }' "$out/under-test.sha" | LC_ALL=C sort) | wc -l | tr -d ' ')
