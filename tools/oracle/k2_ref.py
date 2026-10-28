@@ -853,7 +853,14 @@ def cmd_run(a) -> None:
     force = _read_ids(a.force) if a.force else None
     if force is not None and len(force) < a.gen:
         raise SystemExit(f"--force has {len(force)} ids, --gen is {a.gen}")
-    logits, toks = ref.generate(ids, a.gen, rec, log=lambda s: print(s, flush=True), force=force)
+    logits, toks = ref.generate(ids, a.gen, None if a.lean else rec, log=lambda s: print(s, flush=True), force=force)
+    if a.lean:   # operator ruling 2026-10-29's long-prompt judges: the prompt's last row and the generated rows
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        save_file({"logits": logits[len(ids) - 1:].float().contiguous(), "tokens": torch.tensor(toks, dtype=torch.int32)},
+                  a.out, metadata={"snapshot": os.path.abspath(a.snapshot), "n_prompt": str(len(ids)), "gen": str(a.gen),
+                                   "mode": a.mode, "lean": "1", "kv": "int8 rotkv" if a.sim_kv8 else "bf16"})
+        print(f"wrote {a.out} (lean): logits [{len(toks) + 1}][{logits.shape[1]}]; wall {time.time() - t0:.1f}s", flush=True)
+        return
     out = rec.tensors(ref.ar)
     out["logits"] = logits.float().contiguous()
     out["tokens"] = torch.tensor(toks, dtype=torch.int32)
@@ -969,6 +976,8 @@ def main() -> None:
     r.add_argument("--lm-head", choices=("bf16", "int8"), default="bf16")
     # ... and of the int8 KV cache (`--kv-cache int8`, operator ruling 2026-10-29): K / V through kv8.h's rotkv.
     r.add_argument("--sim-kv8", action="store_true")
+    r.add_argument("--lean", action="store_true", help="logits of the prompt's last row and the generated rows, the "
+                   "tokens - nothing per layer (a long prompt's judge, operator ruling 2026-10-29)")
     r.add_argument("--slow-dequant", action="store_true", help="dequant.py's torch path instead of the C++ one")
     h = sub.add_parser("hfcheck")
     h.add_argument("snapshot")

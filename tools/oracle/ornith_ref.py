@@ -567,7 +567,7 @@ def cmd_run(a) -> None:
         return fn
     hs = []
     gdn = [i for i, t in enumerate(tc.layer_types) if t == "linear_attention"]
-    for i, layer in enumerate(model.model.layers):
+    for i, layer in enumerate(model.model.layers if not a.lean else []):
         mixer = layer.linear_attn if i in gdn else layer.self_attn
         hs += [layer.register_forward_hook(hook(f"resid.L{i}")),
                mixer.register_forward_hook(hook(f"mixer.L{i}")),
@@ -576,7 +576,8 @@ def cmd_run(a) -> None:
     if sim is not None:
         sim["on"] = True
     with torch.no_grad():
-        out = model(input_ids=torch.tensor([ids]), use_cache=True)
+        # --lean: the prompt's last row only (a long prompt's every row is GBs of logits)
+        out = model(input_ids=torch.tensor([ids]), use_cache=True, **({"logits_to_keep": 1} if a.lean else {}))
     if sim is not None:
         sim["on"] = False
         lazy.layer = None   # the shared expert buffers hold fake-quantised rows: refill from here on
@@ -610,6 +611,28 @@ def cmd_run(a) -> None:
         if step == 0:
             print(f"  first decode step {time.time() - t2:.1f}s", flush=True)
     print(f"greedy {a.gen}: {time.time() - t2:.1f}s -> {tokens}")
+    if a.lean:
+        # Operator ruling 2026-10-29's long-prompt judges: logits [1 + gen][V] (row 0 = the prompt's last, row j + 1
+        # the forward that consumed tokens[j]), the tokens, and with --dump-kv the end state - every GDN layer's
+        # recurrent state and every FA layer's cached K / V rows (kv.k.L<i> / kv.v.L<i> [T][kv heads x head dim],
+        # post-norm and post-RoPE, the engine's cache rows).
+        tensors = {"logits": torch.cat(rows, 0).contiguous(), "tokens": torch.tensor(tokens, dtype=torch.int32)}
+        if a.dump_kv:
+            tensors.update({k: v for k, v in states.items() if k.startswith("gdn_state.")})
+            for i, t in enumerate(tc.layer_types):
+                if t == "linear_attention":
+                    continue
+                lay = cache.layers[i]
+                for nm, x in (("k", lay.keys), ("v", lay.values)):
+                    tensors[f"kv.{nm}.L{i}"] = x[0].transpose(0, 1).reshape(x.shape[2], -1).float().contiguous()
+        meta = {"snapshot": os.path.abspath(a.snapshot), "n_prompt": str(len(ids)), "gen": str(a.gen),
+                "dtype": a.dtype, "lean": "1", "dump_kv": str(a.dump_kv)}
+        os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+        save_file(tensors, a.out, metadata=meta)
+        print(f"wrote {a.out}: {len(tensors)} tensors (lean)")
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
+        print(f"wall {time.time() - t0:.1f}s, peak RSS {rss:.1f} GiB")
+        return
     tensors = dict(caps)
     tensors.update(states)
     tensors.update(rec.tensors())
@@ -723,6 +746,9 @@ def main() -> None:
     # and every activation in float32 (box 2026-10-23: is the engine's drift from the bf16
     # reference larger than the bf16 reference's own distance from exact arithmetic?).
     r.add_argument("--dtype", default="bf16", choices=["bf16", "f32"])
+    r.add_argument("--lean", action="store_true", help="logits of the prompt's last row and the generated rows, the "
+                   "tokens - nothing per layer (a long prompt's judge, operator ruling 2026-10-29)")
+    r.add_argument("--dump-kv", action="store_true", help="with --lean: the GDN states and the FA layers' K / V rows")
     # The generated steps consume these ids instead of the argmax (`tokens` then records them):
     # the control's rows line up with another golden file's rows, decision row for decision row.
     r.add_argument("--force", help="file of whitespace-separated ids to teacher-force (>= --gen)")
