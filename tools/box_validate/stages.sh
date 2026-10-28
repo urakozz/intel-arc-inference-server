@@ -880,10 +880,13 @@ st_r14_oracle() {
   grab_all gap 'selection gap' 12
   finish
 }
-stage r14.oracle_f32 14 optin cpu k2,oracle_k2,oracle_image - "the K2 token gates' judge (operator ruling 2026-10-23): tools/box_validate/f32_oracle.sh k2 - k2_ref.py --mode f32 --force <oracle-out-k2's tokens> per prompt -> \$DATA/oracle-out-k2-f32 and oracle-out-k2-f32-i8head (--lm-head int8, the *_i8head gates' judge) (~2.5 min a prompt each, peak RSS ~17 GiB, 22 threads under /tmp/b70-cpu-model.lock; needs MemAvailable >= F32_REF_MIN_GB = 95); then re-links oracle-out* and refreshes the data list"
+stage r14.oracle_f32 14 optin cpu k2,oracle_k2,oracle_image - "the K2 token gates' judge (operator ruling 2026-10-23): tools/box_validate/f32_oracle.sh k2 - k2_ref.py --mode f32 --force <oracle-out-k2's tokens> per prompt -> \$DATA/oracle-out-k2-f32 and oracle-out-k2-f32-i8head (--lm-head int8, the *_i8head gates' judge), and the kv8 gates' -f32-kv8 / -f32-i8head-kv8 (--sim-kv8, operator ruling 2026-10-29) (~2.5 min a prompt each, peak RSS ~17 GiB, 22 threads under /tmp/b70-cpu-model.lock; needs MemAvailable >= F32_REF_MIN_GB = 95); then re-links oracle-out* and refreshes the data list"
 st_r14_oracle_f32() {
   chk "tools/box_validate/f32_oracle.sh $DATA k2" "the K2 f32 teacher-forced reference"
   chk "tools/box_validate/f32_oracle.sh $DATA k2-i8head" "the K2 f32 reference through the int8 head"
+  # operator ruling 2026-10-29: the kv8 gates' judges, K / V through the int8 rotkv cache
+  chk "tools/box_validate/f32_oracle.sh $DATA k2-kv8" "the K2 f32 reference through the int8 KV cache"
+  chk "tools/box_validate/f32_oracle.sh $DATA k2-i8head-kv8" "the K2 f32 reference through the int8 head and KV cache"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_k2' $STATE/have.env"
   finish
@@ -1277,13 +1280,13 @@ st_r21_k3() {
   jgrab k3-kv8 '^k2_decode_kv8_test$' '717|KV \(B70_KV_CACHE\)|plan|allocation|bitwise|OK|FAIL'
   finish
 }
-stage r21.golden 21 default card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head r21.k3,r14.golden "K2 on the int8 cache: k2_golden_kv8_test and k2_golden_i8head_kv8_test judged by oracle-out-k2-f32 (the bf16 golden oracle-out-k2 printed beside it) - the tie-aware gate and the routing rate as r14.golden (B70_K2_TIE_TOL as r14.golden); the non-tie / near-tie counts recorded beside r14.golden's bf16 runs"
+stage r21.golden 21 default card k2,oracle_k2,oracle_k2_f32_kv8,oracle_k2_f32_i8head_kv8 r21.k3,r14.golden "K2 on the int8 cache: k2_golden_kv8_test and k2_golden_i8head_kv8_test judged by the kv8-aware f32 references oracle-out-k2-f32-kv8 / -f32-i8head-kv8 (operator ruling 2026-10-29; the bf16 golden oracle-out-k2 printed beside it) - the tie-aware gate and the routing rate as r14.golden (B70_K2_TIE_TOL as r14.golden); the non-tie / near-tie counts recorded beside r14.golden's bf16 runs"
 st_r21_golden() {
   run_tests '^k2_golden(_i8head)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
   jgrab k2-golden-vs-bf16 '^k2_golden(_i8head)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
   finish
 }
-stage r21.golden_eager 21 default card k2,oracle_k2,oracle_k2_f32 r21.k3,r14.golden_eager "DIAGNOSTIC (routing rate recorded, not gated) - K2 through the eager attention on the int8 cache: k2_golden_eager_kv8_test (B70_KV_CACHE=int8, B70_K2_ATTN=eager; 813 launches) - compared with r14.golden_eager's bf16 run"
+stage r21.golden_eager 21 default card k2,oracle_k2,oracle_k2_f32_kv8 r21.k3,r14.golden_eager "DIAGNOSTIC (token gate and routing printed, not gated - operator rulings 2026-10-23 #4, 2026-10-29) - K2 through the eager attention on the int8 cache: k2_golden_eager_kv8_test (B70_KV_CACHE=int8, B70_K2_ATTN=eager; 813 launches) - compared with r14.golden_eager's bf16 run"
 st_r21_golden_eager() {
   run_tests '^k2_golden_eager_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
   jgrab k2-golden-eager-vs-bf16 '^k2_golden_eager(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|attention|tie|routing|determined|differ|OK|PASS|FAIL'
@@ -1301,7 +1304,7 @@ st_r21_split() {
   jgrab split-kv8 '^prefill_split_k2_kv8_test$' 'KV \(B70_KV_CACHE\)|bitwise|cos|split|PASS|FAIL'
   finish
 }
-stage r21.golden_prefill 21 default card k2,oracle_k2,oracle_k2_f32 r21.prefill,r15.golden "K2 on prefill over the int8 cache: k2_golden_prefill_kv8_test and _c16_kv8 (chunks of 16) judged by oracle-out-k2-f32 (oracle-out-k2 printed beside it) - the tie rule and the routing diagnostic on the prompt rows, the counts beside r15.golden's bf16 runs"
+stage r21.golden_prefill 21 default card k2,oracle_k2,oracle_k2_f32_kv8 r21.prefill,r15.golden "K2 on prefill over the int8 cache: k2_golden_prefill_kv8_test and _c16_kv8 (chunks of 16) judged by oracle-out-k2-f32-kv8 (operator ruling 2026-10-29) (oracle-out-k2 printed beside it) - the tie rule and the routing diagnostic on the prompt rows, the counts beside r15.golden's bf16 runs"
 st_r21_golden_prefill() {
   run_tests '^k2_golden_prefill(_c16)?_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
   jgrab k2-golden-prefill-vs-bf16 '^k2_golden_prefill(_c16)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'

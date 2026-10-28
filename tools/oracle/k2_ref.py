@@ -836,6 +836,19 @@ def cmd_run(a) -> None:
             raise SystemExit("--lm-head int8 is a quantisation-aware f32 judge: use it with --mode f32")
         ref.lm_head = _int8.int8_head_weight(ref.lm_head)
         print("lm_head: int8 per row (loader/lm_head_int8.cc quantise_row_int8), de-quantised to f32", flush=True)
+    if a.sim_kv8:   # the engine's int8 rotkv cache (src/common/kv8.h, K2 hd128), operator ruling 2026-10-29
+        if a.mode != "f32":
+            raise SystemExit("--sim-kv8 is a quantisation-aware f32 judge: use it with --mode f32")
+        kv8 = _load("k2_kv8_probe")
+        plain = globals()["attention"]
+
+        def kv8_attention(ar, q, k, v, q_pos, k_pos, n_rep):
+            # K / V rotated and int8-quantised per (position, kv head) with the fp16 scale, q rotated to match
+            # (the rotations' scales cancel in q.k), the output un-rotated: the cache's rounding and nothing else.
+            kq, vq = kv8.quant_dequant(kv8.rotate_kv(k)), kv8.quant_dequant(kv8.rotate_kv(v))
+            return kv8.unrotate(plain(ar, kv8.rotate_q(q), kq, vq, q_pos, k_pos, n_rep))
+        globals()["attention"] = kv8_attention
+        print("KV cache: int8 rotkv simulated (k2_kv8_probe.py's kv8.h scheme), de-quantised to f32", flush=True)
     rec = Recorder(len(ids))
     force = _read_ids(a.force) if a.force else None
     if force is not None and len(force) < a.gen:
@@ -848,7 +861,7 @@ def cmd_run(a) -> None:
     if not torch.isfinite(last.float()).all():
         raise SystemExit("the last residual is not finite - the weights are wrong")
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt_ids": " ".join(map(str, ids)),
-            "n_prompt": str(len(ids)), "gen": str(a.gen), "mode": a.mode, "lm_head": a.lm_head,
+            "n_prompt": str(len(ids)), "gen": str(a.gen), "mode": a.mode, "lm_head": a.lm_head, "kv": "int8 rotkv" if a.sim_kv8 else "bf16",
             "reference": "tools/oracle/k2_ref.py (port of modeling_k2_horizon.py, layer at a time)",
             "weights": f"int4 g{c.group_size} dequant.py rule" if c.group_size else "bf16 as stored",
             "torch": torch.__version__, "threads": str(torch.get_num_threads())}
@@ -954,6 +967,8 @@ def main() -> None:
     # The quantisation-aware f32 judge of the engine's --lm-head int8 (operator ruling 2026-10-23): the logits
     # through the per-row int8 head, de-quantised (tools/oracle/int8_sim.py). With --mode f32 only.
     r.add_argument("--lm-head", choices=("bf16", "int8"), default="bf16")
+    # ... and of the int8 KV cache (`--kv-cache int8`, operator ruling 2026-10-29): K / V through kv8.h's rotkv.
+    r.add_argument("--sim-kv8", action="store_true")
     r.add_argument("--slow-dequant", action="store_true", help="dequant.py's torch path instead of the C++ one")
     h = sub.add_parser("hfcheck")
     h.add_argument("snapshot")

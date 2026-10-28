@@ -93,6 +93,11 @@ case "${1:-}" in
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32/$p.golden.safetensors || exit 1; done'
     have oracle_k2_f32_i8head "oracle-out-k2-f32-i8head/{prose,code,cjk}.golden.safetensors (the int8 head's quantisation-aware f32 judge: --with r14.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head/$p.golden.safetensors || exit 1; done'
+    # Operator ruling 2026-10-29: the kv8 gates' judges (f32_oracle.sh k2-kv8 / k2-i8head-kv8).
+    have oracle_k2_f32_kv8 "oracle-out-k2-f32-kv8/{prose,code,cjk}.golden.safetensors (the int8 KV cache's quantisation-aware f32 judge: --with r14.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-kv8/$p.golden.safetensors || exit 1; done'
+    have oracle_k2_f32_i8head_kv8 "oracle-out-k2-f32-i8head-kv8/{prose,code,cjk}.golden.safetensors (int8 head and KV cache: --with r14.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head-kv8/$p.golden.safetensors || exit 1; done'
     have kolibri "Kolibri-1 int4 checkpoint ${SNAP_KOLIBRI:-?} (spec 20b, decision 1 open; ~42.5 GB)" \
       complete "${SNAP_KOLIBRI:-/nonexistent}"
     # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).
