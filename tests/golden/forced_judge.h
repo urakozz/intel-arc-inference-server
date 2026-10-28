@@ -46,11 +46,13 @@ struct ForcedJudge {
   }
   void dump(const std::string& k, const std::vector<uint32_t>& prompt, const std::vector<uint32_t>& force) const {
     if (dump_dir.empty()) return;
-    for (const auto& [ext, v] : {std::make_pair(".prompt.ids", &prompt), std::make_pair(".force.ids", &force)}) {
+    auto write = [&](const char* ext, const std::vector<uint32_t>& v) {
       std::ofstream f(dump_dir + "/" + k + ext);
-      for (size_t i = 0; i < v->size(); ++i) f << (i ? " " : "") << (*v)[i];
+      for (size_t i = 0; i < v.size(); ++i) f << (i ? " " : "") << v[i];
       f << "\n";
-    }
+    };
+    write(".prompt.ids", prompt);
+    write(".force.ids", force);
     std::printf("  dumped the forced context %s (%zu prompt ids, %zu forced) to %s\n", k.c_str(), prompt.size(),
                 force.size(), dump_dir.c_str());
   }
