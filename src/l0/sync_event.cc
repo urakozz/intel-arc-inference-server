@@ -13,7 +13,12 @@ SyncEvent::SyncEvent(Context& ctx, const std::vector<const Context*>& devices) {
   }
   ze_event_pool_desc_t pd{};
   pd.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
-  pd.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE;
+  // IPC: never exported, but compute-runtime (26.35 at least) converts a regular event
+  // signalled on an in-order immediate list into a counter-based one - which the host cannot
+  // signal (zeEventHostSignal -> UNSUPPORTED_FEATURE) and whose "signalled" is the list's
+  // counter, not a write after the work before it. An IPC pool's events are created with that
+  // conversion disabled, so this stays the plain event the header describes.
+  pd.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_IPC;
   pd.count = 1;
   ZE_CHECK(zeEventPoolCreate(ctx.handle(), &pd, static_cast<uint32_t>(devs.size()), devs.data(),
                              &pool_));
