@@ -279,6 +279,7 @@ class Ckpt:
         self.h = {fn: safe_open(os.path.join(snapshot, fn), framework="pt", device="cpu")
                   for fn in sorted(set(self.wm.values()))}
         self._hdr: dict[str, dict] = {}
+        self._maps: dict[str, np.memmap] = {}
 
     def __contains__(self, k: str) -> bool:
         return k in self.wm
@@ -301,8 +302,12 @@ class Ckpt:
                 self._hdr[fn] = dict(json.loads(f.read(n)), __start__=8 + n)
         e, s = self._hdr[fn][k], self._hdr[fn]["__start__"]
         dt = {"BF16": np.uint16, "F16": np.float16, "F32": np.float32, "I8": np.int8, "I64": np.int64}[e["dtype"]]
-        a, _ = e["data_offsets"]
-        return np.memmap(os.path.join(self.dir, fn), dtype=dt, mode="r", offset=s + a, shape=tuple(e["shape"])), e["dtype"]
+        a, b = e["data_offsets"]
+        # One map per FILE, the tensor a view into it: mmap.mmap dups the descriptor, so a map per tensor held one
+        # open file per PLE shard and the test process ran out (r30.host: EMFILE after a few port models).
+        if fn not in self._maps:
+            self._maps[fn] = np.memmap(os.path.join(self.dir, fn), dtype=np.uint8, mode="r")
+        return self._maps[fn][s + a:s + b].view(dt).reshape(tuple(e["shape"])), e["dtype"]
 
 
 def _cast(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
