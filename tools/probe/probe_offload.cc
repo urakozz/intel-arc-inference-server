@@ -866,6 +866,9 @@ long page_check(Card& c, l0::Module& helper, const std::vector<const uint8_t*>& 
   k.arg_ptr(2, dout.ptr());
   k.arg(3, pages);
   k.arg(4, uint32_t(ranges.size()));
+  // The ranges are reached through the pointer table, not as arguments: without the flag the driver need not make the
+  // host USM resident on this card - and on card 1 it did not (r36.pin: DEVICE_LOST on the first 1 GiB range).
+  ZE_CHECK(zeKernelSetIndirectAccess(k.handle(), ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST));
   l0::CmdList l = l0::CmdList::regular(c.ctx, c.ord.compute);
   l.launch(k, (pages + 63) / 64);
   l.close();
