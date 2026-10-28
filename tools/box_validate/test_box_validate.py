@@ -195,6 +195,43 @@ class G0CompareTest(Tmp):
         self.mk("head", {"kernels/z.bin": "Z"})
         self.assertEqual(self.run_cmp().returncode, 2)
 
+    @staticmethod
+    def elf(sections):
+        """A minimal ELF64: the given (name, bytes) sections after a null one, then .shstrtab, then the headers."""
+        import struct
+        names = b"\0" + b"".join(n + b"\0" for n, _ in sections) + b".shstrtab\0"
+        body, offs, off = b"", [], 64
+        for _, data in sections + [(None, names)]:
+            offs.append((off, len(data)))
+            body += data
+            off += len(data)
+        hdrs = [struct.pack("<IIQQQQIIQQ", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)]
+        pos = 1
+        for (n, _), (o, ln) in zip(sections + [(b".shstrtab", None)], offs):
+            hdrs.append(struct.pack("<IIQQQQIIQQ", pos, 3 if n == b".shstrtab" else 1, 0, 0, o, ln, 0, 0, 1, 0))
+            pos += len(n) + 1
+        eh = b"\x7fELF\x02\x01\x01" + b"\0" * 9 + struct.pack("<HHIQQQIHHHHHH", 1, 0, 1, 0, 0, off, 0, 64, 0, 0, 64,
+                                                              len(hdrs), len(hdrs) - 1)
+        return eh + body + b"".join(hdrs)
+
+    def test_differ_only_by_the_tree_path(self):
+        # Bolt's -I<tree>/... in the build options: the same sections once each tree's root is replaced.
+        def mk_bin(tree, text):
+            path = self.p(tree, "build", "kernels", "nb.bin")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            opts = b"-I" + self.p(tree).encode() + b"/src/kernels/bolt"
+            with open(path, "wb") as f:
+                f.write(self.elf([(b".text.k", text), (b".note.opts", opts)]))
+        for tree in ("ta", "tree-b"):
+            mk_bin(tree, b"\x01\x02")
+        cmd = [os.path.join(HERE, "g0_compare.sh"), self.p("ta", "build"), self.p("tree-b", "build"), self.p("out")]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("1 binaries differ only by the tree's path", r.stdout)
+        mk_bin("tree-b", b"\x01\x03")                       # the code differs too: still a FAIL
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
+
 
 class DataTest(Tmp):
     def test_link_and_resolve_and_complete(self):
