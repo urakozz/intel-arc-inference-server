@@ -1702,7 +1702,7 @@ if(B70_ORNITH)
     add_test(NAME prefill_split_ornith_${b}_test COMMAND prefill_split_test ${B70_ORNITH_SNAPSHOT}
       ${B70_ORNITH_PROMPTS_DIR}/long32k.ids ${b})
     add_test(NAME ornith_prefill_${b}_test COMMAND ornith_prefill_test ${B70_ORNITH_SNAPSHOT}
-      ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR})
+      ${B70_ORNITH_PROMPTS_DIR} ${b} ${B70_ORNITH_ORACLE_DIR} --judge=${_judge})
     set_tests_properties(prefill_gate_ornith_${b}_test prefill_gate_ornith_${b}_c16_test
       PROPERTIES LABELS "checkpoint;golden;prefill;ornith" SKIP_RETURN_CODE 77 TIMEOUT 3600)
     set_tests_properties(prefill_split_ornith_${b}_test ornith_prefill_${b}_test PROPERTIES
