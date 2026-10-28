@@ -11,6 +11,7 @@
 # The quantisation-aware modes (operator ruling 2026-10-23, tools/oracle/int8_sim.py) add to the same run
 #   *-i8head:     --lm-head int8         the logits through the engine's per-row int8 head (spec 9)
 #   ornith-pfi8:  --sim-int8-prefill     the prompt forward through spec 5's l0-int8 linears
+#   k2-kv8:       --sim-kv8              K / V through the int8 rotkv cache (kv8.h; k2-i8head-kv8 both)
 # and write oracle-out-<model>-f32-i8head / oracle-out-ornith-f32-pfi8, the judges of the *_i8head and
 # the l0-int8 prefill gates; the golden tokens forced are the same bf16 golden's.
 # into <tree>/oracle-out-<mode>-f32.partial/ (box.sh sync leaves oracle-out-* alone), moved into the
@@ -30,8 +31,10 @@ case "$m" in
   ornith-i8head) extra="--lm-head int8"; suffix="-i8head" ;;
   ornith-pfi8)   extra="--sim-int8-prefill"; suffix="-pfi8" ;;
   k2-i8head)     extra="--lm-head int8"; suffix="-i8head" ;;
+  k2-kv8)        extra="--sim-kv8"; suffix="-kv8" ;;                        # operator ruling 2026-10-29
+  k2-i8head-kv8) extra="--lm-head int8 --sim-kv8"; suffix="-i8head-kv8" ;;
   ornith|k2) ;;
-  *) echo "f32_oracle: mode is ornith, k2, ornith-i8head, ornith-pfi8 or k2-i8head, not $m" >&2; exit 2 ;;
+  *) echo "f32_oracle: mode is ornith, k2, ornith-i8head, ornith-pfi8, k2-i8head, k2-kv8 or k2-i8head-kv8, not $m" >&2; exit 2 ;;
 esac
 m="${m%%-*}"   # the model
 case "$m" in

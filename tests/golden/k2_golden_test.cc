@@ -34,6 +34,8 @@
 // differ by one expert. Printed: per layer, the first row where the ids differ (tie or not), and
 // the worst weight difference in bf16 ulps over the matching sets (a diagnostic - the weights'
 // fp32 sum order is torch's reduction against our rank order).
+//   With a judge that dumped its routes (operator ruling 2026-10-29) the gate is the engine's share of differing
+// sets against the f32 judge, no larger than the bf16 golden's own share against it. Otherwise:
 //   The GATE is a rate (box 2026-10-23, replacing "any non-tie difference fails"): the share of
 // (row, layer) route rows whose set differs from the reference's may not exceed the share by
 // which the bf16 reference ITSELF differs from exact arithmetic on the same rows - k2_ref.py
@@ -220,6 +222,7 @@ int main(int argc, char** argv) {
 
   bool gate_ok = true;
   RouteCount moe_c, mova_c;
+  RouteCount moe_j, mova_j, moe_gj, mova_gj;   // with a judge's routes: the engine / the bf16 golden vs the judge
   std::vector<double> sa, sb;
   for (const char* pname : kPrompts) {
     const std::vector<uint32_t> ids = read_ids(gdir + "/" + pname + ".ids", d.vocab);
@@ -235,7 +238,12 @@ int main(int argc, char** argv) {
     std::printf("\n================ %s: %u prompt ids, %u generated%s ================\n", pname, T,
                 kGen, have_routes ? "" : " (NO routing dumps: the diagnostic is skipped)");
 
-    std::vector<char> moe_first(d.layers, 0), mova_first(d.layers, 0);
+    const golden::Judge J =
+        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, rows);
+    // Operator ruling 2026-10-28/29: with a judge that dumped its routes, the routing gate is the engine's
+    // distance to the f32 judge against the bf16 golden's own (both counted here by the same rule).
+    const bool judge_routes = J && J.g->has("route.moe.ids.L" + std::to_string(d.dense_layers));
+    std::vector<char> moe_first(d.layers, 0), mova_first(d.layers, 0), jfirst(d.layers, 1);
     std::vector<double> tap_min(d.layers, 1.0);
     // `route_row(l, which)`: the engine's route row of golden row `row` for (layer, router).
     auto check_route_rows = [&](uint32_t row, const std::function<const uint32_t*(uint32_t, int)>& route_row) {
@@ -252,6 +260,23 @@ int main(int argc, char** argv) {
           compare_route(er + kernels::k2::route::kIds, er + kernels::k2::route::kWeights, gi, gw, gap, K,
                         which ? moe_c : mova_c, which ? moe_first[l] : mova_first[l],
                         which ? "MoE" : "MoVA", pname, row, l);
+          if (judge_routes) {   // the engine and the bf16 golden, each against the judge's route
+            const int32_t* ji = J.g->i32(pre + "ids.L" + ls, size_t(rows) * K) + size_t(row) * K;
+            const float* jwf = J.g->f32(pre + "w.L" + ls, size_t(rows) * K) + size_t(row) * K;
+            const float jgap = J.g->f32(pre + "gap.L" + ls, rows)[row];
+            std::vector<uint16_t> jw(K);
+            std::vector<uint32_t> gid(K), gwb(K);
+            for (uint32_t k = 0; k < K; ++k) {
+              jw[k] = common::f32_to_bf16(jwf[k]);
+              gid[k] = uint32_t(gi[k]);
+              const float f = common::bf16_to_f32(gw[k]);
+              std::memcpy(&gwb[k], &f, 4);
+            }
+            compare_route(er + kernels::k2::route::kIds, er + kernels::k2::route::kWeights, ji, jw.data(), jgap, K,
+                          which ? moe_j : mova_j, jfirst[l], which ? "MoE vs f32" : "MoVA vs f32", pname, row, l);
+            compare_route(gid.data(), gwb.data(), ji, jw.data(), jgap, K, which ? moe_gj : mova_gj, jfirst[l],
+                          which ? "MoE, bf16 golden vs f32" : "MoVA, bf16 golden vs f32", pname, row, l);
+          }
         }
       }
     };
@@ -292,8 +317,6 @@ int main(int argc, char** argv) {
         }
       }
     }
-    const golden::Judge J =
-        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, rows);
     uint32_t bf16_vs_f32 = 0, bf16_det_bad = 0;   // the bf16 golden as a diagnostic beside the judge
     uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
     int first_bad = -1;
@@ -477,20 +500,28 @@ int main(int argc, char** argv) {
               (unsigned long long)moe_c.ties, (unsigned long long)moe_c.bad, moe_c.worst_w,
               (unsigned long long)mova_c.rows, (unsigned long long)mova_c.exact,
               (unsigned long long)mova_c.ties, (unsigned long long)mova_c.bad, mova_c.worst_w);
-  const auto [moe_rate, mova_rate] = route_rate();
-  const double moe_got = moe_c.rows ? double(moe_c.ties + moe_c.bad) / double(moe_c.rows) : 0.0;
-  const double mova_got = mova_c.rows ? double(mova_c.ties + mova_c.bad) / double(mova_c.rows) : 0.0;
-  // Operator ruling 2026-10-23: K2's default decode attention stays flash, and the eager
-  // variant is RECORDED, not gated, on the routing rate - the number and the bar are printed,
-  // the test does not fail on them (its ctest label `diagnostic` says so). The token gate binds
-  // both.
+  auto rate = [](const RouteCount& c) { return c.rows ? double(c.ties + c.bad) / double(c.rows) : 0.0; };
+  // With the judge's routes (operator ruling 2026-10-28/29): the engine's differing share against the f32 judge,
+  // the bar the bf16 golden's own share against the same judge, both counted above by one rule. Without them the
+  // measured constants (the header; B70_K2_ROUTE_RATE overrides) against the bf16 golden's routes, as before.
+  const bool by_judge = moe_j.rows != 0;
+  const auto [moe_const, mova_const] = route_rate();
+  const double moe_got = by_judge ? rate(moe_j) : rate(moe_c), mova_got = by_judge ? rate(mova_j) : rate(mova_c);
+  const double moe_rate = by_judge ? rate(moe_gj) : moe_const, mova_rate = by_judge ? rate(mova_gj) : mova_const;
+  // Operator rulings 2026-10-23 (#4) and 2026-10-29: K2's production decode attention is flash; the eager variant
+  // is DIAGNOSTIC - its routing rate and its token gate are printed with their bars, the test does not fail on
+  // them (its ctest label `diagnostic` says so).
   const bool eager = runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager;
   const bool route_ok = moe_got <= moe_rate && mova_got <= mova_rate;
-  std::printf("routing %s: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - the bf16 reference's own "
-              "rate against its f32 control%s\n", eager ? "(eager: RECORDED, not gated)" : "gate", moe_got,
-              moe_rate, mova_got, mova_rate, route_ok ? "" : (eager ? "  (above the bar)" : "  ** FAIL **"));
-  CHECK(gate_ok);
-  if (!eager) {
+  std::printf("routing %s: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - %s%s\n",
+              eager ? "(eager: RECORDED, not gated)" : "gate", moe_got, moe_rate, mova_got, mova_rate,
+              by_judge ? "the engine and the bf16 golden each against the f32 judge (operator, 2026-10-29)"
+                       : "the bf16 reference's own rate against its f32 control",
+              route_ok ? "" : (eager ? "  (above the bar)" : "  ** FAIL **"));
+  if (eager) {
+    std::printf("token gate (eager: RECORDED, not gated): %s\n", gate_ok ? "kept" : "missed rows above");
+  } else {
+    CHECK(gate_ok);
     CHECK(moe_got <= moe_rate);
     CHECK(mova_got <= mova_rate);
   }
