@@ -453,8 +453,10 @@ def mtp_head(snapshot: str, tc, model, experts: str):
         die(f"{len(names)} mtp.* tensors, expected {14 + 3 * (E + 1)}")
     L = "mtp.layers.0."
     sd: dict[str, torch.Tensor] = {}
-    gate_up = torch.empty(E, 2 * I, tc.hidden_size, dtype=torch.bfloat16)
-    down = torch.empty(E, tc.hidden_size, I, dtype=torch.bfloat16)
+    # The model's dtype: bf16, or float32 under `run --dtype f32` (the same bf16 values widened exactly - the M1 f32
+    # judge, operator ruling 2026-10-29).
+    gate_up = torch.empty(E, 2 * I, tc.hidden_size, dtype=tc.dtype)
+    down = torch.empty(E, tc.hidden_size, I, dtype=tc.dtype)
     conv = rtn_dequant if experts == "rtn" else (lambda w: w)
     n_rtn = 0
     for k in names:
@@ -477,6 +479,7 @@ def mtp_head(snapshot: str, tc, model, experts: str):
             n_rtn += 1
         else:
             sd[k] = t
+    sd = {k: v.to(tc.dtype) for k, v in sd.items()}
     fa = tc.layer_types.index("full_attention")
     with torch.device("meta"):
         layer = m.Qwen3_5MoeDecoderLayer(tc, fa)
