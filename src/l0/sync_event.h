@@ -9,7 +9,8 @@ namespace l0 {
 // for every device in `devices` (all views of one context - l0::Context's view
 // constructor), HOST_VISIBLE so the host can reset it before a step, query it, and signal
 // it to release a waiting list after a timeout. Signal and wait scopes are HOST: the event
-// crosses devices, so its signal must be visible beyond the signalling device.
+// crosses devices, so its signal must be visible beyond the signalling device. The pool is
+// also flagged IPC, only to keep the driver from turning the event counter-based (the .cc).
 //
 // Unlike l0::Event (a kernel-timestamp observer nothing waits on), this event IS waited
 // on: it orders device 1's list after device 0's hand-off. The host resets it before each
