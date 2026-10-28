@@ -1108,6 +1108,37 @@ st_r16_prefix() {
   chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3" "prefix_gpu_test <ornith> l0-int8 --mtp 3"
   finish
 }
+# Operator ruling 2026-10-29: the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
+# forced contexts are the engine's own (tests/golden/forced_judge.h): r16.forced_dumps runs the tests with
+# B70_DUMP_FORCED, r16.forced_refs runs the f32 reference on each context (tools/box_validate/f32_refs.sh) and the
+# MTP head's and the 2600-id split prompt's references; the gates (r13.split, r16.m1, r16.prefix, r15.prefill,
+# g0.suite's k2_prefix_gpu) then judge against them, each falling back to its old rule while a file is missing.
+stage r16.forced_dumps 16 optin card ornith,k2 r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3, k2_prefix_gpu_test x 2, k2_prefill_test (both heads) with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
+st_r16_forced_dumps() {
+  local D="$DATA/oracle-forced-dumps"
+  x "mkdir -p $D/ornith-prefix $D/k2-prefix $D/k2-prefill $D/k2-prefill-i8head"
+  x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8"
+  x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1"
+  x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3"
+  x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts"
+  x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts 0 1"
+  x "B70_DUMP_FORCED=$D/k2-prefill timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
+  x "B70_DUMP_FORCED=$D/k2-prefill-i8head timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all int8"
+  chk "ls $D/*/*.prompt.ids | wc -l" "the dumped contexts"
+  finish
+}
+stage r16.forced_refs 16 optin cpu ornith,k2,oracle_image r16.forced_dumps "the f32 references of the forced contexts, the Ornith MTP head (M1) and long32k[0, 2600) for prefill_split (f32 and bf16) - tools/box_validate/f32_refs.sh under /tmp/b70-cpu-model.lock, ~3-15 min a context (operator ruling 2026-10-29)"
+st_r16_forced_refs() {
+  local D="$DATA/oracle-forced-dumps"
+  chk "tools/box_validate/f32_refs.sh $DATA ornith-mtp" "the Ornith MTP head's f32 M1 rows"
+  chk "tools/box_validate/f32_refs.sh $DATA split ornith tests/golden/prompts/long32k.ids 2600 $DATA/oracle-out-ornith-split/long32k-2600" "long32k[0, 2600) in f32 and bf16"
+  chk "tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix" "the Ornith prefix contexts"
+  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix" "the K2 prefix contexts"
+  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill" "the K2 prefill context"
+  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-i8head -i8head --lm-head int8" "the K2 prefill context, int8 head"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  finish
+}
 stage r16.cost 16 default gpu ornith r16.mtp "Review Focus 2: the verify cost at K = 1..3 on Ornith (up to 8 x (K + 1) experts) - probe_mtp_steps (verify M = 1..4, draft k = 1..3), int8 and bf16 heads (timed)"
 st_r16_cost() {
   idle before
