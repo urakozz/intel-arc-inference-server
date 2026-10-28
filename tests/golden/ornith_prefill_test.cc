@@ -23,7 +23,12 @@
 //      logits (moe_ref's formula), near-ties (kR2TieRel) excepted, weights within
 //      kR2WeightRel - ornith_decode_test's R2, on the rows a prefill routed.
 //
-// argv: <snapshot> <prompt ids dir> <backend l0|l0-int8> [oracle dir] [lm_head form].
+//   With `--judge=<f32 dir>` (operator, 2026-10-23 and 2026-10-28): 6 takes the f32 dump's router
+//   logits, a one-bf16-ulp logit near-tie, and passes when the prefill is no further from f32 than
+//   the bf16 golden (its own routes judged beside); 4 is printed, not gated; a determined row of 5
+//   where prefill and decode disagree goes to the judge when decode's ids so far are the golden's.
+//
+// argv: <snapshot> <prompt ids dir> <backend l0|l0-int8> [oracle dir] [lm_head form] [--judge=<dir>].
 // Exit 77 (SKIP) when the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-
 // GPTQ, spec 15 §13) is not on this machine; R2 is skipped with a message without 15a's dumps.
 #include <algorithm>
@@ -31,6 +36,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -154,6 +161,14 @@ bool decode_tie(const std::vector<float>& lg) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::string judge_dir;   // --judge=<dir>, anywhere after the positional arguments
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]).rfind("--judge=", 0) == 0) {
+      judge_dir = argv[i] + 8;
+      for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+      --argc;
+      break;
+    }
   if (argc < 4) {
     std::fprintf(stderr, "usage: %s <snapshot> <prompt ids dir> <l0|l0-int8> [oracle dir] [lm_head]\n",
                  argv[0]);
@@ -284,9 +299,22 @@ int main(int argc, char** argv) {
       dec_tie.push_back(decode_tie(lg));
       dec_ids.push_back(eng.generate(1)[0]);
     }
+    // With a judge (operator, 2026-10-23 / 2026-10-28): a determined row where prefill and decode disagree is
+    // decided by the f32 reference when decode's ids so far are the golden's - the judge's context - and passes
+    // when the judge (its one-ulp rule, golden_common.h judge_row) accepts the prefill's id.
+    std::unique_ptr<golden::Golden> gg;
+    golden::Judge J;
+    uint32_t ngen = 0;
+    const int32_t* gtok = nullptr;
+    if (!judge_dir.empty() && golden::exists(gdir + "/" + pname + ".golden.safetensors")) {
+      gg = std::make_unique<golden::Golden>(gdir + "/" + pname + ".golden.safetensors");
+      ngen = uint32_t(gg->dim("tokens", 1, 0));
+      gtok = gg->i32("tokens", ngen);
+      J = golden::open_judge(judge_dir, pname, gtok, ngen, uint32_t(gg->dim("logits", 2, 0)));
+    }
     eng.reset();
     eng.prefill(ids);
-    uint32_t det = 0, det_ok = 0, ties = 0, first_bad = kGen;
+    uint32_t det = 0, det_ok = 0, ties = 0, first_bad = kGen, judged = 0;
     bool forced = false;
     for (uint32_t s = 0; s < kGen; ++s) {
       const uint32_t id = eng.buffers().control.as<runtime::Control>()->cur_token[0];
@@ -294,15 +322,28 @@ int main(int argc, char** argv) {
       if (dec_tie[s]) ++ties;
       else {
         ++det;
-        det_ok += ok;
-        if (!ok && first_bad == kGen) first_bad = s;
+        bool pass = ok;
+        if (!ok && J && s < ngen) {
+          bool same_ctx = true;
+          for (uint32_t i = 0; i < s; ++i) same_ctx = same_ctx && dec_ids[i] == uint32_t(gtok[i]);
+          if (same_ctx) {
+            const golden::JudgedRow jr = golden::judge_row(J.row(T - 1 + s), J.V, Qwen35::kVocabUsed);
+            pass = jr.d.contains(id);
+            std::printf("   %s step %u: prefill %u, decode %u, f32 judge %u (gap %.4f, 1 bf16 ulp %.4f)%s\n", pname, s,
+                        id, dec_ids[s], jr.top, jr.gap, jr.ulp,
+                        pass ? " - the f32 judge accepts the prefill's" : " - GATE");
+            judged += pass;
+          }
+        }
+        det_ok += pass;
+        if (!pass && first_bad == kGen) first_bad = s;
       }
       if (!ok) forced = true;
       if (forced) eng.ingest({dec_ids[s]});
       else CHECK_EQ(eng.generate(1)[0], id);
     }
-    std::printf("5. %s: %u ids, %u/%u determined rows equal decode's, %u undetermined%s\n", pname,
-                T, det_ok, det, ties, first_bad < kGen ? "  ** FAIL **" : "");
+    std::printf("5. %s: %u ids, %u/%u determined rows equal decode's (%u of them by the f32 judge), %u undetermined%s\n",
+                pname, T, det_ok, det, judged, ties, first_bad < kGen ? "  ** FAIL **" : "");
     CHECK_EQ(det_ok, det);
   }
   std::printf("4. routes: %llu (position, layer) prefill top-%u sets vs decode's - %llu equal, "
@@ -311,11 +352,17 @@ int main(int argc, char** argv) {
               (unsigned long long)cs.rows, d.moe.top_k, (unsigned long long)cs.exact,
               (unsigned long long)cs.near_ties, double(kConsistTieRel), (unsigned long long)cs.bad,
               double(cs.worst_w), (unsigned long long)cs.bad_weights, double(kConsistWeightAbs));
-  CHECK_EQ(cs.bad, uint64_t(0));
-  CHECK_EQ(cs.bad_weights, uint64_t(0));
+  if (judge_dir.empty()) {
+    CHECK_EQ(cs.bad, uint64_t(0));
+    CHECK_EQ(cs.bad_weights, uint64_t(0));
+  } else {
+    // Operator, 2026-10-28: the routes are judged against the f32 reference (section 6); prefill against decode
+    // - two bf16 paths, each as far from f32 as the bf16 golden - is printed, not gated.
+    std::printf("   (printed, not gated: with the f32 judge section 6 gates the prefill's routes, operator 2026-10-28)\n");
+  }
 
   // ---- 6. R2 on the prefill path ------------------------------------------------------------
-  SetStats r2;
+  SetStats r2, r2_ref;   // r2_ref: the bf16 golden against the judge (with --judge)
   bool any = false;
   const moe_ref::Shape s{d.moe.experts, d.moe.top_k, d.hidden, d.moe.expert_intermediate,
                          d.moe.router_n()};
@@ -338,18 +385,52 @@ int main(int argc, char** argv) {
     eng.reset();
     eng.prefill(ids);
     const State pf = capture(eng, imm, T);
-    std::vector<float> lgr(s.router_n, 0.0f);
+    // With a judge: the reference route is the f32 dump's, a near-tie its 8th / 9th logits within one bf16 ulp
+    // (ornith_decode_test's R2), and the bf16 golden's own route is judged beside the prefill's.
+    std::unique_ptr<golden::Golden> jg;
+    if (!judge_dir.empty()) {
+      const std::string jpath = judge_dir + "/" + pname + ".golden.safetensors";
+      if (!golden::exists(jpath)) {
+        std::printf("SKIP: the f32 judge %s is absent (tools/box_validate/f32_oracle.sh)\n", jpath.c_str());
+        return 77;
+      }
+      jg = std::make_unique<golden::Golden>(jpath);
+      CHECK_EQ(jg->dim("router_logits.L0", 2, 0), uint64_t(rows));
+    }
+    std::vector<float> lgr(s.router_n, 0.0f), lgb(s.router_n, 0.0f);
     for (uint32_t l = 0; l < d.layers; ++l) {
       const std::string ls = std::to_string(l);
       const uint16_t* gl = g.bf16("router_logits.L" + ls, size_t(rows) * s.experts);
       const bool have_sg = g.has("shared_gate_logits.L" + ls);
+      const float* jl = jg ? jg->f32("router_logits.L" + ls, size_t(rows) * s.experts) : nullptr;
+      const float* jsg = jg && have_sg ? jg->f32("shared_gate_logits.L" + ls, rows) : nullptr;
       for (uint32_t t = 0; t < T; ++t) {
-        for (uint32_t e = 0; e < s.experts; ++e) lgr[e] = common::bf16_to_f32(gl[size_t(t) * s.experts + e]);
-        lgr[s.experts] = have_sg ? common::bf16_to_f32(g.bf16("shared_gate_logits.L" + ls, rows)[t]) : 0.0f;
+        for (uint32_t e = 0; e < s.experts; ++e) lgb[e] = common::bf16_to_f32(gl[size_t(t) * s.experts + e]);
+        lgb[s.experts] = have_sg ? common::bf16_to_f32(g.bf16("shared_gate_logits.L" + ls, rows)[t]) : 0.0f;
+        if (jl) {
+          std::copy(jl + size_t(t) * s.experts, jl + size_t(t + 1) * s.experts, lgr.begin());
+          lgr[s.experts] = jsg ? jsg[t] : 0.0f;
+        } else {
+          lgr = lgb;
+        }
         const moe_ref::Route want = moe_ref::route(lgr.data(), s);
         const float pk = want.p[s.top_k - 1];
-        compare_set(&pf.routes[(size_t(l) * T + t) * 32], want.ids, want.w, s.top_k,
-                    (pk - want.p9) <= kR2TieRel * pk, kR2WeightRel, true, r2);
+        bool near = (pk - want.p9) <= kR2TieRel * pk;
+        if (jl) {
+          std::vector<float> srt(lgr.begin(), lgr.begin() + s.experts);
+          std::nth_element(srt.begin(), srt.begin() + s.top_k, srt.end(), std::greater<float>());
+          const float l8 = *std::min_element(srt.begin(), srt.begin() + s.top_k);
+          near = double(l8) - double(srt[s.top_k]) <= golden::bf16_ulp_at(l8);
+          // the bf16 golden's own route as a route row (ids, then the weights' bits)
+          const moe_ref::Route b = moe_ref::route(lgb.data(), s);
+          std::vector<uint32_t> brow(32, 0);
+          for (uint32_t k = 0; k < s.top_k; ++k) {
+            brow[moe_ref::kIds + k] = b.ids[k];
+            std::memcpy(&brow[moe_ref::kWeights + k], &b.w[k], 4);
+          }
+          compare_set(brow.data(), want.ids, want.w, s.top_k, near, kR2WeightRel, true, r2_ref);
+        }
+        compare_set(&pf.routes[(size_t(l) * T + t) * 32], want.ids, want.w, s.top_k, near, kR2WeightRel, true, r2);
       }
     }
   }
@@ -359,8 +440,19 @@ int main(int argc, char** argv) {
                 (unsigned long long)r2.rows, (unsigned long long)r2.exact,
                 (unsigned long long)r2.near_ties, (unsigned long long)r2.bad, double(r2.worst_w),
                 (unsigned long long)r2.bad_weights, double(kR2WeightRel));
-    CHECK_EQ(r2.bad, uint64_t(0));
-    CHECK_EQ(r2.bad_weights, uint64_t(0));
+    if (judge_dir.empty()) {
+      CHECK_EQ(r2.bad, uint64_t(0));
+      CHECK_EQ(r2.bad_weights, uint64_t(0));
+    } else {
+      // Operator, 2026-10-28: judged by the f32 reference, the prefill passes when its distance to f32 is no larger
+      // than the bf16 golden's own (differing sets; matched weights' worst relative error).
+      const bool ok = r2.bad <= r2_ref.bad && r2.worst_w <= r2_ref.worst_w;
+      std::printf("6. R2 gate, judged by the f32 reference %s (operator, 2026-10-28): prefill %llu differing sets vs "
+                  "the bf16 golden's %llu, weights worst %.3e vs %.3e%s\n", judge_dir.c_str(),
+                  (unsigned long long)r2.bad, (unsigned long long)r2_ref.bad, double(r2.worst_w),
+                  double(r2_ref.worst_w), ok ? "" : "  ** FAIL **");
+      CHECK(ok);
+    }
   }
   std::puts("ornith_prefill_test OK");
   return 0;
