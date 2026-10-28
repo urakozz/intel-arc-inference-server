@@ -22,7 +22,10 @@ D1's bars, per draft row:
           spec 19 §10) differ from the fp32 reference's by a median 0.078 a row - against a fixed window of ~1.4e-3.
           The ties used are printed: all of them, and those only the row's difference excused.
   scores  per draft the realized scores' cosine (aligned by candidate id) >= 0.9999 (bf16 drafter) / 0.999 (int8)
-  walk    the K draft ids equal (T = 0)
+  walk    the K draft ids equal (T = 0); a split whose selector-score margin is within max(the row's own
+          engine-vs-reference score noise, 1 bf16 ulp of the top score) is a near-tie, the cosine then over the
+          rows before the split only (operator, 2026-10-29: the 6 splits measured were 0.005-0.09 at noise
+          0.03-0.12, scores 12-36)
 A draft passes on walk and scores; a top-16 set miss beyond the tie window is reported but passes when the walk
 is equal and the scores' cosine meets its bar (operator, 2026-10-28: the misses measured were 16th-place swaps
 0.007-0.01 logits past d_row, cosine 0.999996). Exit 0 when every draft passes. Prints a table (and writes it to --md).
@@ -64,9 +67,10 @@ def compare(rec: dict, out, logits_row) -> dict:
     """One draft: the engine's record against the reference's DraftOut. logits_row(j) -> the reference's masked
     (and scaled) unary logits of mask row j over the whole vocabulary (to judge an engine-only candidate)."""
     K = rec["k"]
-    res = {"sets": True, "walk": True, "ties": 0, "noise_ties": 0, "gaps": []}
+    res = {"sets": True, "walk": True, "ties": 0, "noise_ties": 0, "gaps": [], "walk_tie": None}
     eng_u = rec.get("unary")
-    eng_s, ref_s = [], []
+    pairs = []          # per row: the realized scores aligned by candidate id, (engine, reference)
+    split = None        # the first row whose walk id differs
     for j in range(K):
         e = rec["cand"][j]
         r = out.cand_ids[j].tolist()
@@ -88,12 +92,37 @@ def compare(rec: dict, out, logits_row) -> dict:
             res["noise_ties"] += int(ok and gap > tol)
             res["gaps"].append((gap, d_row))
         rs = dict(zip(r, out.scores[j].tolist()))
-        for c, s in zip(e, rec["scores"][j]):
-            if c in rs:
-                eng_s.append(s)
-                ref_s.append(rs[c])
-        res["walk"] &= rec["ids"][j] == int(out.ids[j])
-    res["cos"] = cosine(eng_s, ref_s)
+        pairs.append([(s, rs[c]) for c, s in zip(e, rec["scores"][j]) if c in rs])
+        if split is None and rec["ids"][j] != int(out.ids[j]):
+            split = j
+    res["walk"] = split is None
+    if split is not None:
+        # Operator ruling 2026-10-29: a walk split whose selector-score margin is within max(the row's own
+        # engine-vs-reference score noise, one bf16 ulp of the top score) is a near-tie. Up to the split both walks
+        # stand on the same predecessor, so row `split`'s scores are comparable: the reference's margin of its pick
+        # over the engine's under its own scores (the engine's margin when its pick is outside the reference's
+        # candidates).
+        j = split
+        r = out.cand_ids[j].tolist()
+        S = out.scores[j].tolist()
+        e_id, r_id = rec["ids"][j], int(out.ids[j])
+        es = dict(zip(rec["cand"][j], rec["scores"][j]))
+        if e_id in r:
+            margin = S[r.index(r_id)] - S[r.index(e_id)]
+        elif e_id in es and r_id in es:
+            margin = es[e_id] - es[r_id]
+        else:
+            margin = math.inf   # neither side scores both picks: not a tie
+        noise = max([abs(a - b) for a, b in pairs[j]], default=0.0)
+        top = max(S)
+        e = 0
+        if top != 0:
+            e = math.frexp(abs(top))[1]
+        ulp = math.ldexp(1.0, e - 8)
+        res["walk_tie"] = (abs(margin) <= max(noise, ulp), split, abs(margin), noise, ulp)
+    # The scores' cosine over the rows before the split only (after it the two walks stand on other paths).
+    rows = pairs if split is None else pairs[:split]
+    res["cos"] = cosine([a for p in rows for a, _ in p], [b for p in rows for _, b in p])
     return res
 
 
@@ -140,7 +169,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     files = {}
     for path in glob.glob(os.path.join(dumps_dir, "*.taps.safetensors")):
         files[dt.dump_header(path)["name"]] = path
-    n = n_sets = n_walk = n_cos = ties = noise_ties = set_excused = 0
+    n = n_sets = n_walk = n_cos = ties = noise_ties = set_excused = walk_ties = 0
     worst = 1.0
     fails = []
     for name, rs in by_dump.items():
@@ -160,17 +189,23 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
             c = compare(r, out, logits_row)
             n += 1
             n_sets += c["sets"]
-            n_walk += c["walk"]
+            wt = c["walk_tie"]
+            if wt is not None and wt[0]:
+                walk_ties += 1
+                log(f"  walk near-tie {name} p {r['p']}: split at row {wt[1]}, margin {wt[2]:.5f} <= max(row noise "
+                    f"{wt[3]:.5f}, 1 bf16 ulp {wt[4]:.4f}); cos over the rows before it {c['cos']:.7f}")
+            walk_ok = c["walk"] or (wt is not None and wt[0])
+            n_walk += walk_ok
             n_cos += c["cos"] >= bar
             ties += c["ties"]
             noise_ties += c["noise_ties"]
             worst = min(worst, c["cos"])
-            if c["walk"] and c["cos"] >= bar:
+            if walk_ok and c["cos"] >= bar:
                 set_excused += not c["sets"]
             else:
                 fails.append((name, r["p"], c))
         log(f"{name}: {len(rs)} drafts")
-    table = (f"| arm | drafts | top-16 sets (tie- and noise-aware) | scores cos >= {bar} | walk equal | worst cos | "
+    table = (f"| arm | drafts | top-16 sets (tie- and noise-aware) | scores cos >= {bar} | walk equal (or a near-tie split) | worst cos | "
              f"ties excused | of them by the row's logit difference |\n"
              f"|---|---:|---:|---:|---:|---:|---:|---:|\n"
              f"| drafter {run['format']}, head {run['head']}, V' {run['draft_vocab'] or 'full'} | {n} | {n_sets} | "
@@ -186,9 +221,11 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     ok = n > 0 and n_walk == n and n_cos == n
     log(f"D1 ties used: {ties} ({noise_ties} by the row's logit difference, operator 2026-10-27)")
     log(f"D1 set misses passed on walk + cosine: {set_excused} (operator 2026-10-28)")
+    log(f"D1 walk splits passed as near-ties: {walk_ties} (operator 2026-10-29)")
     log("D1 " + ("PASS" if ok else "FAIL") + f" ({run.get('load', '')})")
     return ok, {"n": n, "sets": n_sets, "walk": n_walk, "cos": n_cos, "worst": worst, "ties": ties,
-                "noise_ties": noise_ties, "set_excused": set_excused}
+                "noise_ties": noise_ties, "set_excused": set_excused,
+                "walk_ties": walk_ties}
 
 
 def main() -> None:

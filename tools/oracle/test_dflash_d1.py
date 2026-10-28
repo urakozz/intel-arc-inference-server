@@ -140,6 +140,20 @@ def test_near_tie_excused():
         assert c["sets"] == excused and c["ties"] == int(excused) and c["noise_ties"] == int(excused), (logit_99, c)
 
 
+def test_walk_near_tie():
+    # compare() on a planted 2-row draft: the reference's walk picks candidate 0 at row 0 (score 20.0), the engine
+    # candidate 1. A near-tie (operator, 2026-10-29) when the reference's margin is within max(the row's own score
+    # noise, 1 bf16 ulp of 20.0 = 0.125); the cosine then covers the rows before the split (none: 1.0).
+    from types import SimpleNamespace
+    cand = torch.arange(32).view(2, 16)
+    for second, tie in ((19.95, True), (19.5, False)):
+        scores = torch.tensor([[20.0, second] + [10.0 - i for i in range(14)]] * 2)
+        out = SimpleNamespace(cand_ids=cand, unary=scores.clone(), scores=scores, ids=torch.tensor([0, 16]))
+        rec = {"k": 2, "cand": cand.tolist(), "scores": scores.tolist(), "ids": [1, 17]}
+        c = d1.compare(rec, out, lambda j: torch.zeros(64))
+        assert not c["walk"] and c["walk_tie"][0] == tie and c["walk_tie"][1] == 0 and c["cos"] == 1.0, (second, c)
+
+
 def test_int8_arm():
     with tempfile.TemporaryDirectory() as tmp:
         run, recs, dumps, drafter, target, _, _, _ = _world(tmp, "int8", "int8")
