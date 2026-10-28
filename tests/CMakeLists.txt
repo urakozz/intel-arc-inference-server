@@ -1710,6 +1710,10 @@ if(B70_ORNITH)
     set_tests_properties(prefill_split_ornith_${b}_test ornith_prefill_${b}_test PROPERTIES
       LABELS "checkpoint;prefill;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
+    # Operator ruling 2026-10-29: the split runs judged by the f32 reference of long32k[0, 2600), no further from it
+    # than the bf16 reference (tools/box_validate/f32_refs.sh split; absent: the fixed bars).
+    set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
+      "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
   endforeach()
 
 endif()
@@ -1900,7 +1904,8 @@ if(B70_K2)
 
   add_executable(k2_prefill_test runtime/k2_prefill_test.cc)
   b70_target_kernel_dir(k2_prefill_test)
-  target_include_directories(k2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_include_directories(k2_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(k2_prefill_test PRIVATE b70_k2_prefill b70_l0)
   add_dependencies(k2_prefill_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
   add_test(NAME k2_prefill_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
@@ -1910,6 +1915,11 @@ if(B70_K2)
   add_test(NAME k2_prefill_eager_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
   set_tests_properties(k2_prefill_eager_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
+  # Operator ruling 2026-10-29: section 6's rows judged by the f32 reference of the forced context once f32_refs.sh
+  # made it (tests/golden/forced_judge.h); the int8 head by its quantisation-aware twin.
+  set_tests_properties(k2_prefill_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced")
+  set_tests_properties(k2_prefill_i8head_test PROPERTIES
+    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-forced")
   add_test(NAME prefill_split_k2_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
   set_tests_properties(k2_prefill_test k2_prefill_i8head_test k2_prefill_eager_test prefill_split_k2_test
@@ -2049,6 +2059,10 @@ if(B70_ORNITH AND B70_MTP)
     set_tests_properties(ornith_mtp_test ornith_mtp_bf16head_test mtp_head_ornith_test PROPERTIES
       LABELS "checkpoint;mtp;ornith" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       TIMEOUT 3600)
+    # Operator ruling 2026-10-29: M1 judged by the f32 reference of the same rows (tools/box_validate/f32_refs.sh
+    # ornith-mtp), the engine missing no more rows than the bf16 reference.
+    set_tests_properties(mtp_head_ornith_test PROPERTIES
+      ENVIRONMENT "B70_MTP_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp-f32/m1")
   endif()
 endif()
 # ==== Spec 15e ============================================================= (end) ====
@@ -2128,8 +2142,11 @@ if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
   add_test(NAME k2_prefix_gpu_split_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts 0 1)
+  # Operator ruling 2026-10-29: judged by the f32 reference of each forced context once f32_refs.sh made it
+  # (tests/golden/forced_judge.h; without the file a sequence keeps the cold-run rule and says so).
   set_tests_properties(k2_prefix_gpu_test k2_prefix_gpu_split_test PROPERTIES
-    LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+    LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600
+    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced")
   if(B70_KV8)
     add_test(NAME k2_prefix_gpu_kv8_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
       ${CMAKE_SOURCE_DIR}/tests/golden/prompts)

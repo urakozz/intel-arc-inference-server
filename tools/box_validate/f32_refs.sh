@@ -5,9 +5,13 @@
 #       r16.m1's judge: ornith_ref.py --dtype f32 --mtp-out, per golden prompt, teacher-forced on the bf16 M1
 #       reference's continuation (oracle-out-ornith-mtp/<p>.cont256.ids, its first 32) ->
 #       oracle-out-ornith-mtp-f32/m1/<p>.mtp.safetensors (mtp_head_test's format) + <p>.golden.safetensors
-#   tools/box_validate/f32_refs.sh <data tree> forced <ornith|k2> <dir>
-#       every <dir>/<name>.prompt.ids with its <name>.force.ids (a test's own engine run wrote them, e.g.
-#       B70_DUMP_FORCED=<dir>) -> <data tree>/oracle-out-<model>-f32-forced/<name>.golden.safetensors
+#   tools/box_validate/f32_refs.sh <data tree> forced <ornith|k2> <dir> [<suffix> [extra ref.py flags...]]
+#       every <dir>/<key>.prompt.ids with its <key>.force.ids (a test's own engine run wrote them:
+#       B70_DUMP_FORCED=<dir>, tests/golden/forced_judge.h) -> <data tree>/oracle-out-<model>-f32<suffix>-forced/
+#       <key>.golden.safetensors, run --lean (e.g. suffix -i8head with --lm-head int8: the int8 head's judges)
+#   tools/box_validate/f32_refs.sh <data tree> split <ornith|k2> <ids> <N> <out stem>
+#       prefill_split_test's references of ids[0, N): f32 and bf16, --lean --dump-kv, no generated rows ->
+#       <out stem>-f32.golden.safetensors and <out stem>-bf16.golden.safetensors
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 data="${1:?data tree}" what="${2:?ornith-mtp | forced}"
@@ -28,14 +32,25 @@ case "$what" in
     done
     ;;
   forced)
-    m="${3:?ornith | k2}" dir="${4:?the dumped prompt / force ids}"
-    out="$data/oracle-out-$m-f32-forced"
+    m="${3:?ornith | k2}" dir="${4:?the dumped prompt / force ids}" suffix="${5:-}"
+    shift 4; [ $# -gt 0 ] && shift
+    out="$data/oracle-out-$m-f32$suffix-forced"
     for pr in "$dir"/*.prompt.ids; do
       [ -e "$pr" ] || { echo "f32_refs: no *.prompt.ids in $dir"; rc=1; break; }
       n=$(basename "$pr" .prompt.ids)
-      tools/box_validate/f32_ref_job.sh "$m" "$pr" "$dir/$n.force.ids" "$out/$n.golden.safetensors" || rc=1
+      tools/box_validate/f32_ref_job.sh "$m" "$pr" "$dir/$n.force.ids" "$out/$n.golden.safetensors" --lean "$@" || rc=1
     done
     ;;
-  *) echo "f32_refs: ornith-mtp | forced <model> <dir>" >&2; exit 2 ;;
+  split)
+    m="${3:?ornith | k2}" ids="${4:?ids}" n="${5:?N}" stem="${6:?out stem}"
+    mkdir -p oracle-out-f32-job.partial
+    tr -s ' \n' '\n' < "$ids" | grep . | head -"$n" | tr '\n' ' ' > oracle-out-f32-job.partial/split.prompt
+    : > oracle-out-f32-job.partial/split.none
+    tools/box_validate/f32_ref_job.sh "$m" oracle-out-f32-job.partial/split.prompt oracle-out-f32-job.partial/split.none \
+      "$stem-f32.golden.safetensors" --lean --dump-kv || rc=1
+    DTYPE=bf16 tools/box_validate/f32_ref_job.sh "$m" oracle-out-f32-job.partial/split.prompt \
+      oracle-out-f32-job.partial/split.none "$stem-bf16.golden.safetensors" --lean --dump-kv || rc=1
+    ;;
+  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem>" >&2; exit 2 ;;
 esac
 exit "$rc"
