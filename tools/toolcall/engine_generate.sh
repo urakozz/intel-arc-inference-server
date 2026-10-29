@@ -36,7 +36,7 @@ N_DEFAULT=192
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)
 TOK_JSON=$(readlink -f "$SNAP/tokenizer.json")
-IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
+IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
 DECODE_PY='import sys; from tokenizers import Tokenizer
 t = Tokenizer.from_file(sys.argv[1])
 ids = [int(x) for x in open(sys.argv[2]).read().split()]

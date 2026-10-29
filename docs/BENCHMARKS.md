@@ -66,7 +66,7 @@ decode (2026-09-05, same binary, same hour).
 ## vLLM: how the baseline is served and benched
 
 ```bash
-IMAGE=vllm-xpu-env-next-p314-t215-vxkp0
+IMAGE=vllm-xpu-env-next-p314-t216-vxkp0
 MODEL=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 docker run --rm -it \
