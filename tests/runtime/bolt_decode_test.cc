@@ -2,7 +2,7 @@
 // on the card. Box only (labels checkpoint;golden;bolt).
 //   bolt_decode_test <checkpoint> <ids> [bf16] [eager] [b16] [layers:<N>] [--fuse router|route|conv|all,...]
 //                    [--pp <split a>,<split b>]
-// <checkpoint>: 25b's synthetic (make_synth.py n12-*: 12 blocks, one card) or SergiioB's real export (two cards).
+// <checkpoint>: 25b's synthetic (make_synth.py n12-*: 12 blocks, one card) or our real g64 export (two cards).
 //
 //   1. the plan == the allocation, device by device (runtime::bolt::device_plan's kv + ssm + conv_rings + decode_scratch =
 //      the buffers' persistent group + scratch); the list's launches == decode_launches (92 at the synthetic N 12, 653 at

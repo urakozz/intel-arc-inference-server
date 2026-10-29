@@ -53,16 +53,16 @@ namespace cli::bolt {
 inline constexpr uint64_t kBoltStoreKey = 0x4E454D4F424F4C54ull;
 inline constexpr uint64_t store_key(bool bf16_state) { return kBoltStoreKey ^ (bf16_state ? 1ull : 0ull); }
 
-// Bolt's chat template (chat_template.jinja, 12,514 B; byte-identical in NVIDIA's and SergiioB's repos) - what the startup line
+// Bolt's chat template (chat_template.jinja, 12,514 B; NVIDIA's, byte-identical in our export) - what the startup line
 // compares the template it reads against. Not a refusal: --chat-template FILE and a newer snapshot template are the operator's.
 inline constexpr const char* kTemplateSha256 = "6521afc75afb0661e3558e7e6dee5f2d15de8be1c4dece8171935e778ea283f4";
 
 // ---- generation defaults (Decision 12) ---------------------------------------------------------------------------------------
 // NVIDIA's published values (their generation_config.json, the card's "Recommended Sampling: temperature 1.0, top_p 0.95"):
-// sampled, temperature 1.0, top-p 0.95, EOS [2, 11] (`</s>` and `<|im_end|>`). SergiioB's export ships a generation_config.json
-// with EOS 11 only and no sampling keys - it gives the published set, not "greedy, EOS 11". The card names no top-k and vLLM
-// (the reference server) applies none, so an absent top_k is NONE here (0), not Hugging Face's 50 that server::generation_sampling
-// assumes for a field a file leaves out.
+// sampled, temperature 1.0, top-p 0.95, EOS [2, 11] (`</s>` and `<|im_end|>`); our export ships the same file. An export whose
+// generation_config.json has EOS 11 only and no sampling keys gives the published set, not "greedy, EOS 11". The card names no
+// top-k and vLLM (the reference server) applies none, so an absent top_k is NONE here (0), not Hugging Face's 50 that
+// server::generation_sampling assumes for a field a file leaves out.
 inline constexpr uint32_t kEosEnd = 11, kEosSentence = 2;
 
 struct Generation {
@@ -93,7 +93,7 @@ inline Generation published_generation() {
 //   - an explicit file is the operator's word: its sampling fields (a field it leaves out takes the published value) and its
 //     eos_token_id (absent: the published [2, 11]) are used as they are;
 //   - otherwise the snapshot's file is used only when it carries sampling keys (NVIDIA's own does: do_sample, temperature,
-//     top_p, eos [2, 11]); a file without them (SergiioB's: eos 11, nothing else) gives the published defaults, and its
+//     top_p, eos [2, 11]; so does our export's); a file without them (eos 11, nothing else) gives the published defaults, and its
 //     eos_token_id is ADDED to the published set (an export listing another end id keeps it).
 // Throws std::invalid_argument naming the key of a malformed field.
 inline Generation resolve_generation(const nlohmann::json* snapshot, const nlohmann::json* explicit_file,

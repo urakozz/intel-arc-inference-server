@@ -1,5 +1,5 @@
 {
- "source": "SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym@b9f381d20cbd4cede9f729c2647d2542c4a35997 chat_template.jinja sha256 6521afc75afb0661e3558e7e6dee5f2d15de8be1c4dece8171935e778ea283f4, rendered by transformers' apply_chat_template (tools/oracle/bolt_facts.py --section template --write-fixtures)",
+ "source": "urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ@8932aa8d1844f91056c5b9433448075a842b9156 chat_template.jinja sha256 6521afc75afb0661e3558e7e6dee5f2d15de8be1c4dece8171935e778ea283f4, rendered by transformers' apply_chat_template (tools/oracle/bolt_facts.py --section template --write-fixtures)",
  "cases": [
   {
    "name": "no system, no tools, generation prompt",

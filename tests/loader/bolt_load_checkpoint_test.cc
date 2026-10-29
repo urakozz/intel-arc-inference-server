@@ -1,6 +1,6 @@
 // Spec 25b Task 5: load_bolt on the card (box only; label `checkpoint;bolt`), one device or two.
 //   bolt_load_checkpoint_test <snapshot> [int8|bf16] [layers] [split] [max_len]
-// Loads the checkpoint (one of Task 1's synthetic ones in either spelling, or SergiioB's real g128 export / our g64 one,
+// Loads the checkpoint (one of Task 1's synthetic ones in either spelling, or our real g64 export, the served one,
 // optionally truncated to its first `layers` blocks - development mode); `split` > 0: two devices, blocks [0, split) |
 // [split, L). Prints the report, and asserts: zero unconsumed tensors, each part's weight bytes equal to
 // loader::bolt::device_weight_bytes AND to runtime::bolt::plan's `weights` (the plan IS the allocation), and sampled
@@ -37,7 +37,7 @@ bool same(const std::vector<uint8_t>& got, const void* want) { return std::memcm
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string arg = argc > 1 ? argv[1] : "SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym";
+  const std::string arg = argc > 1 ? argv[1] : "urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ";
   const bool bf16_head = argc > 2 && std::string(argv[2]) == "bf16";
   const uint32_t layers = argc > 3 ? uint32_t(std::stoul(argv[3])) : 0;
   const uint32_t split = argc > 4 ? uint32_t(std::stoul(argv[4])) : 0;

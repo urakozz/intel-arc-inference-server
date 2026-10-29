@@ -401,7 +401,7 @@ int main(int argc, char** argv) {
   }
 
   // ===== Spec 25b Task 3: the exact relaxations Nemotron 3.5 Bolt's checkpoint needs (spec 25 §5.2) =====
-  // (a) SergiioB's quantization_config (the published file's, typed here with a subset of its 44 '-:' rules): GPTQ
+  // (a) the GPTQ g128 spelling (AutoRound's GPTQ writer at g128, typed here with a subset of its 44 '-:' rules): GPTQ
   // packing, g128, and ONE '+:' rule that RESTATES the top level. Parsed; the restatement is counted.
   const std::string sb_head =
       R"({"quantization_config":{"autoround_version":"0.17.0","bits":4,"damp_percent":0.01,"data_type":"int",
@@ -431,14 +431,17 @@ int main(int argc, char** argv) {
         R"({"quantization_config":{"bits":4,"group_size":128,"sym":true,"desc_act":false,"dynamic":{
            "+:.*a$":{"bits":4,"group_size":128,"sym":true},"+:.*b$":{"sym":true,"bits":4,"group_size":128}}}})")
         ).dynamic_restating, size_t(2));
-    if (argc > 1) {   // the published file itself: 44 '-:' rules and the one '+:'
+    if (argc > 1) {   // the served export's file itself (tests/model/bolt/config.json): g64, 40 router exclusions, no dynamic
       std::ifstream f(argv[1]);
       CHECK(f.good());
       std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
       const loader::QuantConfig pub = loader::QuantConfig::parse(parse(text));
-      CHECK_EQ(pub.group_size, uint32_t(128));
-      CHECK_EQ(pub.dynamic_rule_count, size_t(44));
-      CHECK_EQ(pub.dynamic_restating, size_t(1));
+      CHECK_EQ(pub.group_size, uint32_t(64));
+      CHECK_EQ(pub.quant_method, std::string("auto-round"));
+      CHECK_EQ(pub.extra_excluded, size_t(40));
+      CHECK_EQ(pub.extra_quantised, size_t(0));
+      CHECK_EQ(pub.dynamic_rule_count, size_t(0));
+      CHECK_EQ(pub.dynamic_restating, size_t(0));
     }
   }
   // (b) the broken-MTP guard is intact: a '+:' rule that changes bits / group / sym, carries any other key, omits one of

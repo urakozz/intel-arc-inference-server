@@ -12,14 +12,14 @@
 // loader/bolt_layout.h sizes, with NO Level Zero, so tests/loader/bolt_repack_test.cc and bolt_synth_host_test.cc run it
 // on any host over crafted / synthetic checkpoints. loader::load_bolt (bolt_loader.h) drives these per block.
 //
-// **One layout from two sources** (spec 25 §0, §5.1): a linear read from SergiioB's g128 GPTQ checkpoint (through
+// **One layout from two sources** (spec 25 §0, §5.1): a linear read from a checkpoint in the GPTQ g128 spelling (through
 // LinearSrc::classify's exact g128 -> g64 scale expansion) and the same weights packed g64 with each g128 scale written
 // to both g64 rows give byte-identical device buffers - the repack only ever sees the g64 words and scales.
 namespace loader {
 
-// The language model's tensor prefix: `language_model.model.` (SergiioB's, ours) or NVIDIA's own
-// `language_model.backbone.` - the alias is accepted only when the checkpoint ships it (spec 25 §1.3); both or neither is
-// an error. Reads only the embedding's name.
+// The language model's tensor prefix: `language_model.model.` (the GPTQ g128 spelling, the synthetics) or NVIDIA's own
+// `language_model.backbone.` (NVIDIA's BF16 original, our served g64 export) - whichever the checkpoint ships (spec 25 §1.3);
+// both or neither is an error. Reads only the embedding's name.
 std::string bolt_trunk_prefix(const SafetensorsSet& set);
 inline constexpr const char* kBoltLmHead = "language_model.lm_head.weight";   // untied, outside the trunk
 // Tensors under these prefixes are the vision tower / projector: skipped by name and counted, never read.

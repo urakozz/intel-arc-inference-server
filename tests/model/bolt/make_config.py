@@ -4,15 +4,18 @@
 copy tests/model/bolt/config.json).
 
     make_config.py <out config.json> [--layers N] [--form gptq-g128|ar-g64|none]
-    make_config.py --check                      # every typed value against the vendored published config.json
+    make_config.py --check                      # every typed value against the vendored config.json
 
-Every value below is typed from the published config of SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym
-@ b9f381d2 (its `llm_config` is NVIDIA's); the key it comes from is the same key of `llm_config` (or of the top level, or
-`quantization_config`) - the comment on a group names where it was read. The per-layer pattern and the per-MoE-layer
+Every value below is typed from the config of the served checkpoint, our export
+urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ @ 8932aa8d (its `llm_config` is NVIDIA's); the key it
+comes from is the same key of `llm_config` (or of the top level, or `quantization_config`) - the comment on a group names
+where it was read. The per-layer pattern and the per-MoE-layer
 (E, I) are the facts sheet's (docs/probe-bolt-2026-10-21.md §2), which 25a read from the same file. `--layers N` keeps the
 first N blocks (`block_configs`, `layers_block_type`); nothing else moves (the model has no `num_hidden_layers` key: the
-count is the length of `block_configs`). `--check` is the test that the typed values ARE the published ones (exit 1
-naming the first key that differs); it needs no torch, no transformers and no network.
+count is the length of `block_configs`). `--check` is the test that the typed values ARE the export's (exit 1 naming the
+first key that differs); it needs no torch, no transformers and no network. The `gptq-g128` form is the GPTQ g128
+spelling (the loader's exact g128 -> g64 expansion, a format capability the synthetic checkpoints test); no served file
+carries it, so `--check` holds only its arithmetic keys to the export's.
 
 The wrapper is the language-relevant part of the omni config (architectures, model_type, dtype, eos, tie flag) - the
 vision tower's own keys (`vision_config`, the image / video keys) are not written: nothing here reads them.
@@ -74,7 +77,7 @@ def llm_config(layers: int = LAYERS) -> dict:
         "auto_map": {"AutoConfig": "configuration_nemotron_h_puzzle.NemotronHPuzzleConfig",
                      "AutoModelForCausalLM": "modeling_nemotron_h_puzzle.NemotronHPuzzleForCausalLM"},
         "aux_loss_alpha": 0.0,
-        "blockwise_members": ["moe_intermediate_size", "n_routed_experts", "block_type", "num_experts_per_tok"],
+        "blockwise_members": ["block_type", "n_routed_experts", "moe_intermediate_size", "num_experts_per_tok"],
         "bos_token_id": 1, "chunk_size": 128, "conv_kernel": 4, "dtype": "bfloat16", "eos_token_id": 2,
         "expand": 2, "head_dim": 128, "hidden_act": "relu2", "hidden_dropout": 0.0, "hidden_size": 4096,
         "initializer_range": 0.02, "intermediate_size": 2688, "layer_norm_epsilon": 1e-05,
@@ -98,9 +101,9 @@ def llm_config(layers: int = LAYERS) -> dict:
 
 
 def quant_gptq_g128() -> dict:
-    """quantization_config.* of SergiioB's export: gptq, provider auto-round, group 128, the 44 `-:` exclusions (embeddings,
-    lm_head, vision_model, vision_projector and the router of each of the 40 MoE layers - ALL 40, whatever --layers) and
-    the ONE restating `+:` rule (spec 25 §5.2)."""
+    """The GPTQ g128 spelling (AutoRound 0.17.0's GPTQ writer at group 128): gptq, provider auto-round, the 44 `-:`
+    exclusions (embeddings, lm_head, vision_model, vision_projector and the router of each of the 40 MoE layers - ALL 40,
+    whatever --layers) and the ONE restating `+:` rule (spec 25 §5.2)."""
     dyn = {"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": True},
            "-:.*embeddings.*": {}, "-:.*lm_head.*": {}, "-:.*vision_model.*": {}, "-:.*vision_projector.*": {}}
     for l in moe_ei():
@@ -111,15 +114,29 @@ def quant_gptq_g128() -> dict:
 
 
 def quant_ar_g64() -> dict:
-    """Ours (25q): AutoRound's own writer's spelling (as tools/oracle/bolt_make_tiny.py's int4-g64 and the 24b / 23b
-    exports: quant_method auto-round, packing_format auto_round:auto_gptq, no desc_act, no dynamic). 25q records the
-    final spelling; the loader reads either (spec 25 §5.1)."""
+    """The synthetics' native g64: AutoRound's own writer's spelling (as tools/oracle/bolt_make_tiny.py's int4-g64: quant_method
+    auto-round, packing_format auto_round:auto_gptq, no desc_act, no dynamic) - the export's arithmetic keys (`--check`), without
+    its per-router `extra_config` (check.py refuses one; the routers are kept bf16 either way)."""
     return {"autoround_version": "0.17.0", "bits": 4, "data_type": "int", "group_size": 64, "iters": 0,
             "packing_format": "auto_round:auto_gptq", "quant_method": "auto-round", "sym": True}
 
 
+ARITH = ("autoround_version", "bits", "data_type", "group_size", "packing_format", "quant_method", "sym")
+
+
+def quant_export() -> dict:
+    """quantization_config.* of our export (the served checkpoint): AutoRound 0.17.0, auto-round / auto_round:auto_gptq, g64
+    sym, and one `extra_config` exclusion {bits 16, data_type float} for the router of each of the 40 MoE layers (ALL 40,
+    whatever --layers; written in the `language_model.model.` spelling though the shards spell the trunk `backbone.`)."""
+    ec = {f".*language_model\\.model\\.layers\\.{l}\\.mixer\\.gate.*": {"bits": 16, "data_type": "float"}
+          for l in sorted(moe_ei())}
+    return {"bits": 4, "data_type": "int", "group_size": 64, "sym": True, "low_gpu_mem_usage": True,
+            "autoround_version": "0.17.0", "block_name_to_quantize": "language_model.backbone.layers",
+            "quant_method": "auto-round", "packing_format": "auto_round:auto_gptq", "extra_config": ec}
+
+
 def config(layers: int = LAYERS, form: str = "none") -> dict:
-    c = {"architectures": ["NemotronH_Omni_Reasoning_V3"], "dtype": "float16", "eos_token_id": 11,
+    c = {"architectures": ["NemotronH_Omni_Reasoning_V3"], "dtype": "bfloat16", "eos_token_id": 11,
          "model_type": "nemotron_h_omni", "tie_word_embeddings": False, "llm_config": llm_config(layers)}
     if form == "gptq-g128":
         c["quantization_config"] = quant_gptq_g128()
@@ -133,7 +150,7 @@ def config(layers: int = LAYERS, form: str = "none") -> dict:
 def check() -> int:
     with open(PUBLISHED, encoding="utf-8") as f:
         pub = json.load(f)
-    mine = config(LAYERS, "gptq-g128")
+    mine = config(LAYERS, "none")
     bad = []
 
     def walk(a, b, path):
@@ -154,18 +171,22 @@ def check() -> int:
             bad.append(f"{path}: typed {a!r}, published {b!r}")
     llm_pub = pub["llm_config"]
     walk(mine["llm_config"], llm_pub, "llm_config")
-    walk(mine["quantization_config"], pub["quantization_config"], "quantization_config")
+    walk(quant_export(), pub["quantization_config"], "quantization_config")
+    for form, q, keys in (("ar-g64", quant_ar_g64(), ARITH),
+                          ("gptq-g128", quant_gptq_g128(), ("autoround_version", "bits", "data_type", "sym"))):
+        for k in keys:   # the g128 spelling's own: group 128, quant_method gptq, no packing_format
+            walk(q.get(k), pub["quantization_config"][k], f"{form}.{k}")
     for k in ("architectures", "dtype", "eos_token_id", "model_type", "tie_word_embeddings"):
         walk(mine[k], pub[k], k)
-    n_dyn = sum(1 for k in pub["quantization_config"]["dynamic"] if k.startswith("-:"))
+    n_ex = len(pub["quantization_config"]["extra_config"])
     for line in bad[:20]:
         print("DIFF", line)
     if bad:
         print(f"make_config --check: FAIL, {len(bad)} difference(s)")
         return 1
     print(f"make_config --check: OK - llm_config ({len(llm_pub)} keys, {len(llm_pub['block_configs'])} blocks), "
-          f"quantization_config ({n_dyn} '-:' rules + 1 '+:'), and the wrapper keys equal the published "
-          f"config.json key by key")
+          f"quantization_config ({n_ex} extra_config router exclusions), and the wrapper keys equal the export's "
+          f"config.json key by key; the synthetic forms' arithmetic keys equal its")
     return 0
 
 

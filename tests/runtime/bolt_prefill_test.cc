@@ -1,5 +1,5 @@
 // Spec 25d Task 3 (B4 on prefill, plan 25d Review Focus 1-3): BoltEngine::prefill with a checkpoint - box only (labels
-// checkpoint;bolt;prefill). 25b's synthetic N 12 (one card) carries it before SergiioB's export (two cards).
+// checkpoint;bolt;prefill). 25b's synthetic N 12 (one card) carries it before our g64 export (two cards).
 //
 //   bolt_prefill_test <checkpoint> <ids> [bf16] [eager] [b16] [layers:<N>] [pp2[:<split>]]
 //

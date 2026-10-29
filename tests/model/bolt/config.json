@@ -9,7 +9,7 @@
     "AutoModelForImageTextToText": "modeling_nemotron_h_omni.NemotronH_Omni_Reasoning_V3"
   },
   "downsample_ratio": 0.5,
-  "dtype": "float16",
+  "dtype": "bfloat16",
   "eos_token_id": 11,
   "force_image_size": 512,
   "image_tag_type": "internvl",
@@ -414,9 +414,9 @@
       }
     ],
     "blockwise_members": [
-      "moe_intermediate_size",
-      "n_routed_experts",
       "block_type",
+      "n_routed_experts",
+      "moe_intermediate_size",
       "num_experts_per_tok"
     ],
     "bos_token_id": 1,
@@ -590,77 +590,12 @@
   "processor_class": "NemotronH_Omni_Reasoning_V3Processor",
   "projector_hidden_size": 20480,
   "ps_version": "v2",
-  "quantization_config": {
-    "autoround_version": "0.17.0",
-    "bits": 4,
-    "damp_percent": 0.01,
-    "data_type": "int",
-    "desc_act": false,
-    "dynamic": {
-      "+:.*mixer\\.out_proj$": {
-        "bits": 4,
-        "group_size": 128,
-        "sym": true
-      },
-      "-:.*embeddings.*": {},
-      "-:.*language_model\\.model\\.layers\\.10\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.12\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.14\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.17\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.19\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.1\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.21\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.23\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.26\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.28\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.30\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.32\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.34\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.37\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.39\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.3\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.41\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.43\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.45\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.48\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.50\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.52\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.54\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.56\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.59\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.5\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.61\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.63\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.65\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.67\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.70\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.72\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.74\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.76\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.79\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.81\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.83\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.85\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.87\\.mixer\\.gate.*": {},
-      "-:.*language_model\\.model\\.layers\\.8\\.mixer\\.gate.*": {},
-      "-:.*lm_head.*": {},
-      "-:.*vision_model.*": {},
-      "-:.*vision_projector.*": {}
-    },
-    "group_size": 128,
-    "lm_head": false,
-    "low_gpu_mem_usage": true,
-    "provider": "auto-round",
-    "quant_method": "gptq",
-    "sym": true,
-    "true_sequential": false
-  },
   "sound_config": null,
   "sound_context_token": "<audio>",
   "sound_context_token_id": null,
   "template": "n5h_5p5_nanov2",
   "tie_word_embeddings": false,
-  "transformers_version": "5.12.1",
+  "transformers_version": "5.8.1",
   "use_thumbnail": false,
   "video_context_token": "<video>",
   "video_context_token_id": null,
@@ -730,5 +665,177 @@
   },
   "vision_final_layernorm": false,
   "vit_hidden_size": 1280,
-  "torch_dtype": "float16"
+  "quantization_config": {
+    "bits": 4,
+    "data_type": "int",
+    "group_size": 64,
+    "sym": true,
+    "low_gpu_mem_usage": true,
+    "autoround_version": "0.17.0",
+    "block_name_to_quantize": "language_model.backbone.layers",
+    "quant_method": "auto-round",
+    "packing_format": "auto_round:auto_gptq",
+    "extra_config": {
+      ".*language_model\\.model\\.layers\\.1\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.3\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.5\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.8\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.10\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.12\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.14\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.17\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.19\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.21\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.23\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.26\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.28\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.30\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.32\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.34\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.37\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.39\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.41\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.43\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.45\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.48\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.50\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.52\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.54\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.56\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.59\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.61\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.63\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.65\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.67\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.70\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.72\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.74\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.76\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.79\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.81\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.83\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.85\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      },
+      ".*language_model\\.model\\.layers\\.87\\.mixer\\.gate.*": {
+        "bits": 16,
+        "data_type": "float"
+      }
+    }
+  }
 }

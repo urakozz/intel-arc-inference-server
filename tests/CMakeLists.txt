@@ -3530,8 +3530,8 @@ endif()
 
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-20-spec25b-bolt-descriptor-loader.md. Box queue row 59 (rows 57-62 are spec 25's). Host tests first (tools/mac_check.sh); card tests SKIP 77 until their data exists - the synthetic
-# checkpoints (tools/quantize/bolt/make_synth.py, tools/box_validate/stages.sh row 59) carry the card gate before SergiioB's
-# 41.9 GB checkpoint does.
+# checkpoints (tools/quantize/bolt/make_synth.py, tools/box_validate/stages.sh row 59) carry the card gate before our
+# 41 GB g64 export (the served checkpoint) does.
 # Task 2: the model table.
 add_executable(bolt_test model/bolt_test.cc)
 target_include_directories(bolt_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3539,10 +3539,10 @@ target_link_libraries(bolt_test PRIVATE b70_bolt_model)
 add_test(NAME bolt_test COMMAND bolt_test ${CMAKE_SOURCE_DIR}/tests/model/bolt/config.json)
 set_tests_properties(bolt_test PROPERTIES LABELS bolt)
 # Task 4: the layouts and the host repack (both spellings to one layout, signed scales, 64 B alignment, the bytes of spec 25
-# §3 re-derived), and the loader's host half over the synthetic checkpoints (make_synth.py: n8-g128 = SergiioB's spelling,
+# §3 re-derived), and the loader's host half over the synthetic checkpoints (make_synth.py: n8-g128 = the GPTQ g128 spelling,
 # n8-g64x = its exact g64 expansion, n8-g64 = a native g64 packing; SKIP 77 until they exist - the box's
-# $DATA/oracle-out-bolt-synth, data key bolt_synth) and, when the HF cache holds the published index, the descriptor's names
-# against the real 112,091.
+# $DATA/oracle-out-bolt-synth, data key bolt_synth) and, when the HF cache holds the export's index, the descriptor's names
+# against the real 84,171.
 set(B70_BOLT_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt-synth" CACHE PATH
   "Task 1's synthetic checkpoints (tools/quantize/bolt/make_synth.py: n8-g128, n8-g64x, n8-g64, n12-g128, n12-g64x) - the box's \$DATA/oracle-out-bolt-synth, data key bolt_synth")
 add_executable(bolt_repack_test loader/bolt_repack_test.cc)
@@ -3558,8 +3558,8 @@ add_test(NAME bolt_synth_host_pair_test COMMAND bolt_synth_host_test ${B70_BOLT_
 add_test(NAME bolt_synth_host_g64_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g64)
 set_tests_properties(bolt_synth_host_g128_test bolt_synth_host_pair_test bolt_synth_host_g64_test PROPERTIES LABELS bolt
   SKIP_RETURN_CODE 77 TIMEOUT 1800)
-set(B70_BOLT_SNAPSHOT "${_b70_hf_home}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997" CACHE PATH
-  "SergiioB's pinned snapshot (only its small files are read by the host tests; the shards by the box's load tests)")
+set(B70_BOLT_SNAPSHOT "${_b70_hf_home}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156" CACHE PATH
+  "our g64 export, the served checkpoint (only its small files are read by the host tests; the shards by the box's load tests)")
 add_executable(bolt_names_test loader/bolt_names_test.cc)
 target_include_directories(bolt_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(bolt_names_test PRIVATE b70_bolt_loader)
@@ -3567,15 +3567,13 @@ add_test(NAME bolt_names_test COMMAND bolt_names_test ${B70_BOLT_SNAPSHOT}/model
 set_tests_properties(bolt_names_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77)
 # Task 5: the loader's device half and the memory plan. The plan is host arithmetic (the two-card split, --max-len auto, the
 # drafter's reserve); the card tests load the synthetic checkpoints in both spellings (n12 = 12 blocks: one card, the bf16 head,
-# and the two-card split 6 | 6) and, SKIP 77 until the checkpoint is on the box, SergiioB's real g128 export on two cards
-# (split 48) and our g64 export (25q) - queue row 59.
+# and the two-card split 6 | 6) and, SKIP 77 until the checkpoint is on the box, our real g64 export on two cards
+# (split 48) - queue row 59.
 add_executable(bolt_plan_test runtime/bolt_plan_test.cc)
 target_include_directories(bolt_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(bolt_plan_test PRIVATE b70_bolt_plan)
 add_test(NAME bolt_plan_test COMMAND bolt_plan_test)
 set_tests_properties(bolt_plan_test PROPERTIES LABELS bolt)
-set(B70_BOLT_RTN_SNAPSHOT "urakozz/Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ" CACHE STRING
-  "our g64 Bolt export (spec 25q, not built when 25b was written)")
 add_executable(bolt_load_checkpoint_test loader/bolt_load_checkpoint_test.cc)
 target_include_directories(bolt_load_checkpoint_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(bolt_load_checkpoint_test PRIVATE b70_bolt_loader b70_l0)
@@ -3586,16 +3584,15 @@ add_test(NAME bolt_load_synth_bf16_test COMMAND bolt_load_checkpoint_test ${B70_
 add_test(NAME bolt_load_synth_pp2_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g128 int8 0 6)
 add_test(NAME bolt_load_synth_pp2_g64x_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SYNTH_DIR}/n12-g64x bf16 0 6)
 add_test(NAME bolt_load_real_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_SNAPSHOT} int8 0 48 262144)
-add_test(NAME bolt_load_rtn_test COMMAND bolt_load_checkpoint_test ${B70_BOLT_RTN_SNAPSHOT} int8 0 48 262144)
 set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_load_synth_g64_test bolt_load_synth_bf16_test bolt_load_synth_pp2_test
-  bolt_load_synth_pp2_g64x_test bolt_load_real_test bolt_load_rtn_test PROPERTIES
+  bolt_load_synth_pp2_g64x_test bolt_load_real_test PROPERTIES
   LABELS "checkpoint;bolt" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (end) ====
 
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-20-spec25c-bolt-decode.md. Box queue row 60. Host tests first (the Mac:
-# tools/mac_check.sh), then the card's (box only). Real-weight gates SKIP (77) until SergiioB's checkpoint and 25a's
-# golden sets are on the box; the synthetic checkpoints (25b's make_synth.py, n12-*) carry B3 / B4 before them.
+# tools/mac_check.sh), then the card's (box only). Real-weight gates SKIP (77) until our export and 25a's golden sets
+# made from it are on the box; the synthetic checkpoints (25b's make_synth.py, n12-*) carry B3 / B4 before them.
 # Task 1 (P0): the skeleton lists probe_bolt_step replays hold spec 25 §6.1's counts.
 add_executable(probe_bolt_step_shapes_test kernels/probe_bolt_step_shapes_test.cc)
 target_include_directories(probe_bolt_step_shapes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -3653,10 +3650,10 @@ if(B70_BOLT)
   # rings, SSM states, KV, both residual buffers, every block's tap; --fuse <arms> bitwise none; --pp a,b two splits
   # bitwise each other and one card) and B3 (bolt_golden_test: tokens tie-aware, routes within B70_BOLT_TIE_TOL, the SSM
   # state and conv columns by cosine, the h taps) on 25b's synthetic N 12 (one card; its golden sets: bolt_oracle.sh export
-  # <synthetic> -> oracle-out-bolt-<name>, data key oracle_bolt_synth) and on SergiioB's g128 checkpoint (two cards, split
-  # 48 and 40; 25a's golden sets, data key oracle_bolt). SKIP 77 without the data.
+  # <synthetic> -> oracle-out-bolt-<name>, data key oracle_bolt_synth) and on our g64 export (two cards, split 48 and 40;
+  # 25a's golden sets made from it, data key oracle_bolt). SKIP 77 without the data.
   set(B70_BOLT_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
-    "25a's golden sets on SergiioB's g128 export (bolt_oracle.sh golden; data key oracle_bolt)")
+    "25a's golden sets on our g64 export (bolt_oracle.sh golden, its SNAPSHOT file naming the export; data key oracle_bolt)")
   set(B70_BOLT_SYNTH_ORACLE "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
     "the synthetics' golden sets: <this>-n12-g128 / <this>-n12-g64x (bolt_oracle.sh export <synthetic>; data key oracle_bolt_synth)")
   set(_bolt_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short.ids)
@@ -3702,7 +3699,7 @@ if(B70_BOLT)
     add_test(NAME bolt_decode_real_fuse_${arm}_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --fuse ${arm})
     list(APPEND _bolt_tests bolt_decode_synth_fuse_${arm}_test bolt_decode_real_fuse_${arm}_test)
   endforeach()
-  # Task 6: SergiioB's g128 on two cards - B4 with split 48 (copy) and 40 (peer) bitwise each other; B3 short / 4k /
+  # Task 6: our g64 export on two cards - B4 with split 48 (copy) and 40 (peer) bitwise each other; B3 short / 4k /
   # agentic (32k opt-in); the int8 head (default), the bf16 head, eager
   add_test(NAME bolt_decode_real_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --pp 48,40)
   list(APPEND _bolt_tests bolt_decode_real_test)
@@ -3792,7 +3789,7 @@ if(B70_BOLT)
   # the plan; twice bitwise, recorded == replayed; chunks of 512 / 1024 / 64 and splits at multiples of 64 bitwise one
   # chunk, a continuation off the grid (Review Focus 1); against decode's fill within the PROPOSED bars (logits, h taps, SSM
   # states, conv columns, KV), the routes up to near-ties, the tokens tie-aware; pp2 bitwise one card. On 25b's synthetic N 12
-  # (one card) and SergiioB's export (two cards).
+  # (one card) and our export (two cards).
   add_executable(bolt_prefill_test runtime/bolt_prefill_test.cc)
   b70_target_kernel_dir(bolt_prefill_test)
   target_include_directories(bolt_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
@@ -3815,7 +3812,7 @@ if(B70_BOLT)
     bolt_prefill_synth_pp_test bolt_prefill_real_test)
   set_tests_properties(${_bolt_pf_tests} PROPERTIES LABELS "checkpoint;bolt;prefill" SKIP_RETURN_CODE 77 TIMEOUT 7200)
   # B3 on prefill: 25c's golden test in its prefill mode (one chunk a 2048, and chunks of 512), the synthetics' sets and
-  # SergiioB's (two cards; 25a's golden sets, data key oracle_bolt); the _eager twin; the 32k prompt opt-in.
+  # our export's (two cards; 25a's golden sets, data key oracle_bolt); the _eager twin; the 32k prompt opt-in.
   target_link_libraries(bolt_golden_test PRIVATE b70_bolt_prefill)
   add_dependencies(bolt_golden_test ${B70_BOLT_PREFILL_KERNELS} ${B70_BOLT_PREFILL_REUSED})
   set(_bolt_gpf_tests)
@@ -3859,7 +3856,7 @@ b70_cli_reject(cli_reject_bolt_prefill_chunk64 ${_bolt_cfg} --ids ${B70_OK_IDS} 
 # Plan: docs/superpowers/plans/2026-10-20-spec25e-bolt-serving.md. Box queue row 62. Host tests first (the Mac); the card's
 # SKIP (77) without their data. No Bolt file is vendored (Decision 20 allows it; generated fixtures stay the default): the
 # fixtures are renders, ids and digests (tests/tokenizer/bolt_*.json, tools/tokenizer/dump_bolt.py) and the template and
-# tokenizer.json are read at run time from B70_BOLT_SNAPSHOT (SergiioB's pinned snapshot, defined with spec 25b's block).
+# tokenizer.json are read at run time from B70_BOLT_SNAPSHOT (our export's pinned snapshot, defined with spec 25b's block).
 if(B70_TOKENIZER_ENABLED)
   # Task 1: the chat template (sha256 6521afc7...) on 80 message lists byte for byte against transformers 5.19.0's
   # apply_chat_template, the system block always there (Review Focus 1) ...
@@ -3877,7 +3874,7 @@ if(B70_TOKENIZER_ENABLED)
   set_tests_properties(template_bolt_test bolt_tokenizer_test PROPERTIES LABELS bolt SKIP_RETURN_CODE 77 TIMEOUT 300)
   # Task 3 (host): the request path through the server over a mock engine, with the REAL template: Task 1's renders POSTed with
   # their kwargs, Decision 13's reasoning_effort table, the kwarg 400s, the media refusals, Decision 12's generation defaults
-  # (tests/model/bolt/generation_config.{nvidia,sergiio}.json) and EOS [2, 11], the output stream end to end.
+  # (tests/model/bolt/generation_config{.nvidia,}.json) and EOS [2, 11], the output stream end to end.
   add_executable(bolt_request_test server/bolt_request_test.cc)
   target_include_directories(bolt_request_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(bolt_request_test PRIVATE b70_server b70_tokenizer b70_third_party_minja)
@@ -3951,7 +3948,7 @@ set_tests_properties(bolt_snapshot_test PROPERTIES LABELS bolt TIMEOUT 900)
 # On the card (box only; SKIP 77 without the synthetic sets / the real export): bolt_snapshot_gpu_test - BoltEngine's snapshot calls
 # (Review Focus 4): restores at the block ends 2048 / 4096 (the hook's own saves) bitwise the cold run, at the request ends 2049 /
 # 5000 / 300 / 3 / 2 / 1 / 0 bitwise the session that never left (KV, conv columns, SSM states, logits, ids), on one card and on two
-# (pp2:6 on the 12-block synthetic; SergiioB's export on two); `cross`: a snapshot taken on two cards continues on one, and the
+# (pp2:6 on the 12-block synthetic; our export on two); `cross`: a snapshot taken on two cards continues on one, and the
 # reverse (spec 16b's rule; two GPUs); `b16`: the bf16 state arm.
 if(B70_BOLT)
   add_executable(bolt_snapshot_gpu_test runtime/bolt_snapshot_gpu_test.cc)
