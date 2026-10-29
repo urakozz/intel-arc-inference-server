@@ -46,11 +46,11 @@ The model follows config.json's model_type:
   nemotron_h_omni   Nemotron 3.5 Bolt 74B-A9B (spec 25a; `--model bolt` says so and checks it): tools/oracle/
                     bolt_ref.py's layer-streamed model - the checkpoint's own remote code, its Mamba mixers on the
                     kernel path through bolt_mamba_ops, an fp32 SSM / conv cache (transformers 5.19.0: the qwen4exp
-                    site first on PYTHONPATH) - on the checkpoint given: SergiioB's int4 g128 (or our g64 export)
+                    site first on PYTHONPATH) - on the checkpoint given: our int4 g64 export (or a g128 spelling)
                     dequantised, the engine-format reference, or the BF16 original; `--weights` defaults to the
                     checkpoint's form and is refused when it names the other. The outputs are tagged by the form,
                     <name>.int4.* / <name>.bf16.* (gate Q compares them). EOS is {2, 11} whatever the
-                    checkpoint's generation_config says (spec 25 Decision 12: SergiioB's lists 11 only). The set
+                    checkpoint's generation_config says (spec 25 Decision 12: an export may list 11 only). The set
                     renders reasoning on: 2048 new ids (a4_ref.sh). BOLT_LAYERS=N truncates as --layers N does;
                     BOLT_EXPERT_CACHE_GB=G keeps dequantised experts in an LRU across steps.
 The MoE paths stop after an EOS id of generation_config.json (kept, as HF generate keeps it)
@@ -729,7 +729,7 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     with open(os.path.join(snap, "generation_config.json"), encoding="utf-8") as f:
         eos = json.load(f)["eos_token_id"]
     eos = set(eos if isinstance(eos, list) else [eos])
-    if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for both checkpoints (SergiioB's config lists 11)
+    if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for every form (an export's file may list 11 only)
         eos = set(BOLT_EOS)
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {sorted(eos)}, "

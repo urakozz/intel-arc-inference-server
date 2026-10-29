@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Spec 25a Task 7: gate Q - SergiioB's int4 g128 checkpoint against NVIDIA's BF16 original (spec 25 B5, Decision 3:
-a RECORDED measurement, not a gate - the g128 checkpoint ships until our g64 passes 25q).
+"""Spec 25a Task 7: gate Q - our int4 g64 export (the served checkpoint) against NVIDIA's BF16 original (spec 25 B5,
+Decision 3: a RECORDED measurement, not a gate).
 
     bolt_gateq.py kl <run dir> <int4 snapshot> --set <dir> --out <json> [--bf16 <bf16 snapshot>]
                      [--text NAME=IDS ...] [--only a,b] [--chunk C] [--layers N]
@@ -13,7 +13,7 @@ against manifest.json) the prompt + <run>/<name>.bf16.ids, and for each --text s
 the top-1 agreement (the lower id among equals). The BF16 rows are cached as <run>/<name>.bf16.rows.safetensors (made
 with --bf16 <snapshot> when absent - one model in memory at a time: the BF16 pass first, then the int4 pass); both
 models are bolt_ref.py's (the remote code layer-streamed, the Mamba kernel path, an fp32 cache; the int4 form
-dequantised through the exact g128 -> g64 expansion). Writes JSON: "a4" pooled over every scenario row, "text" per
+dequantised: g64 as shipped, a g128 spelling through the exact g128 -> g64 expansion). Writes JSON: "a4" pooled over every scenario row, "text" per
 --text source, "scenarios".
 
 verdict (Q-A4 + Q-KL): reads <a4 dir>/<name>.bf16.txt and <name>.int4.txt (oracle_generate.py --model bolt, both
@@ -213,9 +213,8 @@ def verdict(a4_dir: str, kl_json: str, bars: dict = BARS) -> tuple[bool, list[st
     lines = [("PASS  " if ok else "FAIL  ") + s for ok, s in checks]
     ok = all(c for c, _ in checks)
     bad = [s.split(":")[0] for c, s in checks if not c]
-    lines.append("gate Q: WITHIN the proposed bars (recorded; Decision 3: SergiioB's g128 ships until 25q passes)" if ok
-                 else f"gate Q: OUTSIDE the proposed bars on {'; '.join(bad)} (recorded in spec 25; Decision 3: the "
-                      f"g128 checkpoint ships until 25q passes)")
+    lines.append("gate Q: WITHIN the proposed bars (recorded; Decision 3)" if ok
+                 else f"gate Q: OUTSIDE the proposed bars on {'; '.join(bad)} (recorded in spec 25; Decision 3)")
     return ok, lines
 
 

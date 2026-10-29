@@ -8,8 +8,8 @@
 Random weights on the real model's structure, written `save_pretrained`-shaped (model.safetensors + an index,
 config.json, generation_config.json, the real tokenizer / template copied from the HF cache at run time) with the
 CHECKPOINT's tensor names: `language_model.model.layers.<l>.{norm.weight, mixer.*}`, `language_model.model.embeddings.
-weight`, `language_model.model.norm_f.weight`, `language_model.lm_head.weight` (SergiioB's spelling; `--trunk backbone`
-writes NVIDIA's `language_model.backbone.*`). config.json is the omni wrapper's shape - `model_type nemotron_h_omni`
+weight`, `language_model.model.norm_f.weight`, `language_model.lm_head.weight` (the GPTQ g128 spelling's; `--trunk
+backbone` writes NVIDIA's and our export's `language_model.backbone.*`). config.json is the omni wrapper's shape - `model_type nemotron_h_omni`
 with the `llm_config` built from the cached real one at tiny widths (bolt_tiny_check.tiny_config, vocab 131072 so the
 real tokenizer's ids are valid). `A_log` / `D` / `dt_bias` / `e_score_correction_bias` are F32 (the first three holding
 bf16 values, as the checkpoint ships them); everything else bf16 (fp32 in `pattern12-fp32`).
@@ -30,10 +30,10 @@ bf16 values, as the checkpoint ships them); everything else bf16 (fp32 in `patte
                   (qweight I32 [K/8][N], scales F16 [K/64][N], qzeros 0x77777777; src/loader/rtn.h's rule
                   s16 = f16(2 amax / 15)); `--signed-scales` writes AutoRound's signed form s16 = f16(-e / 8), e the
                   group's largest-magnitude value (it maps to q = 0); router, bias, conv, norms, embedding, head kept
-  int4-g128-gptq  SergiioB's spelling on `pattern12-k128` (latent 128, I cycling 128 / 256 / 384: every K a multiple
-                  of 128): quant_method gptq, group 128, `g_idx` = i // 128, qzeros 0x77777777, F16 SIGNED scales, the
-                  cached checkpoint's quantization_config verbatim (the `dynamic` object with its restating `+:`
-                  out_proj rule)
+  int4-g128-gptq  the GPTQ g128 spelling on `pattern12-k128` (latent 128, I cycling 128 / 256 / 384: every K a multiple
+                  of 128): quant_method gptq, group 128, `g_idx` = i // 128, qzeros 0x77777777, F16 SIGNED scales,
+                  tests/model/bolt/make_config.py's quant_gptq_g128() (the `dynamic` object with its restating `+:`
+                  out_proj rule; the served snapshot is g64 and carries none)
 --twin DIR (int4 variants) also writes the dequantised weights (bf16(float(q - 8) x float(scale))) as a bf16
 checkpoint in the plain names: the same model as plain tensors.
 """
@@ -265,8 +265,11 @@ def make(out: str, variant: str, seed: int = 0, snapshot: str | None = None, sig
             t[ckpt_name(k, trunk)] = v.float() if k.endswith(F32_NAMES) else v.to(torch.bfloat16)
             deq[k] = v
     if gptq:
-        with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
-            quant = json.load(f)["quantization_config"]
+        spec = importlib.util.spec_from_file_location(
+            "bolt_make_config", os.path.join(_HERE, "..", "..", "tests", "model", "bolt", "make_config.py"))
+        mc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mc)
+        quant = mc.quant_gptq_g128()
     else:
         quant = {"autoround_version": AUTOROUND_VERSION, "bits": 4, "data_type": "int", "group_size": g, "iters": 0,
                  "packing_format": "auto_round:auto_gptq", "quant_method": "auto-round", "sym": True}

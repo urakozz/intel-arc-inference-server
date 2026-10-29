@@ -5,8 +5,8 @@
 The language model of `nemotron_h_omni` is the remote code's `NemotronHPuzzleForCausalLM` (modeling_nemotron_h_puzzle.py
 over modeling_nemotron_h.py = R). Nothing of it is vendored: `load_remote(snapshot)` imports the four text files
 (configuration_nemotron_h{,_puzzle}.py, modeling_nemotron_h{,_puzzle}.py) from the snapshot under a private package
-name, after checking each file's sha256 against the pinned revision (b9f381d2 of SergiioB's repo; NVIDIA's 24GB repo
-ships the same bytes). The omni wrapper and the vision tower are never imported.
+name, after checking each file's sha256 against the pinned revision (8932aa8d of our export; NVIDIA's 24GB repo ships
+the same bytes). The omni wrapper and the vision tower are never imported.
 
 R needs mamba_ssm at import (R:60-63: `rmsnorm_fn`, else ImportError) and imports the other kernels only on CUDA
 (R:54-68; transformers' is_mamba_2_ssm_available / is_causal_conv1d_available require CUDA). `load_remote` installs
@@ -39,7 +39,7 @@ import torch  # noqa: E402
 
 PINNED_TRANSFORMERS = "5.19.0"
 PKG = "bolt_remote_r"
-# sha256 of the remote text files at SergiioB's b9f381d2 (= NVIDIA's 24GB repo c6cc2e8f, byte-identical); the HF blob
+# sha256 of the remote text files at our export's 8932aa8d (= NVIDIA's 24GB repo c6cc2e8f, byte-identical); the HF blob
 # of modeling_nemotron_h.py is de290021078450c4d5042f66dd74b8eecf1d3eb3 (git sha1), the spec's `R:` file.
 REMOTE_SHA256 = {
     "configuration_nemotron_h.py": "0fc818c10506c91bd02df5a605f49cb0704b5498954f46dbde2d63999ae36c3d",
@@ -49,7 +49,7 @@ REMOTE_SHA256 = {
 }
 REMOTE_BLOB = "de290021078450c4d5042f66dd74b8eecf1d3eb3"
 SNAPSHOT_GLOBS = (
-    "models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997",
+    "models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156",
     "models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB/snapshots/c6cc2e8ffa353403213d6b9b18aaf8eb684d705a",
 )
 

@@ -19,7 +19,7 @@ sys.path.insert(0, _HERE)
 import make_synth as ms  # noqa: E402
 
 
-def test_config_is_the_published_one():
+def test_config_is_the_exports():
     mc = ms.make_config()
     assert mc.check() == 0
     c = mc.config(12, "gptq-g128")

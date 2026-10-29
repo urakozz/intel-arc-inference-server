@@ -3,8 +3,8 @@
 
     dump_bolt.py tokenizer|templates|parse <snapshot> <out.json> [<tests/golden/prompts/bolt_agentic.json>]
 
-<snapshot> is SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym @ b9f381d2 (or NVIDIA's repos: the template,
-tokenizer.json and ultra_v3_reasoning_parser.py are byte-identical in all of them - spec 25 section 7). Only small files
+<snapshot> is our export urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ @ 8932aa8d (or NVIDIA's repos:
+the template, tokenizer.json and ultra_v3_reasoning_parser.py are byte-identical in all of them - spec 25 section 7). Only small files
 are read: tokenizer.json (sha256 d0432ad8...), tokenizer_config.json, chat_template.jinja (sha256 6521afc7..., 12,514 B),
 generation_config.json, ultra_v3_reasoning_parser.py. Every mode is transformers 5.19.0 (spec 21a's site beside the oracle
 image). The fixtures are GENERATED OUTPUTS (renders, ids, digests), not copies of the model's files (spec 25 Decision 20: the
@@ -39,7 +39,7 @@ Run in the oracle image with the 5.19.0 site first on PYTHONPATH (small files on
   docker run --rm --memory 8g --cpus 4 -v "$PWD:/ws" -v <oracle-out-q4exp/site>:/site:ro \\
       -v <hf-cache>/hub:/hub:ro -w /ws -e PYTHONPATH=/site -e HF_HUB_OFFLINE=1 \\
       --entrypoint python3 agnes-ref-img:latest tools/tokenizer/dump_bolt.py templates \\
-      /hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997 \\
+      /hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156 \\
       tests/tokenizer/bolt_templates.json tests/golden/prompts/bolt_agentic.json
 (the whole hub directory: the snapshot's links reach blobs outside the model's own directory)
 """
