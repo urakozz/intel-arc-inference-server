@@ -29,7 +29,7 @@ to it.
 | 9b | Qwen3.8-Flash-Next on the synthetic checkpoints (rows 30-34, spec 21) | **both** | `tools/box_validate.sh --only r30,r31,r32,r33,r34 --with r32.ple_rate,r32.bench_attn` | 32 + 2 opt-in | 3.5-6 h (est.) |
 | 9c | spec 22's expert-offload probe (row 36, plan 22a): links, copy / zero-copy rates, capacity, the curves, the projection | **both**, idle | `tools/box_validate.sh --only r36` (+ CPU lane: `--with r36.prune,r36.prune_a4`) | 15 (+ 2 opt-in) | 3-5 h GPU (est.); the CPU opt-ins hours to days |
 | 10 | the rest of the suite | device 0 | `tools/box_validate.sh --only x` | 1 | 0.5-1 h |
-| 11 | Bolt on SergiioB's g128 checkpoint (row 57): the CPU reference, golden sets, the g128 A4 reference, the taps | box CPU, no card | `tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps` | 1 + 5 opt-in | hours, then days for `r57.a4_ref` (est.) |
+| 11 | Bolt on our g64 export (row 57): the CPU reference, golden sets, the int4 A4 reference, the taps | box CPU, no card | `tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps` | 1 + 5 opt-in | hours, then days for `r57.a4_ref` (est.) |
 | 12 | **the Bolt BF16 window** (rows 57, 58): the BF16 original downloaded, our g64 quantisation, the BF16 references, gate Q and F6, then the BF16 original removed | **both** for `r58.tune`, else box CPU | §2, Session 12 | row 58's + 3 opt-in | ~3-6 days (est.) |
 
 **Total, the default set: ~40-63 h of box time, ~51 h central (est.)** - two to two and a half
@@ -46,8 +46,8 @@ it needs 9b's data and binaries. With 9b and 9c, sessions 1-10 run each of today
 once; 9b adds ~3.5-6 h (est.) plus its CPU-lane data (§1.6) and, optionally, Intel's real checkpoint
 (§1.3); 9c ~3-5 h of GPU time (est.) plus its opt-in CPU stages.
 
-**Added 2026-10-22: Sessions 11 and 12** for Nemotron 3.5 Bolt (spec 25). Session 11 needs only SergiioB's g128
-checkpoint (41.9 GB). The BF16 original (149.8 GB) is downloaded **on the box only**, for Session 12, and
+**Added 2026-10-22: Sessions 11 and 12** for Nemotron 3.5 Bolt (spec 25). Session 11 needs only our g64
+export (41 GB; 2026-10-29: the served checkpoint, on the box). The BF16 original (149.8 GB) is downloaded **on the box only**, for Session 12, and
 removed after it: everything that reads it (row 58's quantisation, the BF16 golden sets, the BF16 A4
 reference, gate Q, F6) runs in that one window.
 
@@ -132,7 +132,7 @@ expected, not a failure.
 | Kolibri-1 int4 | does not exist (spec 20b) | ~42.5 GB when it does | `r24.partial`, `r24.pp_real`, `r26.real`, `r28.real` | `kolibri` |
 | tiny qwen4_exp model | `qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next` | 124 MB | `r30.host` (session 9b) | `q4exp_tiny` |
 | Qwen3.8-Flash-Next original, **small files only** | `Qwen/Qwen3.8-Flash-Next` `config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja` | a few MB (never the 360 GB) | `r31.synth` (the synthetic checkpoints), `r34.a4_ref` | `q4exp_orig_small` |
-| Nemotron 3.5 Bolt int4 g128 (SergiioB) | `SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym` `--revision b9f381d20cbd4cede9f729c2647d2542c4a35997` | 41.9 GB | row 57 (Session 11), Session 12, rows 59-65 | `bolt_g128` (`bolt_small`: its small files alone, `--exclude '*.safetensors'`) |
+| Nemotron 3.5 Bolt int4 g64 (ours, the served checkpoint; on the box since 2026-10-26) | `urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ` `--revision 8932aa8d1844f91056c5b9433448075a842b9156` | 41 GB | row 57 (Session 11), Session 12, rows 59-65 | `bolt_int4` (`bolt_small`: its small files alone, `--exclude '*.safetensors'`) |
 | Nemotron 3.5 Bolt BF16 original (**Session 12 only**, removed after it) | `nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16` `--revision 567021037ff88364143e24ea05e6abd0f72086ff` | 149.8 GB | `r57.golden_bf16`, `r57.a4_bf16`, `r57.gateq`, row 58 (`r58.rtn`, `r58.tune`, `r58.eval`) | `bolt_bf16` |
 | Intel's Qwen3.8-Flash-Next W4A16 (**optional**, 9b part 2) | `Intel/Qwen3.8-Flash-Next-W4A16-AutoRound` | 181.17 GB (102.4 GB of it the PLE shards) | `r31.load_real`, `r32.partial`, `r33.golden_real` (SKIP "missing data" without it), the opt-in real-weight stages of rows 30-34 | `q4exp_intel` |
 
@@ -767,10 +767,14 @@ tools/box_validate.sh --summary          # box-validation-<date>.md: every stage
 twins), ~0.5-1 h (est.). The summary covers the whole state, so the last one written is the
 day's record.
 
-### Session 11 - Bolt on SergiioB's g128 checkpoint (row 57), box CPU
+### Session 11 - Bolt on our g64 export (row 57), box CPU
+
+The 2026-10-22/23 `oracle-out-bolt` / `-a4` were made from a third-party g128 export: without a `SNAPSHOT` file naming
+ours they read as missing, and `r57.golden` / `r57.a4_ref` set them aside (`<dir>.stale-<time>`, kept) and rebuild them.
 
 ```sh
-tools/box.sh run 'tools/probe/detach.sh $HOME/dl-bolt.log uvx --from huggingface_hub hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997'
+# only if HAVE_bolt_int4=0 (it is on the box since 2026-10-26):
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-bolt.log uvx --from huggingface_hub hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156'
 tools/box_validate.sh --only r57 --with r57.ppl,r57.hfcheck,r57.golden,r57.a4_ref,r57.taps
 ```
 
@@ -797,12 +801,12 @@ tools/box_validate.sh --only r58.host,r58.rtn,r58.rtn_ref
 #    (plan 25q Task 4; no other GPU row meanwhile, no BF16 CPU stage either - RAM)
 # 4. the BF16 references and gate Q, box CPU
 tools/box_validate.sh --only r57.golden_bf16,r57.a4_bf16,r57.gateq
-# 5. F6 (KL / top-1 per set and A4 for RTN, SergiioB's g128 and ours against the BF16 original), our export's golden sets
+# 5. F6 (KL / top-1 per set and A4 for RTN and ours against the BF16 original), our export's golden sets
 tools/box_validate.sh --only r58.eval,r58.ours_ref
 ```
 
 Then (a Mac edit) gate Q's table into spec 25 (Decision 3: recorded), F6 into plan 25q's card, and
-the operator's call on which g64 export replaces SergiioB's g128 as the served form. Only after
+the operator's call on the served g64 export (2026-10-29: ours, 8932aa8d). Only after
 that does the operator remove the BF16 original from the box's HF cache (nothing after this
 session reads it; to re-run any of these stages, download it again at the same revision).
 

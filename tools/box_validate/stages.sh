@@ -3091,8 +3091,8 @@ st_r56_d5_pp() {
 
 # ======================================================================================
 row 57 "spec 25a - Nemotron 3.5 Bolt: the facts, the CPU reference (B1), golden sets, the A4 references, the tap dumps, gate Q (plan 25a)"
-rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 GB): hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 (41.9 GB). r57.host needs only its pinned small files (the same command with --exclude '*.safetensors')."
-rownote 57 "The BF16 original (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff, 149.8 GB; MemAvailable >= 96 GB) is downloaded on the box only, for the Bolt BF16 window (docs/box-day-plan.md, Session 12, with row 58) and removed after it: r57.golden_bf16, r57.a4_bf16 and r57.gateq run there. Every other row 57 stage needs only the g128 form."
+rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 GB): hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 (41 GB; our int4 g64 export, the served checkpoint - on the box since 2026-10-26). r57.host needs only its pinned small files (the same command with --exclude '*.safetensors'). The int4 references (oracle-out-bolt, oracle-out-bolt-a4) count only with a SNAPSHOT file naming this snapshot (bolt_oracle.sh writes it): the 2026-10-22/23 ones came from a third-party g128 export, read as missing, and r57.golden / r57.a4_ref set them aside (<dir>.stale-<time>, kept) and rebuild them."
+rownote 57 "The BF16 original (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff, 149.8 GB; MemAvailable >= 96 GB) is downloaded on the box only, for the Bolt BF16 window (docs/box-day-plan.md, Session 12, with row 58) and removed after it: r57.golden_bf16, r57.a4_bf16 and r57.gateq run there. Every other row 57 stage needs only the int4 form."
 rownote 57 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/bolt_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh). The real stages SKIP 77 'missing data' without the checkpoints, or while they download."
 rownote 57 "Hand back: B70_BOLT_TIE_TOL's evidence (the 'MoE 9th/10th sel gap' lines r57.golden prints, per block and over all), the SSM-state magnitude lines, each prompt's wall / RSS, the perplexities per form, hfcheck's verdict and its fallback lines, the A4 parse failures (score.py --format qwen-think, bar 0 for the BF16 reference) and agreement, gate Q's table (a recorded measurement, Decision 3)."
 stage r57.host       57 default cpu  bolt_small,oracle_image       -  "bolt_oracle.sh tests: test_bolt_ref.py, test_bolt_make_tiny.py, bolt_tiny_check.py, the toolcall tests (the box image's torch: the bitwise claims re-checked there)"
@@ -3101,21 +3101,21 @@ st_r57_host() {
   grab_all tests '^ok |^  |FAIL|SKIP|passed|tiny check' 160
   finish
 }
-stage r57.ppl        57 optin   cpu  bolt_g128,oracle_image       -  "perplexity on prose / code / agentic, g128 and BF16 (finite; code < 10 ESTIMATED; recorded per text)"
+stage r57.ppl        57 optin   cpu  bolt_int4,oracle_image       -  "perplexity on prose / code / agentic, int4 and BF16 (finite; code < 10 ESTIMATED; recorded per text)"
 st_r57_ppl() {
   chk "tools/box_validate/bolt_oracle.sh $DATA ppl" "the reference's perplexity on each form present"
   grab_all ppl '^ppl |^wall|not sane|NOT SANE' 12
   finish
 }
-stage r57.hfcheck    57 optin   cpu  bolt_g128,oracle_image       -  "hfcheck --layers 12: the port = its restated chain BITWISE on real weights (fp32 when RAM allows), R's torch fallback recorded"
+stage r57.hfcheck    57 optin   cpu  bolt_int4,oracle_image       -  "hfcheck --layers 12: the port = its restated chain BITWISE on real weights (fp32 when RAM allows), R's torch fallback recorded"
 st_r57_hfcheck() {
   chk "tools/box_validate/bolt_oracle.sh $DATA hfcheck" "hfcheck on each form present"
   grab_all hfcheck '^hfcheck' 16
   finish
 }
-stage r57.golden     57 optin   cpu  bolt_g128,oracle_image       -  "golden sets on SergiioB's g128 dequantised -> oracle-out-bolt (gap lines per block, --taps)"
+stage r57.golden     57 optin   cpu  bolt_int4,oracle_image       -  "golden sets on our g64 export dequantised -> oracle-out-bolt + SNAPSHOT (gap lines per block, --taps; CPU, hours)"
 st_r57_golden() {
-  chk "tools/box_validate/bolt_oracle.sh $DATA golden" "the Bolt golden sets on the g128 form"
+  chk "tools/box_validate/bolt_oracle.sh $DATA golden" "the Bolt golden sets on the int4 form"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   grab_all gap 'sel gap|SSM state|wall' 240
   finish
@@ -3127,9 +3127,9 @@ st_r57_golden_bf16() {
   grab_all gap 'sel gap|SSM state|wall' 120
   finish
 }
-stage r57.a4_ref     57 optin   cpu  bolt_g128,oracle_image       -  "the A4 reference on the g128 form -> oracle-out-bolt-a4 (the engine's tool-call reference; days, resumable)"
+stage r57.a4_ref     57 optin   cpu  bolt_int4,oracle_image       -  "the A4 reference on the int4 form -> oracle-out-bolt-a4 + SNAPSHOT (the engine's tool-call reference; days, resumable)"
 st_r57_a4_ref() {
-  chk "tools/box_validate/bolt_oracle.sh $DATA a4" "the A4 reference on the g128 form (36 scenarios, 2048 new ids, batched)"
+  chk "tools/box_validate/bolt_oracle.sh $DATA a4" "the A4 reference on the int4 form (36 scenarios, 2048 new ids, batched)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
   finish
@@ -3141,7 +3141,7 @@ st_r57_a4_bf16() {
   grab_all a4 'scenarios|parse failure|match|^int4:|^bf16:' 16
   finish
 }
-stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_bf16  "gate Q: g128 vs BF16 (KL / top-1 / A4), recorded"
+stage r57.gateq      57 optin   cpu  bolt_a4_ref,oracle_image     r57.a4_bf16  "gate Q: our g64 vs BF16 (KL / top-1 / A4), recorded"
 st_r57_gateq() {
   chk "tools/box_validate/bolt_oracle.sh $DATA gateq" "gate Q (a recorded measurement, Decision 3)"
   grab_all gateq '^PASS|^FAIL|gate Q|A4 pooled|^kl ' 60
@@ -3151,7 +3151,7 @@ st_r57_gateq() {
 # ======================================================================================
 row 59 "spec 25b - Nemotron 3.5 Bolt: BoltDesc, load_bolt (g128-expanded and native g64 into one layout, the '+:' / BF16-scale / signed-scale relaxations), synthetic checkpoints, the two-card plan (plan 25b)"
 rownote 59 "No kernel touched (kernel_cmdlines +0 / -0 / ~0: G0's sha is the 'nothing moved' check) and no existing loader file but src/loader/quant.{h,cc} (the two exact relaxations: a restating '+:' dynamic rule accepted, BF16 GPTQ scales exact-or-refused; signed scales audited) - r59.host re-runs quant_test, ct_loader_test and dequant_fixture_test (the existing tests that read quant.cc) beside the new bolt tests - not the whole loader suite (r59 does not claim the other families' loaders). Written on the Mac: bolt_test, quant_test, bolt_repack_test, bolt_plan_test, bolt_names_test (the descriptor's 112,091 names against the published index, 849 vision tensors skipped by prefix) and bolt_synth_host_{g128,pair,g64}_test over three real-width synthetic checkpoints (make_synth.py --layers 8) all ran there; nothing of load_bolt has touched a card."
-rownote 59 "r59.synth needs only the oracle image and the pinned small files (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors'): make_synth.py draws random weights at the real widths, N 8 (~3.9 GB a checkpoint) and N 12 (~5.5 GB) each as SergiioB's g128 GPTQ spelling, its exact g64 expansion and a native g64 packing -> \$DATA/oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64} + .ACCEPTED (~28 GB in all; the Mac: ~2 min a checkpoint at N 8, ~3 min at N 12, MEASURED). r59.load_real needs SergiioB's 41.9 GB checkpoint (data key bolt_g128, row 57's download) and BOTH cards (split 48, --max-len 262144 in the test's arguments): the plan, then every block uploaded, 0 unconsumed. r59.load_rtn needs 25q's export (data key bolt_rtn; not built)."
+rownote 59 "r59.synth needs only the oracle image and the pinned small files (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors'): make_synth.py draws random weights at the real widths, N 8 (~3.9 GB a checkpoint) and N 12 (~5.5 GB) each in the GPTQ g128 spelling, its exact g64 expansion and a native g64 packing -> \$DATA/oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64} + .ACCEPTED (~28 GB in all; the Mac: ~2 min a checkpoint at N 8, ~3 min at N 12, MEASURED). r59.load_real needs our 41 GB g64 export (data key bolt_int4, row 57's download) and BOTH cards (split 48, --max-len 262144 in the test's arguments): the plan, then every block uploaded, 0 unconsumed (its out_proj scales ship BF16: the exact-or-refused conversion runs on real data here)."
 rownote 59 "Hand back: each load line (blocks, trunk, g128 / g64 mask, restating '+:' count, int8 / bf16 head, devices, bytes) and its seconds (the int8 head's quantisation time separately), every device's weights line against loader::bolt::device_weight_bytes and runtime::bolt::plan's, the sampled read-backs' counts, the real load's RSS and wall, and the plan lines (the two-card split by block bytes; 262144 positions)."
 stage r59.host       59 default cpu -                         -        "host: quant_test (the relaxations), bolt_test, bolt_repack_test, bolt_plan_test, bolt_names_test, ct_loader_test, dequant_fixture_test"
 st_r59_host() {
@@ -3160,7 +3160,7 @@ st_r59_host() {
     'OK|exp_torch|negative|pp_split|device [01]|24 GB|one card|bytes on the cards|total|descriptor'
   finish
 }
-stage r59.synth      59 default cpu oracle_image              -        "make_synth.py N 8 and 12 in SergiioB's g128 spelling, its exact g64 expansion and a native g64; check.py ACCEPTED on each - bolt_synth.sh synth-ckpt"
+stage r59.synth      59 default cpu oracle_image              -        "make_synth.py N 8 and 12 in the GPTQ g128 spelling, its exact g64 expansion and a native g64; check.py ACCEPTED on each - bolt_synth.sh synth-ckpt"
 st_r59_synth() {
   chk "tools/box_validate/bolt_synth.sh $DATA synth-ckpt" "the synthetic Bolt checkpoints (both spellings, N 8 and 12)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
@@ -3186,16 +3186,10 @@ st_r59_load_synth() {
   jgrab load-synth '^bolt_load_synth' 'OK|weights|unconsumed|SKIP|plan device'
   finish
 }
-stage r59.load_real  59 optin   gpu  bolt_g128                -        "bolt_load_checkpoint_test on SergiioB's g128 export, two cards (split 48, --max-len 262144): the plan, 0 unconsumed, sampled read-backs, load time and RSS"
+stage r59.load_real  59 optin   gpu  bolt_int4                -        "bolt_load_checkpoint_test on our g64 export, two cards (split 48, --max-len 262144): the plan, 0 unconsumed, sampled read-backs, load time and RSS"
 st_r59_load_real() {
   run_tests '^bolt_load_real_test$'
   jgrab load-real '^bolt_load_real_test$' 'OK|weights|unconsumed|plan device|load_bolt|load  '
-  finish
-}
-stage r59.load_rtn   59 optin   gpu  bolt_rtn                 -        "bolt_load_checkpoint_test on 25q's native-g64 export, two cards: the same device bytes as g128-expanded where the weights agree (sampled)"
-st_r59_load_rtn() {
-  run_tests '^bolt_load_rtn_test$'
-  jgrab load-rtn '^bolt_load_rtn_test$' 'OK|weights|unconsumed|plan device'
   finish
 }
 
@@ -3203,7 +3197,7 @@ st_r59_load_rtn() {
 row 60 "spec 25c - Nemotron 3.5 Bolt decode: P0 (653 / 533 skeletons, GEMV and SSM-state floors, the S sweep), the nb_* kernels, BoltEngine on two cards, the fused arms, the fp32 / bf16 state arm (plan 25c)"
 rownote 60 "Written blind on the Mac (spec 25 §15): NO nb_* binary has been compiled by ocloc (kernel_cmdlines +115 / -0 / ~0: the gemv cells at Bolt's 7 int4 shapes x S x layout, the heads at 131072, P0's stand-ins, nb_state_rmw, the 38 family binaries incl. the arms, the bf16-state builds and test-only M = 4 builds). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_run, indicative) every kernel and arm agrees with tests/kernels/bolt_ref.h - exact, except Apple's not-correctly-rounded division (conv / gnorm <= 1 ulp, the route's fp32 words <= 2 ulp with ids exact); mg_attn_eager exact. The flash mg_attn path and the whole engine have never run anywhere."
 rownote 60 "P0 first (Decision 16): r60.p0 runs probe_bolt_step before any engine stage - the 653-launch skeleton from EXISTING kernels at Bolt's shapes, the 533-launch fused skeleton, the GEMV-only list, 653 noops and the SSM-state floor (nb_state_rmw: 4 MiB fp32 / 2 MiB bf16 a Mamba block), interleaved, at depth 4096 and 65536, --sweep-s (every int4 shape at S 1/2/4/8/16 x L 0/1, probe_gemv's 3 % rule) and --pair (the two-launch norm). Stand-ins, PROPOSED scales: moe.cl at E 64 (a 64-block pool + the shared slot a MoE block; up x I*544/2,228,224, down x I*544/1,114,112), gdn_step at Qwen3.8's shape (x 4/3), lfm_res_norm as the one-launch norm; conv / gnorm / route / sh_act / attn_prep / embed are noops. Write the table into docs/probe-bolt-2026-10-21.md (a 'P0' section). The S picks become model::BoltDesc::linears' {S, layout} (25b's PROVISIONAL S 1 until then; the block already builds every cell); every arm whose skeleton saving is >= 1 % of the step is A/B'd in r60.fuse / r60.speed (Decision 16, PROPOSED)."
-rownote 60 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4; split 48 by bytes): its commands set ZE_AFFINITY_MASK=0,1 themselves. The N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, --pp 6,4 and pp2:6 on two. Their golden sets come from r60.synth_golden (bolt_oracle.sh export on n12-g128 / n12-g64x -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, short / 4k / agentic, CPU, hours ESTIMATED; data key oracle_bolt_synth). SergiioB's golden sets are row 57's r57.golden (oracle_bolt)."
+rownote 60 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4; split 48 by bytes): its commands set ZE_AFFINITY_MASK=0,1 themselves. The N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, --pp 6,4 and pp2:6 on two. Their golden sets come from r60.synth_golden (bolt_oracle.sh export on n12-g128 / n12-g64x -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, short / 4k / agentic, CPU, hours ESTIMATED; data key oracle_bolt_synth). Our export's golden sets are row 57's r57.golden (oracle_bolt: SNAPSHOT names ours)."
 rownote 60 "Tolerances (all PROPOSED): B70_BOLT_TIE_TOL = 1e-3 on the 9th / 10th sel until row 57's gap distribution on the real weights (an exact 0 gap is undetermined); h taps median >= 0.9998 / min >= 0.99 a block; the SSM state and the conv columns after the prompt cosine >= 0.999 a block (not bitwise: the int4 GEMV's fp32 order vs the reference's bf16 linear); flash against fp64 at cosine 0.99999. Decision 2's A4 subset needs b70-serve (spec 25e, not built): r60.state_arm records B3 only."
 rownote 60 "Hand back: P0's tables (step per list, gap per launch, the floors, the S picks, the PROPOSED corrected step); bolt_kernels_test's lines; every plan == allocation / launches line (653 / 645 eager / 533 all arms / 655 peer; the synthetic 92); the B3 gate / routing / SSM / h lines per prompt; the arms' bitwise lines and their A/B ratios; the speed rows and the --profile table."
 stage r60.k0        60 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +115 / -0 / ~0 (no existing .cl edited)"
@@ -3276,22 +3270,22 @@ st_r60_synth_pp() {
   jgrab synth-pp '^bolt_(decode_synth_pp|golden_synth_short_pp2)' 'two cards|split|Review Focus 6|gate:|OK'
   finish
 }
-stage r60.golden    60 default gpu  bolt_g128,oracle_bolt    r60.k1   "SergiioB's checkpoint, two cards: bolt_decode_test --pp 48,40 (653 launches, B4, split 48 copy bitwise 40 peer); B3 short / 4k / agentic, split 40, bf16 head, eager"
+stage r60.golden    60 default gpu  bolt_int4,oracle_bolt    r60.k1   "our g64 export, two cards: bolt_decode_test --pp 48,40 (653 launches, B4, split 48 copy bitwise 40 peer); B3 short / 4k / agentic, split 40, bf16 head, eager"
 st_r60_golden() {
   run_tests '^bolt_decode_real_test$|^bolt_golden_real_(bolt_(short|4k|agentic)|short_split40|short_bf16head|short_eager)_test$' \
     '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab golden '^bolt_(decode|golden)_real' 'plan == allocation|launches|B4|Review Focus 6|gate:|routing:|SSM state|conv|OK'
   finish
 }
-stage r60.golden32k 60 optin   gpu  bolt_g128,oracle_bolt    r60.golden "B3 on bolt_32k (32768 ids ingested one replay per id: hours, ESTIMATED)"
+stage r60.golden32k 60 optin   gpu  bolt_int4,oracle_bolt    r60.golden "B3 on bolt_32k (32768 ids ingested one replay per id: hours, ESTIMATED)"
 st_r60_golden32k() {
   run_tests '^bolt_golden_real_32k_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab golden32k '^bolt_golden_real_32k_test$' 'gate:|routing:|SSM state|conv|OK'
   finish
 }
-stage r60.fuse      60 default gpu  bolt_g128                r60.golden "every arm bitwise none on the real checkpoint (bolt_decode_test --fuse); the arms' A/B at depth 4096 (interleaved, median of 3)"
+stage r60.fuse      60 default gpu  bolt_int4                r60.golden "every arm bitwise none on the real checkpoint (bolt_decode_test --fuse); the arms' A/B at depth 4096 (interleaved, median of 3)"
 st_r60_fuse() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local k="ZE_AFFINITY_MASK=0,1" a arms="" ratios=""
   run_tests '^bolt_decode_real_fuse_(router|route|conv|all)_test$' '' '' "$k"
   jgrab fuse '^bolt_decode_real_fuse' 'Review Focus 5|launches|OK'
@@ -3306,9 +3300,9 @@ st_r60_fuse() {
   grab_all idle '^IDLE '
   finish
 }
-stage r60.state_arm 60 optin   gpu  bolt_g128,oracle_bolt    r60.golden "B70_BOLT_SSM=bf16 (Decision 2's arm): B3 short / agentic beside fp32's, and its speed at 4096 / 65536 against fp32 (interleaved)"
+stage r60.state_arm 60 optin   gpu  bolt_int4,oracle_bolt    r60.golden "B70_BOLT_SSM=bf16 (Decision 2's arm): B3 short / agentic beside fp32's, and its speed at 4096 / 65536 against fp32 (interleaved)"
 st_r60_state_arm() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local k="ZE_AFFINITY_MASK=0,1" d arms="" ratios=""
   run_tests '^bolt_golden_real_(short|agentic)_b16state_test$' '' '' "$k"
   jgrab state '^bolt_golden_real_.*_b16state_test$' 'gate:|routing:|SSM state|conv|^  h |OK'
@@ -3323,9 +3317,9 @@ st_r60_state_arm() {
   grab_all ratio '^RATIO '
   finish
 }
-stage r60.speed     60 optin   gpu  bolt_g128                r60.golden "Task 8: decode at depth 886 / 8192 / 32000 / 65536 / 131072 / 262000 (tg 128), int8 / bf16 head, flash / eager, the arms (interleaved, median of 3); --profile --repeats 5 at 4096"
+stage r60.speed     60 optin   gpu  bolt_int4                r60.golden "Task 8: decode at depth 886 / 8192 / 32000 / 65536 / 131072 / 262000 (tg 128), int8 / bf16 head, flash / eager, the arms (interleaved, median of 3); --profile --repeats 5 at 4096"
 st_r60_speed() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local k="ZE_AFFINITY_MASK=0,1" d arms ratios
   x "uptime"
   for d in 886 8192 32000 65536 131072 262000; do   # the deep rows ingest one replay per id: hours, ESTIMATED
@@ -3347,9 +3341,9 @@ st_r60_speed() {
 # ======================================================================================
 row 61 "spec 25d - Nemotron 3.5 Bolt prefill on l0: absolute SSD sub-chunks with the fp32 state, the conv seed / writeback, the grouped latent MoE over real rows, NoPE flash (plan 25d)"
 rownote 61 "Written blind on the Mac (spec 25 §16) after row 60 (25c's decode: nothing of it has run on a card either): NO nb_pf_* binary has been compiled by ocloc (kernel_cmdlines +35 / -0 / ~0: nb_pf_mamba in two tilings and the bf16-state build, nb_pf_cb by DPAS, nb_pf_moe / nb_pf_moe_gemm up relu2 / down at I 1536 / 2048 / 2304 / 2560, nb_pf_embed_gather, 25c's nb_prep / nb_moe at M 2048, the N 4096 slabs in both layouts, the three k2 tail slabs; spec 23d's mg_pf_flash_attn pair is bound by name). No existing .cl edited: G0's sha is K0. On the Mac's GPU (tools/mac/clrun/bolt_pf_run, indicative) every portable prefill kernel agrees with tests/kernels/bolt_pf_ref.h - the seed, C B^T (plain), the scan in fp32 and bf16 state, the sort / gather / dequant / combine, the gather, 25c's kernels at M 2048 exact; the conv, dt, gnorm and the norm within 1-2 ulp (Apple's division); both tilings x10 equal; the prefill eager attention bitwise decode's mg_attn_eager on the same device. The DPAS kernels (nb_pf_cb_L64_DPAS, nb_pf_moe_gemm) and the whole walk have never run anywhere."
-rownote 61 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. The synthetics' golden sets are row 60's r60.synth_golden (oracle_bolt_synth); SergiioB's row 57's r57.golden (oracle_bolt). Run row 60 first: the prefill's head, its KV / ring / state hand-over and every comparison against decode's fill use 25c's list."
+rownote 61 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. The synthetics' golden sets are row 60's r60.synth_golden (oracle_bolt_synth); our export's row 57's r57.golden (oracle_bolt). Run row 60 first: the prefill's head, its KV / ring / state hand-over and every comparison against decode's fill use 25c's list."
 rownote 61 "Bars (all PROPOSED, spec 25 §16): bolt_pf_kernels_test - every portable kernel bitwise the twin, C B^T by DPAS within 2^-16 of sum |C B| of the plain build, the grouped GEMMs bitwise pf_gemm_T0 on an expert's rows and the up rows' cosine >= 0.9999 against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000, the eager build bitwise decode's eager rows. bolt_prefill_test - prefill vs decode's fill: logits >= 0.9995, h taps median >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99; chunked / split at multiples of 64 bitwise. B3 on prefill: 25c's decode bars."
-rownote 61 "Hand back: bolt_pf_kernels_test's lines (the DPAS C B^T error, the grouped == dense lines, flash cosines); every launches / plan line (4333 a chunk on the real model: 2317 + 2016 on two cards; 573 on the N 12; + 4 for the head; 1,251,240,256 B of scratch a device); bolt_prefill_test's lines 1-7 per checkpoint; the B3 prefill gate / routing / SSM / h lines per prompt; the pp rows at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s (his 131072 is unpublished) and the phase tables. The SSD's sub-chunk length (64 as built), the scan's tiling (W16_R16) and the expert batch (512 MiB) change only by a commit naming these rows."
+rownote 61 "Hand back: bolt_pf_kernels_test's lines (the DPAS C B^T error, the grouped == dense lines, flash cosines); every launches / plan line (4333 a chunk on the real model: 2317 + 2016 on two cards; 573 on the N 12; + 4 for the head; 1,251,240,256 B of scratch a device); bolt_prefill_test's lines 1-7 per checkpoint; the B3 prefill gate / routing / SSM / h lines per prompt; the pp rows at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s for their g128 checkpoint under vLLM (their 131072 is unpublished) and the phase tables. The SSD's sub-chunk length (64 as built), the scan's tiling (W16_R16) and the expert batch (512 MiB) change only by a commit naming these rows."
 stage r61.k0        61 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +35 / -0 / ~0 (no existing .cl edited)"
 st_r61_k0() {
   need_pass g0.sha g0.bitwise g0.suite
@@ -3395,21 +3389,21 @@ st_r61_synth_pp() {
   jgrab synth-pp '^bolt_prefill_synth_pp_test$' 'pp2|walk|OK'
   finish
 }
-stage r61.golden    61 default gpu  bolt_g128,oracle_bolt    r61.k1   "SergiioB's checkpoint, two cards: bolt_prefill_test (4333 launches a chunk, B4, prefill vs decode's fill) and B3 after a prefilled prompt - short / 4k / agentic, eager"
+stage r61.golden    61 default gpu  bolt_int4,oracle_bolt    r61.k1   "our g64 export, two cards: bolt_prefill_test (4333 launches a chunk, B4, prefill vs decode's fill) and B3 after a prefilled prompt - short / 4k / agentic, eager"
 st_r61_golden() {
   run_tests '^bolt_prefill_real_test$|^bolt_golden_prefill_real_(bolt_(short|4k|agentic)|short_eager)_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab golden '^bolt_(prefill|golden_prefill)_real' '^[1-7]\.|prefill:|gate:|routing:|SSM state|conv|OK'
   finish
 }
-stage r61.golden32k 61 optin   gpu  bolt_g128,oracle_bolt    r61.golden "B3 on bolt_32k after a prefilled prompt (16 chunks)"
+stage r61.golden32k 61 optin   gpu  bolt_int4,oracle_bolt    r61.golden "B3 on bolt_32k after a prefilled prompt (16 chunks)"
 st_r61_golden32k() {
   run_tests '^bolt_golden_prefill_real_32k_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab golden32k '^bolt_golden_prefill_real_32k_test$' 'prefill:|gate:|routing:|SSM state|conv|OK'
   finish
 }
-stage r61.speed     61 optin   gpu  bolt_g128                r61.golden "prefill rate at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published table (flash and eager interleaved, median of 3), the phase tables at 4096 and 65536"
+stage r61.speed     61 optin   gpu  bolt_int4                r61.golden "prefill rate at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published vLLM table for their g128 checkpoint (flash and eager interleaved, median of 3), the phase tables at 4096 and 65536"
 st_r61_speed() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local k="ZE_AFFINITY_MASK=0,1" d arms ratios
   x "uptime"
   for d in 886 8192 32000 65536 131072; do
@@ -3430,10 +3424,10 @@ st_r61_speed() {
 
 # ======================================================================================
 row 62 "spec 25e - Nemotron 3.5 Bolt served: the template / tokenizer identities, ultra_v3 reasoning over Qwen XML calls, NVIDIA's sampling defaults, hybrid snapshots at aligned block ends, A4 and llama-benchy (plan 25e)"
-rownote 62 "Written blind on the Mac (spec 25 §17) after rows 60 / 61 (25c's decode, 25d's prefill: neither has run on a card): nothing of 25e ran on a card. 25e adds NO kernel (BoltEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. It does change shared host code - toolcall.cc (one opt-in option on the Qwen stream: drop a call cut by the end of generation), chat_format, server.cc (the template's enable_thinking comes from the kwargs after the reasoning_effort mapping), CMake - r62.k0 re-runs the other models' template / parser / server tests. The template and tokenizer.json are read from SergiioB's pinned snapshot in the HF cache (B70_BOLT_SNAPSHOT names another) and the tests SKIP 77 without it; nothing of the model is vendored but its generation_config.json files (tests/model/bolt/, Decision 20)."
-rownote 62 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. Run rows 60 and 61 first: the snapshot calls restore into 25d's prefill and 25c's decode, and every comparison here is against those. The synthetics carry tokenizer.json / tokenizer_config.json / chat_template.jinja / generation_config.json (make_synth.py copies them), so b70-serve starts on them; a random-weight synthetic never writes a tool call or a </think>: the reasoning / tool-call paths through HTTP are bolt_request_test's and bolt_stream_test's (host, scripted engine) - the card stages prove the engine half (snapshots, startup, the server's greedy chat == b70-decode, seeded sampling) and, on SergiioB's checkpoint, a real model's A4 and the agentic loop."
-rownote 62 "Decisions this row measures or leaves open (spec 25 §17): the sampling defaults when the snapshot's generation_config.json has no sampling key (SergiioB's: EOS 11 only) are NVIDIA's published T 1.0 / top-p 0.95 / EOS [2, 11] with NO top-k (the card names none, vLLM applies none; PROVISIONAL), a reasoning_effort of xhigh maps to the default like high (PROVISIONAL extension of Decision 13's table), --chat-template FILE is accepted for Bolt (its sha256 is printed and compared with Bolt's 6521afc7 in the startup line), and r62.benchy takes the lock itself (gpu-self: serve_benchy.sh does; the plan's table said gpu). The agentic transcript's hit rate has NO bar: it is recorded - truncate_history_thinking drops every earlier turn's reasoning when a new user message arrives (spec 25 §7's known miss), r62.agentic's report prints the first token each miss diverges at."
-rownote 62 "Hand back: bolt_snapshot_gpu_test's lines (the sizes - 170,229,760 B of state and 8,192 B of KV a position at the real shapes - then a / b / c per placement), the startup lines (template sha, sampling defaults, the split, the snapshot size), golden_server_test's chat lines, serve_a4_texts' and score.py's A4 tables with bolt_parser_check's counts (0 failures where the scorer finds a call), the agentic report (hit rate, per-turn cached / ideal / the divergence token) in its three arms, the llama-benchy tables beside the operator's vLLM XPU run of the same checkpoint (SergiioB's flags: TP 2, fp8 KV, --enable-prefix-caching --mamba-cache-mode align, --tool-call-parser qwen3_coder --reasoning-parser ultra_v3) and SergiioB's published table (decode 60.5 / 50.7 / 33.5 / 23.0 t/s at 886 / 8k / 32k / 64k, prefill 2925 / 2014 / 871 / 486 t/s)."
+rownote 62 "Written blind on the Mac (spec 25 §17) after rows 60 / 61 (25c's decode, 25d's prefill: neither has run on a card): nothing of 25e ran on a card. 25e adds NO kernel (BoltEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. It does change shared host code - toolcall.cc (one opt-in option on the Qwen stream: drop a call cut by the end of generation), chat_format, server.cc (the template's enable_thinking comes from the kwargs after the reasoning_effort mapping), CMake - r62.k0 re-runs the other models' template / parser / server tests. The template and tokenizer.json are read from our export's pinned snapshot in the HF cache (B70_BOLT_SNAPSHOT names another) and the tests SKIP 77 without it; nothing of the model is vendored but its config.json and generation_config.json files (tests/model/bolt/, Decision 20)."
+rownote 62 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. Run rows 60 and 61 first: the snapshot calls restore into 25d's prefill and 25c's decode, and every comparison here is against those. The synthetics carry tokenizer.json / tokenizer_config.json / chat_template.jinja / generation_config.json (make_synth.py copies them), so b70-serve starts on them; a random-weight synthetic never writes a tool call or a </think>: the reasoning / tool-call paths through HTTP are bolt_request_test's and bolt_stream_test's (host, scripted engine) - the card stages prove the engine half (snapshots, startup, the server's greedy chat == b70-decode, seeded sampling) and, on our g64 export, a real model's A4 and the agentic loop."
+rownote 62 "Decisions this row measures or leaves open (spec 25 §17): the sampling defaults when the snapshot's generation_config.json has no sampling key (EOS 11 only; ours carries NVIDIA's keys: sampled, T 1.0, top-p 0.95, EOS [2, 11]) are NVIDIA's published T 1.0 / top-p 0.95 / EOS [2, 11] with NO top-k (the card names none, vLLM applies none; PROVISIONAL), a reasoning_effort of xhigh maps to the default like high (PROVISIONAL extension of Decision 13's table), --chat-template FILE is accepted for Bolt (its sha256 is printed and compared with Bolt's 6521afc7 in the startup line), and r62.benchy takes the lock itself (gpu-self: serve_benchy.sh does; the plan's table said gpu). The agentic transcript's hit rate has NO bar: it is recorded - truncate_history_thinking drops every earlier turn's reasoning when a new user message arrives (spec 25 §7's known miss), r62.agentic's report prints the first token each miss diverges at."
+rownote 62 "Hand back: bolt_snapshot_gpu_test's lines (the sizes - 170,229,760 B of state and 8,192 B of KV a position at the real shapes - then a / b / c per placement), the startup lines (template sha, sampling defaults, the split, the snapshot size), golden_server_test's chat lines, serve_a4_texts' and score.py's A4 tables with bolt_parser_check's counts (0 failures where the scorer finds a call), the agentic report (hit rate, per-turn cached / ideal / the divergence token) in its three arms, the llama-benchy tables beside the operator's vLLM XPU run of the same checkpoint (the flags of SergiioB's README for their g128 checkpoint: TP 2, fp8 KV, --enable-prefix-caching --mamba-cache-mode align, --tool-call-parser qwen3_coder --reasoning-parser ultra_v3) and SergiioB's published table for their g128 checkpoint (decode 60.5 / 50.7 / 33.5 / 23.0 t/s at 886 / 8k / 32k / 64k, prefill 2925 / 2014 / 871 / 486 t/s)."
 stage r62.k0        62 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): 25e adds no kernel (every binary identical, G0), no existing server / template / tokenizer test changes behaviour (golden_server_test gained two opt-in env vars) - here the host tests that read the patched toolcall.cc / chat_format / server.cc: every template, toolcall and server test, openai_test, minja_ext_test"
 st_r62_k0() {
   need_pass g0.sha g0.bitwise g0.suite
@@ -3462,7 +3456,7 @@ st_r62_snap_synth() {
   jgrab snapshot '^bolt_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
   finish
 }
-stage r62.snapshot  62 default gpu  bolt_g128               -           "bolt_snapshot_gpu_test: restores bitwise the cold run, two cards, split change"
+stage r62.snapshot  62 default gpu  bolt_int4               -           "bolt_snapshot_gpu_test: restores bitwise the cold run, two cards, split change"
 st_r62_snapshot() {
   run_tests '^bolt_snapshot_gpu_real_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab snapshot '^bolt_snapshot_gpu_real_test$' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
@@ -3494,36 +3488,36 @@ st_r62_chat_synth() {
   grab_all chat 'chat of [0-9]+ prompt ids' 9
   finish
 }
-stage r62.chat      62 default gpu  bolt_g128               -           "golden_server_test --chat on b70-serve <bolt> == b70-decode (B70_SERVE_DECODE_AFTER=1: the chats are collected, b70-serve is stopped, THEN b70-decode runs on each saved prompt - two copies of 41.9 GB do not fit two cards)"
+stage r62.chat      62 default gpu  bolt_int4               -           "golden_server_test --chat on b70-serve <bolt> == b70-decode (B70_SERVE_DECODE_AFTER=1: the chats are collected, b70-serve is stopped, THEN b70-decode runs on each saved prompt - two copies of 41 GB do not fit two cards)"
 st_r62_chat() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap"
-  step_rc $? "b70-serve <SergiioB's g128>, two cards (the default), --max-len auto, seeded sampling"
+  step_rc $? "b70-serve <our g64 export>, two cards (the default), --max-len auto, seeded sampling"
   chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_WAIT_S=3600 B70_SERVE_DECODE_AFTER=1 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $snap --chat" \
-    "golden_server_test --chat against SergiioB's g128, two cards"
+    "golden_server_test --chat against our g64 export, two cards"
   grab_all auto 'max_len: auto ->|^split: ' 6
   grab_all memory '^memory' 8
   grab_all startup '^b70-serve: .*Nemotron 3.5 Bolt' 4
   grab_all chat 'chat of [0-9]+ prompt ids' 4
   finish
 }
-stage r62.a4        62 optin   gpu  bolt_g128,bolt_a4_int4  r62.chat    "A4 through b70-serve vs the g128 reference, and vs the BF16 one when the BF16 window has made it (B5's engine row)"
+stage r62.a4        62 optin   gpu  bolt_int4,bolt_a4_int4  r62.chat    "A4 through b70-serve vs the int4 reference, and vs the BF16 one when the BF16 window has made it (B5's engine row)"
 st_r62_a4() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local d=$STATE/a4-bolt set=tests/golden/toolcall-bolt
   x "mkdir -p $d && cp oracle-out-bolt-a4/*.int4.txt $d/ && { cp oracle-out-bolt-a4/*.bf16.txt $d/ 2> /dev/null || true; }"
   chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $d/serve serve 1 $snap --max-len 32768 -- --set $set --max-tokens 2048 --stop-at-eos" "A4 through b70-serve (greedy, up to 2048 new ids, the set's chat_template_kwargs)"
   chk "python3 tools/toolcall/serve_a4_texts.py $d/serve/server-log $set $d serve" "every scenario's prompt ids as the server rendered them equal the reference's (the template and tokenizer on the real tools), the raw texts written"
-  chk "python3 tools/toolcall/score.py --format qwen-think $d int4 serve | tee $d/score-int4.md" "scoring b70-serve against SergiioB's g128 reference (25a's int4 run)"
+  chk "python3 tools/toolcall/score.py --format qwen-think $d int4 serve | tee $d/score-int4.md" "scoring b70-serve against our export's int4 reference (25a's int4 run)"
   x "if ls $d/*.bf16.txt > /dev/null 2>&1; then python3 tools/toolcall/score.py --format qwen-think $d bf16 serve | tee $d/score-bf16.md; else echo 'no BF16 reference texts (the BF16 window has not run): skipped'; fi"
   step_rc $? "scoring against the BF16 reference (skipped when the BF16 window has not run: no <name>.bf16.txt)"
-  chk "python3 tools/toolcall/bolt_parser_check.py build/tests/bolt_parse_dump $d serve int4 | tee $d/parser-check.md" "the server's parser reads a call wherever the scorer does, on b70-serve's texts and the g128 reference's: 0 failures"
+  chk "python3 tools/toolcall/bolt_parser_check.py build/tests/bolt_parse_dump $d serve int4 | tee $d/parser-check.md" "the server's parser reads a call wherever the scorer does, on b70-serve's texts and the int4 reference's: 0 failures"
   grab_all a4 'match|/ 36|parse failure|files,|failures|scenarios written' 14
   finish
 }
-stage r62.agentic   62 optin   gpu  bolt_g128               r62.chat    "the agentic transcript (tests/golden/prompts/bolt_agentic.json: a coding session) as a LIVE agent loop through b70-serve on SergiioB's g128 with the prefix cache on: per request the prompt length, cached_tokens, the hit rate, the turns whose call the template re-renders in another order than generated, and (Review Focus 5) the first token each miss diverges at - three arms: the default cache (truncate_history_thinking true: the known miss at each new user message), truncate_history_thinking false (what the miss costs), --prefix-cache-gb 0"
+stage r62.agentic   62 optin   gpu  bolt_int4               r62.chat    "the agentic transcript (tests/golden/prompts/bolt_agentic.json: a coding session) as a LIVE agent loop through b70-serve on our g64 export with the prefix cache on: per request the prompt length, cached_tokens, the hit rate, the turns whose call the template re-renders in another order than generated, and (Review Focus 5) the first token each miss diverges at - three arms: the default cache (truncate_history_thinking true: the known miss at each new user message), truncate_history_thinking false (what the miss costs), --prefix-cache-gb 0"
 st_r62_agentic() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997' t=tests/golden/prompts/bolt_agentic.json
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156' t=tests/golden/prompts/bolt_agentic.json
   idle r62-agentic
   chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-default $snap $t --max-len 65536" "agentic loop, prefix cache auto (Bolt's defaults: thinking on, truncate_history_thinking true)"
   chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"chat_template_kwargs\": {\"truncate_history_thinking\": false}}' tools/box_validate/agentic_run.sh $STATE/agentic-keep $snap $t --max-len 65536" "agentic loop, truncate_history_thinking false"
@@ -3532,11 +3526,11 @@ st_r62_agentic() {
   grab_all agentic '^hit rate|^turns whose call|^ideal prefix|^turn [0-9]+ diverges|^\| [0-9]+ \|' 90
   finish
 }
-stage r62.benchy    62 optin   gpu-self bolt_g128,uvx       r62.chat    "llama-benchy at 886 / 8192 / 32000 / 65536 beside vLLM XPU (row 41's matrix)"
+stage r62.benchy    62 optin   gpu-self bolt_int4,uvx       r62.chat    "llama-benchy at 886 / 8192 / 32000 / 65536 beside vLLM XPU (row 41's matrix)"
 st_r62_benchy() {
-  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997'
+  local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation --runs 2"
-  say "the operator's vLLM XPU run of the SAME checkpoint first (SergiioB's README: vllm/vllm-openai-xpu, --tensor-parallel-size 2 --dtype bfloat16 --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 262144 --block-size 64 --enable-prefix-caching --mamba-cache-mode align --tool-call-parser qwen3_coder --reasoning-parser-plugin ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3, its patches from the card's b70/), then the same llama-benchy rows against it: uvx llama-benchy@\${BENCHY_VERSION:-0.4.0} --base-url http://127.0.0.1:<port>/v1 --model <served name> $f --pp 886 8192 32000 65536 --tg 128 --depth 0 (the prompt-length rows of SergiioB's table) and $f --pp 512 --tg 128 --depth 886 8192 32000 65536 (decode at depth, row 41's D)"
+  say "the operator's vLLM XPU run of the SAME checkpoint (our g64 export) first (the recipe of SergiioB's README for their g128 checkpoint: vllm/vllm-openai-xpu, --tensor-parallel-size 2 --dtype bfloat16 --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 262144 --block-size 64 --enable-prefix-caching --mamba-cache-mode align --tool-call-parser qwen3_coder --reasoning-parser-plugin ultra_v3_reasoning_parser.py --reasoning-parser ultra_v3, its patches from that repo's b70/), then the same llama-benchy rows against it: uvx llama-benchy@\${BENCHY_VERSION:-0.4.0} --base-url http://127.0.0.1:<port>/v1 --model <served name> $f --pp 886 8192 32000 65536 --tg 128 --depth 0 (the prompt-length rows of SergiioB's published table) and $f --pp 512 --tg 128 --depth 886 8192 32000 65536 (decode at depth, row 41's D)"
   chk "WAIT=3600 MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 886 8192 32000 65536 --tg 128 --depth 0 $f" "b70-serve <bolt> on two cards: pp = prompt length 886 / 8192 / 32000 / 65536, tg 128"
   chk "WAIT=3600 MODEL=$snap MAX_LEN=262144 SERVE_AFFINITY=0,1 BENCHY_VERSION=0.4.0 tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 886 8192 32000 65536 $f" "b70-serve <bolt> on two cards: decode at depth 886 / 8192 / 32000 / 65536"
   grab_all benchy '^\| ' 80

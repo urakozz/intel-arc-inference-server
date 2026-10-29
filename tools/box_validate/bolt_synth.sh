@@ -4,18 +4,18 @@
 #   tools/box_validate/bolt_synth.sh <data tree> synth-ckpt|synth-tests
 #
 #   synth-ckpt   tools/quantize/bolt/make_synth.py for each N in BOLT_SYNTH_LAYERS (default "8 12": N 8 the host tests',
-#                N 12 the card tests'), three checkpoints each - SergiioB's spelling (gptq-g128), its EXACT g64 expansion
+#                N 12 the card tests'), three checkpoints each - the GPTQ g128 spelling (gptq-g128), its EXACT g64 expansion
 #                (--expand-from: the pair whose device bytes and logits must be identical) and a native g64 packing - then
 #                check.py on each -> <data>/oracle-out-bolt-synth/n<N>-{g128,g64x,g64}/ + <name>.ACCEPTED (the check's log,
 #                written last: it marks done). N 8 ~3.9 GB, N 12 ~5.5 GB a checkpoint (measured on the Mac). Needs no
-#                weight download: the pinned snapshot's small files only (config / tokenizer / template, for the tokenizer
-#                copies and the remote code's name list).
+#                weight download: our export's pinned small files only (config / tokenizer / template / generation
+#                config, for the copies and the remote code's name list).
 #   synth-tests  tools/quantize/bolt/test_bolt_synth.py (the packer, the exact expansion, the config, widths), and with
 #                the N 8 pair present its --e2e (check.py ACCEPTED on both, bolt_ref.build_streamed logits on 16 ids bitwise
 #                equal)
 # Exit 77 (SKIP) when the small files are absent or the memory is short (BOLT_SYNTH_MIN_GB 24; the Mac: the container cap
 # BOLT_MEM_GB, default 40). DRY_RUN=1 prints every command and runs nothing.
-# Env: SNAP_BOLT (default models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym), BOLT_SYNTH_LAYERS,
+# Env: SNAP_BOLT (default models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ), BOLT_SYNTH_LAYERS,
 #      BOLT_SYNTH_MIN_GB, BOLT_MEM_GB, BOLT_LOCK, BOLT_LOCK_HELD, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -27,7 +27,7 @@ mac=0
 dry="${DRY_RUN:-0}"
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 export HF_CACHE="${HF_CACHE:-$hf}"
-INT4="${SNAP_BOLT:-models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym}"
+INT4="${SNAP_BOLT:-models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ}"
 layers="${BOLT_SYNTH_LAYERS:-8 12}"
 for n in $layers; do
   [[ "$n" =~ ^[0-9]+$ ]] && [ "$n" -ge 8 ] && [ "$n" -le 88 ] || { echo "bolt_synth: BOLT_SYNTH_LAYERS entry $n (8..88)" >&2; exit 2; }
@@ -50,7 +50,7 @@ if [ "$dry" != 1 ] && [ "${avail:-0}" -lt "$need" ]; then
   exit 77
 fi
 if [ "$dry" != 1 ] && { [ -z "$snapdir" ] || [ ! -s "$snapdir/config.json" ]; }; then
-  echo "SKIP_REASON bolt_synth: the pinned small files are not in $hf/hub (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')"
+  echo "SKIP_REASON bolt_synth: the pinned small files are not in $hf/hub (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors')"
   exit 77
 fi
 if [ $mac = 1 ] && [ "$dry" != 1 ] && [ -z "${BOLT_LOCK_HELD:-}" ]; then

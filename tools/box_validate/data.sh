@@ -163,31 +163,32 @@ case "${1:-}" in
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
     have vllm_image "the vLLM XPU image ${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest} (tools/probe/vllm_benchy.sh)" \
       docker image inspect "${VLLM_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
-    # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - SergiioB's g128 checkpoint (the served one, Decision 3), the
-    # BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
-    # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision b9f381d2... / 56702103... (df -h ~ first);
-    # a revision-pinned download writes no refs/main, so the keys name the snapshot directories themselves.
-    have bolt_small "Bolt's pinned small files (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')" \
-      bash -c 'ls "${HF_HOME:-$HOME/.cache/huggingface}"/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/b9f381d20cbd4cede9f729c2647d2542c4a35997/modeling_nemotron_h.py'
-    have bolt_g128 "SergiioB's Bolt int4 g128 ${SNAP_BOLT:-models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym} @ b9f381d2 (41.9 GB; df -h ~ first)" \
-      complete "$(bolt_snap "${SNAP_BOLT:-}" models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym b9f381d20cbd4cede9f729c2647d2542c4a35997)"
+    # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - our int4 g64 export (the served checkpoint, the only one),
+    # the BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
+    # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision 8932aa8d... / 56702103... (df -h ~ first);
+    # a revision-pinned download writes no refs/main, so the keys name the snapshot directories themselves. The int4
+    # references are ours only when their directory's SNAPSHOT file (bolt_oracle.sh writes it) names this snapshot: the
+    # 2026-10-22/23 ones were made from a third-party g128 export and read as missing.
+    bolt_ours="models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156"
+    have bolt_small "Bolt's pinned small files (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors')" \
+      test -s "$hf/hub/$bolt_ours/modeling_nemotron_h.py"
+    have bolt_int4 "our Bolt int4 g64 export ${SNAP_BOLT:-models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ} @ 8932aa8d (41 GB; df -h ~ first)" \
+      complete "$(bolt_snap "${SNAP_BOLT:-}" models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ 8932aa8d1844f91056c5b9433448075a842b9156)"
     have bolt_bf16 "NVIDIA's Bolt BF16 original ${SNAP_BOLT_BF16:-models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16} @ 56702103 (149.8 GB; gate Q's reference)" \
       complete "$(bolt_snap "${SNAP_BOLT_BF16:-}" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 567021037ff88364143e24ea05e6abd0f72086ff)"
-    have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden - the g128 form, the engine-format reference)" \
-      bash -c 'for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done'
+    have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} + SNAPSHOT = our export's (spec 25a: bolt_oracle.sh golden - the engine-format reference)" \
+      bash -c 'test "$(cat oracle-out-bolt/SNAPSHOT 2>/dev/null)" = "$1" || exit 1; for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done' _ "$bolt_ours"
     have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
       bash -c 'for p in bolt_short bolt_agentic; do test -s oracle-out-bolt-bf16/$p.ids && test -s oracle-out-bolt-bf16/$p.golden.safetensors || exit 1; done'
-    have bolt_a4_int4 "oracle-out-bolt-a4/ with Bolt's set and 36 <name>.int4.txt (spec 25a: bolt_oracle.sh a4 - the g128 reference alone, no BF16 needed)" \
-      bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36'
-    have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and 36 <name>.bf16.txt (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
-      bash -c 'test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    have bolt_a4_int4 "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 - the int4 reference alone, no BF16 needed)" \
+      bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
+    have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt, 36 <name>.bf16.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
+      bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
     # Spec 25b (queue row 59): the synthetic real-width checkpoints (bolt_synth.sh synth-ckpt: N 8 for the host tests, N 12
-    # for the card tests - each in SergiioB's g128 spelling, its exact g64 expansion and a native g64), and our g64 export
-    # (25q: not built when 25b was written; r59.load_rtn SKIPs 77 until it exists).
+    # for the card tests - each in the GPTQ g128 spelling, its exact g64 expansion and a native g64; our export's small
+    # files).
     have bolt_synth "oracle-out-bolt-synth/n{8,12}-{g128,g64x,g64}/ + .ACCEPTED (spec 25b: r59.synth - make_synth.py)" \
       bash -c 'for n in 8 12; do for f in g128 g64x g64; do test -s oracle-out-bolt-synth/n$n-$f/model.safetensors.index.json && test -f oracle-out-bolt-synth/n$n-$f.ACCEPTED || exit 1; done; done'
-    have bolt_rtn "Nemotron 3.5 Bolt's own int4 g64 export (spec 25q's; not built yet)" \
-      bash -c 'false'
     # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
     have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
       bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
