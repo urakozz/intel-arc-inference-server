@@ -4,7 +4,7 @@
 
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/bolt_tiny_check.py <snapshot>
 
-<snapshot> is the pinned SergiioB revision b9f381d2 in the HF cache (only its small files are read). The tiny config is
+<snapshot> is our export's pinned revision 8932aa8d in the HF cache (only its small files are read). The tiny config is
 built in code from the snapshot's llm_config (TINY_OVERRIDES: the real model's first 12 block types
 `M E M E M E M * E M E M`, hidden 256, Mamba 8 heads x 32 (d_inner 256), n_groups 2, state 16, conv 4, attention
 16 q / 1 kv x 16, MoE E per layer {16, 20, 24} with I {64, 128, 192}, top-9, latent 64, shared 128, vocab 512),

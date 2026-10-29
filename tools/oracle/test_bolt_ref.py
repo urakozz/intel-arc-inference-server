@@ -839,16 +839,16 @@ def test_layers_truncation():
 
 
 def test_expected_names():
-    """expected_names against the real indexes: SergiioB's (gptq-g128) and NVIDIA's BF16 original (when its small files
-    are in the HF cache), the vision / projector names aside."""
+    """expected_names against the real indexes: our export's (ar-g64, the `backbone` trunk) and NVIDIA's BF16 original
+    (when its small files are in the HF cache), the vision / projector names aside."""
     s = snapshot()
     cfg = ref.config(s)
     import json
     wm = json.load(open(os.path.join(s, "model.safetensors.index.json")))["weight_map"]
     lang = {k for k in wm if k.startswith("language_model.")}
-    want = set(ref.expected_names(cfg, "gptq-g128"))
+    want = set(ref.expected_names(cfg, "ar-g64", trunk="backbone"))
     assert lang == want, (sorted(lang - want)[:3], sorted(want - lang)[:3])
-    print(f"  gptq-g128: {len(want)} names = SergiioB's index minus its {len(wm) - len(lang)} vision / projector names")
+    print(f"  ar-g64: {len(want)} names = our export's index minus its {len(wm) - len(lang)} vision / projector names")
     hub = os.path.dirname(os.path.dirname(os.path.dirname(s)))
     bf = os.path.join(hub, "models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16", "snapshots")
     snaps = [os.path.join(bf, x) for x in sorted(os.listdir(bf))] if os.path.isdir(bf) else []
@@ -860,8 +860,8 @@ def test_expected_names():
         assert lang2 == want2, (sorted(lang2 - want2)[:3], sorted(want2 - lang2)[:3])
         print(f"  bf16: {len(want2)} names = NVIDIA's BF16 index minus its {len(wm2) - len(lang2)} vision / projector "
               f"names (the trunk spelled language_model.backbone.*)")
-    ar = ref.expected_names(cfg, "ar-g64")
-    assert len(ar) == len(want) - sum(1 for n in want if n.endswith(".g_idx"))
+    g128 = ref.expected_names(cfg, "gptq-g128")
+    assert len(g128) - sum(1 for n in g128 if n.endswith(".g_idx")) == len(want) == len(ref.expected_names(cfg, "ar-g64"))
 
 
 def test_layer_major():

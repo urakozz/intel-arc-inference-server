@@ -28,8 +28,8 @@
 #                                                   tests/golden/toolcall-bolt (make_set.py --from
 #                                                   tests/golden/toolcall --model bolt: the checkpoint's template,
 #                                                   key-sorted, reasoning on, medium_effort) to $OUT/set; `ref`
-#                                                   runs FORM=int4 (SergiioB's g128 checkpoint dequantised through
-#                                                   the exact g64 expansion - the engine-format reference) and
+#                                                   runs FORM=int4 (our g64 export, the served checkpoint,
+#                                                   dequantised - the engine-format reference) and
 #                                                   FORM=bf16 (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16) - FORM=both
 #                                                   (default) one after the other on the box - with bolt_ref.py
 #                                                   (the remote code, the Mamba kernel path, an fp32 cache), 2048 new
@@ -119,10 +119,10 @@ case "$m" in
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
   qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-192} ;;
-  bolt)   # spec 25a: FORM int4 (SergiioB's g128, the served checkpoint) | bf16 (the original) | both (the box)
+  bolt)   # spec 25a: FORM int4 (our g64 export, the served checkpoint) | bf16 (the original) | both (the box)
     FORM=${FORM:-both}
     case "$FORM" in
-      int4) repo=SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym ;;
+      int4) repo=urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ ;;
       bf16) repo=nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 ;;
       both) repo=- ;;
       *) echo "a4_ref: FORM is int4, bf16 or both (got $FORM)" >&2; exit 2 ;;

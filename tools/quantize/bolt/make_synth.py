@@ -11,14 +11,14 @@ attention block is 7, R's cache wants one), the real tensor names (`language_mod
 mixer.*}`, `embeddings`, `norm_f`, `language_model.lm_head.weight` - bolt_ref.expected_names, checked at the end), one
 shard a layer (shard 1: embeddings, norm_f, lm_head), `model_extra_tensors.safetensors` with a few vision / projector
 tensors the loader must skip by name (`vision_model.*`, `vision_projector.*`, `mlp1.*`) and one of them inside a
-language shard, the tokenizer files and chat template copied from the HF cache at run time (the engine reads none;
-tools/oracle does), `generation_config.json` (SergiioB's: eos 11).
+language shard, the tokenizer files, chat template and `generation_config.json` copied from our export's snapshot in the
+HF cache at run time (the engine reads the generation config; tools/oracle the rest).
 
-  gptq-g128   SergiioB's spelling: `quantization_config` the published one (quant_method gptq, group 128, the 44 `-:`
+  gptq-g128   the GPTQ g128 spelling: `quantization_config` make_config's (quant_method gptq, group 128, the 44 `-:`
               exclusions and the restating `+:` out_proj rule), every linear `.qweight` I32 [K/8][N] / `.scales` F16
               [K/128][N] SIGNED (AutoRound's: s = f16(-e / 8), e the group's value of largest magnitude, so about half
               the groups are negative) / `.qzeros` I32 [K/128][N/8] = 0x77777777 / `.g_idx` I32 [K] = i // 128
-  ar-g64      ours (25q): AutoRound's own writer's spelling (auto-round, auto_round:auto_gptq), group 64, no g_idx, scales
+  ar-g64      AutoRound's own writer's spelling (auto-round, auto_round:auto_gptq), group 64, no g_idx, scales
               F16 [K/64][N] signed. By default packed from the SAME random weights at g64 (a native g64 checkpoint);
               `--expand-from DIR` instead writes the EXACT g64 expansion of the g128 synthetic in DIR (every g128 scale
               row written to both g64 rows it covers, the nibbles untouched) - the pair whose device bytes and logits
@@ -57,7 +57,7 @@ from safetensors.torch import save_file  # noqa: E402
 FORMS = ("gptq-g128", "ar-g64")
 F32_NAMES = (".A_log", ".D", ".dt_bias", ".e_score_correction_bias")
 VISION_PREFIXES = ("vision_model.", "vision_projector.", "mlp1.")
-SMALL_FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja")
+SMALL_FILES = ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "generation_config.json")
 
 
 def _load(path: str, name: str):
@@ -223,7 +223,7 @@ def write_json(path: str, obj) -> None:
 
 def find_cache_snapshot():
     hits = sorted(glob.glob(os.path.expanduser(
-        "~/.cache/huggingface/hub/models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym/snapshots/*/")))
+        "~/.cache/huggingface/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/*/")))
     return hits[-1] if hits else None
 
 
@@ -234,7 +234,8 @@ def main() -> None:
     ap.add_argument("--form", required=True, choices=FORMS)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--tokenizer", help="a Bolt snapshot directory (tokenizer.json, tokenizer_config.json, "
-                                        "chat_template.jinja); default: the HF cache's")
+                                        "chat_template.jinja, generation_config.json); default: the HF cache's "
+                                        "copy of our export")
     ap.add_argument("--expand-from", help="ar-g64: the g128 synthetic whose exact g64 expansion to write")
     a = ap.parse_args()
     if a.expand_from and a.form != "ar-g64":
@@ -291,9 +292,6 @@ def main() -> None:
     write_json(os.path.join(a.out, "model.safetensors.index.json"),
                {"metadata": {"total_size": total}, "weight_map": dict(sorted(wm.items()))})
     write_json(os.path.join(a.out, "config.json"), cfg)
-    write_json(os.path.join(a.out, "generation_config.json"),
-               {"_from_model_config": True, "bos_token_id": 1, "eos_token_id": 11, "pad_token_id": 0,
-                "use_cache": True})
     write_json(os.path.join(a.out, "bolt_synth.json"),
                {"synthetic": True, "layers": a.layers, "form": a.form, "seed": a.seed,
                 "expanded_from": os.path.abspath(a.expand_from) if a.expand_from else None,

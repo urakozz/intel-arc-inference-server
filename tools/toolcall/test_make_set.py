@@ -154,7 +154,7 @@ def _bolt_snapshot():
     import glob
     for hub in (os.path.join(os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface")), "hub"), "/hf/hub"):
         for c in sorted(glob.glob(os.path.join(
-                hub, "models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym", "snapshots", "*"))):
+                hub, "models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ", "snapshots", "*"))):
             if os.path.exists(os.path.join(c, "chat_template.jinja")):
                 return c
     return None

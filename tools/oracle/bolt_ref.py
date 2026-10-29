@@ -6,8 +6,8 @@ The model is the checkpoint's OWN remote code (R = modeling_nemotron_h.py, blob 
 snapshot by bolt_remote.py - never vendored) run through transformers 5.19.0 (refused on any other version), built on
 `meta` and LAYER-STREAMED (stream.py: the embedding, norm_f and the untied lm_head resident; each block materialised by
 a forward pre-hook and dropped after). Routed experts are read on demand - only the ones a token routes to, from a
-forward hook on the router - bf16 from the original or dequantised from int4 (SergiioB's g128 via the exact
-g128 -> g64 expansion, or our g64) by stream.dequant_t: the ENGINE-FORMAT reference.
+forward hook on the router - bf16 from the original or dequantised from int4 (our g64 export, the served checkpoint, or
+the GPTQ g128 spelling via the exact g128 -> g64 expansion) by stream.dequant_t: the ENGINE-FORMAT reference.
 
 The Mamba mixers run R's kernel path (`cuda_kernels_forward`) on the CPU through bolt_mamba_ops' plain-torch training
 kernels (spec 25 Decision 1: fp32 inside, no dt clamp, the twin's orders), with an fp32 SSM / conv cache passed in
@@ -147,15 +147,17 @@ def kinds(cfg: dict) -> list[str]:
     return [b["block_type"] for b in cfg["block_configs"]]
 
 
-def expected_names(cfg: dict, form: str) -> list[str]:
+def expected_names(cfg: dict, form: str, trunk: str | None = None) -> list[str]:
     """Every language-model tensor of a checkpoint of `cfg` in `form` (the vision / projector tensors excluded):
       "bf16"       NVIDIA's BF16 original: `language_model.backbone.*` (the index's spelling), every linear `.weight`
-      "gptq-g128"  SergiioB's: `language_model.model.*`, every linear `.qweight` / `.qzeros` / `.scales` / `.g_idx`
-      "ar-g64"     ours (25q): `language_model.model.*`, `.qweight` / `.qzeros` / `.scales` (no g_idx)
+      "gptq-g128"  the GPTQ g128 spelling: `language_model.model.*`, every linear `.qweight` / `.qzeros` / `.scales` /
+                   `.g_idx`
+      "ar-g64"     AutoRound's g64: `language_model.model.*` (the synthetics; our export spells it `backbone`: pass
+                   trunk="backbone"), `.qweight` / `.qzeros` / `.scales` (no g_idx)
     The kept tensors (router, its F32 bias, A_log / D / dt_bias, conv, norms, embeddings, lm_head) as shipped."""
     if form not in ("bf16", "gptq-g128", "ar-g64"):
         raise ValueError(form)
-    trunk = "backbone" if form == "bf16" else "model"
+    trunk = trunk or ("backbone" if form == "bf16" else "model")
     sfx = [".weight"] if form == "bf16" else list(INT4) + ([".g_idx"] if form == "gptq-g128" else [])
 
     def lin(base):
@@ -335,7 +337,7 @@ def moe_routed_only(self, hidden_states, topk_indices, topk_weights):
 def build_streamed(snapshot: str, cfg: dict, weights: str = "int4", dtype: torch.dtype = torch.bfloat16,
                    path: str = "kernel", keep=(), expert_cache_gb: float = 0.0):
     """R's NemotronHPuzzleForCausalLM on meta; embeddings, norm_f and lm_head resident; blocks streamed; routed experts
-    lazy. `weights` names the checkpoint's form - "int4" (SergiioB's g128 or our g64, dequantised: the engine-format
+    lazy. `weights` names the checkpoint's form - "int4" (our g64 or the GPTQ g128 spelling, dequantised: the engine-format
     reference) or "bf16" (the original); a snapshot of the other form is refused. The model carries `bolt_pf` (the
     prefetcher), `bolt_lazy`, `bolt_ckpt`, `bolt_layer_sd`, `bolt_cfg`."""
     ns = ns_for(snapshot)
@@ -1209,7 +1211,7 @@ def main() -> None:
         p.add_argument("snapshot")
         p.add_argument("--layers", type=int)
         p.add_argument("--weights", default=weights, choices=["int4", "bf16"],
-                       help="the checkpoint's form: int4 (SergiioB's g128 / our g64, dequantised) or bf16 (the original)")
+                       help="the checkpoint's form: int4 (our g64 / the GPTQ g128 spelling, dequantised) or bf16 (the original)")
         p.add_argument("--chunk", type=int, default=-1, help="prefill chunk (-1: whole up to 4096 ids, else 2048)")
         p.add_argument("--keep", default="", help="blocks kept resident once loaded: '', 'all' or a comma list")
     r = sub.add_parser("run")

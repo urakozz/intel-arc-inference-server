@@ -7,7 +7,8 @@ tokens, the template, and torch's CPU behaviours the reference depends on. docs/
     bolt_facts.py <snapshot dir> [--section cite,checkpoint,bytes,quant,tokens,template,prompts,ties,gemm,sum9]
                   [--bf16 <BF16 snapshot dir>] [--cache DIR] [--headers] [--sample] [--write-fixtures]
 
-<snapshot> is SergiioB's pinned revision in the HF cache (small files only). Shard headers and tensor data come from
+<snapshot> is our export's pinned revision in the HF cache (small files only; the served checkpoint,
+urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ @ 8932aa8d). Shard headers and tensor data come from
 the local shard when it exists, else an HTTP range request to huggingface.co at the pinned revision (`--headers`
 allows the header requests, ~2 MB a shard; `--sample` the data reads: named small tensors and a few scale /
 qzeros / g_idx rows, a few MB in all), cached under --cache (default: <main checkout>/oracle-out-bolt-facts, outside
@@ -20,7 +21,8 @@ Sections:
               per-layer (type, E, I) table, the vision / projector names, the parameter count; with --bf16 the BF16
               original's names (the `backbone` trunk) and its header dtypes
   bytes       spec 25 §3's parameter counts and int4 g64 bytes re-derived from the shapes
-  quant       quantization_config (the `+:` rule quoted); sampled tensors: qzeros, g_idx, the scales' sign / subnormal
+  quant       quantization_config (`dynamic`'s `+:` rules / `extra_config` quoted); sampled tensors: qzeros, g_idx (the GPTQ
+              g128 spelling's), the scales' sign / subnormal
               / zero counts, A_log / D / dt_bias / e_score_correction_bias ranges and the dt-clamp census (per Mamba
               layer the heads with softplus(dt_bias) < 0.001, R's fallback clamp)
   tokens      tokenizer.json (vocab, the added tokens and their special flags), both generation configs,
@@ -50,7 +52,7 @@ import urllib.request  # noqa: E402
 
 SECTIONS = ("cite", "checkpoint", "bytes", "quant", "tokens", "template", "prompts", "ties", "gemm", "sum9")
 REPO = os.path.dirname(os.path.dirname(_HERE))
-SERGIIOB = ("SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym", "b9f381d20cbd4cede9f729c2647d2542c4a35997")
+OURS = ("urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ", "8932aa8d1844f91056c5b9433448075a842b9156")
 NVIDIA_BF16 = ("nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16", "567021037ff88364143e24ea05e6abd0f72086ff")
 DTYPE_BYTES = {"BF16": 2, "F16": 2, "F32": 4, "I32": 4, "I64": 8, "U8": 1, "F64": 8}
 
@@ -396,10 +398,13 @@ def sec_bytes(info: dict, llm: dict) -> None:
 # ------------------------------------------------------------------------------------------------
 # quant: the config and sampled tensors
 
-SAMPLE_LINEARS = ("language_model.model.layers.0.mixer.out_proj", "language_model.model.layers.0.mixer.in_proj",
-                  "language_model.model.layers.1.mixer.experts.0.down_proj",
-                  "language_model.model.layers.1.mixer.experts.0.up_proj",
-                  "language_model.model.layers.7.mixer.q_proj", "language_model.model.layers.1.mixer.shared_experts.up_proj")
+SAMPLE_LINEARS = ("layers.0.mixer.out_proj", "layers.0.mixer.in_proj", "layers.1.mixer.experts.0.down_proj",
+                  "layers.1.mixer.experts.0.up_proj", "layers.7.mixer.q_proj", "layers.1.mixer.shared_experts.up_proj")
+
+
+def trunk_of(wm: dict) -> str:
+    """The trunk prefix: `language_model.backbone.` (ours) or `language_model.model.` (the GPTQ g128 spelling)."""
+    return "language_model.backbone." if "language_model.backbone.embeddings.weight" in wm else "language_model.model."
 
 
 def f16_stats(t) -> str:
@@ -414,7 +419,9 @@ def sec_quant(src: Source, info: dict, llm: dict) -> None:
     import torch
     cfg = src.json("config.json")
     q = cfg["quantization_config"]
-    print("## quant: quantization_config " + json.dumps({k: v for k, v in q.items() if k != "dynamic"}))
+    print("## quant: quantization_config " + json.dumps({k: v for k, v in q.items() if k not in ("dynamic", "extra_config")}))
+    ec = q.get("extra_config", {})
+    print(f"extra_config: {len(ec)} module(s): " + ", ".join(sorted({json.dumps(v) for v in ec.values()})))
     dyn = q.get("dynamic", {})
     plus = {k: v for k, v in dyn.items() if k.startswith("+:")}
     minus = [k for k in dyn if k.startswith("-:")]
@@ -424,7 +431,8 @@ def sec_quant(src: Source, info: dict, llm: dict) -> None:
     if not shapes:
         print("(no headers: --headers)")
         return
-    for b in SAMPLE_LINEARS:
+    p = trunk_of(wm)
+    for b in (p + s for s in SAMPLE_LINEARS):
         sc = b + ".scales"
         raw = src.tensor_bytes(wm[sc], sc)
         if raw is None:
@@ -446,7 +454,7 @@ def sec_quant(src: Source, info: dict, llm: dict) -> None:
             continue
         vals = {}
         for nm in ("dt_bias", "A_log", "D"):
-            k = f"language_model.model.layers.{i}.mixer.{nm}"
+            k = f"{p}layers.{i}.mixer.{nm}"
             raw = src.tensor_bytes(wm[k], k)
             vals[nm] = None if raw is None else as_tensor(raw, dtypes[k], shapes[k])
         if vals["dt_bias"] is None:
@@ -469,7 +477,7 @@ def sec_quant(src: Source, info: dict, llm: dict) -> None:
     for i, b in enumerate(llm["block_configs"]):
         if b["block_type"] != "moe":
             continue
-        k = f"language_model.model.layers.{i}.mixer.gate.e_score_correction_bias"
+        k = f"{p}layers.{i}.mixer.gate.e_score_correction_bias"
         raw = src.tensor_bytes(wm[k], k)
         if raw is None:
             continue
@@ -501,7 +509,7 @@ def sec_tokens(src: Source, bf16: Source | None) -> None:
     print(f"pre_tokenizer: {pre[:400]}")
     tc = src.json("tokenizer_config.json")
     print(f"tokenizer_config: {json.dumps({k: v for k, v in tc.items() if k not in ('added_tokens_decoder',)})[:600]}")
-    for s, what in ((src, "SergiioB"), (bf16, "NVIDIA BF16")):
+    for s, what in ((src, "our export"), (bf16, "NVIDIA BF16")):
         if s is not None:
             print(f"generation_config ({what}): {json.dumps(s.json('generation_config.json'))}")
     try:
@@ -606,7 +614,7 @@ def sec_template(src: Source, write: bool) -> None:
     if write:
         p = os.path.join(REPO, "tests", "server", "bolt_template_cases.json")
         with open(p, "w", encoding="utf-8") as f:
-            json.dump({"source": f"{SERGIIOB[0]}@{SERGIIOB[1]} chat_template.jinja sha256 {sha256(raw)}, rendered by "
+            json.dump({"source": f"{OURS[0]}@{OURS[1]} chat_template.jinja sha256 {sha256(raw)}, rendered by "
                                  f"transformers' apply_chat_template (tools/oracle/bolt_facts.py --section template "
                                  f"--write-fixtures)", "cases": cases}, f, indent=1, ensure_ascii=False)
             f.write("\n")
@@ -700,7 +708,7 @@ def main(argv=None) -> None:
     bad = [s for s in secs if s not in SECTIONS]
     if bad:
         raise SystemExit(f"unknown sections {bad}")
-    src = Source(a.snapshot, SERGIIOB, a.cache, a.headers, a.sample)
+    src = Source(a.snapshot, OURS, a.cache, a.headers, a.sample)
     bf = Source(a.bf16, NVIDIA_BF16, a.cache, a.headers, False) if a.bf16 else None
     llm = json.loads(src.small("config.json"))["llm_config"]
     info: dict = {"shapes": {}}

@@ -110,7 +110,7 @@ class SkipTiny(Exception):
 
 
 def bolt_snapshot(tmp: str):
-    """Spec 25a: bolt_make_tiny's pattern12 (the real first 12 blocks, bf16, SergiioB's language_model.model.* names,
+    """Spec 25a: bolt_make_tiny's pattern12 (the real first 12 blocks, bf16, the language_model.model.* names,
     what the A4 reference loads in the bf16 form) written into tmp; R comes from the pinned snapshot in the HF cache."""
     try:
         mk = _load(os.path.join(ORACLE, "bolt_make_tiny.py"), "bolt_make_tiny")
