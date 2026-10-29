@@ -1036,8 +1036,8 @@ layers that fit, or on the synthetic checkpoints (4 real-width layers), and says
 
 ## Nemotron 3.5 Bolt (spec 25)
 
-**Nothing here is measured on a card yet.** Bolt (`nemotron_h_omni` over `nemotron_h_puzzle`, SergiioB's int4 g128 export,
-41.9 GB on disk) runs its own engine on two cards (spec 25c's decode, 25d's prefill, 25e's serving; no `nb_*` binary has been
+**Nothing here is measured on a card yet.** Bolt (`nemotron_h_omni` over `nemotron_h_puzzle`, our int4 g64 export
+`urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ`, 41 GB on disk) runs its own engine on two cards (spec 25c's decode, 25d's prefill, 25e's serving; no `nb_*` binary has been
 compiled by ocloc). Weights 40.469 GB with the int8 head (derived, spec 25 §14); split 48: 19.93 / 20.54 GB; 262144 positions
 fit two cards (24.17 / 24.23 GB of 32.53 with the scratches, derived). Decode reads ~5.5 GB a token (derived, spec 25 §3's descriptor sum) plus 8,192 B of KV a
 position and 0.336 GB of fp32 SSM state (derived: 40 blocks x 4 MiB read and written; spec 25 Decision 2; ESTIMATED as a share of the step); 653 launches a token (533 with every arm). SergiioB's vLLM 0.31 XPU numbers on two B70

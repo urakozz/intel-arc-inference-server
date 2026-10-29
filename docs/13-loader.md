@@ -906,12 +906,13 @@ in `tests/loader/ct/`.
 
 ## Nemotron 3.5 Bolt (spec 25b): the exact relaxations, signed scales, one layout from two sources
 
-Bolt's shipping checkpoint (SergiioB's AutoRound g128 GPTQ export, spec 25 §1.3) needs two loader relaxations and an
-audit, all in `src/loader/quant.{h,cc}` - shared code, so each is the narrowest change and every existing test and
+Bolt's GPTQ g128 spelling (the third-party AutoRound g128 export spec 25 §1.3 chose first; since 2026-10-29 the served
+checkpoint is our own g64 export `urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ`, the g128 spelling a
+format the synthetics keep tested) needs two loader relaxations and an audit, all in `src/loader/quant.{h,cc}` - shared code, so each is the narrowest change and every existing test and
 refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is written first and holds both directions):
 
 - **A restating `+:` dynamic rule is accepted, nothing else.** `QuantConfig::parse` used to refuse every `+:` rule
-  (the broken-MTP-config guard: a `+:` rule that CHANGES a module's quantisation). SergiioB's `dynamic` carries 44 `-:`
+  (the broken-MTP-config guard: a `+:` rule that CHANGES a module's quantisation). The g128 spelling's `dynamic` carries 44 `-:`
   exclusions and one `"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": true}` - exactly the top level
   restated. A `+:` rule whose value is an object of exactly the three keys `bits`, `group_size`, `sym`, each equal to
   the top level's, is a no-op, counted in `QuantConfig::dynamic_restating` (the 44 `-:` rules stay in
@@ -922,8 +923,9 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
 - **BF16 GPTQ `.scales` are exact-or-refused.** `classify` (and the `.scales` branch of `assert_quant_invariants`)
   accept `.scales` stored BF16 beside a GPTQ `.qweight` and convert each value with the existing `bf16_to_f16_exact`
   (compressed-tensors' converter): a value f16 cannot hold exactly (above 65504, below f16's subnormals' bits, NaN /
-  Inf) throws naming `<linear>.scales[<element>]`. No checkpoint we have ships them (SergiioB's are all F16, and 25q's
-  Decision 9 writes F16); any dtype other than F16 / BF16 is still refused.
+  Inf) throws naming `<linear>.scales[<element>]`. Our served g64 export ships them: its 40 Mamba `out_proj` linears' `.scales`
+  are BF16 (every other linear's F16; read from its shard headers 2026-10-29) - r59.load_real is the first load of real
+  BF16 scales; any dtype other than F16 / BF16 is still refused.
 - **Signed scales: audited, nothing to change.** AutoRound's symmetric scale is signed (about half of every Bolt
   linear's scales are negative - spec 25 §1.3, measured on the synthetics at 50.0 %); the dequant is `(q - 8) x scale`
   everywhere. The sign is the f16 word's top bit and every path moves f16 words verbatim: the g128 -> g64 expansion
@@ -938,8 +940,9 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
 `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
 `LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`) reads **either** spelling into one device layout:
 
-- **One layout from two sources.** SergiioB's g128 GPTQ checkpoint (`g_idx` = `i // 128`, signed F16 scales, the restating
-  `+:` rule) goes through `classify`'s exact g128 -> g64 scale expansion; our g64 export (25q: no `g_idx`) is read as it is.
+- **One layout from two sources.** A checkpoint in the GPTQ g128 spelling (`g_idx` = `i // 128`, signed F16 scales, the
+  restating `+:` rule) goes through `classify`'s exact g128 -> g64 scale expansion; our g64 export (no `g_idx`,
+  `extra_config` naming the 40 routers as kept, the trunk spelled `language_model.backbone.`) is read as it is.
   A linear's group is decided by its scale rows (a g64 and a g128 linear may even share a checkpoint), never by a label,
   and the repack only ever sees g64 words and scales - so the same weights packed g64 with each g128 scale written to both
   g64 rows give **byte-identical** device buffers (`bolt_repack_test`: both layouts, fused, the expert block;
@@ -955,13 +958,13 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   (N 6400); S 1. `BoltDesc::linears(l)` is the one source; the byte count is the same at either layout.
 - **Kept tensors.** The block norms, conv taps (`[10240][1][4]`, tap 0 the OLDEST position) and bias, the gated-norm weight
   widened to fp32 (exact); `D`, `dt_bias` verbatim and `A = -exp(A_log)` (fp32; `A_log` / `D` / `dt_bias` accepted F32 -
-  SergiioB's, bf16 values - or BF16 - NVIDIA's original -, each finite, `A_log <= 80`); `e_score_correction_bias` F32. The
+  our export's - or BF16 - NVIDIA's original -, each finite, `A_log <= 80`); `e_score_correction_bias` F32. The
   exp is `common::exp_torch` (`src/common/exp_torch.h`, Sleef's expf u10 in plain C++: the same on every host).
   **Measured** (tools: a dump of the C++ values compared in the oracle image, torch 2.14.1 CPU, MKL): over all 33,266 bf16
   values in [-7, 9] (A_log's range is -6.81 .. 8.81) `exp_torch` differs from `torch.exp(x.float())` on 196 values (0.59 %),
   never by more than 1 ulp; libm's `expf` differs on 192 (`tools/oracle/bolt_exp_dump.cc` + `bolt_exp_compare.py` reproduce it). No host function reproduces torch's MKL `vsExp` bitwise; `A`
   feeds `exp(dt x A)` on the card, so a 1 ulp difference in a constant is far below the kernels' own tolerance.
-- **What is skipped is named.** The 849 vision / projector tensors of SergiioB's checkpoint (`vision_model.*`,
+- **What is skipped is named.** The 458 vision / projector tensors of our export (`vision_model.*`,
   `vision_projector.*`, `mlp1.*`) are skipped by prefix and counted; every other tensor is consumed (unconsumed = 0, the
   `.qzeros` / `.g_idx` beside a linear excepted: their invariants are `assert_quant_invariants`'s). The trunk is
   `language_model.model.`; NVIDIA's own `language_model.backbone.` is accepted only when a checkpoint ships it

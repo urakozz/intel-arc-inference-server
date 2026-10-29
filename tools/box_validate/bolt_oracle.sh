@@ -10,18 +10,18 @@
 #   tests        test_bolt_make_tiny.py, test_bolt_ref.py, bolt_tiny_check.py and the toolcall tests (test_score.py,
 #                test_make_set.py, test_oracle_batched.py test_bolt) on tiny puzzles built from the pinned snapshot's
 #                SMALL files (r57.host)
-#   ppl          perplexity on prose.txt, code.txt (no BOS) and bolt_agentic.ids for each form present (SergiioB's g128
+#   ppl          perplexity on prose.txt, code.txt (no BOS) and bolt_agentic.ids for each form present (our g64 export
 #                dequantised; the BF16 original) -> <data>/oracle-out-bolt{,-bf16}/ppl.log; finite, code below an
 #                ESTIMATED sanity ceiling of 10 (recorded per text)
 #   hfcheck      bolt_ref.py hfcheck --layers 12 on 2048 ids of bolt_4k + 4 cached steps for each form present: the
 #                port = its restated chain BITWISE (exit 1 otherwise), R's torch fallback recorded; fp32 when
 #                MemAvailable >= BOLT_FP32_GB (64), else bf16 -> <data>/oracle-out-bolt{,-bf16}/hfcheck.log
-#   golden       SergiioB's g128 dequantised (the engine-format reference every B3 gate reads), every golden prompt
+#   golden       our g64 export dequantised (the engine-format reference every B3 gate reads), every golden prompt
 #                (BOLT_PROMPTS: bolt_short bolt_4k bolt_agentic bolt_32k), --gen 32 --taps -> <data>/oracle-out-bolt/
 #                <p>.{ids,golden.safetensors,log}; each log's gap lines (the 9th / 10th sel per MoE block:
 #                B70_BOLT_TIE_TOL's evidence, Decision 11) and SSM-state magnitudes
 #   golden-bf16  the BF16 original on BOLT_BF16_PROMPTS (bolt_short bolt_agentic) -> <data>/oracle-out-bolt-bf16/
-#   export <dir> the golden prompts on an int4 export dequantised (25q's g64, 25b's synthetics; mounted as ORACLE_SNAP)
+#   export <dir> the golden prompts on an int4 checkpoint dequantised (25b's synthetics; mounted as ORACLE_SNAP)
 #                -> <data>/oracle-out-bolt-<name>/ (<name> = the directory's base name)
 #   a4 / a4-bf16 tools/toolcall/a4_ref.sh bolt set + ref FORM=int4 / FORM=bf16 (36 scenarios, greedy, 2048 new ids,
 #                reasoning on, batched) -> <data>/oracle-out-bolt-a4/<name>.{int4,bf16}.{ids,txt,gap} (DAYS,
@@ -30,15 +30,18 @@
 #                and verdict -> <data>/oracle-out-bolt-a4/{gateq.json,gateq.log}: spec 25 B5's table, a RECORDED
 #                measurement (Decision 3)
 # Golden runs are per prompt resumable (written into <tree>/oracle-out-bolt*.partial/, moved when complete, the golden
-# file last). Exit 77 (SKIP) when the RAM is short (BOLT_REF_MIN_GB: 8 tests, 48 the g128 form, 96 the BF16 one -
-# ESTIMATED; the box: MemAvailable; the Mac: the ORACLE_MEMORY cap) or a snapshot is absent / incomplete (every shard
+# file last). The int4 form's output directories (oracle-out-bolt, oracle-out-bolt-a4) carry a SNAPSHOT file naming the
+# snapshot they were made from (<cache dir>/snapshots/<sha>; data.sh's keys require our export's): one without it, or
+# naming another, is another checkpoint's (the 2026-10-22/23 ones: a third-party g128 export) - it is set aside whole as
+# <dir>.stale-<time> (never deleted) and the run starts it again. Exit 77 (SKIP) when the RAM is short (BOLT_REF_MIN_GB:
+# 8 tests, 48 the int4 form, 96 the BF16 one - ESTIMATED; the box: MemAvailable; the Mac: the ORACLE_MEMORY cap) or a snapshot is absent / incomplete (every shard
 # of its index, no *.incomplete blob - never downloaded here: df -h ~ first, then hf download by hand, pinned):
-#   hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997
+#   hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156
 #   hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff
 # DRY_RUN=1 prints every command, the floor and an ESTIMATED time per prompt, runs nothing.
 # The Mac: ORACLE_IMAGE agnes-ref-img, the container capped at BOLT_MEM_GB (40), the whole run under flock(2) on
 # BOLT_LOCK (/tmp/b70-cpu-model.lock: one model job on the Mac's CPU at a time).
-# Env: SNAP_BOLT (models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym), SNAP_BOLT_BF16
+# Env: SNAP_BOLT (models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ), SNAP_BOLT_BF16
 #      (models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16), BOLT_PROMPTS, BOLT_BF16_PROMPTS, BOLT_GEN (32),
 #      BOLT_REF_MIN_GB, BOLT_FP32_GB, BOLT_KEEP ('' | all: blocks resident once read),
 #      BOLT_MEM_GB, BOLT_LOCK, BOLT_LOCK_HELD, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
@@ -65,7 +68,7 @@ bprompts="${BOLT_BF16_PROMPTS:-bolt_short bolt_agentic}"
 for p in $prompts $bprompts; do
   [ -s "tests/golden/prompts/$p.ids" ] || { echo "bolt_oracle: no tests/golden/prompts/$p.ids" >&2; exit 2; }
 done
-INT4="${SNAP_BOLT:-models--SergiioB--Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym}"
+INT4="${SNAP_BOLT:-models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ}"
 BF16="${SNAP_BOLT_BF16:-models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16}"
 if [ $mac = 1 ]; then
   SITE=oracle-out-q4exp/site
@@ -85,11 +88,12 @@ esac
 echo "bolt_oracle: $mode${arg:+ $arg} -> $data; $memwhat ${avail:-0} GB (need $need)"
 
 snap_of() { ls -d "$hf/hub/$1"/snapshots/*/ 2>/dev/null | head -1; }
-# complete <cache dir name>: config.json, every shard the index names, no *.incomplete blob (a download in flight)
+# complete <cache dir name>: config.json, every shard the index names, no *.incomplete blob written in the last hour (a
+# download in flight; an older one is an interrupted download's leftover - the box's copy of our export has 8)
 complete() {
   local d; d=$(snap_of "$1")
   [ -n "$d" ] && [ -f "$d/config.json" ] || return 1
-  ls "$hf/hub/$1/blobs/"*.incomplete > /dev/null 2>&1 && return 1
+  [ -n "$(find "$hf/hub/$1/blobs/" -maxdepth 1 -name '*.incomplete' -mmin -60 2>/dev/null | head -1)" ] && return 1
   python3 - "$d" <<'EOF'
 import json, os, sys
 d = sys.argv[1]
@@ -103,6 +107,24 @@ forms=()
 complete "$INT4" && forms+=(int4)
 complete "$BF16" && forms+=(bf16)
 model_of() { if [ "$1" = bf16 ]; then echo "$BF16"; else echo "$INT4"; fi; }
+# own_dir <out dir>: make <out> this int4 snapshot's - set a directory whose SNAPSHOT file names another (or that has none)
+# aside whole as <out>.stale-<time>, then write SNAPSHOT. snap_want: what SNAPSHOT says (data.sh compares it to ours).
+snap_want() { echo "$INT4/snapshots/$(basename "$(snap_of "$INT4")")"; }
+own_dir() {
+  local out="$1" want aside
+  want=$(snap_want)
+  if [ -z "$(snap_of "$INT4")" ]; then   # nothing to name (a4-bf16 needs only the BF16 original): touch nothing
+    echo "bolt_oracle: $INT4 is not in $hf/hub - $out is neither set aside nor claimed"
+    [ "$dry" = 1 ] || mkdir -p "$out"
+    return 0
+  fi
+  if [ -e "$out" ] && [ "$(cat "$out/SNAPSHOT" 2>/dev/null)" != "$want" ]; then
+    aside="$out.stale-$(date +%Y%m%d-%H%M%S)"
+    echo "bolt_oracle: $out was made from $(cat "$out/SNAPSHOT" 2>/dev/null || echo 'another checkpoint (no SNAPSHOT file)'), not $want - set aside as $aside"
+    [ "$dry" = 1 ] || mv "$out" "$aside" || return 1
+  fi
+  [ "$dry" = 1 ] || { mkdir -p "$out" && printf '%s\n' "$want" > "$out/SNAPSHOT"; }
+}
 outdir_of() { if [ "$1" = bf16 ]; then echo "$data/oracle-out-bolt-bf16"; else echo "$data/oracle-out-bolt"; fi; }
 
 if [ "$dry" = 1 ]; then
@@ -125,13 +147,13 @@ fi
 miss() { echo "SKIP_REASON bolt_oracle: $1"; exit 77; }
 if [ "$dry" != 1 ]; then
   case "$mode" in
-    tests) small "$INT4" || miss "the pinned snapshot's small files are not in $hf/hub (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d20cbd4cede9f729c2647d2542c4a35997 --exclude '*.safetensors')" ;;
-    golden) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download SergiioB/Nemotron-3.5-Bolt-74B-A9B-AutoRound-W4A16-G128-sym --revision b9f381d2...: 41.9 GB, df -h ~ first)" ;;
-    a4) complete "$INT4" || miss "$INT4 is absent or incomplete (41.9 GB)" ;;
+    tests) small "$INT4" || miss "the pinned snapshot's small files are not in $hf/hub (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors')" ;;
+    golden) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d...: 41 GB, df -h ~ first)" ;;
+    a4) complete "$INT4" || miss "$INT4 is absent or incomplete (41 GB)" ;;
     golden-bf16|a4-bf16) complete "$BF16" || miss "$BF16 is absent or incomplete (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 56702103...: 149.8 GB, df -h ~ first)" ;;
-    gateq) { complete "$INT4" && complete "$BF16"; } || miss "gate Q needs both $INT4 and $BF16 complete (41.9 + 149.8 GB)" ;;
+    gateq) { complete "$INT4" && complete "$BF16"; } || miss "gate Q needs both $INT4 and $BF16 complete (41 + 149.8 GB)" ;;
     ppl|hfcheck) [ ${#forms[@]} -gt 0 ] || miss "neither $INT4 nor $BF16 is complete in $hf/hub" ;;
-    export) [ -f "$arg/config.json" ] || miss "$arg has no config.json (25q's export, or 25b's synthetic checkpoint)" ;;
+    export) [ -f "$arg/config.json" ] || miss "$arg has no config.json (25b's synthetic checkpoint)" ;;
   esac
 fi
 [ ${#forms[@]} -gt 0 ] || forms=(int4)      # DRY_RUN with nothing downloaded: show the int4 form's commands
@@ -199,7 +221,7 @@ case "$mode" in
   ppl|hfcheck)
     for f in "${forms[@]}"; do
       out=$(outdir_of "$f")
-      [ "$dry" = 1 ] || mkdir -p "$out"
+      if [ "$f" = int4 ]; then own_dir "$out" || { rc=1; continue; }; elif [ "$dry" != 1 ]; then mkdir -p "$out"; fi
       if [ "$mode" = ppl ]; then
         cmd="python3 tools/oracle/bolt_ref.py ppl \"\$SNAP\" --weights $f $kflag --text prose=tests/golden/prompts/prose.txt \
           --text code=tests/golden/prompts/code.txt --ids agentic=tests/golden/prompts/bolt_agentic.ids --max-tokens 16384"
@@ -222,6 +244,7 @@ case "$mode" in
     done
     ;;
   golden)
+    own_dir "$data/oracle-out-bolt" || exit 1
     for p in $prompts; do
       golden "$INT4" "$data/oracle-out-bolt" oracle-out-bolt.partial "$p" "$gen" "--weights int4 --taps" || true
     done
@@ -248,6 +271,7 @@ case "$mode" in
     out="$data/oracle-out-bolt-a4"
     f=int4
     [ "$mode" = a4-bf16 ] && f=bf16
+    own_dir "$out" || exit 1
     if [ "$dry" = 1 ]; then
       echo "DRY_RUN: OUT=$out tools/toolcall/a4_ref.sh bolt set; OUT=$out FORM=$f tools/toolcall/a4_ref.sh bolt ref"
       echo "DRY_RUN: python3 tools/toolcall/score.py --format qwen-think $out bf16 int4   (once both forms are done)"
@@ -265,6 +289,9 @@ case "$mode" in
     ;;
   gateq)
     out="$data/oracle-out-bolt-a4"
+    if [ "$dry" != 1 ] && [ "$(cat "$out/SNAPSHOT" 2>/dev/null)" != "$(snap_want)" ]; then
+      miss "gateq needs $out made from $(snap_want) (its SNAPSHOT file; modes a4 and a4-bf16 first)"
+    fi
     if [ "$dry" != 1 ] && [ "$(ls "$out"/*.bf16.txt 2>/dev/null | wc -l)" -ne 36 ]; then
       miss "gateq needs the 36 BF16 A4 references in $out (mode a4-bf16 first)"
     fi

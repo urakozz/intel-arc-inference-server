@@ -527,8 +527,9 @@ directory), `B70_Q4_MTP_NORM` (`single` | `per_stream`), `B70_Q4_MTP_SELECT` (`r
 ## Nemotron 3.5 Bolt 74B-A9B (spec 25)
 
 NVIDIA's hybrid of 40 Mamba-2 blocks, 8 NoPE attention blocks (GQA 32 / 2, head_dim 128) and 40 latent MoE blocks (top-9
-of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabulary 131072; SergiioB's int4 g128 export
-(41.9 GB on disk; 40.469 GB on the cards with the int8 head, derived - spec 25 §14).
+of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabulary 131072; served from our own int4 g64 export
+`urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ` @ `8932aa8d` (AutoRound, GPTQ packing; 41 GB on disk). The
+loader also reads the GPTQ g128 spelling through its exact g64 expansion (the synthetic checkpoints test it).
 
 **Status: decode, prefill and serving built, never run on a B70** (queue rows 60 / 61 / 62; spec 25c / 25d / 25e, as built in
 spec 25 §15 / §16 / §17). The real model runs on **two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes;
@@ -545,7 +546,7 @@ P=tests/golden/prompts/bolt_short.ids
 # every command below: never run on a B70
 ./build/tools/probe/probe_bolt_step --depth 4096 --rounds 9 --sweep-s --pair      # P0: the skeleton lists (no model)
 ./build/src/cli/b70-decode $S --ids $P --n 32                                     # one card, int8 head
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <SergiioB snapshot> --ids $P --n 32   # two cards (the default for 88 blocks)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --ids $P --n 32          # two cards (the default for 88 blocks)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256 --max-len 8192
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --profile --depth 4096 --steps 32 --repeats 5
 B70_BOLT_FUSE=all ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # 533 launches
@@ -557,11 +558,11 @@ small checkpoint; `--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes
 the prefill scratch planned in (Decision 14), the int8 head by default, prefill on `l0` only:
 
 ```sh
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
 ```
 
-- **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, byte-identical in NVIDIA's and SergiioB's
-  repos; `--chat-template FILE` renders another, its sha256 is printed). ChatML, no BOS, and the system block is ALWAYS
+- **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, NVIDIA's, byte-identical in our
+  export; `--chat-template FILE` renders another, its sha256 is printed). ChatML, no BOS, and the system block is ALWAYS
   rendered (`<|im_start|>system\n<|im_end|>\n` with no system message). `chat_template_kwargs`: `enable_thinking` (default
   true: the prompt ends `<think>\n`; false: `<think></think>`), `medium_effort` (appends `{reasoning effort: efficient}` to
   the last user message), `truncate_history_thinking` (default true: the reasoning of turns before the last user message is
@@ -579,7 +580,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <SergiioB snapshot> --port 8000 -
   leaked as content; a call inside reasoning is reasoning (the `ultra_v3` reasoning parser's rules; spec 25 §7 and §17).
 - **Sampling.** A request that names no `temperature` / `top_p` / `top_k` samples with NVIDIA's published T 1.0, top-p 0.95,
   no top-k, and generation ends on EOS **2 or 11** - from the snapshot's `generation_config.json` when it carries sampling
-  keys, else the published values (SergiioB's file lists EOS 11 only); `--generation-config FILE` overrides. A seeded
+  keys (ours does: NVIDIA's file), else the published values; `--generation-config FILE` overrides. A seeded
   sampled request is reproducible request by request; `temperature: 0` is the device argmax.
 - **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
   SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
