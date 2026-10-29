@@ -22,7 +22,7 @@ set -euo pipefail
 # golden set dumped before that date was produced by it and its rows still say
 # so. A golden set records which image made it (doc 14) - so when this default
 # moves again, the sets made under the old one are not retroactively relabelled.
-IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
+IMAGE="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 # The tree this script lives in (per-plan trees: tools/box_dir.sh).
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)}"

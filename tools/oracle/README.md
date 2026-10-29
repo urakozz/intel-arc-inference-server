@@ -9,9 +9,9 @@ safetensors file of layer-by-layer activations, the GDN states after the prompt,
 every logits row, and the greedy continuation. Plan 3's golden test compares the
 engine against that file.
 
-The reference image (`vllm-xpu-env-next-p314-t215-vxkp0:latest` since
-2026-09-09; `…-t214-…` before that, and the sets dumped under it keep that
-label) deliberately has **no `fla`**: the fallback path *is* the contract
+The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
+2026-10-29 - torch 2.16 nightly, oneAPI 2026.2; `…-t215-…` from 2026-09-09 and
+`…-t214-…` before that, and the sets dumped under those keep their label) deliberately has **no `fla`**: the fallback path *is* the contract
 (doc 03).
 
 ## Files

@@ -41,7 +41,7 @@ case "$mode" in
     done
     ;;
   ref)
-    image="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t215-vxkp0:latest}"
+    image="${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
     dumps_host=$(cd "$DUMPS" && pwd -P) || exit 2
     out_host=$(cd "$out" && pwd -P)
     in_hf() { printf '/hf%s' "${1#"$HF"}"; }
