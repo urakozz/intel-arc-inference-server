@@ -1,5 +1,5 @@
-// Spec 25e Task 1: Nemotron 3.5 Bolt's chat template (chat_template.jinja, sha256 6521afc7..., 12,514 B, byte-identical in
-// NVIDIA's and SergiioB's repos) through chat::Template (minja) against transformers 5.19.0's apply_chat_template, from
+// Spec 25e Task 1: Nemotron 3.5 Bolt's chat template (chat_template.jinja, sha256 6521afc7..., 12,514 B, NVIDIA's,
+// byte-identical in our export) through chat::Template (minja) against transformers 5.19.0's apply_chat_template, from
 // tools/tokenizer/dump_bolt.py's tests/tokenizer/bolt_templates.json:
 //   template_bolt_test <tests/tokenizer> <snapshot dir> [<tests/server/bolt_template_cases.json>]
 // <snapshot dir> (tokenizer_config.json + chat_template.jinja; B70_BOLT_SNAPSHOT replaces it) holds the template: it is read

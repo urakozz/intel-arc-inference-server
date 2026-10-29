@@ -13,9 +13,9 @@
 //     Task 1's, byte for byte;
 //   - a non-boolean medium_effort / truncate_history_thinking / force_nonempty_content / enable_thinking is a 400 naming it;
 //   - image / video / audio parts are refused by name (23e's list); text parts of every kind pass;
-//   - Decision 12: SergiioB's generation_config.json (EOS 11, no sampling keys) gives the published set - sampled, T 1.0, top-p
-//     0.95, no top-k, EOS [2, 11] -, NVIDIA's own file the same through its own keys, an explicit file its own, a malformed one
-//     a named error; EOS on either id ends a generation (finish_reason stop), a request's temperature / top_p / top_k override
+//   - Decision 12: the served export's generation_config.json (NVIDIA's keys: sampled, T 1.0, top-p 0.95, EOS [2, 11]) gives the
+//     published set - no top-k -, NVIDIA's own file the same, a file with no sampling key (EOS 11 only) the published set with its
+//     eos added, an explicit file its own, a malformed one a named error; EOS on either id ends a generation (finish_reason stop), a request's temperature / top_p / top_k override
 //     the defaults, temperature 0 is greedy, a seeded request carries its seed;
 //   - the output stream end to end (the body and the streamed frames): reasoning verbatim, content, a Qwen XML call
 //     (tool_calls); thinking off (everything is content, a stray </think> included); force_nonempty_content; a call cut by
@@ -81,7 +81,7 @@ struct RecordingEngine : MockEngine {
 };
 
 std::string g_snapshot, g_fixture_dir, g_model_dir;
-cli::bolt::Generation g_generation;   // SergiioB's file, resolved - what b70-serve sets
+cli::bolt::Generation g_generation;   // the export's file, resolved - what b70-serve sets
 
 struct Fixture {
   Fixture() : tmpl(g_snapshot), options(make_options()), server({tok, tmpl, engine}, options) { CHECK(server.start()); }
@@ -337,20 +337,29 @@ void check_published(const cli::bolt::Generation& g) {
 
 void case_generation() {
   const json nvidia = json::parse(slurp(g_model_dir + "/generation_config.nvidia.json"));
-  const json sergio = json::parse(slurp(g_model_dir + "/generation_config.sergiio.json"));
+  const json ours = json::parse(slurp(g_model_dir + "/generation_config.json"));
   // NVIDIA's file carries sampling keys: used as it is (top_k absent -> none, not HF's 50).
   {
     const cli::bolt::Generation g = cli::bolt::resolve_generation(&nvidia, nullptr, "", "nv.json");
     check_published(g);
     CHECK(g.source.find("nv.json (the snapshot's file carries sampling keys)") != std::string::npos);
   }
-  // SergiioB's: EOS 11 only and no sampling key - the published set (Decision 12), his eos added to it.
+  // The served export's: NVIDIA's keys and values - the same set through its own keys.
   {
-    const cli::bolt::Generation g = cli::bolt::resolve_generation(&sergio, nullptr, "", "sg.json");
+    const cli::bolt::Generation g = cli::bolt::resolve_generation(&ours, nullptr, "", "ours.json");
+    check_published(g);
+    CHECK(g.source.find("ours.json (the snapshot's file carries sampling keys)") != std::string::npos);
+    CHECK(g_generation.eos == g.eos);
+  }
+  // A file with EOS 11 only and no sampling key (an export that writes no sampling defaults): the published set (Decision
+  // 12), its eos added to it.
+  {
+    const json bare = {{"_from_model_config", true}, {"bos_token_id", 1}, {"eos_token_id", 11}, {"pad_token_id", 0},
+                       {"use_cache", true}};
+    const cli::bolt::Generation g = cli::bolt::resolve_generation(&bare, nullptr, "", "bare.json");
     check_published(g);
     CHECK(g.source.find("published defaults") != std::string::npos);
     CHECK(g.source.find("names no sampling key (its eos_token_id is added)") != std::string::npos);
-    CHECK(g_generation.eos == g.eos);
   }
   // No file at all: the published values.
   {
@@ -409,8 +418,8 @@ void case_generation() {
     }
     CHECK(threw);
   }
-  std::printf("generation: NVIDIA's file (T 1.0, top-p 0.95, EOS [2, 11], top-k none), SergiioB's (EOS 11, no sampling key) + the "
-              "published defaults = the same set, an explicit file its own, malformed values named\n");
+  std::printf("generation: NVIDIA's file and the export's (T 1.0, top-p 0.95, EOS [2, 11], top-k none), a bare one (EOS 11, no "
+              "sampling key) + the published defaults = the same set, an explicit file its own, malformed values named\n");
 }
 
 void case_sampling_and_eos() {
@@ -566,8 +575,8 @@ int main(int argc, char** argv) {
     std::printf("bolt_request_test: SKIP (no %s/chat_template.jinja; set B70_BOLT_SNAPSHOT)\n", g_snapshot.c_str());
     return 77;
   }
-  const json sergio = json::parse(slurp(g_model_dir + "/generation_config.sergiio.json"));
-  g_generation = cli::bolt::resolve_generation(&sergio, nullptr);
+  const json ours = json::parse(slurp(g_model_dir + "/generation_config.json"));
+  g_generation = cli::bolt::resolve_generation(&ours, nullptr);
   check_published(g_generation);
   const json facts = json::parse(slurp(g_fixture_dir + "/bolt_templates.json"));
   case_fixture_renders(facts);

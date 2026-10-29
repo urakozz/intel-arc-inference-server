@@ -9,7 +9,10 @@
  "bos_id": 1,
  "eos_id": 11,
  "pad_id": 11,
- "generation_eos": 11,
+ "generation_eos": [
+  2,
+  11
+ ],
  "added_token_count": 1000,
  "named": {
   "<unk>": {

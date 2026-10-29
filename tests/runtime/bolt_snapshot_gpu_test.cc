@@ -1,6 +1,6 @@
 // Spec 25e (plan 25e Task 4 Step 1, Review Focus 4): BoltEngine's prefix-cache snapshot calls on the card with a checkpoint - box
 // only (labels checkpoint;bolt). 25b's synthetic checkpoints (tools/quantize/bolt/make_synth.py: n12 = twelve real-width blocks of
-// Bolt's pattern) carry it before the 41.9 GB export is loaded; SergiioB's on two cards after. The host side (the layouts, the
+// Bolt's pattern) carry it before the 41 GB export is loaded; our export on two cards after. The host side (the layouts, the
 // adapter, spec 7's request path) is bolt_snapshot_test's.
 //
 //   bolt_snapshot_gpu_test <checkpoint> <ids> [pp2[:split]] [cross] [b16]
@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
   const std::string snap = bolt_rig::bolt_snapshot(argc > 1 ? argv[1] : "");
   if (snap.empty()) {
     std::printf("SKIP: no Nemotron 3.5 Bolt checkpoint at '%s' (the synthetic sets: tools/box_validate/bolt_synth.sh; the real "
-                "one: SergiioB's export)\n", argc > 1 ? argv[1] : "");
+                "one: our g64 export)\n", argc > 1 ? argv[1] : "");
     return 77;
   }
   bolt_rig::Options o;

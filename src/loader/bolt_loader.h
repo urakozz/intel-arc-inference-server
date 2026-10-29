@@ -28,13 +28,13 @@
 // resolve_snapshot, QuantConfig::parse, SafetensorsSet, assert_quant_invariants, LinearSrc::classify,
 // quantise_int8_tiled.
 //
-// **Either int4 spelling, one device layout.** SergiioB's g128 GPTQ export (through LinearSrc::classify's exact g128 -> g64
-// expansion; `g_idx` shipped, a restating `+:` rule, signed F16 scales) and our g64 export (25q) go through the same
-// repack; a linear's group is decided by its scale rows, never by a label, and the device buffers of the two spellings of
-// one set of weights are byte-identical. **The vision tower** (849 tensors in SergiioB's: `vision_model.*`,
+// **Either int4 spelling, one device layout.** The GPTQ g128 spelling (through LinearSrc::classify's exact g128 -> g64
+// expansion; `g_idx` shipped, a restating `+:` rule, signed F16 scales) and our g64 export (the served checkpoint) go
+// through the same repack; a linear's group is decided by its scale rows, never by a label, and the device buffers of the
+// two spellings of one set of weights are byte-identical. **The vision tower** (458 tensors in our export: `vision_model.*`,
 // `vision_projector.*`, `mlp1.*`) is skipped by prefix and counted; every other tensor is consumed (unconsumed = 0).
-// **The trunk** is `language_model.model.`; NVIDIA's own `language_model.backbone.` is accepted only when the checkpoint
-// ships it (bolt_trunk_prefix). **The untied head**: `language_model.lm_head.weight` is its own bf16 tensor; the int8 head
+// **The trunk** is `language_model.model.` or NVIDIA's own `language_model.backbone.` (our export's), whichever the
+// checkpoint ships (bolt_trunk_prefix). **The untied head**: `language_model.lm_head.weight` is its own bf16 tensor; the int8 head
 // (spec 9, `--lm-head int8` default, Decision 18) is built from it on the last device, or its bf16 tiles are uploaded
 // (`--lm-head bf16`); the embedding is uploaded once, in gemv_bf16's tiles, on device 0.
 //
@@ -245,7 +245,7 @@ class BoltCheckpoint {
   std::vector<float> widen(const TensorInfo& t) {
     return widen_bolt_bf16(reinterpret_cast<const uint16_t*>(set_.data(t)), set_.bytes(t) / 2);
   }
-  // A kept fp32 tensor shipped F32 (SergiioB's: bf16 values in F32) or BF16 (widened, exact); finite, and |v| <= `bound`.
+  // A kept fp32 tensor shipped F32 (our export's) or BF16 (widened, exact); finite, and |v| <= `bound`.
   std::vector<float> finite_f32(const std::string& name, const std::vector<uint64_t>& shape, float bound = 3.0e38f) {
     const TensorInfo t = take(name, {"F32", "BF16"}, shape);
     std::vector<float> v;

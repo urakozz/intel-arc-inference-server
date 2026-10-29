@@ -42,7 +42,7 @@ struct QuantConfig {
   bool desc_act_declared = false;
   std::string quant_method, packing_format;
   size_t dynamic_rule_count = 0;   // GPTQ `dynamic`: "-:" exclusion regexes
-  // GPTQ `dynamic` "+:" rules that RESTATE the top level (spec 25b / spec 25 §5.2: SergiioB's Bolt export carries
+  // GPTQ `dynamic` "+:" rules that RESTATE the top level (spec 25b / spec 25 §5.2: Bolt's GPTQ g128 spelling carries
   // `"+:.*mixer\\.out_proj$": {bits 4, group_size 128, sym true}` beside a top level of exactly that): a rule with
   // exactly the three keys bits / group_size / sym, each equal to the top level's, changes nothing and is counted
   // here. Every other "+:" rule is still a throw.
