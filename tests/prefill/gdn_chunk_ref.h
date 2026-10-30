@@ -42,10 +42,11 @@
 //               the coefficient on Delta_0 inside vn_1 to be
 //               -beta_1 exp(g_1) (k_1 . k_0) = -A[1][0], and (I - A)^-1 gives
 //               +A[1][0]. Derived by hand, then confirmed against the FLA line.
-//   vb[j][x]  = rne( v[j][x] * beta[j] )                         Q1  bf16 (wy_fast:88)
-//   kb[j][k]  = rne( k[j][k] * beta[j] * exp(gc[j]) )            Q2  bf16 (wy_fast:110)
-//   u[i][x]   = rne( SUM_{j<=i} T[i][j] * f32(vb[j][x]) )        Q3  bf16 (wy_fast:89)
-//   w[i][k]   = rne( SUM_{j<=i} T[i][j] * f32(kb[j][k]) )        Q4  bf16 (wy_fast:112)
+//   vb[j][x]  = v[j][x] * beta[j]                                Q1  fp32 (FLA rounds, wy_fast:88)
+//   kb[j][k]  = k[j][k] * beta[j] * exp(gc[j])                   Q2  fp32 (wy_fast:110)
+//   u[i][x]   = SUM_{j<=i} T[i][j] * vb[j][x]                    Q3  fp32 (wy_fast:89)
+//   w[i][k]   = SUM_{j<=i} T[i][j] * kb[j][k]                    Q4  fp32 (wy_fast:112)
+//   Q1-Q4 fp32 since the operator's ruling of 2026-10-31 (accuracy over FLA parity; pf_gdn_wy.cl).
 //   A2[i][j]  = (SUM_k q[i][k]*k[j][k]) * exp(gc[i] - gc[j])            for j <= i, else 0
 //
 //   # the sequential step. S is the chunk-start state for BOTH lines below.
@@ -75,10 +76,12 @@
 // rounds T to bf16 (chunk.py:47-49) and its `chunk_delta_h` rounds `v_new`
 // before the S update (chunk_delta_h.py:274). Both stay **fp32** here.
 //
-// **Q1-Q4 are the four bf16 roundings the chunked form ADDS and for which
+// **Q1-Q4 are the four intermediates the chunked form ADDS and for which
 // decode has no twin**; every other rounding is one of gdn_step.cl's P1-P8.
-// They are kept because they are the reference vLLM runs, and they are the
-// dominant term of the numerics band
+// FLA rounds them to bf16 (the reference vLLM runs); they were kept so until
+// the operator's ruling of 2026-10-31 made them fp32 (accuracy over FLA
+// parity: the prefill's GDN state was the one path further from f32 than the
+// bf16 reference and decode). They were the dominant term of the numerics band
 // (docs/prefill-l1-preregistration-2026-09-05.md §2.2).
 //
 // ---------------------------------------------------------------------------
@@ -134,10 +137,9 @@
 //     work-item owns which output and how many times each operand is loaded;
 //     it does not change that each output is one ascending-`j` `fma` chain over
 //     the same values, so `wu` below is bit-for-bit what the kernel computes and
-//     `gdn_wy_test` case 6 asserts kernel-vs-kernel bit equality on top. Note
-//     that this file already stages `vb`/`kb` as widened fp32 (`f32(rne(...))`
-//     below), which is exactly what the kernel's SLM now holds: the rounding
-//     point Q1/Q2 is unmoved, only the container changed.
+//     `gdn_wy_test` case 6 asserts kernel-vs-kernel bit equality on top. This
+//     file stages `vb`/`kb` as fp32 (below), which is exactly what the
+//     kernel's SLM holds.
 //     The tiled kernel's shared `j` range over-runs a block's triangle by 12 of
 //     260 `(i,j)` pairs; those terms are `fma(0.0f, vb, acc)` because
 //     `pf_gdn_solve` writes exactly `0.0f` above the diagonal, and adding `+0.0`
@@ -172,6 +174,13 @@ constexpr float kQScale = 0.08838834764831845f;            // 1/sqrt(128)
 constexpr uint32_t kBands = 16, kBandK = 8;                // the 128-term dot's tree
 
 inline float f32(uint16_t h) { return common::bf16_to_f32(h); }
+// One bf16 ulp at |x| (the spacing of bf16 values in x's binade; tiny at 0) - gdn_wy_test's fp32 w bar.
+inline double bf16_ulp(float x) {
+  if (x == 0.0f) return 1e-38;
+  int e = 0;
+  std::frexp(std::fabs(x), &e);
+  return std::ldexp(1.0, e - 8);
+}
 inline uint16_t rne(float f) { return common::f32_to_bf16(f); }
 inline float silu_f32(float x) { return x / (1.0f + std::exp(-x)); }
 inline float softplus_f32(float x) { return x > 20.0f ? x : std::log1p(std::exp(x)); }
@@ -375,11 +384,11 @@ inline void solve(uint32_t C, float* A) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 6 - pf_gdn_wu.  Q1/Q2 then Q3/Q4; `j` ascending, one RNE each.
-//   w, u  bf16 [C][48][128], indexed ((m * 48 + h) * 128 + x)
+// Stage 6 - pf_gdn_wu.  Q1/Q2 then Q3/Q4; `j` ascending, all fp32 (2026-10-31).
+//   w, u  fp32 [C][48][128], indexed ((m * 48 + h) * 128 + x)
 // ---------------------------------------------------------------------------
 inline void wu(uint32_t C, const uint16_t* xb, const float* T, const float* g_cum,
-               const float* beta, uint16_t* w, uint16_t* u) {
+               const float* beta, float* w, float* u) {
   Tile s;
   std::vector<float> vb(size_t(kCT) * kDim), kb(size_t(kCT) * kDim);
   for (uint32_t t = 0; t < nchunks(C); ++t)
@@ -389,10 +398,8 @@ inline void wu(uint32_t C, const uint16_t* xb, const float* T, const float* g_cu
       for (uint32_t j = 0; j < s.L; ++j) {
         const float eg = std::exp(s.gc[j]);
         for (uint32_t d = 0; d < kDim; ++d) {
-          // Round ONCE, at the end of each expression, as wy_fast.py:88 and
-          // :110 do with `.to(dtype)`.
-          vb[size_t(j) * kDim + d] = f32(rne(s.v[j][d] * s.beta[j]));                // Q1
-          kb[size_t(j) * kDim + d] = f32(rne(s.k[j][d] * s.beta[j] * eg));           // Q2
+          vb[size_t(j) * kDim + d] = s.v[j][d] * s.beta[j];                          // Q1
+          kb[size_t(j) * kDim + d] = s.k[j][d] * s.beta[j] * eg;                     // Q2
         }
       }
       for (uint32_t i = 0; i < s.L; ++i) {
@@ -403,8 +410,8 @@ inline void wu(uint32_t C, const uint16_t* xb, const float* T, const float* g_cu
             au = std::fma(Tt[size_t(i) * kCT + j], vb[size_t(j) * kDim + d], au);
             aw = std::fma(Tt[size_t(i) * kCT + j], kb[size_t(j) * kDim + d], aw);
           }
-          u[(size_t(m) * kHeads + h) * kDim + d] = rne(au);                          // Q3
-          w[(size_t(m) * kHeads + h) * kDim + d] = rne(aw);                          // Q4
+          u[(size_t(m) * kHeads + h) * kDim + d] = au;                               // Q3
+          w[(size_t(m) * kHeads + h) * kDim + d] = aw;                               // Q4
         }
       }
     }
@@ -445,7 +452,7 @@ inline void mat_A2(uint32_t C, const uint16_t* xb, const float* g_cum, float* A2
 //     an output tile of 8 with a private accumulator, which is what took the
 //     barrier count per 64-position sub-chunk from 640 to 3.
 // ---------------------------------------------------------------------------
-inline void scan(uint32_t C, const uint16_t* xb, const uint16_t* w, const uint16_t* u,
+inline void scan(uint32_t C, const uint16_t* xb, const float* w, const float* u,
                  const float* A2, const float* g_cum, float* state, float* o) {
   Tile s;
   std::vector<float> vn(size_t(kCT) * kDim), wf(kDim), expg(kCT);
@@ -457,14 +464,14 @@ inline void scan(uint32_t C, const uint16_t* xb, const uint16_t* w, const uint16
       for (uint32_t i = 0; i < s.L; ++i) expg[i] = std::exp(s.gc[i]);
       const float gl = s.gc[s.L - 1];
 
-      // vn[i][x] = f32(u[i][x]) - SUM_k f32(w[i][k]) * S[k][x]
+      // vn[i][x] = u[i][x] - SUM_k w[i][k] * S[k][x]
       for (uint32_t i = 0; i < s.L; ++i) {
         const uint32_t m = t * kCT + i;
         for (uint32_t d = 0; d < kDim; ++d)
-          wf[d] = f32(w[(size_t(m) * kHeads + h) * kDim + d]);
+          wf[d] = w[(size_t(m) * kHeads + h) * kDim + d];
         for (uint32_t x = 0; x < kDim; ++x)
           vn[size_t(i) * kDim + x] =
-              f32(u[(size_t(m) * kHeads + h) * kDim + x]) - asc_dot(wf.data(), S + x, kDim);
+              u[(size_t(m) * kHeads + h) * kDim + x] - asc_dot(wf.data(), S + x, kDim);
       }
       // o[i][x] = (SUM_k q[i][k]*S[k][x]) * exp(gc[i]) + SUM_{j<=i} A2[i][j]*vn[j][x]
       for (uint32_t i = 0; i < s.L; ++i) {
@@ -504,7 +511,7 @@ inline void chunk(uint32_t pos, uint32_t C, const float* qkvz, const float* ab,
   std::vector<float> g_cum(size_t(C) * kHeads), beta(size_t(C) * kHeads);
   std::vector<float> A(size_t(nchunks(C)) * kHeads * kCT * kCT);
   std::vector<float> A2(A.size());
-  std::vector<uint16_t> w(size_t(C) * kHeads * kDim), u(w.size());
+  std::vector<float> w(size_t(C) * kHeads * kDim), u(w.size());
 
   conv(pos, C, qkvz, small, ring, xb.data());
   l2norm(C, xb.data());

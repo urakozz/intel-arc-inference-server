@@ -182,8 +182,8 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   l0::Mem d_beta = pf_harness::upload(d.ctx, d.imm, f.beta);
   l0::Mem d_A(d.ctx, l0::MemKind::Device, tri * 4);
   l0::Mem d_A2(d.ctx, l0::MemKind::Device, tri * 4);
-  l0::Mem d_w(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
-  l0::Mem d_u(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
+  l0::Mem d_w(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 4);   // fp32 (Q3 / Q4, 2026-10-31)
+  l0::Mem d_u(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 4);
 
   // --- 1. pf_gdn_A ---------------------------------------------------------
   // Filled before the launch for case 7's sake: the quadrant grid means an
@@ -404,18 +404,20 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
                PtrArg(d_w.ptr()), PtrArg(d_u.ptr()), arg_val(C)});
   d.cx.wait();
   {
-    std::vector<uint16_t> w_got(size_t(C) * R::kHeads * R::kDim), u_got(w_got.size());
-    std::vector<uint16_t> w_ref(w_got.size(), 0xDEAD), u_ref(w_got.size(), 0xDEAD);
+    std::vector<float> w_got(size_t(C) * R::kHeads * R::kDim), u_got(w_got.size());
+    std::vector<float> w_ref(w_got.size(), -1.0f), u_ref(w_got.size(), -1.0f);
     pf_harness::download(d.imm, w_got, d_w);
     pf_harness::download(d.imm, u_got, d_u);
     R::wu(C, f.xb.data(), T_got.data(), f.g_cum.data(), f.beta.data(), w_ref.data(),
           u_ref.data());
-    const pf_harness::Cmp cu = pf_harness::compare(u_got, u_ref);
-    const pf_harness::Cmp cw = pf_harness::compare(w_got, w_ref);
-    std::printf("  u   : max %u bf16 ulp, %zu/%zu exact  (bar: BIT-IDENTICAL - no "
-                "transcendental in u's chain)\n",
-                cu.max_ulp, cu.exact, cu.n);
-    CHECK_EQ(cu.exact, cu.n);
+    // u, w fp32 since 2026-10-31: u's chain has no transcendental, so it stays bit-identical; w's bar below
+    // keeps plan 6b's 2 bf16 ulp as an absolute error of 2 bf16 ulp of |ref| (the same tolerance, measured on
+    // the fp32 values instead of their bf16 roundings).
+    size_t u_exact = 0;
+    for (size_t i = 0; i < u_got.size(); ++i) u_exact += std::memcmp(&u_got[i], &u_ref[i], 4) == 0;
+    std::printf("  u   : %zu/%zu fp32 words exact  (bar: BIT-IDENTICAL - no transcendental in u's chain)\n",
+                u_exact, u_got.size());
+    CHECK_EQ(u_exact, u_got.size());
 
     // `w`'s bar is RMS-gated, and the reason is arithmetic rather than
     // convenience. `aw = SUM_{j<=i} T[i][j] * kb[j][x]` is a signed sum that
@@ -426,23 +428,24 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     // Both figures are printed, and the worst small-element case is printed
     // with its magnitude so the cancellation claim is checkable, not asserted.
     double ss = 0;
-    for (uint16_t v : w_ref) {
-      const double x = R::f32(v);
-      ss += x * x;
-    }
+    for (float v : w_ref) ss += double(v) * v;
     const double rms = std::sqrt(ss / double(w_ref.size()));
     uint32_t gated_max = 0;
-    size_t over2 = 0;
+    size_t over2 = 0, w_exact = 0;
     double worst_small_mag = 0.0, gated_worst_mag = 0.0, max_abs_over_rms = 0.0;
-    uint32_t worst_small_ulp = 0;
+    uint32_t worst_small_ulp = 0, max_ulp = 0;
     uint32_t gate_ulp[4] = {0, 0, 0, 0};
     for (size_t i = 0; i < w_ref.size(); ++i) {
-      if (w_got[i] == w_ref[i]) continue;
-      const int32_t dk = pf_harness::bf16_key(w_got[i]) - pf_harness::bf16_key(w_ref[i]);
-      const uint32_t ulp = uint32_t(dk < 0 ? -dk : dk);
-      const double mag = std::fabs(double(R::f32(w_ref[i])));
-      max_abs_over_rms =
-          std::max(max_abs_over_rms, std::fabs(double(R::f32(w_got[i])) - R::f32(w_ref[i])) / rms);
+      if (w_got[i] == w_ref[i]) {
+        ++w_exact;
+        continue;
+      }
+      const double mag = std::fabs(double(w_ref[i]));
+      const double err = std::fabs(double(w_got[i]) - w_ref[i]);
+      // the error in bf16 ulps of |ref| (rounded up: 1 = within one ulp)
+      const uint32_t ulp = uint32_t(std::ceil(err / std::max(R::bf16_ulp(float(mag)), 1e-30)));
+      max_ulp = std::max(max_ulp, ulp);
+      max_abs_over_rms = std::max(max_abs_over_rms, err / rms);
       if (mag >= rms / 8.0 && ulp > gated_max) {
         gated_max = ulp;
         gated_worst_mag = mag;
@@ -462,8 +465,8 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     std::printf("  w   : max %u bf16 ulp anywhere (worst at |ref| = rms/%.0f), max %u on "
                 "|ref| >= rms/8 (at rms/%.1f); %zu/%zu exact, %zu over 2 ulp; "
                 "max |err|/rms = %.3e (context, not a bar)\n",
-                cw.max_ulp, worst_small_mag > 0 ? rms / worst_small_mag : 0.0, gated_max,
-                gated_worst_mag > 0 ? rms / gated_worst_mag : 0.0, cw.exact, cw.n, over2,
+                max_ulp, worst_small_mag > 0 ? rms / worst_small_mag : 0.0, gated_max,
+                gated_worst_mag > 0 ? rms / gated_worst_mag : 0.0, w_exact, w_ref.size(), over2,
                 max_abs_over_rms);
     std::printf("        ulp by gate: >=rms/8 %u  >=rms/4 %u  >=rms/2 %u  >=rms %u\n",
                 gate_ulp[0], gate_ulp[1], gate_ulp[2], gate_ulp[3]);
@@ -498,8 +501,8 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   // 2 ulp on a gate while `u`'s is equality. Run at every width `main` asks
   // for, so C = 100's ragged L = 36 tail is covered.
   {
-    l0::Mem d_wL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
-    l0::Mem d_uL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 2);
+    l0::Mem d_wL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 4);
+    l0::Mem d_uL(d.ctx, l0::MemKind::Device, size_t(C) * R::kHeads * R::kDim * 4);
     d.imm.fill(d_wL.ptr(), 0x22222222u, d_wL.size());
     d.imm.fill(d_uL.ptr(), 0x22222222u, d_uL.size());
     d.cx.launch(d.k("pf_gdn_wu_legacy"), R::kHeads, nch, 1,
@@ -507,7 +510,7 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
                  PtrArg(d_wL.ptr()), PtrArg(d_uL.ptr()), arg_val(C)});
     d.cx.wait();
     const size_t n = size_t(C) * R::kHeads * R::kDim;
-    std::vector<uint16_t> wN(n), uN(n), wL(n), uL(n);
+    std::vector<float> wN(n), uN(n), wL(n), uL(n);
     pf_harness::download(d.imm, wN, d_w);
     pf_harness::download(d.imm, uN, d_u);
     pf_harness::download(d.imm, wL, d_wL);
@@ -515,8 +518,8 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
     // The two fills differ, so a word NEITHER kernel wrote fails the memcmp
     // instead of passing it -- which makes this a coverage bar as well as an
     // equality one, and matters because the tiled kernel's grid is 3-D.
-    CHECK(std::memcmp(wN.data(), wL.data(), n * 2) == 0);
-    CHECK(std::memcmp(uN.data(), uL.data(), n * 2) == 0);
+    CHECK(std::memcmp(wN.data(), wL.data(), n * 4) == 0);
+    CHECK(std::memcmp(uN.data(), uL.data(), n * 4) == 0);
     std::printf("  w,u : tiled == legacy, BITWISE - %zu words each\n", n);
   }
 
@@ -584,8 +587,6 @@ void run_case(Dev& d, uint32_t C, bool exhaustive) {
   // --- 5. the L < 64 tail ---------------------------------------------------
   if (C % R::kCT != 0) {
     const uint32_t t = nch - 1, L = C - t * R::kCT;
-    std::vector<uint16_t> w_got(size_t(C) * R::kHeads * R::kDim);
-    pf_harness::download(d.imm, w_got, d_w);
     std::vector<float> A2_got(tri);
     pf_harness::download(d.imm, A2_got, d_A2);
     for (uint32_t h = 0; h < R::kHeads; ++h) {
