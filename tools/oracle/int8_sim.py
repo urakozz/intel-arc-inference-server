@@ -19,6 +19,8 @@ variant's quantisation. Both are the engine's rules, op for op where an op decid
   reference's bf16-rounded dequant, the device's fp32 (q - 8) x scale) can move a code that sits
   on a rounding boundary.
 """
+import os
+
 import torch
 
 _H = {}
@@ -99,16 +101,41 @@ def _sat_rte(v: torch.Tensor) -> torch.Tensor:
     return torch.clamp(torch.round(v), -128.0, 127.0)   # convert_char_sat_rte
 
 
+# Design knobs for the l0-int8 accuracy study (r13.prefill, operator 2026-10-31), the default the engine's scheme:
+#   B70_SIM_I8_X  tok (h8: rotated, one scale per token) | blk (rotated, one scale per token and 1024-k block) |
+#                 g64 (unrotated, one scale per token and 64-k group) | two (rotated, per token, a second int8 limb
+#                 for the residual) | off (exact)
+#   B70_SIM_I8_W  col (h8: rotated, one scale per column) | off (the int4 weight exact, as an int4-on-int8 GEMM)
+SIM_X = os.environ.get("B70_SIM_I8_X", "tok")
+SIM_W = os.environ.get("B70_SIM_I8_W", "col")
+
+
+def _q_rows(v: torch.Tensor) -> torch.Tensor:
+    """Per-row (last dim) symmetric int8 of v, de-quantised."""
+    s = v.abs().amax(-1, keepdim=True) / 127.0
+    iv = torch.where(s == 0, torch.zeros_like(s), 1.0 / s)
+    return _sat_rte(v * iv) * s
+
+
 def fq_x(x: torch.Tensor) -> torch.Tensor:
     """An activation row block [..., K] as the h8 int8 GEMM sees it, de-quantised, original basis."""
     K = x.shape[-1]
     assert K % 1024 == 0, f"K = {K} is not whole 1024-k rotation blocks"
+    if SIM_X == "off":
+        return x
+    if SIM_X == "g64":
+        v = x.float().reshape(*x.shape[:-1], K // 64, 64)
+        return _q_rows(v).reshape(x.shape).to(x.dtype)
     d = int8_signs(K)
     xr = _rot(x.float(), d)
-    s = xr.abs().amax(-1, keepdim=True) / 127.0
-    iv = torch.where(s == 0, torch.zeros_like(s), 1.0 / s)
-    q = _sat_rte(xr * iv)
-    return _unrot(q * s, d).to(x.dtype)
+    if SIM_X == "blk":
+        q = _q_rows(xr.reshape(*xr.shape[:-1], K // 1024, 1024)).reshape(xr.shape)
+    elif SIM_X == "two":
+        q1 = _q_rows(xr)
+        q = q1 + _q_rows(xr - q1)
+    else:
+        q = _q_rows(xr)
+    return _unrot(q, d).to(x.dtype)
 
 
 def fq_w(w: torch.Tensor) -> torch.Tensor:
@@ -116,6 +143,8 @@ def fq_w(w: torch.Tensor) -> torch.Tensor:
     per-column int8 of R^T w with pf_colmax_rot's scales, de-quantised, original basis."""
     K = w.shape[-1]
     assert K % 1024 == 0, f"K = {K} is not whole 1024-k rotation blocks"
+    if SIM_W == "off":
+        return w
     d = int8_signs(K)
     wr = _rot(w.float(), d)
     m = wr.abs().amax(-1, keepdim=True)
