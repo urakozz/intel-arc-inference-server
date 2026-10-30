@@ -19,7 +19,8 @@
 //          x += post_attn_norm(attn(input_layernorm(x))); x += post_ffn_norm(moe(post_attention_layernorm(x)))
 //   attention 48 q / 4 kv heads x 128 (GQA 12), q/k RMSNorm per head; RoPE (neox rotate_half,
 //          theta 1e4, all 128 dims) in the sliding layers only, the full layers NoPE; no bias, no gate
-//   MoE    384 routed experts top 6 (intermediate 512, SiLU) + one UNGATED shared expert (512);
+//   MoE    384 routed experts top 6 (intermediate 512, SiLU) + one UNGATED shared expert (512, int4 as the
+//          routed ones in the operator's export - operator ruling 2026-10-31);
 //          router mlp.gate bf16 [384][2560] with fp32 logits, selection on logit + expert_bias,
 //          weights sigmoid(logit) NOT renormalised, ties to the lower id; the combine in ascending
 //          id in fp32, + the shared expert, one rounding

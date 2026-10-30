@@ -32,7 +32,7 @@ struct KolLayer {
   std::unique_ptr<DeviceWeight> router;            // bf16 tiled {hidden, router_n}, rows >= experts zero
   std::unique_ptr<l0::Mem> bias;                   // fp32 [router_n], 0 past the experts
   std::unique_ptr<l0::Mem> gate_up, down;          // int4 layout-1 blocks, block e at e x block
-  std::unique_ptr<l0::Mem> shared_gate_up, shared_down;   // bf16 tiled {hidden, 2I}, {I, hidden}
+  std::unique_ptr<l0::Mem> shared_gate_up, shared_down;   // int4 layout-1 blocks, a routed expert's form
 };
 
 struct KolDevicePart {

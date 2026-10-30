@@ -10,8 +10,8 @@
 //   3. the router: gemv_bf16 2560 -> 512 (rows 384.. zero) + kol_route - ids exact, weights within 2
 //      ulp; crafted rows: a tie at the cut to the lower id, every real logit -1e30 (ids 0..5), the
 //      padded slots' logits +80 never selected (Review Focus 3)
-//   4. kol_moe_gate_up / kol_moe_down with a forced route row (ids 0 .. 383 spread, the bf16 shared
-//      slot), within 2 bf16 ulps; then the shared slot alone (routed weights zero) and the routed
+//   4. kol_moe_gate_up / kol_moe_down with a forced route row (ids 0 .. 383 spread, the shared slot's
+//      own int4 block - operator ruling 2026-10-31), within 2 bf16 ulps; then the shared slot alone (routed weights zero) and the routed
 //      slots alone (shared weights zero); bitwise replay
 //   5. eager attention (kol_attn_eager.cl, both builds) bitwise against attention_eager: sliding at
 //      5, 512, 513, 4103 (a wrapped ring), 9000; full at 30000
@@ -309,11 +309,7 @@ int main() {
   {
     const size_t gub = kr::gate_up_block_words(), dnb = kr::down_block_words();
     const std::vector<uint32_t> gu = random_blocks(gub * kk::kExperts, 30), dn = random_blocks(dnb * kk::kExperts, 31);
-    const std::vector<uint16_t> sh_gu_rows = random_bf16(size_t(2) * kk::kInter * H, -0.03f, 0.03f, 32);
-    const std::vector<uint16_t> sh_dn_rows = random_bf16(size_t(H) * kk::kInter, -0.05f, 0.05f, 33);
-    std::vector<uint16_t> sh_gu(sh_gu_rows.size()), sh_dn(sh_dn_rows.size());
-    common::repack_bf16_tiled(sh_gu_rows.data(), H, 2 * kk::kInter, sh_gu.data());
-    common::repack_bf16_tiled(sh_dn_rows.data(), kk::kInter, H, sh_dn.data());
+    const std::vector<uint32_t> sh_gu = random_blocks(gub, 32), sh_dn = random_blocks(dnb, 33);
     const std::vector<uint16_t> x = random_bf16(H, -0.5f, 0.5f, 34);
     const uint32_t ids[6] = {0, 17, 128, 255, 300, 383};
     const float ws[6] = {0.73f, 0.51f, 0.95f, 0.12f, 0.66f, 0.88f};
@@ -323,13 +319,13 @@ int main() {
       row[kr::kWeights + j] = kr::as_u32(ws[j]);
     }
     std::vector<uint32_t> zero_gu(gu.size(), 0), zero_dn(dn.size(), 0);
-    std::vector<uint16_t> zero_sgu(sh_gu.size(), 0), zero_sdn(sh_dn.size(), 0);
+    std::vector<uint32_t> zero_sgu(sh_gu.size(), 0), zero_sdn(sh_dn.size(), 0);
     l0::Module mm(d.ctx, kernels::path(kk::moe_variant(1)));
-    const auto run_moe = [&](const std::vector<uint32_t>& g, const std::vector<uint32_t>& dw, const std::vector<uint16_t>& sg,
-                             const std::vector<uint16_t>& sd, std::vector<uint16_t>& h_out) {
+    const auto run_moe = [&](const std::vector<uint32_t>& g, const std::vector<uint32_t>& dw, const std::vector<uint32_t>& sg,
+                             const std::vector<uint32_t>& sd, std::vector<uint16_t>& h_out) {
       l0::Mem rb = d.upload(row.data(), row.size() * 4), xb = d.upload(x.data(), H * 2);
       l0::Mem gb = d.upload(g.data(), g.size() * 4), db = d.upload(dw.data(), dw.size() * 4);
-      l0::Mem sgb = d.upload(sg.data(), sg.size() * 2), sdb = d.upload(sd.data(), sd.size() * 2);
+      l0::Mem sgb = d.upload(sg.data(), sg.size() * 4), sdb = d.upload(sd.data(), sd.size() * 4);
       l0::Mem hb = d.zeros(size_t(kk::kSlots) * kk::kInter * 2), ob = d.zeros(H * 2);
       l0::Kernel k1 = mm.kernel("kol_moe_gate_up");
       k1.group_size(kk::moe_gate_up_wg());
@@ -351,7 +347,7 @@ int main() {
       return d.read<uint16_t>(ob, H);
     };
     const auto check = [&](const char* what, const std::vector<uint32_t>& g, const std::vector<uint32_t>& dw,
-                           const std::vector<uint16_t>& sg, const std::vector<uint16_t>& sd) {
+                           const std::vector<uint32_t>& sg, const std::vector<uint32_t>& sd) {
       std::vector<uint16_t> h;
       const std::vector<uint16_t> mo = run_moe(g, dw, sg, sd, h);
       const std::vector<uint16_t> h_ref = kr::gate_up(ids, x.data(), g.data(), sg.data(), kk::kUpKs);

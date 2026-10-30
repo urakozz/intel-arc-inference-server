@@ -24,7 +24,7 @@
 //       scores, probabilities AND outputs bitwise torch's (P·V as one ascending fp32 chain over the row's
 //       keys reproduces torch's bf16 matmul on these rows; 20c's blocked decode order is 1 ulp off);
 //   (e) the bf16 slab (the o_proj tail: 2560 = 1024 + 1024 + 512, its 512 padding columns zero) and the
-//       dequants' block 384 (the shared expert's bf16 tiles copied, not dequantised).
+//       dequants' block 384 (the shared expert's own int4 block, dequantised as a routed one).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -436,22 +436,19 @@ void test_slabs() {
           CHECK_EQ(s[size_t(k) * ns + c], n0 + c < N ? wr[size_t(n0 + c) * K + k] : uint16_t(0));
     }
   }
-  // the shared expert's block 384: the bf16 tiles copied, gate||up interleave16 kept
+  // the shared expert's block 384 (operator ruling 2026-10-31: int4, its own layout-1 block): dequantised exactly
+  // as a routed expert's block holding the same words
   std::mt19937 rng(7);
-  std::uniform_real_distribution<float> u(-0.05f, 0.05f);
-  std::vector<uint16_t> gr(size_t(2 * kr::kInter) * H), dr(size_t(H) * kr::kInter);
-  for (uint16_t& v : gr) v = rne(u(rng));
-  for (uint16_t& v : dr) v = rne(u(rng));
-  std::vector<uint16_t> gt(gr.size()), dt(dr.size());
-  common::repack_bf16_tiled(gr.data(), H, 2 * kr::kInter, gt.data());
-  common::repack_bf16_tiled(dr.data(), kr::kInter, H, dt.data());
-  const std::vector<uint16_t> g = kp::dequant_gu(nullptr, gt.data(), kp::kShared), d = kp::dequant_dn(nullptr, dt.data(), kp::kShared);
-  for (uint32_t k = 0; k < H; k += 37)
-    for (uint32_t n = 0; n < 2 * kr::kInter; ++n) CHECK_EQ(g[size_t(k) * 2 * kr::kInter + n], gr[size_t(n) * H + k]);
-  for (uint32_t k = 0; k < kr::kInter; k += 13)
-    for (uint32_t n = 0; n < H; ++n) CHECK_EQ(d[size_t(k) * H + n], dr[size_t(n) * kr::kInter + k]);
-  std::puts("  slabs: the bf16 slab's columns and its zero tail; the dequants' block 384 = the shared expert's bf16 "
-            "tiles, row-major");
+  std::vector<uint32_t> gb(kr::gate_up_block_words()), db(kr::down_block_words());
+  for (uint32_t& v : gb) v = uint32_t(rng());
+  for (uint32_t& v : db) v = uint32_t(rng());
+  for (size_t t = 0; t < gb.size(); t += 136) gb[t + 128] = 0x24002400u;   // f16 scales 0.0625 (no NaN)
+  for (size_t t = 0; t < db.size(); t += 136) db[t + 128] = 0x24002400u;
+  CHECK(kp::dequant_gu(nullptr, gb.data(), kp::kShared) == kp::dequant_gu(gb.data(), nullptr, 0));
+  CHECK(kp::dequant_dn(nullptr, db.data(), kp::kShared) == kp::dequant_dn(db.data(), nullptr, 0));
+  (void)H;
+  std::puts("  slabs: the bf16 slab's columns and its zero tail; the dequants' block 384 = the shared expert's int4 "
+            "block, dequantised as a routed one");
 }
 
 }  // namespace

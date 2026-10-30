@@ -13,13 +13,14 @@ and only the first N layers (1..50; the default 5 holds both kinds: 4 sliding + 
                 layer_types = the real pattern[:N], every other key unchanged; plus
                 quantization_config as AutoRound writes it (quant_method auto-round, packing_format
                 auto_round:auto_gptq, bits 4, group_size 64, sym, extra_config bits 16 for the
-                shared experts and - the bf16 arm - attention)
-  int4          every routed expert's gate/up/down_proj (and q/k/v/o_proj in the int4 arm), packed
+                router mlp.gate (the operator's export's rules) and - the bf16 arm - attention)
+  int4          every routed and shared expert's gate/up/down_proj (the shared experts as the
+                operator's export ships them, operator ruling 2026-10-31) (and q/k/v/o_proj in the int4 arm), packed
                 by RTN (pack_rtn_g64): per 64-row group of K, scale = max|w| / 8 rounded to f16,
                 q = clamp(round(w / scale) + 8, 0, 15), nibbles low-first along K; qweight I32
                 [K/8, N], scales F16 [K/64, N], qzeros I32 [K/64, N/8] all 0x77777777 - the bytes of
                 AutoRound's auto_round:auto_gptq export (dequant.py: w = (q - 8) x scale)
-  bf16          router mlp.gate, moe.router.expert_bias, shared_experts.*, every norm, embed_tokens,
+  bf16          router mlp.gate, moe.router.expert_bias, every norm, embed_tokens,
                 lm_head (and attention in the bf16 arm)
 
 The draws are make_tiny.py's at the real widths: norms 1 + 0.2 N(0,1), expert_bias 0.5 N(0,1),
@@ -105,8 +106,7 @@ def synth_config(layers: int, attn: str) -> dict:
     extra = {}
     for i in range(layers):
         p = f"model.layers.{i}."
-        for n in ("gate_proj", "up_proj", "down_proj"):
-            extra[p + "mlp.shared_experts." + n] = {"bits": 16, "data_type": "float"}
+        extra[".*model\\.layers\\.%d\\.mlp\\.gate.*" % i] = {"bits": 16, "data_type": "float"}
         if attn == "bf16":
             for n in ("q_proj", "k_proj", "v_proj", "o_proj"):
                 extra[p + "self_attn." + n] = {"bits": 16, "data_type": "float"}
@@ -151,7 +151,7 @@ def layer_tensors(c, i: int, attn: str, seed: int) -> dict:
     out[p + "mlp.gate.weight"] = _randn(g, (E, D), 3 / math.sqrt(D))
     out[p + "moe.router.expert_bias"] = (0.5 * torch.randn(E, generator=g)).to(torch.bfloat16)
     for n, (rows, cols) in (("gate_proj", (SI, D)), ("up_proj", (SI, D)), ("down_proj", (D, SI))):
-        out[p + f"mlp.shared_experts.{n}.weight"] = _randn(g, (rows, cols), 1 / math.sqrt(cols))
+        _int4(out, p + f"mlp.shared_experts.{n}", _randn(g, (rows, cols), 1 / math.sqrt(cols)))
     for e in range(E):
         for n, (rows, cols) in (("gate_proj", (I, D)), ("up_proj", (I, D)), ("down_proj", (D, I))):
             _int4(out, p + f"mlp.experts.{e}.{n}", _randn(g, (rows, cols), 1 / math.sqrt(cols)))
@@ -197,7 +197,7 @@ def main() -> None:
     want = set()
     for name in ref.expected_names(c):
         base = name[:-len(".weight")]
-        packed = ".mlp.experts." in name or (a.attn == "int4" and ".self_attn." in name and
+        packed = ".mlp.experts." in name or ".mlp.shared_experts." in name or (a.attn == "int4" and ".self_attn." in name and
                                               name.endswith(("q_proj.weight", "k_proj.weight",
                                                              "v_proj.weight", "o_proj.weight")))
         want |= {base + s for s in (".qweight", ".scales", ".qzeros")} if packed else {name}

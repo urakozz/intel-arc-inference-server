@@ -393,9 +393,10 @@ not apply to K2.
 
 Aleph Alpha's Kolibri-1 (`model_type kolibri1`): 50 MoE layers (384 experts top 6 + an ungated shared
 expert), hidden 2560, 48 / 4 heads x 128, 40 sliding-window layers (513 keys, RoPE) and 10 full NoPE
-layers, sandwich norms, a 128000-id vocabulary, trained context 262144. **Our int4 checkpoint
-`urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ` does not exist yet** (spec 20b, decision 1 open): every
-command below needs it, except on a synthetic checkpoint (`tools/quantize/kolibri/make_synth.py`).
+layers, sandwich norms, a 128000-id vocabulary, trained context 262144. Our int4 checkpoint is
+`urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ` (AutoRound g64 sym, every routed AND shared expert int4 - the
+engine reads the shared expert as one more int4 block, operator ruling 2026-10-31); a synthetic checkpoint in
+the same form comes from `tools/quantize/kolibri/make_synth.py`.
 
 **Status: never run on a B70** (queue rows 24, 26 and 28). Decode (spec 20c), prefill (spec 20d) and
 serving (spec 20e, `b70-serve`), on **two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's

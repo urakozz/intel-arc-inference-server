@@ -63,7 +63,7 @@ def render(arm: str, work: str, repo: str) -> str:
           "| routed experts `mlp.experts.*.{gate,up,down}_proj` (50 x 384 x 3) | int4 g64 symmetric |",
           f"| attention `self_attn.{{q,k,v,o}}_proj` | {'int4 g64 symmetric' if attn == 'int4' else 'bf16'} |",
           "| router `mlp.gate`, `moe.router.expert_bias` | bf16 (routing must not move) |",
-          "| shared experts `mlp.shared_experts.*` | bf16 (every token reads them) |",
+          "| shared experts `mlp.shared_experts.*` | int4 g64 (as the routed experts) |",
           "| norms, `embed_tokens`, `lm_head` | bf16 |", ""]
     if chk:
         L += [f"Size: {chk.get('bytes_total', 0) / 1e9:.1f} GB ({chk.get('int4_linears', '?')} int4 linears). "

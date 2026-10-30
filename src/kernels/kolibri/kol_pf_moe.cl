@@ -16,8 +16,8 @@
 //   * 384 experts. k2_pf_sort stages the chunk's ids as BYTES (PF_E <= 255) and gives each lane ONE
 //     expert (PF_WG >= PF_E, 256 lanes at most - the Mac's cap too). Here the ids are staged as ushort
 //     and lane l owns experts l and l + 256 (PF_EPL 2; 20c's route has the same 512 slots on 256 lanes).
-//   * The shared expert is bf16 (spec 20 decision 4's proposal): block PF_E of a weight batch is COPIED
-//     from gemv_bf16's tiles ({K, N}: [n/16][k/8][8 k][16 n]) into row-major [K][N], not dequantised.
+//   * The shared expert is int4 (operator ruling 2026-10-31: the operator's export quantises it): block
+//     PF_E of a weight batch is dequantised from ITS OWN layout-1 block (w_sh) exactly as a routed one.
 //   * Kolibri's combine (20c's kol_moe_down epilogue): the six routed terms in ascending id, each product
 //     rounded to fp32 THEN added (no fma: FP_CONTRACT OFF - the reference's index_add_ of y.float() * w),
 //     + the shared row, ONE rounding to bf16, into `mo` - NOT the residual (post_ffn_norm comes first:
@@ -192,12 +192,12 @@ __kernel void kol_pf_gather(__global const uint4* restrict x, __global const uin
 // [K][N] row-major. Block b < PF_E: the routed expert's int4 layout-1 block (loader/kolibri1_layout.h:
 // block b at b x its stride), k2_pf_dequant's arithmetic statement for statement (the same xor,
 // sign-extension shift and single RNE of (q - 8) x scale); an expert with no row this chunk
-// (hdr[H_COUNT + b] == 0) returns at once - no tile reads it. Block PF_E: the shared expert's bf16
-// gemv_bf16 tiles, copied (w_sh[((n/16) K/8 + k/8) 128 + (k%8) 16 + n%16] = W[n][k]).
+// (hdr[H_COUNT + b] == 0) returns at once - no tile reads it. Block PF_E: the shared expert's own
+// layout-1 block (w_sh, the same layout at the same widths), every chunk.
 #define KOL_PF_DEQUANT(NAME, KK, NN)                                                          \
   __attribute__((reqd_work_group_size(16, 1, 1)))                                             \
   __attribute__((intel_reqd_sub_group_size(16)))                                              \
-  __kernel void NAME(__global const uint* restrict w, __global const ushort* restrict w_sh,   \
+  __kernel void NAME(__global const uint* restrict w, __global const uint* restrict w_sh,     \
                      __global const uint* restrict hdr, __global ushort* restrict out,        \
                      uint b0, uint b1) {                                                      \
     const uint lane = get_local_id(0);                                                        \
@@ -207,14 +207,10 @@ __kernel void kol_pf_gather(__global const uint4* restrict x, __global const uin
     const uint b = b0 + bl;                                                                   \
     if (b >= b1 || b > PF_E) return;                                                          \
     __global ushort* o = out + (size_t)bl * (KK) * (NN) + n_tile * 16 + lane;                 \
-    if (b == PF_E) {                                                                          \
-      const __global ushort* sh = w_sh + ((size_t)n_tile * ((KK) / 8) + g * 8u) * 128 + lane; \
-      for (uint k = 0; k < 64; ++k) o[(size_t)(g * 64u + k) * (NN)] = sh[(k / 8) * 128 + (k % 8) * 16]; \
-      return;                                                                                 \
-    }                                                                                         \
-    if (hdr[H_COUNT + b] == 0u) return;                                                       \
+    if (b < PF_E && hdr[H_COUNT + b] == 0u) return;                                           \
     const size_t blk = (size_t)((NN) / 16) * ((KK) / 64) * TILE_U32;                          \
-    __global const uint* tile = w + (size_t)b * blk + ((size_t)n_tile * ((KK) / 64) + g) * TILE_U32; \
+    __global const uint* tile = (b == PF_E ? w_sh : w + (size_t)b * blk) +                    \
+                                ((size_t)n_tile * ((KK) / 64) + g) * TILE_U32;                \
     const uint8 bw = intel_sub_group_block_read8(tile);                                       \
     uint wv[8];                                                                               \
     wv[0] = bw.s0; wv[1] = bw.s1; wv[2] = bw.s2; wv[3] = bw.s3;                               \

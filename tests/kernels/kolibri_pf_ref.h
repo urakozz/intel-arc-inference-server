@@ -9,10 +9,10 @@
 //   tmax()          the padded tile count of a C-row chunk: floor((C x 6 + 384 x 31) / 32) + ceil(C / 32)
 //                   (820 at C = 2048; runtime::kolibri::pf_tiles is the host's home of it)
 //   sort()          kol_pf_sort: expert-major rows, ascending token inside an expert, tiles of 32, the
-//                   bf16 shared expert's block 384 last with its C tokens in order, pair_row, the header
+//                   shared expert's block 384 last with its C tokens in order, pair_row, the header
 //   gather()        kol_pf_gather: row r of the sorted A operand (zeros for padding)
 //   dequant_gu/_dn  kol_pf_dequant_gu / _dn: block e < 384 the int4 layout-1 dequant (pf_moe_ref's),
-//                   block 384 the shared expert's bf16 tiles copied into row-major [K][N]
+//                   block 384 the shared expert's own int4 block, dequantised the same way
 //   bf16_slab()     kol_pf_bf16_slab: columns [n0, n0 + ns) of a gemv_bf16-tiled linear as bf16 [K][ns],
 //                   the columns >= N exact zeros (the o_proj tail: 2560 = 2 x 1024 + 512)
 //   combine()       kol_pf_moe_combine: kol_moe_down's epilogue over sorted rows - acc = acc + y_j x w_j in
@@ -123,25 +123,14 @@ inline std::vector<uint16_t> gather(const Sorted& st, const uint16_t* x, uint32_
   return g;
 }
 
-// A gemv_bf16-tiled {K, N} weight (common::repack_bf16_tiled: W[n][k] at ((n/16) K/8 + k/8) 128 +
-// (k%8) 16 + n%16) as row-major bf16 [K][N] - the shared expert's block 384 of a weight batch.
-inline std::vector<uint16_t> untile_bf16(const uint16_t* tiles, uint32_t K, uint32_t N) {
-  std::vector<uint16_t> out(size_t(K) * N);
-  const uint32_t K8 = K / 8;
-  for (uint32_t k = 0; k < K; ++k)
-    for (uint32_t n = 0; n < N; ++n)
-      out[size_t(k) * N + n] = tiles[((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16];
-  return out;
-}
-// kol_pf_dequant_gu: block e of the gate||up batch as bf16 [hidden][2I] (interleave16 kept).
-inline std::vector<uint16_t> dequant_gu(const uint32_t* gu, const uint16_t* sh_gu, uint32_t e) {
-  return e < kE ? pf_moe_ref::dequant_block(gu + size_t(e) * kolibri_ref::gate_up_block_words(), kH, 2 * kI)
-                : untile_bf16(sh_gu, kH, 2 * kI);
+// kol_pf_dequant_gu: block e of the gate||up batch as bf16 [hidden][2I] (interleave16 kept); block 384 the
+// shared expert's own int4 block (operator ruling 2026-10-31), dequantised as a routed one.
+inline std::vector<uint16_t> dequant_gu(const uint32_t* gu, const uint32_t* sh_gu, uint32_t e) {
+  return pf_moe_ref::dequant_block(e < kE ? gu + size_t(e) * kolibri_ref::gate_up_block_words() : sh_gu, kH, 2 * kI);
 }
 // kol_pf_dequant_dn: block e of the down batch as bf16 [I][hidden].
-inline std::vector<uint16_t> dequant_dn(const uint32_t* dn, const uint16_t* sh_dn, uint32_t e) {
-  return e < kE ? pf_moe_ref::dequant_block(dn + size_t(e) * kolibri_ref::down_block_words(), kI, kH)
-                : untile_bf16(sh_dn, kI, kH);
+inline std::vector<uint16_t> dequant_dn(const uint32_t* dn, const uint32_t* sh_dn, uint32_t e) {
+  return pf_moe_ref::dequant_block(e < kE ? dn + size_t(e) * kolibri_ref::down_block_words() : sh_dn, kI, kH);
 }
 
 // kol_pf_bf16_slab: columns [n0, n0 + ns) of a gemv_bf16-tiled K x N linear as bf16 [K][ns]; c with
