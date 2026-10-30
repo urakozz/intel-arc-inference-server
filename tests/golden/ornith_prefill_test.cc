@@ -363,6 +363,7 @@ int main(int argc, char** argv) {
 
   // ---- 6. R2 on the prefill path ------------------------------------------------------------
   SetStats r2, r2_ref;   // r2_ref: the bf16 golden against the judge (with --judge)
+  std::vector<uint64_t> bad_l(d.layers, 0), bad_ref_l(d.layers, 0);   // the differing sets per layer, all prompts
   bool any = false;
   const moe_ref::Shape s{d.moe.experts, d.moe.top_k, d.hidden, d.moe.expert_intermediate,
                          d.moe.router_n()};
@@ -399,6 +400,7 @@ int main(int argc, char** argv) {
     }
     std::vector<float> lgr(s.router_n, 0.0f), lgb(s.router_n, 0.0f);
     for (uint32_t l = 0; l < d.layers; ++l) {
+      const uint64_t bad0 = r2.bad, bad_ref0 = r2_ref.bad;
       const std::string ls = std::to_string(l);
       const uint16_t* gl = g.bf16("router_logits.L" + ls, size_t(rows) * s.experts);
       const bool have_sg = g.has("shared_gate_logits.L" + ls);
@@ -432,6 +434,8 @@ int main(int argc, char** argv) {
         }
         compare_set(&pf.routes[(size_t(l) * T + t) * 32], want.ids, want.w, s.top_k, near, kR2WeightRel, true, r2);
       }
+      bad_l[l] += r2.bad - bad0;
+      bad_ref_l[l] += r2_ref.bad - bad_ref0;
     }
   }
   if (any) {
@@ -448,6 +452,11 @@ int main(int argc, char** argv) {
       // than the bf16 golden's own: the differing sets (the matched weights' worst error is printed beside, not gated -
       // one row's number, where the sets are the measure the ruling names).
       const bool ok = r2.bad <= r2_ref.bad;
+      // Where a backend loses routing accuracy: each layer's differing sets, the prefill's / the bf16 golden's.
+      std::printf("   per layer (prefill / bf16 golden differing sets):");
+      for (uint32_t l = 0; l < d.layers; ++l)
+        std::printf(" L%u %llu/%llu", l, (unsigned long long)bad_l[l], (unsigned long long)bad_ref_l[l]);
+      std::printf("\n");
       std::printf("6. R2 gate, judged by the f32 reference %s (operator, 2026-10-28): prefill %llu differing sets vs "
                   "the bf16 golden's %llu, weights worst %.3e vs %.3e%s\n", judge_dir.c_str(),
                   (unsigned long long)r2.bad, (unsigned long long)r2_ref.bad, double(r2.worst_w),
