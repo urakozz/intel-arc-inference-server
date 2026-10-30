@@ -220,6 +220,7 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
   const uint32_t V = eng.vocab();
   const std::unique_ptr<golden::Golden> judge = fj.open(jkey, kGen, V);
   uint32_t judge_cached = 0, judge_cold = 0;
+  golden::CosRows cos_cached, cos_cold, cos_twin;   // each path's rows against the judge's
   uint32_t det_exact = 0, near = 0, bad = 0, bitwise = 0, first_diff = kGen;
   for (uint32_t p = 0; p < kGen; ++p) {
     const std::vector<float> ref = eng.read_logits();
@@ -233,6 +234,8 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
       judge_cold += !cold_ok;
       if (!cached_ok) golden::judge_explain(*judge, p, id, V, V, "cached run's");
       if (!cold_ok) golden::judge_explain(*judge, p, gd.set[0], V, V, "cold run's");
+      cos_cached.c.push_back(golden::judge_cos(*judge, p, cand_rows[p].data(), V, V));
+      cos_cold.c.push_back(golden::judge_cos(*judge, p, ref.data(), V, V));
     }
     if (id != gd.set[0] && first_diff == kGen) first_diff = p;
     if (gd.determined()) {
@@ -253,6 +256,13 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, V) : nullptr;
   const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, V, V) : 0;
   const uint32_t judge_bar = twin ? judge_twin : judge_cold;
+  if (twin) {
+    const float* tl = twin->f32("logits", size_t(twin->dim("logits", 2, 0)) * V);
+    for (uint32_t p = 0; p < kGen; ++p) cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * V, V, V));
+  }
+  if (judge)
+    std::printf("  %s logits rows against the f32 judge, cosine min / median: cached %s, cold %s, bf16 reference %s\n",
+                want.name.c_str(), cos_cached.str().c_str(), cos_cold.str().c_str(), cos_twin.str().c_str());
   std::printf("  %s: %s at %u of %zu | %u/%u exact, %u near-tie (allowed %u), %u bad, first differing row %s, "
               "%u/%u logits rows bitwise the cold run's%s\n",
               want.name.c_str(), server::plan_kind_name(rep.kind), rep.restart, final_prompt.size(), det_exact,
