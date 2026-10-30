@@ -1917,9 +1917,9 @@ if(B70_K2)
   set_tests_properties(k2_prefill_eager_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
   # Operator ruling 2026-10-29: section 6's rows judged by the f32 reference of the forced context once f32_refs.sh
   # made it (tests/golden/forced_judge.h); the int8 head by its quantisation-aware twin.
-  set_tests_properties(k2_prefill_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced")
+  set_tests_properties(k2_prefill_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
   set_tests_properties(k2_prefill_i8head_test PROPERTIES
-    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-forced")
+    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
   add_test(NAME prefill_split_k2_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
   set_tests_properties(k2_prefill_test k2_prefill_i8head_test k2_prefill_eager_test prefill_split_k2_test
@@ -2146,7 +2146,7 @@ if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
   # (tests/golden/forced_judge.h; without the file a sequence keeps the cold-run rule and says so).
   set_tests_properties(k2_prefix_gpu_test k2_prefix_gpu_split_test PROPERTIES
     LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600
-    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced")
+    ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
   if(B70_KV8)
     add_test(NAME k2_prefix_gpu_kv8_test COMMAND k2_prefix_gpu_test ${B70_K2_SNAPSHOT}
       ${CMAKE_SOURCE_DIR}/tests/golden/prompts)

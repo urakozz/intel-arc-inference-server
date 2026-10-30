@@ -1103,9 +1103,9 @@ st_r16_golden_server() {
 }
 stage r16.prefix 16 default card ornith r16.kernels "spec 7 C2 on Ornith: prefix_gpu_test <ornith> on l0-int8, on l0 (near-tie allowance 1) and on l0-int8 with --mtp 3 - run directly, as golden_server_test; each sequence judged by the f32 reference of its forced context where \$DATA/oracle-out-ornith-f32-forced has it (operator ruling 2026-10-29, r16.forced_refs makes them)"
 st_r16_prefix() {
-  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8" "prefix_gpu_test <ornith> l0-int8"
-  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1" "prefix_gpu_test <ornith> l0"
-  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3" "prefix_gpu_test <ornith> l0-int8 --mtp 3"
+  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8" "prefix_gpu_test <ornith> l0-int8"
+  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1" "prefix_gpu_test <ornith> l0"
+  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3" "prefix_gpu_test <ornith> l0-int8 --mtp 3"
   finish
 }
 # Operator ruling 2026-10-29: the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
@@ -1136,6 +1136,10 @@ st_r16_forced_refs() {
   chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix" "the K2 prefix contexts"
   chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill" "the K2 prefill context"
   chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-i8head -i8head --lm-head int8" "the K2 prefill context, int8 head"
+  # Operator ruling 2026-10-31: each judge's bf16 twin (the bar of the near-miss gates), --gemm f32 on this CPU.
+  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix '' --gemm f32" "the Ornith prefix contexts' bf16 twins"
+  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix '' --gemm f32" "the K2 prefix contexts' bf16 twins"
+  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill '' --gemm f32" "the K2 prefill context's bf16 twin"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
 }

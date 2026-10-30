@@ -8,6 +8,11 @@
 //                            would judge (the engine is deterministic: a second run is the same context)
 //   B70_FORCED_JUDGE=<dir>   the test reads <dir>/<key>.golden.safetensors (--lean: `logits` [1 + gen][V], row j
 //                            the decision of forced id j) and judges with golden_common.h's judge_row
+//   B70_FORCED_BF16=<dir>    the bf16 twin of each judge (f32_refs.sh forced ... with DTYPE=bf16 --gemm f32): the
+//                            plain bf16 reference on the same context. Operator ruling 2026-10-31: with it, an engine
+//                            path passes when the judge rejects no more of its ids than of the twin's argmax (the
+//                            Ornith R2 principle, 2026-10-28) - rank-1/2 misses a few ulp below the f32 top are what
+//                            bf16 arithmetic does, and the twin measures how many of them this context has.
 //
 // <key> = <name>_<FNV-1a 64 of the prompt and the forced ids, hex>: two configurations that reach the same tokens
 // share one reference, and a judge can never be applied to another context than its own.
@@ -24,10 +29,11 @@
 namespace golden {
 
 struct ForcedJudge {
-  std::string dump_dir, judge_dir;
+  std::string dump_dir, judge_dir, twin_dir;
   ForcedJudge() {
     if (const char* d = std::getenv("B70_DUMP_FORCED")) dump_dir = d;
     if (const char* j = std::getenv("B70_FORCED_JUDGE")) judge_dir = j;
+    if (const char* t = std::getenv("B70_FORCED_BF16")) twin_dir = t;
   }
   static std::string key(const std::string& name, const std::vector<uint32_t>& prompt,
                          const std::vector<uint32_t>& force) {
@@ -70,6 +76,20 @@ struct ForcedJudge {
     CHECK_EQ(g->dim("logits", 2, 1), uint64_t(vocab));
     return g;
   }
+  // The judge's bf16 twin, or none (said so: the gate then compares against the other engine run, as before).
+  std::unique_ptr<Golden> open_twin(const std::string& k, size_t gen, size_t vocab) const {
+    if (twin_dir.empty()) return nullptr;
+    const std::string p = twin_dir + "/" + k + ".golden.safetensors";
+    if (!exists(p)) {
+      std::printf("  no bf16 twin for %s (%s; f32_refs.sh forced with DTYPE=bf16 --gemm f32) - the engine runs are"
+                  " compared with each other\n", k.c_str(), p.c_str());
+      return nullptr;
+    }
+    auto g = std::make_unique<Golden>(p);
+    CHECK_EQ(g->dim("logits", 2, 0), uint64_t(gen + 1));
+    CHECK_EQ(g->dim("logits", 2, 1), uint64_t(vocab));
+    return g;
+  }
 };
 
 // A forced-context row judged: does the f32 judge accept `id` there (judge_row's one-ulp rule)?
@@ -92,6 +112,27 @@ inline void judge_explain(const Golden& j, uint32_t row, uint32_t id, uint32_t v
   std::printf("    row %u: the judge rejects the %s id %u - %.4g below its top %u (%.2f bf16 ulp of the top %.4f; "
               "rank %u; the judge's own top-2 gap %.4g = %.2f ulp)\n",
               row, who, id, below, jr.top, below / jr.ulp, double(r[jr.top]), rank, jr.gap, jr.gap / jr.ulp);
+}
+
+}  // namespace golden
+
+namespace golden {
+
+// The bf16 twin's own misses over rows [0, rows): rows where the judge rejects every id of the twin's argmax set
+// (golden_decision: a bf16 tie is any of its ids), each printed with its margin.
+inline uint32_t twin_misses(const Golden& judge, const Golden& twin, uint32_t rows, uint32_t vocab, uint32_t used) {
+  const float* t = twin.f32("logits", size_t(twin.dim("logits", 2, 0)) * vocab);
+  uint32_t n = 0;
+  for (uint32_t r = 0; r < rows; ++r) {
+    const GoldenDecision gd = golden_decision(t + size_t(r) * vocab, vocab, used);
+    bool any = false;
+    for (uint32_t id : gd.set) any = any || judge_accepts(judge, r, id, vocab, used);
+    if (!any) {
+      ++n;
+      judge_explain(judge, r, gd.set[0], vocab, used, "bf16 reference's");
+    }
+  }
+  return n;
 }
 
 }  // namespace golden

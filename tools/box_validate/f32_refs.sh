@@ -9,6 +9,8 @@
 #       every <dir>/<key>.prompt.ids with its <key>.force.ids (a test's own engine run wrote them:
 #       B70_DUMP_FORCED=<dir>, tests/golden/forced_judge.h) -> <data tree>/oracle-out-<model>-f32<suffix>-forced/
 #       <key>.golden.safetensors, run --lean (e.g. suffix -i8head with --lm-head int8: the int8 head's judges)
+#       DTYPE=bf16 ... '' --gemm f32: each judge's bf16 twin -> oracle-out-<model>-bf16-forced/ (operator ruling
+#       2026-10-31: the near-miss gates' bar is the twin's own count of ids the judge rejects)
 #   tools/box_validate/f32_refs.sh <data tree> split <ornith|k2> <ids> <N> <out stem>
 #       prefill_split_test's references of ids[0, N): f32 and bf16, --lean --dump-kv, no generated rows ->
 #       <out stem>-f32.golden.safetensors and <out stem>-bf16.golden.safetensors
@@ -34,7 +36,7 @@ case "$what" in
   forced)
     m="${3:?ornith | k2}" dir="${4:?the dumped prompt / force ids}" suffix="${5:-}"
     shift 4; [ $# -gt 0 ] && shift
-    out="$data/oracle-out-$m-f32$suffix-forced"
+    out="$data/oracle-out-$m-${DTYPE:-f32}$suffix-forced"   # DTYPE=bf16: the judges' bf16 twins (B70_FORCED_BF16)
     for pr in "$dir"/*.prompt.ids; do
       [ -e "$pr" ] || { echo "f32_refs: no *.prompt.ids in $dir"; rc=1; break; }
       n=$(basename "$pr" .prompt.ids)

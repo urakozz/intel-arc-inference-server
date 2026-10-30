@@ -438,12 +438,18 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
       e.ingest({dtok[j]});   // teacher-forced on decode's token
     }
   }
-  const bool tok_ok = judge ? judge_pf <= judge_dec : det_agree == det;
+  // Operator ruling 2026-10-31: with the judge's bf16 twin, the bar is the twin's own count of rejected ids.
+  const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, d.vocab) : nullptr;
+  const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, d.vocab, d.vocab_used) : 0;
+  const bool tok_ok = judge ? judge_pf <= (twin ? judge_twin : judge_dec) : det_agree == det;
   std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
               tok_ok ? "" : "  ** FAIL **");
   if (judge)
     std::printf("   judged by the f32 reference (operator, 2026-10-29): it rejects %u of the prefill's ids, %u of"
-                " decode's%s\n", judge_pf, judge_dec, tok_ok ? "" : "  ** FAIL **");
+                " decode's%s%s\n", judge_pf, judge_dec,
+                twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
+                     : "",
+                tok_ok ? "" : "  ** FAIL **");
   ok = ok && (eager || tok_ok);   // eager: recorded (operator rulings 2026-10-23 #4, 2026-10-29)
   return ok ? 0 : 1;
 }
