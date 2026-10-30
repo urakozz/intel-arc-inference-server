@@ -423,8 +423,12 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
     for (uint32_t j = 0; j < kGen; ++j) {
       const uint32_t got = c->cur_token[0];
       if (judge) {
-        judge_pf += !golden::judge_accepts(*judge, j, got, d.vocab, d.vocab_used);
-        judge_dec += !golden::judge_accepts(*judge, j, dtok[j], d.vocab, d.vocab_used);
+        const bool pf_ok = golden::judge_accepts(*judge, j, got, d.vocab, d.vocab_used);
+        const bool dec_ok = golden::judge_accepts(*judge, j, dtok[j], d.vocab, d.vocab_used);
+        judge_pf += !pf_ok;
+        judge_dec += !dec_ok;
+        if (!pf_ok) golden::judge_explain(*judge, j, got, d.vocab, d.vocab_used, "prefill's");
+        if (!dec_ok) golden::judge_explain(*judge, j, dtok[j], d.vocab, d.vocab_used, "decode's");
       }
       agree += got == dtok[j];
       if (determined[j]) {

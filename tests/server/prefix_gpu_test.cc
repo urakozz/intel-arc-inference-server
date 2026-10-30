@@ -231,8 +231,12 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
         golden::golden_decision(ref.data(), Qwen35::kVocab, Qwen35::kVocabUsed);
     const uint32_t id = cand_tok[p];
     if (judge) {
-      judge_cached += !golden::judge_accepts(*judge, p, id, Qwen35::kVocab, Qwen35::kVocabUsed);
-      judge_cold += !golden::judge_accepts(*judge, p, gd.set[0], Qwen35::kVocab, Qwen35::kVocabUsed);
+      const bool cached_ok = golden::judge_accepts(*judge, p, id, Qwen35::kVocab, Qwen35::kVocabUsed);
+      const bool cold_ok = golden::judge_accepts(*judge, p, gd.set[0], Qwen35::kVocab, Qwen35::kVocabUsed);
+      judge_cached += !cached_ok;
+      judge_cold += !cold_ok;
+      if (!cached_ok) golden::judge_explain(*judge, p, id, Qwen35::kVocab, Qwen35::kVocabUsed, "cached run's");
+      if (!cold_ok) golden::judge_explain(*judge, p, gd.set[0], Qwen35::kVocab, Qwen35::kVocabUsed, "cold run's");
     }
     if (id != gd.set[0] && first_diff == kGen) first_diff = p;
     if (gd.determined()) {

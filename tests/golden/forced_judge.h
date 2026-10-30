@@ -79,4 +79,19 @@ inline bool judge_accepts(const Golden& j, uint32_t row, uint32_t id, uint32_t v
   return jr.d.determined() ? id == jr.top : jr.d.contains(id);
 }
 
+// The judge's margin at a row where it rejects one run's id (`who`): how far below the f32 top that id sits, in
+// the judge's own units - the top-2 gap and one bf16 ulp of the top logit (judge_row's near-tie width). Printed
+// beside every rejection, so a reader can tell a near-miss (a gap of a few ulp) from a divergence.
+inline void judge_explain(const Golden& j, uint32_t row, uint32_t id, uint32_t vocab, uint32_t used,
+                          const char* who) {
+  const float* r = j.f32("logits", size_t(j.dim("logits", 2, 0)) * vocab) + size_t(row) * vocab;
+  const JudgedRow jr = judge_row(r, vocab, used);
+  const double below = double(r[jr.top]) - double(r[id]);
+  uint32_t rank = 0;   // ids strictly above `id` in the judge's row
+  for (uint32_t i = 0; i < (vocab < used ? vocab : used); ++i) rank += r[i] > r[id];
+  std::printf("    row %u: the judge rejects the %s id %u - %.4g below its top %u (%.2f bf16 ulp of the top %.4f; "
+              "rank %u; the judge's own top-2 gap %.4g = %.2f ulp)\n",
+              row, who, id, below, jr.top, below / jr.ulp, double(r[jr.top]), rank, jr.gap, jr.gap / jr.ulp);
+}
+
 }  // namespace golden
