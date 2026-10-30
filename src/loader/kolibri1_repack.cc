@@ -31,19 +31,6 @@ void add_int4(std::vector<std::string>& v, const std::string& base) {
 
 size_t int4_src_bytes(const LinearSrc& s) { return size_t(s.K / 8) * s.N * 4 + size_t(s.K / s.group) * s.N * 2; }
 
-// gate||up interleaved in 16-row blocks of an [N][K] row-major pair (cols_interleave16's column
-// order, as rows): row r of the fused [2I][K] is gate[(r / 32) x 16 + r % 16] for r % 32 < 16,
-// else up[...]. Then gemv_bf16's tiles.
-void tiled_interleave16(const uint16_t* gate, const uint16_t* up, uint32_t I, uint32_t K, uint16_t* out) {
-  std::vector<uint16_t> rows(size_t(2) * I * K);
-  for (uint32_t r = 0; r < 2 * I; ++r) {
-    const uint32_t src = (r / 32) * 16 + r % 16;
-    const uint16_t* w = (r % 32 < 16 ? gate : up) + size_t(src) * K;
-    std::memcpy(rows.data() + size_t(r) * K, w, size_t(K) * 2);
-  }
-  common::repack_bf16_tiled(rows.data(), K, 2 * I, out);
-}
-
 }  // namespace
 
 KolAttnForm kol_attn_form(const SafetensorsSet& st, const Kolibri1Desc& d) {
@@ -84,7 +71,7 @@ std::vector<std::string> kol_expected_names(const Kolibri1Desc& d, KolAttnForm a
     v.push_back(p + "self_attn.k_norm.weight");
     v.push_back(p + "mlp.gate.weight");
     v.push_back(p + "moe.router.expert_bias");
-    for (const char* n : kMlp) v.push_back(p + "mlp.shared_experts." + n + ".weight");
+    for (const char* n : kMlp) add_int4(v, p + "mlp.shared_experts." + n);
     for (uint32_t e = 0; e < d.experts; ++e)
       for (const char* n : kMlp) add_int4(v, p + "mlp.experts." + std::to_string(e) + "." + n);
   }
@@ -242,20 +229,25 @@ void KolCheckpoint::repack_layer(uint32_t layer, KolHostLayer& out) {
   widen(take(lp + "moe.router.expert_bias", E), out.bias.data());
   out.src_bf16_bytes += size_t(E) * 2;
 
-  // The shared expert, bf16: gate||up interleave16 then tiles; down tiles.
+  // The shared expert, int4 (operator ruling 2026-10-31: the operator's export quantises it as every routed
+  // expert): one layout-1 block of each kind, a routed expert's layout at the same widths (SI == I).
+  const size_t gu_words = kol_gate_up_block_bytes(d_) / 4, dn_words = kol_down_block_bytes(d_) / 4;
   {
-    const LinearSrc g = bf16(lp + "mlp.shared_experts.gate_proj", H, SI);
-    const LinearSrc u = bf16(lp + "mlp.shared_experts.up_proj", H, SI);
-    const LinearSrc dn = bf16(lp + "mlp.shared_experts.down_proj", SI, H);
-    out.shared_gate_up.resize(size_t(2) * SI * H);
-    tiled_interleave16(g.weight, u.weight, SI, H, out.shared_gate_up.data());
-    out.shared_down.resize(size_t(SI) * H);
-    common::repack_bf16_tiled(dn.weight, SI, H, out.shared_down.data());
-    out.src_bf16_bytes += size_t(3) * SI * H * 2;
+    const std::string sp = lp + "mlp.shared_experts.";
+    const LinearSrc g = int4(sp + "gate_proj", H, SI);
+    const LinearSrc u = int4(sp + "up_proj", H, SI);
+    const LinearSrc dn = int4(sp + "down_proj", SI, H);
+    out.src_int4_bytes += int4_src_bytes(g) + int4_src_bytes(u) + int4_src_bytes(dn);
+    out.shared_gate_up.resize(gu_words);
+    out.shared_down.resize(dn_words);
+    common::repack_int4_layout1_cols(H, 2 * SI,
+                                     common::cols_interleave16({g.qweight, g.scales, g.N}, {u.qweight, u.scales, u.N}),
+                                     out.shared_gate_up.data());
+    common::repack_int4_layout1_cols(SI, H, common::cols_concat({{dn.qweight, dn.scales, dn.N}}),
+                                     out.shared_down.data());
   }
 
   // The routed experts: layout-1 blocks, block e at e x stride (gate||up interleave16).
-  const size_t gu_words = kol_gate_up_block_bytes(d_) / 4, dn_words = kol_down_block_bytes(d_) / 4;
   out.gate_up.resize(gu_words * E);
   out.down.resize(dn_words * E);
   for (uint32_t e = 0; e < E; ++e) {

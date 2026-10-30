@@ -186,11 +186,11 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
       L.bias = upload_u(ctx, imm, host.bias.data(), host.bias.size() * 4);
       L.gate_up = upload_u(ctx, imm, host.gate_up.data(), host.gate_up.size() * 4);
       L.down = upload_u(ctx, imm, host.down.data(), host.down.size() * 4);
-      L.shared_gate_up = upload_u(ctx, imm, host.shared_gate_up.data(), host.shared_gate_up.size() * 2);
-      L.shared_down = upload_u(ctx, imm, host.shared_down.data(), host.shared_down.size() * 2);
+      L.shared_gate_up = upload_u(ctx, imm, host.shared_gate_up.data(), host.shared_gate_up.size() * 4);
+      L.shared_down = upload_u(ctx, imm, host.shared_down.data(), host.shared_down.size() * 4);
       P.bytes += host.norms.size() * 4 + host.router.size() * 2 + host.bias.size() * 4 +
                  (host.gate_up.size() + host.down.size()) * 4 +
-                 (host.shared_gate_up.size() + host.shared_down.size()) * 2;
+                 (host.shared_gate_up.size() + host.shared_down.size()) * 4;
       P.layers.push_back(std::move(L));
     }
     if (dev + 1 == placement.devices) {

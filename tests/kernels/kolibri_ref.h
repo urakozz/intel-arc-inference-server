@@ -16,7 +16,7 @@
 //                   ranked), rank with ties to the lower id, ids ascending, w = sigmoid(logit) fp32
 //   combine()       kol_moe_down's epilogue: Σ_j fp32(rne(down_j)) × w_j in ascending id (mul rounded,
 //                   then add), + fp32(rne(shared down)), one rounding; NOT folded into the residual
-//   gate_up() / down()   the whole MoE block over layout-1 blocks and the bf16 shared slot
+//   gate_up() / down()   the whole MoE block over layout-1 blocks, the shared slot's own block included
 //   attention_eager()    kol_attn_eager.cl: k2_attn_eager's chain without the gate, over the row's
 //                   keys [lo, hi] indexed from lo (the cached decode pass's row)
 //   attention()     decode attention in fp64 over [lo, hi] (a tolerance reference for flash)
@@ -247,43 +247,21 @@ inline float gap(const float* logits, const float* bias, const Route& r) {
 }
 
 // --- the MoE block ---------------------------------------------------------------------------------
-// One bf16-tiled column n ({K, N} gemv_bf16 tiles) over `ks` K slices, each an ascending k chain
-// (a += w · x), merged by the pairwise tree - kol_moe.cl's shared slot.
-inline float bf16_split_dot(const uint16_t* tiles, uint32_t K, uint32_t n, const uint16_t* x, uint32_t ks) {
-  const uint32_t K8 = K / 8, per = K8 / ks;
-  std::vector<float> r(ks);
-  for (uint32_t q = 0; q < ks; ++q) {
-    float a = 0.f;
-    for (uint32_t k8 = q * per; k8 < (q + 1) * per; ++k8)
-      for (uint32_t i = 0; i < 8; ++i) a += f32(tiles[((size_t(n / 16) * K8 + k8) * 8 + i) * 16 + n % 16]) * f32(x[k8 * 8 + i]);
-    r[q] = a;
-  }
-  for (uint32_t stride = ks / 2; stride > 0; stride >>= 1)
-    for (uint32_t q = 0; q < stride; ++q) r[q] += r[q + stride];
-  return r[0];
-}
-
 constexpr uint32_t kSlots = kTopK + 1;   // 6 routed + the shared expert (slot 6)
 inline size_t gate_up_block_words() { return size_t(2 * kInter / 16) * (kHidden / 64) * 136; }
 inline size_t down_block_words() { return size_t(kHidden / 16) * (kInter / 64) * 136; }
 
-// h [7][512] bf16: slot j < 6 the routed expert ids[j] (layout-1 blocks), slot 6 the shared expert
-// (bf16 tiles {hidden, 2I}); h = rne(f32(rne(silu(f32(rne(Σ gate))))) · f32(rne(Σ up))).
+// h [7][512] bf16: slot j < 6 the routed expert ids[j] (layout-1 blocks), slot 6 the shared expert (its own
+// int4 layout-1 block, operator ruling 2026-10-31); h = rne(f32(rne(silu(f32(rne(Σ gate))))) · f32(rne(Σ up))).
 inline std::vector<uint16_t> gate_up(const uint32_t* ids, const uint16_t* x, const uint32_t* gu,
-                                     const uint16_t* sh_gu, uint32_t up_ks) {
+                                     const uint32_t* sh_gu, uint32_t up_ks) {
   std::vector<uint16_t> h(size_t(kSlots) * kInter);
   for (uint32_t slot = 0; slot < kSlots; ++slot)
     for (uint32_t i = 0; i < kInter; ++i) {
       const uint32_t gc = moe_ref::gate_col(i), uc = moe_ref::up_col(i);
-      float g, u;
-      if (slot < kTopK) {
-        const uint32_t* blk = gu + ids[slot] * gate_up_block_words();
-        g = split_dot(blk, kHidden, gc, x, up_ks);
-        u = split_dot(blk, kHidden, uc, x, up_ks);
-      } else {
-        g = bf16_split_dot(sh_gu, kHidden, gc, x, up_ks);
-        u = bf16_split_dot(sh_gu, kHidden, uc, x, up_ks);
-      }
+      const uint32_t* blk = slot < kTopK ? gu + ids[slot] * gate_up_block_words() : sh_gu;
+      const float g = split_dot(blk, kHidden, gc, x, up_ks);
+      const float u = split_dot(blk, kHidden, uc, x, up_ks);
       h[size_t(slot) * kInter + i] = moe_ref::silu_up(g, u);
     }
   return h;
@@ -301,14 +279,13 @@ inline uint16_t combine(const float* down, const float* w) {
 
 // mo [2560] bf16 (NOT added to the residual: post_ffn_norm comes first).
 inline std::vector<uint16_t> down(const uint32_t* ids, const float* w, const std::vector<uint16_t>& h,
-                                  const uint32_t* dn, const uint16_t* sh_dn, uint32_t dn_ks) {
+                                  const uint32_t* dn, const uint32_t* sh_dn, uint32_t dn_ks) {
   std::vector<uint16_t> out(kHidden);
   float d[kSlots];
   for (uint32_t n = 0; n < kHidden; ++n) {
     for (uint32_t slot = 0; slot < kSlots; ++slot) {
       const uint16_t* hs = h.data() + size_t(slot) * kInter;
-      d[slot] = slot < kTopK ? split_dot(dn + ids[slot] * down_block_words(), kInter, n, hs, dn_ks)
-                             : bf16_split_dot(sh_dn, kInter, n, hs, dn_ks);
+      d[slot] = split_dot(slot < kTopK ? dn + ids[slot] * down_block_words() : sh_dn, kInter, n, hs, dn_ks);
     }
     out[n] = combine(d, w);
   }

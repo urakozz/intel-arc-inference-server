@@ -124,7 +124,7 @@ inline uint32_t pf_ld(uint32_t N) { return pad256(N); }
 // The grouped GEMMs' padded tile count of a C-row chunk (kol_pf_moe.cl's header has the bound):
 //   floor((C x top_k + experts x (TM - 1)) / TM) + ceil(C / TM)        820 at C = 2048
 uint32_t pf_tiles(const model::Kolibri1Desc& d, uint32_t C);
-// The weight batches: 385 blocks (384 experts + the bf16 shared expert, block 384) of bf16 [K][N] in
+// The weight batches: 385 blocks (384 experts + the shared expert, block 384) of bf16 [K][N] in
 // kPfBatchBytes regions - gate||up 5,242,880 B a block, 102 a batch, 4 batches; down 2,621,440 B, 204,
 // 2 batches.
 size_t pf_block_gu_bytes(const model::Kolibri1Desc& d);

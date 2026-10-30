@@ -14,8 +14,8 @@
 //      4090..4095, 0..30) and full (NoPE) at 37 - q, k, v bit-exact;
 //   4. the router over the chunk: pf_ab_proj 2560 -> 512 (each sampled row bitwise decode's gemv_bf16 of
 //      that row; rows 384.. zero) and decode's kol_route on grid (1, C) - ids exact, weights within 2 ulp;
-//   5. the MoE block over C = 64: sort / gather exact; the dequantised blocks exact (block 384 = the bf16
-//      shared expert's tiles); GROUPED == DENSE, bitwise, per (token, slot): gate||up (every batch)
+//   5. the MoE block over C = 64: sort / gather exact; the dequantised blocks exact (block 384 = the
+//      shared expert's int4 block); GROUPED == DENSE, bitwise, per (token, slot): gate||up (every batch)
 //      against pf_gemm_T0_SILU over the chunk, down against rne(pf_gemm_T0) over the sorted h, for the
 //      busiest expert, expert 0 when routed and the shared expert; the combine exactly kolibri_pf_ref's;
 //      Review Focus 2: the chunk REVERSED leaves every (token, slot)'s h and y and every token's mo
@@ -377,10 +377,8 @@ Walked moe_walk(Dev& dv, MoeBufs& b, uint32_t C) {
 void moe_block(Dev& dv, const std::vector<uint16_t>& x, const std::vector<uint32_t>& routes, uint32_t C) {
   const std::vector<uint32_t> gu = rblocks(kr::gate_up_block_words() * kk::kExperts, 40),
                               dn = rblocks(kr::down_block_words() * kk::kExperts, 41);
-  const std::vector<uint16_t> sgr = rbf16(size_t(2 * I) * H, -0.03f, 0.03f, 42), sdr = rbf16(size_t(H) * I, -0.05f, 0.05f, 43);
-  std::vector<uint16_t> sgu(sgr.size()), sdn(sdr.size());
-  common::repack_bf16_tiled(sgr.data(), H, 2 * I, sgu.data());
-  common::repack_bf16_tiled(sdr.data(), I, H, sdn.data());
+  // the shared expert: its own int4 blocks (operator ruling 2026-10-31)
+  const std::vector<uint32_t> sgu = rblocks(kr::gate_up_block_words(), 42), sdn = rblocks(kr::down_block_words(), 43);
   const uint32_t T = kp::tmax(kC), R = T * kk::kPfTm;
   MoeBufs b{dv.up(x), dv.up(routes), dv.zeros(kp::hdr_words() * 4), dv.zeros(size_t(T) * 8), dv.zeros(size_t(R) * 4),
             dv.zeros(size_t(kC) * 6 * 4), dv.zeros(size_t(R) * H * 2), dv.zeros(size_t(R) * I * 2),

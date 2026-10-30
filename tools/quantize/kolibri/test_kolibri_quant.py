@@ -96,7 +96,8 @@ def _tiny_export(tmp: str, attn: str = "int4"):
     t.write_checkpoint(src, d, sd)
     q = {}
     for name, w in sd.items():
-        if ".mlp.experts." in name or (attn == "int4" and ".self_attn." in name and name.endswith("_proj.weight")):
+        if (".mlp.experts." in name or ".mlp.shared_experts." in name or
+                (attn == "int4" and ".self_attn." in name and name.endswith("_proj.weight"))):
             base = name[:-len(".weight")]
             qw, s, qz, _ = t.gptq_pack(w)
             q[base + ".qweight"], q[base + ".scales"], q[base + ".qzeros"] = qw, s, qz
@@ -104,7 +105,7 @@ def _tiny_export(tmp: str, attn: str = "int4"):
             q[name] = w.float()                         # AutoRound on a CPU writes these in fp32
     qc = {"bits": 4, "group_size": 64, "sym": True, "quant_method": "auto-round",
           "packing_format": "auto_round:auto_gptq",
-          "extra_config": {f"model.layers.{i}.mlp.shared_experts.down_proj": {"bits": 16, "data_type": "float"}
+          "extra_config": {f"model.layers.{i}.mlp.gate": {"bits": 16, "data_type": "float"}
                            for i in range(c.num_hidden_layers)}}
     t.write_checkpoint(exp, dict(d, quantization_config=qc), q)
     return src, exp, c
@@ -120,7 +121,7 @@ def test_restore_and_check():
         assert stats["restored"] > 0 and stats["shards_rewritten"] > 0, stats
         errs, info = check.check(exp, src, "int4", 8)
         assert not errs, errs[:5]
-        assert info["dequant_rel_err_max"] < 0.2 and info["int4_linears"] == c.num_hidden_layers * (3 * c.num_experts + 4)
+        assert info["dequant_rel_err_max"] < 0.2 and info["int4_linears"] == c.num_hidden_layers * (3 * c.num_experts + 7)
         assert C.read_json(os.path.join(exp, "config.json"))["dtype"] == "bfloat16"
         print(f"  restored {stats['restored']} fp32 tensors to the source's bf16; ACCEPTED "
               f"(dequant rel err {info['dequant_rel_err_max']:.3f})")
@@ -167,12 +168,13 @@ def test_restore_and_check():
             new[f][k] = new[f][k].clone() + 0.125
         assert any("differs from the bf16 source" in e for e in mutate(bias_changed))
 
-        def shared_quantised(new, _):
-            f, k = find(new, "layers.0.mlp.shared_experts.up_proj.weight")
-            del new[f][k]
-            new[f][k[:-len(".weight")] + ".qweight"] = torch.zeros(8, 64, dtype=torch.int32)
-            new[f][k[:-len(".weight")] + ".scales"] = torch.ones(1, 64, dtype=torch.float16)
-        assert any("must stay bf16" in e for e in mutate(shared_quantised))
+        def shared_bf16(new, _):   # the operator's export quantises the shared experts (ruling 2026-10-31)
+            f, k = find(new, "layers.0.mlp.shared_experts.up_proj.qweight")
+            base = k[:-len(".qweight")]
+            for suf in (".qweight", ".scales", ".qzeros"):
+                new[f].pop(base + suf, None)
+            new[f][base + ".weight"] = torch.zeros(64, 64, dtype=torch.bfloat16)
+        assert any("shipped unquantised" in e for e in mutate(shared_bf16))
 
         def transposed(new, _):
             f, k = find(new, "experts.5.down_proj.qweight")
@@ -185,7 +187,7 @@ def test_restore_and_check():
             cfg["quantization_config"]["sym"] = False
             C.write_json(os.path.join(d2, "config.json"), cfg)
         assert any("sym true" in e for e in mutate(asym))
-        print("  rejected: a bad qzeros word, a permuting g_idx, a changed expert_bias, a quantised shared "
+        print("  rejected: a bad qzeros word, a permuting g_idx, a changed expert_bias, a bf16 shared "
               "expert, a column-permuted qweight, an asymmetric config")
 
 

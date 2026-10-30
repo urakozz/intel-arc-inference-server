@@ -21,16 +21,16 @@
 //   gate_up      int4 layout-1 blocks [experts][hidden x 2I] (gate||up interleave16):
 //                  384 x 1,392,640 = 534,773,760 B
 //   down         int4 layout-1 blocks [experts][I x hidden]: 384 x 696,320 = 267,386,880 B
-//   shared       bf16 tiled {hidden, 2I} (gate||up interleave16) 5,242,880 B and
-//                  {I, hidden} 2,621,440 B: 7,864,320 B
-//   total        830,794,752 B (int4 attention), 880,847,872 B (bf16 attention)
+//   shared       int4 layout-1 blocks, one of each kind (operator ruling 2026-10-31: the operator's export
+//                  quantises the shared expert): 1,392,640 + 696,320 = 2,088,960 B
+//   total        825,019,392 B (int4 attention), 875,072,512 B (bf16 attention)
 //
 // Top level: embed bf16 [vocab][hidden] 655,360,000 B (device 0, gathered); lm_head bf16 tiled
 // 655,360,000 B or int8 + fp32 row scales 328,192,000 B, and the final norm fp32 [hidden]
 // (the last device); the RoPE table fp32 [max_len][2][64] on every device holding a sliding
 // layer (Kolibri1Desc::rope_table_bytes - the one term that scales with max_len).
-// The real model, int4 attention, int8 head, split 25: device 0 21,425,228,800 B, device 1
-// 21,098,071,040 B (derived; kolibri1_repack_test pins it).
+// The real model, int4 attention, int8 head, split 25: device 0 21,280,844,800 B, device 1
+// 20,953,687,040 B (derived; kolibri1_repack_test pins it).
 namespace loader {
 
 inline constexpr uint32_t kKolTileU32 = kInt4TileU32;   // layout 1: 128 nibble + 8 scale u32 per tile
@@ -67,8 +67,8 @@ inline KolLayerBytes kol_layer_bytes(const model::Kolibri1Desc& d) {
   b.norms = size_t(d.norm_floats()) * 4;
   b.gate_up = kol_layout1_bytes(d.hidden, 2 * d.moe_inter) * d.experts;
   b.down = kol_layout1_bytes(d.moe_inter, d.hidden) * d.experts;
-  b.shared_gate_up = size_t(d.hidden) * 2 * d.shared_inter * 2;
-  b.shared_down = size_t(d.shared_inter) * d.hidden * 2;
+  b.shared_gate_up = kol_layout1_bytes(d.hidden, 2 * d.shared_inter);
+  b.shared_down = kol_layout1_bytes(d.shared_inter, d.hidden);
   return b;
 }
 // One expert's block in `gate_up` / `down` (block e at e x this).

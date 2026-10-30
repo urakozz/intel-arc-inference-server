@@ -18,8 +18,8 @@
 // **One weight format** (spec 20 §3.1): AutoRound int4 g64 symmetric in the auto_round:auto_gptq
 // packing - `.qweight` I32 [K/8, N], `.scales` F16 [K/64, N], `.qzeros` (0x77777777, proved by
 // assert_quant_invariants, never read), no `.g_idx` (allowed when the identity) - for every routed
-// expert and, in decision 2's int4 arm, the attention projections; bf16 `.weight` for everything
-// else. No compressed-tensors names, no asymmetric zero points.
+// expert, the shared expert (operator ruling 2026-10-31: the operator's export) and, in decision 2's
+// int4 arm, the attention projections; bf16 `.weight` for everything else. No compressed-tensors names, no asymmetric zero points.
 //
 // **Refusals are by name.** check_names holds the checkpoint's tensor list to kol_expected_names
 // both ways: a tensor the descriptor does not know and one it needs that is absent both throw
@@ -49,7 +49,7 @@ struct KolHostLayer {
   std::vector<uint16_t> router;                    // bf16 tiled {hidden, router_n}, rows >= experts zero
   std::vector<float> bias;                         // fp32 [router_n], 0 past the experts
   std::vector<uint32_t> gate_up, down;             // layout-1 blocks, block e at e x block
-  std::vector<uint16_t> shared_gate_up, shared_down;   // bf16 tiled
+  std::vector<uint32_t> shared_gate_up, shared_down;   // one layout-1 block each (a routed block's form)
   size_t src_int4_bytes = 0, src_bf16_bytes = 0;   // checkpoint bytes read
 };
 

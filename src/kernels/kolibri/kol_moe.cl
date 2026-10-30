@@ -1,5 +1,5 @@
 // kol_moe.cl - spec 20c: Kolibri-1's routed experts - the 384-expert router and the MoE block (6 of
-// 384 + the bf16 shared expert). Two families, each compiled only when its defines are given:
+// 384 + the int4 shared expert). Two families, each compiled only when its defines are given:
 //
 //   kol_route(logits, bias, route)                    ROUTE_E   grid (1, M), WG ROUTE_WG (256)
 //   kol_moe_gate_up(route, x, w_gu, w_sh_gu, h)       MOE_E     grid (SLOTS x NT_UP / 4, M), WG 64 x UP_KS
@@ -18,9 +18,10 @@
 //   * the slot order is ASCENDING EXPERT ID, and the combine is fp32: acc = 0; for j ascending:
 //       acc = acc + f32(rne(down_j)) · w_j (the product rounded, THEN the add - no fma: the reference's
 //       index_add_ of y.float() * w), + f32(rne(shared down)), ONE rounding to bf16.
-//   * the shared expert is UNGATED and bf16 (spec 20 decision 4's proposal): slot SLOTS - 1 reads
-//       gemv_bf16's tiles ([n_tile][k_octet][8 k][16 n], gate||up interleave16) instead of a layout-1
-//       block - one launch serves the 6 routed and the shared expert.
+//   * the shared expert is UNGATED and int4 (operator ruling 2026-10-31: the operator's AutoRound export
+//       quantises it as every routed expert, g64 sym GPTQ): slot SLOTS - 1 reads ITS OWN layout-1 block
+//       (w_sh, the routed blocks' layout at the same widths - shared_inter == moe_inter) through the same
+//       tile_dot - one launch serves the 6 routed and the shared expert.
 //   * the block's output `mo` is NOT folded into the residual: post_ffn_norm comes first (the
 //       sandwich; prep_res_fold SP0 then kol_post_add, kol_prep.cl) - k2_moe_down folds, this does not.
 //
@@ -100,29 +101,6 @@ inline float tile_dot(const __global uint* restrict tile, const __global ushort*
   }
   return acc;
 }
-// The shared slot: one gemv_bf16 tile column over k-octets [o0, o1): `tile` is the n_tile's first
-// octet; lane `lane` takes column lane, a += w · x per k ascending (gemv_bf16's inner loop).
-inline float bf16_dot(const __global ushort* restrict tile, const __global ushort* restrict xr,
-                      uint o0, uint o1, uint lane) {
-  float a = 0.f;
-  for (uint o = o0; o < o1; ++o) {
-#ifdef cl_intel_subgroups
-    (void)lane;
-    const ushort8 wv = intel_sub_group_block_read_us8(tile + (size_t)o * 128);
-#else
-    const __global ushort* t = tile + (size_t)o * 128;
-    const ushort8 wv = (ushort8)(t[0 * SG + lane], t[1 * SG + lane], t[2 * SG + lane], t[3 * SG + lane],
-                                 t[4 * SG + lane], t[5 * SG + lane], t[6 * SG + lane], t[7 * SG + lane]);
-#endif
-    const ushort8 xv = vload8(0, xr + o * 8);
-    a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1);
-    a += bf16f(wv.s2) * bf16f(xv.s2); a += bf16f(wv.s3) * bf16f(xv.s3);
-    a += bf16f(wv.s4) * bf16f(xv.s4); a += bf16f(wv.s5) * bf16f(xv.s5);
-    a += bf16f(wv.s6) * bf16f(xv.s6); a += bf16f(wv.s7) * bf16f(xv.s7);
-  }
-  return a;
-}
-
 // ---------------------------------------------------------------------------------------
 // kol_route - one work-group per token, ROUTE_EPL experts per lane (lane l: l, l + WG, ...).
 //   sel_e = logits[m][e] + bias[e]            e < ROUTE_E;  e >= ROUTE_E: -INF, never ranked
@@ -202,7 +180,7 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 
 // ---------------------------------------------------------------------------------------
 // The MoE block: SLOTS = TOP_K + 1 slots - the routed experts' layout-1 blocks (by the route row's
-// ids) and the shared expert's bf16 tiles (the last slot).
+// ids) and the shared expert's own layout-1 block (the last slot).
 #ifdef MOE_E
 #if !defined(MOE_K) || !defined(HIDDEN) || !defined(INTER) || !defined(UP_KS) || !defined(DN_KS)
 #error "kol_moe: MOE_K, HIDDEN, INTER, UP_KS and DN_KS must be defined"
@@ -220,8 +198,6 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 #define DN_BLK_U32 ((size_t)NT_DN * G_DN * TILE_U32)
 #define WG_UP (4 * SG * UP_KS)
 #define WG_DN (SG * SLOTS * DN_KS)
-#define O_UP (HIDDEN / 8)          /* the shared gate||up tiles' k-octets */
-#define O_DN (INTER / 8)
 #if HIDDEN % GROUP != 0 || INTER % 32 != 0 || INTER % GROUP != 0 || HIDDEN % SG != 0
 #error "kol_moe: HIDDEN and INTER must be whole k-groups, INTER whole 32-column gate||up pairs"
 #endif
@@ -238,7 +214,7 @@ __kernel void kol_route(__global const float* restrict logits, __global const fl
 __attribute__((reqd_work_group_size(WG_UP, 1, 1)))
 KOL_SG16
 __kernel void kol_moe_gate_up(__global const uint* restrict route, __global const ushort* restrict x,
-                              __global const uint* restrict w, __global const ushort* restrict w_sh,
+                              __global const uint* restrict w, __global const uint* restrict w_sh,
                               __global ushort* restrict h) {
   __local float red[4 * UP_KS][SG];
   const uint lid = get_local_id(0);
@@ -251,17 +227,14 @@ __kernel void kol_moe_gate_up(__global const uint* restrict route, __global cons
   const uint m = get_group_id(1);
   const uint n_tile = blk * 4 + tile_idx;
   const __global ushort* restrict xr = x + (size_t)m * HIDDEN;
-  float acc;
+  const __global uint* restrict blk_w = w_sh;   // the shared slot's block; a routed slot's by its id
   if (slot < MOE_K) {   // uniform across the work-group
     uint e = route[(size_t)m * RW + R_IDS + slot];
     e = min(e, (uint)(MOE_E - 1));   // never past the allocation, whatever the row holds
-    const uint g0 = q * (G_UP / UP_KS);
-    const __global uint* restrict tile = w + (size_t)e * UP_BLK_U32 + ((size_t)n_tile * G_UP + g0) * TILE_U32;
-    acc = tile_dot(tile, xr, g0, g0 + G_UP / UP_KS, lane);
-  } else {
-    const uint o0 = q * (O_UP / UP_KS);
-    acc = bf16_dot(w_sh + (size_t)n_tile * O_UP * 128, xr, o0, o0 + O_UP / UP_KS, lane);
+    blk_w = w + (size_t)e * UP_BLK_U32;
   }
+  const uint g0 = q * (G_UP / UP_KS);
+  const float acc = tile_dot(blk_w + ((size_t)n_tile * G_UP + g0) * TILE_U32, xr, g0, g0 + G_UP / UP_KS, lane);
   red[sg][lane] = acc;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = UP_KS / 2; stride > 0; stride >>= 1) {
@@ -283,7 +256,7 @@ __kernel void kol_moe_gate_up(__global const uint* restrict route, __global cons
 __attribute__((reqd_work_group_size(WG_DN, 1, 1)))
 KOL_SG16
 __kernel void kol_moe_down(__global const uint* restrict route, __global const ushort* restrict h,
-                           __global const uint* restrict w, __global const ushort* restrict w_sh,
+                           __global const uint* restrict w, __global const uint* restrict w_sh,
                            __global ushort* restrict mo) {
   __local float red[SLOTS * DN_KS][SG];
   const uint lid = get_local_id(0);
@@ -295,17 +268,14 @@ __kernel void kol_moe_down(__global const uint* restrict route, __global const u
   const uint m = get_group_id(1);
   const __global uint* restrict rr = route + (size_t)m * RW;
   const __global ushort* restrict hr = h + ((size_t)m * SLOTS + slot) * INTER;
-  float acc;
+  const __global uint* restrict blk_w = w_sh;   // the shared slot's block; a routed slot's by its id
   if (slot < MOE_K) {   // uniform across the sub-group
     uint e = rr[R_IDS + slot];
     e = min(e, (uint)(MOE_E - 1));
-    const uint g0 = q * (G_DN / DN_KS);
-    const __global uint* restrict tile = w + (size_t)e * DN_BLK_U32 + ((size_t)n_tile * G_DN + g0) * TILE_U32;
-    acc = tile_dot(tile, hr, g0, g0 + G_DN / DN_KS, lane);
-  } else {
-    const uint o0 = q * (O_DN / DN_KS);
-    acc = bf16_dot(w_sh + (size_t)n_tile * O_DN * 128, hr, o0, o0 + O_DN / DN_KS, lane);
+    blk_w = w + (size_t)e * DN_BLK_U32;
   }
+  const uint g0 = q * (G_DN / DN_KS);
+  const float acc = tile_dot(blk_w + ((size_t)n_tile * G_DN + g0) * TILE_U32, hr, g0, g0 + G_DN / DN_KS, lane);
   red[sg][lane] = acc;
   barrier(CLK_LOCAL_MEM_FENCE);
   for (uint stride = DN_KS / 2; stride > 0; stride >>= 1) {

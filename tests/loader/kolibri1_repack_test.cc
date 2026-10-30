@@ -15,7 +15,8 @@
 //   3. EVERY expert block (gate||up interleave16 and down), word by word and scale by scale
 //      against ITS expert's tensors, block e at e x kol_layer_bytes(d).gate_up / experts
 //      (plan 15c's Review Focus 2: test expert slices individually);
-//   4. the shared expert's bf16 tiles equal repack_bf16_tiled of the gate||up interleave;
+//   4. the shared expert's int4 blocks (operator ruling 2026-10-31: the operator's export quantises it), word
+//      by word and scale by scale as a routed expert's;
 //   5. the router: rows 0..7 the checkpoint's, rows 8..15 (of router_n 16) zero;
 //   6. expert_bias widened exactly, zero past the experts; the norms widened verbatim (plain w);
 //   7. the attention rows: int4 q||k||v / o_proj layout 0, bf16 tiles in the other arm;
@@ -163,9 +164,9 @@ Tensors fixture(const Kolibri1Desc& d) {
     }
     add_bf16(ts, p + "mlp.gate.weight", {d.experts, H});
     add_bf16(ts, p + "moe.router.expert_bias", {d.experts});
-    add_bf16(ts, p + "mlp.shared_experts.gate_proj.weight", {SI, H});
-    add_bf16(ts, p + "mlp.shared_experts.up_proj.weight", {SI, H});
-    add_bf16(ts, p + "mlp.shared_experts.down_proj.weight", {H, SI});
+    add_int4(ts, p + "mlp.shared_experts.gate_proj", H, SI);
+    add_int4(ts, p + "mlp.shared_experts.up_proj", H, SI);
+    add_int4(ts, p + "mlp.shared_experts.down_proj", SI, H);
     for (uint32_t e = 0; e < d.experts; ++e) {
       const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
       add_int4(ts, ep + "gate_proj", H, I);
@@ -200,6 +201,32 @@ uint32_t l1_word(const uint32_t* blk, uint32_t K, uint32_t r, uint32_t c) {
 uint16_t l1_scale(const uint32_t* blk, uint32_t K, uint32_t g, uint32_t c) {
   const uint32_t w = blk[(size_t(c / 16) * (K / 64) + g) * 136 + 128 + (c % 16) / 2];
   return uint16_t(c % 2 == 0 ? w & 0xFFFFu : w >> 16);
+}
+// One expert's gate||up and down layout-1 blocks against its checkpoint tensors (`ep` the name prefix ending in
+// '.'), word by word and scale by scale, and one element's dequantised value.
+void check_blocks(const Tensors& ts, const std::string& ep, const uint32_t* blk, const uint32_t* dblk, uint32_t H,
+                  uint32_t I) {
+  const uint32_t* gq = view<uint32_t>(ts, ep + "gate_proj.qweight");
+  const uint32_t* uq = view<uint32_t>(ts, ep + "up_proj.qweight");
+  const uint16_t* gs = view<uint16_t>(ts, ep + "gate_proj.scales");
+  const uint16_t* us = view<uint16_t>(ts, ep + "up_proj.scales");
+  for (uint32_t c = 0; c < 2 * I; ++c) {
+    const bool gate = (c % 32) < 16;
+    const uint32_t sc = (c / 32) * 16 + c % 16;   // the source column (gate tile t, then up tile t)
+    for (uint32_t r = 0; r < H / 8; ++r) CHECK(l1_word(blk, H, r, c) == (gate ? gq : uq)[size_t(r) * I + sc]);
+    for (uint32_t g = 0; g < H / 64; ++g) CHECK(l1_scale(blk, H, g, c) == (gate ? gs : us)[size_t(g) * I + sc]);
+  }
+  const uint32_t* dq = view<uint32_t>(ts, ep + "down_proj.qweight");
+  const uint16_t* ds = view<uint16_t>(ts, ep + "down_proj.scales");
+  for (uint32_t c = 0; c < H; ++c) {
+    for (uint32_t r = 0; r < I / 8; ++r) CHECK(l1_word(dblk, I, r, c) == dq[size_t(r) * H + c]);
+    for (uint32_t g = 0; g < I / 64; ++g) CHECK(l1_scale(dblk, I, g, c) == ds[size_t(g) * H + c]);
+  }
+  // the dequantised value of one element, (q - 8) x scale, for the record
+  const uint32_t q = (gq[0] & 0xFu);
+  const float w = float(int(q) - 8) * common::f16_to_f32(gs[0]);
+  const float got = float(int(l1_word(blk, H, 0, 0) & 0xFu) - 8) * common::f16_to_f32(l1_scale(blk, H, 0, 0));
+  CHECK(w == got);
 }
 // gemv_bf16's tile element (k, n) of a {K, N} tiled matrix.
 uint16_t tiled(const std::vector<uint16_t>& t, uint32_t K, uint32_t k, uint32_t n) {
@@ -277,55 +304,19 @@ void check_arm(KolAttnForm arm) {
       for (uint32_t e = 0; e < d.router_n(); ++e)
         for (uint32_t k = 0; k < H; k += 5)
           CHECK(tiled(h.router, H, k, e) == (e < d.experts ? gw[size_t(e) * H + k] : uint16_t(0)));
-      // 4. the shared expert
-      {
-        const uint16_t* g = view<uint16_t>(ts, p + "mlp.shared_experts.gate_proj.weight");
-        const uint16_t* u = view<uint16_t>(ts, p + "mlp.shared_experts.up_proj.weight");
-        const uint16_t* dn = view<uint16_t>(ts, p + "mlp.shared_experts.down_proj.weight");
-        std::vector<uint16_t> rows(size_t(2) * SI * H);
-        for (uint32_t c = 0; c < 2 * SI; ++c) {
-          const uint16_t* src = ((c % 32) < 16 ? g : u) + size_t((c / 32) * 16 + c % 16) * H;
-          std::memcpy(rows.data() + size_t(c) * H, src, size_t(H) * 2);
-        }
-        std::vector<uint16_t> want(rows.size());
-        common::repack_bf16_tiled(rows.data(), H, 2 * SI, want.data());
-        CHECK(want == h.shared_gate_up);
-        std::vector<uint16_t> wd(size_t(SI) * H);
-        common::repack_bf16_tiled(dn, SI, H, wd.data());
-        CHECK(wd == h.shared_down);
-      }
-      // 3. every expert block, individually
+      // 4. the shared expert: one int4 block of each kind, a routed expert's form
       const loader::KolLayerBytes lb = loader::kol_layer_bytes(d);
+      CHECK_EQ(h.shared_gate_up.size() * 4, lb.shared_gate_up);
+      CHECK_EQ(h.shared_down.size() * 4, lb.shared_down);
+      check_blocks(ts, p + "mlp.shared_experts.", h.shared_gate_up.data(), h.shared_down.data(), H, SI);
+      // 3. every expert block, individually
       CHECK_EQ(h.gate_up.size() * 4, lb.gate_up);
       CHECK_EQ(h.down.size() * 4, lb.down);
       const size_t gub = lb.gate_up / d.experts / 4, dnb = lb.down / d.experts / 4;
       CHECK_EQ(gub * 4, loader::kol_gate_up_block_bytes(d));
-      for (uint32_t e = 0; e < d.experts; ++e) {
-        const std::string ep = p + "mlp.experts." + std::to_string(e) + ".";
-        const uint32_t* blk = h.gate_up.data() + size_t(e) * gub;
-        const uint32_t* gq = view<uint32_t>(ts, ep + "gate_proj.qweight");
-        const uint32_t* uq = view<uint32_t>(ts, ep + "up_proj.qweight");
-        const uint16_t* gs = view<uint16_t>(ts, ep + "gate_proj.scales");
-        const uint16_t* us = view<uint16_t>(ts, ep + "up_proj.scales");
-        for (uint32_t c = 0; c < 2 * I; ++c) {
-          const bool gate = (c % 32) < 16;
-          const uint32_t sc = (c / 32) * 16 + c % 16;   // the source column (gate tile t, then up tile t)
-          for (uint32_t r = 0; r < H / 8; ++r) CHECK(l1_word(blk, H, r, c) == (gate ? gq : uq)[size_t(r) * I + sc]);
-          for (uint32_t g = 0; g < H / 64; ++g) CHECK(l1_scale(blk, H, g, c) == (gate ? gs : us)[size_t(g) * I + sc]);
-        }
-        const uint32_t* dblk = h.down.data() + size_t(e) * dnb;
-        const uint32_t* dq = view<uint32_t>(ts, ep + "down_proj.qweight");
-        const uint16_t* ds = view<uint16_t>(ts, ep + "down_proj.scales");
-        for (uint32_t c = 0; c < H; ++c) {
-          for (uint32_t r = 0; r < I / 8; ++r) CHECK(l1_word(dblk, I, r, c) == dq[size_t(r) * H + c]);
-          for (uint32_t g = 0; g < I / 64; ++g) CHECK(l1_scale(dblk, I, g, c) == ds[size_t(g) * H + c]);
-        }
-        // the dequantised value of one element, (q - 8) x scale, for the record
-        const uint32_t q = (gq[0] & 0xFu);
-        const float w = float(int(q) - 8) * common::f16_to_f32(gs[0]);
-        const float got = float(int(l1_word(blk, H, 0, 0) & 0xFu) - 8) * common::f16_to_f32(l1_scale(blk, H, 0, 0));
-        CHECK(w == got);
-      }
+      for (uint32_t e = 0; e < d.experts; ++e)
+        check_blocks(ts, p + "mlp.experts." + std::to_string(e) + ".", h.gate_up.data() + size_t(e) * gub,
+                     h.down.data() + size_t(e) * dnb, H, I);
     }
     (void)ck.embed();
     (void)ck.final_norm();
@@ -369,21 +360,21 @@ int main() {
   {
     const Kolibri1Desc& d = model::kolibri1();
     const loader::KolLayerBytes b = loader::kol_layer_bytes(d);
-    CHECK_EQ(b.total(), size_t(830794752));
+    CHECK_EQ(b.total(), size_t(825019392));
     CHECK_EQ(b.experts(), size_t(802160640));
-    CHECK_EQ(b.shared_gate_up + b.shared_down, size_t(7864320));
+    CHECK_EQ(b.shared_gate_up + b.shared_down, size_t(2088960));
     CHECK_EQ(b.attention(), size_t(18104320));
     CHECK_EQ(b.router, size_t(2621440));
     CHECK_EQ(b.bias + b.norms, size_t(44032));
     Kolibri1Desc bf = d;
     bf.attn = KolAttnForm::Bf16;
-    CHECK_EQ(loader::kol_layer_bytes(bf).total(), size_t(880847872));
+    CHECK_EQ(loader::kol_layer_bytes(bf).total(), size_t(875072512));
     CHECK_EQ(loader::kol_embed_bytes(d), size_t(655360000));
     CHECK_EQ(loader::kol_lm_head_bytes(d, false), size_t(655360000));
     CHECK_EQ(loader::kol_lm_head_bytes(d, true), size_t(328192000));
     const model::KolPlacement p = model::KolPlacement::two(d, 25);
-    CHECK_EQ(loader::kol_device_weight_bytes(d, p, 0, true), size_t(21425228800ull));
-    CHECK_EQ(loader::kol_device_weight_bytes(d, p, 1, true), size_t(21098071040ull));
+    CHECK_EQ(loader::kol_device_weight_bytes(d, p, 0, true), size_t(21280844800ull));
+    CHECK_EQ(loader::kol_device_weight_bytes(d, p, 1, true), size_t(20953687040ull));
     CHECK(loader::kol_device_has_sliding(d, p, 0) && loader::kol_device_has_sliding(d, p, 1));
   }
   check_arm(KolAttnForm::Int4);

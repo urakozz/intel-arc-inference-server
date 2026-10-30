@@ -13,7 +13,7 @@ and never sees the router as a linear at all (`mlp.gate` is a plain parameter ho
 Settings (§3.1): scheme W4A16, group 64, symmetric (`sym=True`, AutoRound's default; the engine's
 `w = (q - 8) * scale`, qzeros 0x77777777), format `auto_round:auto_gptq` (what
 loader::QuantConfig::parse accepts), model dtype bf16 (every tensor left unquantised is written bf16).
-Kept in bf16: `shared_experts` (ignore_layers), all of `self_attn` when --attn bf16, the router and
+Kept in bf16: all of `self_attn` when --attn bf16, the router and
 `expert_bias` (not nn.Linear), the norms, `embed_tokens`, `lm_head` (no quant_lm_head).
 `--iters 0` is plain RTN (disable_opt_rtn: no data-driven scale search - the baseline); `--iters 200`
 is AutoRound's sign-SGD tuning on the calibration rows (nsamples x seqlen), low_gpu_mem_usage.
@@ -45,7 +45,8 @@ def autoround_commit() -> dict:
 
 
 def settings(a, nsamples: int) -> dict:
-    ignore = ["shared_experts"] + (["self_attn"] if a.attn == "bf16" else [])
+    # The shared experts are quantised as the routed ones: the operator's export (operator ruling 2026-10-31).
+    ignore = ["self_attn"] if a.attn == "bf16" else []
     kw = {
         "scheme": "W4A16", "group_size": 64, "sym": True,
         "iters": a.iters, "nsamples": nsamples, "seqlen": a.seqlen, "batch_size": a.batch_size,

@@ -11,11 +11,13 @@ assert_quant_invariants), plus what spec 20 §3.1 fixes for Kolibri:
                        "gptq" | "auto-round"; packing_format "auto_round:auto_gptq" when present;
                        `dynamic` rules only "-:" exclusions; every `extra_config` entry bits 16, or
                        bits 4 at g64 / g128 symmetric
-  int4 linears         every routed expert's gate/up/down_proj (and q/k/v/o_proj with --attn int4):
+  int4 linears         every routed and shared expert's gate/up/down_proj (the shared experts int4 as the
+                       operator's export ships them, operator ruling 2026-10-31) (and q/k/v/o_proj with
+                       --attn int4):
                        qweight I32 [K/8, N], scales F16 [K/64, N] (g64 exactly), finite (subnormals
                        counted), qzeros I32 all 0x77777777 when shipped, g_idx (if any) the identity
                        k // 64 - no activation-order permutation
-  bf16 tensors         router `mlp.gate.weight`, `moe.router.expert_bias`, `shared_experts.*`, every
+  bf16 tensors         router `mlp.gate.weight`, `moe.router.expert_bias`, every
                        norm, `embed_tokens`, `lm_head` (no lm_head.qweight), attention with --attn
                        bf16: BF16 `.weight`, and BITWISE the bf16 source's tensor
   names                exactly kolibri_ref.expected_names (a .weight may be replaced by
@@ -111,7 +113,7 @@ def check(export: str, source: str, attn: str | None, sample: int) -> tuple[list
     int4, bf16 = [], []
     for name in ref.expected_names(c):
         base = name[:-len(".weight")] if name.endswith(".weight") else None
-        is_expert = ".mlp.experts." in name
+        is_expert = ".mlp.experts." in name or ".mlp.shared_experts." in name
         is_attn = re.search(r"self_attn\.[qkvo]_proj\.weight$", name) is not None
         (int4 if (is_expert or (is_attn and attn == "int4")) else bf16).append((name, base))
     seen = set()

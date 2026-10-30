@@ -49,8 +49,8 @@ int main() {
   const uint32_t L = 262144;
   const std::vector<rk::DevicePlan> pl = rk::plan(d, two, L, /*int8_head=*/true, false, KolAttn::Flash);
   CHECK_EQ(pl.size(), size_t(2));
-  CHECK_EQ(pl[0].weights, size_t(21425228800ull));
-  CHECK_EQ(pl[1].weights, size_t(21098071040ull));
+  CHECK_EQ(pl[0].weights, size_t(21280844800ull));
+  CHECK_EQ(pl[1].weights, size_t(20953687040ull));
   for (const rk::DevicePlan& p : pl) {
     CHECK_EQ(p.full_kv, size_t(2684354560ull));   // 5 full layers x 262144 x 512 x 2 B x (K, V)
     CHECK_EQ(p.rings, size_t(167772160ull));      // 20 sliding layers x 4096 x 512 x 2 B x (K, V)
@@ -136,7 +136,7 @@ int main() {
   CHECK_EQ(rk::prefill_chunk_launches(s5, model::KolPlacement::one(s5)), size_t(2 + 5 * 45));
   CHECK_EQ(rk::prefill_chunk_launches(s5, model::KolPlacement::two(s5, 3)), size_t(2 + 5 * 45));
   CHECK_EQ(rk::kPrefillHeadLaunches, size_t(5));
-  // the weight batches: 385 blocks (384 + the bf16 shared expert) in 512 MiB
+  // the weight batches: 385 blocks (384 + the shared expert) in 512 MiB
   CHECK_EQ(rk::pf_block_gu_bytes(d), size_t(5242880));
   CHECK_EQ(rk::pf_block_dn_bytes(d), size_t(2621440));
   CHECK_EQ(rk::pf_batch_blocks_gu(d), 102u);

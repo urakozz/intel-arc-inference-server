@@ -3,7 +3,7 @@
 // (INDICATIVE ONLY: clrun.h says what this can and cannot show).
 //
 //   kolibri_run      no arguments; Kolibri's real shapes (hidden 2560, 48 / 4 heads x 128, 384 experts
-//                    top 6 x 512 + the bf16 shared expert, window 513 on a 4096-slot ring)
+//                    top 6 x 512 + the int4 shared expert, window 513 on a 4096-slot ring)
 //
 // What runs, with the CMake block's defines: src/kernels/kolibri/kol_prep.cl (kol_norm_finish after
 // prep.cl's prep_res_fold SP0, kol_post_add after prep_res_fold SP4 _Z, kol_attn_prep sliding (ring)
@@ -16,7 +16,7 @@
 // Spec 20d (prefill_checks, against tests/kernels/kolibri_pf_ref.h): kol_pf_moe.cl - kol_pf_sort on
 // 256 lanes at C = 2048 (random, tied at the cut, all to 6 experts, the tile bound reached), kol_pf_gather,
 // kol_pf_dequant_gu / _dn (a routed block, an expert with no row skipped, block 384 the shared expert's
-// bf16 tiles), kol_pf_moe_combine; kol_pf_linear.cl's bf16 slab (o_proj's widths and a zero-padded
+// int4 block), kol_pf_moe_combine; kol_pf_linear.cl's bf16 slab (o_proj's widths and a zero-padded
 // tail); 18c's k2_pf_dequant_slab at q||k||v's width (the int4 arm); prefill/pf_prep.cl's pf_res_fold
 // (SP0, _Z) with kol_prep.cl at M = 2048 (the norm, the sandwich) over a whole chunk - all exact, except
 // that over 2048 rows a handful of norm / post-add values move with Apple's 1/sqrt (not correctly
@@ -221,11 +221,7 @@ void moe_checks(clrun::Device& dev) {
   {   // the MoE block at the B70 build's defines
     const size_t gub = kr::gate_up_block_words(), dnb = kr::down_block_words();
     const std::vector<uint32_t> gu = random_blocks(gub * 384, 30), dn = random_blocks(dnb * 384, 31);
-    const std::vector<uint16_t> sgr = random_bf16(size_t(1024) * H, -0.03f, 0.03f, 32);
-    const std::vector<uint16_t> sdr = random_bf16(size_t(H) * 512, -0.05f, 0.05f, 33);
-    std::vector<uint16_t> sg(sgr.size()), sd(sdr.size());
-    common::repack_bf16_tiled(sgr.data(), H, 1024, sg.data());
-    common::repack_bf16_tiled(sdr.data(), 512, H, sd.data());
+    const std::vector<uint32_t> sg = random_blocks(gub, 32), sd = random_blocks(dnb, 33);   // the int4 shared expert
     const std::vector<uint16_t> x = random_bf16(H, -0.5f, 0.5f, 34);
     const uint32_t ids[6] = {0, 17, 128, 255, 300, 383};
     const float ws[6] = {0.73f, 0.51f, 0.95f, 0.12f, 0.66f, 0.88f};
@@ -243,7 +239,7 @@ void moe_checks(clrun::Device& dev) {
     const std::vector<uint16_t> h_ref = kr::gate_up(ids, x.data(), gu.data(), sg.data(), 4);
     int worst = 0;
     for (size_t i = 0; i < h.size(); ++i) worst = std::max(worst, ulps(h[i], h_ref[i]));
-    report("kol_moe_gate_up (6 routed + bf16 shared)", worst, 2, h.size());
+    report("kol_moe_gate_up (6 routed + int4 shared)", worst, 2, h.size());
     mp.run("kol_moe_down", {size_t(H / 16) * 224, 1}, {224, 1}, rb, hb, db, sdb, ob);
     const std::vector<uint16_t> mo = ob.read<uint16_t>(), mo_ref = kr::down(ids, ws, h, dn.data(), sd.data(), 2);
     worst = 0;
@@ -407,16 +403,13 @@ void prefill_checks(clrun::Device& dev) {
     report_bool("kol_pf_moe_combine C 2048 (ascending id, + shared, 1 rounding)", mo.read<uint16_t>() == want);
   }
   {   // kol_pf_dequant_gu / _dn over blocks [382, 385): 382 routed (rows), 383 routed with NO row (skipped:
-      // its output keeps the sentinel), 384 the shared expert's bf16 tiles copied
+      // its output keeps the sentinel), 384 the shared expert's own int4 block
     const size_t gub = kr::gate_up_block_words(), dnb = kr::down_block_words();
     std::vector<uint32_t> gu(gub * 384, 0), dn(dnb * 384, 0);
     const std::vector<uint32_t> g382 = random_blocks(gub, 81), d382 = random_blocks(dnb, 82);
     std::copy(g382.begin(), g382.end(), gu.begin() + gub * 382);
     std::copy(d382.begin(), d382.end(), dn.begin() + dnb * 382);
-    const std::vector<uint16_t> sgr = random_bf16(size_t(1024) * H, -0.03f, 0.03f, 83), sdr = random_bf16(size_t(H) * 512, -0.05f, 0.05f, 84);
-    std::vector<uint16_t> sg(sgr.size()), sd(sdr.size());
-    common::repack_bf16_tiled(sgr.data(), H, 1024, sg.data());
-    common::repack_bf16_tiled(sdr.data(), 512, H, sd.data());
+    const std::vector<uint32_t> sg = random_blocks(gub, 83), sd = random_blocks(dnb, 84);
     std::vector<uint32_t> hdr(kp::hdr_words(), 0);
     hdr[kp::kHdrCount + 382] = 7;   // 383: 0 rows
     const size_t gsz = size_t(H) * 1024, dsz = size_t(512) * H;
@@ -433,7 +426,7 @@ void prefill_checks(clrun::Device& dev) {
     report_bool("kol_pf_dequant_gu / _dn: routed block exact (int4)",
                 std::equal(g0.begin(), g0.end(), g.begin()) && std::equal(d0.begin(), d0.end(), d.begin()));
     report_bool("kol_pf_dequant_gu / _dn: an expert with no row skipped", skip);
-    report_bool("kol_pf_dequant_gu / _dn: block 384 = the bf16 shared tiles",
+    report_bool("kol_pf_dequant_gu / _dn: block 384 = the int4 shared block",
                 std::equal(g2.begin(), g2.end(), g.begin() + 2 * gsz) && std::equal(d2.begin(), d2.end(), d.begin() + 2 * dsz));
   }
   {   // kol_pf_bf16_slab: o_proj 6144 x 2560 (1024, 1024, 512) and a synthetic 256 x 2400 (a zero tail)
