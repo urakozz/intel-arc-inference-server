@@ -265,16 +265,23 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
     }
     rig.eng.ingest({id});
   }
+  // Operator ruling 2026-10-31: with the judge's bf16 twin the bar is the twin's own count of rejected ids, not
+  // the cold run's (an engine path like the cached one, with its own bf16-sized misses).
+  const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, Qwen35::kVocab) : nullptr;
+  const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, Qwen35::kVocab, Qwen35::kVocabUsed) : 0;
+  const uint32_t judge_bar = twin ? judge_twin : judge_cold;
   std::printf("  %s: %s at %u of %zu | %u/%u exact, %u near-tie (allowed %u), %u bad, first"
               " differing row %s, logits min cos %.9f (row %u)%s\n", want.name.c_str(),
               server::plan_kind_name(rep.kind), rep.restart, final_prompt.size(), det_exact, kGen,
               near, allowed, bad, first_diff == kGen ? "none" : std::to_string(first_diff).c_str(),
-              min_cos, worst, (judge ? judge_cached <= judge_cold : bad == 0) && ok ? "" : "  ** FAIL **");
+              min_cos, worst, (judge ? judge_cached <= judge_bar : bad == 0) && ok ? "" : "  ** FAIL **");
   if (judge) {
     std::printf("  %s judged by the f32 reference (operator, 2026-10-29): it rejects %u of the cached run's ids, %u of"
-                " the cold run's%s\n", want.name.c_str(), judge_cached, judge_cold,
-                judge_cached <= judge_cold ? "" : "  ** FAIL **");
-    return ok && judge_cached <= judge_cold;
+                " the cold run's%s%s\n", want.name.c_str(), judge_cached, judge_cold,
+                twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
+                     : "",
+                judge_cached <= judge_bar ? "" : "  ** FAIL **");
+    return ok && judge_cached <= judge_bar;
   }
   return ok && bad == 0;
 }
