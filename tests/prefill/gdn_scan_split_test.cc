@@ -1,7 +1,8 @@
 // Opt-in D3 arithmetic discriminator.  These fixtures invoke only the scan
 // entry point: their expected values are hand-derived scalar recurrences, not
-// the scan implementation or the chunk reference.  Removing any of the three
-// low DPAS chains (S, A2, D) changes a checked value by orders of magnitude.
+// the scan implementation or the chunk reference.  Removing any of the four
+// low DPAS chains (S, A2, D, and since 2026-10-31 w's) changes a checked value
+// by orders of magnitude.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -37,7 +38,8 @@ struct Dev {
 
 struct Input {
   uint32_t C;
-  std::vector<uint16_t> xb, w, u;
+  std::vector<uint16_t> xb;
+  std::vector<float> w, u;   // fp32 since 2026-10-31 (pf_gdn_wy.cl's Q3 / Q4)
   std::vector<float> a2, gc, state;
 
   explicit Input(uint32_t count)
@@ -90,8 +92,8 @@ void check_split_s_residual(Dev& d) {
   // A high-only S chain rounds S to one and instead produces about 0.0883883.
   Input in(1);
   in.state[sk(0, 0, 0)] = 1.0f + 0x1p-8f;
-  in.w[cv(0, 0, 0)] = G::rne(1.0f);
-  in.u[cv(0, 0, 0)] = G::rne(1.0f);
+  in.w[cv(0, 0, 0)] = 1.0f;
+  in.u[cv(0, 0, 0)] = 1.0f;
   in.xb[G::kQOff] = G::rne(1.0f);
   in.a2[a2i(0, 0, 0)] = 22.625f;  // BF16 exact.
   const Output a = run(d, in);
@@ -100,6 +102,23 @@ void check_split_s_residual(Dev& d) {
   CHECK(std::fabs(a.o[cv(0, 0, 0)] - want) < 5e-6f);
   CHECK(std::memcmp(a.o.data(), b.o.data(), a.o.size() * sizeof(float)) == 0);
   CHECK(std::memcmp(a.state.data(), b.state.data(), a.state.size() * sizeof(float)) == 0);
+  finite(a.state);
+  finite(a.o);
+}
+
+void check_split_w_residual(Dev& d) {
+  // w is fp32 since the operator's ruling of 2026-10-31 and reaches DPAS as a bf16 hi + lo pair. Scalar
+  // recurrence: S=1, W=1+2^-8 (hi 1, lo 2^-8: not BF16-exact), U=Q=1, K=0, g=0, A2=22.625, so vn = 1 - W =
+  // -2^-8 and o = 1/sqrt(128) - 22.625*2^-8 = 0.00000944. A high-only w chain gives vn = 0 and o = 0.0883883.
+  Input in(1);
+  in.state[sk(0, 0, 0)] = 1.0f;
+  in.w[cv(0, 0, 0)] = 1.0f + 0x1p-8f;
+  in.u[cv(0, 0, 0)] = 1.0f;
+  in.xb[G::kQOff] = G::rne(1.0f);
+  in.a2[a2i(0, 0, 0)] = 22.625f;
+  const Output a = run(d, in);
+  const float want = 1.0f / std::sqrt(128.0f) - 22.625f * 0x1p-8f;
+  CHECK(std::fabs(a.o[cv(0, 0, 0)] - want) < 1e-6f);
   finite(a.state);
   finite(a.o);
 }
@@ -115,8 +134,8 @@ void check_split_a2_residual(Dev& d) {
   // `prefill_gate_l0_test` on 2026-09-23 (code L60 cosine 0.996344994).
   Input in(1);
   in.state[sk(0, 0, 0)] = 1.0f + 0x1p-8f;
-  in.w[cv(0, 0, 0)] = G::rne(1.0f);
-  in.u[cv(0, 0, 0)] = G::rne(1.0f);
+  in.w[cv(0, 0, 0)] = 1.0f;
+  in.u[cv(0, 0, 0)] = 1.0f;
   in.xb[G::kQOff] = G::rne(1.0f);
   in.a2[a2i(0, 0, 0)] = 22.65625f;  // 22.625 + 2^-5: NOT BF16 exact.
   const Output a = run(d, in);
@@ -134,7 +153,7 @@ void check_split_d_residual(Dev& d) {
   // At the sub-chunk end D0=exp(-2^-10), so the retained FP32 state is that
   // value.  A high-only D chain rounds it to one.
   Input in(2);
-  in.u[cv(0, 0, 0)] = G::rne(1.0f);
+  in.u[cv(0, 0, 0)] = 1.0f;
   in.xb[G::kKOff] = G::rne(1.0f);
   for (uint32_t h = 0; h < kHeads; ++h) in.gc[size_t(1) * kHeads + h] = -0x1p-10f;
   const Output a = run(d, in);
@@ -164,6 +183,7 @@ int main() {
   Dev d;
   check_split_s_residual(d);
   check_split_a2_residual(d);
+  check_split_w_residual(d);
   check_split_d_residual(d);
   check_zero_ragged(d);
   std::puts("gdn_scan_split_test OK");
