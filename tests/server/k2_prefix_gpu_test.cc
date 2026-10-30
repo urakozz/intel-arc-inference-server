@@ -227,8 +227,12 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
     const golden::GoldenDecision gd = golden::golden_decision(ref.data(), V, V);
     const uint32_t id = cand_tok[p];
     if (judge) {
-      judge_cached += !golden::judge_accepts(*judge, p, id, V, V);
-      judge_cold += !golden::judge_accepts(*judge, p, gd.set[0], V, V);
+      const bool cached_ok = golden::judge_accepts(*judge, p, id, V, V);
+      const bool cold_ok = golden::judge_accepts(*judge, p, gd.set[0], V, V);
+      judge_cached += !cached_ok;
+      judge_cold += !cold_ok;
+      if (!cached_ok) golden::judge_explain(*judge, p, id, V, V, "cached run's");
+      if (!cold_ok) golden::judge_explain(*judge, p, gd.set[0], V, V, "cold run's");
     }
     if (id != gd.set[0] && first_diff == kGen) first_diff = p;
     if (gd.determined()) {
