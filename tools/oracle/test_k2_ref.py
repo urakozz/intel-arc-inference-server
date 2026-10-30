@@ -171,6 +171,18 @@ def test_norm_plain_weight():
     print("  grouped norm is w * x_hat (bitwise = K2HorizonRMSNorm in bf16), not (1 + w) * x_hat")
 
 
+def test_gemm_f32_twin():
+    """--gemm f32: torch's bf16 GEMM up to the accumulation order - every element within one bf16 ulp."""
+    g = torch.Generator().manual_seed(7)
+    x, w = bf(torch.randn(9, 256, generator=g)), bf(torch.randn(48, 256, generator=g))
+    a, b = ref.Arith("bf16"), ref.Arith("bf16", "f32")
+    for ya, yb in ((a.linear(x, w), b.linear(x, w)), (a.mm(x, w.t()), b.mm(x, w.t()))):
+        assert torch.equal(yb, b.r(yb))
+        ulp = torch.ldexp(torch.ones_like(ya), torch.frexp(ya.abs()).exponent - 8)
+        assert bool(((ya - yb).abs() <= ulp).all())
+    print("  --gemm f32: within one bf16 ulp of torch's bf16 GEMM")
+
+
 def test_norm_two_groups():
     g = torch.Generator().manual_seed(2)
     ar = ref.Arith("f32")
@@ -575,7 +587,7 @@ def test_cli_run_and_hfcheck():
     print(f"  run wrote {len(keys)} tensors (the plan 8d layout + gaps); hfcheck read them back")
 
 
-TESTS = [test_real_config, test_real_index, test_norm_plain_weight, test_norm_two_groups, test_softplus_threshold,
+TESTS = [test_real_config, test_real_index, test_norm_plain_weight, test_gemm_f32_twin, test_norm_two_groups, test_softplus_threshold,
          test_router_bias_selects_only, test_router_scale_after_normalise, test_router_ties_lower_id,
          test_combine_ascending_order, test_partial_rope_and_gqa, test_mova_v_is_the_cache,
          test_decode_matches_prefill, test_determinism, test_hf_bf16, test_hf_f32, test_checkpoint_and_stream,

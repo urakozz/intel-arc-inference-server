@@ -534,6 +534,27 @@ def mtp_head(snapshot: str, tc, model, experts: str):
 # --------------------------------------------------------------------------------------------
 # commands
 
+def f32_gemms() -> None:
+    """--gemm f32: every bf16 F.linear / torch._grouped_mm runs as an fp32 matmul of the bf16 values, rounded to bf16
+    once - torch's bf16 GEMM up to the accumulation order (an ulp in places). For CPUs without bf16 units, where
+    torch emulates the bf16 GEMM and a long prompt's bf16 twin takes hours (operator ruling 2026-10-31: the near-miss
+    gates count the bf16 reference's own misses against the f32 judge)."""
+    lin, gmm = torch.nn.functional.linear, getattr(torch, "_grouped_mm", None)
+    bf = torch.bfloat16
+
+    def linear(x, w, b=None):
+        if x.dtype != bf:
+            return lin(x, w, b)
+        return lin(x.float(), w.float(), None if b is None else b.float()).to(bf)
+    torch.nn.functional.linear = linear
+    if gmm is not None:
+        def grouped_mm(a, b, *args, **kw):
+            if a.dtype != bf:
+                return gmm(a, b, *args, **kw)
+            return gmm(a.float(), b.float(), *args, **kw).to(bf)
+        torch._grouped_mm = grouped_mm
+
+
 def cmd_run(a) -> None:
     from safetensors.torch import save_file
     t0 = time.time()
@@ -546,6 +567,11 @@ def cmd_run(a) -> None:
     if not ids or len(ids) > a.max_prompt:
         die(f"{a.prompt}: {len(ids)} ids (1..{a.max_prompt})")
     model, pf, lazy = build_streamed(a.snapshot, tc)
+    if a.gemm == "f32":
+        if a.dtype != "bf16":
+            die("--gemm f32 is the bf16 reference's GEMMs in fp32: use it with --dtype bf16")
+        f32_gemms()
+        print("GEMMs: fp32 matmuls of the bf16 values, rounded once (--gemm f32)")
     if (a.lm_head == "int8" or a.sim_int8_prefill) and a.dtype != "f32":
         die("--lm-head int8 / --sim-int8-prefill are quantisation-aware f32 judges: use them with --dtype f32")
     if a.lm_head == "int8":   # spec 9's int8 head as loader/lm_head_int8.cc quantises it (int8_sim.py)
@@ -749,6 +775,8 @@ def main() -> None:
     # and every activation in float32 (box 2026-10-23: is the engine's drift from the bf16
     # reference larger than the bf16 reference's own distance from exact arithmetic?).
     r.add_argument("--dtype", default="bf16", choices=["bf16", "f32"])
+    r.add_argument("--gemm", default="bf16", choices=["bf16", "f32"], help="f32: the bf16 run's GEMMs as fp32 matmuls "
+                   "of the bf16 values, rounded once (f32_gemms) - a bf16 twin on a CPU without bf16 units")
     r.add_argument("--lean", action="store_true", help="logits of the prompt's last row and the generated rows, the "
                    "tokens - nothing per layer (a long prompt's judge, operator ruling 2026-10-29)")
     r.add_argument("--dump-kv", action="store_true", help="with --lean: the GDN states and the FA layers' K / V rows")

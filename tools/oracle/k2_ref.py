@@ -247,10 +247,16 @@ def expected_names(c: K2Config) -> list[str]:
 # arithmetic: fp32 values, rounded where the bf16 reference rounds
 
 class Arith:
-    def __init__(self, mode: str = "bf16"):
+    def __init__(self, mode: str = "bf16", gemm: str = "bf16"):
         if mode not in ("bf16", "f32"):
             raise ValueError(f"mode {mode!r}: bf16 or f32")
+        if gemm not in ("bf16", "f32"):
+            raise ValueError(f"gemm {gemm!r}: bf16 or f32")
         self.mode = mode
+        # gemm "f32" (bf16 mode only): the GEMMs as fp32 matmuls of the bf16 values, rounded once - torch's bf16 GEMM
+        # up to the accumulation order (an ulp in places, above), for CPUs without bf16 units, where torch's bf16
+        # GEMM is emulated and a 2600-id K2 prompt takes hours instead of minutes (the box's Broadwell Xeon).
+        self.f32_gemm = mode == "bf16" and gemm == "f32"
 
     def r(self, x: torch.Tensor) -> torch.Tensor:
         """Round float32 values to the activation dtype (bf16, RNE) and back; identity in f32."""
@@ -263,12 +269,16 @@ class Arith:
         values: that is the reference's F.linear, and it is NOT bitwise the same as an fp32
         matmul rounded afterwards - the accumulation order differs (measured on torch 2.14 CPU:
         109 of 1008 shapes differ in 1-4 elements by one bf16 ulp)."""
+        if self.f32_gemm:
+            return self.r(self.r(x) @ self.r(w.float()).t())
         if self.mode == "bf16":
             return F.linear(x.to(torch.bfloat16), w.to(torch.bfloat16)).float()
         return x @ w.float().t()
 
     def mm(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         """a @ b, as linear(): torch's bf16 matmul in bf16 mode (eager attention's two matmuls)."""
+        if self.f32_gemm:
+            return self.r(self.r(a) @ self.r(b))
         if self.mode == "bf16":
             return (a.to(torch.bfloat16) @ b.to(torch.bfloat16)).float()
         return a @ b
@@ -560,11 +570,11 @@ class K2Ref:
     """The reference, layer at a time. `src` is a Checkpoint or a DictSource."""
 
     def __init__(self, c: K2Config, src, mode: str = "bf16", prefetch: bool = True, keep_dense=(),
-                 keep_experts=()):
+                 keep_experts=(), gemm: str = "bf16"):
         """keep_dense: layers whose dense tensors stay loaded after their first forward;
         keep_experts: layers whose dequantised experts (MoE and MoVA) are kept once read, instead
         of being dropped with the layer - each read once per run. Neither changes a value."""
-        self.c, self.src, self.ar = c, src, Arith(mode)
+        self.c, self.src, self.ar = c, src, Arith(mode, gemm)
         self.embed = src.tensor("model.embed_tokens.weight")
         self.norm_w = src.tensor("model.norm.weight")
         self.lm_head = self.embed if c.tie_word_embeddings else src.tensor("lm_head.weight")
@@ -712,7 +722,7 @@ class K2Ref:
     def head(self, x: torch.Tensor, chunk: int = 32768) -> torch.Tensor:
         """lm_head: one bf16 GEMM in bf16 mode (as the reference); in f32 mode in vocab-row chunks
         (an fp32 copy of the 250624 x 2560 head would be 2.6 GB)."""
-        if self.ar.mode == "bf16":
+        if self.ar.mode == "bf16" and not self.ar.f32_gemm:
             return self.ar.linear(x, self.lm_head)
         return torch.cat([self.ar.linear(x, self.lm_head[a:a + chunk])
                           for a in range(0, self.lm_head.shape[0], chunk)], dim=-1)
@@ -830,7 +840,7 @@ def cmd_run(a) -> None:
     print(f"{a.snapshot}: {c.num_hidden_layers} layers ({sum(map(c.is_mova, range(c.num_hidden_layers)))} MoVA+MoE), "
           f"{'int4 g%d dequantised' % c.group_size if c.group_size else 'bf16'}; mode {a.mode}; "
           f"prompt {len(ids)} ids; gen {a.gen}", flush=True)
-    ref = K2Ref(c, src, mode=a.mode)
+    ref = K2Ref(c, src, mode=a.mode, gemm=a.gemm)
     if a.lm_head == "int8":   # spec 9's int8 head, as loader/lm_head_int8.cc quantises it (int8_sim.py)
         if a.mode != "f32":
             raise SystemExit("--lm-head int8 is a quantisation-aware f32 judge: use it with --mode f32")
@@ -970,6 +980,9 @@ def main() -> None:
     r.add_argument("--gen", type=int, default=32)
     r.add_argument("--max-prompt", type=int, default=64)
     r.add_argument("--mode", choices=("bf16", "f32"), default="bf16")
+    # bf16 mode's GEMMs as fp32 matmuls of the bf16 values, rounded once (Arith): a bf16 twin beside an f32 judge on a
+    # CPU without bf16 units (operator ruling 2026-10-31: the near-miss gates count the bf16 reference's own misses).
+    r.add_argument("--gemm", choices=("bf16", "f32"), default="bf16")
     r.add_argument("--force", help="ids to teacher-force instead of the greedy argmax (a control: its rows line up with another run's)")
     # The quantisation-aware f32 judge of the engine's --lm-head int8 (operator ruling 2026-10-23): the logits
     # through the per-row int8 head, de-quantised (tools/oracle/int8_sim.py). With --mode f32 only.
