@@ -106,8 +106,11 @@ def _sat_rte(v: torch.Tensor) -> torch.Tensor:
 #                 g64 (unrotated, one scale per token and 64-k group) | two (rotated, per token, a second int8 limb
 #                 for the residual) | off (exact)
 #   B70_SIM_I8_W  col (h8: rotated, one scale per column) | off (the int4 weight exact, as an int4-on-int8 GEMM)
+#   B70_SIM_I8_X_MOE / B70_SIM_I8_W_MOE  the same for the MoE block's gate||up (default: B70_SIM_I8_X / _W)
 SIM_X = os.environ.get("B70_SIM_I8_X", "tok")
 SIM_W = os.environ.get("B70_SIM_I8_W", "col")
+SIM_X_MOE = os.environ.get("B70_SIM_I8_X_MOE", SIM_X)
+SIM_W_MOE = os.environ.get("B70_SIM_I8_W_MOE", SIM_W)
 
 
 def _q_rows(v: torch.Tensor) -> torch.Tensor:
@@ -117,20 +120,21 @@ def _q_rows(v: torch.Tensor) -> torch.Tensor:
     return _sat_rte(v * iv) * s
 
 
-def fq_x(x: torch.Tensor) -> torch.Tensor:
+def fq_x(x: torch.Tensor, moe: bool = False) -> torch.Tensor:
     """An activation row block [..., K] as the h8 int8 GEMM sees it, de-quantised, original basis."""
     K = x.shape[-1]
     assert K % 1024 == 0, f"K = {K} is not whole 1024-k rotation blocks"
-    if SIM_X == "off":
+    mode = SIM_X_MOE if moe else SIM_X
+    if mode == "off":
         return x
-    if SIM_X == "g64":
+    if mode == "g64":
         v = x.float().reshape(*x.shape[:-1], K // 64, 64)
         return _q_rows(v).reshape(x.shape).to(x.dtype)
     d = int8_signs(K)
     xr = _rot(x.float(), d)
-    if SIM_X == "blk":
+    if mode == "blk":
         q = _q_rows(xr.reshape(*xr.shape[:-1], K // 1024, 1024)).reshape(xr.shape)
-    elif SIM_X == "two":
+    elif mode == "two":
         q1 = _q_rows(xr)
         q = q1 + _q_rows(xr - q1)
     else:
@@ -138,12 +142,12 @@ def fq_x(x: torch.Tensor) -> torch.Tensor:
     return _unrot(q, d).to(x.dtype)
 
 
-def fq_w(w: torch.Tensor) -> torch.Tensor:
+def fq_w(w: torch.Tensor, moe: bool = False) -> torch.Tensor:
     """A weight [N][K] (torch Linear layout: row n = output column n over K), as pf_requant_rot's
     per-column int8 of R^T w with pf_colmax_rot's scales, de-quantised, original basis."""
     K = w.shape[-1]
     assert K % 1024 == 0, f"K = {K} is not whole 1024-k rotation blocks"
-    if SIM_W == "off":
+    if (SIM_W_MOE if moe else SIM_W) == "off":
         return w
     d = int8_signs(K)
     wr = _rot(w.float(), d)

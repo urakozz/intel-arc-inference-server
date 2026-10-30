@@ -94,13 +94,13 @@ def sim_int8_prefill(model, tc, lazy):
     state = {"on": False}
     F = torch.nn.functional
 
-    def patch(mod):
+    def patch(mod, moe=False):
         orig = mod.forward
 
         def fwd(x):
             if not state["on"]:
                 return orig(x)
-            return F.linear(_int8.fq_x(x), _int8.fq_w(mod.weight), mod.bias)
+            return F.linear(_int8.fq_x(x, moe), _int8.fq_w(mod.weight, moe), mod.bias)
         mod.forward = fwd
 
     for i, layer in enumerate(model.model.layers):
@@ -110,8 +110,8 @@ def sim_int8_prefill(model, tc, lazy):
         else:
             for n in ("q_proj", "k_proj", "v_proj", "o_proj"):
                 patch(getattr(layer.self_attn, n))
-        patch(layer.mlp.shared_expert.gate_proj)
-        patch(layer.mlp.shared_expert.up_proj)
+        patch(layer.mlp.shared_expert.gate_proj, True)   # block 256 of the int8 gate||up array
+        patch(layer.mlp.shared_expert.up_proj, True)
 
         def experts_pre(_mod, args, i=i):
             if not state["on"]:
@@ -121,8 +121,8 @@ def sim_int8_prefill(model, tc, lazy):
             # the hidden size), then the input with its fake-quantised rows.
             gate_up, _down, _have = lazy.buffers(i)
             for e in sorted(set(int(x) for x in args[1].reshape(-1).tolist())):
-                gate_up[e] = _int8.fq_w(gate_up[e])
-            return (_int8.fq_x(args[0]),) + tuple(args[1:])
+                gate_up[e] = _int8.fq_w(gate_up[e], True)
+            return (_int8.fq_x(args[0], True),) + tuple(args[1:])
         layer.mlp.experts.register_forward_pre_hook(experts_pre)
     return state
 
