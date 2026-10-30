@@ -16,6 +16,8 @@
 //
 // <key> = <name>_<FNV-1a 64 of the prompt and the forced ids, hex>: two configurations that reach the same tokens
 // share one reference, and a judge can never be applied to another context than its own.
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -134,5 +136,29 @@ inline uint32_t twin_misses(const Golden& judge, const Golden& twin, uint32_t ro
   }
   return n;
 }
+
+// A run's logits row against the judge's row `row`, cosine over the first `used` columns; and the min / median of
+// a run's rows - how far a whole path sits from f32, beside the per-row decisions.
+inline double judge_cos(const Golden& j, uint32_t row, const float* v, uint32_t vocab, uint32_t used) {
+  const float* r = j.f32("logits", size_t(j.dim("logits", 2, 0)) * vocab) + size_t(row) * vocab;
+  double ab = 0, aa = 0, bb = 0;
+  for (uint32_t i = 0; i < used; ++i) {
+    ab += double(r[i]) * v[i];
+    aa += double(r[i]) * r[i];
+    bb += double(v[i]) * v[i];
+  }
+  return ab / std::sqrt(aa * bb);
+}
+struct CosRows {
+  std::vector<double> c;
+  std::string str() const {
+    if (c.empty()) return "-";
+    std::vector<double> s = c;
+    std::sort(s.begin(), s.end());
+    char b[64];
+    std::snprintf(b, sizeof b, "%.6f / %.6f", s.front(), s[s.size() / 2]);
+    return b;
+  }
+};
 
 }  // namespace golden
