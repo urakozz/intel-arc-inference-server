@@ -535,11 +535,12 @@ def mtp_head(snapshot: str, tc, model, experts: str):
 # commands
 
 def f32_gemms() -> None:
-    """--gemm f32: every bf16 F.linear / torch._grouped_mm runs as an fp32 matmul of the bf16 values, rounded to bf16
+    """--gemm f32: every bf16 F.linear / torch._grouped_mm / matmul / bmm runs as an fp32 matmul of the bf16 values, rounded to bf16
     once - torch's bf16 GEMM up to the accumulation order (an ulp in places). For CPUs without bf16 units, where
     torch emulates the bf16 GEMM and a long prompt's bf16 twin takes hours (operator ruling 2026-10-31: the near-miss
     gates count the bf16 reference's own misses against the f32 judge)."""
     lin, gmm = torch.nn.functional.linear, getattr(torch, "_grouped_mm", None)
+    mm, bmm, tmm = torch.matmul, torch.bmm, torch.Tensor.__matmul__
     bf = torch.bfloat16
 
     def linear(x, w, b=None):
@@ -547,6 +548,14 @@ def f32_gemms() -> None:
             return lin(x, w, b)
         return lin(x.float(), w.float(), None if b is None else b.float()).to(bf)
     torch.nn.functional.linear = linear
+
+    def wrap(f):   # eager attention's two matmuls (torch.matmul / @) and any bmm
+        def g(a, b, *args, **kw):
+            if not (isinstance(a, torch.Tensor) and a.dtype == bf):
+                return f(a, b, *args, **kw)
+            return f(a.float(), b.float(), *args, **kw).to(bf)
+        return g
+    torch.matmul, torch.bmm, torch.Tensor.__matmul__ = wrap(mm), wrap(bmm), wrap(tmm)
     if gmm is not None:
         def grouped_mm(a, b, *args, **kw):
             if a.dtype != bf:
