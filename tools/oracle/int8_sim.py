@@ -105,7 +105,8 @@ def _sat_rte(v: torch.Tensor) -> torch.Tensor:
 #   B70_SIM_I8_X  tok (h8: rotated, one scale per token) | blk (rotated, one scale per token and 1024-k block) |
 #                 g64 (unrotated, one scale per token and 64-k group) | two (rotated, per token, a second int8 limb
 #                 for the residual) | off (exact)
-#   B70_SIM_I8_W  col (h8: rotated, one scale per column) | off (the int4 weight exact, as an int4-on-int8 GEMM)
+#   B70_SIM_I8_W  col (h8: rotated, one scale per column) | blk (rotated, one scale per column and 1024-k block) |
+#                 off (the int4 weight exact, as an int4-on-int8 GEMM)
 #   B70_SIM_I8_X_MOE / B70_SIM_I8_W_MOE  the same for the MoE block's gate||up (default: B70_SIM_I8_X / _W)
 SIM_X = os.environ.get("B70_SIM_I8_X", "tok")
 SIM_W = os.environ.get("B70_SIM_I8_W", "col")
@@ -147,10 +148,13 @@ def fq_w(w: torch.Tensor, moe: bool = False) -> torch.Tensor:
     per-column int8 of R^T w with pf_colmax_rot's scales, de-quantised, original basis."""
     K = w.shape[-1]
     assert K % 1024 == 0, f"K = {K} is not whole 1024-k rotation blocks"
-    if (SIM_W_MOE if moe else SIM_W) == "off":
+    wmode = SIM_W_MOE if moe else SIM_W
+    if wmode == "off":
         return w
     d = int8_signs(K)
     wr = _rot(w.float(), d)
+    if wmode == "blk":   # one scale per column and 1024-k block
+        return _unrot(_q_rows(wr.reshape(*wr.shape[:-1], K // 1024, 1024)).reshape(wr.shape), d).to(w.dtype)
     m = wr.abs().amax(-1, keepdim=True)
     ws = torch.where(m > 0, m / 127.0, torch.ones_like(m))
     q = _sat_rte(wr * (1.0 / ws))
