@@ -318,14 +318,15 @@ card with the checkpoint (Task 6 Step 2, both settings); a **speed** stage, opt-
 at three depths, the two D1 runs); and a manual **record** stage depending on all of them. Its row note: timed stages
 need the idle protocol; hand back the table, the kept settings, N1 / N2 worst cases per M, the tie census, S1 / S2.
 
-## Open questions for the operator
+## Operator decisions (2026-10-31)
 
-1. **The noise line:** "within noise" made concrete as paired v2 / dpas >= 1.03 with the range's low end > 1.00 (else
-   v2). Spec 28 used >= 5 % for its S choice; 3 % is proposed here because the attention is a smaller part of the step.
-2. **28 parked:** if 28a records NO-GO, does 28c still run (Task 0 then computes the share on today's GEMV-heavy step,
-   where attention is a smaller fraction), or is it parked with 28?
-3. **Two lists per M:** if the table makes some M switch at a depth, is capturing a second verify list for that M
-   acceptable (capture time and memory recorded), or should such an M keep v2 until a device-side form is specified?
-4. **int8 KV at M = 5..8:** no production int8 verify list exists there (`B70_KV8` stops at 4), so DFlash with int8 KV
-   is not built; the table records int8 at 5..8 from probe controls only. Bind DPAS there when DFlash-with-int8-KV is
-   planned, not here?
+1. **The noise line:** "within noise" is paired v2 / dpas >= 1.03 with the range's low end > 1.00 (else v2).
+   **Decided: 3 %** - the attention kernel is timed alone, in pairs.
+2. **28 parked:** **decided: 28c still runs** if 28a records NO-GO - Task 0 computes the share on today's step; the
+   attention is one of the levers a NO-GO names.
+3. **Two lists per M:** **decided: acceptable** when the table makes an M switch at a depth; capture time and list
+   memory recorded.
+4. **int8 KV at M = 5..8:** **decided: recorded from probe controls only;** DPAS is bound there when
+   DFlash-with-int8-KV is planned, not here.
+5. **The GO line and S2 on the attention's excess over M = 1** (one row's KV walk is a floor no kernel removes), not
+   the raw share: **decided: yes.**
