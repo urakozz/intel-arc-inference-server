@@ -33,7 +33,7 @@ has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e), never run |
 | `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV, never run | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
-| prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, its accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
 | `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
 | with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
@@ -313,7 +313,12 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
-- Prefill runs on `l0` (the default) and `l0-int8`. Decode attention `v1`
+- Prefill runs on `l0` (the default) and `l0-int8` (opt-in). On this MoE model `l0-int8` loses routing
+  accuracy against f32 (the box, 2026-10-30: 1314 differing expert sets on the prefill path against the
+  bf16 reference's 1140), and no 8-bit activation scheme studied won it back, so its accuracy gates are
+  diagnostic - printed, not gated (operator ruling 2026-10-31); use it for speed only. Its kernels'
+  own gate (`prefill_gate_ornith_l0-int8`, judged by the quantisation-aware f32 reference) still binds.
+  Decode attention `v1`
   (`B70_DECODE_ATTN=v1`) and the composed prefill attention (`B70_PREFILL_ATTN=composed`)
   are not built for Ornith.
 - `--mtp auto` decides with Qwen3.8's cost table until the card measures Ornith's (the

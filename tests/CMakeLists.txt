@@ -1714,6 +1714,12 @@ if(B70_ORNITH)
     # than the bf16 reference (tools/box_validate/f32_refs.sh split; absent: the fixed bars).
     set_tests_properties(prefill_split_ornith_${b}_test PROPERTIES ENVIRONMENT
       "B70_SPLIT_REFS=${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-f32.golden.safetensors,${CMAKE_SOURCE_DIR}/oracle-out-ornith-split/long32k-2600-bf16.golden.safetensors")
+    # Operator ruling 2026-10-31 (round 2): l0-int8 on a MoE model is opt-in and its accuracy gates are diagnostic
+    # (the tests print their verdicts and do not fail on them); prefill_gate's quantisation-aware judge (pfi8: a miss
+    # there is a kernel error, not an accuracy loss) still gates.
+    if(b STREQUAL "l0-int8")
+      set_property(TEST prefill_split_ornith_${b}_test ornith_prefill_${b}_test APPEND PROPERTY LABELS diagnostic)
+    endif()
   endforeach()
 
 endif()

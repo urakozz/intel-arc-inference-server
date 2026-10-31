@@ -29,9 +29,13 @@
 //
 // **The f32 judge (operator ruling 2026-10-29).** With B70_SPLIT_REFS=<f32 dump>,<bf16 dump> (tools/box_validate/
 // f32_refs.sh split: ornith_ref.py run --lean --dump-kv of ids[0, N), in f32 and in bf16) every engine run - the one
-// call, each split, decode - is held to "no further from f32 than the bf16 reference": each gated metric of
-// (f32, engine) at least that of (f32, bf16 reference). The fixed bars below then do not gate (they are printed);
-// the multiples of 64 stay bitwise.
+// call, each split, decode - is held to "no further from f32 than the bf16 reference". Round 2 of the operator's
+// 2026-10-31 rulings: by the near-miss gates' rule (forced_judge.h), not five strict metrics against one bf16 sample
+// - the last-row logits and the all-(layer, row) median, each a cosine distance to f32 at most kCosSlack (2) times
+// the bf16 reference's; fa0-3's worst row, p01 and GDN layer 0's state are one row's (or one state's) numbers,
+// printed with their ratios, not gated (the GDN L0 state's 1.6x is the fp32-intermediates question parked on branch
+// g0-fix-gdn-fp32). The fixed bars below then do not gate (they are printed); the multiples of 64 stay bitwise.
+// l0-int8 on a MoE model (ruling 4 of round 2): the judge's verdicts are DIAGNOSTIC - printed, not gated.
 //
 // usage: prefill_split_test <snapshot> <ids> [backend l0|l0-int8] [N] [splits,..] [decode 0|1]
 //        prefill_split_test <snapshot> <ids> <backend> --oracle <dump.safetensors> <rows,..>
@@ -50,6 +54,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "forced_judge.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -175,13 +180,13 @@ void print(const char* what, const Result& r) {
 struct Bars {
   double logits, shallow, median, p01, gdn0;
 };
-bool check(const Result& r, const Bars& b) {
+bool check(const Result& r, const Bars& b, bool gated = true) {
   const bool pass = r.logits >= b.logits && r.shallow >= b.shallow && r.median >= b.median &&
                     r.p01 >= b.p01 && r.gdn0 >= b.gdn0;
   if (!pass)
-    std::printf("    ** FAIL ** bars: logits >= %.4f, fa0-%u every row >= %.4f, median >= %.5f,"
-                " p01 >= %.3f, gdn L0 state >= %.6f\n", b.logits, kShallow - 1, b.shallow,
-                b.median, b.p01, b.gdn0);
+    std::printf("    %s bars: logits >= %.4f, fa0-%u every row >= %.4f, median >= %.5f,"
+                " p01 >= %.3f, gdn L0 state >= %.6f\n", gated ? "** FAIL **" : "(not gated: the f32 judge decides)",
+                b.logits, kShallow - 1, b.shallow, b.median, b.p01, b.gdn0);
   return pass;
 }
 
@@ -212,15 +217,19 @@ Snap ref_snap(const std::string& path, uint32_t n) {
                 kGdnLayer * 4);
   return s;
 }
-// The judge's rule: every gated metric of (f32, engine) no lower than (f32, bf16 reference)'s.
+// The judge's rule (header; operator 2026-10-31, round 2): the last-row logits' and the all-rows median's cosine
+// distance to f32 each at most kCosSlack times the bf16 reference's; the one-row metrics printed with their ratios.
+bool g_diagnostic = false;   // l0-int8 on a MoE model: printed, not gated
 bool no_further(const Result& r, const Result& b) {
-  const bool pass = r.logits >= b.logits && r.shallow >= b.shallow && r.median >= b.median && r.p01 >= b.p01 &&
-                    r.gdn0 >= b.gdn0;
-  if (!pass)
-    std::printf("    ** FAIL ** further from f32 than the bf16 reference: logits %.6f / %.6f, fa0-%u worst %.6f / %.6f,"
-                " median %.7f / %.7f, p01 %.6f / %.6f, gdn L0 %.9f / %.9f\n", r.logits, b.logits, kShallow - 1,
-                r.shallow, b.shallow, r.median, b.median, r.p01, b.p01, r.gdn0, b.gdn0);
-  return pass;
+  using golden::cos_dist_ratio;
+  const double rl = cos_dist_ratio(r.logits, b.logits), rm = cos_dist_ratio(r.median, b.median);
+  const bool pass = rl <= golden::kCosSlack && rm <= golden::kCosSlack;
+  std::printf("    against the bf16 reference's distance to f32 (x = engine / reference): logits x%.2f, median x%.2f "
+              "(gated, slack %.1f); fa0-%u worst x%.2f, p01 x%.2f, gdn L0 x%.2f (printed)%s\n", rl, rm,
+              golden::kCosSlack, kShallow - 1, cos_dist_ratio(r.shallow, b.shallow), cos_dist_ratio(r.p01, b.p01),
+              cos_dist_ratio(r.gdn0, b.gdn0),
+              pass ? "" : g_diagnostic ? "  (DIAGNOSTIC: l0-int8 on a MoE model - not gated)" : "  ** FAIL **");
+  return pass || g_diagnostic;
 }
 
 std::vector<uint32_t> parse_list(const std::string& s) {
@@ -323,9 +332,12 @@ int main(int argc, char** argv) {
   e.prepare_prefill();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const bool int8 = backend == runtime::PrefillBackend::L0Int8;
-  std::printf("prefill_split_test: backend %s, attention %s, N %u\n",
+  g_diagnostic = int8 && e.model().desc->is_moe();
+  std::printf("prefill_split_test: backend %s, attention %s, N %u%s\n",
               runtime::prefill_backend_name(backend),
-              runtime::prefill::attn_mode_name(runtime::prefill::attn_mode()), N);
+              runtime::prefill::attn_mode_name(runtime::prefill::attn_mode()), N,
+              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the f32 judge's verdicts not gated (operator "
+                             "2026-10-31)" : "");
 
   // Measured worst over splits 1..2049 (and, second, decode), long32k[0, 2600):
   //   l0       logits 0.999882 / 0.999911, fa0-3 0.999764 / 0.999810, median 0.99994 /
@@ -384,7 +396,7 @@ int main(int argc, char** argv) {
     const Result r = compare(ref, two, N, verbose);
     print(what, r);
     if (!f32ref) return check(r, bars);
-    (void)check(r, bars);
+    (void)check(r, bars, false);
     const Result rf = compare(*f32ref, two, N, false);
     print("  vs f32:", rf);
     return no_further(rf, bf16_dist);
