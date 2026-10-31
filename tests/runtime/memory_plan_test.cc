@@ -80,8 +80,8 @@ void check_sizes_qwen38() {
   unsetenv("B70_DECODE_ATTN");
   CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q).attn_part, size_t{6340608});
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q);
-  CHECK_EQ(s.eager(), size_t{749846424});
-  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q).eager(), size_t{749846424});
+  CHECK_EQ(s.eager(), size_t{699514776});
+  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q).eager(), size_t{699514776});
   CHECK_EQ(s.slab, size_t{35651584});
   CHECK_EQ(s.pf_s, size_t{805306368});
   CHECK_EQ(s.pf_p, size_t{402653184});
@@ -258,14 +258,14 @@ void check_spec6_line() {
   // gdn_state + conv_ring + control + DecodeScratch with attn_part at 2048 blocks.
   CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 405798912));
   CHECK_EQ(p.decode_state, size_t{590450624});
-  CHECK_EQ(p.prefill_scratch, size_t{749846424});
+  CHECK_EQ(p.prefill_scratch, size_t{699514776});
   CHECK_EQ(p.prefill_lazy, size_t{0});         // flash attention, no MTP: nothing lazy
   CHECK_EQ(p.int8, size_t{84680704});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch 0.750 GB,"
-        " int8 0.085 GB, total 28.131 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch 0.700 GB,"
+        " int8 0.085 GB, total 28.081 GB of 32.530 GB");
 }
 
 void check_paths() {

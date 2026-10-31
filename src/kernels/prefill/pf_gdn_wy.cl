@@ -45,17 +45,16 @@
 //     fp32, after the l2norm's bf16 round (P6). `k` is read unscaled (P7);
 //     the `* 1.0f` in the shared dot is exact and is there so both callers use
 //     one function.
-//   * **Q1-Q4, the four intermediates of `pf_gdn_wu`, are fp32** (operator ruling 2026-10-31: accuracy
-//     over FLA parity). FLA rounds each to bf16 (wy_fast.py:88 / :110 / :89 / :112, `.to(dtype)`) and this
-//     file did until then; held fp32 they are what the bf16 reference (transformers' torch chunked rule,
-//     fp32 inside) and decode's recurrent step compute, and the prefill's GDN state stops being the one
-//     path further from f32 than both (r13.split, 2026-10-29: layer 0's state 1 - cos 8.1e-6 against the
-//     bf16 reference's 5.2e-6):
-//       Q1 vb[j][x] = v[j][x] * beta[j]                       fp32
-//       Q2 kb[j][k] = k[j][k] * beta[j] * exp(gc[j])          fp32
-//       Q3 u[i][x]  = SUM_{j<=i} T[i][j] * vb[j][x]           fp32, written fp32
-//       Q4 w[i][k]  = SUM_{j<=i} T[i][j] * kb[j][k]           fp32, written fp32 (the scan's DPAS takes it
-//                                                             as a bf16 hi + lo pair)
+//   * **Q1-Q4, the four bf16 roundings the chunked form ADDS** and for which
+//     decode has no twin, all live in `pf_gdn_wu`:
+//       Q1 vb[j][x] = rne(v[j][x] * beta[j])                  wy_fast.py:88
+//       Q2 kb[j][k] = rne(k[j][k] * beta[j] * exp(gc[j]))     wy_fast.py:110
+//       Q3 u[i][x]  = rne(SUM_{j<=i} T[i][j] * f32(vb[j][x])) wy_fast.py:89
+//       Q4 w[i][k]  = rne(SUM_{j<=i} T[i][j] * f32(kb[j][k])) wy_fast.py:112
+//     They are kept because they are the reference vLLM runs, and they are the
+//     dominant term of the numerics band
+//     (docs/prefill-l1-preregistration-2026-09-05.md §2.2). Each expression is
+//     rounded ONCE, at its end, as FLA's `.to(dtype)` does.
 //   * `T` is **fp32**, deviating from FLA's `solve_tril(..., output_dtype =
 //     k.dtype)` (chunk.py:47-49) - plan 6b ruling R8, deliberate and recorded.
 
@@ -788,9 +787,11 @@ __kernel void pf_gdn_solve_1bar(__global float* restrict A, uint c_count) {
 //       128 output columns this work-group owns. That halves the operand
 //       staging, which is what buys the fp32 staging below inside the same SLM
 //       budget class, and it doubles the launch to 3072 work-groups.
-//     * **`vbs`/`kbs` are staged as fp32**, so **the widen leaves the inner loop
-//       entirely**. They held `f32(rne(...))` until the operator's ruling of
-//       2026-10-31; since then the unrounded fp32 Q1 / Q2 products.
+//     * **`vbs`/`kbs` are staged as fp32**, holding `f32(rne(...))` - the SAME
+//       rounded bf16 value, widened once at staging instead of once per use, so
+//       **the widen leaves the inner loop entirely**. Q1 and Q2 are unmoved:
+//       what changed is the container, not the rounding, and a bf16 value is
+//       exact in fp32 by construction.
 //     * **`T` is staged TRANSPOSED**, `TsT[j][i] = T[i][j]`, at row stride
 //       TS_LD = 68 so that four consecutive `i` at one `j` are one 16 B aligned
 //       vector read. 68 rather than 65 (conflict-free writes, unaligned reads)
@@ -826,7 +827,7 @@ __kernel void pf_gdn_solve_1bar(__global float* restrict A, uint c_count) {
 //
 //     SLM: TsT 64x68 fp32 (17,408 B) + vbs and kbs 64x64 fp32 (16,384 B each)
 //     + bts/egs (512 B) = **50,688 B**, against the previous 49,152 B.
-//       w, u  fp32 [C][48][128], indexed ((m * 48 + h) * 128 + x) (bf16 until 2026-10-31)
+//       w, u  bf16 [C][48][128], indexed ((m * 48 + h) * 128 + x)
 //
 //     **SIMD16 IS MEASURED, NOT INHERITED - do not "fix" this attribute.**
 //     A28 4.2 derived that dropping to SIMD32 (which is what the legacy entry
@@ -856,8 +857,8 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
                         __global const float* restrict T,
                         __global const float* restrict g_cum,
                         __global const float* restrict beta,
-                        __global float* restrict w,
-                        __global float* restrict u, uint c_count) {
+                        __global ushort* restrict w,
+                        __global ushort* restrict u, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1), cxh = get_group_id(2);
   const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
@@ -889,8 +890,8 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
     const size_t row = (size_t)(base_m + j) * CONV_ROWS;
     const float v = bf16f(xb[row + V_OFF + h * DIM + dcol + d]);
     const float kv = bf16f(xb[row + K_OFF + kh * DIM + dcol + d]);
-    vbs[p] = v * bts[j];                                                        // Q1, fp32
-    kbs[p] = kv * bts[j] * egs[j];                                              // Q2, fp32
+    vbs[p] = bf16f(rne_bf16(v * bts[j]));                                       // Q1
+    kbs[p] = bf16f(rne_bf16(kv * bts[j] * egs[j]));                             // Q2
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
@@ -945,10 +946,10 @@ __kernel void pf_gdn_wu(__global const ushort* restrict xb,
     const uint i = p < PB ? il + p : ih + (p - PB);
     if (i < L) {
       const size_t out = ((size_t)(base_m + i) * HEADS + h) * DIM + dcol + c0;
-      u[out + 0] = au[p][0];                                                    // Q3, fp32
-      u[out + 1] = au[p][1];
-      w[out + 0] = aw[p][0];                                                    // Q4, fp32
-      w[out + 1] = aw[p][1];
+      u[out + 0] = rne_bf16(au[p][0]);                                          // Q3
+      u[out + 1] = rne_bf16(au[p][1]);
+      w[out + 0] = rne_bf16(aw[p][0]);                                          // Q4
+      w[out + 1] = rne_bf16(aw[p][1]);
     }
   }
 }
@@ -970,8 +971,8 @@ __kernel void pf_gdn_wu_legacy(__global const ushort* restrict xb,
                                __global const float* restrict T,
                                __global const float* restrict g_cum,
                                __global const float* restrict beta,
-                               __global float* restrict w,
-                               __global float* restrict u, uint c_count) {
+                               __global ushort* restrict w,
+                               __global ushort* restrict u, uint c_count) {
   const uint h = get_group_id(0), chunk = get_group_id(1);
   const uint kh = h / V_PER_K;
   const uint base_m = chunk * CT;
@@ -979,6 +980,7 @@ __kernel void pf_gdn_wu_legacy(__global const ushort* restrict xb,
   const uint lid = get_local_id(0);
 
   __local float Ts[CT * CT];
+  __local ushort vbs[CT * DIM], kbs[CT * DIM];
   __local float bts[CT], egs[CT];
 
   __global const float* restrict Tt = T + ((size_t)(chunk * HEADS + h) * CT) * CT;
@@ -990,21 +992,26 @@ __kernel void pf_gdn_wu_legacy(__global const ushort* restrict xb,
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  // Q1 / Q2 fp32 (operator ruling 2026-10-31) - formed per use from xb, the same expressions the tiled
-  // kernel stages (an fp32 SLM copy of both would not fit beside Ts).
+  for (uint p = lid; p < L * DIM; p += WG_TRI) {
+    const uint j = p / DIM, d = p % DIM;
+    const size_t row = (size_t)(base_m + j) * CONV_ROWS;
+    const float v = bf16f(xb[row + V_OFF + h * DIM + d]);
+    const float kv = bf16f(xb[row + K_OFF + kh * DIM + d]);
+    vbs[p] = rne_bf16(v * bts[j]);                                              // Q1
+    kbs[p] = rne_bf16(kv * bts[j] * egs[j]);                                    // Q2
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
   for (uint p = lid; p < L * DIM; p += WG_TRI) {
     const uint i = p / DIM, x = p % DIM;
     float au = 0.0f, aw = 0.0f;
     for (uint j = 0; j <= i; ++j) {               // j ascending, explicit fma
       const float t = Ts[i * CT + j];
-      const size_t row = (size_t)(base_m + j) * CONV_ROWS;
-      const float vb = bf16f(xb[row + V_OFF + h * DIM + x]) * bts[j];                  // Q1
-      const float kb = bf16f(xb[row + K_OFF + kh * DIM + x]) * bts[j] * egs[j];        // Q2
-      au = fma(t, vb, au);
-      aw = fma(t, kb, aw);
+      au = fma(t, bf16f(vbs[j * DIM + x]), au);
+      aw = fma(t, bf16f(kbs[j * DIM + x]), aw);
     }
     const size_t out = ((size_t)(base_m + i) * HEADS + h) * DIM + x;
-    u[out] = au;                                                                // Q3
-    w[out] = aw;                                                                // Q4
+    u[out] = rne_bf16(au);                                                      // Q3
+    w[out] = rne_bf16(aw);                                                      // Q4
   }
 }
