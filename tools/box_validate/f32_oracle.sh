@@ -12,6 +12,9 @@
 #   *-i8head:     --lm-head int8         the logits through the engine's per-row int8 head (spec 9)
 #   ornith-pfi8:  --sim-int8-prefill     the prompt forward through spec 5's l0-int8 linears
 #   k2-kv8:       --sim-kv8              K / V through the int8 rotkv cache (kv8.h; k2-i8head-kv8 both)
+#   k2-kv8-twin:  --mode bf16 --gemm f32 --sim-kv8   NOT a judge: the kv8 judge's bf16 twin (operator ruling
+#                 2026-10-31, round 2) - the plain bf16 reference through the same cache, forced on the same
+#                 tokens -> oracle-out-k2-bf16-kv8: r21.golden's bar is the count of rows the judge rejects of it
 # and write oracle-out-<model>-f32-i8head / oracle-out-ornith-f32-pfi8, the judges of the *_i8head and
 # the l0-int8 prefill gates; the golden tokens forced are the same bf16 golden's.
 # into <tree>/oracle-out-<mode>-f32.partial/ (box.sh sync leaves oracle-out-* alone), moved into the
@@ -26,22 +29,23 @@ set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -eq 2 ] || { echo "usage: $0 <data tree> ornith|k2" >&2; exit 2; }
 data="$1" m="$2"
-extra="" suffix=""
+extra="" suffix="" dt=f32
 case "$m" in
   ornith-i8head) extra="--lm-head int8"; suffix="-i8head" ;;
   ornith-pfi8)   extra="--sim-int8-prefill"; suffix="-pfi8" ;;
   k2-i8head)     extra="--lm-head int8"; suffix="-i8head" ;;
   k2-kv8)        extra="--sim-kv8"; suffix="-kv8" ;;                        # operator ruling 2026-10-29
   k2-i8head-kv8) extra="--lm-head int8 --sim-kv8"; suffix="-i8head-kv8" ;;
+  k2-kv8-twin)   extra="--gemm f32 --sim-kv8"; suffix="-kv8"; dt=bf16 ;;   # operator ruling 2026-10-31
   ornith|k2) ;;
-  *) echo "f32_oracle: mode is ornith, k2, ornith-i8head, ornith-pfi8, k2-i8head, k2-kv8 or k2-i8head-kv8, not $m" >&2; exit 2 ;;
+  *) echo "f32_oracle: mode is ornith, k2, ornith-i8head, ornith-pfi8, k2-i8head, k2-kv8, k2-i8head-kv8 or k2-kv8-twin, not $m" >&2; exit 2 ;;
 esac
 m="${m%%-*}"   # the model
 case "$m" in
   ornith) model="${SNAP_ORNITH_CACHE:-models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ}" ;;
   k2)     model="${SNAP_K2_CACHE:-models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ}" ;;
 esac
-src="$data/oracle-out-$m" out="$data/oracle-out-$m-f32$suffix" part="oracle-out-$m-f32$suffix.partial"
+src="$data/oracle-out-$m" out="$data/oracle-out-$m-$dt$suffix" part="oracle-out-$m-$dt$suffix.partial"
 need="${F32_REF_MIN_GB:-95}"
 exec 9> /tmp/b70-cpu-model.lock
 echo "f32_oracle: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
@@ -75,7 +79,7 @@ EOF
     cmd="python3 tools/oracle/ornith_ref.py run \"\$SNAP\" --prompt $prompt --out /ws/$part/$p.golden.safetensors --gen 32 --dtype f32 $extra --force /ws/$part/$p.force.ids"
   else
     cp "$src/$p.ids" "$part/$p.ids"
-    cmd="python3 tools/oracle/k2_ref.py run \"\$SNAP\" --prompt /ws/$part/$p.ids --out /ws/$part/$p.golden.safetensors --gen 32 --mode f32 $extra --force /ws/$part/$p.force.ids"
+    cmd="python3 tools/oracle/k2_ref.py run \"\$SNAP\" --prompt /ws/$part/$p.ids --out /ws/$part/$p.golden.safetensors --gen 32 --mode $dt $extra --force /ws/$part/$p.force.ids"
   fi
   echo "f32_oracle: $p start ($(date '+%F %T'))"
   if ! ORACLE_THREADS="${ORACLE_THREADS:-22}" ORACLE_MODEL="$model" tools/oracle/run_in_container.sh \

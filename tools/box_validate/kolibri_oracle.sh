@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 20c's Kolibri-1 golden sets, ON THE BOX CPU (k2_oracle.sh's shape): what kolibri_golden_test,
 # kolibri_decode_test and kolibri_partial_test read.
-#   tools/box_validate/kolibri_oracle.sh <data tree> synth|real
+#   tools/box_validate/kolibri_oracle.sh <data tree> synth|real|synth-f32|real-f32
 #
 # synth  (no 20b needed) <data>/oracle-out-kolibri-synth/{int4attn,bf16attn}/: per arm ckpt/ (a
 #        real-width 5-layer synthetic checkpoint, tools/quantize/kolibri/make_synth.py --layers 5,
@@ -17,6 +17,13 @@
 #        (default models--urakozz--Kolibri-1-W4A16-g64-AutoRound-GPTQ), each -> <p>.ids,
 #        <p>.golden.safetensors, <p>.log; SKIP 77 when the checkpoint is not in the HF cache.
 #
+# synth-f32 / real-f32 (operator ruling 2026-10-31: Kolibri's gates judge the engine against f32, no further
+#        from it than the bf16 golden): each golden above re-run by kolibri_ref.py run --mode f32 --force <its
+#        `tokens`> --gen 32 - the same weights in float32, teacher-forced so its rows are the golden's contexts
+#        row for row -> <data>/oracle-out-kolibri-synth-f32/{int4attn,bf16attn}/ and <data>/oracle-out-kolibri-f32/
+#        (<p>.golden.safetensors + .ids + .log). One CPU model job at a time: /tmp/b70-cpu-model.lock. Measured
+#        2026-10-31 (22 threads): the real checkpoint ~75 s a prompt forward + ~4.5 s a step, peak RSS 13 GiB.
+#
 # Per prompt resumable: written into <tree>/oracle-out-kolibri*.partial/ and moved into the data tree
 # once complete (the golden file last: it marks done). Finally every log's `MoE 6th/7th selection gap`
 # line - the evidence B70_KOL_TIE_TOL (kolibri_golden_test, 1e-2 proposed) is set from.
@@ -26,9 +33,14 @@ set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -eq 2 ] || { echo "usage: $0 <data tree> synth|real" >&2; exit 2; }
 data="$1" mode="$2"
-case "$mode" in synth|real) ;; *) echo "kolibri_oracle: mode $mode is not synth or real" >&2; exit 2 ;; esac
+case "$mode" in synth|real|synth-f32|real-f32) ;; *) echo "kolibri_oracle: mode $mode is not synth, real, synth-f32 or real-f32" >&2; exit 2 ;; esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
-if [ "$mode" = synth ]; then need="${KOL_REF_MIN_GB:-24}"; else need="${KOL_REF_MIN_GB:-48}"; fi
+if [ "${mode%-f32}" = synth ]; then need="${KOL_REF_MIN_GB:-24}"; else need="${KOL_REF_MIN_GB:-48}"; fi
+if [ "${mode#*-}" = f32 ]; then
+  exec 9> /tmp/b70-cpu-model.lock
+  echo "kolibri_oracle: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
+  flock 9
+fi
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "kolibri_oracle: $mode -> $data; MemAvailable ${avail} GB (need $need)"
 if [ "${avail:-0}" -lt "$need" ]; then
@@ -64,7 +76,55 @@ done_or_run() {
   echo "kolibri_oracle: $p done ($(date '+%F %T'))"
 }
 
-if [ "$mode" = synth ]; then
+# judge_run <golden dir> <judge dir> <partial dir> <ORACLE_MODEL or -> <ORACLE_SNAP or ->: the f32 judge of every
+# golden prompt in <golden dir> (its ids, teacher-forced on its tokens); kept when done.
+judge_run() {
+  local src="$1" out="$2" part="$3" om="$4" os="$5" g p
+  mkdir -p "$out" "$part"
+  for g in "$src"/*.golden.safetensors; do
+    [ -e "$g" ] || { echo "kolibri_oracle: no golden in $src (make it first)"; rc=1; return 1; }
+    p=$(basename "$g" .golden.safetensors)
+    if [ -s "$out/$p.golden.safetensors" ]; then echo "kolibri_oracle: $p f32 kept ($out)"; continue; fi
+    python3 - "$g" "$part/$p.force.ids" <<'PY'
+import json, struct, sys
+import numpy as np
+f = open(sys.argv[1], "rb")
+n = struct.unpack("<Q", f.read(8))[0]
+t = json.loads(f.read(n))["tokens"]
+assert t["dtype"] == "I32", t
+s, e = t["data_offsets"]
+f.seek(8 + n + s)
+open(sys.argv[2], "w").write(" ".join(map(str, np.frombuffer(f.read(e - s), np.int32).tolist())) + "\n")
+PY
+    cp -f "$src/$p.ids" "$part/$p.ids"
+    local envs=()
+    [ "$om" != - ] && envs+=("ORACLE_MODEL=$om")
+    [ "$os" != - ] && envs+=("ORACLE_SNAP=$os")
+    echo "kolibri_oracle: $p - kolibri_ref.py run --mode f32 --force (the golden's tokens) ($(date '+%F %T'))"
+    if ! env "${envs[@]}" tools/oracle/run_in_container.sh \
+        "python3 tools/oracle/kolibri_ref.py run \"\$SNAP\" --prompt /ws/$part/$p.ids --mode f32 \
+           --force /ws/$part/$p.force.ids --out /ws/$part/$p.golden.safetensors --gen 32 > /ws/$part/$p.log 2>&1"; then
+      echo "kolibri_oracle: $p f32 FAILED"; tail -20 "$part/$p.log" 2>/dev/null; rc=1; continue
+    fi
+    for f in "$p.ids" "$p.force.ids" "$p.log" "$p.golden.safetensors"; do   # the golden file last: it marks done
+      mv -f "$part/$f" "$out/$f"
+    done
+    echo "kolibri_oracle: $p f32 done ($(date '+%F %T'))"
+  done
+}
+
+if [ "$mode" = synth-f32 ]; then
+  for arm in int4attn bf16attn; do
+    src="$data/oracle-out-kolibri-synth/$arm"
+    judge_run "$src" "$data/oracle-out-kolibri-synth-f32/$arm" "oracle-out-kolibri-synth-f32.partial/$arm" - \
+      "$(cd "$src/ckpt" && pwd)"
+  done
+  logs="$data/oracle-out-kolibri-synth-f32/*/*.log"
+elif [ "$mode" = real-f32 ]; then
+  model="${KOL_ORACLE_MODEL:-models--urakozz--Kolibri-1-W4A16-g64-AutoRound-GPTQ}"
+  judge_run "$data/oracle-out-kolibri" "$data/oracle-out-kolibri-f32" "oracle-out-kolibri-f32.partial" "$model" -
+  logs="$data/oracle-out-kolibri-f32/*.log"
+elif [ "$mode" = synth ]; then
   tokm="${KOL_TOKENIZER_MODEL:-models--Aleph-Alpha--Kolibri-1-BF16}"
   tokdir=$(ls -d "$hf/hub/$tokm"/snapshots/*/ 2>/dev/null | head -1)
   if [ -z "$tokdir" ] || [ ! -f "$tokdir/tokenizer.json" ]; then
