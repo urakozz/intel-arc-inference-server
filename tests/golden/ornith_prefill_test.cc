@@ -28,6 +28,11 @@
 //   the bf16 golden (its own routes judged beside); 4 is printed, not gated; a determined row of 5
 //   where prefill and decode disagree goes to the judge when decode's ids so far are the golden's.
 //
+//   l0-int8 on this MoE model (operator ruling 2026-10-31, round 2): the backend stays opt-in and 4-6 - its accuracy
+//   against decode and f32 - are DIAGNOSTIC (printed with their bars, not gated): 8-bit activations cost routing
+//   accuracy (R2 1314 differing sets vs the bf16 golden's 1140) that no int8 scheme measured won back. 1-3 (the
+//   walk, determinism, chunking: mechanics) still gate. Ornith's default prefill is l0.
+//
 // argv: <snapshot> <prompt ids dir> <backend l0|l0-int8> [oracle dir] [lm_head form] [--judge=<dir>].
 // Exit 77 (SKIP) when the Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-
 // GPTQ, spec 15 §13) is not on this machine; R2 is skipped with a message without 15a's dumps.
@@ -198,8 +203,12 @@ int main(int argc, char** argv) {
   eng.prepare_prefill();
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   const runtime::MoeScratchLayout dml = runtime::moe_scratch_layout(d);
-  std::printf("ornith_prefill_test: backend %s, %s\n", runtime::prefill_backend_name(backend),
-              eng.memory_line().c_str());
+  // Operator ruling 2026-10-31 (round 2, the header): l0-int8 on a MoE model - 4-6 printed, not gated.
+  const bool diagnostic = backend == runtime::PrefillBackend::L0Int8 && d.is_moe();
+  std::printf("ornith_prefill_test: backend %s, %s%s\n", runtime::prefill_backend_name(backend),
+              eng.memory_line().c_str(),
+              diagnostic ? "\n  DIAGNOSTIC: l0-int8 on a MoE model - sections 4-6 printed, not gated (operator "
+                           "2026-10-31)" : "");
   const std::vector<uint32_t> prose = golden::read_ids(pdir + "/prose.ids");
   const uint32_t n = one_chunk(uint32_t(prose.size()));
 
@@ -343,8 +352,9 @@ int main(int argc, char** argv) {
       else CHECK_EQ(eng.generate(1)[0], id);
     }
     std::printf("5. %s: %u ids, %u/%u determined rows equal decode's (%u of them by the f32 judge), %u undetermined%s\n",
-                pname, T, det_ok, det, judged, ties, first_bad < kGen ? "  ** FAIL **" : "");
-    CHECK_EQ(det_ok, det);
+                pname, T, det_ok, det, judged, ties,
+                first_bad < kGen ? (diagnostic ? "  (DIAGNOSTIC: recorded, not gated)" : "  ** FAIL **") : "");
+    if (!diagnostic) CHECK_EQ(det_ok, det);
   }
   std::printf("4. routes: %llu (position, layer) prefill top-%u sets vs decode's - %llu equal, "
               "%llu near-ties (decode's 8th/9th within %.0e), %llu differing; weights worst %.3e, "
@@ -352,9 +362,11 @@ int main(int argc, char** argv) {
               (unsigned long long)cs.rows, d.moe.top_k, (unsigned long long)cs.exact,
               (unsigned long long)cs.near_ties, double(kConsistTieRel), (unsigned long long)cs.bad,
               double(cs.worst_w), (unsigned long long)cs.bad_weights, double(kConsistWeightAbs));
-  if (judge_dir.empty()) {
+  if (judge_dir.empty() && !diagnostic) {
     CHECK_EQ(cs.bad, uint64_t(0));
     CHECK_EQ(cs.bad_weights, uint64_t(0));
+  } else if (judge_dir.empty()) {
+    std::printf("   (DIAGNOSTIC: l0-int8 on a MoE model - recorded, not gated)\n");
   } else {
     // Operator, 2026-10-28: the routes are judged against the f32 reference (section 6); prefill against decode
     // - two bf16 paths, each as far from f32 as the bf16 golden - is printed, not gated.
@@ -444,9 +456,11 @@ int main(int argc, char** argv) {
                 (unsigned long long)r2.rows, (unsigned long long)r2.exact,
                 (unsigned long long)r2.near_ties, (unsigned long long)r2.bad, double(r2.worst_w),
                 (unsigned long long)r2.bad_weights, double(kR2WeightRel));
-    if (judge_dir.empty()) {
+    if (judge_dir.empty() && !diagnostic) {
       CHECK_EQ(r2.bad, uint64_t(0));
       CHECK_EQ(r2.bad_weights, uint64_t(0));
+    } else if (judge_dir.empty()) {
+      std::printf("   (DIAGNOSTIC: l0-int8 on a MoE model - recorded, not gated)\n");
     } else {
       // Operator, 2026-10-28: judged by the f32 reference, the prefill passes when its distance to f32 is no larger
       // than the bf16 golden's own: the differing sets (the matched weights' worst error is printed beside, not gated -
@@ -460,8 +474,9 @@ int main(int argc, char** argv) {
       std::printf("6. R2 gate, judged by the f32 reference %s (operator, 2026-10-28): prefill %llu differing sets vs "
                   "the bf16 golden's %llu, weights worst %.3e vs %.3e%s\n", judge_dir.c_str(),
                   (unsigned long long)r2.bad, (unsigned long long)r2_ref.bad, double(r2.worst_w),
-                  double(r2_ref.worst_w), ok ? "" : "  ** FAIL **");
-      CHECK(ok);
+                  double(r2_ref.worst_w), ok ? "" : diagnostic ? "  (DIAGNOSTIC: l0-int8 on a MoE model - recorded, "
+                                                                "not gated, operator 2026-10-31)" : "  ** FAIL **");
+      if (!diagnostic) CHECK(ok);
     }
   }
   std::puts("ornith_prefill_test OK");

@@ -775,7 +775,7 @@ st_r13_kernels() {
   jgrab pf-moe '^pf_moe_test$' 'bitwise|exact|grouped|dense|ulp|C = 37|OK|PASS|FAIL'
   finish
 }
-stage r13.prefill 13 default card ornith r13.kernels "ornith_prefill_{l0,l0-int8}_test: 2061 / 2021 launches per chunk, replay and chunking bitwise, prefill-vs-decode routes and tokens (the kConsist* distribution printed), R2 on the prefill path"
+stage r13.prefill 13 default card ornith r13.kernels "ornith_prefill_{l0,l0-int8}_test: 2061 / 2021 launches per chunk, replay and chunking bitwise, prefill-vs-decode routes and tokens (the kConsist* distribution printed), R2 on the prefill path - on l0 (Ornith's default) gated; on l0-int8 (opt-in) sections 4-6 DIAGNOSTIC, printed with their bars (ctest label diagnostic; operator ruling 2026-10-31, round 2: 8-bit activations cost MoE routing accuracy against f32)"
 st_r13_prefill() {
   run_tests '^ornith_prefill_(l0|l0-int8)_test$' ornith
   jgrab ornith-prefill 'ornith_prefill_' 'launch|2061|2021|bitwise|kConsist|tie|R2|SKIPPED|OK|FAIL'
@@ -787,7 +787,7 @@ st_r13_gates() {
   jgrab r3 'prefill_gate_ornith' 'golden_gate_test OK|TOTAL:|determined|near-tie|PASS|FAIL'
   finish
 }
-stage r13.split 13 default card ornith r13.kernels "prefill_split_ornith_{l0,l0-int8}_test: splits at multiples of 64 bitwise; the other bars are Qwen3.8's (PROVISIONAL) - the printed numbers re-derive them"
+stage r13.split 13 default card ornith r13.kernels "prefill_split_ornith_{l0,l0-int8}_test: splits at multiples of 64 bitwise; every run judged by the f32 reference of long32k[0, 2600) against the bf16 reference's own distance - the last-row logits and the all-rows median within 2x its cosine distance, the one-row metrics printed (operator ruling 2026-10-31, round 2: the near-miss gates' rule); l0-int8 DIAGNOSTIC (ruling 4)"
 st_r13_split() {
   run_tests '^prefill_split_ornith_' ornith
   jgrab split 'prefill_split_ornith' 'bitwise|cos|split|PASS|FAIL'
@@ -1103,11 +1103,11 @@ st_r16_golden_server() {
   chk "timeout 1800 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_ORNITH" "golden_server_test against Ornith"
   finish
 }
-stage r16.prefix 16 default card ornith r16.kernels "spec 7 C2 on Ornith: prefix_gpu_test <ornith> on l0-int8, on l0 (near-tie allowance 1) and on l0-int8 with --mtp 3 - run directly, as golden_server_test; each sequence judged by the f32 reference of its forced context where \$DATA/oracle-out-ornith-f32-forced has it (operator ruling 2026-10-29, r16.forced_refs makes them)"
+stage r16.prefix 16 default card ornith r16.kernels "spec 7 C2 on Ornith: prefix_gpu_test <ornith> on l0 (the default; near-tie allowance 1), on l0 with --mtp 3 and on l0-int8 (opt-in: its judge's verdicts DIAGNOSTIC, operator ruling 2026-10-31 round 2) - run directly, as golden_server_test; each sequence judged by the f32 reference of its forced context where \$DATA/oracle-out-ornith-f32-forced has it (operator ruling 2026-10-29, r16.forced_refs makes them), more misses than the bf16 twin by the near-miss rule (2026-10-31, round 2)"
 st_r16_prefix() {
-  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8" "prefix_gpu_test <ornith> l0-int8"
   chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1" "prefix_gpu_test <ornith> l0"
-  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3" "prefix_gpu_test <ornith> l0-int8 --mtp 3"
+  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1 0 3" "prefix_gpu_test <ornith> l0 --mtp 3"
+  chk "B70_FORCED_JUDGE=$DATA/oracle-out-ornith-f32-forced B70_FORCED_BF16=$DATA/oracle-out-ornith-bf16-forced timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8" "prefix_gpu_test <ornith> l0-int8 (diagnostic)"
   finish
 }
 # Operator ruling 2026-10-29: the f32 references of the gates f32_oracle.sh's golden prompts do not cover. The
@@ -1121,7 +1121,7 @@ st_r16_forced_dumps() {
   x "mkdir -p $D/ornith-prefix $D/k2-prefix $D/k2-prefill $D/k2-prefill-i8head"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1"
-  x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8 1 0 3"
+  x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1 0 3"
   x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts"
   x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts 0 1"
   x "B70_DUMP_FORCED=$D/k2-prefill timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
