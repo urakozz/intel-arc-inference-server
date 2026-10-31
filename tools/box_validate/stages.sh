@@ -1637,9 +1637,11 @@ st_r24_reject() {
   run_tests '^cli_reject_kolibri_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on the box CPU: kolibri_oracle.sh synth - make_synth.py --layers 5 (int4 and bf16 attention) + check.py, kolibri_ref.py run on prose and de_prose -> \$DATA/oracle-out-kolibri-synth (resumable; MemAvailable >= 24 GB); the gap distribution and kolibri_bench.ids; then re-links oracle-out*"
+stage r24.oracle_synth 24 optin cpu oracle_image - "the synthetic golden sets on the box CPU: kolibri_oracle.sh synth - make_synth.py --layers 5 (int4 and bf16 attention) + check.py, kolibri_ref.py run on prose and de_prose -> \$DATA/oracle-out-kolibri-synth (resumable; MemAvailable >= 24 GB), then each golden's f32 judge (kolibri_oracle.sh synth-f32, teacher-forced on its tokens -> oracle-out-kolibri-synth-f32, operator ruling 2026-10-31); the gap distribution and kolibri_bench.ids; then re-links oracle-out*"
 st_r24_oracle_synth() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA synth" "the Kolibri-1 synthetic reference runs"
+  # operator ruling 2026-10-31 (round 2): each golden's f32 judge, teacher-forced on its tokens
+  chk "tools/box_validate/kolibri_oracle.sh $DATA synth-f32" "the Kolibri-1 synthetic f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
   grab_all gap 'selection gap' 8
@@ -1658,7 +1660,7 @@ st_r24_k3() {
   jgrab k3 '^kolibri_decode_synth_test$' 'plan ==|K3|ring|OK'
   finish
 }
-stage r24.golden 24 default card oracle_kolibri_synth r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - the tie-aware token gate over prose / de_prose x 32 and the routing diagnostic (a non-tie set difference fails; B70_KOL_TIE_TOL 1e-2 proposed)"
+stage r24.golden 24 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r24.k3 "KL2 on the synthetic checkpoints: kolibri_golden_synth_int4attn_test, _bf16attn_test, _i8head_test - judged by the f32 reference (oracle-out-kolibri-synth-f32), no further from it than the bf16 golden over prose / de_prose x 32: the tokens by the near-miss rule, the routing sets differing no more often, each layer's tap median within 2x the golden's distance (operator ruling 2026-10-31, round 2); the bf16 golden's tie rule and near-tie routing diagnostic printed"
 st_r24_golden() {
   run_tests '^kolibri_golden_synth_(int4attn|bf16attn|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden '^kolibri_golden_synth' 'gate:|routing:|tap|OK'
@@ -1691,15 +1693,16 @@ st_r24_cli() {
   grab_all memory '^memory' 6
   finish
 }
-stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set on the box CPU (needs spec 20b): kolibri_oracle.sh real - prose, code, de_prose, de_chat (the chat template's ids) x 32 -> \$DATA/oracle-out-kolibri (MemAvailable >= 48 GB); the gap distribution"
+stage r24.oracle_real 24 optin cpu kolibri,oracle_image - "the real golden set on the box CPU (needs spec 20b): kolibri_oracle.sh real - prose, code, de_prose, de_chat (the chat template's ids) x 32 -> \$DATA/oracle-out-kolibri (MemAvailable >= 48 GB); the gap distribution; then each golden's f32 judge (kolibri_oracle.sh real-f32 -> oracle-out-kolibri-f32, operator ruling 2026-10-31)"
 st_r24_oracle_real() {
   chk "tools/box_validate/kolibri_oracle.sh $DATA real" "the Kolibri-1 reference runs on the real checkpoint"
+  chk "tools/box_validate/kolibri_oracle.sh $DATA real-f32" "the Kolibri-1 f32 judges on the real checkpoint"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(kolibri|oracle_kolibri)' $STATE/have.env"
   grab_all gap 'selection gap' 8
   finish
 }
-stage r24.partial 24 default gpu kolibri,oracle_kolibri r24.k3 "development mode on the real checkpoint, one card (needs spec 20b): kolibri1_load_partial_test (30 layers, bf16 head) and kolibri_partial_test / _eager - the residual tap of layers 0..29 against resid.L* per layer (median cosine >= 0.9998, min >= 0.99, proposed) and the routing diagnostic"
+stage r24.partial 24 default gpu kolibri,oracle_kolibri,oracle_kolibri_f32 r24.k3 "development mode on the real checkpoint, one card (needs spec 20b): kolibri1_load_partial_test (30 layers, bf16 head) and kolibri_partial_test / _eager - the residual tap of layers 0..29 judged by the f32 reference oracle-out-kolibri-f32: each layer's median cosine within 2x the bf16 golden's distance, the routing sets differing no more often than the golden's (operator ruling 2026-10-31, round 2); the old bars (median >= 0.9998, min >= 0.99) printed"
 st_r24_partial() {
   run_tests '^(kolibri1_load_partial_test|kolibri_partial_test|kolibri_partial_eager_test)$'
   jgrab partial 'kolibri_partial' 'layer|BELOW|routing:|OK'
@@ -1866,7 +1869,7 @@ st_r26_reject() {
   run_tests '^cli_reject_kolibri_prefill_(int8|chunk)$'
   finish
 }
-stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, immediate / recorded / replayed bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer)"
+stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, immediate / recorded / replayed bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer); section 4 gated on each layer's median, 5 / 6 printed - the prefill's routes and tokens are r26.golden's, judged by f32 (operator ruling 2026-10-31, round 2)"
 st_r26_prefill() {
   run_tests '^kolibri_prefill_synth_(int4attn|bf16attn|eager)_test$' kolibri
   jgrab k3-prefill '^kolibri_prefill_synth' 'walk|K3|chunks|median|p01|routing|tokens|OK|FAIL'
@@ -1878,7 +1881,7 @@ st_r26_split() {
   jgrab split '^prefill_split_kolibri_test$' 'split at|bitwise|OK|FAIL'
   finish
 }
-stage r26.golden 26 default card oracle_kolibri_synth r26.prefill "KL2 on prefill, synthetic arms: kolibri_golden_prefill_synth_int4attn_test, _bf16attn_test, _c16_test (chunks of 16), _i8head_test - the tie-aware token gate and the routing diagnostic on the prompt rows (B70_KOL_TIE_TOL as r24.golden)"
+stage r26.golden 26 default card oracle_kolibri_synth,oracle_kolibri_synth_f32 r26.prefill "KL2 on prefill, synthetic arms: kolibri_golden_prefill_synth_int4attn_test, _bf16attn_test, _c16_test (chunks of 16), _i8head_test - the tie-aware token gate and the routing diagnostic on the prompt rows (B70_KOL_TIE_TOL as r24.golden) - judged by the f32 reference as r24.golden (operator ruling 2026-10-31, round 2)"
 st_r26_golden() {
   run_tests '^kolibri_golden_prefill_synth_(int4attn|bf16attn|c16|i8head)_test$' kolibri '' "${B70_KOL_TIE_TOL:+B70_KOL_TIE_TOL=$B70_KOL_TIE_TOL}"
   jgrab golden-prefill '^kolibri_golden_prefill_synth' 'gate:|routing:|prefill:|OK|FAIL'

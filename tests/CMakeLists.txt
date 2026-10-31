@@ -2593,6 +2593,13 @@ set_tests_properties(kolibri_plan_test PROPERTIES LABELS kolibri)
 if(B70_KOLIBRI)
   set(B70_KOLIBRI_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri"
     CACHE PATH "The real checkpoint's golden set (kolibri_oracle.sh real): <prompt>.ids + .golden.safetensors")
+  # Operator ruling 2026-10-31 (round 2): Kolibri's golden gates judged by the f32 reference teacher-forced on each
+  # golden's tokens (kolibri_oracle.sh real-f32 / synth-f32; kolibri_golden_test.cc / kolibri_partial_test.cc
+  # `--judge=`): the engine no further from f32 than the bf16 golden.
+  set(B70_KOLIBRI_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-f32"
+    CACHE PATH "The real checkpoint's f32 judge (kolibri_oracle.sh real-f32)")
+  set(B70_KOLIBRI_SYNTH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-kolibri-synth-f32"
+    CACHE PATH "The synthetic arms' f32 judges, <arm>/ (kolibri_oracle.sh synth-f32)")
   foreach(t kolibri_decode_test kolibri_golden_test kolibri_partial_test)
     if(t STREQUAL "kolibri_decode_test")
       add_executable(${t} runtime/${t}.cc)
@@ -2609,19 +2616,19 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_decode_synth_test COMMAND kolibri_decode_test ${_kol_synth}/int4attn/ckpt
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
   add_test(NAME kolibri_golden_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn)
   add_test(NAME kolibri_golden_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
-    ${_kol_synth}/bf16attn)
+    ${_kol_synth}/bf16attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/bf16attn)
   add_test(NAME kolibri_golden_synth_int4attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn)
   add_test(NAME kolibri_golden_synth_bf16attn_eager_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
-    ${_kol_synth}/bf16attn)
+    ${_kol_synth}/bf16attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/bf16attn)
   set_tests_properties(kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test
     PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
   add_test(NAME kolibri_golden_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn int8)
-  add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
-  add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} 30)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn int8)
+  add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
+  add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
   set_tests_properties(kolibri_partial_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
   set_tests_properties(kolibri_decode_synth_test kolibri_golden_synth_int4attn_test kolibri_golden_synth_bf16attn_test
     kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test kolibri_golden_synth_i8head_test
@@ -2640,12 +2647,12 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_pp_test COMMAND kolibri_pp_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt ${B70_KOLIBRI_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
   set_tests_properties(kolibri_pp_test PROPERTIES LABELS "checkpoint;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  add_test(NAME kolibri_golden_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
-  add_test(NAME kolibri_golden_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+  add_test(NAME kolibri_golden_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2)
+  add_test(NAME kolibri_golden_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR}
     int8 pp2)
-  add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} pp2)
+  add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2)
   set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
-  add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+  add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR}
     pp2 peer)
   add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids pp2)
@@ -2744,28 +2751,28 @@ if(B70_KOLIBRI)
   target_link_libraries(kolibri_golden_test PRIVATE b70_kolibri_prefill)
   add_dependencies(kolibri_golden_test ${B70_KOLIBRI_PREFILL_KERNELS})
   add_test(NAME kolibri_golden_prefill_synth_int4attn_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn prefill)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn prefill)
   add_test(NAME kolibri_golden_prefill_synth_bf16attn_test COMMAND kolibri_golden_test ${_kol_synth}/bf16attn/ckpt
-    ${_kol_synth}/bf16attn prefill)
+    ${_kol_synth}/bf16attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/bf16attn prefill)
   add_test(NAME kolibri_golden_prefill_synth_c16_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn prefill:16)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn prefill:16)
   add_test(NAME kolibri_golden_prefill_synth_i8head_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn int8 prefill)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn int8 prefill)
   add_test(NAME kolibri_golden_prefill_synth_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn prefill)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn prefill)
   set_tests_properties(kolibri_golden_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
   add_test(NAME kolibri_golden_prefill_synth_pp_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
-    ${_kol_synth}/int4attn pp2:3 prefill)
+    ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn pp2:3 prefill)
   set_tests_properties(kolibri_golden_prefill_synth_int4attn_test kolibri_golden_prefill_synth_bf16attn_test
     kolibri_golden_prefill_synth_c16_test kolibri_golden_prefill_synth_i8head_test
     kolibri_golden_prefill_synth_eager_test kolibri_golden_prefill_synth_pp_test
     PROPERTIES LABELS "checkpoint;golden;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  add_test(NAME kolibri_golden_prefill_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR}
+  add_test(NAME kolibri_golden_prefill_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR}
     pp2 prefill)
   add_test(NAME kolibri_golden_prefill_c16_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
-    ${B70_KOLIBRI_ORACLE_DIR} pp2 prefill:16)
+    ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2 prefill:16)
   add_test(NAME kolibri_golden_prefill_i8head_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT}
-    ${B70_KOLIBRI_ORACLE_DIR} int8 pp2 prefill)
+    ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} int8 pp2 prefill)
   set_tests_properties(kolibri_golden_prefill_test kolibri_golden_prefill_c16_test kolibri_golden_prefill_i8head_test
     PROPERTIES LABELS "checkpoint;golden;kolibri;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()

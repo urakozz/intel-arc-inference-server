@@ -19,15 +19,22 @@
 //        (every kernel is row-local or keyed to ABSOLUTE positions: the linears, the flash tiles, RoPE,
 //        the ring slots), the route rows of the positions both last chunks hold bitwise;
 //     4. Review Focus 4, prefill against decode's M = 1 fill (ingest, one id per replay) of the same
-//        prompt: per layer, per position the ring / cache still holds, K and V cosine - gated (PROPOSED,
-//        spec 18c's family): every row of layer 0 >= 0.999, all rows' median >= 0.9998, 1st percentile
-//        >= 0.99; printed per layer (bitwise is not expected: the GEMMs' sum orders and the bf16 dequant
-//        differ from the int4 GEMVs');
+//        prompt: per layer, per position the ring / cache still holds, K and V cosine - gated on each layer's
+//        MEDIAN >= kLayerMedian (operator ruling 2026-10-31, round 2: the synthetic gates judged on the
+//        per-layer median, not on one worst row); layer 0's worst row, the all-rows median and the 1st
+//        percentile printed (bitwise is not expected: the GEMMs' sum orders and the bf16 dequant differ from
+//        the int4 GEMVs');
 //     5. routing, prefill against decode per position (the last chunk's rows): the expert sets equal except
 //        where decode's selection margin (the lowest selected sel minus the first not taken) is within
-//        kTieTol (PROPOSED); matched weights within kWeightAbs;
+//        kTieTol; matched weights within kWeightAbs - PRINTED, not gated;
 //     6. tokens: prefill + 32 greedy against ingest + 32 greedy, ruling A26's rule - every row whose
-//        decode-side top-2 gap is at least one bf16 ulp of the top logit agrees; teacher-forced on decode's.
+//        decode-side top-2 gap is at least one bf16 ulp of the top logit agrees; teacher-forced on decode's -
+//        PRINTED, not gated.
+//     5 and 6 compare two bf16 paths, each as far from f32 as the bf16 golden (the Ornith ruling of 2026-10-28):
+//     the prefill's routes and tokens are judged against the f32 reference by kolibri_golden_test's prefill
+//     mode (operator ruling 2026-10-31, round 2) - on the synthetic checkpoints' chaotic 5 random layers the two
+//     paths' last-chunk sets part at 12 - 14 % of the rows beyond a near-tie (2026-10-31), the bf16 golden's and
+//     f32's at 28 - 51 %.
 //   mode `split` (prefill_split_kolibri_test, Review Focus 5): the kN ids in ONE prefill call against TWO
 //     calls split at 64, 1000, 2048, 4097 - KV, rings, the last logits and the first token. Gated: the
 //     multiples of 64 bitwise (plan 20d's bar; the flash tiles and the 8-row groups line up), the others
@@ -68,6 +75,10 @@ using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 8192, kN = 4500, kGen = 32;
 constexpr float kTieTol = 2e-2f;          // PROPOSED: decode's selection margin below this: a near-tie
 constexpr float kWeightAbs = 1.0f / 32;   // PROPOSED: |w_prefill - w_decode| on matched experts
+// Section 4's bar on each layer's median K / V cosine (operator ruling 2026-10-31, round 2). The synthetic
+// checkpoints measured 0.99975 - 0.999995 (layer 4, eager, the worst; 2026-10-31), a quarter of this bar's distance;
+// a continuation fault (a wrong ring slot or offset, a lost row) moves every row after it and the median with them.
+constexpr double kLayerMedian = 0.999;
 
 float bits(uint32_t w) {
   float f;
@@ -260,16 +271,17 @@ int run_all(rk::KolibriEngine& e, const Ids& prompt) {
   }
   const Snap dec = snap(e, n, false);
   const KvCmp kc = compare_kv(d, a, dec, n);
-  const bool kv_ok = kc.layer0_worst >= 0.999 && kc.median >= 0.9998 && kc.p01 >= 0.99;
-  std::printf("4. prefill KV / rings vs decode's fill (%u positions x %u layers): layer 0's worst %.6f, median %.7f, "
-              "p01 %.6f, %u rows < 0.99, worst %.4f (L%u pos %u)%s\n", n, d.layers, kc.layer0_worst, kc.median, kc.p01,
-              kc.below99, kc.worst, kc.worst_layer, kc.worst_pos, kv_ok ? "" : "  ** FAIL **");
+  const bool kv_ok = *std::min_element(kc.layer_median.begin(), kc.layer_median.end()) >= kLayerMedian;
+  std::printf("4. prefill KV / rings vs decode's fill (%u positions x %u layers): each layer's median >= %.4f%s; "
+              "printed: layer 0's worst %.6f, median %.7f, p01 %.6f, %u rows < 0.99, worst %.4f (L%u pos %u)\n", n,
+              d.layers, kLayerMedian, kv_ok ? "" : "  ** FAIL **", kc.layer0_worst, kc.median, kc.p01, kc.below99,
+              kc.worst, kc.worst_layer, kc.worst_pos);
   print_layers(kc);
   std::printf("5. routing on the last chunk's %llu (row, layer) rows: %llu exact, %llu near-ties (margin <= %.0e), "
-              "%llu beyond; matched weights worst |dw| %.4f%s\n", (unsigned long long)rows, (unsigned long long)exact,
-              (unsigned long long)ties, double(kTieTol), (unsigned long long)bad, double(worst_w),
-              bad == 0 && worst_w <= kWeightAbs ? "" : "  ** FAIL **");
-  ok = ok && kv_ok && bad == 0 && worst_w <= kWeightAbs;
+              "%llu beyond; matched weights worst |dw| %.4f - printed, not gated (the header)\n",
+              (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties, double(kTieTol),
+              (unsigned long long)bad, double(worst_w));
+  ok = ok && kv_ok;
 
   // ---- 6. tokens, ruling A26's rule ------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -295,9 +307,8 @@ int run_all(rk::KolibriEngine& e, const Ids& prompt) {
     }
     e.ingest({dtok[j]});   // teacher-forced on decode's token
   }
-  std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
-              det_agree == det ? "" : "  ** FAIL **");
-  ok = ok && det_agree == det;
+  std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree - printed, not gated (the header)\n", agree,
+              kGen, det_agree, det);
   return ok ? 0 : 1;
 }
 

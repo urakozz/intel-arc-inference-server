@@ -32,7 +32,20 @@
 // last chunk (all of the prompt's in one chunk; the last <chunk> rows otherwise), and the tap is not read
 // (prefill writes no tap). The 32 teacher-forced steps after it are decode's, as before.
 //
-// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>]
+// **The f32 judge (operator ruling 2026-10-31, round 2; `--judge=<dir>`)**: kolibri_ref.py run --mode f32 --force
+// <the golden's tokens> (tools/box_validate/kolibri_oracle.sh synth-f32 | real-f32), its rows the golden's contexts.
+// The engine passes when it is no further from f32 than the bf16 golden, over all prompts together (the synthetic
+// checkpoints' 5 random layers are chaotic: the bf16 golden itself misses 15 / 32 of prose's rows against f32 and
+// differs from it in 43 % of the expert sets - one prompt's count is a coin toss):
+//   tokens   forced_judge.h's near-miss rule with the bf16 golden as the twin - the judge rejects no more of the
+//            engine's ids than of the golden's, or every extra miss is a near-tie and the logits rows are as close;
+//   routing  the (row, layer) expert sets differing from the judge's: the engine's count no larger than the golden's
+//            (the Ornith / K2 rule of 2026-10-28/29; the near-tie diagnostic above printed beside it);
+//   tap      (decode only) per layer, the MEDIAN over the prompt rows of the residual's cosine to the judge's within
+//            kCosSlack (2) of the golden's cosine distance - the per-layer median, not one worst row (the minima
+//            printed beside).
+//
+// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>] [--judge=<dir>]
 // (`pp2`: spec 20c Task 6 - the engine on two cards). Exit 77 (SKIP) when the checkpoint or the golden
 // set is absent, or the model does not fit the asked placement.
 #include <algorithm>
@@ -47,6 +60,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "forced_judge.h"
 #include "golden_common.h"
 #include "kernels/kolibri_kernels.h"
 #include "runtime/kolibri_rig.h"
@@ -111,7 +125,26 @@ void compare_route(const uint32_t* row, const int32_t* want_ids, const float* wa
 
 }  // namespace
 
+// The (row, layer) expert sets against the judge's (operator ruling 2026-10-31, round 2): the engine's and the bf16
+// golden's, each a set difference or not.
+struct JudgedRoutes {
+  uint64_t rows = 0, engine = 0, golden = 0;
+  void add(const uint32_t* eng_ids, const int32_t* gold, const int32_t* judge, uint32_t K) {
+    auto set = [K](auto* v) {
+      std::vector<uint32_t> x(K);
+      for (uint32_t k = 0; k < K; ++k) x[k] = uint32_t(v[k]);
+      std::sort(x.begin(), x.end());
+      return x;
+    };
+    const std::vector<uint32_t> j = set(judge);
+    ++rows;
+    engine += set(eng_ids) != j;
+    golden += set(gold) != j;
+  }
+};
+
 int main(int argc, char** argv) {
+  const std::string judge_dir = golden::take_judge(argc, argv);   // operator ruling 2026-10-31, round 2 (header)
   const std::string arg = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-kolibri";
   kolibri_rig::Options o;
@@ -180,6 +213,9 @@ int main(int argc, char** argv) {
   bool gate_ok = true;
   RouteCount rc;
   std::vector<double> sa, sb;
+  golden::NearMiss nm;                          // with the judge: every prompt's decision rows
+  JudgedRoutes jroutes;
+  std::vector<std::vector<double>> tap_e(d.layers), tap_g(d.layers);   // residual cosines to the judge's, per layer
   for (const std::string& pname : prompts) {
     const std::vector<uint32_t> ids = kolibri_rig::read_ids(gdir + "/" + pname + ".ids", d.vocab);
     CHECK(!ids.empty());
@@ -191,6 +227,17 @@ int main(int argc, char** argv) {
     const float* glog = g.f32("logits", size_t(rows) * d.vocab);
     const int32_t* gtok = g.i32("tokens", kGen);
     std::printf("\n================ %s: %u prompt ids, %u generated ================\n", pname.c_str(), T, kGen);
+    const golden::Judge J =
+        judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, rows);
+    if (J) CHECK_EQ(J.V, d.vocab);
+    // The judge's route row of golden row `row`, layer l, beside the engine's and the golden's.
+    auto judge_route = [&](const uint32_t* eng_row, uint32_t row, uint32_t l) {
+      const std::string ls = std::to_string(l);
+      if (!J || !J.g->has("route.moe.ids.L" + ls)) return;
+      jroutes.add(eng_row + kernels::kolibri::route::kIds,
+                  g.i32("route.moe.ids.L" + ls, size_t(rows) * d.top_k) + size_t(row) * d.top_k,
+                  J.g->i32("route.moe.ids.L" + ls, size_t(rows) * d.top_k) + size_t(row) * d.top_k, d.top_k);
+    };
     std::vector<char> first(d.layers, 0);
     std::vector<double> tap_min(d.layers, 1.0);
     auto check_routes = [&](uint32_t row) {
@@ -203,6 +250,7 @@ int main(int argc, char** argv) {
         const float gap = g.f32("route.moe.gap.L" + ls, rows)[row];
         compare_route(r.data() + size_t(l) * runtime::kolibri::kRouteWords, gi, gw, gap, d.top_k, rc, first[l],
                       pname.c_str(), row, l);
+        judge_route(r.data() + size_t(l) * runtime::kolibri::kRouteWords, row, l);
       }
     };
     eng.reset();
@@ -222,6 +270,8 @@ int main(int argc, char** argv) {
           const float gap = g.f32("route.moe.gap.L" + ls, rows)[t];
           compare_route(r.data() + runtime::kolibri::pf_route_at(l) / 4 + size_t(t - row0) * runtime::kolibri::kRouteWords,
                         gi, gw, gap, d.top_k, rc, first[l], pname.c_str(), t, l);
+          judge_route(r.data() + runtime::kolibri::pf_route_at(l) / 4 + size_t(t - row0) * runtime::kolibri::kRouteWords,
+                      t, l);
         }
       std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing diagnostic on rows %u..%u\n", T, c,
                   eng.prefill_launches(), row0, T - 1);
@@ -234,6 +284,16 @@ int main(int argc, char** argv) {
         if (!g.has("resid.L" + std::to_string(l))) continue;
         const uint16_t* want = g.bf16("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
         tap_min[l] = std::min(tap_min[l], golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
+        if (J && J.g->has("resid.L" + std::to_string(l))) {   // the judge's residual is f32 (--mode f32)
+          const float* jr = J.g->f32("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
+          std::vector<float> e(d.hidden), w(d.hidden);
+          for (uint32_t i = 0; i < d.hidden; ++i) {
+            e[i] = common::bf16_to_f32(tap[size_t(l) * d.hidden + i]);
+            w[i] = common::bf16_to_f32(want[i]);
+          }
+          tap_e[l].push_back(golden::row_cos(jr, e.data(), d.hidden));
+          tap_g[l].push_back(golden::row_cos(jr, w.data(), d.hidden));
+        }
       }
     }
     uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
@@ -259,26 +319,56 @@ int main(int argc, char** argv) {
                     dec.determined() ? "determined" : "tie row");
         golden::print_top5("engine", lg.data(), d.vocab, d.vocab_used);
         golden::print_top5("golden", glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
+        if (J) golden::print_top5("f32", J.row(row), d.vocab, d.vocab_used);
       }
+      if (J) nm.add(j, J.row(row), got, lg.data(), glog + size_t(row) * d.vocab, d.vocab, d.vocab_used, "engine's");
       eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
       check_routes(T + j);
     }
     const bool ok = det_ok == det && tie_ok == ties;
-    gate_ok = gate_ok && ok;
-    std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
-                det_ok, det, tie_ok, ties, ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(),
-                logit_min);
+    if (!J) gate_ok = gate_ok && ok;   // with the judge: all prompts' rows together, below
+    std::printf("  %s: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
+                J ? "against the bf16 golden (printed; the f32 judge gates below)" : "gate", det_ok, det, tie_ok, ties,
+                ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(), logit_min);
     if (!prefill) {   // prefill writes no tap
       std::printf("  tap (min cosine over the prompt):");
       for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
       std::printf("\n");
     }
   }
-  std::printf("\nrouting: %llu rows (%llu exact, %llu near-ties, %llu differing; weights worst %lld fp32 ulps)\n",
+  std::printf("\nrouting: %llu rows (%llu exact, %llu near-ties, %llu differing; weights worst %lld fp32 ulps)%s\n",
               (unsigned long long)rc.rows, (unsigned long long)rc.exact, (unsigned long long)rc.ties,
-              (unsigned long long)rc.bad, (long long)rc.worst_w);
-  CHECK(gate_ok);
-  CHECK_EQ(rc.bad, uint64_t(0));
+              (unsigned long long)rc.bad, (long long)rc.worst_w,
+              judge_dir.empty() ? "" : " - against the bf16 golden, printed (the f32 judge gates below)");
+  if (judge_dir.empty()) {
+    CHECK(gate_ok);
+    CHECK_EQ(rc.bad, uint64_t(0));
+    std::puts("kolibri_golden_test OK");
+    return 0;
+  }
+  // Operator ruling 2026-10-31 (round 2; the header): no further from f32 than the bf16 golden.
+  const bool tok_ok = nm.verdict("tokens (every prompt)", "engine's");
+  const bool route_ok = jroutes.engine <= jroutes.golden;
+  std::printf("routing against the f32 judge: %llu (row, layer) sets - the engine's differ at %llu, the bf16 golden's "
+              "at %llu (the bar)%s\n", (unsigned long long)jroutes.rows, (unsigned long long)jroutes.engine,
+              (unsigned long long)jroutes.golden, route_ok ? "" : "  ** FAIL **");
+  bool tap_ok = true;
+  if (!prefill) {
+    std::printf("tap against the f32 judge, per layer: median (min) cosine, the engine's / the bf16 golden's - the "
+                "medians' distance ratio gated at %.1f\n", golden::kCosSlack);
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      if (tap_e[l].empty()) continue;
+      golden::CosRows e{tap_e[l]}, w{tap_g[l]};
+      const double r = golden::cos_dist_ratio(e.median(), w.median());
+      const bool lok = r <= golden::kCosSlack;
+      tap_ok = tap_ok && lok;
+      std::printf("  L%-3u %.6f (%.4f) / %.6f (%.4f)  x%.2f%s\n", l, e.median(), e.min(), w.median(), w.min(), r,
+                  lok ? "" : "  ** FAIL **");
+    }
+  }
+  CHECK(tok_ok);
+  CHECK(route_ok);
+  CHECK(tap_ok);
   std::puts("kolibri_golden_test OK");
   return 0;
 }
