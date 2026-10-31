@@ -847,16 +847,18 @@ def cmd_run(a) -> None:
         ref.lm_head = _int8.int8_head_weight(ref.lm_head)
         print("lm_head: int8 per row (loader/lm_head_int8.cc quantise_row_int8), de-quantised to f32", flush=True)
     if a.sim_kv8:   # the engine's int8 rotkv cache (src/common/kv8.h, K2 hd128), operator ruling 2026-10-29
-        if a.mode != "f32":
-            raise SystemExit("--sim-kv8 is a quantisation-aware f32 judge: use it with --mode f32")
+        # f32: the kv8 gates' quantisation-aware judge. bf16 (operator ruling 2026-10-31, round 2): the judge's
+        # bf16 twin - the plain bf16 reference through the same cache, the bar of r21.golden's token gate (--gemm f32
+        # on a CPU without bf16 units).
         kv8 = _load("k2_kv8_probe")
         plain = globals()["attention"]
 
         def kv8_attention(ar, q, k, v, q_pos, k_pos, n_rep):
             # K / V rotated and int8-quantised per (position, kv head) with the fp16 scale, q rotated to match
-            # (the rotations' scales cancel in q.k), the output un-rotated: the cache's rounding and nothing else.
+            # (the rotations' scales cancel in q.k), the output un-rotated: the cache's rounding and nothing else
+            # (rounded to the activation dtype afterwards in bf16 mode, as the attention output is).
             kq, vq = kv8.quant_dequant(kv8.rotate_kv(k)), kv8.quant_dequant(kv8.rotate_kv(v))
-            return kv8.unrotate(plain(ar, kv8.rotate_q(q), kq, vq, q_pos, k_pos, n_rep))
+            return ar.r(kv8.unrotate(plain(ar, kv8.rotate_q(q), kq, vq, q_pos, k_pos, n_rep)))
         globals()["attention"] = kv8_attention
         print("KV cache: int8 rotkv simulated (k2_kv8_probe.py's kv8.h scheme), de-quantised to f32", flush=True)
     rec = Recorder(len(ids))

@@ -570,9 +570,10 @@ class KolibriRef:
             return F.linear(x.float(), self.lm_head.to(device=x.device, dtype=torch.float32))
         return F.linear(x, self.ops.w(self.lm_head)).float()
 
-    def generate(self, ids, n: int, rec: Recorder | None = None, log=None):
+    def generate(self, ids, n: int, rec: Recorder | None = None, log=None, force=None):
         """Prompt forward, then n greedy steps through the cache. Returns (logits [T + n, V], tokens [n]),
-        dump.py's convention: tokens[0] = argmax(logits[T - 1]); logits[T + j] consumed tokens[j]."""
+        dump.py's convention: tokens[0] = argmax(logits[T - 1]); logits[T + j] consumed tokens[j]. `force`:
+        ids teacher-forced instead of the argmax (the f32 judge on the bf16 golden's tokens, operator 2026-10-31)."""
         cache = self.new_cache()
         ids = list(ids)
         t = time.time()
@@ -581,7 +582,7 @@ class KolibriRef:
             log(f"prompt forward ({len(ids)} ids): {time.time() - t:.1f}s")
         toks: list[int] = []
         for step in range(n):
-            nxt = int(torch.argmax(rows[-1][-1]))
+            nxt = int(torch.argmax(rows[-1][-1])) if force is None else int(force[step])
             toks.append(nxt)
             t = time.time()
             rows.append(self.forward([nxt], len(ids) + step, cache, rec))
@@ -732,7 +733,10 @@ def cmd_run(a) -> None:
           f"prompt {len(ids)} ids; gen {a.gen}", flush=True)
     ref = KolibriRef(c, src, mode=a.mode, device=a.device)
     rec = Recorder(len(ids))
-    logits, toks = ref.generate(ids, a.gen, rec, log=lambda s: print(s, flush=True))
+    force = _read_ids(a.force) if a.force else None
+    if force is not None and len(force) < a.gen:
+        raise SystemExit(f"--force has {len(force)} ids, --gen is {a.gen}")
+    logits, toks = ref.generate(ids, a.gen, rec, log=lambda s: print(s, flush=True), force=force)
     out = rec.tensors(ref.ops)
     out["logits"] = logits.float().contiguous()
     out["tokens"] = torch.tensor(toks, dtype=torch.int32)
@@ -844,6 +848,8 @@ def main() -> None:
     r.add_argument("--mode", choices=("bf16", "f32"), default="bf16")
     r.add_argument("--device", default="cpu")
     r.add_argument("--slow-dequant", action="store_true", help="dequant.py's torch path instead of the C++ one")
+    r.add_argument("--force", help="ids to teacher-force instead of the greedy argmax (the f32 judge: its rows line "
+                                   "up with the bf16 golden's)")
     p = sub.add_parser("ppl")
     p.add_argument("snapshot")
     p.add_argument("--ids", nargs="+", required=True)
