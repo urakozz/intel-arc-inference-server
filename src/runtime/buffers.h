@@ -147,7 +147,7 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Mem gdn_beta;     // fp32 [kC][48]
   l0::Mem gdn_A;        // fp32 [kC/kGdnChunk][48][64][64]  A, then T in place
   l0::Mem gdn_A2;       // fp32 [kC/kGdnChunk][48][64][64]
-  l0::Mem gdn_w, gdn_u; // fp32 [kC][48][128] each (pf_gdn_wy.cl Q3 / Q4, 2026-10-31)
+  l0::Mem gdn_w, gdn_u; // bf16 [kC][48][128] each
   // composed attention (plan 6d-composed Task 5's fields, allocated here)
   l0::Mem pf_q;         // bf16 [kC][24][256]  RoPE'd queries (ruling A9)
   l0::Mem pf_attn;      // bf16 [kC][24][256]  attn_chunk's output, pre-gate

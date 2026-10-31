@@ -250,8 +250,8 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.gdn_beta = size_t{kC} * desc.gdn_v_heads * kFp32;
   s.gdn_A = size_t{kC / kGdnChunk} * desc.gdn_v_heads * kGdnChunk * kGdnChunk * kFp32;
   s.gdn_A2 = s.gdn_A;
-  s.gdn_w = size_t{kC} * desc.gdn_value_dim() * kFp32;   // fp32 since 2026-10-31 (pf_gdn_wy.cl Q3 / Q4)
-  s.gdn_u = size_t{kC} * desc.gdn_value_dim() * kFp32;
+  s.gdn_w = size_t{kC} * desc.gdn_value_dim() * kBf16;
+  s.gdn_u = size_t{kC} * desc.gdn_value_dim() * kBf16;
   s.pf_q = size_t{kC} * desc.fa_value_dim() * kBf16;
   s.pf_attn = size_t{kC} * desc.fa_value_dim() * kBf16;
   s.pf_o = size_t{desc.fa_q_heads} * kC * Q::kFaHeadDim * kFp32;

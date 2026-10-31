@@ -100,7 +100,7 @@
 // position (transcribed in tests/prefill/gdn_chunk_ref.h, which must be edited
 // with this file):
 //
-//   vn[i][x] = u[i][x] - SUM_k w[i][k] * S[k][x]          (u, w fp32: pf_gdn_wy.cl's Q3 / Q4)
+//   vn[i][x] = f32(u[i][x]) - SUM_k f32(w[i][k]) * S[k][x]
 //   o[i][x]  = ( SUM_k q[i][k] * S[k][x] ) * exp(gc[i]) + SUM_{j<=i} A2[i][j]*vn[j][x]
 //   S[k][x] <- S[k][x] * exp(gl) + SUM_i k[i][k] * ( vn[i][x] * exp(gl - gc[i]) )
 //
@@ -185,23 +185,6 @@ inline ushort rne_bf16(float f) {
   return (ushort)((u + rounding) >> 16);
 }
 
-// w is fp32 since the operator's ruling of 2026-10-31 (pf_gdn_wy.cl's Q4). A row's 16 k values as the DPAS
-// B operand: bf16 pairs, k even in the low half (the VNNI form the bf16 w had in memory) - `hi` the RNE of
-// each value, `lo` the RNE of what hi leaves (w = hi + lo to ~16 bits, the split scan's limbs of S and D).
-inline void bf16_limbs16(const float16 v, int8* hi, int8* lo) {
-  float a[16];
-  vstore16(v, 0, a);
-  uint ph[8], pl[8];
-#pragma unroll
-  for (uint i = 0; i < 8; ++i) {
-    const ushort h0 = rne_bf16(a[2 * i]), h1 = rne_bf16(a[2 * i + 1]);
-    ph[i] = ((uint)h1 << 16) | (uint)h0;
-    pl[i] = ((uint)rne_bf16(a[2 * i + 1] - bf16f(h1)) << 16) | (uint)rne_bf16(a[2 * i] - bf16f(h0));
-  }
-  *hi = as_int8(vload8(0, ph));
-  *lo = as_int8(vload8(0, pl));
-}
-
 // ---------------------------------------------------------------------------
 // (3) `pf_gdn_scan_dpas_split` - D3's opt-in split-BF16 probe.
 //
@@ -243,8 +226,8 @@ inline void bf16_limbs16(const float16 v, int8* hi, int8* lo) {
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
-                                     __global const float* restrict w,
-                                     __global const float* restrict u,
+                                     __global const ushort* restrict w,
+                                     __global const ushort* restrict u,
                                      __global const float* restrict A2,
                                      __global const float* restrict g_cum,
                                      __global float* restrict state,
@@ -316,24 +299,23 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
     const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];
     const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];
 
-    // 1. Two separate chains preserve S's BF16 residual until the fp32 sum; w (fp32, Q4) is split too - the
-    //    low chain takes S_lo . w_hi and S_hi . w_lo (operator ruling 2026-10-31).
+    // 1. Two separate chains preserve S's BF16 residual until the fp32 sum.
     {
       float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
-      __global const float* restrict wp = w + ((size_t)(base_m + posc) * HEADS + h) * DIM;
+      __global const uint* restrict wp =
+          (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
       for (uint kb = 0; kb < KBLKS; ++kb) {
-        int8 bh, bl;
-        bf16_limbs16(vload16(0, wp + kb * DK), &bh, &bl);
-        const short8 ah = as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4));
-        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(ah, bh, hi);
+        const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
+            as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4)), b, hi);
         lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
-            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), bh, lo);
-        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(ah, bl, lo);
+            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
       }
-      float ua[DM];
-      vstore8(vload8(0, u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0), 0, ua);
-      ushort vb[DM];
+      const uint4 uw = vload4(0, (__global const uint*)(
+          u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0));
+      ushort ua[DM], vb[DM];
       float hf[DM], lf[DM];
+      vstore8(as_ushort8(uw), 0, ua);
       vstore8(hi, 0, hf);
       vstore8(lo, 0, lf);
       const bool live = pos_l < L;
@@ -342,7 +324,7 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
       __local ushort* restrict dtlo = DtLo + (size_t)col0 * (2 * DT_LD) + pos_l;
 #pragma unroll
       for (uint m = 0; m < DM; ++m) {
-        const float vnv = live ? (ua[m] - (hf[m] + lf[m])) : 0.0f;
+        const float vnv = live ? (bf16f(ua[m]) - (hf[m] + lf[m])) : 0.0f;
         const float d = vnv * sc;
         const ushort dh = rne_bf16(d);
         vb[m] = rne_bf16(vnv);  // controlled D2 A2*vn operand
@@ -426,8 +408,8 @@ __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan(__global const ushort* restrict xb,
-                          __global const float* restrict w,
-                          __global const float* restrict u,
+                          __global const ushort* restrict w,
+                          __global const ushort* restrict u,
                           __global const float* restrict A2,
                           __global const float* restrict g_cum,
                           __global float* restrict state,
@@ -473,12 +455,12 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
     barrier(CLK_LOCAL_MEM_FENCE);
     const float gl = gcv[L - 1];
 
-    // --- 1. vn[i][x] = u[i][x] - SUM_k w[i][k] * S[k][x] (u, w fp32) ---------
+    // --- 1. vn[i][x] = f32(u[i][x]) - SUM_k f32(w[i][k]) * S[k][x] -----------
     // Four positions x two columns per work-item; ascending k, one fma chain
     // per output. The `min(., ilast)` clamp keeps the w reads of a short final
     // sub-chunk in bounds; those lanes' results are simply not stored.
     {
-      __global const float* restrict wp[PPW];
+      __global const ushort* restrict wp[PPW];
       float a0[PPW], a1[PPW];
 #pragma unroll
       for (uint p = 0; p < PPW; ++p) {
@@ -490,7 +472,7 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
         const float s0 = Ss[k][lane], s1 = Ss[k][lane + SG];
 #pragma unroll
         for (uint p = 0; p < PPW; ++p) {
-          const float wv = wp[p][k];
+          const float wv = bf16f(wp[p][k]);
           a0[p] = fma(s0, wv, a0[p]);
           a1[p] = fma(s1, wv, a1[p]);
         }
@@ -500,8 +482,8 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
         const uint i = i0 + p;
         if (i < L) {
           const size_t ub = ((size_t)(base_m + i) * HEADS + h) * DIM;
-          vn[i][lane] = u[ub + col0] - a0[p];
-          vn[i][lane + SG] = u[ub + col1] - a1[p];
+          vn[i][lane] = bf16f(u[ub + col0]) - a0[p];
+          vn[i][lane + SG] = bf16f(u[ub + col1]) - a1[p];
         }
       }
     }
@@ -702,8 +684,8 @@ __kernel void pf_gdn_scan(__global const ushort* restrict xb,
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan_dpas(__global const ushort* restrict xb,
-                               __global const float* restrict w,
-                               __global const float* restrict u,
+                               __global const ushort* restrict w,
+                               __global const ushort* restrict u,
                                __global const float* restrict A2,
                                __global const float* restrict g_cum,
                                __global float* restrict state,
@@ -787,20 +769,22 @@ __kernel void pf_gdn_scan_dpas(__global const ushort* restrict xb,
 
     // --- 1. vn^T[32][64] = u^T - S^T[32][128] . W^T[128][64] ----------------
     // A = S^T: lane `l` holds S[16kb+l][8mt .. 8mt+7], one `vload4` of uint.
-    // B = W^T: lane `n` holds w[pos][16kb .. 16kb+15] (fp32 since 2026-10-31), rounded to bf16 pairs here -
-    // this kept-for-the-record entry keeps its single bf16 w (the split entry carries w's low limb).
+    // B = W^T: lane `n` holds w[pos][16kb .. 16kb+15], already VNNI in memory.
     {
       float8 acc = (float8)(0.0f);
-      __global const float* restrict wp = w + ((size_t)(base_m + posc) * HEADS + h) * DIM;
+      __global const uint* restrict wp =
+          (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
       for (uint kb = 0; kb < KBLKS; ++kb) {
         const short8 a = as_short8(vload4(0, SbW + (kb * DK + lane) * SB_LD + mt * 4));
-        int8 b, b_lo;
-        bf16_limbs16(vload16(0, wp + kb * DK), &b, &b_lo);
+        const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
         acc = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, acc);
       }
 
-      float ua[DM];
-      vstore8(vload8(0, u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0), 0, ua);
+      const uint4 uw = vload4(
+          0, (__global const uint*)(u + ((size_t)(base_m + posc) * HEADS + h) * DIM +
+                                    c * CHUNK_V + col0));
+      ushort ua[DM];
+      vstore8(as_ushort8(uw), 0, ua);
       float af[DM];
       vstore8(acc, 0, af);
       const bool live = pos_l < L;
@@ -809,7 +793,7 @@ __kernel void pf_gdn_scan_dpas(__global const ushort* restrict xb,
       __local ushort* restrict dt = Dt + (size_t)col0 * (2 * DT_LD) + pos_l;
 #pragma unroll
       for (uint m = 0; m < DM; ++m) {
-        const float vnv = live ? (ua[m] - af[m]) : 0.0f;
+        const float vnv = live ? (bf16f(ua[m]) - af[m]) : 0.0f;
         vb[m] = rne_bf16(vnv);                                   // R2
         dt[(size_t)m * (2 * DT_LD)] = rne_bf16(vnv * sc);        // R3
       }

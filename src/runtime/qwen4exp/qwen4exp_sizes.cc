@@ -162,7 +162,7 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   s.beta = size_t(C) * kVHeads * 4;
   s.A = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
   s.A2 = s.A;
-  s.w = size_t(C) * kVHeads * kHd * 4;   // fp32 (pf_gdn_wy.cl Q3 / Q4, 2026-10-31)
+  s.w = size_t(C) * kVHeads * kHd * 2;
   s.u = s.w;
   s.o = size_t(C) * kVHeads * kHd * 4;
   return s;
