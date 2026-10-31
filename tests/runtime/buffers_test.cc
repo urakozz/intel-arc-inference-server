@@ -105,43 +105,44 @@
 //   gdn_beta     same                                           =       393,216
 //   gdn_A        32 x 48 x 64 x 64 x 4 B                        =    25,165,824
 //   gdn_A2       same                                           =    25,165,824
-//   gdn_w        2048 x 48 x 128 x 2 B                          =    25,165,824
-//   gdn_u        same                                           =    25,165,824
+//   gdn_w        2048 x 48 x 128 x 4 B  (fp32, 2026-10-31)      =    50,331,648
+//   gdn_u        same                                           =    50,331,648
 //   pf_q         2048 x 24 x 256 x 2 B  (bf16 - ruling A9)      =    25,165,824
 //   pf_attn      same                                           =    25,165,824
 //   pf_o         24 x 2048 x 256 x 4 B                          =    50,331,648
 //   pf_rowsum    24 x 2048 x 4 B                                =       196,608
-//                                                        total =   699,514,776
+//                                                        total =   749,846,424
 //
 // Spec 6 (plan 6b): `pf_s` / `pf_p` are LAZY, `pf_s_buffer()` / `pf_p_buffer()`, built on
 // the first composed `attn_chunk`; the default flash path never builds them. They were
 //   pf_s         6 x 2048 x max_len x 4 B (kSHeads = one GQA grp) = 805,306,368 @16384
 //   pf_p         6 x 2048 x max_len x 2 B                       =   402,653,184 @16384
-// and the old total 1,907,474,328 - 1,207,959,552 = 699,514,776. Nothing left in `bytes()`
-// depends on max_len, so the same 699,514,776 holds at 131072, where the two would have
+// and the old total 1,907,474,328 - 1,207,959,552 = 699,514,776 (749,846,424 since the GDN w / u went fp32,
+// operator ruling 2026-10-31). Nothing left in `bytes()` depends on max_len, so the same total holds at 131072,
+// where the two would have
 // been 9,663,676,416 B (derived: 6 x 2048 x 131072 x 6).
 //
 // Cross-checks, each of which fails loudly if a row above is wrong:
 //   * the 6b-owned rows alone (everything but the six pf_* ones, and now also
-//     without the dequant scratch) = 598,654,872;
+//     without the dequant scratch) = 648,986,520 (598,654,872 before the fp32 w / u);
 //   * the six pf_* rows = 1,308,819,456, plan 6d-composed's "total added" line
 //     exactly (pf_kt excluded: transB measured native and bitwise identical,
 //     commit 792e1dd, so the transpose fallback is not built); the four still
 //     eager (pf_q, pf_attn, pf_o, pf_rowsum) = 100,859,904 since spec 6;
-//   * 598,654,872 + 100,859,904 = 699,514,776.
+//   * 648,986,520 + 100,859,904 = 749,846,424.
 static void check_prefill_scratch(l0::Context& ctx) {
   // Spec 6: at max_len 131072 no score scratch exists until a composed call asks for it.
   {
     runtime::PrefillScratch big(ctx, 131072, model::qwen38());
     std::printf("prefill scratch @131072: %zu B, lazy %zu B, pf_s %zu B\n", big.bytes(),
                 big.lazy_bytes(), big.pf_s_bytes());
-    CHECK_EQ(big.bytes(), size_t{699514776});
+    CHECK_EQ(big.bytes(), size_t{749846424});
     CHECK_EQ(big.lazy_bytes(), size_t{0});
     CHECK_EQ(big.pf_s_bytes(), size_t{0});
   }
   runtime::PrefillScratch pf(ctx, 16384, model::qwen38());
   std::printf("prefill scratch %zu B (%.3f GB)\n", pf.bytes(), pf.bytes() / 1e9);
-  CHECK_EQ(pf.bytes(), size_t{699514776});
+  CHECK_EQ(pf.bytes(), size_t{749846424});
   CHECK_EQ(pf.lazy_bytes(), size_t{0});
   CHECK_EQ(pf.pf_s_bytes(), size_t{0});
   // The composed path's two, on first use: 6 x 2048 x 16384 x 4 B and x 2 B.
@@ -151,7 +152,7 @@ static void check_prefill_scratch(l0::Context& ctx) {
   CHECK_EQ(pf.pf_p_buffer().size(), size_t{402653184});
   CHECK_EQ(&pf.pf_s_buffer(), &pf.pf_s_buffer());   // built once
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184});
-  CHECK_EQ(pf.bytes(), size_t{699514776});          // lazy buffers are not in bytes()
+  CHECK_EQ(pf.bytes(), size_t{749846424});          // lazy buffers are not in bytes()
   // 17408 x 1024 x 2 B (derived: qwen38().intermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
   CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 35651584});
