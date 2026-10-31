@@ -63,6 +63,7 @@ int main(int argc, char** argv) {
               eng.model().checkpoint_layers, runtime::kolibri::kol_attn_name(eng.attention()),
               model::kol_attn_form_name(d.attn));
   std::vector<std::vector<double>> cos(N);
+  std::vector<std::string> worst_at(N);   // the prompt / row of each layer's minimum (diagnostic)
   uint64_t rows = 0, ties = 0, bad = 0;
   std::vector<double> sa, sb;
   for (const std::string& pname : prompts) {
@@ -78,7 +79,10 @@ int main(int argc, char** argv) {
       for (uint32_t l = 0; l < N; ++l) {
         const std::string ls = std::to_string(l);
         const uint16_t* want = g.bf16("resid.L" + ls, size_t(T) * d.hidden) + size_t(t) * d.hidden;
-        cos[l].push_back(golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
+        const double c = golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos;
+        if (cos[l].empty() || c < *std::min_element(cos[l].begin(), cos[l].end()))
+          worst_at[l] = pname + " row " + std::to_string(t);
+        cos[l].push_back(c);
         const int32_t* gi = g.i32("route.moe.ids.L" + ls, size_t(grows) * d.top_k) + size_t(t) * d.top_k;
         const float gap = g.f32("route.moe.gap.L" + ls, grows)[t];
         const uint32_t* er = r.data() + size_t(l) * runtime::kolibri::kRouteWords + kernels::kolibri::route::kIds;
@@ -103,7 +107,8 @@ int main(int argc, char** argv) {
     const double med = c[c.size() / 2], mn = c.front();
     const bool lok = med >= 0.9998 && mn >= 0.99;
     ok = ok && lok;
-    std::printf("  %3u  %4zu  %.6f    %.6f%s\n", l, c.size(), med, mn, lok ? "" : "  BELOW (proposed bars)");
+    std::printf("  %3u  %4zu  %.6f    %.6f%s  (min at %s)\n", l, c.size(), med, mn, lok ? "" : "  BELOW (proposed bars)",
+                worst_at[l].c_str());
   }
   std::printf("routing: %llu rows, %llu near-ties, %llu differing\n", (unsigned long long)rows,
               (unsigned long long)ties, (unsigned long long)bad);
