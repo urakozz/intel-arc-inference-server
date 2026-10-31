@@ -2630,6 +2630,9 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_partial_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
   add_test(NAME kolibri_partial_eager_test COMMAND kolibri_partial_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} 30)
   set_tests_properties(kolibri_partial_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  # Operator ruling 2026-10-29: eager is diagnostic - under the f32 judge these print their verdicts, never fail.
+  set_property(TEST kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test
+    kolibri_partial_eager_test APPEND PROPERTY LABELS diagnostic)
   set_tests_properties(kolibri_decode_synth_test kolibri_golden_synth_int4attn_test kolibri_golden_synth_bf16attn_test
     kolibri_golden_synth_int4attn_eager_test kolibri_golden_synth_bf16attn_eager_test kolibri_golden_synth_i8head_test
     kolibri_partial_test kolibri_partial_eager_test
@@ -2652,6 +2655,7 @@ if(B70_KOLIBRI)
     int8 pp2)
   add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2)
   set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  set_property(TEST kolibri_golden_eager_test APPEND PROPERTY LABELS diagnostic)   # operator ruling 2026-10-29
   add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR}
     pp2 peer)
   add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
@@ -2761,6 +2765,7 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_golden_prefill_synth_eager_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
     ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn prefill)
   set_tests_properties(kolibri_golden_prefill_synth_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
+  set_property(TEST kolibri_golden_prefill_synth_eager_test APPEND PROPERTY LABELS diagnostic)   # ruling 2026-10-29
   add_test(NAME kolibri_golden_prefill_synth_pp_test COMMAND kolibri_golden_test ${_kol_synth}/int4attn/ckpt
     ${_kol_synth}/int4attn --judge=${B70_KOLIBRI_SYNTH_F32_DIR}/int4attn pp2:3 prefill)
   set_tests_properties(kolibri_golden_prefill_synth_int4attn_test kolibri_golden_prefill_synth_bf16attn_test
