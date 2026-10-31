@@ -44,6 +44,8 @@
 //   tap      (decode only) per layer, the MEDIAN over the prompt rows of the residual's cosine to the judge's within
 //            kCosSlack (2) of the golden's cosine distance - the per-layer median, not one worst row (the minima
 //            printed beside).
+// The EAGER attention (B70_KOLIBRI_ATTN=eager; flash is Kolibri's default) is DIAGNOSTIC under the judge, as K2's
+// (operator ruling 2026-10-29: eager prints, never binds) - the verdicts printed, the test does not fail on them.
 //
 // argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>] [--judge=<dir>]
 // (`pp2`: spec 20c Task 6 - the engine on two cards). Exit 77 (SKIP) when the checkpoint or the golden
@@ -365,6 +367,12 @@ int main(int argc, char** argv) {
       std::printf("  L%-3u %.6f (%.4f) / %.6f (%.4f)  x%.2f%s\n", l, e.median(), e.min(), w.median(), w.min(), r,
                   lok ? "" : "  ** FAIL **");
     }
+  }
+  if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // operator ruling 2026-10-29 (the header)
+    std::printf("eager attention: DIAGNOSTIC - tokens %s, routing %s, tap %s; recorded, not gated\n",
+                tok_ok ? "kept" : "missed", route_ok ? "kept" : "above the bar", tap_ok ? "kept" : "above the slack");
+    std::puts("kolibri_golden_test OK");
+    return 0;
   }
   CHECK(tok_ok);
   CHECK(route_ok);
