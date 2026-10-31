@@ -60,6 +60,10 @@ using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
 bool g_split = false;   // argv[5]
+// Operator ruling 2026-10-31 (round 2): l0-int8 on a MoE model is opt-in and its accuracy gate DIAGNOSTIC - 8-bit
+// activations cost routing accuracy against f32 that no int8 scheme measured won back. The judge's verdict is then
+// printed, not gated (the plan kinds and f's bitwise rows still are: mechanics, not accuracy).
+bool g_diagnostic = false;
 
 Ids slice(const Ids& v, size_t a, size_t b) { return Ids(v.begin() + a, v.begin() + b); }
 Ids cat(Ids a, const Ids& b) {
@@ -273,10 +277,18 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, Qwen35::kVocab) : nullptr;
   const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, Qwen35::kVocab, Qwen35::kVocabUsed) : 0;
   const uint32_t judge_bar = twin ? judge_twin : judge_cold;
+  // Round 2 of the ruling: more misses than the twin pass by the near-miss rule (forced_judge.h NearMiss).
+  golden::NearMiss nm;
   if (twin) {
     const float* tl = twin->f32("logits", size_t(twin->dim("logits", 2, 0)) * Qwen35::kVocab);
-    for (uint32_t p = 0; p < kGen; ++p) cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * Qwen35::kVocab, Qwen35::kVocab, Qwen35::kVocabUsed));
+    const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * Qwen35::kVocab);
+    for (uint32_t p = 0; p < kGen; ++p) {
+      cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * Qwen35::kVocab, Qwen35::kVocab, Qwen35::kVocabUsed));
+      nm.add(p, jl + size_t(p) * Qwen35::kVocab, cand_tok[p], cand_rows[p].data(), tl + size_t(p) * Qwen35::kVocab,
+             Qwen35::kVocab, Qwen35::kVocabUsed, "cached run's", true);
+    }
   }
+  const bool judge_ok = twin ? nm.verdict(want.name, "cached run's") : judge_cached <= judge_bar;
   if (judge)
     std::printf("  %s logits rows against the f32 judge, cosine min / median: cached %s, cold %s, bf16 reference %s\n",
                 want.name.c_str(), cos_cached.str().c_str(), cos_cold.str().c_str(), cos_twin.str().c_str());
@@ -284,14 +296,15 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
               " differing row %s, logits min cos %.9f (row %u)%s\n", want.name.c_str(),
               server::plan_kind_name(rep.kind), rep.restart, final_prompt.size(), det_exact, kGen,
               near, allowed, bad, first_diff == kGen ? "none" : std::to_string(first_diff).c_str(),
-              min_cos, worst, (judge ? judge_cached <= judge_bar : bad == 0) && ok ? "" : "  ** FAIL **");
+              min_cos, worst, (judge ? judge_ok : bad == 0) && ok ? "" : "  ** FAIL **");
   if (judge) {
     std::printf("  %s judged by the f32 reference (operator, 2026-10-29): it rejects %u of the cached run's ids, %u of"
                 " the cold run's%s%s\n", want.name.c_str(), judge_cached, judge_cold,
                 twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
                      : "",
-                judge_cached <= judge_bar ? "" : "  ** FAIL **");
-    return ok && judge_cached <= judge_bar;
+                judge_ok ? "" : g_diagnostic ? "  (DIAGNOSTIC: l0-int8 on a MoE model - recorded, not gated)"
+                                             : "  ** FAIL **");
+    return ok && (judge_ok || g_diagnostic);
   }
   return ok && bad == 0;
 }
@@ -315,8 +328,11 @@ int main(int argc, char** argv) {
   runtime::Engine eng(ctx, loader::load(ctx, snap, kMaxLen, mtp_k > 0), kMaxLen);
   eng.set_prefill_backend(backend);
   eng.prepare_prefill();
-  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d, mtp K %u\n",
-              runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split), mtp_k);
+  g_diagnostic = backend == runtime::PrefillBackend::L0Int8 && eng.model().desc->is_moe();
+  std::printf("prefix_gpu_test: backend %s, near-tie allowance %u, split_last %d, mtp K %u%s\n",
+              runtime::prefill_backend_name(eng.prefill_backend()), allowed, int(g_split), mtp_k,
+              g_diagnostic ? " - DIAGNOSTIC: l0-int8 on a MoE model, the judge's verdicts not gated (operator "
+                             "2026-10-31)" : "");
   EngineAdapter ad(eng, Qwen35::kVocabUsed, mtp_k);
   PinnedAlloc alloc(ctx, size_t(6) << 30);
   Rig rig{eng, ad, alloc, l0::CmdList::immediate(ctx)};

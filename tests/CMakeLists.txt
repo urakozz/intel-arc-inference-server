@@ -2245,12 +2245,19 @@ if(B70_K2 AND B70_KV8)
   endforeach()
   add_test(NAME k2_decode_kv8_test COMMAND k2_decode_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/prose.ids)
-  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR})
+  # Operator ruling 2026-10-31 (round 2): the kv8 token gates' bar is the judge's bf16 twin through the same cache
+  # (f32_oracle.sh k2-kv8-twin; k2_golden_test.cc `--twin=`); without the file the judge's rule applies.
+  set(B70_K2_BF16_KV8_DIR "${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-kv8"
+    CACHE PATH "K2-Horizon's bf16 reference through the int8 KV cache (the kv8 judge's twin, the token gates' bar)")
+  add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
+    --twin=${B70_K2_BF16_KV8_DIR})
   add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_KV8_DIR} int8)
-  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR})
-  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR} prefill)
+  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
+    --twin=${B70_K2_BF16_KV8_DIR})
+  add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
+    --twin=${B70_K2_BF16_KV8_DIR} prefill)
   add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
-    prefill:16)
+    --twin=${B70_K2_BF16_KV8_DIR} prefill:16)
   add_test(NAME k2_prefill_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
   add_test(NAME k2_prefill_eager_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}

@@ -56,6 +56,13 @@
 // (K2Engine's default form) and the same gate, the same tie rule and the same routing diagnostic
 // run unchanged - spec 12 Q2's rule; the logits' worst cosine is printed per prompt beside bf16's.
 //
+// **The bf16 twin (operator ruling 2026-10-31, round 2; `--twin=<dir>`, r21.golden's kv8 gates)**: the plain bf16
+// reference through the same int8 cache (k2_ref.py --mode bf16 --gemm f32 --sim-kv8, teacher-forced on the bf16
+// golden's tokens: tools/box_validate/f32_oracle.sh k2-kv8-twin). The token gate is then, per prompt, the near-miss
+// rule (forced_judge.h NearMiss): the engine passes when the judge rejects no more of its ids than of the twin's, or
+// every extra miss is a near-tie and its logits rows are as close to the judge's (the bar the twin's own misses -
+// the kv8 cache's rounding is in both). Without a twin file the judge's rule above applies, as before.
+//
 // argv: <snapshot> <oracle dir> [int8] [prefill | prefill:<chunk>]. Exit 77 (SKIP) when the checkpoint or the golden set
 // (18a's oracle-out-k2/) is not on this machine - the Mac never has them.
 #include <algorithm>
@@ -73,6 +80,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "forced_judge.h"
 #include "golden_common.h"
 #include "kernels/k2_kernels.h"
 #include "l0/cmdlist.h"
@@ -174,6 +182,7 @@ int main(int argc, char** argv) {
   // `--judge=<f32 dir>` (operator ruling 2026-10-23, golden_common.h): the token gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);
+  const std::string twin_dir = golden::take_flag(argc, argv, "--twin=");   // operator ruling 2026-10-31, round 2
   const golden::AcceptList accept = golden::take_accept(argc, argv);   // known rows (2026-10-23)
   const std::string snap = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-k2";
@@ -243,6 +252,22 @@ int main(int argc, char** argv) {
     // Operator ruling 2026-10-28/29: with a judge that dumped its routes, the routing gate is the engine's
     // distance to the f32 judge against the bf16 golden's own (both counted here by the same rule).
     const bool judge_routes = J && J.g->has("route.moe.ids.L" + std::to_string(d.dense_layers));
+    // The judge's bf16 twin (header), forced on the same golden tokens, its rows the golden's.
+    std::unique_ptr<golden::Golden> twin;
+    if (J && !twin_dir.empty()) {
+      const std::string tp = twin_dir + "/" + pname + ".golden.safetensors";
+      if (golden::exists(tp)) {
+        twin = std::make_unique<golden::Golden>(tp);
+        CHECK_EQ(twin->dim("logits", 2, 0), uint64_t(rows));
+        const int32_t* tt = twin->i32("tokens", kGen);
+        for (uint32_t i = 0; i < kGen; ++i) CHECK_EQ(tt[i], gtok[i]);
+      } else {
+        std::printf("  no bf16 twin %s (tools/box_validate/f32_oracle.sh k2-kv8-twin) - the judge's rule applies\n",
+                    tp.c_str());
+      }
+    }
+    const float* tlog = twin ? twin->f32("logits", size_t(rows) * d.vocab) : nullptr;
+    golden::NearMiss nm;
     std::vector<char> moe_first(d.layers, 0), mova_first(d.layers, 0), jfirst(d.layers, 1);
     std::vector<double> tap_min(d.layers, 1.0);
     // `route_row(l, which)`: the engine's route row of golden row `row` for (layer, router).
@@ -414,6 +439,9 @@ int main(int argc, char** argv) {
         golden::print_top5("golden", glog + size_t(row) * d.vocab, d.vocab, d.vocab_used);
         if (J) golden::print_top5("f32", J.row(row), std::min(J.V, d.vocab), d.vocab_used);
       }
+      if (twin)
+        nm.add(j, J.row(row), got, lg.data(), tlog + size_t(row) * d.vocab, std::min(J.V, d.vocab), d.vocab_used,
+               "engine's");
       eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
       check_routes(T + j);
       // Diagnostic: B70_K2_ATTN_CHECK=<prompt>:<row> - the LAST layer's decode attention of that
@@ -479,7 +507,7 @@ int main(int argc, char** argv) {
         }
       }
     }
-    const bool ok = det_ok == det && tie_ok == ties;
+    const bool ok = twin ? nm.verdict(pname, "engine's") : det_ok == det && tie_ok == ties;
     gate_ok = gate_ok && ok;
     std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; "
                 "logits worst cosine %.6f\n", det_ok, det, tie_ok, ties,
