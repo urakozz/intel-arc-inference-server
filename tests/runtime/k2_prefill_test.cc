@@ -416,12 +416,16 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
   const std::unique_ptr<golden::Golden> judge = fj.open(jkey, kGen, d.vocab);
   uint32_t judge_pf = 0, judge_dec = 0;
   uint32_t agree = 0, det = 0, det_agree = 0;
+  std::vector<std::vector<float>> pf_rows;   // the prefill path's logits rows and ids (the near-miss rule)
+  std::vector<uint32_t> ptok;
   {
     e.reset();
     e.prefill(prompt);
     runtime::Control* c = e.buffers().control.as<runtime::Control>();
     for (uint32_t j = 0; j < kGen; ++j) {
       const uint32_t got = c->cur_token[0];
+      ptok.push_back(got);
+      if (judge) pf_rows.push_back(e.read_logits());
       if (judge) {
         const bool pf_ok = golden::judge_accepts(*judge, j, got, d.vocab, d.vocab_used);
         const bool dec_ok = golden::judge_accepts(*judge, j, dtok[j], d.vocab, d.vocab_used);
@@ -441,7 +445,16 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
   // Operator ruling 2026-10-31: with the judge's bf16 twin, the bar is the twin's own count of rejected ids.
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, d.vocab) : nullptr;
   const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, d.vocab, d.vocab_used) : 0;
-  const bool tok_ok = judge ? judge_pf <= (twin ? judge_twin : judge_dec) : det_agree == det;
+  // Round 2 of the ruling: more misses than the twin pass by the near-miss rule (forced_judge.h NearMiss).
+  golden::NearMiss nm;
+  if (twin) {
+    const float* tl = twin->f32("logits", size_t(twin->dim("logits", 2, 0)) * d.vocab);
+    const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * d.vocab);
+    for (uint32_t j = 0; j < kGen; ++j)
+      nm.add(j, jl + size_t(j) * d.vocab, ptok[j], pf_rows[j].data(), tl + size_t(j) * d.vocab, d.vocab, d.vocab_used,
+             "prefill's", true);
+  }
+  const bool tok_ok = judge ? (twin ? nm.verdict("6.", "prefill's") : judge_pf <= judge_dec) : det_agree == det;
   std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
               tok_ok ? "" : "  ** FAIL **");
   if (judge)

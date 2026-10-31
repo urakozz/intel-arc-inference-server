@@ -98,6 +98,9 @@ case "${1:-}" in
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-kv8/$p.golden.safetensors || exit 1; done'
     have oracle_k2_f32_i8head_kv8 "oracle-out-k2-f32-i8head-kv8/{prose,code,cjk}.golden.safetensors (int8 head and KV cache: --with r14.oracle_f32)" \
       bash -c 'for p in prose code cjk; do test -s oracle-out-k2-f32-i8head-kv8/$p.golden.safetensors || exit 1; done'
+    # Operator ruling 2026-10-31 (round 2): the kv8 judge's bf16 twin, r21.golden's token-gate bar (f32_oracle.sh k2-kv8-twin).
+    have oracle_k2_bf16_kv8 "oracle-out-k2-bf16-kv8/{prose,code,cjk}.golden.safetensors (the kv8 judge's bf16 twin: --with r14.oracle_f32)" \
+      bash -c 'for p in prose code cjk; do test -s oracle-out-k2-bf16-kv8/$p.golden.safetensors || exit 1; done'
     have kolibri "Kolibri-1 int4 checkpoint ${SNAP_KOLIBRI:-?} (spec 20b, decision 1 open; ~42.5 GB)" \
       complete "${SNAP_KOLIBRI:-/nonexistent}"
     # Spec 20c: Kolibri-1's golden sets (tools/box_validate/kolibri_oracle.sh <data tree> synth|real).

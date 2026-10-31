@@ -256,10 +256,17 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
   const std::unique_ptr<golden::Golden> twin = judge ? fj.open_twin(jkey, kGen, V) : nullptr;
   const uint32_t judge_twin = twin ? golden::twin_misses(*judge, *twin, kGen, V, V) : 0;
   const uint32_t judge_bar = twin ? judge_twin : judge_cold;
+  // Round 2 of the ruling: more misses than the twin pass by the near-miss rule (forced_judge.h NearMiss).
+  golden::NearMiss nm;
   if (twin) {
     const float* tl = twin->f32("logits", size_t(twin->dim("logits", 2, 0)) * V);
-    for (uint32_t p = 0; p < kGen; ++p) cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * V, V, V));
+    const float* jl = judge->f32("logits", size_t(judge->dim("logits", 2, 0)) * V);
+    for (uint32_t p = 0; p < kGen; ++p) {
+      cos_twin.c.push_back(golden::judge_cos(*judge, p, tl + size_t(p) * V, V, V));
+      nm.add(p, jl + size_t(p) * V, cand_tok[p], cand_rows[p].data(), tl + size_t(p) * V, V, V, "cached run's", true);
+    }
   }
+  const bool judge_ok = twin ? nm.verdict(want.name, "cached run's") : judge_cached <= judge_bar;
   if (judge)
     std::printf("  %s logits rows against the f32 judge, cosine min / median: cached %s, cold %s, bf16 reference %s\n",
                 want.name.c_str(), cos_cached.str().c_str(), cos_cold.str().c_str(), cos_twin.str().c_str());
@@ -267,14 +274,14 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
               "%u/%u logits rows bitwise the cold run's%s\n",
               want.name.c_str(), server::plan_kind_name(rep.kind), rep.restart, final_prompt.size(), det_exact,
               kGen, near, allowed, bad, first_diff == kGen ? "none" : std::to_string(first_diff).c_str(), bitwise,
-              kGen, (judge ? judge_cached <= judge_bar : bad == 0) && ok ? "" : "  ** FAIL **");
+              kGen, (judge ? judge_ok : bad == 0) && ok ? "" : "  ** FAIL **");
   if (judge) {
     std::printf("  %s judged by the f32 reference (operator, 2026-10-29): it rejects %u of the cached run's ids, %u of"
                 " the cold run's%s%s\n", want.name.c_str(), judge_cached, judge_cold,
                 twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
                      : "",
-                judge_cached <= judge_bar ? "" : "  ** FAIL **");
-    return ok && judge_cached <= judge_bar;
+                judge_ok ? "" : "  ** FAIL **");
+    return ok && judge_ok;
   }
   return ok && bad == 0;
 }
