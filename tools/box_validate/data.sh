@@ -108,6 +108,11 @@ case "${1:-}" in
       bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri/$p.ids && test -s oracle-out-kolibri/$p.golden.safetensors || exit 1; done'
     have oracle_kolibri_synth "oracle-out-kolibri-synth/{int4attn,bf16attn}/{ckpt/,prose,de_prose} (spec 20c: kolibri_oracle.sh synth)" \
       bash -c 'for a in int4attn bf16attn; do test -s oracle-out-kolibri-synth/$a/ckpt/model.safetensors.index.json || exit 1; for p in prose de_prose; do test -s oracle-out-kolibri-synth/$a/$p.golden.safetensors || exit 1; done; done'
+    # Operator ruling 2026-10-31 (round 2): their f32 judges (kolibri_oracle.sh real-f32 / synth-f32).
+    have oracle_kolibri_f32 "oracle-out-kolibri-f32/{prose,code,de_prose,de_chat}.golden.safetensors (the f32 judge: kolibri_oracle.sh real-f32, --with r24.oracle_real)" \
+      bash -c 'for p in prose code de_prose de_chat; do test -s oracle-out-kolibri-f32/$p.golden.safetensors || exit 1; done'
+    have oracle_kolibri_synth_f32 "oracle-out-kolibri-synth-f32/{int4attn,bf16attn}/{prose,de_prose}.golden.safetensors (kolibri_oracle.sh synth-f32, --with r24.oracle_synth)" \
+      bash -c 'for a in int4attn bf16attn; do for p in prose de_prose; do test -s oracle-out-kolibri-synth-f32/$a/$p.golden.safetensors || exit 1; done; done'
     # Spec 21a: Qwen3.8-Flash-Next (qwen4_exp) - the checkpoints and the CPU reference's golden sets
     # (tools/box_validate/qwen4exp_oracle.sh <data tree> intel | intel-layers N | trace).
     have q4exp_tiny "the tiny qwen4_exp model (hf download qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next, 124 MB)" \
