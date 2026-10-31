@@ -339,6 +339,10 @@ int main(int argc, char** argv) {
   }
   const model::BoltDesc pre = loader::bolt_checkpoint_desc(snapdir, o.layers);
   o.devices = pre.layers == model::bolt().layers ? 2u : 1u;   // the whole model needs both cards (Decision 4)
+  if (o.devices == 2 && l0::Context::gpu_count() < 2) {   // bolt_golden_test's rule (a one-card ctest run)
+    std::printf("SKIP: two cards needed, Level Zero shows %u\n", l0::Context::gpu_count());
+    return 77;
+  }
   if (!bolt_rig::fits(pre, o, true)) {
     std::printf("SKIP: %s (%u blocks) does not fit %u card(s) with the prefill scratch\n", snapdir.c_str(), pre.layers,
                 o.devices);
