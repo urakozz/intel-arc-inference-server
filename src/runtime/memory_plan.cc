@@ -33,6 +33,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   p.max_len = max_len;
   p.mtp = mtp;
   p.kv_cache = kv;
+  p.chunk_cap = path.chunk_cap;
   p.rope = model::Qwen35::rope_table_bytes(max_len);
   p.model = model_bytes + p.rope;
 
@@ -50,12 +51,12 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     // With a draft vocabulary MtpBuffers also holds its compact logits (spec 8 §11).
     p.mtp_buffers = MtpDims::sizes(max_len, desc, dv.rows, kv).total();
     // Allocated on the first prefill of an engine with the head (engine_prefill.cc).
-    p.mtp_hidden = path.prefill ? mtp_prefill_hidden_bytes(desc) : 0;
+    p.mtp_hidden = path.prefill ? mtp_prefill_hidden_bytes(desc, path.chunk_cap) : 0;
     p.decode_state += p.mtp_buffers + p.mtp_hidden;
   }
 
   if (path.prefill) {
-    const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, desc);
+    const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, desc, path.chunk_cap);
     // linear_l0 walks the slab for every int4 linear; on l0-int8 only the MTP head's
     // bf16 linears do (step_mtp_kv).
     if (path.backend == PrefillBackend::L0 || mtp) p.prefill_lazy += s.slab;
@@ -64,7 +65,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     // Engine::prepare_prefill: Int8State for the MLP intermediate (down's K), then every
     // int4 linear's rotated column scales, all before the first chunk.
     if (path.backend == PrefillBackend::L0Int8)
-      p.int8 = int8_scratch_sizes(prefill_int8_max_k(desc)).total() + int8_scale_bytes(desc);
+      p.int8 = int8_scratch_sizes(prefill_int8_max_k(desc), path.chunk_cap).total() + int8_scale_bytes(desc);
     p.moe_prefill = s.moe;   // spec 15d: inside s.eager(), 0 when dense
   }
   // Spec 19c: the engine's side of a drafter - 7 more GDN slots, and the prefill's tap staging.
@@ -72,7 +73,7 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     p.drafter_slots = TapVerifyDims::gdn_spec_bytes(desc);
     p.decode_state += p.drafter_slots;
     if (path.prefill) {
-      p.drafter_taps = TapVerifyDims::prefill_taps_bytes(desc, drafter.n_taps);
+      p.drafter_taps = TapVerifyDims::prefill_taps_bytes(desc, drafter.n_taps, path.chunk_cap);
       p.prefill_scratch += p.drafter_taps;
     }
   }
@@ -104,6 +105,22 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
       hi = mid - 1;
   }
   return lo * kMaxLenQuantum;
+}
+
+uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
+                                     size_t device_bytes, size_t reserve_bytes, uint32_t max_len,
+                                     const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
+                                     const DrafterPlan& drafter) {
+  PrefillPath wide = path;
+  wide.chunk_cap = PrefillScratchDims::kCMax;
+  try {
+    check_prefill_chunk_cap(desc, wide.chunk_cap);
+  } catch (const std::invalid_argument&) {
+    return PrefillScratchDims::kCDefault;   // a MoE model: pf_moe's KC
+  }
+  return plan(desc, max_len, mtp, model_bytes, wide, dv, kv, drafter).total() + reserve_bytes <= device_bytes
+             ? PrefillScratchDims::kCMax
+             : PrefillScratchDims::kCDefault;
 }
 
 std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_bytes) {
@@ -139,6 +156,8 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
     s += buf;
   }
   if (p.kv_cache == KvCache::Int8) s += ", int8 KV cache";   // spec 12b; bf16 says nothing
+  if (p.chunk_cap != PrefillScratchDims::kCDefault)   // plan 5d; 2048 says nothing
+    s += ", prefill chunk cap " + std::to_string(p.chunk_cap);
   return s + ")";
 }
 

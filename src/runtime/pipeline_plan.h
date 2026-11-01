@@ -202,7 +202,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
 size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t slots = MtpDims::kSlots);
 // The head's prefill state on the last device (spec 16d): the hidden rows step_mtp_kv
 // writes (mtp_prefill_hidden_bytes) and its two Control blocks (one per chunk in flight).
-size_t pp_mtp_prefill_bytes(const model::ModelDesc& d);
+size_t pp_mtp_prefill_bytes(const model::ModelDesc& d, uint32_t chunk_cap);
 // The launches of a stage's MTP verify list at any M: the stage's decode list (the rows are
 // in the variants, not the count) and, on the last device, the head's 10-launch KV fill -
 // the two add up to runtime::verify_launches(d) (capture.cc asserts it at every capture).

@@ -65,9 +65,9 @@ void dims_case() {
   CHECK(runtime::TapVerifyDims::gdn_spec_bytes(d) == size_t(7) * 150994944u);
   CHECK(runtime::TapVerifyDims::gdn_spec_bytes(d) ==
         runtime::MtpDims::sizes(16384, d, 0, runtime::KvCache::Bf16, 8).gdn_spec);
-  CHECK(runtime::TapVerifyDims::prefill_taps_bytes(d, 5) == size_t(2048) * 5 * 5120 * 2);
+  CHECK(runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) == size_t(2048) * 5 * 5120 * 2);
   std::printf("TapVerifyDims: 7 slots %zu B, prefill taps %zu B\n", runtime::TapVerifyDims::gdn_spec_bytes(d),
-              runtime::TapVerifyDims::prefill_taps_bytes(d, 5));
+              runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
 }
 
 void plan_case() {
@@ -93,7 +93,7 @@ void plan_case() {
   CHECK(with.drafter_slots == runtime::TapVerifyDims::gdn_spec_bytes(d));
   const runtime::MemoryPlan decode_only = runtime::plan(d, 32768, false, 17'000'000'000ull,
                                                         runtime::PrefillPath{false}, {}, runtime::KvCache::Bf16, dr);
-  CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5));
+  CHECK(decode_only.drafter_taps == 0 && without.drafter_taps == runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault));
   std::printf("plan with a drafter at 32768: %s\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
 }
 

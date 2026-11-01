@@ -79,9 +79,9 @@ void check_sizes_qwen38() {
   // The default follows B70_DECODE_ATTN, as capture does.
   unsetenv("B70_DECODE_ATTN");
   CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q).attn_part, size_t{6340608});
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q);
+  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.eager(), size_t{699514776});
-  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q).eager(), size_t{699514776});
+  CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
   CHECK_EQ(s.slab, size_t{35651584});
   CHECK_EQ(s.pf_s, size_t{805306368});
   CHECK_EQ(s.pf_p, size_t{402653184});
@@ -105,14 +105,14 @@ void check_sizes_qwen38() {
     CHECK(threw);
   }
   // (kC + 1) x 5120 x 2 B.
-  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q), size_t{2049} * 5120 * 2);
+  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 5120 * 2);
   // Int8State: xq 2048 x 17408 + xs 2048 x 4 + w8 (17408 / 4) x 1024 x 4, and the
   // column scales: 2 x 4 B x the int4 N of every layer - 48 GDN layers x (16384 +
   // 5120 + 34816 + 5120) + 16 FA layers x (14336 + 5120 + 34816 + 5120).
-  CHECK_EQ(runtime::int8_scratch_sizes(17408).total(), size_t{35651584 + 8192 + 17825792});
+  CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total(), size_t{35651584 + 8192 + 17825792});
   CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * (48 * 61440 + 16 * 59392));
   // = 84,680,704 B: spec 6 §8.4's measured "int8 0.085 GB".
-  CHECK_EQ(runtime::int8_scratch_sizes(17408).total() + runtime::int8_scale_bytes(q),
+  CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total() + runtime::int8_scale_bytes(q),
            size_t{84680704});
 }
 
@@ -129,12 +129,12 @@ void check_sizes_agnes() {
   const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, a);
   CHECK_EQ(d.x, size_t{8} * 19456 * 2);
   CHECK_EQ(d.partials, size_t{8} * 8 * 38912 * 4);                 // gate||up N = 2 x 19456
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, a);
+  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, a, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.x, size_t{2048} * 19456 * 2);
   CHECK_EQ(s.partials, size_t{2048} * 38912 * 4);
   CHECK_EQ(s.slab, size_t{19456} * 1024 * 2);
   CHECK_EQ(runtime::MtpDims::sizes(16384, a).gdn_spec, size_t{3} * 169869312);
-  CHECK_EQ(runtime::int8_scratch_sizes(19456).xq, size_t{2048} * 19456);
+  CHECK_EQ(runtime::int8_scratch_sizes(19456, runtime::PrefillScratchDims::kCDefault).xq, size_t{2048} * 19456);
   CHECK_EQ(runtime::int8_scale_bytes(a),
            size_t{8} * (54 * (16384 + 5120 + 38912 + 5120) + 18 * (14336 + 5120 + 38912 + 5120)));
 }
@@ -209,13 +209,13 @@ void check_sizes_ornith() {
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpInt8), uint32_t(257));
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::DownBf16), uint32_t(257));
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpBf16), uint32_t(129));
-  const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(16384, o);
+  const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(16384, o, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(ps.moe, ml2.total);
   CHECK_EQ(ps.slab, size_t{4096} * 1024 * 2);                       // out_proj / o_proj's K
   CHECK_EQ(ps.partials, size_t{2048} * 12288 * 4);                  // qkv||z's N
   // Dense models carry none, and their slab / int8 K are what they were.
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
-  CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
+  CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});
   CHECK_EQ(runtime::prefill_int8_max_k(model::qwen38()), uint32_t(17408));
   CHECK_EQ(runtime::prefill_int8_max_k(model::agnes()), uint32_t(19456));
   CHECK_EQ(runtime::prefill_int8_max_k(o), uint32_t(4096));
@@ -229,7 +229,7 @@ void check_sizes_ornith() {
     const runtime::MemoryPlan pp = runtime::plan(o, 262144, false, kOrnithInt8Weights, path);
     CHECK_EQ(pp.moe_prefill, ml2.total);
     CHECK_EQ(pp.int8, b == PrefillBackend::L0Int8
-                          ? runtime::int8_scratch_sizes(4096).total() + runtime::int8_scale_bytes(o)
+                          ? runtime::int8_scratch_sizes(4096, runtime::PrefillScratchDims::kCDefault).total() + runtime::int8_scale_bytes(o)
                           : size_t{0});
     // The full trained context still fits with the prefill scratch (derived).
     CHECK_EQ(runtime::max_len_that_fits(o, false, kOrnithInt8Weights, kDevice, kReserve, kTrained,
@@ -270,13 +270,13 @@ void check_spec6_line() {
 
 void check_paths() {
   const model::ModelDesc& q = model::qwen38();
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(65536, q);
+  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(65536, q, runtime::PrefillScratchDims::kCDefault);
   const runtime::MemoryPlan base = runtime::plan(q, 65536, false, kQwenInt8Weights);
   // MTP: the head's buffers and prefill hidden rows in decode state, and the L0 slab
   // (step_mtp_kv's bf16 linears) on l0-int8. The head's weights are the caller's.
   const runtime::MemoryPlan mtp = runtime::plan(q, 65536, true, kQwenInt8Weights + kMtpWeights);
   CHECK_EQ(mtp.mtp_buffers, runtime::MtpDims::sizes(65536, q).total());
-  CHECK_EQ(mtp.mtp_hidden, runtime::mtp_prefill_hidden_bytes(q));
+  CHECK_EQ(mtp.mtp_hidden, runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault));
   CHECK_EQ(mtp.decode_state, base.decode_state + mtp.mtp_buffers + mtp.mtp_hidden);
   CHECK_EQ(mtp.prefill_lazy, s.slab);
   CHECK_EQ(mtp.model, base.model + kMtpWeights);
@@ -639,7 +639,8 @@ void check_chunk_cap() {
   CHECK_EQ(p4.mtp_hidden - p2.mtp_hidden, size_t{20971520});
   CHECK_EQ(p4.kv, p2.kv);
   CHECK_EQ(p4.total() - p2.total(), size_t{698458112 + 35659776 + 20971520});   // ~0.755 GB
-  CHECK_EQ(runtime::plan(q, 65536, true, w).total(), p2.total());               // the default is 2048
+  CHECK_EQ(runtime::plan(q, 65536, true, w, runtime::PrefillPath{true, PrefillBackend::L0Int8, false}).total(),
+           p2.total());                                                         // the default is 2048
   runtime::DrafterPlan dr;
   dr.weights = 1;
   dr.n_taps = 5;

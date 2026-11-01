@@ -65,16 +65,23 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 //                       model also every layer's expert gate||up array, spec 15d); the L0
 //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).
 //   composed attention  (B70_PREFILL_ATTN=composed on an L0 backend) pf_s / pf_p:
-//                       [GQA group][kC][max_len] fp32 + bf16 - 73,728 B per position
-//                       on Qwen3.8, the only prefill scratch that scales with max_len.
+//                       [GQA group][chunk_cap][max_len] fp32 + bf16 - 73,728 B per position
+//                       on Qwen3.8 at cap 2048, the only prefill scratch that scales with max_len.
 //                       The default flash path builds neither.
 //
 // `prefill = false` is a decode-only engine (b70-decode without --prefill-length / --prefill):
 // ruling R7 keeps every prefill allocation lazy, so it plans none of them.
+//
+// `chunk_cap` (plan 5d): the session's prefill chunk cap, 2048 or 4096 - every per-chunk
+// buffer (PrefillScratch, Int8State's xq / xs, MTP's prefill hidden rows, a drafter's tap
+// staging) has that many rows. 4096 costs ~0.70 GB more scratch on Qwen3.8 (~0.76 GB with
+// MTP on l0-int8), which comes out of what auto can give the KV cache; the CLIs choose it
+// by prefill_chunk_cap_that_fits (operator ruling (i): context first).
 struct PrefillPath {
   bool prefill = true;
   PrefillBackend backend = PrefillBackend::L0;
   bool composed_attn = false;
+  uint32_t chunk_cap = PrefillScratchDims::kCDefault;
 };
 
 // Spec 8 §11 (`--draft-vocab`): a draft vocabulary of `rows` ids, its compact head in
@@ -92,6 +99,7 @@ struct MemoryPlan : MemoryComponents {
   uint32_t max_len = 0;
   bool mtp = false;
   KvCache kv_cache = KvCache::Bf16;   // spec 12b: the form `kv` (and the MTP head's KV) is in
+  uint32_t chunk_cap = PrefillScratchDims::kCDefault;   // plan 5d: the prefill chunk cap planned
   // The finer split, each already counted in one of the five above.
   size_t rope = 0;           // in model: Qwen35::rope_table_bytes(max_len)
   size_t mtp_buffers = 0;    // in decode_state: MtpBuffers
@@ -146,6 +154,18 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
                            size_t device_bytes, size_t reserve_bytes, uint32_t cap,
                            const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
                            KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
+
+// Plan 5d, operator ruling (i) of 2026-10-27 (context first): the chunk cap a session at
+// `max_len` runs - PrefillScratchDims::kCMax when the model allows it
+// (check_prefill_chunk_cap) and the plan at max_len with that cap still fits with the
+// reserve, else kCDefault. `path.chunk_cap` is ignored (both are tried). Under
+// --max-len auto, max_len is planned at kCDefault first, so 4096 comes only from memory that
+// is there anyway: an explicit --max-len below the auto value, or a model / KV form whose
+// auto value is the trained context with room to spare.
+uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
+                                     size_t device_bytes, size_t reserve_bytes, uint32_t max_len,
+                                     const PrefillPath& path = {}, const DraftVocabPlan& dv = {},
+                                     KvCache kv = default_kv_cache(), const DrafterPlan& drafter = {});
 
 // One line for the startup log: the plan's five components, the finer split where it
 // is non-zero, the reserve and the device total.

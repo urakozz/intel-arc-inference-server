@@ -371,7 +371,7 @@ void check_figures() {
   CHECK_EQ(m.kv_k, size_t{262144} * 2 * 256 * 2);              // one layer, 2 kv-heads
   CHECK_EQ(m.hh, size_t{9} * 2048 * 2);
   CHECK_EQ(m.dh, size_t{2048} * 2);
-  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(o), size_t{2049} * 2048 * 2);
+  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(o, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 2048 * 2);
   const size_t weights = kOrnithInt8Weights + loader::mtp_head_bytes(o);
   for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0Int8, runtime::PrefillBackend::L0}) {
     runtime::PrefillPath path;
@@ -381,11 +381,11 @@ void check_figures() {
     const runtime::MemoryPlan on = runtime::plan(o, 262144, true, weights, path, {},
                                                  runtime::KvCache::Bf16);
     CHECK_EQ(on.mtp_buffers, m.total());
-    CHECK_EQ(on.mtp_hidden, runtime::mtp_prefill_hidden_bytes(o));
+    CHECK_EQ(on.mtp_hidden, runtime::mtp_prefill_hidden_bytes(o, runtime::PrefillScratchDims::kCDefault));
     CHECK_EQ(on.decode_state, off.decode_state + m.total() + on.mtp_hidden);
     CHECK_EQ(on.model, off.model + loader::mtp_head_bytes(o));
     // step_mtp_kv's bf16 linears walk the L0 slab: on l0-int8 it is built for MTP alone.
-    const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(262144, o);
+    const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(262144, o, runtime::PrefillScratchDims::kCDefault);
     CHECK_EQ(on.prefill_lazy, ps.slab);
     CHECK(ps.slab >= size_t{4096} * 1024 * 2);   // fc's K 4096 fits the slab (step_mtp_kv)
     CHECK_EQ(runtime::max_len_that_fits(o, true, weights, kDevice, kReserve, 262144, path, {},

@@ -130,7 +130,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(b.argmax_part.size(), ds.argmax_part);
   const runtime::PrefillScratch* pf = eng.prefill_scratch();
   CHECK(pf != nullptr);
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(L, d);
+  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(L, d, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(pf->bytes(), s.eager());
   CHECK_EQ(pf->lazy_bytes(), p.prefill_lazy);
   CHECK_EQ(pf->pf_s_bytes(), path.composed_attn ? s.pf_s : size_t{0});
