@@ -10,7 +10,7 @@
 //                                                    time; the row's words checked on the card
 //   probe_tp ar   [--model qwen38|agnes] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
 //                 [--rows 1,8] [--calls N] [--rounds 5] [--execs 20] [--replays N] [--inject skip-data|skip-all]
-//                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4]
+//                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4] [--flag plain|atomic]
 //                                                    the all-reduce (fold-then-send) inside one replayed list per card:
 //                                                    `calls` calls a list (default: the model's all-reduces a token,
 //                                                    128 / 144), each call tp_send + tp_wait; timed against the same
@@ -152,6 +152,7 @@ struct Opts {
   uint32_t rounds = 5, execs = 20, replays = 0;
   uint32_t chunk = 1024, S = 4;
   uint32_t spin_limit = 1u << 24;
+  uint32_t flag_mode = 1;      // 0: system-scope atomic store; 1: plain store + release fence (probe_tp.cl tp_publish)
   std::string inject = "none";
   uint32_t inject_at = 0;
   int cpu = -1;
@@ -365,8 +366,8 @@ int run_bar(const Opts& o) {
   constexpr uint32_t kPeriod = 64;   // tp_ping checks words against tp_gen_bits(i % 64, 0, e)
   const uint32_t warm = 100;
   int failures = 0;
-  std::printf("## bar - visible card %u (%s), %u iterations (+%u warm-up) a cell\n\n", o.card, ctx.name().c_str(),
-              o.iters, warm);
+  std::printf("## bar - visible card %u (%s), %u iterations (+%u warm-up) a cell, ack flag %s\n\n", o.card,
+              ctx.name().c_str(), o.iters, warm, o.flag_mode ? "plain" : "atomic");
   std::printf("| CPU writes into | card acks into | row | RTT median us | p10 | p90 | CPU store us (median) | "
               "card errors |\n|---|---|---|---|---|---|---|---|\n");
   for (const std::string& path : o.paths)
@@ -392,6 +393,7 @@ int run_bar(const Opts& o) {
         kping.arg(4, uint32_t(L.flag_base()));
         kping.arg(5, total);
         kping.arg(6, o.spin_limit);
+        kping.arg(7, o.flag_mode);
         l0::CmdList list = l0::CmdList::regular(ctx);
         list.launch(kping, 1);
         list.close();
@@ -600,6 +602,7 @@ Lists build_lists(Card& card, ArSetup& a, int rank, uint32_t calls, const Opts& 
     k.arg(9, cross);
     k.arg(10, (cross && rank == 1) ? o.inject_at : 0u);
     k.arg(11, inject_kind);
+    k.arg(12, o.flag_mode);
   };
   auto bind_wait = [&](l0::Kernel& k, uint32_t cross, l0::Mem& ctr, l0::Mem& state, l0::Mem& hash) {
     k.arg_ptr(0, cross ? a.src[rank] : s.own->ptr());
@@ -717,8 +720,9 @@ int run_ar(const Opts& o) {
   const uint32_t inj = inject_kind(o.inject);
   const bool check = o.replays > 0 || inj != tpp::kInjNone;
   int failures = 0;
-  std::printf("## ar - %s, %u calls a list (the model's all-reduces a token: %u), %u B a row, chunk %u words, S %u\n\n",
-              d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S);
+  std::printf("## ar - %s, %u calls a list (the model's all-reduces a token: %u), %u B a row, chunk %u words, S %u, "
+              "flag %s\n\n",
+              d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic");
   if (check)
     std::printf("| route | rows | lists replayed | calls checked | card 0 | card 1 | CPU | hashes equal | verdict |\n"
                 "|---|---|---|---|---|---|---|---|---|\n");
@@ -992,6 +996,12 @@ Opts parse(int argc, char** argv) {
     else if (a == "--launches") o.launches = uint32_t(std::stoul(val()));
     else if (a == "--shape") { const std::string v = val(); if (v != "all") o.shapes = split(v); }
     else if (a == "--timeout") o.timeout_s = std::stod(val());
+    else if (a == "--flag") {
+      const std::string v = val();
+      if (v == "atomic") o.flag_mode = 0;
+      else if (v == "plain") o.flag_mode = 1;
+      else die("--flag " + v + " (atomic|plain)");
+    }
     else die("unknown option " + a);
   }
   if (o.inject != "none" && o.inject_at == 0) o.inject_at = 37;
