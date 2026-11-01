@@ -3720,7 +3720,7 @@ st_r68_verdict() {
 
 # ======================================================================================
 row 70 "spec 19f - prompt lookup inside DFlash (--spec dflash-lookup: ENTER >= 8 tokens beyond the drafter's 2048 window, STAY >= 3 accepted, full-depth lookup verify, the drafter's projection kept): D2 / D4 on the mode, speed against plain --spec dflash on the edit / copy set (8k-99k) and A4 / golden (plan 19f)"
-rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the time in lookup, the verdict line."
+rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the share of ids from lookup (the server's dflash: ... lookup: lines; time in lookup is not split out), the verdict line."
 rownote 70 "Host-side only (no kernel, no command line: D0 is G0). The edit / copy set is tests/golden/edit-copy (tools/spec/edit_copy_set.py: 12 prompts at 8k / 32k / 64k / 99k, each source 4953 .. 96230 ids before the prompt's end). The serving arms run at --max-len 102400 (the 99k prompts) - every arm the same flags otherwise. The verify lists' GEMM / attention are whatever main binds (specs 28b / 28c rebind the M >= 2 lists; the mode does not care)."
 stage r70.k0     70 default cpu  -           g0.sha,g0.bitwise,g0.suite "D0: no kernel binary moved by the mode (it is host-side)"
 st_r70_k0() {
