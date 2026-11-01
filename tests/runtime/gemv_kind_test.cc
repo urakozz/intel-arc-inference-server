@@ -44,7 +44,17 @@ int main() {
                kernels::gemv_variant(1, s.K, s.N, s.S, s.layout));
       const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.S, s.layout);
       CHECK(t != nullptr);   // every Qwen3.8 / Agnes int4 decode linear is tuned
-      CHECK_EQ(kernels::gemm_sm_out_s(*t), s.S);   // the consumer's fold is unchanged
+      // the consumer's fold is unchanged - except gate||up's one-slice 2x8 work-group, whose SiLU is the _S1 build
+      if (id == LinearId::GateUp && kernels::gemm_sm_out_s(*t) != s.S) {
+        CHECK_EQ(kernels::gemm_sm_out_s(*t), 1u);
+        for (uint32_t M = 2; M <= 8; ++M)
+          CHECK_EQ(kernels::gemm_sm_silu_variant(M, d->intermediate, 1, s.S),
+                   kernels::prep_silu_mul_s1_variant(M, d->intermediate));
+      } else {
+        CHECK_EQ(kernels::gemm_sm_out_s(*t), s.S);
+        CHECK_EQ(kernels::gemm_sm_silu_variant(2, d->intermediate, s.S, s.S),
+                 kernels::prep_silu_mul_variant(2, d->intermediate));
+      }
       ++tuned;
       for (uint32_t M = 2; M <= 8; ++M)
         CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(M), M, s.K, s.N, s.S, s.layout),

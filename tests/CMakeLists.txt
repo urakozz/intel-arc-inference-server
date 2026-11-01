@@ -331,11 +331,12 @@ add_test(NAME gemm_sm_ref_test COMMAND gemm_sm_ref_test)
 # Spec 28b: the production small-M GEMM. gemm_sm_names_test (host): kernels::kSmallMTuning against the CMake
 # block's binaries. gemm_sm_test (device): N2 against fp64 and gemv, N3 property R, every row at every built M.
 get_property(B70_GEMM_SM_KERNELS GLOBAL PROPERTY B70_GEMM_SM_KERNELS)
+get_property(B70_GEMM_SM_CONSUMERS GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS)
 if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8)
   add_executable(gemm_sm_names_test kernels/gemm_sm_names_test.cc)
   target_include_directories(gemm_sm_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   b70_target_kernel_dir(gemm_sm_names_test)
-  add_test(NAME gemm_sm_names_test COMMAND gemm_sm_names_test ${B70_GEMM_SM_KERNELS})
+  add_test(NAME gemm_sm_names_test COMMAND gemm_sm_names_test ${B70_GEMM_SM_KERNELS} -- ${B70_GEMM_SM_CONSUMERS})
 
   # The capture rule (runtime/gemv_kind.h): M = 1 on gemv for every list, M >= 2 on gemm_sm, the override.
   add_executable(gemv_kind_test runtime/gemv_kind_test.cc)
@@ -474,7 +475,8 @@ if(B70_VERIFY_M8 AND B70_MTP)
     kernel_gemv_i8w_M7_K5120_N32768)
   set(_v19a_reused kernel_argmax_stage2)
   get_property(_v28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)   # spec 28b: the verify lists' gemm_sm
-  list(APPEND _v19a_reused ${_v28b_gemm_sm})
+  get_property(_v28b_cons GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS)    # and gate||up's SiLU at S 1
+  list(APPEND _v19a_reused ${_v28b_gemm_sm} ${_v28b_cons})
   foreach(t ${B70_VERIFY_M8_KERNELS} ${_v19a_reused})
     if(NOT TARGET ${t})
       message(FATAL_ERROR "spec 19a: ${t} is not built (src/kernels/CMakeLists.txt)")

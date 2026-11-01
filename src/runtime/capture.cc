@@ -863,7 +863,8 @@ class Capture {
   //
   // `out` is `partials` for every per-layer GEMV - its consumer is a `prep`
   // that folds the S slices. `lm_head` passes `logits` instead; see `head()`.
-  void gemv(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
+  // Returns the split-K slices it wrote (gemv's S; 1 for gemm_sm's 2x8 work-group on gate||up - spec 28b).
+  uint32_t gemv(uint32_t layer, LinearId id, const void* x, const l0::Mem& out) {
     const loader::DeviceWeight& w = m_.linears.at({layer, id});
     const model::GemvShape& s = w.shape;
     require(w.kind == model::WeightKind::Int4, "gemv bound to a bf16 weight");
@@ -878,10 +879,13 @@ class Capture {
     require(out.size() >= size_t(s.S) * kCapM * s.N * sizeof(float),
             "the GEMV's output allocation is smaller than its [S][M][N] fp32 result");
     // Spec 28b: at M >= 2 (runtime::gemv_kind) a tuned shape binds gemm_sm (gemm_sm.cl) - gemv's four
-    // arguments in gemv's order, gemv's [S][M][N] output (kSmallMTuning keeps the shape's S, so the
-    // consumer's fold is unchanged); only the variant, the entry, the work-group and the grid differ.
+    // arguments in gemv's order, gemv's [S][M][N] output at the shape's S (the consumer's fold unchanged),
+    // except gate||up under the 2x8 work-group: one slice, and mlp() binds the SiLU's _S1 build. Only the
+    // variant, the entry, the work-group and the grid differ.
     const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
-    if (t) require(kernels::gemm_sm_out_s(*t) == s.S, "gemm_sm writes another split-K S than the consumer folds");
+    if (t)
+      require(kernels::gemm_sm_out_s(*t) == s.S || id == LinearId::GateUp,
+              "gemm_sm writes another split-K S than the consumer folds (only gate||up's SiLU has an S 1 build)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
                                kernels::gemm_sm_wg_size(*t))
                       : kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
@@ -893,8 +897,9 @@ class Capture {
       launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
       launch(k, s.N / kGemvColsPerWg, s.S);
+    return t ? kernels::gemm_sm_out_s(*t) : s.S;
   }
-  void gemv(uint32_t layer, LinearId id, const void* x) { gemv(layer, id, x, b_.partials); }
+  uint32_t gemv(uint32_t layer, LinearId id, const void* x) { return gemv(layer, id, x, b_.partials); }
 
   // Spec 28b: the gemm_sm row this list binds for a shape, or null (gemv / gemv_i8w): the rule
   // runtime::linear_kind(M, options) - Gemv at M = 1 unless forced - and the shape's kSmallMTuning row.
@@ -965,11 +970,13 @@ class Capture {
   // GEMV that produced those partials (out_proj / o_proj, both S = 4).
   void mlp(uint32_t layer, uint32_t mixer_s) {
     res_norm(mixer_s, at(small_of(layer).norms, sl_.norms_off_post));
-    gemv(layer, LinearId::GateUp, b_.x.ptr());
+    const uint32_t gu_s = gemv(layer, LinearId::GateUp, b_.x.ptr());
     // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
     // at both I = 17408 (ragged last chunk 1024) and Agnes's 19456 (3072), WG 256.
+    // Spec 28b: SILU_S is baked - gate||up's S, or the _S1 build after gemm_sm's 2x8 work-group.
     {
-      l0::Kernel& k = kernel(kernels::prep_silu_mul_variant(kCapM, d_.intermediate),
+      l0::Kernel& k = kernel(kernels::gemm_sm_silu_variant(kCapM, d_.intermediate, gu_s,
+                                                           d_.shape(LinearId::GateUp).S),
                              "prep_silu_mul", kWgSilu);
       k.arg_ptr(0, b_.partials.ptr());
       k.arg_ptr(1, b_.x.ptr());

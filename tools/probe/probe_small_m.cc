@@ -8,7 +8,8 @@
 //                          [--grf 128|256] [--s N] [--rounds 5] [--launches 40]
 //   probe_small_m levers   [--shape all] [--orient wB,wA] [--rounds 5]
 //   probe_small_m numerics <snapshot> [--shape all] [--trials 1000]
-//   probe_small_m prod     [--shape all] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers)
+//   probe_small_m prod     [--shape all|agnes] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers;
+//                          Qwen3.8's shapes and Agnes's two MLP shapes, the token sum over Qwen3.8's)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -847,16 +848,28 @@ std::unique_ptr<Launch> make_prod(l0::Context& ctx, const kernels::SmallMTuning&
   L->S = kernels::gemm_sm_out_s(t);
   return L;
 }
+// Agnes's two MLP shapes (prod mode only; 72 layers, the gemv control where built - M 1..4).
+const Shape kAgnesShapes[] = {
+    {"agu", "gate'||up' (Agnes)", 5120, 38912, 8, 0, 72, 0, 0, model::LinearId::GateUp},
+    {"adown", "down' (Agnes)", 19456, 5120, 4, 0, 72, 0, 0, model::LinearId::Down},
+};
 int run_prod(l0::Context& ctx, const Opts& o) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   box_line();
+  std::vector<const Shape*> shapes = pick_shapes(o, false);
+  for (const Shape& s : kAgnesShapes) {
+    bool any = o.shapes.empty();
+    for (auto& k : o.shapes) if (k == "all" || k == "agnes" || k == s.key) any = true;
+    if (any) shapes.push_back(&s);
+  }
   std::printf("prod: the production gemm_sm rows and their lever alternates, %u rounds interleaved after 3 warm-up "
               "executions per list, with gemv at M = 1 and at M\n", o.rounds);
   std::map<std::string, std::map<uint32_t, double>> ctl, prod_us, best_us;
   std::vector<const Shape*> done;
-  for (const Shape* sp : pick_shapes(o, false)) {
+  for (const Shape* sp : shapes) {
     const Shape& s = *sp;
+    const bool agnes = sp >= std::begin(kAgnesShapes) && sp < std::end(kAgnesShapes);
     const unsigned lay = s.kind == 2 ? 2 : s.L;
     const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.kind == 2 ? 1 : s.S, lay);
     if (!t) { std::printf("%s: no kSmallMTuning row\n", s.name); continue; }
@@ -875,9 +888,9 @@ int run_prod(l0::Context& ctx, const Opts& o) {
     auto ctl1 = make_timed(ctx, make_control(ctx, s, 1), in, nl);
     for (uint32_t M : o.ms) {
       if (M < 2) continue;
-      auto ctlM = make_timed(ctx, make_control(ctx, s, M), in, nl);
-      bool g256 = t->grf256;
-      if (!grf_ok(kernels::gemm_sm_variant(M, *t), g256) ) continue;
+      std::unique_ptr<Timed> ctlM;
+      if (file_exists(kernels::path(ctl_name(s, M)))) ctlM = make_timed(ctx, make_control(ctx, s, M), in, nl);
+      if (!grf_ok(kernels::gemm_sm_variant(M, *t), t->grf256)) continue;
       auto pr = make_timed(ctx, make_prod(ctx, *t, M), in, nl);
       std::vector<std::unique_ptr<Timed>> al;
       for (const auto& a : alts) {
@@ -886,28 +899,31 @@ int run_prod(l0::Context& ctx, const Opts& o) {
         if (!grf_ok(n, a.grf256)) continue;
         al.push_back(make_timed(ctx, make_prod(ctx, a, M), in, nl));
       }
-      std::vector<Timed*> ts = {ctl1.get(), ctlM.get(), pr.get()};
+      std::vector<Timed*> ts = {ctl1.get(), pr.get()};
+      if (ctlM) ts.push_back(ctlM.get());
       for (auto& a : al) ts.push_back(a.get());
       interleave(q, f, ts, o.rounds);
-      const double c1 = median(ctl1->us), cm = median(ctlM->us), pu = median(pr->us);
+      const double c1 = median(ctl1->us), pu = median(pr->us);
       ctl[s.key][1] = c1;
       prod_us[s.key][M] = pu;
       double best = pu;
-      std::printf("| %s (gemv) | %u | %.1f | %.4f (%s) | 1 | - |\n", ctlM->L->name.c_str(), M, cm,
-                  median(ratios(*ctlM, *ctl1)), range_str(ratios(*ctlM, *ctl1)).c_str());
+      auto vs_m = [&](const Timed& x) { return ctlM ? median(ratios(x, *ctlM)) : 0.0; };
+      if (ctlM)
+        std::printf("| %s (gemv) | %u | %.1f | %.4f (%s) | 1 | - |\n", ctlM->L->name.c_str(), M, median(ctlM->us),
+                    median(ratios(*ctlM, *ctl1)), range_str(ratios(*ctlM, *ctl1)).c_str());
       std::printf("| **%s** (production) | %u | %.1f | %.4f (%s) | %.4f | 1 |\n", pr->L->name.c_str(), M, pu,
-                  median(ratios(*pr, *ctl1)), range_str(ratios(*pr, *ctl1)).c_str(), median(ratios(*pr, *ctlM)));
+                  median(ratios(*pr, *ctl1)), range_str(ratios(*pr, *ctl1)).c_str(), vs_m(*pr));
       for (auto& a : al) {
         const double u = median(a->us);
         best = std::min(best, u);
         std::printf("| %s | %u | %.1f | %.4f (%s) | %.4f | %.4f (%s) |\n", a->L->name.c_str(), M, u,
-                    median(ratios(*a, *ctl1)), range_str(ratios(*a, *ctl1)).c_str(), median(ratios(*a, *ctlM)),
+                    median(ratios(*a, *ctl1)), range_str(ratios(*a, *ctl1)).c_str(), vs_m(*a),
                     median(ratios(*a, *pr)), range_str(ratios(*a, *pr)).c_str());
       }
       best_us[s.key][M] = best;
       std::fflush(stdout);
     }
-    done.push_back(&s);
+    if (!agnes) done.push_back(&s);   // the token sum is Qwen3.8's
   }
   std::printf("\n## the GEMM sum of a token (layers x median us, the head once) - derived\n\n"
               "| M | gemv M=1 sum us | production sum us | x gemv M=1 | best-of-alternates x gemv M=1 |\n|---|---|---|---|---|\n");
