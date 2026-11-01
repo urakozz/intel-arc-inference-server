@@ -8,6 +8,7 @@
 //                          [--grf 128|256] [--s N] [--rounds 5] [--launches 40]
 //   probe_small_m levers   [--shape all] [--orient wB,wA] [--rounds 5]
 //   probe_small_m numerics <snapshot> [--shape all] [--trials 1000]
+//   probe_small_m prod     [--shape all] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -54,6 +55,7 @@
 
 #include "common/bf16.h"
 #include "common/int4.h"
+#include "gemm_sm_levers.h"
 #include "gemm_sm_ref.h"
 #include "kernels/kernels.h"
 #include "l0/cmdlist.h"
@@ -829,6 +831,100 @@ int run_levers(l0::Context& ctx, const Opts& o) {
   return 0;
 }
 
+// ================================ prod (plan 28b) ============================================
+// The production gemm_sm rows (kernels::kSmallMTuning) and their lever alternates (gemm_sm_levers.h) per Qwen3.8
+// shape at each M >= 2 of --m, interleaved with today's gemv at M = 1 and at M: the lever decision of plan 28b at
+// every M, and the GEMM sum of a token through the production rows against gemv's at M = 1 (spec 28 §6 (a)).
+std::unique_ptr<Launch> make_prod(l0::Context& ctx, const kernels::SmallMTuning& t, uint32_t M) {
+  auto L = std::make_unique<Launch>();
+  L->name = kernels::gemm_sm_variant(M, t);
+  L->M = M;
+  L->mod = std::make_unique<l0::Module>(ctx, kernels::path(L->name));
+  L->k = std::make_unique<l0::Kernel>(*L->mod, kernels::gemm_sm_entry(t));
+  L->k->group_size(kernels::gemm_sm_wg_size(t));
+  L->gx = t.N / kernels::gemm_sm_cols(t);
+  L->gy = kernels::gemm_sm_grid_y(t);
+  L->S = kernels::gemm_sm_out_s(t);
+  return L;
+}
+int run_prod(l0::Context& ctx, const Opts& o) {
+  l0::Queue q(ctx);
+  l0::Fence f(q);
+  box_line();
+  std::printf("prod: the production gemm_sm rows and their lever alternates, %u rounds interleaved after 3 warm-up "
+              "executions per list, with gemv at M = 1 and at M\n", o.rounds);
+  std::map<std::string, std::map<uint32_t, double>> ctl, prod_us, best_us;
+  std::vector<const Shape*> done;
+  for (const Shape* sp : pick_shapes(o, false)) {
+    const Shape& s = *sp;
+    const unsigned lay = s.kind == 2 ? 2 : s.L;
+    const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.kind == 2 ? 1 : s.S, lay);
+    if (!t) { std::printf("%s: no kSmallMTuning row\n", s.name); continue; }
+    std::vector<kernels::SmallMTuning> alts;
+    for (const kernels::SmallMTuning& a : gemm_sm::lever_rows())
+      if (a.K == s.K && a.N == s.N && a.layout == lay && kernels::gemm_sm_variant(8, a) != kernels::gemm_sm_variant(8, *t))
+        alts.push_back(a);
+    Inputs in;
+    in.sh = &s;
+    make_random_weights(in, 42 + s.K + s.N);
+    upload(ctx, in, true);
+    set_rows(ctx, in, random_rows(kMaxM, s.K, 5 + s.K));
+    const uint32_t nl = launches_for(s, o.launches);
+    std::printf("\n## %s - %u x %u, %u layers\n\n| kernel | M | us | / gemv M=1 (range) | / gemv M | / production (range) |\n"
+                "|---|---|---|---|---|---|\n", s.name, s.K, s.N, s.layers);
+    auto ctl1 = make_timed(ctx, make_control(ctx, s, 1), in, nl);
+    for (uint32_t M : o.ms) {
+      if (M < 2) continue;
+      auto ctlM = make_timed(ctx, make_control(ctx, s, M), in, nl);
+      bool g256 = t->grf256;
+      if (!grf_ok(kernels::gemm_sm_variant(M, *t), g256) ) continue;
+      auto pr = make_timed(ctx, make_prod(ctx, *t, M), in, nl);
+      std::vector<std::unique_ptr<Timed>> al;
+      for (const auto& a : alts) {
+        const std::string n = kernels::gemm_sm_variant(M, a);
+        if (!file_exists(kernels::path(n))) { std::printf("| %s | %u | NO BINARY |\n", n.c_str(), M); continue; }
+        if (!grf_ok(n, a.grf256)) continue;
+        al.push_back(make_timed(ctx, make_prod(ctx, a, M), in, nl));
+      }
+      std::vector<Timed*> ts = {ctl1.get(), ctlM.get(), pr.get()};
+      for (auto& a : al) ts.push_back(a.get());
+      interleave(q, f, ts, o.rounds);
+      const double c1 = median(ctl1->us), cm = median(ctlM->us), pu = median(pr->us);
+      ctl[s.key][1] = c1;
+      prod_us[s.key][M] = pu;
+      double best = pu;
+      std::printf("| %s (gemv) | %u | %.1f | %.4f (%s) | 1 | - |\n", ctlM->L->name.c_str(), M, cm,
+                  median(ratios(*ctlM, *ctl1)), range_str(ratios(*ctlM, *ctl1)).c_str());
+      std::printf("| **%s** (production) | %u | %.1f | %.4f (%s) | %.4f | 1 |\n", pr->L->name.c_str(), M, pu,
+                  median(ratios(*pr, *ctl1)), range_str(ratios(*pr, *ctl1)).c_str(), median(ratios(*pr, *ctlM)));
+      for (auto& a : al) {
+        const double u = median(a->us);
+        best = std::min(best, u);
+        std::printf("| %s | %u | %.1f | %.4f (%s) | %.4f | %.4f (%s) |\n", a->L->name.c_str(), M, u,
+                    median(ratios(*a, *ctl1)), range_str(ratios(*a, *ctl1)).c_str(), median(ratios(*a, *ctlM)),
+                    median(ratios(*a, *pr)), range_str(ratios(*a, *pr)).c_str());
+      }
+      best_us[s.key][M] = best;
+      std::fflush(stdout);
+    }
+    done.push_back(&s);
+  }
+  std::printf("\n## the GEMM sum of a token (layers x median us, the head once) - derived\n\n"
+              "| M | gemv M=1 sum us | production sum us | x gemv M=1 | best-of-alternates x gemv M=1 |\n|---|---|---|---|---|\n");
+  double base = 0;
+  for (const Shape* s : done) base += s->layers * ctl[s->key][1];
+  for (uint32_t M : o.ms) {
+    if (M < 2) continue;
+    double p = 0, b = 0;
+    for (const Shape* s : done) {
+      p += s->layers * prod_us[s->key][M];
+      b += s->layers * best_us[s->key][M];
+    }
+    std::printf("| %u | %.1f | %.1f | %.4f | %.4f |\n", M, base, p, p / base, b / base);
+  }
+  return 0;
+}
+
 // ================================ numerics ==================================================
 std::vector<uint32_t> read_ids(const std::string& p) {
   std::vector<uint32_t> v;
@@ -1066,6 +1162,7 @@ int main(int argc, char** argv) {
   if (o.mode == "shapes") return run_shapes(ctx, o);
   if (o.mode == "levers") return run_levers(ctx, o);
   if (o.mode == "numerics") return run_numerics(ctx, o);
+  if (o.mode == "prod") return run_prod(ctx, o);
   std::fprintf(stderr, "unknown mode %s\n", o.mode.c_str());
   return 2;
 }

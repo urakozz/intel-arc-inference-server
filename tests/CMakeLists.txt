@@ -328,6 +328,25 @@ add_executable(gemm_sm_ref_test kernels/gemm_sm_ref_test.cc)
 target_include_directories(gemm_sm_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 add_test(NAME gemm_sm_ref_test COMMAND gemm_sm_ref_test)
 
+# Spec 28b: the production small-M GEMM. gemm_sm_names_test (host): kernels::kSmallMTuning against the CMake
+# block's binaries. gemm_sm_test (device): N2 against fp64 and gemv, N3 property R, every row at every built M.
+get_property(B70_GEMM_SM_KERNELS GLOBAL PROPERTY B70_GEMM_SM_KERNELS)
+if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8)
+  add_executable(gemm_sm_names_test kernels/gemm_sm_names_test.cc)
+  target_include_directories(gemm_sm_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  b70_target_kernel_dir(gemm_sm_names_test)
+  add_test(NAME gemm_sm_names_test COMMAND gemm_sm_names_test ${B70_GEMM_SM_KERNELS})
+
+  add_executable(gemm_sm_test kernels/gemm_sm_test.cc)
+  target_include_directories(gemm_sm_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gemm_sm_test PRIVATE b70_l0)
+  b70_target_kernel_dir(gemm_sm_test)
+  add_dependencies(gemm_sm_test ${B70_GEMM_SM_KERNELS})
+  add_test(NAME gemm_sm_test COMMAND gemm_sm_test)
+  set_tests_properties(gemm_sm_test PROPERTIES TIMEOUT 1800)
+endif()
+
 add_executable(gemv_test kernels/gemv_test.cc)
 target_include_directories(gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_test PRIVATE b70_l0)

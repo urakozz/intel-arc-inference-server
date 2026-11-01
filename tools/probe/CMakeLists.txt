@@ -774,6 +774,16 @@ list(APPEND PSM_TARGETS kernel_psm_ctl_gemv_M16_K5120_N16384_S1_L1 kernel_psm_ct
      kernel_psm_ctl_gemv_M16_K5120_N14336_S2_L0 kernel_psm_ctl_gemv_M16_K5120_N34816_S8_L0
      kernel_psm_ctl_gemv_M16_K17408_N5120_S4_L0 kernel_psm_ctl_gemv_i8w_M16_K5120_N248320
      kernel_psm_ctl_gemv_bf16_M16_K5120_N128_C16_S16)
+# Spec 28b (plan 28b): the lever alternates of the production gemm_sm rows (tests/kernels/gemm_sm_levers.h, the
+# same order) at M = 2..8 and 16, from src/kernels/gemm_sm.cl (add_gemm_sm_variant / gemm_sm_rows, src/kernels/
+# CMakeLists.txt) - probe_small_m prod times them against the production rows, gemm_sm_test --levers holds them to
+# N2 / N3. Probe-only names: nothing binds one unless kernels::kSmallMTuning adopts it (src/kernels builds it then).
+set(GEMM_SM_TARGETS "")
+set(GEMM_SM_LEVERS "5120 16384 1 1" "5120 16384 1 1 MG" "6144 5120 4 0 B2D" "5120 14336 2 0 B2D" "5120 34816 8 0"
+                   "5120 34816 1 0 WG MG" "17408 5120 4 0 B2D" "5120 248320 1 2")
+set(_psm_lever_m 2 3 4 5 6 7 8 16)
+gemm_sm_rows(GEMM_SM_LEVERS _psm_lever_m)
+list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
 add_custom_target(psm_kernels DEPENDS ${PSM_TARGETS})
 
 add_executable(probe_small_m probe_small_m.cc)
