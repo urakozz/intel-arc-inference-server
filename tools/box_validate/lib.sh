@@ -69,9 +69,10 @@ bv_field() {   # bv_field ID FIELD  (row sel kind needs after title)
   esac
 }
 # bv_builds ID - the stage's body builds in the tree's build dir (cmake / ocloc): two
-# orchestrators on one tree build one at a time (<state root>/.build.lock)
+# orchestrators on one tree build one at a time (<state root>/.build.lock). grep reads all
+# of its input (not -q): under pipefail an early exit can SIGPIPE declare and flip the answer.
 bv_builds() {
-  declare -f "$(bv_fn "$1")" 2> /dev/null | grep -qE 'cmake (--build|-S)|(^|[^A-Za-z_./-])ocloc |tools/box\.sh build'
+  declare -f "$(bv_fn "$1")" 2> /dev/null | grep -E 'cmake (--build|-S)|(^|[^A-Za-z_./-])ocloc |tools/box\.sh build' > /dev/null
 }
 # bv_card_index D - D is one device index (a card lock needs one: DEVICE=0,1 takes the box)
 bv_card_index() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; return 0; }
