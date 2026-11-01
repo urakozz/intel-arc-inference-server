@@ -1,6 +1,8 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
-> DROPPED (operator, 2026-10-27): support removed from the engine in 0219cc2 (26c) and 99adbb0 (26a / 26b); kept for the record.
+> RESTORED (operator, 2026-11-01 - reverses the 2026-10-27 drop): the engine code is back on branch bolt-spec-restore (reverts of 99adbb0 and 0219cc2 onto main). Not restored: the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_d1.py, interleaved with the dropped Muse form) and the stages that need it (r63 accept / union / vllmref / verdict, r64 d1 / d1_ref).
+>
+> Was: DROPPED (operator, 2026-10-27): support removed from the engine in 0219cc2 (26c) and 99adbb0 (26a / 26b); kept for the record.
 >
 > Reusable later (revive from git: `git show c57e08e:<path>` - c57e08e, this branch's parent on main, is the last
 > commit that has all of it):
