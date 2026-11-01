@@ -3662,6 +3662,63 @@ st_r66_chunk() {
 }
 
 # ======================================================================================
+row 68 "spec 28a - the small-M GEMM P0: Qwen3.8's decode linears at M = 1 / 2 / 4 / 8 / 16 (gemv vs bf16 / i8xi4 DPAS stand-ins), the verify step's GEMV / non-GEMV split at M = 1..8, numerics and row independence, the go / no-go line (plan 28a)"
+rownote 68 "Timed stages need the idle protocol (both cards free of DRM holders). Hand back: the shape table, the attribution table, the numerics lines; they fill docs/probe-small-m-gemm-<date>.md and spec 28 §9."
+rownote 68 "Run first on 2026-11-01 as busy-box timing on one card (operator ruling: the other card and the CPU busy) - the record's provisional line; these stages are the quiet-box re-check. r68.check is every stand-in variant against the fp64 reference before any timing (it is what the busy-box session ran first)."
+stage r68.k0       68 default cpu  -           g0.sha,g0.bitwise,g0.suite "G0: no src/ binary changes (the stand-ins are tools/probe's; build_verify's optional ProfileEvents adds no command line)"
+st_r68_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r68.host     68 default cpu  -           -                     "gemm_sm_ref_test"
+st_r68_host() {
+  run_tests '^gemm_sm_ref_test$'
+  finish
+}
+stage r68.build    68 default cpu  -           g0.build              "probe_small_m and its 347 psm_* binaries (build); probe_verify_m in build-extra-m (-DB70_DECODE_EXTRA_M=ON), -j\$JOBS"
+st_r68_build() {
+  chk "cmake --build build -j$JOBS --target probe_small_m probe_mtp_steps" "probe_small_m and its psm_* binaries"
+  chk "cmake -S . -B build-extra-m -DCMAKE_BUILD_TYPE=Release -DB70_DECODE_EXTRA_M=ON $CMAKE_ARGS > /dev/null && cmake --build build-extra-m -j$JOBS --target probe_verify_m" "build-extra-m: probe_verify_m (B70_DECODE_EXTRA_M)"
+  finish
+}
+stage r68.check    68 default card -           r68.k0,r68.build      "probe_small_m check: every psm_* variant (bf16 / i8, wB / wA, levers, S sweep, M 1..8 and 16) against the fp64 reference, the quantiser bitwise, property R on random rows"
+st_r68_check() {
+  chk "build/tools/probe/probe_small_m check --shape all" "the check"
+  grab_all check '^check: |FAIL|NO BINARY|GRF ' 200
+  finish
+}
+stage r68.shapes   68 default gpu  -           r68.check             "probe_small_m shapes: every shape at M 1/2/4/8/16, gemv vs bf16 and i8xi4 stand-ins (both orientations), then the levers and the S sweep at M 8; idle, interleaved, median of 5"
+st_r68_shapes() {
+  idle before
+  chk "build/tools/probe/probe_small_m shapes --shape all --m 1,2,4,8,16 --rounds 5" "the shape table"
+  chk "build/tools/probe/probe_small_m levers --shape all --rounds 5" "the levers and the S sweep at M = 8"
+  idle after
+  grab_all shapes '^\| |^box load|^## ' 400
+  finish
+}
+stage r68.attrib   68 default gpu  qwen        r68.build                "probe_verify_m --verify8 at depth 4096 / 32768: the verify step and the per-family table at M 1..8 (and r29.cost's arm if it has not run)"
+st_r68_attrib() {
+  idle before
+  chk "build-extra-m/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 4096 --replays 32 --rounds 3" "verify8 at 4096"
+  chk "build-extra-m/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 32768 --replays 32 --rounds 3" "verify8 at 32768"
+  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8" "r29.cost's arm (verify M = 1..8 pairs)"
+  idle after
+  grab_all attrib '^\| |^1v|^1p|^verify|^grouped|^the non-GEMV' 300
+  finish
+}
+stage r68.numerics 68 default card qwen        r68.build                "probe_small_m numerics: N2 against the fp64 reference and gemv on layer 62 / 63's weights with real and random rows, property R (1000 trials a shape and arm); the i8xi4 logit error (oracle image) stays a manual step"
+st_r68_numerics() {
+  chk "build/tools/probe/probe_small_m numerics $SNAP_QWEN --shape all --trials 1000" "numerics"
+  grab_all numerics '^\| |^- property R|^numerics:|^real rows' 300
+  finish
+}
+stage r68.verdict  68 manual  -    -           r68.shapes,r68.attrib,r68.numerics "spec 28 §9: the GO / NO-GO line by spec 28 §6"
+st_r68_verdict() {
+  say "# derived verify(8) = r68.attrib's non-GEMV ms at M = 8 + r68.shapes' GEMM sum at M = 8 (the arm and S per shape chosen), in plain steps (1v's M = 1 step)"
+  say "# GO: (a) sum(8) <= 1.25 x gemv's sum(1), (b) verify(8) <= ~1.4 steps, (c) N2 + N3 pass; 1.4-1.6 the operator's call; NO-GO otherwise"
+}
+
+# ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
 rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
 stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, prefill_replay_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
