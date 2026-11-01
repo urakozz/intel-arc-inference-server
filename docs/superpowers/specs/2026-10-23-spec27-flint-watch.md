@@ -1,6 +1,6 @@
 # Spec 27 - Recursive Flint (`flint`): a watched candidate
 
-**Status (2026-11-01): SUPERSEDED - the operator approved the build on 2026-11-01; the full spec is `2026-11-01-spec27-flint-design.md` (plans `docs/superpowers/plans/2026-11-01-spec27{a,q,b,c,d,e,f,g}-*.md`). The text below is kept as the 2026-10-23 record. Status then: WATCHED - nothing planned or built.** The operator's ruling (2026-10-23, option 1): Flint is
+**Status (2026-11-01): SUPERSEDED - the operator approved the build on 2026-11-01; the full spec is `2026-11-01-spec27-flint-design.md` (plans `docs/superpowers/plans/2026-11-01-spec27{a,q,b,c,d,e,f,g}-*.md`); decided the same day (D3): context 262,144 with int8 KV, nothing beyond it. The text below is kept as the 2026-10-23 record. Status then: WATCHED - nothing planned or built.** The operator's ruling (2026-10-23, option 1): Flint is
 recorded as a candidate beside LFM2.5 (spec 24), which stays; the decision between them is made on OUR numbers - the
 A4 tool-call set (plus a small SWE-style set) run through b70-serve on the card for both - not on the model cards.
 A full spec (facts, CPU reference, quant, descriptor / loader, decode, prefill, serving - the spec 24 shape) is written

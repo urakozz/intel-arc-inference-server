@@ -11,7 +11,7 @@
 ## Global Constraints
 - Branch `spec27b-flint-loader`; signed commits; no merge, no push; box tree automatic, `tools/box.env` never printed or committed; every box job under `~/b70-gpu.lock`; everything under `~/b70`.
 - **No existing loader behaviour changes:** every existing loader / model test stays green and every refusal test still refuses; new code beside the old (`flint_*` files). `quant.cc` relaxations, if any are needed (dense-layer shapes, a fp32 router), are exact and each gets a test that the previous refusal still fires for the old shapes.
-- The descriptor refuses, each by name: another `model_type`, hidden, head dims; a layer table that disagrees between `layer_types`, `mlp_only_layers` and `no_rope_layer_indices`; `softmax_type` other than `learnable`; `router_score_function` other than sigmoid; `norm_topk_prob` false; `use_sliding_window` false; `tie_word_embeddings` true.
+- The descriptor refuses, each by name: another `model_type`, hidden, head dims; a layer table that disagrees between `layer_types`, `mlp_only_layers` and `no_rope_layer_indices`; `softmax_type` other than `learnable`; `router_score_function` other than sigmoid; `norm_topk_prob` false; `use_sliding_window` false; `tie_word_embeddings` true; `max_position_embeddings` other than 262,144 (the max-len cap, D3, is read from it).
 
 ---
 
@@ -26,14 +26,14 @@
 
 ### Task 3: layouts and the host repack
 **Files:** create `src/loader/flint_layout.h`, `src/loader/flint_repack.{h,cc}`, tests.
-- [ ] **Step 1:** the layout-1 int4 byte formulas for qkv (N 5120), o, dense gate||up (N 12288) and down, routed gate||up / down blocks x 256, shared gate||up (N 2048) / down (K 1024). The shared pair is **its own allocation** (its I differs from the routed I, so it is not block 256 of the routed allocation as in Kolibri / Ornith). The router (bf16 tiled, or fp32 per the header facts), norms and q / k norms (dtype per facts), sinks fp32 [32] per layer.
+- [ ] **Step 1:** the layout-1 int4 byte formulas for qkv (N 5120), o, dense gate||up (N 12288) and down, routed gate||up / down blocks x 256, shared gate||up (N 2048) / down (K 1024). The shared pair is **its own allocation** (its I differs from the routed I, so it is not block 256 of the routed allocation as in Kolibri / Ornith). The router bf16 tiled for `gemv_bf16` (bf16 in the checkpoint, read in the spec 27 review), norms and q / k norms widened from bf16 to the fp32 `norm_w` the norm kernels take, sinks widened from bf16 to fp32 [32] per layer. The shared expert's three linears are laid out for `gemv.cl` (gate‖up N 2048, down K 1024) - spec 27 section 2's dense path - with the two-slot routed form kept possible (27c decides; the repack is a function of the form).
 - [ ] **Step 2: failing tests** (repack of a tiny int4 -> the bytes the kernels expect, bitwise against an independent Python repack; per-expert tensors read by name from the shard index with no assumption of expert-to-shard binding; the qzeros check re-used). **Step 3: implement; commit.**
 
 ### Task 4: the loader (device half) and the memory plan
 **Files:** create `src/loader/flint_loader.{h,cc}`, `src/runtime/flint/flint_sizes.{h,cc}`, `src/runtime/flint/flint_buffers.{h,cc}`; modify `src/cli/b70_decode.cc`, `src/cli/b70_serve.cc` (a dispatch branch on `model_type == "flint"` beside Kolibri, a refusal message until the engine lands).
 - [ ] **Step 1:** `is_flint_checkpoint`, `load_flint`: read order by layer, one reused host scratch per layer (the `load_moe_layer` pattern), the int8 head quantised at load (`lm_head_int8`), the embedding bf16 verbatim; the unconsumed-tensor report must be **empty** on the synthetic and on the real index.
 - [ ] **Step 2:** `flint_sizes`: weights, KV (bf16 28,672 / int8 14,560 per position, rings 4096 x 35 x 2048 B), decode and prefill scratch, snapshot sizes; `runtime::plan`-compatible max-len arithmetic in 256-quanta with the default 1.5 GB reserve; the `--pp 2` split by bytes through Kolibri's pp path (the Qwen `require_split` GDN rule does not apply to this family: a test).
-- [ ] **Step 3: tests** (host): sizes against spec 27 section 3; plan on 32 GB and on 2 x 32 GB; max-len at int8 and bf16 matches the section 3 table within the stated reserve; **commit.**
+- [ ] **Step 3: tests** (host): sizes against spec 27 section 3; plan on 32 GB and on 2 x 32 GB; max-len at int8 and bf16 matches the section 3 table within the stated reserve and is capped at 262,144 (D3; a request above it refused by name); **commit.**
 
 ### Task 5: the load on the card (box)
 - [ ] **Step 1:** the synthetic `--layers 4`, then full width, then the real quant: loads, VRAM after load vs the plan (+/- 2%), host peak RSS, cold and warm load seconds (box-local copy; USB copies are the operator's). **Step 2:** `--pp 2` load. **Step 3:** record in the spec's "27b as built" section; a box queue row only if asked. **Commit.**
