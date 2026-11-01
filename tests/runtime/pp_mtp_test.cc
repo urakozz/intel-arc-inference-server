@@ -22,11 +22,13 @@
 // argv: [1] the checkpoint, [2] `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form
 // (pp_mtp_kv8_test). Exits 77 (SKIP) with fewer than two GPUs or without peer access.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -48,6 +50,9 @@ using Bytes = std::vector<uint8_t>;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kIters = 64;
 constexpr uint32_t kHooked = 4103;   // 2048 + 2048 + 7: two mid-prompt block ends
+// A device-1 chunk of 2048 rows is well under a second at these lengths (one card's whole chunk
+// is ~1 s at 4k, docs/BENCHMARKS.md); the hook waits longer than that.
+constexpr uint32_t kHookSleepMs = 1500;
 
 // What a run leaves, compared bitwise across the engines.
 struct Record {
@@ -104,9 +109,6 @@ struct TwoCards {
     }
   }
 };
-
-const loader::LoadedModel& model_of(runtime::Engine& e) { return e.model(); }
-const loader::LoadedModel& model_of(runtime::PipelineEngine& e) { return e.model(0); }
 
 template <class E>
 Bytes state_of(E& e) {
@@ -173,33 +175,20 @@ void m2(E& e, W& w, Record& r) {
   w.check_in_step("M2");
 }
 
-// The head's KV row at `end - 1` in a mid-prompt snapshot: one card has not written it yet (the
-// next chunk's step_mtp_kv writes it, from the pair (h_{end-1}, x_end)); under --pp 2 that
-// chunk may already be running on device 1 when the hook reads the KV. Nothing reads the row
-// before rewriting it after a restore (the next prefill chunk or verify fills it first), so the
-// comparison blanks it in both records. Host layout (Engine's kv_runs): per tensor the FA
-// layers' rows, the head's rows, [the layers' scales, the head's scales].
-void blank_head_row(Bytes& kv, const runtime::KvLayout& L, uint32_t fa, uint32_t end) {
-  const size_t rows = size_t(end) * L.row_bytes(), scales = size_t(end) * L.scale_row_bytes();
-  const size_t tensor = (fa + 1) * (rows + scales);
-  for (size_t t = 0; t < 2; ++t) {
-    uint8_t* base = kv.data() + t * tensor;
-    std::memset(base + fa * rows + size_t(end - 1) * L.row_bytes(), 0, L.row_bytes());
-    if (scales != 0)
-      std::memset(base + (fa + 1) * rows + fa * scales + size_t(end - 1) * L.scale_row_bytes(), 0,
-                  L.scale_row_bytes());
-  }
-}
-
-// Spec 7 with MTP: a hooked prefill; the hook saves the state and the KV (the head's layer too).
+// Spec 7 with MTP: a hooked prefill; the hook saves the state and the KV (the head's layer too),
+// compared WHOLE. The head's KV row at `end - 1` of a mid-prompt snapshot is not written yet on
+// one card (the next chunk's step_mtp_kv writes it, from the pair (h_{end-1}, x_end)); under
+// --pp 2 that chunk may run on device 1 while the hook reads the KV, so the pipeline reads the
+// row from a shadow taken before it (PipelineEngine::snap_head_kv_). The row is not always
+// rewritten after a restore: a block below a deeper snapshot keeps it (pp_prefix_gpu_mtp_test's
+// sequences e and f, whose sessions differed there). A mid-prompt hook sleeps first, so the
+// next chunk has finished on device 1 before the KV is read - the race made certain, not timed.
 template <class E>
 void hooked(E& e, const std::vector<uint32_t>& ids, Record& r) {
-  const model::ModelDesc& d = *model_of(e).desc;
-  const runtime::KvLayout L = runtime::kv_layout(kMaxLen, d, 1, runtime::default_kv_cache());
   e.set_block_hook([&](uint32_t end, bool) {
+    if (end < ids.size()) std::this_thread::sleep_for(std::chrono::milliseconds(kHookSleepMs));
     Bytes b = state_of(e);
     Bytes kv = kv_of(e, end);
-    if (end < ids.size()) blank_head_row(kv, L, d.fa_layers, end);   // a mid-prompt block end
     b.insert(b.end(), kv.begin(), kv.end());
     r.hooked.push_back(std::move(b));
   });

@@ -279,7 +279,8 @@ class PipelineEngine {
   // once BOTH devices have finished the block - the next chunk may already be running - and
   // save_state() inside it reads the block end's shadows (each device copies its GDN state
   // and conv ring there after a hooked chunk); save_kv() reads [0, end), which later chunks
-  // do not write. pos() reads the block end. A hook that throws leaves the state at its end
+  // do not write - except, MTP on, the head's row end - 1 (the next chunk's step_mtp_kv
+  // starts there), which save_kv reads from its shadow. pos() reads the block end. A hook that throws leaves the state at its end
   // (the lists drain, the shadows go back), as on one card.
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
@@ -351,6 +352,20 @@ class PipelineEngine {
   std::array<const l0::Mem*, kPpDevices> snap_gdn_{}, snap_conv_{};
   // Spec 16d: and device 1's shadow of the head's hidden row (MTP on).
   const l0::Mem* snap_hh_ = nullptr;
+  // And device 1's shadow of the head's KV row at the block end - 1 ([K row][V row][K scale]
+  // [V scale]): the next chunk's step_mtp_kv writes that row (it reads x_end), and that chunk
+  // may run while the hook does; save_kv over a range ending at snap_end_ reads the row here,
+  // as it stood before the next chunk - what one card's hook, which runs between chunks, reads.
+  const l0::Mem* snap_head_kv_ = nullptr;
+  uint32_t snap_end_ = 0;
+  // The head's KV at one position as the shadow holds it: {device bytes, offset in the
+  // shadow, size} for the K row, the V row, then (int8) the K and V scales - size 0 when absent.
+  struct HeadRowPart {
+    uint8_t* dev;
+    size_t shadow_off, bytes;
+  };
+  static std::array<HeadRowPart, 4> head_row_parts(const MtpBuffers& m, uint32_t pos);
+  static size_t head_row_bytes(const MtpBuffers& m);   // the shadow's size: 2 x (row + scales)
   std::vector<uint32_t> draft_ids_;
   TapDrafter* drafter_ = nullptr;   // spec 19d: on device 1, borrowed
   static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
