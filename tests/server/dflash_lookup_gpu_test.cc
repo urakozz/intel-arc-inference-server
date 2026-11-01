@@ -265,9 +265,12 @@ int main(int argc, char** argv) {
     ok &= g.lookup_iters > 0 && bitwise && g.ids == plain.ids;
     bool did_cut = false;
     const Gen c = generate_lookup(lk, prompt, kGen, greedy, window, /*cut=*/true, &did_cut);
-    const bool rf4c = did_cut && c.ids == plain.ids;
-    std::printf("RF4: a lookup burst truncated to 2 ids, then continued: %s\n",
-                !did_cut ? "no lookup burst of 3 to truncate" : rf4c ? "equals the plain run" : "DIFFERS");
+    // the partial commit after truncate_to (projection of rows 0..m only) must leave the same warm ring
+    const bool ring_cut = ring_of(lk, d) == ring_plain;
+    const bool rf4c = did_cut && c.ids == plain.ids && ring_cut;
+    std::printf("RF4: a lookup burst truncated to 2 ids, then continued: %s; the ring %s the plain loop's\n",
+                !did_cut ? "no lookup burst of 3 to truncate" : c.ids == plain.ids ? "ids equal the plain run" : "ids DIFFER",
+                ring_cut ? "BITWISE" : "NOT bitwise");
     ok &= rf4c;
   }
 

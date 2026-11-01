@@ -130,7 +130,7 @@ struct EngineAdapter : server::EngineIface {
   static constexpr uint32_t kMaxIterK = 7;
 
   void reset() override {
-    pending_ = false;   // the session is discarded; nothing to commit
+    pending_ = pending_lookup_ = false;   // the session is discarded; nothing to commit
     eng.reset();
   }
 
@@ -404,6 +404,7 @@ struct EngineAdapter : server::EngineIface {
     out.insert(out.end(), d.begin(), d.begin() + a.accepted);
     gen_tokens_ += static_cast<uint32_t>(out.size());
     lk_ids_ += out.size();
+    pending_lookup_ = true;   // a truncate_to of this run takes its dropped ids off lk_ids_
     return out;
   }
 
@@ -420,13 +421,16 @@ struct EngineAdapter : server::EngineIface {
                              ", " + std::to_string(pending_pos_ + pending_j_ + 1) + "]");
     const uint32_t m = p - pending_pos_ - 1;
     gen_tokens_ -= pending_j_ - m;
+    if (pending_lookup_) lk_ids_ -= pending_j_ - m;   // spec 19f: the lookup share counts kept ids only
     pending_ = false;
+    pending_lookup_ = false;
     eng.commit(m, m < pending_j_ ? pending_drafts_[m] : pending_next_);
   }
 
   void flush_commit() {
     if (!pending_) return;
     pending_ = false;
+    pending_lookup_ = false;
     eng.commit(pending_j_, pending_next_);
   }
 
@@ -452,7 +456,7 @@ struct EngineAdapter : server::EngineIface {
     eng.save_state(host);
   }
   void load_state(const void* host, uint32_t p) override {
-    pending_ = false;
+    pending_ = pending_lookup_ = false;
     eng.load_state(host, p);
   }
   void save_kv(uint32_t b, uint32_t e, void* host) override {
@@ -504,6 +508,7 @@ struct EngineAdapter : server::EngineIface {
   bool lookup_ = false;                    // spec 19e: step_drafts() on
   runtime::TapDrafter* df_ = nullptr;   // spec 19c: step_many() drafts with it (the engine's drafter)
   bool dflash_lookup_ = false;          // spec 19f: step_drafts_or_many() on
+  bool pending_lookup_ = false;         // spec 19f: the pending run was a lookup verify
   uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;   // spec 19f, since the last prefill
   std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
