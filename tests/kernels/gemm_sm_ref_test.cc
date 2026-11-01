@@ -84,6 +84,11 @@ int main() {
     CHECK(gemm_sm::n2(over, r, b, 1, 3).over == 1);
     std::vector<float> zero_row = {1.f, -2.f, 1e-30f};   // bound 0 must be exactly 0
     CHECK(gemm_sm::n2(zero_row, r, b, 1, 3).over == 1);
+    // a NaN or infinite output never passes (an unwritten register, a broken dequant)
+    std::vector<float> nan_out = {std::nanf(""), -2.f, 0.f};
+    CHECK(!gemm_sm::n2(nan_out, r, b, 1, 3).pass());
+    std::vector<float> inf_out = {1.f, -INFINITY, 0.f};
+    CHECK(!gemm_sm::n2(inf_out, r, b, 1, 3).pass());
   }
   // 5: the i8 quantiser.
   {

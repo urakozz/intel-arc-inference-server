@@ -101,7 +101,7 @@ narrative, and the numbered guides cite them where they matter.
   M = 1..16 through gemv and small-M DPAS stand-ins (`probe_small_m`, 347 binaries), the verify step at M = 1..8 split
   into GEMV and non-GEMV (`probe_verify_m --verify8`), numerics and property R on layer 62 / 63's weights. Busy-box
   timing on one card (provisional): bf16 weights-on-B at M = 8 is 1.08x a token's M = 1 GEMV sum (today 3.10x);
-  verify(8) today 3.17 plain steps, derived with the stand-in 1.54 - the operator's call; attention at M = 8 is the
+  verify(8) today 3.17 plain steps, derived with the stand-in 1.54-1.58 - the operator's call; attention at M = 8 is the
   next lever (spec 28c). Quiet-box re-check set in §6.
 - [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
