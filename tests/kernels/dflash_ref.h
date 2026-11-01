@@ -22,7 +22,9 @@
 //                   rank summed in TOPK x QS lane slices then the QS partials ascending; argmax (ties: lower c) or
 //                   Gumbel-argmax: x = S / T - log(-log1p(-u)), u = murmur3(seed, p + j + 2^30, cand id) in fp32
 //   gemv_*()        the reused GEMVs' arithmetic: gemv_i8w (Σ q·x ascending, then · s), gemv_bf16 (Σ w·x
-//                   ascending; KSPLIT slices merged by the fixed pairwise tree)
+//                   ascending; KSPLIT slices merged by the fixed pairwise tree), gemv_int4 (spec 26b's int4 g64 arm:
+//                   gemv.cl at S 1 - per 64-k group eight 8-k dots summed in order, the group's sum x its f16 scale,
+//                   groups ascending)
 //
 // draft() chains them in the capture's order (runtime/dflash/dflash_capture.cc) over host copies of the weights in
 // their device forms; with Numerics::Reference every activation stays fp32 and the GEMVs are fp32 dot products over
@@ -410,6 +412,33 @@ inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit
   });
 }
 
+// gemv.cl (int4 g64, LAYOUT 1 or 0 - the same sums) at S 1 from the GPTQ-native form: qweight [K/8][N] (word (r, n)
+// holds k = 8r .. 8r + 7, k = 8r lowest) and f16 scales [K/64][N] - loader::rtn_int4_g64's output.
+inline void gemv_int4(const uint32_t* qw, const uint16_t* scales, uint32_t K, uint32_t N, const uint16_t* x,
+                      uint32_t M, float* out) {
+  std::vector<float> xf(size_t(M) * K);
+  for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
+  parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
+    for (uint32_t n = n0; n < n1; ++n)
+      for (uint32_t m = 0; m < M; ++m) {
+        const float* xr = &xf[size_t(m) * K];
+        float acc = 0.0f;
+        for (uint32_t g = 0; g < K / 64; ++g) {
+          float gacc = 0.0f;
+          for (uint32_t j = 0; j < 8; ++j) {
+            const uint32_t word = qw[size_t(g * 8 + j) * N + n];
+            float a = 0.0f;
+            for (uint32_t t = 0; t < 8; ++t)
+              a = a + float(int((word >> (4 * t)) & 0xFu) - 8) * xr[g * 64 + j * 8 + t];
+            gacc = gacc + a;
+          }
+          acc = acc + gacc * common::f16_to_f32(scales[size_t(g) * N + n]);
+        }
+        out[size_t(m) * N + n] = acc;
+      }
+  });
+}
+
 // --- the whole drafter --------------------------------------------------------------------------------------------
 enum class Numerics { Engine, Reference };
 
@@ -436,6 +465,8 @@ struct Lin {
   std::vector<int8_t> i8;
   std::vector<float> scales;
   std::vector<float> f32;   // row-major [N][K] (Reference)
+  std::vector<uint32_t> q4; // spec 26b: int4 g64 qweight [K/8][N] + f16 scales [K/64][N] (gemv_int4)
+  std::vector<uint16_t> s4;
   // y [M][N] = W x for M rows; xb the bf16 rows (Engine), xf the fp32 rows (Reference).
   void apply(const uint16_t* xb, const float* xf, uint32_t M, float* y) const {
     if (!f32.empty()) {
@@ -449,6 +480,8 @@ struct Lin {
       });
     } else if (!i8.empty()) {
       gemv_i8w(i8.data(), scales.data(), K, N, xb, M, y);
+    } else if (!q4.empty()) {
+      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y);
     } else {
       gemv_bf16(bf16.data(), K, N, ksplit, xb, M, y);
     }
