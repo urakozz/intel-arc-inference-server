@@ -186,6 +186,13 @@ inline N2 n2(const std::vector<float>& got, const std::vector<double>& refv,
     double dot = 0, gg = 0, rr = 0;
     for (uint32_t n = n0; n < n1; ++n) {
       const size_t i = size_t(m) * N + n;
+      if (!std::isfinite(got[i])) {   // NaN / inf never pass (NaN compares false everywhere below)
+        ++r.over;
+        r.max_ratio = 1e30;
+        r.min_cos = -1;
+        ratios.push_back(1e30);
+        continue;
+      }
       const double e = std::fabs(double(got[i]) - refv[i]);
       const double lim = std::ldexp(bound[i], -16);
       const double q = lim > 0 ? e / lim : (e == 0 ? 0.0 : 1e30);

@@ -242,10 +242,12 @@ docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they m
 - **The attribution (depth 4096):** today's verify(8) is **3.17 plain steps** (measured - r29.cost's arm ran:
   probe_mtp_steps 3.167, probe_verify_m 3.170; not the 2.62 extrapolated); its non-GEMV time is 19.35 ms (derived:
   the profiled share x the unprofiled step), 12.3 ms of it attention, which doubles from M = 7 to 8.
-- **(b) derived verify(8) = 19.35 + 27.46 ms = 1.535 plain steps** (1.50 with the levers, estimated).
+- **(b) derived verify(8) = 19.35 + 27.46 ms = 1.535 plain steps**; 1.58 when the stand-alone GEMM sum is charged
+  the 5.2 % today's GEMVs cost more inside the list (derived); 1.50 with the levers (estimated).
 - **(c) N2 and N3 pass:** 398 variant runs against fp64 (max 0.0034 of N2's bound); layer 62 / 63's real weights
   with real rows: 0.0125 of the bound against fp64, 0.026 against gemv, cosine 1.0000000; property R 0 differences
-  in 96,000 row-slices over 1000 trials a shape and arm.
+  in 96,000 row-slices over 1000 trials a shape and arm (base arms; the 2x8 / 8x4 work-group shapes across M too;
+  magic / prefetch / 256 GRF / other S built at M = 8 only - untested for R).
 
 **Provisional line: the operator's call** ((b) between 1.4 and 1.6). The GEMM is no longer what holds verify(8) up:
 the M = 8 attention build is (at the M = 1..7 attention slope, ~1.37 plain steps, estimated) - spec 28c.

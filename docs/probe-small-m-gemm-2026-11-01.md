@@ -164,7 +164,10 @@ against the fp64 reference: max |err| / (2^-16 sum|w x|) = 0.0034, min cosine 1.
 0.9999999); the controls 0.0039. The int arm: the device quantiser bitwise the host's; the kernel against the fp64 of
 its own quantised rows 0.002 of the bound; against the bf16 rows up to 58.7x the bound, min cosine 0.99995. Property
 R: every row of every multi-M configuration bitwise across M = 2..8 / 16 (grid and in-work-group, both orientations,
-both types) and with the other rows random (4 trials each). The ISA counts are §0's.
+both types) and with the other rows random (4 trials each). The ISA counts are §0's. After the branch review found
+that N2's checker let a NaN output through (NaN compares false), the checker was fixed (a non-finite output fails;
+gemm_sm_ref_test holds it) and both r68.check and r68.numerics were re-run on card 0 at 13:20-13:33: unchanged,
+398 runs 0 failures, numerics PASS.
 
 **r68.numerics** (`probe_small_m numerics <snap> --shape all --trials 1000`, card 0, 13:00-13:04): layer 62's qkv‖z
 and out_proj, layer 63's q‖k‖v / o_proj / gate‖up / down and the int8 head, as loaded; 32 real rows (two prompts of
@@ -195,9 +198,13 @@ for K 6144, and layer 63's silu(gate) x up of those rows, computed on the host, 
 - (a) **the GEMM sum at M = 8 = 1.083-1.100x** today's M = 1 sum (bf16 wB, production S, no lever): passes (<= 1.25).
 - (b) **derived verify(8)** = §2's non-GEMV time at M = 8 (19.35 ms) + (a)'s sum without a‖b (27.46 ms) = 46.81 ms =
   **1.535 plain steps** (30.50 ms): in the 1.4-1.6 band. With the levers combined (estimated, 26.30 ms): 1.50.
+  The two terms are not measured the same way: the GEMM sum is stand-alone lists, the non-GEMV time is in-list. At
+  M = 1 the same sum gives 25.35 + 3.83 = 29.18 ms against the measured 30.50 - today's GEMVs cost 5.2 % more in
+  the list (26.67 ms derived) than alone. Charging the stand-in the same 5.2 %: (19.35 + 1.052 x 27.46) / 30.50 =
+  **1.58** (derived) - still in the band, near its top. Both are given; the quiet-box re-check should settle which.
 - (c) N2 and N3 pass (§3).
 
-**Provisional line: the operator's call.** (a) and (c) pass; (b) is 1.54. What holds (b) up is not the GEMM: the
+**Provisional line: the operator's call.** (a) and (c) pass; (b) is 1.54-1.58. What holds (b) up is not the GEMM: the
 non-GEMV time at M = 8 is 19.35 of the 46.81 ms, and 12.3 ms of it (profiled) is attention, whose M = 7 -> 8 step
 doubles. At the attention's M = 1..7 slope (0.93 ms a row, profiled) verify(8) would be ~1.37 plain steps (estimated) -
 spec 28c's lever, not this spec's. Against today's measured verify(8) of 3.17 plain steps, the derived 1.54 is 2.07x
@@ -211,8 +218,13 @@ question 1 stands: gemv keeps M = 1); depth 32768's non-GEMV share is 50 % at M 
 
 - The quiet-box re-check (§6) replaces the provisional line.
 - The int arm's logit-level error (CPU oracle): not needed for the type rule (i8 is slower), recorded as not run.
-- 28b's per-shape levers (2x8 on gate‖up and the head, 256 GRF on qkv‖z, magic) need one combined measurement;
-  property R holds for each form (§3), and a per-shape in-work-group shape must stay one shape for every M >= 2.
+- 28b's per-shape levers (2x8 on gate‖up and the head, 256 GRF on qkv‖z, magic) need one combined measurement.
+  Property R is shown (§3) for the base arms (grid split-K, shift dequant, both types and orientations) and for the
+  2x8 / 8x4 in-work-group shapes across M; magic dequant, prefetch, 256 GRF and the S sweep were built at M = 8
+  only, so their row independence is untested here (expected by construction - nothing in them depends on M - but
+  28b must test it). A per-shape in-work-group shape must stay one shape for every M >= 2.
+- The check's references cover all columns up to N = 6144 and three 512-wide windows (start, middle, end) above
+  it (gate‖up 4.4 % of its columns, the head 0.6 %): "0 failures" is on those windows.
 
 ## 6. The quiet-box re-check set
 

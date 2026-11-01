@@ -586,7 +586,7 @@ int run_check(l0::Context& ctx, const Opts& o) {
           }
       }
       std::printf("- %s: %zu row-slices compared against M = %u, %zu differ %s\n", cfg.c_str(), cmp, Mref, diff,
-                  diff ? "**FAIL**" : "");
+                  diff ? "**FAIL**" : cmp == 0 ? "(NOT TESTED: built at one M only)" : "");
       if (diff) { ok = false; ++n_fail; }
     }
     // Property R with the other rows random: base arms at M = 16 (and 8), 4 trials.
