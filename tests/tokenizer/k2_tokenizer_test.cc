@@ -209,6 +209,22 @@ int main(int argc, char** argv) {
     CHECK_EQ(t.decode({250019}, false), std::string("<|ifm|im_end|>"));
   }
 
+  // The int4 repo's tokenizer.json sets truncation at 2048 ids; the engine must not apply it
+  // (no_truncation_test): the passkey prompt's shape at ~10k ids comes back whole, its tail -
+  // the question - included.
+  {
+    std::string text;
+    for (int i = 0; i < 400; ++i)
+      text += "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. ";
+    text += "What is the pass key? The pass key is";
+    const std::vector<uint32_t> ids = t.encode(text, false);
+    const std::vector<uint32_t> ids_bos = t.encode(text, true);
+    std::printf("long prompt: %zu ids (%zu with BOS)\n", ids.size(), ids_bos.size());
+    CHECK(ids.size() > 4096);
+    CHECK_EQ(ids_bos.size(), ids.size() + 1);
+    CHECK_EQ(t.decode(ids, false), text);
+  }
+
   int bad = check_cases(t, facts);
   bad += check_corpus(t, facts, dir);
   bad += check_renders(t, facts, dir, snapshot);
