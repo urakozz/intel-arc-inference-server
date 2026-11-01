@@ -34,15 +34,22 @@ std::vector<std::string> dflash_expected_names(const model::DFlashDesc& d);
 std::string dflash_canon(const std::string& name);
 
 // One linear in its device form: Bf16 - gemv_bf16's tiles [N/16][K/8][8][16] as uint16; Int8 - gemv_i8w's tiles
-// [N/16][K/16][16][16] as int8 + fp32 row scales [N].
+// [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 26b, the LiLiCorr drafter's DraftFormat::Int4G64) -
+// rtn's GPTQ words and f16 scales repacked into gemv.cl's layout-1 tiles [N/16][K/64][136] u32.
 struct DFlashHostLinear {
   model::WeightKind kind = model::WeightKind::Bf16;
   uint32_t K = 0, N = 0;
   std::vector<uint16_t> bf16;   // Bf16
   std::vector<int8_t> i8;       // Int8
   std::vector<float> scales;    // Int8
-  size_t bytes() const { return bf16.size() * 2 + i8.size() + scales.size() * 4; }
-  model::GemvShape shape() const { return {K, N, 1, 0}; }
+  std::vector<uint32_t> int4;   // Int4: layout-1 tiles
+  // Spec 26b, DraftFormat::Exact over an NVFP4 linear (the LiLiCorr drafter): the fp32 output scale per column - each
+  // part's global g over its rows (ll_gemv_bf16_g: out = (W' x) x gs[n]); empty for every other linear.
+  std::vector<float> gs;
+  size_t bytes() const {
+    return bf16.size() * 2 + i8.size() + scales.size() * 4 + int4.size() * 4 + gs.size() * 4;
+  }
+  model::GemvShape shape() const { return {K, N, 1, kind == model::WeightKind::Int4 ? 1u : 0u}; }
 };
 
 enum class DFlashLinear { Qkv, O, GateUp, Down, AttnKproj, MlpKproj };

@@ -28,13 +28,23 @@
 // v2: the codebooks, bf16 [vocab][sel_rank] each.
 namespace loader {
 
-enum class DraftFormat { Bf16, Int8 };
-const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8"
-bool parse_draft_format(const std::string& s, DraftFormat& out);
+// Spec 26b (the LiLiCorr drafter only - parse_lilicorr_draft_format; the other drafters' `--draft-format` spellings are
+// bf16 / int8): Int4G64 - our int4 g64 symmetric RTN, quantised at load by loader/rtn.h, stored in gemv.cl's layout 1
+// (common/repack.h repack_int4_layout1; S 1: the GEMV writes the [M][N] rows the df_* kernels read); Exact - the
+// drafter's NVFP4 linears as W' (bf16, exact) in gemv_bf16's tiles plus the tensor's global g as an fp32 output scale per
+// column (loader/nvfp4.h, src/kernels/dflash/ll_gemv_bf16_g.cl); its BF16 linears are Bf16's tiles.
+enum class DraftFormat { Bf16, Int8, Int4G64, Exact };
+const char* draft_format_name(DraftFormat f);                 // "bf16" | "int8" | "int4" | "exact"
+bool parse_draft_format(const std::string& s, DraftFormat& out);   // "bf16" | "int8"
+// Spec 26b: the LiLiCorr drafter's spellings - "exact" | "int8" | "int4" (also "int4g64"); "bf16" is not one (its NVFP4
+// linears have no bf16 form short of folding g, which is not exact - spec 26 §3).
+bool parse_lilicorr_draft_format(const std::string& s, DraftFormat& out);
 
-// One linear's device bytes: bf16 K N x 2; int8 K N + 4 N (the scales).
+// One linear's device bytes: bf16 (and exact) K N x 2; int8 K N + 4 N (the scales); int4 g64 layout 1 (N / 16) x
+// (K / 64) tiles of 136 u32 (K / 2 N + K / 32 N: the nibbles and the f16 scales, 4.25 bits a weight).
 inline size_t dflash_linear_bytes(uint32_t K, uint32_t N, DraftFormat f) {
-  return f == DraftFormat::Bf16 ? size_t(K) * N * 2 : size_t(K) * N + size_t(N) * 4;
+  if (f == DraftFormat::Int4G64) return size_t(N / 16) * (K / 64) * 136 * 4;
+  return (f == DraftFormat::Bf16 || f == DraftFormat::Exact) ? size_t(K) * N * 2 : size_t(K) * N + size_t(N) * 4;
 }
 
 struct DFlashBytes {

@@ -206,6 +206,9 @@ case "${1:-}" in
       bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
     have bolt_a4_ref "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt, 36 <name>.bf16.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 + a4-bf16)" \
       bash -c 'test "$(cat oracle-out-bolt-a4/SNAPSHOT 2>/dev/null)" = "$1" && test -s oracle-out-bolt-a4/set/manifest.json && test "$(ls oracle-out-bolt-a4/*.int4.txt 2>/dev/null | wc -l)" -eq 36 && test "$(ls oracle-out-bolt-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36' _ "$bolt_ours"
+    # Queue rows 64 / 65 (spec 26b / 26c): the LiLiCorr drafter, pinned (962 MB; a revision-pinned download writes no refs/main).
+    have lilicorr "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr @ 449d2414 (962 MB: hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1)" \
+      complete "$(bolt_snap "" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr 449d24140160b8e51871bfc0f0a7338abf640aa1)"
     # Spec 25b (queue row 59): the synthetic real-width checkpoints (bolt_synth.sh synth-ckpt: N 8 for the host tests, N 12
     # for the card tests - each in the GPTQ g128 spelling, its exact g64 expansion and a native g64; our export's small
     # files).

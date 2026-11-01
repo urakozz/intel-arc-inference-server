@@ -32,9 +32,13 @@ namespace runtime {
 
 class Engine;
 
-class TapDrafter {
+// Spec 23f / 26c: the target engine's side of a drafter, apart from the proposer's - what an engine's verify lists,
+// commit, prefill, reset and snapshots need (the methods below up to key()). runtime::bolt::BoltEngine holds a TapSink
+// (its drafter is runtime::dflash::LiliDrafter, whose proposer side is its own: the lattice walk); runtime::Engine and
+// runtime::PipelineEngine hold the TapDrafter below, which adds the Qwen3.8 proposer's calls.
+class TapSink {
  public:
-  virtual ~TapDrafter() = default;
+  virtual ~TapSink() = default;
   // The largest K one draft makes (the verify lists then go up to M = max_k() + 1 <= 8 rows).
   virtual uint32_t max_k() const = 0;
   // The target layers whose OUTPUT is tapped (ascending, each < the target's layer count), and the tap buffer:
@@ -60,6 +64,10 @@ class TapDrafter {
   // A 64-bit name for what the ring's bytes mean - the drafter's shapes, format and norm weights - which the prefix
   // store folds into every key, so a snapshot written beside one drafter is never restored beside another. Never 0.
   virtual uint64_t key() const = 0;
+};
+
+class TapDrafter : public TapSink {
+ public:
 
   // The proposer's side, for the serving loop (cli EngineAdapter, b70-decode): one block of k drafts at the
   // engine's pos into Control.cur_token[1..k] - greedy at temperature 0, sampled at `temperature` with `seed` -
