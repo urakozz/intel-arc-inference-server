@@ -12,6 +12,7 @@
 #include "l0/module.h"
 #include "loader/loader.h"
 #include "runtime/buffers.h"
+#include "runtime/gemv_kind.h"
 #include "runtime/pipeline_plan.h"
 
 namespace runtime {
@@ -119,9 +120,12 @@ struct CapturedStep {
 // `decode_attn()` and `B70_DECODE_ATTN` live in runtime/buffer_sizes.h, because the
 // pair also decides `attn_part`'s size.
 
+// Spec 28b: at M >= 2 every tuned int4 / int8 linear binds gemm_sm (runtime::gemv_kind, runtime/gemv_kind.h);
+// `opt` (tests and probes only) forces gemv or gemm_sm at every M - build, build_verify and build_verify_taps
+// take it, every other builder follows the rule.
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
-                   uint32_t M = 1);
+                   uint32_t M = 1, const CaptureOptions& opt = {});
 
 // The decode list's launch count (`CapturedStep::kernel_count` of `build`), which the
 // walk asserts on itself: embed_gather, 12 per dense layer (the input norm pair, the
@@ -160,7 +164,8 @@ size_t draft_launches(const model::ModelDesc& d);
 // `prof` (spec 28a, probe_verify_m --verify8): per-launch events exactly as build's - an
 // observer only; null (every engine call) appends the identical list it always did.
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof = nullptr);
+                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof = nullptr,
+                          const CaptureOptions& opt = {});
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i);
 
@@ -182,7 +187,7 @@ struct TapVerify {
   std::vector<uint32_t> layers;        // the tapped layers' OUTPUTS: ascending, each < the model's layers
 };
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                               const TapVerify& tv, uint32_t M);
+                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {});
 
 // --- spec 16b: pipeline parallel decode ----------------------------------------------
 //

@@ -16,7 +16,7 @@
 
 // dflash_capture.cc - the DFlash drafter's draft and projection lists (dflash_capture.h has both walks in order). Every
 // binding site names the kernel it honours; argument orders are each __kernel's in src/kernels/dflash/df_*.cl and the
-// reused gemv_i8w.cl / gemv_bf16.cl.
+// reused gemv_i8w.cl / gemv_bf16.cl (spec 28b: gemm_sm.cl's gemm_sm_i8w for the int8 linears at M >= 2).
 namespace runtime::dflash {
 namespace {
 
@@ -151,12 +151,7 @@ class Walk {
     {
       const loader::DeviceWeight& hw = *t.head;
       if (hw.kind == model::WeightKind::Int8) {
-        l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kR, H, N), "gemv_i8w", kernels::kGemvI8wCols);
-        k.arg_ptr(0, hw.mem.ptr());
-        k.arg_ptr(1, hw.scales->ptr());
-        k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));
-        k.arg_ptr(3, b_.logits.ptr());
-        launch(k, N / kernels::kGemvI8wCols);
+        int8_linear(kd::kR, H, N, hw.mem.ptr(), hw.scales->ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
       } else {
         const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(N);
         l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kR, H, N, tl), "gemv_bf16", tl.cols * tl.ksplit);
@@ -224,13 +219,8 @@ class Walk {
       const size_t K = d_.hidden, rows = d_.q_n(), n = 2 * d_.kv_n();
       void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * kd::kM * n * 4));
       if (qkv.kind == model::WeightKind::Int8) {
-        l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kM, uint32_t(K), uint32_t(n)), "gemv_i8w",
-                               kernels::kGemvI8wCols);
-        k.arg_ptr(0, at(qkv.mem.ptr(), rows * K));
-        k.arg_ptr(1, at(qkv.scales->ptr(), rows * 4));
-        k.arg_ptr(2, b_.x.ptr());
-        k.arg_ptr(3, out);
-        launch(k, uint32_t(n) / kernels::kGemvI8wCols);
+        int8_linear(kd::kM, uint32_t(K), uint32_t(n), at(qkv.mem.ptr(), rows * K), at(qkv.scales->ptr(), rows * 4),
+                    b_.x.ptr(), out);
       } else {
         const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(uint32_t(n));
         l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kM, uint32_t(K), uint32_t(n), tl), "gemv_bf16",
@@ -308,16 +298,28 @@ class Walk {
     k.arg_ptr(1, b_.resid.ptr());
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
   }
-  // A drafter linear at the block's M rows: gemv_i8w(w, scales, x, out) or gemv_bf16(w, x, out).
+  // An int8 linear at M rows: gemv_i8w(w, scales, x, out) - or, spec 28b, gemm_sm_i8w with the same arguments
+  // and [M][N] output at M >= 2 for a kSmallMTuning shape (kernels::gemv_kind; every drafter list is M 8 or 7).
+  void int8_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* scales, const void* x,
+                   const void* out) {
+    const kernels::SmallMTuning* t =
+        kernels::gemv_kind(M) == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_i8w_variant(M, K, N), "gemv_i8w", kernels::kGemvI8wCols);
+    k.arg_ptr(0, w);
+    k.arg_ptr(1, scales);
+    k.arg_ptr(2, x);
+    k.arg_ptr(3, out);
+    if (t)
+      launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, N / kernels::kGemvI8wCols);
+  }
+  // A drafter linear at the block's M rows: int8_linear or gemv_bf16(w, x, out).
   void gemv(const loader::DeviceWeight& w, const void* x, const void* out) {
     const model::GemvShape& s = w.shape;
     if (w.kind == model::WeightKind::Int8) {
-      l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
-      k.arg_ptr(0, w.mem.ptr());
-      k.arg_ptr(1, w.scales->ptr());
-      k.arg_ptr(2, x);
-      k.arg_ptr(3, out);
-      launch(k, s.N / kernels::kGemvI8wCols);
+      int8_linear(kd::kM, s.K, s.N, w.mem.ptr(), w.scales->ptr(), x, out);
     } else {
       require(w.kind == model::WeightKind::Bf16, "a drafter linear is neither int8 nor bf16");
       const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(s.N);

@@ -43,10 +43,14 @@ inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 
-// The drafter's linears at the block's M rows, in their form (`int8`: gemv_i8w; else gemv_bf16 at the tiling
+// The drafter's linears at the block's M rows, in their form (`int8`: gemv_i8w - or, spec 28b, gemm_sm_i8w at
+// M >= 2 for a kSmallMTuning shape (kernels::int8_linear_variant); else gemv_bf16 at the tiling
 // kernels::gemv_bf16_tiling gives N).
+inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N, LinearKind k) {
+  return int8 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
+}
 inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N) {
-  return int8 ? gemv_i8w_variant(M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
+  return linear_variant(int8, M, K, N, gemv_kind(M));
 }
 
 // The draft vocabulary sizes (spec 8 §11's kDraftVocabSizes) the compact head's binaries exist for.
@@ -58,7 +62,10 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Every binary the draft list and the projection list bind for Qwen3.8's drafter: `v2` (DFlash 2 or v1), `int8`
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
-inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv) {
+// `pre28b`: the names the lists bound before spec 28b (gemv_i8w at every M) - still built (spec 28 N1: no binary
+// is removed), named here so the names test can account for them; the lists bind the default.
+inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv, bool pre28b = false) {
+  const LinearKind lk = pre28b ? LinearKind::Gemv : gemv_kind(kM), hk = pre28b ? LinearKind::Gemv : gemv_kind(kR);
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
@@ -67,13 +74,14 @@ inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_hea
                       {s.I, s.H},                                                            // down
                       {5 * s.H, s.H},                                                        // fc (5 taps)
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
-    v.push_back(linear_variant(int8, kM, K, N));
+    v.push_back(linear_variant(int8, kM, K, N, lk));
   if (v2) {
-    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group)));   // the conv kernel projections
-    v.push_back(linear_variant(int8, kM, s.H, s.rank));                          // the selector's projection
+    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group), lk));   // the conv kernel projections
+    v.push_back(linear_variant(int8, kM, s.H, s.rank, lk));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, N) : gemv_bf16_variant(kR, s.H, N, gemv_bf16_tiling(N)));
+  v.push_back(int8_head ? int8_linear_variant(hk, kR, s.H, N)
+                        : gemv_bf16_variant(kR, s.H, N, gemv_bf16_tiling(N)));
   v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
   return v;
 }

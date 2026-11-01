@@ -337,6 +337,13 @@ if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8)
   b70_target_kernel_dir(gemm_sm_names_test)
   add_test(NAME gemm_sm_names_test COMMAND gemm_sm_names_test ${B70_GEMM_SM_KERNELS})
 
+  # The capture rule (runtime/gemv_kind.h): M = 1 on gemv for every list, M >= 2 on gemm_sm, the override.
+  add_executable(gemv_kind_test runtime/gemv_kind_test.cc)
+  target_include_directories(gemv_kind_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(gemv_kind_test PRIVATE b70_model)
+  b70_target_kernel_dir(gemv_kind_test)
+  add_test(NAME gemv_kind_test COMMAND gemv_kind_test)
+
   add_executable(gemm_sm_test kernels/gemm_sm_test.cc)
   target_include_directories(gemm_sm_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -466,6 +473,8 @@ if(B70_VERIFY_M8 AND B70_MTP)
     kernel_gemv_M8_K25600_N5120_S8_L0 kernel_gemv_M8_K5120_N256_S16_L0
     kernel_gemv_i8w_M7_K5120_N32768)
   set(_v19a_reused kernel_argmax_stage2)
+  get_property(_v28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)   # spec 28b: the verify lists' gemm_sm
+  list(APPEND _v19a_reused ${_v28b_gemm_sm})
   foreach(t ${B70_VERIFY_M8_KERNELS} ${_v19a_reused})
     if(NOT TARGET ${t})
       message(FATAL_ERROR "spec 19a: ${t} is not built (src/kernels/CMakeLists.txt)")
@@ -3467,6 +3476,9 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
       message(FATAL_ERROR "spec 19b: ${t} is not built (src/kernels/CMakeLists.txt)")
     endif()
   endforeach()
+  # Spec 28b: the drafter's int8 linears and the draft head bind gemm_sm_i8w at their 8 / 7 rows.
+  get_property(_v28b_gemm_sm GLOBAL PROPERTY B70_GEMM_SM_KERNELS)
+  list(APPEND _v19b_reused ${_v28b_gemm_sm})
   add_executable(dflash_variant_names_test kernels/dflash_variant_names_test.cc)
   target_include_directories(dflash_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(dflash_variant_names_test PRIVATE b70_dflash_model)

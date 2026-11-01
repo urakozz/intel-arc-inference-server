@@ -44,7 +44,9 @@ void verify_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& 
   for (LinearId id : {LinearId::QkvZ, LinearId::OutProj, LinearId::Qkv, LinearId::OProj,
                       LinearId::GateUp, LinearId::Down}) {
     const model::GemvShape& s = d.shape(id);
+    // spec 28b: gemm_sm under runtime::gemv_kind, gemv when a probe forces it (CaptureOptions)
     out.insert(kernels::gemv_variant(M, s.K, s.N, s.S, s.layout));
+    out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, s.K, s.N, s.S, s.layout));
   }
   out.insert(bf16(M, H, d.shape(LinearId::AB).N));
   out.insert(kernels::prep_silu_mul_variant(M, d.intermediate));
@@ -53,6 +55,7 @@ void verify_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& 
   out.insert(kernels::attn_prep_variant(M, q, kv));
   out.insert(kernels::attn_v2_variant(M, kT, q, kv));
   out.insert(kernels::gemv_i8w_variant(M, H, model::Qwen35::kVocab));
+  out.insert(kernels::int8_linear_variant(kernels::LinearKind::SmallM, M, H, model::Qwen35::kVocab));
   out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
   out.insert(kernels::argmax_stage2_variant());
   // head_kv_fill (head_front)
