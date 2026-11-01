@@ -228,8 +228,10 @@ MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc) {
   return l;
 }
 
-PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::ModelDesc& desc) {
-  static_assert(kC % kGdnChunk == 0, "kC must be a whole number of 64-position GDN chunks");
+PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::ModelDesc& desc,
+                                              uint32_t chunk_cap) {
+  check_prefill_chunk_cap(desc, chunk_cap);
+  const uint32_t kC = chunk_cap;   // the rows of every per-chunk buffer below
   PrefillScratchSizes s{};
   s.ids = size_t{kC} * sizeof(uint32_t);
   s.resid = size_t{kC} * desc.hidden * kBf16;
@@ -288,8 +290,9 @@ size_t TapVerifyDims::gdn_spec_bytes(const model::ModelDesc& desc) {
   return size_t{kSlots - 1} * gdn_state_bytes(desc);
 }
 
-size_t TapVerifyDims::prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps) {
-  return size_t{PrefillScratchDims::kC} * n_taps * desc.hidden * kBf16;
+size_t TapVerifyDims::prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps, uint32_t chunk_cap) {
+  check_prefill_chunk_cap(desc, chunk_cap);
+  return size_t{chunk_cap} * n_taps * desc.hidden * kBf16;
 }
 
 std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc,
@@ -307,14 +310,50 @@ std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc,
   return sites;
 }
 
-size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc) {
-  return size_t{PrefillScratchDims::kC + 1} * desc.hidden * kBf16;
+size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap) {
+  check_prefill_chunk_cap(desc, chunk_cap);
+  return (size_t{chunk_cap} + 1) * desc.hidden * kBf16;
 }
 
-Int8ScratchSizes int8_scratch_sizes(uint32_t max_k) {
+void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap) {
+  if (chunk_cap != PrefillScratchDims::kCDefault && chunk_cap != PrefillScratchDims::kCMax)
+    throw std::invalid_argument("prefill chunk cap " + std::to_string(chunk_cap) + " is neither " +
+                                std::to_string(PrefillScratchDims::kCDefault) + " nor " +
+                                std::to_string(PrefillScratchDims::kCMax));
+  if (chunk_cap > PrefillScratchDims::kCDefault && desc.is_moe())
+    throw std::invalid_argument(desc.name + " prefills in chunks of at most " +
+                                std::to_string(PrefillScratchDims::kCDefault) +
+                                ": pf_moe bakes KC = 2048 into its SLM sort staging, and no KC " +
+                                std::to_string(chunk_cap) + " variant is built (plan 5d)");
+}
+
+uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc) {
+  if (chunk == 0) return 0;
+  if (chunk > PrefillScratchDims::kCMax)
+    throw std::invalid_argument("--prefill-chunk " + std::to_string(chunk) + " exceeds the widest chunk, " +
+                                std::to_string(PrefillScratchDims::kCMax));
+  const uint32_t cap = chunk > PrefillScratchDims::kCDefault ? PrefillScratchDims::kCMax
+                                                             : PrefillScratchDims::kCDefault;
+  check_prefill_chunk_cap(desc, cap);
+  return cap;
+}
+
+uint32_t default_prefill_chunk_cap() {
+  const char* v = std::getenv("B70_PREFILL_CHUNK_CAP");
+  if (!v || !*v) return PrefillScratchDims::kCDefault;
+  const std::string s(v);
+  if (s == "2048") return PrefillScratchDims::kCDefault;
+  if (s == "4096") return PrefillScratchDims::kCMax;
+  throw std::invalid_argument("B70_PREFILL_CHUNK_CAP must be unset, 2048 or 4096 (got '" + s + "')");
+}
+
+Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {
+  if (chunk_cap != PrefillScratchDims::kCDefault && chunk_cap != PrefillScratchDims::kCMax)
+    throw std::invalid_argument("int8_scratch_sizes: chunk cap " + std::to_string(chunk_cap) +
+                                " is neither 2048 nor 4096");
   Int8ScratchSizes s{};
-  s.xq = size_t{PrefillScratchDims::kC} * max_k;                // int8 [kC][max_k]
-  s.xs = size_t{PrefillScratchDims::kC} * kFp32;                // fp32 [kC]
+  s.xq = size_t{chunk_cap} * max_k;                             // int8 [chunk_cap][max_k]
+  s.xs = size_t{chunk_cap} * kFp32;                             // fp32 [chunk_cap]
   s.w8 = size_t{max_k / 4} * kernels::kPfSlabWidth * 4;         // u32 [max_k / 4][1024]
   return s;
 }
@@ -369,8 +408,9 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
   MoePrefillLayout l;
   if (!desc.is_moe()) return l;
   const model::MoeDesc& m = desc.moe;
-  const size_t kC = PrefillScratchDims::kC;
-  l.tmax = moe_prefill_tiles(desc, PrefillScratchDims::kC);
+  // A MoE model's chunk cap is always 2048 (check_prefill_chunk_cap): pf_moe's KC.
+  const size_t kC = PrefillScratchDims::kCDefault;
+  l.tmax = moe_prefill_tiles(desc, PrefillScratchDims::kCDefault);
   l.rows = l.tmax * kernels::pf_moe::kTileM;
   // The weight batch: every block in the int8 gate||up and bf16 down forms, half the
   // blocks (rounded up) in the bf16 gate||up form - whichever is largest.

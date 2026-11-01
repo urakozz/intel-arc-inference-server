@@ -152,9 +152,9 @@ std::string pp_prefill_check(const std::vector<PpPfStep>& steps,
   return "";
 }
 
-PpPfLinkLayout pp_prefill_link_layout(const model::ModelDesc& d) {
+PpPfLinkLayout pp_prefill_link_layout(const model::ModelDesc& d, uint32_t chunk_cap) {
   PpPfLinkLayout l;
-  const PrefillScratchSizes s = PrefillScratchDims::sizes(kMinAutoMaxLen, d);   // rows and sums: max_len-free
+  const PrefillScratchSizes s = PrefillScratchDims::sizes(kMinAutoMaxLen, d, chunk_cap);   // rows and sums: max_len-free
   l.resid_bytes = s.resid;
   l.sumsq_bytes = s.norm_sumsq;
   l.sumsq_off = round_up(l.resid_bytes, kPpPage);
@@ -165,10 +165,10 @@ PpPfLinkLayout pp_prefill_link_layout(const model::ModelDesc& d) {
   return l;
 }
 
-size_t pp_prefill_link_bytes(const model::ModelDesc& d, uint32_t device) {
+size_t pp_prefill_link_bytes(const model::ModelDesc& d, uint32_t device, uint32_t chunk_cap) {
   const size_t common = size_t(kPpPfDepth) * sizeof(Control) + kTimestampBytes;
   const size_t peer_words = size_t(kPpPfDepth) * kPpStateWords * 4;
-  return device == 0 ? common + peer_words : pp_prefill_link_layout(d).total + common + peer_words;
+  return device == 0 ? common + peer_words : pp_prefill_link_layout(d, chunk_cap).total + common + peer_words;
 }
 
 size_t pp_prefill_shadow_bytes(const model::ModelDesc& d, const PpStage& st) {

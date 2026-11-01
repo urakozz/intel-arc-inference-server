@@ -170,8 +170,8 @@ void check_schedule() {
 
 void check_link() {
   for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()}) {
-    const runtime::PpPfLinkLayout l = runtime::pp_prefill_link_layout(*d);
-    const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, *d);
+    const runtime::PpPfLinkLayout l = runtime::pp_prefill_link_layout(*d, runtime::PrefillScratchDims::kCDefault);
+    const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, *d, runtime::PrefillScratchDims::kCDefault);
     CHECK_EQ(l.resid_bytes, s.resid);
     CHECK_EQ(l.sumsq_bytes, s.norm_sumsq);
     CHECK_EQ(l.resid_bytes, size_t{runtime::PrefillScratchDims::kC} * d->hidden * 2);
@@ -188,14 +188,14 @@ void check_link() {
     // pp_send's word counts are 32-bit kernel arguments.
     CHECK(l.resid_bytes / 4 < (size_t{1} << 32));
   }
-  const runtime::PpPfLinkLayout q = runtime::pp_prefill_link_layout(model::qwen38());
+  const runtime::PpPfLinkLayout q = runtime::pp_prefill_link_layout(model::qwen38(), runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(q.resid_bytes, size_t{20971520});   // 2048 x 5120 bf16
   CHECK_EQ(q.sumsq_bytes, size_t{163840});     // [20][2048] fp32
   CHECK_EQ(q.slot_bytes, size_t{21168128});
   CHECK_EQ(q.total, size_t{42336256});         // spec 16 §3.3's ~40 MB, derived
   const size_t common = 2 * sizeof(runtime::Control) + 32;
-  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 0), common + 2 * runtime::kPpStateWords * 4);
-  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 1), q.total + common + 2 * runtime::kPpStateWords * 4);
+  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 0, runtime::PrefillScratchDims::kCDefault), common + 2 * runtime::kPpStateWords * 4);
+  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 1, runtime::PrefillScratchDims::kCDefault), q.total + common + 2 * runtime::kPpStateWords * 4);
   // The shadows: two copies of each device's GDN state + conv ring; together, two of the
   // model's (Qwen3.8 166.72 MB once).
   const std::array<runtime::PpStage, 2> st = runtime::pp_stages(model::qwen38(), 32);
@@ -229,15 +229,15 @@ void check_plan() {
           CHECK_EQ(pf.dev[i].model, dec.dev[i].model);
           CHECK_EQ(pf.dev[i].kv, dec.dev[i].kv);
           CHECK_EQ(pf.dev[i].prefill_scratch, one.prefill_scratch);
-          CHECK_EQ(pf.dev[i].decode_state, dec.dev[i].decode_state + runtime::pp_prefill_link_bytes(*d, i));
-          CHECK_EQ(pf.dev[i].prefill_link, runtime::pp_prefill_link_bytes(*d, i));
+          CHECK_EQ(pf.dev[i].decode_state, dec.dev[i].decode_state + runtime::pp_prefill_link_bytes(*d, i, runtime::PrefillScratchDims::kCDefault));
+          CHECK_EQ(pf.dev[i].prefill_link, runtime::pp_prefill_link_bytes(*d, i, runtime::PrefillScratchDims::kCDefault));
           CHECK_EQ(dec.dev[i].prefill_scratch + dec.dev[i].int8 + dec.dev[i].prefill_link, size_t{0});
           int8 += pf.dev[i].int8;
         }
         // The scales split by layer: the two devices' Int8States hold the one card's scales
         // once and the h8 scratch twice.
         if (b == PrefillBackend::L0Int8)
-          CHECK_EQ(int8, one.int8 + runtime::int8_scratch_sizes(runtime::prefill_int8_max_k(*d)).total());
+          CHECK_EQ(int8, one.int8 + runtime::int8_scratch_sizes(runtime::prefill_int8_max_k(*d), runtime::PrefillScratchDims::kCDefault).total());
         else
           CHECK_EQ(int8, size_t{0});
       }

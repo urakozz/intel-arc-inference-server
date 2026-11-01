@@ -166,10 +166,10 @@ void check_mtp_terms() {
           CHECK_EQ(p1.kv, b1.kv);
           // The head's prefill rows and its two Control blocks (one per chunk in flight).
           const size_t mtp_pf =
-              pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
+              pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d, runtime::PrefillScratchDims::kCDefault) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
           CHECK_EQ(p1.decode_state, b1.decode_state + runtime::MtpDims::sizes(len, *d, dv, kv).total() + mtp_pf);
           const size_t slab = pf.prefill && pf.backend == runtime::PrefillBackend::L0Int8
-                                  ? runtime::PrefillScratchDims::sizes(len, *d).slab
+                                  ? runtime::PrefillScratchDims::sizes(len, *d, runtime::PrefillScratchDims::kCDefault).slab
                                   : 0;
           CHECK_EQ(p1.prefill_scratch, b1.prefill_scratch + slab);
           CHECK_EQ(p1.draft_vocab, dv ? loader::draft_vocab_bytes(dv, d->hidden, true).total() : size_t{0});
@@ -420,7 +420,7 @@ void check_drafter_terms() {
         } else {
           CHECK_EQ(q.model, b.model + w.embed);
           CHECK_EQ(q.drafter, dr.bytes(len));
-          const size_t taps = pf.prefill ? 2 * runtime::TapVerifyDims::prefill_taps_bytes(d, 5) : 0;
+          const size_t taps = pf.prefill ? 2 * runtime::TapVerifyDims::prefill_taps_bytes(d, 5, runtime::PrefillScratchDims::kCDefault) : 0;
           CHECK_EQ(q.drafter_taps, taps);
           CHECK_EQ(q.prefill_scratch, b.prefill_scratch + taps);
           CHECK_EQ(q.draft_vocab, dv ? loader::draft_vocab_bytes(dv, d.hidden, true).total() : size_t{0});

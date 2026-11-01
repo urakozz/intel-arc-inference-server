@@ -231,6 +231,8 @@ struct PrefillScratchSizes {
 // (PrefillScratch::moe), regions at these offsets, sized here and nowhere else
 // (src/kernels/prefill/pf_moe.cl and pf_moe_gemm.cl say what each holds):
 //
+// (kC here is PrefillScratchDims::kCDefault: a MoE model's chunk cap is always 2048.)
+//
 //   logits   fp32 [kC][router_n]            the router || shared-gate GEMV over the chunk
 //   route    u32  [layers][kC][32]          moe_route's rows, PER LAYER: after a prefill every
 //                                           layer's routing is still there for R2 and the
@@ -270,12 +272,35 @@ enum class MoeWeightForm { GateUpInt8, GateUpBf16, DownBf16 };
 uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f);
 
 struct PrefillScratchDims {
-  static constexpr uint32_t kC = 2048;               // ruling A13 (was 4096)
+  // Plan 5d: the chunk's row count is a SESSION value, the chunk cap - kCDefault (ruling
+  // A13's 2048) or kCMax (4096) - and every per-chunk buffer is sized by it. There is no
+  // single kC any more: a site that bounds a chunk asks the scratch it writes
+  // (PrefillScratch::chunk_cap(), Int8State::chunk_cap()). A MoE model stays at 2048
+  // (check_prefill_chunk_cap below).
+  static constexpr uint32_t kCDefault = 2048;        // ruling A13 (was 4096)
+  static constexpr uint32_t kCMax = 4096;            // plan 5d
   static constexpr uint32_t kGdnChunk = 64;          // the FLA intra-chunk size
   static constexpr uint32_t kNormGroups = DecodeScratchDims::kNormGroups;
+  static_assert(kCDefault % kGdnChunk == 0 && kCMax % kGdnChunk == 0,
+                "a chunk cap must be a whole number of 64-position GDN chunks");
 
-  static PrefillScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc);
+  // Throws std::invalid_argument for a cap check_prefill_chunk_cap refuses.
+  static PrefillScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap);
 };
+
+// Plan 5d: the chunk caps a model may run. Throws std::invalid_argument unless `chunk_cap`
+// is kCDefault or kCMax, and - naming the model - for kCMax on a MoE model: pf_moe bakes
+// KC = 2048 into its SLM sort staging (src/kernels/prefill/pf_moe.cl), and a KC 4096
+// variant is not built.
+void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap);
+// The cap a `--prefill-chunk C` width needs: 0 for C = 0 (nothing asked), kCDefault for
+// C <= 2048, kCMax for C <= 4096; above 4096, or a cap the model refuses, throws
+// std::invalid_argument with the reason.
+uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc);
+// `B70_PREFILL_CHUNK_CAP=2048|4096` (read at each call, as B70_KV_CACHE is): the cap an
+// engine uses when nobody set one - how the gate tests run the same binaries at 4096.
+// Unset or empty is kCDefault; anything else throws std::invalid_argument.
+uint32_t default_prefill_chunk_cap();
 
 // --- MtpBuffers (spec 8) -------------------------------------------------------------
 
@@ -304,12 +329,12 @@ struct MtpDims {
 // With a drafter (runtime/tap_drafter.h) the Engine's verify lists run up to M = 8 rows (K <= 7 drafts + the
 // pending id), so the GDN state needs 8 slots: slot 0 is PersistentBuffers::gdn_state, gdn_spec_bytes() the
 // other 7 (one gdn_state each, slot-major - MtpBuffers::gdn_spec's layout at 8 slots). Prefill stages the taps
-// of a chunk's rows inside the drafter's window: bf16 [kC][taps][hidden] (prefill_taps_bytes), allocated on
+// of a chunk's rows inside the drafter's window: bf16 [chunk_cap][taps][hidden] (prefill_taps_bytes), allocated on
 // the first prefill of an engine with a drafter.
 struct TapVerifyDims {
   static constexpr uint32_t kSlots = 8;
   static size_t gdn_spec_bytes(const model::ModelDesc& desc);
-  static size_t prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps);
+  static size_t prefill_taps_bytes(const model::ModelDesc& desc, uint32_t n_taps, uint32_t chunk_cap);
 };
 // Where the verify list copies each tap: for every site s in [0, layers] the indices t into `layers` whose
 // tapped layer is s - 1 - copied after the input fold of layer s (layer s - 1's output), or for s == layers
@@ -321,9 +346,9 @@ std::vector<std::vector<uint32_t>> tap_sites(const model::ModelDesc& desc, const
 // allocations, sized by loader::draft_vocab_bytes (loader/draft_vocab.h, header-only
 // so this archive needs no loader); memory_plan.h adds them as their own term.
 
-// Spec 8 (plan 8b Task 3): `Engine::prefill`'s MTP hidden rows, bf16 [kC + 1][hidden],
+// Spec 8 (plan 8b Task 3): `Engine::prefill`'s MTP hidden rows, bf16 [chunk_cap + 1][hidden],
 // allocated on the first prefill of an engine that carries the head.
-size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc);
+size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap);
 
 // --- prefill::Int8State (spec 5, the h8 path) ----------------------------------------
 
@@ -338,7 +363,7 @@ struct Int8ScratchSizes {
   size_t xq, xs, w8;
   size_t total() const { return xq + xs + w8; }
 };
-Int8ScratchSizes int8_scratch_sizes(uint32_t max_k);
+Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap);   // xq / xs: chunk_cap rows
 size_t int8_scale_bytes(const model::ModelDesc& desc);
 // Spec 16c: the same for layers [first, last) only - one pipeline stage's linears, which is
 // what that device's Int8State holds (int8_scale_bytes(desc) is the whole range).

@@ -189,8 +189,8 @@ size_t pp_gdn_spec_bytes(const model::ModelDesc& d, uint32_t stage_gdn, uint32_t
   return size_t(slots - 2) * d.gdn_layers * layer + size_t(stage_gdn) * layer;
 }
 
-size_t pp_mtp_prefill_bytes(const model::ModelDesc& d) {
-  return mtp_prefill_hidden_bytes(d) + kPpPfDepth * sizeof(Control);
+size_t pp_mtp_prefill_bytes(const model::ModelDesc& d, uint32_t chunk_cap) {
+  return mtp_prefill_hidden_bytes(d, chunk_cap) + kPpPfDepth * sizeof(Control);
 }
 
 size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st) {
@@ -269,12 +269,12 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     dp.kv = ps.kv_k + ps.kv_v;
     dp.decode_state = ps.total() - dp.kv + scratch + dp.link;
     if (pf.prefill) {   // spec 16c: memory_plan.cc's prefill terms, per device
-      const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d);
+      const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d, pf.chunk_cap);
       dp.prefill_scratch = s.eager() + (pf.backend == PrefillBackend::L0 ? s.slab : 0);
       if (pf.backend == PrefillBackend::L0Int8)
-        dp.int8 = int8_scratch_sizes(prefill_int8_max_k(d)).total() +
+        dp.int8 = int8_scratch_sizes(prefill_int8_max_k(d), pf.chunk_cap).total() +
                   int8_scale_bytes(d, st[i].first, st[i].last);
-      dp.prefill_link = pp_prefill_link_bytes(d, i);
+      dp.prefill_link = pp_prefill_link_bytes(d, i, pf.chunk_cap);
       dp.decode_state += dp.prefill_link;
     }
     // Spec 16d (PpExtras, pipeline_plan.h).
@@ -290,10 +290,10 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
                                ? w.draft_vocab
                                : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
         if (pf.prefill) {
-          dp.mtp_prefill = pp_mtp_prefill_bytes(d);
+          dp.mtp_prefill = pp_mtp_prefill_bytes(d, pf.chunk_cap);
           // step_mtp_kv's bf16 linears walk the L0 slab; the l0 backend already holds it.
           if (pf.backend == PrefillBackend::L0Int8)
-            dp.prefill_scratch += PrefillScratchDims::sizes(max_len, d).slab;
+            dp.prefill_scratch += PrefillScratchDims::sizes(max_len, d, pf.chunk_cap).slab;
         }
       } else {
         dp.mtp_buffers = pp_gdn_spec_bytes(d, st[i].gdn);
@@ -310,7 +310,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
                                ? w.draft_vocab
                                : loader::draft_vocab_bytes(x.draft_vocab, d.hidden, x.draft_vocab_int8).total();
         if (pf.prefill) {
-          dp.drafter_taps = kPpPfDepth * TapVerifyDims::prefill_taps_bytes(d, x.drafter.n_taps);
+          dp.drafter_taps = kPpPfDepth * TapVerifyDims::prefill_taps_bytes(d, x.drafter.n_taps, pf.chunk_cap);
           dp.prefill_scratch += dp.drafter_taps;
         }
       }
