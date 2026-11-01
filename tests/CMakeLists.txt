@@ -523,6 +523,11 @@ add_executable(kv8_test common/kv8_test.cc)
 target_include_directories(kv8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME kv8_test COMMAND kv8_test)
 
+# Fix round A: the pieces a large host <-> device copy is cut into (src/common/copy_chunks.h). No device.
+add_executable(copy_chunks_test common/copy_chunks_test.cc)
+target_include_directories(copy_chunks_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME copy_chunks_test COMMAND copy_chunks_test)
+
 add_executable(safetensors_test loader/safetensors_test.cc)
 target_include_directories(safetensors_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(safetensors_test PRIVATE b70_loader)
