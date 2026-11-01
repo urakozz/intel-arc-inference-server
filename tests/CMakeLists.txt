@@ -1179,6 +1179,12 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(tokenizer_smoke_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(tokenizer_smoke_test PRIVATE b70_tokenizer)
   add_test(NAME tokenizer_smoke_test COMMAND tokenizer_smoke_test)
+  # A tokenizer.json's truncation / padding never apply (K2's int4 repo ships truncation at
+  # 2048, which cut every long prompt's tail): a synthetic file, no data needed.
+  add_executable(no_truncation_test tokenizer/no_truncation_test.cc)
+  target_include_directories(no_truncation_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(no_truncation_test PRIVATE b70_tokenizer)
+  add_test(NAME no_truncation_test COMMAND no_truncation_test)
   add_executable(parity_test tokenizer/parity_test.cc)
   target_include_directories(parity_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(parity_test PRIVATE b70_tokenizer)
