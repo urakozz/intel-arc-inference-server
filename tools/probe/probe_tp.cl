@@ -70,6 +70,20 @@ inline uint tp_mix(uint bits, uint e) {
 inline uint tp_trailer(uint words, uint G, uint slot, uint j) { return SLOTS * words + slot * G + j; }
 inline uint tp_flag(uint flag_base, uint G, uint slot, uint j) { return flag_base + (slot * G + j) * FLAG_STRIDE; }
 
+// Publishing a flag (after the data's release fence). flag_mode 0: a system-scope atomic release store - seen by the
+// peer when it lands in the PEER's memory (p2p-push), but on 2026-11-01 never seen in the card's own memory read by
+// the peer (p2p-pull) nor in pinned host memory (host-*: neither the CPU nor the other card saw it, while the plain
+// trailer store before it arrived). flag_mode 1 (the default): a plain volatile store - the path the data takes -
+// followed by a second system-scope release fence to push it out.
+inline void tp_publish(__global uint* p, uint v, uint flag_mode) {
+  if (flag_mode == 0u) {
+    SYS_STORE(p, v, memory_order_release);
+  } else {
+    *(volatile __global uint*)p = v;
+    atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
+  }
+}
+
 inline void tp_record(__global uint* state, uint status, uint got, uint stamp, uint want, uint j) {
   atomic_inc((volatile __global uint*)(state + 5));
   if (atomic_cmpxchg((volatile __global uint*)state, 0u, status) == 0u) {
@@ -83,7 +97,7 @@ inline void tp_record(__global uint* state, uint status, uint got, uint stamp, u
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void tp_send(__global const float* P, __global float* own, __global uint* dst, __global uint* ctr,
              uint words, uint chunk, uint S, uint flag_base, uint rank, uint cross,
-             uint inject_at, uint inject_kind) {
+             uint inject_at, uint inject_kind, uint flag_mode) {
   const uint lid = get_local_id(0);
   const uint j = get_group_id(0);
   const uint G = words / chunk;
@@ -108,7 +122,7 @@ void tp_send(__global const float* P, __global float* own, __global uint* dst, _
   if (cross == 0u || inj == 2u) return;   // the control list, or a dropped write (no flag): uniform per group
   atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
   barrier(CLK_GLOBAL_MEM_FENCE);
-  if (lid == 0) SYS_STORE(dst + tp_flag(flag_base, G, slot, j), n, memory_order_release);
+  if (lid == 0) tp_publish(dst + tp_flag(flag_base, G, slot, j), n, flag_mode);
 }
 
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
@@ -174,7 +188,7 @@ void tp_wait(__global const uint* src, __global const float* own, __global float
 // flag at flag_base + slot x 16). ack: one word the CPU spins on.
 __kernel __attribute__((reqd_work_group_size(WG, 1, 1)))
 void tp_ping(__global const uint* land, __global uint* ack, __global uint* state,
-             uint words, uint flag_base, uint iters, uint spin_limit) {
+             uint words, uint flag_base, uint iters, uint spin_limit, uint flag_mode) {
   const uint lid = get_local_id(0);
   __local uint s_ok;
   for (uint i = 1u; i <= iters; ++i) {
@@ -199,6 +213,6 @@ void tp_ping(__global const uint* land, __global uint* ack, __global uint* state
     barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);
     if (status == 1u) return;   // the CPU is gone: stop rather than spin every remaining iteration
     atomic_work_item_fence(CLK_GLOBAL_MEM_FENCE, memory_order_release, memory_scope_all_svm_devices);
-    if (lid == 0) SYS_STORE(ack, i, memory_order_release);
+    if (lid == 0) tp_publish(ack, i, flag_mode);
   }
 }
