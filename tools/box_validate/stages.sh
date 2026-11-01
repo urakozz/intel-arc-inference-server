@@ -3719,6 +3719,56 @@ st_r68_verdict() {
 }
 
 # ======================================================================================
+row 70 "spec 19f - prompt lookup inside DFlash (--spec dflash-lookup: ENTER >= 8 tokens beyond the drafter's 2048 window, STAY >= 3 accepted, full-depth lookup verify, the drafter's projection kept): D2 / D4 on the mode, speed against plain --spec dflash on the edit / copy set (8k-99k) and A4 / golden (plan 19f)"
+rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the time in lookup, the verdict line."
+rownote 70 "Host-side only (no kernel, no command line: D0 is G0). The edit / copy set is tests/golden/edit-copy (tools/spec/edit_copy_set.py: 12 prompts at 8k / 32k / 64k / 99k, each source 4953 .. 96230 ids before the prompt's end). The serving arms run at --max-len 102400 (the 99k prompts) - every arm the same flags otherwise. The verify lists' GEMM / attention are whatever main binds (specs 28b / 28c rebind the M >= 2 lists; the mode does not care)."
+stage r70.k0     70 default cpu  -           g0.sha,g0.bitwise,g0.suite "D0: no kernel binary moved by the mode (it is host-side)"
+st_r70_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r70.host   70 default cpu  -           -                     "lookup_in_dflash_test, the mock serving tests, test_edit_copy_set.py"
+st_r70_host() {
+  run_tests '^(lookup_in_dflash_test|dflash_lookup_server_test|prompt_lookup_test|lookup_server_test|mtp_server_test|bolt_serve_args_test|cli_reject_serve_dflash_lookup_.*|cli_reject_serve_spec_value)$'
+  chk "python3 tools/spec/test_edit_copy_set.py" "test_edit_copy_set.py (the committed set's --check included)"
+  finish
+}
+stage r70.d2     70 default card qwen,dflash r55.gpu,r70.k0        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off under the tie rule; the warm-ring engine test"
+st_r70_d2() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  run_tests '^dflash_lookup_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  jgrab gpu '^dflash_lookup_gpu_test$' '^drafter|^D2|^RF4|^S:|^dflash_lookup_gpu_test' 80
+  serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --set tests/golden/edit-copy --max-tokens 256 --stop-at-eos" \
+    "off|--max-len 102400 --spec off" "dlk|--max-len 102400 --spec dflash-lookup $dm"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec dflash-lookup identical to --spec off"
+  x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --max-len 16384 --spec dflash-lookup $dm"
+  step_rc $? "b70-serve --spec dflash-lookup: serves; the seeded sampled request twice"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all dflash 'spec dflash|^dflash:|SEEDED|memory:' 60
+  finish
+}
+stage r70.speed  70 optin   gpu  qwen,dflash r70.d2                "b70-serve: off / --mtp auto / dflash / dflash-lookup on the edit / copy set per depth and on A4 / golden; rotated rounds, median of 3, idle"
+st_r70_speed() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  idle before
+  serve_arms "$STATE/$STAGE" "${R70_ROUNDS:-3}" "$SNAP_QWEN" "--set tests/golden/edit-copy --set toolcall --set golden --max-tokens 256 --stop-at-eos" \
+    "off|--max-len 102400 --spec off" "mtp|--max-len 102400 --mtp auto" "dflash|--max-len 102400 --spec dflash $dm" \
+    "dlk|--max-len 102400 --spec dflash-lookup $dm"
+  idle after
+  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical across the arms"
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref dflash --ratio dlk/dflash --ratio dlk/mtp --ratio dflash/mtp --ratio dlk/off"
+  grab_all ratio '^RATIO ' 30
+  grab_all lookup '^dflash:.*lookup' 80
+  grab_all idle '^IDLE '
+  finish
+}
+stage r70.verdict 70 manual -    -           r70.speed             "spec 19 §13.1's bar: replaces / opt-in / dropped"
+st_r70_verdict() {
+  say "# the bar (spec 19 §13.1): dlk/dflash >= 1.20 on the edit / copy set (median over its prompts) and >= 0.97 on A4 (toolcall) and golden -> replaces plain dflash; 1.05 .. 1.20 -> opt-in, the operator's call; < 1.05 -> dropped"
+  say "# read r70.speed's per-prompt table (the edit / copy rows per depth) and its RATIO lines; the 'dflash: ... lookup:' server lines give the time in lookup"
+}
+
+# ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
 rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
 stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, prefill_replay_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
