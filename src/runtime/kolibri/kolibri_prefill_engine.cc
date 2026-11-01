@@ -42,6 +42,7 @@ struct KolibriPrefillState {
     prefill::Context cx;
     prefill::KernelCache kc;
     KolibriPrefillScratch s;
+    std::unique_ptr<l0::Mem> tap;   // debug_tap only: [the device's layers][kPfC][hidden] bf16, the last chunk's
     // Declared after cx / kc / s: recordings are destroyed first.
     std::vector<Chunk> chunks;
     Dev(l0::Context& c, const model::Kolibri1Desc& d) : cx(c), kc(c), s(c, d) {}
@@ -87,7 +88,12 @@ void KolibriEngine::prepare_prefill() {
   auto* ps = new KolibriPrefillState();
   pf_ = std::unique_ptr<KolibriPrefillState, void (*)(KolibriPrefillState*)>(ps, &destroy_prefill);
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;
-  for (uint32_t i = 0; i < devices(); ++i) ps->dev.push_back(std::make_unique<KolibriPrefillState::Dev>(stage_ctx(i), d));
+  for (uint32_t i = 0; i < devices(); ++i) {
+    ps->dev.push_back(std::make_unique<KolibriPrefillState::Dev>(stage_ctx(i), d));
+    if (taps_[i])   // debug_tap: the prefill's per-layer rows too (outside the plan, as a diagnostic)
+      ps->dev[i]->tap = std::make_unique<l0::Mem>(stage_ctx(i), l0::MemKind::Device,
+                                                  size_t(model_.placement.count(i)) * kPfC * d.hidden * 2);
+  }
   if (devices() == 2)
     ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d), PpHandoff::Copy);
   pf_dev_bytes_.assign(devices(), 0);
@@ -120,6 +126,20 @@ std::vector<uint32_t> KolibriEngine::read_prefill_routes() {
     const uint32_t first = model_.placement.first(i), n = model_.placement.count(i);
     stage_imm(i).copy(v.data() + pf_route_at(first) / 4, static_cast<const uint8_t*>(D.s.routes.ptr()) + pf_route_at(first),
                    size_t(n) * kPfC * kRouteWords * 4);
+  }
+  return v;
+}
+
+std::vector<uint16_t> KolibriEngine::read_prefill_tap() {
+  require(bool(pf_), "read_prefill_tap before the first prefill");
+  require(bool(pf_->dev[0]->tap), "read_prefill_tap: constructed without debug_tap");
+  const model::Kolibri1Desc& d = model_.desc;
+  std::vector<uint16_t> v(size_t(d.layers) * kPfC * d.hidden);
+  for (uint32_t i = 0; i < devices(); ++i) {
+    KolibriPrefillState::Dev& D = *pf_->dev[i];
+    require(D.cx.wait_for(pf_->timeout_ns), "device " + std::to_string(i) + "'s prefill list is still running");
+    const uint32_t first = model_.placement.first(i), n = model_.placement.count(i);
+    stage_imm(i).copy(v.data() + size_t(first) * kPfC * d.hidden, D.tap->ptr(), size_t(n) * kPfC * d.hidden * 2);
   }
   return v;
 }
@@ -162,7 +182,7 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     KolibriPrefillState::Dev& D = *P.dev[i];
-    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager); };
+    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get()); };
     if (!replay) return encode();
     auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
                            [&](const KolibriPrefillState::Chunk& c) { return c.pos == pos && c.rows == C; });
