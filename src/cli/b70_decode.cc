@@ -146,9 +146,11 @@ void usage() {
       "                 time, and print a SECOND markdown row with the device-side prefill\n"
       "                 time. The prefilled ids ARE the depth, which is why --depth is\n"
       "                 refused beside it.\n"
-       "  --prefill-chunk C  --prefill-length or --prefill: positions per prefill chunk (default\n"
-       "                 PrefillScratch::kC = 2048, ruling A13). Spec 2 §6.2's multi-chunk\n"
-       "                 gate runs at 1024.\n"
+       "  --prefill-chunk C  --prefill-length or --prefill: positions per prefill chunk, at most\n"
+       "                 4096 (default: the session's chunk cap, 2048 - ruling A13). Above 2048\n"
+       "                 the prefill buffers are sized for 4096-row chunks (plan 5d, ~0.7 GB more,\n"
+       "                 planned: --max-len auto gives the context less); a MoE model (Ornith)\n"
+       "                 stays at 2048. Spec 2 §6.2's multi-chunk gate runs at 1024.\n"
        "  --prefill-backend B  --prefill-length or --prefill: the GEMM backend, l0 (spec 2.1,\n"
        "                 every GEMM on the Level Zero list; the default) or l0-int8 (spec 5, l0\n"
        "                 with every int4 linear on the rotated int8 path).\n"
@@ -974,7 +976,10 @@ int run(int argc, char** argv) {
                              " prefill chunk width and nothing else has one");
   if (have_pp_chunk && pp_chunk == 0)
     throw std::runtime_error("--prefill-chunk 0 is not a chunk width; omit it for the default"
-                             " PrefillScratch::kC");
+                             " (the session's chunk cap)");
+  if (have_pp_chunk && pp_chunk > runtime::PrefillScratchDims::kCMax)
+    throw std::runtime_error("--prefill-chunk " + std::to_string(pp_chunk) + " exceeds the widest chunk, " +
+                             std::to_string(runtime::PrefillScratchDims::kCMax) + " (plan 5d)");
   if (have_pp_backend && !have_prefill_len && !prefill)
     throw std::runtime_error("--prefill-backend belongs to --prefill-length and --prefill; the"
                              " decode path has no GEMM backend");
@@ -1118,7 +1123,7 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's development modes (spec 20c / "
                              "21c: load only the first N layers); this checkpoint is neither model_type kolibri1 nor "
                              "qwen4_exp");
-  const runtime::PrefillPath pp_path = cli::prefill_path(
+  runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
@@ -1259,11 +1264,17 @@ int run(int argc, char** argv) {
   // Spec 15c: --prefill-length / --prefill on a model whose prefill is not built stop here with the
   // reason, before a plan or an engine is made for it (spec 15d: Ornith's is built).
   if (have_prefill_len || prefill) model::require_prefill(*model.desc);
+  // Plan 5d: the chunk cap --prefill-chunk needs (Ornith above 2048 refused by name), planned.
+  const uint32_t asked_cap =
+      have_prefill_len || prefill ? runtime::prefill_chunk_cap_for(pp_chunk, *model.desc) : 0;
+  pp_path.chunk_cap = cli::planned_chunk_cap(asked_cap);
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
-  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache,
-                        drafter_load ? drafter_load->plan : runtime::DrafterPlan{});
+  const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
+  max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
   if (max_len_arg.is_auto) check_len(max_len);
+  const uint32_t chunk_cap =
+      cli::settle_chunk_cap(ctx, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, asked_cap);
 
   // --profile forks here: it replays an instrumented capture and has to reset
   // 774 events before every replay, which is the caller's job by design
@@ -1297,6 +1308,7 @@ int run(int argc, char** argv) {
   size_t pp_launches_setup = 0;
   if (have_prefill_len || prefill) {
     if (have_pp_backend) eng.set_prefill_backend(pp_backend);
+    eng.set_prefill_chunk_cap(chunk_cap);   // plan 5d: the cap the plan counted
     std::fprintf(stderr, "prefill backend: %s\n", runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
     pp_launches_setup = eng.prefill_launches();
@@ -1321,7 +1333,7 @@ int run(int argc, char** argv) {
                  " launches, pos %u\n",
                  ids.size(), ingest_ms,
                  ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0,
-                 pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, pp_launches, eng.pos());
+                 pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), pp_launches, eng.pos());
   if (have_prefill_len) runtime::prefill::profile_report("--prefill-length", ingest_ms);
   if (!have_prefill_len && !prefill)
     std::fprintf(stderr, "ingest: %zu ids in %.1f ms (%.2f ms/token), pos %u\n", ids.size(),
@@ -1395,7 +1407,7 @@ int run(int argc, char** argv) {
   if (have_prefill_len)
     std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, head_tag.c_str(),
                 runtime::prefill_backend_name(eng.prefill_backend()), depth,
-                pp_chunk ? pp_chunk : runtime::PrefillScratch::kC, ingest_ms,
+                pp_chunk ? pp_chunk : eng.prefill_chunk_cap(), ingest_ms,
                 ingest_ms > 0.0 ? double(ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::fprintf(stderr,
                "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box;\n"

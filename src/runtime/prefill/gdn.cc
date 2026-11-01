@@ -141,9 +141,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y) {
   require(C > 0, "C must be > 0");
-  require(C <= PrefillScratch::kC,
-          "C = " + std::to_string(C) + " exceeds PrefillScratch::kC = " +
-              std::to_string(PrefillScratch::kC) + " - the scratch is sized for kC");
+  require(C <= s.chunk_cap(),
+          "C = " + std::to_string(C) + " exceeds the scratch's chunk cap " +
+              std::to_string(s.chunk_cap()) + " - the scratch is sized for it");
   // Validate/cache the process selector before reading or launching any GDN
   // buffer; an unsupported value therefore cannot mutate state or append work.
   const char* const scan_entry = gdn_scan_entry();

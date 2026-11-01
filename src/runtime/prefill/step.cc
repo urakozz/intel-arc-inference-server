@@ -215,7 +215,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     // two cannot share a buffer: work-group 0's x rows would overwrite A rows
     // the later work-groups have not read yet. (The unfused pair could share it,
     // because the GEMM had fully retired before `pf_silu_mul` ran.) `mixer_out`
-    // is bf16 [kC][6144] and its last reader -- out_proj / o_proj -- is three
+    // is bf16 [chunk_cap][6144] and its last reader -- out_proj / o_proj -- is three
     // launches back, so it is free and large enough for [pad256(C)][5120].
     // spec 5: the int8 gate||up exists only in the fused form, whatever silu_fused() says.
     const bool fuse = backend == PrefillBackend::L0Int8 || silu_fused();
@@ -258,8 +258,8 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                 const KvLayout& kv, PrefillBackend backend, Int8State* q, const PrefillTaps* taps) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
-  require(C > 0 && C <= PrefillScratch::kC,
-          "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
+  require(C > 0 && C <= s.chunk_cap(),
+          "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
   // Spec 19c: the taps' sites cover every layer and none is the final norm's fold (step.h).
   require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
@@ -316,8 +316,8 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   require(attn_mode() == AttnMode::Flash,
           "a pipeline stage runs the flash attention only (B70_PREFILL_ATTN=composed has no "
           "two-card walk)");
-  require(C > 0 && C <= PrefillScratch::kC,
-          "C = " + std::to_string(C) + " is outside (0, PrefillScratch::kC]");
+  require(C > 0 && C <= s.chunk_cap(),
+          "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
   const model::ModelDesc& d = *m.desc;
   require(&s.desc() == &d, "the prefill scratch was sized for another model");
@@ -421,7 +421,7 @@ void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWe
   constexpr uint32_t kNs = kernels::kPfSlabWidth;
   require(w.kind == model::WeightKind::Bf16, "linear_bf16 on an int4 weight");
   require(n_begin % kNs == 0 && n_end % kNs == 0 && n_end <= sh.N, "slab range is not whole slabs");
-  require(M > 0 && pad256(M) <= PrefillScratch::kC, "M padded to 256 exceeds kC");
+  require(M > 0 && pad256(M) <= s.chunk_cap(), "M padded to 256 exceeds the scratch's chunk cap");
   l0::Mem& slab = s.slab_buffer();
   require(slab.size() >= size_t(sh.K) * kNs * 2, "the slab buffer is smaller than [K][1024]");
   l0::Kernel& un = kc(kernels::pf_bf16_slab_variant(sh.K), "pf_bf16_slab");
@@ -439,7 +439,7 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   // Spec 15e: a MoE head (Ornith's) fills its KV through this same front - fc, the input
   // norm, q||k||v, attn_prep; its MoE FFN never runs in prefill. The only MoE term is the
   // final norm's fold below (nothing to fold after a MoE block, as step_head's).
-  require(C > 0 && C <= PrefillScratch::kC, "C is outside (0, kC]");
+  require(C > 0 && C <= s.chunk_cap(), "C is outside (0, the scratch's chunk cap]");
   const loader::MtpHead& h = *m.mtp;
   const uint32_t H = m.desc->hidden, G = PrefillScratch::kNormGroups;
   // q||gate is [0, q_proj) and k||v [q_proj, qkv) (Qwen3.8 12288 / 14336); the

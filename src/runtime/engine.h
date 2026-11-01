@@ -84,9 +84,10 @@ class Engine {
   // holds those positions, and control_->cur_token[0] is the argmax of the LAST
   // position's logits (the first generated id) -- exactly as ingest() would
   // have left it, which is what tests/prefill/prefill_consistency_test.cc
-  // grades. Default chunk = PrefillScratch::kC (ruling A7/A13, 2048).
+  // grades. Default chunk = the session's chunk cap (prefill_chunk_cap(): 2048 unless set,
+  // ruling A7/A13; plan 5d: 4096 by set_prefill_chunk_cap or B70_PREFILL_CHUNK_CAP).
   //
-  // Throws if `ids` is empty, if `chunk > PrefillScratch::kC`, if any id is
+  // Throws if `ids` is empty, if `chunk > prefill_chunk_cap()`, if any id is
   // outside the vocabulary (`pf_embed_gather` has no `Control::debug_flag`
   // channel, so the host is the only bound), or if pos + ids.size() > max_len.
   // Allocates `PrefillScratch` and the prefill `Context` on the FIRST call
@@ -119,6 +120,17 @@ class Engine {
   // setting overrides B70_PREFILL_REPLAY=1. Recordings retain frozen (pos,C)
   // arguments, not input contents, and survive reset() with a bounded cache.
   void set_prefill_replay(bool enabled) { pf_replay_ = enabled; }
+
+  // Plan 5d: the session's prefill chunk cap - the most rows a chunk has, and so the rows of
+  // every per-chunk buffer (PrefillScratch, Int8State's xq / xs, MTP's prefill hidden rows, a
+  // drafter's tap staging). 2048 (PrefillScratchDims::kCDefault) or 4096 (kCMax); the CLIs
+  // set the one their memory plan counted (runtime::prefill_chunk_cap_that_fits). Unset means
+  // runtime::default_prefill_chunk_cap() (B70_PREFILL_CHUNK_CAP, else 2048). Throws
+  // std::invalid_argument for a cap check_prefill_chunk_cap refuses (4096 on a MoE model, by
+  // name), and std::logic_error once the prefill scratch exists at another cap (the buffers
+  // are sized once; set it before prepare_prefill()). Defined in engine_prefill.cc.
+  void set_prefill_chunk_cap(uint32_t cap);
+  uint32_t prefill_chunk_cap() const;
 
   // Spec 6 (plan 6b): one line summing the device memory this engine holds --
   //   memory: model <GB>, kv <GB>, decode state <GB>, prefill scratch <GB>, int8 <GB>,
@@ -176,7 +188,9 @@ class Engine {
   // the first generated id is in cur_token. `is_block_end` tells whether end_pos is a
   // multiple of kBlock. A prompt that ends on a block end gets ONE call. With a hook set,
   // every chunk ends at a block end or at the prompt end: chunk rows are
-  // min(chunk, kBlock - pos % kBlock, remaining). Without one (an empty function, the
+  // min(chunk, S - pos % S, remaining), S = chunk rounded up to whole kBlocks
+  // (runtime/prefill_chunks.h) - kBlock itself up to 2048 rows, 4096 at a 4096-row chunk
+  // (plan 5d, ruling A: the hook then fires at every second block end). Without one (an empty function, the
   // default), chunking is exactly as before. If the hook throws, the exception propagates
   // with pos == end_pos: the state holds exactly the chunks written.
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
@@ -254,7 +268,7 @@ class Engine {
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
-  // The last prefill chunk's main hidden rows: bf16 [kC + 1][hidden], row 1 + r = position
+  // The last prefill chunk's main hidden rows: bf16 [chunk_cap + 1][hidden], row 1 + r = position
   // (last chunk base + r) post-final-norm (step_mtp_kv). Null before an MTP prefill.
   const l0::Mem* mtp_prefill_hidden() const { return mtp_pf_hid_.get(); }
   const CapturedStep& verify_step(uint32_t M) const;
@@ -348,6 +362,7 @@ class Engine {
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
   std::optional<bool> pf_replay_;
+  std::optional<uint32_t> pf_chunk_cap_;       // plan 5d; unset = default_prefill_chunk_cap()
   BlockHook block_hook_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid
   // Spec 8: null unless the model carries the MTP head. Declared before step_ so it
@@ -365,10 +380,10 @@ class Engine {
   std::vector<uint32_t> verify_deep_from_;
   double verify_deep_ms_ = 0;   // the deep lists' capture time
   void capture_verify(uint32_t M, const CaptureOptions& opt);
-  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][hidden], lazy
+  std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
   std::vector<uint32_t> draft_ids_;
   // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims), what the verify lists bind, and the
-  // prefill's tap staging (bf16 [kC][taps][hidden], lazy: the first prefill).
+  // prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).
   TapDrafter* drafter_ = nullptr;
   std::unique_ptr<l0::Mem> df_slots_;
   TapVerify df_tv_;

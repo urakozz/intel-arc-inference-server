@@ -43,7 +43,7 @@ namespace runtime::prefill {
 //     instead (`kernels.h`).
 //
 // Ten launches per call, in the order `gdn.cc` lists them. `C` must be in
-// (0, PrefillScratch::kC]; anything else throws.
+// (0, s.chunk_cap()]; anything else throws.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
                uint16_t* conv_ring, const void* small, uint16_t* y);

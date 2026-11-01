@@ -44,8 +44,8 @@ struct Dev {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   runtime::prefill::Context cx{ctx};
   runtime::prefill::KernelCache kc{ctx};
-  runtime::PrefillScratch s{ctx, 256, model::qwen38()};
-  runtime::prefill::Int8State q{ctx, 17408};
+  runtime::PrefillScratch s{ctx, 256, model::qwen38(), runtime::default_prefill_chunk_cap()};
+  runtime::prefill::Int8State q{ctx, 17408, runtime::default_prefill_chunk_cap()};
 };
 
 loader::DeviceWeight make_weight(Dev& d, const common::Int4Gptq& g, uint32_t layout) {

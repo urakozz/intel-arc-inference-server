@@ -20,7 +20,7 @@ namespace runtime {
 //   PersistentBuffers - everything that survives a token boundary and is SHARED
 //                       between the captured decode list and the prefill path.
 //   DecodeScratch     - decode's per-step scratch, sized by kM = 8.
-//   PrefillScratch    - the prefill path's per-chunk scratch, sized by kC.
+//   PrefillScratch    - the prefill path's per-chunk scratch, sized by its chunk cap (plan 5d).
 //
 // `DecodeBuffers` survives as a **view** over the first two, with every public
 // field name it ever had, so `capture.cc`'s 129 `res_norm` sites and its 17
@@ -103,8 +103,14 @@ struct DecodeScratch : DecodeScratchDims {
 };
 
 // The prefill path's per-chunk scratch. Every size is derived from
-// `model::Qwen35`, the model descriptor (spec 15b), `kC` and `max_len`; the totals are pinned by
-// tests/runtime/buffers_test.cc with the arithmetic spelled out there.
+// `model::Qwen35`, the model descriptor (spec 15b), the chunk cap and `max_len`; the totals are
+// pinned by tests/runtime/buffers_test.cc with the arithmetic spelled out there.
+//
+// **Plan 5d: the chunk cap (`kC` below, `chunk_cap()`) is a session value, 2048 or 4096**
+// (PrefillScratchDims::kCDefault / kCMax), chosen by the memory planner
+// (runtime::prefill_chunk_cap_that_fits, operator ruling (i): context first). Ruling A13's
+// paragraph stands for the 2048 default; the int8 path's own measurement at 4096 rows is
+// docs/probe-prefill-chunk-4096-2026-11-01.md.
 //
 // **kC = 2048, not plan 6b's 4096 - ruling A13, and every byte was recomputed
 // rather than halved.** Basis (spec §3.3, progress ledger): four of P2's six
@@ -126,9 +132,11 @@ struct DecodeScratch : DecodeScratchDims {
 // measured `transB` native and bitwise identical to a packed operand, so the
 // transpose fallback is not built.
 struct PrefillScratch : PrefillScratchDims {
-  // kC = 2048 (ruling A13), kGdnChunk = 64 and kNormGroups: PrefillScratchDims.
+  // kCDefault = 2048 (ruling A13), kCMax = 4096 (plan 5d), kGdnChunk = 64 and kNormGroups:
+  // PrefillScratchDims. `kC` in the comments below is this scratch's chunk_cap().
 
-  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc);
+  // Throws std::invalid_argument for a cap check_prefill_chunk_cap refuses.
+  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap);
 
   l0::Mem ids;          // uint32 [kC], Host  - pf_embed_gather's input
   l0::Mem resid;        // bf16 [kC][5120]
@@ -161,6 +169,9 @@ struct PrefillScratch : PrefillScratchDims {
   std::unique_ptr<l0::Mem> moe;
   uint32_t max_len;
 
+  // The most rows a chunk may have in this scratch (plan 5d): every per-chunk buffer above
+  // has this many. Every site that bounds a chunk asks it.
+  uint32_t chunk_cap() const { return chunk_cap_; }
   size_t bytes() const;
   // The model this scratch was sized for (spec 15b: its widths are the descriptor's).
   const model::ModelDesc& desc() const { return *desc_; }
@@ -188,10 +199,11 @@ struct PrefillScratch : PrefillScratchDims {
   size_t lazy_bytes() const;   // whichever of the three exist
 
  private:
-  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
                  const PrefillScratchSizes& s);   // the delegate
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
+  uint32_t chunk_cap_;
   std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_;
 };
 

@@ -21,7 +21,8 @@
 //
 // argv: [1] golden dir, [2] prompt dir, [3] snapshot,
 //       [4] comma-separated prompt names (default "prose,code,cjk"),
-//       [5] prefill chunk width (default 0 = PrefillScratch::kC),
+//       [5] prefill chunk width (default 0 = the engine's chunk cap; plan 5d: run with
+//           B70_PREFILL_CHUNK_CAP=4096 for chunks above 2048),
 //       [6] prefill backend, l0 or l0-int8 (default: l0),
 //       [7] bf16 near-tie flips accepted per prompt (default 0; see main()).
 // Arguments 4 and 5 are what make the >= 2048-id multi-chunk gate of spec §6.2
@@ -209,7 +210,7 @@ int main(int argc, char** argv) {
     const uint32_t V = uint32_t(g.dim("logits", 2, 1));
     CHECK_EQ(uint32_t(g.dim("logits", 2, 0)), T + kGen);
     const uint32_t Vcmp = std::min(V, Qwen35::kVocab);
-    const uint32_t C = chunk ? chunk : runtime::PrefillScratch::kC;
+    const uint32_t C = chunk ? chunk : eng.prefill_chunk_cap();
     std::printf(
         "\n================ %s: %u prompt ids PREFILLED at chunk %u (%u chunk(s)),"
         " %u generated, golden vocab %u ================\n",
