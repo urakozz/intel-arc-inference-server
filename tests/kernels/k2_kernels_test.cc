@@ -5,7 +5,7 @@
 //   1. the grouped norm: prep_res_fold (SP4) + k2_norm_finish - resid and x bit-exact
 //      (no exp anywhere; sqrt / divide are correctly rounded);
 //   2. k2_silu_mul at I 6144 / S 4 - within 1 bf16 ulp (exp);
-//   3. k2_attn_prep, both builds (dense with v, MoVA without) at pos 37 - q, gate, k, v
+//   3. k2_attn_prep, both builds (dense with v, MoVA without) at pos 37 and 3001 - q, gate, k, v
 //      bit-exact (the RoPE chain's products are exact in fp32);
 //   4. the routers: the MoE router GEMV (gemv_bf16 2560 -> 128) + k2_route; k2_route on
 //      crafted logits - exact ties to the lower id, and the 28 PADDED lanes at +80 against
@@ -15,7 +15,7 @@
 //      the shared expert block 100) - every slot against ITS expert, the ascending-id bf16
 //      combine and the residual within 2 bf16 ulps;
 //   6. k2_mova_value - the 4 value experts by id, SiLU, the combine, into the V cache at pos;
-//   7. k2_attn_decode / k2_attn_reduce at depths 6, 300 and 3000 (1, 5 and 24 blocks) against
+//   7. k2_attn_decode / k2_attn_reduce at depths 6, 300, 2048, 2049, 3000 and 4096 against
 //      an fp64 softmax, with gates on both sides of softplus's threshold (Review Focus 2);
 //   8. bitwise replay of the MoE pair and the attention pair;
 //   9. the EAGER attention (B70_K2_ATTN=eager, k2_attn_eager.cl's four kernels) at depths 6,
@@ -231,12 +231,14 @@ int main() {
   c->n_active = 1;
   l0::Mem kvk = d.zeros(size_t(ML) * m.kv_n() * 2), kvv = d.zeros(size_t(ML) * m.kv_n() * 2);
   l0::Mem aq = d.zeros(size_t(m.q_n()) * 4), ag = d.zeros(size_t(m.q_n()) * 4);
+  // pos 37 and pos 3001 (past 2048: the RoPE row and the K / V row both beyond a 2048-row table).
+  for (const uint32_t ppos : {37u, 3001u})
   for (int dense = 1; dense >= 0; --dense) {
     const uint32_t N = dense ? m.attn_dense_n() : m.attn_sparse_n(), S = m.attn_s;
     const std::vector<float> part = random_f32(size_t(S) * N, -1.f, 1.f, 10 + dense);
-    c->pos = 37;
+    c->pos = ppos;
     const k2_ref::Prep want =
-        k2_ref::attn_prep(part.data(), 1, 0, N, S, rope.data() + size_t(37) * 2 * 64, m.q_heads,
+        k2_ref::attn_prep(part.data(), 1, 0, N, S, rope.data() + size_t(ppos) * 2 * 64, m.q_heads,
                           m.kv_heads, m.head_dim, dense);
     l0::Mem pb = d.upload(part.data(), part.size() * 4);
     l0::Module pm(d.ctx, kernels::path(kk::attn_prep_variant(1, N, S, m.q_heads, m.kv_heads, dense)));
@@ -253,12 +255,12 @@ int main() {
     d.run(kp, m.q_heads + m.kv_heads, 1);
     CHECK(d.read<float>(aq, m.q_n()) == want.q);
     CHECK(d.read<float>(ag, m.q_n()) == want.gate);
-    CHECK(d.read<uint16_t>(kvk, m.kv_n(), size_t(37) * m.kv_n() * 2) == want.k);
-    const std::vector<uint16_t> v = d.read<uint16_t>(kvv, m.kv_n(), size_t(37) * m.kv_n() * 2);
+    CHECK(d.read<uint16_t>(kvk, m.kv_n(), size_t(ppos) * m.kv_n() * 2) == want.k);
+    const std::vector<uint16_t> v = d.read<uint16_t>(kvv, m.kv_n(), size_t(ppos) * m.kv_n() * 2);
     if (dense) CHECK(v == want.v);
     else CHECK(std::all_of(v.begin(), v.end(), [](uint16_t e) { return e == 0; }));
   }
-  std::puts("  attn prep: q, gate, k (and the dense build's v) bit-exact at pos 37; the MoVA "
+  std::puts("  attn prep: q, gate, k (and the dense build's v) bit-exact at pos 37 and 3001; the MoVA "
             "build leaves v to k2_mova_value");
 
   // ---- 4. the routers ----------------------------------------------------------------------
@@ -472,7 +474,8 @@ int main() {
     kar.arg_ptr(1, part.ptr());
     kar.arg_ptr(2, ag.ptr());
     kar.arg_ptr(3, out.ptr());
-    for (uint32_t pos : {5u, 299u, 2999u}) {
+    // 2049 keys: the first depth past 2048, where v2_ppw's per-work-group stride steps 64 -> 128.
+    for (uint32_t pos : {5u, 299u, 2047u, 2048u, 2999u, ML - 1}) {
       c->pos = pos;
       d.run(kad, m.kv_heads, kk::kAttnTgt);
       d.run(kar, m.q_heads, 1);

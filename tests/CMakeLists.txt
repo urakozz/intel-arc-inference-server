@@ -2154,6 +2154,21 @@ set_tests_properties(k2_serve_test PROPERTIES LABELS k2)
 # serve_adapters.h (PinnedAlloc) and golden_common.h, as prefix_gpu_test: it links what
 # b70-serve links.
 if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
+  # On the card, checkpoint: the pass key retrieved past 2048 positions, text through the
+  # engine's tokenizer (the int4 repo's tokenizer.json truncates at 2048 - no_truncation_test)
+  # into K2Engine: prefill at ~2100 / ~8000 ids, decode-only at ~2100; bf16 and int8 KV.
+  add_executable(k2_passkey_test server/k2_passkey_test.cc)
+  target_include_directories(k2_passkey_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(k2_passkey_test PRIVATE b70_tokenizer b70_k2_prefill b70_runtime b70_loader b70_model
+    b70_l0)
+  add_dependencies(k2_passkey_test ${B70_K2_PREFILL_KERNELS} ${B70_K2_DECODE_KERNELS})
+  add_test(NAME k2_passkey_test COMMAND k2_passkey_test ${B70_K2_SNAPSHOT})
+  set_tests_properties(k2_passkey_test PROPERTIES LABELS "checkpoint;k2" SKIP_RETURN_CODE 77 TIMEOUT 1800)
+  if(B70_KV8)
+    add_test(NAME k2_passkey_kv8_test COMMAND k2_passkey_test ${B70_K2_SNAPSHOT})
+    set_tests_properties(k2_passkey_kv8_test PROPERTIES LABELS "checkpoint;k2" SKIP_RETURN_CODE 77
+      TIMEOUT 1800 ENVIRONMENT "B70_KV_CACHE=int8")
+  endif()
   add_executable(k2_prefix_gpu_test server/k2_prefix_gpu_test.cc)
   target_include_directories(k2_prefix_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/golden)
