@@ -10,9 +10,11 @@
 the depths 8k / 32k / 64k / 99k of prompt ids, each ending where the assistant's next turn re-emits text that lies
 FAR back in the context - beyond the DFlash drafter's 2048-id window, where only prompt lookup can see it:
   reemit  the first 120 lines of a file printed verbatim by a bash sed (the source), more files were read after it,
-          and the last turn asks to apply a rename across those lines and output them;
-  rename  a function was shown by a read (the source), more files were read, and the last turn asks for the
-          function back with one local renamed;
+          and the last turn asks to apply a rename across those lines and write them in the reply (no tool: on the
+          card Qwen3.8 otherwise answers with a `sed | sed` call);
+  rename  a function was shown by a read (the source), more files were read, and the last turn asks for one edit
+          call whose oldString / newString are the whole function before / after renaming a local (the copy inside
+          a tool call, as an agent's edit carries it);
   quote   a grep's output (the source), more files were read, and the last turn asks to quote that output back
           exactly as the tool printed it.
 The reads in between (the filler) are whole files of this tree in a fixed order, the last one cut so the rendered
@@ -63,10 +65,11 @@ FILLER = [
 USER = {
     "reemit_read": "Print the first {n} lines of {path}.",
     "reemit_ask": ("In those first lines of {path}, rename `{old}` to `{new}` everywhere (the definition and every "
-                   "use) and output the lines with the change, nothing else."),
+                   "use) and write those lines with the change directly in your reply, as one code block - do not "
+                   "call a tool, I will paste it myself."),
     "rename_read": "Show me `{fn}` in {path}.",
-    "rename_ask": ("Rename the local `{local}` to `{local}_v` in `{fn}` ({path}) and print the whole function "
-                   "with the change, nothing else."),
+    "rename_ask": ("Rename the local `{local}` to `{local}_v` in `{fn}` ({path}) with one edit call: oldString the "
+                   "whole function as shown above, newString the whole function after the change."),
     "quote_grep": "Where is `{sym}` used?",
     "quote_ask": ("Quote the grep output for `{sym}` from earlier back to me exactly as the tool printed it, every "
                   "line, then say which hit you would edit first."),

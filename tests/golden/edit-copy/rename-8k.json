@@ -8,7 +8,7 @@
   1029,
   2393
  ],
- "distance": 5781,
+ "distance": 5792,
  "messages": [
   {
    "role": "system",
@@ -69,7 +69,7 @@
   },
   {
    "role": "user",
-   "content": "Rename the local `last` to `last_v` in `PromptLookup::match` (/work/src/server/prompt_lookup.cc) and print the whole function with the change, nothing else."
+   "content": "Rename the local `last` to `last_v` in `PromptLookup::match` (/work/src/server/prompt_lookup.cc) with one edit call: oldString the whole function as shown above, newString the whole function after the change."
   }
  ],
  "tools": [
