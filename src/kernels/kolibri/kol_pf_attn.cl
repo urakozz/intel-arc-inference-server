@@ -30,7 +30,8 @@
 // float8 (8 rows x 128 dims) in registers; S for one KV tile is KT/16 float8 with the row in the
 // component and the key in the lane - the bf16 DPAS A-operand layout, so P goes to P·V with no data
 // movement; K^T through the transposed 32-bit 2D read, V through the VNNI-transform read; the fp32
-// online softmax; P rounded to bf16 as the P·V operand; q read from the prep's fp32 rows once (a row
+// online softmax; P as the P·V operand (the default path: two bf16 halves, KOL_PV_HL; eager: the reference's
+// bf16 p); q read from the prep's fp32 rows once (a row
 // past C reads row C - 1: finite, never written); the scale 1 / sqrt(128).
 //
 // **EAGER (B70_KOLIBRI_ATTN=eager, the switch 20c's decode reads too - one parser,
@@ -179,6 +180,21 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
       o[dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(                                 \
           pa[b + ks], as_int8(vload8(0, vb + c * 16u + 8u * ks)), o[dd + c]);               \
   }
+  // The default path's P·V: P = hi + lo, both bf16 (hi = rne(p), lo = rne(p - hi): p to ~16 bits), each V
+  // tile read once and multiplied by both halves - fp32 P to within 2^-17 of each p instead of bf16's 2^-9.
+#define KOL_PV_HL(t0)                                                                       \
+  _Pragma("unroll") for (uint b = 0; b < NKA; b += 2)                                       \
+  _Pragma("unroll") for (uint dd = 0; dd < NDA; dd += 2) {                                  \
+    uint vb[32];                                                                            \
+    intel_sub_group_2d_block_read_transform_16b_32r16x2c(                                   \
+        (__global void*)Vc, v_w, rows_h, v_p, (int2)((int)(j * HD + 16u * dd), (int)(KROW(t0) + 16u * b)), vb); \
+    _Pragma("unroll") for (uint c = 0; c < 2u; ++c)                                         \
+    _Pragma("unroll") for (uint ks = 0; ks < 2u; ++ks) {                                    \
+      const int8 vv = as_int8(vload8(0, vb + c * 16u + 8u * ks));                           \
+      o[dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pa[b + ks], vv, o[dd + c]);      \
+      o[dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl[b + ks], vv, o[dd + c]);      \
+    }                                                                                       \
+  }
 
 #define KOL_ROWMAX()                                                                        \
   float8 tmax = (float8)(-INFINITY);                                                        \
@@ -200,27 +216,38 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
   rsum.s4 = sub_group_reduce_add(psum.s4); rsum.s5 = sub_group_reduce_add(psum.s5);         \
   rsum.s6 = sub_group_reduce_add(psum.s6); rsum.s7 = sub_group_reduce_add(psum.s7);
 #define KOL_CV(r) pa[b].s##r = as_short(rne_bf16(p.s##r));
+#define KOL_CV_HL(r)                                                                        \
+  {                                                                                         \
+    const ushort hb = rne_bf16(p.s##r);                                                     \
+    pa[b].s##r = as_short(hb);                                                              \
+    pl[b].s##r = as_short(rne_bf16(p.s##r - bf16f(hb)));                                    \
+  }
 
 #if !EAGER
-  // The default path: the online softmax, P = EXPF(s - m) rounded to bf16 for P·V, O / l last.
+  // The default path: the online softmax, P = EXPF(s - m) as hi + lo bf16 halves for P·V (KOL_PV_HL), O / l
+  // last. A single bf16 P (2^-9 per weight against the fp32 l) moved Kolibri-1's real-checkpoint prefill off
+  // decode's fp32-P attention: the code prompt's layer-16 attention rows to cosine 0.974, the residual medians
+  // to 0.962 of f32 by layer 24 (decode 0.994), the routing 8762 sets off f32 against the bf16 golden's 7981
+  // (kolibri_golden_prefill_test, 2026-11-01); hi + lo: 7963 (7792 with the halves' P·V in two passes - the
+  // count's own noise), the code prompt's layer-24 median 0.995. Cost: pp32768 2304 against 2380 t/s (-3 %).
   for (uint t0 = tstart; t0 < last; t0 += KT) {
     KOL_SCORES(t0)
     KOL_ROWMAX()
     const float8 corr = EXPF(m - msafe);         // m = -INF before a row's first key: EXPF(-INF) = 0
     float8 psum = (float8)(0.0f);
-    short8 pa[NKA];
+    short8 pa[NKA], pl[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) {
-      const float8 p = EXPF(sacc[b] - msafe);    // masked: EXPF(-INF) = 0
+      const float8 p = EXPF(sacc[b] - msafe);    // masked: EXPF(-INF) = 0 (hi and lo both 0)
       psum += p;
-      KOL_CV(0) KOL_CV(1) KOL_CV(2) KOL_CV(3) KOL_CV(4) KOL_CV(5) KOL_CV(6) KOL_CV(7)
+      KOL_CV_HL(0) KOL_CV_HL(1) KOL_CV_HL(2) KOL_CV_HL(3) KOL_CV_HL(4) KOL_CV_HL(5) KOL_CV_HL(6) KOL_CV_HL(7)
     }
     KOL_ROWSUM(psum, rsum)
     lsum = lsum * corr + rsum;
     m = mnew;
 #pragma unroll
     for (uint dd = 0; dd < NDA; ++dd) o[dd] *= corr;
-    KOL_PV(t0)
+    KOL_PV_HL(t0)
   }
 #else
   // Pass 1: the row's max and Σ exp(s - max) over its keys (fp32, online).
@@ -252,9 +279,11 @@ __kernel void kol_pf_flash_attn(__global const float* restrict Q, __global const
 #undef KOL_VISIBLE
 #undef KOL_MASK
 #undef KOL_PV
+#undef KOL_PV_HL
 #undef KOL_ROWMAX
 #undef KOL_ROWSUM
 #undef KOL_CV
+#undef KOL_CV_HL
 #undef KROW
 
   // The epilogue: per element (row r0 + r, dim 16 dd + lane), bf16 [C][Q_HEADS x 128].
