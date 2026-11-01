@@ -3796,6 +3796,7 @@ st_r69_d1() {
   finish
 }
 
+# ===============================================================================
 # ======================================================================================
 row 70 "spec 19f - prompt lookup inside DFlash (--spec dflash-lookup: ENTER >= 8 tokens beyond the drafter's 2048 window, STAY >= 3 accepted, full-depth lookup verify, the drafter's projection kept): D2 / D4 on the mode, speed against plain --spec dflash on the edit / copy set (8k-99k) and A4 / golden (plan 19f)"
 rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the share of ids from lookup (the server's dflash: ... lookup: lines; time in lookup is not split out), the verdict line."
@@ -3844,6 +3845,62 @@ stage r70.verdict 70 manual -    -           r70.speed             "spec 19 §13
 st_r70_verdict() {
   say "# the bar (spec 19 §13.1): dlk/dflash >= 1.20 on the edit / copy set (median over its prompts) and >= 0.97 on A4 (toolcall) and golden -> replaces plain dflash; 1.05 .. 1.20 -> opt-in, the operator's call; < 1.05 -> dropped"
   say "# read r70.speed's per-prompt table (the edit / copy rows per depth) and its RATIO lines; the 'dflash: ... lookup:' server lines give the time in lookup"
+}
+=======
+row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --pp 2), speed against 2048"
+rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper per 4096 tokens at 4096 rows, the rest of the plan stops. Hand back: the P0 table, the gate lines, the speed table."
+rownote 75 "Run first on 2026-11-01 as busy-box timing on one card (other agents on both cards) - docs/probe-prefill-chunk-4096-2026-11-01.md's provisional lines; r75.p0 / r75.speed are the quiet-box re-check. The gates run at B70_PREFILL_CHUNK_CAP=4096 (the engines' default cap, as B70_KV_CACHE is the cache form's)."
+stage r75.k0    75 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0 at cap 2048: every binary and token as main"
+st_r75_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r75.host  75 default cpu  -     -                     "buffers_test, the planner's prefill term, the CLI refusals, the prefix-cache hook tests"
+st_r75_host() {
+  run_tests '^(memory_plan_test|pipeline_prefill_plan_test|prefix_cache_test|pp_serve_plan_test|dflash_engine_host_test)$'
+  finish
+}
+stage r75.p0    75 default gpu  qwen  r75.k0                "probe_chunk_rows: the production prefill linears at M 4096 against 2 x 2048, every shape, h8 and bf16; idle, interleaved, median of 5"
+st_r75_p0() {
+  idle before
+  chk "build/tools/probe/probe_chunk_rows --rounds 5" "the P0 table and the stop rule"
+  idle after
+  grab_all p0 '^\| |^STOP RULE' 60
+  finish
+}
+stage r75.gates 75 default card qwen  r75.k0                "prefill_gate / consistency / determinism at cap 4096 (l0-int8, l0), prefill_split at cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise), buffers_test, A4 on l0-int8, MTP prefill"
+st_r75_gates() {
+  run_tests '^(buffers_test|prefill_smoke_test|gdn_chunk_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_consistency_l0_test|prefill_determinism_l0_test|mtp_prefill_test|prefill_split_l0_test|prefill_split_l0-int8_test)$' '' '' B70_PREFILL_CHUNK_CAP=4096
+  if [ -n "${A4_REF_DIR:-}" ] && [ -d "${A4_REF_DIR:-/nonexistent}" ]; then
+    x "mkdir -p $STATE/a4-c4096 && cp $A4_REF_DIR/*.bf16.txt $STATE/a4-c4096/"
+    chk "B70_PREFILL_CHUNK_CAP=4096 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-c4096 l0-int8" "A4 engine runs at cap 4096"
+    chk "python3 tools/toolcall/score.py $STATE/a4-c4096 bf16 l0-int8 | tee $STATE/a4-c4096/score.md" "A4 scoring (>= 25 / 36)"
+    grab_all a4 'match|/36|total' 6
+  else
+    say "A4 skipped: A4_REF_DIR unset (<name>.bf16.txt reference runs)"
+  fi
+  finish
+}
+stage r75.pp    75 default gpu  qwen  r75.k0                "--pp 2 prefill at cap 4096: pp_prefill_test (both cards)"
+st_r75_pp() {
+  run_tests '^pp_prefill_test$' '' '' B70_PREFILL_CHUNK_CAP=4096
+  finish
+}
+stage r75.speed 75 optin   gpu  qwen  r75.gates             "pp4096 / 16384 / 32768 / 65536 (and 512 / 1024) at chunk 4096 vs 2048; idle, interleaved, median of 3"
+st_r75_speed() {
+  idle before
+  local n arms="" ratios=""
+  for n in 512 1024 4096 16384 32768 65536; do
+    arms="$arms pp$n-c2048 '$(bench_cmd "$SNAP_QWEN" --prefill-length $n --tg 16 --prefill-backend l0-int8 --max-len 81920)'"
+    arms="$arms pp$n-c4096 '$(bench_cmd "$SNAP_QWEN" --prefill-length $n --tg 16 --prefill-backend l0-int8 --max-len 81920 --prefill-chunk 4096)'"
+    ratios="$ratios --ratio pp$n-c2048/pp$n-c4096"
+  done
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "chunk 2048 / 4096 prefill arms"
+  idle after
+  grab_all rows '^\| b70-decode' 30
+  grab_all ratio '^RATIO '
+  grab_all idle '^IDLE '
+  finish
 }
 
 # ======================================================================================
