@@ -250,7 +250,9 @@ struct PipelinePrefill final : PipelinePrefillBase {
 
   // Spec 7: each device's shadows, the size of its state (on the first hooked prefill).
   // Spec 16d: `hh_bytes` > 0 (MTP on) - and device 1's shadows of the head's hidden row.
-  void ensure_shadows(const PersistentBuffers& p0, const PersistentBuffers& p1, size_t hh_bytes = 0) {
+  // And `head_kv_bytes` > 0 - device 1's shadows of the head's KV row at the block end - 1.
+  void ensure_shadows(const PersistentBuffers& p0, const PersistentBuffers& p1, size_t hh_bytes = 0,
+                      size_t head_kv_bytes = 0) {
     const std::array<const PersistentBuffers*, kPpDevices> p{&p0, &p1};
     for (uint32_t d = 0; d < kPpDevices; ++d)
       for (uint32_t s = 0; s < kDepth; ++s) {
@@ -263,6 +265,9 @@ struct PipelinePrefill final : PipelinePrefillBase {
     if (hh_bytes != 0)
       for (auto& m : shadow_hh)
         if (!m) m = std::make_unique<l0::Mem>(dev[kPpDevices - 1]->ctx, l0::MemKind::Device, hh_bytes);
+    if (head_kv_bytes != 0)
+      for (auto& m : shadow_head_kv)
+        if (!m) m = std::make_unique<l0::Mem>(dev[kPpDevices - 1]->ctx, l0::MemKind::Device, head_kv_bytes);
   }
 
   uint8_t* slot(uint32_t j) const { return landing.as<uint8_t>() + lay.slot(j); }
@@ -285,6 +290,9 @@ struct PipelinePrefill final : PipelinePrefillBase {
   // with a hook two shadows of hh row 0. Allocated by ensure_mtp / ensure_shadows.
   std::unique_ptr<l0::Mem> mtp_hid, mtp_ctl;
   std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_hh;
+  // And the head's KV row at the block end - 1 ([K row][V row][K scale][V scale]), copied after
+  // the hooked chunk and before the next chunk's step_mtp_kv rewrites it (save_kv's snap_head_kv_).
+  std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_head_kv;
   // Spec 19d, a drafter: the prefill's tap staging per chunk parity, on device 1 ([kC][taps][hidden] bf16: both
   // devices' walks write their own taps' columns; the host projects a chunk's rows once both have finished it).
   std::array<std::unique_ptr<l0::Mem>, kDepth> taps;
@@ -311,6 +319,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
   size_t shadow_hh_bytes() const {
     size_t b = 0;
     for (const auto& m : shadow_hh) b += m ? m->size() : 0;
+    for (const auto& m : shadow_head_kv) b += m ? m->size() : 0;
     return b;
   }
   // Declared last, destroyed first: the lists go before the events and buffers they name.
@@ -441,7 +450,14 @@ struct PipelineEngine::PrefillDriver {
                          S.mtp->kv_lay.layer(S.mtp->kv_k.ptr(), S.mtp->kv_v.ptr(), 0));
     // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h.
     D.cx.copy(S.mtp->hh.ptr(), hid + size_t(c.rows) * row, row);
-    if (c.hook) D.cx.copy(p.shadow_hh[j % kDepth]->ptr(), hid + size_t(c.rows) * row, row);
+    if (c.hook) {
+      D.cx.copy(p.shadow_hh[j % kDepth]->ptr(), hid + size_t(c.rows) * row, row);
+      // The head's row end - 1: this chunk wrote rows up to end - 2; the next chunk's
+      // step_mtp_kv (later on this list) writes end - 1, possibly while the hook runs.
+      uint8_t* sh = p.shadow_head_kv[j % kDepth]->as<uint8_t>();
+      for (const HeadRowPart& part : head_row_parts(*S.mtp, c.end() - 1))
+        if (part.bytes) D.cx.copy(sh + part.shadow_off, part.dev, part.bytes);
+    }
   }
 
   // Spec 7: after a hooked chunk, this device's GDN state and conv ring as they are at its
@@ -502,13 +518,18 @@ struct PipelineEngine::PrefillDriver {
       e.snap_gdn_[d] = p.dev[d]->shadow_gdn[s].get();
       e.snap_conv_[d] = p.dev[d]->shadow_conv[s].get();
     }
-    if (e.mtp()) e.snap_hh_ = p.shadow_hh[s].get();   // spec 16d
+    if (e.mtp()) {   // spec 16d
+      e.snap_hh_ = p.shadow_hh[s].get();
+      e.snap_head_kv_ = p.shadow_head_kv[s].get();
+      e.snap_end_ = c.end();
+    }
     try {
       e.block_hook_(c.end(), true);
     } catch (...) {
       e.snap_gdn_ = {};
       e.snap_conv_ = {};
       e.snap_hh_ = nullptr;
+      e.snap_head_kv_ = nullptr;
       // As on one card, the state is exactly at the block end: let what was appended after it
       // finish - on its own, nothing is released early (every ready event it waits on is
       // signalled by device 0's half, already appended) - then put the shadows back.
@@ -526,6 +547,9 @@ struct PipelineEngine::PrefillDriver {
       if (e.mtp()) {   // spec 16d: and h_{end-1}
         Stage& S1 = e.st(kPpDevices - 1);
         S1.imm.copy(S1.mtp->hh.ptr(), p.shadow_hh[s]->ptr(), size_t(S1.model.desc->hidden) * 2);
+        // and the head's row end - 1, which the next chunk may have rewritten
+        for (const HeadRowPart& part : head_row_parts(*S1.mtp, c.end() - 1))
+          if (part.bytes) S1.imm.copy(part.dev, p.shadow_head_kv[s]->as<uint8_t>() + part.shadow_off, part.bytes);
       }
       hook_threw = true;
       throw;
@@ -533,6 +557,7 @@ struct PipelineEngine::PrefillDriver {
     e.snap_gdn_ = {};
     e.snap_conv_ = {};
     e.snap_hh_ = nullptr;
+    e.snap_head_kv_ = nullptr;
   }
 
   // The head on device 1, after its last chunk: one card's step_head, into device 1's
@@ -642,7 +667,9 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
   PipelinePrefill& p = as_pf(*pf_);
   const bool hooked = static_cast<bool>(block_hook_);
-  if (hooked) p.ensure_shadows(st(0).persist, st(1).persist, mtp() ? size_t(st(1).model.desc->hidden) * 2 : 0);
+  if (hooked)
+    p.ensure_shadows(st(0).persist, st(1).persist, mtp() ? size_t(st(1).model.desc->hidden) * 2 : 0,
+                     mtp() ? head_row_bytes(*st(1).mtp) : 0);
   mtp_before_prefill();   // spec 16d: the live verify slot into slot 0 on both devices
   const std::vector<PpChunk> chunks = pp_prefill_chunks(base, ids.size(), chunk, hooked);
   const std::vector<PpPfStep> steps = pp_prefill_schedule(chunks);

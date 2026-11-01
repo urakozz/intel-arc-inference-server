@@ -224,6 +224,7 @@ void PipelineEngine::reset() {
   snap_gdn_ = {};
   snap_conv_ = {};
   snap_hh_ = nullptr;
+  snap_head_kv_ = nullptr;
   st(0).persist.zero(st(0).imm);
   st(1).persist.zero(st(1).imm);
   // Spec 16d: and the MTP state (Engine::reset's mtp_->zero), on both devices.
@@ -453,6 +454,7 @@ struct KvRun {
   uint32_t dev;
   uint8_t* ptr;
   size_t bytes;
+  bool head;   // the MTP head's layer
 };
 }  // namespace
 
@@ -467,7 +469,7 @@ static std::vector<KvRun> resolve_kv_runs(const std::array<const PersistentBuffe
        pp_kv_runs({p[0]->kv_lay, p[1]->kv_lay}, head ? &head->kv_lay : nullptr, begin, end)) {
     const l0::Mem& m = r.head ? (r.tensor == 0 ? head->kv_k : head->kv_v)
                               : (r.tensor == 0 ? p[r.device]->kv_k : p[r.device]->kv_v);
-    runs.push_back({r.device, m.as<uint8_t>() + r.offset, r.bytes});
+    runs.push_back({r.device, m.as<uint8_t>() + r.offset, r.bytes, r.head});
   }
   return runs;
 }
@@ -485,7 +487,34 @@ void PipelineEngine::save_kv(uint32_t begin, uint32_t end, void* host) const {
     st(r.dev).imm.copy(h, r.ptr, r.bytes);
     h += r.bytes;
   }
+  // Inside a mid-prompt hook (MTP on): the head's row snap_end_ - 1 as it stood at the block
+  // end - the next chunk, which may be running, rewrites it (see snap_head_kv_).
+  if (snap_head_kv_ && begin < snap_end_ && snap_end_ <= end) {
+    const std::array<HeadRowPart, 4> parts = head_row_parts(*st(1).mtp, snap_end_ - 1);
+    h = static_cast<uint8_t*>(host);
+    for (const KvRun& r : runs) {
+      if (r.head) {
+        const size_t unit = r.bytes / (end - begin);
+        for (const HeadRowPart& part : parts)
+          if (part.bytes == unit && r.ptr + size_t(snap_end_ - 1 - begin) * unit == part.dev)
+            st(1).imm.copy(h + size_t(snap_end_ - 1 - begin) * unit,
+                           snap_head_kv_->as<uint8_t>() + part.shadow_off, unit);
+      }
+      h += r.bytes;
+    }
+  }
 }
+
+std::array<PipelineEngine::HeadRowPart, 4> PipelineEngine::head_row_parts(const MtpBuffers& m, uint32_t pos) {
+  const KvLayout& L = m.kv_lay;
+  const size_t rb = L.row_bytes(), sb = L.scale_row_bytes();
+  return {{{m.kv_k.as<uint8_t>() + L.rows_offset(0) + size_t(pos) * rb, 0, rb},
+           {m.kv_v.as<uint8_t>() + L.rows_offset(0) + size_t(pos) * rb, rb, rb},
+           {m.kv_k.as<uint8_t>() + L.scales_offset(0) + size_t(pos) * sb, 2 * rb, sb},
+           {m.kv_v.as<uint8_t>() + L.scales_offset(0) + size_t(pos) * sb, 2 * rb + sb, sb}}};
+}
+
+size_t PipelineEngine::head_row_bytes(const MtpBuffers& m) { return 2 * m.kv_lay.pos_bytes(); }
 
 void PipelineEngine::load_kv(uint32_t begin, uint32_t end, const void* host) {
   if (begin > end || end > max_len_)

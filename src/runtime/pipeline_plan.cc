@@ -319,8 +319,11 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     }
     if (x.hook && pf.prefill) {
       const PersistentSizes hs = PersistentDims::stage_sizes(max_len, d, kv, st[i].gdn, st[i].fa);
+      // MTP on, device 1 also shadows the head's hidden row and its KV row at the block
+      // end - 1 (K and V, rows then scales: PipelineEngine::head_row_bytes).
+      const KvLayout head_kv{kv, 1, d.fa_kv_heads, model::Qwen35::kFaHeadDim, 1};
       dp.shadows = kPpPfDepth * (hs.gdn_state + hs.conv_ring +
-                                 (x.mtp && last ? size_t(d.hidden) * 2 : 0));
+                                 (x.mtp && last ? size_t(d.hidden) * 2 + 2 * head_kv.pos_bytes() : 0));
       dp.prefill_scratch += dp.shadows;
     }
   }

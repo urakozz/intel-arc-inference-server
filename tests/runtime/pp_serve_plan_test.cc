@@ -212,7 +212,10 @@ void check_shadows() {
         const runtime::PpStage& st = a.dev[i].stage;
         const runtime::PersistentSizes ps =
             runtime::PersistentDims::stage_sizes(len, *d, KvCache::Bf16, st.gdn, st.fa);
-        const size_t want = 2 * (ps.gdn_state + ps.conv_ring + (mtp && i == 1 ? size_t(d->hidden) * 2 : 0));
+        // MTP on, device 1: the head's hidden row and its KV row (K and V, bf16: 2 x 2048 B on
+        // every family here).
+        const size_t head = size_t(d->hidden) * 2 + 2 * size_t(d->fa_kv_heads) * 256 * 2;
+        const size_t want = 2 * (ps.gdn_state + ps.conv_ring + (mtp && i == 1 ? head : 0));
         CHECK_EQ(b.dev[i].shadows, want);
         CHECK_EQ(b.dev[i].prefill_scratch, a.dev[i].prefill_scratch + want);
         CHECK_EQ(b.dev[i].total(), a.dev[i].total() + want);
