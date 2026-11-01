@@ -11,6 +11,7 @@
 #include <vector>
 #include "check.h"
 #include "common/bf16.h"
+#include "common/copy_chunks.h"
 #include "common/repack.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -105,6 +106,21 @@ int main(int argc, char** argv) {
     if (want[i] != got[i] && ++diff == 1)
       std::fprintf(stderr, "first mismatch at u32 %zu: want %08X got %08X\n", i, want[i], got[i]);
   CHECK_EQ(diff, size_t(0));
+
+  // Fix round A: embed_tokens is the largest upload from a plain (non-USM) source - the
+  // mmap, 2 542 796 800 B - and l0::CmdList::copy hands it to the driver as 10 pieces of at
+  // most 256 MiB (9 full, then the remainder). The whole tensor read back (itself a chunked
+  // copy) must equal the checkpoint bytes.
+  {
+    const loader::TensorInfo& emb = set.tensors().at(strip("embed_tokens.weight"));
+    const size_t eb = set.bytes(emb);
+    CHECK_EQ(eb, size_t(2542796800));
+    CHECK_EQ(m.embed.size(), eb);
+    std::vector<uint8_t> eg(eb);
+    imm.copy(eg.data(), m.embed.ptr(), eb);
+    CHECK(std::memcmp(eg.data(), set.data(emb), eb) == 0);
+    std::printf("embed round trip: %zu B bit-exact (%zu pieces)\n", eb, common::copy_chunk_count(eb));
+  }
 
   // Layout 0 owns two real allocations and preserves the checkpoint's
   // [K/8][N] qweight + [K/64][N] scales geometry after each fusion map. Read
