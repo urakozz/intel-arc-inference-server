@@ -14,10 +14,11 @@
 
 namespace {
 
-const tp::Linear& find(const tp::Shapes& s, const std::string& key) {
+// by pointer: gcc's -Wdangling-reference flags a reference returned from a call that took a temporary string
+const tp::Linear* find(const tp::Shapes& s, const char* key) {
   for (const tp::Linear& l : s.linears)
-    if (key == l.key) return l;
-  std::fprintf(stderr, "no linear %s\n", key.c_str());
+    if (std::string(key) == l.key) return &l;
+  std::fprintf(stderr, "no linear %s\n", key);
   std::exit(1);
 }
 
@@ -51,28 +52,29 @@ void check_qwen38() {
   CHECK_EQ(s.token_bytes(8), 8u * 128u * 20480u);
   CHECK_EQ(s.linears.size(), 8u);
 
-  check_card(find(s, "qkvz"), 5120, 8192, 1, 1, 48);
-  check_card(find(s, "out"), 3072, 5120, 4, 0, 48);
-  check_card(find(s, "qkv"), 5120, 7168, 2, 0, 16);
-  check_card(find(s, "o"), 3072, 5120, 4, 0, 16);
-  check_card(find(s, "gateup"), 5120, 17408, 8, 0, 64);
-  check_card(find(s, "down"), 8704, 5120, 4, 0, 64);
-  check_card(find(s, "head"), 5120, 124160, 1, 0, 1);
-  check_card(find(s, "ab"), 5120, 128, 1, 0, 48);   // 24 + 24 of 48 + 48, zero-padded to 128
+  check_card(*find(s, "qkvz"), 5120, 8192, 1, 1, 48);
+  check_card(*find(s, "out"), 3072, 5120, 4, 0, 48);
+  check_card(*find(s, "qkv"), 5120, 7168, 2, 0, 16);
+  check_card(*find(s, "o"), 3072, 5120, 4, 0, 16);
+  check_card(*find(s, "gateup"), 5120, 17408, 8, 0, 64);
+  check_card(*find(s, "down"), 8704, 5120, 4, 0, 64);
+  check_card(*find(s, "head"), 5120, 124160, 1, 0, 1);
+  check_card(*find(s, "ab"), 5120, 128, 1, 0, 48);   // 24 + 24 of 48 + 48, zero-padded to 128
 
   // the one-card shapes beside them
-  const tp::Linear& qkvz = find(s, "qkvz");
+  const tp::Linear* qkvz_p = find(s, "qkvz");
+  const tp::Linear& qkvz = *qkvz_p;
   CHECK_EQ(qkvz.one.N, 16384u);
-  CHECK_EQ(find(s, "down").one.K, 17408u);
-  CHECK_EQ(find(s, "head").one.N, 248320u);
-  CHECK_EQ(find(s, "ab").real_n_card, 48u);
+  CHECK_EQ(find(s, "down")->one.K, 17408u);
+  CHECK_EQ(find(s, "head")->one.N, 248320u);
+  CHECK_EQ(find(s, "ab")->real_n_card, 48u);
 
   // row-parallel = the all-reduce after it; column-parallel = none
-  CHECK(find(s, "out").row_parallel);
-  CHECK(find(s, "o").row_parallel);
-  CHECK(find(s, "down").row_parallel);
+  CHECK(find(s, "out")->row_parallel);
+  CHECK(find(s, "o")->row_parallel);
+  CHECK(find(s, "down")->row_parallel);
   CHECK(!qkvz.row_parallel);
-  CHECK(!find(s, "gateup").row_parallel);
+  CHECK(!find(s, "gateup")->row_parallel);
   uint32_t ar = 0;
   for (const tp::Linear& l : s.linears)
     if (l.row_parallel) ar += l.layers;
@@ -87,7 +89,7 @@ void check_qwen38() {
   CHECK_EQ(s.qkv_parts.q, 6144u);    // q‖gate, 12 of 24 heads x 2 x 256
   CHECK_EQ(s.qkv_parts.k, 512u);     // 2 of 4 kv heads
   CHECK_EQ(s.qkv_parts.v, 512u);
-  CHECK_EQ(s.qkv_parts.q + s.qkv_parts.k + s.qkv_parts.v, find(s, "qkv").card.N);
+  CHECK_EQ(s.qkv_parts.q + s.qkv_parts.k + s.qkv_parts.v, find(s, "qkv")->card.N);
   CHECK_EQ(s.conv_channels_card, 5120u);
   CHECK_EQ(s.gdn_v_heads_card, 24u);
   CHECK_EQ(s.fa_q_heads_card, 12u);
@@ -100,12 +102,12 @@ void check_qwen38() {
     CHECK_EQ(l.card.K % 64, 0u);
     CHECK_EQ((l.card.K / 64) % l.card.S, 0u);
   }
-  CHECK_EQ(find(s, "down").card.K / 64, 136u);
-  CHECK_EQ(find(s, "out").card.K / 64, 48u);
+  CHECK_EQ(find(s, "down")->card.K / 64, 136u);
+  CHECK_EQ(find(s, "out")->card.K / 64, 48u);
 
   // rank 1 has the same shapes (the split is even)
   const tp::Shapes r1 = tp::tp_shapes(d, 1, 2);
-  CHECK_EQ(find(r1, "down").card.K, 8704u);
+  CHECK_EQ(find(r1, "down")->card.K, 8704u);
   CHECK_EQ(r1.vocab_offset, 124160u);
   CHECK_EQ(s.vocab_offset, 0u);
 }
@@ -115,13 +117,13 @@ void check_agnes() {
   CHECK_EQ(s.calls, 144u);
   CHECK_EQ(s.head_exchanges, 1u);
   CHECK_EQ(s.row_bytes, 20480u);
-  check_card(find(s, "qkvz"), 5120, 8192, 1, 1, 54);
-  check_card(find(s, "out"), 3072, 5120, 4, 0, 54);
-  check_card(find(s, "qkv"), 5120, 7168, 2, 0, 18);
-  check_card(find(s, "o"), 3072, 5120, 4, 0, 18);
-  check_card(find(s, "gateup"), 5120, 19456, 8, 0, 72);
-  check_card(find(s, "down"), 9728, 5120, 4, 0, 72);
-  CHECK_EQ(find(s, "down").card.K / 64, 152u);
+  check_card(*find(s, "qkvz"), 5120, 8192, 1, 1, 54);
+  check_card(*find(s, "out"), 3072, 5120, 4, 0, 54);
+  check_card(*find(s, "qkv"), 5120, 7168, 2, 0, 18);
+  check_card(*find(s, "o"), 3072, 5120, 4, 0, 18);
+  check_card(*find(s, "gateup"), 5120, 19456, 8, 0, 72);
+  check_card(*find(s, "down"), 9728, 5120, 4, 0, 72);
+  CHECK_EQ(find(s, "down")->card.K / 64, 152u);
 }
 
 void check_tp1_and_refusals() {
@@ -129,10 +131,11 @@ void check_tp1_and_refusals() {
   CHECK_EQ(s.tp_size, 1u);
   CHECK_EQ(s.calls, 0u);            // no all-reduce on one card
   CHECK_EQ(s.head_exchanges, 0u);
-  const tp::Linear& qkvz = find(s, "qkvz");
+  const tp::Linear* qkvz_p = find(s, "qkvz");
+  const tp::Linear& qkvz = *qkvz_p;
   CHECK_EQ(qkvz.card.N, 16384u);
-  CHECK_EQ(find(s, "down").card.K, 17408u);
-  CHECK_EQ(find(s, "head").card.N, 248320u);
+  CHECK_EQ(find(s, "down")->card.K, 17408u);
+  CHECK_EQ(find(s, "head")->card.N, 248320u);
   // a MoE model (Ornith) is not this probe's: dense only
   CHECK(throws([] { tp::tp_shapes(model::ornith(), 0, 2); }));
   // an uneven split (3 does not divide 4 kv heads) and a bad rank
