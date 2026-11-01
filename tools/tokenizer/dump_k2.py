@@ -38,6 +38,10 @@ def sha256(path):
 spec = json.load(open(os.path.join(here, "k2_template_cases.json"), encoding="utf-8"))
 tok = AutoTokenizer.from_pretrained(snapshot)
 raw = tokenizers.Tokenizer.from_file(os.path.join(snapshot, "tokenizer.json"))
+# A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+# the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
+raw.no_truncation()
+raw.no_padding()
 
 
 def case_inputs(case):

@@ -650,6 +650,10 @@ def main() -> None:
     spec.loader.exec_module(CR)
 
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
+    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
+    tok.no_truncation()
+    tok.no_padding()
     gen_cfg = GenerationConfig.from_pretrained(snap)
     eos = gen_cfg.eos_token_id
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {eos}", flush=True)
@@ -732,6 +736,10 @@ def moe_main(snap: str, out: str, todo: list[dict], prompts: dict, new_tokens: i
     if mtype in BOLT_TYPES:     # spec 25 Decision 12: EOS {2, 11} for every form (an export's file may list 11 only)
         eos = set(BOLT_EOS)
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
+    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
+    tok.no_truncation()
+    tok.no_padding()
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {sorted(eos)}, "
           f"model_type {mtype}, {new_tokens} new tokens", flush=True)
     b, kept = 1, (0, 0)
