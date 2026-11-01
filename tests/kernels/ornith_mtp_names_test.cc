@@ -43,13 +43,15 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
   for (model::LinearId id : {model::LinearId::QkvZ, model::LinearId::OutProj, model::LinearId::Qkv,
                              model::LinearId::OProj}) {
     const model::GemvShape& s = d.shape(id);
-    out.insert(kernels::gemv_variant(M, s.K, s.N, s.S, s.layout));
+    out.insert(kernels::gemv_variant(M, s.K, s.N, s.S, s.layout));   // forced (CaptureOptions) / M = 1
+    if (M >= 2) out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, s.K, s.N, s.S, s.layout));
   }
   // a||b in either of the checkpoint's forms (spec 15 §13, ModelDesc::ab): bf16 for a
   // checkpoint that keeps in_proj_a / in_proj_b bf16, gemv.cl for the int4 checkpoint's.
   out.insert(bf16(M, H, d.shape(model::LinearId::AB).N));
   const model::GemvShape& ab4 = d.ab(model::WeightKind::Int4).shape;
   out.insert(kernels::gemv_variant(M, ab4.K, ab4.N, ab4.S, ab4.layout));
+  if (M >= 2) out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, ab4.K, ab4.N, ab4.S, ab4.layout));
   out.insert(kernels::gdn_step_slots_variant(M, d.gdn_layers, k, v));
   out.insert(kernels::prep_gated_head_variant(M, k, v));
   out.insert(kernels::attn_prep_variant(M, q, kv));
@@ -58,6 +60,7 @@ void verify_names(const model::ModelDesc& d, unsigned M, bool int8, std::set<std
   out.insert(kernels::moe_variant(M, md.experts, md.top_k, H, md.expert_intermediate));
   out.insert(int8 ? kernels::gemv_i8w_variant(M, H, model::Qwen35::kVocab)
                   : bf16(M, H, model::Qwen35::kVocab));
+  if (int8 && M >= 2) out.insert(kernels::int8_linear_variant(kernels::LinearKind::SmallM, M, H, model::Qwen35::kVocab));
   out.insert(kernels::argmax_stage1_variant(M, d.vocab_used));
   out.insert(kernels::argmax_stage2_variant());
   // head_kv_fill (head_front)
