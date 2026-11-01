@@ -107,7 +107,7 @@ void PromptLookup::truncate(size_t n) {
   }
 }
 
-PromptLookup::Match PromptLookup::match(uint32_t min_n) const {
+PromptLookup::Match PromptLookup::match(uint32_t min_n, uint32_t source_before) const {
   if (min_n < kMinMatch || min_n > o_.max_match)
     throw std::invalid_argument("PromptLookup::match: n must be in [2, max_match " +
                                 std::to_string(o_.max_match) + "], got " + std::to_string(min_n));
@@ -122,8 +122,15 @@ PromptLookup::Match PromptLookup::match(uint32_t min_n) const {
     // Below the largest level <= n every candidate's m is < n.
     if (static_cast<uint32_t>(l) + 1 < levels_ && kLevels[l + 1] <= min_n) break;
     const uint64_t h = hash(static_cast<uint32_t>(l), last);
-    uint32_t best = kNone, best_m = 0, found = 0, steps = 0;
+    uint32_t best = kNone, best_m = 0, found = 0, steps = 0, skipped = 0;
     for (uint32_t c = prev_[l][last]; c != kNone; c = prev_[l][c]) {
+      // Spec 19f: the chain is most recent first, so the ends whose source is not before
+      // source_before come first; they are passed over without spending the caps (at most
+      // t - source_before of them: the window).
+      if (c + 1 >= source_before) {
+        ++skipped;
+        continue;
+      }
       if (steps == o_.max_steps || found == o_.max_candidates) {
         r.truncated = true;
         break;
@@ -142,7 +149,7 @@ PromptLookup::Match PromptLookup::match(uint32_t min_n) const {
         if (m == o_.max_match) break;
       }
     }
-    r.steps += steps;
+    r.steps += steps + skipped;
     if (found == 0) continue;
     r.length = best_m;
     if (best_m >= min_n) r.end = best;
@@ -151,8 +158,9 @@ PromptLookup::Match PromptLookup::match(uint32_t min_n) const {
   return r;
 }
 
-std::vector<uint32_t> PromptLookup::propose(uint32_t max_k, uint32_t min_n, Match* info) const {
-  const Match m = match(min_n);
+std::vector<uint32_t> PromptLookup::propose(uint32_t max_k, uint32_t min_n, Match* info,
+                                            uint32_t source_before) const {
+  const Match m = match(min_n, source_before);
   if (info != nullptr) *info = m;
   std::vector<uint32_t> out;
   if (m.end == kNone || max_k == 0) return out;

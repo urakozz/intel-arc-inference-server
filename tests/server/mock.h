@@ -107,7 +107,10 @@ struct MockEngine : server::EngineIface {
   std::atomic<int> max_active{0};
 
   void reset() override { at = 0; }
-  void prefill(const std::vector<uint32_t>& ids) override { last_prompt = ids; }
+  void prefill(const std::vector<uint32_t>& ids) override {
+    last_prompt = ids;
+    ring = ids;   // spec 19f's mock drafter: the prompt's positions projected at prefill
+  }
 
   uint32_t step(const server::Sampling&) override {
     const int now_active = ++active;
@@ -139,11 +142,13 @@ struct MockEngine : server::EngineIface {
     n = std::max<uint32_t>(1, std::min<uint32_t>(n, k + 1));
     std::vector<uint32_t> out;
     for (uint32_t i = 0; i < n; ++i) out.push_back(step(s));
+    ring.insert(ring.end(), out.begin(), out.end());   // spec 19f's mock drafter: the commit's projection
     return out;
   }
   void truncate_to(uint32_t p) override {
     truncations.push_back(p);
     at = p - last_prompt.size();
+    if (ring.size() > p) ring.resize(p);
   }
 
   // Spec 19e: a greedy target that verifies external drafts. The script is the target's
@@ -168,6 +173,39 @@ struct MockEngine : server::EngineIface {
     for (size_t i = 0; i <= j; ++i) out.push_back(step(s));
     return out;
   }
+
+  // Spec 19f: a DFlash engine with lookup inside it (window > 0, mtp > 0). step_drafts_or_many() hands the proposer
+  // the pending id; drafts are kept while they equal the script (at most mtp), as step_drafts() keeps them; no drafts
+  // is step_many(s, k) (the scripted DFlash burst). The drafter's "ring" is every position the engine committed - the
+  // prompt at prefill, then each iteration's kept ids, whichever proposer drafted them (EngineAdapter's commit runs
+  // the projection either way) - and truncate_to() takes positions back off it. pendings / proposals record every
+  // iteration (an empty proposal = a DFlash iteration).
+  uint32_t window = 0;
+  std::vector<uint32_t> ring;
+  size_t lookup_iterations = 0, dflash_iterations = 0;
+  uint32_t dflash_window() override { return window; }
+  std::vector<uint32_t> step_drafts_or_many(const server::Sampling& s, uint32_t k, const Proposer& propose) override {
+    if (window == 0 || mtp == 0) throw std::logic_error("mock: step_drafts_or_many without a drafter");
+    pendings.push_back(target(at));
+    const std::vector<uint32_t> d = propose(target(at));
+    if (d.size() > mtp) throw std::logic_error("mock: more lookup drafts than mtp_k()");
+    proposals.push_back(d);
+    std::vector<uint32_t> out;
+    if (d.empty()) {
+      ++dflash_iterations;
+      out = step_many(s, k);   // projects its own burst
+    } else {
+      ++lookup_iterations;
+      size_t j = 0;
+      while (j < d.size() && d[j] == target(at + 1 + j)) ++j;
+      for (size_t i = 0; i <= j; ++i) out.push_back(step(s));
+      if (project_lookup) ring.insert(ring.end(), out.begin(), out.end());   // the projection kept in lookup
+    }
+    returned.push_back(out.size());
+    return out;
+  }
+  std::vector<size_t> returned;   // ids each step_drafts_or_many() returned
+  bool project_lookup = true;   // false: a mutant whose lookup iterations skip the drafter's projection
 };
 
 // Spec 7 (plan 7c): an engine with a real session for the prefix cache tests. The state is

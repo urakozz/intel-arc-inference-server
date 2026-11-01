@@ -16,6 +16,7 @@
 
 #include <httplib.h>
 
+#include "server/lookup_in_dflash.h"
 #include "server/prompt_lookup.h"
 
 namespace server {
@@ -54,6 +55,8 @@ struct Server::Impl {
   // Spec 19e: the request's ids (and, with lookup_history, earlier requests' generated ids).
   PromptLookup lookup;
   std::deque<std::vector<uint32_t>> lookup_history;
+  // Spec 19f: --spec dflash-lookup's policy (its state is per request, its counters the server's).
+  std::optional<LookupInDFlash> lookup_in_dflash;
 };
 
 Server::Server(Deps deps, Options opts)
@@ -67,6 +70,16 @@ Server::Server(Deps deps, Options opts)
     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
         opts_.lookup_min_match > impl_->lookup.options().max_match)
       throw std::invalid_argument("--spec-min-match must be in [2, 64]");
+  }
+  if (opts_.spec_dflash_lookup) {   // spec 19f
+    if (opts_.spec_lookup)
+      throw std::invalid_argument("--spec dflash-lookup and --spec lookup are one proposer each; pick one");
+    if (deps_.engine.mtp_k() == 0 || deps_.engine.dflash_window() == 0)
+      throw std::invalid_argument("--spec dflash-lookup: this engine has no DFlash drafter to fall back to");
+    LookupInDFlashOptions o;
+    o.window = deps_.engine.dflash_window();
+    o.max_k = deps_.engine.mtp_k();
+    impl_->lookup_in_dflash.emplace(o);
   }
   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes,
                                                   opts_.prefix_alloc);
@@ -277,6 +290,13 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     o.max_k = std::min(o.max_k, deps_.engine.verify_k());
     policy.emplace(o);
   }
+  // Spec 19f: --spec dflash-lookup indexes the matcher as --spec lookup does; the DFlash iterations' K comes from the
+  // --mtp auto policy below.
+  const bool dflash_lookup = opts_.spec_dflash_lookup;
+  if (dflash_lookup) {
+    lookup_begin(outcome.prompt_ids);
+    impl_->lookup_in_dflash->reset();
+  }
   bool burst_head_indexed = false;   // burst[0] went into the matcher in the proposer
   // Spec 8 §10: --mtp auto keeps one policy per request, fed only by this request's own
   // acceptance, so the K sequence (and a seeded request's output) is reproducible.
@@ -313,8 +333,41 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     ++burst_at;
     return id;
   };
+  // Spec 19f: one iteration asks the policy first (the pending id indexed in the proposer, as next_lookup's); lookup
+  // drafts feed the policy's STAY / EXIT, a DFlash iteration feeds AdaptiveK - each proposer learns from its own.
+  const auto next_dflash_lookup = [&]() -> uint32_t {
+    if (burst_at == burst.size()) {
+      LookupInDFlash& lid = *impl_->lookup_in_dflash;
+      const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
+      uint32_t proposed = 0;
+      burst_head_indexed = false;
+      burst = deps_.engine.step_drafts_or_many(sampling, k, [&](uint32_t pending) {
+        if (burst_head_indexed) throw std::logic_error("EngineIface::step_drafts_or_many: propose twice");
+        matcher.append(pending);
+        burst_head_indexed = true;
+        const std::vector<uint32_t> d = lid.propose(matcher);
+        proposed = static_cast<uint32_t>(d.size());
+        return d;
+      });
+      burst_at = 0;
+      if (burst.empty()) throw std::runtime_error("EngineIface::step_drafts_or_many returned no ids");
+      const uint32_t kept = static_cast<uint32_t>(burst.size() - 1);
+      if (proposed > 0) {
+        if (kept > proposed)
+          throw std::runtime_error("EngineIface::step_drafts_or_many returned more ids than drafts + 1");
+        lid.observe(proposed, kept);
+      } else if (policy) {
+        policy->observe(k, std::min(k, kept));
+      }
+    }
+    const uint32_t id = burst[burst_at];
+    if (burst_at > 0 || !burst_head_indexed) matcher.append(id);
+    ++burst_at;
+    return id;
+  };
   const auto next_id = [&]() -> uint32_t {
     if (lookup) return next_lookup();
+    if (dflash_lookup) return next_dflash_lookup();
     if (!speculative) return deps_.engine.step(sampling);
     if (burst_at == burst.size()) {
       const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();

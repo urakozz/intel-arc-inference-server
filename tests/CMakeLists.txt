@@ -135,6 +135,17 @@ target_include_directories(lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(lookup_server_test PRIVATE b70_server)
 add_test(NAME lookup_server_test COMMAND lookup_server_test)
 
+# Spec 19f (plan 19f Task 3): prompt lookup inside DFlash - the policy (ENTER / STAY / EXIT, the window, K caps) and the
+# server over a mock DFlash engine (responses byte-identical to plain, the proposals, the warm ring), host only.
+add_executable(lookup_in_dflash_test server/lookup_in_dflash_test.cc)
+target_include_directories(lookup_in_dflash_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(lookup_in_dflash_test PRIVATE b70_server)
+add_test(NAME lookup_in_dflash_test COMMAND lookup_in_dflash_test)
+add_executable(dflash_lookup_server_test server/dflash_lookup_server_test.cc)
+target_include_directories(dflash_lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_lookup_server_test PRIVATE b70_server)
+add_test(NAME dflash_lookup_server_test COMMAND dflash_lookup_server_test)
+
 # Spec 8 §10: the --mtp auto policy on synthetic acceptance sequences, host only.
 add_executable(adaptive_k_test server/adaptive_k_test.cc)
 target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3560,6 +3571,22 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_dflash_mtp cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
     cli_reject_serve_dflash_min_match cli_reject_serve_dflash_format cli_reject_serve_dflash_kv8
     cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
+  # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --pp 2
+  b70_serve_reject(cli_reject_serve_dflash_lookup_mtp ${B70_NO_MODEL} --spec dflash-lookup --mtp 1
+    EXPECT "one proposer per server")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_kv8 ${B70_NO_MODEL} --spec dflash-lookup --kv-cache int8
+    EXPECT "--kv-cache bf16 with --spec dflash")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_min_match ${B70_NO_MODEL} --spec dflash-lookup --spec-min-match 4
+    EXPECT "need --spec lookup")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --pp 2 --pipeline-handoff copy
+    EXPECT "--spec dflash-lookup is built for one card")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
+    --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
+  b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
+    EXPECT "--spec expects off, mtp, lookup, dflash or dflash-lookup")
+  set_tests_properties(cli_reject_serve_dflash_lookup_mtp cli_reject_serve_dflash_lookup_kv8
+    cli_reject_serve_dflash_lookup_min_match cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
+    cli_reject_serve_spec_value PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====
 # ==== Spec 19d: DFlash in the server ==== (begin) ====

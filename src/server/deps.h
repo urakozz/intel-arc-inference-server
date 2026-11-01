@@ -147,6 +147,21 @@ struct EngineIface {
     return {step(s)};
   }
 
+  // Spec 19f (`--spec dflash-lookup`, spec 19 §13.1): prompt lookup inside DFlash. dflash_window() == 0 (the default)
+  // means the engine has no tap drafter, and the server never calls step_drafts_or_many(); otherwise it is the
+  // drafter's window (the positions its ring holds back from the pending one). step_drafts_or_many(s, k, propose) runs
+  // one iteration: it calls propose(x) exactly once, with x the pending id, and then
+  //   - drafts d_1 .. d_m (m <= mtp_k()): verified exactly as step_drafts() verifies them (greedy: argmax; sampled:
+  //     accept_point_mass), the drafter's draft pass skipped - its projection of the committed rows still runs, so its
+  //     ring is the one a DFlash iteration would leave;
+  //   - no drafts: step_many(s, k) - one DFlash iteration at k (k = 0: one plain step).
+  // It returns x and the kept drafts; truncate_to() shortens the run as after step_many().
+  virtual uint32_t dflash_window() { return 0; }
+  virtual std::vector<uint32_t> step_drafts_or_many(const Sampling& s, uint32_t k, const Proposer& propose) {
+    (void)propose;
+    return step_many(s, k);
+  }
+
  private:
   template <class T>
   static T unsupported() {

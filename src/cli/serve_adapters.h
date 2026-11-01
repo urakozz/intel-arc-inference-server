@@ -87,15 +87,19 @@ struct EngineAdapter : server::EngineIface {
   // runtime::Engine::tap_drafter()), `mtp_k` its deepest K (--spec-max, 1..7): step_many() then drafts with it
   // instead of the MTP head - the server's loop, the AdaptiveK policy and truncate_to() are the same. Through the
   // runtime::TapDrafter interface, so this header links nothing of the drafter's.
+  // `dflash_lookup` (spec 19f, `b70-serve --spec dflash-lookup`): with `dflash`, step_drafts_or_many() on - prompt
+  // lookup inside DFlash (server::LookupInDFlash decides; the lookup drafts go through the tap verify list).
   explicit EngineAdapter(runtime::Engine& engine, uint32_t vocab, uint32_t mtp_k = 0,
-                         bool lookup = false, bool dflash = false)
+                         bool lookup = false, bool dflash = false, bool dflash_lookup = false)
       : eng(engine),
         vocab_used(vocab),
         imm(l0::CmdList::immediate(engine.context())),
         host_logits(model::Qwen35::kVocab),
         k_(mtp_k),
         lookup_(lookup),
-        df_(dflash ? engine.tap_drafter() : nullptr) {
+        df_(dflash ? engine.tap_drafter() : nullptr),
+        dflash_lookup_(dflash_lookup) {
+    if (dflash_lookup && !dflash) throw std::runtime_error("--spec dflash-lookup needs the DFlash drafter");
     if (dflash) {
       if (lookup_) throw std::runtime_error("--spec dflash and --spec lookup: pick one proposer");
       if (!df_) throw std::runtime_error("--spec dflash: the engine was not built with a drafter");
@@ -151,7 +155,7 @@ struct EngineAdapter : server::EngineIface {
                    ms / gen_tokens_);
       std::fflush(stderr);
     }
-    if ((k_ > 0 || lookup_) && mtp_iters > 0) {
+    if ((k_ > 0 || lookup_) && (mtp_iters > 0 || lk_iters_ > 0)) {
       std::fprintf(stderr,
                    "%s: K %u, %llu iterations, %llu/%llu drafts accepted (%.3f), iterations at "
                    "K 0/1/2/3: %llu/%llu/%llu/%llu",
@@ -165,9 +169,14 @@ struct EngineAdapter : server::EngineIface {
         std::fprintf(stderr, ", K 4/5/6/7: %llu/%llu/%llu/%llu", (unsigned long long)mtp_iters_at_k[4],
                      (unsigned long long)mtp_iters_at_k[5], (unsigned long long)mtp_iters_at_k[6],
                      (unsigned long long)mtp_iters_at_k[7]);
+      if (dflash_lookup_)   // spec 19f: the lookup iterations (not in the counts above) and the ids they produced
+        std::fprintf(stderr, "; lookup: %llu iterations, %llu/%llu drafts accepted, %llu of %u ids",
+                     (unsigned long long)lk_iters_, (unsigned long long)lk_accepted_,
+                     (unsigned long long)lk_drafted_, (unsigned long long)lk_ids_, gen_tokens_);
       std::fprintf(stderr, "\n");
     }
     mtp_iters = mtp_drafted = mtp_accepted = 0;
+    lk_iters_ = lk_drafted_ = lk_accepted_ = lk_ids_ = 0;
     for (auto& n : mtp_iters_at_k) n = 0;
     gen_tokens_ = 0;
     flush_commit();
@@ -346,6 +355,58 @@ struct EngineAdapter : server::EngineIface {
     return out;
   }
 
+  // --- spec 19f: prompt lookup inside DFlash (`--spec dflash-lookup`) --------------------------
+  //
+  // At pos = n with x_n pending: propose(x_n) (server::LookupInDFlash over the server's matcher). Lookup drafts
+  // d_1..d_k (k <= --spec-max, the engine's max_verify_k) go into cur_token[1..k] - the drafter's draft list is NOT
+  // run - and through the TAP verify list (Engine::verify(k) with a drafter), then the host acceptance (greedy: argmax;
+  // sampled: the point-mass rule, server::accept_point_mass) and the deferred commit, whose Engine::commit replays the
+  // drafter's projection of the committed rows exactly as after a DFlash iteration: the ring stays current and the exit
+  // to DFlash is warm. No drafts: one DFlash iteration at k (step_dflash). The verify list's GEMM / attention binding
+  // is the engine's (spec 28b / 28c rebind the M >= 2 lists; nothing here depends on which kernels they bind).
+  uint32_t dflash_window() override { return dflash_lookup_ ? df_->window() : 0; }
+
+  std::vector<uint32_t> step_drafts_or_many(const server::Sampling& sampling, uint32_t k_dflash,
+                                            const Proposer& propose) override {
+    if (!dflash_lookup_) throw std::logic_error("EngineAdapter::step_drafts_or_many without --spec dflash-lookup");
+    flush_commit();
+    auto* control = eng.buffers().control.as<runtime::Control>();
+    const uint32_t x = control->cur_token[0];
+    const std::vector<uint32_t> d = propose(x);
+    if (d.empty()) return step_dflash(sampling, k_dflash);
+    const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()), k_, eng.max_verify_k()});
+    ++lk_iters_;
+    if (k == 0) {   // the last positions of max_len: one plain step
+      ++lk_ids_;
+      return {step(sampling)};
+    }
+    const uint32_t n = eng.pos();
+    for (uint32_t i = 0; i < k; ++i) control->cur_token[1 + i] = d[i];
+    eng.verify(k);
+    server::AcceptResult a{};
+    if (sampling.greedy) {
+      a = server::accept_greedy(eng.verify_ids(), d.data(), k);
+    } else {
+      seed_rng(sampling);
+      constexpr size_t V = model::Qwen35::kVocab;
+      float* p = spec_logits_->as<float>();   // p rows 0..k (k + 1 <= 8 rows: the DFlash readback's room)
+      imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
+      a = server::accept_point_mass(p, d.data(), k, vocab_used, V, sampling, rng);
+    }
+    pending_ = true;
+    pending_pos_ = n;
+    pending_j_ = a.accepted;
+    pending_next_ = a.next_token;
+    pending_drafts_.assign(d.begin(), d.begin() + k);
+    lk_drafted_ += k;
+    lk_accepted_ += a.accepted;
+    std::vector<uint32_t> out{x};
+    out.insert(out.end(), d.begin(), d.begin() + a.accepted);
+    gen_tokens_ += static_cast<uint32_t>(out.size());
+    lk_ids_ += out.size();
+    return out;
+  }
+
   // Keep x_n, d_1 .. d_m of the last iteration (pos = n + m + 1), pending d_{m+1} (or the
   // accepted run's next id when m = j): the session is what m + 1 plain steps leave.
   void truncate_to(uint32_t p) override {
@@ -442,6 +503,8 @@ struct EngineAdapter : server::EngineIface {
   uint32_t k_ = 0;
   bool lookup_ = false;                    // spec 19e: step_drafts() on
   runtime::TapDrafter* df_ = nullptr;   // spec 19c: step_many() drafts with it (the engine's drafter)
+  bool dflash_lookup_ = false;          // spec 19f: step_drafts_or_many() on
+  uint64_t lk_iters_ = 0, lk_drafted_ = 0, lk_accepted_ = 0, lk_ids_ = 0;   // spec 19f, since the last prefill
   std::unique_ptr<l0::Mem> spec_logits_;   // pinned q rows then p rows, MTP and lookup
   bool pending_ = false;
   uint32_t pending_pos_ = 0, pending_j_ = 0, pending_next_ = 0;
