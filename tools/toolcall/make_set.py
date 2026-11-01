@@ -60,6 +60,9 @@ MIN_IDS, MAX_IDS = 800, 3000
 # Spec 25a: Bolt's template writes every tool as an XML block with the Qwen3-Coder calling instructions: the same 36
 # conversations render to 1085..3098 ids (72,519 in all), so its ceiling is higher; the conversations are unchanged.
 MAX_IDS_FROM = {"nemotron_h_omni": 4096}
+# K2-Horizon's template (xml calls, reasoning_effort low) is terser: the shortest scenario (t1_define-linear_l0) renders
+# to 718 ids, under 800 (r25.a4_ref's first run, 2026-11-01); the conversations are unchanged.
+MIN_IDS_FROM = {"k2_horizon": 600}
 
 FILES = [
     "src/runtime/prefill/linear_l0.cc",
@@ -393,7 +396,7 @@ def retokenise(snap: str, src: str, out: str, kwargs: dict | None = None, tok=No
                                     enable_thinking=sc.get("enable_thinking", False), tokenize=True,
                                     **kwargs)
         ids = [int(x) for x in (r["input_ids"] if hasattr(r, "keys") else r)]
-        lo, hi = MIN_IDS, MAX_IDS_FROM.get(mtype, MAX_IDS)
+        lo, hi = MIN_IDS_FROM.get(mtype, MIN_IDS), MAX_IDS_FROM.get(mtype, MAX_IDS)
         if not lo <= len(ids) <= hi:
             sys.exit(f"FATAL: {name} renders to {len(ids)} ids, outside {lo} to {hi}")
         text = " ".join(map(str, ids)) + "\n"
