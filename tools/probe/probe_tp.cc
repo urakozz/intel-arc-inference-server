@@ -11,6 +11,8 @@
 //   probe_tp ar   [--model qwen38|agnes] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
 //                 [--rows 1,8] [--calls N] [--rounds 5] [--execs 20] [--replays N] [--inject skip-data|skip-all]
 //                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4] [--flag plain|atomic]
+//                 [--host-mem uncached|cached|wc] [--dev-mem cached|uncached] [--send kernel|copy]
+//                 [--spin N] [--cpu-spin N]
 //                                                    the all-reduce (fold-then-send) inside one replayed list per card:
 //                                                    `calls` calls a list (default: the model's all-reduces a token,
 //                                                    128 / 144), each call tp_send + tp_wait; timed against the same
@@ -152,6 +154,9 @@ struct Opts {
   uint32_t rounds = 5, execs = 20, replays = 0;
   uint32_t chunk = 1024, S = 4;
   uint32_t spin_limit = 1u << 24;
+  uint32_t cpu_spin = 1u << 24;  // the CPU-sum thread's bound (its loads are ~0.1 us; it must outwait list start-up)
+  std::string host_mem = "uncached", dev_mem = "cached";
+  bool send_copy = false;
   uint32_t flag_mode = 1;      // 0: system-scope atomic store; 1: plain store + release fence (probe_tp.cl tp_publish)
   std::string inject = "none";
   uint32_t inject_at = 0;
@@ -440,6 +445,46 @@ int run_bar(const Opts& o) {
 }
 
 // --- ar: the all-reduce ---------------------------------------------------------------------------------------------
+// An allocation with explicit caching flags (l0::Mem takes none): --host-mem cached|uncached|wc for the pinned host
+// buffers (mailboxes, the H' sum), --dev-mem cached|uncached for the P2P landing / exposed buffers. On 2026-11-01 the
+// cached forms failed on host-* and p2p-pull: a reader polling host or PEER memory kept seeing the flag's old value
+// while the trailer, read once, was current - the poll is served from a cache.
+struct RawMem {
+  ze_context_handle_t ctx = nullptr;
+  void* p = nullptr;
+  RawMem(l0::Context& c, bool host, uint32_t flags, size_t bytes) : ctx(c.handle()) {
+    if (host) {
+      ze_host_mem_alloc_desc_t hd{};
+      hd.stype = ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC;
+      hd.flags = flags;
+      ZE_CHECK(zeMemAllocHost(ctx, &hd, bytes, 65536, &p));
+    } else {
+      ze_device_mem_alloc_desc_t dd{};
+      dd.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
+      dd.flags = flags;
+      ZE_CHECK(zeMemAllocDevice(ctx, &dd, bytes, 65536, c.device(), &p));
+    }
+  }
+  ~RawMem() {
+    if (p) zeMemFree(ctx, p);
+  }
+  RawMem(const RawMem&) = delete;
+  RawMem& operator=(const RawMem&) = delete;
+  void* ptr() const { return p; }
+  template <class T> T* as() const { return static_cast<T*>(p); }
+};
+uint32_t host_flags(const std::string& s) {
+  if (s == "cached") return 0;
+  if (s == "uncached") return ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED;
+  if (s == "wc") return ZE_HOST_MEM_ALLOC_FLAG_BIAS_WRITE_COMBINED;
+  die("--host-mem " + s + " (cached|uncached|wc)");
+}
+uint32_t dev_flags(const std::string& s) {
+  if (s == "cached") return 0;
+  if (s == "uncached") return ZE_DEVICE_MEM_ALLOC_FLAG_BIAS_UNCACHED;
+  die("--dev-mem " + s + " (cached|uncached)");
+}
+
 struct Side {   // one card's buffers for one (route, rows)
   std::unique_ptr<l0::Mem> P, own, out, sctr, wctr, csctr, cwctr, state, hash, cstate, chash;
 };
@@ -450,10 +495,12 @@ struct ArSetup {
   uint32_t S = 4;
   Side side[2];
   // route buffers
-  std::unique_ptr<l0::Mem> dev_land[2];   // p2p: a landing / exposed buffer on each card
-  std::unique_ptr<l0::Mem> mbox[2];       // pinned host mailboxes (host-*)
+  std::unique_ptr<RawMem> dev_land[2];    // p2p: a landing / exposed buffer on each card
+  std::unique_ptr<RawMem> mbox[2];        // pinned host mailboxes (host-*)
   std::unique_ptr<BarMem> bar[2];         // host-bar: each card's VRAM, CPU-mapped
-  std::unique_ptr<l0::Mem> hsum;          // host-read: the sum, pinned host
+  std::unique_ptr<RawMem> hsum;           // host-read: the sum, pinned host
+  std::unique_ptr<l0::Mem> stage[2];      // --send copy: the card's local staging copy of the message
+  bool copy_send = false;
   void* dst[2] = {nullptr, nullptr};      // tp_send's destination per card
   void* src[2] = {nullptr, nullptr};      // tp_wait's source per card
   uint32_t* cpu_dst[2] = {nullptr, nullptr};
@@ -505,13 +552,13 @@ std::unique_ptr<ArSetup> make_ar(Card (&c)[2], tpp::Route r, uint32_t words, con
     }
     return true;
   };
-  auto host = [&](size_t b) { return std::make_unique<l0::Mem>(*c[0].ctx, l0::MemKind::Host, b, 65536); };
+  auto host = [&](size_t b) { return std::make_unique<RawMem>(*c[0].ctx, true, host_flags(o.host_mem), b); };
   switch (r) {
     case tpp::Route::P2pPush:
     case tpp::Route::P2pPull:
       if (!need_peer()) return a;
       for (int i = 0; i < 2; ++i)
-        a->dev_land[i] = std::make_unique<l0::Mem>(*c[i].ctx, l0::MemKind::Device, lb, 65536);
+        a->dev_land[i] = std::make_unique<RawMem>(*c[i].ctx, false, dev_flags(o.dev_mem), lb);
       if (r == tpp::Route::P2pPush) {
         a->dst[0] = a->dev_land[1]->ptr(); a->dst[1] = a->dev_land[0]->ptr();
         a->src[0] = a->dev_land[0]->ptr(); a->src[1] = a->dev_land[1]->ptr();
@@ -550,6 +597,12 @@ std::unique_ptr<ArSetup> make_ar(Card (&c)[2], tpp::Route r, uint32_t words, con
       a->cpu = a->take = true;
       break;
   }
+  // --send copy (host-* routes): tp_send writes a local staging copy; the list copies data + trailers, then the flags,
+  // into the mailbox with the command list's copies (the external engine's device -> pinned host step)
+  if (o.send_copy && (r == tpp::Route::HostMbox || r == tpp::Route::HostBar || r == tpp::Route::HostRead)) {
+    a->copy_send = true;
+    for (int i = 0; i < 2; ++i) a->stage[i] = std::make_unique<l0::Mem>(*c[i].ctx, l0::MemKind::Device, lb, 65536);
+  }
   return a;
 }
 
@@ -564,6 +617,7 @@ void reset_ar(Card (&c)[2], ArSetup& a) {
     zero_dev(*c[i].ctx, s.state->ptr(), 64);
     zero_dev(*c[i].ctx, s.cstate->ptr(), 64);
     if (a.dev_land[i]) zero_dev(*c[i].ctx, a.dev_land[i]->ptr(), lb);
+    if (a.stage[i]) zero_dev(*c[i].ctx, a.stage[i]->ptr(), lb);
     if (a.mbox[i]) std::memset(a.mbox[i]->ptr(), 0, lb);
     if (a.bar[i]) std::memset(a.bar[i]->cpu, 0, lb);
   }
@@ -592,7 +646,7 @@ Lists build_lists(Card& card, ArSetup& a, int rank, uint32_t calls, const Opts& 
   auto bind_send = [&](l0::Kernel& k, uint32_t cross, l0::Mem& ctr) {
     k.arg_ptr(0, s.P->ptr());
     k.arg_ptr(1, s.own->ptr());
-    k.arg_ptr(2, cross ? a.dst[rank] : s.own->ptr());   // the control never writes dst
+    k.arg_ptr(2, cross ? (a.copy_send ? a.stage[rank]->ptr() : a.dst[rank]) : s.own->ptr());   // control: no dst
     k.arg_ptr(3, ctr.ptr());
     k.arg(4, L.words);
     k.arg(5, L.chunk);
@@ -629,8 +683,17 @@ Lists build_lists(Card& card, ArSetup& a, int rank, uint32_t calls, const Opts& 
   const uint32_t G = L.chunks();
   l.cross = std::make_unique<l0::CmdList>(l0::CmdList::regular(*card.ctx));
   l.ctl = std::make_unique<l0::CmdList>(l0::CmdList::regular(*card.ctx));
+  if (a.copy_send && calls % 2 != 0) die("--send copy needs an even --calls (each list position keeps its slot)");
   for (uint32_t i = 0; i < calls; ++i) {
     l.cross->launch(*l.send, G);
+    if (a.copy_send) {   // call i + 1 of every execution uses slot (i + 1) & 1 (calls even)
+      const uint32_t slot = (i + 1) & 1u;
+      uint8_t* st = static_cast<uint8_t*>(a.stage[rank]->ptr());
+      uint8_t* mb = static_cast<uint8_t*>(a.dst[rank]);
+      l.cross->copy(mb + L.data(slot) * 4, st + L.data(slot) * 4, size_t(L.words) * 4);
+      l.cross->copy(mb + L.trailer(slot, 0) * 4, st + L.trailer(slot, 0) * 4, size_t(G) * 4);
+      l.cross->copy(mb + L.flag(slot, 0) * 4, st + L.flag(slot, 0) * 4, size_t(G) * tpp::kFlagStride * 4);
+    }
     l.cross->launch(*l.wait, G);
     l.ctl->launch(*l.csend, G);
     l.ctl->launch(*l.cwait, G);
@@ -667,7 +730,7 @@ double exec_both(Card (&c)[2], ArSetup& a, Lists (&l)[2], bool cross, uint32_t c
                  CpuRun* cpu, const std::string& arm) {
   std::thread th;
   if (cross && a.cpu)
-    th = std::thread([&] { cpu_sum_loop(a, uint64_t(calls) * execs, o.spin_limit, o.cpu, *cpu); });
+    th = std::thread([&] { cpu_sum_loop(a, uint64_t(calls) * execs, o.cpu_spin, o.cpu, *cpu); });
   const auto t0 = Clock::now();
   for (uint32_t e = 0; e < execs; ++e) {
     c[1].q->execute(cross ? *l[1].cross : *l[1].ctl, c[1].f.get());
@@ -721,8 +784,9 @@ int run_ar(const Opts& o) {
   const bool check = o.replays > 0 || inj != tpp::kInjNone;
   int failures = 0;
   std::printf("## ar - %s, %u calls a list (the model's all-reduces a token: %u), %u B a row, chunk %u words, S %u, "
-              "flag %s\n\n",
-              d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic");
+              "flag %s, host memory %s, P2P buffers %s, send %s\n\n",
+              d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic",
+              o.host_mem.c_str(), o.dev_mem.c_str(), o.send_copy ? "copy" : "kernel");
   if (check)
     std::printf("| route | rows | lists replayed | calls checked | card 0 | card 1 | CPU | hashes equal | verdict |\n"
                 "|---|---|---|---|---|---|---|---|---|\n");
@@ -985,6 +1049,7 @@ Opts parse(int argc, char** argv) {
     else if (a == "--chunk") o.chunk = uint32_t(std::stoul(val()));
     else if (a == "--s") o.S = uint32_t(std::stoul(val()));
     else if (a == "--spin") o.spin_limit = uint32_t(std::stoul(val()));
+    else if (a == "--cpu-spin") o.cpu_spin = uint32_t(std::stoul(val()));
     else if (a == "--inject") o.inject = val();
     else if (a == "--inject-at") o.inject_at = uint32_t(std::stoul(val()));
     else if (a == "--cpu") o.cpu = std::stoi(val());
@@ -996,6 +1061,13 @@ Opts parse(int argc, char** argv) {
     else if (a == "--launches") o.launches = uint32_t(std::stoul(val()));
     else if (a == "--shape") { const std::string v = val(); if (v != "all") o.shapes = split(v); }
     else if (a == "--timeout") o.timeout_s = std::stod(val());
+    else if (a == "--host-mem") o.host_mem = val();
+    else if (a == "--dev-mem") o.dev_mem = val();
+    else if (a == "--send") {
+      const std::string v = val();
+      if (v != "kernel" && v != "copy") die("--send " + v + " (kernel|copy)");
+      o.send_copy = v == "copy";
+    }
     else if (a == "--flag") {
       const std::string v = val();
       if (v == "atomic") o.flag_mode = 0;
