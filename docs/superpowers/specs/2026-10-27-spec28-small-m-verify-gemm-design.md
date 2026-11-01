@@ -217,7 +217,8 @@ list at M = 1..8 for the non-GEMV share.
 ## 8. Out of scope, and open decisions
 
 **Out of scope:** M > 16; the MoE expert GEMVs (`moe_gate_up` / `moe_down`, Ornith; Bolt's / K2's / Kolibri's own
-engines and kernels) - a follow-on per engine once 28b's numbers exist; the prefill's short-prompt floor (separate,
+engines and kernels) - a follow-on per engine once 28b's numbers exist (specced 2026-11-01 as spec 28m, one probe
+for every MoE engine: `2026-11-01-spec28m-moe-small-m-probe-design.md`); the prefill's short-prompt floor (separate,
 docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they matter.
 
 **Open decisions (operator):**
