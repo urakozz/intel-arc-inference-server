@@ -674,3 +674,113 @@ if(B70_BOLT)
   endforeach()
   add_dependencies(probe_bolt_step ${_nb_p0_kernels})
 endif()
+
+# --- probe_small_m: spec 28 P0 (plan 28a), small-M DPAS stand-ins against gemv ---------
+# Plan: docs/superpowers/plans/2026-10-27-spec28a-small-m-probe.md. Record:
+# docs/probe-small-m-gemm-<date>.md. `probe_small_m.cl` is a PROBE kernel: no runtime path
+# binds `psm` / `psm_quant`, no production file is touched. One binary per knob set, named
+#   psm_<t><o>[_wg<NSGN>x<KSL>][_mg][_pf<G>][_g256]_M<M>_K<K>_N<N>_S<S>_L<L>
+# t = b (bf16 DPAS) | i (int DPAS on int8 rows), o = B (weights on B) | A (weights on A);
+# the kVariants logic in probe_small_m.cc builds the same names (a missing one is reported
+# by name at l0::Module). The M = 16 controls are today's gemv / gemv_i8w / gemv_bf16
+# sources at M = 16 with the production cells' defines (probe-only names, psm_ctl_*).
+set(PSM_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_small_m.cl)
+set(PSM_TARGETS "")
+# K N S_prod L BLK2D(wB, layout 0, as the production cell)   - out_proj and o_proj share 6144x5120
+set(PSM_SHAPES "5120 16384 1 1 0" "6144 5120 4 0 1" "5120 14336 2 0 1" "5120 34816 8 0 0"
+               "17408 5120 4 0 1" "5120 248320 1 2 0")
+function(psm_variant T O M K N S L B2D)   # ARGN: extra tag, then extra defines / OPTIONS
+  cmake_parse_arguments(P "" "TAG" "DEFS;OPTS" ${ARGN})
+  if(T STREQUAL "b")
+    set(defs TYPE=1)
+  else()
+    set(defs TYPE=2)
+  endif()
+  if(O STREQUAL "B")
+    list(APPEND defs ORIENT=0)
+    if(B2D)
+      list(APPEND defs BLK2D=1)
+    endif()
+  else()
+    list(APPEND defs ORIENT=1)
+  endif()
+  set(name psm_${T}${O}${P_TAG}_M${M}_K${K}_N${N}_S${S}_L${L})
+  if(NOT TARGET kernel_${name})
+    if(P_OPTS)
+      add_ocloc_kernel(${name} SOURCE ${PSM_CL} DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${defs} ${P_DEFS}
+                       OPTIONS ${P_OPTS})
+    else()
+      add_ocloc_kernel(${name} SOURCE ${PSM_CL} DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${defs} ${P_DEFS})
+    endif()
+    list(APPEND PSM_TARGETS kernel_${name})
+    set(PSM_TARGETS ${PSM_TARGETS} PARENT_SCOPE)
+  endif()
+endfunction()
+foreach(row IN LISTS PSM_SHAPES)
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 SP)
+  list(GET f 3 L)
+  list(GET f 4 B2D)
+  # the sweep: both types, both orientations, M = 1 / 2 / 4 / 8 / 16 (property R: + 3, 5, 6, 7 for bf16)
+  foreach(O B A)
+    foreach(M 1 2 4 8 16)
+      psm_variant(b ${O} ${M} ${K} ${N} ${SP} ${L} ${B2D})
+      psm_variant(i ${O} ${M} ${K} ${N} ${SP} ${L} ${B2D})
+    endforeach()
+    foreach(M 3 5 6 7)
+      psm_variant(b ${O} ${M} ${K} ${N} ${SP} ${L} ${B2D})
+    endforeach()
+    # the oneDNN levers at M = 8, bf16, one at a time (spec 28 §2.1)
+    psm_variant(b ${O} 8 ${K} ${N} 1 ${L} 0 TAG _wg2x8 DEFS SPLITK=1 NSGN=2 KSL=8)
+    psm_variant(b ${O} 8 ${K} ${N} 1 ${L} 0 TAG _wg8x4 DEFS SPLITK=1 NSGN=8 KSL=4)
+    psm_variant(b ${O} 8 ${K} ${N} ${SP} ${L} ${B2D} TAG _mg DEFS DEQ=1)
+    foreach(PG 1 2 3)
+      psm_variant(b ${O} 8 ${K} ${N} ${SP} ${L} ${B2D} TAG _pf${PG} DEFS PF_G=${PG})
+    endforeach()
+    psm_variant(b ${O} 8 ${K} ${N} ${SP} ${L} ${B2D} TAG _g256 OPTS -cl-intel-256-GRF-per-thread)
+    # one in-work-group shape for every M (property R) - its cost at 2 / 4 / 16, and 8x4 at 16
+    foreach(M 2 4 16)
+      psm_variant(b ${O} ${M} ${K} ${N} 1 ${L} 0 TAG _wg2x8 DEFS SPLITK=1 NSGN=2 KSL=8)
+    endforeach()
+    psm_variant(b ${O} 16 ${K} ${N} 1 ${L} 0 TAG _wg8x4 DEFS SPLITK=1 NSGN=8 KSL=4)
+    # the S sweep at M = 8 (grid split-K; the head has none)
+    if(NOT L EQUAL 2)
+      foreach(S 1 2 4 8 16)
+        psm_variant(b ${O} 8 ${K} ${N} ${S} ${L} ${B2D})
+      endforeach()
+    endif()
+  endforeach()
+endforeach()
+# The M = 16 controls: today's kernels, probe-only builds (gemv.cl / gemv_i8w.cl / gemv_bf16.cl
+# are generic in M; production stops at 8). Defines copied from src/kernels' production cells.
+set(PSM_GEMV_CL ${CMAKE_SOURCE_DIR}/src/kernels/gemv.cl)
+add_ocloc_kernel(psm_ctl_gemv_M16_K5120_N16384_S1_L1 SOURCE ${PSM_GEMV_CL}
+                 DEFINES M=16 K=5120 N=16384 S=1 LAYOUT=1)
+add_ocloc_kernel(psm_ctl_gemv_M16_K6144_N5120_S4_L0 SOURCE ${PSM_GEMV_CL}
+                 DEFINES M=16 K=6144 N=5120 S=4 LAYOUT=0 GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+add_ocloc_kernel(psm_ctl_gemv_M16_K5120_N14336_S2_L0 SOURCE ${PSM_GEMV_CL}
+                 DEFINES M=16 K=5120 N=14336 S=2 LAYOUT=0 GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+add_ocloc_kernel(psm_ctl_gemv_M16_K5120_N34816_S8_L0 SOURCE ${PSM_GEMV_CL}
+                 DEFINES M=16 K=5120 N=34816 S=8 LAYOUT=0 GEMV_DEQ_SHIFT=1)
+add_ocloc_kernel(psm_ctl_gemv_M16_K17408_N5120_S4_L0 SOURCE ${PSM_GEMV_CL}
+                 DEFINES M=16 K=17408 N=5120 S=4 LAYOUT=0 GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+add_ocloc_kernel(psm_ctl_gemv_i8w_M16_K5120_N248320 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_i8w.cl
+                 DEFINES M=16 K=5120 N=248320)
+add_ocloc_kernel(psm_ctl_gemv_bf16_M16_K5120_N128_C16_S16 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_bf16.cl
+                 DEFINES M=16 K=5120 N=128 COLS_PER_WG=16 KSPLIT=16)
+list(APPEND PSM_TARGETS kernel_psm_ctl_gemv_M16_K5120_N16384_S1_L1 kernel_psm_ctl_gemv_M16_K6144_N5120_S4_L0
+     kernel_psm_ctl_gemv_M16_K5120_N14336_S2_L0 kernel_psm_ctl_gemv_M16_K5120_N34816_S8_L0
+     kernel_psm_ctl_gemv_M16_K17408_N5120_S4_L0 kernel_psm_ctl_gemv_i8w_M16_K5120_N248320
+     kernel_psm_ctl_gemv_bf16_M16_K5120_N128_C16_S16)
+add_custom_target(psm_kernels DEPENDS ${PSM_TARGETS})
+
+add_executable(probe_small_m probe_small_m.cc)
+target_include_directories(probe_small_m PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                           ${CMAKE_SOURCE_DIR}/tests/kernels ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_small_m PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model pthread)
+b70_target_kernel_dir(probe_small_m)
+get_property(PSM_SRC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+get_property(PSM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_small_m psm_kernels ${PSM_SRC_KERNELS} ${PSM_PF_KERNELS})

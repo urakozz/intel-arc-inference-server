@@ -1793,14 +1793,14 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
 }
 
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                          const MtpBuffers& mtp, uint32_t M) {
+                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof) {
   // Spec 19a: up to the buffers' slot count (kSlots = 4 on every engine; 8 for
   // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
   if (M == 0 || M > mtp.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(mtp.slots) +
                              "] (MtpBuffers::slots)");
-  return Capture(ctx, m, b, nullptr, nullptr, M, &mtp, Mode::Verify).run();
+  return Capture(ctx, m, b, nullptr, prof, M, &mtp, Mode::Verify).run();
 }
 
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,

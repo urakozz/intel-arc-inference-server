@@ -67,13 +67,15 @@ inline std::vector<float> bf16_rows(const std::vector<uint16_t>& x) {
 }
 
 // fp64 reference over columns [n0, n1) (all by default): ref[m][n], bound[m][n] = sum |w x|.
-// `xf` is [M][K] in fp32 (bf16 values, or dequantised int8 rows for the i8 reference).
+// `xf` is [M][K] in fp32 (bf16 values, or dequantised int8 rows for the i8 reference). The
+// outputs are [M][N]; columns outside [n0, n1) are zero, or left as they were when the
+// vectors already have that size (so several column ranges can fill one pair).
 inline void ref(const WeightView& wv, const std::vector<float>& xf, uint32_t M,
                 std::vector<double>& out, std::vector<double>& bound, uint32_t n0 = 0,
                 uint32_t n1 = 0) {
   if (n1 == 0) n1 = wv.N;
-  out.assign(size_t(M) * wv.N, 0.0);
-  bound.assign(size_t(M) * wv.N, 0.0);
+  if (out.size() != size_t(M) * wv.N) out.assign(size_t(M) * wv.N, 0.0);
+  if (bound.size() != size_t(M) * wv.N) bound.assign(size_t(M) * wv.N, 0.0);
   std::vector<double> col(wv.K);
   for (uint32_t n = n0; n < n1; ++n) {
     for (uint32_t k = 0; k < wv.K; ++k) col[k] = wv.w(k, n);
