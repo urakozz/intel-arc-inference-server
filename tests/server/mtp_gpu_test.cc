@@ -227,6 +227,9 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
       if (d == SIZE_MAX) std::snprintf(same, sizeof(same), "yes");
       else if (tr.v == greedy_tie::Verdict::Tie) std::snprintf(same, sizeof(same), "tie@%zu", d);
       else std::snprintf(same, sizeof(same), "NO@%zu", d);
+      if (d != SIZE_MAX)   // the divergence's numbers, one line each (the table cell stays short)
+        std::printf("\n    K=%d first difference at %zu: candidate rank %u in the plain row, %.3f bf16 ulp below its "
+                    "top-1 (top-2 margin %.3f)", k + 1, d, tr.cand_rank, tr.cand_gap, tr.margin_ulps);
       std::printf(" | %-6s %5.3f %5.2f    ", same, g.drafted ? double(g.accepted) / g.drafted : 0.0,
                   g.iters ? double(kGen) / g.iters : 0.0);
     }

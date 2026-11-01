@@ -3722,6 +3722,51 @@ st_r68_verdict() {
 }
 
 # ======================================================================================
+row 69 "spec 28b - gemm_sm in production: every M >= 2 decode list (MTP / lookup verify, DFlash tap verify - the drafter stays on gemv_i8w -, --pp 2 stage verify, 13a rows; Qwen3.8, Agnes, Ornith's dense projections) on the small-M DPAS GEMM, M = 1 bitwise; N1-N8, S2-S3, the measured cost table (plan 28b)"
+rownote 69 "N1 is the gate that is never traded: M = 1 lists bind the old binaries. Hand back: the N2 / N3 lines, the M2 cosines per M, the tie census, the verify(M) table and the D1 table."
+rownote 69 "First run 2026-11-01 as busy-box timing on one card per job (operator ruling, as 28a): r69.speed is the quiet-box re-check of those numbers (docs/superpowers/specs/2026-10-27-spec28-small-m-verify-gemm-design.md, '28b as built')."
+stage r69.k0      69 default cpu  -           g0.sha,g0.bitwise,g0.suite "N1: kernel_cmdlines +N / -0 / ~0, every existing binary identical, the suite (G0)"
+st_r69_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r69.host    69 default cpu  -           -                     "gemv_kind_test, gemm_sm_names_test, gemm_sm_ref_test, greedy_tie_test, the AdaptiveK cost-table tests"
+st_r69_host() {
+  run_tests '^(gemv_kind_test|gemm_sm_names_test|gemm_sm_ref_test|greedy_tie_test|adaptive_k_test|verify_m8_names_test|dflash_variant_names_test|ornith_mtp_names_test)$'
+  finish
+}
+stage r69.kernels 69 default card -           r69.k0                "gemm_sm_test: N2 against the fp64 reference and gemv, N3 property R, every shape and M (and the lever alternates)"
+st_r69_kernels() {
+  chk "build/tests/gemm_sm_test --levers" "gemm_sm_test (N2, N3, every row at every built M)"
+  grab_all kernels '^(PASS|FAIL) |^gemm_sm_test' 80
+  finish
+}
+stage r69.gates   69 default card qwen        r69.kernels           "N4 (mtp_verify_test M2 at M 2..4, dflash_engine_test D3 at M 2..8), N5, N6 greedy vs --spec off under the tie rule (golden + A4), N8 replay; Agnes / kv8 / Ornith MTP twins"
+st_r69_gates() {
+  run_tests '^(mtp_verify_test|mtp_gpu_test|mtp_verify_kv8_test|mtp_gpu_kv8_test|prefix_gpu_mtp_test|dflash_engine_test|dflash_gpu_test|lookup_server_test|batch_rows_test)$'
+  run_tests '^(mtp_verify_agnes_test|ornith_mtp_test|ornith_mtp_bf16head_test)$'
+  grab_all gates '^M2|^M3|^D2|^D3|^RF[0-9]|near-tie|NOT A TIE|first difference' 400
+  finish
+}
+stage r69.speed   69 optin   gpu  qwen        r69.gates             "S2: probe_mtp_steps / probe_verify_m verify(M) M 1..8 (gemm_sm against the same lists forced onto gemv); probe_small_m prod; idle, interleaved, median of 3"
+st_r69_speed() {
+  idle before
+  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8" "verify pairs M 1..8 (int8 head)"
+  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 bf16 off 16384 4" "verify pairs M 1..4 (bf16 head)"
+  chk "build/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 4096 --replays 32 --rounds 3" "verify8 at 4096 (gemm_sm vs forced gemv, the per-family table)"
+  chk "build/tools/probe/probe_small_m prod --shape all --m 2,3,4,5,6,7,8,16 --rounds 5" "the production rows against their lever alternates"
+  idle after
+  grab_all speed '^\| |^1v|^interleaved|^## ' 600
+  finish
+}
+stage r69.d1      69 optin   gpu-self qwen    r69.gates             "S3: tools/probe/mtp_d1.sh greedy 4096 (mtp_gpu_test --bench K = 0..3, 3 rounds, each process under the GPU lock), against 1.633x at K = 3 (BENCHMARKS 'D1, greedy decode')"
+st_r69_d1() {
+  chk "SNAP=$SNAP_QWEN tools/probe/mtp_d1.sh greedy 4096 > $STATE/$STAGE.log && python3 tools/probe/mtp_d1_table.py $STATE/$STAGE.log" "mtp_d1.sh at depth 4096"
+  grab_all d1 '^\| |geomean' 80
+  finish
+}
+
+# ======================================================================================
 row 70 "spec 19f - prompt lookup inside DFlash (--spec dflash-lookup: ENTER >= 8 tokens beyond the drafter's 2048 window, STAY >= 3 accepted, full-depth lookup verify, the drafter's projection kept): D2 / D4 on the mode, speed against plain --spec dflash on the edit / copy set (8k-99k) and A4 / golden (plan 19f)"
 rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the share of ids from lookup (the server's dflash: ... lookup: lines; time in lookup is not split out), the verdict line."
 rownote 70 "Host-side only (no kernel, no command line: D0 is G0). The edit / copy set is tests/golden/edit-copy (tools/spec/edit_copy_set.py: 12 prompts at 8k / 32k / 64k / 99k, each source 4953 .. 96230 ids before the prompt's end). The serving arms run at --max-len 102400 (the 99k prompts) - every arm the same flags otherwise. The verify lists' GEMM / attention are whatever main binds (specs 28b / 28c rebind the M >= 2 lists; the mode does not care)."

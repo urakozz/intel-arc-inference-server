@@ -11,9 +11,14 @@
 //        row r's argmax == g[r+1].
 //   M2b  (Review Focus 1) for k = 1..3 and every j in 0..k: restore S0, drafts g[1..j]
 //        then a WRONG id at j+1 (and junk after), verify(k), commit(j, argmax row j),
-//        then 64 plain greedy ids == g[j+1 .. j+64] (the run that never saw the
-//        rejected drafts). Run at n % 16 == 14, so pos % 16 wraps inside the verify
-//        rows (the conv ring), and at n % 16 == 5.
+//        then 64 plain greedy ids == the run that never saw the rejected drafts: the same
+//        verify(k) with the TRUE drafts g[1..k], commit(j), 64 plain ids - bitwise (spec 28
+//        N3 + N4: rows 0..j do not depend on rows past j). Since spec 28b the verify rows run
+//        gemm_sm and are no longer bitwise M = 1, so the 64 ids against the plain run's
+//        g[j+1 .. j+64] must be identical up to a first difference the golden tie rule classes
+//        as a near-tie (tests/server/greedy_tie.h, spec 28 N6) - before 28b the two references
+//        were the same run. Run at n % 16 == 14, so pos % 16 wraps inside the
+//        verify rows (the conv ring), and at n % 16 == 5.
 //   RF4  spec 7b's C1 case A with MTP on (state and KV carry the head), plus the same
 //        restore driving speculative iterations: bitwise equal to the straight run.
 //   RF5  (M5) a fixed pattern of k and forced j over 12 iterations, twice from S0 and
@@ -39,6 +44,7 @@
 #include <vector>
 
 #include "check.h"
+#include "../server/greedy_tie.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -117,6 +123,7 @@ std::vector<float> gdn_slot(Ctx& c, uint32_t s) {
 
 struct Ref {
   std::vector<uint32_t> g;                     // g[0] = pending at S0, g[i+1] = argmax of step i
+  std::vector<greedy_tie::RefStep> steps;      // step i's decision (top-2, margin) - it decided g[i+1]
   std::vector<std::vector<float>> logits;      // step r's logits, r <= kMaxDraft
   std::vector<std::vector<float>> state;       // GDN state after step r, r <= kMaxDraft
 };
@@ -126,9 +133,9 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
   r.g.push_back(c.ctl->cur_token[0]);
   for (uint32_t i = 0; i < T; ++i) {
     c.e.verify(0);
-    if (i <= runtime::Engine::kMaxDraft) {
-      r.logits.push_back(logits_rows(c, c.e.verify_logits_device(), 1));
-    }
+    const std::vector<float> row = logits_rows(c, c.e.verify_logits_device(), 1);
+    r.steps.push_back(greedy_tie::ref_step(row.data(), uint32_t(VU)));
+    if (i <= runtime::Engine::kMaxDraft) r.logits.push_back(row);
     c.e.commit(0, c.e.verify_ids()[0]);
     if (i <= runtime::Engine::kMaxDraft) r.state.push_back(gdn_slot(c, c.ctl->gdn_live));
     r.g.push_back(c.ctl->cur_token[0]);
@@ -145,16 +152,20 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
     c.e.verify(k);
     const std::vector<float> lg = logits_rows(c, c.e.verify_logits_device(), k + 1);
     for (uint32_t r = 0; r <= k; ++r) {
-      const double cl = cosine(lg.data() + size_t(r) * V, ref.logits[r].data(), VU);
+      double lma = 0;
+      const double cl = cosine(lg.data() + size_t(r) * V, ref.logits[r].data(), VU, &lma);
       const bool lbits = std::memcmp(lg.data() + size_t(r) * V, ref.logits[r].data(), V * 4) == 0;
       const std::vector<float> sl = gdn_slot(c, (c.ctl->gdn_live + r) % runtime::MtpBuffers::kSlots);
       double ma = 0;
       const double cs = cosine(sl.data(), ref.state[r].data(), sl.size(), &ma);
       const bool sbits = std::memcmp(sl.data(), ref.state[r].data(), kGdnBytes) == 0;
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
-      std::printf("  M2a k=%u row %u: logits cos %.9f%s  GDN slot cos %.9f max abs %.3e%s  id %s\n",
-                  k, r, cl, lbits ? " (bitwise)" : "", cs, ma, sbits ? " (bitwise)" : "",
-                  id_ok ? "ok" : "DIFFERS");
+      int le = 0;
+      std::frexp(std::fabs(ref.logits[r][ref.g[r + 1]]), &le);
+      std::printf("  M2a k=%u row %u: logits cos %.9f max abs %.3e (%.2f bf16 ulp of the top)%s  GDN slot cos %.9f max "
+                  "abs %.3e%s  id %s\n",
+                  k, r, cl, lma, lma / std::ldexp(1.0, le - 8), lbits ? " (bitwise)" : "", cs, ma,
+                  sbits ? " (bitwise)" : "", id_ok ? "ok" : "DIFFERS");
       ok &= cl >= 0.99999 && cs >= 0.99999 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);
@@ -162,6 +173,12 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
   // M2b
   for (uint32_t k = 1; k <= runtime::Engine::kMaxDraft; ++k)
     for (uint32_t j = 0; j <= k; ++j) {
+      // the run that never saw a rejected draft: every draft true, the same verify(k), commit(j)
+      s0.restore(c);
+      for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
+      c.e.verify(k);
+      c.e.commit(j, c.e.verify_ids()[j]);
+      const std::vector<uint32_t> clean = c.e.generate(64);
       s0.restore(c);
       for (uint32_t i = 1; i <= k; ++i) {
         uint32_t d = ref.g[i];
@@ -175,10 +192,19 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
       c.e.commit(j, c.e.verify_ids()[j]);
       const std::vector<uint32_t> ids = c.e.generate(64);
       size_t diff = 0;
-      for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != ref.g[j + 1 + i];
-      std::printf("  M2b k=%u j=%u: accepted rows %s, 64 further ids: %zu differ\n", k, j,
-                  rows_ok ? "ok" : "DIFFER", diff);
-      ok &= rows_ok && diff == 0;
+      for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != clean[i];
+      // against the plain M = 1 run: identical, or a first difference the golden tie rule classes a near-tie
+      const std::vector<uint32_t> pg(ref.g.begin() + j + 1, ref.g.begin() + j + 1 + ids.size());
+      const std::vector<greedy_tie::RefStep> ps(ref.steps.begin() + j, ref.steps.begin() + j + ids.size());
+      const greedy_tie::Result tr = greedy_tie::classify(pg, ps, ids);
+      char pf[96];
+      if (tr.v == greedy_tie::Verdict::Same) std::snprintf(pf, sizeof pf, "equal to the plain run");
+      else
+        std::snprintf(pf, sizeof pf, "the plain run first differs at %zu: %s (%.3f bf16 ulp)", tr.at,
+                      tr.v == greedy_tie::Verdict::Tie ? "near-tie" : "NOT A TIE", tr.cand_gap);
+      std::printf("  M2b k=%u j=%u: accepted rows %s, 64 further ids: %zu differ from the clean run; %s\n", k, j,
+                  rows_ok ? "ok" : "DIFFER", diff, pf);
+      ok &= rows_ok && diff == 0 && tr.v != greedy_tie::Verdict::Diverged;
     }
   return ok;
 }

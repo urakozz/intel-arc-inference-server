@@ -141,7 +141,9 @@ int main(int argc, char** argv) {
       if (tr.v == greedy_tie::Verdict::Same) std::snprintf(what, sizeof what, "identical");
       else if (tr.v == greedy_tie::Verdict::Tie)
         std::snprintf(what, sizeof what, "near-tie at %zu (%.3f bf16 ulp)", tr.at, tr.margin_ulps);
-      else std::snprintf(what, sizeof what, "DIFFERS at %zu (margin %.3f bf16 ulp)", tr.at, tr.margin_ulps);
+      else
+        std::snprintf(what, sizeof what, "DIFFERS at %zu (candidate rank %u, %.3f ulp below top-1; top-2 %.3f)", tr.at,
+                      tr.cand_rank, tr.cand_gap, tr.margin_ulps);
       std::printf("D2 %-28s %-4s %s, %llu iterations, %.2f ids an iteration, acceptance %.3f\n", p.name.c_str(),
                   arm[i], what, (unsigned long long)g.iters, double(kGen) / double(std::max<uint64_t>(1, g.iters)),
                   g.drafted ? double(g.accepted) / double(g.drafted) : 0.0);

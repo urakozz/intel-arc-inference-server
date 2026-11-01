@@ -74,14 +74,23 @@ int main() {
       CHECK(v.find("_M" + std::to_string(M) + "_") != std::string::npos);
       CHECK_EQ(kernels::small_m_tuning(t.K, t.N, t.S, t.layout), &t);
     }
-  // Untuned shapes keep gemv at every M (Ornith's int4 a||b and attention, its 2048-wide int8 head).
+  // Ornith (the operator's 28b addition): its dense int4 projections and int8 head on gemm_sm at its verify
+  // lists' M = 2..4, gemv at M = 1; the consumer's S unchanged.
   const model::ModelDesc& o = model::ornith();
-  for (LinearId id : {LinearId::Qkv, LinearId::OProj, LinearId::QkvZ}) {
-    const model::GemvShape& s = o.shape(id);
-    for (uint32_t M = 1; M <= 4; ++M)
+  for (LinearId id : {LinearId::Qkv, LinearId::OProj, LinearId::QkvZ, LinearId::OutProj, LinearId::AB}) {
+    const model::GemvShape& s = id == LinearId::AB ? o.ab(model::WeightKind::Int4).shape : o.shape(id);
+    const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.S, s.layout);
+    CHECK(t != nullptr && t->mset == kernels::kSmVerify4 && kernels::gemm_sm_out_s(*t) == s.S);
+    CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(1), 1, s.K, s.N, s.S, s.layout),
+             kernels::gemv_variant(1, s.K, s.N, s.S, s.layout));
+    for (uint32_t M = 2; M <= 4; ++M)
       CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(M), M, s.K, s.N, s.S, s.layout),
-               kernels::gemv_variant(M, s.K, s.N, s.S, s.layout));
+               kernels::gemm_sm_variant(M, *t));
   }
+  CHECK(kernels::int8_linear_variant(runtime::gemv_kind(2), 2, o.hidden, model::Qwen35::kVocab)
+            .rfind("gemm_sm_i8w_M2_K2048", 0) == 0);
+  // An untuned shape keeps gemv at every M (a made-up one).
+  CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(4), 4, 3072, 1024, 2, 0), kernels::gemv_variant(4, 3072, 1024, 2, 0));
   // The draft vocabulary's head (M = 1) and the MTP draft (M = 1): gemv_i8w.
   for (unsigned nv : {32768u, 65536u, 131072u})
     CHECK_EQ(kernels::int8_linear_variant(runtime::gemv_kind(1), 1, 5120, nv), kernels::gemv_i8w_variant(1, 5120, nv));

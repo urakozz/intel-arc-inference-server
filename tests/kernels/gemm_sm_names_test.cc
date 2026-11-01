@@ -80,9 +80,11 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 5120, 34816, 8, 0),
            std::string("gemm_sm_M4_K5120_N34816_S1_L0_wg_mg"));
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 2048, 128, 1, 1),
-           kernels::gemv_variant(4, 2048, 128, 1, 1));   // Ornith's a||b: not tuned
+           std::string("gemm_sm_M4_K2048_N128_S1_L1_mg"));   // Ornith's a||b (M 2..4)
   CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::SmallM, 2, 2048, 248320),
-           kernels::gemv_i8w_variant(2, 2048, 248320));   // Ornith's head: not tuned
+           std::string("gemm_sm_i8w_M2_K2048_N248320"));      // Ornith's head
+  CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 3072, 1024, 2, 0),
+           kernels::gemv_variant(4, 3072, 1024, 2, 0));        // an untuned shape
   CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::Gemv, 8, 5120, 248320),
            kernels::gemv_i8w_variant(8, 5120, 248320));
   std::printf("gemm_sm_names_test OK: %zu rows, %zu binaries and %zu consumer builds, the block builds exactly these\n",

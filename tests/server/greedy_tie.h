@@ -18,9 +18,41 @@ namespace greedy_tie {
 struct RefStep {
   uint32_t top1 = 0, second = 0;
   double margin_ulps = 0;
+  // diagnostics: the row's top 8 ids and their gap below top-1 in bf16 ulps (a candidate's rank and gap)
+  uint32_t top_ids[8] = {};
+  double top_gap[8] = {};
 };
+// The candidate's rank in the reference row (0 = top-1) and its gap below top-1 in bf16 ulps; rank 8 = beyond.
+inline void rank_of(const RefStep& r, uint32_t id, uint32_t* rank, double* gap) {
+  for (uint32_t i = 0; i < 8; ++i)
+    if (r.top_ids[i] == id) {
+      *rank = i;
+      *gap = r.top_gap[i];
+      return;
+    }
+  *rank = 8;
+  *gap = r.top_gap[7];
+}
 inline RefStep ref_step(const float* row, uint32_t used) {
   RefStep r;
+  {
+    float tv[8];
+    for (uint32_t i = 0; i < 8; ++i) tv[i] = -INFINITY;
+    for (uint32_t i = 0; i < used; ++i) {
+      if (!(row[i] > tv[7])) continue;
+      uint32_t j = 7;
+      while (j > 0 && row[i] > tv[j - 1]) {
+        tv[j] = tv[j - 1];
+        r.top_ids[j] = r.top_ids[j - 1];
+        --j;
+      }
+      tv[j] = row[i];
+      r.top_ids[j] = i;
+    }
+    int e0 = 0;
+    std::frexp(std::fabs(tv[0]), &e0);
+    for (uint32_t i = 0; i < 8; ++i) r.top_gap[i] = (double(tv[0]) - double(tv[i])) / std::ldexp(1.0, e0 - 8);
+  }
   uint32_t t = 0;
   for (uint32_t i = 1; i < used; ++i)
     if (row[i] > row[t]) t = i;
@@ -43,6 +75,8 @@ struct Result {
   Verdict v = Verdict::Same;
   size_t at = SIZE_MAX;
   double margin_ulps = 0;
+  uint32_t cand_rank = 0;   // diagnostics at a divergence: the candidate's rank in the reference row
+  double cand_gap = 0;      // ... and its gap below the reference's top-1, bf16 ulps
 };
 inline Result classify(const std::vector<uint32_t>& ref, const std::vector<RefStep>& steps,
                        const std::vector<uint32_t>& cand) {
@@ -51,6 +85,7 @@ inline Result classify(const std::vector<uint32_t>& ref, const std::vector<RefSt
     if (ref[i] == cand[i]) continue;
     Result r;
     r.at = i;
+    if (i < steps.size()) rank_of(steps[i], cand[i], &r.cand_rank, &r.cand_gap);
     if (i < steps.size() && steps[i].top1 == ref[i] && steps[i].second == cand[i] && steps[i].margin_ulps <= 1.0) {
       r.v = Verdict::Tie;
       r.margin_ulps = steps[i].margin_ulps;
