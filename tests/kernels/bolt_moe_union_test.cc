@@ -170,10 +170,10 @@ void time_moe(Dev& d, std::mt19937& g) {
       l0::Kernel& up = mk(kb::moe_up_variant(M, I, false), "nb_moe_up", kb::moe_up_wg());
       l0::Kernel& dn = mk(kb::moe_down_variant(M, I), "nb_moe_down", kb::moe_down_wg());
       uint32_t i = 0;
-      for (const l0::Mem* m : {&rb, &lb, &wb, &pa}) up.arg_ptr(i++, m->ptr());
+      for (const l0::Mem* m : std::initializer_list<const l0::Mem*>{&rb, &lb, &wb, &pa}) up.arg_ptr(i++, m->ptr());
       up.arg<uint32_t>(i, kE);
       i = 0;
-      for (const l0::Mem* m : {&rb, &pa, &wb, &pr}) dn.arg_ptr(i++, m->ptr());
+      for (const l0::Mem* m : std::initializer_list<const l0::Mem*>{&rb, &pa, &wb, &pr}) dn.arg_ptr(i++, m->ptr());
       dn.arg<uint32_t>(i, kE);
       l0::CmdList plain = l0::CmdList::regular(d.ctx);
       for (uint32_t r = 0; r < kReps; ++r) {
@@ -188,13 +188,13 @@ void time_moe(Dev& d, std::mt19937& g) {
         l0::Kernel& ud2 = mk(kb::moe_down_union_variant(M, I), "nb_moe_down_U", kb::moe_down_union_wg());
         l0::Kernel& uc = mk(kb::moe_comb_union_variant(M), "nb_moe_comb_U", kb::kCombWg);
         i = 0;
-        for (const l0::Mem* m : {&rb, &lb, &wb, &ua}) uu.arg_ptr(i++, m->ptr());
+        for (const l0::Mem* m : std::initializer_list<const l0::Mem*>{&rb, &lb, &wb, &ua}) uu.arg_ptr(i++, m->ptr());
         uu.arg<uint32_t>(i, kE);
         i = 0;
-        for (const l0::Mem* m : {&rb, &ua, &wb, &dd}) ud2.arg_ptr(i++, m->ptr());
+        for (const l0::Mem* m : std::initializer_list<const l0::Mem*>{&rb, &ua, &wb, &dd}) ud2.arg_ptr(i++, m->ptr());
         ud2.arg<uint32_t>(i, kE);
         i = 0;
-        for (const l0::Mem* m : {&rb, &dd, &ur}) uc.arg_ptr(i++, m->ptr());
+        for (const l0::Mem* m : std::initializer_list<const l0::Mem*>{&rb, &dd, &ur}) uc.arg_ptr(i++, m->ptr());
         for (uint32_t r = 0; r < kReps; ++r) {
           uni.launch(uu, kb::moe_up_union_groups(M, I), 1);
           uni.launch(ud2, kb::moe_down_union_groups(M), 1);
