@@ -8,7 +8,7 @@
   1024,
   3308
  ],
- "distance": 95676,
+ "distance": 95687,
  "messages": [
   {
    "role": "system",
@@ -201,7 +201,7 @@
   },
   {
    "role": "user",
-   "content": "Rename the local `props` to `props_v` in `schema_type` (/work/src/server/toolcall.cc) and print the whole function with the change, nothing else."
+   "content": "Rename the local `props` to `props_v` in `schema_type` (/work/src/server/toolcall.cc) with one edit call: oldString the whole function as shown above, newString the whole function after the change."
   }
  ],
  "tools": [
