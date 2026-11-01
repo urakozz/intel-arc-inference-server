@@ -1679,4 +1679,77 @@ endif()
 # first). No defines: the word counts are kernel arguments, so one binary serves every model.
 add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
 
+# ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
+# Plan: docs/superpowers/plans/2026-10-27-spec28b-small-m-build.md. Additive only: no existing variant's name or
+# command line moves (tools/kernel_cmdlines: +N / -0 / ~0), every M = 1 list binds what it bound before. Every list
+# a capture builds at M >= 2 binds these in place of gemv / gemv_i8w (runtime::gemv_kind, runtime/gemv_kind.h) for
+# the shapes of kernels::kSmallMTuning (src/kernels/kernels.h) - ONE row per shape, whose knobs are spelled into the
+# name, so a row and a line here that disagree are a missing file at capture (gemm_sm_names_test holds the two
+# together on the Mac). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's 2..8, spec 13a's rows) and 16
+# (gemm_sm_test, the probe; no list binds 16 yet).
+set(GEMM_SM_TARGETS "")
+# add_gemm_sm_variant(M K N S L [WG] [MG] [G256] [B2D]) - L 2 is the int8 form (gemm_sm_i8w_*), S 1 there. The
+# source by its full path: tools/probe calls these helpers from its own directory scope.
+function(add_gemm_sm_variant M K N S L)
+  cmake_parse_arguments(G "WG;MG;G256;B2D" "" "" ${ARGN})
+  set(defs M=${M} K=${K} N=${N} S=${S} LAYOUT=${L})
+  set(tag "")
+  set(opts "")
+  if(G_WG)
+    list(APPEND defs SPLITK=1)
+    string(APPEND tag _wg)
+  endif()
+  if(G_MG)
+    list(APPEND defs DEQ=1)
+    string(APPEND tag _mg)
+  endif()
+  if(G_G256)
+    set(opts OPTIONS -cl-intel-256-GRF-per-thread)
+    string(APPEND tag _g256)
+  endif()
+  if(G_B2D)
+    list(APPEND defs BLK2D=1)
+  endif()
+  if(L EQUAL 2)
+    set(name gemm_sm_i8w_M${M}_K${K}_N${N}${tag})
+  else()
+    set(name gemm_sm_M${M}_K${K}_N${N}_S${S}_L${L}${tag})
+  endif()
+  if(NOT TARGET kernel_${name})
+    add_ocloc_kernel(${name} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemm_sm.cl DEFINES ${defs} ${opts})
+    set(GEMM_SM_TARGETS ${GEMM_SM_TARGETS} kernel_${name} PARENT_SCOPE)
+  endif()
+endfunction()
+# The production rows, kernels::kSmallMTuning's order: "K N S L flags...".
+set(GEMM_SM_QWEN38 "5120 16384 1 1 MG G256" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 8 0 MG"
+                   "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
+set(GEMM_SM_AGNES "5120 38912 8 0 MG" "19456 5120 4 0 MG B2D")
+set(GEMM_SM_DRAFTER "5120 6144 1 2" "4096 5120 1 2" "5120 34816 1 2" "17408 5120 1 2" "25600 5120 1 2"
+                    "5120 2048 1 2" "5120 1280 1 2" "5120 256 1 2")
+set(GEMM_SM_DRAFT_HEADS "5120 32768 1 2" "5120 65536 1 2" "5120 131072 1 2")
+macro(gemm_sm_rows ROWS MLIST)
+  foreach(row IN LISTS ${ROWS})
+    separate_arguments(f UNIX_COMMAND "${row}")
+    foreach(MM IN LISTS ${MLIST})
+      add_gemm_sm_variant(${MM} ${f})
+    endforeach()
+  endforeach()
+endmacro()
+set(GEMM_SM_M 2 3 4 5 6 7 8 16)
+if(B70_DECODE_EXTRA_M OR B70_MTP)
+  gemm_sm_rows(GEMM_SM_QWEN38 GEMM_SM_M)
+  if(B70_AGNES)
+    gemm_sm_rows(GEMM_SM_AGNES GEMM_SM_M)
+  endif()
+endif()
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(_m8 8)
+  set(_m7 7)
+  gemm_sm_rows(GEMM_SM_DRAFTER _m8)       # the drafter's int8 linears at its block of 8 rows
+  gemm_sm_rows(GEMM_SM_DRAFT_HEADS _m7)   # the compact int8 heads at the draft head's 7 rows
+endif()
+# tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
+set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})
+# ==== Spec 28b ==== (end) ====
+
 add_subdirectory(prefill)

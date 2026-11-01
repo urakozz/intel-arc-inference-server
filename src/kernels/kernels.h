@@ -1,6 +1,8 @@
 #pragma once
 #include <string>
+#include <vector>
 
+#include "kernels/linear_kind.h"
 #include "kernels/shape_suffix.h"
 
 #ifndef B70_KERNEL_DIR
@@ -86,6 +88,106 @@ inline std::string gemv_bf16_variant(unsigned M, unsigned K, unsigned N, GemvBf1
 inline constexpr unsigned kGemvI8wCols = 64;
 inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
   return "gemv_i8w_M" + std::to_string(M) + "_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
+
+// ---- Spec 28b: the small-M GEMM (src/kernels/gemm_sm.cl) ------------------------------------
+//
+// Which kernel a linear at M rows binds is `runtime::gemv_kind(M)` (runtime/gemv_kind.h): `Gemv`
+// at M = 1 - today's gemv / gemv_i8w binaries, untouched -, `SmallM` at M >= 2. `SmallM` binds
+// gemm_sm / gemm_sm_i8w when the shape has a row in `kSmallMTuning` and gemv / gemv_i8w otherwise
+// (the models 28b does not tune - Ornith, K2, Bolt, Kolibri, Qwen4exp - keep their M-row GEMVs).
+// LinearKind and the rule kernels::gemv_kind(M) are in kernels/linear_kind.h (no kernel-directory dependency).
+
+// One row per weight shape: THE source of truth for its gemm_sm variant at every M (spec 28 §2:
+// property R needs the same row block, group order, S and work-group shape at every M >= 2 - the
+// table has no M column, so it cannot vary by M). `layout` 0 / 1 int4 (gemv's S and layout, the
+// key), 2 int8 (gemv_i8w's: S 1). The knobs are gemm_sm.cl's:
+//   wg      the in-work-group split-K (2 column x 8 K-slice sub-groups, SLM reduction). It writes
+//           ONE slice, so it is allowed only where gemv's S is already 1 (no consumer changes S).
+//   magic   the magic-exponent dequant (bit-identical output to the shift form; speed only).
+//   grf256  the variant's ocloc line carries -cl-intel-256-GRF-per-thread.
+//   blk2d   layout 0: the 2D block weight read, copied from gemv's production cell of the shape.
+// The choices are plan 28b's lever measurement (docs/superpowers/specs/2026-10-27-spec28-small-m-
+// verify-gemm-design.md, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
+// (gemm_sm_names_test holds the two together).
+struct SmallMTuning {
+  unsigned K, N, S, layout;
+  bool wg, magic, grf256, blk2d;
+};
+inline constexpr SmallMTuning kSmallMTuning[] = {
+    // Qwen3.8 (and Agnes: the same attention and GDN linears)
+    {5120, 16384, 1, 1, false, true, true, false},    // qkv||z      48 layers
+    {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
+    {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
+    {5120, 34816, 8, 0, false, true, false, false},   // gate||up
+    {17408, 5120, 4, 0, false, true, false, true},    // down
+    {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head (and the DFlash draft head, 7 rows)
+    // Agnes 3.0 Flash's folded MLP (spec 14; gemv's cells PROVISIONAL there, copied here)
+    {5120, 38912, 8, 0, false, true, false, false},   // gate'||up'
+    {19456, 5120, 4, 0, false, true, false, true},    // down'
+    // The DFlash drafter's int8 linears at its block of 8 rows (spec 19b; kernels::dflash) and the
+    // draft vocabularies' compact int8 heads at the draft head's 7 rows - base form, not swept
+    {5120, 6144, 1, 2, false, false, false, false},   // q||k||v
+    {4096, 5120, 1, 2, false, false, false, false},   // o
+    {5120, 34816, 1, 2, false, false, false, false},  // gate||up
+    {17408, 5120, 1, 2, false, false, false, false},  // down
+    {25600, 5120, 1, 2, false, false, false, false},  // fc (5 taps)
+    {5120, 2048, 1, 2, false, false, false, false},   // the context's k||v
+    {5120, 1280, 1, 2, false, false, false, false},   // the conv kernel projections (DFlash 2)
+    {5120, 256, 1, 2, false, false, false, false},    // the selector's projection (DFlash 2)
+    {5120, 32768, 1, 2, false, false, false, false},  // compact draft heads
+    {5120, 65536, 1, 2, false, false, false, false},
+    {5120, 131072, 1, 2, false, false, false, false},
+};
+// The row of a shape, or null (that shape keeps gemv / gemv_i8w at every M). int8: layout 2, S 1.
+inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsigned S, unsigned layout) {
+  for (const SmallMTuning& t : kSmallMTuning)
+    if (t.K == K && t.N == N && t.S == S && t.layout == layout) return &t;
+  return nullptr;
+}
+// The output's split-K slices (what the consumer folds): gemv's S, or 1 under wg (only where S is 1).
+inline constexpr unsigned gemm_sm_out_s(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
+// Work-group size and grid (N / cols, S): grid split-K 4 x 16 columns, wg 2 x 16 columns x 8 slices.
+inline constexpr unsigned gemm_sm_wg_size(const SmallMTuning& t) { return t.wg ? 256 : 64; }
+inline constexpr unsigned gemm_sm_cols(const SmallMTuning& t) { return t.wg ? 32 : 64; }
+inline constexpr unsigned gemm_sm_grid_y(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
+inline constexpr bool small_m_table_ok() {
+  for (const SmallMTuning& t : kSmallMTuning) {
+    if (t.wg && t.S != 1) return false;                        // wg writes one slice
+    if (t.layout == 2 && (t.S != 1 || t.magic || t.blk2d)) return false;
+    if (t.blk2d && t.layout != 0) return false;
+    if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
+    if (t.N % gemm_sm_cols(t) != 0) return false;
+  }
+  return true;
+}
+static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #error guards or changes a consumer's S");
+// gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256] (int4) / gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8):
+// every knob is in the name, so a table row CMake does not build is a missing file at capture.
+inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
+  const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
+  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "");
+  if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
+  return "gemm_sm" + mk + "_S" + std::to_string(t.S) + "_L" + std::to_string(t.layout) + knobs;
+}
+// The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
+// together): 2..8 and 16 for the target's linears and head; the DFlash drafter's linears at its block of 8 rows;
+// the compact draft heads at the draft head's 7 rows.
+inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
+  if (t.layout == 2 && t.N != 248320)
+    return (t.N == 32768 || t.N == 65536 || t.N == 131072) ? std::vector<unsigned>{7} : std::vector<unsigned>{8};
+  return {2, 3, 4, 5, 6, 7, 8, 16};
+}
+inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
+// The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and
+// the names tests share.
+inline std::string int4_linear_variant(LinearKind k, unsigned M, unsigned K, unsigned N, unsigned S, unsigned L) {
+  const SmallMTuning* t = k == LinearKind::SmallM ? small_m_tuning(K, N, S, L) : nullptr;
+  return t ? gemm_sm_variant(M, *t) : gemv_variant(M, K, N, S, L);
+}
+inline std::string int8_linear_variant(LinearKind k, unsigned M, unsigned K, unsigned N) {
+  const SmallMTuning* t = k == LinearKind::SmallM ? small_m_tuning(K, N, 1, 2) : nullptr;
+  return t ? gemm_sm_variant(M, *t) : gemv_i8w_variant(M, K, N);
 }
 
 // The between-GEMV kernels (src/kernels/prep.cl). Only `prep_res_norm` varies
