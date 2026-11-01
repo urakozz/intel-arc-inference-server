@@ -278,9 +278,9 @@ int run_all(rk::KolibriEngine& e, const Ids& prompt) {
               kc.worst, kc.worst_layer, kc.worst_pos);
   print_layers(kc);
   std::printf("5. routing on the last chunk's %llu (row, layer) rows: %llu exact, %llu near-ties (margin <= %.0e), "
-              "%llu beyond; matched weights worst |dw| %.4f - printed, not gated (the header)\n",
+              "%llu beyond; matched weights worst |dw| %.4f (bar %.4f) - printed, not gated (the header)\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties, double(kTieTol),
-              (unsigned long long)bad, double(worst_w));
+              (unsigned long long)bad, double(worst_w), double(kWeightAbs));
   ok = ok && kv_ok;
 
   // ---- 6. tokens, ruling A26's rule ------------------------------------------------------------------
