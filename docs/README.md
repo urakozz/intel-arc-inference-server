@@ -97,6 +97,12 @@ narrative, and the numbered guides cite them where they matter.
   `probe_batch_step` (bitwise on the Mac for gdn_step / attn_prep; the box's check PENDING), the step and chunk
   tables (derived; measured PENDING - queue row 66), the layouts' memory from the code (Qwen3.8 4 slots 1.94 GB
   spare; Agnes 2 with MTP 1.76, 4 with `--mtp off` 1.22), the row table for 13b.
+- [probe-small-m-gemm-2026-11-01.md](probe-small-m-gemm-2026-11-01.md) - spec 28a: Qwen3.8's decode linears at
+  M = 1..16 through gemv and small-M DPAS stand-ins (`probe_small_m`, 347 binaries), the verify step at M = 1..8 split
+  into GEMV and non-GEMV (`probe_verify_m --verify8`), numerics and property R on layer 62 / 63's weights. Busy-box
+  timing on one card (provisional): bf16 weights-on-B at M = 8 is 1.08x a token's M = 1 GEMV sum (today 3.10x);
+  verify(8) today 3.17 plain steps, derived with the stand-in 1.54 - the operator's call; attention at M = 8 is the
+  next lever (spec 28c). Quiet-box re-check set in §6.
 - [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's

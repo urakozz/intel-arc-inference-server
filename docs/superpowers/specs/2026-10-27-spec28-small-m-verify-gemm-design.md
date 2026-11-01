@@ -229,4 +229,23 @@ docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they m
 
 ## 9. P0 verdict
 
-(Empty until plan 28a runs: the shape table, the step attribution, the type and S chosen, the GO / NO-GO line.)
+**PROVISIONAL (2026-11-01): busy-box timing on one card, to be re-checked on a quiet box** (operator ruling
+2026-11-01; the re-check set is docs/probe-small-m-gemm-2026-11-01.md §6). Record: docs/probe-small-m-gemm-2026-11-01.md.
+
+- **The stand-in:** bf16 DPAS, weights on B (§2's sketch), the production S of every shape, grid split-K, shift
+  dequant. Weights on A (oneDNN's orientation) is 2.1x over a token on our layouts (1.13-1.59x per shape even with
+  prefetch); i8 x i4 is 1.26x at M = 8 against bf16's 1.10x and fails N2 against the bf16 rows - **type bf16, S as
+  today** (measured, busy box). Levers: magic dequant 1-2 %, the 2x8 in-work-group split-K 5-6 % on gate‖up and the
+  head only (9-28 % worse elsewhere), 256 GRF 4 % on qkv‖z only - per-shape choices for 28b.
+- **(a) the GEMM sum at M = 8: 1.083x** today's M = 1 sum (1.100x with a‖b's gemv_bf16 on both sides); today's
+  kernels are 3.10x (measured, busy box).
+- **The attribution (depth 4096):** today's verify(8) is **3.17 plain steps** (measured - r29.cost's arm ran:
+  probe_mtp_steps 3.167, probe_verify_m 3.170; not the 2.62 extrapolated); its non-GEMV time is 19.35 ms (derived:
+  the profiled share x the unprofiled step), 12.3 ms of it attention, which doubles from M = 7 to 8.
+- **(b) derived verify(8) = 19.35 + 27.46 ms = 1.535 plain steps** (1.50 with the levers, estimated).
+- **(c) N2 and N3 pass:** 398 variant runs against fp64 (max 0.0034 of N2's bound); layer 62 / 63's real weights
+  with real rows: 0.0125 of the bound against fp64, 0.026 against gemv, cosine 1.0000000; property R 0 differences
+  in 96,000 row-slices over 1000 trials a shape and arm.
+
+**Provisional line: the operator's call** ((b) between 1.4 and 1.6). The GEMM is no longer what holds verify(8) up:
+the M = 8 attention build is (at the M = 1..7 attention slope, ~1.37 plain steps, estimated) - spec 28c.
