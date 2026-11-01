@@ -3989,6 +3989,71 @@ st_r75_speed() {
 }
 
 # ======================================================================================
+row 71 "spec 17a - the TP P0, Qwen3.8 first: links / BARs / peer access, CPU stores into VRAM through the BAR, the all-reduce on every route (P2P push / pull, host-staged + own BAR, host read, host mailbox) at 1 / 8 rows and 128 calls, the per-card step at TP shapes, the go / no-go line (plan 17a)"
+rownote 71 "Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; these stages are the quiet-box re-check (the record's §7). r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
+rownote 71 "Every two-card stage sets ZE_AFFINITY_MASK=0,1 itself and holds the whole box. Hand back: the facts, the BAR table, the all-reduce table (per route, rows, per call, per token, bitwise, stale caught, CPU phases for host-bar), the per-card step table."
+stage r71.k0      71 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0: no src/ binary changes (the probe's kernels are tools/probe's ptp_*)"
+st_r71_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r71.host    71 default cpu  -     -                     "tp_shapes_test, tp_crossing_protocol_test"
+st_r71_host() {
+  run_tests '^(tp_shapes_test|tp_crossing_protocol_test)$'
+  finish
+}
+stage r71.build   71 default cpu  -     g0.build              "probe_tp and its ptp_* binaries (build), -j\$JOBS"
+st_r71_build() {
+  chk "cmake --build build -j$JOBS --target probe_tp" "probe_tp and its ptp_* binaries"
+  finish
+}
+stage r71.facts   71 default gpu  -     r71.build             "offload_links.sh (idle), the BAR lines, the kernel version, probe_tp facts (peer access and P2P properties both ways, the dma-buf BAR mapping); a STOP line stops the row"
+st_r71_facts() {
+  chk "tools/probe/offload_links.sh" "the links (idle)"
+  chk "uname -r; for d in 04:00.0 08:00.0; do lspci -vv -s \$d | grep -E 'Region|LnkSta:'; done" "the BARs and the kernel"
+  chk "ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_tp facts" "probe_tp facts"
+  grab_all facts '^link|^links|^STOP|^\| |Region|^7\.' 80
+  finish
+}
+stage r71.bar     71 default gpu  -     r71.facts             "probe_tp bar on each card: the CPU-into-VRAM round trip (dma-buf BAR mapping, pinned host, shared) at 64 B / 20 / 160 KiB"
+st_r71_bar() {
+  idle before
+  chk "ZE_AFFINITY_MASK=0 build/tools/probe/probe_tp bar --iters 2000" "bar, card 0"
+  chk "ZE_AFFINITY_MASK=1 build/tools/probe/probe_tp bar --iters 2000" "bar, card 1"
+  grab_all bar '^\| |^## ' 80
+  finish
+}
+stage r71.ar      71 default gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8, Agnes) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
+st_r71_ar() {
+  idle before
+  local P="ZE_AFFINITY_MASK=0,1 timeout -k 10 300 build/tools/probe/probe_tp ar"
+  chk "$P --route p2p-push --rows 1,8 --rounds 5 --execs 20" "p2p-push timed"
+  chk "$P --route p2p-push --model agnes --rows 1 --rounds 5 --execs 20" "p2p-push timed, Agnes"
+  chk "$P --route p2p-push --rows 1 --replays 10000" "p2p-push bitwise, 10^4 replays at M = 1"
+  chk "$P --route p2p-push --rows 8 --replays 1000" "p2p-push bitwise at M = 8"
+  chk "$P --route p2p-push --rows 1 --replays 2 --inject skip-data --spin 65536" "a skipped data write caught"
+  chk "$P --route p2p-push --rows 1 --replays 2 --inject skip-all --spin 65536" "a dropped write caught"
+  chk "$P --route host-bar --rows 1,8 --rounds 5 --execs 10 --host-mem wc --cpu 43" "host-bar timed + CPU phases"
+  chk "$P --route host-bar --rows 1 --replays 300 --host-mem wc --cpu 43" "host-bar bitwise"
+  chk "$P --route p2p-pull,host-read,host-mbox --rows 1 --calls 4 --replays 2 --spin 8192 --timeout 15 --cpu 43 || true" "the routes that failed on 2026-11-01 (smoke)"
+  idle after
+  grab_all ar '^\| |^## |TIMEOUT' 200
+  finish
+}
+stage r71.step    71 default card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8 and Agnes; the GEMV sum both ways"
+st_r71_step() {
+  chk "build/tools/probe/probe_tp step --model qwen38" "the per-card step, Qwen3.8"
+  chk "build/tools/probe/probe_tp step --model agnes" "the per-card step, Agnes"
+  grab_all step '^\| |^GEMV sum|^## ' 60
+  finish
+}
+stage r71.verdict 71 manual  -    -     r71.ar,r71.step       "spec 17 §9: the GO / NO-GO line by spec 17 §R2.7"
+st_r71_verdict() {
+  say "# derived plain TP decode = the per-card GEMV ratio (r71.step) x the one-card profile's GEMV + head ms + half its attention / gdn_step + its other launches, scaled to the unprofiled step (r68.attrib), + r71.ar's 128 calls at M = 1"
+  say "# GO: (a) bitwise 10^4 replays + stale caught, (b) <= ~4.0 ms a token, (c) >= ~44 t/s; 4-5 ms or 40-44 t/s the operator's call; NO-GO otherwise or below Gen3 x8"
+}
+
+# ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
 rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
 stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"

@@ -548,7 +548,7 @@ prefill gap recorded, not hidden.
 ## 9. P0 verdict
 
 **Qwen3.8 (§R2.7), 2026-11-01 - GO (PROVISIONAL: busy-box timing, to be re-checked on a quiet box).** Record:
-`docs/probe-tp-2026-11-01.md` (its §7 is the re-check set). Every two-card stage held the whole box; the CPU and the host
+`docs/probes/probe-tp-2026-11-01.md` (its §7 is the re-check set). Every two-card stage held the whole box; the CPU and the host
 carried other agents' work.
 
 | condition (§R2.7) | bar | result | |

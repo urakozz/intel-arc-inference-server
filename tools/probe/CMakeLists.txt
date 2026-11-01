@@ -936,7 +936,7 @@ get_property(PCR_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PR
 add_dependencies(probe_chunk_rows ${PCR_PF_KERNELS})
 
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
-# Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probe-tp-<date>.md.
+# Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
 # path binds it. The ptp_gemv_* binaries are today's gemv.cl / gemv_i8w.cl at the PER-CARD TP shapes of
 # spec 17 §R2.5 (tp_shapes.h), each with its one-card production cell's defines (src/kernels/CMakeLists.txt):
