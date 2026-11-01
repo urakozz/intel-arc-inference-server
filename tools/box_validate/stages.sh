@@ -2150,7 +2150,10 @@ st_r28_real() {
   run_tests '^kolibri_snapshot_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_KOLIBRI"
   step_rc $? "b70-serve <kolibri>, --pp 2, auto max_len, seeded sampling"
-  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--max-len 32768' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_KOLIBRI --chat" \
+  # B70_SERVE_WAIT_S: a cold page cache loads Kolibri-1's 42 GB in 168 - 190 s on two cards (r26.real 2026-11-01), past
+  # the 120 s default; B70_SERVE_DECODE_AFTER=1: b70-decode needs both cards too (22.4 GB a card at 32768), so it runs
+  # once b70-serve is gone (r62.chat's arrangement).
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_WAIT_S=900 B70_SERVE_DECODE_AFTER=1 B70_SERVE_ARGS='--max-len 32768' timeout 7200 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_KOLIBRI --chat" \
     "golden_server_test --chat against Kolibri-1"
   grab_all auto 'max_len: auto ->|^split: |pipeline plan at' 6
   grab_all memory '^memory' 4
