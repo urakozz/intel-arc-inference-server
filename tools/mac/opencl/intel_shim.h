@@ -99,6 +99,10 @@ void B70_OVL intel_sub_group_block_write_uc16(__local uchar* p, uchar16 v);
 // one lane's K slice, b = the lane's column, VNNI-packed into int8.
 float8 B70_OVL intel_sub_group_bf16_bf16_matrix_mad_k16(short8 a, int8 b, float8 acc);
 int8 B70_OVL intel_sub_group_i8_i8_matrix_mad_k32(short8 a, int8 b, int8 acc);
+// The mixed 4-bit x 8-bit k32 forms (both built on bmg-g31 by tools/probe/probe_dpas_rate.cl's
+// pdr_i8i4 / pdr_i4i8 and by probe_w4a8.cl; used by tools/probe/probe_small_m.cl, spec 28a).
+int8 B70_OVL intel_sub_group_i8_i4_matrix_mad_k32(short8 a, int4 b, int8 acc);
+int8 B70_OVL intel_sub_group_i4_i8_matrix_mad_k32(char8 a, int8 b, int8 acc);
 
 // cl_intel_subgroup_2d_block_io: (surface base, width in bytes, height in rows, pitch in
 // bytes, (x in elements, y in rows), per-lane private destination/source).

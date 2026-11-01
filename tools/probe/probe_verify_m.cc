@@ -24,6 +24,18 @@
 //    an immediate list, median of 5 after a warm-up.
 // 4. Host round trip: execute + fence of a one-noop list; a 4-byte and a 5 MB
 //    device -> host readback on an immediate list; medians of 200 / 200 / 20.
+//
+// `--verify8 1` (spec 28a, plan 28a Task 3) replaces all of the above with the VERIFY lists at
+// M = 1..8: the model loaded with its MTP head and the int8 lm_head, M = 1..4 over the engine's
+// own 4-slot MtpBuffers and M = 5..8 over a probe-owned 8-slot one (probe_mtp_steps' B70_VERIFY_M8
+// arrangement), every list driven as Engine::verify(k) + commit(0) drives its own, with pos
+// rewound to the prefill's end before every call:
+//   1v. the unprofiled verify step at M = 1..8, interleaved pairs against M = 1 (the pair's
+//       order alternating by round), median of --rounds over --replays calls each;
+//   1p. the profiled lists (runtime::build_verify with ProfileEvents): per-family ms at M = 1..8
+//       and the grouping spec 28 §6 needs - int4 GEMV, the int8 head, attention, gdn_step,
+//       everything else - with the non-GEMV share applied to 1v's unprofiled step (the events'
+//       flush per launch inflates the profiled absolutes; shares, not times, carry over).
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -66,6 +78,144 @@ constexpr uint32_t kPrompt[] = {
     49813, 78911, 1141, 20459, 13,    3113,  7840,  279,  2981, 1000, 381,  16850, 1495, 13};
 constexpr size_t kPromptLen = sizeof(kPrompt) / sizeof(kPrompt[0]);
 
+// ---- spec 28a: the verify lists at M = 1..8 (--verify8) ---------------------------------
+int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint32_t replays,
+                uint32_t rounds) {
+  uint32_t max_len = 16384;
+  while (max_len < depth + 1024) max_len *= 2;
+  runtime::Engine e(ctx, loader::load(ctx, path, max_len, /*mtp=*/true, loader::LmHeadForm::Int8), max_len);
+  std::vector<uint32_t> ids(depth);
+  for (uint32_t i = 0; i < depth; ++i) ids[i] = kPrompt[i % kPromptLen];
+  {
+    Timer t; t.start();
+    e.prefill(ids);
+    std::printf("verify8: int8 head, max_len %u, prefill %u ids: %.0f ms, pos %u\n", max_len, depth, t.ms(), e.pos());
+  }
+  runtime::Control* ctl = e.buffers().control.as<runtime::Control>();
+  if (ctl->gdn_live != 0) {
+    std::fprintf(stderr, "gdn_live %u after the prefill, not 0\n", ctl->gdn_live);
+    return 1;
+  }
+  runtime::MtpBuffers* mtp4 = e.mtp_buffers();
+  auto mtp8 = std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(), e.kv_cache(),
+                                                    runtime::MtpDims::kMaxSlots);
+  auto buf_for = [&](uint32_t M) -> runtime::MtpBuffers& { return M <= 4 ? *mtp4 : *mtp8; };
+  std::map<uint32_t, runtime::CapturedStep> lists;
+  for (uint32_t M = 1; M <= 8; ++M)
+    lists.emplace(M, runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M));
+  std::printf("verify lists M = 1..8: %zu launches each (M = 5..8 over a probe-owned %u-slot MtpBuffers, %.2f GB)\n",
+              lists.at(1).kernel_count, mtp8->slots, mtp8->bytes() / 1e9);
+  l0::Queue q(ctx);
+  l0::Fence fence(q);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  const size_t hid = size_t(e.model().desc->hidden) * 2;
+  const uint32_t pos0 = ctl->pos;
+  // One verify(M - 1) + commit(0), pos rewound first: Engine::verify + commit on our list.
+  auto call = [&](l0::CmdList& list, uint32_t M) {
+    runtime::MtpBuffers& mb = buf_for(M);
+    runtime::Control* h = mb.hctl.as<runtime::Control>();
+    ctl->pos = pos0;
+    for (uint32_t r = 1; r < M; ++r) ctl->cur_token[r] = kPrompt[r % kPromptLen];
+    ctl->n_active = M;
+    h->pos = pos0 - 1;
+    h->n_active = M;
+    for (uint32_t r = 0; r < M; ++r) h->cur_token[r] = ctl->cur_token[r];
+    q.execute(list, &fence);
+    fence.wait();
+    imm.copy(mb.hh.ptr(), mb.hh.as<uint8_t>() + hid, hid);
+    ctl->n_active = 1;
+    ctl->cur_token[0] = ctl->out_token[0];
+  };
+  auto arm = [&](uint32_t M, uint32_t n) {
+    double s = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+      Timer t; t.start();
+      call(lists.at(M).list, M);
+      s += t.ms();
+    }
+    return s / n;
+  };
+  for (uint32_t M = 1; M <= 8; ++M) arm(M, 8);   // warm-up
+  std::map<uint32_t, std::vector<double>> ms, ratio, ms1;
+  for (uint32_t r = 0; r < rounds; ++r)
+    for (uint32_t M = 1; M <= 8; ++M) {
+      double t1, tm;
+      if ((r + M) % 2 == 0) { t1 = arm(1, replays); tm = arm(M, replays); }
+      else { tm = arm(M, replays); t1 = arm(1, replays); }
+      ms[M].push_back(tm);
+      ms1[M].push_back(t1);
+      ratio[M].push_back(tm / t1);
+    }
+  std::printf("\n1v. the verify step (unprofiled), interleaved pairs with M = 1, %u calls each, median of %u, "
+              "depth %u:\n| M | ms/step | range | x M=1 (paired median) | ratio range | M=1 ms in the pairs |\n"
+              "|---|---|---|---|---|---|\n", replays, rounds, depth);
+  std::map<uint32_t, double> step;
+  for (uint32_t M = 1; M <= 8; ++M) {
+    auto v = ms[M], rr = ratio[M];
+    std::sort(v.begin(), v.end());
+    std::sort(rr.begin(), rr.end());
+    step[M] = median(ms[M]);
+    std::printf("| %u | %.3f | %.3f-%.3f | %.4f | %.4f-%.4f | %.3f |\n", M, step[M], v.front(), v.back(),
+                median(ratio[M]), rr.front(), rr.back(), median(ms1[M]));
+  }
+  // 1p. the profiled lists, per family
+  std::map<std::string, std::map<uint32_t, double>> fam;
+  std::map<uint32_t, double> tot;
+  for (uint32_t M = 1; M <= 8; ++M) {
+    runtime::ProfileEvents prof(ctx);
+    runtime::CapturedStep instr = runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M, &prof);
+    std::vector<double> acc(instr.kernel_count, 0.0);
+    const uint32_t n = 16;
+    for (uint32_t i = 0; i < n + 4; ++i) {
+      for (l0::Event& ev : prof.events) ev.reset();
+      call(instr.list, M);
+      if (i >= 4)
+        for (size_t k = 0; k < instr.kernel_count; ++k) acc[k] += prof.events[k].duration_us();
+    }
+    for (size_t k = 0; k < instr.kernel_count; ++k) {
+      const std::string& l = instr.labels[k];
+      const size_t a = l.find(' '), z = l.find(' ', a + 1);
+      std::string f = l.substr(a + 1, z - a - 1);
+      // the MTP head's own linears (after the main model, label "--" or its layer) stay apart
+      if (f.rfind("gemv", 0) == 0 && l.find("N248320") == std::string::npos && l.rfind("--", 0) == 0) f += " (head)";
+      fam[f][M] += acc[k] / n / 1e3;
+      tot[M] += acc[k] / n / 1e3;
+    }
+  }
+  auto row = [](const std::string& name, std::map<uint32_t, double>& v) {
+    std::printf("| %s |", name.c_str());
+    for (uint32_t M = 1; M <= 8; ++M) std::printf(" %.3f |", v[M]);
+    std::printf(" %.2f |\n", v[1] > 0 ? v[8] / v[1] : 0.0);
+  };
+  std::printf("\n1p. per kernel family, profiled verify lists (ms/step; events add a flush each - shares, not times):\n"
+              "| family | M=1 | M=2 | M=3 | M=4 | M=5 | M=6 | M=7 | M=8 | M=8 / M=1 |\n|---|---|---|---|---|---|---|---|---|---|\n");
+  std::map<std::string, std::map<uint32_t, double>> grp;
+  for (auto& [f, v] : fam) {
+    row(f, v);
+    const std::string g = f == "gemv"                     ? "int4 GEMV (gemv)"
+                          : f == "gemv_i8w"               ? "int8 head (gemv_i8w)"
+                          : f.rfind("attn", 0) == 0       ? "attention (attn*)"
+                          : f.rfind("gdn_step", 0) == 0   ? "gdn_step"
+                                                          : "everything else";
+    for (uint32_t M = 1; M <= 8; ++M) grp[g][M] += v[M];
+  }
+  row("sum", tot);
+  std::printf("\ngrouped (spec 28 §6), profiled ms/step:\n"
+              "| group | M=1 | M=2 | M=3 | M=4 | M=5 | M=6 | M=7 | M=8 | M=8 / M=1 |\n|---|---|---|---|---|---|---|---|---|---|\n");
+  for (auto& [g, v] : grp) row(g, v);
+  row("sum", tot);
+  std::printf("\nthe non-GEMV share (all but the int4 GEMV and the int8 head) applied to 1v's unprofiled step:\n"
+              "| M | profiled sum | non-GEMV profiled | share | unprofiled step ms | non-GEMV ms (derived) | GEMV ms (derived) |\n"
+              "|---|---|---|---|---|---|---|\n");
+  for (uint32_t M = 1; M <= 8; ++M) {
+    const double gemv = grp["int4 GEMV (gemv)"][M] + grp["int8 head (gemv_i8w)"][M];
+    const double share = tot[M] > 0 ? (tot[M] - gemv) / tot[M] : 0;
+    std::printf("| %u | %.3f | %.3f | %.4f | %.3f | %.3f | %.3f |\n", M, tot[M], tot[M] - gemv, share, step[M],
+                share * step[M], (1 - share) * step[M]);
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -75,7 +225,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::string path = argv[1];
-  uint32_t depth = 4096, replays = 64, rounds = 3, device = 0, max_len = 16384;
+  uint32_t depth = 4096, replays = 64, rounds = 3, device = 0, max_len = 16384, verify8 = 0;
   for (int i = 2; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     const uint32_t v = uint32_t(std::stoul(argv[i + 1]));
@@ -83,11 +233,13 @@ int main(int argc, char** argv) {
     else if (a == "--replays") replays = v;
     else if (a == "--rounds") rounds = v;
     else if (a == "--device") device = v;
+    else if (a == "--verify8") verify8 = v;
     else throw std::runtime_error("unknown flag " + a);
   }
 
   l0::Context ctx(device);
   std::printf("device: %s\n", ctx.name().c_str());
+  if (verify8) return run_verify8(ctx, path, depth, replays, rounds);
   loader::LoadedModel model = loader::load(ctx, path, max_len);
   runtime::Engine eng(ctx, std::move(model), max_len);
   std::vector<uint32_t> ids(depth);

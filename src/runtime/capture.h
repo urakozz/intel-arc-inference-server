@@ -157,8 +157,10 @@ size_t draft_launches(const model::ModelDesc& d);
 // its post-mtp.norm hidden back into dh, logits into MtpBuffers::logits row `i`, the
 // argmax into hctl.out_token[0] AND hctl.cur_token[0], hctl.pos += 1 - so replaying the
 // lists for i = 0, 1, ... chains the drafts.
+// `prof` (spec 28a, probe_verify_m --verify8): per-launch events exactly as build's - an
+// observer only; null (every engine call) appends the identical list it always did.
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                          const MtpBuffers& mtp, uint32_t M);
+                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof = nullptr);
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const MtpBuffers& mtp, uint32_t i);
 
