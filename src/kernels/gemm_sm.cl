@@ -12,7 +12,7 @@
 //                writes out[(s M + m) N + n], the layout prep_res_fold / prep_silu_mul / attn_prep /
 //                gdn_step read.
 //   gemm_sm_i8w  LAYOUT 2: the int8 weights [N/16][K/16][16 k][16 n] + fp32 column scales [N]
-//                (loader/lm_head_int8.h; the lm_head and the DFlash drafter's int8 linears) -
+//                (loader/lm_head_int8.h; the int8 lm_head) -
 //                gemv_i8w.cl's (w, scales, x, out); writes out[m N + n], scaled.
 //
 // Compile-time knobs (src/kernels/CMakeLists.txt, from kernels::small_m_tuning - one row per shape):

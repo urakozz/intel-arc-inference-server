@@ -115,11 +115,11 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // verify-gemm-design.md, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
-enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDrafter8 = 2, kSmDraftHead7 = 3 };
+enum : unsigned char { kSmAll = 0, kSmVerify4 = 1 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
-  unsigned char mset = kSmAll;   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDrafter8: 8; kSmDraftHead7: 7
+  unsigned char mset = kSmAll;   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8 (and Agnes: the same attention and GDN linears)
@@ -128,23 +128,10 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
     {5120, 34816, 8, 0, true, true, false, false},    // gate||up (2x8 work-group: one slice, SiLU at S 1)
     {17408, 5120, 4, 0, false, true, false, true},    // down
-    {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head (and the DFlash draft head, 7 rows)
+    {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head
     // Agnes 3.0 Flash's folded MLP (spec 14; gemv's cells PROVISIONAL there, copied here)
     {5120, 38912, 8, 0, true, true, false, false},    // gate'||up' (2x8 work-group: one slice, SiLU at S 1)
     {19456, 5120, 4, 0, false, true, false, true},    // down'
-    // The DFlash drafter's int8 linears at its block of 8 rows (spec 19b; kernels::dflash) and the
-    // draft vocabularies' compact int8 heads at the draft head's 7 rows - base form, not swept
-    {5120, 6144, 1, 2, false, false, false, false, kSmDrafter8},     // q||k||v
-    {4096, 5120, 1, 2, false, false, false, false, kSmDrafter8},     // o
-    {5120, 34816, 1, 2, false, false, false, false, kSmDrafter8},    // gate||up
-    {17408, 5120, 1, 2, false, false, false, false, kSmDrafter8},    // down
-    {25600, 5120, 1, 2, false, false, false, false, kSmDrafter8},    // fc (5 taps)
-    {5120, 2048, 1, 2, false, false, false, false, kSmDrafter8},     // the context's k||v
-    {5120, 1280, 1, 2, false, false, false, false, kSmDrafter8},     // the conv kernel projections (DFlash 2)
-    {5120, 256, 1, 2, false, false, false, false, kSmDrafter8},      // the selector's projection (DFlash 2)
-    {5120, 32768, 1, 2, false, false, false, false, kSmDraftHead7},  // compact draft heads
-    {5120, 65536, 1, 2, false, false, false, false, kSmDraftHead7},
-    {5120, 131072, 1, 2, false, false, false, false, kSmDraftHead7},
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
     // and the bf16 router stay as they are (spec 28m)
@@ -188,15 +175,11 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }
 // The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
-// together): 2..8 and 16 for Qwen3.8's / Agnes's linears and head; Ornith's at its verify lists' 2..4; the
-// DFlash drafter's linears at its block of 8 rows; the compact draft heads at the draft head's 7 rows.
+// together): 2..8 and 16 for Qwen3.8's / Agnes's linears and head; Ornith's at its verify lists' 2..4. (The DFlash
+// drafter's own int8 linears and its draft head stay on gemv_i8w in 28b: dflash_draft_test holds the drafter
+// bitwise to its host twin of gemv_i8w's order - a follow-on with a restated drafter gate.)
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
-  switch (t.mset) {
-    case kSmVerify4: return {2, 3, 4};
-    case kSmDrafter8: return {8};
-    case kSmDraftHead7: return {7};
-    default: return {2, 3, 4, 5, 6, 7, 8, 16};
-  }
+  return t.mset == kSmVerify4 ? std::vector<unsigned>{2, 3, 4} : std::vector<unsigned>{2, 3, 4, 5, 6, 7, 8, 16};
 }
 inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
 // The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and

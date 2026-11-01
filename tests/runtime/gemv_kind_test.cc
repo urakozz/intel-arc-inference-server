@@ -6,7 +6,7 @@
 //     gemm_sm at M = 2..8, and the shape's S is the one its consumer folds (the S table is one row per shape -
 //     the same at every M, property R's precondition); untuned shapes (Ornith's) keep gemv;
 //   - the override (CaptureOptions::force_linear) forces either kernel at any M;
-//   - the DFlash drafter's name list binds gemm_sm_i8w at its 8 / 7 rows.
+//   - the DFlash drafter's name list stays on gemv_i8w (28b leaves the drafter as it was).
 #include <cstdio>
 #include <string>
 
@@ -94,19 +94,11 @@ int main() {
   // The draft vocabulary's head (M = 1) and the MTP draft (M = 1): gemv_i8w.
   for (unsigned nv : {32768u, 65536u, 131072u})
     CHECK_EQ(kernels::int8_linear_variant(runtime::gemv_kind(1), 1, 5120, nv), kernels::gemv_i8w_variant(1, 5120, nv));
-  // The DFlash drafter: every int8 linear of the lists at 8 rows, the head at 7, on gemm_sm_i8w.
-  size_t drafter = 0;
-  for (bool v2 : {true, false})
-    for (unsigned dv : {0u, 32768u})
-      for (const std::string& v : kernels::dflash::draft_variants(v2, true, true, dv)) {
-        CHECK(v.rfind("gemv_i8w", 0) != 0);
-        if (v.rfind("gemm_sm_i8w", 0) == 0) ++drafter;
-      }
-  CHECK(drafter > 0);
-  for (const std::string& v : kernels::dflash::draft_variants(true, true, true, 0, true))
-    CHECK(v.rfind("gemm_sm", 0) != 0);   // pre28b: today's names
+  // The DFlash drafter stays on gemv_i8w in 28b (its gate holds it bitwise to its host twin).
+  for (const std::string& v : kernels::dflash::draft_variants(true, true, true, 0))
+    CHECK(v.rfind("gemm_sm", 0) != 0);
   std::printf("gemv_kind_test OK: %zu tuned int4 decode linears (Qwen3.8 + Agnes), M = 1 on gemv, M >= 2 on "
-              "gemm_sm, the override, %zu drafter bindings on gemm_sm_i8w\n",
-              tuned, drafter);
+              "gemm_sm, Ornith at M 2..4, the override, the drafter on gemv_i8w\n",
+              tuned);
   return 0;
 }
