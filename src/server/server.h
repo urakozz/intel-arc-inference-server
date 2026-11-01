@@ -69,6 +69,13 @@ struct Options {
   // reused across requests from the common prefix.
   uint32_t lookup_history = 0;
   AdaptiveKOptions lookup_adaptive;
+  // Spec 19f (`--spec dflash-lookup`, spec 19 §13.1): prompt lookup inside DFlash. Each iteration first asks
+  // server::LookupInDFlash (ENTER >= 8 ids beyond the drafter's window, STAY >= 3 kept) over the request's matcher
+  // (indexed as --spec lookup's, lookup_history 0): its drafts, when it has any, are verified at K up to mtp_k() with
+  // the drafter's draft pass skipped; otherwise the iteration is a DFlash one at K from mtp_auto's AdaptiveK (which
+  // only DFlash iterations feed). Through EngineIface::step_drafts_or_many; needs an engine with mtp_k() > 0 and
+  // dflash_window() > 0, and not spec_lookup - the Server constructor refuses anything else. Off: nothing here runs.
+  bool spec_dflash_lookup = false;
 };
 
 class Server {

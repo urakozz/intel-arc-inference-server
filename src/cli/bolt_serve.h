@@ -151,7 +151,7 @@ struct ServeFlags {
 inline void check_serve_flags(const ServeFlags& f) {
   if (f.mtp || f.spec == "mtp")
     throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp / --spec mtp");
-  if (f.spec == "dflash" || f.spec == "lookup")
+  if (f.spec == "dflash" || f.spec == "lookup" || f.spec == "dflash-lookup")
     throw std::runtime_error("--spec " + f.spec + ": Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
   if (f.proposer_tuning)
     throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, --draft-model "

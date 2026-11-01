@@ -51,6 +51,7 @@
 #include "runtime/pipeline_plan.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
+#include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
 #include "server/server.h"
 
 namespace {
@@ -185,7 +186,7 @@ void usage() {
                "                             so --max-len auto reaches about twice the context\n"
                "                             (Qwen3.8: the trained 262144). Accuracy gates on\n"
                "                             the card pending; needs the l0 / l0-int8 backends\n"
-               "                 [--spec off|mtp|lookup|dflash]   the speculative proposer (spec 19\n"
+               "                 [--spec off|mtp|lookup|dflash|dflash-lookup]   the speculative proposer (spec 19\n"
                "                             decision 3; default: --mtp's). mtp = --mtp auto unless\n"
                "                             --mtp is given. lookup (spec 19e) = prompt lookup: the\n"
                "                             drafts are the continuation of the longest earlier match\n"
@@ -208,6 +209,12 @@ void usage() {
                "                             --pp 2 with --pipeline-handoff copy (the drafter on device 1, spec\n"
                "                             19d). Loads no MTP head; the prefix cache keeps its ring.\n"
                "                             UNVALIDATED on the card (queue rows 55 / 56)\n"
+               "                 --spec dflash-lookup (spec 19f): --spec dflash with prompt lookup inside it -\n"
+               "                             a continuation match of >= 8 ids whose source lies beyond the\n"
+               "                             drafter's window (2048) replaces the drafter's draft (K = --spec-max\n"
+               "                             lookup drafts, the drafter's projection kept) while each verify keeps\n"
+               "                             >= 3; DFlash otherwise. One card; flags and refusals as dflash's.\n"
+               "                             Opt-in until queue row 70 measures it\n"
                "                 [--draft-model PATH]   the drafter (default z-lab/Qwen3.8-27B-DFlash2,\n"
                "                             from the HF cache)\n"
                "                 [--draft-format int8|bf16]   the drafter's linears (default int8, at load)\n"
@@ -914,8 +921,10 @@ int run(int argc, char** argv) {
     } else if (arg == "--spec") {
       spec_arg = value(i, "--spec");
       // Spec 19c: `dflash` is Qwen3.8's drafter; every other model refuses it below by name.
-      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash")
-        throw std::runtime_error("--spec expects off, mtp, lookup or dflash, got '" + spec_arg + "'");
+      // Spec 19f: `dflash-lookup` is `dflash` with prompt lookup inside it (its refusals are dflash's).
+      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash" &&
+          spec_arg != "dflash-lookup")
+        throw std::runtime_error("--spec expects off, mtp, lookup, dflash or dflash-lookup, got '" + spec_arg + "'");
     } else if (arg == "--spec-min-match") {
       spec_min_match = parse_u32("--spec-min-match", value(i, "--spec-min-match"));
       if (spec_min_match < 2 || spec_min_match > 64)
@@ -1039,7 +1048,9 @@ int run(int argc, char** argv) {
                              "their snapshot's generation_config.json");
   // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
   const bool spec_lookup = spec_arg == "lookup";
-  dflash.on = spec_arg == "dflash";   // spec 19c
+  const bool dflash_lookup = spec_arg == "dflash-lookup";   // spec 19f: dflash with lookup inside it
+  dflash.on = spec_arg == "dflash" || dflash_lookup;        // spec 19c
+  options.spec_dflash_lookup = dflash_lookup;
   if (spec_arg == "mtp" && !have_mtp_arg) mtp_auto = true;
   if ((spec_arg == "off" || spec_lookup || dflash.on) && have_mtp_arg && (mtp_auto || mtp_k > 0))
     throw std::runtime_error("--spec " + spec_arg + " and --mtp: one proposer per server");
@@ -1054,6 +1065,8 @@ int run(int argc, char** argv) {
   // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
                             pipe.handoff == runtime::PpHandoff::Peer);
+  if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the --pp 2 adapter has none
+    throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --pp 2 serves --spec dflash");
   if (spec_lookup) {
     options.spec_lookup = true;
     options.lookup_min_match = spec_min_match;
@@ -1360,7 +1373,7 @@ int run(int argc, char** argv) {
                  tokenizer.vocab_used());
   TemplateAdapter chat_template(snapshot_dir);
   EngineAdapter engine_adapter(engine, tokenizer.vocab_used(), dflash.on ? dflash.max_k : mtp_k, spec_lookup,
-                               dflash.on);
+                               dflash.on, dflash_lookup);
   options.eos_ids = eos;
   // Sized after the model is loaded, so "available" already excludes the process's own load.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
@@ -1386,6 +1399,12 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, " (plain steps; derived until the box measures them)\n");
+    if (dflash_lookup)   // spec 19f
+      std::fprintf(stderr,
+                   "spec dflash-lookup: prompt lookup inside DFlash - ENTER a match of >= %u ids beyond the drafter's "
+                   "window %u, STAY while a verify keeps >= %u (and a match of >= %u remains), K %u lookup drafts\n",
+                   server::LookupInDFlash::kEnterMatch, drafter->window(), server::LookupInDFlash::kStayAccepted,
+                   server::LookupInDFlash::kStayMatch, dflash.max_k);
   }
 
   return listen_until_stopped(server, options);

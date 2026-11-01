@@ -24,13 +24,16 @@ struct Ref {
 // The definition in prompt_lookup.h, by scanning every earlier end: the longest common
 // suffix with the whole sequence, capped; the most recent on ties; boundaries never match
 // (they are unique ids, so a plain comparison handles them).
-Ref brute(const std::vector<uint32_t>& s, uint32_t n, uint32_t max_match) {
+// `source_before` (spec 19f): only ends whose continuation's source s[e + 1] lies before it.
+Ref brute(const std::vector<uint32_t>& s, uint32_t n, uint32_t max_match,
+          uint32_t source_before = PromptLookup::kNone) {
   Ref r;
   const size_t t = s.size();
   if (t < 2) return r;
   uint32_t best = 0;
   size_t best_e = 0;
   for (size_t e = t - 1; e-- > 0;) {
+    if (e + 1 >= source_before) continue;
     uint32_t m = 0;
     while (m < max_match && m <= e && s[e - m] == s[t - 1 - m]) ++m;
     if (m > best) {
@@ -328,12 +331,75 @@ void cost_262144() {
   }
 }
 
+// Spec 19f (lookup inside DFlash): a match whose source lies before `source_before` only - the
+// uncapped matcher equals the brute force over those ends; a walk that skips the more recent
+// (in-window) candidates does not spend max_steps on them, so a far source behind many near
+// ones is still found.
+void source_window() {
+  std::mt19937_64 g(1919);
+  uint64_t checks = 0;
+  for (uint32_t alphabet : {2u, 3u, 50u}) {
+    for (int rep = 0; rep < 8; ++rep) {
+      std::uniform_int_distribution<uint32_t> tok(0, alphabet - 1);
+      std::vector<uint32_t> s(40 + g() % 200);
+      for (uint32_t& x : s) x = tok(g);
+      const size_t a = g() % 20, len = 10 + g() % 40;   // an echo of an early span
+      for (size_t i = 0; i < len; ++i) s.push_back(s[a + i]);
+      PromptLookup exact(uncapped(64));
+      std::vector<uint32_t> prefix;
+      for (size_t i = 0; i < s.size(); ++i) {
+        exact.append(s[i]);
+        prefix.push_back(s[i]);
+        const uint32_t t = uint32_t(prefix.size());
+        for (uint32_t window : {0u, 1u, 5u, 30u, 100u}) {
+          const uint32_t before = t > window ? t - window : 0;
+          for (uint32_t n : {2u, 8u}) {
+            const Ref want = brute(prefix, n, 64, before);
+            PromptLookup::Match got;
+            const std::vector<uint32_t> d = exact.propose(7, n, &got, before);
+            CHECK_EQ(got.end, want.end);
+            if (got.end != PromptLookup::kNone) {
+              CHECK_EQ(got.length, want.length);
+              CHECK(got.end + 1 < before);
+              CHECK(d == brute_drafts(prefix, got.end, 7));
+            }
+            ++checks;
+          }
+        }
+      }
+    }
+  }
+  // 2000 near copies of a 9-gram (each followed by 50), one far copy followed by 100 101 102:
+  // max_steps 16 still reaches the far one once the near ones are filtered out.
+  PromptLookupOptions o;
+  o.max_steps = 16;
+  o.max_candidates = 4;
+  PromptLookup lk(o);
+  std::vector<uint32_t> s = {1, 2, 3, 4, 5, 6, 7, 8, 9, 100, 101, 102};
+  for (int i = 0; i < 3000; ++i) s.push_back(1000 + uint32_t(i));
+  const uint32_t near_from = uint32_t(s.size());
+  for (int i = 0; i < 2000; ++i)
+    for (uint32_t x : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 50u}) s.push_back(x);
+  for (uint32_t x : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u}) s.push_back(x);
+  lk.append(s);
+  PromptLookup::Match m;
+  const std::vector<uint32_t> near = lk.propose(3, 8);
+  CHECK(!near.empty() && near[0] == 50);   // without the filter: the most recent copy
+  const std::vector<uint32_t> far = lk.propose(3, 8, &m, near_from);
+  CHECK(far == ids({100, 101, 102}));
+  CHECK_EQ(m.end, 8u);
+  CHECK(lk.propose(3, 8, nullptr, 9).empty());   // the far copy's source (9) is not before 9
+  std::printf("source window: %llu checks against brute force; a far copy behind 2000 near ones "
+              "found at max_steps 16\n", static_cast<unsigned long long>(checks));
+}
+
 }  // namespace
 
 int main() {
   edge_cases();
   random_and_repetitive();
   truncate_equals_rebuild();
+  source_window();
   cost_262144();
   std::printf("prompt_lookup_test: ok\n");
   return 0;

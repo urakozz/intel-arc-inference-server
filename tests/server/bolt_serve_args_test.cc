@@ -56,7 +56,7 @@ int main() {
     f.spec = "mtp";
     CHECK(refuses([&] { check_serve_flags(f); }, "no MTP head"));
   }
-  for (const char* spec : {"lookup", "dflash"}) {
+  for (const char* spec : {"lookup", "dflash", "dflash-lookup"}) {   // spec 19f: dflash-lookup
     ServeFlags f;
     f.spec = spec;
     CHECK(refuses([&] { check_serve_flags(f); }, "has no speculative decoding (no MTP head, no drafter)"));

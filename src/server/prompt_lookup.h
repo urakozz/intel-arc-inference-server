@@ -79,10 +79,15 @@ class PromptLookup {
     bool truncated = false;    // a walk stopped at max_candidates or max_steps
   };
   // n in [kMinMatch, max_match]; throws std::invalid_argument otherwise.
-  Match match(uint32_t min_n) const;
+  // `source_before` (spec 19f, lookup inside DFlash): only ends e whose continuation's source
+  // s[e + 1] lies before it (e + 1 < source_before) are candidates - the answer is the
+  // definition above over those ends. The skipped (more recent) ends do not spend
+  // max_candidates / max_steps; they are at most size() - source_before chain steps a level.
+  Match match(uint32_t min_n, uint32_t source_before = kNone) const;
   // Up to max_k drafts continuing the match (fewer only at a boundary); empty when no match
   // reaches min_n or max_k is 0.
-  std::vector<uint32_t> propose(uint32_t max_k, uint32_t min_n, Match* info = nullptr) const;
+  std::vector<uint32_t> propose(uint32_t max_k, uint32_t min_n, Match* info = nullptr,
+                                uint32_t source_before = kNone) const;
 
   size_t size() const { return ids_.size(); }
   const std::vector<uint32_t>& ids() const { return ids_; }
