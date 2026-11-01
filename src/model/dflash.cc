@@ -45,6 +45,17 @@ bool is_dflash_architecture(const std::string& a) {
   return a == "DFlashDraftModel" || a == "DFlash2DraftModel" || a == kLiLiCorrArchitecture;
 }
 
+bool DFlashDesc::all_sliding() const {
+  for (uint32_t w : window)
+    if (w == 0) return false;
+  return !window.empty();
+}
+uint32_t DFlashDesc::max_window() const {
+  uint32_t m = 0;
+  for (uint32_t w : window) m = w > m ? w : m;
+  return m;
+}
+
 namespace {
 // The vLLM forms' body (config_from_dict): DFlash / DFlash 2 - or, `lili` (spec 26b), the LiLiCorr form's backbone, which
 // lilicorr_desc_from_config below has already held to its own refusals (dflash_ref.py lilicorr_config_from_dict reads it
