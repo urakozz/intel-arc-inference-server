@@ -1,6 +1,6 @@
 # Spec 28 - a small-M decode / verify GEMM: M = 1..16 rows, one dequant per weight tile, DPAS
 
-**Status (2026-10-27): DESIGN - nothing built.** First item of the Qwen speed track (operator, 2026-10-27: (1) this
+**Status (2026-11-01): 28a done (§9, provisional); 28b BUILT on branch `spec28b-small-m-build` (§10, busy-box timing; N4 / N6 open for the operator).** (2026-10-27: DESIGN.) First item of the Qwen speed track (operator, 2026-10-27: (1) this
 spec, (2) DFlash on the card + lookup inside DFlash - spec 19 §13, (3) the tensor-parallel probe on Qwen3.8 - spec 17
 §R2, (4) prefill chunk 4096 - plan 5d). Builds follow one plan at a time; the operator is asked before each.
 
@@ -253,3 +253,88 @@ docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they m
 
 **Provisional line: the operator's call** ((b) between 1.4 and 1.6). The GEMM is no longer what holds verify(8) up:
 the M = 8 attention build is (at the M = 1..7 attention slope, ~1.37 plain steps, estimated) - spec 28c.
+
+## 10. 28b as built (2026-11-01, branch `spec28b-small-m-build`)
+
+**Timing grade: busy-box timing on one card per job, to be re-checked on a quiet box** (operator ruling 2026-11-01,
+as 28a): every ratio below is from interleaved lists or pairs after a warm-up; the other card ran other agents' jobs.
+Box row 69 (`tools/box_validate/stages.sh`) carries the re-check (`r69.speed`, `r69.d1`).
+
+**What is built.**
+- `src/kernels/gemm_sm.cl` - 28a's `bf16 wB` stand-in in production form: entries `gemm_sm` (int4 g64, layouts 0 / 1)
+  and `gemm_sm_i8w` (the int8 head), gemv's / gemv_i8w's arguments and output, so a capture site swaps the variant, the
+  entry, the work-group and the grid only. Knobs: grid split-K at the shape's production S, or the 2x8 in-work-group
+  split-K (one slice); shift or magic dequant (bit-identical); 2D block weight reads where gemv's cell has them.
+- `kernels::kSmallMTuning` (src/kernels/kernels.h) - one row per weight shape, every knob in the variant name; the
+  CMake block builds exactly those rows (64 Qwen3.8 + Agnes binaries at M = 2..8 and 16, 15 Ornith at M = 2..4, 14
+  `prep_silu_mul_*_S1` consumers): `tools/kernel_cmdlines` +93 / -0 / ~0 against main (the lever alternates are
+  tools/probe's).
+- `runtime::gemv_kind(M)` (src/runtime/gemv_kind.h; the rule itself in kernels/linear_kind.h): Gemv at M = 1, SmallM at
+  M >= 2, applied in capture.cc's `gemv()` / `gemv_i8w()` helpers - every decode, verify, tap-verify, stage and row
+  list; `CaptureOptions::force_linear` on `build` / `build_verify` / `build_verify_taps` for tests and probes.
+
+**The per-shape choices (the levers, measured at every M - `probe_small_m prod`):**
+
+| shape | row | why (ratio against the alternative, M = 2 / 4 / 8 / 16) |
+|---|---|---|
+| qkv‖z 5120x16384 S1 L1 | magic | 256 GRF: +0.6 / -0.3 / 0.0 / -3 % against magic alone - dropped (no list binds 16) |
+| out_proj / o_proj, q‖k‖v, down | magic, 2D block reads (gemv's cells) | magic 1-3 % at every M |
+| gate‖up 5120x34816 | **2x8 work-group + magic, ONE slice** | 0.995 / 0.975 / 0.932 / 0.883 against grid S8 + magic: >= 5 % at M = 8 (§2's rule), so the SiLU binds its `_S1` build (`kernels::gemm_sm_silu_variant`) |
+| Agnes gate'‖up' 5120x38912 | 2x8 + magic, one slice | 0.991 / 0.976 / 0.939 (M 2 / 4 / 8) - the same rule |
+| Agnes down' 19456x5120 | magic, 2D block reads | - |
+| int8 lm_head 5120x248320 | 2x8 work-group | 0.90 / 0.95 / 0.95 / 0.89 against the grid form |
+| Ornith qkv‖z / out_proj / q‖k‖v / a‖b / int8 head | magic (int4), base (head); M = 2..4 | the operator's addition (2026-11-01, spec 28m's review); not swept |
+
+The token's GEMM sum on these rows: 0.987 / 1.011 / 1.029 / 1.147 x gemv's M = 1 sum at M = 2 / 4 / 8 / 16 (28a's
+stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
+
+**Gates.**
+- **N1: PASS.** cmdlines +93 / -0 / ~0; `g0.sha` 1548 identical, 50 that differ only by the tree's path, 0 removed;
+  `g0.bitwise` 11 / 11 gates identical line for line against main's build (ac98878).
+- **N2 / N3: PASS** (`gemm_sm_test`, every row at every built M, 1000 trials a row, the output NaN-filled before every
+  run; every column to N = 65536, one column of every work-group above): N2 against fp64 max 0.0048 of the bound,
+  min cosine 1.000000000, against gemv max 0.0059; property R 0 differing rows. The lever alternates too (28 rows).
+- **N4 / N5 / N6: see "Open" below** - the verify rows are no longer bitwise M = 1, and the bars as written are not met
+  everywhere.
+- **N8:** replay (`mtp_verify_test` RF5, `mtp_gpu_test` M5 / M4) bitwise.
+
+**Speed.**
+- **S2 (verify(M) in plain steps, depth 4096, int8 head):** `probe_verify_m --verify8` (5 rounds, interleaved):
+  1.039 / 1.090 / 1.135 / 1.183 / 1.297 / 1.359 / **1.570** at M = 2..8, the same lists forced onto gemv in the same
+  session 1.157 / 1.513 / 1.715 / 2.005 / 2.368 / 2.633 / 3.170; `probe_mtp_steps` pairs 1.037 / 1.086 / 1.131 / 1.181
+  / 1.300 / 1.352 / 1.562. **verify(8) <= 1.4: MISSED (1.56-1.57)** - the GEMV part of the M = 8 step is now flat
+  (29.5 ms derived against 29.4 at M = 1); the rest is the M = 8 attention build (11.9 ms profiled, 0.9 at M = 1) -
+  spec 28c. M = 1 within noise (1.001). Depth 32768: 1.099 / 1.208 / 1.309 / 1.701 / 2.257 / 2.541 / 2.909 (gemv
+  forced 4.29 at 8).
+- **S3: PASS.** `mtp_gpu_test --bench K` (mtp_d1.sh's arms, bf16 head, depth 4096, 3 rounds), main's build and this
+  one interleaved: tool-call geomean at K = 3 **2.121x** against main's 1.643x in the same session (+29 %; the
+  recorded 1.633x: +30 %); golden 1.549x against 1.228x (prose 1.343x against 1.027x).
+- **The cost table (Task 4):** MtpCost's verify rows are the measured 1.00 / 1.04 / 1.09 / 1.13 (both head forms) and
+  `MtpCost::dflash` 1.18 / 1.30 / 1.35 / 1.56 at M = 5..8 (no more +0.22 a row). AdaptiveK now picks K = 2 in a band
+  and DFlash's K = 7 only above alpha ~0.99.
+
+**Deviations (each with its cost if wrong).**
+- Variant names always carry `_S<S>_L<L>` plus the knob tags - a table / CMake disagreement is a missing file at
+  capture (a rename).
+- gate‖up's (and Agnes's) 2x8 row changes the SiLU consumer's S to 1 (§2's rule) - `capture.cc mlp()` binds
+  `prep_silu_mul_M<M>[_I19456]_S1` (if wrong: a wrong fold; held by the gates and by gemm_sm_names_test).
+- **The DFlash drafter stays on gemv_i8w** (planned: gemm_sm_i8w at its 8 / 7 rows): `dflash_draft_test` holds the
+  drafter bitwise to a host twin of gemv_i8w's order; the drafter only proposes. Cost: ~0.03 plain steps a DFlash
+  iteration until a follow-on restates that gate.
+- Ornith's dense projections added (operator); K2 nothing (no M >= 2 list); Flash-Next's own capture binds gemv
+  directly - a follow-on.
+- The MTP / DFlash rejected-draft checks (mtp_verify_test M2b, dflash_engine_test P) compare against "a run that never
+  saw the rejected drafts" = the same verify(k) with true drafts (bitwise, N3), the plain run under the tie rule.
+
+**Open (the operator's).**
+1. **N4 / N6 as written are not met.** The verify rows against M = 1: logits cosine 0.99995-0.99998 typically, down to
+   **0.99990** (dflash_engine_test D3, row 5); DFlash taps down to 0.99979; GDN slots >= 0.9999997. Greedy against
+   `--spec off` (golden + 36 A4, 256 ids): mtp_gpu_test M3 **27 divergences the 1-ulp golden tie rule does not class as
+   near-ties, 30 it does** (39 prompts x 3 K; the same position at every K); dflash_gpu_test D2 24 / 30. gemm_sm is
+   closer to fp64 than gemv (N2: 0.0125 against gemv's 0.0259 of the bound on real rows, 28a), so this is the two
+   roundings' distance amplified over 64 layers, not a kernel error - but the bars bind. The divergence diagnostics
+   (the candidate's rank and gap in the plain row; M2a's logit max-abs difference in bf16 ulps) are in the rerun's
+   output. Proposed for the ruling: a noise-aware tie (the window = the row pair's own logit difference, as the
+   operator ruled for DFlash's D1 sets on 2026-10-27), or the f32 judge (the MoE gates' form).
+2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
+3. The quiet-box re-check (r69.speed / r69.d1) and the G0 suite (run only for the M >= 2 gate tests so far).

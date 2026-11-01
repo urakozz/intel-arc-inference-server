@@ -148,6 +148,13 @@ a sampled non-MTP run with the same seed (the random draws differ).
   against the M = 1 state after the same token, max abs error recorded,
   cosine >= 0.99999; after a commit with j < k accepted, 64 further M = 1
   greedy tokens equal those of a run that never saw the rejected drafts.
+  *Spec 28b (2026-11-01):* the verify rows run gemm_sm from then on and are no
+  longer bitwise M = 1 (spec 8b measured bitwise because the GEMV was per-row);
+  the bars above are unchanged. "A run that never saw the rejected drafts" is
+  the same verify(k) with true drafts and commit(j) (bitwise, spec 28 N3); the
+  plain M = 1 run is graded by the golden tie rule. Measured: logits cosine
+  0.99997-0.99998 at M = 2..4; the continuation's divergences from the plain
+  run and the greedy census are in spec 28 §10 ("Open").
 - **M3, greedy is lossless.** Greedy with MTP against greedy without, 256
   tokens on the golden prompts and on the A4 tool-call set: identical where
   no near-tie separates them; divergences only at near-ties under the golden

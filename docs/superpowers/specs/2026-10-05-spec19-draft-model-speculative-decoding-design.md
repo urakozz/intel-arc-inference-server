@@ -595,6 +595,12 @@ bitwise M = 1's (DPAS accumulation order). D3 ("M = 5..8 verify rows bitwise M =
 M = 2..8** (logits and GDN slots cosine >= 0.99999 against M = 1, the 64-token continuation after a partial commit)
 **plus property R** (each row bitwise across every M >= 2 and whatever the other rows hold). D2 (greedy lossless, zero
 non-tie divergences under the golden tie rule) is unchanged and is what carries the user-visible guarantee.
+**As built (plan 28b, 2026-11-01, busy-box run):** the verify lists bind gemm_sm; the DFlash drafter's own lists stay
+on gemv_i8w (its gate holds it to a host twin of gemv_i8w's order - a follow-on). Measured against the bars above:
+D3 logits cosine 0.99995-0.99998, one row 0.99990 (below N4's 0.99999), taps down to 0.99979, GDN slots >= 0.9999997;
+D2 24 divergences the 1-ulp tie rule does not class as near-ties (30 it does) over the golden + A4 prompts - the
+operator's ruling is pending (spec 28 §10, "Open"). `MtpCost::dflash`'s verify rows are measured: 1.18 / 1.30 / 1.35 /
+1.56 at M = 5..8.
 
 ### 13.1 Prompt lookup inside DFlash (an opt-in mode, measured against plain DFlash)
 

@@ -736,6 +736,23 @@ round, so the spread in each cell is timing only.
 - **Draft step cost:** 0.185 plain steps.
 - Full detail: `docs/probe-mtp-2026-09-27.md` §2, §3 and §6.
 
+### The verify step on gemm_sm (spec 28b, 2026-11-01 - busy-box timing on one card, to be re-checked on a quiet box)
+
+Every M >= 2 decode list binds the small-M DPAS GEMM (`gemm_sm`, spec 28 §10); M = 1 keeps gemv, bit for bit.
+verify(M) in plain steps, int8 head, depth 4096 (`probe_verify_m --verify8`, 5 rounds interleaved; the same lists
+forced onto gemv in the same session):
+
+| M | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gemm_sm (28b) | 1.039 | 1.090 | 1.135 | 1.183 | 1.297 | 1.359 | 1.570 |
+| gemv (before) | 1.157 | 1.513 | 1.715 | 2.005 | 2.368 | 2.633 | 3.170 |
+| depth 32768, gemm_sm | 1.099 | 1.208 | 1.309 | 1.701 | 2.257 | 2.541 | 2.909 |
+
+`probe_mtp_steps` pairs (int8): 1.037 / 1.086 / 1.131 / 1.181 / 1.300 / 1.352 / 1.562; bf16 head 1.044 / 1.094 /
+1.134 (M 2..4). These are MtpCost's verify rows now. The M = 8 step is the attention build's (spec 28c), the GEMV
+part is flat. **D1 at K = 3 on the same day** (mtp_d1.sh's arms, bf16 head, 4096, main's build interleaved):
+tool-call geomean **2.121x** (main 1.643x), golden 1.549x (main 1.228x); tool calls ~66 t/s against ~52.
+
 ### Acceptance in the server (M3 run, 256 greedy ids, 39 prompts)
 
 These come from `mtp_gpu_test`, using the engine's head over its own greedy

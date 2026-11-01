@@ -3,7 +3,7 @@
 **Conditions:** this plan starts only when **spec 28 §9 records GO** (plan 28a on the box) **and the operator says
 go** (one implementing plan at a time).
 
-**Status (2026-10-27): PLANNED - after 28a's GO.** Nothing built. Box queue row **69** (spec 28's header lists the
+**Status (2026-11-01): BUILT** (branch `spec28b-small-m-build`; spec 28 §10 is the as-built record - busy-box timing, N4 / N6 open for the operator). (2026-10-27: PLANNED.) Box queue row **69** (spec 28's header lists the
 track's rows 68-75).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
