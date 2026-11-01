@@ -9,8 +9,8 @@
 12 agentic-coding conversations built from this repository's own files (no external data), 3 kinds at each of
 the depths 8k / 32k / 64k / 99k of prompt ids, each ending where the assistant's next turn re-emits text that lies
 FAR back in the context - beyond the DFlash drafter's 2048-id window, where only prompt lookup can see it:
-  reemit  the user asked to read a file (the read's result is the source), more files were read after it, and the
-          last turn asks to apply a rename across the file and output the whole file;
+  reemit  the first 120 lines of a file printed verbatim by a bash sed (the source), more files were read after it,
+          and the last turn asks to apply a rename across those lines and output them;
   rename  a function was shown by a read (the source), more files were read, and the last turn asks for the
           function back with one local renamed;
   quote   a grep's output (the source), more files were read, and the last turn asks to quote that output back
@@ -61,9 +61,9 @@ FILLER = [
 ]
 
 USER = {
-    "reemit_read": "Read {path}.",
-    "reemit_ask": ("In {path}, rename `{old}` to `{new}` everywhere (the definition and every use) and output the "
-                   "whole file with the change, nothing else."),
+    "reemit_read": "Print the first {n} lines of {path}.",
+    "reemit_ask": ("In those first lines of {path}, rename `{old}` to `{new}` everywhere (the definition and every "
+                   "use) and output the lines with the change, nothing else."),
     "rename_read": "Show me `{fn}` in {path}.",
     "rename_ask": ("Rename the local `{local}` to `{local}_v` in `{fn}` ({path}) and print the whole function "
                    "with the change, nothing else."),
@@ -108,9 +108,13 @@ class Builder:
         text, path = read_file(rel), f"{ms.WORK}/{rel}"
         funcs = ms.functions(rel, text)
         old = next((n for n, _ in funcs if len(n) >= 5), funcs[0][0])
-        head = [{"role": "user", "content": USER["reemit_read"].format(path=path)},
-                ms.call(1, "read", {"filePath": path, "limit": SOURCE_LINES}),
-                ms.tool(1, ms.read_result(text, 1, SOURCE_LINES))]
+        # the source verbatim (a bash sed of the lines, no line-number prefixes): the copy the last turn asks for is
+        # the text itself, as in the published far-copy measurement
+        shown = "\n".join(text.split("\n")[:SOURCE_LINES])
+        head = [{"role": "user", "content": USER["reemit_read"].format(path=path, n=SOURCE_LINES)},
+                ms.call(1, "bash", {"command": f"sed -n 1,{SOURCE_LINES}p {path}",
+                                    "description": f"Print the first {SOURCE_LINES} lines of {os.path.basename(rel)}"}),
+                ms.tool(1, shown)]
         return head, USER["reemit_ask"].format(path=path, old=old, new=old + "_impl"), [rel]
 
     def rename(self, depth):
