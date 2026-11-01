@@ -126,7 +126,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {17408, 5120, 4, 0, false, true, false, true},    // down
     {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head (and the DFlash draft head, 7 rows)
     // Agnes 3.0 Flash's folded MLP (spec 14; gemv's cells PROVISIONAL there, copied here)
-    {5120, 38912, 8, 0, false, true, false, false},   // gate'||up'
+    {5120, 38912, 8, 0, true, true, false, false},    // gate'||up' (2x8 work-group: one slice, SiLU at S 1)
     {19456, 5120, 4, 0, false, true, false, true},    // down'
     // The DFlash drafter's int8 linears at its block of 8 rows (spec 19b; kernels::dflash) and the
     // draft vocabularies' compact int8 heads at the draft head's 7 rows - base form, not swept
@@ -156,8 +156,8 @@ inline constexpr unsigned gemm_sm_cols(const SmallMTuning& t) { return t.wg ? 32
 inline constexpr unsigned gemm_sm_grid_y(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
 inline constexpr bool small_m_table_ok() {
   for (const SmallMTuning& t : kSmallMTuning) {
-    // wg writes one slice: only where gemv's S is 1, or gate||up (its SiLU consumer has an _S1 build)
-    if (t.wg && t.S != 1 && !(t.layout == 0 && t.N == 2 * 17408 && t.K == 5120)) return false;
+    // wg writes one slice: only where gemv's S is 1, or a gate||up (Qwen3.8's, Agnes's: the SiLU has an _S1 build)
+    if (t.wg && t.S != 1 && !(t.layout == 0 && t.K == 5120 && (t.N == 2 * 17408 || t.N == 2 * 19456))) return false;
     if (t.layout == 2 && (t.S != 1 || t.magic || t.blk2d)) return false;
     if (t.blk2d && t.layout != 0) return false;
     if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
@@ -316,7 +316,7 @@ inline std::string prep_silu_mul_s1_variant(unsigned M, unsigned I) {
   return prep_silu_mul_variant(M, I) + "_S1";
 }
 // Spec 28b: the SiLU a decode list binds after gate||up, by the slices gate||up wrote - gemv's S (SILU_S baked,
-// the plain build) or 1 (gemm_sm's 2x8 work-group, the _S1 build; built at M 2..8 for I 17408).
+// the plain build) or 1 (gemm_sm's 2x8 work-group, the _S1 build; built at M 2..8 for I 17408 and Agnes's 19456).
 inline std::string gemm_sm_silu_variant(unsigned M, unsigned I, unsigned gate_up_s, unsigned gemv_s) {
   return gate_up_s == gemv_s ? prep_silu_mul_variant(M, I) : prep_silu_mul_s1_variant(M, I);
 }
