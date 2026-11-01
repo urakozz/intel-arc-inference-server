@@ -12,7 +12,7 @@
 //                 [--rows 1,8] [--calls N] [--rounds 5] [--execs 20] [--replays N] [--inject skip-data|skip-all]
 //                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4] [--flag plain|atomic]
 //                 [--host-mem uncached|cached|wc] [--dev-mem cached|uncached] [--send kernel|copy]
-//                 [--spin N] [--cpu-spin N]
+//                 [--spin N] [--cpu-spin N] [--barrier]
 //                                                    the all-reduce (fold-then-send) inside one replayed list per card:
 //                                                    `calls` calls a list (default: the model's all-reduces a token,
 //                                                    128 / 144), each call tp_send + tp_wait; timed against the same
@@ -157,6 +157,7 @@ struct Opts {
   uint32_t cpu_spin = 1u << 24;  // the CPU-sum thread's bound (its loads are ~0.1 us; it must outwait list start-up)
   std::string host_mem = "uncached", dev_mem = "cached";
   bool send_copy = false;
+  bool barrier = false;        // a zeCommandListAppendBarrier after every tp_send (and its copies)
   uint32_t flag_mode = 1;      // 0: system-scope atomic store; 1: plain store + release fence (probe_tp.cl tp_publish)
   std::string inject = "none";
   uint32_t inject_at = 0;
@@ -694,8 +695,10 @@ Lists build_lists(Card& card, ArSetup& a, int rank, uint32_t calls, const Opts& 
       l.cross->copy(mb + L.trailer(slot, 0) * 4, st + L.trailer(slot, 0) * 4, size_t(G) * 4);
       l.cross->copy(mb + L.flag(slot, 0) * 4, st + L.flag(slot, 0) * 4, size_t(G) * tpp::kFlagStride * 4);
     }
+    if (o.barrier) l.cross->barrier_signal(nullptr);   // --barrier: a list barrier after the send (both lists)
     l.cross->launch(*l.wait, G);
     l.ctl->launch(*l.csend, G);
+    if (o.barrier) l.ctl->barrier_signal(nullptr);
     l.ctl->launch(*l.cwait, G);
   }
   l.cross->close();
@@ -707,6 +710,10 @@ Lists build_lists(Card& card, ArSetup& a, int rank, uint32_t calls, const Opts& 
 struct CpuRun {
   uint32_t state[tpp::kStateWords] = {};
   double cpu_s = 0, wall_s = 0;
+  // per call (chunk 0's flags): from the previous call's last write to the first card's flag, from there to the
+  // second card's, and from there to the call's last BAR / host write; how often card 0's flag came first
+  std::vector<double> wait_first, gap_second, sum_write;
+  uint64_t card0_first = 0;
 };
 void cpu_sum_loop(ArSetup& a, uint64_t calls, uint32_t spin, int core, CpuRun& out) {
   pin_to_core(core);
@@ -716,10 +723,37 @@ void cpu_sum_loop(ArSetup& a, uint64_t calls, uint32_t spin, int core, CpuRun& o
   const uint32_t* mb1 = a.mbox[1]->as<uint32_t>();
   const double c0 = thread_cpu_s();
   const auto t0 = Clock::now();
-  for (uint64_t n = 1; n <= calls; ++n)
+  out.wait_first.reserve(calls);
+  out.gap_second.reserve(calls);
+  out.sum_write.reserve(calls);
+  auto prev = Clock::now();
+  for (uint64_t n = 1; n <= calls; ++n) {
+    // observe chunk 0's two flags first (bounded like the step itself), then run the protocol step
+    const uint32_t want = ctr[0] + 1u;
+    const size_t f = L.flag(tpp::slot_of(want), 0);
+    bool s0 = false, s1 = false;
+    Clock::time_point t1{}, t2{};
+    for (uint32_t k = 0; k < spin && !(s0 && s1); ++k) {
+      if (!s0 && tpp::load_acq(mb0 + f) == want) {
+        s0 = true;
+        if (!s1) { t1 = Clock::now(); ++out.card0_first; } else t2 = Clock::now();
+      }
+      if (!s1 && tpp::load_acq(mb1 + f) == want) {
+        s1 = true;
+        if (!s0) t1 = Clock::now(); else t2 = Clock::now();
+      }
+    }
     for (uint32_t j = 0; j < L.chunks(); ++j)
       tpp::cpu_sum_chunk(mb0, mb1, a.cpu_dst, a.cpu_ndst, L, j, ctr[j], spin, out.state, scratch.data(),
                          cpu_store_fence);
+    const auto t3 = Clock::now();
+    if (s0 && s1) {
+      out.wait_first.push_back(std::chrono::duration<double, std::micro>(t1 - prev).count());
+      out.gap_second.push_back(std::chrono::duration<double, std::micro>(t2 - t1).count());
+      out.sum_write.push_back(std::chrono::duration<double, std::micro>(t3 - t2).count());
+    }
+    prev = t3;
+  }
   out.cpu_s = thread_cpu_s() - c0;
   out.wall_s = us_since(t0) * 1e-6;
 }
@@ -784,9 +818,9 @@ int run_ar(const Opts& o) {
   const bool check = o.replays > 0 || inj != tpp::kInjNone;
   int failures = 0;
   std::printf("## ar - %s, %u calls a list (the model's all-reduces a token: %u), %u B a row, chunk %u words, S %u, "
-              "flag %s, host memory %s, P2P buffers %s, send %s\n\n",
+              "flag %s, host memory %s, P2P buffers %s, send %s%s\n\n",
               d.name.c_str(), calls, sh.calls, sh.row_bytes, o.chunk, o.S, o.flag_mode ? "plain" : "atomic",
-              o.host_mem.c_str(), o.dev_mem.c_str(), o.send_copy ? "copy" : "kernel");
+              o.host_mem.c_str(), o.dev_mem.c_str(), o.send_copy ? "copy" : "kernel", o.barrier ? ", barrier" : "");
   if (check)
     std::printf("| route | rows | lists replayed | calls checked | card 0 | card 1 | CPU | hashes equal | verdict |\n"
                 "|---|---|---|---|---|---|---|---|---|\n");
@@ -835,7 +869,8 @@ int run_ar(const Opts& o) {
       }
       // timed: warm-up, then interleaved pairs (order alternating), median of rounds
       std::vector<double> ctl, crs, per;
-      double cpu_busy = 0;
+      double cpu_busy = 0, ph_c0 = 0;
+      std::vector<double> ph_wait, ph_gap, ph_write;
       bool bad = false;
       std::string why;
       for (uint32_t w = 0; w < 2; ++w) {
@@ -862,6 +897,12 @@ int run_ar(const Opts& o) {
                 (a->cpu ? "; cpu " + state_str(cpu.state) : "");
         }
         if (a->cpu && cpu.wall_s > 0) cpu_busy = std::max(cpu_busy, cpu.cpu_s / cpu.wall_s);
+        if (a->cpu && !cpu.wait_first.empty()) {
+          ph_wait.push_back(median(cpu.wait_first));
+          ph_gap.push_back(median(cpu.gap_second));
+          ph_write.push_back(median(cpu.sum_write));
+          ph_c0 = double(cpu.card0_first) / double(cpu.wait_first.size());
+        }
         ctl.push_back(tc);
         crs.push_back(tx);
         per.push_back((tx - tc) / calls);
@@ -873,6 +914,10 @@ int run_ar(const Opts& o) {
       std::printf("| %s | %u | %.1f | %.1f | %.2f (%.2f-%.2f) | %.3f | %s | %s |\n", rn.c_str(), M, median(ctl),
                   median(crs), pc, *std::min_element(per.begin(), per.end()), *std::max_element(per.begin(), per.end()),
                   pc * sh.calls / 1000.0, busy, bad ? why.c_str() : "ok");
+      if (!ph_wait.empty())
+        std::printf("|  | CPU phases a call (median of round medians, us): previous write -> first card's flag %.2f, "
+                    "-> second card's %.2f (card 0 first in %.0f %%), -> last write %.2f |  |  |  |  |  |  |\n",
+                    median(ph_wait), median(ph_gap), 100.0 * ph_c0, median(ph_write));
       std::fflush(stdout);
     }
   }
@@ -1062,6 +1107,7 @@ Opts parse(int argc, char** argv) {
     else if (a == "--shape") { const std::string v = val(); if (v != "all") o.shapes = split(v); }
     else if (a == "--timeout") o.timeout_s = std::stod(val());
     else if (a == "--host-mem") o.host_mem = val();
+    else if (a == "--barrier") o.barrier = true;
     else if (a == "--dev-mem") o.dev_mem = val();
     else if (a == "--send") {
       const std::string v = val();
