@@ -50,7 +50,8 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const runtime::PrefillPath path{
       true, runtime::PrefillBackend::L0,   // the engine's default (drop-sycl-tla)
-      runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed};
+      runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed,
+      runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (B70_PREFILL_CHUNK_CAP)
   loader::DraftVocabSpec dvs;
   if (o.draft_vocab != 0) {
     dvs.size = o.draft_vocab;
@@ -130,7 +131,8 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(b.argmax_part.size(), ds.argmax_part);
   const runtime::PrefillScratch* pf = eng.prefill_scratch();
   CHECK(pf != nullptr);
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(L, d, runtime::PrefillScratchDims::kCDefault);
+  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(L, d, path.chunk_cap);
+  CHECK_EQ(pf->chunk_cap(), path.chunk_cap);
   CHECK_EQ(pf->bytes(), s.eager());
   CHECK_EQ(pf->lazy_bytes(), p.prefill_lazy);
   CHECK_EQ(pf->pf_s_bytes(), path.composed_attn ? s.pf_s : size_t{0});
