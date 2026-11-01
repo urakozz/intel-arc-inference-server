@@ -517,9 +517,183 @@ void check_kv_int8() {
     if (r.d == &q) CHECK_EQ(l8, kTrained);
   }
 }
+// Plan 5d: the prefill chunk cap (2048 or 4096) as a session value. Every row of the 4096
+// table recomputed from model::Qwen35 (not doubled - A13's rule); the 2048 table unchanged.
+//
+//   ids          4096 x 4 B                                    =        16,384
+//   resid        4096 x 5120 x 2 B                             =    41,943,040
+//   x            4096 x 17408 x 2 B                            =   142,606,336
+//   partials     4096 x 34816 x 4 B                            =   570,425,344
+//   ab_out       4096 x 128 x 4 B                              =     2,097,152
+//   norm_sumsq   20 x 4096 x 4 B                               =       327,680
+//   gdn_o        4096 x 48 x 128 x 4 B                         =   100,663,296
+//   mixer_out    4096 x 6144 x 2 B                             =    50,331,648
+//   logits       1 x 248320 x 4 B   (last position only)       =       993,280
+//   argmax_part  1 x 243 x 2 x 4 B                             =         1,944
+//   gdn_xb       4096 x 10240 x 2 B                            =    83,886,080
+//   gdn_seed     3 x 10240 x 2 B                               =        61,440
+//   gdn_g        4096 x 48 x 4 B                               =       786,432
+//   gdn_beta     4096 x 48 x 4 B                               =       786,432
+//   gdn_A        (4096 / 64 = 64) x 48 x 64 x 64 x 4 B         =    50,331,648
+//   gdn_A2       same                                          =    50,331,648
+//   gdn_w        4096 x 48 x 128 x 2 B                         =    50,331,648
+//   gdn_u        same                                          =    50,331,648
+//   pf_q         4096 x 24 x 256 x 2 B                         =    50,331,648
+//   pf_attn      same                                          =    50,331,648
+//   pf_o         24 x 4096 x 256 x 4 B                         =   100,663,296
+//   pf_rowsum    24 x 4096 x 4 B                               =       393,216
+//                                                        total = 1,397,972,888
+// Cross-check: the three rows that do not scale (logits, argmax_part, gdn_seed) are
+// 1,056,664 B, so 2 x (699,514,776 - 1,056,664) + 1,056,664 = 1,397,972,888 (+698,458,112).
+void check_chunk_cap() {
+  using D = runtime::PrefillScratchDims;
+  const model::ModelDesc& q = model::qwen38();
+  CHECK_EQ(D::kCDefault, 2048u);
+  CHECK_EQ(D::kCMax, 4096u);
+  const runtime::PrefillScratchSizes s = D::sizes(16384, q, 4096);
+  CHECK_EQ(s.ids, size_t{16384});
+  CHECK_EQ(s.resid, size_t{41943040});
+  CHECK_EQ(s.x, size_t{142606336});
+  CHECK_EQ(s.partials, size_t{570425344});
+  CHECK_EQ(s.ab_out, size_t{2097152});
+  CHECK_EQ(s.norm_sumsq, size_t{327680});
+  CHECK_EQ(s.gdn_o, size_t{100663296});
+  CHECK_EQ(s.mixer_out, size_t{50331648});
+  CHECK_EQ(s.logits, size_t{993280});
+  CHECK_EQ(s.argmax_part, size_t{1944});
+  CHECK_EQ(s.gdn_xb, size_t{83886080});
+  CHECK_EQ(s.gdn_seed, size_t{61440});
+  CHECK_EQ(s.gdn_g, size_t{786432});
+  CHECK_EQ(s.gdn_beta, size_t{786432});
+  CHECK_EQ(s.gdn_A, size_t{50331648});
+  CHECK_EQ(s.gdn_A2, size_t{50331648});
+  CHECK_EQ(s.gdn_w, size_t{50331648});
+  CHECK_EQ(s.gdn_u, size_t{50331648});
+  CHECK_EQ(s.pf_q, size_t{50331648});
+  CHECK_EQ(s.pf_attn, size_t{50331648});
+  CHECK_EQ(s.pf_o, size_t{100663296});
+  CHECK_EQ(s.pf_rowsum, size_t{393216});
+  CHECK_EQ(s.eager(), size_t{1397972888});
+  CHECK_EQ(s.eager() - D::sizes(16384, q, 2048).eager(), size_t{698458112});
+  CHECK_EQ(D::sizes(16384, q, 2048).eager(), size_t{699514776});   // the 2048 table, unchanged
+  CHECK_EQ(s.slab, size_t{35651584});                               // one slab: no row count in it
+  CHECK_EQ(s.pf_s, size_t{2} * 805306368);                          // 6 x 4096 x 16384 x 4 B
+  CHECK_EQ(s.pf_p, size_t{2} * 402653184);
+  // Beside it: MTP's prefill hidden rows (C + 1) x 5120 x 2 B; Int8State's xq C x 17408 and
+  // xs C x 4 (w8 is one slab); DFlash's tap staging C x taps x 5120 x 2 B.
+  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, 4096), size_t{4097} * 5120 * 2);
+  CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, 2048), size_t{2049} * 5120 * 2);
+  CHECK_EQ(runtime::int8_scratch_sizes(17408, 4096).total(), size_t{71303168 + 16384 + 17825792});
+  CHECK_EQ(runtime::int8_scratch_sizes(17408, 2048).total(), size_t{35651584 + 8192 + 17825792});
+  CHECK_EQ(runtime::TapVerifyDims::prefill_taps_bytes(q, 5, 4096), size_t{4096} * 5 * 5120 * 2);
+
+  // Refusals: a cap is 2048 or 4096, and Ornith (pf_moe bakes KC = 2048 into its SLM
+  // sort staging) stays at 2048, refused by name above it.
+  auto throws = [](auto&& f, const char* needle) {
+    try {
+      f();
+    } catch (const std::invalid_argument& e) {
+      if (needle && std::string(e.what()).find(needle) == std::string::npos) {
+        std::printf("message '%s' lacks '%s'\n", e.what(), needle);
+        return false;
+      }
+      return true;
+    }
+    return false;
+  };
+  for (uint32_t bad : {0u, 1024u, 3072u, 8192u})
+    CHECK(throws([&] { D::sizes(16384, q, bad); }, nullptr));
+  const model::ModelDesc& o = model::ornith();
+  CHECK(throws([&] { D::sizes(16384, o, 4096); }, "pf_moe"));
+  CHECK(throws([&] { runtime::check_prefill_chunk_cap(o, 4096); }, o.name.c_str()));
+  runtime::check_prefill_chunk_cap(o, 2048);
+  runtime::check_prefill_chunk_cap(q, 4096);
+  runtime::check_prefill_chunk_cap(model::agnes(), 4096);
+  // A --prefill-chunk width to the cap it needs: 0 = none asked; up to 2048 -> 2048; up to
+  // 4096 -> 4096; above, and Ornith above 2048, refused.
+  CHECK_EQ(runtime::prefill_chunk_cap_for(0, q), 0u);
+  CHECK_EQ(runtime::prefill_chunk_cap_for(16, q), 2048u);
+  CHECK_EQ(runtime::prefill_chunk_cap_for(2048, q), 2048u);
+  CHECK_EQ(runtime::prefill_chunk_cap_for(2049, q), 4096u);
+  CHECK_EQ(runtime::prefill_chunk_cap_for(4096, q), 4096u);
+  CHECK_EQ(runtime::prefill_chunk_cap_for(2048, o), 2048u);
+  CHECK(throws([&] { runtime::prefill_chunk_cap_for(4097, q); }, "4096"));
+  CHECK(throws([&] { runtime::prefill_chunk_cap_for(4096, o); }, o.name.c_str()));
+  // B70_PREFILL_CHUNK_CAP: the engines' default (as B70_KV_CACHE is the cache form's).
+  unsetenv("B70_PREFILL_CHUNK_CAP");
+  CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
+  setenv("B70_PREFILL_CHUNK_CAP", "4096", 1);
+  CHECK_EQ(runtime::default_prefill_chunk_cap(), 4096u);
+  setenv("B70_PREFILL_CHUNK_CAP", "3000", 1);
+  CHECK(throws([] { runtime::default_prefill_chunk_cap(); }, "B70_PREFILL_CHUNK_CAP"));
+  unsetenv("B70_PREFILL_CHUNK_CAP");
+
+  // The planner's prefill term at both caps: l0-int8 with MTP, one DFlash-sized tap count.
+  const runtime::PrefillPath i8c2{true, PrefillBackend::L0Int8, false, 2048};
+  const runtime::PrefillPath i8c4{true, PrefillBackend::L0Int8, false, 4096};
+  const size_t w = kQwenInt8Weights + kMtpWeights;
+  const runtime::MemoryPlan p2 = runtime::plan(q, 65536, true, w, i8c2);
+  const runtime::MemoryPlan p4 = runtime::plan(q, 65536, true, w, i8c4);
+  CHECK_EQ(p4.prefill_scratch - p2.prefill_scratch, size_t{698458112});
+  CHECK_EQ(p4.int8 - p2.int8, size_t{35659776});
+  CHECK_EQ(p4.mtp_hidden - p2.mtp_hidden, size_t{20971520});
+  CHECK_EQ(p4.kv, p2.kv);
+  CHECK_EQ(p4.total() - p2.total(), size_t{698458112 + 35659776 + 20971520});   // ~0.755 GB
+  CHECK_EQ(runtime::plan(q, 65536, true, w).total(), p2.total());               // the default is 2048
+  runtime::DrafterPlan dr;
+  dr.weights = 1;
+  dr.n_taps = 5;
+  CHECK_EQ(runtime::plan(q, 65536, false, kQwenInt8Weights, i8c4, {}, runtime::KvCache::Bf16, dr).drafter_taps -
+               runtime::plan(q, 65536, false, kQwenInt8Weights, i8c2, {}, runtime::KvCache::Bf16, dr).drafter_taps,
+           size_t{104857600});
+
+  // Operator ruling (i), context first: --max-len auto plans at 2048, and 4096 is taken only
+  // when the plan at the session's max_len has room for it anyway.
+  struct Row {
+    const model::ModelDesc* d;
+    bool mtp;
+    size_t w;
+    runtime::KvCache kv;
+    const char* what;
+  };
+  const Row rows[] = {
+      {&q, true, kQwenInt8Weights + kMtpWeights, runtime::KvCache::Bf16, "qwen3.8 + MTP, bf16 KV"},
+      {&q, false, kQwenInt8Weights, runtime::KvCache::Int8, "qwen3.8, int8 KV"},
+      {&q, true, kQwenInt8Weights + kMtpWeights, runtime::KvCache::Int8, "qwen3.8 + MTP, int8 KV"},
+      {&model::agnes(), false, kAgnesInt8Weights, runtime::KvCache::Bf16, "agnes, bf16 KV"},
+      {&model::agnes(), true, kAgnesInt8Weights + kMtpWeights, runtime::KvCache::Int8, "agnes + MTP, int8 KV"},
+      {&o, false, kOrnithInt8Weights, runtime::KvCache::Bf16, "ornith, bf16 KV"},
+  };
+  for (const Row& r : rows)
+    for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8}) {
+      const runtime::PrefillPath path{true, b, false, 2048};
+      const uint32_t L = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, path, {}, r.kv);
+      CHECK(L != 0);
+      const uint32_t cap =
+          runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, L, path, {}, r.kv);
+      runtime::PrefillPath at = path;
+      at.chunk_cap = cap;
+      // Whatever the rule picks, the session's max_len still fits with its reserve.
+      CHECK(runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
+      if (r.d->is_moe()) CHECK_EQ(cap, 2048u);
+      // Below the trained context, auto leaves less than one quantum of slack: 2048.
+      if (L < kTrained) CHECK_EQ(cap, 2048u);
+      // 4096 exactly when its plan fits.
+      at.chunk_cap = 4096;
+      if (!r.d->is_moe())
+        CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
+      std::printf("chunk cap %-26s %-7s auto max_len %6u -> cap %u\n", r.what,
+                  b == PrefillBackend::L0 ? "l0" : "l0-int8", L, cap);
+      // An explicit --max-len well below auto: 4096 (dense models).
+      if (!r.d->is_moe())
+        CHECK_EQ(runtime::prefill_chunk_cap_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, 65536, path, {}, r.kv),
+                 4096u);
+    }
+}
 }  // namespace
 
 int main() {
+  check_chunk_cap();
   check_sizes_qwen38();
   check_sizes_agnes();
   check_sizes_ornith();

@@ -132,14 +132,14 @@
 static void check_prefill_scratch(l0::Context& ctx) {
   // Spec 6: at max_len 131072 no score scratch exists until a composed call asks for it.
   {
-    runtime::PrefillScratch big(ctx, 131072, model::qwen38());
+    runtime::PrefillScratch big(ctx, 131072, model::qwen38(), runtime::PrefillScratch::kCDefault);
     std::printf("prefill scratch @131072: %zu B, lazy %zu B, pf_s %zu B\n", big.bytes(),
                 big.lazy_bytes(), big.pf_s_bytes());
     CHECK_EQ(big.bytes(), size_t{699514776});
     CHECK_EQ(big.lazy_bytes(), size_t{0});
     CHECK_EQ(big.pf_s_bytes(), size_t{0});
   }
-  runtime::PrefillScratch pf(ctx, 16384, model::qwen38());
+  runtime::PrefillScratch pf(ctx, 16384, model::qwen38(), runtime::PrefillScratch::kCDefault);
   std::printf("prefill scratch %zu B (%.3f GB)\n", pf.bytes(), pf.bytes() / 1e9);
   CHECK_EQ(pf.bytes(), size_t{699514776});
   CHECK_EQ(pf.lazy_bytes(), size_t{0});
@@ -155,7 +155,8 @@ static void check_prefill_scratch(l0::Context& ctx) {
   // 17408 x 1024 x 2 B (derived: qwen38().intermediate * 1024 * kBf16, the formula in PrefillScratch::slab_buffer()).
   CHECK_EQ(pf.slab_buffer().size(), size_t{35651584});
   CHECK_EQ(pf.lazy_bytes(), size_t{805306368 + 402653184 + 35651584});
-  CHECK_EQ(runtime::PrefillScratch::kC, 2048u);
+  CHECK_EQ(runtime::PrefillScratch::kCDefault, 2048u);
+  CHECK_EQ(pf.chunk_cap(), 2048u);
   CHECK_EQ(runtime::PrefillScratch::kGdnChunk, 64u);
   CHECK_EQ(pf.s_heads(), 6u);
   CHECK_EQ(pf.max_len, 16384u);
@@ -166,6 +167,18 @@ static void check_prefill_scratch(l0::Context& ctx) {
   // `ids` is the one host-resident field: the host writes C ids per chunk.
   CHECK(pf.ids.kind() == l0::MemKind::Host);
   CHECK(pf.resid.kind() == l0::MemKind::Device);
+  // Plan 5d: the same scratch at a 4096-row chunk cap - memory_plan_test's 4096 table,
+  // every row recomputed (1,397,972,888 B: +698,458,112), against real allocations.
+  {
+    runtime::PrefillScratch pf4(ctx, 16384, model::qwen38(), runtime::PrefillScratch::kCMax);
+    std::printf("prefill scratch at cap 4096: %zu B (%.3f GB)\n", pf4.bytes(), pf4.bytes() / 1e9);
+    CHECK_EQ(pf4.chunk_cap(), 4096u);
+    CHECK_EQ(pf4.bytes(), size_t{1397972888});
+    CHECK_EQ(pf4.partials.size(), size_t{4096} * 34816 * 4);
+    CHECK_EQ(pf4.gdn_A.size(), size_t{64} * 48 * 64 * 64 * 4);
+    CHECK_EQ(pf4.slab_buffer().size(), size_t{35651584});
+    CHECK_EQ(pf4.pf_s_buffer().size(), size_t{2} * 805306368);
+  }
 }
 
 int main() {
