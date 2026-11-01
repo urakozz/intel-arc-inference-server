@@ -100,6 +100,12 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
   require(s.max_len % 256 == 0, "the L0 backend needs max_len % 256 == 0 (spec 2.1 §3.1)");
   const uint32_t ld = s.max_len;                       // pf_s / pf_p row pitch
   const size_t stride_l = size_t(rows) * ld;           // one head slot of pf_s / pf_p
+  // pf_softmax_causal takes the head-slot stride as a uint32 argument (below): a chunk of
+  // `rows` rows at this max_len must keep it under 2^32 elements, or the softmax would
+  // index a wrapped stride. The composed path is diagnostic only; refuse, don't wrap.
+  require(stride_l <= UINT32_MAX, "the pf_s / pf_p head stride rows x max_len = " + std::to_string(rows) +
+                                      " x " + std::to_string(ld) + " = " + std::to_string(stride_l) +
+                                      " exceeds the softmax's uint32 argument; use a smaller chunk or max_len");
   const size_t stride_h = size_t(rows) * kHeadDim;     // one q-head of pf_o
   // Spec 6: the score scratch is lazy -- allocated here, on the first composed call.
   l0::Mem& pf_s = s.pf_s_buffer();
