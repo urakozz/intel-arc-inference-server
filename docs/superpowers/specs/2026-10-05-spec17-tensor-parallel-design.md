@@ -1,5 +1,6 @@
 # Spec 17 - tensor parallel over two B70s
 
+**Status (2026-11-01): P0 RUN - GO (PROVISIONAL, busy-box timing; §9), plan 17a on branch `spec17a-tp-probe`.**
 **Status (2026-10-27): RETARGETED - Qwen3.8 first (operator, 2026-10-27); third in the Qwen speed track, after spec 28
 (plans 28a / 28b) and spec 19's plan 19f.** Nothing of spec 17 is built; no plan of it has started. **§R2 is the
 2026-10-27 revision**: for Qwen3.8 / Agnes it supersedes §R's ruling, §2's target order, §3's rule and §4.1-§4.2's
@@ -546,7 +547,30 @@ prefill gap recorded, not hidden.
 
 ## 9. P0 verdict
 
-(Empty until 17a runs: the measured link, peer-rate and crossing tables, the MoE balance, the GO / NO-GO line.)
+**Qwen3.8 (§R2.7), 2026-11-01 - GO (PROVISIONAL: busy-box timing, to be re-checked on a quiet box).** Record:
+`docs/probe-tp-2026-11-01.md` (its §7 is the re-check set). Every two-card stage held the whole box; the CPU and the host
+carried other agents' work.
+
+| condition (§R2.7) | bar | result | |
+|---|---|---|---|
+| (a) bitwise on both cards over 10^4 replays, stale / missing writes caught | required | route (P) p2p-push: 1.28 M calls at M = 1 and 128 k at M = 8 bitwise; a skipped data write caught stale, a dropped write a bounded timeout | pass |
+| (b) 128 all-reduces at M = 1, inside replayed lists | <= ~4.0 ms a token | **0.45 ms** (3.51 us a call, measured) | pass |
+| (c) the derived plain TP decode | >= ~44 t/s | **55.3 t/s** (53.1 with the send / wait as separate launches; the per-card GEMVs measured at 0.550 of one card's) | pass |
+| links | >= Gen3 x8 | Gen3 x16 both (measured) | pass |
+
+- **The route: (P) p2p-push** - each card writes its folded fp32 row, a trailer stamp and a flag into the PEER's VRAM;
+  each card polls its own VRAM. The flag is a plain store followed by a system-scope release fence (a system-scope
+  atomic store also works on push but costs 5.1 us a call, and was never seen in pinned host memory).
+- Recorded, not gating: M = 8 costs 23.9 us a call (3.06 ms a token); Agnes 0.51 ms a token at 144 calls; route (H)
+  host-bar works and is bitwise but costs 31.6-52.9 ms a token as built (card 1's writes into pinned host memory arrive
+  ~290 us after card 0's, every call; card 0's half runs at ~8.5 us), one CPU core at 100 %; (H') host-read,
+  host-mbox (cards exchanging through pinned host memory) and p2p-pull **do not work**: a card's poll of memory it does
+  not own (the peer's VRAM, pinned host memory) keeps reading a cached flag. **17b must land every crossing in the
+  reader's own VRAM.**
+- The operator's D1 bars (§R2.8): plain TP 1.62-1.69x one card (derived) against >= 1.35x; `--tp 2 --mtp auto` ~1.6x
+  (estimated) against >= 1.25x - 17b measures both.
+- Not run: the `--under-load` link line, the bar probe on card 0, the per-card step on card 1 and for Agnes (the
+  re-check set lists them).
 
 ---
 

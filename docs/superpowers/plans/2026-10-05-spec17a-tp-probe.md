@@ -1,5 +1,12 @@
 # Spec 17a - tensor parallel P0, Qwen3.8 first: both all-reduce routes (P2P peer writes, host-staged + own BAR), the per-card step, the go / no-go line
 
+**Status (2026-11-01): BUILT AND RUN (busy-box timing) - GO (PROVISIONAL)**, spec 17 §9; record
+`docs/probe-tp-2026-11-01.md` (its §7 is the quiet-box re-check set). Started on the operator's 2026-11-01 parallel-
+development go (the start conditions below naming 28a / 28b / 19f and `r22.devices` / `r22.p1` were lifted). Deviations:
+the step arm times random-weight GEMVs (no checkpoint); M = 8 per-card step not timed (gemm_sm is 28b's); an extra
+route `host-mbox`; the flag publish form and the host / device memory forms became probe options after the first box
+window (record §3.3).
+
 **Status (2026-10-27): PLANNED - Qwen3.8 first (spec 17 §R2); third in the Qwen speed track, next after spec 28
 (plans 28a / 28b) and plan 19f, when the operator says go.** Nothing built. Box queue row **71** (the next free row after
 67 once spec 28 took 68 / 69 and plan 19f 70; spec 28's header lists the track's rows 68-75). The revision below
