@@ -4037,3 +4037,14 @@ target_link_libraries(bolt_sampling_test PRIVATE b70_server)
 add_test(NAME bolt_sampling_test COMMAND bolt_sampling_test)
 set_tests_properties(bolt_sampling_test PROPERTIES LABELS bolt TIMEOUT 600)
 # ==== Spec 25e: Nemotron 3.5 Bolt served (label bolt) ==== (end) ====
+
+# Fix round A: every test executable declared above gets a line-buffered stdout
+# (common/line_buffered_stdout.cc - a static initializer, so no main changes): crash logs
+# keep the phase line printed just before the crash, under any launcher. Keep this last.
+get_property(_b70_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(_t IN LISTS _b70_test_targets)
+  get_target_property(_type ${_t} TYPE)
+  if(_type STREQUAL "EXECUTABLE")
+    target_sources(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common/line_buffered_stdout.cc)
+  endif()
+endforeach()
