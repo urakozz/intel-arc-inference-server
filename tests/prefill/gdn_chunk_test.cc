@@ -403,9 +403,11 @@ int main(int argc, char** argv) {
               std::getenv("B70_PREFILL_GDN_SCAN") && *std::getenv("B70_PREFILL_GDN_SCAN")
                   ? std::getenv("B70_PREFILL_GDN_SCAN") : "(unset)",
               runtime::prefill::gdn_scan_launched_entry());
-  CHECK_EQ(got.launches, 2 * runtime::prefill::kGdnChunkLaunches);
-  std::printf("launches: %zu for 2 chunks (%zu per gdn_chunk, ruling R3's tenth included)\n",
-              got.launches, runtime::prefill::kGdnChunkLaunches);
+  // 2 x 2048 at the default cap, ONE call at cap 4096 (plan 5d).
+  const uint32_t n_calls = (kPositions + kC - 1) / kC;
+  CHECK_EQ(got.launches, n_calls * runtime::prefill::kGdnChunkLaunches);
+  std::printf("launches: %zu for %u chunk(s) of %u (%zu per gdn_chunk, ruling R3's tenth included)\n",
+              got.launches, n_calls, kC, runtime::prefill::kGdnChunkLaunches);
 
   // --- 1. vs the CPU fp32 recurrent reference -------------------------------
   {
