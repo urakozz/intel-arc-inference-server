@@ -312,6 +312,11 @@ add_executable(int4_test kernels/int4_test.cc)
 target_include_directories(int4_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME int4_test COMMAND int4_test)
 
+# Spec 28 (plan 28a): the small-M GEMM's fp64 reference and gemv's fp32 host twin. Host only.
+add_executable(gemm_sm_ref_test kernels/gemm_sm_ref_test.cc)
+target_include_directories(gemm_sm_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+add_test(NAME gemm_sm_ref_test COMMAND gemm_sm_ref_test)
+
 add_executable(gemv_test kernels/gemv_test.cc)
 target_include_directories(gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_test PRIVATE b70_l0)
