@@ -3,6 +3,7 @@
 // Pure functions over logits rows: no device, no Engine, unit-tested by
 // tests/server/spec_accept_test.cc.
 #include <cstdint>
+#include <functional>
 #include <random>
 #include <vector>
 
@@ -116,5 +117,16 @@ float dflash_temperature(const Sampling& s);
 AcceptResult accept_sparse(const float* p_rows /*[k+1][row_stride]*/, const SparseQ* q /*[k]*/,
                            const uint32_t* drafts, uint32_t k, uint32_t vocab_used, size_t row_stride,
                            const Sampling& s, std::mt19937_64& rng);
+
+// Spec 26c: accept_sparse and accept_point_mass with the caller's row filter in place of filter_probs - the filter a
+// model's own sampler applies (Nemotron 3.5 Bolt's cli::bolt::filter_probs_top_p: filter_probs' distribution without the
+// full-vocabulary sort, 17 ms a row at top-k 0). The rule, the RNG order and the throws are the functions above, unchanged;
+// `filter(row)` must return the filtered p of a [vocab] logits row (ids in descending order, probs unnormalised, mass).
+using RowFilter = std::function<FilteredProbs(const float* row)>;
+AcceptResult accept_sparse_rows(const float* p_rows /*[k+1][row_stride]*/, const SparseQ* q /*[k]*/,
+                                const uint32_t* drafts, uint32_t k, size_t row_stride, const RowFilter& filter,
+                                std::mt19937_64& rng);
+AcceptResult accept_point_mass_rows(const float* p_rows /*[k+1][row_stride]*/, const uint32_t* drafts, uint32_t k,
+                                    size_t row_stride, const RowFilter& filter, std::mt19937_64& rng);
 
 }  // namespace server

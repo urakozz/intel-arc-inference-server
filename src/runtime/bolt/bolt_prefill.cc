@@ -45,8 +45,10 @@ uint8_t* at(const l0::Mem& m, size_t off) { return static_cast<uint8_t*>(m.ptr()
 class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, BoltPrefillScratch& s, const loader::BoltDevicePart& part,
-       const model::BoltDesc& d, BoltBuffers& b, uint32_t pos, uint32_t C, bool eager, PrefillResid in, l0::Mem* tap)
-      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), r_(in), tap_(tap) {}
+       const model::BoltDesc& d, BoltBuffers& b, uint32_t pos, uint32_t C, bool eager, PrefillResid in, l0::Mem* tap,
+       const PrefillTaps* dtaps)
+      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), r_(in), tap_(tap),
+        dtaps_(dtaps && dtaps->r0 < C ? dtaps : nullptr) {}
 
   PrefillResid run() {
     check();
@@ -56,7 +58,7 @@ class Walk {
              {PtrArg(s_.ids.ptr()), PtrArg(part_.embed_tiles->ptr()), PtrArg(s_.h0.ptr()), arg_val(C_)});
       prefill::profile_wait(cx_, Phase::kNorm);
       r_ = PrefillResid{};
-    } else if (r_.pending && tap_) {
+    } else if (r_.pending && (tap_ || dtaps_)) {
       pending_tap_ = int(part_.first) - 1;   // device 0 could not tap its last block: this device's first fold does
     }
     for (uint32_t l = part_.first; l < part_.end; ++l) block(l);
@@ -89,6 +91,12 @@ class Walk {
             "the prefill scratch is not runtime::bolt::prefill_sizes'");
     if (tap_) require(tap_->size() >= tap_bytes(d_), "the tap is smaller than [layers][hidden] bf16");
     require(r_.cur == 0 || r_.cur == 1, "the residual's buffer is h0 or h1");
+    if (dtaps_) {   // spec 26c: the drafter's tap blocks, and the staging rows they land in
+      require(dtaps_->dst && dtaps_->layers && !dtaps_->layers->empty(), "the drafter's prefill taps without a staging / layers");
+      for (uint32_t t : *dtaps_->layers)
+        require(t + 1 < d_.layers, "the drafter taps block " + std::to_string(t) + ", which no later norm site of the prefill "
+                                       "folds (the head folds the last block's last row only)");
+    }
   }
 
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy, uint32_t gz, std::initializer_list<prefill::KernelArg> args) {
@@ -101,6 +109,16 @@ class Walk {
   void tap_row(uint32_t l) {
     if (!tap_) return;
     cx_.copy(at(*tap_, size_t(l) * d_.hidden * 2), at(s_.h(r_.cur), size_t(C_ - 1) * d_.hidden * 2), size_t(d_.hidden) * 2);
+  }
+  // Spec 26c (Decision 7): rows r0 .. C - 1 of block l's output into the drafter's staging [row - r0][tap][hidden] - one 2D
+  // copy a tap block (device 0's land in device 1's staging: the drafter's device).
+  void stage_taps(uint32_t l) {
+    const std::vector<uint32_t>& tl = *dtaps_->layers;
+    const auto it = std::find(tl.begin(), tl.end(), l);
+    if (it == tl.end()) return;
+    const size_t row = size_t(d_.hidden) * 2, t = size_t(it - tl.begin());
+    cx_.copy_2d(static_cast<uint8_t*>(dtaps_->dst) + t * row, tl.size() * row,
+                at(s_.h(r_.cur), size_t(dtaps_->r0) * row), row, row, C_ - dtaps_->r0);
   }
 
   // nb_res_norm(h_in, slices, slices2, w, h_out, x) at M 2048 - grid (kNormWgs, C): _S1 folds pa's rows (pitch hidden),
@@ -115,10 +133,12 @@ class Walk {
     require(!P || &s_.h(out) != &s_.h(in), "a fold site would rewrite the buffer its work-groups read");
     r_.cur = out;
     r_.pending = 0;
+    const int folded = P ? pending_tap_ : -1;
     if (P && pending_tap_ >= 0) {   // the folded h IS that block's output
       tap_row(uint32_t(pending_tap_));
       pending_tap_ = -1;
     }
+    if (dtaps_ && folded >= 0) stage_taps(uint32_t(folded));   // spec 26c: the drafter's tap blocks
     prefill::profile_wait(cx_, Phase::kNorm);
   }
 
@@ -314,6 +334,7 @@ class Walk {
   const bool eager_;
   PrefillResid r_;
   l0::Mem* tap_;
+  const PrefillTaps* dtaps_;
   int pending_tap_ = -1;
   size_t n_ = 0;
 };
@@ -372,10 +393,10 @@ PrefillResid prefill_resid_out(const model::BoltDesc& d, const model::BoltPlacem
 
 PrefillResid prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, BoltPrefillScratch& s,
                            const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b, uint32_t pos,
-                           uint32_t C, bool eager, PrefillResid in, l0::Mem* tap) {
+                           uint32_t C, bool eager, PrefillResid in, l0::Mem* tap, const PrefillTaps* taps) {
   if (!(in == prefill_resid_in(d, b.placement, part.device)))
     throw std::runtime_error("runtime::bolt::prefill_chunk: the residual handed in is not the placement's");
-  const PrefillResid out = Walk(cx, kc, s, part, d, b, pos, C, eager, in, tap).run();
+  const PrefillResid out = Walk(cx, kc, s, part, d, b, pos, C, eager, in, tap, taps).run();
   if (!(out == prefill_resid_out(d, b.placement, part.device)))
     throw std::runtime_error("runtime::bolt::prefill_chunk: the walk left h elsewhere than prefill_resid_out says");
   return out;

@@ -57,13 +57,23 @@ int main() {
   for (const char* spec : {"lookup", "dflash", "dflash-lookup"}) {   // spec 19f: dflash-lookup
     ServeFlags f;
     f.spec = spec;
-    CHECK(refuses([&] { check_serve_flags(f); }, "has no speculative decoding (no MTP head, no drafter)"));
-    CHECK(refuses([&] { check_serve_flags(f); }, (std::string("--spec ") + spec).c_str()));
+    check_serve_flags(f);
   }
   {
     ServeFlags f;
-    f.proposer_tuning = true;
+    f.proposer_tuning = true;   // --mtp-max / --mtp-cost
     CHECK(refuses([&] { check_serve_flags(f); }, "has none"));
+    f.spec = "dflash";
+    CHECK(refuses([&] { check_serve_flags(f); }, "belong to an MTP head"));
+  }
+  {
+    ServeFlags f;
+    f.lookup_tuning = true;   // --spec-min-match / --spec-history
+    CHECK(refuses([&] { check_serve_flags(f); }, "need --spec lookup"));
+    f.spec = "dflash";
+    CHECK(refuses([&] { check_serve_flags(f); }, "need --spec lookup"));
+    f.spec = "lookup";
+    check_serve_flags(f);
   }
   {
     ServeFlags f;

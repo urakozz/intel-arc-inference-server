@@ -23,6 +23,7 @@
 
 #include "cli/bolt_decode.h"    // spec 25c: is_bolt, check_args, settle
 #include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
+#include "cli/bolt_spec.h"      // spec 26c: --spec dflash / lookup for Bolt (LiLiCorr)
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
 #include "cli/hardware_gate.h"
@@ -369,6 +370,8 @@ struct BoltServe {
   cli::bolt::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
+  cli::bolt::SpecArgs spec_args;                    // spec 26c: --spec dflash / lookup (cli/bolt_spec.h)
+  uint32_t spec_min_match = 3, spec_history = 0;    // spec 26c: --spec lookup's
 };
 
 int serve_bolt(const BoltServe& a, server::Options options) {
@@ -381,6 +384,13 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   const rb::BoltAttn attn = rb::bolt_attn();
   const rb::BoltFuse fuse = rb::bolt_fuse();
   const rb::BoltState state = rb::bolt_state();
+  // Spec 26c: --spec dflash / lookup - the refusals, the verify's MoE form, the drafter's plan terms (its config.json and
+  // safetensors header), all before the device.
+  cli::bolt::SpecArgs sa = a.spec_args;
+  cli::bolt::check_spec(sa, cli::bolt::devices_of(da, pre), da.pipe.handoff, true);
+  const rb::VerifyMoe vmoe = sa.on() ? rb::bolt_verify_moe() : rb::VerifyMoe::Union;
+  cli::bolt::DecodeArgs dplan = da;
+  if (sa.on()) cli::bolt::plan_terms(sa, pre, da.max_len.is_auto ? pre.max_pos : da.max_len.value, dplan);
   // The generation defaults (Decision 12): the snapshot's generation_config.json when it carries sampling keys, else NVIDIA's
   // published values.
   cli::bolt::Generation gen;
@@ -428,7 +438,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
                              "hand-offs write it (docs/10-the-box.md)");
-  const rb::BoltPlan pl = cli::bolt::settle(pre, da, dev);
+  const rb::BoltPlan pl = cli::bolt::settle(pre, dplan, dev);
   loader::BoltLoadOptions lo;
   lo.int8_head = da.int8_head;
   lo.max_len = pl.max_len;
@@ -440,9 +450,38 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   runtime::PipelineOptions opt;
   opt.handoff = da.pipe.handoff;
   rb::BoltEngine engine(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse, state);
+  // Spec 26c: the verify lists (their buffers; the lists on first use) and the drafter, before the adapter: snapshots carry
+  // its ring and anchor.
+  cli::bolt::BoltDrafter drafter;
+  if (sa.on()) engine.enable_spec(vmoe);
+  if (sa.dflash()) {
+    StdoutToStderr redirect;
+    drafter = cli::bolt::attach_drafter(engine, sa, a.snapshot_dir);
+  }
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
-  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(engine, tokenizer.vocab_used());
+  if (sa.dflash()) {   // the server's --mtp auto loop over the drafter's cost table (AdaptiveK, K to --spec-max)
+    options.mtp_auto = true;
+    options.mtp_adaptive.max_k = sa.max_k;
+    options.mtp_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
+    std::fprintf(stderr, "spec dflash: LiLiCorr %s, --draft-format %s (+ the head exact), --draft-q %s, --spec-max %u, the "
+                 "verify's MoE %s (B70_BOLT_VERIFY_MOE), drafter key %016llx, %zu B (%s) + the embedding replica %zu B on device "
+                 "%u - NOT Bolt's default (spec 26 D5: box row 65)\n", sa.draft_model.c_str(), loader::draft_format_name(sa.format),
+                 cli::bolt::bolt_draft_q_name(sa.q), sa.max_k, rb::verify_moe_name(vmoe),
+                 (unsigned long long)engine.drafter_key(), drafter.drafter->bytes(), drafter.drafter->weights().line.c_str(),
+                 drafter.replica->size(), engine.devices() - 1);
+  } else if (sa.lookup()) {
+    options.spec_lookup = true;
+    options.lookup_min_match = a.spec_min_match;
+    options.lookup_history = a.spec_history;
+    options.lookup_adaptive.max_k = sa.max_k;
+    options.lookup_adaptive.cost = cli::bolt::spec_cost(sa, da.int8_head, vmoe);
+    std::fprintf(stderr, "spec lookup: --spec-max %u, the verify's MoE %s (B70_BOLT_VERIFY_MOE)\n", sa.max_k,
+                 rb::verify_moe_name(vmoe));
+  }
+  cli::bolt::BoltEngineAdapterT<rb::BoltEngine> engine_adapter(
+      engine, tokenizer.vocab_used(), sa.on() ? sa.max_k : 0, sa.lookup(),
+      drafter.drafter ? cli::bolt::draft_hooks(engine, *drafter.drafter) : cli::bolt::BoltDraftHooks{}, sa.q);
   options.chat_format = server::ChatFormat::bolt();
   options.eos_ids = gen.eos;
   options.sampling_defaults = gen.sampling;
@@ -873,6 +912,20 @@ int run(int argc, char** argv) {
     ba.layers = 0;              // --layers is Flash-Next's (refused above)
     bs.prefix_auto = prefix_auto;
     bs.prefix_cache_gb = prefix_cache_gb;
+    // Spec 26c: --spec dflash / lookup and the drafter's flags (cli/bolt_spec.h), refused by name before the device.
+    cli::bolt::SpecArgs& sa = bs.spec_args;
+    sa.spec = spec_arg == "dflash" || spec_arg == "lookup" ? spec_arg : "off";
+    if (dflash.have_model) sa.draft_model = dflash.model;
+    sa.have_model = dflash.have_model;
+    sa.format_arg = draft_format_arg;
+    sa.q_arg = draft_q_arg;
+    sa.have_max_k = have_spec_max;
+    if (have_spec_max) sa.max_k = spec_max;
+    sa.cost = spec_cost_arg;
+    sa.draft_vocab = flags.draft_vocab;   // refused above already
+    sa.mtp_tuning = have_mtp_tuning;      // refused above already
+    bs.spec_min_match = spec_min_match;
+    bs.spec_history = spec_history;
     return serve_bolt(bs, options);
   }
 

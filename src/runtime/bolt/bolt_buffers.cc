@@ -95,4 +95,55 @@ void BoltBuffers::zero(l0::CmdList& imm) {
   for (l0::Mem* m : {&control, &kv_k, &kv_v, &conv_ring, &ssm}) imm.fill(m->ptr(), 0u, m->size());
 }
 
+// --- spec 26c: the verify allocations -------------------------------------------------------------------------------
+BoltVerifyBuffers::BoltVerifyBuffers(l0::Context& ctx, const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev,
+                                     uint32_t len, BoltAttn at, BoltState st)
+    : h0(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.h0)),
+      h1(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.h1)),
+      x(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.x)),
+      slices(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.slices)),
+      xc(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.xc)),
+      y(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.y)),
+      g(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.g)),
+      logits_r(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.logits_r)),
+      routes(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.routes)),
+      lat(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.lat)),
+      sh(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.sh)),
+      moe_a(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.moe_a)),
+      moe_r(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.moe_r)),
+      attn_q(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.attn_q)),
+      attn_part(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.attn_part)),
+      attn_out(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.attn_out)),
+      ones(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.ones)),
+      logits(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.logits)),
+      argmax_part(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).scratch.argmax_part)),
+      attn_scores(verify_sizes(d, p, dev, len, at, st).scratch.attn_scores
+                      ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device,
+                                                  verify_sizes(d, p, dev, len, at, st).scratch.attn_scores)
+                      : nullptr),
+      slots(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).slots)),
+      moe_d(dev_mem(ctx, verify_sizes(d, p, dev, len, at, st).moe_d)),
+      desc(d),
+      placement(p),
+      device(dev),
+      max_len(len),
+      attn(at),
+      state(st) {
+  model::validate(p, d);
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  imm.fill(ones.ptr(), 0x3F803F80u, ones.size());   // bf16 1.0 pairs: mg_attn's gate, as the decode scratch's
+}
+
+void* BoltVerifyBuffers::slots_layer(uint32_t layer) const {
+  if (layer < placement.first(device) || layer >= placement.end(device) || !desc.is_mamba(layer))
+    not_here(layer, device, "a Mamba block");
+  return at(slots, size_t(kind_index(desc, placement.first(device), layer)) * kVerifySlots * ssm_layer_bytes(desc, state));
+}
+
+size_t BoltVerifyBuffers::scratch_bytes() const {
+  return h0.size() + h1.size() + x.size() + slices.size() + xc.size() + y.size() + g.size() + logits_r.size() +
+         routes.size() + lat.size() + sh.size() + moe_a.size() + moe_r.size() + attn_q.size() + attn_part.size() +
+         attn_out.size() + ones.size() + logits.size() + argmax_part.size() + (attn_scores ? attn_scores->size() : 0);
+}
+
 }  // namespace runtime::bolt

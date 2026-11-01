@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -74,9 +75,17 @@ PrefillResid prefill_resid_out(const model::BoltDesc& d, const model::BoltPlacem
 // last chunk only): row C - 1 of each block's output into tap row l. Leaves: the K / V rows [pos, pos + C) of the device's
 // attention blocks, the rings' slots of the chunk's last three positions, the SSM states after its last row, the h rows
 // after its last block (the returned PrefillResid), its MoE blocks' route rows of this chunk in s.routes.
+// Spec 26c (`taps`, a drafter's prefill tail - Decision 7): after the fold that produces block l's output (l one of
+// `layers`), rows r0 .. C - 1 are copied into `dst` [row - r0][layers.size()][hidden] bf16 (one 2D copy a tap block, never
+// under a recording); r0 >= C copies nothing.
+struct PrefillTaps {
+  void* dst = nullptr;
+  const std::vector<uint32_t>* layers = nullptr;
+  uint32_t r0 = 0;
+};
 PrefillResid prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, BoltPrefillScratch& s,
                            const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b, uint32_t pos,
-                           uint32_t C, bool eager, PrefillResid in, l0::Mem* tap);
+                           uint32_t C, bool eager, PrefillResid in, l0::Mem* tap, const PrefillTaps* taps = nullptr);
 
 // The tail only the LAST chunk runs, on the last device: decode's nb_res_norm (M 1: _S1 / _S1_T1 folding the last block's
 // GEMM rows of row `last_row`) with norm_f into the decode buffers' h1 / x, the head (int8 or bf16), the two argmax stages -
