@@ -457,3 +457,7 @@ prefill FLOP counts and the template / token facts were re-derived and hold. Wha
     rule needs restating for a full-context drafter. 5d (chunk 4096) is being built and is not a dependency. 29f's acceptance P0 (Task 2) needs none of 28b / 28c / 19f and can run right after 29d.
 12. **Rules.** The prefix-cache restore is now explicitly a one-time copy per request on session resume, never per-token (§4, 29e). 29d's "eager" line
     agrees with 29c's diagnostic `dn_attn_eager`. No new flags or env vars anywhere (all flags cited exist; `--draft-vocab` and `--prefix-cache-gb` are serve-only).
+
+### Operator decisions (2026-11-02)
+Open decision 2 (drafter format): **int8 at load** of the shipped BF16 drafter linears (`--draft-format int8`, as the z-lab
+drafter for Qwen3.8) for the acceptance P0 and the first build; our own AutoRound int4 drafter only if int8 proves short.

@@ -447,3 +447,9 @@ is Ornith's". Corrected:
    "27q parallel with 27b" means overlapping box CPU time, not a second agent. Each plan has objective gates, commit-after-each-step, box stages
    in prose and one agent. "Bolt's 25a was ~3 days" was wrong: git shows 25a-25e's Mac implementation took about a day of agent wall-clock and
    the card fix rounds over a week; the per-plan days are relative sizes (total ~17), and the box is the critical path.
+
+### Operator decisions (2026-11-02)
+D1 own family, D2 generic names / copy-and-adapt / reuse by name, D5 `--pp 2` supported but not the default, D10 27f before 27e:
+**decided as recommended**. D7: **(a)** - the original's sampling defaults (do_sample, T 1.0, top-p 0.95, top-k 20) were added
+to the quant repo's `generation_config.json` on the Hub (urakozz/flint-40B-A2.5B-W4A16-g64-AutoRound-GPTQ commit 76a12a04, stop
+ids unchanged); the server reads them from there. D3 / D4 as decided 2026-11-01. D6, D8, D9 stay measurement-decided.
