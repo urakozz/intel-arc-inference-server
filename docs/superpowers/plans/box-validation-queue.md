@@ -89,10 +89,9 @@ stages to `tools/box_validate/stages.sh` (the header there says how; `--dry-run 
 it, `python3 tools/box_validate/test_box_validate.py` checks the registry). Remove both when the row
 has passed.
 
-**Reserved, planned (not yet rows):** 58 for spec 25 (Nemotron 3.5 Bolt: 25q; 57 is 25a's, 59-62 25b-25e's) -
-`docs/superpowers/plans/2026-10-20-spec25*.md`; the plan adds its table row and its `stages.sh` block when it is built.
-Rows 42-53 (Muse-Glimmer-30B, LFM2.5-24B-A2B: specs 23 / 24) and 63-65 (LiLiCorr: spec 26) were removed with those
-models (operator, 2026-10-27: support dropped); their numbers are not reused.
+**Reserved, planned (not yet rows):** 58 and 60-62 for spec 25 (Nemotron 3.5 Bolt: 25q, 25c, 25d, 25e; 57 is 25a's, 59 25b's) and 63-65 for
+spec 26 (LiLiCorr: 26a, 26b, 26c) - `docs/superpowers/plans/2026-10-20-spec2{5,6}*.md`; each plan adds its table row and its
+`stages.sh` block when it is built.
 
 **Closed rows are deleted** (operator 2026-11-04: obsolete documents are cleaned up as work closes; this file and
 `docs/box-day-plan.md` shrink to nothing). Removed 2026-11-04, every default stage PASS on the box: rows 1, 2, 3, 4, 7, 8, 9, 12, 18, 30, 31, 56, 76. Their stages stay in `tools/box_validate/stages.sh`; the open work is `docs/open-work.md`.
