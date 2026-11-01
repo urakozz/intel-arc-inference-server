@@ -332,9 +332,20 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    `--spec off` (golden + 36 A4, 256 ids): mtp_gpu_test M3 **27 divergences the 1-ulp golden tie rule does not class as
    near-ties, 30 it does** (39 prompts x 3 K; the same position at every K); dflash_gpu_test D2 24 / 30. gemm_sm is
    closer to fp64 than gemv (N2: 0.0125 against gemv's 0.0259 of the bound on real rows, 28a), so this is the two
-   roundings' distance amplified over 64 layers, not a kernel error - but the bars bind. The divergence diagnostics
-   (the candidate's rank and gap in the plain row; M2a's logit max-abs difference in bf16 ulps) are in the rerun's
-   output. Proposed for the ruling: a noise-aware tie (the window = the row pair's own logit difference, as the
-   operator ruled for DFlash's D1 sets on 2026-10-27), or the f32 judge (the MoE gates' form).
+   roundings' distance amplified over 64 layers, not a kernel error - but the bars bind. The rerun's diagnostics:
+   - mtp_verify_test M2a (Qwen3.8): every verify row's logits cosine 0.99995-0.99998 against M = 1 (**below 0.99999
+     at every row**), the max abs logit difference **0.65-1.16 bf16 ulps of the top logit** - the two paths' noise is
+     about one ulp; GDN slots >= 0.9999998. mtp_verify_agnes_test the same (0.99995-0.99997).
+   - M2b / P: after a partial commit the 64 ids equal the clean run (the same verify, true drafts) **bitwise** at every
+     (k, j) - rejection is clean, rows do not depend on later rows (N3 held in the engine); against the plain run they
+     first differ at near-ties of 0.04-0.23 ulp.
+   - dflash_engine_test at n = 2062: the committed ring rows' worst cosine 0.99980 (bar 0.9999), D2 38 of 160 ids
+     differ from the plain run at every K (one position).
+   - ornith_mtp_test M2: prose / code rows cosine 1.000000000 (40 / 40 route rows identical); cjk row 1 picks other
+     experts in 29 of 40 layers (a router near-tie) and lands at logits cosine 0.99976; N3 (bitwise the M = 4 row)
+     holds at every row; M3 cjk diverges beyond the 1-ulp rule.
+   Proposed for the ruling: a noise-aware tie (the window = the row pair's own logit difference, ~1 bf16 ulp here, as
+   the operator ruled for DFlash's D1 sets on 2026-10-27), or the f32 judge (the MoE gates' form); and N4's 0.99999
+   restated at the measured ~0.9999 (or kept, with 28b not mergeable as is).
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
 3. The quiet-box re-check (r69.speed / r69.d1) and the G0 suite (run only for the M >= 2 gate tests so far).
