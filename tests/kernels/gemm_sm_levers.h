@@ -21,7 +21,7 @@ inline const std::vector<kernels::SmallMTuning>& lever_rows() {
       {5120, 34816, 8, 0, false, true, false, false},    // gate||up  grid S 8 + magic (the first table's row)
       {17408, 5120, 4, 0, false, false, false, true},    // down  base
       {5120, 248320, 1, 2, false, false, false, false},  // the int8 head  base (grid, 4 x 16 columns)
-      {5120, 38912, 1, 0, true, true, false, false},     // Agnes gate'||up'  2 x 8 work-group (one slice)
+      {5120, 38912, 8, 0, false, true, false, false},    // Agnes gate'||up'  grid S 8 + magic (the first table's row)
   };
   return v;
 }
