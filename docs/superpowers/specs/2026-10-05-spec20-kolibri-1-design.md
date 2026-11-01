@@ -85,7 +85,8 @@ asymmetric int4 g128, calibrated on 1M tokens of English chat + German Wikipedia
    2048 tokens) with targeted German text.
 5. **Precision by role:**
    - router weights and `expert_bias`: bf16 (required);
-   - shared experts: bf16 (every token uses them; 0.39 GB);
+   - shared experts: bf16 (every token uses them; 0.39 GB) - **superseded 2026-10-31 (operator; commit 1124546): int4 g64
+     sym, quantised with the routed experts in the operator's AutoRound export, one layout-1 block each;**
    - attention: **(decide)** int4 g64 if 20b's KL allows, else bf16 (2.5 GB more read per token);
    - routed experts: int4 g64 symmetric (`--group_size 64 --sym`);
    - embedding and `lm_head`: bf16 in the checkpoint (the engine builds the int8 head at load,
@@ -185,7 +186,8 @@ forward with the reference, so kernels and capture can be tested before spec 16 
 1. **(decide)** Where to run 20b: the box or a rented GPU (§3).
 2. **(decide)** Attention int4 vs bf16: decided by 20b's KL table (2.5 GB more per token in bf16).
 3. **(decide)** Context target: 262144 (KV 5.4 GB) or more.
-4. **(decide)** Whether the shared experts stay bf16 (proposed) or go int8.
+4. **(decided 2026-10-31, operator)** The shared experts are **int4** g64 sym (the operator's AutoRound export quantises
+   them with the routed experts; commit 1124546) - neither bf16 (proposed) nor int8.
 
 ## 8. Out of scope
 
@@ -312,7 +314,8 @@ ascending, weights sigmoid(logit) in fp32, never rounded, not renormalised. The 
 (`kol_moe_down`): ascending id, `acc = acc + f32(rne(y_j)) × w_j` with the product rounded before
 the add (`FP_CONTRACT OFF`: the reference's `index_add_` of `y.float() * w`), + the bf16 shared
 expert, one rounding. The shared expert is the MoE block's seventh slot, read from bf16
-`gemv_bf16` tiles (decision 4 stays open: bf16 proposed).
+`gemv_bf16` tiles (decision 4 stays open: bf16 proposed). **Superseded 2026-10-31 (decision 4, commit 1124546): the
+seventh slot reads the shared expert's own int4 layout-1 block through the routed experts' `tile_dot`.**
 
 **Attention:** q / k RMSNorm per head (128-lane tree), RoPE only in sliding layers
 (`rne(rne(y·cos) + rne(rot(y)·sin))`, the RoPE table bitwise torch's at 0, 1, 513, 100000, 262143 -
@@ -408,7 +411,8 @@ every row >= 0.999, median >= 0.9998, p01 >= 0.99), not bitwise.
 - **`l0` only.** `--prefill-backend l0-int8` refused (its h8 linears rotate in whole 1024-k Hadamard blocks;
   hidden is 2560), `sycl-tla` refused (no Kolibri walk); `--prefill-chunk` above 2048 refused.
 - **The separate dequant pass in 512 MiB batches:** 385 blocks a layer (384 experts + the bf16 shared
-  expert as block 384, COPIED from its gemv_bf16 tiles, not dequantised) of 5,242,880 B (gate||up, 102 a
+  expert as block 384, COPIED from its gemv_bf16 tiles, not dequantised - **since 2026-10-31 (1124546) block 384 is the
+  int4 shared expert, dequantised like the routed ones**) of 5,242,880 B (gate||up, 102 a
   batch, 4 batches) and 2,621,440 B (down, 204, 2 batches); an expert with no row this chunk is skipped.
 - **The 384-expert sort** stages ids as `ushort` (k2_pf_sort's bytes stop at 255) with two experts a lane on
   256 lanes; tmax(2048) = 820 tiles (`floor((C x 6 + 384 x 31) / 32) + ceil(C / 32)`), reachable exactly

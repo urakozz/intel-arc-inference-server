@@ -402,6 +402,8 @@ work-group) -40: **533 with all three** (derived). Decision 16.
 - `nb_conv` / `nb_ssm` / `nb_gnorm` (`src/kernels/bolt/nb_mamba.cl`): §2.2 exactly; `nb_ssm`'s grid over (head, 16-dim
   slice), each work-group owning 16 x 128 fp32 state values in registers, M rows walked in order (one launch serves the
   M-row verify, spec 26); with spec 19c's slot form (`SPEC_SLOTS`) the state after row m goes to slot `(live + m) % 8`.
+  **(Dropped 2026-10-27, commit 0219cc2: no Bolt list runs M > 1 - the M-row walk survives only in the test-only `_M4`
+  binaries, the slot form only in the source, unbuilt.)**
   The reductions: Σ_n over 128 by a fixed pairwise tree across the sub-group; the gated norm's Σ v² over each 1024-group by
   one fixed tree (every work-group of a group recomputes it - LFM2's `res_norm` rule - or a two-launch split if P0 shows
   the recompute costs; Decision 16).
@@ -428,7 +430,7 @@ work-group) -40: **533 with all three** (derived). Decision 16.
 - Norms: `nb_res_norm` (LFM2's one-launch-per-site form at hidden 4096 with Bolt's one-rounding chain), the MoE site's
   two-source fold `h = rne(h + rne(rne(Σ fc2) + rne(Σ sh)))`.
 - Reused at Bolt's shapes from new CMake lines: `gemv.cl` (int4, every shape x S x layout the descriptor names; M 1..8
-  for spec 26's verify), `gemv_bf16.cl` (routers; the bf16 head), `gemv_i8w.cl` (int8 head), `argmax.cl` (131072).
+  for spec 26's verify - **dropped 2026-10-27 (0219cc2): M = 1 only**), `gemv_bf16.cl` (routers; the bf16 head), `gemv_i8w.cl` (int8 head), `argmax.cl` (131072).
 
 **Never route padding rows** (vllm-xpu-kernels 8b95ea6): every M-row list runs exactly M real rows (one captured list
 per M, spec 23f's lazy capture), so no row with a dummy route reaches an expert.
