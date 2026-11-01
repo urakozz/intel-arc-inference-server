@@ -47,7 +47,8 @@ int main(int argc, char** argv) {
     for (bool int8 : {true, false})
       for (bool int8_head : {true, false})
         for (unsigned dv : {0u, 32768u, 65536u, 131072u})
-          for (const std::string& v : kd::draft_variants(v2, int8, int8_head, dv)) bound.insert(v);
+          for (bool pre28b : {false, true})   // spec 28b: gemm_sm_i8w now; gemv_i8w before (kept, N1)
+            for (const std::string& v : kd::draft_variants(v2, int8, int8_head, dv, pre28b)) bound.insert(v);
   int bad = 0;
   for (const std::string& v : bound)
     if (!fresh.count(v) && !reused.count(v)) {

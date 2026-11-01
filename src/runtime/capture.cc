@@ -14,6 +14,7 @@
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/control.h"
+#include "runtime/gemv_kind.h"
 #if B70_BATCH_PROBE
 #include "kernels/batch_kernels.h"
 #include "runtime/batch_rows.h"
@@ -220,6 +221,12 @@ class Capture {
     br_ = &br;
   }
 #endif
+
+  // Spec 28b: the test / probe override of runtime::gemv_kind (runtime/gemv_kind.h).
+  Capture& options(const CaptureOptions& o) {
+    opt_ = o;
+    return *this;
+  }
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -870,15 +877,31 @@ class Capture {
     // stops covering a GEMV the moment one is bound to a different allocation.
     require(out.size() >= size_t(s.S) * kCapM * s.N * sizeof(float),
             "the GEMV's output allocation is smaller than its [S][M][N] fp32 result");
-    l0::Kernel& k =
-        kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
+    // Spec 28b: at M >= 2 (runtime::gemv_kind) a tuned shape binds gemm_sm (gemm_sm.cl) - gemv's four
+    // arguments in gemv's order, gemv's [S][M][N] output (kSmallMTuning keeps the shape's S, so the
+    // consumer's fold is unchanged); only the variant, the entry, the work-group and the grid differ.
+    const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
+    if (t) require(kernels::gemm_sm_out_s(*t) == s.S, "gemm_sm writes another split-K S than the consumer folds");
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
+                               kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_variant(kCapM, s.K, s.N, s.S, s.layout), "gemv", kWgGemv);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, s.layout == 0 ? w.scales->ptr() : w.mem.ptr());
     k.arg_ptr(2, x);
     k.arg_ptr(3, out.ptr());
-    launch(k, s.N / kGemvColsPerWg, s.S);
+    if (t)
+      launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, s.N / kGemvColsPerWg, s.S);
   }
   void gemv(uint32_t layer, LinearId id, const void* x) { gemv(layer, id, x, b_.partials); }
+
+  // Spec 28b: the gemm_sm row this list binds for a shape, or null (gemv / gemv_i8w): the rule
+  // runtime::linear_kind(M, options) - Gemv at M = 1 unless forced - and the shape's kSmallMTuning row.
+  const kernels::SmallMTuning* small_m(uint32_t K, uint32_t N, uint32_t S, uint32_t layout) const {
+    return linear_kind(kCapM, opt_) == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, layout)
+                                                                    : nullptr;
+  }
 
   // gemv_bf16(w, x, out) - src/kernels/gemv_bf16.cl (plan 1 §9.2), grid
   // (N/COLS_PER_WG), WG COLS_PER_WG. No split-K: it writes its fp32 output
@@ -922,13 +945,19 @@ class Capture {
     require(w.kind == model::WeightKind::Int8, "gemv_i8w bound to a non-int8 weight");
     require(bool(w.scales), "the int8 lm_head has no fp32 row-scale allocation");
     require(s.N % kernels::kGemvI8wCols == 0, "gemv_i8w N is not a multiple of 64");
-    l0::Kernel& k =
-        kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
+    // Spec 28b: at M >= 2 a tuned shape binds gemm_sm_i8w - gemv_i8w's arguments and [M][N] output.
+    const kernels::SmallMTuning* t = small_m(s.K, s.N, 1, 2);
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kCapM, *t), kernels::gemm_sm_entry(*t),
+                               kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_i8w_variant(kCapM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
     k.arg_ptr(0, w.mem.ptr());
     k.arg_ptr(1, w.scales->ptr());
     k.arg_ptr(2, x);
     k.arg_ptr(3, out);
-    launch(k, s.N / kernels::kGemvI8wCols);
+    if (t)
+      launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, s.N / kernels::kGemvI8wCols);
   }
 
   // The MLP half, identical in both layer kinds: post-norm folding the mixer's
@@ -1738,6 +1767,8 @@ class Capture {
   const DecodeAttn attn_ = decode_attn();
   // Spec 12b: the buffers' KV form decides every KV writer and reader this walk binds.
   const bool kv8_ = b_.kv_lay.form == KvCache::Int8;
+  // Spec 28b: which linear kernel the walk binds at kCapM (runtime/gemv_kind.h); Auto unless a test forces it.
+  CaptureOptions opt_{};
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
@@ -1785,30 +1816,30 @@ ProfileEvents::ProfileEvents(l0::Context& ctx) : pool(ctx, kProfileCapacity) {
 }
 
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                   l0::Mem* debug_resid, ProfileEvents* prof, uint32_t M) {
+                   l0::Mem* debug_resid, ProfileEvents* prof, uint32_t M, const CaptureOptions& opt) {
   if (M == 0 || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build: M " + std::to_string(M) + " is outside [1, " +
                              std::to_string(DecodeBuffers::kM) + "]");
-  return Capture(ctx, m, b, debug_resid, prof, M).run();
+  return Capture(ctx, m, b, debug_resid, prof, M).options(opt).run();
 }
 
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof) {
+                          const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof, const CaptureOptions& opt) {
   // Spec 19a: up to the buffers' slot count (kSlots = 4 on every engine; 8 for
   // probe_mtp_steps' M = 5..8 lists), never past DecodeBuffers::kM.
   if (M == 0 || M > mtp.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(mtp.slots) +
                              "] (MtpBuffers::slots)");
-  return Capture(ctx, m, b, nullptr, prof, M, &mtp, Mode::Verify).run();
+  return Capture(ctx, m, b, nullptr, prof, M, &mtp, Mode::Verify).options(opt).run();
 }
 
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                               const TapVerify& tv, uint32_t M) {
+                               const TapVerify& tv, uint32_t M, const CaptureOptions& opt) {
   if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_verify_taps: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(tv.slots) + "] (TapVerify::slots)");
-  return Capture(ctx, m, b, tv, M).run();
+  return Capture(ctx, m, b, tv, M).options(opt).run();
 }
 
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
