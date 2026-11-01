@@ -1267,7 +1267,7 @@ int run(int argc, char** argv) {
   // Plan 5d: the chunk cap --prefill-chunk needs (Ornith above 2048 refused by name), planned.
   const uint32_t asked_cap =
       have_prefill_len || prefill ? runtime::prefill_chunk_cap_for(pp_chunk, *model.desc) : 0;
-  pp_path.chunk_cap = cli::planned_chunk_cap(asked_cap);
+  if (pp_path.prefill) pp_path.chunk_cap = cli::planned_chunk_cap(asked_cap, *model.desc);   // decode-only: no cap read
   // Spec 6 §10: auto plans and re-tables the model; an explicit length is held to the
   // plan. The prefill scratch is planned only when this run prefills (ruling R7).
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};

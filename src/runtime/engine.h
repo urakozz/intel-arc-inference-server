@@ -190,7 +190,8 @@ class Engine {
   // every chunk ends at a block end or at the prompt end: chunk rows are
   // min(chunk, S - pos % S, remaining), S = chunk rounded up to whole kBlocks
   // (runtime/prefill_chunks.h) - kBlock itself up to 2048 rows, 4096 at a 4096-row chunk
-  // (plan 5d, ruling A: the hook then fires at every second block end). Without one (an empty function, the
+  // (plan 5d, ruling A: the hook then fires at every second block end). S follows the call's
+  // `chunk`, not the cap: prefill(ids, 1024) at cap 4096 still hooks every 2048. Without one (an empty function, the
   // default), chunking is exactly as before. If the hook throws, the exception propagates
   // with pos == end_pos: the state holds exactly the chunks written.
   using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;

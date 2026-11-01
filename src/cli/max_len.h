@@ -216,6 +216,17 @@ inline uint32_t planned_chunk_cap(uint32_t asked) {
   if (chunk_cap_env_set()) return runtime::default_prefill_chunk_cap();
   return runtime::PrefillScratchDims::kCDefault;
 }
+// The same, with the model checked and a refusal naming the cause: an asked cap was checked by
+// prefill_chunk_cap_for; one from B70_PREFILL_CHUNK_CAP is checked here, before the plan.
+inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
+  const uint32_t cap = planned_chunk_cap(asked);
+  try {
+    runtime::check_prefill_chunk_cap(d, cap);
+  } catch (const std::invalid_argument& e) {
+    throw std::runtime_error(std::string("B70_PREFILL_CHUNK_CAP=") + std::to_string(cap) + ": " + e.what());
+  }
+  return cap;
+}
 inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m, uint32_t max_len,
                                  size_t reserve_bytes, const runtime::PrefillPath& path,
                                  runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked) {

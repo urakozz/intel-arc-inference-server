@@ -89,7 +89,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   // Plan 5d: the chunk cap --prefill-chunk needs (Ornith above 2048 refused by name), planned
   // on both devices.
   runtime::PrefillPath pf = a.pf;
-  if (pf.prefill) pf.chunk_cap = planned_chunk_cap(runtime::prefill_chunk_cap_for(a.chunk, d));
+  if (pf.prefill) pf.chunk_cap = planned_chunk_cap(runtime::prefill_chunk_cap_for(a.chunk, d), d);
   // Steps 3 and 4 (cli/pipeline_settle.h): no hook here - b70-decode has no prefix cache.
   const PpSettled settled = pp_settle(d, w, dev, a.max_len, full.trained_max_len, a.reserve, a.kv,
                                       pf, pp_extras(full, /*hook=*/false), a.pipe);

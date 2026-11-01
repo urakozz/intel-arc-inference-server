@@ -4,7 +4,8 @@
 // beside the weights with the default reserve, reached the way the CLIs reach it:
 // load at 4096, plan, loader::set_max_len). Device + checkpoint.
 //
-//   memory_plan_box_test <snapshot-or-repo> [mtp] [--lm-head int8|bf16]
+//   memory_plan_box_test <snapshot-or-repo> [mtp] [--lm-head int8|bf16] [--prefill-backend l0|l0-int8]
+//   (plan 5d: the prefill chunk cap is the engine's default, B70_PREFILL_CHUNK_CAP)
 //                        [--draft-vocab 32k|64k|128k] [max_len|auto ...]
 //
 // `mtp` loads the MTP head (spec 8) and plans its buffers. `--lm-head` picks the head
@@ -39,6 +40,7 @@ struct Opts {
   bool mtp = false;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;   // the serving default (spec 9)
   uint32_t draft_vocab = 0;
+  runtime::PrefillBackend backend = runtime::PrefillBackend::L0;   // the engine's default (drop-sycl-tla)
 };
 
 void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
@@ -49,7 +51,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const bool is_auto = len_arg == "auto";
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const runtime::PrefillPath path{
-      true, runtime::PrefillBackend::L0,   // the engine's default (drop-sycl-tla)
+      true, o.backend,   // l0 (the engine's default) or, plan 5d, --prefill-backend l0-int8
       runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed,
       runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (B70_PREFILL_CHUNK_CAP)
   loader::DraftVocabSpec dvs;
@@ -90,6 +92,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(m.report.total(), p.model);
 
   runtime::Engine eng(ctx, std::move(m), L);
+  eng.set_prefill_backend(o.backend);
   eng.prepare_prefill();
   std::printf("before the first prefill: %s\n", eng.memory_line().c_str());
   // One short prefill: the lazy buffers a session builds on its first chunk.
@@ -172,6 +175,7 @@ int main(int argc, char** argv) {
     if (a == "mtp") o.mtp = true;
     else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], o.lm_head));
     else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], o.draft_vocab));
+    else if (a == "--prefill-backend" && i + 1 < argc) CHECK(runtime::parse_prefill_backend(argv[++i], o.backend));
     else lens.push_back(a);
   }
   CHECK(o.draft_vocab == 0 || o.mtp);
