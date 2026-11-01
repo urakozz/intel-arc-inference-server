@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "common/copy_chunks.h"
 #include "l0/event.h"
 
 // The prefill Context: the Level Zero immediate list every prefill launch goes on (spec 2.1
@@ -194,8 +195,17 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
 
 void Context::copy(void* dst, const void* src, size_t bytes) {
   if (p_->recording) throw std::runtime_error("prefill capture: copy inside recording");
-  zc(zeCommandListAppendMemoryCopy(p_->list, dst, src, bytes, nullptr, 0, nullptr),
-     "zeCommandListAppendMemoryCopy");
+  if (bytes <= common::kMaxCopyChunk) {
+    zc(zeCommandListAppendMemoryCopy(p_->list, dst, src, bytes, nullptr, 0, nullptr),
+       "zeCommandListAppendMemoryCopy");
+    return;
+  }
+  // Fix round A: the l0::CmdList::copy rule (common/copy_chunks.h) - in-order pieces of at most 256 MiB.
+  common::for_each_copy_chunk(bytes, common::kMaxCopyChunk, [&](size_t off, size_t n) {
+    zc(zeCommandListAppendMemoryCopy(p_->list, static_cast<uint8_t*>(dst) + off,
+                                     static_cast<const uint8_t*>(src) + off, n, nullptr, 0, nullptr),
+       "zeCommandListAppendMemoryCopy");
+  });
 }
 
 void Context::copy_2d(void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width,

@@ -1,4 +1,5 @@
 #include "l0/cmdlist.h"
+#include "common/copy_chunks.h"
 #include "l0/error.h"
 #include "l0/event.h"
 #include "l0/kernel.h"
@@ -30,8 +31,19 @@ CmdList::~CmdList() {
 }
 CmdList::CmdList(CmdList&& o) noexcept : l_(o.l_), immediate_(o.immediate_) { o.l_ = nullptr; }
 
+// Fix round A: a copy larger than common::kMaxCopyChunk goes to the driver as in-order
+// pieces of at most 256 MiB (common/copy_chunks.h has why: NEO maps a >= 512 MB plain host
+// source directly, and the userptr re-pin can time out under host memory pressure). Every
+// upload - lm_head, the embed from the mmap, the int4 staging - comes through here.
 void CmdList::copy(void* dst, const void* src, size_t bytes) {
-  ZE_CHECK(zeCommandListAppendMemoryCopy(l_, dst, src, bytes, nullptr, 0, nullptr));
+  if (bytes <= common::kMaxCopyChunk) {
+    ZE_CHECK(zeCommandListAppendMemoryCopy(l_, dst, src, bytes, nullptr, 0, nullptr));
+    return;
+  }
+  common::for_each_copy_chunk(bytes, common::kMaxCopyChunk, [&](size_t off, size_t n) {
+    ZE_CHECK(zeCommandListAppendMemoryCopy(l_, static_cast<uint8_t*>(dst) + off,
+                                           static_cast<const uint8_t*>(src) + off, n, nullptr, 0, nullptr));
+  });
 }
 void CmdList::fill(void* dst, uint32_t pattern, size_t bytes) {
   ZE_CHECK(zeCommandListAppendMemoryFill(l_, dst, &pattern, sizeof pattern, bytes, nullptr, 0, nullptr));
