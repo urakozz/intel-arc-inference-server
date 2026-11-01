@@ -1,7 +1,7 @@
 // gemm_sm_test - spec 28 N2 and N3 for the production small-M GEMM (plan 28b Task 1; box, one card).
 //
 // For every row of kernels::kSmallMTuning (src/kernels/kernels.h) at every M src/kernels/CMakeLists.txt builds
-// for it (M = 2..8 and 16; the DFlash drafter's linears at 8, the compact draft heads at 7), on random weights
+// for it (M = 2..8 and 16; Ornith's rows at 2..4), on random weights
 // of the shape and random bf16 rows:
 //
 //   N2  the output (the S slices summed in s order, as the consumers fold them) against the fp64 reference

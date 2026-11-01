@@ -25,8 +25,12 @@
 //        GDN slot equals the reference state after step j (cosine >= 0.99999, bitwise recorded) - the slot index
 //        is the whole commit, no copy and no replay of the accepted rows (vLLM's per-token replay state, for
 //        contrast, re-applies the accepted rows' rank-1 updates); the ring as T1 / Review Focus 1 say; then 64 plain
-//        greedy ids == g[j + 1 .. j + 64] (the conv ring's stale positions past n + j are overwritten before any
-//        row reads them). Run at n % 16 == 14 so pos % 16 wraps inside the verify rows.
+//        greedy ids == the run that never saw the rejected drafts - the same verify(k) with every draft true,
+//        commit(j), 64 plain ids - bitwise (spec 28 N3 + N4: rows 0..j do not depend on rows past j; the conv
+//        ring's stale positions past n + j are overwritten before any row reads them). Since spec 28b the verify
+//        rows run gemm_sm, so against the plain run's g[j + 1 .. j + 64] they must be identical up to a first
+//        difference the golden tie rule classes as a near-tie (tests/server/greedy_tie.h). Run at n % 16 == 14 so
+//        pos % 16 wraps inside the verify rows.
 //   D2   (greedy is lossless, on the card) from S0, the loop the server runs - d.draft(K) -> verify(K) -> the
 //        longest agreeing prefix -> commit - at K = 7, 3 and 1: the 160 ids equal g; acceptance printed.
 //   RF3  near max_len: max_verify_k() falls 7 .. 0, the loop runs to max_len - 1 and emits the plain run's ids;
@@ -51,6 +55,7 @@
 #include <vector>
 
 #include "check.h"
+#include "../server/greedy_tie.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -173,6 +178,7 @@ struct Ref {
   std::vector<std::vector<float>> state;       // GDN state after step r, r <= kK
   std::vector<std::vector<uint16_t>> taps;     // step r's tap row, r <= kK
   std::vector<uint16_t> ring;                  // positions n .. n + kK after the reference steps
+  std::vector<greedy_tie::RefStep> steps;      // step i's decision (it decided g[i + 1]) - spec 28 N6's tie rule
 };
 Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
   s0.restore(c);
@@ -180,8 +186,10 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
   r.g.push_back(c.ctl->cur_token[0]);
   for (uint32_t i = 0; i < T; ++i) {
     c.e.verify(0);
+    const std::vector<float> row = logits_rows(c, 1);
+    r.steps.push_back(greedy_tie::ref_step(row.data(), uint32_t(VU)));
     if (i <= kK) {
-      r.logits.push_back(logits_rows(c, 1));
+      r.logits.push_back(row);
       r.taps.push_back(tap_row(c, 0));
     }
     c.e.commit(0, c.e.verify_ids()[0]);
@@ -236,6 +244,12 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k) {
     return ring_rows(c, s0.pos, kK + 1);
   }();
   for (uint32_t j = 0; j <= k; ++j) {
+    // the run that never saw a rejected draft: every draft true, the same verify(k), commit(j), 64 ids
+    s0.restore(c);
+    for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
+    c.e.verify(k);
+    c.e.commit(j, c.e.verify_ids()[j]);
+    const std::vector<uint32_t> clean = c.e.generate(64);
     s0.restore(c);
     for (uint32_t i = 1; i <= k; ++i) {
       uint32_t dft = ref.g[i];
@@ -255,13 +269,21 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k) {
     const bool untouched = std::equal(ring.begin() + (j + 1) * row, ring.end(), ring0.begin() + (j + 1) * row);
     const std::vector<uint32_t> ids = c.e.generate(64);
     size_t diff = 0;
-    for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != ref.g[j + 1 + i];
+    for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != clean[i];
+    const std::vector<uint32_t> pg(ref.g.begin() + j + 1, ref.g.begin() + j + 1 + ids.size());
+    const std::vector<greedy_tie::RefStep> ps(ref.steps.begin() + j, ref.steps.begin() + j + ids.size());
+    const greedy_tie::Result tr = greedy_tie::classify(pg, ps, ids);
+    char pf[112];
+    if (tr.v == greedy_tie::Verdict::Same) std::snprintf(pf, sizeof pf, "equal to the plain run");
+    else
+      std::snprintf(pf, sizeof pf, "the plain run first differs at %zu: %s (rank %u, %.3f bf16 ulp below top-1)",
+                    tr.at, tr.v == greedy_tie::Verdict::Tie ? "near-tie" : "NOT A TIE", tr.cand_rank, tr.cand_gap);
     std::printf("  P k=%u j=%u: live slot %u, GDN state vs the state after step %u cos %.9f%s, accepted rows %s, "
-                "ring rows %u..%u %s, %u..%u %s, 64 further ids: %zu differ\n",
+                "ring rows %u..%u %s, %u..%u %s, 64 further ids: %zu differ from the clean run; %s\n",
                 k, j, c.ctl->gdn_live, j, cs, sbits ? " (bitwise)" : "", rows_ok ? "ok" : "DIFFER", s0.pos,
                 s0.pos + j, committed ? "projected" : "WRONG", s0.pos + j + 1, s0.pos + kK,
-                untouched ? "untouched" : "WRITTEN", diff);
-    ok &= cs >= 0.99999 && rows_ok && committed && untouched && diff == 0;
+                untouched ? "untouched" : "WRITTEN", diff, pf);
+    ok &= cs >= 0.99999 && rows_ok && committed && untouched && diff == 0 && tr.v != greedy_tie::Verdict::Diverged;
   }
   return ok;
 }

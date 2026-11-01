@@ -1685,8 +1685,8 @@ add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
 # a capture builds at M >= 2 binds these in place of gemv / gemv_i8w (runtime::gemv_kind, runtime/gemv_kind.h) for
 # the shapes of kernels::kSmallMTuning (src/kernels/kernels.h) - ONE row per shape, whose knobs are spelled into the
 # name, so a row and a line here that disagree are a missing file at capture (gemm_sm_names_test holds the two
-# together on the Mac). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's 2..8, spec 13a's rows) and 16
-# (gemm_sm_test, the probe; no list binds 16 yet).
+# together on the Mac). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's tap verify 2..8, spec 13a's rows)
+# and 16 (gemm_sm_test, the probe; no list binds 16 yet); Ornith's at 2..4. The DFlash drafter stays on gemv_i8w.
 set(GEMM_SM_TARGETS "")
 # add_gemm_sm_variant(M K N S L [WG] [MG] [G256] [B2D]) - L 2 is the int8 form (gemm_sm_i8w_*), S 1 there. The
 # source by its full path: tools/probe calls these helpers from its own directory scope.
@@ -1725,9 +1725,6 @@ endfunction()
 set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG"
                    "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
 set(GEMM_SM_AGNES "5120 38912 1 0 WG MG" "19456 5120 4 0 MG B2D")
-set(GEMM_SM_DRAFTER "5120 6144 1 2" "4096 5120 1 2" "5120 34816 1 2" "17408 5120 1 2" "25600 5120 1 2"
-                    "5120 2048 1 2" "5120 1280 1 2" "5120 256 1 2")
-set(GEMM_SM_DRAFT_HEADS "5120 32768 1 2" "5120 65536 1 2" "5120 131072 1 2")
 macro(gemm_sm_rows ROWS MLIST)
   foreach(row IN LISTS ${ROWS})
     separate_arguments(f UNIX_COMMAND "${row}")
@@ -1758,12 +1755,6 @@ set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "20
 if(B70_ORNITH AND B70_MTP)
   set(_m234 2 3 4)
   gemm_sm_rows(GEMM_SM_ORNITH _m234)
-endif()
-if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
-  set(_m8 8)
-  set(_m7 7)
-  gemm_sm_rows(GEMM_SM_DRAFTER _m8)       # the drafter's int8 linears at its block of 8 rows
-  gemm_sm_rows(GEMM_SM_DRAFT_HEADS _m7)   # the compact int8 heads at the draft head's 7 rows
 endif()
 # tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
 set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})

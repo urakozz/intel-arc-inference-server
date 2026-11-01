@@ -4,8 +4,8 @@
 //   runtime::gemv_kind(M)   LinearKind::Gemv at M = 1, LinearKind::SmallM at M >= 2.
 //
 // The ONE rule, applied where a list binds a linear: runtime/capture.cc's gemv() / gemv_i8w() helpers (every
-// decode, verify, tap-verify, stage and row list) and runtime/dflash/dflash_capture.cc's drafter linears and
-// draft head. `Gemv` binds today's gemv / gemv_i8w binaries - every M = 1 list (plain decode, ingest, generate,
+// decode, verify, tap-verify, stage and row list; the DFlash drafter's own lists stay on gemv_i8w in 28b).
+// `Gemv` binds today's gemv / gemv_i8w binaries - every M = 1 list (plain decode, ingest, generate,
 // the MTP draft list, the prefill tail's head) is bit for bit what it was (the enum and the rule itself live in
 // kernels/linear_kind.h so the kernels-side name lists apply the same rule). `SmallM` binds gemm_sm / gemm_sm_i8w
 // for the shapes of kernels::kSmallMTuning and gemv / gemv_i8w for the rest (kernels::int4_linear_variant /
