@@ -3,9 +3,12 @@
 //
 // Gate mode:   mtp_gpu_test <snapshot> <backend>            (cwd = the source tree)
 //   M3  greedy, 256 ids, K = 1, 2, 3 against the plain step() loop of the same engine,
-//       on the three golden prompts and the 36 A4 tool-call prompts. Plan 8b's M2 showed
-//       the M = k + 1 rows bitwise equal to M = 1, so the bar is IDENTITY: any divergence
-//       is a failure (reported with its index), not a near-tie.
+//       on the three golden prompts and the 36 A4 tool-call prompts. Spec 28 N6 (plan 28b):
+//       the verify rows run gemm_sm and are no longer bitwise M = 1, so the bar is identity
+//       except a first divergence the golden tie rule classes as a near-tie (the candidate is
+//       the plain row's runner-up within 1 bf16 ulp - tests/server/greedy_tie.h): zero
+//       non-tie divergences, the tie count printed (before 28b the rows were bitwise and the
+//       bar was plain identity).
 //   RF1 on the card: a run truncated inside an accepted burst (truncate_to) and then
 //       continued equals the plain run.
 //   M5  the same greedy K = 3 run twice: ids and the final logits row bitwise.
@@ -43,6 +46,7 @@
 #include <nlohmann/json.hpp>
 
 #include "check.h"
+#include "greedy_tie.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
@@ -122,15 +126,28 @@ struct Gen {
 
 // What server.cc's loop does, minus the text: prefill, then step() or step_many() until
 // n ids, truncating the last burst to exactly n.
+// `steps` (the plain run only): after every step() the row that decided the NEXT id (greedy_tie::ref_step) -
+// steps[i] belongs to ids[i]; steps[0] (the prefill's id) is a never-matching placeholder.
 Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n,
-             const server::Sampling& s) {
+             const server::Sampling& s, std::vector<greedy_tie::RefStep>* steps = nullptr,
+             runtime::Engine* eng = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
+  if (steps) {
+    steps->clear();
+    steps->push_back({UINT32_MAX, UINT32_MAX, 1e30});
+  }
+  std::vector<float> row(steps ? Qwen35::kVocab : 0);
   const auto t0 = std::chrono::steady_clock::now();
   while (g.ids.size() < n) {
     if (a.mtp_k() == 0) {
       g.ids.push_back(a.step(s));
+      if (steps) {
+        l0::CmdList imm = l0::CmdList::immediate(eng->context());
+        imm.copy(row.data(), eng->buffers().logits.ptr(), row.size() * sizeof(float));
+        steps->push_back(greedy_tie::ref_step(row.data(), Qwen35::kVocabUsed));
+      }
       continue;
     }
     const std::vector<uint32_t> burst = a.step_many(s, a.mtp_k());
@@ -144,13 +161,6 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n,
   g.drafted = a.mtp_drafted;
   g.accepted = a.mtp_accepted;
   return g;
-}
-
-size_t first_diff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
-  const size_t n = std::min(a.size(), b.size());
-  for (size_t i = 0; i < n; ++i)
-    if (a[i] != b[i]) return i;
-  return a.size() == b.size() ? SIZE_MAX : n;
 }
 
 uint64_t fnv(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
@@ -195,22 +205,27 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
   int divergences = 0;
   uint64_t tot_d[3] = {0, 0, 0}, tot_a[3] = {0, 0, 0}, tot_i[3] = {0, 0, 0};
   if (kMaxLen != kDefaultMaxLen) std::printf("max_len %u (--max-len)\n", kMaxLen);
-  std::printf("M3 (%s): greedy %u ids, --mtp K vs --mtp 0; bar: identical\n",
+  std::printf("M3 (%s): greedy %u ids, --mtp K vs --mtp 0; bar: identical up to golden near-ties\n",
               runtime::prefill_backend_name(backend), kGen);
   std::printf("%-24s %6s | %-22s | %-22s | %-22s\n", "prompt", "ids", "K=1 same acc tok/it",
               "K=2 same acc tok/it", "K=3 same acc tok/it");
+  int ties = 0;
   for (const Prompt& p : prompts) {
-    const Gen ref = generate(plain, p.ids, kGen, greedy);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen ref = generate(plain, p.ids, kGen, greedy, &steps, &L.eng);
     std::printf("%-24s %6zu", p.name.c_str(), p.ids.size());
     for (int k = 0; k < 3; ++k) {
       const Gen g = generate(spec[k], p.ids, kGen, greedy);
-      const size_t d = first_diff(ref.ids, g.ids);
-      if (d != SIZE_MAX) ++divergences;
+      const greedy_tie::Result tr = greedy_tie::classify(ref.ids, steps, g.ids);
+      const size_t d = tr.at;
+      if (tr.v == greedy_tie::Verdict::Diverged) ++divergences;
+      if (tr.v == greedy_tie::Verdict::Tie) ++ties;
       tot_d[k] += g.drafted;
       tot_a[k] += g.accepted;
       tot_i[k] += g.iters;
       char same[32];
       if (d == SIZE_MAX) std::snprintf(same, sizeof(same), "yes");
+      else if (tr.v == greedy_tie::Verdict::Tie) std::snprintf(same, sizeof(same), "tie@%zu", d);
       else std::snprintf(same, sizeof(same), "NO@%zu", d);
       std::printf(" | %-6s %5.3f %5.2f    ", same, g.drafted ? double(g.accepted) / g.drafted : 0.0,
                   g.iters ? double(kGen) / g.iters : 0.0);
@@ -222,13 +237,15 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
     std::printf("M3 pooled K=%d: acceptance %.4f (%llu/%llu), %.3f ids per iteration\n", k + 1,
                 double(tot_a[k]) / tot_d[k], (unsigned long long)tot_a[k],
                 (unsigned long long)tot_d[k], double(kGen * prompts.size()) / tot_i[k]);
-  std::printf("M3: %d divergences over %zu prompts x 3 K\n", divergences, prompts.size());
+  std::printf("M3: %d non-tie divergences, %d near-ties (golden tie rule) over %zu prompts x 3 K\n", divergences,
+              ties, prompts.size());
 
   // RF1 on the card: keep only 1 id of the first burst with >= 3, then continue.
   int rf1_fail = 0;
   for (size_t pi = 0; pi < 3; ++pi) {
     const Prompt& p = prompts[pi];
-    const Gen ref = generate(plain, p.ids, 96, greedy);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen ref = generate(plain, p.ids, 96, greedy, &steps, &L.eng);
     EngineAdapter& a = spec[2];
     a.reset();
     a.prefill(p.ids);
@@ -245,10 +262,12 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
         if (ids.size() < 96) ids.push_back(id);
     }
     a.flush_commit();
-    const bool ok = cut && first_diff(std::vector<uint32_t>(ref.ids.begin(), ref.ids.end()),
-                                      ids) == SIZE_MAX;
-    std::printf("RF1 %s: truncated inside a burst %s, 96 ids %s\n", p.name.c_str(),
-                cut ? "yes" : "NO", ok ? "equal to plain" : "DIFFER");
+    const greedy_tie::Result tr = greedy_tie::classify(ref.ids, steps, ids);
+    const bool ok = cut && tr.v != greedy_tie::Verdict::Diverged;
+    std::printf("RF1 %s: truncated inside a burst %s, 96 ids %s\n", p.name.c_str(), cut ? "yes" : "NO",
+                tr.v == greedy_tie::Verdict::Same ? "equal to plain"
+                : tr.v == greedy_tie::Verdict::Tie ? "equal to plain up to a near-tie"
+                                                   : "DIFFER");
     if (!ok) ++rf1_fail;
   }
 

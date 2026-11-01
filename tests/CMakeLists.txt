@@ -122,6 +122,11 @@ target_include_directories(prompt_lookup_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${
 target_link_libraries(prompt_lookup_test PRIVATE b70_server)
 add_test(NAME prompt_lookup_test COMMAND prompt_lookup_test)
 
+# Spec 28 N6 (plan 28b): the golden tie rule for the speculative greedy gates (tests/server/greedy_tie.h).
+add_executable(greedy_tie_test server/greedy_tie_test.cc)
+target_include_directories(greedy_tie_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/server)
+add_test(NAME greedy_tie_test COMMAND greedy_tie_test)
+
 # Spec 8 §3.6 (plan 8c): the server over a scripted speculative engine, host only.
 add_executable(mtp_server_test server/mtp_server_test.cc)
 target_include_directories(mtp_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
