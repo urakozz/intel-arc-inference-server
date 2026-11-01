@@ -637,6 +637,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
 refused), context at most 262144, `--layers` is `b70-decode`'s development mode only.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
-`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
+`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_VERIFY_MOE` (`union` | `plain`: the verify's routed experts,
+spec 26c), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
 `B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`), `B70_BOLT_SNAPSHOT` (`template_bolt_test`'s,
 `bolt_tokenizer_test`'s and `bolt_request_test`'s snapshot).

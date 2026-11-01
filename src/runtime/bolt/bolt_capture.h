@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <vector>
+
 #include "l0/context.h"
 #include "l0/memory.h"
 #include "loader/bolt_loader.h"
@@ -36,5 +39,31 @@ namespace runtime::bolt {
 CapturedStep build(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b,
                    BoltFuse fuse, bool int8_head, const runtime::StageLink* link, l0::Mem* tap = nullptr,
                    ProfileEvents* prof = nullptr);
+
+// Spec 26c: the verify lists (spec 26 §5.3) - the same walk at M = 1..8 rows over the device's BoltVerifyBuffers scratch (the
+// persistent group, KV / rings / slot 0 of the states, is BoltBuffers'), the anchor and up to 7 drafts at positions pos ..
+// pos + M - 1 (n_active = M; the gather reads Control::cur_token[0..M-1] on device 0), with these changes:
+//   every M-row launch runs exactly M real rows (one captured list per M, never a padded M - vllm-xpu-kernels 8b95ea6);
+//   nb_ssm is the slot build `_SL8` (the state after row m into slot (Control::gdn_live + m) % 8; its last argument the
+//   block's slots 1..7) - the commit is the host moving gdn_live on both cards;
+//   the routed experts are the union-aware form at M > 1 (`union_moe`: nb_moe_up_U, nb_moe_down_U into the scratch's
+//   moe_d, nb_moe_comb_U - Decision 10) or the plain M-row form; no fused arm (each is bitwise the as-built list);
+//   the head at M rows writes [M][vocab] fp32 logits; argmax stage 2 (the M-free binary) writes out_token[0..M-1] - and
+//   advances the last device's Control::pos / cur_token[0], which BoltEngine::verify puts back (the host commits);
+//   with a drafter (`taps`), after the fold that produces block l's output (l in tap_layers) every row's residual is copied
+//   into taps [row][tap][hidden] - device 0's three sites write device 1's buffer, in its list BEFORE the hand-off's
+//   barrier signals (19d: the copy hand-off only; peer is refused by name);
+//   two cards: the hand-off moves M rows of h and of the cut's pending slices through `link` (the verify link: a landing
+//   sized for kVerifyRows).
+// The launch count is runtime::bolt::verify_device_launches' (asserted).
+struct VerifyBind {
+  BoltVerifyBuffers* vb = nullptr;                    // the device's verify scratch, slots and union rows
+  uint32_t M = 1;
+  bool union_moe = true;                              // VerifyMoe::Union (used at M > 1)
+  l0::Mem* taps = nullptr;                            // a drafter's taps() bf16 [8][taps][hidden] (the last device's), or null
+  const std::vector<uint32_t>* tap_layers = nullptr;  // ascending, each < the target's blocks
+};
+CapturedStep build_verify(l0::Context& ctx, const loader::BoltDevicePart& part, const model::BoltDesc& d, BoltBuffers& b,
+                          bool int8_head, const runtime::StageLink* link, const VerifyBind& v);
 
 }  // namespace runtime::bolt
