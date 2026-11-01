@@ -93,6 +93,30 @@ void check_chunks() {
   CHECK(throws([] { runtime::pp_prefill_chunks(0, 0, 2048, false); }));
   CHECK(throws([] { runtime::pp_prefill_chunks(0, 10, 0, false); }));
   std::printf("chunks: %zu (base, n, chunk, hooked) cases equal Engine::prefill's loop\n", cases);
+  // Plan 5d, operator ruling (A): under a 4096-row chunk with the hook, the blocks stay 2048
+  // (hashing, KV ranges) and hooked chunks end at multiples of 4096 - the chunk rounded up
+  // to whole blocks - so every hook still lands on a block end; a resume at an odd block
+  // (6144) first runs to the next 4096 multiple. Unhooked, 4096 rows a chunk.
+  const std::vector<PpChunk> g = runtime::pp_prefill_chunks(0, 10000, 4096, true);
+  CHECK_EQ(g.size(), size_t{3});
+  CHECK(g[0].rows == 4096 && g[0].hook && g[1].end() == 8192 && g[1].hook && g[2].end() == 10000 && !g[2].hook);
+  const std::vector<PpChunk> h = runtime::pp_prefill_chunks(6144, 7000, 4096, true);
+  CHECK_EQ(h.size(), size_t{3});
+  CHECK(h[0].rows == 2048 && h[0].end() == 8192 && h[0].hook && h[1].rows == 4096 && h[1].hook &&
+        h[2].end() == 13144 && !h[2].hook);
+  const std::vector<PpChunk> u = runtime::pp_prefill_chunks(6144, 7000, 4096, false);
+  CHECK(u.size() == 2 && u[0].rows == 4096 && u[1].rows == 2904);
+  // A width that is not whole blocks (3000) is cut at the 4096 multiples too.
+  const std::vector<PpChunk> w = runtime::pp_prefill_chunks(0, 9000, 3000, true);
+  CHECK(w.size() == 5 && w[0].rows == 3000 && !w[0].hook && w[1].rows == 1096 && w[1].hook &&
+        w[2].rows == 3000 && !w[2].hook && w[3].rows == 1096 && w[3].hook && w[4].rows == 808 && !w[4].hook);
+  for (uint32_t base : {0u, 300u, 2048u, 6144u, 10000u})
+    for (size_t n : {size_t{1}, size_t{4096}, size_t{5000}, size_t{32768}})
+      for (bool hooked : {false, true})
+        for (const PpChunk& c : runtime::pp_prefill_chunks(base, n, 4096, hooked)) {
+          CHECK(c.rows <= 4096);
+          if (c.hook) CHECK_EQ(c.end() % 4096, 0u);
+        }
 }
 
 std::string ops(const std::vector<PpPfStep>& s) {
@@ -174,7 +198,7 @@ void check_link() {
     const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, *d, runtime::PrefillScratchDims::kCDefault);
     CHECK_EQ(l.resid_bytes, s.resid);
     CHECK_EQ(l.sumsq_bytes, s.norm_sumsq);
-    CHECK_EQ(l.resid_bytes, size_t{runtime::PrefillScratchDims::kC} * d->hidden * 2);
+    CHECK_EQ(l.resid_bytes, size_t{runtime::PrefillScratchDims::kCDefault} * d->hidden * 2);
     CHECK_EQ(l.sumsq_off % runtime::kPpPage, size_t{0});
     CHECK(l.sumsq_off >= l.resid_bytes);
     CHECK_EQ(l.stamp_off, l.sumsq_off + l.sumsq_bytes);

@@ -377,7 +377,71 @@ void test_kv_bytes_fn() {
   std::printf("  kv_bytes(n): entries sized by the engine's own function (blocks %zu B, not %zu)\n", kv(8), 8 * kv(1));
 }
 
+// Plan 5d, operator ruling (A): under 4096-row chunks the blocks stay 2048 for hashing and
+// the KV ranges, and the engine's hook fires only at chunk ends that are block ends - every
+// second block (runtime/prefill_chunks.h). Here: block 4, the hook every 8 positions. A
+// block end without a state is a stored KV block and no snapshot; a hit there resumes from
+// the previous state point; the request-end snapshot is unaffected.
+void prefill_wide(PrefixCache& c, const Ids& ids, uint32_t from) {
+  const uint32_t len = uint32_t(ids.size()), stride = 2 * kB;
+  for (uint32_t e = (from / stride + 1) * stride; e < len; e += stride) store(c, ids, e);
+  store(c, ids, len);
+  c.release();
+}
+
+void test_wide_chunks() {
+  MallocAlloc m;
+  PrefixCache c(1 << 20, kState, kKv, kB, m);
+  const Ids a = seq(20, 100);
+  prefill_wide(c, a, 0);
+  // Blocks [0,4) .. [16,20) all stored (reserve stores every block below a hook's end),
+  // snapshots only at 8, 16 and the request end 20: 5 + 3 entries.
+  CHECK_EQ(c.entries(), size_t{8});
+  // An even block end (16): restored there.
+  {
+    const Ids p = cat(head(a, 16), seq(5, 900));
+    const PrefixCache::Plan pl = c.plan(p, {}, false);
+    CHECK(pl.kind == PrefixCache::Plan::Restore);
+    CHECK_EQ(pl.restart, 16u);
+    check_plan(pl, p);
+    c.release();
+  }
+  // An odd block end (12, no state there): from the previous state point, 8 - at most one
+  // block re-prefilled before the divergence.
+  {
+    const Ids p = cat(head(a, 12), seq(5, 900));
+    const PrefixCache::Plan pl = c.plan(p, {}, false);
+    CHECK(pl.kind == PrefixCache::Plan::Restore);
+    CHECK_EQ(pl.restart, 8u);
+    check_plan(pl, p);
+    c.release();
+  }
+  // The request end (20, not a block multiple of the hook's stride... and here a block end):
+  // the next turn restores at 20.
+  {
+    const Ids p = cat(a, seq(5, 900));
+    const PrefixCache::Plan pl = c.plan(p, {}, false);
+    CHECK(pl.kind == PrefixCache::Plan::Restore);
+    CHECK_EQ(pl.restart, 20u);
+    check_plan(pl, p);
+    c.release();
+  }
+  // A request end off any block (22): its snapshot hangs off the block ending at 20.
+  {
+    const Ids b = cat(a, seq(2, 700));
+    prefill_wide(c, b, 20);
+    const Ids p = cat(b, seq(3, 900));
+    const PrefixCache::Plan pl = c.plan(p, {}, false);
+    CHECK(pl.kind == PrefixCache::Plan::Restore);
+    CHECK_EQ(pl.restart, 22u);
+    check_plan(pl, p);
+    c.release();
+  }
+  std::printf("wide chunks (plan 5d, ruling A): even / odd block / request-end restores\n");
+}
+
 int main() {
+  test_wide_chunks();
   test_plans();
   test_kv_bytes_fn();
   test_budget();
