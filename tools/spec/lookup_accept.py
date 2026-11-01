@@ -385,6 +385,10 @@ def load_logs(log_dir, seed_session=0):
 def load_a4(a4_dir, expected_path, tokenizer_path):
     from tokenizers import Tokenizer   # only this source needs it
     tok = Tokenizer.from_file(tokenizer_path)
+    # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+    # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
+    tok.no_truncation()
+    tok.no_padding()
     with open(expected_path, encoding="utf-8") as f:
         expected = json.load(f)
     order = {"bf16": 0, "l0": 1, "l0-int8": 2}

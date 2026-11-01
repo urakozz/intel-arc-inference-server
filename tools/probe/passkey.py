@@ -32,6 +32,10 @@ def main() -> None:
     try:
         from tokenizers import Tokenizer
         tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
+        # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
+        # the engine never applies them (src/tokenizer/rs/src/lib.rs), so neither does this tool.
+        tok.no_truncation()
+        tok.no_padding()
         encode = lambda t: tok.encode(t, add_special_tokens=False).ids  # noqa: E731
     except ImportError:
         from transformers import AutoTokenizer
@@ -44,6 +48,10 @@ def main() -> None:
     text = head + NEEDLE + FILLER * (reps - before) + QUESTION
     ids = encode(text)
     needle_at = len(encode(head))
+    # A truncating tokenizer drops the tail - the question - and every placement then "fails"
+    # with the filler's own continuation (2026-11-01: every K2 prompt came out 2048 ids).
+    if len(ids) < 0.9 * target:
+        sys.exit(f"passkey: {len(ids)} ids for a target of {target} - the tokenizer truncated the prompt")
     with open(out, "w") as f:
         f.write("\n".join(str(i) for i in ids) + "\n")
     print(f"passkey: placement {place}, {len(ids)} ids, needle at id {needle_at} "
