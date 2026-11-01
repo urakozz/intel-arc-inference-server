@@ -2398,6 +2398,13 @@ target_include_directories(pp_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CM
 find_package(Threads REQUIRED)
 target_link_libraries(pp_protocol_test PRIVATE Threads::Threads)
 add_test(NAME pp_protocol_test COMMAND pp_protocol_test)
+# Spec 17a (plan 17a Task 1): the TP all-reduce's crossing protocol (tools/probe/tp_protocol.h, the host mirror of
+# probe_tp.cl's tp_send / tp_wait and probe_tp's CPU-sum thread) on host threads - every route, stamps, the two-slot
+# landing, the fixed-order sum bitwise on both "cards", a skipped data write caught, a dropped write timed out.
+add_executable(tp_crossing_protocol_test runtime/tp_crossing_protocol_test.cc)
+target_include_directories(tp_crossing_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tools/probe)
+target_link_libraries(tp_crossing_protocol_test PRIVATE Threads::Threads)
+add_test(NAME tp_crossing_protocol_test COMMAND tp_crossing_protocol_test)
 add_executable(pipeline_args_test cli/pipeline_args_test.cc)
 target_include_directories(pipeline_args_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pipeline_args_test PRIVATE b70_plan)
@@ -3770,6 +3777,13 @@ target_include_directories(probe_bolt_step_shapes_test PRIVATE ${CMAKE_SOURCE_DI
 target_link_libraries(probe_bolt_step_shapes_test PRIVATE b70_bolt_model)
 add_test(NAME probe_bolt_step_shapes_test COMMAND probe_bolt_step_shapes_test)
 set_tests_properties(probe_bolt_step_shapes_test PROPERTIES LABELS bolt)
+# Spec 17a (plan 17a Task 1): probe_tp's tensor-parallel shapes (tools/probe/tp_shapes.h) from ModelDesc through a
+# tp_rank / tp_size view - spec 17 §R2.5's per-card linears, 128 / 144 all-reduces of 20 KiB. Host only.
+add_executable(tp_shapes_test kernels/tp_shapes_test.cc)
+target_include_directories(tp_shapes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tools/probe)
+target_link_libraries(tp_shapes_test PRIVATE b70_model)
+add_test(NAME tp_shapes_test COMMAND tp_shapes_test)
 # Task 2: the kernels' host twin (tests/kernels/bolt_ref.h) against 25a's bolt_ref.py / bolt_mamba_ops.py
 # (tests/kernels/bolt_fixture.h, tools/oracle/bolt_fixture.py) and the semantics' properties. Host only.
 add_executable(bolt_ref_test kernels/bolt_ref_test.cc)
