@@ -40,6 +40,16 @@ float tie_tol() {
   const char* e = std::getenv("B70_KOL_TIE_TOL");
   return e && *e ? std::strtof(e, nullptr) : 1e-2f;
 }
+// A route row's k ids as uint32 (element by element: gcc 15's -Wfree-nonheap-object misreads the range constructor
+// from an int32 pointer once main inlines it).
+template <class T>
+std::vector<uint32_t> ids_of(const T* p, uint32_t k, bool sorted = false) {
+  std::vector<uint32_t> v;
+  v.reserve(k);
+  for (uint32_t i = 0; i < k; ++i) v.push_back(uint32_t(p[i]));
+  if (sorted) std::sort(v.begin(), v.end());
+  return v;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -117,17 +127,15 @@ int main(int argc, char** argv) {
           jcos_g[l].push_back(golden::row_cos(jr, w.data(), d.hidden));
           const int32_t* ji = J->i32("route.moe.ids.L" + ls, size_t(grows) * d.top_k) + size_t(t) * d.top_k;
           const uint32_t* ei = r.data() + size_t(l) * runtime::kolibri::kRouteWords + kernels::kolibri::route::kIds;
-          std::vector<uint32_t> js(ji, ji + d.top_k), es(ei, ei + d.top_k), gs(gi, gi + d.top_k);
-          std::sort(js.begin(), js.end());
-          std::sort(es.begin(), es.end());
-          std::sort(gs.begin(), gs.end());
+          const std::vector<uint32_t> js = ids_of(ji, d.top_k, true), es = ids_of(ei, d.top_k, true),
+                                      gs = ids_of(gi, d.top_k, true);
           jdiff_e += es != js;
           jdiff_g += gs != js;
         }
         const float gap = g.f32("route.moe.gap.L" + ls, grows)[t];
         const uint32_t* er = r.data() + size_t(l) * runtime::kolibri::kRouteWords + kernels::kolibri::route::kIds;
         ++rows;
-        std::vector<uint32_t> ge(er, er + d.top_k), wa(gi, gi + d.top_k);
+        const std::vector<uint32_t> ge = ids_of(er, d.top_k), wa = ids_of(gi, d.top_k);
         if (ge == wa) continue;
         uint32_t common = 0;
         for (uint32_t x : ge) common += std::count(wa.begin(), wa.end(), x) ? 1u : 0u;
