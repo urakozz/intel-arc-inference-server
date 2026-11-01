@@ -923,3 +923,14 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_VERIFY_DPAS)
   b70_target_kernel_dir(probe_verify_rows)
   add_dependencies(probe_verify_rows ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
 endif()
+
+# --- probe_chunk_rows: plan 5d P0, the prefill linears at a 4096-row chunk ------------------
+# Plan: docs/superpowers/plans/2026-10-27-spec5d-prefill-chunk-4096.md (Task 1). Record:
+# docs/probe-prefill-chunk-4096-<date>.md. Production kernels only (pf_int8 / pf_dequant_slab /
+# pf_gemm), M = 4096 against 2 x 2048; no production file is touched.
+add_executable(probe_chunk_rows probe_chunk_rows.cc)
+target_include_directories(probe_chunk_rows PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_chunk_rows PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_chunk_rows)
+get_property(PCR_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_chunk_rows ${PCR_PF_KERNELS})
