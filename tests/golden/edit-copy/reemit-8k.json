@@ -1,0 +1,218 @@
+{
+ "name": "reemit-8k",
+ "kind": "reemit",
+ "depth": "8k",
+ "expect": "copy",
+ "enable_thinking": false,
+ "source_span": [
+  1007,
+  3236
+ ],
+ "distance": 4953,
+ "messages": [
+  {
+   "role": "system",
+   "content": "You are a coding agent working in a local checkout of b70-inference-server, an LLM inference engine for the Intel Arc Pro B70 written in C++ with Level Zero kernels, plus Python and shell tooling. The repository is at /work.\n\nYou help the user with software engineering tasks: finding code, explaining it, editing it and running builds and tests. Use the tools you are given to inspect the repository; never guess the contents of a file you have not read. Prefer grep and glob to locate code, read to look at it, edit to change it (the oldString must match the file exactly, including indentation) and bash to run commands.\n\nGuidelines:\n- Be concise. Do not explain what you are about to do at length; act.\n- Make one tool call at a time and wait for its result.\n- Keep edits minimal and in the style of the surrounding code.\n- Paths passed to tools are absolute and start with /work.\n- The C++ tree builds with CMake into /work/build; tests are ctest targets named after their source file (for example tests/prefill/dequant_test.cc is dequant_test). The Python tools run with python3 and their tests with python3 -m pytest.\n- Do not commit, push or change git state unless the user asks."
+  },
+  {
+   "role": "user",
+   "content": "Read /work/src/server/adaptive_k.cc."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_1",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/server/adaptive_k.cc",
+       "limit": 120
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_1",
+   "content": "<file>\n00001| #include \"server/adaptive_k.h\"\n00002| \n00003| #include <algorithm>\n00004| #include <cerrno>\n00005| #include <cmath>\n00006| #include <cstdlib>\n00007| #include <stdexcept>\n00008| \n00009| namespace server {\n00010| \n00011| MtpCost MtpCost::bf16_head() { return MtpCost{}; }\n00012| \n00013| // Spec 9 H2 (docs/BENCHMARKS.md, \"int8 lm_head\"): the int8 head makes drafts 34 % cheaper\n00014| // and each verify ~2 ms cheaper; in units of the int8 plain step (32.65 ms). Derived, to be\n00015| // replaced by the box's own measurement (spec 8 §10).\n00016| MtpCost MtpCost::int8_head() {\n00017|   MtpCost c;\n00018|   c.verify = {1.00, 1.18, 1.56, 1.79};\n00019|   c.draft = {0.13, 0.26, 0.38};\n00020|   return c;\n00021| }\n00022| \n00023| MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {\n00024|   MtpCost c = i8_head ? int8_head() : bf16_head();\n00025|   while (c.verify.size() < 8) c.verify.push_back(c.verify.back() + 0.22);\n00026|   const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +\n00027|                    (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);\n00028|   c.draft.assign(7, d);\n00029|   return c;\n00030| }\n00031| \n00032| double MtpCost::dflash_head_share(bool i8_head, bool int8_drafter) {\n00033|   const double h = i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16;\n00034|   return h / (h + (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16));\n00035| }\n00036| \n00037| MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {\n00038|   if (!(head_share >= 0 && head_share <= 1) || !(fraction > 0 && fraction <= 1))\n00039|     throw std::invalid_argument(\"MtpCost::with_draft_vocab: head_share in [0, 1], fraction in (0, 1]\");\n00040|   MtpCost c = *this;\n00041|   const double scale = (1.0 - head_share) + head_share * fraction;\n00042|   for (double& d : c.draft) d *= scale;\n00043|   return c;\n00044| }\n00045| \n00046| MtpCost MtpCost::with_free_drafts() const {\n00047|   MtpCost c = *this;\n00048|   c.draft.assign(verify.empty() ? 0 : verify.size() - 1, 0.0);\n00049|   return c;\n00050| }\n00051| \n00052| namespace {\n00053| \n00054| std::vector<double> parse_list(const std::string& key, const std::string& text) {\n00055|   std::vector<double> out;\n00056|   size_t at = 0;\n00057|   while (at <= text.size()) {\n00058|     const size_t comma = std::min(text.find(',', at), text.size());\n00059|     const std::string item = text.substr(at, comma - at);\n00060|     if (item.empty()) throw std::invalid_argument(\"--mtp-cost: empty value in '\" + key + \"'\");\n00061|     char* end = nullptr;\n00062|     errno = 0;\n00063|     const double v = std::strtod(item.c_str(), &end);\n00064|     if (errno != 0 || end != item.c_str() + item.size() || !std::isfinite(v) || v <= 0)\n00065|       throw std::invalid_argument(\"--mtp-cost: '\" + item + \"' is not a positive cost\");\n00066|     out.push_back(v);\n00067|     at = comma + 1;\n00068|   }\n00069|   return out;\n00070| }\n00071| \n00072| }  // namespace\n00073| \n00074| MtpCost MtpCost::parse(const std::string& text, const MtpCost& base) {\n00075|   MtpCost c = base;\n00076|   bool seen_verify = false, seen_draft = false;\n00077|   size_t at = 0;\n00078|   if (text.empty()) throw std::invalid_argument(\"--mtp-cost: empty\");\n00079|   while (at <= text.size()) {\n00080|     const size_t semi = std::min(text.find(';', at), text.size());\n00081|     const std::string part = text.substr(at, semi - at);\n00082|     const size_t eq = part.find('=');\n00083|     if (eq == std::string::npos)\n00084|       throw std::invalid_argument(\"--mtp-cost: expected verify=... or draft=..., got '\" + part + \"'\");\n00085|     const std::string key = part.substr(0, eq);\n00086|     std::vector<double> v = parse_list(key, part.substr(eq + 1));\n00087|     if (key == \"verify\" && !seen_verify) {\n00088|       seen_verify = true;\n00089|       c.verify = std::move(v);\n00090|     } else if (key == \"draft\" && !seen_draft) {\n00091|       seen_draft = true;\n00092|       c.draft = std::move(v);\n00093|     } else {\n00094|       throw std::invalid_argument(\"--mtp-cost: unknown or repeated key '\" + key + \"'\");\n00095|     }\n00096|     at = semi + 1;\n00097|   }\n00098|   return c;\n00099| }\n00100| \n00101| uint32_t MtpCost::max_k() const {\n00102|   if (verify.empty()) return 0;\n00103|   return static_cast<uint32_t>(std::min(verify.size() - 1, draft.size()));\n00104| }\n00105| \n00106| double MtpCost::cost(uint32_t k) const {\n00107|   if (k == 0) return 1.0;\n00108|   if (k > max_k()) throw std::out_of_range(\"MtpCost: no cost for K = \" + std::to_string(k));\n00109|   return verify[k] + draft[k - 1];\n00110| }\n00111| \n00112| AdaptiveK::AdaptiveK(const AdaptiveKOptions& opts)\n00113|     : o_(opts),\n00114|       max_k_(std::min(opts.max_k, opts.cost.max_k())),\n00115|       s_(opts.prior * opts.prior_weight),\n00116|       t_(opts.prior_weight),\n00117|       cur_(max_k_) {\n00118|   if (!(opts.prior_weight > 0) || !(opts.prior > 0 && opts.prior <= 1))\n00119|     throw std::invalid_argument(\"AdaptiveK: the prior needs 0 < prior <= 1 and a weight > 0\");\n00120| }\n\n(File has more lines. Use 'offset' parameter to read beyond line 120)\n</file>"
+  },
+  {
+   "role": "user",
+   "content": "Before we go on, read the files the build touches, one at a time."
+  },
+  {
+   "role": "assistant",
+   "content": "",
+   "tool_calls": [
+    {
+     "id": "call_2",
+     "type": "function",
+     "function": {
+      "name": "read",
+      "arguments": {
+       "filePath": "/work/src/server/server.cc",
+       "limit": 279
+      }
+     }
+    }
+   ]
+  },
+  {
+   "role": "tool",
+   "tool_call_id": "call_2",
+   "content": "<file>\n00001| #include \"server/server.h\"\n00002| \n00003| #include <algorithm>\n00004| #include <atomic>\n00005| #include <chrono>\n00006| #include <condition_variable>\n00007| #include <cstdio>\n00008| #include <cstdint>\n00009| #include <deque>\n00010| #include <mutex>\n00011| #include <optional>\n00012| #include <set>\n00013| #include <stdexcept>\n00014| #include <thread>\n00015| #include <utility>\n00016| \n00017| #include <httplib.h>\n00018| \n00019| #include \"server/lookup_in_dflash.h\"\n00020| #include \"server/prompt_lookup.h\"\n00021| \n00022| namespace server {\n00023| namespace {\n00024| \n00025| uint64_t unix_time() {\n00026|   return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(\n00027|                                     std::chrono::system_clock::now().time_since_epoch())\n00028|                                     .count());\n00029| }\n00030| \n00031| double steady_seconds() {\n00032|   return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();\n00033| }\n00034| \n00035| std::string request_id(bool chat, uint64_t sequence) {\n00036|   return std::string(chat ? \"chatcmpl-\" : \"cmpl-\") + std::to_string(sequence);\n00037| }\n00038| \n00039| }  // namespace\n00040| \n00041| struct Server::Impl {\n00042|   httplib::Server svr;\n00043|   std::set<uint32_t> eos;\n00044|   mutable std::mutex state_mutex;\n00045|   std::condition_variable queue_changed;\n00046|   uint64_t next_ticket = 0;\n00047|   uint64_t serving = 0;\n00048|   size_t waiting = 0;\n00049|   int port = 0;\n00050|   std::thread thread;\n00051|   std::atomic<uint64_t> next_id{0};\n00052|   std::atomic<uint64_t> next_log{0};\n00053|   uint64_t created = unix_time();\n00054|   std::unique_ptr<PrefixSession> prefix;\n00055|   // Spec 19e: the request's ids (and, with lookup_history, earlier requests' generated ids).\n00056|   PromptLookup lookup;\n00057|   std::deque<std::vector<uint32_t>> lookup_history;\n00058|   // Spec 19f: --spec dflash-lookup's policy (its state is per request, its counters the server's).\n00059|   std::optional<LookupInDFlash> lookup_in_dflash;\n00060| };\n00061| \n00062| Server::Server(Deps deps, Options opts)\n00063|     : deps_(deps), opts_(std::move(opts)), impl_(std::make_unique<Impl>()) {\n00064|   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());\n00065|   if (opts_.spec_lookup) {\n00066|     if (deps_.engine.verify_k() == 0)\n00067|       throw std::invalid_argument(\"--spec lookup: this engine cannot verify external drafts\");\n00068|     if (deps_.engine.mtp_k() != 0)\n00069|       throw std::invalid_argument(\"--spec lookup and --mtp are one proposer each; pick one\");\n00070|     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||\n00071|         opts_.lookup_min_match > impl_->lookup.options().max_match)\n00072|       throw std::invalid_argument(\"--spec-min-match must be in [2, 64]\");\n00073|   }\n00074|   if (opts_.spec_dflash_lookup) {   // spec 19f\n00075|     if (opts_.spec_lookup)\n00076|       throw std::invalid_argument(\"--spec dflash-lookup and --spec lookup are one proposer each; pick one\");\n00077|     if (deps_.engine.mtp_k() == 0 || deps_.engine.dflash_window() == 0)\n00078|       throw std::invalid_argument(\"--spec dflash-lookup: this engine has no DFlash drafter to fall back to\");\n00079|     LookupInDFlashOptions o;\n00080|     o.window = deps_.engine.dflash_window();\n00081|     o.max_k = deps_.engine.mtp_k();\n00082|     impl_->lookup_in_dflash.emplace(o);\n00083|   }\n00084|   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes,\n00085|                                                   opts_.prefix_alloc);\n00086|   impl_->svr.set_tcp_nodelay(opts_.tcp_nodelay);\n00087|   impl_->svr.Post(\"/v1/chat/completions\",\n00088|                   [this](const httplib::Request& request, httplib::Response& response) {\n00089|                     handle(request, response, true);\n00090|                   });\n00091|   impl_->svr.Post(\"/v1/completions\",\n00092|                   [this](const httplib::Request& request, httplib::Response& response) {\n00093|                     handle(request, response, false);\n00094|                   });\n00095|   impl_->svr.Get(\"/v1/models\", [this](const httplib::Request&, httplib::Response& response) {\n00096|     response.set_content(models_body(opts_.served_model, impl_->created), \"application/json\");\n00097|   });\n00098| }\n00099| \n00100| Server::~Server() { stop(); }\n00101| \n00102| bool Server::bind() {\n00103|   int bound = 0;\n00104|   if (opts_.port == 0) {\n00105|     bound = impl_->svr.bind_to_any_port(opts_.host);\n00106|     if (bound <= 0) return false;\n00107|   } else {\n00108|     if (!impl_->svr.bind_to_port(opts_.host, opts_.port)) return false;\n00109|     bound = opts_.port;\n00110|   }\n00111|   std::lock_guard<std::mutex> lock(impl_->state_mutex);\n00112|   impl_->port = bound;\n00113|   return true;\n00114| }\n00115| \n00116| bool Server::listen() {\n00117|   if (!bind()) return false;\n00118|   return impl_->svr.listen_after_bind();\n00119| }\n00120| \n00121| bool Server::start() {\n00122|   {\n00123|     std::lock_guard<std::mutex> lock(impl_->state_mutex);\n00124|     if (impl_->thread.joinable() || impl_->port != 0) return false;\n00125|   }\n00126|   if (!bind()) return false;\n00127|   impl_->thread = std::thread([this] { (void)impl_->svr.listen_after_bind(); });\n00128|   return true;\n00129| }\n00130| \n00131| void Server::stop() {\n00132|   if (!impl_) return;\n00133|   impl_->svr.stop();\n00134|   if (impl_->thread.joinable()) impl_->thread.join();\n00135| }\n00136| \n00137| int Server::bound_port() const {\n00138|   std::lock_guard<std::mutex> lock(impl_->state_mutex);\n00139|   return impl_->port;\n00140| }\n00141| \n00142| bool Server::acquire(uint64_t& ticket) {\n00143|   std::unique_lock<std::mutex> lock(impl_->state_mutex);\n00144|   const bool busy = impl_->next_ticket != impl_->serving;\n00145|   if (busy && impl_->waiting >= opts_.queue_depth) {\n00146|     ticket = static_cast<uint64_t>(impl_->waiting);\n00147|     return false;\n00148|   }\n00149|   ticket = impl_->next_ticket++;\n00150|   if (ticket == impl_->serving) return true;\n00151|   ++impl_->waiting;\n00152|   impl_->queue_changed.wait(lock, [this, ticket] { return ticket == impl_->serving; });\n00153|   --impl_->waiting;\n00154|   return true;\n00155| }\n00156| \n00157| void Server::release() {\n00158|   {\n00159|     std::lock_guard<std::mutex> lock(impl_->state_mutex);\n00160|     ++impl_->serving;\n00161|   }\n00162|   impl_->queue_changed.notify_all();\n00163| }\n00164| \n00165| Server::Outcome Server::generate(const Request& r,\n00166|                                  const std::function<void(const Delta&)>& emit) {\n00167|   Outcome outcome;\n00168|   std::string prompt;\n00169|   try {\n00170|     if (!r.chat) {\n00171|       prompt = r.prompt;\n00172|     } else if (opts_.chat_format.template_kwargs()) {   // spec 18d (K2-Horizon), 20e (Kolibri-1), 25e (Bolt)\n00173|       // Spec 25e: Bolt maps the top-level reasoning_effort onto its template switches (decision 13).\n00174|       const nlohmann::json kwargs = request_template_kwargs(opts_.chat_format, r.template_kwargs, r.reasoning_effort);\n00175|       check_template_kwargs(opts_.chat_format, kwargs);\n00176|       // Spec 25e: the kwargs after the reasoning_effort mapping may carry the enable_thinking the request did not (Bolt: none /\n00177|       // minimal); the template variable is that one (for every other format the kwargs' value IS r.enable_thinking).\n00178|       const bool thinking = kwargs.is_object() && kwargs.contains(\"enable_thinking\") && kwargs.at(\"enable_thinking\").is_boolean()\n00179|                                 ? kwargs.at(\"enable_thinking\").get<bool>()\n00180|                                 : r.enable_thinking;\n00181|       prompt = deps_.tmpl.render_with_kwargs(template_messages(opts_.chat_format, r.messages), r.tools, thinking, kwargs);\n00182|     } else {\n00183|       prompt = deps_.tmpl.render(r.messages, r.tools, r.enable_thinking);\n00184|     }\n00185|   } catch (const std::exception& error) {\n00186|     throw BadRequest(error.what());\n00187|   }\n00188|   outcome.prompt_ids = deps_.tok.encode(prompt);\n00189|   const uint32_t max_len = deps_.engine.max_len();\n00190|   if (outcome.prompt_ids.empty()) throw BadRequest(\"prompt encodes to zero tokens\");\n00191|   if (outcome.prompt_ids.size() + 1 > max_len) {\n00192|     throw BadRequest(\"prompt is \" + std::to_string(outcome.prompt_ids.size()) +\n00193|                      \" tokens; max_model_len is \" + std::to_string(max_len));\n00194|   }\n00195|   const uint32_t budget = static_cast<uint32_t>(max_len - outcome.prompt_ids.size());\n00196|   const uint32_t max_tokens = std::min(r.max_tokens.value_or(budget), budget);\n00197|   outcome.usage.prompt_tokens = static_cast<uint32_t>(outcome.prompt_ids.size());\n00198| \n00199|   // Spec 7 §3.3: restart from the resident session or the deepest host snapshot, prefill\n00200|   // the tail (the block hook writes it through); with the cache off, reset() + prefill.\n00201|   PrefixSession& session = *impl_->prefix;\n00202|   outcome.prefix = session.begin(outcome.prompt_ids, r.chat && opts_.prefix_split_last);\n00203|   outcome.usage.cached_tokens = outcome.prefix.restart;\n00204|   if (session.enabled()) {\n00205|     std::fprintf(stderr,\n00206|                  \"prefix: kind %s restart %u of %zu kv_bytes %zu restore_ms %.1f prefill_ms %.1f\"\n00207|                  \" store_ms %.1f\\n\",\n00208|                  plan_kind_name(outcome.prefix.kind), outcome.prefix.restart,\n00209|                  outcome.prompt_ids.size(), outcome.prefix.kv_bytes, outcome.prefix.restore_ms,\n00210|                  outcome.prefix.prefill_ms, outcome.prefix.store_ms);\n00211|     std::fflush(stderr);\n00212|   }\n00213|   try {\n00214|     generate_tail(r, prompt, max_tokens, outcome, emit);\n00215|   } catch (...) {\n00216|     session.fail();\n00217|     throw;\n00218|   }\n00219|   return outcome;\n00220| }\n00221| \n00222| void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,\n00223|                            Outcome& outcome, const std::function<void(const Delta&)>& emit) {\n00224|   PrefixSession& session = *impl_->prefix;\n00225|   // Spec 24e (decision 1): a request with a repetition penalty carries the distinct ids of its prompt and of every id\n00226|   // consumed so far, for an engine adapter that applies it (the host sampler, before temperature / top-k / top-p).\n00227|   SeenIds seen;\n00228|   Sampling sampling = r.sampling;\n00229|   const bool penalised = sampling.repetition_penalty != 1.0f;\n00230|   if (penalised) {\n00231|     for (uint32_t id : outcome.prompt_ids) seen.add(id);\n00232|     sampling.seen = &seen;\n00233|   }\n00234|   std::unique_ptr<StreamerIface> streamer = deps_.tok.streamer();\n00235|   if (!streamer) throw BadRequest(\"tokenizer did not provide a streamer\");\n00236| \n00237|   size_t hold = 0;\n00238|   for (const std::string& stop : r.stop) {\n00239|     hold = std::max(hold, stop.empty() ? 0U : stop.size() - 1);\n00240|   }\n00241|   // Stop strings apply to content; `pending` holds content not yet emitted.\n00242|   std::string pending;\n00243|   const auto flush_pending = [&](bool final) {\n00244|     const size_t keep = final ? 0 : std::min(hold, pending.size());\n00245|     if (pending.size() <= keep) return;\n00246|     Delta d;\n00247|     d.kind = Delta::Content;\n00248|     d.text = pending.substr(0, pending.size() - keep);\n00249|     outcome.text += d.text;\n00250|     outcome.parsed.content += d.text;\n00251|     pending.erase(0, d.text.size());\n00252|     emit(d);\n00253|   };\n00254|   // Chat: the text goes through the tool-call parser (spec 7 §3.5) of the model's format\n00255|   // (spec 18d, server/chat_format.h). Qwen: with thinking on, the prompt ends in \"<think>\\n\"\n00256|   // and the output opens with reasoning; K2-Horizon: <ifm|think>\\n and its own call syntax.\n00257|   std::unique_ptr<OutputParser> parser;\n00258|   if (r.chat) parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);\n00259|   const auto route = [&](const std::vector<Delta>& deltas) {\n00260|     for (const Delta& d : deltas) {\n00261|       if (d.kind == Delta::Content) {\n00262|         pending += d.text;\n00263|         continue;\n00264|       }\n00265|       flush_pending(true);\n00266|       if (d.kind == Delta::Reasoning) outcome.parsed.reasoning += d.text;\n00267|       else outcome.parsed.tool_calls.push_back(d.call);\n00268|       emit(d);\n00269|     }\n00270|   };\n00271|   const auto add_text = [&](const std::string& text) {\n00272|     outcome.raw_text += text;\n00273|     if (parser) route(parser->push(text));\n00274|     else pending += text;\n00275|   };\n00276| \n00277|   outcome.finish_reason = \"length\";\n00278|   bool eos_stop = false;\n00279|   std::optional<AdaptiveK> policy;   // --mtp auto (spec 8 §10) or --spec lookup (spec 19e)\n\n(File has more lines. Use 'offset' parameter to read beyond line 279)\n</file>"
+  },
+  {
+   "role": "user",
+   "content": "In /work/src/server/adaptive_k.cc, rename `parse_list` to `parse_list_impl` everywhere (the definition and every use) and output the whole file with the change, nothing else."
+  }
+ ],
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file from the local filesystem.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string",
+       "description": "Absolute path to the file"
+      },
+      "offset": {
+       "type": "integer",
+       "description": "Line to start from"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "Number of lines to read"
+      }
+     },
+     "required": [
+      "filePath"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "grep",
+    "description": "Search file contents with a regular expression.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      },
+      "include": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "glob",
+    "description": "Find files by glob pattern.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "pattern": {
+       "type": "string"
+      },
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "pattern"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      },
+      "description": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command",
+      "description"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "edit",
+    "description": "Replace an exact string in a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "oldString": {
+       "type": "string"
+      },
+      "newString": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "oldString",
+      "newString"
+     ]
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "filePath": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "filePath",
+      "content"
+     ]
+    }
+   }
+  }
+ ]
+}
