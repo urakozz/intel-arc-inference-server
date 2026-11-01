@@ -103,7 +103,10 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // table has no M column, so it cannot vary by M). `layout` 0 / 1 int4 (gemv's S and layout, the
 // key), 2 int8 (gemv_i8w's: S 1). The knobs are gemm_sm.cl's:
 //   wg      the in-work-group split-K (2 column x 8 K-slice sub-groups, SLM reduction). It writes
-//           ONE slice, so it is allowed only where gemv's S is already 1 (no consumer changes S).
+//           ONE slice (gemm_sm_out_s): where gemv's S is already 1 no consumer changes; gate||up's
+//           consumer (prep_silu_mul, SILU_S baked) is bound at its _S1 build instead (capture.cc mlp(),
+//           kernels::gemm_sm_silu_variant) - spec 28 §2's "another S with the consumer variant it needs",
+//           taken because 28b measured it >= 5 % faster at M = 8. No other consumer may change S.
 //   magic   the magic-exponent dequant (bit-identical output to the shift form; speed only).
 //   grf256  the variant's ocloc line carries -cl-intel-256-GRF-per-thread.
 //   blk2d   layout 0: the 2D block weight read, copied from gemv's production cell of the shape.
@@ -116,10 +119,10 @@ struct SmallMTuning {
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8 (and Agnes: the same attention and GDN linears)
-    {5120, 16384, 1, 1, false, true, true, false},    // qkv||z      48 layers
+    {5120, 16384, 1, 1, false, true, false, false},   // qkv||z      48 layers
     {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
     {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
-    {5120, 34816, 8, 0, false, true, false, false},   // gate||up
+    {5120, 34816, 8, 0, true, true, false, false},    // gate||up (2x8 work-group: one slice, SiLU at S 1)
     {17408, 5120, 4, 0, false, true, false, true},    // down
     {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head (and the DFlash draft head, 7 rows)
     // Agnes 3.0 Flash's folded MLP (spec 14; gemv's cells PROVISIONAL there, copied here)
@@ -145,7 +148,7 @@ inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsi
     if (t.K == K && t.N == N && t.S == S && t.layout == layout) return &t;
   return nullptr;
 }
-// The output's split-K slices (what the consumer folds): gemv's S, or 1 under wg (only where S is 1).
+// The output's split-K slices (what the consumer folds): gemv's S, or 1 under wg.
 inline constexpr unsigned gemm_sm_out_s(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
 // Work-group size and grid (N / cols, S): grid split-K 4 x 16 columns, wg 2 x 16 columns x 8 slices.
 inline constexpr unsigned gemm_sm_wg_size(const SmallMTuning& t) { return t.wg ? 256 : 64; }
@@ -153,7 +156,8 @@ inline constexpr unsigned gemm_sm_cols(const SmallMTuning& t) { return t.wg ? 32
 inline constexpr unsigned gemm_sm_grid_y(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
 inline constexpr bool small_m_table_ok() {
   for (const SmallMTuning& t : kSmallMTuning) {
-    if (t.wg && t.S != 1) return false;                        // wg writes one slice
+    // wg writes one slice: only where gemv's S is 1, or gate||up (its SiLU consumer has an _S1 build)
+    if (t.wg && t.S != 1 && !(t.layout == 0 && t.N == 2 * 17408 && t.K == 5120)) return false;
     if (t.layout == 2 && (t.S != 1 || t.magic || t.blk2d)) return false;
     if (t.blk2d && t.layout != 0) return false;
     if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
@@ -162,13 +166,14 @@ inline constexpr bool small_m_table_ok() {
   return true;
 }
 static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #error guards or changes a consumer's S");
-// gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256] (int4) / gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8):
-// every knob is in the name, so a table row CMake does not build is a missing file at capture.
+// gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256] (int4; S the OUTPUT's slices, the binary's S define) /
+// gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
+// missing file at capture.
 inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
   const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
-  return "gemm_sm" + mk + "_S" + std::to_string(t.S) + "_L" + std::to_string(t.layout) + knobs;
+  return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }
 // The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
 // together): 2..8 and 16 for the target's linears and head; the DFlash drafter's linears at its block of 8 rows;
@@ -309,6 +314,11 @@ inline std::string prep_norm_finish_strided_variant(unsigned M, unsigned K, unsi
 // both supported checkpoints - Agnes's head has no parallel FFN).
 inline std::string prep_silu_mul_s1_variant(unsigned M, unsigned I) {
   return prep_silu_mul_variant(M, I) + "_S1";
+}
+// Spec 28b: the SiLU a decode list binds after gate||up, by the slices gate||up wrote - gemv's S (SILU_S baked,
+// the plain build) or 1 (gemm_sm's 2x8 work-group, the _S1 build; built at M 2..8 for I 17408).
+inline std::string gemm_sm_silu_variant(unsigned M, unsigned I, unsigned gate_up_s, unsigned gemv_s) {
+  return gate_up_s == gemv_s ? prep_silu_mul_variant(M, I) : prep_silu_mul_s1_variant(M, I);
 }
 inline std::string attn_prep_s1_variant(unsigned M, unsigned q = kRefFaQHeads,
                                         unsigned kv = kRefFaKvHeads) {

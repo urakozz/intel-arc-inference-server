@@ -1721,7 +1721,8 @@ function(add_gemm_sm_variant M K N S L)
   endif()
 endfunction()
 # The production rows, kernels::kSmallMTuning's order: "K N S L flags...".
-set(GEMM_SM_QWEN38 "5120 16384 1 1 MG G256" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 8 0 MG"
+# (S is the OUTPUT's slices: gate||up's 2x8 work-group row compiles at S 1 - kernels::gemm_sm_out_s.)
+set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG"
                    "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
 set(GEMM_SM_AGNES "5120 38912 8 0 MG" "19456 5120 4 0 MG B2D")
 set(GEMM_SM_DRAFTER "5120 6144 1 2" "4096 5120 1 2" "5120 34816 1 2" "17408 5120 1 2" "25600 5120 1 2"
@@ -1736,8 +1737,14 @@ macro(gemm_sm_rows ROWS MLIST)
   endforeach()
 endmacro()
 set(GEMM_SM_M 2 3 4 5 6 7 8 16)
+set(GEMM_SM_CONSUMERS "")
 if(B70_DECODE_EXTRA_M OR B70_MTP)
   gemm_sm_rows(GEMM_SM_QWEN38 GEMM_SM_M)
+  # gate||up's SiLU after the one-slice 2x8 work-group (kernels::gemm_sm_silu_variant): SILU_S 1 at the lists' M
+  foreach(MM 2 3 4 5 6 7 8)
+    add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
+    list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
+  endforeach()
   if(B70_AGNES)
     gemm_sm_rows(GEMM_SM_AGNES GEMM_SM_M)
   endif()
@@ -1750,6 +1757,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
 endif()
 # tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
 set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})
+set_property(GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS ${GEMM_SM_CONSUMERS})
 # ==== Spec 28b ==== (end) ====
 
 add_subdirectory(prefill)

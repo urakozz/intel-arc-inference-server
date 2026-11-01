@@ -49,7 +49,12 @@ void verify_names(const model::ModelDesc& d, unsigned M, std::set<std::string>& 
     out.insert(kernels::int4_linear_variant(kernels::LinearKind::SmallM, M, s.K, s.N, s.S, s.layout));
   }
   out.insert(bf16(M, H, d.shape(LinearId::AB).N));
-  out.insert(kernels::prep_silu_mul_variant(M, d.intermediate));
+  out.insert(kernels::prep_silu_mul_variant(M, d.intermediate));   // after gemv (forced)
+  {   // spec 28b: after gemm_sm's gate||up - its S 1 build when the row is the one-slice 2x8 work-group
+    const model::GemvShape& gu = d.shape(LinearId::GateUp);
+    const kernels::SmallMTuning* t = kernels::small_m_tuning(gu.K, gu.N, gu.S, gu.layout);
+    if (t) out.insert(kernels::gemm_sm_silu_variant(M, d.intermediate, kernels::gemm_sm_out_s(*t), gu.S));
+  }
   out.insert(kernels::gdn_step_slots_variant(M, d.gdn_layers, k, v, kSlots8));
   out.insert(kernels::prep_gated_head_variant(M, k, v));
   out.insert(kernels::attn_prep_variant(M, q, kv));
