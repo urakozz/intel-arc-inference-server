@@ -1,6 +1,6 @@
 # Spec 29f - Nanbeige4.3-33B speculative decoding: acceptance P0, lookup on the dense verify list, the DFlash2 drafter generalised, int8 KV with it, the measured cost table
 
-**Status (2026-11-01): PLANNED - after 29e AND spec 28b, spec 28c and plan 19f.** Nothing built. No box queue row. This plan starts only when those are merged (or the operator waives one by name).
+**Status (2026-11-01): PLANNED - after 29e AND spec 28b (being built), spec 28c (design only, no plan) and plan 19f (being built).** Nothing built. No box queue row. This plan starts only when those are merged (or the operator waives one by name). Task 2 (the acceptance P0) is CPU work on 29c / 29d's tap dumps and needs none of the three: the operator may run it early.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax. **Commit after every step** (signed; `WIP:` if needed); handoff file when you stop.
 
@@ -12,8 +12,8 @@
 
 ## Dependencies and branch points
 
-- 29e merged (served engine); 29c's tap dump (Task 8) and 29a's judge taps; **spec 28b merged with Nanbeige's five shapes added to its table (operator's confirmation, spec 29 open decision 1)** and 28c merged; **plan 19f merged** (lookup-in-DFlash policy; the dense family adopts whatever it ships). If 28b is waived, M = 8 verify costs ~3.1 plain steps on the GEMVs (spec 28 §1) and the drafter's value shrinks accordingly - the plan then measures first and says so.
-- **Third-party weights:** the drafter repo is the operator's download (`hf download ProCreations/Nanbeige4.3-33B-DFlash2`; Apache 2.0, 979,731,200 bf16 parameters, config schema as spec 29 §7.2). Revision pinned in the facts record.
+- 29e merged (served engine); 29c's tap dump (Task 8) and 29a's judge taps; **spec 28b merged with Nanbeige's five shapes added to its table (operator's confirmation, spec 29 open decision 1)** and 28c merged; **plan 19f merged** (lookup-in-DFlash policy; the dense family adopts whatever it ships). If 28b is waived, M = 8 verify costs ~3.1-3.2 plain steps (Qwen3.8 measured: GEMM sum 3.10x, whole verify(8) 3.17, busy box) and the drafter's value shrinks accordingly - the plan then measures first and says so.
+- **Third-party weights:** the drafter repo is the operator's download (`hf download ProCreations/Nanbeige4.3-33B-DFlash2 --revision 22a73c4d099e61a34b6a26251b0a3a98a7b41746`; Apache 2.0 with `SPECFORGE-LICENSE.txt` / `NOTICE.md`, 979,731,200 bf16 parameters, no embedding / head, config schema as spec 29 §7.2). **Format is an operator decision (spec 29 open decision 2):** the shipped BF16 linears quantised to int8 at load is the z-lab precedent; AutoRound int4 g64 by us needs a loader path main does not have.
 - Branch `spec29f-nanbeige-speculative`.
 
 ## Global Constraints
@@ -30,7 +30,7 @@
 2. **The target-side taps.** Layers 1, 25, 49 (zero-based layer *outputs*, the residual before the final norm; HF `hidden_states[2, 26, 50]`) - a test pins the convention on the tiny model (an off-by-one here silently halves acceptance).
 3. **`kTopK` 16 -> 32, fc 5 x H -> 3 x H, rank 256 -> 128, mask id 0, eps 1e-5, theta 1.2e8** are descriptor-driven in the new variants; `check_common`'s Qwen pins become descriptor checks with the same strictness (a descriptor that is neither the Qwen3.8 shape nor the Nanbeige shape is refused by name).
 4. **Window vs full-context drafter attention** is a measured choice (spec 29 §7.3 item 2); the full-context form's KV (6,144 B per position) is in the memory plan and refused when the context would not fit.
-5. **`--pp 2` with the drafter:** taps from both stages reach the drafter; the anchor's embedding row crosses with the hand-off; spec 19's `--pp 2` DFlash has never run on a card, so a two-card run of the Qwen path's equivalent is **not** assumed to have been validated.
+5. **`--pp 2` with the drafter:** taps from both stages reach the drafter; the anchor's embedding row crosses with the hand-off (no embedding replica on stage 1, unlike Qwen3.8's 2.54 GB one). Spec 19's `--pp 2` DFlash has run on the cards for Qwen3.8 (r56.d5_pp, ids identical); the dense binding is new code and is validated on its own.
 6. **Verify at M <= 8 on the dense list:** `dn_attn` accepts M up to 8 (K2's limit of 4 is lifted in the copy, with spec 28c's by-shape variants), `gemm_sm` binds at M >= 2 (28b's `gemv_kind(M)`), rows bitwise across M >= 2 (28's property R) and equal to M = 1 within the cosine bars of spec 28 N4.
 
 ---
@@ -45,13 +45,13 @@
 
 **Files:** Create `tools/oracle/dense_dflash_ref.py` (the vendor's `DFlash2DraftModel` forward in PyTorch from its config and weights, window / full-context switch; `dflash_ref.py`'s arrangement), `tools/spec/dense_accept.py`, `docs/probe-nanbeige-dflash-2026-11-<dd>.md`.
 
-- [ ] **Step 1:** load the drafter and the target's embedding / head from the snapshots; run it on 29c's tap dumps (teacher-forced decode over golden / A4 / the agentic session) at depths **4k, 32k, 128k, 240k** (taps at depth come from the engine's long-context runs, one pass over the session prefix), window 2048 and full context; per anchor the accepted-run length at K = 7: tau per corpus, per depth, per position (E_1 / E_3 / E_7 as the Qwen probe's table). **Step 2: the stop rule and the window decision** (tau >= 2.5 on A4 and the session at 32k; full context only if its tau at 128k+ is >= 0.4 above the window's). **Step 3:** the verdict in the doc and spec 29 §7.3; **commit.** **If the stop rule fails, skip to Task 7.**
+- [ ] **Step 1:** load the drafter and the target's embedding / head from the snapshots; run it on 29c's tap dumps (teacher-forced decode over golden / A4 / the agentic session) at depths **4k, 32k, 128k, 240k** (taps at depth come from the engine's long-context runs, one pass over the session prefix), window 2048 and full context; per anchor the accepted-run length at K = 7: tau per corpus, per depth, per position (E_1 / E_3 / E_7 as the Qwen probe's table). **Step 2: the stop rule and the window decision** (tau >= 2.5 on A4 and the session at 32k; full context only if its tau at 128k+ is >= 0.4 above the window's). The drafter was trained full-context and published only to 8k: the window-2048 arm is outside its training, so a low (a) is expected and is not by itself a verdict on the drafter. **Step 3:** the verdict in the doc and spec 29 §7.3; **commit.** **If the stop rule fails, skip to Task 7.**
 
 ### Task 3: the drafter descriptor and loader generalisation
 
 **Files:** modify `src/model/dflash.{h,cc}` (descriptor already generic; add the checks), `src/loader/dflash_{layout,repack}.cc` (verify q_n / kv_n / fc_k at 3 x 7168 -> 7168), `src/cli/dflash_args.h` (`--draft-model` default stays z-lab's for Qwen; for the dense family it is **required**); tests `tests/model/dflash_dense_test.cc`, `tests/loader/dflash_dense_layout_test.cc`.
 
-- [ ] **Step 1: failing tests** on a tiny drafter built from the vendor's config shape (3 layers, hidden 7168 scaled down, 28 / 4 heads x 128 -> a tiny variant, taps, selector rank 128 / top-k 32); **Step 2: implement; Step 3: commit.** Format: int8 first (`--draft-format int8`, 0.98 GB); the int4 g64 sym drafter (the operator's re-quantisation job; AutoRound of the vendor's weights, 0.52 GB) is loaded by the same path when it exists (`DraftFormat::Int4G64`).
+- [ ] **Step 1: failing tests** on a tiny drafter built from the ProCreations drafter's config shape (3 layers, hidden 7168 scaled down, 28 / 4 heads x 128 -> a tiny variant, taps, selector rank 128 / top-k 32); **Step 2: implement; Step 3: commit.** Format: int8 at load first (`--draft-format int8`, 0.98 GB, the z-lab precedent - subject to the operator's open decision 2). An int4 g64 sym drafter (the operator's AutoRound job on the ProCreations weights, ~0.52 GB) has **no path on main**: `DraftFormat::Int4G64` was dropped with Muse (98c13ef) and was RTN at load (`git show 99adbb0:src/loader/dflash_layout.h`, `dflash_repack.cc`); if the operator chooses int4, this task revives it under the same name and makes it read the `auto_round:auto_gptq` bytes - a scope addition, stated in the handoff.
 
 ### Task 4: the drafter's kernels at the Nanbeige shape
 
@@ -67,7 +67,7 @@
 
 ### Task 6: the cards: DFlash, two stages, depth
 
-- [ ] **Step 1 (one stage):** D2 for the drafter kernels, the golden-with-drafter equality (N6), ids per step and wall clock on A4 / golden / the agentic session at 4k / 32k. **Step 2 (two stages):** the same at `--pp 2`, int8 KV, depths 32k / 131k / 240k / 330k - the numbers that matter: spec 29 §6's derived 52.9 / 35.1 / 25.5 / 21.0 t/s at tau 3.0 against the measured. **Step 3:** `AdaptiveK` on the measured cost table (K by corpus and depth); the memory plan's line with the drafter (the 10-18k positions lost; the planner's max-len with `--spec dflash`). **Step 4: commit** BENCHMARKS rows. A two-card DFlash failure (spec 19's `--pp 2` path was never run) is debugged here and recorded.
+- [ ] **Step 1 (one stage):** D2 for the drafter kernels, the golden-with-drafter equality (N6), ids per step and wall clock on A4 / golden / the agentic session at 4k / 32k. **Step 2 (two stages):** the same at `--pp 2`, int8 KV, depths 32k / 131k / 240k / 330k - the numbers that matter: spec 29 §6's derived 40.4 / 28.9 / 21.9 / 18.3 t/s at tau 2.9 against the measured. **Step 3:** `AdaptiveK` on the measured cost table (K by corpus and depth); the memory plan's line with the drafter (the 10-18k positions lost; the planner's max-len with `--spec dflash`). **Step 4: commit** BENCHMARKS rows. A two-card DFlash failure (spec 19's `--pp 2` path was never run) is debugged here and recorded.
 
 ### Task 7: the combined policy and the verdict
 

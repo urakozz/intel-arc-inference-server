@@ -20,7 +20,7 @@
 - Signed commits; no merge, no push; no `rm -rf`.
 - **No new CLI flag and no environment variable.** `preserve_thinking` is **not** a server option: the template's own default (undefined = reasoning kept) applies; clients may send `chat_template_kwargs` (`preserve_thinking`, `enable_thinking`, `tool_call_format`) and they reach the template - that is the only reason for the new `ChatFormat` kind.
 - Shared-source edits limited to additions: `ChatFormat::Kind::Dense` + `for_model_type("llama")`, the `b70_serve.cc` dispatch, CMake. The Qwen / K2 / Kolibri / Bolt behaviour stays byte-identical (their tests are the gate).
-- The prefix cache is **host RAM only, never on the per-token path**; a restore is a per-request copy.
+- The prefix cache is **host RAM only, never on the per-token path** (the no-offload rule): a restore is a one-time copy per request when a session resumes; every decoded token reads device-resident KV only.
 
 ## Review Focus
 
@@ -51,8 +51,8 @@
 
 **Files:** Create `src/cli/dense_serve.h` (one-stage and two-stage `EngineIface` adapters; no MTP; the DFlash / lookup hooks stay absent until 29f), `src/runtime/dense/dense_snapshot.{h,cc}`, tests `tests/runtime/dense_snapshot_test.cc`, `tests/server/dense_server_test.cc`.
 
-- [ ] **Step 1: failing tests** (host fakes: the HTTP server over a fake engine through `PrefixSession`): continuation (longest-common-prefix truncation, no read past `pos`), cache save / restore of KV blocks of 2048 with the zero-state marker, restore equals a cold prefill's KV bitwise (one stage and two stages, bf16 and int8), eviction under the host-RAM budget (`prefix_cache_size.h`: min(32 GiB, MemTotal / 2, MemAvailable - 8 GiB)), refusal of a snapshot across stage counts **not needed** (the layout is the one-stage host layout byte for byte, as spec 16b made it). **Step 2: implement. Step 3: commit.**
-- [ ] **Step 4: `b70-serve` dispatch** (`model_type: llama` -> dense; `--max-len auto`, `--pp 2`, `--kv-cache`, `--prefix-cache-gb` as existing; `--batch > 1`, `--mtp`, `--spec` (until 29f), `--prefill-backend l0-int8` refused by name with the reason). **Commit.**
+- [ ] **Step 1: failing tests** (host fakes: the HTTP server over a fake engine through `PrefixSession`): continuation (longest-common-prefix truncation, no read past `pos`), cache save / restore of KV blocks of 2048 with the zero-state marker, restore equals a cold prefill's KV bitwise (one stage and two stages, bf16 and int8), eviction under the host-RAM budget (`src/cli/prefix_cache_size.h`: min(32 GiB, MemTotal / 2, MemAvailable - 8 GiB), off below 4 GiB), refusal of a snapshot across stage counts **not needed** (the layout is the one-stage host layout byte for byte, as spec 16b made it). **Step 2: implement. Step 3: commit.**
+- [ ] **Step 4: `b70-serve` dispatch** (`model_type: llama` -> dense; `--max-len auto`, `--pp 2`, `--kv-cache`, `--prefix-cache-gb` as existing; `--batch > 1` (no generic refusal exists in the code - the dense path adds its own), `--mtp`, `--spec` (until 29f), `--prefill-backend l0-int8` refused by name with the reason). **Commit.**
 
 ### Task 5: on the cards (box)
 

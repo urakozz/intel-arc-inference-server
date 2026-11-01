@@ -14,13 +14,13 @@
 
 - 29c merged (decode, `dn_*` kernels, the engine, the hand-off). Branch `spec29d-nanbeige-prefill`.
 - **Box:** both cards, idle; the GPU lock.
-- Plan 5d (chunk 4096) is **not** a dependency: the engine's chunk is 2048 (ruling A13); the chunk is one constant, retried at 4096 only if 5d has merged.
+- Plan 5d (chunk 4096, being built) is **not** a dependency: the engine's chunk is 2048 (`PrefillScratch::kC`, ruling A13); the dense prefill takes the same constant and is retried at 4096 only if 5d has merged.
 
 ## Global Constraints
 
 - Signed commits after every step; no merge, no push; no `rm -rf`.
 - **G0:** `tools/kernel_cmdlines` additions only (`dn_pf_*` and the dense-shape prefill GEMM cells); every existing binary checksum-identical; **`l0-int8` is refused by name for the dense family** (spec 29 §3: K = 22016 is not a multiple of 1024) - a test names the reason.
-- Prefill backend default `l0`; composed attention is **diagnostic** (the dense family builds no composed path; the eager attention exists in the judge only).
+- Prefill backend default `l0`; the dense family builds **no composed / eager prefill attention** (flash only; the reference attention is the judge's). The eager *decode* kernel `dn_attn_eager` (29c) is a diagnostic twin, never a default.
 - No new flag / env var. Timed stages: idle box, interleaved pairs after warm-up.
 
 ## Review Focus
@@ -47,7 +47,7 @@
 
 ### Task 3: speed on one stage
 
-- [ ] **Step 1:** pp4096 / pp32768 (one stage, int8 and bf16 KV, `--max-len` at the single-card limit): t/s against spec 29 §9's derived 1,490 / ~700; the linear rate (`attn_flash` off in a profiled run) against ~1,780 t/s. **Step 2:** the per-phase profile (L0 GPU ms per kernel family) at pp4096: where the linears' 109 TFLOP/s effective goes; **no tuning in this plan** except a fix for a kernel that is clearly broken (> 2x off its twin's roofline), recorded for the operator. **Step 3: commit.**
+- [ ] **Step 1:** pp4096 / pp32768 (one stage, int8 and bf16 KV, `--max-len` at the single-card limit): t/s against spec 29 §9's derived 1,210 / ~630; the linear rate (`attn_flash` off in a profiled run) against ~1,400 t/s (the `l0` basis: Qwen3.8's 1,670.72 t/s). **Step 2:** the per-phase profile (L0 GPU ms per kernel family) at pp4096: where the linears' ~86 TFLOP/s effective goes; **no tuning in this plan** except a fix for a kernel that is clearly broken (> 2x off its twin's roofline), recorded for the operator. **Step 3: commit.**
 
 ### Task 4: two-stage pipelined prefill
 
