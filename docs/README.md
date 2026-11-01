@@ -106,6 +106,12 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   in production for every M >= 2 decode list (Qwen3.8, Agnes, Ornith's dense projections), M = 1 bitwise; verify(8)
   1.57 plain steps (gemv 3.17), D1 tool calls 2.12x at K = 3 (busy-box timing); N4 / N6 as written not met - the
   operator's ruling pending.
+- [probe-tp-2026-11-01.md](probes/probe-tp-2026-11-01.md) - spec 17a: tensor parallel over the two cards, Qwen3.8 first
+  (`probe_tp`): links Gen3 x16 both, 32 GB BARs, peer access; the CPU into VRAM through a dma-buf BAR mapping; the
+  all-reduce on every route - p2p-push 3.51 us a call / 0.45 ms a token at M = 1, bitwise over 10^4 replays; host-bar
+  bitwise but 31.6-52.9 ms a token; p2p-pull and host-polling routes fail (a card's poll of memory it does not own is
+  cached); the per-card GEMVs 0.550 of one card's; derived plain TP decode 53-55 t/s (1.62-1.69x). Busy-box timing:
+  GO (PROVISIONAL); quiet-box re-check set in §7.
 - [probe-qwen4exp-2026-10-09.md](probes/probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
