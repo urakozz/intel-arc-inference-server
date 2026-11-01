@@ -3879,6 +3879,9 @@ st_r75_gates() {
   else
     say "A4 skipped: A4_REF_DIR unset (<name>.bf16.txt reference runs)"
   fi
+  # plan == allocation at cap 4096 (MTP hidden rows, Int8State xq / xs, the scratch), both backends
+  chk "B70_PREFILL_CHUNK_CAP=4096 build/tests/memory_plan_box_test $SNAP_QWEN mtp 16384" "memory_plan_box_test at cap 4096, l0, MTP"
+  chk "B70_PREFILL_CHUNK_CAP=4096 build/tests/memory_plan_box_test $SNAP_QWEN mtp --prefill-backend l0-int8 16384 auto" "memory_plan_box_test at cap 4096, l0-int8, MTP, 16384 and auto"
   finish
 }
 stage r75.pp    75 default gpu  qwen  r75.k0                "--pp 2 prefill at cap 4096: pp_prefill_test (both cards)"

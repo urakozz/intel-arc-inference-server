@@ -759,7 +759,7 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
   extras.drafter = drafter_plan;   // spec 19d
   // Plan 5d: the chunk cap (B70_PREFILL_CHUNK_CAP, else 2048), planned on both devices.
   runtime::PrefillPath pf = a.pp_path;
-  pf.chunk_cap = cli::planned_chunk_cap(0);
+  pf.chunk_cap = cli::planned_chunk_cap(0, d);
   const cli::PpSettled settled = cli::pp_settle(d, w, dev, a.max_len_arg, full.trained_max_len,
                                                 a.mem_reserve, a.kv_cache, pf, extras, a.pipe);
   std::vector<loader::LoadedModel> stages =
@@ -1348,7 +1348,7 @@ int run(int argc, char** argv) {
   // explicit N is held to the same plan. Both print the plan's breakdown.
   // Plan 5d: the prefill chunk cap - B70_PREFILL_CHUNK_CAP if set, else the default (cli/max_len.h:
   // kPrefillChunkCapRule) - planned with max_len and given to the engine.
-  pp_path.chunk_cap = cli::planned_chunk_cap(0);
+  pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
   const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
   const uint32_t chunk_cap =
