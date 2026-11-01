@@ -1115,10 +1115,10 @@ st_r16_prefix() {
 # B70_DUMP_FORCED, r16.forced_refs runs the f32 reference on each context (tools/box_validate/f32_refs.sh) and the
 # MTP head's and the 2600-id split prompt's references; the gates (r13.split, r16.m1, r16.prefix, r15.prefill,
 # g0.suite's k2_prefix_gpu) then judge against them, each falling back to its old rule while a file is missing.
-stage r16.forced_dumps 16 optin card ornith,k2 r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3, k2_prefix_gpu_test x 2, k2_prefill_test (both heads) with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
+stage r16.forced_dumps 16 optin card ornith,k2 r16.kernels "the forced contexts of the f32-judged gates (operator ruling 2026-10-29): prefix_gpu_test <ornith> x 3, k2_prefix_gpu_test x 2, k2_prefill_test (both heads, and over the int8 cache) with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/"
 st_r16_forced_dumps() {
   local D="$DATA/oracle-forced-dumps"
-  x "mkdir -p $D/ornith-prefix $D/k2-prefix $D/k2-prefill $D/k2-prefill-i8head"
+  x "mkdir -p $D/ornith-prefix $D/k2-prefix $D/k2-prefill $D/k2-prefill-i8head $D/k2-prefill-kv8"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0-int8"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1"
   x "B70_DUMP_FORCED=$D/ornith-prefix timeout 1800 build/tests/prefix_gpu_test $SNAP_ORNITH tests/golden/prompts l0 1 0 3"
@@ -1126,6 +1126,8 @@ st_r16_forced_dumps() {
   x "B70_DUMP_FORCED=$D/k2-prefix timeout 1800 build/tests/k2_prefix_gpu_test $SNAP_K2 tests/golden/prompts 0 1"
   x "B70_DUMP_FORCED=$D/k2-prefill timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
   x "B70_DUMP_FORCED=$D/k2-prefill-i8head timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all int8"
+  # operator rulings 2026-10-29 / 2026-10-31: k2_prefill_kv8_test's section 6 over the int8 cache (r21.prefill)
+  x "B70_KV_CACHE=int8 B70_DUMP_FORCED=$D/k2-prefill-kv8 timeout 1800 build/tests/k2_prefill_test $SNAP_K2 tests/golden/prompts/long.ids all"
   chk "ls $D/*/*.prompt.ids | wc -l" "the dumped contexts"
   finish
 }
@@ -1142,6 +1144,9 @@ st_r16_forced_refs() {
   chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced ornith $D/ornith-prefix '' --gemm f32" "the Ornith prefix contexts' bf16 twins"
   chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefix '' --gemm f32" "the K2 prefix contexts' bf16 twins"
   chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill '' --gemm f32" "the K2 prefill context's bf16 twin"
+  # the int8 cache's prefill context: its kv8-aware judge and bf16+kv8 twin (k2_ref.py --sim-kv8)
+  chk "tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-kv8 -kv8 --sim-kv8" "the K2 kv8 prefill context"
+  chk "DTYPE=bf16 tools/box_validate/f32_refs.sh $DATA forced k2 $D/k2-prefill-kv8 -kv8 --gemm f32 --sim-kv8" "the K2 kv8 prefill context's bf16 twin"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
 }

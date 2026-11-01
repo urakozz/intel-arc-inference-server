@@ -2278,6 +2278,11 @@ if(B70_K2 AND B70_KV8)
   set_tests_properties(${_k2kv8_flash} ${_k2kv8_eager} PROPERTIES
     LABELS "checkpoint;golden;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_property(TEST ${_k2kv8_eager} APPEND PROPERTY LABELS diagnostic)   # see k2_golden_eager_test
+  # Section 6 over the int8 cache judged as k2_prefill_test's (operator rulings 2026-10-29 / 2026-10-31): the
+  # kv8-aware f32 reference of its forced context (f32_refs.sh forced k2 <dir> -kv8 --sim-kv8) and its bf16+kv8 twin.
+  set_property(TEST k2_prefill_kv8_test APPEND PROPERTY ENVIRONMENT
+    "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-kv8-forced"
+    "B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-kv8-forced")
 endif()
 # Passkey near the one-card int8 ceiling (opt-in, box, by hand): tools/probe/k2_passkey.sh.
 # ==== Spec 18e: K2-Horizon's int8 KV cache ================================ (end) ====
