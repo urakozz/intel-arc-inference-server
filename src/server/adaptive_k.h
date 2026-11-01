@@ -12,11 +12,13 @@ namespace server {
 // (verify[0] = the plain step), draft[k - 1] for k drafts. Data, not code: defaults per
 // head form, overridable with `--mtp-cost` so the box can calibrate.
 struct MtpCost {
-  std::vector<double> verify{1.00, 1.17, 1.52, 1.74};
+  // Spec 28b: the verify rows on gemm_sm (the small-M GEMM) - measured 2026-11-01 by probe_mtp_steps at depth 4096,
+  // bf16 head (busy-box timing on one card, to be re-checked on a quiet box; before 28b: 1.17 / 1.52 / 1.74).
+  std::vector<double> verify{1.00, 1.04, 1.09, 1.13};
   std::vector<double> draft{0.19, 0.37, 0.55};
 
-  static MtpCost bf16_head();   // measured (spec 8 P0 / §8)
-  static MtpCost int8_head();   // derived from spec 9 H2 (drafts -34 %, verify -~2 ms)
+  static MtpCost bf16_head();   // measured (verify: spec 28b; drafts: spec 8 P0 / §8)
+  static MtpCost int8_head();   // verify measured (spec 28b, interleaved pairs); drafts derived from spec 9 H2
 
   // Spec 8 §11: the share of ONE draft's cost that is its lm_head read, per head form -
   // what a reduced draft vocabulary scales. **Derived, not measured:** the head's bytes at
@@ -41,10 +43,12 @@ struct MtpCost {
   MtpCost with_free_drafts() const;
 
   // Spec 19c (`--spec dflash`, spec 19 decision 4): the verify rows to M = 8 and the DFlash drafter's draft row,
-  // FLAT in K - one pass of the drafter drafts the whole block. DERIVED until the box measures them (queue row 29's
-  // probe_mtp_steps at M = 5..8 and probe_draft_cost; `--spec-cost` replaces either part):
-  //   verify M = 1..4   the head form's rows above; M = 5..8: M = 3 -> 4's slope, 0.22 a row
-  //                     (docs/probe-dflash-2026-10-08.md §3);
+  // FLAT in K - one pass of the drafter drafts the whole block (`--spec-cost` replaces either part):
+  //   verify M = 1..4   the head form's rows above; M = 5..8 MEASURED since spec 28b (probe_mtp_steps' interleaved
+  //                     pairs, int8 head, depth 4096, busy-box timing): 1.18 / 1.30 / 1.35 / 1.56 - the bf16 head's
+  //                     the same rows (derived: its M = 2..4 rows equal the int8 head's within 0.01). M = 8's step
+  //                     is the attention build's (spec 28c), not the GEMM's. (Before 28b: M = 3 -> 4's slope,
+  //                     0.22 a row, docs/probe-dflash-2026-10-08.md §3.)
   //   draft             the drafter's weights read once (int8 ~1.8 GB -> 0.10, bf16 ~3.6 GB -> 0.19 of the 32.65 ms
   //                     int8 plain step) plus the target's head over the K mask rows, read once (int8 1.27 GB ->
   //                     0.07, bf16 2.54 GB -> 0.14), whatever K (spec 19 §3).
