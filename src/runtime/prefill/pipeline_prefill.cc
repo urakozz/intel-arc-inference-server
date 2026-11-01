@@ -146,11 +146,11 @@ class Releaser {
 
 // One device's prefill half.
 struct PfDevice {
-  PfDevice(l0::Context& c, const model::ModelDesc& d, uint32_t max_len)
+  PfDevice(l0::Context& c, const model::ModelDesc& d, uint32_t max_len, uint32_t chunk_cap)
       : ctx(c),
         cx(c),
         kc(c),
-        scratch(c, max_len, d),
+        scratch(c, max_len, d, chunk_cap),
         ctl(c, l0::MemKind::Host, kDepth * sizeof(Control)),
         ts(c, l0::MemKind::Host, kDepth * 2 * sizeof(uint64_t)) {
     for (auto& e : done) e = std::make_unique<l0::SyncEvent>(c, std::vector<const l0::Context*>{&c});
@@ -185,17 +185,18 @@ struct PfDevice {
 
 struct PipelinePrefill final : PipelinePrefillBase {
   PipelinePrefill(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d, uint32_t max_len,
-                  PpHandoff m)
+                  PpHandoff m, uint32_t chunk_cap)
       : mode(m),
-        lay(pp_prefill_link_layout(d)),
-        ids(d0, l0::MemKind::Host, size_t(kDepth) * PrefillScratch::kC * 4),
+        cap(chunk_cap),
+        lay(pp_prefill_link_layout(d, chunk_cap)),
+        ids(d0, l0::MemKind::Host, size_t(kDepth) * chunk_cap * 4),
         landing(d1, l0::MemKind::Device, lay.total, kPpLandingAlign),
         send_seq(d0, l0::MemKind::Device, size_t(kDepth) * kPpStateWords * 4),
         recv_state(d1, l0::MemKind::Host, size_t(kDepth) * kPpStateWords * 4),
         imm0(l0::CmdList::immediate(d0)),
         imm1(l0::CmdList::immediate(d1)) {
-    dev[0] = std::make_unique<PfDevice>(d0, d, max_len);
-    dev[1] = std::make_unique<PfDevice>(d1, d, max_len);
+    dev[0] = std::make_unique<PfDevice>(d0, d, max_len, chunk_cap);
+    dev[1] = std::make_unique<PfDevice>(d1, d, max_len, chunk_cap);
     for (auto& e : ready)
       e = std::make_unique<l0::SyncEvent>(d0, std::vector<const l0::Context*>{&d0, &d1});
     for (auto& e : hold) e = std::make_unique<l0::SyncEvent>(d1, std::vector<const l0::Context*>{&d1});
@@ -237,6 +238,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
     for (auto& d : dev)
       for (auto& e : d->done) e->host_reset();
   }
+  uint32_t chunk_cap() const override { return cap; }
   MemoryComponents memory(uint32_t d) const override {
     const PfDevice& p = *dev.at(d);
     MemoryComponents c;
@@ -273,11 +275,12 @@ struct PipelinePrefill final : PipelinePrefillBase {
   uint8_t* slot(uint32_t j) const { return landing.as<uint8_t>() + lay.slot(j); }
   uint32_t* seq(uint32_t j) const { return send_seq.as<uint32_t>() + size_t(j % kDepth) * kPpStateWords; }
   uint32_t* state(uint32_t j) const { return recv_state.as<uint32_t>() + size_t(j % kDepth) * kPpStateWords; }
-  uint32_t* ids_of(uint32_t j) const { return ids.as<uint32_t>() + size_t(j % kDepth) * PrefillScratch::kC; }
+  uint32_t* ids_of(uint32_t j) const { return ids.as<uint32_t>() + size_t(j % kDepth) * cap; }
 
   PpHandoff mode;
+  uint32_t cap;         // plan 5d: the chunk cap every per-chunk buffer here has
   PpPfLinkLayout lay;
-  l0::Mem ids;          // Host [kDepth][kC] u32: device 0's embed input, by chunk parity
+  l0::Mem ids;          // Host [kDepth][cap] u32: device 0's embed input, by chunk parity
   l0::Mem landing;      // device 1, written only by device 0
   l0::Mem send_seq;     // device 0: pp_send's counter per slot
   l0::Mem recv_state;   // host USM (PfDevice::ctl's reason), device 1's: pp_recv's state words per slot
@@ -286,14 +289,14 @@ struct PipelinePrefill final : PipelinePrefillBase {
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> hold;    // the back-pressure test's hook
   bool in_flight = false;   // a prefill's lists may still hold work / waits
   // Spec 16d, MTP on: device 1's head prefill state - the hidden rows step_mtp_kv writes
-  // ([kC + 1][hidden] bf16, row 0 = h_{pos-1}), two head Control blocks (chunk parity), and
+  // ([cap + 1][hidden] bf16, row 0 = h_{pos-1}), two head Control blocks (chunk parity), and
   // with a hook two shadows of hh row 0. Allocated by ensure_mtp / ensure_shadows.
   std::unique_ptr<l0::Mem> mtp_hid, mtp_ctl;
   std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_hh;
   // And the head's KV row at the block end - 1 ([K row][V row][K scale][V scale]), copied after
   // the hooked chunk and before the next chunk's step_mtp_kv rewrites it (save_kv's snap_head_kv_).
   std::array<std::unique_ptr<l0::Mem>, kDepth> shadow_head_kv;
-  // Spec 19d, a drafter: the prefill's tap staging per chunk parity, on device 1 ([kC][taps][hidden] bf16: both
+  // Spec 19d, a drafter: the prefill's tap staging per chunk parity, on device 1 ([cap][taps][hidden] bf16: both
   // devices' walks write their own taps' columns; the host projects a chunk's rows once both have finished it).
   std::array<std::unique_ptr<l0::Mem>, kDepth> taps;
   void ensure_taps(l0::Context& d1, size_t bytes) {
@@ -307,7 +310,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
   }
   void ensure_mtp(l0::Context& d1, const model::ModelDesc& d) {
     if (mtp_hid) return;
-    mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d));
+    mtp_hid = std::make_unique<l0::Mem>(d1, l0::MemKind::Device, mtp_prefill_hidden_bytes(d, cap));
     mtp_ctl = std::make_unique<l0::Mem>(d1, l0::MemKind::Host, kDepth * sizeof(Control));
     std::memset(mtp_ctl->ptr(), 0, mtp_ctl->size());
   }
@@ -590,6 +593,20 @@ PrefillBackend PipelineEngine::prefill_backend() const {
   return pf_backend_set_ ? pf_backend_ : prefill::default_prefill_backend();
 }
 
+uint32_t PipelineEngine::prefill_chunk_cap() const {
+  if (pf_) return pf_->chunk_cap();   // sized once
+  return pf_chunk_cap_ ? *pf_chunk_cap_ : default_prefill_chunk_cap();
+}
+
+void PipelineEngine::set_prefill_chunk_cap(uint32_t cap) {
+  check_prefill_chunk_cap(*st(0).model.desc, cap);
+  if (pf_ && pf_->chunk_cap() != cap)
+    throw std::logic_error("runtime::PipelineEngine::set_prefill_chunk_cap: the prefill buffers already hold " +
+                           std::to_string(pf_->chunk_cap()) + "-row chunks; set the cap (" +
+                           std::to_string(cap) + ") before prepare_prefill()");
+  pf_chunk_cap_ = cap;
+}
+
 size_t PipelineEngine::prefill_launches(uint32_t dev) const {
   return pf_ ? as_pf(*pf_).dev.at(dev)->cx.launches() : 0;
 }
@@ -619,13 +636,15 @@ void PipelineEngine::prepare_prefill() {
   if (kv_ == KvCache::Int8) prefill::require_kv8_path(b);
   // Spec 16d: the head's prefill runs on the L0 backends only (pf_gemm) - already required.
   if (!pf_) {
+    const uint32_t cap = prefill_chunk_cap();
+    check_prefill_chunk_cap(d, cap);
     // The two stages' walks add up to one card's, launch for launch (step.h).
-    for (uint32_t C : {1u, 256u, PrefillScratch::kC})
+    for (uint32_t C : {1u, 256u, cap})
       if (prefill::step_stage_launches(d, b, C, stage(0)) + prefill::step_stage_launches(d, b, C, stage(1)) !=
           prefill::step_chunk_launches(d, b, C))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
-    pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff);
+    pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff, cap);
   }
   if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
   if (b != PrefillBackend::L0Int8) return;
@@ -635,7 +654,7 @@ void PipelineEngine::prepare_prefill() {
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     PfDevice& D = *p.dev[i];
     const loader::LoadedModel& m = st(i).model;
-    if (!D.int8) D.int8 = std::make_unique<prefill::Int8State>(D.ctx, prefill_int8_max_k(d));
+    if (!D.int8) D.int8 = std::make_unique<prefill::Int8State>(D.ctx, prefill_int8_max_k(d), p.cap);
     for (const auto& [key, w] : m.linears)
       if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
           w.kind == model::WeightKind::Int4)
@@ -648,10 +667,12 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (broken_)
     throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
   if (ids.empty()) throw std::runtime_error("runtime::PipelineEngine::prefill: no ids");
-  if (chunk == 0) chunk = PrefillScratch::kC;
-  if (chunk > PrefillScratch::kC)
+  const uint32_t cap = prefill_chunk_cap();
+  if (chunk == 0) chunk = cap;
+  if (chunk > cap)
     throw std::runtime_error("runtime::PipelineEngine::prefill: chunk " + std::to_string(chunk) +
-                             " exceeds PrefillScratch::kC " + std::to_string(PrefillScratch::kC));
+                             " exceeds the session's prefill chunk cap " + std::to_string(cap) +
+                             " (set_prefill_chunk_cap / B70_PREFILL_CHUNK_CAP: 2048 or 4096)");
   for (uint32_t id : ids)
     if (id >= model::Qwen35::kVocab)
       throw std::runtime_error("runtime::PipelineEngine::prefill: id " + std::to_string(id) +
@@ -687,7 +708,7 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       throw std::runtime_error("runtime::PipelineEngine::prefill: the drafter taps the last layer's output, whose "
                                "fold prefill runs for the last row only - not built (no published drafter does)");
     p.ensure_taps(st(1).ctx, TapVerifyDims::prefill_taps_bytes(*st(0).model.desc,
-                                                               uint32_t(drafter_->tap_layers().size())));
+                                                               uint32_t(drafter_->tap_layers().size()), p.cap));
     const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->window();
     drv.df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
     drv.df_sites = &df_sites;

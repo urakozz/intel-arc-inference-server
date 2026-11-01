@@ -55,7 +55,8 @@ struct PipelineDecodeArgs {
   std::function<void(uint32_t)> check_len;   // b70-decode's prompt + n <= max_len bound
   // Spec 16c: --prefill (the prompt through the chunk pipeline) or --bench --prefill-length N
   // (the timed prefill of `depth` synthetic ids, the pp row); `pf` is what both run on and
-  // what the plan counts, `chunk` --prefill-chunk (0: PrefillScratch::kC).
+  // what the plan counts, `chunk` --prefill-chunk (0: the session's chunk cap; plan 5d: above
+  // 2048 the cap is 4096, planned).
   bool prefill = false, bench_prefill = false;
   uint32_t chunk = 0;
   runtime::PrefillPath pf = runtime::pp_no_prefill();
@@ -85,9 +86,13 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   const model::ModelDesc& d = *full.desc;
   const runtime::PpWeights w = runtime::pp_weights(full);
   const std::array<size_t, runtime::kPpDevices> dev{d0.memory_bytes(), d1.memory_bytes()};
+  // Plan 5d: the chunk cap --prefill-chunk needs (Ornith above 2048 refused by name), planned
+  // on both devices.
+  runtime::PrefillPath pf = a.pf;
+  if (pf.prefill) pf.chunk_cap = planned_chunk_cap(runtime::prefill_chunk_cap_for(a.chunk, d));
   // Steps 3 and 4 (cli/pipeline_settle.h): no hook here - b70-decode has no prefix cache.
   const PpSettled settled = pp_settle(d, w, dev, a.max_len, full.trained_max_len, a.reserve, a.kv,
-                                      a.pf, pp_extras(full, /*hook=*/false), a.pipe);
+                                      pf, pp_extras(full, /*hook=*/false), a.pipe);
   const uint32_t split = settled.split, len = settled.max_len;
   a.check_len(len);
 
@@ -120,6 +125,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   const bool prefill = a.prefill || a.bench_prefill;
   if (prefill) {
     eng.set_prefill_backend(a.pf.backend);
+    eng.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
     std::fprintf(stderr, "prefill backend: %s, both devices (spec 16c: the chunk pipeline)\n",
                  runtime::prefill_backend_name(eng.prefill_backend()));
     eng.prepare_prefill();
@@ -134,7 +140,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
     eng.ingest(a.ids);
   const double ingest_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  const uint32_t chunk = a.chunk ? a.chunk : runtime::PrefillScratch::kC;
+  const uint32_t chunk = a.chunk ? a.chunk : eng.prefill_chunk_cap();
   if (prefill) {
     const runtime::PipelineEngine::PrefillStats& st = eng.last_prefill();
     std::fprintf(stderr,

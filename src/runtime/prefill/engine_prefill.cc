@@ -58,6 +58,20 @@ PrefillBackend Engine::prefill_backend() const {
   return pf_backend_ ? *pf_backend_ : prefill::default_prefill_backend();
 }
 
+uint32_t Engine::prefill_chunk_cap() const {
+  if (pf_) return pf_->chunk_cap();   // sized once: the cap the buffers have
+  return pf_chunk_cap_ ? *pf_chunk_cap_ : default_prefill_chunk_cap();
+}
+
+void Engine::set_prefill_chunk_cap(uint32_t cap) {
+  check_prefill_chunk_cap(*model_.desc, cap);
+  if (pf_ && pf_->chunk_cap() != cap)
+    throw std::logic_error("runtime::Engine::set_prefill_chunk_cap: the prefill scratch already holds " +
+                           std::to_string(pf_->chunk_cap()) + "-row chunks; set the cap (" +
+                           std::to_string(cap) + ") before prepare_prefill()");
+  pf_chunk_cap_ = cap;
+}
+
 MemoryComponents Engine::memory_use() const {
   MemoryComponents c;
   c.model = model_.report.total();
@@ -90,14 +104,17 @@ void Engine::prepare_prefill() {
   model::require_prefill(*model_.desc);
   // Ruling R7: both allocations are lazy, so a decode-only Engine's device
   // residency is byte-identical to what it was before the buffer split.
-  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc));
+  // Plan 5d: every per-chunk buffer at the session's chunk cap (checked against the model).
+  const uint32_t cap = prefill_chunk_cap();
+  check_prefill_chunk_cap(*model_.desc, cap);
+  if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc, cap));
   if (!pfx_)
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
   if (prefill_backend() != PrefillBackend::L0Int8) return;
   if (!pfx_->int8)   // the largest int4 K the h8 walk runs: down's on a dense model (spec
                      // 14), the widest mixer linear's on a MoE model (spec 15d)
-    pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, prefill_int8_max_k(*model_.desc));
+    pfx_->int8 = std::make_unique<prefill::Int8State>(ctx_, prefill_int8_max_k(*model_.desc), pf_->chunk_cap());
   // Every int4 linear's rotated column scales (spec 5 T2), outside any chunk and
   // any recording: cached by weight, so after the first call this loop only
   // looks them up, and no recorded list ever holds the host finish of
@@ -123,11 +140,12 @@ void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
 
 void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (ids.empty()) throw std::runtime_error("runtime::Engine::prefill: no ids");
-  if (chunk == 0) chunk = PrefillScratch::kC;
-  if (chunk > PrefillScratch::kC)
+  const uint32_t cap = prefill_chunk_cap();
+  if (chunk == 0) chunk = cap;
+  if (chunk > cap)
     throw std::runtime_error("runtime::Engine::prefill: chunk " + std::to_string(chunk) +
-                             " exceeds PrefillScratch::kC " +
-                             std::to_string(PrefillScratch::kC));
+                             " exceeds the session's prefill chunk cap " + std::to_string(cap) +
+                             " (set_prefill_chunk_cap / B70_PREFILL_CHUNK_CAP: 2048 or 4096)");
   for (uint32_t id : ids)
     if (id >= model::Qwen35::kVocab)
       throw std::runtime_error(
@@ -185,7 +203,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     if (!df_pf_taps_)
       df_pf_taps_ = std::make_unique<l0::Mem>(
           ctx_, l0::MemKind::Device,
-          TapVerifyDims::prefill_taps_bytes(*model_.desc, uint32_t(drafter_->tap_layers().size())));
+          TapVerifyDims::prefill_taps_bytes(*model_.desc, uint32_t(drafter_->tap_layers().size()),
+                                            pf_->chunk_cap()));
     const uint64_t end = uint64_t(base) + ids.size(), w = drafter_->window();
     df_from = uint32_t(end > w ? std::max<uint64_t>(base, end - w) : base);
   }
@@ -194,7 +213,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     verify_k_ = kNoVerify;
     if (!mtp_pf_hid_)
       mtp_pf_hid_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device,
-                                              mtp_prefill_hidden_bytes(*model_.desc));
+                                              mtp_prefill_hidden_bytes(*model_.desc, pf_->chunk_cap()));
     hid = mtp_pf_hid_->as<uint16_t>();
   }
   const size_t hid_row = size_t(model_.desc->hidden) * 2;

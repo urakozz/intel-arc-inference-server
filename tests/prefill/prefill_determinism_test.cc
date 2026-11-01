@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
   for (const char* pname : kPrompts) {
     const std::vector<uint32_t> ids = read_ids(pdir + "/" + pname + ".ids");
     for (uint32_t chunk : kChunks) {
-      const uint32_t C = chunk ? chunk : runtime::PrefillScratch::kC;
+      const uint32_t C = chunk ? chunk : eng.prefill_chunk_cap();
       eng.reset();
       eng.prefill(ids, chunk);
       const State a = snapshot(eng, imm);

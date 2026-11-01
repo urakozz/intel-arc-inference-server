@@ -118,6 +118,8 @@ struct PipelinePrefillBase {
   virtual void zero() = 0;
   // Its device bytes, in memory_line()'s components (prefill scratch, int8, decode state).
   virtual MemoryComponents memory(uint32_t dev) const = 0;
+  // Plan 5d: the chunk cap both devices' per-chunk buffers were sized for.
+  virtual uint32_t chunk_cap() const = 0;
 };
 
 // The hand-off buffers (pipeline_plan.h: pp_landing_layout).
@@ -260,7 +262,7 @@ class PipelineEngine {
   // --- spec 16c: prefill across the two cards ------------------------------------------
   //
   // Engine::prefill's contract, on two devices (runtime/pipeline_prefill_plan.h has the
-  // order): `ids` in chunks of at most `chunk` (0 = PrefillScratch::kC) from the current
+  // order): `ids` in chunks of at most `chunk` (0 = prefill_chunk_cap()) from the current
   // pos, the same chunks one card cuts; on return pos == old pos + ids.size() in both
   // Controls and cur_token[0] is the first generated id. KV, GDN state, conv ring and the
   // logits row are bitwise one card's (P1). Every wait is bounded (prefill_timeout_ms); a
@@ -274,6 +276,10 @@ class PipelineEngine {
   void prepare_prefill();
   void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; pf_backend_set_ = true; }
   PrefillBackend prefill_backend() const;   // defined in pipeline_prefill.cc
+  // Plan 5d: Engine::set_prefill_chunk_cap / prefill_chunk_cap, for both devices' per-chunk
+  // buffers (and the hand-off's landing slots). Defined in pipeline_prefill.cc.
+  void set_prefill_chunk_cap(uint32_t cap);
+  uint32_t prefill_chunk_cap() const;
   // Spec 7 §3.2's hook, as Engine's: after every mid-prompt chunk that ends on a block end
   // (chunks then end at block ends) and after the prompt's end. Mid-prompt, the hook runs
   // once BOTH devices have finished the block - the next chunk may already be running - and
@@ -345,6 +351,7 @@ class PipelineEngine {
   std::unique_ptr<PipelinePrefillBase> pf_;
   PrefillBackend pf_backend_ = PrefillBackend::L0;
   bool pf_backend_set_ = false;
+  std::optional<uint32_t> pf_chunk_cap_;   // plan 5d; unset = default_prefill_chunk_cap()
   BlockHook block_hook_;
   PrefillStats pf_stats_;
   // Set only while a mid-prompt block hook runs: save_state reads these (each device's

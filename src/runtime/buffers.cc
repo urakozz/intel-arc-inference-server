@@ -78,11 +78,12 @@ size_t DecodeScratch::bytes() const {
 
 // --- PrefillScratch ----------------------------------------------------------
 
-PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc)
-    : PrefillScratch(ctx, max_len, desc, sizes(max_len, desc)) {}
+PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
+                               uint32_t chunk_cap)
+    : PrefillScratch(ctx, max_len, desc, chunk_cap, sizes(max_len, desc, chunk_cap)) {}
 
 PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                               const PrefillScratchSizes& s)
+                               uint32_t chunk_cap, const PrefillScratchSizes& s)
     // `ids` is the one Host allocation: the host writes C ids per chunk and
     // the device gathers embeddings from them.
     : ids(ctx, l0::MemKind::Host, s.ids),
@@ -109,7 +110,8 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::
       pf_rowsum(ctx, l0::MemKind::Device, s.pf_rowsum),
       max_len(max_len),
       ctx_(&ctx),
-      desc_(&desc) {
+      desc_(&desc),
+      chunk_cap_(chunk_cap) {
   // Nothing is zero-filled: no prefill kernel reads scratch it has not first
   // written, and the prefill determinism gate is the standing proof of that -
   // the same rule, and the same reason, Engine::reset() gives for decode.
@@ -129,17 +131,17 @@ size_t PrefillScratch::bytes() const {
 
 l0::Mem& PrefillScratch::slab_buffer() {
   if (!slab_)
-    slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_).slab);
+    slab_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).slab);
   return *slab_;
 }
 l0::Mem& PrefillScratch::pf_s_buffer() {
   if (!pf_s_)
-    pf_s_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_).pf_s);
+    pf_s_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_s);
   return *pf_s_;
 }
 l0::Mem& PrefillScratch::pf_p_buffer() {
   if (!pf_p_)
-    pf_p_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_).pf_p);
+    pf_p_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_p);
   return *pf_p_;
 }
 size_t PrefillScratch::lazy_bytes() const {

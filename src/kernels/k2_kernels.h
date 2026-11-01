@@ -168,7 +168,7 @@ inline std::vector<std::string> decode_variants(const model::K2Desc& d, bool int
 // carry every shape define (pf_res_fold_variant, pf_moe_router_variant, pf_moe_gemm_variant,
 // pf_gemm_variant / pf_gemm_silu_variant, kernels.h / prefill/pf_kernels.h); the K2-only
 // kernels and the reused ones whose names would not carry K2's shape are `k2_pf_*`.
-inline constexpr unsigned kPfC = 2048;     // the chunk's rows (k2_pf_moe.cl KC; = PrefillScratchDims::kC)
+inline constexpr unsigned kPfC = 2048;     // the chunk's rows (k2_pf_moe.cl KC; = PrefillScratchDims::kCDefault)
 inline constexpr unsigned kPfTm = 32;      // the grouped GEMM's tile rows (pf_moe_gemm.cl TM)
 inline constexpr unsigned kPfSlab = 1024;  // a whole slab's columns (k2_pf_dequant_slab's ns)
 inline constexpr unsigned kPfFlashKt = 64, kPfFlashRpw = 8;   // k2_pf_attn.cl's KT / RPW

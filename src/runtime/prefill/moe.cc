@@ -56,7 +56,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   require(d.is_moe() && s.moe != nullptr, "the prefill scratch has no MoE region (a dense model?)");
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
-  require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");
+  require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(layer < d.layers, "layer " + std::to_string(layer) + " is past the model's layers");
   const model::MoeDesc& m = d.moe;
   const MoePrefillLayout L = moe_prefill_layout(d);

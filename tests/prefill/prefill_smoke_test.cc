@@ -223,7 +223,15 @@ int main(int argc, char** argv) {
 
   // ---- 7. the rejections -------------------------------------------------
   throws_naming([&] { eng.prefill({}); }, "no ids", "empty ids");
-  throws_naming([&] { eng.prefill(ids(8), 5000); }, "PrefillScratch::kC", "chunk > kC");
+  throws_naming([&] { eng.prefill(ids(8), 5000); }, "chunk cap", "chunk > the chunk cap");
+  // Plan 5d: the cap is 2048 or 4096, and sized once - after the scratch exists another cap
+  // is refused, the same one accepted.
+  throws_naming([&] { eng.set_prefill_chunk_cap(3072); }, "neither", "chunk cap 3072");
+  if (eng.prefill_chunk_cap() == 2048u) {
+    throws_naming([&] { eng.set_prefill_chunk_cap(4096); }, "before prepare_prefill", "cap after the scratch");
+    eng.set_prefill_chunk_cap(2048);
+    throws_naming([&] { eng.prefill(ids(8), 4096); }, "chunk cap 2048", "chunk 4096 at cap 2048");
+  }
   throws_naming([&] { eng.prefill({Qwen35::kVocab}); }, "vocabulary", "id == kVocab");
   eng.reset();
   throws_naming([&] { eng.prefill(ids(size_t(kMaxLen) + 1)); }, "max_len",

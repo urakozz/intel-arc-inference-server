@@ -254,8 +254,9 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_flash_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
-  # The MoE block. TM (the tile rows) and KC (PrefillScratch::kC, the sort's SLM staging)
-  # are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kC.
+  # The MoE block. TM (the tile rows) and KC (PrefillScratchDims::kCDefault, the sort's SLM
+  # staging) are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kCDefault
+  # (plan 5d: a MoE model's chunk cap stays 2048 - check_prefill_chunk_cap).
   add_ocloc_kernel(pf_moe_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemv_bf16.cl
                    DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl

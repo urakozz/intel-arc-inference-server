@@ -15,7 +15,7 @@ namespace runtime::prefill {
 // and pf_gemm multiplies x [M][K] by it into partials[:, n0 .. n0 + 1024), both on cx's
 // in-order list with NO host wait -- between the two, between slabs, or before the consumer.
 // M is padded to 256 by gemm_l0; rows [M, pad256(M)) of x are read and of partials written,
-// and both buffers have kC = 2048 rows, so every padded row exists.
+// and both buffers have chunk_cap() rows (a multiple of 256), so every padded row exists.
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
                const uint16_t* x, uint32_t M);
 

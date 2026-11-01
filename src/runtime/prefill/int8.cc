@@ -1,5 +1,6 @@
 #include "runtime/prefill/int8.h"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -30,13 +31,15 @@ void check_weight(const loader::DeviceWeight& w, uint32_t max_k) {
   require(sh.layout != 0 || w.scales != nullptr, "layout 0 weight has no independent scales allocation");
 }
 
-// Everything linear_l0's walks require, on the h8 path.
-void check_walk(const loader::DeviceWeight& w, uint32_t M, uint32_t max_k) {
+// Everything linear_l0's walks require, on the h8 path. `rows`: the fewer of the two
+// scratches' chunk caps (PrefillScratch's partials, Int8State's xq / xs).
+void check_walk(const loader::DeviceWeight& w, uint32_t M, uint32_t max_k, uint32_t rows) {
   check_weight(w, max_k);
   const model::GemvShape& sh = w.shape;
   require(sh.N % kNs == 0, "N = " + std::to_string(sh.N) + " is not a whole number of 1024-column slabs");
-  require(M > 0 && pad256(M) <= PrefillScratch::kC,
-          "M = " + std::to_string(M) + " padded to 256 exceeds the kC-row scratch");
+  require(M > 0 && pad256(M) <= rows,
+          "M = " + std::to_string(M) + " padded to 256 exceeds the " + std::to_string(rows) +
+              "-row scratch (the chunk cap)");
 }
 
 // The shared walk: quantise x once, then per slab requant into w8_slab and one
@@ -77,15 +80,16 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
 }
 }  // namespace
 
-Int8State::Int8State(l0::Context& ctx, uint32_t max_k)
+Int8State::Int8State(l0::Context& ctx, uint32_t max_k, uint32_t chunk_cap)
     : ctx_(ctx),
       max_k_(max_k),
+      chunk_cap_(chunk_cap),
       imm_(l0::CmdList::immediate(ctx)),
-      // runtime/buffer_sizes.h (spec 6 §10): int8 [kC][max_k], fp32 [kC], u32
-      // [max_k / 4][kNs] - the sizes the memory planner adds up.
-      xq_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).xq),
-      xs_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).xs),
-      w8_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k).w8) {}
+      // runtime/buffer_sizes.h (spec 6 §10, plan 5d): int8 [chunk_cap][max_k], fp32
+      // [chunk_cap], u32 [max_k / 4][kNs] - the sizes the memory planner adds up.
+      xq_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k, chunk_cap).xq),
+      xs_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k, chunk_cap).xs),
+      w8_(ctx, l0::MemKind::Device, int8_scratch_sizes(max_k, chunk_cap).w8) {}
 
 const l0::Mem& Int8State::signs_f32(uint32_t K) {
   auto it = signs_.find(K);
@@ -173,7 +177,7 @@ size_t linear_i8_launches(const model::GemvShape& sh) { return 1 + 2 * (size_t(s
 
 void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                const loader::DeviceWeight& w, const uint16_t* x, uint32_t M) {
-  check_walk(w, M, q.max_k());
+  check_walk(w, M, q.max_k(), std::min(q.chunk_cap(), s.chunk_cap()));
   const model::GemvShape& sh = w.shape;
   require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
@@ -184,8 +188,9 @@ void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
 void linear_i8_silu(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M,
                     uint16_t* out, uint32_t ldx) {
-  (void)s;   // partials untouched: the epilogue writes bf16 x straight into `out`
-  check_walk(w, M, q.max_k());
+  // partials untouched: the epilogue writes bf16 x straight into `out` (pad256(M) rows of
+  // it, inside the scratch's x, which has chunk_cap rows)
+  check_walk(w, M, q.max_k(), std::min(q.chunk_cap(), s.chunk_cap()));
   const model::GemvShape& sh = w.shape;
   require(size_t(ldx) * 2 == size_t(sh.N),
           "ldx = " + std::to_string(ldx) + " is not N/2 for N = " + std::to_string(sh.N));

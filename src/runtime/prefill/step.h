@@ -15,7 +15,7 @@ namespace runtime::prefill {
 
 class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
 
-// ONE chunk of at most `PrefillScratch::kC` positions, at absolute position
+// ONE chunk of at most `s.chunk_cap()` positions (plan 5d), at absolute position
 // `pos`. The caller has already uploaded the chunk's ids into `s.ids` and set
 // `Control::{pos, n_active}` (after a `wait()`, because the L0 list is
 // asynchronous). This function walks all 64 layers, appending to the L0 list
@@ -90,7 +90,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Lo
 
 // Spec 8 §3.2 (plan 8b Task 3): after `step_chunk`, the MTP head's K/V for the chunk.
 // First the main model's final norm on EVERY row r into `hid` row 1 + r (bf16
-// [kC + 1][5120]; row 0 is h_{pos-1}, the caller's copy of MtpBuffers::hh row 0).
+// [chunk_cap + 1][5120]; row 0 is h_{pos-1}, the caller's copy of MtpBuffers::hh row 0).
 // Then the head over the pairs (hid[r], ids[r]) = (h_{pos-1+r}, x[pos+r]) at positions
 // pos - 1 + r, r < C - the previous chunk's last position is filled here, the chunk's
 // own last position by the next chunk or the first draft/verify. At pos = 0 there is

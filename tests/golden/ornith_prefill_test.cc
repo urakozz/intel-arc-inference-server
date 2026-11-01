@@ -113,7 +113,7 @@ State capture(runtime::Engine& e, l0::CmdList& imm, uint32_t n) {
 // slice); the tests here prefill prompts of at most kC ids in one call, or read after a
 // chunked prefill only the rows of its last chunk.
 uint32_t one_chunk(uint32_t n) {
-  CHECK(n <= runtime::PrefillScratch::kC);
+  CHECK(n <= runtime::PrefillScratchDims::kCDefault);   // a MoE model's cap (plan 5d)
   return n;
 }
 

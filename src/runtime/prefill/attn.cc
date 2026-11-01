@@ -58,7 +58,7 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
                 PrefillBackend backend) {
-  require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");
+  require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   // Spec 15b: the head counts are the descriptor's (Qwen3.8: 24 q-heads, 4 kv-heads,
   // groups of 6). Row pitches, named so a GemmBatch field says which buffer it
   // belongs to: pf_q [C][q-heads][256] (6144) and the cache [pos][kv-heads][256] (1024).
@@ -222,7 +222,7 @@ void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32
 
 void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                     const uint16_t* q, const KvLayer& kv, PrefillBackend backend) {
-  require(C > 0 && C <= PrefillScratch::kC, "C = " + std::to_string(C) + " is outside (0, kC]");
+  require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(kv.int8(), "attn_chunk_kv8 needs the int8 cache's scales");
   require_kv8_path(backend);
   const uint32_t q_heads = s.desc().fa_q_heads, kv_heads = s.desc().fa_kv_heads;

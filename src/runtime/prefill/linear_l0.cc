@@ -24,8 +24,9 @@ l0::Kernel& check_and_dequant_kernel(KernelCache& kc, PrefillScratch& s,
   require(sh.K % 64 == 0, "K = " + std::to_string(sh.K) + " is not a multiple of the group size 64");
   require(sh.layout == 0 || sh.layout == 1, "layout " + std::to_string(sh.layout) + " is neither 0 nor 1");
   require(sh.layout != 0 || w.scales != nullptr, "layout 0 weight has no independent scales allocation");
-  require(M > 0 && pad256(M) <= PrefillScratch::kC,
-          "M = " + std::to_string(M) + " padded to 256 exceeds the kC-row scratch");
+  require(M > 0 && pad256(M) <= s.chunk_cap(),
+          "M = " + std::to_string(M) + " padded to 256 exceeds the " + std::to_string(s.chunk_cap()) +
+              "-row scratch (the chunk cap)");
   require(s.slab_buffer().size() >= size_t(sh.K) * kNs * 2,
           "the slab buffer is smaller than [K][1024] bf16");
   return kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout), "pf_dequant_slab");

@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -189,6 +190,47 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                                  reserve_bytes)
                    .c_str());
   return len;
+}
+
+// Plan 5d: the prefill chunk cap (2048 or 4096), in two steps around settle().
+//
+//   asked = runtime::prefill_chunk_cap_for(--prefill-chunk C, desc)   0 when no C was given;
+//                                                                     refuses C > 4096 and a
+//                                                                     MoE model above 2048
+//   path.chunk_cap = planned_chunk_cap(asked)    what settle() plans max_len at
+//   max_len = settle(..., path, ...)
+//   cap = settle_chunk_cap(..., max_len, path, ..., asked)   what the engine is given
+//
+// An asked cap (or B70_PREFILL_CHUNK_CAP) is planned and kept as it is: an explicit 4096
+// shortens what auto gives the context. With nothing asked, kPrefillChunkCapRule decides:
+// off, the default 2048; on, operator ruling (i) of 2026-10-27 (context first) - max_len is
+// planned at 2048 and 4096 is taken only when the plan at that max_len has room for it
+// (runtime::prefill_chunk_cap_that_fits).
+inline constexpr bool kPrefillChunkCapRule = false;
+inline bool chunk_cap_env_set() {
+  const char* v = std::getenv("B70_PREFILL_CHUNK_CAP");
+  return v != nullptr && *v != '\0';
+}
+inline uint32_t planned_chunk_cap(uint32_t asked) {
+  if (asked != 0) return asked;
+  if (chunk_cap_env_set()) return runtime::default_prefill_chunk_cap();
+  return runtime::PrefillScratchDims::kCDefault;
+}
+inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m, uint32_t max_len,
+                                 size_t reserve_bytes, const runtime::PrefillPath& path,
+                                 runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked) {
+  if (!path.prefill) return path.chunk_cap;
+  const char* why = asked != 0 ? "--prefill-chunk" : chunk_cap_env_set() ? "B70_PREFILL_CHUNK_CAP" : nullptr;
+  uint32_t cap = path.chunk_cap;
+  if (why == nullptr && kPrefillChunkCapRule) {
+    cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, m.report.total() - m.report.rope_bytes,
+                                               ctx.memory_bytes(), reserve_bytes, max_len, path,
+                                               draft_vocab_plan(m), kv, drafter);
+    why = cap == runtime::PrefillScratchDims::kCMax ? "the plan at this max_len has room for it"
+                                                   : "4096 would not fit beside this max_len";
+  }
+  if (why) std::fprintf(stderr, "prefill chunk cap: %u (%s)\n", cap, why);   // the default says nothing
+  return cap;
 }
 
 }  // namespace cli

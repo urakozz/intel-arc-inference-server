@@ -757,8 +757,11 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
   const bool hook = a.prefix_auto || a.prefix_cache_gb > 0;
   runtime::PpExtras extras = cli::pp_extras(full, hook);
   extras.drafter = drafter_plan;   // spec 19d
+  // Plan 5d: the chunk cap (B70_PREFILL_CHUNK_CAP, else 2048), planned on both devices.
+  runtime::PrefillPath pf = a.pp_path;
+  pf.chunk_cap = cli::planned_chunk_cap(0);
   const cli::PpSettled settled = cli::pp_settle(d, w, dev, a.max_len_arg, full.trained_max_len,
-                                                a.mem_reserve, a.kv_cache, a.pp_path, extras, a.pipe);
+                                                a.mem_reserve, a.kv_cache, pf, extras, a.pipe);
   std::vector<loader::LoadedModel> stages =
       runtime::place_stages(d0, d1, std::move(full), settled.split, /*drafter=*/a.dflash.on);
   if (stages[0].max_len != settled.max_len) {   // auto loaded at a small length: re-table both
@@ -778,6 +781,7 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
   if (drafter)
     drafter->attach_target(d1, engine.model(1), engine.buffers(1).control, settled.max_len, draft_vocab_on);
   if (a.have_pp_backend) engine.set_prefill_backend(a.pp_backend);
+  engine.set_prefill_chunk_cap(pf.chunk_cap);   // plan 5d: the cap the plan counted
   // The two-card prefill set up at load, not in a request (each card's scratch, context and
   // l0-int8 column scales; with the head, its prefill rows on device 1).
   engine.prepare_prefill();
@@ -1213,7 +1217,7 @@ int run(int argc, char** argv) {
     return serve_kolibri(ks, options);
   }
 
-  const runtime::PrefillPath pp_path = cli::prefill_path(
+  runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
     const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
@@ -1342,8 +1346,13 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache,
-                                       drafter_load ? drafter_load->plan : runtime::DrafterPlan{});
+  // Plan 5d: the prefill chunk cap - B70_PREFILL_CHUNK_CAP if set, else the default (cli/max_len.h:
+  // kPrefillChunkCapRule) - planned with max_len and given to the engine.
+  pp_path.chunk_cap = cli::planned_chunk_cap(0);
+  const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
+  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
+  const uint32_t chunk_cap =
+      cli::settle_chunk_cap(context, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, 0);
   std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
   if (drafter_load)
     drafter = std::make_unique<runtime::dflash::DFlashDrafter>(context, std::move(drafter_load->w),
@@ -1352,6 +1361,7 @@ int run(int argc, char** argv) {
   runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get());
   if (drafter) drafter->attach(engine, draft_vocab_on);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
+  engine.set_prefill_chunk_cap(chunk_cap);   // plan 5d
   // Prefill setup at load, not in the first request: on l0-int8 this is the
   // one-time rotated column-scale pass (spec 5 T2).
   engine.prepare_prefill();
