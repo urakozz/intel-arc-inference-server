@@ -72,26 +72,27 @@ void test_model() {
   o.cost = MtpCost::bf16_head();
   const AdaptiveK bf(o);
   CHECK_NEAR(bf.rate(0.8, 0), 1.0, 1e-12);
-  CHECK_NEAR(bf.rate(0.8, 1), 1.8 / 1.36, 1e-12);
-  CHECK_NEAR(bf.rate(0.97, 3), AdaptiveK::expected_ids(0.97, 3) / 2.29, 1e-12);
-  // The boundaries of spec 8 §10: bf16 0 | 0.36 | 1 | 0.83 | 3.
+  CHECK_NEAR(bf.rate(0.8, 1), 1.8 / (1.04 + 0.19), 1e-12);
+  CHECK_NEAR(bf.rate(0.97, 3), AdaptiveK::expected_ids(0.97, 3) / (1.13 + 0.55), 1e-12);
+  // The boundaries on spec 28b's measured verify rows (flat: 1.04 / 1.09 / 1.13): bf16 0 | 0.231 | 1 | 0.536 | 2 |
+  // 0.689 | 3 (spec 8 §10's, on the old rows, were 0 | 0.36 | 1 | 0.83 | 3 with K = 2 never the best).
   CHECK_EQ(bf.best(0.20), 0U);
-  CHECK_EQ(bf.best(0.35), 0U);
-  CHECK_EQ(bf.best(0.37), 1U);
+  CHECK_EQ(bf.best(0.24), 1U);
   CHECK_EQ(bf.best(0.44), 1U);   // prose
-  CHECK_EQ(bf.best(0.80), 1U);
-  CHECK_EQ(bf.best(0.84), 3U);
+  CHECK_EQ(bf.best(0.53), 1U);
+  CHECK_EQ(bf.best(0.55), 2U);
+  CHECK_EQ(bf.best(0.68), 2U);
+  CHECK_EQ(bf.best(0.70), 3U);
   CHECK_EQ(bf.best(0.97), 3U);   // tool-call output
   o.cost = MtpCost::int8_head();
-  const AdaptiveK i8(o);
-  CHECK_EQ(i8.best(0.30), 0U);
-  CHECK_EQ(i8.best(0.32), 1U);
-  CHECK_EQ(i8.best(0.80), 1U);
-  CHECK_EQ(i8.best(0.82), 3U);
-  for (int i = 0; i <= 1000; ++i) {   // K = 2 is never the best on either table
-    CHECK(bf.best(i / 1000.0) != 2U);
-    CHECK(i8.best(i / 1000.0) != 2U);
-  }
+  const AdaptiveK i8(o);   // int8: 0 | 0.171 | 1 | 0.477 | 2 | 0.620 | 3
+  CHECK_EQ(i8.best(0.16), 0U);
+  CHECK_EQ(i8.best(0.18), 1U);
+  CHECK_EQ(i8.best(0.47), 1U);
+  CHECK_EQ(i8.best(0.49), 2U);
+  CHECK_EQ(i8.best(0.61), 2U);
+  CHECK_EQ(i8.best(0.63), 3U);
+  CHECK_EQ(i8.best(0.97), 3U);
   std::printf("model: E(K), rates and the K boundaries per table\n");
 }
 
@@ -105,7 +106,7 @@ void test_cost_parse() {
   CHECK_NEAR(c.cost(2), 1.5 + 0.2, 1e-12);
   CHECK_EQ(c.max_k(), 3U);
   const MtpCost d = MtpCost::parse("draft=0.12,0.25", base);   // verify kept from base
-  CHECK_NEAR(d.verify[1], 1.17, 1e-12);
+  CHECK_NEAR(d.verify[1], 1.04, 1e-12);
   CHECK_EQ(d.max_k(), 2U);
   AdaptiveKOptions o;
   o.cost = d;
@@ -170,18 +171,18 @@ void test_down_on_low_acceptance() {
     if (ks[i] != 1) continue;
     CHECK(ks[i + 1] == 0 && ks[i + 2] == 0 && ks[i + 3] == 0 && ks[i + 4] == 0);
   }
-  // Prose-like output, alpha 0.44 (the K = 0 / 1 boundary is 0.36): only K 0 and 1 once
-  // settled, and ids per cost within 5 % of the best fixed K's.
+  // Prose-like output, alpha 0.44 (K = 1 is the best from 0.231 to 0.536 on spec 28b's flat bf16 rows, K = 2 within
+  // 5 % of it): never K = 3 once settled, and ids per cost within 5 % of the best fixed K's.
   AdaptiveKOptions o;
   for (uint64_t seed = 1; seed <= 5; ++seed) {
     AdaptiveK q{o};
     Geometric g(seed, 0.44);
     const Trace t = drive_trace(q, 400, g);
-    for (size_t i = 20; i < t.ks.size(); ++i) CHECK(t.ks[i] <= 1);
+    for (size_t i = 20; i < t.ks.size(); ++i) CHECK(t.ks[i] <= 2);
     CHECK(t.efficiency() >= 0.95 * q.rate(0.44, 1));
   }
   std::printf("low acceptance: K = 0 by iteration %zu with a K = 1 probe every 5th; "
-              "alpha 0.44: K in {0, 1}, within 5 %% of the best rate\n", first0);
+              "alpha 0.44: K in {0, 1, 2}, within 5 %% of the best rate\n", first0);
 }
 
 void test_recovers() {
@@ -202,22 +203,23 @@ void test_recovers() {
 }
 
 void test_hysteresis() {
-  // alpha at the K = 1 / 3 boundary (0.83 on bf16): the default policy must not flap.
+  // alpha at the K = 2 / 3 boundary (0.689 on spec 28b's bf16 rows; 0.83, K = 1 / 3, before): the default policy
+  // must not flap.
   AdaptiveKOptions jumpy;
   jumpy.hysteresis = 0;
   jumpy.decay = 0.3;
   size_t calm_total = 0, jumpy_total = 0;
   for (uint64_t seed = 1; seed <= 5; ++seed) {
     AdaptiveK calm{AdaptiveKOptions{}}, flappy{jumpy};
-    Geometric g1(seed, 0.83), g2(seed, 0.83);
+    Geometric g1(seed, 0.689), g2(seed, 0.689);
     const Trace a = drive_trace(calm, 400, g1);
     const Trace b = drive_trace(flappy, 400, g2);
     calm_total += switches(a.policy, 2);
     jumpy_total += switches(b.policy, 2);
     CHECK(switches(a.policy, 2) <= 40);   // at most one switch per 10 iterations
-    CHECK(a.efficiency() >= 0.97 * calm.rate(0.83, calm.best(0.83)));
+    CHECK(a.efficiency() >= 0.97 * calm.rate(0.689, calm.best(0.689)));
   }
-  std::printf("hysteresis at alpha 0.83: %zu switches in 5 x 400 iterations "
+  std::printf("hysteresis at alpha 0.689: %zu switches in 5 x 400 iterations "
               "(no hysteresis, short window: %zu)\n", calm_total, jumpy_total);
   CHECK(calm_total * 3 <= jumpy_total);
 }

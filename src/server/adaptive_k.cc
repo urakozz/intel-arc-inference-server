@@ -10,19 +10,21 @@ namespace server {
 
 MtpCost MtpCost::bf16_head() { return MtpCost{}; }
 
-// Spec 9 H2 (docs/BENCHMARKS.md, "int8 lm_head"): the int8 head makes drafts 34 % cheaper
-// and each verify ~2 ms cheaper; in units of the int8 plain step (32.65 ms). Derived, to be
-// replaced by the box's own measurement (spec 8 §10).
+// The int8 head, in units of the int8 plain step. Verify: spec 28b's gemm_sm rows, measured 2026-11-01 by
+// probe_mtp_steps' interleaved pairs at depth 4096 (1.037 / 1.086 / 1.131; busy-box timing, to be re-checked on a
+// quiet box; before 28b 1.18 / 1.56 / 1.79, derived from spec 9 H2). Drafts: spec 9 H2 (34 % cheaper than bf16's),
+// which the same run measured at 0.133 / 0.256 / 0.369.
 MtpCost MtpCost::int8_head() {
   MtpCost c;
-  c.verify = {1.00, 1.18, 1.56, 1.79};
+  c.verify = {1.00, 1.04, 1.09, 1.13};
   c.draft = {0.13, 0.26, 0.38};
   return c;
 }
 
 MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
   MtpCost c = i8_head ? int8_head() : bf16_head();
-  while (c.verify.size() < 8) c.verify.push_back(c.verify.back() + 0.22);
+  // Spec 28b: M = 5..8 measured (int8 head; the bf16 head's taken equal - adaptive_k.h)
+  for (double v : {1.18, 1.30, 1.35, 1.56}) c.verify.push_back(v);
   const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +
                    (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
   c.draft.assign(7, d);
