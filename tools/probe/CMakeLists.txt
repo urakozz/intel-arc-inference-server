@@ -934,3 +934,51 @@ target_link_libraries(probe_chunk_rows PRIVATE b70_prefill_host b70_runtime b70_
 b70_target_kernel_dir(probe_chunk_rows)
 get_property(PCR_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_chunk_rows ${PCR_PF_KERNELS})
+
+# --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
+# Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probe-tp-<date>.md.
+# `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
+# path binds it. The ptp_gemv_* binaries are today's gemv.cl / gemv_i8w.cl at the PER-CARD TP shapes of
+# spec 17 §R2.5 (tp_shapes.h), each with its one-card production cell's defines (src/kernels/CMakeLists.txt):
+# probe-only names, no production binary changes. Agnes's per-card gate‖up' / down' carry its PROVISIONAL cells.
+add_ocloc_kernel(ptp_kernels SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_tp.cl)
+set(PTP_GEMV_CL ${CMAKE_SOURCE_DIR}/src/kernels/gemv.cl)
+set(PTP_TARGETS kernel_ptp_kernels)
+# name-suffix K N S L extra-defines   (qkv‖z L1 S1; out_proj / o_proj 3072 x 5120 as the 6144 x 5120 S4 cell;
+# q‖k‖v 7168 as the 14336 S2 cell; gate‖up as the 34816 S8 cell; down as the 17408 S4 cell)
+foreach(row "5120 8192 1 1 -" "3072 5120 4 0 B" "5120 7168 2 0 B" "5120 17408 8 0 D" "8704 5120 4 0 B"
+            "5120 19456 8 0 D" "9728 5120 4 0 B")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 S)
+  list(GET f 3 L)
+  list(GET f 4 X)
+  set(defs M=1 K=${K} N=${N} S=${S} LAYOUT=${L})
+  if(X STREQUAL "B")
+    list(APPEND defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(X STREQUAL "D")
+    list(APPEND defs GEMV_DEQ_SHIFT=1)
+  endif()
+  add_ocloc_kernel(ptp_gemv_M1_K${K}_N${N}_S${S}_L${L} SOURCE ${PTP_GEMV_CL} DEFINES ${defs})
+  list(APPEND PTP_TARGETS kernel_ptp_gemv_M1_K${K}_N${N}_S${S}_L${L})
+endforeach()
+add_ocloc_kernel(ptp_gemv_i8w_M1_K5120_N124160 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gemv_i8w.cl
+                 DEFINES M=1 K=5120 N=124160)
+list(APPEND PTP_TARGETS kernel_ptp_gemv_i8w_M1_K5120_N124160)
+add_custom_target(ptp_kernel_set DEPENDS ${PTP_TARGETS})
+
+add_executable(probe_tp probe_tp.cc)
+target_include_directories(probe_tp PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_tp PRIVATE b70_l0 b70_model pthread)
+b70_target_kernel_dir(probe_tp)
+add_dependencies(probe_tp ptp_kernel_set)
+# the one-card production binaries `probe_tp step` times beside the per-card ones (only these: a new box tree
+# builds probe_tp without the whole kernel set)
+foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14336_S2_L0
+          gemv_M1_K5120_N34816_S8_L0 gemv_M1_K17408_N5120_S4_L0 gemv_i8w_M1_K5120_N248320
+          gemv_M1_K5120_N38912_S8_L0 gemv_M1_K19456_N5120_S4_L0)
+  if(TARGET kernel_${v})
+    add_dependencies(probe_tp kernel_${v})
+  endif()
+endforeach()
