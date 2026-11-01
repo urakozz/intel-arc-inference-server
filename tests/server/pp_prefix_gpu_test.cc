@@ -131,6 +131,53 @@ Result run_seq(Side& side, char n, const Ids& L, const Ids& C, server::HostAlloc
   return r;
 }
 
+// Where two sessions (save_state then save_kv(0, pos), Engine's layout) differ: the state's
+// parts (every GDN layer's state, every conv ring, the head's hidden row), then per tensor
+// (K, V) and per layer (the head's last) the first and last differing position - so a DIFFER
+// names the buffer and the rows, not just the byte count.
+struct Layout {
+  size_t state = 0, gdn = 0, hh = 0, row = 0, scale = 0;
+  uint32_t layers = 0;   // FA layers, + 1 with the head
+};
+void report_diff(const Bytes& a, const Bytes& b, const Layout& L) {
+  if (a.size() != b.size()) {
+    std::printf("    sizes differ: %zu vs %zu\n", a.size(), b.size());
+    return;
+  }
+  const auto range = [&](const char* what, size_t off, size_t n) {
+    size_t first = n, last = 0, cnt = 0;
+    for (size_t i = 0; i < n; ++i)
+      if (a[off + i] != b[off + i]) {
+        if (first == n) first = i;
+        last = i;
+        ++cnt;
+      }
+    if (cnt) std::printf("    %s: %zu B differ in [%zu, %zu] of %zu\n", what, cnt, first, last, n);
+  };
+  range("gdn state", 0, L.gdn);
+  range("conv rings", L.gdn, L.state - L.gdn - L.hh);
+  range("head hidden", L.state - L.hh, L.hh);
+  const size_t pos_bytes = L.row + L.scale;
+  const size_t n = (a.size() - L.state) / (2 * L.layers * pos_bytes);
+  for (int t = 0; t < 2; ++t) {
+    const size_t base = L.state + size_t(t) * L.layers * n * pos_bytes;
+    for (uint32_t l = 0; l < L.layers; ++l) {
+      const size_t off = base + size_t(l) * n * L.row;
+      long first = -1, last = -1, cnt = 0;
+      for (size_t p = 0; p < n; ++p)
+        if (std::memcmp(&a[off + p * L.row], &b[off + p * L.row], L.row) != 0) {
+          if (first < 0) first = long(p);
+          last = long(p);
+          ++cnt;
+        }
+      if (cnt)
+        std::printf("    kv %c layer %u%s: %ld of %zu positions differ, first %ld last %ld\n", t ? 'V' : 'K', l,
+                    l + 1 == L.layers ? " (last)" : "", cnt, n, first, last);
+    }
+    if (L.scale) range(t ? "V scales" : "K scales", base + L.layers * n * L.row, L.layers * n * L.scale);
+  }
+}
+
 template <class E>
 Bytes session_of(E& e) {
   Bytes b(e.state_bytes());
@@ -192,6 +239,15 @@ int main(int argc, char** argv) {
 
   // --- two cards ---------------------------------------------------------------------------------
   loader::LoadedModel full = loader::load(d0, snap, kMaxLen, g_k > 0, head);
+  Layout lay;
+  {
+    const model::ModelDesc& md = *full.desc;
+    lay.gdn = size_t(md.gdn_layers) * md.gdn_v_heads * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
+    lay.hh = g_k > 0 ? size_t(md.hidden) * 2 : 0;
+    lay.layers = md.fa_layers + (g_k > 0 ? 1 : 0);
+    lay.row = size_t(md.fa_kv_n()) * (kv == runtime::KvCache::Int8 ? 1 : 2);
+    lay.scale = kv == runtime::KvCache::Int8 ? size_t(md.fa_kv_heads) * 2 : 0;
+  }
   const runtime::PpWeights w = runtime::pp_weights(full);
   runtime::PpExtras x;
   x.mtp = g_k > 0;
@@ -203,6 +259,7 @@ int main(int argc, char** argv) {
   e.prepare_prefill();
   cli::pp::PipelineEngineAdapterT<runtime::PipelineEngine> ad(e, Qwen35::kVocabUsed, Qwen35::kVocab, g_k);
   Side side{ad, [&] { ad.reset(); }, [&] { return e.read_logits(); }, [&] { return session_of(e); }};
+  lay.state = e.state_bytes();
   bool ok = true;
   for (size_t i = 0; i < sizeof seqs; ++i) {
     const Result got = run_seq(side, seqs[i], L, C, alloc, cache_bytes);
@@ -219,6 +276,7 @@ int main(int argc, char** argv) {
                 same ? "equal" : "DIFFER", got.ids.size(), ids ? "bitwise" : "DIFFER",
                 got.rows.size() / Qwen35::kVocab, rows ? "bitwise" : "DIFFER", got.session.size(),
                 sess ? "bitwise" : "DIFFER");
+    if (!sess) report_diff(want.session, got.session, lay);
     ok = ok && same && ids && rows && sess;
   }
   if (!ok) {
