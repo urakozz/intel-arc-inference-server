@@ -102,6 +102,10 @@ narrative, and the numbered guides cite them where they matter.
   timing on one card (provisional): bf16 weights-on-B at M = 8 is 1.08x a token's M = 1 GEMV sum (today 3.10x);
   verify(8) today 3.17 plain steps, derived with the stand-in 1.54-1.58 - the operator's call; attention at M = 8 is the
   next lever (spec 28c). Quiet-box re-check set in §6.
+- spec 28b (no separate record; spec 28 §10 "28b as built" and BENCHMARKS "The verify step on gemm_sm"): `gemm_sm`
+  in production for every M >= 2 decode list (Qwen3.8, Agnes, Ornith's dense projections), M = 1 bitwise; verify(8)
+  1.57 plain steps (gemv 3.17), D1 tool calls 2.12x at K = 3 (busy-box timing); N4 / N6 as written not met - the
+  operator's ruling pending.
 - [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
