@@ -25,6 +25,8 @@
 // 4. Host round trip: execute + fence of a one-noop list; a 4-byte and a 5 MB
 //    device -> host readback on an immediate list; medians of 200 / 200 / 20.
 //
+// Spec 28b: the 1v rows also time each M >= 2 list forced onto today's gemv (runtime::CaptureOptions), interleaved,
+// and the profile groups gemm_sm / gemm_sm_i8w with the GEMVs they replace.
 // `--verify8 1` (spec 28a, plan 28a Task 3) replaces all of the above with the VERIFY lists at
 // M = 1..8: the model loaded with its MTP head and the int8 lm_head, M = 1..4 over the engine's
 // own 4-slot MtpBuffers and M = 5..8 over a probe-owned 8-slot one (probe_mtp_steps' B70_VERIFY_M8
@@ -100,9 +102,14 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
   auto mtp8 = std::make_unique<runtime::MtpBuffers>(ctx, max_len, *e.model().desc, e.draft_vocab(), e.kv_cache(),
                                                     runtime::MtpDims::kMaxSlots);
   auto buf_for = [&](uint32_t M) -> runtime::MtpBuffers& { return M <= 4 ? *mtp4 : *mtp8; };
-  std::map<uint32_t, runtime::CapturedStep> lists;
+  std::map<uint32_t, runtime::CapturedStep> lists, lists_g;
   for (uint32_t M = 1; M <= 8; ++M)
     lists.emplace(M, runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M));
+  // Spec 28b: the same lists forced onto today's gemv (runtime::CaptureOptions) - the pre-28b step, in the same
+  // session, interleaved with the production (gemm_sm) one.
+  const runtime::CaptureOptions force_gemv{runtime::LinearForce::Gemv};
+  for (uint32_t M = 2; M <= 8; ++M)
+    lists_g.emplace(M, runtime::build_verify(ctx, e.model(), e.buffers(), buf_for(M), M, nullptr, force_gemv));
   std::printf("verify lists M = 1..8: %zu launches each (M = 5..8 over a probe-owned %u-slot MtpBuffers, %.2f GB)\n",
               lists.at(1).kernel_count, mtp8->slots, mtp8->bytes() / 1e9);
   l0::Queue q(ctx);
@@ -126,37 +133,50 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
     ctl->n_active = 1;
     ctl->cur_token[0] = ctl->out_token[0];
   };
-  auto arm = [&](uint32_t M, uint32_t n) {
+  auto arm_on = [&](std::map<uint32_t, runtime::CapturedStep>& ls, uint32_t M, uint32_t n) {
     double s = 0;
     for (uint32_t i = 0; i < n; ++i) {
       Timer t; t.start();
-      call(lists.at(M).list, M);
+      call(ls.at(M).list, M);
       s += t.ms();
     }
     return s / n;
   };
+  auto arm = [&](uint32_t M, uint32_t n) { return arm_on(lists, M, n); };
   for (uint32_t M = 1; M <= 8; ++M) arm(M, 8);   // warm-up
-  std::map<uint32_t, std::vector<double>> ms, ratio, ms1;
+  for (uint32_t M = 2; M <= 8; ++M) arm_on(lists_g, M, 8);
+  std::map<uint32_t, std::vector<double>> ms, ratio, ms1, msg, ratiog;
   for (uint32_t r = 0; r < rounds; ++r)
     for (uint32_t M = 1; M <= 8; ++M) {
-      double t1, tm;
-      if ((r + M) % 2 == 0) { t1 = arm(1, replays); tm = arm(M, replays); }
-      else { tm = arm(M, replays); t1 = arm(1, replays); }
+      // M = 1, M (production) and M forced onto gemv, the order rotating by round
+      double t1 = 0, tm = 0, tg = 0;
+      for (uint32_t j = 0; j < 3; ++j) {
+        const uint32_t w = (j + r + M) % 3;
+        if (w == 0) t1 = arm(1, replays);
+        else if (w == 1) tm = arm(M, replays);
+        else if (M >= 2) tg = arm_on(lists_g, M, replays);
+      }
       ms[M].push_back(tm);
       ms1[M].push_back(t1);
       ratio[M].push_back(tm / t1);
+      if (M >= 2) {
+        msg[M].push_back(tg);
+        ratiog[M].push_back(tg / t1);
+      }
     }
-  std::printf("\n1v. the verify step (unprofiled), interleaved pairs with M = 1, %u calls each, median of %u, "
-              "depth %u:\n| M | ms/step | range | x M=1 (paired median) | ratio range | M=1 ms in the pairs |\n"
-              "|---|---|---|---|---|---|\n", replays, rounds, depth);
+  std::printf("\n1v. the verify step (unprofiled), interleaved with M = 1 (and, spec 28b, with the same list forced onto "
+              "gemv), %u calls each, median of %u, depth %u:\n| M | ms/step | range | x M=1 (paired median) | ratio "
+              "range | M=1 ms in the pairs | gemv-forced ms | gemv-forced x M=1 |\n|---|---|---|---|---|---|---|---|\n",
+              replays, rounds, depth);
   std::map<uint32_t, double> step;
   for (uint32_t M = 1; M <= 8; ++M) {
     auto v = ms[M], rr = ratio[M];
     std::sort(v.begin(), v.end());
     std::sort(rr.begin(), rr.end());
     step[M] = median(ms[M]);
-    std::printf("| %u | %.3f | %.3f-%.3f | %.4f | %.4f-%.4f | %.3f |\n", M, step[M], v.front(), v.back(),
-                median(ratio[M]), rr.front(), rr.back(), median(ms1[M]));
+    std::printf("| %u | %.3f | %.3f-%.3f | %.4f | %.4f-%.4f | %.3f | %.3f | %.4f |\n", M, step[M], v.front(), v.back(),
+                median(ratio[M]), rr.front(), rr.back(), median(ms1[M]), M >= 2 ? median(msg[M]) : step[M],
+                M >= 2 ? median(ratiog[M]) : 1.0);
   }
   // 1p. the profiled lists, per family
   std::map<std::string, std::map<uint32_t, double>> fam;
@@ -192,8 +212,8 @@ int run_verify8(l0::Context& ctx, const std::string& path, uint32_t depth, uint3
   std::map<std::string, std::map<uint32_t, double>> grp;
   for (auto& [f, v] : fam) {
     row(f, v);
-    const std::string g = f == "gemv"                     ? "int4 GEMV (gemv)"
-                          : f == "gemv_i8w"               ? "int8 head (gemv_i8w)"
+    const std::string g = f == "gemv" || f == "gemm_sm"   ? "int4 GEMV (gemv)"
+                          : f == "gemv_i8w" || f == "gemm_sm_i8w" ? "int8 head (gemv_i8w)"
                           : f.rfind("attn", 0) == 0       ? "attention (attn*)"
                           : f.rfind("gdn_step", 0) == 0   ? "gdn_step"
                                                           : "everything else";

@@ -3,8 +3,9 @@
 //
 //   D2   greedy, 256 ids, K = 7, 3 and the AdaptiveK policy over MtpCost::dflash (the server's --spec dflash
 //        default), against the plain step() loop of the same engine, on the three golden prompts and the 36 A4
-//        tool-call prompts. The M = k + 1 rows are bitwise equal to M = 1 (dflash_engine_test D3), so the bar is
-//        IDENTITY: any divergence fails (reported with its index). Acceptance and ids per iteration printed per
+//        tool-call prompts. Spec 28 N6 (plan 28b): the M = k + 1 rows run gemm_sm and are no longer bitwise
+//        M = 1, so the bar is identity except a first divergence the golden tie rule classes as a near-tie
+//        (tests/server/greedy_tie.h): zero non-tie divergences, the near-ties counted (before 28b: identity). Acceptance and ids per iteration printed per
 //        prompt (19a's teacher-forced E_K is the expectation: A4 ~7.2 at K = 7, code ~6.2, prose ~2.2).
 //   RF1  a run truncated inside an accepted burst (truncate_to) and then continued equals the plain run.
 //   S    a seeded sampled run (T 0.7, top-k 20, top-p 0.95) twice from fresh adapters: ids bitwise (the drafter's
@@ -23,6 +24,7 @@
 #include <nlohmann/json.hpp>
 
 #include "check.h"
+#include "greedy_tie.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
@@ -62,11 +64,18 @@ struct Gen {
 
 // server.cc's loop minus the text: prefill, then step() (k_fixed == 0 and no policy) or step_many(K) until n ids,
 // the last burst truncated to exactly n. `policy`: K per iteration from server::AdaptiveK (the --spec dflash default).
+// `steps` (the plain run only): after every step() the row that decided the next id; steps[i] belongs to ids[i].
 Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
-             uint32_t k_fixed, bool policy) {
+             uint32_t k_fixed, bool policy, std::vector<greedy_tie::RefStep>* steps = nullptr,
+             runtime::Engine* eng = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
+  if (steps) {
+    steps->clear();
+    steps->push_back({UINT32_MAX, UINT32_MAX, 1e30});
+  }
+  std::vector<float> row(steps ? model::Qwen35::kVocab : 0);
   std::unique_ptr<server::AdaptiveK> ak;
   if (policy) {
     server::AdaptiveKOptions o;
@@ -77,6 +86,11 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, 
   while (g.ids.size() < n) {
     if (!policy && k_fixed == 0) {
       g.ids.push_back(a.step(s));
+      if (steps) {
+        l0::CmdList imm = l0::CmdList::immediate(eng->context());
+        imm.copy(row.data(), eng->buffers().logits.ptr(), row.size() * sizeof(float));
+        steps->push_back(greedy_tie::ref_step(row.data(), model::Qwen35::kVocabUsed));
+      }
       continue;
     }
     const uint32_t k = ak ? ak->next() : k_fixed;
@@ -90,12 +104,6 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, 
     if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
   }
   return g;
-}
-
-size_t first_diff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
-  for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
-    if (a[i] != b[i]) return i;
-  return a.size() == b.size() ? size_t(-1) : std::min(a.size(), b.size());
 }
 
 }  // namespace
@@ -121,23 +129,30 @@ int main(int argc, char** argv) {
   server::Sampling greedy;   // greedy = true by default
 
   // --- D2 -------------------------------------------------------------------------------------------------
-  uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0;
+  uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0;
   for (const Prompt& p : prompts()) {
-    const Gen plain = generate(a, p.ids, kGen, greedy, 0, false);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen plain = generate(a, p.ids, kGen, greedy, 0, false, &steps, &e);
     const char* arm[3] = {"K=7", "K=3", "auto"};
     for (int i = 0; i < 3; ++i) {
       const Gen g = generate(a, p.ids, kGen, greedy, i == 0 ? kK : i == 1 ? 3 : 0, i == 2);
-      const size_t at = first_diff(g.ids, plain.ids);
+      const greedy_tie::Result tr = greedy_tie::classify(plain.ids, steps, g.ids);
+      char what[96];
+      if (tr.v == greedy_tie::Verdict::Same) std::snprintf(what, sizeof what, "identical");
+      else if (tr.v == greedy_tie::Verdict::Tie)
+        std::snprintf(what, sizeof what, "near-tie at %zu (%.3f bf16 ulp)", tr.at, tr.margin_ulps);
+      else std::snprintf(what, sizeof what, "DIFFERS at %zu (margin %.3f bf16 ulp)", tr.at, tr.margin_ulps);
       std::printf("D2 %-28s %-4s %s, %llu iterations, %.2f ids an iteration, acceptance %.3f\n", p.name.c_str(),
-                  arm[i], at == size_t(-1) ? "identical" : ("DIFFERS at " + std::to_string(at)).c_str(),
-                  (unsigned long long)g.iters, double(kGen) / double(std::max<uint64_t>(1, g.iters)),
+                  arm[i], what, (unsigned long long)g.iters, double(kGen) / double(std::max<uint64_t>(1, g.iters)),
                   g.drafted ? double(g.accepted) / double(g.drafted) : 0.0);
-      fails += at != size_t(-1);
+      fails += tr.v == greedy_tie::Verdict::Diverged;
+      ties += tr.v == greedy_tie::Verdict::Tie;
       tot_iters[i] += g.iters;
       tot_ids[i] += kGen;
     }
   }
-  std::printf("D2: %llu divergences; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n", (unsigned long long)fails,
+  std::printf("D2: %llu non-tie divergences, %llu near-ties; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n",
+              (unsigned long long)fails, (unsigned long long)ties,
               double(tot_ids[0]) / double(tot_iters[0]), double(tot_ids[1]) / double(tot_iters[1]),
               double(tot_ids[2]) / double(tot_iters[2]));
   ok &= fails == 0;
@@ -145,7 +160,8 @@ int main(int argc, char** argv) {
   // --- RF1: truncate inside a burst, then continue -----------------------------------------------------------
   {
     const std::vector<uint32_t> prompt = read_ids("tests/golden/prompts/code.ids");
-    const Gen plain = generate(a, prompt, 96, greedy, 0, false);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen plain = generate(a, prompt, 96, greedy, 0, false, &steps, &e);
     a.reset();
     a.prefill(prompt);
     std::vector<uint32_t> got;
@@ -160,9 +176,13 @@ int main(int argc, char** argv) {
       got.insert(got.end(), burst.begin(), burst.end());
     }
     got.resize(96);
-    const bool rf1 = truncated && got == plain.ids;
+    const greedy_tie::Result tr = greedy_tie::classify(plain.ids, steps, got);
+    const bool rf1 = truncated && tr.v != greedy_tie::Verdict::Diverged;
     std::printf("RF1: a burst truncated to 2 ids, then continued: %s\n",
-                !truncated ? "no burst of 3 to truncate" : rf1 ? "equals the plain run" : "DIFFERS");
+                !truncated                             ? "no burst of 3 to truncate"
+                : tr.v == greedy_tie::Verdict::Same    ? "equals the plain run"
+                : tr.v == greedy_tie::Verdict::Tie     ? "equals the plain run up to a near-tie"
+                                                       : "DIFFERS");
     ok &= rf1;
   }
 
