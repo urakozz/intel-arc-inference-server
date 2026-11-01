@@ -29,8 +29,9 @@
 // **KL2 on prefill (spec 20d)**: with `prefill` (or `prefill:<chunk>`) the prompt goes through
 // KolibriEngine::prefill instead of one replay per id; the gate is the same rule from row T - 1 on (the
 // prefill's head chooses the first token), the routing diagnostic reads the prefill's route rows of the
-// last chunk (all of the prompt's in one chunk; the last <chunk> rows otherwise), and the tap is not read
-// (prefill writes no tap). The 32 teacher-forced steps after it are decode's, as before.
+// last chunk (all of the prompt's in one chunk; the last <chunk> rows otherwise), and the tap reads the
+// prefill's own per-layer rows of that chunk (KolibriEngine::read_prefill_tap). The 32 teacher-forced steps
+// after it are decode's, as before.
 //
 // **The f32 judge (operator ruling 2026-10-31, round 2; `--judge=<dir>`)**: kolibri_ref.py run --mode f32 --force
 // <the golden's tokens> (tools/box_validate/kolibri_oracle.sh synth-f32 | real-f32), its rows the golden's contexts.
@@ -255,6 +256,34 @@ int main(int argc, char** argv) {
         judge_route(r.data() + size_t(l) * runtime::kolibri::kRouteWords, row, l);
       }
     };
+    // One prompt row t's residual per layer (layer l's row at tap + l x stride) against the golden's and the
+    // judge's resid.L{l}.
+    // B70_KOL_TAP_DUMP=<dir> (debug): every tapped row, raw bf16 [row][layer][hidden], to
+    // <dir>/<prompt>.<prefill|decode>.tap - for offline per-row comparisons.
+    const char* dump_dir = std::getenv("B70_KOL_TAP_DUMP");
+    FILE* dump = dump_dir && *dump_dir
+                     ? std::fopen((std::string(dump_dir) + "/" + pname + (prefill ? ".prefill" : ".decode") + ".tap").c_str(), "wb")
+                     : nullptr;
+    auto tap_row = [&](const uint16_t* tap, size_t stride, uint32_t t) {
+      if (dump)
+        for (uint32_t l = 0; l < d.layers; ++l) std::fwrite(tap + size_t(l) * stride, 2, d.hidden, dump);
+      for (uint32_t l = 0; l < d.layers; ++l) {
+        if (!g.has("resid.L" + std::to_string(l))) continue;
+        const uint16_t* got = tap + size_t(l) * stride;
+        const uint16_t* want = g.bf16("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
+        tap_min[l] = std::min(tap_min[l], golden::compare_bf16(got, want, d.hidden, sa, sb).cos);
+        if (J && J.g->has("resid.L" + std::to_string(l))) {   // the judge's residual is f32 (--mode f32)
+          const float* jr = J.g->f32("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
+          std::vector<float> e(d.hidden), w(d.hidden);
+          for (uint32_t i = 0; i < d.hidden; ++i) {
+            e[i] = common::bf16_to_f32(got[i]);
+            w[i] = common::bf16_to_f32(want[i]);
+          }
+          tap_e[l].push_back(golden::row_cos(jr, e.data(), d.hidden));
+          tap_g[l].push_back(golden::row_cos(jr, w.data(), d.hidden));
+        }
+      }
+    };
     eng.reset();
     // Spec 20d, KL2 on prefill: the prompt in one KolibriEngine::prefill (chunks of `chunk`), the routing
     // diagnostic on the rows the last chunk's route buffer holds, then the 32 teacher-forced decode steps.
@@ -277,27 +306,18 @@ int main(int argc, char** argv) {
         }
       std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing diagnostic on rows %u..%u\n", T, c,
                   eng.prefill_launches(), row0, T - 1);
+      // The prefill tap (debug_tap): the last chunk's per-layer rows, prompt row t at block row t - row0.
+      const std::vector<uint16_t> ptap = eng.read_prefill_tap();
+      for (uint32_t t = row0; t < T; ++t)
+        tap_row(ptap.data() + size_t(t - row0) * d.hidden, size_t(runtime::kolibri::kPfC) * d.hidden, t);
     }
     for (uint32_t t = 0; t < T && !prefill; ++t) {
       eng.ingest({ids[t]});
       check_routes(t);
       const std::vector<uint16_t> tap = eng.read_debug_resid();
-      for (uint32_t l = 0; l < d.layers; ++l) {
-        if (!g.has("resid.L" + std::to_string(l))) continue;
-        const uint16_t* want = g.bf16("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
-        tap_min[l] = std::min(tap_min[l], golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
-        if (J && J.g->has("resid.L" + std::to_string(l))) {   // the judge's residual is f32 (--mode f32)
-          const float* jr = J.g->f32("resid.L" + std::to_string(l), size_t(T) * d.hidden) + size_t(t) * d.hidden;
-          std::vector<float> e(d.hidden), w(d.hidden);
-          for (uint32_t i = 0; i < d.hidden; ++i) {
-            e[i] = common::bf16_to_f32(tap[size_t(l) * d.hidden + i]);
-            w[i] = common::bf16_to_f32(want[i]);
-          }
-          tap_e[l].push_back(golden::row_cos(jr, e.data(), d.hidden));
-          tap_g[l].push_back(golden::row_cos(jr, w.data(), d.hidden));
-        }
-      }
+      tap_row(tap.data(), d.hidden, t);
     }
+    if (dump) std::fclose(dump);
     uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
     int first_bad = -1;
     double logit_min = 1.0;
@@ -332,8 +352,8 @@ int main(int argc, char** argv) {
     std::printf("  %s: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
                 J ? "against the bf16 golden (printed; the f32 judge gates below)" : "gate", det_ok, det, tie_ok, ties,
                 ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(), logit_min);
-    if (!prefill) {   // prefill writes no tap
-      std::printf("  tap (min cosine over the prompt):");
+    {
+      std::printf("  tap (min cosine over the prompt%s):", prefill ? ", the prefill's last chunk" : "");
       for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
       std::printf("\n");
     }
@@ -355,9 +375,13 @@ int main(int argc, char** argv) {
               "at %llu (the bar)%s\n", (unsigned long long)jroutes.rows, (unsigned long long)jroutes.engine,
               (unsigned long long)jroutes.golden, route_ok ? "" : "  ** FAIL **");
   bool tap_ok = true;
-  if (!prefill) {
+  {
+    // Prefill: the prompt rows the prefill wrote (KolibriEngine::read_prefill_tap), PRINTED at the same slack - the
+    // operator's prefill gates are tokens and routing (ruling 2026-10-31, round 2); the tap is the diagnostic that
+    // found the bf16-P attention (2026-11-01).
     std::printf("tap against the f32 judge, per layer: median (min) cosine, the engine's / the bf16 golden's - the "
-                "medians' distance ratio gated at %.1f\n", golden::kCosSlack);
+                "medians' distance ratio %s at %.1f\n", prefill ? "printed (prefill: not gated)" : "gated",
+                golden::kCosSlack);
     for (uint32_t l = 0; l < d.layers; ++l) {
       if (tap_e[l].empty()) continue;
       golden::CosRows e{tap_e[l]}, w{tap_g[l]};
@@ -365,7 +389,7 @@ int main(int argc, char** argv) {
       const bool lok = r <= golden::kCosSlack;
       tap_ok = tap_ok && lok;
       std::printf("  L%-3u %.6f (%.4f) / %.6f (%.4f)  x%.2f%s\n", l, e.median(), e.min(), w.median(), w.min(), r,
-                  lok ? "" : "  ** FAIL **");
+                  lok ? "" : prefill ? "  (above the slack)" : "  ** FAIL **");
     }
   }
   if (eng.attention() == runtime::kolibri::KolAttn::Eager) {   // operator ruling 2026-10-29 (the header)
@@ -376,7 +400,7 @@ int main(int argc, char** argv) {
   }
   CHECK(tok_ok);
   CHECK(route_ok);
-  CHECK(tap_ok);
+  CHECK(prefill || tap_ok);
   std::puts("kolibri_golden_test OK");
   return 0;
 }

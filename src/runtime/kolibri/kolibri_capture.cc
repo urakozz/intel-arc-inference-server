@@ -50,7 +50,7 @@ class Walk {
     for (uint32_t l = part_.first; l < part_.end; ++l) {
       layer_ = int(l);
       layer(l);
-      if (tap_) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
+      if (tap_ && !tap_at_attn()) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
     }
     layer_ = -1;
     if (link_ && dev == 0) handoff_out();
@@ -220,6 +220,7 @@ class Walk {
     linear(*L.oproj, b_.attn_out.ptr(), b_.partials);
     fold(b_.partials.ptr(), b_.a, b_.sumsq_a, kk::fold_zero_variant(kM, L.oproj->shape.S), "o_proj's");
     post_add(b_.a, fat(nw, d_.norm_off_post_attn()));
+    if (tap_ && tap_at_attn()) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
     // --- the MoE block -------------------------------------------------------------------------------
     norm(fat(nw, d_.norm_off_post_attention()));
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden, "the router is not [router_n][hidden]");

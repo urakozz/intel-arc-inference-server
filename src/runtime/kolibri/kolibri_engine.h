@@ -150,6 +150,8 @@ class KolibriEngine {
   // u32 [layers][kPfC][32]: every layer's route rows of the last chunk (rows [0, C) written; pf_route_at),
   // each layer's from the device holding it. Throws before the first prefill.
   std::vector<uint32_t> read_prefill_routes();
+  // debug_tap: the last chunk's per-layer output rows, [layers][kPfC][hidden] bf16 (row t of the chunk at t).
+  std::vector<uint16_t> read_prefill_tap();
   bool prefill_ready() const { return pf_bytes_ != 0; }
   // Spec 7's block (runtime::Engine::kBlock); spec 20e's prefix cache hooks into the chunk walk: with a hook
   // set every chunk ends at a block end or at the prompt end (runtime::prefill_chunk_rows), and the hook is
