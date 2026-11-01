@@ -3536,6 +3536,18 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+  # Spec 19f (Review Focus 3-4): --spec dflash-lookup through EngineAdapter - D2 against the plain loop on golden, A4
+  # and the edit / copy set's 8k / 32k prompts, the warm ring (bitwise the plain loop's after lookup runs), a seeded
+  # sampled lookup run reproducible.
+  add_executable(dflash_lookup_gpu_test server/dflash_lookup_gpu_test.cc)
+  target_include_directories(dflash_lookup_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_lookup_gpu_test PRIVATE b70_server b70_tokenizer b70_dflash_runtime b70_prefill_host
+    b70_runtime b70_loader b70_model b70_l0)
+  add_dependencies(dflash_lookup_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_lookup_gpu_test COMMAND dflash_lookup_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_lookup_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
 endif()
 # b70-decode --spec dflash's refusals before the device.
 b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")
