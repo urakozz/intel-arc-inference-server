@@ -49,6 +49,9 @@
 // (operator ruling 2026-10-29: eager prints, never binds) - the verdicts printed, the test does not fail on them.
 //
 // argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>] [--judge=<dir>]
+//       [--tap-at=layer | attn] [--tap-dump=<dir>]
+// (debug: --tap-at=attn taps the residual after each layer's attention half instead of its output - the tap gate then
+// compares other points than the golden's resid.L{l} and is not meaningful; --tap-dump writes every tapped row)
 // (`pp2`: spec 20c Task 6 - the engine on two cards). Exit 77 (SKIP) when the checkpoint or the golden
 // set is absent, or the model does not fit the asked placement.
 #include <algorithm>
@@ -148,11 +151,19 @@ struct JudgedRoutes {
 
 int main(int argc, char** argv) {
   const std::string judge_dir = golden::take_judge(argc, argv);   // operator ruling 2026-10-31, round 2 (header)
+  const std::string tap_dump = golden::take_flag(argc, argv, "--tap-dump=");   // debug (header)
+  const std::string tap_at = golden::take_flag(argc, argv, "--tap-at=");
   const std::string arg = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-kolibri";
   kolibri_rig::Options o;
   o.max_len = kMaxLen;
   o.debug_tap = true;
+  if (tap_at == "attn") {
+    o.tap_at = runtime::kolibri::TapAt::AfterAttn;
+  } else if (!tap_at.empty() && tap_at != "layer") {
+    std::fprintf(stderr, "kolibri_golden_test: --tap-at=%s (layer | attn)\n", tap_at.c_str());
+    return 2;
+  }
   bool prefill = false;   // spec 20d: the prompt through KolibriEngine::prefill
   uint32_t chunk = 0;
   for (int i = 3; i < argc; ++i) {
@@ -258,11 +269,10 @@ int main(int argc, char** argv) {
     };
     // One prompt row t's residual per layer (layer l's row at tap + l x stride) against the golden's and the
     // judge's resid.L{l}.
-    // B70_KOL_TAP_DUMP=<dir> (debug): every tapped row, raw bf16 [row][layer][hidden], to
+    // --tap-dump=<dir> (debug): every tapped row, raw bf16 [row][layer][hidden], to
     // <dir>/<prompt>.<prefill|decode>.tap - for offline per-row comparisons.
-    const char* dump_dir = std::getenv("B70_KOL_TAP_DUMP");
-    FILE* dump = dump_dir && *dump_dir
-                     ? std::fopen((std::string(dump_dir) + "/" + pname + (prefill ? ".prefill" : ".decode") + ".tap").c_str(), "wb")
+    FILE* dump = !tap_dump.empty()
+                     ? std::fopen((tap_dump + "/" + pname + (prefill ? ".prefill" : ".decode") + ".tap").c_str(), "wb")
                      : nullptr;
     auto tap_row = [&](const uint16_t* tap, size_t stride, uint32_t t) {
       if (dump)

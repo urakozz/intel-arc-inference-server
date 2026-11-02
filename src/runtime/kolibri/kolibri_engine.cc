@@ -47,7 +47,12 @@ l0::CmdList& KolibriEngine::stage_imm(uint32_t dev) const { return st(dev).imm; 
 
 KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len,
                              bool debug_tap, const PipelineOptions& opt)
-    : model_(std::move(model)), max_len_(max_len), opt_(opt), attn_(kolibri_attn()) {
+    : KolibriEngine(std::move(devices), std::move(model), max_len, DebugTap{debug_tap, TapAt::LayerOut}, opt) {}
+
+KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len,
+                             DebugTap tap, const PipelineOptions& opt)
+    : model_(std::move(model)), max_len_(max_len), opt_(opt), attn_(kolibri_attn()), tap_at_(tap.at) {
+  const bool debug_tap = tap.on;
   const model::Kolibri1Desc& d = model_.desc;
   const model::KolPlacement& p = model_.placement;
   model::validate(p, d);
@@ -81,7 +86,7 @@ KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoade
     binding = link_->binding(opt.spin_limit);
   }
   for (uint32_t i = 0; i < p.devices; ++i)
-    st(i).step.emplace(build(st(i).ctx, model_.parts[i], d, st(i).buffers, link_ ? &binding : nullptr, taps_[i].get()));
+    st(i).step.emplace(build(st(i).ctx, model_.parts[i], d, st(i).buffers, link_ ? &binding : nullptr, taps_[i].get(), tap_at_));
   reset();
 }
 

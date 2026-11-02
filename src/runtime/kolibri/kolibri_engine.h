@@ -51,6 +51,9 @@ class KolibriEngine {
   // device 0 cannot access device 1's memory (zeDeviceCanAccessPeer) - both hand-offs write it.
   KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len,
                 bool debug_tap = false, const PipelineOptions& opt = {});
+  // The debug tap's full form (a test's: on, and its point - kolibri_sizes.h DebugTap).
+  KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len, DebugTap tap,
+                const PipelineOptions& opt = {});
   ~KolibriEngine();
   KolibriEngine(const KolibriEngine&) = delete;
   KolibriEngine& operator=(const KolibriEngine&) = delete;
@@ -182,6 +185,7 @@ class KolibriEngine {
   std::vector<std::unique_ptr<Stage>> st_;
   std::unique_ptr<PipelineLink> link_;
   std::vector<std::unique_ptr<l0::Mem>> taps_;
+  TapAt tap_at_ = TapAt::LayerOut;
   bool broken_ = false, drop_next_ = false;
   std::vector<bool> pending_;
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;

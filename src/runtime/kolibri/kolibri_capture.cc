@@ -36,8 +36,8 @@ void require(bool ok, const std::string& what) {
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::KolDevicePart& part, const model::Kolibri1Desc& d, KolibriBuffers& b,
-       const StageLink* link, l0::Mem* tap)
-      : ctx_(ctx), part_(part), d_(d), b_(b), link_(link), tap_(tap), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+       const StageLink* link, l0::Mem* tap, TapAt tap_at)
+      : ctx_(ctx), part_(part), d_(d), b_(b), link_(link), tap_(tap), tap_at_(tap_at), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep run() {
     check();
@@ -50,7 +50,7 @@ class Walk {
     for (uint32_t l = part_.first; l < part_.end; ++l) {
       layer_ = int(l);
       layer(l);
-      if (tap_ && !tap_at_attn()) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
+      if (tap_ && tap_at_ == TapAt::LayerOut) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
     }
     layer_ = -1;
     if (link_ && dev == 0) handoff_out();
@@ -220,7 +220,7 @@ class Walk {
     linear(*L.oproj, b_.attn_out.ptr(), b_.partials);
     fold(b_.partials.ptr(), b_.a, b_.sumsq_a, kk::fold_zero_variant(kM, L.oproj->shape.S), "o_proj's");
     post_add(b_.a, fat(nw, d_.norm_off_post_attn()));
-    if (tap_ && tap_at_attn()) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
+    if (tap_ && tap_at_ == TapAt::AfterAttn) step_.list.copy(at(*tap_, size_t(l) * kM * d_.hidden * 2), b_.resid.ptr(), size_t(kM) * d_.hidden * 2);
     // --- the MoE block -------------------------------------------------------------------------------
     norm(fat(nw, d_.norm_off_post_attention()));
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden, "the router is not [router_n][hidden]");
@@ -411,6 +411,7 @@ class Walk {
   KolibriBuffers& b_;
   const StageLink* link_;
   l0::Mem* tap_;
+  const TapAt tap_at_;
   CapturedStep step_;
   int layer_ = -1;
   std::string pending_entry_, pending_variant_;
@@ -419,8 +420,8 @@ class Walk {
 }  // namespace
 
 CapturedStep build(l0::Context& ctx, const loader::KolDevicePart& part, const model::Kolibri1Desc& d,
-                   KolibriBuffers& b, const StageLink* link, l0::Mem* tap) {
-  return Walk(ctx, part, d, b, link, tap).run();
+                   KolibriBuffers& b, const StageLink* link, l0::Mem* tap, TapAt tap_at) {
+  return Walk(ctx, part, d, b, link, tap, tap_at).run();
 }
 
 }  // namespace runtime::kolibri

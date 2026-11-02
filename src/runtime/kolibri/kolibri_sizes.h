@@ -2,7 +2,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -87,12 +86,14 @@ inline constexpr uint32_t kRouteWords = 32;   // = kernels::kolibri::route::kWor
 inline size_t route_at(uint32_t layer) { return size_t(layer) * kM * kRouteWords * 4; }
 // The residual tap (debug): bf16 [layers][M][hidden] on every device (its layers' rows written).
 inline size_t tap_bytes(const model::Kolibri1Desc& d) { return size_t(d.layers) * kM * d.hidden * 2; }
-// The debug tap's point (decode capture and prefill walk alike): each layer's output, or with B70_KOL_TAP_AT=attn the
-// residual after the layer's attention half (its post_attn add) - a diagnostic.
-inline bool tap_at_attn() {
-  const char* e = std::getenv("B70_KOL_TAP_AT");
-  return e && std::string(e) == "attn";
-}
+// The debug tap (a test's diagnostic, KolibriEngine's DebugTap; no environment variable): on or off, and its point -
+// each layer's output (the default), or the residual after the layer's attention half (its post_attn add). The decode
+// capture and the prefill walk take the same point.
+enum class TapAt { LayerOut, AfterAttn };
+struct DebugTap {
+  bool on = false;
+  TapAt at = TapAt::LayerOut;
+};
 
 // The hand-off (spec 16b's buffers through the descriptor-free layout): the residual row and the
 // 20 norm sums cross. Device 0: pp_send's counter; device 1: the landing allocation + pp_recv's state.

@@ -60,13 +60,13 @@ bool prefill_attn_eager();
 // (kol_attn_prep reads both), and - device 1 of two - landed device 0's residual rows and sums in s.resid /
 // s.sumsq_r first. Appends exactly prefill_device_launches(d, b.placement, part.device) launches; waits
 // only when B70_PREFILL_PROFILE=1 (runtime/prefill/profile.h). `tap` (debug, KolibriEngine's debug_tap): each
-// layer's output rows [C][hidden] copied to block (l - part.first) of [layers][kPfC][hidden] bf16 - copies, no
-// launch. Leaves: the K / V rows [pos, pos + C) of
+// layer's output rows [C][hidden] (or, tap_at AfterAttn, the residual after its attention half) copied to block
+// (l - part.first) of [layers][kPfC][hidden] bf16 - copies, no launch. Leaves: the K / V rows [pos, pos + C) of
 // the device's layers (the ring slots (pos + t) & 4095 of a sliding one), the residual rows and their sums
 // after its last layer, and its layers' route rows of this chunk in s.routes.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,
                    const loader::KolDevicePart& part, const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager, l0::Mem* tap = nullptr);
+                   uint32_t C, bool eager, l0::Mem* tap = nullptr, TapAt tap_at = TapAt::LayerOut);
 
 // The tail only the LAST chunk runs, on the last device: the final norm of row `last_row` into the decode
 // buffers' x, the lm_head, the two argmax stages - decode's binaries, so the first generated id is chosen
