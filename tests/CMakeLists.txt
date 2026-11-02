@@ -849,8 +849,9 @@ endforeach()
 #     oracle (tools/oracle/last_logits.py) measured 11359 s to reach 8192 ids, so it is not
 #     part of the suite; given one, `flash_long_test ... <file>` applies the bar at depth.
 #   Its `--128k <ids>` mode (K3b, determinism and replay at max_len 131072) is run by hand.
-add_test(NAME flash_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/flash_vs_oracle.sh)
-set_tests_properties(flash_vs_oracle_test PROPERTIES LABELS "checkpoint;golden;prefill"
+add_test(NAME flash_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/flash_vs_oracle.sh
+  ${B70_TEST_ORACLE_DIR} ${B70_TEST_SNAPSHOT})
+set_tests_properties(flash_vs_oracle_test PROPERTIES LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 add_executable(flash_long_test prefill/flash_long_test.cc)
 target_include_directories(flash_long_test PRIVATE ${CMAKE_SOURCE_DIR}/src
