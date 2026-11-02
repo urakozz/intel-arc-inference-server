@@ -4,7 +4,7 @@
 implementing plan at a time). Task 1 (the fix) does not need 28b's code and may be pulled forward by the operator. **2026-10-27: pulled forward by the
 operator - Task 1 (the fix, rows 54-56) runs early, before spec 28; Tasks 2+ still wait for 28b.**
 
-**Status (2026-10-27): PLANNED - second in the Qwen speed track.** Nothing built. The fix re-runs the existing rows
+**Status (2026-11-02): BUILT (branch spec19f-dflash-card) - Tasks 1-2 on main earlier; D1 re-run PASS under the rulings; Tasks 3-6 built, row 70 run on the card (busy-box): D2 / RF4 / S pass, dflash-lookup / dflash 1.25x (geomean) on edit / copy, 0.971 A4 - PROVISIONAL "replaces", the operator's call after a quiet-box re-check (spec 19 §13.1).** Was: PLANNED - second in the Qwen speed track. The fix re-runs the existing rows
 **54-56**; the lookup-in-DFlash mode is box queue row **70** (spec 28's header lists the track's rows 68-75). K up to 15
 is not here: plan 19g, after spec 28 (spec 19 §13.2).
 

@@ -918,6 +918,37 @@ operator's call.
 `prefill_split_test`'s header records as the model's own amplifiers of a rounding-sized perturbation (its own split
 bar at l0 is median >= 0.9998) - and they move in every pair of paths (one call / chunks / decode) alike.
 
+**D1 under the operator's three rulings (re-run 2026-11-01, plan 19f; engine half from campaign `checks-1101`
+state `32d0f97beac0-vs-ce36d2d786ee`, reference half `tools/oracle/dflash_d1.py` at f8a7758 in tree spec19f):
+PASS on all three arms.**
+
+| arm | drafts | sets (tie / noise-aware) | scores cos | walk (or near-tie split) | worst cos | set misses passed on walk + cos | walk near-ties |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| int8 drafter, int8 head | 592 | 585 | 592 | 592 | 0.9999663 | 7 | 1 |
+| bf16 drafter, bf16 head | 592 | 587 | 592 | 592 | 0.9999682 | 5 | 4 |
+| int8, V' 32768 | 592 | 586 | 592 | 592 | 0.9999666 | 6 | 1 |
+
+### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
+
+**Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
+greedy, `--max-len 102400`, max_tokens 256 (stop at EOS), the server's decode-only t/s, median of 3 rotated rounds
+(dflash, dlk), off / `--mtp auto` 1 round. Output: dflash-lookup identical to dflash 51 / 51 in every round.
+
+| corpus | dlk / dflash (geomean) | median over prompts | prompts |
+|---|---:|---:|---|
+| edit / copy (tests/golden/edit-copy) | **1.247** | **1.33** | quote 1.27 / 1.42 / 1.30 / 1.40, reemit 1.69 / 1.40 / 1.36 / 1.42, rename 1.06 / 0.98 / 0.95 / 0.95 (8k / 32k / 64k / 99k) |
+| A4 tool calls | **0.971** | - | lookup entered 0-2 times a request, ~0 accepted |
+| golden | 1.000 | - | no lookup |
+
+Lookup share (dflash-lookup, round 1): quote / reemit 231-244 of 256 ids from lookup (210 / 210 drafts accepted);
+rename 78-121 of 256 (acceptance ~0.5-0.6: the edit call's newString diverges at each renamed local). Context
+(not like for like on edit / copy: off and mtp ran the set before its asks were rewritten): `--mtp auto` / dflash
+1.49 edit / copy, 1.22 golden, 0.92 A4; on the quote prompts (32k / 99k identical across the two set versions,
+8k / 64k one grep line apart) mtp 54.1 / 44.9 / 61.4 / 38.6 t/s against
+dlk 51.7 / 38.2 / 72.7 / 29.3 (32k / 64k / 8k / 99k) - `--mtp auto` stays ahead of both DFlash modes at depth.
+Through EngineAdapter (dflash_lookup_gpu_test, card 0): reemit-8k (numbered-read form) 21.7 against 25.1 ms an id,
+quote-8k 14.5 against 19.6, quote-32k 20.3 against 25.2.
+
 ### P0, acceptance (measured, CPU reference, teacher-forced greedy)
 
 | corpus | E_1 | E_3 | E_7 (tokens per verify at K = 7) |

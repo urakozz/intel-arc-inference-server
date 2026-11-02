@@ -630,6 +630,19 @@ value is removed again) when it is **>= +20 % on the edit / copy set (median ove
 and golden; **between +5 % and +20 %** it stays opt-in and the operator decides; **below +5 %** it is dropped. D2
 (greedy lossless) and D4 (sampling exact) hold for it as for every proposer.
 
+**As built and measured (plan 19f, 2026-11-01; branch `spec19f-dflash-card`).** The policy is `server::LookupInDFlash`
+in the Server, beside the matcher (`PromptLookup::propose(..., source_before)`), driving
+`EngineIface::step_drafts_or_many`: STAY is the published HOT 3 kept AND a match of >= 3 beyond the window; re-entry
+needs 8; the window is the drafter's (`TapDrafter::window()`); one card (`--pp 2` refused). On the card:
+`dflash_lookup_gpu_test` PASS - D2 0 divergences (golden, A4, edit / copy 8k / 32k), the ring BITWISE the plain loop's
+after lookup runs and after a truncated lookup burst, the seeded sampled run bitwise; `b70-serve` greedy identical to
+`--spec off` 51 / 51 and to `--spec dflash` in 3 / 3 rounds; plain `--spec dflash` unchanged (`dflash_gpu_test` 4.10 /
+3.01 / 3.52 ids an iteration, as before). **Speed (busy-box timing, one card, re-check on a quiet box):
+dflash-lookup / dflash 1.247 geomean, 1.33 median on the edit / copy set (quote / reemit 1.27-1.69, rename 0.95-1.06),
+0.971 on A4, 1.000 on golden.** By the bar that is "replaces" on the edit / copy set (>= +20 %), with A4's loss at
+2.9 % - inside the 3 % but within busy-box noise: **PROVISIONAL, the operator's call after the quiet-box re-check**.
+`--mtp auto` stays faster than both DFlash modes on most prompts (BENCHMARKS "DFlash (spec 19)").
+
 ### 13.2 K up to 15 with an adaptive odd-width ladder - only after spec 28
 
 The same source publishes **K up to 15** with an adaptive odd-width ladder of verify widths (**+10 % on code / json /
