@@ -11,6 +11,9 @@
 //        decision 5: 41,943,040 B).
 //   SR   (spec 19d) save_state / load_state carry the ring: after a reset() (a zero ring) the restore brings the
 //        ring back bitwise, every slot of every layer's K and V.
+//   (Spec 28b, the operator's ruling 2026-11-03: the verify rows run gemm_sm - logits rows by the f32 judge where one
+//   exists, taps and committed ring rows bitwise the M = 8 verify's (N3), their distance to the plain steps recorded;
+//   the ids against the plain run by spec 28 N6 - tests/server/spec_judge.h.)
 //   T1   (Task 1, Review Focus 1-2) for k = 1..7: restore S0, the true greedy drafts g[1..k], verify(k): every row's
 //        TAPS against the reference step's tap row (cosine >= 0.99999; bitwise expected - the M-row kernels sum each
 //        row as M = 1 does - and recorded); commit(k): the ring rows of positions n .. n + k against the reference
@@ -56,6 +59,7 @@
 
 #include "check.h"
 #include "../server/greedy_tie.h"
+#include "../server/spec_judge.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -200,9 +204,32 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
   return r;
 }
 
-// T1 + D3: verify(k) with the true drafts, then commit(k).
-bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref) {
+// The M = 8 verify (k = kK, true drafts) of S0: each row's taps and, after commit(kK), the ring rows n .. n + kK - the
+// reference of spec 28 N3 in the engine (a row's taps and its projection do not depend on M >= 2).
+struct M8 {
+  std::vector<std::vector<uint16_t>> taps;
+  std::vector<uint16_t> ring;
+};
+M8 m8_reference(Ctx& c, const Snap& s0, const Ref& ref) {
+  M8 m;
+  s0.restore(c);
+  for (uint32_t i = 1; i <= kK; ++i) c.ctl->cur_token[i] = ref.g[i];
+  c.e.verify(kK);
+  for (uint32_t r = 0; r <= kK; ++r) m.taps.push_back(tap_row(c, r));
+  c.e.commit(kK, c.e.verify_ids()[kK]);
+  m.ring = ring_rows(c, s0.pos, kK + 1);
+  return m;
+}
+
+// T1 + D3: verify(k) with the true drafts, then commit(k). Since spec 28b (the operator's ruling 2026-11-03): the
+// logits rows by the f32 judge where one exists (spec_judge.h; else cosine >= 0.99999), the taps and the committed
+// ring rows BITWISE those of the M = 8 verify (N3); their cosines against the plain M = 1 steps are recorded.
+bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& prompt, const std::string& tag) {
   bool ok = true;
+  const M8 m8 = m8_reference(c, s0, ref);
+  const spec_judge::RowJudge rj = spec_judge::open_rows(
+      golden::ForcedJudge{}, tag + "_d3", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + kK + 2),
+      uint32_t(V));
   for (uint32_t k = 1; k <= kK; ++k) {
     s0.restore(c);
     for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
@@ -218,26 +245,35 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref) {
       const bool tbits = tr == ref.taps[r];
       const double ct = worst_row_cos(tr, ref.taps[r], tr.size(), 1);
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
-      std::printf("  D3 k=%u row %u: logits cos %.9f%s  GDN slot cos %.9f%s  taps cos %.9f%s  id %s\n", k, r, cl,
-                  lbits ? " (bitwise)" : "", cs, sbits ? " (bitwise)" : "", ct, tbits ? " (bitwise)" : "",
-                  id_ok ? "ok" : "DIFFERS");
-      ok &= cl >= 0.99999 && cs >= 0.99999 && ct >= 0.99999 && id_ok;
+      const bool t8 = tr == m8.taps[r];
+      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(),
+                                                        rj ? rj.row(r + 1) : nullptr, cl, uint32_t(VU));
+      std::printf("  D3 k=%u row %u: logits cos %.9f%s  GDN slot cos %.9f%s  taps cos %.9f%s (the M = 8 row's: %s)  id "
+                  "%s%s\n", k, r, cl, lbits ? " (bitwise)" : "", cs, sbits ? " (bitwise)" : "", ct,
+                  tbits ? " (bitwise)" : "", t8 ? "bitwise" : "DIFFER", id_ok ? "ok" : "DIFFERS",
+                  spec_judge::row_line(rv).c_str());
+      ok &= rv.pass && cs >= 0.99999 && t8 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);
     const std::vector<uint16_t> ring = ring_rows(c, s0.pos, k + 1);
     const bool rbits =
         std::equal(ring.begin(), ring.end(), ref.ring.begin(), ref.ring.begin() + ring.size());
     const double rc = worst_row_cos(ring, ref.ring, ring_row_elems(c), k + 1);
-    std::printf("  T1 k=%u: ring rows of positions %u..%u vs the reference's: worst cos %.9f%s\n", k, s0.pos,
-                s0.pos + k, rc, rbits ? " (bitwise)" : "");
-    ok &= rc >= 0.9999;
+    const bool r8 = std::equal(ring.begin(), ring.end(), m8.ring.begin());
+    std::printf("  T1 k=%u: ring rows of positions %u..%u vs the plain reference's: worst cos %.9f%s (recorded); the "
+                "M = 8 verify's: %s\n", k, s0.pos, s0.pos + k, rc, rbits ? " (bitwise)" : "", r8 ? "bitwise" : "DIFFER");
+    ok &= r8;
   }
   return ok;
 }
 
-// P: partial acceptance at depth k.
-bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k) {
+// P: partial acceptance at depth k. The committed ring rows BITWISE the M = 8 verify's (N3; their cosine against the
+// plain steps recorded); the 64 further ids against the clean run (bitwise) and the plain run (spec 28 N6).
+bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vector<uint32_t>& prompt,
+             const std::string& tag) {
   bool ok = true;
+  const M8 m8 = m8_reference(c, s0, ref);
+  const golden::ForcedJudge fj;
   const size_t row = ring_row_elems(c);
   const std::vector<uint16_t> ring0 = [&] {
     s0.restore(c);
@@ -265,25 +301,24 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k) {
     const double cs = cosine(live.data(), ref.state[j].data(), live.size());
     const bool sbits = std::memcmp(live.data(), ref.state[j].data(), kGdnBytes) == 0;
     const std::vector<uint16_t> ring = ring_rows(c, s0.pos, kK + 1);
-    const bool committed = worst_row_cos(ring, ref.ring, row, j + 1) >= 0.9999;
+    const bool committed = std::equal(ring.begin(), ring.begin() + (j + 1) * row, m8.ring.begin());
+    const double committed_cos = worst_row_cos(ring, ref.ring, row, j + 1);
     const bool untouched = std::equal(ring.begin() + (j + 1) * row, ring.end(), ring0.begin() + (j + 1) * row);
     const std::vector<uint32_t> ids = c.e.generate(64);
     size_t diff = 0;
     for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != clean[i];
     const std::vector<uint32_t> pg(ref.g.begin() + j + 1, ref.g.begin() + j + 1 + ids.size());
     const std::vector<greedy_tie::RefStep> ps(ref.steps.begin() + j, ref.steps.begin() + j + ids.size());
-    const greedy_tie::Result tr = greedy_tie::classify(pg, ps, ids);
-    char pf[112];
-    if (tr.v == greedy_tie::Verdict::Same) std::snprintf(pf, sizeof pf, "equal to the plain run");
-    else
-      std::snprintf(pf, sizeof pf, "the plain run first differs at %zu: %s (rank %u, %.3f bf16 ulp below top-1)",
-                    tr.at, tr.v == greedy_tie::Verdict::Tie ? "near-tie" : "NOT A TIE", tr.cand_rank, tr.cand_gap);
+    std::vector<uint32_t> ctx = prompt;
+    ctx.insert(ctx.end(), ref.g.begin(), ref.g.begin() + j + 1);
+    const spec_judge::StreamVerdict sv = spec_judge::streams(fj, tag + "_p", ctx, pg, ps, ids, uint32_t(V), uint32_t(VU));
     std::printf("  P k=%u j=%u: live slot %u, GDN state vs the state after step %u cos %.9f%s, accepted rows %s, "
-                "ring rows %u..%u %s, %u..%u %s, 64 further ids: %zu differ from the clean run; %s\n",
+                "ring rows %u..%u %s (cos vs plain %.6f), %u..%u %s, 64 further ids: %zu differ from the clean run; "
+                "the plain run: %s\n",
                 k, j, c.ctl->gdn_live, j, cs, sbits ? " (bitwise)" : "", rows_ok ? "ok" : "DIFFER", s0.pos,
-                s0.pos + j, committed ? "projected" : "WRONG", s0.pos + j + 1, s0.pos + kK,
-                untouched ? "untouched" : "WRITTEN", diff, pf);
-    ok &= cs >= 0.99999 && rows_ok && committed && untouched && diff == 0 && tr.v != greedy_tie::Verdict::Diverged;
+                s0.pos + j, committed ? "projected (the M = 8 rows, bitwise)" : "WRONG", committed_cos, s0.pos + j + 1,
+                s0.pos + kK, untouched ? "untouched" : "WRITTEN", diff, sv.line().c_str());
+    ok &= cs >= 0.99999 && rows_ok && committed && untouched && diff == 0 && sv.pass;
   }
   return ok;
 }
@@ -372,8 +407,10 @@ int main(int argc, char** argv) {
       ok &= sr;
     }
     const Ref ref = reference(c, s0, 200);
-    const bool a = t1_d3(c, s0, ref);
-    const bool p7 = partial(c, s0, ref, 7), p4 = partial(c, s0, ref, 4);
+    const std::vector<uint32_t> prompt = head(ids, n);
+    const std::string tag = "dflash_engine_int8_n" + std::to_string(n);
+    const bool a = t1_d3(c, s0, ref, prompt, tag);
+    const bool p7 = partial(c, s0, ref, 7, prompt, tag), p4 = partial(c, s0, ref, 4, prompt, tag);
     std::printf("T1 + D3 at n = %u: %s; P: %s\n", n, a ? "PASS" : "FAIL", p7 && p4 ? "PASS" : "FAIL");
     ok &= a && p7 && p4;
 
@@ -390,11 +427,17 @@ int main(int argc, char** argv) {
       got.resize(160);
       size_t diff = 0;
       for (size_t i = 0; i < got.size(); ++i) diff += got[i] != ref.g[i];
-      std::printf("  D2 K=%u: 160 ids, %zu differ from plain; %llu iterations, acceptance %.3f (%.2f ids an "
+      // spec 28 N6: steps2[i] decided ref.g[i] (ref.steps[i - 1]; g[0] is the prefill's)
+      std::vector<greedy_tie::RefStep> steps2{{UINT32_MAX, UINT32_MAX, 1e30}};
+      steps2.insert(steps2.end(), ref.steps.begin(), ref.steps.begin() + 159);
+      const spec_judge::StreamVerdict sv = spec_judge::streams(
+          golden::ForcedJudge{}, tag + "_d2", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + 160), steps2,
+          got, uint32_t(V), uint32_t(VU));
+      std::printf("  D2 K=%u: 160 ids, %zu differ from plain (%s); %llu iterations, acceptance %.3f (%.2f ids an "
                   "iteration)\n",
-                  k, diff, (unsigned long long)iters, drafted ? double(accepted) / double(drafted) : 0.0,
-                  double(160) / double(iters));
-      ok &= diff == 0;
+                  k, diff, sv.line().c_str(), (unsigned long long)iters,
+                  drafted ? double(accepted) / double(drafted) : 0.0, double(160) / double(iters));
+      ok &= sv.pass;
     }
   }
 

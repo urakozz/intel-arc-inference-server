@@ -5,15 +5,18 @@
 //
 //   D2   greedy, 256 ids, against the plain step() loop of the same engine on the three golden prompts, the 36 A4
 //        tool-call prompts and the edit / copy set's 8k / 32k prompts (tests/golden/edit-copy: far copies, where lookup
-//        enters). The bar is dflash_gpu_test's: IDENTITY (the verify rows equal M = 1's on today's binding, D3; when
-//        spec 28b rebinds the M >= 2 lists to gemm_sm, D2 becomes spec 19 §13's - zero non-tie divergences - for
-//        dflash_gpu_test and this test alike). Per prompt: lookup iterations / ids in lookup, DFlash iterations, ids an
+//        enters). The bar is dflash_gpu_test's: since spec 28b (the M >= 2 lists on gemm_sm) identity, or - from the
+//        first divergence - the f32 judge rejects no more of its ids than of the plain run's (spec 28 N6, the
+//        operator's ruling 2026-11-03; tests/server/spec_judge.h), the golden tie rule without a judge; the tie
+//        census printed. Per prompt: lookup iterations / ids in lookup, DFlash iterations, ids an
 //        iteration; per edit / copy prompt also plain --spec dflash's ids an iteration and the host-timed ms an id of
 //        plain / dflash / dflash-lookup (busy-box timing, informational: r70.speed is the measurement).
 //   RF4  the drafter stays warm: after a dflash-lookup run that used lookup (reemit-8k, 256 ids) the drafter's ring
-//        (save_ring) is BITWISE the ring the plain step() loop leaves at the same position - every committed row
-//        projected, from the lookup verifies too (on today's binding; after 28b the same comparison by cosine >=
-//        0.99999 is printed beside it). A truncate_to inside a lookup burst, then continued: the plain run's ids.
+//        (save_ring) is BITWISE the ring plain --spec dflash leaves at the same position when the two emitted the
+//        same ids - every committed row projected, from the lookup verifies too. Since spec 28b both come from M >= 2
+//        verify rows (gemm_sm; a row does not depend on M, spec 28 N3), while the plain step() loop's rows are M = 1
+//        and are no longer bitwise them: that comparison is printed (cosine), not gated. A truncate_to inside a
+//        lookup burst, then continued: the same ring; the ids against the plain run under N6.
 //   S    a seeded sampled dflash-lookup run (T 0.7, top-k 20, top-p 0.95) twice from fresh adapters: ids bitwise (the
 //        lookup drafts' point-mass acceptance and the DFlash walk draw from the request's RNG); its lookup share
 //        printed.
@@ -35,6 +38,8 @@
 #include "check.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
+#include "greedy_tie.h"
+#include "spec_judge.h"
 #include "l0/context.h"
 #include "loader/dflash_loader.h"
 #include "loader/loader.h"
@@ -91,16 +96,27 @@ double ms_since(std::chrono::steady_clock::time_point t0) {
 }
 
 // The plain step() loop (lookup = false, dflash = false) or plain --spec dflash (AdaptiveK, step_many).
+// `steps` (the plain loop only): the row that decided each id (greedy_tie.h; steps[0] the prefill's placeholder).
 Gen generate_plain(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
-                   bool dflash) {
+                   bool dflash, std::vector<greedy_tie::RefStep>* steps = nullptr, runtime::Engine* eng = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
+  if (steps) {
+    steps->clear();
+    steps->push_back({UINT32_MAX, UINT32_MAX, 1e30});
+  }
+  std::vector<float> row(steps ? model::Qwen35::kVocab : 0);
   server::AdaptiveK ak(ak_options());
   const auto t0 = std::chrono::steady_clock::now();
   while (g.ids.size() < n) {
     if (!dflash) {
       g.ids.push_back(a.step(s));
+      if (steps) {
+        l0::CmdList imm = l0::CmdList::immediate(eng->context());
+        imm.copy(row.data(), eng->buffers().logits.ptr(), row.size() * sizeof(float));
+        steps->push_back(greedy_tie::ref_step(row.data(), model::Qwen35::kVocabUsed));
+      }
       continue;
     }
     const uint32_t k = ak.next();
@@ -164,12 +180,6 @@ Gen generate_lookup(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint3
   return g;
 }
 
-size_t first_diff(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) {
-  for (size_t i = 0; i < std::min(a.size(), b.size()); ++i)
-    if (a[i] != b[i]) return i;
-  return a.size() == b.size() ? size_t(-1) : std::min(a.size(), b.size());
-}
-
 float bf16(uint16_t h) {
   uint32_t u = uint32_t(h) << 16;
   float f;
@@ -210,13 +220,18 @@ int main(int argc, char** argv) {
   server::Sampling greedy;
 
   // --- D2 -------------------------------------------------------------------------------------------------
-  uint64_t fails = 0, far_lookup_iters = 0, tot_iters = 0, tot_lookup_ids = 0, tot_ids = 0;
+  uint64_t fails = 0, far_lookup_iters = 0, tot_iters = 0, tot_lookup_ids = 0, tot_ids = 0, ties = 0, beyond = 0,
+           judged = 0;
+  const golden::ForcedJudge fj;
   for (const Prompt& p : prompts()) {
-    const Gen plain = generate_plain(df, p.ids, kGen, greedy, false);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen plain = generate_plain(df, p.ids, kGen, greedy, false, &steps, &e);
     const Gen g = generate_lookup(lk, p.ids, kGen, greedy, window);
-    const size_t at = first_diff(g.ids, plain.ids);
+    const spec_judge::StreamVerdict sv = spec_judge::streams(fj, "dflash_lookup_gpu_int8_" + p.name, p.ids, plain.ids,
+                                                             steps, g.ids, uint32_t(model::Qwen35::kVocab),
+                                                             uint32_t(model::Qwen35::kVocabUsed));
     std::printf("D2 %-28s %s, %llu iterations (%llu lookup, %llu ids in lookup), %.2f ids an iteration",
-                p.name.c_str(), at == size_t(-1) ? "identical" : ("DIFFERS at " + std::to_string(at)).c_str(),
+                p.name.c_str(), sv.line().c_str(),
                 (unsigned long long)g.iters, (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids,
                 double(kGen) / double(std::max<uint64_t>(1, g.iters)));
     if (p.far) {
@@ -227,14 +242,19 @@ int main(int argc, char** argv) {
       far_lookup_iters += g.lookup_iters;
     }
     std::printf("\n");
-    fails += at != size_t(-1);
+    fails += !sv.pass;
+    ties += sv.tie.v == greedy_tie::Verdict::Tie;
+    beyond += sv.tie.v == greedy_tie::Verdict::Diverged;
+    judged += sv.judged;
     tot_iters += g.iters;
     tot_lookup_ids += g.lookup_ids;
     tot_ids += kGen;
   }
-  std::printf("D2: %llu divergences; %.2f ids an iteration, %.1f %% of the ids from lookup; lookup iterations on the "
+  std::printf("D2: %llu failing runs (spec 28 N6); tie census %llu near-ties, %llu beyond the 1-ulp rule, %llu judged "
+              "by f32; %.2f ids an iteration, %.1f %% of the ids from lookup; lookup iterations on the "
               "edit / copy prompts %llu (busy-box timing above, informational)\n",
-              (unsigned long long)fails, double(tot_ids) / double(tot_iters), 100.0 * tot_lookup_ids / tot_ids,
+              (unsigned long long)fails, (unsigned long long)ties, (unsigned long long)beyond,
+              (unsigned long long)judged, double(tot_ids) / double(tot_iters), 100.0 * tot_lookup_ids / tot_ids,
               (unsigned long long)far_lookup_iters);
   ok &= fails == 0;
   ok &= far_lookup_iters > 0;   // the far copies entered lookup (else D2 proved nothing new)
@@ -242,11 +262,15 @@ int main(int argc, char** argv) {
   // --- RF4: the warm ring -------------------------------------------------------------------------------------
   {
     const std::vector<uint32_t> prompt = read_ids("tests/golden/edit-copy/reemit-8k.ids");
-    const Gen plain = generate_plain(df, prompt, kGen, greedy, false);
+    std::vector<greedy_tie::RefStep> steps;
+    const Gen plain = generate_plain(df, prompt, kGen, greedy, false, &steps, &e);
     const std::vector<uint8_t> ring_plain = ring_of(df, d);
+    const Gen pdf = generate_plain(df, prompt, kGen, greedy, true);   // plain --spec dflash: M >= 2 rows too
+    const std::vector<uint8_t> ring_df = ring_of(df, d);
     const Gen g = generate_lookup(lk, prompt, kGen, greedy, window);
     const std::vector<uint8_t> ring_lk = ring_of(lk, d);
-    const bool bitwise = ring_lk == ring_plain;
+    const bool bitwise = ring_lk == ring_df;   // the gate: the same verify rows, when the ids agree
+    const bool same_ids = g.ids == pdf.ids;
     double dot = 0, na = 0, nb = 0;
     for (size_t i = 0; i + 1 < ring_lk.size(); i += 2) {
       uint16_t x, y;
@@ -258,18 +282,22 @@ int main(int argc, char** argv) {
       nb += fy * fy;
     }
     const double cos = dot / std::sqrt(std::max(na * nb, 1e-300));
-    std::printf("RF4: after %llu lookup iterations (%llu ids) the ring (%zu B) is %s the plain loop's (cosine %.9f); "
-                "ids %s\n",
+    const spec_judge::StreamVerdict sv =
+        spec_judge::streams(fj, "dflash_lookup_gpu_rf4_int8_reemit-8k", prompt, plain.ids, steps, g.ids,
+                            uint32_t(model::Qwen35::kVocab), uint32_t(model::Qwen35::kVocabUsed));
+    std::printf("RF4: after %llu lookup iterations (%llu ids) the ring (%zu B) is %s plain --spec dflash's (ids %s); "
+                "against the plain step() loop's ring cosine %.9f (%s, recorded); ids against the plain loop: %s\n",
                 (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids, ring_lk.size(),
-                bitwise ? "BITWISE" : "NOT bitwise", cos, g.ids == plain.ids ? "identical" : "DIFFER");
-    ok &= g.lookup_iters > 0 && bitwise && g.ids == plain.ids;
+                bitwise ? "BITWISE" : "NOT bitwise", same_ids ? "identical" : "DIFFER", cos,
+                ring_lk == ring_plain ? "bitwise" : "not bitwise", sv.line().c_str());
+    ok &= g.lookup_iters > 0 && same_ids && bitwise && sv.pass;
     bool did_cut = false;
     const Gen c = generate_lookup(lk, prompt, kGen, greedy, window, /*cut=*/true, &did_cut);
     // the partial commit after truncate_to (projection of rows 0..m only) must leave the same warm ring
-    const bool ring_cut = ring_of(lk, d) == ring_plain;
-    const bool rf4c = did_cut && c.ids == plain.ids && ring_cut;
-    std::printf("RF4: a lookup burst truncated to 2 ids, then continued: %s; the ring %s the plain loop's\n",
-                !did_cut ? "no lookup burst of 3 to truncate" : c.ids == plain.ids ? "ids equal the plain run" : "ids DIFFER",
+    const bool ring_cut = ring_of(lk, d) == ring_lk;   // the truncated run's ring = the untruncated lookup run's
+    const bool rf4c = did_cut && c.ids == g.ids && ring_cut;
+    std::printf("RF4: a lookup burst truncated to 2 ids, then continued: %s; the ring %s the untruncated run's\n",
+                !did_cut ? "no lookup burst of 3 to truncate" : c.ids == g.ids ? "ids equal the untruncated run" : "ids DIFFER",
                 ring_cut ? "BITWISE" : "NOT bitwise");
     ok &= rf4c;
   }
