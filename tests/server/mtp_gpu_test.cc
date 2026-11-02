@@ -3,12 +3,14 @@
 //
 // Gate mode:   mtp_gpu_test <snapshot> <backend>            (cwd = the source tree)
 //   M3  greedy, 256 ids, K = 1, 2, 3 against the plain step() loop of the same engine,
-//       on the three golden prompts and the 36 A4 tool-call prompts. Spec 28 N6 (plan 28b):
-//       the verify rows run gemm_sm and are no longer bitwise M = 1, so the bar is identity
-//       except a first divergence the golden tie rule classes as a near-tie (the candidate is
-//       the plain row's runner-up within 1 bf16 ulp - tests/server/greedy_tie.h): zero
-//       non-tie divergences, the tie count printed (before 28b the rows were bitwise and the
-//       bar was plain identity).
+//       on the three golden prompts and the 36 A4 tool-call prompts. Spec 28 N6 (plan 28b;
+//       the operator's ruling 2026-11-03): the verify rows run gemm_sm and are no longer
+//       bitwise M = 1, so a run passes when it is identical, or - from its first divergence -
+//       the f32 judge rejects no more of its ids than of the plain run's
+//       (tests/server/spec_judge.h; the contexts are dumped under B70_DUMP_FORCED and judged
+//       under B70_FORCED_JUDGE, forced_judge.h). Without a judge for a context the golden tie
+//       rule decides (tests/server/greedy_tie.h). The tie census and each divergence's rank
+//       and gap stay printed (before 28b the rows were bitwise and the bar was identity).
 //   RF1 on the card: a run truncated inside an accepted burst (truncate_to) and then
 //       continued equals the plain run.
 //   M5  the same greedy K = 3 run twice: ids and the final logits row bitwise.
@@ -47,6 +49,7 @@
 
 #include "check.h"
 #include "greedy_tie.h"
+#include "spec_judge.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
@@ -205,21 +208,27 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
   int divergences = 0;
   uint64_t tot_d[3] = {0, 0, 0}, tot_a[3] = {0, 0, 0}, tot_i[3] = {0, 0, 0};
   if (kMaxLen != kDefaultMaxLen) std::printf("max_len %u (--max-len)\n", kMaxLen);
-  std::printf("M3 (%s): greedy %u ids, --mtp K vs --mtp 0; bar: identical up to golden near-ties\n",
+  std::printf("M3 (%s): greedy %u ids, --mtp K vs --mtp 0; bar: identical, else the f32 judge (spec 28 N6)\n",
               runtime::prefill_backend_name(backend), kGen);
   std::printf("%-24s %6s | %-22s | %-22s | %-22s\n", "prompt", "ids", "K=1 same acc tok/it",
               "K=2 same acc tok/it", "K=3 same acc tok/it");
-  int ties = 0;
+  int ties = 0, beyond = 0, judged = 0;
+  const golden::ForcedJudge fj;
   for (const Prompt& p : prompts) {
     std::vector<greedy_tie::RefStep> steps;
     const Gen ref = generate(plain, p.ids, kGen, greedy, &steps, &L.eng);
     std::printf("%-24s %6zu", p.name.c_str(), p.ids.size());
     for (int k = 0; k < 3; ++k) {
       const Gen g = generate(spec[k], p.ids, kGen, greedy);
-      const greedy_tie::Result tr = greedy_tie::classify(ref.ids, steps, g.ids);
+      const spec_judge::StreamVerdict sv =
+          spec_judge::streams(fj, std::string("mtp_gpu_") + loader::lm_head_form_name(head.lm_head) + "_" + p.name,
+                              p.ids, ref.ids, steps, g.ids, uint32_t(Qwen35::kVocab), uint32_t(Qwen35::kVocabUsed));
+      const greedy_tie::Result& tr = sv.tie;
       const size_t d = tr.at;
-      if (tr.v == greedy_tie::Verdict::Diverged) ++divergences;
+      if (!sv.pass) ++divergences;
       if (tr.v == greedy_tie::Verdict::Tie) ++ties;
+      if (tr.v == greedy_tie::Verdict::Diverged) ++beyond;
+      judged += sv.judged;
       tot_d[k] += g.drafted;
       tot_a[k] += g.accepted;
       tot_i[k] += g.iters;
@@ -228,8 +237,7 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
       else if (tr.v == greedy_tie::Verdict::Tie) std::snprintf(same, sizeof(same), "tie@%zu", d);
       else std::snprintf(same, sizeof(same), "NO@%zu", d);
       if (d != SIZE_MAX)   // the divergence's numbers, one line each (the table cell stays short)
-        std::printf("\n    K=%d first difference at %zu: candidate rank %u in the plain row, %.3f bf16 ulp below its "
-                    "top-1 (top-2 margin %.3f)", k + 1, d, tr.cand_rank, tr.cand_gap, tr.margin_ulps);
+        std::printf("\n    K=%d %s", k + 1, sv.line().c_str());
       std::printf(" | %-6s %5.3f %5.2f    ", same, g.drafted ? double(g.accepted) / g.drafted : 0.0,
                   g.iters ? double(kGen) / g.iters : 0.0);
     }
@@ -240,8 +248,9 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
     std::printf("M3 pooled K=%d: acceptance %.4f (%llu/%llu), %.3f ids per iteration\n", k + 1,
                 double(tot_a[k]) / tot_d[k], (unsigned long long)tot_a[k],
                 (unsigned long long)tot_d[k], double(kGen * prompts.size()) / tot_i[k]);
-  std::printf("M3: %d non-tie divergences, %d near-ties (golden tie rule) over %zu prompts x 3 K\n", divergences,
-              ties, prompts.size());
+  std::printf("M3: %d failing runs (spec 28 N6: the f32 judge, else the tie rule); the tie census: %d near-ties, %d "
+              "beyond the 1-ulp rule; %d divergent runs judged by f32 - over %zu prompts x 3 K\n",
+              divergences, ties, beyond, judged, prompts.size());
 
   // RF1 on the card: keep only 1 id of the first burst with >= 3, then continue.
   int rf1_fail = 0;
@@ -265,12 +274,12 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
         if (ids.size() < 96) ids.push_back(id);
     }
     a.flush_commit();
-    const greedy_tie::Result tr = greedy_tie::classify(ref.ids, steps, ids);
-    const bool ok = cut && tr.v != greedy_tie::Verdict::Diverged;
-    std::printf("RF1 %s: truncated inside a burst %s, 96 ids %s\n", p.name.c_str(), cut ? "yes" : "NO",
-                tr.v == greedy_tie::Verdict::Same ? "equal to plain"
-                : tr.v == greedy_tie::Verdict::Tie ? "equal to plain up to a near-tie"
-                                                   : "DIFFER");
+    const spec_judge::StreamVerdict sv = spec_judge::streams(
+        golden::ForcedJudge{}, std::string("mtp_gpu_rf1_") + loader::lm_head_form_name(head.lm_head) + "_" + p.name,
+        p.ids, ref.ids, steps, ids, uint32_t(Qwen35::kVocab), uint32_t(Qwen35::kVocabUsed));
+    const bool ok = cut && sv.pass;
+    std::printf("RF1 %s: truncated inside a burst %s, 96 ids against plain: %s\n", p.name.c_str(), cut ? "yes" : "NO",
+                sv.line().c_str());
     if (!ok) ++rf1_fail;
   }
 

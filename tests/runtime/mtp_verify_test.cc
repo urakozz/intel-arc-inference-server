@@ -15,9 +15,11 @@
 //        verify(k) with the TRUE drafts g[1..k], commit(j), 64 plain ids - bitwise (spec 28
 //        N3 + N4: rows 0..j do not depend on rows past j). Since spec 28b the verify rows run
 //        gemm_sm and are no longer bitwise M = 1, so the 64 ids against the plain run's
-//        g[j+1 .. j+64] must be identical up to a first difference the golden tie rule classes
-//        as a near-tie (tests/server/greedy_tie.h, spec 28 N6) - before 28b the two references
-//        were the same run. Run at n % 16 == 14, so pos % 16 wraps inside the
+//        g[j+1 .. j+64] are graded by spec 28 N6 (the operator's ruling 2026-11-03): identical, or
+//        from the first difference the f32 judge rejects no more of the ids than of the plain run's
+//        (tests/server/spec_judge.h), the golden tie rule without a judge - before 28b the two
+//        references were the same run. M2a's logits rows likewise: cosine >= 0.99999 against the
+//        plain row, or no further from the f32 judge's row than the plain row (x kCosSlack). Run at n % 16 == 14, so pos % 16 wraps inside the
 //        verify rows (the conv ring), and at n % 16 == 5.
 //   RF4  spec 7b's C1 case A with MTP on (state and KV carry the head), plus the same
 //        restore driving speculative iterations: bitwise equal to the straight run.
@@ -45,6 +47,7 @@
 
 #include "check.h"
 #include "../server/greedy_tie.h"
+#include "../server/spec_judge.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -143,8 +146,14 @@ Ref reference(Ctx& c, const Snap& s0, uint32_t T) {
   return r;
 }
 
-bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
+// `prompt`: the ids prefilled to S0 (the f32 judge's context, with the forced g[0..]); `tag` names the judge.
+bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& prompt, const std::string& tag) {
   bool ok = true;
+  const golden::ForcedJudge fj;
+  // N4's judge: the context prompt + g[0 .. kMaxDraft + 1]; judge row r + 1 decides g[r + 1], verify row r's id.
+  const spec_judge::RowJudge rj = spec_judge::open_rows(
+      fj, tag + "_m2a", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + runtime::Engine::kMaxDraft + 2),
+      uint32_t(V));
   // M2a
   for (uint32_t k = 1; k <= runtime::Engine::kMaxDraft; ++k) {
     s0.restore(c);
@@ -162,11 +171,14 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
       int le = 0;
       std::frexp(std::fabs(ref.logits[r][ref.g[r + 1]]), &le);
+      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(),
+                                                        rj ? rj.row(r + 1) : nullptr, cl, uint32_t(VU));
       std::printf("  M2a k=%u row %u: logits cos %.9f max abs %.3e (%.2f bf16 ulp of the top)%s  GDN slot cos %.9f max "
-                  "abs %.3e%s  id %s\n",
+                  "abs %.3e%s  id %s%s\n",
                   k, r, cl, lma, lma / std::ldexp(1.0, le - 8), lbits ? " (bitwise)" : "", cs, ma,
-                  sbits ? " (bitwise)" : "", id_ok ? "ok" : "DIFFERS");
-      ok &= cl >= 0.99999 && cs >= 0.99999 && id_ok;
+                  sbits ? " (bitwise)" : "", id_ok ? "ok" : "DIFFERS", spec_judge::row_line(rv).c_str());
+      // spec 28 N4 (the operator's ruling 2026-11-03): the logits row by the f32 judge where one exists
+      ok &= rv.pass && cs >= 0.99999 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);
   }
@@ -193,18 +205,16 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref) {
       const std::vector<uint32_t> ids = c.e.generate(64);
       size_t diff = 0;
       for (size_t i = 0; i < ids.size(); ++i) diff += ids[i] != clean[i];
-      // against the plain M = 1 run: identical, or a first difference the golden tie rule classes a near-tie
+      // against the plain M = 1 run (spec 28 N6): identical, else the f32 judge, else the golden tie rule
       const std::vector<uint32_t> pg(ref.g.begin() + j + 1, ref.g.begin() + j + 1 + ids.size());
       const std::vector<greedy_tie::RefStep> ps(ref.steps.begin() + j, ref.steps.begin() + j + ids.size());
-      const greedy_tie::Result tr = greedy_tie::classify(pg, ps, ids);
-      char pf[96];
-      if (tr.v == greedy_tie::Verdict::Same) std::snprintf(pf, sizeof pf, "equal to the plain run");
-      else
-        std::snprintf(pf, sizeof pf, "the plain run first differs at %zu: %s (%.3f bf16 ulp)", tr.at,
-                      tr.v == greedy_tie::Verdict::Tie ? "near-tie" : "NOT A TIE", tr.cand_gap);
-      std::printf("  M2b k=%u j=%u: accepted rows %s, 64 further ids: %zu differ from the clean run; %s\n", k, j,
-                  rows_ok ? "ok" : "DIFFER", diff, pf);
-      ok &= rows_ok && diff == 0 && tr.v != greedy_tie::Verdict::Diverged;
+      std::vector<uint32_t> ctx = prompt;
+      ctx.insert(ctx.end(), ref.g.begin(), ref.g.begin() + j + 1);
+      const spec_judge::StreamVerdict sv = spec_judge::streams(fj, tag + "_m2b", ctx, pg, ps, ids, uint32_t(V),
+                                                               uint32_t(VU));
+      std::printf("  M2b k=%u j=%u: accepted rows %s, 64 further ids: %zu differ from the clean run; the plain run: %s\n",
+                  k, j, rows_ok ? "ok" : "DIFFER", diff, sv.line().c_str());
+      ok &= rows_ok && diff == 0 && sv.pass;
     }
   return ok;
 }
@@ -265,7 +275,8 @@ int main(int argc, char** argv) {
     std::printf("M2 at n = %u (n %% 16 = %u)\n", n, n % 16);
     const Snap s0(c);
     const Ref ref = reference(c, s0, 72);
-    ok &= m2(c, s0, ref);
+    ok &= m2(c, s0, ref, head(ids, n),
+             "mtp_verify_" + e.model().desc->name + "_" + runtime::kv_cache_name(e.kv_cache()) + "_n" + std::to_string(n));
   }
   std::printf("M2: %s\n", ok ? "PASS" : "FAIL");
 

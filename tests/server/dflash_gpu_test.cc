@@ -3,9 +3,11 @@
 //
 //   D2   greedy, 256 ids, K = 7, 3 and the AdaptiveK policy over MtpCost::dflash (the server's --spec dflash
 //        default), against the plain step() loop of the same engine, on the three golden prompts and the 36 A4
-//        tool-call prompts. Spec 28 N6 (plan 28b): the M = k + 1 rows run gemm_sm and are no longer bitwise
-//        M = 1, so the bar is identity except a first divergence the golden tie rule classes as a near-tie
-//        (tests/server/greedy_tie.h): zero non-tie divergences, the near-ties counted (before 28b: identity). Acceptance and ids per iteration printed per
+//        tool-call prompts. Spec 28 N6 (plan 28b; the operator's ruling 2026-11-03): the M = k + 1 rows run gemm_sm
+//        and are no longer bitwise M = 1, so a run passes when it is identical or the f32 judge rejects no more of
+//        its ids than of the plain run's from their first divergence (tests/server/spec_judge.h; B70_DUMP_FORCED /
+//        B70_FORCED_JUDGE); without a judge the golden tie rule decides. The tie census stays printed (before
+//        28b: identity). Acceptance and ids per iteration printed per
 //        prompt (19a's teacher-forced E_K is the expectation: A4 ~7.2 at K = 7, code ~6.2, prose ~2.2).
 //   RF1  a run truncated inside an accepted burst (truncate_to) and then continued equals the plain run.
 //   S    a seeded sampled run (T 0.7, top-k 20, top-p 0.95) twice from fresh adapters: ids bitwise (the drafter's
@@ -25,6 +27,7 @@
 
 #include "check.h"
 #include "greedy_tie.h"
+#include "spec_judge.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
@@ -129,32 +132,32 @@ int main(int argc, char** argv) {
   server::Sampling greedy;   // greedy = true by default
 
   // --- D2 -------------------------------------------------------------------------------------------------
-  uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0;
+  uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0, beyond = 0, judged = 0;
+  const golden::ForcedJudge fj;
   for (const Prompt& p : prompts()) {
     std::vector<greedy_tie::RefStep> steps;
     const Gen plain = generate(a, p.ids, kGen, greedy, 0, false, &steps, &e);
     const char* arm[3] = {"K=7", "K=3", "auto"};
     for (int i = 0; i < 3; ++i) {
       const Gen g = generate(a, p.ids, kGen, greedy, i == 0 ? kK : i == 1 ? 3 : 0, i == 2);
-      const greedy_tie::Result tr = greedy_tie::classify(plain.ids, steps, g.ids);
-      char what[96];
-      if (tr.v == greedy_tie::Verdict::Same) std::snprintf(what, sizeof what, "identical");
-      else if (tr.v == greedy_tie::Verdict::Tie)
-        std::snprintf(what, sizeof what, "near-tie at %zu (%.3f bf16 ulp)", tr.at, tr.margin_ulps);
-      else
-        std::snprintf(what, sizeof what, "DIFFERS at %zu (candidate rank %u, %.3f ulp below top-1; top-2 %.3f)", tr.at,
-                      tr.cand_rank, tr.cand_gap, tr.margin_ulps);
+      const spec_judge::StreamVerdict sv = spec_judge::streams(fj, std::string("dflash_gpu_int8_") + p.name, p.ids,
+                                                               plain.ids, steps, g.ids, uint32_t(model::Qwen35::kVocab),
+                                                               uint32_t(model::Qwen35::kVocabUsed));
       std::printf("D2 %-28s %-4s %s, %llu iterations, %.2f ids an iteration, acceptance %.3f\n", p.name.c_str(),
-                  arm[i], what, (unsigned long long)g.iters, double(kGen) / double(std::max<uint64_t>(1, g.iters)),
+                  arm[i], sv.line().c_str(), (unsigned long long)g.iters,
+                  double(kGen) / double(std::max<uint64_t>(1, g.iters)),
                   g.drafted ? double(g.accepted) / double(g.drafted) : 0.0);
-      fails += tr.v == greedy_tie::Verdict::Diverged;
-      ties += tr.v == greedy_tie::Verdict::Tie;
+      fails += !sv.pass;
+      ties += sv.tie.v == greedy_tie::Verdict::Tie;
+      beyond += sv.tie.v == greedy_tie::Verdict::Diverged;
+      judged += sv.judged;
       tot_iters[i] += g.iters;
       tot_ids[i] += kGen;
     }
   }
-  std::printf("D2: %llu non-tie divergences, %llu near-ties; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n",
-              (unsigned long long)fails, (unsigned long long)ties,
+  std::printf("D2: %llu failing runs (spec 28 N6); tie census %llu near-ties, %llu beyond the 1-ulp rule, %llu judged by "
+              "f32; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n",
+              (unsigned long long)fails, (unsigned long long)ties, (unsigned long long)beyond, (unsigned long long)judged,
               double(tot_ids[0]) / double(tot_iters[0]), double(tot_ids[1]) / double(tot_iters[1]),
               double(tot_ids[2]) / double(tot_iters[2]));
   ok &= fails == 0;
@@ -178,13 +181,12 @@ int main(int argc, char** argv) {
       got.insert(got.end(), burst.begin(), burst.end());
     }
     got.resize(96);
-    const greedy_tie::Result tr = greedy_tie::classify(plain.ids, steps, got);
-    const bool rf1 = truncated && tr.v != greedy_tie::Verdict::Diverged;
+    const spec_judge::StreamVerdict sv =
+        spec_judge::streams(golden::ForcedJudge{}, "dflash_gpu_rf1_int8_code", prompt, plain.ids, steps, got,
+                            uint32_t(model::Qwen35::kVocab), uint32_t(model::Qwen35::kVocabUsed));
+    const bool rf1 = truncated && sv.pass;
     std::printf("RF1: a burst truncated to 2 ids, then continued: %s\n",
-                !truncated                             ? "no burst of 3 to truncate"
-                : tr.v == greedy_tie::Verdict::Same    ? "equals the plain run"
-                : tr.v == greedy_tie::Verdict::Tie     ? "equals the plain run up to a near-tie"
-                                                       : "DIFFERS");
+                !truncated ? "no burst of 3 to truncate" : sv.line().c_str());
     ok &= rf1;
   }
 

@@ -20,8 +20,10 @@
 //   M3  greedy MTP is lossless (`--mtp K` == `--mtp 0`): K = 1, 2, 3 iterations (draft,
 //       verify, accept the agreeing prefix, commit) emit the greedy ids of an engine loaded
 //       WITHOUT the head (the plain decode list), 128 of them, on prose / code / cjk, after
-//       an l0-int8 prefill (which fills the head's KV through step_mtp_kv) - identical up to
-//       a first divergence the golden tie rule classes as a near-tie (spec 28 N6);
+//       an l0-int8 prefill (which fills the head's KV through step_mtp_kv) - identical, or from
+//       the first divergence the f32 judge rejects no more of its ids than of the plain run's
+//       (spec 28 N6, the operator's ruling 2026-11-03; tests/server/spec_judge.h), the golden
+//       tie rule without a judge; M2's logits rows likewise by the f32 judge where one exists;
 //   H   the head's own MoE layer ran: after a draft, the MoE scratch's head slot (layer 40)
 //       holds a route row of 8 distinct expert ids < 256 whose weights sum to ~1.
 //
@@ -39,6 +41,7 @@
 
 #include "check.h"
 #include "../server/greedy_tie.h"
+#include "../server/spec_judge.h"
 #include "golden_common.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -148,9 +151,14 @@ size_t same_routes(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b)
   return n;
 }
 
-bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what) {
+bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what, const std::vector<uint32_t>& prompt,
+        const std::string& head_form) {
   bool ok = true;
   const uint32_t kK = runtime::Engine::kMaxDraft;
+  // spec 28 N4 by the f32 judge (the operator's ruling 2026-11-03): the context prompt + g[0 .. kK + 1]
+  const spec_judge::RowJudge rj = spec_judge::open_rows(
+      golden::ForcedJudge{}, std::string("ornith_mtp_m2_") + head_form + "_" + what, prompt,
+      std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + kK + 2), uint32_t(V));
   // N3's reference: verify(kK) - M = 4 - with the true drafts, every row's logits, slot and routes
   std::vector<std::vector<uint8_t>> lg4(kK + 1), st4(kK + 1), rt4(kK + 1);
   for (int pass = 0; pass < 2; ++pass)
@@ -180,11 +188,15 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what) {
                            (rs_plain.top1 == ref.g[r + 1] && rs_plain.second == id && rs_plain.margin_ulps <= 1.0);
         // N3 against the same row at M = 4
         const bool n3 = row == lg4[r] && st == st4[r] && rt == rt4[r];
+        const spec_judge::RowVerdict rv =
+            spec_judge::row(reinterpret_cast<const float*>(row.data()),
+                            reinterpret_cast<const float*>(ref.logits[r].data()), rj ? rj.row(r + 1) : nullptr, cl,
+                            uint32_t(VU));
         std::printf("  M2 %s k=%u row %u: logits cos %.9f, GDN slot cos %.9f, routes %zu / 40 identical to the plain "
-                    "step (recorded), id %s; N3: %s the M = 4 row\n",
+                    "step (recorded), id %s; N3: %s the M = 4 row%s\n",
                     what, k, r, cl, cs, rs, id == ref.g[r + 1] ? "ok" : id_ok ? "near-tie" : "DIFFERS",
-                    n3 ? "bitwise" : "DIFFERS from");
-        ok &= cl >= 0.99999 && cs >= 0.99999 && id_ok && n3;
+                    n3 ? "bitwise" : "DIFFERS from", spec_judge::row_line(rv).c_str());
+        ok &= rv.pass && cs >= 0.99999 && id_ok && n3;
       }
       if (pass == 1) c.e.commit(k, c.e.verify_ids()[k]);
     }
@@ -287,8 +299,8 @@ int main(int argc, char** argv) {
     e.reset();
     e.prefill(golden::read_ids(pdir + "/" + p + ".ids"));
     const Snap s0(c);
-    const Ref ref = reference(c, s0, runtime::Engine::kMaxDraft + 1);
-    ok &= m2(c, s0, ref, p);
+    const Ref ref = reference(c, s0, runtime::Engine::kMaxDraft + 2);
+    ok &= m2(c, s0, ref, p, golden::read_ids(pdir + "/" + p + ".ids"), loader::lm_head_form_name(lm_head));
   }
   std::printf("M2: %s\n", ok ? "PASS" : "FAIL");
 
@@ -322,19 +334,14 @@ int main(int argc, char** argv) {
       const double ms =
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
       got.resize(kGen);
-      const greedy_tie::Result tr = greedy_tie::classify(plain[pi], plain_steps[pi], got);
-      std::printf("  M3 %s K=%u: %s plain over %u ids; %zu/%zu drafts accepted (%.3f), %zu "
+      const spec_judge::StreamVerdict sv = spec_judge::streams(
+          golden::ForcedJudge{}, std::string("ornith_mtp_m3_") + loader::lm_head_form_name(lm_head) + "_" + p, ids,
+          plain[pi], plain_steps[pi], got, uint32_t(V), uint32_t(VU));
+      std::printf("  M3 %s K=%u: plain over %u ids: %s; %zu/%zu drafts accepted (%.3f), %zu "
                   "iterations, %.2f ms/id vs plain %.2f\n",
-                  p, K,
-                  tr.v == greedy_tie::Verdict::Same  ? "=="
-                  : tr.v == greedy_tie::Verdict::Tie ? "== up to a near-tie"
-                                                     : "!=",
-                  kGen, accepted, drafted, drafted ? double(accepted) / double(drafted) : 0.0, iters, ms / kGen,
-                  plain_ms / kGen);
-      if (tr.v != greedy_tie::Verdict::Same)
-        std::printf("    first difference at %zu: candidate rank %u in the plain row, %.3f bf16 ulp below its top-1\n",
-                    tr.at, tr.cand_rank, tr.cand_gap);
-      m3 &= tr.v != greedy_tie::Verdict::Diverged;
+                  p, K, kGen, sv.line().c_str(), accepted, drafted, drafted ? double(accepted) / double(drafted) : 0.0,
+                  iters, ms / kGen, plain_ms / kGen);
+      m3 &= sv.pass;
       // H: the head's MoE layer wrote its route row (layer slot `layers`, row 0).
       const runtime::MoeScratchLayout ml = runtime::moe_scratch_layout(d);
       std::vector<uint32_t> row(runtime::kMoeRouteWords);
