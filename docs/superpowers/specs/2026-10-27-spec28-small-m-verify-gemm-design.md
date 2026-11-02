@@ -344,6 +344,16 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    - ornith_mtp_test M2: prose / code rows cosine 1.000000000 (40 / 40 route rows identical); cjk row 1 picks other
      experts in 29 of 40 layers (a router near-tie) and lands at logits cosine 0.99976; N3 (bitwise the M = 4 row)
      holds at every row; M3 cjk diverges beyond the 1-ulp rule.
+   - mtp_gpu_test M3 / dflash_gpu_test D2 rerun with the candidate's rank and gap in the plain row at the first
+     divergence (the same position at every K): of MTP's 9 non-tie prompts, 6 are the runner-up at 1.2-5.7 bf16 ulps
+     below the top, 1 is the runner-up at 3.0, and two are far - **t3_rename-step at 191 (rank 2, 27.1 ulps)** and
+     **t5_test-openai at 99 (rank 3, 8.8 ulps)**; DFlash's 8 non-tie prompts are the runner-up at 1.2-6.4 ulps but
+     t6_usage-box at 37 (18.5 ulps). The near-ties (30 in each) sit at 0.02-1.0 ulp. These are 100-200 positions into
+     a stream whose KV and GDN state all came from verify rows, so the two runs' rows have drifted by then (the first
+     step's distance is ~1 ulp); the model is known to amplify last-bit differences at some positions (dflash_engine_test
+     PF: chunked prefill against one call down to row cosine 0.54, prefill against decode 0.36). Whether the far ones are
+     amplification or a defect is NOT settled here: the f32 judge at those positions (or an engine-level gemv-forced
+     run of the same prompts) would settle it.
    Proposed for the ruling: a noise-aware tie (the window = the row pair's own logit difference, ~1 bf16 ulp here, as
    the operator ruled for DFlash's D1 sets on 2026-10-27), or the f32 judge (the MoE gates' form); and N4's 0.99999
    restated at the measured ~0.9999 (or kept, with 28b not mergeable as is).
