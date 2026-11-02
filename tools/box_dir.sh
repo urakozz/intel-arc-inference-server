@@ -8,8 +8,9 @@
 #   neither                 the suffix is read from the branch name: a branch
 #                           starting spec<N>[.<M>][<letter>] (spec7a-toolcall-probe,
 #                           spec8-mtp, spec2.1-...) gets -spec7a / -spec8 / -spec2.1;
-#                           research-* gets -research; anything else (main, ...)
-#                           the base tree b70-inference-server.
+#                           research-* gets -research; main (or a detached HEAD)
+#                           the base tree
+#                           b70-inference-server; any other branch b70/trees/<branch>.
 #
 # A new remote tree starts empty: its first `tools/box.sh build` is a full build.
 # GPU work from parallel trees must still take the shared locks (tools/gpu_lock.sh,
@@ -31,6 +32,11 @@ b70_remote_dir() {
       suffix="${BASH_REMATCH[1]}"
     elif [[ "$branch" == research-* ]]; then
       suffix="research"
+    elif [ -n "$branch" ] && [ "$branch" != main ] && [ "$branch" != HEAD ]; then
+      # Any other branch (fix-*, cpu-lane, ...) gets its own tree under ~/b70/trees: the
+      # base tree holds the golden sets and the sync's --delete must not land there.
+      printf 'b70/trees/%s\n' "${branch//\//-}"
+      return
     fi
   fi
   if [ -z "$suffix" ] || [ "$suffix" = "none" ]; then
