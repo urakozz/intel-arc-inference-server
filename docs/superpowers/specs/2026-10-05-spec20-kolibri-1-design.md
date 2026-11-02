@@ -475,6 +475,25 @@ ring and to depth 62048, a split at 64 bitwise); K3 on prefill on both synthetic
 real checkpoint across two cards, and Task 5's speed rows (derived pp4096 ~4,000 t/s; the dequant pass
 ~3 GB of bf16 per layer per chunk).
 
+**On the real checkpoint (2026-11-01 - 03, branch `kolibri-real`).**
+
+- *The bf16 P.* `kol_pf_flash_attn`'s default path rounded P to bf16 for P·V against an fp32 l. On real
+  weights that put the prefill's routing 8762 sets off the f32 judge (the bar, the bf16 golden: 7981; `_c16`
+  2054 / 1818). The code prompt's residual drifted from layer 16's attention (0.962 of f32 at layer 24,
+  against 0.994 for decode and the golden). P now goes to P·V as hi + lo bf16 halves (`KOL_PV_HL`):
+  7963 / 1603, pp32768 -3 % (2304 against 2380 t/s). Eager keeps the reference's bf16 p.
+- *Review Focus 4's bar (operator ruling 2026-11-03).* `kolibri_prefill_test` section 4 gates the real
+  checkpoint's layers 0-5 at median >= 0.9999 and prints the deeper layers, not gated. A structural fault
+  shows from the first layer it touches: layers 0-5 (four sliding, the first full layer, one after it)
+  measured 0.999983 - 0.999995. Deeper, any two correct bf16 paths drift apart on the tie-heavy router
+  (~15 % of the expert sets beyond a near-tie): the prefill's layer-29 median was 0.985. Decode against
+  the bf16 golden itself measured 0.992 - 0.999 at layer 29 on the golden prompts, and decode with the
+  prefill's bf16 weight rounding left the deep layers where they were. The deep layers' judge is
+  `kolibri_golden_prefill_test`. The 5-layer synthetic checkpoints keep 0.999 on every layer.
+- *Diagnostics.* KolibriEngine's DebugTap (on; the point: each layer's output or the residual after its
+  attention half) also taps the prefill (`read_prefill_tap`). `kolibri_golden_test --tap-at=attn
+  --tap-dump=<dir>` drives it. No environment variable.
+
 
 ## 13. 20e as built blind (2026-10-06)
 

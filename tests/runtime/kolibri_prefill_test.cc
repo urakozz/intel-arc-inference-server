@@ -20,10 +20,10 @@
 //        the ring slots), the route rows of the positions both last chunks hold bitwise;
 //     4. Review Focus 4, prefill against decode's M = 1 fill (ingest, one id per replay) of the same
 //        prompt: per layer, per position the ring / cache still holds, K and V cosine - gated on each layer's
-//        MEDIAN >= kLayerMedian (operator ruling 2026-10-31, round 2: the synthetic gates judged on the
-//        per-layer median, not on one worst row); layer 0's worst row, the all-rows median and the 1st
-//        percentile printed (bitwise is not expected: the GEMMs' sum orders and the bf16 dequant differ from
-//        the int4 GEMVs');
+//        MEDIAN (operator ruling 2026-10-31, round 2: the per-layer median, not one worst row; 2026-11-03: the
+//        real checkpoint's shallow layers only, kShallowLayers / kShallowMedian below); layer 0's worst row, the
+//        all-rows median and the 1st percentile printed (bitwise is not expected: the GEMMs' sum orders and the
+//        bf16 dequant differ from the int4 GEMVs');
 //     5. routing, prefill against decode per position (the last chunk's rows): the expert sets equal except
 //        where decode's selection margin (the lowest selected sel minus the first not taken) is within
 //        kTieTol; matched weights within kWeightAbs - PRINTED, not gated;
@@ -79,6 +79,18 @@ constexpr float kWeightAbs = 1.0f / 32;   // PROPOSED: |w_prefill - w_decode| on
 // checkpoints measured 0.99975 - 0.999995 (layer 4, eager, the worst; 2026-10-31), a quarter of this bar's distance;
 // a continuation fault (a wrong ring slot or offset, a lost row) moves every row after it and the median with them.
 constexpr double kLayerMedian = 0.999;
+// Operator ruling 2026-11-03, the real checkpoint (more than kShallowLayers layers): layers [0, kShallowLayers) gated
+// at median >= kShallowMedian, the deeper layers PRINTED with their numbers, not gated. Why (2026-11-01/02 on the
+// box): a structural fault (a wrong ring slot, offset or lost row) shows from the first layer it touches, and layers
+// 0-5 - four sliding, the first full (NoPE) layer 4, the sliding layer after it - measured medians 0.999983 -
+// 0.999995 (a sixth of this bar's distance); past them two correct bf16 paths drift apart on Kolibri-1's tie-heavy
+// router (~15 % of the expert sets differ beyond a near-tie between any two of them): layer 29's median fell to
+// 0.985 here, decode against the bf16 golden itself measured 0.992 - 0.999 at layer 29 on the golden prompts, and
+// decode with prefill's bf16 weight rounding left the deep layers unchanged. The judge for the deep layers is
+// kolibri_golden_prefill_test (no further from f32 than the bf16 golden). A checkpoint of at most kShallowLayers
+// layers (the 5-layer synthetic ones, random weights: 0.99975 measured) keeps kLayerMedian on every layer.
+constexpr uint32_t kShallowLayers = 6;
+constexpr double kShallowMedian = 0.9999;
 
 float bits(uint32_t w) {
   float f;
@@ -271,11 +283,15 @@ int run_all(rk::KolibriEngine& e, const Ids& prompt) {
   }
   const Snap dec = snap(e, n, false);
   const KvCmp kc = compare_kv(d, a, dec, n);
-  const bool kv_ok = *std::min_element(kc.layer_median.begin(), kc.layer_median.end()) >= kLayerMedian;
-  std::printf("4. prefill KV / rings vs decode's fill (%u positions x %u layers): each layer's median >= %.4f%s; "
+  const bool deep = d.layers > kShallowLayers;   // the real checkpoint (the header, ruling 2026-11-03)
+  const uint32_t gated = deep ? kShallowLayers : d.layers;
+  const double bar = deep ? kShallowMedian : kLayerMedian;
+  const bool kv_ok = *std::min_element(kc.layer_median.begin(), kc.layer_median.begin() + gated) >= bar;
+  std::printf("4. prefill KV / rings vs decode's fill (%u positions x %u layers): layers 0-%u's median >= %.4f%s%s; "
               "printed: layer 0's worst %.6f, median %.7f, p01 %.6f, %u rows < 0.99, worst %.4f (L%u pos %u)\n", n,
-              d.layers, kLayerMedian, kv_ok ? "" : "  ** FAIL **", kc.layer0_worst, kc.median, kc.p01, kc.below99,
-              kc.worst, kc.worst_layer, kc.worst_pos);
+              d.layers, gated - 1, bar, deep ? " (the deeper layers printed, not gated)" : "",
+              kv_ok ? "" : "  ** FAIL **", kc.layer0_worst, kc.median, kc.p01, kc.below99, kc.worst, kc.worst_layer,
+              kc.worst_pos);
   print_layers(kc);
   std::printf("5. routing on the last chunk's %llu (row, layer) rows: %llu exact, %llu near-ties (margin <= %.0e), "
               "%llu beyond; matched weights worst |dw| %.4f (bar %.4f) - printed, not gated (the header)\n",
