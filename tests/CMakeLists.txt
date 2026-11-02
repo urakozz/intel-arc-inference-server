@@ -1756,7 +1756,7 @@ endif()
 # ==== Spec 18b: K2-Horizon decode (label `k2`) ============================ (begin) ====
 # One delimited block for every K2 registration, so the branches in flight (spec 15d's
 # Ornith prefill beside it) never edit the same lines. Host tests first (they run on the
-# Mac: tools/mac_check.sh), then the card's (box only; docs/superpowers/plans/
+# Mac: tools/box_check.sh), then the card's (box only; docs/superpowers/plans/
 # box-validation-queue.md has the order).
 set(B70_K2_SNAPSHOT "urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ"
   CACHE STRING "K2-Horizon int4 checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
@@ -1894,7 +1894,7 @@ endif()
 
 # ==== Spec 18c: K2-Horizon prefill (labels `k2;prefill`) =================== (begin) ====
 # Written blind on the Mac (docs/superpowers/plans/box-validation-queue.md, the K2 prefill row,
-# has the order to run these in). Host tests first (the Mac runs them: tools/mac_check.sh),
+# has the order to run these in). Host tests first (the Mac runs them: tools/box_check.sh),
 # then the card's; the checkpoint ones SKIP (77) until the K2 int4 checkpoint and 18a's
 # oracle-out-k2/ are on the machine, as 18b's do.
 #   k2_pf_ref_test (host): the routing scatter with ties, the tile bound, grouped-GEMM row
@@ -1979,7 +1979,7 @@ b70_cli_reject(cli_reject_k2_prefill_length_int8 ${CMAKE_CURRENT_SOURCE_DIR}/mod
 
 # ==== Spec 15e: Ornith 1.5 35B-A3B served, and its MoE MTP head (label `ornith`) == (begin) ==
 # One delimited block for every 15e registration (the branches in flight beside it edit
-# their own blocks). Host tests first - they run on the Mac (tools/mac_check.sh) - then the
+# their own blocks). Host tests first - they run on the Mac (tools/box_check.sh) - then the
 # card's, which SKIP (77) until the Ornith int4 checkpoint (15a) is on the machine.
 #
 # Task 1: the chat template. Ornith's chat_template.jinja is Qwen3.5's, not Qwen3.8's (no
@@ -2104,7 +2104,7 @@ endif()
 
 # ==== Spec 18d: K2-Horizon served (label `k2`) ============================== (begin) ==
 # One delimited block for every 18d registration. Host tests first - they run on the Mac
-# (tools/mac_check.sh) - then the card's (box-validation-queue row 25), which SKIP (77)
+# (tools/box_check.sh) - then the card's (box-validation-queue row 25), which SKIP (77)
 # without the K2 int4 checkpoint. The host side as built: spec 18 §12; the engine side
 # (K2Engine behind b70-serve, KV-only snapshots): spec 18 §14.
 #
@@ -2561,7 +2561,7 @@ endif()
 
 # ==== Spec 20c: Kolibri-1 decode (label kolibri) ==== (begin) ====
 # One delimited block for every 20c registration (spec 16c's and 20d's blocks stay apart). Host
-# tests first (they run on the Mac: tools/mac_check.sh), then the card's (box only; box-validation
+# tests first (they run on the Mac: tools/box_check.sh), then the card's (box only; box-validation
 # queue row 24). Real-checkpoint tests SKIP (77) until spec 20b's checkpoint exists; the synthetic
 # checkpoints (tools/box_validate/kolibri_oracle.sh synth) carry KL2 / KL3 before it.
 # Task 2: the model table.
@@ -2728,7 +2728,7 @@ b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS
 
 # ==== Spec 20d: Kolibri-1 prefill (labels kolibri;prefill) ==== (begin) ====
 # One delimited block for every 20d registration, after 20c's. Written blind on the Mac (box queue row
-# 26): host tests first (tools/mac_check.sh runs them), then the card's; the checkpoint ones SKIP (77)
+# 26): host tests first (tools/box_check.sh runs them), then the card's; the checkpoint ones SKIP (77)
 # until the synthetic sets (kolibri_oracle.sh synth) or, for the real checkpoint, spec 20b exist.
 # Task 1: the prefill kernels' host twin (tests/kernels/kolibri_pf_ref.h) - the 384-expert sort and its
 # adversaries, the combine == 20c's decode chain and torch's fixture row, the windowed flash walk over
@@ -2929,7 +2929,7 @@ endif()
 
 # ==== Spec 21b: Qwen3.8-Flash-Next descriptor and loader (label qwen4exp) ==== (begin) ====
 # One delimited block for every 21b registration. Host tests first (they run on the Mac:
-# tools/mac_check.sh), then the card's (box only; box-validation queue row 31): the loads SKIP (77)
+# tools/box_check.sh), then the card's (box only; box-validation queue row 31): the loads SKIP (77)
 # until the synthetic checkpoints (tools/quantize/qwen4exp/make_synth.py + ple_int8.py, r31.synth) or
 # Intel's checkpoint and its PLE file (r31.ple_convert) are on the box.
 # Task 2: the model table (the configs are built in code: the original's config.json is not vendored).
@@ -2966,8 +2966,7 @@ set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING
   "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint (181 GB; its PLE file: r31.ple_convert)")
 # The host half over the synthetic files themselves (make_synth.py's writer against the C++ reader; no device,
-# ~7 min on the Mac: the MTP head's RTN dominates) - label checkpoint, so mac_check leaves it to the box's r31.load
-# (run it by hand on a Mac that has the files: build/mac-host/tests/qwen4exp_synth_host_test <dir>).
+# minutes: the MTP head's RTN dominates) - label checkpoint, so box_check leaves it to the box's r31.load.
 add_executable(qwen4exp_synth_host_test loader/qwen4exp_synth_host_test.cc)
 target_include_directories(qwen4exp_synth_host_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(qwen4exp_synth_host_test PRIVATE b70_qwen4exp_loader)
@@ -2985,7 +2984,7 @@ set_tests_properties(qwen4exp_load_synth_ours_test qwen4exp_load_synth_intel_tes
 
 # ==== Spec 21c: Qwen3.8-Flash-Next decode (label qwen4exp) ==== (begin) ====
 # One delimited block for every 21c registration, after 21b's. Written blind on the Mac (box queue row 32): host
-# tests first (tools/mac_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
+# tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
 # synthetic golden sets (tools/box_validate/qwen4exp_oracle.sh synth) or Intel's checkpoint and 21a's sets exist.
 # Task 1: the kernels' host twin (tests/kernels/qwen4exp_ref.h) against qwen4exp_ref.py's restated ops and
 # transformers' modules (tests/kernels/qwen4exp_fixture.h) and the semantics' properties. Host only; the loader's
@@ -3088,7 +3087,7 @@ b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv
 
 # ==== Spec 21d: Qwen3.8-Flash-Next prefill (labels qwen4exp;prefill) ==== (begin) ====
 # One delimited block for every 21d registration, after 21c's. Written blind on the Mac (box queue row 33): host
-# tests first (tools/mac_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
+# tests first (tools/box_check.sh runs them), then the card's (box only); the checkpoint ones SKIP (77) until the
 # synthetic golden sets (qwen4exp_oracle.sh synth) or Intel's checkpoint and 21a's sets exist.
 # Task 1: the prefill kernels' host twin (tests/kernels/qwen4exp_pf_ref.h) - the 512-expert sort and its adversaries,
 # the combine == 21c's decode chain, dense / sparse rows, the sparse attention over row lists in fp64 and eager, the
@@ -3656,7 +3655,7 @@ endif()
 # ==== Spec 19d ==== (end) ====
 
 # ==== Spec 25b: Nemotron 3.5 Bolt descriptor and loader (label bolt) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-20-spec25b-bolt-descriptor-loader.md. Box queue row 59 (rows 57-62 are spec 25's). Host tests first (tools/mac_check.sh); card tests SKIP 77 until their data exists - the synthetic
+# Plan: docs/superpowers/plans/2026-10-20-spec25b-bolt-descriptor-loader.md. Box queue row 59 (rows 57-62 are spec 25's). Host tests first (tools/box_check.sh); card tests SKIP 77 until their data exists - the synthetic
 # checkpoints (tools/quantize/bolt/make_synth.py, tools/box_validate/stages.sh row 59) carry the card gate before our
 # 41 GB g64 export (the served checkpoint) does.
 # Task 2: the model table.
@@ -3718,7 +3717,7 @@ set_tests_properties(bolt_load_synth_g128_test bolt_load_synth_g64x_test bolt_lo
 
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-20-spec25c-bolt-decode.md. Box queue row 60. Host tests first (the Mac:
-# tools/mac_check.sh), then the card's (box only). Real-weight gates SKIP (77) until our export and 25a's golden sets
+# tools/box_check.sh), then the card's (box only). Real-weight gates SKIP (77) until our export and 25a's golden sets
 # made from it are on the box; the synthetic checkpoints (25b's make_synth.py, n12-*) carry B3 / B4 before them.
 # Task 1 (P0): the skeleton lists probe_bolt_step replays hold spec 25 §6.1's counts.
 add_executable(probe_bolt_step_shapes_test kernels/probe_bolt_step_shapes_test.cc)

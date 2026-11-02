@@ -9,19 +9,10 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 add_compile_options(-Wall -Wextra -Werror)
 
-# B70_HOST_ONLY: the Mac's configuration - no Level Zero runtime, no ocloc;
-# builds and registers only the tests that need no device (cmake/host_only.cmake says
-# how they are told apart; preset `mac-host`; tools/mac_check.sh drives it).
-option(B70_HOST_ONLY "configure without Level Zero/ocloc: host tests only (docs/18-mac-checks.md)" OFF)
-
 include(cmake/tokenizer.cmake)
-if(B70_HOST_ONLY)
-  include(cmake/host_only.cmake)
-else()
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
-  include(cmake/ocloc.cmake)
-endif()
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZE REQUIRED IMPORTED_TARGET level-zero)
+include(cmake/ocloc.cmake)
 
 # Adds -DB70_KERNEL_DIR="<abs path>" so tests and probes can find .bin files.
 function(b70_target_kernel_dir TARGET)
@@ -56,13 +47,8 @@ add_subdirectory(src/model)
 add_subdirectory(src/runtime)
 add_subdirectory(src/kernels)
 add_subdirectory(src/l0)
-if(NOT B70_HOST_ONLY)   # every probe is a device program
-  add_subdirectory(tools/probe)
-endif()
+add_subdirectory(tools/probe)
 # After src/kernels: src/cli reads that directory's target list to depend on
 # every compiled device binary.
 add_subdirectory(src/cli)
 add_subdirectory(tests)
-if(B70_HOST_ONLY)
-  b70_host_only_finish()   # last: it reads every target and test the tree declared
-endif()
