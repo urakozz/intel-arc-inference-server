@@ -66,6 +66,12 @@ import threading  # noqa: E402
 import time  # noqa: E402
 
 import torch  # noqa: E402
+import importlib.util as _ilu  # noqa: E402
+
+# tools/oracle/cpu_bf16.py: fp32 GEMMs rounded to bf16 on a CPU without bf16 units (loaded by path: _HERE is off sys.path)
+_spec = _ilu.spec_from_file_location("cpu_bf16", os.path.join(_HERE, "cpu_bf16.py"))
+cpu_bf16 = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(cpu_bf16)
 
 
 def _load(name: str):
@@ -799,7 +805,10 @@ def main() -> None:
     r.add_argument("--mtp-out")
     r.add_argument("--mtp-rows", type=int, default=32)
     r.add_argument("--mtp-experts", default="rtn", choices=["rtn", "bf16"])
+    for _p in sub.choices.values():
+        cpu_bf16.add_argument(_p)
     a = ap.parse_args()
+    cpu_bf16.install(a.exact_bf16_gemm)
     {"facts": cmd_facts, "run": cmd_run}[a.cmd](a)
 
 

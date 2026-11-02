@@ -80,6 +80,12 @@ import types  # noqa: E402
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+import importlib.util as _ilu  # noqa: E402
+
+# tools/oracle/cpu_bf16.py: fp32 GEMMs rounded to bf16 on a CPU without bf16 units (loaded by path: _HERE is off sys.path)
+_spec = _ilu.spec_from_file_location("cpu_bf16", os.path.join(_HERE, "cpu_bf16.py"))
+cpu_bf16 = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(cpu_bf16)
 import torch.nn.functional as F  # noqa: E402
 
 PINNED_TRANSFORMERS = "5.19.0"
@@ -1724,7 +1730,10 @@ def main() -> None:
     e.add_argument("--full-cache", help="without --golden: the full model's rows, read when present, else written")
     e.add_argument("--json")
     e.add_argument("--json-dir", help="<DIR>/<prompt>.<tag>.json per mask (resumable: existing files are skipped)")
+    for _p in sub.choices.values():
+        cpu_bf16.add_argument(_p)
     a = ap.parse_args()
+    cpu_bf16.install(a.exact_bf16_gemm)
     if a.cmd == "maskeval" and not a.expert_mask:
         die("maskeval: --expert-mask FILE is required")
     {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "trace": cmd_trace, "facts": cmd_facts,

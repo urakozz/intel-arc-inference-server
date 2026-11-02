@@ -57,6 +57,12 @@ import time  # noqa: E402
 import types  # noqa: E402
 
 import torch  # noqa: E402
+import importlib.util as _ilu  # noqa: E402
+
+# tools/oracle/cpu_bf16.py: fp32 GEMMs rounded to bf16 on a CPU without bf16 units (loaded by path: _HERE is off sys.path)
+_spec = _ilu.spec_from_file_location("cpu_bf16", os.path.join(_HERE, "cpu_bf16.py"))
+cpu_bf16 = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(cpu_bf16)
 import torch.nn.functional as F  # noqa: E402
 
 PINNED_TRANSFORMERS = "5.19.0"
@@ -1248,7 +1254,10 @@ def main() -> None:
     f.add_argument("rest", nargs=argparse.REMAINDER)
     q = sub.add_parser("gateq", add_help=False)
     q.add_argument("rest", nargs=argparse.REMAINDER)
+    for _p in sub.choices.values():
+        cpu_bf16.add_argument(_p)
     a = ap.parse_args()
+    cpu_bf16.install(a.exact_bf16_gemm)
     {"run": cmd_run, "ppl": cmd_ppl, "hfcheck": cmd_hfcheck, "facts": cmd_facts,
      "gateq": cmd_gateq}[a.cmd](a)
 
