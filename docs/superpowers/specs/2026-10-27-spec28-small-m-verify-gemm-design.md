@@ -357,5 +357,16 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    Proposed for the ruling: a noise-aware tie (the window = the row pair's own logit difference, ~1 bf16 ulp here, as
    the operator ruled for DFlash's D1 sets on 2026-10-27), or the f32 judge (the MoE gates' form); and N4's 0.99999
    restated at the measured ~0.9999 (or kept, with 28b not mergeable as is).
+   **Ruled (operator, 2026-11-03): option B, the f32 judge** - speculative output passes when it is no further from
+   f32 than plain decode on the same context. As built (`tests/server/spec_judge.h`, on tests/golden/forced_judge.h's
+   dump / judge pair): N6 - identical, or from the first divergence the judge rejects no more of the speculative ids
+   than of the plain ids (or every speculative miss within kNearMissUlp = 8 ulp); N4 - the verify row's cosine
+   distance to the judge's row at most kCosSlack = 2 x the plain row's (else the old 0.99999 bar). Without a judge for
+   a context the golden tie rule decides, as before, and the line says so; the bitwise and tie numbers stay printed.
+   Applied to mtp_gpu_test M3 / RF1, dflash_gpu_test D2 / RF1, dflash_lookup_gpu_test D2 / RF4 (19f), mtp_verify_test
+   M2a / M2b, dflash_engine_test D3 / P / D2, ornith_mtp_test M2 / M3. DFlash's taps and committed ring rows are held
+   bitwise to the M = 8 verify's (N3), their cosine to the plain steps recorded; dflash_lookup's warm ring bitwise
+   plain --spec dflash's. The contexts are dumped (`B70_DUMP_FORCED`); Qwen3.8's f32 references for them are the CPU
+   lane's (tools/box_validate/f32_refs.sh's `forced` mode serves ornith / k2 only today).
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
 3. The quiet-box re-check (r69.speed / r69.d1) and the G0 suite (run only for the M >= 2 gate tests so far).
