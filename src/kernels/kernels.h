@@ -165,12 +165,13 @@ inline constexpr bool small_m_table_ok() {
   return true;
 }
 static_assert(small_m_table_ok(), "kSmallMTuning: a row breaks gemm_sm.cl's #error guards or changes a consumer's S");
-// gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256] (int4; S the OUTPUT's slices, the binary's S define) /
+// gemm_sm_M<M>_K<K>_N<N>_S<S>_L<L>[_wg][_mg][_g256][_b2d] (int4; S the OUTPUT's slices, the binary's S define) /
 // gemm_sm_i8w_M<M>_K<K>_N<N>[_wg] (int8): every knob is in the name, so a table row CMake does not build is a
 // missing file at capture.
 inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   const std::string mk = "_M" + std::to_string(M) + "_K" + std::to_string(t.K) + "_N" + std::to_string(t.N);
-  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "");
+  const std::string knobs = std::string(t.wg ? "_wg" : "") + (t.magic ? "_mg" : "") + (t.grf256 ? "_g256" : "") +
+                            (t.blk2d ? "_b2d" : "");
   if (t.layout == 2) return "gemm_sm_i8w" + mk + knobs;
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }

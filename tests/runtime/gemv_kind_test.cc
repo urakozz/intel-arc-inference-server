@@ -4,7 +4,8 @@
 //     the draft vocabulary's head all bind today's gemv / gemv_i8w names, on every model's shapes;
 //   - M >= 2 -> SmallM: every tuned shape of Qwen3.8 and Agnes (their int4 linears and the int8 head) binds
 //     gemm_sm at M = 2..8, and the shape's S is the one its consumer folds (the S table is one row per shape -
-//     the same at every M, property R's precondition); untuned shapes (Ornith's) keep gemv;
+//     the same at every M, property R's precondition); Ornith's dense projections on gemm_sm at M 2..4; an untuned
+//     shape keeps gemv;
 //   - the override (CaptureOptions::force_linear) forces either kernel at any M;
 //   - the DFlash drafter's name list stays on gemv_i8w (28b leaves the drafter as it was).
 #include <cstdio>
