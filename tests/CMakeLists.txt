@@ -1619,9 +1619,10 @@ if(B70_KV8)
     ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
     prose,code,cjk 0 l0)
   b70_kv8_twin(prefill_gate_l0)
-  add_test(NAME kv8_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/kv8_vs_oracle.sh)
+  add_test(NAME kv8_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/kv8_vs_oracle.sh
+    ${B70_TEST_ORACLE_DIR} ${B70_TEST_SNAPSHOT})
   set_tests_properties(kv8_vs_oracle_test PROPERTIES LABELS "checkpoint;golden;prefill;kv8"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+    SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   add_test(NAME flash_long_kv8_test COMMAND flash_long_test ${B70_TEST_SNAPSHOT} --kv8
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids)
   set_tests_properties(flash_long_kv8_test PROPERTIES LABELS "checkpoint;prefill;kv8"
