@@ -117,7 +117,7 @@ table (Task 3), not a probe allocation.
   ~1.1 is its estimate; the code gives 29.81 GB), 0.47 GB over with MTP in the main slot only) and the largest batch that fits with and without MTP (§9.2's refusal numbers).
   **Commit.**
 - [x] **Step 2 (kernels):** the `BATCH_ROWS` builds and the CMake block; `clang -E -P` of every existing command line
-  of the four sources identical to main's; `tools/mac_check.sh --kernels` (cmdlines `+N, -0, ~0`, opencl PASS);
+  of the four sources identical to main's; `tools/box_check.sh` (cmdlines `+N, -0, ~0`, opencl PASS);
   `batch_rows_run` bitwise. **Commit.**
 - [x] **Step 3 (capture):** `build_rows` - the walk's per-sequence sites bound to the row builds with the pools and the
   table, the head's KV fill over the rows (per run: hh[r0] <- the slot's h_{pos-1}, hh[r0 + 1 ..] <- x[r0 ..]),
@@ -152,7 +152,7 @@ table (Task 3), not a probe allocation.
   models, both KV forms, Agnes also `--mtp off` at 4 slots), `r66.cost` (the timed arms, idle box), `r66.chunk` (the chunk arms); box-day plan Session 6d.
   `python3 tools/box_validate/test_box_validate.py`. **Commit.**
 
-**Gate for the plan (Mac):** `tools/mac_check.sh --base main --kernels`: host / l0 / opencl PASS, cmdlines `+N, -0, ~0`,
+**Gate for the plan (Mac):** `tools/box_check.sh --base main`: host / l0 / opencl PASS, cmdlines `+N, -0, ~0`,
 kernels agree (`batch_rows_run` among them); the host test count includes `batch_rows_test`; `clang -E -P` unchanged
 for every existing command line of the edited sources; the guarded capture and the probe pass `-fsyntax-only` with
 `-DB70_BATCH_PROBE=1`. **On the box (row 66):** the check PASS on both models and KV forms; the step and chunk tables

@@ -65,6 +65,6 @@
 
 - [ ] **Step 1:** `b70-decode` / `b70-serve` dispatch on `model_type: llama` to a `dense` path that loads, prints the plan and exits with "decode not built" until 29c; `docs/19-running-models.md` gets a Nanbeige column (never run on a B70 until 29c); spec 29 gets "29b as built". **Step 2: commit.**
 
-**Gate for the plan:** Mac - every host test; `tools/mac_check.sh --base main` green; `tools/kernel_cmdlines` unchanged. Box - D1 bitwise on both cards; the 10 GB allocation works (or the per-layer-group fallback is built and D1 re-run); the planner's lines match spec 29 §4 within 3 % (or the spec is corrected with the printed numbers).
+**Gate for the plan:** Mac - every host test; `tools/box_check.sh --base main` green; `tools/kernel_cmdlines` unchanged. Box - D1 bitwise on both cards; the 10 GB allocation works (or the per-layer-group fallback is built and D1 re-run); the planner's lines match spec 29 §4 within 3 % (or the spec is corrected with the printed numbers).
 
 **Box stages (prose):** GPU lock for every card job; idle-box check at dispatch. One card first (the load of 8 layers + head), then the 10 GB buffer test, then the whole model on two cards. Each stage is minutes; the real-checkpoint load reads 20 GB from disk (the cold-copy USB path exists).

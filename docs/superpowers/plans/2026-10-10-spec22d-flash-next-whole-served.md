@@ -64,7 +64,7 @@ script), `tools/probe/serve_benchy.sh` (llama-benchy against `b70-serve`, `SERVE
 - Every number measured, or marked derived / estimated / proposed. Box: `flock ~/b70-gpu.lock` (both cards), detached,
   polled; interleaved pairs after warm-up, median of 3, `uptime`, idle grade; the operator's llama-benchy flags for any
   server row; the RAM rule (no CPU oracle beside the pinned mirror and PLE).
-- Mac checks `tools/mac_check.sh --base main --quick`.
+- Mac checks `tools/box_check.sh --base main`.
 
 ## Review Focus
 

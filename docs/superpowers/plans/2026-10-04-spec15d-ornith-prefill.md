@@ -12,7 +12,7 @@
 
 **Status (2026-10-05): Tasks 2 and 3 written blind on the Mac** (branch `spec15d-ornith-prefill`;
 as built: spec 15 §11). Task 1 (P0) and Task 4 (speed) are box work, as is every card-side check:
-box-validation-queue row 13. Mac-side: `tools/mac_check.sh --base main --kernels` green (host tests
+box-validation-queue row 13. Mac-side: `tools/box_check.sh --base main` green (host tests
 incl. `pf_moe_ref_test`, every C++ source against the Level Zero headers, 22 added kernel command
 lines and none moved, every variant through clang, `pf_moe.cl`'s sort / gathers / dequant /
 combine exact on the Mac's GPU - indicative). Deviations from the text below, each recorded in

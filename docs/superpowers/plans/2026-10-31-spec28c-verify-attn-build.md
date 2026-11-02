@@ -116,7 +116,7 @@ line").
   `cmake/host_only.cmake`).
 
 - [ ] **Step 1: failing test** `attn_verify_ref_test` (the header declared, bodies absent): it fails to link.
-- [ ] **Step 2: implement, PASS;** `tools/mac_check.sh --base main --quick` green (host section shows the new test
+- [ ] **Step 2: implement, PASS;** `tools/box_check.sh --base main` green (host section shows the new test
   passing). Commit `git commit -S -m "test: attn_verify_ref - the fp64 reference of the verify attention at M rows, bf16 and int8 KV (spec 28c)"`.
 
 ### Task 2: the kernel and its names (Mac)
@@ -135,7 +135,7 @@ line").
 - Modify: `tests/kernels/variant_names_test.cc` (the names and their CMake lines agree), `tools/mac/opencl/intel_shim.h`
   only if a 2D block shape `pf_flash_attn` / `pf_gemm` do not already use is needed - and then only after ocloc on the
   box has built it (doc 18's rule; the commit says so).
-- Create: `tools/mac/clrun/attn_verify_run.cc` and its name in section 5's loop of `tools/mac_check.sh`: the `EAGER=1`
+- Create: `tools/mac/clrun/attn_verify_run.cc` and its name in section 5's loop of `tools/box_check.sh`: the `EAGER=1`
   build (no sub-group function the emulation shim leaves undeclared - no shuffles, reductions, DPAS or 2D block I/O)
   against `attn_verify_ref.h` at M = 2 / 4 / 8, keys 512 and 2049 (two strides in one launch) and the cache end: the
   partials per block against the reference's block view, the partials merged on the host in `attn_reduce_v2`'s order
@@ -146,7 +146,7 @@ line").
 - [ ] **Step 1: failing test** - `variant_names_test` asks for the names; `attn_verify_run` builds against the reference
   and fails (no kernel).
 - [ ] **Step 2: implement;** `tools/mac/cl_syntax.sh` passes every new command line (the production lines, the eager
-  build, and the probe's lever lines of Task 3); `tools/mac_check.sh --base main --kernels` green with cmdlines
+  build, and the probe's lever lines of Task 3); `tools/box_check.sh --base main` green with cmdlines
   **+N / -0 / ~0** and `attn_verify_run` exact where the reference's order is the kernel's, within N1's bar elsewhere.
   Commit `git commit -S -m "kernels: attn_verify_dpas - the verify attention on DPAS in v2's blocking and partials, bf16 and int8 KV, M 2..8 (spec 28c)"`.
 
@@ -176,7 +176,7 @@ line").
   `src/kernels/attn_verify_dpas.cl` (the tag list and the harness's `--arms` are two lists nothing checks against each
   other: a missing binary is named and skipped, as `probe_decode_attn`), the `pvd_v2kv8_M5..8` controls.
 
-- [ ] **Step 1: implement;** `tools/mac/l0_syntax.sh` (via `tools/mac_check.sh --base main --quick`) and
+- [ ] **Step 1: implement;** `tools/mac/l0_syntax.sh` (via `tools/box_check.sh --base main`) and
   `cl_syntax.sh` on every `pvd_*` line pass; cmdlines still +N / -0 / ~0 for `src/` (the probe's lines are
   `tools/probe`'s). Commit `git commit -S -m "probe: probe_verify_attn - v2 against attn_verify_dpas lever arms on real q / KV at M rows, numerics and paired timing (spec 28c)"`.
 
@@ -247,7 +247,7 @@ bool verify_attn_depth_free(uint32_t M, bool kv8);   // dpas_from is 0 or never:
 - Modify: `tests/CMakeLists.txt`; the engine's capability line (names `B70_VERIFY_ATTN` when set, as
   `B70_DECODE_ATTN`).
 
-- [ ] **Step 1: failing test, then implement, PASS** (host); `tools/mac_check.sh --base main --quick` green, cmdlines
+- [ ] **Step 1: failing test, then implement, PASS** (host); `tools/box_check.sh --base main` green, cmdlines
   +N / -0 / ~0. Commit `git commit -S -m "runtime: verify_attn_kind - the measured M x depth table beside gemv_kind; M >= 2 verify lists bind attn_verify_dpas where it wins, M = 1 keeps v2 (spec 28c)"`.
 
 ### Task 6: the gates on the card (box)
@@ -302,7 +302,7 @@ alternating by round).
   `docs/README.md` the probe record's line. Commit `git commit -S -m "docs: spec 28c as built, the verify-attention rows"`.
 
 **Gate for the plan:** Task 0 GO; `attn_verify_ref_test`, `verify_attn_test` and `variant_names_test` green and
-`tools/mac_check.sh --base main --kernels` PASS on the Mac (cmdlines additions only, `attn_verify_run` exact / within
+`tools/box_check.sh --base main` PASS on the Mac (cmdlines additions only, `attn_verify_run` exact / within
 N1); on the box N1, N2a, N2b, N3 pass with the rule and with `dpas` forced, G0 holds, S1 holds at every switching shape
 and S2 is met (a miss of S2 with S1 held is recorded and goes to the operator; it does not revert the rule). Hand back
 with the P0 line, the table, the gate lines and the S1 / S2 numbers.

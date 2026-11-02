@@ -134,4 +134,4 @@ The chunk per layer: `mg_norm` (M 2048) · q||gate||k||v 9 slabs (+ `pf_gemm_T0`
   - `r45.speed` optin gpu `muse_gptq`.
 - [x] **Step 4: commit** `docs: spec 23 (23d as built), box queue row 45 - Muse-Glimmer prefill`.
 
-**Gate for the plan:** Mac - the twins (fp64 walk, eager bitwise), every variant's syntax, `kernel_cmdlines` additions only, `tools/mac_check.sh --base main --quick --kernels` exit 0. Box - MG2-MG4 on prefill (synthetic, then real), two cards bitwise one, the speed rows recorded.
+**Gate for the plan:** Mac - the twins (fp64 walk, eager bitwise), every variant's syntax, `kernel_cmdlines` additions only, `tools/box_check.sh --base main` exit 0. Box - MG2-MG4 on prefill (synthetic, then real), two cards bitwise one, the speed rows recorded.

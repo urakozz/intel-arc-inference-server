@@ -99,7 +99,7 @@ tests.
   ~/b70-gpu.lock` (once for both cards), detached, polled; interleaved pairs after warm-up, median of 3, `uptime` and
   idle grade; `-j44`. **Host RAM:** the full model's runs pin the mirror and the PLE table - no CPU oracle beside them;
   `free -g` checked first.
-- Mac checks `tools/mac_check.sh --base main --kernels` (host, Level Zero syntax, cmdlines, OpenCL syntax, Mac GPU runs).
+- Mac checks `tools/box_check.sh --base main` (host, Level Zero syntax, cmdlines, OpenCL syntax, Mac GPU runs).
 
 ## Review Focus
 
@@ -150,7 +150,7 @@ tests.
   on host - each bitwise the direct binary's `h` and `y`; `qwen4exp_pf_kernels_test` the same for the dequant batches
   (a chunk's touched experts split across VRAM and host, untouched experts' entries pointing at an unmapped-looking
   poison address that must never be read - the kernel's early return); `q4_page_check` over 3 host + 2 device ranges.
-- [ ] **Step 4: Mac gate** (`qwen4exp_run`: the table cases on the Mac GPU, host memory as "host"; `tools/mac_check.sh
+- [ ] **Step 4: Mac gate** (`qwen4exp_run`: the table cases on the Mac GPU, host memory as "host"; `tools/box_check.sh
   --base main --kernels` exit 0, cmdlines `+10 / -0 / ~0` (8 `q4_moe` `_TBL`, the prefill's, `q4_page_check`) or the count recorded). Commit `git commit -S -m "tests:
   table-addressed experts bitwise the direct ones at M = 1..4 and in the prefill dequant (spec 22b)"`.
 - [ ] **Step 5 (only if decision 1 rules gather staging):** `_STG` variants - the MoE launch pair preceded by

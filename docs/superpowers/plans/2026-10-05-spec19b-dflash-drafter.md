@@ -17,7 +17,7 @@ operator's ruling of 2026-10-15).
 ## Global Constraints
 
 - Branch `spec19b-dflash-drafter` from main; box tree automatic; `tools/box.env` copied if missing, never committed; `oracle-out*` symlinked.
-- **D0:** without a drafter every merged model's kernel binaries are checksum-identical to main's and the full suite is green (`tools/kernel_cmdlines` against main: additions only; `tools/mac_check.sh` once merged).
+- **D0:** without a drafter every merged model's kernel binaries are checksum-identical to main's and the full suite is green (`tools/kernel_cmdlines` against main: additions only; `tools/box_check.sh` once merged).
 - Every buffer through `runtime/buffer_sizes.h` and the planner (`--max-len auto` must count the drafter's weights, ring and taps).
 - Every GPU command under `flock ~/b70-gpu.lock`, detached, polled. No recursive force deletes. Commit on the branch; no merge, no push.
 

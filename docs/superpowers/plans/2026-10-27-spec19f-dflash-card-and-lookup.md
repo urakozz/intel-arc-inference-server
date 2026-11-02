@@ -65,7 +65,7 @@ lists), `lookup_server_test` (mock responses byte-identical to plain).
   `tools/mac/clrun/dflash_run` at the fixture's shapes (the Mac, indicative) to see whether the host twin or the kernel
   is wrong. Root cause stated.
 - [ ] **Step 3: fix + a regression check** that fails before and passes after (a `dflash_kernels_test` case, or a
-  `dflash_ref_test` case if the twin was wrong); `tools/mac_check.sh --base main --quick` green. Commit
+  `dflash_ref_test` case if the twin was wrong); `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "dflash: <root cause> - dflash_kernels_test (spec 19f)"`.
 
 ### Task 2: rows 54, 55, 56 on the card (box)
@@ -90,7 +90,7 @@ lists), `lookup_server_test` (mock responses byte-identical to plain).
   `tests/server/lookup_server_test.cc` or a sibling (the mock: responses byte-identical to plain; the mock drafter's ring
   equal to plain DFlash's after an exit)
 
-- [ ] **Step 1: failing tests, implement, PASS;** `tools/mac_check.sh --base main --quick` green. Commit
+- [ ] **Step 1: failing tests, implement, PASS;** `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "server: --spec dflash-lookup - prompt lookup inside DFlash (ENTER >= 8 beyond the window, STAY >= 3) (spec 19f)"`.
 
 ### Task 4: the edit / copy set (Mac)
@@ -130,5 +130,5 @@ rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data ke
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 70 - lookup inside DFlash (spec 19f)"`.
 
 **Gate for the plan:** `dflash_kernels_test` and rows 54-56 pass on the card (D1-D5, D3 as amended); the mode's host
-tests green and `tools/mac_check.sh --base main` PASS; row 70's D2 / D4 pass and the speed table and verdict are
+tests green and `tools/box_check.sh --base main` PASS; row 70's D2 / D4 pass and the speed table and verdict are
 recorded. Hand back with the fix's root cause, the rows' results and the verdict line.

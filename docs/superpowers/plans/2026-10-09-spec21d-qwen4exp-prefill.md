@@ -49,7 +49,7 @@ last row:        the final mixer and the head with decode's binaries on the last
 - **Determinism:** no atomic in any sum that feeds a result; the sort one work-group in (token, slot) order; a grouped-GEMM row independent of the other rows of its tile; the combine in decode's order; flash key tiles at absolute multiples of KT; a split prefill bitwise at multiples of 64.
 - One weight format; the forms 21b reads. Family kernels in `src/kernels/qwen4exp/`, `q4_pf_*`, every shape define in the name; reused sources' binaries named by their existing helpers (`pf_kernels.h`) or with a `q4_` prefix where the source's own name carries another model's vocabulary (`kol_pf_linear.cl`'s slab at this family's shapes is `q4_pf_bf16_slab_K<K>_N<N>`).
 - Every number measured, or marked derived / estimated / proposed. Box: `flock ~/b70-gpu.lock` (once for both cards), detached, polled; interleaved pairs, median of 3, `uptime`; `-j44`.
-- Mac checks `tools/mac_check.sh --base main --kernels`. No `rm -rf`. Signed commits on the branch; no merge, no push.
+- Mac checks `tools/box_check.sh --base main`. No `rm -rf`. Signed commits on the branch; no merge, no push.
 
 ## Review Focus
 
@@ -135,7 +135,7 @@ Reused at this family's shapes (new lines in the block): `pf_embed.cl` and `pf_a
 - [x] **Step 2: write the three sources, the header block, the CMake block, the `pf_gated_head.cl` define;** the names test PASSES.
 - [x] **Step 3: Mac GPU.** `qwen4exp_run` gains `q4_pf_sort` (random, adversarial, tied routes at C = 2048), `q4_pf_gather`, `q4_pf_dequant_gu` / `_dn` (an empty expert skipped, block 512 both shared forms), `q4_pf_moe_combine`, `q4_pf_ple_{gate,conv,ring}`, 21c's HC / indexer kernels at M = 2048 - each exact against `qwen4exp_pf_ref.h` / `qwen4exp_ref.h`.
 - [x] **Step 4: the card test** `qwen4exp_pf_kernels_test` (labels `qwen4exp;prefill`, no checkpoint): Step 3's set on the card; the grouped GEMMs bitwise equal to a dense `pf_gemm` per expert on the same rows and the row permutation leaving outputs unchanged; `q4_pf_sparse_attn` against `sparse_attn_fp64` (cosine >= 0.99999, spec 6 K1) at chunk starts 2048, 4096, 30000, 131072 and a 300-row tail; `pf_flash_attn_Q24KV2` against fp64 on the dense rows; the EAGER form against the eager chain (rounding points; not bitwise in sum order); `gdn_chunk_q4`'s binaries with `pf_gated_head_SIG` against 21c's decode `gdn_step` + `prep_gated_head_M1_SIG` state over the same 64 positions within spec 6 §6.3's self-consistency bar.
-- [x] **Step 5: Mac gate** `tools/mac_check.sh --base main --kernels` (cmdlines additions only; the count recorded) and **commit** `git commit -S -m "kernels: Qwen3.8-Flash-Next prefill - 512-expert ushort sort, sparse flash over row lists, PLE over a chunk, the sigmoid gated head (spec 21d)"`.
+- [x] **Step 5: Mac gate** `tools/box_check.sh --base main` (cmdlines additions only; the count recorded) and **commit** `git commit -S -m "kernels: Qwen3.8-Flash-Next prefill - 512-expert ushort sort, sparse flash over row lists, PLE over a chunk, the sigmoid gated head (spec 21d)"`.
 
 ### Task 3: the prefill walk and `Qwen4ExpEngine::prefill`
 

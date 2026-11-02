@@ -81,7 +81,7 @@ replay visibility result, P0.6's prefill bytes); plan 22b (the table, the map, t
 - **Residency never changes arithmetic** (22b's O1): every gate here is bitwise against the no-swap / zero-copy run.
 - Box: `flock ~/b70-gpu.lock` (both cards), detached, polled; interleaved pairs after warm-up, median of 3, `uptime`,
   idle grade; `-j44`; the full model's RAM rule (no CPU oracle beside the pinned mirror and PLE).
-- Mac checks `tools/mac_check.sh --base main --kernels`.
+- Mac checks `tools/box_check.sh --base main`.
 
 ## Review Focus
 

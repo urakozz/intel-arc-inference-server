@@ -52,7 +52,7 @@ host tests `pipeline_args_test`, `dflash_engine_host_test`, `memory_plan_test`, 
 `probe_w4a8_gsweep`, `probe_w8a8`, `probe_flash_attn`, `probe_tail`, `probe_writethrough`, `probe_prefix_s12`,
 `probe_tie_judge`, `probe_verify_m`, `probe_mtp_steps`, `probe_batch_step`, `probe_decode_attn`, `probe_lm_head_l1`.
 
-**Tooling / docs.** `tools/mac/l0_syntax.sh` (src/sycl + b70_sycl_probe skip), `tools/mac_check.sh:13,149`,
+**Tooling / docs.** `tools/mac/l0_syntax.sh` (src/sycl + b70_sycl_probe skip), `tools/box_check.sh:13,149`,
 `tools/box.sh:11,26` (build-nosycl), `tools/bench_decode.sh:20`, `tools/toolcall/engine_generate.sh:7`;
 `stages.sh` r13.cli (796-801), r15.k1 (956-959), r23.host / r23.reject (1457-1471), r26.reject (1831-1833),
 r27.reject (1930-1932), r33.reject, r34.reject, r61.reject, r62.reject; README.md 109-113, 177-178, 254, 324, 347;
@@ -110,7 +110,7 @@ Tests that take `default_prefill_backend()` when unpinned: `prefill_gate_test` (
 
 ## 4. Gates
 
-- `tools/mac_check.sh --base main` PASS; every changed / removed command line listed.
+- `tools/box_check.sh --base main` PASS; every changed / removed command line listed.
 - Box (own tree, `gpu_lock.sh`): build -j44 from a fresh build dir; r13.cli; Qwen3.8 and Ornith l0 / l0-int8 prefill
   rows; the changed reject rows; G0 (`g0.bitwise`) and the Qwen3.8 / Agnes / Ornith golden rows for the l0-int8 -> l0
   default move - a G0 diff is reported, never accepted (the operator's call).

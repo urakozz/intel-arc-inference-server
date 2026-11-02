@@ -33,7 +33,7 @@ the bound). Box queue row 26.
 - **Determinism:** no atomic in any sum that feeds a result; the sort is one work-group in (token, slot) order; a grouped-GEMM row's output is independent of the other rows of its tile; the combine sums in ascending expert id; flash key tiles start at an absolute multiple of KT, and a wholly masked tile adds exact zeros. Prefill replay bitwise; a split prefill bitwise at multiples of 64.
 - Kolibri-only kernels in `src/kernels/kolibri/`, `kol_*` names with every shape define.
 - Every number measured, or marked derived / estimated / proposed. Box: `flock ~/b70-gpu.lock` (once for both cards), detached, polled; interleaved pairs, median of 3, `uptime`; `-j44`.
-- Mac checks `tools/mac_check.sh --base main --kernels`. No `rm -rf`. Signed commits on the branch; no merge, no push.
+- Mac checks `tools/box_check.sh --base main`. No `rm -rf`. Signed commits on the branch; no merge, no push.
 
 ## Review Focus
 
@@ -186,7 +186,7 @@ Reused and new lines (`src/kernels/CMakeLists.txt`, spec 20d block, `if(B70_KOLI
 - [ ] **Step 2: write the three sources, the header block and the CMake block;** the names test PASSES.
 - [ ] **Step 3: Mac GPU.** `kolibri_run` gains `kol_pf_sort` (random, adversarial, tied routes at C = 2048), `kol_pf_gather`, `kol_pf_dequant_gu` / `_dn` (an empty expert skipped, block 384 the bf16 copy), `kol_pf_moe_combine`, `kol_pf_bf16_slab` (the 512-column tail zero-filled), `kol_norm_finish` / `kol_post_add` at M = 2048 - each exact against `kolibri_pf_ref.h` / `kolibri_ref.h`.
 - [ ] **Step 4: the card test** `kolibri_pf_kernels_test` (label `kolibri;prefill`, no checkpoint): everything of Step 3 on the card; the grouped GEMMs bitwise equal to a dense `pf_gemm` per expert on the same rows, and Task 1's row permutation leaving outputs bitwise unchanged (Review Focus 2-3); `kol_pf_flash_attn` against `flash_window` (fp64, cosine >= 0.99999, spec 6 K1) at full-layer depths 0, 2048, 30000, 60000, sliding at c0 = 0, 1000, 4396 (wrapped), a tail chunk of 300 rows and single rows; the EAGER form against `eager_window` (rounding points; not bitwise in sum order, spec 18 §11).
-- [ ] **Step 5: Mac gate** `tools/mac_check.sh --base main --kernels` (cmdlines additions only; record the count) and **commit** `git commit -S -m "kernels: Kolibri-1 prefill - 384-expert sort, bf16 shared block, windowed ring flash, bf16 slab tail (spec 20d)"`.
+- [ ] **Step 5: Mac gate** `tools/box_check.sh --base main` (cmdlines additions only; record the count) and **commit** `git commit -S -m "kernels: Kolibri-1 prefill - 384-expert sort, bf16 shared block, windowed ring flash, bf16 slab tail (spec 20d)"`.
 
 ### Task 3: the prefill walk and `KolibriEngine::prefill`
 

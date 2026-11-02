@@ -63,6 +63,6 @@
 
 - [ ] **Step 1:** spec 29 "29d as built" (the kernel's TFLOP/s, the measured prefill and decode tables beside the derived ones, the pipelining factor, the cold-prefill times and the operator decision 4 restated with numbers); `docs/19-running-models.md`; BENCHMARKS. **Step 2: commit.**
 
-**Gate for the plan:** Mac - host tests, `tools/mac_check.sh`, `kernel_cmdlines` additions only. Box - D3 prefill-side under the near-miss rule; D5 prefill bitwise across stage counts; passkey 3/3 at 240k and 330k on int8 KV; the 330k run completes under the planner's line without a device fault; the pipelined speed-up bar; the measured tables recorded; G0 bitwise for other models.
+**Gate for the plan:** Mac - host tests, `tools/box_check.sh`, `kernel_cmdlines` additions only. Box - D3 prefill-side under the near-miss rule; D5 prefill bitwise across stage counts; passkey 3/3 at 240k and 330k on int8 KV; the 330k run completes under the planner's line without a device fault; the pipelined speed-up bar; the measured tables recorded; G0 bitwise for other models.
 
 **Box stages (prose):** (1) the flash probe, minutes to hours, first; (2) one-stage prefill golden and speed; (3) two-stage bitwise and speed; (4) the long runs - 131k first, then 240k, then 330k, each a single job of minutes to half an hour, sequential, the GPU lock held, idle-box check at dispatch; (5) the passkeys and the depth decode rows. A DEVICE_LOST during a long run is investigated before any retry (fix round A's lesson: big uploads and host-memory pressure).

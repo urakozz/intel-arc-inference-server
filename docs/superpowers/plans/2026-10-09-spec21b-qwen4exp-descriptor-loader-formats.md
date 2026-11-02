@@ -2,7 +2,7 @@
 
 **Status (2026-10-09): built on the Mac, branch `spec21b-qwen4exp-loader`; the card runs pending (queue row 31).**
 Tasks 1-7 done and their Mac gates green: the four host tests, `test_qwen4exp_quant.py` 6 / 6, both synthetic
-checkpoints `ACCEPTED`, Level Zero syntax, kernel_cmdlines +0 / -0 / ~0, `tools/mac_check.sh --base main --quick`
+checkpoints `ACCEPTED`, Level Zero syntax, kernel_cmdlines +0 / -0 / ~0, `tools/box_check.sh --base main`
 exit 0. As built (layouts, bytes, the planner's N, departures): spec 21 §13 "21b as built".
 21q (our AutoRound run) is its own plan, `2026-10-09-spec21q-qwen4exp-autoround.md`, parallel to this one.
 
@@ -32,7 +32,7 @@ exit 0. As built (layouts, bytes, the planner's N, departures): spec 21 §13 "21
 - **One weight format** (the operator's rule): AutoRound W4A16 int4 g64 symmetric in `auto_round:auto_gptq` packing (`w = (q - 8) x scale`, `qzeros` 0x77777777, no `g_idx` or the identity), with the one exact-conversion exception - Intel's g128 sym experts expanded to g64 at load - and bf16 for everything AutoRound leaves bf16. No asymmetric path, no compressed-tensors path for this family, no third-party layout of any tensor (spec 21 §11: no GGUF-derived order; the GDN v-head map is `h // 3`).
 - The descriptor is held to config.json key by key; every refusal names the key or the tensor.
 - Every number in docs is measured, or marked derived / estimated / proposed. The byte figures below are **derived**; each test asserts its formula, not a typed constant from this plan.
-- Mac checks: `tools/mac_check.sh --base main` (host tests, Level Zero syntax, kernel command lines unchanged). Python tests in `agnes-ref-img` with `--memory 28g`.
+- Mac checks: `tools/box_check.sh --base main` (host tests, Level Zero syntax, kernel command lines unchanged). Python tests in `agnes-ref-img` with `--memory 28g`.
 - No `rm -rf`. Signed commits on the branch; no merge, no push.
 
 ## Review Focus
@@ -353,7 +353,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
 `load_qwen4exp`: config held (`check_qwen4exp_config`), `max_len <= 262144`, quant invariants (`assert_quant_invariants` + `check_quant_scan`: g64 everywhere for ours, g128 for Intel's experts), forms from the names, names both ways, the plan (`runtime::qwen4exp::plan` + `require_fits`) before the first allocation, each layer repacked and uploaded straight onto its device (no load-then-place), the PLE table loaded once, the int8 head built at load (spec 9), zero unconsumed, each part's `bytes` equal to `q4_device_weight_bytes`; one report line per device plus one for the host table.
 
 - [ ] **Step 1: the card test** `qwen4exp_load_checkpoint_test <snapshot> [layers] [mtp]`: loads, prints the report, asserts 0 unconsumed, `bytes` per part, the last expert's block and the router's row 512 read back equal to the host repack, the PLE ranges' tags read back on the host. Registered: `qwen4exp_load_synth_ours_test`, `qwen4exp_load_synth_intel_test` (Task 1's checkpoints, `${B70_Q4EXP_SYNTH_DIR}`), `qwen4exp_load_intel_layers_test` (Intel's checkpoint, `layers` 18, `${B70_Q4EXP_INTEL_SNAPSHOT}`), labels `checkpoint;qwen4exp`, `SKIP_RETURN_CODE 77`, `TIMEOUT 3600`.
-- [ ] **Step 2: implement; Mac gate** `tools/mac_check.sh --base main` (host PASS incl. every test above, l0 PASS, cmdlines +0 / -0 / ~0).
+- [ ] **Step 2: implement; Mac gate** `tools/box_check.sh --base main` (host PASS incl. every test above, l0 PASS, cmdlines +0 / -0 / ~0).
 - [ ] **Step 3: commit** `git commit -S -m "loader: load_qwen4exp - both checkpoint forms, two cards at load, --layers N, the PLE table pinned per head (spec 21b)"`.
 
 ### Task 7: docs, the box queue row

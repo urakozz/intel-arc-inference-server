@@ -295,9 +295,9 @@ costs on your card (spec 8 §10).
 | `--pipeline-handoff copy\|peer` | `copy` | With `--pp 2`: how the hidden state crosses. `copy`: the first card copies it to the second and signals it; `peer`: the first card's last kernel writes it straight into the second card's memory and raises a flag the second card waits on, with a time limit. Same results either way; which is faster is not yet measured. |
 
 `tools/box.sh` builds and tests on a remote machine over ssh, which is how I
-work day to day. Set `BOX=user@host` before using it. Without the box,
-`tools/mac_check.sh` runs the host tests and syntax-checks the device code and
-every kernel variant on a Mac ([docs/18-mac-checks.md](docs/18-mac-checks.md)).
+work day to day. Set `BOX=user@host` before using it. `tools/box_check.sh --base main`
+is the merge check: the build on the box, every existing kernel's ocloc command line
+against the base, and the tests that need no model files on a free card.
 
 ### Environment variables
 
@@ -342,9 +342,6 @@ The scripts in `tools/`:
 | `BUILD_DIR`, `CMAKE_ARGS` | `box.sh` | `build`, empty | build directory on the box and extra `-D` flags for the configure step |
 | `MODEL`, `DEPTH`, `TG`, `RUNS`, `PP`, `PP_CHUNK`, `PP_BACKEND`, `MAX_LEN`, `LM_HEAD` | `bench_decode.sh` | Qwen3.8's repo id, `4096`, `256`, `3`, the rest unset | the same as its flags (`--model`, `--depth`, ...). Unset adds nothing to the command, so it stays the one every earlier row used. It also forwards `ZE_AFFINITY_MASK` and `B70_PREFILL_ATTN`. |
 | `MODEL`, `PORT`, `SERVED_NAME`, `RUNS` | `serve_bench.sh` | Qwen3.8's snapshot in the box's HF cache, `8000`, `b70`, `3` | the served checkpoint, its port and name, and the number of llama-benchy invocations |
-| `L0_INCLUDE` | `mac_check.sh` | a path in the script | directory holding Level Zero's `ze_api.h` (a `level-zero` checkout's `include/`); without it the host and syntax sections fail |
-| `B70_JOBS` | `mac_check.sh` | all cores | parallelism of the Mac checks |
-| `B70_MAC_CL_DEVICE` | `mac_check.sh --kernels` | the first Intel GPU, else the first GPU | the OpenCL device, by a substring of its name (e.g. `AMD`) |
 | `SNAP_QWEN`, `SNAP_AGNES`, `SNAP_ORNITH`, `SNAP_K2`, `SNAP_KOLIBRI`, `DEVICE`, `PORT`, ... | `box_validate.sh` | the five checkpoints, `0`, `8013` | the checkpoints, card and port the validation run uses; the full list (rounds, baseline, data directories) is in `tools/box_validate.sh --help` |
 | `ORACLE_MODEL` / `ORACLE_SNAP`, `ORACLE_THREADS`, `ORACLE_IMAGE`, `HF_CACHE`, `REPO_DIR` | `tools/oracle/run_in_container.sh` and the scripts that call it (`golden.sh`, `check.sh`) | Qwen3.8 in the HF cache, all threads, the script's reference image, `~/.cache/huggingface`, this tree | the CPU reference's checkpoint (a repo directory in the cache, or an absolute snapshot path, which wins), its CPU threads, the container, and the two mounts. `golden.sh` adds `OUT_DIR` (`oracle-out`), `IDS_DIR` (`tests/golden/prompts`) and `PROMPTS` (`prose code cjk`). |
 
@@ -357,7 +354,7 @@ Test-only (the checkpoint paths the tests load are CMake options, e.g. `-DB70_TE
 | `B70_K2_TIE_TOL` | `k2_golden_test` | `1e-3` | the near-tie tolerance of K2's routing diagnostic, proposed until the reference run measures it |
 | `B70_KOL_TIE_TOL` | `kolibri_golden_test`, `kolibri_partial_test` | `1e-2` | the same for Kolibri-1 (spec 20c), proposed until `kolibri_oracle.sh` prints the gap distribution |
 | `B70_Q4_TIE_TOL`, `B70_Q4_SEL_TOL` | `qwen4exp_golden_test`, `qwen4exp_partial_test` | `1e-3` | Qwen3.8-Flash-Next (spec 21c): the routing diagnostic's 10th / 11th and gate S's 512th / 513th near-tie tolerances, proposed until row 30 prints the gap distributions; a gap of exactly 0 is undetermined |
-| `B70_TOKENIZER_JSON` | the Qwen3.8 tokenizer tests, `mac_check.sh`'s host section | Qwen3.8's snapshot under `$HF_HOME` | path to Qwen3.8's `tokenizer.json`; without it those tests are disabled on the Mac |
+| `B70_TOKENIZER_JSON` | the Qwen3.8 tokenizer tests | Qwen3.8's snapshot under `$HF_HOME` | path to Qwen3.8's `tokenizer.json`; without it those tests are skipped |
 | `B70_SNAPSHOT_DIR` | `template_test` | Qwen3.8's snapshot under `$HF_HOME` | the snapshot whose chat template it renders |
 | `B70_K2_TOKENIZER_JSON` | `k2_tokenizer_test` | the CMake option of that name | K2's `tokenizer.json`; absent, the test is skipped |
 | `B70_SPLIT_VERBOSE` | `prefill_split_test` | unset | set: also print the worst KV row per attention layer of each non-bitwise split |

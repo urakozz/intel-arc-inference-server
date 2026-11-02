@@ -540,7 +540,7 @@ descriptor and the checkpoint headers' shapes); the tests assert the formulas an
   `check.py --ple`; the C++ host half over those very files (`qwen4exp_synth_host_test`, label `checkpoint` -
   run by hand on the Mac, 425 s: both forms' names both ways, every layer and the head repacked to the layout's
   bytes, the 128 shards skipped, the PLE files = the descriptor, 0 unconsumed); Level Zero syntax PASS on every
-  new source; `tools/mac_check.sh --base main --quick` exit 0 (host 77 pass / 0 fail, kernel_cmdlines 630
+  new source; `tools/box_check.sh --base main` exit 0 (host 77 pass / 0 fail, kernel_cmdlines 630
   variants +0 / -0 / ~0).
 - **Departures from the plan:**
   1. `tests/model/qwen4exp/config.json` and `synth4.json` are not vendored (the plan's fallback): the
@@ -753,7 +753,7 @@ Mac results are **measured**.
   rings, bitwise); `qwen4exp_pf_variant_names_test`, `qwen4exp_plan_test` PASS; `qwen4exp_run` on the Mac's GPU (Intel
   UHD 630): 0 disagreements - the sort / gather / dequant / combine / rings / PLE gather / selection exact, the HC xn,
   PLE gn, indexer q / keys within 1 bf16 ulp, the scores within 1 fp32 ulp (Apple's divide and sqrt); Level Zero syntax
-  of every new / changed source, OpenCL syntax of every variant; kernel_cmdlines +30 / -0 / ~0; `tools/mac_check.sh
+  of every new / changed source, OpenCL syntax of every variant; kernel_cmdlines +30 / -0 / ~0; `tools/box_check.sh
   --base main --quick --kernels` exit 0 (host 81 pass / 0 fail, l0 21 / 0, opencl 675 / 0, kernels 9 agree).
 - **What row 33 must prove:** every binary's first compile (30), G0 with the three changed sources' binaries unchanged;
   F2 on the card (grouped == dense bitwise, the sparse flash at cosine 0.99999 of fp64, eager within its bars); F4 on
@@ -877,7 +877,7 @@ checkpoints and Intel's truncated with `--layers N`.
   the adapter instantiation and every changed source through the Level Zero syntax check; OpenCL syntax of every
   new variant; `test_qwen4exp_mtp.py` (the RTN engine format, the accept CLI on the tiny model),
   `test_oracle_generate.py` (9), `test_oracle_batched.py test_qwen4exp`, `test_box_validate.py` (22) PASS;
-  kernel_cmdlines +122 / -0 / ~0 (815 variants); `tools/mac_check.sh --base main --quick --kernels` exit 0
+  kernel_cmdlines +122 / -0 / ~0 (815 variants); `tools/box_check.sh --base main` exit 0
   (host 85 pass / 0 fail, l0 28 / 0, opencl 797 / 0, kernels 9 agree). q4_mtp has no Mac clrun path: it is checked by
   OpenCL syntax only and first runs in r34.mtp's M1.
 - **What row 34 must prove:** every binary's first compile (122) with G0 unchanged; F4 on the prefix cache (restores

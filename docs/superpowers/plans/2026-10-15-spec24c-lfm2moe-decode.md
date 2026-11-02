@@ -53,7 +53,7 @@ head, 5:                 lfm_embed_gather (device 0, first) · res_norm _NF + em
 - Family kernels in `src/kernels/lfm2moe/`, named `lfm_*`, every shape define in the binary name; host half `src/kernels/lfm2moe_kernels.h` (namespace `kernels::lfm2moe`); a CMake block `# ==== Spec 24c: LFM2.5-24B-A2B decode (model::lfm2moe()) ==== (begin) / (end)`, option `B70_LFM2MOE` ON.
 - **Determinism:** no atomic in any sum that feeds a result; every reduction a fixed tree; the fused arms bitwise the as-built list (same op order, only the launch boundary moves).
 - Every number measured, or marked derived / estimated / proposed. Box: every GPU command under `flock ~/b70-gpu.lock` (once for both cards in a two-card job), detached, polled; timed arms as interleaved pairs after a warm-up, median of 3, `uptime` and the idle grade recorded; `-j44` builds.
-- Mac checks: `tools/mac_check.sh --base main --kernels`. Python in `agnes-ref-img` (`--memory 8g --cpus 4`).
+- Mac checks: `tools/box_check.sh --base main`. Python in `agnes-ref-img` (`--memory 8g --cpus 4`).
 - No `rm -rf`. Signed commits; no merge, no push.
 
 ## Review Focus
@@ -81,7 +81,7 @@ head, 5:                 lfm_embed_gather (device 0, first) · res_norm _NF + em
   - `gemv`: only the GEMV and MoE gate‖up / down launches of `a` (the bytes floor of the list).
   - `noop`: 383 `noop`s (`probe_replay`'s floor at this count).
 - [x] **Step 1: write the shapes as data and the tool;** the weights random (incompressible, `probe_gemv`'s rule), one buffer set; each list captured once, replayed `R` rounds interleaved (`a`, `fused`, `gemv`, `noop` rotated per round) after a 20-replay warm-up; `--sweep-s` times every int4 GEMV shape at S in {1, 2, 4, 8, 16} (where S divides K / 64) and layouts 0 / 1, `probe_gemv`'s 3 % rule picks S. Host test `probe_lfm_step_shapes_test`: the list lengths 383 / 277 and the per-family counts (2 x 8 + 28 x 9 + 10 x 11 + 5).
-- [x] **Step 2: CMake lines** for every binary the lists bind (recorded: `+N / -0 / ~0`); Mac gate `tools/mac_check.sh --base main --kernels` (the OpenCL syntax of the new lines).
+- [x] **Step 2: CMake lines** for every binary the lists bind (recorded: `+N / -0 / ~0`); Mac gate `tools/box_check.sh --base main` (the OpenCL syntax of the new lines).
 - [x] **Step 3: commit** `git commit -S -m "probe: probe_lfm_step - LFM2.5-24B-A2B's 383- and 277-launch skeleton lists from existing kernels at its shapes, the GEMV-only floor, the S sweep (spec 24c P0)"`.
 - [ ] **Step 4 (box, row 51's first GPU stage `r51.p0`):** `probe_lfm_step --depth 4096 --rounds 9` and `--depth 32768`, `--sweep-s`; the table into `docs/probe-lfm2moe-<date>.md` (24a's sheet, a "P0" section): step ms for `a` / `fused` / `gemv` / `noop`, the gap per launch, the small-kernel floor, the S picks. **The decision rule** (decision 6, PROPOSED): every arm whose skeleton saving is ≥ 1 % of the step is built and A/B'd in Task 8; the S picks become `kernels::lfm2moe`'s table (`PROVISIONAL` until then). Commit `git commit -S -m "spec 24c P0: the LFM2.5-24B-A2B step on the card - launches, gaps, GEMV floors, the S picks"`.
 
@@ -103,7 +103,7 @@ head, 5:                 lfm_embed_gather (device 0, first) · res_norm _NF + em
 
 **Files:**
 - Create: `src/kernels/lfm2moe/lfm_prep.cl`, `src/kernels/lfm2moe/lfm_conv.cl`, `src/kernels/lfm2moe/lfm_moe.cl`, `src/kernels/lfm2moe/lfm_expert.h` (the address macro), `src/kernels/lfm2moe/lfm_attn.cl`, `src/kernels/lfm2moe/lfm_attn_eager.cl`, `src/kernels/lfm2moe_kernels.h`, `tests/kernels/lfm2moe_variant_names_test.cc`, `tests/kernels/lfm2moe_kernels_test.cc`, `tools/mac/clrun/lfm2moe_run.cc`
-- Modify: `src/kernels/CMakeLists.txt` (the block), `tools/mac_check.sh` (section 5's driver loop gains `lfm2moe`), `tests/CMakeLists.txt`
+- Modify: `src/kernels/CMakeLists.txt` (the block), `tools/box_check.sh` (section 5's driver loop gains `lfm2moe`), `tests/CMakeLists.txt`
 - Test: `lfm2moe_variant_names_test` (host), `lfm2moe_kernels_test` (card), `lfm2moe_run` (Mac GPU, indicative)
 
 **Interfaces:**
@@ -172,9 +172,9 @@ Reused at this family's shapes (Task 1's lines): `gemv_M1_K2048_N6144_S*_L*`, `g
 
 - [x] **Step 1: the failing host test** `lfm2moe_variant_names_test`: every name `decode_variants` returns for (int8 / bf16 head) x (flash / eager) x (one / two cards) x (each arm) is a target of the block (`${B70_LFM2MOE_DECODE_KERNELS}` as argv). FAIL.
 - [x] **Step 2: write the sources, `lfm_expert.h`, the header, the CMake block;** the names test PASSES; `tools/kernel_cmdlines` additions only.
-- [x] **Step 3: Mac GPU driver** `tools/mac/clrun/lfm2moe_run.cc`: `lfm_prep.cl`, `lfm_conv.cl`, `lfm_moe.cl` (plain-load path), `lfm_attn_eager.cl` at the real shapes against `lfm2moe_ref.h` on the fixture and random inputs; prints `lfm2moe_run: <kernel> exact` or the first differing index; added to `tools/mac_check.sh` section 5.
+- [x] **Step 3: Mac GPU driver** `tools/mac/clrun/lfm2moe_run.cc`: `lfm_prep.cl`, `lfm_conv.cl`, `lfm_moe.cl` (plain-load path), `lfm_attn_eager.cl` at the real shapes against `lfm2moe_ref.h` on the fixture and random inputs; prints `lfm2moe_run: <kernel> exact` or the first differing index; added to `tools/box_check.sh` section 5.
 - [x] **Step 4: the card test** `lfm2moe_kernels_test` (label `lfm2moe`, no checkpoint): every binary of the block at the real shapes against `lfm2moe_ref.h` - bitwise for the norm (both variants), the conv (Review Focus 1's positions and M = 1..4), the router and route (Review Focus 2's rows), the MoE (each slot alone, the others' weights zero; the full 4-slot combine), the attention prep, `silu_mul`, the eager attention, the gather, the argmax (Review Focus 5); flash against fp64 at cosine ≥ 0.99999 at depths 1, 2, 300, 4096, 131072.
-- [x] **Step 5: Mac gate** `tools/mac_check.sh --base main --kernels`: host PASS, l0 PASS, cmdlines `+N / -0 / ~0`, opencl PASS, `lfm2moe_run` exact on every kernel it runs. **Commit** `git commit -S -m "kernels: LFM2.5-24B-A2B decode - short conv over a Bx ring, the sigmoid-bf16 route with renormalisation, the 64 x 1536 top-4 MoE, hd64 attention prep / flash / eager, the one-launch norm, the tied gather (spec 24c)"`.
+- [x] **Step 5: Mac gate** `tools/box_check.sh --base main`: host PASS, l0 PASS, cmdlines `+N / -0 / ~0`, opencl PASS, `lfm2moe_run` exact on every kernel it runs. **Commit** `git commit -S -m "kernels: LFM2.5-24B-A2B decode - short conv over a Bx ring, the sigmoid-bf16 route with renormalisation, the 64 x 1536 top-4 MoE, hd64 attention prep / flash / eager, the one-launch norm, the tied gather (spec 24c)"`.
 
 ### Task 4: `Lfm2MoeEngine` on one card, the CLI, `--profile`, F3 / F4
 

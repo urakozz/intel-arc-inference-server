@@ -95,7 +95,7 @@ void softcap_row(const float* z, uint32_t V, float* out);                  // fp
 - Shared at Muse's shapes (new CMake lines only): `prep_res_fold` `_Z` at K 6656 (the sub-block's row and Σ², Kolibri's use), `prep_silu_mul` at I 19968 **only if its build is eps-free and its chain equals `museref::silu_mul`** (else `mg_silu_mul` in `mg_prep.cl`), `gemv.cl` int4 at {K 6656, N 8704}, {4096, 6656}, {6656, 39936}, {19968, 6656} with Qwen3.8's {S, layout} picks for the nearest shapes (PROVISIONAL: Task 7 sweeps), `gemv_i8w.cl` / `gemv_bf16.cl` at {6656, 202048}, `embed_gather.cl` if `mg_embed` reuses it, `argmax.cl` at N 202048.
 
 - [x] **Step 1: failing tests:** `muse_variant_names_test` (every name the capture binds is built by the block; nothing built is unbound); `muse_run` (Mac GPU, indicative) runs each `mg_prep` kernel at M = 1 on random inputs against `museref` - exact except where Apple's `sqrt` / `pow` move an ulp (counted, bounded at 4 fp32 ulps of rstd as Kolibri's run).
-- [x] **Step 2: implement**; Level Zero syntax (`tools/mac_check.sh --quick`'s l0 section) and OpenCL syntax of every variant; `tools/kernel_cmdlines` additions only. Commit `kernels: mg_prep.cl - Muse-Glimmer's embed, centered norms, sandwich and q / k prep (spec 23c)`.
+- [x] **Step 2: implement**; Level Zero syntax (`tools/box_check.sh`'s l0 section) and OpenCL syntax of every variant; `tools/kernel_cmdlines` additions only. Commit `kernels: mg_prep.cl - Muse-Glimmer's embed, centered norms, sandwich and q / k prep (spec 23c)`.
 
 ### Task 3: attention (`mg_attn.cl`, `mg_attn_eager.cl`)
 
@@ -147,7 +147,7 @@ The list per layer (Kolibri's order, Muse's chains): `mg_norm` · q||gate||k||v 
 
 - [x] **Step 1: failing tests** (label `gpu`; SKIP 77 without a checkpoint / card): `muse_decode_test` on the 4-layer synthetic: plan == allocation; the launch formula; two runs bitwise (logits, KV, rings); the ring at 4200 holds 105..4200 at rows `& 4095`; `--layers 2` development mode; `muse_golden_test` (MG3, tie-aware; docs/14's gate plus `cap_tie` rows undetermined; `B70_MUSE_ATTN=eager` arm) against 23b's synthetic golden set (`muse_oracle.sh synth` - this task adds that mode: `muse_ref.py run` on the synthetic checkpoint over `short_prose` / `4k`).
 - [x] **Step 2: implement the buffers, the capture and the engine; the CLI:** `b70-decode <muse> --ids F --n N [--bench --depth D --tg T] [--lm-head int8|bf16] [--max-len auto|N] [--layers N] [--pp N --pipeline-split auto|N --pipeline-handoff copy|peer]`, the plan and memory lines printed. Refused before the device, by name: `--prefill*` (spec 23d - until row 45), `--mtp` / `--spec` (Muse has no MTP head; `--spec dflash` is spec 23f's), `--kv-cache int8` (decision 8), `--max-len` > 131072 (decision 6), `--device N` with `--pp 2`; `b70-serve <muse>` naming spec 23e. `cli_reject_muse_{prefill,mtp,kv8,maxlen,serve}` over `tests/model/muse_glimmer` (config only).
-- [x] **Step 3: Mac gates:** Level Zero syntax of every new source, host tests green, `tools/mac_check.sh --base main --quick --kernels` exit 0. Commit `runtime: MuseEngine decode on one card - the captured list, b70-decode dispatch, refusals (spec 23c)`.
+- [x] **Step 3: Mac gates:** Level Zero syntax of every new source, host tests green, `tools/box_check.sh --base main` exit 0. Commit `runtime: MuseEngine decode on one card - the captured list, b70-decode dispatch, refusals (spec 23c)`.
 
 ### Task 5: two cards
 
@@ -193,4 +193,4 @@ The list per layer (Kolibri's order, Muse's chains): `mg_norm` · q||gate||k||v 
   `rownote`s: written blind, no Muse binary ever compiled; the PROPOSED bars; the real checkpoint's download.
 - [x] **Step 2: commit** `docs: spec 23 (23c as built), box queue row 44 - Muse-Glimmer decode`.
 
-**Gate for the plan:** Mac - `muse_ref_test` bitwise; `muse_run` exact (bounded ulps where Apple's math differs); every variant's syntax; `kernel_cmdlines` additions only; `tools/mac_check.sh --base main --quick --kernels` exit 0. Box - MG0, MG2 on the card, MG3 / MG4 on the synthetic and the real checkpoint, two cards bitwise one, the speed rows recorded.
+**Gate for the plan:** Mac - `muse_ref_test` bitwise; `muse_run` exact (bounded ulps where Apple's math differs); every variant's syntax; `kernel_cmdlines` additions only; `tools/box_check.sh --base main` exit 0. Box - MG0, MG2 on the card, MG3 / MG4 on the synthetic and the real checkpoint, two cards bitwise one, the speed rows recorded.

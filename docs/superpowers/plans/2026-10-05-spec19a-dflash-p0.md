@@ -76,7 +76,7 @@
     bf16 and int4 g64 (the int4 {S} of the new shapes are PROVISIONAL picks, not swept), and the
     int8 head over the 7 draft rows at V 248320 and 32768. GEMVs only (the drafter's attention,
     norms, convolutions and selector walk are not in it).
-  - **Mac gates** (`B70_JOBS=2 tools/mac_check.sh --base main --quick --kernels`): host 72 pass /
+  - **Mac gates** (`B70_JOBS=2 tools/box_check.sh --base main`): host 72 pass /
     0 fail (incl. the new `verify_m8_names_test` and `memory_plan_test`'s 8-slot sizes), L0 syntax
     98 / 0, `kernel_cmdlines` 630 variants +111 / -0 / ~0, OpenCL syntax 614 / 0, the Mac GPU 8
     agree (`gemv_i8w` at M = 8 K 5120 N 1280 and `argmax` at M = 8 among them; indicative).

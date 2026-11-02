@@ -132,7 +132,7 @@ and the replay alternative's 2 x 4 MiB, Decision 4; 8 attention at the depth; 40
 the union bytes as a GEMV-only stand-in, and the plain M-row form's 9 M blocks, Decision 10; the head at M rows), the ratio to
 M = 1 (interleaved pairs), and one drafter block at M = 8 in each format (fc over 8 new rows, the 5 layers, the head at 7 rows,
 the top-8 + logsumexp stand-in, the LiLiCorr head's 56-row projections as small GEMMs).
-- [x] **Step 1:** implement; Mac gates (`B70_JOBS=2 tools/mac_check.sh --base main --quick --kernels`). Commit
+- [x] **Step 1:** implement; Mac gates (`B70_JOBS=2 tools/box_check.sh --base main`). Commit
   `git commit -S -m "probe: Bolt's verify cost at M = 1..8 by layer type (slots vs replay, plain vs union MoE) and one LiLiCorr block (spec 26a)"`.
 - [ ] **Step 2 (box, `r63.cost`):** run at 4096 and 65536.
 

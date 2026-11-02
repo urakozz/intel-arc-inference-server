@@ -205,4 +205,4 @@ void require_fits(const MusePlan& p);       // throws naming each device's bytes
   - `r43.load_real` default gpu `muse_gptq`: the real checkpoint's load (18.96 GB read, 17.41 GB on the card), its line and time, 0 unconsumed.
 - [x] **Step 3: commit** `docs: spec 23 (23b as built), box queue row 43 - the Muse-Glimmer loader`.
 
-**Gate for the plan:** Mac - every host test green; the synthetic 2-layer checkpoint `ACCEPTED` and read by the C++ host half with 0 unconsumed; `tools/mac_check.sh --base main --quick` exit 0 (`kernel_cmdlines` +0 / -0 / ~0). Box - the loads on the synthetic and the real checkpoint with every part's bytes = the plan.
+**Gate for the plan:** Mac - every host test green; the synthetic 2-layer checkpoint `ACCEPTED` and read by the C++ host half with 0 unconsumed; `tools/box_check.sh --base main` exit 0 (`kernel_cmdlines` +0 / -0 / ~0). Box - the loads on the synthetic and the real checkpoint with every part's bytes = the plan.

@@ -79,7 +79,7 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
 - [ ] **Step 1: failing tests** - `gemm_sm_ref_test` (the reference = `gemv`'s host twin within 1 fp32 ulp of the sum;
   layouts 0 / 1; the head's per-column scale).
 - [ ] **Step 2: implement, PASS;** the stand-in kernels pass `tools/mac/cl_syntax.sh` (the Mac has no DPAS: numerics
-  run on the box, Task 4); `tools/mac_check.sh --base main --quick` green. Commit
+  run on the box, Task 4); `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "probe: probe_small_m - stand-in small-M DPAS GEMMs (bf16, i8xi4) and their fp64 reference (spec 28a)"`.
 
 ### Task 2: the shape table (box, `r68.shapes`)
@@ -139,6 +139,6 @@ rownote 68 "Timed stages need the idle protocol (both cards free of DRM holders)
 
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 68 - the small-M GEMM P0 (spec 28a)"`.
 
-**Gate for the plan:** `gemm_sm_ref_test` green and `tools/mac_check.sh --base main` PASS on the Mac (cmdlines ~0 for
+**Gate for the plan:** `gemm_sm_ref_test` green and `tools/box_check.sh --base main` PASS on the Mac (cmdlines ~0 for
 `src/`); on the box the shape, attribution and numerics tables recorded on an idle card, and the verdict line written in
 spec 28 §9. Hand back with the tables and the line.

@@ -39,7 +39,7 @@ served only after spec 22: until then `b70-serve` runs the synthetic checkpoints
 - **F0:** every existing binary unchanged; new binaries are this family's M = 2..4 variants and the head's - additions only.
 - One weight format; the forms 21b reads. Every number measured, or marked derived / estimated / proposed.
 - Box: `flock ~/b70-gpu.lock` (once for both cards), detached, polled; interleaved pairs, median of 3, `uptime`; the operator's llama-benchy flags for any server row.
-- Mac checks `tools/mac_check.sh --base main --kernels`. No `rm -rf`. Signed commits on the branch; no merge, no push.
+- Mac checks `tools/box_check.sh --base main`. No `rm -rf`. Signed commits on the branch; no merge, no push.
 
 ## Review Focus
 

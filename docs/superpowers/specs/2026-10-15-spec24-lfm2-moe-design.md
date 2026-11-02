@@ -716,7 +716,7 @@ sum of `layer_weight_bytes`'s own per-layer outputs, `CHECK_EQ`'d against an ind
   figure that does not land where §3's prose says: "norms / conv taps / biases < 1 MB" measures at ~1.41 MB
   (40 layers' small blocks summed) - a rounding in the spec's ESTIMATE, not a formula mismatch (the per-layer
   byte counts above are exact and tested).
-- **The Mac gate (2026-10-17):** `tools/mac_check.sh --base main` section 1 (host) 120/120 PASS, including
+- **The Mac gate (2026-10-17):** `tools/box_check.sh --base main` section 1 (host) 120/120 PASS, including
   `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test` (bitwise transformers 5.19.0's own
   `Lfm2MoeRotaryEmbedding` at 5 fixed + 1000 random positions), `lfm2moe_plan_test` and
   `lfm2moe_synth_host_{w,proj}_test` (over two synthetic real-width checkpoints, `make_synth.py --layers 4`,

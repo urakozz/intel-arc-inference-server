@@ -9,7 +9,7 @@
 > - the rest: the short conv `src/kernels/lfm2moe/lfm_conv.cl` / `lfm_pf_conv.cl`, head_dim-64 attention `src/kernels/lfm2moe/lfm_attn.cl` / `lfm_pf_attn.cl`, `src/model/lfm2moe.h`, `src/model/lfm2moe.cc`, `src/loader/lfm2moe_*`, `src/runtime/lfm2moe/` (`lfm_prep.cl` still live in `src/kernels/bolt/`)
 
 **Status (2026-10-17): Tasks 1-6 built on the Mac; box queue row 50 added.** Branch `spec24b-lfm2moe-loader`.
-Everything host-side is green (`tools/mac_check.sh`); nothing has run on a card (24b's own row, and 24q's RTN /
+Everything host-side is green (`tools/box_check.sh`); nothing has run on a card (24b's own row, and 24q's RTN /
 AutoRound export, are the box's job). See spec 24 "24b as built" for the measured facts.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
@@ -37,7 +37,7 @@ AutoRound export, are the box's job). See spec 24 "24b as built" for the measure
 - **One weight format** (the operator's rule): AutoRound W4A16 int4 g64 symmetric `auto_round:auto_gptq` (`w = (q - 8) x scale`, `qzeros` 0x77777777, no `g_idx` or the identity) for every `nn.Linear`; bf16 / fp32 as shipped for everything else. No conversion of any other format.
 - The descriptor is held to config.json key by key; every refusal names the key or the tensor.
 - Every byte figure below is **derived**; each test asserts its formula, not a constant typed from this plan.
-- Mac checks: `tools/mac_check.sh --base main` (host tests, Level Zero syntax, kernel command lines unchanged). Python in `agnes-ref-img` (`--memory 8g --cpus 4`).
+- Mac checks: `tools/box_check.sh --base main` (host tests, Level Zero syntax, kernel command lines unchanged). Python in `agnes-ref-img` (`--memory 8g --cpus 4`).
 - No `rm -rf`. Signed commits; no merge, no push.
 
 ## Review Focus
@@ -220,7 +220,7 @@ std::string describe(const Plan& p);
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24b as built"), this plan's status line, `docs/13-loader.md` (an "LFM2.5-24B-A2B" paragraph: the two expert spellings, the tied head from the embedding tiles), `docs/superpowers/plans/box-validation-queue.md` (row 50), `tools/box_validate/stages.sh` (`row 50`)
 
-- [x] **Step 1: Mac gate:** `tools/mac_check.sh --base main` exit 0 (host PASS incl. `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test`, `lfm2moe_synth_host_test`, `lfm2moe_plan_test`; Level Zero syntax; kernel_cmdlines +0 / -0 / ~0).
+- [x] **Step 1: Mac gate:** `tools/box_check.sh --base main` exit 0 (host PASS incl. `lfm2moe_test`, `lfm2moe_repack_test`, `lfm2moe_rope_test`, `lfm2moe_synth_host_test`, `lfm2moe_plan_test`; Level Zero syntax; kernel_cmdlines +0 / -0 / ~0).
 - [x] **Step 2: the queue row 50** (`test_box_validate.py` passes; `--dry-run --only r50` prints it):
 
 ```text

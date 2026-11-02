@@ -77,7 +77,7 @@ the ascending-id combine), `src/kernels/lfm2moe/lfm_{prep,moe,conv}.cl` (the one
 - Alignment: KV rows (256 B), ring rows (20,480 B), SSM state slices, expert blocks - 64 B aligned bases, asserted at capture.
 - Every number measured, or marked derived / estimated / proposed. Box: every GPU command under `flock ~/b70-gpu.lock` (once
   for both cards), detached, polled; timed arms as interleaved pairs after a warm-up, median of 3; `-j44`.
-- Mac checks: `tools/mac_check.sh --base main --kernels`. No `rm -rf`. Signed commits; no merge, no push.
+- Mac checks: `tools/box_check.sh --base main`. No `rm -rf`. Signed commits; no merge, no push.
 
 ## Review Focus
 
@@ -181,7 +181,7 @@ the ascending-id combine), `src/kernels/lfm2moe/lfm_{prep,moe,conv}.cl` (the one
   `src/kernels/bolt/nb_moe.cl` (`nb_router`, `nb_route`, `nb_moe_up` (+ `_R`), `nb_moe_down`), `src/kernels/bolt/nb_expert.h`
   (the one expert-address macro), `src/kernels/bolt_kernels.h`, `tests/kernels/bolt_variant_names_test.cc`,
   `tests/kernels/bolt_kernels_test.cc` (card), `tools/mac/clrun/bolt_run.cc`
-- Modify: `src/kernels/CMakeLists.txt`, `tools/mac_check.sh` (section 5's driver loop gains `bolt`), `tests/CMakeLists.txt`
+- Modify: `src/kernels/CMakeLists.txt`, `tools/box_check.sh` (section 5's driver loop gains `bolt`), `tests/CMakeLists.txt`
 
 **Interfaces** (`src/kernels/bolt_kernels.h`):
 

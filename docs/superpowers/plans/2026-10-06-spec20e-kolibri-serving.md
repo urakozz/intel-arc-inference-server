@@ -28,7 +28,7 @@
 - Renderer gaps are fixed in `third_party/minja` as "b70 patch (spec 20e)" with a `minja_ext_test` case and a `third_party/VERSIONS` line (spec 18 §12's rule) - never a Kolibri special case in the server.
 - One weight format; no third-party quant path. Every number measured, or marked derived / estimated / proposed.
 - Box: `flock ~/b70-gpu.lock` once for both cards, detached, polled; `uptime` with timings; the operator's llama-benchy flags.
-- Mac checks `tools/mac_check.sh --base main` (`--kernels` not needed: no kernel changes). No `rm -rf`. Signed commits on the branch; no merge, no push.
+- Mac checks `tools/box_check.sh --base main` (`--kernels` not needed: no kernel changes). No `rm -rf`. Signed commits on the branch; no merge, no push.
 
 ## Review Focus
 
@@ -126,7 +126,7 @@ set_tests_properties(toolcall_kolibri_test kolibri_server_test PROPERTIES LABELS
 ```
 `ctest --preset mac-host -R '^(toolcall_kolibri|kolibri_server|toolcall_k2|toolcall|k2_server|protocol)_test$'`
 - [ ] **Step 3: implement** (move `parse_json` -> `parse_json_call` first and run `toolcall_k2_test` green before writing the new parser).
-- [ ] **Step 4: run, expect PASS** (K0 tests included); `tools/mac_check.sh --base main` green; **commit** `git commit -S -m "server: Kolibri-1 reasoning and hermes JSON tool calls, its sampling defaults, dispatched on model_type (spec 20e)"`.
+- [ ] **Step 4: run, expect PASS** (K0 tests included); `tools/box_check.sh --base main` green; **commit** `git commit -S -m "server: Kolibri-1 reasoning and hermes JSON tool calls, its sampling defaults, dispatched on model_type (spec 20e)"`.
 
 ### Task 3: the engine behind the server, the prefix cache (card)
 

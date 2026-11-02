@@ -39,7 +39,7 @@ plan (four minja patches, the card tests' names, the parser's readings, the stag
 - **No `eval`, no Python, no regex backtracking without a bound** in the parser: a hand-written recursive-descent literal parser with a depth limit (64), a size limit (1 MiB a block) and the quote-recovery backtracking bounded by the block length.
 - The tokenizer file is read from the snapshot (or `B70_LFM_TOKENIZER_JSON`); no LFM file is committed beyond the fixtures this plan generates (rendered texts and ids of this repo's own conversations; decision 9 covers the config).
 - Every number measured, or marked derived / estimated / proposed. Box: GPU commands under `flock ~/b70-gpu.lock`, detached, polled.
-- Mac checks: `tools/mac_check.sh --base main`. No `rm -rf`. Signed commits; no merge, no push.
+- Mac checks: `tools/box_check.sh --base main`. No `rm -rf`. Signed commits; no merge, no push.
 
 ## Review Focus
 

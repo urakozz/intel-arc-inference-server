@@ -65,7 +65,7 @@ M = 5..8 lists), spec 8b (M2's test, `mtp_gpu_test`).
   `tools/kernel_cmdlines` expectations if it lists names
 
 - [ ] **Step 1: failing test** `gemm_sm_test` (names, shapes, the bound per output, R).
-- [ ] **Step 2: implement;** `tools/mac/cl_syntax.sh` passes every new command line; `tools/mac_check.sh --base main
+- [ ] **Step 2: implement;** `tools/mac/cl_syntax.sh` passes every new command line; `tools/box_check.sh --base main
   --quick` green, cmdlines **+N / -0 / ~0**. Commit `git commit -S -m "kernels: gemm_sm - small-M int4 g64 and int8-head DPAS GEMMs, M 2..8 and 16 (spec 28b)"`.
 
 ### Task 2: the capture rule (Mac)
@@ -75,7 +75,7 @@ M = 5..8 lists), spec 8b (M2's test, `mtp_gpu_test`).
 builders. Create `tests/runtime/gemv_kind_test.cc` (host: M = 1 -> Gemv for every list kind; M >= 2 -> SmallM; the
 override; the S table equal across M).
 
-- [ ] **Step 1: failing test, then implement, PASS** (host); `tools/mac_check.sh --base main --quick` green. Commit
+- [ ] **Step 1: failing test, then implement, PASS** (host); `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "runtime: every M >= 2 decode list binds gemm_sm; M = 1 keeps gemv (spec 28b)"`.
 
 ### Task 3: the gates on the card (box, `r69.kernels`, `r69.gates`)
@@ -118,6 +118,6 @@ rownote 69 "N1 is the gate that is never traded: M = 1 lists bind the old binari
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 69 - the small-M GEMM build (spec 28b)"`.
 
-**Gate for the plan:** host tests green and `tools/mac_check.sh --base main` PASS (cmdlines additions only); on the box
+**Gate for the plan:** host tests green and `tools/box_check.sh --base main` PASS (cmdlines additions only); on the box
 N1-N8 pass and S2 holds (**verify(8) <= 1.4 plain steps**, M = 1 within noise); S3 recorded against its bar (+10 % on
 the tool-call geomean - a miss is recorded and goes to the operator, it does not revert the kernel if S2 holds).

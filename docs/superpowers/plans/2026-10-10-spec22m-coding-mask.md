@@ -66,7 +66,7 @@ lane, the 16-slot route row), §15 (the prefill's route on grid (1, C)), §16 (A
 - **F0:** existing binaries unchanged (`q4_route`'s define off preprocesses as main's); new binaries `_MASK` only.
 - Every number measured, or marked derived / estimated / proposed. Box: `flock ~/b70-gpu.lock` (both cards), detached,
   polled; interleaved pairs, median of 3, `uptime`, idle grade; CPU oracle runs one at a time, `free -g` >= 70 GB.
-- Mac checks `tools/mac_check.sh --base main --kernels`; Python tests in `agnes-ref-img` with the 5.19.0 site.
+- Mac checks `tools/box_check.sh --base main`; Python tests in `agnes-ref-img` with the 5.19.0 site.
 
 ## Review Focus
 

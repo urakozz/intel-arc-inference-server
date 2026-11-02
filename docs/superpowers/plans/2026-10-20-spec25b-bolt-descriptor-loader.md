@@ -39,7 +39,7 @@ planner (`src/loader/bolt_layout.h`).
 ## Global Constraints
 
 - Branch `spec25b-bolt-loader` from main; signed commits; no merge, no push.
-- **B0:** no kernel binary changes; `tools/kernel_cmdlines` +0 / -0 / ~0; `tools/mac_check.sh --base main` green.
+- **B0:** no kernel binary changes; `tools/kernel_cmdlines` +0 / -0 / ~0; `tools/box_check.sh --base main` green.
 - Alignment: every device allocation base and every expert block base a multiple of 64 B (the LSC 2D-load rule,
   vllm-xpu-kernels 6f5935c) - asserted by the layout test, not assumed.
 - Every number in docs measured or derived (from `bolt_layout.h`'s formulas, printed by a test).
@@ -214,6 +214,6 @@ stage r59.load_rtn   59 optin   gpu  bolt_rtn              -          "load our 
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: spec 25 (25b as built), box queue row 59 - the Bolt loader"`.
 
-**Gate for the plan:** Mac - `tools/mac_check.sh --base main` green (every host test incl. the existing loader suite;
+**Gate for the plan:** Mac - `tools/box_check.sh --base main` green (every host test incl. the existing loader suite;
 kernel_cmdlines +0 / -0 / ~0); both synthetics `ACCEPTED` and read with 0 unconsumed. Box - the synthetics and SergiioB's
 checkpoint load on their cards with the plan equal to the allocation.

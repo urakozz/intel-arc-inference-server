@@ -1,7 +1,7 @@
 # Spec 18b - K2-Horizon decode on one card
 
 **Status (2026-10-05, branch `spec18b-k2-decode`):** Tasks 1-3 written blind on the Mac (the box
-unavailable) and rebased on 18a's reference; Mac checks green (`tools/mac_check.sh`: host tests,
+unavailable) and rebased on 18a's reference; Mac checks green (`tools/box_check.sh`: host tests,
 Level Zero syntax, kernel command lines additions only, OpenCL syntax; `--kernels`: the portable K2
 kernels bit-exact on the Mac's GPU, indicative). As built: spec 18 §10. Everything on the card -
 K1 on ocloc's build, the checkpoint load, K2 (after 18a's `oracle-out-k2/`), K3, and Task 4 - is

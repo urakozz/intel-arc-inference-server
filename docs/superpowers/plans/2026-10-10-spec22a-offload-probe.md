@@ -119,7 +119,7 @@ experts a layer at M = 2 / 3 / 4 against the iid 15.36 / 22.13 / 28.36 - the sha
   CPU oracle stages (P0.8) run one at a time with `free -g` >= 70 GB, never beside the pinned arms.
 - **Every wait is bounded** (fences `Fence::wait_for`, events polled with a timeout): a hang is a FAIL line, never a
   stuck box.
-- Mac checks: `tools/mac_check.sh --base main --quick` (host tests, Level Zero syntax of `tools/probe/`, cmdlines),
+- Mac checks: `tools/box_check.sh --base main` (host tests, Level Zero syntax of `tools/probe/`, cmdlines),
   plus Task 2's hand-run OpenCL syntax of the probe's two `.cl` files (section 4 lists `src/kernels` only) and its Mac
   GPU run; Python tests in `agnes-ref-img` (8 GB / 4 CPUs, the operator's cap) with the 5.19.0 site.
 
@@ -202,7 +202,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
 - Modify: `tools/probe/CMakeLists.txt` (a block `# --- spec 22 P0 (2026-10-10): the expert-offload probe ---`, inside
   `if(B70_Q4EXP)`: the two kernels, `probe_offload` linking `b70_l0` and `b70_qwen4exp_model` (`model::qwen4exp()`), depending on 21c's
   `q4_moe_M1_E512_T10_D2560_I640_SH4` target), `tests/CMakeLists.txt` (`probe_offload_kernel_drift_test`: `python3
-  tools/probe/mk_offload_kernel.py --check`, label host), `tools/mac_check.sh` (section 5's loop gains `offload`)
+  tools/probe/mk_offload_kernel.py --check`, label host), `tools/box_check.sh` (section 5's loop gains `offload`)
 - Test: `probe_offload_kernel_drift_test` (host), `offload_run` (Mac GPU, indicative)
 
 **Interfaces:**
@@ -248,7 +248,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   route rows written by the host (the 10 ids of each pair, weights 0.1 in bf16, the shared gate 0); every arm's
   `y` read back; every wait bounded. Commit `git commit -S -m "probe: probe_offload - copy-engine rates, zero-copy
   expert reads mixed with VRAM, replayed visibility, host RAM under load, pinned capacity, the alias check (spec 22a)"`.
-- [x] **Step 3: Mac gates.** `tools/mac_check.sh --base main --quick` exit 0 (Level Zero syntax of the new source;
+- [x] **Step 3: Mac gates.** `tools/box_check.sh --base main` exit 0 (Level Zero syntax of the new source;
   cmdlines +0 / -0 / ~0); by hand, recorded in the commit message: `clang -x cl -cl-std=CL3.0 -fsyntax-only -include
   tools/mac/opencl/intel_shim.h` over both `.cl` files with the q4_moe defines of 21c's `_SH4` line and with
   `-Dcl_intel_subgroups` unset; `offload_run` on the Mac GPU: the table kernel over (identity, a permuted slot order,

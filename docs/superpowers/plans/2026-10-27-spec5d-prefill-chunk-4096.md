@@ -101,7 +101,7 @@ operator rules on (open question 1 below). Every byte is recomputed, not doubled
 
 - [ ] **Step 1: failing tests** - `buffers_test` (the 4096 table recomputed row by row, the 2048 table unchanged),
   the planner's prefill term at both caps, `--prefill-chunk` bounds and refusals (Ornith above 2048 by name).
-- [ ] **Step 2: implement** through the site list above; the cap 2048 default; `tools/mac_check.sh --base main
+- [ ] **Step 2: implement** through the site list above; the cap 2048 default; `tools/box_check.sh --base main
   --quick` green, cmdlines **~0** (no kernel line moves: the prefill kernels are shape-free in C, `pf_moe` keeps KC 2048).
   Commit `git commit -S -m "prefill: the chunk cap as a session value (2048 or 4096), the scratch through the planner (plan 5d)"`.
 
@@ -137,5 +137,5 @@ rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper 
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 75 - prefill chunk 4096 (plan 5d)"`.
 
-**Gate for the plan:** host tests green and `tools/mac_check.sh --base main` PASS (cmdlines ~0); on the box P0 passes its
+**Gate for the plan:** host tests green and `tools/box_check.sh --base main` PASS (cmdlines ~0); on the box P0 passes its
 stop rule, every gate above passes at chunk 4096, and the speed table is recorded against its bar.

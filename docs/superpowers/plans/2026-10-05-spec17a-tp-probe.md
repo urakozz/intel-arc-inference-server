@@ -80,7 +80,7 @@ bounded waits), plan 28a (`probe_small_m`, `probe_verify_m`'s profiled lists).
 [--rows 1|8] [--calls N] [--rounds N] [--replays N]`; every wait bounded (a timeout prints the arm and exits 1).
 
 - [ ] **Step 1: failing tests** (`tp_shapes_test`, `tp_crossing_protocol_test`).
-- [ ] **Step 2: implement, PASS;** `tools/mac_check.sh --base main --quick` green. Commit
+- [ ] **Step 2: implement, PASS;** `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "probe: probe_tp - the TP all-reduce arms (P2P push / pull, host-staged + own BAR, host read) and their host twin, Qwen3.8 first (spec 17a)"`.
 
 ### Task 2: the facts (box, `r71.facts`)
@@ -146,7 +146,7 @@ rownote 71 "Run r22.devices and r22.p1 first in the same session (two cards in o
 ```
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 71 - the TP P0 on Qwen3.8 (spec 17a)"`.
 
-**Gate for the plan:** the host tests green and `tools/mac_check.sh --base main` PASS (cmdlines ~0 for `src/`); on the box
+**Gate for the plan:** the host tests green and `tools/box_check.sh --base main` PASS (cmdlines ~0 for `src/`); on the box
 the facts, BAR, all-reduce and step tables recorded with both cards idle, and the verdict line written in spec 17 §9.
 Hand back with the tables and the line.
 
@@ -238,7 +238,7 @@ plan 22a (`offload_links.sh`, `probe_offload`'s interleaving and bounded waits),
 
 - [ ] **Step 1: failing tests** - `tp_shapes_test` (Bolt 88 + 1 crossings, 16 KiB at S1, the MoE crossing's 4 / 36 KiB
   routed forms; Kolibri 100 + 1; Qwen3.8 128 + 1 at 80 / 20 KiB; all from the descriptors), `tp_crossing_protocol_test`.
-- [ ] **Step 2: implement, PASS;** `tools/mac_check.sh --base main --quick` green. Commit
+- [ ] **Step 2: implement, PASS;** `tools/box_check.sh --base main` green. Commit
   `git commit -S -m "probe: probe_tp - the TP crossing arms (push / pull, remote partials / fold-then-send / all-reduce) and their host twin (spec 17a)"`.
 
 ### Task 2: links and the peer rate (box, `r68.links`, `r68.peer`)

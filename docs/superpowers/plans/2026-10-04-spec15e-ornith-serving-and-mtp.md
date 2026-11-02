@@ -13,7 +13,7 @@
 **Status (2026-10-05): Tasks 1 and 2 written blind on the Mac** (branch `spec15e-ornith-serving`;
 as built: spec 15 §12). Every card-side step - Task 2's M1 / M2 / acceptance / verify cost, the
 server's greedy chat against `b70-decode`, and all of Task 3 - is box work: box-validation-queue
-row 16. Mac-side: `tools/mac_check.sh --base main --kernels` green (host tests incl.
+row 16. Mac-side: `tools/box_check.sh --base main` green (host tests incl.
 `template_ornith_test`, `ornith_server_test`, `ornith_mtp_head_test`, `ornith_mtp_names_test`;
 every C++ source against the Level Zero headers; 80 added kernel command lines and none moved;
 every variant through clang; `moe.cl` at M = 4 bitwise M = 1's per row on the Mac's GPU,

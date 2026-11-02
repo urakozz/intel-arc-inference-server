@@ -3,7 +3,7 @@
 **Status (2026-10-05, branch `spec18c-k2-prefill`):** Task 2 written blind on the Mac (the box
 unavailable): the kernels, the prefill step, `K2Engine::prefill` and its continuation,
 `b70-decode --prefill` / `--prefill-length` for K2 (l0 only), the planner's prefill term, host references
-and every gate registered. Mac checks green (`tools/mac_check.sh --base main --kernels`: host
+and every gate registered. Mac checks green (`tools/box_check.sh --base main`: host
 tests, Level Zero syntax, kernel command lines additions only, OpenCL syntax; the portable
 prefill kernels bit-exact on the Mac's GPU, indicative). As built: spec 18 §11. Task 1 (P0) and
 Task 3 (speed), and everything on the card (K1 on ocloc's build, K3, K2 on prefill after 18a's

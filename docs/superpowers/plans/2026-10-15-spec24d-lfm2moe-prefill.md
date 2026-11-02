@@ -51,7 +51,7 @@ last row only:    lfm_res_norm _NF + embedding_norm · head (int8 | bf16) · arg
 - **Semantics are 24a's:** the conv's taps oldest first with the zero history, the router chain, the rank-order combine, the norm's two roundings - the prefill kernels and `tests/kernels/lfm2moe_pf_ref.h` edited together; prefill rows the decode chain applied per row wherever the arithmetic allows.
 - **Determinism:** no atomic; the sort and the combine in fixed order (Kolibri's sorted layout: expert-major, ascending token, padded to whole TM tiles; tmax a function of C alone, so the host reads no count).
 - Every number measured, or marked derived / estimated / proposed. Box: GPU commands under `flock ~/b70-gpu.lock`, detached, polled, interleaved pairs after a warm-up, median of 3, `uptime` and idle grade; `-j44`.
-- Mac checks: `tools/mac_check.sh --base main --kernels`. No `rm -rf`. Signed commits; no merge, no push.
+- Mac checks: `tools/box_check.sh --base main`. No `rm -rf`. Signed commits; no merge, no push.
 
 ## Review Focus
 

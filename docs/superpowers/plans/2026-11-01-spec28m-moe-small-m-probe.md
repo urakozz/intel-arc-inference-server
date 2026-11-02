@@ -87,7 +87,7 @@ docs/probe-eagle3-k2-2026-10-08.md (K2's recorded routes).
   (`nb_moe_union.cl`'s schedule per family: one work-group set per distinct expert, every pair of it in (row, slot) order,
   sets past the union exit; down writes per-pair bf16 d[row][slot][n] and a third launch combines each row in the
   family's order - rank order + gated shared + residual fold for Ornith / Flash-Next, ascending id for K2 / Kolibri /
-  Bolt; each family file's `FP_CONTRACT` regime kept), U3 (DPAS rows-on-A). Kernels pass `tools/mac/cl_syntax.sh`; `tools/mac_check.sh --base main --quick` green (the Mac has
+  Bolt; each family file's `FP_CONTRACT` regime kept), U3 (DPAS rows-on-A). Kernels pass `tools/mac/cl_syntax.sh`; `tools/box_check.sh --base main` green (the Mac has
   no DPAS, so U3 and all numerics run on the box). Commit
   `git commit -S -m "probe: probe_moe_small_m - union stand-ins (route-sorted, shared-weight, DPAS) for the MoE expert kernels and their fp64 reference (spec 28m)"`.
 
@@ -148,6 +148,6 @@ docs/probe-eagle3-k2-2026-10-08.md (K2's recorded routes).
 6. **Verdict (manual).**
 Timed stages need the idle protocol unless the operator allows busy-box labelled timing again; the record says which.
 
-**Gate for the plan:** `moe_small_m_ref_test` green and `tools/mac_check.sh --base main` PASS on the Mac (cmdlines ~0 for
+**Gate for the plan:** `moe_small_m_ref_test` green and `tools/box_check.sh --base main` PASS on the Mac (cmdlines ~0 for
 `src/`); on the box the routing, block, attribution and numerics tables recorded, and the verdict lines in spec 28m §9.
 Hand back with the tables and the lines.

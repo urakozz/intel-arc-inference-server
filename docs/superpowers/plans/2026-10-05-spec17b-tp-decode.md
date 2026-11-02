@@ -84,7 +84,7 @@ crossing), `src/kernels/CMakeLists.txt` (per-card variants), `src/runtime/bolt/b
 (two host threads), `tests/kernels/bolt_tp_kernels_test.cc` (the twin: the TP fold = the one-card fold's sum in the
 fixed order).
 
-- [ ] **Step 1: failing tests**, then implement; `tools/mac_check.sh --base main --kernels` (the new variants on the
+- [ ] **Step 1: failing tests**, then implement; `tools/box_check.sh --base main` (the new variants on the
   Mac's OpenCL, INDICATIVE). Commit `git commit -S -m "runtime: Bolt decode across two cards - the crossing, the per-card lists, the head exchange (spec 17b)"`.
 
 ### Task 3: the CLI and the refusals (Mac)
