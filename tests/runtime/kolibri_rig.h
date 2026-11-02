@@ -25,6 +25,7 @@ struct Options {
   runtime::PpHandoff handoff = runtime::kDefaultPpHandoff;
   uint32_t layers = 0;  // development mode
   bool debug_tap = false;
+  runtime::kolibri::TapAt tap_at = runtime::kolibri::TapAt::LayerOut;   // the debug tap's point
   uint32_t timeout_ms = 30000;   // runtime::PipelineOptions' bound on a step's fence wait
   uint32_t prefill_timeout_ms = 120000;   // spec 20d: its bound on one prefill wait
 };
@@ -67,7 +68,8 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;
-  r.eng = std::make_unique<runtime::kolibri::KolibriEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po);
+  r.eng = std::make_unique<runtime::kolibri::KolibriEngine>(
+      r.ctx, std::move(m), o.max_len, runtime::kolibri::DebugTap{o.debug_tap, o.tap_at}, po);
 }
 
 // The ids of a whitespace-separated file, each < vocab.

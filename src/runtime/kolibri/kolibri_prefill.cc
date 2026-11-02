@@ -46,8 +46,8 @@ const float* fat(const l0::Mem& m, size_t floats) { return static_cast<const flo
 class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s, const loader::KolDevicePart& part,
-       const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos, uint32_t C, bool eager, l0::Mem* tap)
-      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), tap_(tap) {}
+       const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos, uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at)
+      : cx_(cx), kc_(kc), s_(s), part_(part), d_(d), b_(b), pos_(pos), C_(C), eager_(eager), tap_(tap), tap_at_(tap_at) {}
 
   void run() {
     check();
@@ -233,7 +233,7 @@ class Walk {
     linear(*L.oproj, s_.attn_out.ptr());        // o_proj -> partials [C][2560]
     fold(s_.partials.ptr(), s_.a, s_.sumsq_a, kk::pf_fold_zero_variant());   // o_proj's own row a, Σa²
     post_add(s_.a, fat(nw, d_.norm_off_post_attn()));
-    if (tap_ && tap_at_attn())
+    if (tap_ && tap_at_ == TapAt::AfterAttn)
       cx_.copy(at(*tap_, size_t(l - part_.first) * kPfC * d_.hidden * 2), s_.resid.ptr(), size_t(C_) * d_.hidden * 2);
     // --- the MoE block -------------------------------------------------------------------------------
     norm(fat(nw, d_.norm_off_post_attention()));
@@ -241,7 +241,7 @@ class Walk {
     fold(nullptr, s_.mo, s_.sumsq_a, kk::pf_fold_variant());                 // Σmo²
     post_add(s_.mo, fat(nw, d_.norm_off_post_ffn()));
     // tap (debug): layer l's output rows into tap row block (l - first) - a copy, not a launch
-    if (tap_ && !tap_at_attn()) cx_.copy(at(*tap_, size_t(l - part_.first) * kPfC * d_.hidden * 2), s_.resid.ptr(), size_t(C_) * d_.hidden * 2);
+    if (tap_ && tap_at_ == TapAt::LayerOut) cx_.copy(at(*tap_, size_t(l - part_.first) * kPfC * d_.hidden * 2), s_.resid.ptr(), size_t(C_) * d_.hidden * 2);
   }
 
   prefill::Context& cx_;
@@ -253,6 +253,7 @@ class Walk {
   const uint32_t pos_, C_;
   const bool eager_;
   l0::Mem* tap_;
+  const TapAt tap_at_;
   size_t n_ = 0;
 };
 
@@ -291,10 +292,10 @@ bool prefill_attn_eager() { return kolibri_attn() == KolAttn::Eager; }   // one 
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,
                    const loader::KolDevicePart& part, const model::Kolibri1Desc& d, KolibriBuffers& b, uint32_t pos,
-                   uint32_t C, bool eager, l0::Mem* tap) {
+                   uint32_t C, bool eager, l0::Mem* tap, TapAt tap_at) {
   if (tap && tap->size() < size_t(part.end - part.first) * kPfC * d.hidden * 2)
     throw std::runtime_error("runtime::kolibri::prefill_chunk: the tap is smaller than [layers][kPfC][hidden] bf16");
-  Walk(cx, kc, s, part, d, b, pos, C, eager, tap).run();
+  Walk(cx, kc, s, part, d, b, pos, C, eager, tap, tap_at).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, KolibriPrefillScratch& s,

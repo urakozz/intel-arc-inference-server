@@ -30,10 +30,12 @@
 // (copy) or pp_recv (peer), the copies into its own `resid` / `sumsq_r`, then layer s. The compute
 // launches of the two lists add up to the one-card count.
 //
-// tap (debug): `resid` copied to tap row l after each layer's last launch (layer l's output).
+// tap (debug): `resid` copied to tap row l after each layer's last launch (layer l's output), or after its
+// attention half's kol_post_add (tap_at AfterAttn).
 namespace runtime::kolibri {
 
 CapturedStep build(l0::Context& ctx, const loader::KolDevicePart& part, const model::Kolibri1Desc& d,
-                   KolibriBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr);
+                   KolibriBuffers& b, const runtime::StageLink* link, l0::Mem* tap = nullptr,
+                   TapAt tap_at = TapAt::LayerOut);
 
 }  // namespace runtime::kolibri

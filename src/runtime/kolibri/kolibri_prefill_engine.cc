@@ -182,7 +182,7 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     KolibriPrefillState::Dev& D = *P.dev[i];
-    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get()); };
+    auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get(), tap_at_); };
     if (!replay) return encode();
     auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
                            [&](const KolibriPrefillState::Chunk& c) { return c.pos == pos && c.rows == C; });
