@@ -33,6 +33,10 @@ sync_tree() {
     --exclude build --exclude 'build-*' --exclude .git --exclude 'cmake-build-*' --exclude .idea \
     --exclude oracle-out --exclude 'oracle-out-*' \
     ./ "$BOX:$REMOTE_DIR/"
+  # The sync excludes oracle-out*, so a new tree has no golden set and every golden test
+  # skips (exit 77) rather than runs. Link the main tree's sets into any tree that lacks them.
+  ssh "$BOX" "cd '$REMOTE_DIR' && [ -d ~/b70-inference-server ] && \
+    tools/box_validate/data.sh link ~/b70-inference-server . | grep -c '^linked' | sed 's/^/box: golden-set links added: /' | grep -v ': 0$' >&2 || true"
 }
 configure_and_build() {
   ssh "$BOX" "cd '$REMOTE_DIR' && cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build '$BUILD_DIR' -j$JOBS"
