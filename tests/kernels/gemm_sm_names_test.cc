@@ -73,6 +73,7 @@ int main(int argc, char** argv) {
   const kernels::SmallMTuning* dn = kernels::small_m_tuning(17408, 5120, 4, 0);
   CHECK(dn != nullptr);
   CHECK_EQ(kernels::gemm_sm_out_s(*dn), 4u);
+  CHECK_EQ(kernels::gemm_sm_variant(8, *dn), std::string("gemm_sm_M8_K17408_N5120_S4_L0_mg_b2d"));   // every knob named
   CHECK_EQ(kernels::gemm_sm_grid_y(*dn), 4u);
   // The routing helpers: Gemv names today's binaries; SmallM a tuned shape's gemm_sm, an untuned one's gemv.
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::Gemv, 4, 5120, 34816, 8, 0),
