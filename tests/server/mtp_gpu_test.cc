@@ -363,7 +363,9 @@ int a3(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts&
   };
   line("A3 k3 ids:", gs.ids);
   line("A3 plain ids:", gp.ids);
-  const size_t d = first_diff(gp.ids, gs.ids);
+  size_t d = SIZE_MAX;   // the first position the two streams differ (spec 28b removed first_diff)
+  for (size_t i = 0; i < std::min(gp.ids.size(), gs.ids.size()) && d == SIZE_MAX; ++i)
+    if (gp.ids[i] != gs.ids[i]) d = i;
   if (d == SIZE_MAX) {
     std::printf("A3: K = 3 identical to the plain loop over %u ids (acceptance %.4f)\n", kGen,
                 gs.drafted ? double(gs.accepted) / gs.drafted : 0.0);
