@@ -381,6 +381,9 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
 
    The errors are two-sided (spec closer to f32 on t3, plain on t5 / t6); two of three fail the near-miss allowance by
    0.6-1.1 ulp. No bar is widened here; the remaining 54 divergent runs (and the N4 rows) have no Qwen3.8 judge yet.
+   **The operator's ruling (2026-11-03): t5 and t6 are accepted as near-ties** (the errors are two-sided and 0.6-1.1 ulp
+   over the allowance); 28b merges with the 57 dumped contexts (`~/b70/logs/spec28b/forced`) open until the CPU lane makes
+   the Qwen3.8 f32 references. The 8-ulp allowance in spec_judge.h is unchanged.
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
 3. The quiet-box re-check (r69.speed / r69.d1) - a later session (operator 2026-11-03).
 
