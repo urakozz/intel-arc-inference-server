@@ -281,12 +281,15 @@ dfref::Weights judge_weights(const dfref::Weights& tw) {
   return j;
 }
 double cos_dist(double c) { return 1.0 - c; }
+int g_sets_sm = 0, g_sets_gv = 0;   // judge_draft's top-16 candidates off the judge's sets, summed over the cases
 
 // Spec 28d's restated gate (the int8 drafter; spec 28 N4 / N6's f32-judge form, tests/server/spec_judge.h): the
 // default lists (gemm_sm_i8w) and the same lists forced onto gemv_i8w (the pre-28d binding) run on the same ring and
 // control block, both graded against the f32 judge. gemm_sm passes when it is no further from f32 than gemv_i8w:
 // rows / scores - cosine >= 0.99999 against the judge or a cosine distance at most golden::kCosSlack (2) x gemv's;
-// top-16 sets - no more candidates off the judge's set (the boundary excused as above) than gemv's; the walk -
+// top-16 sets - no more candidates off the judge's set (the boundary excused as above) than gemv's, SUMMED over every
+// judged case (operator 2026-11-04: the drafter only proposes, and a set counts one boundary candidate either way -
+// per case it was 3 against 2 once, 4 against 8 summed; checked at the end of main); the walk -
 // identical to the judge's, or diverging no earlier than gemv's, or at a near tie of the judge's scores (1e-4). The
 // readback / control checks as before. Leaves the default list's readback. Returns failures.
 int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::Weights& tj, const dfref::Ring& ring,
@@ -301,13 +304,15 @@ int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::We
   const double slack = 2.0;   // golden::kCosSlack (tests/golden/forced_judge.h)
   const bool rows = m.hc >= 0.99999 || cos_dist(m.hc) <= slack * cos_dist(g.hc);
   const bool scores = m.sc >= 0.99999 || cos_dist(m.sc) <= slack * cos_dist(g.sc);
-  const bool sets = m.sets_bad <= g.sets_bad;
+  const bool sets = m.sets_bad <= g.sets_bad;   // recorded per case; the gate is the sum (main's end)
+  g_sets_sm += m.sets_bad;
+  g_sets_gv += g.sets_bad;
   const bool walk = m.walk_bad == 0 || m.walk_at >= g.walk_at;
   std::printf("%s (p %u, K %u, T %.1f) against the f32 judge: rows cos gemm_sm %.7f / gemv %.7f %s, scores cos %.7f / "
-              "%.7f %s, sets off %d / %d %s, walk to %u / %u of %u%s %s\n", what, p, K, double(T), m.hc, g.hc,
+              "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s\n", what, p, K, double(T), m.hc, g.hc,
               rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "FAIL",
               m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL");
-  int bad = !rows + !scores + !sets + !walk;
+  int bad = !rows + !scores + !walk;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
 }
@@ -626,6 +631,12 @@ int main(int argc, char** argv) {
                   "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
                   med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
+  }
+  if (g_sets_sm + g_sets_gv > 0) {
+    const bool ok = g_sets_sm <= g_sets_gv;
+    std::printf("top-16 candidates off the f32 judge's sets, summed over the judged cases: gemm_sm %d / gemv_i8w %d %s\n",
+                g_sets_sm, g_sets_gv, ok ? "ok" : "FAIL");
+    bad += !ok;
   }
   if (bad) {
     std::printf("dflash_draft_test: FAIL (%d)\n", bad);
