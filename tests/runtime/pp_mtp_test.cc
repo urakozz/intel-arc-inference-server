@@ -9,7 +9,8 @@
 //              every verify's k + 1 rows, the ids; the session at the end (save_state: the
 //              live verify slot, the conv rings, the head's hidden row; save_kv over [0, pos)
 //              with the head's layer; the Control block). M2: from a snapshot, 4 plain steps'
-//              logits rows against ONE verify at M = 4 over the same ids (teacher-forced).
+//              logits rows against ONE verify at M = 4 over the same ids (teacher-forced) - since
+//              spec 28b (gemm_sm at M >= 2) not bitwise on one card: recorded, mtp_verify_test grades it.
 //              Spec 7 with MTP: a 4103-id hooked prefill (block hooks at 2048 and 4096, the
 //              state and KV saved inside each hook, then at the end).
 //   each configuration  --pp 2 copy and peer at the auto split, and the cuts at 5 and 62: the
@@ -20,6 +21,8 @@
 //
 // argv: [1] the checkpoint, [2] `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form
 // (pp_mtp_kv8_test). Exits 77 (SKIP) with fewer than two GPUs or without peer access.
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -296,9 +299,27 @@ int main(int argc, char** argv) {
     snap_kv = kv_of(e, snap_at);
     spec_run(e, w, ref);
     m2(e, w, ref);
-    // One card's own M2: the verify rows ARE the plain rows (spec 8, plan 8b).
-    same(ref.m2_plain, ref.m2_verify, "one card: M2");
-    std::printf("reference (one card, device 0): %zu ids in %u iterations, M2 bitwise\n", ref.ids.size(), kIters);
+    // One card's own M2. Before spec 28b the verify rows WERE the plain rows (spec 8, plan 8b); since 28b the verify
+    // list's linears run gemm_sm (M >= 2) and its rows are graded against M = 1 by mtp_verify_test (N4, the f32 judge) -
+    // here the worst row cosine is printed, and the gate stays what this test is about: the pipeline's M2 rows (plain
+    // and verify) bitwise the one card's, below.
+    {
+      const size_t V = ref.m2_plain.size() / 4;
+      double worst = 1;
+      for (size_t r = 0; r < 4; ++r) {
+        double ab = 0, aa = 0, bb = 0;
+        for (size_t i = 0; i < V; ++i) {
+          const double x = ref.m2_plain[r * V + i], y = ref.m2_verify[r * V + i];
+          ab += x * y;
+          aa += x * x;
+          bb += y * y;
+        }
+        worst = std::min(worst, ab / std::sqrt(aa * bb));
+      }
+      std::printf("reference (one card, device 0): %zu ids in %u iterations, M2 verify rows against the plain rows: "
+                  "%s, worst cosine %.9f (recorded; spec 28b)\n", ref.ids.size(), kIters,
+                  ref.m2_plain == ref.m2_verify ? "bitwise" : "not bitwise", worst);
+    }
   }
 
   bool first = true;
