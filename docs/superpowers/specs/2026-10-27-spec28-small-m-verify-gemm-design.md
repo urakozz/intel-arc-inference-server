@@ -403,3 +403,70 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
   rejection, taps and ring rows bitwise the M = 8 verify's, dflash-lookup's warm ring bitwise plain dflash's); every
   N4 row and N6 stream with a divergence waits for its Qwen3.8 judge (0 of 57 dumped contexts judged so far) - without
   one the tie rule leaves mtp_gpu 27, dflash_gpu 24 and dflash_lookup 8 runs open.
+
+## 11. 28d as built (2026-11-04, branch `spec28d-drafter-flashnext-gemm-sm`): the two 28b follow-ons
+
+**Timing grade: busy box, one card per job, the GPU stack upgraded the same day (compute-runtime 26.40.40196.8, IGC
+2.42.6); every number below is from the build rebased on main e916d72 (every kernel rebuilt by the new IGC).**
+
+**What is built.**
+- The DFlash drafter's int8 linears at its block of 8 (q||k||v, o, gate||up, down, fc, the context's k||v, the two
+  conv kernel projections, the selector's projection) and the int8 head at its 7 draft rows (the full head - Qwen3.8's
+  row, already built at 7 - and the three draft-vocabulary heads) bind gemm_sm_i8w: new `kSmallMTuning` rows
+  `kSmDraft8` / `kSmDraft7`, all in-work-group split-K (the int8 form has no grid split-K; one knob set for every
+  head, so a column's output does not depend on N - section 6's draft vocabulary stays BITWISE the full head).
+  `build_dflash_draft` / `build_dflash_project` take `CaptureOptions`; `force_linear` Gemv (tests only) binds gemv_i8w.
+- Flash-Next's own capture applies `gemv_kind(M)` to its dense int4 projections (qkv||z 2560x16384 S1, q||gate||k||v
+  2560x13312 S2, out_proj / o_proj 6144x2560 S4 - layout 0, magic dequant, gemv's S, no consumer change) and its int8
+  head (2560x248320, in-work-group) at the verify lists' M = 2..4 (`kSmVerify4`); M = 1 lists (decode, draft, verify(0))
+  untouched. `ListSpec::opt` / `Qwen4ExpEngine`'s last argument carry the test override. bf16 linears stay gemv_bf16.
+- kernel_cmdlines: +23 variants (11 drafter, 12 Flash-Next), no existing line moved.
+
+**Gates.**
+- gemm_sm_test on every new row (N2 against fp64 0.0005-0.0023 of the bound, cosine 1.000000000; against gemv
+  0.0002-0.0069; property R 0 differing rows, 1000 trials a row): PASS.
+- Names: gemm_sm_names_test, gemv_kind_test, dflash_variant_names_test, qwen4exp_mtp_names_test PASS (the names
+  tests bind both the default and the override's names).
+- **dflash_draft_test, restated (the int8 drafter):** gemm_sm's order is not the twin's (against the gemv_i8w-order
+  twin: rows cosine 0.99994, 13 ring values beyond 1/64 - recorded, not gated). Graded instead by the **f32 judge**
+  (the twin in `Numerics::Reference` over fp32 weights and activations) against the same lists forced onto gemv_i8w,
+  spec 28 N4 / N6's form: cosine >= 0.99999 to f32 or a cosine distance <= 2 x gemv's; top-16 sets no more off f32's
+  than gemv's; the walk identical to f32's or diverging no earlier than gemv's (or at a near tie).
+
+  | case | rows cos gemm_sm / gemv | scores cos | sets off | walk (of K) |
+  |---|---|---|---|---|
+  | projection (ring) | 0.9999978 / 0.9999978 | - | - | - |
+  | greedy K 7 | 0.9995127 / 0.9995529 | 0.9999963 / 0.9999961 | 0 / 2 | 2 / 2 |
+  | K 3 | 0.9996932 / 0.9997010 | 0.9999944 / 0.9999928 | 0 / 1 | 3 / 3 |
+  | sampled T 0.8 | 0.9995127 / 0.9995529 | 0.9999921 / 0.9999902 | 1 / 3 | 7 / 7 |
+  | bf16 head | 0.9995127 / 0.9995529 | 0.9999905 / 0.9999881 | **3 / 2 (FAIL)** | 7 / 7 |
+
+  One FAIL as written: the bf16-head case puts one more boundary candidate off f32's top 16 than gemv (3 against 2;
+  pooled over the four cases 4 against 8). Not widened here - the operator's (Open 1). The forced gemv_i8w lists keep
+  the old twin gate (projection 0 values off, rows 0.9999943, sets and walk equal); greedy drafts 7 / 7 the same as
+  gemv's; the bf16 drafter (only its int8 head moved) passes the twin's bars as before.
+- **qwen4exp_mtp_test** (ours, intel, eager, fresh, ours with the int8 head; run with the new `ingest` test flag -
+  main's Flash-Next MTP prefill throws "appended 384 launches, not 385" in its head pass, reproduced with main's
+  binary, r33.prefill's job): the gemv arm bitwise as before (M2 rows, M3 64 ids at K 1..3); the gemm_sm arm - M2 every
+  row logits cosine 1.0000000, ids identical, 0 route / selection rows differing, K / V and GDN slots 1.0000000; M3
+  every run bitwise the plain run. PASS. qwen4exp_decode_synth_ours_test PASS (M = 1, unchanged);
+  qwen4exp_prefill_synth_ours_test fails as on main (chunks 64 vs 2048, prefill vs decode - r33.prefill, not touched).
+- dflash_gpu_test / dflash_lookup_gpu_test: the D2 lines (ids, first differences, tie census, ids an iteration) are
+  line for line spec 28c's final run - the proposals the verify accepts did not change.
+
+**Speed.**
+- The drafter (dflash_draft_test section 8, interleaved pairs after a warm-up, median of 20): **the draft list 8.90 ms
+  against gemv_i8w's 16.33 ms (-7.43 ms), the projection list 0.40 against 2.21 ms (-1.81 ms): -9.2 ms an iteration,
+  ~0.3 plain steps** (spec 28b had estimated ~0.03). ids an iteration unchanged (K 7 4.01, K 3 2.99, AdaptiveK 3.88).
+  dflash_lookup_gpu_test's busy-box ms an id (not interleaved, the stack changed between): dflash 9.76 / 9.04 / 8.51
+  (8k) and 11.50 / 10.28 / 9.49 (32k) against 28c's 11.80 / 10.93 / 10.27 and 13.68 / 12.24 / 11.32.
+- Flash-Next (synthetic, 4 layers - its real step is not measured until spec 22): verify(M) / verify(1) at M = 2 / 3 / 4,
+  ours bf16 head 1.07 / 1.23 / 1.27 (gemv) -> 1.06 / 1.14 / 1.23 (gemm_sm); int8 head 1.10 / 1.32 / 1.37 -> 1.06 / 1.18 /
+  1.29 (each arm interleaved inside, the arms one after the other).
+
+**Open (the operator's).**
+1. dflash_draft_test's bf16-head case: sets off 3 against gemv's 2 (the walk equals f32's). Keep the per-case rule
+   (28d not mergeable as is), pool the sets over the cases, or drop the sets from the judged gate (the walk is what is
+   proposed)?
+2. Flash-Next's MTP prefill head pass throws on main (launch count 384 / 385): every qwen4exp MTP / snapshot-mtp test
+   aborts in its prefill until r33.prefill's fix; 28d's gates ran with `ingest`.
