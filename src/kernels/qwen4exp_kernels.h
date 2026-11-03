@@ -353,25 +353,27 @@ inline std::string gdn_slots_variant(unsigned M) { return gdn_step_slots_variant
 inline std::string pf_ple_verify_variant() { return "q4_pf_ple_C" + std::to_string(kMtpVerifyRows); }   // q4_pf_ple_C4
 inline std::string bf16_m_variant(unsigned M, unsigned K, unsigned N) { return gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N)); }
 inline std::string fc_variant(unsigned M) { return bf16_m_variant(M, kHidden, kHidden); }   // gemv_bf16_M<M>_K2560_N2560
-// The dense / head linears at M rows (21c's M = 1 helpers above are these at M = 1).
-inline std::string qkvz_m_variant(unsigned M, bool int4) {
-  return int4 ? gemv_variant(M, kHidden, kQkvzN, 1, 0) : bf16_m_variant(M, kHidden, kQkvzN);
+// The dense / head linears at M rows (21c's M = 1 helpers above are these at M = 1). Spec 28d: the int4 / int8 forms
+// by `k` - gemv_kind(M) in the lists (gemv / gemv_i8w at M = 1, gemm_sm at M >= 2, kSmallMTuning's Flash-Next rows),
+// Gemv under the tests' override (runtime::CaptureOptions::force_linear) and by default here.
+inline std::string qkvz_m_variant(unsigned M, bool int4, LinearKind k = LinearKind::Gemv) {
+  return int4 ? int4_linear_variant(k, M, kHidden, kQkvzN, 1, 0) : bf16_m_variant(M, kHidden, kQkvzN);
 }
-inline std::string qkvg_m_variant(unsigned M, bool int4) {
-  return int4 ? gemv_variant(M, kHidden, kQkvgN, 2, 0) : bf16_m_variant(M, kHidden, kQkvgN);
+inline std::string qkvg_m_variant(unsigned M, bool int4, LinearKind k = LinearKind::Gemv) {
+  return int4 ? int4_linear_variant(k, M, kHidden, kQkvgN, 2, 0) : bf16_m_variant(M, kHidden, kQkvgN);
 }
-inline std::string out_m_variant(unsigned M, bool int4) {
-  return int4 ? gemv_variant(M, kGdnZN, kHidden, 4, 0) : bf16_m_variant(M, kGdnZN, kHidden);
+inline std::string out_m_variant(unsigned M, bool int4, LinearKind k = LinearKind::Gemv) {
+  return int4 ? int4_linear_variant(k, M, kGdnZN, kHidden, 4, 0) : bf16_m_variant(M, kGdnZN, kHidden);
 }
-inline std::string lm_head_m_variant(unsigned M, bool int8) {
-  return int8 ? gemv_i8w_variant(M, kHidden, kVocab) : bf16_m_variant(M, kHidden, kVocab);
+inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = LinearKind::Gemv) {
+  return int8 ? int8_linear_variant(k, M, kHidden, kVocab) : bf16_m_variant(M, kHidden, kVocab);
 }
 
 // Every binary a verify list at M binds (one device or the last of two: the union), for the dense arm, the shared
 // form, the head form, the attention form, the PLE scale form and the norm form. Two cards add nothing new (the
 // materialising _Y_NN is every list's) but pp_handoff under peer (16b's binary).
 inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
-                                                bool ple_bf16_scale, bool single) {
+                                                bool ple_bf16_scale, bool single, LinearKind k) {
   const unsigned S = int4_dense ? 4u : 1u;
   std::vector<std::string> v = {
       embed_variant(M),
@@ -384,12 +386,12 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
       bf16_m_variant(M, kHcN, kHcLow),
       hc_up_mix_variant(M, true),
       hc_up_mix_variant(M, false),
-      qkvz_m_variant(M, int4_dense),
+      qkvz_m_variant(M, int4_dense, k),
       bf16_m_variant(M, kHidden, kAbN),
       gdn_slots_variant(M),
       gated_head_sig_variant(M),
-      out_m_variant(M, int4_dense),
-      qkvg_m_variant(M, int4_dense),
+      out_m_variant(M, int4_dense, k),
+      qkvg_m_variant(M, int4_dense, k),
       bf16_m_variant(M, kHidden, kIdxN),
       attn_prep_q4_variant(M, int4_dense ? 2u : 1u),
       qsa_variant(M),
@@ -400,7 +402,7 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
       ple_gather_variant(M, ple_bf16_scale),
       bf16_m_variant(M, kHidden, kPleKvN),
       M == 1 ? ple_block_variant(1) : pf_ple_verify_variant(),
-      lm_head_m_variant(M, int8_head),
+      lm_head_m_variant(M, int8_head, k),
       argmax1_variant(M),
       argmax2_variant(),
       // the head's KV pass
@@ -412,10 +414,19 @@ inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, boo
   };
   return v;
 }
+// Without `k`: the lists' rule, gemv_kind(M).
+inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
+                                                bool ple_bf16_scale, bool single) {
+  return verify_variants(M, int4_dense, shared_bf16, int8_head, eager, ple_bf16_scale, single, gemv_kind(M));
+}
+inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
+                                                bool ple_bf16_scale, bool single, LinearKind k) {
+  return verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
+                         ple_bf16_scale, single, k);
+}
 inline std::vector<std::string> verify_variants(const model::Qwen4ExpDesc& d, unsigned M, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single) {
-  return verify_variants(M, d.forms.dense == model::Q4Form::Int4, d.forms.shared == model::Q4Form::Bf16, int8_head, eager,
-                         ple_bf16_scale, single);
+  return verify_variants(d, M, int8_head, eager, ple_bf16_scale, single, gemv_kind(M));
 }
 // Every binary a draft step binds (the last device, M = 1): the head's layer is bf16 dense and bf16 shared
 // (loader::q4_mtp_desc) with int4 experts, whatever the main model's form.

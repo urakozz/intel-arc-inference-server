@@ -51,8 +51,8 @@ Qwen4ExpEngine::Stage& Qwen4ExpEngine::st(uint32_t dev) const {
 }
 
 Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4LoadedModel model, uint32_t max_len,
-                               bool debug_tap, const PipelineOptions& opt)
-    : model_(std::move(model)), max_len_(max_len), opt_(opt), attn_(q4_attn()) {
+                               bool debug_tap, const PipelineOptions& opt, const CaptureOptions& cap)
+    : model_(std::move(model)), max_len_(max_len), opt_(opt), cap_(cap), attn_(q4_attn()) {
   const model::Qwen4ExpDesc& d = model_.desc;
   const model::Q4Placement& p = model_.placement;
   model::validate(p, d);
@@ -109,6 +109,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
         ListSpec ls;
         ls.kind = ListKind::Verify;
         ls.M = M;
+        ls.opt = cap_;
         st(i).verify.push_back(build(st(i).ctx, model_, model_.parts[i], st(i).buffers, link_ ? &binding_ : nullptr,
                                      nullptr, nullptr, ls, &mtp_bind_));
       }

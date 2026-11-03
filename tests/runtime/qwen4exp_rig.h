@@ -30,6 +30,8 @@ struct Options {
   uint32_t prefill_timeout_ms = 120000;   // spec 21d: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
   std::string ple_dir;  // "" = loader::q4_ple_dir(snapshot)
   bool mtp = false;     // spec 21e: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
+  // spec 28d: the verify lists' linear override (Auto: gemm_sm at M >= 2; Gemv: the pre-28d gemv / gemv_i8w)
+  runtime::LinearForce force_linear = runtime::LinearForce::Auto;
 };
 
 struct Rig {
@@ -80,7 +82,9 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;
-  r.eng = std::make_unique<runtime::qwen4exp::Qwen4ExpEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po);
+  runtime::CaptureOptions cap;
+  cap.force_linear = o.force_linear;
+  r.eng = std::make_unique<runtime::qwen4exp::Qwen4ExpEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po, cap);
 }
 
 // The ids of a whitespace-separated file, each < vocab.
