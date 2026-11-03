@@ -22,6 +22,11 @@ class Kernel {
   void group_size(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
     ZE_CHECK(zeKernelSetGroupSize(k_, x, y, z));
   }
+  // The kernel dereferences host-USM addresses it reads from memory (a pointer table), not from its arguments:
+  // without this flag the driver need not make those allocations resident for it - on the box the first such
+  // read faults (xe: "Fault response: Unsuccessful -EIO", DEVICE_LOST). probe_offload's po_page_check (r36.pin)
+  // and Qwen3.8-Flash-Next's PLE gather / check (q4_ple.cl) read the PLE table this way.
+  void indirect_host() { ZE_CHECK(zeKernelSetIndirectAccess(k_, ZE_KERNEL_INDIRECT_ACCESS_FLAG_HOST)); }
   ze_kernel_handle_t handle() const { return k_; }
 
  private:

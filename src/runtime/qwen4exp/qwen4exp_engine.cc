@@ -173,6 +173,7 @@ void Qwen4ExpEngine::ple_init() {
     l0::Module mod(s.ctx, kernels::path(kernels::qwen4exp::ple_check_variant(bf16s)));
     l0::Kernel k = mod.kernel("q4_ple_check");
     k.group_size(kernels::qwen4exp::kPleCheckWg);
+    k.indirect_host();   // the ranges are reached through t.ptrs
     k.arg_ptr(0, t.ptrs->ptr());
     k.arg_ptr(1, fp.ptr());
     k.arg_ptr(2, out.ptr());
