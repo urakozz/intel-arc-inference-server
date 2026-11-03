@@ -16,7 +16,7 @@
 
 // dflash_capture.cc - the DFlash drafter's draft and projection lists (dflash_capture.h has both walks in order). Every
 // binding site names the kernel it honours; argument orders are each __kernel's in src/kernels/dflash/df_*.cl and the
-// reused gemv_i8w.cl / gemv_bf16.cl.
+// reused gemm_sm.cl (gemm_sm_i8w; gemv_i8w.cl under the test override) / gemv_bf16.cl.
 namespace runtime::dflash {
 namespace {
 
@@ -33,8 +33,8 @@ const uint8_t* at(const void* p, size_t off) { return static_cast<const uint8_t*
 
 class Walk {
  public:
-  Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b)
-      : ctx_(ctx), w_(w), d_(w.desc), b_(b), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+  Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt)
+      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
 
   CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) {
     check_common();
@@ -59,7 +59,7 @@ class Walk {
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const bool int8 = w_.format == loader::DraftFormat::Int8;
     for (const std::string& v : kd::draft_variants(d_.v2(), int8, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0))
+                                                   compact ? N : 0, lkind()))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -151,12 +151,7 @@ class Walk {
     {
       const loader::DeviceWeight& hw = *t.head;
       if (hw.kind == model::WeightKind::Int8) {
-        l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kR, H, N), "gemv_i8w", kernels::kGemvI8wCols);
-        k.arg_ptr(0, hw.mem.ptr());
-        k.arg_ptr(1, hw.scales->ptr());
-        k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));
-        k.arg_ptr(3, b_.logits.ptr());
-        launch(k, N / kernels::kGemvI8wCols);
+        i8_linear(kd::kR, H, N, hw.mem.ptr(), hw.scales->ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
       } else {
         const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(N);
         l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kR, H, N, tl), "gemv_bf16", tl.cols * tl.ksplit);
@@ -203,8 +198,9 @@ class Walk {
   CapturedStep project() {
     check_common();
     const bool int8 = w_.format == loader::DraftFormat::Int8;
-    for (const std::string& v : {kd::prep_variant(), kd::linear_variant(int8, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden),
-                                 kd::linear_variant(int8, kd::kM, d_.hidden, 2 * d_.kv_n())})
+    for (const std::string& v : {kd::prep_variant(),
+                                 kd::linear_variant(int8, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
+                                 kd::linear_variant(int8, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     layer_ = -1;
@@ -224,13 +220,9 @@ class Walk {
       const size_t K = d_.hidden, rows = d_.q_n(), n = 2 * d_.kv_n();
       void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * kd::kM * n * 4));
       if (qkv.kind == model::WeightKind::Int8) {
-        l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kM, uint32_t(K), uint32_t(n)), "gemv_i8w",
-                               kernels::kGemvI8wCols);
-        k.arg_ptr(0, at(qkv.mem.ptr(), rows * K));
-        k.arg_ptr(1, at(qkv.scales->ptr(), rows * 4));
-        k.arg_ptr(2, b_.x.ptr());
-        k.arg_ptr(3, out);
-        launch(k, uint32_t(n) / kernels::kGemvI8wCols);
+        // the int8 tiles are [N/16][K/16][16][16]: row q_n (a multiple of 16) starts tile q_n / 16
+        i8_linear(kd::kM, uint32_t(K), uint32_t(n), at(qkv.mem.ptr(), rows * K), at(qkv.scales->ptr(), rows * 4),
+                  b_.x.ptr(), out);
       } else {
         const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(uint32_t(n));
         l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kM, uint32_t(K), uint32_t(n), tl), "gemv_bf16",
@@ -308,16 +300,32 @@ class Walk {
     k.arg_ptr(1, b_.resid.ptr());
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
   }
-  // A drafter linear at the block's M rows: gemv_i8w(w, scales, x, out) or gemv_bf16(w, x, out).
+  // The int8 linears' kernel (runtime/gemv_kind.h): the lists are M >= 2, so SmallM unless a test forces gemv.
+  kernels::LinearKind lkind() const { return linear_kind(kd::kM, opt_); }
+  // An int8 linear at M rows (spec 28d): gemm_sm_i8w(w, scales, x, out) at the shape's kSmallMTuning row - the
+  // in-work-group split-K, grid N / 32, WG 256 - or, forced, gemv_i8w(w, scales, x, out), grid N / 64, WG 64. The same
+  // arguments, the same [M][N] fp32 output, scaled.
+  void i8_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* scales, const void* x, const void* out) {
+    const kernels::SmallMTuning* t =
+        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
+    require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 linear " + std::to_string(K) +
+                                                           " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_i8w_variant(M, K, N), "gemv_i8w", kernels::kGemvI8wCols);
+    k.arg_ptr(0, w);
+    k.arg_ptr(1, scales);
+    k.arg_ptr(2, x);
+    k.arg_ptr(3, out);
+    if (t)
+      launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, N / kernels::kGemvI8wCols);
+  }
+  // A drafter linear at the block's M rows: the int8 linear above or gemv_bf16(w, x, out).
   void gemv(const loader::DeviceWeight& w, const void* x, const void* out) {
     const model::GemvShape& s = w.shape;
     if (w.kind == model::WeightKind::Int8) {
-      l0::Kernel& k = kernel(kernels::gemv_i8w_variant(kd::kM, s.K, s.N), "gemv_i8w", kernels::kGemvI8wCols);
-      k.arg_ptr(0, w.mem.ptr());
-      k.arg_ptr(1, w.scales->ptr());
-      k.arg_ptr(2, x);
-      k.arg_ptr(3, out);
-      launch(k, s.N / kernels::kGemvI8wCols);
+      i8_linear(kd::kM, s.K, s.N, w.mem.ptr(), w.scales->ptr(), x, out);
     } else {
       require(w.kind == model::WeightKind::Bf16, "a drafter linear is neither int8 nor bf16");
       const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(s.N);
@@ -362,6 +370,7 @@ class Walk {
   const loader::DFlashWeights& w_;
   const model::DFlashDesc& d_;
   DFlashBuffers& b_;
+  const CaptureOptions opt_;
   CapturedStep step_;
   const float scale_ = float(1.0 / std::sqrt(double(d_.head_dim)));
   int layer_ = -1;
@@ -387,12 +396,13 @@ DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab) {
 }
 
 CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
-                                DFlashBuffers& b, const l0::Mem& control) {
-  return Walk(ctx, w, b).draft(t, control);
+                                DFlashBuffers& b, const l0::Mem& control, const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt).draft(t, control);
 }
 
-CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b) {
-  return Walk(ctx, w, b).project();
+CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                                  const CaptureOptions& opt) {
+  return Walk(ctx, w, b, opt).project();
 }
 
 }  // namespace runtime::dflash

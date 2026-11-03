@@ -19,6 +19,10 @@
 //      candidates, unary logits, scores and walk BITWISE the full head's; with row 0's best id swapped out of V' (the
 //      table and the compact head rewritten in place, same list) the first row differs.
 //   7. The bf16 head (int8 drafter): the twin agrees as in 2.
+//   8. Spec 28d: the int8 linears and heads bind gemm_sm_i8w (DPAS, the in-work-group split-K) - 1..7 above run on it
+//      against the same twin (gemv_i8w's fp32 order: not bitwise any more, the bars are the ones above - "within an
+//      ulp" ring values, cosine 0.99999 rows and scores, tie-aware sets and walk); the same lists forced onto gemv_i8w
+//      (CaptureOptions::force_linear, the pre-28d binding) agree with the twin as in 2; both lists timed (interleaved).
 // It prints the draft list's host-timed replay (one fence; informational - r54.speed is the timed row).
 #include <algorithm>
 #include <chrono>
@@ -447,6 +451,50 @@ int main(int argc, char** argv) {
       twb.head.bf16 = hb;
       twb.head.ksplit = 1;
       bad += compare_draft(e, b, twb, ring, rope, 1234, P, 7, 0.0f, 0, "bf16 head");
+    }
+
+    // 8. spec 28d: the int8 linears on gemm_sm_i8w (the default lists above) against the same lists forced onto
+    // gemv_i8w (runtime::CaptureOptions::force_linear, the pre-28d binding): the forced draft agrees with the twin as
+    // in 2 (its gate, kept), and both lists' host-timed replays as interleaved pairs after a warm-up - median of 20.
+    if (f == loader::DraftFormat::Int8) {
+      runtime::CaptureOptions gv;
+      gv.force_linear = runtime::LinearForce::Gemv;
+      runtime::CapturedStep dg = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, gv);
+      runtime::CapturedStep pg = runtime::dflash::build_dflash_project(e.ctx, w, b, gv);
+      bad += dg.kernel_count != 87 || pg.kernel_count != 8;
+      c->pos = P;
+      c->cur_token[0] = 1234;
+      b.ctl()->k = 7;
+      b.ctl()->temperature = 0.0f;
+      e.run(dg);
+      bad += compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, forced gemv_i8w");
+      const runtime::dflash::DFlashDraftOut forced = *b.readback();
+      uint32_t same_ids = 0;
+      for (uint32_t j = 0; j < 7; ++j) same_ids += forced.ids[j] == first.ids[j];
+      std::printf("gemm_sm_i8w against gemv_i8w: %u / 7 greedy drafts the same\n", same_ids);
+      auto timed = [&](runtime::CapturedStep& s) {
+        const auto t1 = std::chrono::steady_clock::now();
+        e.run(s);
+        return 1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count();
+      };
+      b.ctl()->proj_pos = P - 8;
+      b.ctl()->proj_n = 8;
+      for (int i = 0; i < 3; ++i)
+        for (runtime::CapturedStep* s : {&draft, &dg, &proj, &pg}) timed(*s);
+      std::vector<double> td, tg, tp, tq;
+      for (int i = 0; i < 20; ++i) {
+        td.push_back(timed(draft));
+        tg.push_back(timed(dg));
+        tp.push_back(timed(proj));
+        tq.push_back(timed(pg));
+      }
+      auto med = [](std::vector<double> v) {
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+      };
+      std::printf("timing (host-timed replays, interleaved, median of 20): draft list gemm_sm %.3f ms / gemv_i8w %.3f ms "
+                  "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
+                  med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
   }
   if (bad) {

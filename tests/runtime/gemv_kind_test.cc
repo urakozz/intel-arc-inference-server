@@ -7,7 +7,8 @@
 //     the same at every M, property R's precondition); Ornith's dense projections on gemm_sm at M 2..4; an untuned
 //     shape keeps gemv;
 //   - the override (CaptureOptions::force_linear) forces either kernel at any M;
-//   - the DFlash drafter's name list stays on gemv_i8w (28b leaves the drafter as it was).
+//   - spec 28d: the DFlash drafter's int8 linears and draft heads on gemm_sm_i8w (gemv_i8w under the override);
+//     Flash-Next's dense projections and int8 head at M 2..4.
 #include <cstdio>
 #include <string>
 
@@ -95,11 +96,36 @@ int main() {
   // The draft vocabulary's head (M = 1) and the MTP draft (M = 1): gemv_i8w.
   for (unsigned nv : {32768u, 65536u, 131072u})
     CHECK_EQ(kernels::int8_linear_variant(runtime::gemv_kind(1), 1, 5120, nv), kernels::gemv_i8w_variant(1, 5120, nv));
-  // The DFlash drafter stays on gemv_i8w in 28b (its gate holds it bitwise to its host twin).
-  for (const std::string& v : kernels::dflash::draft_variants(true, true, true, 0))
-    CHECK(v.rfind("gemm_sm", 0) != 0);
+  // Spec 28d: the DFlash drafter's int8 linears (M 8) and the int8 head at its 7 draft rows (full and every draft
+  // vocabulary) on gemm_sm_i8w; under the override (Gemv) every one is gemv_i8w as before; the bf16 forms gemv_bf16.
+  size_t drafter = 0;
+  for (bool v2 : {true, false})
+    for (unsigned dv : {0u, 32768u, 65536u, 131072u}) {
+      for (const std::string& v : kernels::dflash::draft_variants(v2, true, true, dv)) {
+        CHECK(v.rfind("gemv_i8w", 0) != 0);
+        drafter += v.rfind("gemm_sm_i8w_M", 0) == 0;
+      }
+      for (const std::string& v : kernels::dflash::draft_variants(v2, true, true, dv, LinearKind::Gemv))
+        CHECK(v.rfind("gemm_sm", 0) != 0);
+      for (const std::string& v : kernels::dflash::draft_variants(v2, false, false, dv))
+        CHECK(v.rfind("gemm_sm", 0) != 0 && v.rfind("gemv_i8w", 0) != 0);
+    }
+  CHECK_EQ(drafter, size_t(4 * (9 + 7)));   // v2: 8 linears + the head; v1: 6 + the head
+  // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections and its int8 head at M 2..4 (the verify lists).
+  {
+    const unsigned H = 2560;
+    const struct { unsigned K, N, S; } q4[] = {{H, 16384, 1}, {H, 13312, 2}, {6144, H, 4}};
+    for (const auto& r : q4) {
+      const kernels::SmallMTuning* t = kernels::small_m_tuning(r.K, r.N, r.S, 0);
+      CHECK(t != nullptr && t->mset == kernels::kSmVerify4 && kernels::gemm_sm_out_s(*t) == r.S);
+      for (uint32_t M = 2; M <= 4; ++M)
+        CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(M), M, r.K, r.N, r.S, 0), kernels::gemm_sm_variant(M, *t));
+    }
+    CHECK_EQ(kernels::int8_linear_variant(runtime::gemv_kind(4), 4, H, model::Qwen35::kVocab),
+             std::string("gemm_sm_i8w_M4_K2560_N248320_wg"));
+  }
   std::printf("gemv_kind_test OK: %zu tuned int4 decode linears (Qwen3.8 + Agnes), M = 1 on gemv, M >= 2 on "
-              "gemm_sm, Ornith at M 2..4, the override, the drafter on gemv_i8w\n",
-              tuned);
+              "gemm_sm, Ornith and Flash-Next at M 2..4, the override, the drafter on gemm_sm_i8w (%zu names)\n",
+              tuned, drafter);
   return 0;
 }

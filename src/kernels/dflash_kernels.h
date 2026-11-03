@@ -8,8 +8,8 @@
 // Spec 19b: the DFlash drafter's device binaries by name - the host half of the "Spec 19b" block in
 // src/kernels/CMakeLists.txt, in its own header so kernels.h (shared with every branch in flight) is not edited.
 // Every drafter-only binary is prefixed `df_` and carries in its name the shapes its code bakes, so a host / device
-// disagreement names a binary that does not exist and throws at capture. The GEMVs are the reused gemv_i8w /
-// gemv_bf16 (kernels.h's names: K, N and M carry every shape).
+// disagreement names a binary that does not exist and throws at capture. The linears are the reused gemm_sm_i8w
+// (spec 28d; gemv_i8w under the test override) / gemv_bf16 (kernels.h's names: K, N and M carry every shape).
 //
 // The shapes built are z-lab/Qwen3.8-27B-DFlash2's beside Qwen3.8 (hidden 5120, 32 / 8 heads x 128, intermediate
 // 17408, the 2048 window over a 2048-slot ring, conv group 16 x 2 taps, selector rank 256, top 16, block 8; the
@@ -43,10 +43,11 @@ inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 
-// The drafter's linears at the block's M rows, in their form (`int8`: gemv_i8w; else gemv_bf16 at the tiling
-// kernels::gemv_bf16_tiling gives N).
-inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N) {
-  return int8 ? gemv_i8w_variant(M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
+// The drafter's linears at the block's M rows, in their form (`int8`: gemm_sm_i8w at kSmallMTuning's row of the shape
+// since spec 28d - gemv_i8w under `k` Gemv, the test / probe override runtime::CaptureOptions::force_linear; else
+// gemv_bf16 at the tiling kernels::gemv_bf16_tiling gives N). The target's int8 head at the 7 draft rows: the same.
+inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
+  return int8 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
 }
 
 // The draft vocabulary sizes (spec 8 §11's kDraftVocabSizes) the compact head's binaries exist for.
@@ -58,7 +59,8 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Every binary the draft list and the projection list bind for Qwen3.8's drafter: `v2` (DFlash 2 or v1), `int8`
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
-inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv) {
+inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv,
+                                               LinearKind k = LinearKind::SmallM) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
@@ -67,13 +69,13 @@ inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_hea
                       {s.I, s.H},                                                            // down
                       {5 * s.H, s.H},                                                        // fc (5 taps)
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
-    v.push_back(linear_variant(int8, kM, K, N));
+    v.push_back(linear_variant(int8, kM, K, N, k));
   if (v2) {
-    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group)));   // the conv kernel projections
-    v.push_back(linear_variant(int8, kM, s.H, s.rank));                          // the selector's projection
+    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
+    v.push_back(linear_variant(int8, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  v.push_back(int8_head ? gemv_i8w_variant(kR, s.H, N) : gemv_bf16_variant(kR, s.H, N, gemv_bf16_tiling(N)));
+  v.push_back(linear_variant(int8_head, kR, s.H, N, k));
   v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
   return v;
 }

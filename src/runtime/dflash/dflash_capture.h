@@ -21,7 +21,7 @@
 //               df_attn_reduce (the ring's window + the block, non-causal) - o GEMV - df_conv_add (v1: df_add) -
 //               df_norm (post_attention_layernorm) - [v2: mlp_conv's kernel projection, df_conv_prep] - gate||up
 //               GEMV - df_silu_mul - down GEMV - df_conv_add (v1: df_add)
-//   df_norm (the final norm) - the TARGET's lm_head over rows 1..7 (gemv_i8w / gemv_bf16 at M 7: the full head or
+//   df_norm (the final norm) - the TARGET's lm_head over rows 1..7 (gemm_sm_i8w / gemv_bf16 at M 7: the full head or
 //   the draft vocabulary's compact one, spec 8 §11) - df_topk_stage1/2 (the vocab mask; a draft vocabulary's indices
 //   mapped to ids) - [v2: the selector's hidden_projection GEMV] - df_select
 //
@@ -45,8 +45,12 @@ struct DFlashTarget {
 // The target's full head (`draft_vocab` false) or its draft vocabulary's compact one (LoadedModel::draft_vocab).
 DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab = false);
 
+// Spec 28d: the int8 linears (the block's M = 8, the int8 head's 7 rows) bind gemm_sm_i8w (gemm_sm.cl, kSmallMTuning's
+// kSmDraft8 / kSmDraft7 rows and Qwen3.8's head row) - the lists are M >= 2, runtime::gemv_kind's rule; the bf16 forms
+// stay gemv_bf16. `opt.force_linear` Gemv (tests and probes only) binds gemv_i8w as before 28d.
 CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
-                                DFlashBuffers& b, const l0::Mem& control);
-CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b);
+                                DFlashBuffers& b, const l0::Mem& control, const CaptureOptions& opt = {});
+CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
+                                  const CaptureOptions& opt = {});
 
 }  // namespace runtime::dflash
