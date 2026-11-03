@@ -358,6 +358,8 @@ if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8 AND B70_ORNITH)
   add_dependencies(gemm_sm_test ${B70_GEMM_SM_KERNELS})
   add_test(NAME gemm_sm_test COMMAND gemm_sm_test)
   set_tests_properties(gemm_sm_test PROPERTIES TIMEOUT 1800)
+endif()
+
 # Spec 28c (plan 28c Task 1): the verify attention's fp64 reference at M rows (bf16 and int8 KV) and
 # v2's block view. Host only.
 add_executable(attn_verify_ref_test kernels/attn_verify_ref_test.cc)
