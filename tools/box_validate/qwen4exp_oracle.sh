@@ -221,6 +221,8 @@ case "$mode" in
     dest="${snapdir%/}-ple-int8"
     if [ -s "$dest/model.safetensors.index.json" ]; then
       echo "qwen4exp_oracle: the PLE int8 file is there ($dest)"
+    elif alt=$(tools/box_validate/data.sh q4ple) && [ -n "$alt" ]; then
+      echo "qwen4exp_oracle: the PLE int8 file is there ($alt - data.sh q4ple)"
     else
       df -h . "$hf" "$(dirname "$dest")" 2>/dev/null | tail -3
       # The destination sits beside the snapshot - on the box a bind mount of the operator's USB disk, another

@@ -68,6 +68,9 @@ unset B70_KV_CACHE B70_DECODE_ATTN B70_PREFILL_ATTN B70_PREFILL_GDN_SCAN B70_PRE
       ONEAPI_DEVICE_SELECTOR
 export ZE_AFFINITY_MASK="$DEVICE"
 export HOME_R BV_DATA="$DATA" OPENCODE_LOG="${OPENCODE_LOG:-}" A4_REF_DIR="${A4_REF_DIR:-}"
+# Flash-Next's int8 PLE file when it is not beside the snapshot (data.sh q4ple): the loader's own override.
+q4ple=$(tools/box_validate/data.sh q4ple)
+case "$q4ple" in */oracle-out-q4exp-ple-int8) export B70_Q4_PLE="$q4ple/";; esac
 
 ts() { date '+%F %T'; }
 # one line per event, appended with one write (two orchestrators share the file)
