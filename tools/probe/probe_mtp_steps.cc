@@ -1,7 +1,12 @@
 // probe_mtp_steps - spec 8 plan 8b: the production MTP lists' wall time per call.
 //
 //   probe_mtp_steps <snapshot> [depth = 4096] [calls = 32] [rounds = 3] [lm_head = bf16]
-//                   [draft_vocab = off] [max_len = 16384] [max_m = 4]
+//                   [draft_vocab = off] [max_len = 16384] [max_m = 4] [mode = default]
+//
+// `mode` vattn (spec 28c, plan 28c Task 7; max_m 8, int8 head): per M = 2..8 the verify list over the 8-slot
+// MtpBuffers built three times - forced to v2, by the capture's rule and forced to DPAS (runtime::CaptureOptions::
+// force_attn; no environment variable) - timed as interleaved chunks -
+// the in-list check of the verify-attention table (S1) and verify(8)'s attention saving (S2); nothing else runs.
 //
 // `lm_head` (spec 9 H2): bf16 (the checkpoint's) or int8; the draft list reads it too.
 // `draft_vocab` (spec 8 §11): off, 32k, 64k or 128k (either head form) - the draft list reads
@@ -76,7 +81,7 @@ int main(int argc, char** argv) {
   if (argc < 2) {
     std::fprintf(stderr,
                  "usage: %s <snapshot> [depth] [calls] [rounds] [bf16|int8] [off|32k|64k|128k]"
-                 " [max_len] [max_m 4..8]\n",
+                 " [max_len] [max_m 4..8] [default|vattn]\n",
                  argv[0]);
     return 2;
   }
@@ -90,6 +95,17 @@ int main(int argc, char** argv) {
     return 2;
   }
   const bool wide = max_m > 4;   // spec 19a: the M = 5..8 arms
+  // Spec 28c (plan 28c Task 7): a 9th positional `mode` - default | vattn.
+  const std::string mode = argc > 9 ? argv[9] : "default";
+  if (mode != "default" && mode != "vattn") {
+    std::fprintf(stderr, "mode %s: default or vattn\n", mode.c_str());
+    return 2;
+  }
+  const bool vattn = mode == "vattn";
+  if (vattn && max_m != 8) {
+    std::fprintf(stderr, "vattn needs max_m 8 (the verify lists at M = 2..8 over the 8-slot buffers)\n");
+    return 2;
+  }
   std::vector<uint32_t> ids = read_ids("tests/golden/prompts/long32k.ids");
   if (ids.empty()) return 2;
   const std::vector<uint32_t> file = ids;
@@ -162,6 +178,91 @@ int main(int argc, char** argv) {
     ctl->n_active = 1;
     ctl->cur_token[0] = ctl->out_token[0];
   };
+
+  if (vattn) {
+    // Spec 28c: per M = 2..8 the verify list built three times over the probe's 8-slot MtpBuffers -
+    // force_attn V2, Auto (the rule) and Dpas (runtime::CaptureOptions, given to each build_verify). Pos rewound
+    // to `depth` before each chunk; interleaved pairs (v2, rule) and (v2, dpas), the pair's order alternating by
+    // round, after a warm-up; median over rounds with the range.
+    struct VL {
+      uint32_t M;
+      runtime::CapturedStep v2, rule, dpas;
+    };
+    std::vector<VL> vl;
+    for (uint32_t M = 2; M <= 8; ++M) {
+      const runtime::CaptureOptions fv2 = runtime::attn_forced(runtime::VerifyAttnForce::V2),
+                                    fdpas = runtime::attn_forced(runtime::VerifyAttnForce::Dpas);
+      runtime::CapturedStep a = runtime::build_verify(ctx, e.model(), e.buffers(), *mtp8, M, nullptr, fv2);
+      // The rule's list at this depth: what Engine::verify submits at row 0's keys depth + 1 (the deep list - DPAS
+      // forced - from the table's dpas_from on, the list captured by the rule before it).
+      const model::ModelDesc& md = *e.model().desc;
+      const bool deep = runtime::verify_attn_kind(M, depth + 1, e.kv_cache() == runtime::KvCache::Int8, md.fa_q_heads,
+                                                  md.fa_kv_heads) == runtime::VerifyAttn::Dpas;
+      runtime::CapturedStep b =
+          runtime::build_verify(ctx, e.model(), e.buffers(), *mtp8, M, nullptr, deep ? fdpas : runtime::CaptureOptions{});
+      runtime::CapturedStep c = runtime::build_verify(ctx, e.model(), e.buffers(), *mtp8, M, nullptr, fdpas);
+      vl.push_back({M, std::move(a), std::move(b), std::move(c)});
+    }
+    auto call = [&](runtime::CapturedStep& s, uint32_t M) {
+      runtime::Control* h = mtp8->hctl.as<runtime::Control>();
+      const uint32_t pos = ctl->pos;
+      for (uint32_t r = 1; r < M; ++r) ctl->cur_token[r] = file[(depth + r) % file.size()];
+      ctl->n_active = M;
+      h->pos = pos - 1;
+      h->n_active = M;
+      for (uint32_t r = 0; r < M; ++r) h->cur_token[r] = ctl->cur_token[r];
+      wq->execute(s.list, wfence.get());
+      wfence->wait();
+      wimm->copy(mtp8->hh.ptr(), mtp8->hh.as<uint8_t>() + hid, hid);
+      ctl->pos = pos + 1;
+      ctl->n_active = 1;
+      ctl->cur_token[0] = ctl->out_token[0];
+    };
+    auto chunk = [&](runtime::CapturedStep& s, uint32_t M, uint32_t n) {
+      ctl->pos = depth;
+      const auto t0 = Clock::now();
+      for (uint32_t i = 0; i < n; ++i) call(s, M);
+      return std::chrono::duration<double, std::milli>(Clock::now() - t0).count() / n;
+    };
+    std::printf("vattn: depth %u (rewound before every chunk), %u calls x %u rounds; verify lists v2 / rule / dpas\n",
+                depth, calls, rounds);
+    std::printf("| M | v2 ms | rule ms | dpas ms | v2 / rule [range] | v2 / dpas [range] |\n|---|---|---|---|---|---|\n");
+    for (VL& x : vl) {
+      chunk(x.v2, x.M, 4);
+      chunk(x.rule, x.M, 4);
+      chunk(x.dpas, x.M, 4);
+      std::vector<double> t2, tr, td, rr, rd;
+      for (uint32_t r = 0; r < rounds; ++r) {
+        double a, b, c;
+        if (r % 2 == 0) {
+          a = chunk(x.v2, x.M, calls);
+          b = chunk(x.rule, x.M, calls);
+          c = chunk(x.dpas, x.M, calls);
+        } else {
+          c = chunk(x.dpas, x.M, calls);
+          b = chunk(x.rule, x.M, calls);
+          a = chunk(x.v2, x.M, calls);
+        }
+        t2.push_back(a);
+        tr.push_back(b);
+        td.push_back(c);
+        rr.push_back(a / b);
+        rd.push_back(a / c);
+      }
+      std::vector<double> sr = rr, sd = rd;
+      std::sort(sr.begin(), sr.end());
+      std::sort(sd.begin(), sd.end());
+      std::printf("| %u | %.3f | %.3f | %.3f | %.4f [%.4f-%.4f] | %.4f [%.4f-%.4f] |\n", x.M, median_of(t2),
+                  median_of(tr), median_of(td), median_of(rr), sr.front(), sr.back(), median_of(rd), sd.front(),
+                  sd.back());
+      std::printf("VATTN depth=%u M=%u v2=%.3f rule=%.3f dpas=%.3f r_rule=%.4f r_rule_lo=%.4f r_dpas=%.4f "
+                  "r_dpas_lo=%.4f\n",
+                  depth, x.M, median_of(t2), median_of(tr), median_of(td), median_of(rr), sr.front(), median_of(rd),
+                  sd.front());
+      std::fflush(stdout);
+    }
+    return 0;
+  }
 
   struct Arm {
     std::string name;

@@ -3,7 +3,7 @@
 // Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
 // Record: docs/probe-decode-attn-2026-09-28.md.
 //
-//   probe_decode_attn capture <snapshot> <ids> <outdir> [--steps 8] [--depths a,b,...]
+//   probe_decode_attn capture <snapshot> <ids> <outdir> [--steps 8] [--depths a,b,...] [--rows 4]
 //   probe_decode_attn arms <outdir> --M 1|4 [--depths a,b] [--arms t1,t2,...] [--tgt N]
 //                          [--rounds 5] [--reps 10] [--time]
 //
@@ -12,10 +12,10 @@
 //   * replays the PROFILED captured list --steps times (pos rewound before each), and
 //     reports attn_prep / attn_decode / attn_reduce summed over the 16 FA layers, the
 //     whole step's kernel sum, and the unprofiled list's fence wall (8 replays);
-//   * then (after every depth is profiled) runs 4 plain steps from pos = depth and keeps
+//   * then (after every depth is profiled) runs R = --rows (4) plain steps from pos = depth and keeps
 //     the last FA layer's attn_q, attn_gate and attn_out after each: the q of rows
 //     m = 0..3 of an M = 4 verify at `depth`, and production's own M = 1 output for each.
-// Finally it writes that layer's KV (FA index 15) for positions [0, deepest + 4).
+// Finally it writes that layer's KV (FA index 15) for positions [0, deepest + R) (spec 28c: R up to 8, the q of an M = 8 verify).
 //
 // arms (P1): standalone, no checkpoint. Arm 0 is src/kernels/attn.cl's attn_decode +
 // attn_reduce compiled at the probe's M (pda_v1_M<M>); every other arm is
@@ -128,18 +128,20 @@ float bf16f(uint16_t h) {
 // capture: P0 and the inputs
 // ============================================================================
 int run_capture(int argc, char** argv) {
-  if (argc < 5) throw std::runtime_error("capture <snapshot> <ids> <outdir> [--steps S] [--depths ..]");
+  if (argc < 5) throw std::runtime_error("capture <snapshot> <ids> <outdir> [--steps S] [--depths ..] [--rows R]");
   const std::string snap = argv[2], ids_path = argv[3], out = argv[4];
-  uint32_t steps = 8;
+  uint32_t steps = 8, nrows = 4;
   std::vector<uint32_t> depths = {4096, 32768, 65536, 130816};
   for (int i = 5; i + 1 < argc; i += 2) {
     const std::string a = argv[i];
     if (a == "--steps") steps = uint32_t(std::stoul(argv[i + 1]));
+    else if (a == "--rows") nrows = uint32_t(std::stoul(argv[i + 1]));
     else if (a == "--depths") depths = parse_list(argv[i + 1]);
     else throw std::runtime_error("unknown flag " + a);
   }
   const uint32_t deepest = *std::max_element(depths.begin(), depths.end());
-  if (deepest + 4 > kMaxLen) throw std::runtime_error("depth + 4 exceeds 131072");
+  if (nrows < 1 || nrows > 8) throw std::runtime_error("--rows is 1..8");
+  if (deepest + nrows > kMaxLen) throw std::runtime_error("depth + rows exceeds 131072");
 
   std::vector<uint32_t> base;
   {
@@ -224,26 +226,26 @@ int run_capture(int argc, char** argv) {
     std::fflush(stdout);
   }
 
-  // ---- the inputs: 4 plain steps from each depth -----------------------------
+  // ---- the inputs: R plain steps from each depth -----------------------------
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   for (uint32_t d : depths) {
-    std::vector<float> qv(4 * kRow), gv(4 * kRow);
-    std::vector<uint16_t> ov(4 * kRow);
+    std::vector<float> qv(nrows * kRow), gv(nrows * kRow);
+    std::vector<uint16_t> ov(nrows * kRow);
     c->pos = d;
     c->n_active = 1;
-    for (uint32_t m = 0; m < 4; ++m) {
+    for (uint32_t m = 0; m < nrows; ++m) {
       run(plain);
       imm.copy(qv.data() + m * kRow, b.attn_q.ptr(), kRow * 4);
       imm.copy(gv.data() + m * kRow, b.attn_gate.ptr(), kRow * 4);
       imm.copy(ov.data() + m * kRow, b.attn_out.ptr(), kRow * 2);
     }
-    if (c->pos != d + 4) throw std::runtime_error("pos did not advance by 4");
+    if (c->pos != d + nrows) throw std::runtime_error("pos did not advance by the rows");
     const std::string sfx = "_" + std::to_string(d) + ".bin";
     write_file(out + "/q" + sfx, qv.data(), qv.size() * 4);
     write_file(out + "/g" + sfx, gv.data(), gv.size() * 4);
     write_file(out + "/o" + sfx, ov.data(), ov.size() * 2);
   }
-  const size_t rows = deepest + 4, bytes = rows * kKvH * kHD * 2;
+  const size_t rows = deepest + nrows, bytes = rows * kKvH * kHD * 2;
   const size_t layer = size_t(kMaxLen) * kKvH * kHD * 2;
   std::vector<uint16_t> kv(rows * kKvH * kHD);
   download(ctx, kv.data(), static_cast<char*>(b.kv_k.ptr()) + kFa * layer, bytes);

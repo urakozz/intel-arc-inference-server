@@ -14,6 +14,7 @@
 #include "runtime/buffers.h"
 #include "runtime/gemv_kind.h"
 #include "runtime/pipeline_plan.h"
+#include "runtime/verify_attn.h"
 
 namespace runtime {
 
@@ -123,6 +124,9 @@ struct CapturedStep {
 // Spec 28b: at M >= 2 every tuned int4 / int8 linear binds gemm_sm (runtime::gemv_kind, runtime/gemv_kind.h);
 // `opt` (tests and probes only) forces gemv or gemm_sm at every M - build, build_verify and build_verify_taps
 // take it, every other builder follows the rule.
+// Spec 28c: at M >= 2 a v2 list's attention binds attn_verify_dpas where runtime/verify_attn.h's measured table
+// says so; `opt` (tests and probes only) forces v2 or DPAS at every M >= 2 - build, build_verify and
+// build_verify_taps take it, every other builder follows the rule.
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
                    uint32_t M = 1, const CaptureOptions& opt = {});
@@ -189,6 +193,7 @@ struct TapVerify {
 CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const TapVerify& tv, uint32_t M, const CaptureOptions& opt = {});
 
+// (spec 28c: the stage verify builders below take CaptureOptions too - PipelineEngine's deep lists force DPAS.)
 // --- spec 16b: pipeline parallel decode ----------------------------------------------
 //
 // One stage's decode list: the walk above restricted to layers [st.first, st.last), on the
@@ -247,7 +252,7 @@ CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeB
 // main model runs; the stage's buffers are only its scratch). draft_launches(d) launches.
 CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                 const PpStage& st, const StageLink& link, uint32_t M,
-                                const MtpBuffers* mtp, const l0::Mem& gdn_spec);
+                                const MtpBuffers* mtp, const l0::Mem& gdn_spec, const CaptureOptions& opt = {});
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const PpStage& st, const MtpBuffers& mtp, uint32_t i);
 
@@ -262,7 +267,8 @@ CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, D
 // before the cross-device event (the copy hand-off only - capture refuses peer). Launches: pp_stage_launches (the
 // taps are copies); the two stages' lists add up to build_verify_taps' decode_launches.
 CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M);
+                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M,
+                                     const CaptureOptions& opt = {});
 
 #if B70_BATCH_PROBE
 // --- spec 13a: rows of different sequences (the batching probe; B70_BATCH_PROBE builds only) ---------------------

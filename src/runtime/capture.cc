@@ -15,6 +15,7 @@
 #include "model/qwen35.h"
 #include "runtime/control.h"
 #include "runtime/gemv_kind.h"
+#include "runtime/verify_attn.h"
 #if B70_BATCH_PROBE
 #include "kernels/batch_kernels.h"
 #include "runtime/batch_rows.h"
@@ -223,6 +224,7 @@ class Capture {
 #endif
 
   // Spec 28b: the test / probe override of runtime::gemv_kind (runtime/gemv_kind.h).
+  // Spec 28c: the test / probe override of the verify-attention rule (runtime/verify_attn.h).
   Capture& options(const CaptureOptions& o) {
     opt_ = o;
     return *this;
@@ -396,6 +398,20 @@ class Capture {
             std::string("attn_part (") + std::to_string(b_.attn_part.size()) +
                 " B) was sized for the other decode attention pair than " +
                 decode_attn_name(attn_) + " - set B70_DECODE_ATTN before the buffers are built");
+    // Spec 28c: an M >= 2 list of v2 binds attn_verify_dpas + the v2 binary's reduce where the measured rule
+    // (runtime/verify_attn.h) says so; M = 1, the row builds and v1 never switch.
+    {
+      bool rows = false;
+#if B70_BATCH_PROBE
+      rows = mode_ == Mode::Rows;
+#endif
+      vattn_ = attn_ == DecodeAttn::V2 && !rows
+                   ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
+                   : VerifyAttn::V2;
+      if (vattn_ == VerifyAttn::Dpas)
+        attn_bins.push_back(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+                                                              d_.fa_q_heads, d_.fa_kv_heads));
+    }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
               "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
@@ -526,7 +542,8 @@ class Capture {
       // output before the gate.
       const std::string v = kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
       {
-        l0::Kernel& k = kernel(v, "attn_decode_v2_kv8", kWgAttn);
+        // Spec 28c: attn_verify_dpas_kv8 takes attn_decode_v2_kv8's arguments and writes its partials.
+        l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2_kv8", kWgAttn);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.attn_q.ptr());
         k.arg_ptr(2, kv.k);
@@ -551,7 +568,8 @@ class Capture {
       // row from Control::pos on the device, so one list serves every depth.
       const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
       {
-        l0::Kernel& k = kernel(v, "attn_decode_v2", kWgAttn);
+        // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
+        l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.attn_q.ptr());
         k.arg_ptr(2, kk);
@@ -708,6 +726,20 @@ class Capture {
   }
 #endif
 
+  // Spec 28c: the DPAS verify attention's decode kernel. Its work-group is the binary's own
+  // reqd_work_group_size (the CMake lever line decides it: 16 x row blocks x dim halves x key slices).
+  l0::Kernel& dpas_kernel() {
+    l0::Kernel& k = kernel(kernels::attn_verify_dpas_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_,
+                                                             d_.fa_q_heads, d_.fa_kv_heads),
+                           kv8_ ? "attn_verify_dpas_kv8" : "attn_verify_dpas", 0);
+    ze_kernel_properties_t p{};
+    p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+    require(zeKernelGetProperties(k.handle(), &p) == ZE_RESULT_SUCCESS && p.requiredGroupSizeX >= 16,
+            "attn_verify_dpas: no reqd_work_group_size in the binary");
+    k.group_size(p.requiredGroupSizeX);
+    return k;
+  }
+
   l0::Kernel& kernel(const std::string& variant, const char* entry, uint32_t wg) {
     auto it = step_.modules.find(variant);
     if (it == step_.modules.end())
@@ -716,7 +748,7 @@ class Capture {
                .first;
     step_.kernels.push_back(std::make_unique<l0::Kernel>(*it->second, entry));
     l0::Kernel& k = *step_.kernels.back();
-    k.group_size(wg);
+    if (wg != 0) k.group_size(wg);   // 0 (spec 28c's dpas_kernel): the caller sets the binary's reqd size
     // The two halves of the launch's label. Held here rather than passed to
     // `launch()` because this is where they are already known and it keeps
     // every binding site's `launch(k, grid…)` line unchanged. `launch()`
@@ -1775,7 +1807,11 @@ class Capture {
   // Spec 12b: the buffers' KV form decides every KV writer and reader this walk binds.
   const bool kv8_ = b_.kv_lay.form == KvCache::Int8;
   // Spec 28b: which linear kernel the walk binds at kCapM (runtime/gemv_kind.h); Auto unless a test forces it.
+  // Spec 28c: `opt_.force_attn` likewise for the verify attention (runtime/verify_attn.h); the attention this walk
+  // binds is decided in check_sizes by the rule at row 0's capture-time key count `vattn_keys_`.
   CaptureOptions opt_{};
+  uint32_t vattn_keys_ = 1;
+  VerifyAttn vattn_ = VerifyAttn::V2;
   CapturedStep step_;
   size_t kv_stride_ = 0;
   int layer_ = kBoundary;
@@ -1856,7 +1892,7 @@ CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeB
 
 CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                 const PpStage& st, const StageLink& link, uint32_t M,
-                                const MtpBuffers* mtp, const l0::Mem& gdn_spec) {
+                                const MtpBuffers* mtp, const l0::Mem& gdn_spec, const CaptureOptions& opt) {
   if (M == 0 || M > MtpBuffers::kSlots)
     throw std::runtime_error("runtime::build_stage_verify: M " + std::to_string(M) +
                              " is outside [1, " + std::to_string(MtpBuffers::kSlots) + "]");
@@ -1868,11 +1904,12 @@ CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, 
   if (pp_stage_verify_launches(d, both[0]) + pp_stage_verify_launches(d, both[1]) != verify_launches(d))
     throw std::logic_error("runtime::build_stage_verify: the stages' launches do not add up to " +
                            std::to_string(verify_launches(d)));
-  return Capture(ctx, m, b, st, &link, M, mtp, &gdn_spec, Mode::StageVerify, 0).run();
+  return Capture(ctx, m, b, st, &link, M, mtp, &gdn_spec, Mode::StageVerify, 0).options(opt).run();
 }
 
 CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M) {
+                                     const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M,
+                                     const CaptureOptions& opt) {
   if (M == 0 || M > tv.slots || M > DecodeBuffers::kM)
     throw std::runtime_error("runtime::build_stage_verify_taps: M " + std::to_string(M) + " is outside [1, " +
                              std::to_string(tv.slots) + "] (TapVerify::slots)");
@@ -1881,7 +1918,7 @@ CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel
   if (pp_stage_launches(d, both[0]) + pp_stage_launches(d, both[1]) != decode_launches(d))
     throw std::logic_error("runtime::build_stage_verify_taps: the stages' launches do not add up to " +
                            std::to_string(decode_launches(d)));
-  return Capture(ctx, m, b, st, link, tv, M).run();
+  return Capture(ctx, m, b, st, link, tv, M).options(opt).run();
 }
 
 #if B70_BATCH_PROBE

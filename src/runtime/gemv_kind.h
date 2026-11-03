@@ -18,6 +18,7 @@
 #include <cstdint>
 
 #include "kernels/linear_kind.h"
+#include "runtime/verify_attn.h"
 
 namespace runtime {
 
@@ -26,9 +27,17 @@ using kernels::gemv_kind;   // constexpr LinearKind gemv_kind(unsigned M): Gemv 
 
 // Test / probe only: force one kernel at every M of a capture (`Auto` = gemv_kind).
 enum class LinearForce : uint8_t { Auto, Gemv, SmallM };
+// Spec 28c: `force_attn` forces the verify attention (v2 or attn_verify_dpas) at every M >= 2 instead of
+// runtime/verify_attn.h's measured rule - tests, probes and the engines' second (deep) verify lists.
 struct CaptureOptions {
   LinearForce force_linear = LinearForce::Auto;
+  VerifyAttnForce force_attn = VerifyAttnForce::Auto;
 };
+inline CaptureOptions attn_forced(VerifyAttnForce f) {
+  CaptureOptions o;
+  o.force_attn = f;
+  return o;
+}
 constexpr LinearKind linear_kind(uint32_t M, const CaptureOptions& o) {
   return o.force_linear == LinearForce::Gemv     ? LinearKind::Gemv
          : o.force_linear == LinearForce::SmallM ? LinearKind::SmallM

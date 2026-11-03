@@ -794,3 +794,85 @@ b70_target_kernel_dir(probe_small_m)
 get_property(PSM_SRC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 get_property(PSM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_small_m psm_kernels ${PSM_SRC_KERNELS} ${PSM_PF_KERNELS})
+
+# --- probe_verify_attn: spec 28c (plan 28c Task 3), the verify attention - v2 against attn_verify_dpas ---------
+# Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probe-verify-attn-<date>.md.
+# `pvd_<tag>_M<M>[_KV8]` is src/kernels/attn_verify_dpas.cl itself at one lever tag
+# K<KT>_P<g|h>_S<KS>_D<DSPLIT>_Q<QSPLIT>_G<128|256> (G: the ocloc 256-GRF option or not), M = 2..8 and 16, both KV
+# forms; a (tag, M) whose work-group exceeds the GRF mode's lanes (512 at 256 GRF, 1024 at 128) or whose SLM exceeds
+# 128 KB is not built (the kernel's own #error for the latter). `pvd_v2kv8_M<M>` (M = 5..8) is the int8 v2 control
+# where production stops at M = 4: kv8.cl's KV8_DEC under BATCH_ROWS (spec 13a's row build, one slot = the plain
+# decode), no source edit. The tag list and the harness's --arms are two lists nothing checks against each other: a
+# missing binary is named and skipped. No production binary binds any of these.
+set(PVD_CL ${CMAKE_SOURCE_DIR}/src/kernels/attn_verify_dpas.cl)
+set(PVD_TAGS
+    K32_Pg_S4_D256_Q1_G256                                               # the provisional setting
+    K64_Pg_S4_D256_Q1_G256 K32_Ph_S4_D256_Q1_G256                        # KT, PACK
+    K32_Pg_S1_D256_Q1_G256 K32_Pg_S2_D256_Q1_G256 K32_Pg_S8_D256_Q1_G128 # KS
+    K32_Pg_S2_D128_Q1_G256 K32_Pg_S4_D128_Q1_G128                        # DSPLIT
+    K32_Pg_S4_D256_Q0_G256                                               # QSPLIT
+    K32_Pg_S4_D256_Q1_G128)                                              # GRF
+set(PVD_TARGETS)
+foreach(tag IN LISTS PVD_TAGS)
+  string(REGEX MATCH "^K([0-9]+)_P([gh])_S([0-9]+)_D([0-9]+)_Q([01])_G(128|256)$" _m ${tag})
+  if(NOT _m)
+    message(FATAL_ERROR "probe_verify_attn: bad lever tag ${tag}")
+  endif()
+  set(_kt ${CMAKE_MATCH_1})
+  set(_ks ${CMAKE_MATCH_3})
+  set(_dsplit ${CMAKE_MATCH_4})
+  set(_q ${CMAKE_MATCH_5})
+  set(_g ${CMAKE_MATCH_6})
+  set(_ph 0)
+  if(CMAKE_MATCH_2 STREQUAL "h")
+    set(_ph 1)
+  endif()
+  set(_opts)
+  set(_maxl 1024)
+  if(_g EQUAL 256)
+    set(_opts OPTIONS -cl-intel-256-GRF-per-thread)
+    set(_maxl 512)
+  endif()
+  foreach(MM 2 3 4 5 6 7 8 16)
+    if(_ph)
+      math(EXPR _rb "6 * ((${MM} + 7) / 8)")
+    else()
+      math(EXPR _rb "(6 * ${MM} + 7) / 8")
+    endif()
+    math(EXPR _ds "256 / ${_dsplit}")
+    math(EXPR _lanes "16 * ${_rb} * ${_ds} * ${_ks}")
+    math(EXPR _slm "${_rb} * 16 * 128 * 2 * (1 + ${_q})")
+    if(_ks GREATER 1)
+      math(EXPR _slm "${_slm} + ${_rb} * 8 * 256 * 4 + ${_rb} * ${_ds} * 8 * 2 * 4")
+    endif()
+    if(_lanes GREATER _maxl OR _slm GREATER 131072)
+      continue()
+    endif()
+    foreach(KV 0 1)
+      set(_sfx "")
+      if(KV)
+        set(_sfx _KV8)
+      endif()
+      add_ocloc_kernel(pvd_${tag}_M${MM}${_sfx} SOURCE ${PVD_CL}
+                       DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=${_kt} PACK_H=${_ph} KS=${_ks}
+                               DSPLIT=${_dsplit} QSPLIT=${_q} KV8=${KV}
+                       ${_opts})
+      list(APPEND PVD_TARGETS kernel_pvd_${tag}_M${MM}${_sfx})
+    endforeach()
+  endforeach()
+endforeach()
+foreach(MM 5 6 7 8)
+  add_ocloc_kernel(pvd_v2kv8_M${MM} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/kv8.cl
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SRC=2
+                           BROW_DST=3 BROW_SLOT=4 KV8_DEC=1 M=${MM} TGT=32)
+  list(APPEND PVD_TARGETS kernel_pvd_v2kv8_M${MM})
+endforeach()
+add_custom_target(pvd_kernels DEPENDS ${PVD_TARGETS})
+add_executable(probe_verify_attn probe_verify_attn.cc)
+target_include_directories(probe_verify_attn PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                           ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_verify_attn PRIVATE b70_l0 b70_model pthread)
+b70_target_kernel_dir(probe_verify_attn)
+get_property(PVD_SRC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
+get_property(PVD_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
+add_dependencies(probe_verify_attn pvd_kernels ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})

@@ -33,12 +33,18 @@
 // still has 23 launches. Bench rows carry `dv=<size>` for §11's off / 32k / 64k / 128k
 // acceptance and t/s rows (run `--lm-head int8` alone for the off arm).
 //
+// A3 mode (spec 28c, spec 10 A3's form):  mtp_gpu_test <snapshot> <backend> --a3 [--max-len 65536] [--vattn ..]
+//   tests/golden/prompts/long32k.ids prefilled, 256 greedy ids with K = 3 and with the plain loop; prints both streams
+//   ("A3 k3 ids:" / "A3 plain ids:") and their first difference with the plain row's margin there. A driver runs it
+//   with --vattn rule and --vattn v2 and compares the K = 3 streams (identical except near-ties).
+//
 // [--max-len L] (both modes; default 16384, the registrations' and every recorded row's
 // length): the engine's KV / RoPE capacity. Spec 8 §12 lifted A9's 16384-only MTP lists, so
 // mtp_gpu_{32k,128k}_test run the gate at 32768 / 131072 (box queue row 6) and a bench at
 // --depth past long32k.ids repeats that file as its filler.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -52,11 +58,13 @@
 #include "spec_judge.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
+#include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "loader/draft_vocab.h"
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "runtime/engine.h"
+#include "runtime/verify_attn.h"
 
 namespace {
 using model::Qwen35;
@@ -91,6 +99,9 @@ loader::DraftVocabSpec draft_vocab_spec(const std::string& snap, const HeadOpts&
 
 constexpr uint32_t kDefaultMaxLen = 16384;
 uint32_t kMaxLen = kDefaultMaxLen;   // --max-len
+// Spec 28c: --vattn v2|dpas|rule (test-only): the verify lists' attention forced (Engine::recapture_verify) or the
+// capture's measured rule (the default).
+runtime::VerifyAttnForce kVattn = runtime::VerifyAttnForce::Auto;
 constexpr uint32_t kGen = 256;
 
 struct Prompt {
@@ -189,6 +200,9 @@ struct Loaded {
 
 int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts& head) {
   Loaded L(snap, backend, true, head);
+  if (kVattn != runtime::VerifyAttnForce::Auto) L.eng.recapture_verify(runtime::attn_forced(kVattn));
+  std::printf("verify attention: %s (spec 28c; --vattn), %u deep verify lists (%.0f ms to capture)\n",
+              runtime::verify_attn_force_name(kVattn), L.eng.verify_deep_lists(), L.eng.verify_deep_capture_ms());
   // Spec 8 §11: the draft lists keep 23 launches with a draft vocabulary (the compact
   // GEMV and the two dv_argmax stages replace lm_head and the two argmax stages).
   int launch_fail = 0;
@@ -331,9 +345,50 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
   return pass ? 0 : 1;
 }
 
+int a3(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts& head) {
+  Loaded L(snap, backend, true, head);
+  if (kVattn != runtime::VerifyAttnForce::Auto) L.eng.recapture_verify(runtime::attn_forced(kVattn));
+  std::printf("A3: verify attention %s, %u deep verify lists (%.0f ms to capture)\n",
+              runtime::verify_attn_force_name(kVattn), L.eng.verify_deep_lists(), L.eng.verify_deep_capture_ms());
+  const std::vector<uint32_t> prompt = read_ids("./tests/golden/prompts/long32k.ids");
+  CHECK(prompt.size() + kGen + 8 <= kMaxLen);
+  const server::Sampling greedy;
+  EngineAdapter plain(L.eng, Qwen35::kVocabUsed, 0), k3(L.eng, Qwen35::kVocabUsed, 3);
+  const Gen gs = generate(k3, prompt, kGen, greedy);
+  const Gen gp = generate(plain, prompt, kGen, greedy);
+  auto line = [](const char* what, const std::vector<uint32_t>& v) {
+    std::printf("%s", what);
+    for (uint32_t x : v) std::printf(" %u", x);
+    std::printf("\n");
+  };
+  line("A3 k3 ids:", gs.ids);
+  line("A3 plain ids:", gp.ids);
+  const size_t d = first_diff(gp.ids, gs.ids);
+  if (d == SIZE_MAX) {
+    std::printf("A3: K = 3 identical to the plain loop over %u ids (acceptance %.4f)\n", kGen,
+                gs.drafted ? double(gs.accepted) / gs.drafted : 0.0);
+    return 0;
+  }
+  // The plain row that decides id d (the adapter computes one step ahead: replay d ids), the margin in bf16 ulps.
+  generate(plain, prompt, uint32_t(d), greedy);
+  std::vector<float> lg(Qwen35::kVocab);
+  l0::CmdList::immediate(L.ctx).copy(lg.data(), L.eng.buffers().logits.ptr(), lg.size() * 4);
+  uint32_t top = 0;
+  for (uint32_t i = 1; i < Qwen35::kVocabUsed; ++i)
+    if (lg[i] > lg[top]) top = i;
+  uint32_t bits;
+  std::memcpy(&bits, &lg[top], 4);
+  const float ulp = std::ldexp(1.0f, int((bits >> 23) & 0xFF) - 127 - 7);
+  const uint32_t got = gs.ids[d];
+  std::printf("A3: K = 3 differs from the plain loop at %zu: plain %u, K = 3 %u, %.3f bf16 ulp below the plain top\n",
+              d, top, got, got < Qwen35::kVocabUsed ? (lg[top] - lg[got]) / ulp : -1.0);
+  return 0;
+}
+
 int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, bool sampled,
           uint32_t depth, const HeadOpts& head) {
   Loaded L(snap, backend, k > 0, head);
+  if (k > 0 && kVattn != runtime::VerifyAttnForce::Auto) L.eng.recapture_verify(runtime::attn_forced(kVattn));
   const std::string dv = loader::draft_vocab_name(L.eng.mtp() ? L.eng.draft_vocab() : 0);
   const std::string src = ".";
   std::vector<uint32_t> filler = read_ids(src + "/tests/golden/prompts/long32k.ids");
@@ -366,12 +421,12 @@ int bench(const std::string& snap, runtime::PrefillBackend backend, uint32_t k, 
   for (const Prompt& p : prompts) {
     const Gen g = generate(a, p.ids, kGen, s);
     std::printf("BENCH k=%u mode=%s head=%s dv=%s prompt=%s depth=%zu ids=%zu ms=%.1f tps=%.3f "
-                "acc=%.4f per_iter=%.3f\n",
+                "acc=%.4f per_iter=%.3f vattn=%s\n",
                 k, sampled ? "sampled" : "greedy", loader::lm_head_form_name(head.lm_head),
                 dv.c_str(), p.name.c_str(), p.ids.size(), g.ids.size(),
                 g.ms, 1000.0 * g.ids.size() / g.ms,
                 g.drafted ? double(g.accepted) / g.drafted : 0.0,
-                g.iters ? double(g.ids.size()) / g.iters : 1.0);
+                g.iters ? double(g.ids.size()) / g.iters : 1.0, runtime::verify_attn_force_name(kVattn));
     std::fflush(stdout);
   }
   return 0;
@@ -384,7 +439,7 @@ int main(int argc, char** argv) {
     std::fprintf(stderr,
                  "usage: mtp_gpu_test <snapshot> <backend> [--bench K [--sampled] [--depth D]]\n"
                  "                    [--lm-head bf16|int8] [--draft-vocab 32k|64k|128k"
-                 " [--draft-vocab-ids FILE]] [--max-len L]\n");
+                 " [--draft-vocab-ids FILE]] [--max-len L] [--vattn v2|dpas|rule] [--a3]\n");
     return 2;
   }
   runtime::PrefillBackend backend{};
@@ -393,15 +448,23 @@ int main(int argc, char** argv) {
   bool sampled = false;
   uint32_t depth = 4096;
   HeadOpts head;
+  bool a3_mode = false;
   for (int i = 3; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--bench" && i + 1 < argc) bench_k = std::atoi(argv[++i]);
+    else if (a == "--a3") a3_mode = true;   // spec 28c
     else if (a == "--sampled") sampled = true;
     else if (a == "--depth" && i + 1 < argc) depth = uint32_t(std::atoi(argv[++i]));
     else if (a == "--lm-head" && i + 1 < argc) CHECK(loader::parse_lm_head_form(argv[++i], head.lm_head));
     else if (a == "--draft-vocab" && i + 1 < argc) CHECK(loader::parse_draft_vocab(argv[++i], head.draft_vocab));
     else if (a == "--draft-vocab-ids" && i + 1 < argc) head.draft_vocab_ids = argv[++i];
-    else if (a == "--max-len" && i + 1 < argc) {
+    else if (a == "--vattn" && i + 1 < argc) {   // spec 28c
+      const std::string v = argv[++i];
+      CHECK(v == "v2" || v == "dpas" || v == "rule");
+      kVattn = v == "v2" ? runtime::VerifyAttnForce::V2
+               : v == "dpas" ? runtime::VerifyAttnForce::Dpas
+                             : runtime::VerifyAttnForce::Auto;
+    } else if (a == "--max-len" && i + 1 < argc) {
       kMaxLen = uint32_t(std::atoi(argv[++i]));
       CHECK(kMaxLen >= kDefaultMaxLen && kMaxLen % 256 == 0);
     } else {
@@ -410,6 +473,7 @@ int main(int argc, char** argv) {
     }
   }
   try {
+    if (a3_mode) return a3(argv[1], backend, head);
     if (bench_k >= 0) return bench(argv[1], backend, uint32_t(bench_k), sampled, depth, head);
     return gate(argv[1], backend, head);
   } catch (const std::exception& e) {

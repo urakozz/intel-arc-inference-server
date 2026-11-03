@@ -214,6 +214,9 @@ class PipelineEngine {
   void commit(uint32_t j, uint32_t next_token);
   uint32_t draft_vocab() const;   // |V'| (spec 8 §11), 0 = the full head drafts
   const CapturedStep& verify_step(uint32_t dev, uint32_t M) const;
+  // Spec 28c: the key count (pos + 1) from which verify() at M submits the deep lists (DPAS bound), or
+  // kDpasNever (runtime/verify_attn.h's verify_attn_deep_from at this engine's KV form).
+  uint32_t verify_deep_from(uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
   MtpBuffers* mtp_buffers();   // device 1's, null when MTP is off
 
