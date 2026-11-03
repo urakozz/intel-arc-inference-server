@@ -228,4 +228,4 @@ quiet box. Record: docs/probe-verify-attn-2026-11-03.md.
    K = 7, first difference at generated position 103: plain's id is the f32 top on all 9 rows 103..111; the DPAS
    path's is f32 rank 3, **4.0 below the top** (~32 ulp; the top's own margin 3.44). Not a rounding near-tie, so
    `kVerifyAttnTable`'s bf16 M = 6 / 7 / 8 rows are kDpasNever until the kernel is fixed (queued: attn_verify_dpas
-   at 8 rows on this prompt; M = 2..5 keep their thresholds). Log: box `~/b70/logs/cpu-1104/verdict.txt`.
+   at 8 rows on this prompt). Then every row (MTP M = 2..4, int8 too) went to v2 the same day: the kernel is one code at every M and the cause is unknown. Log: box `~/b70/logs/cpu-1104/verdict.txt`.

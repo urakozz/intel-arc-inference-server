@@ -37,11 +37,13 @@ struct VerifyAttnRow {
 // paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00, and
 // N1 >= 0.99999); dpas_from = the smallest measured depth from which every verdict is dpas.
 // One row per built (M, KV form): bf16 at M = 2..8, int8 at M = 2..4 (production's int8 decode lists).
+// 2026-11-04 (operator: "make it work"): EVERY row on v2 until attn_verify_dpas is fixed - its error at 8 rows
+// (below) has no known cause, and the kernel is the same code at every M; the measured thresholds stay as comments.
 inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
-    {2, false, 11585},   // 0.51 | 0.56 | 0.98 | 1.26 | 1.26 | 1.39
-    {3, false, 4096},    // 0.69 | 0.69 | 1.19 | 1.08 | 1.39 | 1.65
-    {4, false, 4096},    // 0.90 | 0.76 | 1.67 | 1.43 | 1.79 | 2.06
-    {5, false, 4096},    // 1.10 | 0.80 | 1.51 | 2.50 | 3.48 | 4.58  (512 dpas, 1448 v2: not monotone)
+    {2, false, kDpasNever}, // was 11585; 0.51 | 0.56 | 0.98 | 1.26 | 1.26 | 1.39
+    {3, false, kDpasNever}, // was 4096; 0.69 | 0.69 | 1.19 | 1.08 | 1.39 | 1.65
+    {4, false, kDpasNever}, // was 4096; 0.90 | 0.76 | 1.67 | 1.43 | 1.79 | 2.06
+    {5, false, kDpasNever}, // was 4096; 1.10 | 0.80 | 1.51 | 2.50 | 3.48 | 4.58  (512 dpas, 1448 v2: not monotone)
     // M = 6..8 (DFlash only) back on v2 (operator 2026-11-04): the f32 check of t6_usage-loader (DFlash K = 7,
     // first difference at generated position 103) puts the DPAS path's id at f32 rank 3, 4.0 below the top (the
     // top's own margin 3.44; plain = the f32 top over rows 103..111) - not a rounding near-tie; the kernel fix is
@@ -53,9 +55,9 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     // int8: at 4096 every M's worst row (q head 19, row 0) is 0.99998797 against the fp64 reference - below 0.99999,
     // and no further than pf_flash_attn_kv8 (the prefill's kernel, 0.99998792 on the same row). Operator ruling
     // 2026-11-03: the int8 N1 bar is "no further than pf_flash_attn_kv8 on the same row", so 4096 is a timing verdict.
-    {2, true, 11585},    // 0.57 | 0.59 | 0.99 | 1.78 | 2.07 | 2.33
-    {3, true, 4096},     // 0.72 | 0.66 | 1.16 | 1.48 | 1.75 | 1.96
-    {4, true, 4096},     // 0.92 | 0.79 | 1.58 | 1.84 | 2.17 | 2.43
+    {2, true, kDpasNever}, // was 11585; 0.57 | 0.59 | 0.99 | 1.78 | 2.07 | 2.33
+    {3, true, kDpasNever}, // was 4096; 0.72 | 0.66 | 1.16 | 1.48 | 1.75 | 1.96
+    {4, true, kDpasNever}, // was 4096; 0.92 | 0.79 | 1.58 | 1.84 | 2.17 | 2.43
 };
 
 inline const VerifyAttnRow* verify_attn_row(uint32_t M, bool kv8) {
