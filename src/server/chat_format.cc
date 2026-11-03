@@ -43,14 +43,14 @@ const char* ChatFormat::name() const {
   }
 }
 
-json template_messages(const ChatFormat& format, const json& messages) {
+nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohmann::ordered_json& messages) {
   if (!format.string_content() || !messages.is_array()) return messages;
-  json out = messages;
-  for (json& m : out) {
+  nlohmann::ordered_json out = messages;
+  for (nlohmann::ordered_json& m : out) {
     if (!m.is_object() || !m.contains("content") || !m.at("content").is_array()) continue;
     std::string text;
     bool first = true;
-    for (const json& part : m.at("content")) {
+    for (const nlohmann::ordered_json& part : m.at("content")) {
       if (!part.is_object() || !part.contains("text") || !part.at("text").is_string()) continue;
       if (!first) text += "\n";
       text += part.at("text").get<std::string>();

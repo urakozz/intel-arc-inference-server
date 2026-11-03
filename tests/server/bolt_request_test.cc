@@ -54,10 +54,10 @@ std::string slurp(const std::string& path) {
 // The real template, recording what the server asked it to render.
 struct RecordingTemplate : server::TemplateIface {
   explicit RecordingTemplate(const std::string& snapshot) : tmpl(snapshot) {}
-  std::string render(const json& messages, const json& tools, bool thinking) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool thinking) override {
     return render_with_kwargs(messages, tools, thinking, json::object());
   }
-  std::string render_with_kwargs(const json& messages, const json& tools, bool thinking, const json& kwargs) override {
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool thinking, const nlohmann::json& kwargs) override {
     ++renders;
     last_thinking = thinking;
     last_kwargs = kwargs;

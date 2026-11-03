@@ -144,7 +144,7 @@ void check_cases(const std::string& dir, std::mt19937_64& rng) {
     }
     for (size_t i = 0; i < got.tool_calls.size(); ++i) {
       CHECK_EQ(got.tool_calls[i].name, e.at("tool_calls").at(i).at("name").get<std::string>());
-      if (got.tool_calls[i].arguments != e.at("tool_calls").at(i).at("arguments")) {
+      if (nlohmann::json(got.tool_calls[i].arguments) != e.at("tool_calls").at(i).at("arguments")) {
         std::fprintf(stderr, "%s: call %zu arguments %s, want %s\n", name.c_str(), i, got.tool_calls[i].arguments.dump().c_str(),
                      e.at("tool_calls").at(i).at("arguments").dump().c_str());
         std::exit(1);

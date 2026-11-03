@@ -40,7 +40,7 @@ int main() {
 
   const server::Request r = server::parse_request(body.dump(), true);
   CHECK(r.chat);
-  CHECK_EQ(r.messages, body.at("messages"));
+  CHECK_EQ(nlohmann::json(r.messages), body.at("messages"));
   CHECK(r.tools.is_null());
   CHECK(r.enable_thinking);
   CHECK(r.max_tokens.has_value());
@@ -152,9 +152,29 @@ int main() {
       {{"role", "user"}, {"content", {{{"type", "text"}, {"text", "a"}}, {{"type", "text"}, {"text", "b"}}}}});
   const server::Request hr = server::parse_request(history.dump(), true);
   CHECK(hr.messages.at(1).at("content").is_null());
-  CHECK_EQ(hr.messages.at(1).at("tool_calls").at(0).at("function").at("arguments"),
+  CHECK_EQ(nlohmann::json(hr.messages.at(1).at("tool_calls").at(0).at("function").at("arguments")),
            nlohmann::json({{"filePath", "/a"}}));
   CHECK(hr.messages.at(3).at("content").is_array());
+  // Key order is the body's (the template prints tools with tojson and arguments with | items, as transformers does
+  // over a client's dicts): tools, message fields and a string's arguments - nested objects too - are not sorted.
+  {
+    const std::string ordered_body =
+        R"({"model": "m", "tools": [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}],)"
+        R"( "messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": null, "tool_calls": [)"
+        R"({"id": "c", "type": "function", "function": {"name": "f", "arguments": "{\"z\": 1, \"a\": {\"y\": 2, \"b\": 3}}"}}]}]})";
+    const server::Request o = server::parse_request(ordered_body, true);
+    CHECK_EQ(o.tools.dump(), std::string(R"([{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}])"));
+    CHECK_EQ(o.messages.at(1).dump(),
+             std::string(R"({"role":"assistant","content":null,"tool_calls":[{"id":"c","type":"function","function":)"
+                         R"({"name":"f","arguments":{"z":1,"a":{"y":2,"b":3}}}}]})"));
+    // ... and a parsed call's arguments go back to the client in the order the model wrote them.
+    server::ParsedOutput out;
+    out.tool_calls.push_back({"call_y", "f", nlohmann::ordered_json::parse(R"({"z": 1, "a": {"y": 2, "b": 3}})")});
+    const nlohmann::json resp = nlohmann::json::parse(server::completion_body(o, "c", 1, "", "tool_calls", {1, 1}, nullptr,
+                                                                              nullptr, &out));
+    CHECK_EQ(resp.at("choices").at(0).at("message").at("tool_calls").at(0).at("function").at("arguments"),
+             std::string(R"({"z":1,"a":{"y":2,"b":3}})"));
+  }
   nlohmann::json bad_args = history;
   bad_args["messages"][1]["tool_calls"][0]["function"]["arguments"] = "{not json";
   CHECK(rejects(bad_args.dump(), true));

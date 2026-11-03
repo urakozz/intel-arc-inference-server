@@ -10,6 +10,7 @@ namespace server {
 namespace {
 
 using json = nlohmann::json;
+using ojson = nlohmann::ordered_json;   // tool-call arguments keep the model's key order
 
 constexpr const char* kThinkEnd = "</think>";
 constexpr const char* kCallBegin = "<tool_call>";
@@ -112,7 +113,7 @@ bool parse_call(const std::string& body, const json& tools, ToolCall& call) {
   const std::string name = body.substr(name_at, gt - name_at);
   if (name.find('\n') != std::string::npos || trim(name).empty()) return false;
   call.name = trim(name);
-  call.arguments = json::object();
+  call.arguments = ojson::object();
   size_t pos = gt + 1;
   for (;;) {
     const size_t p = body.find(kParameter, pos);
@@ -150,11 +151,11 @@ bool parse_call(const std::string& body, const json& tools, ToolCall& call) {
 
 }  // namespace
 
-json convert_value(const std::string& value, const std::string& function, const std::string& key,
-                   const json& tools) {
+ojson convert_value(const std::string& value, const std::string& function, const std::string& key,
+                    const json& tools) {
   const json* type = schema_type(function, key, tools);
   if (type != nullptr && is_string_type(*type)) return value;
-  json parsed = json::parse(value, nullptr, false);
+  ojson parsed = ojson::parse(value, nullptr, false);
   if (parsed.is_discarded()) return value;
   return parsed;
 }
@@ -166,13 +167,13 @@ int schema_string_type(const std::string& function, const std::string& key, cons
 }
 
 bool parse_json_call(const std::string& body, const json& tools, ToolCall& call) {
-  const json j = json::parse(trim(body), nullptr, false);
+  const ojson j = ojson::parse(trim(body), nullptr, false);
   if (j.is_discarded() || !j.is_object() || !j.contains("name") || !j.at("name").is_string()) return false;
   const std::string name = j.at("name").get<std::string>();
   if (name.empty() || std::any_of(name.begin(), name.end(), is_ws)) return false;
-  json args = j.contains("arguments") ? j.at("arguments") : json::object();
-  if (args.is_string()) args = json::parse(args.get<std::string>(), nullptr, false);
-  if (args.is_null()) args = json::object();
+  ojson args = j.contains("arguments") ? j.at("arguments") : ojson::object();
+  if (args.is_string()) args = ojson::parse(args.get<std::string>(), nullptr, false);
+  if (args.is_null()) args = ojson::object();
   if (args.is_discarded() || !args.is_object()) return false;
   for (auto& [key, value] : args.items()) {
     if (!value.is_string() && schema_string_type(name, key, tools) == 1) value = value.dump();

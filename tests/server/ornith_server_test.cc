@@ -46,7 +46,7 @@ std::string slurp(const std::string& path) {
 
 struct OrnithTemplate : server::TemplateIface {
   explicit OrnithTemplate(const std::string& dir) : tmpl(dir) {}
-  std::string render(const json& messages, const json& tools, bool think) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool think) override {
     return tmpl.render(messages, tools, think);
   }
   chat::Template tmpl;

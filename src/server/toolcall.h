@@ -18,7 +18,9 @@ namespace server {
 struct ToolCall {
   std::string id;            // "call_" + 24 hex chars
   std::string name;
-  nlohmann::json arguments;  // object
+  // An object, keys in the order the model wrote them (ordered_json): the response's arguments string keeps that
+  // order, so a client echoing it back is rendered as the turn was generated (the session's prefix stays a prefix).
+  nlohmann::ordered_json arguments;
 };
 
 struct ParsedOutput {
@@ -77,8 +79,8 @@ class OutputStream : public OutputParser {
   bool drop_cut_calls_ = false;
 };
 
-// A call's parameters converted by the tool's schema; exposed for tests.
-nlohmann::json convert_value(const std::string& value, const std::string& function,
+// A call's parameters converted by the tool's schema (a JSON value keeps its key order); exposed for tests.
+nlohmann::ordered_json convert_value(const std::string& value, const std::string& function,
                              const std::string& key, const nlohmann::json& tools);
 
 // Shared with the K2 parser (spec 18d): how the tool's schema types `key` of `function` -

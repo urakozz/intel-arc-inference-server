@@ -392,8 +392,8 @@ void case_prefix(KvCache form) {
 
 // ---- 4. the server ----------------------------------------------------------------------------------
 struct K2Template : server::TemplateIface {
-  std::string render(const json& messages, const json&, bool) override { return body(messages, json::object()); }
-  std::string render_with_kwargs(const json& messages, const json&, bool, const json& kwargs) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool) override { return body(messages, json::object()); }
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool, const nlohmann::json& kwargs) override {
     return body(messages, kwargs);
   }
   static std::string body(const json& messages, const json& kwargs) {

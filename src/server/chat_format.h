@@ -67,7 +67,7 @@ struct ChatFormat {
 // The messages as this format's template reads them: with string_content(), a content that is a
 // list of text parts becomes their texts joined with "\n" (vLLM's "string" content format); otherwise the messages
 // unchanged.
-nlohmann::json template_messages(const ChatFormat& format, const nlohmann::json& messages);
+nlohmann::ordered_json template_messages(const ChatFormat& format, const nlohmann::ordered_json& messages);
 
 // The request's chat_template_kwargs that this format reads, checked before anything runs
 // (a bad value is the client's error, a 400): K2's tool_call_format and reasoning_effort;

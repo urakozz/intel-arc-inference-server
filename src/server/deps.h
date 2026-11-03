@@ -30,12 +30,14 @@ struct TokIface {
 
 struct TemplateIface {
   virtual ~TemplateIface() = default;
-  virtual std::string render(const nlohmann::json& messages, const nlohmann::json& tools,
+  // `messages` and `tools` in the request's own key order (ordered_json): the template prints tools with tojson and
+  // arguments with `| items`, so the order is part of the prompt - transformers' and vLLM's (Python dicts) keep it.
+  virtual std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                              bool enable_thinking) = 0;
   // Spec 18d: with the request's chat_template_kwargs as template variables beside
   // enable_thinking (K2-Horizon's tool_call_format, reasoning_effort; server/chat_format.h says
   // which models get them). The default ignores them.
-  virtual std::string render_with_kwargs(const nlohmann::json& messages, const nlohmann::json& tools,
+  virtual std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                                          bool enable_thinking, const nlohmann::json& kwargs) {
     (void)kwargs;
     return render(messages, tools, enable_thinking);

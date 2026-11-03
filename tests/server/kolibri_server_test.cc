@@ -35,11 +35,11 @@ using json = nlohmann::json;
 struct KolibriTemplate : server::TemplateIface {
   int plain_calls = 0, kwargs_calls = 0;
   json last_kwargs, last_messages;
-  std::string render(const json& messages, const json&, bool) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool) override {
     ++plain_calls;
     return body(messages) + "<|im_start|>assistant\n";
   }
-  std::string render_with_kwargs(const json& messages, const json&, bool think, const json& kwargs) override {
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool think, const nlohmann::json& kwargs) override {
     ++kwargs_calls;
     last_kwargs = kwargs;
     last_messages = messages;
