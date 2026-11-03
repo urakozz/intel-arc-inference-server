@@ -1216,6 +1216,14 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(streamer_test PRIVATE b70_tokenizer)
   add_test(NAME streamer_test COMMAND streamer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
+  # The server's chat prompt ids are transformers' (Qwen3.8, key order kept): every A4 and edit / copy request's
+  # committed .ids, and one session per tests/server/prompt_order_cases.json case whose turn N+1 (the server's own tool
+  # calls echoed back) starts with turn N's prompt + generated ids + EOS. Exit 77 without the snapshot.
+  add_executable(prompt_order_test server/prompt_order_test.cc)
+  target_include_directories(prompt_order_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(prompt_order_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME prompt_order_test COMMAND prompt_order_test ${CMAKE_SOURCE_DIR})
+  set_tests_properties(prompt_order_test PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 
   add_executable(golden_server_test server/golden_server_test.cc)
   target_include_directories(golden_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
