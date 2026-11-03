@@ -3,6 +3,15 @@ find_program(OCLOC_EXECUTABLE ocloc REQUIRED)
 set(B70_KERNEL_DIR "${CMAKE_BINARY_DIR}/kernels" CACHE INTERNAL "directory of compiled device binaries")
 set(B70_OCLOC_DEVICE "bmg-g31" CACHE STRING "ocloc -device target (B70 = Battlemage G31)")
 file(MAKE_DIRECTORY "${B70_KERNEL_DIR}")
+# The compiler's identity (cmake/ocloc_stamp.cmake), refreshed every build and rewritten only when it changes: every
+# kernel depends on it, so a driver / IGC upgrade recompiles them all.
+set(B70_OCLOC_STAMP "${B70_KERNEL_DIR}/.ocloc-toolchain")
+execute_process(COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/ocloc_stamp.cmake" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}")
+add_custom_target(ocloc_toolchain ALL
+  COMMAND "${CMAKE_COMMAND}" -P "${CMAKE_CURRENT_LIST_DIR}/ocloc_stamp.cmake" "${B70_OCLOC_STAMP}" "${OCLOC_EXECUTABLE}"
+  BYPRODUCTS "${B70_OCLOC_STAMP}"
+  COMMENT "ocloc toolchain stamp"
+  VERBATIM)
 
 # add_ocloc_kernel(<name> SOURCE <file.cl> [DEFINES A=1 B=2 ...] [DEPENDS <files>]
 #                  [OPTIONS -cl-... ...])
@@ -50,8 +59,9 @@ function(add_ocloc_kernel NAME)
             -file "${K_SOURCE}" -device "${B70_OCLOC_DEVICE}"
             -output "${NAME}" -output_no_suffix -out_dir "${B70_KERNEL_DIR}"
             -options "${opts}"
-    DEPENDS "${K_SOURCE}" ${K_DEPENDS}
+    DEPENDS "${K_SOURCE}" ${K_DEPENDS} "${B70_OCLOC_STAMP}"
     COMMENT "ocloc ${NAME}"
     VERBATIM)
   add_custom_target("kernel_${NAME}" ALL DEPENDS "${out}")
+  add_dependencies("kernel_${NAME}" ocloc_toolchain)
 endfunction()
