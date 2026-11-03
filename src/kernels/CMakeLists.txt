@@ -1719,7 +1719,8 @@ add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
 # the shapes of kernels::kSmallMTuning (src/kernels/kernels.h) - ONE row per shape, whose knobs are spelled into the
 # name, so a row and a line here that disagree are a missing file at capture (gemm_sm_names_test holds the two
 # together on the Mac). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's tap verify 2..8, spec 13a's rows)
-# and 16 (gemm_sm_test, the probe; no list binds 16 yet); Ornith's at 2..4. The DFlash drafter stays on gemv_i8w.
+# and 16 (gemm_sm_test, the probe; no list binds 16 yet); Ornith's and Flash-Next's at 2..4; the DFlash drafter's at
+# its block's 8 / draft rows' 7 (spec 28d).
 set(GEMM_SM_TARGETS "")
 # add_gemm_sm_variant(M K N S L [WG] [MG] [G256] [B2D]) - L 2 is the int8 form (gemm_sm_i8w_*), S 1 there. The
 # source by its full path: tools/probe calls these helpers from its own directory scope.
@@ -1789,6 +1790,24 @@ set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "20
 if(B70_ORNITH AND B70_MTP)
   set(_m234 2 3 4)
   gemm_sm_rows(GEMM_SM_ORNITH _m234)
+endif()
+# Spec 28d: the DFlash drafter's int8 linears at its block's M = 8 and its compact draft heads at the 7 draft rows
+# (kSmDraft8 / kSmDraft7; the full int8 head is Qwen3.8's row, built at 7 above) - spec 19b's lists bind them.
+set(GEMM_SM_DFLASH "5120 6144 1 2 WG" "4096 5120 1 2 WG" "5120 34816 1 2 WG" "17408 5120 1 2 WG" "25600 5120 1 2 WG"
+                   "5120 2048 1 2 WG" "5120 1280 1 2 WG" "5120 256 1 2 WG")
+set(GEMM_SM_DFLASH_HEAD "5120 32768 1 2 WG" "5120 65536 1 2 WG" "5120 131072 1 2 WG")
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  set(_m8 8)
+  set(_m7 7)
+  gemm_sm_rows(GEMM_SM_DFLASH _m8)
+  gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
+endif()
+# Spec 28d: Qwen3.8-Flash-Next's dense int4 projections and int8 head at its verify lists' M = 2..4 (spec 21e's block
+# builds the lists' gemv; its own capture binds these at M >= 2).
+set(GEMM_SM_Q4EXP "2560 16384 1 0 MG" "2560 13312 2 0 MG" "6144 2560 4 0 MG" "2560 248320 1 2 WG")
+if(B70_Q4EXP AND B70_MTP)
+  set(_m234 2 3 4)
+  gemm_sm_rows(GEMM_SM_Q4EXP _m234)
 endif()
 # tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
 set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})

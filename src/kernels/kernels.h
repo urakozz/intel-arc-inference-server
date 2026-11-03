@@ -95,8 +95,9 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // Which kernel a linear at M rows binds is `runtime::gemv_kind(M)` (runtime/gemv_kind.h): `Gemv`
 // at M = 1 - today's gemv / gemv_i8w binaries, untouched -, `SmallM` at M >= 2. `SmallM` binds
 // gemm_sm / gemm_sm_i8w when the shape has a row in `kSmallMTuning` and gemv / gemv_i8w otherwise
-// (the models 28b does not tune keep their M-row GEMVs; K2, Bolt and Kolibri have no M >= 2 list, Qwen4exp's
-// own capture binds gemv directly - a follow-on).
+// (the models 28b does not tune keep their M-row GEMVs; K2, Bolt and Kolibri have no M >= 2 list). Spec 28d: the
+// DFlash drafter's int8 linears (block of 8) and its draft heads (7 rows), and Qwen3.8-Flash-Next's own capture
+// (its verify lists' M = 2..4) bind gemm_sm too.
 // LinearKind and the rule kernels::gemv_kind(M) are in kernels/linear_kind.h (no kernel-directory dependency).
 
 // One row per weight shape: THE source of truth for its gemm_sm variant at every M (spec 28 §2:
@@ -115,11 +116,12 @@ inline std::string gemv_i8w_variant(unsigned M, unsigned K, unsigned N) {
 // verify-gemm-design.md, "28b as built"); src/kernels/CMakeLists.txt builds exactly these rows
 // (gemm_sm_names_test holds the two together).
 // The M a row is built at (`mset`): the CMake block builds exactly these (gemm_sm_built_m).
-enum : unsigned char { kSmAll = 0, kSmVerify4 = 1 };
+enum : unsigned char { kSmAll = 0, kSmVerify4 = 1, kSmDraft8 = 2, kSmDraft7 = 3 };
 struct SmallMTuning {
   unsigned K, N, S, layout;
   bool wg, magic, grf256, blk2d;
-  unsigned char mset = kSmAll;   // kSmAll: M 2..8 and 16; kSmVerify4: 2..4
+  // kSmAll: M 2..8 and 16; kSmVerify4: 2..4; kSmDraft8: 8 (the DFlash drafter's block); kSmDraft7: 7 (its draft head)
+  unsigned char mset = kSmAll;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
     // Qwen3.8 (and Agnes: the same attention and GDN linears)
@@ -140,6 +142,30 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {2048, 9216, 2, 0, false, true, false, false, kSmVerify4},       // q||k||v
     {2048, 128, 1, 1, false, true, false, false, kSmVerify4},        // a||b (the int4 checkpoint's)
     {2048, 248320, 1, 2, false, false, false, false, kSmVerify4},    // the int8 lm_head
+    // Spec 28d: z-lab/Qwen3.8-27B-DFlash2's int8 linears at its block's M = 8 (the draft and projection lists,
+    // runtime/dflash/dflash_capture.cc) and the compact draft heads at its 7 draft rows (the full head is Qwen3.8's
+    // row above, built at 7). All in-work-group split-K: the int8 form has no grid split-K, and without it a column's
+    // K walk is one sub-group's (K up to 25600) - 28b's int8-head measurement chose wg too. Every head shares the
+    // knobs, so a column's output is the same whatever N (the draft vocabulary's head bitwise the full head's).
+    {5120, 6144, 1, 2, true, false, false, false, kSmDraft8},        // q||k||v
+    {4096, 5120, 1, 2, true, false, false, false, kSmDraft8},        // o_proj
+    {5120, 34816, 1, 2, true, false, false, false, kSmDraft8},       // gate||up
+    {17408, 5120, 1, 2, true, false, false, false, kSmDraft8},       // down
+    {25600, 5120, 1, 2, true, false, false, false, kSmDraft8},       // fc (5 taps)
+    {5120, 2048, 1, 2, true, false, false, false, kSmDraft8},        // the context's k||v (the projection list)
+    {5120, 1280, 1, 2, true, false, false, false, kSmDraft8},        // the conv kernel projections (DFlash 2)
+    {5120, 256, 1, 2, true, false, false, false, kSmDraft8},         // the selector's projection (DFlash 2)
+    {5120, 32768, 1, 2, true, false, false, false, kSmDraft7},       // the draft vocabulary's heads
+    {5120, 65536, 1, 2, true, false, false, false, kSmDraft7},
+    {5120, 131072, 1, 2, true, false, false, false, kSmDraft7},
+    // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections (GPTQ layout 0, model::qwen4exp's S) and its int8 head at
+    // its verify lists' M = 2..4 (runtime/qwen4exp/qwen4exp_capture.cc) - magic dequant (bit-identical to the shift
+    // form), no lever swept; the head the in-work-group form (28b's int8-head choice). Its bf16 linears (a||b, the
+    // indexer, the router, the HC and the MTP head's) stay gemv_bf16.
+    {2560, 16384, 1, 0, false, true, false, false, kSmVerify4},      // GDN qkv||z
+    {2560, 13312, 2, 0, false, true, false, false, kSmVerify4},      // QSA q||gate||k||v
+    {6144, 2560, 4, 0, false, true, false, false, kSmVerify4},       // GDN out_proj, QSA o_proj
+    {2560, 248320, 1, 2, true, false, false, false, kSmVerify4},     // the int8 lm_head
 };
 // The row of a shape, or null (that shape keeps gemv / gemv_i8w at every M). int8: layout 2, S 1.
 inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsigned S, unsigned layout) {
@@ -176,11 +202,15 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }
 // The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
-// together): 2..8 and 16 for Qwen3.8's / Agnes's linears and head; Ornith's at its verify lists' 2..4. (The DFlash
-// drafter's own int8 linears and its draft head stay on gemv_i8w in 28b: dflash_draft_test holds the drafter
-// bitwise to its host twin of gemv_i8w's order - a follow-on with a restated drafter gate.)
+// together): 2..8 and 16 for Qwen3.8's / Agnes's linears and head; Ornith's and Flash-Next's at their verify lists'
+// 2..4; the DFlash drafter's linears at its block's 8 and its draft heads at 7 (spec 28d).
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
-  return t.mset == kSmVerify4 ? std::vector<unsigned>{2, 3, 4} : std::vector<unsigned>{2, 3, 4, 5, 6, 7, 8, 16};
+  switch (t.mset) {
+    case kSmVerify4: return {2, 3, 4};
+    case kSmDraft8: return {8};
+    case kSmDraft7: return {7};
+    default: return {2, 3, 4, 5, 6, 7, 8, 16};
+  }
 }
 inline constexpr const char* gemm_sm_entry(const SmallMTuning& t) { return t.layout == 2 ? "gemm_sm_i8w" : "gemm_sm"; }
 // The int4 / int8 linear a capture binds at M rows of kind `k` - the one naming rule the captures and
