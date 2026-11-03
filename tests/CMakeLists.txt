@@ -3382,6 +3382,13 @@ if(B70_Q4EXP AND B70_MTP)
         kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SH4 kernel_q4_moe_M${MM}_E512_T10_D2560_I640_SHB)
     endif()
   endforeach()
+  # Spec 28d: the verify lists' dense int4 projections and int8 head at M 2..4 on gemm_sm (spec 28b's block builds
+  # them, kSmallMTuning's Flash-Next rows) - in this list so every MTP test depends on them; the gemv / gemv_i8w ones
+  # above stay bound under the tests' override (CaptureOptions::force_linear).
+  foreach(MM 2 3 4)
+    list(APPEND B70_Q4EXP_MTP_KERNELS kernel_gemm_sm_M${MM}_K2560_N16384_S1_L0_mg kernel_gemm_sm_M${MM}_K2560_N13312_S2_L0_mg
+      kernel_gemm_sm_M${MM}_K6144_N2560_S4_L0_mg kernel_gemm_sm_i8w_M${MM}_K2560_N248320_wg)
+  endforeach()
   set(_q4mtp_reused ${B70_Q4EXP_DECODE_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} kernel_argmax_stage1_M2
     kernel_argmax_stage1_M3 kernel_argmax_stage1_M4)
   if(TARGET qwen4exp_snapshot_gpu_test)   # its `mtp` mode binds the head's lists

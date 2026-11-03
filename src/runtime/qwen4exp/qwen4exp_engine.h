@@ -55,8 +55,10 @@ class Qwen4ExpEngine {
   // `devices[i]` is the context of placement device i (device 1 a view of device 0's context); `model` was
   // loaded onto them at `max_len`. debug_tap: the per-layer H copy the partial-forward gate reads. Two devices:
   // throws when device 0 cannot access device 1's memory (zeDeviceCanAccessPeer).
+  // `cap` (spec 28d): the verify lists' capture override - tests and probes only (CaptureOptions::force_linear Gemv
+  // binds the pre-28d gemv / gemv_i8w at M >= 2; the default binds gemm_sm there, runtime::gemv_kind).
   Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4LoadedModel model, uint32_t max_len,
-                 bool debug_tap = false, const PipelineOptions& opt = {});
+                 bool debug_tap = false, const PipelineOptions& opt = {}, const CaptureOptions& cap = {});
   ~Qwen4ExpEngine();
   Qwen4ExpEngine(const Qwen4ExpEngine&) = delete;
   Qwen4ExpEngine& operator=(const Qwen4ExpEngine&) = delete;
@@ -286,6 +288,7 @@ class Qwen4ExpEngine {
   loader::Q4LoadedModel model_;
   uint32_t max_len_;
   PipelineOptions opt_;
+  CaptureOptions cap_;   // spec 28d: the verify lists' override (tests only)
   Q4Attn attn_;
   std::vector<std::unique_ptr<Stage>> st_;
   std::unique_ptr<PipelineLink> link_;

@@ -67,6 +67,10 @@ struct ListSpec {
   uint32_t M = 1;        // Verify: 1..kVerifyRows; Decode / Draft: 1
   uint32_t draft = 0;    // Draft: the step index (0 reads hh row 0, later steps the previous step's H)
   bool select = true;    // Draft: whether the step scores and selects (step 0; every step under `fresh`)
+  // Spec 28d: the dense int4 projections and the int8 head bind gemm_sm at M >= 2 (runtime::gemv_kind, as Qwen3.8's
+  // capture; kSmallMTuning's Flash-Next rows), gemv / gemv_i8w at M = 1. `opt.force_linear` is the tests' / probes'
+  // override only (Gemv: the verify rows bitwise the plain steps, the pre-28d binding).
+  CaptureOptions opt;
 };
 // The head's pieces the Verify / Draft lists bind (the last device).
 struct MtpBinding {

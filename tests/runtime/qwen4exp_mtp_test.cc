@@ -23,6 +23,15 @@
 //   cost the verify's cost: ms a draft step and a verify at K = 0..3 (median of 16 iterations, interleaved), and per
 //       layer the union of experts over the verify rows at K = 3 (read_verify_routes: spec 22 P0.6's MTP term) -
 //       recorded, no bar.
+// Spec 28d: the verify lists' dense int4 projections and int8 head run gemm_sm at M = 2..4 (runtime::gemv_kind), so
+// their rows are no longer bitwise the M = 1 steps (spec 28 §3). M2, M3 and cost run twice: the `gemv` arm (the lists
+// forced onto gemv / gemv_i8w, CaptureOptions::force_linear - the pre-28d gates above, BITWISE, unchanged) and the
+// `gemm_sm` arm (the default) under spec 28's rules as ruled 2026-11-03 for a context without an f32 judge (none
+// exists for the synthetics): N4 - every verify row's logits cosine >= 0.99999 against the plain step's; N6 - the ids
+// (a verify row's argmax, the 8 after commit, M3's 64) identical to the plain run's or first differing at a near-tie
+// by the golden tie rule (tests/server/greedy_tie.h: the plain row's runner-up within 1 bf16 ulp; the comparison
+// stops there). Routes, selections, K / V and the GDN slots are printed (differing rows, cosine), not gated: they
+// follow from the rows' last bits. The cost line of each arm is the speed before / after.
 // Exit 77 (SKIP) when the checkpoint is absent, has no MTP head, or two GPUs are needed.
 #include <algorithm>
 #include <chrono>
@@ -37,6 +46,7 @@
 
 #include "check.h"
 #include "golden_common.h"
+#include "server/greedy_tie.h"
 #include "qwen4exp_rig.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
@@ -198,8 +208,38 @@ std::string first_diff(const StepRef& a, const StepRef& b) {
   return "";
 }
 
-int run_m2(rq::Qwen4ExpEngine& e, const Ids& base) {
+// Spec 28d: the plain row that decided id `p` of the greedy run from `prompt` (p >= 1; prefill, then p plain steps),
+// for the tie rule at a divergence. The row's top-1 must be that id (greedy_tie::classify checks it).
+greedy_tie::RefStep plain_row(rq::Qwen4ExpEngine& e, const Ids& prompt, size_t p) {
+  e.reset();
+  e.prefill(prompt);
+  if (p > 0) e.generate(uint32_t(p));
+  const std::vector<float> row = e.read_logits();
+  return greedy_tie::ref_step(row.data(), e.model().desc.vocab_used);
+}
+// N6 under the tie rule: `got` against the plain ids `want`, which are positions first .. of the greedy run from
+// `prompt`. Returns the verdict (the plain row read only at a divergence).
+greedy_tie::Result tie_verdict(rq::Qwen4ExpEngine& e, const Ids& prompt, size_t first, const Ids& want, const Ids& got) {
+  size_t d = 0;
+  while (d < want.size() && d < got.size() && want[d] == got[d]) ++d;
+  std::vector<greedy_tie::RefStep> steps;
+  if (d < want.size() && d < got.size() && first + d > 0) {
+    steps.resize(d + 1);
+    steps[d] = plain_row(e, prompt, first + d);
+  }
+  return greedy_tie::classify(want, steps, got);
+}
+const char* verdict_name(const greedy_tie::Result& r) {
+  return r.v == greedy_tie::Verdict::Same ? "identical" : r.v == greedy_tie::Verdict::Tie ? "a near-tie" : "DIVERGED";
+}
+double cos_u16(const std::vector<uint16_t>& a, const std::vector<uint16_t>& b) {
+  return a.size() == b.size() && !a.empty() ? cosine_bf16(a.data(), b.data(), a.size()) : 0.0;
+}
+
+// `bitwise`: the gemv arm (the pre-28d gate); else the gemm_sm arm's N4 / N6 (the header).
+int run_m2(rq::Qwen4ExpEngine& e, const Ids& base, bool bitwise) {
   int bad = 0;
+  const char* arm = bitwise ? "gemv" : "gemm_sm";
   for (const size_t len : {size_t(120), size_t(2100)}) {
     const Ids prompt = cycle(base, len);
     e.reset();
@@ -230,24 +270,55 @@ int run_m2(rq::Qwen4ExpEngine& e, const Ids& base) {
       e.verify(k);
       for (uint32_t r = 0; r <= k; ++r) {
         // row r's GDN slot is (live + r) % 4 with live 0 after load_state; record() reads that slot
-        const std::string diff = first_diff(record(e, r, k + 1, n), ref[r]);
-        if (!diff.empty()) {
-          std::fprintf(stderr, "M2 prompt %zu, k %u: row %u differs from the plain step %u at %s\n", len, k, r, r,
-                       diff.c_str());
-          ++bad;
+        const StepRef got = record(e, r, k + 1, n);
+        if (bitwise) {
+          const std::string diff = first_diff(got, ref[r]);
+          if (!diff.empty()) {
+            std::fprintf(stderr, "M2 prompt %zu, k %u: row %u differs from the plain step %u at %s\n", len, k, r, r,
+                         diff.c_str());
+            ++bad;
+          }
+          continue;
         }
+        // N4: the row's logits against the plain step's; N6: its argmax (the tie rule on the plain row)
+        const double c = cosine(got.logits.data(), ref[r].logits.data(), got.logits.size());
+        const greedy_tie::RefStep rs = greedy_tie::ref_step(ref[r].logits.data(), e.model().desc.vocab_used);
+        const greedy_tie::Result tv = greedy_tie::classify({ref[r].id}, {rs}, {got.id});
+        size_t route_rows = 0;
+        for (size_t i = 0; i < got.routes.size(); i += rq::kRouteWords)
+          route_rows += !std::equal(got.routes.begin() + i, got.routes.begin() + i + rq::kRouteWords, ref[r].routes.begin() + i);
+        size_t sel = 0;
+        for (size_t i = 0; i < got.sel.size(); ++i) sel += got.sel[i] != ref[r].sel[i];
+        double kv = 1, gdn = 1;
+        for (size_t i = 0; i < got.k.size(); ++i) kv = std::min({kv, cos_u16(got.k[i], ref[r].k[i]), cos_u16(got.v[i], ref[r].v[i])});
+        for (size_t i = 0; i < got.gdn.size(); ++i)
+          gdn = std::min(gdn, cosine(got.gdn[i].data(), ref[r].gdn[i].data(), got.gdn[i].size()));
+        const bool ok = c >= 0.99999 && tv.v != greedy_tie::Verdict::Diverged;
+        std::printf("M2 gemm_sm prompt %zu, k %u, row %u: logits cosine %.7f (N4 >= 0.99999), id %s; route rows "
+                    "differing %zu, selections differing %zu, K / V cosine %.7f, GDN slot cosine %.7f%s\n", len, k, r, c,
+                    verdict_name(tv), route_rows, sel, kv, gdn, ok ? "" : " - FAIL");
+        bad += !ok;
       }
       e.commit(k, g[k + 1]);
       // after commit(k) pos is n + k + 1 and the pending id g[k + 1]: generate's 8 ids are full[k + 1 .. k + 9)
       const Ids after = e.generate(8);
       const Ids want(full.begin() + k + 1, full.begin() + k + 9);
-      if (after != want) {
-        std::fprintf(stderr, "M2 prompt %zu, k %u: the ids after commit(%u) are not the plain run's\n", len, k, k);
-        ++bad;
+      if (bitwise) {
+        if (after != want) {
+          std::fprintf(stderr, "M2 prompt %zu, k %u: the ids after commit(%u) are not the plain run's\n", len, k, k);
+          ++bad;
+        }
+      } else if (after != want) {
+        const greedy_tie::Result tv = tie_verdict(e, prompt, k + 1, want, after);
+        std::printf("M2 gemm_sm prompt %zu, k %u: the 8 ids after commit(%u) first differ from the plain run's at %zu: "
+                    "%s (margin %.3f ulp, rank %u)\n", len, k, k, tv.at, verdict_name(tv), tv.margin_ulps, tv.cand_rank);
+        bad += tv.v == greedy_tie::Verdict::Diverged;
       }
     }
-    std::printf("M2 prompt of %zu ids (pos %u): verify rows at M = 2, 3, 4 %s M = 1's steps (logits, routes, "
-                "selections, K / V, GDN slots, ids)\n", len, n, bad ? "DIFFER from" : "bitwise");
+    std::printf("M2 [%s] prompt of %zu ids (pos %u): verify rows at M = 2, 3, 4 %s\n", arm, len, n,
+                bitwise ? (bad ? "DIFFER from M = 1's steps (logits, routes, selections, K / V, GDN slots, ids)"
+                               : "bitwise M = 1's steps (logits, routes, selections, K / V, GDN slots, ids)")
+                        : (bad ? "FAIL spec 28's N4 / N6 (lines above)" : "pass spec 28's N4 / N6 (lines above)"));
   }
   return bad;
 }
@@ -280,6 +351,8 @@ Ids speculative(rq::Qwen4ExpEngine& e, uint32_t K, uint32_t n, uint64_t* drafted
 
 int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Options o, const Ids& base) {
   int bad = 0;
+  const bool bitwise = o.force_linear == runtime::LinearForce::Gemv;
+  const char* arm = bitwise ? "gemv" : "gemm_sm";
   std::vector<Ids> plain;
   o.mtp = false;
   qwen4exp_rig::build(rig, snap, o);
@@ -306,11 +379,20 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
       e.prefill(prompt);
       uint64_t dr = 0, ac = 0;
       const Ids got = speculative(e, K, 64, &dr, &ac);
-      const bool ok = got == plain[pi];
+      std::string how = got == plain[pi] ? "bitwise" : "DIFFER from";
+      bool ok = got == plain[pi];
+      if (!ok && !bitwise) {   // spec 28d: N6 under the tie rule (no f32 judge for the synthetics)
+        const greedy_tie::Result tv = tie_verdict(e, prompt, 0, plain[pi], got);
+        ok = tv.v != greedy_tie::Verdict::Diverged;
+        char b[160];
+        std::snprintf(b, sizeof b, "first differ at %zu from (%s, margin %.3f ulp, rank %u)", tv.at, verdict_name(tv),
+                      tv.margin_ulps, tv.cand_rank);
+        how = b;
+      }
       bad += ok ? 0 : 1;
-      std::printf("M3 prompt %zu, K %u: 64 ids %s the plain run (drafts accepted %llu / %llu - a truncated or "
-                  "synthetic model's acceptance means nothing, spec 22 measures it)\n", len, K,
-                  ok ? "bitwise" : "DIFFER from", (unsigned long long)ac, (unsigned long long)dr);
+      std::printf("M3 [%s] prompt %zu, K %u: 64 ids %s the plain run (drafts accepted %llu / %llu - a truncated or "
+                  "synthetic model's acceptance means nothing, spec 22 measures it)\n", arm, len, K, how.c_str(),
+                  (unsigned long long)ac, (unsigned long long)dr);
     }
     ++pi;
   }
@@ -318,7 +400,7 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
 }
 
 // --- the verify's cost --------------------------------------------------------------------------------------------
-void run_cost(rq::Qwen4ExpEngine& e, const Ids& base) {
+void run_cost(rq::Qwen4ExpEngine& e, const Ids& base, const char* arm) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   e.reset();
   e.prefill(cycle(base, 2100));
@@ -341,7 +423,7 @@ void run_cost(rq::Qwen4ExpEngine& e, const Ids& base) {
     std::sort(x.begin(), x.end());
     return x.empty() ? 0.0 : x[x.size() / 2];
   };
-  std::printf("cost (%u layers, %u device(s), %s attention): verify M = 1 %.3f ms", d.layers, e.devices(),
+  std::printf("cost [%s] (%u layers, %u device(s), %s attention): verify M = 1 %.3f ms", arm, d.layers, e.devices(),
               rq::q4_attn_name(e.attention()), median(v[0]));
   for (uint32_t k = 1; k <= rq::kMaxDraft; ++k)
     std::printf(", M = %u %.3f ms (x%.2f)", k + 1, median(v[k]), median(v[k]) / median(v[0]));
@@ -413,18 +495,23 @@ int main(int argc, char** argv) {
   int bad = 0;
   try {
     if (m1) bad += run_m1(rig, snapdir, o, fixdir);
-    if (m2 || cost) {
-      o.mtp = true;
-      qwen4exp_rig::build(rig, snapdir, o);
-      std::printf("engine: %u layers, %u device(s), the head (%s norm, %s selection); verify launches M = 1..4: %zu %zu "
-                  "%zu %zu; draft steps %zu / %zu\n", rig.eng->model().desc.layers, rig.eng->devices(),
-                  rq::mtp_norm_name(rig.eng->mtp_norm()), rq::mtp_select_name(rig.eng->mtp_select()),
-                  rig.eng->verify_list_launches(1), rig.eng->verify_list_launches(2), rig.eng->verify_list_launches(3),
-                  rig.eng->verify_list_launches(4), rig.eng->draft_list_launches(0), rig.eng->draft_list_launches(1));
-      if (m2) bad += run_m2(*rig.eng, base);
-      if (cost) run_cost(*rig.eng, base);
+    // spec 28d: the gemv arm (the pre-28d binding, bitwise gates) then the gemm_sm arm (the default)
+    for (const runtime::LinearForce arm : {runtime::LinearForce::Gemv, runtime::LinearForce::Auto}) {
+      o.force_linear = arm;
+      const bool bitwise = arm == runtime::LinearForce::Gemv;
+      if (m2 || cost) {
+        o.mtp = true;
+        qwen4exp_rig::build(rig, snapdir, o);
+        std::printf("engine [%s]: %u layers, %u device(s), the head (%s norm, %s selection); verify launches M = 1..4: "
+                    "%zu %zu %zu %zu; draft steps %zu / %zu\n", bitwise ? "gemv" : "gemm_sm", rig.eng->model().desc.layers,
+                    rig.eng->devices(), rq::mtp_norm_name(rig.eng->mtp_norm()), rq::mtp_select_name(rig.eng->mtp_select()),
+                    rig.eng->verify_list_launches(1), rig.eng->verify_list_launches(2), rig.eng->verify_list_launches(3),
+                    rig.eng->verify_list_launches(4), rig.eng->draft_list_launches(0), rig.eng->draft_list_launches(1));
+        if (m2) bad += run_m2(*rig.eng, base, bitwise);
+        if (cost) run_cost(*rig.eng, base, bitwise ? "gemv" : "gemm_sm");
+      }
+      if (m3) bad += run_m3(rig, snapdir, o, base);
     }
-    if (m3) bad += run_m3(rig, snapdir, o, base);
   } catch (const std::exception& ex) {
     const std::string w = ex.what();
     if (w.find("mtp") != std::string::npos && w.find("load") != std::string::npos) {

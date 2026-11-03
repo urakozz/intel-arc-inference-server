@@ -47,6 +47,13 @@ int main(int argc, char** argv) {
   CHECK_EQ(kq::pf_ple_verify_variant(), std::string("q4_pf_ple_C4"));
   CHECK_EQ(kq::qkvg_m_variant(3, true), std::string("gemv_M3_K2560_N13312_S2_L0"));
   CHECK_EQ(kq::lm_head_m_variant(2, true), std::string("gemv_i8w_M2_K2560_N248320"));
+  // spec 28d: the lists' rule (gemv_kind) - gemm_sm at M >= 2, gemv at M = 1
+  CHECK_EQ(kq::qkvg_m_variant(3, true, kernels::gemv_kind(3)), std::string("gemm_sm_M3_K2560_N13312_S2_L0_mg"));
+  CHECK_EQ(kq::qkvz_m_variant(2, true, kernels::gemv_kind(2)), std::string("gemm_sm_M2_K2560_N16384_S1_L0_mg"));
+  CHECK_EQ(kq::out_m_variant(4, true, kernels::gemv_kind(4)), std::string("gemm_sm_M4_K6144_N2560_S4_L0_mg"));
+  CHECK_EQ(kq::lm_head_m_variant(2, true, kernels::gemv_kind(2)), std::string("gemm_sm_i8w_M2_K2560_N248320_wg"));
+  CHECK_EQ(kq::qkvz_m_variant(1, true, kernels::gemv_kind(1)), std::string("gemv_M1_K2560_N16384_S1_L0"));
+  CHECK_EQ(kq::qkvz_m_variant(2, false, kernels::gemv_kind(2)), std::string("gemv_bf16_M2_K2560_N16384"));
 
   std::set<std::string> bound;
   model::Qwen4ExpDesc intel = model::qwen4exp();
@@ -56,8 +63,12 @@ int main(int argc, char** argv) {
       for (bool ple_bf16 : {false, true})
         for (bool int8 : {false, true})
           for (bool single : {false, true}) {
-            for (unsigned M = 1; M <= kq::kMtpVerifyRows; ++M)
+            for (unsigned M = 1; M <= kq::kMtpVerifyRows; ++M) {
               for (const std::string& v : kq::verify_variants(*f, M, int8, eager, ple_bf16, single)) bound.insert(v);
+              // spec 28d: the tests' override binds gemv / gemv_i8w at M >= 2 (CaptureOptions::force_linear)
+              for (const std::string& v : kq::verify_variants(*f, M, int8, eager, ple_bf16, single, kernels::LinearKind::Gemv))
+                bound.insert(v);
+            }
             for (const std::string& v : kq::draft_variants(int8, eager, single)) bound.insert(v);
             for (const std::string& v : kq::mtp_prefill_variants(single)) bound.insert(v);
           }

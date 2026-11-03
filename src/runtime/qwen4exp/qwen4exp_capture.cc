@@ -176,7 +176,7 @@ class Walk {
     if (spec_.kind == ListKind::Decode)
       need = kq::decode_variants(d_, int8, eager, b_.placement.devices == 2, bf16s);
     else if (spec_.kind == ListKind::Verify)
-      need = kq::verify_variants(d_, M_, int8, eager, bf16s, mtp_->single);
+      need = kq::verify_variants(d_, M_, int8, eager, bf16s, mtp_->single, lkind());
     else
       need = kq::draft_variants(int8, eager, mtp_->single);
     if (link_ && link_->mode == PpHandoff::Peer) need.push_back(kernels::pp_handoff_variant());
@@ -265,19 +265,35 @@ class Walk {
     k.arg_ptr(2, out);
     launch(k, N / t.cols);
   }
-  // A dense linear into `out`: gemv(w, scales, x, out) grid (N / 64, S) for int4 layout 0, gemv_bf16 otherwise.
-  // Returns the slices it wrote (S, 1 for bf16).
+  // Spec 28d: which kernel the int4 / int8 linears bind (runtime/gemv_kind.h): gemm_sm at M >= 2 unless forced.
+  kernels::LinearKind lkind() const { return linear_kind(M_, spec_.opt); }
+  // The gemm_sm row of a shape this list binds, or null (gemv / gemv_i8w).
+  const kernels::SmallMTuning* small_m(uint32_t K, uint32_t N, uint32_t S, uint32_t layout) const {
+    return lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, layout) : nullptr;
+  }
+  // A dense linear into `out`: gemv(w, scales, x, out) grid (N / 64, S) for int4 layout 0 - at M >= 2 gemm_sm (spec
+  // 28d: gemv's arguments and [S][M][N] output at the shape's S, the consumer's fold unchanged) -, gemv_bf16
+  // otherwise. Returns the slices it wrote (S, 1 for bf16).
   uint32_t linear(const loader::DeviceWeight& w, const void* x, const l0::Mem& out) {
     const model::GemvShape& s = w.shape;
     if (w.kind == model::WeightKind::Int4) {
       require(s.layout == 0 && w.scales, "a Qwen3.8-Flash-Next int4 linear is GPTQ layout 0 with its own scales");
       require(out.size() >= size_t(s.S) * M_ * s.N * 4, "the GEMV's output is smaller than [S][M][N]");
-      l0::Kernel& k = kernel(kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout), "gemv", 64);
+      const kernels::SmallMTuning* t = small_m(s.K, s.N, s.S, s.layout);
+      require(lkind() == kernels::LinearKind::Gemv || t,
+              "no gemm_sm row for the int4 linear " + std::to_string(s.K) + " x " + std::to_string(s.N) +
+                  " (kernels::kSmallMTuning)");
+      if (t) require(kernels::gemm_sm_out_s(*t) == s.S, "gemm_sm writes another split-K S than the consumer folds");
+      l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M_, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                        : kernel(kernels::gemv_variant(M_, s.K, s.N, s.S, s.layout), "gemv", 64);
       k.arg_ptr(0, w.mem.ptr());
       k.arg_ptr(1, w.scales->ptr());
       k.arg_ptr(2, x);
       k.arg_ptr(3, out.ptr());
-      launch(k, s.N / 64, s.S);
+      if (t)
+        launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+      else
+        launch(k, s.N / 64, s.S);
       return s.S;
     }
     require(w.kind == model::WeightKind::Bf16, "gemv_bf16 bound to a non-bf16 weight");
@@ -586,12 +602,19 @@ class Walk {
     require(lm.shape.N == d_.vocab && lm.shape.K == d_.hidden, "lm_head is not [vocab][hidden]");
     if (lm.kind == model::WeightKind::Int8) {
       require(bool(lm.scales), "the int8 lm_head has no row scales");
-      l0::Kernel& k = kernel(kernels::gemv_i8w_variant(M_, lm.shape.K, lm.shape.N), "gemv_i8w", kernels::kGemvI8wCols);
+      // spec 28d: gemm_sm_i8w at M >= 2 (gemv_i8w's arguments and [M][N] output)
+      const kernels::SmallMTuning* t = small_m(lm.shape.K, lm.shape.N, 1, 2);
+      require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 lm_head");
+      l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M_, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                        : kernel(kernels::gemv_i8w_variant(M_, lm.shape.K, lm.shape.N), "gemv_i8w", kernels::kGemvI8wCols);
       k.arg_ptr(0, lm.mem.ptr());
       k.arg_ptr(1, lm.scales->ptr());
       k.arg_ptr(2, b_.x.ptr());
       k.arg_ptr(3, logits);
-      launch(k, lm.shape.N / kernels::kGemvI8wCols);
+      if (t)
+        launch(k, lm.shape.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+      else
+        launch(k, lm.shape.N / kernels::kGemvI8wCols);
     } else {
       require(lm.kind == model::WeightKind::Bf16, "lm_head is int8 or bf16");
       bf16_linear(lm.mem.ptr(), lm.shape.K, lm.shape.N, b_.x.ptr(), logits, size_t(M_) * lm.shape.N * 4);
