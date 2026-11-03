@@ -368,5 +368,18 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    bitwise to the M = 8 verify's (N3), their cosine to the plain steps recorded; dflash_lookup's warm ring bitwise
    plain --spec dflash's. The contexts are dumped (`B70_DUMP_FORCED`); Qwen3.8's f32 references for them are the CPU
    lane's (tools/box_validate/f32_refs.sh's `forced` mode serves ornith / k2 only today).
+   **The CPU lane's f32 check of the three far divergences (2026-11-03;** tools/oracle/dump_taps.py teacher-forced,
+   fp32 GEMMs over bf16 activations, the top-64 f32 logits a row - no full-row cosine**), graded by N6 as built** (the
+   judge's misses from the divergence, d .. d + 8; the near-miss allowance 8 bf16 ulp of the f32 top - the top logits
+   here sit in [16, 32), ulp 0.125, as M2a's measured logit differences show):
+
+   | case | pos | plain / spec token in f32 | misses d..d+8, plain / spec | N6 |
+   |---|---|---|---|---|
+   | t3_rename-step, MTP K1/K2 | 191 | plain rank 2, 1.455 below (11.6 ulp); spec top-1 | 1 / 0 | **PASS** (fewer misses than plain) |
+   | t5_test-openai, MTP K1/K2 | 99 | plain top-1; spec rank 4, 1.136 below (9.1 ulp) | 0 / 1 | **FAIL** (the extra miss is 9.1 ulp, over 8) |
+   | t6_usage-box, DFlash K = 7 | 37 | plain top-1 (margin 3.42); spec rank 2, 1.074 below (8.6 ulp) | 0 / 1 (+ row 38, 0.040 below: a tie by the judge's own 1-ulp rule) | **FAIL** (8.6 ulp, over 8) |
+
+   The errors are two-sided (spec closer to f32 on t3, plain on t5 / t6); two of three fail the near-miss allowance by
+   0.6-1.1 ulp. No bar is widened here; the remaining 54 divergent runs (and the N4 rows) have no Qwen3.8 judge yet.
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
 3. The quiet-box re-check (r69.speed / r69.d1) and the G0 suite (run only for the M >= 2 gate tests so far).
