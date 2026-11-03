@@ -222,13 +222,35 @@ case "$mode" in
     if [ -s "$dest/model.safetensors.index.json" ]; then
       echo "qwen4exp_oracle: the PLE int8 file is there ($dest)"
     else
-      df -h . "$hf" 2>/dev/null | tail -2
-      echo "qwen4exp_oracle: ple_int8.py on $model -> $dest (~51.8 GB written, ESTIMATED ~0.5-1 h) ($(date '+%F %T'))"
-      if in_box "mkdir -p /ws/oracle-out-q4exp-ple.partial && python3 tools/quantize/qwen4exp/ple_int8.py \"\$SNAP\" \
+      df -h . "$hf" "$(dirname "$dest")" 2>/dev/null | tail -3
+      # The destination sits beside the snapshot - on the box a bind mount of the operator's USB disk, another
+      # filesystem than the tree: the final mv is a copy there. Refuse up front when it cannot hold the file
+      # (2026-11-03: the copy filled the USB disk and the stage still reported the file written).
+      ple_need_gb=56
+      dest_free_gb=$(df -P -k "$(dirname "$dest")" 2>/dev/null | awk 'NR == 2 { print int($4 / 1048576) }')
+      if [ "$dry" != 1 ] && [ "${dest_free_gb:-0}" -lt "$ple_need_gb" ] \
+         && [ ! -s oracle-out-q4exp-ple.partial/ple/model.safetensors.index.json ]; then
+        echo "qwen4exp_oracle: ple-int8 REFUSED: $(dirname "$dest") has ${dest_free_gb:-?} GB free, the file needs $ple_need_gb"
+        rc=1
+      elif [ -s oracle-out-q4exp-ple.partial/ple/model.safetensors.index.json ] \
+         || in_box "mkdir -p /ws/oracle-out-q4exp-ple.partial && python3 tools/quantize/qwen4exp/ple_int8.py \"\$SNAP\" \
             /ws/oracle-out-q4exp-ple.partial/ple --scale ${Q4_PLE_SCALE:-bf16} && python3 tools/quantize/qwen4exp/check.py \
             \"\$SNAP\" --ple /ws/oracle-out-q4exp-ple.partial/ple"; then
-        [ "$dry" = 1 ] || mv oracle-out-q4exp-ple.partial/ple "$dest"
-        echo "qwen4exp_oracle: the PLE int8 file written ($dest, $(date '+%F %T'))"
+        echo "qwen4exp_oracle: ple_int8.py ACCEPTED in oracle-out-q4exp-ple.partial/ple ($(date '+%F %T'))"
+        if [ "$dry" = 1 ]; then
+          :
+        elif [ -e "$dest" ]; then
+          echo "qwen4exp_oracle: ple-int8 FAILED: $dest exists without its index (a partial copy) - remove it first; the file stays in oracle-out-q4exp-ple.partial/ple"
+          rc=1
+        elif [ "${dest_free_gb:-0}" -lt "$ple_need_gb" ]; then
+          echo "qwen4exp_oracle: ple-int8 FAILED: $(dirname "$dest") has ${dest_free_gb:-?} GB free, the file needs $ple_need_gb - left in oracle-out-q4exp-ple.partial/ple"
+          rc=1
+        elif mv oracle-out-q4exp-ple.partial/ple "$dest"; then
+          echo "qwen4exp_oracle: the PLE int8 file written ($dest, $(date '+%F %T'))"
+        else
+          echo "qwen4exp_oracle: ple-int8 FAILED: mv to $dest (a partial copy may be left there; the file stays in oracle-out-q4exp-ple.partial/ple)"
+          rc=1
+        fi
       else
         echo "qwen4exp_oracle: ple_int8.py FAILED"
         rc=1
