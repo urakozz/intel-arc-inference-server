@@ -19,16 +19,20 @@
 //      candidates, unary logits, scores and walk BITWISE the full head's; with row 0's best id swapped out of V' (the
 //      table and the compact head rewritten in place, same list) the first row differs.
 //   7. The bf16 head (int8 drafter): the twin agrees as in 2.
-//   8. Spec 28d: the int8 linears and heads bind gemm_sm_i8w (DPAS, the in-work-group split-K) - 1..7 above run on it
-//      against the same twin (gemv_i8w's fp32 order: not bitwise any more, the bars are the ones above - "within an
-//      ulp" ring values, cosine 0.99999 rows and scores, tie-aware sets and walk); the same lists forced onto gemv_i8w
-//      (CaptureOptions::force_linear, the pre-28d binding) agree with the twin as in 2; both lists timed (interleaved).
+//   8. Spec 28d: the int8 linears and heads bind gemm_sm_i8w (DPAS, the in-work-group split-K), whose order the twin
+//      does not follow. For the int8 drafter 1, 2, 4, 5 and 7 are graded by the f32 JUDGE (judge_draft: the twin in
+//      Numerics::Reference over fp32 weights) - gemm_sm passes when it is no further from f32 than the same lists
+//      forced onto gemv_i8w (CaptureOptions::force_linear, the pre-28d binding), spec 28's N4 / N6 form; the twin
+//      comparisons of gemm_sm stay printed. The forced lists keep the old gate against the twin (the projection's
+//      bar 0, 2's bars); both lists timed as interleaved pairs. The bf16 drafter (only its int8 head moved) keeps the
+//      twin's bars.
 // It prints the draft list's host-timed replay (one fence; informational - r54.speed is the timed row).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <set>
 #include <string>
 #include <thread>
@@ -188,17 +192,18 @@ dfref::Ring read_ring(Env& e, const runtime::dflash::DFlashBuffers& b) {
   return r;
 }
 
-// One draft on the card against the twin. Returns failures.
-int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::Weights& tw, const dfref::Ring& ring,
-                  const std::vector<float>& rope, uint32_t anchor, uint32_t p, uint32_t K, float T, uint64_t seed,
-                  const char* what) {
-  const runtime::dflash::DFlashDraftOut& o = *b.readback();
-  const dfref::DraftOut t = dfref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, p, K, T, seed);
-  const std::vector<float> h = e.read<float>(b.h, size_t(M) * H);
-  double hc = 1;
-  for (uint32_t r = 0; r <= K; ++r) hc = std::fmin(hc, dfref::cosine(&h[size_t(r) * H], &t.hidden[size_t(r) * H], H));
-  std::vector<float> es, ts;
+// A draft's readback (o) and final-norm rows (h) against a twin's draft t.
+struct Measure {
+  double hc = 1, sc = 1;          // rows cosine (min over 0..K), scores cosine over the shared candidates
   int sets_bad = 0, walk_bad = 0, near = 0;
+  uint32_t walk_at = 0;           // the first draft index whose id differs from the twin's (K: none)
+};
+Measure measure(const runtime::dflash::DFlashDraftOut& o, const std::vector<float>& h, const dfref::DraftOut& t,
+                uint32_t p, uint32_t K, float T, uint64_t seed) {
+  Measure m;
+  m.walk_at = K;
+  for (uint32_t r = 0; r <= K; ++r) m.hc = std::fmin(m.hc, dfref::cosine(&h[size_t(r) * H], &t.hidden[size_t(r) * H], H));
+  std::vector<float> es, ts;
   for (uint32_t j = 0; j < K; ++j) {
     for (uint32_t c = 0; c < 16; ++c) {
       const uint32_t id = o.cand[j][c];
@@ -206,13 +211,14 @@ int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::
       if (it == t.cand.begin() + (j + 1) * 16) {
         // an engine-only candidate must be at the boundary: its value within 1e-3 of the twin's 16th
         if (std::fabs(o.unary[j][c] - t.unary[j * 16 + 15]) > 1e-3f * std::fmax(1.0f, std::fabs(t.unary[j * 16 + 15])))
-          ++sets_bad;
+          ++m.sets_bad;
       } else {
         es.push_back(o.scores[j][c]);
         ts.push_back(t.scores[size_t(it - t.cand.begin())]);
       }
     }
     if (o.ids[j] != t.ids[j]) {
+      m.walk_at = j;
       // excused only at a near tie of the twin's own choice (sampled: of the Gumbel-noised scores - the device's
       // log / log1p are not correctly rounded)
       auto key = [&](uint32_t c) {
@@ -224,23 +230,98 @@ int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::
       };
       const float a = key(t.chosen[j]), bb = key(o.chosen[j]);
       if (std::fabs(a - bb) <= 1e-4f * std::fmax(1.0f, std::fabs(a))) {
-        ++near;
+        ++m.near;
         break;   // the walks diverge from here
       }
-      ++walk_bad;
+      ++m.walk_bad;
       break;
     }
   }
-  const double sc = dfref::cosine(es.data(), ts.data(), es.size());
+  m.sc = dfref::cosine(es.data(), ts.data(), es.size());
+  return m;
+}
+
+// One draft on the card against the twin (Numerics::Engine: gemv_i8w's fp32 order). Returns failures.
+int compare_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::Weights& tw, const dfref::Ring& ring,
+                  const std::vector<float>& rope, uint32_t anchor, uint32_t p, uint32_t K, float T, uint64_t seed,
+                  const char* what) {
+  const runtime::dflash::DFlashDraftOut& o = *b.readback();
+  const dfref::DraftOut t = dfref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, p, K, T, seed);
+  const Measure m = measure(o, e.read<float>(b.h, size_t(M) * H), t, p, K, T, seed);
   std::printf("%s (p %u, K %u, T %.1f): rows cos %.7f, scores cos %.7f, top-16 sets %s, walk %s%s\n", what, p, K,
-              double(T), hc, sc, sets_bad ? "DIFF" : "=", walk_bad ? "DIFF" : "=", near ? " (a near tie)" : "");
+              double(T), m.hc, m.sc, m.sets_bad ? "DIFF" : "=", m.walk_bad ? "DIFF" : "=", m.near ? " (a near tie)" : "");
   int bad = 0;
-  bad += hc < 0.99999;
-  bad += sc < 0.99999;
-  bad += sets_bad != 0;
-  bad += walk_bad != 0;
+  bad += m.hc < 0.99999;
+  bad += m.sc < 0.99999;
+  bad += m.sets_bad != 0;
+  bad += m.walk_bad != 0;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
+}
+
+// Spec 28d: the twin's f32 judge - every linear as fp32 [N][K] (the int8 rows x their scales, the bf16 tiles widened)
+// over fp32 activations (Numerics::Reference: dflash_ref.py's arithmetic up to summation order).
+void fill_f32(dfref::Lin& l) {
+  if (l.K == 0 || !l.f32.empty()) return;
+  l.f32.resize(size_t(l.N) * l.K);
+  dfref::parallel_cols(l.N, [&](uint32_t n0, uint32_t n1) {
+    for (uint32_t n = n0; n < n1; ++n)
+      for (uint32_t k = 0; k < l.K; ++k)
+        l.f32[size_t(n) * l.K + k] =
+            !l.i8.empty() ? float(l.i8[size_t(n / 16) * (l.K / 16) * 256 + size_t(k / 16) * 256 + (k % 16) * 16 + n % 16]) *
+                                l.scales[n]
+                          : dfref::bf(l.bf16[size_t(n / 16) * (l.K / 8) * 128 + size_t(k / 8) * 128 + (k % 8) * 16 + n % 16]);
+  });
+}
+dfref::Weights judge_weights(const dfref::Weights& tw) {
+  dfref::Weights j = tw;
+  for (dfref::Lin* l : {&j.fc, &j.sel, &j.head}) fill_f32(*l);
+  for (dfref::Layer& y : j.layers)
+    for (dfref::Lin* l : {&y.qkv, &y.o, &y.gate_up, &y.down, &y.akp, &y.mkp}) fill_f32(*l);
+  return j;
+}
+double cos_dist(double c) { return 1.0 - c; }
+
+// Spec 28d's restated gate (the int8 drafter; spec 28 N4 / N6's f32-judge form, tests/server/spec_judge.h): the
+// default lists (gemm_sm_i8w) and the same lists forced onto gemv_i8w (the pre-28d binding) run on the same ring and
+// control block, both graded against the f32 judge. gemm_sm passes when it is no further from f32 than gemv_i8w:
+// rows / scores - cosine >= 0.99999 against the judge or a cosine distance at most golden::kCosSlack (2) x gemv's;
+// top-16 sets - no more candidates off the judge's set (the boundary excused as above) than gemv's; the walk -
+// identical to the judge's, or diverging no earlier than gemv's, or at a near tie of the judge's scores (1e-4). The
+// readback / control checks as before. Leaves the default list's readback. Returns failures.
+int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::Weights& tj, const dfref::Ring& ring,
+                const std::vector<float>& rope, uint32_t anchor, uint32_t p, uint32_t K, float T, uint64_t seed,
+                runtime::CapturedStep& sm, runtime::CapturedStep& gv, const char* what) {
+  const dfref::DraftOut t = dfref::draft(tj, dfref::Numerics::Reference, ring, rope, anchor, p, K, T, seed);
+  e.run(gv);
+  const Measure g = measure(*b.readback(), e.read<float>(b.h, size_t(M) * H), t, p, K, T, seed);
+  e.run(sm);
+  const runtime::dflash::DFlashDraftOut& o = *b.readback();
+  const Measure m = measure(o, e.read<float>(b.h, size_t(M) * H), t, p, K, T, seed);
+  const double slack = 2.0;   // golden::kCosSlack (tests/golden/forced_judge.h)
+  const bool rows = m.hc >= 0.99999 || cos_dist(m.hc) <= slack * cos_dist(g.hc);
+  const bool scores = m.sc >= 0.99999 || cos_dist(m.sc) <= slack * cos_dist(g.sc);
+  const bool sets = m.sets_bad <= g.sets_bad;
+  const bool walk = m.walk_bad == 0 || m.walk_at >= g.walk_at;
+  std::printf("%s (p %u, K %u, T %.1f) against the f32 judge: rows cos gemm_sm %.7f / gemv %.7f %s, scores cos %.7f / "
+              "%.7f %s, sets off %d / %d %s, walk to %u / %u of %u%s %s\n", what, p, K, double(T), m.hc, g.hc,
+              rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "FAIL",
+              m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL");
+  int bad = !rows + !scores + !sets + !walk;
+  bad += o.k != K || o.anchor != anchor || o.pos != p;
+  return bad;
+}
+
+// The ring rows of positions [pos0, pos0 + n) of every layer, k then v, as one vector (for a cosine).
+std::vector<float> ring_rows(const dfref::Ring& r, const dfref::Dims& d, uint32_t pos0, uint32_t n) {
+  std::vector<float> v;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    for (uint32_t i = 0; i < n; ++i) {
+      const size_t base = (size_t(l) * d.ring + (pos0 + i) % d.ring) * d.kvn();
+      v.insert(v.end(), r.k.begin() + base, r.k.begin() + base + d.kvn());
+      v.insert(v.end(), r.v.begin() + base, r.v.begin() + base + d.kvn());
+    }
+  return v;
 }
 
 }  // namespace
@@ -308,6 +389,18 @@ int main(int argc, char** argv) {
     runtime::CapturedStep proj = runtime::dflash::build_dflash_project(e.ctx, w, b);
     std::printf("launches: draft %zu, projection %zu\n", draft.kernel_count, proj.kernel_count);
     bad += draft.kernel_count != 87 || proj.kernel_count != 8;
+    // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
+    const bool i8 = f == loader::DraftFormat::Int8;
+    runtime::CaptureOptions gvo;
+    gvo.force_linear = runtime::LinearForce::Gemv;
+    std::unique_ptr<runtime::CapturedStep> dg, pg;
+    dfref::Weights tj;
+    if (i8) {
+      dg = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, gvo));
+      pg = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_project(e.ctx, w, b, gvo));
+      bad += dg->kernel_count != 87 || pg->kernel_count != 8;
+      tj = judge_weights(tw);
+    }
 
     // 1. the projection: 2053 positions, 8 a replay
     const uint32_t P = 2053, width = d.fc_k(w.target_hidden);
@@ -339,9 +432,43 @@ int main(int argc, char** argv) {
               }
             }
         }
-      std::printf("projection of positions %u..%u: %d ring values off by a bf16 ulp, %d further (bar 0)\n", pos0,
-                  P - 1, off, far);
-      bad += far;
+      std::printf("projection of positions %u..%u: %d ring values off by a bf16 ulp, %d further (%s)\n", pos0,
+                  P - 1, off, far, i8 ? "gemm_sm: recorded, the f32 judge below decides" : "bar 0");
+      if (!i8) bad += far;
+      if (i8) {
+        // the f32 judge's projection of the last block; gemm_sm's ring rows (above) and gemv_i8w's (the forced list
+        // over the same taps; the rows depend only on the taps), then gemm_sm's restored
+        dfref::Ring jr = dfref::make_ring(tw.d);
+        dfref::project(tj, dfref::Numerics::Reference, rows.data(), n, pos0, rope, jr);
+        const std::vector<float> want = ring_rows(jr, tw.d, pos0, n);
+        e.imm.copy(b.taps.ptr(), rows.data(), rows.size() * 2);
+        b.ctl()->proj_pos = pos0;
+        b.ctl()->proj_n = n;
+        e.run(*pg);
+        const dfref::Ring rg = read_ring(e, b);
+        int goff = 0, gfar = 0;
+        for (uint32_t l = 0; l < d.layers; ++l)
+          for (uint32_t r = 0; r < n; ++r) {
+            const size_t base = (size_t(l) * tw.d.ring + (pos0 + r) % tw.d.ring) * tw.d.kvn();
+            for (uint32_t i = 0; i < tw.d.kvn(); ++i)
+              for (const auto* pr : {&rg.k, &rg.v}) {
+                const auto& tv = pr == &rg.k ? tr.k : tr.v;
+                const float a = (*pr)[base + i], bb = tv[base + i];
+                if (a != bb) {
+                  ++goff;
+                  if (std::fabs(a - bb) > std::fabs(bb) / 64.0f + 1e-6f) ++gfar;
+                }
+              }
+          }
+        const std::vector<float> got_sm = ring_rows(ring, tw.d, pos0, n), got_gv = ring_rows(rg, tw.d, pos0, n);
+        const double cs = dfref::cosine(got_sm.data(), want.data(), want.size()),
+                     cg = dfref::cosine(got_gv.data(), want.data(), want.size());
+        const bool ok = cs >= 0.99999 || cos_dist(cs) <= 2.0 * cos_dist(cg);
+        std::printf("projection, forced gemv_i8w: %d ring values off by a bf16 ulp, %d further (bar 0); against the f32 "
+                    "judge: ring cos gemm_sm %.7f / gemv %.7f %s\n", goff, gfar, cs, cg, ok ? "ok" : "FAIL");
+        bad += gfar + !ok;
+        e.run(proj);   // gemm_sm's rows back (the taps and the control block are still the last block's)
+      }
     }
 
     // 2. a draft at p 2053
@@ -354,7 +481,9 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     e.run(draft);
     const double ms = 1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    bad += compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy");
+    bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.0f, 0, draft, *dg, "greedy")
+              : compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy");
+    if (i8) compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, gemm_sm against the gemv_i8w twin (recorded)");
     for (uint32_t j = 0; j < 7; ++j) bad += c->cur_token[1 + j] != b.readback()->ids[j];
     const runtime::dflash::DFlashDraftOut first = *b.readback();
 
@@ -370,7 +499,8 @@ int main(int argc, char** argv) {
     // 4. K 3 by the control block alone
     b.ctl()->k = 3;
     e.run(draft);
-    bad += compare_draft(e, b, tw, ring, rope, 1234, P, 3, 0.0f, 0, "K 3");
+    bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 3, 0.0f, 0, draft, *dg, "K 3")
+              : compare_draft(e, b, tw, ring, rope, 1234, P, 3, 0.0f, 0, "K 3");
 
     // 5. sampled
     b.ctl()->k = 7;
@@ -378,8 +508,11 @@ int main(int argc, char** argv) {
     b.ctl()->seed_lo = 0x01234567u;
     b.ctl()->seed_hi = 0x89ABCDEFu;
     e.run(draft);
-    bad += compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.8f, (uint64_t(0x89ABCDEFu) << 32) | 0x01234567u,
-                         "sampled");
+    {
+      const uint64_t seed = (uint64_t(0x89ABCDEFu) << 32) | 0x01234567u;
+      bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.8f, seed, draft, *dg, "sampled")
+                : compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.8f, seed, "sampled");
+    }
     b.ctl()->temperature = 0.0f;
 
     // 6. a 32768-id draft vocabulary holding every candidate of the greedy run (Review Focus 3)
@@ -443,31 +576,28 @@ int main(int argc, char** argv) {
       runtime::dflash::DFlashTarget tb = t;
       tb.head = &hbd;
       runtime::CapturedStep db = runtime::dflash::build_dflash_draft(e.ctx, w, tb, b, control);
+      runtime::CapturedStep dbg = runtime::dflash::build_dflash_draft(e.ctx, w, tb, b, control, gvo);
       b.ctl()->k = 7;
-      e.run(db);
-      dfref::Weights twb = tw;
-      twb.head.i8.clear();
-      twb.head.scales.clear();
-      twb.head.bf16 = hb;
-      twb.head.ksplit = 1;
-      bad += compare_draft(e, b, twb, ring, rope, 1234, P, 7, 0.0f, 0, "bf16 head");
+      dfref::Weights tjb = tj;
+      tjb.head = dfref::Lin{};
+      tjb.head.K = H;
+      tjb.head.N = V;
+      tjb.head.bf16 = hb;
+      fill_f32(tjb.head);
+      tjb.head.bf16.clear();
+      bad += judge_draft(e, b, tjb, ring, rope, 1234, P, 7, 0.0f, 0, db, dbg, "bf16 head");
     }
 
     // 8. spec 28d: the int8 linears on gemm_sm_i8w (the default lists above) against the same lists forced onto
     // gemv_i8w (runtime::CaptureOptions::force_linear, the pre-28d binding): the forced draft agrees with the twin as
     // in 2 (its gate, kept), and both lists' host-timed replays as interleaved pairs after a warm-up - median of 20.
     if (f == loader::DraftFormat::Int8) {
-      runtime::CaptureOptions gv;
-      gv.force_linear = runtime::LinearForce::Gemv;
-      runtime::CapturedStep dg = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, gv);
-      runtime::CapturedStep pg = runtime::dflash::build_dflash_project(e.ctx, w, b, gv);
-      bad += dg.kernel_count != 87 || pg.kernel_count != 8;
       c->pos = P;
       c->cur_token[0] = 1234;
       b.ctl()->k = 7;
       b.ctl()->temperature = 0.0f;
-      e.run(dg);
-      bad += compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, forced gemv_i8w");
+      e.run(*dg);
+      bad += compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, forced gemv_i8w (the pre-28d gate)");
       const runtime::dflash::DFlashDraftOut forced = *b.readback();
       uint32_t same_ids = 0;
       for (uint32_t j = 0; j < 7; ++j) same_ids += forced.ids[j] == first.ids[j];
@@ -480,13 +610,13 @@ int main(int argc, char** argv) {
       b.ctl()->proj_pos = P - 8;
       b.ctl()->proj_n = 8;
       for (int i = 0; i < 3; ++i)
-        for (runtime::CapturedStep* s : {&draft, &dg, &proj, &pg}) timed(*s);
+        for (runtime::CapturedStep* s : {&draft, dg.get(), &proj, pg.get()}) timed(*s);
       std::vector<double> td, tg, tp, tq;
       for (int i = 0; i < 20; ++i) {
         td.push_back(timed(draft));
-        tg.push_back(timed(dg));
+        tg.push_back(timed(*dg));
         tp.push_back(timed(proj));
-        tq.push_back(timed(pg));
+        tq.push_back(timed(*pg));
       }
       auto med = [](std::vector<double> v) {
         std::sort(v.begin(), v.end());
