@@ -42,9 +42,14 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {3, false, 4096},    // 0.69 | 0.69 | 1.19 | 1.08 | 1.39 | 1.65
     {4, false, 4096},    // 0.90 | 0.76 | 1.67 | 1.43 | 1.79 | 2.06
     {5, false, 4096},    // 1.10 | 0.80 | 1.51 | 2.50 | 3.48 | 4.58  (512 dpas, 1448 v2: not monotone)
-    {6, false, 0},       // 1.94 | 1.22 | 2.50 | 3.95 | 5.61 | 6.72
-    {7, false, 0},       // 2.29 | 1.68 | 3.19 | 4.85 | 6.74 | 7.47
-    {8, false, 0},       // 2.96 | 3.49 | 6.45 | 6.11 | 8.41 | 9.46
+    // M = 6..8 (DFlash only) back on v2 (operator 2026-11-04): the f32 check of t6_usage-loader (DFlash K = 7,
+    // first difference at generated position 103) puts the DPAS path's id at f32 rank 3, 4.0 below the top (the
+    // top's own margin 3.44; plain = the f32 top over rows 103..111) - not a rounding near-tie; the kernel fix is
+    // queued. The timing verdicts stay recorded: 6 dpas from 0 (1.94 | 1.22 | 2.50 | 3.95 | 5.61 | 6.72),
+    // 7 (2.29 | 1.68 | 3.19 | 4.85 | 6.74 | 7.47), 8 (2.96 | 3.49 | 6.45 | 6.11 | 8.41 | 9.46).
+    {6, false, kDpasNever},
+    {7, false, kDpasNever},
+    {8, false, kDpasNever},
     // int8: at 4096 every M's worst row (q head 19, row 0) is 0.99998797 against the fp64 reference - below 0.99999,
     // and no further than pf_flash_attn_kv8 (the prefill's kernel, 0.99998792 on the same row). Operator ruling
     // 2026-11-03: the int8 N1 bar is "no further than pf_flash_attn_kv8 on the same row", so 4096 is a timing verdict.

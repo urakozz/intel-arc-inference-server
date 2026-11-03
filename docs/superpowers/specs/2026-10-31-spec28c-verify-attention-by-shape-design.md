@@ -223,3 +223,9 @@ quiet box. Record: docs/probe-verify-attn-2026-11-03.md.
    for the CPU lane). The verify-path tests grade by 28b's `tests/server/spec_judge.h`; their contexts are dumped
    (`B70_DUMP_FORCED`) to `~/b70/logs/spec28c/forced`.
 3. **On 28b:** 28c rebased onto main with 28b; `force_attn` joined 28b's `CaptureOptions` (runtime/gemv_kind.h).
+4. **M = 6..8 back on v2 (operator 2026-11-04).** The CPU lane's f32 check (tools/oracle/dump_taps.py, top-64 f32
+   logits, teacher-forced on each stream) of the one new divergence beyond 8 ulp on main - t6_usage-loader, DFlash
+   K = 7, first difference at generated position 103: plain's id is the f32 top on all 9 rows 103..111; the DPAS
+   path's is f32 rank 3, **4.0 below the top** (~32 ulp; the top's own margin 3.44). Not a rounding near-tie, so
+   `kVerifyAttnTable`'s bf16 M = 6 / 7 / 8 rows are kDpasNever until the kernel is fixed (queued: attn_verify_dpas
+   at 8 rows on this prompt; M = 2..5 keep their thresholds). Log: box `~/b70/logs/cpu-1104/verdict.txt`.
