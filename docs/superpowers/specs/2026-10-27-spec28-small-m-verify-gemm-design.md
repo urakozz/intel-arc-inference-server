@@ -382,4 +382,21 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    The errors are two-sided (spec closer to f32 on t3, plain on t5 / t6); two of three fail the near-miss allowance by
    0.6-1.1 ulp. No bar is widened here; the remaining 54 divergent runs (and the N4 rows) have no Qwen3.8 judge yet.
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
-3. The quiet-box re-check (r69.speed / r69.d1) and the G0 suite (run only for the M >= 2 gate tests so far).
+3. The quiet-box re-check (r69.speed / r69.d1) - a later session (operator 2026-11-03).
+
+**The box check on the rebased head (main e755f86, 2026-11-03; Passed / Failed / Skipped apart):**
+- `tools/box_check.sh --base main`: build PASS; kernel_cmdlines +93 / -0 / ~0; `ctest -LE checkpoint` 309 passed, 0
+  failed, 0 skipped (card 0).
+- G0 bitwise (the oracle-out* links in place - an earlier run without them had skipped 6 of the 11): 11 / 11 passed on
+  main's build and on this one, 0 skipped, output identical line for line; g0.sha PASS.
+- The golden-labelled tests beyond those 11: 53 passed, 0 failed, 79 skipped (Bolt, Kolibri and Flash-Next sets whose
+  data is not on the box).
+- The rest of the suite: the first chunked run (before the links) left 188 failing; re-run with the links: 54 passed,
+  126 skipped (other engines' data), 2 failed - mtp_gpu_dv128k_test / _bf16_test, mtp_gpu_test's M3 at a 128k draft
+  vocabulary: N6 waiting for the judges, as mtp_gpu_test itself.
+- pp_dflash_test PASS; pp_mtp_test: its two one-card / pipeline "plain == verify" M2 checks restated (recorded; the
+  pipeline stays bitwise the one card) - re-run: PASS (both cards, one box lock).
+- The M >= 2 gates (gates.log): gemm_sm_test, dflash_draft_test PASS; every N3-in-the-engine check PASS (clean-run
+  rejection, taps and ring rows bitwise the M = 8 verify's, dflash-lookup's warm ring bitwise plain dflash's); every
+  N4 row and N6 stream with a divergence waits for its Qwen3.8 judge (0 of 57 dumped contexts judged so far) - without
+  one the tie rule leaves mtp_gpu 27, dflash_gpu 24 and dflash_lookup 8 runs open.
