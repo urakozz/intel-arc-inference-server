@@ -3,7 +3,7 @@
 // --mtp: 4 real-width layers and the head, its bf16 experts RTN int4 g64 at load) carry it; Intel's --layers 18 when
 // present.
 //
-//   qwen4exp_mtp_test <checkpoint> <fixture dir> <ids> [m1] [m2] [m3] [cost] [pp2[:split]] [layers:N] [int8]
+//   qwen4exp_mtp_test <checkpoint> <fixture dir> <ids> [m1] [m2] [m3] [cost] [pp2[:split]] [layers:N] [int8] [ingest]
 //
 // (no mode: all four). <fixture dir> holds tools/oracle/qwen4exp_mtp_fixture.py's mtp_{single,per_stream}.safetensors
 // for this checkpoint (box: r34.fixture); without them M1 SKIPs and the rest runs.
@@ -85,6 +85,18 @@ Ids cycle(const Ids& base, size_t n) {
   Ids v(n);
   for (size_t i = 0; i < n; ++i) v[i] = base[i % base.size()];
   return v;
+}
+
+// Spec 28d: `ingest` (a test flag) fills the prompts one replay per id (Engine::ingest: the plain step with the head's
+// KV pass) instead of prefill - for when the prefill is the thing under repair (r33.prefill: the head pass's launch
+// count throws on main as of 2026-11-04). M2 / M3 / cost compare runs filled the same way, so the gates hold either way.
+bool g_ingest = false;
+template <class E>
+void fill(E& e, const Ids& ids) {
+  if (g_ingest)
+    e.ingest(ids);
+  else
+    e.prefill(ids);
 }
 
 void set_env(const char* k, const char* v) {
@@ -212,7 +224,7 @@ std::string first_diff(const StepRef& a, const StepRef& b) {
 // for the tie rule at a divergence. The row's top-1 must be that id (greedy_tie::classify checks it).
 greedy_tie::RefStep plain_row(rq::Qwen4ExpEngine& e, const Ids& prompt, size_t p) {
   e.reset();
-  e.prefill(prompt);
+  fill(e, prompt);
   if (p > 0) e.generate(uint32_t(p));
   const std::vector<float> row = e.read_logits();
   return greedy_tie::ref_step(row.data(), e.model().desc.vocab_used);
@@ -243,7 +255,7 @@ int run_m2(rq::Qwen4ExpEngine& e, const Ids& base, bool bitwise) {
   for (const size_t len : {size_t(120), size_t(2100)}) {
     const Ids prompt = cycle(base, len);
     e.reset();
-    e.prefill(prompt);
+    fill(e, prompt);
     const uint32_t n = e.pos();
     std::vector<uint8_t> st(e.state_bytes()), kv(e.kv_bytes(n));
     e.save_state(st.data());
@@ -358,7 +370,7 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
   qwen4exp_rig::build(rig, snap, o);
   for (const size_t len : {size_t(120), size_t(2100)}) {
     rig.eng->reset();
-    rig.eng->prefill(cycle(base, len));
+    fill(*rig.eng, cycle(base, len));
     plain.push_back(rig.eng->generate(64));
   }
   o.mtp = true;
@@ -368,7 +380,7 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
   for (const size_t len : {size_t(120), size_t(2100)}) {
     const Ids prompt = cycle(base, len);
     e.reset();
-    e.prefill(prompt);
+    fill(e, prompt);
     const Ids with_head = e.generate(64);
     if (with_head != plain[pi]) {
       std::fprintf(stderr, "M3 prompt %zu: generate() with the head is not the plain engine's\n", len);
@@ -376,7 +388,7 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
     }
     for (uint32_t K = 1; K <= rq::kMaxDraft; ++K) {
       e.reset();
-      e.prefill(prompt);
+      fill(e, prompt);
       uint64_t dr = 0, ac = 0;
       const Ids got = speculative(e, K, 64, &dr, &ac);
       std::string how = got == plain[pi] ? "bitwise" : "DIFFER from";
@@ -403,7 +415,7 @@ int run_m3(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
 void run_cost(rq::Qwen4ExpEngine& e, const Ids& base, const char* arm) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   e.reset();
-  e.prefill(cycle(base, 2100));
+  fill(e, cycle(base, 2100));
   using Clock = std::chrono::steady_clock;
   const auto ms = [](Clock::time_point a) { return std::chrono::duration<double, std::milli>(Clock::now() - a).count(); };
   std::vector<std::vector<double>> v(rq::kMaxDraft + 1), dr(rq::kMaxDraft + 1);
@@ -478,8 +490,10 @@ int main(int argc, char** argv) {
       o.layers = uint32_t(std::strtoul(x.c_str() + 7, nullptr, 10));
     } else if (x == "int8") {
       o.int8_head = true;
+    } else if (x == "ingest") {
+      g_ingest = true;
     } else {
-      std::fprintf(stderr, "qwen4exp_mtp_test: unknown flag %s (m1 m2 m3 cost pp2[:split] layers:N int8)\n", x.c_str());
+      std::fprintf(stderr, "qwen4exp_mtp_test: unknown flag %s (m1 m2 m3 cost pp2[:split] layers:N int8 ingest)\n", x.c_str());
       return 2;
     }
   }
