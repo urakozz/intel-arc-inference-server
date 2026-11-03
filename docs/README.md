@@ -133,6 +133,10 @@ narrative, and the numbered guides cite them where they matter.
   Python, real layers 0/3/35/71 on real activations: max |d| 0), the reference bit-identical
   to `modeling_agnes.py`, the golden and MTP dumps made layer-streamed in Docker, the
   chat template identical to Qwen3.8's; what is pending for the box
+- [probe-verify-attn-2026-11-03.md](probe-verify-attn-2026-11-03.md) - spec
+  28c: the verify step's attention on DPAS (attn_verify_dpas) against v2 at M = 2..8 x
+  depth 512..130816, bf16 and int8 KV - the levers, the table the rule is built from,
+  numerics, the in-list and end-to-end speed (busy box)
 - [probe-decode-attn-2026-09-28.md](probe-decode-attn-2026-09-28.md) - spec
   10a: decode attention at depth. P0 (69% of the step at 128k, 149 GB/s), the
   lever sweep at M = 1 and 4 on real KV, and the v2 design: device-derived

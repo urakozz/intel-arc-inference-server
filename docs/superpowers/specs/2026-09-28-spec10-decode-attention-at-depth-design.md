@@ -175,3 +175,8 @@ below, same method, earlier session). A-F3 is met either way.
 
 **v2 is the default** (`kDefaultDecodeAttn`); v1 stays selectable and bitwise unchanged.
 Numbers and conditions: docs/BENCHMARKS.md "Decode attention at depth (spec 10)".
+
+- 2026-11-03 (spec 28c): the verify lists at M >= 2 bind `attn_verify_dpas` (with v2's reduce) where spec 28c's
+  table says so (bf16 M = 2 from 11585 keys, M = 3..5 from 4096, M = 6..8 always; int8 M = 2 from 11585, M = 3 / 4 from 4096): those
+  verify rows are no longer bitwise their M = 1 step (logits cosine 0.99991 - 0.99998); property R (a row's result
+  independent of its slot and neighbours) holds instead, bitwise. M = 1 keeps v2.

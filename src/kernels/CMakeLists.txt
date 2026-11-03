@@ -702,6 +702,39 @@ if(B70_KV8)
   endforeach()
 endif()
 
+# Spec 28c (plan 28c Task 2): the verify step's attention on DPAS (attn_verify_dpas.cl), in v2's blocking
+# and partials, so the reduce is the attn_v2_M<M>_T32[_KV8] binary's attn_reduce_v2[_kv8] (no new reduce).
+#   attn_verify_dpas_M<M>_T<TGT>       bf16 KV at the verify lists' M = 2..4 (B70_MTP) and 5..8 (B70_VERIFY_M8)
+#   attn_verify_dpas_M<M>_T<TGT>_KV8   int8 KV at M = 2..4 (the int8 decode lists that exist)
+# One lever setting per KV form for every M (property R, the kernel's header). Additive only: a new source,
+# new names; nothing binds them until the capture's rule (src/runtime/verify_attn.h) says so.
+option(B70_VERIFY_DPAS "build the DPAS verify attention (spec 28c)" ON)
+if(B70_VERIFY_DPAS AND B70_MTP)
+  set(VDPAS_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl)
+  # Plan 28c Task 4's kept settings (docs/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
+  # 256 GRF for both KV forms - the fastest passing N1 / N2 at M = 8, depth 32768 (QSPLIT=0 fails N1 at int8).
+  set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
+  set(VDPAS_LEVERS_KV8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
+  set(VDPAS_OPTIONS -cl-intel-256-GRF-per-thread)
+  set(VDPAS_OPTIONS_KV8 -cl-intel-256-GRF-per-thread)
+  set(_vdpas_m 2 3 4)
+  if(B70_VERIFY_M8)
+    list(APPEND _vdpas_m 5 6 7 8)
+  endif()
+  foreach(MM ${_vdpas_m})
+    add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT} SOURCE ${VDPAS_CL}
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0
+                     OPTIONS ${VDPAS_OPTIONS})
+  endforeach()
+  if(B70_KV8)
+    foreach(MM 2 3 4)
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_KV8} KV8=1
+                       OPTIONS ${VDPAS_OPTIONS_KV8})
+    endforeach()
+  endif()
+endif()
+
 # ==== Spec 18b: K2-Horizon decode (model::k2()) ============================= (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its
 # command line and its bytes (tools/kernel_cmdlines' diff: additions only). K2-only

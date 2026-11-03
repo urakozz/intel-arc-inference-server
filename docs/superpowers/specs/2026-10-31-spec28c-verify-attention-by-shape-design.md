@@ -1,6 +1,6 @@
 # Spec 28c - the verify step's attention on DPAS, chosen by shape: M rows x depth
 
-**Status (2026-10-31): DESIGN - nothing built.** Follows spec 28 (small-M verify GEMM). Operator, 2026-10-31: "let's
+**Status (2026-11-03): BUILT on branch `spec28c-verify-attn` (§10; busy-box timing; the operator's rulings of 2026-11-03 in §10).** (2026-10-31: DESIGN.) Follows spec 28 (small-M verify GEMM). Operator, 2026-10-31: "let's
 spec it", after the upstream review found OpenVINO choosing its speculative-verify attention kernel by shape. Builds
 after 28b; the operator is asked before the plan starts. No box row is allocated until the plan exists (focus-closing,
 2026-10-27).
@@ -114,3 +114,112 @@ What the plan found wrong in the first text, and what replaced it above:
 8. S2 and the GO line are measured on the attention excess over M = 1 (the floor no kernel removes); P0 at M = 16
    dropped.
 9. `gemv_kind(M)` is spec 28b's and does not exist before 28b is merged; this spec builds on a main with 28b.
+
+## 9. P0 line - 2026-11-01 (plan 28c Task 0; records only, no new run)
+
+**Busy-box timing (one card), to be re-checked on a quiet box** - every number below is 28a's
+(docs/probe-small-m-gemm-2026-11-01.md §2, raw tables in the 28a box log `timing1.log`), measured with the other card
+and the CPU on other jobs. Operator ruling 2026-11-01: 28c is built now, in parallel with 28b, so there is no
+28b-measured step yet; verify(8) "after 28b" is derived as 28a Task 5 / §4 (b) did.
+
+Attention = `attn_prep` + `attn_decode_v2` + `attn_reduce_v2` over the 16 FA layers. Its time on the unprofiled step
+= its profiled share x the unprofiled step (Review Focus 3 of 28a). Excess = attention at M less attention at M = 1,
+same depth. All **derived** from measured inputs.
+
+| depth | M | profiled share | attention ms (derived) | excess over M = 1 ms | excess / today's verify(M) |
+|---|---|---|---|---|---|
+| 4096 | 1 | 0.030 | 0.92 | - | - |
+| 4096 | 2 | 0.043 | 1.54 | 0.61 | 1.7 % |
+| 4096 | 4 | 0.048 | 2.52 | 1.60 | 3.1 % |
+| 4096 | 8 | 0.131 | 12.63 | 11.71 | 12.1 % |
+| 32768 | 1 | 0.149 | 5.18 | - | - |
+| 32768 | 2 | 0.202 | 8.68 | 3.51 | 8.2 % |
+| 32768 | 4 | 0.218 | 13.87 | 8.70 | 13.7 % |
+| 32768 | 8 | 0.454 | 67.34 | **62.16** | 41.9 % |
+
+(M = 3 / 5 / 6 / 7 at 32768, same derivation: excess 6.0 / 22.6 / 41.2 / 50.7 ms - the M = 4 -> 5 step doubles
+`attn_decode_v2`, 13.3 -> 26.9 ms profiled, and at 4096 the M = 7 -> 8 step does: 6.3 -> 12.1 ms.)
+
+**verify(8) at 32768 after 28b (derived):** 28a's non-GEMV time at M = 8, depth 32768 (73.81 ms, derived) + 28a's
+GEMM sum of the bf16 wB stand-in at M = 8 without a‖b (27.46 ms stand-alone, measured; 28.89 ms with 28a's 5.2 %
+in-list charge) = **101.3 - 102.7 ms**. The attention excess (62.16 ms) is **60.5 - 61.4 %** of it (on today's step,
+148.36 ms: 41.9 %).
+
+**Line: GO** - the excess at M = 8, depth 32768 is >= 15 % of verify(8) there, by 4x. In the operator's summary:
+today's verify(8) is 3.17 plain steps at 4096; at M = 8 attention is 12.3 ms (profiled) of the 19.35 ms non-GEMV time
+and doubles from M = 7 to 8; at the attention's M = 1..7 slope verify(8) would be ~1.37 plain steps (estimated, 28a
+§4). S2's target at 32768 is therefore (v2 - rule) >= 0.75 x 62.16 = **46.6 ms** on the unprofiled verify(8) (to be
+re-derived from the quiet-box re-check). Provisional with 28a's line until that re-check.
+
+## 10. 28c as built (2026-11-03, branch `spec28c-verify-attn`)
+
+All timing is **busy box** (card 1 beside spec 28b's G0 / suite on card 0, a desktop session; load 10-30): re-check on a
+quiet box. Record: docs/probe-verify-attn-2026-11-03.md.
+
+- **Kernel:** `attn_verify_dpas_M<M>_T32` (bf16, M = 2..8) and `_KV8` (int8, M = 2..4), one source, kept levers
+  **KT 32, PACK g, KS 4, DSPLIT 256, QSPLIT 1, 256 GRF** for both forms (fastest passing N1 / N2 at M = 8, 32768:
+  8.53x / 4.88x over v2 per layer). It writes v2's partials; v2's own reduce finishes it. The 256-GRF build spills
+  (~100-140 registers, IGC's retry) - measured as built.
+- **The rule (`src/runtime/verify_attn.h`)**, from the table at 512 / 1448 / 4096 / 11585 / 32768 / 130816 keys:
+  bf16 M = 2 from 11585 keys, M = 3 / 4 / 5 from 4096, M = 6 / 7 / 8 always; int8 M = 2 from 11585, M = 3 / 4 from
+  4096 (the operator's ruling 1 below). M = 1,
+  other heads (Ornith), v1 and the 13a row builds never switch.
+- **Depth by two lists** (decision 3): where `dpas_from > 1` the Engine and the PipelineEngine capture the verify list
+  at that M twice (the rule's v2 list, a DPAS one) and `verify()` submits the DPAS list from row 0's keys
+  `pos + 1 >= dpas_from`. MTP engines: 3 extra lists (M = 2..4; 33 - 42 ms capture at engine start); a DFlash engine
+  4 (M = 2..5). The capture's override is `CaptureOptions::force_attn` (tests / probes only) - **not** the plan's
+  `B70_VERIFY_ATTN` (operator 2026-11-03: no new environment variables in the engine). Tests take `--vattn
+  v2|dpas|rule` (`mtp_gpu_test`, `mtp_verify_test`'s third argument) through `Engine::recapture_verify`.
+- **Deviations, each with its cost if wrong:** (1) int8 at 4096: one row 0.99998797 < 0.99999 (`pf_flash_attn_kv8`
+  0.99998792 there) - **accepted** (ruling 1 below): int8 M = 3 / 4 from 4096. (2) M = 5 bf16 is not monotone (512 dpas 1.10, 1448 v2 0.80): dpas_from 4096 by the plan's
+  rule; a 512-1448 window stays v2 - cost under 0.1 ms a step. (3) One lever line for every M: at 4096, `S2_D128` is
+  10-18 % faster at M = 2 / 4 but slower at 32768; not built.
+
+### Gates (card 1, busy box)
+
+- **N1 / N2 on the card** (`attn_verify_dpas_test`, the production binaries + v2's reduce, partials NaN-filled before
+  every run): part S (synthetic, 11 positions, M = 2..8 bf16, 2..4 int8) N1 worst 0.9999913 (int8) / 0.9999922
+  (bf16), N2a 1000 / 1000 bitwise at every shape, two runs bitwise; part D (real KV) N1 0.9999937 - 0.9999985 except
+  int8 at 4096 (0.99998797, recorded: the rule keeps it on v2); `--sweep` every position 0 .. 4088 at M = 2 / 3 / 4 /
+  8 against v2's M = 1 step: worst 0.9999890, no (position, head, row) below 0.9999. **PASS.**
+- **With the rule** (ctest, the engines' own lists): `mtp_gpu_test` and `mtp_gpu_kv8_test` M3 0 divergences over 39
+  prompts x 3 K, RF1 / M5 / M4 as before; `mtp_verify_test` / `_kv8` M2 PASS; `prefix_gpu_mtp_test`,
+  `replay_determinism_test` PASS; golden_server_test through `--spec lookup` identical. The golden / A4 prompts sit
+  below 4096 keys, where the rule keeps M = 2..4 on v2 - so these runs mostly exercise v2; DPAS is exercised by the
+  forced runs and the DFlash tests below.
+- **DFlash with the rule** (M = 6..8 bind DPAS at every depth): `dflash_engine_test`, `dflash_gpu_test`,
+  `dflash_lookup_gpu_test` **FAIL their bitwise / 0.99999 bars** - D3 rows at M >= 6 logits cosine 0.99991 - 0.99998
+  against M = 1, the drafter's ring rows from DPAS rows 0.99989 (bar 0.9999), D2 streams parting from plain at
+  near-ties. This is the class spec 28 §10's ruling covers for 28b (the f32 judge; 28b's `tests/server/spec_judge.h`
+  re-grades exactly these tests). M <= 4 rows (v2 at ~2000 keys) stay bitwise.
+- **Forced DPAS** (`--vattn dpas`: every M = 2..4 list on DPAS at every depth): `mtp_verify_test` M2a logits cosine
+  0.99996 - 0.99999 (below the 0.99999 bar), GDN slots >= 0.9999998, M2b 0 of 64 ids differ at every (k, j), RF3-5
+  PASS. `mtp_gpu_test` M3: 22 of 39 prompts part from plain (the same position at every K); the plain row's margin
+  at the parting step: 16 prompts <= 1 bf16 ulp (near-ties), 4 within 1.2 - 3.4 ulp, **2 beyond 8 ulp: 11.3 ulp at 45
+  and 27.1 ulp at 191** - the second is the position 28b measured with gemm_sm (t3_rename-step at 191, 27.1 ulp): a
+  position the model amplifies whichever kernel changes the rounding. The f32 judge needs Qwen3.8 f32 references of
+  these contexts (f32_refs.sh serves Ornith / K2 only) - **not run; open**.
+- **A3 (long32k, 256 greedy ids, `--mtp 3`, `--max-len 65536`):** forced v2 identical to the plain loop; the rule
+  (DPAS at 32k for every M) parts from it at id 133 at a **0.15 bf16 ulp** near-tie in the plain row.
+- **Not run:** the int8-KV passkey at 120k with `--mtp 3` (hours, opt-in); the two-card PP gates (`pp_mtp_test`:
+  the PipelineEngine's deep lists are built but untested on the box); the forced-DPAS int8-head / int8-KV
+  `mtp_gpu_test` runs were graded by the first (one-step-late) classifier and not re-run.
+
+### Speed (busy box)
+
+- **S1 holds** at every shape the rule binds DPAS (in-list paired v2 / rule >= 1.006); **S2 met**: verify(8) at 32768
+  145.6 -> 91.2 ms (-54.4 ms against the 46.6 ms bar). Verify(M) at 120000 keys: M = 2 60.4 -> 48.9 ms, M = 4 94.6 ->
+  67.0, M = 8 297.3 -> 106.5.
+- **End to end:** tool-call geomean unchanged (P0 prompts at 2.2-3.0k keys: v2 by the rule); golden at 32768 keys
+  +3 - 10 % (K = 3 +9.5 %). Record §4.
+
+### The operator's rulings (2026-11-03, "accept all")
+
+1. **int8 at 4096 keys:** accepted at the prefill kernel's distance. The int8 N1 bar is "no further from the fp64
+   reference than `pf_flash_attn_kv8` on the same row" (0.99998792 on the dump's (q head 19, row 0) at 4096), stated
+   as such in `attn_verify_dpas_test` part D - 0.99999 is not lowered elsewhere. int8 M = 3 / 4 bind DPAS from 4096.
+2. **DFlash M >= 6 non-bitwise, and the forced-DPAS prompts beyond 8 ulp:** accepted under spec 28's ruling for 28b
+   (the f32 judge; near-misses like 28b's t5 / t6 accepted as near-ties; contexts without a Qwen3.8 judge stay open
+   for the CPU lane). The verify-path tests grade by 28b's `tests/server/spec_judge.h`; their contexts are dumped
+   (`B70_DUMP_FORCED`) to `~/b70/logs/spec28c/forced`.
+3. **On 28b:** 28c rebased onto main with 28b; `force_attn` joined 28b's `CaptureOptions` (runtime/gemv_kind.h).

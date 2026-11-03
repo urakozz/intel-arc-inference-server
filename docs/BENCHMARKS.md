@@ -861,6 +861,22 @@ Setup:
 | server | `mtp_server_test`: EOS, stop strings and `max_tokens` inside a burst, and a streamed tool call in bursts of 1-4. Byte-identical to `--mtp 0` under 4 burst patterns, and the engine is left at the same position. |
 | M5, spec 7 C2 with MTP on | **pending** plan 7c's merge. `prefix_gpu_test` lives on `spec7c-server-prefix-cache` and loads no head. The merge adds an argv[6] = K there: `loader::load(..., K > 0)` and `EngineAdapter(eng, vocab, K)`. Then one command: `build/tests/prefix_gpu_test "$SNAP" tests/golden/prompts l0-int8 1 0 3`. |
 
+### The verify attention on DPAS (spec 28c, branch `spec28c-verify-attn`, measured 2026-11-03, **busy box**, card 1)
+
+`attn_verify_dpas` against v2 in the verify lists at M >= 2, bound by the measured rule (`src/runtime/verify_attn.h`:
+bf16 M = 2 from 11585 keys, M = 3..5 from 4096, M = 6..8 always; int8 M = 2 from 11585, M = 3 / 4 from 4096). Record:
+docs/probe-verify-attn-2026-11-03.md. Re-check on a quiet box.
+
+| row | v2 | the rule | ratio |
+|---|---|---|---|
+| attention per FA layer, M = 8, 32768 keys (bf16 / int8) | 3975 / 3255 us | 460 / 689 us | 8.4x / 4.7x |
+| verify(8) at 4096 keys, int8 head (`probe_mtp_steps ... 8 vattn`) | 94.7 ms | 85.6 ms | 1.106 |
+| verify(8) at 32768 keys | 145.6 ms | 91.2 ms | 1.598 |
+| verify(4) / verify(2) at 32768 keys | 62.3 / 41.2 ms | 54.8 / 38.2 ms | 1.138 / 1.080 |
+| verify(8) / verify(4) / verify(2) at 120000 keys | 297.3 / 94.6 / 60.4 ms | 106.5 / 67.0 / 48.9 ms | 2.795 / 1.413 / 1.238 |
+| D1 tool-call geomean, `--mtp 3`, P0 prompts (2.2-3.0k keys) | 52.63 t/s | 52.61 t/s | 1.000 |
+| D1 golden at 32768 keys, `--mtp 3` (cjk / code / prose) | 31.7 / 40.8 / 31.7 t/s | 34.7 / 44.7 / 34.7 t/s | 1.095 |
+
 ## DFlash (spec 19)
 
 **On the card since 2026-10-27 (plan 19f); rows 54-56 ran 2026-10-27 (branch `dflash-bars`); D5 says: an option, not

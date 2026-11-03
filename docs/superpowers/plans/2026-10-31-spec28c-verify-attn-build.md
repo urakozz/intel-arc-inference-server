@@ -5,7 +5,7 @@ on `gemm_sm`), **Task 0 below writes GO** from 28a's attribution on 28b's step, 
 implementing plan at a time). If spec 28 was parked at 28a's NO-GO, Task 0 still runs on the measured step without 28b
 and its line goes to the operator instead of deciding (Open question 2).
 
-**Status (2026-10-31): PLANNED - after 28b.** Nothing built. **No box queue row** (operator, 2026-10-31: no new rows
+**Status (2026-11-03): BUILT (spec 28c §10), before 28b by the operator's ruling of 2026-11-01.** (2026-10-31: PLANNED.) **No box queue row** (operator, 2026-10-31: no new rows
 now); the box steps run as named jobs, and the stages to add later are described at the end in prose. Nothing is added
 to `tools/box_validate/stages.sh` or `box-validation-queue.md` by this plan.
 

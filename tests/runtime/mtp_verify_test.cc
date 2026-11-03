@@ -30,7 +30,11 @@
 //        to pos 16384 without a throw and produce the plain run's ids; then verify and
 //        draft refuse.
 //
-// usage: mtp_verify_test <snapshot> [max_len = 16384]   (cwd = the source tree)
+// usage: mtp_verify_test <snapshot> [max_len = 16384] [vattn = rule]   (cwd = the source tree)
+//
+// Spec 28c: `vattn` v2 | dpas | rule (test-only) - the verify lists' attention forced (Engine::recapture_verify) or
+// the capture's measured rule. Where DPAS is bound the verify rows are no longer bitwise their M = 1 steps: M2a's
+// cosine bars hold, its "(bitwise)" marks go.
 //
 // Spec 8 §12 (MTP at every context length; box queue row 6): with max_len above 16384
 // (mtp_verify_{32k,128k}_test) the same cases run at that length, plus M2 deep in the
@@ -235,6 +239,53 @@ std::vector<uint32_t> iterate(Ctx& c, uint32_t k) {
   c.e.commit(j, c.e.verify_ids()[j]);
   return out;
 }
+// Spec 28c diagnostic: `trace <prompt ids> <n> <k>` - the prompt prefilled, n plain steps recorded (logits per step),
+// then greedy speculative iterations at depth k from the same state: every verify row's logits against the plain
+// step of the same position; prints each row below cosine 0.9999 (the first 20) and the worst.
+int trace(Ctx& c, const std::vector<uint32_t>& prompt, uint32_t n, uint32_t k) {
+  c.e.reset();
+  c.e.prefill(prompt);
+  const Snap s0(c);
+  std::vector<std::vector<float>> ref;
+  std::vector<uint32_t> g{c.ctl->cur_token[0]};
+  for (uint32_t i = 0; i < n; ++i) {
+    c.e.verify(0);
+    ref.push_back(logits_rows(c, c.e.verify_logits_device(), 1));
+    c.e.commit(0, c.e.verify_ids()[0]);
+    g.push_back(c.ctl->cur_token[0]);
+  }
+  s0.restore(c);
+  uint32_t t = 0, shown = 0;
+  double worst = 1;
+  while (t + k + 1 < n) {
+    const uint32_t pos = c.e.pos();
+    c.e.draft(k);
+    c.e.verify(k);
+    const std::vector<float> lg = logits_rows(c, c.e.verify_logits_device(), k + 1);
+    uint32_t j = 0;
+    while (j < k && c.e.draft_ids()[j] == c.e.verify_ids()[j]) ++j;
+    for (uint32_t r = 0; r <= j; ++r) {
+      const double cl = cosine(lg.data() + size_t(r) * V, ref[t + r].data(), VU);
+      worst = std::min(worst, cl);
+      if (cl < 0.9999 && shown++ < 20)
+        std::printf("  trace: pos %u row %u of M %u (step %u): logits cos %.6f, id %u vs plain %u\n", pos + r, r,
+                    k + 1, t + r, cl, c.e.verify_ids()[r], g[t + r + 1]);
+      if (c.e.verify_ids()[r] != g[t + r + 1]) {
+        const uint32_t a = g[t + r + 1], b = c.e.verify_ids()[r];
+        const float* vr = lg.data() + size_t(r) * V;
+        std::printf("trace: first id difference at step %u (pos %u, row %u of M %u); worst cos %.6f; plain row: "
+                    "plain id %u %.5f, verify id %u %.5f; verify row: %.5f / %.5f; this row's cos %.6f\n",
+                    t + r, pos + r, r, k + 1, worst, a, ref[t + r][a], b, ref[t + r][b], vr[a], vr[b],
+                    cosine(vr, ref[t + r].data(), VU));
+        return 1;
+      }
+    }
+    c.e.commit(j, c.e.verify_ids()[j]);
+    t += j + 1;
+  }
+  std::printf("trace: %u steps equal; worst row cos %.6f\n", t, worst);
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -253,6 +304,18 @@ int main(int argc, char** argv) {
                         kMaxLen / 2 + 4395);
   l0::Context ctx(0);
   runtime::Engine e(ctx, loader::load(ctx, snap, kMaxLen, /*mtp=*/true), kMaxLen);
+  if (argc > 3) {   // spec 28c
+    const std::string v = argv[3];
+    CHECK(v == "v2" || v == "dpas" || v == "rule");
+    if (v != "rule")
+      e.recapture_verify(runtime::attn_forced(v == "v2" ? runtime::VerifyAttnForce::V2 : runtime::VerifyAttnForce::Dpas));
+    std::printf("verify attention: %s (spec 28c)\n", v.c_str());
+  }
+  if (argc > 7 && std::string(argv[4]) == "trace") {   // spec 28c diagnostic
+    kGdnBytes = e.model().desc->gdn_layers * 48 * 128 * 128 * 4;
+    Ctx c{ctx, e, e.buffers().control.as<runtime::Control>(), l0::CmdList::immediate(ctx)};
+    return trace(c, golden::read_ids(argv[5]), uint32_t(std::stoul(argv[6])), uint32_t(std::stoul(argv[7])));
+  }
   const size_t gdn_layers = e.model().desc->gdn_layers, fa_layers = e.model().desc->fa_layers;
   kGdnBytes = gdn_layers * 48 * 128 * 128 * 4;
   Ctx c{ctx, e, e.buffers().control.as<runtime::Control>(), l0::CmdList::immediate(ctx)};

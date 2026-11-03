@@ -259,6 +259,15 @@ class Engine {
   const l0::Mem* mtp_prefill_hidden() const { return mtp_pf_hid_.get(); }
   const CapturedStep& verify_step(uint32_t M) const;
   const CapturedStep& draft_step(uint32_t i) const;
+  // Spec 28c, tests and probes only (no engine flag, no environment variable): capture the verify lists again under
+  // `opt` (CaptureOptions::force_attn: the verify attention v2 or DPAS at every M >= 2 instead of the measured
+  // rule) - the MTP head's or the drafter's, whichever this Engine has. Session state is untouched.
+  void recapture_verify(const CaptureOptions& opt);
+  // Spec 28c: the verify lists captured twice (by depth) and their capture time - printed at engine start.
+  uint32_t verify_deep_lists() const;
+  double verify_deep_capture_ms() const { return verify_deep_ms_; }
+  // The list verify(k) submits at row 0's key count `keys` (pos + 1): tests and probes.
+  const CapturedStep& verify_step_at(uint32_t M, uint32_t keys) const;
 
   // --- spec 19c: a tap drafter (DFlash) -------------------------------------------------
   //
@@ -347,6 +356,15 @@ class Engine {
   CapturedStep step_;
   std::vector<CapturedStep> draft_steps_;    // [kMaxDraft], MTP on only
   std::vector<CapturedStep> verify_steps_;   // [M - 1] for M = 1..kSlots
+  // Spec 28c (§3, the operator's decision 3 of 2026-10-31: two lists per M are acceptable): where the measured
+  // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the
+  // list at M is captured twice - verify_steps_ by the rule at row 0's key count 1 (v2) and verify_deep_ with DPAS
+  // bound - and verify() submits the deep one when row 0's keys (pos + 1) reach verify_deep_from_. Null / never
+  // where one list serves every depth.
+  std::vector<std::unique_ptr<CapturedStep>> verify_deep_;   // [M - 1], parallel to verify_steps_
+  std::vector<uint32_t> verify_deep_from_;
+  double verify_deep_ms_ = 0;   // the deep lists' capture time
+  void capture_verify(uint32_t M, const CaptureOptions& opt);
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [kC + 1][hidden], lazy
   std::vector<uint32_t> draft_ids_;
   // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims), what the verify lists bind, and the

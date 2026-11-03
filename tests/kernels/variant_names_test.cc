@@ -90,6 +90,16 @@ int main() {
   CHECK_EQ(q.gdn_slots, std::string("gdn_step_slots_M2"));
   CHECK_EQ(q.silu, std::string("prep_silu_mul_M1"));
   CHECK_EQ(q.argmax, std::string("argmax_stage1_M1"));
+  // Spec 28c: the DPAS verify attention (src/kernels/CMakeLists.txt's B70_VERIFY_DPAS block), at
+  // Qwen3.8's heads with no suffix; the runtime forms it from the descriptor's heads.
+  const model::ModelDesc& qd = model::qwen38();
+  CHECK_EQ(kernels::attn_verify_dpas_variant(2, 32, false, qd.fa_q_heads, qd.fa_kv_heads),
+           std::string("attn_verify_dpas_M2_T32"));
+  CHECK_EQ(kernels::attn_verify_dpas_variant(8, 32, false, qd.fa_q_heads, qd.fa_kv_heads),
+           std::string("attn_verify_dpas_M8_T32"));
+  CHECK_EQ(kernels::attn_verify_dpas_variant(4, 32, true, qd.fa_q_heads, qd.fa_kv_heads),
+           std::string("attn_verify_dpas_M4_T32_KV8"));
+  CHECK_EQ(kernels::attn_verify_dpas_variant(4, 32, true), std::string("attn_verify_dpas_M4_T32_KV8"));
 
   // Agnes: Qwen3.8's shapes, so the same names but for spec 14's three suffixes.
   const Names a = names(model::agnes());

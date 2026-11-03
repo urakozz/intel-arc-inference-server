@@ -340,6 +340,15 @@ inline std::string attn_v2_kv8_variant(unsigned M, unsigned T, unsigned q = kRef
                                        unsigned kv = kRefFaKvHeads) {
   return attn_v2_variant(M, T, q, kv) + "_KV8";
 }
+// Spec 28c (src/kernels/attn_verify_dpas.cl): the verify attention on DPAS - entry
+// `attn_verify_dpas` (`attn_verify_dpas_kv8` in the `_KV8` binary) - writing v2's partials, so
+// the reduce stays attn_v2_variant(M, T)'s (or attn_v2_kv8_variant's) attn_reduce_v2[_kv8].
+// Built at Qwen3.8's heads only (fa_suffix is empty there); M = 2..8 bf16, 2..4 int8.
+inline std::string attn_verify_dpas_variant(unsigned M, unsigned T, bool kv8, unsigned q = kRefFaQHeads,
+                                            unsigned kv = kRefFaKvHeads) {
+  return "attn_verify_dpas_M" + std::to_string(M) + "_T" + std::to_string(T) + fa_suffix(q, kv) +
+         (kv8 ? "_KV8" : "");
+}
 // SPEC_SLOT_STRIDE (one slot of MtpBuffers::gdn_spec, gdn_layers x 48 x 128 x 128
 // floats) is baked, so a model with another GDN layer count is another binary:
 // Qwen3.8's 48 keeps the historical name, any other count is `_G<gdn_layers>`; the

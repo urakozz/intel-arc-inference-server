@@ -78,8 +78,7 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     df_tv_.slots = TapVerifyDims::kSlots;
     df_tv_.taps = &drafter->taps();
     df_tv_.layers = drafter->tap_layers();
-    for (uint32_t M = 1; M <= drafter->max_k() + 1; ++M)
-      verify_steps_.push_back(build_verify_taps(ctx, model_, buffers_, df_tv_, M));
+    for (uint32_t M = 1; M <= drafter->max_k() + 1; ++M) capture_verify(M, {});
   }
   if (mtp_) {
     // Spec 8: the draft lists (one per draft index, each writing its own logits row)
@@ -87,10 +86,55 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     hctl_ = mtp_->hctl.as<Control>();
     for (uint32_t i = 0; i < kMaxDraft; ++i)
       draft_steps_.push_back(build_draft(ctx, model_, buffers_, *mtp_, i));
-    for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M)
-      verify_steps_.push_back(build_verify(ctx, model_, buffers_, *mtp_, M));
+    for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M) capture_verify(M, {});
   }
   reset();
+}
+
+void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
+  auto one = [&](const CaptureOptions& o) {
+    return drafter_ ? build_verify_taps(ctx_, model_, buffers_, df_tv_, M, o)
+                    : build_verify(ctx_, model_, buffers_, *mtp_, M, nullptr, o);
+  };
+  verify_steps_.push_back(one(opt));
+  // Spec 28c: the deep list where the rule switches this M at a depth (and nothing forces one kind).
+  const model::ModelDesc& d = *model_.desc;
+  const uint32_t from = opt.force_attn == VerifyAttnForce::Auto && decode_attn() == DecodeAttn::V2
+                            ? verify_attn_deep_from(M, kv_cache() == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
+                            : kDpasNever;
+  const bool by_depth = from != kDpasNever;
+  if (by_depth) {
+    const auto t0 = std::chrono::steady_clock::now();
+    verify_deep_.push_back(std::make_unique<CapturedStep>(one(attn_forced(VerifyAttnForce::Dpas))));
+    verify_deep_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    verify_deep_from_.push_back(from);
+  } else {
+    verify_deep_.push_back(nullptr);
+    verify_deep_from_.push_back(kDpasNever);
+  }
+}
+
+void Engine::recapture_verify(const CaptureOptions& opt) {
+  // The constructor's loops, with `opt`: index M - 1 is the list at M rows (a CapturedStep moves, it does not
+  // assign: the old lists go first).
+  const uint32_t n = uint32_t(verify_steps_.size());
+  verify_steps_.clear();
+  verify_deep_.clear();
+  verify_deep_from_.clear();
+  verify_deep_ms_ = 0;
+  for (uint32_t M = 1; M <= n; ++M) capture_verify(M, opt);
+}
+
+uint32_t Engine::verify_deep_lists() const {
+  uint32_t n = 0;
+  for (const auto& p : verify_deep_) n += p != nullptr;
+  return n;
+}
+
+const CapturedStep& Engine::verify_step_at(uint32_t M, uint32_t keys) const {
+  require_spec("verify_step_at");
+  const size_t i = M - 1;
+  return verify_deep_.at(i) && keys >= verify_deep_from_[i] ? *verify_deep_[i] : verify_steps_.at(i);
 }
 
 void Engine::reset() {
@@ -265,7 +309,9 @@ void Engine::verify(uint32_t k) {
   }
   verify_pos_ = pos;
   verify_k_ = k;
-  queue_.execute(verify_steps_[k].list, &fence_);
+  // Spec 28c: the deep list (DPAS bound) once row 0's keys reach the table's threshold.
+  CapturedStep& list = verify_deep_[k] && pos + 1 >= verify_deep_from_[k] ? *verify_deep_[k] : verify_steps_[k];
+  queue_.execute(list.list, &fence_);
   fence_.wait();
 }
 

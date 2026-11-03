@@ -358,6 +358,47 @@ if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8 AND B70_ORNITH)
   add_dependencies(gemm_sm_test ${B70_GEMM_SM_KERNELS})
   add_test(NAME gemm_sm_test COMMAND gemm_sm_test)
   set_tests_properties(gemm_sm_test PROPERTIES TIMEOUT 1800)
+# Spec 28c (plan 28c Task 1): the verify attention's fp64 reference at M rows (bf16 and int8 KV) and
+# v2's block view. Host only.
+add_executable(attn_verify_ref_test kernels/attn_verify_ref_test.cc)
+target_include_directories(attn_verify_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
+add_test(NAME attn_verify_ref_test COMMAND attn_verify_ref_test)
+
+# Spec 28c (plan 28c Task 5): the capture's verify-attention rule (runtime/verify_attn.h), host only; the built
+# attn_verify_dpas names are its arguments (every (M, KV form) the rule can bind must be on a CMake line).
+set(_vattn_built)
+foreach(MM 2 3 4 5 6 7 8)
+  foreach(SFX "" _KV8)
+    if(TARGET kernel_attn_verify_dpas_M${MM}_T32${SFX})
+      list(APPEND _vattn_built attn_verify_dpas_M${MM}_T32${SFX})
+    endif()
+  endforeach()
+endforeach()
+add_executable(verify_attn_test runtime/verify_attn_test.cc)
+target_include_directories(verify_attn_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(verify_attn_test PRIVATE b70_model)
+b70_target_kernel_dir(verify_attn_test)
+add_test(NAME verify_attn_test COMMAND verify_attn_test ${_vattn_built})
+
+# Spec 28c (plan 28c Task 6): the production attn_verify_dpas binaries + v2's reduce on the card - N1, property R,
+# against v2 at M = 1. Part S always; part D on plan 28c Task 4's capture when B70_VERIFY_ATTN_DUMP names it.
+if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  set(B70_VERIFY_ATTN_DUMP "$ENV{HOME}/b70/logs/spec28c/vattn-dump" CACHE PATH "plan 28c's verify-attention capture")
+  add_executable(attn_verify_dpas_test kernels/attn_verify_dpas_test.cc)
+  target_include_directories(attn_verify_dpas_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(attn_verify_dpas_test PRIVATE b70_l0)
+  b70_target_kernel_dir(attn_verify_dpas_test)
+  set(_vdpas_deps)
+  foreach(MM 2 3 4 5 6 7 8)
+    list(APPEND _vdpas_deps kernel_attn_verify_dpas_M${MM}_T32 kernel_attn_v2_M${MM}_T32)
+  endforeach()
+  foreach(MM 2 3 4)
+    list(APPEND _vdpas_deps kernel_attn_verify_dpas_M${MM}_T32_KV8 kernel_attn_v2_M${MM}_T32_KV8)
+  endforeach()
+  add_dependencies(attn_verify_dpas_test ${_vdpas_deps} kernel_attn_v2_M1_T32 kernel_attn_v2_M1_T32_KV8)
+  add_test(NAME attn_verify_dpas_test COMMAND attn_verify_dpas_test ${B70_VERIFY_ATTN_DUMP})
+  set_tests_properties(attn_verify_dpas_test PROPERTIES TIMEOUT 3600)
 endif()
 
 add_executable(gemv_test kernels/gemv_test.cc)

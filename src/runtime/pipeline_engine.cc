@@ -152,6 +152,12 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
         Stage& s = st(i);
         s.verify.push_back(build_stage_verify(s.ctx, s.model, s.buffers, s.range, binding, M,
                                               s.mtp.get(), *s.spec()));
+        // Spec 28c: the deep list where the verify-attention table switches M at a depth.
+        s.verify_deep.push_back(verify_deep_from(M) == kDpasNever
+                                    ? nullptr
+                                    : std::make_unique<CapturedStep>(build_stage_verify(
+                                          s.ctx, s.model, s.buffers, s.range, binding, M, s.mtp.get(), *s.spec(),
+                                          attn_forced(VerifyAttnForce::Dpas))));
       }
     for (uint32_t i = 0; i < kMaxDraft; ++i)
       s1.draft.push_back(build_stage_draft(s1.ctx, s1.model, s1.buffers, s1.range, *s1.mtp, i));
@@ -171,6 +177,11 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
       for (uint32_t i = 0; i < kPpDevices; ++i) {
         Stage& s = st(i);
         s.verify.push_back(build_stage_verify_taps(s.ctx, s.model, s.buffers, s.range, binding, s.tv, M));
+        s.verify_deep.push_back(verify_deep_from(M) == kDpasNever   // spec 28c
+                                    ? nullptr
+                                    : std::make_unique<CapturedStep>(build_stage_verify_taps(
+                                          s.ctx, s.model, s.buffers, s.range, binding, s.tv, M,
+                                          attn_forced(VerifyAttnForce::Dpas))));
       }
   }
   reset();
@@ -527,6 +538,13 @@ uint32_t PipelineEngine::gdn_slots() const {
 
 uint32_t PipelineEngine::max_draft() const { return mtp() ? kMaxDraft : drafter_ ? drafter_->max_k() : 0; }
 
+uint32_t PipelineEngine::verify_deep_from(uint32_t M) const {
+  const model::ModelDesc& d = *st(1).model.desc;
+  return decode_attn() == DecodeAttn::V2
+             ? verify_attn_deep_from(M, st(1).buffers.kv_lay.form == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
+             : kDpasNever;
+}
+
 const CapturedStep& PipelineEngine::verify_step(uint32_t dev, uint32_t M) const {
   require_spec("verify_step");
   return st(dev).verify.at(M - 1);
@@ -642,7 +660,10 @@ void PipelineEngine::verify(uint32_t k) {
   }
   verify_pos_ = pos;
   verify_k_ = k;
-  run_pair(st(0).verify[k].list, st(1).verify[k].list, "verify");
+  // Spec 28c: both devices' deep lists (DPAS bound) once row 0's keys reach the table's threshold.
+  const bool deep = verify_deep_from(k + 1) != kDpasNever && pos + 1 >= verify_deep_from(k + 1);
+  run_pair(deep ? st(0).verify_deep[k]->list : st(0).verify[k].list,
+           deep ? st(1).verify_deep[k]->list : st(1).verify[k].list, "verify");
   // Device 1's argmax advanced pos by k + 1 and wrote the rows' ids: device 0 mirrors it, as
   // after a step; commit() sets the real pos on both.
   std::memcpy(st(0).ctl, st(1).ctl, sizeof(Control));
