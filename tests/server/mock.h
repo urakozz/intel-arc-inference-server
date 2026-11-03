@@ -86,7 +86,7 @@ struct MockTok : server::TokIface {
 
 struct MockTemplate : server::TemplateIface {
   bool think_tag = false;  // end a thinking prompt in "<think>\n" as the real template does
-  std::string render(const nlohmann::json& messages, const nlohmann::json&, bool think) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool think) override {
     std::string text;
     for (const auto& message : messages) {
       text += message.at("role").get<std::string>() + ": " +

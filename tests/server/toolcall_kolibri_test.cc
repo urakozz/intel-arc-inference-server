@@ -126,7 +126,7 @@ void expect(const std::string& text, const json& tools, const std::string& reaso
   const ParsedOutput p = parse_checked(text, tools);
   bool ok = p.reasoning == reasoning && p.content == content && p.tool_calls.size() == calls.size();
   for (size_t i = 0; ok && i < calls.size(); ++i)
-    ok = p.tool_calls[i].name == calls[i].at(0) && p.tool_calls[i].arguments == calls[i].at(1);
+    ok = p.tool_calls[i].name == calls[i].at(0) && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at(1);
   if (!ok) {
     std::fprintf(stderr, "parse of %s\n  got:  %s\n  want: %s\n", json(text).dump().c_str(), show(p).c_str(),
                  json({{"reasoning", reasoning}, {"content", content}, {"calls", calls}}).dump().c_str());
@@ -196,7 +196,7 @@ void case_round_trip(const std::string& dir) {
       ok = ok && p.tool_calls.size() == want_calls.size();
       for (size_t j = 0; ok && j < want_calls.size(); ++j)
         ok = p.tool_calls[j].name == want_calls[j].at("function").at("name") &&
-             p.tool_calls[j].arguments == want_calls[j].at("function").at("arguments");
+             nlohmann::json(p.tool_calls[j].arguments) == want_calls[j].at("function").at("arguments");
       if (!ok) {
         std::fprintf(stderr, "round trip %s turn %zu: %s\n  from %s\n", name.c_str(), k, show(p).c_str(),
                      json(generated).dump().c_str());
@@ -330,7 +330,7 @@ void case_parse_json_call() {
   server::ToolCall c;
   CHECK(server::parse_json_call("  {\"name\": \"f\", \"arguments\": {\"a\": 1}}\n", kTools, c));
   CHECK_EQ(c.name, std::string("f"));
-  CHECK_EQ(c.arguments, json({{"a", 1}}));
+  CHECK_EQ(nlohmann::json(c.arguments), json({{"a", 1}}));
   CHECK(c.id.empty());   // ids are the stream's
   CHECK(!server::parse_json_call("{\"name\": \"\", \"arguments\": {}}", kTools, c));
   CHECK(!server::parse_json_call("{\"name\": 3}", kTools, c));
@@ -377,7 +377,7 @@ void case_format() {
   const json flat = server::template_messages(f, msgs);
   CHECK_EQ(flat.at(0).at("content"), json("a\nb"));
   CHECK(flat.at(1).at("content").is_null());
-  CHECK_EQ(server::template_messages(server::ChatFormat{}, msgs), msgs);
+  CHECK_EQ(json(server::template_messages(server::ChatFormat{}, msgs)), msgs);
   std::printf("format: kolibri1 -> Kolibri (kwargs, string content, the output parser)\n");
 }
 

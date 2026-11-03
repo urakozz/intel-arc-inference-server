@@ -52,12 +52,12 @@ struct TemplateAdapter : server::TemplateIface {
   // Spec 23e: b70-serve --chat-template FILE (Bolt, spec 25e) - the template from `file` ("" = the snapshot's own).
   TemplateAdapter(const std::string& dir, const std::string& file) : tmpl(dir, file) {}
 
-  std::string render(const nlohmann::json& messages, const nlohmann::json& tools,
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking) override {
     return tmpl.render(messages, tools, enable_thinking);
   }
   // Spec 18d: the request's chat_template_kwargs as template variables (K2-Horizon).
-  std::string render_with_kwargs(const nlohmann::json& messages, const nlohmann::json& tools,
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                                  bool enable_thinking, const nlohmann::json& kwargs) override {
     return tmpl.render(messages, tools, enable_thinking, kwargs);
   }

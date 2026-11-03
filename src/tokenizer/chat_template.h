@@ -21,11 +21,13 @@ class Template {
   Template(const Template&) = delete;
   Template& operator=(const Template&) = delete;
 
-  std::string render(const nlohmann::json& messages, const nlohmann::json& tools,
+  // `messages` and `tools` are rendered in their own key order (the template's tojson and `| items` print it, as
+  // transformers' Jinja does over Python dicts); a nlohmann::json argument converts in its sorted order.
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking) const;
   // Spec 18d: `kwargs` (an object, or null) are the request's chat_template_kwargs - template
   // variables beside enable_thinking, e.g. K2-Horizon's tool_call_format / reasoning_effort.
-  std::string render(const nlohmann::json& messages, const nlohmann::json& tools,
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                      bool enable_thinking, const nlohmann::json& kwargs) const;
   const std::string& bos_token() const;
   const std::string& eos_token() const;

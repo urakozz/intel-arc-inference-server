@@ -153,7 +153,7 @@ void case_reasoning_mentions_tags() {
   CHECK_EQ(p.reasoning, std::string("I should emit <tool_call> with <function=read> here."));
   CHECK_EQ(p.content, std::string("Reading.\n"));
   CHECK_EQ(p.tool_calls.size(), 1U);
-  CHECK_EQ(p.tool_calls[0].arguments, json({{"filePath", "/w/x.cc"}, {"offset", 12}}));
+  CHECK_EQ(nlohmann::json(p.tool_calls[0].arguments), json({{"filePath", "/w/x.cc"}, {"offset", 12}}));
   // No </think>: everything is reasoning.
   const ParsedOutput q = parse_checked("thinking <tool_call> still\n", true, kTools);
   CHECK_EQ(q.reasoning, std::string("thinking <tool_call> still"));
@@ -173,7 +173,7 @@ void case_truncated() {
       "<tool_call>\n<function=edit>\n<parameter=filePath>\n/w/y\n</parameter>\n<parameter=oldString>\nha",
       false, kTools);
   CHECK_EQ(c.tool_calls.size(), 1U);
-  CHECK_EQ(c.tool_calls[0].arguments, json({{"filePath", "/w/y"}}));
+  CHECK_EQ(nlohmann::json(c.tool_calls[0].arguments), json({{"filePath", "/w/y"}}));
   CHECK(c.content.empty());
 }
 
@@ -201,13 +201,19 @@ void case_no_tools() {
       "<parameter=b>\ntrue\n</parameter>\n</function>\n</tool_call>";
   const ParsedOutput p = parse_checked(text, false, json(nullptr));
   CHECK_EQ(p.tool_calls.size(), 1U);
-  CHECK_EQ(p.tool_calls[0].arguments,
+  CHECK_EQ(nlohmann::json(p.tool_calls[0].arguments),
            json({{"n", 42}, {"s", "hello world"}, {"o", {{"a", {1, 2}}}}, {"q", "quoted"}, {"b", true}}));
   // Schema: string stays a string even when it looks like JSON; integer parses.
-  CHECK_EQ(server::convert_value("123", "edit", "oldString", kTools), json("123"));
-  CHECK_EQ(server::convert_value("123", "read", "limit", kTools), json(123));
-  CHECK_EQ(server::convert_value("not json", "read", "limit", kTools), json("not json"));
-  CHECK_EQ(server::convert_value("{\"k\":1}", "edit", "opts", kTools), json({{"k", 1}}));
+  CHECK_EQ(server::convert_value("123", "edit", "oldString", kTools), nlohmann::ordered_json("123"));
+  CHECK_EQ(server::convert_value("123", "read", "limit", kTools), nlohmann::ordered_json(123));
+  CHECK_EQ(server::convert_value("not json", "read", "limit", kTools), nlohmann::ordered_json("not json"));
+  CHECK_EQ(server::convert_value("{\"k\":1}", "edit", "opts", kTools), nlohmann::ordered_json({{"k", 1}}));
+  // The model's key order is kept, nested objects too (the response's arguments string, echoed back by a client, then
+  // renders as the call was generated - tests/server/prompt_order_test.cc's sessions).
+  const ParsedOutput o = parse_checked(
+      "<tool_call>\n<function=f>\n<parameter=z>\n1\n</parameter>\n<parameter=a>\n{\"y\": {\"q\": 1, \"c\": 2}, \"b\": [3]}\n"
+      "</parameter>\n<parameter=m>\nü\n</parameter>\n</function>\n</tool_call>", false, json(nullptr));
+  CHECK_EQ(o.tool_calls.at(0).arguments.dump(), std::string("{\"z\":1,\"a\":{\"y\":{\"q\":1,\"c\":2},\"b\":[3]},\"m\":\"ü\"}"));
 }
 
 void case_thinking_off() {

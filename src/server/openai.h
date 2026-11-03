@@ -15,8 +15,11 @@ namespace server {
 
 struct Request {
   bool chat = false;
-  nlohmann::json messages;
-  nlohmann::json tools;
+  // In the request body's key order: the chat template prints it (tools via tojson, call arguments via | items), and
+  // transformers / vLLM render a client's dicts in their order - a sorted copy is another prompt (spec 19f's
+  // "server ids differ from the set's"), and a sorted echo of the model's own call is not the ids it generated.
+  nlohmann::ordered_json messages;
+  nlohmann::ordered_json tools;
   bool enable_thinking = true;
   // Spec 18d: chat_template_kwargs as sent (an object; enable_thinking included). Which of
   // them reach the template, and which the output parser reads, is the model's

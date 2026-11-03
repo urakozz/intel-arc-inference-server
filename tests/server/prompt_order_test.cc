@@ -78,7 +78,7 @@ struct RealTok : server::TokIface {
 
 struct RealTemplate : server::TemplateIface {
   explicit RealTemplate(const std::string& dir) : tmpl(dir) {}
-  std::string render(const nlohmann::json& messages, const nlohmann::json& tools, bool think) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool think) override {
     return tmpl.render(messages, tools, think);
   }
   chat::Template tmpl;
@@ -131,7 +131,7 @@ ojson request(const ojson& messages, const ojson& tools, bool thinking) {
   ojson b = {{"model", "qwen"}, {"messages", messages}};
   if (!tools.is_null() && !tools.empty()) b["tools"] = tools;
   b["chat_template_kwargs"] = {{"enable_thinking", thinking}};
-  b["max_tokens"] = 64;
+  b["max_tokens"] = 1024;   // the scripted output ends in EOS well before
   b["temperature"] = 0;
   b["return_token_ids"] = true;
   return b;

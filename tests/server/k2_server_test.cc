@@ -29,11 +29,11 @@ using json = nlohmann::json;
 struct K2Template : server::TemplateIface {
   int plain_calls = 0, kwargs_calls = 0;
   json last_kwargs;
-  std::string render(const json& messages, const json&, bool) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool) override {
     ++plain_calls;
     return body(messages) + "<|ifm|im_start|>assistant\n<ifm|think>\n";
   }
-  std::string render_with_kwargs(const json& messages, const json&, bool, const json& kwargs) override {
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool, const nlohmann::json& kwargs) override {
     ++kwargs_calls;
     last_kwargs = kwargs;
     const std::string effort = kwargs.value("reasoning_effort", std::string("high"));

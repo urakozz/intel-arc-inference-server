@@ -69,15 +69,15 @@ std::string base_type(const std::string& stated) {
   return t;
 }
 
-json convert(const std::string& value, const std::string& stated, const std::string& function,
-             const std::string& key, const json& tools) {
+nlohmann::ordered_json convert(const std::string& value, const std::string& stated, const std::string& function,
+                               const std::string& key, const json& tools) {
   const int schema = schema_string_type(function, key, tools);
   if (schema == 1) return value;
   if (schema == -1 && !stated.empty()) {
     const std::string t = base_type(stated);
     if (t == "string" || t == "any") return value;
   }
-  json parsed = json::parse(trim(value), nullptr, false);
+  nlohmann::ordered_json parsed = nlohmann::ordered_json::parse(trim(value), nullptr, false);
   if (parsed.is_discarded()) return value;
   return parsed;
 }
@@ -92,7 +92,7 @@ bool parse_xml(const std::string& body, bool complete, const json& tools, ToolCa
   }
   call.name = trim(body.substr(0, name_end));
   if (!valid_name(call.name)) return false;
-  call.arguments = json::object();
+  call.arguments = nlohmann::ordered_json::object();
   size_t pos = name_end;
   for (;;) {
     pos = skip_ws(body, pos);

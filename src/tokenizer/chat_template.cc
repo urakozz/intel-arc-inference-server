@@ -170,18 +170,18 @@ Template::Template(const std::string& dir, const std::string& template_file) : i
 
 Template::~Template() = default;
 
-std::string Template::render(const nlohmann::json& messages, const nlohmann::json& tools,
+std::string Template::render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                              bool enable_thinking) const {
   return render(messages, tools, enable_thinking, nlohmann::json());
 }
 
-std::string Template::render(const nlohmann::json& messages, const nlohmann::json& tools,
+std::string Template::render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools,
                              bool enable_thinking, const nlohmann::json& kwargs) const {
   if (!kwargs.is_null() && !kwargs.is_object())
     throw std::invalid_argument("chat::Template::render: kwargs must be an object");
   minja::chat_template_inputs inputs;
   inputs.messages = messages;
-  inputs.tools = tools.is_null() ? nlohmann::ordered_json() : nlohmann::ordered_json(tools);
+  inputs.tools = tools;
   inputs.add_generation_prompt = true;
   inputs.now = impl_->clock ? impl_->clock() : std::chrono::system_clock::now();
   inputs.extra_context = nlohmann::ordered_json::object();

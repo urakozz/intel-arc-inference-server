@@ -11,6 +11,7 @@ namespace server {
 namespace {
 
 using json = nlohmann::json;
+using ojson = nlohmann::ordered_json;   // messages and tools: the body's key order
 
 [[noreturn]] void invalid(const std::string& message) {
   throw BadRequest(message);
@@ -82,12 +83,12 @@ json tool_call_json(const ToolCall& call) {
 
 // Messages as OpenAI clients send them: content may be null (an assistant turn
 // holding only tool calls) or a list of text parts; tool-call arguments arrive as a
-// JSON string and the chat template iterates them as an object.
-json normalize_message(const json& message) {
-  json out = message;
-  const json& content = message.at("content");
+// JSON string and the chat template iterates them as an object (parsed in its own key order, as vLLM's json.loads).
+ojson normalize_message(const ojson& message) {
+  ojson out = message;
+  const ojson& content = message.at("content");
   if (content.is_array()) {
-    for (const json& part : content) {
+    for (const ojson& part : content) {
       // Spec 23e: an image / video / audio part is refused by name - no served model loads its encoder (spec 23 §10's
       // rule). A text-bearing part of another type (input_text) stays text.
       static const char* const kMedia[] = {"image", "image_url", "input_image", "video", "video_url", "input_video",
@@ -108,12 +109,12 @@ json normalize_message(const json& message) {
     invalid("content must be a string");
   }
   if (message.contains("tool_calls") && message.at("tool_calls").is_array()) {
-    for (json& call : out.at("tool_calls")) {
+    for (ojson& call : out.at("tool_calls")) {
       if (!call.is_object() || !call.contains("function") || !call.at("function").is_object()) continue;
-      json& fn = call.at("function");
+      ojson& fn = call.at("function");
       if (fn.contains("arguments") && fn.at("arguments").is_string()) {
         const std::string text = fn.at("arguments").get<std::string>();
-        json parsed = text.empty() ? json::object() : json::parse(text, nullptr, false);
+        ojson parsed = text.empty() ? ojson::object() : ojson::parse(text, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object()) {
           // Spec 23e (plan 23e Review Focus 5): name the call - a template that iterates the arguments (it may raise
           // on a string) must never see one, and the client must see which call it sent wrong.
@@ -221,13 +222,24 @@ std::vector<std::string> generation_stop_strings(const json& g) {
 }
 
 Request parse_request(const std::string& body, bool chat, const Sampling& defaults) {
-  json request;
+  // Parsed in the body's key order; messages and tools are taken out as they are (the template prints that order), the
+  // rest - scalar fields whose order nothing reads - is read from a nlohmann::json copy.
+  ojson ordered;
   try {
-    request = json::parse(body);
+    ordered = ojson::parse(body);
   } catch (const json::parse_error&) {
     invalid("invalid JSON body");
   }
-  if (!request.is_object()) invalid("request body must be an object");
+  if (!ordered.is_object()) invalid("request body must be an object");
+  ojson messages_in, tools_in;
+  const bool has_messages = ordered.contains("messages"), has_tools = ordered.contains("tools");
+  if (chat) {
+    if (has_messages) messages_in = std::move(ordered.at("messages"));
+    if (has_tools) tools_in = std::move(ordered.at("tools"));
+    ordered.erase("messages");
+    ordered.erase("tools");
+  }
+  const json request = ordered;
 
   Request out;
   out.chat = chat;
@@ -246,20 +258,20 @@ Request parse_request(const std::string& body, bool chat, const Sampling& defaul
   }
 
   if (chat) {
-    if (!request.contains("messages")) invalid("missing messages");
-    const json& messages = request.at("messages");
+    if (!has_messages) invalid("missing messages");
+    const ojson& messages = messages_in;
     if (!messages.is_array()) invalid("messages must be an array");
     if (messages.empty()) invalid("messages must not be empty");
-    for (const json& message : messages) {
+    for (const ojson& message : messages) {
       if (!message.is_object()) invalid("messages entries must be objects");
       if (!message.contains("role") || !message.at("role").is_string()) {
         invalid("message role must be a string");
       }
       if (!message.contains("content")) invalid("content must be a string");
     }
-    out.messages = json::array();
-    for (const json& message : messages) out.messages.push_back(normalize_message(message));
-    out.tools = request.contains("tools") ? request.at("tools") : json(nullptr);
+    out.messages = ojson::array();
+    for (const ojson& message : messages) out.messages.push_back(normalize_message(message));
+    out.tools = has_tools ? std::move(tools_in) : ojson(nullptr);
     if (request.contains("chat_template_kwargs")) {
       const json& kwargs = request.at("chat_template_kwargs");
       if (!kwargs.is_object()) invalid("chat_template_kwargs must be an object");

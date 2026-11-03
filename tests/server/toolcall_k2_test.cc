@@ -170,7 +170,7 @@ void case_round_trip(const std::string& dir) {
       ok = ok && p.tool_calls.size() == want_calls.size();
       for (size_t j = 0; ok && j < want_calls.size(); ++j) {
         ok = p.tool_calls[j].name == want_calls[j].at("function").at("name") &&
-             p.tool_calls[j].arguments == want_calls[j].at("function").at("arguments");
+             nlohmann::json(p.tool_calls[j].arguments) == want_calls[j].at("function").at("arguments");
       }
       if (!ok) {
         std::fprintf(stderr, "round trip %s turn %zu: %s\n  from %s\n", name.c_str(), k, show(p).c_str(),
@@ -212,7 +212,7 @@ void case_reasoning() {
                                "<ifm|think>", K2CallFormat::Xml, kTools);
   CHECK_EQ(t.reasoning, std::string("I will read it."));
   CHECK_EQ(t.tool_calls.size(), 1U);
-  CHECK_EQ(t.tool_calls[0].arguments, json({{"filePath", "/a"}}));
+  CHECK_EQ(nlohmann::json(t.tool_calls[0].arguments), json({{"filePath", "/a"}}));
   // No reasoning opened: the text is content; a close tag in it is text.
   const auto u = parse_checked("plain </ifm|think> text", "", K2CallFormat::Xml, nullptr);
   CHECK(u.reasoning.empty());
@@ -235,11 +235,11 @@ void case_xml() {
   CHECK_EQ(p.content, std::string("Reading both.\n"));
   CHECK_EQ(p.tool_calls.size(), 2U);
   CHECK_EQ(p.tool_calls[0].name, std::string("read"));
-  CHECK_EQ(p.tool_calls[0].arguments, json({{"filePath", "/w/a.cc"}, {"offset", 12}}));
+  CHECK_EQ(nlohmann::json(p.tool_calls[0].arguments), json({{"filePath", "/w/a.cc"}, {"offset", 12}}));
   CHECK_EQ(p.tool_calls[1].name, std::string("edit"));
   // A string value is verbatim (whitespace, a "</ifm|arg_value>" not followed by a key, tags);
   // a schema string stays a string even when it reads as JSON ("123", "null" for string|null).
-  CHECK_EQ(p.tool_calls[1].arguments,
+  CHECK_EQ(nlohmann::json(p.tool_calls[1].arguments),
            json({{"filePath", "/w/b.xml"}, {"oldString", "  a </ifm|arg_value> <b>\n"}, {"newString", "123"},
                  {"replaceAll", true}, {"opts", {{"k", {1, 2}}}}, {"note", "null"}}));
   CHECK(p.tool_calls[0].id != p.tool_calls[1].id);
@@ -249,7 +249,7 @@ void case_xml() {
                                "<ifm|arg_value>ten</ifm|arg_value>\n</ifm|tool_call>\n</ifm|tool_calls>",
                                "", K2CallFormat::Xml, kTools);
   CHECK_EQ(q.tool_calls.size(), 1U);
-  CHECK_EQ(q.tool_calls[0].arguments, json({{"offset", 7}, {"limit", "ten"}}));
+  CHECK_EQ(nlohmann::json(q.tool_calls[0].arguments), json({{"offset", 7}, {"limit", "ten"}}));
   // No tools: values typed by guessing JSON (server::convert_value's rule).
   const auto r = parse_checked("<ifm|tool_calls><ifm|tool_call>anything\n<ifm|arg_key>n</ifm|arg_key>"
                                "<ifm|arg_value>42</ifm|arg_value><ifm|arg_key>s</ifm|arg_key><ifm|arg_value>hello "
@@ -257,7 +257,7 @@ void case_xml() {
                                "</ifm|arg_value></ifm|tool_call></ifm|tool_calls>",
                                "", K2CallFormat::Xml, nullptr);
   CHECK_EQ(r.tool_calls.size(), 1U);
-  CHECK_EQ(r.tool_calls[0].arguments, json({{"n", 42}, {"s", "hello world"}, {"q", "quoted"}}));
+  CHECK_EQ(nlohmann::json(r.tool_calls[0].arguments), json({{"n", 42}, {"s", "hello world"}, {"q", "quoted"}}));
   CHECK(r.content.empty());
 }
 
@@ -272,14 +272,14 @@ void case_xml_typed() {
       "<ifm|arg_type>null</ifm|arg_type>\n<ifm|arg_value>null</ifm|arg_value>\n</ifm|tool_call>\n</ifm|tool_calls>";
   const auto p = parse_checked(text, "", K2CallFormat::XmlTyped, nullptr);
   CHECK_EQ(p.tool_calls.size(), 1U);
-  CHECK_EQ(p.tool_calls[0].arguments,
+  CHECK_EQ(nlohmann::json(p.tool_calls[0].arguments),
            json({{"items", json::array({{{"id", "1"}}})}, {"n", 40}, {"s", "40"}, {"a", "[1]"}, {"z", nullptr}}));
   // The schema wins over a stated type.
   const auto q = parse_checked("<ifm|tool_calls><ifm|tool_call>read\n<ifm|arg_key>filePath</ifm|arg_key>"
                                "<ifm|arg_type>integer</ifm|arg_type><ifm|arg_value>12</ifm|arg_value>"
                                "</ifm|tool_call></ifm|tool_calls>",
                                "", K2CallFormat::XmlTyped, kTools);
-  CHECK_EQ(q.tool_calls[0].arguments, json({{"filePath", "12"}}));
+  CHECK_EQ(nlohmann::json(q.tool_calls[0].arguments), json({{"filePath", "12"}}));
 }
 
 void case_json() {
@@ -291,9 +291,9 @@ void case_json() {
   CHECK_EQ(p.reasoning, std::string("Done thinking"));
   CHECK(p.content.empty());
   CHECK_EQ(p.tool_calls.size(), 2U);
-  CHECK_EQ(p.tool_calls[0].arguments, json({{"filePath", "/a"}, {"limit", 40}}));
+  CHECK_EQ(nlohmann::json(p.tool_calls[0].arguments), json({{"filePath", "/a"}, {"limit", 40}}));
   // arguments as a JSON string; a schema-string argument written as a number becomes its text.
-  CHECK_EQ(p.tool_calls[1].arguments, json({{"newString", "5"}, {"replaceAll", false}}));
+  CHECK_EQ(nlohmann::json(p.tool_calls[1].arguments), json({{"newString", "5"}, {"replaceAll", false}}));
   // Invalid JSON: the call is content, verbatim with its tags.
   const auto q = parse_checked("<ifm|tool_calls>\n<ifm|tool_call>{\"name\": \"read\", </ifm|tool_call>\n</ifm|tool_calls>",
                                "", K2CallFormat::Json, kTools);
@@ -304,7 +304,7 @@ void case_json() {
                                "", K2CallFormat::Xml, kTools);
   CHECK_EQ(r.tool_calls.size(), 1U);
   CHECK_EQ(r.tool_calls[0].name, std::string("now"));
-  CHECK_EQ(r.tool_calls[0].arguments, json::object());
+  CHECK_EQ(nlohmann::json(r.tool_calls[0].arguments), json::object());
 }
 
 void case_edges() {
@@ -344,7 +344,7 @@ void case_edges() {
                                "<ifm|arg_value>a</ifm|tool_call>b</ifm|arg_value>\n</ifm|tool_call></ifm|tool_calls>",
                                "", K2CallFormat::Xml, kTools);
   CHECK_EQ(v.tool_calls.size(), 1U);
-  CHECK_EQ(v.tool_calls[0].arguments, json({{"oldString", "a</ifm|tool_call>b"}}));
+  CHECK_EQ(nlohmann::json(v.tool_calls[0].arguments), json({{"oldString", "a</ifm|tool_call>b"}}));
 }
 
 void case_truncated() {
@@ -358,7 +358,7 @@ void case_truncated() {
                                  "<ifm|arg_value>/w/y</ifm|arg_value>\n<ifm|arg_key>oldString</ifm|arg_key>\n" + tail,
                                  "", K2CallFormat::XmlTyped, kTools);
     CHECK_EQ(b.tool_calls.size(), 1U);
-    CHECK_EQ(b.tool_calls[0].arguments, json({{"filePath", "/w/y"}}));
+    CHECK_EQ(nlohmann::json(b.tool_calls[0].arguments), json({{"filePath", "/w/y"}}));
     CHECK(b.content.empty());
   }
   // Cut in json: content.
@@ -491,7 +491,7 @@ void case_fuzz() {
     bool ok = p.reasoning == (thinking ? reasoning : "") && p.content == (blank ? "" : content) &&
               p.tool_calls.size() == calls.size();
     for (size_t i = 0; ok && i < calls.size(); ++i) {
-      ok = p.tool_calls[i].name == calls[i].at("name") && p.tool_calls[i].arguments == calls[i].at("arguments");
+      ok = p.tool_calls[i].name == calls[i].at("name") && nlohmann::json(p.tool_calls[i].arguments) == calls[i].at("arguments");
     }
     if (!ok) {
       std::fprintf(stderr, "fuzz %d (format %d): %s\n  from %s\n", iter, int(format), show(p).c_str(),

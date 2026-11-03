@@ -543,8 +543,8 @@ void case_pp() {
 
 // ---- 5. the server -------------------------------------------------------------------------------------------
 struct KolibriTemplate : server::TemplateIface {
-  std::string render(const json& messages, const json&, bool) override { return body(messages); }
-  std::string render_with_kwargs(const json& messages, const json&, bool, const json&) override { return body(messages); }
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool) override { return body(messages); }
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json&, bool, const nlohmann::json&) override { return body(messages); }
   static std::string body(const json& messages) {
     std::string text;
     for (const auto& m : messages)

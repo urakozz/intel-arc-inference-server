@@ -50,10 +50,10 @@ std::string slurp(const std::string& path) {
 
 struct Q4Template : server::TemplateIface {
   explicit Q4Template(const std::string& dir) : tmpl(dir) {}
-  std::string render(const json& messages, const json& tools, bool think) override {
+  std::string render(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool think) override {
     return tmpl.render(messages, tools, think);
   }
-  std::string render_with_kwargs(const json& messages, const json& tools, bool think, const json& kwargs) override {
+  std::string render_with_kwargs(const nlohmann::ordered_json& messages, const nlohmann::ordered_json& tools, bool think, const nlohmann::json& kwargs) override {
     ++with_kwargs;
     return tmpl.render(messages, tools, think, kwargs);
   }
