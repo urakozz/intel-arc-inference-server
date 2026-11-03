@@ -15,8 +15,8 @@
 //              state and KV saved inside each hook, then at the end).
 //   each configuration  --pp 2 copy and peer at the auto split, and the cuts at 5 and 62: the
 //              same three runs on runtime::PipelineEngine, everything above bitwise one card's;
-//              both Control blocks equal after every call (Review Focus 3); M2 on the pipeline
-//              itself; the one card's snapshot after the prefill restored into the pipeline and
+//              both Control blocks equal after every call (Review Focus 3); M2's rows on the
+//              pipeline bitwise the one card's (spec 28b: not plain == verify any more); the one card's snapshot after the prefill restored into the pipeline and
 //              the speculative run continued from it, bitwise.
 //
 // argv: [1] the checkpoint, [2] `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form
@@ -359,7 +359,8 @@ int main(int argc, char** argv) {
     same(kv_of(e, snap_at), snap_kv, what + ": the KV after the prefill (the head's prefill fill)");
     spec_run(e, w, got);
     m2(e, w, got);
-    same(got.m2_plain, got.m2_verify, what + ": M2 across the split");
+    // Spec 28b: the pipeline's verify rows are not bitwise its plain rows (gemm_sm at M >= 2), as on one card;
+    // compare() below holds both - plain and verify - bitwise the one card's.
     compare(ref, got, what);
     // A one-card snapshot continued on two cards (Review Focus 2: the layouts are one).
     if (first) {
