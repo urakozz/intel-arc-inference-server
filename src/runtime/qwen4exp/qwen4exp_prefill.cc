@@ -204,7 +204,9 @@ class Walk {
     }
     const bool bf16s = m_.ple.scale == loader::Q4PleScale::Bf16;
     // q4_ple_gather(ctrl, ids_ring, ptrs, consts, e, ids_out, ids) _PF, grid (16 heads, C): e into x
-    launch(kc_(kq::pf_ple_gather_variant(bf16s), "q4_ple_gather"), d_.ple_heads, C_, 1,
+    l0::Kernel& pg = kc_(kq::pf_ple_gather_variant(bf16s), "q4_ple_gather");
+    pg.indirect_host();   // the PLE table's host-USM ranges are reached through m_.ple.ptrs
+    launch(pg, d_.ple_heads, C_, 1,
            {PtrArg(ctrl()), PtrArg(b_.ple_ids_ring()), PtrArg(m_.ple.ptrs->ptr()), PtrArg(b_.ple_consts.ptr()),
             PtrArg(s_.x.ptr()), PtrArg(s_.ple_ids.ptr()), PtrArg(s_.ids.ptr())});
     const loader::Q4PleOffsets o = loader::q4_ple_offsets(d_);

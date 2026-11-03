@@ -313,6 +313,7 @@ class Walk {
     {
       // q4_ple_gather(ctrl, ids_ring, ptrs, consts, e, ids_out), grid (16 heads, M)
       l0::Kernel& k = kernel(kq::ple_gather_variant(M_, bf16s), "q4_ple_gather", kq::kPleWg);
+      k.indirect_host();   // the PLE table's host-USM ranges are reached through m_.ple.ptrs
       k.arg_ptr(0, ctrl_);
       k.arg_ptr(1, b_.ple_ids_ring());
       k.arg_ptr(2, m_.ple.ptrs->ptr());
