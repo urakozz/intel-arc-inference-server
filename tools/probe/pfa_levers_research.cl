@@ -1,4 +1,4 @@
-// pfa_levers_research - the lever arms of docs/research-flash-prefill-2026-09-27.md.
+// pfa_levers_research - the lever arms of docs/12-kernels.md ("How the prefill kernels got here").
 // PROBE-ONLY and NOT BUILT: no CMake target, no runtime binding. Same entry (`pfa`),
 // arguments, layouts and launch as tools/probe/probe_flash_attn.cl, so it runs through
 // the unchanged probe_flash_attn harness: copy it over probe_flash_attn.cl and list the

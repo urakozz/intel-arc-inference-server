@@ -49,8 +49,8 @@
 // (since the 2026-09-23 fix) `A2` as bf16 hi/lo pairs (`hi = rne(x)`,
 // `lo = rne(x - hi)`) so the DPAS operands retain residual information.  Its
 // bounded opt-in arithmetic, gates and evidence are in
-// docs/prefill-gdn-scan-split-2026-09-20.md and
-// docs/prefill-gdn-scan-split-fix-2026-09-23.md.  **R2, the single bf16
+// docs/12-kernels.md ("How the prefill kernels got here") and
+// docs/12-kernels.md ("How the prefill kernels got here").  **R2, the single bf16
 // rounding of `vn` in the `A2*vn` term, is the one D2 rounding D3 keeps** - a
 // 2x2 on the golden gate measured its effect as nil while `A2`'s was the whole
 // failure (entry (3)'s block below).  None of this alters the D2 result or the
@@ -191,8 +191,8 @@ inline ushort rne_bf16(float f) {
 // `S`, the update `D` and (since 2026-09-23) the intra-chunk `A2` each have
 // independent hi/lo BF16 DPAS chains, while the master state and every chain
 // combination remain fp32.  This is approximate arithmetic, not an
-// fp32-equivalence implementation; see docs/prefill-gdn-scan-split-2026-09-20.md
-// for the original experiment and docs/prefill-gdn-scan-split-fix-2026-09-23.md
+// fp32-equivalence implementation; see docs/12-kernels.md ("How the prefill kernels got here")
+// for the original experiment and docs/12-kernels.md ("How the prefill kernels got here")
 // for the fix below.
 //
 // **Why `A2` is split and `vn` is not (MEASURED, not argued).**  As shipped on

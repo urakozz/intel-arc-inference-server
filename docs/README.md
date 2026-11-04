@@ -141,16 +141,12 @@ narrative, and the numbered guides cite them where they matter.
   4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**; the
   group-size sweep in §13 shows why, and that per-channel scales would reach
   1.752x while every group size a real int4 checkpoint uses does not
-- [probe-prefill-vllm-parity-2026-09-14.md](probe-prefill-vllm-parity-2026-09-14.md)
-  - oneDNN's fused int4 matmul measured directly, and where it lands
-- [prefill-gdn-solve-register-results.md](prefill-gdn-solve-register-results.md)
-  - removing barriers from the GDN triangular solve, **rejected**
-- [prefill-gdn-scan-split-2026-09-20.md](prefill-gdn-scan-split-2026-09-20.md)
-  and
-  [prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md)
-  - the split-BF16 delta net scan, the one approximation in the default path
-- [prefill-parity-2026-09-20.md](prefill-parity-2026-09-20.md) - the matched
-  protocol behind the prefill comparison
+- The September 2026 prefill investigations (the matched vLLM comparison, our own GEMM,
+  oneDNN's int4 matmul, Intel's delta net kernel, replay, continuation, the split-BF16
+  scan, the barrier-free solve, the flash-attention levers) are folded into
+  [08-decode-vs-prefill.md](08-decode-vs-prefill.md#how-prefill-got-here) and
+  [12-kernels.md](12-kernels.md#how-the-prefill-kernels-got-here); their standalone
+  write-ups were deleted when the work closed.
 
 ## Designs
 

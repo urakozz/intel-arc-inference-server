@@ -10,7 +10,7 @@ Every number is **measured** unless marked **derived** or **estimated**.
 
 Matched warm ABBA protocol, GPU 0, `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`,
 4096 ids as two 2048-token chunks
-(`docs/prefill-gdn-scan-split-2026-09-20.md`, `docs/prefill-parity-2026-09-20.md`):
+(`docs/12-kernels.md` ("How the prefill kernels got here"), `docs/08-decode-vs-prefill.md` ("How prefill got here")):
 
 | path | wall | throughput |
 |---|---:|---:|
@@ -445,7 +445,7 @@ default stays `vector`, now on evidence rather than on a contaminated run.
 VECTOR kernel.** Its cosines are bit-identical to the vector row from three days
 earlier; approximate split-BF16 arithmetic cannot reproduce fp32 vector code to
 nine digits across three prompts. Whatever that run selected, it was not
-`pf_gdn_scan_dpas_split`. `docs/prefill-gdn-scan-split-2026-09-20.md`'s
+`pf_gdn_scan_dpas_split`. `docs/12-kernels.md` ("How the prefill kernels got here")'s
 "Available Vishva gates (split selector)" section is therefore **not evidence**,
 and the experiment's own decision - "the opt-in split implementation ... and
 available primary-model gates are green" - does not hold.

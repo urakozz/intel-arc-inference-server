@@ -2247,12 +2247,12 @@ dimension, so a read never clamps inside the matrix and never reaches past it.
 
 **Measured.** The kernel this one generalises measured **156.53 TFLOP/s** in its
 probe and was bitwise equal to `sycl-tla`
-([probe-prefill-vllm-parity-2026-09-14.md](probe-prefill-vllm-parity-2026-09-14.md)).
+([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here)).
 In production it runs at **161.7 TFLOP/s, about 88% of the measured 183.45
 TFLOP/s bf16 DPAS peak** ([probe-dpas-rates-2026-09-22.md](probe-dpas-rates-2026-09-22.md)).
 The two halves of a linear were separated with one wait per slab so the dequant
 round trip could be attributed rather than estimated
-([prefill-parity-2026-09-20.md](prefill-parity-2026-09-20.md)): **`slab_dequant`
+([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here)): **`slab_dequant`
 274.5 ms and `slab_gemm` 1344.3 ms** over 7616 launches each for a 4096-token
 prompt, summing to the unsplit phase within an instrumented run's spread.
 
@@ -2271,7 +2271,7 @@ slab pair, kept because the negative results cost less than re-discovering them:
   [Details](probe-w4a8-2026-09-23.md).
 - **oneDNN's fused int4 W4A16 matmul.** 98.28 TFLOP/s on `gate‖up` at M = 2048,
   below what an own in-kernel int4 GEMM would need to beat the two-pass path.
-  [Details](probe-prefill-vllm-parity-2026-09-14.md).
+  [Details](08-decode-vs-prefill.md#how-prefill-got-here).
 - **bf16 intermediate buffers.** Halving the bytes changed nothing, because
   `ocloc` exposes no 16-bit block write wider than 8 rows, so the epilogue is
   bound by store message count rather than by bytes.
@@ -2364,10 +2364,8 @@ on tokens and state cosines rather than on `memcmp`: 93/93 determined rows with
 state cosines of 0.999912369, 0.999712545 and 0.999901750 against a bar of
 0.999. One honest limit: `vn` inside the A2 term is still a single BF16 operand,
 measured harmless on three prompts of one checkpoint and not proven in general.
-The design is in
-[prefill-gdn-scan-split-2026-09-20.md](prefill-gdn-scan-split-2026-09-20.md) and
-the correction that made it correct is in
-[prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+The design, and the correction that made it correct, are recorded in
+"How the prefill kernels got here" below.
 
 **Two pitfalls from this family, both bought at full price.**
 
@@ -2383,7 +2381,123 @@ the correction that made it correct is in
   1.7 ms of a 73.5 ms row, so the premise was wrong by about 18×; both
   barrier-free variants were bit-identical and both were slower. The row is the
   serialised recurrence itself.
-  [Details](prefill-gdn-solve-register-results.md).
+  Details in "How the prefill kernels got here" below.
+
+### How the prefill kernels got here
+
+The kernel-level conclusions of the September 2026 prefill investigations, folded in from
+their standalone write-ups (the strategy-level ones are in
+[08-decode-vs-prefill.md](08-decode-vs-prefill.md), "How prefill got here").
+
+**The split-BF16 scan: design, the failed gate, the fix (2026-09-20 to 09-23).** A first
+single-BF16 DPAS scan was fast and failed a real golden token gate; the second attempt keeps
+the DPAS rate and buys the precision back with two BF16 limbs (the arithmetic is above). The
+state update `D = vn * exp(gl - gc)` is split the same way: the high chain starts from the
+fp32-decayed master state, the low chain from zero, combined once. The first version left the
+intra-chunk term `A2*vn` at a single BF16, on the reasoning that the state path was where
+precision had been lost; that was the whole failure. A throwaway scalar-fp32 2x2 (each of
+`A2` and `vn` independently fp32 or rne-BF16, nothing else changed, one full golden gate per
+cell) attributed it: with `A2` in BF16 the gate is 92/93 (code prompt layer 60 `gdn_state`
+cosine 0.9975 in the control, 0.996344994 in the DPAS kernel, against a bar of 0.999) whatever
+`vn` is; with `A2` in fp32 it is 93/93 (0.999189068, identical to the vector kernel). It is
+`A2`'s rounding, not `vn`'s; the mechanism is not established (the naive error terms are the
+same order, so the decay `exp(gc_i - gc_j)` spanning decades inside one row is the suspect).
+The fix splits `A2` only (two VNNI blocks, `vn` stays one BF16: two chains instead of three):
+SLM 35,328 to 40,448 B, 128 GRF, SIMD16, no spill (`-abortOnSpill 4` is on the line), 50
+static `dpas.8x8`, about 53.0 DPAS per work-item per sub-chunk; a both-operand split would
+have cost 44,800 B and 55.5. Result: 93/93 with worst cosines 0.999912369 (prose, L33),
+0.999712545 (code, L60), 0.999901750 (cjk, L33); replay, consistency (both backends) and
+determinism (9 cases by 3 runs, bitwise) pass; the chunk band test against the CPU fp32
+recurrence moves `gdn_o` max relative error from 5.039e-2 (vector) to 7.097e-2 and mean
+1.228e-3 to 1.443e-3, with the test's 2.5e-1 tripwire unchanged and the older 1.0e-2 bar
+already exceeded by the vector default since 2026-09-05. The scan row falls 297.6 to 127.65
+ms (2.33x, 170 ms, ABBA, 96 launches); throughput ABBA before the fix (vector 1496.3 t/s,
+split 1587.9 t/s, 158 ms ahead) stands as a selector comparison. A fixture aimed at the A2
+chain (`A2 = 22.65625 = 22.625 + 2^-5`: `o` reads 0.000232638 against 0.000354708 for a
+high-only chain, 24x its bar) was verified RED by deleting the low chain.
+
+**The dispatch rule behind it.** The kernel was first declared green by runs that were
+executing the vector kernel (two runs three days apart printed bit-identical cosines, which
+gave it away). Hence `gdn_scan_entry_name()` (what the selector resolves to) and
+`gdn_scan_launched_entry()` (what a launch was actually built with, read back from the
+pointer the launcher handed the kernel cache), both printed by every gate test, with the four
+non-band tests asserting they agree. The selector `B70_PREFILL_GDN_SCAN` (`vector`, the
+default until the split became it on 2026-09-23, or `dpas_split`; anything else throws before any launch or buffer
+mutation) is process-lifetime and private to the dispatcher; its tests drive the real
+`gdn_chunk` boundary (invalid value: runtime_error, zero launches, bytewise unchanged state
+and ring sentinels; valid values: the produced bytes equal the independently launched entry
+and differ from the other), mutation-proved by hard-wiring `dpas_split` to the vector entry.
+Such tests catch a mis-wired selector, not a stale build, which is what the printed launched
+entry covers. This is the only default in the prefill path that is not bit-identical to what
+it replaced, and its claim is "approximate with measured error, gated on tokens and state
+cosines", measured on three prompts of one checkpoint; promoting an opt-in entry means
+re-running every gate with the dispatch proven inside each run.
+
+**The triangular solve: the premise was wrong by 18x.** `pf_gdn_solve` costs about 0.77 ms
+per layer per chunk (73.5 ms over 96 launches); the design assumed synchronisation (two
+barriers per row of 64, 128 per call) dominated and targeted 0.35 ms. Three entries, all
+`memcmp`-equal to the default at widths 256, 100 and 4096: `pf_gdn_solve_register` (T in its
+own SLM array, zero row barriers; the `B70_PREFILL_GDN_SOLVE=register` selector), the private
+variant (zero barriers, `float t[CT]` per lane lowered to 8,192 B of scratch) and `1bar`
+(in place, one barrier per row). Measured per layer per chunk: default 0.7656 ms, `register`
+1.2073 (+57.7%, 32 KiB SLM halves occupancy), `private` 0.8708 (+13.7%), `1bar` 0.7479
+(-2.3%). Deleting 64 of the 128 barriers bought 1.7 ms, so all 128 are worth about 3.4 ms
+(derived), 4.6% of the row; the row is the serialised recurrence and its SLM traffic. Any
+future attempt has to change the algorithm (a block-recursive inversion, a different
+numerical project), not resynchronise. `1bar` is bitwise identical, free and the one result
+worth keeping (a two-line change to the default, offered but not made). Details worth
+keeping: the dead tail of T carries `-0.0f` (66,528 words at width 100, `48 * sum(i =
+36..63)`), invisible to `CHECK_EQ(., 0.0f)`, so new entries seed their output from the staging
+expression; the solve dispatch is proven by kernel-cache counts, not output (mutation-proved:
+output comparison alone could not have caught it); the matrix is `(I + A)^-1`, not
+`(I - A)^-1`. The golden token gate was not run for `register` (its CPU-oracle set was not
+reachable in the isolated tree); replay, consistency, determinism and backend equivalence
+passed under it.
+
+**Flash prefill research (2026-09-27), and what shipped.** Question: how to make
+`pf_flash_attn` (116.3 ms for pp4096's attention, 28 TFLOP/s = 15% of the 183.45 TFLOP/s
+peak; vLLM 63.1 ms, spec 6's F1 bar 80 ms). Findings:
+
+- **The kernel spilled, and `exp` was the cause.** The main loop was 1639 instructions per
+  128 `dpas.8x8` with 9 of 16 O accumulator vectors (4.9 KB per sub-group) going to scratch on
+  every KV tile (77 GRF spilled, 46 scratch messages). IGC lowers each `exp` to two
+  `math.exp` plus a range-split sequence (88 `mad`, 40 `rndz`); `exp2` with
+  `ATTN_SCALE * log2(e)` folded in removes the spill and cuts the loop to 1137 instructions.
+  `exp2` and `native_exp2` compile identically (one `math.exp`, base 2 in the ISA), so there
+  is no precision trade on this compiler. Streaming Q changes nothing: spec 6's "Q0 beats Q1"
+  was a spill finding.
+- **Measured (diagnostic grade, paired ratios): two one-line changes give 1.42x at every
+  depth with the fp64 cosine unchanged.** `exp2` alone 1.17x to 1.23x; **8 query rows per
+  work-group instead of 16** (6 sub-groups per WG, so an Xe-core holds 30 of 32 thread slots
+  instead of 24) 1.14x to 1.27x alone. Together `pfa_KT64_R8_H6 + exp2` is 39.5 ms against
+  56.1 at pos 30720 (40.4 TFLOP/s), 3.42 against 4.87 at pos 2048, 1.20 against 1.71 at
+  pos 0; about 82 ms for pp4096 attention (derived). `exp2` leaves the worst cosine
+  bit-identical (0.999998097 and the four other cases).
+- **The softmax-side levers are neutral once the spill is gone** (causal mask on diagonal
+  tiles only, FA-4's conditional rescale, hardware bf16 convert, deferred row sums,
+  reversed row order: -3% to +1%). The kernel is latency / memory bound with too few threads
+  to hide it, not issue bound. KT128 does not fit even with every lever; KT32 with every
+  lever fits (712 instructions per 64 DPAS). The 32-row transposed K read (`Q127`) fails at
+  every case (cosine 0.15 to 0.24): the `transpose_32b_32r8x1c` register layout is not "rows
+  0-15 then 16-31", unresolved.
+- **Structural ceiling: operand bandwidth.** With 8 rows per sub-group (ours and vLLM's)
+  every K and V B-operand serves one `dpas.8x8`: 576 B of operands per DPAS against the
+  production GEMM's 192 B. Past vLLM the kernel needs 16 or 32 rows per sub-group, which at
+  head_dim 256 forces O split on d across sub-groups with P exchanged through SLM (what
+  oneDNN micro-SDPA and IPEX XeTLA do; vLLM and sycl-tla do not). No Xe2 L1 bandwidth is
+  published, so whether split-d is needed was left to a probe (P0). Remaining levers, as
+  estimates: cooperative 2D prefetch of the next K and current V plus a split barrier per
+  tile (vLLM, sycl-tla and our own `pf_gemm` do it; `pf_flash_attn` enables the extension and
+  uses neither), 1.1x to 1.3x; split-d, 1.3x to 1.8x beyond that if P0 says the 8-row ceiling
+  is near; larger K messages, 1.0x to 1.1x; reversing the q-block order (heaviest first, as
+  sycl-tla does) for the causal tail at small positions.
+- **Shipped (spec 6c, 2026-09-27):** 8 rows per work-group alone: `attn_flash` 101 ms (from
+  117), pp65536 1.074x, pp130816 1.097x. `exp2` + 8 rows (81 ms, 1.158x, 1.222x) was **held**
+  at first: it failed spec 6's K3a flash-against-composed check on `l0` (0.999951245 against
+  0.999959889, with K1 unchanged; the rounding point moves with the folded scale, and spec 6
+  said "`exp`, never `native_exp`"), so it was built behind `EXP2`, off. The operator ruled
+  it **on** on 2026-09-27 (spec 6 section 9), so `exp2` ships too. The lever arms live in
+  `tools/probe/pfa_levers_research.cl`.
 
 ## `mg_attn*` - the full (NoPE) attention Nemotron 3.5 Bolt binds (spec 23c / 23d's kernels)
 

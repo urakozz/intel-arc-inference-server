@@ -14,7 +14,7 @@ Prefill attention dominates long prompts. After spec 6c (8 rows per work-group a
 at 128k (spec 6 §9, `docs/BENCHMARKS.md` "Spec 6c"). At 64k attention was 51 % of
 prefill GPU time before 6c, at 15 % of the bf16 DPAS peak.
 
-`docs/research-flash-prefill-2026-09-27.md` ranked five levers; 1 and 2 shipped in 6c.
+`docs/12-kernels.md` ("How the prefill kernels got here") ranked five levers; 1 and 2 shipped in 6c.
 With the register spill gone the kernel is no longer instruction-bound: the arms that
 cut instructions (diagonal-only masking, conditional rescale, hardware bf16
 conversion, deferred row sums) measured -3 % to +1 %. What remains is on the memory

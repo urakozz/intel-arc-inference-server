@@ -25,8 +25,8 @@ Derived before measuring and unchanged since:
 
 122.9 TFLOP/s is 199 TFLOP of per-request linear work over the 1618.8 ms of
 slab dequant plus slab GEMM measured in situ
-([prefill-parity-2026-09-20.md](prefill-parity-2026-09-20.md), "The linear
-path, itemised").
+([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here), the linear
+path, itemised).
 
 ## 2. What was run
 

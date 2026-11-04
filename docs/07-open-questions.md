@@ -148,7 +148,7 @@ determined rows exact, state cosines 0.9997 and better against a 0.999 bar.
 measured harmless on three prompts of one checkpoint and not proven in general.
 Whether a longer prompt, a different checkpoint or a different numerical regime
 reaches it is untested. Details in
-[prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+[12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
 
 ## 9. The profiler cannot see inside the prefill walk
 

@@ -18,7 +18,7 @@
 //
 // Timing is L0 kernel timestamps (not the host clock): best of 5 after one
 // discarded warm-up. For the control both the SUM of the 68 kernel durations
-// (the quantity docs/prefill-parity-2026-09-20.md attributed as
+// (the quantity docs/08-decode-vs-prefill.md ("How prefill got here") attributed as
 // slab_dequant + slab_gemm, and therefore the one the pre-registered 122.9
 // TFLOP/s break-even is derived from) and the first-start-to-last-end SPAN are
 // reported; for a single-launch variant the two coincide.

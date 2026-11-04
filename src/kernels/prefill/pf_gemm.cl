@@ -1,6 +1,6 @@
 // pf_gemm - the prefill GEMM on the Level Zero list (spec 2.1 §3.1). It is probe P-A's
 // pf_gemm_bf16 (tools/probe/pf_gemm_bf16.cl, measured 156.53 TFLOP/s and bitwise equal to
-// sycl-tla, docs/probe-prefill-vllm-parity-2026-09-14.md "Phase 2 results") with the tile,
+// sycl-tla, docs/08-decode-vs-prefill.md ("How prefill got here")) with the tile,
 // the 32-dpas k-tile body, the 2D block loads, the 2-deep prefetch and the split barrier
 // UNCHANGED, generalised in three ways:
 //   * lda / ldb / ldc are runtime arguments (the probe fixed them to K, N, N);

@@ -157,6 +157,104 @@ is what puts prefill ahead of vLLM. The bf16 walk is the default. A second, opt-
 activations and weights and is faster still ([17-int8-prefill.md](17-int8-prefill.md)); it is not the
 rejected W4A8 mixed instruction above.
 
+### How prefill got here
+
+The investigations of September 2026 (14 to 28) that decided the prefill design. Their
+standalone write-ups were folded into this section and into
+[12-kernels.md](12-kernels.md) ("How the prefill kernels got here") once the work closed.
+
+**What vLLM runs.** Read from its source: on XPU the int4 linears go through
+`torch.ops._xpu_C.int4_gemm_w4a16` into oneDNN's `bf16_int4` matmul (dequant fused in the
+GEMM mainloop, K-grouped scales, scalar zero point 8), and the delta net goes through a
+native SYCL chunked kernel, not the Triton `fla_chunk_gated_delta_rule` path (that is
+CUDA / ROCm only). Nothing there is a different algorithm, so whether it wins is a question
+of which individual kernels beat ours. oneDNN needs the weights K-contiguous per N, a
+transpose of our layout (about 11.33 GiB of one-time repack for the 256 matrices).
+
+**Our own GEMM, measured.** `pf_gemm_bf16` (256 x 256 x 32 work-group tile, 32 sub-groups,
+sub-group tile 32 x 64, 224 of 256 GRF live, B read through the 2D transform load with no
+repack, cooperative 2-deep prefetch plus a split barrier, no SLM) reached **156.53 TFLOP/s**
+at gate||up M = 2048, bitwise identical to the sycl-tla reference and 2.9% to 17.9% faster
+than it in the same harness at every cell (predicted 146, band 135 to 155). Interleaving the
+slab dequant with it on one in-order Level Zero list, zero host waits, saved **89.29 ms** per
+chunk-equivalent at 1024-column slabs (40.91 ms at 2048: a 1024-column B slab of about
+10.5 MB stays L2-resident), with a device-side handoff of 1.667 us against the 22.35 us host
+wait it replaces. Combined, predicted and measured, 1529 t/s: 77.5% of the vLLM figure then
+in use. That decided it: drop SYCL for prefill, own the whole walk. The raster is explicit
+and owned; a grouped raster for M = 4096 (A exceeds L2) is named, not built.
+
+**oneDNN's int4 matmul: not adopted.** Called directly with vLLM's exact attributes it
+measured **98.28 TFLOP/s** at gate||up M = 2048 (87.8 to 145 across shapes, `down` best),
+below the **115.7 TFLOP/s break-even** an in-kernel int4 GEMM of ours would need against the
+two-pass dequant plus bf16 GEMM (99.64 TFLOP of chunk work over 0.8613 s, derived). It is the
+real JIT generator, not a fallback, and the configuration matches vLLM's field by field. Its
+numerics also fail our identity gate: 33,198,358 of 83,886,080 weights differ (39.6%), every
+one a 1-ULP bf16 neighbour; strict fp32 fpmath gives the identical count. The later build of
+the exact revision vLLM pins (v3.13; 37 commits touching the JIT GEMM generator since the
+packaged v3.11.4, 5 of them int4-specific) shows the same failure and pins it down: every
+extracted weight equals the fp32 dequant product **truncated** to bf16 (zero signs ignored),
+at most one bf16 ULP from our round-to-nearest oracle. Slower and not identical: do not
+adopt.
+
+**Intel's chunked delta net kernel: not a target.** It builds torch-free (two probe-side
+shims: a minimal ATen stand-in, and `int` overloads for a barrier-scope constant that fails
+to compile as shipped). The first probe fed raw Q and K (the file's comments describe an
+input precondition, not code: it normalizes nothing), and after fixing that its state still
+sat at a mean relative error near 1.0 against the CPU reference, so its 0.795 ms per chunk
+(against our 303 ms then, 382x) was never a price. After the probe's input and reset
+contract were repaired, the revision vLLM's build carries passes the CPU-reference bands
+(state max / mean relative error 0.040 / 0.0016 at 129 tokens, 0.056 / 0.0016 at 2048) but
+returns **differing bytes across repetitions** of one call, which fails the determinism gate
+outright. A newer upstream revision (local-space barriers replaced by
+`sycl::group_barrier`, split-barrier scopes typed) is byte-identical over eight repetitions
+and four fixtures. It is a numerical and performance reference, not a drop-in: no
+model-level gate for vendor arithmetic was ever run.
+
+**The matched comparison (2026-09-20).** Same box, checkpoint, 4096 ids, chunk 2048, three
+warm requests: this engine 2748.2 ms (1490 t/s), with recorded L0 chunks 2734.4 ms, vLLM
+**2544.0 ms (1610.04 t/s)**, the same first token on every path. The warm gap was 204 ms, not
+the roughly 657 ms an older uncontrolled 1973 t/s vLLM figure implied (its vLLM and oneDNN
+revisions were never recorded; that figure explains nothing causally). A trace of vLLM's
+request: 2514.0 ms of kernel time (GEMM 2130.6, GDN 177.3, flash attention 63.1, Triton
+pointwise 125.3, other 17.9), only 23.6 ms of the span outside a kernel, 38 host-device
+copies totalling 14,056 bytes, so no large tensors shuttle through the CPU. The partition
+that steered the next round: **our int4 linears were about 497 ms faster than vLLM's, and
+everything else about 634 ms slower** (1031.3 against 397.1 ms; GDN core 527.6 against
+141.8, attention 148.2 against 63.1, SiLU and multiply 98.7 against 51.3). That is how the
+path with fewer layers of software still lost, and it sent the work to the GDN scan,
+attention and pointwise fusion rather than the GEMM. All three landed (the split-BF16 scan,
+2.33x on its row; the QK kernel stopped computing the masked half; SiLU folded into the
+gate||up epilogue) and are the difference between the 1490 t/s here and 1670.72 at the time.
+The linear path itself, split one wait per slab for attribution: `slab_dequant` 274.5 ms and
+`slab_gemm` 1344.3 ms over 7616 launches each; the GEMM half sits about 5% above its own
+floor (199 TFLOP at 156.53 TFLOP/s = 1278 ms), and the dequant ceiling was then tested and
+lost (see the fused-dequant probe in [probes/](probes/probe-fused-dequant-2026-09-22.md)).
+
+**Whole-chunk Level Zero replay: kept experimental.** `B70_PREFILL_REPLAY=1` records the
+chunk's launches (an eight-entry FIFO keyed by position and active row count) and replays
+them. It is numerically exact on every exercised case (GDN state, conv history, both KV
+caches, control and logits, bitwise, including ragged tails and eviction) and saved
+**13.75 ms** against a 204 ms gap, about 0.5%: not the lever, and the complexity is real.
+
+**Continuation is not a bug (2026-09-28).** A prefill that starts at a non-zero `pos` is
+correct. Two alarms (the main hidden after l0-int8 prefill against M = 1 decode: median
+cosine 0.99971 but 0.27 at row 2091, just past the first 2048 chunk edge; and a two-call
+prefill split at 3000 against one call: last-row logits cosine 0.91) were the model
+amplifying a rounding-sized perturbation at a handful of positions (987, 1050, 1212, 1565,
+2091 of the long32k prompt, the same ones in every run). Splits at a multiple of 64 are
+**bitwise** the one-call run (KV, GDN state, live conv slots, logits), because everything on
+the walk is row-local or keyed to absolute positions and only the chunked delta rule's
+64-id cut moves with the call start; any other split re-rounds GDN only (layer 0's state
+moves 2e-6 to 3e-6 in cosine; the full-attention layers 0 to 3 stay at or above 0.9998
+on every row). The CPU oracle chunked at 1000 instead of one forward sits at cosine **0.7596**
+at row 2091 against the engine's split-1000 0.7555, so it is the model at that position, not
+the continuation; at row 987 the one-call engine run is the outlier (0.938). A real hand-off
+bug (the injected `pf_gdn_seed` with `pos = 0`) shows at exactly the chunk-start rows from
+the first full-attention layer on and moves GDN L0's state 20x to 60x more, while the
+last-row logits stay in the clean band. So the discriminating bars of
+`prefill_split_l0_test` and `prefill_split_l0-int8_test` are the shallow-layer rows and GDN
+L0's state, with splits at multiples of 64 bitwise, and not the last logits.
+
 ## Summary: where each engine wins
 
 | | vLLM | OpenVINO | This project |

@@ -126,11 +126,11 @@ evidence covers the linears only.
 Idle box, device 0, interleaved control and candidate, median of 3.
 
 - **P0, baseline (first, before any kernel).** The attention phase of a
-  4096-id prefill today (the 148.2 ms of `prefill-parity-2026-09-20.md`
+  4096-id prefill today (the 148.2 ms of `docs/08-decode-vs-prefill.md` ("How prefill got here")
   predates causal QK^T, parity S3), prefill of one chunk at 8k and 16k depth,
   and decode at depths 4k and 16k at max_len 16384.
 - **F1.** The attention phase of a 4096-id prefill **<= 80 ms**. vLLM's flash
-  kernel measured 63.1 ms (`prefill-parity-2026-09-20.md`). pp4096 must not
+  kernel measured 63.1 ms (`docs/08-decode-vs-prefill.md` ("How prefill got here")). pp4096 must not
   fall below spec 5's 2104.50 t/s record.
 - **F2.** One 2048-id chunk prefilled at 32k, 64k and 128k depth: recorded,
   and the attention part must reach **>= 60 % of the bf16 DPAS peak** (183.45

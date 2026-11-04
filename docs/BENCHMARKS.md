@@ -307,7 +307,7 @@ run measured the vector kernel while believing it had measured this one. See
 
 One honest limit: `vn` inside the A2 term is still a single BF16 operand,
 measured harmless on three prompts of one checkpoint, not proven in general.
-Details in [prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+Details in [12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
 
 ### Chunk width
 
@@ -428,7 +428,7 @@ depth, 3/3 on `l0-int8` and 3/3 on `l0`.
 ### Spec 6c: 8 rows per work-group (2026-09-27)
 
 `pf_flash_attn` now runs 8 query rows per work-group (6 sub-groups, grid `(ceil(C / 8), 4,
-1)`), research lever 2 of docs/research-flash-prefill-2026-09-27.md. Lever 1, `exp2` with
+1)`), research lever 2 of docs/12-kernels.md ("How the prefill kernels got here"). Lever 1, `exp2` with
 the scale folded, was first held (`EXP2=0`: it misses spec 6 K3a on `l0` by 7.6e-6) and
 is **on** since the operator's ruling of 2026-09-27 (spec 6 §9): arm E below is what ships. Interleaved C / R / E triples after one warm-up each, device 0, `l0-int8`,
 `--max-len 131072` for the depth rows; C is main's build in the base tree (its prefill
@@ -1166,7 +1166,7 @@ gdn scan entry LAUNCHED: pf_gdn_scan_dpas_split
 Run with its dispatch proven, that same kernel **failed**: 92 of 93 rows, code
 prompt L60 state cosine 0.996344994. The cause was one operand of one term, and
 the fix took it to 93/93 at 0.999712545. The whole episode is in
-[prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+[12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
 
 **A green gate is not evidence unless the run says which kernel it dispatched.**
 The probes in this repo carry the same rule: the W4A8 probe proves twice, once
@@ -1182,9 +1182,9 @@ wins did.
 |---|---|
 | **Fusing the int4 dequant into the GEMM** | Both variants came out **bitwise identical** to the two-pass path over all 71,303,168 outputs, and both were slower. The dequant pass already runs at about 546 GB/s, roughly 90% of hardware peak, so there is only 0.826 ms in it at this shape; moving the same arithmetic into the mainloop costs 2.759 ms even when issued exactly once per weight. [Details](probe-fused-dequant-2026-09-22.md). |
 | **W4A8 on the mixed 4-bit by 8-bit DPAS** | 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a bar of 1.53x. The per-group rescale costs 3.0 to 3.4 of the 5.440 ms; the matrix math it rescales costs 1.99 ms. Separately, **2.79% relative L2 error** against the bf16 result, with a worst-row cosine of 0.9976, driven by activation outliers. [Details](probe-w4a8-2026-09-23.md). |
-| **Removing barriers from the GDN triangular solve** | The design assumed synchronisation dominated that kernel. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so the premise was wrong by about **18x**. Both barrier-free variants were bit-identical and both were slower. The row is the serialised recurrence itself. [Details](prefill-gdn-solve-register-results.md). |
+| **Removing barriers from the GDN triangular solve** | The design assumed synchronisation dominated that kernel. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so the premise was wrong by about **18x**. Both barrier-free variants were bit-identical and both were slower. The row is the serialised recurrence itself. [Details](12-kernels.md#how-the-prefill-kernels-got-here). |
 | **bf16 intermediate buffers** | Halving the bytes changed nothing: `ocloc` exposes no 16-bit block write wider than 8 rows, so the epilogue is bound by store message count rather than by bytes. |
-| **oneDNN's fused int4 W4A16 matmul** | Measured 98.28 TFLOP/s on gate‖up at M=2048, below the 115.7 TFLOP/s an own in-kernel int4 GEMM would need to beat the two-pass path. Also failed a bitwise identity extraction against our dequant oracle on 39.6% of weights, every mismatch a 1-ULP bf16 neighbour. [Details](probe-prefill-vllm-parity-2026-09-14.md). |
+| **oneDNN's fused int4 W4A16 matmul** | Measured 98.28 TFLOP/s on gate‖up at M=2048, below the 115.7 TFLOP/s an own in-kernel int4 GEMM would need to beat the two-pass path. Also failed a bitwise identity extraction against our dequant oracle on 39.6% of weights, every mismatch a 1-ULP bf16 neighbour. [Details](08-decode-vs-prefill.md#how-prefill-got-here). |
 
 ## The instrument
 

@@ -1,7 +1,7 @@
 // prefill_split_test - a prompt prefilled in ONE Engine::prefill call against the same
 // prompt prefilled in TWO calls split at an offset, and against M = 1 decode (ingest).
 // Written for the fix-prefill-continuation investigation (2026-09-28); the finding it
-// encodes is in docs/probe-prefill-continuation-2026-09-28.md.
+// encodes is in docs/08-decode-vs-prefill.md ("How prefill got here").
 //
 // Per comparison, on one loaded model: the last-row logits cosine (the prefill's head),
 // every FA layer's K and V cache row [0, N) (row cosine, min of K and V -- the cache row p
@@ -176,7 +176,7 @@ void print(const char* what, const Result& r) {
 }
 
 // The gated bars (header). Calibrated on long32k[0, 2600), both backends, 2026-09-28:
-// see docs/probe-prefill-continuation-2026-09-28.md for the measured values they sit under.
+// see docs/08-decode-vs-prefill.md ("How prefill got here") for the measured values they sit under.
 struct Bars {
   double logits, shallow, median, p01, gdn0;
 };
@@ -346,7 +346,7 @@ int main(int argc, char** argv) {
   //            0.99953, p01 0.97736 / 0.97998, GDN L0 state 0.9999972 / 0.9999763
   // Each bar sits a few times the measured distance below it; a lost conv seed at the
   // split (the fault injected when this test was written) fails the GDN L0 and fa0-3 bars
-  // by orders of magnitude (docs/probe-prefill-continuation-2026-09-28.md).
+  // by orders of magnitude (docs/08-decode-vs-prefill.md ("How prefill got here")).
   Bars split_bars = int8 ? Bars{0.998, 0.996, 0.999, 0.95, 0.99999}
                          : Bars{0.9995, 0.999, 0.9998, 0.99, 0.99999};
   Bars decode_bars = int8 ? Bars{0.998, 0.995, 0.999, 0.95, 0.9999}

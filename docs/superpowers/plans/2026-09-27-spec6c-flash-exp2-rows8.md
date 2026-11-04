@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc), C++20, Level Zero, ctest.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§3.1, §4 K1-K4, §5 F1/F2, §8). Evidence: `docs/research-flash-prefill-2026-09-27.md` (§0, the ranked table rows 1-2, P1). **Operator ruling (2026-09-27): `exp2` approved** in place of spec 6 §3.1's "`exp`, not `native_exp`".
+**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md` (§3.1, §4 K1-K4, §5 F1/F2, §8). Evidence: `docs/12-kernels.md` ("How the prefill kernels got here") (§0, the ranked table rows 1-2, P1). **Operator ruling (2026-09-27): `exp2` approved** in place of spec 6 §3.1's "`exp`, not `native_exp`".
 
 ## Global Constraints
 
@@ -38,7 +38,7 @@
 ### Task 2: the speed, in the engine
 
 - [ ] **Step 1:** interleaved pairs, control main vs this branch: pp4096 (t/s and the `attn_flash` phase ms from the prefill profile, as spec 6 §8 F1 measured it), pp65536 and pp130816 at max_len 131072 (F2 rows), decode at 4k depth (no-regression check; decode does not use this kernel).
-- [ ] **Step 2:** the record: `docs/BENCHMARKS.md` (new rows in the flash/128k section; a new pp4096 RECORD row only if the load average was <= 4 and it beats 2125.12); spec 6 amendment §9 "Spec 6c" (the exp2 ruling, the numbers, F1 against 80 ms); `README.md` headline only if a RECORD row was written; `docs/research-flash-prefill-2026-09-27.md` P1 marked done with the in-engine numbers.
+- [ ] **Step 2:** the record: `docs/BENCHMARKS.md` (new rows in the flash/128k section; a new pp4096 RECORD row only if the load average was <= 4 and it beats 2125.12); spec 6 amendment §9 "Spec 6c" (the exp2 ruling, the numbers, F1 against 80 ms); `README.md` headline only if a RECORD row was written; `docs/12-kernels.md` ("How the prefill kernels got here") P1 marked done with the in-engine numbers.
 - [ ] **Step 3: Commit** `spec 6c: exp2 + RPW 8 in the engine, pp4096/pp65536/pp130816 (the record)`.
 
 **Gate for the plan:** K1, K2 (16/16), K3a, K4, full suite green; the in-engine numbers recorded. Hand back with the pair table and the gate results.

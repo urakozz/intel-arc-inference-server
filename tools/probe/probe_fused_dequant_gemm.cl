@@ -66,7 +66,7 @@
 // pf_dequant_slab.cl's rne_bf16, transcribed verbatim. Round-to-nearest-even on
 // the f32->bf16 truncation point: `rounding` is 0x7FFF plus the destination's
 // low bit, so a tie rounds to the even word. NOT a truncation (the failure mode
-// the oneDNN path showed, docs/prefill-parity-2026-09-20.md).
+// the oneDNN path showed, docs/08-decode-vs-prefill.md ("How prefill got here")).
 inline ushort rne_bf16(float f) {
   const uint u = as_uint(f);
   const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;

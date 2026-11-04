@@ -4,8 +4,8 @@
 // its purpose is to set the rate an own in-kernel int4 GEMM would need to beat
 // the two-pass dequant+bf16-GEMM path.
 //
-// Pre-registration: docs/probe-prefill-vllm-parity-2026-09-14.md addendum
-// §A1 / §A3.3, committed before this file was built or run.
+// Pre-registration: docs/08-decode-vs-prefill.md ("How prefill got here")
+// (folded there), committed before this file was built or run.
 //
 // This probe calls oneDNN's plain C++ primitive API directly (no vllm-xpu-
 // kernels machinery: no GpuEngineManager/primitive cache, no torch) --
@@ -178,8 +178,7 @@ Prim make_matmul(engine& eng, uint32_t M, uint32_t K, uint32_t N) {
   attr.set_fpmath_mode(fpmath_mode::bf16, true);
 
   matmul::primitive_desc pd(eng, src_md, wei_md, dst_md, attr);
-  // P-C follow-up (docs/probe-prefill-vllm-parity-2026-09-14.md, "P-C
-  // follow-up" section): the original probe never recorded which oneDNN
+  // P-C follow-up (docs/08-decode-vs-prefill.md ("How prefill got here")): the original probe never recorded which oneDNN
   // implementation was actually dispatched -- print it so a JIT gemmstone
   // kernel can be told apart from a reference/fallback path.
   std::printf("# impl_info_str M=%u K=%u N=%u: %s\n", M, K, N, pd.impl_info_str());
