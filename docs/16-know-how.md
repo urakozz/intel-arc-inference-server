@@ -7,7 +7,8 @@ the derivation for each lives in the doc cited.
 **The headline.** A 15-kLOC engine - pure Level Zero and OpenCL C, no PyTorch,
 no vLLM, no vendor kernel library in the hot path - runs prefill at
 **1670.72 t/s against vLLM's 1610.04** on the same card and the same checkpoint
-files, and decode at **29.45 t/s against 31.01**. Good prefill, decode still
+files, and decode at **29.45 t/s against 31.01**. (The default
+bf16 prefill; the opt-in int8 prefill, `--prefill-backend l0-int8`, reaches 2125 t/s, docs/17.) Good prefill, decode still
 behind. It reproduces a CPU-torch oracle element-exact on every determined token
 row and replays bitwise deterministically.
 
@@ -62,7 +63,8 @@ and only one of them is answered.
   extensions are unnecessary for decode.
 - **More launches can be faster.** The Level Zero prefill walk issues 8,689
   launches per chunk against sycl-tla's 1,201 and has **zero** host waits
-  against 656. Launch count was never the cost; cross-runtime boundaries were.
+  against 656 (the sycl-tla backend was removed on 2026-10-27, our own kernels won).
+  Launch count was never the cost; cross-runtime boundaries were.
 - **Two software queues on this device share one hardware compute queue and
   cannot be ordered against each other.** The driver reports exactly one compute
   queue and refuses any second index, so every L0-to-SYCL boundary is a host
@@ -189,3 +191,25 @@ and only one of them is answered.
   the kernel that would have carried the optimisation is worth more than the
   document that explains why, because it is where the next person will be
   standing.
+- **When a feature must change the kernel, change the judge, not the bar.** Bit-for-bit
+  equality with a CPU reference is the right gate only where the code path is unchanged. The
+  small-batch verify GEMM (spec 28b) made speculative rows differ from plain rows at the last
+  bf16 rounding, so greedy decoding flips on near-ties. The fix was not a looser tolerance but
+  a better reference: grade each output against a float32 run on the same context (the f32
+  judge, doc 14), accept a near-miss of at most 8 bf16 ulps, and still fail a real error - the
+  DPAS verify-attention kernel's token was at f32 rank 3, 4.0 below a top whose margin was 3.44,
+  and the kernel was switched off for it.
+- **The box is the check.** A Mac-side build and test run proves the host code compiles, not that
+  the cards behave; since 2026-11-03 every merge goes through `tools/box_check.sh` (build, kernel
+  command lines against a base, the suite that needs no model files, Passed / Failed / Skipped
+  counted apart because a Skipped test is not a pass), cards are taken only through
+  `tools/gpu_lock.sh`, and model-level rows run through `tools/box_validate.sh`.
+- **A compiler upgrade must invalidate its own kernels.** The 2026-11-04 move to IGC 2.42.6 and
+  compute runtime 26.40 left every binary the old compiler had built, because only the `.cl`
+  sources were build dependencies. `cmake/ocloc_stamp.cmake` now records `ocloc --version` and the
+  real paths of the compiler libraries and rewrites a stamp only when they change; every kernel
+  depends on it.
+- **Anything that renders a prompt must keep the client's key order.** A JSON object parsed into
+  a sorted map re-prints tools and call arguments in another order than transformers and vLLM do,
+  and the prompt ids differ from the first tool definition on (0 of 36 matched before
+  `nlohmann::ordered_json`, 36 of 36 after).

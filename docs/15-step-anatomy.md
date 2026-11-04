@@ -5,7 +5,7 @@ list**, per launch, at the benchmark shape. [12-kernels.md](12-kernels.md) says
 what each kernel does; this document says where the microseconds go, and it is
 the reason the kernel work that followed went where it did.
 
-Decode today is **29.45 t/s** against vLLM's 31.01 on the same checkpoint files
+Decode (M = 1) today is **29.45 t/s** (taken before the 2026-11-04 driver upgrade) against vLLM's 31.01 on the same checkpoint files
 ([BENCHMARKS.md](BENCHMARKS.md)). The anatomy below was measured on
 **2026-08-25**, when the step was **42.141 ms/token**, and three kernel changes
 measured on that same day took it to **36.32 ms**. Later loader and checkpoint

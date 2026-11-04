@@ -6,12 +6,15 @@ the whole strategy.
 
 This document is that target. The families added since each have their own
 engine, specialised the same way, and their own spec: Agnes (14), Ornith (15),
-K2-Horizon (18), Kolibri-1 (20) and Qwen3.8-Flash-Next (`qwen4_exp`, spec 21:
-12 QSA sparse-attention + 36 GDN layers, a 512-expert MoE, 4-stream
-hyper-connections, a 51.8 GB host-resident n-gram embedding). Qwen3.8-Flash-Next
-is built through serving (decode 21c, prefill 21d, `b70-serve` with its prefix
-cache and MTP head 21e - all blind, its box rows 31-34 pending) but served
-**truncated** (`--layers N`): the whole model needs spec 22's expert-offload
+K2-Horizon (18), Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and
+Nemotron 3.5 Bolt (25). LFM2.5, Muse-Glimmer and LiLiCorr were dropped on
+2026-10-27; Flint (spec 27) and Nanbeige (spec 29) are parked since 2026-11-04.
+Qwen3.8-Flash-Next is 12 QSA sparse-attention + 36 GDN layers, a 512-expert MoE
+(mixture of experts: a router picks a few expert networks per token), 4-stream
+hyper-connections and a 51.8 GB host-resident n-gram embedding. It is built through
+serving (decode 21c, prefill 21d, `b70-serve` with its prefix cache and MTP head
+21e) and is **in progress**: its prefill correctness fix is open, and it is served
+**truncated** (`--layers N`) because the whole model needs spec 22's expert-offload
 tier. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the
 original's split adds `\p{M}`, and Intel's interim checkpoint ships Qwen3.8's
 file). What each one runs, and with which flags:

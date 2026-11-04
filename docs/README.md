@@ -17,8 +17,8 @@ short version; this is where the reasoning and the evidence live.
   (SWE-bench, Terminal-Bench) of the models the engine supports or plans, and the models
   considered and not supported.
 - **[18-running-models.md](18-running-models.md)** - the commands to download, serve,
-  decode and benchmark each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon),
-  what each supports, its limits, and which configurations have run on a B70.
+  decode and benchmark each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt, Flash-Next),
+  what each supports, its limits, the speculative-decoding modes and how their output is judged.
 
 ## The design
 
@@ -53,7 +53,7 @@ short version; this is where the reasoning and the evidence live.
 | [07-open-questions.md](07-open-questions.md) | what is genuinely not known |
 | [16-know-how.md](16-know-how.md) | the transferable findings, condensed |
 | [17-int8-prefill.md](17-int8-prefill.md) | how 2104.50 t/s prefill is computed: the int8 path on the W4A16 file, and the 12 things rejected on the way |
-| [10-the-box.md](10-the-box.md) | driving a remote build, and why an idle box matters for a benchmark |
+| [10-the-box.md](10-the-box.md) | the box is the check: box_check, the GPU lock, the toolchain, and why an idle box matters for a benchmark |
 | [box-day-plan.md](box-day-plan.md) | the box-day run plan for the validation queue: sessions, invocations, time estimates, what to defer, what each result decides |
 
 ## Measurement records

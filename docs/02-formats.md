@@ -158,3 +158,15 @@ on a given model. Worth measuring per model rather than assuming smaller is
 better. This project runs g64: finer scale granularity for about 3% more bytes
 than the g128 default, and it matches a 64-element-K tile with inline f16
 scales. Pick the group size your kernels' tile geometry wants.
+
+## What the engine serves today
+
+Every supported model runs from an int4 checkpoint in this one format family: AutoRound, GPTQ
+packing, symmetric, group 64 (our own exports for Qwen3.8, Agnes, Ornith, K2-Horizon, Kolibri-1 and
+Bolt). The loader also reads the g128 spelling (Intel's interim Flash-Next checkpoint, a third-party Bolt
+export) through an exact expansion to g64, which is how the synthetic test checkpoints exercise it. On
+top of that format three choices are made per run, not per file: the output head is quantised to int8
+per row at load (`--lm-head int8`, the default, spec 9); the KV cache is bf16 or, with `--kv-cache int8`,
+a rotated int8 form (spec 12); and prefill linears are bf16 or, with `--prefill-backend l0-int8`, the
+Hadamard-rotated int8 path of [17-int8-prefill.md](17-int8-prefill.md), computed from the same int4 file.
+MXFP4 and FP8 stay rejected for the reasons above.
