@@ -2,8 +2,8 @@
 """Qwen3.8's f32 judges of the forced contexts (spec 28 N4 / N6, tests/server/spec_judge.h), on the CPU.
 
     qwen_forced.py run <snapshot> --ctx DIR [--ctx DIR ...] --out DIR --out-i8head DIR
-                   [--i8head-re REGEX] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
-    qwen_forced.py plan --ctx DIR [--ctx DIR ...] [--match REGEX] [--done FILE]
+                   [--i8head-re REGEX] [--pfi8-re REGEX] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
+    qwen_forced.py plan --ctx DIR [--ctx DIR ...] [--pfi8-re REGEX] [--match REGEX] [--done FILE]
 
 A context is tests/golden/forced_judge.h's dump: <key>.prompt.ids and <key>.force.ids (B70_DUMP_FORCED). Its judge
 is <out>/<key>.golden.safetensors in ornith_ref.py --lean's format: `logits` f32 [1 + gen][V] (row 0 = the prompt's
@@ -13,6 +13,17 @@ dequantises it (int4 x f16 scale, one bf16 rounding - every oracle's weights), e
 activation, GEMM, attention, GDN recurrence and norm in f32; the head is the checkpoint's bf16 lm_head upcast, or -
 for the keys --i8head-re matches (the tests that load LmHeadForm::Int8) - the engine's per-row int8 head
 (int8_sim.int8_head_weight, as ornith_ref.py --lm-head int8), written to --out-i8head.
+
+--pfi8-re (the l0-int8 tests' judges, operator ruling 2026-10-23 - ornith_ref.py --sim-int8-prefill's rule on
+Qwen3.8): for the keys it matches (PFI8_RE: every mtp_gpu_ key - mtp_gpu_test and its twins run `l0-int8`) the
+positions of the TEST'S OWN prompt (tests/golden/prompts or tests/golden/toolcall <name>.ids, checked to be the key's
+prefix - the dumped context's prompt also holds the ids decoded before the divergence) take spec 5's int8 prefill
+linears: every int4 linear the h8 walk runs on Qwen3.8 (runtime/prefill/step.cc pf_linear / linear_i8_silu: GDN
+in_proj_qkv || in_proj_z and out_proj, FA q || k || v and o_proj, the MLP's gate || up and down) computes those rows
+as int8_sim.fq_x(x) . fq_w(w) (the rotation, per-token / per-column int8 codes, de-quantised; each weight's fq_w once
+per layer). What the walk keeps bf16 stays exact (in_proj_a / in_proj_b: pf_ab_proj; the head). The positions after
+the test's prompt are the engine's M = 1 decode rows and stay plain f32. A trie node is a (token, prompt pass) pair, so
+a position is shared only by contexts that computed it the same way.
 
 Why not one teacher-forced run per context (f32_ref_job.sh / ornith_ref.py): the spec tests' ~250 contexts are
 ~450k ids, but they are a few prompts each continued a few ways - a token TRIE of all of them holds ~48k distinct
@@ -48,6 +59,9 @@ import time  # noqa: E402
 # --lm-head int8 (its tags carry the head form: mtp_gpu_<form>_, mtp_gpu_rf1_<form>_). mtp_verify_test's
 # qwen3.8_int8 is the KV cache, not the head.
 I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_)"
+# The tests that prefill with l0-int8 (tests/CMakeLists.txt: mtp_gpu_test <snapshot> l0-int8 ..., every form).
+PFI8_RE = r"^mtp_gpu_"
+REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
 ROW_BLOCK = 4096          # positions per token-parallel GEMM block
 Q_BLOCK = 1024            # attention query rows per block
 HEAD_ROWS = 2048          # logits rows per head block (2048 x 248320 x 4 B = 2 GB)
@@ -98,26 +112,49 @@ def load_contexts(dirs, match=None, done=()):
     return ctx
 
 
+def test_prompt_len(key, prompt, root=REPO, pfi8_re=PFI8_RE):
+    """The l0-int8 test's own prompt length for `key` (0 when `pfi8_re` does not match it): its name's ids file,
+    which must be a prefix of the key's prompt."""
+    if not pfi8_re or not re.search(pfi8_re, key):
+        return 0
+    m = re.match(r"^mtp_gpu_(?:rf1_)?(?:bf16|int8)_(.+)_[0-9a-f]{16}$", key)
+    if not m:
+        raise SystemExit(f"{key}: an l0-int8 key whose prompt name cannot be read")
+    for d in ("tests/golden/prompts", "tests/golden/toolcall"):
+        p = os.path.join(root, d, m.group(1) + ".ids")
+        if os.path.exists(p):
+            ids = read_ids(p)
+            if prompt[:len(ids)] != ids:
+                raise SystemExit(f"{key}: {p} is not a prefix of the key's prompt")
+            return len(ids)
+    raise SystemExit(f"{key}: no ids file for the prompt {m.group(1)}")
+
+
 class Trie:
     """Every context's prompt + forced ids as one token trie, numbered so that each SEGMENT (a maximal chain whose
     inner nodes have one child) is a contiguous index range and a parent segment precedes its children.
 
-    tok / depth / parent: per node (parent -1 at a root); seg_start / seg_len / seg_parent (segment index, -1);
-    seg_anc[s]: the ancestor index ranges of segment s (its parent's, then the parent segment itself)."""
+    tok / i8 / depth / parent: per node (i8: the position runs the int8 prompt pass; parent -1 at a root); seg_start /
+    seg_len / seg_parent (segment index, -1); seg_anc[s]: the ancestor index ranges of segment s (its parent's, then
+    the parent segment itself). `pfi8`: per sequence, its int8 prompt pass's length (0: none) - a node is a (token,
+    depth < that length) pair."""
 
-    def __init__(self, seqs):
-        tok, par, kids, roots = [], [], [], {}
-        for s in seqs:
+    def __init__(self, seqs, pfi8=None):
+        tok, i8, par, kids, roots = [], [], [], [], {}
+        for si, s in enumerate(seqs):
+            P = pfi8[si] if pfi8 else 0
             node = -1
-            for t in s:
+            for depth, t in enumerate(s):
                 d = roots if node < 0 else kids[node]
-                c = d.get(t)
+                key = (t, depth < P)
+                c = d.get(key)
                 if c is None:
                     c = len(tok)
                     tok.append(t)
+                    i8.append(depth < P)
                     par.append(node)
                     kids.append({})
-                    d[t] = c
+                    d[key] = c
                 node = c
         order, self.seg_start, self.seg_len, self.seg_parent = [], [], [], []
         stack = [(c, -1) for c in reversed(list(roots.values()))]
@@ -140,6 +177,7 @@ class Trie:
             new[o] = i
         self.old2new = new
         self.tok = [tok[o] for o in order]
+        self.i8 = [i8[o] for o in order]
         self.parent = [-1 if par[o] < 0 else new[par[o]] for o in order]
         self.depth = [0] * len(order)
         for i, p in enumerate(self.parent):   # a parent precedes its child
@@ -154,46 +192,55 @@ class Trie:
                 self.n_children[ps] += 1
         self._roots, self._kids = roots, kids
 
-    def path(self, seq):
-        """The node of every position of `seq` (new numbering)."""
+    def path(self, seq, pfi8=0):
+        """The node of every position of `seq` (new numbering), its first `pfi8` positions the int8 prompt pass."""
         out, node = [], -1
-        for t in seq:
-            node = (self._roots if node < 0 else self._kids[node])[t]
+        for depth, t in enumerate(seq):
+            node = (self._roots if node < 0 else self._kids[node])[(t, depth < pfi8)]
             out.append(node)
         return [self.old2new[n] for n in out]
 
     def fingerprint(self) -> str:
         h = hashlib.sha256()
-        h.update(json.dumps([self.tok, self.parent]).encode())
+        h.update(json.dumps([self.tok, self.parent] + ([self.i8] if any(self.i8) else [])).encode())
         return h.hexdigest()[:16]
 
 
-def plan(ctx, i8head_re=I8HEAD_RE):
-    """The work: the trie, and per head form the contexts and their distinct (ids, head) outputs."""
+def plan(ctx, i8head_re=I8HEAD_RE, pfi8_re=None, root=REPO):
+    """The work: the trie, and per head form the contexts and their distinct (ids, head, prompt pass) outputs.
+    `pfi8_re`: the keys whose test's own prompt takes the int8 prompt pass (test_prompt_len); None: no key."""
     keys = sorted(ctx)
     seqs = [ctx[k][0] + ctx[k][1] for k in keys]
-    trie = Trie(seqs)
+    pfi8 = [test_prompt_len(k, ctx[k][0], root, pfi8_re) for k in keys]
+    trie = Trie(seqs, pfi8)
     jobs = {}
-    for k, s in zip(keys, seqs):
+    for k, s, P in zip(keys, seqs, pfi8):
         form = "int8" if re.search(i8head_re, k) else "bf16"
         pr, fo = ctx[k]
-        rows = trie.path(s)[len(pr) - 1:]          # 1 + gen rows: the prompt's last position, then each forced id's
+        rows = trie.path(s, P)[len(pr) - 1:]       # 1 + gen rows: the prompt's last position, then each forced id's
         assert len(rows) == len(fo) + 1
-        jobs[k] = {"form": form, "rows": rows, "force": fo, "n_prompt": len(pr), "seq": tuple(s)}
+        jobs[k] = {"form": form, "rows": rows, "force": fo, "n_prompt": len(pr), "seq": tuple(s), "pfi8": P}
     return trie, jobs
 
 
 def describe(trie, jobs, vocab=248320):
     raw = sum(len(j["seq"]) for j in jobs.values())
-    uniq = {(j["n_prompt"], j["seq"], j["form"]) for j in jobs.values()}
+    uniq = {_out_key(j) for j in jobs.values()}
     rows = {}
     for j in jobs.values():
-        rows.setdefault((j["n_prompt"], j["seq"], j["form"]), len(j["rows"]))
+        rows.setdefault(_out_key(j), len(j["rows"]))
     nrow = sum(rows.values())
     forms = {f: sum(1 for j in jobs.values() if j["form"] == f) for f in ("bf16", "int8")}
-    return (f"{len(jobs)} contexts ({forms['bf16']} bf16 head, {forms['int8']} int8 head; {len(uniq)} distinct "
-            f"ids + head), {raw} ids -> {len(trie.tok)} trie positions in {len(trie.seg_start)} segments; "
+    npf = sum(1 for j in jobs.values() if j["pfi8"])
+    return (f"{len(jobs)} contexts ({forms['bf16']} bf16 head, {forms['int8']} int8 head, {npf} with the l0-int8 "
+            f"prompt pass; {len(uniq)} distinct ids + head + prompt pass), {raw} ids -> {len(trie.tok)} trie "
+            f"positions ({sum(trie.i8)} int8 prompt pass) in {len(trie.seg_start)} segments; "
             f"{nrow} logits rows written ({nrow * vocab * 4 / 1e9:.1f} GB)"), len(trie.tok), nrow
+
+
+def _out_key(j):
+    """What decides a judge file: the ids, where the prompt ends, the head, the int8 prompt pass."""
+    return (j["n_prompt"], j["seq"], j["form"], j["pfi8"])
 
 
 def estimate_hours(n_pos, n_rows, longest):
@@ -236,23 +283,62 @@ def _rows(f, x, block=ROW_BLOCK):
     return torch.cat([f(x[a:a + block]) for a in range(0, x.shape[0], block)], 0)
 
 
+def _rows_m(f, x, m, block=ROW_BLOCK):
+    """_rows with the int8 prompt-pass mask's block beside each row block (m None: no int8 row)."""
+    import torch
+    return torch.cat([f(x[a:a + block], None if m is None else m[a:a + block])
+                      for a in range(0, x.shape[0], block)], 0)
+
+
+class Int8Pass:
+    """The l0-int8 prompt pass's linears for one layer: rows where `mask` is set compute int8_sim.fq_x(x) .
+    fq_w(w) (each weight's fq_w once, cached for the layer), the others the plain f32 linear."""
+
+    def __init__(self, mask):
+        self.mask = mask if mask is not None and bool(mask.any()) else None
+        self.wq = {}
+
+    def lin(self, mod, x, m):
+        if m is None or not bool(m.any()):
+            return mod(x)
+        import torch
+        import torch.nn.functional as F
+        I8 = _load("int8_sim")
+        wq = self.wq.get(mod)
+        if wq is None:
+            wq = self.wq[mod] = I8.fq_w(mod.weight.float())
+        out = torch.empty(x.shape[0], mod.out_features, dtype=x.dtype)
+        keep = ~m
+        if bool(keep.any()):
+            out[keep] = mod(x[keep])
+        out[m] = F.linear(I8.fq_x(x[m]), wq, mod.bias)
+        return out
+
+    def rows(self, mod, x):
+        """mod over every row of x (x's rows are the trie's positions, in order)."""
+        if self.mask is None:
+            return _rows(mod, x)
+        return _rows_m(lambda xb, mb: self.lin(mod, xb, mb), x, self.mask)
+
+
 def _anc_index(trie, s):
     import torch
     parts = [torch.arange(a, b) for a, b in trie.seg_anc[s]]
     return torch.cat(parts) if parts else torch.zeros(0, dtype=torch.long)
 
 
-def attention(A, h, trie, cos, sin, M):
+def attention(A, h, trie, cos, sin, M, q8=None):
     """Qwen3_5Attention over the trie: q / k / v / gate token-parallel, softmax(q k^T * scale) v per segment over
-    its ancestors' and its own (causal) positions, f32."""
+    its ancestors' and its own (causal) positions, f32. `q8`: the int8 prompt pass's linears (Int8Pass)."""
     import torch
+    q8 = q8 or Int8Pass(None)
     N, hd = h.shape[0], A.head_dim
-    qg = _rows(A.q_proj, h).view(N, -1, 2 * hd)
+    qg = q8.rows(A.q_proj, h).view(N, -1, 2 * hd)
     q, gate = torch.chunk(qg, 2, dim=-1)
     gate = gate.reshape(N, -1)
     q = A.q_norm(q.contiguous())
-    k = A.k_norm(_rows(A.k_proj, h).view(N, -1, hd))
-    v = _rows(A.v_proj, h).view(N, -1, hd)
+    k = A.k_norm(q8.rows(A.k_proj, h).view(N, -1, hd))
+    v = q8.rows(A.v_proj, h).view(N, -1, hd)
     q, k = M.apply_rotary_pos_emb(q.transpose(0, 1)[None], k.transpose(0, 1)[None], cos, sin)
     q, k, v = q[0], k[0], v.transpose(0, 1).contiguous()        # [heads, N, hd]
     nH, nKV = q.shape[0], k.shape[0]
@@ -272,18 +358,20 @@ def attention(A, h, trie, cos, sin, M):
             p = torch.softmax(sc, dim=-1, dtype=torch.float32)
             out[:, a + r0:a + r1] = torch.matmul(p, Vv[:, :P + r1])
     o = out.transpose(0, 1).reshape(N, -1) * torch.sigmoid(gate)
-    return _rows(A.o_proj, o)
+    return q8.rows(A.o_proj, o)
 
 
-def gdn(G, h, trie, M):
+def gdn(G, h, trie, M, q8=None):
     """Qwen3_5GatedDeltaNet over the trie: the projections token-parallel; the causal conv (kernel K) as the sum of
     K taps up the path (a position's own and its K - 1 ancestors', zero above a root); the gated delta rule per
-    segment from its parent segment's final state (modeling_qwen3_5.torch_chunk_gated_delta_rule, fp32)."""
+    segment from its parent segment's final state (modeling_qwen3_5.torch_chunk_gated_delta_rule, fp32). `q8`: the
+    int8 prompt pass's linears (in_proj_qkv, in_proj_z, out_proj; in_proj_b / in_proj_a stay exact: pf_ab_proj)."""
     import torch
     import torch.nn.functional as F
+    q8 = q8 or Int8Pass(None)
     N = h.shape[0]
-    qkv = _rows(G.in_proj_qkv, h)                               # [N, conv_dim]
-    z = _rows(G.in_proj_z, h)
+    qkv = q8.rows(G.in_proj_qkv, h)                             # [N, conv_dim]
+    z = q8.rows(G.in_proj_z, h)
     b = _rows(G.in_proj_b, h)
     a_ = _rows(G.in_proj_a, h)
     w = G.conv1d.weight.squeeze(1)                              # [conv_dim, K]
@@ -324,17 +412,26 @@ def gdn(G, h, trie, M):
             if not left[ps]:
                 del states[ps]
     core = G.norm(core.reshape(-1, G.head_v_dim), z.reshape(-1, G.head_v_dim)).reshape(N, -1)
-    return _rows(G.out_proj, core)
+    return q8.rows(G.out_proj, core)
 
 
-def layer_forward(lay, X, trie, cos, sin, M):
+def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
+    """One decoder layer over every trie position; `i8_mask` (bool [N]): the positions of the int8 prompt pass."""
+    q8 = Int8Pass(i8_mask)
     h = _rows(lay.input_layernorm, X)
     if lay.block_type == "linear_attention":
-        X = X + gdn(lay.linear_attn, h, trie, M)
+        X = X + gdn(lay.linear_attn, h, trie, M, q8)
     else:
-        X = X + attention(lay.self_attn, h, trie, cos, sin, M)
+        X = X + attention(lay.self_attn, h, trie, cos, sin, M, q8)
     del h
-    return X + _rows(lambda x: lay.mlp(lay.post_attention_layernorm(x)), X)
+    if q8.mask is None:
+        return X + _rows(lambda x: lay.mlp(lay.post_attention_layernorm(x)), X)
+    mlp = lay.mlp                                   # Qwen3_5MLP: down(act(gate(x)) * up(x))
+
+    def block(x, m):
+        x = lay.post_attention_layernorm(x)
+        return q8.lin(mlp.down_proj, mlp.act_fn(q8.lin(mlp.gate_proj, x, m)) * q8.lin(mlp.up_proj, x, m), m)
+    return X + _rows_m(block, X, q8.mask)
 
 
 def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log=print):
@@ -345,6 +442,7 @@ def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log
     from transformers.models.qwen3_5 import modeling_qwen3_5 as M
     tok = torch.tensor(trie.tok)
     pos = torch.tensor(trie.depth)
+    i8_mask = torch.tensor(trie.i8, dtype=torch.bool) if any(trie.i8) else None
     fp = trie.fingerprint()
     start, X = 0, None
     ck = os.path.join(work, "hidden.pt") if work else None
@@ -363,7 +461,7 @@ def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log
             load_layer(i)
         lay = layers[i].float()
         with torch.no_grad():
-            X = layer_forward(lay, X, trie, cos, sin, M)
+            X = layer_forward(lay, X, trie, cos, sin, M, i8_mask)
         if unload_layer:
             unload_layer(i)
         if ck:
@@ -408,23 +506,25 @@ def write_outputs(final, jobs, w_bf16, outs, meta, log=print):
             for k in blk:
                 j = jobs[k]
                 path = os.path.join(outs[form], k + ".golden.safetensors")
-                same = written.get((j["n_prompt"], j["seq"], form))
+                same = written.get(_out_key(j))
                 if same:
                     if os.path.exists(path):
                         os.remove(path)
                     os.link(same, path)
                     continue
                 rows = lg[torch.tensor([where[n] for n in j["rows"]])].contiguous()
-                md = dict(meta, n_prompt=str(j["n_prompt"]), gen=str(len(j["force"])), lm_head=form)
+                md = dict(meta, n_prompt=str(j["n_prompt"]), gen=str(len(j["force"])), lm_head=form,
+                          pfi8_prompt=str(j["pfi8"]))
                 save_file({"logits": rows, "tokens": torch.tensor(j["force"], dtype=torch.int32)}, path + ".tmp",
                           metadata=md)
                 os.replace(path + ".tmp", path)
-                written[(j["n_prompt"], j["seq"], form)] = path
+                written[_out_key(j)] = path
                 vu = int(meta["vocab_used"])
                 arg = rows[:-1, :vu].argmax(-1)
                 agree = (arg == torch.tensor(j["force"])).float().mean().item() if j["force"] else 1.0
-                log(f"[{k}] {form} head, {j['n_prompt']} + {len(j['force'])} ids: the f32 argmax is the forced id "
-                    f"at {agree:.3f} of the rows")
+                pf = f" (the l0-int8 prompt pass over its first {j['pfi8']})" if j["pfi8"] else ""
+                log(f"[{k}] {form} head, {j['n_prompt']} + {len(j['force'])} ids{pf}: the f32 argmax is the forced "
+                    f"id at {agree:.3f} of the rows")
         del W
         log(f"{form} head: {len(ks)} contexts in {time.time() - t:.0f} s")
     return written
@@ -436,7 +536,7 @@ def cmd_plan(a):
     if not ctx:
         print("no context to do")
         return None
-    trie, jobs = plan(ctx, a.i8head_re)
+    trie, jobs = plan(ctx, a.i8head_re, a.pfi8_re)
     line, n_pos, n_rows = describe(trie, jobs)
     longest = max(len(j["seq"]) for j in jobs.values())
     print(line)
@@ -459,7 +559,7 @@ def cmd_run(a):
     if not ctx:
         print("no context to do (every one has its judge)")
         return
-    trie, jobs = plan(ctx, a.i8head_re)
+    trie, jobs = plan(ctx, a.i8head_re, a.pfi8_re)
     line, n_pos, n_rows = describe(trie, jobs)
     longest = max(len(j["seq"]) for j in jobs.values())
     print(line, flush=True)
@@ -484,7 +584,8 @@ def cmd_run(a):
     final = trie_forward(model, trie, load_layer, unload_layer, a.work,
                          log=lambda s: print(s + f" (wall {time.time() - t0:.0f} s)", flush=True))
     meta = {"snapshot": os.path.abspath(a.snapshot), "dtype": "f32", "lean": "1", "dump_kv": "False",
-            "vocab_used": str(a.vocab_used), "model": "qwen3.8 (tools/oracle/qwen_forced.py: one trie forward, f32)"}
+            "vocab_used": str(a.vocab_used), "model": "qwen3.8 (tools/oracle/qwen_forced.py: one trie forward, f32)",
+            "pfi8_re": a.pfi8_re or ""}
     write_outputs(final, jobs, model.lm_head.weight, {"bf16": a.out, "int8": a.out_i8head}, meta,
                   log=lambda s: print(s, flush=True))
     if a.work and os.path.exists(os.path.join(a.work, "hidden.pt")):
@@ -509,6 +610,8 @@ def main():
         p.add_argument("--match")
         p.add_argument("--done")
         p.add_argument("--i8head-re", default=I8HEAD_RE)
+        p.add_argument("--pfi8-re", help="the keys whose test prefills with l0-int8: their test's prompt takes the "
+                       "int8 prompt pass (e.g. PFI8_RE, '%s'); default none" % PFI8_RE)
     a = ap.parse_args()
     if a.cmd == "plan":
         cmd_plan(a)

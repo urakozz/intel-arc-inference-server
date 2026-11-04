@@ -88,26 +88,10 @@ def worst_miss(lg, force, vocab_used=VOCAB_USED):
     return worst, tops
 
 
-PFI8_RE = r"^mtp_gpu_"   # the l0-int8 tests (tests/CMakeLists.txt: mtp_gpu_test <snapshot> l0-int8 ...)
-
-
 def test_prompt_len(key, prompt, root):
-    """The l0-int8 test's own prompt length for `key` (0 when the key is not such a test's): its name's ids file,
-    which must be a prefix of the key's prompt."""
-    if not re.search(PFI8_RE, key):
-        return 0
-    m = re.match(r"^mtp_gpu_(?:rf1_)?(?:bf16|int8)_(.+)_[0-9a-f]{16}$", key)
-    if not m:
-        raise SystemExit(f"{key}: an l0-int8 key whose prompt name cannot be read")
-    for d in ("tests/golden/prompts", "tests/golden/toolcall"):
-        p = os.path.join(root, d, m.group(1) + ".ids")
-        if os.path.exists(p):
-            with open(p, encoding="utf-8") as f:
-                ids = [int(x) for x in f.read().split()]
-            if prompt[:len(ids)] != ids:
-                raise SystemExit(f"{key}: {p} is not a prefix of the key's prompt")
-            return len(ids)
-    raise SystemExit(f"{key}: no ids file for the prompt {m.group(1)}")
+    """The l0-int8 test's own prompt length for `key` (0 when the key is not such a test's): qwen_forced.py's."""
+    qf = _load("qwen_forced")
+    return qf.test_prompt_len(key, prompt, root, qf.PFI8_RE)
 
 
 def sim_int8_prompt(model, I8):

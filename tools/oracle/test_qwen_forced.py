@@ -6,7 +6,10 @@
 The trie forward against transformers' own forward of each context in float32 (the same weights upcast): contexts
 that share prefixes, branch inside a GDN chunk and inside an attention query block, two roots, and one context twice
 under another key; then `run` end to end through the layer-streamed build - the files' shape and rows against the
-reference's logits through the bf16 head and the int8 head, the hard link, the key check and the resume.
+reference's logits through the bf16 head and the int8 head, the hard link, the key check and the resume. The l0-int8
+prompt pass (--pfi8-re) on a 1024-wide tiny model (int8_sim's rotation is 1024-k blocks): the trie forward against a
+per-context forward whose linears take int8_sim.fq_x / fq_w on the test prompt's rows only (ornith_ref.py
+--sim-int8-prefill's style), with contexts where one position is prompt in one key and decode in another.
 """
 import os
 import sys
@@ -175,7 +178,111 @@ def test_resume():
     print("resume: a checkpoint at layer 5 continues to the same final hidden state (bitwise)")
 
 
-TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume]
+# ------------------------------------------------------------------------------------- the l0-int8 prompt pass
+
+TEXT8 = dict(TD.TEXT, hidden_size=1024, intermediate_size=1024, num_hidden_layers=4, num_attention_heads=4,
+             num_key_value_heads=2, head_dim=256, linear_num_key_heads=2, linear_num_value_heads=4,
+             linear_key_head_dim=64, linear_value_head_dim=256, layer_types=["linear_attention"] * 3 +
+             ["full_attention"],
+             rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.25,
+                              "mrope_section": [16, 8, 8], "mrope_interleaved": True})
+
+
+def wide_model():
+    """A 4-layer (3 GDN + 1 FA) Qwen3.5 whose every h8 linear has K a multiple of 1024, f32, random weights."""
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+    tc = Qwen3_5TextConfig(**TEXT8)
+    tc._attn_implementation = "eager"
+    torch.manual_seed(1)
+    m = Qwen3_5ForCausalLM(tc).float().eval()
+    with torch.no_grad():
+        for n, p in m.named_parameters():
+            if p.dim() == 2 and "embed" not in n:
+                p.copy_(torch.randn_like(p) / p.shape[1] ** 0.5)
+    return m
+
+
+H8 = {"linear_attn": ("in_proj_qkv", "in_proj_z", "out_proj"), "self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
+      "mlp": ("gate_proj", "up_proj", "down_proj")}
+
+
+def ref_hidden_pfi8(m, ids, P):
+    """The per-context reference: transformers' f32 forward of `ids` with every h8 linear patched - rows t < P
+    through int8_sim.fq_x(x) . fq_w(w), the rest the plain linear (ornith_ref.sim_int8_prefill's rule, by row)."""
+    import torch.nn.functional as F
+    i8 = _load("int8_sim")
+    saved = []
+    for lay in m.model.layers:
+        for part, names in H8.items():
+            if not hasattr(lay, part):
+                continue
+            for n in names:
+                mod = getattr(getattr(lay, part), n)
+                orig = mod.forward
+
+                def fwd(x, mod=mod, orig=orig):
+                    out = orig(x).clone()
+                    if P:
+                        out[0, :P] = F.linear(i8.fq_x(x[0, :P]), i8.fq_w(mod.weight), mod.bias)
+                    return out
+                mod.forward = fwd
+                saved.append((mod, orig))
+    try:
+        return ref_hidden(m, ids)
+    finally:
+        for mod, orig in saved:
+            mod.forward = orig
+
+
+def test_pfi8():
+    base = TD.seq(150, 21)
+    root = tempfile.mkdtemp(prefix="qwen_forced_pfi8_")
+    os.makedirs(os.path.join(root, "tests/golden/toolcall"))
+    os.makedirs(os.path.join(root, "tests/golden/prompts"))
+    for d, name, ids in (("toolcall", "t1_pa", base[:80]), ("prompts", "pb", base[:120]),
+                         ("toolcall", "t2_pc", TD.seq(40, 22))):
+        with open(os.path.join(root, "tests/golden", d, name + ".ids"), "w") as fh:
+            fh.write(" ".join(map(str, ids)) + "\n")
+    ctx = keyed({
+        "mtp_gpu_bf16_t1_pa": (base[:100], base[100:130]),               # 80 prompt-pass ids, 20 decoded, then forced
+        "mtp_gpu_int8_t1_pa": (base[:90], base[90:100] + TD.seq(12, 23)),  # the same prompt pass, branches at 100
+        "mtp_gpu_rf1_bf16_pb": (base[:125], base[125:140]),              # 80..119: prompt here, decode in t1_pa's
+        "dflash_gpu_int8_c": (base[:70], base[70:130]),                  # t1_pa's ids, no int8 pass at all
+        "mtp_gpu_bf16_t2_pc": (TD.seq(40, 22) + TD.seq(6, 24), TD.seq(8, 25)),   # another root
+    })
+    trie, jobs = QF.plan(ctx, pfi8_re=QF.PFI8_RE, root=root)
+    want_p = {"t1_pa": 80, "pb": 120, "dflash": 0, "t2_pc": 40}
+    for k, j in jobs.items():
+        assert j["pfi8"] == next(v for n, v in want_p.items() if n in k), (k, j["pfi8"])
+    a = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if "_t1_pa_" in k and "bf16" in k], 80)
+    b = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if "_pb_" in k], 120)
+    c = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if k.startswith("dflash")], 0)
+    assert a[:80] == b[:80] and a[80] != b[80], "prompt in one key, decode in another: split at the first such position"
+    assert not set(a) & set(c), "a key without the int8 pass shares no position with one that has it"
+    assert sum(trie.i8) == len(set(a[:80]) | set(b[:120]) | set(trie.path(TD.seq(40, 22), 40)))
+    m = wide_model()
+    with torch.no_grad():
+        final = QF.trie_forward(m, trie, log=lambda s: None)
+    worst, worst_wrong = 0.0, float("inf")
+    for k, (p, f) in ctx.items():
+        P = jobs[k]["pfi8"]
+        want = ref_hidden_pfi8(m, p + f, P)
+        got = final[torch.tensor(trie.path(p + f, P))]
+        err = ((got - want).abs().max() / want.abs().max()).item()
+        worst = max(worst, err)
+        if P:   # the same context without the int8 pass, and with it over every position: both far off
+            for wrong in (0, len(p + f)):
+                w = ref_hidden_pfi8(m, p + f, wrong)
+                worst_wrong = min(worst_wrong, ((got - w).abs().max() / w.abs().max()).item())
+    assert worst < 1e-3, f"the int8 prompt pass: relative max error {worst:.2e}"
+    assert worst_wrong > 20 * worst, (worst_wrong, worst)
+    print(f"the l0-int8 prompt pass: trie forward == the per-context fq_x / fq_w forward (worst relative error "
+          f"{worst:.1e}; the wrong prompt pass is >= {worst_wrong:.1e} away); keys share a position only when they "
+          f"computed it the same way")
+
+
+TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8]
 
 if __name__ == "__main__":
     want = set(sys.argv[1:])
