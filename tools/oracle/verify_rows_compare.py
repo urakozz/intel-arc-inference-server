@@ -11,9 +11,15 @@ import math
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import importlib.util  # noqa: E402
+
 import numpy as np  # noqa: E402
-from row_taps_compare import st_load, bf16_file  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location(
+    "row_taps_compare", os.path.join(os.path.dirname(os.path.abspath(__file__)), "row_taps_compare.py"))
+_rtc = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_rtc)
+st_load, bf16_file = _rtc.st_load, _rtc.bf16_file
 
 vr, plain, ref, G, A, B = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
 taps = [5, 19, 33, 47, 61]
