@@ -3771,7 +3771,7 @@ st_r69_forced_dumps() {
   chk "ls $D/*.prompt.ids | wc -l" "the dumped contexts"
   finish
 }
-stage r69.forced_refs 69 optin cpu qwen,oracle_image r69.forced_dumps "the f32 judges of the Qwen3.8 spec tests' forced contexts: tools/box_validate/f32_refs.sh forced-qwen (tools/oracle/qwen_forced.py, one layer-major f32 forward over the contexts' token trie, both heads) under /tmp/b70-cpu-model.lock - ~250 contexts / ~48k distinct positions, ~3 h (estimate)"
+stage r69.forced_refs 69 optin cpu qwen,oracle_image r69.forced_dumps "the f32 judges of the Qwen3.8 spec tests' forced contexts: tools/box_validate/f32_refs.sh forced-qwen (tools/oracle/qwen_forced.py, one layer-major f32 forward over the contexts' token trie, both heads) under /tmp/b70-cpu-model.lock - 248 contexts / ~48k distinct positions measured 1.5 h (2026-11-04: 4.5 min + 86 min, peak RSS 38 GiB; 20 GB of judges)"
 st_r69_forced_refs() {
   chk "tools/box_validate/f32_refs.sh $DATA forced-qwen $DATA/oracle-forced-dumps/qwen-spec" "the Qwen3.8 spec contexts' f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
