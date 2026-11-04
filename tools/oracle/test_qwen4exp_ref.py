@@ -668,6 +668,18 @@ def test_cli_run_and_hfcheck():
     assert t["H.L3"].shape == (16 + G, tc.hc_count * tc.hidden_size) and t["H.L3"].dtype == BF
     assert t["route.ids.L0"].shape == (T + G, tc.num_experts_per_tok) and t["ple.ids"].shape == (T + G, 16)
     assert t["qsa.sel.L3"].shape == (T + G - 2051, 512) and t["qsa.gap.L3"].shape == (T + G,)
+    # the score judge's inputs: each selection row is the top 512 of its own scores row, route.top's head is route.ids
+    sc = t["qsa.score.L3"]
+    assert sc.shape == (T + G - 2051, (T + G) // 4), sc.shape
+    for j in range(sc.shape[0]):
+        n = (2051 + j + 1) // 4
+        assert bool((sc[j, :n] >= 0).all()) and bool((sc[j, n:] == -1).all())
+        assert torch.equal(sc[j, :n].topk(512).indices.sort().values.to(torch.int32), t["qsa.sel.L3"][j])
+    k, E = tc.num_experts_per_tok, tc.num_experts
+    assert t["route.top.ids.L0"].shape == (T + G, min(16, E)) and t["route.top.p.L0"].shape == (T + G, min(16, E))
+    assert torch.equal(t["route.top.ids.L0"][:, :k].sort(-1).values, t["route.ids.L0"].sort(-1).values)
+    gap = t["route.top.p.L0"][:, k - 1] - t["route.top.p.L0"][:, k]
+    assert torch.equal(gap, t["route.gap.L0"])
     assert t["nll"].shape == (T - 1,) and t["tokens"].shape == (G,)
     assert "QSA 512th/513th gap" in r.stdout and "MoE 2th/3th gap" in r.stdout, r.stdout[-1500:]
     r = subprocess.run(py + ["hfcheck", snap, "--layers", "4", "--n", "2060", "--gen", "2"], capture_output=True,

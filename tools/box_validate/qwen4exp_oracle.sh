@@ -27,7 +27,9 @@
 #                  are absent): qwen4exp_ref.py run on each for q4exp_short / 4k / agentic (--gen 32) with the
 #                  engine-format PLE (their own ckpt-ple-int8, copied into the tree: the container mounts only it and
 #                  the snapshot) -> <data>/oracle-out-q4exp-synth/{ours,intel}/<p>.{ids,golden.safetensors,log}
-#                  (r32.oracle_synth; ESTIMATED ~0.5-1 h a set on the box CPU: 4 real-width layers, every expert)
+#                  (r32.oracle_synth; ESTIMATED ~0.5-1 h a set on the box CPU: 4 real-width layers, every expert);
+#                  a kept set without the gates' score tensors (qsa.score, route.top - since 2026-11-04) is moved to
+#                  ~/b70/trash/<date>/ and made again
 #   trace          teacher-forced routing traces for spec 22 P0.6 / P0.8: the 36 A4 scenarios
 #                  (tests/golden/toolcall/*.ids), q4exp_agentic, code, prose, and the opencode recording when
 #                  OPENCODE_LOG is set -> <data>/oracle-out-q4exp-traces/<name>.routes.safetensors
@@ -158,9 +160,27 @@ in_box() {
   ORACLE_MODEL="$model" tools/oracle/run_in_container.sh "$cmd"
 }
 
-# golden <out dir> <partial dir> <prompt name> <extra run args>
+# has_scores <golden file> - its header names the score judge's tensors (qsa.score.L* when it has QSA selection rows,
+# route.top.p.L*): qwen4exp_ref.py run writes them since 2026-11-04; older sets judge by the gaps (golden_test)
+has_scores() {
+  python3 -c 'import json, struct, sys
+f = open(sys.argv[1], "rb"); h = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+sel = any(k.startswith("qsa.sel.") for k in h); sc = any(k.startswith("qsa.score.") for k in h)
+sys.exit(0 if any(k.startswith("route.top.p.") for k in h) and (sc or not sel) else 1)' "$1"
+}
+
+# golden <out dir> <partial dir> <prompt name> <extra run args> [scores]
+# `scores` (the synthetic sets: minutes a prompt): a kept set without the score judge's tensors is moved to
+# ~/b70/trash/<date>/ (the operator removes it) and made again; the real-checkpoint sets (hours) are kept as they are.
 golden() {
-  local out="$1" part="$2" p="$3" extra="$4"
+  local out="$1" part="$2" p="$3" extra="$4" scores="${5:-}"
+  if [ -n "$scores" ] && [ "$dry" != 1 ] && [ -s "$out/$p.golden.safetensors" ] && ! has_scores "$out/$p.golden.safetensors"; then
+    local trash="$HOME/b70/trash/$(date +%F)/qwen4exp-golden-noscores/$(basename "$(dirname "$out")")-$(basename "$out")"
+    echo "qwen4exp_oracle: $p has no block / router scores (qsa.score, route.top) - the old set to $trash, made again"
+    mkdir -p "$trash" && for f in "$p.golden.safetensors" "$p.log"; do
+      [ -e "$out/$f" ] && mv -f "$out/$f" "$trash/$f"
+    done
+  fi
   if [ -s "$out/$p.golden.safetensors" ] && [ -s "$out/$p.ids" ]; then
     echo "qwen4exp_oracle: $p kept ($out/$p.golden.safetensors)"
     return 0
@@ -280,7 +300,7 @@ case "$mode" in
       [ "$dry" = 1 ] && echo "DRY_RUN: ORACLE_SNAP=$ORACLE_SNAP (the $f form), PLE int8:/ws/$part/ple"
       ple="int8:/ws/$part/ple"
       for p in q4exp_short q4exp_4k q4exp_agentic; do
-        golden "$out" "$part" "$p" ""
+        golden "$out" "$part" "$p" "" scores
       done
       unset ORACLE_SNAP
     done

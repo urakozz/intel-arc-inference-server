@@ -12,6 +12,9 @@
 //     route.gap.L{l} F32  [T + gen]        p(10) - p(11) of the fp32 softmax (0 = an exact tie at the cut)
 //     qsa.sel.L{l}   I32  [R][512]         QSA layers: rows T + gen - R .. (p >= 2051), the selected blocks ascending
 //     qsa.gap.L{l}   F32  [T + gen]        the 512th - 513th block score (+inf where <= 512 blocks are complete)
+//     qsa.score.L{l} F32  [R][W]           the rows of qsa.sel: every complete block's score (n = (p + 1) / 4; -1 past)
+//     route.top.ids.L{l} I32, route.top.p.L{l} F32  [T + gen][16]   the fp32 softmax's top 16 (descending p)
+//                                          (qsa.score / route.top: since 2026-11-04 - older sets judge by the gaps)
 //     ple.ids        I64  [T + gen][16]    the 16 PLE rows each position read
 //     H.L{l}         BF16 [A][10240]       the 4-stream H after layer l, rows T + gen - A .. (the tap diagnostic)
 // The prompts read: q4exp_short (must exist), q4exp_4k, q4exp_agentic - each whose files exist.
@@ -20,12 +23,21 @@
 //   tokens   ingest the ids one replay at a time; for j = 0..31 the engine's id against the golden decision row
 //            T - 1 + j (determined rows exact; a row whose top-1 is not unique accepts any member of the argmax
 //            set), then feed the GOLDEN token
-//   routing  at every (row, layer) the engine's top-10 SET against route.ids: a difference is a NEAR-TIE when the
-//            reference's gap is within B70_Q4_TIE_TOL (1e-3 PROPOSED; 0 = an exact tie, which torch's topk breaks
-//            its own way - undetermined, spec 21 §12 finding 2) and the sets differ by one expert; anything else FAILS
-//   gate S   at every (row >= 2051, QSA layer) the engine's selected block set against qsa.sel: a difference FAILS
-//            unless qsa.gap is within B70_Q4_SEL_TOL (1e-3 PROPOSED; 0 = undetermined, ties of zeros included);
-//            near-tie rows are counted and printed
+//   routing  at every (row, layer) the engine's top-10 SET against route.ids. A reference gap of exactly 0 is an
+//            exact tie, which torch's topk breaks its own way - undetermined (spec 21 §12 finding 2). Otherwise, with
+//            the reference's router scores (route.top.*), a difference is a ROUNDING SWAP when the weights of the
+//            experts both took agree (cosine >= 0.999) and every expert the engine took instead is in the
+//            reference's top 16 with its p within 2 x the cut's noise (|the engine's p of rank 9 / 10 - the
+//            reference's|) below the reference's p of rank 9; anything else FAILS. An old golden set without
+//            route.top.*: a NEAR-TIE when the gap is within B70_Q4_TIE_TOL (1e-3) and one expert differs (printed)
+//   gate S   at every (row >= 2051, QSA layer) the engine's selected block set against qsa.sel. With the reference's
+//            block scores (qsa.score) on the LAST QSA layer (the engine keeps that layer's scores:
+//            read_last_qsa_scores / read_prefill_last_qsa_scores): a ROUNDING SWAP when the row's scores agree
+//            (cosine >= 0.999) and every block the engine took instead lies within 2 x the row's largest score
+//            difference below the reference's cut - qwen4exp_prefill_test's rule (2026-11-04: rounding-level
+//            differences accepted, the bar unchanged, no tolerance widened); other QSA layers, and old golden sets
+//            without qsa.score, by the gap rule (qsa.gap within B70_Q4_SEL_TOL 1e-3; 0 = undetermined); the judge used
+//            is printed per prompt, swaps / near-tie rows counted
 //   PLE      the 16 row ids of every row bitwise (integers)
 //   `inject` the reference's selections fed in (Qwen4ExpEngine's injected capture: the identity list below 2052
 //            visible positions, the reference's blocks + the tail after) - isolates the attention arithmetic: the
@@ -70,12 +82,97 @@ float env_tol(const char* name, float dflt) {
 }
 
 struct Counts {
-  uint64_t rows = 0, exact = 0, near = 0, undetermined = 0, bad = 0;
+  uint64_t rows = 0, exact = 0, near = 0, swaps = 0, undetermined = 0, bad = 0;
+  double cos_min = 1, deficit_ratio_max = 0;   // over the swaps judged by scores
 };
 
-// The engine's route row (rank order) against the reference's top-10 (its topk order), as sets.
-void compare_route(const uint32_t* row, const int32_t* want, float gap, float tol, Counts& c, const char* p, uint32_t r,
-                   uint32_t l) {
+constexpr double kScoreCos = 0.999;   // the prefill test's kScoreCos: a row's scores, engine vs reference
+
+float bits(uint32_t u) {
+  float f;
+  std::memcpy(&f, &u, 4);
+  return f;
+}
+double cos_f32(const float* a, const float* b, size_t n) {
+  double ab = 0, aa = 0, bb = 0;
+  for (size_t i = 0; i < n; ++i) {
+    ab += double(a[i]) * b[i];
+    aa += double(a[i]) * a[i];
+    bb += double(b[i]) * b[i];
+  }
+  if (aa == 0 || bb == 0) return aa == bb ? 1.0 : 0.0;   // two zero rows agree; one does not (never NaN)
+  return ab / std::sqrt(aa * bb);
+}
+
+// The score judge (qwen4exp_prefill_test's rule, the operator's of 2026-11-04): a differing selection / expert set is
+// a ROUNDING SWAP when the row's scores agree (cosine >= kScoreCos) and every item the engine took instead lies within
+// twice the row's score difference ("noise") below the reference's cut - both sides run one top-k rule over their own
+// scores, so rounding moves the cut's neighbours and nothing else; a larger deficit is a wrong row, not rounding.
+struct Swap {
+  double cos = 1, noise = 0, deficit = 0;
+  size_t swapped = 0;
+  bool ok() const { return cos >= kScoreCos && deficit <= 2 * noise; }
+};
+void count_swap(const Swap& s, Counts& c) {
+  ++c.swaps;
+  c.cos_min = std::min(c.cos_min, s.cos);
+  if (s.noise > 0) c.deficit_ratio_max = std::max(c.deficit_ratio_max, s.deficit / s.noise);
+}
+
+// Selection: the engine's block scores `e` and the reference's `r` over the row's n complete blocks; `eb` / `rb` the
+// selected block sets, ascending. The reference's cut is its 512th score (the lowest it took).
+Swap judge_selection(const float* e, const float* r, uint32_t n, const std::vector<uint32_t>& eb,
+                     const std::vector<uint32_t>& rb) {
+  Swap s;
+  for (uint32_t b = 0; b < n; ++b) s.noise = std::max(s.noise, std::fabs(double(e[b]) - r[b]));
+  s.cos = cos_f32(e, r, n);
+  double cut = INFINITY;
+  for (uint32_t b : rb)
+    if (b < n) cut = std::min(cut, double(r[b]));
+  std::vector<uint32_t> in;
+  std::set_difference(eb.begin(), eb.end(), rb.begin(), rb.end(), std::back_inserter(in));
+  s.swapped = in.size();
+  for (uint32_t b : in) s.deficit = std::max(s.deficit, b < n ? cut - r[b] : INFINITY);
+  return s;
+}
+
+// The reference's router scores of one row (route.top.*: the fp32 softmax's top kTop, descending; route.w its weights
+// in route.ids' order) - null pointers: an old golden set (the gap rule).
+struct RouteRef {
+  const int32_t* top_ids = nullptr;
+  const float* top_p = nullptr;
+  const float* w = nullptr;
+  uint32_t top = 0;
+};
+// Routing: the row's noise is the cut's - the engine's p of rank 9 / 10 (route row kP10 / kP11) against the
+// reference's (order statistics: within the scores' sup-norm difference, so the bound is conservative); the agreement
+// is the cosine of the renormalised weights over the experts both took; every expert the engine took instead must be
+// in the reference's top kTop, its p within 2 x noise below the reference's p of rank 9.
+Swap judge_route(const uint32_t* row, const int32_t* want, const RouteRef& ref) {
+  Swap s;
+  const double e10 = bits(row[kr::kP10]), e11 = bits(row[kr::kP11]), r10 = ref.top_p[9], r11 = ref.top_p[10];
+  s.noise = std::max(std::fabs(e10 - r10), std::fabs(e11 - r11));
+  std::vector<float> ew, rw;
+  for (uint32_t i = 0; i < 10; ++i) {
+    const uint32_t id = row[kr::kIds + i];
+    const int32_t* at = std::find(want, want + 10, int32_t(id));
+    if (at != want + 10) {
+      ew.push_back(bits(row[kr::kWeights + i]));
+      rw.push_back(ref.w[at - want]);
+      continue;
+    }
+    ++s.swapped;
+    const int32_t* t = std::find(ref.top_ids, ref.top_ids + ref.top, int32_t(id));
+    s.deficit = std::max(s.deficit, t == ref.top_ids + ref.top ? INFINITY : r10 - ref.top_p[t - ref.top_ids]);
+  }
+  s.cos = cos_f32(ew.data(), rw.data(), ew.size());
+  return s;
+}
+
+// The engine's route row (rank order) against the reference's top-10 (its topk order), as sets. With the reference's
+// router scores (`ref.top_p`) a difference is judged by scores; without them (an old golden set) by the gap rule.
+void compare_route(const uint32_t* row, const int32_t* want, float gap, float tol, const RouteRef& ref, Counts& c,
+                   const char* p, uint32_t r, uint32_t l) {
   ++c.rows;
   std::vector<uint32_t> g(row + kr::kIds, row + kr::kIds + 10), w(want, want + 10);
   std::sort(g.begin(), g.end());
@@ -91,6 +188,19 @@ void compare_route(const uint32_t* row, const int32_t* want, float gap, float to
     ++c.undetermined;
     return;
   }
+  if (ref.top_p) {
+    const Swap s = judge_route(row, want, ref);
+    if (s.ok()) {
+      count_swap(s, c);
+      return;
+    }
+    ++c.bad;
+    if (c.bad <= 10)
+      std::printf("    %s L%u row %u: the expert set differs beyond rounding (%zu experts, reference gap %.3e, weights "
+                  "cosine %.6f, deficit %.3e, cut noise %.3e)\n", p, l, r, og.size(), double(gap), s.cos, s.deficit,
+                  s.noise);
+    return;
+  }
   if (gap <= tol && og.size() == 1 && ow.size() == 1) {
     ++c.near;
     return;
@@ -99,6 +209,41 @@ void compare_route(const uint32_t* row, const int32_t* want, float gap, float to
   if (c.bad <= 10)
     std::printf("    %s L%u row %u: the expert set differs beyond a near-tie (gap %.3e, %zu experts)\n", p, l, r, double(gap),
                 og.size());
+}
+
+// Gate S for one (row, QSA layer): `eb` / `rb` the engine's / reference's blocks (ascending); `esc` the engine's scores
+// of the row (null: none readable for this layer) and `rsc` the reference's (null: an old golden set). Returns true
+// for a near-tie / rounding row (the token gate then reports instead of failing downstream).
+bool compare_selection(const std::vector<uint32_t>& eb, const std::vector<uint32_t>& rb, float gap, float tol,
+                       const float* esc, const float* rsc, uint32_t n, Counts& c, const char* p, uint32_t row, uint32_t l,
+                       const char* what) {
+  if (eb == rb) {
+    ++c.exact;
+    return false;
+  }
+  if (gap == 0.0f) {
+    ++c.undetermined;
+    return true;
+  }
+  if (esc && rsc) {
+    const Swap s = judge_selection(esc, rsc, n, eb, rb);
+    if (s.ok()) {
+      count_swap(s, c);
+      return true;
+    }
+    if (++c.bad <= 10)
+      std::printf("    %s QSA L%u row %u: %s differs beyond rounding (%zu blocks swapped, reference gap %.3e, scores "
+                  "cosine %.6f, deficit %.3e, row noise %.3e)\n", p, l, row, what, s.swapped, double(gap), s.cos, s.deficit,
+                  s.noise);
+    return false;
+  }
+  if (gap <= tol) {
+    ++c.near;
+    return true;
+  }
+  if (++c.bad <= 10)
+    std::printf("    %s QSA L%u row %u: %s differs beyond a near-tie (gap %.3e)\n", p, l, row, what, double(gap));
+  return false;
 }
 
 }  // namespace
@@ -151,6 +296,9 @@ int main(int argc, char** argv) {
   rq::Qwen4ExpEngine& eng = *rig.eng;
   const model::Qwen4ExpDesc& d = eng.model().desc;
   const uint32_t nq = d.qsa_before(d.layers);
+  uint32_t last_qsa = d.layers;   // the QSA layer whose block scores the engine keeps (read_last_qsa_scores)
+  for (uint32_t l = 0; l < d.layers; ++l)
+    if (d.is_qsa(l)) last_qsa = l;
   eng.set_injected_selection(inject);
   std::printf("%s: %u layers, %s dense, lm_head %s, %s attention (B70_Q4_ATTN), %u device(s)%s, %zu launches a token%s; "
               "tolerances: routing %.1e (B70_Q4_TIE_TOL), selection %.1e (B70_Q4_SEL_TOL)\n", snap.c_str(), d.layers,
@@ -184,11 +332,13 @@ int main(int argc, char** argv) {
     std::printf("\n================ %s: %u prompt ids, %u generated ================\n", pname.c_str(), T, kGen);
     // per QSA layer: the reference's selection rows and gaps
     struct Sel {
-      uint32_t layer = 0, row0 = 0, R = 0;
+      uint32_t layer = 0, row0 = 0, R = 0, W = 0;
       const int32_t* blocks = nullptr;
       const float* gap = nullptr;
+      const float* score = nullptr;   // qsa.score: [R][W], the rows of qsa.sel (null: an old golden set)
     };
     std::vector<Sel> sels;
+    bool have_sel_scores = false, have_route_scores = true;
     for (uint32_t l = 0; l < d.layers; ++l) {
       if (!d.is_qsa(l)) continue;
       Sel s;
@@ -200,8 +350,49 @@ int main(int argc, char** argv) {
         s.row0 = rows - s.R;
         s.blocks = g.i32("qsa.sel.L" + ls, size_t(s.R) * 512);
       }
+      if (s.blocks && s.R && g.has("qsa.score.L" + ls)) {
+        CHECK_EQ(g.dim("qsa.score.L" + ls, 2, 0), uint64_t(s.R));
+        s.W = uint32_t(g.dim("qsa.score.L" + ls, 2, 1));
+        CHECK(s.W >= rows / 4);   // row rows - 1's n = rows / 4 blocks
+        s.score = g.f32("qsa.score.L" + ls, size_t(s.R) * s.W);
+        have_sel_scores = true;
+      }
       sels.push_back(s);
     }
+    // the reference's router scores per layer (route.top.*) - absent in an old golden set
+    std::vector<const int32_t*> top_ids(d.layers, nullptr);
+    std::vector<const float*> top_p(d.layers, nullptr), route_w(d.layers, nullptr);
+    uint32_t top_k = 0;
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      const std::string ls = std::to_string(l);
+      if (!g.has("route.ids.L" + ls)) continue;
+      if (!g.has("route.top.p.L" + ls) || !g.has("route.top.ids.L" + ls)) {
+        have_route_scores = false;
+        continue;
+      }
+      top_k = uint32_t(g.dim("route.top.p.L" + ls, 2, 1));
+      CHECK(top_k >= 11);
+      top_ids[l] = g.i32("route.top.ids.L" + ls, size_t(rows) * top_k);
+      top_p[l] = g.f32("route.top.p.L" + ls, size_t(rows) * top_k);
+      route_w[l] = g.f32("route.w.L" + ls, size_t(rows) * 10);
+    }
+    const auto route_ref = [&](uint32_t l, uint32_t row) {
+      RouteRef r;
+      if (!top_p[l]) return r;
+      r.top = top_k;
+      r.top_ids = top_ids[l] + size_t(row) * top_k;
+      r.top_p = top_p[l] + size_t(row) * top_k;
+      r.w = route_w[l] + size_t(row) * 10;
+      return r;
+    };
+    std::printf("  judge: routing %s; gate S %s\n",
+                have_route_scores ? "by the reference's router scores (route.top.*)"
+                                  : "by the gap rule - this golden set has no router scores (route.top.*: regenerate "
+                                    "it with qwen4exp_oracle.sh)",
+                have_sel_scores ? ("by block scores on the last QSA layer (L" + std::to_string(last_qsa) +
+                                   "), the gap rule on the others").c_str()
+                                : "by the gap rule - this golden set has no block scores (qsa.score.*: regenerate it with "
+                                  "qwen4exp_oracle.sh)");
     std::vector<uint8_t> near_row(rows, 0);
     std::vector<double> tap_min(d.layers, 1.0);
     uint32_t act0 = rows;
@@ -236,10 +427,10 @@ int main(int argc, char** argv) {
         if (!g.has("route.ids.L" + ls)) continue;
         const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 10) + size_t(row) * 10;
         const float gap = g.f32("route.gap.L" + ls, rows)[row];
-        const uint64_t bad0 = route_c.bad, near0 = route_c.near + route_c.undetermined;
-        compare_route(r.data() + size_t(l) * rq::kRouteWords, gi, gap, tie_tol, route_c, pname.c_str(), row, l);
-        if (route_c.near + route_c.undetermined != near0) near_row[row] = 1;
-        (void)bad0;
+        const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
+        compare_route(r.data() + size_t(l) * rq::kRouteWords, gi, gap, tie_tol, route_ref(l, row), route_c, pname.c_str(),
+                      row, l);
+        if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] = 1;
       }
       for (const Sel& s : sels) {   // gate S
         if (row < kDenseRows || !s.blocks || row < s.row0) continue;
@@ -249,20 +440,13 @@ int main(int argc, char** argv) {
         for (uint32_t k = 0; k < 512 && 4 * k < got.size(); ++k) gb.push_back(got[4 * k] / 4);
         std::sort(wb.begin(), wb.end());
         const float gap = s.gap ? s.gap[row] : 1.0f;
-        if (gb == wb) {
-          ++sel_c.exact;
-        } else if (gap == 0.0f) {
-          ++sel_c.undetermined;
+        // the engine's scores of this row: the last QSA layer's survive the replay (read_last_qsa_scores), not injected
+        std::vector<float> esc;
+        if (gb != wb && s.score && s.layer == last_qsa && !inject) esc = eng.read_last_qsa_scores();
+        if (compare_selection(gb, wb, gap, sel_tol, esc.empty() ? nullptr : esc.data(),
+                              s.score ? s.score + size_t(row - s.row0) * s.W : nullptr, (row + 1) / 4, sel_c,
+                              pname.c_str(), row, s.layer, "the selection"))
           near_row[row] = 1;
-        } else if (gap <= sel_tol) {
-          ++sel_c.near;
-          near_row[row] = 1;
-        } else {
-          ++sel_c.bad;
-          if (sel_c.bad <= 10)
-            std::printf("    %s QSA L%u row %u: the selection differs beyond a near-tie (gap %.3e)\n", pname.c_str(),
-                        s.layer, row, double(gap));
-        }
       }
       if (gple) {   // the PLE ids, exact
         ++ple_rows;
@@ -317,11 +501,17 @@ int main(int argc, char** argv) {
           if (!g.has("route.ids.L" + ls)) continue;
           const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * 10) + size_t(row) * 10;
           const float gap = g.f32("route.gap.L" + ls, rows)[row];
-          const uint64_t near0 = route_c.near + route_c.undetermined;
-          compare_route(r.data() + rq::pf_route_at(l) / 4 + size_t(row - row0) * rq::kRouteWords, gi, gap, tie_tol, route_c,
-                        pname.c_str(), row, l);
-          if (route_c.near + route_c.undetermined != near0) near_row[row] = 1;
+          const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
+          compare_route(r.data() + rq::pf_route_at(l) / 4 + size_t(row - row0) * rq::kRouteWords, gi, gap, tie_tol,
+                        route_ref(l, row), route_c, pname.c_str(), row, l);
+          if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] = 1;
         }
+      // the engine's block scores of the last chunk's rows in the last QSA layer (rows [0, C) written when the chunk
+      // had sparse rows; none under inject: the selection is the reference's)
+      const bool sparse = T - 1 >= kDenseRows;
+      const std::vector<float> pf_scores = have_sel_scores && sparse && !inject ? eng.read_prefill_last_qsa_scores()
+                                                                                 : std::vector<float>();
+      const uint32_t stride = eng.max_len() / d.idx_compress;
       for (const Sel& s : sels) {   // gate S on the last chunk's rows
         if (!s.blocks) continue;
         const std::vector<uint32_t> lists = eng.read_prefill_selection(s.layer);
@@ -332,18 +522,11 @@ int main(int argc, char** argv) {
           for (uint32_t k = 0; k < 512 && 4 * k < got[rq::kCountWord]; ++k) gb.push_back(got[4 * k] / 4);
           std::sort(wb.begin(), wb.end());
           const float gap = s.gap ? s.gap[row] : 1.0f;
-          if (gb == wb) {
-            ++sel_c.exact;
-          } else if (gap == 0.0f) {
-            ++sel_c.undetermined;
+          const float* esc = !pf_scores.empty() && s.layer == last_qsa ? pf_scores.data() + size_t(row - row0) * stride
+                                                                       : nullptr;
+          if (compare_selection(gb, wb, gap, sel_tol, esc, s.score ? s.score + size_t(row - s.row0) * s.W : nullptr,
+                                (row + 1) / 4, sel_c, pname.c_str(), row, s.layer, "the prefill's selection"))
             near_row[row] = 1;
-          } else if (gap <= sel_tol) {
-            ++sel_c.near;
-            near_row[row] = 1;
-          } else if (++sel_c.bad <= 10) {
-            std::printf("    %s QSA L%u row %u: the prefill's selection differs beyond a near-tie (gap %.3e)\n",
-                        pname.c_str(), s.layer, row, double(gap));
-          }
         }
       }
       std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing and gate S on rows %u..%u\n", T, c,
@@ -400,12 +583,16 @@ int main(int argc, char** argv) {
     for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.4f", l, tap_min[l]);
     std::printf("\n");
   }
-  std::printf("\nrouting: %llu (row, layer) - %llu exact, %llu near-ties, %llu exact ties (undetermined), %llu differing\n",
+  std::printf("\nrouting: %llu (row, layer) - %llu exact, %llu near-ties (gap rule), %llu rounding swaps (scores: weights "
+              "cosine >= %.6f, deficit <= %.2f x the cut noise), %llu exact ties (undetermined), %llu differing\n",
               (unsigned long long)route_c.rows, (unsigned long long)route_c.exact, (unsigned long long)route_c.near,
+              (unsigned long long)route_c.swaps, route_c.cos_min, route_c.deficit_ratio_max,
               (unsigned long long)route_c.undetermined, (unsigned long long)route_c.bad);
-  std::printf("gate S: %llu (row >= 2051, QSA layer) - %llu exact, %llu near-ties, %llu exact ties (undetermined), %llu "
-              "differing; PLE ids: %llu rows, %llu differing; %llu token rows reported after a near tie\n",
+  std::printf("gate S: %llu (row >= 2051, QSA layer) - %llu exact, %llu near-ties (gap rule), %llu rounding swaps (scores: "
+              "cosine >= %.6f, deficit <= %.2f x the row noise), %llu exact ties (undetermined), %llu differing; PLE ids: "
+              "%llu rows, %llu differing; %llu token rows reported after a near tie\n",
               (unsigned long long)sel_c.rows, (unsigned long long)sel_c.exact, (unsigned long long)sel_c.near,
+              (unsigned long long)sel_c.swaps, sel_c.cos_min, sel_c.deficit_ratio_max,
               (unsigned long long)sel_c.undetermined, (unsigned long long)sel_c.bad, (unsigned long long)ple_rows,
               (unsigned long long)ple_bad, (unsigned long long)reported);
   CHECK(gate_ok);

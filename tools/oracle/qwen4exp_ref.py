@@ -53,6 +53,10 @@ A4 scenario the same over its prompt + the full reference's continuation, the fu
     route.gap.L<l> f32 [T+gen]     p(k) - p(k+1) of the fp32 softmax (0 = an exact tie at the cut)
     qsa.sel.L<l>  i32  [R][512]    QSA layers: rows p >= 2051 (qsa_row0), the selected block ids ascending
     qsa.gap.L<l>  f32  [T+gen]     the 512th - 513th block score (+inf where <= 512 blocks are complete)
+    qsa.score.L<l> f32 [R][Nmax]   the rows of qsa.sel: every complete block's fp32 score (n = (p + 1) // 4; -1 past n)
+    route.top.ids.L<l> i32 [T+gen][16]  the fp32 softmax's top 16 experts (descending p), route.top.p.L<l> f32 [T+gen][16]
+                                   their p - with qsa.score the golden gates' score judge (qwen4exp_golden_test: a
+                                   differing selection / route is a rounding swap when the scores agree)
     ple.ids       i64  [T+gen][16] the 16 n-gram rows each token read
     logits        f32  [Lr][V]     rows logits_row0 .. T+gen-1
     tokens        i32  [gen]       greedy;   nll f32 [T-1] the prompt's teacher-forced NLL
@@ -80,6 +84,7 @@ import torch.nn.functional as F  # noqa: E402
 
 PINNED_TRANSFORMERS = "5.19.0"
 DEFAULT_EXPERTS = "grouped_mm"       # 5.19.0's default for Qwen4ExpTextExperts (Task 1, qwen4exp_tiny_check.py)
+ROUTE_TOP = 16                       # route.top.*: the fp32 softmax's top 16 a row (the gates' routing judge)
 QSA_DENSE_ROWS = 2051                # rows p <= 2050 see <= 2051 positions: QSA selects all of them (spec 21 §2.3)
 
 
@@ -567,7 +572,8 @@ def block_keys(indexer, raw: torch.Tensor, starts_cos: torch.Tensor, starts_sin:
 def cached_indexer_forward(self, hidden_states, position_embeddings, attention_mask, past_key_values):
     """Qwen4ExpTextQSAIndexer.forward (M:685-771) for batch 1 with causal visibility, each complete
     block's compressed key computed once and kept beside the cache. Optional per-instance attributes:
-    `_q4_rec(layer_idx, pos, blocks, gap)` records each row; `_q4_force` (int32 [q][W] token lists)
+    `_q4_rec(layer_idx, pos, blocks, gap, scores)` records each row (scores: the fp32 block scores [n] of a row
+    past the cut, else None); `_q4_force` (int32 [q][W] token lists)
     replaces the selection (the MTP head's skip_topk); `_q4_last` receives this call's token lists."""
     m = mq()
     B, q_len, _ = hidden_states.shape
@@ -630,7 +636,7 @@ def cached_indexer_forward(self, hidden_states, position_embeddings, attention_m
                 blk = sel.sort().values.to(torch.int32)
             else:
                 gap, blk = math.inf, None
-            rec(self.layer_idx, p, blk, gap)
+            rec(self.layer_idx, p, blk, gap, scores if blk is not None else None)
     self._q4_last = selected[0].clone()
     kv_length = attention_mask.shape[-1]
     mask = torch.zeros((*selected.shape[:-1], kv_length + 1), device=attention_mask.device, dtype=torch.bool)
@@ -900,9 +906,10 @@ class Recorder:
     """Per layer and row (golden layout, module docstring); `act_from` = the first absolute position whose
     activations are kept. Rows are bucketed by `key` (layer_major's item) - 0 for a sequential run."""
 
-    def __init__(self, model, tc, act_from: int = 0, acts: bool = True, want_p: bool = False):
+    def __init__(self, model, tc, act_from: int = 0, acts: bool = True, want_p: bool = False,
+                 want_scores: bool = False):
         self.tc, self.k, self.n = tc, tc.num_experts_per_tok, tc.num_hidden_layers
-        self.act_from, self.acts, self.want_p = act_from, acts, want_p
+        self.act_from, self.acts, self.want_p, self.want_scores = act_from, acts, want_p, want_scores
         self.key = 0
         self.base: dict = {}             # key -> the absolute position of the current forward's row 0
         self.rows: dict = {}
@@ -953,6 +960,10 @@ class Recorder:
             self._put(f"route.ids.L{i}", idx.detach().to(torch.int32).clone())
             self._put(f"route.w.L{i}", scores.detach().float().clone())
             self._put(f"route.gap.L{i}", (p[:, self.k - 1] - p[:, self.k]).clone())
+            if self.want_scores:                                                   # the gates' score judge
+                top = full.topk(min(ROUTE_TOP, full.shape[-1]), dim=-1)
+                self._put(f"route.top.ids.L{i}", top.indices.to(torch.int32).clone())
+                self._put(f"route.top.p.L{i}", top.values.clone())
             if self.want_p:                                                        # M:965-967 before the cast
                 top = full.gather(-1, idx.detach())
                 if self.tc.norm_topk_prob:
@@ -960,14 +971,16 @@ class Recorder:
                 self._put(f"route.p.L{i}", top.clone())
         return fn
 
-    def _qsa(self, layer, pos, blocks, gap):
-        b = self.qsa.setdefault(self.key, {}).setdefault(layer, {"pos": [], "gap": [], "sel": []})
+    def _qsa(self, layer, pos, blocks, gap, scores=None):
+        b = self.qsa.setdefault(self.key, {}).setdefault(layer, {"pos": [], "gap": [], "sel": [], "score": []})
         b["pos"].append(pos)
         b["gap"].append(gap)
         if blocks is not None:
             row = torch.full((self.tc.indexer_budget // self.tc.indexer_compress_ratio,), -1, dtype=torch.int32)
             row[: blocks.numel()] = blocks
             b["sel"].append((pos, row))
+            if self.want_scores and scores is not None:
+                b["score"].append((pos, scores.detach().float().clone()))
 
     def tensors(self, key=0) -> dict[str, torch.Tensor]:
         out = {k: torch.cat(v, 0).contiguous() for k, v in self.rows.get(key, {}).items()}
@@ -978,6 +991,14 @@ class Recorder:
             W = self.tc.indexer_budget // self.tc.indexer_compress_ratio
             out[f"qsa.sel.L{layer}"] = (torch.stack([r for _, r in sel]) if sel
                                         else torch.empty(0, W, dtype=torch.int32))
+            if self.want_scores and sel:   # the rows of qsa.sel, each row's n = (p + 1) // 4 scores, -1 past them
+                sc = sorted(b["score"], key=lambda x: x[0])
+                if [q for q, _ in sc] != [q for q, _ in sel]:
+                    raise RuntimeError(f"QSA layer {layer}: the score rows are not the selection rows")
+                S = torch.full((len(sc), max(r.numel() for _, r in sc)), -1.0, dtype=torch.float32)
+                for j, (_, r) in enumerate(sc):
+                    S[j, : r.numel()] = r
+                out[f"qsa.score.L{layer}"] = S
         return out
 
 
@@ -1149,7 +1170,7 @@ def cmd_run(a) -> None:
           f"{tc.num_experts} experts top-{tc.num_experts_per_tok}, hidden {tc.hidden_size} x {tc.hc_count} streams, "
           f"attn eager, experts {tc._experts_implementation}; PLE {ple.kind}; prompt {T} ids, chunk {chunk or 'whole'}; "
           f"activations from row {act_from}, logits from row {log_from}; built {time.time() - t0:.1f}s", flush=True)
-    rec = Recorder(model, tc, act_from=act_from)
+    rec = Recorder(model, tc, act_from=act_from, want_scores=True)
     rows, nll = [], torch.empty(max(T - 1, 0))
     ids_t = torch.tensor(ids)
 
