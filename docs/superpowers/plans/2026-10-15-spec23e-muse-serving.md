@@ -138,7 +138,7 @@ std::string muse_normalize_name(const std::string& emitted, const nlohmann::json
 ### Task 7: docs, the queue row
 
 **Files:**
-- Modify: `docs/19-running-models.md` (a "Muse-Glimmer-30B" section: the checkpoint, the flags, reasoning strength, the sampling defaults, what is refused), `README.md` (the CLI tables: `b70-decode` / `b70-serve` rows for Muse, `--chat-template`), `docs/11-tokenizer-and-chat-template.md` (the template's sha256, the one-BOS rule, the parser), `docs/03-models.md` (the model), spec 23 ("23e as built"), this plan's status, `docs/superpowers/plans/box-validation-queue.md` (row 46), `tools/box_validate/stages.sh` (row 46 block)
+- Modify: `docs/18-running-models.md` (a "Muse-Glimmer-30B" section: the checkpoint, the flags, reasoning strength, the sampling defaults, what is refused), `README.md` (the CLI tables: `b70-decode` / `b70-serve` rows for Muse, `--chat-template`), `docs/11-tokenizer-and-chat-template.md` (the template's sha256, the one-BOS rule, the parser), `docs/03-models.md` (the model), spec 23 ("23e as built"), this plan's status, `docs/superpowers/plans/box-validation-queue.md` (row 46), `tools/box_validate/stages.sh` (row 46 block)
 
 - [x] **Step 1: queue row 46. Stage list (sketch):**
   - `r46.k0` default cpu `g0.*`: no kernel changed, the server path's host tests (`template_*_test`, `toolcall_*_test`, `*_server_test`, `prefix_server_test`, `lookup_server_test`) unchanged;

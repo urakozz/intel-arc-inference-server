@@ -120,7 +120,7 @@ operator rules on (open question 1 below). Every byte is recomputed, not doubled
 
 - [ ] **Step 1:** on the bar, the planner's rule of question 1 becomes the default; `src/runtime/buffers.h`'s A13 comment
   amended (the int8 path's measurement); BENCHMARKS "Chunk width" gains the 4096 row; spec 5 §10's result line;
-  docs/19-running-models.md's `--max-len auto` row if it moved. Commit `git commit -S -m "docs: plan 5d as built"`.
+  docs/18-running-models.md's `--max-len auto` row if it moved. Commit `git commit -S -m "docs: plan 5d as built"`.
 
 ### Task 6: the box queue row
 

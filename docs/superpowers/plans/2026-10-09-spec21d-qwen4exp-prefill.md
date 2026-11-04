@@ -183,7 +183,7 @@ void set_block_hook(BlockHook hook);                                  // fired a
 ### Task 4: docs, the box queue row
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-09-spec21-qwen4exp-design.md` (section "21d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 33), `tools/box_validate/stages.sh` (`row 33` block), `docs/19-running-models.md` (the Qwen3.8-Flash-Next row: `--prefill`)
+- Modify: `docs/superpowers/specs/2026-10-09-spec21-qwen4exp-design.md` (section "21d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 33), `tools/box_validate/stages.sh` (`row 33` block), `docs/18-running-models.md` (the Qwen3.8-Flash-Next row: `--prefill`)
 
 - [x] **Step 1:** "21d as built": the chunk table (kernels, rounding chains, launches per kind of chunk), the scores' departure from spec 21 §4.2 and its cost, `gdn_chunk_q4`, the prefill scratch per device, precision against the reference (flash's fp32 probabilities; `B70_Q4_ATTN=eager` covers prefill too).
 - [x] **Step 2: the queue row** (33): every binary of the 21d block never compiled by ocloc; the DPAS sparse flash; the grouped GEMMs at this family's shapes; the walk; stages `r33.k0` (G0 incl. `pf_gated_head`), `r33.host`, `r33.k1` (`qwen4exp_pf_kernels_test`), `r33.prefill` (`qwen4exp_prefill_test`, `_eager`), `r33.golden` (synthetics; Intel's `--layers 18` after 21a's data), `r33.pp` (two cards), `r33.speed` (opt-in, Task 5). `python3 tools/box_validate/test_box_validate.py` passes.

@@ -157,7 +157,7 @@ enum class MtpNorm { Single, PerStream };  MtpNorm mtp_norm() const;   // B70_Q4
 ### Task 6: the queue row and the record
 
 **Files:**
-- Modify: `docs/superpowers/plans/box-validation-queue.md` (row 34), `tools/box_validate/stages.sh` (`row 34` block), the spec's "21e as built" section, `docs/BENCHMARKS.md` ("Qwen3.8-Flash-Next (spec 21)": the MTP rows on the truncated model), `README.md` (scope: the family built, served truncated, whole after spec 22), `docs/03-models.md`, `docs/13-loader.md`, `docs/19-running-models.md`
+- Modify: `docs/superpowers/plans/box-validation-queue.md` (row 34), `tools/box_validate/stages.sh` (`row 34` block), the spec's "21e as built" section, `docs/BENCHMARKS.md` ("Qwen3.8-Flash-Next (spec 21)": the MTP rows on the truncated model), `README.md` (scope: the family built, served truncated, whole after spec 22), `docs/03-models.md`, `docs/13-loader.md`, `docs/18-running-models.md`
 
 - [x] **Step 1: the queue row** (34): the 21e block's binaries never compiled; stages `r34.host`, `r34.k1` (`kbins` + names), `r34.snapshot` (`qwen4exp_snapshot_gpu_test`), `r34.mtp` (`qwen4exp_mtp_test`: M1-M3, the verify cost), `r34.accept` (opt-in cpu: Task 3 Step 4), `r34.serve` (b70-serve on the synthetic: one greedy chat = `b70-decode`, `--mtp 2`, the prefix-cache repeat), `r34.a4_ref` (opt-in cpu: Task 5 Step 2); `rownote`s: A4 on the engine, passkey at the context spec 22 chooses, the llama-benchy rows and the full-model acceptance and speed are spec 22's. `python3 tools/box_validate/test_box_validate.py` passes.
 - [x] **Step 2: the record** - "21e as built" (every gate and number of 21c-21e on the truncated model, decision 4's acceptance table, the verify cost), BENCHMARKS, README, docs/03, docs/13, docs/19.

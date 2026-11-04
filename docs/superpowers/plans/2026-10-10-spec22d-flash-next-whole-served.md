@@ -184,7 +184,7 @@ script), `tools/probe/serve_benchy.sh` (llama-benchy against `b70-serve`, `SERVE
 **Files:**
 - Modify: `docs/BENCHMARKS.md` ("Qwen3.8-Flash-Next (spec 21)": the whole-model rows - decode at 4k / 32k / 128k with
   and without MTP, prefill pp4096 / pp32768, the llama-benchy rows, each with Review Focus 5's columns, against 22a's
-  projection), `docs/19-running-models.md` (the whole model: the command, the flags, RAM, the expected rows),
+  projection), `docs/18-running-models.md` (the whole model: the command, the flags, RAM, the expected rows),
   `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` ("22d as built", O4, decision 5 as ruled),
   `docs/superpowers/specs/2026-10-09-spec21-qwen4exp-design.md` (§7 F6's "after spec 22" rows: A4, passkey; one line
   pointing at spec 22's record), `docs/superpowers/plans/box-validation-queue.md` (row 39), `tools/box_validate/stages.sh`

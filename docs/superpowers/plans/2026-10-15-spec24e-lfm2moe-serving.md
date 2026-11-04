@@ -129,7 +129,7 @@ ParsedOutput parse_output_lfm2(const std::string& text, const nlohmann::json& to
 ### Task 6: docs, the box queue row
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24e as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 53), `tools/box_validate/stages.sh` (`row 53`), `docs/19-running-models.md` (the LFM2 section: serving commands, the sampling defaults, the penalty, `preserve_thinking`, "always thinks"), `README.md` (the `b70-serve` flag table's model list, `B70_LFM_TOKENIZER_JSON`, `B70_LFM_PENALTY_GREEDY`)
+- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24e as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 53), `tools/box_validate/stages.sh` (`row 53`), `docs/18-running-models.md` (the LFM2 section: serving commands, the sampling defaults, the penalty, `preserve_thinking`, "always thinks"), `README.md` (the `b70-serve` flag table's model list, `B70_LFM_TOKENIZER_JSON`, `B70_LFM_PENALTY_GREEDY`)
 
 - [ ] **Step 1: the queue row 53** (`test_box_validate.py` passes; `--dry-run --only r53` prints it):
 

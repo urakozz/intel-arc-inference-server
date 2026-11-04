@@ -133,7 +133,7 @@ flags: `--tool-call-parser qwen3_coder`, `--reasoning-parser ultra_v3`, `--mamba
 ### Task 6: docs, the box queue row
 
 **Files:**
-- Modify: spec 25 ("25e as built"), this plan's status, `docs/BENCHMARKS.md`, `docs/19-running-models.md` (Bolt's flags),
+- Modify: spec 25 ("25e as built"), this plan's status, `docs/BENCHMARKS.md`, `docs/18-running-models.md` (Bolt's flags),
   `README.md` (CLI table), `box-validation-queue.md` (row 62), `tools/box_validate/stages.sh` (`row 62`)
 
 - [x] **Step 1:** the row:

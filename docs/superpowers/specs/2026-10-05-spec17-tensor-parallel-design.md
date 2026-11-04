@@ -94,7 +94,7 @@ carry M rows at nearly the same latency, and after spec 28 the M rows themselves
 per card the KV halves (64 -> 32 KiB a position at bf16, derived: 16 FA layers x 2 x 2 kv heads x 256 x 2 B) and so does
 the GDN state (151 -> 75.5 MB a sequence), while the weights drop from ~17.5 GB to ~10.5 GB a card (derived, embedding
 replicated) - so **262144 positions at bf16 KV fit with MTP or DFlash** (derived; one card today: ~201k, ~170k with
-`--mtp`, ~140k with the int8 DFlash drafter - docs/19-running-models.md, spec 19 §11; the TP planner states the real
+`--mtp`, ~140k with the int8 DFlash drafter - docs/18-running-models.md, spec 19 §11; the TP planner states the real
 figure).
 
 ### R2.5 The split for the GDN hybrid (Qwen3.8 and Agnes; from `ModelDesc` through a `tp_rank` / `tp_size` view)

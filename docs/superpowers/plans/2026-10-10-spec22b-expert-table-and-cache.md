@@ -307,7 +307,7 @@ struct Q4ExpertTier {                               // owned by Q4LoadedModel; o
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` (a "22b as built" section; decisions
   1, 2, 4, 6, 8 as built), `docs/superpowers/plans/box-validation-queue.md` (row 37), `tools/box_validate/stages.sh` (a
-  `row 37` block), `tools/box_validate/data.sh` (`have q4exp_profile`), `docs/19-running-models.md` (the whole model:
+  `row 37` block), `tools/box_validate/data.sh` (`have q4exp_profile`), `docs/18-running-models.md` (the whole model:
   the flags, the RAM it pins), this plan's status line
 
 - [ ] **Step 1: the row** - stages `r37.k0` (G0: every existing `q4_moe` / `q4_pf_moe` binary unchanged), `r37.host`,

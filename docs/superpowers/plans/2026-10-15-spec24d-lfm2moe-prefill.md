@@ -124,7 +124,7 @@ lfm_pf_attn.cl (kol_pf_attn.cl's full path at HD 64: 4 dim-atoms of O, K-dim 64 
 ### Task 5: docs, the queue row, the prefill rate
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 52), `tools/box_validate/stages.sh` (`row 52`), `docs/19-running-models.md` (the LFM2 section's prefill commands), `docs/BENCHMARKS.md` (Task 5 Step 3's rows)
+- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 52), `tools/box_validate/stages.sh` (`row 52`), `docs/18-running-models.md` (the LFM2 section's prefill commands), `docs/BENCHMARKS.md` (Task 5 Step 3's rows)
 
 - [ ] **Step 1:** "24d as built" (the walk, the launch formula, the batches, every departure).
 - [ ] **Step 2: the queue row 52** (`test_box_validate.py` passes; `--dry-run --only r52` prints it):

@@ -167,7 +167,7 @@ KV per layer-position: bf16 4,096 B, int8 2,080 B.
 - **Single-stream decode over two stages is not faster than one card** (the layers run in sequence; spec 16 §1): PP buys
   capacity, not speed. The hand-off is ~14.5 KB per token over PCIe 3.0 (a few microseconds, estimated). `--pp 2` itself **has run on the cards** for
   Qwen3.8 (r56.pp bitwise PASS 2026-10-27; `--pp 2 --mtp auto` / `--spec dflash` measured, BENCHMARKS "two cards" row;
-  docs/19-running-models.md's "never run" is stale), but no per-token hand-off cost is recorded - 29c measures it.
+  docs/18-running-models.md's "never run" is stale), but no per-token hand-off cost is recorded - 29c measures it.
 - **Prefill is pipelined by chunk** (device 0 on chunk c + 1 while device 1 runs chunk c; spec 16c's back-pressure rule, two landing
   slots): derived speed-up up to ~2x at long prompts (spec 16 derived 1.88x at 32768; not measured).
 - **No `--batch`** (spec 13 §9.2: a model without a batched engine refuses `--batch > 1` by name; no generic refusal exists in
@@ -274,7 +274,7 @@ verify writes KV at n..n+k, commit just sets `pos = n + j + 1`, no state rolls b
    with the head (the argmax, the draft-vocab share) and receives layer-1/25 tap rows with the hand-off (28 KB a token extra) - the
    anchor token's embedding row is gathered on stage 0 and sent with the hand-off (Qwen3.8's `--pp 2` DFlash instead keeps an embedding
    replica on device 1, 2.54 GB there; Nanbeige's 2.39 GB embedding would cost ~44k int8 positions, so the gather-and-send form is kept).
-   Spec 19's `--pp 2` DFlash path **has run on the cards** for Qwen3.8 (r56.d5_pp, ids identical, 2026-10-27; docs/19-running-models.md
+   Spec 19's `--pp 2` DFlash path **has run on the cards** for Qwen3.8 (r56.d5_pp, ids identical, 2026-10-27; docs/18-running-models.md
    still says "never run" - stale); the dense engine's own two-stage drafter binding is new and is what 29f's gate checks.
 6. **Cost table:** `MtpCost::dflash` rows measured on the dense verify list at M = 1..8 (not extrapolated); `AdaptiveK` picks K.
 7. **Lookup policy:** spec 19f's lookup-in-DFlash policy (ENTER on a >= 8-token match beyond the drafter's window, STAY while each
@@ -443,7 +443,7 @@ prefill FLOP counts and the template / token facts were re-derived and hold. Wha
    was RTN at load. The built path is int8 quantised at load from the shipped BF16, the z-lab precedent. Whether that fits the one-format rule
    is now flagged as the operator's call. AutoRound int4 g64 by us would need the loader path revived and changed.
 5. **`--pp 2` has run on the cards** for the Qwen path (r56.pp bitwise PASS; `--pp 2 --spec dflash` measured, ids identical, 2026-10-27).
-   Fixed in §5, §7.3 item 5, R7 and 29f. docs/19-running-models.md's "never run" is stale, and this spec no longer repeats it. The per-token hand-off cost is still unrecorded.
+   Fixed in §5, §7.3 item 5, R7 and 29f. docs/18-running-models.md's "never run" is stale, and this spec no longer repeats it. The per-token hand-off cost is still unrecorded.
 6. **Judge rule (§10, decision 7, 29a, 29c).** The rule is now cited where it lives in code: `golden::NearMiss` in `tests/golden/forced_judge.h`
    (2feee9d). The text had two errors. The rule is a pass by count against the twin **or** (extra misses <= 8 ulp **and** cosine distance <= 2x the twin's at the **min and median** rows); the old text said average.
    docs/14-golden-gate.md has neither rule, and 29a now adds a pointer there instead of restating the constants.

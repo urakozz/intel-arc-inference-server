@@ -146,7 +146,7 @@ Refused by name: a vocab or hidden unlike the target's, a tap layer >= the targe
 ### Task 9: speed (D5), docs, the queue row
 
 **Files:**
-- Modify: `docs/BENCHMARKS.md`, `docs/19-running-models.md` (the `--spec dflash` flags for Muse), `README.md` (CLI table), spec 23 ("23f as built"), this plan's status, `docs/superpowers/plans/box-validation-queue.md` (row 47), `tools/box_validate/stages.sh` (row 47 block)
+- Modify: `docs/BENCHMARKS.md`, `docs/18-running-models.md` (the `--spec dflash` flags for Muse), `README.md` (CLI table), spec 23 ("23f as built"), this plan's status, `docs/superpowers/plans/box-validation-queue.md` (row 47), `tools/box_validate/stages.sh` (row 47 block)
 
 - [ ] **Step 1: D5 (box):** `b70-serve <muse>` with llama-benchy at the operator's flags and on the agentic session: `--spec off`, `--spec lookup`, `--spec dflash` (auto K). **`dflash` becomes Muse's default only if it beats both by >= 10 % on the agentic set and loses nowhere by more than 3 %** (spec 19 D5's form); otherwise it ships as an option. **(Box: r47.benchy.)**
 - [x] **Step 2: queue row 47. Stage list (sketch):**

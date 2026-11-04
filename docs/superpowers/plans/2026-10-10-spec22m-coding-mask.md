@@ -194,7 +194,7 @@ Q4ExpertMask load_q4_mask(const std::string& file, const model::Qwen4ExpDesc& d)
 **Files:**
 - Modify: `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` ("22m as built"; decision 9 as ruled),
   `docs/superpowers/plans/box-validation-queue.md` (row 40), `tools/box_validate/stages.sh` (a `row 40` block),
-  `docs/19-running-models.md` (the coding mode: lossy, opt-in, what it measured), `docs/BENCHMARKS.md` (its rows, marked
+  `docs/18-running-models.md` (the coding mode: lossy, opt-in, what it measured), `docs/BENCHMARKS.md` (its rows, marked
   LOSSY), this plan's status line
 
 - [ ] **Step 1:** stages `r40.k0` (G0: every existing `q4_route` binary unchanged), `r40.host`, `r40.k1` (`kbins` of `_MASK`

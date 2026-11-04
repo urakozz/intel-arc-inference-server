@@ -236,7 +236,7 @@ void set_block_hook(BlockHook hook);                                  // fired a
 ### Task 4: docs, the box queue row
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (new section "20d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md`, `tools/box_validate/stages.sh`, `docs/19-running-models.md` (Kolibri row: `--prefill`)
+- Modify: `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (new section "20d as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md`, `tools/box_validate/stages.sh`, `docs/18-running-models.md` (Kolibri row: `--prefill`)
 
 - [ ] **Step 1:** the as-built section: the chunk table (kernels, rounding chains), launches 2252 (one card and two) + 5, the prefill scratch per device, the decisions taken blind (l0 only; the separate dequant pass, 512 MiB batches; the ring's 4096 slots as the reason a chunk's keys fit; the sequential two-card chunk), precision against the reference (flash's fp32 probabilities vs eager; `B70_KOLIBRI_ATTN=eager` covers prefill too, one parser `runtime::kolibri::kolibri_attn()`).
 - [ ] **Step 2: the queue row** (next free number, after 20c's): every binary of the 20d block never compiled by ocloc; the DPAS flash at GQA 12 with the window; the grouped GEMMs at Kolibri's shapes; the 2252-launch walk; Mac-side what passed; runbook stages `rN.k1` (`kolibri_pf_kernels_test`), `rN.prefill` (`kolibri_prefill_test`, `_eager`), `rN.split`, `rN.golden` (synths; real after 20b), `rN.pp` (two cards), `rN.speed` (opt-in); `python3 tools/box_validate/test_box_validate.py` passes.

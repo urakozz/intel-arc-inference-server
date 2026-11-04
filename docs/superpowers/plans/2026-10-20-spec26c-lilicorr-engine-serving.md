@@ -163,7 +163,7 @@ Part 2 (Tasks 8-9); `runtime/{tap_drafter.h,capture.*}`, `runtime/dflash/`, `src
 ### Task 7: speed (D5), docs, the queue row
 
 **Files:**
-- Modify: `docs/BENCHMARKS.md` (a "LiLiCorr on Bolt (spec 26)" section), `docs/19-running-models.md`, `README.md`, spec 26 ("26c as
+- Modify: `docs/BENCHMARKS.md` (a "LiLiCorr on Bolt (spec 26)" section), `docs/18-running-models.md`, `README.md`, spec 26 ("26c as
   built"), this plan's status, `box-validation-queue.md` (row 65), `tools/box_validate/stages.sh` (`row 65`)
 
 - [ ] **Step 1 (box, D5):** `b70-serve <bolt>` with llama-benchy at the operator's flags and on the agentic transcript, `--spec off` /

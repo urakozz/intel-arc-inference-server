@@ -254,7 +254,7 @@ class Lfm2MoeEngine {
 ### Task 7: docs, the box queue row
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24c as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 51), `tools/box_validate/stages.sh` (`row 51`), `docs/19-running-models.md` (an "LFM2.5-24B-A2B (spec 24)" section: decode only until 24d / 24e, every command marked "never run on a B70" until the row passes), `README.md` (the env-var table: `B70_LFM_ATTN`, `B70_LFM_FUSE`)
+- Modify: `docs/superpowers/specs/2026-10-15-spec24-lfm2-moe-design.md` ("24c as built"), this plan's status line, `docs/superpowers/plans/box-validation-queue.md` (row 51), `tools/box_validate/stages.sh` (`row 51`), `docs/18-running-models.md` (an "LFM2.5-24B-A2B (spec 24)" section: decode only until 24d / 24e, every command marked "never run on a B70" until the row passes), `README.md` (the env-var table: `B70_LFM_ATTN`, `B70_LFM_FUSE`)
 
 - [x] **Step 1:** "24c as built": the list and its counts per arm, the stand-ins P0 used, the S picks, every departure.
 - [x] **Step 2: the queue row 51** (`test_box_validate.py` passes; `--dry-run --only r51` prints it):
