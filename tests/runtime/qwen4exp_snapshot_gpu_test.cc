@@ -157,6 +157,37 @@ int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     ok = report(std::string(at == 1 ? "c" : "b") + ". restore at the request end " + std::to_string(at), finish(e), ref) &&
          ok;
   }
+
+  // d. b70-serve's case (r34.serve): a restore with NO reset, over the session of ANOTHER, longer prompt (the same
+  //    ids to kDiverge, then others) - what the card holds past the restored position is that prompt's, not zeros.
+  //    The continuation must still be the cold run's: the ids and the last logits, routes and selections bitwise.
+  {
+    constexpr uint32_t kDiverge = 942;   // r34.serve's t3 / t4 share 942 ids
+    Ids other(kN + 11);
+    for (uint32_t i = 0; i < other.size(); ++i)
+      other[i] = i < kDiverge ? prompt[i] : prompt[(i * 7 + 3) % kN];
+    for (uint32_t at : {2048u, 4096u}) {
+      e.set_block_hook([](uint32_t, bool) {});   // the same chunk ends as the cold run's
+      e.reset();
+      e.prefill(other);
+      (void)continue_ids(e);
+      restore(e, at_hook.at(at), at);   // no reset: the server's Restore
+      e.prefill(slice(prompt, at, kN));
+      const Ids ids = continue_ids(e);
+      const qwen4exp_rig::State s = qwen4exp_rig::read_state(e);
+      std::string diff;
+      if (s.logits != cold.state.logits) diff = "logits";
+      else if (s.routes != cold.state.routes) diff = "route rows";
+      else if (s.selections != cold.state.selections) diff = "selections";
+      else if (s.diag != cold.state.diag) diff = "the selection diagnostics";
+      size_t first = 0;
+      while (first < ids.size() && ids[first] == cold.ids[first]) ++first;
+      std::printf("  d. restore at %u over another prompt's session (no reset): ids %s, last step %s\n", at,
+                  ids == cold.ids ? "bitwise" : ("DIFFER from id " + std::to_string(first)).c_str(),
+                  diff.empty() ? "bitwise" : ("DIFFERS at " + diff).c_str());
+      ok = ids == cold.ids && diff.empty() && ok;
+    }
+  }
   e.set_block_hook({});
   return ok ? 0 : 1;
 }
