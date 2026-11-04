@@ -33,31 +33,26 @@ struct VerifyAttnRow {
   uint32_t dpas_from;   // row 0's key count (pos + 1) from which DPAS is bound; kDpasNever: never
 };
 
-// docs/probes/probe-verify-attn-2026-11-03.md §2 (busy-box timing, card 1; to be re-checked on a quiet box): v2 / dpas
-// paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00, and
-// N1 >= 0.99999); dpas_from = the smallest measured depth from which every verdict is dpas.
+// docs/probes/probe-verify-attn-2026-11-03.md §2 / §5 (busy-box timing, card 1; to be re-checked on a quiet box): v2 /
+// dpas paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00,
+// and N1); dpas_from = the smallest measured depth from which every verdict is dpas.
 // One row per built (M, KV form): bf16 at M = 2..8, int8 at M = 2..4 (production's int8 decode lists).
-// 2026-11-04 (operator: "make it work"): EVERY row on v2 until attn_verify_dpas is fixed - its error at 8 rows
-// (below) has no known cause, and the kernel is the same code at every M; the measured thresholds stay as comments.
+// 2026-11-04: the error that put every row on v2 for a day (DFlash K = 7, t6_usage-loader, position 103: f32 rank 3,
+// 4.0 below the top) was P's bf16 rounding in attn_verify_dpas, not a compiler (docs/07-open-questions.md §11); the
+// kernel now carries P as hi + lo (PSPLIT=1). Re-timed at that kernel (§5), every row's dpas_from is what it was.
 inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
-    {2, false, kDpasNever}, // was 11585; 0.51 | 0.56 | 0.98 | 1.26 | 1.26 | 1.39
-    {3, false, kDpasNever}, // was 4096; 0.69 | 0.69 | 1.19 | 1.08 | 1.39 | 1.65
-    {4, false, kDpasNever}, // was 4096; 0.90 | 0.76 | 1.67 | 1.43 | 1.79 | 2.06
-    {5, false, kDpasNever}, // was 4096; 1.10 | 0.80 | 1.51 | 2.50 | 3.48 | 4.58  (512 dpas, 1448 v2: not monotone)
-    // M = 6..8 (DFlash only) back on v2 (operator 2026-11-04): the f32 check of t6_usage-loader (DFlash K = 7,
-    // first difference at generated position 103) puts the DPAS path's id at f32 rank 3, 4.0 below the top (the
-    // top's own margin 3.44; plain = the f32 top over rows 103..111) - not a rounding near-tie; the kernel fix is
-    // queued. The timing verdicts stay recorded: 6 dpas from 0 (1.94 | 1.22 | 2.50 | 3.95 | 5.61 | 6.72),
-    // 7 (2.29 | 1.68 | 3.19 | 4.85 | 6.74 | 7.47), 8 (2.96 | 3.49 | 6.45 | 6.11 | 8.41 | 9.46).
-    {6, false, kDpasNever},
-    {7, false, kDpasNever},
-    {8, false, kDpasNever},
-    // int8: at 4096 every M's worst row (q head 19, row 0) is 0.99998797 against the fp64 reference - below 0.99999,
-    // and no further than pf_flash_attn_kv8 (the prefill's kernel, 0.99998792 on the same row). Operator ruling
-    // 2026-11-03: the int8 N1 bar is "no further than pf_flash_attn_kv8 on the same row", so 4096 is a timing verdict.
-    {2, true, kDpasNever}, // was 11585; 0.57 | 0.59 | 0.99 | 1.78 | 2.07 | 2.33
-    {3, true, kDpasNever}, // was 4096; 0.72 | 0.66 | 1.16 | 1.48 | 1.75 | 1.96
-    {4, true, kDpasNever}, // was 4096; 0.92 | 0.79 | 1.58 | 1.84 | 2.17 | 2.43
+    {2, false, 11585},  // 0.49 | 0.53 | 0.92 | 1.20 | 1.22 | 1.36
+    {3, false, 4096},   // 0.68 | 0.71 | 1.17 | 1.08 | 1.37 | 1.69
+    {4, false, 4096},   // 0.88 | 0.74 | 1.59 | 1.37 | 1.71 | 2.08
+    {5, false, 4096},   // 1.10 | 0.79 | 1.47 | 2.44 | 3.34 | 4.41  (512 dpas, 1448 v2: not monotone)
+    {6, false, 0},      // 1.91 | 1.20 | 2.28 | 3.90 | 5.36 | 6.21  (DFlash only, M = 6..8)
+    {7, false, 0},      // 2.22 | 1.70 | 2.90 | 4.71 | 6.34 | 7.06
+    {8, false, 0},      // 2.89 | 3.43 | 6.10 | 5.77 | 8.22 | 8.91
+    // int8: N1 now holds at every depth (worst 0.9999984 at 130816; the 4096 row that needed the operator ruling of
+    // 2026-11-03 - P in bf16 - is 0.9999999). M = 2 at 4096 is 1.01 with its low end 0.999: v2 there.
+    {2, true, 11585},   // 0.57 | 0.59 | 1.01 | 1.75 | 2.05 | 2.36
+    {3, true, 4096},    // 0.74 | 0.69 | 1.32 | 1.50 | 1.83 | 2.02
+    {4, true, 4096},    // 0.91 | 0.82 | 1.66 | 1.85 | 2.19 | 2.42
 };
 
 inline const VerifyAttnRow* verify_attn_row(uint32_t M, bool kv8) {
