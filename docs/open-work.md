@@ -19,6 +19,27 @@ Last updated: 2026-11-04 (main bd90836; box: kernel 7.4.0-rc1, compute-runtime 2
 | *(tools)* | CPU reference tool | the CPU bf16 shim + the Bolt BF16-scale fix (branch `cpu-lane-1101`) | done | one CPU test row (r25.a4_ref) + merge |
 | **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done | box measurement on a quiet box + merge |
 
+## Box test rows still open
+
+The rows are defined in `docs/superpowers/plans/box-validation-queue.md` (one row = the box tests of one spec's
+plan) and run by `tools/box_validate/stages.sh` (stage `rN.<name>`); `docs/box-day-plan.md` groups them into
+sessions. Results live on the box under `~/b70-validate/<tree>/<state>/<stage>.status`; the latest result of every
+stage across all runs: `~/b70/logs/stage-latest.txt` (2026-11-04: 272 PASS, 14 FAIL, 86 SKIP - the SKIPs mostly
+wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were dropped models (pivot 2026-10-27).
+
+| spec | what | rows not yet PASS | why | closes with |
+|---|---|---|---|---|
+| G0 | bit-for-bit comparison with the old baseline (ce36d2d) | g0.bitwise | text-only diffs since many merges; it blocks rows 60-61 | re-baseline on today's main (one run) |
+| **21** Flash-Next | | 32 golden / pp / partial / cli, 33 *, 34 * | the prefill fix (open, above); the real-checkpoint refs now exist | the spec 21 fix, then one run of r32-r34 |
+| **25** Bolt | | 60, 61, 62 (synthetic and golden chains) | waiting on G0 and the Bolt reference set (building) | after G0 re-baseline + the references |
+| **16** pipeline | | 23 (two-card prefill speed), 27 (two-card serving: MTP, lookup, prefix cache) | 27 waits on the spec 16 fix (open, above); 23 is speed, quiet box | the spec 16 fix, then one run; 23 in the quiet-box session |
+| **18** K2-Horizon | | 17.k0, 21.passkey, 25.a4_ref, 25.passkey | the long-context passkey and the tool-call reference (CPU, days) | one run each; 25.a4_ref on the CPU |
+| **20** Kolibri | | 26.real, 28.real (two cards, real checkpoint) | older failures; kolibri_prefill_test passed on two cards 2026-11-03 | one rerun |
+| **19** DFlash | | 54.d1_ref (the CPU reference half) | CPU job | one CPU run |
+| **22** expert offload probe | | 36 curve / project / reap | not run | one run (CPU + one card) |
+| **13** batching | | 66 check / chunk / cost | speed, idle box | quiet-box session |
+| **12** int8 KV | | 11 a4 / bf16 | reference data | one run |
+
 ## After the table is empty
 
 1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image.
