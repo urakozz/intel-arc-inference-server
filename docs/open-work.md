@@ -13,7 +13,7 @@ Last updated: 2026-11-04 (main 5804f2b; box: kernel 7.4.0-rc1, compute-runtime 2
 
 | spec | what it is | open item | state | closes when |
 |---|---|---|---|---|
-| **21** Flash-Next | the Qwen3.8-Flash-Next model | prefill correctness: chunked prefill vs decode differ; MTP prefill threw "384 launches, not 385" | agent working (branch `fix-qwen4exp-prefill`): the launch count was off by one; the chunk difference is stale unread cache slots in the test | fix + r32 / r33 / r34 stages + merge |
+| **21** Flash-Next | the Qwen3.8-Flash-Next model | the golden gate's selection rule (1e-3 gap) sits below the scores' own rounding: r32.golden fails on 9 / 66,192 routing pairs and 7,717 / 12,311 sparse rows, while tokens agree on every determined row and the inject runs (reference selections fed in) differ in 0 | decided 2026-11-04: judge by block scores like the prefill test - the CPU reference also dumps the last QSA layer's block scores (CPU job), the gate uses the score-based rule; plus the queued r32.cli / r33 / r34 stages and the real-checkpoint rows (fresh launch) | the score dump + gate change, one stage run |
 | **16** pipeline | one model split across both cards (`--pp 2`) | (optional) a mid-prompt block snapshot stores the head's last KV row before it is written: after restoring a deeper snapshot the MTP head sees a stale key at block boundaries - drafts only, never the output, one card and two cards alike | not started; the proper fix stores that row with the next block (a snapshot-store format version bump) | operator decides whether to build it |
 | **28** faster draft checking | MTP / DFlash verify speed | 28c's DPAS attention kernel is switched off: a real error at 8 rows (t6_usage-loader, position 103: 4.0 below the f32 top) | queued; plan agreed: re-test on IGC 2.42.6, compiler A/B on that kernel, custom IGC only with evidence, our fixed-index rewrite | kernel fixed and back on |
 | **5** int8 prefill | faster prompt processing | 5d: prefill in chunks of 4096 | code done (branch `spec5d-chunk-4096`, Nov 1) | box speed run + merge |
@@ -56,6 +56,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-04 | 21 | Flash-Next prefill: the MTP prefill launch count (1 + 25, not 26) - every MTP prefill aborted; the rest was the test (dead conv-ring slots, a cosine NaN, tail ring by cosine, selections judged by block scores); box_check 313/0/0 |
 | 2026-11-04 | docs | core docs 01-18 refreshed (19-running-models renamed 18) |
 | 2026-11-04 | 16 | two-card prefix cache + MTP: the head's KV row end - 1 read from a shadow copy taken before the next chunk can rewrite it; 9/9 pipeline tests, box_check 313/0/0 |
 | 2026-11-04 | 28 | 28d: DFlash drafter on the small-batch GEMM (draft step 16.3 -> 8.9 ms), Flash-Next verify on it |
