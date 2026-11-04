@@ -7,14 +7,14 @@ new label. Rule until the table is empty: no new specs or side plans. Documents 
 leave `docs/superpowers/plans/box-validation-queue.md`, finished sessions leave `docs/box-day-plan.md`, and both files
 go when empty; this page stays while fix rounds still add items.
 
-Last updated: 2026-11-04 (main bd90836; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
+Last updated: 2026-11-04 (main 5804f2b; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
 ## Open
 
 | spec | what it is | open item | state | closes when |
 |---|---|---|---|---|
 | **21** Flash-Next | the Qwen3.8-Flash-Next model | prefill correctness: chunked prefill vs decode differ; MTP prefill threw "384 launches, not 385" | agent working (branch `fix-qwen4exp-prefill`): the launch count was off by one; the chunk difference is stale unread cache slots in the test | fix + r32 / r33 / r34 stages + merge |
-| **16** pipeline | one model split across both cards (`--pp 2`) | prefix cache + MTP give wrong results in two-card mode | agent working (branch `fix-pp-prefix-mtp`): cause found (a mid-prompt block's last cache row never rewritten), fix being finished | two-card test + merge |
+| **16** pipeline | one model split across both cards (`--pp 2`) | (optional) a mid-prompt block snapshot stores the head's last KV row before it is written: after restoring a deeper snapshot the MTP head sees a stale key at block boundaries - drafts only, never the output, one card and two cards alike | not started; the proper fix stores that row with the next block (a snapshot-store format version bump) | operator decides whether to build it |
 | **28** faster draft checking | MTP / DFlash verify speed | 28c's DPAS attention kernel is switched off: a real error at 8 rows (t6_usage-loader, position 103: 4.0 below the f32 top) | queued; plan agreed: re-test on IGC 2.42.6, compiler A/B on that kernel, custom IGC only with evidence, our fixed-index rewrite | kernel fixed and back on |
 | **5** int8 prefill | faster prompt processing | 5d: prefill in chunks of 4096 | code done (branch `spec5d-chunk-4096`, Nov 1) | box speed run + merge |
 | **25** Bolt | the Nemotron Bolt model | speculative decoding back on (branch `bolt-spec-restore`); the Bolt reference set (CPU, building) | code done; references building tonight | box runs + merge |
@@ -52,6 +52,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-04 | 16 | two-card prefix cache + MTP: the head's KV row end - 1 read from a shadow copy taken before the next chunk can rewrite it; 9/9 pipeline tests, box_check 313/0/0 |
 | 2026-11-04 | 28 | 28d: DFlash drafter on the small-batch GEMM (draft step 16.3 -> 8.9 ms), Flash-Next verify on it |
 | 2026-11-04 | build | kernels recompile when the GPU compiler changes (`cmake/ocloc_stamp.cmake`) |
 | 2026-11-04 | 21 | validation fixes: Flash-Next start-up crash (host memory visibility), disk-full guard, the PLE file's location |
