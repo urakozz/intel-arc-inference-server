@@ -1,11 +1,13 @@
 // spec_judge_test - tests/server/spec_judge.h's grading without and with an f32 judge (spec 28 N4 / N6; the
 // operator's 2026-11-04 rule: a divergence whose context has no f32 reference AWAITS it - the test SKIPs (77), it
 // does not FAIL; a judged divergence and every other check still fail). Host only: the judges are written here.
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -38,6 +40,23 @@ std::vector<std::vector<float>> rows_for(const std::vector<uint32_t>& tops) {
     rows.push_back(r);
   }
   return rows;
+}
+// A bf16 top-k reference (qwen_bf16_top.py's format): ids int32 [rows][C], logits f32 [rows][C].
+void write_bf16top(const std::string& path, const std::vector<std::vector<std::pair<int32_t, float>>>& rows) {
+  const size_t C = rows[0].size(), n = rows.size() * C * 4;
+  std::string h = "{\"ids\":{\"dtype\":\"I32\",\"shape\":[" + std::to_string(rows.size()) + "," + std::to_string(C) +
+                  "],\"data_offsets\":[0," + std::to_string(n) + "]},\"logits\":{\"dtype\":\"F32\",\"shape\":[" +
+                  std::to_string(rows.size()) + "," + std::to_string(C) + "],\"data_offsets\":[" + std::to_string(n) +
+                  "," + std::to_string(2 * n) + "]}}";
+  while (h.size() % 8) h += ' ';
+  std::ofstream f(path, std::ios::binary);
+  const uint64_t hl = h.size();
+  f.write(reinterpret_cast<const char*>(&hl), 8);
+  f.write(h.data(), std::streamsize(h.size()));
+  for (const auto& r : rows)
+    for (const auto& [id, v] : r) f.write(reinterpret_cast<const char*>(&id), 4);
+  for (const auto& r : rows)
+    for (const auto& [id, v] : r) f.write(reinterpret_cast<const char*>(&v), 4);
 }
 greedy_tie::RefStep step(uint32_t top1, uint32_t second, double margin) {
   greedy_tie::RefStep s;
@@ -122,6 +141,73 @@ int main() {
     CHECK(rv.judged && !rv.awaiting && !rv.pass);
   }
   CHECK_EQ(spec_judge::awaiting().divergences, uint64_t(2));   // unchanged by the judged ones
+
+  // 3. the bf16-unstable rule (operator 2026-11-04). The speculative pick 9 sits 12 ulp below the f32 top 4 at the
+  //    speculative judge's row 0 (ulp of 10.0 = 1/16): beyond the near-miss bar, more misses than plain.
+  {
+    const double u = 1.0 / 16;
+    std::vector<std::vector<float>> jr = rows_for({4, 5, 6, 0});
+    jr[0][9] = float(10.0 - 12 * u);
+    const std::string kb = dir + "/" + ks + ".bf16top.safetensors";
+    write_judge(dir + "/" + ks + ".golden.safetensors", jr);
+    setenv("B70_FORCED_BF16", dir.c_str(), 1);
+    const golden::ForcedJudge fj;
+    std::vector<std::vector<uint32_t>> asked;
+    auto plain_gap = [&](double g) {   // a plain row with the pair (4, 9) g ulp apart
+      return spec_judge::PlainRow([&asked, g, u](const std::vector<uint32_t>& gen) {
+        asked.push_back(gen);
+        std::vector<float> r(V, 0.f);
+        r[4] = 10.f;
+        r[9] = float(10.0 - g * u);
+        return r;
+      });
+    };
+    auto bf16 = [&](double g) {   // the bf16 reference: the pair g ulp apart at row 0 (other rows: their f32 tops)
+      std::vector<std::vector<std::pair<int32_t, float>>> rows;
+      rows.push_back({{4, 10.f}, {9, float(10.0 - g * u)}});
+      for (int32_t t : {5, 6, 0}) rows.push_back({{t, 10.f}, {t, 10.f}});
+      write_bf16top(kb, rows);
+    };
+    auto run = [&](const char* what, const spec_judge::PlainRow& pr) {
+      const spec_judge::StreamVerdict sv = spec_judge::streams(fj, "t_judged", prompt, plain, steps, spec, V, V, pr);
+      std::printf("%s: %s\n", what, sv.line().c_str());
+      CHECK(sv.judged);
+      CHECK_EQ(sv.beyond.size(), size_t(1));
+      return sv;
+    };
+    // (a) no bf16 reference: the strict bar
+    spec_judge::StreamVerdict sv = run("no bf16 reference", plain_gap(-3));
+    CHECK(!sv.pass && !sv.beyond[0].have_bf16);
+    CHECK(sv.line().find("no bf16 reference") != std::string::npos);
+    CHECK(asked.empty());   // no plain replay for a row the rule does not reach
+    // (b) bf16 within the bar of f32 (gap 10 vs 12): stable - the strict bar
+    bf16(10);
+    sv = run("bf16 stable", plain_gap(-3));
+    CHECK(!sv.pass && sv.beyond[0].have_bf16 && !sv.beyond[0].unstable);
+    CHECK(asked.empty());
+    // (c) bf16-unstable (gap -5 vs 12), plain only 11 from f32 (gap 1): allowance 11 < 12 - FAIL
+    bf16(-5);
+    sv = run("unstable, plain close to f32", plain_gap(1));
+    CHECK(!sv.pass && sv.beyond[0].unstable && sv.beyond[0].have_plain);
+    CHECK(std::fabs(sv.beyond[0].allow - 11.0) < 1e-3);
+    CHECK_EQ(asked.size(), size_t(1));
+    CHECK(asked[0] == std::vector<uint32_t>({3}));   // prompt + plain[0, d) + spec[d, d + 0): the divergence row
+    // (d) bf16-unstable, plain 15 from f32 (gap -3): allowance 15 >= 12 - PASS, printed loudly
+    sv = run("unstable, plain far from f32", plain_gap(-3));
+    CHECK(sv.pass && sv.beyond[0].pass);
+    CHECK(std::fabs(sv.beyond[0].g32 - 12.0) < 1e-3 && std::fabs(sv.beyond[0].g16 + 5.0) < 1e-3 &&
+          std::fabs(sv.beyond[0].gp + 3.0) < 1e-3 && std::fabs(sv.beyond[0].allow - 15.0) < 1e-3);
+    CHECK(sv.line().find("bf16-unstable rule") != std::string::npos);
+    // (e) bf16-unstable but no plain row: the strict bar
+    sv = run("unstable, no plain row", spec_judge::PlainRow{});
+    CHECK(!sv.pass && sv.beyond[0].unstable && !sv.beyond[0].have_plain);
+    // (f) the allowance never drops below the bar: a near-miss (6 ulp) needs no rule at all
+    jr[0][9] = float(10.0 - 6 * u);
+    write_judge(dir + "/" + ks + ".golden.safetensors", jr);
+    sv = spec_judge::streams(fj, "t_judged", prompt, plain, steps, spec, V, V, plain_gap(6));
+    CHECK(sv.pass && sv.beyond.empty());
+    unsetenv("B70_FORCED_BF16");
+  }
   std::puts("spec_judge_test OK");
   return 0;
 }

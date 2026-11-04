@@ -40,6 +40,7 @@
 #include "golden_common.h"
 #include "greedy_tie.h"
 #include "spec_judge.h"
+#include "spec_plain_row.h"
 #include "l0/context.h"
 #include "loader/dflash_loader.h"
 #include "loader/loader.h"
@@ -229,7 +230,9 @@ int main(int argc, char** argv) {
     const Gen g = generate_lookup(lk, p.ids, kGen, greedy, window);
     const spec_judge::StreamVerdict sv = spec_judge::streams(fj, "dflash_lookup_gpu_int8_" + p.name, p.ids, plain.ids,
                                                              steps, g.ids, uint32_t(model::Qwen35::kVocab),
-                                                             uint32_t(model::Qwen35::kVocabUsed));
+                                                             uint32_t(model::Qwen35::kVocabUsed),
+                                                             spec_judge::engine_plain_row(
+                                                                 e, p.ids, uint32_t(model::Qwen35::kVocab)));
     std::printf("D2 %-28s %s, %llu iterations (%llu lookup, %llu ids in lookup), %.2f ids an iteration",
                 p.name.c_str(), sv.line().c_str(),
                 (unsigned long long)g.iters, (unsigned long long)g.lookup_iters, (unsigned long long)g.lookup_ids,

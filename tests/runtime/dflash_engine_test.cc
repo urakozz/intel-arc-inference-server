@@ -73,6 +73,7 @@
 #include "runtime/dflash/dflash_drafter.h"
 #include "runtime/dflash/dflash_sizes.h"
 #include "runtime/engine.h"
+#include "runtime/verify_attn.h"
 
 namespace {
 using model::Qwen35;
@@ -221,6 +222,21 @@ M8 m8_reference(Ctx& c, const Snap& s0, const Ref& ref) {
   return m;
 }
 
+// Do the M = k + 1 verify and the M = 8 one bind the same attention kernel at S0's depth (runtime/verify_attn.h:
+// spec 28c's table puts M = 2..5 on v2 below 4096 keys and M = 6..8 on attn_verify_dpas from the first key)? Where
+// they do, a row's taps and its projection are bitwise the M = 8 verify's (N3, unchanged). Where they do not (the
+// coordinator's ruling 2026-11-04: not a weakened bitwise check), the rows are judged like every other two-kernel
+// pair in spec 28 (spec_judge.h's N4 row rule, golden::kCosSlack): the logits and ids by the f32 judge as before,
+// and the taps / ring rows - no f32 reference exists for them - by their cosine distance to the plain M = 1 rows,
+// at most kCosSlack x the M = 8 verify's distance to the same rows.
+bool same_attn_as_m8(Ctx& c, const Snap& s0, uint32_t k) {
+  const model::ModelDesc& d = *c.e.model().desc;
+  return runtime::verify_attn_kind(k + 1, s0.pos + 1, false, d.fa_q_heads, d.fa_kv_heads) ==
+         runtime::verify_attn_kind(kK + 1, s0.pos + 1, false, d.fa_q_heads, d.fa_kv_heads);
+}
+// The two-kernel judgement: `cos` (this path vs plain) against `cos8` (the M = 8 verify vs plain).
+bool near_m8(double cos, double cos8) { return golden::cos_dist_ratio(cos, cos8) <= golden::kCosSlack; }
+
 // T1 + D3: verify(k) with the true drafts, then commit(k). Since spec 28b (the operator's ruling 2026-11-03): the
 // logits rows by the f32 judge where one exists (spec_judge.h; else cosine >= 0.99999), the taps and the committed
 // ring rows BITWISE those of the M = 8 verify (N3); their cosines against the plain M = 1 steps are recorded.
@@ -231,6 +247,7 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       golden::ForcedJudge{}, tag + "_d3", prompt, std::vector<uint32_t>(ref.g.begin(), ref.g.begin() + kK + 2),
       uint32_t(V));
   for (uint32_t k = 1; k <= kK; ++k) {
+    const bool same = same_attn_as_m8(c, s0, k);
     s0.restore(c);
     for (uint32_t i = 1; i <= k; ++i) c.ctl->cur_token[i] = ref.g[i];
     c.e.verify(k);
@@ -245,13 +262,19 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       const bool tbits = tr == ref.taps[r];
       const double ct = worst_row_cos(tr, ref.taps[r], tr.size(), 1);
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
-      const bool t8 = tr == m8.taps[r];
+      const bool t8bits = tr == m8.taps[r];
+      const double ct8 = worst_row_cos(m8.taps[r], ref.taps[r], tr.size(), 1);
+      const bool t8 = same ? t8bits : near_m8(ct, ct8);
       const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(), rj, r + 1,
                                                         cl, uint32_t(VU));
+      char m8s[160];
+      if (same) std::snprintf(m8s, sizeof m8s, "%s", t8bits ? "bitwise" : "DIFFER");
+      else
+        std::snprintf(m8s, sizeof m8s, "another attention kernel - distance to plain x%.2f of its %.9f (slack %.1f) %s",
+                      golden::cos_dist_ratio(ct, ct8), ct8, golden::kCosSlack, t8 ? "ok" : "FAIL");
       std::printf("  D3 k=%u row %u: logits cos %.9f%s  GDN slot cos %.9f%s  taps cos %.9f%s (the M = 8 row's: %s)  id "
                   "%s%s\n", k, r, cl, lbits ? " (bitwise)" : "", cs, sbits ? " (bitwise)" : "", ct,
-                  tbits ? " (bitwise)" : "", t8 ? "bitwise" : "DIFFER", id_ok ? "ok" : "DIFFERS",
-                  spec_judge::row_line(rv).c_str());
+                  tbits ? " (bitwise)" : "", m8s, id_ok ? "ok" : "DIFFERS", spec_judge::row_line(rv).c_str());
       ok &= rv.pass && cs >= 0.99999 && t8 && id_ok;
     }
     c.e.commit(k, c.e.verify_ids()[k]);
@@ -259,9 +282,16 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
     const bool rbits =
         std::equal(ring.begin(), ring.end(), ref.ring.begin(), ref.ring.begin() + ring.size());
     const double rc = worst_row_cos(ring, ref.ring, ring_row_elems(c), k + 1);
-    const bool r8 = std::equal(ring.begin(), ring.end(), m8.ring.begin());
+    const bool r8bits = std::equal(ring.begin(), ring.end(), m8.ring.begin());
+    const double rc8 = worst_row_cos(m8.ring, ref.ring, ring_row_elems(c), k + 1);
+    const bool r8 = same ? r8bits : near_m8(rc, rc8);
+    char m8s[160];
+    if (same) std::snprintf(m8s, sizeof m8s, "%s", r8bits ? "bitwise" : "DIFFER");
+    else
+      std::snprintf(m8s, sizeof m8s, "another attention kernel - distance to plain x%.2f of its %.9f (slack %.1f) %s",
+                    golden::cos_dist_ratio(rc, rc8), rc8, golden::kCosSlack, r8 ? "ok" : "FAIL");
     std::printf("  T1 k=%u: ring rows of positions %u..%u vs the plain reference's: worst cos %.9f%s (recorded); the "
-                "M = 8 verify's: %s\n", k, s0.pos, s0.pos + k, rc, rbits ? " (bitwise)" : "", r8 ? "bitwise" : "DIFFER");
+                "M = 8 verify's: %s\n", k, s0.pos, s0.pos + k, rc, rbits ? " (bitwise)" : "", m8s);
     ok &= r8;
   }
   return ok;
@@ -301,8 +331,17 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
     const double cs = cosine(live.data(), ref.state[j].data(), live.size());
     const bool sbits = std::memcmp(live.data(), ref.state[j].data(), kGdnBytes) == 0;
     const std::vector<uint16_t> ring = ring_rows(c, s0.pos, kK + 1);
-    const bool committed = std::equal(ring.begin(), ring.begin() + (j + 1) * row, m8.ring.begin());
+    const bool same = same_attn_as_m8(c, s0, k);
+    const bool committed_bits = std::equal(ring.begin(), ring.begin() + (j + 1) * row, m8.ring.begin());
     const double committed_cos = worst_row_cos(ring, ref.ring, row, j + 1);
+    const double m8_cos = worst_row_cos(m8.ring, ref.ring, row, j + 1);
+    const bool committed = same ? committed_bits : near_m8(committed_cos, m8_cos);
+    char cm[200];
+    if (same) std::snprintf(cm, sizeof cm, "%s", committed ? "projected (the M = 8 rows, bitwise)" : "WRONG");
+    else
+      std::snprintf(cm, sizeof cm, "projected (another attention kernel than M = 8: distance to plain x%.2f of the "
+                    "M = 8 rows' %.6f, slack %.1f) %s", golden::cos_dist_ratio(committed_cos, m8_cos), m8_cos,
+                    golden::kCosSlack, committed ? "ok" : "WRONG");
     const bool untouched = std::equal(ring.begin() + (j + 1) * row, ring.end(), ring0.begin() + (j + 1) * row);
     const std::vector<uint32_t> ids = c.e.generate(64);
     size_t diff = 0;
@@ -316,7 +355,7 @@ bool partial(Ctx& c, const Snap& s0, const Ref& ref, uint32_t k, const std::vect
                 "ring rows %u..%u %s (cos vs plain %.6f), %u..%u %s, 64 further ids: %zu differ from the clean run; "
                 "the plain run: %s\n",
                 k, j, c.ctl->gdn_live, j, cs, sbits ? " (bitwise)" : "", rows_ok ? "ok" : "DIFFER", s0.pos,
-                s0.pos + j, committed ? "projected (the M = 8 rows, bitwise)" : "WRONG", committed_cos, s0.pos + j + 1,
+                s0.pos + j, cm, committed_cos, s0.pos + j + 1,
                 s0.pos + kK, untouched ? "untouched" : "WRITTEN", diff, sv.line().c_str());
     ok &= cs >= 0.99999 && rows_ok && committed && untouched && diff == 0 && sv.pass;
   }
