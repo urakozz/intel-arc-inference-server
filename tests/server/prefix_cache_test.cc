@@ -354,8 +354,32 @@ void test_stress() {
 
 }  // namespace
 
+// r34.serve (2026-11-04): an engine whose save_kv writes more than n x kv_bytes(1) for n positions -
+// Qwen3.8-Flash-Next's blocks carry one compressed indexer key every 4 positions - gets entries sized by
+// its own kv_bytes(n): a block kv_bytes(block), a snapshot state + kv_bytes(end - base). Sized by
+// kv_bytes(1) x n every entry was short and save_kv overran it into the next allocation.
+void test_kv_bytes_fn() {
+  MallocAlloc m;
+  const auto kv = [](uint32_t n) { return size_t(n) * 8 + size_t(n / 4) * 5; };   // 8 B a position + 5 a 4-block
+  PrefixCache c(1 << 20, kState, PrefixCache::KvBytesFn(kv), 8, m);
+  const Ids a = seq(19, 100);
+  PrefixCache::Slot s = c.reserve(a, 16, true);   // blocks [0, 8), [8, 16) and the snapshot at 16 (no KV)
+  CHECK_EQ(s.kv.size(), size_t(2));
+  CHECK(s.state != nullptr);
+  c.commit(s);
+  CHECK_EQ(c.bytes_used(), 2 * kv(8) + kState);
+  s = c.reserve(a, 19, false);   // the snapshot at 19: state + KV [16, 19)
+  CHECK_EQ(s.kv.size(), size_t(1));
+  c.commit(s);
+  CHECK_EQ(c.bytes_used(), 2 * kv(8) + 2 * kState + kv(3));
+  for (const auto& [p, n] : m.live) CHECK(n == kv(8) || n == kState || n == kState + kv(3));
+  c.release();
+  std::printf("  kv_bytes(n): entries sized by the engine's own function (blocks %zu B, not %zu)\n", kv(8), 8 * kv(1));
+}
+
 int main() {
   test_plans();
+  test_kv_bytes_fn();
   test_budget();
   test_collision();
   test_kv_form();
