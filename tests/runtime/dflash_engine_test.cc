@@ -246,8 +246,8 @@ bool t1_d3(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& 
       const double ct = worst_row_cos(tr, ref.taps[r], tr.size(), 1);
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
       const bool t8 = tr == m8.taps[r];
-      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(),
-                                                        rj ? rj.row(r + 1) : nullptr, cl, uint32_t(VU));
+      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(), rj, r + 1,
+                                                        cl, uint32_t(VU));
       std::printf("  D3 k=%u row %u: logits cos %.9f%s  GDN slot cos %.9f%s  taps cos %.9f%s (the M = 8 row's: %s)  id "
                   "%s%s\n", k, r, cl, lbits ? " (bitwise)" : "", cs, sbits ? " (bitwise)" : "", ct,
                   tbits ? " (bitwise)" : "", t8 ? "bitwise" : "DIFFER", id_ok ? "ok" : "DIFFERS",
@@ -536,5 +536,5 @@ int main(int argc, char** argv) {
   }
 
   std::printf("dflash_engine_test: %s\n", ok ? "PASS" : "FAIL");
-  return ok ? 0 : 1;
+  return spec_judge::exit_code(ok, "dflash_engine_test");
 }

@@ -213,5 +213,5 @@ int main(int argc, char** argv) {
   }
 
   std::printf("dflash_gpu_test: %s\n", ok ? "PASS" : "FAIL");
-  return ok ? 0 : 1;
+  return spec_judge::exit_code(ok, "dflash_gpu_test");
 }

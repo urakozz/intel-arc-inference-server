@@ -3750,10 +3750,34 @@ stage r69.gates   69 default card qwen        r69.kernels           "N4 (mtp_ver
 st_r69_gates() {
   run_tests '^(mtp_verify_test|mtp_gpu_test|mtp_verify_kv8_test|mtp_gpu_kv8_test|prefix_gpu_mtp_test|dflash_engine_test|dflash_gpu_test|lookup_server_test|batch_rows_test)$'
   run_tests '^(mtp_verify_agnes_test|ornith_mtp_test|ornith_mtp_bf16head_test)$'
-  grab_all gates '^M2|^M3|^D2|^D3|^RF[0-9]|near-tie|NOT A TIE|first difference' 400
+  grab_all gates '^M2|^M3|^D2|^D3|^RF[0-9]|near-tie|NOT A TIE|first difference|AWAIT' 400
   finish
 }
-stage r69.speed   69 optin   gpu  qwen        r69.gates             "S2: probe_mtp_steps / probe_verify_m verify(M) M 1..8 (gemm_sm against the same lists forced onto gemv); probe_small_m prod; idle, interleaved, median of 3"
+# Spec 28 N4 / N6's f32 judges for Qwen3.8 (operator 2026-11-04): the spec tests' forced contexts (B70_DUMP_FORCED,
+# tests/golden/forced_judge.h) -> tools/box_validate/f32_refs.sh forced-qwen (one f32 trie forward on the box CPU)
+# -> $DATA/oracle-out-qwen-f32{,-i8head}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
+# CMakeLists.txt). Until a context's judge is there its divergences AWAIT it: the test SKIPs (77), not FAILs.
+stage r69.forced_dumps 69 optin card qwen,dflash r69.kernels "the Qwen3.8 spec tests' forced contexts: mtp_verify_test, mtp_gpu_test (+ dv128k, both heads), dflash_engine_test, dflash_gpu_test, dflash_lookup_gpu_test with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/qwen-spec/ (their verdicts here are not the gate: r69.gates / g0.suite are)"
+st_r69_forced_dumps() {
+  local D="$DATA/oracle-forced-dumps/qwen-spec" dm="${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  x "mkdir -p $D"
+  x "B70_DUMP_FORCED=$D timeout 3600 build/tests/mtp_verify_test $SNAP_QWEN"
+  x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8"
+  x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8 --lm-head int8 --draft-vocab 128k"
+  x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8 --lm-head bf16 --draft-vocab 128k"
+  x "B70_DUMP_FORCED=$D timeout 5400 build/tests/dflash_engine_test $SNAP_QWEN $dm"
+  x "B70_DUMP_FORCED=$D timeout 7200 build/tests/dflash_gpu_test $SNAP_QWEN $dm"
+  x "B70_DUMP_FORCED=$D timeout 7200 build/tests/dflash_lookup_gpu_test $SNAP_QWEN $dm"
+  chk "ls $D/*.prompt.ids | wc -l" "the dumped contexts"
+  finish
+}
+stage r69.forced_refs 69 optin cpu qwen,oracle_image r69.forced_dumps "the f32 judges of the Qwen3.8 spec tests' forced contexts: tools/box_validate/f32_refs.sh forced-qwen (tools/oracle/qwen_forced.py, one layer-major f32 forward over the contexts' token trie, both heads) under /tmp/b70-cpu-model.lock - ~250 contexts / ~48k distinct positions, ~3 h (estimate)"
+st_r69_forced_refs() {
+  chk "tools/box_validate/f32_refs.sh $DATA forced-qwen $DATA/oracle-forced-dumps/qwen-spec" "the Qwen3.8 spec contexts' f32 judges"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  finish
+}
+stage r69.speed  69 optin   gpu  qwen        r69.gates             "S2: probe_mtp_steps / probe_verify_m verify(M) M 1..8 (gemm_sm against the same lists forced onto gemv); probe_small_m prod; idle, interleaved, median of 3"
 st_r69_speed() {
   idle before
   chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8" "verify pairs M 1..8 (int8 head)"

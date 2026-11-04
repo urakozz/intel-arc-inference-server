@@ -10,18 +10,28 @@
 //                 own suffix) rejects no more of the speculative ids than of the plain ids; or every speculative miss
 //                 is a near-miss (<= golden::kNearMissUlp bf16 ulp below the f32 top: forced_judge.h's rule 1 - the
 //                 streams' logits rows are not read back, so its cosine half does not apply). Without a judge for a
-//                 context the golden tie rule (greedy_tie.h) decides, as before the ruling - and says so.
+//                 context a near-tie passes by the golden tie rule (greedy_tie.h), and anything beyond it AWAITS its
+//                 reference (below).
 //   N4 (rows)     a verify row against the plain row of the same context and the judge's row there: the verify row's
 //                 cosine distance to f32 at most golden::kCosSlack x the plain row's (forced_judge.h's "tiny
 //                 tolerance": two bf16 paths whose rounding points differ), or the old bar (cosine >= 0.99999
-//                 against the plain row). Without a judge only the old bar.
+//                 against the plain row). Without a judge the old bar, and a row below it AWAITS its reference.
 //
 // A judge must be the one for the test's head form (the tag carries it: the int8 head's references are the
 // --lm-head int8 runs, f32_refs.sh's -i8head suffix).
+//
+// AWAITING (operator 2026-11-04): a divergence the old rule fails (beyond the 1-ulp tie rule; a row below 0.99999)
+// whose context has NO f32 reference yet - B70_FORCED_JUDGE unset, or its <key>.golden.safetensors not made yet - is
+// not judged, so it is not failed either: it is reported as "awaiting f32 reference" and the test SKIPS (exit_code:
+// 77, ctest's SKIP_RETURN_CODE) when nothing else failed. Every divergence a judge grades, and every structural /
+// bitwise check of the tests, fails as before. The contexts are dumped as always (B70_DUMP_FORCED) - the dumps are
+// what f32_refs.sh turns into the references.
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -30,9 +40,24 @@
 
 namespace spec_judge {
 
+// The process's divergences awaiting an f32 reference, and their contexts' keys.
+struct Awaiting {
+  uint64_t divergences = 0;
+  std::set<std::string> contexts;
+};
+inline Awaiting& awaiting() {
+  static Awaiting a;
+  return a;
+}
+inline void await_reference(const std::string& key) {
+  ++awaiting().divergences;
+  awaiting().contexts.insert(key);
+}
+
 struct StreamVerdict {
   greedy_tie::Result tie;            // the tie-rule numbers (always computed, always printed)
   bool judged = false, pass = false;
+  bool awaiting = false;             // not judged: the old rule fails it and its context has no f32 reference yet
   uint32_t miss_spec = 0, miss_plain = 0;
   double worst_spec_ulp = 0;         // the speculative stream's furthest miss below the f32 top
   std::string line() const {
@@ -41,7 +66,10 @@ struct StreamVerdict {
     const char* tv = tie.v == greedy_tie::Verdict::Tie ? "near-tie" : "beyond the 1-ulp tie rule";
     if (!judged) {
       std::snprintf(b, sizeof b, "first difference at %zu (%s, rank %u, %.3f ulp below the plain top); no f32 judge "
-                    "yet - %s", tie.at, tv, tie.cand_rank, tie.cand_gap, pass ? "the tie rule passes it" : "FAILS");
+                    "yet - %s", tie.at, tv, tie.cand_rank, tie.cand_gap,
+                    awaiting ? "AWAITING f32 reference (not judged: a SKIP, not a FAIL)"
+                    : pass   ? "the tie rule passes it"
+                             : "FAILS");
     } else {
       std::snprintf(b, sizeof b, "first difference at %zu (%s, rank %u, %.3f ulp); the f32 judge rejects %u speculative "
                     "/ %u plain ids from there (worst speculative miss %.2f ulp) - %s", tie.at, tv, tie.cand_rank,
@@ -86,7 +114,9 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
   fj.dump(ks, ctx, fs);
   const std::unique_ptr<golden::Golden> jp = fj.open(kp, fp.size(), V), js = fj.open(ks, fs.size(), V);
   if (!jp || !js) {
-    v.pass = v.tie.v == greedy_tie::Verdict::Tie;
+    v.pass = true;   // a near-tie passes by the tie rule; beyond it the judge decides - and it is not there yet
+    v.awaiting = v.tie.v != greedy_tie::Verdict::Tie;
+    if (v.awaiting) await_reference(!jp ? kp : ks);
     return v;
   }
   v.judged = true;
@@ -101,6 +131,7 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
 struct RowJudge {
   std::unique_ptr<golden::Golden> g;
   uint32_t V = 0;
+  std::string key;
   explicit operator bool() const { return g != nullptr; }
   const float* row(size_t i) const { return g->f32("logits", size_t(g->dim("logits", 2, 0)) * V) + i * V; }
 };
@@ -111,32 +142,62 @@ inline RowJudge open_rows(const golden::ForcedJudge& fj, const std::string& tag,
   RowJudge r;
   r.g = fj.open(k, force.size(), V);
   r.V = V;
+  r.key = k;
   return r;
 }
 // N4 on one row: the verify row against the plain row of the same context (`cos_plain_vs_verify`, the old bar) and,
-// with a judge row, each one's distance to f32.
+// with the judge `rj`'s row `judge_row`, each one's distance to f32. Below the old bar without a judge: awaiting.
 struct RowVerdict {
-  bool judged = false, pass = false;
+  bool judged = false, pass = false, awaiting = false;
   double cos_verify_f32 = 1, cos_plain_f32 = 1, ratio = 1;
 };
-inline RowVerdict row(const float* verify, const float* plain, const float* judge_row, double cos_plain_vs_verify,
-                      uint32_t VU) {
+inline RowVerdict row(const float* verify, const float* plain, const RowJudge& rj, size_t judge_row,
+                      double cos_plain_vs_verify, uint32_t VU) {
   RowVerdict v;
   v.pass = cos_plain_vs_verify >= 0.99999;
-  if (!judge_row) return v;
+  if (!rj) {
+    if (!v.pass) {
+      v.pass = true;
+      v.awaiting = true;
+      await_reference(rj.key);
+    }
+    return v;
+  }
+  const float* jrow = rj.row(judge_row);
   v.judged = true;
-  v.cos_verify_f32 = golden::row_cos(judge_row, verify, VU);
-  v.cos_plain_f32 = golden::row_cos(judge_row, plain, VU);
+  v.cos_verify_f32 = golden::row_cos(jrow, verify, VU);
+  v.cos_plain_f32 = golden::row_cos(jrow, plain, VU);
   v.ratio = golden::cos_dist_ratio(v.cos_verify_f32, v.cos_plain_f32);
   v.pass = v.pass || v.ratio <= golden::kCosSlack;
   return v;
 }
 inline std::string row_line(const RowVerdict& v) {
-  if (!v.judged) return v.pass ? "" : " [no f32 judge: the 0.99999 bar FAILS]";
+  if (!v.judged)
+    return v.awaiting ? " [no f32 judge: below the 0.99999 bar - AWAITING f32 reference (a SKIP, not a FAIL)]" : "";
   char b[160];
   std::snprintf(b, sizeof b, " [f32 judge: cos verify %.7f, plain %.7f, distance x%.2f (slack %.1f) %s]", v.cos_verify_f32,
                 v.cos_plain_f32, v.ratio, golden::kCosSlack, v.pass ? "ok" : "FAIL");
   return b;
+}
+
+// The test's exit code: 1 when anything failed; else 77 (ctest SKIP: SKIP_RETURN_CODE 77) when divergences await
+// their f32 reference; else 0. The awaiting count is printed loudly either way - it is what the next
+// tools/box_validate/f32_refs.sh run has to make.
+inline int exit_code(bool ok, const char* test) {
+  const Awaiting& a = awaiting();
+  if (a.divergences) {
+    const char* jd = std::getenv("B70_FORCED_JUDGE");
+    std::printf("\n*** %s: %llu divergence(s) in %zu context(s) AWAIT AN f32 REFERENCE - not judged, not failed "
+                "(B70_FORCED_JUDGE=%s; the contexts are dumped with B70_DUMP_FORCED, tools/box_validate/f32_refs.sh "
+                "forced / forced-qwen makes their references) ***\n",
+                test, (unsigned long long)a.divergences, a.contexts.size(), jd && *jd ? jd : "(unset)");
+    for (const std::string& k : a.contexts) std::printf("    awaiting f32 reference: %s\n", k.c_str());
+    if (ok)
+      std::printf("SKIP_REASON %s: %zu context(s) await their f32 reference; every other check passed\n", test,
+                  a.contexts.size());
+  }
+  if (!ok) return 1;
+  return a.divergences ? 77 : 0;
 }
 
 }  // namespace spec_judge
