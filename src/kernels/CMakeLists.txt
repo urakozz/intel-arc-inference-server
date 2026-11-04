@@ -23,7 +23,7 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
   # Spec 14, Agnes 3.0 Flash: PROVISIONAL cells, COPIED from the nearest Qwen3.8
   # production cells above (gate||up 5120x34816 S8, down 17408x5120 S4), not
-  # measured. The box sweep (B70_AGNES_SWEEP, docs/probe-gemv-2026-08-24.md's
+  # measured. The box sweep (B70_AGNES_SWEEP, docs/probes/probe-gemv-2026-08-24.md's
   # method) replaces them and model::agnes()'s {S, layout} together:
   # docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md, "GEMV tuning".
   elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 38912 AND S EQUAL 8)
@@ -711,7 +711,7 @@ endif()
 option(B70_VERIFY_DPAS "build the DPAS verify attention (spec 28c)" ON)
 if(B70_VERIFY_DPAS AND B70_MTP)
   set(VDPAS_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl)
-  # Plan 28c Task 4's kept settings (docs/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
+  # Plan 28c Task 4's kept settings (docs/probes/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
   # 256 GRF for both KV forms - the fastest passing N1 / N2 at M = 8, depth 32768 (QSPLIT=0 fails N1 at int8).
   set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
   set(VDPAS_LEVERS_KV8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
@@ -1658,7 +1658,7 @@ endif()
 # ==== Spec 25d: Nemotron 3.5 Bolt prefill ==== (end) ====
 
 # ==== Spec 13a: the batching probe (rows of different sequences) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
+# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
 # OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only
 # tools/probe/probe_batch_step through runtime::build_rows (capture.cc, compiled under the same option).
 # tools/kernel_cmdlines lists them (it turns the option on), so the Mac syntax-checks every command line here.

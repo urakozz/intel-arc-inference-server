@@ -2,7 +2,7 @@
 // CPU references for spec 21c's Qwen3.8-Flash-Next kernels (src/kernels/qwen4exp/*.cl, prep.cl's
 // prep_gated_head _SIG) - the same op chains in the same orders, every line with a twin in a kernel; edit
 // the two together. The chains are tools/oracle/qwen4exp_ref.py's restated ops (spec 21a, transformers
-// 5.19.0's qwen4_exp; docs/probe-qwen4exp-2026-10-09.md "The rounding chain"), op for op, at every rounding
+// 5.19.0's qwen4_exp; docs/probes/probe-qwen4exp-2026-10-09.md "The rounding chain"), op for op, at every rounding
 // point; tests/kernels/qwen4exp_ref_test.cc holds them to that reference's own outputs
 // (tests/kernels/qwen4exp_fixture.h) and to the semantics' properties (plan 21c Review Focus 1-6).
 //

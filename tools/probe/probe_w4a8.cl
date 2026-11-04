@@ -29,7 +29,7 @@
 //
 //   "in a GEMM the weights are the B operand, so the builtin a W4A8 kernel
 //    would actually issue is `i8_i4_k32`, and it measures the same."
-//        -- docs/probe-dpas-rates-2026-09-22.md §7
+//        -- docs/probes/probe-dpas-rates-2026-09-22.md §7
 //
 // It is not a free choice. The DPAS B (Src1) operand is column-per-lane with K
 // packed into dwords, so for 4-bit B one lane's 32-k fragment is FOUR

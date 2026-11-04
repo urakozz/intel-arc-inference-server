@@ -1,7 +1,7 @@
 // probe_dpas_rate - what rate does this B70's XMX/DPAS actually sustain for
 // each data type the compiler exposes?
 //
-// Record: docs/probe-dpas-rates-2026-09-22.md. This is a DIAGNOSTIC rate probe,
+// Record: docs/probes/probe-dpas-rates-2026-09-22.md. This is a DIAGNOSTIC rate probe,
 // not a benchmark series row: it answers "is a W4A8 / W4A4 / FP4 kernel worth
 // designing at all" before anyone designs one.
 //

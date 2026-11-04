@@ -142,7 +142,7 @@ void check_q4_ple_host_fit(size_t table_bytes, size_t mem_available) {
                              std::to_string(table_bytes / 1000000000.0).substr(0, 6) + " GB) of pinned host memory, "
                              "but MemAvailable is " + std::to_string(mem_available) + " B (" +
                              std::to_string(mem_available / 1000000000.0).substr(0, 6) +
-                             " GB) and the rule keeps a 16 GiB margin (the measured pinned cap, docs/probe-prefix-"
+                             " GB) and the rule keeps a 16 GiB margin (the measured pinned cap, docs/probes/probe-prefix-"
                              "cache-2026-09-27.md §1) - free host memory first");
 }
 

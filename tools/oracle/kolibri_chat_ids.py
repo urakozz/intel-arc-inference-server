@@ -39,7 +39,7 @@ def main() -> None:
                                    tokenize=False, **kw)
     ids = tok(text, add_special_tokens=False)["input_ids"]
     if tok.bos_token_id is not None and ids and ids[0] == tok.bos_token_id:
-        raise SystemExit("the template rendered a BOS; Kolibri-1 has none (docs/probe-kolibri-2026-10-05.md)")
+        raise SystemExit("the template rendered a BOS; Kolibri-1 has none (docs/probes/probe-kolibri-2026-10-05.md)")
     print(f"{a.prompt}: {len(ids)} ids", file=sys.stderr)
     print(" ".join(str(i) for i in ids))
 

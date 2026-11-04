@@ -4,7 +4,7 @@
 // For each prompt of n ids and the engine's own greedy continuation cont[] (plan 8a's
 // dumps), the reference holds, for rows i < R, the head's depth-1 logits on
 // (h[n-1+i], ids[n+i] = cont[i]) at position n-1+i, attending over depth-1 keys of every
-// earlier row - with h the main model's post-final-norm hidden (docs/probe-mtp §1).
+// earlier row - with h the main model's post-final-norm hidden (docs/probes/probe-mtp §1).
 // The engine reaches the same state by prefilling the prompt and then teacher-forcing
 // cont[] one plain MTP step at a time (verify(0) + commit(0, cont[i+1])); draft(1) at
 // each i is the head on exactly that pair. Bar (spec §4 M1): per-row cosine >= 0.999

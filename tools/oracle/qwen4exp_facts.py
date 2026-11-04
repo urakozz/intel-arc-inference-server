@@ -9,7 +9,7 @@ three I64 PLE hash tensors (by their byte range: ~280 bytes), generation_config.
 tokenizer_config.json, tokenizer.json, chat_template.jinja and the model card. A local snapshot is
 read from disk (only the header bytes of a shard); `hf:REPO` reads the same bytes by HTTP range
 requests (nothing is downloaded whole except the small files; headers are cached in --cache). No
-torch: this runs on the Mac host as well as in the oracle image. docs/probe-qwen4exp-2026-10-09.md
+torch: this runs on the Mac host as well as in the oracle image. docs/probes/probe-qwen4exp-2026-10-09.md
 quotes its tables.
 
 Sections:

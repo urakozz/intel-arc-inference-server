@@ -1,5 +1,5 @@
 // Spec 21b Task 2: model::Qwen4ExpDesc against the checkpoint's own facts (spec 21 §1,
-// docs/probe-qwen4exp-2026-10-09.md). Host only, no argument.
+// docs/probes/probe-qwen4exp-2026-10-09.md). Host only, no argument.
 //
 // The original's config.json is NOT vendored (plan 21b Task 2's fallback): the checkpoint's licence is
 // `qwen-community-1.0` (its card's front matter), whose text this repository has not read, so the test

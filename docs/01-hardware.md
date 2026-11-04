@@ -96,7 +96,7 @@ ratios of the pipe and not of some other bottleneck.
 kernel, as it must; the gap is the GEMM's memory, barrier and epilogue cost.
 
 Details, including the assembly, in
-[probe-dpas-rates-2026-09-22.md](probe-dpas-rates-2026-09-22.md).
+[probe-dpas-rates-2026-09-22.md](probes/probe-dpas-rates-2026-09-22.md).
 
 ### The mixed s8 x s4 DPAS is real, and it is worth nothing extra
 
@@ -128,7 +128,7 @@ That prediction was tested with a real kernel on real weights and real
 activations, and **W4A8 was rejected**: the per-group rescale costs more than
 the 2x instruction rate buys, and the activation outliers cost 2.79% relative
 L2 error against the bf16 result. See
-[probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md).
+[probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md).
 
 The one DPAS lever on this device worth more than 2x is **4-bit by 4-bit**, at
 4.000x. Whether W4A4 is reachable at acceptable accuracy is untested here.

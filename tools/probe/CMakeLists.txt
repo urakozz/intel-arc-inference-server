@@ -220,7 +220,7 @@ function(add_probe_gemv_loads TAG K N S L)
 endfunction()
 
 # The six production shapes at the S the engine binds (model/qwen35.cc), plus
-# the S layout 0 picks for itself in docs/probe-gemv-2026-08-24.md -- the
+# the S layout 0 picks for itself in docs/probes/probe-gemv-2026-08-24.md -- the
 # layout-0 rows are the battery's only apples-to-apples message-count contrast
 # (17 messages per subgroup-step against layout 1's 10, byte-identical traffic).
 #   K N S_prod S_l0best  blk2d16-able (G/S even)
@@ -296,7 +296,7 @@ add_dependencies(probe_fused_dequant_gemm kernel_pfd_gemm_v1 kernel_pfd_gemm_v2
                  kernel_pf_gemm_T0 kernel_pf_dequant_slab_K5120_N34816_L0)
 
 # --- probe_dpas_rate: the per-type DPAS issue rate (2026-09-22) -------------
-# Record: docs/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
+# Record: docs/probes/probe-dpas-rates-2026-09-22.md. `probe_dpas_rate.cl` is a PROBE
 # kernel -- no runtime path binds `dpas_rate`, no production file is touched,
 # and it computes a deliberately meaningless dot product. One binary per data
 # type; `kVariants` in probe_dpas_rate.cc and the tag list below are two lists
@@ -337,7 +337,7 @@ add_dependencies(probe_dpas_rate ${PROBE_DPAS_TARGETS})
 
 # --- probe_w4a8: W4A8 on the mixed 4-bit x 8-bit k32 DPAS (2026-09-23) -------
 # Pre-registration: docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md.
-# Record: docs/probe-w4a8-2026-09-23.md.
+# Record: docs/probes/probe-w4a8-2026-09-23.md.
 #
 # `probe_w4a8.cl` is a PROBE kernel file with two entry points -- `pw4a8_gemm`
 # and `pw4a8_quant`. No runtime path binds either, and no production file is
@@ -370,7 +370,7 @@ get_property(W4A8_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
 add_dependencies(probe_w4a8 kernel_pw4a8 ${W4A8_KERNELS} ${W4A8_PF_KERNELS})
 
 # --- probe_w4a8_gsweep: the W4A8 group-size sweep (2026-09-23) ---------------
-# Record: docs/probe-w4a8-2026-09-23.md, the appended sweep section.
+# Record: docs/probes/probe-w4a8-2026-09-23.md, the appended sweep section.
 #
 # `probe_w4a8_gsweep.cl` is a PROBE kernel file with four entry points --
 # `pw4a8s_g64`, `pw4a8s_g128`, `pw4a8s_g256`, `pw4a8s_gpc` -- one per scale
@@ -403,7 +403,7 @@ add_dependencies(probe_w4a8_gsweep kernel_pw4a8 kernel_pw4a8s ${W4A8S_KERNELS}
                  ${W4A8S_PF_KERNELS})
 
 # --- probe_w8a8: i8 x i8 k32 DPAS, per-channel int8 weights (2026-09-23) -----
-# Record: docs/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.
+# Record: docs/probes/probe-w4a8-2026-09-23.md, the appended i8 x i8 section.
 #
 # The one W4A8-family path the CPU accuracy study left standing: int4 g64
 # weights requantised per 1024-column slab to per-channel int8 (`pw8_requant`),
@@ -430,7 +430,7 @@ add_dependencies(probe_w8a8 kernel_pw8a8 kernel_pw8a8_g128 ${W8A8_KERNELS} ${W8A
 
 # --- probe_flash_attn: spec 6 P1, the flash-attention tile probe (2026-09-25) ---
 # Plan: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
-# Record: docs/probe-flash-attn-2026-09-25.md.
+# Record: docs/probes/probe-flash-attn-2026-09-25.md.
 #
 # The control is the production composed path (`runtime::prefill::attn_chunk`, L0
 # backend) on the same inputs; every arm is checked against an fp64 CPU reference
@@ -465,7 +465,7 @@ get_property(PFA_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill
 add_dependencies(probe_flash_attn ${PFA_TARGETS} ${PFA_KERNELS} ${PFA_PF_KERNELS})
 
 # --- spec 7 P0 (2026-09-27): pinned host copies and the tail-prefill floor ---
-# Record: docs/probe-prefix-cache-2026-09-27.md.
+# Record: docs/probes/probe-prefix-cache-2026-09-27.md.
 add_executable(probe_host_copy probe_host_copy.cc)
 target_include_directories(probe_host_copy PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_host_copy PRIVATE b70_l0)
@@ -477,14 +477,14 @@ get_property(PT_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILD
 get_property(PT_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_tail ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- spec 7 S3 (plan 7b Task 3): the write-through cost of block snapshots ---
-# Record: docs/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
+# Record: docs/probes/probe-prefix-cache-2026-09-27.md, "Write-through cost, S3".
 add_executable(probe_writethrough probe_writethrough.cc)
 target_include_directories(probe_writethrough PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_writethrough PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
 b70_target_kernel_dir(probe_writethrough)
 add_dependencies(probe_writethrough ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- spec 7 S1/S2 (plan 7c Task 4): time to first token at 60k through PrefixSession ---
-# Record: docs/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
+# Record: docs/probes/probe-prefix-cache-2026-09-27.md, "S1 and S2, measured".
 if(TARGET b70_tokenizer)
   add_executable(probe_prefix_s12 probe_prefix_s12.cc)
   target_include_directories(probe_prefix_s12 PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
@@ -501,7 +501,7 @@ b70_target_kernel_dir(probe_tie_judge)
 add_dependencies(probe_tie_judge ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
 # Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
-# Record: docs/probe-mtp-2026-09-27.md. Needs -DB70_DECODE_EXTRA_M=ON (the M = 2..4
+# Record: docs/probes/probe-mtp-2026-09-27.md. Needs -DB70_DECODE_EXTRA_M=ON (the M = 2..4
 # decode-list variants and the head's bf16 GEMV shapes, src/kernels/CMakeLists.txt).
 if(B70_DECODE_EXTRA_M)
   add_executable(probe_verify_m probe_verify_m.cc)
@@ -513,7 +513,7 @@ if(B70_DECODE_EXTRA_M)
   add_dependencies(probe_verify_m ${VM_KERNELS} ${VM_PF_KERNELS})
 endif()
 # --- probe_mtp_steps: spec 8 plan 8b, the production MTP lists' wall time per call ---
-# Record: docs/probe-mtp-2026-09-27.md, "Engine". Needs B70_MTP (the default).
+# Record: docs/probes/probe-mtp-2026-09-27.md, "Engine". Needs B70_MTP (the default).
 if(B70_MTP)
   add_executable(probe_mtp_steps probe_mtp_steps.cc)
   target_include_directories(probe_mtp_steps PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -523,7 +523,7 @@ if(B70_MTP)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
 # --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
-# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probe-batching-2026-10-23.md.
+# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
 # Only with -DB70_BATCH_PROBE=ON (src/kernels' row builds; b70_runtime then compiles runtime::build_rows).
 if(B70_BATCH_PROBE)
   add_executable(probe_batch_step probe_batch_step.cc)
@@ -548,7 +548,7 @@ endif()
 
 # --- probe_decode_attn: spec 10 P0/P1, decode attention at depth (2026-09-28) ---
 # Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
-# Record: docs/probe-decode-attn-2026-09-28.md. Arm 0 (`pda_v1_M<M>`) is
+# Record: docs/probes/probe-decode-attn-2026-09-28.md. Arm 0 (`pda_v1_M<M>`) is
 # src/kernels/attn.cl ITSELF at max_len 131072 and the probe's M (no production build
 # compiles M = 4 at 131072); every other arm is probe_decode_attn.cl at one tag
 # P<ppw>_L<load>_D<dot>_F<prefetch>_R<reduce>. This list and the harness's --arms are two
@@ -619,7 +619,7 @@ add_dependencies(probe_lm_head_l1 ${LH_KERNELS})
 # replayed visibility, host RAM under load, pinned capacity, the alias check. Its expert kernels are 21c's q4_moe.cl
 # token for token with the two address macros as a pointer-table read (probe_offload_moe.cl, generated by
 # mk_offload_kernel.py, drift-checked by probe_offload_kernel_drift_test) at the _SH4 binary's defines; arm A binds
-# 21c's own q4_moe_M1_E512_T10_D2560_I640_SH4. Record: docs/probe-offload-<date>.md.
+# 21c's own q4_moe_M1_E512_T10_D2560_I640_SH4. Record: docs/probes/probe-offload-<date>.md.
 if(B70_Q4EXP)
   add_ocloc_kernel(po_moe_M1_E512_T10_D2560_I640_SH4 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_offload_moe.cl
                    DEFINES M=1 MOE_E=512 MOE_K=10 HIDDEN=2560 INTER=640 UP_KS=4 DN_KS=2 SHARED_BF16=0)
@@ -677,7 +677,7 @@ endif()
 
 # --- probe_small_m: spec 28 P0 (plan 28a), small-M DPAS stand-ins against gemv ---------
 # Plan: docs/superpowers/plans/2026-10-27-spec28a-small-m-probe.md. Record:
-# docs/probe-small-m-gemm-<date>.md. `probe_small_m.cl` is a PROBE kernel: no runtime path
+# docs/probes/probe-small-m-gemm-<date>.md. `probe_small_m.cl` is a PROBE kernel: no runtime path
 # binds `psm` / `psm_quant`, no production file is touched. One binary per knob set, named
 #   psm_<t><o>[_wg<NSGN>x<KSL>][_mg][_pf<G>][_g256]_M<M>_K<K>_N<N>_S<S>_L<L>
 # t = b (bf16 DPAS) | i (int DPAS on int8 rows), o = B (weights on B) | A (weights on A);
@@ -796,7 +796,7 @@ get_property(PSM_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PR
 add_dependencies(probe_small_m psm_kernels ${PSM_SRC_KERNELS} ${PSM_PF_KERNELS})
 
 # --- probe_verify_attn: spec 28c (plan 28c Task 3), the verify attention - v2 against attn_verify_dpas ---------
-# Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probe-verify-attn-<date>.md.
+# Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probes/probe-verify-attn-<date>.md.
 # `pvd_<tag>_M<M>[_KV8]` is src/kernels/attn_verify_dpas.cl itself at one lever tag
 # K<KT>_P<g|h>_S<KS>_D<DSPLIT>_Q<QSPLIT>_G<128|256> (G: the ocloc 256-GRF option or not), M = 2..8 and 16, both KV
 # forms; a (tag, M) whose work-group exceeds the GRF mode's lanes (512 at 256 GRF, 1024 at 128) or whose SLM exceeds

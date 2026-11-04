@@ -1,7 +1,7 @@
 // W8A8 SPEED probe: the i8 x i8 k32 DPAS with PER-CHANNEL int8 weights
 // (2026-09-23).
 //
-// The CPU accuracy study (docs/probe-w4a8-2026-09-23.md, the appended i8 x i8
+// The CPU accuracy study (docs/probes/probe-w4a8-2026-09-23.md, the appended i8 x i8
 // section) left one candidate standing: per-channel int8 weights requantised
 // from the checkpoint's int4 g64, plus per-token int8 activations after a
 // 1024-block Hadamard rotation. This file holds that path's four kernels:

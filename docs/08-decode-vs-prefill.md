@@ -145,7 +145,7 @@ beating both engines rather than matching one.
 so it runs at 2.000x bf16 and not 4x; the per-group rescale it needs costs more
 than the instruction rate buys; and int8 activations cost 2.79% relative L2
 error from outliers. Docs [01](01-hardware.md), [02](02-formats.md) and
-[probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md) carry the numbers.
+[probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md) carry the numbers.
 
 What did work was less exotic and more structural: **stay at W4A16 and own the
 whole walk.** Dequantise int4 into bf16 column slabs, multiply with our own DPAS

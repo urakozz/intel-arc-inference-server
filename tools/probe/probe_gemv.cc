@@ -11,7 +11,7 @@
 // `probe_gemv --loads` runs a SECOND, separate thing in the same binary: spec
 // 1.7 §3's P1 load-path battery (`run_loads` below). With no argument this
 // program is byte-for-byte the instrument that produced
-// docs/probe-gemv-2026-08-24.md and its output format is unchanged, because
+// docs/probes/probe-gemv-2026-08-24.md and its output format is unchanged, because
 // that output is a committed record and the battery must not perturb it.
 #include <algorithm>
 #include <cstdio>
@@ -76,7 +76,7 @@ struct LoadShape {
   const char* name;
 };
 // The six shapes the engine binds, at the S it binds them at (model/qwen35.cc),
-// and the S layout 0 picks for itself in docs/probe-gemv-2026-08-24.md.
+// and the S layout 0 picks for itself in docs/probes/probe-gemv-2026-08-24.md.
 const LoadShape kShapes[] = {
     {6144, 5120, 16, 4, true, "out/o_proj"},   {5120, 14336, 1, 2, true, "q‖k‖v"},
     {5120, 16384, 1, 16, true, "qkv‖z"},       {5120, 34816, 4, 8, true, "gate‖up"},

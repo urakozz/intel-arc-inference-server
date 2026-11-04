@@ -1,4 +1,4 @@
-// Spec 25b Task 2: model::BoltDesc against the checkpoint's own facts (spec 25 §1.1, §13; docs/probe-bolt-2026-10-21.md).
+// Spec 25b Task 2: model::BoltDesc against the checkpoint's own facts (spec 25 §1.1, §13; docs/probes/probe-bolt-2026-10-21.md).
 // Host only. argv[1] = tests/model/bolt/config.json (the served export's config, copied unchanged - Decision 20).
 #include <algorithm>
 #include <cstdio>

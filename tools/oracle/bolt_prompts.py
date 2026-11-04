@@ -5,7 +5,7 @@
     PYTHONPATH=<5.19.0 site> python3 tools/oracle/bolt_prompts.py <Bolt snapshot> [--out tests/golden/prompts] [--check]
 
 <snapshot> needs only the small files (tokenizer.json, tokenizer_config.json, chat_template.jinja, config.json).
-Bolt's template writes no BOS and its post-processor adds none (spec 25 §7; docs/probe-bolt-2026-10-21.md §4), so
+Bolt's template writes no BOS and its post-processor adds none (spec 25 §7; docs/probes/probe-bolt-2026-10-21.md §4), so
 no raw prompt starts with one; the text is tools/oracle/tokenize.py's rule (no template, trailing newlines stripped,
 encoded without special tokens):
 

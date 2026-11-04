@@ -43,7 +43,7 @@
 // The standing matrix already argues the other way and this file is how that
 // argument gets tested rather than asserted: layout 0 issues **1.70x** layout
 // 1's messages for byte-identical traffic and identical arithmetic, and
-// docs/probe-gemv-2026-08-24.md has layout 0 *ahead* at three of the five
+// docs/probes/probe-gemv-2026-08-24.md has layout 0 *ahead* at three of the five
 // shapes (577 vs 540 at q||k||v, 567 vs 531 at down, 549 vs 533 at out/o_proj).
 // A message-issue-bound GEMV cannot produce that table.
 //

@@ -134,7 +134,7 @@ activations, the kernel measured **0.965x the bf16 two-pass control** once the
 activation quantiser it needs is counted, against a 1.53x bar: the per-group
 rescale costs more than the 2x instruction rate buys. It also showed **2.79%
 relative L2 error** against the bf16 result, driven by activation outliers.
-Details in [probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md).
+Details in [probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md).
 
 So the same checkpoint serves both regimes and the activation path is the same
 too. Symmetric checkpoints are still preferable - an asymmetric one forfeits the

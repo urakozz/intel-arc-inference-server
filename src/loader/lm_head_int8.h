@@ -2,7 +2,7 @@
 // Spec 9 §3: the int8 `lm_head`, made at load from the checkpoint's bf16 tensor.
 //
 // **The quantisation** is plan 9a's, the one its accuracy verdict was measured on
-// (docs/probe-lm-head-2026-09-28.md §1): symmetric, one fp32 scale per row,
+// (docs/probes/probe-lm-head-2026-09-28.md §1): symmetric, one fp32 scale per row,
 // `s = max|W_row| / 127` (in fp32), `q = rne(W / s)` clamped to [-127, 127]. The
 // hidden is not quantised (W8A16); the kernel accumulates `q x` in fp32 and
 // multiplies by `s` once per row. A zero row gets `s = 0` and `q = 0`.

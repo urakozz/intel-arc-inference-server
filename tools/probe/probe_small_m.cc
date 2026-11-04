@@ -20,7 +20,7 @@
 // shapes:   per shape and M, three closed lists - the control at M = 1, the control at M and
 //           the candidate at M (the int arm's list carries psm_quant before every GEMM) - each
 //           `launches` launches cycling NB copies of the weights past the 24 MB L2, executed
-//           in a rotating order per round after a warm-up (interleaved; docs/probe-w4a8-
+//           in a rotating order per round after a warm-up (interleaved; docs/probes/probe-w4a8-
 //           2026-09-23.md §14.4); medians over rounds of us/launch and of each round's ratios.
 //           Then the GEMM sum of a token (each shape x its layers + the head) per arm at each M
 //           against the control's at M = 1 - spec 28 §6 (a).

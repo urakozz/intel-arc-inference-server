@@ -1,7 +1,7 @@
 // probe_flash_attn - spec 6 P1: the flash-attention tile probe.
 //
 // Plan: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
-// Record: docs/probe-flash-attn-2026-09-25.md.
+// Record: docs/probes/probe-flash-attn-2026-09-25.md.
 //
 //   probe_flash_attn <pos> <C> [--arms all|none|<name>[,<name>...]] [--qscale S]
 //                    [--bar B] [--time]
@@ -22,7 +22,7 @@
 // Timing (--time): L0 kernel timestamps summed over a path's launches (Context's
 // profiler), a 20-iteration warm-up of every path, then 11 interleaved rounds, each
 // timing the control and then every surviving arm; the headline is the median PAIRED
-// ratio control / arm with its range (docs/probe-w4a8-2026-09-23.md §14.4).
+// ratio control / arm with its range (docs/probes/probe-w4a8-2026-09-23.md §14.4).
 //
 // PROBE-ONLY: no production file is edited.
 #include <algorithm>

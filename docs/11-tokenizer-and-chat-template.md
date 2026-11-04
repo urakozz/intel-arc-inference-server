@@ -190,7 +190,7 @@ Qwen XML tool-call format and needs no parser addition. `template_agnes_test` re
 five message lists (`tests/tokenizer/agnes_template_cases.json`: plain, thinking, tools,
 a tool call in history, tool responses) through Agnes's snapshot against transformers'
 render (`tools/tokenizer/dump_agnes_template.py`); details in
-`docs/probe-agnes-2026-10-03.md`.
+`docs/probes/probe-agnes-2026-10-03.md`.
 
 ## Streaming detokenisation
 

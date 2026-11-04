@@ -1,6 +1,6 @@
 // probe_dpas_rate - a DPAS *issue-rate* micro-benchmark, one data type per binary.
 //
-// The question (docs/probe-dpas-rates-2026-09-22.md): IGC declares matrix_mad
+// The question (docs/probes/probe-dpas-rates-2026-09-22.md): IGC declares matrix_mad
 // builtins for bf16/f16 (k16), i8/i4_i8 (k32), i4/i2/e2m1 (k64) and scaled
 // forms. A builtin existing in IGC is NOT proof the silicon runs it at the
 // K-implied rate -- IGC serves many platforms. This kernel measures the rate.

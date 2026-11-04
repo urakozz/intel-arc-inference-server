@@ -24,7 +24,7 @@ struct TableTuning {
   RowTuning qkvz, out_proj, gate_up, down, qkv, o_proj;
 };
 
-// Qwen3.8's (layout, S): the decision block of docs/probe-gemv-2026-08-24.md,
+// Qwen3.8's (layout, S): the decision block of docs/probes/probe-gemv-2026-08-24.md,
 // measured on the box:
 //
 //   Task 4 production map: out/o_proj L0 S4, q||k||v L0 S2,
@@ -145,7 +145,7 @@ void make_small_tables(ModelDesc& d) {
 //
 // The int4 row is `{K hidden, N 248320, S 1, layout 1}`: layout 1 because it is
 // the only int4 repack the loader implements and the measured winner at large
-// N (docs/probe-gemv-2026-08-24.md); S = 1 because N/64 = 3880 work-groups
+// N (docs/probes/probe-gemv-2026-08-24.md); S = 1 because N/64 = 3880 work-groups
 // already saturate the device, and because S = 1 lets the capture bind the
 // output straight at `logits` (gemv.cl writes `out[(s*M + m)*N + n]`).
 // Deliberately NOT a ninth table entry: `LinearId::LmHead` must stay one ordinal.
@@ -200,7 +200,7 @@ void set_qwen38_shapes(ModelDesc& d) {
 // the nearest Qwen3.8 shapes - gate||up 5120x34816 L0 S8, down 17408x5120 L0 S4 -
 // not measured; and the gemv binaries at the new shapes take the copied cells'
 // extra defines (src/kernels/CMakeLists.txt). The box sweep
-// (docs/probe-gemv-2026-08-24.md's method) replaces both rows by name:
+// (docs/probes/probe-gemv-2026-08-24.md's method) replaces both rows by name:
 // validation checklist "GEMV tuning". S must keep dividing K/64: 80 / 8 and 304 / 4.
 // The S = 8 of gate||up is ALSO baked into prep.cl's SILU_S, which
 // Capture::check_sizes asserts - a retune to another S needs a SILU_S variant.

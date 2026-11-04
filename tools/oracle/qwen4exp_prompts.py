@@ -6,7 +6,7 @@
 
 <tokenizer dir> holds the ORIGINAL checkpoint's tokenizer.json, tokenizer_config.json and chat_template.jinja
 (Qwen/Qwen3.8-Flash-Next's small files). Its tokenizer has Qwen3.8's vocabulary, merges and added tokens but
-NOT its pre-tokenizer: the split regex adds \\p{M} (combining marks) to letter runs (docs/probe-qwen4exp-*.md),
+NOT its pre-tokenizer: the split regex adds \\p{M} (combining marks) to letter runs (docs/probes/probe-qwen4exp-*.md),
 so Qwen3.8's committed .ids are re-checked here, not assumed: each text prompt is re-encoded and compared,
 and long32k.ids (no .txt) is decoded (the vocabularies are the same) and re-encoded.
 

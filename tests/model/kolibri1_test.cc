@@ -1,5 +1,5 @@
 // Spec 20c Task 2: model::Kolibri1Desc against the checkpoint's own facts (spec 20 §1,
-// docs/probe-kolibri-2026-10-05.md). Host only. argv[1] = tests/model/kolibri1/config.json (the
+// docs/probes/probe-kolibri-2026-10-05.md). Host only. argv[1] = tests/model/kolibri1/config.json (the
 // checkpoint's, = tools/oracle/third_party/kolibri1/config.json), argv[2] = tests/model/kolibri1/
 // synth5_bf16attn.json (make_synth.py's config at 5 layers, bf16 attention).
 #include <cstdio>

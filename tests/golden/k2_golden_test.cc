@@ -3,7 +3,7 @@
 // x 32 greedy tokens, with the per-layer ROUTING DIAGNOSTIC (plan 18b Review Focus 3).
 //
 // **The golden files** (spec 18a's tools/oracle/k2_ref.py `run`, merged; tools/oracle/README.md
-// "The K2-Horizon reference" has the commands, docs/probe-k2-2026-10-05.md the facts):
+// "The K2-Horizon reference" has the commands, docs/probes/probe-k2-2026-10-05.md the facts):
 //
 //   <oracle dir>/<prompt>.ids                 K2's tokenisation, BOS 0 first (tokenize.py --bos)
 //   <oracle dir>/<prompt>.golden.safetensors  dump.py's convention plus the routing dumps:

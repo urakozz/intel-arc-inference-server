@@ -39,7 +39,7 @@
 // Options: --dev 0|1|both (0), --pairs 1,2,7,26, --reps 5, --n 10000, --replay-pairs 7, --arena-gb 22, --seconds 20,
 // --max-gb G (pin: a cap below MemAvailable - 16 GiB), --timeout-s 20 (every wait; a hang is a FAIL line).
 // Exit 0 when every arm ran and matched, 1 on a mismatch, a hang or an error, 77 when a precondition is missing.
-// Sizes only from loader/qwen4exp_layout.h and model::qwen4exp(). Record: docs/probe-offload-<date>.md.
+// Sizes only from loader/qwen4exp_layout.h and model::qwen4exp(). Record: docs/probes/probe-offload-<date>.md.
 #include <level_zero/ze_api.h>
 
 #include <algorithm>

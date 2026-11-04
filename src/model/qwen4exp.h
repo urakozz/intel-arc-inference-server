@@ -10,7 +10,7 @@
 // Spec 21b: Qwen3.8-Flash-Next (`Qwen4ExpForConditionalGeneration`, config.json model_type `qwen4_exp`)
 // as data - a fourth model BESIDE qwen3_5, K2-Horizon and Kolibri-1 (spec 21 §6: its own table, loader,
 // kernels and engine; their files untouched). Every number of `qwen4exp()` is the checkpoint's
-// (config.json text_config, the index and every shard header; docs/probe-qwen4exp-2026-10-09.md):
+// (config.json text_config, the index and every shard header; docs/probes/probe-qwen4exp-2026-10-09.md):
 //
 //   layers 48: GDN (`linear_attention`) at l % 4 != 3 (36), QSA sparse attention at l % 4 == 3 (12) -
 //          the checkpoint spells it `full_attention`, the tiny model `qwen_sparse_attention`
@@ -108,7 +108,7 @@ struct Qwen4ExpDesc {
   float rms_eps = 0;
   Q4Forms forms;
   // int4 split-K (gemv.cl S, layout 0), PROVISIONAL until 21c's sweep - copied from Qwen3.8's measured map
-  // at the nearest shapes (docs/probe-gemv-2026-08-24.md: out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
+  // at the nearest shapes (docs/probes/probe-gemv-2026-08-24.md: out_proj / o_proj S4, q||k||v S2). qkv||z is S 1,
   // fixed: gdn_step and prep_gated_head read S 1 (prep.cl:118-123).
   uint32_t gdn_out_s = 0, qkvg_s = 0, o_s = 0;
 

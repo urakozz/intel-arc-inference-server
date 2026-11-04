@@ -7,7 +7,7 @@
 // queues on one engine may serialise; this probe measures whether they do.
 // A measured recovery of 0.0 is a finding, not a failure.
 //
-// Pre-registration: docs/probe-dequant-overlap-2026-09-05.md (recovers
+// Pre-registration: docs/probes/probe-dequant-overlap-2026-09-05.md (recovers
 // 0.6-0.9 of the dequant time; accept at >= 0.3), committed before this file.
 //
 // 2026-09-05 EXTENSION (PROBE B, the same document's second dated section).

@@ -11,7 +11,7 @@
 # with int8 KV on l0-int8 and l0, flash attention. Per run: the mean and worst per-step logit
 # cosine against the oracle. Bar, per backend: mean(int8) >= mean(bf16) - tol, tol = 1e-4
 # (confirmed by the Qwen3.8 repeat of 12a: rotkv's golden 1 - cos against bf16 KV is 3.3e-5 /
-# 5.0e-5 / 3.3e-5 on prose / code / cjk, docs/probe-int8-kv-qwen38-2026-10-06.md), and
+# 5.0e-5 / 3.3e-5 on prose / code / cjk, docs/probes/probe-int8-kv-qwen38-2026-10-06.md), and
 # every gate run itself passes (the tie rule's allowance unchanged, spec 12 Q2).
 # Exit 0 iff both hold on both backends; 77 (ctest SKIP, as golden_gate_test) when the gate
 # reports the golden set absent - a tree without the oracle-out* links

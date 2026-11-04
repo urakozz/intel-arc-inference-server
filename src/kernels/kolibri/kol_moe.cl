@@ -6,7 +6,7 @@
 //   kol_moe_down(route, h, w_dn, w_sh_dn, mo)         MOE_E     grid (HIDDEN / 16, M), WG 16 x SLOTS x DN_KS
 //
 // spec 15c's moe.cl / spec 18b's k2_moe.cl carried to Kolibri's semantics (tools/oracle/kolibri_ref.py,
-// spec 20a; docs/probe-kolibri-2026-10-05.md "The router, exactly") - the layout-1 GEMV inner loop
+// spec 20a; docs/probes/probe-kolibri-2026-10-05.md "The router, exactly") - the layout-1 GEMV inner loop
 // (tile_dot) and the fixed-order, atomic-free reductions are theirs; what differs is why this is a new
 // source and moe.cl / k2_moe.cl are untouched:
 //

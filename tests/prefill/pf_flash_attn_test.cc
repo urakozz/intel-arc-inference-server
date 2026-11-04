@@ -6,7 +6,7 @@
 // the same sampled rows ({0, 1, 7, 8, 63, 64, C/2, C-2, C-1} plus 16 drawn from
 // mt19937(pos + C)) x 24 heads. Bar: worst per-(row, head) cosine >= 0.99999, no
 // non-finite value in the sampled rows, and rows [C, pad256(C)) finite. The max abs
-// error is printed, not gated (docs/probe-flash-attn-2026-09-25.md §3.1).
+// error is printed, not gated (docs/probes/probe-flash-attn-2026-09-25.md §3.1).
 #include <algorithm>
 #include <cmath>
 #include <cstdint>

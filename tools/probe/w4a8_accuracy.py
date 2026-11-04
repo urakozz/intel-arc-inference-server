@@ -14,7 +14,7 @@ i.e. "the model as quantised by AutoRound, run exactly". Bar: per-row cosine
 usage: python w4a8_accuracy.py <calib-capture> <eval-capture>
   captures come from `probe_w4a8 --capture` (gate||up) or `--capture-down` (down);
   calibration (SmoothQuant scales) and evaluation should come from different prompts.
-  Results: docs/probe-w4a8-2026-09-23.md section 14.
+  Results: docs/probes/probe-w4a8-2026-09-23.md section 14.
 """
 import sys, time
 import numpy as np
