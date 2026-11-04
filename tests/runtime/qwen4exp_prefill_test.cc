@@ -24,10 +24,16 @@
 //     4. Review Focus 5, prefill against decode's M = 1 fill (ingest, one id per replay) of the same prompt, per
 //        layer: K and V cosine per position (QSA), the compressed keys per block, the GDN state and conv ring, the PLE
 //        conv ring - gated (PROPOSED, spec 18c's family): every row of the first QSA layer >= 0.999, all rows' median
-//        >= 0.9998, 1st percentile >= 0.99; the tail and PLE id rings bitwise (raw keys / ids); printed per layer;
+//        >= 0.9998, 1st percentile >= 0.99; the QSA tail rings' raw keys as cosine rows (a linear's output: the GEMM's
+//        and the GEMV's sums round apart), the PLE id ring bitwise; the GDN conv rings' live slots only (pos - 3 ..
+//        pos - 1: prefill writes a chunk's last three, decode every position - the rest is not state); printed per
+//        layer;
 //     5. routes and selections on the last chunk's rows, prefill against decode per position: the expert sets equal
 //        except where decode's p10 - p11 is within kTieTol (or 0: undetermined); the selected block sets equal except
-//        where decode's 512th - 513th score gap is within kSelTol (PROPOSED);
+//        for rounding swaps - on the last QSA layer (whose block scores both sides keep) the row's scores agree to
+//        cosine >= kScoreCos and every block prefill took instead lies within twice the row's largest score
+//        difference below decode's cut (both run one select rule over their own scores: rounding moves the cut's
+//        neighbours, nothing else can); other QSA layers by decode's 512th - 513th gap within kSelTol (PROPOSED);
 //     6. tokens: prefill + 32 greedy against ingest + 32 greedy, ruling A26's rule - every row whose decode-side top-2
 //        gap is at least one bf16 ulp of the top logit agrees; teacher-forced on decode's;
 //     7. the injected run chunked == whole, bitwise: a fixed valid selection (the last 512 complete blocks + the tail)
@@ -87,6 +93,7 @@ namespace kq = kernels::qwen4exp;
 using Ids = std::vector<uint32_t>;
 constexpr uint32_t kMaxLen = 8192, kN = 4500, kGen = 32;
 constexpr float kTieTol = 1e-3f;   // PROPOSED: decode's p10 - p11 below this: a routing near-tie
+constexpr double kScoreCos = 0.999;   // PROPOSED: a row's block scores, prefill vs decode (the state's row bar)
 constexpr float kSelTol = 1e-3f;   // PROPOSED: decode's 512th - 513th block score below this: a selection near-tie
 
 float bits(uint32_t w) {
@@ -200,7 +207,8 @@ StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& 
         for (uint32_t i = 0; i < d.idx_dim; ++i) {
           if (ta[i] == tb[i]) continue;
           ++c.tail_words_differ;
-          c.tail_max_ulp = std::max(c.tail_max_ulp, uint32_t(std::abs(int(ta[i]) - int(tb[i]))));
+          const auto ord = [](uint16_t h) { return (h & 0x8000) ? -int(h & 0x7FFF) : int(h); };   // sign-magnitude
+          c.tail_max_ulp = std::max(c.tail_max_ulp, uint32_t(std::abs(ord(ta[i]) - ord(tb[i]))));
         }
       }
       off += size_t(rq::kIdxTail) * d.idx_dim;
@@ -403,7 +411,8 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
       double noise = 0;
       for (uint32_t b = 0; b < nblk; ++b) noise = std::max(noise, std::fabs(double(psc[b]) - dsc[b]));
       score_noise_max = std::max(score_noise_max, noise);
-      score_cos_min = std::min(score_cos_min, cos_f32(psc, dsc.data(), nblk));
+      const double row_cos = cos_f32(psc, dsc.data(), nblk);
+      score_cos_min = std::min(score_cos_min, row_cos);
       for (uint32_t l = 0; l < d.layers; ++l) {
         if (!d.is_qsa(l)) continue;
         const uint32_t qi = d.qsa_before(l);
@@ -425,8 +434,8 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
         std::vector<uint32_t> in;
         std::set_difference(pb.begin(), pb.end(), db.begin(), db.end(), std::back_inserter(in));
         swapped_max = std::max<uint64_t>(swapped_max, in.size());
+        double deficit = 0;
         if (l == last_qsa) {   // decode's scores of the swapped-in blocks against its cut
-          double deficit = 0;
           for (uint32_t b : in) deficit = std::max(deficit, double(T) - dsc[b]);
           deficit_max = std::max(deficit_max, deficit);
           if (noise > 0) deficit_ratio_max = std::max(deficit_ratio_max, deficit / noise);
@@ -434,7 +443,12 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
             std::printf("   QSA L%u row %u: %zu block(s) swapped, decode gap %.3e, cut %.4f, deficit %.3e, row score noise "
                         "%.3e\n", l, p, in.size(), double(gap), double(T), deficit, noise);
         }
-        if (gap <= kSelTol) ++snear;
+        // The last QSA layer (its scores are readable on both sides): a rounding swap when the row's scores agree to
+        // the state bar (cosine >= kScoreCos) and every block prefill took instead is within twice the row's largest
+        // score difference of decode's cut - both paths run the same select over their own scores, so a larger
+        // deficit would be a wrong row or list, not rounding. Other QSA layers: decode's 512th - 513th gap rule.
+        const bool rounding = l == last_qsa ? row_cos >= kScoreCos && deficit <= 2 * noise : gap <= kSelTol;
+        if (rounding) ++snear;
         else if (++sbad <= 10) std::printf("   QSA L%u row %u: selection differs beyond a near-tie (gap %.3e)\n", l, p, double(gap));
       }
     }
