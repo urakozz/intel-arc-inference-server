@@ -2,10 +2,13 @@
 // DFlash run, the operator's plan of 2026-11-04 step 2 (a direct A/B on the failing input).
 //
 //   probe_vattn_ab <snapshot> <ids file> <n> [--max-len 16384] [--bins a,b,...] [--thresh T] [--all]
+//                  [--lm-head bf16|int8] [--follow v2|dpas] [--watch A,B] [--at G,G,...]
 //
 // b70-decode --ids <file> --n <n> --prefill --spec dflash's loop (generate_dflash, K = 7), with every verify run
 // TWICE on the same state: forced to DPAS (CaptureOptions::force_attn, the lists recaptured) and then forced to v2 -
-// v2 last, so the KV rows, GDN slots and taps the commit reads are v2's and the run is the plain stream. Per
+// v2 last, so the KV rows, GDN slots and taps the commit reads are v2's and the run is the plain stream (--follow dpas:
+// v2 first and DPAS last - the commit reads DPAS's, the production stream at M = 8, e.g. dflash_gpu_test's K = 7
+// run with --lm-head int8, the test's head). Per
 // iteration a line (Control and the live GDN slot restored between the two verifies: the list moves pos, row 0 steps the slot in place): the rows where the two verify argmaxes differ inside the accepted prefix (where the DPAS run's
 // stream would leave the plain one) and each row's max |logit difference|.
 //
@@ -17,7 +20,13 @@
 // e.g. 128 GRF, -cl-opt-disable, the EAGER scalar walk), v2's pair, and the fp64 reference
 // (tests/kernels/attn_verify_ref.h). Printed per layer: each arm's worst (row, q head) cosine and max |diff| against
 // fp64 over the gated bf16 rows; then, at the worst (layer, row, head) of the production binary, its partials against
-// v2's and fp64's block by block (mx, sm, acc cosine) - the first differing key block.
+// v2's and fp64's block by block (mx, sm, acc cosine) - the first differing key block. The replays read the inputs of
+// the run that went LAST (its q / gate dump and the K / V rows it left in the cache).
+//
+// Spec 28 (dflash_gpu_test t5_test-box's verify-vs-plain rows): --watch A,B prints, at every kept row, both arms'
+// logit gap A - B (in bf16 ulps of the row's top logit) and argmaxes; --at G,... analyses the iterations whose kept
+// rows decide the generated indices G (in place of the first three by --thresh). Index 0 is the prefill's id, as in
+// the tests' streams (row r of an iteration whose input x is generated id g decides id g + r + 1).
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -40,6 +49,7 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "l0/queue.h"
+#include "loader/lm_head_int8.h"
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "model/qwen35.h"
@@ -153,8 +163,12 @@ struct Dump {   // one run's attn_dump, host side
   }
 };
 
-void analyse(runtime::Engine& eng, Replay& rp, const Dump& dd, const Dump& dv, uint32_t pos, uint32_t M,
+// `in`: the dump of the run that went last (its q / gate and the K / V it wrote are the replays' inputs); `other`: the
+// other run's; `in_v2`: the last run was v2's.
+void analyse(runtime::Engine& eng, Replay& rp, const Dump& in, const Dump& other, bool in_v2, uint32_t pos, uint32_t M,
              uint32_t n_fa, const std::vector<std::string>& bins) {
+  const Dump& dv = in;
+  const Dump& dd = other;
   runtime::DecodeBuffers& b = eng.buffers();
   const uint32_t keys = pos + M;
   std::printf("  analysis at pos %u, M %u (%u keys at the last row)\n", pos, M, keys);
@@ -170,9 +184,11 @@ void analyse(runtime::Engine& eng, Replay& rp, const Dump& dd, const Dump& dv, u
     rp.imm.copy(rp.aq.ptr(), dv.q(f), size_t(M) * kRow * 4);
     rp.imm.copy(rp.ag.ptr(), dv.g(f), size_t(M) * kRow * 4);
     const avr::Result ref = avr::run(pos, M, dv.q(f), dv.g(f), avr::Kv::bf16(hk.data(), hv.data()));
-    // the run's own outputs: v2's dump against its replay (fidelity), the DPAS run's dump against v2's (drift)
+    // the run's own outputs: the last run's dump against its kernel's replay (fidelity), the other run's dump against
+    // the replays (drift)
     const std::vector<uint16_t> o2 = rp.run("", kv.k, kv.v, pos, M);
-    const bool same = std::memcmp(o2.data(), dv.o(f), o2.size() * 2) == 0;
+    const std::vector<uint16_t> olast = in_v2 ? o2 : rp.run(bins[0], kv.k, kv.v, pos, M);
+    const bool same = std::memcmp(olast.data(), dv.o(f), olast.size() * 2) == 0;
     const bool qsame = std::memcmp(dd.q(f), dv.q(f), size_t(M) * kRow * 4) == 0;
     std::ostringstream line;
     char buf[256];
@@ -196,9 +212,9 @@ void analyse(runtime::Engine& eng, Replay& rp, const Dump& dd, const Dump& dv, u
       grade(o, bins[i].c_str(), i == 0);
     }
     // the DPAS run's own dump vs fp64 on v2's inputs only means something where its q equals v2's
-    if (qsame) grade(std::vector<uint16_t>(dd.o(f), dd.o(f) + size_t(M) * kRow), "dpas-run", false);
-    std::printf("  FA %2u: replay==v2 run %s, q dpas-run==v2-run %s |%s\n", f, same ? "yes" : "NO",
-                qsame ? "yes" : "no", line.str().c_str());
+    if (qsame) grade(std::vector<uint16_t>(dd.o(f), dd.o(f) + size_t(M) * kRow), in_v2 ? "dpas-run" : "v2-run", false);
+    std::printf("  FA %2u: replay==%s run %s, q dpas-run==v2-run %s |%s\n", f, in_v2 ? "v2" : "dpas",
+                same ? "yes" : "NO", qsame ? "yes" : "no", line.str().c_str());
   }
   // partials at the production binary's worst (layer, row, head)
   std::printf("  worst of %s: FA %u row %u q head %u (cos %.8f); its blocks:\n", bins[0].c_str(), wf, wm, wh, worst_c);
@@ -234,7 +250,8 @@ void analyse(runtime::Engine& eng, Replay& rp, const Dump& dd, const Dump& dv, u
 
 int main(int argc, char** argv) {
   if (argc < 4) {
-    std::fprintf(stderr, "usage: probe_vattn_ab <snapshot> <ids> <n> [--max-len L] [--bins a,b] [--all]\n");
+    std::fprintf(stderr, "usage: probe_vattn_ab <snapshot> <ids> <n> [--max-len L] [--bins a,b] [--all] [--lm-head bf16|int8] "
+                 "[--follow v2|dpas] [--watch A,B] [--at G,...]\n");
     return 2;
   }
   const std::string snap = argv[1];
@@ -244,6 +261,10 @@ int main(int argc, char** argv) {
   bool all = false;
   double thresh = 4.0;   // analyse an iteration whose kept rows differ by more than this (logits), at most 3
   std::vector<std::string> bins = {kernels::attn_verify_dpas_variant(kM, kTgt, false)};
+  loader::LmHeadForm head = loader::LmHeadForm::Checkpoint;
+  bool follow_dpas = false, watch = false;
+  uint32_t watch_a = 0, watch_b = 0;
+  std::vector<uint32_t> at;   // generated indices whose iteration is analysed
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
     if (a == "--max-len" && i + 1 < argc) {
@@ -256,6 +277,19 @@ int main(int argc, char** argv) {
       thresh = std::stod(argv[++i]);
     } else if (a == "--all") {
       all = true;
+    } else if (a == "--lm-head" && i + 1 < argc) {
+      if (!loader::parse_lm_head_form(argv[++i], head)) throw std::runtime_error("--lm-head bf16|int8");
+    } else if (a == "--follow" && i + 1 < argc) {
+      const std::string f = argv[++i];
+      if (f != "v2" && f != "dpas") throw std::runtime_error("--follow v2|dpas");
+      follow_dpas = f == "dpas";
+    } else if (a == "--watch" && i + 1 < argc) {
+      if (std::sscanf(argv[++i], "%u,%u", &watch_a, &watch_b) != 2) throw std::runtime_error("--watch A,B");
+      watch = true;
+    } else if (a == "--at" && i + 1 < argc) {
+      std::stringstream s(argv[++i]);
+      for (std::string t; std::getline(s, t, ',');)
+        if (!t.empty()) at.push_back(uint32_t(std::stoul(t)));
     } else {
       throw std::runtime_error("unknown argument " + a);
     }
@@ -264,7 +298,8 @@ int main(int argc, char** argv) {
   std::printf("probe_vattn_ab on %s; arms:", ctx.name().c_str());
   for (const auto& s : bins) std::printf(" %s", s.c_str());
   std::printf("\n");
-  loader::LoadedModel model = loader::load(ctx, snap, max_len, /*mtp=*/false, loader::LmHeadForm::Checkpoint);
+  loader::LoadedModel model = loader::load(ctx, snap, max_len, /*mtp=*/false, head);
+  std::printf("lm_head %s, the stream follows %s\n", loader::lm_head_form_name(head), follow_dpas ? "DPAS" : "v2");
   cli::dflash::Args da;
   da.on = true;
   cli::dflash::Loaded dl = cli::dflash::load(ctx, da, model);
@@ -309,28 +344,31 @@ int main(int argc, char** argv) {
     rp.imm.copy(gdn_keep.ptr(), slot, gdn_bytes);
     runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
     const runtime::Control ctl_keep = *ctl;   // the list moves pos on the device
-    eng.recapture_verify(od);
-    eng.verify(k);
-    const std::vector<uint32_t> idd(eng.verify_ids(), eng.verify_ids() + k + 1);
-    rp.imm.copy(ld.data(), eng.verify_logits_device(), size_t(k + 1) * kV * 4);
+    std::vector<uint32_t> idd, idv;
+    auto run_arm = [&](bool dpas) {   // one verify on the kept state; the second restores Control and the live slot
+      eng.recapture_verify(dpas ? od : ov);
+      eng.verify(k);
+      (dpas ? idd : idv).assign(eng.verify_ids(), eng.verify_ids() + k + 1);
+      rp.imm.copy((dpas ? ld : lv).data(), eng.verify_logits_device(), size_t(k + 1) * kV * 4);
+    };
+    run_arm(!follow_dpas);
     rp.imm.copy(slot, gdn_keep.ptr(), gdn_bytes);
     *ctl = ctl_keep;
-    eng.recapture_verify(ov);
-    eng.verify(k);
-    const std::vector<uint32_t> idv(eng.verify_ids(), eng.verify_ids() + k + 1);
-    rp.imm.copy(lv.data(), eng.verify_logits_device(), size_t(k + 1) * kV * 4);
-    uint32_t j = 0;
-    while (j < k && drafts[j] == idv[j]) ++j;
+    run_arm(follow_dpas);
+    const std::vector<uint32_t>& idf = follow_dpas ? idd : idv;   // the run the stream follows
+    uint32_t jv = 0;
+    while (jv < k && drafts[jv] == idv[jv]) ++jv;
     uint32_t jd = 0;
     while (jd < k && drafts[jd] == idd[jd]) ++jd;
-    // the DPAS run leaves the plain stream at the first row r <= j whose argmax differs
+    const uint32_t j = follow_dpas ? jd : jv;
+    // the other run leaves the followed stream at the first row r <= j whose argmax differs
     int first = -1;
     for (uint32_t r = 0; r <= j; ++r)
       if (idd[r] != idv[r]) {
         first = int(r);
         break;
       }
-    std::printf("iter %3u pos %4u gen %3zu k %u accept v2 %u dpas %u |", iter, pos, stream.size(), k, j, jd);
+    std::printf("iter %3u pos %4u gen %3zu k %u accept v2 %u dpas %u |", iter, pos, stream.size(), k, jv, jd);
     double worst_kept = 0;   // the largest |logit difference| over the rows the stream keeps (0 .. j)
     for (uint32_t r = 0; r <= k; ++r) {
       double mx = 0;
@@ -353,18 +391,39 @@ int main(int argc, char** argv) {
       for (uint32_t t = 0; t < k; ++t) std::printf(" %u", drafts[t]);
       std::printf("\n");
     }
-    if (((first >= 0 || worst_kept > thresh) && analysed < 3) || all) {
+    if (watch)
+      for (uint32_t r = 0; r <= j; ++r) {
+        auto gap = [&](const std::vector<float>& L, uint32_t& top) {
+          const float* row = &L[size_t(r) * kV];
+          top = 0;
+          for (uint32_t t = 1; t < model::Qwen35::kVocabUsed; ++t)
+            if (row[t] > row[top]) top = t;
+          int e = 0;
+          std::frexp(std::fabs(row[top]), &e);
+          return double(row[watch_a] - row[watch_b]) / std::ldexp(1.0, e - 8);   // golden::bf16_ulp_at
+        };
+        uint32_t tv = 0, td = 0;
+        const double gv = gap(lv, tv), gd = gap(ld, td);
+        std::printf("  watch: row %u decides generated id %zu: %u - %u: v2 %+.2f ulp (top %u), dpas %+.2f ulp (top %u)\n",
+                    r, stream.size() + r + 1, watch_a, watch_b, gv, tv, gd, td);
+      }
+    bool at_hit = false;
+    for (uint32_t g : at) at_hit |= g > stream.size() && g <= stream.size() + j + 1;   // row g - stream.size() - 1
+    if (((first >= 0 || worst_kept > thresh) && analysed < 3 && at.empty()) || all || at_hit) {
       Dump hd, hv;
       hd.b.resize(dump_d.size());
       hv.b.resize(dump_v.size());
       rp.imm.copy(hd.b.data(), dump_d.ptr(), hd.b.size());
       rp.imm.copy(hv.b.data(), dump_v.ptr(), hv.b.size());
-      analyse(eng, rp, hd, hv, pos, k + 1, n_fa, bins);
+      if (follow_dpas)
+        analyse(eng, rp, hd, hv, false, pos, k + 1, n_fa, bins);
+      else
+        analyse(eng, rp, hv, hd, true, pos, k + 1, n_fa, bins);
       ++analysed;
     }
     stream.push_back(x);
     for (uint32_t i = 0; i < j; ++i) stream.push_back(drafts[i]);
-    eng.commit(j, idv[j]);
+    eng.commit(j, idf[j]);
     ++iter;
   }
   std::printf("probe_vattn_ab: %u iterations, %u with a flip inside the accepted prefix\n", iter, flips);
