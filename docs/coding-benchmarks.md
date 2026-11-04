@@ -21,7 +21,7 @@ engine's int4 checkpoints or a run performed by this repository.
 
 | Model | Parameters / architecture | SWE-bench Verified | SWE-bench Pro | Terminal-Bench 2.1 | Status |
 |---|---:|---:|---:|---:|---|
-| Recursive Flint | 39.8B-A2.5B MoE (35 sliding-window + 14 NoPE attention layers, 256 experts top-6 + shared) | 74.2% (mini-swe-agent) | — (its "Pro v2 89.7" is a different benchmark version) | 54.9% (Terminus 2, web-retrieved counted as failures) | Watched (operator, 2026-10-23): decided against LFM2.5 on our A4 numbers; transformers support merged on main 2026-10-21 (not yet released). `docs/superpowers/specs/2026-10-23-spec27-flint-watch.md` |
+| Recursive Flint | 39.8B-A2.5B MoE (35 sliding-window + 14 NoPE attention layers, 256 experts top-6 + shared) | 74.2% (mini-swe-agent) | — (its "Pro v2 89.7" is a different benchmark version) | 54.9% (Terminus 2, web-retrieved counted as failures) | Watched (operator, 2026-10-23): decided against LFM2.5 on our A4 numbers; transformers support merged on main 2026-10-21 (not yet released). spec 27 (PARKED 2026-11-04: `docs/superpowers/specs/2026-11-01-spec27-flint-design.md`) |
 
 ## Considered, not supported
 

@@ -45,7 +45,8 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 ## After the table is empty
 
 1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image.
-2. Spec 13 batching (13b), spec 28m MoE draft-checking probe, spec 27 Flint, spec 29 Nanbeige.
+2. Spec 13 batching (13b), spec 28m MoE draft-checking probe. (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
+   the independent evidence - see the notes at the top of their design docs; their plans were deleted.)
 3. Box layout: everything under `~/b70` (branches `box-layout`, `plan-box-move`).
 
 ## Closed recently

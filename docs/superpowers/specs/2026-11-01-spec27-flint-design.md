@@ -1,5 +1,15 @@
 # Spec 27 - Recursive Flint (`flint`) on the B70: the engine
 
+> **PARKED 2026-11-04 (operator).** Independent evidence (web research 2026-11-04): every benchmark is the vendor's own,
+> and its own chart has Qwen3.8-27B ahead on 4 of 6 coding benchmarks (Terminal-Bench 2.1 54.9 vs 73.0); one 18-run
+> agentic test passed 12/18 (false success reports, loops); tool calls unreliable without grammar-constrained decoding
+> (the tool turn ends on `<|observation|>`, not the declared EOS; 41/85 failures on a 3-bit build); no quality data at
+> 100k-262k; activations overflow fp16 at layer 47 and int4 changes long-prompt greedy output. Kolibri already covers
+> this architecture family. Revisit when: an independent SWE-bench / Terminal-Bench reproduction near the vendor
+> numbers, RULER / NIAH at 128k-262k on a 4-bit or int8-KV build, and fixed tool calling upstream. Its plans
+> (27a-27g, 27q) were deleted; this document keeps the design.
+
+
 **Status:** design, 2026-11-01, for operator review (operator approval to write it: 2026-11-01); reviewed 2026-11-01 (corrections
 listed at the end). **Decided (operator, 2026-11-01): D3 - Flint's context is 262,144 (its vendor limit) with int8 KV; no option
 beyond it.** The remaining open decisions are collected in section 13. Nothing is built; no code, kernel or card number exists for Flint yet. Supersedes the watch note

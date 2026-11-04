@@ -1,5 +1,13 @@
 # Spec 29 - Nanbeige4.3-33B (a plain dense Llama, all 52 layers full attention) in the engine
 
+> **PARKED 2026-11-04 (operator).** Independent evidence (web research 2026-11-04): every benchmark is the vendor's own,
+> none reproduced, and the vendor table's rows for other models disagree with their official cards; the only hands-on
+> reports show looping (an hour of reasoning on a one-bug task, no fix); a plain dense full-attention design with
+> ~213 KB of KV per token (256k = ~55 GB bf16; 512k did not fit an 80 GB card) adds nothing our hybrid / MoE models
+> lack. Revisit when independent results (Artificial Analysis, SWE-bench, a long-session tool-call test) appear.
+> Its plans (29a-29f) were deleted; this document keeps the design.
+
+
 **Status (2026-11-01): DESIGN - nothing built.** Operator approved writing it 2026-11-01. The slot "spec 29 (Nanbeige4.3-33B)"
 was reserved 2026-10-27; no file existed (checked: `docs/superpowers/specs` has 28 / 28c as its highest numbers).
 Plans: `docs/superpowers/plans/2026-11-01-spec29a-...` to `29f-...` (section 12). No box queue rows are added
