@@ -48,7 +48,9 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image; then
    refresh README.md and docs/BENCHMARKS.md (they still say "nothing measured" for Ornith, K2, Flash-Next, Bolt and show
    pre-upgrade headline rows) and the per-model table in docs/18-running-models.md.
-2. Spec 13 batching (13b), spec 28m MoE draft-checking probe. (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
+2. Spec 22 expert offload (Flash-Next whole on two cards; its P0 rows 36 first; §9 has the Basalt lessons: CPU compute
+   for part of the misses, a popularity profile, a low-bit always-resident drafter), spec 13 batching (13b), spec 28m MoE
+   draft-checking probe. (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
    the independent evidence - see the notes at the top of their design docs; their plans were deleted.)
 3. Box layout: everything under `~/b70` (branches `box-layout`, `plan-box-move`).
 

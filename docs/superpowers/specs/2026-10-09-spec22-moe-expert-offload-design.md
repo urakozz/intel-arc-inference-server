@@ -271,3 +271,42 @@ B70s with room for KV - no host tier, no PCIe on the decode path, about the all-
 - Batching (spec 13) interactions.
 - Models other than the `qwen4_exp` family until the tier exists; the indirection table is family-agnostic, so
   others can adopt it later.
+
+## 9. Lessons from Basalt (2026-11-04)
+
+Basalt (an MIT CUDA engine for Qwen3.8-Flash-Next only, a Strata fork, RTX 50 / sm_120; read-only review of its repo
+2026-11-04, nothing built or run) serves this model on one 16 GB card + 64 GB RAM at ~78-92 t/s with 4-bit experts
+(138-187 t/s with 3.4-bit IQ3_S experts, which cost top-1 88-89 % against bf16 - below our quality bar). Its numbers
+are short-prompt, MTP-drafted, single cold runs; the design ideas are what is useful here. Ideas only, no code taken.
+
+**Our gap is small.** Routed experts 64.17 GB against ~62.2 GB usable on two cards (§ "Why"): after the ~5 GB of dense
+weights, the MTP head and an int8 KV of ~3.3 GB at 262k (12 QSA layers x ~1 KB a position), a VRAM cache holds roughly
+85 % of the expert bytes. Basalt reaches 88-96 % hits with a profile-filled cache far smaller than ours (a 16 GB card
+caches ~18 % of the experts), so a hit rate near or above 97 % is plausible for us - P0.6's curve on spec 21a's
+traces decides it. Each point of miss rate costs ~1 ms a token over PCIe 3.0 (§2).
+
+Additions to the design, each to be weighed against P0's numbers:
+
+1. **Compute part of the misses on the CPU (decide).** Basalt sends ~55 % of misses over PCIe and computes ~45 % on a
+   CPU pool (one worker per physical core) reading pinned RAM, so those expert weights never cross the link - only
+   the 2560-wide activations do. On our PCIe 3.0 box (12.2-12.9 GB/s measured) that halves the miss cost if the box
+   CPU (22 Haswell cores, AVX2 only, DDR4) keeps up: a 4-bit expert is ~2.6 MB, so ~14 misses a token at h = 0.97 are
+   ~37 MB of RAM reads, under 1 ms at DDR4 rates. The cost: a host hand-off inside the step, which our replayed lists
+   avoid today (§ "No CPU expert compute"). P0 measures the box CPU's int4 expert GEMV rate before this is decided.
+2. **A popularity profile shipped with the model** (Basalt: a frequency-ranked profile picks the starting cache,
+   then adaptive swaps of up to 96 experts every ~3 windows, ~2.6 MiB each way, ~7-8 GB/s on the link). P0.6 / P0.8
+   already plan the profile from traces and swaps (22c); Basalt is evidence that the combination works in practice.
+3. **The MTP drafter's experts in low bits, always in VRAM.** Basalt keeps the drafter's experts at 2 bits: the
+   drafter only proposes and verification is exact (it reports token-identical output on 275 prompts with drafting
+   on and off), so the drafter's precision costs acceptance, not quality. For us: a smaller drafter frees VRAM for
+   the verified model's experts. Measure acceptance before and after.
+4. **int8 hyper-connection weights** (already a lever in spec 21 §3: 1.28 -> ~0.64 GB a token, ~+15 % decode).
+5. **An exact two-stage output head** (an 8-bit head screened from bit planes with a proven bound: the argmax and
+   the top-k are exact, the rest of the vocabulary is read only when the bound says it can matter) - a decode
+   saving on the 0.64 GB int8 head; a spec 9 follow-on, not part of this spec.
+6. **KV placement under pressure:** Basalt grows the KV on demand above 32k and can keep only a window in VRAM with
+   the rest in pinned RAM. For us KV is small (~3.3 GB at 262k int8) and stays in VRAM; listed only so the cache
+   sizing in 22b counts KV at the chosen max length.
+
+Not taken: 3-bit or 2-bit routed experts for the verified model (quality rule: one format, int4 g64 AutoRound),
+lossy routing shortcuts (Basalt's opt-in route-prior / route-tail-skip cost KLD 0.06 -> 0.22+).
