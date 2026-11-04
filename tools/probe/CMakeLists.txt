@@ -798,7 +798,8 @@ add_dependencies(probe_small_m psm_kernels ${PSM_SRC_KERNELS} ${PSM_PF_KERNELS})
 # --- probe_verify_attn: spec 28c (plan 28c Task 3), the verify attention - v2 against attn_verify_dpas ---------
 # Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probes/probe-verify-attn-<date>.md.
 # `pvd_<tag>_M<M>[_KV8]` is src/kernels/attn_verify_dpas.cl itself at one lever tag
-# K<KT>_P<g|h>_S<KS>_D<DSPLIT>_Q<QSPLIT>_G<128|256> (G: the ocloc 256-GRF option or not), M = 2..8 and 16, both KV
+# K<KT>_P<g|h>_S<KS>_D<DSPLIT>_Q<QSPLIT>_G<128|256>[_P<PSPLIT>] (G: the ocloc 256-GRF option or not; PSPLIT 0 when the
+# suffix is absent - the plan 28c sweep's kernel, P in bf16), M = 2..8 and 16, both KV
 # forms; a (tag, M) whose work-group exceeds the GRF mode's lanes (512 at 256 GRF, 1024 at 128) or whose SLM exceeds
 # 128 KB is not built (the kernel's own #error for the latter). `pvd_v2kv8_M<M>` (M = 5..8) is the int8 v2 control
 # where production stops at M = 4: kv8.cl's KV8_DEC under BATCH_ROWS (spec 13a's row build, one slot = the plain
@@ -811,10 +812,11 @@ set(PVD_TAGS
     K32_Pg_S1_D256_Q1_G256 K32_Pg_S2_D256_Q1_G256 K32_Pg_S8_D256_Q1_G128 # KS
     K32_Pg_S2_D128_Q1_G256 K32_Pg_S4_D128_Q1_G128                        # DSPLIT
     K32_Pg_S4_D256_Q0_G256                                               # QSPLIT
-    K32_Pg_S4_D256_Q1_G128)                                              # GRF
+    K32_Pg_S4_D256_Q1_G128                                               # GRF
+    K32_Pg_S4_D256_Q1_G256_P1)                                           # the production line since 2026-11-04
 set(PVD_TARGETS)
 foreach(tag IN LISTS PVD_TAGS)
-  string(REGEX MATCH "^K([0-9]+)_P([gh])_S([0-9]+)_D([0-9]+)_Q([01])_G(128|256)$" _m ${tag})
+  string(REGEX MATCH "^K([0-9]+)_P([gh])_S([0-9]+)_D([0-9]+)_Q([01])_G(128|256)(_P([01]))?$" _m ${tag})
   if(NOT _m)
     message(FATAL_ERROR "probe_verify_attn: bad lever tag ${tag}")
   endif()
@@ -823,6 +825,10 @@ foreach(tag IN LISTS PVD_TAGS)
   set(_dsplit ${CMAKE_MATCH_4})
   set(_q ${CMAKE_MATCH_5})
   set(_g ${CMAKE_MATCH_6})
+  set(_p 0)
+  if(CMAKE_MATCH_8)
+    set(_p ${CMAKE_MATCH_8})
+  endif()
   set(_ph 0)
   if(CMAKE_MATCH_2 STREQUAL "h")
     set(_ph 1)
@@ -855,7 +861,7 @@ foreach(tag IN LISTS PVD_TAGS)
       endif()
       add_ocloc_kernel(pvd_${tag}_M${MM}${_sfx} SOURCE ${PVD_CL}
                        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=${_kt} PACK_H=${_ph} KS=${_ks}
-                               DSPLIT=${_dsplit} QSPLIT=${_q} PSPLIT=0 KV8=${KV}
+                               DSPLIT=${_dsplit} QSPLIT=${_q} PSPLIT=${_p} KV8=${KV}
                        ${_opts})
       list(APPEND PVD_TARGETS kernel_pvd_${tag}_M${MM}${_sfx})
     endforeach()
