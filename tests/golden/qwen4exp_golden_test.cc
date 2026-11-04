@@ -27,9 +27,11 @@
 //            exact tie, which torch's topk breaks its own way - undetermined (spec 21 §12 finding 2). Otherwise, with
 //            the reference's router scores (route.top.*), a difference is a ROUNDING SWAP when the weights of the
 //            experts both took agree (cosine >= 0.999) and every expert the engine took instead is in the
-//            reference's top 16 with its p within 2 x the cut's noise (|the engine's p of rank 9 / 10 - the
-//            reference's|) below the reference's p of rank 9; anything else FAILS. An old golden set without
-//            route.top.*: a NEAR-TIE when the gap is within B70_Q4_TIE_TOL (1e-3) and one expert differs (printed)
+//            reference's top 16 with its p within 2 x the row's score difference (the engine's p of rank 9 / 10 and
+//            its weights in p, against the reference's p) below the reference's p of rank 9. The route row keeps no
+//            other p, so that difference is a lower bound: a swap it cannot show still passes the gap rule (a
+//            NEAR-TIE: one expert, the gap within B70_Q4_TIE_TOL 1e-3 - the rule before 2026-11-04, and the only one
+//            for an old golden set without route.top.*); anything else FAILS
 //   gate S   at every (row >= 2051, QSA layer) the engine's selected block set against qsa.sel. With the reference's
 //            block scores (qsa.score) on the LAST QSA layer (the engine keeps that layer's scores:
 //            read_last_qsa_scores / read_prefill_last_qsa_scores): a ROUNDING SWAP when the row's scores agree
@@ -144,14 +146,18 @@ struct RouteRef {
   const float* w = nullptr;
   uint32_t top = 0;
 };
-// Routing: the row's noise is the cut's - the engine's p of rank 9 / 10 (route row kP10 / kP11) against the
-// reference's (order statistics: within the scores' sup-norm difference, so the bound is conservative); the agreement
-// is the cosine of the renormalised weights over the experts both took; every expert the engine took instead must be
-// in the reference's top kTop, its p within 2 x noise below the reference's p of rank 9.
+// Routing: the row's score difference ("noise", in p) is the larger of the cut's - the engine's p of rank 9 / 10
+// (route row kP10 / kP11) against the reference's - and the experts both took: the engine's renormalised weight in p
+// (x the reference's top-10 sum) against the reference's p (the route row keeps no other p; the weight is bf16, so
+// this term is known to half a bf16 ulp of the weight). The agreement is the cosine of the renormalised weights over
+// the experts both took; every expert the engine took instead must be in the reference's top kTop, its p within
+// 2 x noise below the reference's p of rank 9.
 Swap judge_route(const uint32_t* row, const int32_t* want, const RouteRef& ref) {
   Swap s;
   const double e10 = bits(row[kr::kP10]), e11 = bits(row[kr::kP11]), r10 = ref.top_p[9], r11 = ref.top_p[10];
   s.noise = std::max(std::fabs(e10 - r10), std::fabs(e11 - r11));
+  double sum10 = 0;
+  for (uint32_t k = 0; k < 10; ++k) sum10 += ref.top_p[k];
   std::vector<float> ew, rw;
   for (uint32_t i = 0; i < 10; ++i) {
     const uint32_t id = row[kr::kIds + i];
@@ -159,6 +165,9 @@ Swap judge_route(const uint32_t* row, const int32_t* want, const RouteRef& ref) 
     if (at != want + 10) {
       ew.push_back(bits(row[kr::kWeights + i]));
       rw.push_back(ref.w[at - want]);
+      const int32_t* t = std::find(ref.top_ids, ref.top_ids + ref.top, int32_t(id));
+      if (t != ref.top_ids + ref.top)
+        s.noise = std::max(s.noise, std::fabs(double(ew.back()) * sum10 - ref.top_p[t - ref.top_ids]));
       continue;
     }
     ++s.swapped;
@@ -188,21 +197,27 @@ void compare_route(const uint32_t* row, const int32_t* want, float gap, float to
     ++c.undetermined;
     return;
   }
+  // The route row keeps no per-expert p past the engine's top 10, so the score noise below is a LOWER bound of the
+  // row's (a pairwise swap is always within 2 x the true sup-norm difference): a difference the scores cannot show
+  // to be rounding still passes the gap rule it passed before (one expert, gap <= B70_Q4_TIE_TOL) - counted apart.
+  Swap s;
   if (ref.top_p) {
-    const Swap s = judge_route(row, want, ref);
+    s = judge_route(row, want, ref);
     if (s.ok()) {
       count_swap(s, c);
       return;
     }
-    ++c.bad;
-    if (c.bad <= 10)
-      std::printf("    %s L%u row %u: the expert set differs beyond rounding (%zu experts, reference gap %.3e, weights "
-                  "cosine %.6f, deficit %.3e, cut noise %.3e)\n", p, l, r, og.size(), double(gap), s.cos, s.deficit,
-                  s.noise);
-    return;
   }
   if (gap <= tol && og.size() == 1 && ow.size() == 1) {
     ++c.near;
+    return;
+  }
+  if (ref.top_p) {
+    ++c.bad;
+    if (c.bad <= 10)
+      std::printf("    %s L%u row %u: the expert set differs beyond rounding (%zu experts, reference gap %.3e, weights "
+                  "cosine %.6f, deficit %.3e, score noise %.3e)\n", p, l, r, og.size(), double(gap), s.cos, s.deficit,
+                  s.noise);
     return;
   }
   ++c.bad;
@@ -389,10 +404,11 @@ int main(int argc, char** argv) {
                 have_route_scores ? "by the reference's router scores (route.top.*)"
                                   : "by the gap rule - this golden set has no router scores (route.top.*: regenerate "
                                     "it with qwen4exp_oracle.sh)",
-                have_sel_scores ? ("by block scores on the last QSA layer (L" + std::to_string(last_qsa) +
-                                   "), the gap rule on the others").c_str()
-                                : "by the gap rule - this golden set has no block scores (qsa.score.*: regenerate it with "
-                                  "qwen4exp_oracle.sh)");
+                rows <= kDenseRows ? "- no rows past the cut (2051)"
+                : have_sel_scores  ? ("by block scores on the last QSA layer (L" + std::to_string(last_qsa) +
+                                      "), the gap rule on the others").c_str()
+                                   : "by the gap rule - this golden set has no block scores (qsa.score.*: regenerate it "
+                                     "with qwen4exp_oracle.sh)");
     std::vector<uint8_t> near_row(rows, 0);
     std::vector<double> tap_min(d.layers, 1.0);
     uint32_t act0 = rows;
@@ -584,7 +600,7 @@ int main(int argc, char** argv) {
     std::printf("\n");
   }
   std::printf("\nrouting: %llu (row, layer) - %llu exact, %llu near-ties (gap rule), %llu rounding swaps (scores: weights "
-              "cosine >= %.6f, deficit <= %.2f x the cut noise), %llu exact ties (undetermined), %llu differing\n",
+              "cosine >= %.6f, deficit <= %.2f x the score noise), %llu exact ties (undetermined), %llu differing\n",
               (unsigned long long)route_c.rows, (unsigned long long)route_c.exact, (unsigned long long)route_c.near,
               (unsigned long long)route_c.swaps, route_c.cos_min, route_c.deficit_ratio_max,
               (unsigned long long)route_c.undetermined, (unsigned long long)route_c.bad);
