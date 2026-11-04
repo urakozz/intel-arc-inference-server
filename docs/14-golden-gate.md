@@ -329,7 +329,7 @@ gdn scan entry LAUNCHED: pf_gdn_scan_dpas_split
 Run with its dispatch proven, that same kernel **failed**: 92 of 93 rows, with
 one state cosine at 0.996. The cause was one operand of one term, and the fix
 took it to 93/93. The whole episode is in
-[prefill-gdn-scan-split-fix-2026-09-23.md](prefill-gdn-scan-split-fix-2026-09-23.md).
+[12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
 
 The probes in this repo carry the same rule. The W4A8 probe proves dispatch
 twice: once by asking the driver the name of the kernel handle the launcher

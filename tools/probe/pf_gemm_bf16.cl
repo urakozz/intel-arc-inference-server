@@ -1,7 +1,7 @@
 // pf_gemm_bf16 (P-A). PROBE-ONLY: our own OpenCL C bf16 DPAS GEMM on the
 // Level Zero list -- the go/no-go candidate for dropping sycl-tla from the
-// prefill path. Design pre-registered BEFORE this file was written:
-// docs/probe-prefill-vllm-parity-2026-09-14.md addendum §A4. No runtime path
+// prefill path. Design pre-registered BEFORE this file was written, see
+// docs/08-decode-vs-prefill.md ("How prefill got here"). No runtime path
 // binds this kernel and no existing kernel is touched.
 //
 // C[M][N] fp32 = A[M][K] bf16 . B[K][N] bf16 (lda = K, ldb = N, ldc = N) --

@@ -63,7 +63,7 @@ b70_target_kernel_dir(probe_dequant_slab)
 add_dependencies(probe_dequant_slab kernel_pf_dequant_tile_K5120_N34816_L0_T0
                  ${PROBE_SLAB_TARGETS})
 
-# P-A (spec 2 addendum, docs/probe-prefill-vllm-parity-2026-09-14.md §A4):
+# P-A (spec 2 addendum, docs/08-decode-vs-prefill.md ("How prefill got here")):
 # our own OpenCL C bf16 DPAS GEMM on the Level Zero list -- the go/no-go
 # candidate for dropping sycl-tla from the prefill path. AOT at 256 GRF is
 # MANDATORY (§A4.8): P2 measured a 33x loss without it, and zero spill does
@@ -78,7 +78,7 @@ target_link_libraries(probe_pf_gemm PRIVATE b70_prefill_host b70_l0)
 b70_target_kernel_dir(probe_pf_gemm)
 add_dependencies(probe_pf_gemm kernel_pf_gemm_bf16)
 
-# P-B (docs/probe-prefill-vllm-parity-2026-09-14.md §A3.2): slab dequant +
+# P-B (docs/08-decode-vs-prefill.md ("How prefill got here")): slab dequant +
 # P-A's GEMM on ONE in-order L0 list, zero host waits. Runs only because
 # P-A measured >= 128 (committed: 156.53 TFLOP/s). `pf_gemm_bf16_slab` is a
 # second entry point in the SAME pf_gemm_bf16.cl / kernel_pf_gemm_bf16

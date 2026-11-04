@@ -4,8 +4,8 @@
 // cross-runtime L0<->SYCL host wait, does not exist for this pair). Runs
 // only because P-A measured 156.53 TFLOP/s >= the brief's 128 bar.
 //
-// Pre-registration: docs/probe-prefill-vllm-parity-2026-09-14.md addendum
-// §A3.2, committed before this file was built or run. Baseline and battery
+// Pre-registration: docs/08-decode-vs-prefill.md ("How prefill got here")
+// (folded there), committed before this file was built or run. Baseline and battery
 // follow `probe_dequant_slab.cc`'s protocol and naming (C1/C2/C3/C4) with
 // ONE change: the GEMM everywhere is `pf_gemm_bf16`/`pf_gemm_bf16_slab`
 // (P-A's own kernel, raw L0), not sycl-tla's `gemm_bf16` -- the whole point

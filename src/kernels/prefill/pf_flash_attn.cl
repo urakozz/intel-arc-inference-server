@@ -3,7 +3,7 @@
 // Plan: docs/superpowers/plans/2026-09-25-spec6b-flash-attn-integration-and-128k.md.
 // Record: docs/probe-flash-attn-2026-09-25.md. This is plan 6a's winning arm
 // pfa_KT64_R16_H6_Q0 (tools/probe/probe_flash_attn.cl), promoted with its text
-// unchanged except for the entry name, then (spec 6c, docs/research-flash-prefill-2026-09-27.md
+// unchanged except for the entry name, then (spec 6c, docs/12-kernels.md ("How the prefill kernels got here")
 // levers 1-2) moved to 8 rows per work-group, with arm KT64_R8_Q2's `exp2` behind EXP2;
 // built with KT=64 RPW=8 HPW=6 QREG=0 EXP2=<see CMakeLists.txt> and
 // -cl-intel-256-GRF-per-thread. WG = 16 x 6 lanes, grid (ceil(C / 8), 4, 1).

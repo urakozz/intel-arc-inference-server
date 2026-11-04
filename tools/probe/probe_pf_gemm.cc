@@ -3,8 +3,8 @@
 // also timed and checked against `gemm_bf16` (sycl-tla, the C2 control); that arm left with
 // the sycl-tla backend (operator ruling) and the recorded comparison stands.
 //
-// Pre-registration: docs/probe-prefill-vllm-parity-2026-09-14.md addendum
-// §A3.1 / §A4, committed before this file was built or run. Protocol: 8
+// Pre-registration: docs/08-decode-vs-prefill.md ("How prefill got here")
+// (folded there), committed before this file was built or run. Protocol: 8
 // replays, first 3 discarded, median of the last 5, 4 enqueues/replay, one
 // discarded warm-up -- the project standard every prefill probe uses.
 //

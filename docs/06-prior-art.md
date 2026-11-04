@@ -96,7 +96,7 @@ int4 W4A16 matmul reaches **98.28 TFLOP/s** on gate‖up at M=2048, below the
 115.7 TFLOP/s an in-kernel int4 GEMM would need to beat our two-pass path, and
 it failed a bitwise identity extraction against our dequant oracle on 39.6% of
 weights, every mismatch a 1-ULP bf16 neighbour. Details in
-[probe-prefill-vllm-parity-2026-09-14.md](probe-prefill-vllm-parity-2026-09-14.md).
+[08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here).
 
 ## Traps inherited from the vLLM XPU work
 

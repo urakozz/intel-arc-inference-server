@@ -60,7 +60,7 @@ void require(bool ok, const std::string& what) {
 static const char* gdn_scan_entry() {
   static const char* const entry = [] {
     // **The default is the SPLIT-BF16 scan since 2026-09-23**, promoted on the
-    // evidence recorded in docs/prefill-gdn-scan-split-fix-2026-09-23.md and in
+    // evidence recorded in docs/12-kernels.md ("How the prefill kernels got here") and in
     // the parity program's §12: `prefill_gate_l0_test` 93/93 with prose
     // 0.999912369, code 0.999712545 and cjk 0.999901750 all over the > 0.999
     // bar, determinism / consistency / replay green, the vector entry unchanged
@@ -82,7 +82,7 @@ static const char* gdn_scan_entry() {
     // `$HOME/split-dev0.log`). The cause was found on 2026-09-23 and fixed --
     // `A2` was the last single-BF16 DPAS operand and it feeds `o` directly, so
     // it now carries hi/lo limbs like `S` and `D` (pf_gdn_scan.cl entry (3), and
-    // docs/prefill-gdn-scan-split-fix-2026-09-23.md for the 2x2 that attributed
+    // docs/12-kernels.md ("How the prefill kernels got here") for the 2x2 that attributed
     // it). The fixed entry passes the gate at 93/93 with every cosine over the
     // bar, and it is 2.33x faster than the vector scan on the `gdn_scan` profile
     // row -- but it is still approximate arithmetic behind an opt-in selector,

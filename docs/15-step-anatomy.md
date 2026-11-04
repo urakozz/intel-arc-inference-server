@@ -1038,7 +1038,7 @@ wait per slab so the dequant round trip could be attributed rather than
 estimated, a 4096-token prompt measures **`slab_dequant` 274.5 ms and
 `slab_gemm` 1344.3 ms** over 7616 launches each, summing to the unsplit phase
 within an instrumented run's spread
-([prefill-parity-2026-09-20.md](prefill-parity-2026-09-20.md)). Closing a phase
+([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here)). Closing a phase
 per slab costs 15,232 extra waits, so that instrumented wall is an attribution
 and not a throughput figure.
 
