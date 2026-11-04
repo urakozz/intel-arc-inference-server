@@ -3755,7 +3755,7 @@ st_r69_gates() {
 }
 # Spec 28 N4 / N6's f32 judges for Qwen3.8 (operator 2026-11-04): the spec tests' forced contexts (B70_DUMP_FORCED,
 # tests/golden/forced_judge.h) -> tools/box_validate/f32_refs.sh forced-qwen (one f32 trie forward on the box CPU)
-# -> $DATA/oracle-out-qwen-f32{,-i8head}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
+# -> $DATA/oracle-out-qwen-f32{,-i8head,-pfi8}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
 # CMakeLists.txt). Until a context's judge is there its divergences AWAIT it: the test SKIPs (77), not FAILs.
 stage r69.forced_dumps 69 optin card qwen,dflash r69.kernels "the Qwen3.8 spec tests' forced contexts: mtp_verify_test, mtp_gpu_test (+ dv128k, both heads), dflash_engine_test, dflash_gpu_test, dflash_lookup_gpu_test with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/qwen-spec/ (their verdicts here are not the gate: r69.gates / g0.suite are)"
 st_r69_forced_dumps() {
@@ -3774,6 +3774,7 @@ st_r69_forced_dumps() {
 stage r69.forced_refs 69 optin cpu qwen,oracle_image r69.forced_dumps "the f32 judges of the Qwen3.8 spec tests' forced contexts: tools/box_validate/f32_refs.sh forced-qwen (tools/oracle/qwen_forced.py, one layer-major f32 forward over the contexts' token trie, both heads) under /tmp/b70-cpu-model.lock - 248 contexts / ~48k distinct positions measured 1.5 h (2026-11-04: 4.5 min + 86 min, peak RSS 38 GiB; 20 GB of judges)"
 st_r69_forced_refs() {
   chk "tools/box_validate/f32_refs.sh $DATA forced-qwen $DATA/oracle-forced-dumps/qwen-spec" "the Qwen3.8 spec contexts' f32 judges"
+  chk "tools/box_validate/f32_refs.sh $DATA forced-qwen-pfi8 $DATA/oracle-forced-dumps/qwen-spec" "the l0-int8 mtp_gpu contexts' int8-aware f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
 }
