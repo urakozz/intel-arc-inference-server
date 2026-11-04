@@ -7,7 +7,7 @@ new label. Rule until the table is empty: no new specs or side plans. Documents 
 leave `docs/superpowers/plans/box-validation-queue.md`, finished sessions leave `docs/box-day-plan.md`, and both files
 go when empty; this page stays while fix rounds still add items.
 
-Last updated: 2026-11-04 (main 2c9817c; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
+Last updated: 2026-11-04 (main 156cb67; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
 ## Open
 
@@ -20,6 +20,7 @@ Last updated: 2026-11-04 (main 2c9817c; box: kernel 7.4.0-rc1, compute-runtime 2
 | *(tools)* | CPU reference tool | the CPU bf16 shim + the Bolt BF16-scale fix (branch `cpu-lane-1101`) | done | one CPU test row (r25.a4_ref) + merge |
 | **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done | box measurement on a quiet box + merge |
 | **21** Flash-Next | the Qwen3.8-Flash-Next model | r32.partial and the real-checkpoint golden sets still use the old 1e-3 gap rule (remaking them with the block scores is hours of CPU); routing on layers other than the last is judged by the gap rule as a fallback (the engine keeps only ranks 9 / 10 of the router probabilities) | not started | the sets remade on the CPU |
+| **28** faster draft checking | Qwen3.8 MTP / DFlash graded by the f32 references | 5 tests FAIL on judged verdicts only (mtp_gpu_test + its two 128k twins, dflash_gpu_test, dflash_lookup_gpu_test): the speculative stream takes a token 11-30 bf16 ulp below the f32 top (bar 8), always a special token (846 vs 248045 / 248046 and similar) where the engine's own plain row has the two within 0.1-0.3 ulp but f32 puts them 10-20 ulp apart - points at a bf16 accuracy gap on special-token logits, not the spec path | next: re-grade on main (attention fix in), then a CPU bf16 check of those rows (inherent bf16, or an engine accuracy defect) | the cause known, then the fix or the rule |
 
 ## Box test rows still open
 
@@ -31,7 +32,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | spec | what | rows not yet PASS | why | closes with |
 |---|---|---|---|---|
-| G0 | bit-for-bit comparison against a baseline build | g0.suite (on main ad711de, before the spec 21 merge) | bitwise PASS against the new baseline; the suite FAILs only on known open items - the Qwen3.8 MTP tests waiting for f32 references (spec 28) and the pre-fix Flash-Next tests (fixed since) - but a suite FAIL stops every later row | the blocked rows relaunched past G0 on main fb5535b (2026-11-04 07:40) |
+| G0 | bit-for-bit comparison against a baseline build | g0.suite (on main ad711de, before the spec 21 merge) | bitwise PASS against the new baseline; the suite FAILs only on known open items - the Qwen3.8 MTP / DFlash tests (now graded by f32 references: 5 judged FAILs, spec 28 row above) and the pre-fix Flash-Next tests (fixed since) - but a suite FAIL stops every later row | the blocked rows relaunched past G0 on main fb5535b (2026-11-04 07:40) |
 | **21** Flash-Next | | 32 partial / cli, real-checkpoint rows | golden, pp and serve passed on the branch (2026-11-04, run directly); the rest not yet run | one box_validate run of r32-r34 on main |
 | **25** Bolt | | 60, 61, 62 (synthetic and golden chains) | waiting on G0 and the Bolt reference set (building) | after G0 re-baseline + the references |
 | **16** pipeline | | 23 (two-card prefill speed), 27 (two-card serving: MTP, lookup, prefix cache) | 27 waits on the spec 16 fix (open, above); 23 is speed, quiet box | the spec 16 fix, then one run; 23 in the quiet-box session |
@@ -57,6 +58,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-04 | 28 | Qwen3.8 f32 references for all 286 forced contexts (one trie-merged fp32 CPU pass, ~2 h); no reference = SKIP (77), not FAIL; tests wired to the judges; mtp_verify_test and dflash_engine_test PASS judged; box_check 315/0/0 |
 | 2026-11-04 | 21 | Flash-Next golden gates judged by scores (the CPU reference writes the block scores and router top-16; selections differing beyond rounding 7,717 -> 0) and r34.serve: the prefix cache sized entries kv_bytes(1) x n, missing Flash-Next's compressed indexer keys, so saves overran the next entry - now sized by the engine's kv_bytes(n); r32/r33 golden, pp, r34.serve PASS; box_check 314/0/0 |
 | 2026-11-04 | 28 | 28c's DPAS verify attention back on: the position-103 error was its softmax weights rounded to bf16 (not the compiler); weights now as two bf16 halves, DFlash token-identical to plain on the case, thresholds re-timed unchanged, kernel test bar 0.999997; box_check 314/0/0 |
 | 2026-11-04 | 20 | Kolibri tool calls: raw newlines inside JSON string arguments repaired (shared parser), top-level reasoning_effort reaches the template, a 20-turn session test; real 19-turn session on two cards: 0 stalls, 24 valid calls; box_check 314/0/0 |
