@@ -234,7 +234,7 @@ both.
 **Decode** (`src/kernels/`), all bound by `capture.cc` at fixed `M`: 1 for a plain step, 2 to 8 for a
 speculative verify list (`M` = the rows checked at once), 16 for the drafter's blocks. The table is the `M = 1`
 list; since spec 28b every list at `M >= 2` replaces `gemv` / `gemv_i8w` by the small-batch DPAS GEMMs
-`gemm_sm` / `gemm_sm_i8w` (doc 12), which read each weight once for all rows:
+`gemm_sm` / `gemm_sm_i8w` (doc 12; DPAS is the card's matrix instruction), which read each weight once for all rows:
 
 | Kernel | Notes |
 |--------|-------|

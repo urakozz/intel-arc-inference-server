@@ -570,6 +570,35 @@ measured unmoved across the change.
 
 ---
 
+## `gemm_sm` and `gemm_sm_i8w` - the small-batch GEMMs of the verify and draft lists (spec 28b)
+
+A speculative verify list checks M = 2..8 guessed rows at once (the DFlash drafter's block adds
+M = 7, 8 and 16). `gemv` is a matrix-vector kernel: at M rows it re-reads and re-dequantises each
+weight tile for every row, so verify(8) cost 3.17 plain steps. `gemm_sm` (`src/kernels/gemm_sm.cl`)
+instead reads each int4 g64 weight tile once, dequantises it once and multiplies it against all M
+rows on the DPAS (the matrix engine; "DPAS" is its instruction), weights on the DPAS B operand, bf16.
+It reads exactly the bytes `gemv` reads and writes exactly the output `gemv` writes, with the same
+kernel arguments, so a capture site swaps only the variant name, work-group and grid.
+`gemm_sm_i8w` is the same for the int8 `lm_head` (and the DFlash drafter's int8 linears since spec
+28d). Per-shape tuning rows (split-K slices, the magic-exponent dequant, a work-group of 2 x 8
+K-slice sub-groups) are in `kernels::small_m_tuning`.
+
+Every decode list at M >= 2 binds it; **M = 1 keeps `gemv`, bit for bit**, so plain decode did not
+change. The consequence is the one the golden gate documents (doc 14): verify rows are no longer
+bitwise a plain step's rows, and speculative output is judged against an f32 reference. Measured
+(busy box, one card, int8 head, depth 4096): verify(M) in plain steps is 1.039 / 1.090 / 1.135 /
+1.183 / 1.297 / 1.359 / 1.570 at M = 2..8, against `gemv`'s 1.157 ... 3.170 (BENCHMARKS, "The verify
+step on gemm_sm"; to be re-checked on a quiet box). The record is
+[probe-small-m-gemm-2026-11-01.md](probe-small-m-gemm-2026-11-01.md).
+
+**`attn_verify_dpas` (spec 28c) is built and switched off.** It computes the verify step's attention
+on the DPAS (8.4x faster than `attn` v2 per layer at M = 8, 32768 keys, bf16; BENCHMARKS), bound by a
+per-(M, KV form) depth rule in `src/runtime/verify_attn.h`. Since 2026-11-04 every row of that table is
+`kDpasNever`: the f32 check of one DFlash test case put the DPAS path's token at f32 rank 3, 4.0 below
+the top whose margin was 3.44 - a kernel error at 8 rows, not a near-tie, with no known cause yet. The
+plan is a re-test on IGC 2.42.6, a compiler A/B on the kernel and, if needed, a rewrite; the measured
+thresholds stay in the table as comments. Until it is back on, verify attention runs `attn` v2.
+
 ## `prep` - the between-GEMV kernels
 
 `src/kernels/prep.cl`, one file with several entry points. Everything between
