@@ -914,4 +914,12 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_VERIFY_DPAS)
   target_link_libraries(probe_vattn_ab PRIVATE b70_runtime b70_dflash_runtime b70_loader b70_model b70_l0 b70_prefill_host)
   b70_target_kernel_dir(probe_vattn_ab)
   add_dependencies(probe_vattn_ab ${PVAB_ARMS} ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
+  # probe_verify_rows (spec 28, dflash_gpu_test t5_test-box): an M = 8 verify row against the M = 1 plain row on the
+  # same state - the plain history and the DFlash history, the verify at the rule / v2 / gemv arms.
+  add_executable(probe_verify_rows probe_verify_rows.cc)
+  target_include_directories(probe_verify_rows PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(probe_verify_rows PRIVATE b70_runtime b70_dflash_runtime b70_loader b70_model b70_l0
+    b70_prefill_host)
+  b70_target_kernel_dir(probe_verify_rows)
+  add_dependencies(probe_verify_rows ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
 endif()
