@@ -197,3 +197,35 @@ median t/s per prompt (greedy, 256 ids, bf16 head). The four P0 tool-call prompt
 
 Tool-call throughput is unchanged (N3's "unchanged or better": met) - those prompts sit below the M = 2..4 thresholds,
 where the rule keeps v2. At 32768 keys K = 3 is 9.5 % faster end to end (plain decode there: 27.9 t/s). Busy box.
+
+## §5 The fixed kernel (PSPLIT 1), re-timed 2026-11-04 (busy box, card 1)
+
+`attn_verify_dpas` now carries P as bf16 hi + lo (docs/07-open-questions.md §11: P in bf16 alone was the cause of the
+t6_usage-loader error). Tag `K32_Pg_S4_D256_Q1_G256_P1` = the production line; `probe_verify_attn arms --time --rounds 5
+--reps 10` against v2 on the same two dumps, beside a whole-box validation run's other card. Paired v2 / dpas (median):
+
+| M | KV | 512 | 1448 | 4096 | 11585 | 32768 | 130816 | dpas_from |
+|---|---|---|---|---|---|---|---|---|
+| 2 | bf16 | 0.486 | 0.534 | 0.923 | 1.204 | 1.218 | 1.357 | 11585 |
+| 3 | bf16 | 0.675 | 0.706 | 1.172 | 1.078 | 1.371 | 1.693 | 4096 |
+| 4 | bf16 | 0.877 | 0.737 | 1.592 | 1.372 | 1.706 | 2.084 | 4096 |
+| 5 | bf16 | 1.096 | 0.787 | 1.468 | 2.441 | 3.336 | 4.412 | 4096 (not monotone, as before) |
+| 6 | bf16 | 1.905 | 1.199 | 2.277 | 3.897 | 5.361 | 6.211 | 0 |
+| 7 | bf16 | 2.221 | 1.700 | 2.899 | 4.707 | 6.335 | 7.060 | 0 |
+| 8 | bf16 | 2.895 | 3.431 | 6.103 | 5.769 | 8.222 | 8.910 | 0 |
+| 2 | int8 | 0.573 | 0.586 | 1.013 (low 0.999: v2) | 1.751 | 2.054 | 2.361 | 11585 |
+| 3 | int8 | 0.741 | 0.694 | 1.322 | 1.496 | 1.827 | 2.016 | 4096 |
+| 4 | int8 | 0.907 | 0.822 | 1.660 | 1.852 | 2.192 | 2.420 | 4096 |
+
+Every `dpas_from` is the §2 value. The extra PV DPAS costs a few percent at most where DPAS wins (M = 8, 32768:
+480 us a layer against §1's 458). N1 against fp64, every arm row: bf16 0.9999986 - 0.99999999, int8 0.9999984
+(130816) - 1.0; the int8 row at 4096 that §3 accepted at 0.99998797 is 0.99999994. N2a 100 / 100 bitwise everywhere.
+
+How the cause was found (`tools/probe/probe_vattn_ab`, t6_usage-loader, DFlash K = 7, 68 iterations): every verify run
+forced to DPAS and then to v2 on the same state (Control and the live GDN slot restored between them); the flagged
+iterations replayed per FA layer on v2's inputs. With P in bf16 the worst layer rows sat at cos 0.99998 - 0.99999
+against fp64 (v2 0.9999999+) for the 256-GRF build, a 128-GRF build, a `-cl-opt-disable` build and the EAGER scalar
+walk alike - one algorithmic error, no compiler effect - while each key block's partial agreed with fp64 to ~1e-6
+(mx, sm) and acc cos >= 0.9999995: the blocks are right, their merged sum cancels and exposes P's rounding. At PSPLIT 1
+every layer matches v2's distance from fp64, and `b70-decode --spec dflash` with DPAS forced at every M gives the plain
+stream, all 256 ids (box logs `~/b70/logs/attn-verify-fix/`).

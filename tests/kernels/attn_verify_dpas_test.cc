@@ -7,9 +7,10 @@
 // Part S (synthetic, always): random bf16 KV of 4096 rows (and its int8 form through src/common/kv8.h), random q /
 // gate, at the positions attn_v2_test walks (depth 0 -> 1, tiny pos, the 64-block edges, the stride's first step
 // 2048 -> 2049 keys inside one launch, the end of the cache), M = 2..8 bf16 and M = 2..4 int8:
-//   N1   every gated row against tests/kernels/attn_verify_ref.h (fp64): cosine >= 0.99999 per (q head, row), finite;
+//   N1   every gated row against tests/kernels/attn_verify_ref.h (fp64): cosine >= kN1 = 0.999997 per (q head, row),
+//        finite (spec 28c §4's 0.99999, tightened 2026-11-04: see kN1);
 //        v2's own worst cosine on the same inputs printed beside it;
-//   N2b  every row against v2 M = 1 at pos + m (cosine >= 0.99999, max abs printed);
+//   N2b  every row against v2 M = 1 at pos + m (cosine >= kN1, max abs printed);
 //   rep  two runs bitwise;
 //   N2a  property R: per (KV form, position) 1000 trials - a probe row (q, gate) at a random slot of a random M launch
 //        positioned so that it keeps its key count, the other rows random: its gated row bitwise the same every time.
@@ -48,9 +49,12 @@
 namespace {
 
 namespace avr = attn_verify_ref;
-// pf_flash_attn_kv8's cosine to the fp64 reference on the int8 dump's worst row at depth 4096 (q head 19, row 0),
-// measured by probe_verify_attn (spec 28c record §3): the int8 N1 bar there (operator ruling 2026-11-03).
-constexpr double kPfaKv8Row4096 = 0.99998792;
+// N1's bar. Spec 28c §4 says 0.99999; the kernel with P in bf16 alone met it here (0.999991 - 0.999994 on random data,
+// 0.9999880 on the int8 dump's row at 4096, which the operator ruling of 2026-11-03 accepted) and still moved real
+// DFlash verify rows off the f32 top (docs/07-open-questions.md §11): random rows do not show the cancellation that
+// amplifies P's rounding on real heads. P as hi + lo (PSPLIT=1) measures 0.9999984 - 0.99999999 on both parts, so the
+// bar sits between the two kernels: a return to P in bf16 fails it. That also retires the int8 4096 exception.
+constexpr double kN1 = 0.999997;
 constexpr uint32_t kQH = 24, kKvH = 4, kHD = 256, kRow = kQH * kHD;
 constexpr uint32_t kTgt = runtime::DecodeScratch::kAttnV2Blocks, kPart = 258, kMaxM = 8;
 
@@ -279,7 +283,7 @@ int main(int argc, char** argv) {
         for (auto& x : g0) x = nd(rng);
         uint32_t done = 0;
         const uint32_t same = prop_r(r, pos, Ms, q0.data(), g0.data(), 1000, rng, &done);
-        const bool pass = w.n1 >= 0.99999 && w.n2b >= 0.99999 && w.rep && same == done;
+        const bool pass = w.n1 >= kN1 && w.n2b >= kN1 && w.rep && same == done;
         ok = ok && pass;
         std::printf("S %s pos %4u: N1 worst %.8f (v2 %.8f)  N2b worst %.8f (max abs %.3g)  rep %s  N2a %u/%u bitwise%s\n",
                     kv8 ? "int8" : "bf16", pos, w.n1, w.n1_v2, w.n2b, w.abs_n2b, w.rep ? "yes" : "NO", same, done,
@@ -357,18 +361,12 @@ int main(int argc, char** argv) {
           for (uint32_t M : Ms) check(r, d, M, q, g, w);
           uint32_t done = 0;
           const uint32_t same = prop_r(r, d, Ms, q.data(), g.data(), 100, rng, &done);
-          // N1's bar: 0.99999 against the fp64 reference; for int8 KV, operator ruling 2026-11-03: "no further than
-          // pf_flash_attn_kv8 on the same row" - the prefill's production kernel, the same P-in-bf16 form. On this
-          // dump that row is depth 4096, (q head 19, row 0): pf_flash_attn_kv8 0.99998792 (probe_verify_attn arms,
-          // docs/probes/probe-verify-attn-2026-11-03.md §3), the bar there. Every other int8 depth meets 0.99999.
-          const double n1_bar = kv8 && d == 4096 ? kPfaKv8Row4096 : 0.99999;
-          const bool pass = w.n1 >= n1_bar && w.n2b >= n1_bar && w.rep && same == done;
+          const bool pass = w.n1 >= kN1 && w.n2b >= kN1 && w.rep && same == done;
           ok = ok && pass;
           std::printf("D %s depth %6u: N1 worst %.8f (v2 %.8f)  N2b worst %.8f (max abs %.3g)  rep %s  N2a %u/%u  "
-                      "bar %.8f%s%s\n",
+                      "bar %.8f%s\n",
                       kv8 ? "int8" : "bf16", d, w.n1, w.n1_v2, w.n2b, w.abs_n2b, w.rep ? "yes" : "NO", same, done,
-                      n1_bar, n1_bar < 0.99999 ? " (no further than pf_flash_attn_kv8 on that row)" : "",
-                      pass ? "" : "  <-- FAIL");
+                      kN1, pass ? "" : "  <-- FAIL");
         }
       }
     }

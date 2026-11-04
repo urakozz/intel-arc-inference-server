@@ -187,7 +187,19 @@ family exists that is genuinely easier to write in CuTe.
 engine and is up to 8.4x faster than the decode attention kernel. On one DFlash case (`t6_usage-loader`,
 7 guessed tokens, position 103) it returned a token at f32 rank 3, 4.0 below the top, whose own margin over
 the runner-up was 3.44: a kernel error, not a near-tie, and one the f32 judge (doc 14) caught where the
-bitwise comparison could not have been applied. The cause is not known. The kernel is the same code at every
-M, so every M was switched back to the v2 kernel on 2026-11-04 until it is fixed. The plan: re-test on IGC
-2.42.6, a compiler A/B on that kernel, a custom IGC only with evidence, otherwise a rewrite with fixed
-indices.
+bitwise comparison could not have been applied. Every M was switched back to the v2 kernel on 2026-11-04.
+
+**Answered 2026-11-04: P's bf16 rounding, not the compiler.** The new toolchain (IGC 2.42.6) gave the same
+token, bit for bit. `tools/probe/probe_vattn_ab` ran the real DFlash case with every verify done twice on the
+same state (DPAS, then v2) and replayed each full-attention layer's attention on v2's inputs against fp64:
+the 256-GRF build, a 128-GRF build (no spill), a `-cl-opt-disable` build and the scalar EAGER walk of the
+same algorithm all gave the same rows, so no compiler optimisation is involved. Their common cause is that
+the kernel rounded the softmax weights P to bf16 (8 bits) before the P x V product. On random data that
+error averages out (cosine 0.99999 against fp64, the test's bar); on real heads the key blocks' P x V
+partly cancel when merged, so a row's error grew to 1 - cos ~2e-5 (v2: ~1e-8), and over 16 layers a
+verify row's logits moved by up to 9. The fix splits P into two bf16 halves (hi + lo, as the kernel already
+did for q), one more matrix multiply per key pair: every layer is now at v2's level, the DFlash run is
+token-identical to plain, the kernel test's bar is tightened to 0.999997 (the old kernel fails it), and the
+re-timed table keeps every threshold (docs/probes/probe-verify-attn-2026-11-03.md §5). No register array is
+indexed at run time; masks, the causal bound inside the block, the partial tiles and the slice merge were
+checked block by block against fp64 (mx / sm / acc agree to ~1e-6).

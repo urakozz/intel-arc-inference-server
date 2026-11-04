@@ -229,3 +229,10 @@ quiet box. Record: docs/probes/probe-verify-attn-2026-11-03.md.
    path's is f32 rank 3, **4.0 below the top** (~32 ulp; the top's own margin 3.44). Not a rounding near-tie, so
    `kVerifyAttnTable`'s bf16 M = 6 / 7 / 8 rows are kDpasNever until the kernel is fixed (queued: attn_verify_dpas
    at 8 rows on this prompt). Then every row (MTP M = 2..4, int8 too) went to v2 the same day: the kernel is one code at every M and the cause is unknown. Log: box `~/b70/logs/cpu-1104/verdict.txt`.
+5. **Fixed and back on (2026-11-04, branch `fix-attn-verify-dpas`).** The cause was P in bf16 (docs/07 §11): not
+   IGC (2.42.6 gave the same token; 128 GRF, `-cl-opt-disable` and the EAGER walk give the same rows). The kernel
+   takes a seventh lever, **PSPLIT 1** (P as bf16 hi + lo, two PV DPAS per key-atom pair), on both production lines;
+   real-data layers are at v2's level (worst cos 0.9999989 against fp64, v2 0.9999989), DFlash K = 7 with DPAS at
+   every M is token-identical to plain on t6_usage-loader, `attn_verify_dpas_test`'s N1 bar is 0.999997 (int8 4096
+   now 0.99999994: deviation (1) and ruling 1 are retired), and the re-timed table (record §5) keeps every
+   `dpas_from`. Probe: `tools/probe/probe_vattn_ab.cc` (CaptureOptions::attn_dump, test / probe only).
