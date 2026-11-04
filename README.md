@@ -194,7 +194,7 @@ Qwen3.8-Flash-Next - decode, prefill and serving with its MTP head, built blind,
 until spec 22 runs the whole model - and Nemotron 3.5 Bolt - decode, prefill and serving on two cards, built blind,
 spec 25), what each one supports, its limits, and which configurations have
 actually run on a B70:
-[docs/19-running-models.md](docs/19-running-models.md).
+[docs/18-running-models.md](docs/18-running-models.md).
 
 ### Serving
 

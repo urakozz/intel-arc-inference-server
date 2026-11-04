@@ -6,6 +6,10 @@ and `$BOX` in every command. Nothing here requires that arrangement, but
 everything here assumes it, and a few of the consequences are worth writing
 down.
 
+Since 2026-11-03 the box is also *the check*: there is no Mac-side build or test run any
+more (`tools/mac_check.sh` was retired). Everything on the box lives under `~/b70`
+(trees, logs, data, trash), and nothing sits at the top level of the home directory.
+
 The box is a Linux workstation with **two cards**, and the layout extends to four
 (spec 16's pipeline parallel is written for two and keeps the device count a
 parameter).
@@ -29,27 +33,31 @@ anything except the Python CPU oracle and the reference vLLM stack.
 `tools/box.sh` and the benchmark helpers take the machine from
 `BOX=user@host`; there is no default address worth writing down.
 
-### Versions on the box (read 2026-10-22, after an `apt upgrade`)
+### Versions on the box (since 2026-11-04)
 
 | | version |
 |---|---|
-| kernel (running) | 7.3.0-rc4 with the P2P patch (`b70-p2p-exp2`); the upgrade also installed distro 7.0.0-38, so check which entry GRUB boots before a reboot |
-| IGC | 2.41.5 |
-| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.35.39758.10 |
-| Level Zero loader (`libze1`) | 1.33.1 |
-| oneAPI DPC++ compiler | 2026.2.0 (`compiler/latest`) **and** 2026.1.1, side by side |
-| oneDNN | 2026.1.0 and 2026.0.2, side by side |
+| kernel (running) | Linux 7.4.0-rc1, with peer-to-peer (P2P, one card writing straight into the other's memory over PCIe) supported natively; before 2026-11-04 it was 7.3.0-rc4 with a local P2P patch |
+| IGC (Intel Graphics Compiler, which turns OpenCL C into GPU code) | 2.42.6, from the GitHub release debs |
+| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.8, from the GitHub release debs |
 
-The upgrade left the driver stack (IGC, compute runtime, Level Zero) unchanged, so every
-kernel binary and every measured row in BENCHMARKS still comes from the same compiler and
-runtime. Only the oneAPI compiler moved, and since 2026-10-27 the engine build uses no
-oneAPI compiler at all (the sycl-tla prefill backend was removed).
+The 2026-11-04 upgrade changed the compiler and the runtime, so **every speed row in
+BENCHMARKS taken before it comes from the older stack** (compute runtime 26.35, IGC 2.41.5)
+until it is re-measured on a quiet box (open-work, "After the table is empty"). Kernel
+binaries cannot go stale silently: `cmake/ocloc_stamp.cmake` records `ocloc --version` and
+the real paths of the `libigc` / `libigdfcl` libraries the loader resolves, rewrites a stamp
+file only when they change, and every kernel target depends on it, so a new compiler
+recompiles every kernel. The engine build uses no oneAPI compiler at all (the sycl-tla prefill
+backend was removed on 2026-10-27), so the oneAPI and oneDNN versions on the box matter only
+to the stand-alone oneDNN probe.
 
 ## Driving a remote build
 
 `tools/box.sh` syncs the tree, configures, builds and runs `ctest` over ssh.
-Set `BOX=user@host` before using it; `REMOTE_DIR`, `JOBS`, `BUILD_DIR` and
-`CMAKE_ARGS` override the rest.
+Set `BOX=user@host` before using it (or put it in the untracked `tools/box.env`);
+`REMOTE_DIR`, `JOBS`, `BUILD_DIR` and `CMAKE_ARGS` override the rest. Each branch or
+worktree gets its own remote tree (`tools/box_dir.sh`), so parallel lines of work do not
+overwrite one another.
 
 ```sh
 tools/box.sh sync                 # rsync the tree
@@ -73,13 +81,26 @@ not fastidiousness: BuildKit discards *all* completed work, including finished
 layers, if the docker client dies, and a dropped connection can silently lose
 hours.
 
-**Validating work merged without the box** is one command, `tools/box_validate.sh`
+**The merge check** is `tools/box_check.sh`, run before every merge: it syncs this checkout,
+does the full build, compares every kernel's `ocloc` command line against a base
+(`tools/kernel_cmdlines`: an existing variant's command line must not change or vanish), and
+runs `ctest -LE checkpoint` (every test that needs no model files) on a free card. Passed,
+Failed and Skipped are counted apart, because a Skipped test is not a pass. Logs go under
+`~/b70/logs`.
+
+**GPU access is serialised.** Every job that touches a card goes through
+`tools/gpu_lock.sh`: `box` takes the whole machine (timed rows, two-card work, anything that
+wants an idle grade), `card N` takes one card and runs the command with `ZE_AFFINITY_MASK=N`
+so a second job can use the other card. A whole-box job waiting at the gate stops new card
+jobs, so timed work cannot starve.
+
+**Validating work in bulk** is one command, `tools/box_validate.sh`
 (`--dry-run` first to read what it will do). It runs the rows of
 [box-validation-queue.md](superpowers/plans/box-validation-queue.md) as stages in one
 detached orchestrator on the box, under the GPU lock, G0 (kernel binaries and gate outputs
 identical to a baseline build) first and stop-the-line on a G0 failure, resumable after an ssh
-drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its own tree is
-`~/b70-inference-server-validate`; its results are under `~/b70-validate/`.
+drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its results are on the box under `~/b70-validate/`, the latest result of every stage in
+`~/b70/logs/stage-latest.txt`.
 
 ## Device selection, and the gotcha
 
