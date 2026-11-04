@@ -65,6 +65,7 @@
 #include "loader/snapshot.h"
 #include "runtime/engine.h"
 #include "runtime/verify_attn.h"
+#include "spec_plain_row.h"
 
 namespace {
 using model::Qwen35;
@@ -236,7 +237,8 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
       const Gen g = generate(spec[k], p.ids, kGen, greedy);
       const spec_judge::StreamVerdict sv =
           spec_judge::streams(fj, std::string("mtp_gpu_") + loader::lm_head_form_name(head.lm_head) + "_" + p.name,
-                              p.ids, ref.ids, steps, g.ids, uint32_t(Qwen35::kVocab), uint32_t(Qwen35::kVocabUsed));
+                              p.ids, ref.ids, steps, g.ids, uint32_t(Qwen35::kVocab), uint32_t(Qwen35::kVocabUsed),
+                              spec_judge::engine_plain_row(L.eng, p.ids, uint32_t(Qwen35::kVocab)));
       const greedy_tie::Result& tr = sv.tie;
       const size_t d = tr.at;
       if (!sv.pass) ++divergences;

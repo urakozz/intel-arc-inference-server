@@ -1400,6 +1400,10 @@ if(B70_MTP)
     "Qwen3.8's f32 judges of the forced contexts, bf16 head (spec_judge.h's B70_FORCED_JUDGE)")
   set(B70_QWEN_FORCED_JUDGE_I8HEAD "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
+  # The operator's bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
+  # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
+  set(B70_QWEN_FORCED_BF16TOP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-bf16top-forced" CACHE PATH
+    "Qwen3.8's standard-bf16 top-k references of the forced contexts (spec_judge.h's bf16-unstable rule)")
   add_test(NAME mtp_verify_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
@@ -1415,7 +1419,7 @@ if(B70_MTP)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
-      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
     # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
@@ -1427,8 +1431,10 @@ if(B70_MTP)
       --lm-head bf16 --draft-vocab 128k)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
       LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
-    set_tests_properties(mtp_gpu_dv128k_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}")
-    set_tests_properties(mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}")
+    set_tests_properties(mtp_gpu_dv128k_test PROPERTIES ENVIRONMENT
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+    set_tests_properties(mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
@@ -3668,7 +3674,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_dependencies(dflash_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
-    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
   # Spec 19f (Review Focus 3-4): --spec dflash-lookup through EngineAdapter - D2 against the plain loop on golden, A4
   # and the edit / copy set's 8k / 32k prompts, the warm ring (bitwise the plain loop's after lookup runs), a seeded
   # sampled lookup run reproducible.
@@ -3680,7 +3686,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_dependencies(dflash_lookup_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_lookup_gpu_test COMMAND dflash_lookup_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_lookup_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
-    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
 endif()
 # b70-decode --spec dflash's refusals before the device.
 b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")

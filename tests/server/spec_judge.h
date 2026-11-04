@@ -17,6 +17,20 @@
 //                 tolerance": two bf16 paths whose rounding points differ), or the old bar (cosine >= 0.99999
 //                 against the plain row). Without a judge the old bar, and a row below it AWAITS its reference.
 //
+// THE bf16-UNSTABLE RULE (operator 2026-11-04): at a row where standard bf16 itself lands far from f32, a speculative
+// miss is graded against how far plain decoding already is from f32 there, not against the fixed 8 ulp; everywhere
+// else the strict rule stays. Per speculative miss at row r of its judge (the f32 top a, the speculative pick b):
+//   g32 = f32[a] - f32[b], in bf16 ulps of the f32 top (golden::bf16_ulp_at) - the miss
+//   g16 = the same pair's gap in a standard transformers bf16 reference of the same context
+//         (<B70_FORCED_BF16>/<key>.bf16top.safetensors, tools/oracle/qwen_bf16_top.py: top-k ids and logits per row
+//         plus the f32 top and the forced id), in the same unit
+//   the row is bf16-UNSTABLE when |g16 - g32| > golden::kNearMissUlp; then
+//   gp  = the pair's gap in the ENGINE's plain (M = 1) row on the same context (the test's PlainRow: a plain replay
+//         of prompt + plain[0, d) + spec[d, d + r))
+//   and the miss passes when g32 <= max(kNearMissUlp, |gp - g32|) - no further from f32 than plain decoding itself
+//   is on that pair. A miss with no bf16 reference, a stable row, or no plain row stays on the strict bar. Every row
+//   judged by this rule is printed (ids, the three gaps, the allowance, the verdict).
+//
 // A judge must be the one for the test's head form (the tag carries it: the int8 head's references are the
 // --lm-head int8 runs, f32_refs.sh's -i8head suffix).
 //
@@ -27,9 +41,11 @@
 // bitwise check of the tests, fails as before. The contexts are dumped as always (B70_DUMP_FORCED) - the dumps are
 // what f32_refs.sh turns into the references.
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -54,12 +70,42 @@ inline void await_reference(const std::string& key) {
   awaiting().contexts.insert(key);
 }
 
+// The engine's plain (M = 1) logits row after the test's prompt + `generated` (the ids decoded after it), [V] f32 -
+// the test replays its own plain path (tests/server/spec_plain_row.h). Empty function: no plain rows.
+using PlainRow = std::function<std::vector<float>(const std::vector<uint32_t>& generated)>;
+
+// One speculative miss beyond the near-miss bar, judged by the bf16-unstable rule.
+struct UnstableRow {
+  size_t row = 0;
+  uint32_t a = 0, b = 0;            // the f32 top, the speculative pick
+  double g32 = 0, g16 = NAN, gp = NAN, allow = golden::kNearMissUlp;
+  bool have_bf16 = false, unstable = false, have_plain = false, pass = false;
+  std::string line() const {
+    char buf[320];
+    if (!have_bf16)
+      std::snprintf(buf, sizeof buf, "row %zu: ids %u (f32 top) / %u (speculative): f32 gap %.2f ulp; no bf16 reference - "
+                    "the strict bar %.0f: FAIL", row, a, b, g32, golden::kNearMissUlp);
+    else if (!unstable)
+      std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f ulp - bf16 stable (|diff| %.2f <= "
+                    "%.0f): the strict bar: FAIL", row, a, b, g32, g16, std::fabs(g16 - g32), golden::kNearMissUlp);
+    else if (!have_plain)
+      std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f ulp - bf16-UNSTABLE, but no plain "
+                    "row: the strict bar: FAIL", row, a, b, g32, g16);
+    else
+      std::snprintf(buf, sizeof buf, "row %zu: ids %u / %u: f32 gap %.2f, bf16 gap %.2f, plain gap %.2f ulp - "
+                    "bf16-UNSTABLE: allowance max(%.0f, |plain - f32| = %.2f) = %.2f: %s", row, a, b, g32, g16, gp,
+                    golden::kNearMissUlp, std::fabs(gp - g32), allow, pass ? "PASS" : "FAIL");
+    return buf;
+  }
+};
+
 struct StreamVerdict {
   greedy_tie::Result tie;            // the tie-rule numbers (always computed, always printed)
   bool judged = false, pass = false;
   bool awaiting = false;             // not judged: the old rule fails it and its context has no f32 reference yet
   uint32_t miss_spec = 0, miss_plain = 0;
   double worst_spec_ulp = 0;         // the speculative stream's furthest miss below the f32 top
+  std::vector<UnstableRow> beyond;   // the speculative misses beyond the near-miss bar, each by the bf16-unstable rule
   std::string line() const {
     char b[256];
     if (tie.v == greedy_tie::Verdict::Same) return "identical";
@@ -75,7 +121,9 @@ struct StreamVerdict {
                     "/ %u plain ids from there (worst speculative miss %.2f ulp) - %s", tie.at, tv, tie.cand_rank,
                     tie.cand_gap, miss_spec, miss_plain, worst_spec_ulp, pass ? "PASS" : "FAIL");
     }
-    return b;
+    std::string out = b;
+    for (const UnstableRow& u : beyond) out += "\n      ** the bf16-unstable rule (operator 2026-11-04): " + u.line();
+    return out;
   }
 };
 
@@ -95,10 +143,71 @@ inline uint32_t misses(const golden::Golden& j, const std::vector<uint32_t>& for
   return n;
 }
 
+// A standard-bf16 reference's rows, top-k only (tools/oracle/qwen_bf16_top.py): `ids` int32 [1 + gen][C], `logits`
+// f32 [1 + gen][C] - the bf16 row's own top ids, the f32 top and the forced id, each with its bf16 logit.
+struct Bf16Top {
+  std::unique_ptr<golden::Golden> g;
+  size_t rows = 0, cols = 0;
+  explicit operator bool() const { return g != nullptr; }
+  // The bf16 logit of `id` at `row`, or NaN when the reference did not keep it.
+  double at(size_t row, uint32_t id) const {
+    const int32_t* ids = static_cast<const int32_t*>(g->raw("ids", "I32", rows * cols));
+    const float* lg = g->f32("logits", rows * cols);
+    for (size_t c = 0; c < cols; ++c)
+      if (uint32_t(ids[row * cols + c]) == id) return lg[row * cols + c];
+    return NAN;
+  }
+};
+inline Bf16Top open_bf16top(const golden::ForcedJudge& fj, const std::string& k, size_t gen) {
+  Bf16Top t;
+  if (fj.twin_dir.empty()) return t;
+  const std::string p = fj.twin_dir + "/" + k + ".bf16top.safetensors";
+  if (!golden::exists(p)) {
+    std::printf("  no bf16 reference for %s (%s; tools/oracle/qwen_bf16_top.py) - the strict near-miss bar applies\n",
+                k.c_str(), p.c_str());
+    return t;
+  }
+  t.g = std::make_unique<golden::Golden>(p);
+  t.rows = size_t(t.g->dim("ids", 2, 0));
+  t.cols = size_t(t.g->dim("ids", 2, 1));
+  CHECK_EQ(t.rows, gen + 1);
+  CHECK_EQ(uint64_t(t.cols), t.g->dim("logits", 2, 1));
+  return t;
+}
+
+// The bf16-unstable rule on one speculative miss (row `r` of the judge row `jrow`, the speculative pick `b`).
+// `plain_row` yields the engine's plain row on the same context (empty: none).
+inline UnstableRow unstable_rule(const float* jrow, uint32_t V, uint32_t VU, size_t r, uint32_t b, const Bf16Top& bt,
+                                 const std::function<std::vector<float>()>& plain_row) {
+  const golden::JudgedRow jr = golden::judge_row(jrow, V, VU);
+  UnstableRow u;
+  u.row = r;
+  u.a = jr.top;
+  u.b = b;
+  u.g32 = (double(jrow[u.a]) - double(jrow[b])) / jr.ulp;
+  if (bt) {
+    const double fa = bt.at(r, u.a), fb = bt.at(r, b);
+    u.have_bf16 = !std::isnan(fa) && !std::isnan(fb);
+    if (u.have_bf16) u.g16 = (fa - fb) / jr.ulp;
+  }
+  u.unstable = u.have_bf16 && std::fabs(u.g16 - u.g32) > golden::kNearMissUlp;
+  if (u.unstable && plain_row) {
+    const std::vector<float> p = plain_row();
+    u.have_plain = p.size() >= V;
+    if (u.have_plain) {
+      u.gp = (double(p[u.a]) - double(p[b])) / jr.ulp;
+      u.allow = std::max(golden::kNearMissUlp, std::fabs(u.gp - u.g32));
+    }
+  }
+  u.pass = u.unstable && u.have_plain && u.g32 <= u.allow;
+  return u;
+}
+
 // N6. `steps[i]` is the plain row that decided plain[i] (greedy_tie.h); `tag` names the test, prompt and head form.
 inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& tag, const std::vector<uint32_t>& prompt,
                              const std::vector<uint32_t>& plain, const std::vector<greedy_tie::RefStep>& steps,
-                             const std::vector<uint32_t>& spec, uint32_t V, uint32_t VU) {
+                             const std::vector<uint32_t>& spec, uint32_t V, uint32_t VU,
+                             const PlainRow& plain_row = {}) {
   StreamVerdict v;
   v.tie = greedy_tie::classify(plain, steps, spec);
   if (v.tie.v == greedy_tie::Verdict::Same) {
@@ -124,6 +233,27 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
   v.miss_plain = misses(*jp, fp, V, VU, &unused);
   v.miss_spec = misses(*js, fs, V, VU, &v.worst_spec_ulp);
   v.pass = v.miss_spec <= v.miss_plain || v.worst_spec_ulp <= golden::kNearMissUlp;
+  if (v.pass) return v;
+  // More misses than plain, one beyond the near-miss bar: each such miss by the bf16-unstable rule.
+  const Bf16Top bt = open_bf16top(fj, ks, fs.size());
+  const float* rows = js->f32("logits", size_t(js->dim("logits", 2, 0)) * V);
+  bool all = true;
+  for (size_t r = 0; r < fs.size(); ++r) {
+    const float* jrow = rows + r * V;
+    if (golden::row_accepts(jrow, fs[r], V, VU)) continue;
+    const golden::JudgedRow jr = golden::judge_row(jrow, V, VU);
+    if ((double(jrow[jr.top]) - double(jrow[fs[r]])) / jr.ulp <= golden::kNearMissUlp) continue;   // a near-miss
+    std::function<std::vector<float>()> pr;
+    if (plain_row)
+      pr = [&] {
+        std::vector<uint32_t> gen(plain.begin(), plain.begin() + d);
+        gen.insert(gen.end(), fs.begin(), fs.begin() + r);
+        return plain_row(gen);
+      };
+    v.beyond.push_back(unstable_rule(jrow, V, VU, r, fs[r], bt, pr));
+    all = all && v.beyond.back().pass;
+  }
+  v.pass = all;
   return v;
 }
 

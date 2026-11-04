@@ -28,6 +28,7 @@
 #include "check.h"
 #include "greedy_tie.h"
 #include "spec_judge.h"
+#include "spec_plain_row.h"
 #include "cli/serve_adapters.h"
 #include "golden_common.h"
 #include "l0/context.h"
@@ -142,7 +143,9 @@ int main(int argc, char** argv) {
       const Gen g = generate(a, p.ids, kGen, greedy, i == 0 ? kK : i == 1 ? 3 : 0, i == 2);
       const spec_judge::StreamVerdict sv = spec_judge::streams(fj, std::string("dflash_gpu_int8_") + p.name, p.ids,
                                                                plain.ids, steps, g.ids, uint32_t(model::Qwen35::kVocab),
-                                                               uint32_t(model::Qwen35::kVocabUsed));
+                                                               uint32_t(model::Qwen35::kVocabUsed),
+                                                               spec_judge::engine_plain_row(
+                                                                   e, p.ids, uint32_t(model::Qwen35::kVocab)));
       std::printf("D2 %-28s %-4s %s, %llu iterations, %.2f ids an iteration, acceptance %.3f\n", p.name.c_str(),
                   arm[i], sv.line().c_str(), (unsigned long long)g.iters,
                   double(kGen) / double(std::max<uint64_t>(1, g.iters)),
