@@ -45,7 +45,9 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 ## After the table is empty
 
-1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image.
+1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image; then
+   refresh README.md and docs/BENCHMARKS.md (they still say "nothing measured" for Ornith, K2, Flash-Next, Bolt and show
+   pre-upgrade headline rows) and the per-model table in docs/18-running-models.md.
 2. Spec 13 batching (13b), spec 28m MoE draft-checking probe. (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
    the independent evidence - see the notes at the top of their design docs; their plans were deleted.)
 3. Box layout: everything under `~/b70` (branches `box-layout`, `plan-box-move`).
@@ -54,6 +56,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-04 | docs | core docs 01-18 refreshed (19-running-models renamed 18) |
 | 2026-11-04 | 16 | two-card prefix cache + MTP: the head's KV row end - 1 read from a shadow copy taken before the next chunk can rewrite it; 9/9 pipeline tests, box_check 313/0/0 |
 | 2026-11-04 | 28 | 28d: DFlash drafter on the small-batch GEMM (draft step 16.3 -> 8.9 ms), Flash-Next verify on it |
 | 2026-11-04 | build | kernels recompile when the GPU compiler changes (`cmake/ocloc_stamp.cmake`) |
