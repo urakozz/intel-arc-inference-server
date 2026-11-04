@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Spec 25a Task 4: the Nemotron 3.5 Bolt 74B-A9B facts - the rounding chain cited into the remote code (R) and the
 native 5.19.0 class (N), the checkpoint from its small files, its shard headers and a few tensors read by HTTP range,
-tokens, the template, and torch's CPU behaviours the reference depends on. docs/probe-bolt-2026-10-21.md quotes it.
+tokens, the template, and torch's CPU behaviours the reference depends on. docs/probes/probe-bolt-2026-10-21.md quotes it.
 
     bolt_facts.py <snapshot dir> [--section cite,checkpoint,bytes,quant,tokens,template,prompts,ties,gemm,sum9]
                   [--bf16 <BF16 snapshot dir>] [--cache DIR] [--headers] [--sample] [--write-fixtures]

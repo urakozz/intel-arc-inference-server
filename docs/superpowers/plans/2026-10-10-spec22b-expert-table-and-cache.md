@@ -52,7 +52,7 @@ golden sets - and its first speed rows against P0.7's projection.
 **Tech Stack:** C++17, OpenCL C (ocloc), Level Zero, CMake/ctest; Python 3 for the profile file in tests.
 
 **Spec:** `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` (§4, §5 O0 O1 O3 O4, §6 22b, §7
-decisions 1, 2, 4, 6, 8) and plan 22a's record `docs/probe-offload-<date>.md` (the decisions' evidence). Spec 21 §13
+decisions 1, 2, 4, 6, 8) and plan 22a's record `docs/probes/probe-offload-<date>.md` (the decisions' evidence). Spec 21 §13
 (the layouts, the PLE's host-USM pinning and alias check in `loader/qwen4exp_ple_usm.cc`, the planner), §14 (the decode
 list, the macro pair), §15 (the prefill walk, the dequant batches), §16 (verify at M = K + 1, the head's MoE).
 Precedents: `loader/qwen4exp_ple.{h,cc}` + `qwen4exp_ple_usm.cc` (a host-USM table, its tags, its device pointer table

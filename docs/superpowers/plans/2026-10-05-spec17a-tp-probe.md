@@ -88,7 +88,7 @@ bounded waits), plan 28a (`probe_small_m`, `probe_verify_m`'s profiled lists).
 - [ ] **Step 1:** `offload_links.sh` idle and `--under-load` (both cards' LnkCap / LnkSta and every bridge: replaces
   the operator-stated PCIe 3.0 x16 with a measured line; a STOP line below Gen3 x8 is a NO-GO input); the BAR lines
   (`lspci -vv` region sizes, both cards); the running kernel's version string; `zeDeviceCanAccessPeer` and the P2P
-  properties both ways. Record in `docs/probe-tp-<date>.md` §1. Commit
+  properties both ways. Record in `docs/probes/probe-tp-<date>.md` §1. Commit
   `git commit -S -m "probe: the two cards' links, BARs and peer access, measured (spec 17a)"`.
 
 ### Task 3: the CPU into VRAM through the BAR (box, `r71.bar`)
@@ -160,7 +160,7 @@ its arms reuse `probe_tp` (Task 1 above) with Bolt's shapes added to `tp_shapes.
 
 **Conditions (operator, 2026-10-23):** this plan **starts only after `r22.devices` and `r22.p1` have PASSed on the box**
 (spec 16's first two-card rows: two cards in one process, peer access, the `copy` / `peer` hand-offs bitwise). It is
-standalone: it depends on no spec 16a artefact (16a never ran; `docs/probe-multi-gpu-2026-10-05.md` and
+standalone: it depends on no spec 16a artefact (16a never ran; `docs/probes/probe-multi-gpu-2026-10-05.md` and
 `tools/probe/probe_p2p.*` do not exist) and owns its probe.
 
 (The 2026-10-23 status line moved to the top of this file.)
@@ -246,7 +246,7 @@ plan 22a (`offload_links.sh`, `probe_offload`'s interleaving and bounded waits),
 - [ ] **Step 1:** `offload_links.sh` idle and `--under-load` (both cards' LnkCap / LnkSta, every bridge to the root port);
   the line replaces spec 17 §1's operator-stated row. A STOP line (below Gen3 x8) is a NO-GO input.
 - [ ] **Step 2:** `probe_tp peer`: copy engine 0 -> 1, 1 -> 0, both at once; kernel push and pull; 4 KiB to 64 MiB;
-  immediate and replayed. Record in `docs/probe-tp-<date>.md`. Commit
+  immediate and replayed. Record in `docs/probes/probe-tp-<date>.md`. Commit
   `git commit -S -m "probe: the two cards' links and peer rates, push and pull (spec 17a)"`.
 
 ### Task 3: the crossing latency (box, `r68.cross`, `r68.head`)

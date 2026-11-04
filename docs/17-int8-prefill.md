@@ -1,7 +1,7 @@
 # 17. The int8 prefill: how 2104.50 t/s is computed
 
 The short version of spec 5 and the two weeks of probes behind it. The
-evidence is `docs/probe-w4a8-2026-09-23.md` (sections 1 to 15), the design is
+evidence is `docs/probes/probe-w4a8-2026-09-23.md` (sections 1 to 15), the design is
 `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md`, and the rows are
 in `BENCHMARKS.md`. Every number is **measured** unless marked **derived**.
 

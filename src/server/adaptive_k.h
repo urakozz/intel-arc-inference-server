@@ -48,7 +48,7 @@ struct MtpCost {
   //                     pairs, int8 head, depth 4096, busy-box timing): 1.18 / 1.30 / 1.35 / 1.56 - the bf16 head's
   //                     the same rows (derived: its M = 2..4 rows equal the int8 head's within 0.01). M = 8's step
   //                     is the attention build's (spec 28c), not the GEMM's. (Before 28b: M = 3 -> 4's slope,
-  //                     0.22 a row, docs/probe-dflash-2026-10-08.md §3.)
+  //                     0.22 a row, docs/probes/probe-dflash-2026-10-08.md §3.)
   //   draft             the drafter's weights read once (int8 ~1.8 GB -> 0.10, bf16 ~3.6 GB -> 0.19 of the 32.65 ms
   //                     int8 plain step) plus the target's head over the K mask rows, read once (int8 1.27 GB ->
   //                     0.07, bf16 2.54 GB -> 0.14), whatever K (spec 19 §3).

@@ -37,7 +37,7 @@
 
 ### Task 3: teacher-forced acceptance (Mac)
 
-- [ ] `tools/oracle/dflash_accept.py`: at every position draft K = 1..7 from the taps, compare with the next greedy ids, report the acceptance-length distribution and mean tokens per verify per corpus; arms: drafter bf16, drafter int8 per-channel RTN (simulated), `syvai/Qwen3.8-27B-DFlash2-W4A16` if the operator downloads it, draft vocabulary V′ = 32k / 64k / 128k (Review Focus 5). Record in `docs/probe-dflash-<date>.md`. **Commit** `probe: DFlash acceptance on our prompts (spec 19a)`.
+- [ ] `tools/oracle/dflash_accept.py`: at every position draft K = 1..7 from the taps, compare with the next greedy ids, report the acceptance-length distribution and mean tokens per verify per corpus; arms: drafter bf16, drafter int8 per-channel RTN (simulated), `syvai/Qwen3.8-27B-DFlash2-W4A16` if the operator downloads it, draft vocabulary V′ = 32k / 64k / 128k (Review Focus 5). Record in `docs/probes/probe-dflash-<date>.md`. **Commit** `probe: DFlash acceptance on our prompts (spec 19a)`.
 
 ### Task 4: verify cost at M = 5..8 (box)
 
@@ -85,7 +85,7 @@
 
 ## Status (2026-10-08)
 
-- **Tasks 2-3 done** (Mac CPU, 2026-10-06 12:40 to 10-08 02:54): `docs/probe-dflash-2026-10-08.md`.
+- **Tasks 2-3 done** (Mac CPU, 2026-10-06 12:40 to 10-08 02:54): `docs/probes/probe-dflash-2026-10-08.md`.
   E_7 = 7.21 on A4, 6.15 code, 2.2 prose; int8 / w4a16 drafters and the ranked 32k V′ equal bf16.
   Provisional projection (verify at M = 5..8 extrapolated): go on code and agentic output, prose
   marginal. **Task 4 (box) and Task 5 decide formally.**

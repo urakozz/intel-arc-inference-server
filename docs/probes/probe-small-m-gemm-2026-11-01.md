@@ -138,7 +138,7 @@ checks-1101's jobs. The verify lists: int8 head, attention v2, bf16 KV.
 | depth 4096, probe_mtp_steps pairs (x M = 1) | 1 | 1.158 | 1.514 | 1.716 | 2.005 | 2.375 | 2.629 | **3.167** |
 | depth 32768, 1v (x M = 1; M = 1 is 34.65 ms) | 1 | 1.219 | 1.592 | 1.831 | 2.392 | 3.151 | 3.612 | 4.277 |
 
-verify(8) is 3.17 plain steps, measured - not the 2.62 docs/probe-dflash-2026-10-08.md §3 extrapolated.
+verify(8) is 3.17 plain steps, measured - not the 2.62 docs/probes/probe-dflash-2026-10-08.md §3 extrapolated.
 
 **Profiled per-family time at depth 4096** (ms/step; each launch's event adds a flush - shares, not times):
 
@@ -190,7 +190,7 @@ for K 6144, and layer 63's silu(gate) x up of those rows, computed on the host, 
   compared (bf16 and i8, wB and wA, every slice of S).
 - **The int arm** computes its own definition (0.0027 of the bound against its quantised rows' fp64), but unrotated
   per-row int8 rows lose up to cosine 0.9931 (down, real rows). The logit-level error on the four prompts
-  (docs/probe-w4a8-2026-09-23.md §15.4, a CPU oracle run) was not run (the CPU model lock was held); the type rule
+  (docs/probes/probe-w4a8-2026-09-23.md §15.4, a CPU oracle run) was not run (the CPU model lock was held); the type rule
   needs no more - i8 is not faster.
 
 ## 4. The provisional verdict (spec 28 §6) - busy-box timing, provisional

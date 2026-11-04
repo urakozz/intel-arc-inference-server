@@ -215,7 +215,7 @@ pair), the `B70_PREFILL_*` switches for prefill experiments, `B70_GIT_SHA` for b
 
 `z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden
 states (the outputs of layers 5 / 19 / 33 / 47 / 61). Its acceptance on our prompts is measured on the Mac CPU (spec 19a
-P0, `docs/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on
+P0, `docs/probes/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on
 prose; int8 and 4-bit drafters equal bf16). The engine runs it since spec 19b-19d; it has run on the card
 since 2026-10-27 (box queue rows 54, 55, 56, measured in BENCHMARKS "DFlash"), and the verdict is an option, not the default.
 Since spec 28d the drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step 16.3 -> 8.9 ms).
@@ -247,7 +247,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
   until 2048 new positions have refilled the ring (spec 19 §12).
 
 Re-running the acceptance measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
-~54 GB - the first run's numbers are in `docs/probe-dflash-2026-10-08.md` §4):
+~54 GB - the first run's numbers are in `docs/probes/probe-dflash-2026-10-08.md` §4):
 
 ```sh
 # downloads (HF cache): the target in bf16 (~54 GB), the drafter (3.85 GB); optional 4-bit drafter arm
@@ -271,7 +271,7 @@ STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
 format; an MTP head of Qwen3.8's shape. 22.9 GB download.
 
 **Status: built; its box test row 1 passed, no speed row yet** (queue row 1). On the Mac: the CPU reference, the fold
-(bit-exact on the real weights) and the template were checked (docs/probe-agnes-2026-10-03.md).
+(bit-exact on the real weights) and the template were checked (docs/probes/probe-agnes-2026-10-03.md).
 GEMV tuning rows are provisional copies of Qwen3.8's. Expected (derived): decode ~26 t/s at
 depth 4096 with the int8 head, prefill ~1850-1900 t/s at 4096. Weights ~21.0 GB with the
 bf16 head, ~19.7 GB with int8 (derived).

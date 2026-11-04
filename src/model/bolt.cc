@@ -6,7 +6,7 @@
 namespace model {
 namespace {
 
-// The published pattern and per-MoE-layer (E, I): docs/probe-bolt-2026-10-21.md §2 (25a read them from the published
+// The published pattern and per-MoE-layer (E, I): docs/probes/probe-bolt-2026-10-21.md §2 (25a read them from the published
 // config's block_configs); tests/model/bolt_test.cc holds this table to the vendored config.json block by block.
 const char* const kPattern = "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME";
 struct EI {

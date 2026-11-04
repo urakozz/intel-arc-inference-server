@@ -8,7 +8,7 @@
 
 **Tech Stack:** OpenCL C (ocloc AOT, 256 GRF), Level Zero, C++20, CMake/ctest, Python 3 in the oracle container for tokenisation; the box.
 
-**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md`. The measured basis is `docs/probe-flash-attn-2026-09-25.md`.
+**Spec:** `docs/superpowers/specs/2026-09-25-spec6-flash-attention-128k-design.md`. The measured basis is `docs/probes/probe-flash-attn-2026-09-25.md`.
 
 ## Global Constraints
 

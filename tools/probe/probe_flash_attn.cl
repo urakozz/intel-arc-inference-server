@@ -1,6 +1,6 @@
 // probe_flash_attn - spec 6 P1: fused bf16 flash attention, one arm per -D set.
 // Contract and layouts: docs/superpowers/plans/2026-09-25-spec6a-flash-attn-baseline-and-probe.md.
-// Record: docs/probe-flash-attn-2026-09-25.md.
+// Record: docs/probes/probe-flash-attn-2026-09-25.md.
 //
 //   Q   bf16 [C][24][256]    pf_q; q-head h = 6 j + l for kv head j
 //   Kc  bf16 [depth][4][256] one layer's K cache, depth = pos + C

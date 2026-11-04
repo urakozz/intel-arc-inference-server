@@ -73,7 +73,7 @@ Expected: `tiny check: OK` and the lines Step 2 records.
 ### Task 2: the facts sheet (Mac: source and small files only)
 
 **Files:**
-- Create: `docs/probe-qwen4exp-2026-10-09.md` (date = the day it is written), `tools/oracle/qwen4exp_facts.py`
+- Create: `docs/probes/probe-qwen4exp-2026-10-09.md` (date = the day it is written), `tools/oracle/qwen4exp_facts.py`
 - Modify: `docs/README.md` (one line)
 
 **Interfaces:**

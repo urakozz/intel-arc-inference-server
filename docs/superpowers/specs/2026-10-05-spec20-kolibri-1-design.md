@@ -239,7 +239,7 @@ forward with the reference, so kernels and capture can be tested before spec 16 
 ## 10. 20a as built (2026-10-06)
 
 Plan: `docs/superpowers/plans/2026-10-05-spec20a-kolibri-reference-and-quant.md`. Facts:
-`docs/probe-kolibri-2026-10-05.md`. No card, no weights: small files and range-fetched headers.
+`docs/probes/probe-kolibri-2026-10-05.md`. No card, no weights: small files and range-fetched headers.
 
 - **The model class:** `tools/oracle/third_party/kolibri1/{modeling,configuration}_kolibri1.py`,
   `Kolibri1ForCausalLM` for transformers 5.x (Apache-2.0 header naming the plugin), names = the

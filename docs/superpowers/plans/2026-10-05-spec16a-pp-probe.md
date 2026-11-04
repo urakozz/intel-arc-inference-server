@@ -29,7 +29,7 @@
 
 ### Task 1: capability and bandwidth
 
-- [ ] `tools/probe/probe_p2p.{cl,cc}`: `zeDeviceCanAccessPeer` both ways; one context with both devices; copy-engine copies device→peer at 10 KB, 1 MB, 20 MB, 64 MB; kernel peer writes (a kernel on device 0 storing into device 1 memory) at the same sizes; both directions; GB/s and µs. `docs/probe-multi-gpu-2026-10-05.md`. **Commit** `probe: two-B70 peer access and bandwidth (spec 16 P0)`.
+- [ ] `tools/probe/probe_p2p.{cl,cc}`: `zeDeviceCanAccessPeer` both ways; one context with both devices; copy-engine copies device→peer at 10 KB, 1 MB, 20 MB, 64 MB; kernel peer writes (a kernel on device 0 storing into device 1 memory) at the same sizes; both directions; GB/s and µs. `docs/probes/probe-multi-gpu-2026-10-05.md`. **Commit** `probe: two-B70 peer access and bandwidth (spec 16 P0)`.
 
 ### Task 2: the PP hand-off options
 

@@ -41,7 +41,7 @@
 **Files:** `src/kernels/CMakeLists.txt`, `src/kernels/prefill/CMakeLists.txt`, `src/kernels/kernels.h`, the GEMV tuning table (where `capture.cc` reads `{C, S}` per shape), `tests/kernels/*` cases at the new shapes (host reference, `gemv_test` / `pf_gemm_test` / `pf_int8_test` patterns).
 
 - [ ] **Step 1:** variants at `INTERMEDIATE=19456`; GEMV shapes `N=38912 K=5120`, `N=5120 K=19456`; prefill slab counts 38 / 19.
-- [ ] **Step 2:** tune the two GEMV shapes with the method of `docs/probe-gemv-2026-08-24.md` (sweep `C`/`S`/layout, interleaved); record the table and GB/s (Review Focus 2).
+- [ ] **Step 2:** tune the two GEMV shapes with the method of `docs/probes/probe-gemv-2026-08-24.md` (sweep `C`/`S`/layout, interleaved); record the table and GB/s (Review Focus 2).
 - [ ] **Step 3:** kernel tests at the new shapes pass; Qwen3.8 binaries byte-identical. **Commit** `kernels: Agnes shapes and GEMV tuning rows (spec 14)`.
 
 ### Task 3: the engine on Agnes

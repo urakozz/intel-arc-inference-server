@@ -56,47 +56,47 @@ short version; this is where the reasoning and the evidence live.
 | [10-the-box.md](10-the-box.md) | the box is the check: box_check, the GPU lock, the toolchain, and why an idle box matters for a benchmark |
 | [box-day-plan.md](box-day-plan.md) | the box-day run plan for the validation queue: sessions, invocations, time estimates, what to defer, what each result decides |
 
-## Measurement records
+## Probes (evidence behind decisions)
 
-Dated, self-contained records of one experiment each. They are evidence, not
-narrative, and the numbered guides cite them where they matter.
+Dated, self-contained records of one experiment each, in [probes/](probes/). They are
+evidence, not narrative, and the numbered guides cite them where they matter.
 
-- [probe-prefix-cache-2026-09-27.md](probe-prefix-cache-2026-09-27.md) - prefix
+- [probe-prefix-cache-2026-09-27.md](probes/probe-prefix-cache-2026-09-27.md) - prefix
   caching (spec 7): pinned host copies at 12-14 GB/s, the tail floor at depth, the
   write-through cost (S3), S1/S2 at 60k and the replayed opencode-shaped session
-- [probe-dpas-rates-2026-09-22.md](probe-dpas-rates-2026-09-22.md) - DPAS rate
+- [probe-dpas-rates-2026-09-22.md](probes/probe-dpas-rates-2026-09-22.md) - DPAS rate
   by data type, with the assembly that proves the loops are DPAS bound
-- [probe-fused-dequant-2026-09-22.md](probe-fused-dequant-2026-09-22.md) -
+- [probe-fused-dequant-2026-09-22.md](probes/probe-fused-dequant-2026-09-22.md) -
   fusing int4 dequant into the GEMM: bitwise correct, slower, **rejected**
-- [probe-flash-attn-2026-09-25.md](probe-flash-attn-2026-09-25.md) - the
+- [probe-flash-attn-2026-09-25.md](probes/probe-flash-attn-2026-09-25.md) - the
   fused flash-attention probe (spec 6 P0/P1): the attention baselines, the
   composed path against fp64, and the tile sweep whose winner,
   `pfa_KT64_R16_H6_Q0`, is the production `pf_flash_attn`
-- [probe-mtp-2026-09-27.md](probe-mtp-2026-09-27.md) - spec 8 P0: the MTP
+- [probe-mtp-2026-09-27.md](probes/probe-mtp-2026-09-27.md) - spec 8 P0: the MTP
   head's reference wiring (post-norm hidden, embed first), draft acceptance by
   depth, the verify step at M = 1..4 (1.17 / 1.52 / 1.74 steps), K = 3
   provisional and the `Control` index for commit; opencode rows pending the log
-- [probe-lm-head-2026-09-28.md](probe-lm-head-2026-09-28.md) - spec 9 P0: an int8
+- [probe-lm-head-2026-09-28.md](probes/probe-lm-head-2026-09-28.md) - spec 9 P0: an int8
   per-row `lm_head` against bf16 on the CPU. Cosine and argmax pass. The top-20 set
   (92.0 %) and the filtered KL mean fail as written, and bf16 output rounding fails
   them too; the head stays bf16 pending the operator's ruling. Host quantisation
   takes 3.3 s
-- [probe-int8-kv-2026-09-28.md](probe-int8-kv-2026-09-28.md) - spec 12a, **Agnes
+- [probe-int8-kv-2026-09-28.md](probes/probe-int8-kv-2026-09-28.md) - spec 12a, **Agnes
   stand-in** on the Mac: int8 KV schemes against bf16 KV, by attention replay (1k-32k
   tiled) and end to end. Not a stop. Per-token K fails on outlier channels; KIVI and
   rotated K tie; rotating V too (`rotkv`) is best and below the bf16 eager path's own
   error. Proposed `rotkv` (decide), Q3 tolerances, and the Qwen3.8 repeats for the box
-- [probe-dflash-2026-10-08.md](probe-dflash-2026-10-08.md) - spec 19a P0 on the Mac CPU:
+- [probe-dflash-2026-10-08.md](probes/probe-dflash-2026-10-08.md) - spec 19a P0 on the Mac CPU:
   DFlash2's acceptance on Qwen3.8 (A4 tool calls 7.21 tokens per verify at K = 7, code 6.15,
   prose 2.2); int8 / 4-bit drafters cost nothing; a ranked 32k draft vocabulary too (in-sample ranking: an upper bound). Provisional
   go on code and agentic output (+54-65 % over `--mtp auto`, derived); verify at M = 5..8 is
   the box's to measure (plan 19a Task 4).
-- [probe-batching-2026-10-23.md](probe-batching-2026-10-23.md) - spec 13a: rows of different sequences in one
+- [probe-batching-2026-10-23.md](probes/probe-batching-2026-10-23.md) - spec 13a: rows of different sequences in one
   decode step - the audit (six per-sequence kernels, file:line), the `B70_BATCH_PROBE` row builds and
   `probe_batch_step` (bitwise on the Mac for gdn_step / attn_prep; the box's check PENDING), the step and chunk
   tables (derived; measured PENDING - queue row 66), the layouts' memory from the code (Qwen3.8 4 slots 1.94 GB
   spare; Agnes 2 with MTP 1.76, 4 with `--mtp off` 1.22), the row table for 13b.
-- [probe-small-m-gemm-2026-11-01.md](probe-small-m-gemm-2026-11-01.md) - spec 28a: Qwen3.8's decode linears at
+- [probe-small-m-gemm-2026-11-01.md](probes/probe-small-m-gemm-2026-11-01.md) - spec 28a: Qwen3.8's decode linears at
   M = 1..16 through gemv and small-M DPAS stand-ins (`probe_small_m`, 347 binaries), the verify step at M = 1..8 split
   into GEMV and non-GEMV (`probe_verify_m --verify8`), numerics and property R on layer 62 / 63's weights. Busy-box
   timing on one card (provisional): bf16 weights-on-B at M = 8 is 1.08x a token's M = 1 GEMV sum (today 3.10x);
@@ -106,38 +106,38 @@ narrative, and the numbered guides cite them where they matter.
   in production for every M >= 2 decode list (Qwen3.8, Agnes, Ornith's dense projections), M = 1 bitwise; verify(8)
   1.57 plain steps (gemv 3.17), D1 tool calls 2.12x at K = 3 (busy-box timing); N4 / N6 as written not met - the
   operator's ruling pending.
-- [probe-qwen4exp-2026-10-09.md](probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
+- [probe-qwen4exp-2026-10-09.md](probes/probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
-- [probe-bolt-2026-10-21.md](probe-bolt-2026-10-21.md) - spec 25a: Nemotron 3.5 Bolt 74B-A9B - the rounding chain
+- [probe-bolt-2026-10-21.md](probes/probe-bolt-2026-10-21.md) - spec 25a: Nemotron 3.5 Bolt 74B-A9B - the rounding chain
   cited into the remote code (63 anchors), both checkpoints from their headers (the third-party g128 export's 112,940 tensors - served since 2026-10-29: our g64 export -, the BF16
   original's `backbone` names and 74,042,720,768 parameters), signed / subnormal scales, the dt-clamp census (212 of
   5,120 heads), tokens and the template (14 renders in `tests/server/bolt_template_cases.json`), torch's tie order and
   fp32-GEMM row-count dependence, B1's bounds, the bf16 table, and R's fallback state-passing bug past 128 rows.
-- [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
+- [probe-eagle3-k2-2026-10-08.md](probes/probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
   **no-go** - the community drafter is undertrained (golden: 0.23 / 0.06 acceptance, below plain decode at
   every K); prompt lookup wins (to 1.68x at 4k). K2 verify costs 1.26x / 1.63x a plain step at M = 2 / 4.
-- [probe-int8-kv-qwen38-2026-10-06.md](probe-int8-kv-qwen38-2026-10-06.md) - the 12a
+- [probe-int8-kv-qwen38-2026-10-06.md](probes/probe-int8-kv-qwen38-2026-10-06.md) - the 12a
   repeat on **Qwen3.8** (Mac CPU, plan 12b Task A): `rotkv` holds (golden cos mean
   0.99995-0.99997, above the stop rule; replay flat to 32k, below bf16 eager's own error).
   Sets 12b's tolerances: Q2 1e-4 confirmed; Q3 2e-3 per depth and 5e-4 averaged.
-- [probe-agnes-2026-10-03.md](probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
+- [probe-agnes-2026-10-03.md](probes/probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
   Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
   CPU reference, the parallel-FFN fold (bit-exact on the weights, C++ byte-identical to
   Python, real layers 0/3/35/71 on real activations: max |d| 0), the reference bit-identical
   to `modeling_agnes.py`, the golden and MTP dumps made layer-streamed in Docker, the
   chat template identical to Qwen3.8's; what is pending for the box
-- [probe-verify-attn-2026-11-03.md](probe-verify-attn-2026-11-03.md) - spec
+- [probe-verify-attn-2026-11-03.md](probes/probe-verify-attn-2026-11-03.md) - spec
   28c: the verify step's attention on DPAS (attn_verify_dpas) against v2 at M = 2..8 x
   depth 512..130816, bf16 and int8 KV - the levers, the table the rule is built from,
   numerics, the in-list and end-to-end speed (busy box)
-- [probe-decode-attn-2026-09-28.md](probe-decode-attn-2026-09-28.md) - spec
+- [probe-decode-attn-2026-09-28.md](probes/probe-decode-attn-2026-09-28.md) - spec
   10a: decode attention at depth. P0 (69% of the step at 128k, 149 GB/s), the
   lever sweep at M = 1 and 4 on real KV, and the v2 design: device-derived
   stride, block-read V, m-inner single-barrier waves, exp2; 4.4x at 128k,
   derived 28.3 / 25.8 / 21.7 t/s against the A-F3 bars
-- [probe-w4a8-2026-09-23.md](probe-w4a8-2026-09-23.md) - W4A8 on the mixed
+- [probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md) - W4A8 on the mixed
   4-by-8 DPAS: 0.965x the control and 2.79% relative error, **rejected**; the
   group-size sweep in §13 shows why, and that per-channel scales would reach
   1.752x while every group size a real int4 checkpoint uses does not

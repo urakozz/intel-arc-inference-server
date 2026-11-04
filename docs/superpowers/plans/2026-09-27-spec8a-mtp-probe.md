@@ -35,7 +35,7 @@
 - Create: `tools/oracle/mtp_ref.py` (loads `mtp.*` from the checkpoint via the safetensors index; implements `fc`, the norms, the one transformer layer (a full-attention layer as the main model's, reuse `tools/oracle`'s layer code if it has one; otherwise port from the reference), `mtp.norm`, the shared `lm_head`), `tools/oracle/test_mtp_ref.py`
 - Modify: `tools/oracle/dump.py` only if needed to save per-position final hidden states for a prompt (`--hidden-out FILE`)
 
-- [ ] **Step 1:** find the reference (vLLM source on the box or in the oracle container: `find / -name "*mtp*.py" -path "*vllm*" 2>/dev/null`); write down the wiring (Review Focus 1, 2) in the doc skeleton `docs/probe-mtp-2026-09-27.md`.
+- [ ] **Step 1:** find the reference (vLLM source on the box or in the oracle container: `find / -name "*mtp*.py" -path "*vllm*" 2>/dev/null`); write down the wiring (Review Focus 1, 2) in the doc skeleton `docs/probes/probe-mtp-2026-09-27.md`.
 - [ ] **Step 2:** `test_mtp_ref.py`: shapes and dtypes of the 15 tensors against `docs/03-models.md`; a 16-token smoke run finite.
 - [ ] **Step 3:** implement; run on the `code` golden prompt plus its 32 greedy tokens (from the oracle golden set): per position, the head's argmax against the true next-next token. Also the wrong-wiring control.
 - [ ] **Step 4: Commit** `oracle: a CPU reference of the MTP head (spec 8 P0)`.

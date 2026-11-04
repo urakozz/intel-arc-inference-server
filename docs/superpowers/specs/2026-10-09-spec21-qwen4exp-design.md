@@ -328,7 +328,7 @@ On K2's / Kolibri's pattern (spec 18 §5.1, spec 20 §11):
 - **21a. Facts and CPU reference** (Mac, then the box CPU).
   - **Built:** `qwen4exp_ref.py` (transformers' text model, layer-streamed with `stream.py`, dequantising Intel's
     g128 / our g64 experts and int8 PLE rows; the PLE shards read by mmap, 16 rows a token; the MTP head ported
-    from vLLM); a facts sheet `docs/probe-qwen4exp-<date>.md` (every rounding point of §2, the oracle's experts
+    from vLLM); a facts sheet `docs/probes/probe-qwen4exp-<date>.md` (every rounding point of §2, the oracle's experts
     implementation, torch's CPU `topk` order on tied block scores, `tokenizer.json` vs Qwen3.8's, the original's
     card); golden sets (short and long prompts: ids, logits, per-layer routes, selections, gaps); teacher-forced
     routing traces on agentic transcripts for spec 22's P0.
@@ -408,7 +408,7 @@ On K2's / Kolibri's pattern (spec 18 §5.1, spec 20 §11):
 ## 12. 21a as built (2026-10-09; the Mac - nothing on the box yet)
 
 Plan: `docs/superpowers/plans/2026-10-09-spec21a-qwen4exp-facts-and-reference.md`, branch
-`spec21a-qwen4exp-reference`. Facts: `docs/probe-qwen4exp-2026-10-09.md`. Box validation: queue row 30
+`spec21a-qwen4exp-reference`. Facts: `docs/probes/probe-qwen4exp-2026-10-09.md`. Box validation: queue row 30
 (box CPU only). Every number is measured on the Mac unless marked.
 
 - **The version.** transformers **5.19.0** runs beside `agnes-ref-img` (`tools/oracle/qwen4exp_env.sh`:

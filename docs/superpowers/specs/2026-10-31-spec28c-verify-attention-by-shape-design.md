@@ -19,7 +19,7 @@ step into GEMV and non-GEMV time; this spec is the lever P0 names when attention
 
 | fact | value | grade | source |
 |---|---|---|---|
-| `attn_decode` at M = 4 against M = 1 (v1, before spec 10's v2) | 2.5 -> 9.2 ms | measured 2026-09-27 | docs/probe-mtp-2026-09-27.md |
+| `attn_decode` at M = 4 against M = 1 (v1, before spec 10's v2) | 2.5 -> 9.2 ms | measured 2026-09-27 | docs/probes/probe-mtp-2026-09-27.md |
 | today's verify attention | `attn_decode_v2` + `attn_reduce_v2` at the list's M (`kernels::attn_v2_variant(M, 32)`, under `--kv-cache int8` its twin `attn_v2_kv8_variant`), bound by `attn_pair` in the capture for every M (decode, MTP / lookup verify, DFlash tap verify, `--pp 2` stage verify): per-row walk on the vector units, K / V waves shared across rows, the stride per row so every verify row is **bitwise** its M = 1 step (spec 10 §8) - no DPAS. (`attn_v2_rows_variant` is spec 13a's `BATCH_ROWS` probe build for rows of different sequences, not the verify path.) | code | src/kernels/attn_v2.cl, src/runtime/capture.cc |
 | the M range that exists | `attn_v2.cl` compiles M = 1..8 (`#error` above 8); the verify lists stop at M = 8 (`B70_VERIFY_M8`); the int8-KV decode binaries stop at M = 4 (`B70_KV8`; M = 5..8 int8 only as 13a's `_ROWS`) | code | src/kernels/attn_v2.cl, src/kernels/CMakeLists.txt |
 | decode q precision | `attn_q` is fp32 and v2's score dot is an fp32 `fma` on it; a bf16 DPAS A operand rounds q to bf16 (prefill's flash does, `pf_attn_prep_q16`) - a numerics change the kernel must price (§2) | code | src/kernels/attn_v2.cl, src/kernels/prefill/pf_flash_attn.cl |
@@ -118,7 +118,7 @@ What the plan found wrong in the first text, and what replaced it above:
 ## 9. P0 line - 2026-11-01 (plan 28c Task 0; records only, no new run)
 
 **Busy-box timing (one card), to be re-checked on a quiet box** - every number below is 28a's
-(docs/probe-small-m-gemm-2026-11-01.md §2, raw tables in the 28a box log `timing1.log`), measured with the other card
+(docs/probes/probe-small-m-gemm-2026-11-01.md §2, raw tables in the 28a box log `timing1.log`), measured with the other card
 and the CPU on other jobs. Operator ruling 2026-11-01: 28c is built now, in parallel with 28b, so there is no
 28b-measured step yet; verify(8) "after 28b" is derived as 28a Task 5 / §4 (b) did.
 
@@ -154,7 +154,7 @@ re-derived from the quiet-box re-check). Provisional with 28a's line until that 
 ## 10. 28c as built (2026-11-03, branch `spec28c-verify-attn`)
 
 All timing is **busy box** (card 1 beside spec 28b's G0 / suite on card 0, a desktop session; load 10-30): re-check on a
-quiet box. Record: docs/probe-verify-attn-2026-11-03.md.
+quiet box. Record: docs/probes/probe-verify-attn-2026-11-03.md.
 
 - **Kernel:** `attn_verify_dpas_M<M>_T32` (bf16, M = 2..8) and `_KV8` (int8, M = 2..4), one source, kept levers
   **KT 32, PACK g, KS 4, DSPLIT 256, QSPLIT 1, 256 GRF** for both forms (fastest passing N1 / N2 at M = 8, 32768:

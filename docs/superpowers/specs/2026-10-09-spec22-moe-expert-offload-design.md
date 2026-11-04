@@ -24,7 +24,7 @@ Every number is **measured** unless marked **derived**, **estimated** or **publi
 
 - **The box is a Dell T5810** (one CPU socket, **PCIe 3.0 only**), whatever its hostname says. The two B70s may
   train at x8. Nothing in the repo records their link widths.
-- **Measured pinned copies on device 0** (`docs/probe-prefix-cache-2026-09-27.md` §2): host to device 12.2-12.9
+- **Measured pinned copies on device 0** (`docs/probes/probe-prefix-cache-2026-09-27.md` §2): host to device 12.2-12.9
   GB/s, device to host 14.2 GB/s, on an immediate list, 128 MiB to 3.9 GB. That is an x16 Gen3 rate; device 1 was
   never measured, and neither was a GPU kernel reading host USM directly.
 - **A GPU kernel reading host USM directly** (spec 21c's `q4_ple_gather`, the PLE table's 16 rows a token by a
@@ -85,7 +85,7 @@ At BW = 590 GB/s (the roofline) and P = 12 GB/s (R / P = 104.4 ms):
 
 Idle box, the GPU lock for both cards, interleaved pairs after warm-up (the repo's protocol), medians of 5. The
 probe is a standalone tool (`tools/probe/probe_offload.cc`) plus a trace analyser (`tools/oracle/offload_curve.py`);
-the record goes to `docs/probe-offload-<date>.md`.
+the record goes to `docs/probes/probe-offload-<date>.md`.
 
 **P0.1 The links.**
 - `lspci -vv` `LnkCap` / `LnkSta` for both B70s (04:00.0, 08:00.0), the bridges above them (the cards' on-board

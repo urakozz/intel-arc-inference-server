@@ -4,7 +4,7 @@ rotation writer and its check.
 R = D * blockdiag(H_1024) / 32 over the 5120-wide residual stream: random signs
 D, then a Sylvester Walsh-Hadamard per 1024-block, orthonormal. The same
 transform the W8A8 probe applies to activations (tools/probe/probe_w8a8.cl,
-pw8_quant_had2_*; docs/probe-w4a8-2026-09-23.md section 14). A rotated model
+pw8_quant_had2_*; docs/probes/probe-w4a8-2026-09-23.md section 14). A rotated model
 carries h' = h R in its residual stream instead of h:
 
     embed_tokens       E' = E R                         (rows)

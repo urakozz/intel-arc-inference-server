@@ -243,7 +243,7 @@ int k3b(const std::string& snap, const std::string& ids_path) {
 // composed path), on l0-int8 and l0, at max_len 32768. Each prefix length (4096, 8192,
 // 16384, 32704, or the oracle file's) is prefilled in a bf16-KV engine and then in an
 // int8-KV engine - one engine at a time: two do not fit beside each other.
-//   bar (from the Qwen3.8 repeat of 12a, docs/probe-int8-kv-qwen38-2026-10-06.md): last-row
+//   bar (from the Qwen3.8 repeat of 12a, docs/probes/probe-int8-kv-qwen38-2026-10-06.md): last-row
 //   logits 1 - cos(int8, bf16) <= 2e-3 at every depth and <= 5e-4 averaged over the depths,
 //   every logit finite; with the oracle file, also mean cos vs oracle drop (bf16 - int8)
 //   <= 5e-4. One row's 1 - cos has a heavy tail (the repeat's rotkv: 7.7e-5 at the 4096 row,

@@ -26,7 +26,7 @@ global greedy over all (layer, expert) pairs by the profile's counts - the margi
 own curve - round(f x L x E) slots in total (ties: lower layer, lower id). h = routed slots that hit / all routed
 slots, over every layer and row.
 
-Every table is printed and, with --json FILE, written as JSON for the record (docs/probe-offload-<date>.md).
+Every table is printed and, with --json FILE, written as JSON for the record (docs/probes/probe-offload-<date>.md).
 
 P0.8 (plan 22a Task 4), the pruned mode's masks and their curve:
 

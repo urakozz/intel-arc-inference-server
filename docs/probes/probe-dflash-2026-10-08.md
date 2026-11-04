@@ -61,7 +61,7 @@ measured.)
 
 ## 3. Provisional projection (derived - the verify and draft costs are not measured)
 
-Costs in plain decode steps (M = 1 = 1.00). Measured (spec 8 P0, docs/probe-mtp-2026-09-27.md):
+Costs in plain decode steps (M = 1 = 1.00). Measured (spec 8 P0, docs/probes/probe-mtp-2026-09-27.md):
 verify M = 2 / 3 / 4 = 1.17 / 1.52 / 1.74, an MTP draft step 0.185. **Assumed:** verify grows
 by M = 3 -> 4's slope (0.22 per row) to M = 8 = 2.62; one DFlash block (the 3.5 GB bf16
 drafter at int8, ~1.75 GB, plus K rows of the ranked 32k head) ~0.2 plain steps. MTP's side:

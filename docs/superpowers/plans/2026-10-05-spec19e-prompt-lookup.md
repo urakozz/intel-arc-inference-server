@@ -11,7 +11,7 @@
 **Spec:** spec 19 (§3 C, §4 decision 1, §7 19e, §9). Operator decision 1 decides whether this stage runs; for K2 it needs spec 18b merged.
 
 **Status (2026-10-05, branch `spec19e-prompt-lookup`, host side only, no box):**
-- Task 1 done **on A4 only** (`docs/probe-prompt-lookup-2026-10-05.md`): lookup alone 1.44x
+- Task 1 done **on A4 only** (`docs/probes/probe-prompt-lookup-2026-10-05.md`): lookup alone 1.44x
   over plain (n = 3, K <= 3), 0.92x of projected `--mtp auto`; combined with MTP +3-6 %. The
   opencode recording, which decides, is not recorded yet: rerun the tool on it.
 - Task 2, host part done: `server::PromptLookup` (`src/server/prompt_lookup.h`, the matcher),

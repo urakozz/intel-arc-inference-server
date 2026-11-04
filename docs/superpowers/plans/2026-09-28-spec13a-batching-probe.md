@@ -3,9 +3,9 @@
 **Status (2026-10-23): refreshed against spec 13 §9 / §9.1 / §9.2 (the operator's decisions of 2026-10-23, main at
 `a225083`) and BUILT on the Mac on branch `spec13a-batching-probe` - Tasks 1-4's Mac halves (the audit, the row builds,
 `build_rows`, `probe_batch_step`, the proposal skeleton, queue row 66). Nothing has run on a card: every measured cell of
-`docs/probe-batching-2026-10-23.md` is PENDING (box) until row 66 (`r66.check`, then the opt-in `r66.cost` /
+`docs/probes/probe-batching-2026-10-23.md` is PENDING (box) until row 66 (`r66.check`, then the opt-in `r66.cost` /
 `r66.chunk` on an idle box).** The plan of 2026-09-28 (B = 2..4 plain rows, MTP out of scope,
-`docs/probe-batching-2026-09-28.md`) is superseded: rows are now (slot, position, speculative state index) triples, MTP
+`docs/probes/probe-batching-2026-09-28.md`) is superseded: rows are now (slot, position, speculative state index) triples, MTP
 runs in every slot under an 8-row budget, and the models are Qwen3.8 (four slots) and Agnes (two with MTP; four with
 `--mtp off` - spec 13 §9.2).
 
@@ -89,7 +89,7 @@ table (Task 3), not a probe allocation.
 
 - [x] **Step 1:** Every kernel of the decode list (`runtime::build`), the MTP verify list (`build_verify`) and the draft
   list (`build_draft`), for Qwen3.8 and Agnes (the same binaries but `_G54` / `_V248089` / `_I19456`): row-agnostic or
-  per-sequence, what rows of different slots need, file:line. `docs/probe-batching-2026-10-23.md` §1. **Commit**
+  per-sequence, what rows of different slots need, file:line. `docs/probes/probe-batching-2026-10-23.md` §1. **Commit**
   `probe: batching audit of the decode, verify and draft lists (spec 13a Task 1)`.
 
 ### Task 2: the probe

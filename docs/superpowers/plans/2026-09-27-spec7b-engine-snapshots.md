@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, Level Zero, CMake/ctest.
 
-**Spec:** `docs/superpowers/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.1, §3.2, §3.4 first bullet, §4 C1, §5 S3). Plan 7a's P0 doc (`docs/probe-prefix-cache-2026-09-27.md`) has the measured copy rates.
+**Spec:** `docs/superpowers/specs/2026-09-27-spec7-prefix-caching-design.md` (§3.1, §3.2, §3.4 first bullet, §4 C1, §5 S3). Plan 7a's P0 doc (`docs/probes/probe-prefix-cache-2026-09-27.md`) has the measured copy rates.
 
 ## Global Constraints
 
@@ -85,7 +85,7 @@ With a hook set, chunk k of a prefill starting at `base` has rows `min(chunk, kB
 Interleaved pairs on the idle box, device 0: cold pp4096 with no hook against cold pp4096 with a hook that does what 7c will do at each call (`save_state` into a host buffer, `save_kv` of the new range). Median ratio of 3 pairs after a warm-up pair. Also the same at pp32768 (max_len 131072). Bar: ≤ 3 % at pp4096.
 
 - [ ] **Step 1:** write, build, run detached.
-- [ ] **Step 2:** append the result to `docs/probe-prefix-cache-2026-09-27.md` (section "Write-through cost, S3").
+- [ ] **Step 2:** append the result to `docs/probes/probe-prefix-cache-2026-09-27.md` (section "Write-through cost, S3").
 - [ ] **Step 3:** if S3 fails: record it, and measure the variant that copies only at block ends that are **multiples of 4096** (half the snapshots); report both and hand back; do not change the design alone.
 - [ ] **Step 4: Commit** `probe: write-through cost of block snapshots (spec 7 S3)`.
 

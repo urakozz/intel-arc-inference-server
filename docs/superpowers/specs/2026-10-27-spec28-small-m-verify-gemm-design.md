@@ -24,11 +24,11 @@ costs against a 1-row step, and ours costs far more than it needs to.
 | fact | value | grade | source |
 |---|---|---|---|
 | plain decode, Qwen3.8, one card, int8 head | 31.21 t/s (~32 ms a step) | measured | docs/BENCHMARKS.md (spec 9 rows) |
-| verify step at M = 2 / 3 / 4 | 1.17 / 1.52 / 1.74 plain steps | measured | docs/BENCHMARKS.md "P0, acceptance and step costs"; docs/probe-mtp-2026-09-27.md |
-| verify step at M = 5..8 | ~2.62 at M = 8 (M = 3 -> 4's slope, +0.22 a row) | derived (extrapolated, never measured: row 29's `r29.cost` is pending) | docs/probe-dflash-2026-10-08.md §3 |
-| DFlash over `--mtp auto` on A4 tool calls | +54 % (7.21 / (2.62 + 0.2) against 3.82 / 2.30) | derived (on the extrapolated verify) | docs/probe-dflash-2026-10-08.md §3 |
-| where the M = 4 verify step's extra time goes (profiled lists; shares, not absolute times) | int4 GEMV family 23.9 -> 40.3 ms (1.69x), **16.4 of the 24.6 ms added**; `attn_decode` (v1 then) 2.5 -> 9.2 ms; `gdn_step` 0.75 -> 1.67; the bf16 head 4.38 -> 4.50 (it already reads its weights once for all rows) | measured 2026-09-27 | docs/probe-mtp-2026-09-27.md (the per-family table) |
-| our decode GEMV | per-row: `acc[m]` / `gacc[m]`, and `dot8` re-unpacks every int4 nibble once **per row** - the weight load is shared, the dequant and FMA work is M times | code read | `src/kernels/gemv.cl` (the `for (m < M)` loop inside the `j` loop, `dot8`); docs/probe-batching-2026-10-23.md §1.1 |
+| verify step at M = 2 / 3 / 4 | 1.17 / 1.52 / 1.74 plain steps | measured | docs/BENCHMARKS.md "P0, acceptance and step costs"; docs/probes/probe-mtp-2026-09-27.md |
+| verify step at M = 5..8 | ~2.62 at M = 8 (M = 3 -> 4's slope, +0.22 a row) | derived (extrapolated, never measured: row 29's `r29.cost` is pending) | docs/probes/probe-dflash-2026-10-08.md §3 |
+| DFlash over `--mtp auto` on A4 tool calls | +54 % (7.21 / (2.62 + 0.2) against 3.82 / 2.30) | derived (on the extrapolated verify) | docs/probes/probe-dflash-2026-10-08.md §3 |
+| where the M = 4 verify step's extra time goes (profiled lists; shares, not absolute times) | int4 GEMV family 23.9 -> 40.3 ms (1.69x), **16.4 of the 24.6 ms added**; `attn_decode` (v1 then) 2.5 -> 9.2 ms; `gdn_step` 0.75 -> 1.67; the bf16 head 4.38 -> 4.50 (it already reads its weights once for all rows) | measured 2026-09-27 | docs/probes/probe-mtp-2026-09-27.md (the per-family table) |
+| our decode GEMV | per-row: `acc[m]` / `gacc[m]`, and `dot8` re-unpacks every int4 nibble once **per row** - the weight load is shared, the dequant and FMA work is M times | code read | `src/kernels/gemv.cl` (the `for (m < M)` loop inside the `j` loop, `dot8`); docs/probes/probe-batching-2026-10-23.md §1.1 |
 | vllm-sly-radiance (a public vLLM ROCm image, one AMD R9700, ~640 GB/s - about our bandwidth): step time | T(M) = 29.9 + 0.393 x M ms (their fit): M = 8 ~1.09, M = 16 ~1.19 of their M = 1 step | published by others (fit), ratios derived from it | vllm-sly-radiance's technical notes |
 | why theirs is flat | their decode GEMM is a WMMA tile whose fragment is shared by M <= 16 rows, with split-K | published by others | the same |
 | their plain step | ~30 ms, about ours | published by others | the same |
@@ -40,7 +40,7 @@ costs against a 1-row step, and ours costs far more than it needs to.
 |---|---|---|
 | MTP (spec 8), `--mtp auto` K = 3 on tool calls | 3.82 ids / 2.30 steps = 1.66 | at verify(4) = 1.2: 3.82 / (1.2 + 3 x 0.185) = 2.18, **+31 %** |
 | DFlash (spec 19), K = 7 on A4 tool calls | 7.21 / (2.62 + 0.2) = 2.56 (itself on an extrapolation) | at verify(8) = 1.4: 7.21 / 1.6 = 4.51, **+76 %** |
-| batching (spec 13 §9, the 8-row budget) | B rows cost like a B-row verify (docs/probe-batching-2026-10-23.md §1.1: the GEMVs are row-agnostic, so the same per-row cost) | B = 4 slots at ~1.2 steps instead of ~1.74 |
+| batching (spec 13 §9, the 8-row budget) | B rows cost like a B-row verify (docs/probes/probe-batching-2026-10-23.md §1.1: the GEMVs are row-agnostic, so the same per-row cost) | B = 4 slots at ~1.2 steps instead of ~1.74 |
 | DFlash K up to 15 (spec 19 §13) | not possible: the cost of 16 rows would exceed the acceptance | possible only after this spec (M = 16) |
 
 The verify step also has parts that are not GEMVs - the attention's per-row KV walk (the 2026-09-27 table is v1's;
@@ -107,7 +107,7 @@ measures the cost of one shape for all M).
 **The DPAS type (P0 decides):** **bf16** x dequantised-bf16 (above), or **i8 x i4** (activations quantised to int8 per
 row, weights int4 straight into the mixed-precision DPAS). The decode step is bandwidth-bound, so the type changes the
 ALU work, not the bytes; the i8 arm also needs a per-row activation quantisation and - for accuracy - the h8 rotation
-(docs/17-int8-prefill.md: unrotated int8 activations cost 2.8-5.1 % on real layers, docs/probe-w4a8-2026-09-23.md
+(docs/17-int8-prefill.md: unrotated int8 activations cost 2.8-5.1 % on real layers, docs/probes/probe-w4a8-2026-09-23.md
 §14.2), which decode has never paid. **i8 x i4 is adopted only if it is >= 10 % faster than bf16 summed over a token's
 linears at M = 8 AND passes §3's bars as bf16 does**; otherwise bf16 (the expected outcome, estimated).
 
@@ -174,7 +174,7 @@ prefill is not bitwise one-row decode. The gates:
 ## 5. Speed bars
 
 Idle box (both cards free of DRM holders), device 0, interleaved pairs after a warm-up (clock state moves sequential
-arms by up to 35 %, docs/probe-w4a8-2026-09-23.md §14.4), median of 5 for kernels, of 3 for whole steps; depth 4096 and 32768; int8 head,
+arms by up to 35 %, docs/probes/probe-w4a8-2026-09-23.md §14.4), median of 5 for kernels, of 3 for whole steps; depth 4096 and 32768; int8 head,
 bf16 KV (int8 KV recorded).
 
 - **S1 (P0, 28a):** the go rule, §6.
@@ -232,7 +232,7 @@ docs/17-int8-prefill.md); the MTP head's bf16 M-row GEMVs unless P0 shows they m
 ## 9. P0 verdict
 
 **PROVISIONAL (2026-11-01): busy-box timing on one card, to be re-checked on a quiet box** (operator ruling
-2026-11-01; the re-check set is docs/probe-small-m-gemm-2026-11-01.md §6). Record: docs/probe-small-m-gemm-2026-11-01.md.
+2026-11-01; the re-check set is docs/probes/probe-small-m-gemm-2026-11-01.md §6). Record: docs/probes/probe-small-m-gemm-2026-11-01.md.
 
 - **The stand-in:** bf16 DPAS, weights on B (§2's sketch), the production S of every shape, grid split-K, shift
   dequant. Weights on A (oneDNN's orientation) is 2.1x over a token on our layouts (1.13-1.59x per shape even with

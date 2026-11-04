@@ -107,7 +107,7 @@ and the A4 ids **identically**: decode, then re-encode, gives the same ids.
 
 - The decoded long32k text has **0 combining marks** and **no ids >= 248077**.
 - Qwen3.8's tokenizer has the same vocab and merges. It differs only in the regex on
-  `\p{M}` and in Agnes's added specials (`docs/probe-agnes-2026-10-03.md`).
+  `\p{M}` and in Agnes's added specials (`docs/probes/probe-agnes-2026-10-03.md`).
 - So Qwen3.8 gives the same ids for long32k as Agnes (derived from the above).
 
 **The 8192-id plan was cut to 4096.**

@@ -1,5 +1,5 @@
 #!/bin/bash
-# The EAGLE3 K2 P0 on the Mac (docs/probe-eagle3-k2-2026-10-08.md; tools/oracle/README.md "The
+# The EAGLE3 K2 P0 on the Mac (docs/probes/probe-eagle3-k2-2026-10-08.md; tools/oracle/README.md "The
 # EAGLE3 K2 P0"): is EAGLE-3 (Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3) worth building for
 # K2-Horizon? Measured acceptance (teacher-forced, greedy) and a verify cost derived from the
 # recorded routes, against spec 19e's prompt lookup. Run from the repo (or worktree) root:

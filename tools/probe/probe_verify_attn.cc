@@ -2,7 +2,7 @@
 // attn_verify_dpas lever arms, on real q / KV at M rows: numerics (N1, N2a, N2b, repeatability) and
 // interleaved paired timing.
 //
-// Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probe-verify-attn-<date>.md.
+// Plan: docs/superpowers/plans/2026-10-31-spec28c-verify-attn-build.md. Record: docs/probes/probe-verify-attn-<date>.md.
 //
 //   probe_verify_attn arms <dump> [--m 2,3,4,5,6,7,8,16] [--depths 512,4096,32768,130816] [--kv bf16|int8]
 //                         [--arms v2,pfa,<tags>] [--rounds 5] [--reps 10] [--time] [--device 0]

@@ -49,7 +49,7 @@ staging (P0.3), host RAM bandwidth under that load (P0.4), pinned capacity and t
 curve from spec 21a's routing traces (P0.6: static fill, simulated swaps, MTP verify unions, prefill bytes), the
 pruning curve for the coding mask (P0.8: REAP scores, masked reference runs at 50 / 62.5 / 75 / 87.5 % kept, KL,
 argmax, A4 tool-call accuracy) and the projection with the stopping rule (P0.7: stop if two-card decode at 32k
-projects below 40 t/s). The record is `docs/probe-offload-<date>.md`; it feeds decisions 1-9.
+projects below 40 t/s). The record is `docs/probes/probe-offload-<date>.md`; it feeds decisions 1-9.
 
 **Architecture:** no engine change except one host-only planner function. Four tools:
 - `tools/probe/probe_offload.cc` - one Level Zero binary on the repo's `l0::` wrappers (one context over both cards,
@@ -80,8 +80,8 @@ expert output norm `onorm`, the MTP head's `mtp_ids` / `mtp_p` / `mtp_onorm` - `
 rate `r32.ple_rate`), §15 (the prefill's 512-expert sort; `q4_pf_moe.cl` holds a second macro pair), §16
 (`read_verify_routes`; the A4 set and its reference). Precedents: plan 16a (a probe plan: probe binaries in
 `tools/probe/`, one context over both cards, bounded waits), `tools/probe/probe_host_copy.cc` (spec 7 P0's pinned copies
-and the `MemAvailable - 16 GiB` cap), `tools/probe/probe_bw.cc`, `docs/probe-prefix-cache-2026-09-27.md` §1-§2,
-`docs/probe-eagle3-k2-2026-10-08.md` (K2's routing locality: M consecutive rows touch 12.46 / 15.75 / 18.55 distinct
+and the `MemAvailable - 16 GiB` cap), `tools/probe/probe_bw.cc`, `docs/probes/probe-prefix-cache-2026-09-27.md` §1-§2,
+`docs/probes/probe-eagle3-k2-2026-10-08.md` (K2's routing locality: M consecutive rows touch 12.46 / 15.75 / 18.55 distinct
 experts a layer at M = 2 / 3 / 4 against the iid 15.36 / 22.13 / 28.36 - the shape P0.6's verify term should show).
 
 ## Dependencies and branch points
@@ -375,7 +375,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
   after row 34's - row 35 belongs to the W4A4 probe and is not touched), `tools/box_validate/data.sh` (`have
   oracle_q4exp_prune`: the maskeval JSONs; `have probe_offload_bin`), `tools/box_validate/test_box_validate.py` only if
   a new stage kind needs it, `docs/box-day-plan.md` (a spec 22 session after spec 21's rows: cards, RAM rule, order)
-- Create: `docs/probe-offload-<date>.md`
+- Create: `docs/probes/probe-offload-<date>.md`
 - Modify (at the end): `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` (§1's facts: the
   measured links, P, the PLE rate from `r32.ple_rate`; a "P0 as measured" section; decisions 1-9 each with its evidence
   and the proposal), `docs/README.md` (the probe doc's line), this plan's status line
@@ -412,7 +412,7 @@ The stages (`stage <id> 36 <kind> <cpu|gpu> <have> <after> "..."`):
 - [ ] **Step 4 (box CPU): P0.6** - `r36.curve`; the cross-check is `r32.partial`'s routing diagnostic (Dependencies).
 - [ ] **Step 5 (box CPU): P0.8** - `r36.reap`, then `--with r36.prune,r36.prune_a4` (hours; one CPU oracle at a time,
   never beside Step 3's pinned arms).
-- [ ] **Step 6: the record** `docs/probe-offload-<date>.md`: P0.1-P0.8's tables (the links, copy rates by size /
+- [ ] **Step 6: the record** `docs/probes/probe-offload-<date>.md`: P0.1-P0.8's tables (the links, copy rates by size /
   list / ordinal / card / both, zero-copy arms with their paired ratios against A, the mixed-launch law, staging vs
   zero-copy, replay and alias results, host bandwidth idle and loaded, pinned capacity and its failure point, the h(f)
   curves uniform vs per-layer, held out vs in sample, swaps' gain per (S, B), the verify unions against the iid

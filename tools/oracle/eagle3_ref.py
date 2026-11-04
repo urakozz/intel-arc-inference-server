@@ -3,7 +3,7 @@
 #
 # A CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (vLLM
 # Speculators 0.8.0's `Eagle3DraftModel`, Apache-2.0) for the EAGLE3 K2 P0
-# (docs/probe-eagle3-k2-2026-10-08.md). A re-implementation in plain torch, not a copy. The
+# (docs/probes/probe-eagle3-k2-2026-10-08.md). A re-implementation in plain torch, not a copy. The
 # semantics are pinned from source, file:line against:
 #   speculators 0.8.0 (PyPI wheel)     speculators/models/eagle3/{core,model_definitions,data,
 #                                      attention}.py, speculators/train/vocab_mapping.py,

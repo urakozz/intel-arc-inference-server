@@ -23,9 +23,9 @@ generic in M; production stops at 8); a host fp64 reference shared with 28b (`te
 **Tech Stack:** C++17, OpenCL C (Intel sub-group matrix builtins), Level Zero, CMake.
 
 **Spec:** `docs/superpowers/specs/2026-10-27-spec28-small-m-verify-gemm-design.md`. Precedents:
-`tools/probe/probe_gemv.cc` + docs/probe-gemv-2026-08-24.md (the shape sweep's interleaving), `probe_verify_m` and
-docs/probe-mtp-2026-09-27.md (the per-family table this plan extends), `probe_w8a8` (layer-63 captures, the i8 path,
-the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.cl` (the builtins that compile).
+`tools/probe/probe_gemv.cc` + docs/probes/probe-gemv-2026-08-24.md (the shape sweep's interleaving), `probe_verify_m` and
+docs/probes/probe-mtp-2026-09-27.md (the per-family table this plan extends), `probe_w8a8` (layer-63 captures, the i8 path,
+the timing protocol of docs/probes/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.cl` (the builtins that compile).
 
 ## Dependencies and branch points
 
@@ -90,7 +90,7 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
   oneDNN's, spec 28 §2.1); for the faster one the levers one at a time - `--splitk wg` against `grid` (the in-work-group
   shapes 2 x 8 and 8 x 4 of oneDNN, and the one shape kept for every M that property R needs), `--deq magic` against
   `shift`, `--prefetch` 0 / 80 / 160, `--grf 256`; and the S sweep (S dividing K / 64) for grid split-K. Record in
-  `docs/probe-small-m-gemm-<date>.md` §1. Commit
+  `docs/probes/probe-small-m-gemm-<date>.md` §1. Commit
   `git commit -S -m "probe: Qwen3.8's decode linears at M = 1..16, gemv against small-M DPAS (spec 28a)"`.
 
 ### Task 3: the verify step's attribution (box, `r68.attrib`)
@@ -106,7 +106,7 @@ the timing protocol of docs/probe-w4a8-2026-09-23.md §14.4), `probe_dpas_rate.c
 - [ ] **Step 1:** `probe_small_m numerics`: each stand-in type against the fp64 reference and against `gemv` at the same
   M on layer 63's weights with real and random rows - spec 28 N2's bound per output (max / median recorded); property R at
   M = 2..8 / 16 (10^3 trials a shape: rows bitwise across M and with the other rows randomised). For i8 x i4 also the
-  logit-level error on the four prompts by docs/probe-w4a8-2026-09-23.md §15.4's method (a CPU run in the oracle image
+  logit-level error on the four prompts by docs/probes/probe-w4a8-2026-09-23.md §15.4's method (a CPU run in the oracle image
   on the dumped rows), so the type rule of spec 28 §2 can be applied. Record §3. Commit
   `git commit -S -m "probe: small-M DPAS numerics and row independence (spec 28a)"`.
 
@@ -134,7 +134,7 @@ stage r68.shapes   68 default gpu  qwen        r68.k0                "probe_smal
 stage r68.attrib   68 default gpu  qwen        r68.k0                "probe_verify_m at depth 4096 / 32768 with the M8 lists: the verify step and the per-family table at M 1..8 (and r29.cost's arm if it has not run)"
 stage r68.numerics 68 default card qwen        r68.k0                "probe_small_m numerics: N2 against the fp64 reference and gemv, property R; the i8xi4 logit error (oracle image)"
 stage r68.verdict  68 manual  -    -           r68.shapes,r68.attrib,r68.numerics "spec 28 §9: the GO / NO-GO line by spec 28 §6"
-rownote 68 "Timed stages need the idle protocol (both cards free of DRM holders). Hand back: the shape table, the attribution table, the numerics lines; they fill docs/probe-small-m-gemm-<date>.md and spec 28 §9."
+rownote 68 "Timed stages need the idle protocol (both cards free of DRM holders). Hand back: the shape table, the attribution table, the numerics lines; they fill docs/probes/probe-small-m-gemm-<date>.md and spec 28 §9."
 ```
 
 - [ ] **Step 2: commit** `git commit -S -m "docs: box queue row 68 - the small-M GEMM P0 (spec 28a)"`.

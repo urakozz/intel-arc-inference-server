@@ -25,7 +25,7 @@
 """Kolibri 1 for transformers 5.x.
 
 What the plugin defines, and this port implements (tools/oracle/kolibri_ref.py is the layer-streamed
-reference on the same rules; docs/probe-kolibri-2026-10-05.md the facts):
+reference on the same rules; docs/probes/probe-kolibri-2026-10-05.md the facts):
 
   layer      x += post_attn_norm(Attn(input_layernorm(x)));
              x += post_ffn_norm(MoE(post_attention_layernorm(x)))          (sandwich norms)

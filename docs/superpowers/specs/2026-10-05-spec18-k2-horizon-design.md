@@ -112,7 +112,7 @@ Rounding points to mirror: sigmoid in fp32; routing weights rounded to bf16; rou
 ascending expert id, then the shared expert added (the reference's `index_add_` order). The first
 stage re-reads `modeling_k2_horizon.py` and confirms each line before any kernel is written.
 
-**Re-read 2026-10-05 (18a, `docs/probe-k2-2026-10-05.md`):** every line above confirmed against the
+**Re-read 2026-10-05 (18a, `docs/probes/probe-k2-2026-10-05.md`):** every line above confirmed against the
 vendored modeling file (file:line there); the operator's vLLM fork agrees on semantics and differs
 only in rounding / summation order. Rounding detail the K1 references need: the router logits are
 a bf16 linear before the fp32 sigmoid; RoPE's cos/sin are bf16 and `q·cos`, `rotate_half(q)·sin`
@@ -216,7 +216,7 @@ contexts beyond what §4 decision 2 sets; training-only parts (the router's load
 
 Written on the Mac with the box unavailable: plan 18b Tasks 1-3; Task 4 (speed) and every run on
 the card are the box's (`docs/superpowers/plans/box-validation-queue.md`, the K2 row). Rebased on
-18a's reference (`82cf7d1`) and aligned with `docs/probe-k2-2026-10-05.md`.
+18a's reference (`82cf7d1`) and aligned with `docs/probes/probe-k2-2026-10-05.md`.
 
 **Structure (§5.1).** `model::K2Desc` / `model::k2()` (`src/model/k2_horizon.{h,cc}`: every number
 from the int4 checkpoint's `config.json` and safetensors headers; `check_k2_config` holds

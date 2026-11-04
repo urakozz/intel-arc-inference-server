@@ -38,7 +38,7 @@
 
 ### Task 2: the verdict
 
-- [ ] **Step 1:** `docs/probe-lm-head-2026-09-28.md`: the table per source (golden, toolcall): positions, cosine min / mean, argmax mismatches (near-tie or not), top-20 equality %, KL mean / p99 at both temperatures; the host quantisation time for the full head (time the quantisation of the real `[248320, 5120]` tensor).
+- [ ] **Step 1:** `docs/probes/probe-lm-head-2026-09-28.md`: the table per source (golden, toolcall): positions, cosine min / mean, argmax mismatches (near-tie or not), top-20 equality %, KL mean / p99 at both temperatures; the host quantisation time for the full head (time the quantisation of the real `[248320, 5120]` tensor).
 - [ ] **Step 2:** verdict against L1 (cosine >= 0.9999, argmax equal except near-ties, top-20 equal in >= 99 %) and L2 (KL mean <= 1e-3, p99 <= 1e-2). If it fails, stop: record, and say by how much.
 - [ ] **Step 3:** `docs/README.md` line; **Commit** `probe: int8 lm_head verdict (spec 9 P0)`.
 

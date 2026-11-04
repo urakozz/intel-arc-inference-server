@@ -58,7 +58,7 @@ Qwen3.8's ~54 G, so prefill could reach several thousand t/s if the grouped GEMM
 already existed: `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` (2026-08-30).**
 - **(A, proposed) The operator's AutoRound W4A16 g64 quant**, as for Qwen3.8 and Agnes: the
   engine's whole path is gated on AutoRound g64, and AutoRound beat RTN clearly on Qwen3.8
-  (docs/probe-w4a8 §15). Its fused-expert export format is to be checked (AutoRound / GPTQ may
+  (docs/probes/probe-w4a8 §15). Its fused-expert export format is to be checked (AutoRound / GPTQ may
   emit per-expert `qweight` tensors; the loader repacks either way).
 - (B) Load-time RTN int4 g64 from the bf16 file (the loader streams 72 GB and quantises): no
   separate checkpoint, but RTN's error is higher; measured in 15a against (A) to decide.
@@ -131,7 +131,7 @@ model's and is measured, not assumed.
 - **R4:** A4 on Ornith against bf16 Ornith (no bar until the first measurement), spec 7's prefix
   cache, determinism and replay, passkey at 120k and 250k.
 - **R5, quantisation (15a):** the chosen int4 source's logit error against bf16 on the golden
-  prompts, recorded beside Qwen3.8's (7.77 % relative L2, docs/probe-w4a8 §15.2).
+  prompts, recorded beside Qwen3.8's (7.77 % relative L2, docs/probes/probe-w4a8 §15.2).
 
 ## 6. Speed bars
 

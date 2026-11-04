@@ -87,7 +87,7 @@ the attention output is un-rotated per head **before** the sigmoid output gate (
 channel-wise, so the inverse cannot be folded into `o_proj`). q gets the same rotation as K, which
 cancels in q·k.
 
-Evidence (`docs/probe-int8-kv-2026-09-28.md` on branch `spec12a-int8-kv-probe`, Agnes 3.0 Flash as
+Evidence (`docs/probes/probe-int8-kv-2026-09-28.md` on branch `spec12a-int8-kv-probe`, Agnes 3.0 Flash as
 the stand-in for Qwen3.8, layer-streamed CPU reference): attention-only relative L2 4.7e-3 against
 6.1e-3 (KIVI), 6.8e-3 (rotated K only) and 8.8e-3 (per token), below the reference's own bf16
 arithmetic (5.5e-3); flat with depth to 32k; end to end on the golden decision rows 1 - cos
@@ -164,7 +164,7 @@ reference (q, gate, int8 rows, scales; the gate 18432/18432 exact). The decode a
 readers use Intel sub-group / DPAS built-ins and have not run anywhere.
 
 **Tolerances, from the Qwen3.8 repeat of 12a** (2026-10-06,
-`docs/probe-int8-kv-qwen38-2026-10-06.md`; rotkv holds): golden mean logit cos drop ≤ 1e-4
+`docs/probes/probe-int8-kv-qwen38-2026-10-06.md`; rotkv holds): golden mean logit cos drop ≤ 1e-4
 (`kv8_vs_oracle_test`, confirmed); 1 - cos(int8 KV, bf16 KV) ≤ 2e-3 at each of 4k-32k and
 ≤ 5e-4 averaged over them (`flash_long_kv8_test`; was ≤ 5e-4 per depth, which one flat-logit
 row can exceed with no defect); the kernel test's gated flash rows ≥ 0.9999 (still

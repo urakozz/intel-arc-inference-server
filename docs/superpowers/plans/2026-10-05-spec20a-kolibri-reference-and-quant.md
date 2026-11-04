@@ -8,7 +8,7 @@ small files (config, tokenizer, index, shard headers by range request).
 
 | task | files | gate | status |
 |---|---|---|---|
-| 1. Facts | `docs/probe-kolibri-2026-10-05.md` | config / index / headers / template / plugin read; `head_dtype`, window edge, tool-call format, EOS pinned | done |
+| 1. Facts | `docs/probes/probe-kolibri-2026-10-05.md` | config / index / headers / template / plugin read; `head_dtype`, window edge, tool-call format, EOS pinned | done |
 | 2. Model class | `tools/oracle/third_party/kolibri1/` | names = checkpoint, per-expert `nn.Linear`, `trust_remote_code` via `auto_map`, cached `generate()` | done |
 | 3. Reference + KL0 | `tools/oracle/kolibri_ref.py`, `test_kolibri_ref.py` | 21 tests in `agnes-ref-img`; port == reference bitwise (bf16 eager, fp32) | done (tiny); real-model perplexity pending |
 | 4. Quantisation script | `tools/quantize_kolibri1.sh`, `tools/quantize/kolibri/` | `--dry-run` prints every stage; tiny end to end calib -> card; `test_kolibri_quant.py` | done |

@@ -8,7 +8,7 @@ Why: the IR stores int4 asymmetric g128 weights and floating-point activations,
 but OpenVINO's GPU plugin quantises activations to int8 per token at runtime by
 default on XMX devices (DYNAMIC_QUANTIZATION_GROUP_SIZE, "innermost axis") and
 keeps the KV cache in int8 by default. That is W4A8 without a rotation, the
-combination docs/probe-w4a8-2026-09-23.md section 14 measured per layer. This
+combination docs/probes/probe-w4a8-2026-09-23.md section 14 measured per layer. This
 turns it into end-to-end numbers.
 
 Per config, one compile, then:

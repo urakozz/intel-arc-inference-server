@@ -18,7 +18,7 @@
 // dereferences them through the device pointer table `ptrs`, by an index it computes itself).
 //
 // **Why per head.** One 51.8 GB allocation would exceed the largest pinned allocation ever measured (48 GiB,
-// docs/probe-prefix-cache-2026-09-27.md §1); head h's rows [offset_h, offset_h + prime_h) are contiguous in
+// docs/probes/probe-prefix-cache-2026-09-27.md §1); head h's rows [offset_h, offset_h + prime_h) are contiguous in
 // the hash's id space, so each head is one ~3.2 GB range (+ its scales), the "PLE table's shards" spec 22's
 // P0.5 measures - and the allocation, the pointer passing and the load-time checks below are the mechanism
 // spec 22's expert mirror reuses.

@@ -43,7 +43,7 @@ Detail: `2026-10-02-spec14a-agnes-oracle-and-fold.md` Tasks 1-2.
 
 - [ ] **Step 1:** `tools/oracle/agnes.py`, `tools/oracle/agnes_fold.py` and their tests; run the tests locally (synthetic tensors; the name map against the real `model.safetensors.index.json`).
 - [ ] **Step 2:** if the checkpoint is in the Mac's HF cache: the fold proof on layers 0, 3, 35, 71 with real packed weights and inputs from a layer-by-layer forward of a short prompt (embedding + the layers up to the one tested; keep RAM well under 60 GB), cosine >= 0.999999; `modeling_agnes.py` vs our reference on a 64-id prompt if it fits layer by layer, else pending.
-- [ ] **Step 3:** `docs/probe-agnes-2026-10-03.md` with what ran and what is pending. **Commit** `oracle: Agnes CPU reference and the fold proof (spec 14)`.
+- [ ] **Step 3:** `docs/probes/probe-agnes-2026-10-03.md` with what ran and what is pending. **Commit** `oracle: Agnes CPU reference and the fold proof (spec 14)`.
 
 ### Task 3: Agnes in the loader and the engine
 

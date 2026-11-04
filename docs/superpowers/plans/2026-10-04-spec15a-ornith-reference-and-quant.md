@@ -79,7 +79,7 @@ Task 4's RTN arm.
 **Files:** `tools/oracle/ornith.py` (config translation and any naming glue for `qwen3_5_moe`; detection in `tools/oracle/dump.py`), `tools/oracle/moe_quant.py` (RTN int4 g64 for fused and per-expert tensors; dequant), `tools/oracle/test_ornith.py`, `tools/oracle/test_moe_quant.py`.
 
 - [ ] **Step 1:** tests on synthetic tensors: the router formula (as read, Review Focus 1) on random logits against a hand reference; RTN round-trip bound per group; fused-tensor slicing per expert (Review Focus 2) on a toy [4, 8, 16] tensor.
-- [ ] **Step 2:** the tensor-index and header check against the real repo by range requests (as done for spec 15's shapes): every key classified (attention, GDN, router, experts, shared expert, MTP, vision, embed, head), counts per layer, dtypes; written into `docs/probe-ornith-2026-10-04.md`.
+- [ ] **Step 2:** the tensor-index and header check against the real repo by range requests (as done for spec 15's shapes): every key classified (attention, GDN, router, experts, shared expert, MTP, vision, embed, head), counts per layer, dtypes; written into `docs/probes/probe-ornith-2026-10-04.md`.
 - [ ] **Step 3:** run the tests in the Mac's `agnes-ref` container (or a fresh one from its image). **Commit** `oracle: Ornith (qwen3_5_moe) reference glue and RTN g64 for fused experts (spec 15a)`.
 
 ### Task 2 (box CPU): the reference and golden sets (R1)
@@ -96,7 +96,7 @@ Task 4's RTN arm.
 
 ### Task 4 (box CPU): the quantisation study (R5)
 
-- [ ] **Step 1:** RTN int4 g64 (Review Focus 4) simulated in the streamed forward: logits relative L2 and argmax match against bf16 on the golden prompts, beside Qwen3.8's 7.77 % (docs/probe-w4a8 §15.2); also with `lm_head` int8 (spec 9).
+- [ ] **Step 1:** RTN int4 g64 (Review Focus 4) simulated in the streamed forward: logits relative L2 and argmax match against bf16 on the golden prompts, beside Qwen3.8's 7.77 % (docs/probes/probe-w4a8 §15.2); also with `lm_head` int8 (spec 9).
 - [ ] **Step 2: operator step.** The operator's AutoRound W4A16 g64 run (as for Qwen3.8 and Agnes; the hours-long one). When the checkpoint exists: its tensor format (per-expert `qweight` or fused), then the same measurement as Step 1. Until then this step is pending in the doc.
 - [ ] **Step 3:** the verdict for spec 15 decision 1 (AutoRound expected; RTN only if it is within the measured noise of AutoRound), recorded for the operator. `docs/README.md` line. **Commit** `probe: Ornith quantisation, RTN vs AutoRound g64 (spec 15 R5)`.
 

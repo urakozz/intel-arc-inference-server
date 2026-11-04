@@ -176,7 +176,7 @@ work.
 Plans 6a (probe) and 6b (integration, 128k) are done on branch `spec6b-flash-128k`.
 Every number is **measured** unless marked **derived**; the rows are in
 `docs/BENCHMARKS.md` ("Flash attention and 128k (spec 6)") and
-`docs/probe-flash-attn-2026-09-25.md`.
+`docs/probes/probe-flash-attn-2026-09-25.md`.
 
 ### 8.1 Corrections to the design
 

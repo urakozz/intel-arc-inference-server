@@ -163,7 +163,7 @@ int check_renders(const tok::Tokenizer& t, const json& facts, const std::string&
     const std::vector<uint32_t> got = t.encode(prompt, false);
     const std::vector<uint32_t> want = ids_of(r.at("ids"));
     // One BOS: the template writes <|ifm|begin_of_text|>; encoding the render WITH special
-    // tokens would prepend a second (docs/probe-k2-2026-10-05.md, "BOS").
+    // tokens would prepend a second (docs/probes/probe-k2-2026-10-05.md, "BOS").
     const bool one_bos = !got.empty() && got[0] == 0 && (got.size() < 2 || got[1] != 0);
     const bool special_adds_one = t.encode(prompt, true).size() == got.size() + 1;
     if (got != want || !one_bos || !special_adds_one) {

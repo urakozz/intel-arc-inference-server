@@ -175,7 +175,7 @@ substituted into a whole-request result.
 
 ## 7. Amendment - 2026-09-22, after the S1 probe
 
-**S1 is rejected on measurement.** `docs/probe-fused-dequant-2026-09-22.md`:
+**S1 is rejected on measurement.** `docs/probes/probe-fused-dequant-2026-09-22.md`:
 both fused variants are bitwise identical to the two-pass path, and both are
 slower. On gate‖up at M = 2048 the control is 5.341 ms (136.72 TFLOP/s: dequant
 0.826 + GEMM 4.515); registers-only is 11.117 ms (65.68) and SLM-staged is

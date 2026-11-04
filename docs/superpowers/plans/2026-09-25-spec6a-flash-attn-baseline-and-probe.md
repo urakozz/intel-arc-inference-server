@@ -15,7 +15,7 @@
 - Math: S = q k^T in fp32 (bf16 DPAS `intel_sub_group_bf16_bf16_matrix_mad_k16`), times `ATTN_SCALE` = 1/16 on the fp32 score; causal mask, key position <= `pos` + query row; fp32 online softmax (running max m, running sum l, O rescaled by `exp(m_old - m_new)`); P = `exp(s - m)` rounded to bf16 as the PV operand; O / l at the end. `exp`, never `native_exp`.
 - Layouts (from `src/runtime/prefill/attn.cc`): Q `pf_q` bf16 `[C][24][256]`, q-head h = 6 j + l for kv head j; KV cache bf16 `[pos][4][256]`; output **`pf_o` fp32 `[24][rows][256]` with per-head stride `rows * 256`, `rows = pad256(C)`**, the buffer `pf_attn_gate` reads. This corrects spec 6 §3.1, which named `pf_attn`; 6b amends the spec.
 - Correctness bar per arm: per-(row, head) cosine **>= 0.99999** against an fp64 CPU reference, on sampled rows that include row 0, the last row, and rows on a KV-tile diagonal.
-- Timing: interleaved control/candidate pairs after a warm-up, median paired ratio with its range (docs/probe-w4a8-2026-09-23.md §14.4). Device 0, idle box (no render-node holder, no container).
+- Timing: interleaved control/candidate pairs after a warm-up, median paired ratio with its range (docs/probes/probe-w4a8-2026-09-23.md §14.4). Device 0, idle box (no render-node holder, no container).
 - Probe-only: no production file changes.
 
 ## Review Focus
@@ -32,7 +32,7 @@
 
 **Files:**
 - Create: `tools/probe/attn_baseline.sh`
-- Create: `docs/probe-flash-attn-2026-09-25.md` (the record, first section)
+- Create: `docs/probes/probe-flash-attn-2026-09-25.md` (the record, first section)
 
 - [x] **Step 1: The script**
 
@@ -64,7 +64,7 @@ If `bench_decode.sh` names its flags differently (read its usage block first), a
 
 Run: `tools/probe/attn_baseline.sh | tee /tmp/p0.txt` (after the DRM-holder check: no process may hold `/dev/dri/renderD*`).
 
-In `docs/probe-flash-attn-2026-09-25.md`, write section "1. P0, the baselines" with a table:
+In `docs/probes/probe-flash-attn-2026-09-25.md`, write section "1. P0, the baselines" with a table:
 - the attention phase ms (qk + sm + pv) of the profiled pp4096 run;
 - pp4096, pp8192 and pp16384 t/s;
 - the per-chunk increment (derived: the pp16384 total minus the pp8192 total, over 4 chunks);
@@ -75,7 +75,7 @@ Label every number measured or derived, as the repo's records do.
 - [x] **Step 3: Commit**
 
 ```bash
-git add tools/probe/attn_baseline.sh docs/probe-flash-attn-2026-09-25.md
+git add tools/probe/attn_baseline.sh docs/probes/probe-flash-attn-2026-09-25.md
 git commit -m "probe: attention baselines before flash attention (spec 6 P0)"
 ```
 
@@ -106,7 +106,7 @@ Expected: the composed path prints a worst cosine. Record the three values in th
 - [x] **Step 3: Commit**
 
 ```bash
-git add tools/probe/probe_flash_attn.cc tools/probe/CMakeLists.txt docs/probe-flash-attn-2026-09-25.md
+git add tools/probe/probe_flash_attn.cc tools/probe/CMakeLists.txt docs/probes/probe-flash-attn-2026-09-25.md
 git commit -m "probe: flash-attention harness, fp64 reference, composed path as control (spec 6 P1)"
 ```
 
@@ -289,7 +289,7 @@ git commit -m "probe: pfa, a fused bf16 flash-attention kernel, correct against 
 ### Task 4: the sweep, and the winner
 
 **Files:**
-- Modify: `tools/probe/probe_flash_attn.cc` (`--arms all`, the timing), `docs/probe-flash-attn-2026-09-25.md`
+- Modify: `tools/probe/probe_flash_attn.cc` (`--arms all`, the timing), `docs/probes/probe-flash-attn-2026-09-25.md`
 
 - [x] **Step 1: All arms correct**
 
@@ -317,7 +317,7 @@ If **no** arm passes the correctness bar, the spec's stopping rule applies: reco
 - [x] **Step 4: Commit**
 
 ```bash
-git add tools/probe/probe_flash_attn.cc docs/probe-flash-attn-2026-09-25.md
+git add tools/probe/probe_flash_attn.cc docs/probes/probe-flash-attn-2026-09-25.md
 git commit -m "probe: flash-attention tile sweep, winner <arm> (spec 6 P1)"
 ```
 

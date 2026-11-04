@@ -71,7 +71,7 @@ stay `constexpr`. Users today: `src/model/qwen35.{h,cc}`, `src/runtime/{buffers,
 - **Kernels** with the intermediate size baked in get Agnes variants (`INTERMEDIATE=19456`)
   beside today's; the capture names the variant from the descriptor. New GEMV shapes for
   gate‖up `N=38912, K=5120` and down `N=5120, K=19456`, with tuning-table rows
-  (`docs/probe-gemv-2026-08-24.md`'s method), and prefill GEMM / h8 slab counts (38 and 19).
+  (`docs/probes/probe-gemv-2026-08-24.md`'s method), and prefill GEMM / h8 slab counts (38 and 19).
 - **The captured decode list** grows from 64 to 72 layers (774 kernels today; derived ~870).
 
 ### 3.2 The loader

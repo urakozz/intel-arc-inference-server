@@ -15,7 +15,7 @@ the bound). Box queue row 26.
 
 **Tech Stack:** C++17, OpenCL C (ocloc), Level Zero, CMake/ctest.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (§4, §5 KL2-KL3, §6 20d). Facts: `docs/probe-kolibri-2026-10-05.md`. Plan 20c (`docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`) and its as-built §11 in the spec. Precedents: `src/kernels/k2/k2_pf_moe.cl`, `k2_pf_attn.cl`, `k2_pf_linear.cl`, `src/runtime/k2/k2_prefill.{h,cc}`, `k2_prefill_engine.cc`, `tests/kernels/k2_pf_ref.h`, `tests/prefill/prefill_split_test.cc`, spec 18 §11.
+**Spec:** `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (§4, §5 KL2-KL3, §6 20d). Facts: `docs/probes/probe-kolibri-2026-10-05.md`. Plan 20c (`docs/superpowers/plans/2026-10-06-spec20c-kolibri-decode.md`) and its as-built §11 in the spec. Precedents: `src/kernels/k2/k2_pf_moe.cl`, `k2_pf_attn.cl`, `k2_pf_linear.cl`, `src/runtime/k2/k2_prefill.{h,cc}`, `k2_prefill_engine.cc`, `tests/kernels/k2_pf_ref.h`, `tests/prefill/prefill_split_test.cc`, spec 18 §11.
 
 ## Dependencies and branch points
 

@@ -4,7 +4,7 @@
 
 **Goal:** prove branch `spec14-agnes` on the card - Qwen3.8 bitwise unchanged (G0), Agnes 3.0 Flash correct (G1-G5), the provisional GEMV rows measured and replaced, speed recorded - then merge.
 
-**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§4 gates, §5 speed, §6 phase 2). **Phase 1 record:** `docs/probe-agnes-2026-10-03.md` (what ran on the Mac).
+**Spec:** `docs/superpowers/specs/2026-10-02-spec14-agnes-3-flash-design.md` (§4 gates, §5 speed, §6 phase 2). **Phase 1 record:** `docs/probes/probe-agnes-2026-10-03.md` (what ran on the Mac).
 
 **Branch commits (phase 1, written on the Mac, nothing ran on a card):** `be21676` ModelDesc; `3aa5dbf` oracle + fold proof; `e5a71e9` Agnes descriptor, loader fold, kernel variants, test registrations; `061a6e5` template and tool calls; `42a41bf` box instruments (`probe_gemv --agnes`, passkey `MAX_LEN`, A4 reference); `2f8c994` Agnes `vocab_used` 248089.
 
@@ -13,7 +13,7 @@
 CPU-only items closed in a `python:3.12-slim` container on the Mac (torch 2.14.1+cpu,
 transformers 5.15.0 - the box image's; the Agnes model **layer-streamed**,
 `tools/oracle/stream.py`, `dump.py --stream`; setup in `tools/oracle/README.md`, "The Mac
-path"). Record: `docs/probe-agnes-2026-10-03.md`, "Phase 1 continued on the Mac".
+path"). Record: `docs/probes/probe-agnes-2026-10-03.md`, "Phase 1 continued on the Mac".
 
 | item | result |
 |---|---|

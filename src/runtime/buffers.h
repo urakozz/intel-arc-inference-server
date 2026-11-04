@@ -122,7 +122,7 @@ struct DecodeScratch : DecodeScratchDims {
 // In their place are plan 6d-composed's six fields - `pf_q`, `pf_attn`,
 // `pf_s`, `pf_p`, `pf_o`, `pf_rowsum` - sized here **now**, at that plan's own
 // figures, so L3 lands without resizing this struct. `pf_kt` is deliberately
-// absent: the batched-GEMM probe (`docs/probe-gemm-batched-2026-09-05.md`)
+// absent: the batched-GEMM probe (`docs/probes/probe-gemm-batched-2026-09-05.md`)
 // measured `transB` native and bitwise identical to a packed operand, so the
 // transpose fallback is not built.
 struct PrefillScratch : PrefillScratchDims {

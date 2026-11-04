@@ -31,7 +31,7 @@ lists, so `--batch 1` is bitwise today's engine (spec 13 §8, §9.2).
 **Tech Stack:** OpenCL C (ocloc), C++17, Level Zero, ctest.
 
 **Spec:** spec 13 §9 (the row table, the budget, B1-B3 at mixed K), §9.1 ("What this asks of 13b"), §9.2 (`--batch N`
-default 1; no host-RAM offload), §4, §8. Needs `docs/probe-batching-2026-10-23.md` (13a's audit §1, the descriptor
+default 1; no host-RAM offload), §4, §8. Needs `docs/probes/probe-batching-2026-10-23.md` (13a's audit §1, the descriptor
 design §6) with the box's tables and the operator's §7 decisions.
 
 ## Out of scope

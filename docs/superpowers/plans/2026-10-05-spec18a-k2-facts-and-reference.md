@@ -7,7 +7,7 @@ reference are written and tested; nothing has run on real weights, the box or a 
   `tools/oracle/third_party/k2_horizon/` - layer at a time with routing dumps, **bit-identical to
   the vendored HF model in bf16** on tiny random weights, prompt and cached decode; 18 tests, all
   pass in `agnes-ref-img`). The facts from config, both indexes, the shard headers, range-fetched
-  small tensors and the modeling code: `docs/probe-k2-2026-10-05.md` (Task 1 (a); (c)'s BOS
+  small tensors and the modeling code: `docs/probes/probe-k2-2026-10-05.md` (Task 1 (a); (c)'s BOS
   decision: K2 ids start with 0, `tokenize.py encode --bos`). Review Focus 1 (every §3 line, file:line)
   is in that doc; the re-read found no semantic change, only rounding detail, and no HF-vs-vLLM
   semantic disagreement.
@@ -46,7 +46,7 @@ reference are written and tested; nothing has run on real weights, the box or a 
 
 ### Task 1: facts (old plan 8a Tasks 1-3, updated)
 
-- [ ] **(a) quant checks** on the current checkpoint (int4 g64 sym, sequential `g_idx`, which tensors are bf16), **(b) device allocations** on the box (per-layer expert buffers 196.6 / 98.3 / 83.9 MB, KV per layer at 32k and 64k), **(c) K2 prompt ids** and BOS (Review Focus 4). `docs/probe-k2-2026-10-05.md`. **Commit** `probe: K2-Horizon facts (spec 18a)`.
+- [ ] **(a) quant checks** on the current checkpoint (int4 g64 sym, sequential `g_idx`, which tensors are bf16), **(b) device allocations** on the box (per-layer expert buffers 196.6 / 98.3 / 83.9 MB, KV per layer at 32k and 64k), **(c) K2 prompt ids** and BOS (Review Focus 4). `docs/probes/probe-k2-2026-10-05.md`. **Commit** `probe: K2-Horizon facts (spec 18a)`.
 
 ### Task 2: the launch floor
 

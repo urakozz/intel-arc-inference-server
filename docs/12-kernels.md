@@ -589,7 +589,7 @@ bitwise a plain step's rows, and speculative output is judged against an f32 ref
 (busy box, one card, int8 head, depth 4096): verify(M) in plain steps is 1.039 / 1.090 / 1.135 /
 1.183 / 1.297 / 1.359 / 1.570 at M = 2..8, against `gemv`'s 1.157 ... 3.170 (BENCHMARKS, "The verify
 step on gemm_sm"; to be re-checked on a quiet box). The record is
-[probe-small-m-gemm-2026-11-01.md](probe-small-m-gemm-2026-11-01.md).
+[probe-small-m-gemm-2026-11-01.md](probes/probe-small-m-gemm-2026-11-01.md).
 
 **`attn_verify_dpas` (spec 28c) is built and switched off.** It computes the verify step's attention
 on the DPAS (8.4x faster than `attn` v2 per layer at M = 8, 32768 keys, bf16; BENCHMARKS), bound by a
@@ -2249,7 +2249,7 @@ dimension, so a read never clamps inside the matrix and never reaches past it.
 probe and was bitwise equal to `sycl-tla`
 ([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here)).
 In production it runs at **161.7 TFLOP/s, about 88% of the measured 183.45
-TFLOP/s bf16 DPAS peak** ([probe-dpas-rates-2026-09-22.md](probe-dpas-rates-2026-09-22.md)).
+TFLOP/s bf16 DPAS peak** ([probe-dpas-rates-2026-09-22.md](probes/probe-dpas-rates-2026-09-22.md)).
 The two halves of a linear were separated with one wait per slab so the dequant
 round trip could be attributed rather than estimated
 ([08-decode-vs-prefill.md, "How prefill got here"](08-decode-vs-prefill.md#how-prefill-got-here)): **`slab_dequant`
@@ -2264,11 +2264,11 @@ slab pair, kept because the negative results cost less than re-discovering them:
   both were slower. The dequant pass already runs at about 546 GB/s, roughly 90%
   of hardware peak, so there is only 0.826 ms in it at this shape, and moving
   the same arithmetic into the mainloop costs 2.759 ms even when issued exactly
-  once per weight. [Details](probe-fused-dequant-2026-09-22.md).
+  once per weight. [Details](probes/probe-fused-dequant-2026-09-22.md).
 - **W4A8 on the mixed 4-bit by 8-bit DPAS.** 1.017× the bf16 two-pass control,
   0.965× once the activation quantiser it needs is counted, against a bar of
   1.53×, and **2.79% relative L2 error** driven by activation outliers.
-  [Details](probe-w4a8-2026-09-23.md).
+  [Details](probes/probe-w4a8-2026-09-23.md).
 - **oneDNN's fused int4 W4A16 matmul.** 98.28 TFLOP/s on `gate‖up` at M = 2048,
   below what an own in-kernel int4 GEMM would need to beat the two-pass path.
   [Details](08-decode-vs-prefill.md#how-prefill-got-here).

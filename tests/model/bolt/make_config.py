@@ -10,7 +10,7 @@ Every value below is typed from the config of the served checkpoint, our export
 urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ @ 8932aa8d (its `llm_config` is NVIDIA's); the key it
 comes from is the same key of `llm_config` (or of the top level, or `quantization_config`) - the comment on a group names
 where it was read. The per-layer pattern and the per-MoE-layer
-(E, I) are the facts sheet's (docs/probe-bolt-2026-10-21.md §2), which 25a read from the same file. `--layers N` keeps the
+(E, I) are the facts sheet's (docs/probes/probe-bolt-2026-10-21.md §2), which 25a read from the same file. `--layers N` keeps the
 first N blocks (`block_configs`, `layers_block_type`); nothing else moves (the model has no `num_hidden_layers` key: the
 count is the length of `block_configs`). `--check` is the test that the typed values ARE the export's (exit 1 naming the
 first key that differs); it needs no torch, no transformers and no network. The `gptq-g128` form is the GPTQ g128

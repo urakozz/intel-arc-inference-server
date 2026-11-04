@@ -1,6 +1,6 @@
 // The W4A8 GROUP-SIZE SWEEP (2026-09-23).
 //
-// Extends the rejected W4A8 probe (docs/probe-w4a8-2026-09-23.md,
+// Extends the rejected W4A8 probe (docs/probes/probe-w4a8-2026-09-23.md,
 // tools/probe/probe_w4a8.{cl,cc}) with the one measurement that record said it
 // could not make: the same shape at scale strides other than the checkpoint's
 // 64. The rescale FREQUENCY is a function of the scale STRIDE, not the scale

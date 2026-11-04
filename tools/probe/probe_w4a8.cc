@@ -1,10 +1,10 @@
 // The W4A8 probe (pre-registration:
 // docs/superpowers/specs/2026-09-22-w4a8-dpas-probe-design.md; results:
-// docs/probe-w4a8-2026-09-23.md).
+// docs/probes/probe-w4a8-2026-09-23.md).
 //
 // ONE shape, design §4: gate||up, K = 5120, N = 34816, M = 2048 -- 730.1 GFLOP,
 // against the two-pass bf16 control already measured at 5.341 ms / 136.72
-// TFLOP/s (docs/probe-fused-dequant-2026-09-22.md). Break-even 5.341 ms; the
+// TFLOP/s (docs/probes/probe-fused-dequant-2026-09-22.md). Break-even 5.341 ms; the
 // probe is worth a study at <= 3.5 ms (>= 1.53x) and the instruction's nominal
 // promise is 2.67 ms (2.00x). Below 1.53x the probe is REJECTED and recorded.
 //

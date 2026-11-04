@@ -16,9 +16,9 @@ chunk-bound site moved from the constant 2048 to that width, the gates unchanged
 |---|---|---|---|
 | pp4096 today, chunk 2048 (two chunks) | **2125.12 t/s** (1927.4 ms) | measured | docs/BENCHMARKS.md "Flash attention and 128k" |
 | "2048 is the widest this build runs"; the width sweep 512 / 1024 / 2048 is monotone (a fixed cost per chunk) | 932 / 1222 / 1406 t/s (bf16 era) | measured 2026-09-09 | docs/BENCHMARKS.md "Chunk width" |
-| the h8 path rebuilds a rotated int8 slab of every linear **per chunk**; on gate‖up that requant is **1.32 of 4.44 ms (~30 %)** of the linear's time at 2048 rows | ~30 % | measured | docs/17-int8-prefill.md "What the speed is made of"; docs/probe-w4a8-2026-09-23.md §15.5 |
-| a wider chunk amortises the requant: about 1.8x on gate‖up at 4096 | 1.8x | derived (probe-w4a8 §14.7, "what could still move it") | docs/probe-w4a8-2026-09-23.md |
-| the per-chunk h8 linears, all 64 layers | ~602.5 ms of a 2048 chunk | derived (sums of measured kernels) | docs/probe-w4a8-2026-09-23.md §15.5 |
+| the h8 path rebuilds a rotated int8 slab of every linear **per chunk**; on gate‖up that requant is **1.32 of 4.44 ms (~30 %)** of the linear's time at 2048 rows | ~30 % | measured | docs/17-int8-prefill.md "What the speed is made of"; docs/probes/probe-w4a8-2026-09-23.md §15.5 |
+| a wider chunk amortises the requant: about 1.8x on gate‖up at 4096 | 1.8x | derived (probe-w4a8 §14.7, "what could still move it") | docs/probes/probe-w4a8-2026-09-23.md |
+| the per-chunk h8 linears, all 64 layers | ~602.5 ms of a 2048 chunk | derived (sums of measured kernels) | docs/probes/probe-w4a8-2026-09-23.md §15.5 |
 | ruling A13 (2048, not 4096) | taken on the **bf16** GEMM shapes of the time: four of six best at M = 2048, every shape but out / o_proj slower at 4096; the requant's doubling share weighed as nearly cancelling | measured then (bf16 / sycl-tla era); the int8 GEMM at 4096 rows never measured | `src/runtime/buffers.h` (the kC comment) |
 | the lever's source | ranked second among the transferable levers in the 2026-10-27 review of vllm-sly-radiance (public), which runs 4096-token chunks | published by others | - |
 
@@ -94,7 +94,7 @@ operator rules on (open question 1 below). Every byte is recomputed, not doubled
 - [ ] **Step 1:** `probe_w8a8` with `B70_W8A8_M=4096` (a 4096-row capture from `tools/probe/mk_capture.py`) against two
   2048-row calls, every shape of probe-w4a8 §15.5, h8 and the bf16 control, interleaved pairs, median of 5, idle. **Stop
   rule:** if the summed linear time a 4096-token prompt pays is not >= 5 % lower at M = 4096, stop and record (A13
-  stands for the int8 path too). Record in `docs/probe-prefill-chunk-4096-<date>.md`. Commit
+  stands for the int8 path too). Record in `docs/probes/probe-prefill-chunk-4096-<date>.md`. Commit
   `git commit -S -m "probe: the int8 prefill linears at 4096 rows against 2 x 2048 (plan 5d)"`.
 
 ### Task 2: the chunk cap through the code (Mac)

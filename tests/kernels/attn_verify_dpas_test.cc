@@ -360,7 +360,7 @@ int main(int argc, char** argv) {
           // N1's bar: 0.99999 against the fp64 reference; for int8 KV, operator ruling 2026-11-03: "no further than
           // pf_flash_attn_kv8 on the same row" - the prefill's production kernel, the same P-in-bf16 form. On this
           // dump that row is depth 4096, (q head 19, row 0): pf_flash_attn_kv8 0.99998792 (probe_verify_attn arms,
-          // docs/probe-verify-attn-2026-11-03.md §3), the bar there. Every other int8 depth meets 0.99999.
+          // docs/probes/probe-verify-attn-2026-11-03.md §3), the bar there. Every other int8 depth meets 0.99999.
           const double n1_bar = kv8 && d == 4096 ? kPfaKv8Row4096 : 0.99999;
           const bool pass = w.n1 >= n1_bar && w.n2b >= n1_bar && w.rep && same == done;
           ok = ok && pass;

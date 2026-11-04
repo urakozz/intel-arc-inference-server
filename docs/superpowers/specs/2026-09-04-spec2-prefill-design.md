@@ -132,7 +132,7 @@ Correctness at every row: tie-aware golden gate 94/94 Vishva and 93/93 RTN (iden
 
 ### 3.0b RULING A23 (2026-09-05) - A21 falsified by measurement; the scratch + stock GEMM stands
 
-The probe A21 called for ran (`docs/probe-gemm-int4-mixed-2026-09-05.md`).
+The probe A21 called for ran (`docs/probes/probe-gemm-int4-mixed-2026-09-05.md`).
 Correctness was perfect - **0 mismatches in 83.9 M weights** against the
 dequant oracle, after a one-time repack that is exactly a u32 transpose
 (a new layout: +12.16 GB second copy). Rate: **42.2 TFLOP/s at gate‖up

@@ -37,7 +37,7 @@
 ### Task 2: end to end
 
 - [ ] **Step 1:** patch the CPU reference's FA attention to quantise K/V by scheme; last-row and per-position logits cosine, argmax, and unfiltered KL against bf16 KV on the golden prompts + 32 greedy tokens and on the two tool-call prompts; the bf16-output control.
-- [ ] **Step 2:** `docs/probe-int8-kv-2026-09-28.md`: the tables, the chosen scheme (smallest error; ties to the simplest), or a stop (if every scheme's logits cosine at 8k is below the l0-int8 path's own distance to the oracle, record for the operator); proposed tolerances for spec 12's Q3.
+- [ ] **Step 2:** `docs/probes/probe-int8-kv-2026-09-28.md`: the tables, the chosen scheme (smallest error; ties to the simplest), or a stop (if every scheme's logits cosine at 8k is below the l0-int8 path's own distance to the oracle, record for the operator); proposed tolerances for spec 12's Q3.
 - [ ] **Step 3:** `docs/README.md` line; **Commit** `probe: int8 KV verdict (spec 12 P0)`.
 
 **Gate for the plan:** both tasks' tables, the scheme choice or a stop. Hand back with the tables.

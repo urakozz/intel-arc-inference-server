@@ -64,7 +64,7 @@ Qwen3.8** -> plan 5d (prefill chunk 4096). So:
 |---|---|---|---|
 | Qwen3.8 plain decode, one card, int8 head | 31.21 t/s (~32.0 ms a step) | measured | spec 9, docs/BENCHMARKS.md |
 | one card, `--mtp auto` on the tool-call set | geomean 1.633x of plain (~49 t/s at those depths) | measured (1.633x); t/s derived | docs/BENCHMARKS.md "D1, greedy decode" |
-| the step's composition at M = 1 (profiled lists, shares) | int4 GEMVs 23.9 + head 4.4 of 33.3 ms (~85 %); attention + `gdn_step` 3.3 (~10 %); everything else 1.8 (~5 %) | measured 2026-09-27 (bf16 head then) | docs/probe-mtp-2026-09-27.md |
+| the step's composition at M = 1 (profiled lists, shares) | int4 GEMVs 23.9 + head 4.4 of 33.3 ms (~85 %); attention + `gdn_step` 3.3 (~10 %); everything else 1.8 (~5 %) | measured 2026-09-27 (bf16 head then) | docs/probes/probe-mtp-2026-09-27.md |
 | both cards' link | PCIe 3.0 x16 each | operator-stated | §1 |
 | BAR | **32 GB mapped on both cards** (`lspci`) | measured 2026-10-23 (operator, by hand) | §1 |
 | P2P | the box runs the operator's custom kernel with a P2P patch (7.3.0-rc4-b70-p2p); **our engine has never exercised P2P** | installed (measured); never exercised | §1; docs/10-the-box.md |
@@ -189,7 +189,7 @@ mode (spec 13 §10) loses to TP.** The plan is **PARKED**:
 
 | 2026-10-05 premise | the fact on 2026-10-23 |
 |---|---|
-| spec 16a's P0 measures TP's key number ("the remote-partial arm") | **16a never ran** (`tools/box_validate/stages.sh`, rownote 22: "16a's probe ... has not run - it is plan 16a's own probe, not a stage"); `docs/probe-multi-gpu-2026-10-05.md` and `tools/probe/probe_p2p.*` do not exist. **17a now owns its arm** (§3, plan 17a) |
+| spec 16a's P0 measures TP's key number ("the remote-partial arm") | **16a never ran** (`tools/box_validate/stages.sh`, rownote 22: "16a's probe ... has not run - it is plan 16a's own probe, not a stage"); `docs/probes/probe-multi-gpu-2026-10-05.md` and `tools/probe/probe_p2p.*` do not exist. **17a now owns its arm** (§3, plan 17a) |
 | spec 16 gives the multi-device foundation | 16b-16d were **built blind and merged** (spec 16 §8-§10): one Level Zero context over both cards, per-device buffers / lists / queues, `pp_handoff.cl`'s system-scope flag protocol, the bounded fences; **none of it has run on a card** - rows 22 / 23 / 27 pending |
 | TP is the one multi-GPU mode that shortens every turn (Qwen3.8 first) | spec 13 §9 decision 4 keeps the **second card free** for dense models (pipeline parallel, long contexts, another model) and §10 writes the **two-card replica mode** for later; spec 25 Decision 4 names TP "the decode lever after 25e" for Bolt. The targets are re-ordered (§2) |
 | one engine (`src/runtime/capture.cc`, `prep_res_fold`) | every model family since has **its own engine and fold kernels**: `src/runtime/{bolt,k2,kolibri,lfm2moe,muse,qwen4exp,dflash}/`, `src/kernels/{bolt,k2,kolibri,lfm2moe,muse,qwen4exp,dflash}/`. TP is per-engine work; the target engines are named (§4.10) |
@@ -228,7 +228,7 @@ used):
 | P2P kernel patch | installed: 7.3.0-rc4 with `b70-p2p-exp2` | measured (installed) 2026-10-22 | docs/10-the-box.md "Versions on the box" |
 | P2P exercised by our code | **never**: no two-card process of ours has run (rows 22 / 23 / 27 pending) | - | box-validation-queue.md |
 | PCIe link generation and width per card | **PCIe 3.0 x16, both cards** - **operator-stated** 2026-10-23, not read by `lspci` / `offload_links.sh` (spec 22a's `r36.links` is pending; 17a's `r68.links` records it [2026-10-27: row 71, `r71.links`]); theoretical ~15.75 GB/s per direction (derived); both cards under one CPU root complex (Broadwell-EP, operator-stated) | operator-stated | the operator, 2026-10-23 |
-| host <-> device copy rate, device 0 | H2D **12.2-12.9 GB/s**, D2H **14.2 GB/s** (pinned host) | measured 2026-09-27 | docs/probe-prefix-cache-2026-09-27.md |
+| host <-> device copy rate, device 0 | H2D **12.2-12.9 GB/s**, D2H **14.2 GB/s** (pinned host) | measured 2026-09-27 | docs/probes/probe-prefix-cache-2026-09-27.md |
 | peer copy rate (copy engine; kernel peer writes; **kernel peer reads**) | **not measured**. Peer traffic between two root ports of one Xeon E5 root complex can be far slower than host traffic, and peer reads slower than peer writes (estimated: a known risk of the platform) - P0 measures each | - | - |
 | **12 GB/s**, used for every transfer time below | **assumed** for peer traffic: the measured host <-> device rate above, not a peer measurement; every time derived from it scales with the measured peer rate | assumed | - |
 | a peer write + system-scope flag inside a replayed list | **not measured** (16b built `pp_send` / `pp_recv`; `r22.p1` under `--pipeline-handoff peer` is its first run) | - | spec 16 §8 |

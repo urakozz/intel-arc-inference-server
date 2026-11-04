@@ -31,7 +31,7 @@
 
 - [ ] **Step 1:** per-kernel times of `attn_prep`, `attn_decode`, `attn_reduce` at depths 4096 / 32768 / 65536 / 130816, max_len 131072, M = 1; plus M = 4 if spec 8's verify lists are on main (else say so).
 - [ ] **Step 2:** effective GB/s of `attn_decode` against the KV bytes (64 KiB per position per token, spec §1), and `attn_reduce`'s share.
-- [ ] **Step 3:** `docs/probe-decode-attn-2026-09-28.md` with the table; **Commit** `probe: decode attention at depth, per-kernel profile (spec 10 P0)`.
+- [ ] **Step 3:** `docs/probes/probe-decode-attn-2026-09-28.md` with the table; **Commit** `probe: decode attention at depth, per-kernel profile (spec 10 P0)`.
 
 ### Task 2: the probe kernel and harness
 

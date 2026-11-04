@@ -652,7 +652,7 @@ snapshot under a private package, the four text files sha256-checked; the `mamba
 mixer's dispatch patched per instance, `kernel` or R's `torch`), `bolt_mamba_ops.py` (the five training-kernel
 functions in plain torch), `bolt_ref.py` (the streamed reference, the restated ops 25b / 25c import, `run` / `ppl` /
 `hfcheck` / `taps` / `facts` / `gateq`, `fallback_forward` - R's fallback with its rounding points as switches),
-`bolt_make_tiny.py` + `bolt_tiny_check.py`, `bolt_facts.py` (`docs/probe-bolt-2026-10-21.md`), `bolt_prompts.py`,
+`bolt_make_tiny.py` + `bolt_tiny_check.py`, `bolt_facts.py` (`docs/probes/probe-bolt-2026-10-21.md`), `bolt_prompts.py`,
 `bolt_gateq.py`, the A4 set `tests/golden/toolcall-bolt`, `score.py --format qwen-think`, `oracle_generate.py --model
 bolt`, `a4_ref.sh bolt`, `tools/box_validate/bolt_oracle.sh`, the template fixtures `tests/server/bolt_template_cases.json`.
 Measured on the Mac (`agnes-ref-img`, torch 2.14.1 CPU, transformers 5.19.0): `test_bolt_ref.py` 26 tests,
@@ -719,7 +719,7 @@ torch's; the engine's differ by ulps, so B2 is bitwise only where the arithmetic
   `None`, a tool schema's `additionalProperties: false` -> `<additionalProperties>False</additionalProperties>` (§7:
   25e must reproduce it).
 - **torch's `topk(sorted=False)` keeps either id of an exact tie** (28 / 22 of 50 at 240, 19 / 31 at 496).
-- **The bf16 difference table** (`docs/probe-bolt-2026-10-21.md` §6.2): beyond §2.0's list, softplus itself rounds in
+- **The bf16 difference table** (`docs/probes/probe-bolt-2026-10-21.md` §6.2): beyond §2.0's list, softplus itself rounds in
   bf16, and the fallback's prefill keeps y fp32 into the gated norm (the kernel path rounds y once); with every point
   switched to the kernel path's semantics the fallback equals the port (fp32 cache: 0 difference on the outputs).
 

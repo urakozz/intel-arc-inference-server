@@ -1529,7 +1529,7 @@ class Capture {
   // --- spec 8: the MTP head (plan 8b) ---------------------------------------
   //
   // The head is one full-attention layer over fc(cat(pre_fc_norm_embedding(embed(x)),
-  // pre_fc_norm_hidden(h))) (docs/probe-mtp-2026-09-27.md §1). It runs on its OWN
+  // pre_fc_norm_hidden(h))) (docs/probes/probe-mtp-2026-09-27.md §1). It runs on its OWN
   // control block `hctl` (MtpBuffers): embed_gather reads the input ids from
   // hctl.cur_token, the attention trio reads the head's position from hctl.pos, and in
   // the draft list argmax_stage2 writes the draft into hctl.cur_token and advances

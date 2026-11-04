@@ -206,7 +206,7 @@ is under 1.2x (derived); stop and record for the operator's call before 8b.
 
 ## 8. Amendment: what plan 8b built (2026-09-28)
 
-Numbers: `docs/probe-mtp-2026-09-27.md` §6. Each item overrides the text above where
+Numbers: `docs/probes/probe-mtp-2026-09-27.md` §6. Each item overrides the text above where
 they differ.
 
 - **A1, the head's wiring (§3.2, from P0).** The head's hidden input is the main model's

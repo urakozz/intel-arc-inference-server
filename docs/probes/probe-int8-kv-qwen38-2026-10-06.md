@@ -4,7 +4,7 @@ Plan 12b Task A: spec 12a's int8 KV probe repeated on Qwen3.8 27B (bf16 base, sn
 `1d4bf0f`) on the Mac CPU, `tools/oracle/kv8_qwen38_repeat.sh`, container `agnes-ref-img`
 (torch 2.14.1+cpu, transformers 5.15.0), 2026-10-06 04:47-10:05. Raw tables:
 `oracle-out-12a-qwen38/summary.md` and `long4096.replay.md` (gitignored). The Agnes run it
-repeats: `docs/probe-int8-kv-2026-09-28.md`.
+repeats: `docs/probes/probe-int8-kv-2026-09-28.md`.
 
 Every metric is a variant against the bf16-KV forward in the same batch (`pt` per-token int8,
 `kivi` per-channel K / per-token V, `rot` Hadamard-rotated K, `rotkv` K and V rotated with the

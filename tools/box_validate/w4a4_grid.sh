@@ -2,7 +2,7 @@
 # Queue row 35, ON THE BOX CPU: the W4A4 accuracy grid (docs/superpowers/plans/2026-10-09-w4a4-probe.md
 # Task 2 Step 1) - tools/rotate/eval_quantised.py sim on the bf16 Qwen3.8 against the int4 g64 gate
 # checkpoint, in the oracle container (tools/oracle/run_in_container.sh), over the four prompts h8 was
-# accepted on (docs/probe-w4a8-2026-09-23.md §15.4).
+# accepted on (docs/probes/probe-w4a8-2026-09-23.md §15.4).
 #   tools/box_validate/w4a4_grid.sh <data tree> prompts     write the four prompts' ids (no RAM needed)
 #   tools/box_validate/w4a4_grid.sh <data tree> grid        the stopping rule's numbers, every prompt:
 #       sim <bf16> <gate> --prompt <p> --variants none,w4a16,h8,h4,h4p2 --group 256 --vocab-used 248077

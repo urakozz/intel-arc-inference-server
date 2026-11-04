@@ -13,7 +13,7 @@
 // The named risk is that Xe2's L2 need not retain a kernel's writes for the
 // next kernel. Control C6 measures that directly and needs no GEMM to do it.
 //
-// Pre-registration: docs/probe-dequant-slab-2026-09-05.md (dequant overhead
+// Pre-registration: docs/probes/probe-dequant-slab-2026-09-05.md (dequant overhead
 // 210 -> <= 70 ms/chunk-equivalent; accept at >= 90 ms saved, priced at 30-90,
 // dead below 30), committed before this file.
 //

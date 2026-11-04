@@ -33,7 +33,7 @@ struct VerifyAttnRow {
   uint32_t dpas_from;   // row 0's key count (pos + 1) from which DPAS is bound; kDpasNever: never
 };
 
-// docs/probe-verify-attn-2026-11-03.md §2 (busy-box timing, card 1; to be re-checked on a quiet box): v2 / dpas
+// docs/probes/probe-verify-attn-2026-11-03.md §2 (busy-box timing, card 1; to be re-checked on a quiet box): v2 / dpas
 // paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00, and
 // N1 >= 0.99999); dpas_from = the smallest measured depth from which every verdict is dpas.
 // One row per built (M, KV form): bf16 at M = 2..8, int8 at M = 2..4 (production's int8 decode lists).

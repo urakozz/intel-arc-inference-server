@@ -8,7 +8,7 @@
 
 **Tech Stack:** C++20, OpenCL C kernels compiled with ocloc, Level Zero, CMake/ctest.
 
-**Spec:** `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.1-3.5, §4 M1, M2, M5, §5 D3). Needs: plan 8a's doc (`docs/probe-mtp-2026-09-27.md`: the head's wiring, K, the commit mechanism), plan 8a's `capture.cc` M parameter and `tools/oracle/mtp_ref.py`; spec 7 plan 7b merged (`Engine::save_state/load_state/save_kv/load_kv`, `set_block_hook`).
+**Spec:** `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md` (§3.1-3.5, §4 M1, M2, M5, §5 D3). Needs: plan 8a's doc (`docs/probes/probe-mtp-2026-09-27.md`: the head's wiring, K, the commit mechanism), plan 8a's `capture.cc` M parameter and `tools/oracle/mtp_ref.py`; spec 7 plan 7b merged (`Engine::save_state/load_state/save_kv/load_kv`, `set_block_hook`).
 
 ## Global Constraints
 
@@ -79,6 +79,6 @@ Tests: `tests/kernels/gdn_step_slots_test` (each slot equals the M = 1 state aft
 
 - [ ] **Step 1:** interleaved pairs, MTP off, this branch against main at the merge base: pp4096 and decode at 4k depth; bar within 1 %.
 - [ ] **Step 2:** full suite green on the box.
-- [ ] **Step 3:** section "Engine" appended to `docs/probe-mtp-2026-09-27.md` with the M1/M2 numbers and D3; commit `mtp: engine gates M1, M2, D3 (spec 8)`.
+- [ ] **Step 3:** section "Engine" appended to `docs/probes/probe-mtp-2026-09-27.md` with the M1/M2 numbers and D3; commit `mtp: engine gates M1, M2, D3 (spec 8)`.
 
 **Gate for the plan:** M1, M2, M5 (engine part), D3 passing, full suite green. Hand back with the numbers.

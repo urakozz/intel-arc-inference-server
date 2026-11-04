@@ -1,7 +1,7 @@
 // probe_decode_attn.cl - spec 10 P1: decode attention at depth, the lever probe.
 //
 // Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md (Task 2).
-// Record: docs/probe-decode-attn-2026-09-28.md.
+// Record: docs/probes/probe-decode-attn-2026-09-28.md.
 //
 // PROBE kernels. No runtime path binds them; src/kernels/attn.cl is untouched. The
 // control (arm 0) is attn.cl itself, compiled at the probe's M (tools/probe/CMakeLists.txt).

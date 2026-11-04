@@ -30,9 +30,9 @@
 
 **Files:** `tools/probe/probe_dpas_l1.{cl,cc}`, registration in `tools/probe/CMakeLists.txt`.
 
-- [ ] **Step 1:** a kernel that loops DPAS (bf16, the flash kernel's 8x16x16 shape) with operands loaded each iteration by 2D block reads from a small (L1-resident) buffer, at operand reuse 1, 2, 4; TFLOP/s and the implied load GB/s per Xe-core; plus the register-fed peak as reference (183.45 TFLOP/s, docs/probe-dpas-rates).
+- [ ] **Step 1:** a kernel that loops DPAS (bf16, the flash kernel's 8x16x16 shape) with operands loaded each iteration by 2D block reads from a small (L1-resident) buffer, at operand reuse 1, 2, 4; TFLOP/s and the implied load GB/s per Xe-core; plus the register-fed peak as reference (183.45 TFLOP/s, docs/probes/probe-dpas-rates).
 - [ ] **Step 2:** compare with the production kernel's rate at 30720 (TFLOP/s from its FLOP count). Verdict for lever 4: build it only if the reuse-1 ceiling is within 1.3x of the kernel's current rate.
-- [ ] **Step 3:** `docs/probe-flash-levers-2026-09-28.md` with the table; **Commit** `probe: DPAS operand-bandwidth ceiling from L1 (spec 11 P0)`.
+- [ ] **Step 3:** `docs/probes/probe-flash-levers-2026-09-28.md` with the table; **Commit** `probe: DPAS operand-bandwidth ceiling from L1 (spec 11 P0)`.
 
 ### Task 2: lever 5's load layout
 

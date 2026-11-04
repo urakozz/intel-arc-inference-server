@@ -52,7 +52,7 @@ Two differences from the C++ probe, both recorded rather than papered over:
     the wall time of the submission loop BEFORE the final synchronize. When it
     is well below `us/call` the number is device-bound; when it approaches it,
     the row is a host-bound upper bound and says so.
-  * cold-start ramp (docs/probe-gemv-loads-2026-08-26.md): the first recorded
+  * cold-start ramp (docs/probes/probe-gemv-loads-2026-08-26.md): the first recorded
     configuration on a cold device read 355-378 GB/s where the identical binary
     read 532 warm (+42.8%). So: warm the device with a timed dispatch loop
     (>= --warm-seconds of GPU work AND >= --warm-dispatches calls) before the
@@ -84,7 +84,7 @@ if everything-else costs 5-12% of the step it lands around 510-580 GB/s.
   not the card's.
 
   Falsification bars, set BELOW the hypotheses' own ceilings this time (the
-  flaw scored in docs/probe-gemv-loads-2026-08-26.md's pre-registration):
+  flaw scored in docs/probes/probe-gemv-loads-2026-08-26.md's pre-registration):
     1. mean(theirs) / mean(ours `base`) >= 1.05  -> H_skill.
     2. mean(theirs) / mean(ours `base`) <= 0.95  -> we are already ahead of the
        production path and the comparison stops being a ceiling.
@@ -124,7 +124,7 @@ SHAPES: list[tuple[str, int, int]] = [
     ("lm_head int4", 5120, 248320),
 ]
 
-# Our own numbers, QUOTED from docs/probe-gemv-loads-2026-08-26.md so the
+# Our own numbers, QUOTED from docs/probes/probe-gemv-loads-2026-08-26.md so the
 # printed table is directly comparable. `base` is src/kernels/gemv.cl at the
 # production layout/S; `best` is that shape's best measured cell in the same
 # battery. Both are MEASURED, by the C++ probe, not by this script.

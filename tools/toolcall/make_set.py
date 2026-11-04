@@ -352,7 +352,7 @@ BOLT_TEMPLATE_SHA = "6521afc7"
 
 def check_bolt_template(snap: str) -> None:
     """Refuse a Bolt snapshot whose chat_template.jinja is not the pinned one (spec 25 §7; identical in all three
-    repos, docs/probe-bolt-2026-10-21.md §4)."""
+    repos, docs/probes/probe-bolt-2026-10-21.md §4)."""
     p = os.path.join(snap, "chat_template.jinja")
     sha = hashlib.sha256(open(p, "rb").read()).hexdigest() if os.path.exists(p) else "absent"
     if not sha.startswith(BOLT_TEMPLATE_SHA):

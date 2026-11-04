@@ -38,7 +38,7 @@ Task 3 (speed), and everything on the card (K1 on ocloc's build, K3, K2 on prefi
 
 ### Task 1: P0 for K2 prefill
 
-- [ ] Routing and grouped GEMM timings at K2's shapes and expert counts (100 / 64 experts, real row distribution from 18a's dumps); flash at head_dim 128; the derived pp4096 estimate. `docs/probe-k2-prefill-2026-10-05.md`. **Commit** `probe: K2 prefill shapes (spec 18c)`.
+- [ ] Routing and grouped GEMM timings at K2's shapes and expert counts (100 / 64 experts, real row distribution from 18a's dumps); flash at head_dim 128; the derived pp4096 estimate. `docs/probes/probe-k2-prefill-2026-10-05.md`. **Commit** `probe: K2 prefill shapes (spec 18c)`.
 
 ### Task 2: kernels and the prefill step
 

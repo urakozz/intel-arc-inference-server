@@ -40,7 +40,7 @@ and `oracle-out-ornith/` with router logits); the tests skip until both exist.
 
 - [ ] **Step 1:** the per-kernel floor: replayed lists of N empty kernels and N small GEMVs at hidden 2048 (N = 200, 400, 800); µs per kernel.
 - [ ] **Step 2:** the arms of spec §9 at Ornith shapes, each against our current kernel: the register-resident even/odd-K GEMV against our int4 g64 GEMV (K 2048, N 1024 and K 512, N 2048 per expert, and the dense attention / GDN projections); router top-k in one sub-group; the decode-attention "all K/V loads issued first" arm against v2 at GQA 8 and 4k depth.
-- [ ] **Step 3:** the derived decode estimate (kernels x floor + bytes / measured bandwidth) and the proposed decode bar for the operator, in `docs/probe-ornith-decode-2026-10-04.md`. **Commit** `probe: Ornith decode floor and kernel arms (spec 15 P0)`.
+- [ ] **Step 3:** the derived decode estimate (kernels x floor + bytes / measured bandwidth) and the proposed decode bar for the operator, in `docs/probes/probe-ornith-decode-2026-10-04.md`. **Commit** `probe: Ornith decode floor and kernel arms (spec 15 P0)`.
 
 ### Task 2: the loader and the MoE kernels
 

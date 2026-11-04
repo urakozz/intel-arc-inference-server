@@ -5,7 +5,7 @@
 //      holds on its adversary (every expert one row: the most padding a chunk can have);
 //   2. the sort, with routing TIES: route rows from k2_ref::route on coarse logits and biases
 //      (the checkpoint's biases are 8-28 in steps up to 0.125, so exact selection ties are
-//      expected - docs/probe-k2-2026-10-05.md) at C 1 / 37 / 300 / 2048, MoE (100 + shared,
+//      expected - docs/probes/probe-k2-2026-10-05.md) at C 1 / 37 / 300 / 2048, MoE (100 + shared,
 //      top-8) and MoVA (64, top-4, no shared): a tie goes to the LOWER id, every (token, slot)
 //      lands once in a tile of its expert, an expert's rows ascend by token, padding is NONE,
 //      the shared rows are the tokens in order, the header counts; and for the MoE shape the

@@ -10,12 +10,12 @@ Every number is **measured** unless marked **derived** or **estimated**.
 
 ## 1. The decision this spec implements
 
-The evidence is `docs/probe-w4a8-2026-09-23.md` sections 14 and 15. It rests
+The evidence is `docs/probes/probe-w4a8-2026-09-23.md` sections 14 and 15. It rests
 on three facts:
 
 1. **The hardware.** The B70's int8 DPAS runs at 366.9 TIOP/s, 2.000x bf16. It
    has no FP8 or FP4 matrix path: undeclared builtins, compiler crashes, and the
-   datasheet lists INT8 only (`docs/probe-dpas-rates-2026-09-22.md`).
+   datasheet lists INT8 only (`docs/probes/probe-dpas-rates-2026-09-22.md`).
 2. **What is fast.** An i8 x i8 GEMM with **per-channel** weight scales and
    **per-token** activation scales, both applied in the epilogue only: 264 to
    297 TOP/s (§14.5). Checkpoint-group rescales inside the loop kill the rate

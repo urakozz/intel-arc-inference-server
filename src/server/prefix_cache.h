@@ -24,7 +24,7 @@
 // back), and the same prompt again restores at len - 1 (Review Focus 5). The price: the
 // last prompt id goes through decode's kernels, not prefill's, so a near-tie first token
 // can differ from a cold run's, and on the synthetic C3 replay two such differences fail
-// the tie rule (docs/probe-prefix-cache-2026-09-27.md §9). Without it (the default) the
+// the tie rule (docs/probes/probe-prefix-cache-2026-09-27.md §9). Without it (the default) the
 // tail is one prefill and the prompt-end snapshot is at len; a restore at a block end then
 // reproduces a cold run bitwise.
 #include <cstddef>

@@ -1,6 +1,6 @@
 // W4A8 group-size SWEEP kernels (2026-09-23).
 //
-// The W4A8 probe (docs/probe-w4a8-2026-09-23.md, tools/probe/probe_w4a8.cl) was
+// The W4A8 probe (docs/probes/probe-w4a8-2026-09-23.md, tools/probe/probe_w4a8.cl) was
 // REJECTED at the checkpoint's group size 64: the i8_i4 k32 DPAS delivers its
 // 2x instruction rate, but 192 SIMD16 float instructions per group boundary per
 // sub-group (64 int-to-float converts, 64 multiplies, 64 mads) against 16

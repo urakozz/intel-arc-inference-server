@@ -5,7 +5,7 @@
 // and the same KV caches, and writes the same attn_out.
 //
 // It is plan 10a's winner `P0_L2_D1_Q1_E1` (tools/probe/probe_decode_attn.cl, record
-// docs/probe-decode-attn-2026-09-28.md), shipped in its exp form `P0_L2_D1_Q1` (see EXP2
+// docs/probes/probe-decode-attn-2026-09-28.md), shipped in its exp form `P0_L2_D1_Q1` (see EXP2
 // below), with two changes the probe did not have:
 //
 //  1. **The stride is per ROW and a function of that row's key count alone.** Row m of

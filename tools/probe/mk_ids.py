@@ -2,7 +2,7 @@
 
 usage: python mk_ids.py '<snapshot glob>' <out.ids> <text file>...
 The snapshot's own tokenizer.json is used; the first 2048 ids are written.
-docs/probe-w4a8-2026-09-23.md section 14 used docs/05-perf-model.md and
+docs/probes/probe-w4a8-2026-09-23.md section 14 used docs/05-perf-model.md and
 src/runtime/prefill/context.cc as the held-out evaluation text.
 """
 import sys, glob

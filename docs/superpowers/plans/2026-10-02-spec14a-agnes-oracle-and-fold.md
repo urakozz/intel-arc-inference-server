@@ -36,7 +36,7 @@
 
 - [ ] **Step 1:** `test_agnes.py`: config translation (72 layers, FA at `l % 4 == 3`, parallel FFN 2048), name map on a list of real checkpoint keys (from `model.safetensors.index.json`), and the two-branch MLP on random weights equal to a hand-written reference.
 - [ ] **Step 2:** implement; run `test_agnes.py` in the container.
-- [ ] **Step 3:** Review Focus 1: our reference vs `modeling_agnes.py` (`trust_remote_code=True`) on a 64-id prompt, logits per position. Record in `docs/probe-agnes-2026-10-02.md`.
+- [ ] **Step 3:** Review Focus 1: our reference vs `modeling_agnes.py` (`trust_remote_code=True`) on a 64-id prompt, logits per position. Record in `docs/probes/probe-agnes-2026-10-02.md`.
 - [ ] **Step 4: Commit** `oracle: an Agnes 3.0 Flash CPU reference (spec 14a)`.
 
 ### Task 2: the fold proof (G1, CPU)

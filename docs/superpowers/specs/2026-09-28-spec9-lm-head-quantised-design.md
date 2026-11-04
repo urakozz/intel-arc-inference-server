@@ -18,7 +18,7 @@ Every number is **measured** unless marked **derived** or **estimated**.
   the decode path that was measured three ways"), on a self-quantised RTN
   checkpoint that has since been deleted.
 - MTP (spec 8): a draft step is 6.19 ms, of which `lm_head` is 4.39 ms
-  (`docs/probe-mtp-2026-09-27.md`); at K = 3 an iteration reads `lm_head` four
+  (`docs/probes/probe-mtp-2026-09-27.md`); at K = 3 an iteration reads `lm_head` four
   times (derived: three drafts plus the verify's M = 4 rows, which read it once).
 
 The engine already runs an int4 g64 head: `Qwen35::lm_head(kind)` and the
@@ -124,7 +124,7 @@ Idle box, device 0, interleaved pairs, median of 3.
 
 ## 8. Amendment, 2026-09-28: L1/L2 redefined (operator ruling)
 
-Plan 9a (`docs/probe-lm-head-2026-09-28.md`) found int8 failing §4's L1 top-20 bar
+Plan 9a (`docs/probes/probe-lm-head-2026-09-28.md`) found int8 failing §4's L1 top-20 bar
 (92.0 % of positions) and L2's KL mean (+inf) **only** through swaps at the top-20 edge
 and the filtered KL going infinite when a near-equal logit moves the top-p cut. A control
 that changes nothing but rounding the bf16 head's output to bf16 fails the same bars

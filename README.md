@@ -31,7 +31,7 @@ Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work,
 then to 2104 t/s by moving every int4 linear onto the card's int8 matrix engines
 (spec 5: Hadamard-rotated int8 activations against per-channel int8 weights
 rebuilt on the fly from the int4 checkpoint, at W4A16 accuracy; see
-docs/probe-w4a8-2026-09-23.md sections 14 and 15), and to 2125 t/s with the
+docs/probes/probe-w4a8-2026-09-23.md sections 14 and 15), and to 2125 t/s with the
 fused flash attention of spec 6.
 Decode has been parked for a while and vLLM is still ahead there, so that is
 the honest picture: good prefill, decode still to do.
@@ -85,7 +85,7 @@ Why 64 rather than the common 128, or a per-channel scale:
 - **Accuracy.** Finer groups track the weights' outliers better. Measured on
   this model, a per-channel int4 checkpoint (AutoRound on the Hadamard-rotated
   model) had about three times the logit error of g64: 22.9 % against 7.77 %
-  (docs/probe-w4a8-2026-09-23.md §15.2).
+  (docs/probes/probe-w4a8-2026-09-23.md §15.2).
 - **Decode is bandwidth bound**, and g64 costs only a few percent more bytes
   than g128 (one fp16 scale per 64 weights), so the finer grid is nearly free
   where the time actually goes.
@@ -133,7 +133,7 @@ hardware microscaling would work, crashes the compiler. So MXFP4 buys nothing
 here today, and int8 or int4 activations are the only lower precision paths
 that would actually run.
 
-Details in [docs/probe-dpas-rates-2026-09-22.md](docs/probe-dpas-rates-2026-09-22.md).
+Details in [docs/probes/probe-dpas-rates-2026-09-22.md](docs/probes/probe-dpas-rates-2026-09-22.md).
 
 ## Things that did not work
 

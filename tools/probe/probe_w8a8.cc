@@ -1,7 +1,7 @@
 // The W8A8 SPEED probe (2026-09-23): i8 x i8 k32 DPAS, per-channel int8
 // weights requantised per slab from the checkpoint's int4 g64.
 //
-// Why this exists: the CPU accuracy study (docs/probe-w4a8-2026-09-23.md)
+// Why this exists: the CPU accuracy study (docs/probes/probe-w4a8-2026-09-23.md)
 // rejected every int4-weight W4A8 variant on accuracy and left exactly one
 // candidate: per-channel int8 weights + per-token int8 activations after a
 // 1024-block Hadamard rotation. The earlier 1.75x per-channel rate was the
@@ -851,7 +851,7 @@ int main(int argc, char** argv) {
     }
     std::printf("\nThe ROTATED rows rotate both sides: activations in pw8_quant_had2, weights in "
                 "the rotating requant (B70_W8A8_ROT selects the version). The unrotated rows are "
-                "fast but fail the accuracy bar (docs/probe-w4a8-2026-09-23.md section 14).\n");
+                "fast but fail the accuracy bar (docs/probes/probe-w4a8-2026-09-23.md section 14).\n");
     return 0;
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_w8a8 FAILED: %s\n", ex.what());

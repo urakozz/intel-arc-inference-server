@@ -51,7 +51,7 @@ combine exact on the Mac's GPU - indicative). Deviations from the text below, ea
 
 **Files:** `tools/probe/probe_moe_prefill.{cl,cc}`, `tools/probe/CMakeLists.txt`.
 
-- [ ] Routing kernels (histogram, prefix sum, scatter) timed at C = 2048; the grouped GEMM in both dequant strategies at the real distribution (gate‖up K 2048 N 1024; down K 512 N 2048), TFLOP/s and ms per layer; the derived pp4096 estimate and the proposed prefill bar; `docs/probe-ornith-prefill-2026-10-04.md`. **Commit** `probe: Ornith prefill routing and grouped GEMM arms (spec 15 P0)`.
+- [ ] Routing kernels (histogram, prefix sum, scatter) timed at C = 2048; the grouped GEMM in both dequant strategies at the real distribution (gate‖up K 2048 N 1024; down K 512 N 2048), TFLOP/s and ms per layer; the derived pp4096 estimate and the proposed prefill bar; `docs/probes/probe-ornith-prefill-2026-10-04.md`. **Commit** `probe: Ornith prefill routing and grouped GEMM arms (spec 15 P0)`.
 
 ### Task 2: routing and grouped GEMM kernels
 

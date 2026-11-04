@@ -344,7 +344,7 @@ from + - x (`df_exp` = `dfref::attn_exp`, within 1 fp32 ulp of exp): `df_attn` i
 ## 9. Amendment: 19e on the host (2026-10-05)
 
 Plan 19e Task 1 and the host half of Task 2, written on the Mac (branch
-`spec19e-prompt-lookup`). Numbers: `docs/probe-prompt-lookup-2026-10-05.md`.
+`spec19e-prompt-lookup`). Numbers: `docs/probes/probe-prompt-lookup-2026-10-05.md`.
 
 - **Task 1, on A4 only.** No request log exists, so the opencode recording (the deciding
   corpus, D5) is still to come. On the A4 tool-call set (34 prompts, 2613 output ids, greedy,
@@ -618,7 +618,7 @@ other way round: DFlash stays the proposer, and lookup takes over only where it 
 - **Full-depth lookup verify:** while in lookup, the verify carries K = `--spec-max` lookup drafts (7 today, up to 15
   after spec 28 - §13.2), capped by the match's remaining length - not AdaptiveK's DFlash-tuned K.
 - **The drafter while in lookup:** the draft pass is **skipped** (saving its ~0.17-0.2 plain steps a verify, derived,
-  docs/probe-dflash-2026-10-08.md §3); the **commit-side projection still runs** on the accepted rows' taps (the tap
+  docs/probes/probe-dflash-2026-10-08.md §3); the **commit-side projection still runs** on the accepted rows' taps (the tap
   verify list writes them whatever proposed the drafts), so the ring stays current and the exit to DFlash is warm.
 - **Sampling:** a lookup draft is a point mass - §9's `accept_point_mass`; DFlash drafts keep `accept_sparse`.
 

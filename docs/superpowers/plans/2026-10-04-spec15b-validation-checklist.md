@@ -89,7 +89,7 @@ build/src/cli/b70-decode ~/ornith-cfg --bench --depth 16 --tg 1 2>&1 | tail -2
 ```
 Pass: it fails with `ornith-1.5-35b-a3b (Qwen3_5MoeForConditionalGeneration): MoE not implemented (spec 15c)` (from `loader::load` -> `model::require_loadable`, ahead of the quantisation-config parse and of any tensor read).
 
-Then: one paragraph in the spec 15 record (or `docs/probe-ornith-*.md` when 15a creates it) - R0 passed, the checksum compare, the suite and Agnes results with their commits - and offer the fast-forward merge of `spec15b-model-desc` into main.
+Then: one paragraph in the spec 15 record (or `docs/probes/probe-ornith-*.md` when 15a creates it) - R0 passed, the checksum compare, the suite and Agnes results with their commits - and offer the fast-forward merge of `spec15b-model-desc` into main.
 
 ## Pending until this session
 

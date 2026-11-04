@@ -18,7 +18,7 @@ S1 numbers.
 
 **Tech Stack:** C++17, OpenCL C, Level Zero, CMake/ctest.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-spec16-pipeline-parallel-design.md` (§3.1, §3.2, §4 P1, P2 decode, P4, §5 S1). Needs 16a's doc (`docs/probe-multi-gpu-2026-10-05.md`: the hand-off, the split).
+**Spec:** `docs/superpowers/specs/2026-10-05-spec16-pipeline-parallel-design.md` (§3.1, §3.2, §4 P1, P2 decode, P4, §5 S1). Needs 16a's doc (`docs/probes/probe-multi-gpu-2026-10-05.md`: the hand-off, the split).
 
 ## Global Constraints
 

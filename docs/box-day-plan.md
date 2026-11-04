@@ -357,7 +357,7 @@ tools/box_validate.sh --status
 Each session is one launch; start the next only after reading the previous one's
 `progress.log` / summary. Per-session estimates come from these anchors (all estimates unless
 marked measured): the whole suite at 103 tests took 29 min on 2026-09-27 (measured,
-docs/probe-mtp-2026-09-27.md); Qwen3.8 loads in 13.6 s on a warm page cache (measured,
+docs/probes/probe-mtp-2026-09-27.md); Qwen3.8 loads in 13.6 s on a warm page cache (measured,
 docs/10); pp4096 at 2125 t/s and pp130816 in 175 s (746.6 t/s), decode ~30 t/s, ~20 t/s at
 128k (measured, BENCHMARKS); the stage titles' and rownotes' own figures (`r14.load` ~5 min a
 test, `r14.oracle` ~20 min, `r24.oracle_synth` ~1 h, `r8.m3_small` ~1.5 h per size, `r22.s1_32k`
@@ -550,7 +550,7 @@ unprofiled. Watch hw-smi by hand during it; the per-phase bytes and GB/s are der
 
 ### Session 6b - DFlash verify cost at M = 5..8 (plan 19a Task 4), box idle
 
-The one number DFlash's go / no-go still needs. P0 (Tasks 2-3, `docs/probe-dflash-2026-10-08.md`)
+The one number DFlash's go / no-go still needs. P0 (Tasks 2-3, `docs/probes/probe-dflash-2026-10-08.md`)
 measured the acceptance on the Mac: 7.21 tokens per verify at K = 7 on the A4 tool calls, 6.15 on
 code, ~2.2 on prose; its projection against `--mtp auto` (+54 % / +65 % / +17 %) **extrapolates**
 verify(M) past spec 8's measured M = 2..4 (1.17 / 1.52 / 1.74 plain steps) to M = 8 = 2.62. If
@@ -597,7 +597,7 @@ Estimate 0.25-0.5 h (est., from assumed call times: two loads and prefills, then
 arms x 104 calls and 7 x 3 pairs of 32 calls at 35-90 ms a call, ~2-4 min; the draft probe fills
 ~8 GB of random weights, then runs for seconds).
 
-Then plan 19a Task 5 (a Mac edit): re-run `docs/probe-dflash-2026-10-08.md` §3's table with
+Then plan 19a Task 5 (a Mac edit): re-run `docs/probes/probe-dflash-2026-10-08.md` §3's table with
 the measured costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding
 and agentic sets = go for 19b).
 
@@ -629,7 +629,7 @@ Then (a Mac edit) the rows go into docs/BENCHMARKS.md "llama-benchy comparisons"
 ### Session 6d - the batching probe (row 66, plan 13a), box idle
 
 Added 2026-10-23. Rows of DIFFERENT sequences in one decode step (spec 13 §9): the numbers 13b's three decisions wait
-on - the slots per model, the 8-row budget's allocation and the interleave chunk (docs/probe-batching-2026-10-23.md
+on - the slots per model, the 8-row budget's allocation and the interleave chunk (docs/probes/probe-batching-2026-10-23.md
 §7). The probe build is its own tree's second build dir, `build-batch-probe` (`-DB70_BATCH_PROBE=ON`, OFF in G0's
 build): the 80 row builds' first ocloc compile, ~10-20 min at -j44 (est.).
 
@@ -750,7 +750,7 @@ Estimate 3-5 h of GPU time (est.: `copy` ~20 min a card set, `zc` ~30-60 min - 1
 pairs, 3 device sets -, `replay` ~20 min, `hostbw` ~10 min, `pin` ~30-60 min of pinning up to ~100 GiB, `alias`
 ~10 min) plus `r36.curve` up to ~1 h (the swap simulation at S 1). The opt-in CPU lane (`r36.prune` hours to
 days, `r36.prune_a4` days, ESTIMATED from row 30's walls) runs one oracle at a time with `free -g` >= 70 GB,
-never during the GPU stages. Then (a Mac edit) the record `docs/probe-offload-<date>.md` and spec 22's
+never during the GPU stages. Then (a Mac edit) the record `docs/probes/probe-offload-<date>.md` and spec 22's
 decisions section (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows.
 **Check:** `r36.links` prints `links: dev0 Gen3 x16, dev1 Gen3 x<w>` without STOP; `r36.zc` prints `exact=1` on
 every arm and a `law_summary`; `r36.replay` / `r36.alias` `result=exact` / `clean`; `r36.project` ends in
@@ -913,7 +913,7 @@ named stage.
   cards, cross-device events, peer access, load-then-place (device 0 briefly holds the whole
   model). A P1 difference is a bug - read the first differing byte the test prints. Needs both
   cards free and the P2P patch still in the kernel.
-- **The DFlash P0 finished on the Mac** (2026-10-08 02:54, `docs/probe-dflash-2026-10-08.md`;
+- **The DFlash P0 finished on the Mac** (2026-10-08 02:54, `docs/probes/probe-dflash-2026-10-08.md`;
   provisional go on code and agentic output). Its formal verdict waits for Session 6b
   (`r29.cost`; the probe build is on branch `spec19a-task4-probe`, blind: its M = 5..8 binaries
   first compile in G0's build - an ocloc failure there names the variant). 19a also wants data **from** the box: spec 8
@@ -931,7 +931,7 @@ named stage.
 - **`r25.toolcall` is default but its data is not made** (`oracle-out-k2-a4/set`): SKIP unless
   the set is made first (§1.4).
 - **A stale rownote:** row 11's note still says the int8-KV constants are provisional until the
-  Qwen3.8 repeat; they were replaced in `0f13512` (docs/probe-int8-kv-qwen38-2026-10-06.md).
+  Qwen3.8 repeat; they were replaced in `0f13512` (docs/probes/probe-int8-kv-qwen38-2026-10-06.md).
   Only the gated flash rows of `kv8_kernels_test` remain PROVISIONAL.
 - **The idle grade is fragile:** a GNOME daemon or another agent's container appearing
   mid-session makes the timed rows ITERATE; the `IDLE after` line catches it, a re-run in a

@@ -62,7 +62,7 @@ big machine's; F6's PLE row runs on the box CPU and is row 31's opt-in stage.
 
 ### Task 3: F6's PLE row (box CPU, before the big run)
 
-- [ ] **Step 1:** `evaluate.py --ple-only` on Intel's checkpoint (21a's reference, layer-streamed): the same held-out rows through the bf16 PLE table (the original's shards) and the int8 file at `f32` and at `bf16` scales (21b's converter); KL and top-1 per set against the bf16-PLE run; the table into `docs/probe-qwen4exp-<date>.md` (21a's sheet, a new section) - decision 7's evidence. Box queue row 31's opt-in stage `r31.ple_kl` runs it.
+- [ ] **Step 1:** `evaluate.py --ple-only` on Intel's checkpoint (21a's reference, layer-streamed): the same held-out rows through the bf16 PLE table (the original's shards) and the int8 file at `f32` and at `bf16` scales (21b's converter); KL and top-1 per set against the bf16-PLE run; the table into `docs/probes/probe-qwen4exp-<date>.md` (21a's sheet, a new section) - decision 7's evidence. Box queue row 31's opt-in stage `r31.ple_kl` runs it.
 - [ ] **Step 2: commit** `git commit -S -m "probe: the int8 PLE table against bf16 - KL per set, f32 vs bf16 scales (spec 21 F6, decision 7)"`.
 
 ### Task 4: the real run (decision 6's machine) and publication

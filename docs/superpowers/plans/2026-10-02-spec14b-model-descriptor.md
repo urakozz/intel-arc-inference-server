@@ -49,6 +49,6 @@
 
 ### Task 4: G0
 
-- [ ] The full suite on the box; the kernel-binary checksum comparison against a main build; golden gates and replay bitwise. Record in `docs/probe-agnes-2026-10-02.md` (section "Descriptor refactor") or a short new section in the spec 14 amendment if 14a's doc is not on main yet. **Commit** `spec 14b: descriptor refactor is behaviour-neutral (G0)`.
+- [ ] The full suite on the box; the kernel-binary checksum comparison against a main build; golden gates and replay bitwise. Record in `docs/probes/probe-agnes-2026-10-02.md` (section "Descriptor refactor") or a short new section in the spec 14 amendment if 14a's doc is not on main yet. **Commit** `spec 14b: descriptor refactor is behaviour-neutral (G0)`.
 
 **Gate for the plan:** G0 (full suite green, binaries byte-identical, bitwise gates). Hand back with the checksum comparison and the suite count.

@@ -36,7 +36,7 @@ The rule lives in a header-only `src/runtime/verify_attn.h` (host-testable on th
 
 **Spec:** `docs/superpowers/specs/2026-10-31-spec28c-verify-attention-by-shape-design.md` (§8: what this plan corrected
 in it against the code). Precedents: spec 10 (`attn_v2.cl`, the per-row stride and its bitwise row property, A1 / A3,
-`probe_decode_attn` and docs/probe-decode-attn-2026-09-28.md - the capture of real q / KV and the interleaved arm
+`probe_decode_attn` and docs/probes/probe-decode-attn-2026-09-28.md - the capture of real q / KV and the interleaved arm
 timing); spec 6 (`pf_flash_attn.cl`, the DPAS / 2D block idioms and the 256-GRF build); spec 12b (`kv8.cl`, the
 rotkv format and `src/common/kv8.h` its bitwise host twin); spec 28a / 28b (the plan form, `gemv_kind`, property R).
 
@@ -44,7 +44,7 @@ rotkv format and `src/common/kv8.h` its bitwise host twin); spec 28a / 28b (the 
 
 - Main with 28b merged (`gemv_kind(M)`, `gemm_sm`, spec 28 §9 and "28b as built"). Branch **`spec28c-verify-attn-build`**
   from main.
-- **Records read, not re-run:** spec 28 §9 / docs/probe-small-m-gemm-<date>.md §2 (28a's per-family verify table at
+- **Records read, not re-run:** spec 28 §9 / docs/probes/probe-small-m-gemm-<date>.md §2 (28a's per-family verify table at
   M = 1..8, depth 4096 / 32768) and 28b's measured verify(M) (spec 28 "28b as built", BENCHMARKS).
 - **Box:** the gate checkpoint (data key `qwen`, int8 head); one idle card; a build with `B70_MTP`, `B70_VERIFY_M8`,
   `B70_KV8` (the defaults); the long prompt `tests/golden/prompts/long32k.ids`; the golden and A4 sets. DFlash's gates
@@ -193,7 +193,7 @@ line").
 - [ ] **Step 3: the table** with the kept settings: M = 2..8 x depth 512 / 4096 / 32768 / 130816 x bf16 / int8, arms
   `v2,<kept>`, `--time --rounds 5`; M = 16 and `pfa` recorded at 4096 and 32768. Where a verdict changes between two
   measured depths, the geometric midpoints (1448, 11585, 65536) at that M, so the threshold is placed within a factor
-  of 2. Record in **docs/probe-verify-attn-<date>.md**: §1 the levers, §2 the table, §3 numerics. The table's form:
+  of 2. Record in **docs/probes/probe-verify-attn-<date>.md**: §1 the levers, §2 the table, §3 numerics. The table's form:
 
 ```text
 | M | KV   | depth  | v2 ms [range]     | dpas ms [range]   | v2 / dpas paired [range] | verdict |
@@ -217,7 +217,7 @@ line").
 enum class VerifyAttn : uint8_t { V2, Dpas };
 inline constexpr uint32_t kDpasNever = UINT32_MAX;
 struct VerifyAttnRow { uint32_t m; bool kv8; uint32_t dpas_from; };   // keys of row 0 (pos + 1)
-// docs/probe-verify-attn-<date>.md §2; v2 / dpas paired at 512 | 4096 | 32768 | 130816
+// docs/probes/probe-verify-attn-<date>.md §2; v2 / dpas paired at 512 | 4096 | 32768 | 130816
 inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {2, false, kDpasNever},   // 0.98 | 1.01 | 1.07 | 1.12  (example form only - the record's numbers)
     // ... M = 2..8 bf16, M = 2..4 int8
@@ -290,7 +290,7 @@ alternating by round).
 - [ ] **Step 2: end to end.** `VATTN=1 tools/probe/mtp_d1.sh greedy 4096` and `VATTN=1 MAX_LEN=65536 tools/probe/mtp_d1.sh
   greedy 32768`: the tool-call geomean at `--mtp auto`, rule against v2 (recorded; the bar is N3's "unchanged or better").
   If the rule needed two lists per M, the engine-start capture time and list memory with and without them.
-- [ ] **Step 3:** record §4 of docs/probe-verify-attn-<date>.md. Commit
+- [ ] **Step 3:** record §4 of docs/probes/probe-verify-attn-<date>.md. Commit
   `git commit -S -m "probe: the verify step with attn_verify_dpas by the rule against v2 - S1, S2, D1 (spec 28c)"`.
 
 ### Task 8: the record

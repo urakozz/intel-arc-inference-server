@@ -220,7 +220,7 @@ deciding metric (3.6% apart in wall time) - and layout 1's entire lead comes
 from `qkv‖z` (N = 16384), where layout 0's power-of-two row stride caps it at
 419 GB/s against layout 1's 559; layout 0 is 1.1-6.8% ahead on the other four
 shapes. Recorded as the rule in Section 4.2 dictates; `docs/12-kernels.md` has
-the full 51-row table, `docs/probe-gemv-2026-08-24.md` the raw run.
+the full 51-row table, `docs/probes/probe-gemv-2026-08-24.md` the raw run.
 
 The loser is deleted from the tree once the probe has chosen (deferred to
 plan 2's loader by controller ruling, 2026-08-23: the margin is 1.7% and

@@ -1,7 +1,7 @@
 // probe_decode_attn - spec 10 P0 and P1: decode attention at depth.
 //
 // Plan: docs/superpowers/plans/2026-09-28-spec10a-decode-attn-probe.md.
-// Record: docs/probe-decode-attn-2026-09-28.md.
+// Record: docs/probes/probe-decode-attn-2026-09-28.md.
 //
 //   probe_decode_attn capture <snapshot> <ids> <outdir> [--steps 8] [--depths a,b,...] [--rows 4]
 //   probe_decode_attn arms <outdir> --M 1|4 [--depths a,b] [--arms t1,t2,...] [--tgt N]

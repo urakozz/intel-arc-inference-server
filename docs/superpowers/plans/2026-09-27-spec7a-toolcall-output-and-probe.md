@@ -139,7 +139,7 @@ If opencode rejects the responses, that is a Task 2 defect: fix it with a test t
 
 **Files:**
 - Create: `tools/probe/probe_host_copy.cc`, `tools/probe/probe_tail.cc`, registered as executables (not tests) in `tools/probe/CMakeLists.txt` the way `probe_flash_attn` is.
-- Create: `docs/probe-prefix-cache-2026-09-27.md`
+- Create: `docs/probes/probe-prefix-cache-2026-09-27.md`
 
 `probe_host_copy`: allocate `l0::Mem(ctx, MemKind::Host, n)` for n = 4, 8, 16, 24, 32, 48 GB (stop at the first failure, report the largest that worked); copy bandwidth device→host and host→device on an immediate `l0::CmdList` for 128 MiB (one KV block) and 166.7 MB (one state snapshot), median of 5 after 2 warm-ups; the strided form a KV range really takes: 16 layers × one contiguous `[n][4][256]` bf16 slice each for K and V, n = 2048 and n = 60000.
 
@@ -153,7 +153,7 @@ If opencode rejects the responses, that is a Task 2 defect: fix it with a test t
 ### Task 6: the hit rate of the recorded session
 
 - [ ] **Step 1:** copy the operator's log into `tests/golden/opencode/session1/` (the request files only; if over 20 MB total, keep the first 40 requests) and run `tools/prefix/analyze_log.py` on it.
-- [ ] **Step 2:** add a section to `docs/probe-prefix-cache-2026-09-27.md`: requests, how many are side requests (short, prefix < 1k shared with the main thread), the reusable fraction, and where the divergences fall (at an earlier prompt end, inside generated text, elsewhere). If thinking is dropped from history or kept, say which, from the ids.
+- [ ] **Step 2:** add a section to `docs/probes/probe-prefix-cache-2026-09-27.md`: requests, how many are side requests (short, prefix < 1k shared with the main thread), the reusable fraction, and where the divergences fall (at an earlier prompt end, inside generated text, elsewhere). If thinking is dropped from history or kept, say which, from the ids.
 - [ ] **Step 3: Commit** `probe: the prefix reuse an opencode session allows (spec 7 P0)`.
 
 **Gate for the plan:** full suite green on the box (`tools/probe/ctest_env.sh --`), C6 passing, the P0 doc committed, stopping rule evaluated. Hand back with the P0 table and the hit-rate numbers.

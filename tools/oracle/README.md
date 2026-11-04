@@ -30,7 +30,7 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `dump_taps.py` | Spec 19a Task 2: the Qwen3.8 bf16 target (layer-streamed, as `kv_int8_probe.py run` builds it) over [prompt + recorded greedy continuation]; per source the residual after the drafter's tap layers (5, 19, 33, 47, 61), the greedy next ids and the top-64 logits. `test_dump_taps.py`: Review Focus 1 (tap i = layer i's OUTPUT) on a tiny checkpoint. "The DFlash P0" below. |
 | `dflash_accept.py` | Spec 19a Task 3: teacher-forced acceptance of the DFlash 2 drafter on those dumps, K = 1..7, arms bf16 / int8 RTN / int8 + int8 head / W4A16, draft vocabularies 32k / 64k / 128k (`loader::select_draft_vocab`); batched over anchors. `test_dflash_accept.py`: the batch against `dflash_ref.draft_block`. |
 | `dflash_p0.sh` | The two above on the Mac in a 28 GB container, resumable, refusing to start beside the 12a repeat; `DRY_RUN=1` plans only. |
-| `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
+| `eagle3_ref.py` | The EAGLE3 K2 P0: the CPU reference of the EAGLE-3 drafter `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGLE3` (speculators 0.8.0 `Eagle3DraftModel`; the semantics pinned from source in its docstring and `docs/probes/probe-eagle3-k2-2026-10-08.md`): step 0 over the context, the greedy chain, the `d2t` check, the int8 / int4 g64 RTN arms, the derived bytes; `facts`. `test_eagle3_ref.py` holds it to an independent build from transformers' Llama modules in speculators' TTT wiring. "The EAGLE3 K2 P0" below. |
 | `k2_taps.py` | The EAGLE3 K2 P0: `k2_ref.py` over [prompt + K2's recorded continuation], one forward per source: the aux taps (the INPUT of K2 layers 2 / 24 / 45), the pre-norm final hidden, K2's greedy, top-16, and the MoE / MoVA routes. `test_k2_taps.py`: the tap points bitwise against the vendored model with the vLLM plugin's capture emulated. |
 | `eagle3_accept.py` | The EAGLE3 K2 P0: teacher-forced acceptance (K = 1..5, arms bf16 / int8 / int8h / int4h), spec 19e's prompt lookup on the same anchors, and the summary with the derived speed-up. `test_eagle3_accept.py`. |
 | `eagle3_cost.py` | The EAGLE3 K2 P0: K2's verify bytes at M = 1..6 rows from the recorded routes (distinct experts per layer, model::K2Desc's blocks), the drafter's bytes per draft step. `test_eagle3_cost.py`. |
@@ -38,15 +38,15 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `third_party/eagle3_k2/` | The drafter's `config.json` (Apache-2.0), unmodified: what the tests parse. |
 | `k2_ref.py` | Spec 18a: the K2-Horizon CPU reference - a plain-torch port of the checkpoint's `modeling_k2_horizon.py`, layer at a time, bf16 or int4 GPTQ checkpoints by name; `run` (golden file + MoE / MoVA routing dumps), `hfcheck` (against the vendored HF model, layer-streamed), `facts`. `test_k2_ref.py` checks it on tiny random weights. "The K2-Horizon reference" below. |
 | `ornith_ref.py` | Spec 15a: Ornith 1.5 35B-A3B from its **int4** checkpoint - transformers' `Qwen3_5MoeForCausalLM`, layer-streamed, the routed experts dequantised on demand; `run` (golden file + every layer's router / shared-gate logits and routes, and with `--mtp-out` the MoE MTP head's M1 reference), `facts` (the checkpoint facts spec 15 §13 rests on). `test_ornith_ref.py` checks it on tiny random weights; `ornith_golden.sh` is the Mac run. "The Ornith reference" below. |
-| `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. Facts: `docs/probe-kolibri-2026-10-05.md`. |
+| `kolibri_ref.py` | Spec 20a: the Kolibri-1 reference - layer at a time, bf16 or int4 GPTQ by name (sandwich norms, RoPE sliding / NoPE full layers, window 513 incl. the query, fp32 router on logit + expert_bias with sigmoid weights, ungated shared expert, fp32 head); `run`, `ppl`, `hfcheck`, `facts`, layer-major `run_batch` (the quantisation script's coverage and eval). `test_kolibri_ref.py` (KL0, 21 tests): the transformers port == it bitwise. Facts: `docs/probes/probe-kolibri-2026-10-05.md`. |
 | `qwen4exp_ref.py` | Spec 21a: the Qwen3.8-Flash-Next (`qwen4_exp`) CPU reference - transformers **5.19.0**'s own `Qwen4ExpForCausalLM` (refused on another version), layer-streamed, the QSA indexer's block keys cached (bitwise transformers' per-query recomputation), the PLE table by mmap (bf16 shards or 21b's int8 file), routed experts lazy in every form (fused bf16, int4 g128 / g64, per-expert); `run` (golden layout), `ppl`, `hfcheck`, `trace` (spec 22's routing traces), `facts`; `expected_names`, `PleTable`, the restated ops 21b / 21c import. `test_qwen4exp_ref.py` (F1, bitwise on the tiny model). "The Qwen3.8-Flash-Next reference" below. |
 | `qwen4exp_mtp.py` | Spec 21a Task 4: the MTP head from vLLM's semantics on transformers' modules (`MtpHead.step`, `chain`, `accept`, `trace_routes`); `test_qwen4exp_mtp.py` holds it to an independent build. |
 | `qwen4exp_env.sh`, `qwen4exp_requirements.txt` | transformers 5.19.0 + tokenizers 0.23.2 `pip --no-deps --target <dir>` beside the oracle image (the image is never changed); `PYTHONPATH=<dir>` first. |
 | `qwen4exp_tiny_check.py` | Spec 21a Task 1: the tiny model end to end in 5.19.0 (the layer-type remap, the experts implementation, cached vs uncached, the selection past 2051). |
-| `qwen4exp_facts.py` | Spec 21a Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. `docs/probe-qwen4exp-2026-10-09.md`. |
+| `qwen4exp_facts.py` | Spec 21a Task 2: the checkpoint facts from small files and headers (local or `hf:REPO` by range requests, no torch): config, the PLE head table and I64 constants against the formula, tensor groups, Intel's quantization_config and qzeros, tokenizer / template, derived bytes. `docs/probes/probe-qwen4exp-2026-10-09.md`. |
 | `bolt_ref.py` | Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference - the checkpoint's OWN remote code (`modeling_nemotron_h.py`, imported from the pinned snapshot, sha256-checked, never vendored) through transformers **5.19.0**, its Mamba mixers on the KERNEL path (`cuda_kernels_forward`) with `bolt_mamba_ops`' plain-torch training kernels and an fp32 cache (spec 25 Decision 1), layer-streamed, routed experts lazy (our g64 export (the served checkpoint), the GPTQ g128 spelling via the exact g64 expansion, or the BF16 original's `backbone` names); `run` (golden layout + `--taps`), `ppl`, `hfcheck` (the port = its restated chain bitwise; R's torch fallback recorded), `taps` (dump_taps' format), `facts`, `gateq`; `expected_names`, `layer_major`, `Recorder`, the restated ops 25b / 25c import (`rms_norm`, `route`, `combine`, `moe_block`, `mamba_seq` / `mamba_step`), `fallback_forward` (R's fallback with its rounding points as switches). `test_bolt_ref.py` (B1). "The Nemotron 3.5 Bolt reference" below. |
 | `bolt_remote.py`, `bolt_mamba_ops.py` | Spec 25a: the remote code's import under a private package with the `mamba_ssm` / `causal_conv1d` stub, the mixer's dispatch patch (kernel path or R's fallback per instance), the prompt continuation R lacks, the fp32 cache; the five training-kernel functions in plain torch (conv bias-first then taps oldest first, softplus threshold 20 and no dt clamp, the SSM update in mamba_ssm's order with a halving tree over the state, the SSD chunk scan, the gated norm over groups of 1024). |
-| `bolt_facts.py`, `bolt_prompts.py`, `bolt_gateq.py` | Spec 25a: the facts (63 citation anchors in R / N, both repos' shard headers and sampled tensors by HTTP range request, the dt-clamp census, tokens, 14 template renders as `tests/server/bolt_template_cases.json`, torch's tie order / GEMM row-count dependence / 9-element sum; `docs/probe-bolt-2026-10-21.md`); the golden prompts (no BOS); gate Q (`kl` teacher-forced over the BF16 A4 continuations, `verdict` with score.py's qwen-think reader - recorded, Decision 3). |
+| `bolt_facts.py`, `bolt_prompts.py`, `bolt_gateq.py` | Spec 25a: the facts (63 citation anchors in R / N, both repos' shard headers and sampled tensors by HTTP range request, the dt-clamp census, tokens, 14 template renders as `tests/server/bolt_template_cases.json`, torch's tie order / GEMM row-count dependence / 9-element sum; `docs/probes/probe-bolt-2026-10-21.md`); the golden prompts (no BOS); gate Q (`kl` teacher-forced over the BF16 A4 continuations, `verdict` with score.py's qwen-think reader - recorded, Decision 3). |
 | `bolt_make_tiny.py`, `bolt_tiny_check.py` | Spec 25a: tiny `nemotron_h_puzzle` checkpoints in the checkpoint's names (`pattern12` - the real first 12 blocks -, `pattern12-fp32`, `ties`, `dtclamp`, `int4-g64`, `int4-g128-gptq` + dequantised twins; `test_bolt_make_tiny.py`); the remote code end to end in 5.19.0 on both Mamba paths. |
 | `qwen4exp_make_tiny.py` | Tiny `qwen4_exp` variants for the tests (hidden 128, any layer pattern, the four checkpoint forms, tied router rows, `mtp.*`, a dequantised twin) and 21b's int8 PLE file writer. |
 | `offload_curve.py` | Spec 22 P0.6 / P0.7 / P0.8 (plan 22a): from 21a's routing traces - `counts`, `curve` (h(f) for the uniform and per-layer fills, held out by sha256 halves with the A4 scenarios balanced, and in sample), `swap` (spec 22 §4's adaptive swaps simulated), `mtp` (verify unions over K + 1 rows), `prefill` (streamed bytes a chunk), `profile` (the routing profile 22b loads, `spec22-profile-1`); `reap` (REAP / freq masks, `spec22-mask-1`, `--holdout-a4`, decision 9's `--kfold 4 --fold i\|all`), `prune-report` (the pruning curve: KL / argmax, A4 accuracy in sample and 4-fold held out, the gap, the two-card fit), `project` (decode / MTP / prefill t/s from Task 1's budget, probe_offload's `po` lines and the curves; the last line `STOP` or `GO-CANDIDATE`). numpy + safetensors only. `test_offload_curve.py`. The masked reference is `qwen4exp_ref.py --expert-mask` / `maskeval`. |
@@ -57,8 +57,8 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `../quantize/kolibri/make_synth.py` | Spec 20c Task 1: a synthetic Kolibri-1 checkpoint at the REAL widths, N layers, int4 or bf16 attention, RTN-packed into AutoRound's `auto_round:auto_gptq` export form (accepted by `check.py`) - what KL2 / KL3 run on before 20b's checkpoint exists. `tools/box_validate/kolibri_oracle.sh synth` builds both arms and their golden sets (prose, de_prose) on the box CPU; `real` the real checkpoint's (prose, code, de_prose, de_chat). |
 | `k2_attn_eager_fixture.py` | Spec 18 §10.1: `k2_ref.py attention()` on hash inputs, written as `tests/kernels/k2_attn_eager_fixture.h` (scores, probabilities, output) for `k2_attn_eager_ref_test`; no checkpoint, seconds - the docker line is in its docstring. |
 | `third_party/k2_horizon/` | `modeling_k2_horizon.py`, `configuration_k2_horizon.py`, `config.json` from `IFM/K2-Horizon-MoVA-36B-A4B` @ `cca48b66`, unmodified (Apache-2.0, headers kept): the semantics source of truth, imported by the tests and `hfcheck` without network. |
-| `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probe-int8-kv-2026-09-28.md`. |
-| `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probe-int8-kv-2026-09-28.md`. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
+| `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probes/probe-int8-kv-2026-09-28.md`. |
+| `kv_int8_probe.py` | Spec 12a: int8 KV schemes (per token, KIVI, Hadamard-rotated K, and `rotkv`); `run` = one layer-streamed forward whose batch carries the variants through a patched eager attention (per-position logits metrics, q/K/V capture); `replay` = fp64 attention from a capture at real and tiled depths. Record: `docs/probes/probe-int8-kv-2026-09-28.md`. Takes the bf16 base checkpoint too (no `quantization_config`) and `--cont-ids` (teacher-forced ids from a file). |
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
 | `k2_kv8_probe.py` | Spec 18e Task 1 (Review Focus 1): the int8 KV probe on K2-Horizon over `k2_ref.py` - variants bf16 (the reference), `rotkv` (the engine's head_dim-128 scheme bit for bit: `src/common/kv8.h` hd128), per token, fp32 attention, each with its own residual stream and KV cache; `run` (decision-row logits metrics + the routing diagnostic + q/K/V capture), `replay` (fp64, real and tiled depths), `summary`. `test_k2_kv8_probe.py` checks it on tiny weights (no checkpoint, seconds). |
 | `kv8_k2_repeat.sh` | Spec 18e Task 1 on the Mac: `k2_kv8_probe.py` on the int4 K2 checkpoint (`hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`, 22.2 GB) in a 28 GB container - check, K2 tokenisation (BOS 0), golden rows (18a's tokens when `oracle-out-k2/` is here, else 32 greedy steps), long[:4096] + capture, replay to 64k; resumable, `STEPS=` subsets. |
@@ -393,7 +393,7 @@ What streaming changes, and what it does not:
   0..N-1 once loaded; on this Mac it does not pay.
 
 Measured (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps 2100 s
-(~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record: `docs/probe-agnes-2026-10-03.md`.
+(~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record: `docs/probes/probe-agnes-2026-10-03.md`.
 
 ### The DFlash reference (spec 19a, 2026-10-05)
 
@@ -481,7 +481,7 @@ Is EAGLE-3 worth building for K2-Horizon? `Siladrim/K2-Horizon-MoVA-36B-A4B-EAGL
 Llama layer fed with K2's hidden states at the INPUT of layers 2 / 24 / 45, a 32k draft head
 mapped back by `d2t`) measured teacher-forced on K2's own greedy text, its verify cost derived
 from the routes, against the prompt lookup K2 already has. Semantics, citations, the derived
-prior and the results: `docs/probe-eagle3-k2-2026-10-08.md`.
+prior and the results: `docs/probes/probe-eagle3-k2-2026-10-08.md`.
 
 ```bash
 # from the repo (or worktree) root; detached, resumable, log in oracle-out-eagle3-k2/p0.log
@@ -519,7 +519,7 @@ A4=0 nohup tools/oracle/eagle3_k2_p0.sh > /dev/null 2>&1 &   # or: golden prompt
   min a prompt at 128 ids; the dump ~1.6 h (39 sources, ~87k tokens at the 512-id cap), peak
   RSS ~12 GiB, dumps ~1.3 GB on disk; acceptance ~5-10 min per arm (the real drafter's smoke
   rates on 2 CPUs: 40-58 anchors/s), ~3-4 GiB; lookup / cost seconds.
-- **Measured before the run** (the drafter's files; `docs/probe-eagle3-k2-2026-10-08.md`): the
+- **Measured before the run** (the drafter's files; `docs/probes/probe-eagle3-k2-2026-10-08.md`): the
   32k draft vocabulary holds none of K2's tool-call markers (250043 / 44, 250054-250061) nor
   `<ifm|think_fast>` / `<ifm|think_faster>` - on tool-call text a marker is never drafted. One oracle at a time: a model step refuses while another `agnes-ref-img` container
   runs (`FORCE=1` overrides; it never stops one).
@@ -545,7 +545,7 @@ use and dropped with the layer - a decode step reads only the 8 + 4 experts it r
 on the same torch it is **bit-identical** to the vendored model (eager attention), prompt and
 cached decode. Mode `f32` never rounds. Ties at the top-k cut go to the lower expert id (HF's
 `torch.topk` leaves them unspecified). Semantics, rounding points, the HF-vs-vLLM differences and
-the checkpoint facts: `docs/probe-k2-2026-10-05.md`.
+the checkpoint facts: `docs/probes/probe-k2-2026-10-05.md`.
 
 Output (`run`): `dump.py`'s layout - `resid.L{i}` / `mixer.L{i}` / `mlp.L{i}` bf16 [T, 2560],
 `logits` f32 [T + gen, V], `tokens` i32 [gen] - plus plan 8d's routing records for every sparse
@@ -576,7 +576,7 @@ reference. On the box, from the tree root, one prompt at a time, detached:
 ```bash
 M=models--IFM--K2-Horizon-MoVA-36B-A4B          # or models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
 mkdir -p oracle-out-k2 && free -g               # >= 70 GB available for the bf16 page cache
-for p in prose code cjk; do                     # K2 prompts start with BOS 0 (docs/probe-k2-2026-10-05.md)
+for p in prose code cjk; do                     # K2 prompts start with BOS 0 (docs/probes/probe-k2-2026-10-05.md)
   ORACLE_MODEL=$M tools/oracle/run_in_container.sh \
     "python3 tools/oracle/tokenize.py \"\$SNAP\" encode --bos tests/golden/prompts/$p.txt > /ws/oracle-out-k2/$p.ids"
 done
@@ -662,7 +662,7 @@ Three pieces Ornith did not need:
 The image never changes: `tools/oracle/qwen4exp_env.sh <dir>` installs 5.19.0 + tokenizers 0.23.2 with
 `pip --no-deps --target <dir>` (inside the container, so the wheels match its Python) and every command
 runs with `PYTHONPATH=<dir>` first (Mac: `oracle-out-q4exp/site`; box: `<tree>/oracle-out-q4exp-site`).
-Facts: `docs/probe-qwen4exp-2026-10-09.md` (`qwen4exp_facts.py`, torch-free, reads a snapshot or
+Facts: `docs/probes/probe-qwen4exp-2026-10-09.md` (`qwen4exp_facts.py`, torch-free, reads a snapshot or
 `hf:REPO` by range requests).
 
 Subcommands: `run <snapshot> --prompt <ids> --out <p>.golden.safetensors [--gen 32] [--layers N] [--ple
@@ -825,7 +825,7 @@ reference every B3 gate reads, `--taps`; its `SNAPSHOT` file names the snapshot 
 `medium_effort`; 2048 new ids; score with `score.py --format qwen-think`), `gateq` -> `oracle-out-bolt-a4/{gateq.json,gateq.log}` (`bolt_gateq.py`, Decision 3: recorded).
 `BOLT_KEEP=all` keeps the dense blocks resident once read (~13.6 GB bf16) - a decode-heavy run's lever;
 `BOLT_EXPERT_CACHE_GB` (oracle_generate) / `--expert-cache-gb` (run) an LRU of dequantised experts.
-Facts: `bolt_facts.py` (`docs/probe-bolt-2026-10-21.md`); golden prompts `tests/golden/prompts/bolt_{short,short_prose,
+Facts: `bolt_facts.py` (`docs/probes/probe-bolt-2026-10-21.md`); golden prompts `tests/golden/prompts/bolt_{short,short_prose,
 short_code,4k,32k,agentic}.ids` (`bolt_prompts.py`; no BOS).
 
 ### The A4 reference, batched (2026-10-08)

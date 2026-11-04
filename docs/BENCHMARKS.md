@@ -348,7 +348,7 @@ device-side prefill.
 
 Spec 6 (plans 6a and 6b, 2026-09-25): prefill attention is `pf_flash_attn`, one
 fused bf16 DPAS kernel per FA layer (plan 6a's winning tile, `pfa_KT64_R16_H6_Q0`,
-docs/probe-flash-attn-2026-09-25.md), in place of the composed QK^T GEMM, causal
+docs/probes/probe-flash-attn-2026-09-25.md), in place of the composed QK^T GEMM, causal
 softmax and PV GEMM. The composed path stays selectable with
 `B70_PREFILL_ATTN=composed`, and its score scratch (`pf_s` / `pf_p`, which would be
 9.66 GB at 128k, derived) is only allocated when it runs. `--max-len 131072` works in
@@ -455,7 +455,7 @@ are bit-identical to main's (`l0` 0.999960061, `l0-int8` 0.999934564).
 
 Spec 7 (plans 7a-7c, 2026-09-27/28): `b70-serve --prefix-cache-gb 32` (the default)
 continues the resident session or restores the deepest host snapshot and prefills only the
-tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probe-prefix-cache-2026-09-27.md.
+tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probes/probe-prefix-cache-2026-09-27.md.
 
 - **P0**: pinned host copies at 14.2 GB/s device to host, 12.2-12.9 GB/s host to device;
   48 GiB pinned allocation fine; tail floor 316 ms at depth 0, 505 ms at 60k (16 ids).
@@ -505,7 +505,7 @@ stays selectable with `B70_DECODE_ATTN=v1`. Many positions per work-group with t
 derived per row from the row's key count (at most 32 partials per row, from 2045 at 128k),
 K by sub-group block reads and V by 2D block reads, one K/V wave feeding all 6 x M rows,
 one barrier per wave. It ships with attn.cl's `exp`: the approved exp2 form failed the
-golden gate (spec 10 §8). Design record: docs/probe-decode-attn-2026-09-28.md; gates:
+golden gate (spec 10 §8). Design record: docs/probes/probe-decode-attn-2026-09-28.md; gates:
 spec 10 §8.
 
 **The captured decode step, v1 against v2** (`probe_decode_attn ab`: one engine, both
@@ -717,7 +717,7 @@ network artifact.
 them in one main-model step of M = K + 1 rows, and accepts on the host (greedy,
 or lossless sampling after Leviathan et al. 2023). Spec:
 `docs/superpowers/specs/2026-09-27-spec8-mtp-speculative-decoding-design.md`, with its §8
-amendment. The probe and the engine are in `docs/probe-mtp-2026-09-27.md`.
+amendment. The probe and the engine are in `docs/probes/probe-mtp-2026-09-27.md`.
 
 **Scope.** The MTP lists are compiled at max_len 16384 only (spec 8 §8 A9), so
 every row below runs at 16384. The spec's 32k and 64k rows cannot be measured
@@ -734,7 +734,7 @@ round, so the spread in each cell is timing only.
   tool-call outputs 0.985.
 - **Verify step cost** at M = 2 / 3 / 4: 1.17 / 1.52 / 1.74 plain steps.
 - **Draft step cost:** 0.185 plain steps.
-- Full detail: `docs/probe-mtp-2026-09-27.md` §2, §3 and §6.
+- Full detail: `docs/probes/probe-mtp-2026-09-27.md` §2, §3 and §6.
 
 ### The verify step on gemm_sm (spec 28b, 2026-11-01 - busy-box timing on one card, to be re-checked on a quiet box)
 
@@ -865,7 +865,7 @@ Setup:
 
 `attn_verify_dpas` against v2 in the verify lists at M >= 2, bound by the measured rule (`src/runtime/verify_attn.h`:
 bf16 M = 2 from 11585 keys, M = 3..5 from 4096, M = 6..8 always; int8 M = 2 from 11585, M = 3 / 4 from 4096). Record:
-docs/probe-verify-attn-2026-11-03.md. Re-check on a quiet box.
+docs/probes/probe-verify-attn-2026-11-03.md. Re-check on a quiet box.
 
 | row | v2 | the rule | ratio |
 |---|---|---|---|
@@ -883,7 +883,7 @@ docs/probe-verify-attn-2026-11-03.md. Re-check on a quiet box.
 the default.** `b70-serve --spec dflash`
 drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers, int8 at load, beside the gate checkpoint's int8 head) from the
 target's own hidden states and verifies up to 8 rows at once (specs 19b-19d; box queue rows 54-56). The acceptance in
-"P0" is measured on the Mac CPU (spec 19a, `docs/probe-dflash-2026-10-08.md`); "D5" below is measured on the card. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
+"P0" is measured on the Mac CPU (spec 19a, `docs/probes/probe-dflash-2026-10-08.md`); "D5" below is measured on the card. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
@@ -1180,8 +1180,8 @@ wins did.
 
 | what | why it was rejected |
 |---|---|
-| **Fusing the int4 dequant into the GEMM** | Both variants came out **bitwise identical** to the two-pass path over all 71,303,168 outputs, and both were slower. The dequant pass already runs at about 546 GB/s, roughly 90% of hardware peak, so there is only 0.826 ms in it at this shape; moving the same arithmetic into the mainloop costs 2.759 ms even when issued exactly once per weight. [Details](probe-fused-dequant-2026-09-22.md). |
-| **W4A8 on the mixed 4-bit by 8-bit DPAS** | 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a bar of 1.53x. The per-group rescale costs 3.0 to 3.4 of the 5.440 ms; the matrix math it rescales costs 1.99 ms. Separately, **2.79% relative L2 error** against the bf16 result, with a worst-row cosine of 0.9976, driven by activation outliers. [Details](probe-w4a8-2026-09-23.md). |
+| **Fusing the int4 dequant into the GEMM** | Both variants came out **bitwise identical** to the two-pass path over all 71,303,168 outputs, and both were slower. The dequant pass already runs at about 546 GB/s, roughly 90% of hardware peak, so there is only 0.826 ms in it at this shape; moving the same arithmetic into the mainloop costs 2.759 ms even when issued exactly once per weight. [Details](probes/probe-fused-dequant-2026-09-22.md). |
+| **W4A8 on the mixed 4-bit by 8-bit DPAS** | 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a bar of 1.53x. The per-group rescale costs 3.0 to 3.4 of the 5.440 ms; the matrix math it rescales costs 1.99 ms. Separately, **2.79% relative L2 error** against the bf16 result, with a worst-row cosine of 0.9976, driven by activation outliers. [Details](probes/probe-w4a8-2026-09-23.md). |
 | **Removing barriers from the GDN triangular solve** | The design assumed synchronisation dominated that kernel. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so the premise was wrong by about **18x**. Both barrier-free variants were bit-identical and both were slower. The row is the serialised recurrence itself. [Details](12-kernels.md#how-the-prefill-kernels-got-here). |
 | **bf16 intermediate buffers** | Halving the bytes changed nothing: `ocloc` exposes no 16-bit block write wider than 8 rows, so the epilogue is bound by store message count rather than by bytes. |
 | **oneDNN's fused int4 W4A16 matmul** | Measured 98.28 TFLOP/s on gate‖up at M=2048, below the 115.7 TFLOP/s an own in-kernel int4 GEMM would need to beat the two-pass path. Also failed a bitwise identity extraction against our dequant oracle on 39.6% of weights, every mismatch a 1-ULP bf16 neighbour. [Details](08-decode-vs-prefill.md#how-prefill-got-here). |

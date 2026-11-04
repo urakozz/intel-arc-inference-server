@@ -1,6 +1,6 @@
 # Spec 25a - Nemotron 3.5 Bolt 74B-A9B: the facts, the CPU reference, golden sets, the A4 references, the tap dumps
 
-**Status (2026-10-21): built on the Mac (branch `spec25a-bolt-reference`; spec 25 §13 "25a as built") - B1 on the tiny puzzles, the facts sheet `docs/probe-bolt-2026-10-21.md`, the prompts, the A4 set, `bolt_oracle.sh`; no real weight read (not downloaded): Task 7's Steps 2-3 are the box's.** Box queue row **57** (rows 57-62 are spec 25's, 63-65 spec 26's).
+**Status (2026-10-21): built on the Mac (branch `spec25a-bolt-reference`; spec 25 §13 "25a as built") - B1 on the tiny puzzles, the facts sheet `docs/probes/probe-bolt-2026-10-21.md`, the prompts, the A4 set, `bolt_oracle.sh`; no real weight read (not downloaded): Task 7's Steps 2-3 are the box's.** Box queue row **57** (rows 57-62 are spec 25's, 63-65 spec 26's).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
 
@@ -114,7 +114,7 @@ def main()                             # run | ppl | facts | hfcheck | taps | ga
 ### Task 4: the facts sheet (Mac: source, small files, range reads)
 
 **Files:**
-- Create: `docs/probe-bolt-2026-10-<dd>.md`, `tools/oracle/bolt_facts.py` (prints the tables; `--headers` range-reads every shard header of SergiioB's repo at the pinned revision into a cache dir outside the tree; `--sample` reads named tensors' data by range)
+- Create: `docs/probes/probe-bolt-2026-10-<dd>.md`, `tools/oracle/bolt_facts.py` (prints the tables; `--headers` range-reads every shard header of SergiioB's repo at the pinned revision into a cache dir outside the tree; `--sample` reads named tensors' data by range)
 - Modify: `docs/README.md` (one line)
 
 - [x] **Step 1: the rounding chain**, one row per point with `R:` / `N:` / mamba_ssm citations: the block (R:802-840), the norm (R:760-765), the Mamba mixer (R:384-532 the kernel path, R:535-726 the torch path; spec 25 §2.0's three readings side by side), attention (R:1077-1188), the MoE (R:884-965), the router (R:968-1063), the model loop and the tuple convention (R:1470-1513), the head (R:1731), the cache dtype (R:1664-1667), the puzzle config (RP:68-100).

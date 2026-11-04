@@ -10,7 +10,7 @@
 
 **Tech Stack:** C++17, nlohmann::json, minja (the engine's Jinja renderer), the Rust `tokenizers` crate, Level Zero; Python 3 in `agnes-ref-img` (template / tokenizer dumps, A4 tooling); uvx llama-benchy.
 
-**Spec:** `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (§1 tokens and template, §4, §5 KL4 and speed, §6 20e, §7 decision 3). Facts: `docs/probe-kolibri-2026-10-05.md` ("Chat template, tokens, tool calls"). Plans 20c and 20d and their as-built sections. Precedents: `src/server/chat_format.{h,cc}`, `src/server/toolcall{,_k2}.{h,cc}`, `tests/tokenizer/k2/`, `tools/tokenizer/dump_k2.py`, `tests/server/k2_server_test.cc`, `tests/server/toolcall_k2_test.cc`, `src/cli/serve_adapters.h` (`EngineAdapter`), `src/server/prefix_cache.h`, `tools/toolcall/`, `tools/probe/k2_passkey.sh`, spec 18 §12.
+**Spec:** `docs/superpowers/specs/2026-10-05-spec20-kolibri-1-design.md` (§1 tokens and template, §4, §5 KL4 and speed, §6 20e, §7 decision 3). Facts: `docs/probes/probe-kolibri-2026-10-05.md` ("Chat template, tokens, tool calls"). Plans 20c and 20d and their as-built sections. Precedents: `src/server/chat_format.{h,cc}`, `src/server/toolcall{,_k2}.{h,cc}`, `tests/tokenizer/k2/`, `tools/tokenizer/dump_k2.py`, `tests/server/k2_server_test.cc`, `tests/server/toolcall_k2_test.cc`, `src/cli/serve_adapters.h` (`EngineAdapter`), `src/server/prefix_cache.h`, `tools/toolcall/`, `tools/probe/k2_passkey.sh`, spec 18 §12.
 
 ## Dependencies and branch points
 

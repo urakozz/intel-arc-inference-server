@@ -205,7 +205,7 @@ B70 (`docs/BENCHMARKS.md` says "nothing measured yet" for each; spec 28m §5 con
 Qwen3.8-27B decodes 15.54 GB a token at 29.45 t/s = 458 GB/s = **0.72 of 638** with 774 launches (`docs/BENCHMARKS.md`, decode record),
 and the un-instrumented dispatch gap is **0.73-1.13 us a launch** (`docs/15-step-anatomy.md`). Applied to Flint: weights 1.52 GB at eta
 0.5-0.72 = 3.3-4.8 ms, plus ~780 launches x 0.73-1.13 us = 0.6-0.9 ms, gives **~180-260 t/s at zero depth**; with the KV read at the
-attention kernel's measured 540 GB/s (Qwen, spec 10, `docs/probe-decode-attn-2026-09-28.md`), **~120-150 t/s at 100k and ~80-90 t/s at
+attention kernel's measured 540 GB/s (Qwen, spec 10, `docs/probes/probe-decode-attn-2026-09-28.md`), **~120-150 t/s at 100k and ~80-90 t/s at
 262,144** (estimated). Flint's kernels move ~2 MB a launch on average against Qwen's ~20 MB, and small launches reach a lower fraction
 of the bandwidth on this card, so the real figure may fall **below** this range; 27c's P0 replaces it. Not a promise and not a bar.
 

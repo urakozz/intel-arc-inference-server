@@ -2,7 +2,7 @@
 
 **Status (2026-11-01): DESIGN, reviewed 2026-11-01 (corrections listed at the end); operator decisions of 2026-11-01 in
 §7 - nothing built, no box work done.** Operator, 2026-11-01: "spec the MoE probe for all engines". This is the
-follow-on spec 28 §8 left open ("the MoE expert GEMVs ... a follow-on per engine once 28b's numbers exist"). 28a's record (docs/probe-small-m-gemm-2026-11-01.md, provisional) gives the dense numbers this builds
+follow-on spec 28 §8 left open ("the MoE expert GEMVs ... a follow-on per engine once 28b's numbers exist"). 28a's record (docs/probes/probe-small-m-gemm-2026-11-01.md, provisional) gives the dense numbers this builds
 on: the dense GEMMs at M = 8 cost 1.08x the M = 1 sum with the stand-in kernel. Written Mac-only, from the code and docs.
 
 **Plan:** `docs/superpowers/plans/2026-11-01-spec28m-moe-small-m-probe.md` (one probe tool, per-engine stages
@@ -74,7 +74,7 @@ distinct experts over M rows.
 - **Verify, today's kernels (upper bound, no L2 help):** M x (k + 1) reads (Bolt: M x k).
 - **Verify, the ideal kernel:** D(M) + 1 reads (the shared expert once; Bolt: D(M)).
 - **iid prior (estimated):** D(M) = E x (1 - (1 - k/E)^M).
-- **Real routing is more local than iid - measured once, on K2's CPU reference.** docs/probe-eagle3-k2-2026-10-08.md
+- **Real routing is more local than iid - measured once, on K2's CPU reference.** docs/probes/probe-eagle3-k2-2026-10-08.md
   (`tools/oracle/eagle3_cost.py`, **measured** from routes recorded by `k2_taps.py` - the dequantised int4 checkpoint run
   by `k2_ref` on the Mac, **not the engine on the card**; golden prompts only (prose / code / cjk, up to 128 greedy ids
   each, 267 anchors; the A4 set was not in the run); the dumps are on the Mac in `oracle-out-eagle3-k2/dumps/`, not in the

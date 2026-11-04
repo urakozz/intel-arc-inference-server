@@ -23,9 +23,9 @@ plan; `probe_verify_m`-style engine ownership to read route buffers (`ProfileEve
 **Tech Stack:** C++17, OpenCL C (Intel sub-group matrix builtins for U3), Level Zero, CMake.
 
 **Spec:** `docs/superpowers/specs/2026-11-01-spec28m-moe-small-m-probe-design.md`. Precedents: plan 28a
-(`2026-10-27-spec28a-small-m-probe.md`, the structure, the timing protocol, the ISA check), docs/probe-small-m-gemm-
+(`2026-10-27-spec28a-small-m-probe.md`, the structure, the timing protocol, the ISA check), docs/probes/probe-small-m-gemm-
 2026-11-01.md (a record to model §0-§6 on), `tools/oracle/eagle3_cost.py` (the iid formula and the expert-union counter),
-docs/probe-eagle3-k2-2026-10-08.md (K2's recorded routes).
+docs/probes/probe-eagle3-k2-2026-10-08.md (K2's recorded routes).
 
 ## Dependencies and branch points
 
@@ -99,7 +99,7 @@ docs/probe-eagle3-k2-2026-10-08.md (K2's recorded routes).
   rows only, the like-for-like with K2's record. For K2 (no verify list, Mac): replay the recorded CPU-reference routes
   from the EAGLE3 probe as M consecutive rows - this reproduces 12.46 / 15.75 / 18.55 as the check of the replay itself
   (golden prompts only: the A4 set was never dumped for K2; label it so). For Kolibri and Bolt: nothing to record (no list, no checkpoint run); their rows use the
-  K2-locality resampler and iid. Record spec-28m-record `docs/probe-moe-small-m-<date>.md` §1. Commit
+  K2-locality resampler and iid. Record spec-28m-record `docs/probes/probe-moe-small-m-<date>.md` §1. Commit
   `git commit -S -m "probe: distinct experts per M rows on Ornith and Flash-Next, K2 replay (spec 28m)"`.
 
 ### Task 3: the expert block (box)
