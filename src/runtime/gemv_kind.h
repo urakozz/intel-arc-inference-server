@@ -15,6 +15,7 @@
 //
 // Interface kept small on purpose: spec 28c's verify_attn_kind(M, keys, kv) sits beside this rule and reads
 // nothing from it.
+#include <cstddef>
 #include <cstdint>
 
 #include "kernels/linear_kind.h"
@@ -32,7 +33,15 @@ enum class LinearForce : uint8_t { Auto, Gemv, SmallM };
 struct CaptureOptions {
   LinearForce force_linear = LinearForce::Auto;
   VerifyAttnForce force_attn = VerifyAttnForce::Auto;
+  // Test / probe only (tools/probe/probe_vattn_ab.cc): a device buffer of fa_layers x kAttnDumpLayerBytes. Set, every
+  // FA layer f of the walk appends three copies after its attention pair into slice f: attn_q (fp32 [8][6144]),
+  // attn_gate (fp32 [8][6144]) and attn_out (bf16 [8][6144]); rows past the list's M are left as they were. Null
+  // (every production capture): nothing is appended.
+  void* attn_dump = nullptr;
 };
+// One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
+inline constexpr size_t kAttnDumpRow = 24 * 256;
+inline constexpr size_t kAttnDumpLayerBytes = 8 * kAttnDumpRow * (4 + 4 + 2);
 inline CaptureOptions attn_forced(VerifyAttnForce f) {
   CaptureOptions o;
   o.force_attn = f;
