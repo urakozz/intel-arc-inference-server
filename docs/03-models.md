@@ -15,7 +15,7 @@ cache and MTP head 21e - all blind, its box rows 31-34 pending) but served
 tier. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the
 original's split adds `\p{M}`, and Intel's interim checkpoint ships Qwen3.8's
 file). What each one runs, and with which flags:
-[19-running-models.md](19-running-models.md).
+[18-running-models.md](18-running-models.md).
 
 ## The checkpoint
 
