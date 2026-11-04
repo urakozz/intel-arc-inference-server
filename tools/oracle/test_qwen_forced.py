@@ -207,11 +207,10 @@ H8 = {"linear_attn": ("in_proj_qkv", "in_proj_z", "out_proj"), "self_attn": ("q_
       "mlp": ("gate_proj", "up_proj", "down_proj")}
 
 
-def ref_hidden_pfi8(m, ids, P):
+def ref_hidden_pfi8(m, ids, P, i8):
     """The per-context reference: transformers' f32 forward of `ids` with every h8 linear patched - rows t < P
-    through int8_sim.fq_x(x) . fq_w(w), the rest the plain linear (ornith_ref.sim_int8_prefill's rule, by row)."""
+    through i8.fq_x(x) . i8.fq_w(w), the rest the plain linear (ornith_ref.sim_int8_prefill's rule, by row)."""
     import torch.nn.functional as F
-    i8 = _load("int8_sim")
     saved = []
     for lay in m.model.layers:
         for part, names in H8.items():
@@ -235,7 +234,9 @@ def ref_hidden_pfi8(m, ids, P):
             mod.forward = orig
 
 
-def test_pfi8():
+def pfi8_case():
+    """A temp tree with the tests' prompt files, the contexts, and the plan: one position is prompt in one key and
+    decode in another (pb's 80..119 against t1_pa's), one key has no int8 pass (dflash), one is another root."""
     base = TD.seq(150, 21)
     root = tempfile.mkdtemp(prefix="qwen_forced_pfi8_")
     os.makedirs(os.path.join(root, "tests/golden/toolcall"))
@@ -252,34 +253,64 @@ def test_pfi8():
         "mtp_gpu_bf16_t2_pc": (TD.seq(40, 22) + TD.seq(6, 24), TD.seq(8, 25)),   # another root
     })
     trie, jobs = QF.plan(ctx, pfi8_re=QF.PFI8_RE, root=root)
+    return base, ctx, trie, jobs
+
+
+def pfi8_errors(m, ctx, trie, jobs, i8):
+    """Per key: the trie forward's relative max error against its per-context reference, and (keys with the pass)
+    the smaller of its distances to the same context without the pass and with it over every position."""
+    with torch.no_grad():
+        final = QF.trie_forward(m, trie, log=lambda s: None)
+    out = {}
+    for k, (p, f) in ctx.items():
+        P = jobs[k]["pfi8"]
+        got = final[torch.tensor(trie.path(p + f, P))]
+        rel = []
+        for pp in ([P, 0, len(p + f)] if P else [P]):
+            want = ref_hidden_pfi8(m, p + f, pp, i8)
+            rel.append(((got - want).abs().max() / want.abs().max()).item())
+        out[k] = (rel[0], min(rel[1:]) if P else None)
+    return out
+
+
+def test_pfi8():
+    base, ctx, trie, jobs = pfi8_case()
     want_p = {"t1_pa": 80, "pb": 120, "dflash": 0, "t2_pc": 40}
     for k, j in jobs.items():
         assert j["pfi8"] == next(v for n, v in want_p.items() if n in k), (k, j["pfi8"])
-    a = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if "_t1_pa_" in k and "bf16" in k], 80)
-    b = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if "_pb_" in k], 120)
-    c = trie.path(*[ctx[k][0] + ctx[k][1] for k in ctx if k.startswith("dflash")], 0)
+    a = trie.path(ctx[[k for k in ctx if "bf16_t1_pa" in k][0]][0], 80)
+    b = trie.path(base[:125], 120)
+    c = trie.path(base[:70], 0)
     assert a[:80] == b[:80] and a[80] != b[80], "prompt in one key, decode in another: split at the first such position"
     assert not set(a) & set(c), "a key without the int8 pass shares no position with one that has it"
-    assert sum(trie.i8) == len(set(a[:80]) | set(b[:120]) | set(trie.path(TD.seq(40, 22), 40)))
+    assert sum(trie.i8) == len(set(b[:120]) | set(trie.path(TD.seq(40, 22), 40)))
     m = wide_model()
-    with torch.no_grad():
-        final = QF.trie_forward(m, trie, log=lambda s: None)
-    worst, worst_wrong = 0.0, float("inf")
-    for k, (p, f) in ctx.items():
-        P = jobs[k]["pfi8"]
-        want = ref_hidden_pfi8(m, p + f, P)
-        got = final[torch.tensor(trie.path(p + f, P))]
-        err = ((got - want).abs().max() / want.abs().max()).item()
-        worst = max(worst, err)
-        if P:   # the same context without the int8 pass, and with it over every position: both far off
-            for wrong in (0, len(p + f)):
-                w = ref_hidden_pfi8(m, p + f, wrong)
-                worst_wrong = min(worst_wrong, ((got - w).abs().max() / w.abs().max()).item())
-    assert worst < 1e-3, f"the int8 prompt pass: relative max error {worst:.2e}"
-    assert worst_wrong > 20 * worst, (worst_wrong, worst)
-    print(f"the l0-int8 prompt pass: trie forward == the per-context fq_x / fq_w forward (worst relative error "
-          f"{worst:.1e}; the wrong prompt pass is >= {worst_wrong:.1e} away); keys share a position only when they "
-          f"computed it the same way")
+    i8 = QF._load("int8_sim")
+    # 1. The plumbing, exactly: a smooth stand-in for fq_x / fq_w (row-local and weight-dependent like them, but with
+    # no rounding boundary, so the forwards' f32 summation order cannot flip a code) - every key at f32 accuracy, far
+    # from both wrong prompt passes.
+    fq = (i8.fq_x, i8.fq_w)
+    i8.fq_x = lambda x, moe=False: x + 0.25 * torch.tanh(3 * x)
+    i8.fq_w = lambda w, moe=False: w * (1 + 0.25 * torch.cos(40 * w))
+    try:
+        err = pfi8_errors(m, ctx, trie, jobs, i8)
+    finally:
+        i8.fq_x, i8.fq_w = fq
+    worst = max(e for e, _ in err.values())
+    near = min(w for _, w in err.values() if w is not None)
+    assert worst < 5e-5, err
+    assert near > 1e-2, err
+    # 2. int8_sim's own fq_x / fq_w: the same, up to the codes that the two forwards' f32 summation orders put on
+    # opposite sides of a rounding boundary (one such code moves its row by ~1/127 of its largest entry).
+    err8 = pfi8_errors(m, ctx, trie, jobs, i8)
+    for k, (e, w) in err8.items():
+        print(f"  {k}: int8 prompt pass {jobs[k]['pfi8']}: {e:.1e} from its reference" +
+              (f", {w:.1e} from the nearest wrong prompt pass" if w is not None else ""))
+    worst8 = max(e for e, _ in err8.values())
+    assert worst8 < 5e-2, err8
+    print(f"the l0-int8 prompt pass: trie forward == the per-context forward with fq_x / fq_w on the test prompt's rows "
+          f"(smooth stand-in: worst {worst:.1e}, the wrong prompt passes >= {near:.1e} away; int8_sim's own: worst "
+          f"{worst8:.1e}, boundary codes); a position is shared only by keys that computed it the same way")
 
 
 TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8]
