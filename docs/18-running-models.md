@@ -6,32 +6,40 @@ Flags and environment variables are explained in the project README's tables; th
 page only says which ones matter for which model.
 
 Every number is **measured** (on the card) or **derived** (from the memory planner or
-byte counts, never run), as in the specs.
+byte counts), as in the specs.
 
 ## Read this first: what "measured" means here
 
-Most of what is on `main` was written while the box was unavailable and merged
-**blind**: built and tested on the Mac (host tests, Level Zero and OpenCL syntax
-checks, a few kernels on the Mac's own GPU), never run on a B70. The queue of what still
-has to run is [superpowers/plans/box-validation-queue.md](superpowers/plans/box-validation-queue.md).
+How a change reaches `main`: the box is the check (`tools/box_check.sh` before every merge:
+build, kernel command lines, `ctest -LE checkpoint` on a free card), and the box test queue
+(`tools/box_validate.sh`, one "row" = the box tests of one spec) runs the model-level stages:
+golden sets, serving, prefix cache, speculative decoding. A test row that passes proves the
+configuration **runs and is correct**; it is not a speed row. The rows still open are listed
+in [open-work.md](open-work.md); the queue itself is
+[superpowers/plans/box-validation-queue.md](superpowers/plans/box-validation-queue.md).
 
-- **Measured** below means the configuration ran on the card at or before `ce36d2d`, the
-  last commit before the blind work. `main` is expected to give the same bits for
-  Qwen3.8 (the descriptor refactor and the new models only add code paths); checking that
-  is the queue's first step (G0) and has not happened yet.
-- Commands marked `# never run on a B70` have not run on the card at all. They are
-  written to work, and host-tested, but the first run may fail.
+- **Measured** below means a number on the card, with its row in
+  [BENCHMARKS.md](BENCHMARKS.md). Qwen3.8 has the full set (prefill, decode, depth, prefix
+  cache, MTP, DFlash). The other models have box test rows but mostly no speed row yet; the
+  speed numbers for every model are to be re-taken on a quiet box after the 2026-11-04
+  driver / kernel upgrade, so older rows come from compute runtime 26.35 + IGC 2.41.5.
+- **Derived** means arithmetic from the memory planner or byte counts.
+- Commands marked `# no speed row yet` run in the box test stages but have no speed
+  number in BENCHMARKS; the expected numbers beside them are derived.
+- Models dropped on 2026-10-27 (LFM2.5, Muse-Glimmer, LiLiCorr) are no longer supported and
+  are not in the table. Flint (spec 27) and Nanbeige (spec 29) are parked (2026-11-04), not
+  built. Nemotron 3.5 Bolt has its own section below; the table's columns are the older six.
 
 | | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
 |---|---|---|---|---|---|---|
-| checkpoint | published | published | published (spec 15 §13) | published | **not made** (spec 20b) | Intel's interim W4A16 (181 GB); ours not made (21q) |
-| `b70-serve` | yes | yes | yes | yes (spec 18d, box gates pending) | yes (spec 20e, box gates pending; needs 20b), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22), never run |
-| `b70-serve --pp 2` (two cards, spec 16d) | yes, never run | yes, never run | yes, never run | **refused** (one card) | its default (its own engine, spec 20e), never run | yes, `--layers N` (spec 21e), never run |
-| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), `--pp 1` or `2`, never run |
-| ran on a B70 | yes (see above) | no | no | no | no | no |
-| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | `b70-serve --mtp 1..3` (spec 21e; `auto` refused until spec 22's numbers), never run; `b70-decode` refuses it |
-| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e), never run |
-| `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV, never run | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
+| checkpoint | published | published | published (spec 15 §13) | published | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); ours not made (21q) |
+| `b70-serve` | yes | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22) |
+| `b70-serve --pp 2` (two cards, spec 16d) | yes | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
+| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), `--pp 1` or `2` |
+| speed rows in BENCHMARKS | yes | no | no | no | no | no |
+| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | `b70-serve --mtp 1..3` (spec 21e; `auto` refused until spec 22's numbers); `b70-decode` refuses it |
+| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
+| `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, its accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -100,11 +108,11 @@ holds about half the model, so `--max-len auto` reaches the trained 262144 token
 of them (derived, int8 head; with `--mtp` too), and a long prompt prefills ~1.8x faster
 (derived). The MTP head runs on the second card with its own copy of the embedding (2.54 GB).
 K2-Horizon is one card only; Kolibri-1 runs on two cards by default in `b70-decode` (spec 20c / 20d)
-and `b70-serve` (spec 20e, its own engine). **None of this has run on the cards yet** (queue rows 22, 23,
-27, 28):
+and `b70-serve` (spec 20e, its own engine). Its box test rows (22, 23, 27, 28) are partly open (`open-work.md`); the speed
+of the two-card prefill (row 23) is not measured:
 
 ```sh
-# every command below: never run on a B70
+# every command below: no speed row yet
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 # an agentic session over both cards: 262144 tokens with MTP (derived; one card: ~170k)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --served-name qwen \
@@ -122,6 +130,25 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/pr
 
 Startup prints the split (`split: auto -> N`), the plan per card and both cards' memory lines.
 Not with `--device` or `B70_PREFILL_ATTN=composed`.
+
+## Speculative decoding and how its output is judged
+
+A *proposer* guesses the next few tokens and the main model checks them all in one pass (a
+"verify" step of M rows), so every correct guess is a token for free. `--spec` picks the
+proposer: `mtp` (the model's own MTP head, spec 8), `dflash` (a small draft model, spec 19),
+`lookup` (the continuation of the longest earlier repeat in the request, spec 19e) and
+`dflash-lookup` (lookup inside DFlash, spec 19f). Since spec 28b the verify step of every decode
+list at M >= 2 runs the small-batch int4 GEMM `gemm_sm` (M = 1 keeps the GEMV, bitwise as
+before); spec 28d moved the DFlash drafter's int8 linears and Flash-Next's verify lists onto it
+too. The DPAS verify-attention kernel (spec 28c) is built but **switched off**
+(`kVerifyAttnTable` is all `kDpasNever`) until a real error at 8 rows is fixed, so verify
+attention runs the v2 decode kernel at every M.
+
+Because the verify rows no longer run the same kernel as a plain step, speculative output
+is not compared bit for bit with plain decode. It is graded by the **f32 judge**
+(`tests/server/spec_judge.h`, doc 14): a speculative stream passes when it is no further from
+a float32 reference than plain decode on the same context, or when every miss is a near-miss
+(`golden::NearMiss`, within 8 bf16 ulps of the f32 top). Plain, unchanged code paths still gate bitwise.
 
 ## Qwen3.8-27B
 
@@ -151,14 +178,14 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 # the intended default for agentic use: the largest context that fits (~201k, derived),
 # the cache sized from the machine's RAM, MTP choosing 0-3 guesses per step (~170k)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --mtp auto    # never run on a B70
+./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --mtp auto    # no speed row yet
 
 # the full trained context, 262144, with the int8 KV cache (accuracy gates pending)
 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --mtp auto \
-    --kv-cache int8                                                                     # never run on a B70
+    --kv-cache int8                                                                     # no speed row yet
 
 # prompt lookup instead of the MTP guesses (one proposer per server)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --spec lookup  # never run on a B70
+./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --spec lookup  # no speed row yet
 ```
 
 ```sh
@@ -169,7 +196,7 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 # greedy ids in, ids out
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
-./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --mtp auto  # never run on a B70
+./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --mtp auto  # no speed row yet
 
 # per-launch anatomy of the decode step
 ./build/src/cli/b70-decode $Q --profile --depth 4096 --steps 32 --repeats 5
@@ -184,24 +211,26 @@ bf16 head by default so its rows stay comparable.
 **Relevant variables:** `B70_KV_CACHE`, `B70_DECODE_ATTN` (`v1` only for A/B against the old
 pair), the `B70_PREFILL_*` switches for prefill experiments, `B70_GIT_SHA` for bench rows.
 
-### DFlash draft model (spec 19) - built, not yet run on the card
+### DFlash draft model (spec 19) - on the card since 2026-10-27
 
 `z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden
 states (the outputs of layers 5 / 19 / 33 / 47 / 61). Its acceptance on our prompts is measured on the Mac CPU (spec 19a
 P0, `docs/probe-dflash-2026-10-08.md`: 7.21 tokens per verify at K = 7 on agentic tool calls, 6.15 on code, ~2.2 on
-prose; int8 and 4-bit drafters equal bf16). The engine runs it since spec 19b-19d - **written on the Mac, nothing of it
-has run on a B70** (box queue rows 54, 55, 56):
+prose; int8 and 4-bit drafters equal bf16). The engine runs it since spec 19b-19d; it has run on the card
+since 2026-10-27 (box queue rows 54, 55, 56, measured in BENCHMARKS "DFlash"), and the verdict is an option, not the default.
+Since spec 28d the drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step 16.3 -> 8.9 ms).
+`--spec dflash-lookup` (spec 19f) adds prompt lookup inside DFlash for edit / copy turns:
 
 ```sh
 # one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last \
-    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2                 # never run on a B70
+    --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2                 # no speed row yet
 # two cards: the drafter on the second card beside lm_head (the copy hand-off only)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
-    --spec dflash                                                         # never run on a B70
+    --spec dflash                                                         # no speed row yet
 # greedy at a fixed K without the server (one card)
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill --lm-head int8 \
-    --spec dflash --spec-max 7                                            # never run on a B70
+    --spec dflash --spec-max 7                                            # no speed row yet
 ```
 
 - **Defaults (spec 19 §12, chosen from P0):** `--draft-format int8` (P0: int8 = bf16 acceptance at half the bytes),
@@ -241,7 +270,7 @@ STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
 (17408 + 2048 = 19456). Same tokenizer and chat template as Qwen3.8, so the same tool-call
 format; an MTP head of Qwen3.8's shape. 22.9 GB download.
 
-**Status: never run on a B70** (queue row 1). On the Mac: the CPU reference, the fold
+**Status: built; its box test row 1 passed, no speed row yet** (queue row 1). On the Mac: the CPU reference, the fold
 (bit-exact on the real weights) and the template were checked (docs/probe-agnes-2026-10-03.md).
 GEMV tuning rows are provisional copies of Qwen3.8's. Expected (derived): decode ~26 t/s at
 depth 4096 with the int8 head, prefill ~1850-1900 t/s at 4096. Weights ~21.0 GB with the
@@ -251,7 +280,7 @@ bf16 head, ~19.7 GB with int8 (derived).
 uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
 A=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
 
-# every command below: never run on a B70
+# every command below: no speed row yet
 # agentic session: ~140k context (derived), ~114k with --mtp auto
 ./build/src/cli/b70-serve $A --host 0.0.0.0 --port 8000 --served-name agnes \
     --prefix-split-last --mtp auto
@@ -286,7 +315,7 @@ hidden 2048, 256 experts with top-8 plus a shared expert, ~3 B parameters active
 Decode (15c), prefill (15d) and serving with its own chat template (Qwen3.5's), Qwen XML
 tool calls and the MoE MTP head (15e) are built.
 
-**Status: never run on a B70** (queue rows 10, 13, 16, 19). Expected (derived): ~1.86 GB
+**Status: built; no speed row yet** (box test rows 10, 13, 16, 19). Expected (derived): ~1.86 GB
 read per token, so the bandwidth ceiling is far above Qwen3.8's (~270 t/s), and launches,
 not bytes, will set the decode rate; 526 launches per token. Prefill estimated at 3-6k t/s.
 Weights 19.45 GB with the int8 head (derived), +0.50 GB for the MTP head. For comparison,
@@ -297,7 +326,7 @@ the checkpoint's model card reports vLLM XPU on a B70 at 99.8 t/s decode (tg256,
 O=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
-# every command below: never run on a B70
+# every command below: no speed row yet
 # agentic session: the full trained context, 262144, fits with or without MTP (derived)
 ./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --served-name ornith \
     --prefix-split-last --mtp auto
@@ -340,7 +369,7 @@ head dim 128); layers 3-47 route values through 64 value experts (MoVA, top-4) a
 through 100 experts (top-8) plus a shared one. Its own tokenizer (250,624 ids, BOS 0) and
 chat template. No MTP head. Trained context 524288.
 
-**Status: never run on a B70** (queue rows 14, 15, 17, 21, 25). Decode (18b) and prefill (18c)
+**Status: built; no speed row yet** (box test rows 14, 15, 17, 21, 25). Decode (18b) and prefill (18c)
 run through `b70-decode`; `b70-serve` serves it (18d: its chat template, tool calls and
 reasoning, K2's own engine behind the server, KV-only prefix-cache snapshots - host-tested only).
 Expected
@@ -352,7 +381,7 @@ cards (pipeline parallel, fp8 KV) measured 44.43 t/s decode.
 uvx --from huggingface_hub hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
 K=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
 
-# every command below: never run on a B70
+# every command below: no speed row yet
 # K2 ids start with BOS 0: encode with --bos
 python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
 
@@ -386,8 +415,9 @@ B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
   gates pending).
   `--spec lookup` has nothing to run on: it needs verify lists, which only an MTP head
   provides today.
-- The routing gate against the CPU reference has not run; until it has, nobody knows
-  whether the default `flash` attention or `B70_K2_ATTN=eager` matches the reference better.
+- Which attention matches the reference better is decided by the f32 judge (the MoE gates
+  are graded against an f32 reference, with a one-bf16-ulp near-tie rule, since routing
+  flips on near-ties): `flash` is the default, `B70_K2_ATTN=eager` stays as the diagnostic.
 
 **Relevant variables:** `B70_K2_ATTN` (decode and prefill), `B70_PREFILL_REPLAY`.
 `B70_PREFILL_PROFILE` times K2's prefill phases but `b70-decode` does not print the table
@@ -403,7 +433,7 @@ layers, sandwich norms, a 128000-id vocabulary, trained context 262144. Our int4
 engine reads the shared expert as one more int4 block, operator ruling 2026-10-31); a synthetic checkpoint in
 the same form comes from `tools/quantize/kolibri/make_synth.py`.
 
-**Status: never run on a B70** (queue rows 24, 26 and 28). Decode (spec 20c), prefill (spec 20d) and
+**Status: built; no speed row yet** (box test rows 24, 26 and 28). Decode (spec 20c), prefill (spec 20d) and
 serving (spec 20e, `b70-serve`), on **two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's
 default and `--pp 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
 development mode, the first N layers only - e.g. 30, ~26 GB). Expected (derived): 756 launches per
@@ -415,9 +445,9 @@ dequantised to bf16 in 512 MiB weight batches for the grouped GEMMs) + 5 for the
 scratch a card; on two cards each chunk crosses once, by copy, and the cards take turns (no overlap yet).
 
 ```sh
-K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b - not made yet
+K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b
 
-# every command below: never run on a B70; needs 20b's checkpoint and two cards
+# every command below: no speed row yet; needs two cards
 ./build/src/cli/b70-decode $K --ids k.ids --n 32                                  # --pp 2, split by bytes
 ./build/src/cli/b70-decode $K --ids k.ids --n 32 --pipeline-handoff peer --pipeline-split 25
 ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8 --max-len 40960
@@ -441,7 +471,7 @@ works as for every model: each snapshot carries the 40 sliding rings' last 512 p
 beside the full layers' KV (20 KiB a position). `--max-len auto` reaches 262144 on two cards.
 
 ```sh
-# every command below: never run on a B70; needs 20b's checkpoint and two cards
+# every command below: no speed row yet; needs two cards
 ./build/src/cli/b70-serve $K                                    # --pp 2, --max-len auto (262144), int8 head
 ./build/src/cli/b70-serve $K --pipeline-handoff peer --max-len 131072
 ./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn restores at len - 1
@@ -449,7 +479,7 @@ curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -
   [{"role": "user", "content": "Wie spät ist es in Berlin?"}], "chat_template_kwargs": {"reasoning_effort": "low"}}'
 ```
 
-**KL4 (box, after 20b):** `tools/probe/kolibri_passkey.sh` (passkey 3 / 3 at 262144 on two cards) and the
+**KL4 (box):** `tools/probe/kolibri_passkey.sh` (passkey 3 / 3 at 262144 on two cards) and the
 German A4-style tool-call set `tests/golden/toolcall-kolibri-de` (`tools/toolcall/engine_generate.sh`, then
 `score.py --format hermes` against the bf16 source's reference, `oracle_generate.py --model kolibri`).
 
@@ -474,7 +504,7 @@ MoE in every layer, 4-stream hyper-connections instead of a residual, and a per-
 g64 expansion; its PLE table must be converted once (`tools/box_validate/qwen4exp_oracle.sh <data> ple-int8`, ~51.8 GB
 beside the snapshot). Our own AutoRound g64 export is spec 21q's.
 
-**Status: never run on a B70** (queue rows 31, 32, 33 and 34). Decode (spec 21c), prefill (spec 21d) and serving
+**Status: built; no speed row yet** (box test rows 31, 32, 33 and 34). Decode (spec 21c), prefill (spec 21d) and serving
 (spec 21e): **the whole
 model does not fit two B70s** (its routed experts alone are 64.17 GB at int4 g64) and is refused, naming spec 22
 (the expert-offload tier); `--layers N` (development mode: the first N layers, then the final mixer and the head) or
@@ -505,7 +535,7 @@ reads the first card's embedding over peer.
 ```sh
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 
-# every command below: never run on a B70; needs the PLE int8 file beside the snapshot (or --ple-dir / $B70_Q4_PLE)
+# every command below: no speed row yet; needs the PLE int8 file beside the snapshot (or --ple-dir / $B70_Q4_PLE)
 ./build/src/cli/b70-decode $I --layers 18 --lm-head int8 --ids tests/golden/prompts/q4exp_short.ids --n 32
 ./build/src/cli/b70-decode $I --layers 38 --pp 2 --lm-head int8 --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $I --layers auto --max-len auto --ids tests/golden/prompts/q4exp_short.ids --n 8
@@ -537,7 +567,7 @@ of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabu
 `urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ` @ `8932aa8d` (AutoRound, GPTQ packing; 41 GB on disk). The
 loader also reads the GPTQ g128 spelling through its exact g64 expansion (the synthetic checkpoints test it).
 
-**Status: decode, prefill and serving built, never run on a B70** (queue rows 60 / 61 / 62; spec 25c / 25d / 25e, as built in
+**Status: decode, prefill and serving built; no speed row yet** (box test rows 60 / 61 / 62; spec 25c / 25d / 25e, as built in
 spec 25 §15 / §16 / §17). The real model runs on **two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes;
 `--pp 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
 a prompt goes through the decode list one replay per id; `--prefill` / `--bench --prefill-length N` run the `l0` prefill
@@ -549,7 +579,7 @@ arms are worth keeping.
 S=oracle-out-bolt-synth/n12-g128                   # a synthetic checkpoint (25b's make_synth.py, 12 blocks)
 P=tests/golden/prompts/bolt_short.ids
 
-# every command below: never run on a B70
+# every command below: no speed row yet
 ./build/tools/probe/probe_bolt_step --depth 4096 --rounds 9 --sweep-s --pair      # P0: the skeleton lists (no model)
 ./build/src/cli/b70-decode $S --ids $P --n 32                                     # one card, int8 head
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --ids $P --n 32          # two cards (the default for 88 blocks)
