@@ -259,8 +259,15 @@ class Ckpt:
                 gi = self.raw(b + ".g_idx")
                 if not torch.equal(gi, torch.arange(gi.numel(), dtype=gi.dtype) // g):
                     die(f"{b}.g_idx is not i // {g} (act-order is not the engine's format)")
-            if sc.dtype != torch.float16:
-                die(f"{b}.scales is {sc.dtype}, expected F16")
+            if sc.dtype not in (torch.float16, torch.bfloat16):
+                die(f"{b}.scales is {sc.dtype}, expected F16 (or BF16)")
+        if sc.dtype == torch.bfloat16:
+            # The operator's g64 export stores GPTQ scales as BF16; the engine converts them to F16 exactly
+            # (src/loader/quant.h, gptq_bf16_scales - every value proved representable), so the reference does too.
+            s16 = sc.to(torch.float16)
+            if not torch.equal(s16.float(), sc.float()):
+                die(f"{b}.scales: a BF16 scale is not exact in F16 (the engine refuses it too)")
+            sc = s16
         if g == 128:
             sc, g = sc.repeat_interleave(2, 0).contiguous(), 64                  # the exact expansion (docs/13)
         elif g != 64:
