@@ -2949,6 +2949,14 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME kolibri_tokenizer_test COMMAND kolibri_tokenizer_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
     ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri ${B70_KOLIBRI_TOKENIZER_JSON})
   set_tests_properties(template_kolibri_test kolibri_tokenizer_test PROPERTIES LABELS kolibri SKIP_RETURN_CODE 77)
+  # The 2026-11-04 tool-call item: a 20-turn tool session through the server with the vendored template (every prompt
+  # the template's render, by induction; reasoning echoed or not; repaired raw-newline calls), the thinking switches
+  # (top-level reasoning_effort included) and a max_tokens cut inside the reasoning, over a scripted engine.
+  add_executable(kolibri_session_test server/kolibri_session_test.cc)
+  target_include_directories(kolibri_session_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kolibri_session_test PRIVATE b70_server b70_tokenizer)
+  add_test(NAME kolibri_session_test COMMAND kolibri_session_test ${CMAKE_SOURCE_DIR}/tests/tokenizer/kolibri)
+  set_tests_properties(kolibri_session_test PROPERTIES LABELS kolibri)
 endif()
 # Task 2 (host): Kolibri's reasoning (opened by the model) and hermes JSON tool calls - server/toolcall_kolibri.h
 # over the template renders above, the Review Focus cases, German bytes and a 2000-output fuzz, every parse
