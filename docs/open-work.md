@@ -13,7 +13,7 @@ Last updated: 2026-11-04 (main 4ffc3a8; box: kernel 7.4.0-rc1, compute-runtime 2
 
 | spec | what it is | open item | state | closes when |
 |---|---|---|---|---|
-| **16** pipeline | one model split across both cards (`--pp 2`) | (optional) a mid-prompt block snapshot stores the head's last KV row before it is written: after restoring a deeper snapshot the MTP head sees a stale key at block boundaries - drafts only, never the output, one card and two cards alike | not started; the proper fix stores that row with the next block (a snapshot-store format version bump) | operator decides whether to build it |
+| **16** pipeline | one model split across both cards (`--pp 2`) | a mid-prompt block snapshot stores the MTP head's last KV row before it is written: after restoring a deeper snapshot the head sees one stale key per block boundary - drafts only, never the output, one card and two cards alike | operator 2026-11-04: skip the fix, verify first - in the quiet-box session, draft acceptance of a long agent session served cold vs from the prefix cache (one card and `--pp 2`) | closed if acceptance differs by < 1%; otherwise build the fix (the row stored with the next block, a snapshot-store format version bump) |
 | **5** int8 prefill | faster prompt processing | 5d: prefill in chunks of 4096 | code done (branch `spec5d-chunk-4096`, Nov 1) | box speed run + merge |
 | **25** Bolt | the Nemotron Bolt model | speculative decoding back on (branch `bolt-spec-restore`); the Bolt reference set (CPU, building) | code done; references building tonight | box runs + merge |
 | **20** Kolibri | the Aleph Alpha German / English MoE (kept) | a real tool session from a client that drops `reasoning_content` (many OpenAI clients do): earlier tool turns then render as empty think blocks, per the template - the community stalls may come from such clients (operator 2026-11-04: do it) | queued (box session, one card or two) | one real multi-turn tool session without echoing reasoning: stalls and call validity counted, compared with the 2026-11-04 echoing session (0 stalls, 24 valid calls) |
@@ -44,7 +44,9 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 ## After the table is empty
 
-1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image; then
+1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image, spec 17a's
+   first tensor-parallel measurement, and spec 16's check (MTP draft acceptance cold vs prefix-cache-restored, one card
+   and `--pp 2`: < 1% closes the stale-key item); then
    refresh README.md and docs/BENCHMARKS.md (they still say "nothing measured" for Ornith, K2, Flash-Next, Bolt and show
    pre-upgrade headline rows) and the per-model table in docs/18-running-models.md.
 2. Spec 22 expert offload (Flash-Next whole on two cards; its P0 rows 36 first; §9 has the Basalt lessons: CPU compute
