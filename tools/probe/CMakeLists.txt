@@ -876,3 +876,25 @@ b70_target_kernel_dir(probe_verify_attn)
 get_property(PVD_SRC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
 get_property(PVD_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_verify_attn pvd_kernels ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
+
+# --- probe_vattn_ab: spec 28c's open error (docs/07-open-questions.md §11), attn_verify_dpas against v2 on a real
+# DFlash run - every verify twice (DPAS, then v2), the first flipping iteration replayed layer by layer on v2's inputs
+# (CaptureOptions::attn_dump) against fp64. `pvab_<arm>` are attn_verify_dpas.cl at the production bf16 lever line, M = 8,
+# built differently for the compiler A/B (build-time only; no production binary binds them):
+#   G256  the production command line (a control: bitwise the production binary's results)
+#   G128  without -cl-intel-256-GRF-per-thread (no spill)
+#   O0    -cl-opt-disable
+#   EAGER the scalar walk (EAGER=1: same blocks, tiles, masks, P rounding and merge order, no DPAS / sub-groups)
+if(B70_MTP AND B70_VERIFY_M8 AND B70_VERIFY_DPAS)
+  set(PVAB_DEFS CTRL_POS=0 CTRL_NACT=1 M=8 TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 KV8=0)
+  add_ocloc_kernel(pvab_G256 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pvab_G128 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS})
+  add_ocloc_kernel(pvab_O0 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} OPTIONS -cl-intel-256-GRF-per-thread -cl-opt-disable)
+  add_ocloc_kernel(pvab_EAGER SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} EAGER=1)
+  add_executable(probe_vattn_ab probe_vattn_ab.cc)
+  target_include_directories(probe_vattn_ab PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(probe_vattn_ab PRIVATE b70_runtime b70_dflash_runtime b70_loader b70_model b70_l0 b70_prefill_host)
+  b70_target_kernel_dir(probe_vattn_ab)
+  add_dependencies(probe_vattn_ab kernel_pvab_G256 kernel_pvab_G128 kernel_pvab_O0 kernel_pvab_EAGER
+                   ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
+endif()

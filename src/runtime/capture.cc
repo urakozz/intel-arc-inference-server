@@ -801,6 +801,18 @@ class Capture {
     step_.list.copy(at(*tap_, size_t(layer) * bytes), b_.resid.ptr(), bytes);
   }
 
+  // CaptureOptions::attn_dump (tests / probes only): FA layer f's attention inputs and output, copied after its pair.
+  void attn_dump(uint32_t f) {
+    if (opt_.attn_dump == nullptr) return;
+    require(size_t(d_.fa_q_heads) * Qwen35::kFaHeadDim == kAttnDumpRow && kCapM <= 8,
+            "CaptureOptions::attn_dump: Qwen3.8's 24 x 256 q heads at M <= 8 only");
+    uint8_t* base = static_cast<uint8_t*>(opt_.attn_dump) + size_t(f) * kAttnDumpLayerBytes;
+    const size_t f32 = size_t(kCapM) * kAttnDumpRow * 4;
+    step_.list.copy(base, b_.attn_q.ptr(), f32);
+    step_.list.copy(base + 8 * kAttnDumpRow * 4, b_.attn_gate.ptr(), f32);
+    step_.list.copy(base + 8 * kAttnDumpRow * 8, b_.attn_out.ptr(), size_t(kCapM) * kAttnDumpRow * 2);
+  }
+
   // --- the kernels ----------------------------------------------------------
 
   // embed_gather(ctrl, embed, resid) - src/kernels/embed_gather.cl (Task 3),
@@ -1231,6 +1243,7 @@ class Capture {
     // flattered. What is bought is a quartered per-work-group serial walk
     // (369.988 -> 224.046 us/launch, measured, grid growth included).
     attn_pair(b_.control.ptr(), kv);
+    attn_dump(f);
     // o_proj is the one GEMV whose activations are not the shared `x` scratch:
     // attn_reduce writes bf16 [M][6144] into `attn_out`, which is exactly this
     // GEMV's K.
