@@ -7,7 +7,7 @@ new label. Rule until the table is empty: no new specs or side plans. Documents 
 leave `docs/superpowers/plans/box-validation-queue.md`, finished sessions leave `docs/box-day-plan.md`, and both files
 go when empty; this page stays while fix rounds still add items.
 
-Last updated: 2026-11-04 (main 156cb67; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
+Last updated: 2026-11-04 (main 4ffc3a8; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
 ## Open
 
@@ -20,7 +20,7 @@ Last updated: 2026-11-04 (main 156cb67; box: kernel 7.4.0-rc1, compute-runtime 2
 | *(tools)* | CPU reference tool | the CPU bf16 shim + the Bolt BF16-scale fix (branch `cpu-lane-1101`) | done | one CPU test row (r25.a4_ref) + merge |
 | **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done | box measurement on a quiet box + merge |
 | **21** Flash-Next | the Qwen3.8-Flash-Next model | r32.partial and the real-checkpoint golden sets still use the old 1e-3 gap rule (remaking them with the block scores is hours of CPU); routing on layers other than the last is judged by the gap rule as a fallback (the engine keeps only ranks 9 / 10 of the router probabilities) | not started | the sets remade on the CPU |
-| **28** faster draft checking | Qwen3.8 MTP / DFlash graded by the f32 references | 5 tests FAIL on judged verdicts only (mtp_gpu_test + its two 128k twins, dflash_gpu_test, dflash_lookup_gpu_test): the speculative stream takes a token 11-30 bf16 ulp below the f32 top (bar 8), always a special token (846 vs 248045 / 248046 and similar) where the engine's own plain row has the two within 0.1-0.3 ulp but f32 puts them 10-20 ulp apart - points at a bf16 accuracy gap on special-token logits, not the spec path | next: re-grade on main (attention fix in), then a CPU bf16 check of those rows (inherent bf16, or an engine accuracy defect) | the cause known, then the fix or the rule |
+| **28** faster draft checking | Qwen3.8 MTP / DFlash graded by the f32 references | 5 tests FAIL on judged verdicts only (mtp_gpu_test + its two 128k twins, dflash_gpu_test, dflash_lookup_gpu_test), always a turn-boundary row after a tool call (special token vs text token). Cause found: no engine defect - these rows are chaotic in bf16 (transformers bf16 on the same weights lands as far from f32 as the engine); the mtp_gpu rows are flipped by the l0-int8 prompt pass. Rulings 2026-11-04: at a row where standard bf16 moves the pair's gap by > 8 ulp, the speculative pick is graded against the plain stream's own error (max(8, \|plain gap - f32 gap\|)), the strict bar everywhere else; the reference is int8-aware for tests that prefill with l0-int8. Also dflash_engine_test's M = k+1 vs M = 8 bitwise check now differs (M >= 6 runs the DPAS attention): judged by closeness instead, bitwise kept where the kernels match | in progress (branch `spec28-special-token-gap`): bf16 references for the 72 affected contexts building on the CPU, the rule written. Next (one agent, after it): the int8-aware prompt pass - `qwen_forced.py` and the bf16 reference through `int8_sim.py` fq_x / fq_w on prompt positions (as Ornith's `--sim-int8-prefill`), int8-aware f32 and bf16 references for the mtp_gpu contexts, those tests pointed at them | the 5 tests PASS or FAIL on the new judges; merge |
 
 ## Box test rows still open
 
