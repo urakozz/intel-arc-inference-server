@@ -499,6 +499,12 @@ target_include_directories(probe_tie_judge PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(probe_tie_judge PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
 b70_target_kernel_dir(probe_tie_judge)
 add_dependencies(probe_tie_judge ${PT_KERNELS} ${PT_PF_KERNELS})
+# spec 28: the engine's plain decode row + per-layer taps at a forced-context position (tools/oracle/row_taps_ref.py)
+add_executable(probe_row_taps probe_row_taps.cc)
+target_include_directories(probe_row_taps PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_row_taps PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_row_taps)
+add_dependencies(probe_row_taps ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
 # Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
 # Record: docs/probes/probe-mtp-2026-09-27.md. Needs -DB70_DECODE_EXTRA_M=ON (the M = 2..4
