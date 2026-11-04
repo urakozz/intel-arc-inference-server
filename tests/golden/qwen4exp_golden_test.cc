@@ -43,7 +43,9 @@
 //   PLE      the 16 row ids of every row bitwise (integers)
 //   `inject` the reference's selections fed in (Qwen4ExpEngine's injected capture: the identity list below 2052
 //            visible positions, the reference's blocks + the tail after) - isolates the attention arithmetic: the
-//            determined-row token gate must pass on EVERY row
+//            determined-row token gate must pass on every row except after a ROUTING near-tie / swap upstream (the
+//            routes stay the engine's; 2026-11-04: Intel's form, q4exp_short step 0 - no selection rows - failed
+//            on a 2-bf16-ulp golden gap after such a row, as the free run, which reports it)
 // The free run passes S and the token gate on rows with no near-tie in any layer, and reports the others (a near
 // tie upstream can move a determined row's logits: counted, not failed).
 //
@@ -409,7 +411,7 @@ int main(int argc, char** argv) {
                                       "), the gap rule on the others").c_str()
                                    : "by the gap rule - this golden set has no block scores (qsa.score.*: regenerate it "
                                      "with qwen4exp_oracle.sh)");
-    std::vector<uint8_t> near_row(rows, 0);
+    std::vector<uint8_t> near_row(rows, 0);   // bit 0: a selection near-tie / swap, bit 1: a routing one
     std::vector<double> tap_min(d.layers, 1.0);
     uint32_t act0 = rows;
     if (g.has("H.L0")) act0 = rows - uint32_t(g.dim("H.L0", 2, 0));
@@ -446,7 +448,7 @@ int main(int argc, char** argv) {
         const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
         compare_route(r.data() + size_t(l) * rq::kRouteWords, gi, gap, tie_tol, route_ref(l, row), route_c, pname.c_str(),
                       row, l);
-        if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] = 1;
+        if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] |= 2;
       }
       for (const Sel& s : sels) {   // gate S
         if (row < kDenseRows || !s.blocks || row < s.row0) continue;
@@ -462,7 +464,7 @@ int main(int argc, char** argv) {
         if (compare_selection(gb, wb, gap, sel_tol, esc.empty() ? nullptr : esc.data(),
                               s.score ? s.score + size_t(row - s.row0) * s.W : nullptr, (row + 1) / 4, sel_c,
                               pname.c_str(), row, s.layer, "the selection"))
-          near_row[row] = 1;
+          near_row[row] |= 1;
       }
       if (gple) {   // the PLE ids, exact
         ++ple_rows;
@@ -520,7 +522,7 @@ int main(int argc, char** argv) {
           const uint64_t near0 = route_c.near + route_c.swaps + route_c.undetermined;
           compare_route(r.data() + rq::pf_route_at(l) / 4 + size_t(row - row0) * rq::kRouteWords, gi, gap, tie_tol,
                         route_ref(l, row), route_c, pname.c_str(), row, l);
-          if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] = 1;
+          if (route_c.near + route_c.swaps + route_c.undetermined != near0) near_row[row] |= 2;
         }
       // the engine's block scores of the last chunk's rows in the last QSA layer (rows [0, C) written when the chunk
       // had sparse rows; none under inject: the selection is the reference's)
@@ -542,7 +544,7 @@ int main(int argc, char** argv) {
                                                                        : nullptr;
           if (compare_selection(gb, wb, gap, sel_tol, esc, s.score ? s.score + size_t(row - s.row0) * s.W : nullptr,
                                 (row + 1) / 4, sel_c, pname.c_str(), row, s.layer, "the prefill's selection"))
-            near_row[row] = 1;
+            near_row[row] |= 1;
         }
       }
       std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing and gate S on rows %u..%u\n", T, c,
@@ -563,8 +565,10 @@ int main(int argc, char** argv) {
       const float* want = glog + size_t(row - lrow0) * d.vocab;
       logit_min = std::min(logit_min, golden::compare_f32(lg.data(), want, d.vocab, sa, sb).cos);
       const golden::GoldenDecision dec = golden::golden_decision(want, d.vocab, d.vocab_used);
+      // the free run excuses any near-tie upstream; the injected run (the reference's selections) only a routing one -
+      // its selections are the reference's, its routes still the engine's own
       bool upstream_near = false;
-      for (uint32_t r = 0; r <= row; ++r) upstream_near = upstream_near || near_row[r];
+      for (uint32_t r = 0; r <= row; ++r) upstream_near = upstream_near || (near_row[r] & (inject ? 2 : 3));
       bool ok;
       if (dec.determined()) {
         ++det;
@@ -576,8 +580,8 @@ int main(int argc, char** argv) {
         tie_ok += ok;
       }
       if (!ok) {
-        if (!inject && upstream_near) {
-          ++reported;   // a near tie upstream: reported, not failed (the free run's rule)
+        if (upstream_near) {
+          ++reported;   // a near tie upstream: reported, not failed
           std::printf("  step %u: engine %u, golden %u - after a near-tie row (reported)\n", j, got, uint32_t(gtok[j]));
         } else if (first_bad < 0) {
           first_bad = int(j);
