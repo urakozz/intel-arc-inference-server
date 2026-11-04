@@ -151,6 +151,21 @@ std::vector<uint32_t> Qwen4ExpEngine::read_prefill_selection(uint32_t layer) {
   return v;
 }
 
+std::vector<float> Qwen4ExpEngine::read_prefill_last_qsa_scores() {
+  require(bool(pf_), "read_prefill_last_qsa_scores before the first prefill");
+  const model::Qwen4ExpDesc& d = model_.desc;
+  uint32_t last = d.layers;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    if (d.is_qsa(l)) last = l;
+  if (last == d.layers) throw std::out_of_range("read_prefill_last_qsa_scores: no QSA layer is loaded");
+  const uint32_t dev = model_.placement.device_of(last);
+  Qwen4ExpPrefillState::Dev& D = *pf_->dev[dev];
+  require(D.cx.wait_for(pf_->timeout_ns), "device " + std::to_string(dev) + "'s prefill list is still running");
+  std::vector<float> v(size_t(kPfC) * (max_len_ / d.idx_compress));
+  stage_imm(dev).copy(v.data(), D.s.scores.ptr(), v.size() * 4);
+  return v;
+}
+
 void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const model::Qwen4ExpDesc& d = model_.desc;
   if (broken_) throw std::runtime_error("pipeline: a hand-off failed earlier in this session; reset() first");
