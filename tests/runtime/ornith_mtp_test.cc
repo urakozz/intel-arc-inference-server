@@ -190,8 +190,7 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const char* what, const std::vec
         const bool n3 = row == lg4[r] && st == st4[r] && rt == rt4[r];
         const spec_judge::RowVerdict rv =
             spec_judge::row(reinterpret_cast<const float*>(row.data()),
-                            reinterpret_cast<const float*>(ref.logits[r].data()), rj ? rj.row(r + 1) : nullptr, cl,
-                            uint32_t(VU));
+                            reinterpret_cast<const float*>(ref.logits[r].data()), rj, r + 1, cl, uint32_t(VU));
         std::printf("  M2 %s k=%u row %u: logits cos %.9f, GDN slot cos %.9f, routes %zu / 40 identical to the plain "
                     "step (recorded), id %s; N3: %s the M = 4 row%s\n",
                     what, k, r, cl, cs, rs, id == ref.g[r + 1] ? "ok" : id_ok ? "near-tie" : "DIFFERS",
@@ -359,7 +358,6 @@ int main(int argc, char** argv) {
   }
   std::printf("M3: %s\nH (the head's route row): %s\n", m3 ? "PASS" : "FAIL", head_ok ? "ok" : "BAD");
   ok &= m3 && head_ok;
-  if (!ok) return 1;
-  std::puts("ornith_mtp_test OK");
-  return 0;
+  if (ok) std::puts("ornith_mtp_test OK");
+  return spec_judge::exit_code(ok, "ornith_mtp_test");
 }

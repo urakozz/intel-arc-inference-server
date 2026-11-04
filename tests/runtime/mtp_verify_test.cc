@@ -175,8 +175,8 @@ bool m2(Ctx& c, const Snap& s0, const Ref& ref, const std::vector<uint32_t>& pro
       const bool id_ok = c.e.verify_ids()[r] == ref.g[r + 1];
       int le = 0;
       std::frexp(std::fabs(ref.logits[r][ref.g[r + 1]]), &le);
-      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(),
-                                                        rj ? rj.row(r + 1) : nullptr, cl, uint32_t(VU));
+      const spec_judge::RowVerdict rv = spec_judge::row(lg.data() + size_t(r) * V, ref.logits[r].data(), rj, r + 1,
+                                                        cl, uint32_t(VU));
       std::printf("  M2a k=%u row %u: logits cos %.9f max abs %.3e (%.2f bf16 ulp of the top)%s  GDN slot cos %.9f max "
                   "abs %.3e%s  id %s%s\n",
                   k, r, cl, lma, lma / std::ldexp(1.0, le - 8), lbits ? " (bitwise)" : "", cs, ma,
@@ -466,5 +466,5 @@ int main(int argc, char** argv) {
 
   CHECK(ok);
   std::puts("mtp_verify_test OK");
-  return 0;
+  return spec_judge::exit_code(ok, "mtp_verify_test");
 }

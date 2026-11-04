@@ -342,7 +342,7 @@ int gate(const std::string& snap, runtime::PrefillBackend backend, const HeadOpt
       divergences == 0 && rf1_fail == 0 && m5_fail == 0 && m4_fail == 0 && launch_fail == 0;
   std::printf("mtp_gpu_test (%s): %s\n", runtime::prefill_backend_name(backend),
               pass ? "PASS" : "FAIL");
-  return pass ? 0 : 1;
+  return spec_judge::exit_code(pass, "mtp_gpu_test");
 }
 
 int a3(const std::string& snap, runtime::PrefillBackend backend, const HeadOpts& head) {

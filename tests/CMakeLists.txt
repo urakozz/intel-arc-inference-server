@@ -126,6 +126,12 @@ add_test(NAME prompt_lookup_test COMMAND prompt_lookup_test)
 add_executable(greedy_tie_test server/greedy_tie_test.cc)
 target_include_directories(greedy_tie_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/server)
 add_test(NAME greedy_tie_test COMMAND greedy_tie_test)
+# Spec 28 N4 / N6's grading (tests/server/spec_judge.h): awaiting vs judged, the exit code (77 = awaiting a reference).
+add_executable(spec_judge_test server/spec_judge_test.cc)
+target_include_directories(spec_judge_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/server ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(spec_judge_test PRIVATE b70_loader b70_model)
+add_test(NAME spec_judge_test COMMAND spec_judge_test)
 
 # Spec 8 §3.6 (plan 8c): the server over a scripted speculative engine, host only.
 add_executable(mtp_server_test server/mtp_server_test.cc)
@@ -1385,8 +1391,18 @@ if(B70_MTP)
   set_tests_properties(mtp_prefill_test PROPERTIES LABELS "checkpoint;prefill;mtp"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # M2 + Review Focus 1-5: verify at M = k + 1, per-row GDN slots, commit, snapshots, replay.
+  # Spec 28 N4 / N6 (tests/server/spec_judge.h): Qwen3.8's speculative output graded by the f32 judges of its forced
+  # contexts - tools/box_validate/f32_refs.sh forced-qwen makes them on the box CPU into the data tree's
+  # oracle-out-qwen-f32{,-i8head}-forced (data.sh links them here); the bf16 head's for the checkpoint-head tests, the
+  # int8 head's for the tests that load LmHeadForm::Int8. A divergence whose judge is not there yet AWAITS it: the
+  # test exits 77 (SKIP) when nothing else failed (operator 2026-11-04).
+  set(B70_QWEN_FORCED_JUDGE "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-forced" CACHE PATH
+    "Qwen3.8's f32 judges of the forced contexts, bf16 head (spec_judge.h's B70_FORCED_JUDGE)")
+  set(B70_QWEN_FORCED_JUDGE_I8HEAD "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-forced" CACHE PATH
+    "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
   add_test(NAME mtp_verify_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
-  set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp"
+  set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # Plan 8c: M3 (greedy MTP is identical to plain), RF1 on the card, M5, M4 end to end,
   # through EngineAdapter (the server's engine calls); and the D1/D2 bench (--bench K).
@@ -1398,7 +1414,8 @@ if(B70_MTP)
       b70_model b70_l0 b70_prefill_host)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
-    set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp"
+    set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
     # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
@@ -1409,7 +1426,9 @@ if(B70_MTP)
     add_test(NAME mtp_gpu_dv128k_bf16_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8
       --lm-head bf16 --draft-vocab 128k)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
-      LABELS "checkpoint;mtp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+      LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+    set_tests_properties(mtp_gpu_dv128k_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}")
+    set_tests_properties(mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}")
   endif()
   # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
@@ -1433,12 +1452,14 @@ exec "$@"
     add_test(NAME mtp_verify_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
       $<TARGET_FILE:mtp_verify_test> ${B70_TEST_SNAPSHOT} ${_len})
     set_tests_properties(mtp_verify_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
-      SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+      SKIP_RETURN_CODE 77 ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     if(TARGET mtp_gpu_test)
       add_test(NAME mtp_gpu_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
         $<TARGET_FILE:mtp_gpu_test> ${B70_TEST_SNAPSHOT} l0-int8 --max-len ${_len})
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
-        SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+        SKIP_RETURN_CODE 77 ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     endif()
   endforeach()
 endif()
@@ -1497,7 +1518,7 @@ if(B70_AGNES)
   endif()
   if(TARGET mtp_verify_test)
     add_test(NAME mtp_verify_agnes_test COMMAND mtp_verify_test ${B70_AGNES_SNAPSHOT})
-    set_tests_properties(mtp_verify_agnes_test PROPERTIES LABELS "checkpoint;mtp;agnes"
+    set_tests_properties(mtp_verify_agnes_test PROPERTIES LABELS "checkpoint;mtp;agnes" SKIP_RETURN_CODE 77
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
     # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump on Agnes.
     add_test(NAME mtp_head_agnes_test COMMAND mtp_head_test ${B70_AGNES_SNAPSHOT} ${_ag_prompts}
@@ -3634,7 +3655,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_dependencies(dflash_engine_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
 endif()
 # Through EngineAdapter (what b70-serve's loop calls): D2 at K 7 / 3 / auto against the plain loop on the golden and A4
 # prompts, truncate_to inside a burst, seeded sampling reproducible. SKIP 77 without either checkpoint.
@@ -3647,7 +3668,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_dependencies(dflash_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_gpu_test COMMAND dflash_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
   # Spec 19f (Review Focus 3-4): --spec dflash-lookup through EngineAdapter - D2 against the plain loop on golden, A4
   # and the edit / copy set's 8k / 32k prompts, the warm ring (bitwise the plain loop's after lookup runs), a seeded
   # sampled lookup run reproducible.
@@ -3659,7 +3680,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   add_dependencies(dflash_lookup_gpu_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME dflash_lookup_gpu_test COMMAND dflash_lookup_gpu_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_lookup_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
+    ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
 endif()
 # b70-decode --spec dflash's refusals before the device.
 b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")
