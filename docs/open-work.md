@@ -3,7 +3,9 @@
 One page for everything not yet closed, grouped by spec (the design docs in `docs/superpowers/specs/`). Updated at
 every merge. Labels: **spec N** = a design doc; **spec N + letter** (5d, 17a, 28c) = one plan inside it; **rN** = a
 row of the box test list (tests of built specs, never new work). A new finding becomes a line under its spec, not a
-new label. Rule until the table is empty: no new specs or side plans.
+new label. Rule until the table is empty: no new specs or side plans. Documents are deleted when obsolete: closed rows
+leave `docs/superpowers/plans/box-validation-queue.md`, finished sessions leave `docs/box-day-plan.md`, and both files
+go when empty; this page stays while fix rounds still add items.
 
 Last updated: 2026-11-04 (main bd90836; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
