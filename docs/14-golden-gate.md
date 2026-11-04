@@ -349,6 +349,33 @@ The scan's honest limit: one operand inside its A2 term is still a single BF16
 value, measured harmless on three prompts of one checkpoint and not proven in
 general.
 
+## When the kernel path differs: the f32 judge
+
+Bit-for-bit comparison is only fair where the code path is unchanged. A golden set is made by
+the CPU oracle (Hugging Face `transformers` on the CPU); the engine matches it bitwise wherever
+it runs the same arithmetic as before. When a feature **must** use a different kernel, two correct
+bf16 implementations differ at the last rounding, and greedy decoding flips on a near-tie (two
+candidate tokens whose scores are a hair apart). Since spec 28b the verify step of speculative
+decoding is such a case: its rows run the small-batch GEMM `gemm_sm`, not the M = 1 GEMV.
+
+For those cases the gate is the **f32 judge** (operator ruling 2026-11-03; `tests/server/spec_judge.h`,
+on top of `tests/golden/forced_judge.h`). The test writes each context it would judge, the box CPU
+runs the float32 reference on exactly that context, and the test reads it back. A speculative
+stream passes when it is identical to the plain one, or when it is no further from the f32
+reference than plain decode on the same context, or when every miss is a near-miss
+(`golden::NearMiss`: at most `kNearMissUlp` = 8 bf16 ulps - units in the last place of a bf16 number -
+below the f32 top). For logits rows the cosine distance to f32 may be at most `kCosSlack` = 2 times the
+plain row's. A kernel error shows as something else entirely: the DPAS verify-attention kernel
+(spec 28c) put its id at f32 rank 3, 4.0 below a top whose margin was 3.44, and was switched
+off for it. The MoE gates (Ornith, K2) use the same judge, with a one-ulp tie rule, because
+a routing decision can flip on a near-tie.
+
+New references are made quickly with the CPU bf16 shim (`tools/oracle/cpu_bf16.py`, on the
+`cpu-lane-1101` branch until it merges): the box CPU has no bf16 hardware, and torch's
+emulated bf16 GEMM there is about a thousand times slower than float32, so the shim does the
+GEMM in fp32 and rounds once to bf16. It is not bitwise torch's (`--no-exact-bf16-gemm`
+reproduces the old path and the existing goldens), but it is as close to the f32 judge.
+
 ## Running the gate
 
 ```bash
@@ -372,4 +399,8 @@ three prompts. Regenerating a golden set costs 18 min 16 s for all three prompts
 on an idle machine, and 28% longer under a 12-core compile - the CPU oracle is
 the one thing in this project that genuinely contends for the host.
 
-Suite total: **86 tests**, all passing.
+The whole suite runs on the box before every merge, `tools/box_check.sh` (`ctest -LE checkpoint`,
+the tests that need no model files), which counts Passed, Failed and Skipped apart - a Skipped
+test, such as the gate with no golden set present, is not a pass. The check of 2026-11-04 counted
+313 passed, 0 failed, 0 skipped. The tests that need checkpoints and golden sets run as box
+test rows (`tools/box_validate.sh`).
