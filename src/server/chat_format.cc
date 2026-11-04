@@ -108,6 +108,17 @@ json request_template_kwargs(const ChatFormat& format, const json& kwargs, const
     if (efficient && !out.contains("medium_effort")) out["medium_effort"] = true;
     return out;
   }
+  if (format.kind == ChatFormat::Kind::Kolibri && !reasoning_effort.is_null()) {
+    // Kolibri's template reads `reasoning_effort` itself (vLLM hands the top-level field to the template as this kwarg);
+    // an explicit chat_template_kwargs.reasoning_effort wins.
+    bool ok = false;
+    for (const char* e : {"none", "minimal", "low", "medium", "high", "xhigh", "max"}) ok = ok || reasoning_effort == e;
+    if (!ok)
+      throw std::invalid_argument("reasoning_effort must be one of none, minimal, low, medium, high, xhigh, max (Kolibri-1)");
+    json out = kwargs.is_object() ? kwargs : json::object();
+    if (!out.contains("reasoning_effort")) out["reasoning_effort"] = reasoning_effort;
+    return out;
+  }
   return kwargs;
 }
 

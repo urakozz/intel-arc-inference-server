@@ -79,7 +79,9 @@ void check_template_kwargs(const ChatFormat& format, const nlohmann::json& kwarg
 // The kwargs this format's template gets for a request - its chat_template_kwargs, and the OpenAI top-level
 // `reasoning_effort` (null: absent) mapped where a format has one. Spec 25e: for Bolt (decision 13) none | minimal -> enable_thinking false, low | medium -> medium_effort true, high | xhigh -> nothing,
 // each unless the kwargs name that key already (an explicit kwarg wins); anything else std::invalid_argument naming
-// reasoning_effort. Every other format: the kwargs unchanged (reasoning_effort ignored, as before).
+// reasoning_effort. Kolibri-1: the template's own `reasoning_effort` variable (one of its seven efforts, else
+// std::invalid_argument), unless the kwargs name it. Every other format: the kwargs unchanged (reasoning_effort
+// ignored, as before).
 nlohmann::json request_template_kwargs(const ChatFormat& format, const nlohmann::json& kwargs,
                                        const nlohmann::json& reasoning_effort);
 
