@@ -2,7 +2,7 @@
 """Spec 28 (the special-token logit gap): a CPU reference of single rows of Qwen3.8's forced contexts, per layer, for a
 bisection against the engine's plain row (tools/probe/probe_row_taps.cc).
 
-    row_taps_ref.py <snapshot> --cases FILE --out DIR [--dtype bf16|f32] [--batch-tokens N]
+    row_taps_ref.py <snapshot> --cases FILE --out DIR [--dtype bf16|f32] [--exact-dequant] [--batch-tokens N]
 
 Cases file, one a line: "<label> <prompt ids file> <force ids file> <row>" - the row that decides force[row] after
 prompt + force[0, row) (spec_judge.h / forced_judge.h's row numbering). The model is transformers' Qwen3_5ForCausalLM
@@ -11,6 +11,10 @@ dequantises it:
   --dtype bf16  bf16 weights and activations, standard transformers bf16 semantics; the bf16 GEMMs run as fp32 GEMMs of
                 the bf16 values rounded once to bf16 (cpu_bf16.py: the box CPU has no bf16 units)
   --dtype f32   every weight upcast to f32, f32 throughout (the f32 judges' arithmetic, transformers' code)
+  --exact-dequant  the int4 linears' weights (q - 8) x scale kept in f32, NOT rounded to bf16 (every oracle rounds
+                them once; the engine's kernels never do: gemv.cl accumulates (q - 8) x and scales in fp32). With
+                --dtype bf16 the activations stay bf16: such a linear is the fp32 GEMM of the bf16 input and the f32
+                weight, rounded once to bf16 - the engine's arithmetic. The output files are <label>.<dtype>x.
 Per case, DIR/<label>.<dtype>.safetensors at the row's position:
   mid    [64][H]  the residual after layer L's mixer (post_attention_layernorm's input) - the engine's tap[L]
   out    [64][H]  the residual after layer L (transformers' hidden_states[L + 1])
@@ -46,9 +50,28 @@ def read_ids(path):
         return [int(x) for x in f.read().split()]
 
 
-def build(snapshot, dtype):
+def build(snapshot, dtype, exact):
     import torch
     D = _load("dump")
+    if exact:
+        def dequant_t(qw, scales, group_size, check=False):
+            rows, n = qw.shape
+            shifts = torch.arange(8, dtype=torch.int32) * 4
+            q = ((qw.unsqueeze(1) >> shifts.view(1, 8, 1)) & 0xF).reshape(rows * 8, n)
+            w = (q.to(torch.float32) - 8.0) * scales.to(torch.float32).repeat_interleave(group_size, dim=0)
+            return w.t().contiguous()                              # [N, K] f32, as stream.dequant_t's layout
+        D._stream.dequant_t = dequant_t
+        if dtype == "bf16":
+            import torch.nn.functional as F
+            from torch import nn
+            orig = nn.Linear.forward
+
+            def forward(self, x):
+                if x.dtype == torch.bfloat16 and self.weight.dtype == torch.float32:
+                    b = None if self.bias is None else self.bias.float()
+                    return F.linear(x.float(), self.weight, b).to(torch.bfloat16)
+                return orig(self, x)
+            nn.Linear.forward = forward
     from transformers import AutoConfig
     from transformers.models.qwen3_5 import modeling_qwen3_5 as m
     with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
@@ -80,6 +103,7 @@ def main():
     ap.add_argument("--cases", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--dtype", choices=("bf16", "f32"), default="bf16")
+    ap.add_argument("--exact-dequant", action="store_true")
     ap.add_argument("--batch-tokens", type=int, default=16384)
     a = ap.parse_args()
     import torch
@@ -109,9 +133,10 @@ def main():
     if cur:
         batches.append(cur)
     t0 = time.time()
-    print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, dtype {a.dtype}; {len(cases)} cases in "
+    print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, dtype {a.dtype}, exact dequant {a.exact_dequant}; {len(cases)} cases in "
           f"{len(batches)} forwards", flush=True)
-    model, tc, pf = build(a.snapshot, a.dtype)
+    model, tc, pf = build(a.snapshot, a.dtype, a.exact_dequant)
+    tag = a.dtype + ("x" if a.exact_dequant else "")
     L = tc.num_hidden_layers
     for b in batches:
         B, T = len(b), len(b[0]["seq"])
@@ -161,8 +186,8 @@ def main():
                  "x": fin["x"][i].contiguous(), "pre": fin["pre"][i].contiguous(),
                  "logits_bf16head": lg_b[i].contiguous(), "logits_i8head": lg_8[i].contiguous(),
                  "seq": torch.tensor(c["seq"], dtype=torch.int32)}
-            save_file(t, os.path.join(a.out, f"{c['label']}.{a.dtype}.safetensors"),
-                      metadata={"pos": str(c["pos"]), "dtype": a.dtype, "snapshot": a.snapshot})
+            save_file(t, os.path.join(a.out, f"{c['label']}.{tag}.safetensors"),
+                      metadata={"pos": str(c["pos"]), "dtype": tag, "snapshot": a.snapshot})
             print(f"[{c['label']}] {len(c['seq'])} ids, row at position {c['pos']}: bf16-head top "
                   f"{int(lg_b[i, :248077].argmax())}", flush=True)
         print(f"forward B={B} T={T}: {time.time() - tb:.0f} s (wall {time.time() - t0:.0f} s)", flush=True)
