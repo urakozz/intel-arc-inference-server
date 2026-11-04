@@ -15,7 +15,7 @@ box, its defaults PROVISIONAL); **26b built on the Mac 2026-10-23** (§13 as bui
 run on a card yet, row 64); **26c built on the Mac 2026-10-23** (§14 as built: Bolt's verify lists, the slots, the union
 MoE, the prefill tail, snapshots and `b70-serve --spec dflash|lookup` - nothing run on a card yet, row 65; `--spec dflash` is
 NOT Bolt's default until D5).
-**Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec26{a,b,c}-*.md` - 26a P0 (the reference, teacher-forced
+**Plans (2026-10-20):** the plan `2026-10-20-spec26{a,b,c}-*.md` (deleted with the model drop; see the repo history) - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
 serving (D0, D2-D5). **Box queue rows 63-65** (spec 25 takes 57-62).
 

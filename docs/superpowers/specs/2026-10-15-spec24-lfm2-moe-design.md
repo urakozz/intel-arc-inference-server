@@ -10,7 +10,7 @@
 
 **Status:** design, 2026-10-15, for operator review. Open decisions are marked **(decide)** and collected in §10.
 Nothing is built.
-**Plans (2026-10-15):** `docs/superpowers/plans/2026-10-15-spec24{a,q,b,c,d,e}-*.md` - 24a facts and CPU reference,
+**Plans (2026-10-15):** the plan `2026-10-15-spec24{a,q,b,c,d,e}-*.md` (deleted with the model drop; see the repo history) - 24a facts and CPU reference,
 24q our AutoRound run, 24b descriptor and loader, 24c decode (the launch-count P0 first), 24d prefill, 24e serving.
 **Box queue rows 48-53** (24a, 24q, 24b, 24c, 24d, 24e in that order; rows 42-47 are spec 23's, Muse-Glimmer, written in
 parallel). Each plan's last task adds its row to `box-validation-queue.md` and its `row N` block to
@@ -571,7 +571,7 @@ export replaces RTN in every real-weight gate when it exists (each row has an `o
 
 ## 12. 24a as built (2026-10-15; the Mac, the tiny models AND the real bf16 weights)
 
-Plan: `docs/superpowers/plans/2026-10-15-spec24a-lfm2moe-facts-and-reference.md`, branch
+Plan: the plan `2026-10-15-spec24a-lfm2moe-facts-and-reference.md` (deleted with the model drop; see the repo history), branch
 `spec24a-lfm2moe-reference`. Facts: the probe doc `probe-lfm2moe` (deleted with the model drop; see the repo history). Box validation: queue row 48 (box CPU
 only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; real weights in a
 40 GB container, 12 threads, under the one-model-job lock) unless marked.
@@ -641,7 +641,7 @@ only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, t
 
 ## 13. 24b as built (2026-10-17; the Mac only - nothing has run on a card)
 
-Plan: `docs/superpowers/plans/2026-10-15-spec24b-lfm2moe-descriptor-loader.md`, branch
+Plan: the plan `2026-10-15-spec24b-lfm2moe-descriptor-loader.md` (deleted with the model drop; see the repo history), branch
 `spec24b-lfm2moe-loader`. Box validation: queue row 50. Every byte figure below is derived from
 `model::lfm2moe()`'s widths (`src/loader/lfm2moe_layout.h`) and cross-checked against §3's table above,
 word for word, by `lfm2moe_repack_test.cc` and `lfm2moe_plan_test.cc` (review fix, M5: this used to claim
@@ -731,7 +731,7 @@ sum of `layer_weight_bytes`'s own per-layer outputs, `CHECK_EQ`'d against an ind
 
 ## 14. 24c as built (2026-10-20; the Mac only - nothing has run on a card, no lfm_* binary has been compiled by ocloc)
 
-Plan: `docs/superpowers/plans/2026-10-15-spec24c-lfm2moe-decode.md`, branch `spec24c-lfm2moe-decode`. Box validation:
+Plan: the plan `2026-10-15-spec24c-lfm2moe-decode.md` (deleted with the model drop; see the repo history), branch `spec24c-lfm2moe-decode`. Box validation:
 queue row 51 (`tools/box_validate/stages.sh` `row 51`). Every count below is derived and asserted by a host test.
 
 - **The list (§4.5), as built** (`runtime/lfm2moe/lfm2moe_capture.{h,cc}`; `runtime::lfm2moe::device_launches`):
@@ -797,7 +797,7 @@ queue row 51 (`tools/box_validate/stages.sh` `row 51`). Every count below is der
 
 ## 15. 24d as built (2026-10-20; the Mac only - nothing has run on a card, no lfm_pf_* binary has been compiled by ocloc)
 
-Plan: `docs/superpowers/plans/2026-10-15-spec24d-lfm2moe-prefill.md`, branch `spec24d-lfm2moe-prefill`. Box
+Plan: the plan `2026-10-15-spec24d-lfm2moe-prefill.md` (deleted with the model drop; see the repo history), branch `spec24d-lfm2moe-prefill`. Box
 validation: queue row 52 (`tools/box_validate/stages.sh` `row 52`). Every count below is derived and asserted by a host
 test or by the walk itself.
 
@@ -868,7 +868,7 @@ test or by the walk itself.
 
 ## 16. 24e as built (2026-10-20; the Mac only - nothing has run on a card)
 
-Plan: `docs/superpowers/plans/2026-10-15-spec24e-lfm2moe-serving.md`, branch `spec24e-lfm2moe-serving`. Box validation:
+Plan: the plan `2026-10-15-spec24e-lfm2moe-serving.md` (deleted with the model drop; see the repo history), branch `spec24e-lfm2moe-serving`. Box validation:
 queue row 53 (`tools/box_validate/stages.sh` `row 53`). Every count below is measured by a host test unless marked.
 
 - **Template and tokenizer.** `chat::Template` renders `chat_template.jinja` (sha256 `ea663864...`) byte for byte as

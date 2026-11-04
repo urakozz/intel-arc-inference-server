@@ -12,7 +12,7 @@
 > - tests: `tests/runtime/muse_dflash_test.cc`, `tests/loader/muse_assistant_test.cc`, `tests/kernels/muse_dflash_names_test.cc`, the Muse form of `tests/kernels/dflash_ref.h` and `tools/oracle/dflash_ref.py`
 
 **Status:** design, 2026-10-15, for operator review. Open decisions are marked **(decide)** (§11). Nothing is
-built. **Plans (2026-10-15):** `docs/superpowers/plans/2026-10-15-spec23{a,b,c,d,e,f}-*.md` - 23a reference, facts
+built. **Plans (2026-10-15):** the plan `2026-10-15-spec23{a,b,c,d,e,f}-*.md` (deleted with the model drop; see the repo history) - 23a reference, facts
 and golden sets; 23b descriptor, loader and synthetic checkpoints; 23c decode; 23d prefill; 23e serving; 23f the
 DFlash drafter (P0 first, then the engine). **Box queue rows 42-47** (one per plan, 23a = 42 ... 23f = 47): rows
 36-40 are reserved by spec 22's plans, row 41 exists, and spec 24 (written in parallel) takes the rows after 47.
@@ -902,7 +902,7 @@ card, the server on the synthetic and the real checkpoint, MG5, the llama-benchy
 
 ## 17. 23f as built (2026-10-16; the Mac - nothing on a card; box queue row 47)
 
-Plan `docs/superpowers/plans/2026-10-15-spec23f-muse-dflash.md`, both parts on ONE branch `spec23f-muse-dflash` (the
+Plan the plan `2026-10-15-spec23f-muse-dflash.md` (deleted with the model drop; see the repo history), both parts on ONE branch `spec23f-muse-dflash` (the
 operator's 2026-10-15 ruling: Part 2 built regardless of P0 - P0 picks the defaults, §8.5). The rulings with their costs
 if wrong are the plan's SDD ledger; the ones that change what §8.4 says are below.
 
