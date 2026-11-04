@@ -14,6 +14,15 @@
 #   tools/box_validate/f32_refs.sh <data tree> split <ornith|k2> <ids> <N> <out stem>
 #       prefill_split_test's references of ids[0, N): f32 and bf16, --lean --dump-kv, no generated rows ->
 #       <out stem>-f32.golden.safetensors and <out stem>-bf16.golden.safetensors
+#   tools/box_validate/f32_refs.sh <data tree> forced-qwen <dir> [<dir>...]
+#       Qwen3.8's spec tests (spec 28 N4 / N6, tests/server/spec_judge.h: mtp_verify_test, mtp_gpu_test and its
+#       twins, the DFlash tests): every Qwen3.8 context of the dirs (keys QWEN_KEYS_RE; a key in two dirs is one
+#       context) through tools/oracle/qwen_forced.py - ONE layer-major f32 forward over the contexts' token trie,
+#       not a run a context (~250 contexts / ~450k ids are ~48k distinct positions) -> <data tree>/
+#       oracle-out-qwen-f32-forced/ (the checkpoint's bf16 head) and oracle-out-qwen-f32-i8head-forced/ (the int8
+#       head: the DFlash tests and mtp_gpu_test --lm-head int8, qwen_forced.py's I8HEAD_RE). Two passes, each under
+#       /tmp/b70-cpu-model.lock: the contexts QWEN_FIRST_RE names first (mtp_verify_test's and dflash_engine_test's:
+#       ~2.4k positions, minutes), then the rest; a killed pass resumes at its layer (the partial dir's checkpoint).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 data="${1:?data tree}" what="${2:?ornith-mtp | forced}"
@@ -53,6 +62,53 @@ case "$what" in
     DTYPE=bf16 tools/box_validate/f32_ref_job.sh "$m" oracle-out-f32-job.partial/split.prompt \
       oracle-out-f32-job.partial/split.none "$stem-bf16.golden.safetensors" --lean --dump-kv || rc=1
     ;;
-  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem>" >&2; exit 2 ;;
+  forced-qwen)
+    shift 2
+    [ $# -gt 0 ] || { echo "f32_refs: forced-qwen <dir> [<dir>...]" >&2; exit 2; }
+    out="$data/oracle-out-qwen-f32-forced" out8="$data/oracle-out-qwen-f32-i8head-forced"
+    part="oracle-out-qwen-forced.partial"   # in the tree: the container sees only the tree (at /ws)
+    keys="${QWEN_KEYS_RE:-^(mtp_verify_qwen3\.8_|mtp_gpu_|dflash_)}"
+    mkdir -p "$part/ctx" "$part/out" "$part/out-i8head" "$out" "$out8"
+    for d in "$@"; do
+      for f in "$d"/*.prompt.ids; do
+        [ -e "$f" ] || { echo "f32_refs: no *.prompt.ids in $d"; rc=1; break; }
+        k=$(basename "$f" .prompt.ids)
+        printf '%s\n' "$k" | grep -Eq "$keys" || continue
+        [ -e "$part/ctx/$k.prompt.ids" ] && continue   # qwen_forced.py checks each key's hash against its ids
+        cp "$f" "$part/ctx/$k.prompt.ids" && cp "${f%.prompt.ids}.force.ids" "$part/ctx/$k.force.ids" || rc=1
+      done
+    done
+    echo "f32_refs: $(ls "$part/ctx" | grep -c '\.prompt\.ids$') Qwen3.8 contexts in $part/ctx"
+    exec 9> /tmp/b70-cpu-model.lock
+    for pass in first rest; do
+      re=""
+      if [ "$pass" = first ]; then
+        re="${QWEN_FIRST_RE-^(mtp_verify|dflash_engine)_}"
+        [ -n "$re" ] || continue
+      fi
+      echo "f32_refs: forced-qwen pass $pass${re:+ ($re)}: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
+      flock 9
+      avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
+      if [ "${avail:-0}" -lt "${F32_REF_MIN_GB:-95}" ]; then
+        echo "SKIP_REASON f32_refs: MemAvailable ${avail} GB < F32_REF_MIN_GB ${F32_REF_MIN_GB:-95} (another job holds the RAM)"
+        exit 77
+      fi
+      { ls "$out"; ls "$out8"; } | sed -n 's/\.golden\.safetensors$//p' > "$part/done.txt"
+      echo "f32_refs: pass $pass, MemAvailable ${avail} GB ($(date '+%F %T')); log $part/run.log"
+      ORACLE_THREADS="${ORACLE_THREADS:-22}" \
+        ORACLE_MODEL="${SNAP_QWEN_CACHE:-models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}" \
+        tools/oracle/run_in_container.sh "python3 tools/oracle/qwen_forced.py run \"\$SNAP\" --ctx /ws/$part/ctx \
+          --out /ws/$part/out --out-i8head /ws/$part/out-i8head --work /ws/$part/work --done /ws/$part/done.txt \
+          ${re:+--match '$re'} >> /ws/$part/run.log 2>&1" ||
+        { echo "f32_refs: pass $pass FAILED"; tail -20 "$part/run.log"; rc=1; }
+      flock -u 9
+      for f in "$part"/out/*.golden.safetensors; do [ -e "$f" ] && mv -f "$f" "$out/"; done
+      for f in "$part"/out-i8head/*.golden.safetensors; do [ -e "$f" ] && mv -f "$f" "$out8/"; done
+      echo "f32_refs: pass $pass done ($(date '+%F %T')): $(ls "$out" | grep -c 'golden') bf16-head and" \
+        "$(ls "$out8" | grep -c 'golden') int8-head judges"
+      [ "$rc" = 0 ] || break
+    done
+    ;;
+  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem> | forced-qwen <dir>..." >&2; exit 2 ;;
 esac
 exit "$rc"
