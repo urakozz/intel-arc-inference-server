@@ -110,16 +110,11 @@ narrative, and the numbered guides cite them where they matter.
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's
   opt-in), the tokenizer (the pre-tokenizer adds `\p{M}`), torch's tie rule, the derived bytes.
-- [probe-muse-glimmer-2026-10-15.md](probe-muse-glimmer-2026-10-15.md) - **model dropped 2026-10-27 (support removed from the engine; kept for the record)** - spec 23a: Muse-Glimmer-30B from its small files, headers and transformers 5.19.0 - the rounding chain (47 citations held to the source), both checkpoints (GPTQ = our int4 g64 sym), tokens / templates (one BOS), the drafter, the tie_last_hidden_states trap.
 - [probe-bolt-2026-10-21.md](probe-bolt-2026-10-21.md) - spec 25a: Nemotron 3.5 Bolt 74B-A9B - the rounding chain
   cited into the remote code (63 anchors), both checkpoints from their headers (the third-party g128 export's 112,940 tensors - served since 2026-10-29: our g64 export -, the BF16
   original's `backbone` names and 74,042,720,768 parameters), signed / subnormal scales, the dt-clamp census (212 of
   5,120 heads), tokens and the template (14 renders in `tests/server/bolt_template_cases.json`), torch's tie order and
   fp32-GEMM row-count dependence, B1's bounds, the bf16 table, and R's fallback state-passing bug past 128 rows.
-- [probe-lfm2moe-2026-10-15.md](probe-lfm2moe-2026-10-15.md) - **model dropped 2026-10-27 (support removed from the engine; kept for the record)** - spec 24a: LFM2.5-24B-A2B (`lfm2_moe`) - the
-  rounding chain cited into transformers 5.19.0 (`grouped_mm`, the torch conv path), the checkpoint from its
-  headers (7,610 tensors, the derived bytes), tokens (`vocab_used` 125017), the template's pythonic calls and
-  renders, torch's tie order (not the lower id), the conv's accumulation (fp32 taps ascending: 0 of 100k rows differ).
 - [probe-eagle3-k2-2026-10-08.md](probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
   **no-go** - the community drafter is undertrained (golden: 0.23 / 0.06 acceptance, below plain decode at
   every K); prompt lookup wins (to 1.68x at 4k). K2 verify costs 1.26x / 1.63x a plain step at M = 2 / 4.

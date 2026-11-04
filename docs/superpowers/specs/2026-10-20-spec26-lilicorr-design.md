@@ -374,7 +374,7 @@ Branch `spec26a-lilicorr-p0`; box queue row 63. Built: `tools/oracle/dflash_ref.
 `probe_draft_cost --shapes bolt-lilicorr` (+ `draft_cost_shapes.h`'s `bolt_lilicorr`), `tools/spec/lilicorr_p0_project.py`, the
 tests `test_dflash_ref.py`'s 13 `test_lilicorr_*` (one on the real checkpoint), `test_dflash_accept.py`'s 5, `test_expert_union.py`,
 `test_lilicorr_p0_project.py`, `lilicorr_cost_names_test`; queue row 63's stages and the data key `lilicorr`; the record
-`docs/probe-lilicorr-2026-10-23.md`. kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
+the probe doc `probe-lilicorr` (deleted with the model drop; see the repo history). kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
 
 **Measured on the Mac** (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; every number printed by the test named): NVFP4's
 16 x 254 finite (code, scale) products exact in bf16 and f16, |W'| in [2^-10, 2688], the 2 NaN scale codes refused naming the

@@ -188,7 +188,7 @@ parser's reference** on complete turns (§6.5).
 ### 3.1 What it is (verified on the headers, 2026-10-15)
 
 **Either Vishva007 repo** (23a, 2026-10-15: one export in two spellings, sampled tensors byte-identical -
-`docs/probe-muse-glimmer-2026-10-15.md`): `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound` at `ad7b9432` (`quant_method`
+the probe doc `probe-muse-glimmer` (deleted with the model drop; see the repo history)): `Vishva007/Muse-Glimmer-30B-W4A16-AutoRound` at `ad7b9432` (`quant_method`
 "auto-round", `packing_format` "auto_round:auto_gptq" - our own checkpoints' spelling -, no `g_idx`, 2268 tensors,
 22,790,907,104 B; **the repo the Mac downloaded and the reference reads**) or the GPTQ spelling below (`g_idx`
 shipped). `g_idx` is optional; when present it must be `i // 64`.
@@ -519,7 +519,7 @@ Spec 19's design (§5 there; plan 19b / 19c as written) at Muse's shapes:
 ### 8.5 P0 verdict (2026-10-16; the Mac, PROVISIONAL - the box's r47.accept / r47.cost decide)
 
 Recorded, not applied (the operator's 2026-10-15 ruling: the engine half is built whatever P0 shows). Numbers:
-`docs/probe-muse-dflash-2026-10-16.md`. The Mac measured teacher-forced acceptance on the only two continuations it has
+the probe doc `probe-muse-dflash` (deleted with the model drop; see the repo history). The Mac measured teacher-forced acceptance on the only two continuations it has
 (23a's `muse_short_code` / `muse_short_prose`, 32 greedy ids each, 18 anchors each) and projected with the DERIVED cost
 table (`tools/spec/muse_p0_project.py`: verify M = 1..4 Qwen3.8's int8-head rows, +0.305 a row to M = 16; the block
 read once - int4 g64 0.18, int8 0.26, bf16 0.43 plain steps):
@@ -606,7 +606,7 @@ as soon as 23a's tap dumps exist; 23f's engine half needs 23c-23e and P0's "go".
 ## 12. 23a as built (2026-10-15; the Mac - nothing on the box yet)
 
 Branch `spec23a-muse-reference` (plan 23a); box queue row 42 holds what the Mac could not run. Facts:
-`docs/probe-muse-glimmer-2026-10-15.md`.
+the probe doc `probe-muse-glimmer` (deleted with the model drop; see the repo history).
 
 - **The version:** transformers **5.19.0** (spec 21a's site beside `agnes-ref-img`, unchanged) loads the tiny model
   `optimum-intel-internal-testing/tiny-random-muse-glimmer` @ `cb70af19` as shipped (`muse_tiny_check.py`: tiny

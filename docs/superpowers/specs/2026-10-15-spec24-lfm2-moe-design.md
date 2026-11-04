@@ -486,7 +486,7 @@ On Kolibri's pattern (spec 20 §11):
 ## 8. Stages
 
 - **24a. Facts and the CPU reference** (Mac, then the box CPU). `lfm2moe_ref.py` (transformers' model layer-streamed with
-  `stream.py`; experts dequantised from our int4 g64 or read bf16), the facts sheet `docs/probe-lfm2moe-<date>.md`,
+  `stream.py`; experts dequantised from our int4 g64 or read bf16), the facts sheet the probe doc `probe-lfm2moe` (deleted with the model drop; see the repo history),
   tiny-model variants (`lfm2moe_make_tiny.py`: the real layer pattern, head_dim 64, non-zero biases, planted ties, int4
   packing), the golden prompts (re-tokenised: short, 4k, 32k, agentic) and the A4 set rendered by LFM2's template. Mac:
   F1. Box CPU (row 48): perplexity, `hfcheck`, the bf16 golden sets, the A4 reference on the bf16 original, the gap
@@ -572,7 +572,7 @@ export replaces RTN in every real-weight gate when it exists (each row has an `o
 ## 12. 24a as built (2026-10-15; the Mac, the tiny models AND the real bf16 weights)
 
 Plan: `docs/superpowers/plans/2026-10-15-spec24a-lfm2moe-facts-and-reference.md`, branch
-`spec24a-lfm2moe-reference`. Facts: `docs/probe-lfm2moe-2026-10-15.md`. Box validation: queue row 48 (box CPU
+`spec24a-lfm2moe-reference`. Facts: the probe doc `probe-lfm2moe` (deleted with the model drop; see the repo history). Box validation: queue row 48 (box CPU
 only). Every number is measured on the Mac (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; real weights in a
 40 GB container, 12 threads, under the one-model-job lock) unless marked.
 
