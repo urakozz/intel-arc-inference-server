@@ -1,15 +1,16 @@
 // probe_vattn_ab - spec 28c's open error (docs/07-open-questions.md §11): attn_verify_dpas against attn_v2 on a REAL
 // DFlash run, the operator's plan of 2026-11-04 step 2 (a direct A/B on the failing input).
 //
-//   probe_vattn_ab <snapshot> <ids file> <n> [--max-len 16384] [--bins a,b,...] [--all]
+//   probe_vattn_ab <snapshot> <ids file> <n> [--max-len 16384] [--bins a,b,...] [--thresh T] [--all]
 //
 // b70-decode --ids <file> --n <n> --prefill --spec dflash's loop (generate_dflash, K = 7), with every verify run
 // TWICE on the same state: forced to DPAS (CaptureOptions::force_attn, the lists recaptured) and then forced to v2 -
 // v2 last, so the KV rows, GDN slots and taps the commit reads are v2's and the run is the plain stream. Per
-// iteration a line: the rows where the two verify argmaxes differ inside the accepted prefix (where the DPAS run's
+// iteration a line (Control and the live GDN slot restored between the two verifies: the list moves pos, row 0 steps the slot in place): the rows where the two verify argmaxes differ inside the accepted prefix (where the DPAS run's
 // stream would leave the plain one) and each row's max |logit difference|.
 //
-// At the first such iteration (every iteration with --all) the verify is analysed layer by layer: the capture's
+// At the first three iterations with a flip or a kept row whose logits differ by more than --thresh (4.0) (every
+// iteration with --all) the verify is analysed layer by layer: the capture's
 // attn_dump (CaptureOptions, test / probe only) holds each FA layer's attn_q / attn_gate / attn_out of both runs, and
 // the engine's KV cache holds v2's keys, so each FA layer's attention is REPLAYED on v2's inputs - the production
 // attn_verify_dpas binary (and every --bins variant: tools/probe/CMakeLists.txt's pvab_* builds of the same source,
@@ -241,6 +242,7 @@ int main(int argc, char** argv) {
   const uint32_t n = uint32_t(std::stoul(argv[3]));
   uint32_t max_len = 16384;
   bool all = false;
+  double thresh = 4.0;   // analyse an iteration whose kept rows differ by more than this (logits), at most 3
   std::vector<std::string> bins = {kernels::attn_verify_dpas_variant(kM, kTgt, false)};
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
@@ -250,6 +252,8 @@ int main(int argc, char** argv) {
       std::stringstream s(argv[++i]);
       for (std::string t; std::getline(s, t, ',');)
         if (!t.empty()) bins.push_back(t);
+    } else if (a == "--thresh" && i + 1 < argc) {
+      thresh = std::stod(argv[++i]);
     } else if (a == "--all") {
       all = true;
     } else {
@@ -279,10 +283,11 @@ int main(int argc, char** argv) {
   runtime::CaptureOptions ov = runtime::attn_forced(runtime::VerifyAttnForce::V2);
   ov.attn_dump = dump_v.ptr();
   Replay rp(ctx);
+  const size_t gdn_bytes = eng.buffers().gdn_state.size();
+  l0::Mem gdn_keep(ctx, l0::MemKind::Device, gdn_bytes);
   std::vector<float> ld(size_t(kM) * kV), lv(size_t(kM) * kV);
   std::vector<uint32_t> stream;
-  uint32_t iter = 0, flips = 0;
-  bool analysed = false;
+  uint32_t iter = 0, flips = 0, analysed = 0;
   runtime::TapDrafter& d = *eng.tap_drafter();
   while (stream.size() < n) {
     const uint32_t k = std::min(da.max_k, eng.max_verify_k());
@@ -297,10 +302,19 @@ int main(int argc, char** argv) {
     }
     const runtime::dflash::DFlashDraftOut& o = d.draft(eng, k, 0.0f, 0);
     const std::vector<uint32_t> drafts(o.ids, o.ids + k);
+    // verify row 0 steps the LIVE GDN slot in place (gdn_step.cl SPEC_SLOTS), so the second verify needs it back
+    const uint32_t live = eng.buffers().control.as<runtime::Control>()->gdn_live;
+    void* slot = live == 0 ? eng.buffers().gdn_state.ptr()
+                           : static_cast<uint8_t*>(eng.drafter_slots()->ptr()) + size_t(live - 1) * gdn_bytes;
+    rp.imm.copy(gdn_keep.ptr(), slot, gdn_bytes);
+    runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
+    const runtime::Control ctl_keep = *ctl;   // the list moves pos on the device
     eng.recapture_verify(od);
     eng.verify(k);
     const std::vector<uint32_t> idd(eng.verify_ids(), eng.verify_ids() + k + 1);
     rp.imm.copy(ld.data(), eng.verify_logits_device(), size_t(k + 1) * kV * 4);
+    rp.imm.copy(slot, gdn_keep.ptr(), gdn_bytes);
+    *ctl = ctl_keep;
     eng.recapture_verify(ov);
     eng.verify(k);
     const std::vector<uint32_t> idv(eng.verify_ids(), eng.verify_ids() + k + 1);
@@ -317,10 +331,12 @@ int main(int argc, char** argv) {
         break;
       }
     std::printf("iter %3u pos %4u gen %3zu k %u accept v2 %u dpas %u |", iter, pos, stream.size(), k, j, jd);
+    double worst_kept = 0;   // the largest |logit difference| over the rows the stream keeps (0 .. j)
     for (uint32_t r = 0; r <= k; ++r) {
       double mx = 0;
       for (uint32_t t = 0; t < kV; ++t)
         mx = std::max(mx, double(std::fabs(ld[size_t(r) * kV + t] - lv[size_t(r) * kV + t])));
+      if (r <= j) worst_kept = std::max(worst_kept, mx);
       std::printf(" %.3f%s", mx, idd[r] != idv[r] ? "*" : "");
     }
     std::printf("\n");
@@ -337,14 +353,14 @@ int main(int argc, char** argv) {
       for (uint32_t t = 0; t < k; ++t) std::printf(" %u", drafts[t]);
       std::printf("\n");
     }
-    if ((first >= 0 && !analysed) || all) {
+    if (((first >= 0 || worst_kept > thresh) && analysed < 3) || all) {
       Dump hd, hv;
       hd.b.resize(dump_d.size());
       hv.b.resize(dump_v.size());
       rp.imm.copy(hd.b.data(), dump_d.ptr(), hd.b.size());
       rp.imm.copy(hv.b.data(), dump_v.ptr(), hv.b.size());
       analyse(eng, rp, hd, hv, pos, k + 1, n_fa, bins);
-      analysed = analysed || first >= 0;
+      ++analysed;
     }
     stream.push_back(x);
     for (uint32_t i = 0; i < j; ++i) stream.push_back(drafts[i]);

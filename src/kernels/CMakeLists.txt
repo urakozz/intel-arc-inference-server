@@ -713,8 +713,10 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   set(VDPAS_CL ${CMAKE_CURRENT_SOURCE_DIR}/attn_verify_dpas.cl)
   # Plan 28c Task 4's kept settings (docs/probes/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
   # 256 GRF for both KV forms - the fastest passing N1 / N2 at M = 8, depth 32768 (QSPLIT=0 fails N1 at int8).
-  set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
-  set(VDPAS_LEVERS_KV8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1)
+  # PSPLIT=1 since 2026-11-04 (P as bf16 hi + lo): P in bf16 alone moved real verify rows off the f32 top
+  # (attn_verify_dpas.cl's header, docs/07-open-questions.md §11).
+  set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
+  set(VDPAS_LEVERS_KV8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
   set(VDPAS_OPTIONS -cl-intel-256-GRF-per-thread)
   set(VDPAS_OPTIONS_KV8 -cl-intel-256-GRF-per-thread)
   set(_vdpas_m 2 3 4)
