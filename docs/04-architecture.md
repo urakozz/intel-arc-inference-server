@@ -36,6 +36,25 @@ So the first product was not a faster GEMM. It was a decode step that issues
 step is now inside the GPU fence and the host spends 97 us per token. What
 remains is kernel efficiency, which is a different problem (doc 05).
 
+## More than one model
+
+The layout below is Qwen3.8's. Every other family has its own engine and descriptor on the same
+foundations (Level Zero lists, our own OpenCL C, the loader, the server): Agnes (spec 14, the same
+math with 72 layers and a parallel feed-forward), Ornith (spec 15, a mixture-of-experts, MoE, where a
+router picks a few expert networks per token), K2-Horizon (spec 18, MoE with routed value-expert
+attention), Kolibri-1 (spec 20, Aleph Alpha's MoE with sliding-window layers), Nemotron 3.5 Bolt (spec 25,
+Mamba-2 state-space blocks plus attention plus latent MoE) and Qwen3.8-Flash-Next (spec 21, in progress:
+the whole model needs an expert-offload tier). The model is chosen from the checkpoint's `config.json`.
+LFM2.5, Muse and LiLiCorr were dropped on 2026-10-27; Flint (spec 27) and Nanbeige (spec 29) are parked.
+Per-model status and commands: [18-running-models.md](18-running-models.md).
+
+Two cross-cutting pieces sit on top of the decode and prefill paths. **Pipeline parallel**
+(`--pp 2`, spec 16) splits a model's layers across both cards, so each holds about half and the
+context can be longer; the prefix cache and the MTP head work across the split. **Speculative decoding**
+(`--spec mtp|lookup|dflash|dflash-lookup`, specs 8, 19, 19e, 19f) checks several guessed tokens in one
+verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
+int8 linears, doc 17) is opt-in (operator 2026-10-27).
+
 ## Component layout
 
 ```
@@ -183,8 +202,7 @@ top wins:
 
 1. **`--device N`** - selects GPU `N`.
 2. **`ONEAPI_DEVICE_SELECTOR=level_zero:N`** - the default when the flag is
-   absent. The SYCL runtime honours it natively; the raw Level Zero path parses
-   it itself, because Level Zero does not read it.
+   absent. Level Zero does not read it, so the engine parses it itself.
 3. **`ZE_AFFINITY_MASK`** - a Level Zero *driver*-level filter underneath both:
    it restricts which devices are enumerated at all. We respect it and never set
    it. Note that under a mask, `--device` and selector indices refer to the
@@ -213,7 +231,10 @@ kernel.
 Two families, dispatched on `M`, deliberately not one kernel pretending to serve
 both.
 
-**Decode** (`src/kernels/`), all bound by `capture.cc` at fixed `M = 1`:
+**Decode** (`src/kernels/`), all bound by `capture.cc` at fixed `M`: 1 for a plain step, 2 to 8 for a
+speculative verify list (`M` = the rows checked at once), 16 for the drafter's blocks. The table is the `M = 1`
+list; since spec 28b every list at `M >= 2` replaces `gemv` / `gemv_i8w` by the small-batch DPAS GEMMs
+`gemm_sm` / `gemm_sm_i8w` (doc 12), which read each weight once for all rows:
 
 | Kernel | Notes |
 |--------|-------|
@@ -279,6 +300,10 @@ bar registered before the measurement, so it ships on: any request with
 `temperature > 0` is sampled. Greedy is never slowed, because the readback only
 runs when a request asks for sampling.
 
+The scheduler for batching several requests in one decode step (spec 13, `src/server/scheduler.h`) exists
+and is tested against a host mock, but the engine side (spec 13b: per-slot state and one captured list per
+batch size) is not built, so the server still runs one sequence at a time.
+
 Deferring batching is not a shortcut. It isolates the variable being tested,
 which is per-token host and kernel cost, and keeps the first milestone
 reachable.
@@ -287,7 +312,7 @@ reachable.
 
 Spec 7 ([superpowers/specs/2026-09-27-spec7-prefix-caching-design.md](superpowers/specs/2026-09-27-spec7-prefix-caching-design.md)):
 one resident session on the card and a write-through store in pinned host RAM
-(`--prefix-cache-gb`, default 32, `0` = off). The GDN state cannot be rewound, so
+(`--prefix-cache-gb`, default `auto`: at most 32 GiB, sized from the machine's RAM; `0` = off). The GDN state cannot be rewound, so
 reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
 blocks of 2048 positions and state snapshots (at every block end, at every prompt's
 end, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
