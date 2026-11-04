@@ -179,3 +179,18 @@ weights. Record the image beside each set.
 - **A consumer NVMe can drop out under APST** (autonomous power state
   transitions). `nvme_core.default_ps_max_latency_us=0` on the kernel command line
   prevents it. If the box loses its disk after a kernel update, check that first.
+
+## After a reboot
+
+The model cache is partly bind-mounted from the USB disk (BUFFALO, exFAT: it cannot hold symlinks), and the 500 GB disk
+(HDD500GB, ext4) carries Flash-Next's 49 GB int8 PLE file behind the data tree's `oracle-out-q4exp-ple-int8` link.
+Neither the binds nor the 500 GB disk's mount survive a reboot, and nothing says so: the stages that need those files
+SKIP as "missing data" (2026-11-04, the first reboot into Linux 7.4). After every reboot, before any validation run:
+
+```
+udisksctl mount -b "$(lsblk -no PATH,LABEL | awk '$2=="HDD500GB"{print $1}')"
+bash /run/media/urakozz/BUFFALO/hf-hub/link.sh            # asks for sudo once; --status lists what is linked
+```
+
+A stage run checks its data once, at launch (`have.env`), so a run launched before the relink needs a fresh launch.
+Device names move between boots (the USB disk was sda2, then sdb2), so mount by label, never by `/dev/sdX`.
