@@ -45,6 +45,7 @@ def contexts():
         "mtp_verify_e": (TD.seq(30, 14), TD.seq(5, 15)),                      # another root
         "dflash_lookup_gpu_int8_c": (base[:70], base[70:140]),                # = c's ids under another key
         "mtp_gpu_bf16_f": (base[:1], base[1:6]),                              # a one-id prompt
+        "dflash_gpu_int8_g": (base[:60], base[60:140]),                       # c's ids split 10 earlier
     }
 
 
@@ -134,6 +135,8 @@ def test_run_end_to_end():
     c1 = os.path.join(out8, [k for k in ctx if k.startswith("dflash_gpu_int8_c")][0] + ".golden.safetensors")
     c2 = os.path.join(out8, [k for k in ctx if k.startswith("dflash_lookup")][0] + ".golden.safetensors")
     assert os.stat(c1).st_ino == os.stat(c2).st_ino, "one context's ids under two keys: one file"
+    c3 = os.path.join(out8, [k for k in ctx if k.startswith("dflash_gpu_int8_g")][0] + ".golden.safetensors")
+    assert os.stat(c1).st_ino != os.stat(c3).st_ino, "the same ids at another prompt length: another file"
     assert not os.path.exists(os.path.join(work, "hidden.pt")), "the checkpoint is removed once done"
     # a second run finds every judge and does nothing
     QF.main()

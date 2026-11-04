@@ -26,7 +26,8 @@ one-sequence forward only in summation order (test_qwen_forced.py checks it agai
 
 Resumable: the hidden state is checkpointed after every layer in --work (a killed run restarts at the layer it was
 on, for the same set of contexts); keys listed in --done (one per line) or already in --out are skipped. Contexts
-with the same ids and head share one file (a hard link). Run in the oracle container (run_in_container.sh) under
+with the same prompt, forced ids and head share one file (a hard link; the same ids split at another prompt length
+are another file: their rows differ). Run in the oracle container (run_in_container.sh) under
 /tmp/b70-cpu-model.lock - tools/box_validate/f32_refs.sh forced-qwen does both.
 """
 import os
@@ -184,10 +185,10 @@ def plan(ctx, i8head_re=I8HEAD_RE):
 
 def describe(trie, jobs, vocab=248320):
     raw = sum(len(j["seq"]) for j in jobs.values())
-    uniq = {(j["seq"], j["form"]) for j in jobs.values()}
+    uniq = {(j["n_prompt"], j["seq"], j["form"]) for j in jobs.values()}
     rows = {}
     for j in jobs.values():
-        rows.setdefault((j["seq"], j["form"]), len(j["rows"]))
+        rows.setdefault((j["n_prompt"], j["seq"], j["form"]), len(j["rows"]))
     nrow = sum(rows.values())
     forms = {f: sum(1 for j in jobs.values() if j["form"] == f) for f in ("bf16", "int8")}
     return (f"{len(jobs)} contexts ({forms['bf16']} bf16 head, {forms['int8']} int8 head; {len(uniq)} distinct "
@@ -407,7 +408,7 @@ def write_outputs(final, jobs, w_bf16, outs, meta, log=print):
             for k in blk:
                 j = jobs[k]
                 path = os.path.join(outs[form], k + ".golden.safetensors")
-                same = written.get((j["seq"], form))
+                same = written.get((j["n_prompt"], j["seq"], form))
                 if same:
                     if os.path.exists(path):
                         os.remove(path)
@@ -418,7 +419,7 @@ def write_outputs(final, jobs, w_bf16, outs, meta, log=print):
                 save_file({"logits": rows, "tokens": torch.tensor(j["force"], dtype=torch.int32)}, path + ".tmp",
                           metadata=md)
                 os.replace(path + ".tmp", path)
-                written[(j["seq"], form)] = path
+                written[(j["n_prompt"], j["seq"], form)] = path
                 vu = int(meta["vocab_used"])
                 arg = rows[:-1, :vu].argmax(-1)
                 agree = (arg == torch.tensor(j["force"])).float().mean().item() if j["force"] else 1.0
