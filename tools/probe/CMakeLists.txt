@@ -855,7 +855,7 @@ foreach(tag IN LISTS PVD_TAGS)
       endif()
       add_ocloc_kernel(pvd_${tag}_M${MM}${_sfx} SOURCE ${PVD_CL}
                        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=${_kt} PACK_H=${_ph} KS=${_ks}
-                               DSPLIT=${_dsplit} QSPLIT=${_q} KV8=${KV}
+                               DSPLIT=${_dsplit} QSPLIT=${_q} PSPLIT=0 KV8=${KV}
                        ${_opts})
       list(APPEND PVD_TARGETS kernel_pvd_${tag}_M${MM}${_sfx})
     endforeach()
@@ -878,23 +878,28 @@ get_property(PVD_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PR
 add_dependencies(probe_verify_attn pvd_kernels ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
 
 # --- probe_vattn_ab: spec 28c's open error (docs/07-open-questions.md §11), attn_verify_dpas against v2 on a real
-# DFlash run - every verify twice (DPAS, then v2), the first flipping iteration replayed layer by layer on v2's inputs
+# DFlash run - every verify twice (DPAS, then v2), the flagged iterations replayed layer by layer on v2's inputs
 # (CaptureOptions::attn_dump) against fp64. `pvab_<arm>` are attn_verify_dpas.cl at the production bf16 lever line, M = 8,
-# built differently for the compiler A/B (build-time only; no production binary binds them):
-#   G256  the production command line (a control: bitwise the production binary's results)
-#   G128  without -cl-intel-256-GRF-per-thread (no spill)
-#   O0    -cl-opt-disable
-#   EAGER the scalar walk (EAGER=1: same blocks, tiles, masks, P rounding and merge order, no DPAS / sub-groups)
+# built differently for the compiler / precision A/B (build-time only; no production binary binds them):
+#   P0_G256  P in bf16 alone (PSPLIT=0, the kernel before 2026-11-04), the production command line
+#   P0_G128  the same without -cl-intel-256-GRF-per-thread (no spill)
+#   P0_O0    the same with -cl-opt-disable
+#   P0_EAGER the scalar walk (EAGER=1: same blocks, tiles, masks, P rounding and merge order, no DPAS / sub-groups)
+#   P1_EAGER the scalar walk at PSPLIT=1 (the production line's P as hi + lo)
+# Pass them with --bins (the production binary is always the first arm).
 if(B70_MTP AND B70_VERIFY_M8 AND B70_VERIFY_DPAS)
   set(PVAB_DEFS CTRL_POS=0 CTRL_NACT=1 M=8 TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 KV8=0)
-  add_ocloc_kernel(pvab_G256 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} OPTIONS -cl-intel-256-GRF-per-thread)
-  add_ocloc_kernel(pvab_G128 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS})
-  add_ocloc_kernel(pvab_O0 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} OPTIONS -cl-intel-256-GRF-per-thread -cl-opt-disable)
-  add_ocloc_kernel(pvab_EAGER SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} EAGER=1)
+  add_ocloc_kernel(pvab_P0_G256 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} PSPLIT=0 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pvab_P0_G128 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} PSPLIT=0)
+  add_ocloc_kernel(pvab_P0_O0 SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} PSPLIT=0
+                   OPTIONS -cl-intel-256-GRF-per-thread -cl-opt-disable)
+  add_ocloc_kernel(pvab_P0_EAGER SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} PSPLIT=0 EAGER=1)
+  add_ocloc_kernel(pvab_P1_EAGER SOURCE ${PVD_CL} DEFINES ${PVAB_DEFS} PSPLIT=1 EAGER=1)
+  set(PVAB_ARMS P0_G256 P0_G128 P0_O0 P0_EAGER P1_EAGER)
+  list(TRANSFORM PVAB_ARMS PREPEND kernel_pvab_)
   add_executable(probe_vattn_ab probe_vattn_ab.cc)
   target_include_directories(probe_vattn_ab PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(probe_vattn_ab PRIVATE b70_runtime b70_dflash_runtime b70_loader b70_model b70_l0 b70_prefill_host)
   b70_target_kernel_dir(probe_vattn_ab)
-  add_dependencies(probe_vattn_ab kernel_pvab_G256 kernel_pvab_G128 kernel_pvab_O0 kernel_pvab_EAGER
-                   ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
+  add_dependencies(probe_vattn_ab ${PVAB_ARMS} ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
 endif()

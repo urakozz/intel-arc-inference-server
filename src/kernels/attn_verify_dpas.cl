@@ -46,7 +46,13 @@
 //     v2's waves: exp(-INF - -INF) is the only NaN); else corr = exp(m - mnew), p = exp(s - mnew);
 //     sm = sm corr + sum p (fp32 p), O = O corr + P V with P = rne_bf16(p) (KV8: rne_bf16(p v_scale))
 //     as the DPAS A operand - S's layout, so P goes to PV with no data movement; V by the
-//     VNNI-transform 2D read (KV8: the 8-bit transform read, key pairs widened to exact bf16).
+//     VNNI-transform 2D read (KV8: the 8-bit transform read, key pairs widened to exact bf16);
+//   PSPLIT = 1: P = hi + lo like q's (QSPLIT), two DPAS per key atom pair (hi first) - ~16 significant
+//     bits of p; PSPLIT = 0: hi alone. Why 1 ships (2026-11-04, docs/07-open-questions.md §11): P's
+//     bf16 rounding (2^-9 a weight) is not averaged away on real heads - their blocks' P V partly
+//     cancel in the merge, so a row's error grows to 1 - cos ~2e-5 against fp64 (v2: ~1e-8), and over
+//     16 FA layers that moved a DFlash verify row's logits by up to 9 and its argmax off the f32 top
+//     (t6_usage-loader, position 103). Random-data tests (cos ~0.99999 either way) cannot see it.
 // The KS slices of a row block merge in SLM in slice order 0, 1, ..., KS - 1 (attn_reduce_v2's
 // formulas: nmx = max; a = exp(m_a - nmx), b = exp(m_b - nmx); sm = fma(sm_a, a, sm_b b),
 // acc = fma(acc_a, a, acc_b b); both -INF: unchanged), the last slice writing the partial.
@@ -59,7 +65,7 @@
 // its state bit for bit (corr = exp(0) = 1, p = 0, 0 x V = 0; or the whole-skip above); a DPAS output
 // row depends only on its A row; the row max and sum are per row (one component of the sub-group
 // reductions). So nothing in a row's result depends on M, its slot, or the other rows - PROVIDED one
-// lever setting (KT, KS, DSPLIT, QSPLIT, GRF) serves every M of a KV form (Review Focus 2; one CMake
+// lever setting (KT, KS, DSPLIT, QSPLIT, PSPLIT, GRF) serves every M of a KV form (Review Focus 2; one CMake
 // line per form). PACK changes a row's slot only. Checked bitwise on the card, not assumed.
 //
 // ---------------------------------------------------------------------------------------------
@@ -71,6 +77,7 @@
 //   KS      1 | 2 | 4 | 8      key slices per work-group
 //   DSPLIT  256 | 128          output dims per sub-group
 //   QSPLIT  0 | 1
+//   PSPLIT  0 | 1              P in bf16 (0) or as hi + lo (1, the production line)
 //   KV8     0 | 1
 //   EAGER   1: the eager build (the retired Mac runner used it) - plain loads, no sub-group
 //           function at all: one work-item per (q head, row) runs the same walk (blocks, tiles,
@@ -98,8 +105,9 @@
 #ifndef TGT
 #error "attn_verify_dpas: TGT must be defined (runtime::DecodeScratch::kAttnV2Blocks)"
 #endif
-#if !defined(KT) || !defined(PACK_H) || !defined(KS) || !defined(DSPLIT) || !defined(QSPLIT) || !defined(KV8)
-#error "attn_verify_dpas: KT, PACK_H, KS, DSPLIT, QSPLIT and KV8 must all be defined"
+#if !defined(KT) || !defined(PACK_H) || !defined(KS) || !defined(DSPLIT) || !defined(QSPLIT) || !defined(PSPLIT) || \
+    !defined(KV8)
+#error "attn_verify_dpas: KT, PACK_H, KS, DSPLIT, QSPLIT, PSPLIT and KV8 must all be defined"
 #endif
 #ifndef EAGER
 #define EAGER 0
@@ -258,7 +266,7 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
       for (uint d = 0; d < HD; ++d) racc[d] = 0.0f;
       for (uint i = k; i < ntile; i += KS) {
         const uint t0 = bstart + i * KT;
-        float sc[KT], pr16[KT];
+        float sc[KT], pr16[KT], prl[KT];   // P's bf16 hi (and lo at PSPLIT)
         float tmax = -INFINITY;
         for (uint t = 0; t < KT; ++t) {
           const uint key = t0 + t;
@@ -295,10 +303,12 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #if KV8
           const uint key = t0 + t;
           const float sv = key < end ? kv8_f16f(v_scale[(size_t)key * KV_HEADS + j]) : 0.0f;
-          pr16[t] = bf16f(rne_bf16(p * sv));
+          const float pv = p * sv;
 #else
-          pr16[t] = bf16f(rne_bf16(p));
+          const float pv = p;
 #endif
+          pr16[t] = bf16f(rne_bf16(pv));
+          prl[t] = PSPLIT ? bf16f(rne_bf16(pv - pr16[t])) : 0.0f;
         }
         rsm = rsm * corr + psum;
         rm = mnew;
@@ -309,6 +319,13 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
             const float vv = key < end ? V_AT(key, d) : 0.0f;
             o = fma(pr16[t], vv, o);
           }
+#if PSPLIT
+          for (uint t = 0; t < KT; ++t) {
+            const uint key = t0 + t;
+            const float vv = key < end ? V_AT(key, d) : 0.0f;
+            o = fma(prl[t], vv, o);
+          }
+#endif
           racc[d] = o;
         }
       }
@@ -480,6 +497,9 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
       const float8 corr = select((float8)(1.0f), exp(mrow - mnew), seen);
       float8 psum = (float8)(0.0f);
       short8 pa[NKA];
+#if PSPLIT
+      short8 pl[NKA];                           // P's lo half (header, PSPLIT)
+#endif
 #pragma unroll
       for (uint b = 0; b < NKA; ++b) {
         const float8 p = select((float8)(0.0f), exp(sacc[b] - mnew), seen);
@@ -489,7 +509,16 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
 #else
         const float8 pv = p;
 #endif
+#if PSPLIT
+#define CV(r)                                                   \
+  {                                                             \
+    const ushort hi = rne_bf16(pv.s##r);                        \
+    pa[b].s##r = as_short(hi);                                  \
+    pl[b].s##r = as_short(rne_bf16(pv.s##r - bf16f(hi)));       \
+  }
+#else
 #define CV(r) pa[b].s##r = as_short(rne_bf16(pv.s##r));
+#endif
         FOR8(CV)
 #undef CV
       }
@@ -536,6 +565,14 @@ __kernel void ENTRY(__global const uint* restrict ctrl, __global const float* re
             for (uint kh = 0; kh < 2u; ++kh)
               o[dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(
                   pa[b + kh], as_int8(vload8(0, vb + c * 16u + 8u * kh)), o[dd + c]);
+#if PSPLIT
+#pragma unroll
+          for (uint c = 0; c < 2u; ++c)
+#pragma unroll
+            for (uint kh = 0; kh < 2u; ++kh)
+              o[dd + c] = intel_sub_group_bf16_bf16_matrix_mad_k16(
+                  pl[b + kh], as_int8(vload8(0, vb + c * 16u + 8u * kh)), o[dd + c]);
+#endif
         }
     }
   }
