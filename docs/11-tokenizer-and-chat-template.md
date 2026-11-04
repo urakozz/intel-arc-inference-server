@@ -170,8 +170,19 @@ a template uses a construct minja lacks, `openvino.genai` keeps a per-model
 fallback map - copy the idea, not the file, which is what the hash-gated
 fallback above is.
 
-Tool-call *parsing* of model output is not implemented. Template *rendering* of
-tool definitions in the prompt is, and has parity vectors.
+Template *rendering* of tool definitions in the prompt has parity vectors. Tool-call
+*parsing* of the model's output is in the server, one parser per family (`src/server/toolcall*.cc`:
+Qwen's XML, K2's three formats, Kolibri's and Bolt's own).
+
+**Key order is part of the prompt.** A chat request is parsed with `nlohmann::ordered_json`, not
+`nlohmann::json` (whose object is a sorted map), so the template sees the client's `messages`,
+`tools` and tool-call arguments in the order the client wrote them, and a parsed call keeps the
+model's argument order. The template prints tools with `tojson` and iterates arguments with
+`| items`; with sorted keys the prompt ids differed from transformers' and vLLM's render of the
+same request (0 of 36 agentic prompts matched), and a client echoing a call back re-rendered it in
+another order than the model had written, so the next turn diverged inside the cached span. With
+ordered keys `prompt_order_test` matches 36 of 36 agentic and 12 of 12 edit / copy prompts
+against the reference tokenizer's ids (2026-11-03).
 
 **Agnes 3.0 Flash (spec 14, 2026-10-03).** Its `chat_template.jinja` is byte-identical
 to Qwen3.8's (the same sha256 above), so it takes the same fallback, renders the same
