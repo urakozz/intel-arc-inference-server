@@ -112,14 +112,14 @@ int main(int argc, char** argv) {
   CHECK_EQ(rq::draft_launches(eg, true), size_t(28));
   CHECK_EQ(rq::draft_launches(eg, false), size_t(26));
   CHECK_EQ(rq::mtp_prefill_launches(0, 1), size_t(1));
-  CHECK_EQ(rq::mtp_prefill_launches(0, 2048), size_t(27));
-  CHECK_EQ(rq::mtp_prefill_launches(2048, 2048), size_t(27));
+  CHECK_EQ(rq::mtp_prefill_launches(0, 2048), size_t(26));
+  CHECK_EQ(rq::mtp_prefill_launches(2048, 2048), size_t(26));
   CHECK_EQ(rq::mtp_prefill_rows(0, 2048), 2047u);
   CHECK_EQ(rq::mtp_prefill_rows(2048, 7), 7u);
   CHECK_EQ(rq::prefill_chunk_launches(d4, model::Q4Placement::one(d4), 0, 2048, false, true),
-           rq::prefill_chunk_launches(d4, model::Q4Placement::one(d4), 0, 2048) + 27);
+           rq::prefill_chunk_launches(d4, model::Q4Placement::one(d4), 0, 2048) + 26);
   std::printf("--layers 4: decode 75, verify at M = 1 / 4: %zu / %zu; a draft step 29 / 27 (step 0 / later, flash); "
-              "the prefill's head pass 27 a chunk\n", rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl, cp),
+              "the prefill's head pass 26 a chunk\n", rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl, cp),
               rq::verify_launches(d4, model::Q4Placement::one(d4), 4, fl, cp));
   // an iteration at K drafts: K draft steps + the verify at M = K + 1 (K = 3 at 48 layers, one card, flash)
   const size_t it3 = rq::draft_launches(fl, true) + 2 * rq::draft_launches(fl, false) + rq::verify_launches(full, one, 4, fl, cp);

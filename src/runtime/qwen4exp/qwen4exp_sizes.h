@@ -321,7 +321,7 @@ size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows
 //   the prefill's head pass on the last device a chunk (Review Focus 4): combine _Y_NN (the chunk's rows of R), then
 //     over the head's rows (pos - 1 .. pos + C - 2; C - 1 rows from pos 0): q4_mtp_norm _PF, fc_embedding and
 //     fc_hidden as bf16 slabs + pf_gemm (3 slabs each), q4_mtp_fuse, the attn side's gated residual (4), the k||v slab
-//     of q||gate||k||v (one slab + pf_gemm), the indexer (2), pf_attn_prep_q16, q4_qsa_prep _PF, q4_qsa_ring: 1 + 26
+//     of q||gate||k||v (one slab + pf_gemm), the indexer (2), pf_attn_prep_q16, q4_qsa_prep _PF, q4_qsa_ring: 1 + 25
 size_t verify_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t M,
                               Q4Attn a, PpHandoff h);
 size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a, PpHandoff h);
