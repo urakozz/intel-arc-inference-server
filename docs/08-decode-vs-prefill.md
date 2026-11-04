@@ -85,7 +85,8 @@ OpenVINO's GEMV is hard-gated at `M == 1`, so the moment speculative decoding
 produces two or more tokens it drops onto a general path. vLLM's tile only
 becomes fully utilised *at* `M = 8`.
 
-**This is an opportunity nobody has taken, including us.** Weights dominate
+**This was an opportunity nobody had taken; since 2026-11-01 this engine has (spec 28b, `gemm_sm`,
+doc 12).** Weights dominate
 decode traffic and activations are negligible, so a **weight-stationary kernel
 parameterised on `M ∈ [1,8]`** would amortise the entire weight read across `M`
 tokens: stream each weight tile once, multiply it into `M` activation vectors
@@ -93,8 +94,12 @@ held in registers. It would compound with speculative decoding rather than
 competing with it, because speculation's whole cost today is paying full weight
 traffic on every draft step.
 
-This engine does not build it. There is no speculative decoding here, so `M` is
-always 1 on the decode path, and the kernel family is compiled for that.
+The engine now has speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup),
+so `M` is 2..8 on every verify step. Those lists run a small-batch DPAS GEMM that streams each weight
+tile once and multiplies it into all `M` rows (`gemm_sm`, spec 28b): verify(8) went from 3.17 plain
+steps to 1.57 (busy box, to be re-checked quiet; BENCHMARKS). `M = 1` keeps the GEMV, bitwise as
+before. Weight traffic was the reason, and the numbers agree with it: the speculation's cost is no
+longer a full weight read per guessed row.
 
 ## Design rules that follow
 
@@ -145,21 +150,23 @@ error from outliers. Docs [01](01-hardware.md), [02](02-formats.md) and
 What did work was less exotic and more structural: **stay at W4A16 and own the
 whole walk.** Dequantise int4 into bf16 column slabs, multiply with our own DPAS
 GEMM written for this card, and interleave both on one in-order Level Zero list
-so a prefill chunk makes no SYCL call and never waits on the host. That is worth
-6.76% over calling sycl-tla's GEMM from a SYCL queue, and it is what puts
-prefill ahead of vLLM.
+so a prefill chunk makes no SYCL call and never waits on the host. That was worth
+6.76% over calling sycl-tla's GEMM from a SYCL queue (that backend was removed on 2026-10-27), and it
+is what puts prefill ahead of vLLM. The bf16 walk is the default. A second, opt-in prefill
+(`--prefill-backend l0-int8`) computes the linears in int8 after a Hadamard rotation of the
+activations and weights and is faster still ([17-int8-prefill.md](17-int8-prefill.md)); it is not the
+rejected W4A8 mixed instruction above.
 
 ## Summary: where each engine wins
 
 | | vLLM | OpenVINO | This project |
 |---|---|---|---|
 | Decode `M=1` | 8-row tile, no split-K | dedicated GEMV | GEMV with per-shape split-K |
-| Decode `M=2..8` | tile partly used | falls off to oneDNN | **not built - the standing opportunity** |
+| Decode `M=2..8` | tile partly used | falls off to oneDNN | small-batch DPAS GEMM `gemm_sm`, weights read once for all rows (spec 28b) |
 | Prefill | W4A16 XMX tiles | W4A16 via oneDNN | W4A16, own DPAS GEMM, zero host waits |
 
-Prefill is ahead, decode is about 5% behind, and the `M ∈ [1,8]` kernel that
-motivated the original thesis remains unwritten on every engine on this
-silicon.
+Prefill is ahead, decode `M=1` is about 5% behind, and the `M ∈ [1,8]` kernel that
+motivated the original thesis now exists here, for `M >= 2`.
 
 ## Still open
 

@@ -5,6 +5,12 @@ figure is labelled **measured**, **derived** (arithmetic on measured inputs,
 with the inputs shown) or **estimated**. Every measured row and its grade lives
 in [BENCHMARKS.md](BENCHMARKS.md); this document is the reasoning over them.
 
+The measurements here were taken before the 2026-11-04 toolchain upgrade (compute runtime
+26.35 + IGC 2.41.5 then; 26.40 + 2.42.6 now, doc 10). The ceilings are properties of the card and
+stand; every timing is to be re-taken on a quiet box (open-work, "After the table is empty").
+Speculative decoding (MTP, DFlash, lookup) changes the decode arithmetic - one step checks M rows
+for the weight traffic of about 1.04 to 1.6 plain steps - and its rows are in BENCHMARKS, not here.
+
 ## The two ceilings
 
 Decode and prefill are bound by different things, which is the whole reason

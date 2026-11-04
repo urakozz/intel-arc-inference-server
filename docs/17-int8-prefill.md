@@ -72,7 +72,7 @@ which turn decode into a small GEMM that XMX can run.
 | 10 | OpenVINO's own int4 IR (asym g128, dynamic int8 activations) | 1298 t/s prefill, 21.6 decode, 26 % logit error | rejected | §15.3 |
 | 11 | the unrotated fast path (int8 activations and weights, no Hadamard) | 1.70x / 1.85x on gate‖up / down, but 17.8 % vs 12.0 % end-to-end error | rejected as default | §15.4 |
 | 12 | an 8-bit (W8A8 / FP8) checkpoint | would halve decode and take ~27 GB of the 32 | not pursued (derived) | above |
-| 13 | **runtime Hadamard + per-channel int8, W4A16 file unchanged ("h8")** | 12.5 % vs 12.0 % end-to-end on four prompts; 1.35x to 1.52x per linear; 1.28x whole prefill | **accepted, the default** | §15.4-15.5, spec 5 |
+| 13 | **runtime Hadamard + per-channel int8, W4A16 file unchanged ("h8")** | 12.5 % vs 12.0 % end-to-end on four prompts; 1.35x to 1.52x per linear; 1.28x whole prefill | **accepted; the default until 2026-10-27, opt-in since** | §15.4-15.5, spec 5 |
 
 What decided it: rows 4 and 5 said the activations need a rotation, row 11 said
 the rotation cannot be skipped, rows 8 and 9 said it cannot be moved into the
@@ -102,7 +102,12 @@ requant is the one cost here that is not matrix math.
   (spec 5 §9).
 - **The short-prompt floor:** about 0.7 s of prefill whatever the length
   (probe-w4a8 §15.6). It is separate from int8 and matters for every
-  agentic turn once prefix caching lands.
+  agentic turn; prefix caching (spec 7) removes most of it for a continued session.
 - (done) **Flash attention and 128k context**, spec 6, on top of this path:
   pp4096 2125.12 t/s (docs/BENCHMARKS.md, "Flash attention and 128k").
-- **Next:** prefix caching, MTP.
+- (done) **Prefix caching** (spec 7), **MTP** (spec 8) and the other proposers (DFlash, lookup) work on
+  either prefill backend; `--pp 2` (spec 16) splits the prefill across both cards with the same backends.
+- **Where it does not apply:** `l0-int8` rotates in whole 1024-column Hadamard blocks, so a model whose hidden
+  size is not a multiple of 1024 (Kolibri-1's 2560, Flash-Next's 2560) refuses it, and on a mixture-of-experts
+  model such as Ornith it costs routing accuracy (a near-tie between two experts can flip), so there it is
+  for speed only. Prefill chunks of 4096 (spec 5d) are written but not merged, awaiting a box speed run.

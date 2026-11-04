@@ -180,3 +180,14 @@ take a `sycl-tla` example, extract its `ze_kernel_handle_t` via
 append it to a regular command list, replay twice, diff. That would say whether
 the two toolchains can ever share one list, which matters the moment a kernel
 family exists that is genuinely easier to write in CuTe.
+
+## 11. Why does the DPAS verify-attention kernel pick the wrong token at 8 rows?
+
+`attn_verify_dpas` (spec 28c, doc 12) checks a speculative block's attention on the DPAS matrix
+engine and is up to 8.4x faster than the decode attention kernel. On one DFlash case (`t6_usage-loader`,
+7 guessed tokens, position 103) it returned a token at f32 rank 3, 4.0 below the top, whose own margin over
+the runner-up was 3.44: a kernel error, not a near-tie, and one the f32 judge (doc 14) caught where the
+bitwise comparison could not have been applied. The cause is not known. The kernel is the same code at every
+M, so every M was switched back to the v2 kernel on 2026-11-04 until it is fixed. The plan: re-test on IGC
+2.42.6, a compiler A/B on that kernel, a custom IGC only with evidence, otherwise a rewrite with fixed
+indices.
