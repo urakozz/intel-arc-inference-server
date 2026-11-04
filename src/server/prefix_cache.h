@@ -54,6 +54,13 @@ class PrefixCache {
   // what it was.
   PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_bytes_per_pos, uint32_t block,
               HostAlloc& alloc, HashFn hash = {}, uint64_t kv_form = 0);
+  // `kv_bytes(n)`: the bytes save_kv writes for n positions from a block start - the engine's own
+  // kv_bytes(n), which need not be n x kv_bytes(1): Qwen3.8-Flash-Next's blocks carry one compressed
+  // indexer key every 4 positions (kv_bytes(1) holds none), so sizing by kv_bytes(1) x n under-allocates
+  // every entry and save_kv overruns it into the next (r34.serve, 2026-11-04). The server's constructor.
+  using KvBytesFn = std::function<size_t(uint32_t)>;
+  PrefixCache(size_t budget_bytes, size_t state_bytes, KvBytesFn kv_bytes, uint32_t block,
+              HostAlloc& alloc, HashFn hash = {}, uint64_t kv_form = 0);
   ~PrefixCache();
   PrefixCache(const PrefixCache&) = delete;
   PrefixCache& operator=(const PrefixCache&) = delete;
@@ -113,7 +120,8 @@ class PrefixCache {
   void remove(Entry* e);
   void pin(Entry* e);
 
-  size_t budget_, state_bytes_, kv_per_pos_;
+  size_t budget_, state_bytes_;
+  KvBytesFn kv_bytes_;
   uint32_t block_;
   HostAlloc& alloc_;
   HashFn hash_;

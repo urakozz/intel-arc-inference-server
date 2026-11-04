@@ -55,14 +55,20 @@ uint64_t store_root(uint64_t kv_form, uint64_t drafter_key) {
 
 PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, size_t kv_bytes_per_pos,
                          uint32_t block, HostAlloc& alloc, HashFn hash, uint64_t kv_form)
+    : PrefixCache(budget_bytes, state_bytes, [kv_bytes_per_pos](uint32_t n) { return kv_bytes_per_pos * n; },
+                  block, alloc, std::move(hash), kv_form) {}
+
+PrefixCache::PrefixCache(size_t budget_bytes, size_t state_bytes, KvBytesFn kv_bytes, uint32_t block,
+                         HostAlloc& alloc, HashFn hash, uint64_t kv_form)
     : budget_(budget_bytes),
       state_bytes_(state_bytes),
-      kv_per_pos_(kv_bytes_per_pos),
+      kv_bytes_(std::move(kv_bytes)),
       block_(block),
       alloc_(alloc),
       hash_(std::move(hash)),
       root_(std::make_unique<Entry>()) {
   if (block_ == 0) throw std::invalid_argument("PrefixCache: block must be > 0");
+  if (!kv_bytes_) throw std::invalid_argument("PrefixCache: no kv_bytes function");
   root_->ready = true;
   root_->hash = kv_form;   // spec 12b: every chain starts from the KV form (0 = bf16)
 }
@@ -160,7 +166,7 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
   }
   // The missing blocks, in order; a block that cannot be stored ends the chain.
   while (at < base) {
-    const size_t bytes = kv_per_pos_ * block_;
+    const size_t bytes = kv_bytes_(block_);
     void* p = alloc(bytes);
     if (p == nullptr) return slot;
     auto e = std::make_unique<Entry>();
@@ -186,7 +192,7 @@ PrefixCache::Slot PrefixCache::reserve(const std::vector<uint32_t>& ids, uint32_
     s->lru = ++clock_;
     return slot;
   }
-  const size_t kv = kv_per_pos_ * (end - base);
+  const size_t kv = end > base ? kv_bytes_(end - base) : 0;
   const size_t bytes = state_bytes_ + kv;
   // Spec 18d: an engine without recurrent state (K2-Horizon: state_bytes() == 0) has an
   // empty snapshot at a block end - a restore point that costs nothing. It gets no
@@ -314,7 +320,8 @@ PrefixSession::PrefixSession(EngineIface& engine, size_t budget_bytes, HostAlloc
     : engine_(engine) {
   if (budget_bytes == 0) return;
   if (alloc == nullptr) throw std::invalid_argument("PrefixSession: a budget needs an allocator");
-  cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(), engine.kv_bytes(1),
+  cache_ = std::make_unique<PrefixCache>(budget_bytes, engine.state_bytes(),
+                                         [this](uint32_t n) { return engine_.kv_bytes(n); },
                                          engine.block(), *alloc, PrefixCache::HashFn{},
                                          store_root(engine.kv_form(), engine.drafter_key()));
   engine_.set_block_hook([this](uint32_t end, bool is_block_end) {

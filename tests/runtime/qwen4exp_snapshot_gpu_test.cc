@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -123,6 +124,47 @@ bool report(const std::string& what, const Out& got, const Out& want) {
   return ok;
 }
 
+// d's diagnostic: where two sessions at the same pos differ in what a session reads - per QSA layer the first K / V row
+// and compressed-key block below pos, the tail ring's slots; per GDN layer the state and the conv ring's slots; the
+// PLE layer's id / conv ring slots.
+void print_state_diff(rq::Qwen4ExpEngine& e, const qwen4exp_rig::State& got, const qwen4exp_rig::State& want) {
+  const model::Qwen4ExpDesc& d = e.model().desc;
+  const uint32_t pos = e.pos(), L = e.max_len();
+  const auto first_row = [](const uint8_t* a, const uint8_t* b, size_t row, size_t n) -> int64_t {
+    for (size_t i = 0; i < n; ++i)
+      if (std::memcmp(a + i * row, b + i * row, row) != 0) return int64_t(i);
+    return -1;
+  };
+  const auto slots = [](const uint8_t* a, const uint8_t* b, size_t row, size_t n) {
+    std::string s;
+    for (size_t i = 0; i < n; ++i)
+      if (std::memcmp(a + i * row, b + i * row, row) != 0) s += " " + std::to_string(i);
+    return s.empty() ? std::string(" none") : s;
+  };
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const uint8_t* a = got.layers[l].data();
+    const uint8_t* b = want.layers[l].data();
+    if (d.is_qsa(l)) {
+      const size_t row = size_t(d.kv_n()) * 2, kv = size_t(L) * row, kb = size_t(d.idx_dim) * 2;
+      std::printf("     L%u QSA (pos %u): first K row differing %lld, V row %lld, key block %lld (of %u); tail slots"
+                  " differing:%s\n", l, pos, (long long)first_row(a, b, row, pos), (long long)first_row(a + kv, b + kv, row, pos),
+                  (long long)first_row(a + 2 * kv, b + 2 * kv, kb, pos / 4), pos / 4,
+                  slots(a + 2 * kv + size_t(L / 4) * kb, b + 2 * kv + size_t(L / 4) * kb, kb, rq::kIdxTail).c_str());
+    } else {
+      const size_t S = rq::gdn_state_bytes_per_layer(d), R = rq::conv_ring_bytes_per_layer(d) / rq::kConvRing;
+      std::printf("     L%u GDN: state %s; conv slots differing:%s (live: %u %u %u)\n", l,
+                  std::memcmp(a, b, S) ? "DIFFERS" : "equal", slots(a + S, b + S, R, rq::kConvRing).c_str(),
+                  (pos - 3) % rq::kConvRing, (pos - 2) % rq::kConvRing, (pos - 1) % rq::kConvRing);
+    }
+    if (l == d.ple_layer) {
+      const size_t off = got.layers[l].size() - rq::ple_state_bytes(d), R = size_t(d.hc_n()) * 2;
+      std::printf("     L%u PLE: id slots differing:%s; conv slots differing:%s (pos %% 16 = %u)\n", l,
+                  slots(a + off, b + off, 4, rq::kPleRing).c_str(),
+                  slots(a + off + rq::kPleConvOff, b + off + rq::kPleConvOff, R, rq::kPleRing).c_str(), pos % 16);
+    }
+  }
+}
+
 int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   bool ok = true;
@@ -137,6 +179,7 @@ int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   e.prefill(prompt);
   CHECK(at_hook.count(2048) && at_hook.count(4096) && at_hook.count(kN));
   const Out cold = finish(e);
+  const std::map<uint32_t, Saved> cold_saves = at_hook;   // b / c below re-save at 2048 / 4096 from other chunkings
   for (uint32_t at : {2048u, 4096u}) {
     e.reset();
     restore(e, at_hook.at(at), at);
@@ -171,7 +214,7 @@ int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
       e.reset();
       e.prefill(other);
       (void)continue_ids(e);
-      restore(e, at_hook.at(at), at);   // no reset: the server's Restore
+      restore(e, cold_saves.at(at), at);   // no reset: the server's Restore
       e.prefill(slice(prompt, at, kN));
       const Ids ids = continue_ids(e);
       const qwen4exp_rig::State s = qwen4exp_rig::read_state(e);
@@ -186,6 +229,7 @@ int run_default(rq::Qwen4ExpEngine& e, const Ids& prompt) {
                   ids == cold.ids ? "bitwise" : ("DIFFER from id " + std::to_string(first)).c_str(),
                   diff.empty() ? "bitwise" : ("DIFFERS at " + diff).c_str());
       ok = ids == cold.ids && diff.empty() && ok;
+      if (!diff.empty() || ids != cold.ids) print_state_diff(e, s, cold.state);
     }
   }
   e.set_block_hook({});
