@@ -166,13 +166,64 @@ int schema_string_type(const std::string& function, const std::string& key, cons
   return is_string_type(*type) ? 1 : 0;
 }
 
+bool escape_raw_controls(const std::string& text, std::string& out) {
+  out.clear();
+  out.reserve(text.size() + 16);
+  bool in_string = false, escaped = false, changed = false;
+  for (const char ch : text) {
+    const unsigned char c = static_cast<unsigned char>(ch);
+    if (!in_string) {
+      in_string = c == '"';
+      out += ch;
+    } else if (escaped) {
+      escaped = false;
+      out += ch;   // a backslash before a raw control byte stays invalid JSON: not repaired
+    } else if (c == '\\') {
+      escaped = true;
+      out += ch;
+    } else if (c == '"') {
+      in_string = false;
+      out += ch;
+    } else if (c < 0x20) {
+      changed = true;
+      switch (c) {
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        default: {
+          char u[8];
+          std::snprintf(u, sizeof(u), "\\u%04x", static_cast<unsigned>(c));
+          out += u;
+        }
+      }
+    } else {
+      out += ch;
+    }
+  }
+  return changed && !in_string;
+}
+
+namespace {
+
+// ojson::parse; when that fails, once more after escape_raw_controls' repair (spec 20, the 2026-11-04 tool-call item).
+ojson parse_repaired(const std::string& text) {
+  ojson j = ojson::parse(text, nullptr, false);
+  std::string fixed;
+  if (j.is_discarded() && escape_raw_controls(text, fixed)) j = ojson::parse(fixed, nullptr, false);
+  return j;
+}
+
+}  // namespace
+
 bool parse_json_call(const std::string& body, const json& tools, ToolCall& call) {
-  const ojson j = ojson::parse(trim(body), nullptr, false);
+  const ojson j = parse_repaired(trim(body));
   if (j.is_discarded() || !j.is_object() || !j.contains("name") || !j.at("name").is_string()) return false;
   const std::string name = j.at("name").get<std::string>();
   if (name.empty() || std::any_of(name.begin(), name.end(), is_ws)) return false;
   ojson args = j.contains("arguments") ? j.at("arguments") : ojson::object();
-  if (args.is_string()) args = ojson::parse(args.get<std::string>(), nullptr, false);
+  if (args.is_string()) args = parse_repaired(args.get<std::string>());
   if (args.is_null()) args = ojson::object();
   if (args.is_discarded() || !args.is_object()) return false;
   for (auto& [key, value] : args.items()) {

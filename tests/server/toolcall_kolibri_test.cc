@@ -14,6 +14,9 @@
 //     by "\n"; content around calls; schema typing; whitespace-only content dropped;
 //   - Review Focus 5: German argument strings keep their bytes (also from \u escapes), and the
 //     server's arguments text (nlohmann's dump) writes them as UTF-8, not re-escaped;
+//   - raw newlines / tabs / control bytes inside string arguments (multi-line file contents, patches; HF
+//     Kolibri-1 discussions #8 / #9) are repaired into the call, also inside a string-held arguments
+//     object; still-broken bodies stay content verbatim; the fuzz writes half its calls in that raw form;
 //   - the shared parse_json_call (also K2's json format - toolcall_k2_test keeps K2's cases);
 //   - a fuzz: 2000 generated outputs (reasoning or not, content with tag fragments, 0-3 valid calls
 //     with random arguments) parse to the generated structure, and the same outputs cut at a random
@@ -302,6 +305,46 @@ void case_calls() {
   std::printf("calls: valid, broken (verbatim with tags), cut, string arguments, two calls, schema typing\n");
 }
 
+// --- raw control bytes inside string arguments (HF Kolibri-1 discussions #8 / #9) --------------------
+void case_raw_controls() {
+  const json none = json::array();
+  const json write_tools = json::parse(R"([{"type":"function","function":{"name":"write","parameters":{"type":"object",
+    "properties":{"path":{"type":"string"},"content":{"type":"string"}}}}}])");
+  // A multi-line file content written with raw newlines and a raw tab: the call, the bytes kept.
+  const std::string file = "int main() {\n\treturn 0;\r\n}\n";
+  expect("Schreibe.\n<tool_call>\n{\"name\": \"write\", \"arguments\": {\"path\": \"/w/a.c\", \"content\": \"" + file +
+             "\"}}\n</tool_call>",
+         write_tools, "", "Schreibe.", json::array({json::array({"write", {{"path", "/w/a.c"}, {"content", file}}})}));
+  // Raw newlines outside strings are JSON whitespace already; escaped ones stay as written; mixed in one value.
+  expect("<tool_call>\n{\n  \"name\": \"write\",\n  \"arguments\": {\"content\": \"a\\nb\nc\\\\\"}\n}\n</tool_call>",
+         write_tools, "", "", json::array({json::array({"write", {{"content", "a\nb\nc\\"}}})}));
+  // Other control bytes become \u escapes; a quote escaped before a raw newline does not end the string.
+  expect(std::string("<tool_call>{\"name\": \"write\", \"arguments\": {\"content\": \"x\x01y \\\"q\\\"\nz\"}}</tool_call>"),
+         write_tools, "", "", json::array({json::array({"write", {{"content", "x\x01y \"q\"\nz"}}})}));
+  // A patch (apply_patch style) with an apostrophe, braces and German text inside the string.
+  const std::string patch = "*** Begin Patch\n*** Update File: a.py\n@@\n-x = {'a': 1}\n+x = {'a': 2}  # Größe\n*** End Patch";
+  expect("<tool_call>\n{\"name\": \"apply_patch\", \"arguments\": {\"input\": \"" + patch + "\"}}\n</tool_call>", nullptr,
+         "", "", json::array({json::array({"apply_patch", {{"input", patch}}})}));
+  // "arguments" as a string holding an object whose string has raw newlines (repaired in both layers).
+  expect("<tool_call>{\"name\": \"write\", \"arguments\": \"{\\\"content\\\": \\\"l1\nl2\\\"}\"}</tool_call>", write_tools,
+         "", "", json::array({json::array({"write", {{"content", "l1\nl2"}}})}));
+  // Still broken after the repair (a missing brace; an unterminated string; a backslash before a raw
+  // newline): content verbatim, nothing guessed.
+  for (const std::string& body : {std::string("{\"name\": \"write\", \"arguments\": {\"content\": \"a\nb\"}"),
+                                  std::string("{\"name\": \"write\", \"arguments\": {\"content\": \"a\nb}}"),
+                                  std::string("{\"name\": \"write\", \"arguments\": {\"content\": \"a\\\nb\"}}")}) {
+    const std::string raw = "<tool_call>\n" + body + "\n</tool_call>";
+    expect("Ok.\n" + raw, write_tools, "", "Ok.\n" + raw, none);
+  }
+  // The helper itself: only bytes inside literals change; a cut literal is not repaired.
+  std::string out;
+  CHECK(server::escape_raw_controls("{\n\"a\":\t\"x\ty\"\n}", out));
+  CHECK_EQ(out, std::string("{\n\"a\":\t\"x\\ty\"\n}"));
+  CHECK(!server::escape_raw_controls("{\"a\": \"x\\ny\"}", out));   // nothing raw
+  CHECK(!server::escape_raw_controls("{\"a\": \"x\ny", out));       // ends inside the literal
+  std::printf("raw controls: newlines / tabs / \\x01 inside string arguments repaired (both layers), nothing else\n");
+}
+
 // --- Review Focus 5: German bytes -------------------------------------------------------------------
 void case_german() {
   const std::string pattern = "Größe „Straße“ – Donaudampfschifffahrtsgesellschaftskapitän ẞ";
@@ -427,8 +470,14 @@ void case_fuzz() {
     for (size_t i = 0; i < n; ++i) {
       const std::string name = pick(rng, {"read", "grep", "edit_file", "now"});
       const json args = random_args(rng);
-      text += (i ? "\n" : "") + std::string("<tool_call>\n") + json({{"name", name}, {"arguments", args}}).dump() +
-              "\n</tool_call>";
+      std::string call = json({{"name", name}, {"arguments", args}}).dump();
+      if (rng() % 2) {
+        // The model's raw form: the escaped newlines and tabs written as raw bytes (the alphabet has no
+        // backslash, so every "\n" / "\t" escape in the dump is one); parses to the same arguments.
+        for (const auto& [esc, raw] : {std::pair<std::string, std::string>{"\\n", "\n"}, {"\\t", "\t"}})
+          for (size_t at = call.find(esc); at != std::string::npos; at = call.find(esc, at + 1)) call.replace(at, 2, raw);
+      }
+      text += (i ? "\n" : "") + std::string("<tool_call>\n") + call + "\n</tool_call>";
       want.push_back(json::array({name, args}));
     }
     if (n && rng() % 3 == 0) {
@@ -455,6 +504,7 @@ int main(int argc, char** argv) {
   case_round_trip(dir);
   case_reasoning();
   case_calls();
+  case_raw_controls();
   case_german();
   case_parse_json_call();
   case_format();

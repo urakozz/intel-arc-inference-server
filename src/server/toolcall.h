@@ -96,6 +96,17 @@ std::string make_call_id(uint64_t seed, uint32_t index);
 // "arguments": <object | a string holding an object | null | absent>}; an argument the tool's schema
 // types as a string but written as another JSON value becomes its JSON text. Fills call.name and
 // call.arguments (not call.id); false when the body does not parse as such a call.
+// A body (or a string-held arguments object) that does not parse is tried once more after
+// escape_raw_controls: models write multi-line string arguments (file contents, patches) with RAW
+// newlines / tabs inside the string (Kolibri-1, HF discussions #8 / #9) - invalid JSON that would lose
+// the call. Nothing outside string literals changes and no quote or brace is guessed; a body that
+// still does not parse is not a call (the stream keeps it as content).
 bool parse_json_call(const std::string& body, const nlohmann::json& tools, ToolCall& call);
+
+// The JSON text with every raw control byte (< 0x20) INSIDE a string literal escaped (\n, \r, \t, \b,
+// \f, else \u00XX), bytes outside string literals copied unchanged; a literal runs from its opening
+// quote through backslash escapes to its closing quote. False when nothing was escaped or the text
+// ends inside a literal (cut or unbalanced: not repaired). Exposed for tests.
+bool escape_raw_controls(const std::string& text, std::string& out);
 
 }  // namespace server
