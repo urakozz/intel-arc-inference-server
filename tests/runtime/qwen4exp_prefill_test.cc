@@ -50,12 +50,14 @@
 // q4_qsa_attn_eager; one variable, one parser) - so mode `all`'s comparisons 4-6 are between matched variants.
 // Exit 77 (SKIP) when the checkpoint is absent, does not fit, or pp needs two GPUs.
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <random>
 #include <string>
 #include <vector>
@@ -100,7 +102,8 @@ double cos_bf16(const uint16_t* a, const uint16_t* b, size_t n) {
     aa += x * x;
     bb += y * y;
   }
-  return (aa == 0 && bb == 0) ? 1.0 : ab / std::sqrt(aa * bb);
+  if (aa == 0 && bb == 0) return 1.0;
+  return (aa == 0 || bb == 0) ? 0.0 : ab / std::sqrt(aa * bb);   // one side zero: unlike (not 0 / 0)
 }
 double cos_f32(const float* a, const float* b, size_t n) {
   double ab = 0, aa = 0, bb = 0;
@@ -131,7 +134,21 @@ Snap snap(rq::Qwen4ExpEngine& e, bool last) {
   const runtime::Control c = e.control(e.devices() - 1);
   s.first_token = c.cur_token[0];
   s.pos = c.pos;
-  for (uint32_t l = 0; l < d.layers; ++l) s.layers.push_back(e.read_layer_state(l));
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    s.layers.push_back(e.read_layer_state(l));
+    if (d.is_qsa(l)) continue;
+    // A GDN conv ring's live rows are positions pos - 3 .. pos - 1 (gdn_step's window; the prefix-cache snapshot
+    // stores those three - qwen4exp_sizes.h). Prefill writes only a chunk's last three (pf_gdn_conv.cl: "slots this
+    // chunk did not write ... nothing reads"), decode every position, so the other 13 slots hold whichever older
+    // positions each path last wrote - not state: zeroed here on both sides.
+    uint8_t* ring = s.layers.back().data() + rq::gdn_state_bytes_per_layer(d);
+    const size_t slot = size_t(d.conv_rows()) * 2;
+    for (uint32_t k = 0; k < rq::kConvRing; ++k) {
+      bool live = false;
+      for (uint32_t t = 1; t <= 3; ++t) live = live || (s.pos >= t && (s.pos - t) % rq::kConvRing == k);
+      if (!live) std::memset(ring + k * slot, 0, slot);
+    }
+  }
   s.logits = e.read_logits();
   if (last) {
     s.routes = e.read_prefill_routes();
@@ -147,7 +164,8 @@ Snap snap(rq::Qwen4ExpEngine& e, bool last) {
 struct StateCmp {
   double first_qsa_worst = 1, median = 1, p01 = 1, worst = 1;
   uint32_t worst_layer = 0, below99 = 0;
-  bool rings_exact = true;
+  bool rings_exact = true;                          // the PLE id ring (ids: exact on any path)
+  uint32_t tail_words_differ = 0, tail_max_ulp = 0;   // the QSA tail rings (raw keys: a linear's rounding)
   std::vector<double> layer_worst, layer_median;
 };
 StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& b, uint32_t n, uint32_t max_len) {
@@ -175,7 +193,16 @@ StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& 
       off = size_t(max_len) * row * 2;
       for (uint32_t blk = 0; blk < n / 4; ++blk) add(cos_bf16(A + off + size_t(blk) * d.idx_dim, B + off + size_t(blk) * d.idx_dim, d.idx_dim));
       off += size_t(max_len / d.idx_compress) * d.idx_dim;
-      c.rings_exact = c.rings_exact && std::memcmp(A + off, B + off, size_t(rq::kIdxTail) * d.idx_dim * 2) == 0;
+      for (uint32_t k = 0; k < rq::kIdxTail; ++k) {   // the tail ring's raw keys, a cosine row a slot
+        const uint16_t* ta = A + off + size_t(k) * d.idx_dim;
+        const uint16_t* tb = B + off + size_t(k) * d.idx_dim;
+        add(cos_bf16(ta, tb, d.idx_dim));
+        for (uint32_t i = 0; i < d.idx_dim; ++i) {
+          if (ta[i] == tb[i]) continue;
+          ++c.tail_words_differ;
+          c.tail_max_ulp = std::max(c.tail_max_ulp, uint32_t(std::abs(int(ta[i]) - int(tb[i]))));
+        }
+      }
       off += size_t(rq::kIdxTail) * d.idx_dim;
       if (first_qsa)
         for (double v : per) c.first_qsa_worst = std::min(c.first_qsa_worst, v);
@@ -207,6 +234,46 @@ StateCmp compare_state(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& 
   c.p01 = all[all.size() / 100];
   return c;
 }
+// Where two snapshots differ, per layer and region (rows / blocks / slots / heads): the count and the first index - the
+// diagnosis of a failed bitwise comparison.
+void print_diffs(const model::Qwen4ExpDesc& d, const Snap& a, const Snap& b, uint32_t max_len) {
+  const auto region = [](const char* what, uint32_t l, const uint8_t* A, const uint8_t* B, size_t unit, size_t units) {
+    size_t n = 0, first = 0;
+    for (size_t u = 0; u < units; ++u)
+      if (std::memcmp(A + u * unit, B + u * unit, unit) != 0 && n++ == 0) first = u;
+    if (n) std::printf("   L%u %s: %zu of %zu differ, the first %zu\n", l, what, n, units, first);
+  };
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const uint8_t* A = a.layers[l].data();
+    const uint8_t* B = b.layers[l].data();
+    size_t off = 0;
+    if (d.is_qsa(l)) {
+      const size_t row = size_t(d.kv_n()) * 2;
+      region("K rows", l, A, B, row, max_len);
+      region("V rows", l, A + size_t(max_len) * row, B + size_t(max_len) * row, row, max_len);
+      off = size_t(max_len) * row * 2;
+      region("indexer key blocks", l, A + off, B + off, size_t(d.idx_dim) * 2, max_len / d.idx_compress);
+      off += size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+      region("tail slots", l, A + off, B + off, size_t(d.idx_dim) * 2, rq::kIdxTail);
+      off += size_t(rq::kIdxTail) * d.idx_dim * 2;
+    } else {
+      const size_t head = size_t(d.gdn_head) * d.gdn_head * 4;
+      region("GDN state heads", l, A, B, head, d.gdn_v_heads);
+      off = rq::gdn_state_bytes_per_layer(d);
+      region("conv ring slots (live)", l, A + off, B + off, size_t(d.conv_rows()) * 2, rq::kConvRing);
+      off += rq::conv_ring_bytes_per_layer(d);
+    }
+    if (l == d.ple_layer) {
+      region("PLE id ring slots", l, A + off, B + off, 4, rq::kPleRing);
+      region("PLE conv ring slots", l, A + off + rq::kPleConvOff, B + off + rq::kPleConvOff, size_t(d.hc_n()) * 2,
+             rq::kPleRing);
+    }
+  }
+  if (a.logits != b.logits || a.first_token != b.first_token || a.pos != b.pos)
+    std::printf("   logits %s, first token %u / %u, pos %u / %u\n", a.logits == b.logits ? "equal" : "differ", a.first_token,
+                b.first_token, a.pos, b.pos);
+}
+
 bool state_ok(const StateCmp& c) { return c.first_qsa_worst >= 0.999 && c.median >= 0.9998 && c.p01 >= 0.99; }
 void print_layers(const StateCmp& c) {
   std::printf("   per layer (worst / median):");
@@ -258,6 +325,7 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
               rq::prefill_chunk_launches(d, e.model().placement, 4096, n - 4096), rq::kPrefillHeadLaunches, e.devices(),
               rq::prefill_sizes(d, e.max_len()).total() / 1e9, e.memory_line().c_str());
   const Snap a = snap(e, true);
+  const std::vector<float> pf_scores = e.read_prefill_last_qsa_scores();   // the last chunk's rows, the last QSA layer
 
   // ---- 2. determinism and replay ---------------------------------------------------------------------------------
   e.reset();
@@ -279,7 +347,9 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   {
     e.reset();
     e.prefill(prompt, 64);
-    const bool c64 = snap(e, false).state_equal(a);
+    const Snap s64 = snap(e, false);
+    const bool c64 = s64.state_equal(a);
+    if (!c64) print_diffs(d, a, s64, e.max_len());
     e.reset();
     e.prefill(prompt, 16);
     const Snap s16 = snap(e, false);
@@ -296,6 +366,12 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   e.reset();
   const uint32_t lastd = n - ((n - 1) / rq::kPfC) * rq::kPfC;
   uint64_t rows = 0, exact = 0, near = 0, undet = 0, bad = 0, srows = 0, sexact = 0, snear = 0, sbad = 0;
+  uint64_t swapped_max = 0, sprint = 0;
+  double score_noise_max = 0, score_cos_min = 1, deficit_max = 0, deficit_ratio_max = 0;
+  const uint32_t stride = e.max_len() / d.idx_compress;
+  uint32_t last_qsa = d.layers;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    if (d.is_qsa(l)) last_qsa = l;
   for (uint32_t p = 0; p < n; ++p) {
     e.ingest({prompt[p]});
     if (p < n - lastd) continue;
@@ -304,7 +380,9 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     for (uint32_t l = 0; l < d.layers; ++l) {
       const uint32_t* drow = dr.data() + size_t(l) * rq::kRouteWords;
       const uint32_t* prow = pf_route(a.routes, l, r);
-      std::vector<uint32_t> g(drow, drow + d.top_k), w(prow, prow + d.top_k);
+      std::array<uint32_t, kq::kTopK> g{}, w{};   // (fixed arrays: gcc 15 flags the vector pair falsely, -Wfree-nonheap-object)
+      std::copy_n(drow, kq::kTopK, g.begin());
+      std::copy_n(prow, kq::kTopK, w.begin());
       std::sort(g.begin(), g.end());
       std::sort(w.begin(), w.end());
       ++rows;
@@ -319,6 +397,13 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     }
     if (p > rq::kPfDenseLast) {   // the selections (rows with a cut)
       const std::vector<float> diag = e.read_selection_diag();
+      const std::vector<float> dsc = e.read_last_qsa_scores();
+      const uint32_t nblk = (p + 1) / 4;
+      const float* psc = pf_scores.data() + size_t(r) * stride;
+      double noise = 0;
+      for (uint32_t b = 0; b < nblk; ++b) noise = std::max(noise, std::fabs(double(psc[b]) - dsc[b]));
+      score_noise_max = std::max(score_noise_max, noise);
+      score_cos_min = std::min(score_cos_min, cos_f32(psc, dsc.data(), nblk));
       for (uint32_t l = 0; l < d.layers; ++l) {
         if (!d.is_qsa(l)) continue;
         const uint32_t qi = d.qsa_before(l);
@@ -330,7 +415,25 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
           ++sexact;
           continue;
         }
-        const float gap = diag[qi * 2] - diag[qi * 2 + 1];
+        const float T = diag[qi * 2], gap = T - diag[qi * 2 + 1];
+        // the blocks prefill took that decode did not (the lists are ascending blocks x 4, then the tail)
+        std::vector<uint32_t> pb, db;
+        for (uint32_t k = 0; k < kq::kTopBlocks; ++k) {
+          pb.push_back(prow[4 * k] / 4);
+          db.push_back(ds[4 * k] / 4);
+        }
+        std::vector<uint32_t> in;
+        std::set_difference(pb.begin(), pb.end(), db.begin(), db.end(), std::back_inserter(in));
+        swapped_max = std::max<uint64_t>(swapped_max, in.size());
+        if (l == last_qsa) {   // decode's scores of the swapped-in blocks against its cut
+          double deficit = 0;
+          for (uint32_t b : in) deficit = std::max(deficit, double(T) - dsc[b]);
+          deficit_max = std::max(deficit_max, deficit);
+          if (noise > 0) deficit_ratio_max = std::max(deficit_ratio_max, deficit / noise);
+          if (++sprint <= 6)
+            std::printf("   QSA L%u row %u: %zu block(s) swapped, decode gap %.3e, cut %.4f, deficit %.3e, row score noise "
+                        "%.3e\n", l, p, in.size(), double(gap), double(T), deficit, noise);
+        }
         if (gap <= kSelTol) ++snear;
         else if (++sbad <= 10) std::printf("   QSA L%u row %u: selection differs beyond a near-tie (gap %.3e)\n", l, p, double(gap));
       }
@@ -340,9 +443,14 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   const StateCmp sc = compare_state(d, a, dec, n, e.max_len());
   const bool sok = state_ok(sc) && sc.rings_exact;
   std::printf("4. prefill state vs decode's fill (%u positions x %u layers): first QSA layer's worst %.6f, median %.7f, p01 "
-              "%.6f, %u rows < 0.99, worst %.4f (L%u); tail / id rings %s%s\n", n, d.layers, sc.first_qsa_worst, sc.median,
-              sc.p01, sc.below99, sc.worst, sc.worst_layer, sc.rings_exact ? "bitwise" : "DIFFER", sok ? "" : "  ** FAIL **");
+              "%.6f, %u rows < 0.99, worst %.4f (L%u); PLE id ring %s; tail rings %u words differ (max %u bf16 ulp)%s\n", n,
+              d.layers, sc.first_qsa_worst, sc.median, sc.p01, sc.below99, sc.worst, sc.worst_layer,
+              sc.rings_exact ? "bitwise" : "DIFFERS", sc.tail_words_differ, sc.tail_max_ulp, sok ? "" : "  ** FAIL **");
   print_layers(sc);
+  if (!sok) print_diffs(d, a, dec, e.max_len());
+  std::printf("   the last QSA layer's block scores, prefill vs decode per row: cosine >= %.7f, max |diff| %.3e; selections: "
+              "at most %llu block(s) swapped a row, decode's deficit of a swapped-in block <= %.3e (%.2f x the row's score "
+              "noise)\n", score_cos_min, score_noise_max, (unsigned long long)swapped_max, deficit_max, deficit_ratio_max);
   std::printf("5. the last chunk's rows: routing %llu (row, layer) - %llu exact, %llu near-ties, %llu exact ties, %llu "
               "beyond; selections %llu (row, QSA layer) - %llu exact, %llu near-ties, %llu beyond%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)near, (unsigned long long)undet,
@@ -387,7 +495,9 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     const Snap w = snap(e, false);
     e.reset();
     e.prefill(prompt, 64);
-    const bool inj_ok = snap(e, false).state_equal(w);
+    const Snap w64 = snap(e, false);
+    const bool inj_ok = w64.state_equal(w);
+    if (!inj_ok) print_diffs(d, w, w64, e.max_len());
     e.set_injected_selection(false);
     std::printf("7. the injected selection (the last 512 blocks + the tail): chunks of 64 == one call %s\n",
                 inj_ok ? "bitwise" : "DIFFER");
@@ -414,6 +524,7 @@ int run_split(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     const bool pass = s % 64 == 0 ? bitwise : (lc >= 0.9995 && state_ok(c));
     std::printf("split at %u: %s (logits cosine %.7f, state first QSA layer worst %.6f, median %.7f, p01 %.6f)%s\n", s,
                 bitwise ? "bitwise" : "not bitwise", lc, c.first_qsa_worst, c.median, c.p01, pass ? "" : "  ** FAIL **");
+    if (!bitwise && s % 64 == 0) print_diffs(d, whole, two, e.max_len());
     ok = ok && pass;
   }
   return ok ? 0 : 1;

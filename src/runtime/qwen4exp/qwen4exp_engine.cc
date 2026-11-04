@@ -435,6 +435,18 @@ std::vector<float> Qwen4ExpEngine::read_selection_diag() {
   return v;
 }
 
+std::vector<float> Qwen4ExpEngine::read_last_qsa_scores() {
+  const model::Qwen4ExpDesc& d = model_.desc;
+  uint32_t last = d.layers;
+  for (uint32_t l = 0; l < d.layers; ++l)
+    if (d.is_qsa(l)) last = l;
+  if (last == d.layers) throw std::out_of_range("read_last_qsa_scores: no QSA layer is loaded");
+  std::vector<float> v(max_len_ / d.idx_compress);
+  st(model_.placement.device_of(last)).imm.copy(v.data(), st(model_.placement.device_of(last)).buffers.scores.ptr(),
+                                                v.size() * 4);
+  return v;
+}
+
 std::vector<uint64_t> Qwen4ExpEngine::read_ple_ids() {
   Stage& s = st(model_.placement.device_of(model_.desc.ple_layer));
   std::vector<uint64_t> v(model_.desc.ple_heads);

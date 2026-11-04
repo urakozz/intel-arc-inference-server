@@ -96,6 +96,9 @@ class Qwen4ExpEngine {
   std::vector<uint32_t> read_selection(uint32_t layer);
   // fp32 [qsa layers][2]: the 512th / 513th block scores of the last replay (+INF / -INF without a cut).
   std::vector<float> read_selection_diag();
+  // fp32 [max_len / 4]: row 0's block scores of the last replay in the LAST QSA layer (a device's QSA layers share the
+  // scores row, so only the last one's survive) - the prefill test's selection judge.
+  std::vector<float> read_last_qsa_scores();
   // u64 [16]: the PLE row ids of the last replay (the golden set's ple.ids row).
   std::vector<uint64_t> read_ple_ids();
   // fp32 [vocab]: the last replay's logits (the last device's).
@@ -161,6 +164,9 @@ class Qwen4ExpEngine {
   // kCountWord; rows [0, C) written, the dense rows' identity lists only when the chunk had sparse rows - or the
   // injected rows when injected() is on).
   std::vector<uint32_t> read_prefill_selection(uint32_t layer);
+  // fp32 [kPfC][max_len / 4]: the last chunk's rows' block scores in the LAST QSA layer (read_last_qsa_scores' rule;
+  // rows [0, C) written when the chunk had sparse rows).
+  std::vector<float> read_prefill_last_qsa_scores();
   // The injected run on prefill (spec 21 F3's debug input): with injected() on, before each chunk the engine calls
   // `f(qsa_index, pos, rows, lists)` for every QSA layer, `lists` the host-USM rows [rows][kListRow] the chunk's sparse
   // rows read (positions [0, count), count at kCountWord).
