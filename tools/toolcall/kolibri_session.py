@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
 """A live ~20-turn agentic tool session against b70-serve (Kolibri-1), with real tools on a sandbox project.
 
     kolibri_session.py <base url> <sandbox dir> <out.json> [--turns 20] [--effort medium] [--max-tokens 8192]
+                       [--no-echo-reasoning]
+    kolibri_session.py --rescore <out.json>      the counts of a recorded session
 
-The client echoes every response back as an OpenAI client does (content, reasoning_content, tool_calls as returned),
+The client echoes every response back as an OpenAI client does (content, reasoning_content, tool_calls as returned;
+--no-echo-reasoning leaves reasoning_content out of the earlier assistant turns, as many OpenAI clients do - the
+template then renders those turns' think blocks empty),
 executes the calls on the sandbox (list_dir, read_file, write_file, run_tests, search), appends the results, and sends
 the next user task when the model answers without a call. Sampling: the card's T 1.0, top-p 0.97, top-k 128.
 Per turn it records the finish reason, reasoning / content sizes, the calls, and a verdict:
@@ -12,6 +17,8 @@ Per turn it records the finish reason, reasoning / content sizes, the calls, and
   STALL    - reasoning but no content and no call (the community report's symptom)
   LEFTOVER - "<tool_call>" text left in content (a call the parser could not read)
   LENGTH   - finish length (the max_tokens budget hit)
+The summary also counts the calls: valid (a known tool, arguments a JSON object with every required key) or invalid,
+and loops (a call turn whose calls - names and arguments - repeat the previous call turn's exactly).
 """
 import argparse
 import json
@@ -168,11 +175,45 @@ def verdict(res):
     return "STALL"
 
 
+def valid_call(c):
+    spec = {t["function"]["name"]: t["function"]["parameters"] for t in TOOLS}.get(c["name"])
+    if spec is None:
+        return False
+    try:
+        args = json.loads(c["arguments"])
+    except ValueError:
+        return False
+    return isinstance(args, dict) and all(k in args for k in spec.get("required", []))
+
+
+def summary(out):
+    counts = {}
+    for r in out:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+    calls = [c for r in out for c in r["calls"]]
+    valid = sum(valid_call(c) for c in calls)
+    loops, prev = 0, None
+    for r in out:
+        if not r["calls"]:
+            continue
+        key = [(c["name"], c["arguments"]) for c in r["calls"]]
+        loops += key == prev
+        prev = key
+    return (f"SUMMARY {json.dumps(counts)} turns {len(out)} calls {len(calls)} valid {valid} invalid "
+            f"{len(calls) - valid} loops {loops}")
+
+
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--rescore":
+        with open(sys.argv[2], encoding="utf-8") as f:
+            print(summary(json.load(f)))
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
     ap.add_argument("sandbox")
     ap.add_argument("out")
+    ap.add_argument("--no-echo-reasoning", action="store_true",
+                    help="leave reasoning_content out of the earlier assistant turns (a client that drops it)")
     ap.add_argument("--turns", type=int, default=20)
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--max-tokens", type=int, default=8192)
@@ -209,7 +250,7 @@ def main():
         if res["error"]:
             break
         msg = {"role": "assistant", "content": res["content"] or None}
-        if res["reasoning"]:
+        if res["reasoning"] and not a.no_echo_reasoning:
             msg["reasoning_content"] = res["reasoning"]
         if res["tool_calls"]:
             msg["tool_calls"] = [{"id": c["id"], "type": "function",
@@ -227,10 +268,7 @@ def main():
                 break
             messages.append({"role": "user", "content": USERS[next_user]})
             next_user += 1
-    counts = {}
-    for r in out:
-        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
-    print("SUMMARY", json.dumps(counts), f"turns {len(out)}")
+    print(summary(out))
 
 
 if __name__ == "__main__":
