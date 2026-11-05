@@ -3317,7 +3317,7 @@ st_r60_synth() {
   jgrab synth '^bolt_decode_synth' 'plan == allocation|launches|B4|Review Focus|residual|OK'
   finish
 }
-stage r60.synth_b3  60 default card bolt_synth,oracle_bolt_synth,oracle_bolt_synth_f32 r60.synth "bolt_golden_test on the synthetics: tokens tie-aware, routes within B70_BOLT_TIE_TOL, SSM state / conv columns by cosine, h taps - short / 4k / agentic x both spellings; bf16 head, eager"
+stage r60.synth_b3  60 default card bolt_synth,oracle_bolt_synth r60.synth "bolt_golden_test on the synthetics: tokens tie-aware, routes within B70_BOLT_TIE_TOL, SSM state / conv columns by cosine, h taps - short / 4k / agentic x both spellings; bf16 head, eager"
 st_r60_synth_b3() {
   run_tests '^bolt_golden_synth_n12-(g128|g64x)_bolt_(short|4k|agentic)_test$|^bolt_golden_synth_short_(bf16head|eager)_test$'
   jgrab synth-b3 '^bolt_golden_synth' 'gate:|routing:|SSM state|conv|^  h |step [0-9]+:|OK'
@@ -3436,7 +3436,7 @@ st_r61_synth() {
   jgrab synth '^bolt_prefill_synth' '^[1-7]\.|split|chunks|bitwise|cosine|routing|tokens|OK'
   finish
 }
-stage r61.synth_b3  61 default card bolt_synth,oracle_bolt_synth,oracle_bolt_synth_f32 r61.synth "B3 on prefill: bolt_golden_test's prefill mode on the synthetics - short / 4k / agentic x both spellings, chunks of 512 on 4k, eager"
+stage r61.synth_b3  61 default card bolt_synth,oracle_bolt_synth r61.synth "B3 on prefill: bolt_golden_test's prefill mode on the synthetics - short / 4k / agentic x both spellings, chunks of 512 on 4k, eager"
 st_r61_synth_b3() {
   run_tests '^bolt_golden_prefill_synth_'
   jgrab synth-b3 '^bolt_golden_prefill_synth' 'prefill:|gate:|routing:|SSM state|conv|^  h |OK'
