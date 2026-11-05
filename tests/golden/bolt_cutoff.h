@@ -81,4 +81,19 @@ struct Cut {
   bool row_clean(uint32_t r) const { return !found || r < row; }
 };
 
+// The h bars of one block over its gated rows (operator ruling 2026-11-05, the second): on a synthetic the per-block
+// MEDIAN bar binds only when the block has at least kMinMedianRows rows upstream of the flip (a median of one or two rows
+// is a per-row bar); below that only the per-row MIN bar binds and the median is printed. A real checkpoint: both always.
+constexpr size_t kMinMedianRows = 8;
+inline bool median_binds(bool synth, size_t gated_rows) { return !synth || gated_rows >= kMinMedianRows; }
+inline bool h_block_ok(bool synth, size_t gated_rows, double median, double min, double median_bar, double min_bar) {
+  return min >= min_bar && (!median_binds(synth, gated_rows) || median >= median_bar);
+}
+
+// bolt_prefill_test section 3 on the bf16 SSM-state arm (operator ruling 2026-11-05, the third): that arm rounds the state
+// once at each chunk's end (nb_pf_mamba.cl SSM_B16), so a prompt cut anywhere but a multiple of the 2048-chunk is another
+// rounding: on a synthetic with that arm only the cuts at multiples of `chunk` (2048) bind; the other chunk sizes and
+// splits are printed. Everything else (fp32 state, a real checkpoint) binds as before.
+inline bool section3_binds(bool synth_b16, uint32_t cut, uint32_t chunk) { return !synth_b16 || cut % chunk == 0; }
+
 }  // namespace bolt_cutoff

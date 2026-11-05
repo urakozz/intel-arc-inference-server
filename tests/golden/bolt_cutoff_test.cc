@@ -90,6 +90,22 @@ int main() {
     CHECK_EQ(c.bad_before, uint64_t(1));
     CHECK_EQ(c.bad_after, uint64_t(0));
   }
+  // 6. the h bars on few gated rows (ruling 2026-11-05, the second)
+  using bolt_cutoff::h_block_ok;
+  CHECK(bolt_cutoff::kMinMedianRows == 8);
+  CHECK(h_block_ok(true, 1, 0.99979, 0.99979, 0.9998, 0.99));     // one row: the median printed, the min binds
+  CHECK(h_block_ok(true, 7, 0.99979, 0.995, 0.9998, 0.99));
+  CHECK(!h_block_ok(true, 7, 0.99999, 0.98, 0.9998, 0.99));       // the min still binds on one row
+  CHECK(!h_block_ok(true, 8, 0.99979, 0.995, 0.9998, 0.99));      // 8 rows: the median binds
+  CHECK(h_block_ok(true, 8, 0.99981, 0.995, 0.9998, 0.99));
+  CHECK(h_block_ok(true, 0, 1.0, 1.0, 0.9998, 0.99));             // nothing gated
+  CHECK(!h_block_ok(false, 1, 0.99979, 0.99979, 0.9998, 0.99));   // a real checkpoint: the median always binds
+  // 7. section 3 on the bf16-state arm (ruling 2026-11-05, the third)
+  using bolt_cutoff::section3_binds;
+  CHECK(section3_binds(true, 2048, 2048) && section3_binds(true, 4096, 2048));
+  CHECK(!section3_binds(true, 512, 2048) && !section3_binds(true, 64, 2048) && !section3_binds(true, 2112, 2048));
+  CHECK(!section3_binds(true, 2085, 2048));
+  CHECK(section3_binds(false, 64, 2048) && section3_binds(false, 2112, 2048) && section3_binds(false, 512, 2048));
   std::puts("bolt_cutoff_test OK");
   return 0;
 }

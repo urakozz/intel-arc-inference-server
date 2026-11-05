@@ -582,6 +582,18 @@ ids against the reference's as SETS, with the REFERENCE's 9th / 10th margin `gap
 - Unchanged: the bitwise checks (replay, chunk sizes, splits on the grid, `pp2`), every bar's value, and every test on our
   export (a checkpoint without `bolt_synth.json` keeps the rules above exactly: no cut-off).
 
+**Two more rulings (operator, 2026-11-05, after the first box run of the rule: 17 of 22 passed).**
+- *The h median on few rows.* `bolt_short`'s first flip is at row 1, L5, so blocks 5 - 11 keep one gated row (row 0); a
+  median of one row is a per-row bar, and row 0's bf16 drift reached 0.99979 at L11 (bar 0.9998; no routing difference on
+  that row). On a synthetic the per-block MEDIAN h bar binds only when the block has at least 8 rows upstream of the flip
+  (`bolt_cutoff::kMinMedianRows`); below that only the per-row MIN bar (0.99) binds and the median is printed.
+- *The bf16 SSM-state arm's chunking.* That arm rounds the state once at each prefill chunk's end (`nb_pf_mamba.cl`
+  `SSM_B16`, §16), so a prompt cut anywhere but a multiple of the 2048-chunk is another rounding (chunks of 512 / 1024 / 64
+  and the splits at 64 / 2112 differ, 2048 / 4096 bitwise - the same since 2026-11-04). On a synthetic with that arm,
+  `bolt_prefill_test` section 3's other chunk sizes and off-2048 cuts are printed, not gated (`bolt_cutoff::section3_binds`),
+  and section 4's state / conv comparison against decode (which rounds every token) is printed; every other check is
+  unchanged. Real checkpoints and the fp32 state are untouched.
+
 ## 10. Stages
 
 | stage | Mac (blind) | box | row |

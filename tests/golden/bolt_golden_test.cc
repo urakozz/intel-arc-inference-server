@@ -40,7 +40,8 @@
 // undetermined set difference is the flip; every bar above binds on what is computed before it - a Beyond set difference,
 // the tokens of the decision rows wholly before it, each block's h taps upstream of it, the SSM state / conv columns of the
 // blocks upstream of it at the last prompt row - and everything after it is printed, never failed on. With no flip every
-// bar binds on everything. In prefill mode the prompt goes in chunk calls (each on the 64-grid: bitwise one call, Review
+// bar binds on everything. A block's h MEDIAN bar binds only when it has >= 8 rows before the flip (the operator's second
+// ruling of 2026-11-05: a median of one or two rows is a per-row bar); below that its MIN bar binds alone. In prefill mode the prompt goes in chunk calls (each on the 64-grid: bitwise one call, Review
 // Focus 1) so every prompt row's routes are compared. A real checkpoint keeps the rules above unchanged.
 //
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
@@ -390,8 +391,11 @@ int main(int argc, char** argv) {
   for (uint32_t l = 0; l < d.layers; ++l) {
     const double med = median(hgate[l]);
     const double mn = hgate[l].empty() ? 1.0 : *std::min_element(hgate[l].begin(), hgate[l].end());
-    if (synth) std::printf(" %u:%zu/%.5f/%.4f", l, hgate[l].size(), med, mn);
-    h_ok = h_ok && med >= kHMedian && mn >= kHMin;
+    // the median binds on a synthetic only with >= 8 gated rows (operator ruling 2026-11-05, the second; bolt_cutoff.h)
+    if (synth)
+      std::printf(" %u:%zu/%.5f%s/%.4f", l, hgate[l].size(), med,
+                  bolt_cutoff::median_binds(synth, hgate[l].size()) ? "" : "(printed)", mn);
+    h_ok = h_ok && bolt_cutoff::h_block_ok(synth, hgate[l].size(), med, mn, kHMedian, kHMin);
   }
   std::printf("\nrouting: %llu (row, block) (%llu exact sets, %llu near-ties within %.1e, %llu undetermined (gap 0), %llu "
               "differing%s; matching weights worst %lld fp32 ulps)\n", (unsigned long long)cut.pairs,
