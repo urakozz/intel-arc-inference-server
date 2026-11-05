@@ -4064,7 +4064,7 @@ if(B70_BOLT)
   add_executable(bolt_prefill_test runtime/bolt_prefill_test.cc)
   b70_target_kernel_dir(bolt_prefill_test)
   target_include_directories(bolt_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
-    ${CMAKE_SOURCE_DIR}/tests/runtime)
+    ${CMAKE_SOURCE_DIR}/tests/runtime ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(bolt_prefill_test PRIVATE b70_bolt_prefill b70_l0)
   add_dependencies(bolt_prefill_test ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
     ${B70_BOLT_PREFILL_REUSED})
