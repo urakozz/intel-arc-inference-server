@@ -18,6 +18,7 @@ Last updated: 2026-11-06 (main bd0e703; box: kernel 7.4.0-rc1, compute-runtime 2
 | **25** Bolt | the Nemotron Bolt model | speculative decoding back on (branch `bolt-spec-restore`); the Bolt reference set (CPU, building) | code done; references building tonight | box runs + merge |
 | *(tools)* | CPU reference tool | the CPU bf16 shim, the Bolt BF16-scale fix, K2's 600-id prompt floor - merged 2026-11-06 (box_check 316/0/0); K2's tool-call prompt set rebuilt (36 / 36) | merged | one CPU test row (r25.a4_ref, the paused CPU queue) |
 | *(box)* | model storage | hot / cold tiers (operator 2026-11-05): the new 8 TB SATA disk holds every model (cold, fixed mount under `~/b70`), the NVMe only the working set (hot); `tools/hf_tier.sh hot|cold|status <model>` swaps each `~/.cache/huggingface/hub/models--X` between a real NVMe folder and a symlink to the 8 TB copy (copy, verify, then swap; refuses a model a job has open); replaces the USB bind mounts that the reboot dropped. First moves: Bolt bf16 hot (140 GB > RAM: the CPU reference streamed it from the USB disk at ~10 MB/s), parked models and finished reference outputs cold; settle the shared `hub/blobs` folder (599 links) first | queued: after the operator's USB -> 8 TB copy, before the validation rerun | the script + `status` on the box, the bf16 originals reachable again, Bolt bf16 hot |
+| *(engine)* | zero-config cleanup | the operator's 2026-11-06 rulings: the user chooses the model, speculative decoding (default: our auto dynamic MTP), the max context length and optionally the parallel mode (default: whatever is faster) - the engine decides the rest. List A (questions already decided): remove decode attention v1, prefill composed attention, the GDN scan / solve selectors, SILU_FUSED, prefill replay, K2 eager, Flash-Next fresh MTP selection, B70_Q4_PLE / --ple-dir, the EXP2 / AGNES_SWEEP / DECODE_EXTRA_M build options, --lm-head, --draft-format, --mtp-max / --mtp-cost, --spec-cost / --spec-min-match / --spec-history, --served-name, --queue, --mem-reserve-gb, Bolt's --chat-template / --generation-config, Flash-Next's --tokenizer, the renamed-flag refusals, ONEAPI_DEVICE_SELECTOR, B70_TOKENIZER_JSON, the Mac plain-C kernel branches; card memory and Xe-core count read from the device (not kB70Bytes); a startup gate (B70 only until a B60 / B65 is in the box; 1-2 cards, P2P between them); the load-time host-staged weight mover replaced by a direct card-to-card copy; their tests and stages go too | queued after spec 5d merges (both touch prefill) | box_check + one validation run |
 | **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done | box measurement on a quiet box + merge |
 | **21** Flash-Next | the Qwen3.8-Flash-Next model | r32.partial and the real-checkpoint golden sets still use the old 1e-3 gap rule (remaking them with the block scores is hours of CPU); routing on layers other than the last is judged by the gap rule as a fallback (the engine keeps only ranks 9 / 10 of the router probabilities) | not started | the sets remade on the CPU |
 
@@ -37,20 +38,18 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 | **16** pipeline | | 23 (two-card prefill speed), 27 (two-card serving: MTP, lookup, prefix cache) | 27 can run (the spec 16 prefix-cache + MTP fix merged 2026-11-04); 23 is speed, quiet box | one run of 27 in the validation rerun; 23 in the quiet-box session |
 | **18** K2-Horizon | | 17.k0, 21.passkey, 25.a4_ref, 25.passkey | the long-context passkey and the tool-call reference (CPU, days) | one run each; 25.a4_ref on the CPU |
 | **19** DFlash | | 54.d1_ref (the CPU reference half) | CPU job | one CPU run |
-| **22** expert offload probe | | 36 curve / project / reap | not run | one run (CPU + one card) |
 | **13** batching | | 66 check / chunk / cost | speed, idle box | quiet-box session |
 | **12** int8 KV | | 11 a4 / bf16 | reference data | one run |
 
 ## After the table is empty
 
 1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image, spec 17a's
-   first tensor-parallel measurement, and spec 16's check (MTP draft acceptance cold vs prefix-cache-restored, one card
+   first tensor-parallel measurement, the zero-config list B (the arms still waiting on a number - card hand-off copy vs peer, Bolt's fused kernels and bf16 state, Flash-Next's MTP norm, Kolibri / Flash-Next eager attention, int8 KV, int8 prefill, draft vocabulary: measure, keep the winner as the engine's choice, delete the rest), and spec 16's check (MTP draft acceptance cold vs prefix-cache-restored, one card
    and `--pp 2`: < 1% closes the stale-key item); then
    refresh README.md and docs/BENCHMARKS.md (they still say "nothing measured" for Ornith, K2, Flash-Next, Bolt and show
    pre-upgrade headline rows) and the per-model table in docs/18-running-models.md.
-2. Spec 22 expert offload (Flash-Next whole on two cards; its P0 rows 36 first; §9 has the Basalt lessons: CPU compute
-   for part of the misses, a popularity profile, a low-bit always-resident drafter), spec 13 batching (13b), spec 28m MoE
-   draft-checking probe. (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
+2. Spec 13 batching (13b), spec 28m MoE draft-checking probe. Spec 22 expert offload DROPPED 2026-11-06 (host-RAM
+   offload does not suit PCIe 3.0; Flash-Next stays a partial-layer development build). (Spec 27 Flint and spec 29 Nanbeige PARKED 2026-11-04 on
    the independent evidence - see the notes at the top of their design docs; their plans were deleted.)
 3. Box layout: everything under `~/b70` (branches `box-layout`, `plan-box-move`).
 
