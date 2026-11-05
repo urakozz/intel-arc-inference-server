@@ -3296,16 +3296,13 @@ st_r60_reject() {
   run_tests '^cli_reject_bolt_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r60.synth_golden 60 default cpu oracle_image,bolt_synth -       "the synthetics' golden sets: bolt_oracle.sh export on oracle-out-bolt-synth/n12-g128 and n12-g64x (short, 4k, agentic) -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, then their f32 judges (bolt_oracle.sh export-f32 n12-g128 -> oracle-out-bolt-n12-g128-f32{,-i8head}); then re-links oracle-out*"
+stage r60.synth_golden 60 default cpu oracle_image,bolt_synth -       "the synthetics' golden sets: bolt_oracle.sh export on oracle-out-bolt-synth/n12-g128 and n12-g64x (short, 4k, agentic) -> \$DATA/oracle-out-bolt-n12-{g128,g64x}; then re-links oracle-out*"
 st_r60_synth_golden() {
   local s
   for s in n12-g128 n12-g64x; do
     chk "BOLT_PROMPTS='bolt_short bolt_4k bolt_agentic' tools/box_validate/bolt_oracle.sh $DATA export $DATA/oracle-out-bolt-synth/$s" \
       "the synthetic ($s) golden sets"
   done
-  # their f32 judges (n12-g64x is n12-g128's exact expansion: one judge serves both)
-  chk "BOLT_PROMPTS='bolt_short bolt_4k bolt_agentic' tools/box_validate/bolt_oracle.sh $DATA export-f32 $DATA/oracle-out-bolt-synth/n12-g128" \
-    "the synthetics' f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_bolt_synth' $STATE/have.env"
   grab_all gap 'gap|^wall' 20
