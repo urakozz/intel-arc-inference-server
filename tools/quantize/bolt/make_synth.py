@@ -109,7 +109,7 @@ def _lin(n: int, k: int, g: torch.Generator) -> torch.Tensor:
     return _bf(torch.randn(n, k, generator=g) / math.sqrt(k))
 
 
-def layer_tensors(i: int, block: dict, seed: int, wid: dict) -> dict:
+def layer_tensors(i: int, block: dict, seed: int, wid: dict, router_scale: float = 2.0) -> dict:
     """Layer i's tensors, R's names, bf16 (fp32 for the kept F32 ones); `wid` the real widths."""
     g = torch.Generator().manual_seed(seed * 1_000_003 + 17 + i)
     H = wid["hidden"]
@@ -135,7 +135,7 @@ def layer_tensors(i: int, block: dict, seed: int, wid: dict) -> dict:
         out[m + "o_proj.weight"] = _lin(H, qn, g)
     else:
         E, I, L, S = block["n_routed_experts"], block["moe_intermediate_size"], wid["latent"], wid["shared"]
-        out[m + "gate.weight"] = _bf(2.0 * torch.randn(E, H, generator=g) / math.sqrt(H))
+        out[m + "gate.weight"] = _bf(router_scale * torch.randn(E, H, generator=g) / math.sqrt(H))
         out[m + "gate.e_score_correction_bias"] = (min(4.5 + 1.2 * i, 48.0) + 0.02 * torch.randn(E, generator=g)).float()
         out[m + "fc1_latent_proj.weight"] = _lin(L, H, g)
         out[m + "fc2_latent_proj.weight"] = _lin(H, L, g)
@@ -233,6 +233,7 @@ def main() -> None:
     ap.add_argument("--layers", type=int, default=12)
     ap.add_argument("--form", required=True, choices=FORMS)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--router-scale", type=float, default=2.0, help="the router weights' std x sqrt(4096)")
     ap.add_argument("--tokenizer", help="a Bolt snapshot directory (tokenizer.json, tokenizer_config.json, "
                                         "chat_template.jinja, generation_config.json); default: the HF cache's "
                                         "copy of our export")
@@ -276,7 +277,7 @@ def main() -> None:
     else:
         write(0, pack(top_tensors(a.seed, wid), a.form, group))
         for i in range(a.layers):
-            t = pack(layer_tensors(i, llm["block_configs"][i], a.seed, wid), a.form, group)
+            t = pack(layer_tensors(i, llm["block_configs"][i], a.seed, wid, a.router_scale), a.form, group)
             if i == a.layers - 1:
                 t.update({"vision_model.summary_idxs": torch.arange(4, dtype=torch.int64)})
             write(1 + i, t)
@@ -293,7 +294,7 @@ def main() -> None:
                {"metadata": {"total_size": total}, "weight_map": dict(sorted(wm.items()))})
     write_json(os.path.join(a.out, "config.json"), cfg)
     write_json(os.path.join(a.out, "bolt_synth.json"),
-               {"synthetic": True, "layers": a.layers, "form": a.form, "seed": a.seed,
+               {"synthetic": True, "layers": a.layers, "form": a.form, "seed": a.seed, "router_scale": a.router_scale,
                 "expanded_from": os.path.abspath(a.expand_from) if a.expand_from else None,
                 "maker": "tools/quantize/bolt/make_synth.py (random weights, bolt_make_tiny.pack_int4 signed, spec 25b)"})
     snap = a.tokenizer or find_cache_snapshot()
