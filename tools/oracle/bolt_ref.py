@@ -880,10 +880,13 @@ def cmd_run(a) -> None:
     print(f"prompt forward {t_prompt:.1f}s ({model.bolt_lazy.filled} expert reads)", flush=True)
     states = mamba_states(cache, cfg)
     tokens: list[int] = []
+    force = read_ids(a.force) if a.force else None
+    if force is not None and len(force) < a.gen:
+        die(f"--force has {len(force)} ids, --gen is {a.gen}")
     t2 = time.time()
     last = rows[-1][-1]
     for step in range(a.gen):
-        nxt = greedy_id(last)
+        nxt = greedy_id(last) if force is None else int(force[step])
         tokens.append(nxt)
         rec.base[0] = T + step
         with torch.no_grad():
@@ -892,7 +895,7 @@ def cmd_run(a) -> None:
         rows.append(out.logits[0].float())
         if step == 0:
             print(f"  first decode step {time.time() - t2:.1f}s", flush=True)
-    print(f"greedy {a.gen}: {time.time() - t2:.1f}s -> {tokens}", flush=True)
+    print(f"{'forced' if force is not None else 'greedy'} {a.gen}: {time.time() - t2:.1f}s -> {tokens}", flush=True)
     rec.remove()
     t = rec.tensors()
     t.update(states)
@@ -910,7 +913,7 @@ def cmd_run(a) -> None:
     for line in gap_summary(t, cfg) + state_summary(t, cfg):
         print(line)
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
-            "gen": str(a.gen), "layers": str(len(ks)), "chunk": str(chunk), "weights": a.weights,
+            "gen": str(a.gen), "forced": "1" if force is not None else "0", "layers": str(len(ks)), "chunk": str(chunk), "weights": a.weights,
             "trunk": model.bolt_ckpt.trunk, "dtype": a.dtype, "mamba_path": a.path, "cache": a.cache, "a_exp": ops.A_EXP,
             "h_row0": str(h_from), "logits_row0": str(log_from), "attn_implementation": "eager",
             "tap_layers": json.dumps(rec.taps), "transformers": PINNED_TRANSFORMERS, "torch": torch.__version__,
@@ -1226,6 +1229,8 @@ def main() -> None:
     r.add_argument("--cache", default="fp32", choices=["fp32", "bf16"], help="the SSM / conv cache dtype (Decision 2)")
     r.add_argument("--path", default="kernel", choices=["kernel", "torch"], help="the Mamba path (torch: R's fallback)")
     r.add_argument("--dtype", default="bf16", choices=["bf16", "fp32"])
+    r.add_argument("--force", help="ids to teacher-force instead of the greedy argmax (the f32 judge on the bf16 golden's "
+                   "tokens, operator ruling 2026-10-23: its rows line up with the golden's row for row)")
     r.add_argument("--expert-cache-gb", type=float, default=0.0, help="an LRU of dequantised experts across steps")
     r.add_argument("--a-exp", choices=["torch", "engine"], default=None,
                    help="A = -exp(A_log) by torch.exp (R's, the default) or by the engine's exp_torch (spec 25c: the "
