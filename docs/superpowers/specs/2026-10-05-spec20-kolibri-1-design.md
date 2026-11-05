@@ -613,3 +613,45 @@ server's greedy chat = `b70-decode --prefill --lm-head int8` on its `prompt_toke
 same on the real checkpoint (`--max-len auto` -> 262144), KL4 - passkey 3 / 3 at 262144 with the int8 head,
 A4 against the bf16 source's reference with 0 parse failures (agreement recorded) - and the llama-benchy
 rows (pp4096 tg256 copy / peer, prefix caching at 4k / 16k / 32k, decode at 4k / 32k / 128k).
+
+## 14. Real tool sessions on the card: reasoning echoed or dropped (2026-11-04 / 2026-11-06)
+
+**The question.** Many OpenAI clients drop `reasoning_content` from the assistant turns they send back. Kolibri-1's
+template then renders those earlier tool turns with EMPTY think blocks. Community reports of tool-session stalls
+(turns that end with reasoning but no answer and no call) might come from such clients (operator 2026-11-04).
+
+**The driver.** `tools/toolcall/kolibri_session.py` (the 2026-11-04 box script, now in the repo): a live agentic
+session against b70-serve on a small German Python project in a sandbox (three planted bugs in `calc.py`), five real
+tools executed by the client (`list_dir`, `read_file`, `write_file`, `run_tests`, `search`), six scripted user
+tasks (fix the tests, add `mittelwert` with tests and README, docstrings, a summary, a CHANGELOG, a recommendation),
+streamed, sampled with the card's defaults (T 1.0, top-p 0.97, top-k 128), seed 20261104 + turn, reasoning effort
+medium, `max_tokens` 8192, at most 20 turns. Verdict per turn: `call`, `answer`, `STALL` (no content, no call),
+`LEFTOVER` (unparsed `<tool_call>` text), `LENGTH` (token cap). The summary counts the calls as valid (a known
+tool, arguments a JSON object with every required key) or invalid, and loops (a call turn repeating the previous
+call turn's calls exactly). `--no-echo-reasoning` leaves `reasoning_content` out of earlier assistant turns;
+`--rescore <out.json>` recounts a recorded session.
+
+**The runs.** Both on our int4 export (`urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ`), two cards
+(`ZE_AFFINITY_MASK=0,1`, `--pp 2` by default, split 25, `--max-len auto` -> 262144), under `gpu_lock.sh box`. The
+echoing run used the `fix-kolibri-toolcalls` build (merged since); the dropping run main's engine (be9dc98).
+
+| client | turns | calls / answers | stalls / leftovers / length | tool calls (valid / invalid) | loops | sandbox tests at the end |
+|---|---|---|---|---|---|---|
+| echoes reasoning (2026-11-04) | 19 (ran out of user tasks) | 13 / 6 | 0 / 0 / 0 | 24 / 0 | 0 | 6 / 6 pass |
+| drops reasoning (2026-11-06) | 20 (turn cap, mid-task 6) | 15 / 5 | 0 / 0 / 0 | 25 / 0 | 0 | 6 / 6 pass |
+
+**Result: no stall, no invalid call, no loop when the client drops the reasoning.** The empty think blocks did not
+derail Kolibri-1 on this task; the community stalls are not reproduced by dropping `reasoning_content` alone (one
+session, one task - not proof that no client setting ever stalls).
+
+**What dropping the reasoning costs: prefix-cache reuse.** With echo, each new prompt extends the previous one
+exactly, so the server CONTINUES the live session (13 of 19 requests `kind continue`). Without echo the next prompt
+differs from what the model generated (an empty think block where the reasoning was), so every later request is a
+`kind restore` from the last block snapshot before that point and re-prefills from there (19 of 20): 8,698
+re-prefilled ids in 12.8 s over the session vs 7,158 in 10.5 s with echo (the no-echo prompts are shorter). At
+this length the cost is small; it grows with the reasoning between snapshots.
+
+**Seen in both runs, not caused by echo: one ~20-24 s prefix-cache store per server run.** One request-end (or
+first) snapshot store into the 32 GiB pinned RAM cache took 20.4 s (echo run: the first request) / 24.0 s (this run:
+turn 9's request end, which delayed turn 10 to 28 s); every other store took 5-115 ms. Likely first touch of
+not-yet-faulted pinned pages; not investigated here (recorded for the prefix-cache owner).
