@@ -7,7 +7,7 @@ new label. Rule until the table is empty: no new specs or side plans. Documents 
 leave `docs/superpowers/plans/box-validation-queue.md`, finished sessions leave `docs/box-day-plan.md`, and both files
 go when empty; this page stays while fix rounds still add items.
 
-Last updated: 2026-11-05 (main 0dc9b71, branch spec28-reviewed-rows; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
+Last updated: 2026-11-05 (main 5c21b49; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
 ## Open
 
@@ -31,7 +31,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | spec | what | rows not yet PASS | why | closes with |
 |---|---|---|---|---|
-| G0 | bit-for-bit comparison against a baseline build | g0.suite (on main ad711de, before the spec 21 merge) | bitwise PASS against the new baseline; the suite FAILs only on known open items - the Qwen3.8 MTP / DFlash tests (all PASS since 2026-11-05, spec 28 under Closed recently) and the pre-fix Flash-Next tests (fixed since) - but a suite FAIL stops every later row | the blocked rows relaunched past G0 on main fb5535b (2026-11-04 07:40) |
+| G0 | bit-for-bit comparison against a baseline build | g0.suite | the 2026-11-05 run on main cdcb9c9: bitwise PASS; the suite FAILed on 22 Bolt synthetic golden / prefill tests (failing since at least 2026-11-04, missed in this row then) - fixed since (Closed recently); a suite FAIL stops every later row | the validation rerun on main 5c21b49 |
 | **21** Flash-Next | | 32 partial / cli, real-checkpoint rows | golden, pp and serve passed on the branch (2026-11-04, run directly); the rest not yet run | one box_validate run of r32-r34 on main |
 | **25** Bolt | | 60, 61, 62 (synthetic and golden chains) | waiting on G0 and the Bolt reference set (building) | after G0 re-baseline + the references |
 | **16** pipeline | | 23 (two-card prefill speed), 27 (two-card serving: MTP, lookup, prefix cache) | 27 can run (the spec 16 prefix-cache + MTP fix merged 2026-11-04); 23 is speed, quiet box | one run of 27 in the validation rerun; 23 in the quiet-box session |
@@ -58,6 +58,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-05 | 25 | Bolt's 22 synthetic golden / prefill tests: no engine or reference defect - the random-weight N12 synthetics' routers sit on near-ties, so any two correct bf16 implementations flip an expert within rows 0-2 and the Mamba state spreads it (bf16 reference vs its f32 twin misses 12 / 32 tokens too). Operator rulings (spec 25 §9.1): strict bars only before the first near-tie flip, printed after; the per-block h median binds with >= 8 gated rows; the bf16-state arm's off-2048 chunkings printed (its kernel rounds the state once a chunk by design). Real checkpoints and the fp32 state unchanged. 22 / 22 + bolt_cutoff_test PASS, box_check 316/0/0 |
 | 2026-11-05 | 28 | Qwen3.8 speculative tests all PASS: the operator's ruling (option 1) accepts the 4 chaotic turn-boundary positions as REVIEWED - `kReviewedRows` in tests/server/spec_judge.h, exact key / row / ids, stale entries printed (spec 28 §10): t6_usage-openai row 0 (28.63 ulp bf16 head, 28.87 int8 head), t6_usage-rotation row 20 (9.06, bf16 head), dflash_gpu t5_test-box rows 128 / 137 / 143 (10.53 / 11.68 / 16.27); before it the int8-aware f32 judges for the l0-int8 tests (t1_define-loader passes). mtp_verify, mtp_gpu + its two 128k twins, dflash_engine, dflash_gpu, dflash_lookup PASS |
 | 2026-11-04 | 28 | Qwen3.8 speculative tests: the bf16-unstable grading rule (bf16 top-k references for 72 contexts, int8-aware prompt pass for the l0-int8 tests), 41 missing f32 judges made, dflash_engine_test's M = 8 check fixed after the attention change; mtp_verify, dflash_engine, dflash_lookup PASS; box_check 315/0/0 |
 | 2026-11-04 | 28 | Qwen3.8 f32 references for all 286 forced contexts (one trie-merged fp32 CPU pass, ~2 h); no reference = SKIP (77), not FAIL; tests wired to the judges; mtp_verify_test and dflash_engine_test PASS judged; box_check 315/0/0 |
