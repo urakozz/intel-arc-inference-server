@@ -86,6 +86,7 @@ add_dependencies(linear_i8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6
                  kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
                  kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
 add_test(NAME linear_i8_test COMMAND linear_i8_test)
+add_test(NAME linear_i8_cap4096_test COMMAND linear_i8_test --chunk-cap 4096)   # plan 5d: the 4096-row scratch
 
 # --- spec 3 T3: HTTP server (host-only mock tests) ---
 add_executable(openai_test server/openai_test.cc)
@@ -302,6 +303,9 @@ set_tests_properties(gdn_solve_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_
 set_tests_properties(gdn_solve_register_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register")
 set_tests_properties(gdn_chunk_solve_register_test PROPERTIES
   ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register" TIMEOUT 1800)
+# Plan 5d: the 4096-position bars as ONE call at chunk cap 4096 (--chunk-cap, tests/chunk_cap_arg.h).
+add_test(NAME gdn_chunk_cap4096_test COMMAND gdn_chunk_test --chunk-cap 4096)
+set_tests_properties(gdn_chunk_cap4096_test PROPERTIES TIMEOUT 1800)
 
 # The composed attention (ruling A14), end to end against decode's own
 # reference. No checkpoint -- one synthetic FA layer over a synthetic cache. The host
@@ -959,6 +963,11 @@ foreach(b l0 l0-int8)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids ${b})
   set_tests_properties(prefill_split_${b}_test PROPERTIES LABELS "checkpoint;prefill"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # Plan 5d: at chunk cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise).
+  add_test(NAME prefill_split_${b}_cap4096_test COMMAND prefill_split_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids ${b} --chunk-cap 4096)
+  set_tests_properties(prefill_split_${b}_cap4096_test PROPERTIES LABELS "checkpoint;prefill"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 endforeach()
 # Spec 7 C1 (plan 7b): state and KV snapshots restore bitwise; the block hook.
 add_executable(snapshot_test runtime/snapshot_test.cc)
@@ -1025,6 +1034,22 @@ add_test(NAME prefill_determinism_l0_test COMMAND prefill_determinism_test
   ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
 set_tests_properties(prefill_consistency_l0_test prefill_determinism_l0_test PROPERTIES
   LABELS "checkpoint;prefill" TIMEOUT 3600)
+# Plan 5d: the gates at chunk cap 4096 (--chunk-cap, tests/chunk_cap_arg.h): every chunk-0 case
+# runs at the cap, so a prompt above 2048 positions is ONE chunk.
+add_test(NAME prefill_gate_l0_cap4096_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+  prose,code,cjk 0 l0 --chunk-cap 4096)
+add_test(NAME prefill_gate_int8_cap4096_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
+  prose,code,cjk 0 l0-int8 1 --chunk-cap 4096)
+set_tests_properties(prefill_gate_l0_cap4096_test prefill_gate_int8_cap4096_test PROPERTIES
+  LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+add_test(NAME prefill_consistency_l0_cap4096_test COMMAND prefill_consistency_test
+  ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0 --chunk-cap 4096)
+add_test(NAME prefill_determinism_l0_cap4096_test COMMAND prefill_determinism_test
+  ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0 --chunk-cap 4096)
+set_tests_properties(prefill_consistency_l0_cap4096_test prefill_determinism_l0_cap4096_test PROPERTIES
+  LABELS "checkpoint;prefill" TIMEOUT 3600)
 
 # `Engine::prefill` end to end: the chunk walk, the Control handoff, the
 # launch arithmetic and the rejections (plan 6b Task 10), on the L0 backend; section 8
@@ -1037,6 +1062,9 @@ target_link_libraries(prefill_smoke_test PRIVATE b70_prefill_host b70_runtime b7
 add_dependencies(prefill_smoke_test ${B70_PREFILL_KERNELS})
 add_test(NAME prefill_smoke_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_smoke_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
+# Plan 5d: the smoke at chunk cap 4096 (the scratch, the Int8State and the chunk walk at 4096 rows).
+add_test(NAME prefill_smoke_cap4096_test COMMAND prefill_smoke_test ${B70_TEST_SNAPSHOT} --chunk-cap 4096)
+set_tests_properties(prefill_smoke_cap4096_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 1800)
 
 # The int4-lm_head checkpoint (spec 1.6 §5.1, tools/quantize_qwen38_rtn.sh).
 # It never went through `hf download`, so it is a plain path and not a cache
@@ -1389,6 +1417,9 @@ if(B70_MTP)
   # Task 3 / Review Focus 2: the head's KV after prefill against M = 1 fills.
   add_test(NAME mtp_prefill_test COMMAND mtp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(mtp_prefill_test PROPERTIES LABELS "checkpoint;prefill;mtp"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  add_test(NAME mtp_prefill_cap4096_test COMMAND mtp_prefill_test ${B70_TEST_SNAPSHOT} --chunk-cap 4096)   # plan 5d
+  set_tests_properties(mtp_prefill_cap4096_test PROPERTIES LABELS "checkpoint;prefill;mtp"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
   # M2 + Review Focus 1-5: verify at M = k + 1, per-row GDN slots, commit, snapshots, replay.
   # Spec 28 N4 / N6 (tests/server/spec_judge.h): Qwen3.8's speculative output graded by the f32 judges of its forced
@@ -2565,13 +2596,14 @@ add_dependencies(pp_prefill_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNEL
 add_test(NAME pp_prefill_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8)
 add_test(NAME pp_prefill_l0_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0)
 add_test(NAME pp_prefill_i8head_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8 int8)
+add_test(NAME pp_prefill_cap4096_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8 --chunk-cap 4096)   # plan 5d
 add_executable(pp_prefill_fail_test runtime/pp_prefill_fail_test.cc)
 target_include_directories(pp_prefill_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_prefill_fail_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 add_dependencies(pp_prefill_fail_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
 add_test(NAME pp_prefill_fail_test COMMAND pp_prefill_fail_test ${B70_TEST_SNAPSHOT})
-set_tests_properties(pp_prefill_test pp_prefill_l0_test pp_prefill_i8head_test pp_prefill_fail_test
+set_tests_properties(pp_prefill_test pp_prefill_l0_test pp_prefill_i8head_test pp_prefill_cap4096_test pp_prefill_fail_test
   PROPERTIES LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77
   TIMEOUT 5400)
 if(B70_KV8 AND COMMAND b70_kv8_twin)

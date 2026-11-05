@@ -61,6 +61,7 @@
 // `[0, pos + C)` and the causal mask is exercised inside the chunk as well as
 // over the history.
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -361,7 +362,8 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
 
 // Every case prints before anything is judged, so a failure leaves the whole
 // grid in the log (golden_gate_test's arrangement, and for its reason).
-int main() {
+int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   Dev d;
   // Spec 6: flash against composed on the L0 backend, before the composed grid below.
   {

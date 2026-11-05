@@ -201,37 +201,28 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
 //   max_len = settle(..., path, ...)
 //   cap = settle_chunk_cap(..., max_len, path, ..., asked)   what the engine is given
 //
-// An asked cap (or B70_PREFILL_CHUNK_CAP) is planned and kept as it is: an explicit 4096
+// An asked cap (b70-decode's --prefill-chunk) is planned and kept as it is: an explicit 4096
 // shortens what auto gives the context. With nothing asked, kPrefillChunkCapRule decides:
 // off, the default 2048; on, operator ruling (i) of 2026-10-27 (context first) - max_len is
 // planned at 2048 and 4096 is taken only when the plan at that max_len has room for it
-// (runtime::prefill_chunk_cap_that_fits).
+// (runtime::prefill_chunk_cap_that_fits). There is no environment variable or server flag for
+// it (operator, 2026-11-03): the engine side chooses.
 inline constexpr bool kPrefillChunkCapRule = false;
-inline bool chunk_cap_env_set() {
-  const char* v = std::getenv("B70_PREFILL_CHUNK_CAP");
-  return v != nullptr && *v != '\0';
-}
 inline uint32_t planned_chunk_cap(uint32_t asked) {
-  if (asked != 0) return asked;
-  if (chunk_cap_env_set()) return runtime::default_prefill_chunk_cap();
-  return runtime::PrefillScratchDims::kCDefault;
+  return asked != 0 ? asked : runtime::PrefillScratchDims::kCDefault;
 }
-// The same, with the model checked and a refusal naming the cause: an asked cap was checked by
-// prefill_chunk_cap_for; one from B70_PREFILL_CHUNK_CAP is checked here, before the plan.
+// The same, with the model checked (an asked cap was checked by prefill_chunk_cap_for already;
+// the default 2048 every model runs).
 inline uint32_t planned_chunk_cap(uint32_t asked, const model::ModelDesc& d) {
   const uint32_t cap = planned_chunk_cap(asked);
-  try {
-    runtime::check_prefill_chunk_cap(d, cap);
-  } catch (const std::invalid_argument& e) {
-    throw std::runtime_error(std::string("B70_PREFILL_CHUNK_CAP=") + std::to_string(cap) + ": " + e.what());
-  }
+  runtime::check_prefill_chunk_cap(d, cap);
   return cap;
 }
 inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m, uint32_t max_len,
                                  size_t reserve_bytes, const runtime::PrefillPath& path,
                                  runtime::KvCache kv, const runtime::DrafterPlan& drafter, uint32_t asked) {
   if (!path.prefill) return path.chunk_cap;
-  const char* why = asked != 0 ? "--prefill-chunk" : chunk_cap_env_set() ? "B70_PREFILL_CHUNK_CAP" : nullptr;
+  const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
   if (why == nullptr && kPrefillChunkCapRule) {
     cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, m.report.total() - m.report.rope_bytes,

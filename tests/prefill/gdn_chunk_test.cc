@@ -32,8 +32,9 @@
 // one call" is not legal there** - `gdn_chunk` throws above the scratch's chunk cap. The
 // 4096-position bars are then run as 2 x 2048, which also folds the chunk-boundary carry
 // into the headline comparison; case 4's ladder moves to 2048 / 1024 / 64. Plan 5d: with
-// B70_PREFILL_CHUNK_CAP=4096 the scratch holds 4096 rows and the bars run as ONE call.
+// --chunk-cap 4096 (tests/chunk_cap_arg.h) the scratch holds 4096 rows and the bars run as ONE call.
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -66,7 +67,7 @@ using runtime::prefill::PtrArg;
 namespace G = gdn_ref;
 
 constexpr uint32_t kPositions = 4096;                 // the plan's bar
-const uint32_t kC = runtime::default_prefill_chunk_cap();  // 2048 (ruling A13), or 4096 (plan 5d)
+uint32_t kC = 2048;   // the chunk cap: 2048 (ruling A13), or 4096 under --chunk-cap 4096 (plan 5d; set first in main)
 constexpr uint32_t kStateElems = G::kHeads * G::kDim * G::kDim;   // 48*128*128
 constexpr uint32_t kRingElems = G::kRing * G::kConvRows;
 constexpr uint32_t kMixerN = G::kHeads * G::kDim;                 // 6144
@@ -354,6 +355,7 @@ void check_solve_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
 }  // namespace
 
 int main(int argc, char** argv) {
+  kC = b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   Dev d;
   std::printf("device: %s\n", d.ctx.name().c_str());
   const Fixture f = make_fixture();

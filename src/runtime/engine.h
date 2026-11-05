@@ -85,7 +85,7 @@ class Engine {
   // position's logits (the first generated id) -- exactly as ingest() would
   // have left it, which is what tests/prefill/prefill_consistency_test.cc
   // grades. Default chunk = the session's chunk cap (prefill_chunk_cap(): 2048 unless set,
-  // ruling A7/A13; plan 5d: 4096 by set_prefill_chunk_cap or B70_PREFILL_CHUNK_CAP).
+  // ruling A7/A13; plan 5d: 4096 by set_prefill_chunk_cap).
   //
   // Throws if `ids` is empty, if `chunk > prefill_chunk_cap()`, if any id is
   // outside the vocabulary (`pf_embed_gather` has no `Control::debug_flag`
@@ -125,7 +125,7 @@ class Engine {
   // every per-chunk buffer (PrefillScratch, Int8State's xq / xs, MTP's prefill hidden rows, a
   // drafter's tap staging). 2048 (PrefillScratchDims::kCDefault) or 4096 (kCMax); the CLIs
   // set the one their memory plan counted (runtime::prefill_chunk_cap_that_fits). Unset means
-  // runtime::default_prefill_chunk_cap() (B70_PREFILL_CHUNK_CAP, else 2048). Throws
+  // runtime::default_prefill_chunk_cap() (2048; a test may move it). Throws
   // std::invalid_argument for a cap check_prefill_chunk_cap refuses (4096 on a MoE model, by
   // name), and std::logic_error once the prefill scratch exists at another cap (the buffers
   // are sized once; set it before prepare_prefill()). Defined in engine_prefill.cc.

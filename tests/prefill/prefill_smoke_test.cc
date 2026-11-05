@@ -12,6 +12,7 @@
 // tests/CMakeLists.txt's comment on why every checkpoint test takes it
 // explicitly rather than depending on `refs/main`).
 #include <cstdint>
+#include "chunk_cap_arg.h"
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -93,6 +94,7 @@ State grab(runtime::Engine& e, l0::Context& ctx) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string snap =
       argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
 

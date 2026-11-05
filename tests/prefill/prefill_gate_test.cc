@@ -22,7 +22,7 @@
 // argv: [1] golden dir, [2] prompt dir, [3] snapshot,
 //       [4] comma-separated prompt names (default "prose,code,cjk"),
 //       [5] prefill chunk width (default 0 = the engine's chunk cap; plan 5d: run with
-//           B70_PREFILL_CHUNK_CAP=4096 for chunks above 2048),
+//           --chunk-cap 4096 for chunks above 2048, tests/chunk_cap_arg.h),
 //       [6] prefill backend, l0 or l0-int8 (default: l0),
 //       [7] bf16 near-tie flips accepted per prompt (default 0; see main()).
 // Arguments 4 and 5 are what make the >= 2048-id multi-chunk gate of spec §6.2
@@ -34,6 +34,7 @@
 // the ~1 GB of oracle output that lives only on the box. Absent goldens are a
 // SKIP (exit 77), not a failure.
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -123,6 +124,7 @@ bool bf16_near_tie(const float* row, uint32_t used, uint32_t top1, uint32_t* sec
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   // Ornith (operator ruling 2026-10-23, golden_common.h): `--judge=<f32 dir>` - the gate judges
   // against the f32 teacher-forced reference; the bf16 golden is printed beside it.
   const std::string judge_dir = golden::take_judge(argc, argv);

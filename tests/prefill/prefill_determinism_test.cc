@@ -23,6 +23,7 @@
 //       [3] prefill backend, l0 or l0-int8 (default: l0) -- spec 2.1
 //       §2 bar 3 is this gate run on each backend (plan 9e Task 1).
 #include <cstdint>
+#include "chunk_cap_arg.h"
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -94,6 +95,7 @@ void compare(const State& a, const State& b, const char* what) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   // argv[3]: the prefill backend (spec 2.1) -- l0 or l0-int8; default l0.

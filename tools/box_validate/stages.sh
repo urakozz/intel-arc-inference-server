@@ -3849,7 +3849,7 @@ st_r70_verdict() {
 =======
 row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --pp 2), speed against 2048"
 rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper per 4096 tokens at 4096 rows, the rest of the plan stops. Hand back: the P0 table, the gate lines, the speed table."
-rownote 75 "Run first on 2026-11-01 as busy-box timing on one card (other agents on both cards) - docs/probe-prefill-chunk-4096-2026-11-01.md's provisional lines; r75.p0 / r75.speed are the quiet-box re-check. The gates run at B70_PREFILL_CHUNK_CAP=4096 (the engines' default cap, as B70_KV_CACHE is the cache form's)."
+rownote 75 "Run first on 2026-11-01 as busy-box timing on one card (other agents on both cards) - docs/probe-prefill-chunk-4096-2026-11-01.md's provisional lines; r75.p0 / r75.speed are the quiet-box re-check. The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
 stage r75.k0    75 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0 at cap 2048: every binary and token as main"
 st_r75_k0() {
   need_pass g0.sha g0.bitwise g0.suite
@@ -3870,23 +3870,23 @@ st_r75_p0() {
 }
 stage r75.gates 75 default card qwen  r75.k0                "prefill_gate / consistency / determinism at cap 4096 (l0-int8, l0), prefill_split at cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise), buffers_test, A4 on l0-int8, MTP prefill"
 st_r75_gates() {
-  run_tests '^(buffers_test|prefill_smoke_test|gdn_chunk_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_consistency_l0_test|prefill_determinism_l0_test|mtp_prefill_test|prefill_split_l0_test|prefill_split_l0-int8_test)$' '' '' B70_PREFILL_CHUNK_CAP=4096
+  run_tests '^(buffers_test|linear_i8_cap4096_test|gdn_chunk_cap4096_test|prefill_smoke_cap4096_test|prefill_gate_l0_cap4096_test|prefill_gate_int8_cap4096_test|prefill_consistency_l0_cap4096_test|prefill_determinism_l0_cap4096_test|mtp_prefill_cap4096_test|prefill_split_l0_cap4096_test|prefill_split_l0-int8_cap4096_test)$'
   if [ -n "${A4_REF_DIR:-}" ] && [ -d "${A4_REF_DIR:-/nonexistent}" ]; then
     x "mkdir -p $STATE/a4-c4096 && cp $A4_REF_DIR/*.bf16.txt $STATE/a4-c4096/"
-    chk "B70_PREFILL_CHUNK_CAP=4096 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-c4096 l0-int8" "A4 engine runs at cap 4096"
+    chk "PREFILL_CHUNK=4096 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-c4096 l0-int8" "A4 engine runs at cap 4096"
     chk "python3 tools/toolcall/score.py $STATE/a4-c4096 bf16 l0-int8 | tee $STATE/a4-c4096/score.md" "A4 scoring (>= 25 / 36)"
     grab_all a4 'match|/36|total' 6
   else
     say "A4 skipped: A4_REF_DIR unset (<name>.bf16.txt reference runs)"
   fi
   # plan == allocation at cap 4096 (MTP hidden rows, Int8State xq / xs, the scratch), both backends
-  chk "B70_PREFILL_CHUNK_CAP=4096 build/tests/memory_plan_box_test $SNAP_QWEN mtp 16384" "memory_plan_box_test at cap 4096, l0, MTP"
-  chk "B70_PREFILL_CHUNK_CAP=4096 build/tests/memory_plan_box_test $SNAP_QWEN mtp --prefill-backend l0-int8 16384 auto" "memory_plan_box_test at cap 4096, l0-int8, MTP, 16384 and auto"
+  chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp 16384 --chunk-cap 4096" "memory_plan_box_test at cap 4096, l0, MTP"
+  chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp --prefill-backend l0-int8 16384 auto --chunk-cap 4096" "memory_plan_box_test at cap 4096, l0-int8, MTP, 16384 and auto"
   finish
 }
 stage r75.pp    75 default gpu  qwen  r75.k0                "--pp 2 prefill at cap 4096: pp_prefill_test (both cards)"
 st_r75_pp() {
-  run_tests '^pp_prefill_test$' '' '' B70_PREFILL_CHUNK_CAP=4096
+  run_tests '^pp_prefill_cap4096_test$'
   finish
 }
 stage r75.speed 75 optin   gpu  qwen  r75.gates             "pp4096 / 16384 / 32768 / 65536 (and 512 / 1024) at chunk 4096 vs 2048; idle, interleaved, median of 3"

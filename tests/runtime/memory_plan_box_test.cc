@@ -5,7 +5,7 @@
 // load at 4096, plan, loader::set_max_len). Device + checkpoint.
 //
 //   memory_plan_box_test <snapshot-or-repo> [mtp] [--lm-head int8|bf16] [--prefill-backend l0|l0-int8]
-//   (plan 5d: the prefill chunk cap is the engine's default, B70_PREFILL_CHUNK_CAP)
+//   (plan 5d: the prefill chunk cap is the engine's default; --chunk-cap 4096 moves it, tests/chunk_cap_arg.h)
 //                        [--draft-vocab 32k|64k|128k] [max_len|auto ...]
 //
 // `mtp` loads the MTP head (spec 8) and plans its buffers. `--lm-head` picks the head
@@ -20,6 +20,7 @@
 // reserve: if the reserve is too small for what the plan does not count (driver,
 // kernel modules, command lists), this test is where the allocation fails.
 #include <cstdint>
+#include "chunk_cap_arg.h"
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -53,7 +54,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const runtime::PrefillPath path{
       true, o.backend,   // l0 (the engine's default) or, plan 5d, --prefill-backend l0-int8
       runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed,
-      runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (B70_PREFILL_CHUNK_CAP)
+      runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (--chunk-cap)
   loader::DraftVocabSpec dvs;
   if (o.draft_vocab != 0) {
     dvs.size = o.draft_vocab;
@@ -167,6 +168,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string arg = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   Opts o;
   std::vector<std::string> lens;

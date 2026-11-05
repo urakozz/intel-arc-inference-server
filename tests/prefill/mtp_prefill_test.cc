@@ -21,6 +21,7 @@
 //
 // usage: mtp_prefill_test <snapshot>   (cwd = the source tree)
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -87,6 +88,7 @@ Cmp compare(const HeadKv& a, const HeadKv& b, uint32_t rows, double bar) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   std::vector<uint32_t> ids = golden::read_ids("tests/golden/prompts/long32k.ids");
   const uint32_t n = 4096;

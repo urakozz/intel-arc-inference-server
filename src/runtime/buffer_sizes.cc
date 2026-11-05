@@ -338,14 +338,20 @@ uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc) {
   return cap;
 }
 
-uint32_t default_prefill_chunk_cap() {
-  const char* v = std::getenv("B70_PREFILL_CHUNK_CAP");
-  if (!v || !*v) return PrefillScratchDims::kCDefault;
-  const std::string s(v);
-  if (s == "2048") return PrefillScratchDims::kCDefault;
-  if (s == "4096") return PrefillScratchDims::kCMax;
-  throw std::invalid_argument("B70_PREFILL_CHUNK_CAP must be unset, 2048 or 4096 (got '" + s + "')");
+namespace {
+uint32_t g_default_chunk_cap = PrefillScratchDims::kCDefault;   // moved only by testing::
+}  // namespace
+
+uint32_t default_prefill_chunk_cap() { return g_default_chunk_cap; }
+
+namespace testing {
+void set_default_prefill_chunk_cap(uint32_t cap) {
+  if (cap != PrefillScratchDims::kCDefault && cap != PrefillScratchDims::kCMax)
+    throw std::invalid_argument("runtime::testing::set_default_prefill_chunk_cap: " + std::to_string(cap) +
+                                " is not a chunk cap (2048 or 4096)");
+  g_default_chunk_cap = cap;
 }
+}  // namespace testing
 
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {
   if (chunk_cap != PrefillScratchDims::kCDefault && chunk_cap != PrefillScratchDims::kCMax)
