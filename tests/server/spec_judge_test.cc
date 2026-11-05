@@ -201,6 +201,28 @@ int main() {
     // (e) bf16-unstable but no plain row: the strict bar
     sv = run("unstable, no plain row", spec_judge::PlainRow{});
     CHECK(!sv.pass && sv.beyond[0].unstable && !sv.beyond[0].have_plain);
+    // (g) the reviewed rows (operator 2026-11-05): case (c)'s miss (row 0, f32 top 4, speculative 9) fails the rules.
+    //     An entry with another id, or at another row, does not pass it; the exact entry does, printed as REVIEWED.
+    static const std::string kks = ks;   // the entries keep the key's char*
+    const size_t base = spec_judge::reviewed().rows.size();
+    spec_judge::add_reviewed({kks.c_str(), 0, 4, 8, 12.0, "test", "another id at the same row"});
+    spec_judge::add_reviewed({kks.c_str(), 1, 4, 9, 12.0, "test", "another row"});
+    sv = run("reviewed: other id / other row only", plain_gap(1));
+    CHECK(!sv.pass && sv.beyond[0].reviewed < 0);
+    CHECK(sv.line().find("REVIEWED (operator") == std::string::npos);
+    spec_judge::add_reviewed({kks.c_str(), 0, 4, 9, 12.0, "test", "the exact entry"});
+    sv = run("reviewed: exact entry", plain_gap(1));
+    CHECK(sv.pass && sv.beyond[0].pass && sv.beyond[0].reviewed == int(base + 2));
+    CHECK(sv.line().find("PASS as REVIEWED") != std::string::npos);
+    CHECK(!sv.beyond[0].unstable || sv.beyond[0].g32 > sv.beyond[0].allow);   // the rules alone still fail it
+    CHECK_EQ(spec_judge::reviewed().hits[base + 2], uint64_t(1));
+    // the two entries no miss matched are stale (their tag ran); the exact one is not; kReviewedRows' entries are not
+    // (their tests did not run here). Stale entries are printed, never failed.
+    const std::vector<size_t> stale = spec_judge::stale_reviewed();
+    CHECK(stale == std::vector<size_t>({base, base + 1}));
+    spec_judge::report_reviewed("spec_judge_test (reviewed rows)");
+    // a different context with the same row and ids (another tag): no entry matches it
+    CHECK_EQ(spec_judge::match_reviewed("t_other_" + kks.substr(kks.size() - 16), 0, 4, 9), -1);
     // (f) the allowance never drops below the bar: a near-miss (6 ulp) needs no rule at all
     jr[0][9] = float(10.0 - 6 * u);
     write_judge(dir + "/" + ks + ".golden.safetensors", jr);

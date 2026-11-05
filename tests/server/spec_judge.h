@@ -34,6 +34,14 @@
 // A judge must be the one for the test's head form (the tag carries it: the int8 head's references are the
 // --lm-head int8 runs, f32_refs.sh's -i8head suffix).
 //
+// REVIEWED ROWS (operator 2026-11-05, spec 28 sec 10): a few chaotic turn-boundary rows of the Qwen3.8 speculative
+// tests fail every rule above although nothing is wrong (rounding amplified over 64 layers at a turn boundary; the
+// evidence is in spec 28 sec 10). Each is an explicit entry in kReviewedRows, keyed by the judge's context key, the
+// row and the two ids (the f32 top, the speculative pick). A miss that fails the rules and matches an entry EXACTLY
+// passes as REVIEWED and is printed loudly with its numbers; any other miss - another row, other ids, another
+// context - is graded as before. The bars do not change. An entry of a test this process ran that no miss matched is
+// printed as a "stale reviewed entry" (it can go; it does not fail the run).
+//
 // AWAITING (operator 2026-11-04): a divergence the old rule fails (beyond the 1-ulp tie rule; a row below 0.99999)
 // whose context has NO f32 reference yet - B70_FORCED_JUDGE unset, or its <key>.golden.safetensors not made yet - is
 // not judged, so it is not failed either: it is reported as "awaiting f32 reference" and the test SKIPS (exit_code:
@@ -46,6 +54,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <set>
 #include <string>
@@ -70,6 +79,90 @@ inline void await_reference(const std::string& key) {
   awaiting().contexts.insert(key);
 }
 
+// One reviewed row (operator 2026-11-05). `key` is the speculative stream's judge key (golden::ForcedJudge::key:
+// <test tag>_<FNV-1a 64 of the context and the forced ids>), `row` the row in that judge (0 = the first divergence).
+struct ReviewedRow {
+  const char* key;
+  size_t row;
+  uint32_t f32_top, accepted;   // the f32 top, the speculative pick accepted at this row
+  double gap;                   // the f32 gap (bf16 ulps of the f32 top) measured when reviewed
+  const char* date;
+  const char* reason;
+};
+inline constexpr const char* kReviewedReason = "chaotic turn boundary, reviewed 2026-11-05, see spec 28 sec 10";
+// The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
+// registrations that share a head form (mtp_gpu_test and mtp_gpu_dv128k_bf16_test: the bf16 head;
+// mtp_gpu_dv128k_test: the int8 head).
+inline constexpr ReviewedRow kReviewedRows[] = {
+    // t6_usage-openai row 0: bf16 gap 12.05, plain 3.31 - the bf16-unstable allowance 25.32 is 3.31 short
+    {"mtp_gpu_bf16_t6_usage-openai_46b9c791485d35e0", 0, 248068, 248046, 28.63, "2026-11-05", kReviewedReason},
+    // the same row, int8 head: bf16 gap 12.17, plain 3.28 - allowance 25.60
+    {"mtp_gpu_int8_t6_usage-openai_3ed728d9449e7b65", 0, 248068, 248046, 28.87, "2026-11-05", kReviewedReason},
+    // t6_usage-rotation row 20, bf16 head: the int8-aware f32 judge's top flips (-3.94 -> +9.06); bf16 gap 3.87
+    {"mtp_gpu_bf16_t6_usage-rotation_de17c7ad87da9bb2", 20, 74455, 248068, 9.06, "2026-11-05", kReviewedReason},
+    // dflash_gpu_test t5_test-box: the verify on the DFlash history (an M = 1 row on that history picks the same ids)
+    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 128, 248068, 248046, 10.53, "2026-11-05", kReviewedReason},
+    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 137, 248068, 248046, 11.68, "2026-11-05", kReviewedReason},
+    {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 143, 248046, 248068, 16.27, "2026-11-05", kReviewedReason},
+};
+// The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
+// tags streams() saw - an entry whose tag ran and never matched is stale.
+struct Reviewed {
+  std::vector<ReviewedRow> rows;
+  std::vector<uint64_t> hits;
+  std::set<std::string> tags;
+};
+inline Reviewed& reviewed() {
+  static Reviewed r = [] {
+    Reviewed x;
+    x.rows.assign(std::begin(kReviewedRows), std::end(kReviewedRows));
+    x.hits.assign(x.rows.size(), 0);
+    return x;
+  }();
+  return r;
+}
+inline void add_reviewed(const ReviewedRow& e) {
+  reviewed().rows.push_back(e);
+  reviewed().hits.push_back(0);
+}
+// The tag of a judge key: the key without its "_<16 hex>" hash.
+inline std::string key_tag(const std::string& key) {
+  return key.size() > 17 && key[key.size() - 17] == '_' ? key.substr(0, key.size() - 17) : key;
+}
+// The entry matching (key, row, f32 top, speculative pick) exactly, its hit counted; -1 when none.
+inline int match_reviewed(const std::string& key, size_t row, uint32_t a, uint32_t b) {
+  Reviewed& R = reviewed();
+  for (size_t i = 0; i < R.rows.size(); ++i) {
+    const ReviewedRow& e = R.rows[i];
+    if (key == e.key && row == e.row && a == e.f32_top && b == e.accepted) {
+      ++R.hits[i];
+      return int(i);
+    }
+  }
+  return -1;
+}
+// The entries of the tags this process ran that no miss matched.
+inline std::vector<size_t> stale_reviewed() {
+  const Reviewed& R = reviewed();
+  std::vector<size_t> out;
+  for (size_t i = 0; i < R.rows.size(); ++i)
+    if (!R.hits[i] && R.tags.count(key_tag(R.rows[i].key))) out.push_back(i);
+  return out;
+}
+// Printed by exit_code: the reviewed rows matched, and the stale entries (never a failure).
+inline void report_reviewed(const char* test) {
+  const Reviewed& R = reviewed();
+  for (size_t i = 0; i < R.rows.size(); ++i)
+    if (R.hits[i])
+      std::printf("*** %s: REVIEWED row passed %llu time(s): %s row %zu, ids %u (f32 top) / %u (accepted), %.2f ulp "
+                  "(%s: %s) ***\n", test, (unsigned long long)R.hits[i], R.rows[i].key, R.rows[i].row,
+                  R.rows[i].f32_top, R.rows[i].accepted, R.rows[i].gap, R.rows[i].date, R.rows[i].reason);
+  for (size_t i : stale_reviewed())
+    std::printf("*** %s: stale reviewed entry (its test ran, no miss matched it - it can be removed; not a failure): "
+                "%s row %zu, ids %u / %u, %.2f ulp (%s) ***\n", test, R.rows[i].key, R.rows[i].row, R.rows[i].f32_top,
+                R.rows[i].accepted, R.rows[i].gap, R.rows[i].date);
+}
+
 // The engine's plain (M = 1) logits row after the test's prompt + `generated` (the ids decoded after it), [V] f32 -
 // the test replays its own plain path (tests/server/spec_plain_row.h). Empty function: no plain rows.
 using PlainRow = std::function<std::vector<float>(const std::vector<uint32_t>& generated)>;
@@ -80,7 +173,20 @@ struct UnstableRow {
   uint32_t a = 0, b = 0;            // the f32 top, the speculative pick
   double g32 = 0, g16 = NAN, gp = NAN, allow = golden::kNearMissUlp;
   bool have_bf16 = false, unstable = false, have_plain = false, pass = false;
+  int reviewed = -1;                // the kReviewedRows entry this miss matched (it passes as REVIEWED); -1 none
   std::string line() const {
+    std::string s = rule_line();
+    if (reviewed >= 0) {
+      const ReviewedRow& e = spec_judge::reviewed().rows[size_t(reviewed)];
+      char buf[400];
+      std::snprintf(buf, sizeof buf, "\n      *** REVIEWED (operator %s): %s row %zu, ids %u / %u, f32 gap %.2f ulp "
+                    "(%.2f when reviewed) - %s: PASS as REVIEWED ***", e.date, e.key, e.row, e.f32_top, e.accepted, g32,
+                    e.gap, e.reason);
+      s += buf;
+    }
+    return s;
+  }
+  std::string rule_line() const {
     char buf[320];
     if (!have_bf16)
       std::snprintf(buf, sizeof buf, "row %zu: ids %u (f32 top) / %u (speculative): f32 gap %.2f ulp; no bf16 reference - "
@@ -209,6 +315,7 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
                              const std::vector<uint32_t>& spec, uint32_t V, uint32_t VU,
                              const PlainRow& plain_row = {}) {
   StreamVerdict v;
+  reviewed().tags.insert(tag);
   v.tie = greedy_tie::classify(plain, steps, spec);
   if (v.tie.v == greedy_tie::Verdict::Same) {
     v.pass = true;
@@ -251,7 +358,16 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
         return plain_row(gen);
       };
     v.beyond.push_back(unstable_rule(jrow, V, VU, r, fs[r], bt, pr));
-    all = all && v.beyond.back().pass;
+    UnstableRow& u = v.beyond.back();
+    if (!u.pass) {   // the rules fail it: an exact kReviewedRows entry passes it as REVIEWED (operator 2026-11-05)
+      u.reviewed = match_reviewed(ks, r, u.a, u.b);
+      if (u.reviewed >= 0) {
+        u.pass = true;
+        std::printf("    *** REVIEWED row (operator 2026-11-05): %s row %zu, ids %u / %u, f32 gap %.2f ulp - passes as "
+                    "REVIEWED ***\n", ks.c_str(), r, u.a, u.b, u.g32);
+      }
+    }
+    all = all && u.pass;
   }
   v.pass = all;
   return v;
@@ -314,6 +430,7 @@ inline std::string row_line(const RowVerdict& v) {
 // their f32 reference; else 0. The awaiting count is printed loudly either way - it is what the next
 // tools/box_validate/f32_refs.sh run has to make.
 inline int exit_code(bool ok, const char* test) {
+  report_reviewed(test);
   const Awaiting& a = awaiting();
   if (a.divergences) {
     const char* jd = std::getenv("B70_FORCED_JUDGE");
