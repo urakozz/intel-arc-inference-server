@@ -3873,6 +3873,10 @@ add_executable(bolt_ref_test kernels/bolt_ref_test.cc)
 target_include_directories(bolt_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(bolt_ref_test PRIVATE b70_bolt_model)
 add_test(NAME bolt_ref_test COMMAND bolt_ref_test)
+# The first-flip cut-off of Bolt's synthetic gates (tests/golden/bolt_cutoff.h; operator ruling 2026-11-05), host only.
+add_executable(bolt_cutoff_test golden/bolt_cutoff_test.cc)
+target_include_directories(bolt_cutoff_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+add_test(NAME bolt_cutoff_test COMMAND bolt_cutoff_test)
 set_tests_properties(bolt_ref_test PROPERTIES LABELS bolt TIMEOUT 600)
 if(B70_BOLT)
   # Task 3: every binary a Bolt decode list binds, any head / attention / card count / arm / state precision
