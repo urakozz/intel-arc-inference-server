@@ -384,6 +384,29 @@ stand-in: 1.083-1.100 at 8); gemv itself is 3.10 x at 8.
    **The operator's ruling (2026-11-03): t5 and t6 are accepted as near-ties** (the errors are two-sided and 0.6-1.1 ulp
    over the allowance); 28b merges with the 57 dumped contexts (`~/b70/logs/spec28b/forced`) open until the CPU lane makes
    the Qwen3.8 f32 references. The 8-ulp allowance in spec_judge.h is unchanged.
+   **The operator's ruling (2026-11-05, option 1): the four remaining chaotic turn-boundary positions are REVIEWED.**
+   With every Qwen3.8 context judged (the bf16-unstable rule of 2026-11-04; the int8-aware f32 references for the
+   l0-int8 tests), four positions still failed, all at turn boundaries where rounding is amplified over 64 layers (the
+   plain row itself is 0.16-0.65 relative L2 from f32 at layer 61 there, against 0.003-0.007 at layer 5;
+   tools/probe/probe_verify_rows, probe_vattn_ab --follow dpas). They are explicit entries in
+   `tests/server/spec_judge.h`'s `kReviewedRows`, keyed by the speculative stream's judge key, the row and the two ids
+   (the f32 top, the speculative pick); a miss matching one exactly passes as REVIEWED and is printed with its numbers,
+   any other miss - or the same row with other ids - is graded as before, and an entry a run never hits is printed as
+   stale (not a failure). The bars do not change. The entries (f32 gaps in bf16 ulps of the f32 top):
+
+   | test(s) | judge key | row | f32 top / accepted | f32 gap | why the rules fail it |
+   |---|---|---|---|---|---|
+   | mtp_gpu_test, mtp_gpu_dv128k_bf16_test (bf16 head), K 1-3 | mtp_gpu_bf16_t6_usage-openai_46b9c791485d35e0 | 0 | 248068 / 248046 | 28.63 | bf16-unstable (bf16 12.05, plain 3.31): allowance 25.32 |
+   | mtp_gpu_dv128k_test (int8 head), K 1-3 | mtp_gpu_int8_t6_usage-openai_3ed728d9449e7b65 | 0 | 248068 / 248046 | 28.87 | bf16-unstable (bf16 12.17, plain 3.28): allowance 25.60 |
+   | mtp_gpu_test, mtp_gpu_dv128k_bf16_test (bf16 head), K 1-3 | mtp_gpu_bf16_t6_usage-rotation_de17c7ad87da9bb2 | 20 | 74455 / 248068 | 9.06 | the int8-aware prompt pass flips the f32 top (-3.94 -> +9.06); bf16 3.87 is stable: the strict 8 |
+   | dflash_gpu_test D2, K = 7 | dflash_gpu_int8_t5_test-box_a69c16de36a6edd8 | 128 | 248068 / 248046 | 10.53 | bf16 5.98, stable: the strict 8 |
+   | dflash_gpu_test D2, K = 7 | (the same) | 137 | 248068 / 248046 | 11.68 | bf16-unstable (bf16 -25.32, plain 11.61): allowance 8 |
+   | dflash_gpu_test D2, K = 7 | (the same) | 143 | 248046 / 248068 | 16.27 | bf16-unstable (bf16 -16.16, plain 24.15): allowance 8 |
+
+   The DFlash rows are the verify on the DFlash history: neither the attention kernel (v2 and DPAS pick the same id)
+   nor the verify row's own arithmetic (on the plain history the M = 8 row picks the plain id) - an M = 1 row on the
+   DFlash history picks the same ids (row 137: -4.31 ulp against +11.61 on the plain history, f32 +11.68). Precedent:
+   the 2026-11-03 near-tie acceptance above.
 2. S2's 1.4 bar waits for spec 28c (attention at M = 8).
 3. The quiet-box re-check (r69.speed / r69.d1) - a later session (operator 2026-11-03).
 
