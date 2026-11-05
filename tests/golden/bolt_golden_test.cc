@@ -53,7 +53,9 @@
 // DIAGNOSTIC under the judge (operator ruling 2026-10-29: eager prints, never binds).
 //
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
-//       [prefill | prefill:<chunk>] [--judge=<dir>]
+//       [prefill | prefill:<chunk>] [--judge=<dir>] [--dump=<dir>]
+// (debug: --dump writes every decode row's h taps, raw bf16 [row][block][hidden], and route rows, u32 [row][MoE block][48],
+// to <dir>/<prompt>.{tap,routes} - for offline per-row comparisons against the references)
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
 #include <algorithm>
 #include <cmath>
@@ -163,6 +165,7 @@ double cosine_f32(const float* a, const float* b, size_t n, size_t& exact) {
 
 int main(int argc, char** argv) {
   const std::string judge_dir = golden::take_judge(argc, argv);   // the f32 judge (header)
+  const std::string dump_dir = golden::take_flag(argc, argv, "--dump=");   // debug (header)
   const std::string arg = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-bolt";
   const std::string pname = argc > 3 ? argv[3] : "bolt_short";
@@ -304,8 +307,17 @@ int main(int argc, char** argv) {
       }
     }
   };
+  FILE* dtap = dump_dir.empty() ? nullptr : std::fopen((dump_dir + "/" + pname + ".tap").c_str(), "wb");
+  FILE* droute = dump_dir.empty() ? nullptr : std::fopen((dump_dir + "/" + pname + ".routes").c_str(), "wb");
   auto check_row = [&](uint32_t row) {
     const std::vector<uint32_t> r = eng.read_routes();
+    if (dtap) {
+      const std::vector<uint16_t> tap = eng.read_debug_h();
+      std::fwrite(tap.data(), 2, size_t(d.layers) * d.hidden, dtap);
+      uint32_t moe = 0;
+      for (uint32_t l = 0; l < d.layers; ++l) moe += d.is_moe(l);
+      std::fwrite(r.data(), 4, size_t(moe) * rb::kRouteWords, droute);
+    }
     uint32_t mi = 0;
     for (uint32_t l = 0; l < d.layers; ++l)
       if (d.is_moe(l)) check_route(r.data() + size_t(mi++) * rb::kRouteWords, row, l);
@@ -404,6 +416,8 @@ int main(int argc, char** argv) {
     eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
     check_row(T + j);
   }
+  if (dtap) std::fclose(dtap);
+  if (droute) std::fclose(droute);
   const bool gate_ok = det_ok == det && tie_ok == ties;
   std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
               det_ok, det, tie_ok, ties, gate_ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(),
