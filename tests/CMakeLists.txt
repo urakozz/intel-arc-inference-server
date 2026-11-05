@@ -3923,14 +3923,6 @@ if(B70_BOLT)
     "25a's golden sets on our g64 export (bolt_oracle.sh golden, its SNAPSHOT file naming the export; data key oracle_bolt)")
   set(B70_BOLT_SYNTH_ORACLE "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
     "the synthetics' golden sets: <this>-n12-g128 / <this>-n12-g64x (bolt_oracle.sh export <synthetic>; data key oracle_bolt_synth)")
-  # The synthetics' f32 judges (bolt_golden_test.cc's header; the operator's MoE rulings 2026-10-23 / 10-28 / 10-31 round 2,
-  # Kolibri's synthetic precedent): bolt_ref.py run --dtype fp32 --force <the golden's tokens> on n12-g128 (n12-g64x is its
-  # EXACT g64 expansion: the same dequantised weights, the same golden tokens - one judge serves both); <this> for the bf16
-  # head, <this>-i8head (--lm-head int8, the int8-aware judge of the default int8 head, ruling 2026-10-23 5.).
-  set(B70_BOLT_SYNTH_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt-n12-g128-f32" CACHE PATH
-    "the synthetics' f32 judges (bolt_oracle.sh export-f32 n12-g128; data key oracle_bolt_synth_f32)")
-  set(_bj --judge=${B70_BOLT_SYNTH_F32_DIR}-i8head)
-  set(_bj16 --judge=${B70_BOLT_SYNTH_F32_DIR})
   set(_bolt_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short.ids)
   foreach(t bolt_decode_test bolt_golden_test)
     if(t STREQUAL "bolt_decode_test")
@@ -3950,7 +3942,7 @@ if(B70_BOLT)
     list(APPEND _bolt_tests bolt_decode_synth_${sp}_test)
     foreach(p bolt_short bolt_4k bolt_agentic)
       add_test(NAME bolt_golden_synth_${sp}_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SYNTH_DIR}/${sp}
-        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p} ${_bj})
+        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p})
       list(APPEND _bolt_tests bolt_golden_synth_${sp}_${p}_test)
     endforeach()
   endforeach()
@@ -3960,11 +3952,11 @@ if(B70_BOLT)
   add_test(NAME bolt_decode_synth_b16state_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} b16)
   add_test(NAME bolt_decode_synth_pp_test COMMAND bolt_decode_test ${_bs} ${_bolt_ids} --pp 6,4)
   add_test(NAME bolt_golden_synth_short_bf16head_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_short bf16 ${_bj16})
+    bolt_short bf16)
   add_test(NAME bolt_golden_synth_short_eager_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_short eager ${_bj})
+    bolt_short eager)
   add_test(NAME bolt_golden_synth_short_pp2_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_short pp2:6 peer ${_bj})
+    bolt_short pp2:6 peer)
   list(APPEND _bolt_tests bolt_decode_synth_eager_test bolt_decode_synth_bf16head_test bolt_decode_synth_b16state_test
     bolt_decode_synth_pp_test bolt_golden_synth_short_bf16head_test bolt_golden_synth_short_eager_test
     bolt_golden_synth_short_pp2_test)
@@ -4094,14 +4086,14 @@ if(B70_BOLT)
   foreach(sp n12-g128 n12-g64x)
     foreach(p bolt_short bolt_4k bolt_agentic)
       add_test(NAME bolt_golden_prefill_synth_${sp}_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SYNTH_DIR}/${sp}
-        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p} prefill ${_bj})
+        ${B70_BOLT_SYNTH_ORACLE}-${sp} ${p} prefill)
       list(APPEND _bolt_gpf_tests bolt_golden_prefill_synth_${sp}_${p}_test)
     endforeach()
   endforeach()
   add_test(NAME bolt_golden_prefill_synth_c512_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_4k prefill:512 ${_bj})
+    bolt_4k prefill:512)
   add_test(NAME bolt_golden_prefill_synth_eager_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_short eager prefill ${_bj})
+    bolt_short eager prefill)
   list(APPEND _bolt_gpf_tests bolt_golden_prefill_synth_c512_test bolt_golden_prefill_synth_eager_test)
   foreach(p bolt_short bolt_4k bolt_agentic)
     add_test(NAME bolt_golden_prefill_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p}

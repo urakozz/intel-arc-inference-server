@@ -23,15 +23,6 @@
 //   5. routing on the last chunk's rows: expert SETS equal except a near-tie (decode's 9th / 10th gap <= B70_BOLT_TIE_TOL,
 //      one expert different); 0 gaps undetermined
 //   6. tokens: prefill + 32 greedy against ingest + 32 greedy, tie-aware (every determined row agrees), teacher-forced
-//   SYNTHETIC CHAOS (2026-11-05, PROPOSED for the operator's ruling - Kolibri's rulings of 2026-10-31 round 2 / 11-03
-//   applied to Bolt): 25b's random-weight synthetics route in near-ties at every MoE block, so two correct bf16 paths part
-//   at the first near-tie flip and the SSM states carry it to every later row (the bf16 golden itself against f32 on
-//   bolt_short: 12 / 32 argmax rows, 273 / 640 expert sets, last block's h median 0.935). So 4's strict bars bind on the
-//   blocks UPSTREAM of the first MoE block (no routing before them: a structural fault - a wrong state carry, ring column,
-//   chunk offset - shows there first, and 3 holds the continuations bitwise), every other number of 4 printed per block;
-//   5 and 6 printed - the prefill's routes and tokens are judged against the f32 reference by bolt_golden_test's prefill
-//   mode (bolt_golden_prefill_synth_*). A checkpoint whose first block is MoE gates block 0 alone. Only a synthetic
-//   checkpoint (its bolt_synth.json, 25b's make_synth.py) takes this rule; our export keeps every bar of 4 - 6.
 //   7. pp2[:<split>]: the same prefill on two cards (the copy hand-off a chunk) bitwise one card (when it fits one)
 // `eager` / `b16` run B70_BOLT_ATTN=eager / B70_BOLT_SSM=bf16 in BOTH halves. Exit 77 (SKIP) when the checkpoint is absent
 // or the placement does not fit with the prefill scratch.
@@ -41,7 +32,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
@@ -134,8 +124,6 @@ Snap snap(rb::BoltEngine& e, uint32_t n, bool routes, bool taps) {
 const uint32_t* pf_route(const std::vector<uint32_t>& r, uint32_t l, uint32_t row) {
   return r.data() + rb::pf_route_at(l) / 4 + size_t(row) * rb::kRouteWords;
 }
-
-bool g_synth = false;   // the checkpoint is 25b's synthetic (bolt_synth.json): the SYNTHETIC CHAOS rule (header)
 
 int run_all(rb::BoltEngine& e, const Ids& prompt) {
   const model::BoltDesc& d = e.model().desc;
@@ -259,30 +247,12 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
     taps.push_back(cos_bf16(a.taps.data() + size_t(l) * d.hidden, dec.taps.data() + size_t(l) * d.hidden, d.hidden));
   std::vector<double> ts = taps;
   std::sort(ts.begin(), ts.end());
-  // The blocks upstream of the first MoE block (header: SYNTHETIC CHAOS): [0, shallow).
-  uint32_t shallow = 0;
-  while (shallow < d.layers && !d.is_moe(shallow)) ++shallow;
-  shallow = std::max(shallow, 1u);
-  double sworst = 1.0, cworst = 1.0, s_sh = 1.0, c_sh = 1.0;
-  std::string per_state;
+  double sworst = 1.0, cworst = 1.0;
   for (size_t m = 0; m < a.states.size(); ++m) {
-    const double sc = cos_f32(a.states[m].data(), dec.states[m].data(), a.states[m].size());
-    double cc = 1.0;
+    sworst = std::min(sworst, cos_f32(a.states[m].data(), dec.states[m].data(), a.states[m].size()));
     for (uint32_t j = 0; j < 3; ++j)
-      cc = std::min(cc, cos_bf16(a.conv[m].data() + size_t(j) * d.m_conv_dim,
-                                 dec.conv[m].data() + size_t(j) * d.m_conv_dim, d.m_conv_dim));
-    sworst = std::min(sworst, sc);
-    cworst = std::min(cworst, cc);
-    uint32_t l = 0;   // block of Mamba index m
-    for (uint32_t k = 0, mi = 0; k < d.layers; ++k)
-      if (d.is_mamba(k) && mi++ == m) l = k;
-    if (l < shallow) {
-      s_sh = std::min(s_sh, sc);
-      c_sh = std::min(c_sh, cc);
-    }
-    char b[96];
-    std::snprintf(b, sizeof b, " L%u:%.6f/%.6f", l, sc, cc);
-    per_state += b;
+      cworst = std::min(cworst, cos_bf16(a.conv[m].data() + size_t(j) * d.m_conv_dim,
+                                         dec.conv[m].data() + size_t(j) * d.m_conv_dim, d.m_conv_dim));
   }
   std::vector<double> kv;
   for (size_t al = 0; al < a.kv.size(); ++al)
@@ -292,27 +262,19 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
                               d.kv_n()));
   std::sort(kv.begin(), kv.end());
   const double kv_med = kv.empty() ? 1.0 : kv[kv.size() / 2], kv_p01 = kv.empty() ? 1.0 : kv[kv.size() / 100];
-  const bool all4 = lcos >= 0.9995 && ts[ts.size() / 2] >= 0.9998 && ts.front() >= 0.99 && sworst >= 0.999 &&
-                    cworst >= 0.999 && kv_med >= 0.9998 && kv_p01 >= 0.99;
-  double tap_sh = 1.0;
-  for (uint32_t l = 0; l < shallow; ++l) tap_sh = std::min(tap_sh, taps[l]);
-  const bool sh4 = tap_sh >= 0.9998 && s_sh >= 0.999 && c_sh >= 0.999;   // the strict bars, upstream of routing (header)
-  const bool f4 = g_synth ? sh4 : all4;
+  const bool f4 = lcos >= 0.9995 && ts[ts.size() / 2] >= 0.9998 && ts.front() >= 0.99 && sworst >= 0.999 && cworst >= 0.999 &&
+                  kv_med >= 0.9998 && kv_p01 >= 0.99;
   std::printf("4. prefill vs decode's fill (%u positions): logits cosine %.7f (bar 0.9995); h taps median %.7f / min %.6f "
               "(bars 0.9998 / 0.99); SSM states worst %.7f, conv columns worst %.7f (bars 0.999); K / V rows median %.7f, "
               "p01 %.6f%s\n", n, lcos, ts[ts.size() / 2], ts.front(), sworst, cworst, kv_med, kv_p01,
-              all4 ? "" : g_synth ? " - all blocks: printed (header: SYNTHETIC CHAOS)" : "  ** FAIL **");
-  std::printf("   blocks [0, %u) (upstream of the first MoE block) GATED: h tap worst %.7f (bar 0.9998), SSM state worst "
-              "%.7f, conv worst %.7f (bars 0.999)%s\n", shallow, tap_sh, s_sh, c_sh, sh4 ? "" : "  ** FAIL **");
+              f4 ? "" : "  ** FAIL **");
   std::printf("   h taps per block:");
   for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.5f", l, taps[l]);
-  std::printf("\n   SSM state / conv cosine per Mamba block:%s\n", per_state.c_str());
-  std::printf("5. routing on the last chunk's %llu (row, MoE block) rows: %llu exact sets, %llu near-ties (gap <= %.1e), "
-              "%llu undetermined (0 gap), %llu beyond%s\n",
-              (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)ties, double(tie_tol()),
-              (unsigned long long)undet, (unsigned long long)bad,
-              bad == 0 ? "" : g_synth ? " - printed (header: the f32 judge of bolt_golden_prefill_synth_*)" : "  ** FAIL **");
-  ok = ok && f4 && (g_synth || bad == 0);
+  std::printf("\n5. routing on the last chunk's %llu (row, MoE block) rows: %llu exact sets, %llu near-ties (gap <= %.1e), "
+              "%llu undetermined (0 gap), %llu beyond%s\n", (unsigned long long)rows, (unsigned long long)exact,
+              (unsigned long long)ties, double(tie_tol()), (unsigned long long)undet, (unsigned long long)bad,
+              bad == 0 ? "" : "  ** FAIL **");
+  ok = ok && f4 && bad == 0;
 
   // ---- 6. tokens, tie-aware --------------------------------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -339,9 +301,8 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
     e.ingest({dtok[j]});   // teacher-forced on decode's token
   }
   std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
-              det_agree == det ? "" : g_synth ? " - printed (header: the f32 judge of bolt_golden_prefill_synth_*)"
-                                              : "  ** FAIL **");
-  ok = ok && (g_synth || det_agree == det);
+              det_agree == det ? "" : "  ** FAIL **");
+  ok = ok && det_agree == det;
   return ok ? 0 : 1;
 }
 
@@ -353,7 +314,6 @@ int main(int argc, char** argv) {
     std::printf("SKIP: no Nemotron 3.5 Bolt checkpoint at '%s'\n", argc > 1 ? argv[1] : "");
     return 77;
   }
-  g_synth = std::ifstream(snapdir + "/bolt_synth.json").good();
   bolt_rig::Options o;
   o.max_len = kMaxLen;
   o.debug_tap = true;
