@@ -35,6 +35,14 @@
 // gate's (PROPOSED): prefill's linears round through bf16-dequantised weights in a DPAS order and its SSM is the SSD form -
 // both further from the reference than decode's chain, which the bars are meant to absorb (Kolibri's precedent).
 //
+// **25b's synthetics: the first-flip cut-off (operator ruling 2026-11-05; spec 25 §9.1; tests/golden/bolt_cutoff.h)**: on
+// a synthetic checkpoint (its bolt_synth.json) the routing pairs are fed in causal order and the FIRST near-tie or
+// undetermined set difference is the flip; every bar above binds on what is computed before it - a Beyond set difference,
+// the tokens of the decision rows wholly before it, each block's h taps upstream of it, the SSM state / conv columns of the
+// blocks upstream of it at the last prompt row - and everything after it is printed, never failed on. With no flip every
+// bar binds on everything. In prefill mode the prompt goes in chunk calls (each on the 64-grid: bitwise one call, Review
+// Focus 1) so every prompt row's routes are compared. A real checkpoint keeps the rules above unchanged.
+//
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
 //       [prefill | prefill:<chunk>]
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
@@ -44,10 +52,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iterator>
 #include <string>
 #include <vector>
 
+#include "bolt_cutoff.h"
 #include "check.h"
 #include "common/bf16.h"
 #include "golden_common.h"
@@ -72,8 +82,8 @@ float tie_tol() {
 constexpr double kHMedian = 0.9998, kHMin = 0.99, kStateCos = 0.999;   // PROPOSED (header)
 
 struct RouteCount {
-  uint64_t rows = 0, exact = 0, ties = 0, undetermined = 0, bad = 0;
   int64_t worst_w = 0;
+  uint32_t printed = 0;
 };
 
 int64_t ulps32(float a, float b) {
@@ -85,19 +95,14 @@ int64_t ulps32(float a, float b) {
 }
 
 void compare_route(const uint32_t* row, const int32_t* want_ids, const float* want_w, float gap, RouteCount& c,
-                   char& first_diff, const std::string& pname, uint32_t r, uint32_t layer) {
-  ++c.rows;
+                   bolt_cutoff::Cut& cut, char& first_diff, const std::string& pname, uint32_t r, uint32_t layer) {
   const uint32_t K = kernels::bolt::kTopK;
-  std::vector<uint32_t> g(row + kr::kIds, row + kr::kIds + K), w(K);
-  for (uint32_t k = 0; k < K; ++k) w[k] = uint32_t(want_ids[k]);
-  std::vector<uint32_t> gs = g, ws = w;
-  std::sort(gs.begin(), gs.end());
-  std::sort(ws.begin(), ws.end());
-  if (gs == ws) {
-    ++c.exact;
+  const bool was_found = cut.found;
+  const bolt_cutoff::Diff d = cut.add(r, layer, bolt_cutoff::classify(row + kr::kIds, want_ids, K, gap, tie_tol()));
+  if (d == bolt_cutoff::Diff::Exact) {
     for (uint32_t k = 0; k < K; ++k)
       for (uint32_t j = 0; j < K; ++j)
-        if (g[k] == w[j]) {
+        if (row[kr::kIds + k] == uint32_t(want_ids[j])) {
           float gw;
           std::memcpy(&gw, &row[kr::kW + k], 4);
           c.worst_w = std::max(c.worst_w, ulps32(gw, want_w[j]));
@@ -108,21 +113,12 @@ void compare_route(const uint32_t* row, const int32_t* want_ids, const float* wa
     std::printf("    %s L%u: first differing row %u (reference gap %.3e)\n", pname.c_str(), layer, r, double(gap));
     first_diff = 1;
   }
-  std::vector<uint32_t> only_g, only_w;
-  std::set_difference(gs.begin(), gs.end(), ws.begin(), ws.end(), std::back_inserter(only_g));
-  std::set_difference(ws.begin(), ws.end(), gs.begin(), gs.end(), std::back_inserter(only_w));
-  if (gap == 0.0f) {
-    ++c.undetermined;
-    return;
-  }
-  if (gap <= tie_tol() && only_g.size() == 1 && only_w.size() == 1) {
-    ++c.ties;
-    return;
-  }
-  ++c.bad;
-  if (c.bad <= 10)
-    std::printf("    %s L%u row %u: expert set differs beyond a near-tie (reference gap %.3e, %zu experts differ)\n",
-                pname.c_str(), layer, r, double(gap), only_g.size());
+  if (cut.found && !was_found)
+    std::printf("    %s: THE FIRST FLIP at row %u, L%u (%s, reference gap %.3e) - the bars bind upstream of it, the rest "
+                "is printed (header)\n", pname.c_str(), r, layer, bolt_cutoff::diff_name(d), double(gap));
+  if (d == bolt_cutoff::Diff::Beyond && c.printed++ < 10)
+    std::printf("    %s L%u row %u: expert set differs beyond a near-tie (reference gap %.3e)%s\n", pname.c_str(), layer, r,
+                double(gap), was_found ? " - after the flip, printed" : "  ** FAIL **");
 }
 
 double median(std::vector<double> v) {
@@ -239,8 +235,12 @@ int main(int argc, char** argv) {
   const uint32_t K = kernels::bolt::kTopK;
   std::printf("\n================ %s: %u prompt ids, %u generated ================\n", pname.c_str(), T, kGen);
   RouteCount rc;
+  // The first-flip cut-off (header): enabled on 25b's synthetics only.
+  const bool synth = std::ifstream(snap + "/bolt_synth.json").good();
+  bolt_cutoff::Cut cut;
+  cut.enabled = synth;
   std::vector<char> first(d.layers, 0);
-  std::vector<std::vector<double>> hcos(d.layers);
+  std::vector<std::vector<double>> hcos(d.layers), hgate(d.layers);   // every row's; the rows upstream of the flip
   std::vector<double> sa, sb;
   // One (row, MoE block)'s route row against the golden set.
   auto check_route = [&](const uint32_t* r, uint32_t row, uint32_t l) {
@@ -248,7 +248,7 @@ int main(int argc, char** argv) {
     const int32_t* gi = g.i32("route.ids.L" + ls, size_t(rows) * K) + size_t(row) * K;
     const float* gw = g.f32("route.w.L" + ls, size_t(rows) * K) + size_t(row) * K;
     const float gap = g.f32("route.gap.L" + ls, rows)[row];
-    compare_route(r, gi, gw, gap, rc, first[l], pname, row, l);
+    compare_route(r, gi, gw, gap, rc, cut, first[l], pname, row, l);
   };
   auto check_taps = [&](uint32_t row) {
     const std::vector<uint16_t> tap = eng.read_debug_h();
@@ -257,7 +257,9 @@ int main(int argc, char** argv) {
       const uint32_t A = uint32_t(g.dim(n, 2, 0)), h0 = rows - A;
       if (row < h0) continue;
       const uint16_t* want = g.bf16(n, size_t(A) * d.hidden) + size_t(row - h0) * d.hidden;
-      hcos[l].push_back(golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
+      const double c = golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos;
+      hcos[l].push_back(c);
+      if (cut.upstream(row, l)) hgate[l].push_back(c);
     }
   };
   auto check_row = [&](uint32_t row) {
@@ -269,46 +271,66 @@ int main(int argc, char** argv) {
   };
   eng.reset();
   if (prefill) {
-    // Spec 25d: the prompt in one BoltEngine::prefill (chunks of `chunk`, every chunk on the 64-grid from position 0); the
-    // routing on the rows the last chunk's route buffer holds; the h taps at the last prompt row (the prefill's tap).
+    // Spec 25d: the prompt through BoltEngine::prefill (chunks of `chunk`, every chunk on the 64-grid from position 0); the
+    // routing on the rows the last chunk's route buffer holds; the h taps at the last prompt row (the prefill's tap). On a
+    // synthetic one prefill call a chunk (bitwise one call: Review Focus 1), so every prompt row's routes feed the cut-off.
     const uint32_t c = chunk ? chunk : rb::kPfC;
     rb::check_prefill_chunk(c);
-    eng.prefill(ids, c);
-    const std::vector<uint32_t> r = eng.read_prefill_routes();
-    const uint32_t row0 = ((T - 1) / c) * c;
-    for (uint32_t t = row0; t < T; ++t)
-      for (uint32_t l = 0; l < d.layers; ++l)
-        if (d.is_moe(l)) check_route(r.data() + rb::pf_route_at(l) / 4 + size_t(t - row0) * rb::kRouteWords, t, l);
+    uint32_t row0 = ((T - 1) / c) * c;
+    if (synth) {
+      row0 = 0;
+      for (uint32_t s0 = 0; s0 < T; s0 += c) {
+        const uint32_t s1 = std::min(T, s0 + c);
+        eng.prefill(std::vector<uint32_t>(ids.begin() + s0, ids.begin() + s1), c);
+        const std::vector<uint32_t> r = eng.read_prefill_routes();
+        for (uint32_t t = s0; t < s1; ++t)
+          for (uint32_t l = 0; l < d.layers; ++l)
+            if (d.is_moe(l)) check_route(r.data() + rb::pf_route_at(l) / 4 + size_t(t - s0) * rb::kRouteWords, t, l);
+      }
+    } else {
+      eng.prefill(ids, c);
+      const std::vector<uint32_t> r = eng.read_prefill_routes();
+      for (uint32_t t = row0; t < T; ++t)
+        for (uint32_t l = 0; l < d.layers; ++l)
+          if (d.is_moe(l)) check_route(r.data() + rb::pf_route_at(l) / 4 + size_t(t - row0) * rb::kRouteWords, t, l);
+    }
     check_taps(T - 1);
-    std::printf("  prefill: %u ids in chunks of %u (%zu launches), routing on rows %u..%u, h taps at row %u\n", T, c,
-                eng.prefill_launches(), row0, T - 1, T - 1);
+    std::printf("  prefill: %u ids in chunks of %u%s (%zu launches), routing on rows %u..%u, h taps at row %u\n", T, c,
+                synth ? ", one call a chunk" : "", eng.prefill_launches(), row0, T - 1, T - 1);
   } else {
     for (uint32_t t = 0; t < T; ++t) {
       eng.ingest({ids[t]});
       check_row(t);
     }
   }
-  // The SSM state and the conv columns after the prompt.
-  double state_worst = 1.0, conv_worst = 1.0;
+  // The SSM state and the conv columns after the prompt; a block's numbers gate when (T - 1, block) is upstream of the flip.
+  double state_worst = 1.0, conv_worst = 1.0, state_gate = 1.0, conv_gate = 1.0;
   size_t state_exact = 0, state_total = 0, conv_exact = 0, conv_total = 0;
+  std::string gated_blocks;
   for (uint32_t l = 0; l < d.layers; ++l) {
     if (!d.is_mamba(l)) continue;
     const std::string ls = std::to_string(l);
+    const bool up = cut.upstream(T - 1, l);
+    if (up) gated_blocks += (gated_blocks.empty() ? "L" : " L") + ls;
     const std::vector<float> st = eng.read_ssm_state(d.mamba_index(l));
     const float* want_s = g.f32("ssm.L" + ls, st.size());
-    state_worst = std::min(state_worst, cosine_f32(st.data(), want_s, st.size(), state_exact));
+    const double sc = cosine_f32(st.data(), want_s, st.size(), state_exact);
+    state_worst = std::min(state_worst, sc);
+    if (up) state_gate = std::min(state_gate, sc);
     state_total += st.size();
     if (T < 3) continue;
     const std::vector<uint16_t> ring = eng.read_conv_ring(d.mamba_index(l));
     const uint16_t* want = g.bf16("conv.L" + ls, size_t(3) * d.m_conv_dim);
     for (uint32_t s = 0; s < 3; ++s) {
       const uint16_t* got = ring.data() + size_t((T - 3 + s) % 16) * d.m_conv_dim;
-      conv_worst = std::min(conv_worst, golden::compare_bf16(got, want + size_t(s) * d.m_conv_dim, d.m_conv_dim, sa, sb).cos);
+      const double cc = golden::compare_bf16(got, want + size_t(s) * d.m_conv_dim, d.m_conv_dim, sa, sb).cos;
+      conv_worst = std::min(conv_worst, cc);
+      if (up) conv_gate = std::min(conv_gate, cc);
       for (uint32_t k = 0; k < d.m_conv_dim; ++k) conv_exact += got[k] == want[size_t(s) * d.m_conv_dim + k];
       conv_total += d.m_conv_dim;
     }
   }
-  uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
+  uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0, after = 0, after_ok = 0;   // after: decision rows past the flip
   int first_bad = -1;
   double logit_min = 1.0;
   for (uint32_t j = 0; j < kGen; ++j) {
@@ -319,7 +341,11 @@ int main(int argc, char** argv) {
     const std::vector<float> lg = eng.read_logits();
     logit_min = std::min(logit_min, golden::compare_f32(lg.data(), want, d.vocab, sa, sb).cos);
     const golden::GoldenDecision dec = golden::golden_decision(want, d.vocab, d.vocab_used);
-    if (dec.determined()) {
+    const bool gated = cut.row_clean(row);
+    if (!gated) {
+      ++after;
+      after_ok += dec.contains(got) ? 1 : 0;
+    } else if (dec.determined()) {
       ++det;
       if (got == dec.set[0]) ++det_ok;
       else if (first_bad < 0) first_bad = int(j);
@@ -329,7 +355,8 @@ int main(int argc, char** argv) {
       else if (first_bad < 0) first_bad = int(j);
     }
     if (got != uint32_t(gtok[j])) {
-      std::printf("  step %u: engine %u, golden %u (%s)\n", j, got, uint32_t(gtok[j]), dec.determined() ? "determined" : "tie row");
+      std::printf("  step %u: engine %u, golden %u (%s%s)\n", j, got, uint32_t(gtok[j]),
+                  dec.determined() ? "determined" : "tie row", gated ? "" : "; after the flip, printed");
       golden::print_top5("engine", lg.data(), d.vocab, d.vocab_used);
       golden::print_top5("golden", want, d.vocab, d.vocab_used);
     }
@@ -337,30 +364,46 @@ int main(int argc, char** argv) {
     check_row(T + j);
   }
   const bool gate_ok = det_ok == det && tie_ok == ties;
+  if (synth)
+    std::printf("  the first-flip cut-off (synthetic; header): %s; bars bind upstream of it\n",
+                cut.found ? ("the first flip at row " + std::to_string(cut.row) + ", L" + std::to_string(cut.block)).c_str()
+                          : "no flip - every bar binds on everything");
   std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
               det_ok, det, tie_ok, ties, gate_ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(),
               logit_min);
+  if (after) std::printf("  after the flip (printed): %u / %u decision rows in the golden's argmax set\n", after_ok, after);
   std::printf("  SSM state after the prompt: %zu / %zu values exact, worst block cosine %.6f (bar %.3f, PROPOSED)\n",
               state_exact, state_total, state_worst, kStateCos);
   std::printf("  conv columns after the prompt: %zu / %zu values exact, worst cosine %.6f\n", conv_exact, conv_total,
               conv_worst);
+  if (synth)
+    std::printf("  upstream of the flip, gated: SSM state worst %.6f, conv worst %.6f over the Mamba blocks [%s]\n",
+                state_gate, conv_gate, gated_blocks.c_str());
   bool h_ok = true;
   std::printf("  h (median / min cosine per block):");
   for (uint32_t l = 0; l < d.layers; ++l) {
     const double med = median(hcos[l]);
     const double mn = hcos[l].empty() ? 1.0 : *std::min_element(hcos[l].begin(), hcos[l].end());
     std::printf(" %u:%.5f/%.4f", l, med, mn);
+  }
+  if (synth) std::printf("\n  h upstream of the flip, gated (rows / median / min per block):");
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    const double med = median(hgate[l]);
+    const double mn = hgate[l].empty() ? 1.0 : *std::min_element(hgate[l].begin(), hgate[l].end());
+    if (synth) std::printf(" %u:%zu/%.5f/%.4f", l, hgate[l].size(), med, mn);
     h_ok = h_ok && med >= kHMedian && mn >= kHMin;
   }
   std::printf("\nrouting: %llu (row, block) (%llu exact sets, %llu near-ties within %.1e, %llu undetermined (gap 0), %llu "
-              "differing; matching weights worst %lld fp32 ulps)\n", (unsigned long long)rc.rows,
-              (unsigned long long)rc.exact, (unsigned long long)rc.ties, double(tie_tol()),
-              (unsigned long long)rc.undetermined, (unsigned long long)rc.bad, (long long)rc.worst_w);
+              "differing%s; matching weights worst %lld fp32 ulps)\n", (unsigned long long)cut.pairs,
+              (unsigned long long)cut.exact, (unsigned long long)cut.ties, double(tie_tol()),
+              (unsigned long long)cut.undetermined, (unsigned long long)(cut.bad_before + cut.bad_after),
+              cut.bad_after ? (" - " + std::to_string(cut.bad_after) + " of them after the flip, printed").c_str() : "",
+              (long long)rc.worst_w);
   CHECK(gate_ok);
-  CHECK_EQ(rc.bad, uint64_t(0));
+  CHECK_EQ(cut.bad_before, uint64_t(0));
   CHECK(h_ok);
-  CHECK(state_worst >= kStateCos);
-  CHECK(conv_worst >= kStateCos);
+  CHECK(state_gate >= kStateCos);
+  CHECK(conv_gate >= kStateCos);
   std::puts("bolt_golden_test OK");
   return 0;
 }
