@@ -23,6 +23,14 @@
 //   5. routing on the last chunk's rows: expert SETS equal except a near-tie (decode's 9th / 10th gap <= B70_BOLT_TIE_TOL,
 //      one expert different); 0 gaps undetermined
 //   6. tokens: prefill + 32 greedy against ingest + 32 greedy, tie-aware (every determined row agrees), teacher-forced
+//   25b's SYNTHETICS (their bolt_synth.json): the first-flip cut-off (operator ruling 2026-11-05; spec 25 §9.1;
+//   tests/golden/bolt_cutoff.h) with DECODE's fill as the reference - the prefill's route sets against decode's, with
+//   decode's 9th / 10th margin, over EVERY prompt row (the prefill one call a 2048-chunk: bitwise one call, 3) and the 32
+//   teacher-forced rows of 6, in causal order; the first near-tie / undetermined difference is the flip. 4's bars bind on
+//   what is upstream of it (the logits if no flip at or before the last prompt row; each block's last-row tap, each Mamba
+//   block's state / conv columns at (n - 1, block); each attention block's K / V rows at (position, block)), 5 fails on a
+//   Beyond difference before it, 6 binds on the decision rows wholly before it; everything after it is printed. Our export
+//   keeps 4 - 6 as above.
 //   7. pp2[:<split>]: the same prefill on two cards (the copy hand-off a chunk) bitwise one card (when it fits one)
 // `eager` / `b16` run B70_BOLT_ATTN=eager / B70_BOLT_SSM=bf16 in BOTH halves. Exit 77 (SKIP) when the checkpoint is absent
 // or the placement does not fit with the prefill scratch.
@@ -32,11 +40,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <string>
 #include <vector>
 
 #include "bolt_rig.h"
+#include "bolt_cutoff.h"
 #include "check.h"
 #include "common/bf16.h"
 #include "kernels/bolt_kernels.h"
@@ -125,6 +135,8 @@ const uint32_t* pf_route(const std::vector<uint32_t>& r, uint32_t l, uint32_t ro
   return r.data() + rb::pf_route_at(l) / 4 + size_t(row) * rb::kRouteWords;
 }
 
+bool g_synth = false;   // 25b's synthetic (bolt_synth.json): the first-flip cut-off (header)
+
 int run_all(rb::BoltEngine& e, const Ids& prompt) {
   const model::BoltDesc& d = e.model().desc;
   const uint32_t n = uint32_t(prompt.size());
@@ -210,9 +222,52 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
   }
 
   // ---- 4 / 5. against decode's fill ----------------------------------------------------------------------------------
+  const uint32_t K = kernels::bolt::kTopK;
+  bolt_cutoff::Cut cut;   // the first-flip cut-off (header): synthetics only
+  cut.enabled = g_synth;
+  // The prefill's route rows of every compared prompt row: on a synthetic one prefill call a chunk (every row), else the
+  // last chunk's (rows [row0, n)).
+  uint32_t row0 = ((n - 1) / rb::kPfC) * rb::kPfC;   // the last chunk's first position (chunks from 0)
+  std::vector<uint32_t> pf_rows;                      // [rows from row0][moe blocks][48]
+  uint32_t moe = 0;
+  for (uint32_t l = 0; l < d.layers; ++l) moe += d.is_moe(l);
+  auto keep_pf = [&](const std::vector<uint32_t>& r, uint32_t s0, uint32_t s1) {
+    for (uint32_t t = s0; t < s1; ++t)
+      for (uint32_t l = 0; l < d.layers; ++l)
+        if (d.is_moe(l)) {
+          const uint32_t* x = pf_route(r, l, t - s0);
+          pf_rows.insert(pf_rows.end(), x, x + rb::kRouteWords);
+        }
+  };
+  if (g_synth) {
+    row0 = 0;
+    e.reset();
+    for (uint32_t s0 = 0; s0 < n; s0 += rb::kPfC) {
+      const uint32_t s1 = std::min(n, s0 + rb::kPfC);
+      e.prefill(Ids(prompt.begin() + s0, prompt.begin() + s1));
+      keep_pf(e.read_prefill_routes(), s0, s1);
+    }
+  } else {
+    keep_pf(a.routes, row0, n);
+  }
+  uint32_t printed = 0;
+  // One (row, MoE block): the prefill's set against decode's, decode's margin; fed in causal order.
+  auto route_pair = [&](const uint32_t* prow, const uint32_t* drow, uint32_t p, uint32_t l) {
+    const float gap = bits(drow[kr::kSel + 8]) - bits(drow[kr::kSel + 9]);
+    const bool was = cut.found;
+    const bolt_cutoff::Diff df = cut.add(p, l, bolt_cutoff::classify(prow + kr::kIds, drow + kr::kIds, K, gap, tie_tol()));
+    if (cut.found && !was)
+      std::printf("   THE FIRST FLIP at row %u, L%u (%s, decode gap %.3e): 4 - 6 bind upstream of it (header)\n", p, l,
+                  bolt_cutoff::diff_name(df), double(gap));
+    if (df == bolt_cutoff::Diff::Beyond && printed++ < 10) {
+      uint32_t common = 0;
+      for (uint32_t k = 0; k < K; ++k)
+        for (uint32_t m = 0; m < K; ++m) common += prow[kr::kIds + k] == drow[kr::kIds + m];
+      std::printf("   L%u row %u: expert sets differ beyond a near-tie (decode gap %.3e, %u in common)%s\n", l, p,
+                  double(gap), common, was ? " - after the flip, printed" : "");
+    }
+  };
   e.reset();
-  const uint32_t row0 = ((n - 1) / rb::kPfC) * rb::kPfC;   // the last chunk's first position (chunks from 0)
-  uint64_t rows = 0, exact = 0, ties = 0, undet = 0, bad = 0;
   for (uint32_t p = 0; p < n; ++p) {
     e.ingest({prompt[p]});
     if (p < row0) continue;
@@ -220,65 +275,86 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
     uint32_t mi = 0;
     for (uint32_t l = 0; l < d.layers; ++l) {
       if (!d.is_moe(l)) continue;
-      const uint32_t* drow = dr.data() + size_t(mi++) * rb::kRouteWords;
-      const uint32_t* prow = pf_route(a.routes, l, p - row0);
-      ++rows;
-      std::vector<uint32_t> ds(drow + kr::kIds, drow + kr::kIds + 9), ps(prow + kr::kIds, prow + kr::kIds + 9);
-      if (ds == ps) {   // both ascending
-        ++exact;
-        continue;
-      }
-      uint32_t common = 0;
-      for (uint32_t x : ds) common += std::count(ps.begin(), ps.end(), x) ? 1 : 0;
-      const float gap = bits(drow[kr::kSel + 8]) - bits(drow[kr::kSel + 9]);
-      if (gap == 0.0f)
-        ++undet;
-      else if (gap <= tie_tol() && common == 8)
-        ++ties;
-      else if (++bad <= 10)
-        std::printf("   L%u row %u: expert sets differ beyond a near-tie (decode gap %.3e, %u in common)\n", l, p,
-                    double(gap), common);
+      route_pair(pf_rows.data() + (size_t(p - row0) * moe + mi) * rb::kRouteWords, dr.data() + size_t(mi) * rb::kRouteWords,
+                 p, l);
+      ++mi;
     }
   }
   const Snap dec = snap(e, n, false, true);
   const double lcos = cos_f32(a.logits.data(), dec.logits.data(), a.logits.size());
-  std::vector<double> taps;
-  for (uint32_t l = 0; l < d.layers; ++l)
+  const bool lgate = cut.row_clean(n - 1);
+  std::vector<double> taps, tgate;
+  for (uint32_t l = 0; l < d.layers; ++l) {
     taps.push_back(cos_bf16(a.taps.data() + size_t(l) * d.hidden, dec.taps.data() + size_t(l) * d.hidden, d.hidden));
+    if (cut.upstream(n - 1, l)) tgate.push_back(taps.back());
+  }
   std::vector<double> ts = taps;
   std::sort(ts.begin(), ts.end());
-  double sworst = 1.0, cworst = 1.0;
-  for (size_t m = 0; m < a.states.size(); ++m) {
-    sworst = std::min(sworst, cos_f32(a.states[m].data(), dec.states[m].data(), a.states[m].size()));
+  std::sort(tgate.begin(), tgate.end());
+  double sworst = 1.0, cworst = 1.0, sgate = 1.0, cgate = 1.0;
+  std::string per_state;
+  for (uint32_t l = 0, m = 0; l < d.layers; ++l) {
+    if (!d.is_mamba(l)) continue;
+    const double sc = cos_f32(a.states[m].data(), dec.states[m].data(), a.states[m].size());
+    double cc = 1.0;
     for (uint32_t j = 0; j < 3; ++j)
-      cworst = std::min(cworst, cos_bf16(a.conv[m].data() + size_t(j) * d.m_conv_dim,
-                                         dec.conv[m].data() + size_t(j) * d.m_conv_dim, d.m_conv_dim));
+      cc = std::min(cc, cos_bf16(a.conv[m].data() + size_t(j) * d.m_conv_dim,
+                                 dec.conv[m].data() + size_t(j) * d.m_conv_dim, d.m_conv_dim));
+    sworst = std::min(sworst, sc);
+    cworst = std::min(cworst, cc);
+    const bool up = cut.upstream(n - 1, l);
+    if (up) {
+      sgate = std::min(sgate, sc);
+      cgate = std::min(cgate, cc);
+    }
+    char b[96];
+    std::snprintf(b, sizeof b, " L%u:%.6f/%.6f%s", l, sc, cc, up ? "" : "*");
+    per_state += b;
+    ++m;
   }
-  std::vector<double> kv;
-  for (size_t al = 0; al < a.kv.size(); ++al)
+  std::vector<double> kv, kvgate;
+  for (uint32_t l = 0, al = 0; l < d.layers; ++l) {
+    if (!d.is_attention(l)) continue;
     for (uint32_t p = 0; p < n; ++p)
-      for (uint32_t h = 0; h < 2; ++h)
+      for (uint32_t h = 0; h < 2; ++h) {
         kv.push_back(cos_bf16(a.kv[al].data() + (size_t(h) * n + p) * d.kv_n(), dec.kv[al].data() + (size_t(h) * n + p) * d.kv_n(),
                               d.kv_n()));
+        if (cut.upstream(p, l)) kvgate.push_back(kv.back());
+      }
+    ++al;
+  }
   std::sort(kv.begin(), kv.end());
+  std::sort(kvgate.begin(), kvgate.end());
   const double kv_med = kv.empty() ? 1.0 : kv[kv.size() / 2], kv_p01 = kv.empty() ? 1.0 : kv[kv.size() / 100];
-  const bool f4 = lcos >= 0.9995 && ts[ts.size() / 2] >= 0.9998 && ts.front() >= 0.99 && sworst >= 0.999 && cworst >= 0.999 &&
-                  kv_med >= 0.9998 && kv_p01 >= 0.99;
+  const double kg_med = kvgate.empty() ? 1.0 : kvgate[kvgate.size() / 2],
+               kg_p01 = kvgate.empty() ? 1.0 : kvgate[kvgate.size() / 100];
+  const bool f4 = (!lgate || lcos >= 0.9995) && (tgate.empty() || (tgate[tgate.size() / 2] >= 0.9998 && tgate.front() >= 0.99)) &&
+                  sgate >= 0.999 && cgate >= 0.999 && kg_med >= 0.9998 && kg_p01 >= 0.99;
   std::printf("4. prefill vs decode's fill (%u positions): logits cosine %.7f (bar 0.9995); h taps median %.7f / min %.6f "
               "(bars 0.9998 / 0.99); SSM states worst %.7f, conv columns worst %.7f (bars 0.999); K / V rows median %.7f, "
               "p01 %.6f%s\n", n, lcos, ts[ts.size() / 2], ts.front(), sworst, cworst, kv_med, kv_p01,
               f4 ? "" : "  ** FAIL **");
+  if (g_synth)
+    std::printf("   the first-flip cut-off (synthetic; header): %s; gated upstream of it - logits %s, %zu of %u last-row "
+                "taps, state worst %.7f / conv worst %.7f, %zu of %zu K / V rows (median %.7f, p01 %.6f)\n",
+                cut.found ? ("the first flip at row " + std::to_string(cut.row) + ", L" + std::to_string(cut.block)).c_str()
+                          : "no flip",
+                lgate ? "gated" : "printed", tgate.size(), d.layers, sgate, cgate, kvgate.size(), kv.size(), kg_med, kg_p01);
   std::printf("   h taps per block:");
   for (uint32_t l = 0; l < d.layers; ++l) std::printf(" %u:%.5f", l, taps[l]);
-  std::printf("\n5. routing on the last chunk's %llu (row, MoE block) rows: %llu exact sets, %llu near-ties (gap <= %.1e), "
-              "%llu undetermined (0 gap), %llu beyond%s\n", (unsigned long long)rows, (unsigned long long)exact,
-              (unsigned long long)ties, double(tie_tol()), (unsigned long long)undet, (unsigned long long)bad,
-              bad == 0 ? "" : "  ** FAIL **");
-  ok = ok && f4 && bad == 0;
+  std::printf("\n   SSM state / conv cosine per Mamba block (* after the flip, printed):%s\n", per_state.c_str());
+  std::printf("5. routing on %s %llu (row, MoE block) rows: %llu exact sets, %llu near-ties (gap <= %.1e), %llu undetermined "
+              "(0 gap), %llu beyond%s%s\n", g_synth ? "every prompt row's" : "the last chunk's", (unsigned long long)cut.pairs,
+              (unsigned long long)cut.exact, (unsigned long long)cut.ties, double(tie_tol()),
+              (unsigned long long)cut.undetermined, (unsigned long long)(cut.bad_before + cut.bad_after),
+              cut.bad_after ? (" (" + std::to_string(cut.bad_after) + " after the flip, printed)").c_str() : "",
+              cut.bad_before == 0 ? "" : "  ** FAIL **");
+  ok = ok && f4 && cut.bad_before == 0;
 
   // ---- 6. tokens, tie-aware --------------------------------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
   std::vector<bool> determined(kGen);
+  std::vector<uint32_t> droutes;   // synthetics: decode's route rows of the teacher-forced rows n + j
   for (uint32_t j = 0; j < kGen; ++j) {   // decode side: the state after ingest(prompt) is still there
     const std::vector<float> lg = e.read_logits();
     std::vector<float> s(lg.begin(), lg.begin() + d.vocab_used);
@@ -287,22 +363,42 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
     determined[j] = s[0] - s[1] >= ulp;
     dtok[j] = e.pending();
     e.ingest({dtok[j]});
+    if (g_synth) {
+      const std::vector<uint32_t> dr = e.read_routes();
+      droutes.insert(droutes.end(), dr.begin(), dr.begin() + size_t(moe) * rb::kRouteWords);
+    }
   }
-  uint32_t agree = 0, det = 0, det_agree = 0;
+  uint32_t agree = 0, det = 0, det_agree = 0, after = 0, after_agree = 0;
   e.reset();
   e.prefill(prompt);
   for (uint32_t j = 0; j < kGen; ++j) {
     const uint32_t got = e.pending();
     agree += got == dtok[j];
-    if (determined[j]) {
+    if (!cut.row_clean(n - 1 + j)) {   // the decision row n - 1 + j is past the flip: printed
+      ++after;
+      after_agree += got == dtok[j];
+    } else if (determined[j]) {
       ++det;
       det_agree += got == dtok[j];
     }
     e.ingest({dtok[j]});   // teacher-forced on decode's token
+    if (g_synth) {
+      const std::vector<uint32_t> pr = e.read_routes();
+      for (uint32_t mi = 0, l = 0; l < d.layers; ++l)
+        if (d.is_moe(l)) {
+          route_pair(pr.data() + size_t(mi) * rb::kRouteWords,
+                     droutes.data() + (size_t(j) * moe + mi) * rb::kRouteWords, n + j, l);
+          ++mi;
+        }
+    }
   }
-  std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
+  std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s", agree, kGen, det_agree, det,
               det_agree == det ? "" : "  ** FAIL **");
-  ok = ok && det_agree == det;
+  if (after) std::printf("; %u rows after the flip (printed): %u agree", after, after_agree);
+  if (g_synth && cut.bad_before)
+    std::printf("; a Beyond route difference before the flip in the generated rows  ** FAIL **");
+  std::printf("\n");
+  ok = ok && det_agree == det && cut.bad_before == 0;
   return ok ? 0 : 1;
 }
 
@@ -314,6 +410,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: no Nemotron 3.5 Bolt checkpoint at '%s'\n", argc > 1 ? argv[1] : "");
     return 77;
   }
+  g_synth = std::ifstream(snapdir + "/bolt_synth.json").good();
   bolt_rig::Options o;
   o.max_len = kMaxLen;
   o.debug_tap = true;
