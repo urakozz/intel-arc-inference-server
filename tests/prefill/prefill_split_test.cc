@@ -43,6 +43,7 @@
 //          prefills split at 7 / 1000 / 2047, and from M = 1 decode, against the CPU
 //          oracle's (tools/oracle/dump.py, every prompt position's logits).
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -295,6 +296,7 @@ int oracle_rows(const std::string& snapdir, const Ids& all, runtime::PrefillBack
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   if (argc > 6 && std::string(argv[4]) == "--oracle") {
     runtime::PrefillBackend b = runtime::prefill::default_prefill_backend();
     CHECK(runtime::parse_prefill_backend(argv[3], b));

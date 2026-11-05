@@ -56,7 +56,7 @@
 //      `conv_ring`, the chunk's `kv_k`/`kv_v` rows [0, T), and the last hidden.
 //      Printed as a table so the band is greppable, and printed for every chunk
 //      width so a chunk-width dependence is visible.
-//   5. Every case at chunk = the engine's chunk cap (plan 5d: B70_PREFILL_CHUNK_CAP; one chunk; these prompts are
+//   5. Every case at chunk = the engine's chunk cap (plan 5d: --chunk-cap, tests/chunk_cap_arg.h; one chunk; these prompts are
 //      38-61 ids) AND at chunk = 16 (three or four chunks), so the multi-chunk
 //      carry is exercised on a prompt that has a golden set.
 //
@@ -69,6 +69,7 @@
 // logit cosine there, the state band, and which launch the band localises to -
 // and take it to the operator. **Do not widen the bar.**
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -244,6 +245,7 @@ struct Row {
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string pdir = argc > 1 ? argv[1] : "tests/golden/prompts";
   const std::string snap = argc > 2 ? argv[2] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   // argv[3]: the prefill backend (spec 2.1) -- l0 or l0-int8; default l0.

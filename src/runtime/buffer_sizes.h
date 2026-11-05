@@ -297,10 +297,16 @@ void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap);
 // C <= 2048, kCMax for C <= 4096; above 4096, or a cap the model refuses, throws
 // std::invalid_argument with the reason.
 uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc);
-// `B70_PREFILL_CHUNK_CAP=2048|4096` (read at each call, as B70_KV_CACHE is): the cap an
-// engine uses when nobody set one - how the gate tests run the same binaries at 4096.
-// Unset or empty is kCDefault; anything else throws std::invalid_argument.
+// The cap an engine uses when nobody set one (Engine / PipelineEngine::set_prefill_chunk_cap):
+// kCDefault. Only a test moves it, for its whole process (testing:: below, through the
+// `--chunk-cap N` argument of tests/chunk_cap_arg.h) - how the gate tests run the same
+// binaries at 4096. No CLI flag, server option or environment variable reaches it (operator,
+// 2026-11-03: no new engine env vars): the CLIs choose the cap themselves (cli/max_len.h).
 uint32_t default_prefill_chunk_cap();
+namespace testing {
+// Test-only seam: kCDefault or kCMax, else std::invalid_argument. Never called by src/.
+void set_default_prefill_chunk_cap(uint32_t cap);
+}  // namespace testing
 
 // --- MtpBuffers (spec 8) -------------------------------------------------------------
 

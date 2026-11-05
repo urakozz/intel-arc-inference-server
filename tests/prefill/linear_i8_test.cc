@@ -5,6 +5,7 @@
 // output. M = 300 is not a multiple of 256, and rows [300, 512) of x hold NaN
 // bf16, so the padded rows are exercised too.
 #include <cmath>
+#include "chunk_cap_arg.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -96,7 +97,8 @@ std::vector<double> oracle(const std::vector<uint16_t>& x, const common::Int4Gpt
 }
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   using runtime::prefill::linear_i8;
   using runtime::prefill::linear_i8_launches;
   using runtime::prefill::linear_i8_silu;

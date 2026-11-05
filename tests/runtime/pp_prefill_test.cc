@@ -31,6 +31,7 @@
 // `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form (pp_prefill_kv8_test).
 // Exits 77 (SKIP) with fewer than two GPUs or without peer access.
 #include <algorithm>
+#include "chunk_cap_arg.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -189,6 +190,7 @@ struct Config {
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0Int8;
   if (argc > 2) CHECK(runtime::parse_prefill_backend(argv[2], backend));

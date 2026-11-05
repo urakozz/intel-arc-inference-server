@@ -619,14 +619,14 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::prefill_chunk_cap_for(2048, o), 2048u);
   CHECK(throws([&] { runtime::prefill_chunk_cap_for(4097, q); }, "4096"));
   CHECK(throws([&] { runtime::prefill_chunk_cap_for(4096, o); }, o.name.c_str()));
-  // B70_PREFILL_CHUNK_CAP: the engines' default (as B70_KV_CACHE is the cache form's).
-  unsetenv("B70_PREFILL_CHUNK_CAP");
+  // The engines' default cap: 2048, read from no environment variable (operator, 2026-11-03);
+  // only the test seam moves it (tests/chunk_cap_arg.h), and only to a cap.
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
-  setenv("B70_PREFILL_CHUNK_CAP", "4096", 1);
+  runtime::testing::set_default_prefill_chunk_cap(4096);
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 4096u);
-  setenv("B70_PREFILL_CHUNK_CAP", "3000", 1);
-  CHECK(throws([] { runtime::default_prefill_chunk_cap(); }, "B70_PREFILL_CHUNK_CAP"));
-  unsetenv("B70_PREFILL_CHUNK_CAP");
+  CHECK(throws([] { runtime::testing::set_default_prefill_chunk_cap(3000); }, "3000"));
+  runtime::testing::set_default_prefill_chunk_cap(2048);
+  CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
 
   // The planner's prefill term at both caps: l0-int8 with MTP, one DFlash-sized tap count.
   const runtime::PrefillPath i8c2{true, PrefillBackend::L0Int8, false, 2048};

@@ -672,7 +672,7 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   if (chunk > cap)
     throw std::runtime_error("runtime::PipelineEngine::prefill: chunk " + std::to_string(chunk) +
                              " exceeds the session's prefill chunk cap " + std::to_string(cap) +
-                             " (set_prefill_chunk_cap / B70_PREFILL_CHUNK_CAP: 2048 or 4096)");
+                             " (set_prefill_chunk_cap: 2048 or 4096)");
   for (uint32_t id : ids)
     if (id >= model::Qwen35::kVocab)
       throw std::runtime_error("runtime::PipelineEngine::prefill: id " + std::to_string(id) +
