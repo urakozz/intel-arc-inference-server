@@ -23,6 +23,11 @@
 #   golden-bf16  the BF16 original on BOLT_BF16_PROMPTS (bolt_short bolt_agentic) -> <data>/oracle-out-bolt-bf16/
 #   export <dir> the golden prompts on an int4 checkpoint dequantised (25b's synthetics; mounted as ORACLE_SNAP)
 #                -> <data>/oracle-out-bolt-<name>/ (<name> = the directory's base name)
+#   export-f32 <dir>  the f32 JUDGES of export's golden sets (bolt_golden_test.cc's header; the operator's MoE rulings
+#                2026-10-23 / 10-28 / 10-31 round 2): bolt_ref.py run --dtype fp32 --force <each golden's tokens>, plain
+#                head -> <data>/oracle-out-bolt-<name>-f32/, --lm-head int8 (the default head's int8-aware judge) ->
+#                <data>/oracle-out-bolt-<name>-f32-i8head/. Needs oracle-out-bolt-<name>/<p>.golden.safetensors. Measured on
+#                the Mac (12 threads, 2026-11-05): bolt_short 3.5 min, peak RSS 14.8 GiB.
 #   a4 / a4-bf16 tools/toolcall/a4_ref.sh bolt set + ref FORM=int4 / FORM=bf16 (36 scenarios, greedy, 2048 new ids,
 #                reasoning on, batched) -> <data>/oracle-out-bolt-a4/<name>.{int4,bf16}.{ids,txt,gap} (DAYS,
 #                ESTIMATED; resumable per scenario); score.py --format qwen-think once both exist
@@ -47,11 +52,11 @@
 #      BOLT_MEM_GB, BOLT_LOCK, BOLT_LOCK_HELD, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq"
+MODES="tests|ppl|hfcheck|golden|golden-bf16|export <dir>|export-f32 <dir>|a4|a4-bf16|gateq"
 [ $# -ge 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2" arg="${3:-}"
 case "$mode" in tests|ppl|hfcheck|golden|golden-bf16|a4|a4-bf16|gateq) ;;
-  export) [ -n "$arg" ] || { echo "bolt_oracle: export needs the export's directory" >&2; exit 2; } ;;
+  export|export-f32) [ -n "$arg" ] || { echo "bolt_oracle: $mode needs the export's directory" >&2; exit 2; } ;;
   *) echo "bolt_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;;
 esac
 mac=0
@@ -153,7 +158,7 @@ if [ "$dry" != 1 ]; then
     golden-bf16|a4-bf16) complete "$BF16" || miss "$BF16 is absent or incomplete (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 56702103...: 149.8 GB, df -h ~ first)" ;;
     gateq) { complete "$INT4" && complete "$BF16"; } || miss "gate Q needs both $INT4 and $BF16 complete (41 + 149.8 GB)" ;;
     ppl|hfcheck) [ ${#forms[@]} -gt 0 ] || miss "neither $INT4 nor $BF16 is complete in $hf/hub" ;;
-    export) [ -f "$arg/config.json" ] || miss "$arg has no config.json (25b's synthetic checkpoint)" ;;
+    export|export-f32) [ -f "$arg/config.json" ] || miss "$arg has no config.json (25b's synthetic checkpoint)" ;;
   esac
 fi
 [ ${#forms[@]} -gt 0 ] || forms=(int4)      # DRY_RUN with nothing downloaded: show the int4 form's commands
@@ -266,6 +271,41 @@ case "$mode" in
     done
     unset ORACLE_SNAP
     summary "$data/oracle-out-bolt-$name/bolt_*.log"
+    ;;
+  export-f32)
+    name=$(basename "${arg%/}")
+    [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "bolt_oracle: export directory name $name" >&2; exit 2; }
+    export ORACLE_SNAP
+    ORACLE_SNAP="$(cd "$arg" 2>/dev/null && pwd || echo "$arg")"
+    src="oracle-out-bolt-$name"
+    for p in $prompts; do
+      if [ "$dry" != 1 ] && [ ! -s "$data/$src/$p.golden.safetensors" ]; then
+        echo "bolt_oracle: $p - no $data/$src/$p.golden.safetensors (run export first)"; rc=1; continue
+      fi
+      for head in bf16 int8; do
+        sfx=-f32; [ $head = int8 ] && sfx=-f32-i8head
+        part="oracle-out-bolt-$name$sfx.partial"
+        [ "$dry" = 1 ] || mkdir -p "$part"
+        # the forced ids: the bf16 golden's own tokens (its rows are the judge's contexts row for row)
+        if [ "$dry" = 1 ]; then echo "DRY_RUN: $p.force.ids from $data/$src/$p.golden.safetensors"; else
+          python3 -I - "$data/$src/$p.golden.safetensors" "$part/$p.force.ids" <<'PY' || { rc=1; continue; }
+import json, struct, sys
+with open(sys.argv[1], "rb") as f:    # safetensors by hand (the host python has no safetensors): the I32 `tokens`
+    n = struct.unpack("<Q", f.read(8))[0]
+    h = json.loads(f.read(n))["tokens"]
+    assert h["dtype"] == "I32", h
+    a, b = h["data_offsets"]
+    f.seek(8 + n + a)
+    toks = struct.unpack(f"<{(b - a) // 4}i", f.read(b - a))
+open(sys.argv[2], "w").write(" ".join(map(str, toks)) + "\n")
+PY
+        fi
+        golden export "$data/oracle-out-bolt-$name$sfx" "$part" "$p" "$gen" \
+          "--weights int4 --taps --dtype fp32 --lm-head $head --force /ws/$part/$p.force.ids" || true
+      done
+    done
+    unset ORACLE_SNAP
+    summary "$data/oracle-out-bolt-$name-f32*/bolt_*.log"
     ;;
   a4|a4-bf16)
     out="$data/oracle-out-bolt-a4"

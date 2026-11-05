@@ -215,6 +215,9 @@ case "${1:-}" in
     # Spec 25c (queue row 60): the N 12 synthetics' golden sets (r60.synth_golden: bolt_oracle.sh export on each).
     have oracle_bolt_synth "oracle-out-bolt-n12-{g128,g64x}/bolt_{short,4k,agentic}.golden.safetensors (spec 25c: r60.synth_golden)" \
       bash -c 'for s in n12-g128 n12-g64x; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-$s/$p.golden.safetensors || exit 1; done; done'
+    # Their f32 judges (bolt_golden_test --judge; bolt_oracle.sh export-f32 n12-g128 - n12-g64x is its exact expansion).
+    have oracle_bolt_synth_f32 "oracle-out-bolt-n12-g128-f32{,-i8head}/bolt_{short,4k,agentic}.golden.safetensors (bolt_oracle.sh export-f32: r60.synth_golden)" \
+      bash -c 'for s in f32 f32-i8head; do for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-n12-g128-$s/$p.golden.safetensors || exit 1; done; done'
     have tok_python "a python with tokenizers (${TOK_PYTHON:-?})" "${TOK_PYTHON:-/nonexistent}" -c 'import tokenizers'
     # shellcheck disable=SC2016 # expanded by the inner bash
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
