@@ -35,27 +35,8 @@
 // gate's (PROPOSED): prefill's linears round through bf16-dequantised weights in a DPAS order and its SSM is the SSD form -
 // both further from the reference than decode's chain, which the bars are meant to absorb (Kolibri's precedent).
 //
-// **The f32 judge (`--judge=<dir>`; the operator's MoE rulings of 2026-10-23 / 10-28 / 10-31 round 2, Kolibri's
-// synthetic precedent)**: bolt_ref.py run --dtype fp32 --force <the golden's tokens> (tools/box_validate/bolt_oracle.sh
-// export-f32), its rows the golden's contexts row for row. 25b's synthetics are random-weight models whose routers sit
-// in near-ties at every block (25a's gap distribution: 172 of 640 (row, block) gaps below 1e-3 on bolt_short), so one
-// near-tie flip moves the rest of the sequence through the SSM states: the bf16 golden ITSELF misses 12 / 32 of
-// bolt_short's argmax rows against f32 and its expert sets differ from f32's at 273 of 640 (row, block) - the engine's
-// distance to the bf16 golden on its own says nothing. With the judge the engine passes when it is no further from f32
-// than the bf16 golden:
-//   tokens   forced_judge.h's near-miss rule with the bf16 golden as the twin;
-//   routing  the (row, MoE block) sets differing from the judge's: the engine's count no larger than the golden's;
-//   h        (decode only) per block, the MEDIAN over the rows of the residual's cosine to the judge's within kCosSlack
-//            (2) of the golden's cosine distance (the minima printed beside);
-//   state    per Mamba block the SSM state's and the conv columns' cosine to the judge's within kCosSlack of the golden's
-//            distance.
-// The bf16 golden's gate, routing, h, state and conv lines above stay printed (diagnostic). The EAGER attention is
-// DIAGNOSTIC under the judge (operator ruling 2026-10-29: eager prints, never binds).
-//
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
-//       [prefill | prefill:<chunk>] [--judge=<dir>] [--dump=<dir>]
-// (debug: --dump writes every decode row's h taps, raw bf16 [row][block][hidden], and route rows, u32 [row][MoE block][48],
-// to <dir>/<prompt>.{tap,routes} - for offline per-row comparisons against the references)
+//       [prefill | prefill:<chunk>]
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
 #include <algorithm>
 #include <cmath>
@@ -69,7 +50,6 @@
 
 #include "check.h"
 #include "common/bf16.h"
-#include "forced_judge.h"
 #include "golden_common.h"
 #include "kernels/bolt_kernels.h"
 #include "runtime/bolt/bolt_sizes.h"
@@ -164,8 +144,6 @@ double cosine_f32(const float* a, const float* b, size_t n, size_t& exact) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const std::string judge_dir = golden::take_judge(argc, argv);   // the f32 judge (header)
-  const std::string dump_dir = golden::take_flag(argc, argv, "--dump=");   // debug (header)
   const std::string arg = argc > 1 ? argv[1] : "";
   const std::string gdir = argc > 2 ? argv[2] : "oracle-out-bolt";
   const std::string pname = argc > 3 ? argv[3] : "bolt_short";
@@ -260,10 +238,6 @@ int main(int argc, char** argv) {
   const int32_t* gtok = g.i32("tokens", kGen);
   const uint32_t K = kernels::bolt::kTopK;
   std::printf("\n================ %s: %u prompt ids, %u generated ================\n", pname.c_str(), T, kGen);
-  const golden::Judge J = judge_dir.empty() ? golden::Judge{} : golden::open_judge(judge_dir, pname, gtok, kGen, lr);
-  if (J) CHECK_EQ(J.V, d.vocab);
-  uint64_t j_rows = 0, j_engine = 0, j_golden = 0;   // (row, MoE block) sets differing from the judge's
-  std::vector<std::vector<double>> tap_e(d.layers), tap_g(d.layers);   // residual cosines to the judge's
   RouteCount rc;
   std::vector<char> first(d.layers, 0);
   std::vector<std::vector<double>> hcos(d.layers);
@@ -275,17 +249,6 @@ int main(int argc, char** argv) {
     const float* gw = g.f32("route.w.L" + ls, size_t(rows) * K) + size_t(row) * K;
     const float gap = g.f32("route.gap.L" + ls, rows)[row];
     compare_route(r, gi, gw, gap, rc, first[l], pname, row, l);
-    if (!J) return;
-    auto sorted = [K](auto* v) {
-      std::vector<uint32_t> x(K);
-      for (uint32_t k = 0; k < K; ++k) x[k] = uint32_t(v[k]);
-      std::sort(x.begin(), x.end());
-      return x;
-    };
-    const std::vector<uint32_t> js = sorted(J.g->i32("route.ids.L" + ls, size_t(rows) * K) + size_t(row) * K);
-    ++j_rows;
-    j_engine += sorted(r + kr::kIds) != js;
-    j_golden += sorted(gi) != js;
   };
   auto check_taps = [&](uint32_t row) {
     const std::vector<uint16_t> tap = eng.read_debug_h();
@@ -295,29 +258,10 @@ int main(int argc, char** argv) {
       if (row < h0) continue;
       const uint16_t* want = g.bf16(n, size_t(A) * d.hidden) + size_t(row - h0) * d.hidden;
       hcos[l].push_back(golden::compare_bf16(tap.data() + size_t(l) * d.hidden, want, d.hidden, sa, sb).cos);
-      if (J && J.g->has(n)) {   // the judge's residual: f32 (--dtype fp32), the golden's rows
-        const float* jr = J.g->f32(n, size_t(A) * d.hidden) + size_t(row - h0) * d.hidden;
-        std::vector<float> e(d.hidden), w(d.hidden);
-        for (uint32_t i = 0; i < d.hidden; ++i) {
-          e[i] = common::bf16_to_f32(tap[size_t(l) * d.hidden + i]);
-          w[i] = common::bf16_to_f32(want[i]);
-        }
-        tap_e[l].push_back(golden::row_cos(jr, e.data(), d.hidden));
-        tap_g[l].push_back(golden::row_cos(jr, w.data(), d.hidden));
-      }
     }
   };
-  FILE* dtap = dump_dir.empty() ? nullptr : std::fopen((dump_dir + "/" + pname + ".tap").c_str(), "wb");
-  FILE* droute = dump_dir.empty() ? nullptr : std::fopen((dump_dir + "/" + pname + ".routes").c_str(), "wb");
   auto check_row = [&](uint32_t row) {
     const std::vector<uint32_t> r = eng.read_routes();
-    if (dtap) {
-      const std::vector<uint16_t> tap = eng.read_debug_h();
-      std::fwrite(tap.data(), 2, size_t(d.layers) * d.hidden, dtap);
-      uint32_t moe = 0;
-      for (uint32_t l = 0; l < d.layers; ++l) moe += d.is_moe(l);
-      std::fwrite(r.data(), 4, size_t(moe) * rb::kRouteWords, droute);
-    }
     uint32_t mi = 0;
     for (uint32_t l = 0; l < d.layers; ++l)
       if (d.is_moe(l)) check_route(r.data() + size_t(mi++) * rb::kRouteWords, row, l);
@@ -347,11 +291,6 @@ int main(int argc, char** argv) {
   // The SSM state and the conv columns after the prompt.
   double state_worst = 1.0, conv_worst = 1.0;
   size_t state_exact = 0, state_total = 0, conv_exact = 0, conv_total = 0;
-  struct StateJudged {
-    uint32_t l;
-    double ssm_e, ssm_g, conv_e, conv_g;   // cosine to the judge's: the engine's, the golden's
-  };
-  std::vector<StateJudged> sj;
   for (uint32_t l = 0; l < d.layers; ++l) {
     if (!d.is_mamba(l)) continue;
     const std::string ls = std::to_string(l);
@@ -359,33 +298,16 @@ int main(int argc, char** argv) {
     const float* want_s = g.f32("ssm.L" + ls, st.size());
     state_worst = std::min(state_worst, cosine_f32(st.data(), want_s, st.size(), state_exact));
     state_total += st.size();
-    StateJudged js{l, 1.0, 1.0, 1.0, 1.0};
-    if (J) {
-      size_t unused = 0;
-      const float* jst = J.g->f32("ssm.L" + ls, st.size());
-      js.ssm_e = cosine_f32(st.data(), jst, st.size(), unused);
-      js.ssm_g = cosine_f32(want_s, jst, st.size(), unused);
+    if (T < 3) continue;
+    const std::vector<uint16_t> ring = eng.read_conv_ring(d.mamba_index(l));
+    const uint16_t* want = g.bf16("conv.L" + ls, size_t(3) * d.m_conv_dim);
+    for (uint32_t s = 0; s < 3; ++s) {
+      const uint16_t* got = ring.data() + size_t((T - 3 + s) % 16) * d.m_conv_dim;
+      conv_worst = std::min(conv_worst, golden::compare_bf16(got, want + size_t(s) * d.m_conv_dim, d.m_conv_dim, sa, sb).cos);
+      for (uint32_t k = 0; k < d.m_conv_dim; ++k) conv_exact += got[k] == want[size_t(s) * d.m_conv_dim + k];
+      conv_total += d.m_conv_dim;
     }
-    if (T >= 3) {
-      const std::vector<uint16_t> ring = eng.read_conv_ring(d.mamba_index(l));
-      const uint16_t* want = g.bf16("conv.L" + ls, size_t(3) * d.m_conv_dim);
-      std::vector<uint16_t> got3;
-      for (uint32_t s = 0; s < 3; ++s) {
-        const uint16_t* got = ring.data() + size_t((T - 3 + s) % 16) * d.m_conv_dim;
-        conv_worst = std::min(conv_worst, golden::compare_bf16(got, want + size_t(s) * d.m_conv_dim, d.m_conv_dim, sa, sb).cos);
-        for (uint32_t k = 0; k < d.m_conv_dim; ++k) conv_exact += got[k] == want[size_t(s) * d.m_conv_dim + k];
-        conv_total += d.m_conv_dim;
-        got3.insert(got3.end(), got, got + d.m_conv_dim);
-      }
-      if (J) {
-        const uint16_t* jc = J.g->bf16("conv.L" + ls, size_t(3) * d.m_conv_dim);
-        js.conv_e = golden::compare_bf16(got3.data(), jc, got3.size(), sa, sb).cos;
-        js.conv_g = golden::compare_bf16(want, jc, got3.size(), sa, sb).cos;
-      }
-    }
-    sj.push_back(js);
   }
-  golden::NearMiss nm;   // with the judge: the 32 decision rows
   uint32_t det = 0, det_ok = 0, ties = 0, tie_ok = 0;
   int first_bad = -1;
   double logit_min = 1.0;
@@ -410,14 +332,10 @@ int main(int argc, char** argv) {
       std::printf("  step %u: engine %u, golden %u (%s)\n", j, got, uint32_t(gtok[j]), dec.determined() ? "determined" : "tie row");
       golden::print_top5("engine", lg.data(), d.vocab, d.vocab_used);
       golden::print_top5("golden", want, d.vocab, d.vocab_used);
-      if (J) golden::print_top5("f32", J.row(row - logits_row0), d.vocab, d.vocab_used);
     }
-    if (J) nm.add(j, J.row(row - logits_row0), got, lg.data(), want, d.vocab, d.vocab_used, "engine's");
     eng.ingest({uint32_t(gtok[j])});   // teacher-forced: row T + j
     check_row(T + j);
   }
-  if (dtap) std::fclose(dtap);
-  if (droute) std::fclose(droute);
   const bool gate_ok = det_ok == det && tie_ok == ties;
   std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
               det_ok, det, tie_ok, ties, gate_ok ? "" : (" - FIRST BAD STEP " + std::to_string(first_bad)).c_str(),
@@ -438,50 +356,6 @@ int main(int argc, char** argv) {
               "differing; matching weights worst %lld fp32 ulps)\n", (unsigned long long)rc.rows,
               (unsigned long long)rc.exact, (unsigned long long)rc.ties, double(tie_tol()),
               (unsigned long long)rc.undetermined, (unsigned long long)rc.bad, (long long)rc.worst_w);
-  if (J) {
-    // The f32 judge (header): no further from f32 than the bf16 golden; the lines above are the golden's diagnostics.
-    std::printf("the f32 judge %s (the bf16 golden's gate and bars above: printed, not gated)\n", judge_dir.c_str());
-    const bool tok_ok = nm.verdict("tokens", "engine's");
-    const bool route_ok = j_engine <= j_golden;
-    std::printf("routing against the f32 judge: %llu (row, MoE block) sets - the engine's differ at %llu, the bf16 golden's "
-                "at %llu (the bar)%s\n", (unsigned long long)j_rows, (unsigned long long)j_engine,
-                (unsigned long long)j_golden, route_ok ? "" : "  ** FAIL **");
-    bool tap_ok = true;
-    std::printf("h against the f32 judge, per block: median (min) cosine, the engine's / the bf16 golden's - the medians' "
-                "distance ratio %s at %.1f\n", prefill ? "printed (prefill: not gated)" : "gated", golden::kCosSlack);
-    for (uint32_t l = 0; l < d.layers; ++l) {
-      if (tap_e[l].empty()) continue;
-      golden::CosRows e{tap_e[l]}, w{tap_g[l]};
-      const double r = golden::cos_dist_ratio(e.median(), w.median());
-      const bool lok = r <= golden::kCosSlack;
-      tap_ok = tap_ok && lok;
-      std::printf("  L%-3u %.6f (%.4f) / %.6f (%.4f)  x%.2f%s\n", l, e.median(), e.min(), w.median(), w.min(), r,
-                  lok ? "" : prefill ? "  (above the slack)" : "  ** FAIL **");
-    }
-    bool st_ok = true;
-    std::printf("SSM state / conv columns after the prompt against the f32 judge, per Mamba block: cosine, the engine's / "
-                "the bf16 golden's - each distance ratio gated at %.1f\n", golden::kCosSlack);
-    for (const StateJudged& x : sj) {
-      const double rs = golden::cos_dist_ratio(x.ssm_e, x.ssm_g), rcv = golden::cos_dist_ratio(x.conv_e, x.conv_g);
-      const bool lok = rs <= golden::kCosSlack && rcv <= golden::kCosSlack;
-      st_ok = st_ok && lok;
-      std::printf("  L%-3u state %.6f / %.6f x%.2f; conv %.6f / %.6f x%.2f%s\n", x.l, x.ssm_e, x.ssm_g, rs, x.conv_e,
-                  x.conv_g, rcv, lok ? "" : "  ** FAIL **");
-    }
-    if (eng.attention() == rb::BoltAttn::Eager) {   // operator ruling 2026-10-29 (the header)
-      std::printf("eager attention: DIAGNOSTIC - tokens %s, routing %s, h %s, state %s; recorded, not gated\n",
-                  tok_ok ? "kept" : "missed", route_ok ? "kept" : "above the bar", tap_ok ? "kept" : "above the slack",
-                  st_ok ? "kept" : "above the slack");
-      std::puts("bolt_golden_test OK");
-      return 0;
-    }
-    CHECK(tok_ok);
-    CHECK(route_ok);
-    CHECK(prefill || tap_ok);
-    CHECK(st_ok);
-    std::puts("bolt_golden_test OK");
-    return 0;
-  }
   CHECK(gate_ok);
   CHECK_EQ(rc.bad, uint64_t(0));
   CHECK(h_ok);
