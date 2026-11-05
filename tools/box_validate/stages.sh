@@ -3296,13 +3296,16 @@ st_r60_reject() {
   run_tests '^cli_reject_bolt_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r60.synth_golden 60 default cpu oracle_image,bolt_synth -       "the synthetics' golden sets: bolt_oracle.sh export on oracle-out-bolt-synth/n12-g128 and n12-g64x (short, 4k, agentic) -> \$DATA/oracle-out-bolt-n12-{g128,g64x}; then re-links oracle-out*"
+stage r60.synth_golden 60 default cpu oracle_image,bolt_synth -       "the synthetics' golden sets: bolt_oracle.sh export on oracle-out-bolt-synth/n12-g128 and n12-g64x (short, 4k, agentic) -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, then their f32 judges (bolt_oracle.sh export-f32 n12-g128 -> oracle-out-bolt-n12-g128-f32{,-i8head}); then re-links oracle-out*"
 st_r60_synth_golden() {
   local s
   for s in n12-g128 n12-g64x; do
     chk "BOLT_PROMPTS='bolt_short bolt_4k bolt_agentic' tools/box_validate/bolt_oracle.sh $DATA export $DATA/oracle-out-bolt-synth/$s" \
       "the synthetic ($s) golden sets"
   done
+  # their f32 judges (n12-g64x is n12-g128's exact expansion: one judge serves both)
+  chk "BOLT_PROMPTS='bolt_short bolt_4k bolt_agentic' tools/box_validate/bolt_oracle.sh $DATA export-f32 $DATA/oracle-out-bolt-synth/n12-g128" \
+    "the synthetics' f32 judges"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_oracle_bolt_synth' $STATE/have.env"
   grab_all gap 'gap|^wall' 20
@@ -3314,7 +3317,7 @@ st_r60_synth() {
   jgrab synth '^bolt_decode_synth' 'plan == allocation|launches|B4|Review Focus|residual|OK'
   finish
 }
-stage r60.synth_b3  60 default card bolt_synth,oracle_bolt_synth r60.synth "bolt_golden_test on the synthetics: tokens tie-aware, routes within B70_BOLT_TIE_TOL, SSM state / conv columns by cosine, h taps - short / 4k / agentic x both spellings; bf16 head, eager"
+stage r60.synth_b3  60 default card bolt_synth,oracle_bolt_synth,oracle_bolt_synth_f32 r60.synth "bolt_golden_test on the synthetics: tokens tie-aware, routes within B70_BOLT_TIE_TOL, SSM state / conv columns by cosine, h taps - short / 4k / agentic x both spellings; bf16 head, eager"
 st_r60_synth_b3() {
   run_tests '^bolt_golden_synth_n12-(g128|g64x)_bolt_(short|4k|agentic)_test$|^bolt_golden_synth_short_(bf16head|eager)_test$'
   jgrab synth-b3 '^bolt_golden_synth' 'gate:|routing:|SSM state|conv|^  h |step [0-9]+:|OK'
@@ -3433,7 +3436,7 @@ st_r61_synth() {
   jgrab synth '^bolt_prefill_synth' '^[1-7]\.|split|chunks|bitwise|cosine|routing|tokens|OK'
   finish
 }
-stage r61.synth_b3  61 default card bolt_synth,oracle_bolt_synth r61.synth "B3 on prefill: bolt_golden_test's prefill mode on the synthetics - short / 4k / agentic x both spellings, chunks of 512 on 4k, eager"
+stage r61.synth_b3  61 default card bolt_synth,oracle_bolt_synth,oracle_bolt_synth_f32 r61.synth "B3 on prefill: bolt_golden_test's prefill mode on the synthetics - short / 4k / agentic x both spellings, chunks of 512 on 4k, eager"
 st_r61_synth_b3() {
   run_tests '^bolt_golden_prefill_synth_'
   jgrab synth-b3 '^bolt_golden_prefill_synth' 'prefill:|gate:|routing:|SSM state|conv|^  h |OK'
