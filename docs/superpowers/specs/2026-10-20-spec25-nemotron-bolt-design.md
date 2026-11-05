@@ -548,6 +548,40 @@ Spec 7's store with the hybrid split (Qwen3.8's GDN snapshots, spec 23e / 24e's 
 - **Speed (recorded; no bars before P0):** launches (653 / 533), decode at depth 886 .. 262144, prefill at the same
   depths, against §3's roofline and SergiioB's published / measured vLLM rows.
 
+### 9.1 The synthetics' first-flip cut-off (operator ruling 2026-11-05)
+
+**Why.** 25b's N 12 synthetic checkpoints have random weights, and their routers pick 9 of ~500 experts from near-ties
+at every MoE block: on `bolt_short` 172 of 640 (row, block) 9th / 10th selection margins are below 1e-3, while two
+correct bf16 implementations disagree on those scores by 1e-4 - 1e-3. One of them flips a near-tie within the first rows
+(measured 2026-11-05: the engine at L3 row 95, gap 2.7e-5; the bf16 reference against its own f32 run at L3 row 91, gap
+4.3e-4); the flipped row's residual drops to ~0.97 cosine and the SSM states carry it into every later row and block. The
+bf16 reference itself misses 12 / 32 tokens and 273 / 640 expert sets against its f32 run, two torch builds of it part at
+prompt row 83, and the engine's prefill parts from its own decode the same way - so the strict B3 / prefill bars (written
+for a model whose near-tie flips stay local) could not hold for ANY implementation on these checkpoints. Upstream of the
+first flip the engine is at bf16 noise from f32 (distance ratio to the reference's 1.20 / 1.44 / 0.64 at blocks 0 - 2;
+router scores within ~1e-4 of the reference's). An f32 judge (Kolibri's rule) was tried and is a coin toss on one prompt
+(engine 24 vs reference 8 misses on bolt_short, the engine's flip landing on the last prompt row).
+
+**The rule (tests/golden/bolt_cutoff.h; host cases bolt_cutoff_test).** On a synthetic checkpoint (its `bolt_synth.json`),
+the (row, MoE block) pairs are compared in causal order - row ascending, blocks ascending within a row - the engine's 9
+ids against the reference's as SETS, with the REFERENCE's 9th / 10th margin `gap`:
+- *Exact*: equal sets. *Undetermined*: different and `gap == 0`. *Near-tie*: exactly one expert different and
+  `0 < gap <= B70_BOLT_TIE_TOL` (1e-3, unchanged). *Beyond*: any other difference.
+- **The first flip** (r*, l*) is the first pair that is a near-tie or undetermined. A pair is **upstream** of it when
+  (row, block) < (r*, l*) lexicographically; with no flip everything is upstream.
+- Every existing bar binds on what is upstream, unchanged in value: a Beyond difference upstream FAILS; a decision row r
+  (tokens, tie-aware) binds when no flip is at or before row r; the h tap of (row, block) when upstream; a Mamba block's
+  SSM state and conv columns after the prompt when (T - 1, block) is upstream; an attention block's K / V row of position
+  p when (p, block) is upstream. Everything after the flip is printed (the counts, the cosines, Beyond differences "after
+  the flip") and never fails. A row-0 / block-0 defect still fails: nothing precedes it.
+- **The references.** `bolt_golden_test` (decode and prefill modes): the bf16 golden's sets and gaps. In prefill mode the
+  synthetic prompt goes in one `prefill` call a chunk (each on the 64-grid: bitwise one call, B4) so every prompt row's
+  routes are compared, not only the last chunk's. `bolt_prefill_test` (prefill vs decode, no reference): DECODE's fill
+  is the reference - its sets and its margins - over every prompt row (the prefill again one call a chunk) and the 32
+  teacher-forced rows of section 6; section 4's logits gate when no flip is at or before the last prompt row.
+- Unchanged: the bitwise checks (replay, chunk sizes, splits on the grid, `pp2`), every bar's value, and every test on our
+  export (a checkpoint without `bolt_synth.json` keeps the rules above exactly: no cut-off).
+
 ## 10. Stages
 
 | stage | Mac (blind) | box | row |
