@@ -30,7 +30,9 @@
 //   what is upstream of it (the logits if no flip at or before the last prompt row; each block's last-row tap, each Mamba
 //   block's state / conv columns at (n - 1, block); each attention block's K / V rows at (position, block)), 5 fails on a
 //   Beyond difference before it, 6 binds on the decision rows wholly before it; everything after it is printed. Our export
-//   keeps 4 - 6 as above.
+//   keeps 4 - 6 as above. The bf16-state arm on a synthetic (operator ruling 2026-11-05, the third): 3's other chunk sizes
+//   and the cuts off the 2048-grid are printed (the arm rounds the state once a chunk), and 4's state / conv comparison
+//   against decode (which rounds every token) is printed; every other check unchanged.
 //   7. pp2[:<split>]: the same prefill on two cards (the copy hand-off a chunk) bitwise one card (when it fits one)
 // `eager` / `b16` run B70_BOLT_ATTN=eager / B70_BOLT_SSM=bf16 in BOTH halves. Exit 77 (SKIP) when the checkpoint is absent
 // or the placement does not fit with the prefill scratch.
@@ -173,6 +175,10 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
   ok = ok && same && rec1 && rec2;
 
   // ---- 3. Review Focus 1 ---------------------------------------------------------------------------------------------
+  // On a synthetic with the bf16-state arm only the cuts at multiples of the 2048-chunk bind (the arm rounds the state once
+  // at each chunk's end; operator ruling 2026-11-05, the third; bolt_cutoff.h section3_binds); the rest is printed.
+  const bool synth_b16 = g_synth && e.state() == rb::BoltState::Bf16;
+  auto s3note = [&](uint32_t cut) { return bolt_cutoff::section3_binds(synth_b16, cut, rb::kPfC) ? "" : " (bf16 state: printed)"; };
   {
     Snap ref = a;
     ref.routes.clear();
@@ -181,17 +187,17 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
       e.reset();
       e.prefill(prompt, c);
       const bool b = snap(e, n, false, false) == ref;
-      std::printf("3. chunks of %4u vs %u: KV, ring columns, SSM states, logits, first token %s\n", c, rb::kPfC,
-                  b ? "bitwise" : "DIFFER");
-      all = all && b;
+      std::printf("3. chunks of %4u vs %u: KV, ring columns, SSM states, logits, first token %s%s\n", c, rb::kPfC,
+                  b ? "bitwise" : "DIFFER", s3note(c));
+      all = all && (b || !bolt_cutoff::section3_binds(synth_b16, c, rb::kPfC));
     }
     for (uint32_t s : {64u, 2048u, 2112u, 4096u}) {
       e.reset();
       e.prefill(Ids(prompt.begin(), prompt.begin() + s));
       e.prefill(Ids(prompt.begin() + s, prompt.end()));
       const bool b = snap(e, n, false, false) == ref;
-      std::printf("   split at %4u (on the 64-grid): %s\n", s, b ? "bitwise" : "DIFFERS");
-      all = all && b;
+      std::printf("   split at %4u (on the 64-grid): %s%s\n", s, b ? "bitwise" : "DIFFERS", s3note(s));
+      all = all && (b || !bolt_cutoff::section3_binds(synth_b16, s, rb::kPfC));
     }
     {   // a continuation starting off the grid at 2085: one call vs [2085, 2112) + [2112, n) - the rows they share
       const Ids p0(prompt.begin(), prompt.begin() + 2085);
@@ -204,8 +210,9 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
       e.prefill(Ids(prompt.begin() + 2085, prompt.begin() + 2112));
       e.prefill(Ids(prompt.begin() + 2112, prompt.end()));
       const bool b = snap(e, n, false, false) == one;
-      std::printf("   a chunk starting at 2048 + 37 vs one at 2048 + 64 (the same prefix): %s\n", b ? "bitwise" : "DIFFERS");
-      all = all && b;
+      std::printf("   a chunk starting at 2048 + 37 vs one at 2048 + 64 (the same prefix): %s%s\n", b ? "bitwise" : "DIFFERS",
+                  s3note(2112));
+      all = all && (b || !bolt_cutoff::section3_binds(synth_b16, 2112, rb::kPfC));
     }
     for (uint32_t s : {1u, 2047u, 2085u}) {   // off the grid: another evaluation of that sub-chunk - printed
       e.reset();
@@ -302,7 +309,7 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
                                  dec.conv[m].data() + size_t(j) * d.m_conv_dim, d.m_conv_dim));
     sworst = std::min(sworst, sc);
     cworst = std::min(cworst, cc);
-    const bool up = cut.upstream(n - 1, l);
+    const bool up = cut.upstream(n - 1, l) && !synth_b16;   // the bf16-state arm's state vs decode: printed (ruling)
     if (up) {
       sgate = std::min(sgate, sc);
       cgate = std::min(cgate, cc);
