@@ -157,17 +157,12 @@ size_t q4_mem_available() {
 }
 
 std::string q4_ple_dir(const std::string& snapshot_dir) {
-  std::string dir;
-  if (const char* e = std::getenv("B70_Q4_PLE"); e && *e) {
-    dir = with_slash(e);
-  } else {
-    std::string s = snapshot_dir;
-    while (!s.empty() && s.back() == '/') s.pop_back();
-    dir = s + "-ple-int8/";
-  }
+  std::string s = snapshot_dir;
+  while (!s.empty() && s.back() == '/') s.pop_back();
+  const std::string dir = s + "-ple-int8/";
   struct stat st {};
   if (::stat((dir + "model.safetensors.index.json").c_str(), &st) != 0)
-    throw std::runtime_error("no PLE int8 table at " + dir + " (B70_Q4_PLE overrides): the engine reads the n-gram "
+    throw std::runtime_error("no PLE int8 table at " + dir + ": the engine reads the n-gram "
                              "table as int8 rows from a one-time file beside the checkpoint (spec 21 decision 7) - "
                              "make it with: python3 tools/quantize/qwen4exp/ple_int8.py " + snapshot_dir + " " + dir);
   return dir;

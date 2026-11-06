@@ -145,7 +145,7 @@ struct ServeFlags {
   bool proposer_tuning = false;  // --mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost,
                                  // --draft-model, --draft-format
   bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
-  bool qwen4exp_flags = false;   // --layers, --ple-dir, --tokenizer
+  bool qwen4exp_flags = false;   // --layers, --tokenizer
 };
 
 inline void check_serve_flags(const ServeFlags& f) {
@@ -161,7 +161,7 @@ inline void check_serve_flags(const ServeFlags& f) {
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; Nemotron 3.5 "
                              "Bolt has neither");
   if (f.qwen4exp_flags)
-    throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); "
+    throw std::runtime_error("--layers and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); "
                              "this checkpoint is Nemotron 3.5 Bolt (b70-decode --layers is its development mode)");
 }
 

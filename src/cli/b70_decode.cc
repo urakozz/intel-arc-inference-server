@@ -179,8 +179,8 @@ void usage() {
       "                 (chunk <= 2048; two cards cross each chunk by copy); --mtp, --kv-cache\n"
       "                 int8, --profile refused.\n"
       "  Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21c): --layers N|auto is REQUIRED (the\n"
-      "                 whole model needs spec 22's expert-offload tier); --ple-dir DIR the PLE\n"
-      "                 int8 file (default <snapshot>-ple-int8/); --pp 1 (default) or 2. Spec 21d:\n"
+      "                 whole model needs spec 22's expert-offload tier); the PLE int8 file is\n"
+      "                 <snapshot>-ple-int8/; --pp 1 (default) or 2. Spec 21d:\n"
       "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
       "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
       "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
@@ -808,7 +808,6 @@ int run(int argc, char** argv) {
   uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
   bool have_layers = false;
   bool layers_auto = false; // spec 21c: --layers auto (Qwen3.8-Flash-Next's planner N)
-  std::string ple_dir;      // spec 21c: --ple-dir (Qwen3.8-Flash-Next's PLE int8 file)
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -885,8 +884,6 @@ int run(int argc, char** argv) {
         layers = parse_u32("--layers", v);
         if (layers == 0) throw std::runtime_error("--layers 0 would load no layer");
       }
-    } else if (a == "--ple-dir") {   // spec 21c, Qwen3.8-Flash-Next only
-      ple_dir = value(i, "--ple-dir");
     } else if (a == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (a == "--pipeline-handoff") {
@@ -1058,7 +1055,6 @@ int run(int argc, char** argv) {
     if (dflash.on)
       throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Kolibri-1 has none");
     if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Kolibri-1 takes --layers N");
-    if (!ple_dir.empty()) throw std::runtime_error("--ple-dir belongs to Qwen3.8-Flash-Next (spec 21c)");
     cli::kolibri::DecodeArgs ka;
     ka.path = path;
     ka.ids_path = ids_path;
@@ -1093,7 +1089,6 @@ int run(int argc, char** argv) {
     cli::qwen4exp::DecodeArgs qa;
     qa.path = path;
     qa.ids_path = ids_path;
-    qa.ple_dir = ple_dir;
     qa.n = n;
     qa.bench = bench;
     qa.depth = depth;
@@ -1116,7 +1111,6 @@ int run(int argc, char** argv) {
     qa.profile = profile;
     return cli::qwen4exp::run_decode<StdoutToStderr>(qa);
   }
-  if (!ple_dir.empty()) throw std::runtime_error("--ple-dir belongs to Qwen3.8-Flash-Next (spec 21c)");
   if (have_layers)
     throw std::runtime_error("--layers belongs to Kolibri-1's and Qwen3.8-Flash-Next's development modes (spec 20c / "
                              "21c: load only the first N layers); this checkpoint is neither model_type kolibri1 nor "

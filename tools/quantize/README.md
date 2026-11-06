@@ -255,7 +255,7 @@ Every script runs in `agnes-ref-img` with 21a's transformers 5.19.0 site first o
   zero row s = 0): `ple.h<h>.q` I8 `[prime_h][160]`, `ple.h<h>.s` BF16 / F32 `[prime_h]`, the I64 tensors
   copied after checking them against the formula, one file per head + an index, metadata `{source:
   <repo>@<revision>, rule: row-int8-spec9, scale}`. Streams 65,536 rows at a time; the real table: 51.2 GB
-  of q + 0.64 GB of bf16 scales out (derived). The engine reads `<snapshot>-ple-int8/` (or `$B70_Q4_PLE`),
+  of q + 0.64 GB of bf16 scales out (derived). The engine reads `<snapshot>-ple-int8/` (only there),
   as does `qwen4exp_ref.py --ple int8:<dir>` (the engine-format reference).
 - `check.py <ckpt> [--ple <dir>]` - would the engine accept it: `quantization_config` (g64 ours, g128
   Intel's), names = `expected_names` both ways, dtypes and shapes at the real widths, qzeros, finite

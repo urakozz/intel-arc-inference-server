@@ -1,5 +1,5 @@
 // Spec 21b Task 6: load_qwen4exp on the card (box only; label `checkpoint;qwen4exp`), one device.
-//   qwen4exp_load_checkpoint_test <snapshot> [layers] [mtp]       (B70_Q4_PLE: the PLE file, else <snapshot>-ple-int8/)
+//   qwen4exp_load_checkpoint_test <snapshot> [layers] [mtp]       (the PLE file: <snapshot>-ple-int8/)
 // Loads the checkpoint (a synthetic one from tools/quantize/qwen4exp/make_synth.py + ple_int8.py, or Intel's
 // truncated to its first `layers` - development mode), prints the report (one line per device and one for
 // the pinned PLE table: its bytes, the time to pin it, MemAvailable before / after - spec 22 P0.5's starting
@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
   try {
     snap = loader::resolve_snapshot(arg);
     if (!loader::is_qwen4exp_checkpoint(snap)) throw std::runtime_error("not a qwen4_exp checkpoint");
-    ple = loader::q4_ple_dir(snap);
+    ple = loader::q4_ple_dir(snap);   // the PLE file beside the snapshot, or SKIP
   } catch (const std::exception& e) {
     std::printf("SKIP: no Qwen3.8-Flash-Next checkpoint and PLE file at '%s' (%s)\n", arg.c_str(), e.what());
     return 77;
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
   std::vector<l0::Context*> devs = {&ctx};
   const uint32_t max_len = 32768;
   loader::Q4LoadedModel m =
-      loader::load_qwen4exp(devs, snap, max_len, model::Q4Placement::one(pre), loader::LmHeadForm::Int8, layers, mtp, ple);
+      loader::load_qwen4exp(devs, snap, max_len, model::Q4Placement::one(pre), loader::LmHeadForm::Int8, layers, mtp);
   const model::Qwen4ExpDesc& d = m.desc;
   CHECK(d.layers == pre.layers && d.forms.dense == pre.forms.dense && d.forms.expert_group == pre.forms.expert_group);
   CHECK_EQ(m.unconsumed, size_t(0));

@@ -28,7 +28,6 @@ struct Options {
   bool debug_tap = false;
   uint32_t timeout_ms = 60000;
   uint32_t prefill_timeout_ms = 120000;   // spec 21d: a prefill chunk's bound (PipelineOptions::prefill_timeout_ms)
-  std::string ple_dir;  // "" = loader::q4_ple_dir(snapshot)
   bool mtp = false;     // spec 21e: load the MTP head (its bf16 experts RTN int4 g64 at load) - the verify / draft lists
   // spec 28d: the verify lists' linear override (Auto: gemm_sm at M >= 2; Gemv: the pre-28d gemv / gemv_i8w)
   runtime::LinearForce force_linear = runtime::LinearForce::Auto;
@@ -77,7 +76,7 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   const model::Q4Placement p = placement(d, o);
   loader::Q4LoadedModel m = loader::load_qwen4exp(r.ctx, snap, o.max_len, p,
                                                   o.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint,
-                                                  o.layers, o.mtp, o.ple_dir);
+                                                  o.layers, o.mtp);
   runtime::PipelineOptions po;
   po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;

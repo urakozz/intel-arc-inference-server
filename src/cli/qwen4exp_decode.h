@@ -9,7 +9,7 @@
 //                      checkpoint, then the final mixer and the head; `auto` is the planner's largest N that fits
 //                      (runtime::qwen4exp::layers_that_fit). Without it the whole model is refused naming its
 //                      bytes and spec 22 (the expert-offload tier): 512 experts x 48 layers do not fit two B70s
-//   --ple-dir DIR      the PLE int8 file (default: <snapshot>-ple-int8/ or $B70_Q4_PLE - loader::q4_ple_dir)
+//   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
 //   --pp N / --pipeline-parallel-size N   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
 //   --pipeline-split auto|N, --pipeline-handoff copy|peer   16b's switches and parsers; auto is
 //                      runtime::qwen4exp::pp_split (pp_balance over the per-layer bytes at the session's max_len)
@@ -77,7 +77,7 @@ inline bool is_qwen4exp(const std::string& path) {
 }
 
 struct DecodeArgs {
-  std::string path, ids_path, ple_dir;
+  std::string path, ids_path;
   uint32_t n = 0, depth = 4096, tg = 256;
   bool bench = false;
   MaxLenArg max_len{false, 16384};
@@ -271,7 +271,7 @@ int run_decode(const DecodeArgs& a) {
                              std::to_string(s.max_len));
   loader::Q4LoadedModel model = [&] {
     Redirect redirect;
-    return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head, s.desc.layers, false, a.ple_dir);
+    return loader::load_qwen4exp(ctx, a.path, s.max_len, s.placement, a.lm_head, s.desc.layers, false);
   }();
   std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the final mixer reads layer %u's "
                "H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);

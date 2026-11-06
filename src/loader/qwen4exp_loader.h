@@ -87,12 +87,11 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 // the names, every name accounted for both ways, the plan (runtime::qwen4exp::plan + require_fits at the
 // default 1.5 GB reserve - the full model is refused naming spec 22). `layers_limit` > 0 loads only layers
 // [0, layers_limit) (development mode; the later layers' tensors consumed by design, one note line). `mtp`
-// loads the MTP head (its bf16 experts RTN-quantised to int4 g64). `ple_dir` empty: q4_ple_dir(snapshot).
+// loads the MTP head (its bf16 experts RTN-quantised to int4 g64). The PLE table: q4_ple_dir(snapshot).
 // After: zero unconsumed tensors and each part's bytes equal to q4_device_weight_bytes. One report line per
 // device plus one for the host table.
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement,
-                            LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false,
-                            const std::string& ple_dir = "");
+                            LmHeadForm lm_head = LmHeadForm::Int8, uint32_t layers_limit = 0, bool mtp = false);
 
 }  // namespace loader
