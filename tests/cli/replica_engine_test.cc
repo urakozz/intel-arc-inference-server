@@ -7,6 +7,7 @@
 // row's proposer reaches its card; cards that differ are refused.
 #include <atomic>
 #include <chrono>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -22,6 +23,7 @@
 
 namespace {
 
+using Clock = std::chrono::steady_clock;
 using server::Finish;
 using server::SchedRequest;
 using server::Scheduler;
@@ -40,7 +42,7 @@ struct CardMock : StateMockEngine {
   std::mutex mu;
   std::set<std::thread::id> threads;
   std::vector<size_t> prefill_calls;
-  int step_ms = 0;
+  int step_ms = 0, prefill_ms = 0;
   uint32_t fail_step = 0, steps = 0;
   size_t proposals = 0;
   void seen() {
@@ -54,6 +56,7 @@ struct CardMock : StateMockEngine {
   void prefill(const std::vector<uint32_t>& ids) override {
     seen();
     prefill_calls.push_back(ids.size());
+    if (prefill_ms != 0) std::this_thread::sleep_for(std::chrono::milliseconds(prefill_ms));
     StateMockEngine::prefill(ids);
   }
   uint32_t step(const server::Sampling& s) override {
@@ -326,6 +329,76 @@ void test_split_last_and_lookup() {
   std::printf("split-last: prefill 8 + 3, the last id ingested; lookup rows reach each card's step_drafts\n");
 }
 
+// Review (plan 13b): the cards do not wait on each other. Card 1's long prefill (8 calls of 40 ms) leaves card 0's
+// decode rate as it was idle; two prompts arriving together prefill on both cards at once. The scheduler's own
+// thread (start()) drives it, as in the server.
+void test_cards_do_not_wait() {
+  CardMock c0, c1;
+  setup(c0, 4096);
+  setup(c1, 4096);
+  c0.step_ms = c1.step_ms = 1;
+  c0.prefill_ms = c1.prefill_ms = 40;
+  cli::ReplicaEngine eng({{&c0, 8}, {&c1, 8}}, false, true);
+  Scheduler s(eng, SchedulerOptions{});
+  s.start();
+  std::atomic<size_t> a_ids{0};
+  std::atomic<bool> a_done{false}, b_first{false}, b_done{false};
+  SchedRequest ra;
+  ra.prompt = P(11, 4);
+  ra.max_tokens = 3000;
+  ra.on_token = [&](uint32_t) {
+    ++a_ids;
+    return true;
+  };
+  ra.on_done = [&](const Finish&) { a_done = true; };
+  auto ja = s.submit(std::move(ra));
+  CHECK(ja != nullptr);
+  while (a_ids < 5) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const auto t0 = Clock::now();
+  const size_t n0 = a_ids;
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  const double idle_rate = double(a_ids - n0) / std::chrono::duration<double>(Clock::now() - t0).count();
+  SchedRequest rb;
+  rb.prompt = P(12, 64);   // 8 card-1 calls of 40 ms
+  rb.max_tokens = 3;
+  rb.on_token = [&](uint32_t) {
+    b_first = true;
+    return true;
+  };
+  rb.on_done = [&](const Finish&) { b_done = true; };
+  const auto t1 = Clock::now();
+  const size_t n1 = a_ids;
+  CHECK(s.submit(std::move(rb)) != nullptr);
+  while (!b_first) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const double during = std::chrono::duration<double>(Clock::now() - t1).count();
+  const double busy_rate = double(a_ids - n1) / during;
+  CHECK(during >= 0.3);              // the prefill really took 8 x 40 ms
+  CHECK(busy_rate >= 0.6 * idle_rate);   // card 0 decoded on while card 1 prefilled (lockstep: ~25 ids / s)
+  s.cancel(ja);
+  while (!a_done || !b_done) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  // Two prompts together: both cards prefill at once - about one prompt's time, not two.
+  std::atomic<int> firsts{0}, dones{0};
+  const auto t2 = Clock::now();
+  for (uint32_t k : {13u, 14u}) {
+    SchedRequest r;
+    r.prompt = P(k, 64);
+    r.max_tokens = 1;
+    r.on_token = [&](uint32_t) {
+      ++firsts;
+      return true;
+    };
+    r.on_done = [&](const Finish&) { ++dones; };
+    CHECK(s.submit(std::move(r)) != nullptr);
+  }
+  while (dones < 2) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const double both = std::chrono::duration<double>(Clock::now() - t2).count();
+  s.stop();
+  CHECK_EQ(firsts.load(), 2);
+  CHECK(both < 1.5 * 8 * 0.040);   // in series it would be >= 0.64 s
+  std::printf("cards do not wait: card 0 at %.0f ids/s idle, %.0f ids/s while card 1 prefilled for %.2f s; two "
+              "prompts together in %.2f s\n", idle_rate, busy_rate, during, both);
+}
+
 void test_cards_must_agree() {
   CardMock c0, c1;
   setup(c0);
@@ -357,6 +430,7 @@ int main() {
   test_prefill_cut();
   test_split_last_and_lookup();
   test_cards_must_agree();
+  test_cards_do_not_wait();
   std::printf("replica_engine_test: all cases passed\n");
   return 0;
 }

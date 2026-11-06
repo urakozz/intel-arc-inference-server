@@ -58,6 +58,30 @@ struct Card : StateMockEngine {
   }
 };
 
+// MockTok whose streamer can fail: at a request's n-th piece (on_token on the tick thread) or at its flush (on_done).
+struct FlakyTok : MockTok {
+  std::atomic<int> push_throw_at{0};   // > 0: the n-th push of the `throwing_streamer`-th streamer made throws
+  std::atomic<int> throwing_streamer{0}, made{0};
+  std::atomic<bool> flush_throws{false};
+  struct S : server::StreamerIface {
+    S(FlakyTok& t, bool throws) : tok(t), throws(throws) {}
+    std::string push(uint32_t id) override {
+      if (throws && ++n == tok.push_throw_at) throw std::runtime_error("streamer push broke");
+      return tok.piece(id);
+    }
+    std::string flush() override {
+      if (tok.flush_throws) throw std::runtime_error("streamer flush broke");
+      return "";
+    }
+    FlakyTok& tok;
+    bool throws;
+    int n = 0;
+  };
+  std::unique_ptr<server::StreamerIface> streamer() override {
+    return std::make_unique<S>(*this, ++made == throwing_streamer);
+  }
+};
+
 struct Reply {
   int status = 0;
   std::string content, finish;
@@ -153,7 +177,7 @@ struct Fixture {
     return r;
   }
 
-  MockTok tok;
+  FlakyTok tok;
   MockTemplate tmpl;
   Card c0, c1;
   MallocAlloc alloc;
@@ -314,6 +338,38 @@ void test_request_log() {
 
 }  // namespace
 
+// Review (plan 13b): a request whose text rules throw - mid-generation (on_token) or at its end (on_done) - fails
+// with a 500 instead of hanging its client; the other card's request and the next requests are served.
+void test_text_rules_throw() {
+  Fixture rep(true, size_t(1) << 20, false);
+  rep.c0.step_us = rep.c1.step_us = 300;
+  rep.tok.push_throw_at = 5;
+  rep.tok.throwing_streamer = 2;   // B's streamer is the first made, A's the second
+  Reply a, b;
+  std::thread tb([&] { b = rep.chat(json::array({msg("user", "this one runs")}), 1000); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(50));   // B decoding on its card
+  std::thread ta([&] { a = rep.chat(json::array({msg("user", "this one breaks")}), 20); });
+  ta.join();
+  tb.join();
+  CHECK_EQ(a.status, 500);
+  CHECK(a.body.find("streamer push broke") != std::string::npos);
+  CHECK_EQ(b.status, 200);
+  CHECK_EQ(b.out_ids.size(), size_t(1000));
+  rep.tok.flush_throws = true;   // on_done's flush (a request that runs to max_tokens)
+  const Reply c = rep.chat(json::array({msg("user", "end breaks")}), 4);
+  CHECK_EQ(c.status, 500);
+  CHECK(c.body.find("streamer flush broke") != std::string::npos);
+  rep.tok.flush_throws = false;
+  Reply d, e;
+  std::thread td([&] { d = rep.chat(json::array({msg("user", "after d")}), 6); });
+  std::thread te([&] { e = rep.chat(json::array({msg("user", "after e")}), 6); });
+  td.join();
+  te.join();
+  CHECK_EQ(d.status, 200);
+  CHECK_EQ(e.status, 200);
+  std::printf("text rules throwing: 500 for that request (mid-stream and at its end), the others served\n");
+}
+
 int main() {
   test_sequential(0, false);
   test_sequential(size_t(1) << 20, false);
@@ -321,6 +377,7 @@ int main() {
   test_concurrent();
   test_disconnect_and_busy();
   test_request_log();
+  test_text_rules_throw();
   std::printf("replica_server_test: all cases passed\n");
   return 0;
 }

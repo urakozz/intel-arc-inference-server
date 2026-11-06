@@ -126,6 +126,7 @@ struct Scheduler::Impl {
   uint32_t cap = 0;                           // drafts per row at most (spec_k or verify_k)
   std::vector<std::unique_ptr<PromptLookup>> matchers;            // plan 13b: one per slot
   std::vector<std::deque<std::vector<uint32_t>>> history;        // per slot (lookup_history)
+  size_t inflight = 0;                        // plan 13b: chunks prefill_begin'd, not yet joined
 };
 
 struct Scheduler::PrefillCall {
@@ -315,12 +316,23 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
   }
 }
 
+// Never throws (plan 13b review): a request ends here whatever its callbacks or the cache do.
 void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error) {
   if (job->finished_) return;
   job->fin.reason = reason;
   job->fin.error = std::move(error);
   if (job->slot >= 0) {
     const uint32_t slot = static_cast<uint32_t>(job->slot);
+    if (job->inflight) {   // a chunk still on the card: join it first (the tick only gets here once it is ready)
+      try {
+        engine_.prefill_end(slot);
+      } catch (const std::exception& e) {
+        std::fprintf(stderr, "scheduler: slot %u's prefill failed at the request's end: %s\n", slot, e.what());
+      }
+      job->inflight = false;
+      --impl_->inflight;
+      if (cache_) cache_->fail(slot);   // the chunk's positions are not in the cache's view of the slot
+    }
     if (cache_) {
       // Review Focus 2: the slot's final state goes to the host store now, before the
       // slot can be granted again.
@@ -333,13 +345,26 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
         cache_->fail(slot);
       }
     }
-    if (impl_->lookup && (reason == Finish::Stop || reason == Finish::Length)) lookup_end(slot, job->out);
+    if (impl_->lookup && (reason == Finish::Stop || reason == Finish::Length)) {
+      try {
+        lookup_end(slot, job->out);
+      } catch (const std::exception&) {
+      }
+    }
     impl_->slots[slot] = nullptr;
     std::lock_guard<std::mutex> lock(impl_->mu);
     --impl_->active;
   }
   job->finished_ = true;
-  if (job->req.on_done) job->req.on_done(job->fin);
+  if (job->req.on_done) {
+    try {
+      job->req.on_done(job->fin);
+    } catch (const std::exception& e) {
+      std::fprintf(stderr, "scheduler: a request's on_done threw: %s\n", e.what());
+    } catch (...) {
+      std::fprintf(stderr, "scheduler: a request's on_done threw\n");
+    }
+  }
 }
 
 // The next prefill call's chunk for a prefilling request: up to len (or len - 1 under
@@ -466,55 +491,60 @@ bool Scheduler::spec_round() {
       finish(j, Finish::Error, failed[i]);
       continue;
     }
-    const std::vector<uint32_t>& run = runs[i];
-    const uint32_t kept_drafts = static_cast<uint32_t>(run.size() - 1);
-    if (impl_->lookup) {
-      if (j->policy) j->policy->observe(j->proposed, kept_drafts);   // server.cc's next_lookup
-    } else if (j->policy) {
-      j->policy->observe(k, std::min(k, kept_drafts));
+    try {   // plan 13b review: a throwing callback ends this request only; the next rows still get their ids
+      const std::vector<uint32_t>& run = runs[i];
+      const uint32_t kept_drafts = static_cast<uint32_t>(run.size() - 1);
+      if (impl_->lookup) {
+        if (j->policy) j->policy->observe(j->proposed, kept_drafts);   // server.cc's next_lookup
+      } else if (j->policy) {
+        j->policy->observe(k, std::min(k, kept_drafts));
+      }
+      ++j->fin.spec_iters;
+      j->fin.spec_drafted += impl_->lookup ? j->proposed : k;
+      // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
+      bool ended = false;
+      Finish::Reason reason = Finish::Length;
+      size_t used = 0;
+      for (; used < run.size() && !ended;) {
+        const uint32_t id = run[used++];
+        if (impl_->lookup && (used > 1 || !j->head_indexed)) impl_->matchers[slot]->append(id);
+        if (cache_) cache_->fed(slot, id);
+        ++j->steps;
+        const bool is_eos = impl_->eos.count(id) != 0;
+        if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
+          ended = true;
+          reason = Finish::Stop;
+          break;
+        }
+        ++j->fin.completion_tokens;
+        if (impl_->lookup && opts_.lookup_history != 0) j->out.push_back(id);
+        if (j->req.on_token && !j->req.on_token(id)) {
+          ended = true;
+          reason = Finish::Stop;
+          break;
+        }
+        if (j->steps >= j->max_tokens) {
+          ended = true;
+          reason = Finish::Length;
+          break;
+        }
+      }
+      j->fin.spec_accepted += static_cast<uint32_t>(used - 1);
+      if (!ended) continue;
+      if (used < run.size()) {
+        try {   // the slot keeps exactly the ids consumed; then the request-end snapshot (finish)
+          engine_.truncate_to(slot, engine_.pos(slot) - static_cast<uint32_t>(run.size() - used));
+        } catch (const std::exception& error) {
+          if (cache_) cache_->fail(slot);
+          finish(j, Finish::Error, error.what());
+          continue;
+        }
+      }
+      finish(j, reason);
+    } catch (const std::exception& error) {
+      if (cache_) cache_->fail(slot);   // the ids after the throw were never consumed by the request
+      finish(j, Finish::Error, error.what());
     }
-    ++j->fin.spec_iters;
-    j->fin.spec_drafted += impl_->lookup ? j->proposed : k;
-    // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
-    bool ended = false;
-    Finish::Reason reason = Finish::Length;
-    size_t used = 0;
-    for (; used < run.size() && !ended;) {
-      const uint32_t id = run[used++];
-      if (impl_->lookup && (used > 1 || !j->head_indexed)) impl_->matchers[slot]->append(id);
-      if (cache_) cache_->fed(slot, id);
-      ++j->steps;
-      const bool is_eos = impl_->eos.count(id) != 0;
-      if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
-        ended = true;
-        reason = Finish::Stop;
-        break;
-      }
-      ++j->fin.completion_tokens;
-      if (impl_->lookup && opts_.lookup_history != 0) j->out.push_back(id);
-      if (j->req.on_token && !j->req.on_token(id)) {
-        ended = true;
-        reason = Finish::Stop;
-        break;
-      }
-      if (j->steps >= j->max_tokens) {
-        ended = true;
-        reason = Finish::Length;
-        break;
-      }
-    }
-    j->fin.spec_accepted += static_cast<uint32_t>(used - 1);
-    if (!ended) continue;
-    if (used < run.size()) {
-      try {   // the slot keeps exactly the ids consumed; then the request-end snapshot (finish)
-        engine_.truncate_to(slot, engine_.pos(slot) - static_cast<uint32_t>(run.size() - used));
-      } catch (const std::exception& error) {
-        if (cache_) cache_->fail(slot);
-        finish(j, Finish::Error, error.what());
-        continue;
-      }
-    }
-    finish(j, reason);
   }
   return true;
 }
@@ -558,19 +588,68 @@ bool Scheduler::decode_round() {
       continue;
     }
     const uint32_t id = ids[i];
-    if (cache_) cache_->fed(rows[i].slot, id);
-    ++j->steps;
-    const bool is_eos = impl_->eos.count(id) != 0;
-    if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
-      finish(j, Finish::Stop);
-      continue;
+    try {   // plan 13b review: a throwing on_token ends this request only; the next rows still get their ids
+      if (cache_) cache_->fed(rows[i].slot, id);
+      ++j->steps;
+      const bool is_eos = impl_->eos.count(id) != 0;
+      if (is_eos && !j->req.ignore_eos && j->fin.completion_tokens >= j->req.min_tokens) {
+        finish(j, Finish::Stop);
+        continue;
+      }
+      ++j->fin.completion_tokens;
+      if (j->req.on_token && !j->req.on_token(id)) {
+        finish(j, Finish::Stop);
+        continue;
+      }
+      if (j->steps >= j->max_tokens) finish(j, Finish::Length);
+    } catch (const std::exception& error) {
+      finish(j, Finish::Error, error.what());
     }
-    ++j->fin.completion_tokens;
-    if (j->req.on_token && !j->req.on_token(id)) {
-      finish(j, Finish::Stop);
-      continue;
+  }
+  return true;
+}
+
+// Plan 13b: the overlapping engine's prefills. Joins every slot whose chunk is done (its
+// prefill_done: the cache hooks, Decoding when the prompt is in), then starts the next chunk of
+// every prefilling slot with none in flight - all of them in one prefill_begin, so two prompts
+// prefill on their two cards at once. Returns true when it joined or started anything.
+bool Scheduler::overlapped_prefills() {
+  bool did = false;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    const std::shared_ptr<Job> j = impl_->slots[s];
+    if (!j || !j->inflight || !engine_.prefill_ready(s)) continue;
+    std::exception_ptr error;
+    try {
+      engine_.prefill_end(s);
+    } catch (...) {
+      error = std::current_exception();
     }
-    if (j->steps >= j->max_tokens) finish(j, Finish::Length);
+    j->inflight = false;
+    --impl_->inflight;
+    PrefillCall call;
+    call.jobs.push_back(j);
+    call.chunks.push_back(j->chunk);
+    prefill_done(call, error);
+    did = true;
+  }
+  PrefillCall start;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    const std::shared_ptr<Job> j = impl_->slots[s];
+    if (!j || j->inflight || j->state != Job::State::Prefilling || j->cancelled_) continue;
+    start.jobs.push_back(j);
+    start.chunks.push_back(next_chunk(*j, true));
+  }
+  if (start.jobs.empty()) return did;
+  try {
+    engine_.prefill_begin(start.chunks);
+  } catch (const std::exception& error) {   // nothing was started (the engine checks before it posts)
+    for (const auto& j : start.jobs) finish(j, Finish::Error, error.what());
+    return true;
+  }
+  for (size_t i = 0; i < start.jobs.size(); ++i) {
+    start.jobs[i]->inflight = true;
+    start.jobs[i]->chunk = start.chunks[i];
+    ++impl_->inflight;
   }
   return true;
 }
@@ -596,6 +675,7 @@ bool Scheduler::tick() {
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     const std::shared_ptr<Job> j = impl_->slots[s];
     if (!j || !j->cancelled_) continue;
+    if (j->inflight && !engine_.prefill_ready(s)) continue;   // plan 13b: its card finishes the chunk first
     finish(j, Finish::Cancelled);
     did = true;
   }
@@ -631,34 +711,15 @@ bool Scheduler::tick() {
     for (auto it = back.rbegin(); it != back.rend(); ++it) impl_->waiting.push_front(*it);
   }
 
-  // 3. At most one prefill call; 4. one decode step. Plan 13b: with overlaps_prefill() the
-  // prefill call runs beside the step (other slots, other cards) and is joined after it.
-  PrefillCall call;
-  const bool prefill = prefill_plan(call);
+  // 3. At most one prefill call; 4. one decode step. Plan 13b: with overlaps_prefill() (one card
+  // per slot) every prefilling slot has a chunk in flight on its card while the others step - the
+  // step never waits for a prefill.
   if (engine_.overlaps_prefill()) {
-    std::exception_ptr error;
-    bool started = false;
-    if (prefill) {
-      try {
-        engine_.prefill_begin(call.chunks);
-        started = true;
-      } catch (...) {
-        error = std::current_exception();
-      }
-    }
+    if (overlapped_prefills()) did = true;
     if (decode_round()) did = true;
-    if (prefill) {
-      if (started) {
-        try {
-          engine_.prefill_end();
-        } catch (...) {
-          error = std::current_exception();
-        }
-      }
-      prefill_done(call, error);
-      did = true;
-    }
   } else {
+    PrefillCall call;
+    const bool prefill = prefill_plan(call);
     if (prefill) {
       std::exception_ptr error;
       try {
@@ -698,7 +759,9 @@ void Scheduler::start() {
       const double hold = hold_remaining();
       std::unique_lock<std::mutex> lock(impl_->mu);
       const auto woken = [&] { return impl_->stopping || impl_->wake != seen; };
-      if (hold >= 0) impl_->cv.wait_for(lock, std::chrono::duration<double>(hold), woken);
+      if (impl_->inflight != 0)   // plan 13b: a card's chunk is running - poll it (tick thread's own count)
+        impl_->cv.wait_for(lock, std::chrono::microseconds(200), woken);
+      else if (hold >= 0) impl_->cv.wait_for(lock, std::chrono::duration<double>(hold), woken);
       else impl_->cv.wait(lock, woken);
     }
   });

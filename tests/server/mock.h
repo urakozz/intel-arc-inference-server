@@ -393,7 +393,8 @@ struct DrafterMockEngine : StateMockEngine {
 // as a prefill does but logs "replay"; `lookup` > 0 verifies drafts proposed outside (SpecRow::propose: the
 // pending id, then each draft while it equals the target's next id, at most `lookup`; every proposal is logged in
 // `proposals_of[slot]`); `cut` > 0 cuts every prefill call at the next multiple of `cut` (prefill_cut, absolute
-// positions); `overlap` runs prefill_begin / prefill_end (logged "begin" / "end"); `fail_at[slot] = n` makes the
+// positions); `overlap` runs prefill_begin / prefill_ready / prefill_end, a chunk busy for `prefill_polls` polls
+// (logged "begin" / "end s"); `fail_at[slot] = n` makes the
 // slot's n-th step (or, with `fail_prefill`, its prefill) fail with a SlotsFailed naming that row only; `echo`
 // makes the output a copy of the context `echo` positions back.
 struct MockBatchEngine : server::BatchEngineIface {
@@ -490,11 +491,41 @@ struct MockBatchEngine : server::BatchEngineIface {
     return cut == 0 ? 0 : std::min(remaining, cut - at % cut);
   }
   bool overlaps_prefill() override { return overlap; }
+  // The overlap mode's card: prefill_begin writes each chunk at once ("begin", then its "prefill s:n") but the slot
+  // stays busy for `prefill_polls` prefill_ready() calls, as a card still running it; prefill_end(slot) ("end s")
+  // throws what that chunk threw. Steps of other slots run meanwhile.
+  uint32_t prefill_polls = 0;
+  std::map<uint32_t, uint32_t> busy;
+  std::map<uint32_t, std::string> pf_error;
   void prefill_begin(const std::vector<Chunk>& chunks) override {
     events.push_back("begin");
-    prefill(chunks);
+    for (const Chunk& c : chunks) {
+      if (busy.count(c.slot) != 0) throw std::logic_error("mock: slot " + std::to_string(c.slot) + " in flight");
+      try {
+        prefill({c});
+      } catch (const server::SlotsFailed& f) {
+        pf_error[c.slot] = f.errors.empty() ? f.what() : f.errors[0];
+      } catch (const std::exception& e) {
+        pf_error[c.slot] = e.what();
+      }
+      busy[c.slot] = prefill_polls;
+    }
   }
-  void prefill_end() override { events.push_back("end"); }
+  bool prefill_ready(uint32_t i) override {
+    const auto it = busy.find(i);
+    if (it == busy.end() || it->second == 0) return true;
+    --it->second;
+    return false;
+  }
+  void prefill_end(uint32_t i) override {
+    busy.erase(i);
+    events.push_back("end " + std::to_string(i));
+    const auto it = pf_error.find(i);
+    if (it == pf_error.end()) return;
+    const std::string e = it->second;
+    pf_error.erase(it);
+    throw std::runtime_error(e);
+  }
 
   uint32_t slots() override { return static_cast<uint32_t>(slot.size()); }
   uint32_t max_len() override {

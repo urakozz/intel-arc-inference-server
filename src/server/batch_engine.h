@@ -78,13 +78,17 @@ struct BatchEngineIface {
   // makes): the chunk boundaries are part of what a prefill computes, so a prompt cut between
   // ticks must be cut where the serial server's one call cuts it (bitwise per card, R1).
   virtual uint32_t prefill_cut(uint32_t /*slot*/, uint32_t /*pos*/, uint32_t /*remaining*/) { return 0; }
-  // Plan 13b: true when a prefill call and a step over OTHER slots can run at once (one card
-  // per slot). The scheduler then starts the prefill (prefill_begin), runs the tick's step and
-  // joins the prefill (prefill_end, which throws what the prefill threw) - so a long prompt's
-  // chunk stalls only its own card. The defaults run the prefill in prefill_begin.
+  // Plan 13b: true when each slot is its own device (one card per slot), so a slot's prefill
+  // runs while the scheduler keeps stepping the others. The scheduler then starts one chunk per
+  // prefilling slot with prefill_begin (which returns at once - every prefilling slot at the
+  // same time), polls prefill_ready(slot) each tick, and joins a finished one with
+  // prefill_end(slot), which throws what that slot's prefill threw. No other call touches a slot
+  // between its prefill_begin and its prefill_end, so a card's prefill never delays the other
+  // card's steps. The defaults (one device) run the prefill inside prefill_begin.
   virtual bool overlaps_prefill() { return false; }
   virtual void prefill_begin(const std::vector<Chunk>& chunks) { prefill(chunks); }
-  virtual void prefill_end() {}
+  virtual bool prefill_ready(uint32_t /*slot*/) { return true; }
+  virtual void prefill_end(uint32_t /*slot*/) {}
 
   // One decode step over the active rows (distinct slots, each with an id pending). Returns,
   // per row in order, the slot's pending id (consumed). The next pending id is the argmax,
