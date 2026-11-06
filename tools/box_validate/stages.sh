@@ -2579,9 +2579,9 @@ st_r34_snapshot() {
   jgrab snapshot '^qwen4exp_snapshot_gpu' 'snapshot|bytes|bitwise|restore|cross|OK|FAIL|SKIP'
   finish
 }
-stage r34.mtp 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F5 on one card: qwen4exp_mtp_synth_{,intel_,eager_,fresh_}test - M1 the head against 21a's port (r34.fixture's data, both norm forms; SKIP without it), M2 the verify rows (M = 2..4) BITWISE the plain steps, M3 greedy lossless at K = 1..3 and the head off, the selection reused (default) and fresh; the verify's cost (M = 2..4 against M = 1, us) and the per-layer expert union; Intel's --layers 18 (qwen4exp_mtp_intel_test) when present"
+stage r34.mtp 34 default gpu oracle_q4exp_synth r34.k1,r33.prefill "F5 on one card: qwen4exp_mtp_synth_{,intel_,eager_}test - M1 the head against 21a's port (r34.fixture's data, both norm forms; SKIP without it), M2 the verify rows (M = 2..4) BITWISE the plain steps, M3 greedy lossless at K = 1..3 and the head off, the selection reused; the verify's cost (M = 2..4 against M = 1, us) and the per-layer expert union; Intel's --layers 18 (qwen4exp_mtp_intel_test) when present"
 st_r34_mtp() {
-  run_tests '^qwen4exp_mtp_(synth|synth_intel|synth_eager|synth_fresh|intel)_test$' qwen4exp
+  run_tests '^qwen4exp_mtp_(synth|synth_intel|synth_eager|intel)_test$' qwen4exp
   jgrab mtp '^qwen4exp_mtp_' 'M1|M2|M3|cost|union|accept|launch|OK|FAIL|SKIP'
   finish
 }

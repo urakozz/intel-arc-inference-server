@@ -168,8 +168,8 @@ int run_m1(qwen4exp_rig::Rig& rig, const std::string& snap, qwen4exp_rig::Option
       }
     }
     ++ran;
-    std::printf("M1 %s (%s selection): %u samples x %u steps (%u compared, %u undetermined, %u chains parted on a tie): "
-                "logits cosine min %.6f, pre-mixer H cosine min %.6f%s\n", norm, rq::mtp_select_name(e.mtp_select()), S,
+    std::printf("M1 %s (reuse selection): %u samples x %u steps (%u compared, %u undetermined, %u chains parted on a tie): "
+                "logits cosine min %.6f, pre-mixer H cosine min %.6f%s\n", norm, S,
                 K, steps, undetermined, diverged, worst, worst_h, bad ? "" : " - PASS");
   }
   set_env("B70_Q4_MTP_NORM", "single");
@@ -518,7 +518,7 @@ int main(int argc, char** argv) {
         qwen4exp_rig::build(rig, snapdir, o);
         std::printf("engine [%s]: %u layers, %u device(s), the head (%s norm, %s selection); verify launches M = 1..4: "
                     "%zu %zu %zu %zu; draft steps %zu / %zu\n", bitwise ? "gemv" : "gemm_sm", rig.eng->model().desc.layers,
-                    rig.eng->devices(), rq::mtp_norm_name(rig.eng->mtp_norm()), rq::mtp_select_name(rig.eng->mtp_select()),
+                    rig.eng->devices(), rq::mtp_norm_name(rig.eng->mtp_norm()), "reuse",
                     rig.eng->verify_list_launches(1), rig.eng->verify_list_launches(2), rig.eng->verify_list_launches(3),
                     rig.eng->verify_list_launches(4), rig.eng->draft_list_launches(0), rig.eng->draft_list_launches(1));
         if (m2) bad += run_m2(*rig.eng, base, bitwise);

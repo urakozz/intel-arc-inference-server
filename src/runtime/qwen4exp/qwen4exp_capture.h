@@ -54,7 +54,7 @@
 //   Draft step i (the last device, M = 1, the head's Control: position pos - 1 + i): q4_mtp_norm over R = hh row 0
 //     (step 0) or the previous step's pre-mixer H (b.H, which its final mixer's combine materialised) and the head
 //     Control's cur_token[0], the fc's, q4_mtp_fuse, the head's QSA layer - q4_qsa_score / _select into the head's
-//     list on step 0 (and on every step under B70_Q4_MTP_SELECT=fresh), steps 1.. attend step 0's list as it is
+//     list on step 0, steps 1.. attend step 0's list as it is
 //     (decision 5) - and MoE (bf16 dense and shared, int4 experts), its own final mixer (b.H = the head's pre-mixer H:
 //     the next step's R), lm_head into the head's logits row i, argmax into the head's Control (out_token[0],
 //     cur_token[0], pos + 1).

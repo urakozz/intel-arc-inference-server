@@ -81,7 +81,6 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
     if (!model_.parts.back().mtp || !model_.parts.back().mtp_fc || !model_.parts.back().mtp_mixer)
       throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine: the model says mtp but the last device holds no head");
     mtp_norm_ = runtime::qwen4exp::mtp_norm();
-    mtp_select_ = runtime::qwen4exp::mtp_select();
   }
   for (uint32_t i = 0; i < p.devices; ++i) {
     st_.push_back(std::make_unique<Stage>(*devices[i], d, p, i, max_len, attn_, mtp));
@@ -117,7 +116,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
       ListSpec ls;
       ls.kind = ListKind::Draft;
       ls.draft = s;
-      ls.select = s == 0 || mtp_select_ == MtpSelect::Fresh;
+      ls.select = s == 0;   // decision 5: steps 1.. reuse step 0's selection
       st(last).drafts.push_back(build(st(last).ctx, model_, model_.parts[last], st(last).buffers, nullptr, nullptr,
                                       nullptr, ls, &mtp_bind_));
     }

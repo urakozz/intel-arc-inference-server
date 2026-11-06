@@ -207,7 +207,7 @@ class Qwen4ExpEngine {
   // One iteration at pos = n, pending id x_n in cur_token[0] (every device's):
   //   draft(k)       the head drafts d_1..d_k on the last device: step i at position n - 1 + i on (R, t) - step 0 on
   //                  (R_{n-1}, x_n), step i on (its own pre-mixer H, d_i); step 0 selects its QSA blocks, later steps
-  //                  attend step 0's list (decision 5; B70_Q4_MTP_SELECT=fresh selects on every step). The ids go to
+  //                  attend step 0's list (decision 5). The ids go to
   //                  every device's cur_token[1..k] and draft_ids(); draft i's logits (q_i) are the head's row i
   //                  (read_draft_logits_into). `pick(i)` (the sampled path) replaces the on-card argmax as d_{i+1}.
   //   verify(k)      the main model at M = k + 1 rows (x_n, d_1..d_k at n..n+k) on every device: row r's argmax in
@@ -253,7 +253,6 @@ class Qwen4ExpEngine {
   // M1's test hook: replace R_{pos-1} (hh row 0) - the head then drafts on a reference's R (bf16 [10240]).
   void write_mtp_R(const std::vector<uint16_t>& R);
   MtpNorm mtp_norm() const { return mtp_norm_; }
-  MtpSelect mtp_select() const { return mtp_select_; }
   size_t verify_list_launches(uint32_t M) const;   // every device's verify list at M
   size_t draft_list_launches(uint32_t i) const;
   // The head's KV / compressed keys of positions [first, first + count) (bf16 [count][2][256] / blocks [count][128]).
@@ -307,7 +306,6 @@ class Qwen4ExpEngine {
   std::unique_ptr<Qwen4ExpMtpBuffers> mtp_;
   MtpBinding mtp_bind_;
   MtpNorm mtp_norm_ = MtpNorm::Single;
-  MtpSelect mtp_select_ = MtpSelect::Reuse;
   static constexpr uint32_t kNoVerify = ~0u;
   uint32_t verify_k_ = kNoVerify, verify_pos_ = 0, last_verify_m_ = 0;
   std::vector<uint32_t> draft_ids_;

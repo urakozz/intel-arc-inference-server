@@ -9,7 +9,7 @@
 // mtp_prefill_launches) at 48 layers and the synthetic's 4, one card and two:
 //   verify at M: the decode list at M (779 at 48 layers) + 2 on the PLE layer at M > 1 (q4_pf_ple's three for
 //     q4_ple_block) + the head's KV pass 10 + M on the last device;
-//   a draft step: 27 (flash) / 26 (eager), + 2 when it selects (step 0; every step under B70_Q4_MTP_SELECT=fresh);
+//   a draft step: 27 (flash) / 26 (eager), + 2 when it selects (step 0);
 //   the prefill's head pass a chunk: 1 + 26 (just the _Y_NN when the chunk has no head row: pos 0, one id).
 #include <cstdio>
 #include <set>
