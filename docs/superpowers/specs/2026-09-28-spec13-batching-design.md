@@ -1,8 +1,8 @@
 # Spec 13 - batching: several sequences in one decode step
 
-**Status:** design, 2026-09-28; **revised 2026-10-23 (§9, the operator's decisions; §10, the two-card
-replica mode for later)** - §9 supersedes §2's "(decide)" on the layout, §3's "MTP: out of scope", and §7's
-first line. Open decisions are marked **(decide)**.
+**Status:** design, 2026-09-28; revised 2026-10-23 (§9, §10); **revised 2026-11-07 (§11: Qwen3.8 only; the two-engine
+mode of §10 is built FIRST, as plan 13c, on the scheduler that exists; then 13b's slots on one card; no `--batch` flag -
+§11 supersedes §9.2 and §9's order where they differ).** Open decisions are marked **(decide)**.
 
 **Order:** last of specs 10-13: it needs spec 10's decode attention (per-sequence depth
 in the stride), and it is much cheaper in memory after spec 12 (int8 KV).
@@ -278,4 +278,60 @@ No new kernels for the routing half: two engines, one per card, behind one `b70-
 - **Gates:** B2's concurrency on two cards (each request's ids equal to running alone on its card); the prefix
   cache's C2 across cards; the device-1 prefill gap (3.4 % slower, measured) recorded, not hidden.
 - **When:** after 13b-13c, on the operator's go.
+
+## 11. Revision - 2026-11-07: two engines first, then slots; the zero-config surface
+
+**Operator (2026-11-07):** "focus on Qwen3.8. Build the two-engine mode (§10) first: small, and useful immediately.
+Then 13b for one-card batching." Recorded here with what changed on main since §9 (2026-10-23):
+
+- **The zero-config surface (operator, 2026-11-06).** The user picks the model, `--spec`, `--max-len` and
+  `--parallel`; the engine decides the rest; no new flags or environment variables. §9.2's `--batch N`, its refusal
+  text naming `--pp 2` / `--mtp off`, and `--mtp auto` / `--mem-reserve-gb` are withdrawn (those flags are gone).
+- **The small-batch verify GEMM (spec 28b) changed the cost of rows.** §1 / §9 derived batching from spec 8b's
+  1.17 / 1.52 / 1.74 plain steps at M = 2 / 3 / 4; the verify step now measures **1.090 at 3 rows and 1.132 at 4**
+  (2026-11-06, the 17a session). The dense rows share the weights almost for free, so batching pays more than §9's
+  table says (an upper bound still: each slot reads its own KV). Every §9 number is re-derived or measured again.
+- **One-card batching's correctness rule.** Rows of a batched step go through the small-batch kernels, a lone row
+  through the M = 1 GEMV: their rounding differs, so §4's B1 is **not bitwise**; it is judged by spec 28's f32 judge
+  (the operator's rulings of 2026-11-03 / 11-05: the 1-bf16-ulp near-tie and the reviewed rows), exactly as the
+  speculative tests are. The two-engine mode keeps every output bitwise (each card runs today's engine).
+- **int8 KV is not decided yet** (the zero-config list B, measured in the quiet-box session). §9's one-card layout
+  (1 x 131072 + 3 x 32768) fits only with int8 KV; 13b's layout waits for that ruling.
+- **The server gained, since 13c Task 1 (2026-10-05):** `--prefix-split-last` (a thinking model's next turn restores
+  right where the last stopped - the agentic sessions' main win), prompt lookup (`--spec lookup`) as a per-request
+  proposer, block-end prefix snapshots, `--log-requests`. The scheduler path carries all of them.
+
+### 11.1 Order
+
+1. **Plan 13c - two engines behind the scheduler (Qwen3.8).** §10's mode built on what exists: the scheduler
+   (`server/scheduler.{h,cc}`) talks to its engine only through `server::BatchEngineIface`; two of today's
+   single-sequence engines, one per card, behind that interface ARE a two-slot batched engine - a step runs both
+   cards at once, each on its own thread. No new kernels, no per-slot state on a card, every output bitwise today's
+   single-sequence run on that card. The main session keeps the whole card (full context, MTP); a second request
+   (an opencode subagent, a title) no longer waits. `--parallel replica` (the operator's parallel exception: every
+   mode selectable to try and measure); whether `--parallel auto` picks it is **(decide)** after 13c's record and
+   spec 17b (tensor parallel takes the same second card for one session).
+2. **Plan 13b - slots on one card (Qwen3.8),** after 13c and after the int8 KV ruling: the row table over the
+   small-batch kernels, per-slot state, B1 by the f32 judge. The same scheduler drives it; replica x slots
+   (two cards, slots on each) is then one more adapter.
+3. **Measured on the way, not a gate:** how often requests overlap in real opencode sessions, from `--log-requests`
+   (each record's `t_start` is the arrival, before the queue wait; overlap = a request arriving before the previous
+   one ended). It sizes 13b's slot count.
+
+### 11.2 The surface
+
+No flag turns batching on. `--parallel replica` loads the model on both cards and serves two requests at once;
+`--parallel 1` / `pp` / `auto` are unchanged (one request at a time, the rest queue - today's server, bitwise). With
+13b, a card's spare memory becomes slots: `--max-len auto` keeps today's single-session context (the whole card); an
+asked `--max-len` shorter than that frees memory, which the engine fills with 32768-position slots (none below 32768,
+never host RAM). `--spec` holds for every slot (MTP per slot under the 8-row budget, §9). Models without a batched or
+replica engine refuse `--parallel replica` by name.
+
+### 11.3 Gates (replacing §4 / §9's where they differ)
+
+- **R1 (replica):** each request's ids equal to the same request served alone on that card - bitwise (greedy and
+  seeded sampling), MTP on and off; the device-1 gap recorded (3.4 % slower prefill, measured).
+- **B1 (slots):** a slot in a batch equals it alone **by the f32 judge**, at equal and mixed depths and mixed K; B3
+  (a slot's rejected drafts leave every other slot byte-identical) stays bitwise - it is a memory isolation check.
+- **B2-B4** as §4 / §9, through the server, on the replica engine first, then on slots.
 

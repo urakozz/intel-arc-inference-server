@@ -1,19 +1,30 @@
 # Spec 13b - batching in the engine
 
-**Status (2026-10-23): refreshed against spec 13 §9 / §9.1 / §9.2 and plan 13a as built (branch
-`spec13a-batching-probe`); NOT built. It starts after 13a's box row (66) has filled the step and chunk tables and the
-operator has ruled B, the chunk size and the budget rule (probe doc §7) - one implementing agent at a time, on the
-operator's go.** The plan of 2026-09-28 (B plain rows, MTP refused) is superseded: the engine implements spec 13 §9's
-row table with MTP in every slot.
+**Status (2026-11-07): REVISED for spec 13 §11 - Qwen3.8 only; starts AFTER plan 13c (two engines behind the
+scheduler) and after the int8 KV ruling (the zero-config list B, quiet-box session); NOT built.** What changed against
+the 2026-10-23 text below, which this paragraph overrides where they differ:
+
+- **No `--batch` flag** (zero-config, operator 2026-11-06): a card's memory left over by an asked `--max-len` becomes
+  32768-position slots (spec 13 §11.2); `--max-len auto` keeps today's single-session layout. Task 1's refusal text
+  naming `--pp 2` / `--mtp off` / `--mtp auto` is withdrawn; a layout that does not fit is simply fewer slots.
+- **Qwen3.8 only.** Agnes's layouts (two slots with MTP, four without) are out of this plan.
+- **The rows run on the small-batch kernels** (spec 28b's `gemm_sm`, 28c's DPAS verify attention): the verify step
+  now costs 1.090 / 1.132 plain steps at 3 / 4 rows (measured 2026-11-06), not spec 8b's 1.52 / 1.74 - 13a's row 66
+  tables are re-measured with today's kernels before the budget rule is fixed.
+- **B1 by the f32 judge** (spec 28's judges and the operator's near-tie / reviewed-row rulings), not bitwise: a lone
+  row and a batched row go through different kernels. B3 (isolation) stays bitwise.
+- **The KV form** follows the int8 KV ruling: with int8 KV the decided 1 x 131072 + 3 x 32768 fits (§9.1); with bf16
+  KV the slots are fewer or shorter (never below 32768).
+- The engine side plugs into the same scheduler 13c wires (`server::BatchEngineIface`); replica x slots (two cards, slots
+  on each) is then one more adapter.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review. Steps use checkbox (`- [ ]`) syntax for
 > tracking. **Commit after every step** (signed; `WIP:` when it does not build yet) and keep a handoff file at the
 > worktree root (untracked) when you stop.
 
-**Goal:** `runtime::Engine` carries the model's slots (Qwen3.8 1 x 131072 + 3 x 32768 with MTP; Agnes 1 x 131072 +
-1 x 32768 with MTP - the default batched layout - or 1 x 131072 + 3 x 32768 with `--mtp off`; int8 KV - spec 13 §9.1,
-§9.2) and runs ONE captured list per (M, shape) over a row table: plain rows of
+**Goal:** `runtime::Engine` carries Qwen3.8's slots (1 x 131072 + 3 x 32768 with MTP at int8 KV, spec 13 §9.1; the
+layout from the memory an asked `--max-len` leaves, spec 13 §11.2) and runs ONE captured list per (M, shape) over a row table: plain rows of
 several slots, MTP verify runs of several slots, and their mixes under the 8-row budget; `BatchEngineIface` on it
 (`step_batch`, `step_spec`, per-slot `pos` / `reset` / snapshots); gates B1 (incl. mixed K) and B3 (incl. the
 speculative state).
@@ -24,14 +35,13 @@ host side. Per slot: a KV base and a max_len (one KV allocation at the layout's 
 probe's arrangement), a `Control` row (pos, the pending id, the live GDN index), a conv ring, and - following the
 ENGINE's MTP setting (§9.2: MTP trades against slots, it is not per slot) - with MTP `MtpDims::kSlots` GDN states (the
 live one and three speculative; slot 0's live state is today's `gdn_state`), the head's KV range and its `hh` row 0;
-with `--mtp off` one GDN state, no head KV layer and no head weights. The row table is rewritten by the host before every replay; the lists are captured once per (M, shape),
+with `--spec off` one GDN state, no head KV layer and no head weights. The row table is rewritten by the host before every replay; the lists are captured once per (M, shape),
 where the shape is the run lengths (the head's hidden gather is the only shape-dependent part). B = 1 keeps today's
-lists, so `--batch 1` is bitwise today's engine (spec 13 §8, §9.2).
+lists, so one slot (`--max-len auto`) is bitwise today's engine (spec 13 §8, §11.2).
 
 **Tech Stack:** OpenCL C (ocloc), C++17, Level Zero, ctest.
 
-**Spec:** spec 13 §9 (the row table, the budget, B1-B3 at mixed K), §9.1 ("What this asks of 13b"), §9.2 (`--batch N`
-default 1; no host-RAM offload), §4, §8. Needs `docs/probes/probe-batching-2026-10-23.md` (13a's audit §1, the descriptor
+**Spec:** spec 13 §9 (the row table, the budget, B1-B3 at mixed K), §9.1 ("What this asks of 13b"), §11 (the order, the surface: slots from the memory an asked `--max-len` leaves; no host-RAM offload; the gates), §4, §8. Needs `docs/probes/probe-batching-2026-10-23.md` (13a's audit §1, the descriptor
 design §6) with the box's tables and the operator's §7 decisions.
 
 ## Out of scope
@@ -45,12 +55,13 @@ design §6) with the box's tables and the operator's §7 decisions.
 
 ## Global Constraints
 
-- Branch `spec13b-batching-engine` from main; box tree per branch; `flock ~/b70-gpu.lock`, detached, polled;
+- Branch `spec13b-batching-engine` from main; box tree per branch; every GPU job under `tools/gpu_lock.sh`, detached, polled;
   interleaved pairs after a warm-up, median of 3, idle grade.
-- **`--batch 1` (the default) is bitwise today's engine:** the production lists and kernels unchanged (G0 on the box:
+- **One slot (`--max-len auto`, the default) is bitwise today's engine:** the production lists and kernels unchanged (G0 on the box:
   every pre-existing binary's sha256, the golden / replay / prefill gates line for line). The `_ROWS` variants are
   additions (`kernel_cmdlines +N, -0, ~0`).
-- One format (AutoRound int4 g64 sym); int8 lm_head for the M = 5..8 rows. No `rm -rf`.
+- One format (AutoRound int4 g64 sym); int8 lm_head for the M = 5..8 rows. Zero-config: no new flags or environment variables. Merge after
+  `tools/box_check.sh` passes. No recursive deletes.
 
 ## Review Focus
 
@@ -76,14 +87,10 @@ design §6) with the box's tables and the operator's §7 decisions.
 - [ ] `runtime::plan` grows a slot list (`SlotSpec{max_len, mtp}` per slot - every slot's `mtp` the engine's -
   `runtime/batch_rows.h`'s `BatchMemory` promoted into `memory_plan.cc`): per-slot KV (with the head's layer when MTP
   is on), per-slot GDN states (4 with MTP, 1 without) and ring, the MTP head's weights only with MTP, the captured
-  lists per (M, shape) counted; the layout per model (Qwen3.8 four slots; Agnes two with MTP, four with `--mtp off`);
-  `largest_batch(desc, card, mtp)` - the largest batch whose layout fits with and without MTP; short slots never below
-  32768, never offloaded. **The refusal (§9.2, its exact text):** a `--batch` that does not fit is refused at startup
-  with the message built from the plan (the model, the card's bytes and reserve, what the asked layout needs, the
-  largest batch that fits with MTP, the two ways out: `--pp 2`, `--mtp off`); `--mtp auto` with `--batch` asks for the
-  largest batch that fits with MTP and says so. Host tests: §9.1 / §9.2's totals byte for byte (Agnes `--batch 4`:
-  33.24 GB with MTP, ~29.9 GB without), the message for Agnes word for word, Qwen3.8 never refused at 4,
-  `memory_plan_test` unchanged. **Commit** `runtime: the batch layout in the planner (spec 13b)`.
+  lists per (M, shape) counted; Qwen3.8's layout from the memory an asked `--max-len` leaves (spec 13 §11.2: slot 0
+  at the asked length, then as many 32768-position slots as fit, at most 3; none below 32768, never offloaded; the
+  startup line says the layout). Host tests: §9.1's Qwen3.8 totals byte for byte (1 x 131072 + 3 x 32768 at int8 KV
+  with MTP: 29.10 GB), `--max-len auto` = one slot exactly as today, `memory_plan_test` unchanged. **Commit** `runtime: the batch layout in the planner (spec 13b)`.
 
 ### Task 2: slots in the engine
 
@@ -104,7 +111,7 @@ design §6) with the box's tables and the operator's §7 decisions.
 
 ### Task 4: `BatchEngineIface` on the engine
 
-- [ ] An adapter (`cli::BatchEngineAdapter`) - with `--mtp off`, `spec_k() == 0` and `step_batch` only - implementing `server::BatchEngineIface`: `slots()`, `max_len()` per slot
+- [ ] An adapter (`cli::BatchEngineAdapter`) - with `--spec off`, `spec_k() == 0` and `step_batch` only - implementing `server::BatchEngineIface`: `slots()`, `max_len()` per slot
   (the interface grows `max_len(slot)`; `src/server/batch_engine.h:27` is one value today), `step_batch`, `step_spec`
   (the MTP head's drafts per slot - the draft list at M = 1 per slot today, or one draft step over the slots' rows if
   13a's audit shows it pays), `truncate_to`, the per-slot snapshot calls; host sampling per row with the request's
@@ -113,9 +120,9 @@ design §6) with the box's tables and the operator's §7 decisions.
 
 ### Task 5: speed and suite
 
-- [ ] Aggregate t/s at B = 2 / slots, 4k each, plain and with `--mtp` (13a's arms through the engine API: host writes,
+- [ ] Aggregate t/s at B = 2 / slots, 4k each, plain and with `--spec mtp` (13a's arms through the engine API: host writes,
   submit, fence); B = 1 within 2 % of today; the full suite; section "Engine" in the probe doc. Box queue row (the next free one after 67) and
   stages. **Commit** `batching: engine gates and speed (spec 13b)`.
 
-**Gate for the plan:** B1 (incl. mixed K), B3 (incl. speculative state), slot isolation, determinism, `--batch 1`
+**Gate for the plan:** B1 (incl. mixed K), B3 (incl. speculative state), slot isolation, determinism, one slot
 bitwise today's (G0), speed measured, full suite green.
