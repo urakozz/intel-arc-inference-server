@@ -20,7 +20,7 @@ std::vector<PpChunk> pp_prefill_chunks(uint32_t base, size_t n, uint32_t chunk, 
   for (size_t off = 0; off < n;) {
     PpChunk c;
     c.pos = base + uint32_t(off);
-    c.rows = prefill_chunk_rows(c.pos, n - off, chunk, hooked, block);
+    c.rows = prefill_chunk_rows(c.pos, n - off, chunk, hooked, block, /*wide_stride=*/true);   // as Engine::prefill
     off += c.rows;
     // Engine::prefill: a hooked chunk that is not the last and ends on a block end.
     c.hook = hooked && off < n && c.end() % block == 0;
