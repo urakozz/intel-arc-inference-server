@@ -32,17 +32,8 @@ void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::qwen4exp::gdn_chunk_q4: " + what);
 }
 
-// gdn.cc's B70_PREFILL_GDN_SOLVE selector, the same rule (its static is private to gdn.cc): resolved once.
-const char* solve_entry() {
-  static const char* const entry = [] {
-    const char* const v = std::getenv("B70_PREFILL_GDN_SOLVE");
-    if (!v || !*v || std::string(v) == "vector") return "pf_gdn_solve";
-    if (std::string(v) == "register") return "pf_gdn_solve_register";
-    throw std::runtime_error("runtime::qwen4exp::gdn_chunk_q4: B70_PREFILL_GDN_SOLVE must be unset, 'vector', or "
-                             "'register' (got '" + std::string(v) + "')");
-  }();
-  return entry;
-}
+// gdn.cc's solve entry (its selector went in the zero-config cleanup).
+const char* solve_entry() { return "pf_gdn_solve"; }
 
 }  // namespace
 
@@ -51,7 +42,7 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   require(b.qkvz && b.ab && b.state && b.ring && b.small && b.y && b.xb && b.seed && b.g && b.beta && b.A && b.A2 && b.w &&
               b.u && b.o,
           "a buffer is missing");
-  const char* const scan_entry = prefill::gdn_scan_entry_name();   // the process-wide selector (gdn.h)
+  const char* const scan_entry = prefill::gdn_scan_entry_name();   // gdn.cc's (gdn.h)
   const char* const solve = solve_entry();
   const uint32_t nch = (C + kGdnChunk - 1) / kGdnChunk;
   const uint32_t conv_groups = kConvDim / kConvWg;
@@ -76,7 +67,7 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
   cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I + A)^-1 in place over A (gdn.cc's selector: pf_gdn_solve | pf_gdn_solve_register).
+  //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).
   cx.launch(kc(wy, solve), kVHeads, nch, 1, {PtrArg(b.A), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnSolve);
   //  7 - u = T vb and w = T kb.

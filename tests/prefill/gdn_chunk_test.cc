@@ -230,35 +230,6 @@ Walk run_chunked(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
   return r;
 }
 
-void check_invalid_selector(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
-                            l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
-                            l0::Mem& d_ring, l0::Mem& d_y) {
-  // `gdn_chunk` must reject before it reads/launches GDN work.  Deliberately
-  // nonzero sentinels make an accidental state/ring mutation observable.
-  d.imm.fill(d_state.ptr(), 0x3f810000u, d_state.size());
-  d.imm.fill(d_ring.ptr(), 0x7d7du, d_ring.size());
-  std::vector<float> state_before(kStateElems), state_after(kStateElems);
-  std::vector<uint16_t> ring_before(kRingElems), ring_after(kRingElems);
-  d.imm.copy(state_before.data(), d_state.ptr(), d_state.size());
-  d.imm.copy(ring_before.data(), d_ring.ptr(), d_ring.size());
-  d.cx.reset_launches();
-  bool threw = false;
-  try {
-    runtime::prefill::gdn_chunk(d.cx, d.kc, s, 0, 1, d_qkvz.as<float>(), d_ab.as<float>(),
-                                d_state.as<float>(), d_ring.as<uint16_t>(), d_small.ptr(),
-                                d_y.as<uint16_t>());
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  d.imm.copy(state_after.data(), d_state.ptr(), d_state.size());
-  d.imm.copy(ring_after.data(), d_ring.ptr(), d_ring.size());
-  CHECK(threw);
-  CHECK_EQ(d.cx.launches(), size_t(0));
-  CHECK(std::memcmp(state_before.data(), state_after.data(), d_state.size()) == 0);
-  CHECK(std::memcmp(ring_before.data(), ring_after.data(), d_ring.size()) == 0);
-  std::puts("invalid selector: real gdn_chunk threw before launches/state/ring mutation");
-}
-
 struct ScanOutput {
   std::vector<float> state, o;
 };
@@ -368,15 +339,8 @@ int main(int argc, char** argv) {
   l0::Mem d_y(d.ctx, l0::MemKind::Device, size_t(kC) * kMixerN * 2);
   runtime::PrefillScratch s(d.ctx, 16384, model::qwen38(), kC);
 
-  if (argc == 2 && std::string(argv[1]) == "--invalid-selector") {
-    check_invalid_selector(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y);
-    return 0;
-  }
-  if (argc == 2 && std::string(argv[1]) == "--dispatch-vector") {
-    check_selected_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
-                            "pf_gdn_scan", "pf_gdn_scan_dpas_split");
-    return 0;
-  }
+  // The walk's entries (the selectors that could move them went in the zero-config cleanup):
+  // the split scan, and the vector solve.
   if (argc == 2 && std::string(argv[1]) == "--dispatch-split") {
     check_selected_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
                             "pf_gdn_scan_dpas_split", "pf_gdn_scan");
@@ -385,11 +349,6 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::string(argv[1]) == "--dispatch-solve-vector") {
     check_solve_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y, "pf_gdn_solve",
                          "pf_gdn_solve_register");
-    return 0;
-  }
-  if (argc == 2 && std::string(argv[1]) == "--dispatch-solve-register") {
-    check_solve_dispatch(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y,
-                         "pf_gdn_solve_register", "pf_gdn_solve");
     return 0;
   }
   CHECK_EQ(argc, 1);
@@ -401,10 +360,7 @@ int main(int argc, char** argv) {
   // says which one it launched (parity-program design §11). The dispatch rows
   // prove the mapping; this proves which mapping THIS band was measured under.
   CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
-  std::printf("scan entry: B70_PREFILL_GDN_SCAN=%s -> LAUNCHED %s\n",
-              std::getenv("B70_PREFILL_GDN_SCAN") && *std::getenv("B70_PREFILL_GDN_SCAN")
-                  ? std::getenv("B70_PREFILL_GDN_SCAN") : "(unset)",
-              runtime::prefill::gdn_scan_launched_entry());
+  std::printf("scan entry: LAUNCHED %s\n", runtime::prefill::gdn_scan_launched_entry());
   // 2 x 2048 at the default cap, ONE call at cap 4096 (plan 5d).
   const uint32_t n_calls = (kPositions + kC - 1) / kC;
   CHECK_EQ(got.launches, n_calls * runtime::prefill::kGdnChunkLaunches);

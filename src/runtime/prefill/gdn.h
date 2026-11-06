@@ -53,16 +53,15 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
 // arithmetic reads it.
 inline constexpr size_t kGdnChunkLaunches = 10;
 
-// --- the scan selector's DISPATCH PROOF -------------------------------------
+// --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
-// gate run under a non-default `B70_PREFILL_GDN_SCAN` is not admissible
-// evidence unless the run itself says which entry it launched. The 2026-09-21
+// gate run was not admissible evidence unless the run itself said which scan
+// entry it launched (the B70_PREFILL_GDN_SCAN selector is gone since the
+// zero-config cleanup; the proof stays). The 2026-09-21
 // record that declared the split scan green was measuring `pf_gdn_scan`, and
 // nothing in its output could have shown that.
 //
-//   * `gdn_scan_entry_name()` resolves the selector through the SAME
-//     process-lifetime static `gdn_chunk` binds, and throws on an invalid
-//     value exactly as `gdn_chunk` does.
+//   * `gdn_scan_entry_name()` is the entry `gdn_chunk` binds.
 //   * `gdn_scan_launched_entry()` is the entry string the LAST scan launch was
 //     actually built with - `nullptr` until one has happened. A test that
 //     prints it after its prefill is reporting the kernel that ran, not the

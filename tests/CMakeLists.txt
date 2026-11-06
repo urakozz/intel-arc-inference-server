@@ -273,36 +273,13 @@ add_dependencies(gdn_chunk_test kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gd
   kernel_pf_gated_head kernel_gdn_step_M1 kernel_prep_gated_head_M1)
 add_test(NAME gdn_chunk_test COMMAND gdn_chunk_test)
 set_tests_properties(gdn_chunk_test PROPERTIES TIMEOUT 1800)
-add_test(NAME gdn_scan_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
-# Since 2026-09-23 an unset selector binds the SPLIT scan (gdn.cc's
-# `gdn_scan_entry`). This row is what fails if that default moves without the
-# record and the gate evidence moving with it.
+# The walk binds the SPLIT scan and the vector solve (gdn.cc; their B70_PREFILL_GDN_SCAN /
+# B70_PREFILL_GDN_SOLVE selectors went in the zero-config cleanup). These rows fail if either
+# entry moves without the record and the gate evidence moving with it. The solve row observes
+# `KernelCache::kernels()` rather than the output: the register entry (still compiled, graded
+# by gdn_wy_test) is bit-identical by construction.
 add_test(NAME gdn_scan_default_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
-add_test(NAME gdn_scan_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-vector)
-add_test(NAME gdn_scan_split_dispatch_test COMMAND gdn_chunk_test --dispatch-split)
-set_tests_properties(gdn_scan_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=bad")
-set_tests_properties(gdn_scan_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=")
-set_tests_properties(gdn_scan_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=vector")
-set_tests_properties(gdn_scan_split_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SCAN=dpas_split")
-
-# Stage S4's solve selector, registered parallel to the scan's four rows.
-# The dispatch rows observe `KernelCache::kernels()` rather than the output:
-# the two solve entries are bit-identical by construction, so an output
-# comparison could not tell which one ran (gdn_chunk_test.cc,
-# `check_solve_dispatch`). The full end-to-end run is registered a second
-# time under the register selector so every band, boundary and determinism
-# bar in the file is carried under both.
-add_test(NAME gdn_solve_invalid_selector_test COMMAND gdn_chunk_test --invalid-selector)
 add_test(NAME gdn_solve_default_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
-add_test(NAME gdn_solve_vector_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-vector)
-add_test(NAME gdn_solve_register_dispatch_test COMMAND gdn_chunk_test --dispatch-solve-register)
-add_test(NAME gdn_chunk_solve_register_test COMMAND gdn_chunk_test)
-set_tests_properties(gdn_solve_invalid_selector_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=bad")
-set_tests_properties(gdn_solve_default_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=")
-set_tests_properties(gdn_solve_vector_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=vector")
-set_tests_properties(gdn_solve_register_dispatch_test PROPERTIES ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register")
-set_tests_properties(gdn_chunk_solve_register_test PROPERTIES
-  ENVIRONMENT "B70_PREFILL_GDN_SOLVE=register" TIMEOUT 1800)
 # Plan 5d: the 4096-position bars as ONE call at chunk cap 4096 (--chunk-cap, tests/chunk_cap_arg.h).
 add_test(NAME gdn_chunk_cap4096_test COMMAND gdn_chunk_test --chunk-cap 4096)
 set_tests_properties(gdn_chunk_cap4096_test PROPERTIES TIMEOUT 1800)

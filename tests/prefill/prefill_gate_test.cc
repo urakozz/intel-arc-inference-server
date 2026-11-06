@@ -181,13 +181,9 @@ int main(int argc, char** argv) {
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
-  // under `B70_PREFILL_GDN_SCAN` is not evidence unless it says which kernel it
+  // under a scan selector (gone since the zero-config cleanup) was not evidence unless it said which kernel it
   // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
-  {
-    const char* const sel = std::getenv("B70_PREFILL_GDN_SCAN");
-    std::printf("gdn scan selector: B70_PREFILL_GDN_SCAN=%s -> entry %s\n",
-                sel && *sel ? sel : "(unset)", runtime::prefill::gdn_scan_entry_name());
-  }
+  std::printf("gdn scan entry: %s\n", runtime::prefill::gdn_scan_entry_name());
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
   // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived); 13 per MoE
   // layer, 526 on Ornith (spec 15c).
