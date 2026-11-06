@@ -48,7 +48,32 @@ void check_parse() {
   CHECK(p.mode == cli::Parallel::Auto && !p.given());
   CHECK(says([&] { cli::parse_parallel("tp", p); }, "tensor parallel is not built yet"));
   for (const char* bad : {"0", "2", "3", "", "two", "PP", "4096"})
-    CHECK(says([&] { cli::parse_parallel(bad, p); }, "--parallel expects auto, 1 or pp"));
+    CHECK(says([&] { cli::parse_parallel(bad, p); }, "--parallel expects auto, 1, pp or replica"));
+  // Plan 13b: replica - one engine per card, not pipeline parallel (on() stays false).
+  cli::parse_parallel("replica", p);
+  CHECK(p.mode == cli::Parallel::Replica && p.replica() && !p.on() && p.given() && p.devices == 1u);
+  CHECK(says([&] { cli::refuse_replica_in_decode(p); }, "--parallel replica is b70-serve's"));
+  CHECK(says([] { cli::check_replica_model("AgnesForConditionalGeneration", "Agnes 3.0 Flash"); },
+             "--parallel replica serves Qwen3.8 only"));
+  CHECK(says([] { cli::check_replica_model("Qwen3_5MoeForConditionalGeneration", "Ornith 1.5"); },
+             "Ornith 1.5 has no replica engine"));
+  CHECK(says([] { cli::check_replica_model("", ""); }, "no readable config.json"));
+  cli::check_replica_model("Qwen3_5ForConditionalGeneration", "Qwen3.8");   // no throw
+  CHECK(says([] { cli::require_two_devices_for_replica(1); }, "--parallel replica needs two GPUs"));
+  cli::require_two_devices_for_replica(2);
+  cli::check_replica_flags(p, false);
+  CHECK(says([&] { cli::check_replica_flags(p, true); }, "--parallel replica serves --spec off, mtp or lookup"));
+  cli::PipelineArgs rs = p;
+  cli::parse_pipeline_split("20", rs);
+  cli::resolve_overrides(rs);
+  CHECK(rs.replica());   // an override does not turn replica into pp
+  CHECK(says([&] { cli::check_replica_flags(rs, false); }, "--pipeline-split belongs to --parallel pp"));
+  cli::PipelineArgs rh = p;
+  (void)cli::parse_pipeline_handoff("peer", rh);
+  CHECK(says([&] { cli::check_replica_flags(rh, false); }, "--pipeline-handoff belongs to --parallel pp"));
+  cli::PipelineArgs none;
+  cli::refuse_replica_in_decode(none);
+  cli::check_replica_flags(none, true);   // not replica: nothing to refuse here
   // An override under auto means pp; under 1 it stays a refusal (check_pipeline below).
   cli::PipelineArgs o;
   cli::parse_pipeline_split("30", o);

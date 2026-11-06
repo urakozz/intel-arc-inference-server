@@ -78,9 +78,17 @@ struct Options {
   bool spec_dflash_lookup = false;
 };
 
+struct BatchEngineIface;
+class Scheduler;
+
 class Server {
  public:
-  Server(Deps deps, Options opts);
+  // Plan 13b (spec 13 §11, b70-serve --parallel replica): with `batch` (an engine of more than one slot, e.g.
+  // cli::ReplicaEngine - one engine per card) every request goes through server::Scheduler: up to slots() at once,
+  // each granted a slot, its prefix cache per slot (PrefixSlots over the one host store), --prefix-split-last,
+  // MTP / prompt lookup per request, the request log, a client disconnect cancelling its request. `deps.engine`
+  // is then not driven (only its properties are read). Null, or one slot: today's serial server, unchanged.
+  Server(Deps deps, Options opts, BatchEngineIface* batch = nullptr);
   ~Server();
 
   bool listen();
@@ -103,6 +111,15 @@ class Server {
   struct Impl;
 
   Outcome generate(const Request& r, const std::function<void(const Delta&)>& emit);
+  std::string render_prompt(const Request& r);
+  // Plan 13b: the scheduler path - submit (throws BadRequest, or Busy when the queue is full), then wait for the
+  // request's deltas; `emit` returns false when the client is gone (the request is then cancelled).
+  struct BatchedRun;
+  std::shared_ptr<BatchedRun> submit_batched(const Request& r);
+  Outcome wait_batched(BatchedRun& run, const std::function<bool(const Delta&)>& emit);
+  void cancel_batched(BatchedRun& run);
+  void handle_batched(const httplib::Request& request, httplib::Response& response, const Request& parsed,
+                      double t_start);
   void generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
                      Outcome& outcome, const std::function<void(const Delta&)>& emit);
   bool acquire(uint64_t& ticket);

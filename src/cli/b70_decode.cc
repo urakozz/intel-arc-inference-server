@@ -871,6 +871,7 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--spec belongs to --ids (greedy speculative decoding); --bench and"
                              " --profile time the plain list (mtp_gpu_test --bench times MTP)");
   if (have_spec_max && !have_spec) throw std::runtime_error("--spec-max caps a proposer's drafts: name it with --spec");
+  cli::refuse_replica_in_decode(pipe);   // plan 13b: two requests at once is b70-serve's
   cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
   const bool pp_given = pipe.given();
   // The model family decides which proposers exist (cli/spec_args.h); --spec lookup is b70-serve's (it verifies

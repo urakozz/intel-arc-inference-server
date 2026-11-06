@@ -6,6 +6,7 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -17,8 +18,11 @@
 struct MockTok : server::TokIface {
   std::vector<std::string> vocab;
   std::map<std::string, uint32_t> index;
+  // Plan 13b: the scheduler path encodes on HTTP threads while the tick thread streams pieces.
+  std::recursive_mutex mu;
 
   uint32_t id_of(const std::string& word) {
+    std::lock_guard<std::recursive_mutex> lock(mu);
     if (word == "<|im_end|>") return 248046;
     const auto it = index.find(word);
     if (it != index.end()) return it->second;
@@ -29,6 +33,7 @@ struct MockTok : server::TokIface {
   }
 
   std::vector<uint32_t> encode(std::string_view text) override {
+    std::lock_guard<std::recursive_mutex> lock(mu);
     std::vector<uint32_t> out;
     std::string word;
     for (char c : text) {
@@ -57,6 +62,7 @@ struct MockTok : server::TokIface {
   }
 
   std::string piece(uint32_t id) {
+    std::lock_guard<std::recursive_mutex> lock(mu);
     if (id == 248046) return "<|im_end|>";
     const auto raw_it = raw_pieces.find(id);
     if (raw_it != raw_pieces.end()) return raw_it->second;

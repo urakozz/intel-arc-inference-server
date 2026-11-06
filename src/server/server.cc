@@ -16,8 +16,10 @@
 
 #include <httplib.h>
 
+#include "server/batch_engine.h"
 #include "server/lookup_in_dflash.h"
 #include "server/prompt_lookup.h"
+#include "server/scheduler.h"
 
 namespace server {
 namespace {
@@ -35,6 +37,11 @@ double steady_seconds() {
 std::string request_id(bool chat, uint64_t sequence) {
   return std::string(chat ? "chatcmpl-" : "cmpl-") + std::to_string(sequence);
 }
+
+// Plan 13b: the scheduler's queue is full (the serial server's 503).
+struct Busy : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 }  // namespace
 
@@ -57,11 +64,21 @@ struct Server::Impl {
   std::deque<std::vector<uint32_t>> lookup_history;
   // Spec 19f: --spec dflash-lookup's policy (its state is per request, its counters the server's).
   std::optional<LookupInDFlash> lookup_in_dflash;
+  // Plan 13b: the scheduler path (an engine of more than one slot).
+  BatchEngineIface* batch = nullptr;
+  std::mutex prompt_mutex;   // render + encode, one request at a time (as the serial server's queue made them)
+  std::unique_ptr<PrefixSlots> slot_cache;
+  std::unique_ptr<Scheduler> sched;
 };
 
-Server::Server(Deps deps, Options opts)
+Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     : deps_(deps), opts_(std::move(opts)), impl_(std::make_unique<Impl>()) {
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
+  if (batch != nullptr && batch->slots() > 1) {
+    impl_->batch = batch;
+    if (opts_.spec_dflash_lookup)
+      throw std::invalid_argument("--spec dflash-lookup is built for one engine (spec 19f); not under the scheduler");
+  }
   if (opts_.spec_lookup) {
     if (deps_.engine.verify_k() == 0)
       throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
@@ -81,8 +98,29 @@ Server::Server(Deps deps, Options opts)
     o.max_k = deps_.engine.mtp_k();
     impl_->lookup_in_dflash.emplace(o);
   }
-  impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, opts_.prefix_cache_bytes,
+  // Plan 13b: under the scheduler the cache is per slot (PrefixSlots) and deps_.engine is never hooked or driven.
+  impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, impl_->batch ? 0 : opts_.prefix_cache_bytes,
                                                   opts_.prefix_alloc);
+  if (impl_->batch) {
+    BatchEngineIface& b = *impl_->batch;
+    SchedulerOptions so;
+    so.queue_depth = opts_.queue_depth;
+    so.eos_ids = opts_.eos_ids;
+    if (b.spec_k() > 0) {   // --spec mtp (or DFlash): the serial loop's K rule, per request
+      so.spec = opts_.mtp_adaptive;
+      so.spec_fixed_k = opts_.mtp_auto ? 0 : b.spec_k();
+    }
+    so.lookup = opts_.spec_lookup;
+    so.lookup_min_match = opts_.lookup_min_match;
+    so.lookup_history = opts_.lookup_history;
+    so.lookup_adaptive = opts_.lookup_adaptive;
+    if (opts_.prefix_cache_bytes != 0) {
+      if (opts_.prefix_alloc == nullptr) throw std::invalid_argument("Server: a prefix cache budget needs an allocator");
+      impl_->slot_cache = std::make_unique<PrefixSlots>(b, opts_.prefix_cache_bytes, *opts_.prefix_alloc);
+    }
+    impl_->sched = std::make_unique<Scheduler>(b, so, impl_->slot_cache.get());
+    impl_->sched->start();
+  }
   impl_->svr.set_tcp_nodelay(opts_.tcp_nodelay);
   impl_->svr.Post("/v1/chat/completions",
                   [this](const httplib::Request& request, httplib::Response& response) {
@@ -97,7 +135,10 @@ Server::Server(Deps deps, Options opts)
   });
 }
 
-Server::~Server() { stop(); }
+Server::~Server() {
+  stop();
+  if (impl_ && impl_->sched) impl_->sched->stop();
+}
 
 bool Server::bind() {
   int bound = 0;
@@ -162,9 +203,7 @@ void Server::release() {
   impl_->queue_changed.notify_all();
 }
 
-Server::Outcome Server::generate(const Request& r,
-                                 const std::function<void(const Delta&)>& emit) {
-  Outcome outcome;
+std::string Server::render_prompt(const Request& r) {
   std::string prompt;
   try {
     if (!r.chat) {
@@ -185,6 +224,13 @@ Server::Outcome Server::generate(const Request& r,
   } catch (const std::exception& error) {
     throw BadRequest(error.what());
   }
+  return prompt;
+}
+
+Server::Outcome Server::generate(const Request& r,
+                                 const std::function<void(const Delta&)>& emit) {
+  Outcome outcome;
+  const std::string prompt = render_prompt(r);
   outcome.prompt_ids = deps_.tok.encode(prompt);
   const uint32_t max_len = deps_.engine.max_len();
   if (outcome.prompt_ids.empty()) throw BadRequest("prompt encodes to zero tokens");
@@ -499,6 +545,10 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
     response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
     return;
   }
+  if (impl_->sched) {   // plan 13b: up to slots() requests at once
+    handle_batched(request, response, parsed, t_start);
+    return;
+  }
 
   uint64_t ticket = 0;
   if (!acquire(ticket)) {
@@ -580,6 +630,281 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
         sink.done();
         release();
         return true;
+      });
+}
+
+
+// ---- Plan 13b: the scheduler path -------------------------------------------------------------------------------
+//
+// One request under server::Scheduler. The scheduler's tick thread runs generate_tail's per-id rules for it in
+// on_token / on_done (the streamer, the stop strings, the tool-call parser, the repetition penalty's seen ids) -
+// the same steps in the same order as the serial loop - and queues the deltas; the request's own HTTP thread waits
+// for them and writes them out. A write that fails (the client is gone) cancels the request: its slot is free at
+// the next tick (Review Focus 6).
+struct Server::BatchedRun {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::deque<Delta> deltas;   // mu
+    bool done = false;          // mu
+    // The tick thread's until done; the HTTP thread's after.
+    Outcome out;
+    Finish fin;
+    SeenIds seen;
+    std::unique_ptr<StreamerIface> streamer;
+    std::unique_ptr<OutputParser> parser;
+    std::vector<std::string> stops;
+    std::string pending;
+    size_t hold = 0;
+    bool stopped = false;   // a stop string ended it
+    // The scheduler's Job holds the callbacks, which hold this run: a weak reference back, no cycle.
+    std::weak_ptr<Job> job;
+};
+
+std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
+  using Run = BatchedRun;
+  auto run = std::make_shared<Run>();
+  Outcome& outcome = run->out;
+  std::string prompt;
+  {
+    std::lock_guard<std::mutex> lock(impl_->prompt_mutex);
+    prompt = render_prompt(r);
+    outcome.prompt_ids = deps_.tok.encode(prompt);
+  }
+  const uint32_t max_len = impl_->batch->max_len();
+  if (outcome.prompt_ids.empty()) throw BadRequest("prompt encodes to zero tokens");
+  if (outcome.prompt_ids.size() + 1 > max_len) {
+    throw BadRequest("prompt is " + std::to_string(outcome.prompt_ids.size()) +
+                     " tokens; max_model_len is " + std::to_string(max_len));
+  }
+  outcome.usage.prompt_tokens = static_cast<uint32_t>(outcome.prompt_ids.size());
+  outcome.finish_reason = "length";
+  run->streamer = deps_.tok.streamer();
+  if (!run->streamer) throw BadRequest("tokenizer did not provide a streamer");
+  run->stops = r.stop;
+  for (const std::string& stop : r.stop) run->hold = std::max(run->hold, stop.empty() ? 0U : stop.size() - 1);
+  if (r.chat) run->parser = make_output_parser(opts_.chat_format, prompt, r.template_kwargs, r.tools);
+
+  SchedRequest sr;
+  sr.prompt = outcome.prompt_ids;
+  sr.max_tokens = r.max_tokens.value_or(UINT32_MAX);
+  sr.min_tokens = r.min_tokens;
+  sr.ignore_eos = r.ignore_eos;
+  sr.split_last = r.chat && opts_.prefix_split_last;
+  sr.sampling = r.sampling;
+  const bool penalised = sr.sampling.repetition_penalty != 1.0f;
+  if (penalised) {
+    for (uint32_t id : outcome.prompt_ids) run->seen.add(id);
+    sr.sampling.seen = &run->seen;
+  }
+  const std::shared_ptr<Run> rp = run;   // the callbacks keep the run alive until the scheduler drops them
+  const auto push = [rp](const Delta& d) {
+    std::lock_guard<std::mutex> lock(rp->mu);
+    rp->deltas.push_back(d);
+    rp->cv.notify_all();
+  };
+  // generate_tail's flush_pending / route / add_text over the run's state (the tick thread).
+  const auto flush_pending = [rp, push](bool final) {
+    const size_t keep = final ? 0 : std::min(rp->hold, rp->pending.size());
+    if (rp->pending.size() <= keep) return;
+    Delta d;
+    d.kind = Delta::Content;
+    d.text = rp->pending.substr(0, rp->pending.size() - keep);
+    rp->out.text += d.text;
+    rp->out.parsed.content += d.text;
+    rp->pending.erase(0, d.text.size());
+    push(d);
+  };
+  const auto route = [rp, push, flush_pending](const std::vector<Delta>& deltas) {
+    for (const Delta& d : deltas) {
+      if (d.kind == Delta::Content) {
+        rp->pending += d.text;
+        continue;
+      }
+      flush_pending(true);
+      if (d.kind == Delta::Reasoning) rp->out.parsed.reasoning += d.text;
+      else rp->out.parsed.tool_calls.push_back(d.call);
+      push(d);
+    }
+  };
+  const auto add_text = [rp, route](const std::string& text) {
+    rp->out.raw_text += text;
+    if (rp->parser) route(rp->parser->push(text));
+    else rp->pending += text;
+  };
+  const std::set<uint32_t>* eos = &impl_->eos;
+  sr.on_token = [rp, eos, penalised, add_text, flush_pending](uint32_t id) {
+    Outcome& o = rp->out;
+    if (penalised) rp->seen.add(id);
+    if (o.out_ids.empty() && o.t_first_token == 0) o.t_first_token = steady_seconds();
+    const bool is_eos = eos->count(id) != 0;
+    o.out_ids.push_back(id);
+    if (!is_eos) add_text(rp->streamer->push(id));
+    for (const std::string& stop : rp->stops) {
+      const size_t at = rp->pending.find(stop);
+      if (at != std::string::npos) {
+        rp->pending.erase(at);
+        o.finish_reason = "stop";
+        rp->stopped = true;
+        flush_pending(true);
+        return false;
+      }
+    }
+    flush_pending(false);
+    return true;
+  };
+  sr.on_done = [rp, add_text, route, flush_pending](const Finish& fin) {
+    Outcome& o = rp->out;
+    rp->fin = fin;
+    if (fin.reason == Finish::Stop || fin.reason == Finish::Length) {
+      const bool eos_stop = fin.reason == Finish::Stop && !rp->stopped;
+      if (eos_stop) {
+        o.finish_reason = "stop";
+        if (o.t_first_token == 0) o.t_first_token = steady_seconds();   // the EOS was the first id
+      }
+      if (o.finish_reason == "length") add_text(rp->streamer->flush());
+      if (rp->parser && (eos_stop || o.finish_reason == "length")) route(rp->parser->finish());
+      flush_pending(true);
+      if (eos_stop && !o.parsed.tool_calls.empty()) o.finish_reason = "tool_calls";
+    }
+    o.usage.completion_tokens = static_cast<uint32_t>(o.out_ids.size());
+    o.usage.cached_tokens = fin.cached_tokens;
+    std::lock_guard<std::mutex> lock(rp->mu);
+    rp->done = true;
+    rp->cv.notify_all();
+  };
+
+  std::shared_ptr<Job> job;   // the scheduler holds the run's callbacks until on_done
+  try {
+    job = impl_->sched->submit(std::move(sr));
+  } catch (const std::invalid_argument& error) {
+    throw BadRequest(error.what());
+  }
+  if (!job) throw Busy("server busy: " + std::to_string(impl_->sched->waiting()) + " requests queued");
+  run->job = job;
+  return run;
+}
+
+void Server::cancel_batched(BatchedRun& run) {
+  if (std::shared_ptr<Job> job = run.job.lock()) impl_->sched->cancel(job);
+}
+
+Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(const Delta&)>& emit) {
+  BatchedRun* const run = &r;
+  const Outcome& outcome = run->out;
+  bool alive = true;
+  for (;;) {
+    std::deque<Delta> deltas;
+    bool done = false;
+    {
+      std::unique_lock<std::mutex> lock(run->mu);
+      run->cv.wait(lock, [&] { return !run->deltas.empty() || run->done; });
+      deltas.swap(run->deltas);
+      done = run->done;
+    }
+    for (const Delta& d : deltas) {
+      if (alive && !emit(d)) {
+        alive = false;
+        cancel_batched(*run);
+      }
+    }
+    if (done) break;
+  }
+  const Finish& fin = run->fin;
+  if (impl_->slot_cache) {
+    std::fprintf(stderr, "prefix: slot %d kind %s restart %u of %zu\n", fin.slot,
+                 fin.slot >= 0 ? plan_kind_name(impl_->slot_cache->last_kind(uint32_t(fin.slot))) : "none",
+                 fin.cached_tokens, outcome.prompt_ids.size());
+    std::fflush(stderr);
+  }
+  if (fin.reason == Finish::Error) throw std::runtime_error(fin.error);
+  return std::move(run->out);
+}
+
+void Server::handle_batched(const httplib::Request& request, httplib::Response& response, const Request& parsed,
+                            double t_start) {
+  // The submit comes first, as the serial server's acquire(): a full queue is a 503 before any stream starts. A
+  // prompt the template or the length check refuses is a 400 - inside the stream for a streaming request, as the
+  // serial server reports it.
+  std::shared_ptr<BatchedRun> run;
+  std::string refused;
+  try {
+    run = submit_batched(parsed);
+  } catch (const Busy& error) {
+    response.status = 503;
+    response.set_content(error_body(error.what(), "server_overloaded"), "application/json");
+    return;
+  } catch (const BadRequest& error) {
+    if (!parsed.stream) {
+      response.status = 400;
+      response.set_content(error_body(error.what(), "invalid_request_error"), "application/json");
+      return;
+    }
+    refused = error.what();
+  }
+  if (!parsed.stream) {
+    try {
+      const Outcome outcome = wait_batched(*run, [](const Delta&) { return true; });
+      log_request(parsed.chat, request.body, t_start, outcome);
+      const auto* prompt_ids = parsed.return_token_ids ? &outcome.prompt_ids : nullptr;
+      const auto* out_ids = parsed.return_token_ids ? &outcome.out_ids : nullptr;
+      const std::string id = request_id(parsed.chat, ++impl_->next_id);
+      response.set_content(completion_body(parsed, id, unix_time(), outcome.text, outcome.finish_reason,
+                                           outcome.usage, prompt_ids, out_ids,
+                                           parsed.chat ? &outcome.parsed : nullptr),
+                           "application/json");
+    } catch (const std::exception& error) {
+      response.status = 500;
+      response.set_content(error_body(error.what(), "server_error"), "application/json");
+    }
+    return;
+  }
+  response.set_header("Cache-Control", "no-cache");
+  response.set_header("X-Accel-Buffering", "no");
+  response.set_chunked_content_provider(
+      "text/event-stream",
+      [this, parsed, run, refused, body = request.body, t_start](size_t, httplib::DataSink& sink) mutable {
+        const std::string id = request_id(parsed.chat, ++impl_->next_id);
+        const uint64_t created = unix_time();
+        const auto write = [&sink](const std::string& frame) { return sink.write(frame.data(), frame.size()); };
+        bool role_sent = !parsed.chat;
+        const auto send_role = [&] {
+          if (role_sent) return true;
+          role_sent = true;
+          return write(stream_frame_role(parsed, id, created));
+        };
+        if (!run) {
+          (void)write(std::string("data: ") + error_body(refused, "invalid_request_error") + "\n\n");
+        } else {
+          try {
+            const Outcome outcome = wait_batched(*run, [&](const Delta& d) {
+              bool ok = true;
+              if (!d.text.empty() || d.kind == Delta::Call) ok = send_role();
+              if (d.kind == Delta::Call) {
+                ok = write(stream_frame_tool_call(parsed, id, created, d.call, d.index)) && ok;
+              } else if (d.text.empty()) {
+              } else if (d.kind == Delta::Reasoning) {
+                ok = write(stream_frame_reasoning(parsed, id, created, d.text)) && ok;
+              } else {
+                ok = write(stream_frame_text(parsed, id, created, d.text)) && ok;
+              }
+              return ok;
+            });
+            (void)send_role();
+            (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
+            if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
+            log_request(parsed.chat, body, t_start, outcome);
+          } catch (const std::exception& error) {
+            (void)write(std::string("data: ") + error_body(error.what(), "server_error") + "\n\n");
+          }
+        }
+        (void)write(kDone);
+        sink.done();
+        return true;
+      },
+      // A client that left before the stream began never reaches the provider: its request is cancelled here
+      // (a no-op once it finished).
+      [this, run](bool) {
+        if (run) cancel_batched(*run);
       });
 }
 
