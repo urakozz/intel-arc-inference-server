@@ -11,13 +11,13 @@
 //   --spec-max K           the deepest block, 1..7 (default 7, Decision 5); AdaptiveK picks K per iteration
 //
 // What the engine decides (no flag, no environment variable): the drafter's linears are int8 per row (spec 26 §3; PROVISIONAL
-// until r63.accept - `exact` and int4 g64 stay SpecArgs::format, the tests' seam), the head exact in every format (Decision 3);
-// the sampled draft distribution is vLLM's lattice (softmax(realized lattice / T), Decision 6; lattice+lp stays SpecArgs::q, the
-// tests' seam); the verify's routed experts are the union-aware form (Decision 10 - the plain M-row form, its bitwise reference,
-// is the tests' `plain` argument and bolt_moe_union_test --time's arm); the AdaptiveK cost table is the derived Bolt rows
-// (server::MtpCost::bolt_lilicorr / bolt_verify, spec 26 §11 - r63.cost measures them). `--spec dflash` is NOT Bolt's `auto`: it
-// becomes so only on D5's rule (spec 26 §7: >= 10 % over both off and lookup on the agentic set, nowhere worse than 3 %) - box
-// row 65's r65.benchy decides.
+// until box row 65 - r65.d2's acceptance per format with r63.cost's cost; `exact` and int4 g64 stay SpecArgs::format, the
+// tests' seam), the head exact in every format (Decision 3); the sampled draft distribution is vLLM's lattice (softmax(realized
+// lattice / T), Decision 6; lattice+lp stays SpecArgs::q, the tests' seam); the verify's routed experts are the union-aware
+// form (Decision 10 - the plain M-row form, its bitwise reference, is the tests' `plain` argument and bolt_moe_union_test
+// --time's arm); the AdaptiveK cost table is the derived Bolt rows (server::MtpCost::bolt_lilicorr / bolt_verify, spec 26 §11 -
+// r63.cost measures them). `--spec dflash` is NOT Bolt's `auto`: it becomes so only on D5's rule (spec 26 §7: >= 10 % over both
+// off and lookup on the agentic set, nowhere worse than 3 %) - box row 65's r65.benchy decides.
 //
 // Refused before the device, each by name (tests/server/bolt_serve_args_test.cc, tests/runtime/bolt_spec_plan_test.cc; through
 // the binary the box's cli_reject_serve_bolt_*): by cli::resolve_spec --spec mtp, --spec dflash-lookup, --spec-max outside 1..7,

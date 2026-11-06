@@ -632,12 +632,32 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
 - **Request.** Image / video / audio content parts are refused (text only).
 
-**Limits.** No `--spec mtp` (no MTP head), no `--spec lookup` / `dflash` (no drafter; its `--spec auto` is off), no
-`--draft-vocab`, bf16 KV only (`--kv-cache int8` refused, Decision 17), prefill on `l0` only (`--prefill-backend l0-int8`
-refused), context at most 262144, `--layers` is `b70-decode`'s development mode only.
+**Speculative decoding (spec 26c; restored 2026-11-01, not yet run on a card - box rows 63-65).** Bolt has no MTP head, but
+its decode list also runs as a *verify* pass of M = K + 1 <= 8 rows (each row bitwise a plain decode step, so greedy output
+is the plain run's), and two proposers feed it on `b70-serve`:
+
+- `--spec lookup` - prompt lookup (the continuation of the longest earlier repeat in the request, no extra model);
+- `--spec dflash` - NVIDIA's LiLiCorr draft model (`nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr`, 918 MiB, from
+  the HF cache; `--draft-model PATH` points elsewhere) on the last card beside the main model's head: it reads six of Bolt's
+  hidden-state rows ("taps") and drafts a block of up to 7 ids in one pass.
+
+`--spec-max 1..7` caps the guesses (default 7); K is picked per request from how often its guesses were right. Everything
+else is the engine's: the draft model's linears int8 per row (exact bf16 and int4 g64 are test arms), its draft distribution
+vLLM's (the candidate lattice), the verify's experts read once per block for all rows (the union form; the plain M-row form
+is its bitwise test reference). Bolt's `--spec auto` stays **off** until row 65's D5 measures `dflash` >= 10 % faster than
+both `off` and `lookup` on the agentic set (and nowhere > 3 % slower). Two cards cross by the copy hand-off only
+(`--pipeline-handoff peer` is refused with a proposer). `b70-decode` decodes Bolt plainly (`--spec` there is refused).
+
+```sh
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec dflash      # the LiLiCorr drafter, K <= 7 adaptive
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec lookup --spec-max 4
+```
+
+**Limits.** No `--spec mtp` (no MTP head) and no `--spec dflash-lookup` (Qwen3.8's), no `--draft-vocab`, bf16 KV only
+(`--kv-cache int8` refused, Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` refused), context at most
+262144, `--layers` is `b70-decode`'s development mode only.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
-`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_VERIFY_MOE` (`union` | `plain`: the verify's routed experts,
-spec 26c), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
+`route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
 `B70_BOLT_A_EXP` (the reference's `A`: `torch` | `engine`), `B70_BOLT_SNAPSHOT` (`template_bolt_test`'s,
 `bolt_tokenizer_test`'s and `bolt_request_test`'s snapshot).

@@ -115,6 +115,9 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   original's `backbone` names and 74,042,720,768 parameters), signed / subnormal scales, the dt-clamp census (212 of
   5,120 heads), tokens and the template (14 renders in `tests/server/bolt_template_cases.json`), torch's tie order and
   fp32-GEMM row-count dependence, B1's bounds, the bf16 table, and R's fallback state-passing bug past 128 rows.
+- [probe-lilicorr-2026-10-23.md](probes/probe-lilicorr-2026-10-23.md) - spec 26a: NVIDIA's LiLiCorr draft model on our Bolt
+  (dropped 2026-10-27, restored 2026-11-01) - its shapes and NVFP4 weights read on the Mac, the derived verify and block
+  costs, the expected acceptance from SPEED-Bench; the box's numbers are queue row 63.
 - [probe-eagle3-k2-2026-10-08.md](probes/probe-eagle3-k2-2026-10-08.md) - EAGLE-3 on K2-Horizon (Mac CPU P0):
   **no-go** - the community drafter is undertrained (golden: 0.23 / 0.06 acceptance, below plain decode at
   every K); prompt lookup wins (to 1.68x at 4k). K2 verify costs 1.26x / 1.63x a plain step at M = 2 / 4.
