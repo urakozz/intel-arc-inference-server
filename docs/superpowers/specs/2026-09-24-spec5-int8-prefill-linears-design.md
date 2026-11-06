@@ -302,3 +302,9 @@ docs/17-int8-prefill.md), so a 4096 chunk halves that share; **+8-15 % at pp4096
 taken on the bf16 GEMMs; the plan's P0 measures the int8 linears at 4096 rows first and stops if they are not >= 5 %
 cheaper per 4096 tokens. The scratch (+~0.76 GB a card with MTP, derived) goes through the planner as a session chunk
 cap; the gates of this spec are unchanged; box row 75.
+
+**Result (2026-11-06, busy-box timing, one card, interleaved):** built and correct at cap 4096 (every gate of this
+spec passes there), but **+4.2 % at pp4096** (+4.4 % 8k, +5.3 % 32k, +1.5 % 128k) - under the plan's +5 % bar, so
+the default stays 2048 and 4096 is opt-in (`b70-decode --prefill-chunk 4096`); the planner's context-first rule is
+built and off (`cli::kPrefillChunkCapRule`). P0: the int8 linears themselves are not cheaper at 4096 rows (-1.1 %);
+the gain is the other per-chunk fixed costs. Numbers and the open decision: the plan's "As built".

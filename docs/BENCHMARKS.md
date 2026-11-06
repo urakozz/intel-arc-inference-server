@@ -321,7 +321,23 @@ Monotone in the chunk width across the whole available range, measured
 | 512 | 932.37 | 4393.1 | -33.7% |
 
 That is what a fixed cost per chunk predicts: halving the width doubles the
-chunk count and therefore the fixed term. 2048 is the widest this build runs.
+chunk count and therefore the fixed term.
+
+**4096 (plan 5d, 2026-11-06)**: `--prefill-chunk 4096` (the scratch sized for
+4096 rows, +0.70 GB), Qwen3.8-27B int4 g64, `l0-int8`, card 1, `--max-len
+133120`, 4 interleaved rounds after a warm-up (order flipped each round),
+median; the box was busy with I/O (a disk copy) and a test job on card 0, so
+these are provisional until the quiet-box re-run (`r75.speed`):
+
+| depth | chunk 2048 t/s | chunk 4096 t/s | 4096 vs 2048 |
+|---:|---:|---:|---:|
+| 4096 | 2191.8 | 2284.0 | +4.2% |
+| 8192 | 2099.9 | 2191.6 | +4.4% |
+| 32768 | 1674.7 | 1762.7 | +5.3% |
+| 131072 | 925.4 | 939.3 | +1.5% |
+
+Every round agreed to within 0.6 %. Below the plan's +5 % bar at pp4096, so
+2048 stays the default.
 
 ### What prefill replaced
 
