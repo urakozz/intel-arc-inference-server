@@ -14,6 +14,9 @@
 #   3 tests     ctest -LE checkpoint in the remote tree under tools/gpu_lock.sh card N (the
 #               first free card, else card 1, waiting for it), detached on the box and polled.
 #               Passed, Failed and Skipped are counted apart: a Skipped test is not a pass.
+#               Every test runs traced (tools/test_launcher.sh) and its PASS is recorded with
+#               what it read (tools/box_validate/reuse.py): the validation run of the same
+#               sources takes those PASSes instead of running the tests again.
 #
 #   --base REF              what section 2 compares against (main)
 #   --allow-kernel-changes  report changed / removed command lines without failing on them
@@ -135,10 +138,11 @@ else
   t0=$(now)
   log="$logs/ctest.log"
   # Detached on the box: a dropped ssh connection must not kill the run.
-  rbox "cd ~/$tree && nohup bash -c 'tools/gpu_lock.sh card $card -- ctest --test-dir build -LE checkpoint --output-on-failure; echo \"box_check rc=\$?\"' > ~/$log 2>&1 < /dev/null &" > /dev/null
+  rbox "cd ~/$tree && ctest --test-dir build --show-only=json-v1 > ~/$logs/tests.json && nohup bash -c 'tools/gpu_lock.sh card $card -- env B70_TRACE_DIR=\$HOME/$logs/trace ctest --test-dir build -LE checkpoint --output-on-failure --test-output-size-passed 200000000 --test-output-size-failed 200000000 --output-junit \$HOME/$logs/ctest.junit.xml; echo \"box_check rc=\$?\"' > ~/$log 2>&1 < /dev/null &" > /dev/null
   echo "box_check: ctest -LE checkpoint on card $card, log ~/$log"
   until rbox "grep -q '^box_check rc=' ~/$log" > /dev/null; do sleep 30; done
   rbox "cat ~/$log" > "$kc/ctest.log"
+  rbox "cd ~/$tree && python3 tools/box_validate/reuse.py record --tests ~/$logs/tests.json --junit ~/$logs/ctest.junit.xml --trace ~/$logs/trace --since ~/$logs/tests.json --from box-check@$(git -C "$root" rev-parse --short=12 HEAD)" | grep '^REUSE recorded' 
   total=$(sed -nE 's/.* tests failed out of ([0-9]+).*/\1/p' "$kc/ctest.log" | tail -1)
   nf=$(sed -nE 's/.* ([0-9]+) tests failed out of .*/\1/p' "$kc/ctest.log" | tail -1)
   ns=$(grep -cE '^ *[0-9]+ - .*\(Skipped\)' "$kc/ctest.log")
