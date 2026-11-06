@@ -94,6 +94,9 @@ wants an idle grade), `card N` takes one card and runs the command with `ZE_AFFI
 so a second job can use the other card. A whole-box job waiting at the gate stops new card
 jobs, so timed work cannot starve.
 
+**Stopping our own jobs** is `tools/box_stop.sh list | cpu-chain | cpu-job <queue name> | hf-tier |
+validation` - it stops only those (TERM, then KILL after 10 s) and refuses anything else.
+
 **Validating work in bulk** is one command, `tools/box_validate.sh`
 (`--dry-run` first to read what it will do). It runs the rows of
 [box-validation-queue.md](superpowers/plans/box-validation-queue.md) as stages in one
