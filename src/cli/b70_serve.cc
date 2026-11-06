@@ -38,6 +38,7 @@
 #include "cli/prefix_cache_size.h"
 #include "cli/qwen4exp_chat.h"
 #include "cli/qwen4exp_serve.h"
+#include "cli/replica_engine.h"     // plan 13b: --parallel replica
 #include "cli/served_name.h"
 #include "cli/spec_args.h"
 #include "cli/serve_adapters.h"
@@ -92,7 +93,7 @@ void stop_server(int) {
 void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--spec auto|off|mtp|lookup|dflash] [--max-len auto|N]\n"
-               "                 [--parallel auto|1|pp] [--host 0.0.0.0] [--port 8000]\n"
+               "                 [--parallel auto|1|pp|replica] [--host 0.0.0.0] [--port 8000]\n"
                "\n"
                "  The model is chosen from the checkpoint's config.json (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5,\n"
                "  K2-Horizon, Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
@@ -118,6 +119,8 @@ void usage() {
                "  --parallel P    auto (default): one card when the model and the asked context fit it, else\n"
                "                  pp; 1: one card; pp: the layers split over two cards (spec 16). Kolibri-1 and\n"
                "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
+               "                  replica (Qwen3.8): the model on both cards, one engine each - two\n"
+               "                  requests at once, each exactly what it is alone on its card.\n"
                "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
                "                  holds the fewest bytes). An override, for experiments; it implies pp.\n"
                "  --host H, --port P   where to listen (0.0.0.0:8000).\n"
@@ -762,6 +765,90 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   return listen_until_stopped(server, options);
 }
 
+// Plan 13b (spec 13 §10 / §11): b70-serve --parallel replica - Qwen3.8 on both cards, one runtime::Engine each (each
+// card's own plan: its --max-len auto, its prefill chunk cap, MTP / lookup per --spec), behind cli::ReplicaEngine and
+// server::Scheduler: two requests at once, each bitwise what it is alone on its card. Both cards are views of ONE
+// Level Zero context (spec 16 decision 1) so the prefix cache's pinned host store is device-visible to both - a
+// snapshot saved by card 0 restores on card 1; nothing else crosses (no peer access is used). The refusals
+// (another model, one visible card, the pp override flags, DFlash) ran in run(), before the device.
+struct ReplicaServe {
+  std::string snapshot_dir;
+  cli::MaxLenArg max_len_arg;
+  uint32_t trained = 0;
+  size_t mem_reserve = 0;
+  runtime::KvCache kv_cache = runtime::KvCache::Bf16;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  loader::DraftVocabSpec dv_spec;
+  uint32_t mtp_k = 0;
+  bool mtp_auto = false, spec_lookup = false;
+  uint32_t spec_max = 0;
+  bool have_pp_backend = false;
+  runtime::PrefillBackend pp_backend{};
+  runtime::PrefillPath pp_path;
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+  std::vector<uint32_t> eos;
+};
+
+int serve_replica(const ReplicaServe& a, server::Options options) {
+  cli::require_two_devices_for_replica(l0::Context::gpu_count());
+  l0::Context d0(0u);
+  l0::Context d1(d0, 1u);
+  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel replica: one engine per card, one "
+                       "context; no peer access used]\n",
+               d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
+  std::array<l0::Context*, 2> ctx{&d0, &d1};
+  std::vector<std::unique_ptr<runtime::Engine>> engines;
+  std::vector<uint32_t> lens, caps;
+  for (uint32_t i = 0; i < 2; ++i) {
+    l0::Context& c = *ctx[i];
+    loader::LoadedModel model = [&] {
+      StdoutToStderr redirect;
+      return loader::load(c, a.snapshot_dir, cli::load_len(a.max_len_arg, a.trained),
+                          /*mtp=*/a.mtp_k > 0 || a.spec_lookup, a.lm_head, a.dv_spec);
+    }();
+    model::require_prefill(*model.desc);
+    if (!cli::replica_architecture(model.desc->architecture))   // run() read config.json; the loader is the truth
+      throw std::runtime_error("--parallel replica serves Qwen3.8 only (spec 13b); this checkpoint loads as " +
+                               model.desc->name);
+    runtime::PrefillPath pf = a.pp_path;
+    pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
+    std::fprintf(stderr, "card %u: ", i);
+    const uint32_t max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache);
+    const uint32_t chunk_cap = cli::settle_chunk_cap(c, model, max_len, a.mem_reserve, pf, a.kv_cache, {}, 0);
+    auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache);
+    if (a.have_pp_backend) engine->set_prefill_backend(a.pp_backend);
+    engine->set_prefill_chunk_cap(chunk_cap);   // plan 5d
+    engine->prepare_prefill();
+    std::fprintf(stderr, "card %u: max_len %u, prefill chunk %u, %s\n", i, max_len, chunk_cap,
+                 engine->memory_line().c_str());
+    lens.push_back(max_len);
+    caps.push_back(chunk_cap);
+    engines.push_back(std::move(engine));
+  }
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  TemplateAdapter chat_template(a.snapshot_dir);
+  std::vector<std::unique_ptr<EngineAdapter>> adapters;
+  for (auto& e : engines)
+    adapters.push_back(std::make_unique<EngineAdapter>(*e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup));
+  options.eos_ids = a.eos;
+  // The prefix store: one pinned allocation in the shared context, sized after both loads.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  // The prompt's cut is the serial server's: hooked (every chunk ends at a stride end) when the cache is on.
+  cli::ReplicaEngine replica({{adapters[0].get(), caps[0]}, {adapters[1].get(), caps[1]}},
+                             /*hooked=*/options.prefix_cache_bytes != 0, /*wide_stride=*/true);
+  server::Server server({tokenizer, chat_template, *adapters[0]}, options, &replica);
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, --parallel replica: 2 requests at once, max_len %u / %u, eos ",
+               options.served_model.c_str(), options.host.c_str(), options.port, lens[0], lens[1]);
+  print_eos(a.eos);
+  std::fprintf(stderr, ", prefill backend %s, mtp %s%u, lm_head %s, kv cache %s\n",
+               runtime::prefill_backend_name(engines[0]->prefill_backend()), a.mtp_auto ? "auto, max " : "", a.mtp_k,
+               loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engines[0]->kv_cache()));
+  print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
+                 false, engines[0]->model().desc->name);
+  return listen_until_stopped(server, options);
+}
+
 int run(int argc, char** argv) {
   std::string path;
   server::Options options;
@@ -870,6 +957,31 @@ int run(int argc, char** argv) {
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (pipe.mode == cli::Parallel::One && pipe.have_handoff)
     throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses)");
+  if (pipe.replica()) {   // plan 13b: Qwen3.8 only, by name, before any device or weight file
+    cli::check_replica_flags(pipe, /*dflash=*/false);
+    std::string architecture, name;
+    try {
+      const std::string snap = loader::resolve_snapshot(path);
+      if (std::ifstream cf(snap + "config.json"); cf) {
+        std::stringstream cs;
+        cs << cf.rdbuf();
+        const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
+        if (cj.is_object() && cj.contains("architectures") && cj.at("architectures").is_array() &&
+            !cj.at("architectures").empty() && cj.at("architectures").at(0).is_string())
+          architecture = cj.at("architectures").at(0).get<std::string>();
+        if (cj.is_object()) name = cj.value("model_type", std::string());
+      }
+    } catch (const std::exception&) {
+    }
+    if (!architecture.empty()) {
+      try {
+        name = model::desc_for_architecture(architecture).name;
+      } catch (const std::exception&) {
+        name = (name.empty() ? std::string("this model") : name) + " (" + architecture + ")";
+      }
+    }
+    cli::check_replica_model(architecture, name);
+  }
   const bool pp_given = pipe.given();
   if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
     throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); this checkpoint "
@@ -883,6 +995,7 @@ int run(int argc, char** argv) {
   // The hardware gate (cli/hardware_gate.h): one or two Intel Arc Pro B70s, peer access between two - before
   // any model file is read. Its card memory is what the fit checks before a device opens plan against.
   const cli::Hardware hw = cli::hardware_gate();
+  if (pipe.replica()) cli::require_two_devices_for_replica(hw.cards);   // plan 13b: one engine per card
 
   // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
   // cli::bolt::BoltEngineAdapterT (two cards by default) - dispatched here, before every other family's rules (its own:
@@ -954,6 +1067,7 @@ int run(int argc, char** argv) {
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
                             pipe.handoff == runtime::PpHandoff::Peer);
+  cli::check_replica_flags(pipe, dflash.on);   // plan 13b: --spec dflash / dflash-lookup are not built for replica
   if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the pipeline adapter has none
     throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --parallel pp serves --spec dflash");
   if (spec_lookup) {
@@ -1091,6 +1205,27 @@ int run(int argc, char** argv) {
     dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
+  }
+  if (pipe.replica()) {   // plan 13b: one engine per card behind the scheduler
+    ReplicaServe rs;
+    rs.snapshot_dir = snapshot_dir;
+    rs.max_len_arg = max_len_arg;
+    rs.trained = trained;
+    rs.mem_reserve = mem_reserve;
+    rs.kv_cache = kv_cache;
+    rs.lm_head = lm_head;
+    rs.dv_spec = dv_spec;
+    rs.mtp_k = mtp_k;
+    rs.mtp_auto = mtp_on && spec.adaptive;
+    rs.spec_lookup = spec_lookup;
+    rs.spec_max = spec.max_k;
+    rs.have_pp_backend = have_pp_backend;
+    rs.pp_backend = pp_backend;
+    rs.pp_path = pp_path;
+    rs.prefix_auto = prefix_auto;
+    rs.prefix_cache_gb = prefix_cache_gb;
+    rs.eos = eos;
+    return serve_replica(rs, options);
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
   // pipeline parallel (cli::parallel_auto, from the checkpoint's descriptor before the load).

@@ -169,6 +169,12 @@ add_executable(replica_engine_test cli/replica_engine_test.cc)
 target_include_directories(replica_engine_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(replica_engine_test PRIVATE b70_server)
 add_test(NAME replica_engine_test COMMAND replica_engine_test)
+# Plan 13b Task 4: the server's scheduler path over HTTP (cli::ReplicaEngine over two mock cards) against the serial
+# server - replies equal alone and concurrent, streamed, split-last, a disconnect, the 503, the request log. Host only.
+add_executable(replica_server_test server/replica_server_test.cc)
+target_include_directories(replica_server_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(replica_server_test PRIVATE b70_server)
+add_test(NAME replica_server_test COMMAND replica_server_test)
 
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -2461,9 +2467,12 @@ endif()
 # card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --parallel pp must stop with the
 # count, before the load (the model path does not exist).
 b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 3
-  EXPECT "--parallel expects auto, 1 or pp")
+  EXPECT "--parallel expects auto, 1, pp or replica")
 # (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.
 # Spec 16d lifted the --spec mtp one, cli_reject_pipeline_mtp: --parallel pp --spec mtp runs.)
+# Plan 13b: two requests at once is b70-serve's.
+b70_cli_reject(cli_reject_pipeline_replica_decode ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel replica
+  EXPECT "--parallel replica is b70-serve's")
 b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 1
   --pipeline-split 32 EXPECT "--pipeline-split belongs to --parallel pp")
 b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel pp
@@ -2618,13 +2627,25 @@ endif()
 # updated), the rest before the snapshot is resolved (the model path does not exist).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --parallel 4096
-    EXPECT "--parallel expects auto, 1 or pp")
+    EXPECT "--parallel expects auto, 1, pp or replica")
   b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --parallel 1 --pipeline-split 20
     EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p
     EXPECT "--pipeline-handoff expects copy or peer")
+  # Plan 13b: --parallel replica is Qwen3.8's - other models by name (their config.json), an unreadable checkpoint,
+  # the pp override flags; all before the device.
+  b70_serve_reject(cli_reject_serve_replica_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel replica
+    EXPECT "--parallel replica serves Qwen3.8 only")
+  b70_serve_reject(cli_reject_serve_replica_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --parallel replica
+    EXPECT "has no replica engine")
+  b70_serve_reject(cli_reject_serve_replica_no_model ${B70_NO_MODEL} --parallel replica
+    EXPECT "no readable config.json")
+  b70_serve_reject(cli_reject_serve_replica_split ${B70_NO_MODEL} --parallel replica --pipeline-split 20
+    EXPECT "--pipeline-split belongs to --parallel pp")
   set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
+    cli_reject_serve_replica_k2 cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
+    cli_reject_serve_replica_split
     PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
