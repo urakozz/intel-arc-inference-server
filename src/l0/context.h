@@ -3,30 +3,23 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include "l0/gpu_info.h"
 
 namespace l0 {
 // Driver init + one GPU device + one context. `device_index` counts GPU
-// devices of the first driver, in enumeration order.
+// devices of the first driver, in enumeration order (default 0).
 //
-// Device selection (doc 04, "Device selection"), top wins:
-//   1. an explicit index - the CLI's `--device N`, and every probe and test,
-//      which pass 0 and are unaffected by the environment;
-//   2. `ONEAPI_DEVICE_SELECTOR`, consulted only by the default `kFromEnv` and
-//      parsed by `device_index_from_env()` below. Level Zero does not read
-//      that variable - only the SYCL runtime does - so the raw-L0 path parses
-//      it itself, and both paths land on the same card.
-//   3. device 0.
-// `ZE_AFFINITY_MASK` sits *underneath* all three: it is a driver-level filter
-// deciding which devices are enumerated at all. We never set it and nothing
-// here reads it; under a mask, `--device N` and the selector index both refer
-// to the masked (visible) view - the same renumbering the driver gives
-// everyone.
+// Device selection (the zero-config cleanup, operator 2026-11-06): the CLIs run on
+// the supported cards they find - device 0, or devices 0 and 1 under --parallel pp;
+// probes and tests pass their index. `ZE_AFFINITY_MASK` sits underneath: it is a
+// driver-level filter deciding which devices are enumerated at all. We never set
+// it and nothing here reads it; under a mask the index refers to the masked
+// (visible) view - the same renumbering the driver gives everyone.
+// (ONEAPI_DEVICE_SELECTOR and --device were removed with the cleanup.)
 class Context {
  public:
-  // Resolve the index from ONEAPI_DEVICE_SELECTOR instead of taking it here.
-  static constexpr uint32_t kFromEnv = 0xFFFFFFFFu;
-
-  explicit Context(uint32_t device_index = kFromEnv);
+  explicit Context(uint32_t device_index = 0);
   // Spec 16b (pipeline parallel): a view of GPU `device_index` - an explicit index, so
   // the environment is not consulted - inside `primary`'s Level Zero context. Spec 16
   // decision 1 is ONE context holding both devices: every allocation, module, list and
@@ -38,21 +31,19 @@ class Context {
   Context(const Context& primary, uint32_t device_index);
   ~Context();
 
-  // Spec 16b: the GPU devices of the first driver, in the order an index (`--device N`,
-  // the view above) counts them - what `ZE_AFFINITY_MASK` leaves visible. Initialises the
+  // Spec 16b: the GPU devices of the first driver, in the order an index (the view
+  // above) counts them - what `ZE_AFFINITY_MASK` leaves visible. Initialises the
   // driver; no context is created.
   static uint32_t gpu_count();
   // Spec 16b: zeDeviceCanAccessPeer(this view's device, other's device) - whether this
   // device can read and write `other`'s device memory (P4: refused, never assumed).
   bool can_access_peer(const Context& other) const;
 
-  // Parses ONEAPI_DEVICE_SELECTOR: unset or empty and `level_zero:*` mean
-  // device 0 (there is no multi-device execution until P/D disaggregation);
-  // `level_zero:N` means GPU N. Anything else - another backend, a list,
-  // garbage - throws std::runtime_error naming the value and both accepted
-  // forms, rather than silently binding card 0. Pure parse: no driver, no
-  // device, no GPU needed, so it is testable anywhere.
-  static uint32_t device_index_from_env();
+  // The zero-config hardware gate's view (cli/hardware_check.h): every GPU the first driver shows -
+  // what ZE_AFFINITY_MASK leaves visible - read without creating a context.
+  static std::vector<GpuInfo> gpu_infos();
+  // zeDeviceCanAccessPeer(visible GPU a, visible GPU b), without a context.
+  static bool peer_access(uint32_t a, uint32_t b);
 
   Context(const Context&) = delete;
   Context& operator=(const Context&) = delete;
@@ -66,6 +57,7 @@ class Context {
   uint32_t eu_count() const {
     return props_.numSlices * props_.numSubslicesPerSlice * props_.numEUsPerSubslice;
   }
+  uint32_t xe_cores() const { return props_.numSlices * props_.numSubslicesPerSlice; }
   // The device's total memory (zeDeviceGetMemoryProperties' totalSize, summed): the
   // "of <GB>" of Engine::memory_line() and the budget --max-len auto plans against.
   size_t memory_bytes() const;

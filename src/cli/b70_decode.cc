@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "cli/dflash_args.h"   // spec 19c: --spec dflash
+#include "cli/hardware_gate.h"
 #include "cli/k2_decode.h"
 #include "cli/kolibri_decode.h"
 #include "cli/bolt_decode.h"   // spec 25c: Nemotron 3.5 Bolt (nemotron_h_omni over nemotron_h_puzzle)
@@ -735,7 +736,6 @@ int run(int argc, char** argv) {
   // (runtime::kDefaultReserveGb), the lm_head (int8, as b70-serve: spec 9 - loader::LmHeadForm stays the tests'
   // seam for the checkpoint's bf16 head) and the card (card 0 of what Level Zero shows; two cards: 0 and 1).
   const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
-  const uint32_t device = l0::Context::kFromEnv;
   const loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   uint32_t prefill_len = 0, pp_chunk = 0;
   bool bench = false, profile = false, have_n = false, prefill = false;
@@ -939,6 +939,9 @@ int run(int argc, char** argv) {
   if (synthetic && depth == 0)
     throw std::runtime_error("--depth 0 would ingest nothing; --bench and --profile both measure"
                              " a step at a context depth");
+  // The hardware gate (cli/hardware_gate.h): one or two Intel Arc Pro B70s, peer access between two - before
+  // any model file is read. Its card memory is what the fit checks before a device opens plan against.
+  const cli::Hardware hw = cli::hardware_gate();
   // Spec 25c: Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle) runs
   // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
   // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
@@ -958,7 +961,6 @@ int run(int argc, char** argv) {
     ba.repeats = repeats;
     ba.max_len = max_len_arg;
     ba.reserve = mem_reserve;
-    ba.device = device;
     ba.int8_head = true;   // int8 (Decision 18), as every model
     ba.pipe = pipe;
     ba.pp_given = pp_given;
@@ -995,7 +997,7 @@ int run(int argc, char** argv) {
     ka.tg = tg;
     ka.max_len = max_len_arg;
     ka.reserve = mem_reserve;
-    ka.device = device;
+    ka.card_bytes = hw.card_bytes;
     ka.lm_head = lm_head;
     ka.layers = layers;
     ka.pipe = pipe;
@@ -1026,7 +1028,7 @@ int run(int argc, char** argv) {
     qa.tg = tg;
     qa.max_len = max_len_arg;
     qa.reserve = mem_reserve;
-    qa.device = device;
+    qa.card_bytes = hw.card_bytes;
     qa.lm_head = lm_head;
     qa.layers = layers;
     qa.layers_auto = layers_auto;
@@ -1087,7 +1089,6 @@ int run(int argc, char** argv) {
     ka.tg = tg;
     ka.max_len = max_len_arg;
     ka.reserve = mem_reserve;
-    ka.device = device;
     ka.lm_head = lm_head;
     ka.bench_prompt = kBenchPrompt;   // legal K2 ids too (all < 250624)
     ka.bench_prompt_len = kBenchPromptLen;
@@ -1136,6 +1137,20 @@ int run(int argc, char** argv) {
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   }
 
+  // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
+  // pipeline parallel (cli::parallel_auto, from the checkpoint's descriptor before the load).
+  if (pipe.mode == cli::Parallel::Auto) {
+    pipe.devices = cli::parallel_auto(loader::resolve_snapshot(path), max_len_arg, mtp_on, kv_cache, pp_path,
+                                      hw.card_bytes, mem_reserve);
+    if (pipe.on()) {
+      std::fprintf(stderr, "parallel: auto -> pp (the model and the context do not fit one card)\n");
+      if (hw.cards < 2)
+        throw std::runtime_error("--parallel auto: this model at this --max-len does not fit one card and Level Zero "
+                                 "shows one - a shorter --max-len, or both cards visible (ZE_AFFINITY_MASK=0,1)");
+      cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile});
+      if (dflash.on) cli::dflash::check_engine(dflash, true, kv_cache);
+    }
+  }
   // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --parallel 1 goes on below.
   if (pipe.on()) {
     cli::PipelineDecodeArgs pa;
@@ -1161,7 +1176,7 @@ int run(int argc, char** argv) {
     return cli::run_pipeline_decode<StdoutToStderr>(pa);
   }
 
-  l0::Context ctx(device);
+  l0::Context ctx(0u);
   std::fprintf(stderr, "device: %s (%u EUs)\n", ctx.name().c_str(), ctx.eu_count());
 
   loader::LoadedModel model = [&] {

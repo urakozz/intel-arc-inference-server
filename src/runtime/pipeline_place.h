@@ -10,10 +10,11 @@
 //
 // **Load, then place.** loader::load() loads the whole checkpoint onto device 0, as it
 // always has; place_stages() then moves layers [s, layers), the final norm and lm_head to
-// device 1 (allocate there, copy through a bounded host staging buffer, free on device 0)
-// and leaves device 0 with the embedding and layers [0, s). The loader is untouched, every
-// weight on either device is byte-for-byte what a single-card load makes (the copy moves
-// bytes; nothing is re-quantised or re-packed), and placement needs no peer access. The
+// device 1 (allocate there, copy card to card - device 0 writes device 1's memory, the peer
+// access the hardware gate requires - free on device 0) and leaves device 0 with the
+// embedding and layers [0, s). The loader is untouched, every weight on either device is
+// byte-for-byte what a single-card load makes (the copy moves bytes; nothing is re-quantised
+// or re-packed). The
 // cost is the load's peak: device 0 briefly holds the whole model - 18.1 GB on Qwen3.8
 // with its bf16 head, under one card's 32.5 GB for every supported model (spec 16b as
 // built). A model larger than one card needs the loader to place each layer directly

@@ -33,13 +33,6 @@ b70_target_kernel_dir(event_test)
 add_dependencies(event_test kernel_noop)
 add_test(NAME event_test COMMAND event_test)
 
-# The only test here that needs neither a GPU nor a kernel: device_index_from_env
-# is a pure parse of ONEAPI_DEVICE_SELECTOR (doc 04, "Device selection").
-add_executable(device_select_test l0/device_select_test.cc)
-target_include_directories(device_select_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(device_select_test PRIVATE b70_l0)
-add_test(NAME device_select_test COMMAND device_select_test)
-
 # The prefill execution context (spec 2.1 §3.5): the Level Zero list, through
 # b70_prefill_host.
 add_executable(context_test prefill/context_test.cc)

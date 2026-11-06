@@ -294,7 +294,7 @@ int main(int argc, char** argv) {
       throw std::runtime_error("unknown argument " + a);
     }
   }
-  l0::Context ctx(l0::Context::kFromEnv);
+  l0::Context ctx(0u);
   std::printf("probe_vattn_ab on %s; arms:", ctx.name().c_str());
   for (const auto& s : bins) std::printf(" %s", s.c_str());
   std::printf("\n");

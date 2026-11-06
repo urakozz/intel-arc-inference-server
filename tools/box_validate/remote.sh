@@ -63,7 +63,7 @@ fi
 basename "$STATE" > "$RUNS/.current-$DEVICE"
 
 # A run validates the defaults: nothing from the operator's shell may switch a code path.
-unset B70_KV_CACHE B70_PREFILL_PROFILE ONEAPI_DEVICE_SELECTOR
+unset B70_KV_CACHE B70_PREFILL_PROFILE
 export ZE_AFFINITY_MASK="$DEVICE"
 export HOME_R BV_DATA="$DATA" OPENCODE_LOG="${OPENCODE_LOG:-}" A4_REF_DIR="${A4_REF_DIR:-}"
 

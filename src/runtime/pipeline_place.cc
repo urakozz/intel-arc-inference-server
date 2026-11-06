@@ -28,24 +28,18 @@ size_t mtp_head_device_bytes(const loader::MtpHead& h) {
   return t;
 }
 
-// Moves device allocations from device 0 to device 1: allocate on device 1, copy through
-// one USM host staging buffer in bounded chunks (no peer access needed, no full-size host
-// copy of a 2.5 GB lm_head), return the new allocation. The source is freed by its owner.
+// Moves device allocations from device 0 to device 1: allocate on device 1 and copy card to
+// card - device 0's immediate list writes device 1's memory directly (one Level Zero context
+// holds both, and the hardware gate, cli/hardware_check.h, refuses two cards without peer
+// access). The zero-config cleanup replaced the host-staged copy (64 MiB pinned chunks) that
+// needed no peer access. The source is freed by its owner.
 class Mover {
  public:
-  Mover(l0::Context& d0, l0::Context& d1)
-      : d1_(d1),
-        imm0_(l0::CmdList::immediate(d0)),
-        imm1_(l0::CmdList::immediate(d1)),
-        stage_(d0, l0::MemKind::Host, kChunk) {}
+  Mover(l0::Context& d0, l0::Context& d1) : d1_(d1), imm0_(l0::CmdList::immediate(d0)) {}
 
   l0::Mem move(const l0::Mem& src) {
     l0::Mem dst(d1_, l0::MemKind::Device, src.size());
-    for (size_t off = 0; off < src.size(); off += kChunk) {
-      const size_t n = std::min(kChunk, src.size() - off);
-      imm0_.copy(stage_.ptr(), static_cast<const uint8_t*>(src.ptr()) + off, n);
-      imm1_.copy(static_cast<uint8_t*>(dst.ptr()) + off, stage_.ptr(), n);
-    }
+    imm0_.copy(dst.ptr(), src.ptr(), src.size());
     return dst;
   }
   loader::DeviceWeight move(const loader::DeviceWeight& w) {
@@ -63,10 +57,8 @@ class Mover {
   }
 
  private:
-  static constexpr size_t kChunk = size_t{64} << 20;   // 64 MiB of pinned host memory
   l0::Context& d1_;
-  l0::CmdList imm0_, imm1_;
-  l0::Mem stage_;
+  l0::CmdList imm0_;
 };
 
 }  // namespace

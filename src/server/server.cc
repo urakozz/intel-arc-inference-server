@@ -69,7 +69,7 @@ Server::Server(Deps deps, Options opts)
       throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
         opts_.lookup_min_match > impl_->lookup.options().max_match)
-      throw std::invalid_argument("--spec-min-match must be in [2, 64]");
+      throw std::invalid_argument("the lookup minimum match must be in [2, 64]");
   }
   if (opts_.spec_dflash_lookup) {   // spec 19f
     if (opts_.spec_lookup)
