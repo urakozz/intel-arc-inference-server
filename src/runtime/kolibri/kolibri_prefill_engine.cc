@@ -34,17 +34,11 @@
 namespace runtime::kolibri {
 
 struct KolibriPrefillState {
-  struct Chunk {
-    uint32_t pos, rows;
-    std::unique_ptr<prefill::Context::Recording> recording;
-  };
   struct Dev {
     prefill::Context cx;
     prefill::KernelCache kc;
     KolibriPrefillScratch s;
     std::unique_ptr<l0::Mem> tap;   // debug_tap only: [the device's layers][kPfC][hidden] bf16, the last chunk's
-    // Declared after cx / kc / s: recordings are destroyed first.
-    std::vector<Chunk> chunks;
     Dev(l0::Context& c, const model::Kolibri1Desc& d) : cx(c), kc(c), s(c, d) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
@@ -163,8 +157,6 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
   KolibriPrefillState& P = *pf_;
   const bool eager = attn_ == KolAttn::Eager;
-  const char* env = std::getenv("B70_PREFILL_REPLAY");
-  const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
   const uint32_t ndev = devices();
   const uint64_t tmo = P.timeout_ns;
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
@@ -179,19 +171,11 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         fail(std::string("device ") + std::to_string(i) + "'s prefill list did not finish within " +
              std::to_string(opt_.prefill_timeout_ms) + " ms (" + what + ")");
   };
-  // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
+  // One device's walk for a chunk (appended immediately).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     KolibriPrefillState::Dev& D = *P.dev[i];
     auto encode = [&] { prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager, D.tap.get(), tap_at_); };
-    if (!replay) return encode();
-    auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
-                           [&](const KolibriPrefillState::Chunk& c) { return c.pos == pos && c.rows == C; });
-    if (it == D.chunks.end()) {
-      if (D.chunks.size() == 8) D.chunks.erase(D.chunks.begin());   // a FIFO bound on retained lists
-      D.chunks.push_back({pos, C, D.cx.capture(encode)});
-      it = D.chunks.end() - 1;
-    }
-    D.cx.replay(*it->recording);
+    encode();
   };
 
   // Spec 20e's prefix cache: with a block hook every chunk ends at a block end or at the prompt end -
@@ -217,8 +201,8 @@ void KolibriEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
               "the prefill landing buffer does not hold the chunk's rows and exactly its norm sums");
       L.event->host_reset();
       // P4's test hook (drop_next_handoff, decode's): device 0's half of this chunk is not appended - a
-      // hand-off that never arrives. Not under replay (device 1's replay waits without a bound).
-      const bool send = !drop_next_ || replay;
+      // hand-off that never arrives.
+      const bool send = !drop_next_;
       drop_next_ = false;
       if (send) {
         run_dev(0, pos, C);

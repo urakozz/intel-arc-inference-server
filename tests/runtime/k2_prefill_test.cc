@@ -5,8 +5,7 @@
 //   mode `all` (default):
 //     1. the walk: K2Engine::prefill appends prefill_chunk_launches(desc) = 2392 launches per
 //        chunk and the head's 5; the plan's prefill term equals the allocation;
-//     2. K3, determinism and replay, bitwise: two immediate prefills (reset between) and two
-//        RECORDED ones (set_prefill_replay: B70_PREFILL_REPLAY's path) leave the same KV rows of
+//     2. K3, determinism, bitwise: two immediate prefills (reset between) leave the same KV rows of
 //        every layer, last logits and last-chunk route rows - no sum is atomic, the expert sums
 //        are in fixed ascending-id order, a grouped GEMM row does not depend on its tile;
 //     3. chunking: chunks of 64 against the default chunk - KV and logits bitwise, the route
@@ -263,21 +262,12 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
               runtime::k2::prefill_sizes(d).total() / 1e9, e.memory_line().c_str());
   const Snap a = snap(e, imm, n, true);
 
-  // ---- 2. determinism and replay -------------------------------------------------------
+  // ---- 2. determinism --------------------------------------------------------------
   e.reset();
   e.prefill(prompt);
   const bool same = snap(e, imm, n, true) == a;
-  e.set_prefill_replay(true);
-  e.reset();
-  e.prefill(prompt);   // records
-  const bool rec1 = snap(e, imm, n, true) == a;
-  e.reset();
-  e.prefill(prompt);   // replays the recordings
-  const bool rec2 = snap(e, imm, n, true) == a;
-  e.set_prefill_replay(false);
-  std::printf("2. K3: immediate twice %s; recorded %s, replayed %s\n", same ? "bitwise" : "DIFFERS",
-              rec1 ? "bitwise" : "DIFFERS", rec2 ? "bitwise" : "DIFFERS");
-  ok = ok && same && rec1 && rec2;
+  std::printf("2. K3: immediate twice %s\n", same ? "bitwise" : "DIFFERS");
+  ok = ok && same;
 
   // ---- 3. chunking -----------------------------------------------------------------------
   {

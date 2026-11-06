@@ -1124,10 +1124,6 @@ int run(int argc, char** argv) {
   runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
-    const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
-    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
-  }
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --pp's refusals are argument-only, so they come before the device too.

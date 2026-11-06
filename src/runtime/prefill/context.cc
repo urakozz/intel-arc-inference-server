@@ -100,8 +100,6 @@ struct Context::Impl {
   ze_command_list_handle_t list;
   size_t launches = 0;
   std::unique_ptr<LaunchProfiler> profiler;
-  Recording* recording = nullptr;  // non-owning, only during capture callback
-  ze_command_queue_handle_t replay_queue = nullptr;
   // Spec 16c: timestamp()'s clock, read on first use (0 = not yet).
   mutable double ts_hz = 0;
   mutable uint64_t ts_mask = 0;
@@ -133,16 +131,11 @@ Context::~Context() {
   if (!p_) return;
   // Keep timestamp events alive until any pending launches have finished.
   zeCommandListHostSynchronize(p_->list, UINT64_MAX);
-  if (p_->replay_queue) {
-    zeCommandQueueSynchronize(p_->replay_queue, UINT64_MAX);
-    zeCommandQueueDestroy(p_->replay_queue);
-  }
   zeCommandListDestroy(p_->list);
   delete p_;
 }
 
 void Context::wait() {
-  if (p_->recording) throw std::runtime_error("prefill capture: wait inside recording");
   zc(zeCommandListHostSynchronize(p_->list, UINT64_MAX), "zeCommandListHostSynchronize");
 }
 
@@ -152,8 +145,6 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
   const auto begin = p_->profiler ? Clock::now() : Clock::time_point{};
   if (p_->profiler && signal)
     throw std::runtime_error("prefill profile: explicit signal event conflicts with profiling");
-  if (p_->recording && signal)
-    throw std::runtime_error("prefill capture: explicit signal event is unsupported");
   uint32_t i = 0;
   for (const KernelArg& a : args) {
     const ze_result_t r = zeKernelSetArgumentValue(k, i, a.size, a.ptr);
@@ -179,8 +170,7 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
   ze_group_count_t g{gx, gy, gz};
   ze_event_handle_t event = p_->profiler ? p_->profiler->next()
                                        : signal ? signal->handle() : nullptr;
-  const auto target = p_->recording ? p_->recording->list_ : p_->list;
-  zc(zeCommandListAppendLaunchKernel(target, k, &g, event, 0,
+  zc(zeCommandListAppendLaunchKernel(p_->list, k, &g, event, 0,
                                      nullptr),
      "zeCommandListAppendLaunchKernel");
   if (p_->profiler) {
@@ -189,12 +179,10 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
     p_->profiler->metrics.host_submit_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
   }
-  if (p_->recording) ++p_->recording->launches_;
-  else ++p_->launches;
+  ++p_->launches;
 }
 
 void Context::copy(void* dst, const void* src, size_t bytes) {
-  if (p_->recording) throw std::runtime_error("prefill capture: copy inside recording");
   if (bytes <= common::kMaxCopyChunk) {
     zc(zeCommandListAppendMemoryCopy(p_->list, dst, src, bytes, nullptr, 0, nullptr),
        "zeCommandListAppendMemoryCopy");
@@ -210,7 +198,6 @@ void Context::copy(void* dst, const void* src, size_t bytes) {
 
 void Context::copy_2d(void* dst, size_t dst_pitch, const void* src, size_t src_pitch, size_t width,
                       size_t rows) {
-  if (p_->recording) throw std::runtime_error("prefill capture: copy_2d inside recording");
   if (rows == 0) return;
   if (width > dst_pitch || width > src_pitch || dst_pitch > UINT32_MAX || src_pitch > UINT32_MAX ||
       rows > UINT32_MAX)
@@ -222,23 +209,19 @@ void Context::copy_2d(void* dst, size_t dst_pitch, const void* src, size_t src_p
 }
 
 void Context::signal(ze_event_handle_t e) {
-  if (p_->recording) throw std::runtime_error("prefill capture: signal inside recording");
   zc(zeCommandListAppendBarrier(p_->list, e, 0, nullptr), "zeCommandListAppendBarrier (signal)");
 }
 
 void Context::wait_event(ze_event_handle_t e) {
-  if (p_->recording) throw std::runtime_error("prefill capture: wait_event inside recording");
   zc(zeCommandListAppendWaitOnEvents(p_->list, 1, &e), "zeCommandListAppendWaitOnEvents");
 }
 
 void Context::timestamp(uint64_t* dst) {
-  if (p_->recording) throw std::runtime_error("prefill capture: timestamp inside recording");
   zc(zeCommandListAppendWriteGlobalTimestamp(p_->list, dst, nullptr, 0, nullptr),
      "zeCommandListAppendWriteGlobalTimestamp");
 }
 
 bool Context::wait_for(uint64_t timeout_ns) {
-  if (p_->recording) throw std::runtime_error("prefill capture: wait inside recording");
   const ze_result_t r = zeCommandListHostSynchronize(p_->list, timeout_ns);
   if (r == ZE_RESULT_NOT_READY) return false;
   zc(r, "zeCommandListHostSynchronize (bounded)");
@@ -278,50 +261,6 @@ Context::LaunchMetrics Context::take_launch_metrics() {
   const auto metrics = p_->profiler->metrics;
   p_->profiler->metrics = {};
   return metrics;
-}
-
-Context::Recording::~Recording() {
-  if (list_) zeCommandListDestroy(list_);
-}
-
-std::unique_ptr<Context::Recording> Context::capture(const std::function<void()>& encode) {
-  if (p_->recording || p_->profiler)
-    throw std::runtime_error("prefill capture: requires an unprofiled, non-recording L0 context");
-  wait();
-  auto recording = std::unique_ptr<Recording>(new Recording(this));
-  ze_command_list_desc_t desc{};
-  desc.stype = ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC;
-  desc.commandQueueGroupOrdinal = 0;
-  desc.flags = ZE_COMMAND_LIST_FLAG_IN_ORDER;
-  zc(zeCommandListCreate(p_->ctx, p_->dev, &desc, &recording->list_), "capture list create");
-  p_->recording = recording.get();
-  try {
-    encode();
-    zc(zeCommandListClose(recording->list_), "capture list close");
-  } catch (...) {
-    p_->recording = nullptr;
-    throw;
-  }
-  p_->recording = nullptr;
-  return recording;
-}
-
-void Context::replay(const Recording& recording) {
-  if (recording.owner_ != this || p_->recording || p_->profiler)
-    throw std::runtime_error("prefill replay: requires its owning, unprofiled L0 context");
-  wait();
-  if (!p_->replay_queue) {
-    ze_command_queue_desc_t desc{};
-    desc.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC;
-    desc.ordinal = 0;
-    desc.mode = ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS;
-    desc.priority = ZE_COMMAND_QUEUE_PRIORITY_NORMAL;
-    zc(zeCommandQueueCreate(p_->ctx, p_->dev, &desc, &p_->replay_queue), "replay queue create");
-  }
-  auto list = recording.list_;
-  zc(zeCommandQueueExecuteCommandLists(p_->replay_queue, 1, &list, nullptr), "replay execute");
-  zc(zeCommandQueueSynchronize(p_->replay_queue, UINT64_MAX), "replay synchronize");
-  p_->launches += recording.launches_;
 }
 
 }  // namespace runtime::prefill

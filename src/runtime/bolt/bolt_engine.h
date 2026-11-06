@@ -134,9 +134,6 @@ class BoltEngine {
   // Allocates every device's prefill scratch, Context and (two devices) the prefill link, and checks every binary the walk
   // and the head bind exists (naming a missing one); prefill() calls it. A CLI calls it before timing the first prefill.
   void prepare_prefill();
-  // B70_PREFILL_REPLAY's arrangement (Kolibri's): record each chunk's list once per (pos, rows) and device and replay it;
-  // the hand-off's copies and event stay on the immediate lists (never inside a recording; no taps under replay).
-  void set_prefill_replay(bool enabled) { pf_replay_ = enabled ? 1 : 0; }
   // Launches every device's prefill Context has appended since it was made (0 before the first prefill).
   size_t prefill_launches() const;
   size_t prefill_launches(uint32_t dev) const;
@@ -210,7 +207,6 @@ class BoltEngine {
   // prefill symbol. pf_dev_bytes_: each device's prefill scratch + prefill link, for memory_use().
   std::vector<size_t> pf_dev_bytes_;
   size_t pf_bytes_ = 0;
-  int pf_replay_ = -1;   // -1: B70_PREFILL_REPLAY decides
   std::unique_ptr<BoltPrefillState, void (*)(BoltPrefillState*)> pf_{nullptr, nullptr};
 };
 

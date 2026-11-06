@@ -1067,7 +1067,7 @@ int run(int argc, char** argv) {
   if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
-  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, {}, false, /*pipeline_served=*/true,
+  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
                             pipe.handoff == runtime::PpHandoff::Peer);
   if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the --pp 2 adapter has none
     throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --pp 2 serves --spec dflash");
@@ -1219,22 +1219,15 @@ int run(int argc, char** argv) {
 
   runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
-  {   // spec 19c: the drafter's prefill refusals, before the device (cli/dflash_args.h)
-    const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
-    cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1",
-                              /*pipeline_served=*/true, pipe.handoff == runtime::PpHandoff::Peer);
-  }
 
   // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
-  // without --pp 2, --device, the composed attention, prefill replay and
-  // profiling - before the snapshot is even resolved; the model's own follow below.
+  // without --pp 2, --device and prefill profiling - before the snapshot is even resolved;
+  // the model's own follow below.
   cli::ServePipelineContext pipe_ctx;
   pipe_ctx.device = device != l0::Context::kFromEnv;
   pipe_ctx.mtp = mtp_k > 0 || mtp_auto || spec_lookup;
   {
-    const char* replay = std::getenv("B70_PREFILL_REPLAY");
     const char* profile = std::getenv("B70_PREFILL_PROFILE");
-    pipe_ctx.prefill_replay = replay != nullptr && std::string(replay) == "1";
     pipe_ctx.prefill_profile = profile != nullptr && std::string(profile) == "1";
   }
   cli::check_serve_pipeline(pipe, pipe_ctx);

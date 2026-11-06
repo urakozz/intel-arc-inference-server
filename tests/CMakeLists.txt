@@ -898,7 +898,7 @@ set(B70_PREFILL_KERNELS
 # The three spec 2 §6 gates. `tests/golden` is on the include path for
 # golden_common.h -- the decode gate's machinery, extracted verbatim, so the
 # prefill gate grades on the same code rather than on a copy of it.
-foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay prefill_int8)
+foreach(t prefill_gate prefill_consistency prefill_determinism prefill_int8)
   add_executable(${t}_test prefill/${t}_test.cc)
   target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
@@ -910,7 +910,7 @@ endforeach()
 #   finite; flash-vs-composed printed as information. A 32k CPU oracle
 #   (tools/oracle/last_logits.py) measured 11359 s to reach 8192 ids, so it is not part of the
 #   suite; given one, `flash_long_test ... <file>` applies the bar at depth. Its `--128k <ids>`
-#   mode (K3b, determinism and replay at max_len 131072) is run by hand. (flash_vs_oracle_test,
+#   mode (K3b, determinism at max_len 131072) is run by hand. (flash_vs_oracle_test,
 #   K3a's golden-set bar, ran the gate under B70_PREFILL_ATTN=composed; it went with the variable
 #   in the zero-config cleanup, its bar long met.)
 add_executable(flash_long_test prefill/flash_long_test.cc)
@@ -950,11 +950,8 @@ add_dependencies(snapshot_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS}
 add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
-add_test(NAME prefill_replay_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
-set_tests_properties(prefill_replay_test PROPERTIES LABELS "checkpoint;prefill"
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-# Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0, replay
-# bitwise against immediate, and the l0 + 256 launch delta. The int8 kernels are in
+# Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0 and the
+# l0 + 256 launch delta. The int8 kernels are in
 # B70_PREFILL_KERNELS above.
 add_test(NAME prefill_int8_test COMMAND prefill_int8_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_int8_test PROPERTIES LABELS "checkpoint;prefill"
@@ -1696,7 +1693,7 @@ if(B70_KV8)
   endmacro()
 
   foreach(exe replay_determinism_test engine_smoke_test golden_gate_test prefill_gate_test
-              prefill_determinism_test prefill_consistency_test prefill_replay_test snapshot_test
+              prefill_determinism_test prefill_consistency_test snapshot_test
               flash_long_test memory_plan_box_test mtp_verify_test mtp_gpu_test prefix_gpu_test)
     if(TARGET ${exe})
       add_dependencies(${exe} ${B70_KV8_KERNELS})
@@ -1735,8 +1732,6 @@ if(B70_KV8)
   add_test(NAME prefill_consistency_l0_kv8_test COMMAND prefill_consistency_test
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
   b70_kv8_twin(prefill_consistency_l0)
-  add_test(NAME prefill_replay_kv8_test COMMAND prefill_replay_test ${B70_TEST_SNAPSHOT})
-  b70_kv8_twin(prefill_replay)
   add_test(NAME snapshot_kv8_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
   b70_kv8_twin(snapshot)
   add_test(NAME memory_plan_box_kv8_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT})

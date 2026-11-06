@@ -625,10 +625,6 @@ void PipelineEngine::prepare_prefill() {
   if (prefill::attn_mode() != prefill::AttnMode::Flash)
     throw std::runtime_error("--pp 2 prefills with the flash attention only: "
                              "the composed reference has no two-card walk (spec 16c)");
-  const char* replay = std::getenv("B70_PREFILL_REPLAY");
-  if (replay && std::strcmp(replay, "1") == 0)
-    throw std::runtime_error("--pp 2 has no prefill replay (B70_PREFILL_REPLAY=1): the "
-                             "recordings are one card's walk (spec 16c)");
   if (prefill::profile_enabled())
     throw std::runtime_error("--pp 2 prefill is not profiled (B70_PREFILL_PROFILE=1): the "
                              "phase waits would serialise the pipeline; each device's busy time "

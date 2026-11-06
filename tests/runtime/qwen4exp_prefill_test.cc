@@ -13,8 +13,7 @@
 //     1. the walk: every chunk's launches are prefill_chunk_launches(desc, placement, pos, C) (they depend on its dense
 //        / sparse rows), the head's kPrefillHeadLaunches; the plan's prefill term (prefill_sizes + the prefill link)
 //        equals the allocation, per device;
-//     2. F4, determinism and replay, bitwise: two immediate prefills (reset between) and two RECORDED ones
-//        (set_prefill_replay: B70_PREFILL_REPLAY's path) leave the same state of every layer (KV, the compressed keys
+//     2. F4, determinism, bitwise: two immediate prefills (reset between) leave the same state of every layer (KV, the compressed keys
 //        and tail rings, the GDN state and conv rings, the PLE rings), the last chunk's route rows and selections, the
 //        last logits and the first token - no sum is atomic, the sort is one work-group, the combine is decode's;
 //     3. chunking: chunks of 64 against the default chunk - every layer's state, logits, the first token BITWISE (the
@@ -335,21 +334,12 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   const Snap a = snap(e, true);
   const std::vector<float> pf_scores = e.read_prefill_last_qsa_scores();   // the last chunk's rows, the last QSA layer
 
-  // ---- 2. determinism and replay ---------------------------------------------------------------------------------
+  // ---- 2. determinism ----------------------------------------------------------------------------------------
   e.reset();
   e.prefill(prompt);
   const bool same = snap(e, true) == a;
-  e.set_prefill_replay(true);
-  e.reset();
-  e.prefill(prompt);   // records
-  const bool rec1 = snap(e, true) == a;
-  e.reset();
-  e.prefill(prompt);   // replays the recordings
-  const bool rec2 = snap(e, true) == a;
-  e.set_prefill_replay(false);
-  std::printf("2. F4: immediate twice %s; recorded %s, replayed %s\n", same ? "bitwise" : "DIFFERS", rec1 ? "bitwise" : "DIFFERS",
-              rec2 ? "bitwise" : "DIFFERS");
-  ok = ok && same && rec1 && rec2;
+  std::printf("2. F4: immediate twice %s\n", same ? "bitwise" : "DIFFERS");
+  ok = ok && same;
 
   // ---- 3. chunking ------------------------------------------------------------------------------------------------
   {
@@ -580,13 +570,9 @@ int run_pp(const std::string& snap_dir, qwen4exp_rig::Options o, const Ids& prom
   const Snap b = snap(e, false);
   const runtime::Control c0 = e.control(0), c1 = e.control(1);
   const bool same = b.state_equal(a) && std::memcmp(&c0, &c1, sizeof c0) == 0;
-  e.set_prefill_replay(true);
   e.reset();
   e.prefill(prompt);
-  e.reset();
-  e.prefill(prompt);
-  const bool rep = snap(e, false).state_equal(a);
-  e.set_prefill_replay(false);
+  const bool rep = snap(e, false).state_equal(a);   // a second prefill (the recorded arm went with prefill replay)
   e.reset();
   e.prefill(Ids(prompt.begin(), prompt.begin() + 2051));
   e.prefill(Ids(prompt.begin() + 2051, prompt.end()));
@@ -595,7 +581,7 @@ int run_pp(const std::string& snap_dir, qwen4exp_rig::Options o, const Ids& prom
   e.prefill(prompt, 64);
   const bool c64 = snap(e, false).state_equal(a64);
   std::printf("pp: split %u, launches %zu + %zu = prefill_device_launches'; --pp 2 == --pp 1: one prefill %s (Controls "
-              "mirrored %s), replayed %s, 2051 + rest %s, chunks of 64 %s\n", e.split(), w0, w1,
+              "mirrored %s), again %s, 2051 + rest %s, chunks of 64 %s\n", e.split(), w0, w1,
               b.state_equal(a) ? "bitwise" : "DIFFERS", std::memcmp(&c0, &c1, sizeof c0) == 0 ? "equal" : "DIFFER",
               rep ? "bitwise" : "DIFFERS", split ? "bitwise" : "DIFFERS", c64 ? "bitwise" : "DIFFERS");
   ok = ok && same && rep && split && c64;

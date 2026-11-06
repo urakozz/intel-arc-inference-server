@@ -3,8 +3,7 @@
 //
 //   1. the walk: Engine::prefill appends step_chunk_launches(desc, backend, C) per chunk
 //      and step_head's 5 - Ornith's chunk, MoE blocks included, as derived in step.cc;
-//   2. determinism and replay, bitwise: two immediate prefills, and two recorded
-//      (B70_PREFILL_REPLAY's path), leave the same GDN state, conv ring, KV rows, last
+//   2. determinism, bitwise: two immediate prefills leave the same GDN state, conv ring, KV rows, last
 //      logits and every layer's prefill route rows - the expert sum is in fixed slot order,
 //      no sum is atomic, and a row's GEMM result does not depend on its tile neighbours;
 //   3. chunking: the prompt prefilled in chunks of 64 and in one chunk - bitwise the same
@@ -233,27 +232,16 @@ int main(int argc, char** argv) {
                 runtime::prefill_backend_name(backend));
   }
 
-  // ---- 2. determinism and replay --------------------------------------------------------
+  // ---- 2. determinism ---------------------------------------------------------------
   State ref;
   {
-    eng.set_prefill_replay(false);
     eng.reset();
     eng.prefill(prose);
     ref = capture(eng, imm, n);
     eng.reset();
     eng.prefill(prose);
     CHECK(capture(eng, imm, n) == ref);
-    eng.set_prefill_replay(true);
-    for (int rep = 0; rep < 2; ++rep) {
-      eng.reset();
-      eng.prefill(prose);
-      if (!(capture(eng, imm, n) == ref)) {
-        std::fprintf(stderr, "recorded prefill %d differs from the immediate one\n", rep);
-        return 1;
-      }
-    }
-    eng.set_prefill_replay(false);
-    std::printf("2. determinism: two immediate and two recorded prefills of %u ids bitwise equal "
+    std::printf("2. determinism: two immediate prefills of %u ids bitwise equal "
                 "(state, KV, logits, every layer's routes)\n", n);
   }
 

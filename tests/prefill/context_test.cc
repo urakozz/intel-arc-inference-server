@@ -145,49 +145,6 @@ int main() {
   cx.wait();
   CHECK_EQ(cx.take_launch_metrics().launches, size_t{0});
 
-  // Recording must freeze scalar arguments, not buffer contents; capture is
-  // not execution, and later immediate launches must not mutate the recording.
-  imm.fill(buf.ptr(), 0u, buf.size());
-  cx.reset_launches();
-  auto recorded = cx.capture([&] {
-    for (uint32_t step = 1; step <= 300; ++step)
-      cx.launch(chain_k, kN / 256, 1, 1,
-                {runtime::prefill::PtrArg(buf.ptr()), runtime::prefill::arg_val(kN),
-                 runtime::prefill::arg_val(step)});
-  });
-  CHECK_EQ(cx.launches(), size_t{0});
-  imm.copy(host.data(), buf.ptr(), buf.size());
-  for (auto value : host) CHECK_EQ(value, 0u);
-  cx.replay(*recorded);
-  CHECK_EQ(cx.launches(), size_t{300});
-  imm.copy(host.data(), buf.ptr(), buf.size());
-  for (auto value : host) CHECK_EQ(value, 45150u);
-  imm.fill(buf.ptr(), 7u, buf.size());
-  cx.launch(chain_k, kN / 256, 1, 1,
-            {runtime::prefill::PtrArg(buf.ptr()), runtime::prefill::arg_val(kN),
-             runtime::prefill::arg_val(11u)});
-  cx.replay(*recorded);  // orders pending immediate work before regular-list work
-  imm.copy(host.data(), buf.ptr(), buf.size());
-  for (auto value : host) CHECK_EQ(value, 45168u);
-  CHECK_EQ(cx.launches(), size_t{601});
-  for (int misuse = 0; misuse < 2; ++misuse) {
-    bool threw = false;
-    try {
-      auto invalid = cx.capture([&] {
-        if (misuse == 0) cx.wait();
-        if (misuse == 1) (void)cx.capture([] {});
-      });
-    } catch (const std::exception&) { threw = true; }
-    CHECK(threw);
-    cx.wait();  // a failed capture must restore the immediate path
-  }
-  cx.set_profiling(true);
-  bool profile_capture_threw = false;
-  try { (void)cx.capture([] {}); }
-  catch (const std::exception&) { profile_capture_threw = true; }
-  CHECK(profile_capture_threw);
-  cx.set_profiling(false);
-
   // --- misuse is loud -------------------------------------------------------
   // One argument too many: the driver rejects index 3 on a three-argument
   // kernel and the throw names the kernel and the index, not just a hex code.

@@ -19,7 +19,6 @@
 //                          only (--pipeline-handoff peer: device 0's taps are copies into device 1 that only the
 //                          copy hand-off's event orders)
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
-//   B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
 #include <cstdint>
@@ -60,16 +59,11 @@ inline void check_flags(const Args& a) {
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
 
-// The engine's refusals (see the header). `path` / `prefill_replay` (B70_PREFILL_REPLAY=1): what
-// Engine::prefill would otherwise refuse per request, after the load - the drafter's prefill taps are copies on the
-// L0 list, which a recorded chunk cannot hold. Spec 19d: `pipeline_served` - the caller serves
-// --pp 2 with the drafter (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
-inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, const runtime::PrefillPath& path = {},
-                         bool prefill_replay = false, bool pipeline_served = false, bool peer = false) {
+// The engine's refusals (see the header). Spec 19d: `pipeline_served` - the caller serves --pp 2 with the drafter
+// (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
+inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, bool pipeline_served = false,
+                         bool peer = false) {
   if (!a.on) return;
-  if (path.prefill && prefill_replay)
-    throw std::runtime_error("--spec dflash: the drafter's prefill taps are copies, which a recorded chunk cannot "
-                             "hold - unset B70_PREFILL_REPLAY");
   if (pipeline && !pipeline_served)
     throw std::runtime_error("b70-decode --spec dflash runs on one card (b70-serve --pp 2 --spec dflash serves the "
                              "drafter beside a split target): drop --pp 2");

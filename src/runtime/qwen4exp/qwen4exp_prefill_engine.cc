@@ -33,19 +33,12 @@
 namespace runtime::qwen4exp {
 
 struct Qwen4ExpPrefillState {
-  struct Chunk {
-    uint32_t pos, rows;
-    bool injected;
-    std::unique_ptr<prefill::Context::Recording> recording;
-  };
   struct Dev {
     prefill::Context cx;
     prefill::KernelCache kc;
     Qwen4ExpPrefillScratch s;
     std::unique_ptr<l0::Mem> inj;   // host USM [qsa layers][kPfC][kListRow]: the injected rows (lazy)
     std::unique_ptr<l0::Mem> mtp_R;   // spec 21e, the last device with the MTP head: the head pass's R rows
-    // Declared after cx / kc / s: recordings are destroyed first.
-    std::vector<Chunk> chunks;
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len) : cx(c), kc(c), s(c, d, max_len) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
@@ -199,8 +192,6 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     mp.single = mtp_norm_ == MtpNorm::Single;
   }
   const bool eager = attn_ == Q4Attn::Eager;
-  const char* env = std::getenv("B70_PREFILL_REPLAY");
-  const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
   const uint32_t ndev = devices();
   const uint64_t tmo = P.timeout_ns;
   const bool inj = injected_;
@@ -222,23 +213,14 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         fail(std::string("device ") + std::to_string(i) + "'s prefill list did not finish within " +
              std::to_string(opt_.prefill_timeout_ms) + " ms (" + what + ")");
   };
-  // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY).
+  // One device's walk for a chunk (appended immediately).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C) {
     Qwen4ExpPrefillState::Dev& D = *P.dev[i];
     auto encode = [&] {
       prefill_chunk(D.cx, D.kc, D.s, model_, model_.parts[i], stage_buffers(i), pos, C, eager, inj ? D.inj.get() : nullptr,
                     ndev == 2, mtp_ && i + 1 == ndev ? &mp : nullptr);
     };
-    if (!replay) return encode();
-    auto it = std::find_if(D.chunks.begin(), D.chunks.end(), [&](const Qwen4ExpPrefillState::Chunk& c) {
-      return c.pos == pos && c.rows == C && c.injected == inj;
-    });
-    if (it == D.chunks.end()) {
-      if (D.chunks.size() == 8) D.chunks.erase(D.chunks.begin());   // a FIFO bound on retained lists
-      D.chunks.push_back({pos, C, inj, D.cx.capture(encode)});
-      it = D.chunks.end() - 1;
-    }
-    D.cx.replay(*it->recording);
+    encode();
   };
 
   // Spec 21e's prefix cache: with a block hook every chunk ends at a block end or at the prompt end - Engine::prefill's
@@ -275,8 +257,8 @@ void Qwen4ExpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
               "the prefill landing buffer does not hold the chunk's H rows (and no norm sums)");
       L.event->host_reset();
       // P4's test hook (drop_next_handoff, decode's): device 0's half of this chunk is not appended - a hand-off that
-      // never arrives. Not under replay (device 1's replay waits without a bound).
-      const bool send = !drop_next_ || replay;
+      // never arrives.
+      const bool send = !drop_next_;
       drop_next_ = false;
       if (send) {
         run_dev(0, pos, C);

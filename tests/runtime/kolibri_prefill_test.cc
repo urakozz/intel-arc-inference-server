@@ -11,8 +11,7 @@
 //   mode `all` (default; one card, or two with pp2):
 //     1. the walk: prefill_chunk_launches(desc, placement) per chunk (2 + 45 x layers) and the head's 5;
 //        the plan's prefill term (prefill_sizes + the prefill link) equals the allocation, per device;
-//     2. K3, determinism and replay, bitwise: two immediate prefills (reset between) and two RECORDED ones
-//        (set_prefill_replay: B70_PREFILL_REPLAY's path) leave the same KV rows of every full layer, the
+//     2. K3, determinism, bitwise: two immediate prefills (reset between) leave the same KV rows of every full layer, the
 //        ring of every sliding layer, the last logits, the last chunk's route rows and the first token -
 //        no sum is atomic, the combine is ascending-id, a grouped GEMM row does not depend on its tile;
 //     3. chunking: chunks of 16 against the default chunk - KV, rings, logits and the first token bitwise
@@ -219,21 +218,12 @@ int run_all(rk::KolibriEngine& e, const Ids& prompt) {
               rk::prefill_sizes(d).total() / 1e9, e.memory_line().c_str());
   const Snap a = snap(e, n, true);
 
-  // ---- 2. determinism and replay ---------------------------------------------------------------
+  // ---- 2. determinism ----------------------------------------------------------------------
   e.reset();
   e.prefill(prompt);
   const bool same = snap(e, n, true) == a;
-  e.set_prefill_replay(true);
-  e.reset();
-  e.prefill(prompt);   // records
-  const bool rec1 = snap(e, n, true) == a;
-  e.reset();
-  e.prefill(prompt);   // replays the recordings
-  const bool rec2 = snap(e, n, true) == a;
-  e.set_prefill_replay(false);
-  std::printf("2. K3: immediate twice %s; recorded %s, replayed %s\n", same ? "bitwise" : "DIFFERS",
-              rec1 ? "bitwise" : "DIFFERS", rec2 ? "bitwise" : "DIFFERS");
-  ok = ok && same && rec1 && rec2;
+  std::printf("2. K3: immediate twice %s\n", same ? "bitwise" : "DIFFERS");
+  ok = ok && same;
 
   // ---- 3. chunking --------------------------------------------------------------------------------
   {
@@ -371,13 +361,9 @@ int run_pp(kolibri_rig::Rig& rig, const std::string& snapdir, kolibri_rig::Optio
       CHECK(std::memcmp(&c0, &c1, sizeof c0) == 0);   // the mirror after the head
       for (uint32_t i = 0; i < 2; ++i) std::printf("   device %u: %zu prefill launches\n", i, e.prefill_launches(i));
     }
-    e.set_prefill_replay(true);
     e.reset();
     e.prefill(ids);
-    e.reset();
-    e.prefill(ids);
-    r.rep = snap(e, n, true);
-    e.set_prefill_replay(false);
+    r.rep = snap(e, n, true);   // a second immediate prefill (the recorded arm went with prefill replay)
     e.reset();
     e.prefill(Ids(ids.begin(), ids.begin() + 1000));
     e.prefill(Ids(ids.begin() + 1000, ids.end()));

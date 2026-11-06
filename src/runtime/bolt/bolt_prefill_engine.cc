@@ -32,16 +32,10 @@
 namespace runtime::bolt {
 
 struct BoltPrefillState {
-  struct Chunk {
-    uint32_t pos, rows;
-    std::unique_ptr<prefill::Context::Recording> recording;
-  };
   struct Dev {
     prefill::Context cx;
     prefill::KernelCache kc;
     BoltPrefillScratch s;
-    // Declared after cx / kc / s: recordings are destroyed first.
-    std::vector<Chunk> chunks;
     Dev(l0::Context& c, const model::BoltDesc& d) : cx(c), kc(c), s(c, d) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
@@ -173,8 +167,6 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
   BoltPrefillState& P = *pf_;
   const bool eager = attn_ == BoltAttn::Eager;
-  const char* env = std::getenv("B70_PREFILL_REPLAY");
-  const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
   const uint64_t tmo = P.timeout_ns;
   const auto set_ctl = [&](uint32_t pos, uint32_t n) {
     for (uint32_t i = 0; i < ndev; ++i) {
@@ -191,24 +183,16 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   // Where each device's walk takes and leaves h (its PrefillResid): a function of the placement alone (the walk asserts it).
   const PrefillResid in1 = prefill_resid_in(d, model_.place, 1);
   const PrefillResid last = prefill_resid_out(d, model_.place, ndev - 1);
-  // One device's walk for a chunk: immediately, or through its recording (B70_PREFILL_REPLAY). The tap (debug) is written
+  // One device's walk for a chunk (appended immediately). The tap (debug) is written
   // on the last chunk only and never under a recording (a copy is not recordable).
   const auto run_dev = [&](uint32_t i, uint32_t pos, uint32_t C, bool last_chunk) {
     BoltPrefillState::Dev& D = *P.dev[i];
-    l0::Mem* tap = !replay && last_chunk ? taps_[i].get() : nullptr;
+    l0::Mem* tap = last_chunk ? taps_[i].get() : nullptr;
     auto encode = [&] {
       prefill_chunk(D.cx, D.kc, D.s, model_.parts[i], d, stage_buffers(i), pos, C, eager,
                     prefill_resid_in(d, model_.place, i), tap);
     };
-    if (!replay) return encode();
-    auto it = std::find_if(D.chunks.begin(), D.chunks.end(),
-                           [&](const BoltPrefillState::Chunk& c) { return c.pos == pos && c.rows == C; });
-    if (it == D.chunks.end()) {
-      if (D.chunks.size() == 8) D.chunks.erase(D.chunks.begin());   // a FIFO bound on retained lists
-      D.chunks.push_back({pos, C, D.cx.capture(encode)});
-      it = D.chunks.end() - 1;
-    }
-    D.cx.replay(*it->recording);
+    encode();
   };
 
   const bool hooked = static_cast<bool>(block_hook_);
@@ -234,8 +218,8 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
               "the prefill landing buffer does not hold the chunk's rows and its pending GEMM rows");
       L.event->host_reset();
       // P4's test hook (drop_next_handoff, decode's): device 0's half of this chunk is not appended - a hand-off that
-      // never arrives. Not under replay (device 1's replay waits without a bound).
-      const bool send = !drop_next_ || replay;
+      // never arrives.
+      const bool send = !drop_next_;
       drop_next_ = false;
       if (send) {
         run_dev(0, pos, C, last_chunk);
@@ -283,7 +267,7 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   {
     BoltPrefillState::Dev& D = *P.dev[ndev - 1];
     prefill_head(D.cx, D.kc, D.s, model_.parts[ndev - 1], d, stage_buffers(ndev - 1), C - 1, last, model_.int8_head,
-                 replay ? nullptr : taps_[ndev - 1].get());
+                 taps_[ndev - 1].get());
     if (!D.cx.wait_for(tmo))
       fail("device " + std::to_string(ndev - 1) + "'s prefill head did not finish within " +
            std::to_string(opt_.prefill_timeout_ms) + " ms");
