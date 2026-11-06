@@ -7,8 +7,25 @@ everything here assumes it, and a few of the consequences are worth writing
 down.
 
 Since 2026-11-03 the box is also *the check*: there is no Mac-side build or test run any
-more (`tools/mac_check.sh` was retired). Everything on the box lives under `~/b70`
-(trees, logs, data, trash), and nothing sits at the top level of the home directory.
+more (`tools/mac_check.sh` was retired). New things on the box go under `~/b70`, and nothing new
+sits at the top level of the home directory:
+
+| path | what |
+|---|---|
+| `~/b70/trees/<name>` | a branch's tree (every branch but main, `tools/box_dir.sh`) |
+| `~/b70/logs/<topic>/` | logs: box_check, probes (`tools/probe/detach.sh` makes the directory), benchmarks, CPU jobs |
+| `~/b70/scripts/` | the operator's and the chains' scripts |
+| `~/b70/scratch/`, `~/b70/models/` | probe captures; local model folders that are not in the HF cache |
+| `~/b70/hdd`, `~/b70/hdd3` | the cold and archive disks ("Model storage" below) |
+| `~/b70/trash/<date>/` | what is no longer needed: `mv` it here, the operator runs `rm` |
+
+Still at the top level until one box session moves them (they are in use by every
+validation run): the base tree `~/b70-inference-server` (main's tree, and the golden sets
+`oracle-out*` that every other tree links to), the validation tree
+`~/b70-inference-server-validate`, its G0 baselines `~/b70-inference-server-g0-<sha12>` and
+its results `~/b70-validate/<tree>/<state>/`. The GPU lock files `~/b70-gpu*.lock` /
+`~/b70-gpu.wait` stay in `$HOME` for good: every script and habit opens them there, and a
+lock moved under a running holder no longer excludes anything.
 
 The box is a Linux workstation with **two cards**, and the layout extends to four
 (spec 16's pipeline parallel is written for two and keeps the device count a
