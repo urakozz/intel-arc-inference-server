@@ -1,7 +1,7 @@
 #pragma once
 // Spec 26b: tests/loader/lilicorr_dflash_fixture.safetensors (tools/oracle/dflash_fixture.py --lilicorr) read into the
 // LiLiCorr twin's structures (tests/kernels/lilicorr_ref.h) - shared by lilicorr_ref_test (the twin vs dflash_ref.py's
-// LiLiCorr form) and tools/mac/clrun/lilicorr_run.cc (the kernels at the fixture's tiny shapes on the Mac's GPU). The
+// LiLiCorr form) and lilicorr_kernels_test (the kernels at the fixture's tiny shapes on the card). The
 // fixture carries the tiny checkpoint's own tensors (`ckpt.*`); they are written back out as a checkpoint directory and
 // read by the loader's host half (loader::LiliCheckpoint) - so the twin runs on exactly the device forms the loader builds.
 #include <unistd.h>

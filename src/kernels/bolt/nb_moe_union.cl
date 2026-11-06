@@ -27,7 +27,7 @@
 //   comb  acc = 0; for k = 0 .. 8 (ascending id): acc = acc + (f32(d[row][k][n]) · w_k); r[row][n] = rne(acc) - the
 //         combine of nb_moe_down, product then add, FP_CONTRACT OFF
 // so a, r (and hence everything after) equal the plain M-row binaries' bits (tests/kernels/bolt_moe_union_test.cc on the
-// card, tools/mac/clrun/nb_union_run.cc on the Mac at DN_KS 1). The plain form stays the reference and an arm
+// card). The plain form stays the reference and an arm
 // (VerifyMoe::Plain, the tests' arm); nb_moe.cl is not edited (its 25c binaries keep their bytes).
 //
 // **The cost** (Decision 10): the plain M-row form reads 9 x M expert blocks a MoE block (7.2 GB at M 8 over the 40

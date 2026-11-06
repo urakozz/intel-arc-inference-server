@@ -4,8 +4,7 @@
 // together. The semantics are tools/oracle/dflash_ref.py's LiLiCorr form (spec 26 §2, 26a's port of vLLM's
 // models/lilicorr.py); tests/kernels/lilicorr_ref_test.cc holds this twin to that reference's own outputs
 // (tests/loader/lilicorr_dflash_fixture.safetensors, tools/oracle/dflash_fixture.py --lilicorr) in Reference numerics, and
-// the kernels to this twin (tools/mac/clrun/lilicorr_run.cc on the Mac's GPU, tests/kernels/lilicorr_kernels_test.cc on
-// the card). Built on tests/kernels/dflash_ref.h (dfref: norm, conv, head_prep, the GEMVs' arithmetic, murmur3, choose).
+// the kernels to this twin (tests/kernels/lilicorr_kernels_test.cc on the card). Built on tests/kernels/dflash_ref.h (dfref: norm, conv, head_prep, the GEMVs' arithmetic, murmur3, choose).
 //
 //   attention_sink()  ll_attn_part + ll_attn_reduce: df_attn's chain (context blocks of PB ring offsets, each block's
 //                     (m, l, acc) ascending; the reduce merges blocks ascending, then the block's rows 0..K) and THE SINK:
