@@ -4273,8 +4273,8 @@ target_link_libraries(lilicorr_d1_twin PRIVATE b70_dflash_loader b70_bolt_loader
 # ==== Spec 26b: LiLiCorr on the card - the drafter (label lilicorr) ==== (end) ====
 
 # ==== Spec 26c: LiLiCorr in Bolt's loop and server (labels bolt, lilicorr) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-10-20-spec26c-lilicorr-engine-serving.md. Box queue row 65. Host tests run on the Mac
-# (tools/mac_check.sh); the card's are the box's (row 65's stages).
+# Plan: docs/superpowers/plans/2026-10-20-spec26c-lilicorr-engine-serving.md. Box queue row 65. Host tests first
+# (tools/box_check.sh); the card's are row 65's stages.
 # Task 1: every binary Bolt's verify lists bind at M = 1..8 (kernels::bolt::verify_variants) is built - by the kernels' Spec
 # 26c lines or reused by name (25c's M = 1 and test-only M 4 lines, 26a's M 2..8 GEMVs / routers / int8 heads / argmax stage
 # 1, 26b's bf16 head at M 7) - and the block builds nothing unbound but its counting build. Host only.
