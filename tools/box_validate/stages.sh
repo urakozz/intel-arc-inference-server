@@ -114,7 +114,7 @@ stage r1.parity 1 default card agnes,tok_python - "step 3 (P5): parity_test agai
 st_r1_parity() {
   x "mkdir -p $STATE/agnes-parity/tests/tokenizer && cp tests/tokenizer/corpus.txt $STATE/agnes-parity/tests/tokenizer/"
   chk "cd $STATE/agnes-parity && $TOK_PYTHON $TREE/tools/tokenizer/dump_parity.py \$($TREE/tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json" "corpus.ids from Agnes's tokenizer (Python tokenizers)"
-  chk "B70_TOKENIZER_JSON=\$(tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json build/tests/parity_test $STATE/agnes-parity/tests/tokenizer" "parity_test on Agnes's tokenizer.json"
+  chk "build/tests/parity_test $STATE/agnes-parity/tests/tokenizer \$(tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json" "parity_test on Agnes's tokenizer.json"
   grab parity 'cases|parity|OK'
   finish
 }
