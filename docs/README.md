@@ -95,7 +95,7 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   decode step - the audit (six per-sequence kernels, file:line), the `B70_BATCH_PROBE` row builds and
   `probe_batch_step` (bitwise on the Mac for gdn_step / attn_prep; the box's check PENDING), the step and chunk
   tables (derived; measured PENDING - queue row 66), the layouts' memory from the code (Qwen3.8 4 slots 1.94 GB
-  spare; Agnes 2 with MTP 1.76, 4 with `--mtp off` 1.22), the row table for 13b.
+  spare; Agnes 2 with MTP 1.76, 4 with `--mtp off` 1.22), the row table for 13c.
 - [probe-small-m-gemm-2026-11-01.md](probes/probe-small-m-gemm-2026-11-01.md) - spec 28a: Qwen3.8's decode linears at
   M = 1..16 through gemv and small-M DPAS stand-ins (`probe_small_m`, 347 binaries), the verify step at M = 1..8 split
   into GEMV and non-GEMV (`probe_verify_m --verify8`), numerics and property R on layer 62 / 63's weights. Busy-box

@@ -2,7 +2,7 @@
 
 Spec 13 §9 / §9.1 / §9.2 (the operator's decisions of 2026-10-23) and plan 13a: which kernels of the decode, MTP verify
 and draft lists assume one sequence, a probe build that runs rows of several slots in one step, its correctness check,
-the step and chunk costs, the memory of the decided layouts, and the row table 13b builds. Qwen3.8 batches four slots
+the step and chunk costs, the memory of the decided layouts, and the row table 13c builds. Qwen3.8 batches four slots
 (1 x 131072 + 3 x 32768, MTP in every slot); Agnes two (1 x 131072 + 1 x 32768, MTP in both) or four with `--mtp off`.
 Every number is **DERIVED** (from the code's formulas or spec 8b's measured costs), **ESTIMATED**, or **PENDING (box)** -
 queue row 66; nothing batched has run on a card. Written on the Mac, branch `spec13a-batching-probe`.
@@ -32,7 +32,7 @@ whether row m's output depends on anything but row m's inputs and the weights.
 
 Spec 8b measured the consequence for the GEMVs: the M = 1..4 verify rows are bitwise the M = 1 step, so a row's GEMV
 output does not depend on what shares the step. The same holds for every kernel in this table by construction (no
-cross-row reduction anywhere). These need **no change** for 13b; they need the M = 5..8 binaries at the model's shapes:
+cross-row reduction anywhere). These need **no change** for 13c; they need the M = 5..8 binaries at the model's shapes:
 Qwen3.8's exist (`B70_VERIFY_M8`, plan 19a Task 4), Agnes's gate||up' / down' / SiLU / argmax at M = 5..8 do not (13a's
 `B70_BATCH_PROBE` block adds them).
 
@@ -139,7 +139,7 @@ written once per slot and step) is the larger of the two terms the M-row table d
 `Engine::prefill` of ONE chunk into slot 0 at depth (the served path: l0-int8, flash attention, the MTP head's KV fill),
 rotated rounds, median of 3. While a prompt prefills chunk by chunk between the batch's ticks, a decoding slot's worst
 inter-token gap is one chunk plus one step. ESTIMATED from spec 2's ~1 s per 2048-row chunk (linear in rows; the
-attention's growth with depth not estimated); the scheduler's mock (plan 13c Task 1, `scheduler_test`) gives the same
+attention's growth with depth not estimated); the scheduler's mock (plan 13b Task 1, `scheduler_test`) gives the same
 ordering in ticks (worst gap 17 ticks at chunk 512, 65 at 2048, 1025 with batched admission).
 
 | chunk | depth | ms / chunk (ESTIMATED) | ms / chunk (measured) | worst gap, ms (measured chunk + step) |
@@ -181,9 +181,9 @@ head's 0.25, the engine's state with MTP 0.62, the probe's 12 pool states and a 
 Agnes at 45,056 ~27.4 GB; Agnes `--mtp off` at 61,440 ~27.3 GB. All under the budget; `probe_batch_step` prints the
 engine's measured line and the pools.
 
-## 6. The per-row descriptor for 13b
+## 6. The per-row descriptor for 13c
 
-13b promotes the probe's arrangement; what it keeps, and what it adds:
+13c promotes the probe's arrangement; what it keeps, and what it adds:
 
 - **The table** (`runtime::BatchRow`, 8 words a row, 256 B in shared memory, `runtime/batch_rows.h`): position, KV base,
   GDN src, GDN dst, slot. The host writes it before every replay with the ids (`Control::cur_token[m]`) and
@@ -192,15 +192,15 @@ engine's measured line and the pools.
   slot's max_len.
 - **Slots as position ranges** of one KV allocation (and of the MTP head's KV layer), so the KV layout, the int8 scales'
   layout and the prefill path keep one allocation each; a slot's prefill binds pointers offset by its base (audit P9).
-- **GDN state indices:** 13b gives each slot `MtpDims::kSlots` states (its live one and three speculative) with MTP on,
+- **GDN state indices:** 13c gives each slot `MtpDims::kSlots` states (its live one and three speculative) with MTP on,
   one with `--mtp off` (spec 13 §9.2); a verify run of slot s reads src = its live index and writes dst = (live + j) mod 4
-  in its own four (spec 8's commit as an index, per slot). The probe's shared 8-state scratch is not 13b's layout.
+  in its own four (spec 8's commit as an index, per slot). The probe's shared 8-state scratch is not 13c's layout.
 - **The head's hidden rows** per run by copies (P6), per (M, shape) list; the head's own table at position - 1.
 - **One list per (M, shape)**: at most 8 rows in at most 4 slots - the shapes the budget allows (a few dozen); the plain
   M = 1 list stays today's for `--batch 1` (spec 13 §8, §9.2).
 - **Commit and argmax_stage2:** the in-list `pos += n` / `cur_token[0] = out[n - 1]` are ignored by a row list's host
   (P5); per slot the host commits as Engine::commit does (pos + j + 1, live index, hh row 0 <- x[r0 + j]).
-- **Drafts across slots** (P7): one M = S draft list over the slots' rows is the open design question 13b decides with
+- **Drafts across slots** (P7): one M = S draft list over the slots' rows is the open design question 13c decides with
   the measured draft cost (it reads the head and lm_head once per draft index for all slots instead of once per slot).
 
 ## 7. What the box run (row 66) decides
@@ -211,5 +211,5 @@ engine's measured line and the pools.
 | the row budget's allocation | the MTP-shaped arms (`2x4`, `4x2`, `1x4+3x1`, Agnes `2x4` / `2x2` / `1x4+1x1`) | every active slot gets its pending row first; the remaining rows of the 8 go where the measured ids / cost is highest (spec 13 §9's "the longest-running main session first" if `1x4+3x1` beats `4x2`, else K = 1 everywhere); a slot's K never exceeds its AdaptiveK |
 | the interleave chunk (`SchedulerOptions::chunk`) | `r66.chunk`, with `1x1@4k` / `1x1@32k` | the smallest of 512 / 1024 / 2048 whose ms / id is within 15 % of 2048's (prefill throughput kept), and smaller still if its worst gap (chunk + step at 32k) exceeds the operator's bound (proposed 500 ms) |
 | interleave vs batched admission (spec 13 §8) | `r66.chunk` and the mock's ticks | interleave unless a burst's batched prefill beats N interleaved chunks by more than its gap cost |
-| the row build's overhead | `rows 1x1@32k vs production verify(0)` | <= 1.02 (spec 13 §5's "a single request within 2 %"); above it, 13b keeps the production M = 1 list for a lone request (it does anyway at `--batch 1`) |
-| the check | `r66.check` | every arm PASS on both models and KV forms; a FAIL stops 13b until the row build is fixed |
+| the row build's overhead | `rows 1x1@32k vs production verify(0)` | <= 1.02 (spec 13 §5's "a single request within 2 %"); above it, 13c keeps the production M = 1 list for a lone request (it does anyway at `--batch 1`) |
+| the check | `r66.check` | every arm PASS on both models and KV forms; a FAIL stops 13c until the row build is fixed |

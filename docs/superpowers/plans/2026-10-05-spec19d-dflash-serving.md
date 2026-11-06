@@ -33,7 +33,7 @@
 
 ### Task 2: batching hook
 
-- [x] Per-slot rings and the draft list over `BatchEngineIface` (spec 13c); scheduler tests with a mock drafter. **Commit** `server: DFlash under the batching scheduler (spec 19d)`.
+- [x] Per-slot rings and the draft list over `BatchEngineIface` (spec 13b); scheduler tests with a mock drafter. **Commit** `server: DFlash under the batching scheduler (spec 19d)`.
 
 ### Task 3: speed and the record
 
@@ -61,9 +61,9 @@ Branch `spec19d-dflash-serving`, written on the Mac after 19b / 19c (both unvali
 - **"snapshot_test / prefix_gpu_* with the drafter"** became one dedicated `dflash_prefix_gpu_test` (PrefixSession over
   EngineAdapter: restore vs Continue, bitwise ring, ids and per-iteration acceptance; a block-end restore vs a cold run)
   plus `dflash_engine_test` SR. Cost if wrong: spec 7's C2 sequences a-g are not re-run with the drafter on.
-- **Batching:** no batched runtime engine exists on main (13b was never built), so Task 2 is the interface
+- **Batching:** no batched runtime engine exists on main (13c was never built), so Task 2 is the interface
   (`BatchEngineIface::spec_k / step_spec / truncate_to / drafter_key`), the scheduler's speculative round with a
-  per-request AdaptiveK, and the mock with a ring per slot. Cost if wrong: the contract may move when 13b implements it.
+  per-request AdaptiveK, and the mock with a ring per slot. Cost if wrong: the contract may move when 13c implements it.
 - **`--spec dflash --pp 2`** (in the operator's list for 19d, not in this plan): built as a step between Tasks 2 and 3 -
   the drafter on device 1, tap verify stage lists, the copy hand-off only (peer refused by name), the pipeline prefill's
   taps projected from the host once both devices finish a chunk; b70-decode stays one card. Cost if wrong: peer cannot

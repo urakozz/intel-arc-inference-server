@@ -1,10 +1,10 @@
-# Spec 13c - two requests at once: two engines behind the scheduler (Qwen3.8)
+# Spec 13b - two requests at once: two engines behind the scheduler (Qwen3.8)
 
 **Status (2026-11-07): REWRITTEN for spec 13 §11 (operator: "focus on Qwen3.8. Build the two-engine mode (§10) first:
-small, and useful immediately. Then 13b for one-card batching").** Task 1 (the scheduler against `MockBatchEngine`) is on
+small, and useful immediately. Then 13c for one-card batching").** Task 1 (the scheduler against `MockBatchEngine`) is on
 main since 2026-10-05 and maintained since (the prefix-cache sizing fix 2026-11-04, DFlash per slot 2026-10-16). This
 plan serves Qwen3.8 with **two of today's single-sequence engines, one per card, behind `server::BatchEngineIface`** - a
-two-slot batched engine with no new kernels - through `b70-serve --parallel replica`. Plan 13b (slots on one card)
+two-slot batched engine with no new kernels - through `b70-serve --parallel replica`. Plan 13c (slots on one card)
 follows on the same scheduler.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
@@ -30,14 +30,14 @@ routes through the scheduler when the engine has more than one slot; the serial 
 
 ## Out of scope
 
-- Slots on one card, the row table, the 8-row budget, int8-KV layouts: plan 13b.
+- Slots on one card, the row table, the 8-row budget, int8-KV layouts: plan 13c.
 - Other models (they refuse `--parallel replica` by name); DFlash per slot (the scheduler's hook exists; the engine
   side is spec 19's); replica x pipeline; three or four cards.
 - Whether `--parallel auto` picks replica: decided after this plan's record and spec 17b (spec 13 §11.1).
 
 ## Global Constraints
 
-- Branch `spec13c-replica` from main; box tree per branch (`tools/box.sh`, `tools/box_dir.sh`); every GPU job under
+- Branch `spec13b-replica` from main; box tree per branch (`tools/box.sh`, `tools/box_dir.sh`); every GPU job under
   `tools/gpu_lock.sh` (`box` for two-card runs); long jobs detached and polled at most every 30 min; timed arms
   interleaved after a warm-up, median of 3, idle grade. No box work while a validation run holds the box.
 - Zero-config (operator, 2026-11-06): no new flags or environment variables - `--parallel replica` is a value of the
@@ -84,15 +84,15 @@ routes through the scheduler when the engine has more than one slot; the serial 
   per-request proposer under `step_spec` (Review Focus 4); `--log-requests` records from the scheduler path (the same
   fields as server.cc's `log_request`, `t_start` = arrival). The interleave chunk: with one row per card a prefill chunk
   stalls only its own card, so the replica engine prefills a slot at the session's chunk cap (2048) - the 512 default
-  stays for 13b. **Commit** `server: the scheduler carries split-last, lookup, per-slot lengths and the request log
-  (spec 13c)`.
+  stays for 13c. **Commit** `server: the scheduler carries split-last, lookup, per-slot lengths and the request log
+  (spec 13b)`.
 
 ### Task 3: the replica engine (host side + its test)
 
 - [ ] `cli::ReplicaEngine` over two `runtime::Engine`s (Architecture), with a host test over two fake engines: the
   fan-out and join, a failure on one card, per-slot `pos` / `reset` / snapshots, the prefix store shared. The hardware
   gate already requires two cards; replica needs no peer access (say so at startup). **Commit** `cli: two engines
-  behind BatchEngineIface (spec 13c)`.
+  behind BatchEngineIface (spec 13b)`.
 
 ### Task 4: `--parallel replica` in b70-serve
 
@@ -100,7 +100,7 @@ routes through the scheduler when the engine has more than one slot; the serial 
   refused); `b70_serve.cc` builds the two engines (each card's own plan and startup lines: model, max_len, memory) and
   the server routes through the scheduler; `--parallel 1 | pp | auto` paths untouched. Host tests: the parse and the
   refusals (`pipeline_args_test`), `cli_reject_*` rows for replica. **Commit** `cli: b70-serve --parallel replica
-  (spec 13c)`.
+  (spec 13b)`.
 
 ### Task 5: gates on the cards
 
@@ -109,7 +109,7 @@ routes through the scheduler when the engine has more than one slot; the serial 
   concurrent clients; **B3:** prefix caching across cards (a snapshot saved on card 0 restored on card 1, C2 equal);
   **B4:** disconnect, per-row stop, streaming order; `prefix_server_test` / `mtp_server_test` unchanged on the serial
   path. Box queue row (the next free one) and its stages (`tools/box_validate/stages.sh`). **Commit** `server: the
-  replica engine on the cards (spec 13c, R1 / B2-B4)`.
+  replica engine on the cards (spec 13b, R1 / B2-B4)`.
 
 ### Task 6: speed and record
 
@@ -117,8 +117,8 @@ routes through the scheduler when the engine has more than one slot; the serial 
   every row says how admission was timed, spec 13 §8); a lone request's latency within 2 % of `--parallel 1`; the
   opencode-shaped replay (`tools/prefix/make_synth_log.py`, side requests sent concurrently) - total wall time against
   the serial server; how often requests overlap in a real opencode session (`--log-requests`, spec 13 §11.1 item 3 -
-  it sizes 13b). BENCHMARKS section "Two requests at once (spec 13c)", spec 13 §11's record, README,
-  docs/18-running-models.md (Qwen3.8's `--parallel replica` line). **Commit** `spec 13c: two engines behind the
+  it sizes 13c). BENCHMARKS section "Two requests at once (spec 13b)", spec 13 §11's record, README,
+  docs/18-running-models.md (Qwen3.8's `--parallel replica` line). **Commit** `spec 13b: two engines behind the
   scheduler (the record)`.
 
 **Gate for the plan:** R1 bitwise, B2-B4 green, the serial modes byte for byte today's, speed measured (misses

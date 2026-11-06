@@ -17,7 +17,7 @@ runs in every slot under an 8-row budget, and the models are Qwen3.8 (four slots
 **Goal:** measure a decode step whose rows belong to **different sequences** - plain rows of B slots, MTP-shaped runs
 (a slot's K + 1 consecutive positions) of several slots, and their mixes up to the 8-row budget - at equal and mixed
 depths, at int8 and bf16 KV, on Qwen3.8 and Agnes; prove each batched row equals its sequence stepped alone; price the
-prefill chunk that interleaves with the batch; and hand the operator the numbers for 13b's B, chunk size and budget
+prefill chunk that interleaves with the batch; and hand the operator the numbers for 13c's B, chunk size and budget
 rule.
 
 **Architecture:** spec 13 §9's row table, built as a PROBE: every per-sequence kernel gets a `BATCH_ROWS` build that
@@ -33,7 +33,7 @@ unchanged.
 **Tech Stack:** OpenCL C (ocloc), C++17, Level Zero; Mac: clang `-fsyntax-only`, `tools/mac/clrun`.
 
 **Spec:** `docs/superpowers/specs/2026-09-28-spec13-batching-design.md` §9 (the row table, the budget, the added gates),
-§9.1 (the layouts, the memory method, what 13b needs), §9.2 (`--batch N`, no host-RAM offload; MTP trades against slots: Agnes
+§9.1 (the layouts, the memory method, what 13c needs), §9.2 (`--batch N`, no host-RAM offload; MTP trades against slots: Agnes
 `--batch 4` only with `--mtp off`), §4 (B1-B4), §8 (admission). Precedents: plan 19a Task 4 (`B70_VERIFY_M8`,
 `probe_mtp_steps`' M = 5..8 lists and interleaved pairs),
 plan 8a (`probe_verify_m`).
@@ -124,7 +124,7 @@ table (Task 3), not a probe allocation.
   `decode_launches` (+10 with the head) asserted. **Commit.**
 - [x] **Step 4 (the probe):** `probe_batch_step <snapshot> [--kv bf16|int8] [--slots ...] [--arms ...] ...`:
   - one Engine at max_len = the slots' sum (int8 head, MTP head loaded); a state pool (one source per slot + 8
-    destinations, one per row - the probe's destinations are shared scratch; 13b gives each slot its own) and a ring
+    destinations, one per row - the probe's destinations are shared scratch; 13c gives each slot its own) and a ring
     pool; each slot's sequence (long32k.ids at a slot offset) prefilled into slot 0 and copied out (state, ring, KV
     rows, the head's KV rows, h_{pos-1}), slot 0's last;
   - **the check** (Review Focus 2-3) for every arm, then the production tie for slot 0;
@@ -141,7 +141,7 @@ table (Task 3), not a probe allocation.
 
 - [x] In the probe doc: §2 the check, §3 the step table (derived columns filled, measured PENDING (box)), §4 the chunk
   table, §5 the memory table from the code (§9.1's method; both models' decided layouts and the alternatives, int8 and
-  bf16 KV), §6 the per-row descriptor design for 13b, §7 the decisions the box run feeds (B, chunk size, the budget
+  bf16 KV), §6 the per-row descriptor design for 13c, §7 the decisions the box run feeds (B, chunk size, the budget
   rule) with the rule that turns each measured column into a decision. `docs/README.md` line. **Commit**
   `probe: batching proposal skeleton (spec 13a Task 3)`.
 

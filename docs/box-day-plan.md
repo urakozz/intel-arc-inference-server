@@ -635,7 +635,7 @@ Then (a Mac edit) the rows go into docs/BENCHMARKS.md "llama-benchy comparisons"
 
 ### Session 6d - the batching probe (row 66, plan 13a), box idle
 
-Added 2026-10-23. Rows of DIFFERENT sequences in one decode step (spec 13 §9): the numbers 13b's three decisions wait
+Added 2026-10-23. Rows of DIFFERENT sequences in one decode step (spec 13 §9): the numbers 13c's three decisions wait
 on - the slots per model, the 8-row budget's allocation and the interleave chunk (docs/probes/probe-batching-2026-10-23.md
 §7). The probe build is its own tree's second build dir, `build-batch-probe` (`-DB70_BATCH_PROBE=ON`, OFF in G0's
 build): the 80 row builds' first ocloc compile, ~10-20 min at -j44 (est.).
@@ -648,7 +648,7 @@ tools/box_validate.sh --only r66.cost,r66.chunk
 
 `r66.check` runs `probe_batch_step --no-time --no-chunks` five times (Qwen3.8 int8 / bf16 KV, Agnes int8 / bf16 with
 MTP at 2 slots, Agnes int8 `--mtp off` at 4): every arm's rows bitwise their slot's run alone, isolation, the production
-tie - a `check: FAIL` stops 13b (report the CHECK lines first). `r66.cost` times every arm against `1x1@4k` as
+tie - a `check: FAIL` stops 13c (report the CHECK lines first). `r66.cost` times every arm against `1x1@4k` as
 interleaved pairs (median of 3) for Qwen3.8 at both KV forms and Agnes's two layouts; `r66.chunk` one prefill chunk of
 512 / 1024 / 2048 at 4k and 32k beside the 1-row steps. Each run prefills 32k + 3 x 4k (or 32k + 4k) first (~30-60 s,
 est.). Estimate for the timed pair: 1-2 h (est.: ~16 arms x (3 rounds x 2 x 32 replays + warm-up) at 35-100 ms a

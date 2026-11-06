@@ -173,7 +173,7 @@ for Qwen3.8.
   decided by the operator 2026-10-27)**; `--tp 2 --spec dflash` against one card `--spec dflash` once 19f has passed; the replica mode on the
   multi-session workload is recorded when spec 13 §10 exists.
 - **Gates:** §5's T1-T4 unchanged; T2 is against one card under the golden tie rule (Qwen3.8 fits one card).
-- **Batching (spec 13b) under TP:** still out of scope (§8).
+- **Batching (spec 13c) under TP:** still out of scope (§8).
 
 ## R. Revision - 2026-10-23: refresh, retarget at Bolt, park
 

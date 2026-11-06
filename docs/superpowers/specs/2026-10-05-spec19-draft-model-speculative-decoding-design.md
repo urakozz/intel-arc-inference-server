@@ -540,7 +540,7 @@ and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpower
   chain - `kv_form` itself without a drafter (every key as before), a mix of both with one. The key is FNV-1a over the
   drafter's shapes, taps, format and its two norm weights as loaded (`runtime::dflash::drafter_key`).
   `EngineIface::drafter_key` / `BatchEngineIface::drafter_key` (0 = none) feed PrefixSession and PrefixSlots.
-- **Batching (spec 13c):** no batched runtime engine exists (13b was never built: the scheduler runs over its mock), so
+- **Batching (spec 13b):** no batched runtime engine exists (13c was never built: the scheduler runs over its mock), so
   the hook is the interface and the scheduler: `BatchEngineIface::spec_k / step_spec / truncate_to(slot, pos)` - one
   draft / verify / accept iteration over every row, each row drafting from its own slot's state (one ring per slot,
   Review Focus 3) - and `Scheduler::spec_round`: K per row from the request's own `AdaptiveK` (or a fixed K), the run's
@@ -572,7 +572,7 @@ and nothing changes without `--spec dflash`, so D0 is G0. Plan: `docs/superpower
   equal; R2 a block-end restore; the caveat counted; a cold-ring control), `dflash_engine_test` SR, `pp_dflash_test`
   (`--pp 2` bitwise one card's).
 - **Not in 19d:** Ornith's DFlash (v1) drafter (a full-attention layer and a 16-row block - its stage), a batched runtime
-  engine (spec 13b), int8 KV / v1 attention at M = 5..8, the replay-state lever (§11), the measured cost table (row 29).
+  engine (spec 13c), int8 KV / v1 attention at M = 5..8, the replay-state lever (§11), the measured cost table (row 29).
 
 
 ## 13. Amendment - 2026-10-27: DFlash on the card first, then prompt lookup inside DFlash; K up to 15 after spec 28

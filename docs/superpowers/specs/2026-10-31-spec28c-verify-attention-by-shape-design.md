@@ -94,7 +94,7 @@ As spec 28 §5 (idle box, device 0, interleaved pairs after warm-up, median of 5
 ## 7. Out of scope
 
 Prefill attention (`pf_flash_attn`); the MoE engines' own attention (Ornith / K2 / Kolibri / Bolt) - a follow-on per
-engine once 28c's numbers exist; varlen M per request inside one batch (vllm-xpu-kernels 470c19f) - spec 13b's call.
+engine once 28c's numbers exist; varlen M per request inside one batch (vllm-xpu-kernels 470c19f) - spec 13c's call.
 
 ## 8. Amendment - 2026-10-31, against the code (with plan 28c)
 

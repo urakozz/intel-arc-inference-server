@@ -123,7 +123,7 @@ operator's 2026-10-27 ruling against more options).
 
 **Variants:** one binary per (shape, M) as today's `gemv_M<M>_K_N` names, for M = 2..8 (the lists that exist: MTP
 M <= 4, DFlash M <= 8, 13a's rows) and M = 16 (P0, batching, DFlash K <= 15); M = 9..15 are added with the plan that
-first binds them (spec 19's K <= 15, spec 13b's row budget). Qwen3.8's six int4 shapes and the int8 head first; Agnes's
+first binds them (spec 19's K <= 15, spec 13c's row budget). Qwen3.8's six int4 shapes and the int8 head first; Agnes's
 gate||up' / down' (PROVISIONAL tuning, spec 14 §6) in 28b too, since it shares the capture.
 
 **Row independence (property R, by construction, held by test):** a DPAS output row depends only on its own A row; the
@@ -166,7 +166,7 @@ prefill is not bitwise one-row decode. The gates:
 | **MTP** (spec 8, `--mtp K` / `--mtp auto`) | `runtime::build_verify` at M = K + 1 (2..4) | the capture's `gemv_kind(M)`: no engine flag | the cost table: `MtpCost`'s verify row re-measured at M = 1..8 (28b), replacing the measured-then-extrapolated defaults; `--mtp auto` then picks K on the new costs. More than 3 MTP drafts (`MtpDims::kSlots` = 4) is a follow-on decision, not here |
 | **DFlash** (spec 19c, `--spec dflash`) | `build_verify_taps` at M = K + 1 (2..8); the drafter's own int8 linears at its block of 8 rows | the same rule; the drafter's int8 GEMVs at M = 8 bind `gemm_sm_i8w` | `MtpCost::dflash`'s verify row measured (no more +0.22 a row); D3 as N5; K <= 15 only after 28b (spec 19 §13) |
 | **prompt lookup** (spec 19e, `--spec lookup`) | the MTP verify lists | as MTP | - |
-| **batching** (spec 13b, `--batch N`) | the batched decode list at B rows (B x (K + 1) with MTP in every slot) | the same rule at M = B | spec 13a's check ("each slot's rows equal its run alone") holds bitwise **against the slot run alone through `gemm_sm`** (N3) and under the tie rule against M = 1; the 8-row budget (spec 13 §9) can grow to 16 rows - 13b's decision, on 28b's measured step |
+| **batching** (spec 13c, `--batch N`) | the batched decode list at B rows (B x (K + 1) with MTP in every slot) | the same rule at M = B | spec 13a's check ("each slot's rows equal its run alone") holds bitwise **against the slot run alone through `gemm_sm`** (N3) and under the tie rule against M = 1; the 8-row budget (spec 13 §9) can grow to 16 rows - 13c's decision, on 28b's measured step |
 | **pipeline parallel** (spec 16, `--pp 2` verify lists) | each stage's verify lists | the same rule per stage | none |
 | **tensor parallel** (spec 17 §R2) | each card's verify lists at per-card shapes | the same rule at the per-card shapes | the crossings carry M rows |
 | prefill | C >= 256 rows, the slab GEMMs | not touched | - |

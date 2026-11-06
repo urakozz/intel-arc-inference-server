@@ -299,7 +299,7 @@ bar registered before the measurement, so it ships on: any request with
 runs when a request asks for sampling.
 
 The scheduler for batching several requests in one decode step (spec 13, `src/server/scheduler.h`) exists
-and is tested against a host mock, but the engine side (spec 13b: per-slot state and one captured list per
+and is tested against a host mock, but the engine side (spec 13c: per-slot state and one captured list per
 batch size) is not built, so the server still runs one sequence at a time.
 
 Deferring batching is not a shortcut. It isolates the variable being tested,

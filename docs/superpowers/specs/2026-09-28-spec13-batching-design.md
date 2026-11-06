@@ -1,8 +1,8 @@
 # Spec 13 - batching: several sequences in one decode step
 
 **Status:** design, 2026-09-28; revised 2026-10-23 (§9, §10); **revised 2026-11-07 (§11: Qwen3.8 only; the two-engine
-mode of §10 is built FIRST, as plan 13c, on the scheduler that exists; then 13b's slots on one card; no `--batch` flag -
-§11 supersedes §9.2 and §9's order where they differ).** Open decisions are marked **(decide)**.
+mode of §10 is built FIRST, as plan 13b, on the scheduler that exists; then 13c's slots on one card; no `--batch` flag -
+§11 supersedes §9.2 and §9's order where they differ).** **Renamed 2026-11-07 (operator) so the letters follow the build order: 13b is now the server and the two-engine mode (was 13c), 13c the one-card engine with slots (was 13b); every reference in this doc and the others was swapped, commit messages before 2026-11-07 keep the old letters.** Open decisions are marked **(decide)**.
 
 **Order:** last of specs 10-13: it needs spec 10's decode attention (per-sequence depth
 in the stride), and it is much cheaper in memory after spec 12 (int8 KV).
@@ -83,8 +83,8 @@ A mixed layout (one long slot for the main thread, small slots for subagents, e.
 - **13a, probe:** the batched GEMV and `gdn_step` at B rows of different sequences;
   measured step time at B = 2..4 (the table in §1 is derived from consecutive-position
   rows); the memory layout decision.
-- **13b, engine:** slots, row descriptors, the batched list(s), B1.
-- **13c, server:** the scheduler, slot mapping with spec 7, B2-B4, speed, record.
+- **13c, engine:** slots, row descriptors, the batched list(s), B1.
+- **13b, server:** the scheduler, slot mapping with spec 7, B2-B4, speed, record.
 
 ## 7. Out of scope
 
@@ -113,7 +113,7 @@ A mixed layout (one long slot for the main thread, small slots for subagents, e.
 What changed on main since §1-§8 were written: spec 12b's int8 KV cache, spec 14's Agnes, spec 19d's speculative
 step under the scheduler (`server::BatchEngineIface::step_spec`, one proposer state per slot, a per-row K from
 `server::AdaptiveK`, tested against the mock in `dflash_scheduler_test`), spec 16's pipeline parallel, and the MoE
-models (specs 15, 18, 20-25). Plan 13c Task 1 (the scheduler against `MockBatchEngine`) is on main; 13a and 13b
+models (specs 15, 18, 20-25). Plan 13b Task 1 (the scheduler against `MockBatchEngine`) is on main; 13a and 13c
 are not built.
 
 **Operator's decisions (2026-10-23):**
@@ -150,7 +150,7 @@ measured acceptance (K = 1: 1.92 ids, K = 3: 3.455):
 | 4 | 0 | 4 | ~2.3x |
 | 4 | 1 | 8 | ~3.0x |
 
-13a measures the M = 5..8 step and the mixed-row (different slots, different depths) step before 13b fixes the
+13a measures the M = 5..8 step and the mixed-row (different slots, different depths) step before 13c fixes the
 budget rule.
 
 **Memory (derived, Qwen3.8, one card: 32.53 GB, `--mem-reserve-gb` 1.5, model 18.1 GB, prefill scratch 0.7 GB;
@@ -178,7 +178,7 @@ subagents share opencode's system prompt, so a slot restores the shared prefix f
 `--mtp` on (greedy MTP output identical to plain, per slot, at 4 concurrent requests); B3 for the speculative
 state (a slot's rejected drafts leave every other slot's `gdn_spec` and head KV byte-identical).
 
-**Plans.** 13a, 13b and 13c's remaining tasks are refreshed against this section before 13a starts (one
+**Plans.** 13a, 13c and 13b's remaining tasks are refreshed against this section before 13a starts (one
 implementing agent at a time).
 
 ### 9.1 Addendum - 2026-10-23: the memory recomputed, Agnes's layout, the follow-on order
@@ -205,7 +205,7 @@ head + the MTP head (0.849 GB). All derived; nothing batched has run.
   first prompt is 10-30k ids). Agnes at concurrency 4 is the pipeline follow-on below. Rejected: the embedding in host
   USM and every other host-RAM offload for batching (see the server option below), and a shared pool of speculative
   GDN states.
-- **What this asks of 13b:** the slot count and lengths PER MODEL (Qwen3.8 four slots, Agnes two); a max_len PER SLOT (`BatchEngineIface::max_len()` is one value today,
+- **What this asks of 13c:** the slot count and lengths PER MODEL (Qwen3.8 four slots, Agnes two); a max_len PER SLOT (`BatchEngineIface::max_len()` is one value today,
   src/server/batch_engine.h:27); MTP on or off PER SLOT (a slot without speculative GDN states, `MtpDims` refuses
   fewer than 4 today, buffer_sizes.cc:273); the layout from the planner per model (`runtime::plan` grows a slot list),
   the extra captured lists (per batch size and per M) counted in it.
@@ -282,7 +282,7 @@ No new kernels for the routing half: two engines, one per card, behind one `b70-
 ## 11. Revision - 2026-11-07: two engines first, then slots; the zero-config surface
 
 **Operator (2026-11-07):** "focus on Qwen3.8. Build the two-engine mode (§10) first: small, and useful immediately.
-Then 13b for one-card batching." Recorded here with what changed on main since §9 (2026-10-23):
+Then 13c for one-card batching." Recorded here with what changed on main since §9 (2026-10-23):
 
 - **The zero-config surface (operator, 2026-11-06).** The user picks the model, `--spec`, `--max-len` and
   `--parallel`; the engine decides the rest; no new flags or environment variables. §9.2's `--batch N`, its refusal
@@ -296,33 +296,33 @@ Then 13b for one-card batching." Recorded here with what changed on main since �
   (the operator's rulings of 2026-11-03 / 11-05: the 1-bf16-ulp near-tie and the reviewed rows), exactly as the
   speculative tests are. The two-engine mode keeps every output bitwise (each card runs today's engine).
 - **int8 KV is not decided yet** (the zero-config list B, measured in the quiet-box session). §9's one-card layout
-  (1 x 131072 + 3 x 32768) fits only with int8 KV; 13b's layout waits for that ruling.
-- **The server gained, since 13c Task 1 (2026-10-05):** `--prefix-split-last` (a thinking model's next turn restores
+  (1 x 131072 + 3 x 32768) fits only with int8 KV; 13c's layout waits for that ruling.
+- **The server gained, since 13b Task 1 (2026-10-05):** `--prefix-split-last` (a thinking model's next turn restores
   right where the last stopped - the agentic sessions' main win), prompt lookup (`--spec lookup`) as a per-request
   proposer, block-end prefix snapshots, `--log-requests`. The scheduler path carries all of them.
 
 ### 11.1 Order
 
-1. **Plan 13c - two engines behind the scheduler (Qwen3.8).** §10's mode built on what exists: the scheduler
+1. **Plan 13b - two engines behind the scheduler (Qwen3.8).** §10's mode built on what exists: the scheduler
    (`server/scheduler.{h,cc}`) talks to its engine only through `server::BatchEngineIface`; two of today's
    single-sequence engines, one per card, behind that interface ARE a two-slot batched engine - a step runs both
    cards at once, each on its own thread. No new kernels, no per-slot state on a card, every output bitwise today's
    single-sequence run on that card. The main session keeps the whole card (full context, MTP); a second request
    (an opencode subagent, a title) no longer waits. `--parallel replica` (the operator's parallel exception: every
-   mode selectable to try and measure); whether `--parallel auto` picks it is **(decide)** after 13c's record and
+   mode selectable to try and measure); whether `--parallel auto` picks it is **(decide)** after 13b's record and
    spec 17b (tensor parallel takes the same second card for one session).
-2. **Plan 13b - slots on one card (Qwen3.8),** after 13c and after the int8 KV ruling: the row table over the
+2. **Plan 13c - slots on one card (Qwen3.8),** after 13b and after the int8 KV ruling: the row table over the
    small-batch kernels, per-slot state, B1 by the f32 judge. The same scheduler drives it; replica x slots
    (two cards, slots on each) is then one more adapter.
 3. **Measured on the way, not a gate:** how often requests overlap in real opencode sessions, from `--log-requests`
    (each record's `t_start` is the arrival, before the queue wait; overlap = a request arriving before the previous
-   one ended). It sizes 13b's slot count.
+   one ended). It sizes 13c's slot count.
 
 ### 11.2 The surface
 
 No flag turns batching on. `--parallel replica` loads the model on both cards and serves two requests at once;
 `--parallel 1` / `pp` / `auto` are unchanged (one request at a time, the rest queue - today's server, bitwise). With
-13b, a card's spare memory becomes slots: `--max-len auto` keeps today's single-session context (the whole card); an
+13c, a card's spare memory becomes slots: `--max-len auto` keeps today's single-session context (the whole card); an
 asked `--max-len` shorter than that frees memory, which the engine fills with 32768-position slots (none below 32768,
 never host RAM). `--spec` holds for every slot (MTP per slot under the 8-row budget, §9). Models without a batched or
 replica engine refuse `--parallel replica` by name.
