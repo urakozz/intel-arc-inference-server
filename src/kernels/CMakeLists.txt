@@ -716,8 +716,7 @@ endif()
 #   prep.cl         prep_res_fold at K 2560 (stage A of the grouped norm, unchanged)
 #   embed_gather.cl / argmax.cl at K2's vocabulary 250624 (fully used)
 # What K2's decode list binds (runtime/k2/k2_capture.cc): 717 launches = embed + 3 dense
-# layers x 12 + 45 MoVA/MoE layers x 15 + 5; 813 under B70_K2_ATTN=eager (4 attention launches
-# a layer for flash's 2).
+# layers x 12 + 45 MoVA/MoE layers x 15 + 5.
 option(B70_K2 "build the K2-Horizon decode variants (spec 18b)" ON)
 if(B70_K2)
   set(K2_CL ${CMAKE_CURRENT_SOURCE_DIR}/k2)
@@ -750,10 +749,8 @@ if(B70_K2)
   # k2_attn.cl: decode attention v2 at head_dim 128 / GQA 4 with the softplus gate.
   add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn.cl
                    DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
-  # k2_attn_eager.cl: the reference's bf16 eager chain (B70_K2_ATTN=eager, spec 18 §10) - the
-  # same defines; a new source, so k2_attn.cl's binary keeps its bytes.
-  add_ocloc_kernel(k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8 SOURCE ${K2_CL}/k2_attn_eager.cl
-                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} Q_HEADS=32 KV_HEADS=8)
+  # (k2_attn_eager.cl, the eager decode attention behind B70_K2_ATTN=eager, was removed in the
+  # zero-config cleanup: flash is K2's attention.)
   # k2_moe.cl: the sigmoid router (MoVA's over the fused GEMV's v_router columns, the MoE's
   # over its bf16 GEMV), the MoE block (100 + 1 shared, top-8), MoVA's value experts.
   add_ocloc_kernel(k2_route_M1_E64_T4_N9280_O9216_S2 SOURCE ${K2_CL}/k2_moe.cl
@@ -811,26 +808,20 @@ if(B70_K2)
                    DEFINES ${K2_PF_PREP_DEFINES} QKV_N=10240 V_FROM_PARTIALS=1)
   add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8 SOURCE ${K2_PF_SRC}/k2_prep.cl
                    DEFINES ${K2_PF_PREP_DEFINES} QKV_N=9472 V_FROM_PARTIALS=0)
-  # The flash attention at head_dim 128 / GQA 4: the default (fp32 scores and probabilities)
-  # and the eager-mirroring variant (B70_K2_ATTN=eager), each gated (the walk's) and ungated
-  # (_O, the K1 test's). Natural exp (EXP2 0) in both, as K2's decode attention and the
-  # reference - PROVISIONAL for the default, a speed knob for plan 18c Task 3. 256 GRF as
-  # pf_flash_attn.
-  foreach(EG 0 1)
-    foreach(GT 0 1)
-      set(_n k2_pf_flash_attn_Q32KV8)
-      set(_x2 0)
-      if(EG)
-        string(APPEND _n _EAGER)
-      endif()
-      if(NOT GT)
-        string(APPEND _n _O)
-      endif()
-      add_ocloc_kernel(${_n} SOURCE ${K2_PF_SRC}/k2_pf_attn.cl
-                       DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=${_x2} EAGER=${EG}
-                               GATE_EPI=${GT}
-                       OPTIONS -cl-intel-256-GRF-per-thread)
-    endforeach()
+  # The flash attention at head_dim 128 / GQA 4 (fp32 scores and probabilities), gated (the
+  # walk's) and ungated (_O, the K1 test's). Natural exp (EXP2 0), as K2's decode attention and
+  # the reference. 256 GRF as pf_flash_attn. (The eager-mirroring _EAGER builds went with
+  # B70_K2_ATTN in the zero-config cleanup; EAGER=0 stays on these command lines, the source's
+  # eager branch being Kolibri-1's.)
+  foreach(GT 0 1)
+    set(_n k2_pf_flash_attn_Q32KV8)
+    if(NOT GT)
+      string(APPEND _n _O)
+    endif()
+    add_ocloc_kernel(${_n} SOURCE ${K2_PF_SRC}/k2_pf_attn.cl
+                     DEFINES KT=64 RPW=8 HPW=4 Q_HEADS=32 KV_HEADS=8 EXP2=0 EAGER=0
+                             GATE_EPI=${GT}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
   endforeach()
   add_ocloc_kernel(k2_route_M1_E64_T4_N9472_O9216_S1 SOURCE ${K2_PF_SRC}/k2_moe.cl
                    DEFINES M=1 ROUTE_E=64 ROUTE_K=4 ROUTE_WG=64 ROUTE_LN=9472 ROUTE_LOFF=9216
@@ -860,10 +851,8 @@ endif()
 #   decode   k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 / ..._N9280_S2_Q32KV8_KV8   the writer
 #            k2_mova_M1_E64_T4_D2560_N1024_STAGE                             MoVA's v, staged
 #            k2_attn_M1_T<TGT>_Q32KV8_KV8           flash decode + the un-rotating reduce
-#            k2_attn_eager_M1_T<TGT>_Q32KV8_KV8     eager score / P·V / un-rotating reduce (the
-#                                                   softmax is k2_attn_eager's binary, unchanged)
 #   prefill  k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 / ..._N9472_S1_Q32KV8_KV8  the writer
-#            k2_pf_flash_attn_Q32KV8[_EAGER][_O]_KV8  the flash over int8 (gated, and the K1
+#            k2_pf_flash_attn_Q32KV8[_O]_KV8        the flash over int8 (gated, and the K1
 #                                                   test's ungated un-rotated o)
 #            (MoVA's combine is k2_pf_mova's binary with pos 0 into the staging row)
 if(B70_K2 AND B70_KV8)
@@ -880,27 +869,20 @@ if(B70_K2 AND B70_KV8)
                            MOVA_STAGE=1)
   add_ocloc_kernel(k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
                    DEFINES ${CTRL_DEFINES} K2KV8_DEC=1 M=1 TGT=${ATTN_V2_TGT} ${K2_KV8_HEADS})
-  add_ocloc_kernel(k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
-                   DEFINES ${CTRL_DEFINES} K2KV8_EAGER=1 M=1 TGT=${ATTN_V2_TGT} ${K2_KV8_HEADS})
   add_ocloc_kernel(k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 SOURCE ${K2_KV8_CL}
                    DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=10240
                            V_FROM_PARTIALS=1)
   add_ocloc_kernel(k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8 SOURCE ${K2_KV8_CL}
                    DEFINES ${CTRL_DEFINES} K2KV8_PREP=1 M=2048 QKV_S=1 ${K2_KV8_HEADS} QKV_N=9472
                            V_FROM_PARTIALS=0)
-  foreach(EG 0 1)
-    foreach(GT 0 1)
-      set(_n k2_pf_flash_attn_Q32KV8)
-      if(EG)
-        string(APPEND _n _EAGER)
-      endif()
-      if(NOT GT)
-        string(APPEND _n _O)
-      endif()
-      add_ocloc_kernel(${_n}_KV8 SOURCE ${K2_KV8_CL}
-                       DEFINES K2KV8_FLASH=1 KT=64 RPW=8 HPW=4 ${K2_KV8_HEADS} EAGER=${EG} GATE_EPI=${GT}
-                       OPTIONS -cl-intel-256-GRF-per-thread)
-    endforeach()
+  foreach(GT 0 1)   # EAGER=0, inert since the eager arm went (zero-config cleanup)
+    set(_n k2_pf_flash_attn_Q32KV8)
+    if(NOT GT)
+      string(APPEND _n _O)
+    endif()
+    add_ocloc_kernel(${_n}_KV8 SOURCE ${K2_KV8_CL}
+                     DEFINES K2KV8_FLASH=1 KT=64 RPW=8 HPW=4 ${K2_KV8_HEADS} EAGER=0 GATE_EPI=${GT}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
   endforeach()
 endif()
 # ==== Spec 18e: K2-Horizon's int8 KV cache ==================================== (end) ====

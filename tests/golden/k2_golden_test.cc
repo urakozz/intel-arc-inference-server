@@ -224,9 +224,8 @@ int main(int argc, char** argv) {
   runtime::k2::K2Engine eng(ctx, std::move(model), kMaxLen, /*debug_tap=*/true);
   CHECK_EQ(eng.step().kernel_count, runtime::k2::decode_launches(d));
   runtime::Control* ctl = eng.buffers().control.as<runtime::Control>();
-  std::printf("lm_head %s, %s attention (B70_K2_ATTN), %s KV (B70_KV_CACHE), %zu launches per token, "
-              "near-tie tolerance %.1e, prompt by %s\n", int8 ? "int8" : "bf16",
-              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), runtime::kv_cache_name(eng.kv_cache()),
+  std::printf("lm_head %s, flash attention, %s KV (B70_KV_CACHE), %zu launches per token, "
+              "near-tie tolerance %.1e, prompt by %s\n", int8 ? "int8" : "bf16", runtime::kv_cache_name(eng.kv_cache()),
               eng.step().kernel_count, double(tie_tol()), prefill ? "K2Engine::prefill" : "decode replays");
 
   bool gate_ok = true;
@@ -488,13 +487,12 @@ int main(int argc, char** argv) {
               bb += got * got;
             }
           }
-          std::printf("  attention check, row %u layer %u (%s): attn_out vs double cos %.6f, worst rel %.3e; "
-                      "the most peaked head's max p %.6f\n", T + j, L,
-                      runtime::k2::k2_attn_name(runtime::k2::k2_attn()), ab / std::sqrt(aa * bb), worst, pmax);
+          std::printf("  attention check, row %u layer %u (flash): attn_out vs double cos %.6f, worst rel %.3e; "
+                      "the most peaked head's max p %.6f\n", T + j, L, ab / std::sqrt(aa * bb), worst, pmax);
         }
       }
       // Diagnostic: B70_K2_DUMP=<prompt>:<row>:<file> writes that generated row's per-layer
-      // tap (bf16 [layers][hidden]) - two runs (B70_K2_ATTN=flash / eager) compared layer by layer.
+      // tap (bf16 [layers][hidden]) - two runs compared layer by layer.
       if (const char* dump = std::getenv("B70_K2_DUMP"); dump && !prefill) {
         const std::string s = dump;
         const size_t c1 = s.find(':'), c2 = s.find(':', c1 + 1);
@@ -536,23 +534,17 @@ int main(int argc, char** argv) {
   const auto [moe_const, mova_const] = route_rate();
   const double moe_got = by_judge ? rate(moe_j) : rate(moe_c), mova_got = by_judge ? rate(mova_j) : rate(mova_c);
   const double moe_rate = by_judge ? rate(moe_gj) : moe_const, mova_rate = by_judge ? rate(mova_gj) : mova_const;
-  // Operator rulings 2026-10-23 (#4) and 2026-10-29: K2's production decode attention is flash; the eager variant
-  // is DIAGNOSTIC - its routing rate and its token gate are printed with their bars, the test does not fail on
-  // them (its ctest label `diagnostic` says so).
-  const bool eager = runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager;
+  // Operator rulings 2026-10-23 (#4), 2026-10-29 and 2026-11-06: K2's decode attention is flash (the eager
+  // variant, once recorded here as a diagnostic, went with B70_K2_ATTN in the zero-config cleanup).
   const bool route_ok = moe_got <= moe_rate && mova_got <= mova_rate;
-  std::printf("routing %s: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - %s%s\n",
-              eager ? "(eager: RECORDED, not gated)" : "gate", moe_got, moe_rate, mova_got, mova_rate,
+  std::printf("routing gate: differing sets MoE %.4f (bar %.4f), MoVA %.4f (bar %.4f) - %s%s\n",
+              moe_got, moe_rate, mova_got, mova_rate,
               by_judge ? "the engine and the bf16 golden each against the f32 judge (operator, 2026-10-29)"
                        : "the bf16 reference's own rate against its f32 control",
-              route_ok ? "" : (eager ? "  (above the bar)" : "  ** FAIL **"));
-  if (eager) {
-    std::printf("token gate (eager: RECORDED, not gated): %s\n", gate_ok ? "kept" : "missed rows above");
-  } else {
-    CHECK(gate_ok);
-    CHECK(moe_got <= moe_rate);
-    CHECK(mova_got <= mova_rate);
-  }
+              route_ok ? "" : "  ** FAIL **");
+  CHECK(gate_ok);
+  CHECK(moe_got <= moe_rate);
+  CHECK(mova_got <= mova_rate);
   std::puts("k2_golden_test OK");
   return 0;
 }

@@ -11,7 +11,7 @@
 //     needle at 5 %, 50 % and 95 % of the filler;
 //   - decode only (one replay per id, K2Engine::ingest): ~2100 ids, needle at 95 %.
 // The prompt is tools/probe/passkey.py's (no chat template, BOS prepended by the tokenizer).
-// argv: [1] snapshot. The KV form is B70_KV_CACHE's, the attention B70_K2_ATTN's.
+// argv: [1] snapshot. The KV form is B70_KV_CACHE's, the attention flash.
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -81,8 +81,8 @@ int main(int argc, char** argv) {
   l0::Context ctx(0);
   runtime::k2::K2Engine eng(ctx, loader::load_k2(ctx, snap, kMaxLen), kMaxLen);
   eng.prepare_prefill();
-  std::printf("k2_passkey_test: %s KV, attention %s, max_len %u\n", runtime::kv_cache_name(eng.kv_cache()),
-              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), kMaxLen);
+  std::printf("k2_passkey_test: %s KV, attention flash, max_len %u\n", runtime::kv_cache_name(eng.kv_cache()),
+              kMaxLen);
   bool all = true;
   for (const uint32_t target : {2100u, 8000u})
     for (const double place : {0.05, 0.5, 0.95}) all = run(eng, t, target, place, false) && all;

@@ -306,9 +306,8 @@ int main(int argc, char** argv) {
   l0::Context ctx(0);
   runtime::k2::K2Engine eng(ctx, loader::load_k2(ctx, snap, kMaxLen, loader::LmHeadForm::Int8), kMaxLen);
   eng.prepare_prefill();
-  std::printf("k2_prefix_gpu_test: %s KV, int8 head, attention %s, near-tie allowance %u, split_last %d, "
-              "a snapshot position %zu B\n", runtime::kv_cache_name(eng.kv_cache()),
-              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), allowed, int(g_split), eng.kv_bytes(1));
+  std::printf("k2_prefix_gpu_test: %s KV, int8 head, attention flash, near-tie allowance %u, split_last %d, "
+              "a snapshot position %zu B\n", runtime::kv_cache_name(eng.kv_cache()), allowed, int(g_split), eng.kv_bytes(1));
   bool all = part0(ctx, eng, L);
 
   Adapter ad(eng, eng.vocab());

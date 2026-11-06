@@ -45,8 +45,8 @@ uint8_t* at(const l0::Mem& m, size_t off) { return static_cast<uint8_t*>(m.ptr()
 class Walk {
  public:
   Walk(prefill::Context& cx, prefill::KernelCache& kc, K2PrefillScratch& s,
-       const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C, bool eager)
-      : cx_(cx), kc_(kc), s_(s), m_(m), d_(*m.desc), b_(b), pos_(pos), C_(C), eager_(eager) {}
+       const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C)
+      : cx_(cx), kc_(kc), s_(s), m_(m), d_(*m.desc), b_(b), pos_(pos), C_(C) {}
 
   void run() {
     check();
@@ -160,7 +160,7 @@ class Walk {
             PtrArg(s_.attn_q.ptr()), PtrArg(s_.attn_gate.ptr()), PtrArg(kvk), PtrArg(kvv)});
     prefill::profile_wait(cx_, Phase::kAttnPrep);
     // k2_pf_flash_attn(q, kv_k, kv_v, gate, out, pos, C) - grid (ceil(C / 8), kv heads, 1)
-    launch(kc_(kk::pf_flash_variant(d_.q_heads, d_.kv_heads, eager_, true), "k2_pf_flash_attn"),
+    launch(kc_(kk::pf_flash_variant(d_.q_heads, d_.kv_heads, true), "k2_pf_flash_attn"),
            (C_ + kk::kPfFlashRpw - 1) / kk::kPfFlashRpw, d_.kv_heads, 1,
            {PtrArg(s_.attn_q.ptr()), PtrArg(kvk), PtrArg(kvv), PtrArg(s_.attn_gate.ptr()),
             PtrArg(s_.attn_out.ptr()), arg_val(pos_), arg_val(C_)});
@@ -182,7 +182,7 @@ class Walk {
     prefill::profile_wait(cx_, Phase::kAttnPrep);
     // k2_pf_flash_attn_kv8(q, kv_k, k_scale, kv_v, v_scale, gate, out, pos, C) - grid
     // (ceil(C / 8), kv heads, 1)
-    launch(kc_(kk::pf_flash_kv8_variant(d_.q_heads, d_.kv_heads, eager_, true), "k2_pf_flash_attn_kv8"),
+    launch(kc_(kk::pf_flash_kv8_variant(d_.q_heads, d_.kv_heads, true), "k2_pf_flash_attn_kv8"),
            (C_ + kk::kPfFlashRpw - 1) / kk::kPfFlashRpw, d_.kv_heads, 1,
            {PtrArg(s_.attn_q.ptr()), PtrArg(kl.k), PtrArg(kl.ks), PtrArg(kl.v), PtrArg(kl.vs),
             PtrArg(s_.attn_gate.ptr()), PtrArg(s_.attn_out.ptr()), arg_val(pos_), arg_val(C_)});
@@ -309,7 +309,6 @@ class Walk {
   const model::K2Desc& d_;
   K2Buffers& b_;
   const uint32_t pos_, C_;
-  const bool eager_;
   const bool kv8_ = b_.kv_cache() == KvCache::Int8;   // spec 18e: the buffers' form
   size_t n_ = 0;
 };
@@ -345,12 +344,9 @@ size_t K2PrefillScratch::bytes() const {
          h.size() + w.size();
 }
 
-bool prefill_attn_eager() { return k2_attn() == K2Attn::Eager; }   // one parser, k2_sizes.cc
-
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, K2PrefillScratch& s,
-                   const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C,
-                   bool eager) {
-  Walk(cx, kc, s, m, b, pos, C, eager).run();
+                   const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C) {
+  Walk(cx, kc, s, m, b, pos, C).run();
 }
 
 void prefill_head(prefill::Context& cx, prefill::KernelCache& kc, K2PrefillScratch& s,

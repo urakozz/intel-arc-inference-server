@@ -10,12 +10,8 @@
 //   K2KV8_DEC    k2_attn_decode_kv8          k2_attn.cl's decode pair over int8 K / V + fp16
 //                k2_attn_reduce_kv8            scales, the output un-rotated per head BEFORE the gate
 //                (M, TGT)
-//   K2KV8_EAGER  k2_attn_eager_score_kv8     k2_attn_eager.cl's score / P·V / reduce over the int8
-//                k2_attn_eager_pv_kv8          cache (the softmax between them is k2_attn_eager.cl's
-//                k2_attn_eager_reduce_kv8      own kernel, unchanged: it never sees the cache)
-//                (M, TGT)
-//   K2KV8_FLASH  k2_pf_flash_attn_kv8        k2_pf_attn.cl over the int8 cache (EAGER 0 / 1), the
-//                (KT, RPW, HPW, EAGER,         un-rotation fused into the epilogue (one sub-group
+//   K2KV8_FLASH  k2_pf_flash_attn_kv8        k2_pf_attn.cl over the int8 cache (its flash form), the
+//                (KT, RPW, HPW, EAGER = 0,     un-rotation fused into the epilogue (one sub-group
 //                 GATE_EPI)                    holds a row's 128 dims), then the softplus gate
 //
 // Every existing kernel source keeps its bytes (k2_moe.cl gains one define, MOVA_STAGE, whose
@@ -52,8 +48,6 @@
 //
 // The readers dequantise while loading:
 //   decode flash  K and V exactly, deq in fp32 (k2_attn.cl's arithmetic and orders on those values);
-//   decode eager  the same exact deq; the reference's rounding points (score rounded twice, p to
-//                 bf16) on the rotated q and the dequantised K, P·V in fp32, then the un-rotation;
 //   prefill       K's int8 is the bf16 DPAS operand as is (exact) and the score is multiplied by the
 //                 key's scale; V's int8 likewise, its scale folded into P (rne(p s_v) - one rounding
 //                 more than bf16 KV's rne(p)); the row sum is P's, unscaled.
@@ -68,14 +62,11 @@
 #ifndef K2KV8_DEC
 #define K2KV8_DEC 0
 #endif
-#ifndef K2KV8_EAGER
-#define K2KV8_EAGER 0
-#endif
 #ifndef K2KV8_FLASH
 #define K2KV8_FLASH 0
 #endif
-#if K2KV8_PREP + K2KV8_DEC + K2KV8_EAGER + K2KV8_FLASH != 1
-#error "k2_kv8: define exactly one of K2KV8_PREP, K2KV8_DEC, K2KV8_EAGER, K2KV8_FLASH (src/kernels/CMakeLists.txt)"
+#if K2KV8_PREP + K2KV8_DEC + K2KV8_FLASH != 1
+#error "k2_kv8: define exactly one of K2KV8_PREP, K2KV8_DEC, K2KV8_FLASH (src/kernels/CMakeLists.txt)"
 #endif
 
 #if K2KV8_DEC || K2KV8_FLASH
@@ -83,7 +74,7 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
 #endif
-#if K2KV8_PREP || K2KV8_EAGER
+#if K2KV8_PREP
 #pragma OPENCL FP_CONTRACT OFF
 #endif
 
@@ -150,7 +141,7 @@ inline float kv8_f16f(ushort h) {
   return (h & 0x8000u) ? -v : v;
 }
 
-#if K2KV8_PREP || K2KV8_DEC || K2KV8_EAGER
+#if K2KV8_PREP || K2KV8_DEC
 // The 128-point FWHT across a 128-work-item work-group, work-item i owning element i, staged
 // through `buf` (128 floats of SLM). Every work-item must call it (barriers). It starts and ends
 // on a barrier-safe footing: the first write follows the caller's last read of `buf` only through
@@ -293,7 +284,7 @@ __kernel void k2_attn_prep_kv8(__global const uint* restrict ctrl,
 }
 #endif  // K2KV8_PREP
 
-#if K2KV8_DEC || K2KV8_EAGER
+#if K2KV8_DEC
 #ifndef M
 #define M 1
 #endif
@@ -533,142 +524,10 @@ __kernel void k2_attn_reduce_kv8(__global const uint* restrict ctrl,
 }
 #endif  // K2KV8_DEC
 
-#if K2KV8_EAGER
-// ---------------------------------------------------------------------------
-// The eager decode attention over the int8 cache - k2_attn_eager.cl's chain (its header is the
-// contract: the score row attn_s [M][Q_HEADS][stride], the blocks of eager_ppw over the step's
-// longest row, attn_part words 2..) with the cache's loads replaced and the un-rotation added:
-//
-//   k2_attn_eager_score_kv8 (ctrl, attn_q, kv_k, k_scale, attn_s, stride)   grid (KV_HEADS, TGT)
-//     s_p = rne(f32(rne(sum_d q_rot,d x deq(K)_pd)) x SCALE)   one fma chain, d ascending; the
-//     operand deq = float(q8) x f16f(scale) is exact, q_rot fp32 (so the products are not: the
-//     fma chain is the one order, contraction off - kv8_ref::eager_score is the twin)
-//   k2_attn_eager_softmax   k2_attn_eager.cl's own kernel, unchanged (torch's softmax bit for bit)
-//   k2_attn_eager_pv_kv8    (ctrl, attn_s, kv_v, v_scale, attn_part, stride) grid (KV_HEADS, TGT)
-//     per key block sum_p p_p x deq(V)_pd, an fma chain ascending
-//   k2_attn_eager_reduce_kv8 (ctrl, attn_part, attn_gate, attn_out)          grid (Q_HEADS, M)
-//     o_rot = the blocks added ascending (fp32); o = unrotate(o_rot); out = k2_gated(o, gate)
-// Where bf16 KV's eager rounds P·V to bf16 and gates it, the int8 form un-rotates the fp32 sum
-// first and rounds the un-rotated value (the reference's one rounding of o, in the right basis).
-// Plain OpenCL C (the Mac's OpenCL runs it: tools/mac/clrun/k2_run.cc).
-// ---------------------------------------------------------------------------
-inline uint eager_ppw(uint len) { return v2_ppw(len); }
-inline uint n_rows(__global const uint* restrict ctrl) {
-  const uint n = ctrl[CTRL_NACT];
-  return n > M ? M : n;
-}
-
-__attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void k2_attn_eager_score_kv8(__global const uint* restrict ctrl,
-                                      __global const float* restrict attn_q,
-                                      __global const char* restrict kv_k,
-                                      __global const ushort* restrict k_scale,
-                                      __global float* restrict attn_s,
-                                      const uint stride) {
-  const uint j = get_group_id(0);
-  const uint blk = get_group_id(1);
-  const uint lid = get_local_id(0);
-  const uint pos = ctrl[CTRL_POS];
-  const uint n_act = n_rows(ctrl);
-  if (n_act == 0) return;
-  const uint end = pos + n_act;
-  const uint s = eager_ppw(end);
-  const uint bstart = blk * s;
-  if (bstart >= end) return;   // uniform
-  const uint bend = min(bstart + s, end);
-
-  __local float qpack[NPR * HD];   // [m][qhl][128]
-  for (uint i = lid; i < NPR * HD; i += WG) {
-    const uint pr = i / HD, d = i % HD;
-    const uint m = pr / GQA, qhl = pr % GQA;
-    qpack[i] = m < n_act ? attn_q[((size_t)m * Q_HEADS + j * GQA + qhl) * HD + d] : 0.0f;
-  }
-  barrier(CLK_LOCAL_MEM_FENCE);
-
-  for (uint p = bstart + lid; p < bend; p += WG) {
-    const size_t r = (size_t)p * KV_HEADS + j;
-    __global const char* restrict kr = kv_k + r * HD;
-    const float ksc = kv8_f16f(k_scale[r]);
-    float a[NPR];
-    for (uint pr = 0; pr < NPR; ++pr) a[pr] = 0.0f;
-    for (uint d0 = 0; d0 < HD; d0 += 8) {
-      const char8 k8 = vload8(0, kr + d0);
-      const float kf[8] = {(float)k8.s0 * ksc, (float)k8.s1 * ksc, (float)k8.s2 * ksc, (float)k8.s3 * ksc,
-                           (float)k8.s4 * ksc, (float)k8.s5 * ksc, (float)k8.s6 * ksc, (float)k8.s7 * ksc};
-      for (uint pr = 0; pr < NPR; ++pr)
-        for (uint t = 0; t < 8; ++t) a[pr] = fma(qpack[pr * HD + d0 + t], kf[t], a[pr]);   // d ascending
-    }
-    for (uint pr = 0; pr < NPR; ++pr) {
-      const uint m = pr / GQA, qhl = pr % GQA;
-      if (m >= n_act || p > pos + m) continue;   // row m's keys end at pos + m
-      attn_s[((size_t)m * Q_HEADS + j * GQA + qhl) * stride + p] = rf(rf(a[pr]) * SSCALE);
-    }
-  }
-}
-
-__attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void k2_attn_eager_pv_kv8(__global const uint* restrict ctrl,
-                                   __global const float* restrict attn_s,
-                                   __global const char* restrict kv_v,
-                                   __global const ushort* restrict v_scale,
-                                   __global float* restrict attn_part,
-                                   const uint stride) {
-  const uint j = get_group_id(0);
-  const uint blk = get_group_id(1);
-  const uint d = get_local_id(0);
-  const uint pos = ctrl[CTRL_POS];
-  const uint n_act = n_rows(ctrl);
-  if (n_act == 0) return;
-  const uint end = pos + n_act;
-  const uint s = eager_ppw(end);
-  const uint bstart = blk * s;
-  if (bstart >= end) return;   // uniform
-  const uint bend = min(bstart + s, end);
-
-  float acc[NPR];
-  for (uint pr = 0; pr < NPR; ++pr) acc[pr] = 0.0f;
-  for (uint p = bstart; p < bend; ++p) {
-    const size_t r = (size_t)p * KV_HEADS + j;
-    const float v = (float)kv_v[r * HD + d] * kv8_f16f(v_scale[r]);   // exact
-    for (uint pr = 0; pr < NPR; ++pr) {
-      const uint m = pr / GQA, qhl = pr % GQA;
-      if (m >= n_act || p > pos + m) continue;   // uniform
-      acc[pr] = fma(attn_s[((size_t)m * Q_HEADS + j * GQA + qhl) * stride + p], v, acc[pr]);
-    }
-  }
-  for (uint pr = 0; pr < NPR; ++pr) {
-    const uint m = pr / GQA, qhl = pr % GQA;
-    if (m >= n_act || bstart > pos + m) continue;   // the reduce reads row m's blocks only
-    attn_part[(((size_t)(j * GQA + qhl) * TGT + blk) * M + m) * PART + 2 + d] = acc[pr];
-  }
-}
-
-__attribute__((reqd_work_group_size(WG, 1, 1)))
-__kernel void k2_attn_eager_reduce_kv8(__global const uint* restrict ctrl,
-                                       __global const float* restrict attn_part,
-                                       __global const float* restrict attn_gate,
-                                       __global ushort* restrict attn_out) {
-  const uint h = get_group_id(0);
-  const uint m = get_group_id(1);
-  const uint d = get_local_id(0);
-  __local float xch[HD];
-  const uint pos = ctrl[CTRL_POS];
-  const uint n_act = n_rows(ctrl);
-  if (m >= n_act) return;   // uniform
-  const uint s = eager_ppw(pos + n_act);
-  const uint nb = (pos + m + 1 + s - 1) / s;
-  float o_rot = 0.0f;
-  for (uint b = 0; b < nb; ++b) o_rot += attn_part[(((size_t)h * TGT + b) * M + m) * PART + 2 + d];
-  const float o = kv8_unrotate(o_rot, d, xch);
-  const float g = attn_gate[((size_t)m * Q_HEADS + h) * HD + d];
-  attn_out[(size_t)m * OUT_N + (size_t)h * HD + d] = k2_gated(o, g);
-}
-#endif  // K2KV8_EAGER
-
 #if K2KV8_FLASH
 // ---------------------------------------------------------------------------
 // k2_pf_flash_attn_kv8 - k2_pf_attn.cl (its header is the contract: 8 query rows per sub-group,
-// S in the DPAS A layout, the online softmax, the tiles from key 0, EAGER's two passes) over the
+// S in the DPAS A layout, the online softmax, the tiles from key 0) over the
 // int8 cache, the un-rotation and the gate in the epilogue:
 //
 //   k2_pf_flash_attn_kv8(Q, Kc, Ks, Vc, Vs, G, out, pos, C)
@@ -682,12 +541,11 @@ __kernel void k2_attn_eager_reduce_kv8(__global const uint* restrict ctrl,
 // K^T operand: lane l = key t0 + 16 b + l, its 16 dims 16 kk .. 16 kk + 15 as 8 bf16 pairs (low
 //   half = even dim) - the transposed 2D read's layout in k2_pf_attn.cl - from one 16-byte load of
 //   the key's int8 row; an int8 is exactly a bf16. The key's K scale multiplies the dot: the score
-//   is score_of(dot x sk) - k2_pf_attn.cl's score_of (fp32 scale, or EAGER's two roundings).
+//   is score_of(dot x sk) - k2_pf_attn.cl's score_of (fp32 scale).
 // V operand: lane l = dim, 8 pairs of consecutive keys (VNNI), int8 as bf16 exactly; the key's V
-//   scale goes into P: pa = rne(p x sv) (default: p = exp(s - m); EAGER: p = rf(exp(s - m) / l),
-//   the reference's bf16 probability, scaled and rounded once more). The row sum stays sum p.
+//   scale goes into P: pa = rne(p x sv), p = exp(s - m). The row sum stays sum p.
 // Keys at or past `depth` load as 0 and score -INF; nothing past the cache's rows is read.
-// Epilogue: per row r0 + r, w = o / l (EAGER: o, p was normalised); the 128 dims of the row are
+// Epilogue: per row r0 + r, w = o / l; the 128 dims of the row are
 //   the sub-group's (dim 16 dd + lane): flipped by s, the FWHT's stages 1, 2, 4, 8 across lanes
 //   (sub-group xor shuffles) and 16, 32, 64 across dd (registers), in ascending order - the host's
 //   unrotate op for op, so bitwise kv8::hd128::unrotate on the same w - times 1/16, then the gate.
@@ -707,8 +565,8 @@ __kernel void k2_attn_eager_reduce_kv8(__global const uint* restrict ctrl,
 #if GQA % HPW != 0
 #error "k2_kv8 flash: the GQA group must be a multiple of HPW"
 #endif
-#if !defined(EAGER) || !defined(GATE_EPI)
-#error "k2_kv8 flash: EAGER and GATE_EPI must be defined (0 or 1 each)"
+#if !defined(GATE_EPI)
+#error "k2_kv8 flash: GATE_EPI must be defined (0 or 1); EAGER (the removed eager arm) is inert"
 #endif
 #define SG 16
 #define NDA (HD / 16)                  /* 8 dim-atoms of O */
@@ -719,11 +577,7 @@ __kernel void k2_attn_eager_reduce_kv8(__global const uint* restrict ctrl,
 inline uint kv8_bf(char c) { return as_uint((float)c) >> 16; }
 // k2_pf_attn.cl's score_of on the scaled dot.
 inline float score_of(float dot) {
-#if EAGER
-  return rf(rf(dot) * SSCALE);
-#else
   return dot * SSCALE;
-#endif
 }
 // One xor-shuffle FWHT stage across the sub-group's lanes on a float8 (8 rows), per component.
 inline float8 fwht_lanes(float8 v, uint l, uint h) {
@@ -854,7 +708,6 @@ __kernel void k2_pf_flash_attn_kv8(__global const float* restrict Q,
   rsum.s6 = sub_group_reduce_add(psum.s6); rsum.s7 = sub_group_reduce_add(psum.s7);
 #define KV8_CV(r) pa[b].s##r = as_short(rne_bf16(ps.s##r));
 
-#if !EAGER
   // The default path: the online softmax, P = exp(s - m) x s_v rounded to bf16 for P·V, O / l last.
   for (uint t0 = 0; t0 < last; t0 += KT) {
     KV8_SCORES(t0)
@@ -876,36 +729,6 @@ __kernel void k2_pf_flash_attn_kv8(__global const float* restrict Q,
     for (uint dd = 0; dd < NDA; ++dd) o[dd] *= corr;
     KV8_PV(t0)
   }
-#else
-  // Pass 1: the row's max and sum exp(s - max) over its keys (fp32, online).
-  for (uint t0 = 0; t0 < last; t0 += KT) {
-    KV8_SCORES(t0)
-    KV8_ROWMAX()
-    const float8 corr = exp(m - mnew);
-    float8 psum = (float8)(0.0f);
-#pragma unroll
-    for (uint b = 0; b < NKA; ++b) psum += exp(sacc[b] - mnew);
-    KV8_ROWSUM(psum, rsum)
-    lsum = lsum * corr + rsum;
-    m = mnew;
-  }
-  // Pass 2: p = rf(exp(s - m) / l), the softmax's bf16 output, times s_v rounded once more;
-  // O = sum p v in fp32.
-  for (uint t0 = 0; t0 < last; t0 += KT) {
-    KV8_SCORES(t0)
-    short8 pa[NKA];
-#pragma unroll
-    for (uint b = 0; b < NKA; ++b) {
-      const float8 pe = exp(sacc[b] - m) / lsum;
-      float8 ps;
-      ps.s0 = rf(pe.s0) * svl[b]; ps.s1 = rf(pe.s1) * svl[b]; ps.s2 = rf(pe.s2) * svl[b];
-      ps.s3 = rf(pe.s3) * svl[b]; ps.s4 = rf(pe.s4) * svl[b]; ps.s5 = rf(pe.s5) * svl[b];
-      ps.s6 = rf(pe.s6) * svl[b]; ps.s7 = rf(pe.s7) * svl[b];
-      KV8_CV(0) KV8_CV(1) KV8_CV(2) KV8_CV(3) KV8_CV(4) KV8_CV(5) KV8_CV(6) KV8_CV(7)
-    }
-    KV8_PV(t0)
-  }
-#endif
 #undef KV8_SCORES
 #undef KV8_MASK
 #undef KV8_PV
@@ -917,11 +740,7 @@ __kernel void k2_pf_flash_attn_kv8(__global const float* restrict Q,
   float8 w[NDA];
 #pragma unroll
   for (uint dd = 0; dd < NDA; ++dd) {
-#if EAGER
-    w[dd] = o[dd];                               // already normalised
-#else
     w[dd] = o[dd] / lsum;
-#endif
     w[dd] = as_float8(as_uint8(w[dd]) ^ (uint8)(kv8_negbit(16u * dd + l)));   // s (.) y
   }
   for (uint hl = 1u; hl < SG; hl <<= 1) {        // stages 1, 2, 4, 8: lane bits

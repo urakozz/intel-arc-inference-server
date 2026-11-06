@@ -1,5 +1,6 @@
-// k2_attn_eager_ref_test - K2-Horizon's eager decode attention (B70_K2_ATTN=eager, spec 18
-// §10): tests/kernels/k2_ref.h's eager chain against the reference itself, and against the
+// k2_attn_eager_ref_test - K2-Horizon's eager decode attention HOST chain (spec 18 §10; the
+// device kernel and B70_K2_ATTN went in the zero-config cleanup, the chain stays the reference of
+// Kolibri's and Bolt's eager forms): tests/kernels/k2_ref.h's eager chain against the reference itself, and against the
 // flash path it is the alternative to. Host only (the Mac runs it).
 //
 //   (a) torch, bit for bit. tests/kernels/k2_attn_eager_fixture.h is tools/oracle/k2_ref.py

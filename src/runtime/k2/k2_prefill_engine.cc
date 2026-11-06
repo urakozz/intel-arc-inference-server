@@ -76,7 +76,6 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
               std::to_string(buffers_.max_len) + " - the KV cache and the RoPE table stop there");
 
   prepare_prefill();
-  const bool eager = prefill_attn_eager();
 
   // Spec 18d: with a block hook (spec 7 §3.2) every chunk ends at a block end or at the
   // prompt end - Engine::prefill's rule, one shared function - so each completed block is a
@@ -90,7 +89,7 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     std::memcpy(pf_->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = pos;
     control_->n_active = C;
-    prefill_chunk(pf_->cx, pf_->kc, pf_->s, model_, buffers_, pos, C, eager);
+    prefill_chunk(pf_->cx, pf_->kc, pf_->s, model_, buffers_, pos, C);
     pf_->cx.wait();   // the chunk's KV rows have landed
     const uint32_t end = pos + C;
     if (hooked && off + C < ids.size() && end % kBlock == 0) {
