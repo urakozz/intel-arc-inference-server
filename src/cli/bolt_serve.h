@@ -223,9 +223,10 @@ struct BoltDraftHooks {
   std::function<const runtime::dflash::LiliDraftOut&(uint32_t k)> draft;
   bool on() const { return static_cast<bool>(draft); }
 };
-// The sampled draft distribution (spec 26 Decision 6, PROVISIONAL until r63.accept): `lattice` - q_s = softmax(realized / T)
-// over slot s's 8 candidates, realized = lattice[s][previous] (vLLM's) - or `lattice+lp` - softmax((realized + lp_s) / T), the
-// alternative 26a records. Either is lossless through accept_sparse; only acceptance moves.
+// The sampled draft distribution (spec 26 Decision 6, PROVISIONAL: r63.accept, its measurement, is not restored; D4 on the host
+// holds both lossless): `lattice` - q_s = softmax(realized / T) over slot s's 8 candidates, realized = lattice[s][previous]
+// (vLLM's) - or `lattice+lp` - softmax((realized + lp_s) / T), the alternative 26a records. Either is lossless through
+// accept_sparse; only acceptance moves.
 enum class BoltDraftQ { Lattice, LatticeLp };
 inline bool parse_bolt_draft_q(const std::string& v, BoltDraftQ& out) {
   if (v == "lattice") out = BoltDraftQ::Lattice;

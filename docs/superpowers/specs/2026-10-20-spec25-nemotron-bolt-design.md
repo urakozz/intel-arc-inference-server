@@ -12,7 +12,7 @@ template / tokenizer fixtures, the output stream, the request path, `b70-serve <
 and plain serving (25c-25e) stay. Muse-Glimmer (spec 23) and LFM2.5 (spec 24), whose patterns this spec reuses, were
 dropped the same day; the kernels Bolt binds from them (`mg_attn*.cl`, `mg_pf_attn.cl`, and `lfm_prep.cl` for P0's
 stand-in) moved byte-identical to `src/kernels/bolt/`.
-**2026-11-01 (operator):** the 2026-10-27 drop of spec 26 is reversed - Bolt's verify lists, the Mamba state slots, the union MoE, `--spec lookup` / `dflash` and the LiLiCorr drafter are restored (branch bolt-spec-restore).
+**2026-11-01 (operator):** the 2026-10-27 drop of spec 26 is reversed - Bolt's verify lists, the Mamba state slots, the union MoE, `--spec lookup` / `dflash` and the LiLiCorr drafter are restored (branch bolt-spec-restore-2, on the zero-config `--spec` surface of 2026-11-06: `--spec lookup|dflash`, `--spec-max`, `--draft-model`; Bolt's `--spec auto` off until row 65's D5).
 **Plans (2026-10-20):** `docs/superpowers/plans/2026-10-20-spec25{a,q,b,c,d,e}-*.md` - 25a facts and the CPU
 reference, 25q our AutoRound g64 re-quantisation (the recipe; the operator runs it), 25b descriptor / loader /
 memory plan, 25c decode (the launch-count and state-bandwidth P0 first), 25d prefill, 25e serving.

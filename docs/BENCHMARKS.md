@@ -1150,9 +1150,9 @@ overall 4.30 -> ~2.3x, writing 3.41 -> ~1.8x (spec 26 §11).
 | what | configuration | number | stage |
 |---|---|---|---|
 | tokens a verify (D5's acceptance) per K 1..7 and AdaptiveK | `bolt_dflash_{int8,exact,int4}_test`: the golden short prose / short code prompts and the agentic transcript, greedy | pending | r65.d2 |
-| llama-benchy pp4096 tg256 depth 1; decode at depth 4k / 16k | b70-serve two cards, `--spec off` / `lookup` / `dflash` (int8, exact, int4; `B70_BOLT_VERIFY_MOE=plain`), `--no-cache --exact-tg --latency-mode generation` | pending | r65.benchy (opt-in) |
-| the agentic transcript as a live loop | the same arms, greedy and T 1.0 / top-p 0.95; per request the mean accepted length | pending - D5's rule: `dflash` becomes Bolt's default only if it beats `off` and `lookup` by >= 10 % here and loses nowhere by more than 3 % | r65.benchy (opt-in) |
-| the verify per M, the block per format | `probe_draft_cost --shapes bolt-lilicorr` | pending (replaces the derived rows above; `--spec-cost` meanwhile) | r63.cost |
+| llama-benchy pp4096 tg256 depth 1; decode at depth 4k / 16k | b70-serve two cards, `--spec off` / `lookup` / `dflash` (the engine's int8 drafter and union MoE; the formats' and the MoE forms' A/B is r63.cost x r65.d2 and `bolt_moe_union_test --time`), `--no-cache --exact-tg --latency-mode generation` | pending | r65.benchy (opt-in) |
+| the agentic transcript as a live loop | the same arms, greedy and T 1.0 / top-p 0.95; per request the mean accepted length | pending - D5's rule: `dflash` becomes Bolt's `--spec auto` only if it beats `off` and `lookup` by >= 10 % here and loses nowhere by more than 3 % | r65.benchy (opt-in) |
+| the verify per M, the block per format | `probe_draft_cost --shapes bolt-lilicorr` | pending (replaces the derived rows above in `MtpCost::bolt_lilicorr` / `bolt_verify`) | r63.cost |
 | memory with `--spec dflash` | the verify slots 1,174,405,120 B over the 40 Mamba blocks (7 x 4 MiB each), the verify scratch ~14.8 MB a card, the drafter 1.30 GB (int8, at 262144) + the replica 1.07 GB + the prefill staging 50 MB on device 1; `--max-len auto` 262144 in every format | derived (`bolt_spec_plan_test`, measured on the Mac) | r65.serve's memory lines |
 
 ## Correctness

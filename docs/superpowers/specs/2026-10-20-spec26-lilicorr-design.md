@@ -1,6 +1,8 @@
 # Spec 26 - LiLiCorr: NVIDIA's DFlash-family drafter for Nemotron 3.5 Bolt
 
-> RESTORED (operator, 2026-11-01 - reverses the 2026-10-27 drop): the engine code is back on branch bolt-spec-restore (reverts of 99adbb0 and 0219cc2 onto main). Not restored: the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_d1.py, interleaved with the dropped Muse form) and the stages that need it (r63 accept / union / vllmref / verdict, r64 d1 / d1_ref).
+> RESTORED (operator, 2026-11-01 - reverses the 2026-10-27 drop): the engine code is back on branch bolt-spec-restore-2 (reverts of 99adbb0 and 0219cc2, rebased onto main 04e7f0d). Not restored: the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_d1.py, interleaved with the dropped Muse form) and the stages that need it (r63 accept / union / vllmref / verdict, r64 d1 / d1_ref). The plans 26a-c and the probe doc came back with it.
+>
+> **The flags since the zero-config cleanup (operator 2026-11-06):** the user-facing surface is `b70-serve --spec off|lookup|dflash` (`auto` = off for Bolt until D5, row 65), `--spec-max 1..7` and `--draft-model PATH` (cli/spec_args.h `SpecFamily::Bolt`, cli/bolt_spec.h). Every other knob this spec names is now the engine's choice, not a flag: `--draft-format` (int8; exact / int4 g64 are the card tests' `--format` arms), `--draft-q` (lattice; lattice+lp the host tests'), `--spec-cost` (the derived `MtpCost::bolt_lilicorr` / `bolt_verify` until r63.cost replaces them in the code), `--spec-min-match` / `--spec-history` (lookup's server defaults 3 / 0), `B70_BOLT_VERIFY_MOE` (union; plain the tests' `plain` argument and `bolt_moe_union_test --time`), `B70_PREFILL_REPLAY` (gone on main).
 >
 > Was: DROPPED (operator, 2026-10-27): support removed from the engine in 0219cc2 (26c) and 99adbb0 (26a / 26b); kept for the record.
 >
@@ -17,7 +19,7 @@ box, its defaults PROVISIONAL); **26b built on the Mac 2026-10-23** (§13 as bui
 run on a card yet, row 64); **26c built on the Mac 2026-10-23** (§14 as built: Bolt's verify lists, the slots, the union
 MoE, the prefill tail, snapshots and `b70-serve --spec dflash|lookup` - nothing run on a card yet, row 65; `--spec dflash` is
 NOT Bolt's default until D5).
-**Plans (2026-10-20):** the plan `2026-10-20-spec26{a,b,c}-*.md` (deleted with the model drop; see the repo history) - 26a P0 (the reference, teacher-forced
+**Plans (2026-10-20):** the plans `2026-10-20-spec26{a,b,c}-*.md` (deleted with the model drop, restored 2026-11-01) - 26a P0 (the reference, teacher-forced
 acceptance on our target, the verify cost, the projection), 26b the drafter on the card (D1), 26c the engine loop and
 serving (D0, D2-D5). **Box queue rows 63-65** (spec 25 takes 57-62).
 
@@ -376,7 +378,7 @@ Branch `spec26a-lilicorr-p0`; box queue row 63. Built: `tools/oracle/dflash_ref.
 `probe_draft_cost --shapes bolt-lilicorr` (+ `draft_cost_shapes.h`'s `bolt_lilicorr`), `tools/spec/lilicorr_p0_project.py`, the
 tests `test_dflash_ref.py`'s 13 `test_lilicorr_*` (one on the real checkpoint), `test_dflash_accept.py`'s 5, `test_expert_union.py`,
 `test_lilicorr_p0_project.py`, `lilicorr_cost_names_test`; queue row 63's stages and the data key `lilicorr`; the record
-the probe doc `probe-lilicorr` (deleted with the model drop; see the repo history). kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
+the probe doc `docs/probes/probe-lilicorr-2026-10-23.md` (deleted with the model drop, restored 2026-11-01). kernel_cmdlines **+99 / -0 / ~0** (1,406 -> 1,505); no existing `.cl` edited.
 
 **Measured on the Mac** (`agnes-ref-img`, torch 2.14.1+cpu, the 5.19.0 site; every number printed by the test named): NVFP4's
 16 x 254 finite (code, scale) products exact in bf16 and f16, |W'| in [2^-10, 2688], the 2 NaN scale codes refused naming the

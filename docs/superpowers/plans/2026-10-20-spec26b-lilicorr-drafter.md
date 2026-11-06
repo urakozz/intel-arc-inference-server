@@ -1,6 +1,6 @@
 # Spec 26b - LiLiCorr on the card: the descriptor form, NVFP4 -> our formats at load, the sink attention, top-8 with log-probs, the lattice head and its walk, the draft and projection lists (D1)
 
-> RESTORED (operator, 2026-11-01 - reverses the 2026-10-27 drop): the engine code is back on branch bolt-spec-restore (reverts of 99adbb0 and 0219cc2 onto main). Not restored: the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_d1.py, interleaved with the dropped Muse form) and the stages that need it (r63 accept / union / vllmref / verdict, r64 d1 / d1_ref).
+> RESTORED (operator, 2026-11-01 - reverses the 2026-10-27 drop): the engine code is back on branch bolt-spec-restore-2 (reverts of 99adbb0 and 0219cc2, rebased onto main 04e7f0d). The flags this plan names are history: since the zero-config cleanup (2026-11-06) Bolt's surface is `b70-serve --spec lookup|dflash`, `--spec-max 1..7`, `--draft-model`; `--draft-format`, `--draft-q`, `--spec-cost`, `--spec-min-match` / `--spec-history`, `B70_BOLT_VERIFY_MOE` and `B70_PREFILL_REPLAY` are the engine's choices or the tests' arguments (spec 26's header). Not restored: the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_d1.py, interleaved with the dropped Muse form) and the stages that need it (r63 accept / union / vllmref / verdict, r64 d1 / d1_ref).
 >
 > Was: DROPPED (operator, 2026-10-27): support removed from the engine in 99adbb0; kept for the record.
 >

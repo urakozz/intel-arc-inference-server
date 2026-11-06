@@ -3614,7 +3614,7 @@ st_r64_draft() {
 # ======================================================================================
 row 65 "spec 26c - LiLiCorr in Bolt's loop and server: verify M <= 8 with taps on two cards, Mamba state slots and the commit, the union-aware MoE, the prefill projection, snapshots with the ring, --spec dflash (D0, D2-D5) (plan 26c)"
 rownote 65 "Run rows 60-62 (Bolt) and 64 (the drafter on the card) first; the drafter is row 64's download (lilicorr), our g64 export row 57's (bolt_int4), the N 12 synthetics row 59's (bolt_synth). Every stage on the REAL checkpoint needs BOTH cards: its tests / commands set ZE_AFFINITY_MASK=0,1 themselves (the verify lists cross by the copy hand-off only)."
-rownote 65 "Written on the Mac (spec 26 §14): the verify lists at M = 1..8 (25c's walk over a verify scratch at 8 rows, the six taps of every row - device 0's crossing before the hand-off's barrier -, nb_ssm's slot build at every M, the commit moving Control::gdn_live on both cards), the union-aware MoE (nb_moe_union.cl: bitwise the plain M-row form on the Mac's GPU in 10 route cases, each block read once by the counting build), the drafter's prefill tail (each chunk's rows in its window, 8 a replay - the GEMM path NOT built), snapshots with the ring and the anchor, b70-serve --spec dflash|lookup for Bolt (cli/bolt_spec.h; NOT the default), MtpCost::bolt_lilicorr (DERIVED). Host tests: bolt_spec_test (D2 / D4 10^6 draws / Review Focus 3 and 4 over a fake engine), bolt_spec_plan_test. kernel_cmdlines additions only; no existing .cl edited; nothing compiled by ocloc, nothing run on a card. Defaults PROVISIONAL (spec 26 §11): --draft-format int8, --spec-max 7, --draft-q lattice, B70_BOLT_VERIFY_MOE=union."
+rownote 65 "Written on the Mac (spec 26 §14): the verify lists at M = 1..8 (25c's walk over a verify scratch at 8 rows, the six taps of every row - device 0's crossing before the hand-off's barrier -, nb_ssm's slot build at every M, the commit moving Control::gdn_live on both cards), the union-aware MoE (nb_moe_union.cl: bitwise the plain M-row form on the Mac's GPU in 10 route cases, each block read once by the counting build), the drafter's prefill tail (each chunk's rows in its window, 8 a replay - the GEMM path NOT built), snapshots with the ring and the anchor, b70-serve --spec dflash|lookup for Bolt (cli/bolt_spec.h; NOT the default), MtpCost::bolt_lilicorr (DERIVED). Host tests: bolt_spec_test (D2 / D4 10^6 draws / Review Focus 3 and 4 over a fake engine), bolt_spec_plan_test. kernel_cmdlines additions only; no existing .cl edited; nothing compiled by ocloc, nothing run on a card. Defaults PROVISIONAL (spec 26 §11): the drafter int8, --spec-max 7, q lattice, the union MoE. Since the zero-config cleanup (2026-11-06) they are the engine's choices: b70-serve takes --spec off|lookup|dflash, --spec-max and --draft-model only (Bolt's --spec auto is off until r65.benchy's D5); the other arms are the card tests' arguments (bolt_dflash_test --format exact|int4, bolt_verify_*_plain, bolt_moe_union_test --time) - no flag, no variable."
 rownote 65 "Hand back: r65.d3's lines (bolt_moe_union_test per I / case, bolt_verify_*'s per M and MoE form, bolt_commit_*'s per j and the ragged line), r65.d2's 'tokens a verify' per K and format (D5's acceptance on the golden prompts and the agentic set), r65.prefill's worst cosine, r65.prefix's lines, r65.serve's IDENTICAL / SEEDED lines and the startup's 'spec dflash:' line, r65.benchy's tables (opt-in), any FAIL lines."
 stage r65.k0      65 default cpu  -                          g0.sha,g0.bitwise,g0.suite "D0: every pre-existing binary identical and the suite (G0) - 26c's edits to shared files: bolt_capture.cc (the walk over a scratch view; the decode list's commands unchanged), BoltEngine (enable_spec / verify / commit, the live slot, read_logits' row), bolt_prefill (defaulted drafter taps), bolt_serve.h (the adapter's spec paths, inert without spec_k), spec_accept / adaptive_k (additions), b70-serve's Bolt flags; Bolt's decode and prefill names (bolt_variant_names_test, bolt_pf_variant_names_test) and the verify names"
 st_r65_k0() {
@@ -3628,9 +3628,9 @@ st_r65_host() {
   jgrab host '^(bolt_spec_test|bolt_spec_plan_test)$' 'greedy|D4|p-value|mutant|snapshots|deferred|plan with|cost rows|verify launches|OK|PASS'
   finish
 }
-stage r65.reject  65 default gpu  -                          -        "the --spec refusals before the device: b70-serve cli_reject_serve_bolt_{lookup,dflash,spec_max,dflash_peer,draft_q,draft_vocab,spec_mtp,mtp}, b70-decode cli_reject_bolt_spec (under the GPU lock: a refusal that regressed would open the devices)"
+stage r65.reject  65 default gpu  -                          -        "the --spec refusals before the device: b70-serve cli_reject_serve_bolt_{lookup,dflash_lookup,spec_max,dflash_peer,draft_model,draft_vocab,spec_mtp}, b70-decode cli_reject_bolt_spec (under the GPU lock: a refusal that regressed would open the devices)"
 st_r65_reject() {
-  run_tests '^cli_reject_(serve_bolt_(lookup|dflash|spec_max|dflash_peer|draft_q|draft_vocab|spec_mtp|mtp)|bolt_spec)$'
+  run_tests '^cli_reject_(serve_bolt_(lookup|dflash_lookup|spec_max|dflash_peer|draft_model|draft_vocab|spec_mtp)|bolt_spec)$'
   finish
 }
 stage r65.d3      65 default gpu  bolt_synth                 r65.k0   "D3 + Review Focus 1 + Decision 10 on the cards: the verify binaries' first ocloc build; bolt_moe_union_test (union = plain M-row, bitwise, every I; the counting build); bolt_verify_synth{,_plain,_b16,_eager}_test (N 12, one card) and bolt_verify_real{,_plain}_test (our g64 export's, two cards: SKIP without bolt_g128) - verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV rows, ring columns, SSM slots, taps), the launches per M; bolt_commit_{synth,synth_b16,real}_test - the live slot after commit j = the state after j + 1 steps on both cards, 64 ids after it, 3dc6def360's M 1 and ragged cases"
@@ -3661,7 +3661,7 @@ st_r65_prefix() {
   jgrab prefix '^bolt_dflash_prefix_gpu_test$' '^restore at|sibling|ring of zeros|differ|OK'
   finish
 }
-stage r65.serve   65 default gpu  bolt_int4,lilicorr         r65.d2   "D2 / D4 by b70-serve <bolt> on two cards: the 36 A4 scenarios (tests/golden/toolcall-bolt, greedy, max_tokens 512) through --spec off / --spec dflash (AdaptiveK to 7) / --spec lookup - identical to --spec off; a seeded sampled request twice through --spec dflash with --draft-q lattice and lattice+lp; the startup's 'spec dflash:' line and the per-request 'dflash:' lines (tokens a verify)"
+stage r65.serve   65 default gpu  bolt_int4,lilicorr         r65.d2   "D2 / D4 by b70-serve <bolt> on two cards: the 36 A4 scenarios (tests/golden/toolcall-bolt, greedy, max_tokens 512) through --spec off / --spec dflash (AdaptiveK to 7) / --spec lookup - identical to --spec off; a seeded sampled request twice through --spec dflash (q lattice, the engine's; lattice+lp is bolt_spec_test's D4 on the host); the startup's 'spec dflash:' line and the per-request 'dflash:' lines (tokens a verify)"
 st_r65_serve() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local dm="--draft-model ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr}"
@@ -3673,36 +3673,30 @@ st_r65_serve() {
   x "python3 tools/box_validate/serve_client.py table --dir $d --ref off --metric wall_tps"
   x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap --max-len 32768 --spec dflash $dm"
   step_rc $? "b70-serve --spec dflash (q lattice): serves; the seeded sampled request twice"
-  x "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $snap --max-len 32768 --spec dflash --draft-q lattice+lp $dm"
-  step_rc $? "b70-serve --spec dflash --draft-q lattice+lp: the seeded sampled request twice"
   grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
   grab_all ratio '^RATIO ' 10
   grab_all dflash 'spec dflash:|dflash:|lookup:|SEEDED|memory' 30
   finish
 }
-stage r65.benchy  65 optin   gpu-self bolt_int4,lilicorr,uvx r65.serve "D5 (spec 26 §7): llama-benchy through b70-serve <bolt> on two cards at the operator's flags (pp4096 tg256 depth 1, --no-cache --exact-tg --latency-mode generation; decode at depth 4k / 16k) and the agentic transcript as a live loop, --spec off / --spec lookup / --spec dflash (auto K) with the int8 drafter, then dflash with --draft-format exact / int4 and B70_BOLT_VERIFY_MOE=plain (the union's A/B), greedy and T 1.0 / top-p 0.95 - dflash becomes Bolt's default only if it beats both by >= 10 % on the agentic set and loses nowhere by more than 3 %"
+stage r65.benchy  65 optin   gpu-self bolt_int4,lilicorr,uvx r65.serve "D5 (spec 26 §7): llama-benchy through b70-serve <bolt> on two cards at the operator's flags (pp4096 tg256 depth 1, --no-cache --exact-tg --latency-mode generation; decode at depth 4k / 16k) and the agentic transcript as a live loop, --spec off / --spec lookup / --spec dflash (auto K) with the engine's int8 drafter, greedy and T 1.0 / top-p 0.95 (the formats' A/B is r63.cost's cost x r65.d2's acceptance per format, the union's bolt_moe_union_test --time: no serve flag selects them since 2026-11-06) - dflash becomes Bolt's --spec auto only if it beats both by >= 10 % on the agentic set and loses nowhere by more than 3 %"
 st_r65_benchy() {
   local snap='${HF_HOME:-$HOME/.cache/huggingface}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156'
   local dm="--draft-model ${SNAP_LILICORR:-nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr}" t=tests/golden/prompts/bolt_agentic.json
-  local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation" arm a e
+  local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation" arm a
   idle r65-benchy-before
-  for arm in off lookup dflash dflash-exact dflash-int4 dflash-plain; do
-    e=""
+  for arm in off lookup dflash; do
     case "$arm" in
       off) a="--spec off" ;;
       lookup) a="--spec lookup" ;;
       dflash) a="--spec dflash $dm" ;;
-      dflash-exact) a="--spec dflash $dm --draft-format exact" ;;
-      dflash-int4) a="--spec dflash $dm --draft-format int4" ;;
-      dflash-plain) a="--spec dflash $dm"; e="B70_BOLT_VERIFY_MOE=plain " ;;
     esac
-    chk "${e}WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "pp4096 tg256, $arm"
-    chk "${e}WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 1024 --tg 256 --depth 4096 16384 $f" "decode at depth 4k / 16k, $arm"
-    chk "${e}WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-$arm $snap $t --max-len 65536 $a" "the agentic transcript, $arm (greedy)"
-    chk "${e}WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"temperature\": 1.0, \"top_p\": 0.95}' tools/box_validate/agentic_run.sh $STATE/agentic-$arm-t1 $snap $t --max-len 65536 $a" "the agentic transcript, $arm (T 1.0 / top-p 0.95)"
+    chk "WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "pp4096 tg256, $arm"
+    chk "WAIT=3600 MODEL=$snap MAX_LEN=65536 SERVE_AFFINITY=0,1 SERVE_ARGS='$a' tools/probe/serve_benchy.sh --pp 1024 --tg 256 --depth 4096 16384 $f" "decode at depth 4k / 16k, $arm"
+    chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/agentic_run.sh $STATE/agentic-$arm $snap $t --max-len 65536 $a" "the agentic transcript, $arm (greedy)"
+    chk "WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=$PORT EXTRA='{\"temperature\": 1.0, \"top_p\": 0.95}' tools/box_validate/agentic_run.sh $STATE/agentic-$arm-t1 $snap $t --max-len 65536 $a" "the agentic transcript, $arm (T 1.0 / top-p 0.95)"
   done
   idle r65-benchy-after
-  say "D5's rule (spec 26 §7): --spec dflash becomes Bolt's default only if it beats --spec off AND --spec lookup by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option. Record the tables, the per-request 'dflash:' lines (tokens a verify) and the verdict in docs/BENCHMARKS.md 'LiLiCorr on Bolt (spec 26)'"
+  say "D5's rule (spec 26 §7): --spec dflash becomes Bolt's --spec auto only if it beats --spec off AND --spec lookup by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option. Record the tables, the per-request 'dflash:' lines (tokens a verify) and the verdict in docs/BENCHMARKS.md 'LiLiCorr on Bolt (spec 26)'"
   grab_all benchy '^\| |dflash:|lookup:|hit rate|wall' 160
   finish
 }

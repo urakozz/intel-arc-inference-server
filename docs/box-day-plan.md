@@ -860,7 +860,8 @@ MoE, the M = 2..8 rows of 25c's kernels, Muse's attention at M rows when the Mus
 state many times (save / load_state + _kv, 170 MB a restore). `r65.d2` loads the drafter three times (int8 / exact / int4,
 ~1-2.4 GB on device 1 beside the 1.07 GB replica - DERIVED, spec 26 §4) and runs the three golden prompts at every K 1..7
 and AdaptiveK - the per-K "tokens a verify" lines are D5's acceptance on the golden prompts. `r65.benchy` is the timed
-row: box idle (§1.7), six arms (off, lookup, dflash int8 / exact / int4, dflash with `B70_BOLT_VERIFY_MOE=plain`) x
+row: box idle (§1.7), three arms (off, lookup, dflash with the engine's int8 drafter; since the zero-config cleanup no serve
+flag selects the exact / int4 formats or the plain MoE - those A/Bs are r63.cost x r65.d2 and `bolt_moe_union_test --time`) x
 llama-benchy and the agentic transcript (greedy and T 1.0 / top-p 0.95) - hours, ESTIMATED. Hand back the lines row 65's
 rownote lists; §4's row for D5 says what they decide.
 
@@ -945,10 +946,10 @@ named stage.
 | the 1.5 GB reserve (`kDefaultReserveGb`) | `r7.serve` (device memory via xpu-smi while a fresh server is up) | confirm, or tune after a long operator session |
 | `--prefix-cache-gb auto` | `r9.auto` (startup line and its /proc/meminfo inputs) | confirm the chosen size |
 | MTP embedding on device 1 | `r27.serve`, `r27.s3` memory lines | already **decided: replicate** (operator, 2026-10-07); the box only confirms it fits |
-| Bolt's `--spec dflash` default (spec 26 D5) | opt-in `r65.benchy` (llama-benchy + the agentic transcript per arm); `r65.d2`'s tokens a verify | `dflash` becomes Bolt's default only if it beats `--spec off` AND `--spec lookup` by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option |
-| LiLiCorr's `--draft-format`, `--spec-max`, `--draft-q` defaults (spec 26 §11) | `r63.accept` (E_K per arm, the q forms), `r65.benchy`'s exact / int4 arms | int4 g64 if its E_K is within 0.05 of exact's at the chosen K (Decision 2), else int8; K_max from AdaptiveK's picks; `lattice+lp` only if r63 shows it ahead |
-| `MtpCost::bolt_lilicorr` / `bolt_verify` (DERIVED) | `r63.cost` (verify per M, the block), `r63.union` (u per M) | replace the derived rows (`--spec-cost` meanwhile) |
-| the union MoE / the replay lever (Decisions 10 / 4) | `r65.benchy`'s `dflash-plain` arm; `r63.cost`'s slot-write share | keep the union unless the plain form is not slower; build the read-only verify + replay only if the slot writes exceed 10 % of a verify at the chosen K |
+| Bolt's `--spec auto` = `dflash` (spec 26 D5) | opt-in `r65.benchy` (llama-benchy + the agentic transcript per arm); `r65.d2`'s tokens a verify | `dflash` becomes Bolt's `--spec auto` only if it beats `--spec off` AND `--spec lookup` by >= 10 % on the agentic set and loses nowhere by more than 3 %; else it ships as an option |
+| LiLiCorr's format, `--spec-max` and draft-q defaults (spec 26 §11; the engine's choices, no flag since 2026-11-06) | `r65.d2`'s tokens a verify per format (`bolt_dflash_{int8,exact,int4}_test`) with `r63.cost`'s block per format (`r63.accept` is not restored) | int4 g64 if its acceptance is within 0.05 of exact's at the chosen K (Decision 2), else int8 - set in `cli::bolt::SpecArgs`; K_max from AdaptiveK's picks; `lattice+lp` stays a test arm (no measurement of its acceptance is restored) |
+| `MtpCost::bolt_lilicorr` / `bolt_verify` (DERIVED) | `r63.cost` (verify per M, the block), `r63.union` (u per M) | replace the derived rows in `MtpCost::bolt_lilicorr` / `bolt_verify` (no `--spec-cost` since 2026-11-06) |
+| the union MoE / the replay lever (Decisions 10 / 4) | `bolt_moe_union_test --time` (union vs plain at M 1..8, card 1) and r65.d3's plain verify tests; `r63.cost`'s slot-write share | keep the union unless the plain form is not slower; build the read-only verify + replay only if the slot writes exceed 10 % of a verify at the chosen K |
 
 ## 5. Known risks
 
