@@ -3,8 +3,8 @@
 //
 //   probe_verify_m <snapshot> [--depth 4096] [--replays 64] [--rounds 3] [--device 0]
 //
-// Needs a build with -DB70_DECODE_EXTRA_M=ON (the M = 2..4 decode-list variants
-// and the bf16 head-shape GEMVs). Everything is timed on the REAL captured list
+// Needs B70_MTP (the default build: the M = 2..4 decode-list variants and the bf16
+// head-shape GEMVs). Everything is timed on the REAL captured list
 // (runtime::build at M), not kernels in isolation, after one prefill of --depth
 // ids: every layer, lm_head and argmax at M rows.
 //

@@ -94,7 +94,7 @@ st_g0_suite() {
 
 # ======================================================================================
 row 1 "spec 14 - Agnes 3.0 Flash, ModelDesc (2026-10-03-spec14-validation-checklist.md)"
-rownote 1 "Step 4's follow-up (replace P1-P3 in make_agnes() and add_gemv_variant when the sweep picks another {S, L}, rebuild, re-run G0) and step 12's record are edits on a branch: r1.sweep records the picks."
+rownote 1 "Step 4's GEMV sweep (B70_AGNES_SWEEP) was removed in the zero-config cleanup (2026-11-06): Agnes keeps the PROVISIONAL cells; step 12's record is an edit on a branch."
 rownote 1 "Step 6's optional box re-dump of oracle-out-agnes (golden.sh, unstreamed, 61+ GiB) is not run: the gates use the Mac's layer-streamed sets."
 
 stage r1.host 1 default cpu - - "step 3: host and table tests (model_desc, agnes_fold, kernel_table, template x2, qwen35)"
@@ -116,22 +116,6 @@ st_r1_parity() {
   chk "cd $STATE/agnes-parity && $TOK_PYTHON $TREE/tools/tokenizer/dump_parity.py \$($TREE/tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json" "corpus.ids from Agnes's tokenizer (Python tokenizers)"
   chk "B70_TOKENIZER_JSON=\$(tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json build/tests/parity_test $STATE/agnes-parity/tests/tokenizer" "parity_test on Agnes's tokenizer.json"
   grab parity 'cases|parity|OK'
-  finish
-}
-
-stage r1.sweep_build 1 default cpu - g0.build "step 4 (P1-P3): build the GEMV sweep variants (-DB70_AGNES_SWEEP=ON) in build-agnes-sweep"
-st_r1_sweep_build() {
-  chk "cmake -S . -B build-agnes-sweep -DCMAKE_BUILD_TYPE=Release -DB70_AGNES_SWEEP=ON $CMAKE_ARGS > /dev/null && cmake --build build-agnes-sweep -j$JOBS" "the sweep build"
-  finish
-}
-
-stage r1.sweep 1 default gpu - r1.sweep_build "step 4 (P1-P3): probe_gemv --agnes - the {S, L} picks for 5120x38912 and 19456x5120, GB/s (timed)"
-st_r1_sweep() {
-  idle before
-  chk "build-agnes-sweep/tools/probe/probe_gemv --agnes" "probe_gemv --agnes"
-  idle after
-  grab_all sweep-decisions 'decision|pick|chosen|best' 20
-  grab_all idle '^IDLE '
   finish
 }
 
@@ -3683,10 +3667,9 @@ st_r68_host() {
   run_tests '^gemm_sm_ref_test$'
   finish
 }
-stage r68.build    68 default cpu  -           g0.build              "probe_small_m and its 347 psm_* binaries (build); probe_verify_m in build-extra-m (-DB70_DECODE_EXTRA_M=ON), -j\$JOBS"
+stage r68.build    68 default cpu  -           g0.build              "probe_small_m and its 347 psm_* binaries, probe_mtp_steps and probe_verify_m (build), -j\$JOBS"
 st_r68_build() {
-  chk "cmake --build build -j$JOBS --target probe_small_m probe_mtp_steps" "probe_small_m and its psm_* binaries"
-  chk "cmake -S . -B build-extra-m -DCMAKE_BUILD_TYPE=Release -DB70_DECODE_EXTRA_M=ON $CMAKE_ARGS > /dev/null && cmake --build build-extra-m -j$JOBS --target probe_verify_m" "build-extra-m: probe_verify_m (B70_DECODE_EXTRA_M)"
+  chk "cmake --build build -j$JOBS --target probe_small_m probe_mtp_steps probe_verify_m" "probe_small_m and its psm_* binaries, probe_mtp_steps, probe_verify_m"
   finish
 }
 stage r68.check    68 default card -           r68.k0,r68.build      "probe_small_m check: every psm_* variant (bf16 / i8, wB / wA, levers, S sweep, M 1..8 and 16) against the fp64 reference, the quantiser bitwise, property R on random rows"
@@ -3707,8 +3690,8 @@ st_r68_shapes() {
 stage r68.attrib   68 default gpu  qwen        r68.build                "probe_verify_m --verify8 at depth 4096 / 32768: the verify step and the per-family table at M 1..8 (and r29.cost's arm if it has not run)"
 st_r68_attrib() {
   idle before
-  chk "build-extra-m/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 4096 --replays 32 --rounds 3" "verify8 at 4096"
-  chk "build-extra-m/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 32768 --replays 32 --rounds 3" "verify8 at 32768"
+  chk "build/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 4096 --replays 32 --rounds 3" "verify8 at 4096"
+  chk "build/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 32768 --replays 32 --rounds 3" "verify8 at 32768"
   chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8" "r29.cost's arm (verify M = 1..8 pairs)"
   idle after
   grab_all attrib '^\| |^1v|^1p|^verify|^grouped|^the non-GEMV' 300
