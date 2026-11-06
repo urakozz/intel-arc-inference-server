@@ -1,5 +1,6 @@
 #include "runtime/prefill/gdn.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstdint>
 #include <stdexcept>
@@ -106,11 +107,13 @@ static const char* gdn_scan_entry() {
 
 // The entry the last scan launch was built with; see gdn.h for why it exists.
 // Written by `gdn_chunk` below, read by the gate/determinism/consistency/replay
-// tests so a selector run carries its own dispatch evidence.
-static const char* g_scan_launched = nullptr;
+// tests so a selector run carries its own dispatch evidence. Atomic (plan 13b): two engines
+// (b70-serve --parallel replica, one per card) prefill at once on their own threads; every
+// writer stores the same entry, so the value read is unchanged.
+static std::atomic<const char*> g_scan_launched{nullptr};
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
-const char* gdn_scan_launched_entry() { return g_scan_launched; }
+const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
 
 // Stage S4's solve: `pf_gdn_solve`. The register entry (`pf_gdn_solve_register`, bit-identical
 // by construction) and its B70_PREFILL_GDN_SOLVE selector went in the zero-config cleanup; the
@@ -198,7 +201,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
             {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
              PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
-  g_scan_launched = scan_entry;          // the dispatch proof, after the append
+  g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
   cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,

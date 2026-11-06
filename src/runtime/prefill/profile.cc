@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace runtime::prefill {
 namespace {
@@ -25,6 +26,9 @@ struct Acc {
   Context::LaunchMetrics launch[kN] = {};
 };
 Acc g_acc;
+// Plan 13b: two engines (--parallel replica) may prefill at once; the accumulators are guarded
+// (only when B70_PREFILL_PROFILE=1 - the unprofiled path never takes it).
+std::mutex g_acc_mu;
 
 }  // namespace
 
@@ -44,7 +48,9 @@ void timed_wait(Context& cx, Phase p) {
   const Clock::time_point t0 = Clock::now();
   cx.wait();
   const uint32_t i = uint32_t(p);
-  g_acc.ms[i] += std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+  const double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+  std::lock_guard<std::mutex> lock(g_acc_mu);
+  g_acc.ms[i] += ms;
   ++g_acc.waits[i];
   const auto metrics = cx.take_launch_metrics();
   g_acc.launch[i].gpu_ms += metrics.gpu_ms;
@@ -57,10 +63,14 @@ void profile_wait(Context& cx, Phase p) {
   timed_wait(cx, p);
 }
 
-void profile_reset() { g_acc = Acc{}; }
+void profile_reset() {
+  std::lock_guard<std::mutex> lock(g_acc_mu);
+  g_acc = Acc{};
+}
 
 void profile_report(const char* label, double wall_ms) {
   if (!profile_enabled()) return;
+  std::lock_guard<std::mutex> lock(g_acc_mu);
   double total = 0;
   size_t waits = 0;
   Context::LaunchMetrics launch;
