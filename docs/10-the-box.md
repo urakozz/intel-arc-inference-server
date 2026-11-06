@@ -105,6 +105,22 @@ identical to a baseline build) first and stop-the-line on a G0 failure, resumabl
 drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its results are on the box under `~/b70-validate/`, the latest result of every stage in
 `~/b70/logs/stage-latest.txt`.
 
+**When each runs.** `box_check` gates every merge; the validation run is not per merge - it runs once a
+night on the latest main and covers the day's merges together (operator, 2026-11-06).
+
+**A test whose inputs did not change keeps its PASS.** Every test runs through
+`tools/test_launcher.sh`; under box_check and box_validate it runs under `strace`, which records every
+file the test - and every program it starts - opened, ran, checked or found missing, and the
+environment it saw. `tools/box_validate/reuse.py` stores each PASS with the state of those inputs
+(`~/b70/test-results/<test>.json`): files of the tree by content, model snapshots and reference outputs
+by real path, size and mtime, missing files as missing, the number of visible cards. Before ctest runs,
+a test whose every input is still identical takes that PASS (`<stage>.reused.junit.xml`, its old output
+behind a `REUSED:` line); everything else runs. A device binary must match byte for byte (a new driver
+compiler changes them with no source changed); a host program from another tree built from the same
+sources with the same settings counts as the same, so the validation run takes box_check's PASSes
+for the half of the suite that needs no model files. Only PASS is kept: a failure or a skip always runs
+again. `tools/box_validate.sh --no-reuse` runs everything.
+
 ## Device selection, and the gotcha
 
 A box with two cards will not hand you the same one twice unless you say which.
