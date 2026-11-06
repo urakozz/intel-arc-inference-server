@@ -3,6 +3,7 @@
 #include <vector>
 
 #include "kernels/linear_kind.h"
+#include "kernels/xe_cores.h"
 #include "kernels/shape_suffix.h"
 
 #ifndef B70_KERNEL_DIR
@@ -60,11 +61,8 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
 // to the reference tolerance and to the golden gate, not to bit-identity.
 inline constexpr unsigned kGemvBf16Cols = 64;      // 4 subgroups per work-group
 inline constexpr unsigned kGemvBf16TinyCols = 16;  // 1 column tile per work-group
-// The Xe-core count the kernels are built for - the B70's 32 (docs/01-hardware.md);
-// the hardware gate (cli/hardware_check.h) refuses a card that shows another. A
-// shape whose default grid already puts at least one work-group on every core is
-// not the tiny-N case.
-inline constexpr unsigned kBuiltXeCores = 32;
+// kBuiltXeCores (kernels/xe_cores.h): a shape whose default grid already puts at least
+// one work-group on every core is not the tiny-N case.
 struct GemvBf16Tiling {
   unsigned cols;    // COLS_PER_WG: output columns per work-group
   unsigned ksplit;  // KSPLIT: subgroups splitting one tile's K, merged in SLM
