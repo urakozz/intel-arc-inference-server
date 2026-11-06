@@ -3849,7 +3849,7 @@ st_r70_verdict() {
 =======
 row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --pp 2), speed against 2048"
 rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper per 4096 tokens at 4096 rows, the rest of the plan stops. Hand back: the P0 table, the gate lines, the speed table."
-rownote 75 "Run first on 2026-11-01 as busy-box timing on one card (other agents on both cards) - docs/probe-prefill-chunk-4096-2026-11-01.md's provisional lines; r75.p0 / r75.speed are the quiet-box re-check. The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
+rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.p0 / r75.speed are the quiet-box re-check. The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
 stage r75.k0    75 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0 at cap 2048: every binary and token as main"
 st_r75_k0() {
   need_pass g0.sha g0.bitwise g0.suite

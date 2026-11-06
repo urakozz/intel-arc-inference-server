@@ -13,7 +13,7 @@
 //              `1 chunk`   2 ids;
 //              `split`     prefill_split under the pipeline: 4103 ids in two calls split at
 //                          2500, chunk 1000 (a continuation off the 64-row GDN grid);
-//              `hooks`     5000 ids with spec 7's block hook: at 2048 and 4096 (mid-prompt,
+//              `hooks`     5000 ids with spec 7's block hook: at 2048 and 4096 (plan 5d: at cap 4096 at 4096 only; mid-prompt,
 //                          read from the shadows while the next chunk runs) and at 5000, the
 //                          snapshot (save_state + save_kv) each hook takes;
 //              `hook throws` the same with a hook that throws at 2048: pos 2048 and the
@@ -181,6 +181,11 @@ struct Case {
 const Case kCases[] = {{"3 chunks", 4103, 2048, 0}, {"16 chunks", 32768, 2048, 0},
                        {"1 chunk", 2, 2048, 0},     {"split", 4103, 1000, 2500}};
 constexpr uint32_t kHookN = 5000, kRestoreAt = 3000, kRestoreN = 4103;
+// Plan 5d: the hooked prefill runs at the session's chunk cap, so the hook's stride (runtime/prefill_chunks.h) is
+// the cap: at 2048 hooks at 2048, 4096 and 5000; at 4096 (--chunk-cap 4096, ruling A) at 4096 and 5000. The
+// throwing hook throws at the first stride end. Set in main.
+uint32_t g_stride = 2048;
+size_t hook_count() { return (kHookN - 1) / g_stride + 1; }
 
 struct Config {
   runtime::PpHandoff handoff;
@@ -190,7 +195,7 @@ struct Config {
 }  // namespace
 
 int main(int argc, char** argv) {
-  b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
+  g_stride = b70test::take_chunk_cap_arg(argc, argv);   // plan 5d: --chunk-cap 4096 (the test seam)
   const std::string checkpoint = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   runtime::PrefillBackend backend = runtime::PrefillBackend::L0Int8;
   if (argc > 2) CHECK(runtime::parse_prefill_backend(argv[2], backend));
@@ -238,11 +243,11 @@ int main(int argc, char** argv) {
     });
     e.prefill(head(prompt, kHookN));
     e.set_block_hook({});
-    CHECK_EQ(ref_hooks.size(), size_t{3});
+    CHECK_EQ(ref_hooks.size(), hook_count());
     // The throwing hook: one card stops with pos at the block end.
     e.reset();
     e.set_block_hook([](uint32_t end, bool) {
-      if (end == 2048) throw std::runtime_error("hook");
+      if (end == g_stride) throw std::runtime_error("hook");
     });
     bool threw = false;
     try {
@@ -251,9 +256,9 @@ int main(int argc, char** argv) {
       threw = true;
     }
     e.set_block_hook({});
-    CHECK(threw && e.pos() == 2048);
+    CHECK(threw && e.pos() == g_stride);
     ref_throw_state = state_digest(e);
-    ref_throw_kv = kv_digest(e, 2048);
+    ref_throw_kv = kv_digest(e, g_stride);
     // The restore pair: 3000 ids, the snapshot, the rest.
     e.reset();
     e.prefill(head(prompt, kRestoreAt));
@@ -263,8 +268,8 @@ int main(int argc, char** argv) {
     e.save_kv(0, kRestoreAt, snap_kv.data());
     e.prefill(Ids(prompt.begin() + kRestoreAt, prompt.begin() + kRestoreN));
     ref_restore = record(e, imm);
-    std::printf("references (one card, device 0, %s): %zu cases, 3 hooks, a throwing hook, the "
-                "restore pair\n", runtime::prefill_backend_name(backend), ref.size());
+    std::printf("references (one card, device 0, %s): %zu cases, %zu hooks, a throwing hook, the "
+                "restore pair\n", runtime::prefill_backend_name(backend), ref.size(), ref_hooks.size());
   }
 
   const model::ModelDesc* desc = nullptr;
@@ -320,11 +325,12 @@ int main(int argc, char** argv) {
                      differ(ref_hooks[i].kv, hooks[i].kv).c_str());
       CHECK(hooks[i] == ref_hooks[i]);
     }
-    std::printf("%s, hooks: at 2048, 4096 (from the shadows) and 5000, each snapshot bitwise\n", what.c_str());
+    std::printf("%s, hooks: %zu at a %u stride (mid-prompt from the shadows) and 5000, each snapshot bitwise\n",
+                what.c_str(), hooks.size(), g_stride);
     // A throwing hook: pos 2048 and the 2048 state, as one card leaves them.
     e.reset();
     e.set_block_hook([](uint32_t end, bool) {
-      if (end == 2048) throw std::runtime_error("hook");
+      if (end == g_stride) throw std::runtime_error("hook");
     });
     bool threw = false;
     try {
@@ -334,10 +340,11 @@ int main(int argc, char** argv) {
     }
     e.set_block_hook({});
     CHECK(threw);
-    CHECK_EQ(e.pos(), 2048u);
+    CHECK_EQ(e.pos(), g_stride);
     CHECK(differ(state_digest(e), ref_throw_state).empty());
-    CHECK(differ(kv_digest(e, 2048), ref_throw_kv).empty());
-    std::printf("%s, a hook that throws at 2048: pos 2048, the state and KV one card leaves\n", what.c_str());
+    CHECK(differ(kv_digest(e, g_stride), ref_throw_kv).empty());
+    std::printf("%s, a hook that throws at %u: pos %u, the state and KV one card leaves\n", what.c_str(), g_stride,
+                g_stride);
 
     // One card -> two: the one-card snapshot at 3000 into the pipeline, the rest there.
     e.reset();

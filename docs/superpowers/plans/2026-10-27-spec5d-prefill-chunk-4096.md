@@ -1,7 +1,7 @@
 # Spec 5d - prefill chunk 4096: kC widened, the scratch through the planner, the chunk-bound sites, gates unchanged
 
-**Status (2026-10-27): PLANNED - fourth in the Qwen speed track (after spec 28, plan 19f and spec 17a); starts when the
-operator says go.** Nothing built. Box queue row **75** (spec 28's header lists the track's rows 68-75). Under spec 5
+**Status (2026-11-06): BUILT, correct at 4096, default kept at 2048** - +4.2 % at pp4096 is under the +5 % bar
+(see "As built" at the end; the operator decides whether the context-first rule goes on). Box queue row **75** (spec 28's header lists the track's rows 68-75). Under spec 5
 (the int8 prefill, `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md` §10 points here).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox (`- [ ]`) syntax for tracking. **Commit after every step** (signed, `git commit -S`; a step that does not build or pass yet goes in as a `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop.
@@ -139,3 +139,50 @@ rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper 
 
 **Gate for the plan:** host tests green and `tools/box_check.sh --base main` PASS (cmdlines ~0); on the box P0 passes its
 stop rule, every gate above passes at chunk 4096, and the speed table is recorded against its bar.
+
+---
+
+## As built (2026-11-06)
+
+**What changed.** The prefill chunk's row count is a session value, 2048 or 4096 (`PrefillScratchDims::kCDefault` /
+`kCMax`): `PrefillScratch`, `Int8State`'s int8 rows, MTP's prefill hidden rows and a drafter's tap staging are sized
+by it, the memory planner counts it, and every site that bounded a chunk by the constant 2048 asks the scratch it
+writes. Ornith (MoE) is refused at 4096 by name (`pf_moe` bakes 2048 into its sort staging). The prefix-cache hook
+follows ruling A: blocks stay 2048, a 4096-row chunk takes a state snapshot only at its end (every second block).
+`b70-decode --prefill-chunk` (the existing flag) now reaches 4096. **No environment variable** (operator, 2026-11-03):
+the first build's `B70_PREFILL_CHUNK_CAP` is gone; the engines default to 2048, the CLIs choose the cap
+(`cli/max_len.h`), and only a test binary moves the default (`runtime::testing::set_default_prefill_chunk_cap`
+through the tests' `--chunk-cap 4096` argument, `tests/chunk_cap_arg.h`; the `*_cap4096_test` registrations).
+
+**P0 (2026-11-01, busy box, `probe_chunk_rows`, 3 rounds):** the int8 linears are NOT cheaper at 4096 rows: one 4096
+chunk 97.1 ms against two 2048 chunks 96.1 ms (**-1.1 %**; bf16 +3.0 %), bitwise identical outputs. The stop rule
+would have stopped here; the end-to-end run below was made anyway (operator, 2026-11-06), since the other per-chunk
+fixed costs also halve.
+
+**Speed (2026-11-06, provisional: the box had a disk copy and a test job on the other card):** Qwen3.8-27B int4 g64
+(our export, NVMe), `l0-int8`, card 1, `--max-len 133120`, 4 interleaved rounds after a warm-up, order flipped each
+round, median (every round within 0.6 %):
+
+| depth | chunk 2048 t/s | chunk 4096 t/s | 4096 vs 2048 |
+|---:|---:|---:|---:|
+| 4096 | 2191.8 | 2284.0 | +4.2 % |
+| 8192 | 2099.9 | 2191.6 | +4.4 % |
+| 32768 | 1674.7 | 1762.7 | +5.3 % |
+| 131072 | 925.4 | 939.3 | +1.5 % |
+
+Faster at every depth, never slower; but **pp4096 +4.2 % < the +5 % go bar**, so by the plan 4096 stays opt-in:
+`cli::kPrefillChunkCapRule` (ruling (i): 4096 only when the plan at the chosen max_len has room) is built and **off**.
+The cost of 4096 is +0.70 GB of scratch (+~0.76 GB with MTP): ~12k fewer context positions under `--max-len auto` at
+bf16 KV if it were always on.
+
+**Gates at cap 4096 (card 0, 2026-11-06), all PASS:** `linear_i8_cap4096`, `gdn_chunk_cap4096` (the 4096-position bars
+as one call), `prefill_smoke_cap4096`, `prefill_gate_{l0,int8}_cap4096` (golden tie rule), `prefill_consistency_l0_cap4096`,
+`prefill_determinism_l0_cap4096`, `prefill_split_{l0,l0-int8}_cap4096`, `mtp_prefill_cap4096`, `pp_prefill_cap4096`
+(two cards), `memory_plan_box_test --chunk-cap 4096` (plan == allocation at 16384 and auto = 158976, MTP, l0 and
+l0-int8). The same tests at 2048 pass unchanged, with `prefill_int8`, `prefill_replay`, `snapshot`, `prefix_gpu_int8`,
+`prefix_gpu_mtp`, `golden_server`. **A4:** no Qwen3.8 bf16 A4 reference is on the box, so the 36 tool-call scenarios
+were run on `l0-int8` at cap 2048 and at cap 4096 and scored against each other: **33 / 36 identical first calls; the
+other 3 are 'incomplete' in both runs** (the rename scenarios hit the 192-token limit), so no call changed.
+
+**Open (operator):** turn the context-first rule on (4096 whenever it costs no context), or keep 2048. The quiet-box
+re-run (`r75.speed`) gives the final numbers either way.
