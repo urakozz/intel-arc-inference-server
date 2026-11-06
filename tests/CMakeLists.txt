@@ -3044,7 +3044,7 @@ add_test(NAME qwen4exp_plan_test COMMAND qwen4exp_plan_test)
 set_tests_properties(qwen4exp_plan_test PROPERTIES LABELS qwen4exp)
 # Task 6: the loader on the card - the synthetic checkpoints (both forms, with the MTP head) and Intel's
 # checkpoint at 18 layers (one card's fit with its bf16 dense layers, development mode); each with its PLE int8
-# file beside it (<snapshot>-ple-int8/, or B70_Q4_PLE). SKIP 77 without the data.
+# file beside it (<snapshot>-ple-int8/). SKIP 77 without the data.
 set(B70_Q4EXP_SYNTH_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-synth" CACHE PATH
   "Spec 21b's synthetic checkpoints: <dir>/{ours,intel}/ckpt and ckpt-ple-int8 (box: r31.synth)")
 set(B70_Q4EXP_INTEL_SNAPSHOT "Intel/Qwen3.8-Flash-Next-W4A16-AutoRound" CACHE STRING

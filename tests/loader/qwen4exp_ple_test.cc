@@ -10,7 +10,7 @@
 //      marker rows at head-local indices, the scale dtype read, dequant_row = bf16(float(q) x float(s));
 //   3. check_q4_ple against a test descriptor (2 heads, base 50): passes, and refuses a wrong multiplier, a
 //      wrong size, a wrong offset, a wrong width, a wrong head count - each naming the tensor;
-//   4. the host-memory rule refuses naming both numbers; q4_ple_dir finds <snapshot>-ple-int8/ or $B70_Q4_PLE
+//   4. the host-memory rule refuses naming both numbers; q4_ple_dir finds <snapshot>-ple-int8/ (nowhere else)
 //      and refuses naming ple_int8.py;
 //   5. the real table's derived bytes (51.2 GB of q + 0.64 / 1.28 GB of scales) printed.
 #include <unistd.h>
@@ -261,19 +261,13 @@ int main() {
   {
     const fs::path snap = tmpdir("snap");
     fs::create_directories(snap);
-    ::unsetenv("B70_Q4_PLE");
     throws_naming("ple_int8.py", [&] { loader::q4_ple_dir(snap.string() + "/"); });
     const fs::path ple = fs::path(snap.string() + "-ple-int8");
     write_checkpoint(ple, ple_file(sd, true));
     CHECK_EQ(loader::q4_ple_dir(snap.string() + "/"), ple.string() + "/");
-    const fs::path other = tmpdir("other");
-    write_checkpoint(other, ple_file(sd, true));
-    ::setenv("B70_Q4_PLE", other.string().c_str(), 1);
-    CHECK_EQ(loader::q4_ple_dir(snap.string()), other.string() + "/");
-    ::unsetenv("B70_Q4_PLE");
+    CHECK_EQ(loader::q4_ple_dir(snap.string()), ple.string() + "/");   // with or without the trailing slash
     fs::remove_all(snap);
     fs::remove_all(ple);
-    fs::remove_all(other);
   }
   CHECK(loader::q4_ple_tag(0, 0) != loader::q4_ple_tag(1, 0) && loader::q4_ple_tag(0, 1) != loader::q4_ple_tag(0, 0));
 

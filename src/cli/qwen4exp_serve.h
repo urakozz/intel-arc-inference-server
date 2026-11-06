@@ -8,7 +8,7 @@
 //
 //   --layers N|auto        REQUIRED until spec 22 (b70-decode's development mode): without it the whole model is
 //                          refused naming its bytes and spec 22 (the expert-offload tier)
-//   --ple-dir DIR          the PLE int8 file (default: <snapshot>-ple-int8/ or $B70_Q4_PLE)
+//   the PLE int8 file      <snapshot>-ple-int8/, beside the checkpoint (no flag)
 //   --tokenizer FILE       the original's tokenizer.json (Qwen/Qwen3.8-Flash-Next) when the snapshot's is Qwen3.8's:
 //                          21a found the original's split regex adds \p{M}, and Intel's checkpoint ships Qwen3.8's
 //                          file - a snapshot tokenizer.json without \p{M} in its pre-tokenizer is refused naming this

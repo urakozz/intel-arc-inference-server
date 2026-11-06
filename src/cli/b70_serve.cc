@@ -110,7 +110,7 @@ void usage() {
                "                 1.0 / 0.97 / 128). UNVALIDATED on the cards (queue row 28)\n"
                "                 Qwen3.8-Flash-Next (spec 21e, model_type qwen4_exp): its own engine, one card\n"
                "                 or two (--pp 2), --layers N|auto REQUIRED until spec 22 (the whole model is\n"
-               "                 refused naming its bytes), [--ple-dir DIR] (the PLE int8 file), [--tokenizer\n"
+               "                 refused naming its bytes), the PLE int8 file <snapshot>-ple-int8/, [--tokenizer\n"
                "                 FILE] (the original's tokenizer.json when the snapshot ships Qwen3.8's - it is\n"
                "                 refused), the Qwen path (XML tool calls, reasoning, greedy unless the request\n"
                "                 samples), the prefix cache, --mtp 1..3 / --spec lookup (--mtp auto,\n"
@@ -621,8 +621,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   const cq::Settled s = cq::settle(full, da, dev);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
-    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head(),
-                                 da.ple_dir);
+    return loader::load_qwen4exp(ctx, a.snapshot_dir, s.max_len, s.placement, da.lm_head, s.desc.layers, a.loads_head());
   }();
   std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode until spec 22)\n",
                model.desc.layers, model.checkpoint_layers);
@@ -866,7 +865,7 @@ int run(int argc, char** argv) {
   // original's tokenizer.json when the snapshot ships Qwen3.8's.
   uint32_t q4_layers = 0;
   bool q4_layers_auto = false, have_q4_layers = false;
-  std::string q4_ple_dir, q4_tokenizer;
+  std::string q4_tokenizer;
   std::string chat_template_file;   // spec 25e: --chat-template FILE (Bolt)
   std::string generation_config_file;   // spec 25e: --generation-config FILE (Bolt)
 
@@ -981,8 +980,6 @@ int run(int argc, char** argv) {
         q4_layers = parse_u32("--layers", v);
         if (q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
       }
-    } else if (arg == "--ple-dir") {     // spec 21e: Qwen3.8-Flash-Next only
-      q4_ple_dir = value(i, "--ple-dir");
     } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
       q4_tokenizer = value(i, "--tokenizer");
     } else if (arg == "--chat-template") {   // spec 25e: Bolt
@@ -1014,7 +1011,7 @@ int run(int argc, char** argv) {
     flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
                             dflash.have_format;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
-    flags.qwen4exp_flags = have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty();
+    flags.qwen4exp_flags = have_q4_layers || !q4_tokenizer.empty();
     cli::bolt::check_serve_flags(flags);
     if (options.host.empty()) throw std::runtime_error("--host must not be empty");
     if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
@@ -1148,7 +1145,7 @@ int run(int argc, char** argv) {
   // path that does not resolve is not Kolibri: the flow below reports it, so every rejection keeps its order.
   // Spec 21e: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
   // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
-  // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --ple-dir / --tokenizer
+  // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --tokenizer
   // belong to it alone.
   // --chat-template is Bolt's (dispatched above); every other served model renders its snapshot's template.
   if (!chat_template_file.empty())
@@ -1163,7 +1160,6 @@ int run(int argc, char** argv) {
     qs.tokenizer = q4_tokenizer;
     cli::qwen4exp::DecodeArgs& qa = qs.args;
     qa.path = qs.snapshot_dir;
-    qa.ple_dir = q4_ple_dir;
     qa.max_len = max_len_arg;
     qa.reserve = mem_reserve;
     qa.device = device;
@@ -1185,8 +1181,8 @@ int run(int argc, char** argv) {
     qs.prefix_cache_gb = prefix_cache_gb;
     return serve_qwen4exp(qs, options);
   }
-  if (have_q4_layers || !q4_ple_dir.empty() || !q4_tokenizer.empty())
-    throw std::runtime_error("--layers, --ple-dir and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
+  if (have_q4_layers || !q4_tokenizer.empty())
+    throw std::runtime_error("--layers and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
                              "spec 21e); this checkpoint is not one");
   if (cli::kolibri::is_kolibri(path)) {
     if (dflash.on)

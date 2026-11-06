@@ -2251,14 +2251,11 @@ st_r31_load() {
   finish
 }
 stage r31.load_real 31 default gpu q4exp_intel,q4exp_intel_ple r31.load "Intel's checkpoint at 18 layers on one card (development mode, its bf16 dense arms, g128 experts expanded): qwen4exp_load_intel_layers_test - 0 unconsumed, bytes = the plan, the edges read back; and the 51.8 GB PLE table pinned in 16 + 16 host-USM ranges: the time to pin it, MemAvailable before / after (spec 22 P0.5's starting number)"
-# The stages on Intel's real checkpoint: its int8 PLE file from the data tree when it is not beside the snapshot
-# (remote.sh's BV_Q4_PLE, data.sh q4ple), for this one command only.
-with_real_ple() {
-  if [ -n "${BV_Q4_PLE:-}" ]; then B70_Q4_PLE="$BV_Q4_PLE" "$@"; else "$@"; fi
-}
+# The stages on Intel's real checkpoint read its int8 PLE file beside the snapshot (<snapshot>-ple-int8/, the only
+# place the engine looks since the zero-config cleanup removed B70_Q4_PLE): data.sh q4ple says whether it is there.
 st_r31_load_real() {
   x "free -g | head -2"
-  with_real_ple run_tests '^qwen4exp_load_intel_layers_test$'
+  run_tests '^qwen4exp_load_intel_layers_test$'
   x "free -g | head -2"
   jgrab load-real '^qwen4exp_load_intel_layers_test$' 'model |skipped|note|device 0|host PLE|read/token|load  |OK'
   finish
@@ -2337,7 +2334,7 @@ st_r32_golden() {
 stage r32.partial 32 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp,oracle_q4exp_layers r32.k3 "development mode on Intel's checkpoint, one card: qwen4exp_partial_test at --layers 18 (int8 head) - the H tap of layers 0..17 against the full reference's H.L* (median cosine >= 0.9998, min >= 0.99, PROPOSED, per layer), the routing diagnostic and gate S for layers < 18, the token gate against the truncated reference oracle-out-q4exp-L18"
 st_r32_partial() {
   x "free -g | head -2"
-  with_real_ple run_tests '^qwen4exp_partial_test$'
+  run_tests '^qwen4exp_partial_test$'
   jgrab partial '^qwen4exp_partial_test$' 'tokens|tap cosine|routing:|OK'
   finish
 }
@@ -2456,7 +2453,7 @@ st_r33_golden() {
 stage r33.golden_real 33 default gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_layers r33.golden "F3 on prefill on Intel's checkpoint at --layers 18 (int8 head, one card): qwen4exp_golden_prefill_intel_test against 21a's truncated set oracle-out-q4exp-L18"
 st_r33_golden_real() {
   x "free -g | head -2"
-  with_real_ple run_tests '^qwen4exp_golden_prefill_intel_test$' qwen4exp '' \
+  run_tests '^qwen4exp_golden_prefill_intel_test$' qwen4exp '' \
     "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL} ${B70_Q4_SEL_TOL:+B70_Q4_SEL_TOL=$B70_Q4_SEL_TOL}"
   jgrab golden-real '^qwen4exp_golden_prefill_intel' 'gate:|routing:|gate S:|prefill:|OK|FAIL'
   finish

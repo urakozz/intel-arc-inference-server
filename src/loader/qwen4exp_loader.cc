@@ -140,7 +140,7 @@ model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo
 
 Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std::string& snapshot_or_repo,
                             uint32_t max_len, const model::Q4Placement& placement, LmHeadForm lm_form,
-                            uint32_t layers_limit, bool mtp, const std::string& ple_dir_arg) {
+                            uint32_t layers_limit, bool mtp) {
   const auto t0 = std::chrono::steady_clock::now();
   const Opened o = open(snapshot_or_repo);
   const QuantConfig qc = check_qwen4exp_checkpoint_config(o.cfg);
@@ -183,7 +183,7 @@ Q4LoadedModel load_qwen4exp(const std::vector<l0::Context*>& devices, const std:
     runtime::qwen4exp::require_fits(runtime::qwen4exp::plan(d, placement, max_len, int8, mtp), caps,
                                     size_t(runtime::kDefaultReserveGb * 1e9));
   }
-  const std::string ple_dir = ple_dir_arg.empty() ? q4_ple_dir(o.snap) : ple_dir_arg;
+  const std::string ple_dir = q4_ple_dir(o.snap);
   check_ple_constants(d, ck.ple_constants());
 
   Q4LoadedModel m;

@@ -64,15 +64,10 @@ basename "$STATE" > "$RUNS/.current-$DEVICE"
 
 # A run validates the defaults: nothing from the operator's shell may switch a code path.
 unset B70_KV_CACHE \
-      B70_PREFILL_PROFILE B70_TOKENIZER_JSON B70_Q4_PLE \
+      B70_PREFILL_PROFILE B70_TOKENIZER_JSON \
       ONEAPI_DEVICE_SELECTOR
 export ZE_AFFINITY_MASK="$DEVICE"
 export HOME_R BV_DATA="$DATA" OPENCODE_LOG="${OPENCODE_LOG:-}" A4_REF_DIR="${A4_REF_DIR:-}"
-# Flash-Next's int8 PLE file when it is not beside the snapshot (data.sh q4ple): stages.sh's with_real_ple hands it
-# to the loader (its B70_Q4_PLE override) for the stages on Intel's checkpoint only - exported to every stage it
-# would replace the synthetic checkpoints' own ckpt-ple-int8 files too.
-q4ple=$(tools/box_validate/data.sh q4ple)
-case "$q4ple" in */oracle-out-q4exp-ple-int8) BV_Q4_PLE="$q4ple/";; *) BV_Q4_PLE=;; esac
 
 ts() { date '+%F %T'; }
 # one line per event, appended with one write (two orchestrators share the file)
