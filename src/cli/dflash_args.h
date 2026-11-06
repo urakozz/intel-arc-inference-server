@@ -19,7 +19,6 @@
 //                          only (--pipeline-handoff peer: device 0's taps are copies into device 1 that only the
 //                          copy hand-off's event orders)
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
-//   B70_DECODE_ATTN=v1     decode attention v1 is not built at M = 5..8
 //   B70_PREFILL_REPLAY=1   the drafter's prefill taps are copies on the L0 list
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
@@ -80,9 +79,6 @@ inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, cons
   if (kv == runtime::KvCache::Int8)
     throw std::runtime_error("--spec dflash verifies up to 8 rows, and --kv-cache int8's attention is built for "
                              "M <= 4 (kv8.cl): use --kv-cache bf16 with --spec dflash");
-  if (runtime::decode_attn() == runtime::DecodeAttn::V1)
-    throw std::runtime_error("--spec dflash verifies through decode attention v2 (B70_DECODE_ATTN=v1 is not built at "
-                             "M = 5..8): unset B70_DECODE_ATTN");
 }
 
 // The AdaptiveK cost table: MtpCost::dflash for the head and drafter forms, a draft vocabulary scaling the head's

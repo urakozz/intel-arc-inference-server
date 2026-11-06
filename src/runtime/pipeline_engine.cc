@@ -569,9 +569,7 @@ uint32_t PipelineEngine::max_draft() const { return mtp() ? kMaxDraft : drafter_
 
 uint32_t PipelineEngine::verify_deep_from(uint32_t M) const {
   const model::ModelDesc& d = *st(1).model.desc;
-  return decode_attn() == DecodeAttn::V2
-             ? verify_attn_deep_from(M, st(1).buffers.kv_lay.form == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
-             : kDpasNever;
+  return verify_attn_deep_from(M, st(1).buffers.kv_lay.form == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads);
 }
 
 const CapturedStep& PipelineEngine::verify_step(uint32_t dev, uint32_t M) const {

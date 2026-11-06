@@ -59,26 +59,16 @@ void check_sizes_qwen38() {
   CHECK_EQ(p.kv_k, size_t{536870912});
   CHECK_EQ(p.kv_v, size_t{536870912});
   CHECK_EQ(p.total(), size_t{1240465536});
-  // v1's attn_part strides every 64-position block of the cache (B70_DECODE_ATTN=v1).
-  const runtime::DecodeScratchSizes d =
-      runtime::DecodeScratchDims::sizes(16384, q, runtime::DecodeAttn::V1);
-  CHECK_EQ(d.attn_part, size_t{50724864});
+  // Decode attention v2's attn_part: [24][32][8][258] fp32 whatever max_len is, 6,340,608 B
+  // (the removed v1 strided every 64-position block: 50,724,864 B at 16384).
+  const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, q);
   CHECK_EQ(d.partials, size_t{8912896});
   CHECK_EQ(d.logits, size_t{7946240});
-  CHECK_EQ(d.total(), size_t{68652864});
-  // 128k (spec 6): KV 8,589,934,592, attn_part 24 x 2048 x 8 x 258 x 4.
+  CHECK_EQ(d.total(), size_t{68652864 - 50724864 + 6340608});
+  // 128k (spec 6): KV 8,589,934,592.
   CHECK_EQ(runtime::PersistentDims::sizes(131072, q).kv_k * 2, size_t{8589934592ull});
-  CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q, runtime::DecodeAttn::V1).attn_part,
-           size_t{405798912});
-  // v2 (the default): [24][32][8][258] fp32 whatever max_len is, 6,340,608 B.
   for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q, runtime::DecodeAttn::V2).attn_part,
-             size_t{24} * 32 * 8 * 258 * 4);
-  CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, q, runtime::DecodeAttn::V2).total(),
-           size_t{68652864 - 50724864 + 6340608});
-  // The default follows B70_DECODE_ATTN, as capture does.
-  unsetenv("B70_DECODE_ATTN");
-  CHECK_EQ(runtime::DecodeScratchDims::sizes(131072, q).attn_part, size_t{6340608});
+    CHECK_EQ(runtime::DecodeScratchDims::sizes(L, q).attn_part, size_t{24} * 32 * 8 * 258 * 4);
   const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, q, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(s.eager(), size_t{699514776});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(131072, q, runtime::PrefillScratchDims::kCDefault).eager(), size_t{699514776});
@@ -244,28 +234,27 @@ void check_sizes_ornith() {
 // first prefill): "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB,
 // prefill scratch 0.700 GB, int8 0.085 GB, total 28.081 GB of 32.530 GB".
 void check_spec6_line() {
-  // Measured before spec 10, so with v1's attn_part: the plan reproduces it under v1.
-  setenv("B70_DECODE_ATTN", "v1", 1);
+  // Measured before spec 10, with decode attention v1's attn_part (405,798,912 B at 131072, decode
+  // state 0.590 GB, total 28.081 GB); v1 is gone (zero-config cleanup), so the plan is v2's: the
+  // same engine with 0.399 GB less decode state.
   const runtime::PrefillPath i8{true, PrefillBackend::L0Int8, false};   // measured on l0-int8, then the default
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
-  unsetenv("B70_DECODE_ATTN");
-  // With v2 (the default) the same engine plans 0.399 GB less decode state.
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
            size_t{590450624} - 405798912 + 6340608);
   CHECK_EQ(p.rope, size_t{131072} * 256);
   CHECK_EQ(p.model, size_t{18116331520ull});   // the 16384 load re-tabled to 131072
   CHECK_EQ(p.kv, size_t{8589934592ull});
-  // gdn_state + conv_ring + control + DecodeScratch with attn_part at 2048 blocks.
-  CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 405798912));
-  CHECK_EQ(p.decode_state, size_t{590450624});
+  // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
+  CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 6340608));
+  CHECK_EQ(p.decode_state, size_t{190992320});
   CHECK_EQ(p.prefill_scratch, size_t{699514776});
   CHECK_EQ(p.prefill_lazy, size_t{0});         // flash attention, no MTP: nothing lazy
   CHECK_EQ(p.int8, size_t{84680704});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.590 GB, prefill scratch 0.700 GB,"
-        " int8 0.085 GB, total 28.081 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.700 GB,"
+        " int8 0.085 GB, total 27.681 GB of 32.530 GB");
 }
 
 void check_paths() {
@@ -466,7 +455,7 @@ void check_kv_int8() {
   CHECK(runtime::describe(b8, kDevice, kReserve).find(", int8 KV cache)") != std::string::npos);
   CHECK(runtime::describe(b16, kDevice, kReserve).find("int8 KV") == std::string::npos);
 
-  // B70_KV_CACHE sets the default (as B70_DECODE_ATTN does for the decode pair).
+  // B70_KV_CACHE sets the default.
   setenv("B70_KV_CACHE", "int8", 1);
   CHECK(runtime::default_kv_cache() == KvCache::Int8);
   CHECK_EQ(runtime::PersistentDims::sizes(16384, q).kv_k, p8.kv_k);

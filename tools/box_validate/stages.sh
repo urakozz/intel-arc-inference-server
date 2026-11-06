@@ -268,7 +268,7 @@ st_r4_g128() {
 
 # ======================================================================================
 row 5 "spec 15b - ModelDesc carries every per-model width (2026-10-04-spec15b-validation-checklist.md)"
-rownote 5 "Step 6 (b70-decode on a config-only Ornith directory fails with 'MoE not implemented (spec 15c)') is superseded: 15c made Ornith loadable for decode; row 10's r10.refusals checks what Ornith refuses now."
+rownote 5 "Step 6 (b70-decode on a config-only Ornith directory fails with 'MoE not implemented (spec 15c)') is superseded: 15c made Ornith loadable for decode; (row 10's r10.refusals, which checked the last refusal - decode attention v1 - went with v1 in the zero-config cleanup)."
 stage r5.host 5 default cpu - - "step 3: model_desc, variant_names, qwen35, kernel_table, agnes_fold, template"
 st_r5_host() {
   run_tests '^(model_desc_test|variant_names_test|qwen35_test|kernel_table_test|agnes_fold_test|template_test)$'
@@ -532,7 +532,7 @@ st_r9_auto() {
 row 10 "spec 15c - Ornith 1.5 35B-A3B decode (spec 15 §10)"
 rownote 10 "P0's build-variant sweeps (UP_KS 1/2/4/8, DN_KS 1/2/4, the {S, layout} sweeps of the four int4 shapes, spec 15 §9's arms, the 3-launch arm) each need a rebuild with other defines or a probe that does not exist yet: r10.p0_sweeps lists them."
 rownote 10 "Everything after the no-checkpoint tests waits on 15a: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box."
-rownote 10 "The --prefill-length / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them), b70-serve's and --mtp's since 15e (Ornith is served, with its MoE MTP head: row 16); r10.refusals checks what remains."
+rownote 10 "The --prefill-length / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them), b70-serve's and --mtp's since 15e (Ornith is served, with its MoE MTP head: row 16); the last one (decode attention v1) went with v1 (zero-config cleanup, 2026-11-06)."
 stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite, Agnes's gates; Ornith's decode list built - since spec 15 §13 its greedy argmax is Qwen3.8's argmax_stage1_M1 (the int4 checkpoint's tokenizer.json: 248077 ids) and its a||b the int4 gemv_M1_K2048_N128_S1_L1"
 st_r10_r0() {
   need_pass g0.sha g0.bitwise g0.suite r1.gates
@@ -563,11 +563,6 @@ stage r10.gates 10 default card ornith,oracle_ornith,oracle_ornith_f32,oracle_or
 st_r10_gates() {
   run_tests 'ornith_decode|golden_gate_ornith' ornith
   jgrab ornith 'ornith' 'launch|526|R2|R3|OK|PASS|FAIL'
-  finish
-}
-stage r10.refusals 10 default card ornith - "what Ornith still refuses, with its message: B70_DECODE_ATTN=v1 (decode attention v1 is not built at its heads); b70-serve and --mtp serve it since 15e (row 16)"
-st_r10_refusals() {
-  xfail "B70_DECODE_ATTN=v1 timeout 900 build/src/cli/b70-decode $SNAP_ORNITH --bench --depth 16 --tg 1" 'decode attention v1' "B70_DECODE_ATTN=v1"
   finish
 }
 stage r10.p0 10 optin gpu ornith - "P0 (plan 15c Task 1), the runnable part: the per-kernel floor (probe_replay) and b70-decode --profile --depth 4096 for the shares of the 526 launches"
@@ -608,7 +603,7 @@ rownote 11 "Making int8 the default (plan 12b Task 4 Step 3) is an edit after ev
 stage r11.bf16 11 default cpu - g0.sha,g0.bitwise,g0.suite "step 1, bf16 unchanged: every pre-existing binary identical, the suite at the default with B70_KV_CACHE unset (G0)"
 st_r11_bf16() {
   need_pass g0.sha g0.bitwise g0.suite
-  x "env | grep -E '^B70_(KV_CACHE|DECODE_ATTN|PREFILL_ATTN)=' || echo 'B70_KV_CACHE, B70_DECODE_ATTN, B70_PREFILL_ATTN unset in this run'"
+  x "env | grep -E '^B70_(KV_CACHE|PREFILL_ATTN)=' || echo 'B70_KV_CACHE, B70_PREFILL_ATTN unset in this run'"
   finish
 }
 stage r11.kernels 11 default card qwen - "step 2 FIRST - the readers that replace DPAS / 2D-block reads with byte gathers: kv8_kernels_test (W, D, F), then flash_long_kv8_test (1 - cos <= 5e-4 at 4k-32k); a failure stops row 11"

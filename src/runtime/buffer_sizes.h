@@ -18,25 +18,13 @@
 // every call site has always spelled them, and this header needs no Level Zero.
 namespace runtime {
 
-// Spec 10 (plan 10b): which decode-attention pair every capture binds - attn.cl's
-// attn_decode + attn_reduce (v1) or attn_v2.cl's (v2). `B70_DECODE_ATTN=v1|v2`, read
-// at each call (so a test can set it between engines); unset or empty means the
-// default; any other value throws. Both pairs share attn_prep, the KV layout, attn_q /
-// attn_gate / attn_part / attn_out - but not attn_part's SIZE (DecodeScratchDims), which
-// is why the choice lives here, beside the sizes, rather than in capture.h.
-enum class DecodeAttn { V1, V2 };
-inline constexpr DecodeAttn kDefaultDecodeAttn = DecodeAttn::V2;   // spec 10 gates, 2026-09-28
-DecodeAttn decode_attn();
-const char* decode_attn_name(DecodeAttn a);
-
 // --- the KV cache's form (spec 12b) --------------------------------------------------
 
 // `--kv-cache bf16|int8`. bf16 is today's cache, bit for bit. int8 is the operator's
 // `rotkv` scheme (spec 12 §8; src/common/kv8.h, src/kernels/kv8.cl): every K and V row
 // rotated by the same 256-point Hadamard and stored as int8 with one fp16 scale per
-// (position, kv head). `B70_KV_CACHE=bf16|int8` sets the default (as B70_DECODE_ATTN does
-// for the decode pair: read at each call, so a test can set it between engines; unset or
-// empty is bf16; anything else throws), which is how the gate tests run the same binaries
+// (position, kv head). `B70_KV_CACHE=bf16|int8` sets the default (read at each call,
+// so a test can set it between engines; unset or empty is bf16; anything else throws), which is how the gate tests run the same binaries
 // over the int8 cache; the CLIs pass their flag explicitly.
 enum class KvCache { Bf16, Int8 };
 inline constexpr KvCache kDefaultKvCache = KvCache::Bf16;   // until spec 12's gates pass
@@ -141,7 +129,10 @@ MoeScratchLayout moe_scratch_layout(const model::ModelDesc& desc);   // all zero
 struct DecodeScratchDims {
   static constexpr uint32_t kM = 8;
   // KV positions per `attn_decode` work-group - spec 1.5's lever L5 took it
-  // from 256 to 64. It is the ONE home for the number on the host: `attn_part`
+  // from 256 to 64. Since the zero-config cleanup (2026-11-06) decode attention v1
+  // (attn.cl's attn_decode / attn_reduce) is no engine's: it survives only as the
+  // test-only reference attn_v2_test grades v2 against (and attn_test grades it), at
+  // max_len 4096 / 131072, and this is its block size. The text below is its history. It is the ONE home for the number on the host: `attn_part`
   // below is strided by `max_len / kAttnBlock` blocks, capture.cc launches
   // `attn_decode` with exactly that many, and it is the `_B64` half of both
   // compiled variant names (`kernels::attn_decode_variant`), so a value here
@@ -182,10 +173,8 @@ struct DecodeScratchDims {
   // Spec 10 (plan 10b): decode attention v2's work-groups per kv head, TGT in
   // src/kernels/attn_v2.cl and `_T32` in its variant name. v2 walks a row of L keys in
   // blocks of max(64, roundup64(ceil(L / 32))) positions, so no row has more than 32
-  // partials: v2 needs [24][32][M][258] floats whatever max_len is, so `attn_part` is
-  // sized by the pair the engine binds (`sizes(..., attn)`): v1's
-  // [24][max_len / kAttnBlock][M][258] only under B70_DECODE_ATTN=v1 (buffers_test pins
-  // both).
+  // partials: v2 needs [24][32][M][258] floats whatever max_len is, which is how
+  // `attn_part` is sized.
   static constexpr uint32_t kAttnV2Blocks = 32;
   // **prep_res_norm's two-stage grid** (spec 1.5 lever L1). Stage A
   // (`prep_res_fold`) runs this many work-groups over the hidden row and writes
@@ -201,11 +190,7 @@ struct DecodeScratchDims {
   // docs/15 §L2 measured as the one that pays.
   static constexpr uint32_t kNormGroups = 20;
 
-  // `attn`: the decode-attention pair the engine will bind; by default the one
-  // `B70_DECODE_ATTN` selects, which is what capture binds, so a plan and an allocation
-  // made in the same process agree.
-  static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc,
-                                  DecodeAttn attn = decode_attn());
+  static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc);
 };
 
 // --- PrefillScratch ------------------------------------------------------------------

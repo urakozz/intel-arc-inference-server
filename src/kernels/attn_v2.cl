@@ -1,6 +1,6 @@
 // attn_v2.cl - decode attention at depth, v2 (spec 10 §2; plan 10b). The pair
-// `attn_decode_v2` + `attn_reduce_v2` replaces attn.cl's `attn_decode` +
-// `attn_reduce` when the capture selects it (B70_DECODE_ATTN, src/runtime/capture.cc).
+// `attn_decode_v2` + `attn_reduce_v2` replaced attn.cl's `attn_decode` +
+// `attn_reduce` (v1, now a test-only reference: zero-config cleanup, 2026-11-06).
 // `attn_prep` (attn.cl) is shared and unchanged: v2 reads the same attn_q / attn_gate
 // and the same KV caches, and writes the same attn_out.
 //

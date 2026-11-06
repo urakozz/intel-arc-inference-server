@@ -177,7 +177,6 @@ void check_memory() {
 }  // namespace
 
 int main() {
-  unsetenv("B70_DECODE_ATTN");   // the plan's attn_part is v2's (the default), as the engine allocates
   check_device_layout();
   check_rules();
   check_memory();

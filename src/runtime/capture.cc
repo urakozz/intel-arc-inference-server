@@ -352,59 +352,33 @@ class Capture {
  private:
   // Preconditions this file can check before a single command is appended.
   void check_sizes() {
-    // The attention variants bake MAXLEN (attn_part's stride) and ATTN_BLOCK
-    // (its block count); the grid comes from b.max_len and kAttnBlock, and the
-    // RoPE table from the loader's. All of them are one number or the KV cache
-    // is read at the wrong stride. The block size needs no `require` here - it
-    // is in the variant NAME (`..._B64`), so a host/device disagreement is a
-    // missing binary at `kernel()` rather than a wrong stride at replay.
+    // The grid comes from b.max_len and the RoPE table from the loader's: one number, or the
+    // KV cache is read at the wrong stride.
     require(m_.max_len == b_.max_len, "model max_len " + std::to_string(m_.max_len) +
                                           " != buffers max_len " + std::to_string(b_.max_len));
-    require(b_.max_len % DecodeBuffers::kAttnBlock == 0,
-            "max_len must be a multiple of DecodeBuffers::kAttnBlock (" +
-                std::to_string(DecodeBuffers::kAttnBlock) + ") - attn_decode's block grid");
-    // Spec 6: MAXLEN is baked into both attention binaries, and only some max_lens are
-    // compiled (src/kernels/CMakeLists.txt: 4096, 16384, 32768 and 131072 at M = 1). Name the missing one
-    // here, before a single command is appended, rather than as a bare path later.
-    // Spec 10: v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`).
-    // Spec 12b: the int8 cache is read by v2's kv8 twin only; v1 stays a bf16-KV reference.
-    require(!kv8_ || attn_ == DecodeAttn::V2,
-            "--kv-cache int8 decodes through attention v2 only (src/kernels/kv8.cl); "
-            "B70_DECODE_ATTN=v1 reads a bf16 cache - unset it or use --kv-cache bf16");
-    // Spec 15c: a MoE model is built for decode attention v2 only. Said before v1's binaries
-    // are looked up: v1 is not compiled at a MoE model's heads at all, and the max_len lookup
-    // below would refuse it with a message about max_len instead (the box's first r10.refusals).
-    if (d_.is_moe())
-      require(attn_ == DecodeAttn::V2,
-              "decode attention v1 (B70_DECODE_ATTN=v1) is not built at " + d_.name + "'s heads");
+    // Spec 10: decode attention v2 bakes no MAXLEN (one binary per M, `_T<kAttnV2Blocks>`); spec 12b: the
+    // int8 cache is read by its kv8 twin. (v1, which baked MAXLEN, was removed in the zero-config cleanup.)
     std::vector<std::string> attn_bins =
         kv8_ ? std::vector<std::string>{kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
-        : attn_ == DecodeAttn::V2
-            ? std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)}
-            : std::vector<std::string>{
-                  kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
-                  kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads)};
+             : std::vector<std::string>{kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads)};
 #if B70_BATCH_PROBE
     // Spec 13a: a row list binds the `_ROWS` pair (attn_pair_rows), not the production one - which at M = 5..8 over
     // int8 KV nothing builds (B70_KV8's decode block stops at M = 4).
     if (mode_ == Mode::Rows)
       attn_bins = {kernels::attn_v2_rows_variant(kCapM, DecodeBuffers::kAttnV2Blocks, kv8_, d_.fa_q_heads, d_.fa_kv_heads)};
 #endif
-    // attn_part is sized for one pair (DecodeScratchDims::sizes): v2's is a fixed 32 blocks
-    // per row, v1's every block of the cache. Binding v1 over buffers sized for v2 would
-    // write past the allocation, so refuse it here rather than corrupt memory on token 1.
-    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_, attn_).attn_part,
-            std::string("attn_part (") + std::to_string(b_.attn_part.size()) +
-                " B) was sized for the other decode attention pair than " +
-                decode_attn_name(attn_) + " - set B70_DECODE_ATTN before the buffers are built");
+    // attn_part is sized by DecodeScratchDims::sizes: v2's fixed 32 blocks per row.
+    require(b_.attn_part.size() >= DecodeScratchDims::sizes(b_.max_len, d_).attn_part,
+            std::string("attn_part (") + std::to_string(b_.attn_part.size()) + " B) is smaller than decode attention "
+                "v2's partials");
     // Spec 28c: an M >= 2 list of v2 binds attn_verify_dpas + the v2 binary's reduce where the measured rule
-    // (runtime/verify_attn.h) says so; M = 1, the row builds and v1 never switch.
+    // (runtime/verify_attn.h) says so; M = 1 and the row builds never switch.
     {
       bool rows = false;
 #if B70_BATCH_PROBE
       rows = mode_ == Mode::Rows;
 #endif
-      vattn_ = attn_ == DecodeAttn::V2 && !rows
+      vattn_ = !rows
                    ? verify_attn_kind(kCapM, vattn_keys_, kv8_, d_.fa_q_heads, d_.fa_kv_heads, opt_.force_attn)
                    : VerifyAttn::V2;
       if (vattn_ == VerifyAttn::Dpas)
@@ -413,9 +387,7 @@ class Capture {
     }
     for (const std::string& v : attn_bins)
       require(std::ifstream(kernels::path(v)).good(),
-              "no decode attention is compiled for max_len " + std::to_string(b_.max_len) +
-                  ": " + v + " is missing (" + kernels::path(v) +
-                  "); the compiled max_lens are listed in src/kernels/CMakeLists.txt");
+              "no decode attention is compiled: " + v + " is missing (" + kernels::path(v) + ")");
 
     // n_gdn_ / n_fa_ are the descriptor's counts, or (spec 16b) a stage's own.
     const std::string gdn_n = std::to_string(n_gdn_), fa_n = std::to_string(n_fa_);
@@ -522,8 +494,8 @@ class Capture {
   // arguments are captured at append, so one object could serve many launches -
   // but it keeps the list auditable (kernels[i] is what launch i ran) for the
   // cost of 774 handles.
-  // Decode attention over one KV cache: attn.cl's attn_decode + attn_reduce (v1) or
-  // attn_v2.cl's pair (spec 10, plan 10b), whichever `attn_` names. `ctrl` is the list's
+  // Decode attention over one KV cache: attn_v2.cl's pair (spec 10, plan 10b; kv8.cl's twin
+  // over an int8 cache, spec 12b). `ctrl` is the list's
   // control block (the head's `hctl` in the draft list); both read q from attn_q, write
   // partials into attn_part and the gated bf16 rows into attn_out.
   void attn_pair(void* ctrl, const KvLayer& kv) {
@@ -562,53 +534,22 @@ class Capture {
       }
       return;
     }
-    if (attn_ == DecodeAttn::V2) {
-      // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
-      // row from Control::pos on the device, so one list serves every depth.
-      const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
-      {
-        // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
-        l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
-        k.arg_ptr(0, ctrl);
-        k.arg_ptr(1, b_.attn_q.ptr());
-        k.arg_ptr(2, kk);
-        k.arg_ptr(3, vv);
-        k.arg_ptr(4, b_.attn_part.ptr());
-        launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
-      }
-      // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
-      {
-        l0::Kernel& k = kernel(v, "attn_reduce_v2", kWgAttn);
-        k.arg_ptr(0, ctrl);
-        k.arg_ptr(1, b_.attn_part.ptr());
-        k.arg_ptr(2, b_.attn_gate.ptr());
-        k.arg_ptr(3, b_.attn_out.ptr());
-        launch(k, d_.fa_q_heads, kCapM);
-      }
-      return;
-    }
-    // attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part) - attn.cl (Task 5), grid
-    // (4 kv-heads, max_len/kAttnBlock blocks), WG 256. The grid spans the whole
-    // cache because a captured list cannot resize; the work-groups past the
-    // context early-out on their first instruction (the grid's history and the
-    // idle work-groups' measured cost: docs/15 "Spec 1.6 §5.2", docs/12 `attn`).
+    // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
+    // row from Control::pos on the device, so one list serves every depth.
+    const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
     {
-      l0::Kernel& k = kernel(
-          kernels::attn_decode_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
-          "attn_decode", kWgAttn);
+      // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
+      l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.attn_q.ptr());
       k.arg_ptr(2, kk);
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
-      launch(k, d_.fa_kv_heads, b_.max_len / DecodeBuffers::kAttnBlock);
+      launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
     }
-    // attn_reduce(ctrl, attn_part, attn_gate, attn_out) - attn.cl (Task 5),
-    // grid (24 q-heads, M), WG 256.
+    // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
-      l0::Kernel& k =
-          kernel(kernels::attn_reduce_variant(kCapM, b_.max_len, DecodeBuffers::kAttnBlock, d_.fa_q_heads, d_.fa_kv_heads),
-                 "attn_reduce", kWgAttn);
+      l0::Kernel& k = kernel(v, "attn_reduce_v2", kWgAttn);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.attn_gate.ptr());
@@ -630,7 +571,6 @@ class Capture {
             "a row list needs its row table (runtime::BatchRowTable)");
     require(stage_ == nullptr && tap_ == nullptr && prof_ == nullptr,
             "a row list is single-card, with no residual tap and no profiling events");
-    require(attn_ == DecodeAttn::V2, "the row builds are decode attention v2's (B70_DECODE_ATTN=v1 has none)");
     const size_t state = gdn_state_stride() * d_.gdn_layers, ring = conv_ring_stride() * d_.gdn_layers;
     require(!br_->state_pool || (br_->state_pool->size() >= state && br_->state_pool->size() % state == 0),
             "the GDN state pool is not whole " + std::to_string(state) + "-byte states");
@@ -1216,31 +1156,8 @@ class Capture {
       k.arg_ptr(7, vv);
       launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
     }
-    // attn_decode(ctrl, attn_q, kv_k, kv_v, attn_part) - attn.cl (Task 5), grid
-    // (4 kv-heads, max_len/kAttnBlock blocks), WG 256. The grid spans the whole
-    // cache because a captured list cannot resize; the work-groups past the
-    // context early-out on their first instruction. Since spec 1.5's lever L5
-    // the block is 64 positions, so this grid is (4, 256) = 1024 work-groups at
-    // max_len 16384, of which 260 are live at depth 4096 - nearly 4x the 68
-    // before. docs/15 §2 measured work-group count as very nearly free but put
-    // ~264 work-groups "past the point any measurement here reaches"; the
-    // measurement now reaches it. **"Nearly free" is WITHDRAWN for this grid
-    // (2026-08-25, tools/probe/probe_attn; docs/15 "Spec 1.6 §5.2"):** that was
-    // measured at ATTN_BLOCK 256 over 20 -> 68 work-groups, a low-occupancy
-    // regime, and at the shipped block the launch is LINEAR in live
-    // work-groups (68 -> 1004 = 14.8x for 11.8x the time). What survives, and
-    // is what this comment actually needs, is the sentence below: the IDLE
-    // work-groups are free -- now measured per kernel at 1.63 ns each. The idle work-groups grow with the grid: at
-    // depth 4096 there are 1024 - 260 = 764 of them per launch, against
-    // 256 - 68 = 188 before, so the retile added 576. **Their cost is not a
-    // term to add**: the 224.046 us/launch below was measured WITH all 764 of
-    // them present, so whatever they cost is already inside it. For a bound
-    // anyway, the two available transplants disagree 47x -- doc 07 #12's own
-    // 14.97 ns/work-group puts 576 at 8.6 us/launch (3.8% of 224 us, 0.38% of
-    // the step across 16 launches), docs/15 §2's in-situ 0.32 ns/work-group puts
-    // it at 0.18 us -- and doc 07 #12 keeps the larger one so the bound is not
-    // flattered. What is bought is a quartered per-work-group serial walk
-    // (369.988 -> 224.046 us/launch, measured, grid growth included).
+    // Decode attention (attn_pair): v2's fixed grid of (4 kv-heads, kAttnV2Blocks) work-groups, the
+    // stride derived per row from Control::pos on the device.
     attn_pair(b_.control.ptr(), kv);
     attn_dump(f);
     // o_proj is the one GEMV whose activations are not the shared `x` scratch:
@@ -1814,8 +1731,6 @@ class Capture {
   const MtpBuffers* mtp_;
   const Mode mode_;
   const uint32_t draft_i_;
-  // Spec 10: the decode-attention pair, read from B70_DECODE_ATTN once per build.
-  const DecodeAttn attn_ = decode_attn();
   // Spec 12b: the buffers' KV form decides every KV writer and reader this walk binds.
   const bool kv8_ = b_.kv_lay.form == KvCache::Int8;
   // Spec 28b: which linear kernel the walk binds at kCapM (runtime/gemv_kind.h); Auto unless a test forces it.

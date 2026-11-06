@@ -93,7 +93,7 @@ void usage() {
                "                 --max-len: auto (default) = the largest context that fits the card\n"
                "                 beside the weights (spec 6 §10); N = any multiple of 256 up to the\n"
                "                 trained context (config.json max_position_embeddings), refused at\n"
-               "                 startup if it does not fit (B70_DECODE_ATTN=v1: the compiled lengths)\n"
+               "                 startup if it does not fit\n"
                "                 [--mem-reserve-gb G]   device memory the plan leaves free (default\n"
                "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
                "                 The model is picked from the checkpoint's config.json: Qwen3.8,\n"

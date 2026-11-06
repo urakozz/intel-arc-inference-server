@@ -283,25 +283,19 @@ function(add_attn_reduce MM LL)
   add_ocloc_kernel(attn_reduce_M${MM}_L${LL}_B${ATTN_BLOCK} SOURCE ${ATTN_CL}
                    DEFINES ${ATTN_DEFINES} M=${MM} MAXLEN=${LL})
 endfunction()
+# Zero-config cleanup (operator 2026-11-06): decode attention v1 (attn_decode / attn_reduce)
+# is no engine's any more - v2 below is the only decode attention. These three lengths stay,
+# test-only: attn_v2_test grades v2 against v1 (L4096 synthetic, L131072 on the real capture)
+# and attn_test grades v1 against its host reference (L4096, M = 1 and 2). attn_prep is shared.
 add_attn_prep(1)
-add_attn_decode(1 16384)   # the loader's default max_len (docs/13-loader.md)
-add_attn_reduce(1 16384)
-add_attn_decode(1 131072)  # spec 6: 128k context (--max-len 131072)
+add_attn_decode(1 131072)  # attn_v2_test part D's reference
 add_attn_reduce(1 131072)
-add_attn_decode(1 32768)   # spec 6 K3a: flash_long_test's 32k engines (the composed path's
-add_attn_reduce(1 32768)   # pf_s / pf_p do not fit beside a 131072 KV cache)
 add_attn_decode(1 4096)    # attn_test's buffers: 64 blocks, cheap to fill
 add_attn_reduce(1 4096)
 # M = 2 is compiled per spec 1 §9 (the M loop must compile); all three are also
 # RUN by attn_test, as the only cover for per-m causal masking (a position valid
 # for m = 1 and masked for m = 0, both inside one block and across a block edge).
 #
-# Note the asymmetry, which is deliberate while M = 2 is test-only: the M = 2
-# decode/reduce pair exists **at L4096 only**, the length attn_test allocates.
-# There is no `attn_decode_M2_L16384_B*` / `attn_reduce_M2_L16384_B*`, so
-# `kernels::attn_{decode,reduce}_variant(2, 16384, 64)` names no file and the
-# runtime cannot bind M = 2 attention at the loader's default max_len. Whoever
-# turns M > 1 on (plan 3's MTP work) adds the L16384 rows here first.
 add_attn_prep(2)
 add_attn_decode(2 4096)
 add_attn_reduce(2 4096)
@@ -343,8 +337,6 @@ if(B70_MTP)
     add_ocloc_kernel(embed_gather_M${MM} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/embed_gather.cl
                      DEFINES ${CTRL_DEFINES} M=${MM} HIDDEN=5120 VOCAB=248320)
     add_ocloc_kernel(argmax_stage1_M${MM} SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES} M=${MM})
-    add_attn_decode(${MM} 16384)
-    add_attn_reduce(${MM} 16384)
     if(NOT MM EQUAL 2)   # the M = 2 ones already exist above
       add_prep_norm_finish(${MM} 5120 20 20)
       add_ocloc_kernel(gdn_step_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} M=${MM})
@@ -610,7 +602,7 @@ endif()
 #             negA / dt_bias at 131072 / 131200 B = 32768 / 32800 floats
 #             (loader::make_small_layout(2048, 8192, 32), checked by model_desc_test)
 #   FA        attn_prep and decode attention v2 at 16 q / 2 kv heads (GQA 8); v1
-#             (B70_DECODE_ATTN=v1) is not built for Ornith
+#             (removed) was never built for Ornith
 #   MoE       moe.cl's three kernels: 256 experts, top-8, hidden 2048, expert 512
 # argmax_stage1_M1_V248070: built for the base checkpoint's tokenizer.json (its last id is
 # </think> = 248069). NOT BOUND since spec 15 §13: the int4 checkpoint's tokenizer.json

@@ -111,7 +111,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
                runtime::pp_handoff_name(eng.handoff()), eng.split(), eng.split(),
                eng.step(0).kernel_count, eng.step(0).modules.size(), eng.stage(1).first,
                eng.stage(1).last, eng.step(1).kernel_count, eng.step(1).modules.size(),
-               eng.max_len(), runtime::decode_attn_name(runtime::decode_attn()),
+               eng.max_len(), "v2",
                runtime::kv_cache_name(eng.kv_cache()));
   if (eng.mtp())   // spec 16d: the head on device 1, the verify lists on both
     std::fprintf(stderr,
