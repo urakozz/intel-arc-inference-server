@@ -518,6 +518,7 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
       {"out_ids", outcome.out_ids},
       {"response_text", outcome.raw_text},
   };
+  if (outcome.slot >= 0) record["slot"] = outcome.slot;   // plan 13b: which card (the serial record is unchanged)
   char name[32];
   std::snprintf(name, sizeof(name), "/%06llu.json",
                 static_cast<unsigned long long>(++impl_->next_log));
@@ -817,6 +818,7 @@ Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(con
     std::fflush(stderr);
   }
   if (fin.reason == Finish::Error) throw std::runtime_error(fin.error);
+  run->out.slot = fin.slot;
   return std::move(run->out);
 }
 
