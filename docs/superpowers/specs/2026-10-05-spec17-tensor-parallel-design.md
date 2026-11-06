@@ -1,6 +1,7 @@
 # Spec 17 - tensor parallel over two B70s
 
-**Status (2026-11-01): P0 RUN - GO (PROVISIONAL, busy-box timing; §9), plan 17a on branch `spec17a-tp-probe`.**
+**Status (2026-11-06): P0 DONE - GO on a quiet box (§9); plan 17a closed. 17b-17d (rewritten for Qwen3.8) wait for the
+operator's go.** (2026-11-01: GO PROVISIONAL on busy-box timing.)
 **Status (2026-10-27): RETARGETED - Qwen3.8 first (operator, 2026-10-27); third in the Qwen speed track, after spec 28
 (plans 28a / 28b) and spec 19's plan 19f.** Nothing of spec 17 is built; no plan of it has started. **§R2 is the
 2026-10-27 revision**: for Qwen3.8 / Agnes it supersedes §R's ruling, §2's target order, §3's rule and §4.1-§4.2's
@@ -547,7 +548,36 @@ prefill gap recorded, not hidden.
 
 ## 9. P0 verdict
 
-**Qwen3.8 (§R2.7), 2026-11-01 - GO (PROVISIONAL: busy-box timing, to be re-checked on a quiet box).** Record:
+**Qwen3.8 (§R2.7), 2026-11-06 - GO (quiet box, grade RECORD; record §8).**
+
+| condition (§R2.7) | bar | quiet box 2026-11-06 | |
+|---|---|---|---|
+| (a) bitwise over 10^4 replays, stale / missing writes caught | required | route (P): 1.28 M calls at M = 1, 128 k at M = 8 bitwise; both injections caught | pass |
+| (b) 128 all-reduces at M = 1 | <= ~4.0 ms a token | **0.47 ms** (3.61-3.67 us a call, measured) | pass |
+| (c) derived plain TP decode | >= ~44 t/s | **56.3 t/s** (54.1 with unfused send / wait launches) | pass |
+| links | >= Gen3 x8 | Gen3 x16 both | pass |
+
+Measured beside it, interleaved, median of 3: one card plain **33.42 t/s**, `--parallel pp` plain **34.59 t/s**.
+
+**In plain words.** Tensor parallel splits every layer's weight matrices in half across the two cards, so each card
+reads half the bytes per token (decode is bound by how fast a card streams its weights); after each layer's two split
+products the cards must add their partial results together - an *all-reduce* - before the next layer can start. On
+this box the all-reduce runs as a *P2P push*: each card writes its 20 KiB partial row straight into the other card's
+memory over PCIe (peer-to-peer, no host RAM, no CPU) and then waits on its own memory for the peer's row. That costs
+~3.6 us a crossing, 128 crossings a token = 0.47 ms - small next to the ~12 ms each card saves by reading half the
+weights. Pipeline parallel (`--parallel pp`, layers 0-28 on one card, the rest on the other) does not make one token
+faster: the cards take turns, so it is 1.035x one card; its value is fitting more context. **What TP would gain:**
+~1.68x one card on plain decode (56 vs 33 t/s) and ~1.63x pp, ~1.6x one card with MTP (estimated, verify on gemm_sm),
+plus pp's memory gain (per card half the KV and GDN state, ~10.5 GB of weights a card: 262144 positions at bf16 KV with
+MTP or DFlash, derived in §R2.4). **What it would lose / cost:** both cards serve one model, so no second engine or
+replica on the other card; prefill under TP is unmeasured (40 MiB a crossing at 2048 rows; 17c's question - pp's
+prefill or the wavefront may stay the better path); every layer's kernels need per-card shapes (one cell, qkv‖z at half
+width, keeps only 70 % of its bandwidth and wants a re-tune); a new `--parallel tp` value under the zero-config rule
+(chosen automatically, no new flag); and the crossing depends on P2P staying available (it works on the stock
+7.4.0-rc1 kernel too, measured). Route (H), host-staged through the CPU, works but costs ~50 ms a token as built (card
+1's writes into host memory arrive ~300 us late every call) - it is no fallback on this box.
+
+**The 2026-11-01 busy-box record (kept):** Record:
 `docs/probes/probe-tp-2026-11-01.md` (its §7 is the re-check set). Every two-card stage held the whole box; the CPU and the host
 carried other agents' work.
 

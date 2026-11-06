@@ -110,8 +110,8 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   (`probe_tp`): links Gen3 x16 both, 32 GB BARs, peer access; the CPU into VRAM through a dma-buf BAR mapping; the
   all-reduce on every route - p2p-push 3.51 us a call / 0.45 ms a token at M = 1, bitwise over 10^4 replays; host-bar
   bitwise but 31.6-52.9 ms a token; p2p-pull and host-polling routes fail (a card's poll of memory it does not own is
-  cached); the per-card GEMVs 0.550 of one card's; derived plain TP decode 53-55 t/s (1.62-1.69x). Busy-box timing:
-  GO (PROVISIONAL); quiet-box re-check set in §7.
+  cached); the per-card GEMVs 0.550 of one card's. Quiet-box re-check 2026-11-06 (§8): 0.47 ms a token, one card
+  33.42 t/s, `--parallel pp` 34.59, derived plain TP 56.3 t/s (1.68x one card, 1.63x pp) - GO.
 - [probe-qwen4exp-2026-10-09.md](probes/probe-qwen4exp-2026-10-09.md) - spec 21a: Qwen3.8-Flash-Next (`qwen4_exp`)
   from its small files, headers and transformers 5.19.0 / vLLM source - the rounding chain, both checkpoints,
   the PLE layout and hash constants (= the formula), the MTP head's wiring (decision 5's reuse is vLLM's

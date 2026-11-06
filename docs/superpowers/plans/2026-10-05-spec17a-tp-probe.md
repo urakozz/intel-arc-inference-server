@@ -1,5 +1,8 @@
 # Spec 17a - tensor parallel P0, Qwen3.8 first: both all-reduce routes (P2P peer writes, host-staged + own BAR), the per-card step, the go / no-go line
 
+**Status (2026-11-06): DONE - GO on a quiet box** (record §8, spec 17 §9): p2p-push 0.47 ms a token, bitwise; derived
+plain TP 56.3 t/s = 1.68x one card (33.42), 1.63x `--parallel pp` (34.59). 17b-17d wait for the operator's go.
+
 **Status (2026-11-01): BUILT AND RUN (busy-box timing) - GO (PROVISIONAL)**, spec 17 §9; record
 `docs/probes/probe-tp-2026-11-01.md` (its §7 is the quiet-box re-check set). Started on the operator's 2026-11-01 parallel-
 development go (the start conditions below naming 28a / 28b / 19f and `r22.devices` / `r22.p1` were lifted). Deviations:
