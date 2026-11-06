@@ -527,7 +527,7 @@ def verify(st, src, dst, rels, dst_store_root):
         die("verify failed; nothing swapped")
 
 
-def ensure_copy(st, name, src, tier):
+def ensure_copy(st, name, src, tier, recheck=None):
     """Copy + verify src into <tier>/<name> (merging into an existing copy). Returns its path."""
     root = st.root(tier)
     if not os.path.isdir(root):
@@ -553,13 +553,11 @@ def ensure_copy(st, name, src, tier):
     rels = plan_and_copy(st, src, dst, tier)
     verify(st, src, dst, rels, root)
     if dst != final:
-        if os.path.lexists(final):
-            # an empty folder or a stray link at the final name
-            if os.path.islink(final):
-                os.unlink(final)
-            else:
-                os.rmdir(final)
-        os.rename(dst, final)
+        if recheck:
+            refuse_if_open(recheck)
+        old = swap_in(dst, final)
+        if old:
+            retire(st, tier, old, name)
         try:
             os.rmdir(os.path.join(root, STAGING))
         except OSError:
@@ -569,37 +567,76 @@ def ensure_copy(st, name, src, tier):
 
 # ---------------------------------------------------------------- swapping the cache entry
 
-def to_trash(st, tier, path, sub):
+def to_trash(st, tier, path, sub, as_name=None):
     dest_dir = os.path.join(st.trash[tier], sub)
     os.makedirs(dest_dir, exist_ok=True)
-    dest = os.path.join(dest_dir, os.path.basename(path))
+    base = as_name or os.path.basename(path)
+    dest = os.path.join(dest_dir, base)
     n = 1
     while os.path.lexists(dest):
-        dest = os.path.join(dest_dir, "%s.%d" % (os.path.basename(path), n))
+        dest = os.path.join(dest_dir, "%s.%d" % (base, n))
         n += 1
     os.rename(path, dest)
     log("moved %s -> %s" % (path, dest))
     return dest
 
 
+def _exchange(a, b):
+    """Atomically swap two paths (Linux renameat2 RENAME_EXCHANGE). False where unsupported."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        f = libc.renameat2
+    except (OSError, AttributeError):
+        return False
+    f.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    at_fdcwd, rename_exchange = -100, 2
+    if f(at_fdcwd, os.fsencode(a), at_fdcwd, os.fsencode(b), rename_exchange) != 0:
+        err = ctypes.get_errno()
+        log("renameat2 exchange failed (%s); falling back to two renames" % os.strerror(err))
+        return False
+    return True
+
+
+def swap_in(new, entry):
+    """Put `new` (a folder or a link) at `entry` in one atomic step: readers see the old entry
+    or the new one, never a missing or half-made path. Returns where the old entry is now."""
+    if not os.path.lexists(entry):
+        os.rename(new, entry)
+        return None
+    if _exchange(new, entry):
+        return new
+    aside = new + ".old"
+    os.rename(entry, aside)  # fallback (not Linux): a short window without the entry
+    os.rename(new, entry)
+    return aside
+
+
+def retire(st, tier, old, name):
+    """What a swap replaced: a link goes, an empty folder goes, a real folder goes to the trash."""
+    if os.path.islink(old):
+        os.unlink(old)
+    elif os.path.isdir(old) and not any(True for _ in os.scandir(old)):
+        os.rmdir(old)
+    else:
+        return to_trash(st, tier, old, "nvme" if tier == "hot" else tier, as_name=name)
+    return None
+
+
 def point_entry(st, name, target):
-    """The cache entry becomes a symlink to target; a hot folder goes to the NVMe trash."""
+    """The cache entry becomes a symlink to target (atomically); a hot folder goes to the NVMe trash."""
     e = os.path.join(st.hot, name)
     tmp = os.path.join(st.hot, ".%s.hf-tier-link" % name)
     if os.path.lexists(tmp):
         os.unlink(tmp)
     os.symlink(target, tmp)
-    retired = None
-    if os.path.islink(e):
-        os.unlink(e)
-    elif os.path.isdir(e):
-        if any(True for _ in os.scandir(e)):
-            retired = to_trash(st, "hot", e, "nvme")
-        else:
-            os.rmdir(e)
-    os.rename(tmp, e)
+    old = swap_in(tmp, e)
     log("%s -> %s" % (e, target))
-    return retired
+    if old:
+        return retire(st, "hot", old, name)
+    return None
 
 
 def hot_shared_refs(st):
@@ -663,8 +700,7 @@ def cmd_place(st, name, tier):
         if state == "hot":
             log("%s: already hot" % name)
             return
-        dst = ensure_copy(st, name, src, "hot")  # staging under <hot>/.hf-tier-staging, renamed in
-        # ensure_copy renamed the staged folder onto the entry (it removed the old link/empty dir)
+        dst = ensure_copy(st, name, src, "hot", recheck=[src])  # staged, then swapped in atomically
         log("%s: hot (%s)" % (name, dst))
         return
     if tier == "sync":
@@ -676,6 +712,7 @@ def cmd_place(st, name, tier):
         return
     dst = ensure_copy(st, name, src, tier)
     shared = describe(os.path.join(st.hot, name), st.hot)["shared_paths"] if state == "hot" else set()
+    refuse_if_open([src] + sorted(sinfo["shared_paths"]))  # again: a job may have opened it during the copy
     point_entry(st, name, dst)
     if shared:
         sweep_shared(st, shared)
