@@ -77,7 +77,7 @@ struct Q4LoadedModel {
 bool is_qwen4exp_checkpoint(const std::string& snapshot_dir);
 
 // The descriptor load_qwen4exp would build, from config.json and the tensor names alone (no device, no tensor
-// read): the CLI's planner needs it before the load (--layers auto, --pp, --max-len auto).
+// read): the CLI's planner needs it before the load (--layers auto, --parallel, --max-len auto).
 model::Qwen4ExpDesc qwen4exp_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0);
 
 // Loads the checkpoint (resolve_snapshot rules) onto `devices` (devices.size() == placement.devices; device 1 a

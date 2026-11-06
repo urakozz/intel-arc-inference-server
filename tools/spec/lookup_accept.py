@@ -11,7 +11,7 @@ recorded ids, what a prompt-lookup proposer would have had accepted. Inputs:
 - `--log DIR`: what `b70-serve --log-requests DIR` writes (NNNNNN.json per request with
   `prompt_ids` and `out_ids`). With `--seed-session N` each request's matcher also holds the
   generated ids of the N requests before it in the log, each behind a boundary no match
-  crosses, before the prompt: what `b70-serve --spec lookup --spec-history N` sees.
+  crosses, before the prompt: what a history-capped `--spec lookup` would see (b70-serve's own is uncapped).
 - `--a4 DIR --a4-expected JSON --tokenizer FILE`: the A4 tool-call set. DIR/<name>.ids is
   the rendered prompt; the reference output is the `text` of the scenario's first entry in
   tests/server/toolcall_expected.json (bf16 backend first, then l0, then l0-int8),

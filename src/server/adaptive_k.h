@@ -1,5 +1,5 @@
 #pragma once
-// Spec 8 §10: `b70-serve --mtp auto` - per request, choose the iteration's draft count K
+// Spec 8 §10: `b70-serve --spec mtp` - per request, choose the iteration's draft count K
 // from the request's own acceptance so far. Pure host code, unit-tested by
 // tests/server/adaptive_k_test.cc; the server keeps one AdaptiveK per request.
 #include <cstdint>
@@ -10,7 +10,7 @@ namespace server {
 
 // Step costs in units of one plain decode step: verify[m - 1] for a verify of M = m rows
 // (verify[0] = the plain step), draft[k - 1] for k drafts. Data, not code: defaults per
-// head form, overridable with `--mtp-cost` so the box can calibrate.
+// head form, overridable with `the cost table` so the box can calibrate.
 struct MtpCost {
   // Spec 28b: the verify rows on gemm_sm (the small-M GEMM) - measured 2026-11-01 by probe_mtp_steps at depth 4096,
   // bf16 head (busy-box timing on one card, to be re-checked on a quiet box; before 28b: 1.17 / 1.52 / 1.74).
@@ -26,7 +26,7 @@ struct MtpCost {
   //   int8: 1.27 GB -> ~2.2 ms of the 32.65 ms int8 plain step = 0.067 of draft[0] 0.13
   //   bf16: 2.54 GB -> ~4.4 ms of the ~34 ms bf16 plain step   = 0.129 of draft[0] 0.19
   // The rest of a draft (the MTP head's own layer, its norms, the argmax) does not move.
-  // `probe_mtp_steps ... <form> <size>` on the box replaces the result (via --mtp-cost).
+  // `probe_mtp_steps ... <form> <size>` on the box replaces the result (via the cost table).
   static constexpr double kInt8DraftHeadShare = 0.067 / 0.13;
   static constexpr double kBf16DraftHeadShare = 0.129 / 0.19;
   // This table with every draft[k - 1] scaled to draft[k - 1] * ((1 - head_share) +

@@ -11,6 +11,8 @@
 # answered), 1 when the server did not come up.
 # Env: PORT (8013), WAIT (900 s for /v1/models), B70_SERVE (the binary; default this tree's
 # build/src/cli/b70-serve - test_box_validate.py points it at a stand-in).
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -ge 4 ] || { echo "usage: $0 <out dir> <label> <round> <snapshot> [serve flags] -- [client flags]" >&2; exit 2; }
@@ -22,8 +24,8 @@ while [ $# -gt 0 ] && [ "$1" != "--" ]; do serve+=("$1"); shift; done
 port="${PORT:-8013}"
 mkdir -p "$out/server-log"
 bin="${B70_SERVE:-build/src/cli/b70-serve}"
-echo "serve_run: [$label r$round] $bin $model --port $port --served-name b70 --log-requests $out/server-log ${serve[*]+${serve[*]}}"
-"$bin" "$model" --port "$port" --served-name b70 --log-requests "$out/server-log" ${serve[@]+"${serve[@]}"} \
+echo "serve_run: [$label r$round] $bin $model --port $port --spec off --log-requests $out/server-log ${serve[*]+${serve[*]}}"
+"$bin" "$model" --port "$port" --spec off --log-requests "$out/server-log" ${serve[@]+"${serve[@]}"} \
   > "$out/server.log" 2>&1 &
 srv=$!
 stop() { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; }

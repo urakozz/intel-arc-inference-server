@@ -158,7 +158,7 @@ target_include_directories(dflash_lookup_server_test PRIVATE ${CMAKE_SOURCE_DIR}
 target_link_libraries(dflash_lookup_server_test PRIVATE b70_server)
 add_test(NAME dflash_lookup_server_test COMMAND dflash_lookup_server_test)
 
-# Spec 8 §10: the --mtp auto policy on synthetic acceptance sequences, host only.
+# Spec 8 §10: the --spec mtp policy on synthetic acceptance sequences, host only.
 add_executable(adaptive_k_test server/adaptive_k_test.cc)
 target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(adaptive_k_test PRIVATE b70_server)
@@ -1211,42 +1211,24 @@ b70_cli_reject(cli_reject_prefill_length_zero ${B70_NO_MODEL} --bench --prefill-
   EXPECT "--prefill-length 0 would prefill nothing")
 b70_cli_reject(cli_reject_prefill_chunk_without_length ${B70_NO_MODEL} --bench --prefill-chunk 1024
   EXPECT "--prefill-chunk belongs to --prefill-length")
-# The 2026-10-06 rename (cli/renamed_flags.h): `--pp` is vLLM's pipeline-parallel size now, so
-# an old `--bench --pp 4096` must not request a 4096-way pipeline - any value but 1 or 2 is
-# refused naming --prefill-length - and the old prefill flags are unknown options that name
-# their new spelling (no aliases).
-b70_cli_reject(cli_reject_pp_old_prefill_length ${B70_NO_MODEL} --bench --pp 4096
-  EXPECT "--pp is the pipeline-parallel size, 1 or 2")
-b70_cli_reject(cli_reject_pp_old_prefill_length_hint ${B70_NO_MODEL} --bench --pp 4096
-  EXPECT "the bench's prefill length is --prefill-length N")
-b70_cli_reject(cli_reject_pipeline_parallel_size_value ${B70_NO_MODEL} --bench
-  --pipeline-parallel-size 512 EXPECT "--pipeline-parallel-size is the pipeline-parallel size, 1 or 2")
-b70_cli_reject(cli_reject_renamed_pp_chunk ${B70_NO_MODEL} --bench --prefill-length 64 --pp-chunk 1024
-  EXPECT "unknown option '--pp-chunk' (renamed: --prefill-chunk C)")
-b70_cli_reject(cli_reject_renamed_pp_backend ${B70_NO_MODEL} --bench --prefill-length 64
-  --pp-backend l0 EXPECT "unknown option '--pp-backend' (renamed: --prefill-backend B)")
-b70_cli_reject(cli_reject_renamed_pipeline ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pipeline 2
-  EXPECT "unknown option '--pipeline' (renamed: --pp N, or --pipeline-parallel-size N)")
 # `--prefill` is the ids-mode equivalent of `--prefill-length`; it must not be accepted as
 # an unknown flag or leak as far as l0::Context.
 b70_cli_reject(cli_reject_prefill_without_ids ${B70_NO_MODEL} --bench --prefill
   EXPECT "--prefill belongs to --ids")
-# Spec 6 §10: --max-len is `auto` or a positive integer, --mem-reserve-gb a number of GB;
-# both are parsed host-side, before the snapshot or the device is touched.
+# Spec 6 §10: --max-len is `auto` or a positive integer, parsed host-side, before the snapshot or
+# the device is touched.
 b70_cli_reject(cli_reject_max_len_zero ${B70_NO_MODEL} --bench --max-len 0
   EXPECT "--max-len 0 is not a model length")
 b70_cli_reject(cli_reject_max_len_word ${B70_NO_MODEL} --bench --max-len big
   EXPECT "--max-len expects auto or a positive integer")
-b70_cli_reject(cli_reject_mem_reserve ${B70_NO_MODEL} --bench --mem-reserve-gb -1
-  EXPECT "--mem-reserve-gb expects a number of GB")
-# Spec 8: `--mtp K|auto` is --ids mode's greedy speculative decoding (queue row 6's
+# Spec 8: `--spec mtp` is --ids mode's greedy speculative decoding (queue row 6's
 # long-context checks without the server); parsed and placed before the device like the rest.
-b70_cli_reject(cli_reject_mtp_with_bench ${B70_NO_MODEL} --bench --mtp 1
-  EXPECT "--mtp belongs to --ids")
-b70_cli_reject(cli_reject_mtp_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --mtp 4
-  EXPECT "--mtp expects off, 0..3 or auto")
+b70_cli_reject(cli_reject_mtp_with_bench ${B70_NO_MODEL} --bench --spec mtp
+  EXPECT "--spec belongs to --ids")
+b70_cli_reject(cli_reject_mtp_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec mtp --spec-max 4
+  EXPECT "expects 1..3")
 b70_cli_reject(cli_reject_mtp_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
-  --mtp auto EXPECT "K2-Horizon has no MTP head")
+  --spec mtp EXPECT "K2-Horizon has no MTP head")
 
 
 # --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
@@ -1332,7 +1314,7 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
   set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test prefix_gpu_split_l0_test
     prefix_gpu_split_int8_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
-  # Spec 8 M5 (plan 8c): C2 with the MTP head loaded and the adapter at --mtp 3.
+  # Spec 8 M5 (plan 8c): C2 with the MTP head loaded and the adapter at --spec mtp.
   if(B70_MTP)
     add_test(NAME prefix_gpu_mtp_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
       ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 0 3)
@@ -2156,7 +2138,7 @@ if(B70_ORNITH AND B70_MTP)
   set_tests_properties(moe_m_test PROPERTIES LABELS "ornith;mtp" TIMEOUT 900)
 
   # On the card with the checkpoint (SKIP 77 without it): the lists, M2 bitwise rows
-  # (logits, GDN slots, every layer's routes), M3 greedy --mtp K == --mtp 0 against a
+  # (logits, GDN slots, every layer's routes), M3 greedy --spec mtp == --spec off against a
   # head-less engine, the head's route row; both lm_head forms. And M1 - the head's draft
   # logits against tools/oracle/mtp_ref.py's dump on Ornith (oracle-out-ornith-mtp, spec
   # 15a's; SKIP without it) - through spec 8's own mtp_head_test.
@@ -2290,7 +2272,7 @@ if(B70_K2 AND B70_TOKENIZER_ENABLED AND TARGET b70_k2_prefill)
   endif()
 endif()
 # b70-serve's K2 refusals, before the device (tests/model/k2: config.json only) - what K2's
-# engine does not have, by name - and the one-card refusal of --pp (any model).
+# engine does not have, by name - and the one-card refusal of --parallel (any model).
 if(TARGET b70-serve)
   function(b70_serve_reject name)
     cmake_parse_arguments(R "" "EXPECT" "" ${ARGN})
@@ -2318,16 +2300,14 @@ fi
 ]==] b70_serve_reject "${R_EXPECT}" $<TARGET_FILE:b70-serve> ${R_UNPARSED_ARGUMENTS})
     set_tests_properties(${name} PROPERTIES TIMEOUT 60 LABELS k2)
   endfunction()
-  b70_serve_reject(cli_reject_serve_k2_mtp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --mtp 1
-    EXPECT "K2-Horizon has no MTP head")
   b70_serve_reject(cli_reject_serve_k2_spec_mtp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec mtp
     EXPECT "K2-Horizon has no MTP head")
   b70_serve_reject(cli_reject_serve_k2_lookup ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec lookup
     EXPECT "K2-Horizon's engine does not capture")
   b70_serve_reject(cli_reject_serve_k2_prefill_int8 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2
     --prefill-backend l0-int8 EXPECT "K2-Horizon prefills on the l0 backend only")
-  # Spec 16d: --pp 2 serves the Qwen family on two cards; K2 stays refused, by name.
-  b70_serve_reject(cli_reject_serve_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --pp 2
+  # Spec 16d: --parallel pp serves the Qwen family on two cards; K2 stays refused, by name.
+  b70_serve_reject(cli_reject_serve_pp ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel pp
     EXPECT "K2-Horizon runs its own engine")
 endif()
 # ==== Spec 18d ============================================================= (end) ====
@@ -2415,7 +2395,7 @@ endif()
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
 # and auto length for Qwen3.8 / Agnes / Ornith, K2-Horizon's bytes per card), the peer
 # hand-off's protocol on two threads (runtime/pipeline_protocol.h, pp_handoff.cl's mirror),
-# and b70-decode's --pp / --pipeline-parallel-size flags (and the 2026-10-06 rename's refusals).
+# and b70-decode's --parallel flag.
 add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
 target_include_directories(pipeline_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pipeline_plan_test PRIVATE b70_plan b70_k2_plan)
@@ -2432,7 +2412,7 @@ add_test(NAME pipeline_args_test COMMAND pipeline_args_test)
 
 # On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
 # peer access. P1 (pp_decode_test): ingest + 64 greedy ids and a spec 7 restore at 4395,
-# --pp 2 with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
+# --parallel pp with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
 # every layer's GDN state / conv ring / KV and both Control blocks BITWISE the single card on
 # device 0; a reset and the whole run again, bitwise. P4 (pp_fail_test): a lost hand-off under
 # copy and under peer throws within its bound, never hangs, and reset() recovers.
@@ -2457,21 +2437,19 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(pp_decode)
 endif()
 
-# b70-decode's --pp refusals, before any device (cli/pipeline_args.h), and P4's missing
-# card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --pp 2 must stop with the
+# b70-decode's --parallel refusals, before any device (cli/pipeline_args.h), and P4's missing
+# card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --parallel pp must stop with the
 # count, before the load (the model path does not exist).
-b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 3
-  EXPECT "--pp is the pipeline-parallel size, 1 or 2")
+b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 3
+  EXPECT "--parallel expects auto, 1 or pp")
 # (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.
-# Spec 16d lifted the --mtp one, cli_reject_pipeline_mtp: --pp 2 --mtp runs.)
-b70_cli_reject(cli_reject_pipeline_device ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --pp 2
-  --device 1 EXPECT "--device names one card")
-b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
-  --pipeline-split 32 EXPECT "--pipeline-split belongs to --pp 2")
-b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4
-  --pp 2 --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
-b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS}
-  --n 4 --pp 2 EXPECT "K2 across two cards is future work")
+# Spec 16d lifted the --spec mtp one, cli_reject_pipeline_mtp: --parallel pp --spec mtp runs.)
+b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 1
+  --pipeline-split 32 EXPECT "--pipeline-split belongs to --parallel pp")
+b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel pp
+  --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
+b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4 --parallel pp
+  EXPECT "K2 across two cards is future work")
 add_test(NAME cli_reject_pipeline_one_gpu COMMAND sh -c [==[
 out=$(ZE_AFFINITY_MASK=0 "$@" 2>&1)
 rc=$?
@@ -2482,7 +2460,7 @@ printf '%s\n' "$out" | grep -qF 'needs two GPUs and Level Zero shows 1' ||
 if printf '%s\n' "$out" | grep -q '^devices:'; then echo "a device was opened" >&2; exit 1; fi
 exit 0
 ]==] cli_reject_pipeline_one_gpu $<TARGET_FILE:b70-decode> ${B70_NO_MODEL} --ids ${B70_OK_IDS}
-  --n 4 --pp 2)
+  --n 4 --parallel pp)
 set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60)
 # ==== Spec 16b ============================================================= (end) ====
 
@@ -2539,10 +2517,10 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(pp_prefill)
 endif()
 
-# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline.
+# b70-decode --parallel pp runs --prefill and --bench --prefill-length through the pipeline.
 # ==== Spec 16c ============================================================= (end) ====
 
-# ==== Spec 16d: pipeline parallel integration (b70-serve --pp 2, MTP across the split) ====
+# ==== Spec 16d: pipeline parallel integration (b70-serve --parallel pp, MTP across the split) ====
 # Written blind on the Mac, like 16b / 16c; box-validation-queue.md row 27 is the order to run
 # the device ones in (`ctest -L pp`).
 #
@@ -2585,7 +2563,7 @@ if(B70_MTP)
     b70_kv8_twin(pp_mtp)
   endif()
 endif()
-# Review Focus 2 / 5 and spec 16 P2 (spec 7's C2 with --pp 2): the prefix cache's request path
+# Review Focus 2 / 5 and spec 16 P2 (spec 7's C2 with --parallel pp): the prefix cache's request path
 # through b70-serve's adapters, two cards BITWISE one card - the plans, the final turn's ids and
 # rows, the session - on sequences a-f; copy, peer, the split_last path, MTP (K 3, step_many),
 # the int8 head; the int8 KV twin.
@@ -2615,21 +2593,17 @@ if(B70_TOKENIZER_ENABLED)
   endif()
 endif()
 
-# b70-serve's --pp refusals before the device (cli/pipeline_serve.h): the model's with
+# b70-serve's --parallel refusals before the device (cli/pipeline_serve.h): the model's with
 # tests/model/kolibri1 (config.json only; K2's is 18d's cli_reject_serve_pp, its expectation
 # updated), the rest before the snapshot is resolved (the model path does not exist).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
-  b70_serve_reject(cli_reject_serve_pp_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --pp 2 --device 1
-    EXPECT "--device names one card")   # spec 20e: Kolibri-1 serves on --pp 2 (its default), refuses --device
-  b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --pp 4096
-    EXPECT "--pp is the pipeline-parallel size, 1 or 2")
-  b70_serve_reject(cli_reject_serve_pp_device ${B70_NO_MODEL} --pipeline-parallel-size 2 --device 1
-    EXPECT "--device names one card")
-  b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --pipeline-split 20
-    EXPECT "--pipeline-split belongs to --pp 2")
-  b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --pp 2 --pipeline-handoff p2p
+  b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --parallel 4096
+    EXPECT "--parallel expects auto, 1 or pp")
+  b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --parallel 1 --pipeline-split 20
+    EXPECT "--pipeline-split belongs to --parallel pp")
+  b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p
     EXPECT "--pipeline-handoff expects copy or peer")
-  set_tests_properties(cli_reject_serve_pp_kolibri cli_reject_serve_pp_value cli_reject_serve_pp_device
+  set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
     PROPERTIES LABELS pp)
 endif()
@@ -2763,7 +2737,7 @@ if(B70_KOLIBRI)
     kolibri_partial_test kolibri_partial_eager_test
     PROPERTIES LABELS "checkpoint;golden;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
-# Task 6: two cards on spec 16b's pieces - --pp 1 against --pp 2 bitwise on the synthetic checkpoint
+# Task 6: two cards on spec 16b's pieces - --parallel 1 against --parallel pp bitwise on the synthetic checkpoint
 # under both hand-offs, the real one across splits 25 / 20, P4's lost hand-off, replay (kolibri_pp_test);
 # KL2 and K3 on the real checkpoint across two cards (needs spec 20b). SKIP 77 with one GPU or no data.
 if(B70_KOLIBRI)
@@ -2788,13 +2762,11 @@ if(B70_KOLIBRI)
   set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test kolibri_golden_peer_test
     kolibri_decode_test PROPERTIES LABELS "checkpoint;golden;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
-b70_cli_reject(cli_reject_kolibri_pp_device ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
-  --device 1 EXPECT "--device names one card")
 # b70-decode's model_type dispatch and Kolibri's refusals, before the device: tests/model/kolibri1/ holds
-# only the checkpoint's config.json, which is all the dispatch and the --pp 1 fit check read.
+# only the checkpoint's config.json, which is all the dispatch and the --parallel 1 fit check read.
 set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
-b70_cli_reject(cli_reject_kolibri_one_card ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --pp 1 EXPECT "--pp 2")
-b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_kolibri_one_card ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --parallel 1 EXPECT "--parallel pp")
+b70_cli_reject(cli_reject_kolibri_mtp ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "no MTP head")
 b70_cli_reject(cli_reject_kolibri_kv8 ${_kol_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "bf16 only")
 b70_cli_reject(cli_reject_kolibri_layers_qwen ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --layers 3
   EXPECT "--layers belongs to Kolibri-1")
@@ -2866,7 +2838,7 @@ if(B70_KOLIBRI)
   set_tests_properties(kolibri_prefill_synth_int4attn_test kolibri_prefill_synth_bf16attn_test
     kolibri_prefill_synth_eager_test prefill_split_kolibri_test
     PROPERTIES LABELS "checkpoint;kolibri;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # two cards (16b's pieces): one card against --pp 2 --pipeline-split 3 bitwise on the synthetic checkpoint,
+  # two cards (16b's pieces): one card against --parallel pp --pipeline-split 3 bitwise on the synthetic checkpoint,
   # the split test across two cards; the real checkpoint on two cards (needs spec 20b)
   add_test(NAME kolibri_prefill_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} pp pp2:3)
   add_test(NAME prefill_split_kolibri_pp_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids}
@@ -2962,7 +2934,7 @@ set_tests_properties(toolcall_kolibri_test kolibri_server_test PROPERTIES LABELS
 # Task 3 (host): the engine behind the server without a device - cli::kolibri::KolibriEngineAdapterT over a
 # fake with KolibriEngine's interface whose rings and full KV are host buffers in KolibriBuffers' layout (one
 # card and two): runtime::kolibri::state_runs / kv_runs on the real shapes (41,943,040 B of state, 20,480 B of
-# KV a position, one host layout under --pp 1 and --pp 2), save / load on host buffers, Review Focus 4 through
+# KV a position, one host layout under --parallel 1 and --parallel pp), save / load on host buffers, Review Focus 4 through
 # spec 7's PrefixSession (restores at 2048, 4096, 2049, 5000 and 300, every turn == a cold run), a snapshot
 # moving between one card and two, and the server over HTTP (greedy == the decode run, a cached second turn,
 # seeded sampling with the model's defaults, no id the tokenizer lacks).
@@ -2994,18 +2966,17 @@ if(B70_KOLIBRI)
     kolibri_snapshot_gpu_test PROPERTIES LABELS "checkpoint;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-serve's Kolibri refusals, before the device (tests/model/kolibri1: config.json only - all the dispatch,
-# cli::kolibri::check_args and the --pp 1 fit check read).
+# cli::kolibri::check_args and the --parallel 1 fit check read).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_kol_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1)
-  b70_serve_reject(cli_reject_serve_kolibri_mtp ${_kol_cfg} --mtp 1 EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_kolibri_spec_mtp ${_kol_cfg} --spec mtp EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_kolibri_lookup ${_kol_cfg} --spec lookup EXPECT "Kolibri-1's engine does not capture")
   b70_serve_reject(cli_reject_serve_kolibri_kv8 ${_kol_cfg} --kv-cache int8 EXPECT "bf16 only")
   b70_serve_reject(cli_reject_serve_kolibri_prefill_int8 ${_kol_cfg} --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
-  b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --pp 1 EXPECT "run it with --pp 2")
+  b70_serve_reject(cli_reject_serve_kolibri_one_card ${_kol_cfg} --parallel 1 EXPECT "run it with --parallel pp")
   b70_serve_reject(cli_reject_serve_kolibri_max_len ${_kol_cfg} --max-len 524288 EXPECT "decision 3")
-  set_tests_properties(cli_reject_serve_kolibri_mtp cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
+  set_tests_properties(cli_reject_serve_kolibri_spec_mtp cli_reject_serve_kolibri_lookup
     cli_reject_serve_kolibri_kv8 cli_reject_serve_kolibri_prefill_int8 cli_reject_serve_kolibri_one_card
     cli_reject_serve_kolibri_max_len PROPERTIES LABELS kolibri)
 endif()
@@ -3147,7 +3118,7 @@ if(B70_Q4EXP)
     ${B70_Q4EXP_ORACLE_DIR}-L18 18 int8)
   set_tests_properties(${_q4tests} qwen4exp_partial_test
     PROPERTIES LABELS "checkpoint;golden;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # Task 4: two cards on spec 16b's pieces - --pp 1 against --pp 2 (splits 2 and 1, copy and peer) bitwise on the
+  # Task 4: two cards on spec 16b's pieces - --parallel 1 against --parallel pp (splits 2 and 1, copy and peer) bitwise on the
   # ours synthetic, Intel's --layers 38 split 19 against 20, P4's lost hand-off, the landing layout. SKIP 77 with one
   # GPU or no data.
   add_executable(qwen4exp_pp_test runtime/qwen4exp_pp_test.cc)
@@ -3164,7 +3135,7 @@ endif()
 # dispatch and the refusals read.
 set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
 b70_cli_reject(cli_reject_qwen4exp_full ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 EXPECT "spec 22")
-b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "spec 21e")
+b70_cli_reject(cli_reject_qwen4exp_mtp ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "spec 21e")
 b70_cli_reject(cli_reject_qwen4exp_kv8 ${_q4_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "decision 8")
 # (spec 21e removed cli_reject_qwen4exp_serve: b70-serve serves this family now - its refusals are 21e's block's)
 # ==== Spec 21c: Qwen3.8-Flash-Next decode ==== (end) ====
@@ -3240,7 +3211,7 @@ if(B70_Q4EXP)
   set_tests_properties(${_q4pf} qwen4exp_prefill_synth_eager_test prefill_split_qwen4exp_test
     PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   set_tests_properties(qwen4exp_prefill_gdn_test PROPERTIES LABELS "qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 1800)
-  # two cards (16b's pieces): one card against --pp 2 --pipeline-split 2 bitwise on the ours synthetic, the split test
+  # two cards (16b's pieces): one card against --parallel pp --pipeline-split 2 bitwise on the ours synthetic, the split test
   # across two cards; Intel's truncated model on two cards at the planner's N with prefill (37 at 32768: 38 does not fit
   # beside the prefill scratch)
   add_test(NAME qwen4exp_prefill_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2)
@@ -3315,7 +3286,7 @@ if(B70_TOKENIZER_ENABLED)
     TIMEOUT 300)
 endif()
 # Task 2: the prefix cache's snapshots. Host: the layouts (state_runs / kv_runs) over simulated devices - the bytes,
-# one host layout under --pp 1 and --pp 2 (every split of --layers 4 and 8), round trips across placements, the
+# one host layout under --parallel 1 and --parallel pp (every split of --layers 4 and 8), round trips across placements, the
 # history before position 0 (EOS ids, zero conv rows), the open block's raw keys at 2049..2052 and the head's.
 add_executable(qwen4exp_snapshot_test runtime/qwen4exp_snapshot_test.cc)
 target_include_directories(qwen4exp_snapshot_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3439,21 +3410,18 @@ endif()
 if(TARGET b70-serve)
   set(_q4_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp)
   b70_serve_reject(cli_reject_serve_qwen4exp_full ${_q4_cfg} EXPECT "spec 22")
-  b70_serve_reject(cli_reject_serve_qwen4exp_mtp_auto ${_q4_cfg} --layers 4 --mtp auto
-    EXPECT "auto waits for spec 22's full-model numbers")
-  b70_serve_reject(cli_reject_serve_qwen4exp_spec_mtp ${_q4_cfg} --layers 4 --spec mtp EXPECT "pass --mtp 1, 2 or 3")
-  b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --mtp 1 --draft-vocab 32k
+  b70_serve_reject(cli_reject_serve_qwen4exp_draft_vocab ${_q4_cfg} --layers 4 --spec mtp --draft-vocab 32k
     EXPECT "--draft-vocab is not built for Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_qwen4exp_kv8 ${_q4_cfg} --layers 4 --kv-cache int8 EXPECT "decision 8")
   b70_serve_reject(cli_reject_serve_qwen4exp_prefill_int8 ${_q4_cfg} --layers 4 --prefill-backend l0-int8
     EXPECT "1024-k Hadamard blocks")
-  b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --pipeline-split 2
-    EXPECT "--pipeline-split belongs to --pp 2")
+  b70_serve_reject(cli_reject_serve_qwen4exp_split_alone ${_q4_cfg} --layers 4 --parallel 1 --pipeline-split 2
+    EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_qwen4exp_tokenizer ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp-q38tok --layers 4
-    EXPECT "Pass --tokenizer")
+    EXPECT "Serve a snapshot that ships")
   b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --layers 4
     EXPECT "belong to Qwen3.8-Flash-Next")
-  set_tests_properties(cli_reject_serve_qwen4exp_full cli_reject_serve_qwen4exp_mtp_auto cli_reject_serve_qwen4exp_spec_mtp
+  set_tests_properties(cli_reject_serve_qwen4exp_full
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
     cli_reject_serve_layers_other PROPERTIES LABELS qwen4exp)
@@ -3471,8 +3439,6 @@ set_tests_properties(probe_offload_kernel_drift_test PROPERTIES LABELS host)
 # b70-serve refuses another model's flags on a Kolibri-1 config, before the device: --chat-template is Nemotron 3.5 Bolt's
 # (spec 25e) and --spec dflash Qwen3.8's (spec 19c). (Written for spec 23e; Muse-Glimmer-30B was dropped 2026-10-27.)
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
-  b70_serve_reject(cli_reject_serve_chat_template_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --chat-template x
-    EXPECT "Nemotron 3.5 Bolt only")
   b70_serve_reject(cli_reject_serve_spec_dflash_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --spec dflash
     EXPECT "built for Qwen3.8 beside its drafter")   # spec 19c: dflash is Qwen3.8's
 endif()
@@ -3647,54 +3613,43 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
 endif()
 # b70-decode --spec dflash's refusals before the device.
-b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec dflash belongs to --ids")
-b70_cli_reject(cli_reject_dflash_mtp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --mtp 1
-  EXPECT "one proposer")
+b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec belongs to --ids")
 b70_cli_reject(cli_reject_dflash_spec_max ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 9
   EXPECT "expects 1..7")
 b70_cli_reject(cli_reject_dflash_kv8 ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --kv-cache int8
   EXPECT "--kv-cache bf16 with --spec dflash")
 b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
-  --spec dflash EXPECT "Kolibri-1 has none")
-# spec 19d: b70-decode stays one card (b70-serve --pp 2 serves the drafter).
-b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --pp 2
+  --spec dflash EXPECT "no DFlash drafter exists for Kolibri-1")
+# spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
+b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
   EXPECT "b70-decode --spec dflash runs on one card")
-set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_mtp cli_reject_dflash_spec_max cli_reject_dflash_kv8
+set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max cli_reject_dflash_kv8
   cli_reject_dflash_kolibri cli_reject_dflash_pp PROPERTIES LABELS dflash)
 # b70-serve --spec dflash's refusals before the device (cli/dflash_args.h).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
-  b70_serve_reject(cli_reject_serve_dflash_mtp ${B70_NO_MODEL} --spec dflash --mtp 1 EXPECT "one proposer per server")
-  b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "need --spec dflash")
+  b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "needs --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_dflash_min_match ${B70_NO_MODEL} --spec dflash --spec-min-match 4
-    EXPECT "need --spec lookup")
-  b70_serve_reject(cli_reject_serve_dflash_format ${B70_NO_MODEL} --spec dflash --draft-format fp8
-    EXPECT "--draft-format expects int8 or bf16")
   b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
     EXPECT "--kv-cache bf16 with --spec dflash")
-  # spec 19d: --pp 2 serves the drafter on device 1, on the copy hand-off only
-  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --pp 2 --pipeline-handoff peer
+  # spec 19d: --parallel pp serves the drafter on device 1, on the copy hand-off only
+  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --parallel pp --pipeline-handoff peer
     EXPECT "needs --pipeline-handoff copy")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
     EXPECT "no DFlash drafter exists for K2-Horizon")
-  set_tests_properties(cli_reject_serve_dflash_mtp cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
-    cli_reject_serve_dflash_min_match cli_reject_serve_dflash_format cli_reject_serve_dflash_kv8
+  set_tests_properties(cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
+    cli_reject_serve_dflash_kv8
     cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
-  # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --pp 2
-  b70_serve_reject(cli_reject_serve_dflash_lookup_mtp ${B70_NO_MODEL} --spec dflash-lookup --mtp 1
-    EXPECT "one proposer per server")
+  # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_kv8 ${B70_NO_MODEL} --spec dflash-lookup --kv-cache int8
     EXPECT "--kv-cache bf16 with --spec dflash")
-  b70_serve_reject(cli_reject_serve_dflash_lookup_min_match ${B70_NO_MODEL} --spec dflash-lookup --spec-min-match 4
-    EXPECT "need --spec lookup")
-  b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --pp 2 --pipeline-handoff copy
-    EXPECT "--spec dflash-lookup is built for one card")
+  b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
+    --pipeline-handoff copy EXPECT "--spec dflash-lookup is built for one card")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
     --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
-    EXPECT "--spec expects off, mtp, lookup, dflash or dflash-lookup")
-  set_tests_properties(cli_reject_serve_dflash_lookup_mtp cli_reject_serve_dflash_lookup_kv8
-    cli_reject_serve_dflash_lookup_min_match cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
+    EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
+  set_tests_properties(cli_reject_serve_dflash_lookup_kv8
+    cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
     cli_reject_serve_spec_value PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====
@@ -3713,7 +3668,7 @@ target_include_directories(dflash_scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src
 target_link_libraries(dflash_scheduler_test PRIVATE b70_server)
 add_test(NAME dflash_scheduler_test COMMAND dflash_scheduler_test)
 set_tests_properties(dflash_scheduler_test PROPERTIES LABELS dflash)
-# --spec dflash --pp 2 without a device: PipelineEngineAdapterT's DFlash path over a fake two-card engine with a tap
+# --spec dflash --parallel pp without a device: PipelineEngineAdapterT's DFlash path over a fake two-card engine with a tap
 # drafter (lossless greedy, seeded sampling, a restored turn drafting as the uninterrupted one, the refusals).
 add_executable(pp_dflash_serve_test server/pp_dflash_serve_test.cc)
 target_include_directories(pp_dflash_serve_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3734,7 +3689,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP AND B70_TOKENIZER_ENABLED)
   set_tests_properties(dflash_prefix_gpu_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
 endif()
-# --spec dflash --pp 2 on two cards, BITWISE the one-card drafter (the copy hand-off at the auto split and at 20): the
+# --spec dflash --parallel pp on two cards, BITWISE the one-card drafter (the copy hand-off at the auto split and at 20): the
 # prefill's ring, every verify's rows, the drafts and ids, the session and the hooked snapshots; a one-card snapshot
 # continued on two cards. SKIP 77 with fewer than two GPUs, without peer access or either checkpoint.
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
@@ -3873,7 +3828,7 @@ if(B70_BOLT)
   add_test(NAME bolt_kernels_test COMMAND bolt_kernels_test)
   set_tests_properties(bolt_kernels_test PROPERTIES LABELS bolt TIMEOUT 1800)
   # Task 4-6: the engine. B4 (bolt_decode_test: plan == allocation, the launch count, two runs bitwise - logits, routes,
-  # rings, SSM states, KV, both residual buffers, every block's tap; --fuse <arms> bitwise none; --pp a,b two splits
+  # rings, SSM states, KV, both residual buffers, every block's tap; --fuse <arms> bitwise none; --parallel a,b two splits
   # bitwise each other and one card) and B3 (bolt_golden_test: tokens tie-aware, routes within B70_BOLT_TIE_TOL, the SSM
   # state and conv columns by cosine, the h taps) on 25b's synthetic N 12 (one card; its golden sets: bolt_oracle.sh export
   # <synthetic> -> oracle-out-bolt-<name>, data key oracle_bolt_synth) and on our g64 export (two cards, split 48 and 40;
@@ -3956,7 +3911,7 @@ endif()
 set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
 # (25c's cli_reject_bolt_prefill / _prefill_length - --prefill naming spec 25d - are gone: Bolt prefills now; 25d's refusals
 # are the spec 25d block's cli_reject_bolt_prefill_*.)
-b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --mtp 1 EXPECT "no MTP head")
+b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "no MTP head")
 b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "has no speculative decoding")
 b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
@@ -4136,8 +4091,6 @@ set_tests_properties(bolt_serve_args_test PROPERTIES LABELS bolt)
 # ... and through the binary (box; the vendored config.json is all the dispatch, check_args and the planner read before the device):
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_bolt_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
-  b70_serve_reject(cli_reject_serve_bolt_mtp ${_bolt_serve_cfg} --mtp 1 EXPECT "no MTP head")
-  b70_serve_reject(cli_reject_serve_bolt_mtp_auto ${_bolt_serve_cfg} --mtp auto EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_spec_mtp ${_bolt_serve_cfg} --spec mtp EXPECT "no MTP head")
   b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup EXPECT "has no speculative decoding")
   b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash EXPECT "has no speculative decoding")
@@ -4149,21 +4102,17 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belong to Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_bolt_max_len ${_bolt_serve_cfg} --max-len 262145
     EXPECT "exceeds Nemotron 3.5 Bolt's trained context 262144")
-  b70_serve_reject(cli_reject_serve_bolt_device ${_bolt_serve_cfg} --pp 2 --device 1 EXPECT "--device names one card")
-  b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --pp 1 --pipeline-split 3
-    EXPECT "--pipeline-split belongs to --pp 2")
-  b70_serve_reject(cli_reject_serve_bolt_generation_config ${_bolt_serve_cfg} --generation-config /nonexistent/gc.json
-    EXPECT "--generation-config: cannot read")
-  set_tests_properties(cli_reject_serve_bolt_mtp cli_reject_serve_bolt_mtp_auto cli_reject_serve_bolt_spec_mtp
+  b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --parallel 1 --pipeline-split 3
+    EXPECT "--pipeline-split belongs to --parallel pp")
+  set_tests_properties(cli_reject_serve_bolt_spec_mtp
     cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
     cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_layers
-    cli_reject_serve_bolt_max_len cli_reject_serve_bolt_device cli_reject_serve_bolt_split
-    cli_reject_serve_bolt_generation_config PROPERTIES LABELS bolt)
+    cli_reject_serve_bolt_max_len cli_reject_serve_bolt_split PROPERTIES LABELS bolt)
 endif()
 # Task 4 (host): the engine behind the server without a device - cli::bolt::BoltEngineAdapterT over a fake with BoltEngine's
 # interface whose SSM states, conv rings and attention KV are host buffers in BoltBuffers' layout (one card and two): runtime::
-# bolt::state_runs / kv_runs on the real shapes (170,229,760 B of state, 8,192 B of KV a position, one host layout under --pp 1
-# and --pp 2), save / load on host buffers, Review Focus 4 (restores at positions 0 .. 18 and, through spec 7's PrefixSession, at
+# bolt::state_runs / kv_runs on the real shapes (170,229,760 B of state, 8,192 B of KV a position, one host layout under --parallel 1
+# and --parallel pp), save / load on host buffers, Review Focus 4 (restores at positions 0 .. 18 and, through spec 7's PrefixSession, at
 # 2048, 4096, 6144, 2049, 5000 and 300 - every turn and the whole memory == a cold run), a snapshot moving between every split,
 # and the server over HTTP (greedy == the decode run, a cached second turn, seeded sampling, no id the tokenizer lacks).
 add_executable(bolt_snapshot_test runtime/bolt_snapshot_test.cc)

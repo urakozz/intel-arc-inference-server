@@ -218,7 +218,7 @@ uint32_t max_len_that_fits(const model::Kolibri1Desc& d, const model::KolPlaceme
 PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
                           const std::array<size_t, kPpDevices>& device_bytes, size_t reserve, uint32_t cap = 0,
                           bool prefill = false);
-// Whether `--pp 1` may run: the one-card plan at min(kMinAutoMaxLen, trained) fits device_bytes - reserve.
+// Whether `--parallel 1` may run: the one-card plan at min(kMinAutoMaxLen, trained) fits device_bytes - reserve.
 bool fits_one_card(const model::Kolibri1Desc& d, bool int8_head, size_t device_bytes, size_t reserve,
                    bool prefill = false);
 // "pipeline plan at max_len N, split s (layers [0, s) | [s, L)):" + one line per device
@@ -235,7 +235,7 @@ std::string describe(const std::vector<DevicePlan>& p, const model::KolPlacement
 // rows on the host, written back as zeros: the window never reads them, and a cold run's ring holds
 // zeros there too (reset). The routes, the RoPE table and the scratch are per step or constant.
 //
-// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte, so an entry moves between one
+// The HOST layouts (spec 16b's rule: --parallel pp's is --parallel 1's byte for byte, so an entry moves between one
 // card and two unchanged - every layer is addressed through the placement, never by device order):
 //   state  [K | V][sliding layer, in layer order][state_positions(d)][kv_n] bf16, positions ascending
 //   kv     [K | V][full layer, in layer order][end - begin][kv_n] bf16 (runtime::Engine's / K2's order)

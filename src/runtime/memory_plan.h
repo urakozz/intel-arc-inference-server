@@ -136,7 +136,8 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 constexpr uint32_t kMaxLenQuantum = 256;
 // Below this, auto gives up instead of serving a context nobody asked for.
 constexpr uint32_t kMinAutoMaxLen = 4096;
-// The default --mem-reserve-gb: device memory the plan does not count - the driver's
+// The device memory the plan leaves free (the engine's constant since the zero-config cleanup removed
+// --mem-reserve-gb): device memory the plan does not count - the driver's
 // own allocations, the kernel modules and command lists (decode, MTP draft / verify,
 // prefill), the int8 sign tables, Int8State's per-weight colmax temporaries, the
 // allocator's slack. An estimate, NOT a measurement: the box has to confirm or tune

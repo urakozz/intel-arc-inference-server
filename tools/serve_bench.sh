@@ -34,9 +34,11 @@
 # the box and polled with short, separately-connecting ssh calls, so a
 # mid-run WiFi drop costs at most one retry rather than the whole session.
 #
-# Env: MODEL (default: the gate checkpoint), PORT (8000), SERVED_NAME (b70),
+# Env: MODEL (default: the gate checkpoint), PORT (8000), SERVED_NAME (b70: the requests' model field, which the server does not check),
 #      RUNS (3 llama-benchy invocations; each is itself 3 runs -- llama-
 #      benchy's own --runs default), BOX, REMOTE_DIR, JOBS (tools/box.sh).
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -98,7 +100,7 @@ else
 fi
 
 echo "=== starting b70-serve (detached, device 0 default) ===" >&2
-PID="$($SSH "$BOX" "cd '$REMOTE_DIR' && setsid nohup ./build/src/cli/b70-serve '$MODEL' --port $PORT --served-name '$SERVED_NAME' > \$HOME/b70-serve-bench.log 2>&1 < /dev/null & echo \$!")"
+PID="$($SSH "$BOX" "cd '$REMOTE_DIR' && setsid nohup ./build/src/cli/b70-serve '$MODEL' --port $PORT --spec off > \$HOME/b70-serve-bench.log 2>&1 < /dev/null & echo \$!")"
 echo "server pid: $PID" >&2
 
 PID_STILL_RUNNING=1

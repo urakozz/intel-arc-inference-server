@@ -7,12 +7,12 @@
 # (K2's l0 prefill) at --max-len MAX_LEN with --kv-cache <form> and generates 8 ids greedily, the
 # container decodes them, and the placement PASSES if "71432" is in the text. Prints one line per
 # (form, placement) and "passkey k2 <form>: k/3"; exit 0 iff every form got 3/3.
-# The ceiling (k2_plan_test, 32.53 GB card, 1.5 GB reserve, the prefill scratch planned): int8 KV
-# 83968 (bf16 head) / 90368 (--lm-head int8); bf16 KV 42752 / 45824. N_TARGET defaults to ~95 % of
-# the int8 / bf16-head ceiling: MAX_LEN=auto must print "max_len: auto -> 83968" (the run fails
-# loudly if the prompt does not fit). A bf16 form needs N_TARGET=40000.
+# The ceiling (k2_plan_test, 32.53 GB card, 1.5 GB reserve, the prefill scratch planned, the int8 head
+# b70-decode runs): int8 KV 90368, bf16 KV 45824. N_TARGET defaults to ~87 % of the int8 ceiling:
+# MAX_LEN=auto must print "max_len: auto -> 90368" (the run fails loudly if the prompt does not fit).
+# A bf16 form needs N_TARGET=40000.
 # Env: MODEL (the K2 int4 checkpoint), ORACLE_MODEL (its HF cache dir), MAX_LEN (auto), N_TARGET
-# (79000), DECODE_ARGS (extra b70-decode flags, e.g. '--lm-head int8' with N_TARGET=85000),
+# (79000), DECODE_ARGS (extra b70-decode flags, word-split),
 # ZE_AFFINITY_MASK (0). Hold ~/b70-gpu.lock (flock) around it on a shared box.
 cd "$(dirname "$0")/../.." || exit 2
 MODEL="${MODEL:-urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ}"

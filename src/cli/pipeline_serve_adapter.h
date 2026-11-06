@@ -1,5 +1,5 @@
 #pragma once
-// Spec 16d: b70-serve --pp 2 - runtime::PipelineEngine (the model's layers over two B70s) as a
+// Spec 16d: b70-serve --parallel pp - runtime::PipelineEngine (the model's layers over two B70s) as a
 // server::EngineIface, the two-card counterpart of EngineAdapter (src/cli/serve_adapters.h).
 // b70-serve instantiates it as PipelineEngineAdapterT<runtime::PipelineEngine>; the template
 // exists so the host test (tests/server/pp_serve_test.cc) runs the SAME adapter over a
@@ -13,15 +13,15 @@
 //   - spec 7's prefix cache: PipelineEngine's snapshots, which are the ONE-CARD host layouts
 //     (16b's design; with MTP the head's hidden row and KV layer too, spec 16d), so the store
 //     keys them exactly as EngineAdapter does - kv_form() 0 (bf16) / 1 (int8): an entry is
-//     the same bytes whichever of --pp 1 / 2 wrote it. The block hook on the pipeline's
+//     the same bytes whichever of --parallel 1 / 2 wrote it. The block hook on the pipeline's
 //     prefill (from the shadows mid-prompt), ingest for --prefix-split-last;
-//   - spec 8's MTP (`--mtp K|auto`, `--spec mtp`): draft on device 1, verify on both, the
+//   - spec 8's MTP (`--spec mtp`, `--spec mtp`): draft on device 1, verify on both, the
 //     host's acceptance (greedy argmax match; sampled: server::accept_sampled over the q rows
 //     of the drafts and the p rows of the verify), the commit deferred exactly as
 //     EngineAdapter defers it (truncate_to commits fewer);
 //   - spec 19e's prompt lookup (`--spec lookup`): the proposer's drafts written on both
 //     devices (set_draft_input), the same verify lists, server::accept_point_mass;
-//   - spec 19d's DFlash drafter on device 1 (`--spec dflash --pp 2`): draft_tap (the drafter's block, its sparse q
+//   - spec 19d's DFlash drafter on device 1 (`--spec dflash --parallel pp`): draft_tap (the drafter's block, its sparse q
 //     in the readback), the tap verify lists on both devices, the host's acceptance (greedy argmax match; sampled:
 //     server::accept_sparse) - EngineAdapter::step_dflash line for line; the commit replays the drafter's projection;
 //     the snapshots carry its ring and the store keys it (drafter_key).
@@ -87,10 +87,10 @@ struct PipelineEngineAdapterT : server::EngineIface {
         throw std::runtime_error("--spec dflash: this engine has no tap drafter");
       }
     } else if (k_ > Engine::kMaxDraft) {
-      throw std::runtime_error("--mtp " + std::to_string(k_) + ": K is 0..3");
+      throw std::runtime_error("--spec mtp " + std::to_string(k_) + ": K is 0..3");
     }
-    if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--mtp needs the model's MTP head loaded");
-    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --mtp: pick one proposer");
+    if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
+    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
     if (lookup_ && !eng.mtp())
       throw std::runtime_error("--spec lookup needs the verify lists, which the pipeline captures "
                                "with the MTP head loaded; this model has none");

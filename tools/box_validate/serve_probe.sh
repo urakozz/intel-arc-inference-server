@@ -9,14 +9,16 @@
 # `draft vocab ...`). Exit 0 when the request was answered.
 # Env: PORT (8013), WAIT (900), DEVICE (0, for xpu-smi), SEEDED=1 (also send one seeded
 # sampled request twice; the two completions must be identical).
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -ge 1 ] || { echo "usage: $0 <snapshot> [b70-serve flags...]" >&2; exit 2; }
 model="$1"; shift
 port="${PORT:-8013}"
 log="${TMPDIR:-/tmp}/b70-serve-probe.$$.log"
-echo "serve_probe: build/src/cli/b70-serve $model --port $port --served-name b70 $*"
-build/src/cli/b70-serve "$model" --port "$port" --served-name b70 "$@" > "$log" 2>&1 &
+echo "serve_probe: build/src/cli/b70-serve $model --port $port --spec off $*"
+build/src/cli/b70-serve "$model" --port "$port" --spec off "$@" > "$log" 2>&1 &
 srv=$!
 stop() { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; }
 trap stop EXIT

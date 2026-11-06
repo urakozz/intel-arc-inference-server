@@ -316,7 +316,7 @@ class BoltCheckpoint {
 };
 
 // The descriptor load_bolt would build, from config.json alone (no device, no tensor read): the CLI's planner needs it before
-// the load (--pp, --max-len auto).
+// the load (--parallel, --max-len auto).
 model::BoltDesc bolt_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0);
 bool is_bolt_checkpoint(const std::string& snapshot_dir);
 

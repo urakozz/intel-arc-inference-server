@@ -180,7 +180,7 @@ class Qwen4ExpEngine {
   // --- spec 21e: spec 7's prefix-cache snapshots ---------------------------------------------------------------
   // The state at pos (the GDN states and conv rows, the PLE history, the QSA layers' open-block raw keys; with the MTP
   // head its tail and R_{pos-1}) and the blocks (K / V rows and the complete blocks' compressed keys; the head's last):
-  // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --pp 1 and --pp 2
+  // runtime/qwen4exp/qwen4exp_sizes.h's state_runs / kv_runs give both HOST layouts, the same under --parallel 1 and --parallel pp
   // (spec 16b's rule). state_bytes() is 115,651,592 B at the real 48 layers and kv_bytes(n) the blocks of n positions
   // from a block start (25,344 B a position; derived). save_state copies the state at pos() (the zero runs' history:
   // zeros, the PLE ids as EOS); load_state writes it back and sets pos on every device (n_active 0; the GDN state into

@@ -254,7 +254,7 @@ CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, 
 CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                const PpStage& st, const MtpBuffers& mtp, uint32_t i);
 
-// --- spec 19d: a tap drafter across the split (--spec dflash --pp 2) -------------------------
+// --- spec 19d: a tap drafter across the split (--spec dflash --parallel pp) -------------------------
 //
 // build_stage_verify_taps: build_verify_taps restricted to one stage, exactly as build_stage_verify restricts
 // build_verify - the stage's layers at M rows, gdn_step_slots_M<M>_N8 over `tv.gdn_spec` (the stage's slots,

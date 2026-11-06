@@ -76,7 +76,7 @@ class KolibriEngine {
   // --- spec 20e: spec 7's prefix-cache snapshots ---------------------------------------------------
   // Kolibri's "state" is the sliding rings' last state_positions (512) positions - what the next query's
   // window reads - and its blocks are the full layers' KV: runtime/kolibri/kolibri_sizes.h's state_runs /
-  // kv_runs give both host layouts, which are the same under --pp 1 and --pp 2 (spec 16b's rule: layers in
+  // kv_runs give both host layouts, which are the same under --parallel 1 and --parallel pp (spec 16b's rule: layers in
   // layer order, whichever device holds them). state_bytes() is 41,943,040 B and kv_bytes(n) n x 20,480 B
   // at the real shapes (derived). save_state copies the rings' rows of [pos - 512, pos) (zeros for
   // positions before 0); load_state writes them back into their slots (p & 4095, the zeros into the slots

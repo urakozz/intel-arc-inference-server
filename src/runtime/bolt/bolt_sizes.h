@@ -159,7 +159,7 @@ inline size_t ssm_layer_bytes(const model::BoltDesc& d, BoltState s) {
 //   restore at pos 0..2 writes the zeros into the slots, which nothing else reads).
 //   kv     [K | V][attention block, in layer order][end - begin][kv_heads x head_dim] bf16 (runtime::Engine's order): 8,192 B a
 //          position at the real shapes.
-// One host layout for --pp 1 and --pp 2 (spec 16b's rule: an entry moves between one card and two unchanged - every block is
+// One host layout for --parallel 1 and --parallel pp (spec 16b's rule: an entry moves between one card and two unchanged - every block is
 // addressed through the placement, never by device order). A run is one contiguous range of one device allocation, in host order.
 inline constexpr uint32_t kStateColumns = 3;   // conv_kernel - 1
 enum class SnapTensor : uint32_t { KvK, KvV, ConvRing, Ssm };

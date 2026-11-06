@@ -9,6 +9,8 @@
 # (<out prefix>.cases, tools/probe/probe_tie_judge). Env: MODEL, PORT
 # (8012), GB (the cache-on budget, 32), ARMS ("on off"), SERVE_ARGS (extra b70-serve flags,
 # e.g. "--log-requests DIR").
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 log="$1"
@@ -23,7 +25,7 @@ for arm in ${ARMS:-on off}; do
   echo "== cache $arm (--prefix-cache-gb $gb) =="; uptime
   mkdir -p "$out.$arm.log"
   ZE_AFFINITY_MASK=0 build/src/cli/b70-serve "$MODEL" --max-len 131072 --port "$PORT" \
-    --served-name b70 --prefix-cache-gb "$gb" --log-requests "$out.$arm.log" ${SERVE_ARGS:-} \
+    --spec off --prefix-cache-gb "$gb" --log-requests "$out.$arm.log" ${SERVE_ARGS:-} \
     > "$out.$arm.serve.log" 2>&1 &
   srv=$!
   for _ in $(seq 1 900); do

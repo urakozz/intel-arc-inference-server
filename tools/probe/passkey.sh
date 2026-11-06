@@ -11,7 +11,7 @@
 # MAX_LEN=65536 N_TARGET=60000 (spec 14's ceiling), with ORACLE_MODEL naming it too.
 # Spec 6 §10: MAX_LEN=auto takes the largest length the memory plan fits (b70-decode
 # prints it as "max_len: auto -> N"; bf16 head, its default here); set N_TARGET to ~95%
-# of that N. DECODE_ARGS: extra b70-decode flags (word-split), e.g. DECODE_ARGS='--mtp auto'
+# of that N. DECODE_ARGS: extra b70-decode flags (word-split), e.g. DECODE_ARGS='--spec auto'
 # for spec 8 §12's passkey at 120k with MTP (box queue row 6); unset, the runs are as before.
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"

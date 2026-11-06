@@ -15,7 +15,7 @@
 //     the store keyed by K2's own root (k2_store_key), so no entry made by another model's
 //     engine - or by K2 in the other KV form - can ever hit;
 //   - no speculative decoding: mtp_k() and verify_k() stay 0 (K2 has no MTP head, spec 18 §9;
-//     --spec lookup needs verify lists K2Engine does not capture) - b70-serve refuses --mtp,
+//     --spec lookup needs verify lists K2Engine does not capture) - b70-serve refuses --spec mtp,
 //     --spec mtp|lookup and --draft-vocab for K2 by name before the device.
 #include <chrono>
 #include <cstdint>

@@ -11,9 +11,9 @@
 //   --lm-head bf16|int8  int8 the default (Decision 18: built from lm_head at load); bf16 reads lm_head's own tiles
 //   --max-len N|auto     16384 the default (bench rows comparable); auto = the largest multiple of 256 that fits every card,
 //                        at most the trained 262144 (Decision 14)
-//   --pp N / --pipeline-parallel-size N   2 the default for the whole model, 1 for a truncated one; --pp 1 on the whole
+//   --parallel auto|1|pp   2 the default for the whole model, 1 for a truncated one; --parallel 1 on the whole
 //                        model is refused by the plan naming the bytes and Decision 4
-//   --pipeline-split auto|N, --pipeline-handoff copy|peer   --pp 2's (auto = runtime::bolt::pp_split: 48)
+//   --pipeline-split auto|N, --pipeline-handoff copy|peer   --parallel pp's (auto = runtime::bolt::pp_split: 48)
 //   --layers N           development mode: load only blocks [0, N) (the head reads block N-1's residual)
 //   --prefill            (--ids) spec 25d: the prompt through BoltEngine::prefill in chunks, then --n greedy ids
 //   --bench --prefill-length N    depth N PREFILLED and timed (the pp row, a second stdout line, with its TFLOP/s against
@@ -25,8 +25,8 @@
 // construction; the prefill follows the attention form and the state precision). B70_PREFILL_PROFILE=1 prints the prefill's
 // phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
 // device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 and a
-// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --mtp (Bolt has no MTP head), --spec (no
-// drafter either), --kv-cache int8 (Decision 17), --device with --pp 2.
+// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --spec mtp (Bolt has no MTP head), --spec (no
+// drafter either), --kv-cache int8 (Decision 17), --device with --parallel pp.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -83,8 +83,8 @@ struct DecodeArgs {
   size_t reserve = 0;
   uint32_t device = l0::Context::kFromEnv;
   bool int8_head = true;        // --lm-head (Decision 18's int8 head unless bf16)
-  PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
-  bool pp_given = false;        // --pp / --pipeline-parallel-size on the command line
+  PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
+  bool pp_given = false;        // --parallel on the command line
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
   // Spec 25d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
   // --prefill-backend as parsed (l0 only).
@@ -96,7 +96,7 @@ struct DecodeArgs {
   bool prefills() const { return prefill || pp; }
 };
 
-// --pp's default: two cards for the whole model (Decision 4), one for a truncated / synthetic one.
+// --parallel's default: two cards for the whole model (Decision 4), one for a truncated / synthetic one.
 inline uint32_t devices_of(const DecodeArgs& a, const model::BoltDesc& d) {
   if (a.pp_given) return a.pipe.devices;
   return d.layers == model::bolt().layers ? 2u : 1u;
@@ -114,21 +114,21 @@ inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " is not a multiple of " +
                              std::to_string(runtime::bolt::kPfSub) + ": the SSD's sub-chunks are absolute 64-row windows "
                              "and every chunk ends on that grid (spec 25d)");
-  if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp");
+  if (a.mtp) throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --spec mtp");
   if (a.spec)
     throw std::runtime_error("--spec: Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Nemotron 3.5 Bolt's KV is bf16 (spec 25 Decision 17: 8 KiB a position)");
   const uint32_t devs = devices_of(a, d);
   if (devs == 1) {
-    if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --pp 2 (the block device 1 starts at)");
-    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
+    if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the block device 1 starts at)");
+    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     return;
   }
   if (a.device != l0::Context::kFromEnv)
-    throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which two); "
+    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which two); "
                              "--device names one card - drop it");
-  if (d.layers < 2) throw std::runtime_error("--pp 2 needs at least two blocks to split (--layers " + std::to_string(d.layers) + ")");
+  if (d.layers < 2) throw std::runtime_error("--parallel pp needs at least two blocks to split (--layers " + std::to_string(d.layers) + ")");
   if (!a.pipe.split_auto && (a.pipe.split < 1 || a.pipe.split >= d.layers))
     throw std::runtime_error("--pipeline-split " + std::to_string(a.pipe.split) + " leaves a device no block: it is the "
                              "first block of device 1, in [1, " + std::to_string(d.layers - 1) + "]");
@@ -260,9 +260,9 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
                  a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   else
-    std::fprintf(stderr, "devices: %s + %s (--pp 2)\n", c0->name().c_str(), c1->name().c_str());
+    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
                              "hand-offs write it (docs/10-the-box.md)");
   const rb::BoltPlan pl = settle(pre, a, dev);
   if (need > pl.max_len)

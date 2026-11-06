@@ -25,7 +25,7 @@ namespace server {
 //
 // `probs` are the softmax over the top-k, truncated at the top-p cut and NOT
 // renormalised -- exactly the weights `sample()` has always handed to
-// `std::discrete_distribution` (so `--mtp 0` sampling is bit-for-bit what it was);
+// `std::discrete_distribution` (so `--spec mtp 0` sampling is bit-for-bit what it was);
 // `mass` is their sum. The filtered distribution is probs[i] / mass on ids[i]
 // (ids in descending logit order).
 struct FilteredProbs {

@@ -46,7 +46,7 @@ inline constexpr uint32_t kPpDevices = 2;   // spec 16 builds and gates two (§7
 // order (the index the persistent state is sliced by: GDN 0..gdn_layers-1, FA
 // 0..fa_layers-1). A stage's state holds exactly its own layers, kind-major as the
 // single-card buffers are, so stage 0's slices followed by stage 1's ARE the single-card
-// layout - which is what makes save_state / save_kv identical across --pp 1 and 2.
+// layout - which is what makes save_state / save_kv identical across --parallel 1 and 2.
 struct PpStage {
   uint32_t first = 0, last = 0;      // layers [first, last)
   uint32_t gdn_first = 0, gdn = 0;   // its GDN layers: [gdn_first, gdn_first + gdn)
@@ -139,7 +139,7 @@ inline PrefillPath pp_no_prefill() {
   return p;
 }
 //
-// Spec 16d (`PpExtras`, b70-serve --pp 2 and MTP across the split; the overloads below take
+// Spec 16d (`PpExtras`, b70-serve --parallel pp and MTP across the split; the overloads below take
 // it, the ones without are PpExtras{} and unchanged):
 //   mtp   the MTP head on the last device (spec 16 §3.1): its weights (PpWeights::mtp) and
 //         a REPLICA of the embedding (the operator's choice, as 16b's placement anticipated:
@@ -153,7 +153,7 @@ inline PrefillPath pp_no_prefill() {
 //   hook  a spec 7 block hook on the prefill (b70-serve's prefix cache): each device's two
 //         block-end shadows of its GDN state and conv ring (and device 1's two of the head's
 //         hidden row with mtp), in prefill_scratch where PipelineEngine::memory_use counts them.
-//   drafter  (spec 19d, `--spec dflash --pp 2`; not with mtp - one proposer) a DFlash drafter on the last
+//   drafter  (spec 19d, `--spec dflash --parallel pp`; not with mtp - one proposer) a DFlash drafter on the last
 //         device beside lm_head: its weights and buffers (DrafterPlan, in `drafter`) and the embedding
 //         replica (in `model`) the draft list gathers; on EACH device the verify slots of its own GDN layers
 //         for TapVerifyDims::kSlots (pp_gdn_spec_bytes(d, gdn, 8), decode_state); with a prefill path, the
@@ -214,7 +214,7 @@ size_t pp_stage_verify_launches(const model::ModelDesc& d, const PpStage& st);
 // (its KvLayout on the last device), then at int8 every layer's scales the same way. Each
 // run is one contiguous device range: `device`, the allocation (`tensor` 0 = K / 1 = V,
 // `head` = MtpBuffers' kv_k / kv_v rather than the stage's), its byte offset and length. So
-// a snapshot moves between --pp 1 and --pp 2 byte for byte, MTP included.
+// a snapshot moves between --parallel 1 and --parallel pp byte for byte, MTP included.
 struct PpKvRun {
   uint32_t device = 0, tensor = 0;
   bool head = false;

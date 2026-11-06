@@ -153,10 +153,8 @@ std::vector<uint32_t> run_decode(const std::string& decode, const std::string& s
     ::close(output[1]);
     fail("posix_spawn_file_actions setup failed");
   }
-  // Spec 9: b70-serve defaults to the int8 lm_head, b70-decode to bf16; this test is
-  // server-vs-CLI equivalence, so the CLI runs the server's default head.
-  const pid_t pid = spawn(
-      {decode, snapshot, "--ids", ids_path, "--n", "32", "--prefill", "--lm-head", "int8"}, &actions);
+  // Both CLIs run the int8 lm_head (spec 9; the zero-config cleanup made it b70-decode's too).
+  const pid_t pid = spawn({decode, snapshot, "--ids", ids_path, "--n", "32", "--prefill"}, &actions);
   posix_spawn_file_actions_destroy(&actions);
   ::close(output[1]);
   std::string text;
@@ -223,9 +221,12 @@ int main(int argc, char** argv) {
     const std::string snapshot = argv[4];
     const uint16_t port = free_port();
     // Spec 16d: B70_SERVE_ARGS (whitespace-separated) are appended to b70-serve's command line -
-    // box stage r27.golden runs `--pp 2` (two cards) against b70-decode on ONE card. Unset: as
+    // box stage r27.golden runs `--parallel pp` (two cards) against b70-decode on ONE card. Unset: as
     // before.
-    std::vector<std::string> serve_args{serve, snapshot, "--host", "127.0.0.1", "--port", std::to_string(port)};
+    // `--spec off`: the server's default is the model's MTP head (--spec auto), whose verify rows are not bitwise
+    // the plain step's (doc 14's f32 judge grades those); this test is plain greedy against b70-decode's plain list.
+    std::vector<std::string> serve_args{serve, snapshot, "--host", "127.0.0.1", "--port", std::to_string(port),
+                                        "--spec", "off"};
     if (const char* extra = std::getenv("B70_SERVE_ARGS")) {
       std::istringstream words(extra);
       std::string w;

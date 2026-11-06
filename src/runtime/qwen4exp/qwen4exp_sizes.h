@@ -340,7 +340,7 @@ inline size_t mtp_prefill_R_bytes(const model::Qwen4ExpDesc& d) { return size_t(
 // and R_{p-1}, the main model's pre-mixer 4-stream H of position p - 1 (the next draft step's and the next head
 // pass's input: Qwen3.8's spec 8 `hh` row, Engine::state_bytes); the blocks add the head's K / V and keys, last.
 //
-// The HOST layouts (spec 16b's rule: --pp 2's is --pp 1's byte for byte - every layer addressed through the
+// The HOST layouts (spec 16b's rule: --parallel pp's is --parallel 1's byte for byte - every layer addressed through the
 // placement, in layer order, whichever device holds it; the head on the last device, last):
 //   state  [GDN layers: fp32 state 3,145,728 B][GDN layers: conv rows p-3, p-2, p-1, 3 x 20,480 B]
 //          [PLE ids p-1, p-2: u32 x 2 (EOS 248044 before 0)][PLE conv rows p-9 .. p-1: 9 x 20,480 B]

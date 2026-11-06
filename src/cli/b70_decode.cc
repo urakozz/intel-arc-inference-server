@@ -1,11 +1,9 @@
 // b70-decode - spec §12, plus spec 1.5 §3.4. Three modes:
 //
-//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]] [--device N]
-//                                         [--max-len 16384]
-//                                         [--mtp off|1|2|3|auto]
-//   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256] [--device N]
+//   b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]]
+//                                         [--max-len 16384] [--spec mtp|dflash]
+//   b70-decode <snapshot-or-repo> --bench [--depth 4096] [--tg 256]
 //   b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]
-//                                           [--device N]
 //
 // The first two run `runtime::Engine`. The third does not: it replays an
 // *instrumented* capture and needs one event reset before every replay, which
@@ -43,7 +41,7 @@
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_decode.h"
-#include "cli/renamed_flags.h"
+#include "cli/spec_args.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/event.h"
@@ -98,99 +96,48 @@ constexpr double kDeviceGBs = 590.0;              // GB/s, measured
 void usage() {
   std::fprintf(
       stderr,
-      "usage:\n"
-       "  b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill [--prefill-chunk C]\n"
-       "                                        [--prefill-backend l0|l0-int8]]\n"
-       "                                        [--device N] [--max-len 16384|auto]\n"
-      "                                        [--mtp off|1|2|3|auto]\n"
-      "                                        [--pp 1|2 [--pipeline-split S]\n"
-      "                                        [--pipeline-handoff H]]\n"
-      "  b70-decode <snapshot-or-repo> --bench [--depth 4096 | --prefill-length N\n"
-      "                                        [--prefill-chunk C]\n"
-      "                                        [--prefill-backend l0|l0-int8]]\n"
-      "                                        [--tg 256] [--device N] [--max-len 16384|auto]\n"
-      "                                        [--pp 1|2 [--pipeline-split S]\n"
-      "                                        [--pipeline-handoff H]]\n"
-      "  b70-decode <snapshot-or-repo> --profile [--depth 4096] [--steps 32] [--repeats 1]\n"
-      "                                          [--device N]\n"
+      "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
+      "                                     [--max-len 16384|auto] [--parallel auto|1|pp]\n"
+      "\n"
+      "  ids in, ids out (no tokenizer: tools/oracle/tokenize.py turns text into an --ids file);\n"
+      "  stdout is one generated id per line, everything else goes to stderr. The model is chosen\n"
+      "  from the checkpoint's config.json; the lm_head is int8 and the device memory the plan leaves\n"
+      "  free is the engine's, as b70-serve. Cards: Intel Arc Pro B70, one or two; ZE_AFFINITY_MASK\n"
+      "  picks which the driver shows.\n"
       "\n"
       "  <snapshot-or-repo>  a snapshot directory, or an HF repo id resolved against the local\n"
-      "                      cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
-      "  --ids <file>   whitespace-separated token ids (tools/oracle/tokenize.py writes them)\n"
-       "  --n <N>        ids to generate, greedily; one per line on stdout, t/s on stderr\n"
-       "  --prefill      --ids only: run the prompt through Engine::prefill instead of one\n"
-       "                 Engine::ingest replay per id; needs the optional prefill component.\n"
-       "  --mtp K        --ids only (spec 8): greedy speculative decoding with the checkpoint's\n"
-       "                 MTP head - K drafts per iteration (1..3), or `auto` (b70-serve --mtp\n"
-       "                 auto's per-request policy, its default cost table for the --lm-head\n"
-       "                 form). Greedy, so the ids equal the plain run's; off / 0 = no head.\n"
-       "                 Stderr adds the iterations and the acceptance.\n"
-       "  --spec dflash  --ids only (spec 19c): greedy speculative decoding with a DFlash drafter\n"
-       "                 (the MTP head is not loaded): K = --spec-max drafts a block (1..7,\n"
-       "                 default 7), verified at M = K + 1; the ids equal the plain run's.\n"
-       "                 [--draft-model PATH] (default z-lab/Qwen3.8-27B-DFlash2, HF cache)\n"
-       "                 [--draft-format int8|bf16] (default int8). One card, bf16 KV.\n"
-      "  --device N     GPU index. Absent: ONEAPI_DEVICE_SELECTOR=level_zero:N, else device 0.\n"
-      "  --max-len <L>  KV cache and RoPE capacity: default 16384 (bench rows stay comparable);\n"
-      "                 any multiple of 256 up to the trained context (config.json\n"
-      "                 max_position_embeddings), refused before the engine if the memory plan\n"
-      "                 does not fit; `auto` = the largest that fits (spec 6 §10)\n"
-      "  --mem-reserve-gb G  device memory the plan leaves free (default 1.5 GB: driver, kernels,\n"
-      "                 allocator slack - an estimate the box has to confirm)\n"
-      "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
-      "                 a markdown row on stdout\n"
-      "  --prefill-length N  --bench only, and exclusive with --depth: prefill N synthetic ids\n"
-      "                 through Engine::prefill instead of ingesting them one replay at a\n"
-      "                 time, and print a SECOND markdown row with the device-side prefill\n"
-      "                 time. The prefilled ids ARE the depth, which is why --depth is\n"
-      "                 refused beside it.\n"
-       "  --prefill-chunk C  --prefill-length or --prefill: positions per prefill chunk, at most\n"
-       "                 4096 (default: the session's chunk cap, 2048 - ruling A13). Above 2048\n"
-       "                 the prefill buffers are sized for 4096-row chunks (plan 5d, ~0.7 GB more,\n"
-       "                 planned: --max-len auto gives the context less); a MoE model (Ornith)\n"
-       "                 stays at 2048. Spec 2 §6.2's multi-chunk gate runs at 1024.\n"
-       "  --prefill-backend B  --prefill-length or --prefill: the GEMM backend, l0 (spec 2.1,\n"
-       "                 every GEMM on the Level Zero list; the default) or l0-int8 (spec 5, l0\n"
-       "                 with every int4 linear on the rotated int8 path).\n"
-      "  --lm-head H    bf16 (default: the checkpoint's own head, byte-matched with vLLM) or\n"
-      "                 int8 (spec 9: quantised per row at load). An int8 run's bench rows\n"
-      "                 carry `int8-head` after the sha.\n"
-      "  --kv-cache F   bf16 (default) or int8 (spec 12: rotated int8 rows + fp16 scales,\n"
-      "                 half the KV bytes; decode attention v2 and the l0 / l0-int8 flash\n"
-      "                 prefill only). An int8 run's bench rows carry `int8-kv`. K2-Horizon:\n"
-      "                 spec 18e's rotkv at head_dim 128, decode (flash / eager) and prefill.\n"
-      "  --pp N, --pipeline-parallel-size N  1 (default) or 2 (spec 16b, vLLM's flag): split the\n"
-      "                 model's layers over GPUs 0 and 1 of what Level Zero shows. --prefill and\n"
-      "                 --prefill-length run the two-card chunk pipeline (spec 16c: l0 / l0-int8,\n"
-      "                 flash attention; each card's busy time on stderr); without them --ids\n"
-      "                 ingests one replay per id. --mtp K|auto (--ids, spec 16d): the head on\n"
-      "                 device 1, the verify lists on both. Refused with --profile and --device.\n"
-      "                 Both cards' memory lines on stderr; --max-len auto fits both. (Before 2026-10-06 --pp was the bench's prefill length: that\n"
-      "                 is --prefill-length now.)\n"
-      "  --pipeline-split S  auto (default: the split whose heavier card holds the fewest bytes)\n"
-      "                 or N: device 0 runs layers [0, N), device 1 the rest\n"
-      "  --pipeline-handoff H  copy (default: a device-to-device copy and a cross-device event)\n"
-      "                 or peer (device 0's last kernel writes device 1's buffer and raises a\n"
-      "                 flag device 1's first kernel polls, bounded)\n"
-      "  Kolibri-1 (model_type kolibri1, spec 20c): --pp defaults to 2 (the int4 model holds\n"
-      "                 ~42.5 GB); --pp 1 only when the model fits one card (a synthetic\n"
-      "                 checkpoint, or --layers N: load only its first N layers, development\n"
-      "                 mode). Spec 20d: --prefill / --prefill-length N on the l0 backend only\n"
-      "                 (chunk <= 2048; two cards cross each chunk by copy); --mtp, --kv-cache\n"
-      "                 int8, --profile refused.\n"
-      "  Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21c): --layers N|auto is REQUIRED (the\n"
-      "                 whole model needs spec 22's expert-offload tier); the PLE int8 file is\n"
-      "                 <snapshot>-ple-int8/; --pp 1 (default) or 2. Spec 21d:\n"
-      "                 --prefill / --prefill-length N on the l0 backend only (chunk <= 2048; two\n"
-      "                 cards cross each chunk by copy); --mtp (21e) and --kv-cache int8 refused.\n"
-      "  --profile      ingest --depth synthetic ids on a plain list, then replay --steps\n"
-      "                 INSTRUMENTED steps and print the per-launch anatomy on stdout.\n"
-      "                 Never a bench row: every launch signals a host-visible event\n"
-      "                 an unprofiled list does not pay for (spec 1.5 §3.3).\n"
-      "  --repeats R    --profile only: R independent sessions of --steps replays each, over\n"
-      "                 ONE ingest, each starting from a rewind of pos to the post-ingest\n"
-      "                 value. Adds a per-family mean +/- spread table and the 2sigma delta\n"
-      "                 this instrument can resolve. Default 1 (the pre-flag report).\n");
+      "                 cache ($HF_HOME or ~/.cache/huggingface). Never downloads.\n"
+      "  --ids <file>   whitespace-separated token ids\n"
+      "  --n <N>        ids to generate, greedily; t/s on stderr\n"
+      "  --prefill      run the prompt through the engine's prefill instead of one decode replay per id\n"
+      "  --spec S       --ids only: off (default), mtp (the MTP head, adaptive K <= --spec-max 1..3;\n"
+      "                 Qwen3.8, Agnes, Ornith) or dflash (Qwen3.8's DFlash drafter, K <= --spec-max\n"
+      "                 1..7, one card; --draft-model PATH). Greedy: the ids equal the plain run's.\n"
+      "  --max-len L    KV cache and RoPE capacity: default 16384 (bench rows stay comparable); any\n"
+      "                 multiple of 256 up to the trained context, refused if it does not fit; auto =\n"
+      "                 the largest that fits (spec 6 §10)\n"
+      "  --parallel P   auto (default): one card when the model and the context fit it, else pp; 1;\n"
+      "                 pp: the layers over two cards (spec 16; --prefill runs the two-card chunk\n"
+      "                 pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
+      "  --pipeline-split auto|N   pp: device 0 runs layers [0, N); an override, it implies pp.\n"
+      "  Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: --layers N (and Flash-Next's REQUIRED\n"
+      "                 --layers N|auto, until spec 22) loads only the first N layers (development mode).\n"
+      "\n"
+      "developer (benchmarks and profiles):\n"
+      "  --bench        ingest --depth synthetic ids, then time --tg generated ones; a markdown row\n"
+      "                 on stdout. [--depth 4096] [--tg 256]\n"
+      "  --prefill-length N  --bench only, exclusive with --depth: prefill N synthetic ids and print\n"
+      "                 a SECOND row with the device-side prefill time\n"
+      "  --prefill-chunk C  --prefill-length / --prefill: positions per chunk, at most 4096 (default the\n"
+      "                 session's chunk cap, 2048; above 2048 the buffers hold 4096-row chunks, planned)\n"
+      "  --profile      ingest --depth synthetic ids, then replay --steps INSTRUMENTED steps and print\n"
+      "                 the per-launch anatomy (never a bench row). [--steps 32] [--repeats R: R\n"
+      "                 sessions over one ingest, a per-family mean +/- spread table]\n"
+      "  --layers N     load only the first N layers (numeric: every model with a development mode)\n"
+      "  B70_PREFILL_PROFILE=1   per-phase prefill timings on stderr (diagnostic)\n"
+      "\n"
+      "still being measured (they go when their numbers decide, docs/open-work.md):\n"
+      "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8, --pipeline-handoff copy|peer\n");
 }
 
 // The loader reports itself with std::printf - to stdout, which is this CLI's
@@ -652,7 +599,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
   return 0;
 }
 
-// --- --mtp: greedy speculative decoding in --ids mode (spec 8) ------------------
+// --- --spec mtp: greedy speculative decoding in --ids mode (spec 8) ------------------
 //
 // What b70-serve's loop does for a greedy request, without the server: per iteration, K
 // drafts from the head (fixed, or AdaptiveK's choice under `auto` - one policy for the run,
@@ -663,7 +610,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
 // long-context checks diff (queue row 6). The last positions of max_len fall back to K = 0
 // (max_verify_k), and ids past --n are not printed.
 //
-// Spec 16d: the same loop over runtime::PipelineEngine (`--pp 2 --mtp`): the engines share the
+// Spec 16d: the same loop over runtime::PipelineEngine (`--parallel pp --spec mtp`): the engines share the
 // draft / verify / commit contract; the pending id is read through pending_of.
 uint32_t pending_of(runtime::Engine& e) {
   return e.buffers().control.as<runtime::Control>()->cur_token[0];
@@ -675,7 +622,7 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
   std::optional<server::AdaptiveK> policy;
   if (mtp_auto) {
     server::AdaptiveKOptions o;
-    o.max_k = runtime::Engine::kMaxDraft;
+    o.max_k = mtp_k;   // --spec-max (default 3, runtime::Engine::kMaxDraft)
     o.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
                                                  : server::MtpCost::bf16_head();
     policy.emplace(o);
@@ -714,7 +661,7 @@ int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::Lm
   }
   const double ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--mtp %s, greedy)\n", n,
+  std::fprintf(stderr, "generate: %u ids, %.2f t/s, %.2f ms/token (--spec mtp %s, greedy)\n", n,
                ms > 0.0 ? 1000.0 * n / ms : 0.0, n ? ms / n : 0.0,
                mtp_auto ? "auto" : std::to_string(mtp_k).c_str());
   std::fprintf(stderr,
@@ -784,27 +731,26 @@ int run(int argc, char** argv) {
   // Spec 6 §10: 16384 stays the default here, so bench rows stay comparable; `auto`
   // plans the largest max_len that fits, as b70-serve's default does.
   cli::MaxLenArg max_len_arg{false, max_len};
-  size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
-  uint32_t device = l0::Context::kFromEnv;
+  // The zero-config cleanup (operator 2026-11-06): the engine decides the device memory the plan leaves free
+  // (runtime::kDefaultReserveGb), the lm_head (int8, as b70-serve: spec 9 - loader::LmHeadForm stays the tests'
+  // seam for the checkpoint's bf16 head) and the card (card 0 of what Level Zero shows; two cards: 0 and 1).
+  const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  const uint32_t device = l0::Context::kFromEnv;
+  const loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   uint32_t prefill_len = 0, pp_chunk = 0;
   bool bench = false, profile = false, have_n = false, prefill = false;
   bool have_depth = false, have_tg = false, have_steps = false, have_repeats = false;
   bool have_prefill_len = false, have_pp_chunk = false;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
-  // Spec 9 §3: bf16 by default, so BENCHMARKS rows stay byte-matched with vLLM.
-  loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
-  bool have_lm_head = false;   // Bolt: the head is int8 unless --lm-head bf16
-  bool have_spec = false;      // --spec: dflash (Qwen3.8); Bolt refuses it by name; else unknown
-  std::string spec_arg;        // spec 19c: `dflash` runs the DFlash drafter (--ids); anything else is unknown
-  cli::dflash::Args dflash;
+  // --spec (cli/spec_args.h): b70-decode's default is off (a developer tool: the plain list unless asked); --ids only.
+  std::string spec_arg = "off";
+  bool have_spec = false;
+  uint32_t spec_max = 0;
   bool have_spec_max = false;
+  cli::dflash::Args dflash;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
-  // Spec 8: --mtp K|auto in --ids mode (greedy); absent = no head, every path as before.
-  uint32_t mtp_k = 0;
-  bool mtp_auto = false, have_mtp = false;
-  cli::PipelineArgs pipe;   // spec 16b: --pp, --pipeline-split, --pipeline-handoff
-  bool pp_given = false;    // spec 20c: Kolibri-1's --pp defaults to 2, so "given" matters
+  cli::PipelineArgs pipe;   // --parallel, --pipeline-split, --pipeline-handoff
   uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
   bool have_layers = false;
   bool layers_auto = false; // spec 21c: --layers auto (Qwen3.8-Flash-Next's planner N)
@@ -825,17 +771,9 @@ int run(int argc, char** argv) {
       have_n = true;
     } else if (a == "--prefill") {
       prefill = true;
-    } else if (a == "--device") {
-      device = parse_u32("--device", value(i, "--device"));
-      // 0xFFFFFFFF is l0::Context's "ask the environment" sentinel, so it is
-      // the one index --device cannot name.
-      if (device == l0::Context::kFromEnv)
-        throw std::runtime_error("--device is out of range");
     } else if (a == "--max-len") {
       max_len_arg = cli::parse_max_len(value(i, "--max-len"));
       max_len = max_len_arg.value;   // 0 for auto until cli::settle
-    } else if (a == "--mem-reserve-gb") {
-      mem_reserve = cli::parse_reserve_gb(value(i, "--mem-reserve-gb"));
     } else if (a == "--bench") {
       bench = true;
     } else if (a == "--profile") {
@@ -861,20 +799,10 @@ int run(int argc, char** argv) {
     } else if (a == "--repeats") {
       repeats = parse_u32("--repeats", value(i, "--repeats"));
       have_repeats = true;
-    } else if (a == "--mtp") {   // spec 8, --ids mode
-      const std::string v = value(i, "--mtp");
-      have_mtp = true;
-      mtp_auto = v == "auto";
-      if (!mtp_auto) {
-        if (v != "off" && (v.size() != 1 || v[0] < '0' || v[0] > '3'))
-          throw std::runtime_error("--mtp expects off, 0..3 or auto, got '" + v + "'");
-        mtp_k = v == "off" ? 0 : uint32_t(v[0] - '0');
-      }
     } else if (a == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (a == "--pp" || a == "--pipeline-parallel-size") {   // spec 16b, vLLM's spelling
-      pipe.devices = cli::parse_pipeline_devices(a, value(i, a.c_str()));
-      pp_given = true;
+    } else if (a == "--parallel") {
+      cli::parse_parallel(value(i, "--parallel"), pipe);
     } else if (a == "--layers") {   // spec 20c, Kolibri-1; spec 21c, Qwen3.8-Flash-Next (also `auto`)
       const std::string v = value(i, "--layers");
       have_layers = true;
@@ -888,28 +816,18 @@ int run(int argc, char** argv) {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (a == "--pipeline-handoff") {
       cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
-    } else if (a == "--lm-head") {
-      const std::string v = value(i, "--lm-head");
-      if (!loader::parse_lm_head_form(v, lm_head))
-        throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
-      have_lm_head = true;
-    } else if (a == "--spec") {   // spec 19c: dflash; Bolt refuses it by name
-      spec_arg = value(i, "--spec");
+    } else if (a == "--spec") {   // --ids only: mtp or dflash (cli/spec_args.h); Bolt refuses it by name
+      spec_arg = cli::parse_spec(value(i, "--spec"));
       have_spec = true;
-    } else if (a == "--spec-max") {   // spec 19c
-      dflash.max_k = parse_u32("--spec-max", value(i, "--spec-max"));
+    } else if (a == "--spec-max") {
+      spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
       have_spec_max = true;
     } else if (a == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (a == "--draft-format") {   // spec 19c
-      const std::string v = value(i, "--draft-format");
-      if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
-      dflash.have_format = true;
     } else if (!a.empty() && a[0] == '-') {
       usage();
-      throw std::runtime_error(cli::unknown_option(a));
+      throw std::runtime_error("unknown option '" + a + "'");
     } else if (path.empty()) {
       path = a;
     } else {
@@ -949,10 +867,30 @@ int run(int argc, char** argv) {
   if (have_depth && !synthetic)
     throw std::runtime_error("--depth belongs to --bench and --profile; --ids sizes its run"
                              " with --n");
-  if (have_mtp && synthetic)
-    throw std::runtime_error("--mtp belongs to --ids (greedy speculative decoding); --bench and"
+  if (have_spec && spec_arg != "off" && synthetic)
+    throw std::runtime_error("--spec belongs to --ids (greedy speculative decoding); --bench and"
                              " --profile time the plain list (mtp_gpu_test --bench times MTP)");
-  const bool mtp_on = mtp_auto || mtp_k > 0;
+  if (have_spec_max && !have_spec) throw std::runtime_error("--spec-max caps a proposer's drafts: name it with --spec");
+  cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  const bool pp_given = pipe.given();
+  // The model family decides which proposers exist (cli/spec_args.h); --spec lookup is b70-serve's (it verifies
+  // a request's own repeats), so b70-decode has mtp and dflash.
+  if (spec_arg == "lookup" || spec_arg == "dflash-lookup")
+    throw std::runtime_error("--spec " + spec_arg + " is b70-serve's (prompt lookup over a request's own ids); "
+                             "b70-decode --ids runs --spec mtp or --spec dflash");
+  const bool fam_bolt = cli::bolt::is_bolt(path), fam_kol = !fam_bolt && cli::kolibri::is_kolibri(path);
+  const bool fam_q4 = !fam_bolt && !fam_kol && cli::qwen4exp::is_qwen4exp(path);
+  const bool fam_k2 = !fam_bolt && !fam_kol && !fam_q4 && cli::k2::is_k2(path);
+  const std::string model_name = fam_bolt ? "Nemotron 3.5 Bolt" : fam_kol ? "Kolibri-1" : fam_q4 ? "Qwen3.8-Flash-Next"
+                                 : fam_k2 ? "K2-Horizon" : "this model";
+  const cli::Spec spec =
+      fam_bolt ? cli::Spec{}
+               : cli::resolve_spec(spec_arg, fam_q4 ? cli::SpecFamily::Qwen4Exp
+                                             : fam_kol || fam_k2 ? cli::SpecFamily::None : cli::SpecFamily::Qwen,
+                                   model_name, have_spec_max, spec_max, dflash.have_model);
+  const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
+  const bool mtp_auto = mtp_on && spec.adaptive;
+  const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
@@ -1004,7 +942,7 @@ int run(int argc, char** argv) {
   // Spec 25c: Nemotron 3.5 Bolt (model_type nemotron_h_omni over llm_config.model_type nemotron_h_puzzle) runs
   // runtime::bolt::BoltEngine on two cards (the whole model's default, Decision 4) or one (a truncated / synthetic
   // checkpoint) - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --mtp (no MTP
+  // cli/bolt_decode.h: the prefill's backend and chunk (spec 25d: l0 only, chunk a multiple of 64 <= 2048), --spec mtp (no MTP
   // head), --spec (no drafter), int8 KV (Decision 17)). A path that does not resolve is not Bolt - the flows below report it.
   if (cli::bolt::is_bolt(path)) {
     if (layers_auto) throw std::runtime_error("--layers auto is Qwen3.8-Flash-Next's (spec 21c); Nemotron 3.5 Bolt takes --layers N");
@@ -1021,7 +959,7 @@ int run(int argc, char** argv) {
     ba.max_len = max_len_arg;
     ba.reserve = mem_reserve;
     ba.device = device;
-    ba.int8_head = !have_lm_head || lm_head == loader::LmHeadForm::Int8;
+    ba.int8_head = true;   // int8 (Decision 18), as every model
     ba.pipe = pipe;
     ba.pp_given = pp_given;
     ba.layers = layers;
@@ -1030,26 +968,19 @@ int run(int argc, char** argv) {
     ba.pp_chunk = pp_chunk;
     ba.pp_backend_given = have_pp_backend;
     ba.pp_backend = pp_backend;
-    ba.mtp = mtp_on || have_mtp;
-    ba.spec = have_spec;
+    ba.mtp = spec_arg == "mtp";
+    ba.spec = spec_arg != "off" && spec_arg != "auto" && spec_arg != "mtp";
     ba.kv8 = kv_cache == runtime::KvCache::Int8;
     return cli::bolt::run_decode<StdoutToStderr>(ba);
   }
-  // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card); every other --spec is unknown here.
-  if (have_spec && spec_arg != "dflash") throw std::runtime_error(cli::unknown_option("--spec"));
-  dflash.on = spec_arg == "dflash";
-  if (have_spec_max && !dflash.on) throw std::runtime_error("--spec-max needs --spec dflash");
+  // Spec 19c: --spec dflash is the Qwen engine's (--ids, one card).
+  dflash.on = spec.kind == cli::SpecKind::DFlash;
+  if (dflash.on) dflash.max_k = spec.max_k;
   cli::dflash::check_flags(dflash);
-  if (dflash.on) {
-    if (ids_path.empty())
-      throw std::runtime_error("--spec dflash belongs to --ids (greedy speculative decoding); --bench and --profile "
-                               "time the plain list");
-    if (mtp_on) throw std::runtime_error("--spec dflash and --mtp: one proposer");
-    cli::dflash::check_engine(dflash, pipe.on(), kv_cache);
-  }
+  if (dflash.on) cli::dflash::check_engine(dflash, pipe.on(), kv_cache);
   // Spec 20c: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on one or two
   // cards - dispatched here, before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/kolibri_decode.h, replace them: --pp defaults to 2 there). A path that does not resolve is
+  // cli/kolibri_decode.h, replace them: --parallel defaults to 2 there). A path that does not resolve is
   // not Kolibri - the flows below report it, so every rejection keeps its order.
   if (cli::kolibri::is_kolibri(path)) {
     if (dflash.on)
@@ -1081,7 +1012,7 @@ int run(int argc, char** argv) {
   }
   // Spec 21c: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine on one or two cards -
   // dispatched here, beside Kolibri-1 and before the Qwen engine's pipeline and kv-cache rules (its own refusals,
-  // cli/qwen4exp_decode.h: the prefill's other backends (21d: l0 only), --mtp (21e), int8 KV (decision 8), the whole
+  // cli/qwen4exp_decode.h: the prefill's other backends (21d: l0 only), --spec mtp (21e), int8 KV (decision 8), the whole
   // model without --layers (spec 22)). A path that does not resolve is not this family - the flows below report it.
   if (cli::qwen4exp::is_qwen4exp(path)) {
     if (dflash.on)
@@ -1120,9 +1051,8 @@ int run(int argc, char** argv) {
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
-  // Spec 16b: --pp's refusals are argument-only, so they come before the device too.
-  cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile,
-                             device != l0::Context::kFromEnv});
+  // Spec 16b: --parallel's refusals are argument-only, so they come before the device too.
+  cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what
@@ -1143,9 +1073,9 @@ int run(int argc, char** argv) {
       throw std::runtime_error("--profile is not built for K2-Horizon yet (spec 18b Task 4, the box's "
                                "speed work); --bench times it");
     if (mtp_on)
-      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --mtp");
+      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9); drop --spec mtp");
     if (pipe.on())
-      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --pp 2 is built "
+      throw std::runtime_error("K2-Horizon runs its own engine (runtime/k2); --parallel pp is built "
                                "for the Qwen3.5 family's (spec 16b) - K2 across two cards is "
                                "future work");
     cli::k2::DecodeArgs ka;
@@ -1206,7 +1136,7 @@ int run(int argc, char** argv) {
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   }
 
-  // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --pp 1 goes on below.
+  // Spec 16b: two devices, its own flow (cli/pipeline_decode.h); --parallel 1 goes on below.
   if (pipe.on()) {
     cli::PipelineDecodeArgs pa;
     pa.path = path;
@@ -1226,14 +1156,13 @@ int run(int argc, char** argv) {
     pa.bench_prefill = have_prefill_len;   // --prefill-length N already set depth = N
     pa.chunk = pp_chunk;
     pa.pf = pp_path;
-    pa.mtp = mtp_on;   // spec 16d: --ids only (synthetic runs refused --mtp above)
+    pa.mtp = mtp_on;   // spec 16d: --ids only (synthetic runs refused --spec mtp above)
     pa.run_mtp = [&](runtime::PipelineEngine& e) { return generate_mtp(e, n, mtp_auto, mtp_k, lm_head); };
     return cli::run_pipeline_decode<StdoutToStderr>(pa);
   }
 
   l0::Context ctx(device);
-  std::fprintf(stderr, "device: %s (%u EUs)%s\n", ctx.name().c_str(), ctx.eu_count(),
-               device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  std::fprintf(stderr, "device: %s (%u EUs)\n", ctx.name().c_str(), ctx.eu_count());
 
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;

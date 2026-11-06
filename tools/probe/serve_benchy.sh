@@ -6,8 +6,10 @@
 # Env: MODEL (repo id or snapshot; default the W4A16 g64 checkpoint), MAX_LEN
 # (16384), PORT (8011), WAIT (seconds to wait for /v1/models, default 600 - a 41.9 GB model on two cards may need more),
 # SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
-# ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--pp 2'` needs 0,1), BENCHY_VERSION
+# ZE_AFFINITY_MASK, default 0; spec 16d's `SERVE_ARGS='--parallel pp'` needs 0,1), BENCHY_VERSION
 # (pins llama-benchy, e.g. 0.4.0 for queue row 41's matrix; unset: whatever uvx resolves).
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
@@ -18,7 +20,7 @@ exec 9>"$HOME/b70-gpu.lock"
 echo "waiting for the GPU lock"; flock 9; echo "lock held"
 uptime
 ZE_AFFINITY_MASK="${SERVE_AFFINITY:-0}" build/src/cli/b70-serve "$MODEL" --max-len "$MAX_LEN" --port "$PORT" \
-  --served-name b70 ${SERVE_ARGS:-} > "$HOME/benchy-serve.log" 2>&1 &
+  --spec off ${SERVE_ARGS:-} > "$HOME/benchy-serve.log" 2>&1 &
 srv=$!
 trap 'kill $srv 2>/dev/null; wait $srv 2>/dev/null || true' EXIT
 for _ in $(seq 1 "${WAIT:-600}"); do

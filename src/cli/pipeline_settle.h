@@ -1,6 +1,6 @@
 #pragma once
-// Spec 16d: the split and the max_len of a two-card run - b70-decode --pp 2
-// (cli/pipeline_decode.h, spec 16b / 16c, where this lived inline) and b70-serve --pp 2 (spec
+// Spec 16d: the split and the max_len of a two-card run - b70-decode --parallel pp
+// (cli/pipeline_decode.h, spec 16b / 16c, where this lived inline) and b70-serve --parallel pp (spec
 // 16d) - over the LOADED model's bytes (runtime::pp_weights) and each device's memory:
 //
 //   --max-len auto    the largest multiple of 256 both devices hold with the reserve each, at
@@ -11,18 +11,25 @@
 //
 // `x` (runtime::PpExtras): spec 16d's terms - the MTP head on device 1 (its weights, the
 // embedding replica, its buffers, its prefill rows) and the prefix cache's block shadows.
-// PpExtras{} is spec 16b / 16c's plan exactly (b70-decode without --mtp). Prints the lines
+// PpExtras{} is spec 16b / 16c's plan exactly (b70-decode without --spec mtp). Prints the lines
 // b70-decode always printed ("max_len: ...", "split: ...", the plan).
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+
+#include "common/json.h"
 
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "loader/loader.h"
+#include "loader/moe_layout.h"
+#include "model/model_desc.h"
+#include "runtime/memory_plan.h"
 #include "runtime/pipeline_plan.h"
 
 namespace cli {
@@ -42,6 +49,32 @@ inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
   }
   x.hook = hook;
   return x;
+}
+
+// The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Agnes, Ornith): one card
+// when the model and the asked context fit it - the faster choice (one answer is not faster on two
+// cards, docs/18-running-models.md) - else pipeline parallel. Decided before the load, from the
+// checkpoint's descriptor (config.json architectures[0]) and the planner's weight model
+// (runtime::pp_weights at the int8 head, plus the MTP head when it loads); `--max-len auto` asks for
+// runtime::kMinAutoMaxLen, the smallest context auto plans (it then gives the card's largest). The
+// load-time plan (cli::settle) holds an explicit length to the real bytes and refuses with its
+// breakdown, so an estimate a little off costs a clear message, never a wrong run.
+inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& max_len, bool mtp,
+                              runtime::KvCache kv, const runtime::PrefillPath& pf, size_t card_bytes,
+                              size_t reserve) {
+  std::ifstream f(snapshot_dir + "config.json");
+  if (!f) return 1;   // the load reports the checkpoint's problem by name
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const common::json::Value config = common::json::parse(ss.str());
+  const common::json::Value* archs = config.find("architectures");
+  if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string()) return 1;
+  const model::ModelDesc& d = model::desc_for_architecture(archs->arr()[0].str());
+  const size_t weights =
+      runtime::pp_weights(d, model::WeightKind::Int8).total() + (mtp ? loader::mtp_head_bytes(d) : 0);
+  const uint32_t len = max_len.is_auto ? runtime::kMinAutoMaxLen : max_len.value;
+  const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, pf, {}, kv);
+  return p.total() + reserve <= card_bytes ? 1u : 2u;
 }
 
 inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& w,
@@ -87,7 +120,7 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                                  std::to_string(i) + ": " + runtime::pp_describe(p, dev, reserve) +
                                  ". The largest that fits at split " + std::to_string(split) +
                                  " is " + std::to_string(best) +
-                                 " (--max-len auto); --mem-reserve-gb lowers the reserve");
+                                 " (--max-len auto)");
       }
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }

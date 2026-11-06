@@ -1,9 +1,9 @@
-// Spec 16b: b70-decode's --pp / --pipeline-parallel-size flags (cli/pipeline_args.h) on the
-// host - the parse and every refusal that needs no device - and the 2026-10-06 rename's
-// refusals (cli/renamed_flags.h). The CLI's own registrations (cli_reject_pipeline_*,
-// cli_reject_pp_*, cli_reject_renamed_*) drive the shipped binary on the box; this is the same
-// logic without it. Spec 16d: and b70-serve's (cli/pipeline_serve.h) - what --pp 2 serves and
-// what it refuses before the device (the box's cli_reject_serve_pp_* drive the binary).
+// Spec 16b: the --parallel flag and the pipeline's overrides (cli/pipeline_args.h) on the host -
+// the parse and every refusal that needs no device. The CLI's own registrations
+// (cli_reject_pipeline_*, cli_reject_pp_*) drive the shipped binary on the box; this is the same
+// logic without it. Spec 16d: and b70-serve's (cli/pipeline_serve.h) - what --parallel pp serves
+// and what it refuses before the device (the box's cli_reject_serve_pp_* drive the binary). The
+// served name (cli/served_name.h) and the --spec rule (cli/spec_args.h) are checked here too.
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
@@ -12,7 +12,8 @@
 #include "check.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
-#include "cli/renamed_flags.h"
+#include "cli/served_name.h"
+#include "cli/spec_args.h"
 
 namespace {
 
@@ -35,15 +36,27 @@ bool says(const std::function<void()>& f, const char* what) {
 }
 
 void check_parse() {
-  for (const char* flag : {"--pp", "--pipeline-parallel-size"}) {
-    CHECK_EQ(cli::parse_pipeline_devices(flag, "1"), 1u);
-    CHECK_EQ(cli::parse_pipeline_devices(flag, "2"), 2u);
-    for (const char* bad : {"0", "3", "4", "", "two", "-1", "02"}) {
-      CHECK(says([&] { cli::parse_pipeline_devices(flag, bad); },
-                 "is the pipeline-parallel size, 1 or 2"));
-      CHECK(says([&] { cli::parse_pipeline_devices(flag, bad); }, flag));
-    }
-  }
+  cli::PipelineArgs p;
+  CHECK(p.mode == cli::Parallel::Auto && !p.on() && !p.given());
+  cli::parse_parallel("pp", p);
+  CHECK(p.mode == cli::Parallel::Pp && p.on() && p.given() && p.devices == 2u);
+  cli::parse_parallel("1", p);
+  CHECK(p.mode == cli::Parallel::One && !p.on() && p.given());
+  cli::parse_parallel("auto", p);
+  CHECK(p.mode == cli::Parallel::Auto && !p.given());
+  CHECK(says([&] { cli::parse_parallel("tp", p); }, "tensor parallel is not built yet"));
+  for (const char* bad : {"0", "2", "3", "", "two", "PP", "4096"})
+    CHECK(says([&] { cli::parse_parallel(bad, p); }, "--parallel expects auto, 1 or pp"));
+  // An override under auto means pp; under 1 it stays a refusal (check_pipeline below).
+  cli::PipelineArgs o;
+  cli::parse_pipeline_split("30", o);
+  cli::resolve_overrides(o);
+  CHECK(o.mode == cli::Parallel::Pp && o.on());
+  cli::PipelineArgs o1;
+  cli::parse_parallel("1", o1);
+  cli::parse_pipeline_handoff("peer", o1);
+  cli::resolve_overrides(o1);
+  CHECK(o1.mode == cli::Parallel::One && !o1.on());
 
   cli::PipelineArgs a;
   CHECK(a.split_auto && !a.on() && a.handoff == runtime::PpHandoff::Copy);
@@ -61,34 +74,46 @@ void check_parse() {
   CHECK(says([&] { cli::parse_pipeline_handoff("p2p", h); }, "--pipeline-handoff expects copy or peer"));
 }
 
-// An old command line's `--bench --pp 4096` (the prefill length before 2026-10-06) must not
-// become a 4096-way pipeline: refused, naming --prefill-length. The old prefill flags are
-// unknown options that name their new spelling.
-void check_rename() {
-  for (const char* old_len : {"4096", "64", "2048", "512", "0"}) {
-    CHECK(says([&] { cli::parse_pipeline_devices("--pp", old_len); },
-               "--pp is the pipeline-parallel size, 1 or 2"));
-    CHECK(says([&] { cli::parse_pipeline_devices("--pp", old_len); }, "--prefill-length N"));
-  }
-  CHECK(cli::unknown_option("--pp-chunk") ==
-        "unknown option '--pp-chunk' (renamed: --prefill-chunk C)");
-  CHECK(cli::unknown_option("--pp-backend") ==
-        "unknown option '--pp-backend' (renamed: --prefill-backend B)");
-  CHECK(cli::unknown_option("--pipeline") ==
-        "unknown option '--pipeline' (renamed: --pp N, or --pipeline-parallel-size N)");
-  CHECK(cli::unknown_option("--frobnicate") == "unknown option '--frobnicate'");
+// The served name (cli/served_name.h) and the --spec rule (cli/spec_args.h).
+void check_names_and_spec() {
+  CHECK(cli::served_name("urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ") == "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ");
+  CHECK(cli::served_name("/home/u/.cache/huggingface/hub/models--urakozz--Agnes-3.0-Flash/snapshots/abc/") ==
+        "urakozz/Agnes-3.0-Flash");
+  CHECK(cli::served_name("/data/checkpoints/my-model/") == "my-model");
+  CHECK(cli::served_name("./tests/model/k2") == "k2");
+
+  using cli::SpecFamily;
+  using cli::SpecKind;
+  const cli::Spec q = cli::resolve_spec("auto", SpecFamily::Qwen, "Qwen3.8", false, 0, false);
+  CHECK(q.kind == SpecKind::Mtp && q.adaptive && q.max_k == 3u);
+  CHECK(cli::resolve_spec("auto", SpecFamily::None, "K2-Horizon", false, 0, false).kind == SpecKind::Off);
+  CHECK(cli::resolve_spec("auto", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false).kind == SpecKind::Off);
+  const cli::Spec f = cli::resolve_spec("mtp", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", true, 2, false);
+  CHECK(f.kind == SpecKind::Mtp && !f.adaptive && f.max_k == 2u);
+  const cli::Spec d = cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", false, 0, true);
+  CHECK(d.kind == SpecKind::DFlash && d.max_k == 7u);
+  CHECK(cli::resolve_spec("lookup", SpecFamily::Qwen, "Qwen3.8", true, 1, false).max_k == 1u);
+  CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::None, "K2-Horizon", false, 0, false); }, "K2-Horizon has no MTP head"));
+  CHECK(says([] { cli::resolve_spec("lookup", SpecFamily::None, "Kolibri-1", false, 0, false); }, "--spec lookup verifies"));
+  CHECK(says([] { cli::resolve_spec("dflash", SpecFamily::Qwen4Exp, "Qwen3.8-Flash-Next", false, 0, false); },
+             "built for Qwen3.8 beside its drafter"));
+  CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::Qwen, "Qwen3.8", true, 4, false); }, "expects 1..3"));
+  CHECK(says([] { cli::resolve_spec("dflash", SpecFamily::Qwen, "Qwen3.8", true, 8, false); }, "expects 1..7"));
+  CHECK(says([] { cli::resolve_spec("off", SpecFamily::Qwen, "Qwen3.8", true, 2, false); }, "--spec off has none"));
+  CHECK(says([] { cli::resolve_spec("mtp", SpecFamily::Qwen, "Qwen3.8", false, 0, true); }, "--draft-model needs --spec dflash"));
+  CHECK(says([] { cli::parse_spec("eagle"); }, "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup"));
 }
 
 void check_refusals() {
-  cli::PipelineArgs one;   // --pp 1 (the default) refuses nothing of its own
+  cli::PipelineArgs one;   // one card (the default) refuses nothing of its own
   cli::check_pipeline(one, {});
-  cli::check_pipeline(one, {true, true, true, true, true});
+  cli::check_pipeline(one, {true, true, true, true});
   cli::PipelineArgs sub = one;
   sub.have_split = true;
-  CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-split belongs to --pp 2"));
+  CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-split belongs to --parallel pp"));
   sub = one;
   sub.have_handoff = true;
-  CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-handoff belongs to --pp 2"));
+  CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-handoff belongs to --parallel pp"));
 
   cli::PipelineArgs two;
   two.devices = 2;
@@ -109,9 +134,6 @@ void check_refusals() {
   c = {};
   c.profile = true;
   CHECK(says([&] { cli::check_pipeline(two, c); }, "--profile"));
-  c = {};
-  c.device = true;
-  CHECK(says([&] { cli::check_pipeline(two, c); }, "--device names one card"));
 }
 
 void check_device_refusal() {
@@ -122,25 +144,24 @@ void check_device_refusal() {
   cli::require_two_devices(4);
 }
 
-// Spec 16d: b70-serve --pp.
+// Spec 16d: b70-serve --parallel.
 void check_serve() {
   cli::PipelineArgs one, two;
   two.devices = 2;
   cli::ServePipelineContext c;
-  // --pp 1 is today's one-card server: nothing refused, whatever the model or flags.
+  // One card: nothing refused, whatever the model or flags.
   for (const char* mt : {"qwen3_5", "k2_horizon", "kolibri1", ""}) {
     c = {};
     c.model_type = mt;
-    c.device = true;
     cli::check_serve_pipeline(one, c);
   }
   // ... but the sub-flags alone are refused, as b70-decode refuses them.
   cli::PipelineArgs split_only, handoff_only;
   cli::parse_pipeline_split("30", split_only);
   cli::parse_pipeline_handoff("peer", handoff_only);
-  CHECK(says([&] { cli::check_serve_pipeline(split_only, {}); }, "--pipeline-split belongs to --pp 2"));
-  CHECK(says([&] { cli::check_serve_pipeline(handoff_only, {}); }, "--pipeline-handoff belongs to --pp 2"));
-  // --pp 2 serves the Qwen family with everything else on: MTP, either backend.
+  CHECK(says([&] { cli::check_serve_pipeline(split_only, {}); }, "--pipeline-split belongs to --parallel pp"));
+  CHECK(says([&] { cli::check_serve_pipeline(handoff_only, {}); }, "--pipeline-handoff belongs to --parallel pp"));
+  // pp serves the Qwen family with everything else on: MTP, either backend.
   for (const char* mt : {"qwen3_5", "qwen3_5_moe", ""})
     for (bool mtp : {false, true}) {
       c = {};
@@ -154,23 +175,20 @@ void check_serve() {
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "K2-Horizon runs its own engine"));
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "serve it on one card"));
   // Spec 20e: Kolibri-1 is served by its own engine (two cards by default) - nothing refused here; its
-  // rules are cli::kolibri::check_args's (a --pipeline-split without --pp is Kolibri's default --pp 2).
+  // rules are cli::kolibri::check_args's (a --pipeline-split under --parallel auto is Kolibri's default two cards).
   c.model_type = "kolibri1";
   cli::check_serve_pipeline(two, c);
   cli::check_serve_pipeline(split_only, c);
   c = {};
-  c.device = true;
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
-  c = {};
   c.prefill_profile = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));
-  std::printf("b70-serve --pp: --pp 1 untouched, --pp 2 serves the Qwen family, 7 refusals by name, Kolibri-1 its own\n");
+  std::printf("b70-serve --parallel: one card untouched, pp serves the Qwen family, the refusals by name, Kolibri-1 its own\n");
 }
 }  // namespace
 
 int main() {
   check_parse();
-  check_rename();
+  check_names_and_spec();
   check_refusals();
   check_device_refusal();
   check_serve();

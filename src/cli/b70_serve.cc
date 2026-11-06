@@ -1,6 +1,6 @@
 // b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8, Agnes,
 // Ornith), runtime::k2::K2Engine (K2-Horizon, spec 18d) or runtime::kolibri::KolibriEngine
-// (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --pp 2
+// (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --parallel pp
 // (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two B70s
 // (cli/pipeline_serve.h has what it serves and refuses).
 #include <array>
@@ -36,7 +36,8 @@
 #include "cli/prefix_cache_size.h"
 #include "cli/qwen4exp_chat.h"
 #include "cli/qwen4exp_serve.h"
-#include "cli/renamed_flags.h"
+#include "cli/served_name.h"
+#include "cli/spec_args.h"
 #include "cli/serve_adapters.h"
 #include "l0/context.h"
 #include "loader/loader.h"
@@ -88,138 +89,44 @@ void stop_server(int) {
 
 void usage() {
   std::fprintf(stderr,
-               "usage: b70-serve <snapshot-or-repo> [--host 0.0.0.0] [--port 8000]\n"
-               "                 [--max-len auto|N] [--device N] [--served-name NAME] [--queue 4]\n"
-               "                 --max-len: auto (default) = the largest context that fits the card\n"
-               "                 beside the weights (spec 6 §10); N = any multiple of 256 up to the\n"
-               "                 trained context (config.json max_position_embeddings), refused at\n"
-               "                 startup if it does not fit\n"
-               "                 [--mem-reserve-gb G]   device memory the plan leaves free (default\n"
-               "                                        1.5: driver, kernels, slack; box-unconfirmed)\n"
-               "                 The model is picked from the checkpoint's config.json: Qwen3.8,\n"
-               "                 Agnes 3.0 Flash (spec 14), Ornith 1.5 35B-A3B (spec 15, MoE) or\n"
-               "                 K2-Horizon MoVA 36B-A4B (spec 18: its own engine, prefill on l0\n"
-               "                 only, no MTP head - --mtp, --spec mtp|lookup and --draft-vocab are\n"
-               "                 refused; its chat_template_kwargs tool_call_format / reasoning_effort\n"
-               "                 reach the template) or Kolibri-1 (spec 20e: its own engine on TWO cards\n"
-               "                 by default - --pp 1 only when the model fits one card; prefill on l0\n"
-               "                 only; no MTP head and bf16 KV only - --mtp, --spec mtp|lookup and\n"
-               "                 --kv-cache int8 are refused; its chat_template_kwargs reasoning_effort\n"
-               "                 none|minimal|low|medium|high|xhigh|max reach the template; requests\n"
-               "                 without temperature / top_p / top_k sample with generation_config.json's\n"
-               "                 1.0 / 0.97 / 128). UNVALIDATED on the cards (queue row 28)\n"
-               "                 Qwen3.8-Flash-Next (spec 21e, model_type qwen4_exp): its own engine, one card\n"
-               "                 or two (--pp 2), --layers N|auto REQUIRED until spec 22 (the whole model is\n"
-               "                 refused naming its bytes), the PLE int8 file <snapshot>-ple-int8/, [--tokenizer\n"
-               "                 FILE] (the original's tokenizer.json when the snapshot ships Qwen3.8's - it is\n"
-               "                 refused), the Qwen path (XML tool calls, reasoning, greedy unless the request\n"
-               "                 samples), the prefix cache, --mtp 1..3 / --spec lookup (--mtp auto,\n"
-               "                 --draft-vocab and --kv-cache int8 are refused); prefill on l0 only.\n"
-               "                 UNVALIDATED on the cards (queue row 34)\n"
-               "                 Nemotron 3.5 Bolt 74B-A9B (spec 25e, model_type nemotron_h_omni over nemotron_h_puzzle):\n"
-               "                 its own engine on TWO cards by default (--pp 2, --pipeline-split / --pipeline-handoff;\n"
-               "                 the whole model does not fit one), prefill on l0 only, --max-len auto -> up to 262144;\n"
-               "                 [--chat-template FILE] (default: the snapshot's chat_template.jinja; its sha256 is\n"
-               "                 printed), [--generation-config FILE] (sampling defaults and EOS; default: the snapshot's\n"
-               "                 file when it carries sampling keys, else NVIDIA's published T 1.0 / top-p 0.95 / EOS\n"
-               "                 [2, 11]); chat_template_kwargs enable_thinking (default true) / medium_effort /\n"
-               "                 truncate_history_thinking reach the template, force_nonempty_content the reasoning parser\n"
-               "                 (ultra_v3's rules), the OpenAI reasoning_effort maps onto them (none|minimal -> thinking\n"
-               "                 off, low|medium -> medium_effort, high -> default); Qwen3-Coder XML tool calls; hybrid\n"
-               "                 prefix-cache snapshots (SSM states + conv columns + KV at 2048-position block ends);\n"
-               "                 --mtp, --spec, --kv-cache int8 and --prefill-backend l0-int8 are refused.\n"
-               "                 UNVALIDATED on the cards (queue row 62)\n"
-               "                 [--pp 1|2] [--pipeline-parallel-size 1|2]   2 (spec 16d): the model's\n"
-               "                             layers over GPUs 0 and 1 of what Level Zero shows (Qwen3.8,\n"
-               "                             Agnes, Ornith, Kolibri-1 - its default; K2-Horizon is refused).\n"
-               "                             --max-len auto fits both cards; the prefix cache, --mtp /\n"
-               "                             --spec (the MTP head on device 1), --kv-cache int8 and\n"
-               "                             --lm-head work as on one card. Not with --device.\n"
-               "                             UNVALIDATED on the cards (queue row 27)\n"
-               "                 [--pipeline-split auto|N]   --pp 2: device 0 runs layers [0, N)\n"
-               "                             (auto, the default: the split whose heavier card holds the\n"
-               "                             fewest bytes, with the MTP head and the cache's shadows)\n"
-               "                 [--pipeline-handoff copy|peer]   --pp 2: how the residual crosses\n"
-               "                             (copy, the default: a device copy and a cross-device event)\n"
-               "                 [--prefill-backend l0|l0-int8]   Default: l0.\n"
-               "                 [--log-requests DIR]   write DIR/NNNNNN.json per request\n"
-               "                 [--prefix-cache-gb auto|N]  the prefix cache, in SYSTEM RAM (pinned\n"
-               "                                        host memory, not VRAM), GiB. auto (default):\n"
-               "                                        min(32, half the RAM, available - 8), off\n"
-               "                                        below 4. 0 = off: every request prefills\n"
-               "                                        in full (spec 7)\n"
-               "                 [--prefix-split-last]  a flag (present = on), chat requests only.\n"
-               "                                        A thinking model's next turn diverges at this\n"
-               "                                        prompt's LAST id (<think>\\n re-rendered as\n"
-               "                                        <think>\\n\\n</think>); this prefills to len - 1,\n"
-               "                                        snapshots there and runs the last id as one\n"
-               "                                        decode step, so the next turn restores right\n"
-               "                                        there instead of up to 2047 ids earlier (~1 s).\n"
-               "                                        Cost: a near-tie first token may differ from an\n"
-               "                                        uncached run. On for agentic sessions; off for\n"
-               "                                        benchmarks and the golden gates.\n"
-               "                 [--mtp off|1|2|3|auto]   speculative decoding with the MTP\n"
-               "                             head: K guesses per step (off/0 = none, the default;\n"
-               "                             auto = 0..3 per step from the request's own hit rate). Loads the\n"
-               "                             head (+0.85 GB weights - Ornith's MoE head +0.50 GB -\n"
-               "                             + its KV and state slots);\n"
-               "                             any --max-len (spec 8 §12).\n"
-               "                 [--mtp auto [--mtp-max 3] [--mtp-cost SPEC]]   K per iteration\n"
-               "                             from each request's own acceptance (spec 8 §10).\n"
-               "                             SPEC: \"verify=1,1.17,1.52,1.74;draft=0.19,0.37,0.55\"\n"
-               "                             (plain-step units; default: the --lm-head form's)\n"
-               "                 [--lm-head bf16|int8]   Default: int8 (spec 9: quantised at load\n"
-               "                 from the bf16 head; bf16 is the checkpoint's own head)\n"
-               "                 [--draft-vocab off|32k|64k|128k]   MTP drafts over a reduced\n"
-               "                             vocabulary (spec 8 §11; default off): the head's\n"
-               "                             rows for the added tokens, then\n"
-               "                             --draft-vocab-ids, then the lowest ids. Output\n"
-               "                             unchanged (verify is full); needs --mtp. With\n"
-               "                             --mtp auto the draft costs scale with |V'|\n"
-               "                             (derived; an explicit --mtp-cost draft= wins)\n"
-               "                 [--draft-vocab-ids FILE]   ranked ids, most frequent first\n"
-               "                             (tools/draft_vocab/rank.py over --log-requests logs)\n"
-               "                 [--kv-cache bf16|int8]   the KV cache's storage (spec 12):\n"
-               "                             bf16 (default) or int8 - every K and V row rotated\n"
-               "                             (256-point Hadamard) and stored as int8 with one\n"
-               "                             fp16 scale per token and head: half the KV memory,\n"
-               "                             so --max-len auto reaches about twice the context\n"
-               "                             (Qwen3.8: the trained 262144). Accuracy gates on\n"
-               "                             the card pending; needs the l0 / l0-int8 backends\n"
-               "                 [--spec off|mtp|lookup|dflash|dflash-lookup]   the speculative proposer (spec 19\n"
-               "                             decision 3; default: --mtp's). mtp = --mtp auto unless\n"
-               "                             --mtp is given. lookup (spec 19e) = prompt lookup: the\n"
-               "                             drafts are the continuation of the longest earlier match\n"
-               "                             of the request's own ids, verified by the MTP verify lists\n"
-               "                             (loads the head for them; Qwen3.8 only so far); K per\n"
-               "                             iteration by --mtp auto's policy with a free draft.\n"
-               "                             Greedy output unchanged; sampled output lossless.\n"
-               "                             UNVALIDATED on the card (plan 19e Task 2)\n"
-               "                 [--spec-min-match N]   lookup drafts only after a match of >= N ids\n"
-               "                             (2..64, default 3)\n"
-               "                 [--spec-max K]   lookup's largest K (1..3, default 3); dflash's (1..7,\n"
-               "                             default 7)\n"
-               "                 [--spec-cost SPEC]   lookup's / dflash's cost table, --mtp-cost's syntax\n"
-               "                             (lookup default: the --lm-head form's verify rows, free drafts;\n"
-               "                             dflash: verify M = 1..8 and a draft row flat in K, derived)\n"
-               "                 --spec dflash (spec 19c): the DFlash drafter drafts K <= 7 ids a block from\n"
-               "                             the target's own hidden states, verified at M = K + 1 rows; K per\n"
-               "                             iteration by --mtp auto's policy. Greedy output unchanged; sampled\n"
-               "                             output lossless (the drafter's sparse q). bf16 KV; one card, or\n"
-               "                             --pp 2 with --pipeline-handoff copy (the drafter on device 1, spec\n"
-               "                             19d). Loads no MTP head; the prefix cache keeps its ring.\n"
-               "                             UNVALIDATED on the card (queue rows 55 / 56)\n"
-               "                 --spec dflash-lookup (spec 19f): --spec dflash with prompt lookup inside it -\n"
-               "                             a continuation match of >= 8 ids whose source lies beyond the\n"
-               "                             drafter's window (2048) replaces the drafter's draft (K = --spec-max\n"
-               "                             lookup drafts, the drafter's projection kept) while each verify keeps\n"
-               "                             >= 3; DFlash otherwise. One card; flags and refusals as dflash's.\n"
-               "                             Opt-in until queue row 70 measures it\n"
-               "                 [--draft-model PATH]   the drafter (default z-lab/Qwen3.8-27B-DFlash2,\n"
-               "                             from the HF cache)\n"
-               "                 [--draft-format int8|bf16]   the drafter's linears (default int8, at load)\n"
-               "                 [--spec-history N]   also match the generated ids of the last N\n"
-               "                             requests (default 0)\n");
+               "usage: b70-serve <snapshot-or-repo> [--spec auto|off|mtp|lookup|dflash] [--max-len auto|N]\n"
+               "                 [--parallel auto|1|pp] [--host 0.0.0.0] [--port 8000]\n"
+               "\n"
+               "  The model is chosen from the checkpoint's config.json (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5,\n"
+               "  K2-Horizon, Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
+               "  (the repo id, or the directory's). Everything else - the device memory the plan leaves free,\n"
+               "  the int8 lm_head, the drafter's form, the speculative cost tables, the tokenizer, the chat\n"
+               "  template and the generation defaults (the snapshot's) - the engine decides; what does not fit\n"
+               "  is refused at startup, naming why. Cards: Intel Arc Pro B70, one or two (peer access between\n"
+               "  them); ZE_AFFINITY_MASK picks which the driver shows.\n"
+               "\n"
+               "  --spec S        speculative decoding (default auto: the model's own MTP head with an adaptive\n"
+               "                  K per request where it has one and its cost table is measured - Qwen3.8,\n"
+               "                  Agnes, Ornith; off elsewhere). off; mtp; lookup (prompt lookup, verified\n"
+               "                  through the MTP lists); dflash (Qwen3.8's DFlash drafter, from the HF cache);\n"
+               "                  dflash-lookup (lookup inside DFlash, opt-in). Greedy output unchanged.\n"
+               "  --spec-max K    the proposer's cap: 1..3 drafts (mtp, lookup), 1..7 (dflash). Default the most.\n"
+               "  --draft-model P --spec dflash's drafter (default z-lab/Qwen3.8-27B-DFlash2).\n"
+               "  --max-len L     auto (default): the largest context that fits beside the weights, at most\n"
+               "                  the trained one; N: any multiple of 256 up to it, refused if it does not fit.\n"
+               "  --parallel P    auto (default): one card when the model and the asked context fit it, else\n"
+               "                  pp; 1: one card; pp: the layers split over two cards (spec 16). Kolibri-1 and\n"
+               "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
+               "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
+               "                  holds the fewest bytes). An override, for experiments; it implies pp.\n"
+               "  --host H, --port P   where to listen (0.0.0.0:8000).\n"
+               "  --log-requests DIR   write DIR/NNNNNN.json per request (timings, ids, text).\n"
+               "  --prefix-cache-gb auto|N   the prefix cache in SYSTEM RAM (pinned host memory), GiB. auto\n"
+               "                  (default): min(32, half the RAM, available - 8), off below 4; 0 = off.\n"
+               "  --prefix-split-last   chat requests: prefill to len - 1 and run the last id as one decode\n"
+               "                  step, so a thinking model's next turn restores right there (agentic sessions;\n"
+               "                  off for benchmarks and the golden gates).\n"
+               "  --layers N|auto Qwen3.8-Flash-Next only, REQUIRED until spec 22: load its first N layers\n"
+               "                  (development mode); its PLE int8 file is <snapshot>-ple-int8/.\n"
+               "\n"
+               "  Still being measured (they go when their numbers decide, docs/open-work.md):\n"
+               "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8, --pipeline-handoff copy|peer,\n"
+               "  --draft-vocab off|32k|64k|128k [--draft-vocab-ids FILE].\n");
 }
 
 uint32_t parse_u32(const char* what, const std::string& value) {
@@ -308,7 +215,6 @@ struct K2Serve {
   std::string path, snapshot_dir;
   cli::MaxLenArg max_len_arg;
   size_t mem_reserve = 0;
-  uint32_t device = l0::Context::kFromEnv;
   runtime::KvCache kv_cache = runtime::KvCache::Bf16;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   bool prefix_auto = true;
@@ -319,9 +225,8 @@ int serve_k2(const K2Serve& a, server::Options options) {
   const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
   const uint32_t trained = loader::trained_context(a.snapshot_dir);
   cli::check_before_load(a.max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10
-  l0::Context context(a.device);
-  std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
-               a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  l0::Context context(0u);
+  std::fprintf(stderr, "device: %s (%u EUs)\n", context.name().c_str(), context.eu_count());
   loader::K2LoadedModel model = [&] {
     StdoutToStderr redirect;
     return loader::load_k2(context, a.path, cli::load_len(a.max_len_arg, trained), a.lm_head);
@@ -357,8 +262,8 @@ int serve_k2(const K2Serve& a, server::Options options) {
 // snapshots, host sampling at the tokenizer's id count), Kolibri's chat format (server::ChatFormat,
 // set by run() from model_type), its EOS [127906, 127901] and its sampling defaults from
 // generation_config.json. b70-decode's flow (cli/kolibri_decode.h run_decode): the refusals before the
-// device (cli::kolibri::check_args: --mtp, --kv-cache int8, the prefill backends, a --pp 1 that does not
-// fit, --device with --pp 2), both cards in one Level Zero context with peer access, the placement and
+// device (cli::kolibri::check_args: --spec mtp, --kv-cache int8, the prefill backends, a --parallel 1 that does not
+// fit, --device with --parallel pp), both cards in one Level Zero context with peer access, the placement and
 // max_len planned before the load with the prefill scratch (every request prefills), each layer loaded
 // straight onto its device.
 struct KolibriServe {
@@ -392,19 +297,18 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   }
   const uint32_t devs = cli::kolibri::devices_of(da);
   if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   const std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : 0};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n", c0->name().c_str(),
                  c0->eu_count(), c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
                              "and both hand-offs write it (docs/10-the-box.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = cli::kolibri::settle(pre, da, dev);
   const uint32_t max_len = pl.second;
@@ -431,11 +335,11 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
       make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
                       std::to_string(engine.split()) + ": device 0 layers [0, " + std::to_string(engine.split()) +
                       "), device 1 [" + std::to_string(engine.split()) + ", " +
                       std::to_string(engine.model().desc.layers) + "))"
-                : std::string("--pp 1");
+                : std::string("--parallel 1");
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
@@ -457,13 +361,11 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
 // chat_template.jinja (or --chat-template FILE), NVIDIA's sampling defaults and EOS [2, 11] unless the snapshot's
 // generation_config.json carries sampling keys or --generation-config FILE says otherwise (cli::bolt::resolve_generation).
 // b70-decode's flow (cli/bolt_decode.h run_decode): the refusals before the device (cli::bolt::check_args and check_serve_flags,
-// the trained-context cap), both cards in one Level Zero context with peer access when --pp 2, the placement and max_len
+// the trained-context cap), both cards in one Level Zero context with peer access when --parallel pp, the placement and max_len
 // planned before the load with the prefill scratch (every request prefills), each block loaded straight onto its device.
 struct BoltServe {
   std::string snapshot_dir;
   cli::bolt::DecodeArgs args;   // the planner's and the refusals' inputs (prefill on)
-  std::string chat_template;       // --chat-template FILE ("" = the snapshot's)
-  std::string generation_config;   // --generation-config FILE ("" = the snapshot's / published)
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
 };
@@ -479,7 +381,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   const rb::BoltFuse fuse = rb::bolt_fuse();
   const rb::BoltState state = rb::bolt_state();
   // The generation defaults (Decision 12): the snapshot's generation_config.json when it carries sampling keys, else NVIDIA's
-  // published values; --generation-config FILE is the operator's word.
+  // published values.
   cli::bolt::Generation gen;
   {
     const auto read = [](const std::string& path, nlohmann::json& out) {
@@ -492,23 +394,16 @@ int serve_bolt(const BoltServe& a, server::Options options) {
       }
       return true;
     };
-    nlohmann::json snap, given;
+    nlohmann::json snap;
     const std::string snap_path = a.snapshot_dir + "generation_config.json";
     const bool have_snap = read(snap_path, snap);
-    bool have_given = false;
-    if (!a.generation_config.empty()) {
-      have_given = read(a.generation_config, given);
-      if (!have_given) throw std::runtime_error("--generation-config: cannot read '" + a.generation_config + "'");
-    }
     try {
-      gen = cli::bolt::resolve_generation(have_snap ? &snap : nullptr, have_given ? &given : nullptr, a.generation_config,
-                                          snap_path);
+      gen = cli::bolt::resolve_generation(have_snap ? &snap : nullptr, nullptr, "", snap_path);
     } catch (const std::invalid_argument& error) {
       throw std::runtime_error(error.what());
     }
   }
-  TemplateAdapter chat_template = a.chat_template.empty() ? TemplateAdapter(a.snapshot_dir)
-                                                          : TemplateAdapter(a.snapshot_dir, a.chat_template);
+  TemplateAdapter chat_template(a.snapshot_dir);
   const std::string template_sha = chat_template.tmpl.source_sha256();
   TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
   if (tokenizer.vocab_used() != pre.vocab_used)
@@ -518,20 +413,19 @@ int serve_bolt(const BoltServe& a, server::Options options) {
                  tokenizer.vocab_used());
   const uint32_t devs = cli::bolt::devices_of(da, pre);
   if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   std::vector<size_t> dev = {c0->memory_bytes()};
   if (c1) dev.push_back(c1->memory_bytes());
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(), c0->eu_count(),
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n", c0->name().c_str(), c0->eu_count(),
                  c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
                              "hand-offs write it (docs/10-the-box.md)");
   const rb::BoltPlan pl = cli::bolt::settle(pre, da, dev);
   loader::BoltLoadOptions lo;
@@ -556,11 +450,11 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
                       std::to_string(engine.split()) + ": device 0 blocks [0, " + std::to_string(engine.split()) +
                       "), device 1 [" + std::to_string(engine.split()) + ", " + std::to_string(engine.model().desc.layers) +
                       "))"
-                : std::string("--pp 1");
+                : std::string("--parallel 1");
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(), options.host.c_str(),
                options.port, pl.max_len);
   print_eos(gen.eos);
@@ -571,8 +465,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
                "sampling defaults %s: %s T %.2f top-p %.2f top-k %s, prefix snapshots at aligned %u-position block ends: %u "
                "SSM states + conv columns %.1f MB, attention KV %zu B a position\n",
                options.chat_format.name(), template_sha.c_str(),
-               template_sha == cli::bolt::kTemplateSha256 ? " = Bolt's" : " (NOT Bolt's 6521afc7: --chat-template or another "
-                                                                          "snapshot's)",
+               template_sha == cli::bolt::kTemplateSha256 ? " = Bolt's" : " (NOT Bolt's 6521afc7: another snapshot's)",
                placement.c_str(), rb::kPfC, rb::bolt_attn_name(engine.attention()), rb::bolt_fuse_name(engine.fuse()).c_str(),
                rb::bolt_state_name(engine.state()),
                loader::lm_head_form_name(da.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
@@ -589,14 +482,14 @@ int serve_bolt(const BoltServe& a, server::Options options) {
 // (cli::qwen4exp::chat_options: ChatFormat Qwen, EOS [248046, 248044], decision 11's greedy-unless-asked). b70-decode's
 // flow (cli/qwen4exp_decode.h run_decode): the refusals before the device (cli::qwen4exp::check_serve), the served
 // tokenizer.json held to the original's (check_tokenizer), both cards in one context with peer access, the layers,
-// placement and max_len planned before the load with the prefill scratch and (--mtp / --spec) the head, each layer
+// placement and max_len planned before the load with the prefill scratch and (--spec mtp / --spec) the head, each layer
 // loaded straight onto its device.
 int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   namespace cq = cli::qwen4exp;
   cq::check_serve(a);
   const std::vector<uint32_t> eos = eos_ids(a.snapshot_dir);
-  const std::string tok_path = a.tokenizer_path();
-  cq::check_tokenizer(tok_path);   // a file read, before the device
+  const std::string tok_path = a.snapshot_dir + "tokenizer.json";
+  cq::check_tokenizer(tok_path);   // a file read, before the device: the snapshot's must be the original's
   const cq::DecodeArgs& da = a.args;
   const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(a.snapshot_dir, 0);
   if (!da.max_len.is_auto && da.max_len.value > full.trained_max_len)
@@ -604,19 +497,18 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                              " exceeds Qwen3.8-Flash-Next's trained context " + std::to_string(full.trained_max_len));
   const uint32_t devs = cq::devices_of(da);
   if (devs == 2) cli::require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : da.device);
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   const std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : c0->memory_bytes()};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 da.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
-    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n", c0->name().c_str(),
+    std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n", c0->name().c_str(),
                  c0->eu_count(), c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
                              "and both hand-offs write it (docs/10-the-box.md)");
   const cq::Settled s = cq::settle(full, da, dev);
   loader::Q4LoadedModel model = [&] {
@@ -642,9 +534,9 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--pp 2 (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
                       std::to_string(engine.split()) + ")"
-                : std::string("--pp 1");
+                : std::string("--parallel 1");
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, s.max_len);
   print_eos(eos);
@@ -655,7 +547,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                "position\n",
                engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
                runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
-               engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
+               engine.mtp() ? (std::string(" (the head, fixed K: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
                                " norm, reuse selection" +
                                (a.spec_lookup ? ", --spec lookup" : "") + ")").c_str()
                             : "",
@@ -665,7 +557,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
 }
 
 // The speculative proposer's startup lines (spec 19e's lookup, spec 8 §10's auto policy) -
-// one card's and --pp 2's.
+// one card's and --parallel pp's.
 void print_proposer(const server::Options& options, bool spec_lookup, uint32_t spec_min_match,
                     uint32_t spec_max, uint32_t spec_history, bool mtp_auto, bool moe_default_costs,
                     const std::string& model_name) {
@@ -687,22 +579,22 @@ void print_proposer(const server::Options& options, bool spec_lookup, uint32_t s
     std::fprintf(stderr, " (plain steps)\n");
     // Spec 15e Review Focus 2: the defaults are Qwen3.8's measured table. A MoE model's
     // verify at M rows touches up to top_k x M distinct experts, so its costs are its own -
-    // unmeasured until the box records them; --mtp-cost replaces the table.
+    // unmeasured until the box records them (then they become the engine's table).
     if (moe_default_costs)
       std::fprintf(stderr, "mtp auto: %s's own costs are not measured yet; the table above is "
-                           "Qwen3.8's (pass --mtp-cost once the box has them)\n",
+                           "Qwen3.8's\n",
                    model_name.c_str());
   }
 }
 
-// Spec 16d: b70-serve --pp 2 - the Qwen-family model over two B70s (runtime::PipelineEngine
-// behind cli::pp::PipelineEngineAdapterT). b70-decode --pp 2's flow (cli/pipeline_decode.h):
+// Spec 16d: b70-serve --parallel pp - the Qwen-family model over two B70s (runtime::PipelineEngine
+// behind cli::pp::PipelineEngineAdapterT). b70-decode --parallel pp's flow (cli/pipeline_decode.h):
 // both cards in one Level Zero context and peer access, the whole checkpoint (with the MTP
 // head when a proposer needs it) loaded onto device 0, the split and max_len planned over the
 // loaded bytes with the server's terms (the prefill scratch per card; the MTP head, its
 // embedding replica and buffers on device 1; the prefix cache's block shadows when the cache
 // may be on - cli/pipeline_settle.h), then placed, then the two-card prefill prepared before
-// the first request. --pp's refusals ran before this (cli/pipeline_serve.h).
+// the first request. --parallel's refusals ran before this (cli/pipeline_serve.h).
 struct PipeServe {
   std::string snapshot_dir;
   cli::MaxLenArg max_len_arg;
@@ -712,8 +604,8 @@ struct PipeServe {
   loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   loader::DraftVocabSpec dv_spec;
   uint32_t mtp_k = 0;
-  bool mtp_auto = false, spec_lookup = false, default_mtp_costs = true;
-  uint32_t spec_min_match = 3, spec_max = 3, spec_history = 0;
+  bool mtp_auto = false, spec_lookup = false;
+  uint32_t spec_max = 3;
   bool have_pp_backend = false;
   runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   runtime::PrefillPath pp_path;
@@ -721,18 +613,17 @@ struct PipeServe {
   uint32_t prefix_cache_gb = 0;
   cli::PipelineArgs pipe;
   std::vector<uint32_t> eos;
-  cli::dflash::Args dflash;   // spec 19d: --spec dflash --pp 2 (the drafter on device 1)
+  cli::dflash::Args dflash;   // spec 19d: --spec dflash --parallel pp (the drafter on device 1)
 };
 
-int serve_pipeline(const PipeServe& a, server::Options options) {
+int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options) {
   cli::require_two_devices(l0::Context::gpu_count());
-  l0::Context d0(0u);
   l0::Context d1(d0, 1u);
-  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--pp 2: one context]\n",
+  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n",
                d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
-        "--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 is false), "
+        "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 is false), "
         "and both hand-offs write it. Peer access needs the P2P-capable kernel and both cards "
         "under one root complex (docs/10-the-box.md)");
   loader::LoadedModel full = [&] {
@@ -805,7 +696,7 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
                options.host.c_str(), options.port, settled.max_len);
   print_eos(a.eos);
   std::fprintf(stderr,
-               ", --pp 2 (hand-off %s, split %u: device 0 layers [0, %u), device 1 [%u, %u)), prefill "
+               ", --parallel pp (hand-off %s, split %u: device 0 layers [0, %u), device 1 [%u, %u)), prefill "
                "backend %s, mtp %s%u%s, lm_head %s%s%s, kv cache %s\n",
                runtime::pp_handoff_name(engine.handoff()), engine.split(), engine.split(),
                engine.stage(1).first, engine.stage(1).last,
@@ -816,11 +707,11 @@ int serve_pipeline(const PipeServe& a, server::Options options) {
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
                runtime::kv_cache_name(engine.kv_cache()));
-  print_proposer(options, a.spec_lookup, a.spec_min_match, a.spec_max, a.spec_history, a.mtp_auto,
-                 served.is_moe() && a.default_mtp_costs, served.name);
+  print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
+                 served.is_moe(), served.name);
   if (drafter) {   // spec 19d: the drafter's policy line, as on one card
     const server::MtpCost& c = options.mtp_adaptive.cost;
-    std::fprintf(stderr, "spec dflash (--pp 2, device 1): %s drafter, K <= %u, cost verify M=1..%zu",
+    std::fprintf(stderr, "spec dflash (--parallel pp, device 1): %s drafter, K <= %u, cost verify M=1..%zu",
                  loader::draft_format_name(a.dflash.format), a.dflash.max_k, c.verify.size());
     for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
@@ -835,39 +726,28 @@ int run(int argc, char** argv) {
   server::Options options;
   cli::MaxLenArg max_len_arg;   // spec 6 §10: auto unless --max-len N
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
-  size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
-  uint32_t device = l0::Context::kFromEnv;
+  // The zero-config cleanup (operator 2026-11-06): the engine decides these - the device memory the plan
+  // leaves free (runtime::kDefaultReserveGb), the int8 lm_head (spec 9, every served model), the request
+  // queue (server::Options::queue_depth) and the served name (cli::served_name, from the model).
+  const size_t mem_reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+  const loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
   std::string pp_backend_arg;
   bool have_pp_backend = false;
   // Spec 7: system RAM, not VRAM; auto by default (cli/prefix_cache_size.h).
   bool prefix_auto = true;
   uint32_t prefix_cache_gb = 0;
-  uint32_t mtp_k = 0;
-  bool mtp_auto = false, have_mtp_tuning = false;   // spec 8 §10
-  uint32_t mtp_max = 3;
-  std::string mtp_cost_arg;
-  // Spec 19 decision 3 / spec 19e: --spec; unset keeps --mtp's meaning exactly.
-  std::string spec_arg;
-  bool have_mtp_arg = false, have_spec_tuning = false;
-  uint32_t spec_min_match = 3, spec_max = runtime::Engine::kMaxDraft, spec_history = 0;
-  std::string spec_cost_arg;
-  // Spec 19c: --spec dflash's drafter (cli/dflash_args.h); --spec-max / --spec-cost serve lookup and dflash.
-  cli::dflash::Args dflash;
-  bool have_spec_max = false, have_spec_cost = false;
-  // Spec 9 §3: the serving default is the gated int8 head (amendment §8, L3).
-  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  // --spec auto|off|mtp|lookup|dflash|dflash-lookup (cli/spec_args.h); --spec-max K its one cap.
+  std::string spec_arg = "auto";
+  uint32_t spec_max = 0;
+  bool have_spec_max = false;
+  cli::dflash::Args dflash;   // spec 19c: --spec dflash's drafter (--draft-model)
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
   uint32_t draft_vocab = 0;
   std::string draft_vocab_ids;
-  cli::PipelineArgs pipe;   // spec 16d: --pp, --pipeline-split, --pipeline-handoff
-  bool pp_given = false;    // spec 20e: Kolibri-1's --pp defaults to 2, so "given" matters
-  // Spec 21e: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22), its PLE file, and the
-  // original's tokenizer.json when the snapshot ships Qwen3.8's.
+  cli::PipelineArgs pipe;   // --parallel, --pipeline-split, --pipeline-handoff
+  // Spec 21e: Qwen3.8-Flash-Next only - its development mode (--layers N|auto until spec 22).
   uint32_t q4_layers = 0;
   bool q4_layers_auto = false, have_q4_layers = false;
-  std::string q4_tokenizer;
-  std::string chat_template_file;   // spec 25e: --chat-template FILE (Bolt)
-  std::string generation_config_file;   // spec 25e: --generation-config FILE (Bolt)
 
   auto value = [&](int& i, const char* flag) -> std::string {
     if (++i >= argc) throw std::runtime_error(std::string(flag) + " needs a value");
@@ -886,15 +766,6 @@ int run(int argc, char** argv) {
       options.port = static_cast<int>(port);
     } else if (arg == "--max-len") {
       max_len_arg = cli::parse_max_len(value(i, "--max-len"));
-    } else if (arg == "--mem-reserve-gb") {
-      mem_reserve = cli::parse_reserve_gb(value(i, "--mem-reserve-gb"));
-    } else if (arg == "--device") {
-      device = parse_u32("--device", value(i, "--device"));
-      if (device == l0::Context::kFromEnv) throw std::runtime_error("--device is out of range");
-    } else if (arg == "--served-name") {
-      options.served_model = value(i, "--served-name");
-    } else if (arg == "--queue") {
-      options.queue_depth = parse_u32("--queue", value(i, "--queue"));
     } else if (arg == "--log-requests") {
       options.log_requests_dir = value(i, "--log-requests");
     } else if (arg == "--prefix-cache-gb") {
@@ -903,59 +774,17 @@ int run(int argc, char** argv) {
       if (!prefix_auto) prefix_cache_gb = parse_u32("--prefix-cache-gb", v);
     } else if (arg == "--prefix-split-last") {
       options.prefix_split_last = true;
-    } else if (arg == "--mtp") {
-      const std::string v = value(i, "--mtp");
-      have_mtp_arg = true;
-      mtp_auto = v == "auto";
-      if (!mtp_auto) {
-        mtp_k = v == "off" ? 0 : parse_u32("--mtp", v);
-        if (mtp_k > runtime::Engine::kMaxDraft)
-          throw std::runtime_error("--mtp expects off, 0..3 or auto");
-      }
-    } else if (arg == "--mtp-max") {
-      mtp_max = parse_u32("--mtp-max", value(i, "--mtp-max"));
-      if (mtp_max == 0 || mtp_max > runtime::Engine::kMaxDraft)
-        throw std::runtime_error("--mtp-max expects 1..3");
-      have_mtp_tuning = true;
-    } else if (arg == "--mtp-cost") {
-      mtp_cost_arg = value(i, "--mtp-cost");
-      have_mtp_tuning = true;
     } else if (arg == "--spec") {
-      spec_arg = value(i, "--spec");
-      // Spec 19c: `dflash` is Qwen3.8's drafter; every other model refuses it below by name.
-      // Spec 19f: `dflash-lookup` is `dflash` with prompt lookup inside it (its refusals are dflash's).
-      if (spec_arg != "off" && spec_arg != "mtp" && spec_arg != "lookup" && spec_arg != "dflash" &&
-          spec_arg != "dflash-lookup")
-        throw std::runtime_error("--spec expects off, mtp, lookup, dflash or dflash-lookup, got '" + spec_arg + "'");
-    } else if (arg == "--spec-min-match") {
-      spec_min_match = parse_u32("--spec-min-match", value(i, "--spec-min-match"));
-      if (spec_min_match < 2 || spec_min_match > 64)
-        throw std::runtime_error("--spec-min-match expects 2..64");
-      have_spec_tuning = true;
+      spec_arg = cli::parse_spec(value(i, "--spec"));
     } else if (arg == "--spec-max") {
       spec_max = parse_u32("--spec-max", value(i, "--spec-max"));
       have_spec_max = true;   // its range is the proposer's: checked below
-    } else if (arg == "--spec-cost") {
-      spec_cost_arg = value(i, "--spec-cost");
-      have_spec_cost = true;
     } else if (arg == "--draft-model") {   // spec 19c
       dflash.model = value(i, "--draft-model");
       dflash.have_model = true;
-    } else if (arg == "--draft-format") {   // spec 19c
-      const std::string v = value(i, "--draft-format");
-      if (!loader::parse_draft_format(v, dflash.format))
-        throw std::runtime_error("--draft-format expects int8 or bf16, got '" + v + "'");
-      dflash.have_format = true;
-    } else if (arg == "--spec-history") {
-      spec_history = parse_u32("--spec-history", value(i, "--spec-history"));
-      have_spec_tuning = true;
     } else if (arg == "--prefill-backend") {
       pp_backend_arg = value(i, "--prefill-backend");
       have_pp_backend = true;
-    } else if (arg == "--lm-head") {
-      const std::string v = value(i, "--lm-head");
-      if (!loader::parse_lm_head_form(v, lm_head))
-        throw std::runtime_error("--lm-head expects bf16 or int8, got '" + v + "'");
     } else if (arg == "--draft-vocab") {
       const std::string v = value(i, "--draft-vocab");
       if (!loader::parse_draft_vocab(v, draft_vocab))
@@ -964,9 +793,8 @@ int run(int argc, char** argv) {
       draft_vocab_ids = value(i, "--draft-vocab-ids");
     } else if (arg == "--kv-cache") {   // spec 12b
       kv_cache = cli::parse_kv_cache_arg(value(i, "--kv-cache"));
-    } else if (arg == "--pp" || arg == "--pipeline-parallel-size") {   // spec 16d
-      pipe.devices = cli::parse_pipeline_devices(arg, value(i, arg.c_str()));
-      pp_given = true;
+    } else if (arg == "--parallel") {
+      cli::parse_parallel(value(i, "--parallel"), pipe);
     } else if (arg == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
     } else if (arg == "--pipeline-handoff") {
@@ -980,15 +808,9 @@ int run(int argc, char** argv) {
         q4_layers = parse_u32("--layers", v);
         if (q4_layers == 0) throw std::runtime_error("--layers 0 would load no layer");
       }
-    } else if (arg == "--tokenizer") {   // spec 21e: Qwen3.8-Flash-Next only
-      q4_tokenizer = value(i, "--tokenizer");
-    } else if (arg == "--chat-template") {   // spec 25e: Bolt
-      chat_template_file = value(i, "--chat-template");
-    } else if (arg == "--generation-config") {   // spec 25e: Bolt only
-      generation_config_file = value(i, "--generation-config");
     } else if (!arg.empty() && arg[0] == '-') {
       usage();
-      throw std::runtime_error(cli::unknown_option(arg));
+      throw std::runtime_error("unknown option '" + arg + "'");
     } else if (path.empty()) {
       path = arg;
     } else {
@@ -1000,170 +822,132 @@ int run(int argc, char** argv) {
     usage();
     throw std::runtime_error("a snapshot directory or HF repo id is required");
   }
+  if (options.host.empty()) throw std::runtime_error("--host must not be empty");
+  options.served_model = cli::served_name(path);
+  cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  const bool pp_given = pipe.given();
+  if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
+    throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); this checkpoint "
+                             "is not one");
+  runtime::PrefillBackend pp_backend{};
+  if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
+    throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
+  if (!draft_vocab_ids.empty() && draft_vocab == 0)
+    throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
+  if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
+
   // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
   // cli::bolt::BoltEngineAdapterT (two cards by default) - dispatched here, before every other family's rules (its own:
   // cli::bolt::check_args and check_serve_flags replace them), as b70-decode dispatches it. A path that does not resolve is not
-  // Bolt: the flow below reports it. --generation-config is Bolt's alone.
+  // Bolt: the flow below reports it.
   if (cli::bolt::is_bolt(path)) {
     cli::bolt::ServeFlags flags;
-    flags.mtp = mtp_k > 0 || mtp_auto;
     flags.spec = spec_arg;
-    flags.proposer_tuning = have_mtp_tuning || have_spec_tuning || have_spec_max || have_spec_cost || dflash.have_model ||
-                            dflash.have_format;
+    flags.proposer_tuning = have_spec_max || dflash.have_model;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
-    flags.qwen4exp_flags = have_q4_layers || !q4_tokenizer.empty();
     cli::bolt::check_serve_flags(flags);
-    if (options.host.empty()) throw std::runtime_error("--host must not be empty");
-    if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
-    runtime::PrefillBackend bolt_backend{};
-    if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, bolt_backend))
-      throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
-    if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
     options.chat_format = server::ChatFormat::bolt();
     BoltServe bs;
     bs.snapshot_dir = loader::resolve_snapshot(path);
-    bs.chat_template = chat_template_file;
-    bs.generation_config = generation_config_file;
     cli::bolt::DecodeArgs& ba = bs.args;
     ba.path = bs.snapshot_dir;
     ba.max_len = max_len_arg;   // auto by default: the largest that fits, at most 262144 (Decision 14)
     ba.reserve = mem_reserve;
-    ba.device = device;
-    ba.int8_head = lm_head == loader::LmHeadForm::Int8;   // int8 by default (Decision 18), as every served model
+    ba.int8_head = true;        // int8 (Decision 18), as every served model
     ba.pipe = pipe;
     ba.pp_given = pp_given;
     ba.prefill = true;          // every request prefills: the plan carries the prefill scratch
     ba.pp_backend_given = have_pp_backend;
-    ba.pp_backend = bolt_backend;
+    ba.pp_backend = pp_backend;
     ba.mtp = false;             // refused above
     ba.spec = false;            // refused above
     ba.kv8 = kv_cache == runtime::KvCache::Int8;
-    ba.layers = 0;              // refused above
+    ba.layers = 0;              // --layers is Flash-Next's (refused above)
     bs.prefix_auto = prefix_auto;
     bs.prefix_cache_gb = prefix_cache_gb;
     return serve_bolt(bs, options);
   }
-  if (!generation_config_file.empty())
-    throw std::runtime_error("--generation-config is built for Nemotron 3.5 Bolt only (spec 25e); the other served models read "
-                             "their snapshot's generation_config.json");
-  // Spec 19 decision 3: --spec names the proposer; --mtp keeps its meaning (--spec mtp).
-  const bool spec_lookup = spec_arg == "lookup";
-  const bool dflash_lookup = spec_arg == "dflash-lookup";   // spec 19f: dflash with lookup inside it
-  dflash.on = spec_arg == "dflash" || dflash_lookup;        // spec 19c
+
+  // The model family decides what `--spec auto` is and which proposers exist (cli/spec_args.h).
+  const bool is_q4 = cli::qwen4exp::is_qwen4exp(path);
+  const bool is_kol = !is_q4 && cli::kolibri::is_kolibri(path);
+  // A path that does not resolve is the Qwen family here: every flag refusal below keeps its order, and the
+  // snapshot's own error comes after them.
+  std::string model_type;
+  if (!is_q4 && !is_kol) {
+    std::string snap;
+    try {
+      snap = loader::resolve_snapshot(path);
+    } catch (const std::exception&) {
+    }
+    if (std::ifstream cf(snap + "config.json"); !snap.empty() && cf) {
+      std::stringstream cs;
+      cs << cf.rdbuf();
+      const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
+      if (cj.is_object()) model_type = cj.value("model_type", std::string());
+    }
+  }
+  const bool is_k2 = model_type == "k2_horizon";
+  const cli::SpecFamily family = is_q4 ? cli::SpecFamily::Qwen4Exp
+                                 : is_kol ? cli::SpecFamily::None
+                                 : is_k2 ? cli::SpecFamily::None
+                                         : cli::SpecFamily::Qwen;
+  const std::string model_name = is_q4 ? "Qwen3.8-Flash-Next" : is_kol ? "Kolibri-1" : is_k2 ? "K2-Horizon" : "this model";
+  const cli::Spec spec = cli::resolve_spec(spec_arg, family, model_name, have_spec_max, spec_max, dflash.have_model);
+  const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
+  const bool spec_lookup = spec.kind == cli::SpecKind::Lookup;
+  const bool dflash_lookup = spec.kind == cli::SpecKind::DFlashLookup;
+  dflash.on = spec.kind == cli::SpecKind::DFlash || dflash_lookup;   // spec 19c / 19f
+  dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
   options.spec_dflash_lookup = dflash_lookup;
-  if (spec_arg == "mtp" && !have_mtp_arg) mtp_auto = true;
-  if ((spec_arg == "off" || spec_lookup || dflash.on) && have_mtp_arg && (mtp_auto || mtp_k > 0))
-    throw std::runtime_error("--spec " + spec_arg + " and --mtp: one proposer per server");
-  if (have_spec_tuning && !spec_lookup)
-    throw std::runtime_error("--spec-min-match and --spec-history need --spec lookup");
-  if ((have_spec_max || have_spec_cost) && !spec_lookup && !dflash.on)
-    throw std::runtime_error("--spec-max and --spec-cost need --spec lookup or --spec dflash");
-  if (have_spec_max && spec_lookup && (spec_max == 0 || spec_max > runtime::Engine::kMaxDraft))
-    throw std::runtime_error("--spec-max expects 1..3 with --spec lookup");
-  if (dflash.on) dflash.max_k = have_spec_max ? spec_max : 7;
+  uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   cli::dflash::check_flags(dflash);
-  // Spec 19c: bf16 KV, attention v2; spec 19d: --pp 2 on the copy hand-off.
+  // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
                             pipe.handoff == runtime::PpHandoff::Peer);
-  if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the --pp 2 adapter has none
-    throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --pp 2 serves --spec dflash");
+  if (dflash_lookup && pipe.on())   // spec 19f: EngineAdapter's step_drafts_or_many; the pipeline adapter has none
+    throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f); --parallel pp serves --spec dflash");
   if (spec_lookup) {
     options.spec_lookup = true;
-    options.lookup_min_match = spec_min_match;
-    options.lookup_history = spec_history;
-    options.lookup_adaptive.max_k = spec_max;
-    options.lookup_adaptive.cost = (lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
-                                                                       : server::MtpCost::bf16_head())
-                                       .with_free_drafts();
-    if (!spec_cost_arg.empty()) {
-      try {
-        options.lookup_adaptive.cost =
-            server::MtpCost::parse(spec_cost_arg, options.lookup_adaptive.cost);
-      } catch (const std::invalid_argument& error) {
-        throw std::runtime_error(std::string(error.what()) + " (--spec-cost)");
-      }
-    }
-    if (options.lookup_adaptive.cost.max_k() < spec_max)
-      throw std::runtime_error("--spec-cost covers K up to " +
-                               std::to_string(options.lookup_adaptive.cost.max_k()) +
-                               ", below --spec-max " + std::to_string(spec_max));
+    options.lookup_min_match = server::Options{}.lookup_min_match;   // 3 (spec 19e)
+    options.lookup_history = 0;
+    options.lookup_adaptive.max_k = spec.max_k;
+    options.lookup_adaptive.cost = server::MtpCost::int8_head().with_free_drafts();
   }
-  // Spec 8 §10: --mtp auto loads the head for --mtp-max drafts and chooses K per iteration;
-  // the cost table defaults to the head form's, --mtp-cost overrides it.
-  if (have_mtp_tuning && !mtp_auto)
-    throw std::runtime_error("--mtp-max and --mtp-cost need --mtp auto");
-  if (mtp_auto) {
-    mtp_k = mtp_max;
+  // Spec 8 §10: MTP chooses K per iteration from each request's own acceptance, over the int8 head's measured
+  // cost table (the Qwen family; Flash-Next drafts a fixed K - its adaptive policy waits for spec 22's numbers).
+  if (mtp_on && spec.adaptive) {
     options.mtp_auto = true;
-    options.mtp_adaptive.max_k = mtp_max;
-    options.mtp_adaptive.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
-                                                                    : server::MtpCost::bf16_head();
-    // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head
-    // share scales with it (derived; MtpCost::kInt8DraftHeadShare). Applied to the base
-    // --mtp-cost parses over, so an explicit draft= wins and a verify= alone keeps it.
+    options.mtp_adaptive.max_k = spec.max_k;
+    options.mtp_adaptive.cost = server::MtpCost::int8_head();
+    // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
+    // (derived; MtpCost::kInt8DraftHeadShare).
     if (draft_vocab != 0)
       options.mtp_adaptive.cost = options.mtp_adaptive.cost.with_draft_vocab(
-          lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::kInt8DraftHeadShare
-                                              : server::MtpCost::kBf16DraftHeadShare,
-          double(draft_vocab) / model::Qwen35::kVocab);
-    if (!mtp_cost_arg.empty()) {
-      try {
-        options.mtp_adaptive.cost = server::MtpCost::parse(mtp_cost_arg, options.mtp_adaptive.cost);
-      } catch (const std::invalid_argument& error) {
-        throw std::runtime_error(error.what());
-      }
-    }
-    if (options.mtp_adaptive.cost.max_k() < mtp_max)
-      throw std::runtime_error("--mtp-cost covers K up to " +
-                               std::to_string(options.mtp_adaptive.cost.max_k()) +
-                               ", below --mtp-max " + std::to_string(mtp_max));
+          server::MtpCost::kInt8DraftHeadShare, double(draft_vocab) / model::Qwen35::kVocab);
   }
-  // Spec 8 §11: the draft vocabulary narrows the MTP head's drafts, so both flags need
-  // --mtp (K or auto), and the ranked list needs a size to fill. Checked here, before the
-  // device is touched. The compact head is gathered from the head in either --lm-head
-  // form; the loader refuses only a checkpoint that ships the head int4.
-  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && mtp_k == 0 && !dflash.on)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --mtp (K or auto) or --spec dflash");
-  // Spec 19c: the drafter's AdaptiveK policy (the server's --mtp auto loop, over the drafter's cost table).
+  // Spec 8 §11: the draft vocabulary narrows the MTP head's or the drafter's drafts.
+  if ((draft_vocab != 0 || !draft_vocab_ids.empty()) && !mtp_on && !dflash.on)
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids need --spec mtp (the default where the model has "
+                             "an MTP head) or --spec dflash");
+  // Spec 19c: the drafter's AdaptiveK policy (the server's adaptive loop, over the drafter's cost table).
   if (dflash.on) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = dflash.max_k;
-    options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab, spec_cost_arg);
+    options.mtp_adaptive.cost = cli::dflash::cost(dflash, lm_head, draft_vocab);
   }
-  if (!draft_vocab_ids.empty() && draft_vocab == 0)
-    throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
-  if (options.host.empty()) throw std::runtime_error("--host must not be empty");
-  if (options.served_model.empty()) throw std::runtime_error("--served-name must not be empty");
-  if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
-  runtime::PrefillBackend pp_backend{};
-  if (have_pp_backend && !runtime::parse_prefill_backend(pp_backend_arg, pp_backend))
-    throw std::runtime_error("--prefill-backend expects l0 or l0-int8, got '" + pp_backend_arg + "'");
 
-  // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -
-  // dispatched here, before the Qwen family's kv-cache and --pp rules (its own, cli::kolibri::check_args,
-  // replace them: a --pipeline-split without --pp is its default --pp 2), as b70-decode dispatches it. A
-  // path that does not resolve is not Kolibri: the flow below reports it, so every rejection keeps its order.
   // Spec 21e: Qwen3.8-Flash-Next (model_type qwen4_exp) runs runtime::qwen4exp::Qwen4ExpEngine behind spec 16d's
-  // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and --pp rules (its
-  // own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it. --layers / --tokenizer
-  // belong to it alone.
-  // --chat-template is Bolt's (dispatched above); every other served model renders its snapshot's template.
-  if (!chat_template_file.empty())
-    throw std::runtime_error("--chat-template is built for Nemotron 3.5 Bolt only (spec 25e); this checkpoint renders "
-                             "its own");
-  if (cli::qwen4exp::is_qwen4exp(path)) {
-    if (dflash.on)
-      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); "
-                               "Qwen3.8-Flash-Next has none");
+  // PipelineEngineAdapterT (one card or two) - dispatched here, before the Qwen family's kv-cache and parallel rules
+  // (its own, cli::qwen4exp::check_serve, replace them), as b70-decode dispatches it.
+  if (is_q4) {
     cli::qwen4exp::ServeArgs qs;
     qs.snapshot_dir = loader::resolve_snapshot(path);
-    qs.tokenizer = q4_tokenizer;
     cli::qwen4exp::DecodeArgs& qa = qs.args;
     qa.path = qs.snapshot_dir;
     qa.max_len = max_len_arg;
     qa.reserve = mem_reserve;
-    qa.device = device;
-    qa.lm_head = lm_head;   // int8 by default (spec 9), as every served model
+    qa.lm_head = lm_head;   // int8 (spec 9), as every served model
     qa.layers = q4_layers;
     qa.layers_auto = q4_layers_auto;
     qa.pipe = pipe;
@@ -1172,8 +956,7 @@ int run(int argc, char** argv) {
     qa.pp_backend_given = have_pp_backend;
     qa.pp_backend = pp_backend;
     qa.kv8 = kv_cache == runtime::KvCache::Int8;
-    qs.mtp_k = mtp_auto ? 0 : mtp_k;
-    qs.mtp_auto = mtp_auto;
+    qs.mtp_k = mtp_k;       // a fixed K (cli::resolve_spec: Flash-Next's MTP is not adaptive yet)
     qs.spec_lookup = spec_lookup;
     qs.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     qa.load_mtp = qs.loads_head();
@@ -1181,16 +964,10 @@ int run(int argc, char** argv) {
     qs.prefix_cache_gb = prefix_cache_gb;
     return serve_qwen4exp(qs, options);
   }
-  if (have_q4_layers || !q4_tokenizer.empty())
-    throw std::runtime_error("--layers and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, "
-                             "spec 21e); this checkpoint is not one");
-  if (cli::kolibri::is_kolibri(path)) {
-    if (dflash.on)
-      throw std::runtime_error("--spec dflash is built for Qwen3.8 beside its drafter (spec 19c); Kolibri-1 has "
-                               "none");
-    if (spec_lookup)
-      throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, which Kolibri-1's "
-                               "engine does not capture (no MTP head, spec 20 §1): drop --spec lookup");
+  // Spec 20e: Kolibri-1 (model_type kolibri1) runs runtime::kolibri::KolibriEngine on two cards by default -
+  // dispatched here, before the Qwen family's kv-cache and parallel rules (its own, cli::kolibri::check_args,
+  // replace them: a --pipeline-split is its default two cards), as b70-decode dispatches it.
+  if (is_kol) {
     options.chat_format = server::ChatFormat::kolibri();
     KolibriServe ks;
     ks.snapshot_dir = loader::resolve_snapshot(path);
@@ -1198,14 +975,13 @@ int run(int argc, char** argv) {
     ka.path = ks.snapshot_dir;
     ka.max_len = max_len_arg;
     ka.reserve = mem_reserve;
-    ka.device = device;
-    ka.lm_head = lm_head;   // int8 by default (spec 9), as every served model
+    ka.lm_head = lm_head;   // int8 (spec 9), as every served model
     ka.pipe = pipe;
     ka.pp_given = pp_given;
     ka.prefill = true;      // every request prefills: the plan carries the prefill scratch
     ka.pp_backend_given = have_pp_backend;
     ka.pp_backend = pp_backend;
-    ka.mtp = mtp_k > 0 || mtp_auto;
+    ka.mtp = false;         // cli::resolve_spec refused every proposer
     ka.kv8 = kv_cache == runtime::KvCache::Int8;
     ks.prefix_auto = prefix_auto;
     ks.prefix_cache_gb = prefix_cache_gb;
@@ -1215,44 +991,26 @@ int run(int argc, char** argv) {
   runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
 
-  // Spec 16d: --pp's refusals that need no checkpoint (cli/pipeline_serve.h) - the sub-flags
-  // without --pp 2, --device and prefill profiling - before the snapshot is even resolved;
-  // the model's own follow below.
+  // Spec 16d: the pipeline's refusals that need no checkpoint (cli/pipeline_serve.h) - the override flags on
+  // one card and prefill profiling - before the snapshot is even resolved; the model's own follow below.
   cli::ServePipelineContext pipe_ctx;
-  pipe_ctx.device = device != l0::Context::kFromEnv;
-  pipe_ctx.mtp = mtp_k > 0 || mtp_auto || spec_lookup;
+  pipe_ctx.mtp = mtp_on || spec_lookup;
   {
     const char* profile = std::getenv("B70_PREFILL_PROFILE");
     pipe_ctx.prefill_profile = profile != nullptr && std::string(profile) == "1";
   }
-  cli::check_serve_pipeline(pipe, pipe_ctx);
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   // Spec 18b / 18d: dispatch on config.json's model_type. The chat format (template variables,
   // reasoning tags, tool-call syntax) follows it (server/chat_format.h: anything but
   // k2_horizon is the Qwen path Qwen3.8, Agnes and Ornith share); K2-Horizon runs its own
   // engine (runtime/k2, cli::k2::K2EngineAdapterT) - what that engine does not have is refused
   // here by name, before the device.
-  std::string model_type;
-  if (std::ifstream cf(snapshot_dir + "config.json"); cf) {
-    std::stringstream cs;
-    cs << cf.rdbuf();
-    const nlohmann::json cj = nlohmann::json::parse(cs.str(), nullptr, /*allow_exceptions=*/false);
-    if (cj.is_object()) model_type = cj.value("model_type", std::string());
-  }
   options.chat_format = server::ChatFormat::for_model_type(model_type);
-  // Spec 16d: the model's --pp refusals, before the model dispatch below - so K2 under --pp 2 is
-  // refused by name rather than served on one card (Kolibri-1 was dispatched above, spec 20e).
+  // Spec 16d: the model's parallel refusals, before the model dispatch below - so K2 under --parallel pp is
+  // refused by name rather than served on one card.
   pipe_ctx.model_type = model_type;
   cli::check_serve_pipeline(pipe, pipe_ctx);
-  if (model_type == "k2_horizon") {
-    if (dflash.on)
-      throw std::runtime_error("--spec dflash: no DFlash drafter exists for K2-Horizon (spec 19 §1)");
-    if (mtp_k > 0 || mtp_auto)
-      throw std::runtime_error("K2-Horizon has no MTP head (spec 18 §9): drop --mtp / --spec mtp");
-    if (spec_lookup)
-      throw std::runtime_error("--spec lookup verifies its drafts through the MTP verify lists, "
-                               "which K2-Horizon's engine does not capture (no head, spec 18 §9; "
-                               "plan 19e Task 2's engine part): drop --spec lookup");
+  if (is_k2) {
     if (have_pp_backend && pp_backend != runtime::PrefillBackend::L0)
       throw std::runtime_error(std::string("K2-Horizon prefills on the l0 backend only (spec 18c), "
                                            "not ") + runtime::prefill_backend_name(pp_backend) +
@@ -1264,7 +1022,6 @@ int run(int argc, char** argv) {
     k2.snapshot_dir = snapshot_dir;
     k2.max_len_arg = max_len_arg;
     k2.mem_reserve = mem_reserve;
-    k2.device = device;
     k2.kv_cache = kv_cache;
     k2.lm_head = lm_head;
     k2.prefix_auto = prefix_auto;
@@ -1284,6 +1041,21 @@ int run(int argc, char** argv) {
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
   }
+  // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
+  // pipeline parallel (cli::parallel_auto, from the checkpoint's descriptor before the load).
+  std::unique_ptr<l0::Context> d0 = std::make_unique<l0::Context>(0u);
+  if (pipe.mode == cli::Parallel::Auto) {
+    pipe.devices = cli::parallel_auto(snapshot_dir, max_len_arg, mtp_on || spec_lookup, kv_cache, pp_path,
+                                      d0->memory_bytes(), mem_reserve);
+    std::fprintf(stderr, "parallel: auto -> %s\n",
+                 pipe.on() ? "pp (the model and the context do not fit one card)" : "1 (one card)");
+    if (pipe.on()) {
+      cli::dflash::check_engine(dflash, true, kv_cache, /*pipeline_served=*/true, pipe.handoff == runtime::PpHandoff::Peer);
+      if (dflash_lookup)
+        throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f), and this model and context "
+                                 "need two: --spec dflash, or a shorter --max-len");
+    }
+  }
   if (pipe.on()) {   // spec 16d: two cards, serve_pipeline's own flow
     PipeServe ps;
     ps.snapshot_dir = snapshot_dir;
@@ -1294,12 +1066,9 @@ int run(int argc, char** argv) {
     ps.lm_head = lm_head;
     ps.dv_spec = dv_spec;
     ps.mtp_k = mtp_k;
-    ps.mtp_auto = mtp_auto;
+    ps.mtp_auto = mtp_on;
     ps.spec_lookup = spec_lookup;
-    ps.spec_min_match = spec_min_match;
-    ps.spec_max = spec_max;
-    ps.spec_history = spec_history;
-    ps.default_mtp_costs = mtp_cost_arg.empty();
+    ps.spec_max = spec.max_k;
     ps.have_pp_backend = have_pp_backend;
     ps.pp_backend = pp_backend;
     ps.pp_path = pp_path;
@@ -1308,11 +1077,10 @@ int run(int argc, char** argv) {
     ps.pipe = pipe;
     ps.eos = eos;
     ps.dflash = dflash;   // spec 19d
-    return serve_pipeline(ps, options);
+    return serve_pipeline(*d0, ps, options);
   }
-  l0::Context context(device);
-  std::fprintf(stderr, "device: %s (%u EUs)%s\n", context.name().c_str(), context.eu_count(),
-               device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  l0::Context& context = *d0;
+  std::fprintf(stderr, "device: %s (%u EUs)\n", context.name().c_str(), context.eu_count());
   loader::LoadedModel model = [&] {
     StdoutToStderr redirect;
     return loader::load(context, snapshot_dir, cli::load_len(max_len_arg, trained),
@@ -1378,13 +1146,13 @@ int run(int argc, char** argv) {
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
   std::fprintf(stderr, ", prefill backend %s, mtp %s%u, lm_head %s%s%s, kv cache %s\n",
-               runtime::prefill_backend_name(engine.prefill_backend()), mtp_auto ? "auto, max " : "",
+               runtime::prefill_backend_name(engine.prefill_backend()), mtp_on && spec.adaptive ? "auto, max " : "",
                mtp_k, loader::lm_head_form_name(lm_head),
                engine.draft_vocab() ? ", draft vocab " : "",
                engine.draft_vocab() ? loader::draft_vocab_name(engine.draft_vocab()).c_str() : "",
                runtime::kv_cache_name(engine.kv_cache()));
-  print_proposer(options, spec_lookup, spec_min_match, spec_max, spec_history, mtp_auto,
-                 served.is_moe() && mtp_cost_arg.empty(), served.name);
+  print_proposer(options, spec_lookup, options.lookup_min_match, spec.max_k, options.lookup_history,
+                 mtp_on && spec.adaptive, served.is_moe(), served.name);
   if (drafter) {   // spec 19c: the drafter's policy line (print_proposer's format)
     const server::MtpCost& c = options.mtp_adaptive.cost;
     std::fprintf(stderr, "spec dflash: %s drafter, K <= %u, cost verify M=1..%zu",

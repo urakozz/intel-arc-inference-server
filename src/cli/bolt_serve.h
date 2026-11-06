@@ -23,7 +23,7 @@
 //     BoltEngine::prefill (chunks end at block ends), ingest for --prefix-split-last; the store keyed by Bolt's own root
 //     (kBoltStoreKey, the bf16-state arm another one: its snapshots are half the size), so no entry another model's engine made
 //     - or another state precision's - can ever hit;
-//   - no speculative decoding: mtp_k() and verify_k() stay 0 (no MTP head, no drafter) - b70-serve refuses --mtp and --spec
+//   - no speculative decoding: mtp_k() and verify_k() stay 0 (no MTP head, no drafter) - b70-serve refuses --spec mtp and --spec
 //     by name.
 //
 // Also here, host-side and device-free: the generation defaults (Decision 12) and the flags b70-serve refuses for this model.
@@ -54,7 +54,7 @@ inline constexpr uint64_t kBoltStoreKey = 0x4E454D4F424F4C54ull;
 inline constexpr uint64_t store_key(bool bf16_state) { return kBoltStoreKey ^ (bf16_state ? 1ull : 0ull); }
 
 // Bolt's chat template (chat_template.jinja, 12,514 B; NVIDIA's, byte-identical in our export) - what the startup line
-// compares the template it reads against. Not a refusal: --chat-template FILE and a newer snapshot template are the operator's.
+// compares the template it reads against (the snapshot's own; a newer template is the operator's, printed, not refused).
 inline constexpr const char* kTemplateSha256 = "6521afc75afb0661e3558e7e6dee5f2d15de8be1c4dece8171935e778ea283f4";
 
 // ---- generation defaults (Decision 12) ---------------------------------------------------------------------------------------
@@ -136,33 +136,26 @@ inline Generation resolve_generation(const nlohmann::json* snapshot, const nlohm
 }
 
 // ---- what b70-serve refuses before the device -----------------------------------------------------------------------------------
-// What b70-serve parsed that Bolt has no use for (the rest - --mtp, --spec, --kv-cache int8, the prefill backends, --device with
-// --pp 2, a split without --pp 2 - is cli/bolt_decode.h's check_args, shared with b70-decode), each refusal by name
+// What b70-serve parsed that Bolt has no use for (the rest - --kv-cache int8, the prefill backends, a split on one card - is
+// cli/bolt_decode.h's check_args, shared with b70-decode), each refusal by name
 // (tests/server/bolt_request_test.cc, and cli_reject_serve_bolt_* through the binary on the box).
 struct ServeFlags {
-  bool mtp = false;              // --mtp N | auto
-  std::string spec;              // --spec's value ("" when not given): off | mtp | lookup | dflash
-  bool proposer_tuning = false;  // --mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost,
-                                 // --draft-model, --draft-format
+  std::string spec;              // --spec's value ("" or "auto" when not given): auto | off | mtp | lookup | dflash
+  bool proposer_tuning = false;  // --spec-max, --draft-model
   bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
-  bool qwen4exp_flags = false;   // --layers, --tokenizer
 };
 
 inline void check_serve_flags(const ServeFlags& f) {
-  if (f.mtp || f.spec == "mtp")
-    throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --mtp / --spec mtp");
+  if (f.spec == "mtp")
+    throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --spec mtp");
   if (f.spec == "dflash" || f.spec == "lookup" || f.spec == "dflash-lookup")
     throw std::runtime_error("--spec " + f.spec + ": Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
   if (f.proposer_tuning)
-    throw std::runtime_error("--mtp-max, --mtp-cost, --spec-min-match, --spec-history, --spec-max, --spec-cost, --draft-model "
-                             "and --draft-format belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
+    throw std::runtime_error("--spec-max and --draft-model belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
                              "head, no drafter)");
   if (f.draft_vocab)
     throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; Nemotron 3.5 "
                              "Bolt has neither");
-  if (f.qwen4exp_flags)
-    throw std::runtime_error("--layers and --tokenizer belong to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); "
-                             "this checkpoint is Nemotron 3.5 Bolt (b70-decode --layers is its development mode)");
 }
 
 // The served context is capped at the trained 262144 (Decision 14) - refused before the device (the planner refuses it too, after

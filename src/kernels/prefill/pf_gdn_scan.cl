@@ -72,7 +72,7 @@
 // band-tree reductions each, five barriers per tree, with only `sgid == 0` - 16
 // of 256 work-items - running the epilogue. That is 640 barriers per 64-position
 // sub-chunk and it measured **15.071 ms per GDN layer per chunk**, 35.1% of the
-// whole `--pp 4096` walk. Ruling A25's rewrite:
+// whole `--parallel 4096` walk. Ruling A25's rewrite:
 //
 //   * the chunk-START `S` tile is staged **once per sub-chunk** into
 //     `Ss[128][32]` fp32 (16 KB SLM), written straight out of the work-items'

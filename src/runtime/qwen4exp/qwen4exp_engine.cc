@@ -69,7 +69,7 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: device 1 is not a view of device 0's Level Zero "
                                   "context (spec 16 decision 1)");
     if (!devices[0]->can_access_peer(*devices[1]))
-      throw std::runtime_error("--pp 2: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
+      throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
                                "(zeDeviceCanAccessPeer is false), and both hand-offs write it. Peer access needs the "
                                "P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
     if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
@@ -650,7 +650,7 @@ void Qwen4ExpEngine::require_mtp(const char* what) const {
   if (!mtp_)
     throw std::runtime_error(std::string("runtime::qwen4exp::Qwen4ExpEngine::") + what +
                              ": MTP is off - load the model with its head (loader::load_qwen4exp(..., mtp = true), "
-                             "b70-serve --mtp K)");
+                             "b70-serve --spec mtp)");
 }
 Control* Qwen4ExpEngine::hctl() const { return mtp_->hctl.as<Control>(); }
 

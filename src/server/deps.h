@@ -118,7 +118,7 @@ struct EngineIface {
 
   // Spec 8 §3.6 (plan 8c): speculative decoding. mtp_k() == 0 (the default) means the
   // server calls step() only, exactly as before. Otherwise step_many(s, k) runs one
-  // draft/verify/accept iteration with k drafts (k <= mtp_k(); spec 8 §10: `--mtp auto`
+  // draft/verify/accept iteration with k drafts (k <= mtp_k(); spec 8 §10: `--spec mtp`
   // chooses k per iteration, k = 0 is one plain step) and returns 1 .. k + 1 ids in
   // order, the first being what step() would have returned; pos() then counts all of
   // them. When the server keeps fewer (a stop, EOS or max_tokens inside the run),

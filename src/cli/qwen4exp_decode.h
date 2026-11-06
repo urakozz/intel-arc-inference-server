@@ -10,7 +10,7 @@
 //                      (runtime::qwen4exp::layers_that_fit). Without it the whole model is refused naming its
 //                      bytes and spec 22 (the expert-offload tier): 512 experts x 48 layers do not fit two B70s
 //   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
-//   --pp N / --pipeline-parallel-size N   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
+//   --parallel auto|1|pp   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
 //   --pipeline-split auto|N, --pipeline-handoff copy|peer   16b's switches and parsers; auto is
 //                      runtime::qwen4exp::pp_split (pp_balance over the per-layer bytes at the session's max_len)
 //   --lm-head bf16|int8 (bf16 by default, as b70-decode's other paths), --max-len N|auto (<= the trained 262144)
@@ -23,9 +23,9 @@
 // A prefilling run plans the prefill scratch (and, on two cards, the prefill hand-off) into --layers auto, --max-len
 // auto and the fit.
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
-// Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --mtp
+// Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --spec mtp
 // (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
-// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), --device N with --pp 2
+// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), --device N with --parallel pp
 // (16b's rule: GPUs 0 and 1), and the whole model without --layers (spec 22).
 #include <algorithm>
 #include <array>
@@ -86,7 +86,7 @@ struct DecodeArgs {
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: not given)
   bool layers_auto = false;     // --layers auto
-  PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
+  PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
   bool pp_given = false;
   // Spec 21d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C (0 = kPfC),
   // --prefill-backend as parsed (l0 only).
@@ -95,7 +95,7 @@ struct DecodeArgs {
   runtime::PrefillBackend pp_backend = runtime::PrefillBackend::L0;
   // What else was asked for, for the refusals.
   bool mtp = false, kv8 = false, profile = false;
-  // Spec 21e: b70-serve's --mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
+  // Spec 21e: b70-serve's --spec mtp / --spec loads the MTP head - the planner (settle) then carries its weights, its
   // buffers and the verify rows (runtime::qwen4exp::plan(..., mtp)). b70-decode never sets it.
   bool load_mtp = false;
   bool int8_head() const { return lm_head == loader::LmHeadForm::Int8; }
@@ -134,7 +134,7 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
                              std::to_string(runtime::qwen4exp::kPfC) + " (the prefill scratch is sized for it)");
   if (a.mtp)
     throw std::runtime_error("b70-decode runs Qwen3.8-Flash-Next plain: its MTP head (spec 21e) is served by b70-serve "
-                             "--mtp K and measured by qwen4exp_mtp_test - drop --mtp");
+                             "--spec mtp and measured by qwen4exp_mtp_test - drop --spec mtp");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Qwen3.8-Flash-Next's KV is bf16 (spec 21 decision 8: int8 later - kv8.cl "
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
@@ -142,10 +142,10 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
     throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (spec 21c Task 7 times it with --bench)");
   const uint32_t devs = devices_of(a);
   if (devs == 1) {
-    if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --pp 2 (the layer device 1 starts at)");
-    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how H crosses)");
+    if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
+    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how H crosses)");
   } else if (a.device != l0::Context::kFromEnv) {
-    throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
+    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
                              "two); --device names one card - drop it");
   }
   if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
@@ -199,7 +199,7 @@ inline Settled settle(const model::Qwen4ExpDesc& full, const DecodeArgs& a,
   s.desc = rq::truncated(full, layers);
   const model::Qwen4ExpDesc& d = s.desc;
   model::Q4Placement p = devs == 1 ? model::Q4Placement::one(d) : model::Q4Placement::two(d, a.pipe.split ? a.pipe.split : 1);
-  if (devs == 2 && d.layers < 2) throw std::runtime_error("--pp 2 needs at least two layers to split (--layers " +
+  if (devs == 2 && d.layers < 2) throw std::runtime_error("--parallel pp needs at least two layers to split (--layers " +
                                                           std::to_string(d.layers) + ")");
   if (devs == 2 && !a.pipe.split_auto && (a.pipe.split < 1 || a.pipe.split >= d.layers))
     throw std::runtime_error("--pipeline-split " + std::to_string(a.pipe.split) + " leaves a device no layer: it is the "
@@ -261,9 +261,9 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
                  a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   else
-    std::fprintf(stderr, "devices: %s + %s (--pp 2)\n", c0->name().c_str(), c1->name().c_str());
+    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
                              "both hand-offs write it (docs/10-the-box.md)");
   const Settled s = settle(full, a, dev);
   if (need > s.max_len)

@@ -1,23 +1,23 @@
 #pragma once
 // Spec 19c: `--spec dflash` - speculative decoding with a DFlash drafter (spec 19 §5) - for b70-serve and b70-decode
-// (--ids), the Qwen3.5 family's engine (runtime::Engine); spec 19d: and b70-serve --pp 2 (runtime::PipelineEngine,
-// the drafter on device 1 beside lm_head). The flags:
+// (--ids), the Qwen3.5 family's engine (runtime::Engine); spec 19d: and b70-serve --parallel pp (runtime::PipelineEngine,
+// the drafter on device 1 beside lm_head). The flags (cli/spec_args.h has --spec itself):
 //
 //   --spec dflash          the proposer is the drafter (spec 19 decision 3: one per server; the MTP head is not
-//                          loaded, --mtp / --spec lookup are refused)
+//                          loaded)
 //   --draft-model PATH     the drafter: a snapshot directory or a repo id in the HF cache (default
 //                          z-lab/Qwen3.8-27B-DFlash2, the published drafter for Qwen3.8); never downloaded here
-//   --draft-format F       int8 (default, spec 19 decision 2: per-row RTN at load) or bf16
 //   --spec-max K           the deepest block, 1..7 (default 7: DFlash 2's block of 8 - 1)
-//   --spec-cost SPEC       the AdaptiveK cost table (b70-serve; --mtp-cost's syntax: "verify=<8 rows>;draft=<7>");
-//                          default MtpCost::dflash for the --lm-head and --draft-format forms, the draft row flat in K
 //   --draft-vocab N        (b70-serve) the drafter's head over a draft vocabulary (spec 8 §11's, built without the
 //                          MTP head)
+// The drafter's linears are int8 (spec 19 decision 2: per-row RTN at load; --draft-format went in the zero-config
+// cleanup - Args::format stays the tests' seam) and its AdaptiveK cost table is MtpCost::dflash's (--spec-cost went
+// with it).
 //
 // What is refused here, by name, before the device (each is a later stage's, or has no binaries):
-//   --pp 2                 b70-decode: one card (b70-serve --pp 2 serves it); b70-serve --pp 2: the copy hand-off
-//                          only (--pipeline-handoff peer: device 0's taps are copies into device 1 that only the
-//                          copy hand-off's event orders)
+//   pipeline parallel      b70-decode: one card (b70-serve --parallel pp serves it); b70-serve --parallel pp: the
+//                          copy hand-off only (--pipeline-handoff peer: device 0's taps are copies into device 1
+//                          that only the copy hand-off's event orders)
 //   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
@@ -48,27 +48,26 @@ struct Args {
   std::string model = "z-lab/Qwen3.8-27B-DFlash2";
   loader::DraftFormat format = loader::DraftFormat::Int8;
   uint32_t max_k = 7;
-  bool have_model = false, have_format = false;
+  bool have_model = false;
 };
 
-// --draft-model / --draft-format belong to --spec dflash.
+// --draft-model belongs to --spec dflash.
 inline void check_flags(const Args& a) {
-  if (!a.on && (a.have_model || a.have_format))
-    throw std::runtime_error("--draft-model and --draft-format need --spec dflash");
+  if (!a.on && a.have_model) throw std::runtime_error("--draft-model needs --spec dflash");
   if (a.on && (a.max_k == 0 || a.max_k > 7))
     throw std::runtime_error("--spec-max with --spec dflash expects 1..7 (the drafter's block of 8)");
 }
 
-// The engine's refusals (see the header). Spec 19d: `pipeline_served` - the caller serves --pp 2 with the drafter
+// The engine's refusals (see the header). Spec 19d: `pipeline_served` - the caller serves two cards with the drafter
 // (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
 inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, bool pipeline_served = false,
                          bool peer = false) {
   if (!a.on) return;
   if (pipeline && !pipeline_served)
-    throw std::runtime_error("b70-decode --spec dflash runs on one card (b70-serve --pp 2 --spec dflash serves the "
-                             "drafter beside a split target): drop --pp 2");
+    throw std::runtime_error("b70-decode --spec dflash runs on one card (b70-serve --parallel pp --spec dflash serves "
+                             "the drafter beside a split target): --parallel 1");
   if (pipeline && peer)
-    throw std::runtime_error("--spec dflash --pp 2 needs --pipeline-handoff copy: device 0's taps are copies into "
+    throw std::runtime_error("--spec dflash --parallel pp needs --pipeline-handoff copy: device 0's taps are copies into "
                              "device 1, which only the copy hand-off's event orders before device 1's rows");
   if (kv == runtime::KvCache::Int8)
     throw std::runtime_error("--spec dflash verifies up to 8 rows, and --kv-cache int8's attention is built for "
@@ -76,23 +75,15 @@ inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, bool
 }
 
 // The AdaptiveK cost table: MtpCost::dflash for the head and drafter forms, a draft vocabulary scaling the head's
-// share of the draft row (derived, as --mtp auto's), then --spec-cost over it.
-inline server::MtpCost cost(const Args& a, loader::LmHeadForm head, uint32_t draft_vocab,
-                            const std::string& spec_cost) {
+// share of the draft row (derived, as the MTP head's).
+inline server::MtpCost cost(const Args& a, loader::LmHeadForm head, uint32_t draft_vocab) {
   const bool i8h = head == loader::LmHeadForm::Int8, i8d = a.format == loader::DraftFormat::Int8;
   server::MtpCost c = server::MtpCost::dflash(i8h, i8d);
   if (draft_vocab != 0)
     c = c.with_draft_vocab(server::MtpCost::dflash_head_share(i8h, i8d), double(draft_vocab) / model::Qwen35::kVocab);
-  if (!spec_cost.empty()) {
-    try {
-      c = server::MtpCost::parse(spec_cost, c);
-    } catch (const std::invalid_argument& error) {
-      throw std::runtime_error(std::string(error.what()) + " (--spec-cost)");
-    }
-  }
   if (c.max_k() < a.max_k)
-    throw std::runtime_error("--spec-cost covers K up to " + std::to_string(c.max_k()) + ", below --spec-max " +
-                             std::to_string(a.max_k));
+    throw std::runtime_error("the drafter's cost table covers K up to " + std::to_string(c.max_k()) +
+                             ", below --spec-max " + std::to_string(a.max_k));
   return c;
 }
 
@@ -104,7 +95,7 @@ struct Loaded {
   uint32_t head_rows = 0;
   runtime::DrafterPlan plan;
 };
-// Spec 19d (--pp 2): the planner's term before the drafter is loaded - read off its checkpoint (config.json, the
+// Spec 19d (two cards): the planner's term before the drafter is loaded - read off its checkpoint (config.json, the
 // shards' shapes) against the WHOLE target as loaded on device 0, so the split and max_len account for it; the
 // weights are then loaded onto device 1 beside the stage model (load(), below).
 inline runtime::DrafterPlan plan_only(const Args& a, const loader::LoadedModel& target) {
