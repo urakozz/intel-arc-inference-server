@@ -760,9 +760,23 @@ if(DEFINED ENV{HF_HOME})
 else()
   set(_b70_hf_home "$ENV{HOME}/.cache/huggingface")
 endif()
-set(B70_TEST_SNAPSHOT
-  "${_b70_hf_home}/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d"
-  CACHE PATH "Checkpoint snapshot directory the checkpoint-labelled tests load (bypasses refs/main)")
+# b70_hf_snapshot(VAR REPO_DIR PINNED SUFFIX TYPE DOC): VAR = REPO_DIR's snapshot in the HF cache - the one refs/main
+# names (what is downloaded), PINNED when the cache has no refs/main - plus SUFFIX (a file inside, or empty). A cached
+# value that no longer exists (the snapshot moved on: a re-download, a new upstream revision) is replaced; one that
+# exists - an override with -D - is kept. (kolibri_tokenizer_test skipped for weeks on a pinned id the box no longer
+# had, 2026-11-07.)
+function(b70_hf_snapshot var repo pinned suffix type doc)
+  set(_sha "${pinned}")
+  if(EXISTS "${_b70_hf_home}/hub/${repo}/refs/main")
+    file(READ "${_b70_hf_home}/hub/${repo}/refs/main" _sha)
+    string(STRIP "${_sha}" _sha)
+  endif()
+  if(NOT DEFINED CACHE{${var}} OR NOT EXISTS "$CACHE{${var}}")
+    set(${var} "${_b70_hf_home}/hub/${repo}/snapshots/${_sha}${suffix}" CACHE ${type} "${doc}" FORCE)
+  endif()
+endfunction()
+b70_hf_snapshot(B70_TEST_SNAPSHOT models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+  84575a18f209992ef96d819b31f924b489e3d55d "" PATH "Checkpoint snapshot directory the checkpoint-labelled tests load")
 set(B70_TEST_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-primary"
   CACHE PATH "The CPU-oracle golden set dumped from B70_TEST_SNAPSHOT (tools/oracle/golden.sh OUT_DIR)")
 
@@ -1246,9 +1260,9 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME template_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
   # Spec 14: Agnes's template (byte-identical to Qwen3.8's) on five message lists - plain,
   # thinking, tools, a tool call in history, tool responses - against transformers' render.
-  set(B70_AGNES_SNAPSHOT_DIR
-    "${_b70_hf_home}/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ/snapshots/946012d0e0b1b6df685c910adf3d68e351931306"
-    CACHE PATH "Agnes snapshot directory for the template test (tokenizer_config + chat_template.jinja)")
+  b70_hf_snapshot(B70_AGNES_SNAPSHOT_DIR models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
+    946012d0e0b1b6df685c910adf3d68e351931306 "" PATH
+    "Agnes snapshot directory for the template test (tokenizer_config + chat_template.jinja)")
   add_test(NAME template_agnes_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
     ${B70_AGNES_SNAPSHOT_DIR} agnes_template_cases.json)
   add_executable(streamer_test tokenizer/streamer_test.cc)
@@ -2200,9 +2214,8 @@ if(B70_TOKENIZER_ENABLED)
   # digests, three chat renders' ids). tokenizer.json (20.6 MB) is not vendored: the int4
   # snapshot's in the HF cache, or -DB70_K2_TOKENIZER_JSON / the environment variable of the
   # same name. Absent: disabled on the Mac (host_only), SKIP (77) elsewhere.
-  set(B70_K2_TOKENIZER_JSON
-    "${_b70_hf_home}/hub/models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ/snapshots/0e38c26ca3ce5899a0cb93ae8d085669d9565720/tokenizer.json"
-    CACHE FILEPATH "K2-Horizon's tokenizer.json for k2_tokenizer_test")
+  b70_hf_snapshot(B70_K2_TOKENIZER_JSON models--urakozz--IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ
+    0e38c26ca3ce5899a0cb93ae8d085669d9565720 /tokenizer.json FILEPATH "K2-Horizon's tokenizer.json for k2_tokenizer_test")
   add_executable(k2_tokenizer_test tokenizer/k2_tokenizer_test.cc)
   target_include_directories(k2_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(k2_tokenizer_test PRIVATE b70_tokenizer)
@@ -2900,9 +2913,9 @@ if(B70_TOKENIZER_ENABLED)
   # tokenizer.json (9.5 MB) is not vendored: the BF16 release's in the HF cache (20b's export copies it
   # unchanged), or -DB70_KOLIBRI_TOKENIZER_JSON / the environment variable of the same name. Absent:
   # disabled on the Mac (host_only), SKIP (77) elsewhere.
-  set(B70_KOLIBRI_TOKENIZER_JSON
-    "${_b70_hf_home}/hub/models--Aleph-Alpha--Kolibri-1-BF16/snapshots/8c8b34899c7bc77b349f7916b07158e3ba29456a/tokenizer.json"
-    CACHE FILEPATH "Kolibri-1's tokenizer.json for kolibri_tokenizer_test (-D or the environment variable)")
+  b70_hf_snapshot(B70_KOLIBRI_TOKENIZER_JSON models--Aleph-Alpha--Kolibri-1-BF16
+    8c8b34899c7bc77b349f7916b07158e3ba29456a /tokenizer.json FILEPATH
+    "Kolibri-1's tokenizer.json for kolibri_tokenizer_test (-D or the environment variable)")
   add_executable(kolibri_tokenizer_test tokenizer/kolibri_tokenizer_test.cc)
   target_include_directories(kolibri_tokenizer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(kolibri_tokenizer_test PRIVATE b70_tokenizer)
@@ -3735,7 +3748,8 @@ add_test(NAME bolt_synth_host_pair_test COMMAND bolt_synth_host_test ${B70_BOLT_
 add_test(NAME bolt_synth_host_g64_test COMMAND bolt_synth_host_test ${B70_BOLT_SYNTH_DIR}/n8-g64)
 set_tests_properties(bolt_synth_host_g128_test bolt_synth_host_pair_test bolt_synth_host_g64_test PROPERTIES LABELS bolt
   SKIP_RETURN_CODE 77 TIMEOUT 1800)
-set(B70_BOLT_SNAPSHOT "${_b70_hf_home}/hub/models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ/snapshots/8932aa8d1844f91056c5b9433448075a842b9156" CACHE PATH
+b70_hf_snapshot(B70_BOLT_SNAPSHOT models--urakozz--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ
+  8932aa8d1844f91056c5b9433448075a842b9156 "" PATH
   "our g64 export, the served checkpoint (only its small files are read by the host tests; the shards by the box's load tests)")
 add_executable(bolt_names_test loader/bolt_names_test.cc)
 target_include_directories(bolt_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
