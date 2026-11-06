@@ -126,10 +126,11 @@ void stop(pid_t pid) {
 
 void wait_ready(uint16_t port) {
   httplib::Client client("127.0.0.1", port);
-  // Spec 25e: B70_SERVE_WAIT_S (seconds, default 120) - Nemotron 3.5 Bolt's 41.9 GB on two cards takes longer to load.
-  uint32_t seconds = 120;
+  // Spec 25e: B70_SERVE_WAIT_S (seconds, default 300) - Nemotron 3.5 Bolt's 41.9 GB on two cards takes longer to load,
+  // and a busy box stretches Qwen3.8's (a 61.6 s load with builds beside it, 2026-11-06, missed the old 120 s).
+  uint32_t seconds = 300;
   if (const char* wait = std::getenv("B70_SERVE_WAIT_S")) seconds = static_cast<uint32_t>(std::strtoul(wait, nullptr, 10));
-  if (seconds == 0) seconds = 120;   // 0 or not a number: the default
+  if (seconds == 0) seconds = 300;   // 0 or not a number: the default
   for (uint32_t attempt = 0; attempt < seconds * 2; ++attempt) {
     const auto response = client.Get("/v1/models");
     if (response && response->status == 200) return;
