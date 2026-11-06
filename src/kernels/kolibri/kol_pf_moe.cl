@@ -14,7 +14,7 @@
 // theirs, restated below:
 //
 //   * 384 experts. k2_pf_sort stages the chunk's ids as BYTES (PF_E <= 255) and gives each lane ONE
-//     expert (PF_WG >= PF_E, 256 lanes at most - the Mac's cap too). Here the ids are staged as ushort
+//     expert (PF_WG >= PF_E, 256 lanes at most). Here the ids are staged as ushort
 //     and lane l owns experts l and l + 256 (PF_EPL 2; 20c's route has the same 512 slots on 256 lanes).
 //   * The shared expert is int4 (operator ruling 2026-10-31: the operator's export quantises it): block
 //     PF_E of a weight batch is dequantised from ITS OWN layout-1 block (w_sh) exactly as a routed one.
@@ -40,12 +40,8 @@
 // row's slot order - ASCENDING EXPERT ID - exactly as kol_moe_down does (tests/kernels/kolibri_pf_ref.h
 // repeats it and checks it against 20c's kolibri_ref::combine and torch's fixture row).
 //
-// **Portability.** No sub-group function but the int4 dequant's block read, which
-// tools/mac/opencl/intel_shim.h emulates exactly; scales through vload_half. Every entry point runs on
-// the Mac's OpenCL 1.2 GPU for an indicative check (tools/mac/clrun/kolibri_run.cc).
-#ifdef cl_intel_subgroups
+// No sub-group function but the int4 dequant's block read; scales through vload_half.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
-#endif
 
 #if !defined(PF_E) || !defined(PF_K) || !defined(PF_WG) || !defined(PF_EPL) || !defined(PF_D) || !defined(PF_INTER) || !defined(TM) || !defined(KC)
 #error "kol_pf_moe: PF_E, PF_K, PF_WG, PF_EPL, PF_D, PF_INTER, TM and KC must be defined (src/kernels/CMakeLists.txt, spec 20d)"

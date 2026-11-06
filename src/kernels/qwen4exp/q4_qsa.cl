@@ -31,7 +31,7 @@
 //   list (u32 words [M][LIST_ROW]): positions [0, count), count at word COUNT_W = 2048 + (p + 1 - 4n) (or p + 1);
 //   diag [M][2] = {the 512th score, the 513th} ({+INF, -INF} without a cut) - the near-tie diagnostic (gate S).
 //
-// Plain OpenCL C (no sub-group functions): the Mac's OpenCL runs it.
+// Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

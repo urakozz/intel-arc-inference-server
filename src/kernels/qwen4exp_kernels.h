@@ -20,7 +20,7 @@
 // checkpoint or --layers N differs only in its layer count.
 //
 // The source files (src/kernels/qwen4exp/):
-//   q4_hc.cl              q4_hc_combine_norm, q4_hc_up_mix                    plain OpenCL C (the Mac runs it)
+//   q4_hc.cl              q4_hc_combine_norm, q4_hc_up_mix                    plain OpenCL C
 //   q4_ple.cl             q4_ple_gather, q4_ple_block, q4_ple_check           plain OpenCL C
 //   q4_qsa.cl             q4_qsa_prep, q4_qsa_score, q4_qsa_select            plain OpenCL C
 //   q4_qsa_attn.cl        q4_qsa_attn, q4_qsa_reduce (flash, sub-groups)       card only
@@ -213,7 +213,7 @@ inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bo
 // spec 6's flash at 24 / 2 heads for the rows with <= 2051 visible positions and q4_pf_sparse_attn over each row's
 // own list past them, the MoE through a 512-expert ushort sort and spec 15d's grouped GEMMs. New sources
 // (src/kernels/qwen4exp/):
-//   q4_pf_moe.cl    q4_pf_sort, q4_pf_gather, q4_pf_dequant_{gu,dn}[_shb], q4_pf_moe_combine     the Mac runs it
+//   q4_pf_moe.cl    q4_pf_sort, q4_pf_gather, q4_pf_dequant_{gu,dn}[_shb], q4_pf_moe_combine
 //   q4_pf_attn.cl   q4_pf_sparse_attn (DPAS over a gathered list)                               card only
 //   q4_pf_ple.cl    q4_pf_ple_gate, q4_pf_ple_conv, q4_pf_ple_ring                               plain OpenCL C
 // and three existing sources gain a define each, every existing binary's preprocessed source token for token as it

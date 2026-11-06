@@ -11,8 +11,7 @@
 // summed in fp32 and rounded to bf16 once, every elementwise op widens to fp32 and rounds
 // its result. tests/kernels/k2_ref.h repeats every chain below; edit the two together.
 //
-// **No sub-group function anywhere in this file**, so it also builds as OpenCL 1.2 for an
-// indicative run on the Mac's GPU (tools/mac/clrun/k2_run.cc).
+// **No sub-group function anywhere in this file.**
 #ifndef M
 #define M 1
 #endif

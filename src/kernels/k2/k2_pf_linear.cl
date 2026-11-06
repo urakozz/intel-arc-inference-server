@@ -15,8 +15,7 @@
 //   k2_pf_dequant_slab(w, scales, out, n0, ns)   grid (ns / 16, K / 64), WG 16
 //     out[k][c] = bf16 of column n0 + c of the [K][N] weight, c < ns, k < K
 //
-// No sub-group function (the layout-0 reads are plain loads, the scale through vload_half),
-// so it also runs on the Mac's OpenCL 1.2 GPU (tools/mac/clrun/k2_run.cc).
+// No sub-group function (the layout-0 reads are plain loads, the scale through vload_half).
 #ifndef K
 #error "k2_pf_dequant_slab: K must be defined"
 #endif

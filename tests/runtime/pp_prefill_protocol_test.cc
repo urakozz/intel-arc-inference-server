@@ -4,7 +4,7 @@
 // events are signalled by one "device" and waited on by the other (unbounded, as a list
 // waits) or by the host (bounded). Per-chunk resources are plain memory indexed by chunk % 2
 // - each device's Control, device 0's ids, the landing slot, the shadows - and under
-// ThreadSanitizer (tools/mac/pp_prefill_tsan.sh) the shipped order is data-race free: every
+// ThreadSanitizer (measured with the retired Mac tooling) the shipped order is data-race free: every
 // one of them is handed between the host and the "devices" through an event or a queue.
 // That a resource is not REUSED too early is a different property - a slot overwritten
 // after device 1 waited for it is still ordered by the event - and the stamps, the per-chunk

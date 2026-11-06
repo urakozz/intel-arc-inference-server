@@ -26,8 +26,8 @@
 // operand, O / l rounded once; natural exp; scale 1 / sqrt(128). Its host twin is tests/kernels/muse_pf_ref.h
 // flash_window_sim (fp32, the bar 0.99999 against flash_window_fp64).
 //
-// **EAGER 1, B70_MUSE_ATTN=eager** (grid (Q_HEADS, C), WG 128, plain OpenCL C - no sub-group function, no block read:
-// the Mac's OpenCL runs it): the reference's bf16 eager chain row by row, BITWISE decode's eager row
+// **EAGER 1, B70_MUSE_ATTN=eager** (grid (Q_HEADS, C), WG 128, plain OpenCL C - no sub-group function, no block read):
+// the reference's bf16 eager chain row by row, BITWISE decode's eager row
 // (tests/kernels/muse_ref.h attention_eager_head = mg_attn_eager.cl at M 1, itself bitwise transformers 5.19.0's
 // eager_attention_forward) - so prefill and decode agree exactly under eager. Per (row, head) a work-group walks the
 // row's L keys [lo, p] in 128-key tiles three times (a score is recomputed each pass - the same fma chain, the same

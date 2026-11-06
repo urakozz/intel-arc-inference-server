@@ -1,7 +1,6 @@
 #pragma once
 // Spec 19b: tests/loader/dflash_ref_fixture.safetensors (tools/oracle/dflash_fixture.py) read into the host twin's
-// structures (tests/kernels/dflash_ref.h) - shared by dflash_ref_test (the twin vs dflash_ref.py) and
-// tools/mac/clrun/dflash_run.cc (the kernels at the fixture's tiny shapes on the Mac's GPU).
+// structures (tests/kernels/dflash_ref.h) - read by dflash_ref_test (the twin vs dflash_ref.py).
 #include <cstdint>
 #include <cstring>
 #include <map>

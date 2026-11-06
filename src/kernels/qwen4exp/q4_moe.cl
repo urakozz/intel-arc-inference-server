@@ -32,7 +32,7 @@
 // no kernel source in this tree #includes - ocloc's include resolution is unproven blind - so the macro lives here.)
 //
 // **Portability**: sub-group block reads under cl_intel_subgroups, the plain loads they equal otherwise, every
-// cross-lane step through SLM - the file builds as OpenCL 1.2 for the indicative Mac run.
+// cross-lane step through SLM.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -48,13 +48,9 @@
 #define R_P10 27
 #define R_P11 28
 
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define Q4_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
-#else
-#define Q4_SG16
-#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
@@ -210,14 +206,10 @@ inline float dot8(uint word, ushort8 xv) {
   return a;
 }
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * SG + lane];
-#endif
 }
 inline float tile_dot(const __global uint* restrict tile, const __global ushort* restrict xr,
                       uint g0, uint g1, uint lane) {
@@ -238,14 +230,8 @@ inline float bf16_dot(const __global ushort* restrict tile, const __global ushor
                       uint o0, uint o1, uint lane) {
   float a = 0.f;
   for (uint o = o0; o < o1; ++o) {
-#ifdef cl_intel_subgroups
     (void)lane;
     const ushort8 wv = intel_sub_group_block_read_us8(tile + (size_t)o * 128);
-#else
-    const __global ushort* t = tile + (size_t)o * 128;
-    const ushort8 wv = (ushort8)(t[0 * SG + lane], t[1 * SG + lane], t[2 * SG + lane], t[3 * SG + lane],
-                                 t[4 * SG + lane], t[5 * SG + lane], t[6 * SG + lane], t[7 * SG + lane]);
-#endif
     const ushort8 xv = vload8(0, xr + o * 8);
     a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1);
     a += bf16f(wv.s2) * bf16f(xv.s2); a += bf16f(wv.s3) * bf16f(xv.s3);

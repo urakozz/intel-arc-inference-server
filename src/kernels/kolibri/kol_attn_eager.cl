@@ -32,7 +32,7 @@
 // included), so a prompt row past position 512 sums its lanes over other indices than this decode
 // row does (spec 20 §11 "known deviations").
 //
-// Plain OpenCL C on purpose (no sub-group operations, no block reads): the Mac's OpenCL runs it.
+// Plain OpenCL C on purpose (no sub-group operations, no block reads).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

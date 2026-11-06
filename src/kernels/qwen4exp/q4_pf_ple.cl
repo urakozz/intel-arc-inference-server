@@ -24,7 +24,7 @@
 // them to 21c's q4ref::ple_block applied row by row, bitwise. Every norm is q4_hc's (256 lanes, fma, the tree,
 // 1 / sqrt); every sigmoid / SiLU is 1 / (1 + exp_torch(-x)) / x / (1 + exp_torch(-x)).
 //
-// Plain OpenCL C (no sub-group functions): the Mac's OpenCL runs it.
+// Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #if !defined(CTRL_POS) || !defined(CTRL_NACT)

@@ -47,8 +47,7 @@
 // compiler defines `cl_intel_subgroups` (ocloc for the B70) and plain per-lane loads
 // of the same elements otherwise (lane l of a 16-lane group reads element l of each
 // 16-element row: exactly what intel_sub_group_block_read8 returns), and every
-// cross-lane step goes through SLM - so the file also builds as OpenCL 1.2 for an
-// indicative host run (spec 15c, the Mac's OpenCL devices). moe_route uses no
+// cross-lane step goes through SLM. moe_route uses no
 // sub-group functions at all.
 //
 // The route row - u32 words per (layer, token), the host mirror is kernels::moe_route
@@ -110,12 +109,8 @@
 #error "moe: DN_KS must be a power of two dividing INTER / 64"
 #endif
 
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #define MOE_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
-#else
-#define MOE_SG16
-#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
@@ -147,14 +142,10 @@ inline float dot8(uint word, ushort8 xv) {
 // One layout-1 tile's eight nibble words for this lane: word j is the tile's
 // element j x 16 + lane (common/repack.h: [k_octet j][lane l]).
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * SG + lane];
-#endif
 }
 
 // The int4 layout-1 GEMV of one 16-column n-tile over k-groups [g0, g1) of one

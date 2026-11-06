@@ -79,7 +79,7 @@
 //   QSPLIT  0 | 1
 //   PSPLIT  0 | 1              P in bf16 (0) or as hi + lo (1, the production line)
 //   KV8     0 | 1
-//   EAGER   1: the eager build (the retired Mac runner used it) - plain loads, no sub-group
+//   EAGER   1: the eager build - plain loads, no sub-group
 //           function at all: one work-item per (q head, row) runs the same walk (blocks, tiles,
 //           slices, masks, the P rounding, the slice merge order, the partial layout) with a scalar
 //           tile product (16-dim atoms ascending, hi then lo). Never a production line.
@@ -231,7 +231,7 @@ inline void merge1(float* ma, float* sa, float* aa, float mb, float sb, float ab
 #define K_AT(p, i) bf16f(kv_k[((size_t)(p) * KV_HEADS + j) * HD + (i)])
 #define V_AT(p, i) bf16f(kv_v[((size_t)(p) * KV_HEADS + j) * HD + (i)])
 #endif
-// The eager work-group: 64 work-items whatever the levers (a Mac GPU's limit is 256); work-item i runs
+// The eager work-group: 64 work-items whatever the levers; work-item i runs
 // the pairs i, i + 64, ... (pair = qhl M + m).
 #define EAGER_WG 64
 

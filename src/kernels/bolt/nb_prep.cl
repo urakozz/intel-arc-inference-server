@@ -27,8 +27,7 @@
 // consecutive k per column, ascending, then the stride 4 / 2 / 1 tree) - one launch fewer per MoE block, the logits bitwise
 // nb_router's on the same row.
 //
-// **No sub-group function anywhere in this file**, so it also builds as OpenCL 1.2 for an indicative run on the Mac's
-// GPU (tools/mac/clrun/bolt_run.cc).
+// **No sub-group function anywhere in this file.**
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

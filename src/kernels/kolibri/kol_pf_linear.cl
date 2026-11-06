@@ -16,15 +16,10 @@
 //          w[((n/16) * K/8 + k/8) * 128 + (k%8) * 16 + n%16] = W[n][k]
 //     out  bf16 [K][ns] row-major: out[k][c] = W[n0 + c][k] (0 for n0 + c >= N) - pf_gemm's B operand
 //
-// A pure copy: the slab is the weight's bits. One sub-group block read under cl_intel_subgroups (as
-// pf_bf16_slab.cl), the plain loads it equals otherwise - so it runs on the Mac (tools/mac/clrun).
-#ifdef cl_intel_subgroups
+// A pure copy: the slab is the weight's bits. One sub-group block read (as pf_bf16_slab.cl).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define KOL_SG16 __attribute__((intel_reqd_sub_group_size(16)))
-#else
-#define KOL_SG16
-#endif
 #ifndef K
 #error "kol_pf_bf16_slab: K must be defined"
 #endif
@@ -52,12 +47,7 @@ __kernel void kol_pf_bf16_slab(__global const ushort* restrict w, __global ushor
   }
   const uint nt = n0 / SG + t;
   const __global ushort* src = w + ((size_t)nt * K8 + k8) * 128;
-#ifdef cl_intel_subgroups
   const ushort8 v = intel_sub_group_block_read_us8(src);
-#else
-  const ushort8 v = (ushort8)(src[0 * SG + lane], src[1 * SG + lane], src[2 * SG + lane], src[3 * SG + lane],
-                              src[4 * SG + lane], src[5 * SG + lane], src[6 * SG + lane], src[7 * SG + lane]);
-#endif
   o[0 * (size_t)ns] = v.s0;
   o[1 * (size_t)ns] = v.s1;
   o[2 * (size_t)ns] = v.s2;

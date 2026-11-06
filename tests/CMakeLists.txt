@@ -2495,7 +2495,7 @@ set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60
 # prefill path (runtime/pipeline_prefill_plan.h); and that order run by its one executor over
 # two host threads standing in for the devices - copy and peer, a slowed device 1
 # (back-pressure), spec 7's hooks from the shadows, a throwing hook, a lost hand-off. Clean
-# under ThreadSanitizer (by hand: tools/mac/pp_prefill_tsan.sh).
+# under ThreadSanitizer (measured on the retired Mac tooling, 2026-10).
 add_executable(pipeline_prefill_plan_test runtime/pipeline_prefill_plan_test.cc)
 target_include_directories(pipeline_prefill_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pipeline_prefill_plan_test PRIVATE b70_plan)

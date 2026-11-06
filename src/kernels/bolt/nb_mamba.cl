@@ -44,7 +44,7 @@
 // tree(v²) / 1024 (the halving tree: in-lane j vs j + 2, + 1, then 128 .. 1 in SLM), rstd = 1 / sqrt(ms + 1e-5), out =
 // rne((v · rstd) · w) - one work-group a group, no recompute.
 //
-// Plain OpenCL C (every cross-lane step through SLM), so the file also runs on the Mac's GPU (bolt_run.cc).
+// Plain OpenCL C (every cross-lane step through SLM).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
