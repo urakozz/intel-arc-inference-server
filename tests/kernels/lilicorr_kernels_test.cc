@@ -200,14 +200,26 @@ int check_attn(Dev& d) {
     llref::attention_sink({NH, NKV, HD, M, RING, S.win, S.pb, scale}, q.data(), kb.data(), vb.data(), fk.data(), fv.data(),
                           p, K, sink.data(), want.data());
     const std::vector<uint16_t> got = d.read<uint16_t>(out, size_t(M) * QN);
+    // A value misses when it is more than 1 bf16 ulp off AND more than 1 ulp of (the row's largest |value| / 256)
+    // off: a value near zero beside large ones is judged at the row's own resolution, not its own (operator
+    // 2026-11-06: -4.47e-7 vs -4.44e-7 in a row reaching 0.076, the summation order, was 2 ulps of itself).
     int over = 0, zero = 0;
-    for (uint32_t r = 0; r < M; ++r)
+    for (uint32_t r = 0; r < M; ++r) {
+      float row = 0.f;
+      for (uint32_t i = 0; i < QN; ++i) row = std::max(row, std::fabs(want[size_t(r) * QN + i]));
+      const float floor = row > 0.f ? std::ldexp(1.f, std::ilogb(row) - 7 - 8) : 0.f;
       for (uint32_t i = 0; i < QN; ++i) {
         const size_t j = size_t(r) * QN + i;
         if (r > K) zero += got[j] != 0;
-        else over += ulps(got[j], rne(want[j])) > 1;
+        else if (ulps(got[j], rne(want[j])) > 1 && std::fabs(dfref::bf(got[j]) - want[j]) > floor) {
+          ++over;
+          std::printf("  miss: row %u col %u got %.9g want %.9g (%d ulps; the row's largest |value| %.6g)\n", r, i,
+                      double(dfref::bf(got[j])), double(want[j]), ulps(got[j], rne(want[j])), double(row));
+        }
       }
-    std::printf("ll_attn at p %u, K %u: %d values over 1 bf16 ulp, %d nonzero past K\n", p, K, over, zero);
+    }
+    std::printf("ll_attn at p %u, K %u: %d values over 1 bf16 ulp (beyond the row's resolution), %d nonzero past K\n", p,
+                K, over, zero);
     bad += over + zero;
   }
   return bad;
