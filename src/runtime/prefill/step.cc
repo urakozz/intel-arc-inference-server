@@ -34,29 +34,6 @@ void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::step_chunk: " + what);
 }
 
-// **The pre-S2a fallback, opt-in through the environment.**
-// `B70_PREFILL_SILU_FUSED=0` makes the L0 backend run the old pair -- gate||up
-// into the fp32 [C][34816] `partials`, then `pf_silu_mul` -- instead of the
-// fused epilogue. It exists so that "before and after" is ONE binary and one
-// session rather than two builds, which is the role the (removed) GDN scan
-// selector played for the scan experiment, and so the ABBA that prices this stage can be
-// taken without rebuilding between arms.
-//
-// The fused path is the DEFAULT and is what every gate runs. The two are
-// bitwise identical -- `pf_gemm_test`'s silu case compares them directly, on
-// device, at M = 2048 and M = 772 -- so this selector chooses a cost, never a
-// value. `step_chunk_launches` reads it too, so the launch arithmetic always
-// describes the walk that will actually run; `prefill_smoke_test`'s pinned
-// constants are the default path's and will fail loudly under `=0`, which is
-// the correct behaviour for a knob that changes the list.
-bool silu_fused() {
-  static const bool on = [] {
-    const char* v = std::getenv("B70_PREFILL_SILU_FUSED");
-    return v == nullptr || std::strcmp(v, "0") != 0;
-  }();
-  return on;
-}
-
 uint8_t* at(const l0::Mem& m, size_t off) {
   return static_cast<uint8_t*>(m.ptr()) + off;
 }
@@ -100,8 +77,6 @@ void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_pre
   pf_norm_finish(cx, kc, s, norm_w, resid, x, M);
   profile_wait(cx, Phase::kNorm);
 }
-
-constexpr uint32_t kSiluChunk = 4096;
 
 // The layers [w.first, w.last) of one chunk - step_chunk's whole model, or (spec 16c) one
 // pipeline stage's: for every layer the same launches, arguments and order. GDN / FA state
@@ -217,30 +192,23 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     // because the GEMM had fully retired before `pf_silu_mul` ran.) `mixer_out`
     // is bf16 [chunk_cap][6144] and its last reader -- out_proj / o_proj -- is three
     // launches back, so it is free and large enough for [pad256(C)][5120].
-    // spec 5: the int8 gate||up exists only in the fused form, whatever silu_fused() says.
-    const bool fuse = backend == PrefillBackend::L0Int8 || silu_fused();
-    void* const mlp_x = fuse ? s.mixer_out.ptr() : s.x.ptr();
+    // The gate||up GEMM with pf_silu_mul fused into its epilogue (the unfused pair and its
+    // B70_PREFILL_SILU_FUSED=0 fallback went in the zero-config cleanup; pf_gemm_test still
+    // holds the two bitwise equal).
+    void* const mlp_x = s.mixer_out.ptr();
     pf_res_norm(cx, kc, s, 1u, at_const(small.norms, s.desc().small_layout().norms_off_post),
                 s.partials.ptr(), s.resid.ptr(), mlp_x, C);   // stride hidden
-    if (fuse) {
-      // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
-      // directly, so the fp32 [C][2 x I] `partials` rectangle -- the largest on
-      // the walk -- is neither written nor read back (spec §3, S2).
-      if (backend == PrefillBackend::L0Int8)
-        linear_i8_silu(cx, kc, s, *q, m.linears.at({l, LinearId::GateUp}),
-                       static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
-                       d.intermediate);
-      else
-        linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
-                       static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
-                       d.intermediate);
-    } else {
-      pf_linear(cx, kc, s, m.linears.at({l, LinearId::GateUp}), s.x.as<uint16_t>(), C, backend, q);
-      cx.launch(kc(kernels::pf_silu_mul_variant(d.intermediate), "pf_silu_mul"),
-                (d.intermediate + kSiluChunk - 1) / kSiluChunk, C, 1,
-                {PtrArg(s.partials.ptr()), PtrArg(s.x.ptr()), arg_val(C)});   // x stride I
-      profile_wait(cx, Phase::kSilu);
-    }
+    // One launch pair per slab and NO `pf_silu_mul`: the epilogue writes x
+    // directly, so the fp32 [C][2 x I] `partials` rectangle -- the largest on
+    // the walk -- is neither written nor read back (spec §3, S2).
+    if (backend == PrefillBackend::L0Int8)
+      linear_i8_silu(cx, kc, s, *q, m.linears.at({l, LinearId::GateUp}),
+                     static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
+                     d.intermediate);
+    else
+      linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
+                     static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
+                     d.intermediate);
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend, q);
   }
   // Spec 16c: the cut - layer `last`'s fold, on this device. It reads no weight, and the
@@ -514,9 +482,6 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
 // chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8705).
 // The composed reference (a test's set_attn_mode_for_test) gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
-// `silu_fused()` is the one term that is not a property of the shape: it is a
-// diagnostic selector, and the arithmetic follows the walk rather than the
-// default so that a `=0` session's counter still matches its own prediction.
 namespace {
 constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
 // The 2 x N / 1024 slab launches of one layer kind's four int4 linears.
@@ -527,11 +492,11 @@ size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind) {
   return n;
 }
 size_t l0_gdn_layer_launches(const model::ModelDesc& d) {
-  return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN) - (silu_fused() ? 1 : 0);
+  return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN) - 1;   // - 1: the fused SiLU
 }
 size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
   return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0) + kAttnGateLaunches +
-         2 + 1 + slab_launches(d, model::LayerKind::FA) - (silu_fused() ? 1 : 0);
+         2 + 1 + slab_launches(d, model::LayerKind::FA) - 1;   // - 1: the fused SiLU
 }
 }  // namespace
 // Spec 15d, a MoE model. Per layer: the input norm 2, the mixer's two
@@ -560,10 +525,8 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
       1 + d.gdn_layers * l0_gdn_layer_launches(d) + d.fa_layers * l0_fa_layer_launches(d, C);
   if (b != PrefillBackend::L0Int8) return base;
   // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
-  // layer, the slab walk being the same 2 x N/1024 launches. The int8 gate||up is ALWAYS
-  // the fused SiLU form, while `base` follows silu_fused(): an unfused session's base
-  // counts one pf_silu_mul per layer the int8 walk never issues.
-  return base + size_t(d.layers) * 4 - (silu_fused() ? 0 : d.layers);
+  // layer, the slab walk being the same 2 x N/1024 launches.
+  return base + size_t(d.layers) * 4;
 }
 // Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
@@ -579,7 +542,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   }
   const size_t l0n = gdn ? l0_gdn_layer_launches(d) : l0_fa_layer_launches(d, C);
-  return b == PrefillBackend::L0Int8 ? l0n + 4 - (silu_fused() ? 0 : 1) : l0n;
+  return b == PrefillBackend::L0Int8 ? l0n + 4 : l0n;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,

@@ -164,9 +164,7 @@ int capture(const std::string& snap, const std::string& ids_path, const std::str
             uint32_t layer) {
   std::printf("# W4A8 probe -- capture (design §5: real weights, real activations)\n");
   std::printf("# ZE_AFFINITY_MASK=%s\n", env_or_unset("ZE_AFFINITY_MASK"));
-  std::printf("# B70_PREFILL_SILU_FUSED=%s (unset/non-zero => the fused gate||up epilogue, "
-              "whose A operand is PrefillScratch::mixer_out)\n",
-              env_or_unset("B70_PREFILL_SILU_FUSED"));
+  std::printf("# the fused gate||up epilogue, whose A operand is PrefillScratch::mixer_out\n");
 
   std::vector<uint32_t> ids;
   {
