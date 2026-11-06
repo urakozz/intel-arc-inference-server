@@ -301,10 +301,8 @@ inline constexpr uint32_t kVerifyRows = 8;                   // M <= 8: Control:
 inline constexpr uint32_t kSpecSlots = 8;                    // the slots a verify writes into (slot 0 the block's own)
 inline constexpr uint32_t kVerifySlots = kSpecSlots - 1;     // BoltReserve::verify_slots: the 7 extra copies
 // The routed experts at M rows (Decision 10): the union-aware form (each expert block read once a verify, the default) or the
-// plain M-row form, its bitwise reference - `B70_BOLT_VERIFY_MOE=union|plain`; unset or empty is union; anything else throws.
+// plain M-row form, its bitwise reference (the tests' `plain` argument - b70-serve always runs the union).
 enum class VerifyMoe { Union, Plain };
-VerifyMoe parse_verify_moe(const std::string& v);
-VerifyMoe bolt_verify_moe();                   // B70_BOLT_VERIFY_MOE
 const char* verify_moe_name(VerifyMoe m);
 // scratch_sizes at `rows` rows (the 3-argument form is kM's): every [M]-sized term at rows, routes [layers][rows][48].
 ScratchSizes scratch_sizes(const model::BoltDesc& d, uint32_t max_len, BoltAttn a, uint32_t rows);

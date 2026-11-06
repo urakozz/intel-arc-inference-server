@@ -3905,7 +3905,7 @@ set(_bolt_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
 # (25c's cli_reject_bolt_prefill / _prefill_length - --prefill naming spec 25d - are gone: Bolt prefills now; 25d's refusals
 # are the spec 25d block's cli_reject_bolt_prefill_*.)
 b70_cli_reject(cli_reject_bolt_mtp ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec mtp EXPECT "no MTP head")
-b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "has no speculative decoding")
+b70_cli_reject(cli_reject_bolt_spec ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --spec dflash EXPECT "b70-decode decodes plainly")
 b70_cli_reject(cli_reject_bolt_kv8 ${_bolt_cfg} --ids ${B70_OK_IDS} --n 4 --kv-cache int8 EXPECT "Decision 17")
 # ==== Spec 25c: Nemotron 3.5 Bolt decode (label bolt) ==== (end) ====
 
@@ -4085,15 +4085,16 @@ set_tests_properties(bolt_serve_args_test PROPERTIES LABELS bolt)
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set(_bolt_serve_cfg ${CMAKE_CURRENT_SOURCE_DIR}/model/bolt)
   b70_serve_reject(cli_reject_serve_bolt_spec_mtp ${_bolt_serve_cfg} --spec mtp EXPECT "no MTP head")
-  # Spec 26c: --spec lookup / dflash are served now (cli/bolt_spec.h); their refusals before the device, by name.
+  # Spec 26c: --spec lookup / dflash are served now (cli::resolve_spec's SpecFamily::Bolt, cli/bolt_spec.h); their refusals
+  # before the device, by name.
   b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup --spec-max 9 EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_bolt_dflash ${_bolt_serve_cfg} --spec dflash --draft-format bf16
-    EXPECT "exact, int8 and int4")
-  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "need --spec dflash or --spec lookup")
+  b70_serve_reject(cli_reject_serve_bolt_dflash_lookup ${_bolt_serve_cfg} --spec dflash-lookup EXPECT "built for Qwen3.8")
+  b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "--spec off has none")
   b70_serve_reject(cli_reject_serve_bolt_dflash_peer ${_bolt_serve_cfg} --spec dflash --pipeline-handoff peer
     EXPECT "copy hand-off only")
-  b70_serve_reject(cli_reject_serve_bolt_draft_q ${_bolt_serve_cfg} --draft-q lattice EXPECT "need --spec dflash")
-  set_tests_properties(cli_reject_serve_bolt_dflash_peer cli_reject_serve_bolt_draft_q PROPERTIES LABELS "bolt;lilicorr")
+  b70_serve_reject(cli_reject_serve_bolt_draft_model ${_bolt_serve_cfg} --spec lookup --draft-model /nonexistent
+    EXPECT "--draft-model needs --spec dflash")
+  set_tests_properties(cli_reject_serve_bolt_dflash_peer cli_reject_serve_bolt_draft_model PROPERTIES LABELS "bolt;lilicorr")
   b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
@@ -4334,9 +4335,6 @@ if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
     b70_target_kernel_dir(${t})
     target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_l0)
-    if(B70_PREFILL_ENABLED)
-      b70_link_prefill(${t})
-    endif()
     add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
       ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused})
   endforeach()
@@ -4358,9 +4356,6 @@ if(B70_BOLT_VERIFY AND B70_BOLT AND B70_LILICORR_P0)
       b70_target_kernel_dir(${t})
       target_include_directories(${t} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/runtime)
       target_link_libraries(${t} PRIVATE b70_bolt_prefill b70_dflash_runtime b70_dflash_loader b70_server b70_l0)
-      if(B70_PREFILL_ENABLED)
-        b70_link_prefill(${t})
-      endif()
       add_dependencies(${t} ${B70_BOLT_DECODE_KERNELS} ${B70_BOLT_REUSED_KERNELS} ${B70_BOLT_PREFILL_KERNELS}
         ${B70_BOLT_PREFILL_REUSED} ${B70_BOLT_VERIFY_KERNELS} ${_l26c_reused} ${B70_LILICORR_KERNELS} ${_l26b_reused})
     endforeach()

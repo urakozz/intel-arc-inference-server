@@ -78,9 +78,14 @@ int main(int argc, char** argv) {
   sa.draft_model = argv[2];
   sa.have_model = true;
   for (int i = 3; i + 1 < argc; ++i)
-    if (std::string(argv[i]) == "--format") sa.format_arg = argv[++i];
+    if (std::string(argv[i]) == "--format") {
+      if (!loader::parse_lilicorr_draft_format(argv[++i], sa.format)) {   // the tests' seam: exact | int8 | int4
+        std::fprintf(stderr, "--format expects exact, int8 or int4\n");
+        return 2;
+      }
+    }
   try {
-    cli::bolt::check_spec(sa, 2, runtime::PpHandoff::Copy, true);
+    cli::bolt::check_spec(sa, 2, runtime::PpHandoff::Copy);
     (void)loader::LiliCheckpoint(sa.draft_model);
   } catch (const std::exception& e) {
     std::printf("SKIP: the drafter: %s\n", e.what());

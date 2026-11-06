@@ -414,15 +414,6 @@ size_t prefill_chunk_launches(const model::BoltDesc& d, const model::BoltPlaceme
 
 
 // ==== spec 26c ===========================================================================================================
-VerifyMoe parse_verify_moe(const std::string& v) {
-  if (v.empty() || v == "union") return VerifyMoe::Union;
-  if (v == "plain") return VerifyMoe::Plain;
-  throw std::runtime_error("B70_BOLT_VERIFY_MOE=" + v + ": expected union or plain (spec 26 Decision 10)");
-}
-VerifyMoe bolt_verify_moe() {
-  const char* v = std::getenv("B70_BOLT_VERIFY_MOE");
-  return parse_verify_moe(v ? v : "");
-}
 const char* verify_moe_name(VerifyMoe m) { return m == VerifyMoe::Plain ? "plain" : "union"; }
 
 VerifySizes verify_sizes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len, BoltAttn a,

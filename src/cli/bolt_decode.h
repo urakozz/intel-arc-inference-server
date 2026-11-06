@@ -25,8 +25,8 @@
 // construction; the prefill follows the attention form and the state precision). B70_PREFILL_PROFILE=1 prints the prefill's
 // phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
 // device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 and a
-// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --spec mtp (Bolt has no MTP head), --spec (no
-// drafter either), --kv-cache int8 (Decision 17).
+// --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --spec mtp (Bolt has no MTP head), --spec dflash
+// (b70-serve --spec dflash / lookup serves Bolt's proposers, spec 26c; b70-decode decodes plainly), --kv-cache int8 (Decision 17).
 #include <algorithm>
 #include <array>
 #include <chrono>

@@ -172,9 +172,8 @@ void BoltEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const uint64_t tmo = P.timeout_ns;
   // Spec 26c (Decision 7): with a drafter every chunk stages its tap rows inside the drafter's window (lili_prefill_r0) into
   // the last device's staging - device 0's tap blocks write it across - and projects them after the chunk, before the block
-  // hook (so a snapshot at a block end carries the ring of the window before it). Copies a recording cannot hold.
+  // hook (so a snapshot at a block end carries the ring of the window before it).
   if (drafter_) {
-    require(!replay, "a drafter's prefill taps are copies, which a recorded chunk cannot hold - unset B70_PREFILL_REPLAY");
     const size_t bytes = prefill_taps_bytes(drafter_->window(), uint32_t(drafter_->tap_layers().size()), d.hidden);
     if (!pf_taps_ || pf_taps_->size() != bytes)
       pf_taps_ = std::make_unique<l0::Mem>(stage_ctx(ndev - 1), l0::MemKind::Device, bytes);

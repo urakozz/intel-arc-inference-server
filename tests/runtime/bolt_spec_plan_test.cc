@@ -10,8 +10,9 @@
 //   2. lili_prefill_r0 on the cases Decision 7 names: a chunk ending at a block end (its last 1024 rows), the prompt's last
 //      window across chunks, a short prompt, no hook.
 //   3. The cost rows: verify 1.000 .. 2.353 (plain) and M 8 1.593 with the union at u 30 (§11), the draft row flat per format
-//      (exact 0.500, int8 0.306, int4 0.214), lookup's free drafts, --spec-cost over them, the bf16 head's.
-//   4. check_spec: every refusal by name; the formats exact / int8 / int4 and the q forms resolved.
+//      (exact 0.500, int8 0.306, int4 0.214), lookup's free drafts, the bf16 head's.
+//   4. spec_args / check_spec: every refusal by name (cli::resolve_spec's for SpecFamily::Bolt, the hand-off's); --spec auto is
+//      off; the tests' seams - the formats exact / int8 / int4 and the q forms - parse.
 //   5. The plan: two 32.53 GB cards at --max-len auto with the verify lists and the drafter (each format: its weights + buffers
 //      at 262144, its prefill staging, the 1.07 GB replica) - the length each allows, printed (DERIVED).
 #include <cmath>
@@ -104,8 +105,6 @@ int main(int argc, char** argv) {
       threw = true;
     }
     CHECK(threw);
-    CHECK(rb::parse_verify_moe("") == U && rb::parse_verify_moe("union") == U && rb::parse_verify_moe("plain") == P);
-    CHECK(refuses([&] { rb::parse_verify_moe("fused"); }, "B70_BOLT_VERIFY_MOE=fused"));
     std::printf("verify launches: 653 at M 1, 693 at M 2..8 (union), 653 (plain); slots 1,174,405,120 B over the 40 blocks\n");
   }
 
@@ -150,76 +149,57 @@ int main(int argc, char** argv) {
     std::printf(" | draft exact 0.500 / int8 0.306 / int4 0.214\n");
   }
 
-  // --- 4. b70-serve's --spec refusals and the flags' resolution (cli/bolt_spec.h) --------------------------------------------
+  // --- 4. b70-serve's --spec refusals and the flags' resolution (cli/bolt_spec.h over cli::resolve_spec) ------------------------
   {
     using cli::bolt::SpecArgs;
+    using cli::bolt::spec_args;
     const auto copy = runtime::PpHandoff::Copy, peer = runtime::PpHandoff::Peer;
     {
-      SpecArgs s;
-      cli::bolt::check_spec(s, 2, copy, true);   // off
-      s.spec = "dflash";
-      cli::bolt::check_spec(s, 2, copy, true);
-      CHECK(s.format == loader::DraftFormat::Int8 && s.q == cli::bolt::BoltDraftQ::Lattice && s.max_k == 7);   // PROVISIONAL
-      CHECK(refuses([&] { SpecArgs t = s; cli::bolt::check_spec(t, 2, peer, true); }, "copy hand-off only"));
-      cli::bolt::check_spec(s, 1, peer, true);   // one card: no hand-off
-    }
-    for (const char* f : {"exact", "int8", "int4", "int4g64"}) {
-      SpecArgs s;
-      s.spec = "dflash";
-      s.format_arg = f;
-      cli::bolt::check_spec(s, 2, copy, true);
-      CHECK(std::string(loader::draft_format_name(s.format)) == (f[0] == 'e' ? "exact" : f[3] == '8' ? "int8" : "int4"));
-    }
-    {
-      SpecArgs s;
-      s.spec = "dflash";
-      s.format_arg = "bf16";
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "exact, int8 and int4"));
-      s.format_arg = "";
-      s.q_arg = "lattice+lp";
-      cli::bolt::check_spec(s, 2, copy, true);
-      CHECK(s.q == cli::bolt::BoltDraftQ::LatticeLp);
-      s.q_arg = "raw";
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "lattice or lattice+lp"));
-    }
-    {
-      SpecArgs s;
-      s.have_model = true;
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "need --spec dflash"));
-      s.have_model = false;
-      s.format_arg = "int8";
-      s.spec = "lookup";
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "need --spec dflash"));
-    }
-    {
-      SpecArgs s;
-      s.have_max_k = true;
-      s.max_k = 3;
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "need --spec dflash or --spec lookup"));
-      s.spec = "lookup";
-      cli::bolt::check_spec(s, 2, copy, true);
-      for (uint32_t k : {0u, 8u}) {
-        s.max_k = k;
-        CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "expects 1..7"));
+      for (const char* a : {"auto", "off"}) {   // Bolt's auto is off until box row 65's D5 (spec 26 §7)
+        const SpecArgs s = spec_args(a, false, 0, false, "");
+        CHECK(!s.on());
+        cli::bolt::check_spec(s, 2, peer);   // no proposer: any hand-off
       }
+      const SpecArgs s = spec_args("dflash", false, 0, false, "");
+      CHECK(s.dflash() && s.draft_model == cli::bolt::kDefaultDrafter && !s.have_model);
+      CHECK(s.format == loader::DraftFormat::Int8 && s.q == cli::bolt::BoltDraftQ::Lattice && s.max_k == 7);   // PROVISIONAL
+      cli::bolt::check_spec(s, 2, copy);
+      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, peer); }, "copy hand-off only"));
+      cli::bolt::check_spec(s, 1, peer);   // one card: no hand-off
+      const SpecArgs m = spec_args("dflash", true, 3, true, "/snap/lilicorr");
+      CHECK(m.max_k == 3 && m.have_model && m.draft_model == "/snap/lilicorr");
+      const SpecArgs l = spec_args("lookup", false, 0, false, "");
+      CHECK(l.lookup() && l.max_k == 7);
+      CHECK(refuses([&] { cli::bolt::check_spec(l, 2, peer); }, "copy hand-off only"));
     }
-    {
-      SpecArgs s;
-      s.spec = "dflash";
-      s.draft_vocab = true;
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "no compact head"));
-      s.draft_vocab = false;
-      s.mtp_tuning = true;
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "belong to an MTP head"));
+    {   // cli::resolve_spec's refusals, by name
+      CHECK(refuses([&] { spec_args("mtp", false, 0, false, ""); }, "Nemotron 3.5 Bolt has no MTP head"));
+      CHECK(refuses([&] { spec_args("dflash-lookup", false, 0, false, ""); }, "built for Qwen3.8"));
+      CHECK(refuses([&] { spec_args("off", true, 3, false, ""); }, "--spec off has none"));
+      CHECK(refuses([&] { spec_args("lookup", false, 0, true, "x"); }, "--draft-model needs --spec dflash"));
+      CHECK(refuses([&] { spec_args("auto", false, 0, true, "x"); }, "--draft-model needs --spec dflash"));
+      for (uint32_t k : {0u, 8u}) {
+        CHECK(refuses([&] { spec_args("lookup", true, k, false, ""); }, "expects 1..7"));
+        CHECK(refuses([&] { spec_args("dflash", true, k, false, ""); }, "expects 1..7"));
+      }
+      SpecArgs t;   // a test seam's K outside the block, past spec_args
+      t.spec = "lookup";
+      t.max_k = 8;
+      CHECK(refuses([&] { cli::bolt::check_spec(t, 1, copy); }, "expects 1..7"));
     }
-    {
-      SpecArgs s;
-      s.spec = "dflash";
-      setenv("B70_PREFILL_REPLAY", "1", 1);
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, copy, true); }, "unset B70_PREFILL_REPLAY"));
-      unsetenv("B70_PREFILL_REPLAY");
+    {   // the tests' format seam: the LiLiCorr spellings
+      for (const char* f : {"exact", "int8", "int4", "int4g64"}) {
+        loader::DraftFormat df{};
+        CHECK(loader::parse_lilicorr_draft_format(f, df));
+        CHECK(std::string(loader::draft_format_name(df)) == (f[0] == 'e' ? "exact" : f[3] == '8' ? "int8" : "int4"));
+      }
+      loader::DraftFormat df{};
+      CHECK(!loader::parse_lilicorr_draft_format("bf16", df));
+      cli::bolt::BoltDraftQ q{};
+      CHECK(cli::bolt::parse_bolt_draft_q("lattice+lp", q) && q == cli::bolt::BoltDraftQ::LatticeLp);
+      CHECK(!cli::bolt::parse_bolt_draft_q("raw", q));
     }
-    {   // the cost tables
+    {   // the cost tables (derived; no flag replaces them)
       SpecArgs s;
       s.spec = "dflash";
       s.format = loader::DraftFormat::Int4G64;
@@ -228,16 +208,9 @@ int main(int argc, char** argv) {
       s.spec = "lookup";
       const server::MtpCost l = cli::bolt::spec_cost(s, true, rb::VerifyMoe::Plain);
       CHECK(near(l.draft[0], 0.0) && near(l.verify[7], 2.353));
-      s.spec = "dflash";
-      s.cost = "verify=1,1.1,1.2,1.3,1.4,1.5,1.6,1.7;draft=0.2,0.2,0.2,0.2,0.2,0.2,0.2";
-      const server::MtpCost o = cli::bolt::spec_cost(s, true, rb::VerifyMoe::Union);
-      CHECK(near(o.verify[7], 1.7) && near(o.draft[0], 0.2));
-      s.cost = "verify=1,1.1";
-      CHECK(refuses([&] { cli::bolt::spec_cost(s, true, rb::VerifyMoe::Union); }, "below --spec-max"));
-      s.cost = "nonsense";
-      CHECK(refuses([&] { cli::bolt::spec_cost(s, true, rb::VerifyMoe::Union); }, "(--spec-cost)"));
     }
-    std::printf("--spec refusals: by name; formats exact / int8 / int4, q lattice / lattice+lp resolved; the cost tables\n");
+    std::printf("--spec refusals: by name (resolve_spec's and the hand-off's); auto off; the formats' / q's test seams; the cost "
+                "tables\n");
   }
 
   // --- 5. the plan with the verify lists and the drafter (DERIVED) ----------------------------------------------------------
@@ -256,11 +229,12 @@ int main(int argc, char** argv) {
       a.drafter = r.drafter + rb::prefill_taps_bytes(1024, 6, d.hidden);
       a.drafter_replica = r.drafter_embed_replica;
       CHECK_EQ(a.drafter_replica, size_t(1073741824));
-      const rb::BoltPlan pl = cli::bolt::settle(d, a, {cli::bolt::kB70Bytes, cli::bolt::kB70Bytes});
+      const size_t card = size_t(32530000000ull);   // a B70's memory_bytes (main reads it from the device)
+      const rb::BoltPlan pl = cli::bolt::settle(d, a, {card, card});
       CHECK(pl.place.devices == 2 && pl.device[1].drafter == a.drafter && pl.device[0].drafter == 0);
       std::printf("plan with --spec dflash, %s drafter: --max-len auto -> %u (DERIVED; device 1 %.3f GB of %.3f)\n",
                   loader::draft_format_name(fm), pl.max_len, double(pl.device[1].total()) / 1e9,
-                  double(cli::bolt::kB70Bytes) / 1e9);
+                  double(card) / 1e9);
     }
   }
   std::printf("bolt_spec_plan_test OK\n");

@@ -1735,7 +1735,7 @@ set(B70_LILICORR_KERNELS ${B70_LILICORR_KERNELS} CACHE INTERNAL "spec 26b's LiLi
 #                  slot form at EVERY M (`_SL8`: SPEC_SLOTS 8, CTRL_LIVE 19 - Control::gdn_live, here the live SSM slot -,
 #                  SPEC_SLOT_STRIDE one Mamba block's state, 128 x 64 x 128 elements: a block's 7 extra slots are contiguous
 #                  beside one another; M = 1 is the drafter's plain token, verify(0)); fp32 and Decision 2's bf16 state
-#   nb_moe.cl      the route and the plain M-row experts (the bitwise reference, B70_BOLT_VERIFY_MOE=plain)
+#   nb_moe.cl      the route and the plain M-row experts (the bitwise reference, VerifyMoe::Plain: the tests' arm)
 #   nb_moe_union.cl (new) the union-aware experts (Decision 10, the default): up / down per distinct expert, the combine; and,
 #                  test-only, the counting build `_CNT` (bolt_moe_union_test: every block read once)
 #   gemv_bf16.cl   the bf16 head at M rows (--lm-head bf16; M 7 is 26b's)
