@@ -162,10 +162,11 @@ def describe(folder, store_root):
             info["dangling"].append(rel)
             continue
         info["files"][rel] = rp
-        if rp in seen:
+        st_ = os.stat(rp)
+        if (st_.st_dev, st_.st_ino) in seen:  # a hard link (a blob shared with an old snapshot) counts once
             continue
-        seen.add(rp)
-        sz = os.path.getsize(rp)
+        seen.add((st_.st_dev, st_.st_ino))
+        sz = st_.st_size
         info["size"] += sz
         if inside(rp, shared_root):
             info["shared"] += sz
