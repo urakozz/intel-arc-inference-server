@@ -234,7 +234,7 @@ int main(int argc, char** argv) {
   const std::string dir = argc > 1 ? argv[1] : "";
   std::vector<uint32_t> depths = {4096, 32768, 65536, 130816};
   if (dir.empty() || !std::ifstream(dir + "/kv_k.bin").good()) {
-    std::printf("Part D: SKIPPED (no dump dir; plan 10a's capture, e.g. ~/spec10a-dump)\n");
+    std::printf("Part D: SKIPPED (no dump dir; plan 10a's capture, e.g. ~/b70/scratch/spec10a-dump)\n");
   } else {
     constexpr uint32_t L = 131072;
     Rig r(ctx, L);

@@ -57,6 +57,8 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 # shellcheck source=tools/box_dir.sh
 . "$(dirname "${BASH_SOURCE[0]:-$0}")/box_dir.sh"
 REMOTE_DIR="$(b70_remote_dir "$(dirname "${BASH_SOURCE[0]:-$0}")/..")"
+# The server's and llama-benchy's logs on the box, relative to its $HOME (never loose in ~)
+BENCH_LOGS="b70/logs/serve-bench"
 SSH="ssh -n -o BatchMode=yes"
 
 while [ $# -gt 0 ]; do
@@ -100,7 +102,7 @@ else
 fi
 
 echo "=== starting b70-serve (detached, device 0 default) ===" >&2
-PID="$($SSH "$BOX" "cd '$REMOTE_DIR' && setsid nohup ./build/src/cli/b70-serve '$MODEL' --port $PORT --spec off > \$HOME/b70-serve-bench.log 2>&1 < /dev/null & echo \$!")"
+PID="$($SSH "$BOX" "mkdir -p \$HOME/$BENCH_LOGS && cd '$REMOTE_DIR' && setsid nohup ./build/src/cli/b70-serve '$MODEL' --port $PORT --spec off > \$HOME/$BENCH_LOGS/b70-serve-bench.log 2>&1 < /dev/null & echo \$!")"
 echo "server pid: $PID" >&2
 
 PID_STILL_RUNNING=1
@@ -124,7 +126,7 @@ for i in $(seq 1 60); do
   fi
   sleep 2
 done
-[ "$ready" = 1 ] || { echo "serve_bench.sh: server never answered /v1/models -- see \$HOME/b70-serve-bench.log on the box" >&2; exit 1; }
+[ "$ready" = 1 ] || { echo "serve_bench.sh: server never answered /v1/models -- see \$HOME/$BENCH_LOGS/b70-serve-bench.log on the box" >&2; exit 1; }
 echo "server ready" >&2
 
 echo "=== coherence probe: What is the capital of France? ===" >&2
@@ -136,8 +138,8 @@ e2e_vals=()
 ppraw_vals=()
 for i in $(seq 1 "$RUNS"); do
   echo "=== llama-benchy invocation $i/$RUNS (detached) ===" >&2
-  remote_log="\$HOME/serve_bench_$i.log"
-  remote_json="\$HOME/serve_bench_$i.json"
+  remote_log="\$HOME/$BENCH_LOGS/serve_bench_$i.log"
+  remote_json="\$HOME/$BENCH_LOGS/serve_bench_$i.json"
   # -n so llama-benchy's own --runs 3 is honoured (median-over-3 inside this
   # one invocation, matching how the vLLM rows in docs/BENCHMARKS.md were
   # taken); the invocation itself runs detached because it can exceed a
@@ -199,4 +201,4 @@ printf '%s\n' "${tg_vals[@]}" "${e2e_vals[@]}" "${ppraw_vals[@]}" | awk -v n="$R
     printf "pp4096 http (derived from e2e_ttft) median %.2f t/s\n", pp_med
   }' >&2
 
-echo "server-log-only (Task 5) generation timing lines, if any, are in \$HOME/b70-serve-bench.log on the box" >&2
+echo "server-log-only (Task 5) generation timing lines, if any, are in \$HOME/$BENCH_LOGS/b70-serve-bench.log on the box" >&2

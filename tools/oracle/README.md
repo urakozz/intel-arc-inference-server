@@ -585,7 +585,7 @@ ORACLE_MODEL=$M setsid nohup tools/oracle/run_in_container.sh \
      --out /ws/oracle-out-k2/$p.golden.safetensors --gen 32 > /ws/oracle-out-k2/$p.log 2>&1; done;
    python3 tools/oracle/k2_ref.py hfcheck "$SNAP" --prompt /ws/oracle-out-k2/prose.ids \
      --against /ws/oracle-out-k2/prose.golden.safetensors > /ws/oracle-out-k2/hfcheck.log 2>&1' \
-  > ~/k2-ref.log 2>&1 < /dev/null &
+  > ~/b70/logs/k2-ref.log 2>&1 < /dev/null &
 ```
 
 Time (estimated from the 4-layer timing at real shapes on the Mac and the bytes read): bf16 - a

@@ -538,8 +538,8 @@ add_test(NAME attn_test COMMAND attn_test)
 
 # Spec 10 A1 (plan 10b Task 1): decode attention v2 against v1. Part S (synthetic)
 # always; part D on plan 10a's real capture when B70_ATTN_V2_DUMP names it (the box
-# keeps it at ~/spec10a-dump).
-set(B70_ATTN_V2_DUMP "$ENV{HOME}/spec10a-dump" CACHE PATH "plan 10a's decode-attention capture")
+# keeps it at ~/b70/scratch/spec10a-dump).
+set(B70_ATTN_V2_DUMP "$ENV{HOME}/b70/scratch/spec10a-dump" CACHE PATH "plan 10a's decode-attention capture")
 add_executable(attn_v2_test kernels/attn_v2_test.cc)
 target_include_directories(attn_v2_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(attn_v2_test PRIVATE b70_l0)

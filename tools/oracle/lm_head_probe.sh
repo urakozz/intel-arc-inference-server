@@ -1,6 +1,6 @@
 #!/bin/bash
 # Spec 9 P0 (plan 9a): the int8 lm_head probe's production run, ON THE BOX, from the repo root.
-#   tools/probe/detach.sh ~/spec9a.log tools/oracle/lm_head_probe.sh
+#   tools/probe/detach.sh ~/b70/logs/probe/spec9a.log tools/oracle/lm_head_probe.sh
 # Stages its inputs into oracle-out-spec9a/ (the container mounts only this tree):
 #   - golden: the three prompts + the 32 greedy golden tokens of the W4A16 g64
 #     checkpoint (~/b70-inference-server/oracle-out-primary/*.tokens);

@@ -3,7 +3,7 @@
 # cache on and then off (same build, max_len 131072, device 0), under the shared GPU lock,
 # and compare the two runs.
 #   tools/prefix/replay_ab.sh <log dir> <out prefix>
-# e.g. tools/probe/detach.sh ~/c3.log tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/c3
+# e.g. tools/probe/detach.sh ~/b70/logs/prefix/c3.log tools/prefix/replay_ab.sh tests/golden/opencode/session1 ~/b70/logs/prefix/c3
 # Writes <out prefix>.on.json, .off.json, .on.serve.log, .off.serve.log, the servers' request
 # logs <out prefix>.on.log/ and .off.log/, and judges every divergence by the tie rule
 # (<out prefix>.cases, tools/probe/probe_tie_judge). Env: MODEL, PORT
