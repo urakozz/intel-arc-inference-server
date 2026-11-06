@@ -78,7 +78,7 @@ KolLoadedModel load_kolibri1(const std::vector<l0::Context*>& devices, const std
                              LmHeadForm lm_head = LmHeadForm::Checkpoint, uint32_t layers_limit = 0);
 
 // The descriptor load_kolibri1 would build, from config.json and the tensor names alone (no
-// device): the CLI's planner needs it before the load (`--pp`, `--max-len auto`).
+// device): the CLI's planner needs it before the load (`--parallel`, `--max-len auto`).
 model::Kolibri1Desc kolibri1_checkpoint_desc(const std::string& snapshot_or_repo, uint32_t layers_limit = 0);
 
 }  // namespace loader

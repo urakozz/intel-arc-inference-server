@@ -251,7 +251,7 @@ void Q4Checkpoint::check_names(bool mtp) const {
     if (ends_with(name, ".qzeros")) continue;   // never read; assert_quant_invariants checks it when shipped
     if (!set_.tensors().count(name))
       throw std::runtime_error("load_qwen4exp: the checkpoint has no tensor '" + name + "', which " + d_.name + " needs" +
-                               (starts_with(name, "mtp.") ? " for its MTP head (load without --mtp)" : ""));
+                               (starts_with(name, "mtp.") ? " for its MTP head (load without --spec mtp)" : ""));
   }
 }
 

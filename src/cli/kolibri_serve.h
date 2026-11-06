@@ -21,7 +21,7 @@
 //     ends), ingest for --prefix-split-last; the store keyed by Kolibri's own root (kKolibriStoreKey), so no
 //     entry another model's engine made can ever hit;
 //   - no speculative decoding: mtp_k() and verify_k() stay 0 (no MTP head, spec 20 §1; --spec lookup needs
-//     verify lists KolibriEngine does not capture) - b70-serve refuses --mtp, --spec mtp|lookup by name.
+//     verify lists KolibriEngine does not capture) - b70-serve refuses --spec mtp|lookup by name.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>

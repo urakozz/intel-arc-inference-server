@@ -67,7 +67,7 @@ class TapDrafter {
   // Throws unless the drafter can draft k at e's pos (k <= e.max_verify_k()).
   virtual const dflash::DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) = 0;
 
-  // Spec 19d (--pp 2, runtime::PipelineEngine): the same proposer beside a target that is not a runtime::Engine.
+  // Spec 19d (--parallel pp, runtime::PipelineEngine): the same proposer beside a target that is not a runtime::Engine.
   // attach_target captures the draft list once against `target` (its embedding and head - the full one, or with
   // `draft_vocab` the compact one - on the drafter's device) and that device's Control block `control` (the anchor
   // pos / cur_token[0]; the drafts go to its cur_token[1..k]); the drafter's buffers must be at `max_len`.

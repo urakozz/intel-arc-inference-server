@@ -25,7 +25,7 @@ uint32_t device_blocks(const model::BoltDesc& d, const model::BoltPlacement& p, 
                 p.reserve, p.total(), one_card ? " - " : "");
   std::string msg = buf;
   if (one_card)
-    msg += d.name + " does not fit one 32 GB card (Decision 4: two cards by default, --pp 2; one card only through "
+    msg += d.name + " does not fit one 32 GB card (Decision 4: two cards by default, --parallel pp; one card only through "
                     "spec 22's expert-offload tier, not built - spec 25 §4.2)";
   throw std::runtime_error(msg);
 }

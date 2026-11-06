@@ -1,5 +1,5 @@
 #pragma once
-// `--max-len auto|N` and `--mem-reserve-gb G`, shared by b70-serve and b70-decode
+// `--max-len auto|N`, shared by b70-serve and b70-decode
 // (spec 6 §10). The order is forced by what each step needs:
 //
 //   1. parse                 before the device: "auto" or a positive integer
@@ -43,20 +43,6 @@ inline MaxLenArg parse_max_len(const std::string& v) {
   if (n > 0xFFFFFFFFull) throw std::runtime_error("--max-len is out of range: " + v);
   if (n == 0) throw std::runtime_error("--max-len 0 is not a model length");
   return {false, static_cast<uint32_t>(n)};
-}
-
-// Decimal GB (1e9 B, the unit memory_line() prints in), 0 <= G < 1000.
-inline size_t parse_reserve_gb(const std::string& v) {
-  size_t used = 0;
-  double g = -1.0;
-  try {
-    g = std::stod(v, &used);
-  } catch (const std::exception&) {
-    used = 0;
-  }
-  if (used != v.size() || v.empty() || !(g >= 0.0 && g < 1000.0))
-    throw std::runtime_error("--mem-reserve-gb expects a number of GB in [0, 1000), got '" + v + "'");
-  return static_cast<size_t>(std::llround(g * 1e9));
 }
 
 // Step 2. `trained` is loader::trained_context(snapshot) (0 = not declared).
@@ -150,7 +136,7 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
       throw std::runtime_error(
           "--max-len " + std::to_string(len) + " does not fit: " +
           runtime::describe(p, device, reserve_bytes) + ". The largest that fits is " +
-          std::to_string(fit) + " (--max-len auto); --mem-reserve-gb lowers the reserve");
+          std::to_string(fit) + " (--max-len auto)");
     }
     std::fprintf(stderr, "max_len: %u (--max-len)\n", len);
   }

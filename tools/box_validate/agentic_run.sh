@@ -10,6 +10,8 @@
 # Env: PORT (8013), WAIT (900 s for /v1/models), TURNS (12), MAX_TOKENS (1024), EXTRA (spec 25e: a JSON object merged into every
 # request body - Bolt's chat_template_kwargs arms), B70_SERVE (the binary; default this tree's
 # build/src/cli/b70-serve - test_box_validate.py points it at a stand-in).
+# --spec off comes first: a box row measures the plain server unless its flags name a proposer (the last
+# --spec wins; b70-serve's own default is --spec auto).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 [ $# -ge 3 ] || { echo "usage: $0 <out dir> <snapshot> <transcript.json> [b70-serve flags...]" >&2; exit 2; }
@@ -18,8 +20,8 @@ shift 3
 port="${PORT:-8013}"
 mkdir -p "$out/server-log"
 bin="${B70_SERVE:-build/src/cli/b70-serve}"
-echo "agentic_run: $bin $model --port $port --served-name b70 --log-requests $out/server-log $*"
-"$bin" "$model" --port "$port" --served-name b70 --log-requests "$out/server-log" "$@" > "$out/server.log" 2>&1 &
+echo "agentic_run: $bin $model --port $port --spec off --log-requests $out/server-log $*"
+"$bin" "$model" --port "$port" --spec off --log-requests "$out/server-log" "$@" > "$out/server.log" 2>&1 &
 srv=$!
 stop() { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; }
 trap stop EXIT

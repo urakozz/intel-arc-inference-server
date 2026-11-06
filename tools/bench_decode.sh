@@ -9,7 +9,6 @@
 #   tools/bench_decode.sh --prefill-length 4096 --prefill-chunk 1024
 #   tools/bench_decode.sh --prefill-length 4096 --prefill-backend l0    spec 2.1's L0 GEMM backend
 #   tools/bench_decode.sh --depth 4096 --max-len 131072 spec 6: the 128k decode variants
-#   tools/bench_decode.sh --lm-head int8         spec 9: the int8 lm_head (rows say int8-head)
 #
 # `--prefill-length N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
 # and makes the binary print a SECOND markdown row -- `| ... <backend> pp | N |
@@ -18,9 +17,8 @@
 # is exclusive with --depth for the same reason the CLI refuses the pair: the
 # prefilled ids ARE the depth. `--prefill-backend l0|l0-int8` (spec 2.1 §3.5, spec 5)
 # belongs to --prefill-length the same way --prefill-chunk does, and both PP_BACKEND (env) and
-# --prefill-backend (flag) are refused without it. (These were --pp, --pp-chunk and --pp-backend
-# until 2026-10-06, when b70-decode's --pp became vLLM's pipeline-parallel size; the old
-# spellings are refused here naming the new ones.)
+# --prefill-backend (flag) are refused without it. b70-decode runs the int8 lm_head (its rows
+# say int8-head) since the zero-config cleanup removed --lm-head.
 #
 # **The grade is a property of the box, not of this script, so this script
 # measures it instead of asserting it.** Record grade needs a provably idle
@@ -79,7 +77,6 @@ PP="${PP:-}"
 PP_CHUNK="${PP_CHUNK:-}"
 PP_BACKEND="${PP_BACKEND:-}"
 MAX_LEN="${MAX_LEN:-}"
-LM_HEAD="${LM_HEAD:-}"
 BUILD=1
 
 # `set -u` is on, so a bare `--depth` at the end of the line would abort with
@@ -102,19 +99,10 @@ while [ $# -gt 0 ]; do
     --prefill-length)  need_value "$@"; PP="$2";       shift 2 ;;
     --prefill-chunk)   need_value "$@"; PP_CHUNK="$2"; shift 2 ;;
     --prefill-backend) need_value "$@"; PP_BACKEND="$2"; shift 2 ;;
-    --pp|--pp-chunk|--pp-backend)
-      case "$1" in
-        --pp) new="--prefill-length N (b70-decode's --pp is the pipeline-parallel size now)" ;;
-        --pp-chunk) new="--prefill-chunk C" ;;
-        *) new="--prefill-backend B" ;;
-      esac
-      echo "bench_decode.sh: $1 was renamed on 2026-10-06: $new" >&2
-      exit 2 ;;
     --tg)    need_value "$@"; TG="$2";    shift 2 ;;
     --runs)  need_value "$@"; RUNS="$2";  shift 2 ;;
     --model) need_value "$@"; MODEL="$2"; shift 2 ;;
     --max-len) need_value "$@"; MAX_LEN="$2"; shift 2 ;;
-    --lm-head) need_value "$@"; LM_HEAD="$2"; shift 2 ;;
     --no-build) BUILD=0; shift ;;
     -h|--help)
       awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
@@ -168,8 +156,6 @@ if [ -n "${ZE_AFFINITY_MASK:-}" ]; then
 fi
 MAXLEN_ARGS=""
 [ -n "$MAX_LEN" ] && MAXLEN_ARGS=" --max-len $MAX_LEN"
-# Spec 9: unset adds nothing (b70-decode's default is the checkpoint's bf16 head).
-[ -n "$LM_HEAD" ] && MAXLEN_ARGS="$MAXLEN_ARGS --lm-head $LM_HEAD"
 
 if [ -n "$PP" ]; then
   MODE_ARGS="--prefill-length $PP"

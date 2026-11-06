@@ -40,7 +40,7 @@ target_link_libraries(b70-decode PRIVATE b70_dflash_runtime)
 if(TARGET b70-serve)
   target_link_libraries(b70-serve PRIVATE b70_dflash_runtime)
 endif()
-# Spec 8: b70-decode --mtp auto runs b70-serve's per-request policy (server::AdaptiveK, host
+# Spec 8: b70-decode --spec mtp runs b70-serve's per-request policy (server::AdaptiveK, host
 # code in b70_server); appended, as the K2 line above.
 target_link_libraries(b70-decode PRIVATE b70_server)
 # Spec 18c: and K2's prefill (b70_k2_prefill: K2Engine::prefill, its walk and scratch).

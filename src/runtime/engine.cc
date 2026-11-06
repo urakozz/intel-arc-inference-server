@@ -210,13 +210,13 @@ void Engine::require_mtp(const char* what) const {
   if (!mtp_)
     throw std::runtime_error(std::string("runtime::Engine::") + what +
                              ": MTP is off - load the model with its head (loader::load(..., mtp"
-                             " = true), b70 --mtp)");
+                             " = true), b70 --spec mtp)");
 }
 
 void Engine::require_spec(const char* what) const {
   if (!mtp_ && !drafter_)
     throw std::runtime_error(std::string("runtime::Engine::") + what +
-                             ": no proposer - load the model with its MTP head (b70 --mtp) or build the engine "
+                             ": no proposer - load the model with its MTP head (b70 --spec mtp) or build the engine "
                              "with a drafter (--spec dflash)");
 }
 

@@ -318,7 +318,7 @@ endforeach()
 # Spec 8 (plan 8b): MTP speculative decoding. ON by default - it only ADDS binaries
 # (the M = 2..4 verify lists at max_len 16384, the per-row GDN slot variants, the MTP
 # head's own); every existing binary's command line is unchanged, and an engine without
-# `--mtp` binds none of them.
+# `--spec mtp` binds none of them.
 option(B70_MTP "build the MTP verify / draft variants (spec 8)" ON)
 if(B70_MTP)
   foreach(MM 2 3 4)

@@ -80,7 +80,7 @@ struct EngineAdapter : server::EngineIface {
   // `imm` and `host_logits` are created ONCE here, not per token (Task 5
   // Step 3): the immediate command list and the readback buffer are reused
   // across every sampled step for the life of the adapter.
-  // `mtp_k` > 0 (spec 8, `b70-serve --mtp K`) needs an engine with the head loaded.
+  // `mtp_k` > 0 (spec 8, `b70-serve --spec mtp`) needs an engine with the head loaded.
   // `lookup` (spec 19e, `b70-serve --spec lookup`) verifies the server's prompt-lookup drafts
   // through the same verify lists, which the engine captures only with the head loaded.
   // `dflash` (spec 19c, `b70-serve --spec dflash`): draft with the drafter the engine was built with (attached -
@@ -107,10 +107,10 @@ struct EngineAdapter : server::EngineIface {
         throw std::runtime_error("--spec-max " + std::to_string(k_) + ": the drafter verifies K in 1.." +
                                  std::to_string(eng.max_draft()));
     } else if (k_ > runtime::Engine::kMaxDraft) {
-      throw std::runtime_error("--mtp " + std::to_string(k_) + ": K is 0..3");
+      throw std::runtime_error("--spec mtp " + std::to_string(k_) + ": K is 0..3");
     }
-    if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--mtp needs the model's MTP head loaded");
-    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --mtp: pick one proposer");
+    if (k_ > 0 && !df_ && !eng.mtp()) throw std::runtime_error("--spec mtp needs the model's MTP head loaded");
+    if (lookup_ && k_ > 0) throw std::runtime_error("--spec lookup and --spec mtp: pick one proposer");
     // TODO(spec 19e Task 2, engine part, box): a model without an MTP head (K2-Horizon, spec
     // 18) has no verify lists today; it needs the M = 2..8 verify lists captured on their own.
     if (lookup_ && !eng.mtp())
@@ -203,7 +203,7 @@ struct EngineAdapter : server::EngineIface {
   // (the verify rows' GDN slots and hidden rows stay valid until the next verify).
   uint32_t mtp_k() override { return k_; }
 
-  // `k_req` (spec 8 §10): the iteration's K, <= mtp_k(); `--mtp auto` varies it per
+  // `k_req` (spec 8 §10): the iteration's K, <= mtp_k(); `--spec mtp` varies it per
   // iteration, 0 is one plain step.
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
     flush_commit();

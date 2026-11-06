@@ -59,12 +59,12 @@ std::vector<double> parse_list(const std::string& key, const std::string& text) 
   while (at <= text.size()) {
     const size_t comma = std::min(text.find(',', at), text.size());
     const std::string item = text.substr(at, comma - at);
-    if (item.empty()) throw std::invalid_argument("--mtp-cost: empty value in '" + key + "'");
+    if (item.empty()) throw std::invalid_argument("the cost table: empty value in '" + key + "'");
     char* end = nullptr;
     errno = 0;
     const double v = std::strtod(item.c_str(), &end);
     if (errno != 0 || end != item.c_str() + item.size() || !std::isfinite(v) || v <= 0)
-      throw std::invalid_argument("--mtp-cost: '" + item + "' is not a positive cost");
+      throw std::invalid_argument("the cost table: '" + item + "' is not a positive cost");
     out.push_back(v);
     at = comma + 1;
   }
@@ -77,13 +77,13 @@ MtpCost MtpCost::parse(const std::string& text, const MtpCost& base) {
   MtpCost c = base;
   bool seen_verify = false, seen_draft = false;
   size_t at = 0;
-  if (text.empty()) throw std::invalid_argument("--mtp-cost: empty");
+  if (text.empty()) throw std::invalid_argument("the cost table: empty");
   while (at <= text.size()) {
     const size_t semi = std::min(text.find(';', at), text.size());
     const std::string part = text.substr(at, semi - at);
     const size_t eq = part.find('=');
     if (eq == std::string::npos)
-      throw std::invalid_argument("--mtp-cost: expected verify=... or draft=..., got '" + part + "'");
+      throw std::invalid_argument("the cost table: expected verify=... or draft=..., got '" + part + "'");
     const std::string key = part.substr(0, eq);
     std::vector<double> v = parse_list(key, part.substr(eq + 1));
     if (key == "verify" && !seen_verify) {
@@ -93,7 +93,7 @@ MtpCost MtpCost::parse(const std::string& text, const MtpCost& base) {
       seen_draft = true;
       c.draft = std::move(v);
     } else {
-      throw std::invalid_argument("--mtp-cost: unknown or repeated key '" + key + "'");
+      throw std::invalid_argument("the cost table: unknown or repeated key '" + key + "'");
     }
     at = semi + 1;
   }

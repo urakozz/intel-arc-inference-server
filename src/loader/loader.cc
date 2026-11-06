@@ -821,7 +821,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // Spec 9: the int8 form is made from the bf16 tensor, so it needs one.
   if (lm_form == LmHeadForm::Int8 && ckpt_int4)
     throw std::runtime_error(
-        "--lm-head int8 quantises a bf16 lm_head at load; this checkpoint ships it int4");
+        "the int8 lm_head is quantised at load from a bf16 lm_head; this checkpoint ships it int4");
   const model::FusedLinear& lm_row = desc.lm_head(
       ckpt_int4 ? model::WeightKind::Int4
                 : (lm_form == LmHeadForm::Int8 ? model::WeightKind::Int8 : model::WeightKind::Bf16));
@@ -831,7 +831,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // size the compact GEMV and argmax are compiled for - all knowable before a byte is read.
   if (draft_vocab.size != 0) {
     if (!mtp && !draft_vocab.for_drafter)
-      throw std::runtime_error("--draft-vocab drafts with the MTP head or a DFlash drafter: it needs --mtp or "
+      throw std::runtime_error("--draft-vocab drafts with the MTP head or a DFlash drafter: it needs --spec mtp or "
                                "--spec dflash");
     if (lm_int4)
       throw std::runtime_error(
@@ -1135,7 +1135,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       small_resident, small_resident / gb,
       r.pad_bytes, r.pad_bytes / gb, per_token, per_token / gb, r.embed_bytes, r.embed_bytes / gb,
       rope_bytes, rope_bytes / gb, r.mtp_bytes, r.mtp_bytes / gb,
-      mtp ? mtp_line.c_str() : "not loaded; --mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
+      mtp ? mtp_line.c_str() : "not loaded; --spec mtp loads it", r.total(), r.total() / gb, per_token / gb, expected / gb,
       desc.doc_w / gb, r.pad_bytes / gb, widen.total() / gb, lm_adjust / gb, widen.norm, widen.gdn,
       delta * 100.0, have_w ? "" : "   (void: no measured W for this model)", m.report.seconds);
   if (m.draft_vocab) {

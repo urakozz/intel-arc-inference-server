@@ -46,11 +46,9 @@ int main() {
   ServeFlags off;
   off.spec = "off";
   check_serve_flags(off);
-  {
-    ServeFlags f;
-    f.mtp = true;
-    CHECK(refuses([&] { check_serve_flags(f); }, "no MTP head"));
-  }
+  ServeFlags automatic;   // --spec auto (b70-serve's default): off for Bolt
+  automatic.spec = "auto";
+  check_serve_flags(automatic);
   {
     ServeFlags f;
     f.spec = "mtp";
@@ -71,11 +69,6 @@ int main() {
     ServeFlags f;
     f.draft_vocab = true;
     CHECK(refuses([&] { check_serve_flags(f); }, "has neither"));
-  }
-  {
-    ServeFlags f;
-    f.qwen4exp_flags = true;
-    CHECK(refuses([&] { check_serve_flags(f); }, "belong to Qwen3.8-Flash-Next"));
   }
 
   // b70-decode's refusals, with prefill on (what b70-serve passes).

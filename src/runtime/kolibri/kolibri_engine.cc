@@ -69,7 +69,7 @@ KolibriEngine::KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoade
       throw std::invalid_argument("runtime::kolibri::KolibriEngine: device 1 is not a view of device 0's Level Zero "
                                   "context (spec 16 decision 1)");
     if (!devices[0]->can_access_peer(*devices[1]))
-      throw std::runtime_error("--pp 2: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
+      throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
                                "(zeDeviceCanAccessPeer is false), and both hand-offs write it. Peer access needs the "
                                "P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
     if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))

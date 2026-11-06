@@ -11,17 +11,17 @@
 //   --prefill-backend l0  the only backend: l0-int8 (its h8 linears rotate in 1024-k Hadamard blocks and
 //                      Kolibri's hidden is 2560) is refused by name
 //
-//   --pp N / --pipeline-parallel-size N   2 (Kolibri's DEFAULT: the real model holds ~42.5 GB of
+//   --parallel auto|1|pp   2 (Kolibri's DEFAULT: the real model holds ~42.5 GB of
 //                      weights at int4, one card 32.5 GB) or 1 - accepted only when the planner says the
 //                      model fits one card (a synthetic checkpoint, --layers N), else refused before the
-//                      device naming the bytes and --pp 2
+//                      device naming the bytes and --parallel pp
 //   --pipeline-split auto|N, --pipeline-handoff copy|peer   spec 16b's switches and parsers; auto is
 //                      runtime::pp_balance over Kolibri's per-layer bytes at the session's max_len
 //   --layers N         development mode (spec 20 §4): load only layers [0, N) of the checkpoint
 //   --lm-head bf16|int8, --max-len N|auto (under the trained 262144; above it is spec 20 decision 3)
 // Refused before the device, each by name: --prefill-backend l0-int8, --prefill-chunk above
-// 2048 (spec 20d), --mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position: bf16 only),
-// --profile (Task 8), --device N with --pp 2 (16b's rule: GPUs 0 and 1). A prefilling run plans the
+// 2048 (spec 20d), --spec mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position: bf16 only),
+// --profile (Task 8), --device N with --parallel pp (16b's rule: GPUs 0 and 1). A prefilling run plans the
 // prefill scratch (and, on two cards, the prefill hand-off) into --max-len and the fit.
 #include <array>
 #include <chrono>
@@ -59,7 +59,7 @@ inline constexpr uint32_t kKolibriBenchPrompt[] = {
     44,    1469,  2618,  3408,  922,   5958,  7737,  4325,  46,    1047,  8190,  65429, 4561, 7462};
 inline constexpr size_t kKolibriBenchPromptLen = sizeof(kKolibriBenchPrompt) / sizeof(kKolibriBenchPrompt[0]);
 
-// The B70's device memory as Level Zero reports it (32.530 GB, l0/context.cc): the --pp 1 fit check
+// The B70's device memory as Level Zero reports it (32.530 GB, l0/context.cc): the --parallel 1 fit check
 // runs before any device is opened, against this; the device's own figure is used after.
 inline constexpr size_t kB70Bytes = size_t(32530000000ull);
 
@@ -82,8 +82,8 @@ struct DecodeArgs {
   uint32_t device = l0::Context::kFromEnv;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
-  PipelineArgs pipe;            // devices as parsed (1 when --pp was not given)
-  bool pp_given = false;        // --pp / --pipeline-parallel-size on the command line
+  PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
+  bool pp_given = false;        // --parallel on the command line
   // Spec 20d: --prefill (--ids), --prefill-length N (--bench at depth N: the pp row), --prefill-chunk C
   // (0 = kPfC), --prefill-backend as parsed (l0 only).
   bool prefill = false, pp = false, pp_backend_given = false;
@@ -94,7 +94,7 @@ struct DecodeArgs {
   bool prefills() const { return prefill || pp; }
 };
 
-// Kolibri's device count: --pp as given, else 2.
+// Kolibri's device count: --parallel as given, else 2.
 inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.devices : 2u; }
 
 // Every refusal that needs no device - in this order, each by name (tests/CMakeLists.txt's
@@ -109,7 +109,7 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
     throw std::runtime_error("--prefill-chunk " + std::to_string(a.pp_chunk) + " exceeds Kolibri-1's prefill chunk " +
                              std::to_string(runtime::kolibri::kPfC) + " (the scratch and the 4096-slot ring's "
                              "headroom are sized for it)");
-  if (a.mtp) throw std::runtime_error("Kolibri-1 has no MTP head (spec 20 §1); drop --mtp");
+  if (a.mtp) throw std::runtime_error("Kolibri-1 has no MTP head (spec 20 §1); drop --spec mtp");
   if (a.kv8)
     throw std::runtime_error("--kv-cache int8: Kolibri-1's KV is bf16 only - 20 KiB a position on its 10 full "
                              "layers, 5.4 GB at 262144 (spec 20 §2)");
@@ -120,15 +120,15 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
   const bool int8 = a.lm_head == loader::LmHeadForm::Int8;
   if (devs == 1) {
     if (a.pipe.have_split)
-      throw std::runtime_error("--pipeline-split belongs to --pp 2 (the layer device 1 starts at)");
+      throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
     if (a.pipe.have_handoff)
-      throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
+      throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     if (!runtime::kolibri::fits_one_card(d, int8, kB70Bytes, a.reserve, a.prefills())) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
       char msg[400];
       std::snprintf(msg, sizeof msg,
-                    "--pp 1: Kolibri-1 holds ~%.1f GB of weights at int4 (%u layers, %s attention, %s head), one card "
-                    "%.1f GB: run it with --pp 2 (the default), or load fewer layers with --layers N (development "
+                    "--parallel 1: Kolibri-1 holds ~%.1f GB of weights at int4 (%u layers, %s attention, %s head), one card "
+                    "%.1f GB: run it with --parallel pp (the default), or load fewer layers with --layers N (development "
                     "mode)", w / 1e9, d.layers, model::kol_attn_form_name(d.attn), int8 ? "int8" : "bf16",
                     kB70Bytes / 1e9);
       throw std::runtime_error(msg);
@@ -136,9 +136,9 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
     return;
   }
   if (a.device != l0::Context::kFromEnv)
-    throw std::runtime_error("--pp 2 runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
+    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
                              "two); --device names one card - drop it");
-  if (d.layers < 2) throw std::runtime_error("--pp 2 needs at least two layers to split (--layers " +
+  if (d.layers < 2) throw std::runtime_error("--parallel pp needs at least two layers to split (--layers " +
                                              std::to_string(d.layers) + ")");
   if (!a.pipe.split_auto && (a.pipe.split < 1 || a.pipe.split >= d.layers))
     throw std::runtime_error("--pipeline-split " + std::to_string(a.pipe.split) + " leaves a device no layer: it is "
@@ -247,9 +247,9 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
                  a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
   else
-    std::fprintf(stderr, "devices: %s + %s (--pp 2)\n", c0->name().c_str(), c1->name().c_str());
+    std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--pp 2: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
                              "both hand-offs write it (docs/10-the-box.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = settle(pre, a, dev);
   const model::KolPlacement placement = pl.first;

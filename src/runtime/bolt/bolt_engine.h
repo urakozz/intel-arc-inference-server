@@ -149,7 +149,7 @@ class BoltEngine {
   void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
 
   // --- spec 25e: prefix-cache snapshots (spec 7's engine calls; runtime/bolt/bolt_sizes.h's state_runs / kv_runs give both host
-  // layouts, one for --pp 1 and --pp 2) ------------------------------------------------------------------------------------------
+  // layouts, one for --parallel 1 and --parallel pp) ------------------------------------------------------------------------------------------
   // The state is what a session leaves behind besides `pos` and the KV: per Mamba block the SSM state (fp32 or bf16 - the arm
   // B70_BOLT_SSM) and the raw-xBC columns of positions pos - 1 .. pos - 3, written back at their ring slots by load_state (a
   // position below 0 a zero row). state_bytes() is 170,229,760 B (86,343,680 with the bf16 arm) and kv_bytes(n) n x 8,192 B at the

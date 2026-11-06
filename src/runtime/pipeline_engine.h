@@ -23,7 +23,7 @@
 #include "runtime/prefill_backend.h"
 #include "runtime/tap_drafter.h"
 
-// Spec 16b: decode with the model's layers split over two B70s (`b70-decode --pp 2`).
+// Spec 16b: decode with the model's layers split over two B70s (`b70-decode --parallel pp`).
 //
 //   device 0  embedding, layers [0, s), their GDN state / conv ring / KV, decode list 0
 //   device 1  layers [s, L), their state, final norm, lm_head, argmax, decode list 1
@@ -63,7 +63,7 @@
 // virtual calls.
 //
 // Not here: the residual tap, profiling. Snapshots (spec 7) ARE here, in the single-card
-// host layout, so a snapshot moves between --pp 1 and 2 unchanged.
+// host layout, so a snapshot moves between --parallel 1 and 2 unchanged.
 //
 // **MTP across the split (spec 16d)** - draft() / verify() / commit() below, Engine's
 // contract. The head, its buffers and its draft lists live on device 1 with lm_head, and
@@ -76,7 +76,7 @@
 // prefill() fills the head's KV on device 1 after each chunk's layers (step_mtp_kv). The
 // snapshots carry the head's hidden row and KV layer in Engine's MTP layouts.
 //
-// **A DFlash drafter across the split (spec 19d, `--spec dflash --pp 2`)** - Engine's spec 19c contract on two
+// **A DFlash drafter across the split (spec 19d, `--spec dflash --parallel pp`)** - Engine's spec 19c contract on two
 // cards. The drafter (runtime/tap_drafter.h) lives on device 1 with lm_head and the embedding replica its draft list
 // gathers; each device holds the verify slots of its own GDN layers for 8 slots (pp_gdn_spec_bytes(d, gdn, 8)), and
 // its verify lists at M = 1 .. max_k + 1 (build_stage_verify_taps) copy the taps of the sites it walks into the
@@ -234,7 +234,7 @@ class PipelineEngine {
   bool tap_samples() const { return drafter_ && drafter_->samples(); }
   uint64_t drafter_key() const { return drafter_ ? drafter_->key() : 0; }
 
-  // --- spec 16d: the server's host reads (b70-serve --pp 2, cli/pipeline_serve_adapter.h) ---
+  // --- spec 16d: the server's host reads (b70-serve --parallel pp, cli/pipeline_serve_adapter.h) ---
   //
   // The pending id (device 1's Control, mirrored on device 0 at every step boundary).
   uint32_t pending() const;

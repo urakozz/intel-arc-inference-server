@@ -13,8 +13,7 @@
 # (ORACLE_IMAGE, as tools/oracle/run_in_container.sh), with only the output dir
 # and the resolved tokenizer.json mounted.
 # Env: B70_DECODE (default build/src/cli/b70-decode), PYTHON (default python3),
-#      ORACLE_IMAGE, LM_HEAD (spec 9: bf16 or int8, passed as --lm-head; an int8 run
-#      is saved as <name>.<backend>-i8head.* so it sits beside the bf16-head run),
+#      ORACLE_IMAGE (the int8 lm_head: outputs are <name>.<backend>-i8head.*),
 #      N_NEW (the greedy ids per scenario, default 192 - the reference run's --new-tokens:
 #      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384), PREFILL_CHUNK (plan 5d:
 #      passed as b70-decode's existing --prefill-chunk, e.g. 4096; unset = the engine's default).
@@ -23,12 +22,9 @@
 set -euo pipefail
 [ $# -eq 4 ] || { echo "usage: $0 <snapshot> <set dir> <out dir> <backend>" >&2; exit 2; }
 SNAP="$1" SET="$2" OUT="$3" BACKEND="$4"
-LM_HEAD="${LM_HEAD:-bf16}"
-case "$LM_HEAD" in
-  bf16) TAG="$BACKEND" ;;
-  int8) TAG="$BACKEND-i8head" ;;
-  *) echo "LM_HEAD must be bf16 or int8, got '$LM_HEAD'" >&2; exit 2 ;;
-esac
+# b70-decode runs the int8 lm_head (the zero-config cleanup removed --lm-head): the outputs carry
+# -i8head, as the int8 runs always did.
+TAG="$BACKEND-i8head"
 DECODE="${B70_DECODE:-build/src/cli/b70-decode}"
 PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
@@ -67,7 +63,7 @@ while read -r name count sha; do
   fi
   t0=$(date +%s)
   "$DECODE" "$SNAP" --ids "$ids" --n "${N_NEW:-$N_DEFAULT}" --prefill --prefill-backend "$BACKEND" --max-len "${MAX_LEN:-16384}" \
-    --lm-head "$LM_HEAD" ${PREFILL_CHUNK:+--prefill-chunk "$PREFILL_CHUNK"} < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
+    ${PREFILL_CHUNK:+--prefill-chunk "$PREFILL_CHUNK"} < /dev/null > "$out_ids.tmp" 2> "$OUT/$name.$TAG.log"
   mv "$out_ids.tmp" "$out_ids"
   decode "$name.$TAG.ids" "$name.$TAG.txt" < /dev/null
   echo "[$n] $name: $count prompt ids, $(( $(date +%s) - t0 ))s"

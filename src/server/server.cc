@@ -66,7 +66,7 @@ Server::Server(Deps deps, Options opts)
     if (deps_.engine.verify_k() == 0)
       throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
     if (deps_.engine.mtp_k() != 0)
-      throw std::invalid_argument("--spec lookup and --mtp are one proposer each; pick one");
+      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
     if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
         opts_.lookup_min_match > impl_->lookup.options().max_match)
       throw std::invalid_argument("--spec-min-match must be in [2, 64]");
@@ -276,7 +276,7 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
 
   outcome.finish_reason = "length";
   bool eos_stop = false;
-  std::optional<AdaptiveK> policy;   // --mtp auto (spec 8 §10) or --spec lookup (spec 19e)
+  std::optional<AdaptiveK> policy;   // --spec mtp (spec 8 §10) or --spec lookup (spec 19e)
   // Spec 8: with MTP a step yields a burst of ids; the loop below still sees them one
   // at a time, and ids past a stop are handed back with truncate_to() after it.
   const bool speculative = deps_.engine.mtp_k() > 0;
@@ -291,14 +291,14 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     policy.emplace(o);
   }
   // Spec 19f: --spec dflash-lookup indexes the matcher as --spec lookup does; the DFlash iterations' K comes from the
-  // --mtp auto policy below.
+  // --spec mtp policy below.
   const bool dflash_lookup = opts_.spec_dflash_lookup;
   if (dflash_lookup) {
     lookup_begin(outcome.prompt_ids);
     impl_->lookup_in_dflash->reset();
   }
   bool burst_head_indexed = false;   // burst[0] went into the matcher in the proposer
-  // Spec 8 §10: --mtp auto keeps one policy per request, fed only by this request's own
+  // Spec 8 §10: --spec mtp keeps one policy per request, fed only by this request's own
   // acceptance, so the K sequence (and a seeded request's output) is reproducible.
   if (speculative && opts_.mtp_auto) {
     AdaptiveKOptions o = opts_.mtp_adaptive;

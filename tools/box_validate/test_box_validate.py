@@ -711,7 +711,10 @@ FAKE_SERVE = textwrap.dedent("""\
     logdir = a[a.index("--log-requests") + 1] if "--log-requests" in a else None
     drift = "--drift" in a              # an arm whose output differs from the others
     n = [0]
-    sys.stderr.write("max_len: 16384, mtp: %s\\n" % (a[a.index("--mtp") + 1] if "--mtp" in a else "off"))
+    spec = [a[i + 1] for i in range(len(a) - 1) if a[i] == "--spec"]      # the last --spec wins
+    spec = spec[-1] if spec else "auto"
+    mtp = a[a.index("--spec-max") + 1] if spec == "mtp" and "--spec-max" in a else spec
+    sys.stderr.write("max_len: 16384, mtp: %s\\n" % mtp)
     sys.stderr.flush()
     class H(BaseHTTPRequestHandler):
         def log_message(self, *x):
@@ -779,7 +782,7 @@ class ServeClientTest(Tmp):
 
     def test_arms_table_compare(self):
         for rnd in (1, 2):
-            for label, flags in (("off", ["--mtp", "off"]), ("k3", ["--mtp", "3"])):
+            for label, flags in (("off", ["--spec", "off"]), ("k3", ["--spec", "mtp", "--spec-max", "3"])):
                 r = self.arm(label, rnd, *flags)
                 self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("SERVE_RUN [k3 r2] rc=0", r.stdout)
@@ -1050,7 +1053,7 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--- r13.kernels", out)
         self.assertIn("--- r14.k1", out)
         self.assertIn("env B70_LONGCTX_TESTS=1 ctest", out)             # r6.mtp_long's variants
-        self.assertIn("--mtp 3 > ", out)                                 # r6.greedy_long: b70-decode --mtp
+        self.assertIn("--spec mtp --spec-max 3 > ", out)                 # r6.greedy_long: b70-decode with MTP
         self.assertIn("probe_mtp_steps", out)
         self.assertIn(" 120000 32 3 int8 off 131072", out)
         addr = self.box_address()
@@ -1090,13 +1093,13 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(arms, ["off.r1", "k1.r1", "k3.r1", "auto.r1", "auto.r2", "k3.r2", "k1.r2", "off.r2",
                                 "off.r3", "k1.r3", "k3.r3", "auto.r3"])
         self.assertIn("serve_client.py compare --dir", out)
-        self.assertRegex(out, r"serve_run\.sh \S+/r12\.a4/lookup2\.r1 lookup2 1 \S+ --max-len 16384 --spec lookup --spec-min-match 2 -- ")
+        self.assertRegex(out, r"serve_run\.sh \S+/r12\.a4/lookup\.r1 lookup 1 \S+ --max-len 16384 --spec lookup -- ")
         # Ornith prefills since 15d and is served since 15e: nothing expects those refusals
         self.assertNotIn("printing /prefill of a mixture-of-experts model/", out)
         self.assertNotIn("spec 15e/", out)
-        # K2: b70-serve serves it since 18d (row 25) and refuses --mtp before the device; 18c's CLI
+        # K2: b70-serve serves it since 18d (row 25) and refuses --spec mtp before the device; 18c's CLI
         # rejects in row 15, 18b's in row 14
-        self.assertIn("--mtp 1\n      (must exit non-zero without a crash, printing /K2-Horizon has no MTP head/)", out)
+        self.assertIn("--spec mtp --spec-max 1\n      (must exit non-zero without a crash, printing /K2-Horizon has no MTP head/)", out)
         self.assertNotIn("is not served yet", out)
         self.assertIn("--re '^cli_reject_mtp_k2$'", out)
         self.assertIn("--re '^cli_reject_k2_prefill_length_int8$'", out)
@@ -1154,7 +1157,7 @@ class DriverTest(unittest.TestCase):
             self.assertIn("--re '^%s$' --label k2 --label kv8" % name, out)
         self.assertIn("k2_mova_M1_E64_T4_D2560_N1024_STAGE; do", out)          # the 11 int8 binaries built
         self.assertIn("for b in k2_route_M1_E64_T4_N9280_O9216_S2 k2_route_M1_E100_T8_N128_O0_S1 ", out)  # one line
-        self.assertIn("--depth 16 --tg 1 --kv-cache int8) && echo \"K2 max_len auto, int8 KV, bf16 head: $n (derived 91904", out)
+        self.assertIn("--depth 16 --tg 1 --kv-cache int8) && echo \"K2 max_len auto, int8 KV, int8 head: $n (derived 98304", out)
         self.assertIn("tools/probe/k2_passkey.sh int8", out)
         out = self.run_driver("--dry-run", "--only", "r21.speed").stdout
         self.assertIn("--ratio int8-kv@32768/bf16-kv@32768", out)
@@ -1169,7 +1172,7 @@ class DriverTest(unittest.TestCase):
                                  "r25.serve", "r25.chat", "r25.passkey", "r25.toolcall", "r25.a4_ref", "r25.a4",
                                  "r25.benchy"])
         self.assertIn("--re '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'", out)
-        self.assertIn("--re '^cli_reject_serve_(k2_mtp|k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'", out)
+        self.assertIn("--re '^cli_reject_serve_(k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'", out)
         self.assertIn("--re '^k2_prefix_gpu(_split)?_test$' --label k2", out)
         self.assertIn("--re '^k2_prefix_gpu_kv8_test$' --label k2", out)
         self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
@@ -1178,7 +1181,8 @@ class DriverTest(unittest.TestCase):
         self.assertIn("SEEDED=1 tools/box_validate/serve_probe.sh urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ "
                       "--kv-cache int8", out)
         self.assertIn("tools/toolcall/a4_ref.sh k2 ref", out)
-        self.assertIn("N_NEW=512 LM_HEAD=int8 tools/toolcall/engine_generate.sh", out)
+        self.assertIn("N_NEW=512 tools/toolcall/engine_generate.sh", out)
+        self.assertNotIn("LM_HEAD=", out)
         self.assertIn("score.py $HOME/", out)
         # row 26 (spec 20d, Kolibri-1 prefill): K0 and the host first, K1 before the synthetic gates, two
         # cards after one, the real checkpoint last; the speed rows opt-in
@@ -1189,7 +1193,7 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--re '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'", out)
         self.assertIn("--re '^cli_reject_kolibri_prefill_(int8|chunk)$'", out)
         self.assertIn("kol_pf_flash_attn_Q48KV4_W513_R4096_EAGER", out)
-        self.assertIn("--prefill-length 131072 --tg 16 --max-len 140000 --lm-head int8", out)
+        self.assertIn("--prefill-length 131072 --tg 16 --max-len 140000' ", out)
         self.assertNotIn("r26.speed", re.findall(r"^--- (\S+)", self.run_driver("--dry-run", "--only", "r26").stdout, re.M))
         # row 27 (spec 16d): host, K0 and the refusals first, the engine gates before the server,
         # the server before the long-context rows; P3 with MTP and the benchy rows opt-in
@@ -1199,20 +1203,20 @@ class DriverTest(unittest.TestCase):
                                  "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden", "r27.agnes",
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
-        self.assertIn("--re '^cli_reject_serve_pp(_kolibri|_value|_device|_split_alone|_handoff_value)?$'", out)
+        self.assertIn("--re '^cli_reject_serve_pp_(value|split_alone|handoff_value)$'", out)
         self.assertIn("env ZE_AFFINITY_MASK=0,1 ctest", out)
-        self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--pp 2 --mtp 3' timeout 3600 build/tests/golden_server_test", out)
-        self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --pp 2 --mtp auto --prefix-split-last")
-        self.assertIn("MAX_LEN=262144 N_TARGET=250000 DECODE_ARGS='--pp 2' tools/probe/passkey.sh l0-int8", out)
-        self.assertIn("--mtp auto --pp 2 --pipeline-handoff peer", out)
+        self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel pp --spec mtp --spec-max 3' timeout 3600 build/tests/golden_server_test", out)
+        self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --parallel pp --spec auto --prefix-split-last")
+        self.assertIn("MAX_LEN=262144 N_TARGET=250000 DECODE_ARGS='--parallel pp' tools/probe/passkey.sh l0-int8", out)
+        self.assertIn("--spec auto --parallel pp --pipeline-handoff peer", out)
         out = self.run_driver("--dry-run", "--only", "r27", "--with", "r27.p3_mtp,r27.benchy").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order[-2:], ["r27.p3_mtp", "r27.benchy"])
-        self.assertIn("SERVE_AFFINITY=0,1 SERVE_ARGS='--pp 2' tools/probe/serve_benchy.sh", out)
+        self.assertIn("SERVE_AFFINITY=0,1 SERVE_ARGS='--parallel pp' tools/probe/serve_benchy.sh", out)
         # row 16's A4 on Ornith's own set (made on the Mac), opt-in; the Mac steps manual
         out = self.run_driver("--dry-run", "--only", "r16.a4").stdout
         self.assertIn("oracle-out-ornith-a4/set", out)
-        self.assertIn("l0-int8 l0-int8-i8head l0", out)
+        self.assertRegex(out, r"score\.py \S+/a4-ornith bf16 l0-int8-i8head l0-i8head ")
         out = self.run_driver("--dry-run", "--with", "r16.a4_ref").stdout
         self.assertNotIn("--- r16.a4_ref", out)   # manual: printed in the summary, never run
         # row 35 (the W4A4 probe's grid): CPU, opt-in only, the grid before the per-class passes
@@ -1258,7 +1262,7 @@ class DriverTest(unittest.TestCase):
         for stage, pat in (("r56.d5_opencode", r"SERVE_ARGS='([^']*)' tools/prefix/replay_ab\.sh"),
                            ("r56.d5_benchy", r"SERVE_ARGS='([^']*)' tools/probe/serve_benchy\.sh --pp 512 4096")):
             block = out.split("--- " + stage + " ", 1)[1].split("\n--- ", 1)[0]
-            arms = [a.split()[1] if a.startswith("--spec") else "mtp" for a in re.findall(pat, block)]
+            arms = [{"auto": "mtp"}.get(a.split()[1], a.split()[1]) for a in re.findall(pat, block)]
             self.assertEqual(len(arms), 9, (stage, arms))
             rounds = [arms[i:i + 3] for i in (0, 3, 6)]
             for pos in range(3):
@@ -1326,7 +1330,7 @@ class DriverTest(unittest.TestCase):
     def test_card_stages_follow_the_rules(self):
         """A `card` stage (lib.sh) runs beside the other card's stream: one-card correctness only. Its printed body
         sets no ZE_AFFINITY_MASK, runs nothing timed (interleave / idle / xpu-smi / benchy / ratios / timing rows),
-        nothing on two cards (--pp, SERVE_AFFINITY, a pp-labelled test), takes no lock itself, builds nothing,
+        nothing on two cards (--parallel pp, SERVE_AFFINITY, a pp-labelled test), takes no lock itself, builds nothing,
         runs no passkey probe (fixed /tmp directories shared with the oracle container), reads no host-RAM budget
         (free -g) and writes nothing under ~ outside the state."""
         reg = tempfile.mktemp(suffix=".tsv")
@@ -1342,7 +1346,7 @@ class DriverTest(unittest.TestCase):
         pp = pp_labelled_tests()
         self.assertIn("pp_decode_test", pp)
         self.assertIn("pp_prefix_gpu_split_test", pp)            # through ${_pp_prefix}
-        bad = [r"ZE_AFFINITY_MASK=", r"SERVE_AFFINITY", r"--pp\b", r"interleave\.sh", r"idle\.sh", r"xpu-smi",
+        bad = [r"ZE_AFFINITY_MASK=", r"SERVE_AFFINITY", r"--pp\b", r"--parallel pp\b", r"interleave\.sh", r"idle\.sh", r"xpu-smi",
                r"benchy", r"--ratio", r"\bflock\b", r"\bcmake\b", r"(^|\s)ocloc ", r"passkey\.sh", r"free -g",
                r"matching /\^\\\| b70-decode", r"(>|tee( -a)?)\s*(~|\$HOME)/(?!b70-validate/)"]
         for sid in card:
