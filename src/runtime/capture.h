@@ -115,8 +115,7 @@ struct CapturedStep {
 // shares and per-kernel deltas, not the absolute step.
 //
 // M: the rows in flight (consecutive positions), default 1 - what ships. M > 1
-// binds the `_M<M>` variants, which a default build does not compile (spec 8a:
-// B70_DECODE_EXTRA_M builds M = 2..4 at max_len 16384 for the MTP probe).
+// binds the `_M<M>` variants (B70_MTP builds M = 2..4 at max_len 16384).
 // Spec 10 (plan 10b): which decode-attention pair every capture binds - `DecodeAttn`,
 // `decode_attn()` and `B70_DECODE_ATTN` live in runtime/buffer_sizes.h, because the
 // pair also decides `attn_part`'s size.

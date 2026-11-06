@@ -5,7 +5,7 @@
 // and the same KV caches, and writes the same attn_out.
 //
 // It is plan 10a's winner `P0_L2_D1_Q1_E1` (tools/probe/probe_decode_attn.cl, record
-// docs/probes/probe-decode-attn-2026-09-28.md), shipped in its exp form `P0_L2_D1_Q1` (see EXP2
+// docs/probes/probe-decode-attn-2026-09-28.md), shipped in its exp form `P0_L2_D1_Q1` (see
 // below), with two changes the probe did not have:
 //
 //  1. **The stride is per ROW and a function of that row's key count alone.** Row m of
@@ -38,10 +38,9 @@
 // barrier per wave publishes the raw dots (double-buffered SLM by a wave counter that
 // runs across the two row groups); lane s computes position s's weight and the weights
 // are broadcast in ascending s for the sum and the V fma (attn.cl's orders).
-// EXP2=1: exp2 with 1/16 * log2(e) folded into the score scale (spec 10 lever 4,
-// approved 2026-09-28 subject to the gates), max and merges in the log2 domain. It fails
-// the golden gate (cjk row 9 flips, spec 10 §8), so the shipped build is EXP2=0:
-// attn.cl's `exp` and 1/16 scale.
+// Scores use attn.cl's `exp` and 1/16 scale. The exp2 form with log2(e) folded into the
+// scale (spec 10 lever 4) failed the golden gate (cjk row 9 flips, spec 10 §8) and was
+// removed in the zero-config cleanup (2026-11-06); the command lines keep an inert -DEXP2=0.
 //
 // Masking: row m's bound is pos + m. A position past it scores -INF, weight exactly 0,
 // which adds +-0 to the sums - so a longer walk (the verify's group end) is neutral to
@@ -49,7 +48,7 @@
 //
 //   attn_decode_v2(ctrl, attn_q, kv_k, kv_v, attn_part)   grid (4, TGT), WG 256
 //   attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out)  grid (24, M),  WG 256
-//     attn_part  fp32 [24][TGT][M][258]  {mx (log2 domain if EXP2), sm, acc[256]}
+//     attn_part  fp32 [24][TGT][M][258]  {mx, sm, acc[256]}
 //     the rest as attn.cl's header.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -96,16 +95,8 @@
 #define PART 258
 #define WG 256
 #define NPR (M * GQA)
-#ifndef EXP2
-#error "attn_v2: EXP2 must be defined (src/kernels/CMakeLists.txt, B70_ATTN_V2_EXP2)"
-#endif
-#if EXP2
-#define SSCALE (0.0625f * M_LOG2E_F)   /* 1/sqrt(256) * log2(e) */
-#define EXPF(x) exp2(x)
-#else
 #define SSCALE 0.0625f
 #define EXPF(x) exp(x)
-#endif
 
 // M = 5..8: spec 19a's verify probe (B70_VERIFY_M8). qpack is 6 KB x M (48 KB at 8, under
 // the 128 KB a work-group may hold) and mx / sm / acc hold 6 x M floats per lane; the rows

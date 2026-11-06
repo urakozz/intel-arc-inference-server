@@ -157,7 +157,8 @@ gates").** With exp2 (10a's `..._E1`) the golden gate fails on `cjk` row 9, a de
 row: engine 105874 at 13.99905 against 95895 at 13.96513, the golden's 95895 13.9375 /
 105874 13.875 (one golden bf16 step apart); v1 and v2-with-`exp` both pass the same gate
 in the same session. v2 therefore ships as `P0_L2_D1_Q1` (attn.cl's `exp` and 1/16
-scale); the exp2 form stays buildable (`-DB70_ATTN_V2_EXP2=ON`) for a later look. The
+scale); the exp2 form stayed buildable (`-DB70_ATTN_V2_EXP2=ON`) until the zero-config
+cleanup removed it (operator 2026-11-06; v1 went with it, v2 `exp` is the only decode attention). The
 cost: 10a measured exp2 at +10 % of kernel time at M = 1; in the step it is 1.3 / 3.1 /
 4.5 % at 32768 / 65536 / 130816 (28.21 / 25.27 / 21.04 t/s with exp2, against the table
 below, same method, earlier session). A-F3 is met either way.

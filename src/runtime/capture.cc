@@ -92,8 +92,7 @@ static_assert(offsetof(BatchRow, slot) == kernels::batch_row::kSlot * 4, "BROW_S
 // kernel, M = 1 is what ships), while `DecodeBuffers::kM` = 8 is the
 // *allocation* capacity. Every kernel indexes its buffers with its own compiled
 // M, so the argument and the variant names below move together. M = 2..4 at
-// max_len 16384 exist only under the CMake option B70_DECODE_EXTRA_M (spec 8a's
-// probe); any other M names a binary that does not exist and throws at
+// max_len 16384 exist under the CMake option B70_MTP (on by default); any other M names a binary that does not exist and throws at
 // capture. The caller sets `Control::n_active` = M and `cur_token[0..M)`.
 
 constexpr size_t kBf16 = 2, kFp32 = 4;

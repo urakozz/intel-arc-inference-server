@@ -4,7 +4,7 @@
 # any existing binary's command line (spec 14 G0's Mac-side pre-check; the box compares
 # the binaries' checksums).
 #
-#   cmake -S tools/kernel_cmdlines -B /tmp/kc -DTREE=$PWD [-DB70_AGNES_SWEEP=ON] && sort /tmp/kc/kernels.txt
+#   cmake -S tools/kernel_cmdlines -B /tmp/kc -DTREE=$PWD && sort /tmp/kc/kernels.txt
 cmake_minimum_required(VERSION 3.22)
 project(kernel_cmdlines NONE)
 if(NOT TREE)

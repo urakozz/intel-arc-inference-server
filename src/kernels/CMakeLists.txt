@@ -23,9 +23,8 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
   # Spec 14, Agnes 3.0 Flash: PROVISIONAL cells, COPIED from the nearest Qwen3.8
   # production cells above (gate||up 5120x34816 S8, down 17408x5120 S4), not
-  # measured. The box sweep (B70_AGNES_SWEEP, docs/probes/probe-gemv-2026-08-24.md's
-  # method) replaces them and model::agnes()'s {S, layout} together:
-  # docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md, "GEMV tuning".
+  # measured (the sweep build option that would have tuned them was removed in the
+  # zero-config cleanup, 2026-11-06; a re-tune is a probe of its own).
   elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 38912 AND S EQUAL 8)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL
   elseif(L EQUAL 0 AND K EQUAL 19456 AND N EQUAL 5120 AND S EQUAL 4)
@@ -313,31 +312,21 @@ add_attn_reduce(2 4096)
 # runtime::DecodeScratch::kAttnV2Blocks and is in the name (`_T32`), as ATTN_BLOCK is.
 set(ATTN_V2_TGT 32 CACHE INTERNAL
     "work-groups per kv head of attn_decode_v2; must equal runtime::DecodeScratch::kAttnV2Blocks")
-# exp2 with the scale folded (operator-approved 2026-09-28 subject to the gates) FAILS the
-# golden gate: cjk row 9, a determined row with a 0.0625 golden margin, flips (spec 10 §8).
-# So v2 ships with attn.cl's `exp`; the exp2 form stays buildable for the record.
-option(B70_ATTN_V2_EXP2 "decode attention v2 with exp2 (fails the golden gate; spec 10 §8)" OFF)
-if(B70_ATTN_V2_EXP2)
-  set(ATTN_V2_EXP2 1)
-else()
-  set(ATTN_V2_EXP2 0)
-endif()
+# v2 runs attn.cl's `exp` and 1/16 scale: exp2 with the scale folded failed the golden gate
+# (cjk row 9 flips, spec 10 §8) and its build option is gone (zero-config cleanup, 2026-11-06).
+# EXP2=0 stays on the command lines, inert, so no existing binary's command line moves.
+set(ATTN_V2_EXP2 0)
 foreach(MM 1 2 3 4)
   add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
                    DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2})
 endforeach()
 
-# Spec 8a (MTP probe): the whole decode list at M = 2, 3, 4 - every variant
-# runtime::build binds at max_len 16384 with the production checkpoint's bf16
-# lm_head - so tools/probe/probe_verify_m can capture the real list at M rows.
-# OFF by default: production builds compile exactly what they did before.
-option(B70_DECODE_EXTRA_M "build the M = 2..4 decode-list variants (spec 8a probe)" OFF)
 # Spec 8 (plan 8b): MTP speculative decoding. ON by default - it only ADDS binaries
 # (the M = 2..4 verify lists at max_len 16384, the per-row GDN slot variants, the MTP
 # head's own); every existing binary's command line is unchanged, and an engine without
 # `--mtp` binds none of them.
 option(B70_MTP "build the MTP verify / draft variants (spec 8)" ON)
-if(B70_DECODE_EXTRA_M OR B70_MTP)
+if(B70_MTP)
   foreach(MM 2 3 4)
     add_gemv_variant(${MM} 5120 16384 1 1)     # qkv||z
     add_gemv_variant(${MM} 6144 5120 4 0)      # out_proj, o_proj
@@ -570,10 +559,6 @@ endif()
 # the GDN layer count (54, which sizes the MTP slot stride) - and in the two GEMV
 # shapes that follow from the first.
 option(B70_AGNES "build the Agnes 3.0 Flash variants (spec 14)" ON)
-# The tuning sweep over the two new GEMV shapes, both layouts, S in {1,2,4,8,16}
-# (all divide K/64 = 80 and 304) - for the box session that replaces the
-# provisional rows. OFF by default: 20 ocloc compiles nobody binds.
-option(B70_AGNES_SWEEP "build the Agnes GEMV tuning matrix (spec 14 validation)" OFF)
 if(B70_AGNES)
   set(AGNES_I 19456)
   add_gemv_variant(1 5120 38912 8 0)    # gate'||up'  PROVISIONAL S8 L0
@@ -583,19 +568,7 @@ if(B70_AGNES)
   # argmax masks from 248089 (model::agnes().vocab_used, kernels::argmax_stage1_variant).
   set(AGNES_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248089)
   add_ocloc_kernel(argmax_stage1_M1_V248089 SOURCE ${ARGMAX_CL} DEFINES ${AGNES_ARGMAX_DEFINES} M=1)
-  if(B70_AGNES_SWEEP)
-    foreach(L 0 1)
-      foreach(S 1 2 4 8 16)
-        if(NOT (L EQUAL 0 AND S EQUAL 8))
-          add_gemv_variant(1 5120 38912 ${S} ${L})
-        endif()
-        if(NOT (L EQUAL 0 AND S EQUAL 4))
-          add_gemv_variant(1 19456 5120 ${S} ${L})
-        endif()
-      endforeach()
-    endforeach()
-  endif()
-  if(B70_DECODE_EXTRA_M OR B70_MTP)
+  if(B70_MTP)
     foreach(MM 2 3 4)   # the verify lists' M rows (spec 8), at Agnes's shapes
       add_gemv_variant(${MM} 5120 38912 8 0)
       add_gemv_variant(${MM} 19456 5120 4 0)
@@ -1772,7 +1745,7 @@ macro(gemm_sm_rows ROWS MLIST)
 endmacro()
 set(GEMM_SM_M 2 3 4 5 6 7 8 16)
 set(GEMM_SM_CONSUMERS "")
-if(B70_DECODE_EXTRA_M OR B70_MTP)
+if(B70_MTP)
   gemm_sm_rows(GEMM_SM_QWEN38 GEMM_SM_M)
   # gate||up's SiLU after the one-slice 2x8 work-group (kernels::gemm_sm_silu_variant): SILU_S 1 at the lists' M
   foreach(MM 2 3 4 5 6 7 8)
