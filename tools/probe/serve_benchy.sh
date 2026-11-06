@@ -2,7 +2,7 @@
 # On the box, from a tree root: start b70-serve under the shared GPU lock, run
 # llama-benchy against it, stop the server.
 #   tools/probe/serve_benchy.sh [llama-benchy args...]
-# e.g. tools/probe/detach.sh ~/benchy.log tools/probe/serve_benchy.sh --pp 4096 --tg 256
+# e.g. tools/probe/detach.sh ~/b70/logs/benchy/benchy.log tools/probe/serve_benchy.sh --pp 4096 --tg 256
 # Env: MODEL (repo id or snapshot; default the W4A16 g64 checkpoint), MAX_LEN
 # (16384), PORT (8011), WAIT (seconds to wait for /v1/models, default 600 - a 41.9 GB model on two cards may need more),
 # SERVE_ARGS (extra b70-serve flags), SERVE_AFFINITY (the server's
@@ -16,16 +16,18 @@ MODEL="${MODEL:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}"
 MAX_LEN="${MAX_LEN:-16384}"
 PORT="${PORT:-8011}"
 export PATH="$HOME/.local/bin:$PATH"
+LOGS="$HOME/b70/logs/benchy"   # the server's log: $LOGS/benchy-serve.log
+mkdir -p "$LOGS"
 exec 9>"$HOME/b70-gpu.lock"
 echo "waiting for the GPU lock"; flock 9; echo "lock held"
 uptime
 ZE_AFFINITY_MASK="${SERVE_AFFINITY:-0}" build/src/cli/b70-serve "$MODEL" --max-len "$MAX_LEN" --port "$PORT" \
-  --spec off ${SERVE_ARGS:-} > "$HOME/benchy-serve.log" 2>&1 &
+  --spec off ${SERVE_ARGS:-} > "$LOGS/benchy-serve.log" 2>&1 &
 srv=$!
 trap 'kill $srv 2>/dev/null; wait $srv 2>/dev/null || true' EXIT
 for _ in $(seq 1 "${WAIT:-600}"); do
   curl -sf "http://127.0.0.1:$PORT/v1/models" > /dev/null && break
-  kill -0 $srv 2>/dev/null || { echo "server exited"; cat "$HOME/benchy-serve.log"; exit 1; }
+  kill -0 $srv 2>/dev/null || { echo "server exited"; cat "$LOGS/benchy-serve.log"; exit 1; }
   sleep 1
 done
 echo "server up"

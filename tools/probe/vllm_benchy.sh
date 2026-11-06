@@ -23,6 +23,8 @@ PORT="${PORT:-8012}"
 HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
 NAME="b70-vllm-benchy-$$"
 export PATH="$HOME/.local/bin:$PATH"
+LOGS="$HOME/b70/logs/benchy"   # the container's log: $LOGS/benchy-vllm.log
+mkdir -p "$LOGS"
 spec=()
 if [ "$MTP" != 0 ]; then
   spec=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$MTP}")
@@ -30,8 +32,8 @@ fi
 exec 9>"$HOME/b70-gpu.lock"
 echo "waiting for the GPU lock"; flock 9; echo "lock held"
 uptime
-# Not --rm: the container's log is kept in ~/benchy-vllm.log even when vLLM dies at startup.
-trap 'docker logs "$NAME" > "$HOME/benchy-vllm.log" 2>&1 || true; docker rm -f "$NAME" > /dev/null 2>&1 || true' EXIT
+# Not --rm: the container's log is kept in ~/b70/logs/benchy/benchy-vllm.log even when vLLM dies at startup.
+trap 'docker logs "$NAME" > "$LOGS/benchy-vllm.log" 2>&1 || true; docker rm -f "$NAME" > /dev/null 2>&1 || true' EXIT
 # The HF cache is mounted at its own path as well, so a snapshot dir's blob links resolve.
 # shellcheck disable=SC2086 # VLLM_ARGS is a flag list
 docker run -d --name "$NAME" \

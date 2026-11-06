@@ -172,8 +172,8 @@ pp60000 '$(bench_cmd "$SNAP_AGNES" --prefill-length 60000 --tg 256 --max-len 655
 stage r1.a4 1 manual - agnes - "step 9 (G3): A4 on Agnes against its bf16 reference (oracle in the container, hours of CPU)"
 st_r1_a4() {
   say "tools/oracle/run_in_container.sh 'python3 tools/toolcall/oracle_generate.py <Agnes-AI/Agnes-3.0-Flash snapshot> tests/golden/toolcall-agnes /scratch/agnes-toolcall-ref'"
-  say "flock ~/b70-gpu.lock env ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh $SNAP_AGNES tests/golden/toolcall-agnes ~/agnes-toolcall-out l0-int8"
-  say "python3 tools/toolcall/score.py ~/agnes-toolcall-out bf16 l0-int8-i8head      # recorded beside Qwen3.8's 25/36 (no bar)"
+  say "flock ~/b70-gpu.lock env ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh $SNAP_AGNES tests/golden/toolcall-agnes ~/b70/logs/toolcall/agnes-toolcall-out l0-int8"
+  say "python3 tools/toolcall/score.py ~/b70/logs/toolcall/agnes-toolcall-out bf16 l0-int8-i8head      # recorded beside Qwen3.8's 25/36 (no bar)"
 }
 
 stage r1.prefix_benchy 1 optin gpu-self agnes,uvx - "step 11: llama-benchy prefix caching at depth 4k / 16k / 32k, cache on vs off, through b70-serve"
@@ -2778,7 +2778,7 @@ st_r36_project() {
 # ======================================================================================
 row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve and vLLM through one client, one set of flags, one card - Qwen3.8 int4 g64, every engine served the same way so the rows compare with numbers others publish"
 rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit a server's prefix cache: b70-serve's and vLLM's are on by default), B = A with --no-cache (the fair cross-engine reading), D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
-rownote 41 "Opt-in and timed: run on an idle box (box-day plan Session 6c, after Session 6), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so. vLLM: the recorded baseline's flags (docs/BENCHMARKS.md 'vLLM: how the baseline is served') with --max-num-seqs 8; the version string vllm_benchy.sh prints goes in every vLLM row. r41.vllm_mtp is the MTP-4 + fp8-KV recipe: if the XPU image refuses or crashes on it, record the failure (~/benchy-vllm.log) - no patches."
+rownote 41 "Opt-in and timed: run on an idle box (box-day plan Session 6c, after Session 6), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so. vLLM: the recorded baseline's flags (docs/BENCHMARKS.md 'vLLM: how the baseline is served') with --max-num-seqs 8; the version string vllm_benchy.sh prints goes in every vLLM row. r41.vllm_mtp is the MTP-4 + fp8-KV recipe: if the XPU image refuses or crashes on it, record the failure (~/b70/logs/benchy/benchy-vllm.log) - no patches."
 stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --spec off and --spec auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"
 st_r41_ours() {
   local v="${BENCHY_VERSION:-0.4.0}" a="--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md"
