@@ -155,7 +155,9 @@ class HfTierTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.hot, ".hf-tier-staging")))
 
     def test_empty_bind_point_becomes_link(self):
-        self.run_tool("cold", "o/D")
+        out = self.run_tool("cold", "o/D")
+        if sys.platform.startswith("linux"):
+            self.assertNotIn("falling back", out)  # the swap is one renameat2 exchange
         e = os.path.join(self.hot, "models--o--D")
         self.assertTrue(os.path.islink(e))
         self.assertEqual(read(self.snap(self.hot, "models--o--D", "w.bin")), b"D" * 500)
