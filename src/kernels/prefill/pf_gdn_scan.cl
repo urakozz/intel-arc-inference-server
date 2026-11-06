@@ -1,9 +1,10 @@
 // pf_gdn_scan.cl - `gdn_chunk` part C: the chunk-to-chunk sequential state
 // scan. Three entry points share one file: `pf_gdn_scan` (ruling A27's vector
-// kernel, the default), `pf_gdn_scan_dpas` (ruling A28 option (c)'s DPAS
+// kernel, the default until 2026-09-23), `pf_gdn_scan_dpas` (ruling A28 option (c)'s DPAS
 // kernel - BUILT, MEASURED and REVERTED, kept in-tree and launched by nothing),
-// and the separate D3 experiment `pf_gdn_scan_dpas_split`, selected only by
-// `B70_PREFILL_GDN_SCAN=dpas_split`.
+// and the D3 entry `pf_gdn_scan_dpas_split` - the walk's scan since 2026-09-23 (its
+// selector, B70_PREFILL_GDN_SCAN, went in the zero-config cleanup; the vector entry
+// stays compiled, unbound).
 // It is the only kernel in the GDN family that touches `gdn_state`.
 //
 // ---------------------------------------------------------------------------

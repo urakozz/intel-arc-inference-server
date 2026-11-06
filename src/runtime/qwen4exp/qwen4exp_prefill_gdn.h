@@ -15,8 +15,8 @@
 // a model::ModelDesc (Qwen3.8's ~GB of scratch, its descriptor's GDN shape) and binds pf_gated_head by name.
 // gdn.cc is not edited. The GDN shape is Qwen3.8's (16 k / 48 v heads x 128, 10240 conv channels; the small block's
 // conv / negA / dt_bias at Qwen3.8's offsets: loader::make_small_layout(2560, 10240, 48) == kQwen38Small's GDN part),
-// so Qwen3.8's pf_gdn_conv / pf_gdn_wy / pf_gdn_scan binaries apply as built; the scan and solve entries follow
-// the same process-wide selectors gdn.cc reads (B70_PREFILL_GDN_SCAN, B70_PREFILL_GDN_SOLVE: gdn_scan_entry_name()).
+// so Qwen3.8's pf_gdn_conv / pf_gdn_wy / pf_gdn_scan binaries apply as built; the scan and solve entries are
+// gdn.cc's (gdn_scan_entry_name()).
 //
 // It reads and writes the SAME gdn_state and conv_ring decode's gdn_step uses, in decode's layouts, so decode
 // continues from pos + C with no translation; the gated head's output `y` is the out_proj input.

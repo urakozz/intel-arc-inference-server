@@ -38,8 +38,8 @@ void require(bool ok, const std::string& what) {
 // `B70_PREFILL_SILU_FUSED=0` makes the L0 backend run the old pair -- gate||up
 // into the fp32 [C][34816] `partials`, then `pf_silu_mul` -- instead of the
 // fused epilogue. It exists so that "before and after" is ONE binary and one
-// session rather than two builds, which is the role `B70_PREFILL_GDN_SCAN`
-// played for the scan experiment, and so the ABBA that prices this stage can be
+// session rather than two builds, which is the role the (removed) GDN scan
+// selector played for the scan experiment, and so the ABBA that prices this stage can be
 // taken without rebuilding between arms.
 //
 // The fused path is the DEFAULT and is what every gate runs. The two are
