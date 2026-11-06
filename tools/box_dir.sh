@@ -1,16 +1,19 @@
 # Sourced by tools/box.sh and tools/serve_bench.sh: which tree on the box this
 # checkout syncs to. Several worktrees (one per plan) can work in parallel, and
 # box.sh syncs with --delete, so each line of work needs its own remote tree.
+# Paths are relative to $HOME on the box.
 #
-#   REMOTE_DIR set          that directory, as before (relative to $HOME on the box)
-#   BOX_SUFFIX=spec8a       b70-inference-server-spec8a
+#   REMOTE_DIR set          that directory
+#   BOX_SUFFIX=validate     b70-inference-server-validate (an explicit suffix keeps the
+#                           old top-level name: the validation campaign's tree)
 #   BOX_SUFFIX=none         b70-inference-server (force the base tree)
-#   neither                 the suffix is read from the branch name: a branch
-#                           starting spec<N>[.<M>][<letter>] (spec7a-toolcall-probe,
-#                           spec8-mtp, spec2.1-...) gets -spec7a / -spec8 / -spec2.1;
-#                           research-* gets -research; main (or a detached HEAD)
-#                           the base tree
-#                           b70-inference-server; any other branch b70/trees/<branch>.
+#   neither                 from the branch name, under ~/b70/trees: a branch starting
+#                           spec<N>[.<M>][<letter>] (spec7a-toolcall-probe, spec8-mtp,
+#                           spec2.1-...) -> b70/trees/spec7a / spec8 / spec2.1;
+#                           research-* -> b70/trees/research; any other branch
+#                           -> b70/trees/<branch> (a / becomes -); main (or a detached
+#                           HEAD) -> the base tree b70-inference-server, which also
+#                           holds the golden sets (oracle-out*, never synced over).
 #
 # A new remote tree starts empty: its first `tools/box.sh build` is a full build.
 # GPU work from parallel trees must still take the shared locks (tools/gpu_lock.sh,
@@ -28,13 +31,16 @@ b70_remote_dir() {
   local base="b70-inference-server" suffix="${BOX_SUFFIX:-}" branch
   if [ -z "$suffix" ]; then
     branch="$(git -C "$1" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+    # Every branch but main gets its own tree under ~/b70/trees: nothing new at the top of
+    # the box's $HOME, and the base tree holds the golden sets, so the sync's --delete must
+    # not land there.
     if [[ "$branch" =~ ^(spec[0-9]+(\.[0-9]+)?[a-z]?) ]]; then
-      suffix="${BASH_REMATCH[1]}"
+      printf 'b70/trees/%s\n' "${BASH_REMATCH[1]}"
+      return
     elif [[ "$branch" == research-* ]]; then
-      suffix="research"
+      printf 'b70/trees/research\n'
+      return
     elif [ -n "$branch" ] && [ "$branch" != main ] && [ "$branch" != HEAD ]; then
-      # Any other branch (fix-*, cpu-lane, ...) gets its own tree under ~/b70/trees: the
-      # base tree holds the golden sets and the sync's --delete must not land there.
       printf 'b70/trees/%s\n' "${branch//\//-}"
       return
     fi
