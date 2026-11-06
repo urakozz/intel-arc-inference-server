@@ -4156,3 +4156,9 @@ foreach(_t IN LISTS _b70_test_targets)
     target_sources(${_t} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common/line_buffered_stdout.cc)
   endif()
 endforeach()
+
+# tools/test_launcher.sh names a test's trace after the test.
+get_property(_b70_all_tests DIRECTORY PROPERTY TESTS)
+foreach(_t IN LISTS _b70_all_tests)
+  set_property(TEST ${_t} APPEND PROPERTY ENVIRONMENT B70_TEST_NAME=${_t})
+endforeach()

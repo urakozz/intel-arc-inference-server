@@ -38,6 +38,12 @@ add_custom_target(golden
   VERBATIM)
 
 enable_testing()
+# Every test runs through tools/test_launcher.sh: as it is, or - with B70_TRACE_DIR set (box_validate,
+# box_check) - under strace, so tools/box_validate/reuse.py knows what the test read (a test whose inputs
+# are all unchanged keeps its PASS). The launcher property needs CMake 3.29.
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.29)
+  set(CMAKE_TEST_LAUNCHER "${CMAKE_SOURCE_DIR}/tools/test_launcher.sh")
+endif()
 add_subdirectory(third_party)
 add_subdirectory(src/common)
 add_subdirectory(src/tokenizer)

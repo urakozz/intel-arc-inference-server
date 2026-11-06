@@ -17,6 +17,8 @@
 #   --redo S      run these even if already PASS (`--redo all`); G0's tests are reused by
 #                 later stages, so `--redo g0.suite` is what re-runs a test the suite ran
 #   --force       run past a G0 that has not passed (stop-the-line is the default)
+#   --no-reuse    run every test, even one whose inputs are all unchanged since a recorded PASS
+#                 (by default such a test keeps that PASS: tools/box_validate/reuse.py)
 # Run control:
 #   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
 #                    commit, a86dd86; `--baseline main` when validating a branch before merging)
@@ -66,7 +68,7 @@ ROOT="$PWD"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 die() { echo "box_validate.sh: $*" >&2; exit 2; }
 
-MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
+MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
 BASELINE_REF="${BASELINE_REF:-ce36d2d}" STATE_NAME=""
 need() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
@@ -81,6 +83,7 @@ while [ $# -gt 0 ]; do
     --skip) need "$@"; SKIP="$SKIP,$2"; shift 2 ;;
     --redo) need "$@"; REDO="$REDO,$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
+    --no-reuse) NO_REUSE=1; shift ;;
     --baseline) need "$@"; BASELINE_REF="$2"; shift 2 ;;
     --state) need "$@"; STATE_NAME="$2"; shift 2 ;;
     --no-wait) WAIT=0; shift ;;
@@ -166,7 +169,7 @@ q() { printf '%q' "$1"; }
 remote_env() {
   local s
   s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
-  s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_REDO=$(q "$REDO_IDS")"
+  s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_REDO=$(q "$REDO_IDS")"
   local v
   for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
            A4_REF_DIR ORACLE_IMAGE G0_BITWISE_RE G0_ALLOW_REMOVED R10_RUNS R2_ROUNDS R8_DRAFT_VOCAB \

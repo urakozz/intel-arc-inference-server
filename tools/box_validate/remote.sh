@@ -29,7 +29,7 @@
 # and progress.log (one line per event, tagged [d<DEVICE>]), meta-<DEVICE>.env (shas, trees,
 # times of this device's launch).
 # Env (from the driver): BV_TREE_LABEL, BV_BASE, BV_DATA, BV_REDO ("id ..." | all),
-#   BV_FORCE, B70_GIT_SHA, BV_BASE_SHA, BV_BASE_REF, JOBS, CMAKE_ARGS, DEVICE, PORT, SNAP_*.
+#   BV_FORCE, BV_NO_REUSE, B70_GIT_SHA, BV_BASE_SHA, BV_BASE_REF, JOBS, CMAKE_ARGS, DEVICE, PORT, SNAP_*.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 TREE="$PWD"
