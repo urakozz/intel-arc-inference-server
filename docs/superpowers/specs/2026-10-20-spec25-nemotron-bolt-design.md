@@ -1,5 +1,7 @@
 # Spec 25 - NVIDIA Nemotron 3.5 Bolt 74B-A9B (text only) in the engine
 
+> **Zero-config cleanup (operator 2026-11-06):** `b70-serve`'s `--chat-template` and `--generation-config` were removed: the snapshot's files (or the published defaults) are used.
+
 **Status:** design, 2026-10-20, approved by the operator 2026-10-20. Decisions are marked **Decision N** with their
 cost if wrong and collected in §12. 25a is built on the Mac (§13: the reference, B1 on tiny models; no real
 weight read yet); 25b is built on the Mac (§14: the descriptor, the loader, the plan; no card); 25c is built on the Mac (§15: P0's

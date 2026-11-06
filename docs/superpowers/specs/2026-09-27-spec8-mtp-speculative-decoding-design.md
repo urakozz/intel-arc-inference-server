@@ -1,5 +1,7 @@
 # Spec 8 - MTP speculative decoding, greedy and sampled
 
+> **Zero-config cleanup (operator 2026-11-06):** `--mtp off|K|auto`, `--mtp-max` and `--mtp-cost` became `--spec auto|off|mtp` with one cap, `--spec-max K`; `--spec mtp` is the adaptive K of §10 (capped at K) on the Qwen family, `b70-serve`'s default through `--spec auto`, and the cost table is the int8 head's, fixed.
+
 **Status:** design, 2026-09-27, for operator review.
 
 **Order, set by the operator:** spec 5 (int8 prefill linears) is the

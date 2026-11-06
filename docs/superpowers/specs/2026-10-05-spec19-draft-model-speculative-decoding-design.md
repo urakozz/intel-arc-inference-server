@@ -1,5 +1,7 @@
 # Spec 19 - speculative decoding with a draft model
 
+> **Zero-config cleanup (operator 2026-11-06):** `--draft-format` (int8 at load), `--spec-cost`, `--spec-min-match` (3) and `--spec-history` were removed; `--spec dflash` takes `--spec-max` and `--draft-model` only.
+
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 
 **Status (2026-10-27):** 19a-19e merged; 19b-19d built blind and **not yet passing on the card** (`r54.kernels` failed

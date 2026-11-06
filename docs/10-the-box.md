@@ -114,13 +114,9 @@ under a benchmark.
 
 The contract is in [04-architecture.md](04-architecture.md) and it is worth
 repeating here because it is the thing that silently invalidates a measurement:
-
-1. `--device N` wins.
-2. `ONEAPI_DEVICE_SELECTOR=level_zero:N` is the fallback; the Level Zero path parses
-   it itself, because Level Zero does not read it.
-3. `ZE_AFFINITY_MASK` sits underneath both as a driver-level filter on which
-   devices are enumerated at all. Under a mask, every index above refers to the
-   masked view.
+the CLIs have no device flag; `ZE_AFFINITY_MASK` decides which cards the driver
+enumerates, one card is device 0 of that view, two are devices 0 and 1
+(`ZE_AFFINITY_MASK=1` runs on the second card alone).
 
 **The two cards are not interchangeable.** Same binary, same checkpoint, same
 ten minutes: prefill loses 3.2% to 3.4% on the second card while decode loses

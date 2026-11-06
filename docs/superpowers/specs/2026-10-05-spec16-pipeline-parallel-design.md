@@ -1,5 +1,7 @@
 # Spec 16 - pipeline parallel over two B70s
 
+> **Zero-config cleanup (operator 2026-11-06):** `--pp 1|2` / `--pipeline-parallel-size` became `--parallel auto|1|pp` (auto: one card when the model and the context fit, else pp); `--device` and `ONEAPI_DEVICE_SELECTOR` were removed (a hardware gate checks one or two B70s with peer access); the load-time weight move (16b's Mover) copies card to card instead of through a host staging buffer.
+
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 16b (decode) built blind 2026-10-06, before 16a's probe: §8. 16c (the prefill chunk pipeline) built
 blind 2026-10-06 on top of it: §9. 16d (b70-serve --pp 2, MTP across the split, P3 / S3 as box

@@ -106,7 +106,7 @@ requant is the one cost here that is not matrix math.
 - (done) **Flash attention and 128k context**, spec 6, on top of this path:
   pp4096 2125.12 t/s (docs/BENCHMARKS.md, "Flash attention and 128k").
 - (done) **Prefix caching** (spec 7), **MTP** (spec 8) and the other proposers (DFlash, lookup) work on
-  either prefill backend; `--pp 2` (spec 16) splits the prefill across both cards with the same backends.
+  either prefill backend; `--parallel pp` (spec 16) splits the prefill across both cards with the same backends.
 - **Where it does not apply:** `l0-int8` rotates in whole 1024-column Hadamard blocks, so a model whose hidden
   size is not a multiple of 1024 (Kolibri-1's 2560, Flash-Next's 2560) refuses it, and on a mixture-of-experts
   model such as Ornith it costs routing accuracy (a near-tie between two experts can flip), so there it is

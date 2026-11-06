@@ -1,5 +1,7 @@
 # Spec 21 - the `qwen4_exp` family (Qwen3.8-Flash-Next) in the engine
 
+> **Zero-config cleanup (operator 2026-11-06):** `--ple-dir` / `B70_Q4_PLE` (the PLE file is `<snapshot>-ple-int8/` only), `--tokenizer` (the snapshot's file is served; Intel's checkpoint is refused) and `B70_Q4_MTP_SELECT` (reuse only) were removed; MTP is `--spec mtp --spec-max K` (a fixed K).
+
 **Status:** design, 2026-10-09; the operator approved the design on 2026-10-08 (§0 records what was ruled).
 Open decisions are marked **(decide)**. Nothing is built.
 **Plans (2026-10-09, after the operator's approval that day; 21a built on the Mac, §12; 21b built on the Mac, §13; 21c built on the Mac, §14; 21d built on the Mac, §15; 21e built on the Mac, §16):** `docs/superpowers/plans/2026-10-09-spec21{a,b,c,d,e,q}-*.md` - 21a reference, 21b descriptor / loader / formats, 21c decode, 21d prefill, 21e serving and MTP, 21q our AutoRound run; box queue rows 30-34.

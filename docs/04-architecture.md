@@ -49,7 +49,7 @@ LFM2.5, Muse and LiLiCorr were dropped on 2026-10-27; Flint (spec 27) and Nanbei
 Per-model status and commands: [18-running-models.md](18-running-models.md).
 
 Two cross-cutting pieces sit on top of the decode and prefill paths. **Pipeline parallel**
-(`--pp 2`, spec 16) splits a model's layers across both cards, so each holds about half and the
+(`--parallel pp`, spec 16) splits a model's layers across both cards, so each holds about half and the
 context can be longer; the prefix cache and the MTP head work across the split. **Speculative decoding**
 (`--spec mtp|lookup|dflash|dflash-lookup`, specs 8, 19, 19e, 19f) checks several guessed tokens in one
 verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
@@ -196,21 +196,19 @@ have no such problem: their state is fixed-size.
 
 ### Device selection
 
-`--device N` is the single authoritative knob, and it governs **both** execution
-paths so they always land on the same physical card. The precedence contract,
-top wins:
+There is no device flag (the zero-config cleanup, operator 2026-11-06, removed
+`--device` and the `ONEAPI_DEVICE_SELECTOR` parse): the CLIs run on the cards the
+driver shows - one card is device 0, two are devices 0 and 1 (`--parallel pp`).
+**`ZE_AFFINITY_MASK`**, a Level Zero *driver*-level filter, decides which cards
+are enumerated at all; we respect it and never set it, and under a mask every
+index refers to the masked view (`ZE_AFFINITY_MASK=1` runs on the second card as
+device 0).
 
-1. **`--device N`** - selects GPU `N`.
-2. **`ONEAPI_DEVICE_SELECTOR=level_zero:N`** - the default when the flag is
-   absent. Level Zero does not read it, so the engine parses it itself.
-3. **`ZE_AFFINITY_MASK`** - a Level Zero *driver*-level filter underneath both:
-   it restricts which devices are enumerated at all. We respect it and never set
-   it. Note that under a mask, `--device` and selector indices refer to the
-   masked view, which is the same re-numbering the driver gives everyone.
-
-The gotcha worth stating plainly: a machine with two cards will not necessarily
-give you the same one twice unless the selection is expressed once and shared.
-Two selectors that happen to agree today are not a contract.
+Before any weight is read, the hardware gate (`cli/hardware_check.h`) checks what
+the driver shows: one or two Intel Arc Pro B70s (vendor 0x8086, device id 0xE223;
+the B65 and B60 are refused as not yet tested), the Xe-core count the kernels are
+built for (32), and peer access both ways when there are two. The fit checks that
+run before a device opens use the memory the gate read from the cards.
 
 ### What makes this hard
 

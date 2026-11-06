@@ -1,5 +1,7 @@
 # Prefill parity program - the ordered work to vLLM and beyond
 
+> **Zero-config cleanup (operator 2026-11-06):** the GDN scan / solve selectors (`B70_PREFILL_GDN_SCAN`, `B70_PREFILL_GDN_SOLVE`), `B70_PREFILL_SILU_FUSED` and `B70_PREFILL_REPLAY` were removed: dpas_split, the vector solve and the fused SiLU are the only prefill paths.
+
 **Status:** design, 2026-09-22, for operator review. Supersedes the *ordering* in
 `2026-09-22-gdn-solve-register-design.md`; that document remains the design of
 one stage (S4) and is amended, not withdrawn.

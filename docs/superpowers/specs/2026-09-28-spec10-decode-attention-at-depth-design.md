@@ -1,5 +1,7 @@
 # Spec 10 - decode attention at depth
 
+> **Zero-config cleanup (operator 2026-11-06):** decode attention v1 (`B70_DECODE_ATTN=v1`) was removed; v2 is the only decode attention (the v1 kernels attn_v2_test and attn_test compare against stay test-only).
+
 **Status:** design, 2026-09-28, for operator review.
 
 **Order:** after spec 8 (MTP) and spec 9 (`lm_head`) in the operator's queue.

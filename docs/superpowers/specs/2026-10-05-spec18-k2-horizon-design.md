@@ -1,5 +1,7 @@
 # Spec 18 - K2-Horizon MoVA 36B-A4B, the second MoE model
 
+> **Zero-config cleanup (operator 2026-11-06):** the eager attention arm (`B70_K2_ATTN=eager`) was removed; flash is K2's only attention (the f32 judge decided). The host eager chain (`k2_ref.h`) stays as Kolibri's and Bolt's reference.
+
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 
 **Model:** [`urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`](https://huggingface.co/urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ)

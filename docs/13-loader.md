@@ -884,7 +884,7 @@ in `tests/loader/ct/`.
 - **The MTP head's bf16 experts** (both checkpoints ship `mtp.*` bf16) are RTN-quantised to int4 g64 at
   load (`rtn_int4_g64`, spec 15e's precedent: the head only drafts), until decision 6.
 - **The PLE table** is not in device memory. The checkpoint's 128 bf16 shards are skipped by design; the
-  engine reads `<snapshot>-ple-int8/` (or `$B70_Q4_PLE`), made once by `tools/quantize/qwen4exp/ple_int8.py`:
+  engine reads `<snapshot>-ple-int8/` (the only place since the zero-config cleanup), made once by `tools/quantize/qwen4exp/ple_int8.py`:
   per n-gram head `ple.h<h>.q` I8 `[prime_h][160]` and `ple.h<h>.s` BF16 / F32 `[prime_h]` (spec 9's row
   rule), the three I64 constants. A checkpoint without the file is refused naming the converter's command.
   Both the checkpoint's and the file's I64 tensors are held to the formula (`qwen4exp_ple_hash.h`, exact
@@ -894,15 +894,15 @@ in `tests/loader/ct/`.
   data (the alias check), copies the rows, compares sampled rows, and uploads the device pointer table the
   gather (21c) indexes.
 - **Names both ways**: every tensor is read once or skipped by design and counted - `model.visual.*`, the
-  PLE shards, `mtp.*` without `--mtp`, the later layers with `--layers N` (N >= 2: the PLE layer is 1).
+  PLE shards, `mtp.*` without the MTP head, the later layers with `--layers N` (N >= 2: the PLE layer is 1).
 - **The plan before the first allocation**: `runtime::qwen4exp::plan` + `require_fits` (weights + persistent
   state; the full model is refused naming spec 22's expert-offload tier).
 - **Serving (spec 21e) adds no loader code.** `b70-serve` loads through `load_qwen4exp` as `b70-decode` does
-  (`--layers N`, `--ple-dir`; `mtp = true` with `--mtp K` or `--spec lookup`, the head's bf16 experts RTN int4 g64 as
+  (`--layers N`; `mtp = true` with `--spec mtp` or `--spec lookup`, the head's bf16 experts RTN int4 g64 as
   above), and the planner counts the head's buffers (Intel's forms at 32768: 18 layers on one card and 37 on two with
   the head, decode-only). The one file it checks besides the weights is `tokenizer.json`: the served file must be
-  the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and takes
-  `--tokenizer FILE`.
+  the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it (the
+  snapshot's own file is the only one served).
 
 ## Nemotron 3.5 Bolt (spec 25b): the exact relaxations, signed scales, one layout from two sources
 
@@ -972,8 +972,8 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   published index's 112,091 language names exactly (+ 849 vision) - the typed pattern and the typed (E, I) table are the
   real ones.
 - **The untied head.** `language_model.lm_head.weight` is its own bf16 tensor: the int8 head (spec 9, Decision 18) is
-  quantised from it on the last device, or its own bf16 tiles are uploaded (`--lm-head bf16`: 1,073,741,824 B against the
-  int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica).
+  quantised from it on the last device, or its own bf16 tiles are uploaded (the tests' bf16 form: 1,073,741,824 B against
+  the int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica).
 - **The memory plan before the first allocation** (`runtime::bolt::plan`, `src/runtime/bolt/`): per device its blocks'
   weights (the loader asserts its allocation equals `loader::bolt::device_weight_bytes`), KV for its attention blocks at
   `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds, the
@@ -990,7 +990,7 @@ refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is writte
   vision-language model and this project serves text only (doc 03).
 - **`mtp.*`** (15 tensors, 0.849 GB on the published checkpoint; 29 on the
   self-quantised one) - skipped unless the caller asks for the head
-  (`load(..., mtp = true)`; `b70-serve --mtp K`, spec 8). Without it the skip
+  (`load(..., mtp = true)`; `--spec mtp`, spec 8). Without it the skip
   is counted in the report, which is how that stays a decision rather than an
   oversight. The self-quantised checkpoint's 29-tensor head is refused by name.
 - **`*.qzeros`, `*.g_idx`** (800 tensors, 0.202 GB) - fully scanned to prove the

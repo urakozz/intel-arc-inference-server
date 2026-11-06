@@ -1,5 +1,7 @@
 # Spec 6 - fused flash attention in prefill, and 128k context
 
+> **Zero-config cleanup (operator 2026-11-06):** the composed prefill attention (`B70_PREFILL_ATTN=composed`) was removed; flash is the only prefill attention. `--mem-reserve-gb` became the engine's constant (1.5 GB).
+
 **Status:** design, 2026-09-25; implemented 2026-09-26 (plans 6a, 6b). Results and
 the operator's rulings are in §8.
 

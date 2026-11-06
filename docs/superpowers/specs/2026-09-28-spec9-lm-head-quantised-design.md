@@ -1,5 +1,7 @@
 # Spec 9 - a quantised `lm_head`, made at load from the bf16 checkpoint
 
+> **Zero-config cleanup (operator 2026-11-06):** `--lm-head` was removed: both CLIs run the int8 head; `loader::LmHeadForm` stays the tests' seam for the checkpoint's bf16 head.
+
 **Status:** design, 2026-09-28; **operator ruling the same day: int8, not int4** (§2).
 
 **Order:** after spec 8 (MTP) in the operator's queue; independent of it in

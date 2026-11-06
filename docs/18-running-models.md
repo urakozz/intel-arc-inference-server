@@ -34,17 +34,17 @@ in [open-work.md](open-work.md); the queue itself is
 |---|---|---|---|---|---|---|
 | checkpoint | published | published | published (spec 15 §13) | published | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); ours not made (21q) |
 | `b70-serve` | yes | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22) |
-| `b70-serve --pp 2` (two cards, spec 16d) | yes | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
-| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (`--pp 2`, the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), `--pp 1` or `2` |
+| `b70-serve --parallel pp` (two cards, spec 16d) | yes | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
+| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), one card or `--parallel pp` |
 | speed rows in BENCHMARKS | yes | no | no | no | no | no |
-| MTP head (`--mtp`) | yes | yes | yes (MoE head) | none | none | `b70-serve --mtp 1..3` (spec 21e; `auto` refused until spec 22's numbers); `b70-decode` refuses it |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (spec 21e; `auto` = off until spec 22's numbers); `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19c / 19d) | yes, one card or `--pp 2` (copy hand-off), bf16 KV | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
+| `--spec dflash` (spec 19c / 19d) | yes, one card or `--parallel pp` (copy hand-off), bf16 KV | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, its accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
-| `--max-len auto`, int8 head (derived) | ~201k; ~170k with `--mtp` | ~140k; ~114k with `--mtp` | 262144, with or without `--mtp` | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
-| with `--kv-cache int8` (derived) | 262144, with or without `--mtp` | 262144; ~226k with `--mtp` | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
+| `--max-len auto`, int8 head (derived) | ~170k with MTP (the default); ~201k with `--spec off` | ~114k with MTP; ~140k with `--spec off` | 262144, with or without MTP | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
+| with `--kv-cache int8` (derived) | 262144, with or without MTP | 262144; ~226k with MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the
 32.53 GB card; the reserve itself is an estimate the box has not confirmed, and nothing
@@ -64,14 +64,27 @@ Both CLIs then take the repo id (looked up under `$HF_HOME`, default
 `~/.cache/huggingface`) or a snapshot directory. The model is chosen from the
 checkpoint's `config.json`; there is no model flag.
 
-**Which card.** `--device N`, else `ONEAPI_DEVICE_SELECTOR=level_zero:N`, else device 0.
-`ZE_AFFINITY_MASK=N` hides the other cards from the process instead.
+**What you choose, what the engine decides** (the zero-config cleanup, operator 2026-11-06). You
+choose the model, the speculative decoding (`--spec`, default `auto`: the model's validated
+proposer), the context length (`--max-len`) and the parallel mode (`--parallel auto|1|pp`, default
+`auto`: one card when the model and the context fit it, else two; `--pipeline-split` overrides the
+cut). The engine decides the rest - the int8 `lm_head`, the memory it leaves free (1.5 GB), the
+draft model's form (int8), the speculative cost tables, the served name (the repo id), the tokenizer,
+chat template and generation defaults (the snapshot's) - and refuses at startup, by name, what does
+not fit or is not built.
+
+**Which cards.** One or two Intel Arc Pro B70s (PCI id 0xE223), with peer access between them when
+there are two: the hardware gate checks the vendor, the device id, the Xe-core count and peer access
+before any weight is read (the Arc Pro B65 and B60 are refused as not yet tested on this box; more
+than two cards are refused). One card is device 0, two are devices 0 and 1 of what
+`ZE_AFFINITY_MASK` shows - `ZE_AFFINITY_MASK=1` runs on the second card alone.
 
 **One model per server process.** The prefix cache (`--prefix-cache-gb`, system RAM, on
 by default) belongs to that process and that model.
 
 **Connecting a client.** `b70-serve` is OpenAI compatible: point the client (opencode or
-any other) at `http://<host>:8000/v1` and use the `--served-name` as the model name. For
+any other) at `http://<host>:8000/v1`; the server lists the model under its repo id (or the
+snapshot directory's name) and answers to any model name in a request. For
 agentic sessions with a thinking model, add `--prefix-split-last` so each turn restores
 exactly where the next one diverges (README, `b70-serve` flags).
 
@@ -79,7 +92,7 @@ exactly where the next one diverges (README, `b70-serve` flags).
 server (no `--prefix-split-last`; it is for sessions, not benchmarks):
 
 ```sh
-uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model <served-name> \
+uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model <repo id> \
     --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation
 ```
 
@@ -100,12 +113,13 @@ python3 tools/oracle/tokenize.py <snapshot> decode $(cat out.ids)
 `tests/golden/prompts/{prose,code,cjk}.ids` are ready-made ids for the Qwen tokenizer
 (Qwen3.8 and Agnes share it).
 
-**Two cards (`--pp 2`, spec 16).** Qwen3.8, Agnes and Ornith run with their layers split over
-GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows: `b70-decode --pp 2` (decode, spec 16b; the
-two-card prefill with `--prefill`, spec 16c; `--mtp`, spec 16d) and `b70-serve --pp 2` (spec
-16d, everything the server does on one card). One answer is not faster on two cards; each card
+**Two cards (`--parallel pp`, spec 16).** Qwen3.8, Agnes and Ornith run with their layers split over
+GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows: `b70-decode --parallel pp` (decode, spec 16b; the
+two-card prefill with `--prefill`, spec 16c; `--spec mtp`, spec 16d) and `b70-serve --parallel pp` (spec
+16d, everything the server does on one card); `--parallel auto` picks two cards by itself when the
+model and the asked `--max-len` do not fit one. One answer is not faster on two cards; each card
 holds about half the model, so `--max-len auto` reaches the trained 262144 tokens on every one
-of them (derived, int8 head; with `--mtp` too), and a long prompt prefills ~1.8x faster
+of them (derived, int8 head; with MTP too), and a long prompt prefills ~1.8x faster
 (derived). The MTP head runs on the second card with its own copy of the embedding (2.54 GB).
 K2-Horizon is one card only; Kolibri-1 runs on two cards by default in `b70-decode` (spec 20c / 20d)
 and `b70-serve` (spec 20e, its own engine). Its box test rows (22, 23, 27, 28) are partly open (`open-work.md`); the speed
@@ -115,21 +129,21 @@ of the two-card prefill (row 23) is not measured:
 # every command below: no speed row yet
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 # an agentic session over both cards: 262144 tokens with MTP (derived; one card: ~170k)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --served-name qwen \
-    --pp 2 --prefix-split-last --mtp auto
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --parallel pp --prefix-split-last
+# the same by itself: --parallel auto takes two cards when 262144 does not fit one
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --max-len 262144 --prefix-split-last
 # the same with the int8 KV cache and the peer hand-off (both cards ~16 GB, derived)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen --pp 2 --mtp auto \
-    --kv-cache int8 --pipeline-handoff peer
-# Agnes over two cards: 262144 instead of ~140k (derived)
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --parallel pp --kv-cache int8 --pipeline-handoff peer
+# Agnes over two cards: 262144 instead of ~114k (derived)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ \
-    --served-name agnes --pp 2 --prefix-split-last --mtp auto
+    --parallel pp --prefix-split-last
 # b70-decode: the same ids as one card, greedy, with MTP across the split
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 \
-    --prefill --lm-head int8 --pp 2 --mtp 3
+    --prefill --parallel pp --spec mtp
 ```
 
-Startup prints the split (`split: auto -> N`), the plan per card and both cards' memory lines.
-Not with `--device` or `B70_PREFILL_ATTN=composed`.
+Startup prints the split (`split: auto -> N`), the plan per card and both cards' memory lines
+(and `parallel: auto -> ...` when `auto` chose).
 
 ## Speculative decoding and how its output is judged
 
@@ -158,58 +172,57 @@ layers (48 delta net, 16 attention), int4 g64, bf16 `lm_head` and MTP head in th
 **On the card (measured):** decode (29.45 t/s at depth 4096 with the bf16 head, 31.21 t/s
 with the int8 head; 20.1 t/s at 128k), prefill (2125.12 t/s at 4096), the 131072
 context (28.1 GB) with passkey at 5 / 50 / 95 % of 120k, the prefix cache and
-`--prefix-split-last` (a turn at 60k of history in 1.23 s), the int8 `lm_head` (serving
-default), decode attention v2, `--mtp 1|2|3` at `--max-len 16384`, the golden gates and
-the tool-call set.
+`--prefix-split-last` (a turn at 60k of history in 1.23 s), the int8 `lm_head` (the only head
+the CLIs run since the zero-config cleanup), decode attention v2, MTP at a fixed K 1 / 2 / 3 at
+`--max-len 16384`, the golden gates and the tool-call set.
 
 **Never run on the card:** `--max-len auto` (the `b70-serve` default; row 7),
-`--prefix-cache-gb auto` (the default; row 9), `--mtp auto` (row 2), MTP above 16384
-(row 6), `b70-decode --mtp` (row 6), `--draft-vocab` (row 8), `--kv-cache int8` (row 11),
-`--spec lookup` (row 12).
+`--prefix-cache-gb auto` (the default; row 9), the adaptive MTP of `--spec auto` (the `b70-serve`
+default; row 2), MTP above 16384 (row 6), `b70-decode --spec mtp` (row 6), `--draft-vocab` (row 8),
+`--kv-cache int8` (row 11), `--spec lookup` (row 12).
 
 ```sh
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 # agentic session, the configuration that has run on the card: 131072 context, an explicit
-# prefix cache size (spec 7 measured 32 GiB; pick what your RAM allows), int8 head (default)
-./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --served-name qwen3.8 \
-    --max-len 131072 --prefix-cache-gb 32 --prefix-split-last
+# prefix cache size (spec 7 measured 32 GiB; pick what your RAM allows), no proposer
+./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 \
+    --max-len 131072 --prefix-cache-gb 32 --prefix-split-last --spec off
 
-# the intended default for agentic use: the largest context that fits (~201k, derived),
-# the cache sized from the machine's RAM, MTP choosing 0-3 guesses per step (~170k)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --mtp auto    # no speed row yet
+# the default for agentic use: the largest context that fits beside the MTP head (~170k, derived),
+# the cache sized from the machine's RAM, MTP choosing 0-3 guesses per step
+./build/src/cli/b70-serve $Q --prefix-split-last                                   # no speed row yet
 
 # the full trained context, 262144, with the int8 KV cache (accuracy gates pending)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --mtp auto \
-    --kv-cache int8                                                                     # no speed row yet
+./build/src/cli/b70-serve $Q --prefix-split-last --kv-cache int8                   # no speed row yet
 
 # prompt lookup instead of the MTP guesses (one proposer per server)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last --spec lookup  # no speed row yet
+./build/src/cli/b70-serve $Q --prefix-split-last --spec lookup                     # no speed row yet
 ```
 
 ```sh
-# the BENCHMARKS.md rows: prefill 4096, then decode 256 at that depth (bf16 head, byte-matched with vLLM)
+# the BENCHMARKS.md rows: prefill 4096, then decode 256 at that depth (the int8 head; the
+# byte-matched bf16-head rows predate the zero-config cleanup)
 ./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256 --lm-head int8        # the serving head
 ./build/src/cli/b70-decode $Q --bench --depth 4096 --tg 256 --max-len 131072  # decode at a deep cache
 
 # greedy ids in, ids out
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
-./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --mtp auto  # no speed row yet
+./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --spec mtp  # no speed row yet
 
 # per-launch anatomy of the decode step
 ./build/src/cli/b70-decode $Q --profile --depth 4096 --steps 32 --repeats 5
 ```
 
-**Limits.** The trained context is 262144; with the bf16 KV cache the card holds ~201k
-(derived) and 131072 is the largest length measured. `--kv-cache int8` needs the `l0` or
-`l0-int8` prefill and decode attention v2. MTP above 16384 and the `--mtp auto` cost table
-for the int8 head are derived, not measured. `b70-decode` keeps `--max-len 16384` and the
-bf16 head by default so its rows stay comparable.
+**Limits.** The trained context is 262144; with the bf16 KV cache one card holds ~201k plain and
+~170k with the MTP head (derived) and 131072 is the largest length measured. `--kv-cache int8`
+needs the `l0` or `l0-int8` prefill. MTP above 16384 and the adaptive MTP's cost table for the
+int8 head are derived, not measured. `b70-decode` keeps `--max-len 16384` and `--spec off` by
+default so its rows stay comparable.
 
-**Relevant variables:** `B70_KV_CACHE`, `B70_DECODE_ATTN` (`v1` only for A/B against the old
-pair), the `B70_PREFILL_*` switches for prefill experiments, `B70_GIT_SHA` for bench rows.
+**Relevant variables:** `B70_KV_CACHE`, `B70_PREFILL_PROFILE` for prefill phase timings,
+`B70_GIT_SHA` for bench rows.
 
 ### DFlash draft model (spec 19) - on the card since 2026-10-27
 
@@ -223,23 +236,23 @@ Since spec 28d the drafter's int8 linears run on the small-batch GEMM `gemm_sm_i
 
 ```sh
 # one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
-./build/src/cli/b70-serve $Q --served-name qwen3.8 --prefix-split-last \
+./build/src/cli/b70-serve $Q --prefix-split-last \
     --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2                 # no speed row yet
 # two cards: the drafter on the second card beside lm_head (the copy hand-off only)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --served-name qwen3.8 --pp 2 \
-    --spec dflash                                                         # no speed row yet
-# greedy at a fixed K without the server (one card)
-./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill --lm-head int8 \
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --parallel pp --spec dflash   # no speed row yet
+# greedy without the server (one card), K <= 7 per step
+./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill \
     --spec dflash --spec-max 7                                            # no speed row yet
 ```
 
-- **Defaults (spec 19 §12, chosen from P0):** `--draft-format int8` (P0: int8 = bf16 acceptance at half the bytes),
+- **Defaults (spec 19 §12, chosen from P0):** the drafter quantised to int8 at load (P0: int8 = bf16 acceptance at half the
+  bytes; the zero-config cleanup removed `--draft-format`),
   `--spec-max 7` (the drafter's block; P0's acceptance still rises at K = 7 on tool calls and code, and the per-request
   policy drops K on prose), `--draft-vocab off` (P0's free-looking ranked 32k was ranked in-sample; by id it loses up to
-  1.4 tokens at K = 7 - r56.d5_dv measures it). `--spec` stays unset (= `--mtp`'s meaning): `dflash` becomes Qwen3.8's
-  default only if it beats `--mtp auto` by >= 10 % on the opencode recording (D5, r56.d5_opencode).
-- **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `B70_DECODE_ATTN=v1`,
-  `B70_PREFILL_REPLAY=1`, `--pp 2 --pipeline-handoff peer`, `b70-decode --pp 2`, every other model.
+  1.4 tokens at K = 7 - r56.d5_dv measures it). `--spec auto` stays the adaptive MTP: `dflash` becomes Qwen3.8's
+  `auto` only if it beats the adaptive MTP by >= 10 % on the opencode recording (D5, r56.d5_opencode).
+- **Refused, by name:** `--kv-cache int8` (kv8.cl is built for M <= 4), `--parallel pp --pipeline-handoff peer`,
+  `b70-decode --parallel pp`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot (spec 19 decision 5 as ruled in 19d), so a
   conversation restored from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one; the store
   is keyed by the drafter. **Caveat:** a snapshot at a block end inside a long prefill holds the ring as that prefill
@@ -281,22 +294,21 @@ uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-G
 A=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
 
 # every command below: no speed row yet
-# agentic session: ~140k context (derived), ~114k with --mtp auto
-./build/src/cli/b70-serve $A --host 0.0.0.0 --port 8000 --served-name agnes \
-    --prefix-split-last --mtp auto
+# agentic session: ~114k context with MTP, the default (derived); ~140k with --spec off
+./build/src/cli/b70-serve $A --host 0.0.0.0 --port 8000 --prefix-split-last
 
-# the full 262144 needs the int8 KV cache (~226k with --mtp auto, derived)
-./build/src/cli/b70-serve $A --served-name agnes --prefix-split-last --kv-cache int8
+# the full 262144 needs the int8 KV cache (~226k with MTP, derived) or two cards
+./build/src/cli/b70-serve $A --prefix-split-last --kv-cache int8
 
 ./build/src/cli/b70-decode $A --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $A --bench --depth 4096 --tg 256 --lm-head int8
+./build/src/cli/b70-decode $A --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $A --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
 ```
 
 **Limits.** Without `--kv-cache int8`, ~140k is the most that fits (derived; the old fixed
 65536 ceiling is gone). `--kv-cache int8` uses Qwen3.8's binaries (same attention shape),
-whose accuracy gates are pending. MTP and `--spec lookup` load the head (+0.85 GB of weights
-plus its buffers), which is where the ~114k comes from.
+whose accuracy gates are pending. MTP (the `--spec auto` default) and `--spec lookup` load the
+head (+0.85 GB of weights plus its buffers), which is where the ~114k comes from.
 
 **Relevant variables:** as for Qwen3.8.
 
@@ -328,10 +340,9 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 # every command below: no speed row yet
 # agentic session: the full trained context, 262144, fits with or without MTP (derived)
-./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --served-name ornith \
-    --prefix-split-last --mtp auto
+./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --prefix-split-last
 
-./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256 --lm-head int8
+./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256 --prefill-backend l0
 ./build/src/cli/b70-decode $O --ids prompt.ids --n 64 --prefill > out.ids
@@ -347,10 +358,7 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
   bf16 reference's 1140), and no 8-bit activation scheme studied won it back, so its accuracy gates are
   diagnostic - printed, not gated (operator ruling 2026-10-31); use it for speed only. Its kernels'
   own gate (`prefill_gate_ornith_l0-int8`, judged by the quantisation-aware f32 reference) still binds.
-  Decode attention `v1`
-  (`B70_DECODE_ATTN=v1`) and the composed prefill attention (`B70_PREFILL_ATTN=composed`)
-  are not built for Ornith.
-- `--mtp auto` decides with Qwen3.8's cost table until the card measures Ornith's (the
+- The adaptive MTP (`--spec auto`) decides with Qwen3.8's cost table until the card measures Ornith's (the
   startup line says so); no default K is chosen for Ornith. The head's bf16 experts are
   quantised to int4 at load (round to nearest), which can change acceptance, never output.
 - The checkpoint's `tokenizer.json` defines Qwen3.8's 248077 ids, the count the greedy
@@ -359,7 +367,7 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
   combining marks differently from the bf16 base checkpoint's file (`\p{M}`), which only
   text with combining marks sees.
 
-**Relevant variables:** `B70_KV_CACHE` must stay `bf16`; the `B70_PREFILL_*` switches apply.
+**Relevant variables:** `B70_KV_CACHE` must stay `bf16`; `B70_PREFILL_PROFILE` applies.
 
 ## K2-Horizon MoVA-36B-A4B
 
@@ -387,42 +395,38 @@ python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
 
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32                    # decode only, one replay per id
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill          # prefill on l0
-./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8
+./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $K --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill --max-len auto   # ~43k, derived
-
-# the reference-rounding attention, for the A/B the box will run
-B70_K2_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
+./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill --max-len auto   # ~46k, derived
 
 # serving (spec 18d): int8 head, prefix cache on, --max-len auto (~46k bf16 KV, ~90k int8 KV)
-./build/src/cli/b70-serve $K --served-name k2 --port 8000
-./build/src/cli/b70-serve $K --served-name k2 --kv-cache int8
+./build/src/cli/b70-serve $K --port 8000
+./build/src/cli/b70-serve $K --kv-cache int8
 # K2's template variables per request: "chat_template_kwargs": {"tool_call_format": "xml" |
 # "xml_typed" | "json", "reasoning_effort": "high" | "medium" | "low"}
 ```
 
 **Limits.**
 
-- Served on one card only (no `--pp` in the server), no llama-benchy row yet (queue row 25).
-  `b70-serve` refuses `--mtp`, `--spec mtp` / `lookup` and a non-`l0` `--prefill-backend` by name.
-- Context: the bf16 KV cache costs 192 KiB per position, so `--max-len auto` gives ~46.6k
-  decode-only with the bf16 head, ~49.9k with `--lm-head int8`, ~42.8k when the run
-  prefills (bf16 head) - all derived. `b70-decode`'s default is 16384. Long context needs
-  int8 KV or two cards (spec 18e, not built).
+- Served on one card only (`--parallel pp` refused; `--parallel auto` is one card), no llama-benchy
+  row yet (queue row 25). `b70-serve` refuses `--spec mtp` / `lookup` / `dflash` and a non-`l0`
+  `--prefill-backend` by name; its `--spec auto` is off.
+- Context: the bf16 KV cache costs 192 KiB per position, so `--max-len auto` gives ~49.9k
+  decode-only, ~45.8k when the run prefills (the int8 head) - derived. `b70-decode`'s default is
+  16384. Long context needs int8 KV or two cards (spec 18e, not built).
 - Prefill runs on `l0` only: `--prefill-backend l0-int8` is refused by name.
   Omitting `--prefill-backend` is fine.
-- Refused: `--mtp` (no head), `--profile` (not built yet). `--kv-cache int8` is built (spec 18e,
+- Refused: `--spec mtp` (no head), `--profile` (not built yet). `--kv-cache int8` is built (spec 18e,
   gates pending).
   `--spec lookup` has nothing to run on: it needs verify lists, which only an MTP head
   provides today.
 - Which attention matches the reference better is decided by the f32 judge (the MoE gates
   are graded against an f32 reference, with a one-bf16-ulp near-tie rule, since routing
-  flips on near-ties): `flash` is the default, `B70_K2_ATTN=eager` stays as the diagnostic.
+  flips on near-ties): `flash` is the attention (the eager diagnostic arm, `B70_K2_ATTN=eager`, went with the
+  zero-config cleanup; the f32 judge had decided).
 
-**Relevant variables:** `B70_K2_ATTN` (decode and prefill), `B70_PREFILL_REPLAY`.
-`B70_PREFILL_PROFILE` times K2's prefill phases but `b70-decode` does not print the table
-for K2 yet. `B70_KV_CACHE`, `B70_DECODE_ATTN`, `B70_PREFILL_ATTN` and the GDN switches do
-not apply to K2.
+**Relevant variables:** `B70_PREFILL_PROFILE` times K2's prefill phases but `b70-decode` does not
+print the table for K2 yet. `B70_KV_CACHE` does not apply to K2 (`--kv-cache`).
 
 ## Kolibri-1 (spec 20)
 
@@ -434,8 +438,8 @@ engine reads the shared expert as one more int4 block, operator ruling 2026-10-3
 the same form comes from `tools/quantize/kolibri/make_synth.py`.
 
 **Status: built; no speed row yet** (box test rows 24, 26 and 28). Decode (spec 20c), prefill (spec 20d) and
-serving (spec 20e, `b70-serve`), on **two cards**: at int4 the model holds ~42.5 GB of weights, so `--pp 2` is Kolibri's
-default and `--pp 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
+serving (spec 20e, `b70-serve`), on **two cards**: at int4 the model holds ~42.5 GB of weights, so two cards are Kolibri's
+default (`--parallel auto`) and `--parallel 1` is refused unless the model fits one card (a synthetic checkpoint, or `--layers N`:
 development mode, the first N layers only - e.g. 30, ~26 GB). Expected (derived): 756 launches per
 token (856 with `B70_KOLIBRI_ATTN=eager`), ~2.39 GB read per token with int4 attention and the int8 head -
 a roofline near 250 t/s on two cards. Prefill (`--prefill`, `--prefill-length N`) runs chunks of up to
@@ -448,13 +452,13 @@ scratch a card; on two cards each chunk crosses once, by copy, and the cards tak
 K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b
 
 # every command below: no speed row yet; needs two cards
-./build/src/cli/b70-decode $K --ids k.ids --n 32                                  # --pp 2, split by bytes
+./build/src/cli/b70-decode $K --ids k.ids --n 32                                  # two cards, split by bytes
 ./build/src/cli/b70-decode $K --ids k.ids --n 32 --pipeline-handoff peer --pipeline-split 25
-./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8 --max-len 40960
-./build/src/cli/b70-decode $K --pp 1 --layers 30 --ids k.ids --n 8                # one card, 30 layers
-B70_KOLIBRI_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --lm-head int8
+./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --max-len 40960
+./build/src/cli/b70-decode $K --parallel 1 --layers 30 --ids k.ids --n 8          # one card, 30 layers
+B70_KOLIBRI_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $K --ids k.ids --n 32 --prefill                        # spec 20d: prefilled
-./build/src/cli/b70-decode $K --bench --prefill-length 32768 --tg 16 --lm-head int8 --max-len 40960   # the pp row
+./build/src/cli/b70-decode $K --bench --prefill-length 32768 --tg 16 --max-len 40960   # the pp row
 ./build/src/cli/b70-decode $K --ids k.ids --n 32 --prefill --prefill-chunk 1000
 ```
 
@@ -472,7 +476,7 @@ beside the full layers' KV (20 KiB a position). `--max-len auto` reaches 262144 
 
 ```sh
 # every command below: no speed row yet; needs two cards
-./build/src/cli/b70-serve $K                                    # --pp 2, --max-len auto (262144), int8 head
+./build/src/cli/b70-serve $K                                    # two cards, --max-len auto (262144), int8 head
 ./build/src/cli/b70-serve $K --pipeline-handoff peer --max-len 131072
 ./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn restores at len - 1
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
@@ -485,14 +489,13 @@ German A4-style tool-call set `tests/golden/toolcall-kolibri-de` (`tools/toolcal
 
 **Limits.** Prefill on `--prefill-backend l0` only (`l0-int8` refused: its h8 linears rotate in
 1024-k Hadamard blocks and the hidden is 2560), `--prefill-chunk`
-at most 2048; no `--mtp` / `--spec` (no head, no verify lists), `--kv-cache int8` refused (20 KiB a
-position: bf16 only), no `--profile`, `--device` refused with `--pp 2` (GPUs 0 and 1, `ZE_AFFINITY_MASK`
-picks them), context capped at the trained 262144 (decision 3) - `b70-decode` and `b70-serve` alike. The
+at most 2048; no `--spec mtp` / `lookup` / `dflash` (no head, no verify lists; its `--spec auto` is off),
+`--kv-cache int8` refused (20 KiB a position: bf16 only), no `--profile`, context capped at the trained
+262144 (decision 3) - `b70-decode` and `b70-serve` alike. The
 bench prompt is the first 42 ids of `de_prose.txt` through Kolibri's tokenizer (spec 20e).
 
-**Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`, decode and prefill alike),
-`B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them), `B70_KOL_TIE_TOL` (the
-golden test).
+**Relevant variables:** `B70_KOLIBRI_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_KOL_TIE_TOL`
+(the golden test).
 
 ## Qwen3.8-Flash-Next (spec 21)
 
@@ -518,46 +521,46 @@ at 48 layers (derived). The prefill scratch is ~1.5 GB a card (the 512 MiB exper
 grow with `--max-len`), planned into `--layers auto` / `--max-len auto` when a run prefills: with it Intel's forms fit
 18 layers on one card and 37 on two at 32768 (derived).
 
-**Serving (spec 21e).** `b70-serve <checkpoint> --layers N` serves OpenAI chat on one card or two (`--pp 2`) through
+**Serving (spec 21e).** `b70-serve <checkpoint> --layers N` serves OpenAI chat on one card or two (`--parallel pp`) through
 the Qwen chat path: the template is Qwen3.8's byte for byte, XML tool calls and `<think>` reasoning as for Qwen3.8,
 greedy unless the request asks (decision 11 open). **The tokenizer must be the original's** (`Qwen/Qwen3.8-Flash-Next`'s
-`tokenizer.json`, whose split adds `\p{M}`): Intel's checkpoint ships Qwen3.8's file, which `b70-serve` refuses -
-pass `--tokenizer <the original's tokenizer.json>` (a few MB: `hf download Qwen/Qwen3.8-Flash-Next tokenizer.json`).
+`tokenizer.json`, whose split adds `\p{M}`), and it is the snapshot's: Intel's checkpoint ships Qwen3.8's file, which
+`b70-serve` refuses - serve a snapshot directory that ships the original's (our own export, spec 21q; the zero-config
+cleanup removed `--tokenizer`).
 The prefix cache keeps this family's state with each snapshot (115.7 MB: the 36 GDN states and conv rows, the PLE
 history, the QSA open block's raw keys; + 21 KB with the head) and 25,344 B a position in its blocks (+ 2,112 with the
-head), one layout on one card or two. `--mtp K` (1-3) drafts with the MTP head (vLLM's form; `pre_fc_norm_hidden` as
-one RMS over the 4 streams, `B70_Q4_MTP_NORM=per_stream` for the other form; draft steps after the first reuse step
-0's selection, `B70_Q4_MTP_SELECT=fresh` selects every step) and verifies K + 1 rows in one list (790-795 launches at
-48 layers, 86-91 at `--layers 4`, derived); `--mtp auto` is refused until spec 22 measures the acceptance on the
-whole model. The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
+head), one layout on one card or two. `--spec mtp --spec-max K` (K 1-3, a fixed K) drafts with the MTP head (vLLM's form;
+`pre_fc_norm_hidden` as one RMS over the 4 streams, `B70_Q4_MTP_NORM=per_stream` for the other form; draft steps after
+the first reuse step 0's selection) and verifies K + 1 rows in one list (790-795 launches at 48 layers, 86-91 at
+`--layers 4`, derived); its `--spec auto` is off until spec 22 measures the acceptance on the whole model. The head's bf16 experts are RTN-quantised to int4 g64 at load; on two cards it runs on the second and
 reads the first card's embedding over peer.
 
 ```sh
 I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 
-# every command below: no speed row yet; needs the PLE int8 file beside the snapshot (or --ple-dir / $B70_Q4_PLE)
-./build/src/cli/b70-decode $I --layers 18 --lm-head int8 --ids tests/golden/prompts/q4exp_short.ids --n 32
-./build/src/cli/b70-decode $I --layers 38 --pp 2 --lm-head int8 --bench --depth 4096 --tg 256
+# every command below: no speed row yet; needs the PLE int8 file beside the snapshot (<snapshot>-ple-int8/)
+./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_short.ids --n 32
+./build/src/cli/b70-decode $I --layers 38 --parallel pp --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $I --layers auto --max-len auto --ids tests/golden/prompts/q4exp_short.ids --n 8
 # spec 21d: the prompt prefilled in chunks (l0 only), then decode; the pp row
-./build/src/cli/b70-decode $I --layers 18 --lm-head int8 --ids tests/golden/prompts/q4exp_4k.ids --n 32 --prefill
-./build/src/cli/b70-decode $I --layers 37 --pp 2 --lm-head int8 --bench --prefill-length 32768 --tg 16 --max-len 33024
-# spec 21e: served truncated, the original's tokenizer.json (Intel's ships Qwen3.8's), MTP K = 2, one card / two
-T=$(ls -d ~/.cache/huggingface/hub/models--Qwen--Qwen3.8-Flash-Next/snapshots/*/)tokenizer.json
-./build/src/cli/b70-serve $I --layers 18 --tokenizer $T --mtp 2
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $I --layers 37 --pp 2 --tokenizer $T --mtp 2
+./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_4k.ids --n 32 --prefill
+./build/src/cli/b70-decode $I --layers 37 --parallel pp --bench --prefill-length 32768 --tg 16 --max-len 33024
+# spec 21e: served truncated from a snapshot that ships the original's tokenizer.json, MTP K = 2, one card / two
+F=<a Flash-Next snapshot with the original's tokenizer.json>
+./build/src/cli/b70-serve $F --layers 18 --spec mtp --spec-max 2
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --spec mtp --spec-max 2
 ```
 
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
 blocks and the hidden is 2560), `--prefill-chunk` at most 2048; the two cards
 cross each chunk by copy, sequentially (spec 16c's overlapped chunk pipeline is a later lever); MTP in `b70-serve`
-only (`b70-decode --mtp` refused; `--mtp auto` and `--draft-vocab` refused), the whole model refused in both CLIs
+only, at a fixed K (`b70-decode --spec mtp` and `--draft-vocab` refused), the whole model refused in both CLIs
 (spec 22), bf16 KV only (`--kv-cache int8` refused, decision 8), `reasoning_effort` not forwarded to the template (as
 for Qwen3.8),
-no `--profile`, `--device` refused with `--pp 2`, context capped at the trained 262144.
+no `--profile`, context capped at the trained 262144.
 
-**Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_PLE` (the PLE int8
-directory), `B70_Q4_MTP_NORM` (`single` | `per_stream`), `B70_Q4_MTP_SELECT` (`reuse` | `fresh`), `B70_PREFILL_REPLAY` (record each prefill chunk's lists once and replay them),
+**Relevant variables:** `B70_Q4_ATTN` (`flash` | `eager`, decode and prefill alike), `B70_Q4_MTP_NORM` (`single` |
+`per_stream`),
 `B70_Q4_TIE_TOL` / `B70_Q4_SEL_TOL` (the golden test's routing and selection near-tie tolerances, 1e-3 proposed).
 
 ## Nemotron 3.5 Bolt 74B-A9B (spec 25)
@@ -568,8 +571,8 @@ of 240..496 relu² experts in a 1024 latent, a shared expert), 88 blocks, vocabu
 loader also reads the GPTQ g128 spelling through its exact g64 expansion (the synthetic checkpoints test it).
 
 **Status: decode, prefill and serving built; no speed row yet** (box test rows 60 / 61 / 62; spec 25c / 25d / 25e, as built in
-spec 25 §15 / §16 / §17). The real model runs on **two cards** (Decision 4: `--pp 2` is the default, split 48 by bytes;
-`--pp 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
+spec 25 §15 / §16 / §17). The real model runs on **two cards** (Decision 4: two cards are its `--parallel auto`, split 48
+by bytes; `--parallel 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
 a prompt goes through the decode list one replay per id; `--prefill` / `--bench --prefill-length N` run the `l0` prefill
 (spec 25d). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with `B70_BOLT_FUSE=all`, +2 with
 `--pipeline-handoff peer`). P0 (`probe_bolt_step`) runs first on the box and decides the GEMV `{S, layout}` picks and which
@@ -589,7 +592,7 @@ B70_BOLT_FUSE=all ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --b
 B70_BOLT_SSM=bf16 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --bench --depth 4096 --tg 256   # Decision 2's arm
 ```
 
-**Serving (spec 25e).** `b70-serve <snapshot>` runs the engine on **two cards by default** (`--pp 1` only for a synthetic /
+**Serving (spec 25e).** `b70-serve <snapshot>` runs the engine on **two cards by default** (`--parallel 1` only for a synthetic /
 small checkpoint; `--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes them), `--max-len auto` up to 262144 with
 the prefill scratch planned in (Decision 14), the int8 head by default, prefill on `l0` only:
 
@@ -598,7 +601,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
 ```
 
 - **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, NVIDIA's, byte-identical in our
-  export; `--chat-template FILE` renders another, its sha256 is printed). ChatML, no BOS, and the system block is ALWAYS
+  export; its sha256 is printed and compared in the startup line). ChatML, no BOS, and the system block is ALWAYS
   rendered (`<|im_start|>system\n<|im_end|>\n` with no system message). `chat_template_kwargs`: `enable_thinking` (default
   true: the prompt ends `<think>\n`; false: `<think></think>`), `medium_effort` (appends `{reasoning effort: efficient}` to
   the last user message), `truncate_history_thinking` (default true: the reasoning of turns before the last user message is
@@ -616,7 +619,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
   leaked as content; a call inside reasoning is reasoning (the `ultra_v3` reasoning parser's rules; spec 25 §7 and §17).
 - **Sampling.** A request that names no `temperature` / `top_p` / `top_k` samples with NVIDIA's published T 1.0, top-p 0.95,
   no top-k, and generation ends on EOS **2 or 11** - from the snapshot's `generation_config.json` when it carries sampling
-  keys (ours does: NVIDIA's file), else the published values; `--generation-config FILE` overrides. A seeded
+  keys (ours does: NVIDIA's file), else the published values. A seeded
   sampled request is reproducible request by request; `temperature: 0` is the device argmax.
 - **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
   SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
@@ -627,9 +630,9 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.
 - **Request.** Image / video / audio content parts are refused (text only).
 
-**Limits.** No `--mtp` (no MTP head), no `--spec` (no drafter), no `--draft-vocab`, bf16 KV only (`--kv-cache int8` refused,
-Decision 17), prefill on `l0` only (`--prefill-backend l0-int8` refused), context at most 262144, `--layers`
-is `b70-decode`'s development mode only, `--device` refused with `--pp 2`.
+**Limits.** No `--spec mtp` (no MTP head), no `--spec lookup` / `dflash` (no drafter; its `--spec auto` is off), no
+`--draft-vocab`, bf16 KV only (`--kv-cache int8` refused, Decision 17), prefill on `l0` only (`--prefill-backend l0-int8`
+refused), context at most 262144, `--layers` is `b70-decode`'s development mode only.
 
 **Relevant variables:** `B70_BOLT_ATTN` (`flash` | `eager`), `B70_BOLT_FUSE` (`none` | `all` | a comma list of `router`,
 `route`, `conv`), `B70_BOLT_SSM` (`fp32` | `bf16`), `B70_BOLT_TIE_TOL` (the golden gate's near-tie tolerance, 1e-3 proposed),
