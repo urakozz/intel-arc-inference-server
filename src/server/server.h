@@ -107,6 +107,7 @@ class Server {
     std::string raw_text;  // every generated piece, before any parsing or stop
     double t_first_token = 0;
     PrefixSession::Report prefix;
+    int slot = -1;         // plan 13b: the slot (card) that served it under the scheduler; -1 on the serial path
   };
   struct Impl;
 

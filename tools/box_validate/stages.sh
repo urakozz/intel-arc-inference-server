@@ -4081,6 +4081,66 @@ st_r76_speed() {
 }
 
 # ======================================================================================
+row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise per card, B2 two concurrent chat clients, B3 a snapshot from card 0 restored on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
+rownote 77 "Everything two-card holds the whole box (kind gpu, ZE_AFFINITY_MASK=0,1 set by each arm). Hand back: r77.r1's R1 lines per --spec (off / mtp / lookup), r77.b2's golden lines, r77.b3 / r77.b4's PASS lines, each card's startup lines (devices, card 0 / card 1 max_len, memory) - the device-1 gap is recorded by Task 6, not gated."
+rownote 77 "Task 6 (speed and record) is not staged yet: aggregate t/s at concurrency 2 against 1 (serve_bench.sh / llama-benchy, admission timing stated), a lone request within 2 % of --parallel 1, the opencode-shaped replay (tools/prefix/make_synth_log.py) against the serial server, and the overlap share of a real opencode session from --log-requests. Rows are added when Task 5 is green."
+stage r77.k0      77 default cpu  -    g0.sha,g0.bitwise,g0.suite "G0: no kernel binary changes; the serial server's gates (golden_gate_*, the suite) as main's"
+st_r77_k0() {
+  need_pass g0.sha g0.bitwise g0.suite
+  finish
+}
+stage r77.host    77 default cpu  -    -                          "host: scheduler_test, dflash_scheduler_test, replica_engine_test, replica_server_test, pipeline_args_test and the serial server's protocol / prefix / mtp / lookup server tests"
+st_r77_host() {
+  run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
+  finish
+}
+stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (K2, Kolibri test configs), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
+st_r77_reject() {
+  run_tests '^(cli_reject_serve_replica_.*|cli_reject_pipeline_replica_decode)$'
+  chk "out=\$(ZE_AFFINITY_MASK=0 timeout 120 build/src/cli/b70-serve $SNAP_QWEN --parallel replica 2>&1); rc=\$?; echo \"\$out\" | tail -3; [ \$rc -eq 1 ] && echo \"\$out\" | grep -q 'parallel replica needs two GPUs' && ! echo \"\$out\" | grep -q '^device'" "one visible card: refused"
+  finish
+}
+stage r77.r1      77 default gpu  qwen r77.reject                 "R1: every request (golden prose / code / cjk, completion and chat, greedy and seeded) sent two at a time to --parallel replica equals it alone on the card that served it (--parallel 1 on card 0 and on card 1) - bitwise, --spec off, mtp and lookup, --max-len 65536"
+st_r77_r1() {
+  local sp
+  for sp in off mtp lookup; do
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/replica 0,1 $SNAP_QWEN --parallel replica --spec $sp --max-len 65536 -- --mode pairs" "--spec $sp: pairs on the replica server"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card0 0 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 0"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card1 1 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 1"
+    chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/r1/$sp/replica/requests.jsonl --server-log $STATE/r1/$sp/replica/server-log --card0 $STATE/r1/$sp/card0/requests.jsonl --card1 $STATE/r1/$sp/card1/requests.jsonl" "--spec $sp: R1"
+  done
+  grab_all r1 '^R1 |card [01]: max_len|^devices:' 120
+  finish
+}
+stage r77.b2      77 default gpu  qwen r77.r1                     "B2: golden_server_test --chat with two concurrent clients (B70_SERVE_CLIENTS=2) on --parallel replica: both replies of every prompt equal b70-decode's 32 ids on one card (decoded after the server stops)"
+st_r77_b2() {
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel replica --max-len 65536' B70_SERVE_CLIENTS=2 B70_SERVE_DECODE_AFTER=1 timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_QWEN --chat" \
+    "golden_server_test --chat, two clients, --parallel replica"
+  grab_all b2 'generated ids identical' 12
+  finish
+}
+stage r77.b3      77 default gpu  qwen r77.r1                     "B3: A on card 0, X (A's best match) holding card 0, A' (A continued) restored on card 1 from A's request-end snapshot in the one host store - equal to the same order on card 1 alone (C2 across cards)"
+st_r77_b3() {
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/replica 0,1 $SNAP_QWEN --parallel replica --spec off --max-len 65536 -- --mode b3" "b3 on the replica server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/card0 0 $SNAP_QWEN --parallel 1 --spec off --max-len 65536 -- --mode b3" "b3 alone on card 0"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/card1 1 $SNAP_QWEN --parallel 1 --spec off --max-len 65536 -- --mode b3" "b3 alone on card 1"
+  chk "python3 tools/box_validate/replica_check.py b3 --replica $STATE/b3/replica/requests.jsonl --server-log $STATE/b3/replica/server-log --card0 $STATE/b3/card0/requests.jsonl --card1 $STATE/b3/card1/requests.jsonl" "B3"
+  grab_all b3 '^B3' 20
+  finish
+}
+stage r77.b4      77 default gpu  qwen r77.r1                     "B4: a stream dropped mid-request frees its card (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text"
+st_r77_b4() {
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b4/replica 0,1 $SNAP_QWEN --parallel replica --spec off --max-len 65536 -- --mode b4" "b4 on the replica server"
+  chk "python3 tools/box_validate/replica_check.py b4 --replica $STATE/b4/replica/requests.jsonl" "B4"
+  grab_all b4 '^B4' 20
+  finish
+}
+stage r77.serial  77 default card qwen r77.host                   "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
+st_r77_serial() {
+  run_tests '^golden_server_test$'
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr labels belong to their rows)"
 st_x_rest() {

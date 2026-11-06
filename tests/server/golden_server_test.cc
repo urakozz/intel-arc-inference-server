@@ -255,6 +255,12 @@ int main(int argc, char** argv) {
       std::printf("%s: chat of %zu prompt ids (first %u), %zu/%u generated ids identical to b70-decode\n", name.c_str(),
                   prompt_ids.size(), prompt_ids.empty() ? 0u : prompt_ids[0], compared, kGenerated);
     };
+    // Plan 13b (box stage r77.b2): B70_SERVE_CLIENTS=N (chat mode) sends every prompt from N clients at once (one
+    // thread and connection each) - under --parallel replica the two cards serve them together - and every reply is
+    // held to b70-decode's ids. Unset: one client, as before.
+    size_t clients = 1;
+    if (const char* c = std::getenv("B70_SERVE_CLIENTS")) clients = std::max<size_t>(1, std::strtoul(c, nullptr, 10));
+    if (clients > 1 && !chat) fail("B70_SERVE_CLIENTS needs --chat");
     server = spawn(serve_args);
     wait_ready(port);
     httplib::Client client("127.0.0.1", port);
@@ -267,20 +273,41 @@ int main(int argc, char** argv) {
                               {"max_tokens", kGenerated},
                               {"temperature", 0},
                               {"return_token_ids", true}};
-        const auto response = client.Post("/v1/chat/completions", request.dump(), "application/json");
-        if (!response) fail(name + " /v1/chat/completions did not return a response");
-        if (response->status != 200)
-          fail(name + " /v1/chat/completions status " + std::to_string(response->status) + ": " + response->body);
-        const json body = json::parse(response->body);
-        const std::vector<uint32_t> prompt_ids = body.at("prompt_token_ids").get<std::vector<uint32_t>>();
-        const std::vector<uint32_t> served_ids =
-            body.at("choices").at(0).at("token_ids").get<std::vector<uint32_t>>();
-        if (served_ids.size() > kGenerated) fail(name + " server returned more than 32 generated ids");
-        if (decode_after) {   // collected; b70-decode runs once the server is gone (below)
-          saved.push_back({name, prompt_ids, served_ids});
-          continue;
+        std::vector<std::string> bodies(clients), errors(clients);
+        const auto post = [&](size_t c) {
+          try {
+            httplib::Client own("127.0.0.1", port);
+            own.set_read_timeout(600, 0);
+            const auto response = own.Post("/v1/chat/completions", request.dump(), "application/json");
+            if (!response) fail(name + " /v1/chat/completions did not return a response");
+            if (response->status != 200)
+              fail(name + " /v1/chat/completions status " + std::to_string(response->status) + ": " + response->body);
+            bodies[c] = response->body;
+          } catch (const std::exception& e) {
+            errors[c] = e.what();
+          }
+        };
+        if (clients == 1) {
+          post(0);
+        } else {
+          std::vector<std::thread> threads;
+          for (size_t c = 0; c < clients; ++c) threads.emplace_back(post, c);
+          for (std::thread& t : threads) t.join();
         }
-        compare_chat(name, prompt_ids, served_ids);
+        for (size_t c = 0; c < clients; ++c) {
+          if (!errors[c].empty()) fail(errors[c]);
+          const json body = json::parse(bodies[c]);
+          const std::vector<uint32_t> prompt_ids = body.at("prompt_token_ids").get<std::vector<uint32_t>>();
+          const std::vector<uint32_t> served_ids =
+              body.at("choices").at(0).at("token_ids").get<std::vector<uint32_t>>();
+          if (served_ids.size() > kGenerated) fail(name + " server returned more than 32 generated ids");
+          const std::string label = clients == 1 ? name : name + " (client " + std::to_string(c) + ")";
+          if (decode_after) {   // collected; b70-decode runs once the server is gone (below)
+            saved.push_back({label, prompt_ids, served_ids});
+            continue;
+          }
+          compare_chat(label, prompt_ids, served_ids);
+        }
         continue;
       }
       const std::string ids_path = prompts + "/" + name + ".ids";

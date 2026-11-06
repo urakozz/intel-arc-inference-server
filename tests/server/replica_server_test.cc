@@ -304,6 +304,7 @@ void test_request_log() {
       CHECK(r.at("t_first_token").get<double>() <= r.at("t_end").get<double>());
       const auto ids = r.at("out_ids").get<std::vector<uint32_t>>();
       CHECK(ids == a.out_ids || ids == b.out_ids);
+      CHECK(r.contains("slot") && r.at("slot").get<int>() >= 0 && r.at("slot").get<int>() < 2);
     }
   }
   for (const auto& e : std::filesystem::directory_iterator(dir)) std::filesystem::remove(e.path());
