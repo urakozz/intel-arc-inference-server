@@ -180,17 +180,50 @@ weights. Record the image beside each set.
   transitions). `nvme_core.default_ps_max_latency_us=0` on the kernel command line
   prevents it. If the box loses its disk after a kernel update, check that first.
 
+## Model storage: hot, cold, archive
+
+Three disks hold the Hugging Face cache, in tiers (since 2026-11-06; the USB disk and its bind mounts are gone):
+
+| tier | where | holds |
+|---|---|---|
+| hot | NVMe, `~/.cache/huggingface/hub` | the working set: the models the next runs read, as real folders |
+| cold | 8 TB WD Red, `~/b70/hdd/hf-hub` | every model, always (the bf16 originals, our int4 exports, everything hot) |
+| archive | 3 TB, `~/b70/hdd3/hf-hub` | parked models (Nanbeige, Flint), instead of cold |
+
+Every `~/.cache/huggingface/hub/models--X` is either a real folder (hot) or a symlink to `models--X` on the 8 TB or
+3 TB disk, so every tool keeps finding every model at its usual path - only the read speed differs (the 8 TB disk
+reads ~200 MB/s; a model that fits in RAM is read once and then served from the page cache). `tools/hf_tier.sh`
+(on the box, from any tree) moves a model between tiers:
+
+```
+tools/hf_tier.sh status                 # every model: tier, size, which disks hold a copy; free space per disk
+tools/hf_tier.sh hot  Org/Name          # copy to the NVMe, verify, the entry becomes a real folder (keeps 40 GB free)
+tools/hf_tier.sh cold Org/Name          # make the 8 TB copy complete, verify, the entry becomes a link to it
+tools/hf_tier.sh archive Org/Name       # the same on the 3 TB disk; the 8 TB copy goes to the trash
+tools/hf_tier.sh sync Org/Name          # only complete the 8 TB copy of a hot model
+```
+
+It copies first, verifies (sizes; sha256 against the blob's name for LFS files; byte compare for the rest), then
+swaps the entry; it refuses a model a running process has open. Nothing is deleted: the folder a swap replaces goes to
+that disk's trash (`~/b70/trash`, `~/b70/hdd/trash`, `~/b70/hdd3/trash`, under `<date>/hf-tier/`) and the NVMe
+space comes back only when the operator empties it. huggingface_hub 2.x keeps a cache-wide shared blob store
+(`hub/blobs/<2 hex>/<xet hash>`, per-repo blobs are links into it); the script copies those as real files, so every
+cold or archive copy is self-contained, and moves the shared payloads nothing on the NVMe links to any more into the
+trash with their folder. Copies take hours: run them detached (`setsid nohup ... > ~/b70/logs/hf-tier/<name>.log`).
+Logic and rules: `tools/hf_tier.py`; tests on a fake hub: `python3 tools/test_hf_tier.py` (Mac or box).
+
+A model too big for RAM whose CPU reference streams its weights (Bolt's bf16 original, 150 GB) stays cold and goes
+hot only for that job: `hf_tier.sh hot` before it, `hf_tier.sh cold` after (the 8 TB copy stays, so `cold` only
+re-verifies it and moves the NVMe folder to the trash).
+
+Flash-Next's int8 PLE file (`ple_int8.py`, 52 GB) is not a cache model: its NVMe copy is the main tree's
+`oracle-out-q4exp-ple-int8/` (a real folder - an `oracle-out*` name, so `tools/box.sh sync --delete` leaves it alone),
+its cold copy `~/b70/hdd/b70/qwen3.8-flash-next-ple-int8/`.
+
 ## After a reboot
 
-The model cache is partly bind-mounted from the USB disk (BUFFALO, exFAT: it cannot hold symlinks), and the 500 GB disk
-(HDD500GB, ext4) carries Flash-Next's 49 GB int8 PLE file behind the data tree's `oracle-out-q4exp-ple-int8` link.
-Neither the binds nor the 500 GB disk's mount survive a reboot, and nothing says so: the stages that need those files
-SKIP as "missing data" (2026-11-04, the first reboot into Linux 7.4). After every reboot, before any validation run:
-
-```
-udisksctl mount -b "$(lsblk -no PATH,LABEL | awk '$2=="HDD500GB"{print $1}')"
-bash /run/media/urakozz/BUFFALO/hf-hub/link.sh            # asks for sudo once; --status lists what is linked
-```
-
-A stage run checks its data once, at launch (`have.env`), so a run launched before the relink needs a fresh launch.
-Device names move between boots (the USB disk was sda2, then sdb2), so mount by label, never by `/dev/sdX`.
+The 8 TB and 3 TB disks are mounted from `/etc/fstab` by UUID (`nofail`: a missing disk does not stop the boot, the
+cold links just dangle until it is back). Check both after a reboot, before any validation run:
+`findmnt ~/b70/hdd ~/b70/hdd3 && tools/hf_tier.sh status` - a cold model whose disk is missing shows `broken`.
+A stage run checks its data once, at launch (`have.env`), so a run launched before the disk was back needs a fresh
+launch. Device names move between boots, so mount by UUID, never by `/dev/sdX`.

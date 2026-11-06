@@ -270,7 +270,18 @@ def drop_cache(fd):
         pass
 
 
+_SHA_CACHE = {}
+
+
 def sha256_file(path):
+    st_ = os.stat(path)
+    key = (os.path.realpath(path), st_.st_size, st_.st_mtime_ns, st_.st_ino)
+    if key not in _SHA_CACHE:
+        _SHA_CACHE[key] = _sha256_read(path)
+    return _SHA_CACHE[key]
+
+
+def _sha256_read(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
         drop_cache(f.fileno())
@@ -405,7 +416,28 @@ def plan_and_copy(st, src, dst, dst_tier):
             copy_file(sreal, d)
             copied += os.path.getsize(sreal)
         check.append(rel)
-    # Pass 2: blobs.
+    # Pass 2: blobs. A blob the target holds already under another name (an older snapshot kept
+    # as real files) is hard-linked, not copied: same size and a sha256 equal to the blob's name.
+    by_size = {}
+    for rel, kind in walk(dst):
+        if kind == "f" and not rel.endswith(PART):
+            by_size.setdefault(os.path.getsize(os.path.join(dst, rel)), []).append(os.path.join(dst, rel))
+
+    def link_existing(rel, size, d):
+        name = os.path.basename(rel)
+        if not SHA_RE.fullmatch(name):
+            return False
+        for c in by_size.get(size, []):
+            if sha256_file(c) == name:
+                os.makedirs(os.path.dirname(d), exist_ok=True)
+                if os.path.lexists(d + PART):
+                    os.unlink(d + PART)
+                os.link(c, d + PART)
+                os.replace(d + PART, d)
+                log("%s: the target has it as %s - hard-linked" % (rel, os.path.relpath(c, dst)))
+                return True
+        return False
+
     for rel, kind in entries:
         if not rel.startswith("blobs/") or kind == "d" or rel.endswith(".incomplete") or rel.endswith(PART):
             continue
@@ -419,6 +451,9 @@ def plan_and_copy(st, src, dst, dst_tier):
         if not os.path.isfile(sreal):
             die("the source has a dangling link: %s" % s)
         if os.path.lexists(d) and handle_existing(rel, sreal):
+            check.append(rel)
+            continue
+        if link_existing(rel, os.path.getsize(sreal), d):
             check.append(rel)
             continue
         log("copy %s (%s)" % (rel, gb(os.path.getsize(sreal))))
