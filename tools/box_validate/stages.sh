@@ -3990,7 +3990,7 @@ st_r75_speed() {
 
 # ======================================================================================
 row 71 "spec 17a - the TP P0, Qwen3.8 first: links / BARs / peer access, CPU stores into VRAM through the BAR, the all-reduce on every route (P2P push / pull, host-staged + own BAR, host read, host mailbox) at 1 / 8 rows and 128 calls, the per-card step at TP shapes, the go / no-go line (plan 17a)"
-rownote 71 "Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; these stages are the quiet-box re-check (the record's §7). r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
+rownote 71 "DONE 2026-11-06: re-checked on a quiet box, GO (docs/probes/probe-tp-2026-11-01.md §8, spec 17 §9); the card stages are opt-in since (a re-measure), host and build stay default so the probe keeps building. Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; these stages are the quiet-box re-check (the record's §7). r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
 rownote 71 "Every two-card stage sets ZE_AFFINITY_MASK=0,1 itself and holds the whole box. Hand back: the facts, the BAR table, the all-reduce table (per route, rows, per call, per token, bitwise, stale caught, CPU phases for host-bar), the per-card step table."
 stage r71.k0      71 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0: no src/ binary changes (the probe's kernels are tools/probe's ptp_*)"
 st_r71_k0() {
@@ -4007,7 +4007,7 @@ st_r71_build() {
   chk "cmake --build build -j$JOBS --target probe_tp" "probe_tp and its ptp_* binaries"
   finish
 }
-stage r71.facts   71 default gpu  -     r71.build             "offload_links.sh (idle), the BAR lines, the kernel version, probe_tp facts (peer access and P2P properties both ways, the dma-buf BAR mapping); a STOP line stops the row"
+stage r71.facts   71 optin   gpu  -     r71.build             "offload_links.sh (idle), the BAR lines, the kernel version, probe_tp facts (peer access and P2P properties both ways, the dma-buf BAR mapping); a STOP line stops the row"
 st_r71_facts() {
   chk "tools/probe/offload_links.sh" "the links (idle)"
   chk "uname -r; for d in 04:00.0 08:00.0; do lspci -vv -s \$d | grep -E 'Region|LnkSta:'; done" "the BARs and the kernel"
@@ -4015,7 +4015,7 @@ st_r71_facts() {
   grab_all facts '^link|^links|^STOP|^\| |Region|^7\.' 80
   finish
 }
-stage r71.bar     71 default gpu  -     r71.facts             "probe_tp bar on each card: the CPU-into-VRAM round trip (dma-buf BAR mapping, pinned host, shared) at 64 B / 20 / 160 KiB"
+stage r71.bar     71 optin   gpu  -     r71.facts             "probe_tp bar on each card: the CPU-into-VRAM round trip (dma-buf BAR mapping, pinned host, shared) at 64 B / 20 / 160 KiB"
 st_r71_bar() {
   idle before
   chk "ZE_AFFINITY_MASK=0 build/tools/probe/probe_tp bar --iters 2000" "bar, card 0"
@@ -4023,7 +4023,7 @@ st_r71_bar() {
   grab_all bar '^\| |^## ' 80
   finish
 }
-stage r71.ar      71 default gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8, Agnes) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
+stage r71.ar      71 optin   gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8, Agnes) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
 st_r71_ar() {
   idle before
   local P="ZE_AFFINITY_MASK=0,1 timeout -k 10 300 build/tools/probe/probe_tp ar"
@@ -4040,7 +4040,7 @@ st_r71_ar() {
   grab_all ar '^\| |^## |TIMEOUT' 200
   finish
 }
-stage r71.step    71 default card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8 and Agnes; the GEMV sum both ways"
+stage r71.step    71 optin   card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8 and Agnes; the GEMV sum both ways"
 st_r71_step() {
   chk "build/tools/probe/probe_tp step --model qwen38" "the per-card step, Qwen3.8"
   chk "build/tools/probe/probe_tp step --model agnes" "the per-card step, Agnes"
