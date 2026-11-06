@@ -64,10 +64,8 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 //   l0-int8             Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
 //                       model also every layer's expert gate||up array, spec 15d); the L0
 //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).
-//   composed attention  (B70_PREFILL_ATTN=composed on an L0 backend) pf_s / pf_p:
-//                       [GQA group][chunk_cap][max_len] fp32 + bf16 - 73,728 B per position
-//                       on Qwen3.8 at cap 2048, the only prefill scratch that scales with max_len.
-//                       The default flash path builds neither.
+//   (the flash attention builds no pf_s / pf_p: those are the composed attention's, a test-only
+//   reference since the zero-config cleanup, and no engine plans them)
 //
 // `prefill = false` is a decode-only engine (b70-decode without --prefill-length / --prefill):
 // ruling R7 keeps every prefill allocation lazy, so it plans none of them.
@@ -80,7 +78,6 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 struct PrefillPath {
   bool prefill = true;
   PrefillBackend backend = PrefillBackend::L0;
-  bool composed_attn = false;
   uint32_t chunk_cap = PrefillScratchDims::kCDefault;
 };
 

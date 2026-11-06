@@ -13,8 +13,8 @@
 // draft vocabulary from the snapshot's added tokens and the lowest ids, as b70-serve
 // builds it: the plan's `draft_vocab` term must equal the loader's compact head + id
 // table, and MtpBuffers' compact logits its MtpDims size. The lengths default to
-// "16384 auto". The default l0 backend and the attention mode of
-// B70_PREFILL_ATTN (flash unless set) are planned and run. One short prefill runs
+// "16384 auto". The default l0 backend and the flash attention are planned and run.
+// One short prefill runs
 // first, so the lazy buffers (the MTP prefill hidden rows, the slab on an MTP engine)
 // exist when the engine is measured. At `auto` the engine fills the card up to the
 // reserve: if the reserve is too small for what the plan does not count (driver,
@@ -53,7 +53,6 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
   const runtime::PrefillPath path{
       true, o.backend,   // l0 (the engine's default) or, plan 5d, --prefill-backend l0-int8
-      runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed,
       runtime::default_prefill_chunk_cap()};   // plan 5d: the engine's default cap (--chunk-cap)
   loader::DraftVocabSpec dvs;
   if (o.draft_vocab != 0) {
@@ -139,7 +138,7 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   CHECK_EQ(pf->chunk_cap(), path.chunk_cap);
   CHECK_EQ(pf->bytes(), s.eager());
   CHECK_EQ(pf->lazy_bytes(), p.prefill_lazy);
-  CHECK_EQ(pf->pf_s_bytes(), path.composed_attn ? s.pf_s : size_t{0});
+  CHECK_EQ(pf->pf_s_bytes(), size_t{0});   // the flash attention builds no pf_s / pf_p
   if (mtp) {
     const runtime::MtpBuffers* mb = eng.mtp_buffers();
     CHECK(mb != nullptr);

@@ -1128,14 +1128,11 @@ int run(int argc, char** argv) {
     const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
     cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
   }
-  // Spec 12b's int8-KV refusals are the Qwen3.5 family's (the composed prefill);
-  // K2-Horizon's engine has its own int8 twins for flash and eager and refuses its own backends.
-  if (!cli::k2::is_k2(path)) cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --pp's refusals are argument-only, so they come before the device too.
   cli::check_pipeline(pipe, {prefill, have_prefill_len, mtp_on, profile,
-                             device != l0::Context::kFromEnv, pp_path.composed_attn});
+                             device != l0::Context::kFromEnv});
 
   // Spec 18b: dispatch on config.json's model_type. K2-Horizon runs runtime::k2::K2Engine (its
   // own loader, list and planner); every flag validated above means the same there, and what

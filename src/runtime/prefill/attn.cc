@@ -21,21 +21,11 @@ void require(bool ok, const std::string& what) {
 }
 
 
-std::atomic<int> g_mode{-1};   // -1: not yet read from the environment
+std::atomic<int> g_mode{int(AttnMode::Flash)};   // the flash attention unless a test sets Composed
 
 }  // namespace
 
-AttnMode attn_mode() {
-  int m = g_mode.load(std::memory_order_relaxed);
-  if (m < 0) {
-    const char* v = std::getenv("B70_PREFILL_ATTN");
-    m = int(v != nullptr && std::strcmp(v, "composed") == 0 ? AttnMode::Composed
-                                                             : AttnMode::Flash);
-    int expected = -1;
-    if (!g_mode.compare_exchange_strong(expected, m)) m = expected;
-  }
-  return AttnMode(m);
-}
+AttnMode attn_mode() { return AttnMode(g_mode.load(std::memory_order_relaxed)); }
 
 void set_attn_mode_for_test(AttnMode m) { g_mode.store(int(m)); }
 
@@ -202,8 +192,8 @@ void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 void require_kv8_path(PrefillBackend) {
   if (attn_mode() != AttnMode::Flash)
     throw std::runtime_error(
-        "runtime::prefill: --kv-cache int8 prefills through the flash attention only: "
-        "B70_PREFILL_ATTN=composed is the bf16-KV reference - unset it or use --kv-cache bf16");
+        "runtime::prefill: --kv-cache int8 prefills through the flash attention only: the composed "
+        "attention (a test's set_attn_mode_for_test) is the bf16-KV reference");
 }
 
 void attn_prep_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, void* ctrl,

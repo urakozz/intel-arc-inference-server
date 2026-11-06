@@ -154,10 +154,10 @@ void refusal_case() {
       if (std::string(e.what()).find(what) != std::string::npos) ++refused;
     }
   };
-  expect({true, runtime::PrefillBackend::L0Int8, false}, true, "B70_PREFILL_REPLAY");
+  expect({true, runtime::PrefillBackend::L0Int8}, true, "B70_PREFILL_REPLAY");
   CHECK(refused == 1);
-  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {true, runtime::PrefillBackend::L0Int8, false}, false);
-  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {false, runtime::PrefillBackend::L0, false}, true);
+  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {true, runtime::PrefillBackend::L0Int8}, false);
+  cli::dflash::check_engine(a, false, runtime::KvCache::Bf16, {false, runtime::PrefillBackend::L0}, true);
   std::printf("check_engine: B70_PREFILL_REPLAY refused before the device\n");
 }
 

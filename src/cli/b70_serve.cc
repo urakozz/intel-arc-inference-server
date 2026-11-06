@@ -1231,7 +1231,6 @@ int run(int argc, char** argv) {
   cli::ServePipelineContext pipe_ctx;
   pipe_ctx.device = device != l0::Context::kFromEnv;
   pipe_ctx.mtp = mtp_k > 0 || mtp_auto || spec_lookup;
-  pipe_ctx.composed_attn = pp_path.composed_attn;
   {
     const char* replay = std::getenv("B70_PREFILL_REPLAY");
     const char* profile = std::getenv("B70_PREFILL_PROFILE");
@@ -1284,9 +1283,6 @@ int run(int argc, char** argv) {
     k2.prefix_cache_gb = prefix_cache_gb;
     return serve_k2(k2, options);
   }
-  // Spec 12b: the Qwen3.5 family's int8-KV refusals, before the device is touched (K2 above has
-  // its own engine's int8 twins; Kolibri, earlier, refuses int8 KV itself).
-  cli::check_kv_cache(kv_cache, pp_path);
   const std::vector<uint32_t> eos = eos_ids(snapshot_dir);
   const uint32_t trained = loader::trained_context(snapshot_dir);
   cli::check_before_load(max_len_arg, trained, /*require_quantum=*/true);   // spec 6 §10

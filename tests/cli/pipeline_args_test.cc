@@ -82,7 +82,7 @@ void check_rename() {
 void check_refusals() {
   cli::PipelineArgs one;   // --pp 1 (the default) refuses nothing of its own
   cli::check_pipeline(one, {});
-  cli::check_pipeline(one, {true, true, true, true, true, true});
+  cli::check_pipeline(one, {true, true, true, true, true});
   cli::PipelineArgs sub = one;
   sub.have_split = true;
   CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-split belongs to --pp 2"));
@@ -94,18 +94,12 @@ void check_refusals() {
   two.devices = 2;
   cli::check_pipeline(two, {});   // --ids / --bench --depth, nothing else: accepted
   cli::PipelineContext c;
-  // Spec 16c: --prefill and --bench --prefill-length run the two-card pipeline with the flash
-  // attention; the composed attention is refused.
+  // Spec 16c: --prefill and --bench --prefill-length run the two-card pipeline (flash attention).
   c = {};
   c.prefill = true;
   cli::check_pipeline(two, c);
   c.prefill = false;
   c.bench_prefill = true;
-  cli::check_pipeline(two, c);
-  c.composed_attn = true;
-  CHECK(says([&] { cli::check_pipeline(two, c); }, "flash attention only"));
-  c = {};
-  c.composed_attn = true;   // no prefill: nothing to refuse
   cli::check_pipeline(two, c);
   c = {};
   c.mtp = true;
@@ -168,9 +162,6 @@ void check_serve() {
   c = {};
   c.device = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
-  c = {};
-  c.composed_attn = true;
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "flash attention only"));
   c = {};
   c.prefill_replay = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_REPLAY=1"));

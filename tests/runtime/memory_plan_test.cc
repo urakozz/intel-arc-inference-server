@@ -237,7 +237,7 @@ void check_spec6_line() {
   // Measured before spec 10, with decode attention v1's attn_part (405,798,912 B at 131072, decode
   // state 0.590 GB, total 28.081 GB); v1 is gone (zero-config cleanup), so the plan is v2's: the
   // same engine with 0.399 GB less decode state.
-  const runtime::PrefillPath i8{true, PrefillBackend::L0Int8, false};   // measured on l0-int8, then the default
+  const runtime::PrefillPath i8{true, PrefillBackend::L0Int8};   // measured on l0-int8, then the default
   const runtime::MemoryPlan p = runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights, i8);
   CHECK_EQ(runtime::plan(model::qwen38(), 131072, false, kQwenBf16Weights).decode_state,
            size_t{590450624} - 405798912 + 6340608);
@@ -270,16 +270,12 @@ void check_paths() {
   CHECK_EQ(mtp.prefill_lazy, s.slab);
   CHECK_EQ(mtp.model, base.model + kMtpWeights);
   // l0: the slab always, no Int8State.
-  runtime::PrefillPath l0{true, PrefillBackend::L0, false};
+  runtime::PrefillPath l0{true, PrefillBackend::L0};
   const runtime::MemoryPlan pl0 = runtime::plan(q, 65536, false, kQwenInt8Weights, l0);
   CHECK_EQ(pl0.prefill_lazy, s.slab);
   CHECK_EQ(pl0.int8, size_t{0});
-  // Composed attention on l0-int8: 6 x 2048 x (4 + 2) B = 73,728 B per position.
-  runtime::PrefillPath comp{true, PrefillBackend::L0Int8, true};
-  const runtime::MemoryPlan pc = runtime::plan(q, 65536, false, kQwenInt8Weights, comp);
-  CHECK_EQ(pc.prefill_lazy, size_t{65536} * 73728);
   // Decode only (ruling R7): no prefill scratch, no int8, no MTP hidden rows.
-  runtime::PrefillPath none{false, PrefillBackend::L0Int8, false};
+  runtime::PrefillPath none{false, PrefillBackend::L0Int8};
   const runtime::MemoryPlan pd = runtime::plan(q, 65536, true, kQwenInt8Weights + kMtpWeights, none);
   CHECK_EQ(pd.prefill_scratch, size_t{0});
   CHECK_EQ(pd.int8, size_t{0});
@@ -311,9 +307,7 @@ void check_max_len_that_fits() {
   const uint32_t qb = check_fit(q, false, kQwenBf16Weights, "qwen3.8 bf16 head");
   const uint32_t a8 = check_fit(a, false, kAgnesInt8Weights, "agnes int8 head");
   const uint32_t a8m = check_fit(a, true, kAgnesInt8Weights + kMtpWeights, "agnes int8 head + MTP");
-  const uint32_t qc = check_fit(q, false, kQwenInt8Weights, "qwen3.8 int8, composed attn",
-                                runtime::PrefillPath{true, PrefillBackend::L0Int8, true});
-  CHECK(q8m < q8 && qb < q8 && a8 < q8 && a8m < a8 && qc < q8);
+  CHECK(q8m < q8 && qb < q8 && a8 < q8 && a8m < a8);
   // Every one of them is above 128k but below the trained 262144 on one card.
   CHECK(q8 > 131072 && q8 < kTrained);
   CHECK(a8 > 131072 && a8m < a8);
@@ -618,8 +612,8 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
 
   // The planner's prefill term at both caps: l0-int8 with MTP, one DFlash-sized tap count.
-  const runtime::PrefillPath i8c2{true, PrefillBackend::L0Int8, false, 2048};
-  const runtime::PrefillPath i8c4{true, PrefillBackend::L0Int8, false, 4096};
+  const runtime::PrefillPath i8c2{true, PrefillBackend::L0Int8, 2048};
+  const runtime::PrefillPath i8c4{true, PrefillBackend::L0Int8, 4096};
   const size_t w = kQwenInt8Weights + kMtpWeights;
   const runtime::MemoryPlan p2 = runtime::plan(q, 65536, true, w, i8c2);
   const runtime::MemoryPlan p4 = runtime::plan(q, 65536, true, w, i8c4);
@@ -628,7 +622,7 @@ void check_chunk_cap() {
   CHECK_EQ(p4.mtp_hidden - p2.mtp_hidden, size_t{20971520});
   CHECK_EQ(p4.kv, p2.kv);
   CHECK_EQ(p4.total() - p2.total(), size_t{698458112 + 35659776 + 20971520});   // ~0.755 GB
-  CHECK_EQ(runtime::plan(q, 65536, true, w, runtime::PrefillPath{true, PrefillBackend::L0Int8, false}).total(),
+  CHECK_EQ(runtime::plan(q, 65536, true, w, runtime::PrefillPath{true, PrefillBackend::L0Int8}).total(),
            p2.total());                                                         // the default is 2048
   runtime::DrafterPlan dr;
   dr.weights = 1;
@@ -656,7 +650,7 @@ void check_chunk_cap() {
   };
   for (const Row& r : rows)
     for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8}) {
-      const runtime::PrefillPath path{true, b, false, 2048};
+      const runtime::PrefillPath path{true, b, 2048};
       const uint32_t L = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, path, {}, r.kv);
       CHECK(L != 0);
       const uint32_t cap =

@@ -314,7 +314,7 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(attn_mode() == AttnMode::Flash,
-          "a pipeline stage runs the flash attention only (B70_PREFILL_ATTN=composed has no "
+          "a pipeline stage runs the flash attention only (the composed reference has no "
           "two-card walk)");
   require(C > 0 && C <= s.chunk_cap(),
           "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
@@ -513,7 +513,7 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // L0 (spec 6, plan 6b): in Flash mode -- the default, `attn_mode()` -- attention is ONE
 // `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
 // chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8705).
-// `B70_PREFILL_ATTN=composed` gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
+// The composed reference (a test's set_attn_mode_for_test) gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
 // `silu_fused()` is the one term that is not a property of the shape: it is a
 // diagnostic selector, and the arithmetic follows the walk rather than the
 // default so that a `=0` session's counter still matches its own prediction.

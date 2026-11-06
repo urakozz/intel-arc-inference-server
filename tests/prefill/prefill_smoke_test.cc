@@ -99,8 +99,8 @@ int main(int argc, char** argv) {
       argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
 
   using runtime::prefill::AttnMode;
-  // The mode the environment selected (B70_PREFILL_ATTN); the sections below that toggle it
-  // put it back, so the live measurements run in whatever mode the test was started in.
+  // The process's mode (flash: B70_PREFILL_ATTN is gone since the zero-config cleanup); the
+  // sections below that set the composed reference put it back.
   const AttnMode env_mode = runtime::prefill::attn_mode();
   std::printf("attention mode: %s\n", runtime::prefill::attn_mode_name(env_mode));
 
