@@ -657,6 +657,8 @@ struct Server::BatchedRun {
     std::string pending;
     size_t hold = 0;
     bool stopped = false;   // a stop string ended it
+    std::string error;      // the end-of-request text rules threw (on_done): the request fails with it
+    const char* kind = "none";   // the slot's prefix plan, read on the tick thread (PrefixSlots::last_kind)
     // The scheduler's Job holds the callbacks, which hold this run: a weak reference back, no cycle.
     std::weak_ptr<Job> job;
 };
@@ -753,22 +755,31 @@ std::shared_ptr<Server::BatchedRun> Server::submit_batched(const Request& r) {
     flush_pending(false);
     return true;
   };
-  sr.on_done = [rp, add_text, route, flush_pending](const Finish& fin) {
+  PrefixSlots* const slot_cache = impl_->slot_cache.get();
+  sr.on_done = [rp, add_text, route, flush_pending, slot_cache](const Finish& fin) {
     Outcome& o = rp->out;
     rp->fin = fin;
-    if (fin.reason == Finish::Stop || fin.reason == Finish::Length) {
-      const bool eos_stop = fin.reason == Finish::Stop && !rp->stopped;
-      if (eos_stop) {
-        o.finish_reason = "stop";
-        if (o.t_first_token == 0) o.t_first_token = steady_seconds();   // the EOS was the first id
+    // Plan 13b review: done is set whatever the text rules below throw - the HTTP thread waits for it.
+    try {
+      if (slot_cache && fin.slot >= 0) rp->kind = plan_kind_name(slot_cache->last_kind(uint32_t(fin.slot)));
+      if (fin.reason == Finish::Stop || fin.reason == Finish::Length) {
+        const bool eos_stop = fin.reason == Finish::Stop && !rp->stopped;
+        if (eos_stop) {
+          o.finish_reason = "stop";
+          if (o.t_first_token == 0) o.t_first_token = steady_seconds();   // the EOS was the first id
+        }
+        if (o.finish_reason == "length") add_text(rp->streamer->flush());
+        if (rp->parser && (eos_stop || o.finish_reason == "length")) route(rp->parser->finish());
+        flush_pending(true);
+        if (eos_stop && !o.parsed.tool_calls.empty()) o.finish_reason = "tool_calls";
       }
-      if (o.finish_reason == "length") add_text(rp->streamer->flush());
-      if (rp->parser && (eos_stop || o.finish_reason == "length")) route(rp->parser->finish());
-      flush_pending(true);
-      if (eos_stop && !o.parsed.tool_calls.empty()) o.finish_reason = "tool_calls";
+      o.usage.completion_tokens = static_cast<uint32_t>(o.out_ids.size());
+      o.usage.cached_tokens = fin.cached_tokens;
+    } catch (const std::exception& e) {
+      rp->error = e.what();
+    } catch (...) {
+      rp->error = "the request's end failed";
     }
-    o.usage.completion_tokens = static_cast<uint32_t>(o.out_ids.size());
-    o.usage.cached_tokens = fin.cached_tokens;
     std::lock_guard<std::mutex> lock(rp->mu);
     rp->done = true;
     rp->cv.notify_all();
@@ -812,12 +823,12 @@ Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(con
   }
   const Finish& fin = run->fin;
   if (impl_->slot_cache) {
-    std::fprintf(stderr, "prefix: slot %d kind %s restart %u of %zu\n", fin.slot,
-                 fin.slot >= 0 ? plan_kind_name(impl_->slot_cache->last_kind(uint32_t(fin.slot))) : "none",
-                 fin.cached_tokens, outcome.prompt_ids.size());
+    std::fprintf(stderr, "prefix: slot %d kind %s restart %u of %zu\n", fin.slot, run->kind, fin.cached_tokens,
+                 outcome.prompt_ids.size());
     std::fflush(stderr);
   }
   if (fin.reason == Finish::Error) throw std::runtime_error(fin.error);
+  if (!run->error.empty()) throw std::runtime_error(run->error);
   run->out.slot = fin.slot;
   return std::move(run->out);
 }

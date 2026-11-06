@@ -5,9 +5,10 @@
 //
 // Threads (Review Focus 2): every call on a card's engine runs on that card's own worker thread, so the engines
 // never share a thread and each sees exactly the call sequence the serial server would make. A call over several
-// slots (step_batch, step_spec, prefill) is posted to every card's worker and joined; a call that failed on some
-// cards throws server::SlotsFailed naming those rows only, with the others' results. prefill_begin / prefill_end
-// (overlaps_prefill() is true) let the scheduler run a prefill on one card beside a step on the other.
+// slots (step_batch, step_spec) is posted to every card's worker and joined; a call that failed on some cards throws
+// server::SlotsFailed naming those rows only, with the others' results. A prefill (overlaps_prefill() is true) is
+// started per card by prefill_begin and joined per card by prefill_end(slot) once prefill_ready(slot): the scheduler
+// keeps stepping the other card meanwhile, and both cards may prefill at once.
 //
 // Bitwise per card (R1): the engines are independent - nothing is shared but the host prefix store (the scheduler's
 // PrefixSlots: a snapshot saved on card 0 restores on card 1, the host layout being the same - checked at
@@ -19,6 +20,7 @@
 //
 // Host only: this header includes no device code (tests/cli/replica_engine_test.cc runs it on the Mac).
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -101,6 +103,7 @@ class ReplicaEngine : public server::BatchEngineIface {
     for (const Card& c : cards_)
       if (c.engine == nullptr) throw std::invalid_argument("ReplicaEngine: a card without an engine");
     for (size_t i = 0; i < cards_.size(); ++i) workers_.push_back(std::make_unique<CardWorker>());
+    inflight_.resize(cards_.size());
     // What the scheduler and the shared host store read once, from each card on its own thread.
     for (uint32_t i = 0; i < slots(); ++i) {
       Facts f;
@@ -125,7 +128,7 @@ class ReplicaEngine : public server::BatchEngineIface {
   }
   ~ReplicaEngine() override {
     for (auto& f : inflight_)
-      if (f.valid()) f.wait();
+      if (f.valid()) f.wait();   // a prefill still on a card finishes before the threads go
     workers_.clear();   // joins every card's thread
   }
 
@@ -153,17 +156,37 @@ class ReplicaEngine : public server::BatchEngineIface {
                                        wide_);
   }
   bool overlaps_prefill() override { return true; }
+  // Synchronous: every chunk's card started, then each joined (a failure names its chunk only).
   void prefill(const std::vector<Chunk>& chunks) override {
     prefill_begin(chunks);
-    prefill_end();
+    std::vector<std::string> errors(chunks.size());
+    bool failed = false;
+    for (size_t i = 0; i < chunks.size(); ++i) {
+      try {
+        prefill_end(chunks[i].slot);
+      } catch (const std::exception& e) {
+        errors[i] = e.what()[0] != '\0' ? e.what() : "a card failed";
+        failed = true;
+      }
+    }
+    if (failed) throw server::SlotsFailed(std::move(errors), {});
   }
+  // Starts each chunk on its card's thread and returns. Checked before anything is posted: one chunk per slot, and
+  // no slot with a prefill still in flight - so a throw here started nothing.
   void prefill_begin(const std::vector<Chunk>& chunks) override {
-    if (!inflight_.empty()) throw std::logic_error("ReplicaEngine: a prefill is already in flight");
+    std::vector<bool> seen(cards_.size(), false);
+    for (const Chunk& c : chunks) {
+      if (c.slot >= cards_.size()) throw std::out_of_range("ReplicaEngine: no slot " + std::to_string(c.slot));
+      if (seen[c.slot]) throw std::logic_error("ReplicaEngine: two chunks of slot " + std::to_string(c.slot));
+      if (inflight_[c.slot].valid())
+        throw std::logic_error("ReplicaEngine: slot " + std::to_string(c.slot) + " has a prefill in flight");
+      seen[c.slot] = true;
+    }
     for (const Chunk& c : chunks) {
       const uint32_t slot = c.slot;
       std::vector<uint32_t> ids(c.ids, c.ids + c.n);
       const bool replay = c.replay;
-      inflight_.push_back(workers_.at(slot)->post([this, slot, ids = std::move(ids), replay] {
+      inflight_[slot] = workers_[slot]->post([this, slot, ids = std::move(ids), replay] {
         server::EngineIface& e = card(slot);
         if (replay) {   // --prefix-split-last: PrefixSession::begin's ingest of the last id
           e.ingest(ids);
@@ -176,13 +199,19 @@ class ReplicaEngine : public server::BatchEngineIface {
           e.prefill(std::vector<uint32_t>(ids.begin() + long(at), ids.begin() + long(at + n)));
           at += n;
         }
-      }));
+      });
     }
   }
-  void prefill_end() override {
-    std::vector<std::future<void>> done = std::move(inflight_);
-    inflight_.clear();
-    join(done, nullptr);
+  bool prefill_ready(uint32_t slot) override {
+    const std::future<void>& f = inflight_.at(slot);
+    return !f.valid() || f.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
+  }
+  // Joins the slot's prefill (waiting if it still runs) and throws what it threw; nothing in flight: nothing.
+  void prefill_end(uint32_t slot) override {
+    std::future<void>& f = inflight_.at(slot);
+    if (!f.valid()) return;
+    std::future<void> done = std::move(f);   // the slot is free again whatever get() throws
+    done.get();
   }
 
   std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {
@@ -290,7 +319,7 @@ class ReplicaEngine : public server::BatchEngineIface {
   std::vector<Card> cards_;
   bool hooked_, wide_;
   std::vector<Facts> facts_;
-  std::vector<std::future<void>> inflight_;          // the prefill_begin calls not yet joined
+  std::vector<std::future<void>> inflight_;          // per slot: the prefill started, not yet joined
   std::vector<std::unique_ptr<CardWorker>> workers_;   // one thread per card
 };
 

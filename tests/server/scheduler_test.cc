@@ -694,33 +694,141 @@ void test_slot_failure() {
 // The engine's prefill cut and the overlapped prefill: a replica engine's chunks end where
 // its card's one call would cut, and each prefill call runs beside the other card's step.
 void test_prefill_cut_and_overlap() {
+  // Review (plan 13b): a card's prefill must not slow the other card's decode. Each chunk keeps its card busy for
+  // 5 polls (6 ticks); A, decoding, still gets one id EVERY tick while B's 30 ids prefill in 8 / 8 / 8 / 6.
   MockBatchEngine eng(2, 4096);
   configure(eng);
   eng.cut = 8;
   eng.overlap = true;
+  eng.prefill_polls = 5;
   Scheduler s(eng, opts());
   Out a, b;
-  CHECK(s.submit(make({P(111, 13), 200, {}}, a, eng)) != nullptr);   // 8 + 5, nothing else decoding
+  CHECK(s.submit(make({P(111, 13), 400, {}}, a, eng)) != nullptr);   // 8 + 5, nothing else decoding
   while (a.ids.size() < 3) s.tick();
-  CHECK(s.submit(make({P(112, 30), 4, {}}, b, eng)) != nullptr);     // 8, 8, 8, 6 beside A's steps
-  while (b.done_calls == 0) s.tick();
+  CHECK(s.submit(make({P(112, 30), 4, {}}, b, eng)) != nullptr);
+  size_t ticks = 0, b_prefill_ticks = 0;
+  while (b.done_calls == 0) {
+    const size_t before = a.ids.size();
+    const bool b_prefilling = b.ids.empty();
+    s.tick();
+    ++ticks;
+    if (b_prefilling) ++b_prefill_ticks;
+    CHECK_EQ(a.ids.size(), before + 1);   // the idle rate: one id a tick
+  }
+  CHECK(b_prefill_ticks >= 4 * 6);   // B's four chunks really took their polls
   std::vector<std::string> pf;
   for (const auto& e : eng.events)
     if (e.rfind("prefill", 0) == 0) pf.push_back(e);
   const std::vector<std::string> want = {"prefill 0:8", "prefill 0:5", "prefill 1:8", "prefill 1:8", "prefill 1:8",
                                          "prefill 1:6"};
   CHECK(pf == want);
-  // Every one of B's chunks: begin, its prefill, A's step, end - in one tick.
-  size_t overlapped = 0;
-  for (size_t i = 0; i + 3 < eng.events.size(); ++i)
-    if (eng.events[i] == "begin" && eng.events[i + 1].rfind("prefill 1:", 0) == 0 && eng.events[i + 2] == "step 0" &&
-        eng.events[i + 3] == "end")
-      ++overlapped;
-  CHECK_EQ(overlapped, size_t(4));
-  drain(s);
-  same_as_alone("cut and overlap, A", {P(111, 13), 200, {}}, a, 4096);
+  s.cancel(nullptr);
+  while (s.active() != 0) {
+    const size_t before = a.ids.size();
+    s.tick();
+    CHECK(a.ids.size() == before + 1 || a.done_calls == 1);
+  }
+  same_as_alone("cut and overlap, A", {P(111, 13), 400, {}}, a, 4096);
   same_as_alone("cut and overlap, B", {P(112, 30), 4, {}}, b, 4096);
-  std::printf("prefill cut and overlap: chunks 8/8/8/6 at the engine's cut, each beside the other slot's step\n");
+  std::printf("overlap: A got one id every one of %zu ticks while B's 8/8/8/6 chunks prefilled (%zu ticks)\n", ticks,
+              b_prefill_ticks);
+}
+
+// Review (plan 13b): two prompts arriving together prefill at the same time, one on each card.
+void test_parallel_prefill() {
+  MockBatchEngine eng(2, 4096);
+  configure(eng);
+  eng.cut = 8;
+  eng.overlap = true;
+  eng.prefill_polls = 3;
+  Scheduler s(eng, opts());
+  Out a, b;
+  CHECK(s.submit(make({P(113, 20), 6, {}}, a, eng)) != nullptr);
+  CHECK(s.submit(make({P(114, 20), 6, {}}, b, eng)) != nullptr);
+  s.tick();
+  // The first tick started both slots' first chunks in one prefill_begin; nothing joined yet.
+  std::vector<std::string> first;
+  for (const auto& e : eng.events)
+    if (e == "begin" || e.rfind("prefill", 0) == 0 || e.rfind("end", 0) == 0) first.push_back(e);
+  CHECK(first == std::vector<std::string>({"begin", "prefill 0:8", "prefill 1:8"}));
+  drain(s);
+  // Every later begin also carried both slots' chunks (8 / 8 / 4 each), side by side.
+  size_t both = 0;
+  for (size_t i = 0; i + 2 < eng.events.size(); ++i)
+    if (eng.events[i] == "begin" && eng.events[i + 1].rfind("prefill 0:", 0) == 0 &&
+        eng.events[i + 2].rfind("prefill 1:", 0) == 0)
+      ++both;
+  CHECK_EQ(both, size_t(3));
+  same_as_alone("parallel prefill, A", {P(113, 20), 6, {}}, a, 4096);
+  same_as_alone("parallel prefill, B", {P(114, 20), 6, {}}, b, 4096);
+  std::printf("parallel prefill: two prompts prefilled side by side, 3 chunks each\n");
+}
+
+// Review (plan 13b): a callback that throws ends its own request with Error and nothing else - mid-step beside the
+// other slot's prefill in flight, and beside another row of the same step; on_done throwing changes nothing either.
+void test_callback_throws() {
+  {
+    MockBatchEngine eng(2, 4096);
+    configure(eng);
+    eng.cut = 8;
+    eng.overlap = true;
+    eng.prefill_polls = 4;
+    Scheduler s(eng, opts());
+    Out a, b;
+    SchedRequest ra = make({P(121, 9), 50, {}}, a, eng);
+    auto inner = ra.on_token;
+    ra.on_token = [inner, &a](uint32_t id) -> bool {
+      if (a.ids.size() == 2) throw std::runtime_error("the streamer broke");
+      return inner(id);
+    };
+    CHECK(s.submit(std::move(ra)) != nullptr);
+    while (a.ids.size() < 1) s.tick();
+    CHECK(s.submit(make({P(122, 40), 7, {}}, b, eng)) != nullptr);   // prefilling on slot 1 when A throws
+    drain(s);
+    CHECK_EQ(a.fin.reason, Finish::Error);
+    CHECK(a.fin.error.find("streamer broke") != std::string::npos);
+    CHECK_EQ(a.done_calls, 1);
+    CHECK_EQ(b.fin.reason, Finish::Length);
+    same_as_alone("a neighbour's callback threw", {P(122, 40), 7, {}}, b, 4096);
+    // The engine recovered: both slots serve again, nothing left in flight.
+    Out c, d;
+    CHECK(s.submit(make({P(123, 17), 5, {}}, c, eng)) != nullptr);
+    CHECK(s.submit(make({P(124, 23), 5, {}}, d, eng)) != nullptr);
+    drain(s);
+    same_as_alone("after the throw, C", {P(123, 17), 5, {}}, c, 4096);
+    same_as_alone("after the throw, D", {P(124, 23), 5, {}}, d, 4096);
+  }
+  {
+    MockBatchEngine eng(2);
+    configure(eng);
+    Scheduler s(eng, opts());
+    Out a, b, c;
+    SchedRequest ra = make({P(125, 6), 30, {}}, a, eng);
+    auto inner = ra.on_token;
+    ra.on_token = [inner, &a](uint32_t id) -> bool {
+      if (a.ids.size() == 3) throw std::runtime_error("the parser broke");
+      return inner(id);
+    };
+    CHECK(s.submit(std::move(ra)) != nullptr);
+    CHECK(s.submit(make({P(126, 6), 30, {}}, b, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(a.fin.reason, Finish::Error);
+    same_as_alone("the other row of the throwing step", {P(126, 6), 30, {}}, b);
+    // on_done throwing: the request is over, the scheduler goes on.
+    SchedRequest rc = make({P(127, 6), 4, {}}, c, eng);
+    auto done = rc.on_done;
+    rc.on_done = [done](const Finish& f) {
+      done(f);
+      throw std::runtime_error("on_done broke");
+    };
+    CHECK(s.submit(std::move(rc)) != nullptr);
+    Out e;
+    CHECK(s.submit(make({P(128, 6), 4, {}}, e, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(c.done_calls, 1);
+    same_as_alone("after on_done threw", {P(128, 6), 4, {}}, e);
+  }
+  std::printf("callback throws: its own request ends with Error; the neighbour, the next requests unaffected\n");
 }
 
 }  // namespace
@@ -756,6 +864,8 @@ int main() {
   test_lookup_per_request();
   test_slot_failure();
   test_prefill_cut_and_overlap();
+  test_parallel_prefill();
+  test_callback_throws();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

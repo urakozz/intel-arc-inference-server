@@ -32,8 +32,10 @@
 //     max_tokens clamped to that slot's room;
 //   - the prefill cut: an engine with prefill_cut() decides every chunk (each call = one of
 //     its card's own prefill chunks, so a replica engine's prompt is cut where the serial
-//     server's one call cuts it); with overlaps_prefill() the tick's prefill call runs beside
-//     its step (prefill_begin, the step, prefill_end) - a chunk stalls only its own card;
+//     server's one call cuts it); with overlaps_prefill() (one card per slot) every prefilling
+//     slot has its next chunk in flight at once, polled each tick and joined when done
+//     (prefill_ready / prefill_end), so a card's prefill never slows the other card's steps and
+//     two prompts prefill on the two cards together;
 //   - --prefix-split-last (SchedRequest::split_last, with a cache): the prompt is prefilled
 //     to len - 1 (its prompt-end snapshot there) and its last id goes through the decode
 //     replay (Chunk::replay) - PrefixSession::begin(prompt, true)'s order, per slot;
@@ -42,7 +44,9 @@
 //     every id it consumed, plus with lookup_history the slot's earlier requests' generated
 //     ids) - never another slot's (Review Focus 4); its K from its own AdaptiveK over
 //     lookup_adaptive, fed (drafts proposed, drafts kept) as server.cc's loop feeds it;
-//   - per-slot failures: an engine that throws SlotsFailed fails only the rows it names.
+//   - per-slot failures: an engine that throws SlotsFailed fails only the rows it names; a
+//     callback (on_token / on_done) that throws ends its own request with Error and nothing
+//     else - the other rows of the step still get their ids, the engine stays usable.
 //
 // Threading: submit() and cancel() may be called from any thread; engine calls and the
 // callbacks run on the thread calling tick() (the start() loop in the server, the test's
@@ -143,6 +147,10 @@ class Job {
   uint32_t iter_k = 0, proposed = 0;
   bool head_indexed = false;
   std::vector<uint32_t> out;
+  // Plan 13b, an overlapping engine: a chunk of this request is in flight (prefill_begin'd, not
+  // yet joined), and which.
+  bool inflight = false;
+  BatchEngineIface::Chunk chunk{0, nullptr, 0, false, false};
 };
 
 // Spec 7 per slot: the scheduler's prefix-cache calls. PrefixSlots is the implementation
@@ -230,6 +238,7 @@ class Scheduler {
   BatchEngineIface::Chunk next_chunk(const Job& job, bool cut);
   bool prefill_plan(PrefillCall& call);
   void prefill_done(PrefillCall& call, std::exception_ptr error);
+  bool overlapped_prefills();   // plan 13b: join the finished chunks, start the next ones
   void lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt);   // plan 13b
   void lookup_end(uint32_t slot, const std::vector<uint32_t>& out);
   bool decode_round();
