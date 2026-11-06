@@ -1,5 +1,7 @@
 #include "server/scheduler.h"
 
+#include "server/prompt_lookup.h"
+
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -81,6 +83,11 @@ void PrefixSlots::end(uint32_t slot) {
 
 void PrefixSlots::fail(uint32_t slot) { slots_.at(slot).valid = false; }
 
+uint32_t PrefixSlots::held(uint32_t slot) {
+  const Slot& s = slots_.at(slot);
+  return s.valid ? static_cast<uint32_t>(s.resident.size()) : 0;
+}
+
 void PrefixSlots::store(uint32_t slot, uint32_t end) {
   Slot& s = slots_.at(slot);
   try {
@@ -113,15 +120,45 @@ struct Scheduler::Impl {
   std::vector<std::shared_ptr<Job>> slots;
   std::set<uint32_t> eos;
   uint32_t n_slots = 0, max_len = 0;
+  std::vector<uint32_t> slot_len;             // plan 13b: slot_max_len per slot
+  bool spec = false;                          // step_spec rounds (a speculative engine or lookup)
+  bool lookup = false;                        // plan 13b: prompt lookup per request
+  uint32_t cap = 0;                           // drafts per row at most (spec_k or verify_k)
+  std::vector<std::unique_ptr<PromptLookup>> matchers;            // plan 13b: one per slot
+  std::vector<std::deque<std::vector<uint32_t>>> history;        // per slot (lookup_history)
+};
+
+struct Scheduler::PrefillCall {
+  std::vector<std::shared_ptr<Job>> jobs;
+  std::vector<BatchEngineIface::Chunk> chunks;
 };
 
 Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheIface* cache)
     : engine_(engine), opts_(std::move(opts)), cache_(cache), impl_(std::make_unique<Impl>()) {
   impl_->n_slots = engine_.slots();
-  impl_->max_len = engine_.max_len();
   if (impl_->n_slots == 0) throw std::invalid_argument("Scheduler: the engine has no slots");
+  impl_->max_len = 0;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    impl_->slot_len.push_back(engine_.slot_max_len(s));
+    impl_->max_len = std::max(impl_->max_len, impl_->slot_len.back());
+  }
   impl_->slots.resize(impl_->n_slots);
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
+  if (opts_.lookup) {   // plan 13b: server.cc's refusals for --spec lookup, per engine
+    if (engine_.verify_k() == 0)
+      throw std::invalid_argument("--spec lookup: this engine cannot verify external drafts");
+    if (engine_.spec_k() != 0)
+      throw std::invalid_argument("--spec lookup and --spec mtp are one proposer each; pick one");
+    PromptLookup probe;
+    if (opts_.lookup_min_match < PromptLookup::kMinMatch ||
+        opts_.lookup_min_match > probe.options().max_match)
+      throw std::invalid_argument("the lookup minimum match must be in [2, 64]");
+    impl_->lookup = true;
+    for (uint32_t s = 0; s < impl_->n_slots; ++s) impl_->matchers.push_back(std::make_unique<PromptLookup>());
+    impl_->history.resize(impl_->n_slots);
+  }
+  impl_->spec = engine_.spec_k() > 0 || impl_->lookup;
+  impl_->cap = impl_->lookup ? engine_.verify_k() : engine_.spec_k();
 }
 
 // Requests still queued or holding a slot are dropped without on_done: the owner of the
@@ -140,8 +177,8 @@ std::shared_ptr<Job> Scheduler::submit(SchedRequest r) {
                                 " tokens; max_model_len is " + std::to_string(impl_->max_len));
   }
   auto job = std::make_shared<Job>();
-  const uint32_t budget = impl_->max_len - static_cast<uint32_t>(r.prompt.size());
-  job->max_tokens = std::min(r.max_tokens, budget);
+  // The room to generate is the granted slot's (plan 13b: per-slot lengths); clamped at the grant.
+  job->max_tokens = r.max_tokens;
   job->rng.seed(r.sampling.has_seed ? r.sampling.seed : std::random_device{}());
   job->fin.prompt_tokens = static_cast<uint32_t>(r.prompt.size());
   job->req = std::move(r);
@@ -187,19 +224,51 @@ double Scheduler::hold_remaining() const {
   return std::max(0.0, opts_.burst_hold_s - (now() - impl_->waiting.front()->arrived));
 }
 
-uint32_t Scheduler::pick_slot(const Job& job) const {
+// Review Focus 5: the free slot the prompt fits whose resident session matches the most of
+// it; among equal matches (plan 13b) the one whose session holds least - a new conversation
+// does not evict a long one from a card while another card holds nothing.
+int Scheduler::pick_slot(const Job& job) const {
   int best = -1;
-  uint32_t best_match = 0;
+  uint32_t best_match = 0, best_held = 0;
+  const size_t need = job.req.prompt.size() + 1;
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
-    if (impl_->slots[s]) continue;
+    if (impl_->slots[s] || impl_->slot_len[s] < need) continue;
     const uint32_t m = cache_ ? cache_->match(s, job.req.prompt) : 0;
-    if (best < 0 || m > best_match) {
+    const uint32_t h = cache_ ? cache_->held(s) : 0;
+    if (best < 0 || m > best_match || (m == best_match && h < best_held)) {
       best = static_cast<int>(s);
       best_match = m;
+      best_held = h;
     }
   }
-  if (best < 0) throw std::logic_error("Scheduler: no free slot to grant");
-  return static_cast<uint32_t>(best);
+  return best;
+}
+
+// Spec 19e's lookup_begin (server.cc), on the slot's matcher.
+void Scheduler::lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt) {
+  PromptLookup& lk = *impl_->matchers[slot];
+  if (opts_.lookup_history == 0) {
+    const std::vector<uint32_t>& held = lk.ids();
+    size_t common = 0;
+    const size_t n = std::min(held.size(), prompt.size());
+    while (common < n && held[common] == prompt[common]) ++common;
+    lk.truncate(common);
+    for (size_t i = common; i < prompt.size(); ++i) lk.append(prompt[i]);
+    return;
+  }
+  lk.clear();
+  for (const std::vector<uint32_t>& earlier : impl_->history[slot]) {
+    lk.append(earlier);
+    lk.boundary();
+  }
+  lk.append(prompt);
+}
+
+void Scheduler::lookup_end(uint32_t slot, const std::vector<uint32_t>& out) {
+  if (opts_.lookup_history == 0) return;
+  auto& h = impl_->history[slot];
+  h.push_back(out);
+  while (h.size() > opts_.lookup_history) h.pop_front();
 }
 
 void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
@@ -211,10 +280,26 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
   job->slot = static_cast<int>(slot);
   job->fin.slot = job->slot;
   job->state = Job::State::Prefilling;
-  if (engine_.spec_k() > 0 && opts_.spec_fixed_k == 0) {   // spec 19d: the request's own K policy
-    AdaptiveKOptions o = opts_.spec;
-    o.max_k = std::min(o.max_k, engine_.spec_k());
+  job->max_tokens = std::min(job->max_tokens,
+                             impl_->slot_len[slot] - static_cast<uint32_t>(job->req.prompt.size()));
+  job->split = job->req.split_last && cache_ != nullptr;
+  if (impl_->spec && (impl_->lookup || opts_.spec_fixed_k == 0)) {   // the request's own K policy
+    AdaptiveKOptions o = impl_->lookup ? opts_.lookup_adaptive : opts_.spec;
+    o.max_k = std::min(o.max_k, impl_->cap);
     job->policy = std::make_unique<AdaptiveK>(o);
+  }
+  if (impl_->lookup) {
+    Job* raw = job.get();
+    job->propose = [this, raw](uint32_t pending) {
+      if (raw->head_indexed) throw std::logic_error("BatchEngineIface::step_spec: propose twice");
+      PromptLookup& m = *impl_->matchers[static_cast<uint32_t>(raw->slot)];
+      m.append(pending);
+      raw->head_indexed = true;
+      std::vector<uint32_t> d =
+          raw->iter_k > 0 ? m.propose(raw->iter_k, opts_.lookup_min_match) : std::vector<uint32_t>{};
+      raw->proposed = static_cast<uint32_t>(d.size());
+      return d;
+    };
   }
   try {
     // Review Focus 5: the prefix plan is taken here, at the grant, against what the slot
@@ -224,6 +309,7 @@ void Scheduler::grant(const std::shared_ptr<Job>& job, uint32_t slot) {
     else engine_.reset(slot);
     job->prefilled = restart;
     job->fin.cached_tokens = restart;
+    if (impl_->lookup) lookup_begin(slot, job->req.prompt);
   } catch (const std::exception& error) {
     finish(job, Finish::Error, error.what());
   }
@@ -247,6 +333,7 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
         cache_->fail(slot);
       }
     }
+    if (impl_->lookup && (reason == Finish::Stop || reason == Finish::Length)) lookup_end(slot, job->out);
     impl_->slots[slot] = nullptr;
     std::lock_guard<std::mutex> lock(impl_->mu);
     --impl_->active;
@@ -255,90 +342,146 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
   if (job->req.on_done) job->req.on_done(job->fin);
 }
 
-bool Scheduler::prefill_round() {
-  std::vector<std::shared_ptr<Job>> jobs;
+// The next prefill call's chunk for a prefilling request: up to len (or len - 1 under
+// split-last, then the replay of the last id), cut by the engine's rule when it has one,
+// else at `chunk` when `cut` (Interleave while rows decode).
+BatchEngineIface::Chunk Scheduler::next_chunk(const Job& j, bool cut) {
+  const uint32_t len = static_cast<uint32_t>(j.req.prompt.size());
+  const uint32_t slot = static_cast<uint32_t>(j.slot);
+  const uint32_t end = j.split ? len - 1 : len;
+  if (j.prefilled >= end) return {slot, j.req.prompt.data() + len - 1, 1, true, true};
+  uint32_t n = end - j.prefilled;
+  const uint32_t engine_cut = engine_.prefill_cut(slot, j.prefilled, n);
+  if (engine_cut != 0) n = std::min(n, engine_cut);
+  else if (cut && opts_.chunk != 0) n = std::min(n, opts_.chunk);
+  return {slot, j.req.prompt.data() + j.prefilled, n, !j.split && j.prefilled + n == len, false};
+}
+
+bool Scheduler::prefill_plan(PrefillCall& call) {
   bool decoding = false;
   for (const auto& j : impl_->slots) {
     if (!j) continue;
     if (j->state == Job::State::Decoding) decoding = true;
-    if (j->state == Job::State::Prefilling) jobs.push_back(j);
+    if (j->state == Job::State::Prefilling) call.jobs.push_back(j);
   }
-  if (jobs.empty()) return false;
-  std::sort(jobs.begin(), jobs.end(), [](const auto& a, const auto& b) { return a->order < b->order; });
-  if (opts_.admission == Admission::Interleave) jobs.resize(1);   // the oldest, one chunk
-
-  std::vector<BatchEngineIface::Chunk> chunks;
-  for (const auto& j : jobs) {
-    const uint32_t len = static_cast<uint32_t>(j->req.prompt.size());
-    uint32_t n = len - j->prefilled;
-    if (opts_.admission == Admission::Interleave && decoding && opts_.chunk != 0)
-      n = std::min(n, opts_.chunk);
-    chunks.push_back({static_cast<uint32_t>(j->slot), j->req.prompt.data() + j->prefilled, n,
-                      j->prefilled + n == len});
-  }
-  try {
-    engine_.prefill(chunks);
-  } catch (const std::exception& error) {
-    for (const auto& j : jobs) finish(j, Finish::Error, error.what());
-    return true;
-  }
-  for (size_t i = 0; i < jobs.size(); ++i) {
-    const auto& j = jobs[i];
-    j->prefilled += chunks[i].n;
-    try {
-      if (cache_) cache_->prefilled(chunks[i].slot, j->prefilled, chunks[i].last);
-    } catch (const std::exception& error) {
-      finish(j, Finish::Error, error.what());
-      continue;
-    }
-    if (!chunks[i].last) continue;
-    j->state = Job::State::Decoding;
-    if (j->max_tokens == 0) finish(j, Finish::Length);
-  }
+  if (call.jobs.empty()) return false;
+  std::sort(call.jobs.begin(), call.jobs.end(), [](const auto& a, const auto& b) { return a->order < b->order; });
+  if (opts_.admission == Admission::Interleave) call.jobs.resize(1);   // the oldest, one chunk
+  for (const auto& j : call.jobs)
+    call.chunks.push_back(next_chunk(*j, opts_.admission == Admission::Interleave && decoding));
   return true;
 }
 
+// After the prefill call: `error` null when every chunk went in; a SlotsFailed fails only the
+// chunks it names, any other error every chunk of the call.
+void Scheduler::prefill_done(PrefillCall& call, std::exception_ptr error) {
+  std::vector<std::string> failed(call.jobs.size());
+  if (error) {
+    try {
+      std::rethrow_exception(error);
+    } catch (const SlotsFailed& f) {
+      for (size_t i = 0; i < failed.size(); ++i)
+        failed[i] = i < f.errors.size() ? f.errors[i] : std::string(f.what());
+    } catch (const std::exception& e) {
+      for (auto& f : failed) f = e.what();
+    }
+  }
+  for (size_t i = 0; i < call.jobs.size(); ++i) {
+    const auto& j = call.jobs[i];
+    const BatchEngineIface::Chunk& c = call.chunks[i];
+    if (!failed[i].empty()) {
+      finish(j, Finish::Error, failed[i]);
+      continue;
+    }
+    const uint32_t len = static_cast<uint32_t>(j->req.prompt.size());
+    try {
+      if (c.replay) {   // split-last: the last prompt id went through the decode replay
+        j->prefilled = len;
+        if (cache_) cache_->fed(c.slot, c.ids[0]);
+      } else {
+        j->prefilled += c.n;
+        // The prompt-end snapshot: at len, or at len - 1 under split-last.
+        const bool prompt_end = c.last || (j->split && j->prefilled == len - 1);
+        if (cache_) cache_->prefilled(c.slot, j->prefilled, prompt_end);
+      }
+    } catch (const std::exception& e) {
+      finish(j, Finish::Error, e.what());
+      continue;
+    }
+    if (!c.last) continue;
+    j->state = Job::State::Decoding;
+    if (j->max_tokens == 0) finish(j, Finish::Length);
+  }
+}
+
 // Spec 19d: one speculative iteration over every decoding slot; each row's run goes through the per-id rules in
-// order, and the ids past the one that ends a request are handed back before its request-end snapshot.
+// order, and the ids past the one that ends a request are handed back before its request-end snapshot. Plan 13b:
+// with prompt lookup each row carries its request's proposer; a SlotsFailed fails only the rows it names.
 bool Scheduler::spec_round() {
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::SpecRow> rows;
-  const uint32_t cap = engine_.spec_k();
+  const uint32_t cap = impl_->cap;
   for (const auto& j : impl_->slots) {
     if (!j || j->state != Job::State::Decoding) continue;
     jobs.push_back(j);
     const uint32_t k = j->policy ? j->policy->next() : std::min(opts_.spec_fixed_k, cap);
-    rows.push_back({static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, std::min(k, cap)});
+    BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, std::min(k, cap), nullptr};
+    if (impl_->lookup) {
+      j->iter_k = row.k;
+      j->proposed = 0;
+      j->head_indexed = false;
+      row.propose = &j->propose;
+    }
+    rows.push_back(row);
   }
   if (rows.empty()) return false;
   std::vector<std::vector<uint32_t>> runs;
+  std::vector<std::string> failed(rows.size());
   try {
-    runs = engine_.step_spec(rows);
+    try {
+      runs = engine_.step_spec(rows);
+    } catch (const SlotsFailed& f) {
+      runs = f.runs;
+      runs.resize(rows.size());
+      for (size_t i = 0; i < rows.size(); ++i) failed[i] = i < f.errors.size() ? f.errors[i] : std::string(f.what());
+    }
     if (runs.size() != rows.size())
       throw std::logic_error("BatchEngineIface::step_spec returned " + std::to_string(runs.size()) +
                              " runs for " + std::to_string(rows.size()) + " rows");
-    for (size_t i = 0; i < runs.size(); ++i)
-      if (runs[i].empty() || runs[i].size() > size_t(rows[i].k) + 1)
+    for (size_t i = 0; i < runs.size(); ++i) {
+      if (!failed[i].empty()) continue;
+      const uint32_t most = impl_->lookup ? jobs[i]->proposed : rows[i].k;
+      if (runs[i].empty() || runs[i].size() > size_t(most) + 1)
         throw std::logic_error("BatchEngineIface::step_spec returned " + std::to_string(runs[i].size()) +
-                               " ids for a row of " + std::to_string(rows[i].k) + " drafts");
+                               " ids for a row of " + std::to_string(most) + " drafts");
+    }
   } catch (const std::exception& error) {
     for (const auto& j : jobs) finish(j, Finish::Error, error.what());
     return true;
   }
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
-    const std::vector<uint32_t>& run = runs[i];
     const uint32_t slot = rows[i].slot, k = rows[i].k;
+    if (!failed[i].empty()) {
+      finish(j, Finish::Error, failed[i]);
+      continue;
+    }
+    const std::vector<uint32_t>& run = runs[i];
     const uint32_t kept_drafts = static_cast<uint32_t>(run.size() - 1);
-    if (j->policy) j->policy->observe(k, std::min(k, kept_drafts));
+    if (impl_->lookup) {
+      if (j->policy) j->policy->observe(j->proposed, kept_drafts);   // server.cc's next_lookup
+    } else if (j->policy) {
+      j->policy->observe(k, std::min(k, kept_drafts));
+    }
     ++j->fin.spec_iters;
-    j->fin.spec_drafted += k;
+    j->fin.spec_drafted += impl_->lookup ? j->proposed : k;
     // server.cc's per-id rules over the run; `end` = the reason, at the id that ends the request.
     bool ended = false;
     Finish::Reason reason = Finish::Length;
     size_t used = 0;
     for (; used < run.size() && !ended;) {
       const uint32_t id = run[used++];
+      if (impl_->lookup && (used > 1 || !j->head_indexed)) impl_->matchers[slot]->append(id);
       if (cache_) cache_->fed(slot, id);
       ++j->steps;
       const bool is_eos = impl_->eos.count(id) != 0;
@@ -348,6 +491,7 @@ bool Scheduler::spec_round() {
         break;
       }
       ++j->fin.completion_tokens;
+      if (impl_->lookup && opts_.lookup_history != 0) j->out.push_back(id);
       if (j->req.on_token && !j->req.on_token(id)) {
         ended = true;
         reason = Finish::Stop;
@@ -376,7 +520,7 @@ bool Scheduler::spec_round() {
 }
 
 bool Scheduler::decode_round() {
-  if (engine_.spec_k() > 0) return spec_round();   // spec 19d
+  if (impl_->spec) return spec_round();   // spec 19d; plan 13b: prompt lookup
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::Row> rows;
   for (const auto& j : impl_->slots) {
@@ -386,8 +530,19 @@ bool Scheduler::decode_round() {
   }
   if (rows.empty()) return false;
   std::vector<uint32_t> ids;
+  std::vector<std::string> failed(rows.size());
   try {
-    ids = engine_.step_batch(rows);
+    try {
+      ids = engine_.step_batch(rows);
+    } catch (const SlotsFailed& f) {   // plan 13b: the rows it names fail, the others stand
+      ids.assign(rows.size(), 0);
+      for (size_t i = 0; i < rows.size(); ++i) {
+        failed[i] = i < f.errors.size() ? f.errors[i] : std::string(f.what());
+        if (failed[i].empty() && (i >= f.runs.size() || f.runs[i].size() != 1))
+          throw std::logic_error("BatchEngineIface::step_batch: SlotsFailed without a completed row's id");
+        if (failed[i].empty()) ids[i] = f.runs[i][0];
+      }
+    }
     if (ids.size() != rows.size())
       throw std::logic_error("BatchEngineIface::step_batch returned " + std::to_string(ids.size()) +
                              " ids for " + std::to_string(rows.size()) + " rows");
@@ -398,6 +553,10 @@ bool Scheduler::decode_round() {
   // server.cc's per-id rules, per row: the id is consumed (fed) whatever happens next.
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
+    if (!failed[i].empty()) {
+      finish(j, Finish::Error, failed[i]);
+      continue;
+    }
     const uint32_t id = ids[i];
     if (cache_) cache_->fed(rows[i].slot, id);
     ++j->steps;
@@ -441,7 +600,8 @@ bool Scheduler::tick() {
     did = true;
   }
 
-  // 2. Grants, in arrival order.
+  // 2. Grants, in arrival order; a request no free slot fits (plan 13b: per-slot lengths)
+  // goes back to the head of the queue.
   std::vector<std::shared_ptr<Job>> granted;
   {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -456,14 +616,61 @@ bool Scheduler::tick() {
       }
     }
   }
+  std::vector<std::shared_ptr<Job>> back;
   for (const auto& j : granted) {
-    grant(j, pick_slot(*j));
+    const int slot = pick_slot(*j);
+    if (slot < 0) {
+      back.push_back(j);
+      continue;
+    }
+    grant(j, static_cast<uint32_t>(slot));
     did = true;
   }
+  if (!back.empty()) {
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    for (auto it = back.rbegin(); it != back.rend(); ++it) impl_->waiting.push_front(*it);
+  }
 
-  // 3. At most one prefill call; 4. one decode step.
-  if (prefill_round()) did = true;
-  if (decode_round()) did = true;
+  // 3. At most one prefill call; 4. one decode step. Plan 13b: with overlaps_prefill() the
+  // prefill call runs beside the step (other slots, other cards) and is joined after it.
+  PrefillCall call;
+  const bool prefill = prefill_plan(call);
+  if (engine_.overlaps_prefill()) {
+    std::exception_ptr error;
+    bool started = false;
+    if (prefill) {
+      try {
+        engine_.prefill_begin(call.chunks);
+        started = true;
+      } catch (...) {
+        error = std::current_exception();
+      }
+    }
+    if (decode_round()) did = true;
+    if (prefill) {
+      if (started) {
+        try {
+          engine_.prefill_end();
+        } catch (...) {
+          error = std::current_exception();
+        }
+      }
+      prefill_done(call, error);
+      did = true;
+    }
+  } else {
+    if (prefill) {
+      std::exception_ptr error;
+      try {
+        engine_.prefill(call.chunks);
+      } catch (...) {
+        error = std::current_exception();
+      }
+      prefill_done(call, error);
+      did = true;
+    }
+    if (decode_round()) did = true;
+  }
   return did;
 }
 
