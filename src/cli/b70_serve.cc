@@ -826,6 +826,10 @@ int run(int argc, char** argv) {
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
   cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
+    throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
+  if (pipe.mode == cli::Parallel::One && pipe.have_handoff)
+    throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses)");
   const bool pp_given = pipe.given();
   if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
     throw std::runtime_error("--layers belongs to Qwen3.8-Flash-Next (model_type qwen4_exp, spec 21e); this checkpoint "

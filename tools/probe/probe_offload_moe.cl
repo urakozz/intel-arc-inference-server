@@ -2,7 +2,7 @@
 // checks the committed copy). Spec 22a (P0.3): src/kernels/qwen4exp/q4_moe.cl with exactly its two expert-address lines
 // (Q4_EXPERT_GU / Q4_EXPERT_DN) replaced by a u64 pointer-table read - `w` is the layer's table: gate||up
 // pointers [0, 512), down pointers [512, 1024); the down launch is bound at table + 512 entries.
-// source sha256 13ea7154ab1c15778d5f4a726ef6e85177c1e3a87e1bf46a5943990cdd5d19e0
+// source sha256 492b0681a65980aa8b55a1054194b03758fb9915baeff4965bdf94cb9b6ce125
 // q4_moe.cl - spec 21c: Qwen3.8-Flash-Next's MoE block at 512 experts / top-10 / 640 (spec 21 §2.1, §4.4) - the
 // router's softmax route and the 11-slot block (10 routed + the shared expert). Two families, each compiled only
 // when its defines are given (kol_moe.cl's arrangement; moe.cl's semantics - Qwen3.5-MoE's softmax router - at
@@ -37,7 +37,7 @@
 // no kernel source in this tree #includes - ocloc's include resolution is unproven blind - so the macro lives here.)
 //
 // **Portability**: sub-group block reads under cl_intel_subgroups, the plain loads they equal otherwise, every
-// cross-lane step through SLM - the file builds as OpenCL 1.2 for the indicative Mac run.
+// cross-lane step through SLM.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -53,13 +53,9 @@
 #define R_P10 27
 #define R_P11 28
 
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define Q4_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
-#else
-#define Q4_SG16
-#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
@@ -215,14 +211,10 @@ inline float dot8(uint word, ushort8 xv) {
   return a;
 }
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * SG + lane];
-#endif
 }
 inline float tile_dot(const __global uint* restrict tile, const __global ushort* restrict xr,
                       uint g0, uint g1, uint lane) {
@@ -243,14 +235,8 @@ inline float bf16_dot(const __global ushort* restrict tile, const __global ushor
                       uint o0, uint o1, uint lane) {
   float a = 0.f;
   for (uint o = o0; o < o1; ++o) {
-#ifdef cl_intel_subgroups
     (void)lane;
     const ushort8 wv = intel_sub_group_block_read_us8(tile + (size_t)o * 128);
-#else
-    const __global ushort* t = tile + (size_t)o * 128;
-    const ushort8 wv = (ushort8)(t[0 * SG + lane], t[1 * SG + lane], t[2 * SG + lane], t[3 * SG + lane],
-                                 t[4 * SG + lane], t[5 * SG + lane], t[6 * SG + lane], t[7 * SG + lane]);
-#endif
     const ushort8 xv = vload8(0, xr + o * 8);
     a += bf16f(wv.s0) * bf16f(xv.s0); a += bf16f(wv.s1) * bf16f(xv.s1);
     a += bf16f(wv.s2) * bf16f(xv.s2); a += bf16f(wv.s3) * bf16f(xv.s3);
