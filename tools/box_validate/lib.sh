@@ -211,15 +211,18 @@ idle() {   # idle TAG - the record/iterate grade at this moment (docs/10-the-box
 # The test output is kept in full in the JUnit file (ctest truncates passed tests' output
 # to 1 KiB by default), which is what G0's bitwise comparison and the numbers read.
 BV_CTEST_FLAGS="--output-on-failure --no-tests=error --test-output-size-passed 200000000 --test-output-size-failed 200000000"
-ctest_cmd() { echo "ctest --test-dir build $BV_CTEST_FLAGS --output-junit $STATE/$STAGE${1:-}.junit.xml"; }
+# On the tree under test every test runs traced (tools/test_launcher.sh): what it read, for reuse.py.
+ctest_cmd() { echo "B70_TRACE_DIR=$STATE/trace ctest --test-dir build $BV_CTEST_FLAGS --output-junit $STATE/$STAGE${1:-}.junit.xml"; }
 ctest_cmd_base() { echo "ctest --test-dir build $BV_CTEST_FLAGS --output-junit $STATE/$STAGE${1:-}.baseline.xml"; }
 
 # run_tests ERE [LABELS] [NOT_LABELS] [ENV] - the registered tests whose names match ERE (and
 # carry every label of LABELS, none of NOT_LABELS); ENV (`VAR=value ...`) is set for the ctest
 # run (B70_LONGCTX_TESTS=1 for the `longctx` variants, which SKIP without it). Tests that
 # already have a result in this run (the G0 suite ran most of the old ones) are taken from it;
-# the rest run now. The verdict is over all of them: a failure fails, a test with no result
-# fails, all skipped is a skip.
+# then those whose every input - binary, kernels, data, environment - is byte-identical to a
+# recorded PASS (box_check's, an earlier run's) take that PASS (reuse_claim); the rest run now,
+# and their PASSes are recorded (reuse_record). The verdict is over all of them: a failure
+# fails, a test with no result fails, all skipped is a skip.
 BV_CT_N=0
 run_tests() {
   local re="$1" filt="" l sfx="" envp="${4:+env $4 }"
@@ -231,9 +234,23 @@ run_tests() {
   # the test list per stage: a stage of the other orchestrator may be rewriting its own
   local tj="$STATE/$STAGE.tests.json"
   x "ctest --test-dir build --show-only=json-v1 > $tj"
+  reuse_claim "$tj" "--re '$re'$filt" "$sfx" "$envp"
   x "re=\$(python3 tools/box_validate/junit.py todo $tj --re '$re'$filt --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $envp$(ctest_cmd "$sfx") -R \"\$re\"; fi"
+  reuse_record "$tj" "$sfx"
   x "python3 tools/box_validate/junit.py pick $tj --re '$re'$filt --junit \"$STATE/*.junit.xml\""
   step_rc $? "tests /$re/$filt"
+}
+
+# reuse_claim TESTS_JSON "<junit.py filters>" [SFX] [ENV] - the selected tests still without a
+# result in this run whose recorded PASS still holds go into $STAGE<SFX>.reused.junit.xml
+# (tools/box_validate/reuse.py claim, with the stage's ENV: the environment is an input).
+reuse_claim() {
+  x "re=\$(python3 tools/box_validate/junit.py todo $1 $2 --done \"$STATE/*.junit.xml\"); [ -z \"\$re\" ] || ${4:-}python3 tools/box_validate/reuse.py claim --tests $1 --re \"\$re\" --state $STATE --out $STATE/$STAGE${3:-}.reused.junit.xml"
+}
+# reuse_record TESTS_JSON [SFX] - the PASSes of $STAGE<SFX>.junit.xml into the store (what each
+# test read, from its trace of this run: traces older than TESTS_JSON are not this run's).
+reuse_record() {
+  x "python3 tools/box_validate/reuse.py record --tests $1 --junit $STATE/$STAGE${2:-}.junit.xml --trace $STATE/trace --since $1 --ignore $STATE"
 }
 
 # xfail "<command line>" ERE WHAT - the command must refuse: exit non-zero, not by a signal

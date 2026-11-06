@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests of tools/box_validate that need no box: python3 tools/box_validate/test_box_validate.py
 
-The JUnit / test-list logic, G0's normalised comparison and binary checksum compare, the
+The JUnit / test-list logic, reuse.py's record / claim (a PASS kept while every input matches), G0's normalised comparison and binary checksum compare, the
 interleaved medians, the summary, the orchestrator's resume / redo / stop-the-line / needs /
 after rules and need_ok (remote.sh over a stub stage file, with a stand-in flock), the server
 rows' client (serve_run.sh + serve_client.py against a stand-in b70-serve: run, table,
@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 import junit  # noqa: E402
+import reuse  # noqa: E402
 import summary  # noqa: E402
 
 
@@ -156,6 +157,171 @@ class JunitTest(Tmp):
                             self.p("*.junit.xml"), "--test", "replay", "--pattern", "kernel_count",
                             "--label", "replay"], capture_output=True, text=True)
         self.assertEqual(r.stdout, "METRIC replay\t[replay_determinism_test] kernel_count 774\n")
+
+
+class ReuseTest(Tmp):
+    """reuse.py over a stand-in tree, data directory, trace and store (no strace, no ctest)."""
+
+    TRACE = textwrap.dedent("""\
+        100 execve("{T}/build/tests/t_exe", ["t_exe"], 0x7ff /* 3 vars */) = 0
+        100 openat(AT_FDCWD, "build/kernels/k.bin", O_RDONLY|O_CLOEXEC) = 3
+        100 openat(AT_FDCWD, "oracle-out-x/model.bin", O_RDONLY <unfinished ...>
+        101 newfstatat(AT_FDCWD, "tests/golden/g.txt", {{st_mode=S_IFREG|0644, st_size=3, ...}}, 0) = 0
+        100 <... openat resumed>) = 4
+        100 openat(AT_FDCWD, "{T}/out/scratch.bin", O_WRONLY|O_CREAT|O_TRUNC, 0644) = 5
+        100 openat(AT_FDCWD, "{T}/out/scratch.bin", O_RDONLY) = 6
+        100 access("{T}/tests/golden/optional.txt", R_OK) = -1 ENOENT (No such file or directory)
+        100 openat(AT_FDCWD, "{T}/tests/golden", O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_DIRECTORY) = 7
+        100 +++ exited with 0 +++
+        """)
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = os.path.realpath(self.tmp)
+        self.ignored = reuse.IGNORED
+        reuse.IGNORED = ("/proc/", "/sys/", "/dev/")      # the box's tempdir is under /tmp
+        self.env = {k: v for k, v in os.environ.items() if reuse.ENV_RX.match(k)}
+        for k in self.env:
+            del os.environ[k]
+        self.old = time.time() - 300
+        self.tree = self.mk_tree("tree")
+
+    def tearDown(self):
+        reuse.IGNORED = self.ignored
+        os.environ.update(self.env)
+        os.environ.pop("BV_NO_REUSE", None)
+        super().tearDown()
+
+    def mk_tree(self, name, exe="EXE1"):
+        t = self.p(name)
+        files = {"build/tests/t_exe": "\x7fELF" + exe, "build/kernels/k.bin": "K1", "tests/golden/g.txt": "g1",
+                 "src/x.cc": "int x;", "build/CMakeCache.txt": f"CMAKE_BUILD_TYPE:STRING=Release\nB70_X:BOOL=ON\n"
+                 f"B70_KERNEL_DIR:INTERNAL={t}/build/kernels\n"}
+        for rel, text in files.items():
+            write(os.path.join(t, rel), text)
+        write(self.p("data", "model.bin"), "M1")
+        if not os.path.lexists(os.path.join(t, "oracle-out-x")):
+            os.symlink(self.p("data"), os.path.join(t, "oracle-out-x"))
+        for d, _, fs in os.walk(t):
+            for f in fs:
+                os.utime(os.path.join(d, f), (self.old, self.old))
+        os.utime(self.p("data", "model.bin"), (self.old, self.old))
+        write(os.path.join(t, "tests.json"), json.dumps({"kind": "ctestInfo", "tests": [{
+            "name": "t_test", "command": [f"{t}/tools/test_launcher.sh", f"{t}/build/tests/t_exe", "oracle-out-x"],
+            "properties": [{"name": "WORKING_DIRECTORY", "value": t}, {"name": "LABELS", "value": ["checkpoint"]},
+                           {"name": "ENVIRONMENT", "value": ["B70_KV_CACHE=int8", "B70_TEST_NAME=t_test"]}]}]}))
+        os.utime(os.path.join(t, "tests.json"), (self.old + 100, self.old + 100))
+        return t
+
+    def run_test(self, tree, status="run", trace=None, env="B70_KV_CACHE=int8\n"):
+        """the stand-in of one traced ctest run of t_test in TREE: trace, env, cwd and the JUnit"""
+        tr = os.path.join(tree, "trace")
+        write(os.path.join(tr, "t_test.trace"), (trace or self.TRACE).format(T=tree))
+        write(os.path.join(tr, "t_test.env"), env)
+        write(os.path.join(tr, "t_test.cwd"), tree + "\n")
+        write(os.path.join(tree, "run.junit.xml"), junit_xml([("t_test", status, None, "golden OK 32/32\n")]))
+        return reuse.main(["record", "--tests", os.path.join(tree, "tests.json"), "--junit",
+                           os.path.join(tree, "run.junit.xml"), "--trace", tr, "--since",
+                           os.path.join(tree, "tests.json"), "--tree", tree, "--store", self.p("store")])
+
+    def claim(self, tree):
+        out = os.path.join(tree, "reused.junit.xml")
+        if os.path.exists(out):
+            os.remove(out)
+        reuse.main(["claim", "--tests", os.path.join(tree, "tests.json"), "--re", "^(t_test)$", "--out", out,
+                    "--tree", tree, "--store", self.p("store")])
+        return junit.parse_junit(out) if os.path.exists(out) else {}
+
+    def entry(self):
+        return reuse.load(self.p("store"), "t_test")[0]
+
+    def test_record_and_claim(self):
+        self.run_test(self.tree)
+        ins = self.entry()["inputs"]
+        self.assertIn("T:tests/golden/g.txt", ins)
+        self.assertEqual(ins["T:tests/golden/optional.txt"], [False, "missing"])
+        self.assertEqual(ins["T:oracle-out-x/model.bin"][1], "ext")
+        self.assertEqual(ins["T:tests/golden"][1], "dirlist")
+        self.assertFalse([k for k in ins if "scratch" in k], "a file the test wrote is an output, not an input")
+        got = self.claim(self.tree)
+        self.assertEqual(got["t_test"][0], junit.PASS)
+        self.assertIn("REUSED", got["t_test"][2])
+        self.assertIn("golden OK 32/32", got["t_test"][2])
+
+    def test_any_changed_input_runs_again(self):
+        self.run_test(self.tree)
+        g = os.path.join(self.tree, "tests/golden/g.txt")
+        write(g, "g2"); os.utime(g, (self.old, self.old))
+        self.assertEqual(self.claim(self.tree), {}, "a tree file by content")
+        write(g, "g1"); os.utime(g, (self.old, self.old))
+        self.assertIn("t_test", self.claim(self.tree))
+        write(os.path.join(self.tree, "tests/golden/optional.txt"), "x")
+        self.assertEqual(self.claim(self.tree), {}, "a file that was missing is there now (and the listing changed)")
+        os.remove(os.path.join(self.tree, "tests/golden/optional.txt"))
+        self.assertIn("t_test", self.claim(self.tree))
+        os.utime(self.p("data", "model.bin"), (self.old + 5, self.old + 5))
+        self.assertEqual(self.claim(self.tree), {}, "a data file by size and mtime")
+        os.utime(self.p("data", "model.bin"), (self.old, self.old))
+        os.environ["B70_KV_CACHE"] = "bf16"                   # the test's own ENVIRONMENT wins, as in ctest
+        self.assertIn("t_test", self.claim(self.tree))
+        del os.environ["B70_KV_CACHE"]
+        os.environ["B70_PREFILL_PROFILE"] = "1"
+        self.assertEqual(self.claim(self.tree), {}, "the environment")
+        del os.environ["B70_PREFILL_PROFILE"]
+        os.environ["ZE_AFFINITY_MASK"] = "0,1"
+        self.assertEqual(self.claim(self.tree), {}, "two cards visible, recorded with whatever the box showed")
+        del os.environ["ZE_AFFINITY_MASK"]
+        write(os.path.join(self.tree, "build/kernels/k.bin"), "K2")
+        self.assertEqual(self.claim(self.tree), {}, "a kernel binary")
+
+    def test_same_binary_after_an_unrelated_change(self):
+        self.run_test(self.tree)
+        write(os.path.join(self.tree, "src/x.cc"), "int y;")          # another build id, same binaries
+        self.assertIn("t_test", self.claim(self.tree))
+        write(os.path.join(self.tree, "build/tests/t_exe"), "\x7fELF-EXE2")
+        self.assertEqual(self.claim(self.tree), {})
+
+    def test_other_tree_same_sources(self):
+        self.run_test(self.tree)
+        other = self.mk_tree("other", exe="EXE-with-its-own-path")       # box_check's tree vs the validation tree
+        self.assertIn("t_test", self.claim(other))
+        write(os.path.join(other, "build/kernels/k.bin"), "K-other")
+        self.assertEqual(self.claim(other), {}, "a device binary is compared by its bytes")
+        write(os.path.join(other, "build/kernels/k.bin"), "K1")
+        self.assertIn("t_test", self.claim(other))
+        write(os.path.join(other, "src/x.cc"), "int y;")
+        self.assertEqual(self.claim(other), {}, "other sources: the programs are compared by their bytes")
+
+    def test_not_recorded(self):
+        self.run_test(self.tree, status="fail")
+        self.assertEqual(reuse.load(self.p("store"), "t_test"), [], "a failure")
+        self.run_test(self.tree, trace=self.TRACE + "100 chdir(\"/\") = 0\n")
+        self.assertEqual(reuse.load(self.p("store"), "t_test"), [], "a test that changed directory")
+        self.run_test(self.tree, trace=self.TRACE + "100 openat(9, \"x\", O_RDONLY) = 3\n")
+        self.assertEqual(reuse.load(self.p("store"), "t_test"), [], "a path relative to an unknown fd")
+        g = os.path.join(self.tree, "tests/golden/g.txt")
+        os.utime(g, None)
+        self.run_test(self.tree)
+        self.assertEqual(reuse.load(self.p("store"), "t_test"), [], "an input that changed during the run")
+
+    def test_cards_visible(self):
+        self.run_test(self.tree, env="B70_KV_CACHE=int8\nZE_AFFINITY_MASK=0\n")
+        os.environ["ZE_AFFINITY_MASK"] = "1"
+        self.assertIn("t_test", self.claim(self.tree), "the other card alone: the same test")
+        os.environ["ZE_AFFINITY_MASK"] = "0,1"
+        self.assertEqual(self.claim(self.tree), {}, "two cards: not the same test")
+        del os.environ["ZE_AFFINITY_MASK"]
+
+    def test_no_reuse(self):
+        self.run_test(self.tree)
+        os.environ["BV_NO_REUSE"] = "1"
+        self.assertEqual(self.claim(self.tree), {})
+
+    def test_launcher_passes_through(self):
+        r = subprocess.run([os.path.join(ROOT, "tools", "test_launcher.sh"), "sh", "-c", "echo hi; exit 3"],
+                           capture_output=True, text=True, env={k: v for k, v in os.environ.items()
+                                                                 if k != "B70_TRACE_DIR"})
+        self.assertEqual((r.returncode, r.stdout), (3, "hi\n"))
 
 
 class G0CompareTest(Tmp):
@@ -1052,7 +1218,7 @@ class DriverTest(unittest.TestCase):
         # rows 13 and 14 (spec 15d, 18b): R0 / K0 first, the no-checkpoint kernels before the gates
         self.assertIn("--- r13.kernels", out)
         self.assertIn("--- r14.k1", out)
-        self.assertIn("env B70_LONGCTX_TESTS=1 ctest", out)             # r6.mtp_long's variants
+        self.assertRegex(out, r"env B70_LONGCTX_TESTS=1 B70_TRACE_DIR=\S+ ctest")             # r6.mtp_long's variants
         self.assertIn("--spec mtp --spec-max 3 > ", out)                 # r6.greedy_long: b70-decode with MTP
         self.assertIn("probe_mtp_steps", out)
         self.assertIn(" 120000 32 3 int8 off 131072", out)
@@ -1204,7 +1370,7 @@ class DriverTest(unittest.TestCase):
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
         self.assertIn("--re '^cli_reject_serve_pp_(value|split_alone|handoff_value)$'", out)
-        self.assertIn("env ZE_AFFINITY_MASK=0,1 ctest", out)
+        self.assertRegex(out, r"env ZE_AFFINITY_MASK=0,1 B70_TRACE_DIR=\S+ ctest")
         self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel pp --spec mtp --spec-max 3' timeout 3600 build/tests/golden_server_test", out)
         self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --parallel pp --spec auto --prefix-split-last")
         self.assertIn("MAX_LEN=262144 N_TARGET=250000 DECODE_ARGS='--parallel pp' tools/probe/passkey.sh l0-int8", out)

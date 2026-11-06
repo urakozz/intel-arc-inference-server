@@ -69,7 +69,9 @@ st_g0_bitwise() {
   xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"
   x "python3 tools/box_validate/junit.py verdict $STATE/g0.bitwise.baseline.xml"
   step_rc $? "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
+  x "ctest --test-dir build --show-only=json-v1 > $STATE/g0.bitwise.tests.json"
   x "$(ctest_cmd) -R '$G0_BITWISE_RE'"
+  reuse_record "$STATE/g0.bitwise.tests.json"
   x "python3 tools/box_validate/junit.py verdict $STATE/g0.bitwise.junit.xml"
   step_rc $? "the gates on the tree under test"
   chk "python3 tools/box_validate/junit.py compare $STATE/g0.bitwise.baseline.xml $STATE/g0.bitwise.junit.xml --strip-a $BASE --strip-b $TREE --out $STATE/g0.bitwise.diff" \
@@ -82,11 +84,13 @@ st_g0_bitwise() {
   finish
 }
 
-stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Agnes / Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset"
+stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Agnes / Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
 st_g0_suite() {
   xb "ctest --test-dir build --show-only=json-v1 > $STATE/tests.baseline.json"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
+  reuse_claim "$STATE/tests.json" "--also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8"
   x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8 --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_record "$STATE/tests.json"
   chk "python3 tools/box_validate/junit.py pick $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8 --junit \"$STATE/*.junit.xml\"" \
     "the baseline's suite on the tree under test"
   finish
