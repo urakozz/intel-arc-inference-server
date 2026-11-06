@@ -306,7 +306,8 @@ def test_defs(tests_json, tree):
 
 
 ENV_RX = re.compile(r"^(B70_|ZE_|HF_|ONEAPI_|SYCL_|IGC_|NEO|OCL_|LD_LIBRARY_PATH$|LD_PRELOAD$)")
-ENV_DROP = {"B70_TRACE_DIR", "B70_TEST_NAME"}
+# B70_GIT_SHA only labels b70-decode's printed bench rows (remote.sh exports the commit): never a test's result.
+ENV_DROP = {"B70_TRACE_DIR", "B70_TEST_NAME", "B70_GIT_SHA"}
 
 
 def env_norm(e, tree):

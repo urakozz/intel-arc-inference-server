@@ -304,6 +304,12 @@ class ReuseTest(Tmp):
         self.run_test(self.tree)
         self.assertEqual(reuse.load(self.p("store"), "t_test"), [], "an input that changed during the run")
 
+    def test_commit_label_is_not_an_input(self):
+        self.run_test(self.tree, env="B70_KV_CACHE=int8\nB70_GIT_SHA=abc123\n")
+        os.environ["B70_GIT_SHA"] = "def456"
+        self.assertIn("t_test", self.claim(self.tree), "B70_GIT_SHA labels bench rows only")
+        del os.environ["B70_GIT_SHA"]
+
     def test_cards_visible(self):
         self.run_test(self.tree, env="B70_KV_CACHE=int8\nZE_AFFINITY_MASK=0\n")
         os.environ["ZE_AFFINITY_MASK"] = "1"
