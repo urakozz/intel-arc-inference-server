@@ -60,15 +60,17 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
 // to the reference tolerance and to the golden gate, not to bit-identity.
 inline constexpr unsigned kGemvBf16Cols = 64;      // 4 subgroups per work-group
 inline constexpr unsigned kGemvBf16TinyCols = 16;  // 1 column tile per work-group
-// The B70's Xe-core count (docs/01-hardware.md). A shape whose default grid
-// already puts at least one work-group on every core is not the tiny-N case.
-inline constexpr unsigned kGemvBf16Cores = 32;
+// The Xe-core count the kernels are built for - the B70's 32 (docs/01-hardware.md);
+// the hardware gate (cli/hardware_check.h) refuses a card that shows another. A
+// shape whose default grid already puts at least one work-group on every core is
+// not the tiny-N case.
+inline constexpr unsigned kBuiltXeCores = 32;
 struct GemvBf16Tiling {
   unsigned cols;    // COLS_PER_WG: output columns per work-group
   unsigned ksplit;  // KSPLIT: subgroups splitting one tile's K, merged in SLM
 };
 inline constexpr GemvBf16Tiling gemv_bf16_tiling(unsigned N) {
-  return N / kGemvBf16Cols >= kGemvBf16Cores ? GemvBf16Tiling{kGemvBf16Cols, 1}
+  return N / kGemvBf16Cols >= kBuiltXeCores ? GemvBf16Tiling{kGemvBf16Cols, 1}
                                              : GemvBf16Tiling{kGemvBf16TinyCols, 16};
 }
 // Both suffixes are empty at the default tiling, so `{64, 1}` names exactly the

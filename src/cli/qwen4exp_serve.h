@@ -57,7 +57,7 @@ inline void check_serve(const ServeArgs& s) {
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (s.mtp_k > runtime::qwen4exp::kMaxDraft)
     throw std::runtime_error("--spec-max " + std::to_string(s.mtp_k) + ": Qwen3.8-Flash-Next verifies at M <= 4 (K 1..3)");
-  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags, --device, --layers
+  DecodeArgs a = s.args;   // b70-decode's refusals: the prefill backends, the --parallel sub-flags, --layers
   a.mtp = false;
   a.kv8 = false;
   a.profile = false;

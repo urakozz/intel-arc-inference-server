@@ -188,7 +188,7 @@ struct Loaded {
   l0::Context ctx;
   runtime::Engine eng;
   Loaded(const std::string& snap, runtime::PrefillBackend b, bool mtp, const HeadOpts& h)
-      : ctx(l0::Context::kFromEnv),
+      : ctx(0u),
         eng(ctx,
             loader::load(ctx, snap, kMaxLen, mtp, h.lm_head,
                          mtp ? draft_vocab_spec(snap, h) : loader::DraftVocabSpec{}),

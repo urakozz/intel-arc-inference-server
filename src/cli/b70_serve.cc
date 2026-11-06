@@ -25,6 +25,7 @@
 #include "cli/bolt_serve.h"     // spec 25e: BoltEngineAdapterT, the generation defaults, the refusals
 #include "cli/dflash_args.h"    // spec 19c: --spec dflash
 #include "cli/k2_decode.h"
+#include "cli/hardware_gate.h"
 #include "cli/k2_serve_adapter.h"
 #include "cli/kolibri_decode.h"
 #include "cli/kolibri_serve.h"
@@ -263,7 +264,7 @@ int serve_k2(const K2Serve& a, server::Options options) {
 // set by run() from model_type), its EOS [127906, 127901] and its sampling defaults from
 // generation_config.json. b70-decode's flow (cli/kolibri_decode.h run_decode): the refusals before the
 // device (cli::kolibri::check_args: --spec mtp, --kv-cache int8, the prefill backends, a --parallel 1 that does not
-// fit, --device with --parallel pp), both cards in one Level Zero context with peer access, the placement and
+// fit), both cards in one Level Zero context with peer access, the placement and
 // max_len planned before the load with the prefill scratch (every request prefills), each layer loaded
 // straight onto its device.
 struct KolibriServe {
@@ -835,6 +836,9 @@ int run(int argc, char** argv) {
   if (!draft_vocab_ids.empty() && draft_vocab == 0)
     throw std::runtime_error("--draft-vocab-ids needs --draft-vocab 32k, 64k or 128k");
   if (!options.log_requests_dir.empty()) std::filesystem::create_directories(options.log_requests_dir);
+  // The hardware gate (cli/hardware_gate.h): one or two Intel Arc Pro B70s, peer access between two - before
+  // any model file is read. Its card memory is what the fit checks before a device opens plan against.
+  const cli::Hardware hw = cli::hardware_gate();
 
   // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
   // cli::bolt::BoltEngineAdapterT (two cards by default) - dispatched here, before every other family's rules (its own:
@@ -947,6 +951,7 @@ int run(int argc, char** argv) {
     qa.path = qs.snapshot_dir;
     qa.max_len = max_len_arg;
     qa.reserve = mem_reserve;
+    qa.card_bytes = hw.card_bytes;
     qa.lm_head = lm_head;   // int8 (spec 9), as every served model
     qa.layers = q4_layers;
     qa.layers_auto = q4_layers_auto;
@@ -975,6 +980,7 @@ int run(int argc, char** argv) {
     ka.path = ks.snapshot_dir;
     ka.max_len = max_len_arg;
     ka.reserve = mem_reserve;
+    ka.card_bytes = hw.card_bytes;
     ka.lm_head = lm_head;   // int8 (spec 9), as every served model
     ka.pipe = pipe;
     ka.pp_given = pp_given;
@@ -1043,19 +1049,22 @@ int run(int argc, char** argv) {
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
   // pipeline parallel (cli::parallel_auto, from the checkpoint's descriptor before the load).
-  std::unique_ptr<l0::Context> d0 = std::make_unique<l0::Context>(0u);
   if (pipe.mode == cli::Parallel::Auto) {
     pipe.devices = cli::parallel_auto(snapshot_dir, max_len_arg, mtp_on || spec_lookup, kv_cache, pp_path,
-                                      d0->memory_bytes(), mem_reserve);
+                                      hw.card_bytes, mem_reserve);
     std::fprintf(stderr, "parallel: auto -> %s\n",
                  pipe.on() ? "pp (the model and the context do not fit one card)" : "1 (one card)");
     if (pipe.on()) {
+      if (hw.cards < 2)
+        throw std::runtime_error("--parallel auto: this model at this --max-len does not fit one card and Level Zero "
+                                 "shows one - a shorter --max-len, or both cards visible (ZE_AFFINITY_MASK=0,1)");
       cli::dflash::check_engine(dflash, true, kv_cache, /*pipeline_served=*/true, pipe.handoff == runtime::PpHandoff::Peer);
       if (dflash_lookup)
         throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f), and this model and context "
                                  "need two: --spec dflash, or a shorter --max-len");
     }
   }
+  std::unique_ptr<l0::Context> d0 = std::make_unique<l0::Context>(0u);
   if (pipe.on()) {   // spec 16d: two cards, serve_pipeline's own flow
     PipeServe ps;
     ps.snapshot_dir = snapshot_dir;

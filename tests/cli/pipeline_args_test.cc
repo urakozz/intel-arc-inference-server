@@ -3,13 +3,15 @@
 // (cli_reject_pipeline_*, cli_reject_pp_*) drive the shipped binary on the box; this is the same
 // logic without it. Spec 16d: and b70-serve's (cli/pipeline_serve.h) - what --parallel pp serves
 // and what it refuses before the device (the box's cli_reject_serve_pp_* drive the binary). The
-// served name (cli/served_name.h) and the --spec rule (cli/spec_args.h) are checked here too.
+// served name (cli/served_name.h), the --spec rule (cli/spec_args.h) and the hardware gate's rule
+// (cli/hardware_check.h, on made-up driver reports) are checked here too.
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
 #include <string>
 
 #include "check.h"
+#include "cli/hardware_check.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_serve.h"
 #include "cli/served_name.h"
@@ -184,6 +186,43 @@ void check_serve() {
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));
   std::printf("b70-serve --parallel: one card untouched, pp serves the Qwen family, the refusals by name, Kolibri-1 its own\n");
 }
+
+// The hardware gate's rule on made-up driver reports: one or two B70s pass, with the smaller card's memory;
+// everything else is refused by name.
+void check_hardware_rule() {
+  const auto b70 = [](size_t bytes = 32530000000ull) {
+    l0::GpuInfo g;
+    g.vendor_id = 0x8086;
+    g.device_id = 0xE223;
+    g.name = "Intel(R) Graphics [0xe223]";
+    g.xe_cores = 32;
+    g.memory_bytes = bytes;
+    return g;
+  };
+  cli::Hardware hw = cli::check_hardware({b70()}, false);
+  CHECK(hw.cards == 1 && hw.card_bytes == 32530000000ull);
+  hw = cli::check_hardware({b70(32530000000ull), b70(32000000000ull)}, true);
+  CHECK(hw.cards == 2 && hw.card_bytes == 32000000000ull);
+  CHECK(says([] { cli::check_hardware({}, false); }, "no GPU"));
+  CHECK(says([&] { cli::check_hardware({b70(), b70(), b70()}, true); }, "3 GPUs visible"));
+  CHECK(says([&] { cli::check_hardware({b70(), b70()}, false); }, "cannot access each other's memory"));
+  l0::GpuInfo g = b70();
+  g.vendor_id = 0x10DE;
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "is not an Intel GPU (vendor 0x10DE)"));
+  g = b70();
+  g.device_id = 0xE211;
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B60: not yet tested on this box"));
+  g.device_id = 0xE222;
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "Intel Arc Pro B65: not yet tested on this box"));
+  g.device_id = 0x56A0;
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "device id 0x56A0) is not a supported card"));
+  g = b70();
+  g.xe_cores = 20;
+  CHECK(says([&] { cli::check_hardware({g}, false); }, "shows 20 Xe-cores"));
+  CHECK(says([&] { cli::check_hardware({b70(), g}, true); }, "GPU 1 ("));
+  std::printf("hardware gate: one or two B70s pass; no GPU, three, no peer access, another vendor, the B60 / B65, "
+              "another device id and another Xe-core count refused by name\n");
+}
 }  // namespace
 
 int main() {
@@ -192,6 +231,7 @@ int main() {
   check_refusals();
   check_device_refusal();
   check_serve();
+  check_hardware_rule();
   std::printf("pipeline_args_test: OK\n");
   return 0;
 }

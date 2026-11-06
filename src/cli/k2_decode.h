@@ -47,7 +47,6 @@ struct DecodeArgs {
   bool bench = false;
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
-  uint32_t device = l0::Context::kFromEnv;
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   const uint32_t* bench_prompt = nullptr;   // cycled to --depth (b70_decode.cc's kBenchPrompt)
   size_t bench_prompt_len = 0;
@@ -136,9 +135,8 @@ int run_decode(const DecodeArgs& a) {
     for (uint32_t i = 0; i < a.depth; ++i) ids[i] = a.bench_prompt[i % a.bench_prompt_len];
   }
 
-  l0::Context ctx(a.device);
-  std::fprintf(stderr, "device: %s (%u EUs)%s\n", ctx.name().c_str(), ctx.eu_count(),
-               a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+  l0::Context ctx(0u);
+  std::fprintf(stderr, "device: %s (%u EUs)\n", ctx.name().c_str(), ctx.eu_count());
   loader::K2LoadedModel model = [&] {
     Redirect redirect;
     return loader::load_k2(ctx, a.path, load_len(a.max_len, trained), a.lm_head);

@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
   for (uint32_t g : gens)
     if (g == 0 || g + kK > stream.size()) throw std::runtime_error("G " + std::to_string(g) + " is outside the stream");
 
-  l0::Context ctx(l0::Context::kFromEnv);
+  l0::Context ctx(0u);
   loader::LoadedModel model = loader::load(ctx, argv[1], max_len, /*mtp=*/false, head);
   cli::dflash::Args da;
   da.on = true;

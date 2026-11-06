@@ -21,7 +21,7 @@
 //   --lm-head bf16|int8, --max-len N|auto (under the trained 262144; above it is spec 20 decision 3)
 // Refused before the device, each by name: --prefill-backend l0-int8, --prefill-chunk above
 // 2048 (spec 20d), --spec mtp (Kolibri has no MTP head), --kv-cache int8 (20 KiB a position: bf16 only),
-// --profile (Task 8), --device N with --parallel pp (16b's rule: GPUs 0 and 1). A prefilling run plans the
+// --profile (Task 8). A prefilling run plans the
 // prefill scratch (and, on two cards, the prefill hand-off) into --max-len and the fit.
 #include <array>
 #include <chrono>
@@ -59,9 +59,6 @@ inline constexpr uint32_t kKolibriBenchPrompt[] = {
     44,    1469,  2618,  3408,  922,   5958,  7737,  4325,  46,    1047,  8190,  65429, 4561, 7462};
 inline constexpr size_t kKolibriBenchPromptLen = sizeof(kKolibriBenchPrompt) / sizeof(kKolibriBenchPrompt[0]);
 
-// The B70's device memory as Level Zero reports it (32.530 GB, l0/context.cc): the --parallel 1 fit check
-// runs before any device is opened, against this; the device's own figure is used after.
-inline constexpr size_t kB70Bytes = size_t(32530000000ull);
 
 // True when `path` resolves to a snapshot whose config.json says model_type "kolibri1". A path that
 // does not resolve is not Kolibri: the caller's own flow then reports it.
@@ -79,7 +76,7 @@ struct DecodeArgs {
   bool bench = false;
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
-  uint32_t device = l0::Context::kFromEnv;
+  size_t card_bytes = 0;        // the smallest visible card's memory (cli::hardware_gate): the fit checks before a device opens
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: the checkpoint's)
   PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
@@ -123,21 +120,18 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
       throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
     if (a.pipe.have_handoff)
       throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
-    if (!runtime::kolibri::fits_one_card(d, int8, kB70Bytes, a.reserve, a.prefills())) {
+    if (!runtime::kolibri::fits_one_card(d, int8, a.card_bytes, a.reserve, a.prefills())) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
       char msg[400];
       std::snprintf(msg, sizeof msg,
                     "--parallel 1: Kolibri-1 holds ~%.1f GB of weights at int4 (%u layers, %s attention, %s head), one card "
                     "%.1f GB: run it with --parallel pp (the default), or load fewer layers with --layers N (development "
                     "mode)", w / 1e9, d.layers, model::kol_attn_form_name(d.attn), int8 ? "int8" : "bf16",
-                    kB70Bytes / 1e9);
+                    a.card_bytes / 1e9);
       throw std::runtime_error(msg);
     }
     return;
   }
-  if (a.device != l0::Context::kFromEnv)
-    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
-                             "two); --device names one card - drop it");
   if (d.layers < 2) throw std::runtime_error("--parallel pp needs at least two layers to split (--layers " +
                                              std::to_string(d.layers) + ")");
   if (!a.pipe.split_auto && (a.pipe.split < 1 || a.pipe.split >= d.layers))
@@ -237,15 +231,14 @@ int run_decode(const DecodeArgs& a) {
                              std::to_string(a.max_len.value));
   if (devs == 2) require_two_devices(l0::Context::gpu_count());
 
-  // The contexts: one card (--device / the environment), or GPUs 0 and 1 (device 1 a view of 0's).
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : a.device);
+  // The contexts: one card (GPU 0), or GPUs 0 and 1 (device 1 a view of 0's).
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : 0};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))

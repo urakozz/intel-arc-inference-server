@@ -64,7 +64,7 @@ DFlashDesc dflash_desc_from_config(const Value& c) {
   d.architecture = arch->arr()[0].str();
   if (opt(c, "quantization_config"))
     refuse("quantization_config: a quantised drafter is not one of our formats - load the bf16 drafter "
-           "(it is quantised at load: --draft-format int8)");
+           "(it is quantised to int8 at load)");
   // dc = eagle_config, overlaid by dflash_config (config_from_dict).
   Value::Object dco;
   for (const char* k : {"eagle_config", "dflash_config"})

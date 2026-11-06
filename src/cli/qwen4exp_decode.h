@@ -25,8 +25,8 @@
 // Refused before the device, each by name: --prefill-backend l0-int8 (spec 5's h8 linears rotate in whole 1024-k
 // Hadamard blocks; the hidden is 2560), --prefill-chunk above 2048, --spec mtp
 // (b70-decode runs plain; the head - spec 21e - is b70-serve's and qwen4exp_mtp_test's), --kv-cache int8 (decision 8:
-// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), --device N with --parallel pp
-// (16b's rule: GPUs 0 and 1), and the whole model without --layers (spec 22).
+// bf16 first; kv8.cl hard-codes 24 q / 4 kv heads), --profile (Task 7 times it with --bench), and the
+// whole model without --layers (spec 22).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -62,9 +62,6 @@ inline constexpr uint32_t kQwen4ExpBenchPrompt[] = {
     49813, 78911, 1141,  20459, 13,   3113,  7840, 279,  2981, 1000,  381,   16850, 1495, 13};
 inline constexpr size_t kQwen4ExpBenchPromptLen = sizeof(kQwen4ExpBenchPrompt) / sizeof(kQwen4ExpBenchPrompt[0]);
 
-// The B70's device memory as Level Zero reports it (32.530 GB, l0/context.cc): the fit checks before any device
-// is opened run against this; the device's own figure is used after.
-inline constexpr size_t kB70Bytes = size_t(32530000000ull);
 
 // True when `path` resolves to a snapshot whose config.json says model_type qwen4_exp (or qwen4_exp_text). A path
 // that does not resolve is not this family: the caller's own flow then reports it.
@@ -82,7 +79,7 @@ struct DecodeArgs {
   bool bench = false;
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
-  uint32_t device = l0::Context::kFromEnv;
+  size_t card_bytes = 0;        // the smallest visible card's memory (cli::hardware_gate): the fit checks before a device opens
   loader::LmHeadForm lm_head = loader::LmHeadForm::Checkpoint;
   uint32_t layers = 0;          // --layers N (0: not given)
   bool layers_auto = false;     // --layers auto
@@ -111,7 +108,7 @@ inline uint32_t devices_of(const DecodeArgs& a) { return a.pp_given ? a.pipe.dev
   const model::Qwen4ExpDesc& d = model::qwen4exp();
   const uint32_t len = a.max_len.is_auto ? runtime::kMinAutoMaxLen : a.max_len.value;
   const model::Q4Placement p = model::Q4Placement::two(d, rq::pp_split(d, len, a.int8_head(), a.load_mtp).split);
-  const std::array<size_t, runtime::kPpDevices> caps = {kB70Bytes, kB70Bytes};
+  const std::array<size_t, runtime::kPpDevices> caps = {a.card_bytes, a.card_bytes};
   try {
     rq::require_fits(rq::plan(d, p, len, a.int8_head(), a.load_mtp), caps, a.reserve);
   } catch (const std::exception& e) {
@@ -144,9 +141,6 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
   if (devs == 1) {
     if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
     if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how H crosses)");
-  } else if (a.device != l0::Context::kFromEnv) {
-    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which "
-                             "two); --device names one card - drop it");
   }
   if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
 }
@@ -252,14 +246,13 @@ int run_decode(const DecodeArgs& a) {
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds --max-len " +
                              std::to_string(a.max_len.value));
   if (devs == 2) require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : a.device);
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   std::array<size_t, runtime::kPpDevices> dev{c0->memory_bytes(), c1 ? c1->memory_bytes() : c0->memory_bytes()};
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))

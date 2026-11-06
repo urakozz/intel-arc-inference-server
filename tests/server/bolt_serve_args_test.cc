@@ -98,21 +98,13 @@ int main() {
   }
   {
     DecodeArgs a = served();
-    a.device = 1;   // two cards are the default: --device names one card
-    CHECK(refuses([&] { check_args(a, d); }, "--device names one card"));
-    a.pp_given = true;
-    a.pipe.devices = 2;
-    CHECK(refuses([&] { check_args(a, d); }, "--device names one card"));
-  }
-  {
-    DecodeArgs a = served();
     a.pp_given = true;
     a.pipe.devices = 1;
     a.pipe.have_split = true;
-    CHECK(refuses([&] { check_args(a, d); }, "--pipeline-split belongs to --pp 2"));
+    CHECK(refuses([&] { check_args(a, d); }, "--pipeline-split belongs to --parallel pp"));
     a.pipe.have_split = false;
     a.pipe.have_handoff = true;
-    CHECK(refuses([&] { check_args(a, d); }, "--pipeline-handoff belongs to --pp 2"));
+    CHECK(refuses([&] { check_args(a, d); }, "--pipeline-handoff belongs to --parallel pp"));
   }
   {
     DecodeArgs a = served();

@@ -26,7 +26,7 @@
 // phase table (runtime/prefill/profile.h; the Mamba launches under the gdn_* rows) after the timed call. Refused before the
 // device, each by name (tests/CMakeLists.txt's cli_reject_bolt_*): --prefill-backend l0-int8 and a
 // --prefill-chunk that is not a multiple of 64 or above 2048 (spec 25d), --spec mtp (Bolt has no MTP head), --spec (no
-// drafter either), --kv-cache int8 (Decision 17), --device with --parallel pp.
+// drafter either), --kv-cache int8 (Decision 17).
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -62,8 +62,6 @@ inline constexpr uint32_t kBenchPrompt[] = {
     108813, 2246, 16853, 1046, 5652,  11282, 1278,  7232,  2168, 1402,  25402,  2790,  1046};
 inline constexpr size_t kBenchPromptLen = sizeof(kBenchPrompt) / sizeof(kBenchPrompt[0]);
 
-// The B70's device memory as Level Zero reports it (32.530 GB): the planner's check before any device is opened.
-inline constexpr size_t kB70Bytes = size_t(32530000000ull);
 
 // True when `path` resolves to a snapshot whose config.json is Bolt's. A path that does not resolve is not Bolt: the
 // caller's own flow then reports it.
@@ -81,7 +79,6 @@ struct DecodeArgs {
   bool bench = false, profile = false;
   MaxLenArg max_len{false, 16384};
   size_t reserve = 0;
-  uint32_t device = l0::Context::kFromEnv;
   bool int8_head = true;        // --lm-head (Decision 18's int8 head unless bf16)
   PipelineArgs pipe;            // devices as parsed (1 when --parallel was not given)
   bool pp_given = false;        // --parallel on the command line
@@ -125,9 +122,6 @@ inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
     if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     return;
   }
-  if (a.device != l0::Context::kFromEnv)
-    throw std::runtime_error("--parallel pp runs on GPUs 0 and 1 of what Level Zero shows (ZE_AFFINITY_MASK picks which two); "
-                             "--device names one card - drop it");
   if (d.layers < 2) throw std::runtime_error("--parallel pp needs at least two blocks to split (--layers " + std::to_string(d.layers) + ")");
   if (!a.pipe.split_auto && (a.pipe.split < 1 || a.pipe.split >= d.layers))
     throw std::runtime_error("--pipeline-split " + std::to_string(a.pipe.split) + " leaves a device no block: it is the "
@@ -250,15 +244,14 @@ int run_decode(const DecodeArgs& a) {
                              std::to_string(a.max_len.value));
   const uint32_t devs = devices_of(a, pre);
   if (devs == 2) require_two_devices(l0::Context::gpu_count());
-  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(devs == 2 ? 0u : a.device);
+  std::unique_ptr<l0::Context> c0 = std::make_unique<l0::Context>(0u);
   std::unique_ptr<l0::Context> c1 = devs == 2 ? std::make_unique<l0::Context>(*c0, 1u) : nullptr;
   std::vector<l0::Context*> ctx = {c0.get()};
   if (c1) ctx.push_back(c1.get());
   std::vector<size_t> dev = {c0->memory_bytes()};
   if (c1) dev.push_back(c1->memory_bytes());
   if (devs == 1)
-    std::fprintf(stderr, "device: %s (%u EUs)%s\n", c0->name().c_str(), c0->eu_count(),
-                 a.device == l0::Context::kFromEnv ? " [ONEAPI_DEVICE_SELECTOR]" : " [--device]");
+    std::fprintf(stderr, "device: %s (%u EUs)\n", c0->name().c_str(), c0->eu_count());
   else
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
