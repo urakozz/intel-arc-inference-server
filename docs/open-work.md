@@ -5,17 +5,16 @@ The one list of what is not finished. An item leaves this page when it is done: 
 (`docs/superpowers/plans/box-validation-queue.md`, rows `rN`); this page only says what is left and what closes it.
 Merges are gated by `tools/box_check.sh`; the full box validation runs once a night on main.
 
-Last updated: 2026-11-06 (main 6390164).
+Last updated: 2026-11-06 (main 605ecf5).
 
 ## Now, in order
 
 | # | what | state | closes when |
 |---|---|---|---|
-| 1 | **Bolt's speculative decoding back** (spec 25/26, branch `bolt-spec-restore-2`): `--spec lookup\|dflash`, `--spec-max`, `--draft-model`. Operator 2026-11-06: the draft model's format from `r65.d2` (accepted tokens) with `r63.cost` - int8 if its acceptance holds, else bf16, never int4; union vs plain expert reads by `bolt_moe_union_test --time`; `B70_LILICORR` / `B70_LILICORR_P0` stay until rows 63-65 show whether the draft model pays | box_check running | box_check passes, merged; rows 63-65 in the nightly run |
-| 2 | **Spec 17a, the first tensor-parallel measurement** (branch `spec17a-tp-probe`, Mac side done) | not started on the box | rebased, measured on both cards, merged |
-| 3 | **Tonight's validation run on main** - the first since the zero-config cleanup; covers every merge of the day | to launch tonight | its FAILs fixed (see Waiting for the rows it closes) |
-| 4 | **The quiet-box measurement session**: every speed number on the new driver, the vLLM baseline, the zero-config list B (card hand-off copy vs peer, Bolt's fused kernels and bf16 state, Flash-Next's MTP norm, Kolibri / Flash-Next eager attention, int8 KV, int8 prefill, draft vocabulary: the winner stays as the engine's choice, the rest is deleted), spec 16's check (MTP draft acceptance cold vs restored from the prefix cache, one card and `--parallel pp`: < 1 % difference closes it, else the stale-key fix is built), spec 5d's 4096-row prefill chunks (+4.2 % at 4096 ids, under the +5 % bar: the operator decides; `r75.speed`), batching speed (row 66) and two-card prefill speed (row 23) | after 3 | measured; then README.md, docs/BENCHMARKS.md and the per-model table in docs/18-running-models.md refreshed |
-| 5 | **Spec 13b batching**, then the spec 28m MoE draft-checking probe | after 4 | built and merged |
+| 1 | **Spec 17a, the first tensor-parallel measurement** (branch `spec17a-tp-probe`, Mac side done) | not started on the box | rebased, measured on both cards, merged |
+| 2 | **Tonight's validation run on main** - the first since the zero-config cleanup; covers every merge of the day | to launch tonight | its FAILs fixed (see Waiting for the rows it closes) |
+| 3 | **The quiet-box measurement session**: every speed number on the new driver, the vLLM baseline, the zero-config list B (card hand-off copy vs peer, Bolt's fused kernels and bf16 state, Flash-Next's MTP norm, Kolibri / Flash-Next eager attention, int8 KV, int8 prefill, draft vocabulary: the winner stays as the engine's choice, the rest is deleted), spec 16's check (MTP draft acceptance cold vs restored from the prefix cache, one card and `--parallel pp`: < 1 % difference closes it, else the stale-key fix is built), spec 5d's 4096-row prefill chunks (+4.2 % at 4096 ids, under the +5 % bar: the operator decides; `r75.speed`), batching speed (row 66) and two-card prefill speed (row 23) | after 2 | measured; then README.md, docs/BENCHMARKS.md and the per-model table in docs/18-running-models.md refreshed |
+| 4 | **Spec 13b batching**, then the spec 28m MoE draft-checking probe | after 3 | built and merged |
 
 ## Waiting - only a box run or a CPU job left
 
@@ -24,6 +23,7 @@ Last updated: 2026-11-06 (main 6390164).
 | **21** Flash-Next | the partial / cli rows and the real-checkpoint rows | rows 32-34 | in tonight's run |
 | **21** Flash-Next | golden sets remade with the block scores (some still use the old 1e-3 gap rule) | CPU job (hours) | queued on the CPU |
 | **25** Bolt | the synthetic and golden chains | rows 60-62 | in tonight's run; the real-checkpoint ones wait on the Bolt reference set (CPU, Bolt bf16 hot for its job) |
+| **25/26** Bolt | speculative decoding (prompt lookup, the LiLiCorr draft model): verify bitwise, greedy output identical at every K, prefill / prefix, serve off / lookup / dflash identical; then the D5 speed verdict (`r65.benchy`) and the draft format (int8 if `r65.d2`'s acceptance holds with `r63.cost`, else bf16, never int4) | rows 63-65 | in tonight's run |
 | **16** pipeline | two-card serving: MTP, lookup, prefix cache | row 27 | in tonight's run |
 | **12** int8 KV | the tool-call and bf16 rows | row 11 a4 / bf16 | in tonight's run |
 | **18** K2-Horizon | the tool-call reference and the long-context passkeys | 25.a4_ref (CPU), 17.k0, 21.passkey, 25.passkey | the reference waits for K2 bf16 hot (75 GB); the passkeys in tonight's run |
@@ -33,6 +33,7 @@ Last updated: 2026-11-06 (main 6390164).
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-06 | 25/26 | Bolt's speculative decoding back on the zero-config surface: `b70-serve --spec lookup\|dflash`, `--spec-max 1..7`, `--draft-model`; `--spec auto` stays off for Bolt until row 65's speed verdict. Operator rulings: draft format from `r65.d2` + `r63.cost` (int8 if its acceptance holds, else bf16, never int4), union vs plain expert reads by `bolt_moe_union_test --time`, `B70_LILICORR` / `B70_LILICORR_P0` until rows 63-65; `lilicorr_kernels_test` judges a near-zero value at its row's resolution (one value, -4.47e-7 vs -4.44e-7 beside 0.076). box_check 297/298 (the one: that value), then the test PASS on the box |
 | 2026-11-06 | tools | validation: a test whose every input (binary, kernels, data, environment, cards) is byte-identical to a recorded PASS keeps it (`tools/test_launcher.sh`, `tools/box_validate/reuse.py`, `--no-reuse`); box_check records its PASSes for the validation run; the full validation nightly, not per merge. box_check 283/284 (traced: 7520 s vs 7490 s untraced) |
 | 2026-11-06 | box | box layout leftovers: every branch's tree under `~/b70/trees`, logs and probe scratch under `~/b70`; docs/10 says what is still at the top level. The old `box-layout` / `plan-box-move` branches retired |
 | 2026-11-06 | tests | `golden_server_test` waits 300 s for b70-serve to answer (120 s missed a 61.6 s load on a busy box) |
