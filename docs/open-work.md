@@ -11,16 +11,14 @@ Last updated: 2026-11-06 (main bd0e703; box: kernel 7.4.0-rc1, compute-runtime 2
 
 ## Next, in order
 
-1. The validation run on main 973e37d (state `973e37d83996-vs-973e37d83996`) and the fixes for its FAILs.
+1. Bolt's speculative decoding back (branch `bolt-spec-restore-2`, fitted to `--spec lookup|dflash`): box_check running,
+   then merge; its box rows 63-65 in the nightly validation. Operator 2026-11-06: the drafter's format from `r65.d2`
+   (acceptance) with `r63.cost` - int8 if its acceptance holds, else bf16, never int4; union vs plain expert reads by
+   `bolt_moe_union_test --time`; `B70_LILICORR` / `B70_LILICORR_P0` stay until rows 63-65 show whether the drafter pays.
 2. Spec 17a, the first tensor-parallel measurement (branch `spec17a-tp-probe`, Mac side done): rebase onto main, the
-   box measurement, merge - right after 1, to close the branch (moved ahead of the quiet-box session, operator
-   2026-11-06).
-3. Bolt's speculative decoding back (branch `bolt-spec-restore`, being rebased onto the new `--spec` surface): box_check,
-   its box rows, merge.
-4. The old box-layout branches (`box-layout`, `plan-box-move`): what is left ported or dropped.
-5. Validation tooling: a test whose binary, kernels and inputs are unchanged since its last PASS reuses that result;
-   the gate skips what box_check already passed; full validation nightly on main instead of per merge.
-6. Then the quiet-box session and the rest under "After the table is empty".
+   box measurement, merge.
+3. The validation run tonight on main (nightly from now on; box_check gates merges), its FAILs fixed.
+4. Then the quiet-box session and the rest under "After the table is empty".
 
 ## Open
 
