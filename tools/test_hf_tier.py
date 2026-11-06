@@ -170,6 +170,17 @@ class HfTierTest(unittest.TestCase):
         self.assertEqual(os.listdir(os.path.join(c, "blobs")) if os.path.isdir(os.path.join(c, "blobs")) else [], [])
         self.assertEqual(read(self.snap(self.hot, "models--o--E", "w.bin")), b"E" * 4000)
 
+    def test_new_snapshot_hardlinks_old_real_file(self):
+        make_model(self.hot, "models--o--F", {"w.bin": b"F" * 5000})
+        f = os.path.join(self.cold, "models--o--F")
+        write(os.path.join(f, "refs", "main"), b"older")
+        write(os.path.join(f, "snapshots", "older", "w.bin"), b"F" * 5000)
+        out = self.run_tool("cold", "o/F")
+        self.assertIn("hard-linked", out)
+        blob = os.path.join(f, "blobs", sha(b"F" * 5000))
+        self.assertTrue(os.path.samefile(blob, os.path.join(f, "snapshots", "older", "w.bin")))
+        self.assertEqual(read(self.snap(self.hot, "models--o--F", "w.bin")), b"F" * 5000)
+
     def test_sync_and_archive(self):
         self.run_tool("sync", "o/B")
         self.assertTrue(os.path.isdir(os.path.join(self.cold, "models--o--B")))
