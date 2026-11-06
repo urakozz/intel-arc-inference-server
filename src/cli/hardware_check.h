@@ -20,7 +20,7 @@
 #include <string>
 #include <vector>
 
-#include "kernels/kernels.h"
+#include "kernels/xe_cores.h"
 #include "l0/gpu_info.h"
 
 namespace cli {
