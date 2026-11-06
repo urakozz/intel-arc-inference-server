@@ -3419,15 +3419,12 @@ if(B70_Q4EXP AND B70_MTP)
   add_test(NAME qwen4exp_mtp_synth_eager_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
     ${_q4m_ids} m2 m3)
   set_tests_properties(qwen4exp_mtp_synth_eager_test PROPERTIES ENVIRONMENT "B70_Q4_ATTN=eager")
-  add_test(NAME qwen4exp_mtp_synth_fresh_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
-    ${_q4m_ids} m3)
-  set_tests_properties(qwen4exp_mtp_synth_fresh_test PROPERTIES ENVIRONMENT "B70_Q4_MTP_SELECT=fresh")
   add_test(NAME qwen4exp_mtp_synth_pp_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt ${_q4m}/ours
     ${_q4m_ids} m2 m3 cost pp2:2)
   add_test(NAME qwen4exp_mtp_intel_test COMMAND qwen4exp_mtp_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4m}/intel-L18 ${_q4m_ids}
     layers:18 int8)
   set_tests_properties(qwen4exp_mtp_synth_test qwen4exp_mtp_synth_intel_test qwen4exp_mtp_synth_eager_test
-    qwen4exp_mtp_synth_fresh_test qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
+    qwen4exp_mtp_synth_pp_test qwen4exp_mtp_intel_test
     PROPERTIES LABELS "checkpoint;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 4: b70-serve serves this family (src/cli/qwen4exp_serve.h; 21c's cli_reject_qwen4exp_serve is gone). The

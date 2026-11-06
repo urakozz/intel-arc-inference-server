@@ -280,12 +280,9 @@ inline constexpr uint32_t kGdnSlots = 4;                  // gdn_step SPEC_SLOTS
 enum class MtpNorm { Single, PerStream };
 MtpNorm mtp_norm();
 const char* mtp_norm_name(MtpNorm n);
-// Decision 5 (draft attention): the ruled form REUSES draft step 0's selection on steps 1.. (vLLM's opt-in
-// index_share_for_mtp_iteration - 21a found it is not vLLM's default); `fresh` (vLLM's default) selects on every step.
-// B70_Q4_MTP_SELECT=reuse|fresh, read at engine construction; unset or empty is reuse; anything else throws.
-enum class MtpSelect { Reuse, Fresh };
-MtpSelect mtp_select();
-const char* mtp_select_name(MtpSelect s);
+// Decision 5 (draft attention): draft steps 1.. REUSE draft step 0's selection (vLLM's opt-in
+// index_share_for_mtp_iteration - 21a found it is not vLLM's default). The `fresh` arm (vLLM's default: select on
+// every step) and its B70_Q4_MTP_SELECT went in the zero-config cleanup (operator 2026-11-06).
 
 struct MtpSizes {
   size_t ctl = 0, kv = 0, idx_keys = 0, idx_tail = 0, list = 0, diag = 0, hh = 0, xe = 0, xh = 0, fe = 0, fh = 0,

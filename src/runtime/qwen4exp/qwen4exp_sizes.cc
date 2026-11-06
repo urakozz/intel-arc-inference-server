@@ -522,15 +522,6 @@ MtpNorm mtp_norm() {
                            "vLLM's one RMS over the 4 x 2560 values, spec 21 decision 4)");
 }
 const char* mtp_norm_name(MtpNorm n) { return n == MtpNorm::PerStream ? "per_stream" : "single"; }
-MtpSelect mtp_select() {
-  const char* e = std::getenv("B70_Q4_MTP_SELECT");
-  if (e == nullptr || *e == '\0') return MtpSelect::Reuse;
-  if (std::strcmp(e, "reuse") == 0) return MtpSelect::Reuse;
-  if (std::strcmp(e, "fresh") == 0) return MtpSelect::Fresh;
-  throw std::runtime_error(std::string("B70_Q4_MTP_SELECT=") + e + ": expected reuse or fresh (unset: reuse - draft "
-                           "steps after the first attend step 0's selection, spec 21 decision 5)");
-}
-const char* mtp_select_name(MtpSelect s) { return s == MtpSelect::Fresh ? "fresh" : "reuse"; }
 
 MtpSizes mtp_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   const size_t R = kVerifyRows;

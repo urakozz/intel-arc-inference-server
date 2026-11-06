@@ -657,7 +657,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                engine.model().desc.layers, options.chat_format.name(), placement.c_str(), runtime::qwen4exp::kPfC,
                runtime::qwen4exp::q4_attn_name(engine.attention()), a.mtp_k,
                engine.mtp() ? (std::string(" (the head: ") + runtime::qwen4exp::mtp_norm_name(engine.mtp_norm()) +
-                               " norm, " + runtime::qwen4exp::mtp_select_name(engine.mtp_select()) + " selection" +
+                               " norm, reuse selection" +
                                (a.spec_lookup ? ", --spec lookup" : "") + ")").c_str()
                             : "",
                loader::lm_head_form_name(da.lm_head), engine.state_bytes(), engine.mtp() ? ", the head's" : "",
