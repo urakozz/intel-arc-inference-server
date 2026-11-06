@@ -36,15 +36,10 @@
 // - nb_moe_down's epilogue on the down GEMM's rows, which round once (rne(acc): decode's rf(red)).
 // tests/kernels/bolt_pf_ref.h (sort, gather, dequant_up / _dn, combine) repeats every entry point - EDIT THE TWO TOGETHER.
 //
-// **Portability.** The dequant's block read under cl_intel_subgroups, the plain loads it equals otherwise (nb_moe.cl's
-// idiom); scales through vload_half. Every entry point runs on the Mac's OpenCL 1.2 GPU (tools/mac/clrun/bolt_pf_run.cc).
+// The dequant's block read (nb_moe.cl's idiom); scales through vload_half.
 #pragma OPENCL FP_CONTRACT OFF
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #define NB_PF_SG16 __attribute__((intel_reqd_sub_group_size(16)))
-#else
-#define NB_PF_SG16
-#endif
 
 #include "nb_common.h"
 
@@ -166,14 +161,10 @@ __kernel void nb_pf_gather(__global const uint4* restrict lat, __global const ui
 // The bf16 B operands of nb_pf_moe_gemm.cl: experts [b0, b1) of one layer into out[b - b0] = bf16 [K][N] row-major. An
 // expert with no row this chunk (hdr[H_COUNT + b] == 0) returns at once - no tile reads it.
 inline void nb_pf_tile8(__global const uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * 16 + lane];
-#endif
 }
 #define NB_PF_DEQUANT(NAME, KK, NN, ADDR)                                                       \
   __attribute__((reqd_work_group_size(16, 1, 1)))                                               \

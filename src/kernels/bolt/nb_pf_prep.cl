@@ -12,7 +12,7 @@
 // The other per-row kernels of a prefill chunk are 25c's own binaries at M = 2048 (the norm sites `_NF` / `_S1` /
 // `_S1_T1`, the router, the route, the shared expert's relu2 and the latent, the attention prep - kernels::bolt::pf_*):
 // decode's chains row for row, so the prefill's per-row arithmetic is decode's by construction. Plain OpenCL C
-// (tools/mac/clrun/bolt_pf_run.cc runs it).
+//.
 #if !defined(K) || !defined(EMBED_V)
 #error "nb_pf_embed_gather: K and EMBED_V must be defined"
 #endif

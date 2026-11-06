@@ -1315,7 +1315,7 @@ endif()
 #                      buffer by the row's own group id (get_group_id(1)) and nothing in
 #                      them depends on M but the grid, so row m of an M-row launch is the
 #                      M = 1 code on row m's inputs (tests/kernels/moe_m_ref_test.cc,
-#                      tools/mac/clrun/moe_run.cc and moe_m_test on the card pin it).
+#                      and moe_m_test on the card pin it).
 #                      argmax_stage1_M<M>_V248070 (masks from 248070, the base checkpoint's
 #                      tokenizer.json) is built beside moe_M<M> below but, since spec 15 §13,
 #                      not bound: the int4 checkpoint's tokenizer.json defines 248077 ids, so
@@ -1610,7 +1610,7 @@ endif()
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
 # OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only
 # tools/probe/probe_batch_step through runtime::build_rows (capture.cc, compiled under the same option).
-# tools/kernel_cmdlines lists them (it turns the option on), so the Mac syntax-checks every command line here.
+# tools/kernel_cmdlines lists them (it turns the option on), so box_check's cmdlines stage sees every command line here.
 #   gdn_step_rows_M<M>[_G54]            gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
 #                                       indices (src at a slot's first row, dst after every row); the strides of one
 #                                       whole-model state and one whole-model ring baked (48 / 54 GDN layers)
@@ -1667,7 +1667,7 @@ add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
 # a capture builds at M >= 2 binds these in place of gemv / gemv_i8w (runtime::gemv_kind, runtime/gemv_kind.h) for
 # the shapes of kernels::kSmallMTuning (src/kernels/kernels.h) - ONE row per shape, whose knobs are spelled into the
 # name, so a row and a line here that disagree are a missing file at capture (gemm_sm_names_test holds the two
-# together on the Mac). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's tap verify 2..8, spec 13a's rows)
+# together on any host). Rows: M = 2..8 (the MTP / lookup verify lists 2..4, DFlash's tap verify 2..8, spec 13a's rows)
 # and 16 (gemm_sm_test, the probe; no list binds 16 yet); Ornith's and Flash-Next's at 2..4; the DFlash drafter's at
 # its block's 8 / draft rows' 7 (spec 28d).
 set(GEMM_SM_TARGETS "")

@@ -32,7 +32,7 @@
 // for step (torch's Vectorized<float>::exp; k2_attn_eager.cl's), so this file and tests/kernels/qwen4exp_ref.h
 // (hc_combine_norm, hc_up_mix) agree bit for bit.
 //
-// Plain OpenCL C (no sub-group functions): the Mac's OpenCL runs it (tools/mac/clrun/qwen4exp_run.cc).
+// Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

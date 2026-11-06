@@ -43,13 +43,9 @@
 // the residual, exactly as decode's moe_down does, so prefill and decode combine by one
 // rule (tests/kernels/pf_moe_ref.h repeats it and checks it against moe_ref::combine).
 //
-// **Portability.** No sub-group function but the block reads of pf_moe_dequant_*, which
-// tools/mac/opencl/intel_shim.h emulates exactly; scales go through vload_half, so no
-// cl_khr_fp16. Every entry point therefore also runs on the Mac's OpenCL 1.2 GPU for an
-// indicative check (tools/mac/clrun/pf_moe_run.cc).
-#ifdef cl_intel_subgroups
+// No sub-group function but the block reads of pf_moe_dequant_*; scales go through
+// vload_half, so no cl_khr_fp16.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
-#endif
 
 #if !defined(EXPERTS) || !defined(TOP_K) || !defined(HIDDEN) || !defined(INTER) || !defined(TM) || !defined(KC)
 #error "pf_moe: EXPERTS, TOP_K, HIDDEN, INTER, TM and KC must be defined (src/kernels/prefill/CMakeLists.txt)"

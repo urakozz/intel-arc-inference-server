@@ -25,7 +25,7 @@
 //            row 0's lo): per block an fma chain ascending, the blocks added ascending
 //   out      rne(f32(rne(o)) · f32(gate))                 the output gate (M:358)
 //
-// Plain OpenCL C on purpose (no sub-group operations, no block reads): the Mac's OpenCL runs it.
+// Plain OpenCL C on purpose (no sub-group operations, no block reads).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

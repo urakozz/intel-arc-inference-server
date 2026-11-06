@@ -3,7 +3,7 @@
 // every function with a twin in a kernel; edit the two together. The semantics are tools/oracle/dflash_ref.py's (the
 // D1 reference); tests/kernels/dflash_ref_test.cc holds this twin to that reference's own outputs
 // (tests/loader/dflash_ref_fixture.safetensors, tools/oracle/dflash_fixture.py) in fp32 mode, and the kernels to
-// this twin (tests/kernels/dflash_kernels_test.cc on the card, tools/mac/clrun/dflash_run.cc on the Mac's GPU).
+// this twin (tests/kernels/dflash_kernels_test.cc on the card).
 //
 //   norm()          df_norm: Σx² as WG lanes (i = lane, lane + WG, ... ascending) then a pairwise tree, rstd =
 //                   1 / sqrt(Σ / H + eps), h = (x · rstd) · w in fp32, x = bf16(h)

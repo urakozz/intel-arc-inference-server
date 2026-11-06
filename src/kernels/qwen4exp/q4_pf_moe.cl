@@ -45,12 +45,8 @@
 // the same pair as q4_moe.cl's (no kernel in this tree #includes, so the two lines are repeated; spec 22 replaces
 // both files' pair).
 //
-// **Portability.** No sub-group function but the dequant's block read, which tools/mac/opencl/intel_shim.h emulates
-// exactly; scales through vload_half. Every entry point runs on the Mac's OpenCL 1.2 GPU for an indicative check
-// (tools/mac/clrun/qwen4exp_run.cc).
-#ifdef cl_intel_subgroups
+// No sub-group function but the dequant's block read; scales through vload_half.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
-#endif
 
 #if !defined(PF_E) || !defined(PF_K) || !defined(PF_WG) || !defined(PF_EPL) || !defined(PF_D) || !defined(PF_INTER) || !defined(TM) || !defined(KC)
 #error "q4_pf_moe: PF_E, PF_K, PF_WG, PF_EPL, PF_D, PF_INTER, TM and KC must be defined (src/kernels/CMakeLists.txt, spec 21d)"

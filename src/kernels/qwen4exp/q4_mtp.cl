@@ -23,7 +23,7 @@
 // Every norm is q4_hc's: lane i accumulates fma(x, x, acc) over k = i + 256 j, j ascending, the pairwise tree 128 .. 1,
 // rstd = 1 / sqrt(sum / N + 1e-6) (correctly rounded, never rsqrt), the product (x x rstd) x w in fp32, rounded once.
 // MTP_PF (the prefill's head pass, M = kPfC): the rows' tokens from the chunk's id buffer `ids` (the last argument) -
-// Control holds 8. Rows m >= n_active exit (uniform). Plain OpenCL C (no sub-group functions): the Mac's OpenCL runs it.
+// Control holds 8. Rows m >= n_active exit (uniform). Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

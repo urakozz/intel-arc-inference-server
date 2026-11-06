@@ -40,7 +40,7 @@
 // bitwise the same.
 //
 // **Portability** (moe.cl's): sub-group block reads under cl_intel_subgroups, the plain loads they equal otherwise,
-// every cross-lane step through SLM - the file builds as OpenCL 1.2 for the Mac (bolt_run.cc).
+// every cross-lane step through SLM.
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -62,12 +62,8 @@
 #define RT_SLOTS 512
 #define NB_LAT 1024                 /* the latent */
 
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #define NB_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
-#else
-#define NB_SG16
-#endif
 
 // ---------------------------------------------------------------------------------------------------------------
 // nb_router - work-group = one 16-column n-tile of the router (n_exp / 16 of them), work-item (j, lane) = k-span j (k in
@@ -222,14 +218,10 @@ inline float dot8(uint word, ushort8 xv) {
   return a;
 }
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * SG + lane];
-#endif
 }
 inline float tile_dot(const __global uint* restrict tile, const __global ushort* restrict xr, uint g0, uint g1,
                       uint lane) {

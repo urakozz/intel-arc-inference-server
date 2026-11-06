@@ -32,9 +32,7 @@
 //   [R_NEXT]      sel of rank TOP_K - the first expert not taken        (the near-tie margin)
 //   [R_LMIN]      the smallest logit among the selected                  (fp32 bits, diagnostics)
 //
-// **Portability**: sub-group block reads under cl_intel_subgroups, the plain loads they equal
-// otherwise, every cross-lane step through SLM - so the file builds as OpenCL 1.2 for the indicative
-// Mac run (tools/mac/clrun/kolibri_run.cc).
+// Sub-group block reads, every cross-lane step through SLM.
 #ifndef M
 #define M 1
 #endif
@@ -48,13 +46,9 @@
 #define R_NEXT 24
 #define R_LMIN 25
 
-#ifdef cl_intel_subgroups
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #define KOL_SG16 __attribute__((intel_reqd_sub_group_size(SG)))
-#else
-#define KOL_SG16
-#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
@@ -79,14 +73,10 @@ inline float dot8(uint word, ushort8 xv) {
   return a;
 }
 inline void load_tile8(const __global uint* restrict tile, uint lane, uint* wv) {
-#ifdef cl_intel_subgroups
   (void)lane;
   const uint8 b = intel_sub_group_block_read8(tile);
   wv[0] = b.s0; wv[1] = b.s1; wv[2] = b.s2; wv[3] = b.s3;
   wv[4] = b.s4; wv[5] = b.s5; wv[6] = b.s6; wv[7] = b.s7;
-#else
-  for (uint j = 0; j < 8; ++j) wv[j] = tile[j * SG + lane];
-#endif
 }
 inline float tile_dot(const __global uint* restrict tile, const __global ushort* restrict xr,
                       uint g0, uint g1, uint lane) {

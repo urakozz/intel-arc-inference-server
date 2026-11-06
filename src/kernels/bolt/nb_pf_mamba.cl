@@ -43,8 +43,7 @@
 //
 // Tilings (Review Focus 4: every build finite and equal, bitwise, ten times over): SSD_W (dims p a work-group: 16 or 8 -
 // the work-item's state values 8 or 4) and CONV_ROWS (rows a conv work-item: any >= 1) change only who computes what, never
-// an operation's operands or order. Plain OpenCL C but the CB_DPAS build (every cross-lane step through SLM), so the file
-// also runs on the Mac's GPU (tools/mac/clrun/bolt_pf_run.cc).
+// an operation's operands or order. Plain OpenCL C but the CB_DPAS build (every cross-lane step through SLM).
 #pragma OPENCL FP_CONTRACT OFF
 
 #include "nb_common.h"

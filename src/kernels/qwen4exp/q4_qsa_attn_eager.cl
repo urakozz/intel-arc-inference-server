@@ -16,7 +16,7 @@
 // only on the two GEMMs' fp32 accumulation orders (its own) and the softmax's lane assignment (torch's runs over the
 // whole masked row, this over the list).
 //
-// Plain OpenCL C (no sub-group functions): the Mac's OpenCL runs it.
+// Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M

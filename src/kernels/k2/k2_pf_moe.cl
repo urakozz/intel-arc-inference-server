@@ -47,12 +47,8 @@
 // (tests/kernels/k2_pf_ref.h repeats both and checks them against k2_ref.h's decode chains).
 //
 // **Portability.** No sub-group function but the block reads of the dequants, which
-// tools/mac/opencl/intel_shim.h emulates exactly; scales through vload_half (no
-// cl_khr_fp16). Every entry point runs on the Mac's OpenCL 1.2 GPU for an indicative check
-// (tools/mac/clrun/k2_run.cc).
-#ifdef cl_intel_subgroups
+// a plain load matches exactly; scales through vload_half (no cl_khr_fp16).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
-#endif
 
 #if !defined(PF_E) || !defined(PF_K) || !defined(PF_WG) || !defined(PF_SHARED) || !defined(PF_D) || !defined(TM) || !defined(KC)
 #error "k2_pf_moe: PF_E, PF_K, PF_WG, PF_SHARED, PF_D, TM and KC must be defined (src/kernels/CMakeLists.txt, spec 18c)"

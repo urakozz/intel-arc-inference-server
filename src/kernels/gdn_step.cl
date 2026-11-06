@@ -260,7 +260,7 @@ inline __global float* slot_base(__global float* s0, __global float* spec, uint 
 //
 // A slot's rows are one run at consecutive positions (runtime::check_rows), so a run is the plain kernel's M loop
 // over that slot and a 1-row run is the M = 1 kernel: the same operations in the same order, row for row - the
-// probe's bitwise claim (tools/mac/clrun/batch_rows_run.cc holds it on the Mac). Safe without a cross-work-group
+// probe's bitwise claim. Safe without a cross-work-group
 // barrier for the in-place kernel's two reasons: each work-item reads and writes only its own 16 cells of any state
 // (a dst is never another run's src - check_rows), and within one slot's ring the written positions (the run's) and
 // the read ones (its first position - 1 .. - 3) are disjoint at RING >= M + 3; two slots never share a ring.

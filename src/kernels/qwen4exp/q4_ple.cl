@@ -18,8 +18,7 @@
 // rows of one launch write slots pos .. pos + M - 1 and read pos - 2 .. pos - 1 - disjoint at 16 slots.
 // consts u64 [35]: the multipliers [3], the 16 head sizes, the 16 offsets (the engine copies them from the
 // checkpoint's I64 tensors, checked by 21b against the formula). ptrs u64 [32]: 21b's Q4PleTable::ptrs (q[0..15],
-// s[0..15]): a device-side table of host-USM addresses (`PLE_DIRECT`: the Mac's indicative build passes one
-// buffer of all heads' rows / scales and byte offsets instead - OpenCL 1.2 has no pointer to pass).
+// s[0..15]): a device-side table of host-USM addresses.
 //
 // **q4_ple_block** (M:1227-1247, the decoder layer's `H = H + ple(H)`; qwen4exp_ref.h ple_block), one work-group
 // per (stream s, row m); `kv` the key||value gemv_bf16 row fp32 [M][12800] over e; pw the layer's PLE block at
@@ -39,7 +38,7 @@
 // range: out[g] = the first u64 of page g - first_page[r] of range r (first_page [33], the ranges' page prefix
 // sums); the host compares with Q4PleTable::page_words. Runs once, at engine construction.
 //
-// Plain OpenCL C (no sub-group functions; the Mac's OpenCL runs gather and block under PLE_DIRECT).
+// Plain OpenCL C (no sub-group functions).
 #pragma OPENCL FP_CONTRACT OFF
 
 #ifndef M
@@ -114,12 +113,7 @@ inline uint n_rows(__global const uint* restrict ctrl) {
 #endif
 __attribute__((reqd_work_group_size(WG_GATHER, 1, 1)))
 __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* restrict ids_ring,
-#ifdef PLE_DIRECT
-                            __global const char* restrict q_all, __global const uchar* restrict s_all,
-                            __global const ulong* restrict head_off,   // [32]: byte offsets of q[h], s[h]
-#else
                             __global const ulong* restrict ptrs,
-#endif
                             __global const ulong* restrict consts, __global ushort* restrict e,
                             __global ulong* restrict ids_out
 #ifdef PLE_PF
@@ -141,20 +135,11 @@ __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* r
   const ulong mixed = h < 8 ? mixed2 : mixed2 ^ ((ulong)t2 * consts[2]);
   const ulong r = mixed % consts[3 + h];
   if (i == 0) ids_out[(size_t)m * HEADS + h] = r + consts[3 + HEADS + h];
-#ifdef PLE_DIRECT
-  const char qv = q_all[head_off[h] + r * DIM + i];
-#if PLE_SCALE_BF16
-  const float sc = bf16f(((__global const ushort*)(s_all + head_off[HEADS + h]))[r]);
-#else
-  const float sc = ((__global const float*)(s_all + head_off[HEADS + h]))[r];
-#endif
-#else
   const char qv = ((__global const char*)(intptr_t)ptrs[h])[r * DIM + i];
 #if PLE_SCALE_BF16
   const float sc = bf16f(((__global const ushort*)(intptr_t)ptrs[HEADS + h])[r]);
 #else
   const float sc = ((__global const float*)(intptr_t)ptrs[HEADS + h])[r];
-#endif
 #endif
   e[(size_t)m * HIDDEN + h * DIM + i] = rne_bf16((float)qv * sc);
 #ifndef PLE_PF
@@ -162,7 +147,6 @@ __kernel void q4_ple_gather(__global const uint* restrict ctrl, __global uint* r
 #endif
 }
 
-#ifndef PLE_DIRECT
 #define WG_CHECK 64
 __attribute__((reqd_work_group_size(WG_CHECK, 1, 1)))
 __kernel void q4_ple_check(__global const ulong* restrict ptrs, __global const uint* restrict first_page,
@@ -174,7 +158,6 @@ __kernel void q4_ple_check(__global const ulong* restrict ptrs, __global const u
   const ulong addr = ptrs[r] + (ulong)(g - first_page[r]) * PAGE;
   out[g] = *(__global const ulong*)(intptr_t)addr;
 }
-#endif
 #endif  // PLE_GATHER
 
 // ---------------------------------------------------------------------------------------------------------------

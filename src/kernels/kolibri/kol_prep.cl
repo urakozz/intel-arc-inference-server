@@ -19,8 +19,7 @@
 // and reduces its Σ², and kol_post_add normalises it, adds, and reduces the new residual's Σ² for the
 // next norm.
 //
-// **No sub-group function anywhere in this file**, so it also builds as OpenCL 1.2 for an indicative
-// run on the Mac's GPU (tools/mac/clrun/kolibri_run.cc).
+// **No sub-group function anywhere in this file.**
 #ifndef M
 #define M 1
 #endif

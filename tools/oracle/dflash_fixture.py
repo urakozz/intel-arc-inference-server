@@ -9,8 +9,7 @@ host twin (tests/kernels/dflash_ref.h) to the reference the engine's D1 gate is 
 Run in the oracle container (tools/oracle/run_in_container.sh). Deterministic (torch.manual_seed): re-running writes
 the same bytes.
 
-The shapes are tiny but keep every GEMV width a multiple of 64 (the engine's GEMV tiles, so the same file drives the
-Mac's indicative kernel run, tools/mac/clrun/dflash_run.cc): hidden 64, 2 layers, 4 / 2 heads x 16, intermediate 96,
+The shapes are tiny but keep every GEMV width a multiple of 64 (the engine's GEMV tiles): hidden 64, 2 layers, 4 / 2 heads x 16, intermediate 96,
 vocab 512 of which 508 are "defined" (rows 508..511 of the head are made large: the engine masks them as argmax.cl
 masks Qwen3.8's padded rows, and the expected outputs here apply the same mask), mask id 500, block 8, taps {1, 3} of a
 target of hidden 64, window 16 (so a 40-position context crosses it), conv group 4 (kernel projection 64 rows),

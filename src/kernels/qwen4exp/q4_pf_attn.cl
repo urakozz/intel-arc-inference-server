@@ -31,7 +31,7 @@
 //
 // tests/kernels/qwen4exp_pf_ref.h sparse_attn_fp64 is the default form's walk in fp64 (the cosine >= 0.99999 bar of
 // spec 6 K1, qwen4exp_pf_kernels_test on the card); sparse_row_eager the eager chain. Card only: DPAS and sub-group
-// broadcasts / reductions (the Mac checks its OpenCL syntax, not its arithmetic).
+// broadcasts / reductions.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 
