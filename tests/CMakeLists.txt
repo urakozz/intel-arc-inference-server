@@ -163,6 +163,13 @@ target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAK
 target_link_libraries(scheduler_test PRIVATE b70_server)
 add_test(NAME scheduler_test COMMAND scheduler_test)
 
+# Plan 13b Task 3: cli::ReplicaEngine (b70-serve --parallel replica: one engine per card behind the scheduler) over
+# two host mock engines - threads, bitwise per card, a card's failure, a restore across cards, the prefill cut. Host only.
+add_executable(replica_engine_test cli/replica_engine_test.cc)
+target_include_directories(replica_engine_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(replica_engine_test PRIVATE b70_server)
+add_test(NAME replica_engine_test COMMAND replica_engine_test)
+
 add_executable(protocol_test server/protocol_test.cc)
 target_include_directories(protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(protocol_test PRIVATE b70_server)
