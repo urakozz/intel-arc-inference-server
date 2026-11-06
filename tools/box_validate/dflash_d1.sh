@@ -46,6 +46,8 @@ case "$mode" in
     out_host=$(cd "$out" && pwd -P)
     in_hf() { printf '/hf%s' "${1#"$HF"}"; }
     env_flags=(-e HF_HUB_OFFLINE=1 -e HOME=/scratch -e PYTHONUNBUFFERED=1)
+    # capped like tools/oracle/run_in_container.sh's CPU jobs: 56g, no swap for the container
+    env_flags+=(--memory 56g --memory-swap 56g)
     [ -n "${ORACLE_THREADS:-}" ] && env_flags+=(-e "OMP_NUM_THREADS=$ORACLE_THREADS" -e "MKL_NUM_THREADS=$ORACLE_THREADS")
     # one model job on the box CPU at a time (~15 GB RSS a run), as f32_oracle.sh
     exec 9> /tmp/b70-cpu-model.lock

@@ -85,7 +85,7 @@
 # dequantised weights resident once read - every layer's dense part, then whole layers of
 # experts - in what the cap leaves (also bitwise: the same values, read from RAM instead of
 # re-dequantised). The memory plan (estimates, from config.json and the container's cap - MEM)
-# is the log's first lines (on the box, no cap: MemAvailable at start, or MEM=<N>g). ONLY=a,b,...
+# is the log's first lines (on the box: run_in_container.sh's cap, 56g by default, or MEM=<N>g). ONLY=a,b,...
 # runs just those scenarios (the cross-check);
 # NAME the container (a4-ref-<model>).
 #
@@ -288,10 +288,13 @@ if [ $mac = 0 ]; then   # the box: the reference image, foreground
     cp -f "$MASK" "$work/$mask_base"
     cmd_ref="$cmd_ref --expert-mask /ws/$work/$mask_base"
   fi
-  # No container cap here: the memory plan reads MemAvailable at start, or MEM (e.g. 60g) when set
+  # The container's cap is run_in_container.sh's (56g by default, swap off; above it only with the
+  # cards idle): MEM (e.g. 48g) sets both the cap and the memory plan's budget, so they agree; unset,
+  # the plan reads the cap from the container's memory.max.
   if [ "$step" = ref ] && [ -n "${MEM:-}" ]; then
     [[ "$MEM" =~ ^[0-9]+g$ ]] || { echo "a4_ref: MEM is <N>g (got $MEM)" >&2; exit 2; }
     cmd_ref="ORACLE_MEM_GB=${MEM%g} $cmd_ref"
+    export ORACLE_MEMORY="$MEM"
   fi
   if [ "$step" = set ]; then
     tools/oracle/run_in_container.sh "$pre$cmd_set \"\$SNAP\" /ws/$work/set ${kw[*]+$(printf "'%s' " "${kw[@]}")}" || rc=$?

@@ -1,0 +1,171 @@
+The box-side half of the CPU-job memory cap (branch cpu-mem-cap, 2026-11-07), for the operator to apply.
+Files on the box, relative to ~/b70: scripts/cpu-refs-chain.sh and logs/cpu-refs/queue.txt (made from
+their 2026-11-06 copies). Apply when the chain is not running (pgrep -af cpu-refs-chain), after the
+branch is merged and pulled into ~/b70/trees/cpu-refs (the chain runs its jobs there):
+
+  cd ~/b70 && patch -p1 --dry-run < <tree>/tools/oracle/box-cpu-refs-chain-mem-cap.patch \
+           && patch -p1 < <tree>/tools/oracle/box-cpu-refs-chain-mem-cap.patch
+
+What it changes:
+- cpu-refs-chain.sh: CAP_GB=56 (run_in_container.sh's default cap); a line whose peak_gb is above it is
+  REFUSED unless its class is Q; class Q = validation not running and ~/b70-gpu.lock free, run with
+  ORACLE_MEMORY=<peak_gb>g (run_in_container.sh then holds that lock for the run; its exit 75 = a GPU
+  job took the lock first: the line goes back to queued); the RAM gate is MemAvailable >= cap + 8
+  (was peak + 20); the peak column is anon + shmem + swap of the job's containers (cgroup memory.stat),
+  not docker stats, which counts the active page cache of the weights a job reads.
+- queue.txt: the MEM=80g overrides dropped (the jobs run under the 56g cap, their memory plans read it);
+  the BF16 Bolt runs and the q4exp golden rescore / prune (96 / 90 GB) become class Q.
+  q4exp-a4-ref's state is "failed rc=137": to run it again, move state/q4exp-a4-ref.env to ~/b70/trash.
+
+diff -ru a/logs/cpu-refs/queue.txt b/logs/cpu-refs/queue.txt
+--- a/logs/cpu-refs/queue.txt	2026-11-06 23:16:29
++++ b/logs/cpu-refs/queue.txt	2026-11-06 23:16:29
+@@ -1,14 +1,14 @@
+-# name|class|peak_gb|out_gb|out dir|command   (class A: before validation row 22 or after r60.synth_golden; C: after r60.synth_golden; D: validation finished)
++# name|class|peak_gb|out_gb|out dir|command   (class A: before validation row 22 or after r60.synth_golden; C: after r60.synth_golden; D: validation finished; Q: above the 56 GB CPU cap - validation finished and no GPU job, holds ~/b70-gpu.lock)
+ k2-a4-set|A|8|1|oracle-out-k2-a4|OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 set && OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 status
+ q4exp-a4-set|A|8|1|oracle-out-q4exp-a4|OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp set && OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp status
+ kolibri-a4-set|A|4|1|oracle-out-kolibri-a4|OUT=$DATA/oracle-out-kolibri-a4 tools/toolcall/a4_ref.sh kolibri set
+-#HOLD-hot-first bolt-golden-bf16|A|70|4|oracle-out-bolt-bf16|tools/box_validate/bolt_oracle.sh $DATA golden-bf16
++#HOLD-hot-first bolt-golden-bf16|Q|96|4|oracle-out-bolt-bf16|tools/box_validate/bolt_oracle.sh $DATA golden-bf16
+ #HOLD-hot-first k2-a4-ref|C|45|1|oracle-out-k2-a4|OUT=$DATA/oracle-out-k2-a4 MEM=40g tools/toolcall/a4_ref.sh k2 ref; rc=$?; OUT=$DATA/oracle-out-k2-a4 tools/toolcall/a4_ref.sh k2 status; exit $rc
+-q4exp-a4-ref|D|85|1|oracle-out-q4exp-a4|OUT=$DATA/oracle-out-q4exp-a4 MEM=80g tools/toolcall/a4_ref.sh qwen4exp ref && OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp status && python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16
+-q4exp-traces|D|85|2|oracle-out-q4exp-traces|tools/box_validate/qwen4exp_oracle.sh $DATA trace
++q4exp-a4-ref|D|56|1|oracle-out-q4exp-a4|OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp ref && OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp status && python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16
++q4exp-traces|D|56|2|oracle-out-q4exp-traces|tools/box_validate/qwen4exp_oracle.sh $DATA trace
+ q4exp-reap|D|8|1|oracle-out-q4exp-prune|tools/box_validate/qwen4exp_oracle.sh $DATA reap
+-bolt-a4-int4|D|85|1|oracle-out-bolt-a4|MEM=80g tools/box_validate/bolt_oracle.sh $DATA a4
+-bolt-a4-bf16|D|85|1|oracle-out-bolt-a4|MEM=80g tools/box_validate/bolt_oracle.sh $DATA a4-bf16
+-kolibri-a4-ref|D|85|1|oracle-out-kolibri-a4|OUT=$DATA/oracle-out-kolibri-a4 MEM=80g tools/toolcall/a4_ref.sh kolibri ref && python3 tools/toolcall/score.py --format hermes $DATA/oracle-out-kolibri-a4 bf16
+-q4exp-golden-scores|D|90|10|oracle-out-q4exp|bash $HOME/b70/scripts/cpu-refs-q4exp-rescore.sh
+-q4exp-prune|D|90|2|oracle-out-q4exp-prune|tools/box_validate/qwen4exp_oracle.sh $DATA prune
++bolt-a4-int4|D|56|1|oracle-out-bolt-a4|tools/box_validate/bolt_oracle.sh $DATA a4
++bolt-a4-bf16|Q|96|1|oracle-out-bolt-a4|tools/box_validate/bolt_oracle.sh $DATA a4-bf16
++kolibri-a4-ref|D|56|1|oracle-out-kolibri-a4|OUT=$DATA/oracle-out-kolibri-a4 tools/toolcall/a4_ref.sh kolibri ref && python3 tools/toolcall/score.py --format hermes $DATA/oracle-out-kolibri-a4 bf16
++q4exp-golden-scores|Q|90|10|oracle-out-q4exp|bash $HOME/b70/scripts/cpu-refs-q4exp-rescore.sh
++q4exp-prune|Q|90|2|oracle-out-q4exp-prune|tools/box_validate/qwen4exp_oracle.sh $DATA prune
+diff -ru a/scripts/cpu-refs-chain.sh b/scripts/cpu-refs-chain.sh
+--- a/scripts/cpu-refs-chain.sh	2026-11-06 23:16:29
++++ b/scripts/cpu-refs-chain.sh	2026-11-06 23:16:29
+@@ -4,7 +4,14 @@
+ #   class A: may start while the validation run is before row 22 (or after its r60.synth_golden), or when it is not running
+ #         C: only after the validation's r60.synth_golden (or when it is not running)
+ #         D: only when the validation run is not running
+-#   A job starts when MemAvailable >= peak_gb + 20 and df avail - out_gb >= 40 GB (else the chain stops: BLOCKED).
++#         Q: above the CPU cap (below): only when the validation run is not running AND no GPU job holds
++#            ~/b70-gpu.lock; the job runs with ORACLE_MEMORY=<peak_gb>g and holds that lock (run_in_container.sh)
++#   Memory (2026-11-07): every job's container is capped with no swap (tools/oracle/run_in_container.sh: 56g by
++#   default, --memory X --memory-swap X). A line whose peak_gb is above CAP_GB (56) and whose class is not Q is
++#   REFUSED (state refused, the chain goes on to the next line): it would be killed at the cap, or thrash.
++#   A job starts when MemAvailable >= its cap + 8 (CAP_GB, or peak_gb for Q) and df avail - out_gb >= 40 GB (else the
++#   chain stops: BLOCKED). The peak column is the job's containers' anon + shmem + swap (cgroup memory.stat), not
++#   docker stats (which counts the page cache of the weights it reads: the 2026-11-06 "99.9 GiB").
+ #   Each command runs in $TREE under flock /tmp/b70-cpu-model.lock; log ~/b70/logs/cpu-refs/<name>.log.
+ #   The queue is re-read before each job (edit it while the chain runs); a job with a state file in done/failed/skipped is not re-run.
+ set -u
+@@ -14,6 +21,7 @@
+ VSTATE=$(ls -td $HOME/b70-validate/b70-inference-server-validate/*-vs-* | head -1)  # the newest validation run (was pinned to the 11-05 run)
+ Q=$LOG/queue.txt
+ ST=$LOG/state
++CAP_GB=56   # tools/oracle/run_in_container.sh's default CPU-job cap
+ mkdir -p "$ST"
+ now() { date '+%F %T'; }
+ memavail() { awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo; }
+@@ -21,14 +29,17 @@
+ v_alive() { pgrep -f "box_validate/remote.sh $VSTATE" > /dev/null; }
+ v_maxrow() { grep -oE ' r[0-9]+\.[A-Za-z0-9_]+ START' "$VSTATE/orchestrator-0.log" 2>/dev/null | sed -E 's/ r([0-9]+)\..*/\1/' | sort -n | tail -1; }
+ v_post() { [ -f "$VSTATE/r60.synth_golden.status" ] || [ "$(v_maxrow)" -ge 61 ] 2>/dev/null; }
++gpu_free() { flock -n -x "$HOME/b70-gpu.lock" true; }   # a non-blocking probe: takes nothing
+ # gate <class>: 0 = may start; prints the reason otherwise
+ gate() {
++  if [ "$1" = Q ]; then v_alive || { gpu_free && return 0; echo "a GPU job holds ~/b70-gpu.lock (class Q needs the cards idle)"; return 1; }; fi
+   v_alive || return 0
+   case "$1" in
+     A) local r; r=$(v_maxrow); r=${r:-0}
+        { [ "$r" -lt 22 ] || v_post; } && return 0
+        echo "validation at row $r (paused from row 22 until r60.synth_golden)"; return 1 ;;
+     C) v_post && return 0; echo "validation before r60.synth_golden (row $(v_maxrow))"; return 1 ;;
++    Q) echo "validation run still running (row $(v_maxrow)); class Q needs the cards idle"; return 1 ;;
+     *) echo "validation run still running (row $(v_maxrow))"; return 1 ;;
+   esac
+ }
+@@ -49,15 +60,18 @@
+     done < "$Q"
+   } > "$LOG/STATUS.txt.tmp" && mv -f "$LOG/STATUS.txt.tmp" "$LOG/STATUS.txt"
+ }
+-# sample <name> <pidfile of the job>: the sum of this tree's containers' memory (docker stats), max kept in $ST/<name>.peak
++# sample <name> <pidfile of the job>: the sum of this tree's containers' anon + shmem (memory.stat) + swap
++# (memory.swap.current; 0 under the cap), GiB, max kept in $ST/<name>.peak - what the job holds, without the
++# page cache of what it reads (docker stats counts the active part of it)
+ sample() {
+-  local n="$1" jp="$2" max=0 cur ids id
++  local n="$1" jp="$2" max=0 cur id cg v
+   while kill -0 "$(cat "$jp" 2>/dev/null)" 2>/dev/null; do
+     cur=0
+-    for id in $(docker ps -q); do
++    for id in $(docker ps -q --no-trunc); do
+       docker inspect -f '{{range .Mounts}}{{.Source}} {{end}}' "$id" 2>/dev/null | grep -q "$TREE" || continue
+-      v=$(docker stats --no-stream --format '{{.MemUsage}}' "$id" 2>/dev/null | awk '{ x=$1; u=x; gsub(/[0-9.]/,"",u); gsub(/[A-Za-z]/,"",x);
+-            f = (u=="GiB") ? 1 : (u=="MiB") ? 1/1024 : (u=="TiB") ? 1024 : 0; printf "%.1f", x*f }')
++      cg=/sys/fs/cgroup/system.slice/docker-$id.scope
++      v=$(awk -v sw="$(cat "$cg/memory.swap.current" 2>/dev/null || echo 0)" '$1 == "anon" || $1 == "shmem" { b += $2 }
++            END { printf "%.1f", (b + sw) / 1073741824 }' "$cg/memory.stat" 2>/dev/null)
+       cur=$(awk -v a="$cur" -v b="${v:-0}" 'BEGIN { printf "%.1f", a+b }')
+     done
+     max=$(awk -v a="$max" -v b="$cur" 'BEGIN { print (b>a)?b:a }')
+@@ -71,16 +85,21 @@
+   while IFS='|' read -r n c pk og od cmd; do
+     [ -z "$n" ] || [ "${n#\#}" != "$n" ] && continue
+     state=queued; [ -f "$ST/$n.env" ] && . "$ST/$n.env"
+-    case "$state" in done*|failed*|skipped*|blocked*) continue ;; esac
++    case "$state" in done*|failed*|skipped*|blocked*|refused*) continue ;; esac
++    if [ "$c" != Q ] && [ "$pk" -gt "$CAP_GB" ] 2>/dev/null; then
++      setst "$n" "refused: declares $pk GB > the $CAP_GB GB CPU cap (class Q runs it with the cards idle)" - - -
++      echo "$(now) $n REFUSED: peak_gb $pk > CAP_GB $CAP_GB and class $c (not Q)" >> "$LOG/chain.log"; continue
++    fi
+     job="$n|$c|$pk|$og|$od|$cmd"; break
+   done < "$Q"
+   [ -n "$job" ] || { echo "$(now) queue empty - chain ends" >> "$LOG/chain.log"; status_write; exit 0; }
+   IFS='|' read -r n c pk og od cmd <<< "$job"
++  jcap=$CAP_GB; [ "$c" = Q ] && jcap=$pk   # the job's container cap: its RAM need at start is the cap + 8
+   # wait for the gate and the RAM
+   while :; do
+     why=$(gate "$c") || { setst "$n" "waiting: $why" - - -; sleep 600; continue; }
+     ma=$(memavail)
+-    [ "$ma" -ge $((pk + 20)) ] || { setst "$n" "waiting: MemAvailable $ma < $((pk + 20)) GB" - - -; sleep 600; continue; }
++    [ "$ma" -ge $((jcap + 8)) ] || { setst "$n" "waiting: MemAvailable $ma < $((jcap + 8)) GB" - - -; sleep 600; continue; }
+     break
+   done
+   da=$(diskavail)
+@@ -92,13 +111,17 @@
+   exec 9> /tmp/b70-cpu-model.lock
+   flock -x 9
+   ma=$(memavail)
+-  if [ "$ma" -lt $((pk + 20)) ] || ! gate "$c" > /dev/null; then flock -u 9; exec 9>&-; continue; fi
++  if [ "$ma" -lt $((jcap + 8)) ] || ! gate "$c" > /dev/null; then flock -u 9; exec 9>&-; continue; fi
+   start=$(now)
+   setst "$n" running "$start" - -
+   echo "$(now) $n START (MemAvailable $ma GB, disk $da GB): $cmd" >> "$LOG/chain.log"
+   echo "=== $(now) $n: $cmd (MemAvailable $ma GB, disk $da GB)" >> "$LOG/$n.log"
+   rm -f "$ST/$n.peak"
+-  ( cd "$TREE" && exec bash -c "$cmd" ) >> "$LOG/$n.log" 2>&1 &
++  if [ "$c" = Q ]; then
++    ( cd "$TREE" && export ORACLE_MEMORY="${pk}g" && exec bash -c "$cmd" ) >> "$LOG/$n.log" 2>&1 &
++  else
++    ( cd "$TREE" && unset ORACLE_MEMORY && exec bash -c "$cmd" ) >> "$LOG/$n.log" 2>&1 &
++  fi
+   jpid=$!
+   echo "$jpid" > "$ST/$n.pid"
+   sample "$n" "$ST/$n.pid" 9>&- &
+@@ -112,9 +135,11 @@
+   case "$rc" in
+     0) st=done ;;
+     77) st="skipped: $(grep -h SKIP_REASON "$LOG/$n.log" | tail -1 | cut -c1-120)" ;;
++    75) st=queued ;;   # run_in_container.sh refused it: a GPU job took ~/b70-gpu.lock first (class Q); tried again
+     *) st="failed rc=$rc" ;;
+   esac
+   setst "$n" "$st" "$start" "$end" "$peak"
+   echo "$(now) $n END rc=$rc peak $peak" >> "$LOG/chain.log"
+   echo "=== $(now) $n END rc=$rc" >> "$LOG/$n.log"
++  [ "$rc" = 75 ] && sleep 60
+ done
