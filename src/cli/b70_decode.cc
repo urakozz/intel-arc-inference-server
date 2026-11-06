@@ -134,9 +134,7 @@ void usage() {
       "  --max-len <L>  KV cache and RoPE capacity: default 16384 (bench rows stay comparable);\n"
       "                 any multiple of 256 up to the trained context (config.json\n"
       "                 max_position_embeddings), refused before the engine if the memory plan\n"
-      "                 does not fit; `auto` = the largest that fits (spec 6 §10). Only\n"
-      "                 B70_DECODE_ATTN=v1 bakes max_len: 4096, 16384, 32768 and 131072 are compiled,\n"
-      "                 any other fails at capture naming the missing binary\n"
+      "                 does not fit; `auto` = the largest that fits (spec 6 §10)\n"
       "  --mem-reserve-gb G  device memory the plan leaves free (default 1.5 GB: driver, kernels,\n"
       "                 allocator slack - an estimate the box has to confirm)\n"
       "  --bench        ingest --depth synthetic ids, then time --tg generated ones and print\n"
@@ -418,7 +416,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
                "engine: %zu kernels, %zu modules, max_len %u, %.2f GB of persistent state"
                ", decode attention %s (profiled list: %zu events)\n",
                n, instr.modules.size(), buffers.max_len, buffers.persistent_bytes() / 1e9,
-               runtime::decode_attn_name(runtime::decode_attn()), prof.events.size());
+               "v2", prof.events.size());
 
   // One queue for both lists: the ingestion and the measured replays go through
   // the same ordering domain the Engine would use, so nothing about the
@@ -1130,7 +1128,7 @@ int run(int argc, char** argv) {
     const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
     cli::dflash::check_engine(dflash, pipe.on(), kv_cache, pp_path, replay_env != nullptr && std::string(replay_env) == "1");
   }
-  // Spec 12b's int8-KV refusals are the Qwen3.5 family's (B70_DECODE_ATTN, the composed prefill);
+  // Spec 12b's int8-KV refusals are the Qwen3.5 family's (the composed prefill);
   // K2-Horizon's engine has its own int8 twins for flash and eager and refuses its own backends.
   if (!cli::k2::is_k2(path)) cli::check_kv_cache(kv_cache, pp_path);   // spec 12b
   if (profile && kv_cache == runtime::KvCache::Int8)
@@ -1294,7 +1292,7 @@ int run(int argc, char** argv) {
                "decode attention %s, kv cache %s\n",
                eng.step().kernel_count, eng.step().modules.size(), eng.max_len(),
                eng.buffers().persistent_bytes() / 1e9,
-               runtime::decode_attn_name(runtime::decode_attn()),
+               "v2",
                runtime::kv_cache_name(eng.kv_cache()));
 
   // Ingestion is one replay per prompt token unless `--prefill-length` or `--prefill` is

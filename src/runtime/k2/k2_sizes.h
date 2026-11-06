@@ -22,7 +22,7 @@ inline constexpr uint32_t kM = 1;
 // scores and probabilities through an online softmax, one rounding at the end) or
 // k2_attn_eager.cl's eager form (the reference's own bf16 chain: scores and probabilities
 // rounded to bf16, the softmax over the full row in torch's order). `B70_K2_ATTN=flash|eager`,
-// read at each call (so a test can set it between engines, as B70_DECODE_ATTN is); unset or
+// read at each call (so a test can set it between engines); unset or
 // empty means the default; anything else throws. The choice lives here, beside the sizes,
 // because eager needs a score row the buffers allocate (attn_scores_bytes) and two more
 // launches a layer (decode_launches).

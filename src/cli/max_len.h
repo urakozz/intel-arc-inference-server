@@ -101,25 +101,9 @@ inline runtime::KvCache parse_kv_cache_arg(const std::string& v) {
 }
 inline void check_kv_cache(runtime::KvCache kv, const runtime::PrefillPath& path) {
   if (kv != runtime::KvCache::Int8) return;
-  if (runtime::decode_attn() == runtime::DecodeAttn::V1)
-    throw std::runtime_error("--kv-cache int8 decodes through attention v2 only;"
-                             " B70_DECODE_ATTN=v1 reads a bf16 cache");
   if (path.prefill && path.composed_attn)
     throw std::runtime_error("--kv-cache int8 prefills through the flash attention only;"
                              " B70_PREFILL_ATTN=composed reads a bf16 cache");
-}
-
-// Decode attention v1 (B70_DECODE_ATTN=v1) bakes MAXLEN into its binaries and only some
-// are compiled (src/kernels/CMakeLists.txt): auto then takes the largest compiled length
-// at or below what fits. v2, the default, serves any max_len (spec 10).
-inline uint32_t v1_compiled_at_most(uint32_t fit, const model::ModelDesc& d) {
-  for (uint32_t len : {262144u, 131072u, 65536u, 32768u, 16384u, 4096u}) {
-    if (len > fit) continue;
-    const std::string v = kernels::attn_decode_variant(1, len, runtime::DecodeScratch::kAttnBlock,
-                                                       d.fa_q_heads, d.fa_kv_heads);
-    if (std::ifstream(kernels::path(v)).good()) return len;
-  }
-  return 0;
 }
 
 // Spec 8 §11: the draft vocabulary a loaded model carries (load(..., DraftVocabSpec)
@@ -157,18 +141,11 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
           runtime::describe(runtime::plan(d, runtime::kMinAutoMaxLen, mtp, weights, path, dv, kv, drafter),
                             device, reserve_bytes));
     len = fit;
-    if (runtime::decode_attn() == runtime::DecodeAttn::V1) {
-      len = v1_compiled_at_most(fit, d);
-      if (len == 0)
-        throw std::runtime_error("--max-len auto with B70_DECODE_ATTN=v1: no compiled v1 decode"
-                                 " attention at or below " + std::to_string(fit));
-    }
     loader::set_max_len(ctx, m, len);
     std::fprintf(stderr,
                  "max_len: auto -> %u (the largest multiple of %u that fits %.3f GB with a %.3f GB"
-                 " reserve; trained context %u%s)\n",
-                 len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len,
-                 len != fit ? ", v1 decode attention's largest compiled length" : "");
+                 " reserve; trained context %u)\n",
+                 len, runtime::kMaxLenQuantum, device / gb, reserve_bytes / gb, m.trained_max_len);
   } else {
     const runtime::MemoryPlan p = runtime::plan(d, len, mtp, weights, path, dv, kv, drafter);
     if (p.total() + reserve_bytes > device) {

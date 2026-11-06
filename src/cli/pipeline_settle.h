@@ -5,8 +5,7 @@
 //
 //   --max-len auto    the largest multiple of 256 both devices hold with the reserve each, at
 //                     the auto split (both auto: the split whose length is largest) or at
-//                     --pipeline-split N; B70_DECODE_ATTN=v1 then takes its largest compiled
-//                     length at or below it;
+//                     --pipeline-split N;
 //   --max-len N       the auto split at N (or --pipeline-split N), refused with the plan's
 //                     breakdown and the largest length that fits when a device cannot hold it.
 //
@@ -70,18 +69,10 @@ inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& 
                                " positions fit on both devices - " +
                                runtime::pp_describe(runtime::pp_plan(d, s, at, w, kv, pf, x), dev, reserve));
     }
-    const uint32_t fit = len;
-    if (runtime::decode_attn() == runtime::DecodeAttn::V1) {
-      len = v1_compiled_at_most(fit, d);
-      if (len == 0)
-        throw std::runtime_error("--max-len auto with B70_DECODE_ATTN=v1: no compiled v1 decode"
-                                 " attention at or below " + std::to_string(fit));
-    }
     std::fprintf(stderr,
                  "max_len: auto -> %u (the largest multiple of %u that fits BOTH devices, %.3f and"
-                 " %.3f GB, with a %.3f GB reserve each; trained context %u%s)\n",
-                 len, runtime::kMaxLenQuantum, dev[0] / gb, dev[1] / gb, reserve / gb, cap,
-                 len != fit ? ", v1 decode attention's largest compiled length" : "");
+                 " %.3f GB, with a %.3f GB reserve each; trained context %u)\n",
+                 len, runtime::kMaxLenQuantum, dev[0] / gb, dev[1] / gb, reserve / gb, cap);
   } else {
     if (pipe.split_auto) split = runtime::pp_auto_split(d, w, len, kv, pf, x);
     const runtime::PpPlan p = runtime::pp_plan(d, split, len, w, kv, pf, x);

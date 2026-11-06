@@ -116,9 +116,8 @@ struct CapturedStep {
 //
 // M: the rows in flight (consecutive positions), default 1 - what ships. M > 1
 // binds the `_M<M>` variants (B70_MTP builds M = 2..4 at max_len 16384).
-// Spec 10 (plan 10b): which decode-attention pair every capture binds - `DecodeAttn`,
-// `decode_attn()` and `B70_DECODE_ATTN` live in runtime/buffer_sizes.h, because the
-// pair also decides `attn_part`'s size.
+// Spec 10 (plan 10b): every capture binds decode attention v2 (attn_v2.cl; v1 was removed in
+// the zero-config cleanup).
 
 // Spec 28b: at M >= 2 every tuned int4 / int8 linear binds gemm_sm (runtime::gemv_kind, runtime/gemv_kind.h);
 // `opt` (tests and probes only) forces gemv or gemm_sm at every M - build, build_verify and build_verify_taps

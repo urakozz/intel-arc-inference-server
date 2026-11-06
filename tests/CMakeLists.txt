@@ -549,7 +549,9 @@ if(B70_VERIFY_M8 AND B70_MTP)
     ${_v19a_reused})
 endif()
 
-# The decode-attention trio. Its reference (attn_ref.h) reproduces the kernels'
+# The decode-attention trio (attn_prep, shared with v2; attn_decode / attn_reduce, v1 - the
+# test-only reference attn_v2_test grades v2 against since the zero-config cleanup). Its
+# reference (attn_ref.h) reproduces the kernels'
 # norm tree, score tree, wave order and block-merge order exactly, so the KV
 # cache and the norm/RoPE outputs are held bit-exact and only the `exp`-carrying
 # tensors have a tolerance. M = 2 is run, not just compiled: it is the only
@@ -561,8 +563,7 @@ b70_target_kernel_dir(attn_test)
 add_dependencies(attn_test kernel_attn_prep_M1
   kernel_attn_decode_M1_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M1_L4096_B${ATTN_BLOCK}
   kernel_attn_prep_M2
-  kernel_attn_decode_M2_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M2_L4096_B${ATTN_BLOCK}
-  kernel_attn_decode_M1_L16384_B${ATTN_BLOCK} kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK})
+  kernel_attn_decode_M2_L4096_B${ATTN_BLOCK} kernel_attn_reduce_M2_L4096_B${ATTN_BLOCK})
 add_test(NAME attn_test COMMAND attn_test)
 
 # Spec 10 A1 (plan 10b Task 1): decode attention v2 against v1. Part S (synthetic)
@@ -819,8 +820,7 @@ set(B70_DECODE_LIST_KERNELS
   kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20
   kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1 kernel_gdn_step_M1
-  kernel_attn_prep_M1 kernel_attn_decode_M1_L16384_B${ATTN_BLOCK}
-  kernel_attn_reduce_M1_L16384_B${ATTN_BLOCK} kernel_attn_v2_M1_T${ATTN_V2_TGT}
+  kernel_attn_prep_M1 kernel_attn_v2_M1_T${ATTN_V2_TGT}
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N34816_S8_L0
   kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M1_K5120_N248320_S1_L1
@@ -1279,23 +1279,6 @@ b70_cli_reject(cli_reject_mtp_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --
 b70_cli_reject(cli_reject_mtp_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4
   --mtp auto EXPECT "K2-Horizon has no MTP head")
 
-# Spec 6 (plan 6b Task 3): a max_len with no compiled decode attention. This one is NOT
-# host-side -- it needs the device and the checkpoint, because the variant is resolved at
-# capture -- so it is its own registration, labelled checkpoint: exit 1 (not a signal),
-# and the message names the missing binary, attn_decode_M1_L65536_B64.
-add_test(NAME cli_reject_maxlen_uncompiled COMMAND sh -c [==[
-out=$("$@" 2>&1)
-rc=$?
-printf '%s\n' "$out" >&2
-[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
-printf '%s\n' "$out" | grep -qF attn_decode_M1_L65536 ||
-  { echo "exit 1, but the missing variant is not named" >&2; exit 1; }
-]==] cli_reject_maxlen_uncompiled $<TARGET_FILE:b70-decode> ${B70_TEST_SNAPSHOT}
-  --bench --depth 64 --max-len 65536)
-# Spec 10: decode attention v2 bakes no MAXLEN, so the missing binary is v1's alone and
-# the test pins B70_DECODE_ATTN=v1 (v1 stays selectable; its guard must keep firing).
-set_tests_properties(cli_reject_maxlen_uncompiled PROPERTIES LABELS "checkpoint" TIMEOUT 600
-  ENVIRONMENT "B70_DECODE_ATTN=v1")
 
 # --- spec 3 T1: tokenizer (host-only; needs the checkpoint's tokenizer.json) ---
 if(B70_TOKENIZER_ENABLED)

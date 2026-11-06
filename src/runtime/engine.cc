@@ -99,7 +99,7 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
   verify_steps_.push_back(one(opt));
   // Spec 28c: the deep list where the rule switches this M at a depth (and nothing forces one kind).
   const model::ModelDesc& d = *model_.desc;
-  const uint32_t from = opt.force_attn == VerifyAttnForce::Auto && decode_attn() == DecodeAttn::V2
+  const uint32_t from = opt.force_attn == VerifyAttnForce::Auto
                             ? verify_attn_deep_from(M, kv_cache() == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
                             : kDpasNever;
   const bool by_depth = from != kDpasNever;

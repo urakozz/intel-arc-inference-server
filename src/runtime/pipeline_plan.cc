@@ -255,8 +255,7 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
   p.prefill = pf;
   p.extras = x;
   const std::array<PpStage, kPpDevices> st = pp_stages(d, split);
-  // The decode scratch is max_len-dependent only through v1's attn_part; the planner
-  // follows B70_DECODE_ATTN as runtime::plan does.
+  // The decode scratch, as runtime::plan counts it.
   const size_t scratch = DecodeScratchDims::sizes(max_len, d).total();
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     PpDevicePlan& dp = p.dev[i];

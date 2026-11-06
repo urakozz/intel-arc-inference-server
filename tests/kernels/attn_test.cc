@@ -122,19 +122,6 @@
 //     read it, since `nb(0) = 4`) while for `m = 1` it holds the one valid
 //     position 256.
 //
-// One case runs at `max_len = 16384` - `pos = 16383, M = 1`. `MAXLEN` is a
-// compile-time `-D` (attn_part's block stride and `NBLOCKS` both come from it),
-// so L16384 is a **different binary**, and it is the one the captured decode
-// list binds and the product ships; every case above tests a variant nothing
-// runs in anger. One depth, at the far end of the cache, is what makes that
-// binary's own arithmetic true: **256** live blocks and a 256-step merge in
-// `attn_reduce`, four times the longest any L4096 case reaches - and, since
-// L5, the case that proves `attn_reduce`'s `hmx[NBLOCKS]`/`hsm[NBLOCKS]` SLM
-// arrays are still correct at four times their old length (256 floats each,
-// 2 KB together of the 64 KB budget). It costs 67 MB of KV on the device and a
-// few seconds of reference on the host, which is why it is one case and not a
-// second sweep.
-//
 // The early-out is asserted directly rather than inferred: `attn_part` is
 // canary-filled (1e30 in every word) *inside the replayed list*, so any block
 // whose `kBlock·b ≥ pos + n_active` must come back still holding the canary - and
@@ -177,17 +164,12 @@ using attn_ref::kQkvN;
 using attn_ref::kRotDim;
 
 constexpr uint32_t kWG = 256;
-// Two compiled caches are exercised. `kMaxLen` is the cheap one every case
-// below the last one uses: 64 blocks of 64, a 4 MB KV cache, a whole sweep of
-// block edges for the price of one. `kProdLen` is the one the *product* runs -
-// b70-decode's default `--max-len` and the only attention variant
-// runtime::build binds (tests/CMakeLists.txt's B70_DECODE_LIST_KERNELS) - and it
-// is a different compiled kernel, not the same kernel with a bigger grid:
-// MAXLEN is a `-D` that sets attn_part's block stride and NBLOCKS. Running only
-// L4096 left the shipped binary untested, so the last case below runs L16384
-// once, at the far end of its cache (67 MB of KV, 6.3 MB of attn_part).
+// One compiled cache is exercised: 64 blocks of 64, a 4 MB KV cache, a whole sweep of
+// block edges for the price of one. Since the zero-config cleanup (2026-11-06) this
+// decode attention (v1) is no engine's - it is the reference attn_v2_test grades v2
+// against, so this test keeps it honest; the L16384 case that covered the binary the
+// product used to bind went with v1's runtime path.
 constexpr uint32_t kMaxLen = 4096;
-constexpr uint32_t kProdLen = 16384;
 constexpr uint32_t kFaSmallFloats = 2048 / 4;       // loader::kFaBlockBytes / 4
 constexpr float kCanary = 1.0e30f;
 
@@ -707,18 +689,6 @@ int main() {
   // is 4, must not read it).
   run_case(d, 254, 2, 2, 6000);
   run_case(d, 255, 2, 2, 7000);
-  // L16384 - the ONLY attention variant the captured decode list binds, and
-  // until now compiled but never executed (tests/CMakeLists.txt named it as a
-  // dependency, which built it and proved nothing). MAXLEN is a compile-time
-  // define, so this is a different binary from every case above: a different
-  // NBLOCKS (256, not 64) and a different attn_part block stride. One depth,
-  // at the far end of the cache, because that is where both differ most -
-  // pos = 16383 makes all 256 blocks live and gives attn_reduce a 256-step
-  // merge, four times the longest merge any L4096 case can reach - and it is
-  // the only case that runs attn_reduce's hmx/hsm SLM arrays at their post-L5
-  // length of NBLOCKS = 256 floats each. Same bars as the rest; ~67 MB of KV
-  // and 6.3 MB of attn_part on the device.
-  run_case(d, kProdLen - 1, 1, 1, 8000, kProdLen);
   std::puts("attn_test OK");
   return 0;
 }
