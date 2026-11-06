@@ -28,6 +28,8 @@ Last updated: 2026-11-06 (main 605ecf5).
 | **16** pipeline | two-card serving: MTP, lookup, prefix cache | row 27 | in tonight's run |
 | **12** int8 KV | the tool-call and bf16 rows | row 11 a4 / bf16 | in tonight's run |
 | **18** K2-Horizon | the tool-call reference and the long-context passkeys | 25.a4_ref (CPU), 17.k0, 21.passkey, 25.passkey | the reference waits for K2 bf16 hot (75 GB); the passkeys in tonight's run |
+| **8** MTP | `mtp_head_test` - the MTP head's draft logits against the CPU reference, which was never made (`oracle-out-spec8b/m1`, `tools/oracle/mtp_ref.py --dump`; it reads Qwen3.8's bf16 original: `hf_tier.sh hot Qwen/Qwen3.8-27B` for the job, cold after) - the test SKIPs until then | CPU job, then `mtp_head_test` in the next run | to queue after the validation run (with the CPU jobs' memory cap) |
+| *(tests)* | `kolibri_tokenizer_test` and K2's tokenizer test read a pinned HF snapshot id the box no longer has (they SKIP): fixed on branch `fix-hf-snapshot-paths` (the snapshot follows refs/main) | box_check with the next batch (13b) | fix built, not merged |
 | **19** DFlash | the CPU half of the drafter reference | 54.d1_ref | CPU job, queued |
 
 ## Closed recently
