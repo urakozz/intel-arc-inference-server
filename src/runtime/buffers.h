@@ -109,8 +109,10 @@ struct DecodeScratch : DecodeScratchDims {
 // **Plan 5d: the chunk cap (`kC` below, `chunk_cap()`) is a session value, 2048 or 4096**
 // (PrefillScratchDims::kCDefault / kCMax), chosen by the memory planner
 // (runtime::prefill_chunk_cap_that_fits, operator ruling (i): context first). Ruling A13's
-// paragraph stands for the 2048 default; the int8 path's own measurement at 4096 rows is
-// docs/probe-prefill-chunk-4096-2026-11-01.md.
+// paragraph stands for the 2048 default. The int8 path at 4096 rows (2026-11-01 / 11-06, plan
+// 5d "As built"): the linears alone gain nothing (h8 -1.1 %), the whole prefill +4.2 % at
+// pp4096, +5.3 % at 32k, +1.5 % at 128k (the other per-chunk fixed costs halve) - below the
+// plan's +5 % bar at pp4096, so 2048 stays the default and 4096 is opt-in (--prefill-chunk).
 //
 // **kC = 2048, not plan 6b's 4096 - ruling A13, and every byte was recomputed
 // rather than halved.** Basis (spec §3.3, progress ledger): four of P2's six
