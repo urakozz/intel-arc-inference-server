@@ -1,40 +1,38 @@
 #pragma once
-// Spec 26c: speculative decoding for Nemotron 3.5 Bolt - b70-serve on Bolt's cards (two by default):
+// Spec 26c: speculative decoding for Nemotron 3.5 Bolt - b70-serve on Bolt's cards (two by default), selected by the one
+// --spec surface (cli/spec_args.h, SpecFamily::Bolt; the zero-config cleanup of 2026-11-06 left no other knob):
 //
 //   --spec dflash          the proposer is LiLiCorr (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr, spec 26) on the LAST
 //                          card beside the target's lm_head (Decision 8: with a 1.07 GB embedding replica there): one 8-row
 //                          block drafts up to 7 ids, verified at M = K + 1 by Bolt's verify lists (runtime::bolt::BoltEngine)
 //   --draft-model PATH     the drafter: a snapshot directory or a repo id in the HF cache (default the published one); never
 //                          downloaded here
-//   --draft-format F       exact (W' bf16 + g: spec 26 §3), int8 (per row - the default, PROVISIONAL until r63.accept, spec 26
-//                          §11) or int4 (g64 RTN); the LiLiCorr head is exact in every format (Decision 3)
-//   --draft-q Q            the sampled draft distribution: lattice (softmax(realized lattice / T) - vLLM's, the default,
-//                          PROVISIONAL until r63.accept) or lattice+lp (+ the candidates' log-probs, the alternative 26a
-//                          records); lossless either way (D4)
 //   --spec lookup          the proposer is the server's prompt lookup (spec 19e), verified through the same lists
 //   --spec-max K           the deepest block, 1..7 (default 7, Decision 5); AdaptiveK picks K per iteration
-//   --spec-cost SPEC       the AdaptiveK cost table (--mtp-cost's syntax, verify to M = 8, draft to 7); default
-//                          server::MtpCost::bolt_lilicorr / bolt_verify (DERIVED, spec 26 §11 - r63.cost measures it)
-// and B70_BOLT_VERIFY_MOE=union|plain (the verify's routed experts: the union-aware form, Decision 10, or its bitwise reference).
-// `--spec dflash` is NOT the default: it becomes Bolt's only on D5's rule (spec 26 §7: >= 10 % over both off and lookup on the
-// agentic set, nowhere worse than 3 %) - box row 65's r65.benchy decides.
 //
-// Refused before the device, each by name (tests/server/bolt_serve_args_test.cc; through the binary the box's
-// cli_reject_serve_bolt_*): --draft-model / --draft-format / --draft-q without --spec dflash; --spec-max / --spec-cost without a
-// proposer; --spec-max outside 1..7; --draft-format bf16 (LiLiCorr's NVFP4 linears have no exact bf16 form); --draft-vocab (no
-// compact head); --mtp-max / --mtp-cost (an MTP head's); --pipeline-handoff peer with --spec (the taps ride on the copy
-// hand-off's barrier, 19d); B70_PREFILL_REPLAY=1 with --spec dflash (the prefill taps are copies a recorded chunk cannot hold).
-// By the loader: a drafter that is not LiLiCorr's shapes or does not fit Bolt (model::check_lilicorr, check_target).
+// What the engine decides (no flag, no environment variable): the drafter's linears are int8 per row (spec 26 §3; PROVISIONAL
+// until r63.accept - `exact` and int4 g64 stay SpecArgs::format, the tests' seam), the head exact in every format (Decision 3);
+// the sampled draft distribution is vLLM's lattice (softmax(realized lattice / T), Decision 6; lattice+lp stays SpecArgs::q, the
+// tests' seam); the verify's routed experts are the union-aware form (Decision 10 - the plain M-row form, its bitwise reference,
+// is the tests' `plain` argument and bolt_moe_union_test --time's arm); the AdaptiveK cost table is the derived Bolt rows
+// (server::MtpCost::bolt_lilicorr / bolt_verify, spec 26 §11 - r63.cost measures them). `--spec dflash` is NOT Bolt's `auto`: it
+// becomes so only on D5's rule (spec 26 §7: >= 10 % over both off and lookup on the agentic set, nowhere worse than 3 %) - box
+// row 65's r65.benchy decides.
+//
+// Refused before the device, each by name (tests/server/bolt_serve_args_test.cc, tests/runtime/bolt_spec_plan_test.cc; through
+// the binary the box's cli_reject_serve_bolt_*): by cli::resolve_spec --spec mtp, --spec dflash-lookup, --spec-max outside 1..7,
+// --spec-max with --spec off, --draft-model without --spec dflash; by check_serve_flags --draft-vocab (LiLiCorr reads the whole
+// lm_head); here --pipeline-handoff peer with a proposer (the taps ride on the copy hand-off's barrier, 19d). By the loader: a
+// drafter that is not LiLiCorr's shapes or does not fit Bolt (model::check_lilicorr, check_target).
 #include <algorithm>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 #include "cli/bolt_decode.h"
 #include "cli/bolt_serve.h"
+#include "cli/spec_args.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -58,14 +56,11 @@ inline constexpr const char* kDefaultDrafter = "nvidia/NVIDIA-Nemotron-3.5-Bolt-
 inline constexpr uint32_t kSpecMaxK = 7;
 
 struct SpecArgs {
-  std::string spec = "off";        // off | dflash | lookup (mtp: check_serve_flags refuses it)
+  std::string spec = "off";        // off | dflash | lookup (cli::resolve_spec's SpecKind for SpecFamily::Bolt)
   std::string draft_model = kDefaultDrafter;
-  std::string format_arg;          // --draft-format as given ("" = the default, int8)
-  std::string q_arg;               // --draft-q as given ("" = lattice)
   uint32_t max_k = kSpecMaxK;
-  std::string cost;                // --spec-cost
-  bool have_model = false, have_max_k = false, draft_vocab = false, mtp_tuning = false;
-  // resolved by check_spec
+  bool have_model = false;
+  // The engine's choices (the header's list) - not user-facing: the tests' seams for the other arms.
   loader::DraftFormat format = loader::DraftFormat::Int8;
   BoltDraftQ q = BoltDraftQ::Lattice;
   bool dflash() const { return spec == "dflash"; }
@@ -73,36 +68,24 @@ struct SpecArgs {
   bool on() const { return dflash() || lookup(); }
 };
 
-// Every refusal that needs no device (the header's list), in order; resolves --draft-format and --draft-q.
-inline void check_spec(SpecArgs& s, uint32_t devices, runtime::PpHandoff handoff, bool prefills) {
-  if (!s.dflash() && (s.have_model || !s.format_arg.empty() || !s.q_arg.empty()))
-    throw std::runtime_error("--draft-model, --draft-format and --draft-q need --spec dflash (Nemotron 3.5 Bolt's drafter is "
-                             "LiLiCorr, spec 26)");
-  if ((s.have_max_k || !s.cost.empty()) && !s.on())
-    throw std::runtime_error("--spec-max and --spec-cost need --spec dflash or --spec lookup");
+// b70-serve's --spec / --spec-max / --draft-model for Bolt: cli::resolve_spec's refusals and K (SpecFamily::Bolt).
+inline SpecArgs spec_args(const std::string& spec_arg, bool have_max, uint32_t max, bool have_model, const std::string& model) {
+  const Spec r = resolve_spec(spec_arg, SpecFamily::Bolt, "Nemotron 3.5 Bolt", have_max, max, have_model);
+  SpecArgs s;
+  s.spec = r.kind == SpecKind::DFlash ? "dflash" : r.kind == SpecKind::Lookup ? "lookup" : "off";
+  if (s.on()) s.max_k = r.max_k;
+  s.have_model = have_model;
+  if (have_model) s.draft_model = model;
+  return s;
+}
+
+// The refusals that need the placement (the header's list), after spec_args.
+inline void check_spec(const SpecArgs& s, uint32_t devices, runtime::PpHandoff handoff) {
   if (s.on() && (s.max_k == 0 || s.max_k > kSpecMaxK))
     throw std::runtime_error("--spec-max with Nemotron 3.5 Bolt expects 1..7 (LiLiCorr's block of 8 - 1, spec 26 Decision 5)");
-  if (s.draft_vocab)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's head; LiLiCorr reads "
-                             "Bolt's whole lm_head (no compact head, spec 26)");
-  if (s.mtp_tuning)
-    throw std::runtime_error("--mtp-max and --mtp-cost belong to an MTP head; Nemotron 3.5 Bolt has none (its proposers: --spec "
-                             "dflash / lookup, tuned by --spec-max and --spec-cost)");
-  if (!s.format_arg.empty() && !loader::parse_lilicorr_draft_format(s.format_arg, s.format))
-    throw std::runtime_error("--draft-format " + s.format_arg + ": LiLiCorr's formats are exact, int8 and int4 (spec 26 §3: its "
-                             "NVFP4 linears have no exact bf16 form - `exact` is W' bf16 with g on the output)");
-  if (!s.q_arg.empty() && !parse_bolt_draft_q(s.q_arg, s.q))
-    throw std::runtime_error("--draft-q " + s.q_arg + ": Nemotron 3.5 Bolt's drafter samples from lattice or lattice+lp "
-                             "(spec 26 Decision 6)");
   if (s.on() && devices == 2 && handoff != runtime::PpHandoff::Copy)
     throw std::runtime_error("--spec " + s.spec + " on Nemotron 3.5 Bolt crosses the cards by the copy hand-off only (19d: "
                              "the drafter's taps ride on its barrier) - drop --pipeline-handoff peer");
-  if (s.dflash() && prefills) {
-    const char* env = std::getenv("B70_PREFILL_REPLAY");
-    if (env && std::strcmp(env, "1") == 0)
-      throw std::runtime_error("--spec dflash: the drafter's prefill taps are copies, which a recorded chunk cannot hold - "
-                               "unset B70_PREFILL_REPLAY");
-  }
 }
 
 inline unsigned format_index(loader::DraftFormat f) {   // MtpCost::bolt_lilicorr's: 0 exact, 1 int8, 2 int4 g64
@@ -110,20 +93,13 @@ inline unsigned format_index(loader::DraftFormat f) {   // MtpCost::bolt_lilicor
 }
 
 // The AdaptiveK cost table (b70-serve): the derived Bolt rows for the drafter's format, the head and the MoE form, or lookup's
-// free drafts over the same verify rows, then --spec-cost over it.
+// free drafts over the same verify rows.
 inline server::MtpCost spec_cost(const SpecArgs& s, bool int8_head, runtime::bolt::VerifyMoe moe) {
   const bool un = moe == runtime::bolt::VerifyMoe::Union;
-  server::MtpCost c = s.dflash() ? server::MtpCost::bolt_lilicorr(int8_head, format_index(s.format), un)
-                                 : server::MtpCost::bolt_verify(int8_head, un);
-  if (!s.cost.empty()) {
-    try {
-      c = server::MtpCost::parse(s.cost, c);
-    } catch (const std::invalid_argument& error) {
-      throw std::runtime_error(std::string(error.what()) + " (--spec-cost)");
-    }
-  }
+  const server::MtpCost c = s.dflash() ? server::MtpCost::bolt_lilicorr(int8_head, format_index(s.format), un)
+                                       : server::MtpCost::bolt_verify(int8_head, un);
   if (c.max_k() < s.max_k)
-    throw std::runtime_error("--spec-cost covers K up to " + std::to_string(c.max_k()) + ", below --spec-max " +
+    throw std::runtime_error("the Bolt cost table covers K up to " + std::to_string(c.max_k()) + ", below --spec-max " +
                              std::to_string(s.max_k));
   return s.lookup() ? c.with_free_drafts() : c;
 }
@@ -155,7 +131,7 @@ inline void plan_terms(const SpecArgs& s, const model::BoltDesc& d, uint32_t bou
 }
 
 // The drafter beside the loaded engine (whose verify lists are on): the embedding replica on the last card from the Bolt
-// checkpoint's own rows (mmapped), the weights in --draft-format (load_lilicorr: its own checks), its buffers at the engine's
+// checkpoint's own rows (mmapped), the weights in SpecArgs::format (load_lilicorr: its own checks), its buffers at the engine's
 // max_len, attached to the engine (verify taps, commit projection, prefill tail, reset, snapshots) and its draft list captured
 // over the replica, the engine's lm_head and the last card's Control block.
 struct BoltDrafter {

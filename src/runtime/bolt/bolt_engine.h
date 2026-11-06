@@ -172,8 +172,8 @@ class BoltEngine {
   // enable_spec allocates every device's BoltVerifyBuffers (the verify scratch at 8 rows, the SSM state slots 1..7 of each
   // Mamba block, the union MoE's down rows) and, two cards, the verify link (a copy hand-off sized for 8 rows); the verify lists
   // are captured on first use per M (runtime/bolt/bolt_capture.h build_verify). Before it nothing of this exists: a plain run
-  // allocates, captures and replays exactly 25c's (D0). `moe`: the routed experts at M > 1 (B70_BOLT_VERIFY_MOE: union the
-  // default, Decision 10). Two cards: the copy hand-off only (peer is refused by name - the taps ride on its barrier).
+  // allocates, captures and replays exactly 25c's (D0). `moe`: the routed experts at M > 1 (union - b70-serve's - the
+  // default, Decision 10; plain the tests' arm). Two cards: the copy hand-off only (peer is refused by name - the taps ride on its barrier).
   // At pos = n with x_n pending:
   //   verify(drafts, k)  rows [x_n, d_1 .. d_k] at n .. n + k (device 0's Control::cur_token[1..k] = the drafts, n_active
   //                      k + 1 on both cards); row r's argmax in verify_ids()[r], its raw fp32 logits row in the last

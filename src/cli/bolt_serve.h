@@ -23,8 +23,10 @@
 //     BoltEngine::prefill (chunks end at block ends), ingest for --prefix-split-last; the store keyed by Bolt's own root
 //     (kBoltStoreKey, the bf16-state arm another one: its snapshots are half the size), so no entry another model's engine made
 //     - or another state precision's - can ever hit;
-//   - no speculative decoding: mtp_k() and verify_k() stay 0 (no MTP head, no drafter) - b70-serve refuses --spec mtp and --spec
-//     by name.
+//   - spec 26c: speculative decoding with `spec_k` > 0 - --spec dflash (LiLiCorr: step_many) or --spec lookup (step_drafts) over
+//     BoltEngine's verify lists (the adapter section below says how greedy and sampled acceptance run); without it (--spec auto
+//     and off: Bolt's auto is off until box row 65's D5) every path is 25e's (mtp_k() and verify_k() 0). No MTP head: --spec mtp
+//     is refused by name (cli::resolve_spec, SpecFamily::Bolt).
 //
 // Also here, host-side and device-free: the generation defaults (Decision 12) and the flags b70-serve refuses for this model.
 #include <algorithm>
@@ -141,26 +143,17 @@ inline Generation resolve_generation(const nlohmann::json* snapshot, const nlohm
 // ---- what b70-serve refuses before the device -----------------------------------------------------------------------------------
 // What b70-serve parsed that Bolt has no use for (the rest - --kv-cache int8, the prefill backends, a split on one card - is
 // cli/bolt_decode.h's check_args, shared with b70-decode), each refusal by name
-// (tests/server/bolt_request_test.cc, and cli_reject_serve_bolt_* through the binary on the box).
-// Spec 26c: --spec dflash / lookup and their flags (--spec-max, --spec-cost, --draft-model, --draft-format, --draft-q,
-// --spec-min-match, --spec-history) are cli/bolt_spec.h's (check_spec); what stays refused here is an MTP head's.
+// (tests/server/bolt_serve_args_test.cc, and cli_reject_serve_bolt_* through the binary on the box).
+// Spec 26c: --spec, --spec-max and --draft-model are cli::resolve_spec's (SpecFamily::Bolt: lookup and dflash served, mtp and
+// dflash-lookup refused) and cli/bolt_spec.h's; what stays refused here is a compact draft head.
 struct ServeFlags {
-  std::string spec;              // --spec's value ("" or "auto" when not given): auto | off | mtp | lookup | dflash
-  bool proposer_tuning = false;  // --spec-max, --draft-model
   bool draft_vocab = false;      // --draft-vocab, --draft-vocab-ids
 };
 
 inline void check_serve_flags(const ServeFlags& f) {
-  if (f.spec == "mtp")
-    throw std::runtime_error("Nemotron 3.5 Bolt has no MTP head (spec 25 §0: num_nextn_predict_layers 0): drop --spec mtp");
-  if (f.spec == "dflash" || f.spec == "lookup" || f.spec == "dflash-lookup")
-    throw std::runtime_error("--spec " + f.spec + ": Nemotron 3.5 Bolt has no speculative decoding (no MTP head, no drafter)");
-  if (f.proposer_tuning)
-    throw std::runtime_error("--spec-max and --draft-model belong to a speculative proposer; Nemotron 3.5 Bolt has none (no MTP "
-                             "head, no drafter)");
   if (f.draft_vocab)
-    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a drafter's vocabulary; Nemotron 3.5 "
-                             "Bolt has neither");
+    throw std::runtime_error("--draft-vocab and --draft-vocab-ids narrow an MTP head's or a DFlash drafter's vocabulary; Nemotron "
+                             "3.5 Bolt has neither (LiLiCorr reads its whole lm_head, spec 26)");
 }
 
 // The served context is capped at the trained 262144 (Decision 14) - refused before the device (the planner refuses it too, after

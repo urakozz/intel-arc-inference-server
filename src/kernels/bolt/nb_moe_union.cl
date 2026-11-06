@@ -28,7 +28,7 @@
 //         combine of nb_moe_down, product then add, FP_CONTRACT OFF
 // so a, r (and hence everything after) equal the plain M-row binaries' bits (tests/kernels/bolt_moe_union_test.cc on the
 // card, tools/mac/clrun/nb_union_run.cc on the Mac at DN_KS 1). The plain form stays the reference and an arm
-// (B70_BOLT_VERIFY_MOE=plain); nb_moe.cl is not edited (its 25c binaries keep their bytes).
+// (VerifyMoe::Plain, the tests' arm); nb_moe.cl is not edited (its 25c binaries keep their bytes).
 //
 // **The cost** (Decision 10): the plain M-row form reads 9 x M expert blocks a MoE block (7.2 GB at M 8 over the 40
 // blocks); this one reads the union's u blocks (spec 26 §4: ~40 x u x 2.45 MB) plus one more launch (the combine) a MoE

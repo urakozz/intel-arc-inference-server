@@ -158,7 +158,7 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
 // conv, gated norm, router, route, shared act, attention prep / attention, head and argmax stage 1 at M rows (argmax stage 2
 // is the M-free binary: it writes out_token[0..M-1]); nb_ssm in its SLOT form at every M (`_SL8`: the state after row m into
 // slot (live + m) % 8, live = Control::gdn_live - spec 26 §5.3, Decision 4); the routed experts union-aware (Decision 10:
-// `_U`, three launches - up, down, the combine) or plain at M rows (B70_BOLT_VERIFY_MOE=plain; M = 1 is always plain). The
+// `_U`, three launches - up, down, the combine) or plain at M rows (VerifyMoe::Plain, the tests' arm; M = 1 is always plain). The
 // fused arms are not bound (each is bitwise the as-built list, Decision 16). The copy hand-off only (peer is refused by name).
 inline constexpr unsigned kVerifyRows = 8, kSpecSlots = 8;
 inline constexpr unsigned kSlotStride = kMHeads * kMHeadDim * kMState;   // one Mamba block's state, elements (1,048,576)
