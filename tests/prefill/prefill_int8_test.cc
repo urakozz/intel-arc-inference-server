@@ -16,10 +16,7 @@
 //      where l0 moves to 0.9987: the int8 rounding redraws its noise on any perturbation,
 //      and some positions are sensitive to it. So on `long` the cosine is printed, not
 //      gated (2026-09-24, plan 5b Task 2);
-//   3. reset, l0-int8 with replay twice: the replayed state (logits, Control, GDN state,
-//      conv ring, KV) is BITWISE the non-replay int8 run's. This is the plan's Review
-//      Focus "scales built mid-recording": a recording holding one-time work (the host
-//      finish of pf_colmax_rot) would either fail to replay or diverge;
+//   3. (the replay check went with the experimental prefill replay, zero-config cleanup)
 //   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(model::qwen38(), L0Int8, 2048)
 //      + the head's 5, i.e. l0's + 256, which is the proof the walk really ran the h8
 //      linears (on the bf16 walk it would be 256 short).
@@ -65,10 +62,9 @@ struct Run {
   std::vector<std::vector<uint8_t>> state;     // persistent buffers + Control, for bitwise
 };
 
-Run run(runtime::Engine& eng, l0::CmdList& copy, PrefillBackend b, bool replay,
+Run run(runtime::Engine& eng, l0::CmdList& copy, PrefillBackend b,
         const std::vector<uint32_t>& ids, bool grab_state, uint32_t chunk = 2048) {
   eng.set_prefill_backend(b);
-  eng.set_prefill_replay(replay);
   eng.reset();
   eng.prefill(ids, chunk);
   CHECK_EQ(eng.pos(), uint32_t(ids.size()));
@@ -110,7 +106,6 @@ int first_cost(runtime::Engine& eng, const std::string& backend_name) {
   PrefillBackend b{};
   CHECK(runtime::parse_prefill_backend(backend_name, b));
   eng.set_prefill_backend(b);
-  eng.set_prefill_replay(false);
   const auto seed = golden::read_ids("tests/golden/prompts/prose.ids");
   std::vector<uint32_t> ids(4096);
   for (size_t i = 0; i < ids.size(); ++i) ids[i] = seed[i % seed.size()];
@@ -163,8 +158,8 @@ int main(int argc, char** argv) {
     for (uint32_t n : lens) {
       CHECK(n > 0 && n <= all.size());
       const std::vector<uint32_t> ids(all.begin(), all.begin() + n);
-      const Run a = run(eng, copy, PrefillBackend::L0, false, ids, false);
-      const Run b = run(eng, copy, PrefillBackend::L0Int8, false, ids, false);
+      const Run a = run(eng, copy, PrefillBackend::L0, ids, false);
+      const Run b = run(eng, copy, PrefillBackend::L0Int8, ids, false);
       std::printf("sweep long[:%u]: first id l0 %u / l0-int8 %u, last-row cosine %.9f\n", n,
                   a.first_id, b.first_id, cosine(a.logits, b.logits));
       std::fflush(stdout);
@@ -180,10 +175,10 @@ int main(int argc, char** argv) {
     const auto pr = golden::read_ids("tests/golden/prompts/prose.ids");
     const std::vector<uint32_t> big(all.begin() + 100, all.begin() + 2148);
     for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8}) {
-      run(eng, copy, b, false, big, false);
-      const Run x = run(eng, copy, b, false, ids, false);
-      run(eng, copy, b, false, pr, false);
-      const Run y = run(eng, copy, b, false, ids, false);
+      run(eng, copy, b, big, false);
+      const Run x = run(eng, copy, b, ids, false);
+      run(eng, copy, b, pr, false);
+      const Run y = run(eng, copy, b, ids, false);
       std::printf("history %s: long[:257] after 2048 others vs after prose: %s (cos %.9f)\n",
                   runtime::prefill_backend_name(b),
                   std::memcmp(x.logits.data(), y.logits.data(), x.logits.size() * 4) == 0
@@ -191,7 +186,7 @@ int main(int argc, char** argv) {
                   cosine(x.logits, y.logits));
       std::fflush(stdout);
       for (uint32_t c : {256u, 16u}) {
-        const Run z = run(eng, copy, b, false, ids, false, c);
+        const Run z = run(eng, copy, b, ids, false, c);
         std::printf("history %s: long[:257] one chunk vs chunk %u: cos %.9f, first id %u / %u\n",
                     runtime::prefill_backend_name(b), c, cosine(x.logits, z.logits), x.first_id,
                     z.first_id);
@@ -207,9 +202,9 @@ int main(int argc, char** argv) {
 
   struct Case { const char* name; const std::vector<uint32_t>* ids; bool cos_bar; };
   for (const Case& c : {Case{"prose", &prose, true}, Case{"long[:2048]", &long_ids, false}}) {
-    const Run l0 = run(eng, copy, PrefillBackend::L0, false, *c.ids, false);
+    const Run l0 = run(eng, copy, PrefillBackend::L0, *c.ids, false);
     const size_t before = eng.prefill_launches();
-    const Run i8 = run(eng, copy, PrefillBackend::L0Int8, false, *c.ids, true);
+    const Run i8 = run(eng, copy, PrefillBackend::L0Int8, *c.ids, true);
     const size_t delta = eng.prefill_launches() - before;
     const double cos = cosine(l0.logits, i8.logits);
     std::printf("%s: %zu ids, first id l0 %u / l0-int8 %u, last-row logits cosine %.9f,"
@@ -226,24 +221,6 @@ int main(int argc, char** argv) {
       std::printf("  launch delta %zu, predicted %zu (l0 + 256 + head)\n", delta, want);
       CHECK_EQ(delta, want);
     }
-
-    Run rp;
-    for (int repeat = 0; repeat < 2; ++repeat)
-      rp = run(eng, copy, PrefillBackend::L0Int8, true, *c.ids, true);
-    const bool same_logits =
-        std::memcmp(rp.logits.data(), i8.logits.data(), i8.logits.size() * 4) == 0;
-    const char* names[] = {"gdn_state", "conv_ring", "kv_k", "kv_v", "control"};
-    bool same_state = rp.state.size() == i8.state.size();
-    for (size_t k = 0; same_state && k < i8.state.size(); ++k)
-      if (rp.state[k] != i8.state[k]) {
-        std::fprintf(stderr, "int8 replay mismatch: %s\n", names[k]);
-        same_state = false;
-      }
-    std::printf("  l0-int8 replay (second recorded run) vs immediate: logits %s, state %s\n",
-                same_logits ? "BITWISE EQUAL" : "DIFFER", same_state ? "BITWISE EQUAL" : "DIFFER");
-    std::fflush(stdout);
-    CHECK(same_logits);
-    CHECK(same_state);
   }
   std::puts("prefill_int8_test OK");
   return 0;

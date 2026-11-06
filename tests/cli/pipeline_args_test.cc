@@ -132,7 +132,6 @@ void check_serve() {
     c = {};
     c.model_type = mt;
     c.device = true;
-    c.prefill_replay = true;
     cli::check_serve_pipeline(one, c);
   }
   // ... but the sub-flags alone are refused, as b70-decode refuses them.
@@ -162,9 +161,6 @@ void check_serve() {
   c = {};
   c.device = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "--device names one card"));
-  c = {};
-  c.prefill_replay = true;
-  CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_REPLAY=1"));
   c = {};
   c.prefill_profile = true;
   CHECK(says([&] { cli::check_serve_pipeline(two, c); }, "B70_PREFILL_PROFILE=1"));

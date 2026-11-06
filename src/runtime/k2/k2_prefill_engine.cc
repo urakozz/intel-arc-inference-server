@@ -25,13 +25,6 @@ struct K2PrefillState {
   prefill::Context cx;
   prefill::KernelCache kc;
   K2PrefillScratch s;
-  struct Chunk {
-    uint32_t pos, rows;
-    bool eager;   // a recording holds one attention variant's walk
-    std::unique_ptr<prefill::Context::Recording> recording;
-  };
-  // Declared after cx / kc / s: recordings are destroyed first.
-  std::vector<Chunk> chunks;
   K2PrefillState(l0::Context& c, const model::K2Desc& d) : cx(c), kc(c), s(c, d) {}
 };
 
@@ -84,8 +77,6 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
 
   prepare_prefill();
   const bool eager = prefill_attn_eager();
-  const char* env = std::getenv("B70_PREFILL_REPLAY");
-  const bool replay = pf_replay_ >= 0 ? pf_replay_ == 1 : (env && std::strcmp(env, "1") == 0);
 
   // Spec 18d: with a block hook (spec 7 §3.2) every chunk ends at a block end or at the
   // prompt end - Engine::prefill's rule, one shared function - so each completed block is a
@@ -99,21 +90,7 @@ void K2Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     std::memcpy(pf_->s.ids.ptr(), ids.data() + off, size_t(C) * 4);
     control_->pos = pos;
     control_->n_active = C;
-    auto encode = [&] { prefill_chunk(pf_->cx, pf_->kc, pf_->s, model_, buffers_, pos, C, eager); };
-    if (replay) {
-      auto it = std::find_if(pf_->chunks.begin(), pf_->chunks.end(), [&](const K2PrefillState::Chunk& c) {
-        return c.pos == pos && c.rows == C && c.eager == eager;
-      });
-      if (it == pf_->chunks.end()) {
-        // A FIFO bound keeps the retained command storage of long sessions finite.
-        if (pf_->chunks.size() == 8) pf_->chunks.erase(pf_->chunks.begin());
-        pf_->chunks.push_back({pos, C, eager, pf_->cx.capture(encode)});
-        it = pf_->chunks.end() - 1;
-      }
-      pf_->cx.replay(*it->recording);
-    } else {
-      encode();
-    }
+    prefill_chunk(pf_->cx, pf_->kc, pf_->s, model_, buffers_, pos, C, eager);
     pf_->cx.wait();   // the chunk's KV rows have landed
     const uint32_t end = pos + C;
     if (hooked && off + C < ids.size() && end % kBlock == 0) {

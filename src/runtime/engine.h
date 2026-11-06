@@ -116,11 +116,6 @@ class Engine {
   void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; }
   PrefillBackend prefill_backend() const;          // defined in engine_prefill.cc
 
-  // Experimental pure-L0 whole-chunk replay. Off by default; an explicit
-  // setting overrides B70_PREFILL_REPLAY=1. Recordings retain frozen (pos,C)
-  // arguments, not input contents, and survive reset() with a bounded cache.
-  void set_prefill_replay(bool enabled) { pf_replay_ = enabled; }
-
   // Plan 5d: the session's prefill chunk cap - the most rows a chunk has, and so the rows of
   // every per-chunk buffer (PrefillScratch, Int8State's xq / xs, MTP's prefill hidden rows, a
   // drafter's tap staging). 2048 (PrefillScratchDims::kCDefault) or 4096 (kCMax); the CLIs
@@ -362,7 +357,6 @@ class Engine {
   // both halves stay null until the first prefill().
   std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)> pfx_{nullptr, nullptr};
   std::optional<PrefillBackend> pf_backend_;   // unset = default_prefill_backend()
-  std::optional<bool> pf_replay_;
   std::optional<uint32_t> pf_chunk_cap_;       // plan 5d; unset = default_prefill_chunk_cap()
   BlockHook block_hook_;
   std::unique_ptr<l0::Mem> tap_;   // null unless debug_resid

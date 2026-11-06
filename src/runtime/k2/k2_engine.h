@@ -60,9 +60,6 @@ class K2Engine {
   // Allocates the prefill scratch and the prefill Context, and checks every binary the walk
   // binds exists; prefill() calls it. A CLI calls it before timing the first prefill.
   void prepare_prefill();
-  // B70_PREFILL_REPLAY's arrangement (engine_prefill.cc): record each chunk's list once per
-  // (pos, rows, attention variant) and replay it. Off by default (unset = the environment).
-  void set_prefill_replay(bool enabled) { pf_replay_ = enabled ? 1 : 0; }
   // Launches the prefill Context has appended since it was made (0 before the first prefill).
   size_t prefill_launches() const;
   // The last chunk's route rows, u32 [layers][2 (MoVA, MoE)][kPfC][32] (k2_sizes.h
@@ -147,7 +144,6 @@ class K2Engine {
   // set where the state is made (b70_k2_prefill), so this header names no prefill symbol.
   std::unique_ptr<K2PrefillState, void (*)(K2PrefillState*)> pf_{nullptr, nullptr};
   size_t pf_bytes_ = 0;   // the prefill scratch's bytes, for memory_use() (0 = none)
-  int pf_replay_ = -1;    // -1: B70_PREFILL_REPLAY decides
 };
 
 }  // namespace runtime::k2

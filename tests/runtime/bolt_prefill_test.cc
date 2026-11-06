@@ -7,8 +7,7 @@
 //
 //   1. the walk: prefill_chunk_launches(desc, placement) per chunk (asserted by the walk itself, chunk by chunk) and the
 //      head's 4; the plan's prefill term (prefill_scratch_bytes) equals the allocation, device by device
-//   2. determinism and replay, bitwise: two immediate prefills (reset between) and two RECORDED ones (set_prefill_replay:
-//      B70_PREFILL_REPLAY's path) leave the same KV rows, the three ring columns decode reads next, every SSM state, the
+//   2. determinism, bitwise: two immediate prefills (reset between) leave the same KV rows, the three ring columns decode reads next, every SSM state, the
 //      logits, the last chunk's route rows, the first token
 //   3. Review Focus 1, bitwise: chunks of 512 / 1024 / 64 against 2048 (= one chunk per 2048: chunked = whole); the prompt
 //      in two prefill calls split at 64 / 2048 / 2112 / 4096 (multiples of 64); a continuation that starts OFF the grid
@@ -158,21 +157,12 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
               per_chunk, rb::kPrefillHeadLaunches, rb::prefill_sizes(d).total() / 1e9, e.memory_line().c_str());
   const Snap a = snap(e, n, true, true);
 
-  // ---- 2. determinism and replay -------------------------------------------------------------------------------------
+  // ---- 2. determinism --------------------------------------------------------------------------------------------
   e.reset();
   e.prefill(prompt);
   const bool same = snap(e, n, true, false) == a;
-  e.set_prefill_replay(true);
-  e.reset();
-  e.prefill(prompt);   // records
-  const bool rec1 = snap(e, n, true, false) == a;
-  e.reset();
-  e.prefill(prompt);   // replays the recordings
-  const bool rec2 = snap(e, n, true, false) == a;
-  e.set_prefill_replay(false);
-  std::printf("2. B4: immediate twice %s; recorded %s, replayed %s\n", same ? "bitwise" : "DIFFERS", rec1 ? "bitwise" : "DIFFERS",
-              rec2 ? "bitwise" : "DIFFERS");
-  ok = ok && same && rec1 && rec2;
+  std::printf("2. B4: immediate twice %s\n", same ? "bitwise" : "DIFFERS");
+  ok = ok && same;
 
   // ---- 3. Review Focus 1 ---------------------------------------------------------------------------------------------
   // On a synthetic with the bf16-state arm only the cuts at multiples of the 2048-chunk bind (the arm rounds the state once

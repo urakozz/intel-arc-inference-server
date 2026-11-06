@@ -15,15 +15,15 @@
 //       both backends, every logit finite, the flash-vs-composed figures printed. The 32k
 //       CPU oracle is not affordable on the box: tools/oracle/last_logits.py measured 3799 s
 //       to reach 4096 ids and 11359 s to reach 8192 (2026-09-26), so 32704 is a day-class
-//       run; the oracle bar is registered as flash_vs_oracle_test on the golden set instead.
+//       run (the golden-set bar, flash_vs_oracle_test, went with B70_PREFILL_ATTN).
 //   flash_long_test <snapshot> --128k <ids>
 //       K3b: max_len 131072, flash mode (not registered; run by hand). The prompt (131000
 //       ids, tools/probe/mk_long_ids.py) prefilled in two fresh engines: last-row logits
-//       bitwise equal and finite. Then prefill replay (set_prefill_replay(true)) twice:
-//       both bitwise equal to the immediate run.
+//       bitwise equal and finite. (Its prefill replay arm went with the experimental replay,
+//       zero-config cleanup.)
 //
 // The 32k CPU oracle is last-row logits only (tools/oracle/last_logits.py); at 128k there
-// is none, and determinism, replay and passkey retrieval carry the gate.
+// is none, and determinism and passkey retrieval carry the gate.
 //   flash_long_test <snapshot> --sweep <ids>   diagnostic: flash vs composed by depth.
 //   flash_long_test <snapshot> --kv8 <ids> [<oracle>]   spec 12b Q3: int8 KV against bf16
 //       KV at 32k (registered as flash_long_kv8_test; see kv8() below).
@@ -193,7 +193,7 @@ int k3a(const std::string& snap, const std::string& ids_path, const std::string&
   CHECK(ok);
   std::puts(have_oracle
                 ? "flash_long_test OK -- K3a: flash no further from the oracle than composed, l0 and l0-int8"
-                : "flash_long_test OK -- 32k: flash and composed finite on l0 and l0-int8 (oracle bar: flash_vs_oracle_test)");
+                : "flash_long_test OK -- 32k: flash and composed finite on l0 and l0-int8");
   return 0;
 }
 
@@ -205,12 +205,11 @@ int k3b(const std::string& snap, const std::string& ids_path) {
   std::printf("K3b: %zu prompt ids (%s), max_len %u, flash\n", prompt.size(), ids_path.c_str(),
               max_len);
   l0::Context ctx(0);
-  Run a, b, r1, r2;
+  Run a, b;
   {
     runtime::Engine e(ctx, loader::load(ctx, snap, max_len), max_len);
     e.prepare_prefill();
     std::printf("  %s\n", e.memory_line().c_str());
-    e.set_prefill_replay(false);
     a = prefill_once(e, ctx, prompt, 0);
     std::printf("  engine 1 immediate: prefill %.1f ms (%.2f t/s), first token %u, logits"
                 " non-finite %zu\n", a.prefill_ms, prompt.size() * 1000.0 / a.prefill_ms,
@@ -219,23 +218,14 @@ int k3b(const std::string& snap, const std::string& ids_path) {
   }
   {
     runtime::Engine e(ctx, loader::load(ctx, snap, max_len), max_len);
-    e.set_prefill_replay(false);
     b = prefill_once(e, ctx, prompt, 0);
     std::printf("  engine 2 immediate: prefill %.1f ms, first token %u, bitwise == engine 1:"
                 " %s\n", b.prefill_ms, b.first, a.logits == b.logits ? "yes" : "NO");
     std::fflush(stdout);
-    e.set_prefill_replay(true);
-    r1 = prefill_once(e, ctx, prompt, 0);
-    r2 = prefill_once(e, ctx, prompt, 0);
-    std::printf("  engine 2 replay x2: %.1f / %.1f ms, bitwise == immediate: %s / %s\n",
-                r1.prefill_ms, r2.prefill_ms, r1.logits == a.logits ? "yes" : "NO",
-                r2.logits == a.logits ? "yes" : "NO");
   }
   CHECK_EQ(nonfinite(a.logits), size_t(0));
   CHECK(a.logits == b.logits && a.first == b.first);
-  CHECK(r1.logits == a.logits && r1.first == a.first);
-  CHECK(r2.logits == a.logits && r2.first == a.first);
-  std::puts("flash_long_test OK -- K3b: 128k determinism and replay, bitwise");
+  std::puts("flash_long_test OK -- K3b: 128k determinism, bitwise");
   return 0;
 }
 

@@ -33,18 +33,10 @@ namespace runtime {
 struct PrefillEngine {
   prefill::Context cx;
   prefill::KernelCache kc;
-  struct Chunk {
-    uint32_t pos, rows;
-    PrefillBackend backend;   // a recording holds one backend's walk, never another's
-    prefill::AttnMode attn;   // ... and one attention path's (spec 6)
-    std::unique_ptr<prefill::Context::Recording> recording;
-  };
   // Spec 5's int8 state (signs, per-linear column scales, int8 scratch), created on the
   // first l0-int8 prefill. Declared before `chunks`: recordings that name its buffers are
   // destroyed first.
   std::unique_ptr<prefill::Int8State> int8;
-  // Declared after kc/cx: recordings are destroyed before kernels/context.
-  std::vector<Chunk> chunks;
   explicit PrefillEngine(l0::Context& c) : cx(c), kc(c) {}
 };
 
@@ -164,11 +156,8 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   prepare_prefill();
 
   const PrefillBackend backend = prefill_backend();
-  const char* replay_env = std::getenv("B70_PREFILL_REPLAY");
-  const bool replay = pf_replay_.value_or(replay_env && std::strcmp(replay_env, "1") == 0);
 
   prefill::Int8State* q = backend == PrefillBackend::L0Int8 ? pfx_->int8.get() : nullptr;
-  const prefill::AttnMode attn = prefill::attn_mode();
   // Spec 12b: an int8 cache is written and read by the flash path's kv8 twins only; refuse
   // the composed path here, before a chunk writes anything.
   if (persist_.kv_lay.form == KvCache::Int8) prefill::require_kv8_path(backend);
@@ -191,9 +180,6 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   std::vector<std::vector<uint32_t>> df_sites;
   uint32_t df_from = 0;   // the first position tapped
   if (drafter_) {
-    if (replay)
-      throw std::runtime_error("runtime::Engine::prefill: a drafter's prefill taps are copies, which a recorded "
-                               "chunk cannot hold - unset B70_PREFILL_REPLAY with --spec dflash");
     df_sites = tap_sites(*model_.desc, drafter_->tap_layers());
     if (!df_sites.back().empty())
       throw std::runtime_error("runtime::Engine::prefill: the drafter taps the last layer's output, whose fold "
@@ -239,31 +225,13 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       df_taps.n_taps = uint32_t(drafter_->tap_layers().size());
       df_taps.r0 = df_from > cpos ? std::min(df_from - cpos, C) : 0;
     }
-    auto encode = [&] {
-      prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
-                        base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
-                        persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q,
-                        drafter_ ? &df_taps : nullptr);
-      if (mtp_)
-        prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
-                             hid, mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0));
-    };
-    if (replay) {
-      const uint32_t pos = base + uint32_t(off);
-      auto it = std::find_if(pfx_->chunks.begin(), pfx_->chunks.end(), [&](const auto& entry) {
-        return entry.pos == pos && entry.rows == C && entry.backend == backend &&
-               entry.attn == attn;
-      });
-      if (it == pfx_->chunks.end()) {
-        // FIFO bound limits retained command storage for long/incremental sessions.
-        if (pfx_->chunks.size() == 8) pfx_->chunks.erase(pfx_->chunks.begin());
-        pfx_->chunks.push_back({pos, C, backend, attn, pfx_->cx.capture(encode)});
-        it = pfx_->chunks.end() - 1;
-      }
-      pfx_->cx.replay(*it->recording);
-    } else {
-      encode();
-    }
+    prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
+                      base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
+                      persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q,
+                      drafter_ ? &df_taps : nullptr);
+    if (mtp_)
+      prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
+                           hid, mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0));
     pfx_->cx.wait();                       // the chunk's state has landed
     if (drafter_ && df_taps.r0 < C) drafter_project_staged(cpos + df_taps.r0, C - df_taps.r0);   // spec 19c
     if (mtp_)   // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h

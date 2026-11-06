@@ -16,7 +16,6 @@
 //            --spec mtp (the head on device 1), --draft-vocab, --spec lookup;
 //   refused  K2-Horizon (its own engine, runtime/k2: two-card K2 is future work - serve it on
 //            one card), --device N (names one card: ZE_AFFINITY_MASK picks the two),
-//            B70_PREFILL_REPLAY=1 (the recordings are one card's walk) and
 //            B70_PREFILL_PROFILE=1 (its phase waits would serialise the pipeline).
 //   Kolibri-1 (spec 20e) is not this path: b70-serve dispatches it to its own engine before these
 //            checks (cli/kolibri_serve.h, runtime::kolibri::KolibriEngine on two cards by default), and
@@ -33,7 +32,6 @@ struct ServePipelineContext {
   std::string model_type;   // config.json's (empty when there is none)
   bool device = false;      // --device N given
   bool mtp = false;         // --mtp K|auto, --spec mtp|lookup (the head is loaded)
-  bool prefill_replay = false;  // B70_PREFILL_REPLAY=1
   bool prefill_profile = false; // B70_PREFILL_PROFILE=1
 };
 
@@ -53,9 +51,6 @@ inline void check_serve_pipeline(const PipelineArgs& a, const ServePipelineConte
                              "two-card path yet (spec 16 §8: K2 across two cards is future work) - "
                              "serve it on one card (drop --pp)");
   check_pipeline(a, pc);   // --device - by name
-  if (c.prefill_replay)
-    throw std::runtime_error("--pp 2 has no prefill replay (B70_PREFILL_REPLAY=1): the recordings "
-                             "are one card's walk (spec 16c) - unset it");
   if (c.prefill_profile)
     throw std::runtime_error("--pp 2 prefill is not profiled (B70_PREFILL_PROFILE=1): the phase "
                              "waits would serialise the pipeline (spec 16c) - unset it");

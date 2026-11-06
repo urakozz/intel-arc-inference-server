@@ -626,9 +626,9 @@ st_r11_q2() {
   jgrab q2 'kv8' 'golden_gate_test OK|TOTAL:|drop|cos mean'
   finish
 }
-stage r11.q5 11 default gpu qwen,oracle_qwen r11.kernels "step 3, Q5: replay / prefill determinism, prefill_replay, snapshot, mtp_verify (M2), mtp_gpu, prefix_gpu_*, engine_smoke, prefill_consistency (its bar may need re-deriving)"
+stage r11.q5 11 default gpu qwen,oracle_qwen r11.kernels "step 3, Q5: replay / prefill determinism, snapshot, mtp_verify (M2), mtp_gpu, prefix_gpu_*, engine_smoke, prefill_consistency (its bar may need re-deriving)"
 st_r11_q5() {
-  run_tests 'replay_determinism|prefill_determinism|prefill_replay|snapshot|mtp_verify|mtp_gpu|prefix_gpu|engine_smoke|prefill_consistency' kv8
+  run_tests 'replay_determinism|prefill_determinism|snapshot|mtp_verify|mtp_gpu|prefix_gpu|engine_smoke|prefill_consistency' kv8
   finish
 }
 stage r11.memory 11 default card qwen r11.kernels "step 4: memory_plan_box_kv8_test / _mtp_kv8_test (plan == allocation at int8); b70-serve --kv-cache int8 picks 262144 under auto (derived) and serves"
@@ -735,7 +735,7 @@ rownote 13 "Everything after r13.kernels waits on 15a, as row 10: the int4 check
 rownote 13 "Calibrating kConsistTieRel / kConsistWeightAbs from ornith_prefill_test's printed distribution and re-deriving prefill_split_ornith's non-64 bars (Qwen3.8's, PROVISIONAL) are edits on a branch after r13.prefill / r13.split record the numbers."
 rownote 13 "P0's SLM-fused dequant arm needs tools/probe/probe_moe_prefill.{cl,cc}, not written; it and the rebuild arms (TM, prefetch, a multi-work-group sort) are r13.p0_arms."
 
-stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_replay / prefill_smoke bitwise (G0), Agnes's prefill gates; Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
+stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_smoke bitwise (G0), Agnes's prefill gates; Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
 st_r13_r0() {
   need_pass g0.sha g0.bitwise g0.suite r1.gates
   kbins pf_moe_E256_T8_D2048_I512 pf_moe_router_K2048_N272 pf_moe_gemm_K2048_N1024_SILU \
@@ -3886,9 +3886,9 @@ st_r75_speed() {
 # ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
 rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
-stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, prefill_replay_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
+stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
 st_r76_tests() {
-  run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|prefill_replay_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value|golden_server_test)$'
+  run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value|golden_server_test)$'
   jgrab pf-gemm '^pf_gemm_test$' 'within|OUTSIDE|bitwise|DIFFERS|OK'
   jgrab smoke '^prefill_smoke_test$' 'launch|8449|8454|8625|OK'
   finish

@@ -75,7 +75,7 @@ class Context {
   ze_command_list_handle_t l0_list() const;
 
   // Spec 16c (the two-card prefill pipeline, runtime/prefill/pipeline_prefill.cc): appended
-  // on the immediate list in order with the launches; never inside a recording.
+  // on the immediate list in order with the launches.
   //   copy       zeCommandListAppendMemoryCopy (the hand-off's rows, a block-end shadow)
   //   signal     a barrier that signals `e` once everything appended before it has completed
   //   wait_event everything appended after it waits until `e` is signalled
@@ -109,25 +109,6 @@ class Context {
   // the counters after the caller has waited; it does not synchronize itself.
   void set_profiling(bool enabled);
   LaunchMetrics take_launch_metrics();
-
-  // Opt-in pure-L0 recording. Capture resolves pointer/scalar arguments but
-  // executes nothing; replay reads current buffer contents and synchronizes
-  // before returning. Kernels and referenced allocations must outlive the
-  // recording. Waits, profiling and nested captures are rejected.
-  class Recording {
-   public:
-    ~Recording();
-    Recording(const Recording&) = delete;
-    Recording& operator=(const Recording&) = delete;
-   private:
-    friend class Context;
-    explicit Recording(const Context* owner) : owner_(owner) {}
-    const Context* owner_;
-    ze_command_list_handle_t list_ = nullptr;
-    size_t launches_ = 0;
-  };
-  std::unique_ptr<Recording> capture(const std::function<void()>& encode);
-  void replay(const Recording& recording);
 
  private:
   struct Impl;
