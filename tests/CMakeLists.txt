@@ -3413,7 +3413,7 @@ if(TARGET b70-serve)
   b70_serve_reject(cli_reject_serve_qwen4exp_tokenizer ${CMAKE_CURRENT_SOURCE_DIR}/model/qwen4exp-q38tok --layers 4
     EXPECT "Serve a snapshot that ships")
   b70_serve_reject(cli_reject_serve_layers_other ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --layers 4
-    EXPECT "belong to Qwen3.8-Flash-Next")
+    EXPECT "belongs to Qwen3.8-Flash-Next")
   set_tests_properties(cli_reject_serve_qwen4exp_full
     cli_reject_serve_qwen4exp_draft_vocab cli_reject_serve_qwen4exp_kv8 cli_reject_serve_qwen4exp_prefill_int8
     cli_reject_serve_qwen4exp_split_alone cli_reject_serve_qwen4exp_tokenizer
@@ -4092,7 +4092,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
     EXPECT "int8 prefill for this family is out of scope")
-  b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belong to Qwen3.8-Flash-Next")
+  b70_serve_reject(cli_reject_serve_bolt_layers ${_bolt_serve_cfg} --layers 3 EXPECT "belongs to Qwen3.8-Flash-Next")
   b70_serve_reject(cli_reject_serve_bolt_max_len ${_bolt_serve_cfg} --max-len 262145
     EXPECT "exceeds Nemotron 3.5 Bolt's trained context 262144")
   b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --parallel 1 --pipeline-split 3
