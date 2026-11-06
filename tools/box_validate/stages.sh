@@ -3846,7 +3846,6 @@ st_r70_verdict() {
   say "# the bar (spec 19 §13.1): dlk/dflash >= 1.20 on the edit / copy set (median over its prompts) and >= 0.97 on A4 (toolcall) and golden -> replaces plain dflash; 1.05 .. 1.20 -> opt-in, the operator's call; < 1.05 -> dropped"
   say "# read r70.speed's per-prompt table (the edit / copy rows per depth) and its RATIO lines; the 'dflash: ... lookup:' server lines give the time in lookup"
 }
-=======
 row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --pp 2), speed against 2048"
 rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper per 4096 tokens at 4096 rows, the rest of the plan stops. Hand back: the P0 table, the gate lines, the speed table."
 rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.p0 / r75.speed are the quiet-box re-check. The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
