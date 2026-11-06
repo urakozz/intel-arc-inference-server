@@ -27,11 +27,29 @@
 //      back with truncate_to(slot, pos) BEFORE the request-end snapshot, so the slot holds
 //      exactly the prompt and the ids consumed, as plain steps would leave it.
 //
+// Plan 13b (spec 13 §11, the server's features since Task 1 carried through the scheduler):
+//   - per-slot lengths: a request is granted a free slot it fits (slot_max_len), its
+//     max_tokens clamped to that slot's room;
+//   - the prefill cut: an engine with prefill_cut() decides every chunk (each call = one of
+//     its card's own prefill chunks, so a replica engine's prompt is cut where the serial
+//     server's one call cuts it); with overlaps_prefill() the tick's prefill call runs beside
+//     its step (prefill_begin, the step, prefill_end) - a chunk stalls only its own card;
+//   - --prefix-split-last (SchedRequest::split_last, with a cache): the prompt is prefilled
+//     to len - 1 (its prompt-end snapshot there) and its last id goes through the decode
+//     replay (Chunk::replay) - PrefixSession::begin(prompt, true)'s order, per slot;
+//   - prompt lookup (SchedulerOptions::lookup, an engine with verify_k() > 0): each request's
+//     drafts come from its slot's matcher (server::PromptLookup over the request's prompt and
+//     every id it consumed, plus with lookup_history the slot's earlier requests' generated
+//     ids) - never another slot's (Review Focus 4); its K from its own AdaptiveK over
+//     lookup_adaptive, fed (drafts proposed, drafts kept) as server.cc's loop feeds it;
+//   - per-slot failures: an engine that throws SlotsFailed fails only the rows it names.
+//
 // Threading: submit() and cancel() may be called from any thread; engine calls and the
 // callbacks run on the thread calling tick() (the start() loop in the server, the test's
 // own thread in tests) with no scheduler lock held.
 #include <atomic>
 #include <cstddef>
+#include <exception>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -60,6 +78,13 @@ struct SchedulerOptions {
   // for every iteration when spec_fixed_k > 0.
   AdaptiveKOptions spec;
   uint32_t spec_fixed_k = 0;
+  // Plan 13b: prompt lookup (`--spec lookup`, spec 19e) per request - server::Options'
+  // spec_lookup / lookup_min_match / lookup_history / lookup_adaptive, with the server's
+  // meaning, per slot. Needs an engine with verify_k() > 0 and spec_k() == 0.
+  bool lookup = false;
+  uint32_t lookup_min_match = 3;
+  uint32_t lookup_history = 0;
+  AdaptiveKOptions lookup_adaptive;
 };
 
 struct Finish {
@@ -78,6 +103,9 @@ struct SchedRequest {
   uint32_t max_tokens = UINT32_MAX; // clamped to max_len - prompt.size()
   uint32_t min_tokens = 0;
   bool ignore_eos = false;
+  // Plan 13b: --prefix-split-last (a chat request): prefill to len - 1, the last id by the
+  // decode replay, so the prompt-end snapshot sits at len - 1. Only with a cache.
+  bool split_last = false;
   Sampling sampling;
   // Tick thread, in order: every id the request keeps (an EOS that ends it is not passed).
   // Return false to end the request with Stop (a stop string found in the text).
@@ -107,6 +135,14 @@ class Job {
   uint32_t steps = 0;        // decode steps taken (the EOS that ends it included)
   Finish fin;
   std::unique_ptr<AdaptiveK> policy;   // spec 19d: this request's K (speculative engines)
+  bool split = false;        // plan 13b: split_last honoured (a cache is present)
+  // Plan 13b, prompt lookup: the row's proposer over the slot's matcher, this iteration's K,
+  // the drafts it proposed, whether the pending id went into the matcher, and the ids kept
+  // (for lookup_history).
+  BatchEngineIface::Proposer propose;
+  uint32_t iter_k = 0, proposed = 0;
+  bool head_indexed = false;
+  std::vector<uint32_t> out;
 };
 
 // Spec 7 per slot: the scheduler's prefix-cache calls. PrefixSlots is the implementation
@@ -123,13 +159,17 @@ struct SlotCacheIface {
   virtual void fed(uint32_t slot, uint32_t id) = 0;   // every id a step consumed
   virtual void end(uint32_t slot) = 0;   // request end: snapshot the slot's final state
   virtual void fail(uint32_t slot) = 0;  // the slot's session is unknown after an error
+  // Plan 13b: positions the slot's resident session holds (what a grant there would evict);
+  // the grant prefers, among equal matches, the slot that holds least.
+  virtual uint32_t held(uint32_t /*slot*/) { return 0; }
 };
 
 // The prefix cache per slot: one host store (PrefixCache) shared by the slots, one resident
 // session per slot. Blocks and the prompt-end snapshot are stored after the prefill call
 // that reaches a block end or the prompt's end (no in-prefill hook: a chunk that is not a
-// block multiple stores its crossed blocks at the next such call); `--prefix-split-last`
-// is not supported here.
+// block multiple stores its crossed blocks at the next such call). `--prefix-split-last`
+// (plan 13b): the scheduler calls prefilled(slot, len - 1, true) after the prefill to len - 1
+// (the prompt-end snapshot there) and fed(slot, last id) after the replay.
 class PrefixSlots : public SlotCacheIface {
  public:
   PrefixSlots(BatchEngineIface& engine, size_t budget_bytes, HostAlloc& alloc);
@@ -139,6 +179,7 @@ class PrefixSlots : public SlotCacheIface {
   void fed(uint32_t slot, uint32_t id) override;
   void end(uint32_t slot) override;
   void fail(uint32_t slot) override;
+  uint32_t held(uint32_t slot) override;
 
   PrefixCache& cache() { return cache_; }
   PrefixCache::Plan::Kind last_kind(uint32_t slot) const { return slots_.at(slot).kind; }
@@ -184,12 +225,17 @@ class Scheduler {
 
  private:
   struct Impl;
+  struct PrefillCall;   // plan 13b: one prefill call's requests and chunks
   void grant(const std::shared_ptr<Job>& job, uint32_t slot);
-  bool prefill_round();
+  BatchEngineIface::Chunk next_chunk(const Job& job, bool cut);
+  bool prefill_plan(PrefillCall& call);
+  void prefill_done(PrefillCall& call, std::exception_ptr error);
+  void lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt);   // plan 13b
+  void lookup_end(uint32_t slot, const std::vector<uint32_t>& out);
   bool decode_round();
   bool spec_round();   // spec 19d
   void finish(const std::shared_ptr<Job>& job, Finish::Reason reason, std::string error = {});
-  uint32_t pick_slot(const Job& job) const;
+  int pick_slot(const Job& job) const;   // -1: no free slot the prompt fits
   double now() const;
 
   BatchEngineIface& engine_;

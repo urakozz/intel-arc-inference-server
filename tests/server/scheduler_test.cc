@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -481,6 +482,247 @@ void test_eos_rules_and_errors() {
   std::printf("EOS rules, max_tokens 0 and clamping, a failing prefill: as server.cc\n");
 }
 
+
+// ---- Plan 13b Task 2: the scheduler catches up with the server ---------------------------
+
+// Per-slot lengths: a request goes to a free slot it fits, its max_tokens clamped to that
+// slot's room; a prompt no slot fits is refused at submit.
+void test_slot_lengths() {
+  MockBatchEngine eng(2);
+  eng.lens = {64, 1024};
+  configure(eng);
+  Scheduler s(eng, opts());
+  Out a, b, c;
+  CHECK(s.submit(make({P(71, 100), 8, {}}, a, eng)) != nullptr);   // fits slot 1 only
+  CHECK(s.submit(make({P(72, 60), 100, {}}, b, eng)) != nullptr);  // slot 0: 4 ids of room
+  drain(s);
+  CHECK_EQ(a.fin.slot, 1);
+  CHECK_EQ(a.ids.size(), size_t(8));
+  CHECK_EQ(b.fin.slot, 0);
+  CHECK_EQ(b.ids.size(), size_t(4));
+  CHECK_EQ(b.fin.reason, Finish::Length);
+  // Two long prompts and one long slot: the second waits for slot 1 (never slot 0).
+  Out d, e;
+  CHECK(s.submit(make({P(73, 200), 6, {}}, d, eng)) != nullptr);
+  CHECK(s.submit(make({P(74, 300), 6, {}}, e, eng)) != nullptr);
+  drain(s);
+  CHECK_EQ(d.fin.slot, 1);
+  CHECK_EQ(e.fin.slot, 1);
+  same_as_alone("slot lengths, the waiting one", {P(74, 300), 6, {}}, e);
+  bool threw = false;
+  try {
+    s.submit(make({P(75, 1024), 5, {}}, c, eng));
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+  std::printf("slot lengths: a 100-id prompt skips the 64-position slot; max_tokens clamped to the slot's room\n");
+}
+
+// --prefix-split-last (Review Focus 3): the prompt is prefilled to len - 1, the prompt-end
+// snapshot taken there, the last id replayed; a later request whose prompt diverges at the
+// last id restores at len - 1 on another slot.
+void test_split_last() {
+  MockBatchEngine eng(2);
+  configure(eng);
+  MallocAlloc alloc;
+  server::PrefixSlots cache(eng, 1 << 20, alloc);
+  Scheduler s(eng, opts(), &cache);
+  const std::vector<uint32_t> prompt = P(81, 11);
+  Out a;
+  SchedRequest ra = make({prompt, 6, {}}, a, eng);
+  ra.split_last = true;
+  CHECK(s.submit(std::move(ra)) != nullptr);
+  drain(s);
+  same_as_alone("split-last", {prompt, 6, {}}, a);
+  bool prefill10 = false, replay = false, snap10 = false;
+  for (const auto& e : eng.events) {
+    prefill10 = prefill10 || e == "prefill 0:10";
+    replay = replay || (prefill10 && e == "replay 0:1");
+    snap10 = snap10 || (prefill10 && !replay && e == MockBatchEngine::ev("save_state", 0, 10));
+  }
+  CHECK(prefill10 && replay && snap10);
+  // B: the same conversation re-rendered (the last prompt id differs), on slot 1 while slot
+  // 0 is busy: a host restore at len - 1.
+  Out x, b;
+  CHECK(s.submit(make({prompt, 400, {}}, x, eng)) != nullptr);   // slot 0 (its match)
+  s.tick();
+  std::vector<uint32_t> pb(prompt.begin(), prompt.end() - 1);
+  pb.push_back(9999);
+  pb.push_back(9998);
+  SchedRequest rb = make({pb, 5, {}}, b, eng);
+  rb.split_last = true;
+  CHECK(s.submit(std::move(rb)) != nullptr);
+  drain(s);
+  CHECK_EQ(x.fin.slot, 0);
+  CHECK_EQ(b.fin.slot, 1);
+  CHECK_EQ(b.fin.cached_tokens, uint32_t(prompt.size() - 1));
+  CHECK_EQ(cache.last_kind(1), server::PrefixCache::Plan::Restore);
+  same_as_alone("split-last, restored at len - 1", {pb, 5, {}}, b);
+  // Without a cache split_last is ignored (PrefixSession's rule): one prefill of the whole prompt.
+  MockBatchEngine e2(1);
+  Scheduler s2(e2, opts());
+  Out c;
+  SchedRequest rc = make({prompt, 3, {}}, c, e2);
+  rc.split_last = true;
+  CHECK(s2.submit(std::move(rc)) != nullptr);
+  drain(s2);
+  for (const auto& e : e2.events) CHECK(e != "replay 0:1");
+  std::printf("split-last: prefill to len - 1, snapshot there, the last id replayed; B restored at %u\n",
+              b.fin.cached_tokens);
+}
+
+SchedulerOptions lookup_opts(uint32_t history = 0) {
+  SchedulerOptions o = opts();
+  o.lookup = true;
+  o.lookup_history = history;
+  o.lookup_adaptive.max_k = 3;
+  o.lookup_adaptive.cost = server::MtpCost::int8_head().with_free_drafts();
+  return o;
+}
+
+// A prompt that repeats a phrase: prompt lookup finds matches.
+std::vector<uint32_t> repetitive(uint32_t key, uint32_t n) {
+  std::vector<uint32_t> p{key};
+  for (uint32_t i = 1; i < n; ++i) p.push_back(1000 + (i * 7 + key) % 24);
+  return p;
+}
+
+// Prompt lookup per request (Review Focus 4): the ids equal the plain run's; each slot's
+// drafts come from its own request's ids only; a request's K sequence and acceptance are the
+// same alone and in company.
+void test_lookup_per_request() {
+  const std::vector<Spec> specs = {{repetitive(91, 60), 40, {}}, {repetitive(92, 45), 40, seeded(5)}};
+  // Alone, with lookup, on a one-slot engine; and the plain reference.
+  std::vector<Out> alone_lk(specs.size());
+  for (size_t i = 0; i < specs.size(); ++i) {
+    MockBatchEngine e(1);
+    e.lookup = 3;
+    e.echo = 24;
+    Scheduler s(e, lookup_opts());
+    CHECK(s.submit(make(specs[i], alone_lk[i], e)) != nullptr);
+    drain(s);
+    if (specs[i].s.greedy) CHECK(alone_lk[i].fin.spec_accepted > 0);
+  }
+  MockBatchEngine eng(2);
+  eng.lookup = 3;
+  eng.echo = 24;
+  Scheduler s(eng, lookup_opts());
+  std::vector<Out> outs(specs.size());
+  for (size_t i = 0; i < specs.size(); ++i) CHECK(s.submit(make(specs[i], outs[i], eng)) != nullptr);
+  drain(s);
+  for (size_t i = 0; i < specs.size(); ++i) {
+    // The plain reference: the same echo engine, no lookup.
+    MockBatchEngine pe(1);
+    pe.echo = 24;
+    Scheduler ps(pe, opts());
+    Out plain;
+    CHECK(ps.submit(make(specs[i], plain, pe)) != nullptr);
+    drain(ps);
+    CHECK(outs[i].ids == plain.ids && alone_lk[i].ids == plain.ids);
+    CHECK_EQ(outs[i].fin.spec_iters, alone_lk[i].fin.spec_iters);
+    CHECK_EQ(outs[i].fin.spec_drafted, alone_lk[i].fin.spec_drafted);
+    CHECK_EQ(outs[i].fin.spec_accepted, alone_lk[i].fin.spec_accepted);
+    // Every draft is an id of this request's own prompt or output.
+    const uint32_t slot = uint32_t(outs[i].fin.slot);
+    std::set<uint32_t> own(specs[i].prompt.begin(), specs[i].prompt.end());
+    own.insert(outs[i].ids.begin(), outs[i].ids.end());
+    for (const auto& d : eng.proposals_of[slot])
+      for (uint32_t id : d) CHECK(own.count(id) != 0);
+  }
+  // The key ids 91 / 92 are each in one prompt only: never drafted for the other.
+  for (const auto& d : eng.proposals_of[uint32_t(outs[1].fin.slot)])
+    for (uint32_t id : d) CHECK(id != 91);
+  // lookup_history 1: the slot's earlier request's output seeds the next one's matcher; ids unchanged.
+  MockBatchEngine eh(1);
+  eh.lookup = 3;
+  Scheduler sh(eh, lookup_opts(1));
+  Out h1, h2;
+  CHECK(sh.submit(make(specs[0], h1, eh)) != nullptr);
+  drain(sh);
+  CHECK(sh.submit(make({P(93, 9), 30, {}}, h2, eh)) != nullptr);
+  drain(sh);
+  same_as_alone("lookup history", {P(93, 9), 30, {}}, h2);
+  // A lookup scheduler needs a verifying engine without its own proposer.
+  MockBatchEngine plain(1);
+  bool threw = false;
+  try {
+    Scheduler bad(plain, lookup_opts());
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+  std::printf("lookup per request: ids as plain decode, drafts from the request's own ids, K and acceptance as "
+              "alone (%u / %u drafts kept)\n", outs[0].fin.spec_accepted, outs[0].fin.spec_drafted);
+}
+
+// Review Focus 2: a failure on one card (SlotsFailed) ends that slot's request only.
+void test_slot_failure() {
+  {
+    MockBatchEngine eng(2);
+    configure(eng);
+    eng.fail_at[1] = 3;   // slot 1's third step fails
+    Scheduler s(eng, opts());
+    Out a, b;
+    CHECK(s.submit(make({P(101, 6), 20, {}}, a, eng)) != nullptr);
+    CHECK(s.submit(make({P(102, 6), 20, {}}, b, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(b.fin.slot, 1);
+    CHECK_EQ(b.fin.reason, Finish::Error);
+    CHECK(b.fin.error.find("slot 1") != std::string::npos);
+    CHECK_EQ(b.ids.size(), size_t(2));
+    CHECK_EQ(a.fin.reason, Finish::Length);
+    same_as_alone("a neighbour's card failed", {P(101, 6), 20, {}}, a);
+  }
+  {
+    MockBatchEngine eng(2);
+    configure(eng);
+    eng.fail_prefill = true;
+    eng.fail_at[0] = 1;   // slot 0's first prefill fails, in a batched admission call
+    Scheduler s(eng, opts(512, Admission::Batched));
+    Out a, b;
+    CHECK(s.submit(make({P(103, 6), 9, {}}, a, eng)) != nullptr);
+    CHECK(s.submit(make({P(104, 6), 9, {}}, b, eng)) != nullptr);
+    drain(s);
+    CHECK_EQ(a.fin.reason, Finish::Error);
+    CHECK_EQ(b.fin.reason, Finish::Length);
+    same_as_alone("a neighbour's prefill failed", {P(104, 6), 9, {}}, b);
+  }
+  std::printf("slot failure: a step or prefill failing on one card ends that request only\n");
+}
+
+// The engine's prefill cut and the overlapped prefill: a replica engine's chunks end where
+// its card's one call would cut, and each prefill call runs beside the other card's step.
+void test_prefill_cut_and_overlap() {
+  MockBatchEngine eng(2, 4096);
+  configure(eng);
+  eng.cut = 8;
+  eng.overlap = true;
+  Scheduler s(eng, opts());
+  Out a, b;
+  CHECK(s.submit(make({P(111, 13), 200, {}}, a, eng)) != nullptr);   // 8 + 5, nothing else decoding
+  while (a.ids.size() < 3) s.tick();
+  CHECK(s.submit(make({P(112, 30), 4, {}}, b, eng)) != nullptr);     // 8, 8, 8, 6 beside A's steps
+  while (b.done_calls == 0) s.tick();
+  std::vector<std::string> pf;
+  for (const auto& e : eng.events)
+    if (e.rfind("prefill", 0) == 0) pf.push_back(e);
+  const std::vector<std::string> want = {"prefill 0:8", "prefill 0:5", "prefill 1:8", "prefill 1:8", "prefill 1:8",
+                                         "prefill 1:6"};
+  CHECK(pf == want);
+  // Every one of B's chunks: begin, its prefill, A's step, end - in one tick.
+  size_t overlapped = 0;
+  for (size_t i = 0; i + 3 < eng.events.size(); ++i)
+    if (eng.events[i] == "begin" && eng.events[i + 1].rfind("prefill 1:", 0) == 0 && eng.events[i + 2] == "step 0" &&
+        eng.events[i + 3] == "end")
+      ++overlapped;
+  CHECK_EQ(overlapped, size_t(4));
+  drain(s);
+  same_as_alone("cut and overlap, A", {P(111, 13), 200, {}}, a, 4096);
+  same_as_alone("cut and overlap, B", {P(112, 30), 4, {}}, b, 4096);
+  std::printf("prefill cut and overlap: chunks 8/8/8/6 at the engine's cut, each beside the other slot's step\n");
+}
+
 }  // namespace
 
 // Spec 12b: PrefixSlots keys its cache by the batched engine's KV form, as PrefixSession
@@ -509,6 +751,11 @@ int main() {
   test_fairness();
   test_eos_rules_and_errors();
   test_kv_form();
+  test_slot_lengths();
+  test_split_last();
+  test_lookup_per_request();
+  test_slot_failure();
+  test_prefill_cut_and_overlap();
   std::printf("scheduler_test: all cases passed\n");
   return 0;
 }

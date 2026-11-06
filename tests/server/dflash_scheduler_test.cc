@@ -200,7 +200,11 @@ std::vector<std::pair<uint32_t, uint32_t>> continuation(bool other_slot, bool ri
   CHECK_EQ(a.fin.slot, 0);
   Out x;
   if (other_slot) {
-    CHECK(s.submit(make(R(P(22, 9), 300), x)) != nullptr);
+    // X shares A's first 5 ids, so slot 0 (which holds A) is its best match; a request matching no slot would take
+    // the slot that holds least (plan 13b), slot 1.
+    std::vector<uint32_t> xp(A.begin(), A.begin() + 5);
+    for (uint32_t t = 0; t < 4; ++t) xp.push_back(9100 + t);
+    CHECK(s.submit(make(R(xp, 300), x)) != nullptr);
     s.tick();   // X granted slot 0
   }
   std::vector<uint32_t> a2 = A;

@@ -382,6 +382,14 @@ struct DrafterMockEngine : StateMockEngine {
 // target's own next id (greedy: the argmax rule; sampled: the row's own draw, one per id exactly as step_batch
 // draws), and the run stops at the first wrong one. `spec_log[slot]` records every iteration's (anchor, drafts kept).
 // truncate_to rewinds the slot to any point of its last run (state, pending id and ring as they were there).
+//
+// Plan 13b: `lens` (per-slot max_len, empty = maxlen everywhere); a replay chunk (Chunk::replay) consumes its ids
+// as a prefill does but logs "replay"; `lookup` > 0 verifies drafts proposed outside (SpecRow::propose: the
+// pending id, then each draft while it equals the target's next id, at most `lookup`; every proposal is logged in
+// `proposals_of[slot]`); `cut` > 0 cuts every prefill call at the next multiple of `cut` (prefill_cut, absolute
+// positions); `overlap` runs prefill_begin / prefill_end (logged "begin" / "end"); `fail_at[slot] = n` makes the
+// slot's n-th step (or, with `fail_prefill`, its prefill) fail with a SlotsFailed naming that row only; `echo`
+// makes the output a copy of the context `echo` positions back.
 struct MockBatchEngine : server::BatchEngineIface {
   struct Slot {
     std::vector<uint32_t> kv;
@@ -444,6 +452,7 @@ struct MockBatchEngine : server::BatchEngineIface {
     const uint32_t generated = s.p - s.prompt_end + 1;   // the pending id's index, 1-based
     const auto it = eos_at.find(s.kv[0]);
     if (it != eos_at.end() && generated == it->second) return eos;
+    if (echo != 0 && s.p >= echo) return s.kv[s.p - echo];   // plan 13b: a predictable continuation
     uint64_t h = s.state;
     for (uint32_t i = 0; i < s.p; ++i) h = StateMockEngine::mix(h, s.kv[i]);
     return words[h % words.size()];
@@ -457,8 +466,36 @@ struct MockBatchEngine : server::BatchEngineIface {
     return what + " " + std::to_string(i) + " @" + std::to_string(at);
   }
 
+  // Plan 13b.
+  std::vector<uint32_t> lens;
+  uint32_t lookup = 0, cut = 0;
+  uint32_t echo = 0;   // > 0: the next id repeats the one `echo` positions back (prompt lookup finds it)
+  bool overlap = false, fail_prefill = false;
+  std::map<uint32_t, uint32_t> fail_at;        // slot -> its failing step (1-based), counted in slot_steps
+  std::map<uint32_t, uint32_t> slot_steps;
+  std::map<uint32_t, std::vector<std::vector<uint32_t>>> proposals_of;
+  bool fails(uint32_t i) {
+    const auto it = fail_at.find(i);
+    return it != fail_at.end() && ++slot_steps[i] == it->second;
+  }
+  uint32_t slot_max_len(uint32_t i) override { return lens.empty() ? maxlen : lens.at(i); }
+  uint32_t verify_k() override { return lookup; }
+  uint32_t prefill_cut(uint32_t, uint32_t at, uint32_t remaining) override {
+    return cut == 0 ? 0 : std::min(remaining, cut - at % cut);
+  }
+  bool overlaps_prefill() override { return overlap; }
+  void prefill_begin(const std::vector<Chunk>& chunks) override {
+    events.push_back("begin");
+    prefill(chunks);
+  }
+  void prefill_end() override { events.push_back("end"); }
+
   uint32_t slots() override { return static_cast<uint32_t>(slot.size()); }
-  uint32_t max_len() override { return maxlen; }
+  uint32_t max_len() override {
+    uint32_t m = maxlen;
+    if (!lens.empty()) m = *std::max_element(lens.begin(), lens.end());
+    return m;
+  }
   uint32_t pos(uint32_t i) override { return slot.at(i).p; }
   void reset(uint32_t i) override {
     Slot& s = slot.at(i);
@@ -471,11 +508,21 @@ struct MockBatchEngine : server::BatchEngineIface {
     events.push_back(ev("reset", i, 0));
   }
   void prefill(const std::vector<Chunk>& chunks) override {
-    std::string e = "prefill";
+    std::string e = chunks.size() == 1 && chunks[0].replay ? "replay" : "prefill";
     uint32_t total = 0;
-    for (const Chunk& c : chunks) {
+    std::vector<std::string> errors(chunks.size());
+    bool any_failed = false;
+    for (size_t ci = 0; ci < chunks.size(); ++ci) {
+      const Chunk& c = chunks[ci];
       if (c.n == 0) throw std::runtime_error("mock: empty chunk");
+      if (c.replay && c.n != 1) throw std::logic_error("mock: a replay chunk of more than one id");
+      if (fail_prefill && fails(c.slot)) {
+        errors[ci] = "mock: slot " + std::to_string(c.slot) + "'s card failed";
+        any_failed = true;
+        continue;
+      }
       Slot& s = slot.at(c.slot);
+      if (s.p + c.n > slot_max_len(c.slot)) throw std::runtime_error("mock: past the slot's max_len");
       e += " " + std::to_string(c.slot) + ":" + std::to_string(c.n);
       run_of(c.slot).clear();
       const uint32_t end = s.p + c.n, from = end > window ? std::max(s.p, end - window) : s.p;
@@ -493,14 +540,25 @@ struct MockBatchEngine : server::BatchEngineIface {
     }
     clock += total / prefill_rate;
     events.push_back(e);
+    if (any_failed) throw server::SlotsFailed(errors, {});
   }
   std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {
     if (step_us != 0) std::this_thread::sleep_for(std::chrono::microseconds(step_us));
     std::vector<uint32_t> out;
     std::string e = "step";
-    for (const Row& r : rows) {
+    std::vector<std::string> errors(rows.size());
+    std::vector<std::vector<uint32_t>> runs(rows.size());
+    bool any_failed = false;
+    for (size_t ri = 0; ri < rows.size(); ++ri) {
+      const Row& r = rows[ri];
       Slot& s = slot.at(r.slot);
       if (!s.pending) throw std::logic_error("mock: step on a slot with nothing pending");
+      if (!fail_prefill && fails(r.slot)) {
+        errors[ri] = "mock: slot " + std::to_string(r.slot) + "'s card failed";
+        any_failed = true;
+        out.push_back(0);
+        continue;
+      }
       e += " " + std::to_string(r.slot);
       run_of(r.slot).clear();
       const uint32_t id = s.cur;
@@ -509,22 +567,47 @@ struct MockBatchEngine : server::BatchEngineIface {
       s.cur = next(s);
       if (!r.sampling->greedy && s.cur != eos) s.cur = words[(*r.rng)() % words.size()];
       out.push_back(id);
+      runs[ri] = {id};
     }
     clock += step_cost;
     events.push_back(e);
     ++steps;
+    if (any_failed) throw server::SlotsFailed(errors, runs);
     return out;
   }
 
   // Spec 19d: one draft / verify / accept iteration per row (see the struct's comment).
   uint32_t spec_k() override { return spec; }
   std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) override {
-    if (spec == 0) throw std::logic_error("mock: step_spec with spec_k 0");
+    if (spec == 0 && lookup == 0) throw std::logic_error("mock: step_spec with spec_k 0");
     std::vector<std::vector<uint32_t>> out;
     std::string e = "spec";
     for (const SpecRow& r : rows) {
       Slot& s = slot.at(r.slot);
       if (!s.pending) throw std::logic_error("mock: step_spec on a slot with nothing pending");
+      if (r.propose != nullptr) {   // plan 13b: drafts from outside (prompt lookup)
+        if (lookup == 0) throw std::logic_error("mock: a proposer row with verify_k 0");
+        std::vector<uint32_t> d = (*r.propose)(s.cur);
+        if (d.size() > r.k) throw std::logic_error("mock: more drafts than the row asked for");
+        proposals_of[r.slot].push_back(d);
+        e += " " + std::to_string(r.slot) + ":L" + std::to_string(d.size());
+        std::vector<Slot>& hist = run_of(r.slot);
+        hist.clear();
+        std::vector<uint32_t> ids;
+        for (size_t j = 0; j <= d.size(); ++j) {
+          if (j > 0 && d[j - 1] != s.cur) break;   // draft j is not the target's next id
+          if (j > 0 && s.p + 1 >= maxlen) break;
+          const uint32_t id = s.cur;
+          consume(s, id);
+          project(s, s.p - 1);
+          s.cur = next(s);
+          if (!r.sampling->greedy && s.cur != eos) s.cur = words[(*r.rng)() % words.size()];
+          ids.push_back(id);
+          hist.push_back(s);
+        }
+        out.push_back(ids);
+        continue;
+      }
       if (r.k > spec) throw std::logic_error("mock: a row asked for more drafts than spec_k()");
       const uint32_t k = std::min(r.k, s.p + 1 < maxlen ? maxlen - s.p - 1 : 0u);
       e += " " + std::to_string(r.slot) + ":" + std::to_string(k);
