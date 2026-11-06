@@ -194,7 +194,7 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Mem& slab_buffer();      // L0: bf16 [widest int4 K][1024] (Qwen3.8 35,651,584 B = 17408*1024*2;
                                // spec 15d: Ornith's 4096, out_proj / o_proj)
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
-  // composed `attn_chunk` (B70_PREFILL_ATTN=composed). The default
+  // composed `attn_chunk` (the tests' reference, set_attn_mode_for_test). The
   // flash path never touches them, so prefill scratch no longer scales with max_len.
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)

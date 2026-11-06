@@ -27,7 +27,6 @@
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/memory_plan.h"
-#include "runtime/prefill/attn.h"
 
 namespace cli {
 
@@ -87,23 +86,16 @@ inline uint32_t load_len(const MaxLenArg& a, uint32_t trained) {
 
 // What the engine's prefill will allocate (runtime::PrefillPath): `prefill` false for a
 // decode-only b70-decode run; the backend the engine will run (set_prefill_backend, else
-// the default, l0); B70_PREFILL_ATTN=composed's max_len-sized S / P scratch.
+// the default, l0).
 inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend backend) {
-  return {prefill, backend, runtime::prefill::attn_mode() == runtime::prefill::AttnMode::Composed};
+  return {prefill, backend};
 }
 
 // Spec 12b: `--kv-cache bf16|int8` (default runtime::default_kv_cache(): B70_KV_CACHE, unset
-// = bf16). int8 decodes through attention v2's kv8 twin and prefills through the
-// flash attention only; anything else is refused here, before the load, with
-// the reason, instead of at capture or at the first request.
+// = bf16). int8 decodes through attention v2's kv8 twin and prefills through the flash
+// attention.
 inline runtime::KvCache parse_kv_cache_arg(const std::string& v) {
   return runtime::parse_kv_cache(v.c_str());
-}
-inline void check_kv_cache(runtime::KvCache kv, const runtime::PrefillPath& path) {
-  if (kv != runtime::KvCache::Int8) return;
-  if (path.prefill && path.composed_attn)
-    throw std::runtime_error("--kv-cache int8 prefills through the flash attention only;"
-                             " B70_PREFILL_ATTN=composed reads a bf16 cache");
 }
 
 // Spec 8 §11: the draft vocabulary a loaded model carries (load(..., DraftVocabSpec)

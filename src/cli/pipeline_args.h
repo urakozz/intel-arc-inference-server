@@ -78,9 +78,6 @@ struct PipelineContext {
   bool mtp = false;          // --mtp K|auto (spec 16d: allowed with --pp 2)
   bool profile = false;      // --profile
   bool device = false;       // --device N
-  // Spec 16c: what a prefill would run (read with prefill / bench_prefill only):
-  // B70_PREFILL_ATTN=composed.
-  bool composed_attn = false;
 };
 
 // Every refusal that needs no device. --pp 1 refuses nothing (it is today's engine); the two
@@ -93,11 +90,8 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
       throw std::runtime_error("--pipeline-handoff belongs to --pp 2 (how the residual crosses)");
     return;
   }
-  // Spec 16c: --prefill and --bench --prefill-length run the two-card chunk pipeline, on the
-  // flash attention only.
-  if ((c.prefill || c.bench_prefill) && c.composed_attn)
-    throw std::runtime_error("--pp 2 prefills with the flash attention only: unset "
-                             "B70_PREFILL_ATTN=composed (spec 16c)");
+  // Spec 16c: --prefill and --bench --prefill-length run the two-card chunk pipeline (the flash
+  // attention, the only prefill attention).
   // (Spec 16d lifted 16b's --mtp refusal: the head, its embedding replica and the draft lists
   // run on device 1, the verify lists on both.)
   if (c.profile)

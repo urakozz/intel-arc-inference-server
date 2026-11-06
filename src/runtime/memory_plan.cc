@@ -60,7 +60,6 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
     // linear_l0 walks the slab for every int4 linear; on l0-int8 only the MTP head's
     // bf16 linears do (step_mtp_kv).
     if (path.backend == PrefillBackend::L0 || mtp) p.prefill_lazy += s.slab;
-    if (path.composed_attn) p.prefill_lazy += s.pf_s + s.pf_p;
     p.prefill_scratch = s.eager() + p.prefill_lazy;
     // Engine::prepare_prefill: Int8State for the MLP intermediate (down's K), then every
     // int4 linear's rotated column scales, all before the first chunk.

@@ -9,7 +9,6 @@
 #   tools/bench_decode.sh --prefill-length 4096 --prefill-chunk 1024
 #   tools/bench_decode.sh --prefill-length 4096 --prefill-backend l0    spec 2.1's L0 GEMM backend
 #   tools/bench_decode.sh --depth 4096 --max-len 131072 spec 6: the 128k decode variants
-#   B70_PREFILL_ATTN=composed tools/bench_decode.sh --prefill-length 4096   spec 6's reference attention
 #   tools/bench_decode.sh --lm-head int8         spec 9: the int8 lm_head (rows say int8-head)
 #
 # `--prefill-length N` replaces `--depth N` with `Engine::prefill` (spec 2, plan 6e Task 1)
@@ -49,10 +48,9 @@
 #
 # The box must be otherwise idle - no vLLM container, no other GPU work - or
 # the number measures the contention instead. Env: BOX, REMOTE_DIR, JOBS (see
-# tools/box.sh), MODEL, DEPTH, TG, RUNS, MAX_LEN, ZE_AFFINITY_MASK, B70_PREFILL_ATTN.
+# tools/box.sh), MODEL, DEPTH, TG, RUNS, MAX_LEN, ZE_AFFINITY_MASK.
 #
-# `B70_PREFILL_ATTN` (spec 6: `flash`, the default, or `composed`) is forwarded exactly
-# like ZE_AFFINITY_MASK below, for the same reason: ssh carries no environment. `--max-len`
+# ZE_AFFINITY_MASK is forwarded below because ssh carries no environment. `--max-len`
 # (or MAX_LEN) is passed through to b70-decode's own flag; unset adds nothing, so the
 # invocation is byte-for-byte the one every earlier row used.
 #
@@ -168,9 +166,6 @@ AFFINITY=""
 if [ -n "${ZE_AFFINITY_MASK:-}" ]; then
   AFFINITY="ZE_AFFINITY_MASK='$ZE_AFFINITY_MASK' "
 fi
-if [ -n "${B70_PREFILL_ATTN:-}" ]; then
-  AFFINITY="${AFFINITY}B70_PREFILL_ATTN='$B70_PREFILL_ATTN' "
-fi
 MAXLEN_ARGS=""
 [ -n "$MAX_LEN" ] && MAXLEN_ARGS=" --max-len $MAX_LEN"
 # Spec 9: unset adds nothing (b70-decode's default is the checkpoint's bf16 head).
@@ -180,7 +175,7 @@ if [ -n "$PP" ]; then
   MODE_ARGS="--prefill-length $PP"
   [ -n "$PP_CHUNK" ] && MODE_ARGS="$MODE_ARGS --prefill-chunk $PP_CHUNK"
   [ -n "$PP_BACKEND" ] && MODE_ARGS="$MODE_ARGS --prefill-backend $PP_BACKEND"
-  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}, attention ${B70_PREFILL_ATTN:-default (flash)}, max_len ${MAX_LEN:-default}" >&2
+  echo "bench: $MODEL, PREFILL $PP ids (chunk ${PP_CHUNK:-default kC}), tg $TG, $RUNS run(s), sha $SHA, device ${ZE_AFFINITY_MASK:-unset (box default 0)}, backend ${PP_BACKEND:-build default}, max_len ${MAX_LEN:-default}" >&2
   echo "       iterate grade unless the box is provably idle -- see this script's header" >&2
 else
   MODE_ARGS="--depth $DEPTH"

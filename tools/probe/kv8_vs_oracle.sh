@@ -1,8 +1,7 @@
 #!/bin/bash
 # Spec 12b Q2/Q3 on the golden set: the int8 KV cache no further from the CPU oracle than
 # the bf16 one, less a tolerance. Registered as ctest `kv8_vs_oracle_test`; run from the repo
-# root on the box (build in ./build) - flash_vs_oracle.sh's arrangement, with B70_KV_CACHE in
-# place of B70_PREFILL_ATTN.
+# root on the box (build in ./build), B70_KV_CACHE selecting the cache.
 #   tools/probe/kv8_vs_oracle.sh [oracle dir] [snapshot]
 # ctest passes B70_TEST_ORACLE_DIR and B70_TEST_SNAPSHOT, as the other golden registrations
 # do; by hand the defaults are ./oracle-out-primary and the checkpoint's repo id (refs/main).
@@ -32,7 +31,7 @@ for b in "l0-int8 1" "l0"; do
   for kv in bf16 int8; do
     : > $out/$kv-$bn.mean
     # shellcheck disable=SC2086
-    ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} B70_PREFILL_ATTN=flash B70_KV_CACHE=$kv ./build/tests/prefill_gate_test \
+    ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-0} B70_KV_CACHE=$kv ./build/tests/prefill_gate_test \
       "$oracle" tests/golden/prompts "$snap" \
       prose,code,cjk 0 $b > $out/$kv-$bn.log 2>&1
     grc=$?

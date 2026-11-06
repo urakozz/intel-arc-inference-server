@@ -87,7 +87,7 @@ inline std::string pf_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRef
   return "pf_attn" + fa_suffix(q, kv);
 }
 // Spec 6: the fused flash attention (plan 6a's pfa_KT64_R16_H6_Q0), the default prefill
-// attention on the L0 backends; the composed path above is B70_PREFILL_ATTN=composed.
+// attention on the L0 backends; the composed path above is the tests' reference.
 // It bakes HPW = 6, the GQA group (q-heads per kv-head), so it carries the FA suffix.
 inline std::string pf_flash_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn" + fa_suffix(q, kv);

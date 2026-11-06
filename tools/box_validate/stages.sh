@@ -603,7 +603,7 @@ rownote 11 "Making int8 the default (plan 12b Task 4 Step 3) is an edit after ev
 stage r11.bf16 11 default cpu - g0.sha,g0.bitwise,g0.suite "step 1, bf16 unchanged: every pre-existing binary identical, the suite at the default with B70_KV_CACHE unset (G0)"
 st_r11_bf16() {
   need_pass g0.sha g0.bitwise g0.suite
-  x "env | grep -E '^B70_(KV_CACHE|PREFILL_ATTN)=' || echo 'B70_KV_CACHE, B70_PREFILL_ATTN unset in this run'"
+  x "env | grep -E '^B70_KV_CACHE=' || echo 'B70_KV_CACHE unset in this run'"
   finish
 }
 stage r11.kernels 11 default card qwen - "step 2 FIRST - the readers that replace DPAS / 2D-block reads with byte gathers: kv8_kernels_test (W, D, F), then flash_long_kv8_test (1 - cos <= 5e-4 at 4k-32k); a failure stops row 11"
@@ -1476,7 +1476,7 @@ row 23 "spec 16c - pipeline parallel PREFILL across two B70s (--pp 2 --prefill /
 rownote 23 "After row 22: 16c's prefill hands off at 16b's cut (layer s's fold on device 0) through 16b's two hand-offs, so r22.devices and r22.p1 must pass first. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both cards free of other DRM holders for the speed stages."
 rownote 23 "S2 (spec 16 §5): pp32768 and pp65536 >= 1.7x one card, pp4096 >= 1.2x (estimates). Each --pp 2 arm prints each card's busy time ('pp: device N busy ...'): the pipeline runs at the slower card's rate, so the busy line says whether the byte-balanced auto split also balances time (the second card is ~3 % slower on prefill, docs/10); r23.split_sweep (opt-in) times the neighbouring splits."
 rownote 23 "pp131072 is opt-in (r23.s2_128k): one card at --max-len 131328 (the most it holds with the bf16 head at that length), --pp 2 at --max-len 262144 (the P3 / S3 configuration only two cards hold); ~2.5 min per one-card run."
-stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal; composed refused)"
+stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal)"
 st_r23_host() {
   run_tests '^(pipeline_prefill_plan_test|pp_prefill_protocol_test|pipeline_args_test)$'
   jgrab plan '^pipeline_prefill_plan_test$' 'chunks:|schedule:|landing:|split'

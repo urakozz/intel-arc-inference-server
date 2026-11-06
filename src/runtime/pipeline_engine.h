@@ -271,7 +271,7 @@ class PipelineEngine {
   void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
   // Everything prefill() sets up before its first chunk (each device's scratch, context,
   // and on l0-int8 its own linears' column scales). Idempotent. Refuses, by name, what has
-  // no two-card walk: B70_PREFILL_ATTN=composed, B70_PREFILL_REPLAY=1,
+  // no two-card walk: the composed reference attention, B70_PREFILL_REPLAY=1,
   // B70_PREFILL_PROFILE=1.
   void prepare_prefill();
   void set_prefill_backend(PrefillBackend b) { pf_backend_ = b; pf_backend_set_ = true; }

@@ -83,8 +83,8 @@ void same(const runtime::PpDevicePlan& a, const runtime::PpDevicePlan& b) {
 const std::vector<runtime::PrefillPath>& paths() {
   static const std::vector<runtime::PrefillPath> p = [] {
     std::vector<runtime::PrefillPath> v{runtime::pp_no_prefill()};
-    v.push_back({true, runtime::PrefillBackend::L0Int8, false});
-    v.push_back({true, runtime::PrefillBackend::L0, false});
+    v.push_back({true, runtime::PrefillBackend::L0Int8});
+    v.push_back({true, runtime::PrefillBackend::L0});
     return v;
   }();
   return p;

@@ -59,11 +59,12 @@ inline uint32_t attn_row_blocks(uint32_t C, PrefillBackend b) { return attn_rows
 //   Flash    - `pf_flash_attn` (pfa_KT64_R8_H6 + exp2, spec 6c), ONE launch per FA layer for
 //              all four kv groups, no score scratch. The default.
 //   Composed - the QK^T / softmax / PV path below (ruling A14), kept as the correctness
-//              reference. `pf_s` / `pf_p` exist only once it has run
-//              (PrefillScratch::pf_s_buffer()).
-// `B70_PREFILL_ATTN=composed` selects Composed; unset, `flash` or anything else is Flash.
+//              reference the tests grade flash against (attn_chunk_test, flash_long_test,
+//              prefill_smoke_test, probe_flash_attn). `pf_s` / `pf_p` exist only once it has
+//              run (PrefillScratch::pf_s_buffer()). Since the zero-config cleanup (2026-11-06)
+//              nothing but set_attn_mode_for_test reaches it (B70_PREFILL_ATTN is gone).
 enum class AttnMode { Flash, Composed };
-// The process-wide mode: B70_PREFILL_ATTN, read once at first use, unless a test has set it.
+// The process-wide mode: Flash, unless a test has set it.
 AttnMode attn_mode();
 // Test-only override (Review Focus: one engine prefills in both modes). A replay recording
 // is keyed by the mode it was captured in (engine_prefill.cc), so switching is safe.

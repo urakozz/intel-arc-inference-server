@@ -928,19 +928,14 @@ foreach(t prefill_gate prefill_consistency prefill_determinism prefill_replay pr
   target_link_libraries(${t}_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
   add_dependencies(${t}_test ${B70_PREFILL_KERNELS})
 endforeach()
-# Spec 6 K3a (plan 6b Task 4; redefined by the operator's 2026-09-26 ruling: flash no further
-# from the CPU oracle than composed, per backend, flash >= composed - 1e-6).
-#   flash_vs_oracle_test: THE K3a bar, on the golden set (prose, code, cjk; 96 decision rows
-#     per mode), l0 and l0-int8, both modes; mean logit cosine against the CPU oracle.
-#   flash_long_test: the 32704-id prefill of the committed prompt in both modes on both
-#     backends, every logit finite; flash-vs-composed printed as information. A 32k CPU
-#     oracle (tools/oracle/last_logits.py) measured 11359 s to reach 8192 ids, so it is not
-#     part of the suite; given one, `flash_long_test ... <file>` applies the bar at depth.
-#   Its `--128k <ids>` mode (K3b, determinism and replay at max_len 131072) is run by hand.
-add_test(NAME flash_vs_oracle_test COMMAND ${CMAKE_SOURCE_DIR}/tools/probe/flash_vs_oracle.sh
-  ${B70_TEST_ORACLE_DIR} ${B70_TEST_SNAPSHOT})
-set_tests_properties(flash_vs_oracle_test PROPERTIES LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77
-  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+# Spec 6 K3a (plan 6b Task 4): flash_long_test, the 32704-id prefill of the committed prompt in
+#   both modes (flash, and the composed reference set by the test) on both backends, every logit
+#   finite; flash-vs-composed printed as information. A 32k CPU oracle
+#   (tools/oracle/last_logits.py) measured 11359 s to reach 8192 ids, so it is not part of the
+#   suite; given one, `flash_long_test ... <file>` applies the bar at depth. Its `--128k <ids>`
+#   mode (K3b, determinism and replay at max_len 131072) is run by hand. (flash_vs_oracle_test,
+#   K3a's golden-set bar, ran the gate under B70_PREFILL_ATTN=composed; it went with the variable
+#   in the zero-config cleanup, its bar long met.)
 add_executable(flash_long_test prefill/flash_long_test.cc)
 target_include_directories(flash_long_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
@@ -2595,8 +2590,7 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(pp_prefill)
 endif()
 
-# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline;
-# B70_PREFILL_ATTN=composed (no two-card walk) is refused before any device (pipeline_args_test).
+# b70-decode --pp 2 runs --prefill and --bench --prefill-length through the pipeline.
 # ==== Spec 16c ============================================================= (end) ====
 
 # ==== Spec 16d: pipeline parallel integration (b70-serve --pp 2, MTP across the split) ====
