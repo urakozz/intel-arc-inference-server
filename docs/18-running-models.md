@@ -526,7 +526,9 @@ the Qwen chat path: the template is Qwen3.8's byte for byte, XML tool calls and 
 greedy unless the request asks (decision 11 open). **The tokenizer must be the original's** (`Qwen/Qwen3.8-Flash-Next`'s
 `tokenizer.json`, whose split adds `\p{M}`), and it is the snapshot's: Intel's checkpoint ships Qwen3.8's file, which
 `b70-serve` refuses - serve a snapshot directory that ships the original's (our own export, spec 21q; the zero-config
-cleanup removed `--tokenizer`).
+cleanup removed `--tokenizer`). On the box that directory is `~/b70/models/qwen3.8-flash-next/`: links to every file
+of Intel's snapshot except `tokenizer.json`, which links to the original's; `qwen3.8-flash-next-ple-int8/` beside it
+links the PLE int8 file.
 The prefix cache keeps this family's state with each snapshot (115.7 MB: the 36 GDN states and conv rows, the PLE
 history, the QSA open block's raw keys; + 21 KB with the head) and 25,344 B a position in its blocks (+ 2,112 with the
 head), one layout on one card or two. `--spec mtp --spec-max K` (K 1-3, a fixed K) drafts with the MTP head (vLLM's form;
@@ -546,7 +548,7 @@ I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 ./build/src/cli/b70-decode $I --layers 18 --ids tests/golden/prompts/q4exp_4k.ids --n 32 --prefill
 ./build/src/cli/b70-decode $I --layers 37 --parallel pp --bench --prefill-length 32768 --tg 16 --max-len 33024
 # spec 21e: served truncated from a snapshot that ships the original's tokenizer.json, MTP K = 2, one card / two
-F=<a Flash-Next snapshot with the original's tokenizer.json>
+F=~/b70/models/qwen3.8-flash-next   # Intel's files, the original's tokenizer.json
 ./build/src/cli/b70-serve $F --layers 18 --spec mtp --spec-max 2
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --spec mtp --spec-max 2
 ```

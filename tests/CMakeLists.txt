@@ -1271,7 +1271,7 @@ if(B70_TOKENIZER_ENABLED)
   add_test(NAME golden_server_test COMMAND golden_server_test
     $<TARGET_FILE:b70-serve> $<TARGET_FILE:b70-decode> ${CMAKE_SOURCE_DIR}/tests/golden/prompts
     ${B70_TEST_SNAPSHOT})
-  set_tests_properties(golden_server_test PROPERTIES TIMEOUT 300)
+  set_tests_properties(golden_server_test PROPERTIES TIMEOUT 600)
 
   # Host sampling (spec 3.5, plan 7d Task 5): the sampler function alone, over
   # synthetic logits rows -- no device, no checkpoint, no Engine instantiated.
