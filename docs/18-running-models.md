@@ -26,8 +26,9 @@ in [open-work.md](open-work.md); the queue itself is
 - **Derived** means arithmetic from the memory planner or byte counts.
 - Commands marked `# no speed row yet` run in the box test stages but have no speed
   number in BENCHMARKS; the expected numbers beside them are derived.
-- Models dropped on 2026-10-27 (LFM2.5, Muse-Glimmer, LiLiCorr) are no longer supported and
-  are not in the table. Flint (spec 27) and Nanbeige (spec 29) are parked (2026-11-04), not
+- Models dropped on 2026-10-27 (LFM2.5, Muse-Glimmer) are no longer supported and are not in
+  the table; LiLiCorr, dropped the same day, came back on 2026-11-01 as Bolt's draft model
+  (`--spec dflash`, Bolt's section). Flint (spec 27) and Nanbeige (spec 29) are parked (2026-11-04), not
   built. Nemotron 3.5 Bolt has its own section below; the table's columns are the older six.
 
 | | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
