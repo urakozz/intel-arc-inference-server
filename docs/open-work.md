@@ -21,7 +21,7 @@ Last updated: 2026-11-06 (main 605ecf5).
 | spec | what | proved by | state |
 |---|---|---|---|
 | **21** Flash-Next | the partial / cli rows and the real-checkpoint rows | rows 32-34 | in tonight's run |
-| **21** Flash-Next | golden sets remade with the block scores (some still use the old 1e-3 gap rule) | CPU job (hours) | queued on the CPU |
+| **21** Flash-Next | golden sets remade with the block scores (some still use the old 1e-3 gap rule): until then `qwen4exp_partial_test` and `qwen4exp_golden_prefill_intel_test` FAIL on Intel's real checkpoint (expert sets differing beyond the old near-tie gap) - first run 2026-11-06, when the PLE file was linked beside the snapshot; they skipped before | CPU job (hours) | to queue: the CPU chain died with the 2026-11-06 crash |
 | **25** Bolt | the synthetic and golden chains | rows 60-62 | in tonight's run; the real-checkpoint ones wait on the Bolt reference set (CPU, Bolt bf16 hot for its job) |
 | **25/26** Bolt | speculative decoding (prompt lookup, the LiLiCorr draft model): verify bitwise, greedy output identical at every K, prefill / prefix, serve off / lookup / dflash identical; then the D5 speed verdict (`r65.benchy`) and the draft format (int8 if `r65.d2`'s acceptance holds with `r63.cost`, else bf16, never int4) | rows 63-65 | in tonight's run |
 | **16** pipeline | two-card serving: MTP, lookup, prefix cache | row 27 | in tonight's run |
