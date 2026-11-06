@@ -4105,7 +4105,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --parallel 1 --pipeline-split 3
     EXPECT "--pipeline-split belongs to --parallel pp")
   set_tests_properties(cli_reject_serve_bolt_spec_mtp
-    cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
+    cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash_lookup cli_reject_serve_bolt_dflash_peer
+    cli_reject_serve_bolt_draft_model cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
     cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_layers
     cli_reject_serve_bolt_max_len cli_reject_serve_bolt_split PROPERTIES LABELS bolt)
 endif()
