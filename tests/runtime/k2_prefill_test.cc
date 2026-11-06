@@ -42,12 +42,6 @@
 //     gated: the multiples of 64 bitwise (plan 18c's bar), the others within the split test's
 //     bars (Qwen3.8's l0 numbers, PROVISIONAL for K2), each printed as bitwise or not.
 //
-// B70_K2_ATTN=eager runs the reference-rounding attention in BOTH halves - prefill's
-// k2_pf_attn.cl EAGER and decode's k2_attn_eager.cl (spec 18 §10.1), one variable, one parser
-// (runtime::k2::k2_attn()) - so mode `all`'s comparison 4 / 5 / 6 is between matched variants
-// (the run prints both). Matched is not bitwise: the two eager forms share the rounding points,
-// not the softmax's exp / sum order (decode's is torch's own, prefill's its two-pass form).
-//
 // Spec 18e: under B70_KV_CACHE=int8 (the `_kv8` twins) the engine holds the int8 rotkv cache;
 // the bitwise comparisons compare its int8 rows and fp16 scales byte for byte, the cosines its
 // dequantised rows (snap()), so every gate above reads the same in either form.
@@ -361,10 +355,7 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
     const size_t o = (size_t(l) * n + p) * 2 * SW;
     return !std::equal(pf_set.begin() + o, pf_set.begin() + o + SW, dec_set.begin() + o);
   });
-  // Operator ruling 2026-10-23: under B70_K2_ATTN=eager (k2_prefill_eager*, ctest label `diagnostic`) sections
-  // 4 / 5 are RECORDED - every number and bar printed, no failure on them; flash, the default, keeps the gates.
-  const bool eager = runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager;
-  const char* const fail_mark = eager ? "  (below the bar: eager, recorded)" : "  ** FAIL **";
+  const char* const fail_mark = "  ** FAIL **";
   const bool kv_ok = kc.dense_worst >= 0.999 && kc.k_median >= kKMedian && kc.v_median >= kVMedian;
   std::printf("4. prefill KV vs decode's fill (%u rows x %u layers): dense layers' worst %.6f, median %.7f, "
               "p01 %.6f, %u rows < 0.99, worst %.4f (L%u row %u)%s\n", n, d.layers, kc.dense_worst, kc.median,
@@ -380,7 +371,7 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
               double(exact) >= kSameSets * double(rows) ? "" : fail_mark);
   std::printf("   sets equal %.4f of the rows (bar %.4f); K median bar %.3f, same-set V median bar %.3f\n",
               rows ? double(exact) / double(rows) : 1.0, kSameSets, kKMedian, kVMedian);
-  ok = ok && (eager || (kv_ok && double(exact) >= kSameSets * double(rows)));
+  ok = ok && kv_ok && double(exact) >= kSameSets * double(rows);
 
   // ---- 6. tokens, ruling A26's rule ------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -453,7 +444,7 @@ int run_all(runtime::k2::K2Engine& e, l0::CmdList& imm, const Ids& prompt) {
                 twin ? (", " + std::to_string(judge_twin) + " of the bf16 reference's (the bar, 2026-10-31)").c_str()
                      : "",
                 tok_ok ? "" : "  ** FAIL **");
-  ok = ok && (eager || tok_ok);   // eager: recorded (operator rulings 2026-10-23 #4, 2026-10-29)
+  ok = ok && tok_ok;
   return ok ? 0 : 1;
 }
 
@@ -516,12 +507,9 @@ int main(int argc, char** argv) {
                                           int8 ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint),
                           kMaxLen);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
-  std::printf("k2_prefill_test %s: %zu ids, lm_head %s, prefill attention %s, decode attention %s "
-              "(B70_K2_ATTN; %zu decode launches), %s KV (B70_KV_CACHE)\n", mode.c_str(), ids.size(),
-              int8 ? "int8" : "bf16", runtime::k2::prefill_attn_eager() ? "eager" : "flash",
-              runtime::k2::k2_attn_name(runtime::k2::k2_attn()), e.step().kernel_count,
-              runtime::kv_cache_name(e.kv_cache()));
-  CHECK(runtime::k2::prefill_attn_eager() == (runtime::k2::k2_attn() == runtime::k2::K2Attn::Eager));
+  std::printf("k2_prefill_test %s: %zu ids, lm_head %s, prefill attention flash, decode attention flash "
+              "(%zu decode launches), %s KV (B70_KV_CACHE)\n", mode.c_str(), ids.size(),
+              int8 ? "int8" : "bf16", e.step().kernel_count, runtime::kv_cache_name(e.kv_cache()));
   CHECK_EQ(e.step().kernel_count, runtime::k2::decode_launches(*e.model().desc));
   const int rc = mode == "split" ? run_split(e, imm, ids) : run_all(e, imm, Ids(ids.begin(), ids.begin() + std::min<size_t>(ids.size(), 2600)));
   std::printf("k2_prefill_test %s %s\n", mode.c_str(), rc == 0 ? "OK" : "FAILED");

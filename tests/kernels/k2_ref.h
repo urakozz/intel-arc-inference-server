@@ -16,7 +16,8 @@
 //   attn_prep()     k2_attn_prep: the bf16 RoPE chain (rotate_half over all dims), gate, v
 //   attention()     decode attention in fp64 (a tolerance reference, not the kernel's order)
 //   attn_gate()     k2_attn_reduce's last line: rne(f32(rne(o)) · f32(rne(softplus(g))))
-//   attention_eager()  B70_K2_ATTN=eager (k2_attn_eager.cl): the reference's bf16 eager chain,
+//   attention_eager()  the reference's bf16 eager chain (K2's eager kernel, k2_attn_eager.cl, is gone;
+//                      the chain is the host reference of Kolibri's / Bolt's eager forms),
 //                   the kernel's orders, torch's softmax bit for bit (the section has the account)
 //
 // What is NOT bit-exact between these and the device: `exp` / `log1p` (OpenCL's ulp
@@ -264,7 +265,7 @@ inline uint16_t attn_gate(float o, float gate) {
   return rne(f32(rne(o)) * f32(rne(softplus(gate))));
 }
 
-// --- eager decode attention (B70_K2_ATTN=eager: src/kernels/k2/k2_attn_eager.cl) ------------
+// --- eager decode attention (the host chain; K2's own kernel went in the zero-config cleanup) --
 // transformers' bf16 eager path as tools/oracle/k2_ref.py attention() runs it, one q head over
 // keys 0..len-1, every rounding point at the reference's place:
 //

@@ -53,12 +53,6 @@ struct K2PrefillScratch {
   size_t bytes() const;
 };
 
-// B70_K2_ATTN=eager selects the reference-rounding attention (k2_pf_attn.cl EAGER); unset /
-// `flash` is the default. Spec 18c's half of the switch 18b's review asked for; the decode
-// half (k2_attn_eager.cl, spec 18 §10.1) reads the same variable through the same parser,
-// runtime::k2::k2_attn() (k2_sizes.h), at each call.
-bool prefill_attn_eager();
-
 // ONE chunk at absolute position `pos`, C rows. The caller has uploaded the ids into s.ids
 // and set Control::{pos = pos, n_active = C} (k2_attn_prep reads both), after a wait.
 // Appends exactly prefill_chunk_launches(desc) launches; waits only when
@@ -66,8 +60,7 @@ bool prefill_attn_eager();
 // [pos, pos + C) of every layer, the residual rows (resid) after the last layer, and every
 // layer's route rows of this chunk in s.routes.
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, K2PrefillScratch& s,
-                   const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C,
-                   bool eager);
+                   const loader::K2LoadedModel& m, K2Buffers& b, uint32_t pos, uint32_t C);
 
 // The tail only the LAST chunk runs: the final grouped norm of row `last_row` into the decode
 // buffers' x, the lm_head, the two argmax stages - decode's binaries, so the first generated

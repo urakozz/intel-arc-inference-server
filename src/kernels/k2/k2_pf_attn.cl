@@ -31,7 +31,8 @@
 //       attn_out = rne(f32(rne(o / l)) x f32(rne(softplus(gate))))   (o / l a true division,
 //     as the decode reduce's acc / sm), softplus with beta ln 2 and torch's threshold 20.
 //
-// **EAGER (B70_K2_ATTN=eager, spec 18c's opt-in).** The default path keeps scores and
+// **EAGER (Kolibri-1's B70_KOLIBRI_ATTN=eager build; K2's B70_K2_ATTN went in the zero-config
+// cleanup).** The default path keeps scores and
 // probabilities in fp32 (the engine's convention since spec 6). The reference
 // (tools/oracle/k2_ref.py attention(), bitwise HF eager in bf16) rounds them: s_b = rne(q·k)
 // (a bf16 matmul), s = rne(f32(s_b) x 1/sqrt(128)), p = rne(exp(s - max) / Σ exp(s - max))

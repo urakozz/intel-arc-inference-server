@@ -818,8 +818,7 @@ st_r13_p0_arms() {
 row 14 "spec 18b - K2-Horizon decode on one card (spec 18 §10, plan 18b)"
 rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ, 21.8 GB); K2 also needs oracle-out-k2, which the opt-in r14.oracle makes on the box CPU (--with r14.oracle, ~20 min). Without them those stages SKIP with 'missing data'."
 rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
-rownote 14 "B70_K2_ATTN=eager's decode speed: r15.speed's eager pairs carry tg256 at depth 4k / 16k / 32k after a prefill; by hand, B70_K2_ATTN=eager before r14.speed's command lines."
-rownote 14 "If K2's determined rows fail, the first suspect is decode attention's fp32 probabilities against the reference's eager bf16 scores / probabilities (spec 18 §10): r14.golden_eager runs the same gate through the eager variant (B70_K2_ATTN=eager, spec 18 §10.1); compare the two, and §10.1's rule decides the default."
+rownote 14 "K2's eager decode attention (B70_K2_ATTN=eager, spec 18 §10.1) and its stages (r14.golden_eager, r15.golden_eager, r21.golden_eager, the eager arms of r15.p0 / r15.speed) went in the zero-config cleanup (operator 2026-11-06): flash is K2's attention."
 
 stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Agnes's and Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
 st_r14_k0() {
@@ -879,12 +878,6 @@ st_r14_golden() {
   jgrab k2-golden 'k2_golden' 'tie|routing|determined|differ|OK|PASS|FAIL'
   finish
 }
-stage r14.golden_eager 14 default card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head r14.k3 "DIAGNOSTIC - K2 through the EAGER attention (B70_K2_ATTN=eager; 813 launches): k2_golden_eager_test and _i8head (ctest label diagnostic) - the token gate judged by oracle-out-k2-f32 binds; the routing rate is RECORDED with its bar, not gated. Flash stays the default (operator ruling 2026-10-23, spec 18 §10.1)"
-st_r14_golden_eager() {
-  run_tests '^k2_golden_eager(_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden-eager 'k2_golden_eager' 'attention|tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
 stage r14.cli 14 default card k2 r14.k1 "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32; --max-len auto -> ~46592 (bf16 head) / ~49920 (--lm-head int8), derived; b70-serve <k2> --mtp 1 refuses before the device (K2 has no MTP head; serving K2 is row 25's)"
 st_r14_cli() {
   chk "ids=oracle-out-k2/prose.ids; [ -s \$ids ] || ids=tests/golden/prompts/prose.ids; echo \"ids: \$ids\"; timeout 1800 build/src/cli/b70-decode $SNAP_K2 --ids \$ids --n 32 | tr '\\n' ' '; echo" "b70-decode --ids --n 32"
@@ -935,18 +928,17 @@ st_r15_host() {
   run_tests '^(k2_pf_ref_test|k2_pf_variant_names_test|k2_plan_test)$'
   finish
 }
-stage r15.k1 15 default card - - "K1, no checkpoint: k2_pf_kernels_test (slab exact, linear cos 0.99999; norm / prep bit-exact; routers; MoE and MoVA grouped == dense bitwise - a 1-ulp difference is a finding; reversed chunk and replay bitwise; MoVA V rows cos 0.9999; flash attention against fp64 at 8 (pos, C) cases: default >= 0.99999, EAGER >= 0.9999 / 0.999, gated within 1 ulp); cli_reject_k2_prefill_length_int8"
+stage r15.k1 15 default card - - "K1, no checkpoint: k2_pf_kernels_test (slab exact, linear cos 0.99999; norm / prep bit-exact; routers; MoE and MoVA grouped == dense bitwise - a 1-ulp difference is a finding; reversed chunk and replay bitwise; MoVA V rows cos 0.9999; flash attention against fp64 at 8 (pos, C) cases: >= 0.99999, gated within 1 ulp); cli_reject_k2_prefill_length_int8"
 st_r15_k1() {
   run_tests '^k2_pf_kernels_test$' k2
   run_tests '^cli_reject_k2_prefill_length_int8$'
   jgrab k1-prefill '^k2_pf_kernels_test$' 'cos|ulp|bit-exact|bitwise|grouped|dense|OK|PASS|FAIL'
   finish
 }
-stage r15.prefill 15 default card k2 r15.k1 "K3: k2_prefill_test and _i8head (2392 / chunk + 5 launches, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise; prefill KV and routes against decode's fill - the PROPOSED bars' distributions printed; tokens by A26's rule); k2_prefill_eager_test (DIAGNOSTIC, ctest label diagnostic - B70_K2_ATTN=eager: sections 4 / 5's dense worst, medians and set share RECORDED with their bars, not gated; operator ruling 2026-10-23)"
+stage r15.prefill 15 default card k2 r15.k1 "K3: k2_prefill_test and _i8head (2392 / chunk + 5 launches, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise; prefill KV and routes against decode's fill - the PROPOSED bars' distributions printed; tokens by A26's rule)"
 st_r15_prefill() {
-  run_tests '^k2_prefill(_i8head|_eager)?_test$' k2
+  run_tests '^k2_prefill(_i8head)?_test$' k2
   jgrab k3-prefill '^k2_prefill(_i8head)?_test$' '2392|launch|plan|allocation|bitwise|cos|median|p01|tie|token|OK|FAIL'
-  jgrab k3-prefill-eager '^k2_prefill_eager_test$' 'eager|attention|cos|median|p01|tie|agree|OK|FAIL'
   finish
 }
 stage r15.split 15 default card k2 r15.k1 "prefill_split_k2_test: splits at multiples of 64 bitwise; the argument predicts every split bitwise - read a non-bitwise one before accepting the bars"
@@ -959,16 +951,6 @@ stage r15.golden 15 default card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head
 st_r15_golden() {
   run_tests '^k2_golden_prefill(_c16|_i8head)?_test$' k2 '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
   jgrab k2-golden-prefill 'k2_golden_prefill' 'tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r15.golden_eager 15 optin card k2,oracle_k2,oracle_k2_f32,oracle_k2_f32_i8head r15.prefill "DIAGNOSTIC - the golden prefill gates under B70_K2_ATTN=eager (k2_golden_test prefill / prefill:16 / int8 prefill, judged by oracle-out-k2-f32; the routing rate recorded, not gated - operator ruling 2026-10-23)"
-st_r15_golden_eager() {
-  local m tol="${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL }"
-  for m in prefill prefill:16 'int8 prefill'; do
-    j=oracle-out-k2-f32; [ "${m%% *}" = int8 ] && j=oracle-out-k2-f32-i8head   # the int8 head's own judge
-    chk "${tol}B70_K2_ATTN=eager timeout 3600 build/tests/k2_golden_test $SNAP_K2 oracle-out-k2 --judge=$j $m" "k2_golden_test $m, eager attention"
-  done
-  grab_all k2-golden-prefill-eager 'tie|routing|determined|differ|PASS|FAIL' 30
   finish
 }
 stage r15.cli 15 default card k2 r15.prefill "CLI: b70-decode <k2> --ids (oracle-out-k2/prose.ids, else the committed prose.ids) --n 32 with and without --prefill - compared (a difference is judged by the tie rule, not failed here); --max-len auto with a prefill planned -> ~42752 (bf16 head, derived)"
@@ -984,24 +966,21 @@ st_r15_cli() {
   grab_all auto '^K2 max_len auto' 2
   finish
 }
-stage r15.p0 15 optin gpu k2 r15.k1 "P0 (plan 18c Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode <k2> --bench --prefill-length 4096, flash and B70_K2_ATTN=eager - the moe_* / slab_* / attn_flash rows against the derived ~1.2 s (the per-chunk expert dequant the largest term)"
+stage r15.p0 15 optin gpu k2 r15.k1 "P0 (plan 18c Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode <k2> --bench --prefill-length 4096 - the moe_* / slab_* / attn_flash rows against the derived ~1.2 s (the per-chunk expert dequant the largest term)"
 st_r15_p0() {
   idle before
   chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_K2" --prefill-length 4096 --tg 1)" "the K2 prefill profile"
-  chk "B70_K2_ATTN=eager B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_K2" --prefill-length 4096 --tg 1)" "the K2 prefill profile, eager attention"
   idle after
   grab_all profile 'moe|mova|slab|attn|flash|dequant|sort|gather|combine' 80
   grab_all idle '^IDLE '
   finish
 }
-stage r15.speed 15 optin gpu k2 r15.prefill "Task 3: pp4096 / pp16384 / pp32768 then tg256 (max_len 40960, --lm-head int8), flash against B70_K2_ATTN=eager in interleaved pairs, median of 3 - BENCHMARKS 'K2-Horizon (spec 18)' prefill rows (derived pp4096 ~3,400 t/s)"
+stage r15.speed 15 optin gpu k2 r15.prefill "Task 3: pp4096 / pp16384 / pp32768 then tg256 (max_len 40960, --lm-head int8), interleaved, median of 3 - BENCHMARKS 'K2-Horizon (spec 18)' prefill rows (derived pp4096 ~3,400 t/s)"
 st_r15_speed() {
   idle before
   local n arms="" ratios=""
   for n in 4096 16384 32768; do
     arms="$arms pp$n '$(bench_cmd "$SNAP_K2" --prefill-length $n --tg 256 --max-len 40960 --lm-head int8)'"
-    arms="$arms pp$n-eager 'B70_K2_ATTN=eager $(bench_cmd "$SNAP_K2" --prefill-length $n --tg 256 --max-len 40960 --lm-head int8)'"
-    ratios="$ratios --ratio pp$n-eager/pp$n"
   done
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the K2 prefill arms"
   idle after
@@ -1258,24 +1237,23 @@ st_r19_load() {
 }
 
 # ======================================================================================
-# Spec 18e's 11 int8-KV binaries (src/kernels/CMakeLists.txt's 18e block, tests/CMakeLists.txt
+# Spec 18e's int8-KV binaries (7 since the eager ones went, zero-config cleanup) (src/kernels/CMakeLists.txt's 18e block, tests/CMakeLists.txt
 # B70_K2_KV8_KERNELS; ATTN_V2_TGT 32) and k2_moe.cl's binaries from before 18e (18b's four, 18c's
 # MoVA route): 18e gave k2_moe.cl a defaulted define (MOVA_STAGE), so those must keep their bytes.
 K2_KV8_BINS="k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 k2_attn_prep_M1_N9280_S2_Q32KV8_KV8 k2_attn_M1_T32_Q32KV8_KV8
-  k2_attn_eager_M1_T32_Q32KV8_KV8 k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
-  k2_pf_flash_attn_Q32KV8_KV8 k2_pf_flash_attn_Q32KV8_EAGER_KV8 k2_pf_flash_attn_Q32KV8_O_KV8
-  k2_pf_flash_attn_Q32KV8_EAGER_O_KV8 k2_mova_M1_E64_T4_D2560_N1024_STAGE"
+  k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
+  k2_pf_flash_attn_Q32KV8_KV8 k2_pf_flash_attn_Q32KV8_O_KV8 k2_mova_M1_E64_T4_D2560_N1024_STAGE"
 K2_MOE_PRE18E_BINS="k2_route_M1_E64_T4_N9280_O9216_S2 k2_route_M1_E100_T8_N128_O0_S1 k2_moe_M1_E100_T8_D2560_I768
   k2_mova_M1_E64_T4_D2560_N1024 k2_route_M1_E64_T4_N9472_O9216_S1"
 row 21 "spec 18e Task 1 - K2-Horizon's int8 KV cache, rotkv at head_dim 128 (--kv-cache int8; spec 18 §13, plan 18e)"
-rownote 21 "After rows 14 and 15: each GPU stage waits for its bf16 sibling's PASS in this state (r14.k1 / r15.k1, r14.k3, r14.golden, r14.golden_eager, r15.prefill, r15.split, r15.golden). The twins need SNAP_K2, the golden ones oracle-out-k2 as well (--with r14.oracle makes it on the box CPU); without them those stages SKIP with 'missing data'."
+rownote 21 "After rows 14 and 15: each GPU stage waits for its bf16 sibling's PASS in this state (r14.k1 / r15.k1, r14.k3, r14.golden, r15.prefill, r15.split, r15.golden). The twins need SNAP_K2, the golden ones oracle-out-k2 as well (--with r14.oracle makes it on the box CPU); without them those stages SKIP with 'missing data'."
 rownote 21 "K0's binary half is G0's g0.sha: a pre-existing binary that differs fails G0 and stops the line. k2_moe.cl's pre-18e binaries are compared only against a baseline that builds them: the default ce36d2d predates K2, so r21.k0 lists them as not compared - --baseline 0f13512 (main just before 18e) compares them."
 rownote 21 "Review Focus 1 (tools/oracle/kv8_k2_repeat.sh: 12a's probe on K2's real weights, Mac or box CPU, ~4-8 h) is not a stage; the K2 int8 tolerances (PROPOSED in k2_kv8_kernels_test) are re-derived from it, so r21.k1 runs at the proposals. A4 with int8 KV needs 18d's K2 A4 tooling (plan 18e): not built."
 rownote 21 "Passkey (r21.passkey) and speed (r21.speed) are opt-in; speed is a record with no bar - int8 against bf16 KV at depth 4096 / 32768 (both fit at max_len 40960), int8 alone at 65536 (max_len 69632: bf16 KV holds 46592)."
 stage r21.k0 21 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (G0) - k2_moe.cl's pre-18e binaries named (MOVA_STAGE defaults to the old line); the K2 bf16 suite not failed (rows 14 / 15: k2_decode_test, k2_golden_test, k2_prefill_test; a SKIP for missing data is noted, not counted); the 11 int8 binaries built"
 st_r21_k0() {
   need_pass g0.sha g0.bitwise g0.suite
-  need_ok r14.k1 r14.k3 r14.golden r14.golden_eager r15.k1 r15.prefill r15.split r15.golden
+  need_ok r14.k1 r14.k3 r14.golden r15.k1 r15.prefill r15.split r15.golden
   # shellcheck disable=SC2086 # the names, one word each, onto one line
   set -- $K2_MOE_PRE18E_BINS
   chk "bad=0; for b in $*; do f=kernels/\$b.bin; a=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/baseline.sha 2>/dev/null); u=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/under-test.sha 2>/dev/null); if [ -z \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: NOT BUILT (not in g0.sha's list)\"; bad=1; elif [ -z \"\$a\" ]; then echo \"K0 k2_moe.cl \$b: not in the baseline build (the baseline predates K2) - not compared; --baseline 0f13512 compares it\"; elif [ \"\$a\" = \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: identical to the baseline build\"; else echo \"K0 k2_moe.cl \$b: DIFFERS from the baseline build\"; bad=1; fi; done; [ \$bad = 0 ]" \
@@ -1307,16 +1285,10 @@ st_r21_golden() {
   jgrab k2-golden-vs-bf16 '^k2_golden(_i8head)?(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|tie|routing|determined|differ|OK|PASS|FAIL'
   finish
 }
-stage r21.golden_eager 21 default card k2,oracle_k2,oracle_k2_f32_kv8 r21.k3,r14.golden_eager "DIAGNOSTIC (token gate and routing printed, not gated - operator rulings 2026-10-23 #4, 2026-10-29) - K2 through the eager attention on the int8 cache: k2_golden_eager_kv8_test (B70_KV_CACHE=int8, B70_K2_ATTN=eager; 813 launches) - compared with r14.golden_eager's bf16 run"
-st_r21_golden_eager() {
-  run_tests '^k2_golden_eager_kv8_test$' 'k2 kv8' '' "${B70_K2_TIE_TOL:+B70_K2_TIE_TOL=$B70_K2_TIE_TOL}"
-  jgrab k2-golden-eager-vs-bf16 '^k2_golden_eager(_kv8)?_test$' 'KV \(B70_KV_CACHE\)|attention|tie|routing|determined|differ|OK|PASS|FAIL'
-  finish
-}
-stage r21.prefill 21 default card k2 r21.k1,r15.prefill "K3 on prefill over the int8 cache: k2_prefill_kv8_test (2392 / chunk + 5 launches, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise; prefill KV and routes against decode's int8 fill) and k2_prefill_eager_kv8_test (DIAGNOSTIC, B70_K2_ATTN=eager: sections 4 / 5 recorded with their bars, not gated)"
+stage r21.prefill 21 default card k2 r21.k1,r15.prefill "K3 on prefill over the int8 cache: k2_prefill_kv8_test (2392 / chunk + 5 launches, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise; prefill KV and routes against decode's int8 fill)"
 st_r21_prefill() {
-  run_tests '^k2_prefill(_eager)?_kv8_test$' 'k2 kv8'
-  jgrab k3-prefill-kv8 '^k2_prefill(_eager)?_kv8_test$' '2392|KV \(B70_KV_CACHE\)|launch|plan|allocation|bitwise|cos|median|p01|tie|agree|OK|FAIL'
+  run_tests '^k2_prefill_kv8_test$' 'k2 kv8'
+  jgrab k3-prefill-kv8 '^k2_prefill_kv8_test$' '2392|KV \(B70_KV_CACHE\)|launch|plan|allocation|bitwise|cos|median|p01|tie|agree|OK|FAIL'
   finish
 }
 stage r21.split 21 default card k2 r21.k1,r15.split "prefill_split_k2_kv8_test: splits at multiples of 64 bitwise over the int8 cache (as r15.split's bf16 run)"
@@ -1853,7 +1825,7 @@ st_r26_reject() {
   run_tests '^cli_reject_kolibri_prefill_(int8|chunk)$'
   finish
 }
-stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, immediate / recorded / replayed bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer); section 4 gated on each layer's median, 5 / 6 printed - the prefill's routes and tokens are r26.golden's, judged by f32 (operator ruling 2026-10-31, round 2)"
+stage r26.prefill 26 default card oracle_kolibri_synth r26.k1 "K3 on one card: kolibri_prefill_synth_int4attn_test, _bf16attn_test, _eager_test - 2 + 5 x 45 = 227 launches a chunk + 5, plan == allocation, two immediate prefills bitwise, chunks of 16 bitwise (4500 ids: the third chunk wraps the ring), Review Focus 4 (KV / rings / routes / tokens against decode's fill, per layer); section 4 gated on each layer's median, 5 / 6 printed - the prefill's routes and tokens are r26.golden's, judged by f32 (operator ruling 2026-10-31, round 2)"
 st_r26_prefill() {
   run_tests '^kolibri_prefill_synth_(int4attn|bf16attn|eager)_test$' kolibri
   jgrab k3-prefill '^kolibri_prefill_synth' 'walk|K3|chunks|median|p01|routing|tokens|OK|FAIL'
@@ -1877,7 +1849,7 @@ st_r26_golden_eager() {
   jgrab golden-prefill-eager '^kolibri_golden_prefill_synth_eager' 'gate:|routing:|OK|FAIL'
   finish
 }
-stage r26.pp 26 default gpu oracle_kolibri_synth r26.prefill,r22.p1 "two cards: kolibri_prefill_pp_test (--pp 2 --pipeline-split 3 against --pp 1, BITWISE: one prefill, recorded + replayed, a 1000 + rest continuation, chunks of 16, both Control blocks; P4 - a dropped chunk hand-off throws within 5 s naming device 1, reset() recovers), prefill_split_kolibri_pp_test, kolibri_golden_prefill_synth_pp_test"
+stage r26.pp 26 default gpu oracle_kolibri_synth r26.prefill,r22.p1 "two cards: kolibri_prefill_pp_test (--pp 2 --pipeline-split 3 against --pp 1, BITWISE: one prefill, a second one, a 1000 + rest continuation, chunks of 16, both Control blocks; P4 - a dropped chunk hand-off throws within 5 s naming device 1, reset() recovers), prefill_split_kolibri_pp_test, kolibri_golden_prefill_synth_pp_test"
 st_r26_pp() {
   run_tests '^(kolibri_prefill_pp_test|prefill_split_kolibri_pp_test|kolibri_golden_prefill_synth_pp_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^(kolibri_prefill_pp|prefill_split_kolibri_pp|kolibri_golden_prefill_synth_pp)' 'pp:|P4|device|split at|gate:|OK|FAIL'
@@ -2467,7 +2439,7 @@ st_r33_reject() {
   run_tests '^cli_reject_qwen4exp_prefill_(int8|chunk)$'
   finish
 }
-stage r33.prefill 33 default card oracle_q4exp_synth r33.k1,r32.k3 "F4 on prefill, one card: qwen4exp_prefill_synth_{ours,intel}_test, _eager_test (4500 ids of q4exp_4k: chunks at 0 (dense), 2048 (3 dense rows), 4096 (sparse)) - launches = prefill_chunk_launches per chunk + 6, plan == allocation, immediate / recorded / replayed bitwise, chunks of 64 bitwise (16 printed), Review Focus 5 (state, routes, selections and tokens against decode's fill, per layer), the injected run chunked == whole; prefill_split_qwen4exp_test (splits at 64 / 2048 bitwise, 2051 / 4097 within the bars)"
+stage r33.prefill 33 default card oracle_q4exp_synth r33.k1,r32.k3 "F4 on prefill, one card: qwen4exp_prefill_synth_{ours,intel}_test, _eager_test (4500 ids of q4exp_4k: chunks at 0 (dense), 2048 (3 dense rows), 4096 (sparse)) - launches = prefill_chunk_launches per chunk + 6, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise (16 printed), Review Focus 5 (state, routes, selections and tokens against decode's fill, per layer), the injected run chunked == whole; prefill_split_qwen4exp_test (splits at 64 / 2048 bitwise, 2051 / 4097 within the bars)"
 st_r33_prefill() {
   run_tests '^(qwen4exp_prefill_synth_(ours|intel|eager)_test|prefill_split_qwen4exp_test)$' qwen4exp '' \
     "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL}"
@@ -2489,7 +2461,7 @@ st_r33_golden_real() {
   jgrab golden-real '^qwen4exp_golden_prefill_intel' 'gate:|routing:|gate S:|prefill:|OK|FAIL'
   finish
 }
-stage r33.pp 33 default gpu oracle_q4exp_synth r33.prefill,r22.p1 "two cards: qwen4exp_prefill_pp_test (--pp 2 --pipeline-split 2 against --pp 1, BITWISE: one prefill, recorded + replayed, a 2051 + rest continuation, chunks of 64, both Control blocks; P4 - a dropped chunk hand-off throws within 30 s naming device 1, reset() recovers), prefill_split_qwen4exp_pp_test, qwen4exp_golden_prefill_synth_pp_test; Intel's --layers 37 on two cards (qwen4exp_prefill_intel_pp_test) when present"
+stage r33.pp 33 default gpu oracle_q4exp_synth r33.prefill,r22.p1 "two cards: qwen4exp_prefill_pp_test (--pp 2 --pipeline-split 2 against --pp 1, BITWISE: one prefill, a second one, a 2051 + rest continuation, chunks of 64, both Control blocks; P4 - a dropped chunk hand-off throws within 30 s naming device 1, reset() recovers), prefill_split_qwen4exp_pp_test, qwen4exp_golden_prefill_synth_pp_test; Intel's --layers 37 on two cards (qwen4exp_prefill_intel_pp_test) when present"
 st_r33_pp() {
   run_tests '^(qwen4exp_prefill_pp_test|prefill_split_qwen4exp_pp_test|qwen4exp_golden_prefill_synth_pp_test|qwen4exp_prefill_intel_pp_test)$' \
     '' '' 'ZE_AFFINITY_MASK=0,1'
@@ -3406,7 +3378,7 @@ st_r61_reject() {
   run_tests '^cli_reject_bolt_prefill_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r61.synth     61 default card bolt_synth               r61.k1   "bolt_prefill_test on the synthetics (n12-g128, n12-g64x, eager, bf16 head, bf16 state): the walk's launches and plan, twice bitwise, recorded == replayed, chunks / splits at multiples of 64 bitwise, prefill vs decode's fill within the bars, routes up to near-ties, tokens tie-aware"
+stage r61.synth     61 default card bolt_synth               r61.k1   "bolt_prefill_test on the synthetics (n12-g128, n12-g64x, eager, bf16 head, bf16 state): the walk's launches and plan, twice bitwise, chunks / splits at multiples of 64 bitwise, prefill vs decode's fill within the bars, routes up to near-ties, tokens tie-aware"
 st_r61_synth() {
   run_tests '^bolt_prefill_synth_(n12-g128|n12-g64x|eager|bf16head|b16state)_test$'
   jgrab synth '^bolt_prefill_synth' '^[1-7]\.|split|chunks|bitwise|cosine|routing|tokens|OK'

@@ -13,13 +13,11 @@
 //   4. the decode flash pair k2_attn_decode_kv8 / k2_attn_reduce_kv8 at 6, 300 and 3000 keys against
 //      the fp64 attention over the dequantised cache, un-rotated, gated: within 2 bf16 ulps (k2_attn's
 //      own bar against its fp64 reference); a replay bitwise;
-//   5. the eager kv8 kernels (score / k2_attn_eager.cl's softmax / P·V / reduce) at 6, 300, 3000 and
-//      4096 keys against k2_kv8_ref::eager_head: scores and probabilities BITWISE, the output bitwise
-//      through gates past softplus's threshold, within 1 ulp below it (OpenCL's exp / log1p);
-//   6. the prefill flash k2_pf_flash_attn_kv8, default and EAGER, at depths 1 .. 32048: the ungated
-//      _O build's un-rotated o against the fp64 attention (q as the kernel reads it: rne(q_rot)):
-//      default >= 0.9999, eager >= 0.999 (PROPOSED: the int8 V scale is folded into P, one bf16
-//      rounding more than bf16 KV's 0.99999 / 0.999); the gated build against k2_ref::attn_gate over
+//   (5., the eager kv8 kernels, went with B70_K2_ATTN in the zero-config cleanup)
+//   6. the prefill flash k2_pf_flash_attn_kv8 at depths 1 .. 32048: the ungated _O build's
+//      un-rotated o against the fp64 attention (q as the kernel reads it: rne(q_rot)): >= 0.9999
+//      (PROPOSED: the int8 V scale is folded into P, one bf16 rounding more than bf16 KV's
+//      0.99999); the gated build against k2_ref::attn_gate over
 //      the _O output within 1 ulp; a replay bitwise.
 #include <algorithm>
 #include <cmath>
@@ -301,67 +299,6 @@ void decode_flash(Dev& dv) {
   }
 }
 
-// ---- 5. decode eager ----------------------------------------------------------------------------
-void decode_eager(Dev& dv) {
-  const uint32_t ML = 4096, QN = D.q_n(), QH = D.q_heads;
-  const kr::Cache c = make_cache(ML, 60);
-  DevCache dc(dv, c);
-  std::vector<float> q(QN), g(QN);
-  {
-    Rng r(62);
-    for (uint32_t h = 0; h < QH; ++h) {
-      float qb[kHD];
-      for (float& e : qb) e = rf(r.uni(-4.f, 4.f));
-      h128::rotate_q(qb, &q[size_t(h) * kHD]);
-    }
-    for (uint32_t i = 0; i < QN; ++i) g[i] = rf((i / 128) % 2 == 0 ? 30.0f + float(i % 11) : r.uni(-4.f, 4.f));
-  }
-  l0::Mem dq = dv.up(q), dg = dv.up(g), sc = dv.zeros(size_t(QH) * ML * 4);
-  l0::Mem part = dv.zeros(size_t(QH) * kk::kAttnTgt * kk::kAttnPart * 4), out = dv.zeros(size_t(QN) * 2);
-  const std::string v8 = kk::attn_eager_kv8_variant(1, kk::kAttnTgt, QH, D.kv_heads);
-  const std::string vs = kk::attn_eager_variant(1, kk::kAttnTgt, QH, D.kv_heads);
-  for (uint32_t pos : {5u, 299u, 2999u, ML - 1}) {
-    l0::Mem ctrl = control(dv, pos, 1);
-    const uint32_t len = pos + 1, blk = k2_ref::eager_block(pos, 1, kk::kAttnTgt);
-    dv.go(v8, "k2_attn_eager_score_kv8", D.kv_heads, kk::kAttnTgt, 1,
-          {PtrArg(ctrl.ptr()), PtrArg(dq.ptr()), PtrArg(dc.k.ptr()), PtrArg(dc.ks.ptr()), PtrArg(sc.ptr()), arg_val(ML)});
-    const std::vector<float> s = dv.rd<float>(sc, size_t(QH) * ML);
-    dv.go(vs, "k2_attn_eager_softmax", QH, 1, 1, {PtrArg(ctrl.ptr()), PtrArg(sc.ptr()), arg_val(ML)});
-    const std::vector<float> pr = dv.rd<float>(sc, size_t(QH) * ML);
-    dv.go(v8, "k2_attn_eager_pv_kv8", D.kv_heads, kk::kAttnTgt, 1,
-          {PtrArg(ctrl.ptr()), PtrArg(sc.ptr()), PtrArg(dc.v.ptr()), PtrArg(dc.vs.ptr()), PtrArg(part.ptr()), arg_val(ML)});
-    dv.go(v8, "k2_attn_eager_reduce_kv8", QH, 1, 1,
-          {PtrArg(ctrl.ptr()), PtrArg(part.ptr()), PtrArg(dg.ptr()), PtrArg(out.ptr())});
-    const std::vector<uint16_t> o = dv.rd<uint16_t>(out, QN);
-    size_t s_bad = 0, p_bad = 0, o_exact_bad = 0, o_sp = 0;
-    int sp_worst = 0;
-    for (uint32_t h = 0; h < QH; ++h) {
-      const kr::EagerHead e = kr::eager_head(q.data() + size_t(h) * kHD, c, len, h / D.gqa(), blk);
-      for (uint32_t i = 0; i < len; ++i) {
-        s_bad += s[size_t(h) * ML + i] != e.s[i];
-        p_bad += pr[size_t(h) * ML + i] != e.p[i];
-      }
-      for (uint32_t d = 0; d < kHD; ++d) {
-        const float gate = g[size_t(h) * kHD + d];
-        const uint16_t got = o[size_t(h) * kHD + d], want = k2_ref::attn_gate(e.o[d], gate);
-        if (gate * k2_ref::kSpBeta > k2_ref::kSpThreshold) {
-          o_exact_bad += got != want;
-        } else {
-          o_sp += got != want;
-          sp_worst = std::max(sp_worst, ulps(got, want));
-        }
-      }
-    }
-    std::printf("5. eager over int8 at %4u keys (%u-key blocks): scores %zu, probabilities %zu, outputs "
-                "(gate past the threshold) %zu differ from k2_kv8_ref; below it %zu within %d ulp\n",
-                len, blk, s_bad, p_bad, o_exact_bad, o_sp, sp_worst);
-    CHECK_EQ(s_bad, size_t(0));
-    CHECK_EQ(p_bad, size_t(0));
-    CHECK_EQ(o_exact_bad, size_t(0));
-    CHECK(sp_worst <= 1);
-  }
-}
-
 // ---- 6. prefill flash ---------------------------------------------------------------------------
 void prefill_flash(Dev& dv) {
   const uint32_t QH = D.q_heads, KVH = D.kv_heads, QN = QH * kHD;
@@ -384,47 +321,42 @@ void prefill_flash(Dev& dv) {
   for (size_t i = 0; i < g.size(); i += 7) g[i] = 25.0f + float(i % 17);
   for (float& v : g) v = rf(v);
   l0::Mem dq = dv.up(q), dg = dv.up(g), o = dv.zeros(size_t(QH) * kC * kHD * 4), out = dv.zeros(size_t(kC) * QN * 2);
-  double worst[2] = {1.0, 1.0};
+  double worst = 1.0;
   int worst_gate = 0;
   for (const Case& cs : cases) {
     std::vector<uint32_t> rows = {0, cs.C - 1, cs.C / 2};
     if (cs.C > 9) rows.insert(rows.end(), {7, 8});
-    for (int eager = 0; eager <= 1; ++eager) {
-      auto launch = [&](bool gated) {
-        dv.go(kk::pf_flash_kv8_variant(QH, KVH, eager, gated), "k2_pf_flash_attn_kv8", (cs.C + 7) / 8, KVH, 1,
-              {PtrArg(dq.ptr()), PtrArg(dc.k.ptr()), PtrArg(dc.ks.ptr()), PtrArg(dc.v.ptr()), PtrArg(dc.vs.ptr()),
-               PtrArg(dg.ptr()), PtrArg(gated ? out.ptr() : o.ptr()), arg_val(cs.pos), arg_val(cs.C)});
-      };
-      launch(false);
-      const std::vector<float> of = dv.rd<float>(o, size_t(QH) * cs.C * kHD);
-      for (uint32_t r : rows)
-        for (uint32_t h = 0; h < QH; ++h) {
-          double want[kHD];
-          kr::attend(qk.data() + (size_t(r) * QH + h) * kHD, c, h / D.gqa(), cs.pos + r + 1, want);
-          worst[eager] = std::min(worst[eager], cosine(want, of.data() + (size_t(h) * cs.C + r) * kHD, kHD));
-        }
-      launch(true);
-      const std::vector<uint16_t> ob = dv.rd<uint16_t>(out, size_t(cs.C) * QN);
-      for (uint32_t r : rows)
-        for (uint32_t h = 0; h < QH; ++h)
-          for (uint32_t d = 0; d < kHD; ++d) {
-            const size_t idx = (size_t(r) * QH + h) * kHD + d;
-            worst_gate = std::max(worst_gate, ulps(ob[idx], k2_ref::attn_gate(of[(size_t(h) * cs.C + r) * kHD + d], g[idx])));
-          }
-      if (cs.C == 2048 && cs.pos == 2048) {
-        launch(true);
-        CHECK(dv.rd<uint16_t>(out, size_t(cs.C) * QN) == ob);
+    auto launch = [&](bool gated) {
+      dv.go(kk::pf_flash_kv8_variant(QH, KVH, gated), "k2_pf_flash_attn_kv8", (cs.C + 7) / 8, KVH, 1,
+            {PtrArg(dq.ptr()), PtrArg(dc.k.ptr()), PtrArg(dc.ks.ptr()), PtrArg(dc.v.ptr()), PtrArg(dc.vs.ptr()),
+             PtrArg(dg.ptr()), PtrArg(gated ? out.ptr() : o.ptr()), arg_val(cs.pos), arg_val(cs.C)});
+    };
+    launch(false);
+    const std::vector<float> of = dv.rd<float>(o, size_t(QH) * cs.C * kHD);
+    for (uint32_t r : rows)
+      for (uint32_t h = 0; h < QH; ++h) {
+        double want[kHD];
+        kr::attend(qk.data() + (size_t(r) * QH + h) * kHD, c, h / D.gqa(), cs.pos + r + 1, want);
+        worst = std::min(worst, cosine(want, of.data() + (size_t(h) * cs.C + r) * kHD, kHD));
       }
+    launch(true);
+    const std::vector<uint16_t> ob = dv.rd<uint16_t>(out, size_t(cs.C) * QN);
+    for (uint32_t r : rows)
+      for (uint32_t h = 0; h < QH; ++h)
+        for (uint32_t d = 0; d < kHD; ++d) {
+          const size_t idx = (size_t(r) * QH + h) * kHD + d;
+          worst_gate = std::max(worst_gate, ulps(ob[idx], k2_ref::attn_gate(of[(size_t(h) * cs.C + r) * kHD + d], g[idx])));
+        }
+    if (cs.C == 2048 && cs.pos == 2048) {
+      launch(true);
+      CHECK(dv.rd<uint16_t>(out, size_t(cs.C) * QN) == ob);
     }
-    std::printf("   (pos %5u, C %4u): default worst %.7f, eager worst %.7f vs fp64 over the int8 cache\n",
-                cs.pos, cs.C, worst[0], worst[1]);
+    std::printf("   (pos %5u, C %4u): worst %.7f vs fp64 over the int8 cache\n", cs.pos, cs.C, worst);
   }
-  CHECK(worst[0] >= 0.9999);
-  CHECK(worst[1] >= 0.999);
+  CHECK(worst >= 0.9999);
   CHECK(worst_gate <= 1);
-  std::printf("6. prefill flash over int8, depths 1 .. 32048: default %.7f (bar 0.9999), eager %.6f (0.999), "
-              "un-rotated in the epilogue; gated build within %d bf16 ulp; replay bitwise\n",
-              worst[0], worst[1], worst_gate);
+  std::printf("6. prefill flash over int8, depths 1 .. 32048: %.7f (bar 0.9999), un-rotated in the epilogue; "
+              "gated build within %d bf16 ulp; replay bitwise\n", worst, worst_gate);
 }
 
 }  // namespace
@@ -434,7 +366,6 @@ int main() {
   std::printf("k2_kv8_kernels_test on %s\n", dv.ctx.name().c_str());
   writers(dv);
   decode_flash(dv);
-  decode_eager(dv);
   prefill_flash(dv);
   std::printf("k2_kv8_kernels_test OK\n");
   return 0;

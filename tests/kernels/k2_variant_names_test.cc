@@ -36,11 +36,10 @@ int main(int argc, char** argv) {
   std::vector<std::string> wanted;
   if (kv8) {
     std::set<std::string> bf16, int8;
-    for (bool head : {false, true})
-      for (bool eager : {false, true}) {
-        for (const std::string& v : kernels::k2::decode_variants(d, head, eager, false)) bf16.insert(v);
-        for (const std::string& v : kernels::k2::decode_variants(d, head, eager, true)) int8.insert(v);
-      }
+    for (bool head : {false, true}) {
+      for (const std::string& v : kernels::k2::decode_variants(d, head, false)) bf16.insert(v);
+      for (const std::string& v : kernels::k2::decode_variants(d, head, true)) int8.insert(v);
+    }
     for (bool k : {false, true}) {
       std::vector<std::string> l = kernels::k2::prefill_variants(d, k);
       for (const std::string& v : kernels::k2::prefill_test_variants(d, k)) l.push_back(v);
@@ -53,8 +52,7 @@ int main(int argc, char** argv) {
     for (const std::string& v : kernels::k2::prefill_test_variants(d)) wanted.push_back(v);
   } else {
     for (bool int8 : {false, true})
-      for (bool eager : {false, true})   // B70_K2_ATTN=flash|eager (spec 18 §10.1)
-        for (const std::string& v : kernels::k2::decode_variants(d, int8, eager)) wanted.push_back(v);
+      for (const std::string& v : kernels::k2::decode_variants(d, int8)) wanted.push_back(v);
   }
   for (const std::string& v : wanted)
     if (!built.count(v)) {

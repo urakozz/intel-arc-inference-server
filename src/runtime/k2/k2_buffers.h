@@ -17,12 +17,9 @@ class CmdList;
 namespace runtime::k2 {
 
 struct K2Buffers {
-  // `attn`: the decode attention the capture will bind; by default the one B70_K2_ATTN
-  // selects, which is what capture reads, so an engine built in one process agrees.
   // `kv` (spec 18e): the KV cache's form - bf16 (today's, bit for bit) or int8 rotkv; the
   // capture and the prefill walk bind the binaries of the form the buffers were built in.
-  K2Buffers(l0::Context& ctx, const model::K2Desc& d, uint32_t max_len, K2Attn attn = k2_attn(),
-            KvCache kv = default_kv_cache());
+  K2Buffers(l0::Context& ctx, const model::K2Desc& d, uint32_t max_len, KvCache kv = default_kv_cache());
 
   // --- persistent: zeroed by zero() (K2Engine::reset) ---------------------------------
   l0::Mem control;    // runtime::Control, shared memory
@@ -32,8 +29,6 @@ struct K2Buffers {
   // --- decode scratch: never zeroed (no step reads scratch it has not written first) ---
   l0::Mem resid, x, partials, norm_sumsq, attn_q, attn_gate, attn_part, attn_out, router,
       routes, moe_h, logits, argmax_part;
-  // B70_K2_ATTN=eager only (null under flash): the score row, attn_scores_bytes().
-  std::unique_ptr<l0::Mem> attn_scores;
 
   const model::K2Desc& desc;
   uint32_t max_len;

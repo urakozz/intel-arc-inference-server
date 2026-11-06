@@ -23,11 +23,10 @@
 //      V at pos + t exactly k2_pf_ref's; Review Focus 1 at kernel level: decode's k2_mova_value
 //      on the same x and route row gives a V row within cosine 0.9999 (the GEMMs' sum orders
 //      differ, not the rule);
-//   7. the flash attention, Review Focus 3 (K1): the ungated _O builds against fp64 (default)
-//      and against the eager reference's rounding points (EAGER) at (pos, C) = (0, 1), (0, 37),
-//      (0, 2048), (2011, 37) (a tail chunk), (2048, 2048), (30000, 2048), (60000, 2048) and
-//      (4095, 1) (one row at depth 4096) - sampled rows x every head, cosine >= 0.99999
-//      (default vs fp64) / 0.9999 (eager vs its reference) / 0.999 (eager vs fp64); the gated
+//   7. the flash attention, Review Focus 3 (K1): the ungated _O build against fp64 at (pos, C)
+//      = (0, 1), (0, 37), (0, 2048), (2011, 37) (a tail chunk), (2048, 2048), (30000, 2048),
+//      (60000, 2048) and (4095, 1) (one row at depth 4096) - sampled rows x every head, cosine
+//      >= 0.99999 (its EAGER build went with B70_K2_ATTN, zero-config cleanup); the gated
 //      production build within 1 bf16 ulp of k2_ref::attn_gate over the _O output, gates on
 //      both sides of softplus's threshold;
 //   8. replay of the flash attention bitwise.
@@ -566,59 +565,45 @@ void flash(Dev& dv) {
   for (size_t i = 0; i < g.size(); i += 7) g[i] = 25.0f + float(i % 17);   // beta x > 20 for x > 28.85
   for (float& v : g) v = rf(v);
   l0::Mem dq = dv.up(q), dg = dv.up(g), o = dv.zeros(size_t(QH) * kC * HD * 4), out = dv.zeros(size_t(kC) * QN * 2);
-  double worst_flash = 1.0, worst_eager = 1.0, worst_eager64 = 1.0;
+  double worst_flash = 1.0;
   int worst_gate = 0;
   for (const Case& c : cases) {
     std::vector<uint32_t> rows = {0, c.C - 1, c.C / 2};
     if (c.C > 9) rows.insert(rows.end(), {7, 8});
-    for (int eager = 0; eager <= 1; ++eager) {
-      dv.go(kk::pf_flash_variant(QH, KVH, eager, false), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
-            {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dvv.ptr()), PtrArg(dg.ptr()), PtrArg(o.ptr()),
-             arg_val(c.pos), arg_val(c.C)});
-      const std::vector<float> of = dv.rd<float>(o, size_t(QH) * c.C * HD);
-      for (uint32_t r : rows)
-        for (uint32_t h = 0; h < QH; ++h) {
-          const float* qr = q.data() + (size_t(r) * QH + h) * HD;
-          const float* got = of.data() + (size_t(h) * c.C + r) * HD;
-          const std::vector<double> want = k2_pf_ref::attention(qr, kc.data(), vc.data(), c.pos + r, h / (QH / KVH), KVH, HD);
-          if (!eager) {
-            worst_flash = std::min(worst_flash, cosine(want.data(), got, HD));
-          } else {
-            worst_eager64 = std::min(worst_eager64, cosine(want.data(), got, HD));
-            const std::vector<float> e =
-                k2_pf_ref::attention_eager(qr, kc.data(), vc.data(), c.pos + r, h / (QH / KVH), KVH, HD);
-            std::vector<double> ed(e.begin(), e.end());
-            worst_eager = std::min(worst_eager, cosine(ed.data(), got, HD));
-          }
+    dv.go(kk::pf_flash_variant(QH, KVH, false), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
+          {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dvv.ptr()), PtrArg(dg.ptr()), PtrArg(o.ptr()),
+           arg_val(c.pos), arg_val(c.C)});
+    const std::vector<float> of = dv.rd<float>(o, size_t(QH) * c.C * HD);
+    for (uint32_t r : rows)
+      for (uint32_t h = 0; h < QH; ++h) {
+        const float* qr = q.data() + (size_t(r) * QH + h) * HD;
+        const float* got = of.data() + (size_t(h) * c.C + r) * HD;
+        const std::vector<double> want = k2_pf_ref::attention(qr, kc.data(), vc.data(), c.pos + r, h / (QH / KVH), KVH, HD);
+        worst_flash = std::min(worst_flash, cosine(want.data(), got, HD));
+      }
+    // the gated production build against k2_ref::attn_gate over this _O output
+    dv.go(kk::pf_flash_variant(QH, KVH, true), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
+          {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dvv.ptr()), PtrArg(dg.ptr()), PtrArg(out.ptr()),
+           arg_val(c.pos), arg_val(c.C)});
+    const std::vector<uint16_t> ob = dv.rd<uint16_t>(out, size_t(c.C) * QN);
+    for (uint32_t r : rows)
+      for (uint32_t h = 0; h < QH; ++h)
+        for (uint32_t dd = 0; dd < HD; ++dd) {
+          const size_t idx = (size_t(r) * QH + h) * HD + dd;
+          worst_gate = std::max(worst_gate, ulps(ob[idx], k2_ref::attn_gate(of[(size_t(h) * c.C + r) * HD + dd], g[idx])));
         }
-      // the gated production build against k2_ref::attn_gate over this _O output
-      dv.go(kk::pf_flash_variant(QH, KVH, eager, true), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
+    if (c.C == 2048 && c.pos == 2048) {   // 8. replay bitwise
+      dv.go(kk::pf_flash_variant(QH, KVH, true), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
             {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dvv.ptr()), PtrArg(dg.ptr()), PtrArg(out.ptr()),
              arg_val(c.pos), arg_val(c.C)});
-      const std::vector<uint16_t> ob = dv.rd<uint16_t>(out, size_t(c.C) * QN);
-      for (uint32_t r : rows)
-        for (uint32_t h = 0; h < QH; ++h)
-          for (uint32_t dd = 0; dd < HD; ++dd) {
-            const size_t idx = (size_t(r) * QH + h) * HD + dd;
-            worst_gate = std::max(worst_gate, ulps(ob[idx], k2_ref::attn_gate(of[(size_t(h) * c.C + r) * HD + dd], g[idx])));
-          }
-      if (c.C == 2048 && c.pos == 2048) {   // 8. replay bitwise
-        dv.go(kk::pf_flash_variant(QH, KVH, eager, true), "k2_pf_flash_attn", (c.C + 7) / 8, KVH, 1,
-              {PtrArg(dq.ptr()), PtrArg(dk.ptr()), PtrArg(dvv.ptr()), PtrArg(dg.ptr()), PtrArg(out.ptr()),
-               arg_val(c.pos), arg_val(c.C)});
-        CHECK(dv.rd<uint16_t>(out, size_t(c.C) * QN) == ob);
-      }
+      CHECK(dv.rd<uint16_t>(out, size_t(c.C) * QN) == ob);
     }
-    std::printf("   (pos %5u, C %4u): flash worst %.7f, eager worst %.7f vs its reference / %.6f vs fp64\n",
-                c.pos, c.C, worst_flash, worst_eager, worst_eager64);
+    std::printf("   (pos %5u, C %4u): flash worst %.7f\n", c.pos, c.C, worst_flash);
   }
   CHECK(worst_flash >= 0.99999);
-  CHECK(worst_eager >= 0.9999);
-  CHECK(worst_eager64 >= 0.999);
   CHECK(worst_gate <= 1);
-  std::printf("7. flash attention at head_dim 128 / GQA 4, depths 0 .. 62048: default %.7f (bar 0.99999), "
-              "eager %.6f vs its reference (0.9999) / %.6f vs fp64 (0.999); gated build within %d bf16 ulp; "
-              "8. replay bitwise\n", worst_flash, worst_eager, worst_eager64, worst_gate);
+  std::printf("7. flash attention at head_dim 128 / GQA 4, depths 0 .. 62048: %.7f (bar 0.99999); gated build "
+              "within %d bf16 ulp; 8. replay bitwise\n", worst_flash, worst_gate);
 }
 
 }  // namespace

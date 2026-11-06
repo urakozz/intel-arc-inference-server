@@ -1901,7 +1901,7 @@ if(B70_K2)
     kernel_prep_res_fold_M1_K2560_SP0_G20 kernel_prep_res_fold_M1_K2560_SP4_G20
     kernel_k2_norm_M1_K2560_G20_W20_NG2 kernel_k2_silu_M1_I6144_S4
     kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V kernel_k2_attn_prep_M1_N9280_S2_Q32KV8
-    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8 kernel_k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8
+    kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8
     kernel_k2_route_M1_E64_T4_N9280_O9216_S2 kernel_k2_route_M1_E100_T8_N128_O0_S1
     kernel_k2_moe_M1_E100_T8_D2560_I768 kernel_k2_mova_M1_E64_T4_D2560_N1024
     kernel_gemv_M1_K2560_N10240_S2_L0 kernel_gemv_M1_K2560_N9280_S2_L0
@@ -1967,19 +1967,10 @@ if(B70_K2)
   add_test(NAME k2_golden_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
   add_test(NAME k2_golden_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8
     --accept=prose:1)   # a known divergence, 2026-10-23 (debug 2026-10-26)
-  # Spec 18 §10: the same gate through the EAGER attention (k2_attn_eager.cl, the reference's
-  # bf16 chain) - the box's first session runs both pairs and compares (box-validation-queue
-  # row 14).
-  add_test(NAME k2_golden_eager_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_DIR})
-  add_test(NAME k2_golden_eager_i8head_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_DIR} int8)
-  set_tests_properties(k2_golden_eager_test k2_golden_eager_i8head_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
+  # (The k2_golden_eager_* rows, the gate through the EAGER attention, went with B70_K2_ATTN in
+  # the zero-config cleanup: flash is K2's attention, operator rulings 2026-10-23 / 2026-11-06.)
   set_tests_properties(k2_decode_test k2_decode_i8head_test k2_golden_test k2_golden_i8head_test
-    k2_golden_eager_test k2_golden_eager_i8head_test
     PROPERTIES LABELS "checkpoint;golden;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # Operator ruling 2026-10-23 (spec 18 §10.1): flash stays the default; the eager tests RECORD the
-  # routing rate / prefill-vs-decode set share / dense worst (printed with their bars, not
-  # failed on). Label `diagnostic` - the token gate still binds them.
-  set_property(TEST k2_golden_eager_test k2_golden_eager_i8head_test APPEND PROPERTY LABELS diagnostic)
 endif()
 # b70-decode's model_type dispatch, before the device: tests/model/k2/ holds only the
 # checkpoint's config.json, which is all the dispatch reads, so these run on any box with the
@@ -2017,8 +2008,7 @@ if(B70_K2)
     kernel_k2_pf_dequant_slab_K4096_N2560 kernel_k2_pf_dequant_slab_K2560_N12288
     kernel_k2_pf_dequant_slab_K6144_N2560 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
     kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8
-    kernel_k2_pf_flash_attn_Q32KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER
-    kernel_k2_pf_flash_attn_Q32KV8_O kernel_k2_pf_flash_attn_Q32KV8_EAGER_O
+    kernel_k2_pf_flash_attn_Q32KV8 kernel_k2_pf_flash_attn_Q32KV8_O
     kernel_k2_route_M1_E64_T4_N9472_O9216_S1 kernel_k2_pf_mova_E64_T4_D2560_N1024
     kernel_pf_moe_gemm_K2560_N1024 kernel_pf_moe_router_K2560_N128
     kernel_k2_route_M1_E100_T8_N128_O0_S1 kernel_k2_pf_moe_E100_T8_D2560_I768
@@ -2044,9 +2034,6 @@ if(B70_K2)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
   add_test(NAME k2_prefill_i8head_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all int8)
-  add_test(NAME k2_prefill_eager_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
-  set_tests_properties(k2_prefill_eager_test PROPERTIES ENVIRONMENT "B70_K2_ATTN=eager")
   # Operator ruling 2026-10-29: section 6's rows judged by the f32 reference of the forced context once f32_refs.sh
   # made it (tests/golden/forced_judge.h); the int8 head by its quantisation-aware twin.
   set_tests_properties(k2_prefill_test PROPERTIES ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
@@ -2054,9 +2041,8 @@ if(B70_K2)
     ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-k2-f32-i8head-forced;B70_FORCED_BF16=${CMAKE_SOURCE_DIR}/oracle-out-k2-bf16-forced")
   add_test(NAME prefill_split_k2_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
-  set_tests_properties(k2_prefill_test k2_prefill_i8head_test k2_prefill_eager_test prefill_split_k2_test
+  set_tests_properties(k2_prefill_test k2_prefill_i8head_test prefill_split_k2_test
     PROPERTIES LABELS "checkpoint;prefill;k2" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_property(TEST k2_prefill_eager_test APPEND PROPERTY LABELS diagnostic)   # see k2_golden_eager_test
 
   # K2 on prefill: 18b's golden test in its prefill mode (one chunk, and chunks of 16).
   target_link_libraries(k2_golden_test PRIVATE b70_k2_prefill)
@@ -2371,15 +2357,13 @@ if(B70_K2 AND B70_KV8)
   set(B70_K2_KV8_KERNELS
     kernel_k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 kernel_k2_attn_prep_M1_N9280_S2_Q32KV8_KV8
     kernel_k2_mova_M1_E64_T4_D2560_N1024_STAGE kernel_k2_attn_M1_T${ATTN_V2_TGT}_Q32KV8_KV8
-    kernel_k2_attn_eager_M1_T${ATTN_V2_TGT}_Q32KV8_KV8
     kernel_k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 kernel_k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
-    kernel_k2_pf_flash_attn_Q32KV8_KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER_KV8
-    kernel_k2_pf_flash_attn_Q32KV8_O_KV8 kernel_k2_pf_flash_attn_Q32KV8_EAGER_O_KV8)
+    kernel_k2_pf_flash_attn_Q32KV8_KV8 kernel_k2_pf_flash_attn_Q32KV8_O_KV8)
   add_test(NAME k2_kv8_variant_names_test COMMAND k2_variant_names_test kv8 ${B70_K2_KV8_KERNELS})
   set_tests_properties(k2_kv8_variant_names_test PROPERTIES LABELS "k2;kv8")
 
   # K1 on the card: the writers bitwise, MoVA's staged row bitwise the bf16 binary's, the decode
-  # flash pair within 2 ulps of fp64, eager bitwise k2_kv8_ref, the prefill flash vs fp64.
+  # flash pair within 2 ulps of fp64, the prefill flash vs fp64.
   add_executable(k2_kv8_kernels_test kernels/k2_kv8_kernels_test.cc)
   target_include_directories(k2_kv8_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(k2_kv8_kernels_test PRIVATE b70_prefill_host b70_k2_loader b70_k2_plan b70_l0)
@@ -2388,7 +2372,7 @@ if(B70_K2 AND B70_KV8)
   add_test(NAME k2_kv8_kernels_test COMMAND k2_kv8_kernels_test)
   set_tests_properties(k2_kv8_kernels_test PROPERTIES LABELS "k2;kv8" TIMEOUT 1800)
 
-  # The twins: B70_KV_CACHE=int8 (B70_K2_ATTN=eager on the eager ones), the bf16 tests' argv.
+  # The twins: B70_KV_CACHE=int8, the bf16 tests' argv.
   foreach(t k2_decode_test k2_golden_test k2_prefill_test)
     add_dependencies(${t} ${B70_K2_KV8_KERNELS})
   endforeach()
@@ -2401,26 +2385,19 @@ if(B70_K2 AND B70_KV8)
   add_test(NAME k2_golden_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
     --twin=${B70_K2_BF16_KV8_DIR})
   add_test(NAME k2_golden_i8head_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_I8HEAD_KV8_DIR} int8)
-  add_test(NAME k2_golden_eager_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
-    --twin=${B70_K2_BF16_KV8_DIR})
   add_test(NAME k2_golden_prefill_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
     --twin=${B70_K2_BF16_KV8_DIR} prefill)
   add_test(NAME k2_golden_prefill_c16_kv8_test COMMAND k2_golden_test ${B70_K2_SNAPSHOT} ${B70_K2_ORACLE_DIR} --judge=${B70_K2_F32_KV8_DIR}
     --twin=${B70_K2_BF16_KV8_DIR} prefill:16)
   add_test(NAME k2_prefill_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
-  add_test(NAME k2_prefill_eager_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
-    ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long.ids all)
   add_test(NAME prefill_split_k2_kv8_test COMMAND k2_prefill_test ${B70_K2_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/long32k.ids split)
   set(_k2kv8_flash k2_decode_kv8_test k2_golden_kv8_test k2_golden_i8head_kv8_test k2_golden_prefill_kv8_test
     k2_golden_prefill_c16_kv8_test k2_prefill_kv8_test prefill_split_k2_kv8_test)
-  set(_k2kv8_eager k2_golden_eager_kv8_test k2_prefill_eager_kv8_test)
   set_tests_properties(${_k2kv8_flash} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8")
-  set_tests_properties(${_k2kv8_eager} PROPERTIES ENVIRONMENT "B70_KV_CACHE=int8;B70_K2_ATTN=eager")
-  set_tests_properties(${_k2kv8_flash} ${_k2kv8_eager} PROPERTIES
+  set_tests_properties(${_k2kv8_flash} PROPERTIES
     LABELS "checkpoint;golden;k2;kv8" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  set_property(TEST ${_k2kv8_eager} APPEND PROPERTY LABELS diagnostic)   # see k2_golden_eager_test
   # Section 6 over the int8 cache judged as k2_prefill_test's (operator rulings 2026-10-29 / 2026-10-31): the
   # kv8-aware f32 reference of its forced context (f32_refs.sh forced k2 <dir> -kv8 --sim-kv8) and its bf16+kv8 twin.
   set_property(TEST k2_prefill_kv8_test APPEND PROPERTY ENVIRONMENT

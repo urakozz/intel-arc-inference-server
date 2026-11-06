@@ -18,18 +18,11 @@ namespace runtime::k2 {
 // is spec 13's), so the scratch is sized for one row and every K2 binary is `_M1`.
 inline constexpr uint32_t kM = 1;
 
-// Spec 18 §10: which decode attention every K2 capture binds - k2_attn.cl's flash form (fp32
-// scores and probabilities through an online softmax, one rounding at the end) or
-// k2_attn_eager.cl's eager form (the reference's own bf16 chain: scores and probabilities
-// rounded to bf16, the softmax over the full row in torch's order). `B70_K2_ATTN=flash|eager`,
-// read at each call (so a test can set it between engines); unset or
-// empty means the default; anything else throws. The choice lives here, beside the sizes,
-// because eager needs a score row the buffers allocate (attn_scores_bytes) and two more
-// launches a layer (decode_launches).
-enum class K2Attn { Flash, Eager };
-inline constexpr K2Attn kDefaultK2Attn = K2Attn::Flash;   // until the box A/B (spec 18 §10)
-K2Attn k2_attn();
-const char* k2_attn_name(K2Attn a);
+// Spec 18 §10: every K2 capture binds k2_attn.cl's flash decode attention (fp32 scores and
+// probabilities through an online softmax, one rounding at the end). The eager form
+// (k2_attn_eager.cl, B70_K2_ATTN=eager: the reference's bf16 chain) was removed in the
+// zero-config cleanup (operator 2026-11-06: flash kept; the eager HOST chain, k2_ref.h, stays
+// the reference several tests grade against).
 
 // The persistent group: what survives a token boundary and Engine reset() zeroes.
 //   control   runtime::Control, shared memory (the host writes cur_token, reads out_token)
@@ -107,11 +100,6 @@ struct ScratchSizes {
   }
 };
 ScratchSizes scratch_sizes(const model::K2Desc& d);
-// Eager's score row, fp32 [M][q_heads][max_len] (k2_attn_eager.cl attn_s: scores, then the
-// probabilities in place); 0 under flash. 4 MiB at 32k on K2. Outside ScratchSizes because it
-// scales with max_len; K2Buffers allocates it only under eager, plan() counts it in the
-// decode state.
-size_t attn_scores_bytes(const model::K2Desc& d, uint32_t max_len, K2Attn a = k2_attn());
 // The largest S x N over the int4 linears: the partials row the capture binds every GEMV to.
 size_t partials_floats(const model::K2Desc& d);
 
@@ -132,9 +120,8 @@ inline size_t tap_bytes(const model::K2Desc& d) { return size_t(d.layers) * kM *
 //                    route, gate||up (8 + shared), down + combine + residual
 //   5 at the boundary: the final fold + norm, lm_head, the two argmax stages
 // K2: 1 + 3 x 12 + 45 x 15 + 5 = 717 - against spec 18 §2's ~1000 estimate and spec 4's
-// 2067 (fixed slot launches). Under B70_K2_ATTN=eager every layer's decode + reduce is four
-// launches (score, softmax, P·V, reduce): + 2 x 48 = 813.
-size_t decode_launches(const model::K2Desc& d, K2Attn a = k2_attn());
+// 2067 (fixed slot launches).
+size_t decode_launches(const model::K2Desc& d);
 
 // --- Spec 18c: the prefill chunk ----------------------------------------------------------
 // One chunk of at most kPfC positions (= kernels::k2::kPfC, checked in k2_prefill.cc): every
@@ -233,7 +220,7 @@ struct Plan : MemoryComponents {
   KvCache kv_form = KvCache::Bf16;   // the cache's form (MemoryComponents::kv is its bytes)
 };
 Plan plan(const model::K2Desc& d, uint32_t max_len, size_t model_bytes, bool debug_tap = false,
-          bool prefill = false, K2Attn a = k2_attn(), KvCache kv = default_kv_cache());
+          bool prefill = false, KvCache kv = default_kv_cache());
 // The largest multiple of runtime::kMaxLenQuantum up to `cap` whose plan + reserve fits;
 // 0 when not even min(kMinAutoMaxLen, cap) does. Throws std::invalid_argument below a quantum.
 uint32_t max_len_that_fits(const model::K2Desc& d, size_t model_bytes, size_t device_bytes,

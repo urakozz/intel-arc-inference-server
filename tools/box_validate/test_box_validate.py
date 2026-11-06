@@ -1082,7 +1082,7 @@ class DriverTest(unittest.TestCase):
                              ("r25.serve", "r25.chat"), ("r25.chat", "r25.passkey"), ("r25.passkey", "r25.toolcall"),
                              ("r25.toolcall", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
-        for optin in ("r15.p0", "r15.speed", "r15.golden_eager", "r16.mtp_rows", "r16.passkey", "r16.benchy",
+        for optin in ("r15.p0", "r15.speed", "r16.mtp_rows", "r16.passkey", "r16.benchy",
                       "r16.a4", "r21.passkey", "r21.speed", "r25.a4_ref", "r25.a4", "r25.benchy"):
             self.assertNotIn(optin, order)
         # the server rows: one serve_run.sh per arm and round, round 2 in reversed order
@@ -1124,7 +1124,7 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r14", "--with", "r14.oracle").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r14.k0", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
-                                 "r14.golden", "r14.golden_eager", "r14.cli"])
+                                 "r14.golden", "r14.cli"])
         self.assertIn("tools/box_validate/k2_oracle.sh $HOME/b70-inference-server", out)
         out = self.run_driver("--dry-run", "--only", "r13").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
@@ -1134,7 +1134,8 @@ class DriverTest(unittest.TestCase):
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r15.k0", "r15.host", "r15.k1", "r15.prefill", "r15.split", "r15.golden",
                                  "r15.cli", "r15.speed"])
-        self.assertIn("pp4096-eager 'B70_K2_ATTN=eager B70_GIT_SHA=", out)
+        self.assertIn("pp4096 'B70_GIT_SHA=", out)
+        self.assertNotIn("B70_K2_ATTN=eager", out)   # the eager arm went in the zero-config cleanup
         out = self.run_driver("--dry-run", "--only", "r16").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r16.r0", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
@@ -1144,11 +1145,11 @@ class DriverTest(unittest.TestCase):
         self.assertIn("tools/box_validate/tok_diff.py", out)
         out = self.run_driver("--dry-run", "--only", "r21", "--with", "r21.passkey").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r21.k0", "r21.host", "r21.k1", "r21.k3", "r21.golden", "r21.golden_eager",
+        self.assertEqual(order, ["pre", "r21.k0", "r21.host", "r21.k1", "r21.k3", "r21.golden",
                                  "r21.prefill", "r21.split", "r21.golden_prefill", "r21.cli", "r21.passkey"])
         # the registered names (tests/CMakeLists.txt's 18e block), each with the k2 and kv8 labels
         for name in ("k2_kv8_kernels_test", "k2_decode_kv8_test", "k2_golden(_i8head)?_kv8_test",
-                     "k2_golden_eager_kv8_test", "k2_prefill(_eager)?_kv8_test", "prefill_split_k2_kv8_test",
+                     "k2_prefill_kv8_test", "prefill_split_k2_kv8_test",
                      "k2_golden_prefill(_c16)?_kv8_test"):
             self.assertIn("--re '^%s$' --label k2 --label kv8" % name, out)
         self.assertIn("k2_mova_M1_E64_T4_D2560_N1024_STAGE; do", out)          # the 11 int8 binaries built

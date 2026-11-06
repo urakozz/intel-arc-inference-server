@@ -346,10 +346,9 @@ int serve_k2(const K2Serve& a, server::Options options) {
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
   print_eos(eos);
-  std::fprintf(stderr, ", K2-Horizon (%s chat format), prefill backend l0, attention %s "
-                       "(B70_K2_ATTN), mtp none, lm_head %s, kv cache %s, prefix snapshots KV-only\n",
-               options.chat_format.name(), runtime::k2::k2_attn_name(runtime::k2::k2_attn()),
-               loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
+  std::fprintf(stderr, ", K2-Horizon (%s chat format), prefill backend l0, attention flash, "
+                       "mtp none, lm_head %s, kv cache %s, prefix snapshots KV-only\n",
+               options.chat_format.name(), loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
   return listen_until_stopped(server, options);
 }
 

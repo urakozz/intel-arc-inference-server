@@ -17,7 +17,6 @@
 int main() {
   namespace k2 = runtime::k2;
   const model::K2Desc& d = model::k2();
-  unsetenv("B70_K2_ATTN");   // the defaults below are flash's (spec 18 §10's switch is tested after)
 
   // Review Focus 5: 1 + 3 x 12 + 45 x 15 + 5 against spec 18 §2's ~1000 estimate.
   CHECK_EQ(k2::decode_launches(d), size_t(717));
@@ -52,34 +51,6 @@ int main() {
   CHECK_EQ(p.total(), size_t(28262548344ull));   // spec 18 decision 2 (A): 32k bf16 KV on one card
   CHECK_EQ(k2::plan(d, 32768, w_int8).total(), size_t(27621953400ull));
   CHECK_EQ(k2::plan(d, 32768, w_bf16, true).decode_state, p.decode_state + k2::tap_bytes(d));
-
-  // Spec 18 §10: B70_K2_ATTN. Flash is the default and changes nothing above; eager adds two
-  // launches a layer and a [M][q_heads][max_len] fp32 score row to the decode state.
-  unsetenv("B70_K2_ATTN");
-  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
-  CHECK_EQ(k2::attn_scores_bytes(d, 32768), size_t(0));
-  CHECK_EQ(k2::decode_launches(d, k2::K2Attn::Eager), size_t(717 + 2 * 48));
-  CHECK_EQ(k2::attn_scores_bytes(d, 32768, k2::K2Attn::Eager), size_t(32) * 32768 * 4);   // 4 MiB
-  CHECK_EQ(k2::plan(d, 32768, w_bf16, false, false, k2::K2Attn::Eager).decode_state,
-           p.decode_state + size_t(32) * 32768 * 4);
-  setenv("B70_K2_ATTN", "eager", 1);
-  CHECK(k2::k2_attn() == k2::K2Attn::Eager);
-  CHECK_EQ(k2::decode_launches(d), size_t(813));   // the defaults follow the variable, as capture does
-  CHECK_EQ(k2::plan(d, 32768, w_bf16).decode_state, p.decode_state + size_t(32) * 32768 * 4);
-  setenv("B70_K2_ATTN", "flash", 1);
-  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
-  setenv("B70_K2_ATTN", "", 1);
-  CHECK(k2::k2_attn() == k2::K2Attn::Flash);
-  setenv("B70_K2_ATTN", "fp32", 1);
-  bool bad = false;
-  try {
-    (void)k2::k2_attn();
-  } catch (const std::runtime_error& e) {
-    bad = std::string(e.what()).find("expected flash or eager") != std::string::npos;
-  }
-  CHECK(bad);
-  unsetenv("B70_K2_ATTN");
-  CHECK_EQ(std::string(k2::k2_attn_name(k2::K2Attn::Eager)), std::string("eager"));
 
   // --max-len auto on a 32.53 GB card with the default 1.5 GB reserve: the largest quantum
   // that fits, and one more quantum does not.
@@ -150,7 +121,7 @@ int main() {
     CHECK_EQ(l8.scales_offset(0), size_t(48) * 32768 * 1024);   // after every layer's rows
     CHECK_EQ(l8.scales_offset(47) + l8.layer_scales(), p8.kv_k);
   }
-  const k2::Plan p8p = k2::plan(d, 32768, w_bf16, false, false, k2::K2Attn::Flash, KvCache::Int8);
+  const k2::Plan p8p = k2::plan(d, 32768, w_bf16, false, false, KvCache::Int8);
   CHECK_EQ(p8p.kv, p8.kv());
   CHECK_EQ(p8p.decode_state, p.decode_state);
   CHECK_EQ(p8p.total(), p.total() - p.kv + p8.kv());
@@ -167,14 +138,11 @@ int main() {
     for (int pfl = 0; pfl < 2; ++pfl) {
       const size_t w = h ? w_int8 : w_bf16;
       fit8[h][pfl] = k2::max_len_that_fits(d, w, dev, res, 524288, pfl == 1, KvCache::Int8);
-      CHECK(k2::plan(d, fit8[h][pfl], w, false, pfl == 1, k2::K2Attn::Flash, KvCache::Int8).total() + res <= dev);
-      CHECK(k2::plan(d, fit8[h][pfl] + runtime::kMaxLenQuantum, w, false, pfl == 1, k2::K2Attn::Flash,
+      CHECK(k2::plan(d, fit8[h][pfl], w, false, pfl == 1, KvCache::Int8).total() + res <= dev);
+      CHECK(k2::plan(d, fit8[h][pfl] + runtime::kMaxLenQuantum, w, false, pfl == 1,
                      KvCache::Int8).total() + res > dev);
     }
   const uint32_t fit8_pf_i8 = fit8[1][1];
-  setenv("B70_K2_ATTN", "eager", 1);
-  const uint32_t fit8_eager = k2::max_len_that_fits(d, w_bf16, dev, res, 524288, false, KvCache::Int8);
-  unsetenv("B70_K2_ATTN");
   const uint32_t fit_pf_i8 = k2::max_len_that_fits(d, w_int8, dev, res, 524288, true);
   // Derived on this 32.53 GB / 1.5 GB-reserve card: spec 18 §2 / plan 18e said ~64k for one
   // card with int8 KV; the planner gives 1.9-2.0x bf16 KV's lengths.
@@ -182,13 +150,12 @@ int main() {
   CHECK_EQ(fit8[1][0], 98304u);
   CHECK_EQ(fit8[0][1], 83968u);
   CHECK_EQ(fit8[1][1], 90368u);
-  CHECK_EQ(fit8_eager, 91648u);
   CHECK_EQ(fit_pf_i8, 45824u);
   std::printf("int8 KV (spec 18e): %zu B / position (bf16 %zu); auto -> decode-only %u (bf16 head) / %u "
-              "(int8 head), with prefill %u / %u; eager decode-only %u (bf16 head) - against bf16 KV's "
+              "(int8 head), with prefill %u / %u - against bf16 KV's "
               "%u / %u and %u / %u\n", p8.kv() / 32768, ps.kv() / 32768, fit8[0][0], fit8[1][0], fit8[0][1],
-              fit8_pf_i8, fit8_eager, fit_b, fit_i, fit_pf, fit_pf_i8);
-  std::printf("k2_plan_test OK: 717 launches (813 eager); auto -> %u (bf16 head) / %u (int8 head) on "
+              fit8_pf_i8, fit_b, fit_i, fit_pf, fit_pf_i8);
+  std::printf("k2_plan_test OK: 717 launches; auto -> %u (bf16 head) / %u (int8 head) on "
               "a %.2f GB card with a %.1f GB reserve\n", fit_b, fit_i, dev / 1e9, res / 1e9);
   return 0;
 }

@@ -25,7 +25,7 @@
 #include "loader/snapshot.h"
 #include "loader/trained_context.h"
 #include "runtime/k2/k2_engine.h"
-#include "runtime/k2/k2_prefill.h"   // spec 18c: prefill_attn_eager (b70_k2_prefill)
+#include "runtime/k2/k2_prefill.h"   // spec 18c (b70_k2_prefill)
 #include "runtime/k2/k2_sizes.h"
 
 namespace cli::k2 {
@@ -85,7 +85,7 @@ inline uint32_t settle(l0::Context& ctx, loader::K2LoadedModel& m, const MaxLenA
   const model::K2Desc& d = *m.desc;
   const size_t weights = m.report.bytes.total(), device = ctx.memory_bytes();
   const auto plan_at = [&](uint32_t n) {
-    return runtime::k2::plan(d, n, weights, false, prefill, runtime::k2::k2_attn(), kv);
+    return runtime::k2::plan(d, n, weights, false, prefill, kv);
   };
   uint32_t len = a.value;
   if (a.is_auto) {
@@ -160,9 +160,8 @@ int run_decode(const DecodeArgs& a) {
   if (prefill) {
     eng.prepare_prefill();
     pp_launches0 = eng.prefill_launches();
-    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention %s (B70_K2_ATTN), %zu launches per "
+    std::fprintf(stderr, "prefill: l0 backend, chunk %u, attention flash, %zu launches per "
                  "chunk + %zu for the head\n", a.pp_chunk ? a.pp_chunk : runtime::k2::kPfC,
-                 runtime::k2::prefill_attn_eager() ? "eager" : "flash",
                  runtime::k2::prefill_chunk_launches(*eng.model().desc), runtime::k2::kPrefillHeadLaunches);
   }
   std::fprintf(stderr, "%s\n", eng.memory_line().c_str());
