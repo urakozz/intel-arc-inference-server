@@ -115,6 +115,11 @@ struct Weights {
 
 // --- the backbone's pieces ------------------------------------------------------------------------------------------
 
+// The exp attention_sink() uses (default libm's expf, what the twin always used). A test may swap it - e.g. for
+// dfref::attn_exp, a different exp within 1-2 fp32 ulps - to price how far the drafter's outputs move when only the
+// attention's exp ulps change (lilicorr_draft_test --diag). ll_attn.cl uses the device's builtin exp.
+inline float (*attn_sink_exp)(float) = [](float x) { return std::exp(x); };
+
 // ll_attn: df_attn's chain + the sink. `sink` [NH] fp32 (this layer's).
 inline void attention_sink(const dfref::AttnDims& a, const float* q, const float* kb, const float* vb, const float* ring_k,
                            const float* ring_v, uint32_t p, uint32_t K, const float* sink, float* out) {
@@ -144,7 +149,7 @@ inline void attention_sink(const dfref::AttnDims& a, const float* q, const float
         std::vector<float> e(a.PB, 0.0f);
         if (m != -INFINITY)
           for (uint32_t t = 0; t < a.PB; ++t) {
-            e[t] = s[t] == -INFINITY ? 0.0f : std::exp(s[t] - m);
+            e[t] = s[t] == -INFINITY ? 0.0f : attn_sink_exp(s[t] - m);
             l = l + e[t];
           }
         for (uint32_t d = 0; d < HD; ++d) {
@@ -172,14 +177,14 @@ inline void attention_sink(const dfref::AttnDims& a, const float* q, const float
       float l = 0.0f;
       std::vector<float> wb(a.tgt(), 0.0f), wj(a.M, 0.0f);
       for (uint32_t b = 0; b < a.tgt(); ++b) {
-        wb[b] = bm[b] == -INFINITY ? 0.0f : std::exp(bm[b] - m);
+        wb[b] = bm[b] == -INFINITY ? 0.0f : attn_sink_exp(bm[b] - m);
         l = l + bl[b] * wb[b];
       }
       for (uint32_t j = 0; j < a.M; ++j) {
-        wj[j] = sb[j] == -INFINITY ? 0.0f : std::exp(sb[j] - m);
+        wj[j] = sb[j] == -INFINITY ? 0.0f : attn_sink_exp(sb[j] - m);
         l = l + wj[j];
       }
-      l = l + std::exp(sink[h] - m);   // the sink: the denominator only, once, after the blocks and the keys
+      l = l + attn_sink_exp(sink[h] - m);   // the sink: the denominator only, once, after the blocks and the keys
       for (uint32_t d = 0; d < HD; ++d) {
         float acc = 0.0f;
         for (uint32_t b = 0; b < a.tgt(); ++b) acc = acc + bacc[size_t(b) * HD + d] * wb[b];

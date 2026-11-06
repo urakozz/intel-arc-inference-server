@@ -4,7 +4,11 @@
 // checkpoint is needed - against the host twin tests/kernels/lilicorr_ref.h fed the same weights (the loader's own host
 // forms) and the card's ring. One card (the drafter's device, Decision 8's device 1 in Bolt's layout; any card here).
 //
-//   lilicorr_draft_test <drafter repo or dir> [exact|int8|int4]      (all three when none is given; SKIP 77 without it)
+//   lilicorr_draft_test <drafter repo or dir> [exact|int8|int4] [--diag]   (all three when none is given; SKIP 77 without it)
+//   --diag (test-only, docs/probes/lilicorr-exact-divergence-2026-11-07.md): after step 2, before its check, where the
+//   card and the twin part - the final-norm rows, the target head and the log-softmax over the CARD's rows, the worst
+//   log-prob - and how far the twin moves against itself when only its exp changes (SiLU's, the attention's: libm's
+//   expf -> dfref::attn_exp, 1-2 fp32 ulps apart, the size of the card's builtin exp vs libm's). Prints only.
 //
 //   1. The lists capture to their formulas' launch counts (116 draft, 9 projection); 1100 positions of random taps are
 //      projected 8 a replay (the 1024-slot ring wraps); the last replay's ring rows equal the twin's (bf16 within an
@@ -84,7 +88,7 @@ int ulps(uint16_t a, uint16_t b) {
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    std::fprintf(stderr, "usage: lilicorr_draft_test <LiLiCorr repo or dir> [exact|int8|int4]\n");
+    std::fprintf(stderr, "usage: lilicorr_draft_test <LiLiCorr repo or dir> [exact|int8|int4] [--diag]\n");
     return 2;
   }
   std::string snap;
@@ -96,6 +100,7 @@ int main(int argc, char** argv) {
   }
   std::vector<loader::DraftFormat> formats = {loader::DraftFormat::Int8, loader::DraftFormat::Exact,
                                               loader::DraftFormat::Int4G64};
+  const bool diag = argc >= 4 && std::string(argv[3]) == "--diag";
   if (argc >= 3) {
     loader::DraftFormat f;
     CHECK(loader::parse_lilicorr_draft_format(argv[2], f));
@@ -207,6 +212,87 @@ int main(int argc, char** argv) {
     if (same == 7) lc = dfref::cosine(&o.lattice[0][0][0], want.lattice.data(), want.lattice.size());
     std::printf("2. draft at p %u: candidate sets %d / 7 (in order %d), log-probs within %.2e, lattice cosine %.9f, walk "
                 "%s; %.3f ms host-timed\n", NPOS, sets, same, lpd, lc, walk ? "=" : "DIFFERS", ms);
+    if (diag) {
+      // (a) the backbone: the card's final-norm rows (fp32 h, bf16 x) against the twin's
+      std::vector<float> ch(size_t(M) * H);
+      std::vector<uint16_t> cx(size_t(M) * H);
+      imm.copy(ch.data(), b.h.ptr(), ch.size() * 4);
+      imm.copy(cx.data(), b.x.ptr(), cx.size() * 2);
+      for (uint32_t r = 0; r < M; ++r) {
+        double mx = 0;
+        int flips = 0, worst = 0;
+        for (uint32_t i = 0; i < H; ++i) {
+          const size_t at = size_t(r) * H + i;
+          mx = std::fmax(mx, std::fabs(double(ch[at]) - want.hidden[at]));
+          const int u = ulps(cx[at], dfref::rne(want.hidden[at]));
+          flips += u != 0;
+          worst = std::max(worst, u);
+        }
+        std::printf("diag a. final-norm row %u: cosine %.9f, max |h diff| %.3e, bf16 x differing %d / %u (worst %d ulps)\n", r,
+                    dfref::cosine(&ch[size_t(r) * H], &want.hidden[size_t(r) * H], H), mx, flips, H, worst);
+      }
+      // (b) the target head + top-k + log-softmax over the CARD's rows 1..7 in the twin: what is left is the head's
+      std::vector<float> clog(size_t(7) * V), tlog(size_t(7) * V);
+      imm.copy(clog.data(), b.logits.ptr(), clog.size() * 4);
+      tw.head.apply(cx.data() + H, ch.data() + H, 7, tlog.data());
+      double hl = 0, hlp = 0;
+      int hcand = 0;
+      for (uint32_t s = 0; s < 7; ++s) {
+        for (uint32_t i = 0; i < V; ++i)
+          hl = std::fmax(hl, std::fabs(double(clog[size_t(s) * V + i]) - tlog[size_t(s) * V + i]));
+        const llref::TopK t = llref::topk_lse(&tlog[size_t(s) * V], D.used, 8);
+        for (uint32_t i = 0; i < 8; ++i) {
+          hcand += t.id[i] == o.cand[s][i];
+          hlp = std::fmax(hlp, std::fabs(double(o.lp[s][i]) - t.lp[i]));
+        }
+      }
+      std::printf("diag b. over the card's rows: head logits max |diff| %.3e (bitwise expected), candidates %d / 56 in order, "
+                  "log-probs within %.3e\n", hl, hcand, hlp);
+      // (c) the worst log-prob of step 2, split into its logit and its logsumexp (lse = logit - lp)
+      uint32_t ws = 0, wi = 0;
+      double wd = -1;
+      for (uint32_t s = 0; s < 7; ++s)
+        for (uint32_t i = 0; i < 8; ++i) {
+          const double dd = std::fabs(double(o.lp[s][i]) - want.lp[s * 8 + i]);
+          if (dd > wd) wd = dd, ws = s, wi = i;
+        }
+      std::printf("diag c. worst log-prob: slot %u rank %u, id card %u / twin %u, lp %.6f / %.6f, logit %.6f / %.6f, lse "
+                  "%.6f / %.6f\n", ws, wi, o.cand[ws][wi], want.cand[ws * 8 + wi], o.lp[ws][wi], want.lp[ws * 8 + wi],
+                  o.logit[ws][wi], want.logit[ws * 8 + wi], o.logit[ws][wi] - o.lp[ws][wi],
+                  want.logit[ws * 8 + wi] - want.lp[ws * 8 + wi]);
+      for (uint32_t s = 0; s < 7; ++s) {
+        std::printf("diag c. slot %u card:", s);
+        for (uint32_t i = 0; i < 8; ++i) std::printf(" %u:%.5f", o.cand[s][i], o.logit[s][i]);
+        std::printf("\ndiag c. slot %u twin:", s);
+        for (uint32_t i = 0; i < 8; ++i) std::printf(" %u:%.5f", want.cand[s * 8 + i], want.logit[s * 8 + i]);
+        std::printf("\n");
+      }
+      // (d) the twin against itself with one exp swapped (libm's expf -> attn_exp, 1-2 fp32 ulps): the sensitivity
+      auto vs_twin = [&](const char* what) {
+        const llref::DraftOut p = llref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, true, 1234, NPOS, 7);
+        double d = 0, hc = 1;
+        int sm = 0;
+        for (uint32_t s = 0; s < 7; ++s) {
+          sm += std::equal(p.cand.begin() + s * 8, p.cand.begin() + (s + 1) * 8, want.cand.begin() + s * 8);
+          for (uint32_t i = 0; i < 8; ++i) d = std::fmax(d, std::fabs(double(p.lp[s * 8 + i]) - want.lp[s * 8 + i]));
+        }
+        for (uint32_t r = 0; r < M; ++r)
+          hc = std::fmin(hc, dfref::cosine(&p.hidden[size_t(r) * H], &want.hidden[size_t(r) * H], H));
+        std::printf("diag d. twin vs twin, %s: candidates in order %d / 7, log-probs within %.3e, worst row cosine %.9f\n",
+                    what, sm, d, hc);
+      };
+      float (*const libm_exp)(float) = dfref::silu_exp;
+      float (*const libm_attn)(float) = llref::attn_sink_exp;
+      dfref::silu_exp = dfref::attn_exp;
+      vs_twin("SiLU's exp -> attn_exp");
+      dfref::silu_exp = libm_exp;
+      llref::attn_sink_exp = dfref::attn_exp;
+      vs_twin("the attention's exp -> attn_exp");
+      dfref::silu_exp = dfref::attn_exp;
+      vs_twin("both");
+      dfref::silu_exp = libm_exp;
+      llref::attn_sink_exp = libm_attn;
+    }
     CHECK(sets == 7 && lc >= 0.99999 && walk && lpd <= 1e-3);
     CHECK(o.k == 7 && o.anchor == 1234 && o.pos == NPOS && o.anchor_valid == 1);
     {   // Review Focus 5: the block's own K / V never reach the ring - a draft leaves the ring and the anchor as they were
