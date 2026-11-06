@@ -230,9 +230,9 @@ The linear path itself, split one wait per slab for attribution: `slab_dequant` 
 floor (199 TFLOP at 156.53 TFLOP/s = 1278 ms), and the dequant ceiling was then tested and
 lost (see the fused-dequant probe in [probes/](probes/probe-fused-dequant-2026-09-22.md)).
 
-**Whole-chunk Level Zero replay: kept experimental.** `B70_PREFILL_REPLAY=1` records the
-chunk's launches (an eight-entry FIFO keyed by position and active row count) and replays
-them. It is numerically exact on every exercised case (GDN state, conv history, both KV
+**Whole-chunk Level Zero replay: tried, removed.** `B70_PREFILL_REPLAY=1` recorded the
+chunk's launches (an eight-entry FIFO keyed by position and active row count) and replayed
+them (the zero-config cleanup, 2026-11-06, removed it). It was numerically exact on every exercised case (GDN state, conv history, both KV
 caches, control and logits, bitwise, including ragged tails and eviction) and saved
 **13.75 ms** against a 204 ms gap, about 0.5%: not the lever, and the complexity is real.
 

@@ -361,7 +361,7 @@ docs/probes/probe-mtp-2026-09-27.md); Qwen3.8 loads in 13.6 s on a warm page cac
 docs/10); pp4096 at 2125 t/s and pp130816 in 175 s (746.6 t/s), decode ~30 t/s, ~20 t/s at
 128k (measured, BENCHMARKS); the stage titles' and rownotes' own figures (`r14.load` ~5 min a
 test, `r14.oracle` ~20 min, `r24.oracle_synth` ~1 h, `r8.m3_small` ~1.5 h per size, `r22.s1_32k`
-~20 min a `--pp 2` arm, `r23.s2_128k` ~2.5 min a one-card run, `r27.p3` ~1 h a placement);
+~20 min a `--parallel pp` arm, `r23.s2_128k` ~2.5 min a one-card run, `r27.p3` ~1 h a placement);
 everything else is ~10-30 min a checkpoint test stage.
 
 ### Session 1 - G0 (stop the line)
@@ -552,7 +552,7 @@ unprofiled. Watch hw-smi by hand during it; the per-phase bytes and GB/s are der
 
 The one number DFlash's go / no-go still needs. P0 (Tasks 2-3, `docs/probes/probe-dflash-2026-10-08.md`)
 measured the acceptance on the Mac: 7.21 tokens per verify at K = 7 on the A4 tool calls, 6.15 on
-code, ~2.2 on prose; its projection against `--mtp auto` (+54 % / +65 % / +17 %) **extrapolates**
+code, ~2.2 on prose; its projection against the adaptive MTP (`--spec auto`; +54 % / +65 % / +17 %) **extrapolates**
 verify(M) past spec 8's measured M = 2..4 (1.17 / 1.52 / 1.74 plain steps) to M = 8 = 2.62. If
 verify(8) comes out near 3.5, A4's margin shrinks to ~+17 %.
 
@@ -598,7 +598,7 @@ arms x 104 calls and 7 x 3 pairs of 32 calls at 35-90 ms a call, ~2-4 min; the d
 ~8 GB of random weights, then runs for seconds).
 
 Then plan 19a Task 5 (a Mac edit): re-run `docs/probes/probe-dflash-2026-10-08.md` §3's table with
-the measured costs and record the verdict in spec 19 (`≥ 10 %` over `--mtp auto` on the coding
+the measured costs and record the verdict in spec 19 (`≥ 10 %` over the adaptive MTP (`--spec auto`) on the coding
 and agentic sets = go for 19b).
 
 ### Session 6c - the llama-benchy comparison matrix (row 41), box idle
@@ -615,7 +615,7 @@ Each stage serves one engine at a time (never two on the card) and runs three ma
 `--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md` verbatim (the usual published
 form; a repeated prompt may hit a prefix cache), **B** = A with `--no-cache` (the fair
 cross-engine reading), **D** = `--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2
---no-cache` (agentic depth). Arms: `b70-serve --mtp 0` and `--mtp auto` (`r41.ours`), vLLM plain
+--no-cache` (agentic depth). Arms: `b70-serve --spec off` and `--spec auto` (`r41.ours`), vLLM plain
 (`r41.vllm`), vLLM's MTP-4 + fp8-KV recipe (`r41.vllm_mtp`; if the XPU image refuses or crashes on
 it, `~/benchy-vllm.log` is the reading - no patches).
 
@@ -876,14 +876,14 @@ named stage.
 
 | decision | read from | the rule |
 |---|---|---|
-| 16b decode hand-off default (`--pipeline-handoff copy\|peer`) | `r22.s1` (+ `r22.p1` under peer) | keep `copy` unless `peer` wins S1 **and** P1 holds bitwise under peer; S1's bar: `--pp 2` within 2 % of one card |
+| 16b decode hand-off default (`--pipeline-handoff copy\|peer`) | `r22.s1` (+ `r22.p1` under peer) | keep `copy` unless `peer` wins S1 **and** P1 holds bitwise under peer; S1's bar: `--parallel pp` within 2 % of one card |
 | `pp_recv`'s `spin_limit` | `r22.p4` | the peer throw's time / 2^24 is the first measured per-load time; if a clean step ever times out, raise the default |
 | 16c prefill hand-off default, multi-group peer copy | `r23.s2_4k`, `r23.s2_32k`, `r23.s2_64k` (copy vs peer arms) | `copy` stays the default; if `peer`'s single work-group 20 MB copy costs more than a few % of a chunk, note it (a multi-group variant is the fix) |
 | byte-balanced vs time-balanced split | the `pp: device N busy` lines of the S2 stages; opt-in `r23.split_sweep` | if device 1's ~3 % slower prefill unbalances the busy times, a time-balanced cut (30 / 32 / 34 swept) |
 | S2 bars | `r23.s2_4k` (>= 1.2x), `r23.s2_32k` / `r23.s2_64k` (>= 1.7x) | estimates to confirm or re-derive |
 | MTP cost tables (`MtpCost` defaults) | `r2.cost` (int8 head, verify M = 1..4, draft k = 1..3); at depth `r6.cost` (32k, 120k) | replace the defaults with the measured table |
 | draft-vocab default and draft shares | `r8.rows` (medians); `r8.cost` -> `kInt8DraftHeadShare` / `kBf16DraftHeadShare` | the default leaves `off` only if a size beats it by >= 2 % on A4 and loses nowhere (operator's ruling) |
-| Ornith `--mtp-cost` default and default K | `r16.cost` | an Ornith table beside Qwen3.8's |
+| Ornith MTP cost table default and default K | `r16.cost` | an Ornith table beside Qwen3.8's |
 | int8 KV: tolerances and default | `r11.kernels` (gated flash rows, PROVISIONAL >= 0.9999 - the card's first run sets them; `flash_long_kv8_test` at 2e-3 per depth / 5e-4 averaged, set in `0f13512`), `r11.q2` (`kv8_vs_oracle_test` <= 1e-4), `r11.speed` (1.1x / 1.15x / 1.2x at 32k / 64k / 128k, prefill <= 3 % worse) | int8 the default only after every row-11 gate passes (plan 12b Task 4 Step 3) |
 | K2 near-tie tolerance `B70_K2_TIE_TOL` | `r14.oracle`'s selection-gap distribution (MoE 8th / 9th, MoVA 4th / 5th) | 1e-3 proposed; the driver forwards `B70_K2_TIE_TOL` to `r14.golden`, `r15.golden`, `r15.cli` and the `r21.golden`, `r21.golden_eager`, `r21.golden_prefill` twins; re-run those with `--redo` once set |
 | K2 attention default (`kDefaultK2Attn`) | `r14.golden` vs `r14.golden_eager` (and `r21.golden` vs `r21.golden_eager` on int8 KV); eager's cost from opt-in `r15.speed`'s eager pairs | spec 18 §10.1: `eager` if flash fails determined rows that eager passes, or both pass and eager's routing diagnostic is strictly closer; otherwise `flash`; if eager wins and costs > ~3 % at 32k, a faster eager next |
@@ -896,7 +896,7 @@ named stage.
 | Ornith int4 a\|\|b cell (PROVISIONAL S1 L1) | opt-in `r10.p0` (its share of the 526 launches) | an S > 1 form needs gdn_step to sum slices (a P0 arm, not built) |
 | Agnes GEMV cells P1-P3 | `r1.sweep` | replace `make_agnes()`'s {S, L} picks and `add_gemv_variant` cells, rebuild, **G0 again** |
 | Agnes W (P4) and speeds (P7) | `r1.load` (W within 2 %), `r1.speed` | replace the PENDING numbers |
-| `--mem-reserve-gb` 1.5 | `r7.serve` (device memory via xpu-smi while a fresh server is up) | confirm, or tune after a long operator session |
+| the 1.5 GB reserve (`kDefaultReserveGb`) | `r7.serve` (device memory via xpu-smi while a fresh server is up) | confirm, or tune after a long operator session |
 | `--prefix-cache-gb auto` | `r9.auto` (startup line and its /proc/meminfo inputs) | confirm the chosen size |
 | MTP embedding on device 1 | `r27.serve`, `r27.s3` memory lines | already **decided: replicate** (operator, 2026-10-07); the box only confirms it fits |
 

@@ -102,11 +102,11 @@ The MTP head, all **bf16**, 0.85 GB: `mtp.fc` `[5120, 10240]` (fusing embedding
 ‖ hidden), `pre_fc_norm_embedding`, `pre_fc_norm_hidden`, one full transformer
 layer at the main model's shapes, `mtp.norm`. It shares `embed_tokens` and
 `lm_head` with the main model, so a draft step would read 0.85 + 2.54 GB and
-`lm_head` width would matter twice. The engine loads it behind `--mtp K`
-(spec 8): `b70-serve --mtp K` drafts K tokens with it and verifies them in one
-step of K + 1 rows (docs/BENCHMARKS.md, "MTP speculative decoding");
-`--mtp auto` chooses K per iteration from each request's own acceptance (spec 8
-§10). Without the flag it is skipped, as before.
+`lm_head` width would matter twice. The engine loads it behind `--spec mtp`
+(spec 8; `b70-serve`'s default `--spec auto` on this model): it drafts up to K
+tokens and verifies them in one step of K + 1 rows (docs/BENCHMARKS.md, "MTP
+speculative decoding"), K chosen per iteration from each request's own
+acceptance (spec 8 §10) up to `--spec-max`. With `--spec off` it is skipped.
 
 ### Layer math, verified against the modeling file
 
@@ -207,8 +207,9 @@ index and the safetensors headers only, no tensor data, and prints this table,
 **`lm_head` forms (spec 9).** The engine reads the head in one of three forms: bf16 as
 shipped (2.543 GB), int4 g64 when a self-quantised checkpoint ships it packed (0.675 GB),
 or **int8 per row with one fp32 scale per row, quantised at load** from the bf16 tensor
-(`--lm-head int8`, 1,271,398,400 + 993,280 B = 1.272 GB, `W` 14.270 GB). `b70-serve`
-defaults to int8, `b70-decode` to the checkpoint's own head.
+(1,271,398,400 + 993,280 B = 1.272 GB, `W` 14.270 GB). Both CLIs run the int8 head since
+the zero-config cleanup (`b70-decode --lm-head bf16` was the byte-matched arm); the tests keep
+`loader::LmHeadForm` as their seam for the checkpoint's bf16 head.
 
 ### Three facts that drive the design
 
