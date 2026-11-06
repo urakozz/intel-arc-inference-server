@@ -327,7 +327,7 @@ The scripts in `tools/`:
 | variable | read by | default | what it does |
 |---|---|---|---|
 | `BOX` | `box.sh`, `bench_decode.sh`, `serve_bench.sh`, `box_validate.sh` | none, required | ssh target (`user@host`) of the machine with the GPU. Set it in the environment or in the untracked `tools/box.env` (copy `tools/box.env.example`); the environment wins. |
-| `REMOTE_DIR` | the same | from the branch | the tree on the box, relative to its `$HOME`: `b70-inference-server`, `-spec7a` for a `spec7a-*` branch, `-research` for `research-*` (`tools/box_dir.sh`); `box_validate.sh` uses `-validate`. |
+| `REMOTE_DIR` | the same | from the branch | the tree on the box, relative to its `$HOME`: `b70-inference-server` for main, `b70/trees/spec7a` for a `spec7a-*` branch, `b70/trees/research` for `research-*`, `b70/trees/<branch>` for any other (`tools/box_dir.sh`); `box_validate.sh` uses `b70-inference-server-validate`. |
 | `BOX_SUFFIX` | the same | from the branch | overrides that suffix; `none` forces the base tree. |
 | `JOBS` | `box.sh` (and every script that builds through it) | `44` | parallelism of the remote build |
 | `BUILD_DIR`, `CMAKE_ARGS` | `box.sh` | `build`, empty | build directory on the box and extra `-D` flags for the configure step |
