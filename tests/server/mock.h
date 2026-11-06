@@ -364,7 +364,7 @@ struct DrafterMockEngine : StateMockEngine {
   }
 };
 
-// Spec 13 (plan 13c Task 1): a batched engine with `n_slots` independent sessions, each a
+// Spec 13 (plan 13b Task 1): a batched engine with `n_slots` independent sessions, each a
 // StateMockEngine: the next id is a function of the slot's state hash AND its KV ids, so a
 // wrong restore or a row mixed up with another slot's generates different ids. Sampled rows
 // draw from the row's own generator only. `clock` counts cost in mock ticks: a decode step

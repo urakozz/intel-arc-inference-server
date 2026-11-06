@@ -157,7 +157,7 @@ target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(adaptive_k_test PRIVATE b70_server)
 add_test(NAME adaptive_k_test COMMAND adaptive_k_test)
 
-# Spec 13 B4 (plan 13c Task 1): the batching scheduler over a mock batched engine, host only.
+# Spec 13 B4 (plan 13b Task 1): the batching scheduler over a mock batched engine, host only.
 add_executable(scheduler_test server/scheduler_test.cc)
 target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(scheduler_test PRIVATE b70_server)

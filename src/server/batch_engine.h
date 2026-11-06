@@ -1,6 +1,6 @@
 #pragma once
-// Spec 13 (plan 13c Task 1): what the batching scheduler (server/scheduler.h) needs from a
-// batched engine. Plan 13b implements it on runtime::Engine (per-slot state, KV base and
+// Spec 13 (plan 13b Task 1): what the batching scheduler (server/scheduler.h) needs from a
+// batched engine. Plan 13c implements it on runtime::Engine (per-slot state, KV base and
 // Control; one captured decode list per batch size); tests/server/mock.h has a host mock
 // (MockBatchEngine) the scheduler is written and tested against.
 //
@@ -42,7 +42,7 @@ struct BatchEngineIface {
   // per row in order, the slot's pending id (consumed). The next pending id is the argmax,
   // or with !sampling->greedy a draw from the filtered row (server::filter_probs) with
   // *rng - the request's own generator, so a seeded request draws the same ids whatever
-  // else shares the step (plan 13c Review Focus 4).
+  // else shares the step (plan 13b Review Focus 4).
   struct Row {
     uint32_t slot;
     const Sampling* sampling;

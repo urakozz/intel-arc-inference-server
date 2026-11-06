@@ -8,7 +8,7 @@
 // **The allocation.** ONE engine (the int8 lm_head, the MTP head unless --mtp off) at max_len = the slots' summed
 // lengths, so a slot is a position range of the engine's KV cache (its KV base; the MTP head's KV layer alike), and:
 //   GDN states   index 0 = the engine's gdn_state = slot 0's; a pool of (slots - 1) sources (slot s's is index s) and
-//                8 destinations (index slots + m for row m - the probe's scratch: 13b gives each slot its own);
+//                8 destinations (index slots + m for row m - the probe's scratch: 13c gives each slot its own);
 //   conv rings   slot 0's = the engine's; a pool of slots - 1;
 //   hprev        bf16 [slots][hidden], each slot's h_{pos-1} (the MTP head's input at a run's first row).
 // Default slots (spec 13 §9.1 / §9.2's layouts at the probe's depths): Qwen3.8 36864 + 3 x 8192; Agnes 36864 + 8192

@@ -1,4 +1,4 @@
-// Spec 13 B4 (plan 13c Task 1, Review Focus 1-5): the batching scheduler against a mock
+// Spec 13 B4 (plan 13b Task 1, Review Focus 1-5): the batching scheduler against a mock
 // batched engine (tests/server/mock.h, MockBatchEngine), host only. Every request's ids
 // must equal the same request served alone; the cases cover streaming order, per-row
 // stops, disconnects, per-request seeds, the bounded queue, the prefix plan taken at the

@@ -1,5 +1,5 @@
 #pragma once
-// Spec 13 §3 and §8 (plan 13c Task 1): the batching scheduler, host only. It owns a
+// Spec 13 §3 and §8 (plan 13b Task 1): the batching scheduler, host only. It owns a
 // BatchEngineIface (server/batch_engine.h) and serves up to slots() requests at once: a
 // request is queued, granted a slot (its spec 7 prefix plan is taken then, not at arrival),
 // prefilled, then decoded one id per tick in a step shared with every other decoding slot.
