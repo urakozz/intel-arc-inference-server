@@ -62,10 +62,10 @@ std::optional<uint32_t> Tokenizer::token_to_id(std::string_view t) const {
 
 // The gate checkpoint's tokenizer, resolved the way the Hugging Face cache
 // itself resolves: $HF_HOME, else $HOME/.cache/huggingface. No home directory
-// is baked in, so the same binary works for any user on any machine.
-// B70_TOKENIZER_JSON overrides the whole path.
+// is baked in, so the same binary works for any user on any machine. (The tests'
+// default; the servers read the model directory's own tokenizer.json, and a test
+// that needs another file takes its path as an argument - B70_TOKENIZER_JSON is gone.)
 std::string default_tokenizer_json() {
-  if (const char* e = std::getenv("B70_TOKENIZER_JSON")) return e;
   std::string root;
   if (const char* hf = std::getenv("HF_HOME")) {
     root = hf;

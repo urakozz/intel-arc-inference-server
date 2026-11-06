@@ -25,9 +25,10 @@ static std::vector<std::string> lines(const std::string& p) {
   return out;
 }
 
+// parity_test [corpus dir (tests/tokenizer)] [tokenizer.json (the gate checkpoint's, tok::default_tokenizer_json)]
 int main(int argc, char** argv) {
   const std::string dir = argc > 1 ? argv[1] : "tests/tokenizer";
-  tok::Tokenizer t(tok::default_tokenizer_json());
+  tok::Tokenizer t(argc > 2 ? std::string(argv[2]) : tok::default_tokenizer_json());
   const auto txt = lines(dir + "/corpus.txt");
   const auto ref = lines(dir + "/corpus.ids");
   CHECK_EQ(txt.size(), ref.size());
