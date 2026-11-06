@@ -9,6 +9,19 @@ go when empty; this page stays while fix rounds still add items.
 
 Last updated: 2026-11-06 (main bd0e703; box: kernel 7.4.0-rc1, compute-runtime 26.40, IGC 2.42.6).
 
+## Next, in order
+
+1. The validation run on main 973e37d (state `973e37d83996-vs-973e37d83996`) and the fixes for its FAILs.
+2. Spec 17a, the first tensor-parallel measurement (branch `spec17a-tp-probe`, Mac side done): rebase onto main, the
+   box measurement, merge - right after 1, to close the branch (moved ahead of the quiet-box session, operator
+   2026-11-06).
+3. Bolt's speculative decoding back (branch `bolt-spec-restore`, being rebased onto the new `--spec` surface): box_check,
+   its box rows, merge.
+4. The old box-layout branches (`box-layout`, `plan-box-move`): what is left ported or dropped.
+5. Validation tooling: a test whose binary, kernels and inputs are unchanged since its last PASS reuses that result;
+   the gate skips what box_check already passed; full validation nightly on main instead of per merge.
+6. Then the quiet-box session and the rest under "After the table is empty".
+
 ## Open
 
 | spec | what it is | open item | state | closes when |
@@ -19,7 +32,7 @@ Last updated: 2026-11-06 (main bd0e703; box: kernel 7.4.0-rc1, compute-runtime 2
 | *(tools)* | CPU reference tool | the CPU bf16 shim, the Bolt BF16-scale fix, K2's 600-id prompt floor - merged 2026-11-06 (box_check 316/0/0); K2's tool-call prompt set rebuilt (36 / 36) | merged | one CPU test row (r25.a4_ref, the paused CPU queue) |
 | *(box)* | model storage | hot (NVMe) / cold (8 TB, every model) / archive (3 TB, parked Nanbeige + Flint) tiers, `tools/hf_tier.sh status\|hot\|cold\|archive\|sync` (docs/10-the-box.md "Model storage"). Done 2026-11-06: every model has a verified 8 TB copy; Flash-Next (Intel int4) hot, its int8 PLE file linked beside the snapshot (`<snapshot>-ple-int8`); `~/b70/models/qwen3.8-flash-next/` serves Intel's files with the original's tokenizer.json; Nanbeige / Flint archived; bf16 originals cold (Bolt / K2 hot only around their CPU reference jobs); both disks in fstab | done | - |
 | *(engine)* | zero-config cleanup | the operator's 2026-11-06 rulings: the user chooses the model, speculative decoding (`--spec`, default `auto`: the adaptive MTP where the model has a head), the max context length and the parallel mode (`--parallel auto\|1\|pp`: one card when the model and the context fit, else pp; the split an optional override) - the engine decides the rest. List A is built on branch `zero-config-a` (Mac side): decode attention v1, prefill composed attention, the GDN scan / solve selectors, SILU_FUSED, prefill replay, K2 eager, Flash-Next fresh MTP selection, B70_Q4_PLE / --ple-dir, B70_TOKENIZER_JSON, ONEAPI_DEVICE_SELECTOR / --device, the EXP2 / AGNES_SWEEP / DECODE_EXTRA_M build options, --lm-head, --draft-format, --mtp / --mtp-max / --mtp-cost, --spec-cost / --spec-min-match / --spec-history, --served-name, --queue, --mem-reserve-gb, Bolt's --chat-template / --generation-config, Flash-Next's --tokenizer, the renamed-flag refusals and the Mac plain-C kernel branches removed with their tests and stages; the hardware gate (B70 only, 1-2 cards, peer access) before any weight; card memory and Xe-cores from the device; the load-time weight mover copies card to card | merged 2026-11-06 (973e37d; box_check 283/284, the one timeout passed alone); the validation run on it is running (state 973e37d83996-vs-973e37d83996) | the validation run's FAILs fixed |
-| **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done | box measurement on a quiet box + merge |
+| **17** tensor parallel | every layer split across both cards | 17a: the first measurement (branch `spec17a-tp-probe`) | Mac side done; next after the validation run (Next, step 2) | rebase, box measurement, merge |
 | **21** Flash-Next | the Qwen3.8-Flash-Next model | r32.partial and the real-checkpoint golden sets still use the old 1e-3 gap rule (remaking them with the block scores is hours of CPU); routing on layers other than the last is judged by the gap rule as a fallback (the engine keeps only ranks 9 / 10 of the router probabilities) | not started | the sets remade on the CPU |
 
 ## Box test rows still open
@@ -44,7 +57,7 @@ wait on a FAIL upstream or on missing reference data). Rows 44-52 / 64 were drop
 ## After the table is empty
 
 1. Quiet-box re-measure: every speed number on the new driver and kernel, the vLLM baseline on the new image, spec 17a's
-   first tensor-parallel measurement, the zero-config list B (the arms still waiting on a number - card hand-off copy vs peer, Bolt's fused kernels and bf16 state, Flash-Next's MTP norm, Kolibri / Flash-Next eager attention, int8 KV, int8 prefill, draft vocabulary: measure, keep the winner as the engine's choice, delete the rest), and spec 16's check (MTP draft acceptance cold vs prefix-cache-restored, one card
+   the zero-config list B (the arms still waiting on a number - card hand-off copy vs peer, Bolt's fused kernels and bf16 state, Flash-Next's MTP norm, Kolibri / Flash-Next eager attention, int8 KV, int8 prefill, draft vocabulary: measure, keep the winner as the engine's choice, delete the rest), and spec 16's check (MTP draft acceptance cold vs prefix-cache-restored, one card
    and `--parallel pp`: < 1% closes the stale-key item); then
    refresh README.md and docs/BENCHMARKS.md (they still say "nothing measured" for Ornith, K2, Flash-Next, Bolt and show
    pre-upgrade headline rows) and the per-model table in docs/18-running-models.md.
