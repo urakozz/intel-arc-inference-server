@@ -1243,7 +1243,7 @@ class DriverTest(unittest.TestCase):
                              ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4"),
                              ("r14.cli", "r15.host"), ("r15.host", "r15.k1"), ("r15.k1", "r15.prefill"),
                              ("r15.prefill", "r15.golden"), ("r15.golden", "r15.cli"), ("r15.cli", "r16.host"),
-                             ("r16.host", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.cost"),
+                             ("r16.host", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.m1"),
                              ("r16.tokdiff", "r17.host"), ("r17.host", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
         # row 21 (spec 18e): after rows 14 / 15, K0 first, K1 before the checkpoint twins
@@ -1259,7 +1259,10 @@ class DriverTest(unittest.TestCase):
                              ("r25.toolcall", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
         for optin in ("r15.p0", "r15.speed", "r16.mtp_rows", "r16.passkey", "r16.benchy",
-                      "r16.a4", "r21.passkey", "r21.speed", "r25.a4_ref", "r25.a4", "r25.benchy"):
+                      "r16.a4", "r21.passkey", "r21.speed", "r25.a4_ref", "r25.a4", "r25.benchy",
+                      # timed, opt-in since 2026-11-07 (the operator's ruling: the quiet-box session runs them)
+                      "r2.cost", "r3.readme", "r8.cost", "r8.rows", "r11.speed", "r16.cost", "r22.s1", "r76.speed",
+                      "r36.copy", "r36.zc", "r36.hostbw"):
             self.assertNotIn(optin, order)
         # the server rows: one serve_run.sh per arm and round, round 2 in reversed order
         arms = re.findall(r"serve_run\.sh \S+/r2\.auto_rows/(\S+) ", out)
@@ -1303,7 +1306,7 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r16").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
-                                 "r16.golden_server", "r16.prefix", "r16.cost", "r16.tokdiff"])
+                                 "r16.golden_server", "r16.prefix", "r16.tokdiff"])
         self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
                       "tests/golden/prompts urakozz/Ornith-", out)
         self.assertIn("tools/box_validate/tok_diff.py", out)
@@ -1498,7 +1501,7 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(self.run_driver("--dry-run", "--device", "0,1", ok=False).returncode, 2)
         out = self.run_driver("--list", "--device", "1").stdout
         self.assertRegex(out, r"(?m)^r2\.suite\*? +2 +default +card +card1 ")
-        self.assertRegex(out, r"(?m)^r2\.cost\*? +2 +default +gpu +box ")
+        self.assertRegex(out, r"(?m)^r2\.cost\*? +2 +optin +gpu +box ")
         self.assertRegex(out, r"(?m)^g0\.build\*? +0 +g0 +cpu +cpu\+build ")
 
     def test_card_stages_follow_the_rules(self):

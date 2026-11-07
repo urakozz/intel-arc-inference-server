@@ -106,7 +106,7 @@ st_r2_suite() {
   finish
 }
 
-stage r2.cost 2 default gpu qwen - "the int8-head --mtp auto cost table: probe_mtp_steps (verify M = 1..4, draft k = 1..3) for MtpCost's defaults (timed)"
+stage r2.cost 2 optin gpu qwen - "the int8-head --mtp auto cost table: probe_mtp_steps (verify M = 1..4, draft k = 1..3) for MtpCost's defaults (timed)"
 st_r2_cost() {
   idle before
   chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8" "probe_mtp_steps, int8 head"
@@ -144,7 +144,7 @@ st_r2_opencode() {
 
 # ======================================================================================
 row 3 "README rows on current main (v2 decode attention, int8 head), idle box, RECORD grade"
-stage r3.readme 3 default gpu qwen - "headline pp4096 / tg256 (the int8 head); prefill and decode at depth 32k / 64k / 130816 (max_len 131072) - interleaved, median of 3"
+stage r3.readme 3 optin gpu qwen - "headline pp4096 / tg256 (the int8 head); prefill and decode at depth 32k / 64k / 130816 (max_len 131072) - interleaved, median of 3"
 st_r3_readme() {
   idle before
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 -- \
@@ -320,7 +320,7 @@ st_r8_serve() {
   grab_all memory '^memory:'
   finish
 }
-stage r8.cost 8 default gpu qwen - "probe_mtp_steps at |V'| = 32k / 64k / 128k for both heads: the measured draft rows replace kInt8DraftHeadShare / kBf16DraftHeadShare (timed)"
+stage r8.cost 8 optin gpu qwen - "probe_mtp_steps at |V'| = 32k / 64k / 128k for both heads: the measured draft rows replace kInt8DraftHeadShare / kBf16DraftHeadShare (timed)"
 st_r8_cost() {
   idle before
   local h s
@@ -334,7 +334,7 @@ st_r8_cost() {
   grab_all idle '^IDLE '
   finish
 }
-stage r8.rows 8 default gpu qwen - "§11 rows: mtp_gpu_test --bench K = 1 / 3, int8 head, greedy, at off / 32k / 64k / 128k - acceptance and t/s on golden, A4, prose (interleaved, median of 3)"
+stage r8.rows 8 optin gpu qwen - "§11 rows: mtp_gpu_test --bench K = 1 / 3, int8 head, greedy, at off / 32k / 64k / 128k - acceptance and t/s on golden, A4, prose (interleaved, median of 3)"
 st_r8_rows() {
   idle before
   local arms="" k s dv
@@ -491,7 +491,7 @@ st_r11_memory() {
   grab_all memory '^memory:'
   finish
 }
-stage r11.speed 11 default gpu qwen r11.q2 "step 5: bf16-KV against int8-KV pairs - decode at 32k / 64k / 128k (bars 1.1x / 1.15x / 1.2x), prefill at depth (<= 3 % regression), the memory line at 131072"
+stage r11.speed 11 optin gpu qwen r11.q2 "step 5: bf16-KV against int8-KV pairs - decode at 32k / 64k / 128k (bars 1.1x / 1.15x / 1.2x), prefill at depth (<= 3 % regression), the memory line at 131072"
 st_r11_speed() {
   idle before
   local d arms="" ratios=""
@@ -893,7 +893,7 @@ st_r16_forced_refs() {
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   finish
 }
-stage r16.cost 16 default gpu ornith r16.mtp "Review Focus 2: the verify cost at K = 1..3 on Ornith (up to 8 x (K + 1) experts) - probe_mtp_steps (verify M = 1..4, draft k = 1..3), int8 and bf16 heads (timed)"
+stage r16.cost 16 optin gpu ornith r16.mtp "Review Focus 2: the verify cost at K = 1..3 on Ornith (up to 8 x (K + 1) experts) - probe_mtp_steps (verify M = 1..4, draft k = 1..3), int8 and bf16 heads (timed)"
 st_r16_cost() {
   idle before
   chk "build/tools/probe/probe_mtp_steps $SNAP_ORNITH 4096 32 3 int8" "probe_mtp_steps on Ornith, int8 head"
@@ -1142,7 +1142,7 @@ st_r22_ornith() {
   grab_all split 'split: auto ->|^engine: --parallel pp'
   finish
 }
-stage r22.s1 22 default gpu qwen r22.p1 "S1: decode at depth 4096, tg 256 - one card against --parallel pp copy and peer, interleaved after a warm-up, median of 3; the bar is within 2 % (ratio >= 0.98)"
+stage r22.s1 22 optin gpu qwen r22.p1 "S1: decode at depth 4096, tg 256 - one card against --parallel pp copy and peer, interleaved after a warm-up, median of 3; the bar is within 2 % (ratio >= 0.98)"
 st_r22_s1() {
   idle before
   local arms
@@ -2257,7 +2257,7 @@ rownote 36 "Nothing in src/kernels changes (kernel_cmdlines +0 / -0 / ~0: G0's g
 rownote 36 "Data: r36.curve needs row 30's traces (r30.traces: oracle-out-q4exp-traces, 39+ files). The arms need r32.k1 and two cards in one context (r22.p1). Predecessors to hand in beside: r32.ple_rate (the first host-USM number), r31.load_real's pin line (P0.5's start), r34.accept (the projection's MTP acceptance; else the 0.5-0.8 range, PROPOSED), row 32's per-layer rate (PROJECT_BW) and row 33's compute a chunk (PROJECT_PF_MS). Outputs: \$DATA/oracle-out-q4exp-offload (budget.json, links*.txt, po-*.txt, the curves, project), oracle-out-q4exp-traces/profile.safetensors (decision 8)."
 rownote 36 "Both cards: the run exports DEVICE's one card (ZE_AFFINITY_MASK); every probe_offload command sets ZE_AFFINITY_MASK=0,1 itself, as row 22's do, and a two-card arm that still sees one card FAILS (not a SKIP). The GPU lock is the one lock for both."
 rownote 36 "RAM rule: the pinned arms never beside a CPU oracle - r36.pin SKIPs 'host RAM' below 110 GB available or with any container up (probe_offload itself refuses above MemAvailable - 16 GiB, printing the cap: spec 7's rule); r36.hostbw pins 1.34 GB and allocates a 6 GiB triad."
-rownote 36 "Session: an idle box (the idle protocol, docs/10-the-box.md), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is docs/probes/probe-offload-<date>.md (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows r36.project's STOP / GO-CANDIDATE line."
+rownote 36 "Session: an idle box (the idle protocol, docs/10-the-box.md), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw - opt-in since 2026-11-07, the operator's ruling: they run in the quiet-box session with --with; r36.project waits on r36.zc's PASS, so it SKIPs until then; r36.replay checks visibility only and runs after r36.build / r36.links / r22.p1): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is docs/probes/probe-offload-<date>.md (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows r36.project's STOP / GO-CANDIDATE line."
 stage r36.host 36 default cpu oracle_image - "host: qwen4exp_plan_test (the routed-expert budget = plan() byte for byte; its budget-json lines -> \$DATA/oracle-out-q4exp-offload/budget.json), probe_offload_kernel_drift_test, offload_links.sh --self-test, test_offload_curve.py in the oracle image (the 5.19.0 site for its tiny-model test)"
 st_r36_host() {
   local off="$DATA/oracle-out-q4exp-offload"
@@ -2290,7 +2290,7 @@ st_r36_links_load() {
   grab_all links_load '^(links:|STOP:|UNKNOWN:|  hold: po hold)' 12
   finish
 }
-stage r36.copy 36 default gpu - r36.build,r36.links,r22.p1 "P0.2: probe_offload copy --dev 0, 1, both - pinned host -> device at 0.87 / 1.74 / 2.61 MB, 16 / 64 / 256 experts as one copy and per expert, 1 GiB; immediate and replayed lists; the compute ordinal and the copy-only group; both cards concurrently (one thread each behind a start barrier); first-byte latency"
+stage r36.copy 36 optin gpu - r36.build,r36.links,r22.p1 "P0.2: probe_offload copy --dev 0, 1, both - pinned host -> device at 0.87 / 1.74 / 2.61 MB, 16 / 64 / 256 experts as one copy and per expert, 1 GiB; immediate and replayed lists; the compute ordinal and the copy-only group; both cards concurrently (one thread each behind a start barrier); first-byte latency"
 st_r36_copy() {
   local off="$DATA/oracle-out-q4exp-offload" d
   idle r36.copy
@@ -2301,7 +2301,7 @@ st_r36_copy() {
   grab_all copy '^po copy .*(shape=(expert|1gib|256_experts_one|latency_[a-z0-9]+) |card=all|SKIP)' 80
   finish
 }
-stage r36.zc 36 default gpu - r36.copy "P0.3: probe_offload zc --dev 0, 1, both - M = 1, P = 1 / 2 / 7 / 26 launch pairs; arms A (21c's binary over VRAM), B (the table, identity), C (every routed slot on host USM), D1-D3 (1-3 slots on host), S (copy-queue staging: an upper bound), K (in-list staging), the streaming ceilings; interleaved pairs, y bitwise A's every run; the mixed-launch law (sum / max / mix) and P per card"
+stage r36.zc 36 optin gpu - r36.copy "P0.3: probe_offload zc --dev 0, 1, both - M = 1, P = 1 / 2 / 7 / 26 launch pairs; arms A (21c's binary over VRAM), B (the table, identity), C (every routed slot on host USM), D1-D3 (1-3 slots on host), S (copy-queue staging: an upper bound), K (in-list staging), the streaming ceilings; interleaved pairs, y bitwise A's every run; the mixed-launch law (sum / max / mix) and P per card"
 st_r36_zc() {
   local off="$DATA/oracle-out-q4exp-offload" d
   idle r36.zc
@@ -2312,14 +2312,15 @@ st_r36_zc() {
   grab_all zc '^po zc .*(law_summary| arm=(A|C|K|S) |FAIL)' 120
   finish
 }
-stage r36.replay 36 default gpu - r36.zc "P0.3's visibility: probe_offload replay --dev both --n 10000 - arms D2 and C replayed 10^4 times, y compared every replay, a host expert rewritten every 100th replay (the next must see it), the host image's page words read back every 1000th; a mismatch names its replay and page and stops the arm"
+stage r36.replay 36 default gpu - r36.build,r36.links,r22.p1 "P0.3's visibility: probe_offload replay --dev both --n 10000 - arms D2 and C replayed 10^4 times, y compared every replay, a host expert rewritten every 100th replay (the next must see it), the host image's page words read back every 1000th; a mismatch names its replay and page and stops the arm"
 st_r36_replay() {
   local off="$DATA/oracle-out-q4exp-offload"
+  x "mkdir -p $off"
   chk "ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_offload replay --dev both --n 10000 | tee $off/po-replay.txt; r=\${PIPESTATUS[0]}; [ \$r != 77 ] || { echo 'FAIL: this arm needs both cards and saw one (ZE_AFFINITY_MASK)'; exit 1; }; exit \$r" "the replayed visibility"
   grab_all replay '^po replay ' 12
   finish
 }
-stage r36.hostbw 36 default gpu - r36.zc "P0.4: probe_offload hostbw --dev both - the STREAM triad over 3 x 2 GiB (1 and all threads, GPUs idle), then arm C on both cards with the CPU idle, beside a 64 MiB copy loop (PROPOSED stand-in for the server's host work), beside the all-thread triad"
+stage r36.hostbw 36 optin gpu - r36.zc "P0.4: probe_offload hostbw --dev both - the STREAM triad over 3 x 2 GiB (1 and all threads, GPUs idle), then arm C on both cards with the CPU idle, beside a 64 MiB copy loop (PROPOSED stand-in for the server's host work), beside the all-thread triad"
 st_r36_hostbw() {
   local off="$DATA/oracle-out-q4exp-offload"
   idle r36.hostbw
@@ -3372,7 +3373,7 @@ st_r76_tests() {
   jgrab smoke '^prefill_smoke_test$' 'launch|8449|8454|8625|OK'
   finish
 }
-stage r76.speed 76 default gpu qwen r76.tests "record, not a gate: Qwen3.8 prefill rate on l0 (the default) vs l0-int8 at pp2048 and pp8192, --tg 16, interleaved pairs after a warm-up, median of 3"
+stage r76.speed 76 optin gpu qwen r76.tests "record, not a gate: Qwen3.8 prefill rate on l0 (the default) vs l0-int8 at pp2048 and pp8192, --tg 16, interleaved pairs after a warm-up, median of 3"
 st_r76_speed() {
   idle before
   local n arms="" ratios=""
