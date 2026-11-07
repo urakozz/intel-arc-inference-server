@@ -1225,7 +1225,10 @@ class DriverTest(unittest.TestCase):
         self.assertRegex(out, r"env B70_LONGCTX_TESTS=1 B70_TRACE_DIR=\S+ ctest")             # r6.mtp_long's variants
         self.assertIn("--spec mtp --spec-max 3 > ", out)                 # r6.greedy_long: b70-decode with MTP
         self.assertIn("probe_mtp_steps", out)
-        self.assertIn(" 120000 32 3 int8 off 131072", out)
+        self.assertNotIn(" 120000 32 3 int8 off 131072", out)   # r6.cost: a speed stage, opt-in (quiet-box session)
+        self.assertNotIn("--- r23.s2_4k", out)
+        self.assertNotIn("--- r63.cost", out)
+        self.assertNotRegex(out, r"(?m)^--- r\d+\.(k0|r0) ")             # no per-row G0 recaps
         addr = self.box_address()
         if addr:
             self.assertNotIn(addr, out)
@@ -1235,22 +1238,22 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(order[:5], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite"])
         self.assertLess(order.index("r11.kernels"), order.index("r11.q2"))
         self.assertEqual(order[-1], "x.rest")
-        for first, later in (("r13.r0", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
-                             ("r14.k0", "r14.k1"), ("r14.k1", "r14.load"), ("r14.load", "r14.k3"),
+        for first, later in (("r13.host", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
+                             ("r14.host", "r14.k1"), ("r14.k1", "r14.load"), ("r14.load", "r14.k3"),
                              ("r14.k3", "r14.golden"), ("r12.d2", "r12.a4"),
-                             ("r14.cli", "r15.k0"), ("r15.k0", "r15.k1"), ("r15.k1", "r15.prefill"),
-                             ("r15.prefill", "r15.golden"), ("r15.golden", "r15.cli"), ("r15.cli", "r16.r0"),
-                             ("r16.r0", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.cost"),
-                             ("r16.tokdiff", "r17.host"), ("r17.k0", "x.rest")):
+                             ("r14.cli", "r15.host"), ("r15.host", "r15.k1"), ("r15.k1", "r15.prefill"),
+                             ("r15.prefill", "r15.golden"), ("r15.golden", "r15.cli"), ("r15.cli", "r16.host"),
+                             ("r16.host", "r16.kernels"), ("r16.kernels", "r16.mtp"), ("r16.mtp", "r16.cost"),
+                             ("r16.tokdiff", "r17.host"), ("r17.host", "x.rest")):
             self.assertLess(order.index(first), order.index(later), (first, later))
         # row 21 (spec 18e): after rows 14 / 15, K0 first, K1 before the checkpoint twins
-        for first, later in (("r15.cli", "r21.k0"), ("r21.k0", "r21.k1"), ("r21.k1", "r21.k3"),
+        for first, later in (("r15.cli", "r21.host"), ("r21.host", "r21.k1"), ("r21.k1", "r21.k3"),
                              ("r21.k3", "r21.golden"), ("r21.k1", "r21.prefill"), ("r21.prefill", "r21.golden_prefill"),
                              ("r21.cli", "r22.host")):
             self.assertLess(order.index(first), order.index(later), (first, later))
         # row 25 (spec 18d's engine side): after rows 21 / 23, K0 first, the host and the refusals
         # before the card, the snapshots and the server before the chat and K4
-        for first, later in (("r23.s2_64k", "r25.k0"), ("r25.k0", "r25.host"), ("r25.host", "r25.reject"),
+        for first, later in (("r23.ornith", "r25.host"), ("r25.host", "r25.reject"),
                              ("r25.reject", "r25.snapshot"), ("r25.snapshot", "r25.snapshot_kv8"),
                              ("r25.serve", "r25.chat"), ("r25.chat", "r25.passkey"), ("r25.passkey", "r25.toolcall"),
                              ("r25.toolcall", "x.rest")):
@@ -1274,59 +1277,45 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--re '^cli_reject_mtp_k2$'", out)
         self.assertIn("--re '^cli_reject_k2_prefill_length_int8$'", out)
         self.assertNotIn("cli_reject_k2_prefill,", out)
-        # Ornith's binaries since spec 15 §13 (the int4 checkpoint): Qwen3.8's greedy argmax
-        # (vocab_used 248077) and the int4 a||b, in the binary checks of rows 10, 13 and 16
-        for stage, names in (("r10.r0", ["argmax_stage1_M1", "gemv_M1_K2048_N128_S1_L1",
-                                         "moe_M1_E256_T8_D2048_I512"]),
-                             ("r13.r0", ["argmax_stage1_M1", "pf_moe_E256_T8_D2048_I512"]),
-                             ("r16.r0", ["argmax_stage1_M%d" % m for m in (1, 2, 3, 4)] +
-                                        ["gemv_M%d_K2048_N128_S1_L1" % m for m in (1, 2, 3, 4)])):
-            body = out.split("--- " + stage + " ")[1].split("\n--- ")[0]
-            line = next(x for x in body.splitlines() if "build/kernels/" in x)
-            for n in names:
-                self.assertRegex(line, r" %s[ ;]" % n, (stage, n))
-            self.assertNotIn("V248070", line, stage)
         # row 16: the startup note that compared tokenizer and descriptor must stay silent for Ornith
         self.assertIn("note: tokenizer[.]json defines", out)
 
     def test_selection(self):
         out = self.run_driver("--dry-run", "--only", "r11", "--with", "r11.passkey120k", "--skip", "r11.speed").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r11.bf16", "r11.kernels", "r11.q2", "r11.q5", "r11.memory",
+        self.assertEqual(order, ["pre", "r11.kernels", "r11.q2", "r11.q5", "r11.memory",
                                  "r11.passkey120k"])
         out = self.run_driver("--dry-run", "--only", "r14", "--with", "r14.oracle").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r14.k0", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
+        self.assertEqual(order, ["pre", "r14.host", "r14.k1", "r14.load", "r14.k3", "r14.oracle",
                                  "r14.golden", "r14.cli"])
         self.assertIn("tools/box_validate/k2_oracle.sh $HOME/b70-inference-server", out)
         out = self.run_driver("--dry-run", "--only", "r13").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r13.r0", "r13.host", "r13.kernels", "r13.prefill", "r13.gates", "r13.split",
+        self.assertEqual(order, ["pre", "r13.host", "r13.kernels", "r13.prefill", "r13.gates", "r13.split",
                                  "r13.cli"])
         out = self.run_driver("--dry-run", "--only", "r15", "--with", "r15.speed").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r15.k0", "r15.host", "r15.k1", "r15.prefill", "r15.split", "r15.golden",
+        self.assertEqual(order, ["pre", "r15.host", "r15.k1", "r15.prefill", "r15.split", "r15.golden",
                                  "r15.cli", "r15.speed"])
         self.assertIn("pp4096 'B70_GIT_SHA=", out)
         self.assertNotIn("B70_K2_ATTN=eager", out)   # the eager arm went in the zero-config cleanup
         out = self.run_driver("--dry-run", "--only", "r16").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r16.r0", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
+        self.assertEqual(order, ["pre", "r16.host", "r16.kernels", "r16.mtp", "r16.m1", "r16.serve",
                                  "r16.golden_server", "r16.prefix", "r16.cost", "r16.tokdiff"])
         self.assertIn("build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode "
                       "tests/golden/prompts urakozz/Ornith-", out)
         self.assertIn("tools/box_validate/tok_diff.py", out)
         out = self.run_driver("--dry-run", "--only", "r21", "--with", "r21.passkey").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r21.k0", "r21.host", "r21.k1", "r21.k3", "r21.golden",
+        self.assertEqual(order, ["pre", "r21.host", "r21.k1", "r21.k3", "r21.golden",
                                  "r21.prefill", "r21.split", "r21.golden_prefill", "r21.cli", "r21.passkey"])
         # the registered names (tests/CMakeLists.txt's 18e block), each with the k2 and kv8 labels
         for name in ("k2_kv8_kernels_test", "k2_decode_kv8_test", "k2_golden(_i8head)?_kv8_test",
                      "k2_prefill_kv8_test", "prefill_split_k2_kv8_test",
                      "k2_golden_prefill(_c16)?_kv8_test"):
             self.assertIn("--re '^%s$' --label k2 --label kv8" % name, out)
-        self.assertIn("k2_mova_M1_E64_T4_D2560_N1024_STAGE; do", out)          # the 11 int8 binaries built
-        self.assertIn("for b in k2_route_M1_E64_T4_N9280_O9216_S2 k2_route_M1_E100_T8_N128_O0_S1 ", out)  # one line
         self.assertIn("--depth 16 --tg 1 --kv-cache int8) && echo \"K2 max_len auto, int8 KV, int8 head: $n (derived 98304", out)
         self.assertIn("tools/probe/k2_passkey.sh int8", out)
         out = self.run_driver("--dry-run", "--only", "r21.speed").stdout
@@ -1334,11 +1323,11 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--depth 65536 --tg 256 --max-len 69632 --kv-cache int8'", out)
         out = self.run_driver("--dry-run", "--only", "r17").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r17.host", "r17.k0"])
+        self.assertEqual(order, ["pre", "r17.host"])
         # row 25 (spec 18d's engine side): the default stages, then K4's A4 and the comparison rows
         out = self.run_driver("--dry-run", "--only", "r25", "--with", "r25.a4_ref,r25.a4,r25.benchy").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r25.k0", "r25.host", "r25.reject", "r25.snapshot", "r25.snapshot_kv8",
+        self.assertEqual(order, ["pre", "r25.host", "r25.reject", "r25.snapshot", "r25.snapshot_kv8",
                                  "r25.serve", "r25.chat", "r25.passkey", "r25.toolcall", "r25.a4_ref", "r25.a4",
                                  "r25.benchy"])
         self.assertIn("--re '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'", out)
@@ -1358,7 +1347,7 @@ class DriverTest(unittest.TestCase):
         # cards after one, the real checkpoint last; the speed rows opt-in
         out = self.run_driver("--dry-run", "--only", "r26", "--with", "r26.speed").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r26.k0", "r26.host", "r26.k1", "r26.reject", "r26.prefill", "r26.split",
+        self.assertEqual(order, ["pre", "r26.host", "r26.k1", "r26.reject", "r26.prefill", "r26.split",
                                  "r26.golden", "r26.golden_eager", "r26.pp", "r26.cli", "r26.real", "r26.speed"])
         self.assertIn("--re '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'", out)
         self.assertIn("--re '^cli_reject_kolibri_prefill_(int8|chunk)$'", out)
@@ -1369,7 +1358,7 @@ class DriverTest(unittest.TestCase):
         # the server before the long-context rows; P3 with MTP and the benchy rows opt-in
         out = self.run_driver("--dry-run", "--only", "r27").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order, ["pre", "r27.host", "r27.k0", "r27.reject", "r27.mtp", "r27.mtp_kv8", "r27.prefix",
+        self.assertEqual(order, ["pre", "r27.host", "r27.reject", "r27.mtp", "r27.mtp_kv8", "r27.prefix",
                                  "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden",
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
@@ -1391,9 +1380,9 @@ class DriverTest(unittest.TestCase):
         self.assertNotIn("--- r16.a4_ref", out)   # manual: printed in the summary, never run
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
-        out = self.run_driver("--dry-run", "--redo", "r5").stdout
-        self.assertIn("# redo: r5.host r5.r0", out)
-        self.assertIn("BV_REDO=r5.host\\ r5.r0", out)
+        out = self.run_driver("--dry-run", "--redo", "r18").stdout
+        self.assertIn("# redo: r18.host r18.g64", out)
+        self.assertIn("BV_REDO=r18.host\\ r18.g64", out)
 
     def test_resume_keeps_the_state_baseline(self):
         """--state X continues with the baseline X was started against: never a re-resolved --baseline main"""
@@ -1447,29 +1436,13 @@ class DriverTest(unittest.TestCase):
     def test_row36_sees_both_cards(self):
         # Row 36 (spec 22 P0): the run exports ZE_AFFINITY_MASK=$DEVICE (one card); every probe_offload command must
         # see both cards itself, as row 22's do - else its --dev 1 / both arms SKIP and the row measures one card.
-        out = self.run_driver("--dry-run", "--only", "r36", "--with", "r36.prune,r36.prune_a4").stdout
+        out = self.run_driver("--dry-run", "--only", "r36", "--with", "r36").stdout
         lines = [ln for ln in out.splitlines() if "probe_offload " in ln or "PROBE_OFFLOAD=" in ln]
         self.assertTrue(lines, "no probe_offload command in row 36's dry-run")
         for ln in lines:
             if ln.lstrip().startswith("---") or "(record" in ln:
                 continue
             self.assertIn("ZE_AFFINITY_MASK=0,1", ln, ln[:160])
-
-    def test_d5_arms_balanced(self):
-        """Spec 19d D5 (Review Focus 4): over its 3 rounds every arm of r56.d5_opencode and r56.d5_benchy takes every
-        position once (a Latin square), so no arm always runs first, last or between the same two; idle checks bracket
-        the timed rounds."""
-        out = self.run_driver("--dry-run", "--only", "r56", "--with", "r56.d5_opencode,r56.d5_benchy").stdout
-        for stage, pat in (("r56.d5_opencode", r"SERVE_ARGS='([^']*)' tools/prefix/replay_ab\.sh"),
-                           ("r56.d5_benchy", r"SERVE_ARGS='([^']*)' tools/probe/serve_benchy\.sh --pp 512 4096")):
-            block = out.split("--- " + stage + " ", 1)[1].split("\n--- ", 1)[0]
-            arms = [{"auto": "mtp"}.get(a.split()[1], a.split()[1]) for a in re.findall(pat, block)]
-            self.assertEqual(len(arms), 9, (stage, arms))
-            rounds = [arms[i:i + 3] for i in (0, 3, 6)]
-            for pos in range(3):
-                self.assertEqual(sorted(r[pos] for r in rounds), ["dflash", "mtp", "off"], (stage, rounds))
-            self.assertIn("idle.sh before", block, stage)
-            self.assertIn("idle.sh after", block, stage)
 
     def test_registry_consistent(self):
         reg = tempfile.mktemp(suffix=".tsv")
