@@ -330,6 +330,45 @@ class ReuseTest(Tmp):
         self.assertEqual((r.returncode, r.stdout), (3, "hi\n"))
 
 
+class ChangedSinceTest(Tmp):
+    """changed_since.sh: what box_validate.sh --nightly treats as a reason to run."""
+
+    def git(self, *a):
+        subprocess.run(["git", "-C", self.p("r"), *a], check=True, capture_output=True,
+                       env=dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+                                GIT_COMMITTER_EMAIL="t@t"))
+
+    def changed(self, sha):
+        r = subprocess.run([os.path.join(HERE, "changed_since.sh"), sha], cwd=self.p("r"), capture_output=True,
+                           text=True)
+        return r.returncode, r.stdout.split()
+
+    def test_docs_only_is_nothing(self):
+        os.makedirs(self.p("r"))
+        self.git("init", "-q")
+        self.git("config", "commit.gpgsign", "false")
+        write(self.p("r", "src", "a.cc"), "int a;")
+        write(self.p("r", "docs", "x.md"), "x")
+        self.git("add", "-A"); self.git("commit", "-qm", "one")
+        sha = subprocess.run(["git", "-C", self.p("r"), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+        write(self.p("r", "docs", "x.md"), "y")
+        write(self.p("r", "README.md"), "r")
+        self.git("add", "-A"); self.git("commit", "-qm", "docs")
+        self.assertEqual(self.changed(sha), (0, []), "documentation only")
+        write(self.p("r", "src", "a.cc"), "int b;")
+        self.assertEqual(self.changed(sha), (0, ["src/a.cc"]), "an uncommitted source change counts")
+        self.git("add", "-A"); self.git("commit", "-qm", "src")
+        write(self.p("r", "tools", "new.sh"), "x")
+        self.assertEqual(self.changed(sha), (0, ["src/a.cc", "tools/new.sh"]), "an untracked tool counts")
+        self.assertEqual(self.changed("0" * 40)[0], 2, "not a commit here")
+
+    def test_nightly_refuses_only(self):
+        r = subprocess.run([os.path.join(ROOT, "tools", "box_validate.sh"), "--nightly", "--only", "r1"], cwd=ROOT,
+                           capture_output=True, text=True, env=dict(os.environ, BOX="nobody@invalid.invalid"))
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--nightly runs the default selection", r.stderr)
+
+
 class G0CompareTest(Tmp):
     def mk(self, build, files):
         for rel, data in files.items():

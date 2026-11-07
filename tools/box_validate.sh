@@ -19,6 +19,9 @@
 #   --force       run past a G0 that has not passed (stop-the-line is the default)
 #   --no-reuse    run every test, even one whose inputs are all unchanged since a recorded PASS
 #                 (by default such a test keeps that PASS: tools/box_validate/reuse.py)
+#   --nightly     the nightly run (docs/10-the-box.md): no run at all when nothing but documentation
+#                 changed since the newest finished run of this tree (tools/box_validate/changed_since.sh);
+#                 a full run (--no-reuse) when the newest finished full run is older than 7 days
 # Run control:
 #   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
 #                    commit, a86dd86; `--baseline main` when validating a branch before merging)
@@ -68,7 +71,7 @@ ROOT="$PWD"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 die() { echo "box_validate.sh: $*" >&2; exit 2; }
 
-MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
+MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 NIGHTLY=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
 BASELINE_REF="${BASELINE_REF:-ce36d2d}" STATE_NAME=""
 need() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
@@ -84,6 +87,7 @@ while [ $# -gt 0 ]; do
     --redo) need "$@"; REDO="$REDO,$2"; shift 2 ;;
     --force) FORCE=1; shift ;;
     --no-reuse) NO_REUSE=1; shift ;;
+    --nightly) NIGHTLY=1; shift ;;
     --baseline) need "$@"; BASELINE_REF="$2"; shift 2 ;;
     --state) need "$@"; STATE_NAME="$2"; shift 2 ;;
     --no-wait) WAIT=0; shift ;;
@@ -98,6 +102,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
+[ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 
 # ---- selection ------------------------------------------------------------------------
 # expand "a,b,r11" [noopt] -> the ids those name, in registry order (manual stages never
@@ -429,7 +434,28 @@ if [ "$PUSH" = 1 ]; then
     if [ -d "$LOCAL_DATA/$d" ]; then rsync -a "$LOCAL_DATA/$d" "$BOX:$DATA_DIR/"; else echo "push-data: no $LOCAL_DATA/$d"; fi
   done
 fi
+if [ "$NIGHTLY" = 1 ]; then
+  # The newest FINISHED run of this tree (its progress.log says the orchestrator is done), and whether a finished
+  # full run (a state marked full-run) is younger than 7 days.
+  runs="~/b70-validate/$REMOTE_DIR"
+  last=$("${SSH[@]}" "$BOX" "cd $runs 2>/dev/null && for s in \$(ls -td *-vs-* 2>/dev/null); do grep -q 'orchestrator done' \$s/progress.log 2>/dev/null && { echo \$s; break; }; done") || die "ssh failed"
+  recent_full=$("${SSH[@]}" "$BOX" "cd $runs 2>/dev/null && for f in \$(find . -maxdepth 2 -name full-run -mtime -7); do grep -q 'orchestrator done' \$(dirname \$f)/progress.log 2>/dev/null && { echo \$f; break; }; done") || die "ssh failed"
+  if [ -n "$last" ] && [ "${SHA%-dirty}" = "$SHA" ]; then
+    lsha=${last%%-vs-*}; lsha=${lsha%-dirty}
+    if changed=$(tools/box_validate/changed_since.sh "$lsha" 2> /dev/null) && [ -z "$changed" ] && [ -n "$recent_full" ]; then
+      echo "nightly: nothing but documentation changed since the last finished run ($last) - no run tonight"
+      exit 0
+    fi
+    [ -n "${changed:-}" ] && echo "nightly: $(printf '%s\n' "$changed" | wc -l | tr -d ' ') files changed since $last (e.g. $(printf '%s\n' "$changed" | head -3 | tr '\n' ' '))"
+  fi
+  if [ -z "$recent_full" ]; then
+    echo "nightly: no finished full run in the last 7 days - this one runs every test (--no-reuse)"
+    NO_REUSE=1
+    LAUNCH_CMD="mkdir -p \"\$HOME/$STATE_REL\" && env $(remote_env) tools/probe/detach.sh \"\$HOME/$STATE_REL/$ORCH_LOG\" tools/box_validate/remote.sh \"\$HOME/$STATE_REL\" $SELECTED"
+  fi
+fi
 if [ "$SYNC" = 1 ]; then tools/box.sh sync; fi
+if [ "$NO_REUSE" = 1 ]; then "${SSH[@]}" "$BOX" "mkdir -p ~/$STATE_REL && touch ~/$STATE_REL/full-run" || die "ssh failed"; fi
 if [ "$("${SSH[@]}" "$BOX" "$BASE_CHECK_CMD")" != "$BASE_SHA" ]; then
   echo "baseline: extracting $BASELINE_REF ($BASE_SHORT) into ~/$BASE_DIR"
   git archive --format=tar "$BASE_SHA" | "${SSH[@]}" "$BOX" "$BASE_EXTRACT_CMD"
