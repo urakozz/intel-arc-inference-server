@@ -48,7 +48,7 @@ The C++ side builds **natively on the host**. No container is needed for
 anything except the Python CPU oracle and the reference vLLM stack.
 
 **CPU jobs are memory-capped, with no swap.** Every CPU reference container on the box
-(`tools/oracle/run_in_container.sh`) runs with `--memory X --memory-swap X`, X = 56g by default:
+(`tools/oracle/run_in_container.sh`) runs with `--memory X --memory-swap X`, X = 64g by default (beside GPU work; up to MemTotal - 9 GiB with the cards idle, operator 2026-11-08):
 at its cap the kernel kills the job inside its container and nothing else notices. The other
 ~65 GiB of the 121 GiB are for one GPU job's host side (measured ~52 GiB: the pinned prefix cache,
 up to 32 GiB, plus weight staging), the OS and the page cache of the GPU job's weight reads. A job

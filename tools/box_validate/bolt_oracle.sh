@@ -85,7 +85,7 @@ case "$mode" in
   golden-bf16|a4-bf16|gateq) need="${BOLT_REF_MIN_GB:-96}" ;;
   *) need="${BOLT_REF_MIN_GB:-48}" ;;
 esac
-# The box: the BF16 form's runs (96) are above run_in_container.sh's 56g CPU-job cap; they declare it, so they get it
+# The box: the BF16 form's runs (96) are above run_in_container.sh's 64g CPU-job cap; they declare it, so they get it
 # only with the cards idle (the whole-box GPU lock for the run; refused, exit 75, while a GPU job runs)
 if [ $mac = 0 ] && [ "$need" -gt 56 ]; then export ORACLE_MEMORY="${ORACLE_MEMORY:-${need}g}"; fi
 echo "bolt_oracle: $mode${arg:+ $arg} -> $data; $memwhat ${avail:-0} GB (need $need)${ORACLE_MEMORY:+; container cap $ORACLE_MEMORY}"

@@ -16,11 +16,11 @@
 # container gets NO swap (--memory X --memory-swap X), so a CPU job can never
 # push the box into swap - at its cap the kernel kills the job inside its own
 # container (exit 137) and nothing else on the box notices. On the box (Linux)
-# X is ORACLE_MEMORY, default 56g: the box has 121 GiB; one GPU job's host side
+# X is ORACLE_MEMORY, default 64g (operator 2026-11-08: 64 GiB beside GPU work): the box has 121 GiB; one GPU job's host side
 # was measured at ~52 GiB (2026-11-06 19:40-20:30, sar: pinned prefix cache up
 # to 32 GiB + weight staging in the driver), plus ~3 GiB for the OS and ~10 GiB
 # of page cache for the GPU job's weight reads. A run that truly needs more says
-# so (ORACLE_MEMORY=96g, at most MemTotal - 12 GiB) and gets it only with the
+# so (ORACLE_MEMORY=110g, at most MemTotal - 9 GiB: 4 for the OS + 5 buffer, operator 2026-11-08) and gets it only with the
 # cards idle: it takes the whole-box GPU lock (~/b70-gpu.lock, exclusive,
 # non-blocking) for its whole run, so no GPU job starts beside it, and it is
 # REFUSED (exit 75) while any GPU job holds that lock - never queued, so a
@@ -62,7 +62,7 @@ fi
 
 env_flags=(-e HF_HUB_OFFLINE=1 -e HF_HOME=/scratch/hf -e HOME=/scratch -e PYTHONUNBUFFERED=1)
 # ORACLE_MEMORY (<N>g): the container's memory cap, swap off (above). The box: default CPU_CAP_GB.
-CPU_CAP_GB=56
+CPU_CAP_GB=64
 if [ -r /proc/meminfo ]; then   # the box
   ORACLE_MEMORY="${ORACLE_MEMORY:-${CPU_CAP_GB}g}"
 fi
@@ -73,8 +73,8 @@ fi
 if [ -r /proc/meminfo ] && [ "${ORACLE_MEMORY%g}" -gt "$CPU_CAP_GB" ]; then
   want=${ORACLE_MEMORY%g}
   total=$(awk '/^MemTotal:/ { print int($2 / 1048576) }' /proc/meminfo)
-  if [ "$want" -gt $((total - 12)) ]; then
-    echo "run_in_container: REFUSED: ORACLE_MEMORY=${want}g > MemTotal ${total} GiB - 12 GiB (the OS)" >&2; exit 2
+  if [ "$want" -gt $((total - 9)) ]; then
+    echo "run_in_container: REFUSED: ORACLE_MEMORY=${want}g > MemTotal ${total} GiB - 9 GiB (the OS 4 + a 5 GiB buffer)" >&2; exit 2
   fi
   # Above the CPU cap only with the cards idle: the whole-box GPU lock, exclusive, for the whole run
   # (fd 8 stays open in docker's client, which waits for the container: --rm, foreground).
