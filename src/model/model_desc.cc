@@ -62,35 +62,35 @@ std::array<FusedLinear, kLinearCount> make_table(const ModelDesc& d, const Table
       // GDN: in_proj_qkv (conv dim = q k-heads x 128 | k k-heads x 128 | v v-heads x 128;
       // Qwen3.8 10240) || in_proj_z (v-heads x 128; 6144). Qwen3.8 5120 x 16384.
       {LinearId::QkvZ, {H, d.gdn_qkvz_n(), t.qkvz.S, t.qkvz.layout}, WeightKind::Int4,
-       Fuse::Concat, {"linear_attn.in_proj_qkv", "linear_attn.in_proj_z"}, 0, Fold::None, {}},
+       Fuse::Concat, {"linear_attn.in_proj_qkv", "linear_attn.in_proj_z"}, 0},
       // GDN decay/beta, bf16 (kept out of the quantisation by the checkpoint's
       // dynamic rules). Source N is 2 x v-heads (Qwen3.8 48+48 = 96), zero-padded
       // to the kernel's 128.
       {LinearId::AB, {H, kAbPaddedN, 1, 0}, WeightKind::Bf16, Fuse::Concat,
-       {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, d.gdn_ab_n(), Fold::None, {}},
+       {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, d.gdn_ab_n()},
       // K = v-heads x 128 (Qwen3.8 6144 = 48 x 128).
       {LinearId::OutProj, {d.gdn_value_dim(), H, t.out_proj.S, t.out_proj.layout},
-       WeightKind::Int4, Fuse::Single, {"linear_attn.out_proj"}, 0, Fold::None, {}},
+       WeightKind::Int4, Fuse::Single, {"linear_attn.out_proj"}, 0},
       // gate || up interleaved so the lane holding gate[n] finds up[n] at +16.
       // Qwen3.8 5120 x 34816.
       {LinearId::GateUp, {H, 2 * d.intermediate, t.gate_up.S, t.gate_up.layout},
-       WeightKind::Int4, Fuse::Interleave16, gate_up, 0, Fold::None, {}},
+       WeightKind::Int4, Fuse::Interleave16, gate_up, 0},
       // Qwen3.8 17408 x 5120.
       {LinearId::Down, {d.intermediate, H, t.down.S, t.down.layout}, WeightKind::Int4,
-       Fuse::Single, down, 0, Fold::None, {}},
+       Fuse::Single, down, 0},
       // FA: q_proj is 2 x q-heads x 256 (q || gate per head; Qwen3.8 12288 = 24 x
       // 512), k/v kv-heads x 256 each (1024). Qwen3.8 5120 x 14336.
       {LinearId::Qkv, {H, d.fa_qkv_n(), t.qkv.S, t.qkv.layout}, WeightKind::Int4, Fuse::Concat,
-       {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}, 0, Fold::None, {}},
+       {"self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"}, 0},
       // K = q-heads x 256 (Qwen3.8 6144 = 24 x 256).
       {LinearId::OProj, {d.fa_value_dim(), H, t.o_proj.S, t.o_proj.layout}, WeightKind::Int4,
-       Fuse::Single, {"self_attn.o_proj"}, 0, Fold::None, {}},
+       Fuse::Single, {"self_attn.o_proj"}, 0},
       // Top level. The bf16 row: 2.543 GB read in full every token on Qwen3.8.
       // This is the row `linear(LinearId::LmHead)` returns and the one the
       // shipped bf16 checkpoint needs; `lm_int4` below is its counterpart for a
       // checkpoint that packed this tensor.
       {LinearId::LmHead, {H, Qwen35::kVocab, 1, 0}, WeightKind::Bf16, Fuse::Single,
-       {"lm_head"}, 0, Fold::None, {}},
+       {"lm_head"}, 0},
   }};
 }
 
@@ -155,13 +155,13 @@ void make_small_tables(ModelDesc& d) {
 // `logits`); `layout` is a filler, the int8 tiling is fixed (loader/lm_head_int8.h).
 void make_lm_head_rows(ModelDesc& d) {
   d.lm_int4 = {LinearId::LmHead, {d.hidden, Qwen35::kVocab, 1, 1}, WeightKind::Int4,
-               Fuse::Single,     {"lm_head"},                    0, Fold::None, {}};
+               Fuse::Single,     {"lm_head"},                    0};
   d.lm_int8 = {LinearId::LmHead, {d.hidden, Qwen35::kVocab, 1, 0}, WeightKind::Int8,
-               Fuse::Single,     {"lm_head"},                    0, Fold::None, {}};
+               Fuse::Single,     {"lm_head"},                    0};
 }
 
 // Spec 15 §13: a||b's int4 row, for a checkpoint that quantised in_proj_a / in_proj_b
-// (the published Ornith int4 export; Qwen3.8's and Agnes's keep them bf16). The bf16 row's
+// (the published Ornith int4 export; Qwen3.8's keeps them bf16). The bf16 row's
 // contract kept whole: K hidden, the 2 x v-heads real columns zero-padded to kAbPaddedN, so
 // ab_out, gdn_step's AB_STRIDE and the prefill's pf_ab_proj (which reads a bf16 copy the
 // loader dequantises, loader/ab.h) see what they always saw. gemv.cl at S = 1 - its output
@@ -171,7 +171,7 @@ void make_lm_head_rows(ModelDesc& d) {
 // would need gdn_step to sum the slices.
 void make_ab_rows(ModelDesc& d) {
   d.ab_int4 = {LinearId::AB, {d.hidden, kAbPaddedN, 1, 1}, WeightKind::Int4, Fuse::Concat,
-               {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, d.gdn_ab_n(), Fold::None, {}};
+               {"linear_attn.in_proj_a", "linear_attn.in_proj_b"}, d.gdn_ab_n()};
 }
 
 void finish(ModelDesc& d, const TableTuning& t) {
@@ -181,7 +181,7 @@ void finish(ModelDesc& d, const TableTuning& t) {
   make_ab_rows(d);
 }
 
-// Qwen3.8 and Agnes share every width but the layer counts and the MLP.
+// Qwen3.8's widths.
 void set_qwen38_shapes(ModelDesc& d) {
   d.hidden = 5120;
   d.fa_q_heads = 24;
@@ -193,41 +193,6 @@ void set_qwen38_shapes(ModelDesc& d) {
   d.mtp_intermediate = 17408;
 }
 
-// Spec 14: Agnes 3.0 Flash. Qwen3.8's table with the two MLP rows widened by the
-// parallel FFN fold (§2): gate||up N = 2 x (17408 + 2048) = 38912, down K = 19456.
-//
-// **PROVISIONAL tuning (spec 14 §6).** `{S, layout}` of both rows are COPIED from
-// the nearest Qwen3.8 shapes - gate||up 5120x34816 L0 S8, down 17408x5120 L0 S4 -
-// not measured; and the gemv binaries at the new shapes take the copied cells'
-// extra defines (src/kernels/CMakeLists.txt). The box sweep
-// (docs/probes/probe-gemv-2026-08-24.md's method) replaces both rows by name:
-// validation checklist "GEMV tuning". S must keep dividing K/64: 80 / 8 and 304 / 4.
-// The S = 8 of gate||up is ALSO baked into prep.cl's SILU_S, which
-// Capture::check_sizes asserts - a retune to another S needs a SILU_S variant.
-ModelDesc make_agnes() {
-  ModelDesc d;
-  d.name = "agnes-3.0-flash";
-  d.architecture = "AgnesForConditionalGeneration";
-  d.layers = 72;
-  d.fa_layers = 18;   // l % 4 == 3 (global_attention_interval 4)
-  d.gdn_layers = 54;
-  set_qwen38_shapes(d);   // the head's MLP stays 17408: no parallel FFN in it (spec 14 §1)
-  d.parallel_ffn = 2048;
-  d.intermediate = 17408 + 2048;   // 19456 = 19 x 1024 = 304 x 64
-  d.name_map = {{"delta_attn.", "linear_attn."}, {"global_attn.", "self_attn."}};
-  d.doc_w = 18.344234624e9;        // derived from the headers, see model_desc.h
-  d.vocab_used = 248089;           // tokenizer.json: 248077 + 12 Agnes specials
-  d.provisional_tuning = true;
-  finish(d, kQwen38Tuning);        // gate||up and down: PROVISIONAL S8 L0 / S4 L0 (copied)
-  FusedLinear& gu = d.table[static_cast<size_t>(LinearId::GateUp)];
-  gu.fold = Fold::N;
-  gu.fold_parts = {"mlp.parallel_ffn.gate_proj", "mlp.parallel_ffn.up_proj"};
-  FusedLinear& dn = d.table[static_cast<size_t>(LinearId::Down)];
-  dn.fold = Fold::K;
-  dn.fold_parts = {"mlp.parallel_ffn.down_proj"};
-  return d;
-}
-
 ModelDesc make_qwen38() {
   ModelDesc d;
   d.name = "qwen3.8";
@@ -237,7 +202,6 @@ ModelDesc make_qwen38() {
   d.gdn_layers = 48;
   set_qwen38_shapes(d);
   d.intermediate = 17408;
-  d.parallel_ffn = 0;
   d.doc_w = 15.519e9;   // docs/03-models.md, measured 2026-08-24
   d.vocab_used = Qwen35::kVocabUsed;
   finish(d, kQwen38Tuning);
@@ -294,7 +258,6 @@ ModelDesc make_ornith() {
   d.tied_embeddings = false;
   d.mtp_intermediate = 0;          // the MTP head is one MoE layer (spec 15e)
   d.intermediate = d.moe.shared_intermediate;
-  d.parallel_ffn = 0;
   d.doc_w = 2.344862976e9;            // the int4 checkpoint's headers (above), derived
   d.vocab_used = Qwen35::kVocabUsed;  // 248077: the int4 checkpoint's tokenizer.json
   d.provisional_tuning = true;
@@ -360,22 +323,6 @@ size_t ModelDesc::mtp_checkpoint_tensors() const {
   return mtp_intermediate == 0 ? 0 : 15;
 }
 
-std::string ModelDesc::to_engine(const std::string& n) const {
-  for (const auto& [ckpt, eng] : name_map) {
-    const size_t at = n.find(ckpt);
-    if (at != std::string::npos) return n.substr(0, at) + eng + n.substr(at + ckpt.size());
-  }
-  return n;
-}
-
-std::string ModelDesc::to_checkpoint(const std::string& n) const {
-  for (const auto& [ckpt, eng] : name_map) {
-    const size_t at = n.find(eng);
-    if (at != std::string::npos) return n.substr(0, at) + ckpt + n.substr(at + eng.size());
-  }
-  return n;
-}
-
 std::string ModelDesc::intermediate_suffix() const {
   return intermediate == 17408 ? std::string() : "_I" + std::to_string(intermediate);
 }
@@ -388,22 +335,22 @@ const ModelDesc& qwen38() {
   return d;
 }
 
-const ModelDesc& agnes() {
-  static const ModelDesc d = make_agnes();
-  return d;
-}
-
 const ModelDesc& ornith() {
   static const ModelDesc d = make_ornith();
   return d;
 }
 
 const ModelDesc& desc_for_architecture(const std::string& architecture) {
-  for (const ModelDesc* d : {&qwen38(), &agnes(), &ornith()})
+  for (const ModelDesc* d : {&qwen38(), &ornith()})
     if (d->architecture == architecture) return *d;
+  // Dropped models are refused by name (spec 14: Agnes 3.0 Flash, dropped 2026-11-07).
+  if (architecture == "AgnesForConditionalGeneration")
+    throw std::runtime_error("config.json architectures[0] is 'AgnesForConditionalGeneration': Agnes 3.0 Flash "
+                             "was dropped (2026-11-07, spec 14) and is not supported; this engine runs "
+                             "Qwen3_5ForConditionalGeneration (Qwen3.8) and Qwen3_5MoeForConditionalGeneration "
+                             "(Ornith)");
   throw std::runtime_error("config.json architectures[0] is '" + architecture +
-                           "'; this engine runs Qwen3_5ForConditionalGeneration (Qwen3.8), "
-                           "AgnesForConditionalGeneration (Agnes 3.0 Flash) and "
+                           "'; this engine runs Qwen3_5ForConditionalGeneration (Qwen3.8) and "
                            "Qwen3_5MoeForConditionalGeneration (Ornith, from spec 15c)");
 }
 

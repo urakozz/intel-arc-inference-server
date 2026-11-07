@@ -51,7 +51,7 @@ inline runtime::PpExtras pp_extras(const loader::LoadedModel& full, bool hook) {
   return x;
 }
 
-// The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Agnes, Ornith): one card
+// The zero-config cleanup's `--parallel auto` for the Qwen family (Qwen3.8, Ornith): one card
 // when the model and the asked context fit it - the faster choice (one answer is not faster on two
 // cards, docs/18-running-models.md) - else pipeline parallel. Decided before the load, from the
 // checkpoint's descriptor (config.json architectures[0]) and the planner's weight model

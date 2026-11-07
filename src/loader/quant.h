@@ -123,7 +123,7 @@ struct LinearSrc {
   // Suffix presence decides the kind; labels are never trusted (doc 02). Int4 is
   // `.qweight` + `.scales` (GPTQ v1) or `.weight_packed` + `.weight_scale` +
   // `.weight_shape` (compressed-tensors pack-quantized, symmetric; converted here -
-  // the ONE conversion point every loader path goes through: dense, Agnes's fold,
+  // the ONE conversion point every loader path goes through: dense,
   // the MoE experts, the MTP head's MoE layer, K2); Bf16 is `.weight`.
   static LinearSrc classify(const SafetensorsSet& set, const std::string& prefix);
   // The kind alone, from the same suffixes, without reading or converting a byte.

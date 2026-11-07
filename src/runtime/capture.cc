@@ -131,7 +131,7 @@ constexpr uint32_t kGdnStateChunks = Qwen35::kGdnHeadDim / 32;
 // from the same descriptor rather than shared, and `check_sizes()` below asserts
 // stride x layers == allocation size - so a divergence is a throw at capture,
 // not a wrong KV slot at token 300. The layer COUNTS are the model descriptor's
-// (spec 14: 48 / 16 on Qwen3.8, 54 / 18 on Agnes); so are the widths (spec 15b).
+// (spec 14: 48 / 16 on Qwen3.8, 30 / 10 on Ornith); so are the widths (spec 15b).
 
 uint8_t* at(const l0::Mem& m, size_t byte_off) {
   return static_cast<uint8_t*>(m.ptr()) + byte_off;
@@ -955,7 +955,7 @@ class Capture {
     res_norm(mixer_s, at(small_of(layer).norms, sl_.norms_off_post));
     const uint32_t gu_s = gemv(layer, LinearId::GateUp, b_.x.ptr());
     // prep_silu_mul(partials, x_out) - prep.cl (Task 2), grid (I/4096, M) = (5, M)
-    // at both I = 17408 (ragged last chunk 1024) and Agnes's 19456 (3072), WG 256.
+    // at I = 17408 (ragged last chunk 1024), WG 256.
     // Spec 28b: SILU_S is baked - gate||up's S, or the _S1 build after gemm_sm's 2x8 work-group.
     {
       l0::Kernel& k = kernel(kernels::gemm_sm_silu_variant(kCapM, d_.intermediate, gu_s,
@@ -1035,7 +1035,7 @@ class Capture {
     }
   }
 
-  // A gated-delta-net layer (48 of 64 on Qwen3.8, 54 of 72 on Agnes): 10 kernels.
+  // A gated-delta-net layer (48 of 64 on Qwen3.8): 10 kernels.
   void gdn_layer(uint32_t layer, uint32_t g) {
     // Layer 0 leads the whole step, so there are no previous partials to fold
     // and `resid` is exactly embed_gather's output: the SP0 variant. Every
@@ -1109,7 +1109,7 @@ class Capture {
     ffn(layer, d_.shape(LinearId::OutProj).S);
   }
 
-  // A full-attention layer (16 of 64 on Qwen3.8, 18 of 72 on Agnes): 10 kernels.
+  // A full-attention layer (16 of 64 on Qwen3.8): 10 kernels.
   void fa_layer(uint32_t layer, uint32_t f) {
     res_norm(d_.ffn_fold_s(), at(small_of(layer).norms, sl_.norms_off_input));
     tap_copy(layer);   // spec 19c: layer - 1's output, when a drafter taps it
@@ -1597,8 +1597,7 @@ class Capture {
     } else {
       head_gemv(*h.gate_up, b_.x.ptr(), b_.partials.ptr());
       {
-        // The HEAD's intermediate (its down linear's K): 17408 on both supported
-        // checkpoints - Agnes's MTP block has no parallel FFN.
+        // The HEAD's intermediate (its down linear's K): 17408 on Qwen3.8.
         const uint32_t head_i = h.down->shape.K;
         l0::Kernel& k =
             kernel(kernels::prep_silu_mul_s1_variant(kCapM, head_i), "prep_silu_mul", kWgSilu);
@@ -1706,7 +1705,7 @@ class Capture {
   // It was five until spec 1.5's lever L1 split that norm.
   static constexpr int kBoundary = -1;
   // Spec 8: the MTP head's launches are labelled "L<layers>" - the layer after the
-  // last ("L64" on Qwen3.8, "L72" on Agnes).
+  // last ("L64" on Qwen3.8).
   int head_layer() const { return static_cast<int>(d_.layers); }
   // One GDN layer's recurrent state, fp32 [v-heads][128][128] (Qwen3.8: 48 heads,
   // 3,145,728 B), and its conv ring, bf16 [kConvRing][conv dim] (Qwen3.8 10240).

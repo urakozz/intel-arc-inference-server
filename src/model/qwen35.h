@@ -31,13 +31,6 @@ constexpr size_t kLinearCount = static_cast<size_t>(LinearId::kCount);
 // How a fused device weight is assembled from checkpoint tensors.
 enum class Fuse { Single, Concat, Interleave16 };
 
-// Spec 14 §2: a second set of checkpoint tensors joined onto `parts` at load, on
-// packed int4 (loader/fold.h). `N`: each fold part is appended to the matching
-// part along the output columns (GPTQ `qweight [K/8][N]`, `scales [K/64][N]`),
-// before the Fuse map runs - gate' = [gate | gate_p], up' = [up | up_p]. `K`:
-// the single fold part is appended along the packed input rows - down' =
-// [down ; down_p] at `qweight` row K/8 and `scales` row K/64 of the first part.
-enum class Fold { None, N, K };
 // Int8 exists for ONE row: `lm_head` quantised at load (spec 9 §3, int8 rows with an
 // fp32 scale per row, gemv_i8w). No checkpoint ships it and no per-layer row uses it.
 enum class WeightKind { Int4, Bf16, Int8 };
@@ -49,9 +42,6 @@ struct FusedLinear {
   Fuse fuse;
   std::vector<std::string> parts;   // checkpoint prefixes, in order; layer-relative
   uint32_t pad_n = 0;               // zero-pad N to shape.N (a||b: 96 -> 128)
-  Fold fold = Fold::None;           // spec 14 §2; None on every Qwen3.8 row
-  std::vector<std::string> fold_parts;  // layer-relative, parallel to `parts` (Fold::N)
-                                        // or exactly one (Fold::K)
 };
 
 enum class LayerKind { GDN, FA };
@@ -91,7 +81,7 @@ struct LayerDesc {
 
 // What every supported Qwen3.5-family checkpoint shares (spec 14 §3.1, spec
 // 15b): the head dims, the vocabulary, the rotary embedding, the per-layer
-// linear order and the small tensors' names. Qwen3.8, Agnes and Ornith all read
+// linear order and the small tensors' names. Qwen3.8 and Ornith both read
 // these values from their config.json (`head_dim` 256, `linear_key_head_dim` /
 // `linear_value_head_dim` 128, `vocab_size` 248320, `partial_rotary_factor` 0.25,
 // `rope_theta` 1e7). Every per-model shape - hidden, q/kv heads, GDN heads,

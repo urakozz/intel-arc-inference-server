@@ -1,5 +1,5 @@
 #pragma once
-// Spec 17a: the tensor-parallel view of a dense GDN-hybrid model (Qwen3.8, Agnes) - spec 17 §R2.5 - from its
+// Spec 17a: the tensor-parallel view of a dense GDN-hybrid model (Qwen3.8) - spec 17 §R2.5 - from its
 // `ModelDesc` through tp_rank / tp_size, for probe_tp (the all-reduce's count and row size; the per-card linears the
 // step arm times). Megatron split: column-parallel qkv‖z, a‖b, q‖k‖v, gate‖up and the head's vocabulary;
 // row-parallel out_proj, o_proj and down (each followed by one all-reduce of an fp32 row of the hidden width a
@@ -53,8 +53,8 @@ struct Shapes {
 
 inline const model::ModelDesc& model_by_name(const std::string& s) {
   if (s == "qwen38") return model::qwen38();
-  if (s == "agnes") return model::agnes();
-  throw std::runtime_error("probe_tp: --model '" + s + "' (qwen38|agnes: the dense GDN hybrids of spec 17 §R2)");
+  throw std::runtime_error("probe_tp: --model '" + s + "' (qwen38: the dense GDN hybrid of spec 17 §R2; Agnes 3.0 Flash "
+                           "was dropped 2026-11-07)");
 }
 
 namespace detail {

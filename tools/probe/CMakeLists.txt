@@ -786,7 +786,7 @@ list(APPEND PSM_TARGETS kernel_psm_ctl_gemv_M16_K5120_N16384_S1_L1 kernel_psm_ct
 # N2 / N3. Probe-only names: nothing binds one unless kernels::kSmallMTuning adopts it (src/kernels builds it then).
 set(GEMM_SM_TARGETS "")
 set(GEMM_SM_LEVERS "5120 16384 1 1" "5120 16384 1 1 MG G256" "6144 5120 4 0 B2D" "5120 14336 2 0 B2D" "5120 34816 8 0"
-                   "5120 34816 8 0 MG" "17408 5120 4 0 B2D" "5120 248320 1 2" "5120 38912 8 0 MG")
+                   "5120 34816 8 0 MG" "17408 5120 4 0 B2D" "5120 248320 1 2")
 set(_psm_lever_m 2 3 4 5 6 7 8 16)
 gemm_sm_rows(GEMM_SM_LEVERS _psm_lever_m)
 list(APPEND PSM_TARGETS ${GEMM_SM_TARGETS})
@@ -940,14 +940,13 @@ add_dependencies(probe_chunk_rows ${PCR_PF_KERNELS})
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
 # path binds it. The ptp_gemv_* binaries are today's gemv.cl / gemv_i8w.cl at the PER-CARD TP shapes of
 # spec 17 §R2.5 (tp_shapes.h), each with its one-card production cell's defines (src/kernels/CMakeLists.txt):
-# probe-only names, no production binary changes. Agnes's per-card gate‖up' / down' carry its PROVISIONAL cells.
+# probe-only names, no production binary changes.
 add_ocloc_kernel(ptp_kernels SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_tp.cl)
 set(PTP_GEMV_CL ${CMAKE_SOURCE_DIR}/src/kernels/gemv.cl)
 set(PTP_TARGETS kernel_ptp_kernels)
 # name-suffix K N S L extra-defines   (qkv‖z L1 S1; out_proj / o_proj 3072 x 5120 as the 6144 x 5120 S4 cell;
 # q‖k‖v 7168 as the 14336 S2 cell; gate‖up as the 34816 S8 cell; down as the 17408 S4 cell)
-foreach(row "5120 8192 1 1 -" "3072 5120 4 0 B" "5120 7168 2 0 B" "5120 17408 8 0 D" "8704 5120 4 0 B"
-            "5120 19456 8 0 D" "9728 5120 4 0 B")
+foreach(row "5120 8192 1 1 -" "3072 5120 4 0 B" "5120 7168 2 0 B" "5120 17408 8 0 D" "8704 5120 4 0 B")
   separate_arguments(f UNIX_COMMAND "${row}")
   list(GET f 0 K)
   list(GET f 1 N)
@@ -976,8 +975,7 @@ add_dependencies(probe_tp ptp_kernel_set)
 # the one-card production binaries `probe_tp step` times beside the per-card ones (only these: a new box tree
 # builds probe_tp without the whole kernel set)
 foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14336_S2_L0
-          gemv_M1_K5120_N34816_S8_L0 gemv_M1_K17408_N5120_S4_L0 gemv_i8w_M1_K5120_N248320
-          gemv_M1_K5120_N38912_S8_L0 gemv_M1_K19456_N5120_S4_L0)
+          gemv_M1_K5120_N34816_S8_L0 gemv_M1_K17408_N5120_S4_L0 gemv_i8w_M1_K5120_N248320)
   if(TARGET kernel_${v})
     add_dependencies(probe_tp kernel_${v})
   endif()

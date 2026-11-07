@@ -16,7 +16,7 @@
 // **The split comes from the descriptor.** Layers [0, s) run on device 0 with the
 // embedding; layers [s, layers) on device 1 with the final norm, lm_head and the argmax.
 // Which layers are GDN and which FA, and every byte, are ModelDesc's - so Qwen3.8 (64
-// layers), Agnes (72) and Ornith (40) split without code changes (spec 16b Review Focus 5).
+// layers) and Ornith (40) split without code changes (spec 16b Review Focus 5).
 //
 // **`--pipeline-split auto` balances BYTES, not layers** (spec 16 decision 2, and vLLM's
 // PP = 2 lesson on these cards: an even layer split leaves the lm_head card heavier, and

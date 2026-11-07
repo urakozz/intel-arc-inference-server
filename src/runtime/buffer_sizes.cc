@@ -30,7 +30,7 @@ constexpr size_t kBf16 = 2, kFp32 = 4;
 // Spec 15b: `x` holds three things - prep's normed hidden row (K = hidden), the
 // MTP head's two concatenated pre-fc norms ([M][2 x hidden], capture.cc's X stride)
 // and SiLU(gate) x up ([M][intermediate]) - so it is the widest of them. On
-// Qwen3.8 and Agnes the MLP is (17408 / 19456 > 10240), which is the size spec 14
+// Qwen3.8 the MLP is (17408 > 10240), which is the size spec 14
 // gave it; Ornith's 512-wide shared expert is not, and 2 x 2048 is.
 uint32_t x_width(const model::ModelDesc& d) { return std::max(d.intermediate, 2 * d.hidden); }
 // Prefill's `mixer_out` is the out_proj / o_proj input (GDN value dim, FA value

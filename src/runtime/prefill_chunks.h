@@ -14,7 +14,7 @@ namespace runtime {
 // at most `chunk`, and with a block hook (spec 7 §3.2) never past the next multiple of the
 // hook's stride, so every chunk ends at a stride end (a block end) or at the prompt end. The
 // stride is the block - the rule of every engine - unless `wide_stride`: then `chunk` rounded
-// up to whole blocks when it is wider than one. Only Qwen3.8 / Agnes's prefill (Engine::prefill
+// up to whole blocks when it is wider than one. Only Qwen3.8's prefill (Engine::prefill
 // and the two-card pp_prefill_chunks) pass it - plan 5d, operator ruling (A): a 4096-row chunk
 // over 2048-position blocks hooks every 4096, the blocks between stored as KV by the hook's
 // store call without a state snapshot of their own; up to 2048 rows the stride is the block,

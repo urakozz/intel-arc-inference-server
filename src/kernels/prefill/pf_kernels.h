@@ -27,7 +27,7 @@
 // hidden (pf_embed_gather, pf_ab_proj), the GDN heads (pf_gated_head and the
 // pf_gdn_* chain), the FA heads (pf_attn_prep*, pf_attn, pf_flash_attn) - take
 // it as arguments and append kernels/shape_suffix.h's suffix, which is empty
-// at Qwen3.8's shapes (Agnes's too), so no existing binary is renamed. The
+// at Qwen3.8's shapes, so no existing binary is renamed. The
 // defaults are those reference shapes; the runtime passes the descriptor's.
 namespace kernels {
 

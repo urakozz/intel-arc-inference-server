@@ -5,7 +5,7 @@
 // capture (runtime/capture.cc's attn_pair) asks it, tests/runtime/verify_attn_test.cc checks it on the host.
 //
 // The rule (spec 28c §3): V2 at M = 1 (plain decode never switches: spec 28 §8 decision 1), at any heads but
-// Qwen3.8's 24 / 4 (Agnes shares them), for an (M, KV form) the table lacks (no binary is built there); else the
+// Qwen3.8's 24 / 4, for an (M, KV form) the table lacks (no binary is built there); else the
 // measured table: Dpas from `dpas_from` keys of row 0 (pos + 1) on. Ties and noise keep v2 (plan 28c Task 4's
 // verdict rule: paired v2 / dpas >= 1.03 with the range's low end > 1.00).
 //

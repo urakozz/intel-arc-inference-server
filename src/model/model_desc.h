@@ -12,25 +12,26 @@
 // the small tensors' names - stays `constexpr` in `model::Qwen35`. What differs
 // is here, chosen by the loader from `config.json`'s `architectures[0]`:
 //
-//                     Qwen3.8-27B            Agnes 3.0 Flash        Ornith 1.5 35B-A3B
-//   architecture      Qwen3_5ForCondi-       AgnesForCondi-         Qwen3_5MoeForCondi-
-//                     tionalGeneration       tionalGeneration       tionalGeneration
-//   layers            64 = 48 GDN + 16 FA    72 = 54 GDN + 18 FA    40 = 30 GDN + 10 FA
-//   FA layers         l % 4 == 3             l % 4 == 3             l % 4 == 3
-//   hidden            5120                   5120                   2048
-//   FA q / kv heads   24 / 4 (GQA 6)         24 / 4                 16 / 2 (GQA 8)
-//   GDN k / v heads   16 / 48 (conv 10240)   16 / 48                16 / 32 (conv 8192)
-//   FFN               dense 17408            dense 19456 = 17408 +  MoE: 256 experts, top-8,
-//                                            2048, the parallel     expert 512, shared
-//                                            FFN folded in (§2)     expert 512 + sigmoid gate
-//   tensor names      linear_attn. /         delta_attn. /          linear_attn. /
-//                     self_attn.             global_attn.           self_attn.
+//                     Qwen3.8-27B            Ornith 1.5 35B-A3B
+//   architecture      Qwen3_5ForCondi-       Qwen3_5MoeForCondi-
+//                     tionalGeneration       tionalGeneration
+//   layers            64 = 48 GDN + 16 FA    40 = 30 GDN + 10 FA
+//   FA layers         l % 4 == 3             l % 4 == 3
+//   hidden            5120                   2048
+//   FA q / kv heads   24 / 4 (GQA 6)         16 / 2 (GQA 8)
+//   GDN k / v heads   16 / 48 (conv 10240)   16 / 32 (conv 8192)
+//   FFN               dense 17408            MoE: 256 experts, top-8,
+//                                            expert 512, shared
+//                                            expert 512 + sigmoid gate
+//   tensor names      linear_attn. /         linear_attn. /
+//                     self_attn.             self_attn.
 //   max_len           any multiple of 256 up to config.json's max_position_embeddings
-//                     (262144 for all three) that the memory plan fits on the card
-//                     (spec 6 §10; Agnes's fixed 65536 of spec 14 §3.3 is gone)
-//   loadable          yes                    yes                    decode (spec 15c),
-//                                                                   prefill (15d), MTP and
-//                                                                   b70-serve (15e)
+//                     (262144 for both) that the memory plan fits on the card (spec 6 §10)
+//   loadable          yes                    decode (spec 15c), prefill (15d), MTP and
+//                                            b70-serve (15e)
+//
+// (Agnes 3.0 Flash, spec 14's second dense descriptor, was dropped on 2026-11-07;
+// desc_for_architecture refuses its architecture by name.)
 //
 // Descriptors are process-lifetime singletons: hold them by reference/pointer.
 namespace model {
@@ -66,7 +67,7 @@ struct MoeDesc {
 };
 
 struct ModelDesc {
-  std::string name;           // a short label for logs: "qwen3.8", "agnes-3.0-flash"
+  std::string name;           // a short label for logs: "qwen3.8", "ornith-1.5-35b-a3b"
   std::string architecture;   // config.json's architectures[0]
   uint32_t layers = 0, gdn_layers = 0, fa_layers = 0;
   // Spec 15b: the per-model widths (config.json hidden_size, num_attention_heads,
@@ -78,26 +79,19 @@ struct ModelDesc {
   FfnKind ffn = FfnKind::Dense;
   MoeDesc moe{};                      // FfnKind::Moe only
   bool tied_embeddings = false;       // lm_head shares embed_tokens (none supported does)
-  // The MTP head's dense MLP width: 17408 on Qwen3.8 and on Agnes (no parallel FFN
-  // in Agnes's head, spec 14 §1). 0 = the head's FFN is not dense (Ornith: one MoE
+  // The MTP head's dense MLP width: 17408 on Qwen3.8. 0 = the head's FFN is not dense (Ornith: one MoE
   // layer of the main model's shape, spec 15e - mtp_head_moe()).
   uint32_t mtp_intermediate = 0;
-  // The MLP width the ENGINE runs: for Agnes the folded 17408 + 2048 (spec 14 §2).
-  // For a MoE model, its shared expert's width - the dense GateUp / Down rows of
+  // The MLP width the engine runs. For a MoE model, its shared expert's width - the dense GateUp / Down rows of
   // the table describe the shared expert (spec 15b; the routed experts are `moe`).
   uint32_t intermediate = 0;
-  // The checkpoint's `mlp.parallel_ffn` width, folded at load; 0 = none.
-  uint32_t parallel_ffn = 0;
-  // Checkpoint-name infix -> engine-name infix, applied to every
-  // `model.language_model.*` and `mtp.*` name (vLLM PR #57003's WeightsMapper).
-  std::vector<std::pair<std::string, std::string>> name_map;
   std::array<FusedLinear, kLinearCount> table{};   // indexed by LinearId ordinal
   // lm_head's int4 and int8 rows (the bf16 one is table[LmHead]); `lm_head(kind)`
   // picks. Per descriptor because K is the model's hidden size (spec 15b).
   FusedLinear lm_int4{}, lm_int8{};
   // The GDN a||b projection's int4 row (the bf16 one is table[AB]); `ab(kind)` picks.
   // Like lm_head, a||b's kind is a property of the CHECKPOINT, not of the model: Qwen3.8's
-  // and Agnes's exports keep in_proj_a / in_proj_b bf16, the published Ornith int4
+  // exports keep in_proj_a / in_proj_b bf16, the published Ornith int4
   // checkpoint quantises them (int4 g64 sym, spec 15 §13). The loader classifies by
   // content (loader/ab.h) and the capture binds by the loaded weight's kind: gemv_bf16 for
   // the bf16 row, gemv.cl at S 1 for this one - both write fp32 [M][128] at ab_out, the
@@ -107,28 +101,23 @@ struct ModelDesc {
   FusedLinear ab_int4{};
   // `W` with a bf16 lm_head: the bytes a decode step streams (int4 qweight +
   // scales + bf16 per-layer tensors + lm_head), the loader's 2% cross-check
-  // (docs/13). Qwen3.8: 15.519 GB, measured (docs/03). Agnes: 18.344 GB, summed
-  // from the checkpoint's safetensors headers over the same four categories
-  // (derived - not yet a load on the card; spec 14 validation checklist).
+  // (docs/13). Qwen3.8: 15.519 GB, measured (docs/03).
   // Ornith: 2.345 GB, summed from the int4 checkpoint's headers the same way, with a
   // MoE layer's per-token share - the router and shared gate, the shared expert and
   // top_k routed experts (all the same size) - in place of a dense MLP (spec 15 §13).
   double doc_w = 0;
   // The ids the tokenizer defines - the greedy argmax masks every lm_head row at or
-  // above it (argmax.cl's VOCAB_USED). Qwen3.8: 248077 (Qwen35::kVocabUsed). Agnes's
-  // tokenizer.json adds 12 specials at 248077..248088 (<|agnes_bos|> .. <|agnes_reserved_3|>;
-  // same vocab and merges otherwise), so 248089 (spec 14). Ornith's int4 checkpoint's
+  // above it (argmax.cl's VOCAB_USED). Qwen3.8: 248077 (Qwen35::kVocabUsed). Ornith's int4 checkpoint's
   // tokenizer.json defines Qwen3.8's 248077 (spec 15 §13).
   uint32_t vocab_used = 0;
-  // True for a descriptor whose GEMV tuning rows were copied, not measured (spec
-  // 14 §6: Agnes's two new shapes until the box sweep replaces them).
+  // True for a descriptor whose GEMV tuning rows were copied, not measured (Ornith's,
+  // copied from Qwen3.8's map).
   bool provisional_tuning = false;
   // The per-layer non-GEMV tensors of each layer kind, in engine names - the
   // loader's single source of truth (fix I3). Element counts and offsets follow
   // this descriptor's shapes (`small_layout()`); built with the descriptor.
   std::vector<SmallTensor> small_gdn, small_fa;
 
-  bool has_parallel_ffn() const { return parallel_ffn != 0; }
   bool is_moe() const { return ffn == FfnKind::Moe; }
   // Spec 15c: the split-K width of the partials the FFN leaves for the next
   // residual fold (the next layer's input norm, or the final norm): the dense
@@ -169,7 +158,7 @@ struct ModelDesc {
   bool mtp_head_moe() const { return is_moe() && mtp_intermediate == 0; }
   // The MTP head's bf16 checkpoint bytes, from the shapes: fc [hidden][2 hidden],
   // q/k/v/o, the FFN, five hidden-wide norms and q_norm / k_norm. The FFN is the dense
-  // MLP at mtp_intermediate (Qwen3.8 and Agnes: 15 tensors, 849,398,784 B, docs/03) or,
+  // MLP at mtp_intermediate (Qwen3.8: 15 tensors, 849,398,784 B, docs/03) or,
   // on a MoE head (spec 15e), the router [experts][hidden], the shared gate [1][hidden]
   // and experts + 1 SwiGLU experts of expert_intermediate (Ornith: 785 tensors,
   // 1,689,281,536 B - the sum over its shard 16 header, 2026-10-05). An int4 export of
@@ -192,29 +181,23 @@ struct ModelDesc {
   // All `layers` layer descriptors, fully populated, in index order.
   std::vector<LayerDesc> layer_descs() const;
 
-  // Name mapping. `to_engine` rewrites a checkpoint name's first matching infix
-  // ("delta_attn." -> "linear_attn."); `to_checkpoint` is its inverse. Both are
-  // the identity on Qwen3.8.
-  std::string to_engine(const std::string& checkpoint_name) const;
-  std::string to_checkpoint(const std::string& engine_name) const;
-
   // The suffix that kernels baking the intermediate size carry in their variant
   // names: "" at Qwen3.8's 17408 (so every Qwen3.8 binary keeps its name and its
   // command line), "_I<intermediate>" otherwise.
   std::string intermediate_suffix() const;
   // Spec 15b: the suffixes of kernels that bake a model shape their name does not
   // otherwise carry (kernels.h, kernels::hidden_suffix / gdn_suffix / fa_suffix).
-  // "" at Qwen3.8's shapes, which Agnes shares, so no existing binary is renamed.
+  // "" at Qwen3.8's shapes, so no existing binary is renamed.
   std::string hidden_suffix() const;   // "_D<hidden>"
   std::string gdn_suffix() const;      // "_GK<k-heads>V<v-heads>"
   std::string fa_suffix() const;       // "_Q<q-heads>KV<kv-heads>"
 };
 
 const ModelDesc& qwen38();
-const ModelDesc& agnes();    // Agnes 3.0 Flash (spec 14)
 const ModelDesc& ornith();   // Ornith 1.5 35B-A3B (spec 15): decode from spec 15c
 // The descriptor for config.json's `architectures[0]`; throws std::runtime_error
-// naming the architecture and the supported ones.
+// naming the architecture and the supported ones (a dropped model - Agnes 3.0 Flash's
+// AgnesForConditionalGeneration - by name).
 const ModelDesc& desc_for_architecture(const std::string& architecture);
 // Throws std::runtime_error when the engine cannot run this descriptor: tied
 // embeddings, or a FfnKind::Moe shape src/kernels/moe.cl is not written for (a

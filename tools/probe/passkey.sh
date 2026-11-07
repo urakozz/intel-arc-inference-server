@@ -6,9 +6,8 @@
 # greedily, the container decodes them, and the placement PASSES if "71432" is in the text.
 # Files go to /tmp/passkey (small: ~1 MB each). Prints one line per (backend, placement)
 # and a summary "passkey <backend>: k/3". Exit 0 iff every backend got 3/3.
-# Env: MODEL (default the gate checkpoint), ZE_AFFINITY_MASK (default 0); spec 14:
-# MAX_LEN (131072) and N_TARGET (prompt ids, 120000) - Agnes 3.0 Flash ran at
-# MAX_LEN=65536 N_TARGET=60000 (spec 14's ceiling), with ORACLE_MODEL naming it too.
+# Env: MODEL (default the gate checkpoint), ZE_AFFINITY_MASK (default 0),
+# MAX_LEN (131072) and N_TARGET (prompt ids, 120000), ORACLE_MODEL for another checkpoint.
 # Spec 6 §10: MAX_LEN=auto takes the largest length the memory plan fits (b70-decode
 # prints it as "max_len: auto -> N"; bf16 head, its default here); set N_TARGET to ~95%
 # of that N. DECODE_ARGS: extra b70-decode flags (word-split), e.g. DECODE_ARGS='--spec auto'

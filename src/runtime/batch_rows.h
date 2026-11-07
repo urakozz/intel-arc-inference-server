@@ -153,7 +153,7 @@ inline std::vector<uint32_t> run_lengths(const std::vector<BatchRow>& rows) {
 //            table at the longest slot
 //   scratch  runtime::plan's decode state without the persistent state and the head's KV / spec states, + its prefill
 //            scratch + int8 (the default backend's: l0, so none) - shared by the slots, one prefill at a time
-// `weights` excludes the MTP head and the RoPE table: memory_plan_test's kQwenInt8Weights / kAgnesInt8Weights.
+// `weights` excludes the MTP head and the RoPE table: memory_plan_test's kQwenInt8Weights.
 struct BatchMemory {
   size_t kv = 0, state = 0, weights = 0, scratch = 0;
   size_t total() const { return kv + state + weights + scratch; }

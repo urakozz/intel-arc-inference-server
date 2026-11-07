@@ -54,11 +54,11 @@ struct MoeLayer {
 // It shares `embed` and the `lm_head` linear with the main model.
 //
 // The FFN is the descriptor's (model::ModelDesc::mtp_head_moe): a dense head's bf16
-// gate||up and down (Qwen3.8, Agnes), or (spec 15e) one MoE layer of the main model's
+// gate||up and down (Qwen3.8), or (spec 15e) one MoE layer of the main model's
 // shape in exactly the main layers' device form (MoeLayer, loader/moe_layout.h), so
 // moe.cl runs the head's block as it runs layer l's. The other pair is null.
 struct MtpHead {
-  // Shapes from the descriptor (spec 15b); Qwen3.8's and Agnes's in the comments, then
+  // Shapes from the descriptor (spec 15b); Qwen3.8's in the comments, then
   // Ornith's.
   DeviceWeight fc;        // K 2 x hidden 10240 -> N 5120, over cat(pre_fc_norm_embedding(e), pre_fc_norm_hidden(h)); Ornith 4096 -> 2048
   DeviceWeight qkv;       // K 5120 -> N fa_qkv_n 14336: q_proj (q||gate per head) || k_proj || v_proj; Ornith 2048 -> 9216
@@ -90,7 +90,7 @@ inline size_t mtp_norms_bytes(const model::ModelDesc& d) {
   return size_t(kMtpNormCount) * d.hidden * 4;
 }
 // A dense MTP head's tensor count; its bf16 bytes are ModelDesc::mtp_checkpoint_bytes()
-// (849,398,784 on Qwen3.8 and Agnes, docs/03: 0.849 GB). A MoE head's count is
+// (849,398,784 on Qwen3.8, docs/03: 0.849 GB). A MoE head's count is
 // ModelDesc::mtp_checkpoint_tensors() when every tensor is bf16 (Ornith 785).
 constexpr size_t kMtpTensors = 15;
 
@@ -219,7 +219,7 @@ inline const DeviceWeight& prefill_ab(const LoadedModel& m, uint32_t layer) {
 // and at most config.json's max_position_embeddings (spec 6 §10: positions the model
 // was never trained on are refused here, before a byte is read). Whether the KV cache
 // at that max_len FITS is not the loader's question - runtime/memory_plan.h answers it
-// from the loaded bytes (spec 14 §3.3's fixed Agnes ceiling is gone).
+// from the loaded bytes.
 // `mtp` (spec 8 §3.1): also load the MTP head into LoadedModel::mtp. Without it the
 // head's tensors are skipped by name, counted, and never read - exactly as before.
 // `lm_head` (spec 9 §3): Checkpoint loads the head as shipped; Int8 quantises a bf16

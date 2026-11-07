@@ -5,7 +5,7 @@
 
 // Spec 6 §10: the context a checkpoint was trained for, config.json's
 // `max_position_embeddings` - in `text_config` for the multimodal checkpoints
-// (Qwen3.8, Agnes and Ornith all say 262144 there), at the top level otherwise. It is
+// (Qwen3.8 and Ornith both say 262144 there), at the top level otherwise. It is
 // the hard upper bound of any max_len (the RoPE angles beyond it are positions the
 // model never saw) and the cap `--max-len auto` plans under. Host only: no device.
 namespace loader {

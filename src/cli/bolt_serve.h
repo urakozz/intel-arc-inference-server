@@ -52,7 +52,7 @@
 
 namespace cli::bolt {
 
-// The prefix cache's root for Bolt (PrefixCache's kv_form): "NEMOBOLT". Qwen3.8 / Agnes / Ornith keep 0 / 1, the other models
+// The prefix cache's root for Bolt (PrefixCache's kv_form): "NEMOBOLT". Qwen3.8 / Ornith keep 0 / 1, the other models
 // their own keys: no chain crosses models; the entries' bytes are Bolt's SSM states, conv columns and attention KV (bf16 only),
 // meaningless to any other engine. The bf16-state arm (B70_BOLT_SSM=bf16) flips the low bit: its states are half the size.
 inline constexpr uint64_t kBoltStoreKey = 0x4E454D4F424F4C54ull;

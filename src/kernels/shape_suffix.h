@@ -10,8 +10,7 @@
 //
 // The reference shape is Qwen3.8's - the shape src/kernels/*.cl bake by default
 // and every pre-15b binary was built at - and it carries NO suffix, so every
-// Qwen3.8 binary (and every Agnes binary: Agnes shares these shapes) keeps its
-// name and its ocloc command line. Another model's shapes name a binary that
+// Qwen3.8 binary keeps its name and its ocloc command line. Another model's shapes name a binary that
 // exists only once a CMake block builds it with the matching defines (spec
 // 15c); until then capture throws on the missing file, the same guard
 // `kernels::path` gives every variant.
