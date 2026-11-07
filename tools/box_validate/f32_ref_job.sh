@@ -30,7 +30,7 @@ part="oracle-out-f32-job.partial"
 mkdir -p "$part" "$(dirname "$out")"
 exec 9> /tmp/b70-cpu-model.lock
 echo "f32_ref_job: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
-flock 9
+[ -n "${B70_CPU_MODEL_LOCK_HELD:-}" ] || flock 9   # the CPU chain holds it for its job already
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 need="${F32_REF_MIN_GB:-95}"
 if [ "${avail:-0}" -lt "$need" ]; then
