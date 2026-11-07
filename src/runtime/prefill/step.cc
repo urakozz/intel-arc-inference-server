@@ -472,8 +472,7 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // `step_head` adds 5 once per prefill: 2 (final norm) + 1 (lm_head) + 2 (argmax).
 // L0 (spec 2.1 S2): each int4 linear is 2 x (N / 1024) slab launches -- GDN: qkv||z 32 +
 // out_proj 10 + gate||up 68 + down 10 = 120; FA: q||k||v 28 + o_proj 10 + 68 + 10 = 116
-// (Qwen3.8; spec 14: gate||up is 2 x 38 = 76 on Agnes, so 128 / 124 - `slab_launches` reads
-// the descriptor's rows).
+// (Qwen3.8; `slab_launches` reads the descriptor's rows).
 // L0 (parity program S3): the composed attention issues QK^T per row block of 256 rows (P·V
 // is not -- see attn.cc), so it is 4 x (2 + blocks) launches -- the one term that depends on C.
 // L0 (parity program S2a): `pf_silu_mul` is fused into the gate||up slab GEMM's epilogue,

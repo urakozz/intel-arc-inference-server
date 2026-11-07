@@ -8,8 +8,8 @@
 //                          [--grf 128|256] [--s N] [--rounds 5] [--launches 40]
 //   probe_small_m levers   [--shape all] [--orient wB,wA] [--rounds 5]
 //   probe_small_m numerics <snapshot> [--shape all] [--trials 1000]
-//   probe_small_m prod     [--shape all|agnes] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers;
-//                          Qwen3.8's shapes and Agnes's two MLP shapes, the token sum over Qwen3.8's)
+//   probe_small_m prod     [--shape all] [--m 2,4,8,16] [--rounds 5]   (plan 28b: production gemm_sm + levers;
+//                          Qwen3.8's shapes, the token sum over them)
 //   (every mode: [--device 0]; the card is whatever ZE_AFFINITY_MASK leaves at index 0)
 //
 // check:    every built variant of the selected shapes and M against the fp64 reference
@@ -848,28 +848,17 @@ std::unique_ptr<Launch> make_prod(l0::Context& ctx, const kernels::SmallMTuning&
   L->S = kernels::gemm_sm_out_s(t);
   return L;
 }
-// Agnes's two MLP shapes (prod mode only; 72 layers, the gemv control where built - M 1..4).
-const Shape kAgnesShapes[] = {
-    {"agu", "gate'||up' (Agnes)", 5120, 38912, 8, 0, 72, 0, 0, model::LinearId::GateUp},
-    {"adown", "down' (Agnes)", 19456, 5120, 4, 0, 72, 0, 0, model::LinearId::Down},
-};
 int run_prod(l0::Context& ctx, const Opts& o) {
   l0::Queue q(ctx);
   l0::Fence f(q);
   box_line();
   std::vector<const Shape*> shapes = pick_shapes(o, false);
-  for (const Shape& s : kAgnesShapes) {
-    bool any = o.shapes.empty();
-    for (auto& k : o.shapes) if (k == "all" || k == "agnes" || k == s.key) any = true;
-    if (any) shapes.push_back(&s);
-  }
   std::printf("prod: the production gemm_sm rows and their lever alternates, %u rounds interleaved after 3 warm-up "
               "executions per list, with gemv at M = 1 and at M\n", o.rounds);
   std::map<std::string, std::map<uint32_t, double>> ctl, prod_us, best_us;
   std::vector<const Shape*> done;
   for (const Shape* sp : shapes) {
     const Shape& s = *sp;
-    const bool agnes = sp >= std::begin(kAgnesShapes) && sp < std::end(kAgnesShapes);
     const unsigned lay = s.kind == 2 ? 2 : s.L;
     const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.kind == 2 ? 1 : s.S, lay);
     if (!t) { std::printf("%s: no kSmallMTuning row\n", s.name); continue; }
@@ -923,7 +912,7 @@ int run_prod(l0::Context& ctx, const Opts& o) {
       best_us[s.key][M] = best;
       std::fflush(stdout);
     }
-    if (!agnes) done.push_back(&s);   // the token sum is Qwen3.8's
+    done.push_back(&s);
   }
   std::printf("\n## the GEMM sum of a token (layers x median us, the head once) - derived\n\n"
               "| M | gemv M=1 sum us | production sum us | x gemv M=1 | best-of-alternates x gemv M=1 |\n|---|---|---|---|---|\n");

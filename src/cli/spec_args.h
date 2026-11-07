@@ -5,7 +5,7 @@
 // --spec-cost, --spec-min-match, --spec-history, --draft-format): the engine uses the measured defaults.
 //
 //   auto           the model's validated proposer: MTP with an adaptive K (spec 8 §10, AdaptiveK over the int8
-//                  head's measured cost table) on the Qwen family (Qwen3.8, Agnes, Ornith - the models with an
+//                  head's measured cost table) on the Qwen family (Qwen3.8, Ornith - the models with an
 //                  MTP head and that table); none elsewhere (K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt have no head;
 //                  Qwen3.8-Flash-Next's MTP is not validated; Bolt's drafter becomes its auto only on spec 26 §7's
 //                  D5 rule, box row 65). b70-serve's default; b70-decode's is off.
@@ -38,7 +38,7 @@ inline std::string parse_spec(const std::string& v) {
   throw std::runtime_error("--spec expects auto, off, mtp, lookup, dflash or dflash-lookup, got '" + v + "'");
 }
 
-// Which proposers a model family has: Qwen (Qwen3.8, Agnes, Ornith: the MTP head and its cost table; the
+// Which proposers a model family has: Qwen (Qwen3.8, Ornith: the MTP head and its cost table; the
 // drafter for Qwen3.8), Qwen4Exp (Qwen3.8-Flash-Next: the head, fixed K), Bolt (Nemotron 3.5 Bolt: no head, its
 // own verify lists to M = 8 - prompt lookup and the LiLiCorr drafter, spec 26c), None (no head, no drafter).
 enum class SpecFamily { Qwen, Qwen4Exp, Bolt, None };

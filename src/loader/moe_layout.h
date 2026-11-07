@@ -97,7 +97,7 @@ inline size_t moe_bytes(const model::ModelDesc& d) {
 // and o in bf16 tiles; the five fp32 (1 + w) norms; the FA block (q_norm || k_norm); and
 // the FFN - a dense head's bf16 gate||up and down at mtp_intermediate, or a MoE head's
 // one layer in the main layers' device form (moe_layer_bytes). 0 for a descriptor with
-// no head. Qwen3.8 / Agnes 849,451,008 B; Ornith 501,990,464 B (16,777,216 fc +
+// no head. Qwen3.8 849,451,008 B; Ornith 501,990,464 B (16,777,216 fc +
 // 37,748,736 q||k||v + 16,777,216 o + 40,960 norms + 2,048 FA + 430,604,288 MoE).
 inline size_t mtp_head_bytes(const model::ModelDesc& d) {
   if (d.mtp_intermediate == 0 && !d.mtp_head_moe()) return 0;

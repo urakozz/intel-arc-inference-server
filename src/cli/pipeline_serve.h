@@ -6,7 +6,7 @@
 // b70-serve takes b70-decode's flags (cli/pipeline_args.h): --parallel auto|1|pp, and the overrides
 // --pipeline-split auto|N and --pipeline-handoff copy|peer (pp's). Under pp:
 //
-//   served   Qwen3.8, Agnes and Ornith (runtime::PipelineEngine: the descriptor gives the
+//   served   Qwen3.8 and Ornith (runtime::PipelineEngine: the descriptor gives the
 //            split), with --max-len auto|N (both cards, each with the reserve), --prefill-backend
 //            l0|l0-int8, --kv-cache bf16|int8, the prefix cache (--prefix-cache-gb auto|N,
 //            --prefix-split-last: snapshots in the one-card layouts, the block hook from the

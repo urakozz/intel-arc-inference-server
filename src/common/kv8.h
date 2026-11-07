@@ -81,7 +81,7 @@ inline float f16f(uint16_t h) {
   return (h & 0x8000u) ? -v : v;
 }
 
-// In place, ascending stages, over N points (256: Qwen3.8 / Agnes; 128: K2-Horizon, below).
+// In place, ascending stages, over N points (256: Qwen3.8; 128: K2-Horizon, below).
 template <uint32_t N>
 inline void fwht(float* v) {
   for (uint32_t h = 1; h < N; h <<= 1)
@@ -139,7 +139,7 @@ inline uint16_t encode(const float* x, int8_t* q) {
 // ---------------------------------------------------------------------------------------
 // Spec 18e Task 1: rotkv at head_dim 128 (K2-Horizon) - src/kernels/k2/k2_kv8.cl repeats
 // every statement below; edit the two together. Everything above (the 256-point scheme of
-// Qwen3.8 / Agnes) is unchanged: fwht256 / quantise are the templates at N = 256, the same
+// Qwen3.8) is unchanged: fwht256 / quantise are the templates at N = 256, the same
 // statements in the same order.
 //
 //   R = H_128 diag(s) / sqrt(128)       orthonormal; s = the first 128 of kSignWords

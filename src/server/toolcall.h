@@ -59,7 +59,7 @@ class OutputStream : public OutputParser {
 
   // Spec 25e (Bolt, spec 23 decision 16's rule): a call still open when generation ends is DROPPED - neither a call nor
   // content - unless its </function> had closed (only </tool_call> missing: the call is complete). Off (the default): the
-  // Qwen / Agnes behaviour, unchanged - an open call whose function tag is complete is emitted with the parameters that closed.
+  // Qwen behaviour, unchanged - an open call whose function tag is complete is emitted with the parameters that closed.
   void set_drop_cut_calls(bool on) { drop_cut_calls_ = on; }
 
  private:

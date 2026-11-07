@@ -8,7 +8,7 @@
 //                                                    kernel (tp_ping) waits for the CPU's row + stamp and acks; the
 //                                                    CPU times the round trip (median, p10 / p90) and its own store
 //                                                    time; the row's words checked on the card
-//   probe_tp ar   [--model qwen38|agnes] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
+//   probe_tp ar   [--model qwen38] [--route all|p2p-push,p2p-pull,host-mbox,host-bar,host-read]
 //                 [--rows 1,8] [--calls N] [--rounds 5] [--execs 20] [--replays N] [--inject skip-data|skip-all]
 //                 [--inject-at N] [--cpu C] [--chunk 1024] [--s 4] [--flag plain|atomic]
 //                 [--host-mem uncached|cached|wc] [--dev-mem cached|uncached] [--send kernel|copy]
@@ -21,7 +21,7 @@
 //                                                    every output word against the host formula on both cards, the
 //                                                    two cards' output hashes equal, stamps; with --inject a stale
 //                                                    (skip-data) or dropped (skip-all) write by card 1 must be caught
-//   probe_tp step [--model qwen38|agnes] [--card 0] [--rounds 5] [--launches 40] [--shape all|qkvz,...]
+//   probe_tp step [--model qwen38] [--card 0] [--rounds 5] [--launches 40] [--shape all|qkvz,...]
 //                                                    one card: each linear at its one-card shape (the production
 //                                                    binary) against its per-card TP shape (spec 17 §R2.5, ptp_*
 //                                                    binaries from the production sources and cells), M = 1,

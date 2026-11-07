@@ -124,16 +124,13 @@ struct SmallMTuning {
   unsigned char mset = kSmAll;
 };
 inline constexpr SmallMTuning kSmallMTuning[] = {
-    // Qwen3.8 (and Agnes: the same attention and GDN linears)
+    // Qwen3.8
     {5120, 16384, 1, 1, false, true, false, false},   // qkv||z      48 layers
     {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
     {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
     {5120, 34816, 8, 0, true, true, false, false},    // gate||up (2x8 work-group: one slice, SiLU at S 1)
     {17408, 5120, 4, 0, false, true, false, true},    // down
     {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head
-    // Agnes 3.0 Flash's folded MLP (spec 14; gemv's cells PROVISIONAL there, copied here)
-    {5120, 38912, 8, 0, true, true, false, false},    // gate'||up' (2x8 work-group: one slice, SiLU at S 1)
-    {19456, 5120, 4, 0, false, true, false, true},    // down'
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify
     // lists' M = 2..4 - gemv's PROVISIONAL S / layout, magic dequant, no lever swept; the routed experts (moe.cl)
     // and the bf16 router stay as they are (spec 28m)
@@ -181,8 +178,8 @@ inline constexpr unsigned gemm_sm_cols(const SmallMTuning& t) { return t.wg ? 32
 inline constexpr unsigned gemm_sm_grid_y(const SmallMTuning& t) { return t.wg ? 1 : t.S; }
 inline constexpr bool small_m_table_ok() {
   for (const SmallMTuning& t : kSmallMTuning) {
-    // wg writes one slice: only where gemv's S is 1, or a gate||up (Qwen3.8's, Agnes's: the SiLU has an _S1 build)
-    if (t.wg && t.S != 1 && !(t.layout == 0 && t.K == 5120 && (t.N == 2 * 17408 || t.N == 2 * 19456))) return false;
+    // wg writes one slice: only where gemv's S is 1, or Qwen3.8's gate||up (the SiLU has an _S1 build)
+    if (t.wg && t.S != 1 && !(t.layout == 0 && t.K == 5120 && t.N == 2 * 17408)) return false;
     if (t.layout == 2 && (t.S != 1 || t.magic || t.blk2d)) return false;
     if (t.blk2d && t.layout != 0) return false;
     if (t.K % 64 != 0 || (t.K / 64) % t.S != 0 || (t.wg && (t.K / 64) % 8 != 0)) return false;
@@ -202,7 +199,7 @@ inline std::string gemm_sm_variant(unsigned M, const SmallMTuning& t) {
   return "gemm_sm" + mk + "_S" + std::to_string(gemm_sm_out_s(t)) + "_L" + std::to_string(t.layout) + knobs;
 }
 // The M each row is built at (src/kernels/CMakeLists.txt's spec 28b block; gemm_sm_names_test holds the two
-// together): 2..8 and 16 for Qwen3.8's / Agnes's linears and head; Ornith's and Flash-Next's at their verify lists'
+// together): 2..8 and 16 for Qwen3.8's linears and head; Ornith's and Flash-Next's at their verify lists'
 // 2..4; the DFlash drafter's linears at its block's 8 and its draft heads at 7 (spec 28d).
 inline std::vector<unsigned> gemm_sm_built_m(const SmallMTuning& t) {
   switch (t.mset) {
@@ -268,8 +265,8 @@ inline std::string prep_silu_mul_variant(unsigned M, unsigned I) {
 // Spec 15b: the kernels below that bake a MODEL shape their other parameters do
 // not name take it as trailing arguments - hidden for embed_gather, the GDN heads
 // for prep_gated_head / gdn_step*, the FA heads for the attention kernels - and
-// append kernels/shape_suffix.h's suffix: empty at Qwen3.8's shapes (Agnes
-// shares them), so no existing binary is renamed. The defaults are those
+// append kernels/shape_suffix.h's suffix: empty at Qwen3.8's shapes, so no
+// existing binary is renamed. The defaults are those
 // reference shapes, for the kernel tests that bind Qwen3.8's binaries; the
 // runtime always passes the model descriptor's.
 inline std::string prep_gated_head_variant(unsigned M, unsigned gdn_k = kRefGdnKHeads,
@@ -339,13 +336,13 @@ inline std::string prep_norm_finish_strided_variant(unsigned M, unsigned K, unsi
                                                     unsigned W, unsigned X) {
   return prep_norm_finish_variant(M, K, G, W) + "_X" + std::to_string(X);
 }
-// The MTP head's bf16 gate||up (SILU_S = 1). The head's own intermediate (17408 on
-// both supported checkpoints - Agnes's head has no parallel FFN).
+// The MTP head's bf16 gate||up (SILU_S = 1), at the head's own intermediate (17408 on
+// Qwen3.8).
 inline std::string prep_silu_mul_s1_variant(unsigned M, unsigned I) {
   return prep_silu_mul_variant(M, I) + "_S1";
 }
 // Spec 28b: the SiLU a decode list binds after gate||up, by the slices gate||up wrote - gemv's S (SILU_S baked,
-// the plain build) or 1 (gemm_sm's 2x8 work-group, the _S1 build; built at M 2..8 for I 17408 and Agnes's 19456).
+// the plain build) or 1 (gemm_sm's 2x8 work-group, the _S1 build; built at M 2..8 for I 17408).
 inline std::string gemm_sm_silu_variant(unsigned M, unsigned I, unsigned gate_up_s, unsigned gemv_s) {
   return gate_up_s == gemv_s ? prep_silu_mul_variant(M, I) : prep_silu_mul_s1_variant(M, I);
 }
@@ -418,7 +415,7 @@ inline std::string embed_gather_variant(unsigned M, unsigned hidden = kRefHidden
   return "embed_gather_M" + std::to_string(M) + hidden_suffix(hidden);
 }
 // VOCAB_USED (the ids the tokenizer defines) is baked: Qwen3.8's 248077 keeps the
-// historical name, any other count is `_V<vocab_used>` (spec 14: Agnes's 248089).
+// historical name, any other count is `_V<vocab_used>` (spec 14).
 inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
   return "argmax_stage1_M" + std::to_string(M) +
          (vocab_used == 248077 ? std::string() : "_V" + std::to_string(vocab_used));

@@ -33,7 +33,7 @@
 namespace cli::k2 {
 
 // The prefix cache's root for K2 (PrefixCache's kv_form, EngineIface::kv_form): every hash
-// chain of the store starts here. Qwen3.8 / Agnes / Ornith keep 0 (bf16) / 1 (int8), so their
+// chain of the store starts here. Qwen3.8 / Ornith keep 0 (bf16) / 1 (int8), so their
 // chains are unchanged; K2's are "K2HORIZ" plus its form, a disjoint key - the entries' bytes
 // are K2's KV layout in that form (48 layers x 8 heads x 128), meaningless to any other engine.
 inline constexpr uint64_t kK2StoreKey = 0x4B32484F52495A00ull;   // "K2HORIZ\0"

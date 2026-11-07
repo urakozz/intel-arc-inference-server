@@ -391,7 +391,7 @@ size_t Engine::state_bytes() const {
 }
 
 size_t Engine::kv_bytes(uint32_t n_pos) const {
-  const size_t fa = model_.desc->fa_layers;   // 16 on Qwen3.8, 18 on Agnes (spec 14)
+  const size_t fa = model_.desc->fa_layers;   // 16 on Qwen3.8, 10 on Ornith
   // One position of one layer: the rows, and at int8 their scales (spec 12b).
   return 2 * persist_.kv_lay.pos_bytes() * (fa + (mtp_ ? 1 : 0)) * n_pos;   // K and V
 }
@@ -433,7 +433,7 @@ void Engine::load_state(const void* host, uint32_t pos) {
 
 // kv_k / kv_v are KvLayout's: [fa_layers][max_len][4][256] rows (bf16, or int8 then the
 // [fa_layers][max_len][4] fp16 scales). A position range is one contiguous run per layer,
-// so fa_layers (16 on Qwen3.8, 18 on Agnes) copies each for K and V, plus as many scale
+// so fa_layers (16 on Qwen3.8) copies each for K and V, plus as many scale
 // runs at int8 (spec 12b). The two loops below walk the same (allocation, offset, bytes)
 // list in the same order, one copying out and the other in.
 namespace {

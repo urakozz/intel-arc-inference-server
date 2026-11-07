@@ -12,7 +12,7 @@
 // it on any host over a synthetic checkpoint. loader::load uploads what these produce.
 //
 // **a||b's kind is the checkpoint's, like lm_head's** (model/model_desc.h `ab()`). Qwen3.8's
-// and Agnes's exports keep in_proj_a / in_proj_b bf16 (their `dynamic` exclusion rules); the
+// exports keep in_proj_a / in_proj_b bf16 (their `dynamic` exclusion rules); the
 // published Ornith int4 checkpoint (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`) quantises
 // them, int4 g64 sym, like every other GDN linear. The loader classifies the first GDN
 // layer's in_proj_a by content (LinearSrc::kind_of: `.qweight`, compressed-tensors'

@@ -1,4 +1,4 @@
-// b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8, Agnes,
+// b70-serve -- the OpenAI-compatible server over the replayed runtime::Engine (Qwen3.8,
 // Ornith), runtime::k2::K2Engine (K2-Horizon, spec 18d) or runtime::kolibri::KolibriEngine
 // (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --parallel pp
 // (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two B70s
@@ -95,7 +95,7 @@ void usage() {
                "usage: b70-serve <snapshot-or-repo> [--spec auto|off|mtp|lookup|dflash] [--max-len auto|N]\n"
                "                 [--parallel auto|1|pp|replica] [--host 0.0.0.0] [--port 8000]\n"
                "\n"
-               "  The model is chosen from the checkpoint's config.json (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5,\n"
+               "  The model is chosen from the checkpoint's config.json (Qwen3.8, Ornith 1.5,\n"
                "  K2-Horizon, Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
                "  (the repo id, or the directory's). Everything else - the device memory the plan leaves free,\n"
                "  the int8 lm_head, the drafter's form, the speculative cost tables, the tokenizer, the chat\n"
@@ -105,7 +105,7 @@ void usage() {
                "\n"
                "  --spec S        speculative decoding (default auto: the model's own MTP head with an adaptive\n"
                "                  K per request where it has one and its cost table is measured - Qwen3.8,\n"
-               "                  Agnes, Ornith; off elsewhere). off; mtp; lookup (prompt lookup, verified\n"
+               "                  Ornith; off elsewhere). off; mtp; lookup (prompt lookup, verified\n"
                "                  through the MTP lists); dflash (Qwen3.8's DFlash drafter, from the HF cache);\n"
                "                  dflash-lookup (lookup inside DFlash, opt-in). Greedy output unchanged.\n"
                "                  Nemotron 3.5 Bolt (spec 26c, opt-in): lookup and dflash (its LiLiCorr\n"
@@ -1167,7 +1167,7 @@ int run(int argc, char** argv) {
   const std::string snapshot_dir = loader::resolve_snapshot(path);
   // Spec 18b / 18d: dispatch on config.json's model_type. The chat format (template variables,
   // reasoning tags, tool-call syntax) follows it (server/chat_format.h: anything but
-  // k2_horizon is the Qwen path Qwen3.8, Agnes and Ornith share); K2-Horizon runs its own
+  // k2_horizon is the Qwen path Qwen3.8 and Ornith share); K2-Horizon runs its own
   // engine (runtime/k2, cli::k2::K2EngineAdapterT) - what that engine does not have is refused
   // here by name, before the device.
   options.chat_format = server::ChatFormat::for_model_type(model_type);
@@ -1310,7 +1310,7 @@ int run(int argc, char** argv) {
   TokAdapter tokenizer(snapshot_dir + "tokenizer.json");
   // Spec 15e: the sampler masks at the tokenizer's count, the greedy argmax at the
   // descriptor's vocab_used (argmax.cl VOCAB_USED). They agree on every model served:
-  // Qwen3.8 248077, Agnes 248089, and Ornith 248077 - the int4 checkpoint's tokenizer.json
+  // Qwen3.8 248077 and Ornith 248077 - the int4 checkpoint's tokenizer.json
   // defines Qwen3.8's ids (spec 15 §13; the base checkpoint's stopped at </think>, 248070,
   // which the descriptor masked from between 11ab54f and §13). A checkpoint whose
   // tokenizer.json and descriptor disagree is said once at startup

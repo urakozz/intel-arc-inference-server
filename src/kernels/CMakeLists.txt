@@ -21,14 +21,6 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
   elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
-  # Spec 14, Agnes 3.0 Flash: PROVISIONAL cells, COPIED from the nearest Qwen3.8
-  # production cells above (gate||up 5120x34816 S8, down 17408x5120 S4), not
-  # measured (the sweep build option that would have tuned them was removed in the
-  # zero-config cleanup, 2026-11-06; a re-tune is a probe of its own).
-  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 38912 AND S EQUAL 8)
-    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)                    # PROVISIONAL
-  elseif(L EQUAL 0 AND K EQUAL 19456 AND N EQUAL 5120 AND S EQUAL 4)
-    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)     # PROVISIONAL
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -383,8 +375,7 @@ if(B70_MTP)
   # tiling, which kernels::gemv_bf16_tiling gives every N >= 2048) and the mapped argmax +
   # scatter (draft_vocab.cl), one binary per size holding both stages. Additive: no
   # existing binary's command line moves, and an engine without a draft vocabulary binds
-  # none of them. The head's K is the model's hidden (5120 on Qwen3.8 and Agnes), so these
-  # serve both.
+  # none of them. The head's K is the model's hidden (5120 on Qwen3.8).
   set(DRAFT_VOCAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/draft_vocab.cl)
   foreach(NV 32768 65536 131072)
     add_gemv_i8w_variant(1 5120 ${NV})
@@ -534,7 +525,7 @@ endif()
 # Every binary above is built at Qwen3.8's shapes - hidden 5120, FA 24 q / 4 kv
 # heads, GDN 16 k / 48 v heads - which the .cl sources bake by default. The
 # host names a binary from the model descriptor (src/kernels/shape_suffix.h):
-# Qwen3.8's shapes, and Agnes's (the same), carry no suffix, so every name and
+# Qwen3.8's shapes carry no suffix, so every name and
 # command line here is unchanged. Another model's kernels that bake a shape
 # their name does not otherwise carry are suffixed `_D<hidden>` (embed_gather),
 # `_GK<k>V<v>` (gdn_step*, prep_gated_head) and `_Q<q>KV<kv>` (attn_prep,
@@ -544,45 +535,8 @@ endif()
 # overridable (GDN_K_HEADS / GDN_V_HEADS, FA_Q_HEADS / FA_KV_HEADS); any other
 # shape's missing binary throws at capture, as for any unbuilt variant.
 #
-# --- Spec 14: Agnes 3.0 Flash (model::agnes()) ------------------------------
-# Additive only: every Qwen3.8 binary above keeps its name and its command line
-# (G0 compares their checksums against a main build). Agnes differs from Qwen3.8
-# in two baked numbers - the MLP intermediate (17408 + 2048 folded = 19456) and
-# the GDN layer count (54, which sizes the MTP slot stride) - and in the two GEMV
-# shapes that follow from the first.
-option(B70_AGNES "build the Agnes 3.0 Flash variants (spec 14)" ON)
-if(B70_AGNES)
-  set(AGNES_I 19456)
-  add_gemv_variant(1 5120 38912 8 0)    # gate'||up'  PROVISIONAL S8 L0
-  add_gemv_variant(1 19456 5120 4 0)    # down'       PROVISIONAL S4 L0
-  add_ocloc_kernel(prep_silu_mul_M1_I${AGNES_I} SOURCE ${PREP_CL} DEFINES M=1 INTERMEDIATE=${AGNES_I})
-  # Agnes's tokenizer defines 12 more ids (248077..248088, its specials), so its greedy
-  # argmax masks from 248089 (model::agnes().vocab_used, kernels::argmax_stage1_variant).
-  set(AGNES_ARGMAX_DEFINES ${CTRL_DEFINES} VOCAB=248320 VOCAB_USED=248089)
-  add_ocloc_kernel(argmax_stage1_M1_V248089 SOURCE ${ARGMAX_CL} DEFINES ${AGNES_ARGMAX_DEFINES} M=1)
-  if(B70_MTP)
-    foreach(MM 2 3 4)   # the verify lists' M rows (spec 8), at Agnes's shapes
-      add_gemv_variant(${MM} 5120 38912 8 0)
-      add_gemv_variant(${MM} 19456 5120 4 0)
-      add_ocloc_kernel(prep_silu_mul_M${MM}_I${AGNES_I} SOURCE ${PREP_CL}
-                       DEFINES M=${MM} INTERMEDIATE=${AGNES_I})
-      add_ocloc_kernel(argmax_stage1_M${MM}_V248089 SOURCE ${ARGMAX_CL}
-                       DEFINES ${AGNES_ARGMAX_DEFINES} M=${MM})
-    endforeach()
-  endif()
-  if(B70_MTP)
-    # gdn_step_slots bakes one MtpBuffers::gdn_spec slot: 54 GDN layers x 48 x 128 x 128
-    # floats = 42467328 (kernels::gdn_step_slots_variant names it `_G54`).
-    foreach(MM 1 2 3 4)
-      add_ocloc_kernel(gdn_step_slots_M${MM}_G54 SOURCE ${GDN_CL}
-                       DEFINES ${GDN_DEFINES} SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=42467328
-                               M=${MM})
-    endforeach()
-  endif()
-endif()
-
 # --- Spec 15c: Ornith 1.5 35B-A3B (model::ornith()), the M = 1 decode list ------
-# Additive only, like the Agnes block: every binary above keeps its name and command
+# Additive only: every binary above keeps its name and command
 # line (tools/kernel_cmdlines diff), and the .cl edits that made the head counts
 # overridable leave the default token stream untouched (the shape defines below are
 # the only way into the new branches). What Ornith's decode list binds
@@ -649,8 +603,8 @@ endif()
 #   attn_prep_M<M>_KV8        the decode writer at M = 1..4 (QKV_S = 2: the main FA layers)
 #   attn_prep_M<M>_S1_KV8     the MTP head's writer (its bf16 qkv: QKV_S = 1), B70_MTP
 #   attn_v2_M<M>_T<TGT>_KV8   decode attention v2 over int8 + scales, the un-rotating reduce
-# The prefill three are in prefill/CMakeLists.txt. Shapes are Qwen3.8's (Agnes shares
-# them); another model's FA heads name a `_Q<q>KV<kv>` binary nothing builds yet.
+# The prefill three are in prefill/CMakeLists.txt. Shapes are Qwen3.8's;
+# another model's FA heads name a `_Q<q>KV<kv>` binary nothing builds yet.
 option(B70_KV8 "build the --kv-cache int8 variants (spec 12b)" ON)
 if(B70_KV8)
   set(KV8_CL ${CMAKE_CURRENT_SOURCE_DIR}/kv8.cl)
@@ -1821,31 +1775,27 @@ set(B70_BOLT_VERIFY_KERNELS ${B70_BOLT_VERIFY_KERNELS} CACHE INTERNAL "spec 26c'
 # OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only
 # tools/probe/probe_batch_step through runtime::build_rows (capture.cc, compiled under the same option).
 # tools/kernel_cmdlines lists them (it turns the option on), so box_check's cmdlines stage sees every command line here.
-#   gdn_step_rows_M<M>[_G54]            gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
+#   gdn_step_rows_M<M>                  gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
 #                                       indices (src at a slot's first row, dst after every row); the strides of one
-#                                       whole-model state and one whole-model ring baked (48 / 54 GDN layers)
+#                                       whole-model state and one whole-model ring baked (48 GDN layers)
 #   attn_prep_M<M>[_S1][_KV8]_ROWS      attn.cl / kv8.cl's writer: RoPE at the row's position, K / V at its slot's
 #                                       KV base + position (_S1: the MTP head's bf16 q||k||v, QKV_S 1)
 #   attn_v2_M<M>_T32[_KV8]_ROWS         attention v2 / its kv8 twin: groups = a slot's rows at one stride, each over
 #                                       its own slot's keys
-# at M = 1..8 (the 8-row budget, spec 13 §9), and Agnes's row-agnostic M = 5..8 rows B70_VERIFY_M8 built for Qwen3.8
-# only (gate||up' 5120 x 38912 S8 L0, down' 19456 x 5120 S4 L0, SiLU at 19456, argmax_stage1 at 248089). Every other
+# at M = 1..8 (the 8-row budget, spec 13 §9). Every other
 # binary the probe's lists bind is B70_MTP's (M = 1..4) or B70_VERIFY_M8's (M = 5..8). The source edits are BATCH_ROWS
 # blocks only: no existing command line defines it, so every existing binary's preprocessed source is unchanged.
 # BROW_DEFINES is the row table's word layout (runtime::BatchRow, kernels::batch_row - the host mirror).
 option(B70_BATCH_PROBE "build the batching probe: the row builds, build_rows and probe_batch_step (spec 13a)" OFF)
 if(B70_BATCH_PROBE)
-  if(NOT (B70_MTP AND B70_VERIFY_M8 AND B70_KV8 AND B70_AGNES))
-    message(FATAL_ERROR "B70_BATCH_PROBE needs B70_MTP, B70_VERIFY_M8, B70_KV8 and B70_AGNES (their M-row binaries)")
+  if(NOT (B70_MTP AND B70_VERIFY_M8 AND B70_KV8))
+    message(FATAL_ERROR "B70_BATCH_PROBE needs B70_MTP, B70_VERIFY_M8 and B70_KV8 (their M-row binaries)")
   endif()
   set(BROW_DEFINES BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SRC=2 BROW_DST=3 BROW_SLOT=4)
   # One whole-model GDN state (gdn_layers x 48 x 128 x 128 floats) and conv ring (gdn_layers x 16 x 10240 ushorts).
   set(BR_GDN_QWEN SPEC_SLOT_STRIDE=37748736 RING_SLOT_STRIDE=7864320)
-  set(BR_GDN_AGNES SPEC_SLOT_STRIDE=42467328 RING_SLOT_STRIDE=8847360)
   foreach(MM 1 2 3 4 5 6 7 8)
     add_ocloc_kernel(gdn_step_rows_M${MM} SOURCE ${GDN_CL} DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_QWEN} M=${MM})
-    add_ocloc_kernel(gdn_step_rows_M${MM}_G54 SOURCE ${GDN_CL}
-                     DEFINES ${GDN_DEFINES} ${BROW_DEFINES} ${BR_GDN_AGNES} M=${MM})
     add_ocloc_kernel(attn_prep_M${MM}_ROWS SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM})
     add_ocloc_kernel(attn_prep_M${MM}_S1_ROWS SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_ROWS SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
@@ -1856,12 +1806,6 @@ if(B70_BATCH_PROBE)
                      DEFINES ${KV8_PREP_DEFINES} ${BROW_DEFINES} M=${MM} QKV_S=1)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS SOURCE ${KV8_CL}
                      DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
-  endforeach()
-  foreach(MM 5 6 7 8)   # Agnes's decode list at M = 5..8 (B70_VERIFY_M8 built Qwen3.8's)
-    add_gemv_variant(${MM} 5120 38912 8 0)
-    add_gemv_variant(${MM} 19456 5120 4 0)
-    add_ocloc_kernel(prep_silu_mul_M${MM}_I${AGNES_I} SOURCE ${PREP_CL} DEFINES M=${MM} INTERMEDIATE=${AGNES_I})
-    add_ocloc_kernel(argmax_stage1_M${MM}_V248089 SOURCE ${ARGMAX_CL} DEFINES ${AGNES_ARGMAX_DEFINES} M=${MM})
   endforeach()
 endif()
 # ==== Spec 13a ==== (end) ====
@@ -1918,7 +1862,6 @@ endfunction()
 # (S is the OUTPUT's slices: gate||up's 2x8 work-group row compiles at S 1 - kernels::gemm_sm_out_s.)
 set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG"
                    "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
-set(GEMM_SM_AGNES "5120 38912 1 0 WG MG" "19456 5120 4 0 MG B2D")
 macro(gemm_sm_rows ROWS MLIST)
   foreach(row IN LISTS ${ROWS})
     separate_arguments(f UNIX_COMMAND "${row}")
@@ -1936,13 +1879,6 @@ if(B70_MTP)
     add_ocloc_kernel(prep_silu_mul_M${MM}_S1 SOURCE ${PREP_CL} DEFINES M=${MM} SILU_S=1)
     list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_S1)
   endforeach()
-  if(B70_AGNES)
-    gemm_sm_rows(GEMM_SM_AGNES GEMM_SM_M)
-    foreach(MM 2 3 4 5 6 7 8)   # gate'||up''s SiLU after its one-slice 2x8 work-group
-      add_ocloc_kernel(prep_silu_mul_M${MM}_I19456_S1 SOURCE ${PREP_CL} DEFINES M=${MM} INTERMEDIATE=19456 SILU_S=1)
-      list(APPEND GEMM_SM_CONSUMERS kernel_prep_silu_mul_M${MM}_I19456_S1)
-    endforeach()
-  endif()
 endif()
 # Ornith's dense projections at its verify lists' M = 2..4 (kSmVerify4; spec 15e's block builds the lists' gemv)
 set(GEMM_SM_ORNITH "2048 12288 1 1 MG" "4096 2048 4 0 MG" "2048 9216 2 0 MG" "2048 128 1 1 MG" "2048 248320 1 2")

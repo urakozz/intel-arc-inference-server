@@ -11,8 +11,7 @@
 //                8 destinations (index slots + m for row m - the probe's scratch: 13c gives each slot its own);
 //   conv rings   slot 0's = the engine's; a pool of slots - 1;
 //   hprev        bf16 [slots][hidden], each slot's h_{pos-1} (the MTP head's input at a run's first row).
-// Default slots (spec 13 §9.1 / §9.2's layouts at the probe's depths): Qwen3.8 36864 + 3 x 8192; Agnes 36864 + 8192
-// with MTP, 36864 + 3 x 8192 with --mtp off. Each slot's sequence - tests/golden/prompts/long32k.ids from a per-slot
+// Default slots (spec 13 §9.1 / §9.2's layouts at the probe's depths): Qwen3.8 36864 + 3 x 8192. Each slot's sequence - tests/golden/prompts/long32k.ids from a per-slot
 // offset, repeated past its end - is prefilled into slot 0 by Engine::prefill (the served path, MTP head included) and
 // copied out (state, ring, KV rows and scales, the head's KV rows, h_{pos-1}); slot 0's is prefilled last and stays.
 // Slot 0 holds `deep` ids, the others `shallow`.
@@ -511,8 +510,7 @@ int main(int argc, char** argv) {
   l0::Context ctx(0);
   loader::LoadedModel model = loader::load(ctx, argv[1], load_len, mtp, loader::LmHeadForm::Int8);
   const model::ModelDesc& d = *model.desc;
-  const bool agnes = d.name.find("agnes") != std::string::npos;
-  if (slots_arg.empty()) slots_arg = (agnes && mtp) ? std::vector<uint32_t>{36864, 8192} : four;
+  if (slots_arg.empty()) slots_arg = four;
   runtime::BatchLayout lay;
   for (uint32_t l : slots_arg) lay.slots.push_back({l, mtp});
   const uint32_t total = lay.total();

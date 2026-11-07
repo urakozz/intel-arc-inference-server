@@ -134,11 +134,11 @@ CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers
 // mixer's 5, the post norm pair, gate||up + SiLU + down) or 13 per MoE layer (spec 15c:
 // the router GEMV, moe_route, moe_gate_up, moe_down in place of the dense MLP's 3), and
 // 5 at the boundary (the final norm pair, lm_head, the two argmax stages). Qwen3.8 774,
-// Agnes 870, Ornith 526.
+// Ornith 526.
 size_t decode_launches(const model::ModelDesc& d);
 // Spec 15e: the MTP lists' launch counts, which their walks assert on themselves too.
 // verify_launches: decode_launches + the head's 10-launch KV fill, at every M (Qwen3.8
-// 784, Agnes 880, Ornith 536). draft_launches: 23 with a dense head, 24 with a MoE head
+// 784, Ornith 536). draft_launches: 23 with a dense head, 24 with a MoE head
 // (its FFN is the 4-launch MoE block in place of gate||up, SiLU, down) - a draft
 // vocabulary swaps 3 launches for 3.
 size_t verify_launches(const model::ModelDesc& d);

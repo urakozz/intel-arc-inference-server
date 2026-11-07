@@ -52,8 +52,8 @@ namespace loader {
 // Spec 15b: the norms and GDN blocks follow the model's hidden size, conv
 // channels and GDN v-heads, so their offsets are a function of the descriptor
 // (`model::ModelDesc::small_layout()`); the FA block depends only on the
-// shared head_dim and stays constant. Qwen3.8 and Agnes share every input, and
-// `kQwen38Small` below pins their numbers - the ones the kernels' NEGA_OFF /
+// shared head_dim and stays constant. `kQwen38Small` below pins Qwen3.8's
+// numbers - the ones the kernels' NEGA_OFF /
 // DTBIAS_OFF defines (src/kernels/CMakeLists.txt) were derived from.
 
 // The depthwise conv's taps (linear_conv_kernel_dim, 4 on every supported model).
@@ -86,7 +86,7 @@ constexpr SmallLayout make_small_layout(uint32_t hidden, uint32_t conv_rows,
   return l;
 }
 
-// Qwen3.8's (and Agnes's) layout: hidden 5120, conv 10240 = (16 + 16 + 48) x 128,
+// Qwen3.8's layout: hidden 5120, conv 10240 = (16 + 16 + 48) x 128,
 // 48 v-heads. Pinned so an edit to the arithmetic above fails the build here.
 constexpr SmallLayout kQwen38Small = make_small_layout(5120, 10240, 48);
 static_assert(kQwen38Small.norms_off_input == 0 && kQwen38Small.norms_off_post == 20480,

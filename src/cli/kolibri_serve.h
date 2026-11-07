@@ -37,7 +37,7 @@
 
 namespace cli::kolibri {
 
-// The prefix cache's root for Kolibri (PrefixCache's kv_form): "KOLIBRI\0". Qwen3.8 / Agnes / Ornith keep
+// The prefix cache's root for Kolibri (PrefixCache's kv_form): "KOLIBRI\0". Qwen3.8 / Ornith keep
 // 0 / 1 and K2 its "K2HORIZ" key, so no chain crosses models; the entries' bytes are Kolibri's ring and
 // full-layer layouts (bf16 only), meaningless to any other engine.
 inline constexpr uint64_t kKolibriStoreKey = 0x4B4F4C4942524900ull;

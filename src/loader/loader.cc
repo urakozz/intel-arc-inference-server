@@ -17,7 +17,6 @@
 #include "common/repack.h"
 #include "l0/cmdlist.h"
 #include "loader/ab.h"
-#include "loader/fold.h"
 #include "loader/moe.h"
 #include "loader/safetensors.h"
 #include "loader/small_layout.h"
@@ -37,9 +36,7 @@ using model::Qwen35;
 // `W` - the read-per-token bytes with a bf16 lm_head - is the model
 // descriptor's `doc_w` (spec 14): Qwen3.8's is docs/03-models.md's byte
 // accounting (measured 2026-08-24): 12.163 qweight + 0.760 scales + 0.052 bf16
-// smalls + 2.543 lm_head = 15.519 GB. Agnes's 18.344 GB is the same four
-// categories summed from its safetensors headers (14.816 + 0.926 + 0.059 +
-// 2.543; the fold moves bytes, it adds none).
+// smalls + 2.543 lm_head = 15.519 GB.
 
 // doc-03's `W` was measured over a checkpoint with a **bf16** `lm_head`. A
 // checkpoint that packs it (spec 1.6 §5.1) reads 0.675 GB there instead of
@@ -74,10 +71,10 @@ constexpr const char* kLmPrefix = "model.language_model.";
 bool starts_with(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
 // Rebuilds the checkpoint name of a stripped (model-description) name: the
-// prefix back on, and the model's name map run backwards (spec 14 §3.2: an
-// engine `linear_attn.` is Agnes's `delta_attn.`; the identity on Qwen3.8).
-std::string ckpt_name(const model::ModelDesc& d, const std::string& stripped) {
-  return starts_with(stripped, "lm_head") ? stripped : kLmPrefix + d.to_checkpoint(stripped);
+// prefix back on (`lm_head` is top level). Engine and checkpoint spell every
+// other part of the name the same.
+std::string ckpt_name(const std::string& stripped) {
+  return starts_with(stripped, "lm_head") ? stripped : kLmPrefix + stripped;
 }
 
 bool has_suffix(const std::string& s, const char* suf) {
@@ -101,17 +98,16 @@ struct NameView {
   size_t top_level = 0;                      // names outside model.language_model.
 };
 
-// Every kept name is mapped to its ENGINE spelling here, once (spec 14 §3.2:
-// Agnes's `delta_attn.` / `global_attn.` -> `linear_attn.` / `self_attn.`, the
-// MTP head's included); everything downstream binds engine names only.
-NameView build_view(const SafetensorsSet& set, bool keep_mtp, const model::ModelDesc& d) {
+// Every kept name is recorded under its stripped spelling here, once (the MTP
+// head's top level); everything downstream binds these names only.
+NameView build_view(const SafetensorsSet& set, bool keep_mtp) {
   NameView v;
   for (const auto& [name, info] : set.tensors()) {
     (void)info;
     if (starts_with(name, "model.visual.")) {          // no vision tower in v1
       ++v.visual_skipped;
     } else if (starts_with(name, "mtp.") && keep_mtp) {   // spec 8: kept on request
-      v.names.emplace(d.to_engine(name), name);             // top-level, name-mapped
+      v.names.emplace(name, name);                          // top-level
     } else if (starts_with(name, "mtp.")) {            // no speculation unless asked
       // The RTN checkpoint's `mtp.*` are 29 tensors in their own shard
       // (`model_extra_tensors.safetensors`, pointed at by the index like any
@@ -122,7 +118,7 @@ NameView build_view(const SafetensorsSet& set, bool keep_mtp, const model::Model
       // report's `mtp` figure and can never land in `unconsumed`.
       ++v.mtp_skipped;
     } else if (starts_with(name, kLmPrefix)) {
-      std::string stripped = d.to_engine(name.substr(std::strlen(kLmPrefix)));
+      std::string stripped = name.substr(std::strlen(kLmPrefix));
       if (has_suffix(stripped, ".qzeros")) ++v.qzeros;
       if (has_suffix(stripped, ".g_idx")) ++v.g_idx;
       if (is_kv_scale(stripped)) ++v.kv_scales;
@@ -278,41 +274,6 @@ size_t int4_scale_elems(const model::GemvShape& s) {
   return s.layout == 0 ? size_t(s.K / 64) * s.N : 0;
 }
 
-// Spec 14 §2: join each part with its fold part (Fold::N: columns, part i with
-// fold part i; Fold::K: rows, the one part with the one fold part), on packed
-// int4 (loader/fold.h). The joined tensors live in `keep`; the returned sources
-// point into it. Every fold part must be int4 - the parallel FFN is quantised
-// exactly like the MLP it joins (the checkpoint's modules_in_block_to_quantize).
-std::vector<LinearSrc> apply_fold(const SafetensorsSet& set, NameView& view,
-                                  const model::ModelDesc& desc, const std::string& layer_prefix,
-                                  const model::FusedLinear& fl, std::vector<LinearSrc> srcs,
-                                  std::vector<PackedInt4>& keep, const std::string& id) {
-  const bool by_n = fl.fold == model::Fold::N;
-  if (fl.kind != model::WeightKind::Int4)
-    throw std::runtime_error(id + ": a fold is implemented for int4 linears only");
-  if (by_n ? fl.fold_parts.size() != srcs.size()
-           : (fl.fold_parts.size() != 1 || srcs.size() != 1))
-    throw std::runtime_error(id + ": " + std::to_string(fl.fold_parts.size()) + " fold parts for " +
-                             std::to_string(srcs.size()) + " parts (Fold::N pairs them, Fold::K "
-                             "joins one with one)");
-  keep.reserve(srcs.size());
-  for (size_t i = 0; i < srcs.size(); ++i) {
-    const std::string& fp = fl.fold_parts[i];
-    const LinearSrc f = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + fp));
-    if (f.kind != WKind::Int4 || srcs[i].kind != WKind::Int4)
-      throw std::runtime_error(id + ": fold part '" + fp + "' or its partner is not int4");
-    for (const std::string& suffix : f.suffixes()) view.consumed.insert(layer_prefix + fp + suffix);
-    const PackedInt4View a{srcs[i].K, srcs[i].N, srcs[i].qweight, srcs[i].scales};
-    const PackedInt4View b{f.K, f.N, f.qweight, f.scales};
-    keep.push_back(by_n ? fold_n(a, b) : fold_k(a, b));
-    srcs[i].K = keep.back().K;
-    srcs[i].N = keep.back().N;
-    srcs[i].qweight = keep.back().qweight.data();
-    srcs[i].scales = keep.back().scales.data();
-  }
-  return srcs;
-}
-
 // One fused linear: classify every part, check the preconditions the repack
 // helpers document but cannot check (Task-3 review minor, closed here at the
 // first real consumer - these run in release too, load is one-shot), repack
@@ -335,7 +296,7 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
   std::vector<LinearSrc> srcs;
   for (const std::string& part : fl.parts) {
     // classify() checks the alignment of every pointer it casts (M6).
-    LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, layer_prefix + part));
+    LinearSrc s = LinearSrc::classify(set, ckpt_name(layer_prefix + part));
     const bool int4 = s.kind == WKind::Int4;
     if (int4 != (fl.kind == model::WeightKind::Int4))
       throw std::runtime_error(id + ": part '" + part + "' is " + (int4 ? "int4" : "bf16") +
@@ -345,11 +306,6 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
     for (const std::string& suffix : s.suffixes()) view.consumed.insert(layer_prefix + part + suffix);
     srcs.push_back(s);
   }
-  // Spec 14 §2: Agnes's parallel FFN joined onto the parts on packed int4 BEFORE
-  // the column map, so gate'||up' interleaves exactly as gate||up does. `folded`
-  // owns the joined tensors for the rest of this call; srcs[i] then points at them.
-  std::vector<PackedInt4> folded;
-  if (fl.fold != model::Fold::None) srcs = apply_fold(set, view, desc, layer_prefix, fl, srcs, folded, id);
   uint32_t n_sum = 0;
   for (size_t i = 0; i < srcs.size(); ++i) {
     if (srcs[i].K != sh.K)
@@ -461,7 +417,7 @@ DeviceWeight load_ab_prefill(l0::Context& ctx, l0::CmdList& imm, const Safetenso
   const std::string id = "AB prefill copy (" + layer_prefix + fl.parts[0] + ")";
   std::vector<LinearSrc> srcs;
   for (const std::string& part : fl.parts)
-    srcs.push_back(LinearSrc::classify(set, ckpt_name(desc, layer_prefix + part)));
+    srcs.push_back(LinearSrc::classify(set, ckpt_name(layer_prefix + part)));
   Int4Pad pad;
   const std::vector<common::ColSource> cols = int4_row_cols(fl, srcs, pad, id);
   const model::GemvShape sh{fl.shape.K, fl.shape.N, 1, 0};
@@ -598,10 +554,8 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
   };
   const std::string L = "mtp.layers.0.";
   // The head's shapes are the descriptor's (spec 15b): its own MLP width
-  // `mtp_intermediate` is 17408 on Qwen3.8 AND on Agnes (no parallel FFN in the
-  // head; spec 14 §1), whatever the main model's folded intermediate is; the
-  // attention follows the main model's heads. Qwen3.8's numbers in the comments.
-  // Names are engine names (the view mapped Agnes's `global_attn.` already).
+  // `mtp_intermediate` is 17408 on Qwen3.8; the attention follows the main model's
+  // heads. Qwen3.8's numbers in the comments.
   const uint32_t H = desc.hidden, I = desc.mtp_intermediate, KV = desc.fa_kv_n();
   DeviceWeight fc = linear({"mtp.fc.weight"}, {H}, 2 * H, false);          // 5120 x 10240
   DeviceWeight qkv = linear({L + "self_attn.q_proj.weight", L + "self_attn.k_proj.weight",
@@ -627,7 +581,7 @@ std::unique_ptr<MtpHead> load_mtp(l0::Context& ctx, l0::CmdList& imm, const Safe
     };
     src.linear = [&](const std::string& part) {
       const std::string eng = L + part;
-      LinearSrc s = LinearSrc::classify(set, desc.to_checkpoint(eng));
+      LinearSrc s = LinearSrc::classify(set, eng);
       for (const std::string& suffix : s.suffixes()) {
         const TensorInfo info = take(view, set, eng + suffix);
         rep.mtp_checkpoint_bytes += set.bytes(info);
@@ -707,7 +661,7 @@ MoeLayer load_moe_layer(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet
     return false;
   };
   src.linear = [&](const std::string& part) {
-    LinearSrc s = LinearSrc::classify(set, ckpt_name(desc, lp + part));
+    LinearSrc s = LinearSrc::classify(set, ckpt_name(lp + part));
     for (const std::string& suffix : s.suffixes()) view.consumed.insert(lp + part + suffix);
     return s;
   };
@@ -777,8 +731,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const QuantConfig qc = QuantConfig::parse(config);
   // Spec 6 §10: the trained context bounds max_len; whether it fits on the card is the
   // memory plan's question (runtime/memory_plan.h), asked by the CLI once the weights'
-  // bytes are known. Spec 14 §3.3's fixed 65536 ceiling for Agnes was that question
-  // answered once, by hand, for one head form.
+  // bytes are known.
   const uint32_t trained = trained_context(config);
   check_max_len(desc, max_len, trained);
 
@@ -806,7 +759,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // checkpoint is compressed-tensors - what is converted, and the recommended format.
   const std::string quant_note = ct_conversion_note(scan);
   if (!quant_note.empty()) std::fprintf(stderr, "loader: %s\n", quant_note.c_str());
-  NameView view = build_view(set, mtp, desc);
+  NameView view = build_view(set, mtp);
   Widen widen;
 
   // **`lm_head`'s kind is the checkpoint's to choose, and it is chosen by
@@ -817,7 +770,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // cross-check, the shape and layout the capture binds - follows from this
   // one line, so a checkpoint that packs the head and one that does not are
   // the same code path with a different row.
-  const bool ckpt_int4 = LinearSrc::kind_of(set, ckpt_name(desc, "lm_head")) == WKind::Int4;
+  const bool ckpt_int4 = LinearSrc::kind_of(set, ckpt_name("lm_head")) == WKind::Int4;
   // Spec 9: the int8 form is made from the bf16 tensor, so it needs one.
   if (lm_form == LmHeadForm::Int8 && ckpt_int4)
     throw std::runtime_error(
@@ -895,7 +848,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const model::FusedLinear* ab_row = &desc.linear(model::LinearId::AB);
   for (const model::LayerDesc& ld : layers)
     if (ld.kind == model::LayerKind::GDN) {
-      const std::string a = ckpt_name(desc, Qwen35::layer_prefix(ld.index) + ab_row->parts[0]);
+      const std::string a = ckpt_name(Qwen35::layer_prefix(ld.index) + ab_row->parts[0]);
       ab_row = &ab_row_for(desc, LinearSrc::kind_of(set, a));
       break;
     }
@@ -1020,11 +973,6 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 
   const LoadReport& r = m.report;
   const double gb = 1e9;
-  const std::string fold_note =
-      desc.has_parallel_ffn()
-          ? " (" + std::to_string(desc.intermediate - desc.parallel_ffn) + " + parallel FFN " +
-                std::to_string(desc.parallel_ffn) + ", folded at load)"
-          : std::string();
   // Spec 9 §3: the form, and for int8 the host quantisation time.
   char lm_buf[160];
   if (lm_int8)
@@ -1101,7 +1049,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 
   std::printf(
       "loader: %s\n"
-      "  model     %s (%s): %u layers = %u GDN + %u FA, MLP intermediate %u%s\n"
+      "  model     %s (%s): %u layers = %u GDN + %u FA, MLP intermediate %u\n"
       "  quant     int4 g%u sym desc_act=false (%s), %s\n"
       "  tensors   %zu language-model + %zu top-level; skipped %zu visual, %zu mtp;\n"
       "            dropped %zu qzeros + %zu g_idx (invariants asserted), %zu unconsumed%s%s\n"
@@ -1123,7 +1071,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
       "              widen = %zu B RMSNorm fp32 (1+w) + %zu B GDN fp32  ->  %+.3f%%%s\n"
       "  load        %.1f s\n",
       snap.c_str(), desc.name.c_str(), desc.architecture.c_str(), desc.layers, desc.gdn_layers,
-      desc.fa_layers, desc.intermediate, fold_note.c_str(), qc.group_size,
+      desc.fa_layers, desc.intermediate, qc.group_size,
       qc.desc_act_declared ? "declared" : "inferred, 0 g_idx",
       rules.c_str(), view.names.size() - view.top_level, view.top_level,
       view.visual_skipped, view.mtp_skipped, view.qzeros, view.g_idx, r.unconsumed,
