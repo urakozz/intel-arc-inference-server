@@ -76,10 +76,12 @@ Unknown, and in this order:
 The order matters: measure the accuracy on a probe before writing a mainloop.
 That is the mistake W4A8 made and it cost a kernel.
 
-**Planned (2026-10-09):** `docs/superpowers/plans/2026-10-09-w4a4-probe.md`, box queue row 35 - the
-accuracy grid first (a CPU job: h8's rotation, then int4 on both operands at **group 256**, the
-operator's choice: projected ~2.5x bf16 from the W4A8 rescale fit, ~1.4x over h8, derived), a
-stopping rule at 2 points above h8's end-to-end error, and the g256 rescale microprobe only on a pass.
+**Answered 2026-10-28: no - closed on accuracy** ([probe-w4a4-2026-10-28.md](probes/probe-w4a4-2026-10-28.md)).
+h8's rotation, then int4 on both operands at group 256 (projected ~2.5x bf16, ~1.4x over h8, derived)
+roughly doubles the output error: held-out logits 23.3 % relative L2 against h8's 12.5 %, +7.7 to +13.6
+points over h8 on four prompts, 3.4 argmax positions in 100 lost (the stopping rule allowed 2 and 2).
+Power-of-two scales are worse still. Only o_proj alone stays inside the rule, and it is 2.1 % of the
+prefill GEMM work. The rescale microprobe did not run.
 
 ## 4. Is W8A8 worth anything for prefill?
 

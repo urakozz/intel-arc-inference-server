@@ -156,9 +156,8 @@ case "${1:-}" in
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; spec 22's engine run scores against it)" \
       bash -c 'test -s oracle-out-q4exp-a4/set/manifest.json && test "$(ls oracle-out-q4exp-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
-    # Queue row 35 (the W4A4 probe, plan 2026-10-09-w4a4-probe Task 2): the bf16 reference the grid's
-    # logits are compared against (tools/box_validate/w4a4_grid.sh).
-    have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; row 35's W4A4 grid reference)" \
+    # The bf16 original Qwen3.8 (row 11's A4 reference, r11.a4_ref).
+    have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; r11.a4_ref's reference)" \
       complete "${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B}"
     # Queue row 36 (spec 22 P0, plan 22a): the masked reference's KL / argmax files (r36.prune: qwen4exp_oracle.sh
     # prune) and the probe binary (r36.build; listed for the record - the r36 stages order on r36.build itself).

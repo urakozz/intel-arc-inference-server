@@ -65,7 +65,7 @@ which turn decode into a small GEMM that XMX can run.
 | 3 | the same at coarser groups | g128 1.22x, g256 1.43x, per-channel 1.75x (speed only) | only per-channel is fast | §13 |
 | 4 | int8 activations without rotation (CPU, real layers) | gate‖up 2.8 %, down 5.1 % error, worst rows 0.998 / 0.957 | rejected, accuracy | §14.2 |
 | 5 | SmoothQuant instead of rotation | helps gate‖up, fails on down (outliers move per token) | rejected | §14.2 |
-| 6 | int4 activations (W4A4) | 16x coarser than int8, which already failed unrotated | not pursued | §8 |
+| 6 | int4 activations (W4A4), rotated, g256 on both operands (CPU, whole model) | held-out 23.3 % rel L2 vs h8's 12.5 %; +7.7 to +13.6 points on four prompts, 3.4 argmax in 100 lost; pow2 scales worse | **rejected, accuracy** | probe-w4a4-2026-10-28 |
 | 7 | rotating the weights inside the engine: rot1 to rot4, including an exact DPAS factorisation | rot2 (SLM butterflies) fastest; the DPAS form was exact but not faster | **rot2 kept** | §14.6 |
 | 8 | a rotated checkpoint, made offline (rotate bf16, then AutoRound) | the rotation is exact (3.9e-7) but makes int4 weights ~25 % worse | rejected; model deleted | §15.1-15.2 |
 | 9 | per-channel int4, AutoRound on the rotated model | 22.9 % logit error vs 7.77 % for g64 | rejected; checkpoint deleted | §15.2 |

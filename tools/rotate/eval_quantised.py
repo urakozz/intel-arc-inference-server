@@ -5,7 +5,7 @@
     eval_quantised.py actquant <quantised snapshot> --prompt <ids> [--tokens 512] [--layers 0]
     eval_quantised.py rtn      <bf16 snapshot> <bf16 snapshot to quantise> --prompt <ids> --group <-1|64|128>
     eval_quantised.py sim      <bf16 snapshot> <quantised snapshot> --prompt <ids> [--variants none,a8,a8w8,h8]
-                               [--group 256] [--per-class h8,h4,h4p2] [--vocab-used N] [--out f.json]
+                               [--per-class h8] [--vocab-used N] [--out f.json]
 
 logits    the quantised model against the ORIGINAL bf16 model, the metrics of
           check_rotation.py. The yardstick on the 42-id prose prompt is the
@@ -35,21 +35,12 @@ sim       the end-to-end cost of the int8 paths, simulated: every decoder
                                               unrotated fast path, 1.70x / 1.85x)
             h8     Q8(xR) Q8pc(WR)^T          runtime 1024-block Hadamard on
                                               both sides (1.37x / 1.52x)
-          and the W4A4 probe's (plan 2026-10-09-w4a4-probe, docs/07 §3):
-            h4     Q4g(xR) Q4g(WR)^T          h8's rotation exactly (same signs,
-                                              R.rot on both sides), then int4
-                                              symmetric on BOTH operands, q in
-                                              [-8, 7], s = max|v| / 7.5 per group
-                                              of --group (default 256) along K,
-                                              groups at K offsets 0, g, 2g, ...
-                                              for x and W alike; fp32 product
-            h4p2   the same, each scale rounded up to 2^ceil(log2 s) (the
-                   shift-rescale kernel's numerics)
+          and the shipped model as a control:
             w4a16  the module's own forward: the checkpoint's int4 g64 weights
                    (dequantised to bf16) times bf16 activations in bf16 - the
                    shipped model, bitwise the `logits` mode's
           W in every variant is the quantised checkpoint's dequantised weight
-          (so h8 / h4 re-quantise the g64 grid's values, as the engine would).
+          (so h8 re-quantises the g64 grid's values, as the engine would).
           The model is loaded once; each variant is one forward, logits
           against one bf16 reference: CR.compare's table (rel L2, worst
           position cosine, argmax, top-5, max |log-softmax| difference) plus
@@ -170,7 +161,7 @@ def rtn_int4(w: torch.Tensor, group: int) -> torch.Tensor:
     return (torch.clamp(torch.round(wf / s), -8, 7) * s).reshape(n, k).to(w.dtype)
 
 
-# ---- the W4A4 probe (plan 2026-10-09-w4a4-probe) ---------------------------------------------
+# ---- the sim: linear classes and variants --------------------------------------------------
 LINEAR_CLASSES = (   # (class, layer-relative module names); o / out_proj / down apart (Review Focus 5)
     ("attn_qkv", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
     ("attn_o", ("self_attn.o_proj",)),
@@ -180,10 +171,9 @@ LINEAR_CLASSES = (   # (class, layer-relative module names); o / out_proj / down
     ("down", ("mlp.down_proj",)),
 )
 CLASS_NAMES = tuple(c for c, _ in LINEAR_CLASSES)
-FP32_VARIANTS = ("none", "a8", "a8w8", "h8", "h4", "h4p2")
+FP32_VARIANTS = ("none", "a8", "a8w8", "h8")
 VARIANTS = FP32_VARIANTS + ("w4a16",)
-ROTATED = ("h8", "h4", "h4p2")
-INT4_ACT = ("h4", "h4p2")
+ROTATED = ("h8",)
 
 
 def linear_class(name: str) -> str:
@@ -194,65 +184,12 @@ def linear_class(name: str) -> str:
     return "other"
 
 
-def check_group(k: int, group: int, name: str) -> int:
-    """The group along K (group <= 0: all of K), or ValueError naming the linear."""
-    if group <= 0:
-        return k
-    if k % group:
-        raise ValueError(f"{name}: K {k} is not a multiple of the int4 group {group} - the groups must "
-                         f"tile K from offset 0 on both operands; refused, not padded")
-    return group
-
-
-def pow2_ceil(s: torch.Tensor) -> torch.Tensor:
-    """2^ceil(log2 s) per element, exactly (frexp, not log2: log2 of a value one ulp above a
-    power of two can round down to the integer). s = m 2^e with m in [0.5, 1): m == 0.5 is
-    2^(e-1) itself, anything else rounds up to 2^e. Zeros stay zero."""
-    m, e = torch.frexp(s)
-    p = torch.ldexp(torch.ones_like(s), e - (m == 0.5).to(e.dtype))
-    return torch.where(s > 0, p, s)
-
-
-def quant_int4_groups(x: torch.Tensor, g: int = 256, pow2: bool = False, name: str = "tensor"):
-    """x [R, K] -> (q int8 [R, K] in [-8, 7], s fp32 [R, K/g]).
-
-    One symmetric scale per row per g elements along K, the groups at K offsets 0, g, 2g, ...
-    s = max|v| / 7.5 (rtn_int4's RTN rule), q = clamp(round(v / s), -8, 7); pow2 rounds each s
-    up to a power of two first. An all-zero group gets s = 1, q = 0. g <= 0: one group of K."""
-    r, k = x.shape
-    g = check_group(k, g, name)
-    xg = x.to(torch.float32).reshape(r, k // g, g)
-    s = xg.abs().amax(dim=2, keepdim=True) / 7.5
-    if pow2:
-        s = pow2_ceil(s)
-    s[s == 0] = 1.0
-    q = torch.clamp(torch.round(xg / s), -8, 7)
-    return q.to(torch.int8).reshape(r, k), s.reshape(r, k // g)
-
-
-def fake_int4_groups(x: torch.Tensor, g: int = 256, pow2: bool = False, name: str = "tensor") -> torch.Tensor:
-    """quant_int4_groups dequantised: q * s in fp32, [R, K]."""
-    q, s = quant_int4_groups(x, g, pow2, name)
-    r, k = q.shape
-    return (q.to(torch.float32).reshape(r, s.shape[1], -1) * s.unsqueeze(2)).reshape(r, k)
-
-
-def w4a4_matmul(x: torch.Tensor, w: torch.Tensor, g: int = 256, pow2: bool = False, rot=None,
-                name: str = "tensor") -> torch.Tensor:
-    """Q4g(rot(x)) Q4g(rot(w))^T in fp32: x [T, K], w [N, K], the same rotation and the same K
-    groups on both operands, so every group's partial sum has one x scale and one w scale - what
-    an int4 x int4 kernel with a rescale every g along K computes, up to float association."""
-    if rot is not None:
-        x, w = rot(x), rot(w)
-    return fake_int4_groups(x, g, pow2, name) @ fake_int4_groups(w, g, pow2, name).t()
-
-
 def rotation_signs(k: int) -> torch.Tensor:
     """The runtime rotation's signs for depth K: h8's (R.signs(K, R.SEED + K))."""
     return R.signs(k, R.SEED + k)
 
 
-def variant_matmul(v: str, x32: torch.Tensor, w32: torch.Tensor, d, group: int, name: str) -> torch.Tensor:
+def variant_matmul(v: str, x32: torch.Tensor, w32: torch.Tensor, d) -> torch.Tensor:
     """One fp32 variant's x W^T (no bias). d: the rotation signs for the rotated variants."""
     if v == "none":
         return x32 @ w32.t()
@@ -262,8 +199,6 @@ def variant_matmul(v: str, x32: torch.Tensor, w32: torch.Tensor, d, group: int, 
         return q8_token(x32) @ q8_channel(w32).t()
     if v == "h8":
         return q8_token(R.rot(x32, d)) @ q8_channel(R.rot(w32, d)).t()
-    if v in INT4_ACT:
-        return w4a4_matmul(x32, w32, group, v == "h4p2", lambda t: R.rot(t, d), name)
     raise ValueError(v)
 
 
@@ -390,7 +325,6 @@ def sim(args, keep_logits: bool = False) -> dict:
     for v in variants + per_class:
         if v not in VARIANTS:
             sys.exit(f"FATAL: unknown variant {v!r}; known: {','.join(VARIANTS)}")
-    group = 256 if getattr(args, "group", None) is None else args.group
     vocab_used = getattr(args, "vocab_used", 0) or 0
     linear_stats = getattr(args, "linear_stats", True)
     tc = CR.text_config(args.snapshot, args.layers)
@@ -410,15 +344,6 @@ def sim(args, keep_logits: bool = False) -> dict:
         for n, m in layer.named_modules():
             if isinstance(m, torch.nn.Linear) and not n.endswith(("in_proj_a", "in_proj_b")):
                 targets.append((f"L{i}.{n}", m))
-    if any(v in INT4_ACT for v in variants + per_class):
-        for name, m in targets:          # refuse before any forward, by name (Review Focus 1)
-            k = m.weight.shape[1]
-            try:
-                check_group(k, group, name)
-            except ValueError as e:
-                sys.exit(f"FATAL: {e}")
-            if k % R.BLOCK:
-                sys.exit(f"FATAL: {name}: K {k} is not a multiple of the rotation's {R.BLOCK}-block")
 
     def make_forward(name, m):
         cls = linear_class(name)
@@ -443,7 +368,7 @@ def sim(args, keep_logits: bool = False) -> dict:
             w32 = m.weight.to(torch.float32)
             k = shp[-1]
             d = signs.setdefault(k, rotation_signs(k)) if v in ROTATED else None
-            y = variant_matmul(v, x32, w32, d, group, name)
+            y = variant_matmul(v, x32, w32, d)
             if m.bias is not None:
                 y = y + m.bias.to(torch.float32)
             if state["stats"] is not None and v != "none":
@@ -458,7 +383,7 @@ def sim(args, keep_logits: bool = False) -> dict:
     for name, m in targets:
         m.forward = make_forward(name, m)
     present = [c for c in CLASS_NAMES if any(linear_class(n) == c for n, _ in targets)]
-    print(f"sim: {len(targets)} linears replaced; {len(ids)} ids; group {group} (h4 / h4p2); "
+    print(f"sim: {len(targets)} linears replaced; {len(ids)} ids; "
           f"KL over {vocab_used} ids; classes {present}")
     passes = []
     qname = os.path.basename(args.quantised.rstrip('/'))
@@ -498,7 +423,7 @@ def sim(args, keep_logits: bool = False) -> dict:
     if out:
         with open(out, "w", encoding="utf-8") as f:
             json.dump({"snapshot": args.snapshot, "quantised": args.quantised, "prompt": args.prompt,
-                       "ids": len(ids), "group": group, "vocab_used": vocab_used,
+                       "ids": len(ids), "vocab_used": vocab_used,
                        "passes": [{k: v for k, v in p.items() if k != "logits"} for p in passes]}, f, indent=1)
         print(f"wrote {out}")
     return {"base": base, "passes": passes}
@@ -513,8 +438,7 @@ def main() -> None:
     ap.add_argument("--layers", type=int, default=0)
     ap.add_argument("--tokens", type=int, default=512)
     ap.add_argument("--group", type=int, default=None,
-                    help="rtn: the int4 group (default -1, per-channel); sim: h4 / h4p2's group along K "
-                         "on both operands (default 256; -1 = all of K)")
+                    help="rtn: the int4 group (default -1, per-channel)")
     ap.add_argument("--variants", default="none,a8,a8w8,h8",
                     help=f"sim: comma list of {','.join(VARIANTS)}")
     ap.add_argument("--per-class", default="",
