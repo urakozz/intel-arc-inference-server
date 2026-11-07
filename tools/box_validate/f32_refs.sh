@@ -104,7 +104,7 @@ case "$what" in
         [ -n "$re" ] || continue
       fi
       echo "f32_refs: forced-qwen pass $pass${re:+ ($re)}: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
-      flock 9
+      [ -n "${B70_CPU_MODEL_LOCK_HELD:-}" ] || flock 9   # the CPU chain holds it for its job already
       avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
       if [ "${avail:-0}" -lt "${F32_REF_MIN_GB:-95}" ]; then
         echo "SKIP_REASON f32_refs: MemAvailable ${avail} GB < F32_REF_MIN_GB ${F32_REF_MIN_GB:-95} (another job holds the RAM)"
@@ -118,7 +118,7 @@ case "$what" in
           --out /ws/$part/out --out-i8head /ws/$part/out-i8head --work /ws/$part/work --done /ws/$part/done.txt \
           ${re:+--match '$re'} $pfi8 >> /ws/$part/run.log 2>&1" ||
         { echo "f32_refs: pass $pass FAILED"; tail -20 "$part/run.log"; rc=1; }
-      flock -u 9
+      [ -n "${B70_CPU_MODEL_LOCK_HELD:-}" ] || flock -u 9
       for f in "$part"/out/*.golden.safetensors; do [ -e "$f" ] && mv -f "$f" "$out/"; done
       for f in "$part"/out-i8head/*.golden.safetensors; do [ -e "$f" ] && mv -f "$f" "$out8/"; done
       echo "f32_refs: pass $pass done ($(date '+%F %T')): $(ls "$out" | grep -c 'golden') bf16-head and" \

@@ -49,7 +49,7 @@ src="$data/oracle-out-$m" out="$data/oracle-out-$m-$dt$suffix" part="oracle-out-
 need="${F32_REF_MIN_GB:-95}"
 exec 9> /tmp/b70-cpu-model.lock
 echo "f32_oracle: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
-flock 9
+[ -n "${B70_CPU_MODEL_LOCK_HELD:-}" ] || flock 9   # the CPU chain holds it for its job already
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "f32_oracle: $m ($model) -> $out; MemAvailable ${avail} GB (need $need)"
 if [ "${avail:-0}" -lt "$need" ]; then
