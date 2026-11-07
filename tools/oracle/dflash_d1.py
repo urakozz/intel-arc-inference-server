@@ -119,7 +119,8 @@ def compare(rec: dict, out, logits_row) -> dict:
         if top != 0:
             e = math.frexp(abs(top))[1]
         ulp = math.ldexp(1.0, e - 8)
-        res["walk_tie"] = (abs(margin) <= max(noise, ulp), split, abs(margin), noise, ulp)
+        e_margin = es[e_id] - es[r_id] if (e_id in es and r_id in es) else math.inf
+        res["walk_tie"] = (abs(margin) <= max(noise, ulp), split, abs(margin), noise, ulp, e_id, r_id, e_margin)
     # The scores' cosine over the rows before the split only (after it the two walks stand on other paths).
     rows = pairs if split is None else pairs[:split]
     res["cos"] = cosine([a for p in rows for a, _ in p], [b for p in rows for _, b in p])
@@ -213,8 +214,13 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
     log(table)
     for name, p, c in fails[:20]:
         gaps = ", ".join(f"gap {g:.4f} > d_row {dr:.4f}" for g, dr in c["gaps"] if g > max(dr, 1e-3))
+        wt = c["walk_tie"]
+        walk = ""
+        if wt is not None:   # diagnostic only: the split's numbers the near-tie rule judged
+            walk = (f"; walk split at row {wt[1]}: engine id {wt[5]}, reference id {wt[6]}, margin {wt[2]:.5f} vs "
+                    f"max(row noise {wt[3]:.5f}, 1 bf16 ulp {wt[4]:.4f}), the engine's own margin {wt[7]:.5f}")
         log(f"  FAIL {name} p {p}: sets {c['sets']}, walk {c['walk']}, cos {c['cos']:.7f}"
-            + (f" ({gaps})" if gaps else ""))
+            + (f" ({gaps})" if gaps else "") + walk)
     if md:
         with open(md, "a") as f:
             f.write(table)

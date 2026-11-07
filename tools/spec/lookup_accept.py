@@ -382,6 +382,37 @@ def load_logs(log_dir, seed_session=0):
     return seqs
 
 
+def read_dump_ids(path):
+    """(metadata, ids) of a dump_taps.py-format safetensors file, without torch: the 8-byte header length, the JSON
+    header (dtype / shape / data_offsets per tensor, __metadata__), then the raw little-endian data. Read by
+    lilicorr_p0_project.py --dumps (spec 26a: lookup on the SAME continuations the drafter is measured on)."""
+    import struct
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        hdr = json.loads(f.read(n))
+        e = hdr["ids"]
+        if e["dtype"] != "I32" or len(e["shape"]) != 1:
+            raise ValueError(f"{path}: ids is {e['dtype']} {e['shape']}, not I32 [N]")
+        a, b = e["data_offsets"]
+        f.seek(8 + n + a)
+        raw = f.read(b - a)
+    return hdr.get("__metadata__", {}), list(struct.unpack(f"<{len(raw) // 4}i", raw))
+
+
+def load_dumps(dump_dir):
+    """Each *.taps.safetensors dump's ids split at its n_prompt; the corpus (`name` before `/`) as the group."""
+    seqs = []
+    for fn in sorted(os.listdir(dump_dir)):
+        if not fn.endswith(".taps.safetensors"):
+            continue
+        md, ids = read_dump_ids(os.path.join(dump_dir, fn))
+        n_prompt = int(md["n_prompt"])
+        name = md.get("name", fn[: -len(".taps.safetensors")].replace("__", "/"))
+        seqs.append({"name": name, "prompt_ids": ids[:n_prompt], "out_ids": ids[n_prompt:],
+                     "group": name.split("/")[0]})
+    return seqs
+
+
 def load_a4(a4_dir, expected_path, tokenizer_path):
     from tokenizers import Tokenizer   # only this source needs it
     tok = Tokenizer.from_file(tokenizer_path)

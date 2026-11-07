@@ -444,6 +444,19 @@ def pool(entries, ks):
     return out
 
 
+def pool_sampled(entries, kmax: int) -> dict:
+    """{q form: {"alpha": [kmax], "E": [E_1..E_kmax]}} pooled over sources that carry a "sampled" block (per q form
+    "counted" / "sum" per depth). No run of this file writes one now; lilicorr_p0_project.py --sampled reads it."""
+    out = {}
+    forms = sorted({qf for e in entries for qf in (e.get("sampled") or {})})
+    for qf in forms:
+        cnt = [sum(e["sampled"][qf]["counted"][j] for e in entries if "sampled" in e) for j in range(kmax)]
+        tot = [sum(e["sampled"][qf]["sum"][j] for e in entries if "sampled" in e) for j in range(kmax)]
+        alpha = [t / c if c else None for t, c in zip(tot, cnt)]
+        out[qf] = {"alpha": alpha, "E": [expected_tokens(alpha[:K]) for K in range(1, kmax + 1)], "counted": cnt}
+    return out
+
+
 def summarize(files, md_out=None, ks=tuple(range(1, KMAX + 1))) -> dict:
     per_arm = {}
     agree = {}
