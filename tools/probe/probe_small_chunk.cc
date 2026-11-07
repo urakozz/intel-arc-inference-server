@@ -4,8 +4,11 @@
 //          pf_dequant_slab_K<K>_N<N>_L<l> + pf_gemm (256 x 256 tiles, rows padded to 256: gemm_l0's
 //          launch before open-work 3a)
 //   dq     the walk's dequants alone (every slab), g256 the walk's GEMMs alone (every slab)
-//   aXbYsZ pf_gemm_small_A<X>_B<Y>_S<Z> (pf_gemm_small.cl: X 8-row blocks x Y 16-column atoms a
-//          sub-group, Z sub-groups a work-group; rows padded to 8 X only) alone, every slab
+//   l0_now the walk through gemm_l0 as built (pf_small_tile picks the tile up to 1024 rows)
+//   aXbYsZ the walk with pf_gemm_small_A<X>_B<Y>_S<Z> for pf_gemm (pf_gemm_small.cl: X 8-row
+//          blocks x Y 16-column atoms a sub-group, Z sub-groups a work-group; rows padded to 8 X
+//          only) - each slab's GEMM right after its dequant, as the engine runs it (a GEMM-only
+//          arm over one resident slab reads B hot from cache and flatters the small tiles)
 //   sm     gemm_sm (spec 28b's small-M decode GEMM, bf16 DPAS straight from the int4 weights - no
 //          slab) at M = 8 and 16 where the build has the variant; its output is the S-slice form
 //          a decode consumer folds and it rounds differently, so this arm is a time only
@@ -164,6 +167,17 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
               {PtrArg(dx.ptr()), PtrArg(slab.ptr()), PtrArg(c_at(o, n0)), arg_val(Mp), arg_val(K),
                arg_val(kNs), arg_val(lda), arg_val(ldb), arg_val(ldc), arg_val(z), arg_val(z), arg_val(z)});
   };
+  auto gnow = [&](uint32_t M, uint32_t n0, l0::Mem& o) {
+    if (sh.silu) {
+      const runtime::prefill::GemmBatch b{M, K, kNs, 1, K, kNs, 0, 0, 0, 0};
+      runtime::prefill::gemm_l0_silu(cx, kc, b, dx.as<uint16_t>(), slab.as<uint16_t>(),
+                                     static_cast<uint16_t*>(c_at(o, n0)), N / 2);
+    } else {
+      const runtime::prefill::GemmBatch b{M, K, kNs, 1, K, kNs, N, 0, 0, 0};
+      runtime::prefill::gemm_l0(cx, kc, b, dx.as<uint16_t>(), slab.as<uint16_t>(),
+                                static_cast<float*>(c_at(o, n0)), false);
+    }
+  };
   auto gs = [&](uint32_t M, const Small& v, uint32_t n0, l0::Mem& o) {
     const uint32_t Mt = pad_to(M, v.rows());
     l0::Kernel& g = kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, sh.silu), "pf_gemm_small");
@@ -188,9 +202,11 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   for (uint32_t M : rows) {
     arms.push_back({"l0", M, [&, M] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) { deq(n0); g256(M, n0, out_a); } }});
     arms.push_back({"dq", M, [&] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(n0); }});
+    // the production walk as it is now: gemm_l0 picks the tile (pf_small_tile)
+    arms.push_back({"l0_now", M, [&, M] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) { deq(n0); gnow(M, n0, out_b); } }});
     arms.push_back({"g256", M, [&, M] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) g256(M, n0, out_a); }});
     for (const Small& v : smalls)
-      arms.push_back({v.tag(), M, [&, M, v] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) gs(M, v, n0, out_b); }});
+      arms.push_back({v.tag(), M, [&, M, v] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) { deq(n0); gs(M, v, n0, out_b); } }});
     // gemm_sm where the build has it (Qwen3.8's rows are built at M 2..8 and 16)
     const kernels::SmallMTuning* t = kernels::small_m_tuning(K, N, sh.gemv_s, sh.layout);
     if (t && (M == 8 || M == 16)) {
