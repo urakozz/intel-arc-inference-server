@@ -265,8 +265,6 @@ def build(snapshot):
     from transformers.models.qwen3_5 import modeling_qwen3_5 as m
     with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
         raw = json.load(f)
-    if D._agnes.is_agnes(raw):
-        raise SystemExit("qwen_forced.py is for Qwen3.8")
     quantised = bool(raw.get("quantization_config") or (raw.get("text_config") or {}).get("quantization_config"))
     group_size = D.check_quant_config(snapshot) if quantised else 0
     tc = AutoConfig.from_pretrained(snapshot).get_text_config()

@@ -21,8 +21,8 @@ Run inside the reference container (tools/oracle/run_in_container.sh with
 ORACLE_MODEL=models--Qwen--Qwen3.8-27B).
 
 The model follows config.json's model_type:
-  qwen3_5 / agnes   transformers' Qwen3_5ForCausalLM on the bf16 checkpoint (above; spec 14
-                    for Agnes), HF generate;
+  qwen3_5           transformers' Qwen3_5ForCausalLM on the bf16 checkpoint (above), HF
+                    generate;
   qwen3_5_moe       Ornith 1.5 (spec 15e Task 3): tools/oracle/ornith_ref.py's layer-streamed
                     Qwen3_5MoeForCausalLM on its INT4 checkpoint dequantised by the repo's one
                     rule (15a: the engine's own weights, so a mismatch is the engine's, not the
@@ -659,29 +659,10 @@ def main() -> None:
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {eos}", flush=True)
 
     t = time.time()
-    # Spec 14: Agnes 3.0 Flash (config.json model_type agnes) is Qwen3.5 + the parallel
-    # FFN under other tensor names (tools/oracle/agnes.py); its bf16 checkpoint
-    # (Agnes-AI/Agnes-3.0-Flash) is the A4 reference (spec 14 G3).
-    aspec = importlib.util.spec_from_file_location(
-        "b70_agnes", os.path.join(HERE, "..", "oracle", "agnes.py"))
-    AG = importlib.util.module_from_spec(aspec)
-    aspec.loader.exec_module(AG)
-    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
-        raw = json.load(f)
-    if AG.is_agnes(raw):
-        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-        kwargs, parallel = AG.translate_text_config(raw)
-        tc = Qwen3_5TextConfig(**kwargs)
-        tc._attn_implementation = "eager"
-    else:
-        tc = CR.text_config(snap, 0)
+    tc = CR.text_config(snap, 0)
     with torch.device("meta"):
         model = Qwen3_5ForCausalLM(tc)
-        if AG.is_agnes(raw):
-            AG.attach_parallel_ffn(model, tc, parallel)
     sd = CR.to_model_names(CR.load_sd(snap, 0, torch.bfloat16))
-    if AG.is_agnes(raw):
-        sd = {AG.map_name(k): v for k, v in sd.items()}
     want = set(model.state_dict().keys())
     if set(sd) != want:
         sys.exit(f"FATAL: state dict mismatch: {len(want - set(sd))} missing, "

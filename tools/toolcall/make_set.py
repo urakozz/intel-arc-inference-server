@@ -17,7 +17,7 @@ The repository is read from this script's tree (/ws in the reference
 container); the prompts call it /work. Run inside the reference container
 (tools/oracle/run_in_container.sh) so the tokenizer is the pinned one.
 
---from with another model's checkpoint (Agnes, Ornith, K2-Horizon) renders the SAME
+--from with another model's checkpoint (Ornith, K2-Horizon) renders the SAME
 conversations with that checkpoint's template and tokenizer. `--kwargs JSON` passes
 template variables (chat_template_kwargs) to every render and records them in each
 <name>.json as "chat_template_kwargs" (serve_client.py sends them with the request).
@@ -333,7 +333,7 @@ def scenarios(corpus, lang: str = "en"):
 
 def load_tokenizer(snap: str):
     """AutoTokenizer on the snapshot. A checkpoint whose config.json names remote code
-    (Agnes 3.0 Flash, spec 14: `auto_map`) needs trust_remote_code just to read its config;
+    (`auto_map`) needs trust_remote_code just to read its config;
     the tokenizer itself is tokenizer.json either way. Qwen3.8 loads exactly as before."""
     from transformers import AutoTokenizer
     with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:

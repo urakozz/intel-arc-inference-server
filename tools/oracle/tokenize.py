@@ -39,8 +39,8 @@ def main() -> None:
     dec.add_argument("ids", nargs="+", type=int)
     args = ap.parse_args()
 
-    # Agnes 3.0 Flash (spec 14): config.json names remote code (`auto_map`), which
-    # AutoTokenizer must be allowed to read; the tokenizer itself is tokenizer.json.
+    # A config.json that names remote code (`auto_map`) must be allowed to be read by
+    # AutoTokenizer; the tokenizer itself is tokenizer.json.
     import json
     with open(os.path.join(args.snapshot, "config.json"), encoding="utf-8") as f:
         remote = "auto_map" in json.load(f)

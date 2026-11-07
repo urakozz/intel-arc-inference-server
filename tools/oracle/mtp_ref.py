@@ -87,13 +87,9 @@ def weight_map(snapshot: str) -> dict[str, str]:
 
 
 def _checkpoint_name(wm: dict[str, str], n: str) -> str:
-    """Qwen3.5 name -> the name this checkpoint ships it under (spec 14: Agnes spells
-    `self_attn.` as `global_attn.`, agnes.NAME_MAP run backwards; Qwen3.8 is verbatim)."""
+    """Qwen3.5 name -> the name this checkpoint ships it under (verbatim)."""
     if n in wm:
         return n
-    for ckpt, qwen in _load_module("agnes").NAME_MAP:
-        if qwen in n and n.replace(qwen, ckpt, 1) in wm:
-            return n.replace(qwen, ckpt, 1)
     raise KeyError(n)
 
 
@@ -113,14 +109,7 @@ def read_tensors(snapshot: str, names) -> dict[str, torch.Tensor]:
 
 
 def text_config(snapshot: str):
-    with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
-        raw = json.load(f)
-    agnes = _load_module("agnes")
-    if agnes.is_agnes(raw):   # spec 14: the config class is remote code; translate it
-        from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
-        tc = Qwen3_5TextConfig(**agnes.translate_text_config(raw)[0])
-    else:
-        tc = AutoConfig.from_pretrained(snapshot).get_text_config()
+    tc = AutoConfig.from_pretrained(snapshot).get_text_config()
     tc._attn_implementation = "eager"
     return tc
 
@@ -246,17 +235,12 @@ def build_main(snapshot: str, stream: bool = False):
     """The main model exactly as dump.py builds it (dequantised, strict, eager).
 
     stream: dump.py --stream's layer-streamed weights (stream.py), for a host with less
-    RAM than the bf16 model (Agnes on the Mac); the forward is the same."""
+    RAM than the bf16 model; the forward is the same."""
     dump = _load_module("dump")
     gs = dump.check_quant_config(snapshot)
     tc = text_config(snapshot)
-    with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
-        raw = json.load(f)
-    agnes = _load_module("agnes")
     with torch.device("meta"):
         model = dump.Qwen3_5ForCausalLM(tc)
-        if agnes.is_agnes(raw):   # spec 14: the parallel FFN, unfolded, as dump.py
-            agnes.attach_parallel_ffn(model, tc, agnes.translate_text_config(raw)[1])
     if stream:
         dump.stream_weights(model, snapshot, gs, tc)
         return model.eval(), tc

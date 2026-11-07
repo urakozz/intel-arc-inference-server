@@ -6,7 +6,7 @@ Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) a
 each candidate's first call - its name and raw argument strings - with the reference's.
 
 Two call syntaxes, told apart by their tags (the two sets share none):
-  Qwen XML (Qwen3.8, Agnes, Ornith): <tool_call>\\n<function=NAME>\\n<parameter=K>\\nV\\n</parameter>
+  Qwen XML (Qwen3.8, Ornith): <tool_call>\\n<function=NAME>\\n<parameter=K>\\nV\\n</parameter>
       ...</function>\\n</tool_call>; the first <tool_call> block wins.
   K2-Horizon (spec 18d; its template's tool_call_format, server/toolcall_k2.h): a block
       <ifm|tool_calls> ... </ifm|tool_calls> of <ifm|tool_call> ... </ifm|tool_call> calls in

@@ -62,7 +62,6 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
 | `k2_kv8_probe.py` | Spec 18e Task 1 (Review Focus 1): the int8 KV probe on K2-Horizon over `k2_ref.py` - variants bf16 (the reference), `rotkv` (the engine's head_dim-128 scheme bit for bit: `src/common/kv8.h` hd128), per token, fp32 attention, each with its own residual stream and KV cache; `run` (decision-row logits metrics + the routing diagnostic + q/K/V capture), `replay` (fp64, real and tiled depths), `summary`. `test_k2_kv8_probe.py` checks it on tiny weights (no checkpoint, seconds). |
 | `kv8_k2_repeat.sh` | Spec 18e Task 1 on the Mac: `k2_kv8_probe.py` on the int4 K2 checkpoint (`hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`, 22.2 GB) in a 28 GB container - check, K2 tokenisation (BOS 0), golden rows (18a's tokens when `oracle-out-k2/` is here, else 32 greedy steps), long[:4096] + capture, replay to 64k; resumable, `STEPS=` subsets. |
-| `agnes_remote_check.py` | Agnes: our reference (`agnes.py`) against the checkpoint's own `modeling_agnes.py` (trust_remote_code), per-position logits on 64 ids, both streamed. |
 | `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
@@ -128,7 +127,6 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 | `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
 | `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
 | `oracle-out-long/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** - the spec 2 §6.2 long prompt only, **NOT YET RUN** (below) |
-| `oracle-out-agnes/` | `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (HF cache) | bf16 - spec 14; `dump.py` builds Agnes from `config.json` (`agnes.py`: Qwen3.5 + the parallel FFN, unfolded); **dumped on the Mac 2026-10-04**, layer-streamed (the Mac path below) - rsync it to the box |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
@@ -338,12 +336,14 @@ finite in all three. `dump.py`'s own aborts (strict load, no surviving meta
 tensor, `tokens` length, every GDN layer's state present, `resid.L63` finite)
 also passed inside each run, or nothing would have been written.
 
-### The Mac path: Agnes in a Linux container, layer-streamed (spec 14, 2026-10-04)
+### The Mac path: the oracle in a Linux container, layer-streamed (spec 14, 2026-10-04)
 
-Agnes 3.0 Flash dequantised to bf16 is ~62 GB, and the x86_64 Mac's own Python stops at
-torch 2.2 (no transformers 5). So the Agnes oracle runs on the Mac in a plain Linux
-container, with the weights **streamed one decoder layer at a time** (`stream.py`).
-The container (kept between sessions; `docker start agnes-ref` after a Docker restart):
+A 27B-class checkpoint dequantised to bf16 is 54-62 GB, and the x86_64 Mac's own Python
+stops at torch 2.2 (no transformers 5). So the oracle runs on the Mac in a plain Linux
+container, with the weights **streamed one decoder layer at a time** (`stream.py`). The
+container was first built for Agnes 3.0 Flash (spec 14, dropped 2026-11-07) - hence its
+name; committed as the image `agnes-ref-img`, it is the Mac oracle image every later model's
+tooling uses. The container (kept between sessions; `docker start agnes-ref` after a Docker restart):
 
 ```bash
 # from the repo (or worktree) root on the Mac
@@ -357,18 +357,17 @@ docker exec agnes-ref sh -c 'apt-get update && apt-get install -y g++ procps'   
 
 Install torch from the CPU index **first** and never let a later `pip install` pull it
 from PyPI (a bare `pip install accelerate` resolves torch to the 2.14.1+cu130 build);
-`transformers==5.15.0` is the box image's version. Then, e.g. one golden prompt:
+`transformers==5.15.0` is the box image's version. Then, e.g. one golden prompt
+(`<snapshot>` the checkpoint's directory under `/hf/hub`):
 
 ```bash
 docker exec -d -e HF_HUB_OFFLINE=1 -e PYTHONUNBUFFERED=1 -e TORCH_EXTENSIONS_DIR=/root/torch_ext \
-  agnes-ref sh -c 'S=$(ls -d /hf/hub/models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ/snapshots/*/);
-  python3 tools/oracle/dump.py "$S" --stream --prompt /ws/tests/golden/prompts/prose.ids \
-    --out /ws/oracle-out-agnes/prose.golden.safetensors --gen 32 --max-prompt 4096 \
-    --mlp-in /ws/oracle-out-agnes/mlp_in.safetensors > /ws/oracle-out-agnes/prose.log 2>&1'
+  agnes-ref sh -c 'python3 tools/oracle/dump.py <snapshot> --stream --prompt /ws/tests/golden/prompts/prose.ids \
+    --out /ws/oracle-out-<name>/prose.golden.safetensors --gen 32 --max-prompt 4096 > /ws/oracle-out-<name>/prose.log 2>&1'
 ```
 
-(`HF_HOME=/tmp/hf` for anything that loads remote code or `AutoTokenizer` on Agnes:
-`/hf` is read-only and transformers copies `modeling_agnes.py` into `$HF_HOME/modules`.)
+(`HF_HOME=/tmp/hf` for anything that loads remote code: `/hf` is read-only and
+transformers copies the checkpoint's modeling file into `$HF_HOME/modules`.)
 
 What streaming changes, and what it does not:
 
@@ -382,9 +381,9 @@ What streaming changes, and what it does not:
   16-entry table per group and column); ~15x faster, and every tensor's first dequant
   re-does 64 columns with `dequant.py` and must be equal.
 - **Grouped bf16 `conv1d` runs on one thread.** On the Mac's CPU (i9-9980HK, AVX2,
-  16 vCPUs) torch 2.14's depthwise bf16 conv is 50-4000x slower multi-threaded (Agnes's
+  16 vCPUs) torch 2.14's depthwise bf16 conv is 50-4000x slower multi-threaded (a
   10240-channel causal conv did not finish in 10 min); outputs are bitwise equal across
-  thread counts. A wrapper on `torch.nn.functional.conv1d` (both modeling files call it).
+  thread counts. A wrapper on `torch.nn.functional.conv1d` (the modeling file calls it).
 - **Memory.** Cap the container at 28 GB. Uncapped (Docker Desktop at 64 GB), the guest
   page cache over the 18 GB checkpoint plus kept layers grew the VM to 60 GB, macOS
   swapped 38 GB, and a decode step took 360 s instead of 43 s; Docker Desktop had to be
@@ -392,8 +391,9 @@ What streaming changes, and what it does not:
   4.7 GiB resident, two layers, the mmapped shards). `--stream-keep N` keeps layers
   0..N-1 once loaded; on this Mac it does not pay.
 
-Measured (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps 2100 s
-(~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record: `docs/probes/probe-agnes-2026-10-03.md`.
+Measured on Agnes 3.0 Flash, 2026-10-04 (prose, 42 ids, `--gen 32`): prompt forward 263 s, 32 greedy steps
+2100 s (~66 s each), wall 2379 s; code 3118 s, cjk 1069 s (the Mac's load varies). Record:
+`docs/probes/probe-agnes-2026-10-03.md`.
 
 ### The DFlash reference (spec 19a, 2026-10-05)
 
@@ -420,7 +420,7 @@ out = d.draft_block(anchor_id, p, K, ctx, temperature=0.0)  # out.ids, cand_ids,
 
 The tests take ~10 s; the last one loads `z-lab/Qwen3.8-27B-DFlash2` (+ `syvai/...-W4A16`) and the
 `Qwen/Qwen3.8-27B` embedding / head from the HF cache (~16 GB RSS, estimated: not yet run) and prints SKIP when they are not
-there. On the Mac, in the image the Agnes container was committed to (torch 2.14.1+cpu,
+there. On the Mac, in `agnes-ref-img` (the Mac path's container, committed; torch 2.14.1+cpu,
 safetensors), capped at 28 GB:
 
 ```bash

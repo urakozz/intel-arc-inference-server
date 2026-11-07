@@ -21,7 +21,6 @@
 # What G0 compares OUTPUT-for-output against the baseline build (timings dropped): the gates
 # the spec 14 and 15b checklists name as "bitwise identical to main's last record".
 : "${G0_BITWISE_RE:=^(golden_gate_test|golden_gate_i8head_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_gate_l0_i8head_test|prefill_gate_int8_i8head_test|replay_determinism_test|replay_determinism_i8head_test|buffers_test|prefill_smoke_test|load_checkpoint_test)$}"
-AGNES_ORACLE_MODEL=models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
 ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 # Ornith's M = 1 decode list (tests/CMakeLists.txt B70_ORNITH_DECODE_KERNELS, ATTN_V2_TGT 32):
 # since spec 15 §13 (the int4 checkpoint read) the greedy argmax is Qwen3.8's argmax_stage1_M1
@@ -84,113 +83,16 @@ st_g0_bitwise() {
   finish
 }
 
-stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Agnes / Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
+stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
 st_g0_suite() {
   xb "ctest --test-dir build --show-only=json-v1 > $STATE/tests.baseline.json"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
-  reuse_claim "$STATE/tests.json" "--also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8"
-  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8 --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_claim "$STATE/tests.json" "--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8"
+  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
   reuse_record "$STATE/tests.json"
-  chk "python3 tools/box_validate/junit.py pick $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label agnes --no-label ornith --no-label kv8 --junit \"$STATE/*.junit.xml\"" \
+  chk "python3 tools/box_validate/junit.py pick $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --junit \"$STATE/*.junit.xml\"" \
     "the baseline's suite on the tree under test"
   finish
-}
-
-# ======================================================================================
-row 1 "spec 14 - Agnes 3.0 Flash, ModelDesc (2026-10-03-spec14-validation-checklist.md)"
-rownote 1 "Step 4's GEMV sweep (B70_AGNES_SWEEP) was removed in the zero-config cleanup (2026-11-06): Agnes keeps the PROVISIONAL cells; step 12's record is an edit on a branch."
-rownote 1 "Step 6's optional box re-dump of oracle-out-agnes (golden.sh, unstreamed, 61+ GiB) is not run: the gates use the Mac's layer-streamed sets."
-
-stage r1.host 1 default cpu - - "step 3: host and table tests (model_desc, agnes_fold, kernel_table, template x2, qwen35)"
-st_r1_host() {
-  run_tests '^(model_desc_test|agnes_fold_test|kernel_table_test|template_agnes_test|template_test|qwen35_test)$'
-  finish
-}
-
-stage r1.load 1 default card agnes - "step 3: load_agnes_test (72 layers, fold, MTP head, 262400 refused; W check within 2% - P4)"
-st_r1_load() {
-  run_tests '^load_agnes_test$'
-  jgrab load-agnes '^load_agnes_test$' 'W check|load_agnes_test OK|refus'
-  finish
-}
-
-stage r1.parity 1 default card agnes,tok_python - "step 3 (P5): parity_test against Agnes's tokenizer.json (corpus re-dumped with the reference tokenizers)"
-st_r1_parity() {
-  x "mkdir -p $STATE/agnes-parity/tests/tokenizer && cp tests/tokenizer/corpus.txt $STATE/agnes-parity/tests/tokenizer/"
-  chk "cd $STATE/agnes-parity && $TOK_PYTHON $TREE/tools/tokenizer/dump_parity.py \$($TREE/tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json" "corpus.ids from Agnes's tokenizer (Python tokenizers)"
-  chk "build/tests/parity_test $STATE/agnes-parity/tests/tokenizer \$(tools/box_validate/data.sh resolve $SNAP_AGNES)/tokenizer.json" "parity_test on Agnes's tokenizer.json"
-  grab parity 'cases|parity|OK'
-  finish
-}
-
-stage r1.kernels 1 default card - - "step 5 (G1, card half): gemv / prep / pf_dequant_slab / pf_int8 / argmax tests at the new shapes"
-st_r1_kernels() {
-  run_tests '^(gemv_test|prep_test|pf_dequant_slab_test|pf_int8_test|argmax_test)$'
-  finish
-}
-
-stage r1.gates 1 default card agnes,oracle_agnes - "step 6 (G2): golden_gate_agnes (+i8head), prefill_gate_agnes l0 / int8 - 870 launches (P8), tie rule"
-st_r1_gates() {
-  run_tests 'golden_gate_agnes|prefill_gate_agnes' agnes
-  jgrab agnes-golden 'golden_gate_agnes|prefill_gate_agnes' 'golden_gate_test OK|TOTAL:|kernel_count|870|PASS|FAIL'
-  finish
-}
-
-stage r1.features 1 default card agnes - "step 7 (G4): replay bitwise, prefill split, snapshot C1, prefix C2, MTP verify M2 on Agnes"
-st_r1_features() {
-  run_tests 'replay_determinism_agnes|prefill_split_agnes|snapshot_agnes|prefix_gpu_agnes|mtp_verify_agnes' agnes
-  finish
-}
-
-stage r1.mtp_head 1 default card agnes,oracle_agnes_mtp - "step 7 (G4): mtp_head_agnes_test (M1) against oracle-out-agnes-mtp"
-st_r1_mtp_head() {
-  run_tests '^mtp_head_agnes_test$' agnes
-  finish
-}
-
-stage r1.passkey 1 default gpu agnes,oracle_image - "step 8 (G5): passkey 3/3 at ~60k on l0-int8 and l0 (max_len 65536)"
-st_r1_passkey() {
-  chk "MODEL=$SNAP_AGNES ORACLE_MODEL=$AGNES_ORACLE_MODEL MAX_LEN=65536 N_TARGET=60000 tools/probe/passkey.sh l0-int8 l0" "passkey on Agnes"
-  grab_all passkey '^passkey [^ ]+: [0-9]/3'
-  finish
-}
-
-stage r1.speed 1 default gpu agnes - "step 9 (P7): decode at 4k / 32k / 60k and pp4096 at max_len 65536, the int8 head (interleaved, median of 3; derived ~26 t/s, ~1850-1900 t/s)"
-st_r1_speed() {
-  idle before
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 -- \
-pp4096 '$(bench_cmd "$SNAP_AGNES" --prefill-length 4096 --tg 256 --max-len 65536)' \
-pp32768 '$(bench_cmd "$SNAP_AGNES" --prefill-length 32768 --tg 256 --max-len 65536)' \
-pp60000 '$(bench_cmd "$SNAP_AGNES" --prefill-length 60000 --tg 256 --max-len 65536)'" "the Agnes speed arms"
-  idle after
-  grab_all memory '^memory:' 4
-  grab_all ratio '^RATIO '
-  grab_all idle '^IDLE '
-  finish
-}
-
-stage r1.a4 1 manual - agnes - "step 9 (G3): A4 on Agnes against its bf16 reference (oracle in the container, hours of CPU)"
-st_r1_a4() {
-  say "tools/oracle/run_in_container.sh 'python3 tools/toolcall/oracle_generate.py <Agnes-AI/Agnes-3.0-Flash snapshot> tests/golden/toolcall-agnes /scratch/agnes-toolcall-ref'"
-  say "flock ~/b70-gpu.lock env ZE_AFFINITY_MASK=0 tools/toolcall/engine_generate.sh $SNAP_AGNES tests/golden/toolcall-agnes ~/b70/logs/toolcall/agnes-toolcall-out l0-int8"
-  say "python3 tools/toolcall/score.py ~/b70/logs/toolcall/agnes-toolcall-out bf16 l0-int8-i8head      # recorded beside Qwen3.8's 25/36 (no bar)"
-}
-
-stage r1.prefix_benchy 1 optin gpu-self agnes,uvx - "step 11: llama-benchy prefix caching at depth 4k / 16k / 32k, cache on vs off, through b70-serve"
-st_r1_prefix_benchy() {
-  chk "MODEL=$SNAP_AGNES MAX_LEN=65536 SERVE_ARGS='--spec off' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, cache on"
-  chk "MODEL=$SNAP_AGNES MAX_LEN=65536 SERVE_ARGS='--spec off --prefix-cache-gb 0' tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "llama-benchy, cache off"
-  grab_all benchy '^\| ' 60
-  finish
-}
-
-stage r1.vllm 1 manual - agnes - "step 10: the vLLM row (PR #57003 overlay) against b70-serve plain (--spec off) and at its default (--spec auto)"
-st_r1_vllm() {
-  say "# the box's vLLM XPU image with PR #57003's eight files overlaid (gh pr diff 57003), --language-model-only --max-model-len 65536"
-  say "uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model <agnes> --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation"
-  say "MODEL=$SNAP_AGNES MAX_LEN=65536 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation"
-  say "MODEL=$SNAP_AGNES MAX_LEN=65536 SERVE_ARGS='--spec auto' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation"
-  say "# never both servers on the card at once; read the vLLM version string the server prints"
 }
 
 # ======================================================================================
@@ -200,7 +102,7 @@ rownote 2 "Updating MtpCost's defaults from r2.cost's table is an edit on a bran
 
 stage r2.suite 2 default card qwen,oracle_qwen - "the suite around the changed signature: mtp_gpu, mtp_server, golden_server, prefix_gpu_*, mtp_verify, scheduler, adaptive_k"
 st_r2_suite() {
-  run_tests '^(mtp_gpu_test|mtp_server_test|golden_server_test|prefix_gpu_.*|mtp_verify_test|scheduler_test|adaptive_k_test)$' '' 'kv8 agnes'
+  run_tests '^(mtp_gpu_test|mtp_server_test|golden_server_test|prefix_gpu_.*|mtp_verify_test|scheduler_test|adaptive_k_test)$' '' 'kv8'
   finish
 }
 
@@ -271,14 +173,14 @@ st_r4_g128() {
 # ======================================================================================
 row 5 "spec 15b - ModelDesc carries every per-model width (2026-10-04-spec15b-validation-checklist.md)"
 rownote 5 "Step 6 (b70-decode on a config-only Ornith directory fails with 'MoE not implemented (spec 15c)') is superseded: 15c made Ornith loadable for decode; (row 10's r10.refusals, which checked the last refusal - decode attention v1 - went with v1 in the zero-config cleanup)."
-stage r5.host 5 default cpu - - "step 3: model_desc, variant_names, qwen35, kernel_table, agnes_fold, template"
+stage r5.host 5 default cpu - - "step 3: model_desc, variant_names, qwen35, kernel_table, template"
 st_r5_host() {
-  run_tests '^(model_desc_test|variant_names_test|qwen35_test|kernel_table_test|agnes_fold_test|template_test)$'
+  run_tests '^(model_desc_test|variant_names_test|qwen35_test|kernel_table_test|template_test)$'
   finish
 }
-stage r5.r0 5 default cpu - g0.sha,g0.bitwise,g0.suite "steps 2, 4, 5: binaries, the Qwen3.8 suite bitwise (G0) and the Agnes gates (row 1) - 15b adds no binary"
+stage r5.r0 5 default cpu - g0.sha,g0.bitwise,g0.suite "steps 2, 4, 5: binaries, the Qwen3.8 suite bitwise (G0) - 15b adds no binary"
 st_r5_r0() {
-  need_pass g0.sha g0.bitwise g0.suite r1.gates r1.features
+  need_pass g0.sha g0.bitwise g0.suite
   jgrab buffers '^buffers_test$' 'x |mixer_out|total'
   jgrab mtp-bytes '^load_checkpoint_test$' '849|MTP'
   finish
@@ -354,23 +256,10 @@ st_r7_plan() {
   jgrab plan 'memory_plan_box' 'plan == allocation'
   finish
 }
-stage r7.plan_agnes 7 default card agnes - "load_agnes_test (trained-context refusal), memory_plan_box_agnes_test (+mtp)"
-st_r7_plan_agnes() {
-  run_tests '^(load_agnes_test|memory_plan_box_agnes_test|memory_plan_box_agnes_mtp_test)$'
-  jgrab plan 'memory_plan_box_agnes' 'plan == allocation'
-  finish
-}
 stage r7.lines 7 default card qwen - "memory_plan_box_test <snap> 16384 131072 auto, with and without mtp: every component equals the allocation; 131072 reproduces spec 6 §8.4's line"
 st_r7_lines() {
   chk "build/tests/memory_plan_box_test $SNAP_QWEN 16384 131072 auto" "memory_plan_box_test 16384 131072 auto"
   chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp 16384 131072 auto" "memory_plan_box_test mtp 16384 131072 auto"
-  grab_all plan 'plan == allocation|memory:|max_len'
-  finish
-}
-stage r7.lines_agnes 7 default card agnes - "the same for Agnes"
-st_r7_lines_agnes() {
-  chk "build/tests/memory_plan_box_test $SNAP_AGNES 16384 131072 auto" "memory_plan_box_test (Agnes) 16384 131072 auto"
-  chk "build/tests/memory_plan_box_test $SNAP_AGNES mtp 16384 auto" "memory_plan_box_test (Agnes) mtp 16384 auto"
   grab_all plan 'plan == allocation|memory:|max_len'
   finish
 }
@@ -382,14 +271,6 @@ st_r7_serve() {
   grab_all memory '^memory:'
   grab_all prefix 'prefix cache:'
   grab_all device-memory '[Mm]emory.*([Uu]sed|[Ff]ree)' 8
-  finish
-}
-stage r7.serve_agnes 7 default card agnes - "the same for Agnes (derived 139520; 114176 with --spec auto)"
-st_r7_serve_agnes() {
-  serve "$SNAP_AGNES"
-  serve "$SNAP_AGNES" --spec auto
-  grab_all auto 'max_len: auto ->'
-  grab_all memory '^memory:'
   finish
 }
 stage r7.passkey 7 optin gpu qwen,oracle_image - "passkey 3/3 at 95% of the auto length (bf16 head, prefill planned: auto 181760 derived, so ~172.7k ids)"
@@ -535,9 +416,9 @@ row 10 "spec 15c - Ornith 1.5 35B-A3B decode (spec 15 §10)"
 rownote 10 "P0's build-variant sweeps (UP_KS 1/2/4/8, DN_KS 1/2/4, the {S, layout} sweeps of the four int4 shapes, spec 15 §9's arms, the 3-launch arm) each need a rebuild with other defines or a probe that does not exist yet: r10.p0_sweeps lists them."
 rownote 10 "Everything after the no-checkpoint tests waits on 15a: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box."
 rownote 10 "The --prefill-length / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them), b70-serve's and MTP's since 15e (Ornith is served, with its MoE MTP head: row 16); the last one (decode attention v1) went with v1 (zero-config cleanup, 2026-11-06)."
-stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite, Agnes's gates; Ornith's decode list built - since spec 15 §13 its greedy argmax is Qwen3.8's argmax_stage1_M1 (the int4 checkpoint's tokenizer.json: 248077 ids) and its a||b the int4 gemv_M1_K2048_N128_S1_L1"
+stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite; Ornith's decode list built - since spec 15 §13 its greedy argmax is Qwen3.8's argmax_stage1_M1 (the int4 checkpoint's tokenizer.json: 248077 ids) and its a||b the int4 gemv_M1_K2048_N128_S1_L1"
 st_r10_r0() {
-  need_pass g0.sha g0.bitwise g0.suite r1.gates
+  need_pass g0.sha g0.bitwise g0.suite
   kbins $ORNITH_DECODE_BINS
   finish
 }
@@ -689,7 +570,7 @@ rownote 12 "'no kernel binary changes' is G0's g0.sha (every binary present in b
 rownote 12 "The per-request 'lookup:' stderr line the plan names is not printed by b70-serve as merged; r12.d2 / r12.a4 record whatever 'lookup' lines the server log has."
 stage r12.suite 12 default card qwen,oracle_qwen - "the suite unchanged with --spec unset: mtp_gpu_test, golden_server_test, prefix_gpu_*; the host tests prompt_lookup_test, lookup_server_test, spec_accept_test"
 st_r12_suite() {
-  run_tests '^(mtp_gpu_test|golden_server_test|prefix_gpu_.*|prompt_lookup_test|lookup_server_test|spec_accept_test)$' '' 'kv8 agnes'
+  run_tests '^(mtp_gpu_test|golden_server_test|prefix_gpu_.*|prompt_lookup_test|lookup_server_test|spec_accept_test)$' '' 'kv8'
   finish
 }
 stage r12.d2 12 default card qwen - "D2: golden_server_test against a --spec lookup server (min match 3, the engine's) - greedy identical to the plain decode; a seeded sampled request bitwise reproducible; the 'spec lookup:' startup and per-request 'lookup:' lines"
@@ -733,9 +614,9 @@ rownote 13 "Everything after r13.kernels waits on 15a, as row 10: the int4 check
 rownote 13 "Calibrating kConsistTieRel / kConsistWeightAbs from ornith_prefill_test's printed distribution and re-deriving prefill_split_ornith's non-64 bars (Qwen3.8's, PROVISIONAL) are edits on a branch after r13.prefill / r13.split record the numbers."
 rownote 13 "P0's SLM-fused dequant arm needs tools/probe/probe_moe_prefill.{cl,cc}, not written; it and the rebuild arms (TM, prefetch, a multi-work-group sort) are r13.p0_arms."
 
-stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_smoke bitwise (G0), Agnes's prefill gates; Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
+stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_smoke bitwise (G0); Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
 st_r13_r0() {
-  need_pass g0.sha g0.bitwise g0.suite r1.gates
+  need_pass g0.sha g0.bitwise g0.suite
   kbins pf_moe_E256_T8_D2048_I512 pf_moe_router_K2048_N272 pf_moe_gemm_K2048_N1024_SILU \
     pf_moe_gemm_i8_K2048_N1024_SILU pf_moe_gemm_K512_N2048 pf_flash_attn_Q16KV2 argmax_stage1_M1
   jgrab prefill 'prefill_(gate_(l0|int8)|smoke)' 'golden_gate_test OK|TOTAL:|8449|8705|launch'
@@ -818,10 +699,10 @@ rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf downlo
 rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
 rownote 14 "K2's eager decode attention (B70_K2_ATTN=eager, spec 18 §10.1) and its stages (r14.golden_eager, r15.golden_eager, r21.golden_eager, the eager arms of r15.p0 / r15.speed) went in the zero-config cleanup (operator 2026-11-06): flash is K2's attention."
 
-stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Agnes's and Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
+stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
 st_r14_k0() {
   need_pass g0.sha g0.bitwise g0.suite
-  need_ok r1.gates r1.features r10.nockpt r10.gates r13.kernels r13.gates
+  need_ok r10.nockpt r10.gates r13.kernels r13.gates
   finish
 }
 stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_attn_eager_ref (the eager chain bitwise against torch), k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
@@ -912,10 +793,10 @@ rownote 15 "K1 (r15.k1) needs no checkpoint; K3, split and the CLI need SNAP_K2,
 rownote 15 "The PROPOSED bars (prefill KV against decode's fill: dense rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing near-tie margin 2e-2, weights 1/32) are set from the distributions r15.prefill prints - an edit on a branch after the run."
 rownote 15 "P0's rebuild arms (flash EXP2 0 vs 1, RPW 8 / 16, the sort's single work-group, an SLM-fused dequant in the grouped GEMM) are r15.p0_arms; r15.p0 is the runnable profile."
 
-stage r15.k0 15 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Agnes's, Ornith's and K2 decode's gates not failed (a SKIP for missing data is noted, not counted)"
+stage r15.k0 15 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Ornith's and K2 decode's gates not failed (a SKIP for missing data is noted, not counted)"
 st_r15_k0() {
   need_pass g0.sha g0.bitwise g0.suite
-  need_ok r1.gates r10.gates r13.gates r14.k1 r14.k3 r14.golden
+  need_ok r10.gates r13.gates r14.k1 r14.k3 r14.golden
   finish
 }
 stage r15.host 15 default cpu - - "host: k2_pf_ref_test (the routing scatter with exact ties, tile bound, row independence, combines == decode's chains, slab tail, eager reference), k2_pf_variant_names_test, k2_plan_test (2392 launches, 0.797 GB scratch, auto 42752 with prefill)"
@@ -1177,10 +1058,10 @@ st_r17_host() {
   jgrab k2-tokenizer '^k2_tokenizer_test$' 'SKIP|vocab|corpus|digest|OK|FAIL'
   finish
 }
-stage r17.k0 17 default card qwen - "K0 for the server path on the box's snapshots (the patched minja under the Qwen3.8 / Agnes / Ornith templates; ChatFormat / make_output_parser on the Qwen path): template_test, template_agnes_test, template_ornith_test, ornith_server_test, toolcall_test, protocol_test, golden_server_test, prefix_server_test, mtp_server_test, lookup_server_test - unchanged"
+stage r17.k0 17 default card qwen - "K0 for the server path on the box's snapshots (the patched minja under the Qwen3.8 / Ornith templates; ChatFormat / make_output_parser on the Qwen path): template_test, template_ornith_test, ornith_server_test, toolcall_test, protocol_test, golden_server_test, prefix_server_test, mtp_server_test, lookup_server_test - unchanged"
 st_r17_k0() {
   need_pass g0.sha
-  run_tests '^(template_test|template_agnes_test|template_ornith_test|ornith_server_test|toolcall_test|protocol_test|golden_server_test|prefix_server_test|mtp_server_test|lookup_server_test)$'
+  run_tests '^(template_test|template_ornith_test|ornith_server_test|toolcall_test|protocol_test|golden_server_test|prefix_server_test|mtp_server_test|lookup_server_test)$'
   finish
 }
 
@@ -1338,7 +1219,7 @@ row 22 "spec 16b - pipeline parallel decode across two B70s (--parallel pp; spec
 rownote 22 "Every GPU stage of this row needs BOTH cards: its commands set ZE_AFFINITY_MASK=0,1 themselves (the run exports DEVICE's one card); the GPU lock is the one lock for both. Both cards must be free of other DRM holders for r22.s1."
 rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b ships both hand-offs behind --pipeline-handoff (copy default) and the split by bytes; r22.s1 is where the two hand-offs are first compared."
 rownote 22 "S1 at 32k depth is opt-in (r22.s1_32k): --parallel pp ingests through the decode lists (prefill across two cards is 16c), ~20 min per arm at depth 32768."
-stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Agnes / Ornith; K2's bytes per card), pp_protocol_test (the peer hand-off's protocol on two threads), pipeline_args_test"
+stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Ornith; K2's bytes per card), pp_protocol_test (the peer hand-off's protocol on two threads), pipeline_args_test"
 st_r22_host() {
   run_tests '^(pipeline_plan_test|pp_protocol_test|pipeline_args_test)$'
   jgrab splits '^pipeline_plan_test$' 'split|auto|k2-horizon'
@@ -1388,14 +1269,6 @@ st_r22_cli() {
   grab_all auto 'max_len: auto ->|split: auto ->'
   grab_all plan '^  device [01]:' 8
   grab_all memory '^memory, device' 8
-  finish
-}
-stage r22.agnes 22 default gpu agnes r22.p1 "Review Focus 5 - the split from the descriptor: Agnes (72 layers) under --parallel pp gives the one-card ids (--ids prose.ids --n 32)"
-st_r22_agnes() {
-  chk "build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 > $STATE/r22-agnes-one.ids" "Agnes, one card"
-  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --parallel pp > $STATE/r22-agnes-pp.ids && cmp $STATE/r22-agnes-one.ids $STATE/r22-agnes-pp.ids" \
-    "Agnes, --parallel pp: the one-card ids"
-  grab_all split 'split: auto ->|^engine: --parallel pp'
   finish
 }
 stage r22.ornith 22 default gpu ornith r22.p1 "Review Focus 5 on a MoE model: Ornith (40 layers, the cut's fold SP0) under --parallel pp gives the one-card ids (--ids prose.ids --n 32)"
@@ -1487,14 +1360,6 @@ st_r23_cli() {
   grab_all auto 'max_len: auto ->|split: auto ->|pipeline plan at'
   grab_all pp '^pp: ' 12
   grab_all memory '^memory, device' 8
-  finish
-}
-stage r23.agnes 23 default gpu agnes r23.p1 "Review Focus 1 on Agnes (72 layers): --ids prose.ids --n 32 --prefill under --parallel pp gives the one-card --prefill ids"
-st_r23_agnes() {
-  chk "build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --prefill > $STATE/r23-agnes-one.ids" "Agnes, one card, --prefill"
-  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_AGNES --ids tests/golden/prompts/prose.ids --n 32 --prefill --parallel pp > $STATE/r23-agnes-pp.ids && cmp $STATE/r23-agnes-one.ids $STATE/r23-agnes-pp.ids" \
-    "Agnes, --parallel pp --prefill: the one-card ids"
-  grab_all pp '^pp: |split: auto ->' 6
   finish
 }
 stage r23.ornith 23 default gpu ornith r23.p1 "Review Focus 1 on a MoE model: Ornith (40 layers; the cut's fold SP0, the grouped experts per device) --ids prose.ids --n 32 --prefill under --parallel pp (l0-int8 and l0) gives the one-card --prefill ids"
@@ -1977,16 +1842,6 @@ st_r27_golden() {
   grab_all golden 'generated ids identical' 12
   finish
 }
-stage r27.agnes 27 default gpu agnes r27.golden "b70-serve --parallel pp on Agnes (72 layers): golden_server_test --chat (the server's greedy chat = one-card b70-decode on its prompt_token_ids), plain and --spec mtp --spec-max 3"
-st_r27_agnes() {
-  local a
-  for a in "--parallel pp" "--parallel pp --spec mtp --spec-max 3"; do
-    chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_AGNES --chat" \
-      "Agnes, golden_server_test --chat, b70-serve $a"
-  done
-  grab_all chat 'chat of [0-9]+ prompt ids' 6
-  finish
-}
 stage r27.ornith 27 default gpu ornith r27.golden "b70-serve --parallel pp on a MoE model: Ornith (40 layers, the MoE MTP head on device 1) golden_server_test --chat, plain and --spec mtp --spec-max 3"
 st_r27_ornith() {
   local a
@@ -2038,10 +1893,10 @@ rownote 28 "Written blind on the Mac after rows 24 / 26 (20c's decode, 20d's pre
 rownote 28 "The synthetic checkpoints (oracle-out-kolibri-synth, r24.oracle_synth) carry the engine side before spec 20b: make_synth.py copies the BF16 release's tokenizer.json / tokenizer_config.json (its chat_template string - the release ships no chat_template.jinja; chat::Template reads it) / generation_config.json into each ckpt, which b70-serve needs. kolibri_tokenizer_test reads the release's tokenizer.json from the HF cache (B70_KOLIBRI_TOKENIZER_JSON) - SKIP 77 without it."
 rownote 28 "After spec 20b (SNAP_KOLIBRI): r28.real, r28.passkey (KL4: 3 / 3 at 262144 with the int8 head), r28.benchy. KL4's A4 reference is the bf16 SOURCE (156 GB) run wherever 20b runs (decision 1: tools/toolcall/a4_ref.sh kolibri ref, MODEL_DIR / DEVICE there) and pushed as oracle-out-kolibri-a4; r28.a4 then scores the engine on two cards against it - the hard bar is 0 parse failures of the reference (score.py --format hermes); the first-call agreement is recorded, no bar."
 rownote 28 "A request-end restore (2049, 300) is bitwise the session that never left, not ONE cold prefill of the whole prompt (20d's split rule: a split off a multiple of 64 is within the split bars, not bitwise); block-end restores (4096) are bitwise the cold run."
-stage r28.k0 28 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 20e adds no kernel (every binary identical, G0) and the server path is unchanged - G0's suite (golden_server_test, prefix_gpu_*) and here the host tests template_test / _agnes / _ornith / _k2, toolcall_test, toolcall_k2_test (parse_json_call moved out of toolcall_k2.cc), k2_server_test, ornith_server_test, protocol_test, prefix_server_test, mtp_server_test, lookup_server_test; Qwen's sampling defaults unchanged"
+stage r28.k0 28 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 20e adds no kernel (every binary identical, G0) and the server path is unchanged - G0's suite (golden_server_test, prefix_gpu_*) and here the host tests template_test / _ornith / _k2, toolcall_test, toolcall_k2_test (parse_json_call moved out of toolcall_k2.cc), k2_server_test, ornith_server_test, protocol_test, prefix_server_test, mtp_server_test, lookup_server_test; Qwen's sampling defaults unchanged"
 st_r28_k0() {
   need_pass g0.sha g0.bitwise g0.suite
-  run_tests '^(template_test|template_agnes_test|template_ornith_test|template_k2_test|toolcall_test|toolcall_k2_test|k2_server_test|ornith_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test)$' '' 'kv8'
+  run_tests '^(template_test|template_ornith_test|template_k2_test|toolcall_test|toolcall_k2_test|k2_server_test|ornith_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test)$' '' 'kv8'
   finish
 }
 stage r28.host 28 default cpu - - "host: template_kolibri_test (16 renders byte-identical to apply_chat_template), kolibri_tokenizer_test (127998 ids, the tags, 24 texts, corpus.txt, three renders' ids), toolcall_kolibri_test (the HF renders parse back, Review Focus 1 / 2 / 5, a 2000-output fuzz split-invariant), kolibri_server_test (kwargs, list content, both EOS ids, streaming, the 1.0 / 0.97 / 128 defaults), kolibri_snapshot_test (the layouts on the real shapes, restores at 2048 / 4096 / 2049 / 5000 / 300 == cold through PrefixSession, one card <-> two, the server over HTTP), pipeline_args_test; the toolcall Python tests"
@@ -3423,7 +3278,7 @@ rownote 62 "Hand back: bolt_snapshot_gpu_test's lines (the sizes - 170,229,760 B
 stage r62.k0        62 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): 25e adds no kernel (every binary identical, G0), no existing server / template / tokenizer test changes behaviour (golden_server_test gained two opt-in env vars) - here the host tests that read the patched toolcall.cc / chat_format / server.cc: every template, toolcall and server test, openai_test, minja_ext_test"
 st_r62_k0() {
   need_pass g0.sha g0.bitwise g0.suite
-  run_tests '^(template_test|template_agnes_test|template_ornith_test|template_k2_test|template_kolibri_test|minja_ext_test|toolcall_test|toolcall_k2_test|toolcall_kolibri_test|openai_test|k2_server_test|kolibri_server_test|ornith_server_test|qwen4exp_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|spec_accept_test|sampling_test)$' '' 'kv8'
+  run_tests '^(template_test|template_ornith_test|template_k2_test|template_kolibri_test|minja_ext_test|toolcall_test|toolcall_k2_test|toolcall_kolibri_test|openai_test|k2_server_test|kolibri_server_test|ornith_server_test|qwen4exp_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|spec_accept_test|sampling_test)$' '' 'kv8'
   finish
 }
 stage r62.host      62 default cpu  -                       -           "template_bolt_test, bolt_tokenizer_test, bolt_stream_test, bolt_request_test, bolt_snapshot_test"
@@ -3530,21 +3385,16 @@ st_r62_benchy() {
 }
 
 # ======================================================================================
-row 67 "the prefill memory-bandwidth profile: which kernels reach ~94 % of the card's 638 GB/s (the operator saw 600+ GB/s on hw-smi during r1.features' prefill_split_test, Agnes l0-int8 at long32k, 2026-10-23) - B70_PREFILL_PROFILE's per-phase L0 GPU time at 32k on Agnes and Qwen3.8, l0 and l0-int8; the bytes per phase are derived on the Mac from the shapes, so the GB/s per phase is for the decode kernels' work (decode runs ~445 GB/s effective)"
-rownote 67 "Diagnostic, gates nothing. Run it on an idle card in a timed session (Session 6). Watch hw-smi by hand during the arms for the live GB/s (hw-smi needs sudo and a terminal, so the stage does not log it). Hand back r67.profile's log (the four 'prefill phase attribution' tables and the unprofiled pp32768 rows); the per-phase bytes and GB/s table is a Mac edit into docs/BENCHMARKS.md."
-stage r67.profile 67 optin gpu agnes,qwen -  "B70_PREFILL_PROFILE=1 b70-decode --bench --prefill-length 32768 --tg 16 --max-len 65536 on Agnes and Qwen3.8, --prefill-backend l0 and l0-int8: the per-phase L0 GPU ms; then the same four arms unprofiled (interleaved, median of 3) for the wall each table perturbs"
+row 67 "the prefill memory-bandwidth profile: which kernels reach ~94 % of the card's 638 GB/s (the operator saw 600+ GB/s on hw-smi during the since-removed Agnes prefill_split_test, l0-int8 at long32k, 2026-10-23) - B70_PREFILL_PROFILE's per-phase L0 GPU time at 32k on Qwen3.8, l0 and l0-int8; the bytes per phase are derived on the Mac from the shapes, so the GB/s per phase is for the decode kernels' work (decode runs ~445 GB/s effective)"
+rownote 67 "Diagnostic, gates nothing. Run it on an idle card in a timed session (Session 6). Watch hw-smi by hand during the arms for the live GB/s (hw-smi needs sudo and a terminal, so the stage does not log it). Hand back r67.profile's log (the two 'prefill phase attribution' tables and the unprofiled pp32768 rows); the per-phase bytes and GB/s table is a Mac edit into docs/BENCHMARKS.md."
+stage r67.profile 67 optin gpu qwen -  "B70_PREFILL_PROFILE=1 b70-decode --bench --prefill-length 32768 --tg 16 --max-len 65536 on Qwen3.8, --prefill-backend l0 and l0-int8: the per-phase L0 GPU ms; then the same two arms unprofiled (interleaved, median of 3) for the wall each table perturbs"
 st_r67_profile() {
-  local snap m b
+  local b
   idle before
-  for m in agnes qwen; do
-    if [ "$m" = agnes ]; then snap=$SNAP_AGNES; else snap=$SNAP_QWEN; fi
-    for b in l0-int8 l0; do
-      chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$snap" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend $b)" "the profiled prefill, $m $b"
-    done
+  for b in l0-int8 l0; do
+    chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend $b)" "the profiled prefill, qwen $b"
   done
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 -- \
-agnes-l0-int8 '$(bench_cmd "$SNAP_AGNES" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0-int8)' \
-agnes-l0 '$(bench_cmd "$SNAP_AGNES" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0)' \
 qwen-l0-int8 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0-int8)' \
 qwen-l0 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0)'" "the unprofiled arms"
   idle after
@@ -3704,49 +3554,43 @@ st_r65_benchy() {
 # ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
 rownote 66 "Written blind on the Mac (docs/probes/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
-rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison; Agnes runs its two layouts (2 slots with MTP; 4 with --mtp off)."
+rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison."
 rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13c); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill docs/probes/probe-batching-2026-10-23.md sections 2-4 and the operator's section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
 stage r66.k0    66 default cpu -           g0.sha,g0.bitwise,g0.suite "B0: the default build is main's (G0) - B70_BATCH_PROBE is off there"
 st_r66_k0() {
   need_pass g0.sha g0.bitwise g0.suite
   finish
 }
-stage r66.build 66 default cpu -           g0.build "build-batch-probe: -DB70_BATCH_PROBE=ON (the 80 row builds' first ocloc compile, build_rows, probe_batch_step), -j\$JOBS"
+stage r66.build 66 default cpu -           g0.build "build-batch-probe: -DB70_BATCH_PROBE=ON (the 56 row builds' first ocloc compile, build_rows, probe_batch_step), -j\$JOBS"
 st_r66_build() {
   chk "cmake -S . -B build-batch-probe -DCMAKE_BUILD_TYPE=Release -DB70_BATCH_PROBE=ON $CMAKE_ARGS > /dev/null && cmake --build build-batch-probe -j$JOBS --target probe_batch_step" \
     "the probe build"
-  chk "miss=0; for b in gdn_step_rows_M8 gdn_step_rows_M8_G54 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS gemv_M8_K5120_N38912_S8_L0 argmax_stage1_M8_V248089; do if [ -s build-batch-probe/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
-    "the row builds and Agnes's M = 8 rows are in build-batch-probe/kernels"
+  chk "miss=0; for b in gdn_step_rows_M8 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS; do if [ -s build-batch-probe/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
+    "the row builds are in build-batch-probe/kernels"
   finish
 }
-stage r66.check 66 default gpu qwen,agnes  r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8 and Agnes, bf16 and int8 KV, Agnes also --mtp off (4 slots)"
+stage r66.check 66 default gpu qwen        r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8, bf16 and int8 KV"
 st_r66_check() {
   x "uptime"
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-time --no-chunks" "Qwen3.8, int8 KV, MTP"
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-time --no-chunks" "Qwen3.8, bf16 KV, MTP"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-time --no-chunks" "Agnes, int8 KV, MTP (2 slots)"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv bf16 --no-time --no-chunks" "Agnes, bf16 KV, MTP (2 slots)"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --mtp off --no-time --no-chunks" "Agnes, int8 KV, --mtp off (4 slots)"
   grab_all check '^CHECK |^check: |^probe_batch_step: |^memory: ' 200
   finish
 }
-stage r66.cost  66 optin   gpu qwen,agnes  r66.check "the step table: every arm against 1x1@4k as interleaved pairs, median of 3 - Qwen3.8 int8 and bf16 KV, Agnes int8 (2 slots, MTP) and --mtp off (4 slots) - idle box, both cards free of DRM holders (timed)"
+stage r66.cost  66 optin   gpu qwen        r66.check "the step table: every arm against 1x1@4k as interleaved pairs, median of 3 - Qwen3.8 int8 and bf16 KV - idle box, both cards free of DRM holders (timed)"
 st_r66_cost() {
   idle before
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, int8 KV (the decided form)"
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, bf16 KV"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Agnes, int8 KV, MTP (2 slots)"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --mtp off --no-check --no-chunks --calls 32 --rounds 3" "Agnes, int8 KV, --mtp off (4 slots)"
   idle after
   grab_all cost '^probe_batch_step: |^memory: |^timing: |^\| ' 200
   grab_all idle '^IDLE '
   finish
 }
-stage r66.chunk 66 optin   gpu qwen,agnes  r66.check "the interleave chunk: one Engine::prefill chunk of 512 / 1024 / 2048 at depth 4096 and 32768 beside the 1-row steps, rotated rounds, median of 3 - Qwen3.8 and Agnes, int8 KV - idle box (timed)"
+stage r66.chunk 66 optin   gpu qwen        r66.check "the interleave chunk: one Engine::prefill chunk of 512 / 1024 / 2048 at depth 4096 and 32768 beside the 1-row steps, rotated rounds, median of 3 - Qwen3.8, int8 KV - idle box (timed)"
 st_r66_chunk() {
   idle before
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Qwen3.8, int8 KV"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_AGNES --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Agnes, int8 KV"
   idle after
   grab_all chunk '^probe_batch_step: |^chunks: |^timing: |^\| ' 80
   grab_all idle '^IDLE '
@@ -3810,7 +3654,7 @@ st_r68_verdict() {
 }
 
 # ======================================================================================
-row 69 "spec 28b - gemm_sm in production: every M >= 2 decode list (MTP / lookup verify, DFlash tap verify - the drafter stays on gemv_i8w -, --parallel pp stage verify, 13a rows; Qwen3.8, Agnes, Ornith's dense projections) on the small-M DPAS GEMM, M = 1 bitwise; N1-N8, S2-S3, the measured cost table (plan 28b)"
+row 69 "spec 28b - gemm_sm in production: every M >= 2 decode list (MTP / lookup verify, DFlash tap verify - the drafter stays on gemv_i8w -, --parallel pp stage verify, 13a rows; Qwen3.8, Ornith's dense projections) on the small-M DPAS GEMM, M = 1 bitwise; N1-N8, S2-S3, the measured cost table (plan 28b)"
 rownote 69 "N1 is the gate that is never traded: M = 1 lists bind the old binaries. Hand back: the N2 / N3 lines, the M2 cosines per M, the tie census, the verify(M) table and the D1 table."
 rownote 69 "First run 2026-11-01 as busy-box timing on one card per job (operator ruling, as 28a): r69.speed is the quiet-box re-check of those numbers (docs/superpowers/specs/2026-10-27-spec28-small-m-verify-gemm-design.md, '28b as built')."
 stage r69.k0      69 default cpu  -           g0.sha,g0.bitwise,g0.suite "N1: kernel_cmdlines +N / -0 / ~0, every existing binary identical, the suite (G0)"
@@ -3829,10 +3673,10 @@ st_r69_kernels() {
   grab_all kernels '^(PASS|FAIL) |^gemm_sm_test' 80
   finish
 }
-stage r69.gates   69 default card qwen        r69.kernels           "N4 (mtp_verify_test M2 at M 2..4, dflash_engine_test D3 at M 2..8), N5, N6 greedy vs --spec off under the tie rule (golden + A4), N8 replay; Agnes / kv8 / Ornith MTP twins"
+stage r69.gates   69 default card qwen        r69.kernels           "N4 (mtp_verify_test M2 at M 2..4, dflash_engine_test D3 at M 2..8), N5, N6 greedy vs --spec off under the tie rule (golden + A4), N8 replay; kv8 / Ornith MTP twins"
 st_r69_gates() {
   run_tests '^(mtp_verify_test|mtp_gpu_test|mtp_verify_kv8_test|mtp_gpu_kv8_test|prefix_gpu_mtp_test|dflash_engine_test|dflash_gpu_test|lookup_server_test|batch_rows_test)$'
-  run_tests '^(mtp_verify_agnes_test|ornith_mtp_test|ornith_mtp_bf16head_test)$'
+  run_tests '^(ornith_mtp_test|ornith_mtp_bf16head_test)$'
   grab_all gates '^M2|^M3|^D2|^D3|^RF[0-9]|near-tie|NOT A TIE|first difference|AWAIT' 400
   finish
 }
@@ -4023,12 +3867,11 @@ st_r71_bar() {
   grab_all bar '^\| |^## ' 80
   finish
 }
-stage r71.ar      71 optin   gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8, Agnes) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
+stage r71.ar      71 optin   gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
 st_r71_ar() {
   idle before
   local P="ZE_AFFINITY_MASK=0,1 timeout -k 10 300 build/tools/probe/probe_tp ar"
   chk "$P --route p2p-push --rows 1,8 --rounds 5 --execs 20" "p2p-push timed"
-  chk "$P --route p2p-push --model agnes --rows 1 --rounds 5 --execs 20" "p2p-push timed, Agnes"
   chk "$P --route p2p-push --rows 1 --replays 10000" "p2p-push bitwise, 10^4 replays at M = 1"
   chk "$P --route p2p-push --rows 8 --replays 1000" "p2p-push bitwise at M = 8"
   chk "$P --route p2p-push --rows 1 --replays 2 --inject skip-data --spin 65536" "a skipped data write caught"
@@ -4040,10 +3883,9 @@ st_r71_ar() {
   grab_all ar '^\| |^## |TIMEOUT' 200
   finish
 }
-stage r71.step    71 optin   card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8 and Agnes; the GEMV sum both ways"
+stage r71.step    71 optin   card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8; the GEMV sum both ways"
 st_r71_step() {
   chk "build/tools/probe/probe_tp step --model qwen38" "the per-card step, Qwen3.8"
-  chk "build/tools/probe/probe_tp step --model agnes" "the per-card step, Agnes"
   grab_all step '^\| |^GEMV sum|^## ' 60
   finish
 }
@@ -4055,7 +3897,7 @@ st_r71_verdict() {
 
 # ======================================================================================
 row 76 "the sycl-tla prefill backend removed (operator, 2026-10-27; plan 2026-10-27-drop-sycl-tla): l0 the default for every model, l0-int8 opt-in; the engine build has no SYCL / icpx"
-rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Agnes / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
+rownote 76 "G0 is expected to differ: prefill_smoke_test lost sycl-tla's sections, and every Qwen3.8 / Ornith run that names no backend now prefills on l0 - the diff goes to the operator, it is not accepted here."
 stage r76.tests 76 default card qwen - "the tests the removal rewrote: pf_gemm_test (pf_gemm against a host fp64 reference: cos >= 0.999999 and max-ulp of sum|ab| <= K per case), attn_chunk_test (flash vs composed; the composed grid on the L0 backend against attn_ref), context_test, prefill_smoke_test (L0: 8449 + 5 flash), prefill_int8_test, the L0 kernel tests that lost their guard (gdn_conv / gdn_wy / pf_int8 / pf_flash_attn / linear_i8), buffers_test, cli_reject_prefill_backend_value, golden_server_test (b70-serve and b70-decode both on the new default, l0)"
 st_r76_tests() {
   run_tests '^(pf_gemm_test|attn_chunk_test|context_test|prefill_smoke_test|prefill_int8_test|gdn_conv_test|gdn_wy_test|pf_int8_test|pf_flash_attn_test|linear_i8_test|buffers_test|cli_reject_prefill_backend_value|golden_server_test)$'
@@ -4142,8 +3984,8 @@ st_r77_serial() {
 }
 
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Agnes / Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'agnes ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr'
+  run_tests '.' '' 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr'
   finish
 }
