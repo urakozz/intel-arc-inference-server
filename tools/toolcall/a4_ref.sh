@@ -10,7 +10,7 @@
 #                                                   oracle_generate.py --model qwen on the bf16 original
 #                                                   Qwen/Qwen3.8-27B (54 GB): Qwen3_5ForCausalLM layer-streamed,
 #                                                   the first K layers kept once read (K from the memory plan
-#                                                   under the cap: ~54 of 64 at the box's 56g), bf16 GEMMs as fp32
+#                                                   under the cap: ~54 of 64 at the box's 64g), bf16 GEMMs as fp32
 #                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 192 new ids,
 #                                                   one scenario at a time -> $OUT/<name>.bf16.{ids,txt}
 #                                                   (resumable; no .gap). OUT default oracle-out-qwen-a4.
@@ -91,7 +91,7 @@
 # dequantised weights resident once read - every layer's dense part, then whole layers of
 # experts - in what the cap leaves (also bitwise: the same values, read from RAM instead of
 # re-dequantised). The memory plan (estimates, from config.json and the container's cap - MEM)
-# is the log's first lines (on the box: run_in_container.sh's cap, 56g by default, or MEM=<N>g). ONLY=a,b,...
+# is the log's first lines (on the box: run_in_container.sh's cap, 64g by default, or MEM=<N>g). ONLY=a,b,...
 # runs just those scenarios (the cross-check);
 # NAME the container (a4-ref-<model>).
 #
@@ -292,7 +292,7 @@ if [ $mac = 0 ]; then   # the box: the reference image, foreground
   if [ -n "${MODEL_DIR:-}" ]; then export ORACLE_SNAP="${MODEL_DIR%/}"; else export ORACLE_MODEL="$cache_name"; fi
   [ -n "${ORACLE_THREADS:-}" ] && export ORACLE_THREADS
   rc=0
-  # The container's cap is run_in_container.sh's (56g by default, swap off; above it only with the
+  # The container's cap is run_in_container.sh's (64g by default, swap off; above it only with the
   # cards idle): MEM (e.g. 48g) sets both the cap and the memory plan's budget, so they agree; unset,
   # the plan reads the cap from the container's memory.max.
   if [ "$step" = ref ] && [ -n "${MEM:-}" ]; then
