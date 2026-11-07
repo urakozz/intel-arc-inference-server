@@ -311,10 +311,21 @@ std::string take_judge(int& argc, char** argv) { return take_flag(argc, argv, "-
 
 // ---- accepted rows (operator ruling 2026-10-23, the fourth) -------------------------------
 // `--accept=<prompt>:<step>,...`: rows KNOWN to diverge from the judge, to be debugged on
-// 2026-10-26 (docs/box-day-plan.md, "Known divergences"). Such a row, if it fails, prints
-// kAcceptNote with its gap and does not fail the test; any other failing row still does; an
-// accepted row that passes prints "accepted row now passes - remove it". Set per registration in
-// tests/CMakeLists.txt, holding exactly the rows that failed on 2026-10-23.
+// 2026-10-26. Such a row, if it fails, prints kAcceptNote with its gap and does not fail the test;
+// any other failing row still does; an accepted row that passes prints "accepted row now passes -
+// remove it". Set per registration in tests/CMakeLists.txt, holding exactly the rows that failed
+// on 2026-10-23. The rows and what is known (card 0, 2026-10-23; judge gap / bf16 ulp):
+//   golden_gate_ornith_i8head code 3 (0.138 / 0.125), cjk 15 (0.125 / 0.0625).
+//   prefill_gate_ornith_l0-int8 prose 22 (0.469), cjk 15 (0.118): the same kernels at chunk 16 pass
+//     both; the GDN state is as far from the pfi8 judge at chunk 2048 as at 16 (0.99476 / 0.99484
+//     prose), and the failing run's row-22 logits are the closer to the judge (cos 0.99709 / 0.99534).
+//   prefill_gate_ornith_l0_c16 (bf16) prose 18 (0.447), cjk 15: chunk widths 2048 / 64 / 32 / 16 / 8
+//     leave the state's distance to f32 flat (0.996 prose) and flip the rows non-monotonically
+//     (prose 18 wrong at 32 and 16, right at 8 and 2048) - chunk-boundary rounding of the GDN scan.
+//   k2_golden_i8head prose 1 (0.136): gemv_i8w recomputed on the host from the device's own hidden
+//     and int8 rows agrees to 4e-6 - the divergence is the hidden state; the bf16 head on it picks
+//     the judge's 1961.
+//   cjk 15 is a 3-4-way f32 near tie (four ids within 0.31) that different variants resolve differently.
 constexpr const char* kAcceptNote = "ACCEPTED (known divergence, 2026-10-23, debug 2026-10-26)";
 struct AcceptList {
   std::vector<std::pair<std::string, uint32_t>> rows;

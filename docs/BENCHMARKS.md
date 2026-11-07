@@ -1028,7 +1028,6 @@ state `e89445916986-vs-0fb0cb914a37`, greedy, every arm's output identical to `-
 
 | what | configuration | number | stage |
 |---|---|---|---|
-| verify cost at M = 5..8 | `probe_mtp_steps`, int8 head, depth 4k / 32k, interleaved pairs | not run (r29.cost, outside this run) | r29.cost |
 | one draft block | the draft list, host-timed replay (r54.draft) | 20.6 / 25.0 ms int8 (~0.7-0.85 of a 29.2 ms plain step, against the derived 0.17) | r54.draft |
 | A4 + golden through b70-serve | `--spec off` / `--mtp auto` / `--spec dflash` (auto K) / `--spec dflash --spec-max 3`, `--max-len 16384`, int8 head, bf16 KV, greedy, max_tokens 256, 3 rotated rounds; gen t/s geomean | dflash / mtp: **A4 1.033**, golden 0.791 (code 61.8 vs 60.0 t/s, prose 32.4 vs 44.5, cjk 28.9 vs 43.7); dflash3 / mtp 0.928 / 0.758; dflash / off 1.974 / 1.127 | r56.d5_a4 |
 | the draft vocabulary | `--spec dflash` vs `--draft-vocab 32k` ranked (in-sample) and by id | ranked / full: A4 1.043, golden 1.022; by id / full: A4 0.916, golden 1.022; ids identical | r56.d5_dv |

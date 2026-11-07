@@ -438,7 +438,7 @@ projection with measured numbers, vLLM XPU with LiLiCorr. Every default in §11 
 
 ## 13. 26b as built (2026-10-23; the Mac only - no card)
 
-Branch `spec26b-lilicorr-drafter`; box queue row 64 (Session 13 of `docs/box-day-plan.md`). kernel_cmdlines **+9 / -0 / ~0**;
+Branch `spec26b-lilicorr-drafter`; box queue row 64. kernel_cmdlines **+9 / -0 / ~0**;
 no existing `.cl` edited; nothing compiled by ocloc, nothing run on a card.
 
 **Built.** `model::DFlashForm::LiLiCorr` (`dflash_desc_from_config` reads `LiLiCorrDraftModel` through the vLLM DFlash 2
@@ -539,7 +539,7 @@ prefill's last 1024 rows 8 a replay (Decision 7), snapshots with `ring_bytes()` 
 
 ## 14. 26c as built (2026-10-23; the Mac only - no card)
 
-Branch `spec26c-lilicorr-engine-serving`; box queue row 65 (Session 14 of `docs/box-day-plan.md`). kernel_cmdlines additions
+Branch `spec26c-lilicorr-engine-serving`; box queue row 65. kernel_cmdlines additions
 only (no existing `.cl` edited, no existing command line moved); nothing compiled by ocloc, nothing run on a card.
 
 **Built.** Kernels (the CMake spec 26c block, `B70_BOLT_VERIFY`): 25c's kernels at M = 2..8 by new lines (the norm sites, the

@@ -1718,7 +1718,7 @@ if(B70_ORNITH)
   foreach(b l0 l0-int8)
     set(_near 0)
     set(_judge ${B70_ORNITH_F32_DIR})
-    # Known divergences (operator ruling 2026-10-23, debug 2026-10-26; docs/box-day-plan.md): exactly
+    # Known divergences (operator ruling 2026-10-23, debug 2026-10-26; golden_common.h): exactly
     # the rows that failed that day - golden_common.h AcceptList.
     set(_acc_one "")
     set(_acc_c16 "prose:18,cjk:15")

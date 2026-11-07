@@ -17,19 +17,14 @@
 #   4. `tools/box_validate.sh --dry-run --only rN` prints what it will run;
 #      `python3 tools/box_validate/test_box_validate.py` checks the registry.
 # Stage ids are `<row>.<step>`: --only / --redo / --with accept an id or a row prefix (`r11`).
+# Speed stages (timed: interleaved arms, cost tables, llama-benchy) are opt-in: their numbers count only in the
+# quiet-box session (docs/open-work.md, Now), which names them; a busy nightly run would only record noise.
+# No per-row recap of G0: a row's first stage waits on g0.sha (and G0's other stages gate every run anyway).
 
 # What G0 compares OUTPUT-for-output against the baseline build (timings dropped): the gates
 # the spec 14 and 15b checklists name as "bitwise identical to main's last record".
 : "${G0_BITWISE_RE:=^(golden_gate_test|golden_gate_i8head_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_gate_l0_i8head_test|prefill_gate_int8_i8head_test|replay_determinism_test|replay_determinism_i8head_test|buffers_test|prefill_smoke_test|load_checkpoint_test)$}"
 ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
-# Ornith's M = 1 decode list (tests/CMakeLists.txt B70_ORNITH_DECODE_KERNELS, ATTN_V2_TGT 32):
-# since spec 15 §13 (the int4 checkpoint read) the greedy argmax is Qwen3.8's argmax_stage1_M1
-# (its tokenizer.json defines 248077 ids) and a||b is int4: gemv_M1_K2048_N128_S1_L1.
-ORNITH_DECODE_BINS="embed_gather_M1_D2048 argmax_stage1_M1 argmax_stage2 prep_res_fold_M1_K2048_SP0_G20
-  prep_res_fold_M1_K2048_SP4_G20 prep_norm_finish_M1_K2048_G20_W20 prep_gated_head_M1_GK16V32 gdn_step_M1_GK16V32
-  attn_prep_M1_Q16KV2 attn_v2_M1_T32_Q16KV2 gemv_M1_K2048_N12288_S1_L1 gemv_M1_K4096_N2048_S4_L0
-  gemv_M1_K2048_N9216_S2_L0 gemv_M1_K2048_N248320_S1_L1 gemv_M1_K2048_N128_S1_L1 gemv_bf16_M1_K2048_N128_C16_S16
-  gemv_bf16_M1_K2048_N272_C16_S16 gemv_bf16_M1_K2048_N248320 gemv_i8w_M1_K2048_N248320 moe_M1_E256_T8_D2048_I512"
 
 # ======================================================================================
 row 0 "G0 - the gate: Qwen3.8 bitwise unchanged against the last box-validated main (spec 14 G0, spec 15b R0, spec 15c R0, spec 12b step 1)"
@@ -166,12 +161,6 @@ st_r4_g64() {
   run_tests '^(quant_test|load_checkpoint_test|golden_gate_test)$'
   finish
 }
-stage r4.g128 4 manual - - - "optional: a public g128 sym GPTQ checkpoint of Qwen3.8, its golden prompts against its own CPU reference"
-st_r4_g128() {
-  say "uvx --from huggingface_hub hf download <a g128 sym GPTQ Qwen3.8 checkpoint>"
-  say "ORACLE_MODEL=<its models--... dir> OUT_DIR=oracle-out-g128 tools/oracle/golden.sh        # its own CPU reference (tools/oracle/README.md)"
-  say "flock ~/b70-gpu.lock build/tests/golden_gate_test oracle-out-g128 tests/golden/prompts <its snapshot dir>"
-}
 
 # ======================================================================================
 row 5 "spec 15b - ModelDesc carries every per-model width (2026-10-04-spec15b-validation-checklist.md)"
@@ -179,13 +168,6 @@ rownote 5 "Step 6 (b70-decode on a config-only Ornith directory fails with 'MoE 
 stage r5.host 5 default cpu - - "step 3: model_desc, variant_names, qwen35, kernel_table, template"
 st_r5_host() {
   run_tests '^(model_desc_test|variant_names_test|qwen35_test|kernel_table_test|template_test)$'
-  finish
-}
-stage r5.r0 5 default cpu - g0.sha,g0.bitwise,g0.suite "steps 2, 4, 5: binaries, the Qwen3.8 suite bitwise (G0) - 15b adds no binary"
-st_r5_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  jgrab buffers '^buffers_test$' 'x |mixer_out|total'
-  jgrab mtp-bytes '^load_checkpoint_test$' '849|MTP'
   finish
 }
 
@@ -219,7 +201,7 @@ st_r6_greedy_long() {
   grab_all mtp '^mtp:|^generate:|GREEDY' 12
   finish
 }
-stage r6.cost 6 default gpu qwen r6.memory "the cost table at depth: probe_mtp_steps at 32k (max_len 65536) and 120k (max_len 131072), int8 and bf16 heads (timed)"
+stage r6.cost 6 optin gpu qwen r6.memory "the cost table at depth: probe_mtp_steps at 32k (max_len 65536) and 120k (max_len 131072), int8 and bf16 heads (timed)"
 st_r6_cost() {
   idle before
   local h
@@ -416,15 +398,8 @@ st_r9_auto() {
 
 # ======================================================================================
 row 10 "spec 15c - Ornith 1.5 35B-A3B decode (spec 15 §10)"
-rownote 10 "P0's build-variant sweeps (UP_KS 1/2/4/8, DN_KS 1/2/4, the {S, layout} sweeps of the four int4 shapes, spec 15 §9's arms, the 3-launch arm) each need a rebuild with other defines or a probe that does not exist yet: r10.p0_sweeps lists them."
 rownote 10 "Everything after the no-checkpoint tests waits on 15a: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box."
 rownote 10 "The --prefill-length / --ids --prefill refusals are gone since 15d (Ornith prefills on l0 / l0-int8; row 13's r13.cli runs them), b70-serve's and MTP's since 15e (Ornith is served, with its MoE MTP head: row 16); the last one (decode attention v1) went with v1 (zero-config cleanup, 2026-11-06)."
-stage r10.r0 10 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the four edited sources included), the Qwen3.8 suite; Ornith's decode list built - since spec 15 §13 its greedy argmax is Qwen3.8's argmax_stage1_M1 (the int4 checkpoint's tokenizer.json: 248077 ids) and its a||b the int4 gemv_M1_K2048_N128_S1_L1"
-st_r10_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  kbins $ORNITH_DECODE_BINS
-  finish
-}
 stage r10.nockpt 10 default card - - "no checkpoint needed: moe_test (the card's sub-group path, 288-lane moe_down), moe_ref_test, ornith_repack_test, variant_names_test, memory_plan_test, model_desc_test, ab_int4_test"
 st_r10_nockpt() {
   run_tests '^(moe_test|moe_ref_test|ornith_repack_test|variant_names_test|memory_plan_test|model_desc_test|ab_int4_test)$'
@@ -451,15 +426,6 @@ st_r10_gates() {
   jgrab ornith 'ornith' 'launch|526|R2|R3|OK|PASS|FAIL'
   finish
 }
-stage r10.p0 10 optin gpu ornith - "P0 (plan 15c Task 1), the runnable part: the per-kernel floor (probe_replay) and b70-decode --profile --depth 4096 for the shares of the 526 launches"
-st_r10_p0() {
-  idle before
-  chk "build/tools/probe/probe_replay" "probe_replay"
-  chk "build/src/cli/b70-decode $SNAP_ORNITH --profile --depth 4096 --steps 32 --repeats 5" "the Ornith decode profile"
-  idle after
-  grab_all idle '^IDLE '
-  finish
-}
 stage r10.speed 10 optin gpu ornith - "Task 4: decode at 4k / 32k / 128k / 250k, --max-len auto (decode-only auto should give 262144; one replay per id: hours)"
 st_r10_speed() {
   idle before
@@ -474,24 +440,11 @@ d250000 '$(bench_cmd "$SNAP_ORNITH" --max-len auto --depth 250000 --tg 256)'" "t
   grab_all idle '^IDLE '
   finish
 }
-stage r10.p0_sweeps 10 manual - ornith - "P0's build-variant sweeps and spec 15 §9's arms"
-st_r10_p0_sweeps() {
-  say "# UP_KS 1 / 2 / 4 / 8 and DN_KS 1 / 2 / 4: rebuild moe.cl's variants with the define, re-run moe_test and b70-decode --bench on Ornith per value"
-  say "# {S, layout} sweeps of q||k||v 2048x9216, qkv||z 2048x12288, out_proj = o_proj 4096x2048 with their GEMV_* defines (probe_gemv rows as spec 14 step 4)"
-  say "# spec 15 §9 arms: register-resident GEMV vs moe.cl gate||up / down; one-sub-group top-k vs moe_route; all-loads-first attention vs v2 at GQA 8, 4k; the 3-launch arm"
-  say "# record: docs/probes/probe-ornith-decode-2026-10-04.md (derived decode estimate, proposed bar)"
-}
 
 # ======================================================================================
 row 11 "spec 12b - the int8 KV cache (--kv-cache int8, rotkv; spec 12 §9, plan 12b)"
 rownote 11 "Step 0, the Qwen3.8 repeat of 12a, runs on the Mac CPU (tools/oracle/kv8_qwen38_repeat.sh, plan 12b Task A); until its numbers replace the PROVISIONAL constants, r11.q2 runs against the provisional tolerances and says so."
 rownote 11 "Making int8 the default (plan 12b Task 4 Step 3) is an edit after every gate passes."
-stage r11.bf16 11 default cpu - g0.sha,g0.bitwise,g0.suite "step 1, bf16 unchanged: every pre-existing binary identical, the suite at the default with B70_KV_CACHE unset (G0)"
-st_r11_bf16() {
-  need_pass g0.sha g0.bitwise g0.suite
-  x "env | grep -E '^B70_KV_CACHE=' || echo 'B70_KV_CACHE unset in this run'"
-  finish
-}
 stage r11.kernels 11 default card qwen - "step 2 FIRST - the readers that replace DPAS / 2D-block reads with byte gathers: kv8_kernels_test (W, D, F), then flash_long_kv8_test (1 - cos <= 5e-4 at 4k-32k); a failure stops row 11"
 st_r11_kernels() {
   run_tests '^kv8_kernels_test$'
@@ -628,16 +581,7 @@ st_r12_d5() {
 row 13 "spec 15d - Ornith 1.5 prefill: device routing, grouped expert GEMMs (spec 15 §11, plan 15d)"
 rownote 13 "Everything after r13.kernels waits on 15a, as row 10: the int4 checkpoint (SNAP_ORNITH) and oracle-out-ornith with router_logits.L*; those stages SKIP with 'missing data' until both are on the box (ornith_prefill_* needs the checkpoint only; its R2 part reports itself SKIPPED without the golden set)."
 rownote 13 "Calibrating kConsistTieRel / kConsistWeightAbs from ornith_prefill_test's printed distribution and re-deriving prefill_split_ornith's non-64 bars (Qwen3.8's, PROVISIONAL) are edits on a branch after r13.prefill / r13.split record the numbers."
-rownote 13 "P0's SLM-fused dequant arm needs tools/probe/probe_moe_prefill.{cl,cc}, not written; it and the rebuild arms (TM, prefetch, a multi-work-group sort) are r13.p0_arms."
 
-stage r13.r0 13 default cpu - g0.sha,g0.bitwise,g0.suite "R0: every pre-existing binary identical (the seven edited prefill sources included), the Qwen3.8 suite incl. prefill_gate_* / prefill_split_* / prefill_smoke bitwise (G0); Ornith's prefill binaries built (the grouped experts, its flash attention, the last chunk's argmax_stage1_M1 - Qwen3.8's since spec 15 §13)"
-st_r13_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  kbins pf_moe_E256_T8_D2048_I512 pf_moe_router_K2048_N272 pf_moe_gemm_K2048_N1024_SILU \
-    pf_moe_gemm_i8_K2048_N1024_SILU pf_moe_gemm_K512_N2048 pf_flash_attn_Q16KV2 argmax_stage1_M1
-  jgrab prefill 'prefill_(gate_(l0|int8)|smoke)' 'golden_gate_test OK|TOTAL:|8449|8705|launch'
-  finish
-}
 stage r13.host 13 default cpu - - "host: pf_moe_ref_test (the sort's invariants and tile bound, row independence, combine == decode's, the chunk against decode's chain), memory_plan_test, model_desc_test"
 st_r13_host() {
   run_tests '^(pf_moe_ref_test|memory_plan_test|model_desc_test)$'
@@ -675,16 +619,6 @@ st_r13_cli() {
   grab_all pp '^pp: ' 2
   finish
 }
-stage r13.p0 13 optin gpu ornith r13.kernels "P0 (plan 15d Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode --prefill-length 2048 on l0-int8 and l0 - the moe_* rows (router, route, sort, gather, requant / dequant, GEMM, combine) against the derived ~2.6 GB / layer / chunk of the separate pass"
-st_r13_p0() {
-  idle before
-  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1 --prefill-backend l0-int8)" "the l0-int8 prefill profile"
-  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_ORNITH" --prefill-length 2048 --tg 1)" "the l0 prefill profile"
-  idle after
-  grab_all moe 'moe|MoE' 60
-  grab_all idle '^IDLE '
-  finish
-}
 stage r13.speed 13 optin gpu ornith r13.kernels "Task 4: pp4096, pp32768 and pp130816 (max_len 131072) on l0-int8 and l0, interleaved pairs, median of 3 - BENCHMARKS 'Ornith 1.5 MoE (spec 15)' prefill rows"
 st_r13_speed() {
   idle before
@@ -701,26 +635,13 @@ st_r13_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r13.p0_arms 13 manual - ornith - "P0's arms that need a probe or a rebuild (plan 15d Task 1)"
-st_r13_p0_arms() {
-  say "# the SLM-fused dequant arm: tools/probe/probe_moe_prefill.{cl,cc} (not written) against the separate pass r13.p0 measured"
-  say "# the grouped GEMMs' TFLOP/s at the real row distribution (15a's router statistics); TM 16 / 32 / 64; prefetch + split barrier in pf_moe_gemm; a multi-work-group sort if moe_sort shows in r13.p0"
-  say "# each: rebuild with the define, pf_moe_test bitwise, then B70_PREFILL_PROFILE=1 build/src/cli/b70-decode $SNAP_ORNITH --bench --prefill-length 2048 --tg 1"
-  say "# record: docs/probes/probe-ornith-prefill-2026-10-04.md"
-}
 
 # ======================================================================================
 row 14 "spec 18b - K2-Horizon decode on one card (spec 18 §10, plan 18b)"
 rownote 14 "Load, K3, CLI and speed need the int4 checkpoint (SNAP_K2: hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ, 21.8 GB); K2 also needs oracle-out-k2, which the opt-in r14.oracle makes on the box CPU (--with r14.oracle, ~20 min). Without them those stages SKIP with 'missing data'."
 rownote 14 "Setting the near-tie tolerance from the gap distribution r14.oracle prints (k2_golden_test.cc proposes 1e-3) is an edit after it; r14.golden runs at the proposal, or at B70_K2_TIE_TOL when the driver's environment sets it."
-rownote 14 "K2's eager decode attention (B70_K2_ATTN=eager, spec 18 §10.1) and its stages (r14.golden_eager, r15.golden_eager, r21.golden_eager, the eager arms of r15.p0 / r15.speed) went in the zero-config cleanup (operator 2026-11-06): flash is K2's attention."
+rownote 14 "K2's eager decode attention (B70_K2_ATTN=eager, spec 18 §10.1) and its stages (r14.golden_eager, r15.golden_eager, r21.golden_eager, the eager arm of r15.speed) went in the zero-config cleanup (operator 2026-11-06): flash is K2's attention."
 
-stage r14.k0 14 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Ornith's gates not failed (a SKIP for missing data is noted, not counted)"
-st_r14_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r10.nockpt r10.gates r13.kernels r13.gates
-  finish
-}
 stage r14.host 14 default cpu - - "host: k2_horizon, k2_rope, k2_repack, k2_ref, k2_attn_eager_ref (the eager chain bitwise against torch), k2_plan, k2_variant_names, model_desc (the power-of-two expert-count refusal)"
 st_r14_host() {
   run_tests '^(k2_horizon_test|k2_rope_test|k2_repack_test|k2_ref_test|k2_attn_eager_ref_test|k2_plan_test|k2_variant_names_test|model_desc_test)$'
@@ -796,25 +717,12 @@ st_r14_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r14.sweeps 14 manual - k2 - "Task 4's sweeps: the {S, layout} cells of the five int4 shapes and the expert kernels' K splits"
-st_r14_sweeps() {
-  say "# {S, layout} of 2560x10240, 2560x9280, 4096x2560, 2560x12288, 6144x2560 with their GEMV_* defines (probe_gemv rows, as spec 14 step 4)"
-  say "# UP_KS / DN_KS / MOVA_KS: rebuild k2_moe.cl's variants per value, k2_kernels_test, then build/src/cli/b70-decode $SNAP_K2 --bench --depth 4096 --tg 256 per value"
-  say "# --profile is refused on K2 until Task 4 builds it; record: docs/BENCHMARKS.md 'K2-Horizon (spec 18)'"
-}
 
 # ======================================================================================
 row 15 "spec 18c - K2-Horizon prefill: grouped MoVA and MoE, flash attention at head_dim 128 (spec 18 §11, plan 18c)"
 rownote 15 "K1 (r15.k1) needs no checkpoint; K3, split and the CLI need SNAP_K2, the golden prefill tests oracle-out-k2 as well (--with r14.oracle makes it on the box CPU). Without them those stages SKIP with 'missing data'."
 rownote 15 "The PROPOSED bars (prefill KV against decode's fill: dense rows >= 0.999, median >= 0.9998, p01 >= 0.99; routing near-tie margin 2e-2, weights 1/32) are set from the distributions r15.prefill prints - an edit on a branch after the run."
-rownote 15 "P0's rebuild arms (flash EXP2 0 vs 1, RPW 8 / 16, the sort's single work-group, an SLM-fused dequant in the grouped GEMM) are r15.p0_arms; r15.p0 is the runnable profile."
 
-stage r15.k0 15 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl changed), the Qwen3.8 suite (G0); Ornith's and K2 decode's gates not failed (a SKIP for missing data is noted, not counted)"
-st_r15_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r10.gates r13.gates r14.k1 r14.k3 r14.golden
-  finish
-}
 stage r15.host 15 default cpu - - "host: k2_pf_ref_test (the routing scatter with exact ties, tile bound, row independence, combines == decode's chains, slab tail, eager reference), k2_pf_variant_names_test, k2_plan_test (2392 launches, 0.797 GB scratch, auto 42752 with prefill)"
 st_r15_host() {
   run_tests '^(k2_pf_ref_test|k2_pf_variant_names_test|k2_plan_test)$'
@@ -858,15 +766,6 @@ st_r15_cli() {
   grab_all auto '^K2 max_len auto' 2
   finish
 }
-stage r15.p0 15 optin gpu k2 r15.k1 "P0 (plan 18c Task 1), the runnable part: B70_PREFILL_PROFILE=1 b70-decode <k2> --bench --prefill-length 4096 - the moe_* / slab_* / attn_flash rows against the derived ~1.2 s (the per-chunk expert dequant the largest term)"
-st_r15_p0() {
-  idle before
-  chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_K2" --prefill-length 4096 --tg 1)" "the K2 prefill profile"
-  idle after
-  grab_all profile 'moe|mova|slab|attn|flash|dequant|sort|gather|combine' 80
-  grab_all idle '^IDLE '
-  finish
-}
 stage r15.speed 15 optin gpu k2 r15.prefill "Task 3: pp4096 / pp16384 / pp32768 then tg256 (max_len 40960), interleaved, median of 3 - BENCHMARKS 'K2-Horizon (spec 18)' prefill rows (derived pp4096 ~3,400 t/s)"
 st_r15_speed() {
   idle before
@@ -881,34 +780,15 @@ st_r15_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r15.p0_arms 15 manual - k2 - "P0's arms that need a rebuild (plan 18c Task 1)"
-st_r15_p0_arms() {
-  say "# k2_pf_flash_attn: EXP2 0 (natural exp, as decode and the reference - PROVISIONAL) vs 1; RPW 8 vs 16"
-  say "# the sort's single work-group (k2_pf_sort) if it shows in r15.p0; an SLM-fused dequant inside pf_moe_gemm against the per-chunk bf16 pass"
-  say "# each: rebuild with the define, k2_pf_kernels_test bitwise, then B70_PREFILL_PROFILE=1 build/src/cli/b70-decode $SNAP_K2 --bench --prefill-length 4096 --tg 1"
-  say "# record: docs/probes/probe-k2-prefill-2026-10-05.md"
-}
 
 # ======================================================================================
 row 16 "spec 15e - Ornith 1.5 served: template, tool calls, the MoE MTP head (spec 15 §12, plan 15e)"
 rownote 16 "Everything after r16.kernels needs the int4 checkpoint (SNAP_ORNITH, 15a) and should follow rows 10 and 13; mtp_head_ornith_test (M1) also needs 15a's oracle-out-ornith-mtp/. Without them those stages SKIP with 'missing data'."
-rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1; r16.r0 checks they are built)."
+rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1: the tests that bind them fail when one is not built)."
 rownote 16 "An Ornith MTP cost default (and a default K) from r16.cost's table is an edit on a branch after the run."
 rownote 16 "A4 against the Ornith reference (plan 15e Task 3 Step 1) needs oracle-out-ornith-a4/ - the Ornith tool-call set (Qwen3.8's 36 conversations rendered by Ornith's own template) and the reference's <name>.bf16.txt - made on the Mac from the int4 checkpoint (r16.a4_ref: tools/toolcall/a4_ref.sh ornith set / ref, hours) and copied by --push-data; r16.a4 (opt-in) then runs the engine and scores. No bar: recorded beside Qwen3.8's 25/36."
 rownote 16 "Determinism and replay on Ornith (plan 15e Task 3 Step 1) are row 10's / 13's gates (ornith_decode_test, ornith_prefill_* replay and chunking bitwise); C2 is r16.prefix, passkey r16.passkey (opt-in), the comparison rows r16.benchy (opt-in). The record (BENCHMARKS 'Ornith 1.5 MoE (spec 15)', spec 15 §10) is filled from those numbers on a branch."
 
-stage r16.r0 16 default card qwen - "R0: every pre-existing binary identical (no .cl changed), the Qwen3.8 suite (G0); 15e's binaries built (moe_M{2,3,4}, gdn_step_slots_M{1..4}_G30_GK16V32, the prefill head-KV fill, the int4 a||b gemv_M{1..4}_K2048_N128_S1_L1 and Qwen3.8's argmax_stage1_M{1..4}, spec 15 §13); Qwen3.8's MTP suite unchanged (mtp_head, mtp_verify, mtp_gpu, load_checkpoint: the draft list's dense branch and the launch asserts are new code on that path)"
-st_r16_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  kbins argmax_stage1_M1 argmax_stage1_M2 argmax_stage1_M3 argmax_stage1_M4 \
-    gemv_M1_K2048_N128_S1_L1 gemv_M2_K2048_N128_S1_L1 gemv_M3_K2048_N128_S1_L1 gemv_M4_K2048_N128_S1_L1 \
-    moe_M2_E256_T8_D2048_I512 moe_M3_E256_T8_D2048_I512 moe_M4_E256_T8_D2048_I512 \
-    gdn_step_slots_M1_G30_GK16V32 gdn_step_slots_M2_G30_GK16V32 gdn_step_slots_M3_G30_GK16V32 gdn_step_slots_M4_G30_GK16V32 \
-    pf_res_fold_K2048_SP1_G20_Z pf_norm_finish_K2048_G20_W20_X4096 pf_bf16_slab_K4096 pf_bf16_slab_K2048
-  run_tests '^(mtp_head_test|mtp_verify_test|mtp_gpu_test|load_checkpoint_test)$'
-  jgrab mtp-bytes '^load_checkpoint_test$' '849|MTP'
-  finish
-}
 stage r16.host 16 default cpu - - "host: template_ornith_test (six lists byte-identical to transformers 5.18.0), ornith_server_test, ornith_mtp_head_test, ornith_mtp_names_test (every bound name against the built ones, both a||b forms included), model_desc_test (vocab_used 248077, doc_w, the int4 a||b row), variant_names_test, memory_plan_test, ab_int4_test"
 st_r16_host() {
   run_tests '^(template_ornith_test|ornith_server_test|ornith_mtp_head_test|ornith_mtp_names_test|model_desc_test|variant_names_test|memory_plan_test|ab_int4_test)$'
@@ -1074,16 +954,9 @@ st_r17_host() {
   jgrab k2-tokenizer '^k2_tokenizer_test$' 'SKIP|vocab|corpus|digest|OK|FAIL'
   finish
 }
-stage r17.k0 17 default card qwen - "K0 for the server path on the box's snapshots (the patched minja under the Qwen3.8 / Ornith templates; ChatFormat / make_output_parser on the Qwen path): template_test, template_ornith_test, ornith_server_test, toolcall_test, protocol_test, golden_server_test, prefix_server_test, mtp_server_test, lookup_server_test - unchanged"
-st_r17_k0() {
-  need_pass g0.sha
-  run_tests '^(template_test|template_ornith_test|ornith_server_test|toolcall_test|protocol_test|golden_server_test|prefix_server_test|mtp_server_test|lookup_server_test)$'
-  finish
-}
 
 # ======================================================================================
 row 18 "compressed-tensors symmetric pack-quantized loader (branch ct-sym-loader; spec 20 §9 as built, docs/13)"
-rownote 18 "A real symmetric checkpoint on the card (r18.ct) needs RedHatAI/Qwen3.8-27B-INT4 downloaded (~20 GB); its golden prompts need its own CPU reference (tools/oracle/golden.sh with ORACLE_MODEL pointing at it). Both are manual."
 stage r18.host 18 default cpu - - "host: ct_loader_test (exact repack g64 / g128 x f16 / bf16, the note, the refusals, the real configs), quant_test, ornith_repack_test and k2_repack_test (compressed-tensors MoE layer and K2 checkpoint == the GPTQ bytes)"
 st_r18_host() {
   run_tests '^(ct_loader_test|quant_test|ornith_repack_test|k2_repack_test)$'
@@ -1095,32 +968,17 @@ st_r18_g64() {
   jgrab g64 'load_checkpoint_test' 'unconsumed|compressed-tensors|W check|OK|FAIL'
   finish
 }
-stage r18.ct 18 manual - - - "RedHatAI/Qwen3.8-27B-INT4 (sym int4 g128, bf16 scales): the load note, 0 unconsumed, the W check, decode, its golden prompts against its own CPU reference"
-st_r18_ct() {
-  say "uvx --from huggingface_hub hf download RedHatAI/Qwen3.8-27B-INT4"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-decode RedHatAI/Qwen3.8-27B-INT4 --bench --tg 64 2>&1 | tee r18.ct.log   # the ONE 'converting compressed-tensors pack-quantized (g128, 400 linears)' note; 0 unconsumed; 32 fp8 KV scales dropped; W check within 2 % of the g64 checkpoint's"
-  say "flock ~/b70-gpu.lock build/src/cli/b70-decode RedHatAI/Qwen3.8-27B-INT4 --spec mtp --spec-max 1 --bench --tg 64   # the bf16 MTP head (15 tensors) loads beside it"
-  say "ORACLE_MODEL=models--RedHatAI--Qwen3.8-27B-INT4 OUT_DIR=oracle-out-rh-int4 tools/oracle/golden.sh   # its own CPU reference (tools/oracle/README.md)"
-  say "flock ~/b70-gpu.lock build/tests/golden_gate_test oracle-out-rh-int4 tests/golden/prompts <its snapshot dir>"
-}
 
 # ======================================================================================
 row 19 "the real Ornith int4 checkpoint - its int4 a||b, vocab_used 248077, doc_w (branch ornith-real-checkpoint; spec 15 §13)"
 rownote 19 "Rows 10, 13 and 16 run on this checkpoint (SNAP_ORNITH = urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ): their gates are where its a||b is exercised end to end (decode, prefill, the MTP verify lists). oracle-out-ornith / -mtp are made on the Mac from the int4 checkpoint (plan 15a Task 0, tools/oracle/ornith_golden.sh) and pushed with --push-data."
-rownote 19 "Speed: the int4 a||b is a PROVISIONAL S1 L1 cell (8 sub-groups); r10.p0's profile shows its share - an S > 1 form needs gdn_step to sum slices (a P0 arm, not built)."
+rownote 19 "Speed: the int4 a||b is a PROVISIONAL S1 L1 cell (8 sub-groups); an S > 1 form needs gdn_step to sum slices (a P0 arm, not built)."
 stage r19.host 19 default cpu - - "host: ab_int4_test (the int4 a||b repack exact with its zero padding, the prefill copy, the compressed-tensors form, the bf16 row untouched), model_desc_test, variant_names_test, ornith_mtp_names_test (both a||b forms bound), memory_plan_test, ornith_mtp_head_test"
 st_r19_host() {
   run_tests '^(ab_int4_test|model_desc_test|variant_names_test|ornith_mtp_names_test|memory_plan_test|ornith_mtp_head_test)$'
   finish
 }
-stage r19.r0 19 default cpu - g0.sha,g0.bitwise,g0.suite "R0: no .cl changed and every pre-existing binary identical (G0); the new int4 a||b binaries gemv_M{1..4}_K2048_N128_S1_L1 built, and Qwen3.8's argmax_stage1_M{1..4} Ornith now binds"
-st_r19_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  kbins gemv_M1_K2048_N128_S1_L1 gemv_M2_K2048_N128_S1_L1 gemv_M3_K2048_N128_S1_L1 gemv_M4_K2048_N128_S1_L1 \
-    argmax_stage1_M1 argmax_stage1_M2 argmax_stage1_M3 argmax_stage1_M4
-  finish
-}
-stage r19.load 19 default card ornith r19.r0 "the load on the card: in_proj_a/b classified int4 (the a||b line: 64 real columns, 15.7 MB prefill copy), 0 unconsumed, read/token and the W check against doc_w 2.345 GB (predicted delta 0.000%), a prefill + decode through both a||b paths"
+stage r19.load 19 default card ornith g0.sha "the load on the card: in_proj_a/b classified int4 (the a||b line: 64 real columns, 15.7 MB prefill copy), 0 unconsumed, read/token and the W check against doc_w 2.345 GB (predicted delta 0.000%), a prefill + decode through both a||b paths"
 st_r19_load() {
   chk "$(bench_cmd "$SNAP_ORNITH" --prefill-length 512 --tg 16)" "b70-decode on Ornith: prefill (pf_ab_proj over the bf16 copy) and decode (gemv.cl int4 a||b)"
   grab_all loader 'a‖b|unconsumed|W check|read/token|per token' 12
@@ -1128,31 +986,11 @@ st_r19_load() {
 }
 
 # ======================================================================================
-# Spec 18e's int8-KV binaries (7 since the eager ones went, zero-config cleanup) (src/kernels/CMakeLists.txt's 18e block, tests/CMakeLists.txt
-# B70_K2_KV8_KERNELS; ATTN_V2_TGT 32) and k2_moe.cl's binaries from before 18e (18b's four, 18c's
-# MoVA route): 18e gave k2_moe.cl a defaulted define (MOVA_STAGE), so those must keep their bytes.
-K2_KV8_BINS="k2_attn_prep_M1_N10240_S2_Q32KV8_V_KV8 k2_attn_prep_M1_N9280_S2_Q32KV8_KV8 k2_attn_M1_T32_Q32KV8_KV8
-  k2_attn_prep_M2048_N10240_S1_Q32KV8_V_KV8 k2_attn_prep_M2048_N9472_S1_Q32KV8_KV8
-  k2_pf_flash_attn_Q32KV8_KV8 k2_pf_flash_attn_Q32KV8_O_KV8 k2_mova_M1_E64_T4_D2560_N1024_STAGE"
-K2_MOE_PRE18E_BINS="k2_route_M1_E64_T4_N9280_O9216_S2 k2_route_M1_E100_T8_N128_O0_S1 k2_moe_M1_E100_T8_D2560_I768
-  k2_mova_M1_E64_T4_D2560_N1024 k2_route_M1_E64_T4_N9472_O9216_S1"
 row 21 "spec 18e Task 1 - K2-Horizon's int8 KV cache, rotkv at head_dim 128 (--kv-cache int8; spec 18 §13, plan 18e)"
 rownote 21 "After rows 14 and 15: each GPU stage waits for its bf16 sibling's PASS in this state (r14.k1 / r15.k1, r14.k3, r14.golden, r15.prefill, r15.split, r15.golden). The twins need SNAP_K2, the golden ones oracle-out-k2 as well (--with r14.oracle makes it on the box CPU); without them those stages SKIP with 'missing data'."
-rownote 21 "K0's binary half is G0's g0.sha: a pre-existing binary that differs fails G0 and stops the line. k2_moe.cl's pre-18e binaries are compared only against a baseline that builds them: the default ce36d2d predates K2, so r21.k0 lists them as not compared - --baseline 0f13512 (main just before 18e) compares them."
+rownote 21 "K0's binary half is G0's g0.sha: a pre-existing binary that differs fails G0 and stops the line. k2_moe.cl's pre-18e binaries are compared only against a baseline that builds them: --baseline 0f13512 (main just before 18e)."
 rownote 21 "Review Focus 1 (tools/oracle/kv8_k2_repeat.sh: 12a's probe on K2's real weights, Mac or box CPU, ~4-8 h) is not a stage; the K2 int8 tolerances (PROPOSED in k2_kv8_kernels_test) are re-derived from it, so r21.k1 runs at the proposals. A4 with int8 KV needs 18d's K2 A4 tooling (plan 18e): not built."
 rownote 21 "Passkey (r21.passkey) and speed (r21.speed) are opt-in; speed is a record with no bar - int8 against bf16 KV at depth 4096 / 32768 (both fit at max_len 40960), int8 alone at 65536 (max_len 69632: bf16 KV holds 46592)."
-stage r21.k0 21 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (G0) - k2_moe.cl's pre-18e binaries named (MOVA_STAGE defaults to the old line); the K2 bf16 suite not failed (rows 14 / 15: k2_decode_test, k2_golden_test, k2_prefill_test; a SKIP for missing data is noted, not counted); the 11 int8 binaries built"
-st_r21_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r14.k1 r14.k3 r14.golden r15.k1 r15.prefill r15.split r15.golden
-  # shellcheck disable=SC2086 # the names, one word each, onto one line
-  set -- $K2_MOE_PRE18E_BINS
-  chk "bad=0; for b in $*; do f=kernels/\$b.bin; a=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/baseline.sha 2>/dev/null); u=\$(awk -v f=\$f '\$2 == f { print \$1 }' $STATE/g0-sha/under-test.sha 2>/dev/null); if [ -z \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: NOT BUILT (not in g0.sha's list)\"; bad=1; elif [ -z \"\$a\" ]; then echo \"K0 k2_moe.cl \$b: not in the baseline build (the baseline predates K2) - not compared; --baseline 0f13512 compares it\"; elif [ \"\$a\" = \"\$u\" ]; then echo \"K0 k2_moe.cl \$b: identical to the baseline build\"; else echo \"K0 k2_moe.cl \$b: DIFFERS from the baseline build\"; bad=1; fi; done; [ \$bad = 0 ]" \
-    "k2_moe.cl's pre-18e binaries against the baseline"
-  kbins $K2_KV8_BINS
-  grab_all k2-moe '^K0 k2_moe[.]cl' 6
-  finish
-}
 stage r21.host 21 default cpu - - "host: kv8_test (hd128: torch's hadamard(128, 0) signs, the rotations against fp64), k2_kv8_ref_test (the flash epilogue's FWHT decomposition == unrotate bitwise, the writer, MoVA's mix quantised after the combine), k2_plan_test (the int8 auto lengths), k2_kv8_variant_names_test (every int8 binary the walks bind is built, nothing dead)"
 st_r21_host() {
   run_tests '^(kv8_test|k2_kv8_ref_test|k2_plan_test|k2_kv8_variant_names_test)$'
@@ -1239,12 +1077,6 @@ stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by 
 st_r22_host() {
   run_tests '^(pipeline_plan_test|pp_protocol_test|pipeline_args_test)$'
   jgrab splits '^pipeline_plan_test$' 'split|auto|k2-horizon'
-  finish
-}
-stage r22.r0 22 default cpu - g0.sha,g0.bitwise,g0.suite "--parallel 1 is today's engine: every pre-existing binary identical, the suite bitwise (G0); the one new binary (pp_handoff) built"
-st_r22_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  kbins pp_handoff
   finish
 }
 stage r22.devices 22 default gpu - - "P4's preflight: both cards in one process and peer access 0 -> 1 (b70-decode --parallel pp prints the 'devices:' line before it fails on a missing model); the refusals before the device (cli_reject_pipeline_*), the one-GPU one under ZE_AFFINITY_MASK=0"
@@ -1336,11 +1168,6 @@ st_r23_host() {
   jgrab protocol '^pp_prefill_protocol_test$' 'chunks:|threw|hook|OK'
   finish
 }
-stage r23.r0 23 default cpu - g0.sha,g0.bitwise,g0.suite "--parallel 1 is today's engine: 16c adds no kernel binary (pp_send / pp_recv are 16b's), every pre-existing binary identical and the suite bitwise (G0) - Engine::prefill's chunk rule now comes from runtime/prefill_chunks.h and step_chunk walks through walk_layers, both meant to be the same launches in the same order"
-st_r23_r0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r23.p1 23 default gpu qwen r22.p1 "P1 / P2 (Review Focus 1-4): pp_prefill_test, _l0 and _i8head - 4103 ids (3 chunks), 32768 (16), 2 ids, a prefill_split continuation (2500 | 1603, chunk 1000), spec 7's hooks at 2048 / 4096 (from the shadows, the next chunk running) and 5000, a hook throwing at 2048, a one-card snapshot at 3000 continued on two cards - logits row, every layer's GDN state / conv ring / KV, both Control blocks and 16 decoded ids bitwise one card on device 0; copy and peer at the auto split, and the cuts at 5 and 62; each card's launches = step_stage_launches' arithmetic"
 st_r23_p1() {
   run_tests '^(pp_prefill_test|pp_prefill_l0_test|pp_prefill_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
@@ -1407,11 +1234,11 @@ s2_stage() {   # s2_stage LEN MAXLEN_ONE MAXLEN_PP
   grab_all idle '^IDLE '
   finish
 }
-stage r23.s2_4k 23 default gpu qwen r23.p1 "S2 at pp4096 (two chunks: little overlap; bar >= 1.2x): one card vs --parallel pp copy and peer, --tg 16, max_len 16384, interleaved, median of 3; each card's busy time"
+stage r23.s2_4k 23 optin gpu qwen r23.p1 "S2 at pp4096 (two chunks: little overlap; bar >= 1.2x): one card vs --parallel pp copy and peer, --tg 16, max_len 16384, interleaved, median of 3; each card's busy time"
 st_r23_s2_4k() { s2_stage 4096 16384 16384; }
-stage r23.s2_32k 23 default gpu qwen r23.p1 "S2 at pp32768 (16 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 40960, interleaved, median of 3; each card's busy time"
+stage r23.s2_32k 23 optin gpu qwen r23.p1 "S2 at pp32768 (16 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 40960, interleaved, median of 3; each card's busy time"
 st_r23_s2_32k() { s2_stage 32768 40960 40960; }
-stage r23.s2_64k 23 default gpu qwen r23.p1 "S2 at pp65536 (32 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 69632, interleaved, median of 3; each card's busy time"
+stage r23.s2_64k 23 optin gpu qwen r23.p1 "S2 at pp65536 (32 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 69632, interleaved, median of 3; each card's busy time"
 st_r23_s2_64k() { s2_stage 65536 69632 69632; }
 stage r23.s2_128k 23 optin gpu qwen r23.p1 "S2 at pp131072 (64 chunks): one card at max_len 131328 vs --parallel pp copy and peer at max_len 262144 (the length only two cards hold, spec 16 P3 / S3), interleaved, median of 3"
 st_r23_s2_128k() { s2_stage 131072 131328 262144; }
@@ -1437,11 +1264,6 @@ rownote 24 "Everything on the REAL checkpoint (r24.oracle_real, r24.partial, r24
 rownote 24 "Set B70_KOL_TIE_TOL from the gap distribution r24.oracle_synth / r24.oracle_real print (kolibri_golden_test.cc proposes 1e-2); the partial-forward bars (median cosine 0.9998, min 0.99) are proposals too - r24.partial prints them per layer."
 rownote 24 "tests/golden/prompts/kolibri_bench.ids (and cli/kolibri_decode.h's kKolibriBenchPrompt) are the first 42 ids of de_prose through Kolibri's tokenizer since spec 20e (20c's placeholders re-baked on the Mac from the BF16 release's tokenizer.json): r24.oracle_synth writes the same 42 (kolibri_bench.ids in oracle-out-kolibri-synth) and says NOTE if they differ."
 rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); spec 18 §10.1's rule decides the default. Two cards (r24.pp) need row 22's hand-offs proven first."
-stage r24.k0 24 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl edited; kernel_cmdlines +23 / -0 / ~0 with K2 on), the Qwen3.8 suite (G0); the two descriptor-free overloads in 16b's files leave pipeline_plan_test / pp_decode_test unchanged"
-st_r24_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r24.host 24 default cpu - - "host: kolibri1_test, kolibri1_repack_test, kolibri1_rope_test (bitwise torch's cos / sin), kolibri_ref_test (the kernels' twin bitwise against kolibri_ref.py's fixture), kolibri_variant_names_test, kolibri_plan_test (756 / 856 launches, the split 25 by pp_balance), pipeline_plan_test (the overload == the ModelDesc form)"
 st_r24_host() {
   run_tests '^(kolibri1_test|kolibri1_repack_test|kolibri1_rope_test|kolibri_ref_test|kolibri_variant_names_test|kolibri_plan_test|pipeline_plan_test)$'
@@ -1561,25 +1383,12 @@ st_r24_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r24.sweeps 24 manual - kolibri - "Task 8's sweeps: the int4 attention arm's {S, layout} cells (q||k||v 2560x7168, o_proj 6144x2560: S 1 / 2 / 4, L 0 / 1) and the MoE kernels' UP_KS / DN_KS"
-st_r24_sweeps() {
-  say "# {S, layout} of 2560x7168 and 6144x2560 with their GEMV_* defines (probe_gemv rows, spec 14 step 4's method); model::kolibri1()'s qkv_s / oproj_s and kernels::kolibri's names move together"
-  say "# UP_KS / DN_KS: rebuild kol_moe.cl's variant per value, kolibri_kernels_test, then ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_KOLIBRI --bench --depth 4096 --tg 256 per value"
-  say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
-}
 
 # ======================================================================================
 row 25 "spec 18d engine side - K2-Horizon served: K2Engine behind b70-serve, KV-only prefix snapshots, K4 (A4, passkey), the comparison rows (spec 18 §14, plan 18d)"
 rownote 25 "After rows 14 / 15 (K2's decode and prefill on the card) and 21 (its int8 KV); 17 is the host half. 18d adds no kernel: G0's g0.sha is the 'nothing moved' check. Everything after r25.reject needs SNAP_K2; the A4 stages need oracle-out-k2-a4 (r25.a4_ref makes it on the box CPU: hours)."
 rownote 25 "A4 has no bar (spec 18 K4): the engine against 18a's reference (k2_ref.py, bf16 mode, on the int4 checkpoint dequantised) on K2's own set (xml calls, reasoning_effort low, 512 ids) is recorded; 'reasoning' cells (the budget ran out inside the reasoning) are read, not failed."
 rownote 25 "Review Focus 4 (the comparison rows) is r25.benchy, opt-in: b70-serve on ONE card at decision 2's 32k (bf16 KV) and at the int8-KV auto length, against the recorded vLLM baseline (TWO B70s, PP = 2, fp8 KV, 390,016 tokens, 44.43 t/s decode, spec 18 §7) - every row says which configuration. The record (BENCHMARKS 'K2-Horizon (spec 18)', spec 18 §10's amendment, README, docs/03, docs/13) is plan 18d Task 3, an edit on a branch after the run."
-stage r25.k0 25 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 18d adds no kernel (every binary identical, G0) and the Qwen-family server path is unchanged - G0's suite (prefix_gpu_*, golden_server_test, snapshot_test), r17.k0, and here prefix_cache_test / prefix_server_test (the store's zero-byte snapshots are new code there); K2's decode and prefill gates not failed (rows 14 / 15 / 21; a SKIP for missing data is noted, not counted)"
-st_r25_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r17.k0 r14.k3 r15.prefill r15.split r21.k3
-  run_tests '^(prefix_cache_test|prefix_server_test)$'
-  finish
-}
 stage r25.host 25 default cpu - - "host: k2_serve_test (the snapshot runs on K2's shapes, save / load on host buffers, C2's sequences through PrefixSession bitwise a cold run's in both KV forms, the server's greedy chat = the decode run, a cached second turn, seeded sampling), k2_server_test, toolcall_k2_test"
 st_r25_host() {
   run_tests '^(k2_serve_test|k2_server_test|toolcall_k2_test)$'
@@ -1668,12 +1477,6 @@ row 26 "spec 20d - Kolibri-1 prefill: grouped MoE over 384 experts, windowed fla
 rownote 26 "Written blind on the Mac, after row 24 (20c's decode on the card) and rows 22 / 23 (16b's / 16c's hand-offs): none of the 17 new binaries of the 20d block was ever compiled by ocloc - the DPAS flash at GQA 12 with the 513-key window over the 4096-slot ring (kol_pf_flash_attn_Q48KV4_{W513_R4096,F}[_EAGER]), the 384-expert sort on 256 lanes (kol_pf_moe_E384_T6_D2560_I512_L256), the grouped GEMMs at Kolibri's shapes (pf_moe_gemm_K2560_N1024_SILU, _K512_N2560), kol_prep.cl at M 2048. The 2252-launch walk and the sequential two-card chunk hand-off never ran."
 rownote 26 "The synthetic checkpoints (oracle-out-kolibri-synth, row 24's r24.oracle_synth) carry KL2 / K3 before spec 20b; everything on the real checkpoint (r26.real, r26.speed) SKIPs 'missing data' until 20b. The near-tie tolerance and the prefill-vs-decode KV bars (row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) are PROPOSED: the tests print the distributions."
 rownote 26 "If KL2 on prefill fails determined rows under flash, compare r26.golden_eager (B70_KOLIBRI_ATTN=eager: the eager prefill flash and decode's eager attention) before reading the kernels (spec 18 §10.1's rule)."
-stage r26.k0 26 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (no existing .cl edited; kernel_cmdlines +17 / -0 / ~0 with K2 on), the Qwen3.8 suite (G0); 20c's decode gates not failed (756 / 856 launches unchanged)"
-st_r26_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r24.k1 r24.k3 r24.golden
-  finish
-}
 stage r26.host 26 default cpu - - "host: kolibri_pf_ref_test (the 384-expert sort and its adversaries, == pf_moe_ref::sort; the combine == decode's chain and torch's row; the windowed flash walk == the direct softmax through the ring; eager_window == torch's eager rows bitwise; the bf16 slab tail), kolibri_pf_variant_names_test, kolibri_plan_test (2252 launches one card and two, 4 + 2 weight batches, 0.905 GB scratch, 262144 on two cards with prefill planned)"
 st_r26_host() {
   run_tests '^(kolibri_pf_ref_test|kolibri_pf_variant_names_test|kolibri_plan_test)$'
@@ -1763,13 +1566,6 @@ st_r26_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r26.p0 26 manual - kolibri - "plan 20d Task 5's profile and levers (need a rebuild or the real checkpoint)"
-st_r26_p0() {
-  say "# B70_PREFILL_PROFILE=1 ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode \$SNAP_KOLIBRI --bench --prefill-length 4096 --tg 1: the moe_weights (dequant) share of a chunk, per card"
-  say "# per-device busy time per chunk: the sequential hand-off leaves one card idle - spec 16c's overlapped chunk pipeline is the recorded lever (up to ~2x)"
-  say "# an SLM-fused int4 grouped GEMM (spec 15d Task 1's arm) removing the per-chunk bf16 dequant pass"
-  say "# record: docs/BENCHMARKS.md 'Kolibri-1 (spec 20)'"
-}
 
 # ======================================================================================
 row 27 "spec 16d - pipeline parallel integration: b70-serve --parallel pp, MTP across the split, the prefix cache on two cards, P3 / S3 at 262144 (spec 16 §10, plan 16d)"
@@ -1782,12 +1578,6 @@ st_r27_host() {
   run_tests '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'
   jgrab plan '^pp_serve_plan_test$' 'extras off|verify slots|kv snapshot|split|OK'
   jgrab serve '^pp_serve_test$' 'one device|snapshots move|M2|restore|server|OK'
-  finish
-}
-stage r27.k0 27 default cpu - g0.sha,g0.bitwise,g0.suite "K0: --parallel 1 is today's engine and server - every binary identical (16d adds none), G0's suite bitwise (mtp_verify_test, prefix_gpu_*, golden_server_test, snapshot_test); rows 22 / 23's P1 not failed"
-st_r27_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r22.p1 r23.p1
   finish
 }
 stage r27.reject 27 default cpu - - "b70-serve's --parallel refusals before the device: a bad --parallel value (4096), --pipeline-split alone, a bad --pipeline-handoff (K2-Horizon's --parallel pp is r25.reject's)"
@@ -1909,12 +1699,6 @@ rownote 28 "Written blind on the Mac after rows 24 / 26 (20c's decode, 20d's pre
 rownote 28 "The synthetic checkpoints (oracle-out-kolibri-synth, r24.oracle_synth) carry the engine side before spec 20b: make_synth.py copies the BF16 release's tokenizer.json / tokenizer_config.json (its chat_template string - the release ships no chat_template.jinja; chat::Template reads it) / generation_config.json into each ckpt, which b70-serve needs. kolibri_tokenizer_test reads the release's tokenizer.json from the HF cache (B70_KOLIBRI_TOKENIZER_JSON) - SKIP 77 without it."
 rownote 28 "After spec 20b (SNAP_KOLIBRI): r28.real, r28.passkey (KL4: 3 / 3 at 262144 with the int8 head), r28.benchy. KL4's A4 reference is the bf16 SOURCE (156 GB) run wherever 20b runs (decision 1: tools/toolcall/a4_ref.sh kolibri ref, MODEL_DIR / DEVICE there) and pushed as oracle-out-kolibri-a4; r28.a4 then scores the engine on two cards against it - the hard bar is 0 parse failures of the reference (score.py --format hermes); the first-call agreement is recorded, no bar."
 rownote 28 "A request-end restore (2049, 300) is bitwise the session that never left, not ONE cold prefill of the whole prompt (20d's split rule: a split off a multiple of 64 is within the split bars, not bitwise); block-end restores (4096) are bitwise the cold run."
-stage r28.k0 28 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 20e adds no kernel (every binary identical, G0) and the server path is unchanged - G0's suite (golden_server_test, prefix_gpu_*) and here the host tests template_test / _ornith / _k2, toolcall_test, toolcall_k2_test (parse_json_call moved out of toolcall_k2.cc), k2_server_test, ornith_server_test, protocol_test, prefix_server_test, mtp_server_test, lookup_server_test; Qwen's sampling defaults unchanged"
-st_r28_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  run_tests '^(template_test|template_ornith_test|template_k2_test|toolcall_test|toolcall_k2_test|k2_server_test|ornith_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test)$' '' 'kv8'
-  finish
-}
 stage r28.host 28 default cpu - - "host: template_kolibri_test (16 renders byte-identical to apply_chat_template), kolibri_tokenizer_test (127998 ids, the tags, 24 texts, corpus.txt, three renders' ids), toolcall_kolibri_test (the HF renders parse back, Review Focus 1 / 2 / 5, a 2000-output fuzz split-invariant), kolibri_server_test (kwargs, list content, both EOS ids, streaming, the 1.0 / 0.97 / 128 defaults), kolibri_snapshot_test (the layouts on the real shapes, restores at 2048 / 4096 / 2049 / 5000 / 300 == cold through PrefixSession, one card <-> two, the server over HTTP), pipeline_args_test; the toolcall Python tests"
 st_r28_host() {
   run_tests '^(template_kolibri_test|kolibri_tokenizer_test|toolcall_kolibri_test|kolibri_server_test|kolibri_snapshot_test|pipeline_args_test)$'
@@ -2002,22 +1786,6 @@ st_r28_benchy() {
   finish
 }
 
-# ======================================================================================
-row 29 "spec 19a Task 4 - DFlash's verify cost at M = 5..8 and one block's draft cost (plan 19a Task 4; box-day plan Session 6b)"
-rownote 29 "Written blind on the Mac: B70_VERIFY_M8 (default ON) adds the M = 5..8 verify variants and the drafter's GEMVs; no engine binds them (G0's g0.sha lists them as added). probe_mtp_steps' M = 5..8 lists run over a probe-owned 8-slot MtpBuffers (+1.06 GB); every existing probe_mtp_steps command line (r2.cost, r6.cost, r8.cost, r16.cost) is the 4-arm mode, unchanged. verify_m8_names_test (host) runs in x.rest."
-rownote 29 "Plan 19a Task 5 (the projection and the go / no-go in spec 19) is a Mac edit from r29.cost's rows: verify(M) / plain from the 'pair M=' lines (interleaved pairs), the draft cost from probe_draft_cost's 'block' lines at the arm's precision. The M = 5..8 rows carry no bitwise check (spec 19 D3 belongs to 19c): they are costs, not outputs."
-stage r29.cost 29 optin gpu qwen - "verify(M) for M = 1..8 on the int8 head at depths 4k and 32k (probe_mtp_steps max_m 8: interleaved pairs, median of 3) and one DFlash2 block's GEMVs at M = 8 in int8 / bf16 / int4 g64 plus the int8 head's 7 rows (probe_draft_cost, random weights) - idle box, device 0 (timed)"
-st_r29_cost() {
-  idle before
-  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8 | tee $STATE/$STAGE.4k.txt" "verify M = 1..8 at depth 4k, int8 head"
-  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 32768 32 3 int8 off 65536 8" "verify M = 1..8 at depth 32k (max_len 65536), int8 head"
-  chk "pm=\$(awk '\$2 == \"verify\" && \$3 == \"M=1\" {print \$5; exit}' $STATE/$STAGE.4k.txt); build/tools/probe/probe_draft_cost --calls 20 --rounds 3 --plain-ms \${pm:-0}" \
-    "one DFlash2 block's GEMVs (int8 / bf16 / int4 g64, the int8 head's 7 rows), shares of the 4k plain step"
-  idle after
-  grab_all cost-rows '^lm_head:|^max_len:|^verify M = |^probe_mtp_steps:|^interleaved|^probe_draft_cost:|^allocated|^one DFlash|^\| ' 160
-  grab_all idle '^IDLE '
-  finish
-}
 
 # ======================================================================================
 row 30 "spec 21a - Qwen3.8-Flash-Next (qwen4_exp): the facts, the CPU reference (F1), golden sets, routing traces (plan 21a)"
@@ -2072,12 +1840,6 @@ rownote 31 "No kernel and no existing file's behaviour moved (kernel_cmdlines +0
 rownote 31 "Downloads: r31.synth needs only the ORIGINAL's small files (hf download Qwen/Qwen3.8-Flash-Next config.json tokenizer.json tokenizer_config.json generation_config.json chat_template.jinja - a few MB, not its 360 GB); r31.ple_convert and r31.load_real need Intel's checkpoint (hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound, 181.17 GB incl. its 102.4 GB of PLE shards - row 30's download)."
 rownote 31 "Disk: r31.synth writes two ~13.5 / ~13.7 GB synthetic checkpoints (+ tiny PLE files) under \$DATA/oracle-out-q4exp-synth (via the tree's oracle-out-q4exp-synth.partial: same filesystem); r31.ple_convert writes ~51.8 GB (bf16 scales; Q4_PLE_SCALE=f32: ~52.5 GB) beside Intel's snapshot - df -h ~ first."
 rownote 31 "r31.load_real pins the 51.8 GB table: load_q4_ple refuses when it exceeds MemAvailable - 16 GiB (the measured pinned cap's rule), naming both - stop other RAM users first (free -g >= 70 GB). Its report line (bytes, seconds to pin, MemAvailable before / after, page tags, rows compared) is spec 22 P0.5's starting number: hand it back."
-rownote 31 "r31.ple_kl is 21q Task 3's (tools/quantize/qwen4exp/evaluate.py --ple-only, decision 7's evidence) - SKIP until that file exists."
-stage r31.k0 31 default cpu - g0.sha,g0.bitwise,g0.suite "K0: 21b adds no kernel (every binary identical, G0) and leaves loader::load / load_k2 / load_kolibri1 and their files untouched"
-st_r31_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r31.host 31 default cpu - - "host: qwen4exp_test (the table against config.json key by key), qwen4exp_repack_test (both forms at real widths: every expert block word for word incl. the g128 expansion, gate||up, the router's row 512, names both ways), qwen4exp_ple_test (the hash = transformers' on 64 sequences, the int8 file per head), qwen4exp_plan_test (N per card, the split by bytes, the full model refused naming spec 22)"
 st_r31_host() {
   run_tests '^(qwen4exp_test|qwen4exp_repack_test|qwen4exp_ple_test|qwen4exp_plan_test)$'
@@ -2121,18 +1883,6 @@ st_r31_load_real() {
   jgrab load-real '^qwen4exp_load_intel_layers_test$' 'model |skipped|note|device 0|host PLE|read/token|load  |OK'
   finish
 }
-stage r31.ple_kl 31 optin cpu q4exp_intel,q4exp_bf16,oracle_image r31.ple_convert "21q Task 3 (decision 7's evidence): the reference through the int8 PLE file (f32 and bf16 scales) against the bf16 table - KL and top-1 per held-out set (tools/quantize/qwen4exp/evaluate.py --ple-only; SKIP until 21q writes it)"
-st_r31_ple_kl() {
-  if [ ! -f tools/quantize/qwen4exp/evaluate.py ]; then
-    skip "tools/quantize/qwen4exp/evaluate.py (21q Task 3) is not in this tree"
-    finish
-    return
-  fi
-  chk "ORACLE_MODEL=models--Intel--Qwen3.8-Flash-Next-W4A16-AutoRound tools/oracle/run_in_container.sh 'tools/oracle/qwen4exp_env.sh /ws/oracle-out-q4exp-site > /dev/null && export PYTHONPATH=/ws/oracle-out-q4exp-site && python3 tools/quantize/qwen4exp/evaluate.py --ple-only \"\$SNAP\"'" \
-    "the int8-vs-bf16 PLE KL"
-  grab_all ple-kl 'KL|top-1|scale' 24
-  finish
-}
 
 # ======================================================================================
 row 32 "spec 21c - Qwen3.8-Flash-Next (qwen4_exp) decode: hyper-connections, QSA, the PLE gather from host USM, the 512-expert MoE, one card then two (plan 21c)"
@@ -2140,12 +1890,6 @@ rownote 32 "Written on the Mac: every 21c binary's first ocloc compile is here (
 rownote 32 "Data: r32.oracle_synth needs the synthetic checkpoints (r31.synth) and writes their golden sets (~0.5-1 h each on the box CPU, ESTIMATED); r32.golden / r32.k3 need them; r32.partial needs 21a's real sets on Intel's checkpoint (row 30: qwen4exp_oracle.sh intel and intel-layers 18) and the PLE int8 file (r31.ple_convert); r32.pp and the two-card CLI need two GPUs (after r22.p1)."
 rownote 32 "Tolerances PROPOSED until row 30 prints the gap distributions: B70_Q4_TIE_TOL 1e-3 (the router's 10th / 11th p) and B70_Q4_SEL_TOL 1e-3 (the 512th / 513th block score); a gap of exactly 0 is undetermined whatever the tolerance (torch's topk does not prefer the lower index: spec 21 §12 finding 2). The partial forward's bars (tap median cosine >= 0.9998, min >= 0.99) are PROPOSED too."
 rownote 32 "r32.ple_rate's numbers (us per token, the implied bus rate, one card / the other / both) are spec 22 P0's first host-USM measurement: hand them back with the row (spec 22 §1 records where)."
-stage r32.k0 32 default cpu - g0.sha,g0.bitwise,g0.suite "K0 (F0): every pre-existing binary identical - prep.cl's GDN_GATE_SIGMOID leaves prep_gated_head_M1 (and every prep_* binary) byte-identical; kernel_cmdlines +33 / -0 / ~0 with K2 and Kolibri on; the 21b loader untouched"
-st_r32_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  x "grep -E 'prep_gated_head_M1(\.bin)?$|prep_res' $STATE/g0-sha/changed.txt 2>/dev/null && echo 'a prep.cl binary MOVED' || echo 'no prep.cl binary moved'"
-  finish
-}
 stage r32.host 32 default cpu - - "host: qwen4exp_ref_test (the kernels' twin against qwen4exp_ref.py / transformers 5.19.0's fixture: HC, PLE ids and block, indexer, scores, selection, route, combine, the sigmoid gated norm; Review Focus 1-3), qwen4exp_variant_names_test (the bound names = the CMake block), qwen4exp_plan_test (779 / 767 / 755 launches, 75 at --layers 4, +1 two cards, +3 peer; the scratch; --layers 18 / 38 fit at 32k)"
 st_r32_host() {
   run_tests '^(qwen4exp_ref_test|qwen4exp_variant_names_test|qwen4exp_plan_test)$'
@@ -2234,7 +1978,7 @@ st_r32_bench_attn() {
   grab_all bench 'depth|us|median' 12
   finish
 }
-stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two (copy, peer), --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21 §3); then the {S, layout} and UP_KS / DN_KS sweeps (r32.sweeps)"
+stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two (copy, peer), --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21 §3)"
 st_r32_speed() {
   idle before
   local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
@@ -2252,26 +1996,13 @@ st_r32_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r32.sweeps 32 manual - q4exp_intel - "Task 7's sweeps: the int4 rows' {S, layout} (q||gate||k||v 2560x13312, out_proj / o_proj 6144x2560: S 1 / 2 / 4, L 0 / 1; qkv||z stays S 1 for gdn_step) on our synthetic, and q4_moe's UP_KS / DN_KS"
-st_r32_sweeps() {
-  say "# {S, layout} of 2560x13312 and 6144x2560 (probe_gemv rows, spec 14 step 4's method); model::qwen4exp()'s qkvg_s / gdn_out_s / o_s and kernels::qwen4exp's names move together"
-  say "# UP_KS / DN_KS: rebuild q4_moe.cl's variants per value, qwen4exp_kernels_test, then build/src/cli/b70-decode <synthetic> --layers 4 --bench --depth 4096 --tg 256 per value"
-  say "# record: docs/BENCHMARKS.md 'Qwen3.8-Flash-Next (spec 21)'"
-}
 
 # ======================================================================================
 row 33 "spec 21d - Qwen3.8-Flash-Next (qwen4_exp) prefill: dense flash to 2050, the indexer and the sparse flash past it, the 512-expert grouped MoE, the PLE over a chunk, one hand-off per chunk (plan 21d)"
 rownote 33 "Written blind on the Mac, after row 32 (21c's decode on the card): none of the 30 new binaries of the 21d block was ever compiled by ocloc - the DPAS sparse flash over row lists (q4_pf_sparse_attn_Q24KV2[_EAGER]), spec 6's flash at 24 / 2 heads (pf_flash_attn_Q24KV2), the 512-expert ushort sort / dequant / combine (q4_pf_moe_E512_T10_D2560_I640_L256), the grouped GEMMs at this family's shapes (pf_moe_gemm_K2560_N1280_SILU, _K640_N2560), 21c's HC / indexer / PLE gather at M 2048 (_PF), the PLE block over a chunk (q4_pf_ple_C2048). The walk (358 / 361 / 360 launches a chunk at --layers 4) and the sequential two-card chunk hand-off never ran."
-rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged (r33.k0); if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21d F0)."
+rownote 33 "THREE existing sources changed, each by a define every existing binary leaves unset: prefill/pf_gated_head.cl (GDN_GATE_SIGMOID: pf_gated_head_SIG), qwen4exp/q4_qsa.cl (QSA_PF: the prep without its in-launch ring write + q4_qsa_ring; the indexer pitch 768), qwen4exp/q4_ple.cl (PLE_PF: the gather's tokens from the chunk's ids, no ring write). Their existing binaries' preprocessed sources were checked on the Mac (pf_gated_head x 2, q4_qsa_M1: byte for byte; q4_ple_gather_M1_* token for token) - G0's g0.sha must show every pf_gated_head*, q4_qsa_M1* and q4_ple_* binary unchanged; if one moved, the variant moves to a copy in src/kernels/qwen4exp/ and the source is restored (plan 21d F0)."
 rownote 33 "Bars PROPOSED (spec 18c's family; the tests print the distributions): prefill vs decode's fill - every row of the first QSA layer >= 0.999, all rows' median >= 0.9998, p01 >= 0.99; the sparse flash against fp64 >= 0.99999 (spec 6 K1), eager >= 0.9999 / 0.999; routing / selection near-ties 1e-3 (B70_Q4_TIE_TOL / B70_Q4_SEL_TOL, row 30 decides), a 0 gap undetermined. Chunks of 16 are printed, not gated bitwise: the GDN's 64-row WY sub-chunks move with the chunk start (chunks of 64 ARE gated bitwise)."
 rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21a's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
-stage r33.k0 33 default cpu - g0.sha,g0.bitwise,g0.suite "K0 (F0): every pre-existing binary identical - pf_gated_head.cl's GDN_GATE_SIGMOID, q4_qsa.cl's QSA_PF and q4_ple.cl's PLE_PF leave pf_gated_head / _GK16V32, q4_qsa_M1_T512_W1024 and every q4_ple_* M1 binary byte-identical; kernel_cmdlines +30 / -0 / ~0 with K2 and Kolibri on; 21c's decode gates not failed (779 / 75 launches unchanged)"
-st_r33_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r32.k1 r32.k3
-  x "grep -E 'pf_gated_head(_GK16V32)?(\.bin)?$|q4_qsa_M1|q4_ple_' $STATE/g0-sha/changed.txt 2>/dev/null && echo 'a source-changed binary MOVED' || echo 'no pf_gated_head / q4_qsa / q4_ple binary moved'"
-  finish
-}
 stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21c's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
 st_r33_host() {
   run_tests '^(qwen4exp_pf_ref_test|qwen4exp_pf_variant_names_test|qwen4exp_plan_test)$'
@@ -2361,13 +2092,6 @@ st_r33_speed() {
   grab_all idle '^IDLE '
   finish
 }
-stage r33.p0 33 manual - q4exp_intel - "plan 21d Task 5's profile and levers (one chunk's anatomy, the recorded levers)"
-st_r33_p0() {
-  say "# B70_PREFILL_PROFILE=1 build/src/cli/b70-decode \$SNAP_Q4EXP_INTEL --layers 18 --bench --prefill-length 4096 --tg 1: one chunk's phases - the expert dequant pass (moe_weights), the HC kernels at M = C (the HC up ~6.7 GFLOP a chunk an HC on plain FMA, ESTIMATED ~0.5 ms), the scores (fp32 FMA; the DPAS GEMM form is the lever), the sparse flash"
-  say "# per-device busy time per chunk on two cards (--layers 37 --parallel pp): the sequential hand-off leaves one card idle - spec 16c's overlapped chunk pipeline is the recorded lever"
-  say "# levers, recorded not built: HC up through DPAS slabs, the scores as one GEMM, an SLM-fused int4 grouped GEMM (spec 15d Task 1's arm) removing the dequant pass, spec 22's prefill streaming once the full model runs"
-  say "# record: docs/BENCHMARKS.md 'Qwen3.8-Flash-Next (spec 21)' prefill rows"
-}
 
 # ======================================================================================
 row 34 "spec 21e - Qwen3.8-Flash-Next (qwen4_exp) served truncated: b70-serve over Qwen4ExpEngine, prefix-cache snapshots, the MTP head (draft / verify / commit), the A4 set and its CPU reference for spec 22 (plan 21e)"
@@ -2375,13 +2099,6 @@ rownote 34 "Written blind on the Mac, after rows 32 / 33 (21c's decode and 21d's
 rownote 34 "Data: every card stage runs on the synthetic checkpoints (r31.synth; 4 real-width layers + the MTP layer) - r34.fixture writes M1's data (oracle-out-q4exp-mtp, box CPU ~0.5 h, ESTIMATED); Intel's --layers 18 rows (qwen4exp_snapshot_gpu_intel_test, qwen4exp_mtp_intel_test) need Intel's checkpoint and its PLE int8 file (rows 30 / 31). The served tokenizer is the ORIGINAL's (its split has \\p{M}); Intel's checkpoint ships Qwen3.8's tokenizer.json - b70-serve refuses it (cli_reject_serve_qwen4exp_tokenizer): serve a snapshot that ships the original's."
 rownote 34 "MTP acceptance has no engine bar here: on the synthetic checkpoints the drafts are random (M3 is greedy LOSSLESS at K = 1..3, not a rate). Decision 4's numbers are r34.accept's (the reference's teacher-forced acceptance on Intel's checkpoint, both pre_fc_norm_hidden forms, the selection reused and fresh) until spec 22 runs the whole model on the card. The verify cost (M = 2..4 against M = 1) and the per-layer expert union are r34.mtp's cost lines: hand them back."
 rownote 34 "Spec 22's, not this row's: A4 on the engine (the reference is r34.a4_ref's), passkey at the context spec 22 chooses, the llama-benchy rows, the full-model acceptance and speed. b70-serve refuses the whole model (no --layers N) naming spec 22, and --spec auto naming spec 22's numbers."
-stage r34.k0 34 default cpu - g0.sha,g0.bitwise,g0.suite "K0: every pre-existing binary identical (21e adds 122, changes none); the server path's suite unchanged (golden_server_test, prefix_gpu_*, mtp_verify_test, snapshot_test in G0's suite); rows 32 / 33's gates not failed"
-st_r34_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  need_ok r32.k1 r32.k3 r33.k1 r33.prefill
-  run_tests '^(prefix_cache_test|prefix_server_test|mtp_server_test|lookup_server_test)$'
-  finish
-}
 stage r34.host 34 default cpu - - "host: qwen4exp_tokenizer_test (the original's tokenizer.json bitwise transformers 5.19.0 over 24 cases + a 10240-line corpus, Qwen3.8's file refused by its SHA-256, the three chat renders), qwen4exp_server_test (ChatFormat, EOS, decision 11's sampling defaults, the serve refusals), qwen4exp_snapshot_test (the snapshot runs on simulated devices: one host layout for --parallel 1 / 2, block and request ends, sizes), qwen4exp_mtp_names_test (every bound name built, every 21e binary bound; the verify / draft / head-pass launch counts), qwen4exp_plan_test"
 st_r34_host() {
   run_tests '^(qwen4exp_tokenizer_test|qwen4exp_server_test|qwen4exp_snapshot_test|qwen4exp_mtp_names_test|qwen4exp_plan_test)$'
@@ -2483,7 +2200,7 @@ st_r34_accept() {
   grab_all accept '^pooled' 8
   finish
 }
-stage r34.a4_ref 34 optin cpu q4exp_intel,q4exp_orig_small,oracle_image - "plan 21e Task 5 Step 2 on the box CPU: the Qwen3.8-Flash-Next tool-call set (make_set.py --from tests/golden/toolcall on the ORIGINAL's tokenizer and template, transformers 5.19.0: the log says how many of the 36 are Qwen3.8's ids exactly) and qwen4exp_ref.py's reference on Intel's checkpoint (192 ids, resumable) into \$DATA/oracle-out-q4exp-a4 - HOURS; score.py's parse of every reference call (0 failures: the hard bar); then re-links oracle-out*. The engine's A4 run is spec 22's"
+stage r34.a4_ref 34 optin cpu q4exp_intel,q4exp_orig_small,oracle_image - "plan 21e Task 5 Step 2 on the box CPU: the Qwen3.8-Flash-Next tool-call set (make_set.py --from tests/golden/toolcall on the ORIGINAL's tokenizer and template, transformers 5.19.0: the log says how many of the 36 are Qwen3.8's ids exactly) and qwen4exp_ref.py's reference on Intel's checkpoint (192 ids, resumable) into \$DATA/oracle-out-q4exp-a4 - HOURS; score.py's parse of every reference call (0 failures: the hard bar); then re-links oracle-out*. The engine's A4 run is r34.a4"
 st_r34_a4_ref() {
   chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp set" "the Qwen3.8-Flash-Next tool-call set"
   chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp ref" "the reference run (qwen4exp_ref.py)"
@@ -2492,19 +2209,34 @@ st_r34_a4_ref() {
   chk "python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16" "every reference call parses (Qwen XML)"
   finish
 }
+stage r34.a4 34 optin gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_a4 r34.serve "A4 on Flash-Next against r34.a4_ref's reference (oracle-out-q4exp-a4, Intel's checkpoint, all 48 layers) - engine_generate.sh on its set, two cards (--parallel auto), l0, 192 ids, the int8 head; score.py (Qwen XML) - recorded beside Qwen3.8's 25 / 36, no bar, as r11.a4 / r25.a4. The engine refuses the whole model without --layers until the expert tier exists (open-work Now 4: 512 experts x 48 layers do not fit two cards); a truncated --layers run is not the reference's model, so until then the stage SKIPs, never scores a truncated run"
+st_r34_a4() {
+  local d=$STATE/a4-q4exp s="\$(tools/box_validate/data.sh resolve ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound})"
+  # the whole model, no --layers: the engine's own refusal (qwen4exp_decode.h, "expert-offload tier") is the only SKIP
+  x "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $s --depth 16 --tg 1 > /dev/null 2> $STATE/$STAGE.fit.txt; rc=\$?; cat $STATE/$STAGE.fit.txt; exit \$rc"
+  local rc=$?
+  if [ "${DRY:-0}" != 1 ] && [ "$rc" -ne 0 ]; then
+    if grep -q 'expert-offload tier' "$STATE/$STAGE.fit.txt" 2> /dev/null; then
+      skip "the whole Flash-Next model is refused on two cards (awaiting the expert tier, open-work Now 4)"
+    else
+      bad "b70-decode on the whole Flash-Next model failed for another reason (rc $rc; $STAGE.fit.txt)"
+    fi
+    finish; return
+  fi
+  x "mkdir -p $d && cp oracle-out-q4exp-a4/*.bf16.txt $d/"
+  chk "ZE_AFFINITY_MASK=0,1 tools/toolcall/engine_generate.sh $s oracle-out-q4exp-a4/set $d l0" "A4 engine runs, all 48 layers on two cards, int8 head"
+  chk "python3 tools/toolcall/score.py $d bf16 l0-i8head | tee $d/score.md" "scoring against the reference"
+  grab_all a4 'match|/ 36|/36' 6
+  finish
+}
 
 # ======================================================================================
 row 36 "spec 22a - the expert-offload probe (P0): the links, copy and zero-copy rates, replayed visibility, host RAM under load, pinned capacity and the alias check, the hit-rate and pruning curves, the projection and its stopping rule (plan 22a)"
-rownote 36 "Nothing in src/kernels changes (kernel_cmdlines +0 / -0 / ~0: r36.k0 is G0's); the one src/ change is the host-only runtime::qwen4exp::expert_budget. The probe's two kernels are tools/probe's - po_moe_M1_E512_T10_D2560_I640_SH4 (q4_moe.cl with its two address lines as a pointer-table read, generated by mk_offload_kernel.py and drift-checked) and po_kernels - first compiled by r36.build; arm A binds r32.k1's q4_moe_M1_E512_T10_D2560_I640_SH4."
-rownote 36 "Data: r36.curve / r36.reap need row 30's traces (r30.traces: oracle-out-q4exp-traces, 39+ files); r36.prune row 30's golden sets (r30.golden) and Intel's checkpoint, its A4 half row 34's reference (r34.a4_ref); r36.prune_a4 the A4 set and reference. The arms need r32.k1 and two cards in one context (r22.p1). Predecessors to hand in beside: r32.ple_rate (the first host-USM number), r31.load_real's pin line (P0.5's start), r34.accept (the projection's MTP acceptance; else the 0.5-0.8 range, PROPOSED), row 32's per-layer rate (PROJECT_BW) and row 33's compute a chunk (PROJECT_PF_MS). Outputs: \$DATA/oracle-out-q4exp-offload (budget.json, links*.txt, po-*.txt, the curves, prune / project), oracle-out-q4exp-prune (masks, maskeval), oracle-out-q4exp-traces/profile.safetensors (decision 8)."
+rownote 36 "Nothing in src/kernels changes (kernel_cmdlines +0 / -0 / ~0: G0's g0.sha checks it); the one src/ change is the host-only runtime::qwen4exp::expert_budget. The probe's two kernels are tools/probe's - po_moe_M1_E512_T10_D2560_I640_SH4 (q4_moe.cl with its two address lines as a pointer-table read, generated by mk_offload_kernel.py and drift-checked) and po_kernels - first compiled by r36.build; arm A binds r32.k1's q4_moe_M1_E512_T10_D2560_I640_SH4."
+rownote 36 "Data: r36.curve needs row 30's traces (r30.traces: oracle-out-q4exp-traces, 39+ files). The arms need r32.k1 and two cards in one context (r22.p1). Predecessors to hand in beside: r32.ple_rate (the first host-USM number), r31.load_real's pin line (P0.5's start), r34.accept (the projection's MTP acceptance; else the 0.5-0.8 range, PROPOSED), row 32's per-layer rate (PROJECT_BW) and row 33's compute a chunk (PROJECT_PF_MS). Outputs: \$DATA/oracle-out-q4exp-offload (budget.json, links*.txt, po-*.txt, the curves, project), oracle-out-q4exp-traces/profile.safetensors (decision 8)."
 rownote 36 "Both cards: the run exports DEVICE's one card (ZE_AFFINITY_MASK); every probe_offload command sets ZE_AFFINITY_MASK=0,1 itself, as row 22's do, and a two-card arm that still sees one card FAILS (not a SKIP). The GPU lock is the one lock for both."
-rownote 36 "RAM rule: the pinned arms never beside a CPU oracle - r36.pin SKIPs 'host RAM' below 110 GB available or with any container up (probe_offload itself refuses above MemAvailable - 16 GiB, printing the cap: spec 7's rule); r36.hostbw pins 1.34 GB and allocates a 6 GiB triad. The CPU oracle stages (r36.prune, r36.prune_a4: hours to days, ESTIMATED from row 30's walls) run one at a time with free -g >= 70 GB, outside the GPU session."
-rownote 36 "Session: an idle box (box-day plan Session 9c), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is docs/probes/probe-offload-<date>.md (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows r36.project's STOP / GO-CANDIDATE line."
-stage r36.k0 36 default cpu - g0.sha,g0.bitwise,g0.suite "G0 trivially: kernel_cmdlines +0 / -0 / ~0 - plan 22a changes no device code (the probe's kernels are tools/probe's); every pre-existing binary identical"
-st_r36_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
+rownote 36 "RAM rule: the pinned arms never beside a CPU oracle - r36.pin SKIPs 'host RAM' below 110 GB available or with any container up (probe_offload itself refuses above MemAvailable - 16 GiB, printing the cap: spec 7's rule); r36.hostbw pins 1.34 GB and allocates a 6 GiB triad."
+rownote 36 "Session: an idle box (the idle protocol, docs/10-the-box.md), both cards free of other DRM holders, RECORD grade for the timed stages (r36.copy, r36.zc, r36.hostbw): probe_offload warms up ~0.5 s, then times control and candidate as interleaved pairs, median of 5 with the range. A mismatch in r36.replay or r36.alias is reported first, with its replay / page. A STOP from r36.links (a card below Gen3 x8; an UNKNOWN line means lspci -vv needed root - sudo lspci -vv -s 04:00.0 by hand) stops the row: spec 22 §3, stop and report. The record is docs/probes/probe-offload-<date>.md (plan 22a Task 5 Steps 6-7); the operator's go / no-go follows r36.project's STOP / GO-CANDIDATE line."
 stage r36.host 36 default cpu oracle_image - "host: qwen4exp_plan_test (the routed-expert budget = plan() byte for byte; its budget-json lines -> \$DATA/oracle-out-q4exp-offload/budget.json), probe_offload_kernel_drift_test, offload_links.sh --self-test, test_offload_curve.py in the oracle image (the 5.19.0 site for its tiny-model test)"
 st_r36_host() {
   local off="$DATA/oracle-out-q4exp-offload"
@@ -2512,7 +2244,7 @@ st_r36_host() {
   chk "mkdir -p $off && build/tests/qwen4exp_plan_test --budget-json $off/budget.json | grep -E '^spec 22a|OK'" "the routed-expert budget lines"
   chk "tools/probe/offload_links.sh --self-test" "offload_links.sh's parser on its fixture"
   chk "ORACLE_SNAP=\$PWD/tests/model/qwen4exp tools/oracle/run_in_container.sh 'tools/oracle/qwen4exp_env.sh /ws/oracle-out-q4exp-site > /dev/null && export PYTHONPATH=/ws/oracle-out-q4exp-site && python3 tools/oracle/test_offload_curve.py'" \
-    "test_offload_curve.py (the curves, the masks, the projection on synthetic traces; the tiny model's own)"
+    "test_offload_curve.py (the curves and the projection on synthetic traces; the tiny model's own)"
   grab_all budget '^spec 22a' 6
   finish
 }
@@ -2598,27 +2330,7 @@ st_r36_curve() {
   grab_all curve '^(reach |budget max_len|\| [0-9]+ \| [0-9.]+ \| [0-9]+ \||mtp head|profile:)' 60
   finish
 }
-stage r36.reap 36 default cpu oracle_q4exp_traces,oracle_image - "P0.8's masks: qwen4exp_oracle.sh reap - REAP (p x onorm) and freq at 50 / 62.5 / 75 / 87.5 % kept from the A4 / agentic / opencode traces, in sample, without A4, and decision 9's 4 folds -> \$DATA/oracle-out-q4exp-prune/masks"
-st_r36_reap() {
-  chk "tools/box_validate/qwen4exp_oracle.sh $DATA reap" "the REAP and freq masks"
-  grab_all reap '^reap: kept' 40
-  finish
-}
-stage r36.prune 36 optin cpu q4exp_intel,oracle_q4exp,oracle_image r36.reap "P0.8: qwen4exp_oracle.sh prune - maskeval (per row KL(full || masked), argmax) for every REAP mask over q4exp_short / 4k / agentic (+ 32k with PRUNE_32K=1), and the 36 A4 scenarios on their in-sample and own-fold masks over the full reference's continuation - HOURS to days (ESTIMATED), resumable"
-st_r36_prune() {
-  x "free -g | head -2"
-  chk "tools/box_validate/qwen4exp_oracle.sh $DATA prune" "the masked reference's KL and argmax"
-  grab_all prune '^maskeval .* kept=' 120
-  finish
-}
-stage r36.prune_a4 36 optin cpu q4exp_intel,oracle_q4exp_a4,oracle_image r36.reap "P0.8: qwen4exp_oracle.sh prune-a4 - the A4 set generated under each REAP fraction whose experts fit two cards whole at 32k (the all-traces mask on 36, each fold's mask on its 9), score.py against the full reference - DAYS (ESTIMATED), resumable per scenario"
-st_r36_prune_a4() {
-  x "free -g | head -2"
-  chk "tools/box_validate/qwen4exp_oracle.sh $DATA prune-a4" "the masked A4 runs and their score"
-  grab_all prune_a4 '^(mask-reap-[0-9.]+(-fold[0-3])?: [0-9]+ / [0-9]+ match|qwen4exp_oracle: prune-a4: kept fractions)' 24
-  finish
-}
-stage r36.project 36 default cpu oracle_image r36.host,r36.zc,r36.curve "P0.7: qwen4exp_oracle.sh project - prune-report when r36.prune ran, then the projection (decode at 4k / 32k / 128k per Task 1's budget, MTP at K 1-3, prefill 2048 / 4096, one card) with the measured law and P per card; the last line STOP or GO-CANDIDATE (two cards, 32k, int4 dense, 40 t/s)"
+stage r36.project 36 default cpu oracle_image r36.host,r36.zc,r36.curve "P0.7: qwen4exp_oracle.sh project - the projection (decode at 4k / 32k / 128k per Task 1's budget, MTP at K 1-3, prefill 2048 / 4096, one card) with the measured law and P per card; the last line STOP or GO-CANDIDATE (two cards, 32k, int4 dense, 40 t/s)"
 st_r36_project() {
   chk "tools/box_validate/qwen4exp_oracle.sh $DATA project" "the projection and the stopping rule"
   grab_all project '^(project:|\| ours|decision 9|STOP:|GO-CANDIDATE:)' 24
@@ -2629,7 +2341,7 @@ st_r36_project() {
 # ======================================================================================
 row 41 "the llama-benchy comparison matrix (operator, 2026-10-13): b70-serve and vLLM through one client, one set of flags, one card - Qwen3.8 int4 g64, every engine served the same way so the rows compare with numbers others publish"
 rownote 41 "One matrix, every arm: llama-benchy pinned (BENCHY_VERSION, default 0.4.0), A = --pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md verbatim (the flags such tables are usually published with - no --no-cache, so a repeated prompt can hit a server's prefix cache: b70-serve's and vLLM's are on by default), B = A with --no-cache (the fair cross-engine reading), D = --pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache (agentic depth). HTTP-inclusive: these rows sit beside, never replace, the engine-internal records (docs/BENCHMARKS.md 'llama-benchy comparisons')."
-rownote 41 "Opt-in and timed: run on an idle box (box-day plan Session 6c, after Session 6), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so. vLLM: the recorded baseline's flags (docs/BENCHMARKS.md 'vLLM: how the baseline is served') with --max-num-seqs 8; the version string vllm_benchy.sh prints goes in every vLLM row. r41.vllm_mtp is the MTP-4 + fp8-KV recipe: if the XPU image refuses or crashes on it, record the failure (~/b70/logs/benchy/benchy-vllm.log) - no patches."
+rownote 41 "Opt-in and timed: run on an idle box (the quiet-box session, docs/open-work.md), device 0, never with a container or the CPU lane up. b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 rows are requests served one after another - recorded as the baseline batching has to beat, labelled so. vLLM: the recorded baseline's flags (docs/BENCHMARKS.md 'vLLM: how the baseline is served') with --max-num-seqs 8; the version string vllm_benchy.sh prints goes in every vLLM row. r41.vllm_mtp is the MTP-4 + fp8-KV recipe: if the XPU image refuses or crashes on it, record the failure (~/b70/logs/benchy/benchy-vllm.log) - no patches."
 stage r41.ours 41 optin gpu-self qwen,uvx - "b70-serve <qwen> --max-len 40960 on device 0, --spec off and --spec auto: matrices A, B and D (int8 head, bf16 KV, defaults otherwise)"
 st_r41_ours() {
   local v="${BENCHY_VERSION:-0.4.0}" a="--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md"
@@ -2669,11 +2381,6 @@ rownote 54 "Written blind on the Mac: no df_* binary has ever been compiled (ocl
 rownote 54 "Data: the drafter (hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB; data key dflash) for r54.load / r54.draft / r54.d1; 19a's tap dumps (the Mac's oracle-out-19a/dumps, 2.7 GB, and oracle-out-19a/draft_vocab.ranked.ids: tools/box_validate.sh --push-data; data key oracle_dflash_dumps) for r54.d1; the gate checkpoint (qwen). r54.d1_ref runs dflash_ref.py in the oracle image: ~15 GB RSS (the drafter fp32 7.2 GB, the target's head and embedding), ~1-2 s a draft on 44 threads, ESTIMATED (16 anchors x 37 dumps x 3 arms ~ 0.5-1 h)."
 rownote 54 "D1's bars are spec 19 §6's: top-16 sets tie-aware, scores cosine >= 0.9999 (bf16 drafter) / 0.999 (int8), walk ids equal at T 0. The engine rounds every GEMV input to bf16 (the reused gemv kernels read bf16 activations; vLLM runs the drafter in bf16 throughout) and keeps the ring bf16; the reference is fp32. A Mac preview on the real drafter with real taps (random head: the true scores need the target's head) measured the final rows at cosine 0.99991 (bf16) - if the scores bar fails, read the per-draft table: fp32-input GEMV variants are the lever (plan 19b status)."
 rownote 54 "Hand back: the kbins list, dflash_kernels_test's lines, dflash_load_checkpoint_test's lines (bytes, read-backs), dflash_draft_test's lines (launches, the projection, every draft line, the replay, the draft vocabulary line, the host-timed ms), and r54.d1's three tables (out/d1.md) with any FAIL lines."
-stage r54.k0 54 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +14 / -0 / ~0), every pre-existing binary identical, the suite (G0); 19b's edits to shared files: SafetensorsSet's opt-in single-file mode, runtime::plan / max_len_that_fits' defaulted DrafterPlan, the CMake blocks"
-st_r54_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r54.host 54 default cpu - - "host: dflash_loader_test (the config, every refusal, the synthetic checkpoints' device forms), dflash_ref_test (the twin vs dflash_ref.py), dflash_variant_names_test, dflash_plan_test (the buffers, the planner's term, auto); test_dflash_ref.py and test_dflash_d1.py in the oracle image"
 st_r54_host() {
   run_tests '^(dflash_loader_test|dflash_ref_test|dflash_variant_names_test|dflash_plan_test)$'
@@ -2723,11 +2430,6 @@ row 55 "spec 19c - DFlash in the decode loop: the taps in the verify lists (runt
 rownote 55 "Written blind on the Mac after row 54 (19b's drafter, itself unvalidated): nothing of 19c has run on a card. 7 new binaries (kernel_cmdlines +7 / -0 / ~0): gdn_step_slots_M1..4_N8 (the 8-slot verify build at the rows spec 8's lists ran at 4 slots) and the bf16 lm_head at M = 5 / 6 / 8. Nothing binds them without --spec dflash: D0 is G0. On the Mac (indicative): tools/mac/clrun/gdn_slots_run - gdn_step's 8-slot build at M = 8 and 5 bitwise to the plain kernel stepping the same rows, and a partial acceptance (j = 0 / 3 / 6 / 7 of 7, 2 of 4) leaves the live slot exactly the state after row j, with 3 new rows from it equal to the plain run (a mutant committing j + 1 is caught)."
 rownote 55 "How the GDN state ends at the last accepted token (the operator's upstream question, vllm-xpu-kernels 78799fe's per-token replay state): the verify list writes the state after EVERY row into its own slot ((live + m) % 8) and commit(j) only moves Control::gdn_live to row j's slot - no copy, no replay; the rejected rows' slots and conv-ring positions are never read before a later list rewrites them. The cost is M x 151 MB of state writes per verify (1.2 GB at M = 8, ~2 ms at 600 GB/s, derived) and 1.06 GB of slots; a replay-entry scheme (per row: corr, normalised k, decay - ~2.4 MB at M = 8 - then one rank-1 replay pass at commit, ~0.5 ms) is recorded as a lever in spec 19 §11, not built."
 rownote 55 "Data: the gate checkpoint (qwen) and the drafter (dflash: hf download z-lab/Qwen3.8-27B-DFlash2, 3.85 GB - row 54's). r55.engine and r55.gpu load both (~19 GB + 2.1 GB int8 drafter + 1.06 GB slots at max_len 16384). Hand back: every stage's lines - L (launch counts, the memory line), T1 / D3 per row (cosines and the bitwise marks), P per j (the live slot, the ring rows, the 64 ids), D2 per K (acceptance, ids an iteration), RF3, PF (split / chunked / decode cosines), dflash_gpu_test's per-prompt D2 lines and its S line, r55.serve's IDENTICAL / RATIO lines and the 'spec dflash:' / 'dflash:' server lines, r55.tps's generate lines."
-stage r55.k0 55 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +7 / -0 / ~0), every pre-existing binary identical, the suite (G0) - incl. 19c's edits to shared files: capture.cc (a new mode; Plain / Verify / Stage walks unchanged), runtime::Engine (a defaulted TapDrafter*), step_chunk (a defaulted PrefillTaps*), the planner (a drafter term), EngineAdapter (a defaulted dflash flag), the loader's DraftVocabSpec::for_drafter"
-st_r55_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r55.host 55 default cpu - - "host: dflash_engine_host_test (the tap sites, the 8 slots, the planner with a drafter, MtpCost::dflash and AdaptiveK at K <= 7), dflash_accept_test (D4: sparse-q acceptance, 10^6 seeded draws per case, chi-square >= 0.01, no draft outside the candidates, the residual finite), dflash_plan_test (19b's, now with the engine's slots and prefill taps), spec_accept_test / adaptive_k_test unchanged; b70-serve / b70-decode --spec dflash's refusals before the device"
 st_r55_host() {
   run_tests '^(dflash_engine_host_test|dflash_accept_test|dflash_plan_test|spec_accept_test|adaptive_k_test|cli_reject_(serve_)?dflash_.*|cli_reject_serve_spec_dflash_other)$'
@@ -2807,12 +2509,7 @@ st_r55_tps() {
 row 56 "spec 19d - DFlash in the server: the drafter's ring in the prefix cache's snapshots (decision 5 as ruled: the whole ring after the state, the store keyed by the drafter), the batching scheduler's speculative hook (per-slot rings, a mock engine), --spec dflash --parallel pp (the drafter on device 1, tap verify stage lists, the pipeline prefill's taps), D5 against --spec auto (plan 19d)"
 rownote 56 "Written blind on the Mac after rows 54 / 55 (themselves unvalidated): nothing of 19d has run on a card. No new binary (kernel_cmdlines +0 / -0 / ~0): the --parallel pp tap verify stage lists bind 19c's gdn_step_slots_M<M>_N8 and B70_VERIFY_M8's M = 5..8 variants per stage. Nothing changes without --spec dflash: D0 is G0 (shared edits: Engine's snapshots gain the ring only with a drafter, PipelineEngine / place_stages / pp_plan gain defaulted drafter arguments, capture.cc a new mode, step_stage a defaulted PrefillTaps*, the prefix store's root store_root(kv_form, 0) = kv_form)."
 rownote 56 "Decision 5 as ruled in 19d (spec 19 §12): every snapshot carries the drafter's WHOLE ring (41,943,040 B, +25 % a snapshot) - a restore is a copy, bitwise by construction; a mid-call block end's snapshot holds the ring as that call left it (positions outside the call's last 2048 not yet projected): lower acceptance after a restore there with a short tail, never another output (r56.prefix's R2 caveat line counts it)."
-rownote 56 "Data: the gate checkpoint (qwen), the drafter (dflash), both cards for r56.pp / r56.pp_serve / r56.d5_pp, uvx for r56.d5_benchy, OPENCODE_LOG for r56.d5_opencode (the recording may not exist yet - the stage then SKIPs), oracle-out-19a/draft_vocab.ranked.ids (--push-data from the Mac; IN-SAMPLE on A4 / golden) for r56.d5_dv. Hand back: every stage's lines - the K / R1 / R2 lines of dflash_prefix_gpu_test, dflash_engine_test's SR and L lines, pp_dflash_test's bitwise lines per split, the serve rows' IDENTICAL / RATIO tables and 'dflash:' lines, llama-benchy's tables, the replay summaries. D5's bar (spec 19 §6): --spec dflash becomes the Qwen3.8 default only at >= +10 % over --mtp auto on the opencode recording and no loss > 3 % elsewhere - the operator decides from r56.d5_opencode; the A4 / golden rows (r56.d5_a4) are the expectation, not the bar."
-stage r56.k0 56 default cpu - g0.sha,g0.bitwise,g0.suite "D0: no command line moved (kernel_cmdlines +0 / -0 / ~0), every pre-existing binary identical, the suite (G0) - incl. 19d's shared edits (Engine / PipelineEngine snapshots, capture.cc's StageVerifyTaps mode, step_stage, place_stages, pp_plan, the prefix store's root, BatchEngineIface / Scheduler's speculative round)"
-st_r56_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
+rownote 56 "Data: the gate checkpoint (qwen), the drafter (dflash), both cards for r56.pp / r56.pp_serve. Hand back: every stage's lines - the K / R1 / R2 lines of dflash_prefix_gpu_test, dflash_engine_test's SR and L lines, pp_dflash_test's bitwise lines per split, the serve rows' judged tables and 'dflash:' lines. D5 (the speed verdict) is closed (spec 19, 2026-10-28: --spec dflash is an option, not the default; the numbers are in docs/BENCHMARKS.md), so its stages are gone."
 stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession restore, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a restore onto another slot), pp_dflash_serve_test (the --parallel pp adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --parallel pp refusals (peer, b70-decode)"
 st_r56_host() {
   run_tests '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test|pp_serve_plan_test|dflash_plan_test|scheduler_test|prefix_cache_test|pp_serve_test|cli_reject_(serve_)?dflash_pp)$'
@@ -2847,96 +2544,11 @@ st_r56_pp_serve() {
   grab_all plan 'pipeline plan|DFlash:|memory, device|spec dflash' 12
   finish
 }
-stage r56.d5_a4 56 optin gpu qwen,dflash r56.prefix "D5's expectation on the A4 + golden sets (the recording is the bar): b70-serve --spec off / --spec auto / --spec dflash (auto K) / --spec dflash --spec-max 3, the same flags otherwise (--max-len 16384, the int8 head, bf16 KV, the prefix cache's default), greedy, max_tokens 256, 3 rounds in rotated order after an idle check - per-arm decode t/s (the server's decode-only rate) and the RATIO lines dflash / mtp-auto; greedy output identical across the arms"
-st_r56_d5_a4() {
-  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  idle before
-  serve_arms "$STATE/$STAGE" "${R56_ROUNDS:-3}" "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 256 --stop-at-eos" \
-    "off|--max-len 16384 --spec off" "mtp|--max-len 16384 --spec auto" "dflash|--max-len 16384 --spec dflash $dm" \
-    "dflash3|--max-len 16384 --spec dflash --spec-max 3 $dm"
-  idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical across off / mtp auto / dflash"
-  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref mtp --ratio dflash/mtp --ratio dflash3/mtp --ratio dflash/off"
-  grab_all ratio '^RATIO ' 20
-  grab_all dflash 'spec dflash:|^dflash:|^mtp:' 24
-  grab_all idle '^IDLE '
-  finish
-}
-stage r56.d5_dv 56 optin gpu qwen,dflash,oracle_dflash_rank r56.d5_a4 "the draft vocabulary arm: --spec dflash against --spec dflash --draft-vocab 32k --draft-vocab-ids oracle-out-19a/draft_vocab.ranked.ids (ranked IN-SAMPLE on these sets - an upper bound) and --draft-vocab 32k by id, A4 + golden, 3 rotated rounds - decode t/s ratios and acceptance; output identical"
-st_r56_d5_dv() {
-  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  idle before
-  serve_arms "$STATE/$STAGE" "${R56_ROUNDS:-3}" "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 256 --stop-at-eos" \
-    "dflash|--max-len 16384 --spec dflash $dm" \
-    "dv32k-r|--max-len 16384 --spec dflash --draft-vocab 32k --draft-vocab-ids oracle-out-19a/draft_vocab.ranked.ids $dm" \
-    "dv32k|--max-len 16384 --spec dflash --draft-vocab 32k $dm"
-  idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref dflash" "greedy output identical with the draft vocabulary"
-  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref dflash --ratio dv32k-r/dflash --ratio dv32k/dflash"
-  grab_all ratio '^RATIO ' 20
-  grab_all dflash 'spec dflash:|^dflash:|draft vocab' 24
-  finish
-}
-stage r56.d5_benchy 56 optin gpu-self qwen,dflash,uvx r56.d5_a4 "D5 with llama-benchy at the operator's flags (row 41's matrix A at concurrency 1 and matrix D: --pp 512 4096 --tg 128 --runs 2; --pp 512 --tg 128 --depth 4096 32768 --no-cache), b70-serve --max-len 40960 --spec off / --spec auto / --spec dflash, 3 rounds in a Latin square (every arm in every position once), idle checks around them"
-st_r56_d5_benchy() {
-  local v="${BENCHY_VERSION:-0.4.0}" r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  local a="--pp 512 4096 --tg 128 --concurrency 1 --runs 2 --format md"
-  local d="--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md"
-  idle before
-  for r in 1 2 3; do   # a Latin square: every arm in every position once
-    case "$r" in 1) order="off mtp dflash" ;; 2) order="mtp dflash off" ;; 3) order="dflash off mtp" ;; esac
-    for arm in $order; do
-      case "$arm" in off) args="--spec off" ;; mtp) args="--spec auto" ;; dflash) args="--spec dflash $dm" ;; esac
-      chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $a" "round $r $arm, matrix A (c1)"
-      chk "BENCHY_VERSION=$v MODEL=$SNAP_QWEN MAX_LEN=40960 SERVE_ARGS='$args' tools/probe/serve_benchy.sh $d" "round $r $arm, matrix D"
-    done
-  done
-  idle after
-  grab_all benchy '^(client: |\| )' 200
-  grab_all idle '^IDLE '
-  finish
-}
-stage r56.d5_opencode 56 optin gpu-self qwen,dflash,opencode_log r56.d5_a4 "D5 proper (spec 19 §6): the opencode recording (OPENCODE_LOG) replayed through b70-serve with the prefix cache on (replay_ab.sh, max_len 131072), --spec off / --spec auto / --spec dflash, 3 rounds in a Latin square, idle checks around them - the per-arm t/s and ttft summaries, and per request the prefix plan beside the dflash acceptance; the bar is dflash >= 1.10 x --spec auto here"
-st_r56_d5_opencode() {
-  local r arm args order dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  idle before
-  for r in 1 2 3; do   # a Latin square: every arm in every position once
-    case "$r" in 1) order="off mtp dflash" ;; 2) order="mtp dflash off" ;; 3) order="dflash off mtp" ;; esac
-    for arm in $order; do
-      case "$arm" in off) args="--spec off" ;; mtp) args="--spec auto" ;; dflash) args="--spec dflash $dm" ;; esac
-      chk "MODEL=$SNAP_QWEN ARMS=on SERVE_ARGS='$args' tools/prefix/replay_ab.sh $OPENCODE_LOG $STATE/r56.d5.r$r.$arm" "replay round $r, $arm"
-    done
-  done
-  idle after
-  # Per request: the prefix plan (cold / continue / restore and where) beside the dflash acceptance - whether restores
-  # at mid-call block ends (their ring not the session's, spec 19 §12) cost acceptance.
-  x "grep -hE '^prefix: |^dflash: ' $STATE/r56.d5.r1.dflash.on.serve.log | head -400 > $STATE/r56.d5.restore_vs_accept.txt; wc -l $STATE/r56.d5.restore_vs_accept.txt"
-  grab_all replay 'tok/s|t/s|requests|ttft' 60
-  grab_all idle '^IDLE '
-  finish
-}
-stage r56.d5_pp 56 optin gpu qwen,dflash r56.pp_serve "the --parallel pp rows (both cards): b70-serve --parallel pp --spec auto against --parallel pp --spec dflash on A4 + golden, 3 rounds in rotated order - decode t/s, RATIO dflash / mtp; output identical"
-st_r56_d5_pp() {
-  local r arm flags order c="--set toolcall --set golden --max-tokens 256 --stop-at-eos" dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
-  idle before
-  for r in 1 2 3; do
-    order="mtp dflash"; [ $((r % 2)) = 0 ] && order="dflash mtp"
-    for arm in $order; do
-      flags="--max-len 16384 --parallel pp --spec auto"; [ "$arm" = dflash ] && flags="--max-len 16384 --parallel pp --spec dflash $dm"
-      chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$arm.r$r $arm $r $SNAP_QWEN $flags -- $c" "arm $arm, round $r"
-    done
-  done
-  idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref mtp" "greedy output identical"
-  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref mtp --ratio dflash/mtp"
-  grab_all ratio '^RATIO ' 10
-  finish
-}
 
 # ======================================================================================
 row 57 "spec 25a - Nemotron 3.5 Bolt: the facts, the CPU reference (B1), golden sets, the A4 references, the tap dumps, gate Q (plan 25a)"
 rownote 57 "Download first (pinned; df -h ~ first; MemAvailable >= 48 GB): hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 (41 GB; our int4 g64 export, the served checkpoint - on the box since 2026-10-26). r57.host needs only its pinned small files (the same command with --exclude '*.safetensors'). The int4 references (oracle-out-bolt, oracle-out-bolt-a4) count only with a SNAPSHOT file naming this snapshot (bolt_oracle.sh writes it): the 2026-10-22/23 ones came from a third-party g128 export, read as missing, and r57.golden / r57.a4_ref set them aside (<dir>.stale-<time>, kept) and rebuild them."
-rownote 57 "The BF16 original (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff, 149.8 GB; MemAvailable >= 96 GB) is downloaded on the box only, for the Bolt BF16 window (docs/box-day-plan.md, Session 12, with row 58) and removed after it: r57.golden_bf16, r57.a4_bf16 and r57.gateq run there. Every other row 57 stage needs only the int4 form."
+rownote 57 "The BF16 original (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 567021037ff88364143e24ea05e6abd0f72086ff, 149.8 GB; MemAvailable >= 96 GB) is downloaded on the box only, for the Bolt BF16 window (one CPU job at a time, docs/10-the-box.md) and removed after it: r57.golden_bf16, r57.a4_bf16 and r57.gateq run there. Every other row 57 stage needs only the int4 form."
 rownote 57 "Box CPU only, no card: nothing here takes the GPU lock. Every stage runs tools/box_validate/bolt_oracle.sh in the oracle image with transformers 5.19.0 from <tree>/oracle-out-q4exp-site (tools/oracle/qwen4exp_env.sh). The real stages SKIP 77 'missing data' without the checkpoints, or while they download."
 rownote 57 "Hand back: B70_BOLT_TIE_TOL's evidence (the 'MoE 9th/10th sel gap' lines r57.golden prints, per block and over all), the SSM-state magnitude lines, each prompt's wall / RSS, the perplexities per form, hfcheck's verdict and its fallback lines, the A4 parse failures (score.py --format qwen-think, bar 0 for the BF16 reference) and agreement, gate Q's table (a recorded measurement, Decision 3)."
 stage r57.host       57 default cpu  bolt_small,oracle_image       -  "bolt_oracle.sh tests: test_bolt_ref.py, test_bolt_make_tiny.py, bolt_tiny_check.py, the toolcall tests (the box image's torch: the bitwise claims re-checked there)"
@@ -3044,11 +2656,6 @@ rownote 60 "P0 first (Decision 16): r60.p0 runs probe_bolt_step before any engin
 rownote 60 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4; split 48 by bytes): its commands set ZE_AFFINITY_MASK=0,1 themselves. The N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, --pp 6,4 and pp2:6 on two. Their golden sets come from r60.synth_golden (bolt_oracle.sh export on n12-g128 / n12-g64x -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, short / 4k / agentic, CPU, hours ESTIMATED; data key oracle_bolt_synth). Our export's golden sets are row 57's r57.golden (oracle_bolt: SNAPSHOT names ours)."
 rownote 60 "Tolerances (all PROPOSED): B70_BOLT_TIE_TOL = 1e-3 on the 9th / 10th sel until row 57's gap distribution on the real weights (an exact 0 gap is undetermined); h taps median >= 0.9998 / min >= 0.99 a block; the SSM state and the conv columns after the prompt cosine >= 0.999 a block (not bitwise: the int4 GEMV's fp32 order vs the reference's bf16 linear); flash against fp64 at cosine 0.99999. Decision 2's A4 subset needs b70-serve (spec 25e, not built): r60.state_arm records B3 only."
 rownote 60 "Hand back: P0's tables (step per list, gap per launch, the floors, the S picks, the PROPOSED corrected step); bolt_kernels_test's lines; every plan == allocation / launches line (653 / 645 eager / 533 all arms / 655 peer; the synthetic 92); the B3 gate / routing / SSM / h lines per prompt; the arms' bitwise lines and their A/B ratios; the speed rows and the --profile table."
-stage r60.k0        60 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +115 / -0 / ~0 (no existing .cl edited)"
-st_r60_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r60.host      60 default cpu -                         -        "host: probe_bolt_step_shapes_test, bolt_ref_test (the twin against the fixture), bolt_variant_names_test, bolt_plan_test (the launch counts, the decode scratch)"
 st_r60_host() {
   run_tests '^(probe_bolt_step_shapes_test|bolt_ref_test|bolt_variant_names_test|bolt_plan_test)$'
@@ -3056,7 +2663,7 @@ st_r60_host() {
     'OK|ok|bitwise|differ|launches|scratch|lists'
   finish
 }
-stage r60.p0        60 default gpu -                         r60.k0   "P0: probe_bolt_step at depth 4096 / 65536, interleaved a / fused / gemv / noop / state, --sweep-s, --pair: the table into the facts sheet"
+stage r60.p0        60 default gpu -                         g0.sha   "P0: probe_bolt_step at depth 4096 / 65536, interleaved a / fused / gemv / noop / state, --sweep-s, --pair: the table into the facts sheet"
 st_r60_p0() {
   idle r60-p0
   x "uptime"
@@ -3066,7 +2673,7 @@ st_r60_p0() {
   grab_all p0 '^\| (a|fused|gemv|noop|state) \||^- step|gap per launch|roofline|PROPOSED step|\*\*pick\*\*|--pair' 80
   finish
 }
-stage r60.k1        60 default card -                         r60.k0   "kbins of the block + bolt_kernels_test: B2 on every kernel and arm (bitwise bolt_ref.h; flash at cosine 0.99999 against fp64)"
+stage r60.k1        60 default card -                         g0.sha   "kbins of the block + bolt_kernels_test: B2 on every kernel and arm (bitwise bolt_ref.h; flash at cosine 0.99999 against fp64)"
 st_r60_k1() {
   kbins nb_res_norm_M1_K4096_W8_NF nb_res_norm_M1_K4096_W8_S1 nb_res_norm_M1_K4096_W8_S1_T1 nb_res_norm_M1_K4096_W8_S1_R \
     nb_sh_act_M1_L1024_SH5376_S1 nb_attn_prep_M1_KV2_S1 nb_embed_gather_M1_K4096_V131072 nb_conv_M1_C10240_S1 \
@@ -3187,18 +2794,13 @@ rownote 61 "Written blind on the Mac (spec 25 §16) after row 60 (25c's decode: 
 rownote 61 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. The synthetics' golden sets are row 60's r60.synth_golden (oracle_bolt_synth); our export's row 57's r57.golden (oracle_bolt). Run row 60 first: the prefill's head, its KV / ring / state hand-over and every comparison against decode's fill use 25c's list."
 rownote 61 "Bars (all PROPOSED, spec 25 §16): bolt_pf_kernels_test - every portable kernel bitwise the twin, C B^T by DPAS within 2^-16 of sum |C B| of the plain build, the grouped GEMMs bitwise pf_gemm_T0 on an expert's rows and the up rows' cosine >= 0.9999 against the twin's decode order, flash >= 0.99999 against fp64 at 3000 / 65536 / 200000, the eager build bitwise decode's eager rows. bolt_prefill_test - prefill vs decode's fill: logits >= 0.9995, h taps median >= 0.9998 / min >= 0.99, SSM states and conv columns >= 0.999 a block, K / V rows median >= 0.9998 / p01 >= 0.99; chunked / split at multiples of 64 bitwise. B3 on prefill: 25c's decode bars."
 rownote 61 "Hand back: bolt_pf_kernels_test's lines (the DPAS C B^T error, the grouped == dense lines, flash cosines); every launches / plan line (4333 a chunk on the real model: 2317 + 2016 on two cards; 573 on the N 12; + 4 for the head; 1,251,240,256 B of scratch a device); bolt_prefill_test's lines 1-7 per checkpoint; the B3 prefill gate / routing / SSM / h lines per prompt; the pp rows at depth 886 / 8192 / 32000 / 65536 / 131072 beside SergiioB's published 2925 / 2014 / 871 / 486 t/s for their g128 checkpoint under vLLM (their 131072 is unpublished) and the phase tables. The SSD's sub-chunk length (64 as built), the scan's tiling (W16_R16) and the expert batch (512 MiB) change only by a commit naming these rows."
-stage r61.k0        61 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +35 / -0 / ~0 (no existing .cl edited)"
-st_r61_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r61.host      61 default cpu -                         -        "host: bolt_pf_ref_test (the SSD form vs the recurrence in double and fp32, the conv over a chunk = decode's, absolute sub-chunks, the grouped MoE = decode's per row, the fixture), bolt_pf_variant_names_test (25c's names pinned), bolt_plan_test (the prefill launches, scratch, link, chunk rule)"
 st_r61_host() {
   run_tests '^(bolt_pf_ref_test|bolt_pf_variant_names_test|bolt_plan_test)$'
   jgrab host '^(bolt_pf_ref_test|bolt_pf_variant_names_test|bolt_plan_test)$' 'OK|bitwise|relative|cosine|launches|prefill|differ'
   finish
 }
-stage r61.k1        61 default card -                         r61.k0   "kbins of the block + bolt_pf_kernels_test: B2 on prefill (every kernel against bolt_pf_ref.h, both tilings x10 finite and equal, C B^T by DPAS vs plain, grouped == dense, the slabs, flash vs fp64 at 3000 / 65536 / 200000, eager bitwise decode's)"
+stage r61.k1        61 default card -                         g0.sha   "kbins of the block + bolt_pf_kernels_test: B2 on prefill (every kernel against bolt_pf_ref.h, both tilings x10 finite and equal, C B^T by DPAS vs plain, grouped == dense, the slabs, flash vs fp64 at 3000 / 65536 / 200000, eager bitwise decode's)"
 st_r61_k1() {
   kbins nb_pf_mamba_L64_W16_R16 nb_pf_mamba_L64_W8_R4 nb_pf_mamba_L64_W16_R16_B16 nb_pf_cb_L64_DPAS \
     nb_pf_moe_I1536_L1024_T9_TM32 nb_pf_moe_I2560_L1024_T9_TM32 nb_pf_moe_gemm_K1024_N1536_RELU2 \
@@ -3267,16 +2869,10 @@ st_r61_speed() {
 
 # ======================================================================================
 row 62 "spec 25e - Nemotron 3.5 Bolt served: the template / tokenizer identities, ultra_v3 reasoning over Qwen XML calls, NVIDIA's sampling defaults, hybrid snapshots at aligned block ends, A4 and llama-benchy (plan 25e)"
-rownote 62 "Written blind on the Mac (spec 25 §17) after rows 60 / 61 (25c's decode, 25d's prefill: neither has run on a card): nothing of 25e ran on a card. 25e adds NO kernel (BoltEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. It does change shared host code - toolcall.cc (one opt-in option on the Qwen stream: drop a call cut by the end of generation), chat_format, server.cc (the template's enable_thinking comes from the kwargs after the reasoning_effort mapping), CMake - r62.k0 re-runs the other models' template / parser / server tests. The template and tokenizer.json are read from our export's pinned snapshot in the HF cache (B70_BOLT_SNAPSHOT names another) and the tests SKIP 77 without it; nothing of the model is vendored but its config.json and generation_config.json files (tests/model/bolt/, Decision 20)."
+rownote 62 "Written blind on the Mac (spec 25 §17) after rows 60 / 61 (25c's decode, 25d's prefill: neither has run on a card): nothing of 25e ran on a card. 25e adds NO kernel (BoltEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. It does change shared host code - toolcall.cc (one opt-in option on the Qwen stream: drop a call cut by the end of generation), chat_format, server.cc (the template's enable_thinking comes from the kwargs after the reasoning_effort mapping), CMake - g0.suite runs the other models' template / parser / server tests. The template and tokenizer.json are read from our export's pinned snapshot in the HF cache (B70_BOLT_SNAPSHOT names another) and the tests SKIP 77 without it; nothing of the model is vendored but its config.json and generation_config.json files (tests/model/bolt/, Decision 20)."
 rownote 62 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4): its commands set ZE_AFFINITY_MASK=0,1 themselves; the N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, pp2:6 on two. Run rows 60 and 61 first: the snapshot calls restore into 25d's prefill and 25c's decode, and every comparison here is against those. The synthetics carry tokenizer.json / tokenizer_config.json / chat_template.jinja / generation_config.json (make_synth.py copies them), so b70-serve starts on them; a random-weight synthetic never writes a tool call or a </think>: the reasoning / tool-call paths through HTTP are bolt_request_test's and bolt_stream_test's (host, scripted engine) - the card stages prove the engine half (snapshots, startup, the server's greedy chat == b70-decode, seeded sampling) and, on our g64 export, a real model's A4 and the agentic loop."
 rownote 62 "Decisions this row measures or leaves open (spec 25 §17): the sampling defaults when the snapshot's generation_config.json has no sampling key (EOS 11 only; ours carries NVIDIA's keys: sampled, T 1.0, top-p 0.95, EOS [2, 11]) are NVIDIA's published T 1.0 / top-p 0.95 / EOS [2, 11] with NO top-k (the card names none, vLLM applies none; PROVISIONAL), a reasoning_effort of xhigh maps to the default like high (PROVISIONAL extension of Decision 13's table), the chat template is the snapshot's (its sha256 is printed and compared with Bolt's 6521afc7 in the startup line), and r62.benchy takes the lock itself (gpu-self: serve_benchy.sh does; the plan's table said gpu). The agentic transcript's hit rate has NO bar: it is recorded - truncate_history_thinking drops every earlier turn's reasoning when a new user message arrives (spec 25 §7's known miss), r62.agentic's report prints the first token each miss diverges at."
 rownote 62 "Hand back: bolt_snapshot_gpu_test's lines (the sizes - 170,229,760 B of state and 8,192 B of KV a position at the real shapes - then a / b / c per placement), the startup lines (template sha, sampling defaults, the split, the snapshot size), golden_server_test's chat lines, serve_a4_texts' and score.py's A4 tables with bolt_parser_check's counts (0 failures where the scorer finds a call), the agentic report (hit rate, per-turn cached / ideal / the divergence token) in its three arms, the llama-benchy tables beside the operator's vLLM XPU run of the same checkpoint (the flags of SergiioB's README for their g128 checkpoint: TP 2, fp8 KV, --enable-prefix-caching --mamba-cache-mode align, --tool-call-parser qwen3_coder --reasoning-parser ultra_v3) and SergiioB's published table for their g128 checkpoint (decode 60.5 / 50.7 / 33.5 / 23.0 t/s at 886 / 8k / 32k / 64k, prefill 2925 / 2014 / 871 / 486 t/s)."
-stage r62.k0        62 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): 25e adds no kernel (every binary identical, G0), no existing server / template / tokenizer test changes behaviour (golden_server_test gained two opt-in env vars) - here the host tests that read the patched toolcall.cc / chat_format / server.cc: every template, toolcall and server test, openai_test, minja_ext_test"
-st_r62_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  run_tests '^(template_test|template_ornith_test|template_k2_test|template_kolibri_test|minja_ext_test|toolcall_test|toolcall_k2_test|toolcall_kolibri_test|openai_test|k2_server_test|kolibri_server_test|ornith_server_test|qwen4exp_server_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|spec_accept_test|sampling_test)$' '' 'kv8'
-  finish
-}
 stage r62.host      62 default cpu  -                       -           "template_bolt_test, bolt_tokenizer_test, bolt_stream_test, bolt_request_test, bolt_snapshot_test"
 st_r62_host() {
   run_tests '^(template_bolt_test|bolt_tokenizer_test|bolt_stream_test|bolt_request_test|bolt_serve_args_test|bolt_snapshot_test|bolt_plan_test)$'
@@ -3380,32 +2976,9 @@ st_r62_benchy() {
   finish
 }
 
-# ======================================================================================
-row 67 "the prefill memory-bandwidth profile: which kernels reach ~94 % of the card's 638 GB/s (the operator saw 600+ GB/s on hw-smi during the since-removed Agnes prefill_split_test, l0-int8 at long32k, 2026-10-23) - B70_PREFILL_PROFILE's per-phase L0 GPU time at 32k on Qwen3.8, l0 and l0-int8; the bytes per phase are derived on the Mac from the shapes, so the GB/s per phase is for the decode kernels' work (decode runs ~445 GB/s effective)"
-rownote 67 "Diagnostic, gates nothing. Run it on an idle card in a timed session (Session 6). Watch hw-smi by hand during the arms for the live GB/s (hw-smi needs sudo and a terminal, so the stage does not log it). Hand back r67.profile's log (the two 'prefill phase attribution' tables and the unprofiled pp32768 rows); the per-phase bytes and GB/s table is a Mac edit into docs/BENCHMARKS.md."
-stage r67.profile 67 optin gpu qwen -  "B70_PREFILL_PROFILE=1 b70-decode --bench --prefill-length 32768 --tg 16 --max-len 65536 on Qwen3.8, --prefill-backend l0 and l0-int8: the per-phase L0 GPU ms; then the same two arms unprofiled (interleaved, median of 3) for the wall each table perturbs"
-st_r67_profile() {
-  local b
-  idle before
-  for b in l0-int8 l0; do
-    chk "B70_PREFILL_PROFILE=1 $(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend $b)" "the profiled prefill, qwen $b"
-  done
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 -- \
-qwen-l0-int8 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0-int8)' \
-qwen-l0 '$(bench_cmd "$SNAP_QWEN" --prefill-length 32768 --tg 16 --max-len 65536 --prefill-backend l0)'" "the unprofiled arms"
-  idle after
-  grab_all phases '^(prefill phase attribution|  (norm|dequant|gemm|slab_|i8_|ab_proj|gdn_|silu|attn_|head|TOTAL|instrumented))' 200
-  grab_all idle '^IDLE '
-  finish
-}
 
 row 63 "spec 26a - LiLiCorr P0: the verify / block costs (probe_draft_cost --shapes bolt-lilicorr) and the projection's host tests (plan 26a). Restored 2026-11-01 without the oracle's LiLiCorr form (dflash_ref.py / dflash_accept.py / dflash_p0.sh MODEL=lilicorr stay dropped): its accept / union / vllmref / verdict stages are not run again"
 rownote 63 "Download the drafter (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1"
-stage r63.k0        63 default cpu -                         g0.sha,g0.bitwise,g0.suite "K0 (B0): every pre-existing binary identical; kernel_cmdlines +99 / -0 / ~0 (no existing .cl edited)"
-st_r63_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r63.host      63 default cpu -                         -        "test_lilicorr_p0_project.py, test_expert_union.py; host: lilicorr_cost_names_test"
 st_r63_host() {
   run_tests '^lilicorr_cost_names_test$'
@@ -3413,7 +2986,7 @@ st_r63_host() {
   jgrab host '^lilicorr_cost_names_test$' 'OK|names'
   finish
 }
-stage r63.cost      63 default gpu -                         r63.k0   "probe_draft_cost --shapes bolt-lilicorr at 4096 / 65536"
+stage r63.cost      63 optin   gpu -                         g0.sha   "probe_draft_cost --shapes bolt-lilicorr at 4096 / 65536"
 st_r63_cost() {
   kbins gemv_M8_K4096_N18560_S1_L0 nb_router_M8_K4096 gemv_i8w_M8_K4096_N131072 nb_argmax_stage1_M8_V131072 \
     gemv_M1_K1024_N2304_S1_L1 gemv_M8_K24576_N4096_S1_L1 gemv_i8w_M8_K24576_N4096 gemv_bf16_M8_K24576_N4096 \
@@ -3430,18 +3003,13 @@ row 64 "spec 26b - LiLiCorr on the card: DFlashForm::LiLiCorr, NVFP4 decoded exa
 rownote 64 "Download the drafter (962 MB): hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr --revision 449d24140160b8e51871bfc0f0a7338abf640aa1. D1 against the oracle (r64.d1 / d1_ref) is not restored (2026-11-01): the drafter is judged by the lossless verify and its acceptance on the card."
 rownote 64 "Written on the Mac (spec 26 §13): the descriptor, the NVFP4 decode (all 16 x 256 products, the real checkpoint's 25 linears read), the three formats from (W', g), the twin (tests/kernels/lilicorr_ref.h) against dflash_ref.py's LiLiCorr form on a tiny NVFP4 drafter (candidates and walks equal, the lattice within 1.3e-5 of |2.8|), every ll_* kernel on the Mac's GPU against the twin (tools/mac/clrun/lilicorr_run: exact and int8 arms agree; gemv.cl's int4 does not build there), D1's pipeline on 25a's tiny pair (the twin in fp32 passes every bar; in the engine's bf16 numerics the log-probs move by up to 1.7e-2 - spec 26 §13's caveat for r64.d1's 1e-3 bar). kernel_cmdlines +9 / -0 / ~0 - no existing .cl edited, none of the 9 compiled by ocloc. Every default is spec 26 §11's PROVISIONAL one (int8, K 7, q lattice) and switchable (--format / LiliDrafter's max_k)."
 rownote 64 "Hand back: r64.k1's lilicorr_kernels_test lines (ll_gemv_bf16_g bitwise gemv_bf16 x g, ll_attn's ulps, ll_topk, the head chain's lattice cosine, ll_select, ll_anchor), r64.draft's lilicorr_draft_test lines per format (launches, the projection's ulps and anchor cosine, the draft line, the replay / k 3 / sampled / snapshot / cold lines, the host-timed ms), r64.d1_ref's d1.md (one row per arm) and any FAIL lines."
-stage r64.k0     64 default cpu  -                                              g0.sha,g0.bitwise,g0.suite "D0: no existing command line moved (kernel_cmdlines +9 / -0 / ~0), every pre-existing binary identical, the suite (G0); 26b's edits to shared files: DFlashDesc's third form, DraftFormat::Exact (other drafters refuse it), draft_list_k's LiLiCorr case, dflash_d1's --model lilicorr"
-st_r64_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r64.host   64 default cpu  -                                              -        "host: lilicorr_desc_test, nvfp4_test, lilicorr_repack_test, lilicorr_ref_test (LiLiCorr), lilicorr_names_test, lilicorr_plan_test; host only"
 st_r64_host() {
   run_tests '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$'
   jgrab host '^(lilicorr_desc_test|nvfp4_test|lilicorr_repack_test|lilicorr_ref_test|lilicorr_names_test|lilicorr_plan_test)$' '^[0-9]\.|OK|PASS|drafter in'
   finish
 }
-stage r64.k1     64 default card -                                              r64.k0   "lilicorr_kernels_test: every ll_* kernel against the twin (the 9 new binaries' first ocloc build)"
+stage r64.k1     64 default card -                                              g0.sha   "lilicorr_kernels_test: every ll_* kernel against the twin (the 9 new binaries' first ocloc build)"
 st_r64_k1() {
   kbins df_prep_M8_H4096_I12288_Q32KV2_D128_G16T2_R1024_V131072 ll_attn_M8_Q32KV2_D128_R1024_W1024_P64_H8 \
     ll_topk_R7_N131072_U131072_K8 ll_lattice_S7_K8_HL1024_LH8_B8 ll_select_S7_K8 ll_gemv_bf16_g_M8_K24576_N4096 \
@@ -3462,12 +3030,6 @@ row 65 "spec 26c - LiLiCorr in Bolt's loop and server: verify M <= 8 with taps o
 rownote 65 "Run rows 60-62 (Bolt) and 64 (the drafter on the card) first; the drafter is row 64's download (lilicorr), our g64 export row 57's (bolt_int4), the N 12 synthetics row 59's (bolt_synth). Every stage on the REAL checkpoint needs BOTH cards: its tests / commands set ZE_AFFINITY_MASK=0,1 themselves (the verify lists cross by the copy hand-off only)."
 rownote 65 "Written on the Mac (spec 26 §14): the verify lists at M = 1..8 (25c's walk over a verify scratch at 8 rows, the six taps of every row - device 0's crossing before the hand-off's barrier -, nb_ssm's slot build at every M, the commit moving Control::gdn_live on both cards), the union-aware MoE (nb_moe_union.cl: bitwise the plain M-row form on the Mac's GPU in 10 route cases, each block read once by the counting build), the drafter's prefill tail (each chunk's rows in its window, 8 a replay - the GEMM path NOT built), snapshots with the ring and the anchor, b70-serve --spec dflash|lookup for Bolt (cli/bolt_spec.h; NOT the default), MtpCost::bolt_lilicorr (DERIVED). Host tests: bolt_spec_test (D2 / D4 10^6 draws / Review Focus 3 and 4 over a fake engine), bolt_spec_plan_test. kernel_cmdlines additions only; no existing .cl edited; nothing compiled by ocloc, nothing run on a card. Defaults PROVISIONAL (spec 26 §11): the drafter int8, --spec-max 7, q lattice, the union MoE. Since the zero-config cleanup (2026-11-06) they are the engine's choices: b70-serve takes --spec off|lookup|dflash, --spec-max and --draft-model only (Bolt's --spec auto is off until r65.benchy's D5); the other arms are the card tests' arguments (bolt_dflash_test --format exact|int4, bolt_verify_*_plain, bolt_moe_union_test --time) - no flag, no variable."
 rownote 65 "Hand back: r65.d3's lines (bolt_moe_union_test per I / case, bolt_verify_*'s per M and MoE form, bolt_commit_*'s per j and the ragged line), r65.d2's 'tokens a verify' per K and format (D5's acceptance on the golden prompts and the agentic set), r65.prefill's worst cosine, r65.prefix's lines, r65.serve's IDENTICAL / SEEDED lines and the startup's 'spec dflash:' line, r65.benchy's tables (opt-in), any FAIL lines."
-stage r65.k0      65 default cpu  -                          g0.sha,g0.bitwise,g0.suite "D0: every pre-existing binary identical and the suite (G0) - 26c's edits to shared files: bolt_capture.cc (the walk over a scratch view; the decode list's commands unchanged), BoltEngine (enable_spec / verify / commit, the live slot, read_logits' row), bolt_prefill (defaulted drafter taps), bolt_serve.h (the adapter's spec paths, inert without spec_k), spec_accept / adaptive_k (additions), b70-serve's Bolt flags; Bolt's decode and prefill names (bolt_variant_names_test, bolt_pf_variant_names_test) and the verify names"
-st_r65_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  run_tests '^(bolt_variant_names_test|bolt_pf_variant_names_test|bolt_verify_names_test)$'
-  finish
-}
 stage r65.host    65 default cpu  -                          -        "host: bolt_spec_test (D2 / D4 / Review Focus 3 / 4 over a fake engine, 10^6 draws a case), bolt_spec_plan_test, bolt_verify_names_test, bolt_serve_args_test, bolt_snapshot_test, bolt_request_test, spec_accept_test, adaptive_k_test"
 st_r65_host() {
   run_tests '^(bolt_spec_test|bolt_spec_plan_test|bolt_verify_names_test|bolt_serve_args_test|bolt_snapshot_test|bolt_request_test|spec_accept_test|adaptive_k_test)$'
@@ -3479,7 +3041,7 @@ st_r65_reject() {
   run_tests '^cli_reject_(serve_bolt_(lookup|dflash_lookup|spec_max|dflash_peer|draft_model|draft_vocab|spec_mtp)|bolt_spec)$'
   finish
 }
-stage r65.d3      65 default gpu  bolt_synth                 r65.k0   "D3 + Review Focus 1 + Decision 10 on the cards: the verify binaries' first ocloc build; bolt_moe_union_test (union = plain M-row, bitwise, every I; the counting build); bolt_verify_synth{,_plain,_b16,_eager}_test (N 12, one card) and bolt_verify_real{,_plain}_test (our g64 export's, two cards: SKIP without bolt_g128) - verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV rows, ring columns, SSM slots, taps), the launches per M; bolt_commit_{synth,synth_b16,real}_test - the live slot after commit j = the state after j + 1 steps on both cards, 64 ids after it, 3dc6def360's M 1 and ragged cases"
+stage r65.d3      65 default gpu  bolt_synth                 g0.sha   "D3 + Review Focus 1 + Decision 10 on the cards: the verify binaries' first ocloc build; bolt_moe_union_test (union = plain M-row, bitwise, every I; the counting build); bolt_verify_synth{,_plain,_b16,_eager}_test (N 12, one card) and bolt_verify_real{,_plain}_test (our g64 export's, two cards: SKIP without bolt_g128) - verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV rows, ring columns, SSM slots, taps), the launches per M; bolt_commit_{synth,synth_b16,real}_test - the live slot after commit j = the state after j + 1 steps on both cards, 64 ids after it, 3dc6def360's M 1 and ragged cases"
 st_r65_d3() {
   kbins nb_ssm_M1_H128_P64_N128_G8_S1_SL8 nb_ssm_M8_H128_P64_N128_G8_S1_SL8 nb_ssm_M8_H128_P64_N128_G8_S1_B16_SL8 \
     nb_moe_up_U_M8_I2560_L1024_T9 nb_moe_down_U_M8_I1536_L1024_T9 nb_moe_comb_U_M8_L1024_T9 nb_moe_up_M8_I2304_L1024_T9 \
@@ -3550,13 +3112,8 @@ st_r65_benchy() {
 # ======================================================================================
 row 66 "spec 13a - the batching probe: rows of different sequences in one decode step (the BATCH_ROWS row builds, runtime::build_rows, probe_batch_step under B70_BATCH_PROBE); the check, the step and chunk tables (plan 13a)"
 rownote 66 "Written blind on the Mac (docs/probes/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
-rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (box-day plan Session 6d, the idle protocol of section 1.7), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison."
+rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (the quiet-box session; the idle protocol, docs/10-the-box.md), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison."
 rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13c); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill docs/probes/probe-batching-2026-10-23.md sections 2-4 and the operator's section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
-stage r66.k0    66 default cpu -           g0.sha,g0.bitwise,g0.suite "B0: the default build is main's (G0) - B70_BATCH_PROBE is off there"
-st_r66_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r66.build 66 default cpu -           g0.build "build-batch-probe: -DB70_BATCH_PROBE=ON (the 56 row builds' first ocloc compile, build_rows, probe_batch_step), -j\$JOBS"
 st_r66_build() {
   chk "cmake -S . -B build-batch-probe -DCMAKE_BUILD_TYPE=Release -DB70_BATCH_PROBE=ON $CMAKE_ARGS > /dev/null && cmake --build build-batch-probe -j$JOBS --target probe_batch_step" \
@@ -3595,75 +3152,23 @@ st_r66_chunk() {
 
 # ======================================================================================
 row 68 "spec 28a - the small-M GEMM P0: Qwen3.8's decode linears at M = 1 / 2 / 4 / 8 / 16 (gemv vs bf16 / i8xi4 DPAS stand-ins), the verify step's GEMV / non-GEMV split at M = 1..8, numerics and row independence, the go / no-go line (plan 28a)"
-rownote 68 "Timed stages need the idle protocol (both cards free of DRM holders). Hand back: the shape table, the attribution table, the numerics lines; they fill docs/probes/probe-small-m-gemm-<date>.md and spec 28 §9."
-rownote 68 "Run first on 2026-11-01 as busy-box timing on one card (operator ruling: the other card and the CPU busy) - the record's provisional line; these stages are the quiet-box re-check. r68.check is every stand-in variant against the fp64 reference before any timing (it is what the busy-box session ran first)."
-stage r68.k0       68 default cpu  -           g0.sha,g0.bitwise,g0.suite "G0: no src/ binary changes (the stand-ins are tools/probe's; build_verify's optional ProfileEvents adds no command line)"
-st_r68_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
-stage r68.host     68 default cpu  -           -                     "gemm_sm_ref_test"
-st_r68_host() {
-  run_tests '^gemm_sm_ref_test$'
-  finish
-}
+rownote 68 "The probe is closed: GO, built and merged as 28b (docs/probes/probe-small-m-gemm-2026-11-01.md); its check / shape / attribution / numerics stages are gone. r68.build stays: it builds the stand-in kernels r69.speed's lever table times."
 stage r68.build    68 default cpu  -           g0.build              "probe_small_m and its 347 psm_* binaries, probe_mtp_steps and probe_verify_m (build), -j\$JOBS"
 st_r68_build() {
   chk "cmake --build build -j$JOBS --target probe_small_m probe_mtp_steps probe_verify_m" "probe_small_m and its psm_* binaries, probe_mtp_steps, probe_verify_m"
   finish
-}
-stage r68.check    68 default card -           r68.k0,r68.build      "probe_small_m check: every psm_* variant (bf16 / i8, wB / wA, levers, S sweep, M 1..8 and 16) against the fp64 reference, the quantiser bitwise, property R on random rows"
-st_r68_check() {
-  chk "build/tools/probe/probe_small_m check --shape all" "the check"
-  grab_all check '^check: |FAIL|NO BINARY|GRF ' 200
-  finish
-}
-stage r68.shapes   68 default gpu  -           r68.check             "probe_small_m shapes: every shape at M 1/2/4/8/16, gemv vs bf16 and i8xi4 stand-ins (both orientations), then the levers and the S sweep at M 8; idle, interleaved, median of 5"
-st_r68_shapes() {
-  idle before
-  chk "build/tools/probe/probe_small_m shapes --shape all --m 1,2,4,8,16 --rounds 5" "the shape table"
-  chk "build/tools/probe/probe_small_m levers --shape all --rounds 5" "the levers and the S sweep at M = 8"
-  idle after
-  grab_all shapes '^\| |^box load|^## ' 400
-  finish
-}
-stage r68.attrib   68 default gpu  qwen        r68.build                "probe_verify_m --verify8 at depth 4096 / 32768: the verify step and the per-family table at M 1..8 (and r29.cost's arm if it has not run)"
-st_r68_attrib() {
-  idle before
-  chk "build/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 4096 --replays 32 --rounds 3" "verify8 at 4096"
-  chk "build/tools/probe/probe_verify_m $SNAP_QWEN --verify8 1 --depth 32768 --replays 32 --rounds 3" "verify8 at 32768"
-  chk "build/tools/probe/probe_mtp_steps $SNAP_QWEN 4096 32 3 int8 off 16384 8" "r29.cost's arm (verify M = 1..8 pairs)"
-  idle after
-  grab_all attrib '^\| |^1v|^1p|^verify|^grouped|^the non-GEMV' 300
-  finish
-}
-stage r68.numerics 68 default card qwen        r68.build                "probe_small_m numerics: N2 against the fp64 reference and gemv on layer 62 / 63's weights with real and random rows, property R (1000 trials a shape and arm); the i8xi4 logit error (oracle image) stays a manual step"
-st_r68_numerics() {
-  chk "build/tools/probe/probe_small_m numerics $SNAP_QWEN --shape all --trials 1000" "numerics"
-  grab_all numerics '^\| |^- property R|^numerics:|^real rows' 300
-  finish
-}
-stage r68.verdict  68 manual  -    -           r68.shapes,r68.attrib,r68.numerics "spec 28 §9: the GO / NO-GO line by spec 28 §6"
-st_r68_verdict() {
-  say "# derived verify(8) = r68.attrib's non-GEMV ms at M = 8 + r68.shapes' GEMM sum at M = 8 (the arm and S per shape chosen), in plain steps (1v's M = 1 step)"
-  say "# GO: (a) sum(8) <= 1.25 x gemv's sum(1), (b) verify(8) <= ~1.4 steps, (c) N2 + N3 pass; 1.4-1.6 the operator's call; NO-GO otherwise"
 }
 
 # ======================================================================================
 row 69 "spec 28b - gemm_sm in production: every M >= 2 decode list (MTP / lookup verify, DFlash tap verify - the drafter stays on gemv_i8w -, --parallel pp stage verify, 13a rows; Qwen3.8, Ornith's dense projections) on the small-M DPAS GEMM, M = 1 bitwise; N1-N8, S2-S3, the measured cost table (plan 28b)"
 rownote 69 "N1 is the gate that is never traded: M = 1 lists bind the old binaries. Hand back: the N2 / N3 lines, the M2 cosines per M, the tie census, the verify(M) table and the D1 table."
 rownote 69 "First run 2026-11-01 as busy-box timing on one card per job (operator ruling, as 28a): r69.speed is the quiet-box re-check of those numbers (docs/superpowers/specs/2026-10-27-spec28-small-m-verify-gemm-design.md, '28b as built')."
-stage r69.k0      69 default cpu  -           g0.sha,g0.bitwise,g0.suite "N1: kernel_cmdlines +N / -0 / ~0, every existing binary identical, the suite (G0)"
-st_r69_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r69.host    69 default cpu  -           -                     "gemv_kind_test, gemm_sm_names_test, gemm_sm_ref_test, greedy_tie_test, the AdaptiveK cost-table tests"
 st_r69_host() {
   run_tests '^(gemv_kind_test|gemm_sm_names_test|gemm_sm_ref_test|greedy_tie_test|adaptive_k_test|verify_m8_names_test|dflash_variant_names_test|ornith_mtp_names_test)$'
   finish
 }
-stage r69.kernels 69 default card -           r69.k0                "gemm_sm_test: N2 against the fp64 reference and gemv, N3 property R, every shape and M (and the lever alternates)"
+stage r69.kernels 69 default card -           g0.sha                "gemm_sm_test: N2 against the fp64 reference and gemv, N3 property R, every shape and M (and the lever alternates)"
 st_r69_kernels() {
   chk "build/tests/gemm_sm_test --levers" "gemm_sm_test (N2, N3, every row at every built M)"
   grab_all kernels '^(PASS|FAIL) |^gemm_sm_test' 80
@@ -3728,18 +3233,13 @@ st_r69_d1() {
 row 70 "spec 19f - prompt lookup inside DFlash (--spec dflash-lookup: ENTER >= 8 tokens beyond the drafter's 2048 window, STAY >= 3 accepted, full-depth lookup verify, the drafter's projection kept): D2 / D4 on the mode, speed against plain --spec dflash on the edit / copy set (8k-99k) and A4 / golden (plan 19f)"
 rownote 70 "Needs rows 54-56 passed (plan 19f Tasks 1-2) and the drafter data key. Hand back: the D2 census, the speed table per corpus and depth, the share of ids from lookup (the server's dflash: ... lookup: lines; time in lookup is not split out), the verdict line."
 rownote 70 "Host-side only (no kernel, no command line: D0 is G0). The edit / copy set is tests/golden/edit-copy (tools/spec/edit_copy_set.py: 12 prompts at 8k / 32k / 64k / 99k, each source 4953 .. 96230 ids before the prompt's end). The serving arms run at --max-len 102400 (the 99k prompts) - every arm the same flags otherwise. The verify lists' GEMM / attention are whatever main binds (specs 28b / 28c rebind the M >= 2 lists; the mode does not care)."
-stage r70.k0     70 default cpu  -           g0.sha,g0.bitwise,g0.suite "D0: no kernel binary moved by the mode (it is host-side)"
-st_r70_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r70.host   70 default cpu  -           -                     "lookup_in_dflash_test, the mock serving tests, test_edit_copy_set.py"
 st_r70_host() {
   run_tests '^(lookup_in_dflash_test|dflash_lookup_server_test|prompt_lookup_test|lookup_server_test|mtp_server_test|bolt_serve_args_test|cli_reject_serve_dflash_lookup_.*|cli_reject_serve_spec_value)$'
   chk "python3 tools/spec/test_edit_copy_set.py" "test_edit_copy_set.py (the committed set's --check included)"
   finish
 }
-stage r70.d2     70 default card qwen,dflash r55.gpu,r70.k0        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off under the tie rule; the warm-ring engine test"
+stage r70.d2     70 default card qwen,dflash r55.gpu,g0.sha        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off under the tie rule; the warm-ring engine test"
 st_r70_d2() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   run_tests '^dflash_lookup_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
@@ -3774,27 +3274,13 @@ st_r70_verdict() {
   say "# read r70.speed's per-prompt table (the edit / copy rows per depth) and its RATIO lines; the 'dflash: ... lookup:' server lines give the time in lookup"
 }
 row 75 "plan 5d - prefill chunk 4096: the int8 linears at 4096 rows (P0), the chunk cap through the planner, the gates at 4096 (golden tie rule, consistency, determinism, A4 >= 25 / 36, MTP / DFlash prefill, --parallel pp), speed against 2048"
-rownote 75 "r75.p0 is the stop rule: if the int8 linears are not >= 5 % cheaper per 4096 tokens at 4096 rows, the rest of the plan stops. Hand back: the P0 table, the gate lines, the speed table."
-rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.p0 / r75.speed are the quiet-box re-check. The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
-stage r75.k0    75 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0 at cap 2048: every binary and token as main"
-st_r75_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
+rownote 75 "Run 2026-11-01 (P0) and 2026-11-06 (gates, speed) as busy-box timing - the plan's 'As built' holds the provisional lines (+4.2 % pp4096); r75.speed (opt-in) is the quiet-box re-check; the P0 is decided (5d built and merged). The gates run the same binaries at cap 4096 through the tests' --chunk-cap 4096 argument (tests/chunk_cap_arg.h; the *_cap4096_test registrations) - no environment variable (operator, 2026-11-03)."
 stage r75.host  75 default cpu  -     -                     "buffers_test, the planner's prefill term, the CLI refusals, the prefix-cache hook tests"
 st_r75_host() {
   run_tests '^(memory_plan_test|pipeline_prefill_plan_test|prefix_cache_test|pp_serve_plan_test|dflash_engine_host_test)$'
   finish
 }
-stage r75.p0    75 default gpu  qwen  r75.k0                "probe_chunk_rows: the production prefill linears at M 4096 against 2 x 2048, every shape, h8 and bf16; idle, interleaved, median of 5"
-st_r75_p0() {
-  idle before
-  chk "build/tools/probe/probe_chunk_rows --rounds 5" "the P0 table and the stop rule"
-  idle after
-  grab_all p0 '^\| |^STOP RULE' 60
-  finish
-}
-stage r75.gates 75 default card qwen  r75.k0                "prefill_gate / consistency / determinism at cap 4096 (l0-int8, l0), prefill_split at cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise), buffers_test, A4 on l0-int8, MTP prefill"
+stage r75.gates 75 default card qwen  g0.sha                "prefill_gate / consistency / determinism at cap 4096 (l0-int8, l0), prefill_split at cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise), buffers_test, A4 on l0-int8, MTP prefill"
 st_r75_gates() {
   run_tests '^(buffers_test|linear_i8_cap4096_test|gdn_chunk_cap4096_test|prefill_smoke_cap4096_test|prefill_gate_l0_cap4096_test|prefill_gate_int8_cap4096_test|prefill_consistency_l0_cap4096_test|prefill_determinism_l0_cap4096_test|mtp_prefill_cap4096_test|prefill_split_l0_cap4096_test|prefill_split_l0-int8_cap4096_test)$'
   local a4ref="${A4_REF_DIR:-$TREE/oracle-out-qwen-a4}"
@@ -3811,7 +3297,7 @@ st_r75_gates() {
   chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp --prefill-backend l0-int8 16384 auto --chunk-cap 4096" "memory_plan_box_test at cap 4096, l0-int8, MTP, 16384 and auto"
   finish
 }
-stage r75.pp    75 default gpu  qwen  r75.k0                "--parallel pp prefill at cap 4096: pp_prefill_test (both cards)"
+stage r75.pp    75 default gpu  qwen  g0.sha                "--parallel pp prefill at cap 4096: pp_prefill_test (both cards)"
 st_r75_pp() {
   run_tests '^pp_prefill_cap4096_test$'
   finish
@@ -3835,65 +3321,11 @@ st_r75_speed() {
 
 # ======================================================================================
 row 71 "spec 17a - the TP P0, Qwen3.8 first: links / BARs / peer access, CPU stores into VRAM through the BAR, the all-reduce on every route (P2P push / pull, host-staged + own BAR, host read, host mailbox) at 1 / 8 rows and 128 calls, the per-card step at TP shapes, the go / no-go line (plan 17a)"
-rownote 71 "DONE 2026-11-06: re-checked on a quiet box, GO (docs/probes/probe-tp-2026-11-01.md §8, spec 17 §9); the card stages are opt-in since (a re-measure), host and build stay default so the probe keeps building. Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; these stages are the quiet-box re-check (the record's §7). r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
-rownote 71 "Every two-card stage sets ZE_AFFINITY_MASK=0,1 itself and holds the whole box. Hand back: the facts, the BAR table, the all-reduce table (per route, rows, per call, per token, bitwise, stale caught, CPU phases for host-bar), the per-card step table."
-stage r71.k0      71 default cpu  -     g0.sha,g0.bitwise,g0.suite "G0: no src/ binary changes (the probe's kernels are tools/probe's ptp_*)"
-st_r71_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
+rownote 71 "DONE 2026-11-06: re-checked on a quiet box, GO (docs/probes/probe-tp-2026-11-01.md §8, spec 17 §9); the probe's stages are gone (probe_tp stays for 17b and builds in g0.build); r71.host stays. Run first on 2026-11-01 as busy-box timing (the operator's parallel-development go: every two-card stage held the whole box, the CPU carried other agents' work) - docs/probes/probe-tp-2026-11-01.md and spec 17 §9 hold the PROVISIONAL GO; the quiet-box re-check is the record's §7. r22.devices / r22.p1 are no longer a precondition (17a owns its context code); run them in the same session when they are pending and record them beside this row."
 stage r71.host    71 default cpu  -     -                     "tp_shapes_test, tp_crossing_protocol_test"
 st_r71_host() {
   run_tests '^(tp_shapes_test|tp_crossing_protocol_test)$'
   finish
-}
-stage r71.build   71 default cpu  -     g0.build              "probe_tp and its ptp_* binaries (build), -j\$JOBS"
-st_r71_build() {
-  chk "cmake --build build -j$JOBS --target probe_tp" "probe_tp and its ptp_* binaries"
-  finish
-}
-stage r71.facts   71 optin   gpu  -     r71.build             "offload_links.sh (idle), the BAR lines, the kernel version, probe_tp facts (peer access and P2P properties both ways, the dma-buf BAR mapping); a STOP line stops the row"
-st_r71_facts() {
-  chk "tools/probe/offload_links.sh" "the links (idle)"
-  chk "uname -r; for d in 04:00.0 08:00.0; do lspci -vv -s \$d | grep -E 'Region|LnkSta:'; done" "the BARs and the kernel"
-  chk "ZE_AFFINITY_MASK=0,1 build/tools/probe/probe_tp facts" "probe_tp facts"
-  grab_all facts '^link|^links|^STOP|^\| |Region|^7\.' 80
-  finish
-}
-stage r71.bar     71 optin   gpu  -     r71.facts             "probe_tp bar on each card: the CPU-into-VRAM round trip (dma-buf BAR mapping, pinned host, shared) at 64 B / 20 / 160 KiB"
-st_r71_bar() {
-  idle before
-  chk "ZE_AFFINITY_MASK=0 build/tools/probe/probe_tp bar --iters 2000" "bar, card 0"
-  chk "ZE_AFFINITY_MASK=1 build/tools/probe/probe_tp bar --iters 2000" "bar, card 1"
-  grab_all bar '^\| |^## ' 80
-  finish
-}
-stage r71.ar      71 optin   gpu  -     r71.bar               "probe_tp ar: p2p-push timed at 1 / 8 rows (Qwen3.8) and bitwise over 10^4 replays with both injections caught; host-bar timed with the CPU phases and checked; p2p-pull / host-read / host-mbox smoke (they failed on 2026-11-01)"
-st_r71_ar() {
-  idle before
-  local P="ZE_AFFINITY_MASK=0,1 timeout -k 10 300 build/tools/probe/probe_tp ar"
-  chk "$P --route p2p-push --rows 1,8 --rounds 5 --execs 20" "p2p-push timed"
-  chk "$P --route p2p-push --rows 1 --replays 10000" "p2p-push bitwise, 10^4 replays at M = 1"
-  chk "$P --route p2p-push --rows 8 --replays 1000" "p2p-push bitwise at M = 8"
-  chk "$P --route p2p-push --rows 1 --replays 2 --inject skip-data --spin 65536" "a skipped data write caught"
-  chk "$P --route p2p-push --rows 1 --replays 2 --inject skip-all --spin 65536" "a dropped write caught"
-  chk "$P --route host-bar --rows 1,8 --rounds 5 --execs 10 --host-mem wc --cpu 43" "host-bar timed + CPU phases"
-  chk "$P --route host-bar --rows 1 --replays 300 --host-mem wc --cpu 43" "host-bar bitwise"
-  chk "$P --route p2p-pull,host-read,host-mbox --rows 1 --calls 4 --replays 2 --spin 8192 --timeout 15 --cpu 43 || true" "the routes that failed on 2026-11-01 (smoke)"
-  idle after
-  grab_all ar '^\| |^## |TIMEOUT' 200
-  finish
-}
-stage r71.step    71 optin   card -     r71.build             "probe_tp step on the card: the per-card linears at TP shapes against the one-card shapes, M 1, Qwen3.8; the GEMV sum both ways"
-st_r71_step() {
-  chk "build/tools/probe/probe_tp step --model qwen38" "the per-card step, Qwen3.8"
-  grab_all step '^\| |^GEMV sum|^## ' 60
-  finish
-}
-stage r71.verdict 71 manual  -    -     r71.ar,r71.step       "spec 17 §9: the GO / NO-GO line by spec 17 §R2.7"
-st_r71_verdict() {
-  say "# derived plain TP decode = the per-card GEMV ratio (r71.step) x the one-card profile's GEMV + head ms + half its attention / gdn_step + its other launches, scaled to the unprofiled step (r68.attrib), + r71.ar's 128 calls at M = 1"
-  say "# GO: (a) bitwise 10^4 replays + stale caught, (b) <= ~4.0 ms a token, (c) >= ~44 t/s; 4-5 ms or 40-44 t/s the operator's call; NO-GO otherwise or below Gen3 x8"
 }
 
 # ======================================================================================
@@ -3927,11 +3359,6 @@ st_r76_speed() {
 row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise per card, B2 two concurrent chat clients, B3 a snapshot from card 0 restored on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
 rownote 77 "Everything two-card holds the whole box (kind gpu, ZE_AFFINITY_MASK=0,1 set by each arm). Hand back: r77.r1's R1 lines per --spec (off / mtp / lookup), r77.b2's golden lines, r77.b3 / r77.b4's PASS lines, each card's startup lines (devices, card 0 / card 1 max_len, memory) - the device-1 gap is recorded by Task 6, not gated."
 rownote 77 "Task 6 (speed and record) is not staged yet: aggregate t/s at concurrency 2 against 1 (serve_bench.sh / llama-benchy, admission timing stated), a lone request within 2 % of --parallel 1, the opencode-shaped replay (tools/prefix/make_synth_log.py) against the serial server, and the overlap share of a real opencode session from --log-requests. Rows are added when Task 5 is green."
-stage r77.k0      77 default cpu  -    g0.sha,g0.bitwise,g0.suite "G0: no kernel binary changes; the serial server's gates (golden_gate_*, the suite) as main's"
-st_r77_k0() {
-  need_pass g0.sha g0.bitwise g0.suite
-  finish
-}
 stage r77.host    77 default cpu  -    -                          "host: scheduler_test, dflash_scheduler_test, replica_engine_test, replica_server_test, pipeline_args_test and the serial server's protocol / prefix / mtp / lookup server tests"
 st_r77_host() {
   run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'

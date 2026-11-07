@@ -22,7 +22,7 @@
 #   tools/gpu_lock.sh card N -- <cmd>     card N only (ZE_AFFINITY_MASK=N), beside a job on
 #                                         the other card
 # `flock ~/b70-gpu.lock <cmd>` still takes the whole box, without the gate's priority over
-# card jobs (docs/box-day-plan.md §1.8).
+# card jobs (docs/10-the-box.md, "Two streams, one per card").
 b70_remote_dir() {
   if [ -n "${REMOTE_DIR:-}" ]; then
     printf '%s\n' "$REMOTE_DIR"

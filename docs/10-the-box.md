@@ -58,6 +58,15 @@ uncapped reference (its `MEM=80g` only sized its own plan) plus a GPU job's ~63 
 host memory filled RAM and swap; the kernel killed the reference, and the next job's swapping
 beside a GPU job's weight reads took the NVMe off the bus.
 
+**One CPU model job at a time.** Every CPU reference script (the f32 judges `tools/box_validate/f32_oracle.sh`
+and `f32_refs.sh`, the K2 / Kolibri / Bolt oracles) holds `/tmp/b70-cpu-model.lock` for its whole run and first
+checks MemAvailable (the kernel's estimate of RAM free for a new job) against its own floor (`F32_REF_MIN_GB`,
+`K2_REF_MIN_GB`, `KOL_REF_MIN_GB`, ...): below it the script exits 77, which a stage records as SKIP, not FAIL. They
+run beside non-timed GPU work with `ORACLE_THREADS=22` (half the cores, so the GPU tests keep their host threads),
+never during a build (a compile slows a CPU reference by ~28 %, "Why an idle box matters") and never during a timed
+row. A finished reference lands in the data tree (`~/b70-inference-server/oracle-out-*`);
+`tools/box_validate/data.sh link ~/b70-inference-server <tree>` links it into another tree.
+
 `tools/box.sh` and the benchmark helpers take the machine from
 `BOX=user@host`; there is no default address worth writing down.
 
@@ -104,7 +113,8 @@ Two properties of that script are load-bearing rather than incidental.
   rather than a hardcoded path, so one tree serves every configuration.
 
 **Long jobs must survive the ssh session.** Detach them
-(`setsid nohup <script> >/dev/null 2>&1 </dev/null &`) and poll the log. This is
+(`tools/box.sh run 'tools/probe/detach.sh ~/b70/logs/<topic>/<name>.log <cmd...>'`, which wraps
+`setsid nohup`; the log ends in `ALLDONE rc=<status>`) and poll the log at most every 30 minutes. This is
 not fastidiousness: BuildKit discards *all* completed work, including finished
 layers, if the docker client dies, and a dropped connection can silently lose
 hours.
@@ -120,7 +130,8 @@ Failed and Skipped are counted apart, because a Skipped test is not a pass. Logs
 `tools/gpu_lock.sh`: `box` takes the whole machine (timed rows, two-card work, anything that
 wants an idle grade), `card N` takes one card and runs the command with `ZE_AFFINITY_MASK=N`
 so a second job can use the other card. A whole-box job waiting at the gate stops new card
-jobs, so timed work cannot starve.
+jobs, so timed work cannot starve. The details, and how two validation streams share the
+cards, are in "Two streams, one per card" below.
 
 **Stopping our own jobs** is `tools/box_stop.sh list | cpu-chain | cpu-job <queue name> | hf-tier |
 validation` - it stops only those (TERM, then KILL after 10 s) and refuses anything else.
@@ -152,6 +163,81 @@ compiler changes them with no source changed); a host program from another tree 
 sources with the same settings counts as the same, so the validation run takes box_check's PASSes
 for the half of the suite that needs no model files. Only PASS is kept: a failure or a skip always runs
 again. `tools/box_validate.sh --no-reuse` runs everything.
+
+### Running stages by hand
+
+The rules the orchestrator (the one detached `tools/box_validate/remote.sh` process on the box that runs
+the stages in order) enforces, and what follows from them:
+
+- **A state is commit x baseline.** Results live in `~/b70-validate/<tree>/<HEAD sha12>-vs-<baseline sha12>/`
+  (default baseline `ce36d2d`; `--baseline main` when validating a branch before its merge). Every launch that
+  should add to one state must come from the same commit with the same baseline, or G0 (the stop-the-line
+  check: kernel binaries and gate outputs identical to the baseline build) is not PASS there and every later
+  stage is SKIP "blocked". So when main may move under a long run, launch from a detached worktree
+  (`git worktree add --detach ../b70-boxday main`, with the untracked `tools/box.env` copied in; never commit
+  it). A `-dirty` suffix in the state name means the tree had uncommitted changes. A fix is a new commit and so
+  a new state (G0 again); `--state <old name>` keeps adding to the old one, only for fixes that touch no device
+  code and nothing G0 compares.
+- **Selecting stages.** `--list` and `--dry-run` print every stage with the lock it will take - read them
+  first. `--only <ids or row prefixes>` runs the preflight `pre` plus those and never adds G0 (it must already be
+  PASS in the state); a row prefix (`r22`) means the row's default stages, opt-in ones need their id or
+  `--with <id>`; `--skip <ids>` leaves stages out (they stay "not run" for a later `--only`); `--redo <ids>`
+  runs a PASS again. Manual stages are never run by the orchestrator: their commands are in `--dry-run --with`
+  and in the summary. A stage whose prerequisite is not PASS in this state is SKIP "needs PASS first", so the
+  launch order is also the dependency order.
+- **The preflight.** `--only pre` syncs the tree, extracts the baseline and writes `pre.log` (uptime, cores,
+  `free -g`, `df -h ~`, `/dev/dri`, `ocloc`, the idle grade) and `have.env`, the `HAVE_<key>=0|1` list of data
+  present (`tools/box_validate/data.sh have`) that every stage's needs are checked against. A missing
+  checkpoint or golden set is SKIP "missing data", expected rather than a failure. `have.env` is taken once per
+  launch, so data that arrives later (a download, a remounted disk) needs a fresh launch. `--push-data` pushes
+  the Mac's golden sets first (from the main checkout, found through the git common dir, so a worktree needs no
+  copies).
+- **Attaching.** Re-running the same command re-attaches to a live run; after it finished it launches again and
+  re-runs every stage that is not PASS. `--no-wait` launches and returns, `--status` looks (read only),
+  `--summary` fetches the results and writes `box-validation-<date>.md` without running anything. A dropped ssh
+  connection costs nothing: the orchestrator is detached on the box.
+- **Reading a result.** A timed stage prints `IDLE before` / `IDLE after` lines: quote that grade, and re-run an
+  ITERATE row in a clean window with `--redo <id>`. A FAIL against a bar marked PROPOSED or PROVISIONAL is a
+  reading first: look at the printed distribution before calling it a bug.
+
+## Two streams, one per card
+
+Two orchestrators can run at once, one per card, so two lines of correctness work share the box. The
+locks are `flock(2)` (a lock on a file, released when the holder exits) on files in `$HOME`;
+`tools/gpu_lock.sh`'s header has the protocol in full.
+
+| job | takes, in this order | runs beside |
+|---|---|---|
+| card N: a `card` stage of the device-N orchestrator, or `tools/gpu_lock.sh card N -- <cmd>` | `~/b70-gpu<N>.lock` exclusive, the gate `~/b70-gpu.wait` for an instant, `~/b70-gpu.lock` **shared**; `ZE_AFFINITY_MASK=N` | a card job on the other card |
+| whole box: a `gpu` stage, or `tools/gpu_lock.sh box -- <cmd>` | the gate exclusive while it waits, then `~/b70-gpu.lock` **exclusive** (the gate dropped) | nothing |
+| whole box, the old way: `flock ~/b70-gpu.lock <cmd>`, `gpu-self` stages (their scripts lock themselves) | `~/b70-gpu.lock` exclusive | nothing |
+
+- **The rule.** A card job starts when its card is free and no whole-box job runs *or waits*; a whole-box job
+  starts when no job holds either card. The gate exists because Linux flock has no queue: a shared lock is
+  granted whenever no exclusive one is *held*, so two overlapping card streams would starve a waiting timed job
+  forever. The old `flock ~/b70-gpu.lock` form still excludes everything but skips the gate, so while card
+  streams run take the box with `tools/gpu_lock.sh box -- <cmd>`, and run `gpu-self` stages only when no card
+  stream runs. Card, then gate, then box is the one order, so there is no deadlock. **Never nest**: a job holding
+  one of these locks must not take another (flock on a second open of the same file waits for itself).
+  `tools/gpu_lock.sh status` shows what is held right now.
+- **Two orchestrators, one tree, one state.** Each device has its run lock
+  (`~/b70-validate/<tree>/.run-<N>.lock`). A running stage is claimed (`<id>.claim`): the other orchestrator
+  leaves it alone, and a RUNNING stage whose claim is free belonged to a dead orchestrator and runs again. G0
+  runs alone; a stage that builds holds `.build.lock`; `cpu` stages of the two run one at a time (`.cpu.lock`:
+  the CPU references' RAM, the host tests' fixed `/tmp` directories). Servers listen on 8013 (device 0) and 8113
+  (device 1); `progress.log` marks lines `[d0]` / `[d1]`.
+- **Launching the second stream**, from the same tree and commit after the first one started:
+  `tools/box_validate.sh --device 1 --only <stages> --no-wait`, then `--status` to see both. The driver refuses
+  another state or commit beside a running orchestrator, and `--push-data` (push before the first launch).
+- **Device 1 runs correctness only.** Timed and series rows belong on device 0 (device 1 is ~3.4 % slower on
+  prefill, "Device selection" below); the device-1 dry-run names every whole-box stage in its selection.
+  Two-card stages (`*.pp`, the pipeline-parallel rows) take the whole box when they come.
+- **Split by row family, not inside a chain.** A stage whose prerequisite is RUNNING in the other stream at that
+  moment is SKIP "needs PASS first" (relaunch it later). Pair families that are mostly `card` stages;
+  `tools/box_validate.sh --list --only <rows>` shows each stage's lock.
+- **Host RAM.** Two engines load at once, and each `b70-serve` pins up to 32 GiB of prefix cache sized from
+  MemAvailable at its start. Stages with a host-RAM budget (Qwen3.8-Flash-Next's 51.8 GB PLE table) and the
+  passkey probes (fixed `/tmp/*passkey` directories) therefore stay whole-box.
 
 ## Device selection, and the gotcha
 
@@ -195,6 +281,25 @@ Desktop session daemons routinely hold a DRM file descriptor without submitting
 any work. They still cost the row its record grade, because "submitted no work"
 is a corroboration and not a proof.
 
+### The idle protocol, before timed or two-card work
+
+1. **Read the grade right before the launch** - a reading expires within minutes:
+   `tools/box.sh run tools/box_validate/idle.sh now` prints `IDLE now grade=RECORD|ITERATE`, the container
+   count, the load average and every DRM holder (a process with an open file on a card's `/dev/dri` node) by pid
+   and name.
+2. **Holders are the operator's to end.** We never kill anything on the box that is not ours (ours stop through
+   `tools/box_stop.sh`); report pid, name and the command. Known holders: the GNOME `baobab` / `ptyxis` service
+   daemons (they ignore SIGTERM and need `kill -9`); nautilus, chrome, gnome-control-center and resources open
+   both cards too; killing Xwayland takes the desktop down, so ask.
+3. **Zero containers**: no CPU reference job, no vLLM. Stop the CPU lane for the timed window.
+4. **No second stream**: `tools/box_validate.sh --status` lists both orchestrators, and
+   `tools/gpu_lock.sh status` on the box should show the box, both cards and the gate free.
+5. **Two-card rows need both cards free of other holders.** Their commands set `ZE_AFFINITY_MASK=0,1`
+   themselves; series rows stay on device 0.
+
+The grade is fragile: a desktop daemon or another job's container appearing mid-run turns a row ITERATE. The
+stage's own `IDLE after` line catches it, and `--redo <id>` in a clean window fixes it.
+
 ## The reference stack
 
 The vLLM container that produces the baseline numbers, the exact serve command
@@ -220,6 +325,8 @@ weights. Record the image beside each set.
   `docker run --name X` can fail with exit 125; `docker rm -f X` first.
 - **Never `docker volume prune`** on a box that also runs anything else. It
   takes unrelated named volumes with it.
+- **A non-interactive ssh shell has a short `PATH`.** `uvx` may be only at `~/.local/bin/uvx`, and `icpx`
+  is not on it at all; give full paths in `tools/box.sh run` commands.
 - **Model load for a 27B is 2 to 4 minutes in the reference stack**, and graph
   capture plus compile adds another 2 to 4. Budget about 8 minutes from launch
   to a servable endpoint. Our own loader takes 13.6 s on a warm page cache.

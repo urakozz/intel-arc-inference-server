@@ -6,6 +6,9 @@ branch is merged and pulled into ~/b70/trees/cpu-refs (the chain runs its jobs t
   cd ~/b70 && patch -p1 --dry-run < <tree>/tools/oracle/box-cpu-refs-chain-mem-cap.patch \
            && patch -p1 < <tree>/tools/oracle/box-cpu-refs-chain-mem-cap.patch
 
+After applying: delete the q4exp-reap and q4exp-prune lines from logs/cpu-refs/queue.txt by hand (expert
+pruning was removed 2026-11-07; qwen4exp_oracle.sh's reap / prune modes now exit 2).
+
 What it changes:
 - cpu-refs-chain.sh: CAP_GB=56 (run_in_container.sh's default cap); a line whose peak_gb is above it is
   REFUSED unless its class is Q; class Q = validation not running and ~/b70-gpu.lock free, run with

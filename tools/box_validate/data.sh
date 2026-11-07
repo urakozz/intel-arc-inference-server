@@ -124,8 +124,6 @@ case "${1:-}" in
       complete "${SNAP_Q4EXP_TINY:-qikp/tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next}"
     have q4exp_intel "Intel's Qwen3.8-Flash-Next W4A16 AutoRound checkpoint ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound} (181 GB with the 102.4 GB PLE shards; df -h first)" \
       complete "${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
-    have q4exp_bf16 "the bf16 original ${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next} (360 GB; its 128 PLE shards alone are what the bf16-PLE KL needs)" \
-      complete "${SNAP_Q4EXP_BF16:-Qwen/Qwen3.8-Flash-Next}"
     have oracle_q4exp "oracle-out-q4exp/q4exp_{short,4k,8k,32k,agentic}.{ids,golden.safetensors} (spec 21a: qwen4exp_oracle.sh intel)" \
       bash -c 'for p in q4exp_short q4exp_4k q4exp_8k q4exp_32k q4exp_agentic; do test -s oracle-out-q4exp/$p.ids && test -s oracle-out-q4exp/$p.golden.safetensors || exit 1; done'
     have oracle_q4exp_layers "oracle-out-q4exp-L4/ and -L18/ q4exp_{short,4k,agentic} (spec 21a: qwen4exp_oracle.sh intel-layers 4 / 18 - 21c's --layers N gate)" \
@@ -154,15 +152,13 @@ case "${1:-}" in
       bash -c 'test "$(ls oracle-out-kolibri-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     have oracle_ornith_a4 "oracle-out-ornith-a4/ with Ornith's set and 36 <name>.bf16.txt (spec 15e Task 3: tools/toolcall/a4_ref.sh ornith set / ref on the Mac, then --push-data)" \
       bash -c 'test -s oracle-out-ornith-a4/set/manifest.json && test "$(ls oracle-out-ornith-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
-    have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; spec 22's engine run scores against it)" \
+    have oracle_q4exp_a4 "oracle-out-q4exp-a4/ with Qwen3.8-Flash-Next's set and 36 <name>.bf16.txt (spec 21e Task 5: tools/toolcall/a4_ref.sh qwen4exp set / ref on Intel's checkpoint - --with r34.a4_ref; r34.a4 scores the engine against it)" \
       bash -c 'test -s oracle-out-q4exp-a4/set/manifest.json && test "$(ls oracle-out-q4exp-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
     # The bf16 original Qwen3.8 (row 11's A4 reference, r11.a4_ref).
     have qwen_bf16 "the bf16 original ${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B} (54 GB; r11.a4_ref's reference)" \
       complete "${SNAP_QWEN_BF16:-Qwen/Qwen3.8-27B}"
-    # Queue row 36 (spec 22 P0, plan 22a): the masked reference's KL / argmax files (r36.prune: qwen4exp_oracle.sh
-    # prune) and the probe binary (r36.build; listed for the record - the r36 stages order on r36.build itself).
-    have oracle_q4exp_prune "oracle-out-q4exp-prune/maskeval/*.json (spec 22 P0.8: r36.prune - qwen4exp_oracle.sh prune)" \
-      bash -c 'ls oracle-out-q4exp-prune/maskeval/*.json'
+    # Queue row 36 (spec 22 P0, plan 22a; on hold for the expert-tiering probe): the probe binary (r36.build; listed
+    # for the record - the r36 stages order on r36.build itself).
     have probe_offload_bin "build/tools/probe/probe_offload (spec 22 P0: r36.build - the probe and its two kernels)" \
       test -x build/tools/probe/probe_offload
     # Queue row 54 (spec 19b): the DFlash drafter (3.85 GB; hf download z-lab/Qwen3.8-27B-DFlash2) and 19a's tap dumps
@@ -171,10 +167,6 @@ case "${1:-}" in
       complete "${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
     have oracle_dflash_dumps "oracle-out-19a/dumps/*.taps.safetensors (spec 19a's tap dumps, 2.7 GB: --push-data from the Mac)" \
       bash -c 'ls oracle-out-19a/dumps/*.taps.safetensors'
-    # Queue row 56 (spec 19d): 19a's ranked draft vocabulary (tools/draft_vocab/rank.py over A4 + golden, in-sample;
-    # --push-data from the Mac) for r56.d5_dv's ranked 32k arm.
-    have oracle_dflash_rank "oracle-out-19a/draft_vocab.ranked.ids (spec 19a's ranking, in-sample: --push-data from the Mac)" \
-      test -s oracle-out-19a/draft_vocab.ranked.ids
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
     # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.

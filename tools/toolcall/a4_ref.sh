@@ -69,11 +69,6 @@
 #           the A4 reference is the whole model). Prepared for spec 22: the engine's A4 run on the
 #           whole model waits for it (box-validation-queue row 34's r34.a4_ref makes the reference).
 #           Score with `score.py` (Qwen XML; 0 parse failures of the reference).
-#           MASK=<a spec22-mask-1 file> (spec 22 P0.8, `ref` only): the same reference under the expert
-#           mask (oracle_generate.py --expert-mask: the router on the kept set, LOSSY) -> $OUT/<name>.mask-
-#           <tag>.{ids,txt,gap} beside the full run's .bf16.* (<tag> the file name without mask- and
-#           .safetensors; DONE.mask-<tag> when complete); the file is copied into the run's directory
-#           (the container mounts only this tree). ONLY= runs a fold's scenarios on its fold's mask.
 # Then on the box: tools/toolcall/engine_generate.sh with the same set and N_NEW, and
 # tools/toolcall/score.py <dir> bf16 <engine runs> (box-validation-queue rows 16 / 25).
 #
@@ -123,7 +118,7 @@
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
 # ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto; qwen: ignored), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
-# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK;
+# TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE;
 # bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
 set -eu
 cd "$(dirname "$0")/../.."
@@ -249,19 +244,8 @@ else
     cmd_ref="$cmd_ref --only $ONLY"
   fi
 fi
-# Spec 22 P0.8: MASK (qwen4exp ref only) - the expert-masked reference, its outputs tagged .mask-<tag>.
-mask_base="" done_file=DONE
+done_file=DONE
 [ "$m" = bolt ] && done_file=DONE.$run_tag
-if [ -n "${MASK:-}" ]; then
-  [ "$m" = qwen4exp ] && [ "$step" = ref ] || { echo "a4_ref: MASK is qwen4exp's ref only" >&2; exit 2; }
-  [ -f "$MASK" ] || { echo "a4_ref: MASK=$MASK: no such file" >&2; exit 2; }
-  mask_base=$(basename "$MASK")
-  [[ "$mask_base" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "a4_ref: MASK's file name ($mask_base)" >&2; exit 2; }
-  tag=${mask_base%.safetensors}
-  tag=mask-${tag#mask-}
-  done_file=DONE.$tag
-  [ -n "$name_given" ] || NAME=a4-ref-$m-$tag
-fi
 
 # qwen4exp: transformers 5.19.0 from the site directory first on PYTHONPATH (made in the container
 # once by tools/oracle/qwen4exp_env.sh - pip --no-deps --target, the image never changed), the
@@ -308,10 +292,6 @@ if [ $mac = 0 ]; then   # the box: the reference image, foreground
   if [ -n "${MODEL_DIR:-}" ]; then export ORACLE_SNAP="${MODEL_DIR%/}"; else export ORACLE_MODEL="$cache_name"; fi
   [ -n "${ORACLE_THREADS:-}" ] && export ORACLE_THREADS
   rc=0
-  if [ -n "$mask_base" ]; then
-    cp -f "$MASK" "$work/$mask_base"
-    cmd_ref="$cmd_ref --expert-mask /ws/$work/$mask_base"
-  fi
   # The container's cap is run_in_container.sh's (56g by default, swap off; above it only with the
   # cards idle): MEM (e.g. 48g) sets both the cap and the memory plan's budget, so they agree; unset,
   # the plan reads the cap from the container's memory.max.
@@ -357,10 +337,6 @@ if [ "$step" = set ]; then
   "${run[@]}" --rm --entrypoint python3 "$IMAGE" tools/toolcall/make_set.py --from tests/golden/toolcall \
     "$S" "/ws/$OUT/set" ${kw[@]+"${kw[@]}"}
   exit $?
-fi
-if [ -n "$mask_base" ]; then
-  cp -f "$MASK" "$OUT/$mask_base"
-  cmd_ref="$cmd_ref --expert-mask /ws/$OUT/$mask_base"
 fi
 if [ "${FOREGROUND:-0}" = 1 ]; then   # attached: the caller holds the Mac's lock for the whole run
   "${run[@]}" --rm "$IMAGE" sh -c "$pre$cmd_ref $S /ws/$OUT/set /ws/$OUT --new-tokens $new >> /ws/$OUT/ref.log 2>&1 && echo done > /ws/$OUT/$done_file"

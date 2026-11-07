@@ -374,7 +374,7 @@ std::string budget_json(const ExpertBudget& b);  // one line: {"max_len":..,"dev
 - Modify: `docs/superpowers/plans/box-validation-queue.md` (row 36), `tools/box_validate/stages.sh` (a `row 36` block
   after row 34's - row 35 belongs to the W4A4 probe and is not touched), `tools/box_validate/data.sh` (`have
   oracle_q4exp_prune`: the maskeval JSONs; `have probe_offload_bin`), `tools/box_validate/test_box_validate.py` only if
-  a new stage kind needs it, `docs/box-day-plan.md` (a spec 22 session after spec 21's rows: cards, RAM rule, order)
+  a new stage kind needs it, the box-day plan (deleted 2026-11-07; a spec 22 session after spec 21's rows: cards, RAM rule, order)
 - Create: `docs/probes/probe-offload-<date>.md`
 - Modify (at the end): `docs/superpowers/specs/2026-10-09-spec22-moe-expert-offload-design.md` (§1's facts: the
   measured links, P, the PLE rate from `r32.ple_rate`; a "P0 as measured" section; decisions 1-9 each with its evidence
