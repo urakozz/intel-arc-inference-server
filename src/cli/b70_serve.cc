@@ -256,6 +256,7 @@ int serve_k2(const K2Serve& a, server::Options options) {
   options.eos_ids = eos;
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(context, a.prefix_auto, a.prefix_cache_gb, options);
+  options.parallel_desc = "1 card";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);
@@ -342,6 +343,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  options.parallel_desc = "pp - the layers split over 2 cards (Kolibri-1 needs both)";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
       devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
@@ -492,6 +494,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   options.stop_strings = gen.stops;
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
+  options.parallel_desc = "pp - the layers split over 2 cards (Nemotron 3.5 Bolt needs both)";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
       devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
@@ -735,6 +738,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   // Pinned host memory of the one context both cards share: either device's copies reach it.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  options.parallel_desc = "pp - the layers split over 2 cards";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, settled.max_len);
@@ -837,6 +841,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
   // The prompt's cut is the serial server's: hooked (every chunk ends at a stride end) when the cache is on.
   cli::ReplicaEngine replica({{adapters[0].get(), caps[0]}, {adapters[1].get(), caps[1]}},
                              /*hooked=*/options.prefix_cache_bytes != 0, /*wide_stride=*/true);
+  options.parallel_desc = "replica - one copy of the model per card, two requests at once";
   server::Server server({tokenizer, chat_template, *adapters[0]}, options, &replica);
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, --parallel replica: 2 requests at once, max_len %u / %u, eos ",
                options.served_model.c_str(), options.host.c_str(), options.port, lens[0], lens[1]);
@@ -1329,6 +1334,7 @@ int run(int argc, char** argv) {
   // Sized after the model is loaded, so "available" already excludes the process's own load.
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(context, prefix_auto, prefix_cache_gb, options);
+  options.parallel_desc = "1 card";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
 
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),

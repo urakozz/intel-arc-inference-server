@@ -156,6 +156,36 @@ bool Server::bind() {
 
 bool Server::listen() {
   if (!bind()) return false;
+  // One line when the server is up: where, which model, how it uses the cards, the speculative decoding the engine
+  // resolved (not the flags asked), the context each card holds, the prefix cache.
+  {
+    EngineIface& e = deps_.engine;
+    std::string spec = "off";
+    if (opts_.spec_lookup) {
+      spec = "prompt lookup, K <= " + std::to_string(e.verify_k()) + " adaptive per request";
+    } else if (e.mtp_k() > 0) {
+      spec = std::string(e.dflash_window() > 0 ? "dflash" : "mtp") + ", K <= " + std::to_string(e.mtp_k()) +
+             (opts_.mtp_auto ? " adaptive per request" : " fixed") +
+             (opts_.spec_dflash_lookup ? ", lookup inside dflash" : "");
+    }
+    std::string ctx;
+    if (impl_->batch) {
+      for (uint32_t s = 0; s < impl_->batch->slots(); ++s)
+        ctx += (s ? " / " : "") + std::to_string(impl_->batch->slot_max_len(s));
+      ctx += " ids (card 0 / card 1)";
+    } else {
+      ctx = std::to_string(e.max_len()) + " ids";
+    }
+    const std::string prefix = opts_.prefix_cache_bytes
+                                   ? std::to_string(opts_.prefix_cache_bytes >> 30) + " GiB of system RAM"
+                                   : std::string(impl_->batch ? "per card, one host store" : "off");
+    std::fprintf(stderr, "b70-serve: ready on http://%s:%d - model %s%s%s; speculative decoding %s; context %s;"
+                         " prefix cache %s\n",
+                 opts_.host.c_str(), impl_->port, opts_.served_model.c_str(),
+                 opts_.parallel_desc.empty() ? "" : "; parallel ", opts_.parallel_desc.c_str(), spec.c_str(),
+                 ctx.c_str(), prefix.c_str());
+    std::fflush(stderr);
+  }
   return impl_->svr.listen_after_bind();
 }
 
