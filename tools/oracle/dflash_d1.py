@@ -68,9 +68,11 @@ def cosine(a, b) -> float:
 # own engine-vs-reference score noise, 1 bf16 ulp of the top score).
 # Operator ruling 2026-11-07 (r54.d1_ref: one int8 draft, a4/t2_explain-step p 1042, splits at a 0.004 dead heat after
 # spec 28d's GEMM change, cosine 0.9999979): measure that draft first (the command in docs/open-work.md, Waiting, row
-# 19), then widen the window to twice the row's noise if the measurement confirms it is a rounding split. PREPARED,
-# NOT ENABLED: 1.0 is the 2026-10-29 rule; enabling the widening is this one edit, 1.0 -> 2.0, nothing else.
-WALK_TIE_NOISE_X = 1.0
+# 19), then widen the window to twice the row's noise if the measurement confirms it is a rounding split.
+# ENABLED 2026-11-08 on the measurement (box CPU, both int8 arms): the split at row 4 has the reference's margin
+# 0.33336 against a row noise of 0.18675 (1.8 x the noise; 1 bf16 ulp 0.1250) while the engine's own margin is 0.00430 -
+# both picks sit inside each other's rounding, as the ruling expected. 1.0 was the 2026-10-29 rule.
+WALK_TIE_NOISE_X = 2.0
 
 
 def compare(rec: dict, out, logits_row) -> dict:
