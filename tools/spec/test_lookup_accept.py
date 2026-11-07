@@ -146,6 +146,30 @@ def test_load_logs_and_seed():
                         "--verify-cost", "1,1.18,1.56,1.79"]) == 0
 
 
+def _write_dump(path, name, ids, n_prompt):
+    """A dump_taps-format safetensors file with only what load_dumps reads (ids, n_prompt / name) - torch-free.
+    Also used by test_lilicorr_p0_project.py."""
+    import struct
+    raw = struct.pack(f"<{len(ids)}i", *ids)
+    hdr = {"__metadata__": {"name": name, "n_prompt": str(n_prompt), "n": str(len(ids))},
+           "ids": {"dtype": "I32", "shape": [len(ids)], "data_offsets": [0, len(raw)]}}
+    h = json.dumps(hdr).encode()
+    h += b" " * ((8 - len(h) % 8) % 8)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(h)) + h + raw)
+
+
+def test_load_dumps():
+    # lilicorr_p0_project.py --dumps: each dump's ids split at n_prompt, grouped by corpus.
+    with tempfile.TemporaryDirectory() as d:
+        rep = list(range(100, 140))
+        _write_dump(os.path.join(d, "code__a.taps.safetensors"), "code/a", rep + rep[:30], 40)
+        _write_dump(os.path.join(d, "prose__b.taps.safetensors"), "prose/b", list(range(50)), 20)
+        seqs = la.load_dumps(d)
+        assert [s["name"] for s in seqs] == ["code/a", "prose/b"] and [s["group"] for s in seqs] == ["code", "prose"]
+        assert seqs[0]["prompt_ids"] == rep and seqs[0]["out_ids"] == rep[:30] and len(seqs[1]["out_ids"]) == 30
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
