@@ -207,6 +207,35 @@ def test_reviewed_rows_of_the_header():
     assert rows[0][0].startswith("mtp_gpu_") and rows[0][1] == 0
 
 
+def test_decode_records():
+    """serve_client.py record: b70-decode's prompt / output ids as records serve_judge.py judges like a server's."""
+    import serve_client as sc
+    tmp = tempfile.mkdtemp(prefix="serve_record_test_")
+    files = {}
+    for n, v in (("p", PROMPT), ("off", OFF), ("spec", SPEC)):
+        files[n] = os.path.join(tmp, n + ".ids")
+        with open(files[n], "w") as f:
+            f.write("\n".join(map(str, v)) + "\n")
+    for label, k in (("off", "off"), ("mtp", "spec")):
+        rc = sc.main(["record", "--out", os.path.join(tmp, "runs", label + ".r1", "requests.jsonl"), "--label", label,
+                      "--set", "golden", "--name", "long", "--prompt", files["p"], "--ids", files[k]])
+        assert rc == 0
+    rc = sc.main(["record", "--out", os.path.join(tmp, "runs", "mtp.r1", "requests.jsonl"), "--label", "mtp",
+                  "--set", "golden", "--name", "long", "--prompt", files["p"], "--ids", files["spec"]])
+    assert rc == 0                                               # a re-run replaces its record
+    recs = sc.records(os.path.join(tmp, "runs"))
+    assert len(recs) == 2, recs
+    assert sorted(r["label"] for r in recs) == ["mtp", "off"], recs
+    assert all(r["prompt_ids"] == PROMPT for r in recs), recs
+    assert sc.main(["record", "--out", os.path.join(tmp, "x.jsonl"), "--label", "x", "--set", "g", "--name", "n",
+                    "--prompt", os.path.join(tmp, "absent.ids"), "--ids", files["off"]]) == 1
+    out = subprocess.run([sys.executable, os.path.join(HERE, "serve_judge.py"), "--dir", os.path.join(tmp, "runs"),
+                          "--ref", "off", "--dump", os.path.join(tmp, "dump"), "--judge", os.path.join(tmp, "judge")],
+                         capture_output=True, text=True)
+    assert out.returncode == 77, out.stdout + out.stderr          # a difference, no reference: SKIP, never PASS
+    assert "AWAITING f32 reference" in out.stdout, out.stdout
+
+
 def main(argv):
     tests = {k: v for k, v in globals().items() if k.startswith("test_") and callable(v)}
     names = argv or sorted(tests)

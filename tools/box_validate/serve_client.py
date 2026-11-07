@@ -6,6 +6,7 @@
       [--label ARM] [--round N] [--server-log DIR] [--warmup 1] [--stop-at-eos]
   serve_client.py table   --dir D [--ref ARM] [--ratio A/B]... [--metric gen_tps|wall_tps]
   serve_client.py compare --dir D --ref ARM [--round N]
+  serve_client.py record  --out arm.r1/requests.jsonl --label ARM --set S --name N --prompt P.ids --ids OUT.ids
 
 `run` sends one OpenAI request per prompt, one at a time, temperature 0 (greedy), with
 `return_token_ids` so the output ids come back:
@@ -34,6 +35,9 @@ over rounds of --metric per arm, then `RATIO <arm>/<ref> <set> geomean x` per ar
 arm's output ids; prints `IDENTICAL a vs ref: n/n` or the first differing index; exit 1 on
 any difference or missing request. Since spec 28b / 28c a speculative arm's identity is a recorded
 number, not a bar: serve_judge.py judges each difference by the f32 judge (spec_judge.h's rule).
+`record` writes one record (label, round, set, name, prompt_ids, out_ids; a re-run replaces its own) made from a b70-decode run's
+--ids prompt and its stdout ids, so the rows that compare b70-decode arms without the server go through the same
+compare / serve_judge.py (b70-decode loads the int8 head and prefills with l0, as b70-serve does).
 """
 import argparse
 import glob
@@ -272,6 +276,27 @@ def compare(a):
     return 1 if bad else 0
 
 
+def record(a):
+    prompt, ids = read_ids(a.prompt), read_ids(a.ids)
+    if prompt is None or ids is None:
+        print(f"serve_client record: cannot read {a.prompt if prompt is None else a.ids}")
+        return 1
+    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
+    rec = {"label": a.label, "round": a.round, "set": a.set, "name": a.name, "endpoint": "b70-decode",
+           "prompt_tokens": len(prompt), "prompt_ids_match": None, "prompt_ids": prompt,
+           "completion_tokens": len(ids), "out_ids": ids}
+    keep = []   # a re-run replaces its own record (the same label, round, set and name), keeps the others
+    if os.path.exists(a.out):
+        with open(a.out, encoding="utf-8") as f:
+            keep = [ln for ln in f if ln.strip() and
+                    [json.loads(ln).get(k) for k in ("label", "round", "set", "name")] != [a.label, a.round, a.set, a.name]]
+    with open(a.out, "w", encoding="utf-8") as f:
+        f.writelines(keep)
+        f.write(json.dumps(rec) + "\n")
+    print(f"REQ {a.label} r{a.round} {a.set}/{a.name} prompt={len(prompt)} out={len(ids)} (b70-decode)")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -298,8 +323,16 @@ def main(argv=None):
     c.add_argument("--dir", required=True)
     c.add_argument("--ref", required=True)
     c.add_argument("--round", type=int)
+    d = sub.add_parser("record")
+    d.add_argument("--out", required=True)
+    d.add_argument("--label", required=True)
+    d.add_argument("--round", type=int, default=1)
+    d.add_argument("--set", required=True)
+    d.add_argument("--name", required=True)
+    d.add_argument("--prompt", required=True, help="the --ids file b70-decode was given")
+    d.add_argument("--ids", required=True, help="b70-decode's stdout: the generated ids")
     a = ap.parse_args(argv)
-    return {"run": run, "table": table, "compare": compare}[a.cmd](a)
+    return {"run": run, "table": table, "compare": compare, "record": record}[a.cmd](a)
 
 
 if __name__ == "__main__":
