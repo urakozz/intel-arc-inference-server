@@ -1430,8 +1430,11 @@ exec "$@"
     if(TARGET mtp_gpu_test)
       add_test(NAME mtp_gpu_${_tag}_test COMMAND sh -c "${_b70_longctx_gate}" b70_longctx
         $<TARGET_FILE:mtp_gpu_test> ${B70_TEST_SNAPSHOT} l0-int8 --max-len ${_len})
+      # The bf16-unstable rule's references as for mtp_gpu_test (operator 2026-11-07: the same prompts and positions;
+      # their own contexts' bf16 top-k files come from f32_refs.sh bf16top-qwen over r69.forced_dumps' longctx dumps).
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
-        SKIP_RETURN_CODE 77 ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8}"
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     endif()
   endforeach()
