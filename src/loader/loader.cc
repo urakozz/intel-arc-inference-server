@@ -279,9 +279,8 @@ size_t int4_scale_elems(const model::GemvShape& s) {
 // first real consumer - these run in release too, load is one-shot), repack
 // into staging and upload with a single copy.
 DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
-                         NameView& view, const model::ModelDesc& desc,
-                         const std::string& layer_prefix, const model::FusedLinear& fl,
-                         Staging& st, LoadReport& rep) {
+                         NameView& view, const std::string& layer_prefix,
+                         const model::FusedLinear& fl, Staging& st, LoadReport& rep) {
   const model::GemvShape& sh = fl.shape;
   const std::string id = std::string(id_name(fl.id)) + " (" + layer_prefix + fl.parts[0] + ")";
   if (sh.K % 64 != 0 || sh.N % 16 != 0)
@@ -412,8 +411,8 @@ DeviceWeight load_linear(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSe
 // load_linear just repacked (it checked them), the same column map, dequantised by the
 // prefill dequant's arithmetic and tiled for pf_ab_proj. Read by nothing on decode.
 DeviceWeight load_ab_prefill(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set,
-                             const model::ModelDesc& desc, const std::string& layer_prefix,
-                             const model::FusedLinear& fl, LoadReport& rep) {
+                             const std::string& layer_prefix, const model::FusedLinear& fl,
+                             LoadReport& rep) {
   const std::string id = "AB prefill copy (" + layer_prefix + fl.parts[0] + ")";
   std::vector<LinearSrc> srcs;
   for (const std::string& part : fl.parts)
@@ -892,9 +891,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
         continue;
       const model::FusedLinear& row = fl.id == model::LinearId::AB ? *ab_row : fl;
       m.linears.emplace(std::make_pair(ld.index, fl.id),
-                        load_linear(ctx, imm, set, view, desc, lp, row, st, m.report));
+                        load_linear(ctx, imm, set, view, lp, row, st, m.report));
       if (fl.id == model::LinearId::AB && ab_int4)
-        m.ab_prefill.emplace(ld.index, load_ab_prefill(ctx, imm, set, desc, lp, row, m.report));
+        m.ab_prefill.emplace(ld.index, load_ab_prefill(ctx, imm, set, lp, row, m.report));
     }
     m.layer_small.push_back(load_small(ctx, imm, set, view, desc, ld, m.report, widen));
     if (desc.is_moe()) {
@@ -909,7 +908,7 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                            " B, not the " + std::to_string(moe_bytes(desc)) +
                            " B loader::moe_bytes() plans");
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
-                    load_linear(ctx, imm, set, view, desc, "", lm_row, st, m.report));
+                    load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
   // Spec 8 §11: V' and its compact head, gathered from the host copy of the head
   // `load_linear` just made and uploaded - st.i8 / st.i8_scales for int8 (the
   // quantisation), st.bf_tiled for bf16 (the tiling) - so no byte comes back from the
