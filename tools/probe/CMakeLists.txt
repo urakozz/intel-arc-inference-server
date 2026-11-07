@@ -980,3 +980,7 @@ foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14
     add_dependencies(probe_tp kernel_${v})
   endif()
 endforeach()
+# --- probe_reset: what Engine::reset()'s persistent fills cost at max_len small vs auto (branch cheap-reset) ---
+add_executable(probe_reset probe_reset.cc)
+target_include_directories(probe_reset PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_reset PRIVATE b70_runtime b70_model b70_l0)
