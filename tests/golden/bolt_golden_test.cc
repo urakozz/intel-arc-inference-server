@@ -42,7 +42,10 @@
 // blocks upstream of it at the last prompt row - and everything after it is printed, never failed on. With no flip every
 // bar binds on everything. A block's h MEDIAN bar binds only when it has >= 8 rows before the flip (the operator's second
 // ruling of 2026-11-05: a median of one or two rows is a per-row bar); below that its MIN bar binds alone. In prefill mode the prompt goes in chunk calls (each on the 64-grid: bitwise one call, Review
-// Focus 1) so every prompt row's routes are compared. A real checkpoint keeps the rules above unchanged.
+// Focus 1) so every prompt row's routes are compared.
+// **The real checkpoint (operator ruling 2026-11-08, option A, until its f32 reference exists - option B, open-work)**: the
+// same first-flip cut-off for the routing, the SSM state / conv columns and the h taps, but the TOKENS gate on every
+// decision row (tie-aware), before and after the flip. Its prefill mode still compares the last chunk's route rows only.
 //
 // argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
 //       [prefill | prefill:<chunk>]
@@ -236,10 +239,11 @@ int main(int argc, char** argv) {
   const uint32_t K = kernels::bolt::kTopK;
   std::printf("\n================ %s: %u prompt ids, %u generated ================\n", pname.c_str(), T, kGen);
   RouteCount rc;
-  // The first-flip cut-off (header): enabled on 25b's synthetics only.
+  // The first-flip cut-off (header): on 25b's synthetics and, since 2026-11-08, the real checkpoint (its tokens gate on
+  // every row).
   const bool synth = std::ifstream(snap + "/bolt_synth.json").good();
   bolt_cutoff::Cut cut;
-  cut.enabled = synth;
+  cut.enabled = true;
   std::vector<char> first(d.layers, 0);
   std::vector<std::vector<double>> hcos(d.layers), hgate(d.layers);   // every row's; the rows upstream of the flip
   std::vector<double> sa, sb;
@@ -342,7 +346,7 @@ int main(int argc, char** argv) {
     const std::vector<float> lg = eng.read_logits();
     logit_min = std::min(logit_min, golden::compare_f32(lg.data(), want, d.vocab, sa, sb).cos);
     const golden::GoldenDecision dec = golden::golden_decision(want, d.vocab, d.vocab_used);
-    const bool gated = cut.row_clean(row);
+    const bool gated = !synth || cut.row_clean(row);
     if (!gated) {
       ++after;
       after_ok += dec.contains(got) ? 1 : 0;
@@ -365,8 +369,8 @@ int main(int argc, char** argv) {
     check_row(T + j);
   }
   const bool gate_ok = det_ok == det && tie_ok == ties;
-  if (synth)
-    std::printf("  the first-flip cut-off (synthetic; header): %s; bars bind upstream of it\n",
+  if (cut.enabled)
+    std::printf("  the first-flip cut-off (%s; header): %s; bars bind upstream of it\n", synth ? "synthetic" : "real, tokens gate everywhere",
                 cut.found ? ("the first flip at row " + std::to_string(cut.row) + ", L" + std::to_string(cut.block)).c_str()
                           : "no flip - every bar binds on everything");
   std::printf("  gate: %u / %u determined rows exact, %u / %u tie rows in the argmax set%s; logits worst cosine %.6f\n",
@@ -377,7 +381,7 @@ int main(int argc, char** argv) {
               state_exact, state_total, state_worst, kStateCos);
   std::printf("  conv columns after the prompt: %zu / %zu values exact, worst cosine %.6f\n", conv_exact, conv_total,
               conv_worst);
-  if (synth)
+  if (cut.enabled)
     std::printf("  upstream of the flip, gated: SSM state worst %.6f, conv worst %.6f over the Mamba blocks [%s]\n",
                 state_gate, conv_gate, gated_blocks.c_str());
   bool h_ok = true;
@@ -387,15 +391,15 @@ int main(int argc, char** argv) {
     const double mn = hcos[l].empty() ? 1.0 : *std::min_element(hcos[l].begin(), hcos[l].end());
     std::printf(" %u:%.5f/%.4f", l, med, mn);
   }
-  if (synth) std::printf("\n  h upstream of the flip, gated (rows / median / min per block):");
+  if (cut.enabled) std::printf("\n  h upstream of the flip, gated (rows / median / min per block):");
   for (uint32_t l = 0; l < d.layers; ++l) {
     const double med = median(hgate[l]);
     const double mn = hgate[l].empty() ? 1.0 : *std::min_element(hgate[l].begin(), hgate[l].end());
-    // the median binds on a synthetic only with >= 8 gated rows (operator ruling 2026-11-05, the second; bolt_cutoff.h)
-    if (synth)
+    // the median binds only with >= 8 gated rows (operator ruling 2026-11-05, the second; bolt_cutoff.h)
+    if (cut.enabled)
       std::printf(" %u:%zu/%.5f%s/%.4f", l, hgate[l].size(), med,
-                  bolt_cutoff::median_binds(synth, hgate[l].size()) ? "" : "(printed)", mn);
-    h_ok = h_ok && bolt_cutoff::h_block_ok(synth, hgate[l].size(), med, mn, kHMedian, kHMin);
+                  bolt_cutoff::median_binds(cut.enabled, hgate[l].size()) ? "" : "(printed)", mn);
+    h_ok = h_ok && bolt_cutoff::h_block_ok(cut.enabled, hgate[l].size(), med, mn, kHMedian, kHMin);
   }
   std::printf("\nrouting: %llu (row, block) (%llu exact sets, %llu near-ties within %.1e, %llu undetermined (gap 0), %llu "
               "differing%s; matching weights worst %lld fp32 ulps)\n", (unsigned long long)cut.pairs,
