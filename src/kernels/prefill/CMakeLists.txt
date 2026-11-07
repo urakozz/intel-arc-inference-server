@@ -120,7 +120,20 @@ add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=
 # runtime::prefill::pf_small_tile binds (A1_B2_S1 to 16 rows, A2_B2_S1 to 128, A4_B2_S1 to 256,
 # A4_B4_S4 to 1024; tools/probe/probe_small_chunk.cc swept NA 1/2/4 x NB 2/4 x SN 1/2/4). 256 GRF
 # where the accumulators alone fill 128 (NA x NB >= 8). Additive: no existing binary changes.
-foreach(tile "1 2 1" "2 2 1" "4 2 1" "4 4 4")
+# -DB70_PF_SMALL_SWEEP=ON builds the probe's whole sweep instead (probe_small_chunk --small ...).
+option(B70_PF_SMALL_SWEEP "build every pf_gemm_small tile probe_small_chunk sweeps" OFF)
+set(_pf_small_tiles "1 2 1" "2 2 1" "4 2 1" "4 4 4")
+if(B70_PF_SMALL_SWEEP)
+  set(_pf_small_tiles "")
+  foreach(NA 1 2 4)
+    foreach(NB 2 4)
+      foreach(SN 1 2 4)
+        list(APPEND _pf_small_tiles "${NA} ${NB} ${SN}")
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
+foreach(tile IN LISTS _pf_small_tiles)
   separate_arguments(_t UNIX_COMMAND "${tile}")
   list(GET _t 0 NA)
   list(GET _t 1 NB)
