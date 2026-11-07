@@ -25,6 +25,11 @@
 # the spec 14 and 15b checklists name as "bitwise identical to main's last record".
 : "${G0_BITWISE_RE:=^(golden_gate_test|golden_gate_i8head_test|prefill_gate_l0_test|prefill_gate_int8_test|prefill_gate_l0_i8head_test|prefill_gate_int8_i8head_test|replay_determinism_test|replay_determinism_i8head_test|buffers_test|prefill_smoke_test|load_checkpoint_test)$}"
 ORNITH_ORACLE_MODEL=models--urakozz--Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
+# decode_record DIR LABEL NAME PROMPT OUT - one b70-decode run (its --ids PROMPT, its stdout OUT) as a record under
+# DIR/LABEL.r1, so a b70-decode row's arms go through serve_client.py compare and serve_judge (operator 2026-11-07)
+decode_record() {
+  chk "python3 tools/box_validate/serve_client.py record --out $1/$2.r1/requests.jsonl --label $2 --set decode --name $3 --prompt $4 --ids $5" "the $2 / $3 record"
+}
 
 # ======================================================================================
 row 0 "G0 - the gate: Qwen3.8 bitwise unchanged against the last box-validated main (spec 14 G0, spec 15b R0, spec 15c R0, spec 12b step 1)"
@@ -188,7 +193,7 @@ st_r6_mtp_long() {
   jgrab m3 'mtp_gpu_(32k|128k)' 'M3:|M3 pooled|mtp_gpu_test .*(PASS|FAIL)|max_len'
   finish
 }
-stage r6.greedy_long 6 default card qwen r6.memory "long-context MTP greedy equality without the server: b70-decode --ids (120000 ids) --prefill --max-len 131072, 256 ids plain / --spec mtp --spec-max 3 / --spec auto, the three outputs identical"
+stage r6.greedy_long 6 default card qwen r6.memory "long-context MTP greedy equality without the server: b70-decode --ids (120000 ids) --prefill --max-len 131072, 256 ids plain / --spec mtp --spec-max 3 / --spec auto; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07)"
 st_r6_greedy_long() {
   local arm f="$STATE/$STAGE.120k.ids"
   chk "python3 tools/box_validate/long_ids.py 120000 $f" "the 120000-id prompt"
@@ -197,9 +202,13 @@ st_r6_greedy_long() {
     case "$arm" in off) a="--spec off" ;; 3) a="--spec mtp --spec-max 3" ;; auto) a="--spec auto" ;; esac
     chk "build/src/cli/b70-decode $SNAP_QWEN --ids $f --n 256 --prefill --max-len 131072 $a > $STATE/$STAGE.mtp-$arm.out" "b70-decode $a at 120k"
   done
-  chk "cmp $STATE/$STAGE.mtp-off.out $STATE/$STAGE.mtp-3.out && cmp $STATE/$STAGE.mtp-off.out $STATE/$STAGE.mtp-auto.out && echo 'GREEDY identical: plain, --spec mtp --spec-max 3, --spec auto at 120k'" "greedy ids identical with and without MTP at 120k"
-  grab_all mtp '^mtp:|^generate:|GREEDY' 12
-  finish
+  for arm in off 3 auto; do decode_record "$STATE/$STAGE" "mtp-$arm" 120k "$f" "$STATE/$STAGE.mtp-$arm.out"; done
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref mtp-off"
+  serve_judge "$STATE/$STAGE" mtp-off "MTP's first difference from plain at 120k by the f32 judge"
+  grab_all mtp '^mtp:|^generate:' 12
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 6
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 6
+  judged_finish
 }
 stage r6.cost 6 optin gpu qwen r6.memory "the cost table at depth: probe_mtp_steps at 32k (max_len 65536) and 120k (max_len 131072), int8 and bf16 heads (timed)"
 st_r6_cost() {
@@ -369,19 +378,23 @@ st_r8_m3_small() {
   grab_all m3 'mtp_gpu_test .*(PASS|FAIL)'
   finish
 }
-stage r8.auto_rows 8 optin gpu qwen - "--spec auto rows at the chosen size (R8_DRAFT_VOCAB, default 128k) against fixed K = 1 / 3 and against --spec auto without it, through b70-serve as r2.auto_rows"
+stage r8.auto_rows 8 optin gpu qwen - "--spec auto rows at the chosen size (R8_DRAFT_VOCAB, default 128k) against fixed K = 1 / 3 and against --spec auto without it, through b70-serve as r2.auto_rows, with --spec off beside them: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); identity to --spec auto without the draft vocabulary recorded too"
 st_r8_auto_rows() {
   local dv="${R8_DRAFT_VOCAB:-128k}"
   idle before
   serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
-    "auto|--max-len 16384 --spec auto" "auto-dv|--max-len 16384 --spec auto --draft-vocab $dv" \
+    "off|--max-len 16384 --spec off" "auto|--max-len 16384 --spec auto" "auto-dv|--max-len 16384 --spec auto --draft-vocab $dv" \
     "k1-dv|--max-len 16384 --spec mtp --spec-max 1 --draft-vocab $dv" "k3-dv|--max-len 16384 --spec mtp --spec-max 3 --draft-vocab $dv"
   idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref auto" "greedy output identical with the draft vocabulary"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref auto"
+  serve_judge "$STATE/$STAGE" off "every speculative arm's first difference from --spec off by the f32 judge"
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref auto --ratio auto-dv/k1-dv --ratio auto-dv/k3-dv"
   grab_all ratio '^RATIO ' 20
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 30
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all idle '^IDLE '
-  finish
+  judged_finish
 }
 
 # ======================================================================================
@@ -896,19 +909,21 @@ st_r16_tokdiff() {
   grab_all tokdiff '^TOKDIFF ' 20
   finish
 }
-stage r16.mtp_rows 16 optin gpu ornith r16.mtp "D1-style rows on Ornith through b70-serve: --spec off / 1 / 3 / auto on the golden and A4 prompts, 256 ids, greedy, R2_ROUNDS rotated; greedy output identical across the arms (decode t/s per request from the server's records)"
+stage r16.mtp_rows 16 optin gpu ornith r16.mtp "D1-style rows on Ornith through b70-serve: --spec off / 1 / 3 / auto on the golden and A4 prompts, 256 ids, greedy, R2_ROUNDS rotated; decode t/s per request from the server's records; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07) - Ornith's int8-head f32 references, made from the dumped contexts by f32_refs.sh forced ornith <dump> -i8head --lm-head int8"
 st_r16_mtp_rows() {
   idle before
   serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_ORNITH" "--set golden --set toolcall --max-tokens 256" \
     "off|--max-len 16384 --spec off" "k1|--max-len 16384 --spec mtp --spec-max 1" "k3|--max-len 16384 --spec mtp --spec-max 3" \
     "auto|--max-len 16384 --spec auto"
   idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical to --spec off in every arm"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "every speculative arm's first difference from --spec off by the f32 judge (Ornith)" ornith
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --ratio k1/off --ratio k3/off --ratio auto/off"
   grab_all ratio '^RATIO ' 20
   grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all idle '^IDLE '
-  finish
+  judged_finish
 }
 stage r16.passkey 16 optin gpu ornith,oracle_image r16.kernels "Review Focus 4: passkey 3/3 at 120k (l0-int8, l0; max_len 131072) and at 250000 ids (l0-int8, max_len 262144 - Ornith's KV is 20 KiB a position)"
 st_r16_passkey() {
@@ -1607,21 +1622,27 @@ st_r27_prefix_kv8() {
   run_tests '^pp_prefix_gpu_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto under copy and peer, equal the one-card plain ids (greedy MTP is identical, spec 8 M3); the mtp line and both memory lines"
+stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto under copy and peer, against the one-card plain ids: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the mtp line and both memory lines"
 st_r27_cli_mtp() {
   local args="--ids tests/golden/prompts/prose.ids --n 64 --prefill"
   chk "build/src/cli/b70-decode $SNAP_QWEN $args > $STATE/r27-one.ids" "one card, plain"
+  decode_record "$STATE/$STAGE" one prose tests/golden/prompts/prose.ids "$STATE/r27-one.ids"
   local h m s
   for h in copy peer; do
     for m in 3 auto; do
       s="--spec auto"; [ "$m" = 3 ] && s="--spec mtp --spec-max 3"
-      chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN $args $s --parallel pp --pipeline-handoff $h > $STATE/r27-$h-$m.ids && cmp $STATE/r27-one.ids $STATE/r27-$h-$m.ids" \
-        "--parallel pp $s, $h: the one-card plain ids"
+      chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN $args $s --parallel pp --pipeline-handoff $h > $STATE/r27-$h-$m.ids" \
+        "--parallel pp $s, $h"
+      decode_record "$STATE/$STAGE" "$h-$m" prose tests/golden/prompts/prose.ids "$STATE/r27-$h-$m.ids"
     done
   done
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref one"
+  serve_judge "$STATE/$STAGE" one "each two-card MTP arm's first difference from one card's plain ids by the f32 judge"
   grab_all mtp '^mtp: ' 8
   grab_all memory '^memory, device' 8
-  finish
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 8
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 8
+  judged_finish
 }
 stage r27.serve 27 default gpu qwen r27.prefix "Review Focus 5: b70-serve --parallel pp startup and one request - --max-len auto -> 262144 with the int8 head, the prefill and the prefix cache's shadows planned (derived; one card: 201216), with --spec auto + --kv-cache int8 (262144, derived) and with --spec auto alone (262144 at split 36, derived); the plan and both memory lines (device 1: the head and the embedding replica); a seeded sampled request twice, identical"
 st_r27_serve() {
@@ -2454,22 +2475,24 @@ st_r55_gpu() {
   jgrab gpu '^dflash_gpu_test$' '^D2|^RF1|^S:|^dflash_gpu_test' 140
   finish
 }
-stage r55.serve 55 default gpu qwen,dflash r55.gpu "D2 by b70-serve: the 36 A4 tool-call scenarios and the golden prompts through --spec off / --spec dflash (auto K) / --spec dflash --spec-max 3, greedy, max_tokens 192 - output identical to --spec off; a seeded sampled request twice; the 'spec dflash:' startup line and the per-request 'dflash:' lines"
+stage r55.serve 55 default gpu qwen,dflash r55.gpu "D2 by b70-serve: the 36 A4 tool-call scenarios and the golden prompts through --spec off / --spec dflash (auto K) / --spec dflash --spec-max 3, greedy, max_tokens 192 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); a seeded sampled request twice; the 'spec dflash:' startup line and the per-request 'dflash:' lines"
 st_r55_serve() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
     "off|--max-len 16384 --spec off" "dflash|--max-len 16384 --spec dflash $dm" \
     "dflash3|--max-len 16384 --spec dflash --spec-max 3 $dm"
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec dflash identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "every --spec dflash arm's first difference from --spec off by the f32 judge"
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --metric wall_tps"
   x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --max-len 16384 --spec dflash $dm"
   step_rc $? "b70-serve --spec dflash: serves; the seeded sampled request twice"
   grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
   grab_all ratio '^RATIO ' 10
   grab_all dflash 'spec dflash:|dflash:|SEEDED|memory:' 16
-  finish
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
+  judged_finish
 }
-stage r55.decode 55 default card qwen,dflash r55.engine "D2 without the server: b70-decode --ids (code, prose, the 4395-id long prompt) --prefill --n 256, plain / --spec dflash (K 7) / --spec dflash --spec-max 3 - the outputs identical; the 'dflash:' acceptance lines"
+stage r55.decode 55 default card qwen,dflash r55.engine "D2 without the server: b70-decode --ids (code, prose, the 4395-id long prompt) --prefill --n 256, plain / --spec dflash (K 7) / --spec dflash --spec-max 3 - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the 'dflash:' acceptance lines"
 st_r55_decode() {
   local p arm f a dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   chk "python3 tools/box_validate/long_ids.py 4395 $STATE/$STAGE.long.ids" "the 4395-id prompt"
@@ -2480,11 +2503,15 @@ st_r55_decode() {
         off) a="" ;; k7) a="--spec dflash $dm" ;; k3) a="--spec dflash --spec-max 3 $dm" ;;
       esac
       chk "build/src/cli/b70-decode $SNAP_QWEN --ids $f --n 256 --prefill $a > $STATE/$STAGE.$p.$arm.out" "b70-decode $p $arm"
+      decode_record "$STATE/$STAGE" "$arm" "$p" "$f" "$STATE/$STAGE.$p.$arm.out"
     done
-    chk "cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.k7.out && cmp $STATE/$STAGE.$p.off.out $STATE/$STAGE.$p.k3.out && echo 'GREEDY identical: $p plain / dflash K 7 / K 3'" "greedy ids identical with and without the drafter ($p)"
   done
-  grab_all dflash '^dflash:|^generate:|GREEDY' 30
-  finish
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "each drafter arm's first difference from plain by the f32 judge"
+  grab_all dflash '^dflash:|^generate:' 30
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 12
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 12
+  judged_finish
 }
 stage r55.tps 55 optin gpu-self qwen,dflash r55.decode "the speed record, informational (D5 proper is 19d's): b70-decode --ids --prefill --n 512 plain vs --spec dflash on code and on an A4 scenario, 3 rounds in rotated order after a warm-up - the generate t/s and the acceptance lines"
 st_r55_tps() {
@@ -2534,15 +2561,17 @@ st_r56_pp() {
   jgrab pp '^pp_dflash_test$' '^reference|^--pp 2|  ids|bitwise|DIFFERS|continued|PASS|FAIL' 60
   finish
 }
-stage r56.pp_serve 56 default gpu qwen,dflash r56.pp "D2 by b70-serve --parallel pp --spec dflash (both cards): the A4 + golden sets greedy, max_tokens 192, against one card's --spec off - identical; the plan line (the drafter on device 1, the embedding replica), both memory lines, the 'spec dflash (--parallel pp' line"
+stage r56.pp_serve 56 default gpu qwen,dflash r56.pp "D2 by b70-serve --parallel pp --spec dflash (both cards): the A4 + golden sets greedy, max_tokens 192, against one card's --spec off - identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the plan line (the drafter on device 1, the embedding replica), both memory lines, the 'spec dflash (--parallel pp' line"
 st_r56_pp_serve() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" c="--set toolcall --set golden --max-tokens 192 --stop-at-eos"
   chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/off.r1 off 1 $SNAP_QWEN --max-len 16384 --spec off -- $c" "one card, --spec off"
   chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/pp2dflash.r1 pp2dflash 1 $SNAP_QWEN --max-len 16384 --parallel pp --spec dflash $dm -- $c" "--parallel pp --spec dflash"
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --parallel pp --spec dflash identical to one card's --spec off"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "--parallel pp --spec dflash's first difference from one card's --spec off by the f32 judge"
   grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all plan 'pipeline plan|DFlash:|memory, device|spec dflash' 12
-  finish
+  judged_finish
 }
 
 # ======================================================================================
@@ -3030,6 +3059,7 @@ row 65 "spec 26c - LiLiCorr in Bolt's loop and server: verify M <= 8 with taps o
 rownote 65 "Run rows 60-62 (Bolt) and 64 (the drafter on the card) first; the drafter is row 64's download (lilicorr), our g64 export row 57's (bolt_int4), the N 12 synthetics row 59's (bolt_synth). Every stage on the REAL checkpoint needs BOTH cards: its tests / commands set ZE_AFFINITY_MASK=0,1 themselves (the verify lists cross by the copy hand-off only)."
 rownote 65 "Written on the Mac (spec 26 §14): the verify lists at M = 1..8 (25c's walk over a verify scratch at 8 rows, the six taps of every row - device 0's crossing before the hand-off's barrier -, nb_ssm's slot build at every M, the commit moving Control::gdn_live on both cards), the union-aware MoE (nb_moe_union.cl: bitwise the plain M-row form on the Mac's GPU in 10 route cases, each block read once by the counting build), the drafter's prefill tail (each chunk's rows in its window, 8 a replay - the GEMM path NOT built), snapshots with the ring and the anchor, b70-serve --spec dflash|lookup for Bolt (cli/bolt_spec.h; NOT the default), MtpCost::bolt_lilicorr (DERIVED). Host tests: bolt_spec_test (D2 / D4 10^6 draws / Review Focus 3 and 4 over a fake engine), bolt_spec_plan_test. kernel_cmdlines additions only; no existing .cl edited; nothing compiled by ocloc, nothing run on a card. Defaults PROVISIONAL (spec 26 §11): the drafter int8, --spec-max 7, q lattice, the union MoE. Since the zero-config cleanup (2026-11-06) they are the engine's choices: b70-serve takes --spec off|lookup|dflash, --spec-max and --draft-model only (Bolt's --spec auto is off until r65.benchy's D5); the other arms are the card tests' arguments (bolt_dflash_test --format exact|int4, bolt_verify_*_plain, bolt_moe_union_test --time) - no flag, no variable."
 rownote 65 "Hand back: r65.d3's lines (bolt_moe_union_test per I / case, bolt_verify_*'s per M and MoE form, bolt_commit_*'s per j and the ragged line), r65.d2's 'tokens a verify' per K and format (D5's acceptance on the golden prompts and the agentic set), r65.prefill's worst cosine, r65.prefix's lines, r65.serve's IDENTICAL / SEEDED lines and the startup's 'spec dflash:' line, r65.benchy's tables (opt-in), any FAIL lines."
+rownote 65 "r65.serve keeps the identical-output bar (operator ruling 3 of 2026-11-07 moves the speculative-vs---spec-off rows to the f32 judge where the verify rows round differently): Bolt's verify rows are bitwise its plain decode steps by construction (D3, r65.d3), so identity is still what the code promises; a difference there is a finding, not a near-tie."
 stage r65.host    65 default cpu  -                          -        "host: bolt_spec_test (D2 / D4 / Review Focus 3 / 4 over a fake engine, 10^6 draws a case), bolt_spec_plan_test, bolt_verify_names_test, bolt_serve_args_test, bolt_snapshot_test, bolt_request_test, spec_accept_test, adaptive_k_test"
 st_r65_host() {
   run_tests '^(bolt_spec_test|bolt_spec_plan_test|bolt_verify_names_test|bolt_serve_args_test|bolt_snapshot_test|bolt_request_test|spec_accept_test|adaptive_k_test)$'
@@ -3122,7 +3152,7 @@ st_r66_build() {
     "the row builds are in build-batch-probe/kernels"
   finish
 }
-stage r66.check 66 default gpu qwen        r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8, bf16 and int8 KV"
+stage r66.check 66 default gpu qwen        r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8, bf16 and int8 KV. Plan 13c's probe, left as it is: when 13c builds slots, its B1 (a slot in a batch equals it alone) is judged by the f32 judge, not bitwise (spec 13 §11.3; B3, the isolation, stays bitwise)"
 st_r66_check() {
   x "uptime"
   chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-time --no-chunks" "Qwen3.8, int8 KV, MTP"
@@ -3239,21 +3269,23 @@ st_r70_host() {
   chk "python3 tools/spec/test_edit_copy_set.py" "test_edit_copy_set.py (the committed set's --check included)"
   finish
 }
-stage r70.d2     70 default card qwen,dflash r55.gpu,g0.sha        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off under the tie rule; the warm-ring engine test"
+stage r70.d2     70 default card qwen,dflash r55.gpu,g0.sha        "D2 / D4 on --spec dflash-lookup: golden + A4 + the edit / copy set vs --spec off: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the warm-ring engine test"
 st_r70_d2() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   run_tests '^dflash_lookup_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   jgrab gpu '^dflash_lookup_gpu_test$' '^drafter|^D2|^RF4|^S:|^dflash_lookup_gpu_test' 80
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --set tests/golden/edit-copy --max-tokens 256 --stop-at-eos" \
     "off|--max-len 102400 --spec off" "dlk|--max-len 102400 --spec dflash-lookup $dm"
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec dflash-lookup identical to --spec off"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "--spec dflash-lookup's first difference from --spec off by the f32 judge"
   x "PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --max-len 16384 --spec dflash-lookup $dm"
   step_rc $? "b70-serve --spec dflash-lookup: serves; the seeded sampled request twice"
   grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all dflash 'spec dflash|^dflash:|SEEDED|memory:' 60
-  finish
+  judged_finish
 }
-stage r70.speed  70 optin   gpu  qwen,dflash r70.d2                "b70-serve: off / --spec auto / dflash / dflash-lookup on the edit / copy set per depth and on A4 / golden; rotated rounds, median of 3, idle"
+stage r70.speed  70 optin   gpu  qwen,dflash r70.d2                "b70-serve: off / --spec auto / dflash / dflash-lookup on the edit / copy set per depth and on A4 / golden; rotated rounds, median of 3, idle; identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07)"
 st_r70_speed() {
   local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   idle before
@@ -3261,12 +3293,14 @@ st_r70_speed() {
     "off|--max-len 102400 --spec off" "mtp|--max-len 102400 --spec auto" "dflash|--max-len 102400 --spec dflash $dm" \
     "dlk|--max-len 102400 --spec dflash-lookup $dm"
   idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical across the arms"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "every speculative arm's first difference from --spec off by the f32 judge"
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref dflash --ratio dlk/dflash --ratio dlk/mtp --ratio dflash/mtp --ratio dlk/off"
   grab_all ratio '^RATIO ' 30
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 30
   grab_all lookup '^dflash:.*lookup' 80
   grab_all idle '^IDLE '
-  finish
+  judged_finish
 }
 stage r70.verdict 70 manual -    -           r70.speed             "spec 19 §13.1's bar: replaces / opt-in / dropped"
 st_r70_verdict() {

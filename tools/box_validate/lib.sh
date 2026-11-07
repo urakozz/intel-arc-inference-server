@@ -308,9 +308,16 @@ serve_arms() {
 # difference's forced contexts to $DATA/oracle-forced-dumps/qwen-serve and judges them with the int8-head f32
 # references (b70-serve loads the int8 head, prefills with l0). A difference without its reference is a SKIP, never a
 # pass: the step is accounted, and BV_JUDGE_RC (77) makes judged_finish return SKIP when nothing failed.
+# MODEL (4th, default qwen): ornith dumps to oracle-forced-dumps/ornith-serve and reads Ornith's int8-head f32
+# references (tools/box_validate/f32_refs.sh <data> forced ornith <dump dir> -i8head --lm-head int8), no bf16 twins.
+# b70-decode arms join through serve_client.py record (the same int8 head and l0 prefill).
 serve_judge() {
+  local dump="$DATA/oracle-forced-dumps/qwen-serve" judge="$DATA/oracle-out-qwen-f32-i8head-forced" bf16="--bf16 $DATA/oracle-out-qwen-bf16top-forced"
+  if [ "${4:-qwen}" = ornith ]; then
+    dump="$DATA/oracle-forced-dumps/ornith-serve" judge="$DATA/oracle-out-ornith-f32-i8head-forced" bf16=""
+  fi
   chk "python3 tools/box_validate/test_serve_judge.py" "serve_judge.py's own tests (its numpy path runs on the box only)"
-  x "python3 tools/box_validate/serve_judge.py --dir $1 --ref $2 --dump $DATA/oracle-forced-dumps/qwen-serve --judge $DATA/oracle-out-qwen-f32-i8head-forced --bf16 $DATA/oracle-out-qwen-bf16top-forced"
+  x "python3 tools/box_validate/serve_judge.py --dir $1 --ref $2 --dump $dump --judge $judge $bf16"
   BV_JUDGE_RC=$?
   step_rc "$BV_JUDGE_RC" "$3"
 }
