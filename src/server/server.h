@@ -76,6 +76,9 @@ struct Options {
   // only DFlash iterations feed). Through EngineIface::step_drafts_or_many; needs an engine with mtp_k() > 0 and
   // dflash_window() > 0, and not spec_lookup - the Server constructor refuses anything else. Off: nothing here runs.
   bool spec_dflash_lookup = false;
+  // How b70-serve runs the model on the cards, for the startup line ("1 card", "pp - ...", "replica - ..."); empty
+  // when the family's own runner says it.
+  std::string parallel_desc;
 };
 
 struct BatchEngineIface;
