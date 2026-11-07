@@ -304,6 +304,150 @@ def test_qwen4exp_mask_reaches_reference():
         print(f"    unmasked {out0['s']} vs masked {out1['s']}: the mask reached the batched reference")
 
 
+
+def test_args_qwen():
+    """2026-11-07: --model qwen (Qwen3.8, a4_ref.sh's qwen mode) names the dense path's model_type."""
+    import oracle_generate as og
+    a = parse_args(["--model", "qwen", "/snap", "set", "out", "--batch", "auto", "--resident", "auto"])
+    assert a["model"] == "qwen" and a["keep"] == "auto"
+    assert og.MODELS["qwen"] == ("qwen3_5",) and "qwen3_5" not in MOE_TYPES
+
+
+def test_dense_keep():
+    """The dense path's memory plan: layers kept = (cap - resident - 2 layers - the head's fp32 copy - slack) / a
+    layer, clamped to [0, n]; none / an unknown cap keep none. Qwen3.8-27B's numbers: 64 layers of ~0.77 GB, a 2.5 GB
+    head and a 2.5 GB embedding, the box's 56g cap -> most layers kept."""
+    import oracle_generate as og
+    G = og.GiB
+    p = og.dense_keep([G] * 10, 2 * G, G, 20 * G)
+    assert p["keep_layers"] == (20 - 2 - 2 - 2 - 6), p          # 8
+    assert og.dense_keep([G] * 10, 2 * G, G, 100 * G)["keep_layers"] == 10
+    assert og.dense_keep([G] * 10, 2 * G, G, 5 * G)["keep_layers"] == 0
+    assert og.dense_keep([G] * 10, 2 * G, G, 100 * G, "none")["keep_layers"] == 0
+    assert og.dense_keep([G] * 10, 2 * G, G, None)["keep_layers"] == 0
+    layer, head = int(0.77e9), 248320 * 5120 * 2
+    q = og.dense_keep([layer] * 64, 2 * head, head, 56 * G)
+    assert 50 <= q["keep_layers"] < 64, q
+    print(f"    {q['text']}")
+
+
+def _tiny_qwen38(root):
+    """A tiny random Qwen3.8-layout checkpoint (test_dump_taps.py's shape: config.json with a text_config,
+    `model.language_model.*` + lm_head over two shards and an index, bf16), a word-level tokenizer.json and a
+    generation_config.json."""
+    import json
+    import torch
+    from safetensors.torch import save_file
+    from tokenizers import Tokenizer, models
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+    text = dict(hidden_size=64, intermediate_size=96, num_hidden_layers=8, num_attention_heads=4,
+                num_key_value_heads=2, head_dim=32, linear_num_key_heads=2, linear_num_value_heads=4,
+                linear_key_head_dim=16, linear_value_head_dim=16, linear_conv_kernel_dim=4,
+                full_attention_interval=4, vocab_size=320, rms_norm_eps=1e-6, attn_output_gate=True,
+                rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 0.25,
+                                 "mrope_section": [2, 1, 1], "mrope_interleaved": True},
+                partial_rotary_factor=0.25, tie_word_embeddings=False, model_type="qwen3_5_text",
+                layer_types=(["linear_attention"] * 3 + ["full_attention"]) * 2)
+    tc = Qwen3_5TextConfig(**text)
+    torch.manual_seed(0)
+    model = Qwen3_5ForCausalLM(tc).to(torch.bfloat16).eval()
+    with torch.no_grad():
+        for n, p in model.named_parameters():
+            if p.dim() == 2 and "embed" not in n:
+                p.copy_(torch.randn_like(p.float()) / p.shape[1] ** 0.5)
+    shards = ({}, {})
+    for n, t in model.state_dict().items():
+        name = "lm_head.weight" if n == "lm_head.weight" else "model.language_model." + n[len("model."):]
+        layer = int(name.split(".layers.")[1].split(".")[0]) if ".layers." in name else 99
+        shards[0 if layer < 4 else 1][name] = t.contiguous()
+    shards[1]["mtp.fc.weight"] = torch.zeros(4, 4, dtype=torch.bfloat16)   # skipped by name
+    wm = {}
+    for k, sd in enumerate(shards):
+        fn = f"model-0000{k + 1}-of-00002.safetensors"
+        save_file(sd, os.path.join(root, fn))
+        wm.update({n: fn for n in sd})
+    with open(os.path.join(root, "model.safetensors.index.json"), "w") as f:
+        json.dump({"weight_map": wm}, f)
+    with open(os.path.join(root, "config.json"), "w") as f:
+        json.dump({"architectures": ["Qwen3_5ForConditionalGeneration"], "model_type": "qwen3_5",
+                   "text_config": text}, f)
+    with open(os.path.join(root, "generation_config.json"), "w") as f:
+        json.dump({"eos_token_id": [319]}, f)
+    Tokenizer(models.WordLevel({f"t{i}": i for i in range(320)}, unk_token="t0")).save(
+        os.path.join(root, "tokenizer.json"))
+    per = [0] * 8
+    rest = head = 0
+    for name, t in (kv for sd in shards for kv in sd.items()):
+        if name.startswith("mtp."):
+            continue
+        b = t.numel() * 2
+        if ".layers." in name:
+            per[int(name.split(".layers.")[1].split(".")[0])] += b
+        else:
+            rest += b
+            head += b if name.startswith("lm_head.") else 0
+    return per, rest, head
+
+
+def test_dense_streamed_tiny():
+    """The dense path (Qwen3.8, a4_ref.sh qwen): on a tiny random checkpoint, the layer-streamed run (every layer
+    streamed: --resident none; some kept: a small ORACLE_MEM_GB; all kept: a large one) writes the same ids as a
+    RESIDENT Qwen3_5ForCausalLM under the same cpu_bf16 shim, HF generate - bitwise. Needs torch + transformers with
+    qwen3_5 (agnes-ref-img / the box's reference image): skipped (printed) otherwise."""
+    try:
+        import torch
+        from transformers.models.qwen3_5 import modeling_qwen3_5  # noqa: F401
+    except ImportError:
+        print("    skipped: no torch / transformers' qwen3_5 here (run it in the reference image)")
+        return
+    import tempfile
+    import oracle_generate as og
+    from transformers import AutoConfig, GenerationConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+    prompt = [5, 17, 42, 99, 3, 250, 7, 8, 120, 64, 33, 2]
+    runs = {}
+    with tempfile.TemporaryDirectory() as snap:
+        per, rest, head = _tiny_qwen38(snap)
+        some = (rest + 2 * max(per) + 2 * head + og.DENSE_SLACK + 3.5 * max(per)) / og.GiB   # 3 layers kept
+        assert og.dense_keep(per, rest, head, int(some * og.GiB))["keep_layers"] == 3
+        for tag, resident, mem in (("none", "none", None), ("some", "auto", repr(some)), ("all", "auto", "1000")):
+            with tempfile.TemporaryDirectory() as st, tempfile.TemporaryDirectory() as out:
+                _fake_set(st, prompt)
+                saved, env = sys.argv, os.environ.get("ORACLE_MEM_GB")
+                if mem:
+                    os.environ["ORACLE_MEM_GB"] = mem
+                sys.argv = ["oracle_generate.py", "--model", "qwen", snap, st, out, "--new-tokens", "8",
+                            "--batch", "auto", "--resident", resident]
+                try:
+                    og.main()
+                finally:
+                    sys.argv = saved
+                    if env is None:
+                        os.environ.pop("ORACLE_MEM_GB", None)
+                    else:
+                        os.environ["ORACLE_MEM_GB"] = env
+                runs[tag] = open(os.path.join(out, "s1.bf16.ids")).read().split()
+                assert open(os.path.join(out, "s1.bf16.txt")).read().startswith("t"), tag
+        # the resident reference, the shim installed (dense_build installed it, process-wide)
+        tc = AutoConfig.from_pretrained(snap).get_text_config()
+        tc._attn_implementation = "eager"
+        model = Qwen3_5ForCausalLM(tc).to(torch.bfloat16).eval()
+        from safetensors.torch import load_file
+        sd = {}
+        for fn in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
+            for k, v in load_file(os.path.join(snap, fn)).items():
+                if not k.startswith("mtp."):
+                    sd["model." + k[len("model.language_model."):] if k.startswith("model.language_model.") else k] = v
+        model.load_state_dict(sd, strict=True)
+        model.model.rotary_emb = type(model.model.rotary_emb)(tc)
+        cfg = GenerationConfig(max_new_tokens=8, do_sample=False, eos_token_id=[319], pad_token_id=319)
+        with torch.no_grad():
+            seq = model.generate(torch.tensor([prompt]), generation_config=cfg)
+    want = [str(int(x)) for x in seq[0, len(prompt):].tolist()]
+    assert runs["none"] == runs["some"] == runs["all"] == want, (runs, want)
+    print(f"    streamed (none / some / all kept) == resident: {want}")
+
 if __name__ == "__main__":
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)]
     for n, f in tests:

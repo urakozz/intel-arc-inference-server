@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Greedy bf16 baseline for the tool-call set (spec 5 T0, gate A4), on CPU.
 
-    oracle_generate.py [--model kolibri|qwen4exp|bolt] [--weights bf16|int4]
+    oracle_generate.py [--model qwen|kolibri|qwen4exp|bolt] [--weights bf16|int4]
                        [--device cpu|cuda|xpu] <snapshot> <set dir> <out dir>
                        [--new-tokens N] [--batch 1|N|auto] [--resident none|auto] [--only a,b,..]
                        [--expert-mask FILE]
 
-Builds transformers' Qwen3_5ForCausalLM the way tools/rotate/check_rotation.py
-does (text_config, load_sd in bf16, eager attention), then for every scenario
+Builds transformers' Qwen3_5ForCausalLM (text config, eager attention, layer-streamed,
+the bf16 GEMMs as fp32 GEMMs rounded once to bf16 - dense_build), then for every scenario
 in <set dir>/manifest.json, after checking its .ids file's SHA-256 against the
 manifest, runs greedy generate with 192 new tokens and writes
 <out>/<name>.bf16.ids (the new ids) and <out>/<name>.bf16.txt (decoded with
@@ -21,8 +21,16 @@ Run inside the reference container (tools/oracle/run_in_container.sh with
 ORACLE_MODEL=models--Qwen--Qwen3.8-27B).
 
 The model follows config.json's model_type:
-  qwen3_5           transformers' Qwen3_5ForCausalLM on the bf16 checkpoint (above), HF
-                    generate;
+  qwen3_5           Qwen3.8 (`--model qwen` says so and checks it): transformers' Qwen3_5ForCausalLM
+                    on the checkpoint given (the bf16 original Qwen/Qwen3.8-27B for A4; a GPTQ int4
+                    one dequantised), built on meta and layer-streamed (tools/oracle/dump.py's
+                    stream_weights: embedding, final norm and head resident; the first K decoder
+                    layers kept once read, K from the memory plan under the container's cap -
+                    --resident none keeps none; the rest re-read every forward), its bf16 GEMMs
+                    as fp32 GEMMs of the bf16 values rounded once to bf16 (tools/oracle/cpu_bf16.py,
+                    the operator's 2026-11-03 ruling for new references: the box CPU has no bf16
+                    units), HF generate, one scenario at a time (--batch is ignored). NOT bitwise
+                    the pre-2026-11 torch-bf16 references (summation order); writes no .gap;
   qwen3_5_moe       Ornith 1.5 (spec 15e Task 3): tools/oracle/ornith_ref.py's layer-streamed
                     Qwen3_5MoeForCausalLM on its INT4 checkpoint dequantised by the repo's one
                     rule (15a: the engine's own weights, so a mismatch is the engine's, not the
@@ -528,10 +536,95 @@ def moe_runner(snap: str, mtype: str, device: str = "cpu", keep: tuple[int, int]
                            step_many=OR.layer_major(model, pf), lazy=lazy, ref=model, pf=pf)
 
 
+def dense_keep(layer_bytes: list[int], resident: int, head: int, cap: int | None, keep="auto") -> dict:
+    """The dense path's memory plan: how many decoder layers stay resident once read (the first `keep_layers`;
+    the rest are re-read and streamed every forward, stream.py). Budget: the cap minus the resident tensors
+    (embedding, final norm, lm_head), two streamed layers in flight (the prefetch), the lm_head's fp32 copy
+    cpu_bf16 makes per forward, and a fixed DENSE_SLACK (activations, the cache, torch, page cache).
+    ESTIMATES from the checkpoint's headers, not measured."""
+    n = len(layer_bytes)
+    per = max(layer_bytes) if layer_bytes else 0
+    fixed = resident + 2 * per + 2 * head + DENSE_SLACK
+    if keep == "none" or cap is None or per == 0:
+        k = 0
+    else:
+        k = max(0, min(n, (cap - fixed) // per))
+    capt = "unknown" if cap is None else f"{cap / GiB:.1f} GiB"
+    text = (f"dense plan (ESTIMATED): cap {capt}; resident {resident / GiB:.2f} GiB, a layer {per / GiB:.2f} GiB "
+            f"x {n}, fixed {fixed / GiB:.2f} GiB (prefetch 2 layers, the head's fp32 copy, "
+            f"{DENSE_SLACK / GiB:.0f} GiB slack); keep {k} of {n} layers resident (--resident {keep}), "
+            f"{n - k} streamed every forward ({(n - k) * per / GiB:.1f} GiB read a step)")
+    return {"keep_layers": k, "text": text}
+
+
+DENSE_SLACK = 6 * GiB
+
+
+def dense_bytes(where: dict, n_layers: int, skip=(), quant_suffixes=()) -> tuple[list[int], int, int]:
+    """Per decoder layer, the resident rest and the lm_head: bf16 bytes once materialised (a GPTQ .qweight
+    [K/8, N] dequantises to K x N bf16), from the safetensors headers alone."""
+    import re
+    per = [0] * n_layers
+    rest = head = 0
+    for key, h in where.items():
+        if key.startswith(skip) or key.endswith(quant_suffixes):
+            continue
+        shape = h.get_slice(key).get_shape()
+        numel = 1
+        for d in shape:
+            numel *= d
+        if key.endswith(".qweight"):
+            numel *= 8
+        b = 2 * numel
+        m = re.match(r"model\.language_model\.layers\.(\d+)\.", key)
+        if m and int(m.group(1)) < n_layers:
+            per[int(m.group(1))] += b
+        else:
+            rest += b
+            if key.startswith("lm_head."):
+                head += b
+    return per, rest, head
+
+
+def dense_build(snap: str, keep: str = "auto"):
+    """Qwen3.8 (model_type qwen3_5): transformers' Qwen3_5ForCausalLM on meta, eager attention, layer-streamed
+    (tools/oracle/dump.py's stream_weights: embedding, final norm and lm_head resident, each decoder layer
+    materialised per forward unless kept), the bf16 GEMMs as fp32 GEMMs of the bf16 values rounded once to bf16
+    (tools/oracle/cpu_bf16.py: the box CPU has no bf16 units). The checkpoint is the bf16 original or a GPTQ int4
+    one (dequantised as every oracle does). -> (model, text config, prefetcher, plan)."""
+    import torch
+    from transformers import AutoConfig
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as m
+    oracle = os.path.join(HERE, "..", "oracle")
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location("b70_og_" + name, os.path.join(oracle, name + ".py"))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    load("cpu_bf16").install(True)
+    D = load("dump")
+    torch.set_grad_enabled(False)
+    with open(os.path.join(snap, "config.json"), encoding="utf-8") as f:
+        raw = json.load(f)
+    quantised = bool(raw.get("quantization_config") or (raw.get("text_config") or {}).get("quantization_config"))
+    group_size = D.check_quant_config(snap) if quantised else 0
+    tc = AutoConfig.from_pretrained(snap).get_text_config()
+    tc._attn_implementation = "eager"
+    per, rest, head = dense_bytes(D.open_shards(snap), tc.num_hidden_layers, D.SKIP_PREFIXES, D.QUANT_SUFFIXES)
+    plan = dense_keep(per, rest, head, mem_limit(), keep)
+    with torch.device("meta"):
+        model = m.Qwen3_5ForCausalLM(tc)
+    pf = D.stream_weights(model, snap, group_size, tc, plan["keep_layers"])
+    model.eval()
+    return model, tc, pf, plan
+
+
 MOE_TYPES = ("qwen3_5_moe", "k2_horizon", "kolibri1", "qwen4_exp", "qwen4_exp_text", "nemotron_h_omni")
 # --model NAME -> the model_type(s) it must be (spec 21e: qwen4exp - the checkpoints say qwen4_exp, a text-only
-# export qwen4_exp_text; spec 25a: bolt)
-MODELS = {"kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "bolt": BOLT_TYPES}
+# export qwen4_exp_text; spec 25a: bolt; qwen: Qwen3.8, the dense path)
+MODELS = {"qwen": ("qwen3_5",), "kolibri": ("kolibri1",), "qwen4exp": ("qwen4_exp", "qwen4_exp_text"), "bolt": BOLT_TYPES}
 
 
 def checkpoint_form(snap: str) -> str:
@@ -642,12 +735,6 @@ def main() -> None:
     import torch
     from tokenizers import Tokenizer
     from transformers import GenerationConfig
-    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
-
-    spec = importlib.util.spec_from_file_location(
-        "b70_check_rotation", os.path.join(HERE, "..", "rotate", "check_rotation.py"))
-    CR = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(CR)
 
     tok = Tokenizer.from_file(os.path.join(snap, "tokenizer.json"))
     # A tokenizer.json may carry truncation / padding (K2's int4 repo truncates at 2048 ids);
@@ -657,21 +744,13 @@ def main() -> None:
     gen_cfg = GenerationConfig.from_pretrained(snap)
     eos = gen_cfg.eos_token_id
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, eos {eos}", flush=True)
+    if a["batch"] != "1":
+        print(f"--batch {a['batch']}: the dense path runs one scenario at a time (HF generate)", flush=True)
 
     t = time.time()
-    tc = CR.text_config(snap, 0)
-    with torch.device("meta"):
-        model = Qwen3_5ForCausalLM(tc)
-    sd = CR.to_model_names(CR.load_sd(snap, 0, torch.bfloat16))
-    want = set(model.state_dict().keys())
-    if set(sd) != want:
-        sys.exit(f"FATAL: state dict mismatch: {len(want - set(sd))} missing, "
-                 f"{len(set(sd) - want)} unexpected, e.g. {sorted(want ^ set(sd))[:4]}")
-    model.load_state_dict(sd, strict=True, assign=True)
-    del sd
-    model.model.rotary_emb = type(model.model.rotary_emb)(tc)
-    model.eval()
-    print(f"loaded {tc.num_hidden_layers} layers, dtype {model.dtype}, {time.time() - t:.0f}s", flush=True)
+    model, tc, pf, plan = dense_build(snap, a["keep"])
+    print(plan["text"], flush=True)
+    print(f"ready: {tc.num_hidden_layers} layers, dtype {model.dtype}, {time.time() - t:.0f}s", flush=True)
 
     gen_cfg = GenerationConfig(max_new_tokens=new_tokens, do_sample=False, eos_token_id=eos,
                                pad_token_id=eos[0] if isinstance(eos, list) else eos)

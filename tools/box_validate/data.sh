@@ -218,7 +218,17 @@ case "${1:-}" in
     have uvx "uvx (llama-benchy)" bash -c 'command -v uvx || test -x "$HOME/.local/bin/uvx"'
     have xpu_smi "xpu-smi (device memory while serving)" bash -c 'command -v xpu-smi'
     have opencode_log "OPENCODE_LOG=${OPENCODE_LOG:-<unset>} (a request log dir)" test -d "${OPENCODE_LOG:-/nonexistent}"
-    have a4_ref "A4_REF_DIR=${A4_REF_DIR:-<unset>} (<name>.bf16.txt reference runs)" test -d "${A4_REF_DIR:-/nonexistent}"
+    # Qwen3.8's A4 reference (operator, 2026-11-07: tools/toolcall/a4_ref.sh qwen set / ref on the bf16 original, the box
+    # CPU) - complete: the set and 36 <name>.bf16.txt. a4_ref (r11.a4 / r75.gates): A4_REF_DIR when set (as before), else
+    # this directory once complete (the stages read ${A4_REF_DIR:-oracle-out-qwen-a4}).
+    have oracle_qwen_a4 "oracle-out-qwen-a4/ with Qwen3.8's set (tests/golden/toolcall) and 36 <name>.bf16.txt (tools/toolcall/a4_ref.sh qwen set / ref on Qwen/Qwen3.8-27B, the box CPU)" \
+      bash -c 'test -s oracle-out-qwen-a4/set/manifest.json && test "$(ls oracle-out-qwen-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    if [ -n "${A4_REF_DIR:-}" ]; then
+      have a4_ref "A4_REF_DIR=$A4_REF_DIR (<name>.bf16.txt reference runs)" test -d "$A4_REF_DIR"
+    else
+      have a4_ref "A4_REF_DIR unset: oracle-out-qwen-a4/ with 36 <name>.bf16.txt (Qwen3.8's reference: tools/toolcall/a4_ref.sh qwen)" \
+        bash -c 'test "$(ls oracle-out-qwen-a4/*.bf16.txt 2>/dev/null | wc -l)" -eq 36'
+    fi
     ;;
   resolve) resolve "$2" ;;
   complete) complete "$2" ;;      # exit 0 when the snapshot is complete (spec 23a: either int4 spelling)
