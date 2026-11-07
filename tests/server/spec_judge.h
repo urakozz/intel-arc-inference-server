@@ -39,7 +39,13 @@
 // evidence is in spec 28 sec 10). Each is an explicit entry in kReviewedRows, keyed by the judge's context key, the
 // row and the two ids (the f32 top, the speculative pick). A miss that fails the rules and matches an entry EXACTLY
 // passes as REVIEWED and is printed loudly with its numbers; any other miss - another row, other ids, another
-// context - is graded as before. The bars do not change. An entry of a test this process ran that no miss matched is
+// context - is graded as before. The bars do not change.
+// The same row in a variant of the test (operator 2026-11-07: mtp_gpu_32k_test / mtp_gpu_128k_test, the same prompts
+// and positions at a longer max_len): the key's hash covers the WHOLE forced stream, so a variant whose ids differ
+// only AFTER the reviewed row has another key. Such a miss matches an entry when the test tag (the key without its
+// hash), the row and both ids are the entry's and its f32 gap is the entry's to kReviewedGapUlp - the f32 row is a
+// function of the row's own context (the prompt and every id before the row), so an equal gap there is that
+// context's fingerprint. It is printed as a REVIEWED match "by tag / row / ids / f32 gap", with both keys. An entry of a test this process ran that no miss matched is
 // printed as a "stale reviewed entry" (it can go; it does not fail the run).
 //
 // AWAITING (operator 2026-11-04): a divergence the old rule fails (beyond the 1-ulp tie rule; a row below 0.99999)
@@ -90,9 +96,12 @@ struct ReviewedRow {
   const char* reason;
 };
 inline constexpr const char* kReviewedReason = "chaotic turn boundary, reviewed 2026-11-05, see spec 28 sec 10";
+// How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
+inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
 // registrations that share a head form (mtp_gpu_test and mtp_gpu_dv128k_bf16_test: the bf16 head;
-// mtp_gpu_dv128k_test: the int8 head).
+// mtp_gpu_dv128k_test: the int8 head). mtp_gpu_32k_test / mtp_gpu_128k_test (bf16 head) reach the bf16-head rows
+// with other keys (their streams differ after the row) and match by tag / row / ids / f32 gap (operator 2026-11-07).
 inline constexpr ReviewedRow kReviewedRows[] = {
     // t6_usage-openai row 0: bf16 gap 12.05, plain 3.31 - the bf16-unstable allowance 25.32 is 3.31 short
     {"mtp_gpu_bf16_t6_usage-openai_46b9c791485d35e0", 0, 248068, 248046, 28.63, "2026-11-05", kReviewedReason},
@@ -129,13 +138,28 @@ inline void add_reviewed(const ReviewedRow& e) {
 inline std::string key_tag(const std::string& key) {
   return key.size() > 17 && key[key.size() - 17] == '_' ? key.substr(0, key.size() - 17) : key;
 }
-// The entry matching (key, row, f32 top, speculative pick) exactly, its hit counted; -1 when none.
-inline int match_reviewed(const std::string& key, size_t row, uint32_t a, uint32_t b) {
+// The entry matching (key, row, f32 top, speculative pick) exactly, its hit counted; -1 when none. With `g32` (the
+// miss's f32 gap; NaN: exact only) and no exact entry: the entry of the same test tag, row and ids whose gap is
+// within kReviewedGapUlp of g32 (a variant's stream that differs only after the row); `*by_gap` says which matched.
+inline int match_reviewed(const std::string& key, size_t row, uint32_t a, uint32_t b, double g32 = NAN,
+                          bool* by_gap = nullptr) {
   Reviewed& R = reviewed();
+  if (by_gap) *by_gap = false;
   for (size_t i = 0; i < R.rows.size(); ++i) {
     const ReviewedRow& e = R.rows[i];
     if (key == e.key && row == e.row && a == e.f32_top && b == e.accepted) {
       ++R.hits[i];
+      return int(i);
+    }
+  }
+  if (std::isnan(g32)) return -1;
+  const std::string tag = key_tag(key);
+  for (size_t i = 0; i < R.rows.size(); ++i) {
+    const ReviewedRow& e = R.rows[i];
+    if (tag == key_tag(e.key) && row == e.row && a == e.f32_top && b == e.accepted &&
+        std::fabs(g32 - e.gap) <= kReviewedGapUlp) {
+      ++R.hits[i];
+      if (by_gap) *by_gap = true;
       return int(i);
     }
   }
@@ -174,15 +198,23 @@ struct UnstableRow {
   double g32 = 0, g16 = NAN, gp = NAN, allow = golden::kNearMissUlp;
   bool have_bf16 = false, unstable = false, have_plain = false, pass = false;
   int reviewed = -1;                // the kReviewedRows entry this miss matched (it passes as REVIEWED); -1 none
+  bool reviewed_by_gap = false;     // matched by tag / row / ids / f32 gap (a variant's key), not by the exact key
+  std::string key;                  // the speculative stream's judge key (printed with a by-gap match)
   std::string line() const {
     std::string s = rule_line();
     if (reviewed >= 0) {
       const ReviewedRow& e = spec_judge::reviewed().rows[size_t(reviewed)];
-      char buf[400];
+      char buf[640];
       std::snprintf(buf, sizeof buf, "\n      *** REVIEWED (operator %s): %s row %zu, ids %u / %u, f32 gap %.2f ulp "
                     "(%.2f when reviewed) - %s: PASS as REVIEWED ***", e.date, e.key, e.row, e.f32_top, e.accepted, g32,
                     e.gap, e.reason);
       s += buf;
+      if (reviewed_by_gap) {
+        std::snprintf(buf, sizeof buf, "\n      *** matched by tag / row / ids / f32 gap (within %.2f ulp; operator "
+                      "2026-11-07: the test's variants), this stream's key %s - its ids differ after the row ***",
+                      kReviewedGapUlp, key.c_str());
+        s += buf;
+      }
     }
     return s;
   }
@@ -360,11 +392,14 @@ inline StreamVerdict streams(const golden::ForcedJudge& fj, const std::string& t
     v.beyond.push_back(unstable_rule(jrow, V, VU, r, fs[r], bt, pr));
     UnstableRow& u = v.beyond.back();
     if (!u.pass) {   // the rules fail it: an exact kReviewedRows entry passes it as REVIEWED (operator 2026-11-05)
-      u.reviewed = match_reviewed(ks, r, u.a, u.b);
+      u.reviewed = match_reviewed(ks, r, u.a, u.b, u.g32, &u.reviewed_by_gap);
+      u.key = ks;
       if (u.reviewed >= 0) {
         u.pass = true;
-        std::printf("    *** REVIEWED row (operator 2026-11-05): %s row %zu, ids %u / %u, f32 gap %.2f ulp - passes as "
-                    "REVIEWED ***\n", ks.c_str(), r, u.a, u.b, u.g32);
+        std::printf("    *** REVIEWED row (operator 2026-11-05%s): %s row %zu, ids %u / %u, f32 gap %.2f ulp - passes as "
+                    "REVIEWED%s%s ***\n", u.reviewed_by_gap ? "; its variants 2026-11-07" : "", ks.c_str(), r, u.a, u.b,
+                    u.g32, u.reviewed_by_gap ? " by tag / row / ids / f32 gap: entry " : "",
+                    u.reviewed_by_gap ? reviewed().rows[size_t(u.reviewed)].key : "");
       }
     }
     all = all && u.pass;

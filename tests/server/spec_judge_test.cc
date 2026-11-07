@@ -223,6 +223,20 @@ int main() {
     spec_judge::report_reviewed("spec_judge_test (reviewed rows)");
     // a different context with the same row and ids (another tag): no entry matches it
     CHECK_EQ(spec_judge::match_reviewed("t_other_" + kks.substr(kks.size() - 16), 0, 4, 9), -1);
+    // (h) a variant of the test (operator 2026-11-07: mtp_gpu_32k_test / _128k_test): the same tag, row and ids under
+    //     another hash (its stream differs after the row) match by the f32 gap, within kReviewedGapUlp only
+    const std::string variant = spec_judge::key_tag(kks) + "_fedcba9876543210";
+    bool by_gap = false;
+    CHECK_EQ(spec_judge::match_reviewed(variant, 0, 4, 9), -1);                       // no gap given: exact only
+    CHECK_EQ(spec_judge::match_reviewed(variant, 0, 4, 9, 12.004, &by_gap), int(base + 2));
+    CHECK(by_gap);
+    CHECK_EQ(spec_judge::match_reviewed(kks, 0, 4, 9, 12.004, &by_gap), int(base + 2));   // the exact key: not by gap
+    CHECK(!by_gap);
+    CHECK_EQ(spec_judge::match_reviewed(variant, 0, 4, 9, 12.02, &by_gap), -1);        // another gap: another row
+    CHECK_EQ(spec_judge::match_reviewed(variant, 1, 4, 9, 12.0, &by_gap), int(base + 1));   // row 1: its own entry
+    CHECK_EQ(spec_judge::match_reviewed(variant, 2, 4, 9, 12.0, &by_gap), -1);         // a row with no entry
+    CHECK_EQ(spec_judge::match_reviewed(variant, 0, 4, 7, 12.0, &by_gap), -1);         // a pick with no entry
+    CHECK_EQ(spec_judge::match_reviewed("t_other_fedcba9876543210", 0, 4, 9, 12.0, &by_gap), -1);   // another tag
     // (f) the allowance never drops below the bar: a near-miss (6 ulp) needs no rule at all
     jr[0][9] = float(10.0 - 6 * u);
     write_judge(dir + "/" + ks + ".golden.safetensors", jr);

@@ -28,6 +28,14 @@
 #       every mtp_gpu_ context of the dirs through qwen_forced.py --pfi8-re (the test's own prompt rows through
 #       int8_sim fq_x / fq_w on the h8 linears, decode rows plain), one pass, both heads into ONE dir (the keys carry
 #       the head form) -> <data tree>/oracle-out-qwen-f32-pfi8-forced/
+#   tools/box_validate/f32_refs.sh <data tree> bf16top-qwen <dir> [<dir>...]
+#       the bf16-unstable rule's standard-bf16 top-k references (operator 2026-11-04, tests/server/spec_judge.h;
+#       B70_FORCED_BF16): tools/oracle/qwen_bf16_top.py plan on the host - the Qwen3.8 contexts of the dirs whose
+#       judge rejects a forced id by more than 8 bf16 ulp, each against the judge its test reads (mtp_gpu_ keys: the
+#       l0-int8 judges of oracle-out-qwen-f32-pfi8-forced; the rest: oracle-out-qwen-f32{,-i8head}-forced) - then
+#       qwen_bf16_top.py run in the oracle container under /tmp/b70-cpu-model.lock (its memory cap:
+#       run_in_container.sh, ORACLE_MEMORY) -> <data tree>/oracle-out-qwen-bf16top-forced/<key>.bf16top.safetensors.
+#       Resumable: keys already there are skipped. Run forced-qwen / forced-qwen-pfi8 first (no judge, no plan).
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 data="${1:?data tree}" what="${2:?ornith-mtp | forced}"
@@ -118,6 +126,60 @@ case "$what" in
       [ "$rc" = 0 ] || break
     done
     ;;
-  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem> | forced-qwen <dir>... | forced-qwen-pfi8 <dir>..." >&2; exit 2 ;;
+  bf16top-qwen)
+    shift 2
+    [ $# -gt 0 ] || { echo "f32_refs: bf16top-qwen <dir> [<dir>...]" >&2; exit 2; }
+    out="$data/oracle-out-qwen-bf16top-forced"
+    part="oracle-out-qwen-bf16top.partial"   # in the tree: the container sees only the tree (at /ws)
+    mkdir -p "$part/ctx-pfi8" "$part/ctx" "$part/out" "$out"
+    for d in "$@"; do
+      for f in "$d"/*.prompt.ids; do
+        [ -e "$f" ] || { echo "f32_refs: no *.prompt.ids in $d"; rc=1; break; }
+        k=$(basename "$f" .prompt.ids)
+        case "$k" in
+          mtp_gpu_*) c="$part/ctx-pfi8" ;;
+          mtp_verify_qwen3.8_*|dflash_*) c="$part/ctx" ;;
+          *) continue ;;
+        esac
+        [ -e "$c/$k.prompt.ids" ] && continue
+        cp "$f" "$c/$k.prompt.ids" && cp "${f%.prompt.ids}.force.ids" "$c/$k.force.ids" || rc=1
+      done
+    done
+    [ "$rc" = 0 ] || exit "$rc"
+    echo "f32_refs: bf16top-qwen: $(ls "$part/ctx-pfi8" | grep -c '\.prompt\.ids$') l0-int8 and" \
+      "$(ls "$part/ctx" | grep -c '\.prompt\.ids$') other Qwen3.8 contexts"
+    # the plan on the host (numpy; the judges are read where they are), one judge per key: the one its test reads
+    python3 tools/oracle/qwen_bf16_top.py plan --ctx "$part/ctx-pfi8" --judge "$data/oracle-out-qwen-f32-pfi8-forced" \
+      --out "$out" --plan "$part/plan-pfi8.json" &&
+      python3 tools/oracle/qwen_bf16_top.py plan --ctx "$part/ctx" --judge "$data/oracle-out-qwen-f32-forced" \
+        --judge "$data/oracle-out-qwen-f32-i8head-forced" --out "$out" --plan "$part/plan-rest.json" &&
+      python3 -c 'import json, sys
+sel = [s for p in sys.argv[2:] for s in json.load(open(p))]
+json.dump(sel, open(sys.argv[1], "w"))
+print(f"f32_refs: bf16top-qwen plan: {len(sel)} contexts")' "$part/plan.json" "$part/plan-pfi8.json" "$part/plan-rest.json" ||
+      { echo "f32_refs: bf16top-qwen: the plan FAILED"; exit 1; }
+    if [ "$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$part/plan.json")" = 0 ]; then
+      echo "f32_refs: bf16top-qwen: nothing to do (every context with a miss beyond 8 ulp has its reference)"
+      exit 0
+    fi
+    exec 9> /tmp/b70-cpu-model.lock
+    echo "f32_refs: bf16top-qwen: waiting for /tmp/b70-cpu-model.lock ($(date '+%F %T'))"
+    flock 9
+    avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
+    if [ "${avail:-0}" -lt "${F32_REF_MIN_GB:-95}" ]; then
+      echo "SKIP_REASON f32_refs: MemAvailable ${avail} GB < F32_REF_MIN_GB ${F32_REF_MIN_GB:-95} (another job holds the RAM)"
+      exit 77
+    fi
+    echo "f32_refs: bf16top-qwen, MemAvailable ${avail} GB ($(date '+%F %T')); log $part/run.log"
+    ORACLE_THREADS="${ORACLE_THREADS:-22}" \
+      ORACLE_MODEL="${SNAP_QWEN_CACHE:-models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}" \
+      tools/oracle/run_in_container.sh "python3 tools/oracle/qwen_bf16_top.py run \"\$SNAP\" --plan /ws/$part/plan.json \
+        --out /ws/$part/out >> /ws/$part/run.log 2>&1" ||
+      { echo "f32_refs: bf16top-qwen FAILED"; tail -20 "$part/run.log"; rc=1; }
+    flock -u 9
+    for f in "$part"/out/*.bf16top.safetensors; do [ -e "$f" ] && mv -f "$f" "$out/"; done
+    echo "f32_refs: bf16top-qwen done ($(date '+%F %T')): $(ls "$out" | grep -c 'bf16top') bf16 top-k references"
+    ;;
+  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem> | forced-qwen <dir>... | forced-qwen-pfi8 <dir>... | bf16top-qwen <dir>..." >&2; exit 2 ;;
 esac
 exit "$rc"
