@@ -8,7 +8,7 @@
 //
 //   attention_sink()  ll_attn_part + ll_attn_reduce: df_attn's chain (context blocks of PB ring offsets, each block's
 //                     (m, l, acc) ascending; the reduce merges blocks ascending, then the block's rows 0..K) and THE SINK:
-//                     l += exp(sink_h - m) once per (row, head), after the blocks and the keys merged; the numerator
+//                     l += attn_exp(sink_h - m) once per (row, head), after the blocks and the keys merged; the numerator
 //                     untouched (Review Focus 2) - dflash_ref's softmax(cat([s, sink]))[..., :-1]
 //   topk_lse()        ll_topk_stage1/2: the TOPK (8) largest raw logits (value desc, index asc; NaN never), and the row's
 //                     logsumexp from per-chunk (max, Σ exp(v - max)) - CH-logit chunks, lane partials (i = lane, lane +
@@ -115,10 +115,12 @@ struct Weights {
 
 // --- the backbone's pieces ------------------------------------------------------------------------------------------
 
-// The exp attention_sink() uses (default libm's expf, what the twin always used). A test may swap it - e.g. for
-// dfref::attn_exp, a different exp within 1-2 fp32 ulps - to price how far the drafter's outputs move when only the
-// attention's exp ulps change (lilicorr_draft_test --diag). ll_attn.cl uses the device's builtin exp.
-inline float (*attn_sink_exp)(float) = [](float x) { return std::exp(x); };
+// The exp attention_sink() uses: dfref::attn_exp, ll_attn.cl's df_exp, so the kernel and the twin agree bit for bit
+// (DFlash's spec 19f fix, ported 2026-11-07: the device's builtin exp against libm's expf, 1-2 fp32 ulps, reached
+// lilicorr_draft_test's log-probs as 5.67e-3 - docs/probes/lilicorr-exact-divergence-2026-11-07.md). A test may swap it
+// - e.g. back to libm's expf, 1-2 fp32 ulps away - to price how far the drafter's outputs move when only the
+// attention's exp ulps change (lilicorr_draft_test --diag).
+inline float (*attn_sink_exp)(float) = dfref::attn_exp;
 
 // ll_attn: df_attn's chain + the sink. `sink` [NH] fp32 (this layer's).
 inline void attention_sink(const dfref::AttnDims& a, const float* q, const float* kb, const float* vb, const float* ring_k,

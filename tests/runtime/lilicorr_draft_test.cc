@@ -7,8 +7,9 @@
 //   lilicorr_draft_test <drafter repo or dir> [exact|int8|int4] [--diag]   (all three when none is given; SKIP 77 without it)
 //   --diag (test-only, docs/probes/lilicorr-exact-divergence-2026-11-07.md): after step 2, before its check, where the
 //   card and the twin part - the final-norm rows, the target head and the log-softmax over the CARD's rows, the worst
-//   log-prob - and how far the twin moves against itself when only its exp changes (SiLU's, the attention's: libm's
-//   expf -> dfref::attn_exp, 1-2 fp32 ulps apart, the size of the card's builtin exp vs libm's). Prints only.
+//   log-prob - and how far the twin moves against itself when only its exp changes, by 1-2 fp32 ulps (the size of the
+//   card's builtin exp vs libm's): SiLU's libm expf -> dfref::attn_exp, the attention's dfref::attn_exp (ll_attn's
+//   df_exp since 2026-11-07) -> libm's expf. Prints only.
 //
 //   1. The lists capture to their formulas' launch counts (116 draft, 9 projection); 1100 positions of random taps are
 //      projected 8 a replay (the 1024-slot ring wraps); the last replay's ring rows equal the twin's (bf16 within an
@@ -210,8 +211,10 @@ int main(int argc, char** argv) {
       walk &= o.ids[s] == want.walk.ids[s] && c.cur_token[1 + s] == o.ids[s];
     }
     if (same == 7) lc = dfref::cosine(&o.lattice[0][0][0], want.lattice.data(), want.lattice.size());
-    std::printf("2. draft at p %u: candidate sets %d / 7 (in order %d), log-probs within %.2e, lattice cosine %.9f, walk "
-                "%s; %.3f ms host-timed\n", NPOS, sets, same, lpd, lc, walk ? "=" : "DIFFERS", ms);
+    char lcs[32] = "n/a (candidates out of order)";   // lc is computed only when all 7 slots agree in order
+    if (same == 7) std::snprintf(lcs, sizeof lcs, "%.9f", lc);
+    std::printf("2. draft at p %u: candidate sets %d / 7 (in order %d), log-probs within %.2e, lattice cosine %s, walk "
+                "%s; %.3f ms host-timed\n", NPOS, sets, same, lpd, lcs, walk ? "=" : "DIFFERS", ms);
     if (diag) {
       // (a) the backbone: the card's final-norm rows (fp32 h, bf16 x) against the twin's
       std::vector<float> ch(size_t(M) * H);
@@ -267,7 +270,7 @@ int main(int argc, char** argv) {
         for (uint32_t i = 0; i < 8; ++i) std::printf(" %u:%.5f", want.cand[s * 8 + i], want.logit[s * 8 + i]);
         std::printf("\n");
       }
-      // (d) the twin against itself with one exp swapped (libm's expf -> attn_exp, 1-2 fp32 ulps): the sensitivity
+      // (d) the twin against itself with one exp swapped (libm's expf <-> attn_exp, 1-2 fp32 ulps): the sensitivity
       auto vs_twin = [&](const char* what) {
         const llref::DraftOut p = llref::draft(tw, dfref::Numerics::Engine, ring, rope, anchor, true, 1234, NPOS, 7);
         double d = 0, hc = 1;
@@ -281,17 +284,18 @@ int main(int argc, char** argv) {
         std::printf("diag d. twin vs twin, %s: candidates in order %d / 7, log-probs within %.3e, worst row cosine %.9f\n",
                     what, sm, d, hc);
       };
-      float (*const libm_exp)(float) = dfref::silu_exp;
-      float (*const libm_attn)(float) = llref::attn_sink_exp;
+      float (*const silu_was)(float) = dfref::silu_exp;        // libm's expf (df_silu_mul: the builtin exp)
+      float (*const attn_was)(float) = llref::attn_sink_exp;   // dfref::attn_exp (ll_attn: df_exp, bitwise)
+      float (*const libm)(float) = [](float x) { return std::exp(x); };
       dfref::silu_exp = dfref::attn_exp;
-      vs_twin("SiLU's exp -> attn_exp");
-      dfref::silu_exp = libm_exp;
-      llref::attn_sink_exp = dfref::attn_exp;
-      vs_twin("the attention's exp -> attn_exp");
+      vs_twin("SiLU's exp, libm -> attn_exp");
+      dfref::silu_exp = silu_was;
+      llref::attn_sink_exp = libm;
+      vs_twin("the attention's exp, attn_exp -> libm");
       dfref::silu_exp = dfref::attn_exp;
       vs_twin("both");
-      dfref::silu_exp = libm_exp;
-      llref::attn_sink_exp = libm_attn;
+      dfref::silu_exp = silu_was;
+      llref::attn_sink_exp = attn_was;
     }
     CHECK(sets == 7 && lc >= 0.99999 && walk && lpd <= 1e-3);
     CHECK(o.k == 7 && o.anchor == 1234 && o.pos == NPOS && o.anchor_valid == 1);
