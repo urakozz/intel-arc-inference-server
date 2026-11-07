@@ -1,7 +1,7 @@
 // ll_attn.cl - spec 26b: the LiLiCorr drafter's attention - src/kernels/dflash/df_attn.cl's chain (a family copy: df_attn.cl
 // is not edited, 23f's MG0 / D0 rule) with ATTENTION SINKS (spec 26 §2.1; dflash_ref.py _softmax_sink: a learned per-head
 // logit in the softmax denominator - softmax(cat([s, sink]))[..., :-1] - not scaled by head_dim^-0.5, no value row).
-// Twin: tests/kernels/lilicorr_ref.h attention_sink() (same order; FP_CONTRACT off).
+// Twin: tests/kernels/lilicorr_ref.h attention_sink() (same order; FP_CONTRACT off; the same exp, df_exp = dfref::attn_exp).
 //
 // **The window** (vLLM's non-causal sliding layer, Decision 11): a query at q sees a key at k iff |q - k| <= WIN - 1
 // (1023 at WIN 1024). Block row r sits at p + r (p = ctrl.pos), the context is positions < p: row r sees max(0, p + r -
@@ -11,10 +11,10 @@
 //
 //   ll_attn_part    grid (NKV x G / HPW, TGT), WG WGA: one kv head's PB context keys against HPW of its G = NH / NKV q
 //                   heads x M rows (P = HPW·M pairs; HPW < G keeps the local memory of 32 / 2 heads' pairs within 64 KB:
-//                   at HPW 8, P 64) - scores (q · k, ascending d) · scale, per pair m, e = exp(s - m), l = Σ e
+//                   at HPW 8, P 64) - scores (q · k, ascending d) · scale, per pair m, e = df_exp(s - m), l = Σ e
 //                   (ascending t), acc[d] = Σ e · v[d] -> part[q head][b][r] = (m, l, acc[HD]) (df_attn_part's layout)
 //   ll_attn_reduce  grid (NH, M), WG HD: row r > K writes zeros; else the block keys' scores, m over the blocks then
-//                   the keys, l and acc merged blocks-ascending then keys-ascending, THEN l += exp(sink[h] - m) once
+//                   the keys, l and acc merged blocks-ascending then keys-ascending, THEN l += df_exp(sink[h] - m) once
 //                   (Review Focus 2: after the context blocks and the block keys, the numerator untouched), out =
 //                   bf16(acc / l)
 #pragma OPENCL FP_CONTRACT OFF
@@ -52,6 +52,28 @@ inline ushort f2bf(float f) {
   return (ushort)((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
 }
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+
+// The softmax's exp - df_attn.cl's df_exp, copied (df_attn.cl is not edited): NOT the device's `exp`, which is not
+// libm's (1-2 fp32 ulps off the host's expf in ~45 % of softmax arguments; through an output that cancels toward 0 and
+// its bf16 rounding that reached lilicorr_draft_test's log-probs as 5.67e-3 against the 1e-3 bar -
+// docs/probes/lilicorr-exact-divergence-2026-11-07.md). Cephes' expf from + - x, rint and an exponent-field scale:
+// bitwise the twin's dfref::attn_exp, within 2 fp32 ulps of exp. Below -86 it is 0, above 88 +inf (the sink's
+// sink[h] - m may be positive: handled to 88); NaN passes through.
+inline float df_exp(float x) {
+  if (x != x) return x;
+  if (x < -86.0f) return 0.0f;
+  if (x > 88.0f) return INFINITY;
+  const float n = rint(x * 1.44269504088896341f);
+  const float r = (x - n * 0.693359375f) - n * -2.12194440e-4f;
+  float p = 1.9875691500e-4f;
+  p = p * r + 1.3981999507e-3f;
+  p = p * r + 8.3334519073e-3f;
+  p = p * r + 4.1665795894e-2f;
+  p = p * r + 1.6666665459e-1f;
+  p = p * r + 5.0000001201e-1f;
+  const float y = p * (r * r) + r + 1.0f;
+  return y * as_float((uint)((int)n + 127) << 23);
+}
 
 __attribute__((reqd_work_group_size(WGA, 1, 1)))
 __kernel void ll_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
@@ -91,7 +113,7 @@ __kernel void ll_attn_part(__global const uint* restrict ctrl, __global const ui
     float l = 0.0f;
     for (uint t = 0; t < PB; ++t) {
       const float sc = s[pr * PB + t];
-      const float e = (m == -INFINITY || sc == -INFINITY) ? 0.0f : exp(sc - m);
+      const float e = (m == -INFINITY || sc == -INFINITY) ? 0.0f : df_exp(sc - m);
       s[pr * PB + t] = e;
       l = l + e;
     }
@@ -158,16 +180,16 @@ __kernel void ll_attn_reduce(__global const uint* restrict ctrl, __global const 
     float l = 0.0f;
     for (uint b = 0; b < TGT; ++b) {
       const float mb = pb[(size_t)b * M * PART];
-      const float w = mb == -INFINITY ? 0.0f : exp(mb - m);
+      const float w = mb == -INFINITY ? 0.0f : df_exp(mb - m);
       wts[b] = w;
       l = l + pb[(size_t)b * M * PART + 1] * w;
     }
     for (uint j = 0; j < M; ++j) {
-      const float w = sb[j] == -INFINITY ? 0.0f : exp(sb[j] - m);
+      const float w = sb[j] == -INFINITY ? 0.0f : df_exp(sb[j] - m);
       wts[TGT + j] = w;
       l = l + w;
     }
-    l = l + exp(sink[h] - m);   // the sink: the denominator only, once, after the blocks and the keys
+    l = l + df_exp(sink[h] - m);   // the sink: the denominator only, once, after the blocks and the keys
     mlsum[0] = m;
     mlsum[1] = l;
   }
