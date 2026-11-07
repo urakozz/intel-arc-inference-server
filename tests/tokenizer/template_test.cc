@@ -46,7 +46,9 @@ void diff_report(const char* name, const std::string& got, const std::string& wa
 
 // Spec 14: `template_test <dir> <snapshot> <cases.json>` renders every case of the JSON
 // file (name, messages, tools, think) through <snapshot>'s template and compares with
-// <dir>/agnes_template_<name>.txt (tools/tokenizer/dump_agnes_template.py, transformers).
+// <dir>/agnes_template_<name>.txt (tools/tokenizer/dump_agnes_template.py, transformers). The agnes_template_*
+// fixtures are renders of Qwen3.8's chat template (named after the model they were first dumped for, spec 14,
+// dropped 2026-11-07); Flash-Next's tests read them.
 // Spec 15e: an optional fifth argument names the reference files' prefix (`ornith` ->
 // <dir>/ornith_template_<name>.txt). A snapshot without its two template files is a
 // SKIP (77), not a failure - the test is about the renderer, not about the cache.

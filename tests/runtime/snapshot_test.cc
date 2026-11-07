@@ -111,17 +111,15 @@ int main(int argc, char** argv) {
   const auto other = repeat_to(golden::read_ids("tests/golden/prompts/code.ids"), 3000);
   // The sizes are written out per model, not derived from the descriptor (that would check the
   // formula against itself). State: GDN layers x 48 v-heads x 128 x 128 x 4 B, plus the conv ring
-  // GDN layers x 16 x 10240 x 2 B - Qwen3.8 48 layers: 150,994,944 + 15,728,640; Agnes 54 layers:
-  // 169,869,312 + 17,694,720 (the box's first Agnes run, 2026-10-22, found Qwen3.8's number here).
-  const bool agnes = e.model().desc->name == "agnes-3.0-flash";
-  CHECK_EQ(e.state_bytes(), agnes ? size_t(187564032) : size_t(166723584));
-  // 2048 positions x K and V x FA layers (16 on Qwen3.8, 18 on Agnes) x 4 kv heads x (256 x 2 B)
-  // = 134,217,728 / 150,994,944 at bf16; x (256 + 2) B at int8 (spec 12b: the rows and their
+  // GDN layers x 16 x 10240 x 2 B - Qwen3.8 48 layers: 150,994,944 + 15,728,640.
+  CHECK_EQ(e.state_bytes(), size_t(166723584));
+  // 2048 positions x K and V x FA layers (16 on Qwen3.8) x 4 kv heads x (256 x 2 B)
+  // = 134,217,728 at bf16; x (256 + 2) B at int8 (spec 12b: the rows and their
   // fp16 scales).
-  const size_t fa = agnes ? 18 : 16;
+  const size_t fa = 16;
   CHECK_EQ(e.kv_bytes(2048), e.kv_cache() == runtime::KvCache::Int8
                                  ? size_t(2048) * 2 * fa * 4 * (256 + 2)
-                                 : agnes ? size_t(150994944) : size_t(134217728));
+                                 : size_t(134217728));
 
   // A and B.
   check_restore(ctx, e, ids, 4395, other);
@@ -212,7 +210,7 @@ int main(int argc, char** argv) {
     std::vector<std::unique_ptr<l0::Mem>> states;
     std::vector<uint32_t> ends;
     // The KV of the whole run, gathered range by range into one [0, 5000) host layout:
-    // save_kv's runs (run_units: 2 x fa_layers at bf16 - 32 on Qwen3.8, 36 on Agnes - and
+    // save_kv's runs (run_units: 2 x fa_layers at bf16 - 32 on Qwen3.8 - and
     // twice that at int8) of 5000 positions each.
     const std::vector<size_t> units = run_units(e);
     std::vector<uint8_t> kv_all(e.kv_bytes(5000));

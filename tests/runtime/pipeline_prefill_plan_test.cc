@@ -193,7 +193,7 @@ void check_schedule() {
 }
 
 void check_link() {
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()}) {
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()}) {
     const runtime::PpPfLinkLayout l = runtime::pp_prefill_link_layout(*d, runtime::PrefillScratchDims::kCDefault);
     const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, *d, runtime::PrefillScratchDims::kCDefault);
     CHECK_EQ(l.resid_bytes, s.resid);
@@ -239,7 +239,7 @@ runtime::PrefillPath path(PrefillBackend b) {
 }
 
 void check_plan() {
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()})
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8})
       for (uint32_t len : {16384u, 131072u}) {
         const runtime::PpWeights w = runtime::pp_weights(*d, WeightKind::Int8);

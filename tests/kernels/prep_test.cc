@@ -302,8 +302,7 @@ void case_res_norm_two_stage(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV, ui
 
 // `exact_silu`: force every gate column to sum to 30.0f, making silu(gate)
 // provably 30.0f on host and device alike, so the whole chain is bit-exact.
-// `N`: the MLP intermediate - Qwen3.8's 17408, or Agnes's 19456 (spec 14, the
-// `_I19456` variant: 5 work-groups, the last covering 3072).
+// `N`: the MLP intermediate - Qwen3.8's 17408 (5 work-groups, the last covering 1024).
 void case_silu_mul(Dev& d, uint32_t M, bool exact_silu, uint32_t N = prep_ref::kSiluN) {
   const uint32_t S = prep_ref::kSiluS, FN = 2 * N;
   std::vector<float> partials = random_f32(size_t(S) * M * FN, exact_silu ? 401 : 400, 0.f, 1.f);
@@ -385,8 +384,6 @@ int main() {
   case_res_norm_two_stage(d, 1, 5120, 4, 20, 1);
   case_silu_mul(d, 1, false);
   case_silu_mul(d, 1, true);
-  case_silu_mul(d, 1, false, 19456);   // spec 14: Agnes's folded intermediate
-  case_silu_mul(d, 1, true, 19456);
   case_gated_head(d, 1, false);
   case_gated_head(d, 1, true);
   std::puts("prep_test OK");

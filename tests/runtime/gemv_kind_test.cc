@@ -2,7 +2,7 @@
 //
 //   - M = 1 -> Gemv for every list kind: plain decode, ingest / generate, the MTP draft, the prefill tail's head,
 //     the draft vocabulary's head all bind today's gemv / gemv_i8w names, on every model's shapes;
-//   - M >= 2 -> SmallM: every tuned shape of Qwen3.8 and Agnes (their int4 linears and the int8 head) binds
+//   - M >= 2 -> SmallM: every tuned shape of Qwen3.8 (its int4 linears and the int8 head) binds
 //     gemm_sm at M = 2..8, and the shape's S is the one its consumer folds (the S table is one row per shape -
 //     the same at every M, property R's precondition); Ornith's dense projections on gemm_sm at M 2..4; an untuned
 //     shape keeps gemv;
@@ -36,7 +36,7 @@ int main() {
   }
 
   size_t tuned = 0;
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes()}) {
+  for (const model::ModelDesc* d : {&model::qwen38()}) {
     const LinearId int4[] = {LinearId::QkvZ, LinearId::OutProj, LinearId::Qkv, LinearId::OProj, LinearId::GateUp,
                              LinearId::Down};
     for (LinearId id : int4) {
@@ -45,7 +45,7 @@ int main() {
       CHECK_EQ(kernels::int4_linear_variant(runtime::gemv_kind(1), 1, s.K, s.N, s.S, s.layout),
                kernels::gemv_variant(1, s.K, s.N, s.S, s.layout));
       const kernels::SmallMTuning* t = kernels::small_m_tuning(s.K, s.N, s.S, s.layout);
-      CHECK(t != nullptr);   // every Qwen3.8 / Agnes int4 decode linear is tuned
+      CHECK(t != nullptr);   // every Qwen3.8 int4 decode linear is tuned
       // the consumer's fold is unchanged - except gate||up's one-slice 2x8 work-group, whose SiLU is the _S1 build
       if (id == LinearId::GateUp && kernels::gemm_sm_out_s(*t) != s.S) {
         CHECK_EQ(kernels::gemm_sm_out_s(*t), 1u);
@@ -124,7 +124,7 @@ int main() {
     CHECK_EQ(kernels::int8_linear_variant(runtime::gemv_kind(4), 4, H, model::Qwen35::kVocab),
              std::string("gemm_sm_i8w_M4_K2560_N248320_wg"));
   }
-  std::printf("gemv_kind_test OK: %zu tuned int4 decode linears (Qwen3.8 + Agnes), M = 1 on gemv, M >= 2 on "
+  std::printf("gemv_kind_test OK: %zu tuned int4 decode linears (Qwen3.8), M = 1 on gemv, M >= 2 on "
               "gemm_sm, Ornith and Flash-Next at M 2..4, the override, the drafter on gemm_sm_i8w (%zu names)\n",
               tuned, drafter);
   return 0;

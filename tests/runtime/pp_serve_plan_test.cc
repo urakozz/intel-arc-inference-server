@@ -13,11 +13,11 @@
 //   3. the block shadows: two of each device's GDN state + conv ring (+ device 1's hidden row
 //      with MTP), only with a prefill path;
 //   4. the stage verify lists' launches add up to verify_launches (decode_launches + 10) at
-//      every legal split of Qwen3.8, Agnes and Ornith;
+//      every legal split of Qwen3.8 and Ornith;
 //   5. pp_kv_runs: a two-device "save" of synthetic KV equals the one-card save (Engine's
 //      kv_runs, restated here) byte for byte - bf16 and int8, with and without the head's
 //      layer, three splits, several ranges; a load of those bytes restores both stages;
-//   6. b70-serve --pp 2's auto choices with the server's terms (derived): Qwen3.8, Agnes and
+//   6. b70-serve --pp 2's auto choices with the server's terms (derived): Qwen3.8 and
 //      Ornith with and without MTP, both KV forms - and each beats one card's auto length;
 //   7. spec 19d (a DFlash drafter on device 1, --spec dflash --pp 2): device 1 gains the drafter's bytes and the
 //      embedding replica, each device its 8-slot verify slots (pp_gdn_spec_bytes(d, gdn, 8)), device 1 two prefill
@@ -93,7 +93,7 @@ const std::vector<runtime::PrefillPath>& paths() {
 // ---- 1 -------------------------------------------------------------------------------------
 void check_extras_off() {
   size_t n = 0;
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()})
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (WeightKind h : {WeightKind::Bf16, WeightKind::Int8}) {
       const runtime::PpWeights w = weights_with_head(*d, h);   // w.mtp ignored without PpExtras::mtp
       for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
@@ -122,12 +122,12 @@ void check_extras_off() {
 // ---- 2 -------------------------------------------------------------------------------------
 void check_gdn_spec() {
   // The binaries' SPEC_SLOT_STRIDE (floats per slot, src/kernels/CMakeLists.txt): Qwen3.8
-  // 37748736 (48 GDN layers), Agnes 42467328 (54), Ornith 15728640 (30).
+  // 37748736 (48 GDN layers), Ornith 15728640 (30).
   struct M {
     const model::ModelDesc* d;
     size_t slot_floats;
   };
-  for (const M m : {M{&model::qwen38(), 37748736}, M{&model::agnes(), 42467328}, M{&model::ornith(), 15728640}}) {
+  for (const M m : {M{&model::qwen38(), 37748736}, M{&model::ornith(), 15728640}}) {
     const size_t slot = m.slot_floats * 4, layer = slot / m.d->gdn_layers;
     CHECK_EQ(layer * m.d->gdn_layers, slot);
     for (uint32_t g = 1; g < m.d->gdn_layers; ++g) CHECK_EQ(runtime::pp_gdn_spec_bytes(*m.d, g), 2 * slot + g * layer);
@@ -142,7 +142,7 @@ void check_gdn_spec() {
 }
 
 void check_mtp_terms() {
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()})
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
       for (const runtime::PrefillPath& pf : paths())
         for (uint32_t dv : {0u, 32768u}) {
@@ -198,7 +198,7 @@ void check_mtp_terms() {
 
 // ---- 3 -------------------------------------------------------------------------------------
 void check_shadows() {
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()})
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (bool mtp : {false, true}) {
       const runtime::PpWeights w = weights_with_head(*d, WeightKind::Int8);
       runtime::PpExtras x;
@@ -229,7 +229,7 @@ void check_shadows() {
 
 // ---- 4 -------------------------------------------------------------------------------------
 void check_verify_launches() {
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()}) {
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()}) {
     const size_t decode = 1 + size_t(d->layers) * (d->is_moe() ? 13 : 12) + 5;   // decode_launches
     for (uint32_t s = 1; s < d->layers; ++s) {
       if (!legal(*d, s)) continue;
@@ -363,8 +363,6 @@ void check_serve_auto() {
                       Row{"qwen3.8 int8 head, mtp", &model::qwen38(), WeightKind::Int8, true, KvCache::Bf16},
                       Row{"qwen3.8 int8 head, mtp, int8 KV", &model::qwen38(), WeightKind::Int8, true, KvCache::Int8},
                       Row{"qwen3.8 bf16 head, mtp", &model::qwen38(), WeightKind::Bf16, true, KvCache::Bf16},
-                      Row{"agnes int8 head", &model::agnes(), WeightKind::Int8, false, KvCache::Bf16},
-                      Row{"agnes int8 head, mtp", &model::agnes(), WeightKind::Int8, true, KvCache::Bf16},
                       Row{"ornith int8 head", &model::ornith(), WeightKind::Int8, false, KvCache::Bf16}}) {
     const runtime::PpWeights w = weights_with_head(*r.d, r.head);
     runtime::PpExtras x;

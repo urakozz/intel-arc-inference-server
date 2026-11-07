@@ -12,7 +12,7 @@
 //       by every raw argument (a string equals the raw text, any other value is the raw text's JSON);
 //   (b) streaming facts: reasoning streams verbatim up to the longest tail that may still become </think>; with
 //       force_nonempty_content nothing streams until the first byte behind </think> (or the end); thinking off streams content;
-//   (c) the Qwen / Agnes OutputStream is unchanged (a cut call is still emitted when its function tag is complete);
+//   (c) the Qwen OutputStream is unchanged (a cut call is still emitted when its function tag is complete);
 //   (d) a fuzz: 2000 random outputs (reasoning, tags, calls complete and cut, values with markers, multi-byte text; thinking on /
 //       off, force on / off) - every whole parse equals its byte-at-a-time, two-way-split and 1-7-byte streams, and an independent
 //       model of the reasoning rule (text before the first </think>, verbatim) holds.
@@ -242,7 +242,7 @@ void check_streaming_facts() {
 void check_qwen_unchanged() {
   const std::string cut = "<tool_call>\n<function=f>\n<parameter=a>\n1\n</parameter>\n<parameter=b>\nabc";
   const ParsedOutput q = server::parse_output(cut, false, json());
-  CHECK_EQ(q.tool_calls.size(), size_t(1));   // the Qwen / Agnes behaviour: the cut call is emitted with what closed
+  CHECK_EQ(q.tool_calls.size(), size_t(1));   // the Qwen behaviour: the cut call is emitted with what closed
   CHECK_EQ(q.tool_calls[0].name, std::string("f"));
   CHECK_EQ(q.tool_calls[0].arguments.dump(), std::string("{\"a\":1}"));
   const ParsedOutput b = server::parse_bolt_output(cut, false, false, json());

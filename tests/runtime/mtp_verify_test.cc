@@ -66,8 +66,7 @@ namespace {
 using model::Qwen35;
 uint32_t kMaxLen = 16384;   // argv[2]
 constexpr size_t V = Qwen35::kVocab, VU = Qwen35::kVocabUsed;
-// One GDN state slot: gdn_layers x 48 x 128 x 128 fp32 (48 layers on Qwen3.8, 54 on
-// Agnes - spec 14), set from the loaded model's descriptor in main().
+// One GDN state slot: gdn_layers x 48 x 128 x 128 fp32 (48 layers on Qwen3.8), set from the loaded model's descriptor in main().
 size_t kGdnBytes = 0;
 
 double cosine(const float* a, const float* b, size_t n, double* max_abs = nullptr) {
@@ -323,7 +322,7 @@ int main(int argc, char** argv) {
 
   // Sizes with the head (Review Focus 4): +hh0 in the state, a 17th KV layer.
   // Qwen3.8: 166723584 + 10240 and 134217728 / 16 x 17 (the gdn_state + conv ring of
-  // 48 GDN layers; 2048 positions of 16 FA layers' K and V); Agnes: 54 / 18.
+  // 48 GDN layers; 2048 positions of 16 FA layers' K and V).
   CHECK_EQ(e.state_bytes(), kGdnBytes + gdn_layers * 16 * 10240 * 2 + 10240);
   // Spec 12b: 4 x 256 x 2 B per layer and position at bf16, 4 x (256 + 2) B at int8.
   CHECK_EQ(e.kv_bytes(2048), size_t(2048) * 2 * (fa_layers + 1) *

@@ -23,7 +23,7 @@ bool throws(const std::string& text) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  // Qwen3.8 / Agnes / Ornith: the multimodal layout, text_config wins.
+  // Qwen3.8 / Ornith: the multimodal layout, text_config wins.
   CHECK_EQ(of(R"({"architectures":["Qwen3_5ForConditionalGeneration"],
                   "text_config":{"max_position_embeddings":262144,"hidden_size":5120}})"),
            262144u);

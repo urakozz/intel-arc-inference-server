@@ -53,7 +53,7 @@ void check_parse() {
   cli::parse_parallel("replica", p);
   CHECK(p.mode == cli::Parallel::Replica && p.replica() && !p.on() && p.given() && p.devices == 1u);
   CHECK(says([&] { cli::refuse_replica_in_decode(p); }, "--parallel replica is b70-serve's"));
-  CHECK(says([] { cli::check_replica_model("AgnesForConditionalGeneration", "Agnes 3.0 Flash"); },
+  CHECK(says([] { cli::check_replica_model("LlamaForCausalLM", "llama"); },
              "--parallel replica serves Qwen3.8 only"));
   CHECK(says([] { cli::check_replica_model("Qwen3_5MoeForConditionalGeneration", "Ornith 1.5"); },
              "Ornith 1.5 has no replica engine"));
@@ -104,8 +104,8 @@ void check_parse() {
 // The served name (cli/served_name.h) and the --spec rule (cli/spec_args.h).
 void check_names_and_spec() {
   CHECK(cli::served_name("urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ") == "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ");
-  CHECK(cli::served_name("/home/u/.cache/huggingface/hub/models--urakozz--Agnes-3.0-Flash/snapshots/abc/") ==
-        "urakozz/Agnes-3.0-Flash");
+  CHECK(cli::served_name("/home/u/.cache/huggingface/hub/models--urakozz--Kolibri-1/snapshots/abc/") ==
+        "urakozz/Kolibri-1");
   CHECK(cli::served_name("/data/checkpoints/my-model/") == "my-model");
   CHECK(cli::served_name("./tests/model/k2") == "k2");
 

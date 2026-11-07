@@ -59,7 +59,7 @@ target_link_libraries(pf_int8_test PRIVATE b70_l0)
 b70_target_kernel_dir(pf_int8_test)
 add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
                  kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
-                 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU kernel_pf_quant_had_K19456)
+                 kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
 add_test(NAME pf_int8_test COMMAND pf_int8_test)
 
 # Spec 6 K1 (plan 6b Task 1): pf_flash_attn against an fp64 reference.
@@ -202,8 +202,6 @@ add_dependencies(pf_dequant_slab_test
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
-  kernel_pf_dequant_slab_K5120_N38912_L0 kernel_pf_dequant_slab_K19456_N5120_L0
-  kernel_pf_dequant_tile_K5120_N38912_L0_T0 kernel_pf_dequant_tile_K19456_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N16384_L1_T0 kernel_pf_dequant_tile_K6144_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N34816_L0_T0 kernel_pf_dequant_tile_K17408_N5120_L0_T0
   kernel_pf_dequant_tile_K5120_N14336_L0_T0)
@@ -330,7 +328,7 @@ add_test(NAME gemm_sm_ref_test COMMAND gemm_sm_ref_test)
 # block's binaries. gemm_sm_test (device): N2 against fp64 and gemv, N3 property R, every row at every built M.
 get_property(B70_GEMM_SM_KERNELS GLOBAL PROPERTY B70_GEMM_SM_KERNELS)
 get_property(B70_GEMM_SM_CONSUMERS GLOBAL PROPERTY B70_GEMM_SM_CONSUMERS)
-if(B70_MTP AND B70_AGNES AND B70_DFLASH AND B70_VERIFY_M8 AND B70_ORNITH AND B70_Q4EXP)
+if(B70_MTP AND B70_DFLASH AND B70_VERIFY_M8 AND B70_ORNITH AND B70_Q4EXP)
   add_executable(gemm_sm_names_test kernels/gemm_sm_names_test.cc)
   target_include_directories(gemm_sm_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   b70_target_kernel_dir(gemm_sm_names_test)
@@ -404,8 +402,7 @@ add_dependencies(gemv_test
   kernel_gemv_control_M1_K6144_N5120_S4_L0
   kernel_gemv_M1_K6144_N5120_S4_L0 kernel_gemv_M1_K5120_N14336_S2_L0
   kernel_gemv_M1_K5120_N16384_S1_L1 kernel_gemv_M1_K5120_N34816_S8_L0
-  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0
-  kernel_gemv_M1_K5120_N38912_S8_L0 kernel_gemv_M1_K19456_N5120_S4_L0)   # spec 14
+  kernel_gemv_M1_K17408_N5120_S4_L0 kernel_gemv_M2_K6144_N5120_S1_L0)
 add_test(NAME gemv_test COMMAND gemv_test)
 
 add_executable(gemv_bf16_test kernels/gemv_bf16_test.cc)
@@ -463,8 +460,7 @@ b70_target_kernel_dir(prep_test)
 add_dependencies(prep_test kernel_prep_res_norm_M1_K5120_SP0 kernel_prep_res_norm_M1_K5120_SP4
   kernel_prep_res_fold_M1_K5120_SP0_G20 kernel_prep_res_fold_M1_K5120_SP4_G20
   kernel_prep_norm_finish_M1_K5120_G20_W20 kernel_prep_norm_finish_M1_K5120_G20_W1
-  kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1
-  kernel_prep_silu_mul_M1_I19456)   # spec 14: Agnes's intermediate
+  kernel_prep_silu_mul_M1 kernel_prep_gated_head_M1)
 add_test(NAME prep_test COMMAND prep_test)
 
 # The GDN decode step. Its reference (gdn_ref.h) reproduces the kernel's tree
@@ -652,14 +648,6 @@ target_include_directories(dequant_fixture_test PRIVATE ${CMAKE_SOURCE_DIR}/src 
 target_link_libraries(dequant_fixture_test PRIVATE b70_loader)
 add_test(NAME dequant_fixture_test COMMAND dequant_fixture_test ${CMAKE_SOURCE_DIR}/tests/golden/dequant_fixture.safetensors)
 
-# Spec 14 §2: the loader's packed-int4 fold against tools/oracle/agnes_fold.py on a
-# shared synthetic fixture, byte for byte. Host only.
-add_executable(agnes_fold_test loader/agnes_fold_test.cc)
-target_include_directories(agnes_fold_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(agnes_fold_test PRIVATE b70_loader)
-add_test(NAME agnes_fold_test COMMAND agnes_fold_test
-  ${CMAKE_SOURCE_DIR}/tests/loader/agnes_fold_fixture.safetensors)
-
 # Spec 15c: the MoE layer repack (loader/moe.h) on a synthetic per-expert GPTQ
 # checkpoint the test writes itself (both per-expert forms, g128, the refusals) and
 # Ornith's MoE byte figures. Host only.
@@ -700,7 +688,7 @@ target_link_libraries(model_desc_test PRIVATE b70_model)
 add_test(NAME model_desc_test COMMAND model_desc_test)
 
 # Spec 15b: the kernel variant names built from a descriptor - main's names at
-# Qwen3.8's and Agnes's shapes, suffixed ones at Ornith's. Host only; names only.
+# Qwen3.8's shapes, suffixed ones at Ornith's. Host only; names only.
 add_executable(variant_names_test kernels/variant_names_test.cc)
 target_include_directories(variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(variant_names_test PRIVATE b70_model)
@@ -907,8 +895,6 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
-  kernel_pf_dequant_slab_K5120_N38912_L0 kernel_pf_dequant_slab_K19456_N5120_L0
-  kernel_pf_dequant_tile_K5120_N38912_L0_T0 kernel_pf_dequant_tile_K19456_N5120_L0_T0
   # Spec 5's h8 path, which `--prefill-backend l0-int8` runs (pf_colmax_rot is in the
   # pf_requant_rot binaries).
   kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
@@ -1271,13 +1257,6 @@ if(B70_TOKENIZER_ENABLED)
   target_include_directories(template_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(template_test PRIVATE b70_tokenizer)
   add_test(NAME template_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer)
-  # Spec 14: Agnes's template (byte-identical to Qwen3.8's) on five message lists - plain,
-  # thinking, tools, a tool call in history, tool responses - against transformers' render.
-  b70_hf_snapshot(B70_AGNES_SNAPSHOT_DIR models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
-    946012d0e0b1b6df685c910adf3d68e351931306 "" PATH
-    "Agnes snapshot directory for the template test (tokenizer_config + chat_template.jinja)")
-  add_test(NAME template_agnes_test COMMAND template_test ${CMAKE_SOURCE_DIR}/tests/tokenizer
-    ${B70_AGNES_SNAPSHOT_DIR} agnes_template_cases.json)
   add_executable(streamer_test tokenizer/streamer_test.cc)
   target_include_directories(streamer_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(streamer_test PRIVATE b70_tokenizer)
@@ -1458,70 +1437,6 @@ exec "$@"
   endforeach()
 endif()
 
-# --- Spec 14: Agnes 3.0 Flash ---------------------------------------------------------
-# The second model's gates (spec 14 §4): the loader and the fold on device (G1's loader
-# half), the golden gates on decode and on both prefill backends (G2), replay determinism,
-# prefill continuation, snapshots, prefix caching, MTP (G4). Same executables as Qwen3.8's,
-# pointed at the Agnes checkpoint and its golden set, label `agnes` beside the usual ones:
-# `ctest -L agnes` runs exactly these, `ctest -LE agnes` is a Qwen3.8 session as before.
-# The golden set `oracle-out-agnes` is dumped on the box (tools/oracle/README.md, spec 14);
-# the golden registrations SKIP (77) until it exists, as Qwen3.8's do.
-# Unvalidated on the card (docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md).
-if(B70_AGNES)
-  set(B70_AGNES_SNAPSHOT "urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ"
-    CACHE STRING "Agnes checkpoint (repo id resolved in the HF cache, or a snapshot directory)")
-  set(B70_AGNES_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-agnes"
-    CACHE PATH "The CPU-oracle golden set dumped from B70_AGNES_SNAPSHOT")
-  set(_ag_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
-
-  add_executable(load_agnes_test loader/load_agnes_test.cc)
-  target_include_directories(load_agnes_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(load_agnes_test PRIVATE b70_loader b70_model)
-  add_test(NAME load_agnes_test COMMAND load_agnes_test ${B70_AGNES_SNAPSHOT})
-  set_tests_properties(load_agnes_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 900)
-
-  # G2: decode (bf16 and int8 head) and prefill (l0, l0-int8) against oracle-out-agnes.
-  add_test(NAME golden_gate_agnes_test COMMAND golden_gate_test
-    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT})
-  add_test(NAME golden_gate_agnes_i8head_test COMMAND golden_gate_test
-    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} int8)
-  add_test(NAME prefill_gate_agnes_l0_test COMMAND prefill_gate_test
-    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} prose,code,cjk 0 l0)
-  add_test(NAME prefill_gate_agnes_int8_test COMMAND prefill_gate_test
-    ${B70_AGNES_ORACLE_DIR} ${_ag_prompts} ${B70_AGNES_SNAPSHOT} prose,code,cjk 0 l0-int8 1)
-  set_tests_properties(golden_gate_agnes_test golden_gate_agnes_i8head_test
-    prefill_gate_agnes_l0_test prefill_gate_agnes_int8_test PROPERTIES
-    LABELS "checkpoint;golden;agnes" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-
-  # Determinism, continuation, snapshots (G4 spec 7 C1), MTP verify (G4 spec 8 M2).
-  add_test(NAME replay_determinism_agnes_test COMMAND replay_determinism_test ${B70_AGNES_SNAPSHOT})
-  set_tests_properties(replay_determinism_agnes_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 1200)
-  foreach(b l0 l0-int8)
-    add_test(NAME prefill_split_agnes_${b}_test COMMAND prefill_split_test ${B70_AGNES_SNAPSHOT}
-      ${_ag_prompts}/long32k.ids ${b})
-    set_tests_properties(prefill_split_agnes_${b}_test PROPERTIES LABELS "checkpoint;prefill;agnes"
-      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-  endforeach()
-  add_test(NAME snapshot_agnes_test COMMAND snapshot_test ${B70_AGNES_SNAPSHOT})
-  set_tests_properties(snapshot_agnes_test PROPERTIES LABELS "checkpoint;agnes"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1200)
-  if(TARGET prefix_gpu_test)   # G4 spec 7 C2
-    add_test(NAME prefix_gpu_agnes_int8_test COMMAND prefix_gpu_test ${B70_AGNES_SNAPSHOT}
-      ${_ag_prompts} l0-int8)
-    set_tests_properties(prefix_gpu_agnes_int8_test PROPERTIES LABELS "checkpoint;agnes" TIMEOUT 1800)
-  endif()
-  if(TARGET mtp_verify_test)
-    add_test(NAME mtp_verify_agnes_test COMMAND mtp_verify_test ${B70_AGNES_SNAPSHOT})
-    set_tests_properties(mtp_verify_agnes_test PROPERTIES LABELS "checkpoint;mtp;agnes" SKIP_RETURN_CODE 77
-      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
-    # M1: the head's draft logits against tools/oracle/mtp_ref.py --dump on Agnes.
-    add_test(NAME mtp_head_agnes_test COMMAND mtp_head_test ${B70_AGNES_SNAPSHOT} ${_ag_prompts}
-      ${CMAKE_SOURCE_DIR}/oracle-out-agnes-mtp/m1 ${CMAKE_SOURCE_DIR}/oracle-out-agnes-mtp)
-    set_tests_properties(mtp_head_agnes_test PROPERTIES LABELS "checkpoint;golden;mtp;agnes"
-      SKIP_RETURN_CODE 77 TIMEOUT 1800)
-  endif()
-endif()
-
 # Spec 6 §10 (max_len auto): the memory plan against the card - every planned component
 # and every buffer equal to what the engine allocated, at max_len 16384 and at `auto`
 # (the largest the plan fits with the default 1.5 GB reserve, reached as the CLIs reach
@@ -1550,17 +1465,6 @@ if(B70_MTP)
 endif()
 set_tests_properties(${_b70_plan_box_tests} PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
-if(B70_AGNES)
-  add_test(NAME memory_plan_box_agnes_test COMMAND memory_plan_box_test ${B70_AGNES_SNAPSHOT})
-  set(_b70_plan_box_agnes memory_plan_box_agnes_test)
-  if(B70_MTP)
-    add_test(NAME memory_plan_box_agnes_mtp_test COMMAND memory_plan_box_test ${B70_AGNES_SNAPSHOT} mtp)
-    list(APPEND _b70_plan_box_agnes memory_plan_box_agnes_mtp_test)
-  endif()
-  set_tests_properties(${_b70_plan_box_agnes} PROPERTIES LABELS "checkpoint;agnes"
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 1800)
-endif()
-
 # --- Spec 15c: Ornith 1.5 35B-A3B decode on the card (label `ornith`) ----------------
 # The int4 checkpoint is the operator's AutoRound W4A16 g64 export,
 # urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ (spec 15 decision 1, settled in §13);
@@ -2412,7 +2316,7 @@ endif()
 # `pp` labels the device ones: `ctest -L pp`.
 #
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
-# and auto length for Qwen3.8 / Agnes / Ornith, K2-Horizon's bytes per card), the peer
+# and auto length for Qwen3.8 / Ornith, K2-Horizon's bytes per card), the peer
 # hand-off's protocol on two threads (runtime/pipeline_protocol.h, pp_handoff.cl's mirror),
 # and b70-decode's --parallel flag.
 add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
@@ -3300,8 +3204,8 @@ b70_cli_reject(cli_reject_qwen4exp_prefill_chunk ${_q4_cfg} --layers 4 --ids ${B
 # Task 1 (host): the tokens and the template. 21a found the original's tokenizer.json NOT Qwen3.8's (the split regex
 # adds \p{M}; Intel's checkpoint ships Qwen3.8's file), so qwen4exp_tokenizer_test holds the engine's tokenizer to
 # tools/tokenizer/dump_qwen4exp.py's fixture (tests/tokenizer/qwen4exp_tokenizer.json: 24 texts, the added tokens
-# both ways, corpus.txt's digests, three renders' ids) and the template to its hash (c3cf9e34... = Qwen3.8's /
-# Agnes's) and Agnes's renders. Nothing of the release is vendored (its licence text unread): the original's small
+# both ways, corpus.txt's digests, three renders' ids) and the template to its hash (c3cf9e34... = Qwen3.8's)
+# and the agnes_template_* renders (Qwen3.8's template, named after the dropped model they were first dumped for). Nothing of the release is vendored (its licence text unread): the original's small
 # files are the synthetic checkpoint's (21b's make_synth.py copies them; box: r31.synth), or
 # -DB70_Q4EXP_TOKENIZER_JSON / the environment variable of the same name (a directory holding the original's
 # tokenizer.json, tokenizer_config.json, chat_template.jinja and generation_config.json). Absent: disabled on the

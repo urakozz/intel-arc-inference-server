@@ -102,7 +102,7 @@ using golden::read_ids;
 
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 64;
-const uint32_t kHid = model::qwen38().hidden;  // 5120, Agnes's too (spec 15b)
+const uint32_t kHid = model::qwen38().hidden;  // 5120 (spec 15b)
 const size_t kGdnElems =
     size_t(model::qwen38().gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
 const char* const kPrompts[] = {"prose", "code", "cjk"};

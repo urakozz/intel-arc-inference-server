@@ -362,7 +362,6 @@ void check_figures() {
   CHECK_EQ(loader::mtp_head_bytes(o),
            size_t(16777216) + 37748736 + 16777216 + 40960 + 2048 + 430604288);   // 501,990,464
   CHECK_EQ(loader::mtp_head_bytes(model::qwen38()), size_t(849451008));
-  CHECK_EQ(loader::mtp_head_bytes(model::agnes()), size_t(849451008));
   CHECK_EQ(model::qwen38().mtp_checkpoint_tensors(), size_t(15));
 
   // The head's buffers at Ornith's shapes (MtpDims::sizes), 262144 positions, bf16 KV.

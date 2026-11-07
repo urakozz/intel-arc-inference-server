@@ -106,7 +106,7 @@ using golden::read_ids;
 constexpr uint32_t kMaxLen = 16384;
 constexpr uint32_t kGen = 32;
 // The loaded model's widths (spec 15c: set from the descriptor right after the load -
-// 5120 and 48 x 128 x 128 on Qwen3.8 and Agnes, 2048 and 32 x 128 x 128 on Ornith).
+// 5120 and 48 x 128 x 128 on Qwen3.8, 2048 and 32 x 128 x 128 on Ornith).
 uint32_t kHid = 0;
 size_t kGdnElems = 0;
 // Spec 15c: true when the FFN folds into the residual inside its own layer (a MoE
@@ -177,12 +177,12 @@ int main(int argc, char** argv) {
   kFfnInLayer = model.desc->ffn_fold_s() == 0;
   const ::model::ModelDesc& desc = *model.desc;
   CHECK(model.embed.size() >= size_t(Qwen35::kVocab) * kHid * 2);
-  // Spec 14: the layer count is the loaded model's (64 Qwen3.8, 72 Agnes).
+  // Spec 14: the layer count is the loaded model's (64 Qwen3.8).
   const uint32_t kLayers = model.desc->layers, kGdnLayers = model.desc->gdn_layers;
   runtime::Engine eng(ctx, std::move(model), kMaxLen, /*debug_resid=*/true);
   CHECK(eng.debug_resid());
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
-  // (645 + lever L1's 129), 870 on Agnes's 72 layers (spec 14, derived); 13 per MoE
+  // (645 + lever L1's 129); 13 per MoE
   // layer, 526 on Ornith's 40 (spec 15c) - runtime::decode_launches.
   CHECK_EQ(eng.step().kernel_count, (desc.is_moe() ? size_t(13) : size_t(12)) * kLayers + 6);
   CHECK_EQ(eng.step().kernel_count, runtime::decode_launches(desc));
