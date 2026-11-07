@@ -1964,7 +1964,7 @@ st_r32_partial() {
   jgrab partial '^qwen4exp_partial_test$' 'tokens|tap cosine|routing:|OK'
   finish
 }
-stage r32.pp 32 default gpu oracle_q4exp_synth r32.k3,r22.p1 "two cards (Review Focus 6): qwen4exp_pp_test - --parallel 1 against --parallel pp --pipeline-split 2 and 1 (the cut at the PLE layer) on the ours synthetic under copy and peer: tokens, logits, routes, selections, every layer's persistent bytes and the PLE ids bitwise, both Control blocks equal; P4 (a lost hand-off throws within 10 s, reset recovers); Intel's --layers 38 split 19 vs 20 when present"
+stage r32.pp 32 default gpu oracle_q4exp_synth r32.k3,r22.p1 "two cards (Review Focus 6): qwen4exp_pp_test - --parallel 1 against --parallel pp --pipeline-split 2 and 1 (the cut at the PLE layer) on the ours synthetic under copy and peer: tokens, logits, routes, selections, every layer's persistent bytes and the PLE ids bitwise, both Control blocks equal; P4 (a lost hand-off throws within 10 s, reset recovers); Intel's checkpoint when present at the planner's layer count for two cards (layers_that_fit, stepped down until the planned split and a neighbour both fit: 38, splits 18 / 19 on these cards - 38 at split 20 did not fit device 0), the two splits bitwise under copy and peer"
 st_r32_pp() {
   run_tests '^qwen4exp_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^qwen4exp_pp_test$' '\(a\)|\(b\)|\(c\)|\(d\)|SKIP|OK'

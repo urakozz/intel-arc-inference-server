@@ -7,8 +7,9 @@
 //       rings, the GDN state and conv rings, the PLE rings) and the PLE ids BITWISE equal (plan 21c Review Focus 6:
 //       the cut is invisible - the materialised H crosses); both Control blocks equal after every phase; and
 //       --pipeline-split 1 (the cut AT the PLE layer: device 1's PLE prologue folds nothing) likewise
-//   (b) Intel's checkpoint at --layers 38, split 19 against 20, each hand-off: the same, bitwise (SKIPs alone
-//       without it)
+//   (b) Intel's checkpoint at the planner's N for two cards (runtime::qwen4exp::layers_that_fit; 38 asked for
+//       59.0 GB and its split 20 did not fit device 0), split s against s + 1 (both fit), each hand-off: the same,
+//       bitwise (SKIPs alone without it)
 //   (c) P4: drop_next_handoff() - the step throws within the bounds (never hangs), every later step throws until
 //       reset(), and after reset() the run is again bitwise (a)'s
 //   (d) the hand-off layout: pp_landing_layout(20480, 0) - the norm-sum region empty, the stamp right after H's
@@ -17,6 +18,7 @@
 // be provoked on a P2P-capable pair; it is read, not run. Exit 77 (SKIP) with one GPU or without the synthetic
 // checkpoint.
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -158,28 +160,53 @@ int main(int argc, char** argv) {
       }
     }
 
-  // (b) Intel's checkpoint at --layers 38, split 19 against 20
+  // (b) Intel's checkpoint at the planner's N for two cards, split s against s + 1
   const std::string intel = qwen4exp_rig::qwen4exp_snapshot(argv[2], &why);
   if (intel.empty()) {
     std::printf("(b) SKIP: %s\n", why.c_str());
   } else {
-    o.layers = 38;
+    // The loader's own check (require_fits: these cards, the default reserve, the int8 head, max_len): the largest
+    // N layers_that_fit allows, down to the first whose planned split and a neighbour both fit - (b) compares two.
+    const model::Qwen4ExpDesc full = loader::qwen4exp_checkpoint_desc(intel);
+    const std::array<size_t, runtime::kPpDevices> caps = {rig.c0->memory_bytes(), rig.c1->memory_bytes()};
+    const size_t reserve = size_t(runtime::kDefaultReserveGb * 1e9);
+    const auto fit = [&](const model::Qwen4ExpDesc& t, uint32_t s) {
+      return s >= 1 && s < t.layers &&
+             rq::fits(rq::plan(t, model::Q4Placement::two(t, s), o.max_len, true, false), caps, reserve);
+    };
+    uint32_t n = rq::layers_that_fit(full, 2, o.max_len, true, false, std::min(caps[0], caps[1]), reserve), lo = 0;
+    for (; n >= std::max<uint32_t>(2, full.ple_layer + 1); --n) {
+      const model::Qwen4ExpDesc t = rq::truncated(full, n);
+      const uint32_t s = rq::placement_for(t, 2, o.max_len, true, false, std::min(caps[0], caps[1]), reserve).split;
+      if (fit(t, s) && (fit(t, s + 1) || fit(t, s - 1))) {
+        lo = fit(t, s + 1) ? s : s - 1;
+        break;
+      }
+    }
+    if (!lo) {
+      std::fprintf(stderr, "(b) no --layers N of Intel's checkpoint has two neighbouring splits that fit these cards\n");
+      return 1;
+    }
+    o.layers = n;
     o.int8_head = true;
+    const std::string tag = "Intel's --layers " + std::to_string(n) + " of " + std::to_string(full.layers);
+    std::printf("(b) %s (the planner's N for two cards at max_len %u), splits %u and %u\n", tag.c_str(), o.max_len,
+                lo, lo + 1);
     std::vector<Run> runs;
-    for (uint32_t split : {19u, 20u})
+    for (uint32_t split : {lo, lo + 1})
       for (runtime::PpHandoff h : {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer}) {
         o.split = split;
         o.handoff = h;
         qwen4exp_rig::build(rig, intel, o);
         runs.push_back(run(*rig.eng, ids));
-        std::printf("(b) Intel's --layers 38 split %u %s: %zu launches\n", split, runtime::pp_handoff_name(h),
+        std::printf("(b) %s split %u %s: %zu launches\n", tag.c_str(), split, runtime::pp_handoff_name(h),
                     rig.eng->launches());
       }
     for (size_t i = 1; i < runs.size(); ++i) {
       // the persistent bytes live on different cards per split but read back in layer order: bitwise
-      same(runs[0], runs[i], "Intel's --layers 38 run " + std::to_string(i));
+      same(runs[0], runs[i], tag + " run " + std::to_string(i));
     }
-    std::printf("(b) splits 19 / 20 under copy and peer bitwise\n");
+    std::printf("(b) splits %u / %u under copy and peer bitwise\n", lo, lo + 1);
   }
   std::puts("qwen4exp_pp_test OK");
   return 0;

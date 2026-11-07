@@ -3067,8 +3067,8 @@ if(B70_Q4EXP)
   set_tests_properties(${_q4tests} qwen4exp_partial_test
     PROPERTIES LABELS "checkpoint;golden;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   # Task 4: two cards on spec 16b's pieces - --parallel 1 against --parallel pp (splits 2 and 1, copy and peer) bitwise on the
-  # ours synthetic, Intel's --layers 38 split 19 against 20, P4's lost hand-off, the landing layout. SKIP 77 with one
-  # GPU or no data.
+  # ours synthetic, Intel's at the planner's N for two cards (layers_that_fit) split s against s + 1, P4's lost
+  # hand-off, the landing layout. SKIP 77 with one GPU or no data.
   add_executable(qwen4exp_pp_test runtime/qwen4exp_pp_test.cc)
   target_include_directories(qwen4exp_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
