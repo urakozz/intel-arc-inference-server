@@ -25,7 +25,8 @@ D1's bars, per draft row:
   walk    the K draft ids equal (T = 0); a split whose selector-score margin is within max(the row's own
           engine-vs-reference score noise, 1 bf16 ulp of the top score) is a near-tie, the cosine then over the
           rows before the split only (operator, 2026-10-29: the 6 splits measured were 0.005-0.09 at noise
-          0.03-0.12, scores 12-36)
+          0.03-0.12, scores 12-36). WALK_TIE_NOISE_X scales the row's noise in that window: 1 (as ruled 2026-10-29)
+          until the measurement of the 2026-11-07 ruling confirms the 2x widening (the constant's comment)
 A draft passes on walk and scores; a top-16 set miss beyond the tie window is reported but passes when the walk
 is equal and the scores' cosine meets its bar (operator, 2026-10-28: the misses measured were 16th-place swaps
 0.007-0.01 logits past d_row, cosine 0.999996). Exit 0 when every draft passes. Prints a table (and writes it to --md).
@@ -61,6 +62,15 @@ def cosine(a, b) -> float:
     if aa == 0 and bb == 0:
         return 1.0
     return ab / math.sqrt(aa * bb)
+
+
+# The walk near-tie's noise factor: a split is a near-tie when its margin is within max(WALK_TIE_NOISE_X x the row's
+# own engine-vs-reference score noise, 1 bf16 ulp of the top score).
+# Operator ruling 2026-11-07 (r54.d1_ref: one int8 draft, a4/t2_explain-step p 1042, splits at a 0.004 dead heat after
+# spec 28d's GEMM change, cosine 0.9999979): measure that draft first (the command in docs/open-work.md, Waiting, row
+# 19), then widen the window to twice the row's noise if the measurement confirms it is a rounding split. PREPARED,
+# NOT ENABLED: 1.0 is the 2026-10-29 rule; enabling the widening is this one edit, 1.0 -> 2.0, nothing else.
+WALK_TIE_NOISE_X = 1.0
 
 
 def compare(rec: dict, out, logits_row) -> dict:
@@ -120,7 +130,7 @@ def compare(rec: dict, out, logits_row) -> dict:
             e = math.frexp(abs(top))[1]
         ulp = math.ldexp(1.0, e - 8)
         e_margin = es[e_id] - es[r_id] if (e_id in es and r_id in es) else math.inf
-        res["walk_tie"] = (abs(margin) <= max(noise, ulp), split, abs(margin), noise, ulp, e_id, r_id, e_margin)
+        res["walk_tie"] = (abs(margin) <= max(WALK_TIE_NOISE_X * noise, ulp), split, abs(margin), noise, ulp, e_id, r_id, e_margin)
     # The scores' cosine over the rows before the split only (after it the two walks stand on other paths).
     rows = pairs if split is None else pairs[:split]
     res["cos"] = cosine([a for p in rows for a, _ in p], [b for p in rows for _, b in p])
@@ -193,7 +203,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
             wt = c["walk_tie"]
             if wt is not None and wt[0]:
                 walk_ties += 1
-                log(f"  walk near-tie {name} p {r['p']}: split at row {wt[1]}, margin {wt[2]:.5f} <= max(row noise "
+                log(f"  walk near-tie {name} p {r['p']}: split at row {wt[1]}, margin {wt[2]:.5f} <= max({WALK_TIE_NOISE_X:g} x row noise "
                     f"{wt[3]:.5f}, 1 bf16 ulp {wt[4]:.4f}); cos over the rows before it {c['cos']:.7f}")
             walk_ok = c["walk"] or (wt is not None and wt[0])
             n_walk += walk_ok
@@ -218,7 +228,7 @@ def evaluate(d1_path: str, dumps_dir: str, drafter_dir: str, target_dir: str, md
         walk = ""
         if wt is not None:   # diagnostic only: the split's numbers the near-tie rule judged
             walk = (f"; walk split at row {wt[1]}: engine id {wt[5]}, reference id {wt[6]}, margin {wt[2]:.5f} vs "
-                    f"max(row noise {wt[3]:.5f}, 1 bf16 ulp {wt[4]:.4f}), the engine's own margin {wt[7]:.5f}")
+                    f"max({WALK_TIE_NOISE_X:g} x row noise {wt[3]:.5f}, 1 bf16 ulp {wt[4]:.4f}), the engine's own margin {wt[7]:.5f}")
         log(f"  FAIL {name} p {p}: sets {c['sets']}, walk {c['walk']}, cos {c['cos']:.7f}"
             + (f" ({gaps})" if gaps else "") + walk)
     if md:

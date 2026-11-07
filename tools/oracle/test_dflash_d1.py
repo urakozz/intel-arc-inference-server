@@ -154,6 +154,29 @@ def test_walk_near_tie():
         assert not c["walk"] and c["walk_tie"][0] == tie and c["walk_tie"][1] == 0 and c["cos"] == 1.0, (second, c)
 
 
+def test_walk_near_tie_noise_factor():
+    # The prepared widening (operator, 2026-11-07; dflash_d1.WALK_TIE_NOISE_X): row 0's engine scores sit 0.2 off the
+    # reference's (the row noise), the reference's margin is 0.3 (> 1 bf16 ulp of 20.0 = 0.125): beyond the 1x window,
+    # within the 2x one. The shipped factor is 1 (the 2026-10-29 rule) until the measurement confirms the widening.
+    from types import SimpleNamespace
+    assert d1.WALK_TIE_NOISE_X in (1.0, 2.0), d1.WALK_TIE_NOISE_X
+    cand = torch.arange(32).view(2, 16)
+    scores = torch.tensor([[20.0, 19.7] + [10.0 - i for i in range(14)]] * 2)
+    eng = scores.clone()
+    eng[0, 2] += 0.2
+    out = SimpleNamespace(cand_ids=cand, unary=scores.clone(), scores=scores, ids=torch.tensor([0, 16]))
+    rec = {"k": 2, "cand": cand.tolist(), "scores": eng.tolist(), "ids": [1, 17]}
+    saved = d1.WALK_TIE_NOISE_X
+    try:
+        for x, tie in ((1.0, False), (2.0, True)):
+            d1.WALK_TIE_NOISE_X = x
+            c = d1.compare(rec, out, lambda j: torch.zeros(64))
+            wt = c["walk_tie"]
+            assert not c["walk"] and wt[0] == tie and abs(wt[2] - 0.3) < 1e-5 and abs(wt[3] - 0.2) < 1e-5, (x, wt)
+    finally:
+        d1.WALK_TIE_NOISE_X = saved
+
+
 def test_int8_arm():
     with tempfile.TemporaryDirectory() as tmp:
         run, recs, dumps, drafter, target, _, _, _ = _world(tmp, "int8", "int8")
