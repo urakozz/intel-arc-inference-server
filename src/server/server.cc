@@ -518,10 +518,16 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
     const double first_s = t_first - t_start, decode_s = t_end - t_first;
     const double read_tps = first_s > 0 ? double(prompt - cached) / first_s : 0;
     const double gen_tps = (out > 1 && decode_s > 0) ? double(out - 1) / decode_s : 0;
+    // The context the conversation now fills (prompt + generated ids) of what its card holds (max_len; with
+    // --parallel replica the serving card's own).
+    const size_t used = prompt + out;
+    const size_t capacity = impl_->batch ? impl_->batch->slot_max_len(static_cast<uint32_t>(std::max(outcome.slot, 0)))
+                                         : deps_.engine.max_len();
     std::fprintf(stderr,
                  "request: prompt %zu ids (%zu cached, %zu read), first token after %.2f s = %.0f t/s read;"
-                 " %zu ids generated in %.2f s = %.1f t/s%s\n",
-                 prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps,
+                 " %zu ids generated in %.2f s = %.1f t/s; context %zu of %zu (%.0f %%)%s\n",
+                 prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps, used, capacity,
+                 capacity ? 100.0 * double(used) / double(capacity) : 0.0,
                  outcome.slot >= 0 ? (std::string(", card ") + std::to_string(outcome.slot)).c_str() : "");
     std::fflush(stderr);
   }
