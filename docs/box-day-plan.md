@@ -15,11 +15,11 @@ to it.
 |---|---|---|---|---|---|
 | 0 | preflight, downloads, data push | - | `tools/box_validate.sh --only pre` + §1.3 / §1.4 | 1 | 0.5-1 h (downloads go on in the background) |
 | 1 | **G0, stop the line** | device 0 | `tools/box_validate.sh --only g0` | 4 | 2.5-4.5 h |
-| 2 | one-card gates: Agnes and the Qwen3.8 feature rows | device 0 | `tools/box_validate.sh --only r1,r2,r4,r5,r6,r7,r8,r9,r11,r12,r17,r18 --skip r1.sweep,r1.speed,r2.cost,r2.auto_rows,r6.cost,r8.cost,r8.rows,r11.speed` | 40 | 8-13 h |
+| 2 | one-card gates: the Qwen3.8 feature rows (row 1, Agnes, removed 2026-11-07) | device 0 | `tools/box_validate.sh --only r2,r4,r5,r6,r7,r8,r9,r11,r12,r17,r18 --skip r2.cost,r2.auto_rows,r6.cost,r8.cost,r8.rows,r11.speed` | < 40 (40 with row 1) | 6-10.5 h |
 | 3 | Ornith's real checkpoint loads (row 19) | device 0 | `tools/box_validate.sh --only r19` | 3 | ~0.25 h |
 | 4 | Ornith decode, prefill, serving (rows 10, 13, 16) | device 0 (beside 5 on device 1: §1.8) | `tools/box_validate.sh --only r10,r13,r16 --skip r16.cost` | 21 | 3-5 h |
 | 5 | K2-Horizon (rows 14, 15, 21, 25) | device 0, or device 1 beside 4 (`--device 1`, §1.8) | `tools/box_validate.sh --only r14,r15,r21,r25 --with r14.oracle` | 35 | 4.5-7.5 h |
-| 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 10 | 7-11 h |
+| 6 | timed one-card rows, **box idle (RECORD)** | device 0, both idle | `tools/box_validate.sh --only r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost` | 8 | 6-9.5 h |
 | 6b | DFlash verify cost at M = 5..8 and one block's draft cost (row 29, plan 19a Task 4) | device 0, both idle | `tools/box_validate.sh --only r29.cost` | 1 (opt-in) | 0.25-0.5 h (est.) |
 | 6c | llama-benchy comparison matrix: b70-serve and vLLM, one client and set of flags (row 41) | device 0, both idle | `tools/box_validate.sh --only r41.ours,r41.vllm,r41.vllm_mtp` | 3 (opt-in) | 2-3.5 h (est.) |
 | 6d | the batching probe (row 66, plan 13a): the row builds' check, the step table, the interleave chunk | device 0, both idle for the timed stages | `tools/box_validate.sh --only r66`, then `--only r66.cost,r66.chunk` | 3 + 2 (opt-in) | 0.5 h + 1-2 h (est.) |
@@ -85,8 +85,7 @@ expected, not a failure.
   the state. A row prefix (`r22`) names the row's default stages only; opt-in stages need their
   id or `--with`. `after` lists and the recaps' `need_pass` are enforced against this state:
   a stage whose prerequisite is not PASS is SKIP "needs PASS first", so the session order below
-  is also the dependency order (the hidden ones: `r5.r0`, `r10.r0` and `r13.r0` `need_pass`
-  `r1.gates`, so row 1 goes before rows 5, 10 and 13).
+  is also the dependency order.
 - **Re-running the same command** re-attaches to a live run; after the run has finished it
   launches again and re-runs every stage that is not PASS. To fetch without running anything,
   use `--summary`; to look, `--status`. Long sessions: add `--no-wait` and re-attach later. A
@@ -122,7 +121,7 @@ expected, not a failure.
 - [ ] Present before session 1 (from `have.env`): `qwen` (the gate snapshot `84575a18`,
       `SNAP_QWEN`), `oracle_qwen` (`oracle-out-primary/`, box-made), `oracle_image` (the
       oracle container image), `tok_python` (`~/auto-round/.venv/bin/python` with
-      `tokenizers`, for `r1.parity`). Nice to have: `xpu_smi` (`r7.serve` records device memory
+      `tokenizers`). Nice to have: `xpu_smi` (`r7.serve` records device memory
       with it), `uvx` (only the opt-in llama-benchy rows).
 - [ ] Both cards enumerate (`/dev/dri` shows the two B70 render nodes) and the P2P kernel patch
       is still in place (it is what `r22.devices` checks first; peer access absent fails every
@@ -132,7 +131,6 @@ expected, not a failure.
 
 | checkpoint | repo | size | needed by | key |
 |---|---|---|---|---|
-| Agnes 3.0 Flash int4 | `urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` | 22.9 GB | row 1, `r7.plan_agnes`, `r7.lines_agnes`, `r7.serve_agnes`, `r22.agnes`, `r23.agnes`, `r27.agnes` | `agnes` |
 | Ornith 1.5 35B-A3B int4 | `urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ` | 23.0 GB (22.99 GB of shards, measured on the Mac's copy) | rows 10, 13, 16, 19, `r22.ornith`, `r23.ornith`, `r27.ornith` | `ornith` |
 | K2-Horizon int4 | `urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ` | 21.8 GB | rows 14, 15, 21, 25 | `k2` |
 | Qwen3.8 int4 g64 gate snapshot | `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ` `--revision 84575a18f209992ef96d819b31f924b489e3d55d` | 20.0 GB | everything (G0) | `qwen` - **only if `HAVE_qwen=0`**: the box has used this snapshot since August |
@@ -145,7 +143,7 @@ expected, not a failure.
 
 ```sh
 export REMOTE_DIR=b70-inference-server-validate
-tools/box.sh run 'tools/probe/detach.sh $HOME/dl-models.log bash -c "for r in urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; do uvx --from huggingface_hub hf download \$r || exit 1; done"'
+tools/box.sh run 'tools/probe/detach.sh $HOME/dl-models.log bash -c "for r in urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; do uvx --from huggingface_hub hf download \$r || exit 1; done"'
 tools/box.sh run 'tail -3 $HOME/dl-models.log'      # poll; the log ends in ALLDONE rc=0
 ```
 
@@ -158,31 +156,24 @@ tools/box.sh run 'tools/probe/detach.sh $HOME/dl-q4exp.log bash -c "uvx --from h
 tools/box.sh run 'tools/probe/detach.sh $HOME/dl-q4exp-intel.log uvx --from huggingface_hub hf download Intel/Qwen3.8-Flash-Next-W4A16-AutoRound'
 ```
 
-~67.7 GB in all (without spec 21's); at an unmeasured 30-100 MB/s that is 10-40 min (est.), well inside session
-1. (`uvx` may be only at `~/.local/bin/uvx` in a non-interactive shell.) The Agnes checkpoint
-**is not in the Mac's HF cache any more**, so it is downloaded here rather than copied (see
-§1.4 for why that matters).
+~44.8 GB in all (without spec 21's); at an unmeasured 30-100 MB/s that is 8-25 min (est.), well inside session
+1. (`uvx` may be only at `~/.local/bin/uvx` in a non-interactive shell.)
 
 ### 1.4 Data from the Mac (`--push-data`, or by hand)
 
-`--push-data` skips the Agnes checkpoint when the Mac no longer has it (it is gone from the
-Mac's cache, checked 2026-10-07 - download it on the box, §1.3) and pushes every golden set that
-exists, `oracle-out-kolibri-a4` included (fixed 2026-10-07; before, the Agnes rsync failed under
-`set -e` and aborted before any golden set). By hand, into the box's data tree (`DATA_DIR`,
+`--push-data` pushes every golden set that exists, `oracle-out-kolibri-a4` included. By hand, into the box's data tree (`DATA_DIR`,
 `~/b70-inference-server`; `pre` links every `oracle-out*` there into the validate and baseline
 trees):
 
 ```sh
 cd <main checkout>                       # where oracle-out-* live
 set -a; . tools/box.env; set +a          # BOX; never echo it
-rsync -a --info=progress2 oracle-out-agnes oracle-out-agnes-mtp oracle-out-ornith oracle-out-ornith-mtp "$BOX:b70-inference-server/"
+rsync -a --info=progress2 oracle-out-ornith oracle-out-ornith-mtp "$BOX:b70-inference-server/"
 rsync -a ~/.cache/huggingface/hub/models--Aleph-Alpha--Kolibri-1-BF16 "$BOX:.cache/huggingface/hub/"
 ```
 
 | set (Mac) | size | read by | state |
 |---|---|---|---|
-| `oracle-out-agnes` | 1.1 GB | `r1.gates` (`oracle_agnes`) | ready |
-| `oracle-out-agnes-mtp` | 91 MB | `r1.mtp_head` (`oracle_agnes_mtp`) | ready |
 | `oracle-out-ornith` | 481 MB | `r10.gates`, `r13.gates` (`oracle_ornith`) | ready |
 | `oracle-out-ornith-mtp` | 91 MB | `r16.m1` (`oracle_ornith_mtp`) | ready |
 | Kolibri-1-BF16 release, tokenizer and configs only | ~10 MB (tokenizer.json 9.5 MB; no weights) | `r24.oracle_synth` (make_synth copies them into each synthetic checkpoint; b70-serve needs them for `r28.*`), `r28.host`'s `kolibri_tokenizer_test` | ready |
@@ -199,10 +190,10 @@ alone is made on the box before session 5 - one container run of make_set.py, no
 
 ### 1.5 Disk and RAM
 
-- [ ] **Disk** (`df -h ~` in `pre.log`): ~68 GB of new checkpoints, ~12.4 GB of Kolibri
+- [ ] **Disk** (`df -h ~` in `pre.log`): ~45 GB of new checkpoints, ~12.4 GB of Kolibri
       synthetic checkpoints (`r24.oracle_synth`: two 5-layer real-width checkpoints, ~6.2 GB
-      each), ~2 GB of golden sets, and three build directories (the validate tree, the
-      baseline tree, `build-agnes-sweep`; unmeasured, budget 10-20 GB). **Want >= 120 GB free**;
+      each), ~2 GB of golden sets, and two build directories (the validate tree, the
+      baseline tree; unmeasured, budget 10-20 GB). **Want >= 120 GB free**;
       +20 GB if the Qwen3.8 snapshot must be fetched; +42.5 GB later for Kolibri int4; +20 GB
       for the manual `r18.ct` checkpoint (`RedHatAI/Qwen3.8-27B-INT4`), which is not on the day's
       list. **Session 9b:** +~27 GB for the two Qwen3.8-Flash-Next synthetic checkpoints
@@ -225,8 +216,7 @@ alone is made on the box before session 5 - one container run of make_set.py, no
 ### 1.6 Build, and the optional CPU lane
 
 - [ ] The builds are stages, not a separate step: `g0.build` builds the tree under test **and**
-      the baseline (Release, `-j44`: `JOBS` defaults to 44 on the box), `r1.sweep_build` a third
-      tree with `-DB70_AGNES_SWEEP=ON`. `g0.build` is the first ocloc compile of ~250 kernel
+      the baseline (Release, `-j44`: `JOBS` defaults to 44 on the box). `g0.build` is the first ocloc compile of ~250 kernel
       binaries written blind (rows 8, 10, 11, 13-16, 19, 21, 22, 24, 26) - the most likely
       first-day stop (§5).
 - [ ] **Optional, saves ~1.5 h of serial time:** once `g0.build` is PASS and while sessions 1-2
@@ -379,7 +369,7 @@ tools/box_validate.sh --only g0
 
 Stages: `g0.build`, `g0.sha`, `g0.bitwise`, `g0.suite` (+ `pre`). Device 0.
 Estimate 2.5-4.5 h: two full builds 0.5-1 h (unmeasured), `g0.bitwise` (11 gate tests on
-both builds) ~1 h, `g0.suite` (the baseline's whole suite minus the agnes / ornith / kv8 labels,
+both builds) ~1 h, `g0.suite` (the baseline's whole suite minus the ornith / kv8 labels,
 on the new build) 1-2 h - the 103-test suite took 29 min, the baseline registers more,
 including the long prefill gates.
 
@@ -390,28 +380,27 @@ session 1 again. If `g0.build` fails on one family's kernels, `CMAKE_ARGS='-DB70
 (or `B70_K2` / `B70_ORNITH` / `B70_KV8`) builds the rest so G0 can still be judged - that is
 triage, not validation: the family's rows then wait for the fix.
 
-### Session 2 - one-card gates: Agnes and the Qwen3.8 feature rows
+### Session 2 - one-card gates: the Qwen3.8 feature rows
+
+Row 1 (spec 14, Agnes 3.0 Flash) and every Agnes arm were removed with the model (2026-11-07); the stage
+count and estimate below are from before that.
 
 ```sh
-tools/box_validate.sh --only r1,r2,r4,r5,r6,r7,r8,r9,r11,r12,r17,r18 \
-  --skip r1.sweep,r1.speed,r2.cost,r2.auto_rows,r6.cost,r8.cost,r8.rows,r11.speed --no-wait
+tools/box_validate.sh --only r2,r4,r5,r6,r7,r8,r9,r11,r12,r17,r18 \
+  --skip r2.cost,r2.auto_rows,r6.cost,r8.cost,r8.rows,r11.speed --no-wait
 ```
 
-40 stages, device 0, in this order: row 1 (`r1.host` ... `r1.passkey`, incl. `r1.sweep_build`),
-`r2.suite`, `r4.g64`, `r5.host`, `r5.r0`, row 6 (`r6.memory`, `r6.mtp_long`,
-`r6.greedy_long`), row 7 (`r7.plan` ... `r7.serve_agnes`), row 8 (`r8.kernels`, `r8.m3`,
+Device 0, in this order: `r2.suite`, `r4.g64`, `r5.host`, `r5.r0`, row 6 (`r6.memory`, `r6.mtp_long`,
+`r6.greedy_long`), row 7 (`r7.plan` ... `r7.serve`), row 8 (`r8.kernels`, `r8.m3`,
 `r8.off`, `r8.memory`, `r8.serve`), `r9.auto`, row 11 (`r11.bf16`, `r11.kernels`, `r11.q2`,
 `r11.q5`, `r11.memory`), row 12 (`r12.suite`, `r12.d2`, `r12.a4`), `r17.host`, `r17.k0`,
 `r18.host`, `r18.g64`. The timed stages of these rows wait for session 6.
-Needs: `agnes`, `oracle_agnes`, `oracle_agnes_mtp`, `tok_python`, `oracle_image`.
-Estimate 8-13 h (an overnight run): row 1 ~2-2.5 h (the sweep build ~0.3-0.6 h, 72-layer
-gates, features, passkey at 60k), row 6 ~1.5-2 h (`r6.mtp_long` at 32k and 128k), `r8.m3`
+Needs: `tok_python`, `oracle_image`.
+Estimate 6-10.5 h (an overnight run): row 6 ~1.5-2 h (`r6.mtp_long` at 32k and 128k), `r8.m3`
 ~1.5 h (128k, both heads; `r8.m3_small` is ~1.5 h per size), row 7 ~1 h, row 11 ~1.5-2 h,
 the rest ~2-3 h.
 
-**Check:** `r1.gates` and `r1.features` PASS (`r5.r0` needs both, `r10.r0` and `r13.r0` need
-`r1.gates`);
-`r11.kernels` PASS (a failure stops row 11 by design); `r8.kernels` PASS (the 9 draft-vocab
+**Check:** `r11.kernels` PASS (a failure stops row 11 by design); `r8.kernels` PASS (the 9 draft-vocab
 binaries' first run).
 
 ### Session 3 - Ornith's real checkpoint (row 19)
@@ -448,7 +437,7 @@ on the box's first run the bf16 golden's own determined rows disagreed with exac
 `tools/box_validate/f32_oracle.sh ~/b70-inference-server ornith` - ~1.5 min a prompt, peak RSS
 18-21 GiB, 22 threads under `/tmp/b70-cpu-model.lock`, SKIPs below MemAvailable 95 GB (70 GB kept
 for the other jobs + the run) - then `tools/box_validate/data.sh link ~/b70-inference-server
-<tree>`. Qwen3.8's and Agnes's gates take no judge.
+<tree>`. Qwen3.8's gates take no judge.
 
 **The quantisation-aware judges (operator ruling 2026-10-23, the third).** The int8 variants are
 judged against f32 math that applies the same int8 roundings (`tools/oracle/int8_sim.py`, its codes
@@ -488,7 +477,7 @@ differently.
   f32 judge plus the head: ~2 min a prompt, ~22 GiB peak - fits beside the Bolt job under the
   95 GB rule. The bar is then the bf16 M1 reference's own cosine to it.
 - `prefill_split_ornith_*` (Qwen3.8's provisional bars; fa0-3 rows 0.85-0.97 at rows 986 / 1104,
-  GDN L0 state 0.999998, multiples of 64 bitwise - Agnes's pattern): needed, as for Agnes, a CPU
+  GDN L0 state 0.999998, multiples of 64 bitwise): needed, a CPU
   reference over `long32k.ids[0, 2600)` for `prefill_split_test --oracle` - `dump.py`-style
   logits for the listed rows, i.e. `ornith_ref.py` with a prompt of 2600 ids (`--max-prompt 2600
   --gen 1`). Not measured for Ornith; K2's comparable 2600-id bf16 run took 66 min at 22 threads
@@ -535,13 +524,13 @@ Known divergence: `k2_golden_i8head` prose 1 is accepted until 2026-10-26 (sessi
 Idle protocol (§1.7) first: both cards free, zero containers, the CPU lane stopped.
 
 ```sh
-tools/box_validate.sh --only r1.sweep,r1.speed,r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost
+tools/box_validate.sh --only r2.cost,r2.auto_rows,r3,r6.cost,r8.cost,r8.rows,r11.speed,r16.cost
 ```
 
-10 stages, device 0: `r1.sweep`, `r1.speed`, `r2.cost`, `r2.auto_rows`, `r3.readme`,
+8 stages, device 0: `r2.cost`, `r2.auto_rows`, `r3.readme`,
 `r6.cost`, `r8.cost`, `r8.rows`, `r11.speed`, `r16.cost`. Prerequisites from earlier sessions:
-`r1.sweep_build`, `r6.memory`, `r11.q2` (session 2), `r16.mtp` (session 4).
-Estimate 7-11 h: `r1.speed`, `r3.readme`, `r11.speed` ~1-1.5 h each (depth rows: every arm
+`r6.memory`, `r11.q2` (session 2), `r16.mtp` (session 4).
+Estimate 6-9.5 h: `r3.readme`, `r11.speed` ~1-1.5 h each (depth rows: every arm
 re-ingests to 32k / 64k / 128k, 175 s per 130816-token prefill, median of 3 after a warm-up),
 `r2.auto_rows` and `r8.rows` ~1.5-2 h each (4 server arms x 3 rounds; 8 bench arms x 3),
 the cost tables ~0.3-1 h each.
@@ -549,9 +538,9 @@ the cost tables ~0.3-1 h each.
 reading, not a record.
 
 **Added 2026-10-23 - row 67, the prefill bandwidth profile** (opt-in, ~20-30 min, est.): hw-smi showed 600+ GB/s of
-the card's 638 GB/s during `r1.features`' Agnes `prefill_split_test` (l0-int8, long32k) - the highest bandwidth any of
+the card's 638 GB/s during the (since removed) Agnes `prefill_split_test` of `r1.features` (l0-int8, long32k) - the highest bandwidth any of
 our kernels has reached; decode runs ~445 GB/s effective. Append `,r67.profile` to the launch above (or run it alone,
-idle): `B70_PREFILL_PROFILE=1` per-phase GPU time at 32k on Agnes and Qwen3.8, l0 and l0-int8, then the four arms
+idle): `B70_PREFILL_PROFILE=1` per-phase GPU time at 32k on Qwen3.8, l0 and l0-int8, then the four arms
 unprofiled. Watch hw-smi by hand during it; the per-phase bytes and GB/s are derived afterwards on the Mac
 (docs/BENCHMARKS.md), to find which kernel streams at ~94 % and what the decode kernels can take from it.
 
@@ -646,10 +635,10 @@ tools/box_validate.sh --only r66                                # k0, the build,
 tools/box_validate.sh --only r66.cost,r66.chunk
 ```
 
-`r66.check` runs `probe_batch_step --no-time --no-chunks` five times (Qwen3.8 int8 / bf16 KV, Agnes int8 / bf16 with
-MTP at 2 slots, Agnes int8 `--mtp off` at 4): every arm's rows bitwise their slot's run alone, isolation, the production
+`r66.check` runs `probe_batch_step --no-time --no-chunks` for Qwen3.8 at int8 / bf16 KV (the Agnes arms were removed with
+the model, 2026-11-07): every arm's rows bitwise their slot's run alone, isolation, the production
 tie - a `check: FAIL` stops 13c (report the CHECK lines first). `r66.cost` times every arm against `1x1@4k` as
-interleaved pairs (median of 3) for Qwen3.8 at both KV forms and Agnes's two layouts; `r66.chunk` one prefill chunk of
+interleaved pairs (median of 3) for Qwen3.8 at both KV forms; `r66.chunk` one prefill chunk of
 512 / 1024 / 2048 at 4k and 32k beside the 1-row steps. Each run prefills 32k + 3 x 4k (or 32k + 4k) first (~30-60 s,
 est.). Estimate for the timed pair: 1-2 h (est.: ~16 arms x (3 rounds x 2 x 32 replays + warm-up) at 35-100 ms a
 replay per configuration, four configurations, plus the chunk rounds). **Check:** the `IDLE before` / `after` grades.
@@ -662,9 +651,9 @@ Idle protocol (§1.7): **both cards free of DRM holders.**
 tools/box_validate.sh --only r22,r23
 ```
 
-22 stages, both cards: `r22.host`, `r22.r0`, `r22.devices`, `r22.p1`, `r22.p1_kv8`, `r22.p4`,
-`r22.cli`, `r22.agnes`, `r22.ornith`, `r22.s1`, then `r23.host`, `r23.r0`, `r23.reject`,
-`r23.p1`, `r23.p1_kv8`, `r23.p4`, `r23.cli`, `r23.agnes`, `r23.ornith`, `r23.s2_4k`,
+20 stages, both cards: `r22.host`, `r22.r0`, `r22.devices`, `r22.p1`, `r22.p1_kv8`, `r22.p4`,
+`r22.cli`, `r22.ornith`, `r22.s1`, then `r23.host`, `r23.r0`, `r23.reject`,
+`r23.p1`, `r23.p1_kv8`, `r23.p4`, `r23.cli`, `r23.ornith`, `r23.s2_4k`,
 `r23.s2_32k`, `r23.s2_64k`. Row 22 strictly before row 23: `r23.p1` is `after r22.p1`,
 `r23.reject` / `r23.p4` after `r22.devices`.
 Estimate 4.5-7 h: `r22.p1` and `r23.p1` ~0.75-1 h each (copy and peer x auto split and the
@@ -680,8 +669,8 @@ PASS bitwise - rows 24, 26 and 27 wait on them.
 tools/box_validate.sh --only r27
 ```
 
-14 stages, both cards: `r27.host`, `r27.k0`, `r27.reject`, `r27.mtp`, `r27.mtp_kv8`,
-`r27.prefix`, `r27.prefix_kv8`, `r27.cli_mtp`, `r27.serve`, `r27.golden`, `r27.agnes`,
+13 stages, both cards: `r27.host`, `r27.k0`, `r27.reject`, `r27.mtp`, `r27.mtp_kv8`,
+`r27.prefix`, `r27.prefix_kv8`, `r27.cli_mtp`, `r27.serve`, `r27.golden`,
 `r27.ornith`, `r27.s3`, `r27.p3`. Needs `r22.p1`, `r23.p1` PASS.
 Estimate 4.5-7 h, of which `r27.p3` (passkey at ~250k on two cards, three placements, ~1 h
 each derived) is ~3 h; the rest ~2-3.5 h.
@@ -879,7 +868,7 @@ rownote lists; §4's row for D5 says what they decide.
 - **First runs of new kernels** (a blind kernel either works here or nowhere): `r8.kernels`,
   `r10.nockpt`, `r11.kernels`, `r13.kernels`, `r14.k1`, `r15.k1`, `r16.kernels`, `r21.k1`,
   `r24.k1`, `r26.k1`, `r32.k1`, `r33.k1`, `r34.k1`; and `r19.load`, `r22.devices`.
-- **The token gates:** `r1.gates`, `r10.gates`, `r13.gates`, `r14.golden`, `r15.golden`,
+- **The token gates:** `r10.gates`, `r13.gates`, `r14.golden`, `r15.golden`,
   `r21.golden`, `r24.golden`, `r26.golden`, `r32.golden`, `r33.golden`.
 
 ### 3.2 Defer first (default stages; the short path, ~36 h instead of ~51 h)
@@ -890,7 +879,7 @@ rownote lists; §4's row for D5 says what they decide.
 | P3 at 262144 | `--skip r27.p3` in session 8 | ~3 h | passkey at ~250k; S3's memory lines (`r27.s3`) still prove the length fits |
 | draft-vocab M3 at 128k | `--skip r8.m3` in session 2 | ~1.5 h | `--draft-vocab` is off by default; `r8.kernels` / `r8.off` / `r8.memory` still run |
 | S2 at pp65536 | `--skip r23.s2_64k` in session 7 | ~0.5 h | pp32768 already tests the >= 1.7x bar |
-| the passkeys inside default rows | `--skip r1.passkey,r25.passkey` | ~1 h | long-context recall; the golden gates cover correctness |
+| the passkeys inside default rows | `--skip r25.passkey` | ~1 h | long-context recall; the golden gates cover correctness |
 
 Skip with the session's own command plus `--skip <ids>`; the skipped stages stay "not run" in
 the state and run later with `--only <ids>`.
@@ -904,12 +893,12 @@ the state and run later with `--only <ids>`.
 | 2: long context | `--only r6.passkey120k,r7.passkey,r11.passkey120k,r11.passkey262k,r16.passkey,r21.passkey,r22.s1_32k,r23.s2_128k` | 6-10 h | recall at 120k-262k, S1 at depth 32k, S2 at pp131072 |
 | 3: hours | `--only r6.d1,r7.depth,r8.rows_full,r8.m3_small,r10.speed,r27.p3_mtp` | 12-20 h | A12's depth rows, decode at the auto depth, the full §11 matrix, M3 at 32k / 64k, Ornith at 250k, P3 with MTP |
 | 3: K2 A4 | `--only r25.a4_ref,r25.a4` | ~0.6-1 day (CPU; ESTIMATED, batched + resident weights - `BATCH=1 RESIDENT=none` is the old ~1-1.5 days) + ~1 h | K4's reference on the box CPU (blocks the idle grade while it runs), then the run; no bar |
-| 3: comparison rows | `--only r1.prefix_benchy,r16.benchy,r25.benchy,r27.benchy` (needs `uvx`) | 3-5 h | llama-benchy rows for BENCHMARKS / README |
+| 3: comparison rows | `--only r16.benchy,r25.benchy,r27.benchy` (needs `uvx`) | 3-5 h | llama-benchy rows for BENCHMARKS / README |
 | 3: comparison matrix | Session 6c: `--only r41.ours,r41.vllm,r41.vllm_mtp` (needs `uvx`, the vLLM image; idle box) | 2-3.5 h | b70-serve vs vLLM through one pinned client and flag set (row 41) |
 | blocked | `r2.opencode`, `r12.d5` (no opencode recording), `r11.a4` (`A4_REF_DIR`: set it if Qwen3.8's A4 bf16 reference dir is on the box), `r16.a4` (`oracle-out-ornith-a4`), `r24.oracle_real`, `r24.speed`, `r26.speed`, `r28.passkey`, `r28.a4`, `r28.benchy` (spec 20b) | - | data that does not exist yet |
 
 Manual stages (commands in `--dry-run --with ...` and in the summary, never run by the
-orchestrator): `r1.a4`, `r1.vllm`, `r4.g128`, `r10.p0_sweeps`, `r11.near_ties`, `r13.p0_arms`,
+orchestrator): `r4.g128`, `r10.p0_sweeps`, `r11.near_ties`, `r13.p0_arms`,
 `r14.sweeps`, `r15.p0_arms`, `r16.a4_ref`, `r18.ct`, `r24.sweeps`, `r26.p0`.
 
 Optional second G0: `r21.k0` lists `k2_moe.cl`'s pre-18e binaries as "not compared" because
@@ -941,8 +930,6 @@ named stage.
 | Kolibri prefill bars (PROPOSED: row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) | `r26.prefill` | set from the distribution |
 | Ornith prefill consistency (`kConsistTieRel`, `kConsistWeightAbs`) and the non-64 split bars | `r13.prefill`, `r13.split` | calibrate from the printed distribution; the split bars are Qwen3.8's (PROVISIONAL) until then |
 | Ornith int4 a\|\|b cell (PROVISIONAL S1 L1) | opt-in `r10.p0` (its share of the 526 launches) | an S > 1 form needs gdn_step to sum slices (a P0 arm, not built) |
-| Agnes GEMV cells P1-P3 | `r1.sweep` | replace `make_agnes()`'s {S, L} picks and `add_gemv_variant` cells, rebuild, **G0 again** |
-| Agnes W (P4) and speeds (P7) | `r1.load` (W within 2 %), `r1.speed` | replace the PENDING numbers |
 | the 1.5 GB reserve (`kDefaultReserveGb`) | `r7.serve` (device memory via xpu-smi while a fresh server is up) | confirm, or tune after a long operator session |
 | `--prefix-cache-gb auto` | `r9.auto` (startup line and its /proc/meminfo inputs) | confirm the chosen size |
 | MTP embedding on device 1 | `r27.serve`, `r27.s3` memory lines | already **decided: replicate** (operator, 2026-10-07); the box only confirms it fits |

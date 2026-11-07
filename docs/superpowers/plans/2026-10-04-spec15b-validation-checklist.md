@@ -6,7 +6,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-04-spec15-ornith-moe-design.md` (§3 decision 2, §5 R0, §7 15b). **Plan:** `docs/superpowers/plans/2026-10-04-spec15b-model-desc-all-shapes.md`.
 
-**Order with spec 14:** main carries spec 14 **unvalidated on the card** (its checklist, `2026-10-03-spec14-validation-checklist.md`, is pending). Run spec 14's session on main first; this session's "main" reference below is the main build spec 14's session validated (or main at `0024bd1` if both run in one sitting, spec 14's G0 first). A failure here that also fails on main is spec 14's, not 15b's.
+**Order with spec 14:** main carried spec 14 **unvalidated on the card** (its checklist, since deleted with the Agnes drop of 2026-11-07 - spec 14's DROPPED note, was pending). Run spec 14's session on main first; this session's "main" reference below is the main build spec 14's session validated (or main at `0024bd1` if both run in one sitting, spec 14's G0 first). A failure here that also fails on main is spec 14's, not 15b's.
 
 **Branch commits (written on the Mac, nothing ran on a card):**
 

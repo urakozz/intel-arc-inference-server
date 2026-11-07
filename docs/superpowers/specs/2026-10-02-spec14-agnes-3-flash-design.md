@@ -1,5 +1,22 @@
 # Spec 14 - Agnes 3.0 Flash, the second model
 
+> DROPPED (operator, 2026-11-07): no independent evidence it is used or better: 584 downloads vs Qwen3.8-27B's 7.8 M,
+> no commit since 2026-09-16, no community discussion or independent coding benchmark found. Support removed from the
+> engine on branch `drop-agnes`; kept for the record.
+>
+> Removed with it: the descriptor `model::agnes()` (an `AgnesForConditionalGeneration` config.json is refused by name),
+> the loader's parallel-FFN fold (`src/loader/fold.*`) and name map, the Agnes-only kernel variants (intermediate 19456,
+> gate'||up' 5120 x 38912, down' 19456 x 5120, argmax at 248089, `_G54`), every `*_agnes_*` test, the oracle / fold /
+> template tools (`tools/oracle/agnes*.py`, `tools/tokenizer/dump_agnes_template.py`), validation row 1 and every Agnes
+> stage and arm. Its plans were deleted (see the repo history): `2026-10-02-spec14a-agnes-oracle-and-fold.md`,
+> `2026-10-02-spec14b-model-descriptor.md`, `2026-10-02-spec14c-agnes-engine.md`, `2026-10-02-spec14d-agnes-serving.md`,
+> `2026-10-03-spec14-write-phase.md`, `2026-10-03-spec14-validation-checklist.md`.
+>
+> Kept, shared with Qwen3.8 and Ornith: the `ModelDesc` machinery this spec introduced - the per-model descriptor and
+> its linear table, the kernel shape suffixes (`hidden_suffix` / `gdn_suffix` / `fa_suffix`), `intermediate_suffix`,
+> `vocab_used` (the greedy argmax mask) and the descriptor-driven layer counts. Revive the rest from git (the parent of
+> the `drop-agnes` branch on main has all of it).
+
 **Status:** design, 2026-10-02, operator approved approach 1 (§2) the same day; re-scoped
 2026-10-03 into write-now / validate-on-the-box (§6).
 
@@ -164,8 +181,8 @@ gate that needs the card runs in one validation session when the box is back.
   (bf16 Agnes on the box's RAM); G1 (card), G2, G4, G5, A4 (G3); speed and the vLLM row; the
   record. The branch merges only after it.
 
-The earlier per-stage plans (`2026-10-02-spec14a`..`14d`) are superseded by these two and kept for
-their task detail, which the write plan points to.
+The earlier per-stage plans (`2026-10-02-spec14a`..`14d`) were superseded by these two; all six were deleted with
+the model drop (2026-11-07, see the DROPPED note at the top).
 
 ## 7. Out of scope
 

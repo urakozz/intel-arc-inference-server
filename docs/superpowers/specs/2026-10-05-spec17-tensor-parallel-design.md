@@ -1,7 +1,8 @@
 # Spec 17 - tensor parallel over two B70s
 
 **Status (2026-11-06): P0 DONE - GO on a quiet box (§9); plan 17a closed. 17b-17d (rewritten for Qwen3.8) wait for the
-operator's go.** (2026-11-01: GO PROVISIONAL on busy-box timing.)
+operator's go.** (2026-11-01: GO PROVISIONAL on busy-box timing.) **Agnes 3.0 Flash was dropped 2026-11-07** (spec 14's
+DROPPED note): the main engine's TP target is Qwen3.8 alone; Agnes's counts, rows and P0 readings below are history.
 **Status (2026-10-27): RETARGETED - Qwen3.8 first (operator, 2026-10-27); third in the Qwen speed track, after spec 28
 (plans 28a / 28b) and spec 19's plan 19f.** Nothing of spec 17 is built; no plan of it has started. **§R2 is the
 2026-10-27 revision**: for Qwen3.8 / Agnes it supersedes §R's ruling, §2's target order, §3's rule and §4.1-§4.2's
@@ -16,7 +17,7 @@ differ.
 **Plans:** `docs/superpowers/plans/2026-10-05-spec17{a,b,c,d}-*.md`. **17a was revised 2026-10-27 for Qwen3.8 first**
 (P0: both all-reduce routes, the go / no-go line of §R2.7; its 2026-10-23 Bolt tasks are kept below its revision for
 Bolt's later P0). 17b-17d keep their 2026-10-23 Bolt-first text under a 2026-10-27 status line; each is rewritten for the
-main engine (Qwen3.8, then Agnes) when 17a records GO. **Box rows (2026-10-27): 71 (17a), 72-74 (17b-17d)** - the next
+main engine (Qwen3.8; Agnes dropped 2026-11-07) when 17a records GO. **Box rows (2026-10-27): 71 (17a), 72-74 (17b-17d)** - the next
 free rows after 67 once spec 28 (68 / 69) and plan 19f (70) took theirs; plan 5d is 75. The 2026-10-23 proposal of row
 68 for 17a is withdrawn (68 is plan 28a's). Like spec 25's plans, these documents do not edit
 `tools/box_validate/stages.sh`: each plan describes its stages and adds them when it is built.
@@ -41,7 +42,7 @@ decoding** (spec 26's LiLiCorr drafter was dropped on 2026-10-27, with Bolt's `-
 order: spec 28 (small-M verify GEMM) -> spec 19 §13 (DFlash on the card, lookup inside it) -> **this spec's P0 on
 Qwen3.8** -> plan 5d (prefill chunk 4096). So:
 
-1. **Targets, in order: Qwen3.8 (then Agnes, the same engine and code), then Bolt, then Kolibri.** §R's condition
+1. **Targets, in order: Qwen3.8 (Agnes, which shared its engine, dropped 2026-11-07), then Bolt, then Kolibri.** §R's condition
    "Qwen3.8 / Agnes only if the two-card replica mode (spec 13 §10) loses to TP" is **withdrawn**; the replica mode
    stays written for later, and `--tp 2`, `--pp 2` and `--replica` stay mutually exclusive (§4.9).
 2. **P0 (plan 17a) measures both all-reduce routes** (§R2.6) on Qwen3.8's counts and sizes and applies §R2.7's rule.
@@ -496,7 +497,7 @@ TP is built into each engine, not once:
   the one-card ones unchanged), `src/cli/bolt_serve.h`.
 - **Kolibri (second, a follow-on plan after Bolt's record):** `src/runtime/kolibri/`, `src/loader/kolibri1_*`,
   `src/model/kolibri1.*`, `src/kernels/kolibri/` (`kol_post_add`, the sandwich fold).
-- **Main engine (Qwen3.8 / Agnes; only on §2's condition):** `src/runtime/{engine,capture,buffers,memory_plan}.*`,
+- **Main engine (Qwen3.8; only on §2's condition):** `src/runtime/{engine,capture,buffers,memory_plan}.*`,
   `src/kernels/prep.cl`'s `prep_res_fold`, `gdn_step.cl`, `attn*.cl`.
 - **Shared:** a `tp` crossing protocol (host-tested on two threads like `pp_protocol_test`), the TP planner, the
   snapshot gather / scatter, the head's argmax exchange and sampling merge, the CLI refusals.

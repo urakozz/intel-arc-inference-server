@@ -162,7 +162,7 @@ scales. Pick the group size your kernels' tile geometry wants.
 ## What the engine serves today
 
 Every supported model runs from an int4 checkpoint in this one format family: AutoRound, GPTQ
-packing, symmetric, group 64 (our own exports for Qwen3.8, Agnes, Ornith, K2-Horizon, Kolibri-1 and
+packing, symmetric, group 64 (our own exports for Qwen3.8, Ornith, K2-Horizon, Kolibri-1 and
 Bolt). The loader also reads the g128 spelling (Intel's interim Flash-Next checkpoint, a third-party Bolt
 export) through an exact expansion to g64, which is how the synthetic test checkpoints exercise it. On
 top of that format three choices are made per run, not per file: the output head is quantised to int8

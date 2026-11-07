@@ -1,6 +1,7 @@
 # Spec 28 - a small-M decode / verify GEMM: M = 1..16 rows, one dequant per weight tile, DPAS
 
-**Status (2026-11-01): 28a done (§9, provisional); 28b BUILT on branch `spec28b-small-m-build` (§10, busy-box timing; N4 / N6 open for the operator).** (2026-10-27: DESIGN.) First item of the Qwen speed track (operator, 2026-10-27: (1) this
+**Status (2026-11-01): 28a done (§9, provisional); 28b BUILT on branch `spec28b-small-m-build` (§10, busy-box timing; N4 / N6 open for the operator).** (2026-10-27: DESIGN.) Agnes's `gemm_sm` rows (decision 3, §10) were removed
+with the model on 2026-11-07 (spec 14's DROPPED note); the record below keeps them as measured. First item of the Qwen speed track (operator, 2026-10-27: (1) this
 spec, (2) DFlash on the card + lookup inside DFlash - spec 19 §13, (3) the tensor-parallel probe on Qwen3.8 - spec 17
 §R2, (4) prefill chunk 4096 - plan 5d). Builds follow one plan at a time; the operator is asked before each.
 

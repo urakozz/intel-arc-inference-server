@@ -26,26 +26,27 @@ in [open-work.md](open-work.md); the queue itself is
 - **Derived** means arithmetic from the memory planner or byte counts.
 - Commands marked `# no speed row yet` run in the box test stages but have no speed
   number in BENCHMARKS; the expected numbers beside them are derived.
-- Models dropped on 2026-10-27 (LFM2.5, Muse-Glimmer) are no longer supported and are not in
+- Models dropped on 2026-10-27 (LFM2.5, Muse-Glimmer) and on 2026-11-07 (Agnes 3.0 Flash, spec 14: an
+  `AgnesForConditionalGeneration` config.json is refused by name) are no longer supported and are not in
   the table; LiLiCorr, dropped the same day, came back on 2026-11-01 as Bolt's draft model
   (`--spec dflash`, Bolt's section). Flint (spec 27) and Nanbeige (spec 29) are parked (2026-11-04), not
-  built. Nemotron 3.5 Bolt has its own section below; the table's columns are the older six.
+  built. Nemotron 3.5 Bolt has its own section below; the table's columns are the older five.
 
-| | Qwen3.8-27B | Agnes 3.0 Flash | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
-|---|---|---|---|---|---|---|
-| checkpoint | published | published | published (spec 15 §13) | published | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); ours not made (21q) |
-| `b70-serve` | yes | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22) |
-| `b70-serve --parallel pp` (two cards, spec 16d) | yes | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
-| `b70-decode` | yes | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), one card or `--parallel pp` |
-| speed rows in BENCHMARKS | yes | no | no | no | no | no |
-| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (spec 21e; `auto` = off until spec 22's numbers); `b70-decode` refuses it |
-| `--spec lookup` | yes | yes (needs the head) | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19c / 19d) | yes, one card or `--parallel pp` (copy hand-off), bf16 KV | no drafter (refused) | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
-| `--kv-cache int8` | yes, gates pending | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
-| prefill backends | `l0` (default), `l0-int8` | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, its accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
-| KV per position (bf16) | 64 KiB | 72 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
-| `--max-len auto`, int8 head (derived) | ~170k with MTP (the default); ~201k with `--spec off` | ~114k with MTP; ~140k with `--spec off` | 262144, with or without MTP | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
-| with `--kv-cache int8` (derived) | 262144, with or without MTP | 262144; ~226k with MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
+| | Qwen3.8-27B | Ornith 1.5 35B-A3B | K2-Horizon MoVA-36B-A4B | Kolibri-1 (spec 20) | Qwen3.8-Flash-Next (spec 21) |
+|---|---|---|---|---|---|
+| checkpoint | published | published (spec 15 §13) | published | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); ours not made (21q) |
+| `b70-serve` | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model refused naming spec 22) |
+| `b70-serve --parallel pp` (two cards, spec 16d) | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
+| `b70-decode` | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22), one card or `--parallel pp` |
+| speed rows in BENCHMARKS | yes | no | no | no | no |
+| MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (spec 21e; `auto` = off until spec 22's numbers); `b70-decode` refuses it |
+| `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
+| `--spec dflash` (spec 19c / 19d) | yes, one card or `--parallel pp` (copy hand-off), bf16 KV | no (its v1 drafter is a later stage) | no drafter exists (refused) | refused | refused |
+| `--kv-cache int8` | yes, gates pending | not built | yes, gates pending (spec 18e) | refused (bf16 only) | refused (decision 8: bf16 first) |
+| prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, its accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
+| KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
+| `--max-len auto`, int8 head (derived) | ~170k with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP | ~46k served (the prefill planned); `b70-decode` ~50k decode-only | 262144 on two cards (split 25), the prefill planned or not | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
+| with `--kv-cache int8` (derived) | 262144, with or without MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the
 32.53 GB card; the reserve itself is an estimate the box has not confirmed, and nothing
@@ -112,9 +113,9 @@ python3 tools/oracle/tokenize.py <snapshot> decode $(cat out.ids)
 ```
 
 `tests/golden/prompts/{prose,code,cjk}.ids` are ready-made ids for the Qwen tokenizer
-(Qwen3.8 and Agnes share it).
+(Qwen3.8's).
 
-**Two cards (`--parallel pp`, spec 16).** Qwen3.8, Agnes and Ornith run with their layers split over
+**Two cards (`--parallel pp`, spec 16).** Qwen3.8 and Ornith run with their layers split over
 GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows: `b70-decode --parallel pp` (decode, spec 16b; the
 two-card prefill with `--prefill`, spec 16c; `--spec mtp`, spec 16d) and `b70-serve --parallel pp` (spec
 16d, everything the server does on one card); `--parallel auto` picks two cards by itself when the
@@ -135,9 +136,6 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --p
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --max-len 262144 --prefix-split-last
 # the same with the int8 KV cache and the peer hand-off (both cards ~16 GB, derived)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --parallel pp --kv-cache int8 --pipeline-handoff peer
-# Agnes over two cards: 262144 instead of ~114k (derived)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ \
-    --parallel pp --prefix-split-last
 # b70-decode: the same ids as one card, greedy, with MTP across the split
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 \
     --prefill --parallel pp --spec mtp
@@ -276,42 +274,6 @@ tail -f oracle-out-19a/p0.log                       # then oracle-out-19a/accept
 # one arm again, e.g. after a new ranking
 STEPS="accept" ARMS=int8 tools/oracle/dflash_p0.sh
 ```
-
-## Agnes 3.0 Flash
-
-`urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ` (spec 14): Qwen3.8's math with 72 layers
-(54 delta net, 18 attention) and a parallel FFN, which the loader folds into the MLP
-(17408 + 2048 = 19456). Same tokenizer and chat template as Qwen3.8, so the same tool-call
-format; an MTP head of Qwen3.8's shape. 22.9 GB download.
-
-**Status: built; its box test row 1 passed, no speed row yet** (queue row 1). On the Mac: the CPU reference, the fold
-(bit-exact on the real weights) and the template were checked (docs/probes/probe-agnes-2026-10-03.md).
-GEMV tuning rows are provisional copies of Qwen3.8's. Expected (derived): decode ~26 t/s at
-depth 4096 with the int8 head, prefill ~1850-1900 t/s at 4096. Weights ~21.0 GB with the
-bf16 head, ~19.7 GB with int8 (derived).
-
-```sh
-uvx --from huggingface_hub hf download urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
-A=urakozz/Agnes-3.0-Flash-W4A16-AutoRound-GPTQ
-
-# every command below: no speed row yet
-# agentic session: ~114k context with MTP, the default (derived); ~140k with --spec off
-./build/src/cli/b70-serve $A --host 0.0.0.0 --port 8000 --prefix-split-last
-
-# the full 262144 needs the int8 KV cache (~226k with MTP, derived) or two cards
-./build/src/cli/b70-serve $A --prefix-split-last --kv-cache int8
-
-./build/src/cli/b70-decode $A --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $A --bench --depth 4096 --tg 256
-./build/src/cli/b70-decode $A --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
-```
-
-**Limits.** Without `--kv-cache int8`, ~140k is the most that fits (derived; the old fixed
-65536 ceiling is gone). `--kv-cache int8` uses Qwen3.8's binaries (same attention shape),
-whose accuracy gates are pending. MTP (the `--spec auto` default) and `--spec lookup` load the
-head (+0.85 GB of weights plus its buffers), which is where the ~114k comes from.
-
-**Relevant variables:** as for Qwen3.8.
 
 ## Ornith 1.5 35B-A3B
 

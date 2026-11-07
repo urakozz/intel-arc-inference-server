@@ -5,7 +5,7 @@
 (spec 17 §3) - and the operator says go (one implementing plan at a time).
 
 **Status (2026-10-27): PARKED -> next after spec 28 (28a / 28b), spec 19's plan 19f and spec 17a's GO.** Retargeted
-to Qwen3.8 first (spec 17 §R2): this plan is rewritten for the main engine - `b70-decode <qwen3.8> --tp 2`, then Agnes:
+to Qwen3.8 first (spec 17 §R2): this plan is rewritten for the main engine - `b70-decode <qwen3.8> --tp 2` (Agnes, once next, dropped 2026-11-07):
 spec 17 §R2.5's split re-fused per card at load, the all-reduce on the route 17a chooses, the vocabulary-split head, the
 verify lists on spec 28's `gemm_sm` at per-card shapes - when 17a records GO and the operator says go. Box queue row
 **72** (the speed track's rows are 68-75, spec 28's header). The 2026-10-23 Bolt-first text below is kept for Bolt's later

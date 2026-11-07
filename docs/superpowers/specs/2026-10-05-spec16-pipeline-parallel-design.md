@@ -2,6 +2,8 @@
 
 > **Zero-config cleanup (operator 2026-11-06):** `--pp 1|2` / `--pipeline-parallel-size` became `--parallel auto|1|pp` (auto: one card when the model and the context fit, else pp); `--device` and `ONEAPI_DEVICE_SELECTOR` were removed (a hardware gate checks one or two B70s with peer access); the load-time weight move (16b's Mover) copies card to card instead of through a host staging buffer.
 
+> **Agnes 3.0 Flash dropped (operator 2026-11-07, spec 14's DROPPED note):** `--parallel pp` serves Qwen3.8 and Ornith; Agnes's rows, plans and stages below (`r22.agnes`, `r23.agnes`, `r27.agnes`) are history - the stages were removed.
+
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
 16b (decode) built blind 2026-10-06, before 16a's probe: §8. 16c (the prefill chunk pipeline) built
 blind 2026-10-06 on top of it: §9. 16d (b70-serve --pp 2, MTP across the split, P3 / S3 as box

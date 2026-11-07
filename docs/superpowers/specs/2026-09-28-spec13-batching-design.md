@@ -3,6 +3,8 @@
 **Status:** design, 2026-09-28; revised 2026-10-23 (§9, §10); **revised 2026-11-07 (§11: Qwen3.8 only; the two-engine
 mode of §10 is built FIRST, as plan 13b, on the scheduler that exists; then 13c's slots on one card; no `--batch` flag -
 §11 supersedes §9.2 and §9's order where they differ).** **Renamed 2026-11-07 (operator) so the letters follow the build order: 13b is now the server and the two-engine mode (was 13c), 13c the one-card engine with slots (was 13b); every reference in this doc and the others was swapped, commit messages before 2026-11-07 keep the old letters.** Open decisions are marked **(decide)**.
+**Agnes 3.0 Flash dropped 2026-11-07** (spec 14's DROPPED note): its layouts in §9 / §9.1 / §9.2 (two slots with MTP,
+four without, concurrency 4 over the pipeline) were already out of scope under §11 and are now history, not built.
 
 **Order:** last of specs 10-13: it needs spec 10's decode attention (per-sequence depth
 in the stride), and it is much cheaper in memory after spec 12 (int8 KV).
@@ -218,8 +220,8 @@ follow-ons 2 and 3 until their support was dropped, operator 2026-10-27):
 1. **Ornith** (MoE, 256 experts top-8): shares Qwen's decode list and already has M = 2..4 MoE lists (spec 15);
    ~1.6x / 2.2x at B = 2 / 4 by bytes (estimated; rows of different sequences route nearly independently, so the gain is
    the shared non-expert weights, not an expert union).
-2. **Batching over the pipeline (operator, 2026-10-23):** Agnes (and Qwen3.8 if it pays) at concurrency 4 on both cards
-   under `--pp 2` - each card holds half the layers (~10 GB of Agnes's weights), so four 128k slots fit with room, and
+2. **Batching over the pipeline (operator, 2026-10-23):** Qwen3.8, if it pays (Agnes, the first candidate, was dropped
+   2026-11-07), at concurrency 4 on both cards under `--pp 2` - each card holds half the layers (~10 GB of Agnes's weights, the figure as written), so four 128k slots fit with room, and
    two groups of rows alternate between the stages so both cards work (the pipeline's only decode gain: at batch 1
    one card waits for the other). The row table in both stages of `runtime::PipelineEngine`, the group scheduling, the
    handoff per group. Begins only after spec 16's rows 22, 23 and 27 pass on the box and 13b-13c are done; per model

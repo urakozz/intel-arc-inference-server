@@ -47,7 +47,7 @@ everywhere, but the route row, the combine and the `FP_CONTRACT` regime are each
 
 | engine | verify lists (M >= 2) | drafters | max M |
 |---|---|---|---|
-| Qwen3.8 dense, Agnes | yes (`build_verify`, `build_verify_taps`) | MTP, DFlash, lookup | 4 (MTP), 8 (DFlash) |
+| Qwen3.8 dense (Agnes dropped 2026-11-07) | yes (`build_verify`, `build_verify_taps`) | MTP, DFlash, lookup | 4 (MTP), 8 (DFlash) |
 | **Ornith** | yes, built (536 launches at every M; `moe_M{2,3,4}_E256_T8_D2048_I512`); **has run on a B70 for correctness** (row 16's card stages in the 2026-10-23 sessions; r16.prefix with `--mtp 3`, 2026-11-01) - **no verify cost recorded** (r16.cost / r16.mtp_rows are postponed speed stages; BENCHMARKS "Ornith 1.5 MoE": nothing measured) | MTP head (one MoE layer), lookup; DFlash refused | **4** (`kMaxK` 3) |
 | **Flash-Next** (qwen4exp) | yes, built (790-795 launches at M = 1..4, 48 layers); no card run recorded (r34.mtp pending) | MTP head, lookup | **4** (`kMaxDraft` 3) |
 | **K2-Horizon** | **none** (kM = 1; `--mtp`, `--spec lookup`, dflash refused by name; EAGLE3 probed NO-GO) | none; prompt lookup is its named path | 1 |
@@ -222,7 +222,7 @@ Flash-Next and Bolt have no card run recorded. Order decided by the operator 202
 | 4 | Bolt | no (removed) | shape rows | **no separate run** - nothing to verify; its 12 (E, I) pairs are rows of the shared probe; the smallest gain (routed only, iid 3-6 %) |
 | 5 | Kolibri | no | shape rows | **no separate run** - same |
 | - | Flint | nothing built | none | **no** - an architectural near-twin of Kolibri, not a kernel-level one (spec 27: hidden 2048, 256 experts top-6, expert width 512, 2 dense + 47 MoE; Kolibri's binaries and runtime are built at 2560 / 384 experts), so it needs its own descriptor and builds first. Its routed expert shape (H 2048, I 512, E 256) is Ornith's, so Ornith's rows at k = 6 cover it if wanted |
-| - | Nanbeige | not in the repo | none | not MoE, no engine path; if added as plain dense Llama it would use `gemv.cl` and the Qwen capture, and 28b's shape list (Qwen3.8 + Agnes) would need its shapes |
+| - | Nanbeige | not in the repo | none | not MoE, no engine path; if added as plain dense Llama it would use `gemv.cl` and the Qwen capture, and 28b's shape list (Qwen3.8's) would need its shapes |
 
 ### 5.1 Ornith (order 1)
 

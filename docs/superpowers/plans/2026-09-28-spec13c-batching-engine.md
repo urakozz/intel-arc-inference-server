@@ -7,7 +7,7 @@ the 2026-10-23 text below, which this paragraph overrides where they differ:
 - **No `--batch` flag** (zero-config, operator 2026-11-06): a card's memory left over by an asked `--max-len` becomes
   32768-position slots (spec 13 §11.2); `--max-len auto` keeps today's single-session layout. Task 1's refusal text
   naming `--pp 2` / `--mtp off` / `--mtp auto` is withdrawn; a layout that does not fit is simply fewer slots.
-- **Qwen3.8 only.** Agnes's layouts (two slots with MTP, four without) are out of this plan.
+- **Qwen3.8 only.** Agnes's layouts (two slots with MTP, four without) are gone with the model (dropped 2026-11-07).
 - **The rows run on the small-batch kernels** (spec 28b's `gemm_sm`, 28c's DPAS verify attention): the verify step
   now costs 1.090 / 1.132 plain steps at 3 / 4 rows (measured 2026-11-06), not spec 8b's 1.52 / 1.74 - 13a's row 66
   tables are re-measured with today's kernels before the budget rule is fixed.
@@ -46,7 +46,7 @@ design §6) with the box's tables and the operator's §7 decisions.
 
 ## Out of scope
 
-- Batching over `--pp 2` (spec 13 §9.1 follow-on 2: Agnes at concurrency 4 on two cards) - after spec 16's rows 22,
+- Batching over `--pp 2` (spec 13 §9.1 follow-on 2: concurrency 4 on two cards) - after spec 16's rows 22,
   23 and 27 pass and 13b-13c are done; its own plan.
 - The two-card replica mode (spec 13 §10). The MoE follow-on (§9.1 1). DFlash per slot (spec 19
   §5's proposer per slot rides the same row table; its own plan).

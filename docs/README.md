@@ -17,7 +17,7 @@ short version; this is where the reasoning and the evidence live.
   (SWE-bench, Terminal-Bench) of the models the engine supports or plans, and the models
   considered and not supported.
 - **[18-running-models.md](18-running-models.md)** - the commands to download, serve,
-  decode and benchmark each model (Qwen3.8, Agnes 3.0 Flash, Ornith 1.5, K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt, Flash-Next),
+  decode and benchmark each model (Qwen3.8, Ornith 1.5, K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt, Flash-Next),
   what each supports, its limits, the speculative-decoding modes and how their output is judged.
 
 ## The design
@@ -103,7 +103,7 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   verify(8) today 3.17 plain steps, derived with the stand-in 1.54-1.58 - the operator's call; attention at M = 8 is the
   next lever (spec 28c). Quiet-box re-check set in §6.
 - spec 28b (no separate record; spec 28 §10 "28b as built" and BENCHMARKS "The verify step on gemm_sm"): `gemm_sm`
-  in production for every M >= 2 decode list (Qwen3.8, Agnes, Ornith's dense projections), M = 1 bitwise; verify(8)
+  in production for every M >= 2 decode list (Qwen3.8, Ornith's dense projections), M = 1 bitwise; verify(8)
   1.57 plain steps (gemv 3.17), D1 tool calls 2.12x at K = 3 (busy-box timing); N4 / N6 as written not met - the
   operator's ruling pending.
 - [probe-tp-2026-11-01.md](probes/probe-tp-2026-11-01.md) - spec 17a: tensor parallel over the two cards, Qwen3.8 first
@@ -131,8 +131,8 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   repeat on **Qwen3.8** (Mac CPU, plan 12b Task A): `rotkv` holds (golden cos mean
   0.99995-0.99997, above the stop rule; replay flat to 32k, below bf16 eager's own error).
   Sets 12b's tolerances: Q2 1e-4 confirmed; Q3 2e-3 per depth and 5e-4 averaged.
-- [probe-agnes-2026-10-03.md](probes/probe-agnes-2026-10-03.md) - spec 14 phase 1, on the
-  Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
+- [probe-agnes-2026-10-03.md](probes/probe-agnes-2026-10-03.md) - spec 14 phase 1 (Agnes dropped
+  2026-11-07; kept as the record), on the Mac: Agnes 3.0 Flash from its own files (72 layers, W 18.344 GB from the headers), the
   CPU reference, the parallel-FFN fold (bit-exact on the weights, C++ byte-identical to
   Python, real layers 0/3/35/71 on real activations: max |d| 0), the reference bit-identical
   to `modeling_agnes.py`, the golden and MTP dumps made layer-streamed in Docker, the
