@@ -26,7 +26,9 @@
 #   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
 #                    commit, a86dd86; `--baseline main` when validating a branch before merging)
 #   --state NAME     results directory on the box (default <sha>-vs-<baseline sha>); a new
-#                    commit starts a new state, `--state <old>` continues an old one
+#                    commit starts a new state, `--state <old>` continues an old one - with
+#                    the baseline it was started against (its meta-*.env, else the name's
+#                    -vs-<sha>); a --baseline naming another commit is refused
 #   --no-wait        launch and return (re-run the same command later to re-attach)
 #   --no-sync        do not rsync the tree (the box keeps what it has)
 #   --push-data      first rsync (spec 15a, made on the Mac from the int4 checkpoint)
@@ -72,7 +74,8 @@ usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' 
 die() { echo "box_validate.sh: $*" >&2; exit 2; }
 
 MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 NIGHTLY=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
-BASELINE_REF="${BASELINE_REF:-ce36d2d}" STATE_NAME=""
+BASELINE_REF="${BASELINE_REF:-}" STATE_NAME=""
+BASELINE_GIVEN=0; [ -z "$BASELINE_REF" ] || BASELINE_GIVEN=1
 need() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -88,7 +91,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift ;;
     --no-reuse) NO_REUSE=1; shift ;;
     --nightly) NIGHTLY=1; shift ;;
-    --baseline) need "$@"; BASELINE_REF="$2"; shift 2 ;;
+    --baseline) need "$@"; BASELINE_REF="$2"; BASELINE_GIVEN=1; shift 2 ;;
     --state) need "$@"; STATE_NAME="$2"; shift 2 ;;
     --no-wait) WAIT=0; shift ;;
     --no-sync) SYNC=0; shift ;;
@@ -102,6 +105,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
+BASELINE_REF="${BASELINE_REF:-ce36d2d}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 
 # ---- selection ------------------------------------------------------------------------
@@ -155,13 +159,36 @@ SHA="$(git rev-parse --short=12 HEAD)"
 git diff --quiet HEAD -- 2>/dev/null || SHA="$SHA-dirty"
 BASE_SHA="$(git rev-parse --verify --quiet "$BASELINE_REF^{commit}")" || die "baseline '$BASELINE_REF' is not a commit here"
 BASE_SHORT="${BASE_SHA:0:12}"
+# A state continues with the baseline it was started against: G0 compares this tree's build with
+# the baseline tree the state built, so a resume must not re-resolve a moving ref (`main`).
+state_baseline() {   # state_baseline NAME - the baseline sha in a state name (<sha>-vs-<baseline sha>), or nothing
+  local b="${1##*-vs-}"
+  [ "$b" != "$1" ] || return 0
+  case "$b" in ""|*[!0-9a-f]*) return 0 ;; esac
+  if [ "${#b}" -ge 7 ]; then echo "$b"; fi
+}
+use_recorded_baseline() {   # use_recorded_baseline SHA WHERE - adopt the state's baseline, or refuse a --baseline that differs
+  local rec="$1" where="$2" full
+  full="$(git rev-parse --verify --quiet "$rec^{commit}")" ||
+    die "state $STATE_NAME was started against baseline $rec ($where), which is not a commit here - fetch it, or start a new state (drop --state)"
+  [ "$full" != "$BASE_SHA" ] || return 0
+  [ "$BASELINE_GIVEN" = 0 ] ||
+    die "state $STATE_NAME was started against baseline ${full:0:12} ($where), but --baseline $BASELINE_REF is ${BASE_SHA:0:12} now; G0 must compare against the baseline the state built. Resume it without --baseline (it uses ${full:0:12}), or start a new state for ${BASE_SHA:0:12}: drop --state (the default name is <sha>-vs-<baseline>) or pick a new --state NAME"
+  echo "baseline: state $STATE_NAME was started against ${full:0:12} ($where) - using it" >&2
+  BASELINE_REF="${full:0:12}"; BASE_SHA="$full"; BASE_SHORT="${BASE_SHA:0:12}"
+}
+if [ -n "$STATE_NAME" ]; then
+  rec="$(state_baseline "$STATE_NAME")"
+  [ -z "$rec" ] || use_recorded_baseline "$rec" "its name"
+fi
 if [ -z "${REMOTE_DIR:-}" ]; then
   # shellcheck source=tools/box_dir.sh
   . tools/box_dir.sh
   REMOTE_DIR="$(BOX_SUFFIX="${BOX_SUFFIX:-validate}" b70_remote_dir "$ROOT")"
 fi
 export REMOTE_DIR
-BASE_DIR="${BASE_DIR:-b70-inference-server-g0-$BASE_SHORT}"
+BASE_DIR_ENV="${BASE_DIR:-}"
+BASE_DIR="${BASE_DIR_ENV:-b70-inference-server-g0-$BASE_SHORT}"
 DATA_DIR="${DATA_DIR:-b70-inference-server}"
 STATE_NAME="${STATE_NAME:-${SHA}-vs-$BASE_SHORT}"
 STATE_REL="b70-validate/$REMOTE_DIR/$STATE_NAME"
@@ -190,9 +217,15 @@ remote_env() {
 RUNS_REL="b70-validate/$REMOTE_DIR"
 ORCH_LOG="orchestrator-$DEVICE.log"
 CHECK_CMD="d=\"\$HOME/$RUNS_REL\"; mkdir -p \"\$d\"; n=\$(cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null | wc -l); flock -n \"\$d/.run.lock\" true || echo \"LEGACY \$(cat \"\$d/.current\" 2>/dev/null)\"; for f in \"\$d\"/.run-*.lock; do [ -e \"\$f\" ] || continue; k=\${f##*/.run-}; k=\${k%.lock}; [ \"\$k\" = $DEVICE ] && continue; flock -n \"\$f\" true && continue; c=\$(cat \"\$d/.current-\$k\" 2>/dev/null); echo \"OTHER \$k \$c \$(sed -n 's/^tree_sha=//p' \"\$d/\$c/meta-\$k.env\" 2>/dev/null)\"; done; if flock -n \"\$d/.run-$DEVICE.lock\" true; then echo \"IDLE \$n\"; else echo \"RUNNING \$n \$(cat \"\$d/.current-$DEVICE\" 2>/dev/null)\"; fi"
-BASE_CHECK_CMD="cat \"\$HOME/$BASE_DIR/.b70-baseline-ref\" 2>/dev/null || true"
-BASE_EXTRACT_CMD="mkdir -p \"\$HOME/$BASE_DIR\" && tar -xf - -C \"\$HOME/$BASE_DIR\" && echo $BASE_SHA > \"\$HOME/$BASE_DIR/.b70-baseline-ref\""
-LAUNCH_CMD="mkdir -p \"\$HOME/$STATE_REL\" && env $(remote_env) tools/probe/detach.sh \"\$HOME/$STATE_REL/$ORCH_LOG\" tools/box_validate/remote.sh \"\$HOME/$STATE_REL\" $SELECTED"
+# the baselines the state's orchestrators recorded (meta-<device>.env, one sha per line; nothing for a new state)
+STATE_BASE_CMD="sed -n 's/^baseline_sha=//p' \"\$HOME/$STATE_REL\"/meta-*.env 2>/dev/null | sort -u"
+base_cmds() {   # the commands that name the baseline (again after the state's recorded one is adopted)
+  BASE_DIR="${BASE_DIR_ENV:-b70-inference-server-g0-$BASE_SHORT}"
+  BASE_CHECK_CMD="cat \"\$HOME/$BASE_DIR/.b70-baseline-ref\" 2>/dev/null || true"
+  BASE_EXTRACT_CMD="mkdir -p \"\$HOME/$BASE_DIR\" && tar -xf - -C \"\$HOME/$BASE_DIR\" && echo $BASE_SHA > \"\$HOME/$BASE_DIR/.b70-baseline-ref\""
+  LAUNCH_CMD="mkdir -p \"\$HOME/$STATE_REL\" && env $(remote_env) tools/probe/detach.sh \"\$HOME/$STATE_REL/$ORCH_LOG\" tools/box_validate/remote.sh \"\$HOME/$STATE_REL\" $SELECTED"
+}
+base_cmds
 POLL_CMD="cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; tail -1 \"\$HOME/$STATE_REL/$ORCH_LOG\" 2>/dev/null; echo @@; flock -n \"\$HOME/$RUNS_REL/.run-$DEVICE.lock\" true && echo idle || echo running"
 STATUS_CMD="cd \"\$HOME/$STATE_REL\" 2>/dev/null && cat *.status 2>/dev/null; echo @@; tail -8 \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; d=\"\$HOME/$RUNS_REL\"; for f in \"\$d\"/.run-*.lock; do [ -e \"\$f\" ] || continue; k=\${f##*/.run-}; k=\${k%.lock}; if flock -n \"\$f\" true; then s=idle; else s=RUNNING; fi; echo \"\$k \$s \$(cat \"\$d/.current-\$k\" 2>/dev/null)\"; done"
 FETCH_SRC="b70-validate/$REMOTE_DIR/$STATE_NAME/"
@@ -310,6 +343,8 @@ if [ "$MODE" = dry ]; then
   echo "== 1. a run already active in this tree on device $DEVICE? (attach to it instead of launching; another"
   echo "   device's orchestrator on the same state and commit: launch beside it without syncing)"
   echo "  ssh \$BOX '$CHECK_CMD'"
+  echo "== 1a. the baseline the state was started against (a resume keeps it; a --baseline naming another commit is refused)"
+  echo "  ssh \$BOX '$STATE_BASE_CMD'"
   if [ "$PUSH" = 1 ]; then
     echo "== 1b. --push-data"
     echo "  rsync -a $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-k2-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
@@ -392,6 +427,14 @@ check=$("${SSH[@]}" "$BOX" "$CHECK_CMD") || die "cannot reach the box (ssh $BOX)
 legacy=$(printf '%s\n' "$check" | awk '$1 == "LEGACY" { print $2 }')
 [ -z "$(printf '%s\n' "$check" | grep '^LEGACY')" ] ||
   die "an orchestrator from before the per-device locks is active in ~/$REMOTE_DIR (state ${legacy:-?}) - wait for it to finish"
+recorded=$("${SSH[@]}" "$BOX" "$STATE_BASE_CMD") || die "cannot read the state's baseline (ssh $BOX)"
+recorded=$(printf '%s\n' "$recorded" | grep -v '^?*$' || true)
+if [ -n "$recorded" ]; then
+  [ "$(printf '%s\n' "$recorded" | wc -l | tr -d ' ')" = 1 ] ||
+    die "state $STATE_NAME records more than one baseline ($(printf '%s' "$recorded" | tr '\n' ' ')) in its meta-*.env - start a new state"
+  use_recorded_baseline "$recorded" "its meta-*.env"
+  base_cmds
+fi
 self=$(printf '%s\n' "$check" | tail -1)
 seen=$(printf '%s' "$self" | awk '{ print $2 }')
 case "$self" in
