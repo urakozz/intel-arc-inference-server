@@ -141,9 +141,10 @@ inline std::string pf_gemm_variant(bool transB) { return transB ? "pf_gemm_T1" :
 inline std::string pf_gemm_silu_variant() { return "pf_gemm_T0_SILU"; }
 // Open-work 3a: pf_gemm for a chunk of few rows (pf_gemm_small.cl) - NA 8-row blocks x NB 16-column
 // atoms a sub-group, SN sub-groups a work-group; bit-identical to pf_gemm_T0 / pf_gemm_T0_SILU.
-inline std::string pf_gemm_small_variant(unsigned NA, unsigned NB, unsigned SN, bool silu) {
+// `nfast`: the grid's dimension 0 walks the column tiles (NFAST=1, the _NF build).
+inline std::string pf_gemm_small_variant(unsigned NA, unsigned NB, unsigned SN, bool silu, bool nfast = false) {
   return "pf_gemm_small_A" + std::to_string(NA) + "_B" + std::to_string(NB) + "_S" + std::to_string(SN) +
-         (silu ? "_SILU" : "");
+         (nfast ? "_NF" : "") + (silu ? "_SILU" : "");
 }
 inline constexpr unsigned kPfSlabWidth = 1024;   // columns per pf_dequant_slab / slab GEMM
 inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout) {
