@@ -507,11 +507,29 @@ void Server::finish_request() {
 
 void Server::log_request(bool chat, const std::string& body, double t_start,
                          const Outcome& outcome) {
+  const double t_end = steady_seconds();
+  const double t_first = outcome.t_first_token == 0 ? t_start : outcome.t_first_token;
+  // Every request's speeds on one line (always, with or without --log-requests): the prompt ids this request
+  // read (the prompt minus what the prefix cache restored), timed from arrival to the first token - queue wait
+  // and restore included - and the decode rate over the ids after the first one.
+  {
+    const size_t prompt = outcome.prompt_ids.size(), out = outcome.out_ids.size();
+    const size_t cached = std::min<size_t>(outcome.usage.cached_tokens, prompt);
+    const double first_s = t_first - t_start, decode_s = t_end - t_first;
+    const double read_tps = first_s > 0 ? double(prompt - cached) / first_s : 0;
+    const double gen_tps = (out > 1 && decode_s > 0) ? double(out - 1) / decode_s : 0;
+    std::fprintf(stderr,
+                 "request: prompt %zu ids (%zu cached, %zu read), first token after %.2f s = %.0f t/s read;"
+                 " %zu ids generated in %.2f s = %.1f t/s%s\n",
+                 prompt, cached, prompt - cached, first_s, read_tps, out, decode_s, gen_tps,
+                 outcome.slot >= 0 ? (std::string(", card ") + std::to_string(outcome.slot)).c_str() : "");
+    std::fflush(stderr);
+  }
   if (opts_.log_requests_dir.empty()) return;
   nlohmann::json record = {
       {"t_start", t_start},
-      {"t_first_token", outcome.t_first_token == 0 ? t_start : outcome.t_first_token},
-      {"t_end", steady_seconds()},
+      {"t_first_token", t_first},
+      {"t_end", t_end},
       {"endpoint", chat ? "/v1/chat/completions" : "/v1/completions"},
       {"request", nlohmann::json::parse(body, nullptr, false)},
       {"prompt_ids", outcome.prompt_ids},
