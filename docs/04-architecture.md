@@ -39,8 +39,7 @@ remains is kernel efficiency, which is a different problem (doc 05).
 ## More than one model
 
 The layout below is Qwen3.8's. Every other family has its own engine and descriptor on the same
-foundations (Level Zero lists, our own OpenCL C, the loader, the server): Agnes (spec 14, the same
-math with 72 layers and a parallel feed-forward), Ornith (spec 15, a mixture-of-experts, MoE, where a
+foundations (Level Zero lists, our own OpenCL C, the loader, the server): Ornith (spec 15, a mixture-of-experts, MoE, where a
 router picks a few expert networks per token), K2-Horizon (spec 18, MoE with routed value-expert
 attention), Kolibri-1 (spec 20, Aleph Alpha's MoE with sliding-window layers), Nemotron 3.5 Bolt (spec 25,
 Mamba-2 state-space blocks plus attention plus latent MoE) and Qwen3.8-Flash-Next (spec 21, in progress:

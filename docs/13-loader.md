@@ -95,7 +95,7 @@ cannot read cannot mislead it.
 
 **Since spec 15 §13, `a‖b`'s kind is the checkpoint's, like `lm_head`'s.** The published
 Ornith int4 checkpoint (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`) quantised
-`in_proj_a` / `in_proj_b` (int4 g64), where Qwen3.8's and Agnes's exports keep them bf16. The
+`in_proj_a` / `in_proj_b` (int4 g64), where Qwen3.8's export keeps them bf16. The
 loader classifies the first GDN layer's `in_proj_a` by content (`loader/ab.h`) and takes the
 table's bf16 `AB` row or the descriptor's `ab_int4` row - the same 128-column contract, the
 real columns zero-padded with the int4 zero (nibble 8, scale +0), an S 1 layout-1 GEMV through
@@ -699,45 +699,13 @@ above: the machine was under a 12-core compile throughout, and a cold page cache
 read 41.4 s against a warm 12.6 s. Nothing about load time was being measured
 there.
 
-## The second model: Agnes 3.0 Flash (spec 14)
-
-*Written 2026-10-03 without the box; unvalidated on the card - every number below
-that is not read from the checkpoint's headers is pending the validation checklist
-(`docs/superpowers/plans/2026-10-03-spec14-validation-checklist.md`).*
+## Picking the model
 
 The model is picked from `config.json`'s `architectures[0]` - no flag
-(`model::desc_for_architecture`; an unknown architecture throws, naming it). The
-descriptor (`src/model/model_desc.h`) carries what differs:
-
-| | Qwen3.8 | Agnes 3.0 Flash |
-|---|---|---|
-| `architectures[0]` | `Qwen3_5ForConditionalGeneration` | `AgnesForConditionalGeneration` |
-| layers | 64 = 48 GDN + 16 FA | 72 = 54 GDN + 18 FA (FA at `l % 4 == 3`) |
-| MLP intermediate (engine) | 17408 | 19456 = 17408 + the 2048-wide parallel FFN, folded |
-| name map | identity | `delta_attn.` -> `linear_attn.`, `global_attn.` -> `self_attn.` (the MTP head's too) |
-| `W` (bf16 `lm_head`) | 15.519 GB, measured | 18.344 GB, summed from the headers (14.816 qweight + 0.926 scales + 0.059 bf16 + 2.543 head) |
-| max_len ceiling | none | 65536 (spec 14 §3.3, until spec 12) |
-
-The name view maps every kept name to its engine spelling once; `ckpt_name` runs
-the map backwards for `LinearSrc::classify`. Everything downstream binds engine names.
-
-**Classification, the new rows.** Each layer ships `mlp.parallel_ffn.{gate,up,down}_proj`
-as int4 g64 sym (`qweight`/`scales`/`qzeros`/`g_idx`, 12 tensors, in the quantiser's
-`modules_in_block_to_quantize`). They are classified by suffix like every other linear
-and consumed by the fold; their `qzeros`/`g_idx` are scanned (identity asserted) and
-dropped. `in_proj_a/b` stay bf16 (the `dynamic` exclusions, as on Qwen3.8); `lm_head`,
-`mtp.*` (15 tensors, 0.849 GB) and the vision tower (0.921 GB) as on Qwen3.8.
-
-**The fold (spec 14 §2), `src/loader/fold.{h,cc}`.** On packed GPTQ int4, before the
-column map: gate' = [gate | gate_p] and up' = [up | up_p] along N (columns of
-`qweight [K/8][N]` and `scales [K/64][N]`), then gate'||up' interleaved in 16-column
-blocks exactly as gate||up; down' = [down ; down_p] along K, `qweight` row 2176 and
-`scales` row 272 - a g64 boundary. No nibble moves within a word and no scale is
-recomputed, so the folded tensors dequantise to the stacked dequantisations bit for bit;
-`y = down'(silu(gate' x) * up' x)` equals the two-branch sum up to accumulation order.
-`tests/loader/agnes_fold_test.cc` holds the C++ fold byte-identical to
-`tools/oracle/agnes_fold.py` on a shared fixture; `tests/loader/load_agnes_test.cc`
-reads the joins back from the device (box).
+(`model::desc_for_architecture`; an unknown architecture throws, naming it and the supported ones). The descriptor
+(`src/model/model_desc.h`, spec 14 §3.1 / spec 15b) carries what differs per model: layer counts, widths, the MLP
+intermediate, `W`, the tokenizer's id count. (Agnes 3.0 Flash, the first model after Qwen3.8 the descriptor ran, was dropped on
+2026-11-07 with its parallel-FFN fold and name map; its config.json is refused by name - spec 14's DROPPED note.)
 
 ## g128 checkpoints
 
@@ -746,7 +714,7 @@ and runs them on the g64 kernels unchanged: `LinearSrc::classify` reads the grou
 `.scales` row count (K/64 is g64, K/128 is g128, anything else is refused) and, for g128,
 builds a [K/64][N] copy in which g64 rows 2j and 2j+1 both hold g128 row j. Every weight
 keeps its own scale, so the expanded tensor dequantises to the g128 checkpoint's weights
-exactly, and fold, repack, the GEMVs, the prefill dequant and h8 see an ordinary g64 linear.
+exactly, and repack, the GEMVs, the prefill dequant and h8 see an ordinary g64 linear.
 `assert_quant_invariants` checks a g_idx against the identity k/group with the group taken
 from the same module's `.scales`, so a g_idx and scales that disagree are refused.
 `tests/loader/quant_test.cc` pins the expansion against a direct g128 dequant.
@@ -798,7 +766,7 @@ tensor and the index, because rounding a scale changes every weight in its group
 buffers belong to the `LinearSrc` (`owned_qweight`, `expanded_scales`, shared pointers),
 one linear at a time. `LinearSrc::suffixes()` names the tensors read (`weight_packed`,
 `weight_scale`, `weight_shape`, and `weight_g_idx` if shipped), and every loader marks
-those consumed. So **dense linears, Agnes's fold, the MoE experts (main layers and the
+those consumed. So **dense linears, the MoE experts (main layers and the
 MTP head's MoE layer) and K2** all take compressed-tensors through the same function.
 K2's name check expects one packing per checkpoint: if any `.weight_packed` exists, every
 int4 linear must be in that form. The dense MTP head stays the published 15 bf16 tensors

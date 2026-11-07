@@ -5,10 +5,10 @@ general engine cannot hardcode the things this one hardcodes; specialisation is
 the whole strategy.
 
 This document is that target. The families added since each have their own
-engine, specialised the same way, and their own spec: Agnes (14), Ornith (15),
+engine, specialised the same way, and their own spec: Ornith (15),
 K2-Horizon (18), Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and
 Nemotron 3.5 Bolt (25). LFM2.5, Muse-Glimmer and LiLiCorr were dropped on
-2026-10-27; Flint (spec 27) and Nanbeige (spec 29) are parked since 2026-11-04.
+2026-10-27, Agnes 3.0 Flash (spec 14) on 2026-11-07; Flint (spec 27) and Nanbeige (spec 29) are parked since 2026-11-04.
 Qwen3.8-Flash-Next is 12 QSA sparse-attention + 36 GDN layers, a 512-expert MoE
 (mixture of experts: a router picks a few expert networks per token), 4-stream
 hyper-connections and a 51.8 GB host-resident n-gram embedding. It is built through
