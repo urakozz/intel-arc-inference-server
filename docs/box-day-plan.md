@@ -246,25 +246,6 @@ alone is made on the box before session 5 - one container run of make_set.py, no
       turn `r31.load_real`, `r32.partial`, `r33.golden_real` from SKIP into real runs; `r30.traces`
       (spec 22 P0.6 / P0.8's routing traces) and `r34.accept` (decision 4's MTP acceptance) are the
       other real-weight CPU stages worth the time, both HOURS.
-- [ ] **Also for the CPU lane - queue row 35, the W4A4 probe** (plan
-      `docs/superpowers/plans/2026-10-09-w4a4-probe.md` Task 2; Task 1's tool is on the tree):
-      `tools/box_validate/w4a4_grid.sh` runs `eval_quantised.py sim <Qwen3.8 bf16> <gate checkpoint>
-      --prompt <p> --variants none,w4a16,h8,h4,h4p2 --group 256 --vocab-used 248077` on cjk / code /
-      heldout (478) / long512 in the oracle container, `free -g` printed and MemAvailable >= 70 GB
-      first (else SKIP), resumable, into `~/b70-inference-server/oracle-out-w4a4/`; needs the bf16
-      `Qwen/Qwen3.8-27B` (54 GB) in the HF cache. Detached, capped like the oracles above:
-      ```sh
-      export REMOTE_DIR=b70-inference-server-validate
-      tools/box.sh run 'ORACLE_THREADS=22 tools/probe/detach.sh $HOME/w4a4-grid.log tools/box_validate/w4a4_grid.sh $HOME/b70-inference-server grid'        # hours (est.)
-      tools/box.sh run 'ORACLE_THREADS=22 tools/probe/detach.sh $HOME/w4a4-class.log tools/box_validate/w4a4_grid.sh $HOME/b70-inference-server per-class'  # hours (est.), after grid
-      tools/box.sh run 'tools/box_validate/w4a4_grid.sh $HOME/b70-inference-server summary'   # the tables and the stopping rule
-      ```
-      or as runbook stages: `tools/box_validate.sh --only r35 --with r35.grid` (then
-      `r35.per_class`; both opt-in, CPU, and G0 must have passed in that state). §15.4's 478 held-out
-      ids are not in the tree: `W4A4_HELDOUT=<file>` if the box still has them, otherwise the script
-      re-makes a 478-id held-out prompt from this tree's texts (read h4 against the same run's
-      none / w4a16 / h8). **Never during sessions 6-9**: a running container makes every timed row
-      ITERATE.
 
 ### 1.7 Idle protocol (before sessions 6, 7, 8, 9)
 

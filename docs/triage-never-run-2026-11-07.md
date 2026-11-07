@@ -6,8 +6,8 @@ the specs and tonight's run on the box (state `f73b2490562a-vs-f73b2490562a`, re
 
 ## In short
 
-233 stages: **74 to run**, **43 already done**, **45 speed measurements** for the quiet-box session, **67 to delete**,
-**4 on hold** (plus 4 Agnes stages already removed with the model).
+231 stages: **74 to run**, **41 already done**, **45 speed measurements** for the quiet-box session, **67 to delete**,
+**4 on hold** (plus 4 Agnes stages already removed with the model, and the W4A4 probe's 2 after its verdict).
 
 - **To run (74)** - in plain words:
   - **CPU reference jobs (17)**: the "right answers" the card's output is judged against, computed on the box's CPU
@@ -65,8 +65,8 @@ the specs and tonight's run on the box (state `f73b2490562a-vs-f73b2490562a`, re
    Flash-Next (recommended - it is needed anyway once Now 4 runs the full model) or drop the reference.
 6. **`r31.ple_kl` is blocked on a script never written** (plan 21q Task 3's `evaluate.py`) and on the 360 GB bf16
    original. Build it, or accept the int8 PLE table on the golden gates alone.
-7. **The W4A4 probe's verdict table is not written** (`r35.grid`, `r35.per_class` ran; plan Task 2 Step 3, a Mac
-   job from the JSON on the box). After it, the two stages and `w4a4_grid.sh` can go.
+7. **Done 2026-11-07: the W4A4 probe's verdict is written** (docs/probes/probe-w4a4-2026-10-28.md: no - int4
+   activations double the output error). `r35.grid`, `r35.per_class` and `w4a4_grid.sh` are removed.
 8. **Tonight's run is older than today's fixes** (it runs f73b249). So `r2.auto_rows`, `r12.a4` (the old "identical
    output" bar), `r6.mtp_long` (the long MTP tests before the reviewed rows) and `lilicorr_draft_test` (before
    `df_exp`) fail tonight under the old code; the fixes are on main and the next run checks them. Tonight's `g0.suite`
@@ -127,7 +127,7 @@ cards).
   is a timing).
 - `r56.d5_opencode`, `r56.d5_dv`: b -> c (DFlash's speed verdict is closed, spec 19 D5, 2026-10-28).
 - `r30.traces`, `r32.ple_rate`, `r36.curve`, `r36.project`: c -> hold (Now 4 needs them).
-- `r35.grid`, `r35.per_class`: c -> a-done (their verdict table is still to write).
+- `r35.grid`, `r35.per_class`: c -> a-done, then removed with their verdict (2026-11-07).
 - `r11.a4_ref` added (new stage: Qwen3.8's tool-call reference, a).
 
 ## a - run on the box (74)
@@ -192,7 +192,7 @@ cards).
 |---|---|
 | `r69.forced_dumps` | the forced contexts for `r69.forced_refs`, now with the long MTP tests at 32k / 128k (~6-8 h card time) |
 
-## a-done - already passed (43)
+## a-done - already passed (41)
 
 | stages | what passed |
 |---|---|
@@ -204,7 +204,6 @@ cards).
 | `r23.p1`, `r26.real`, `r28.real` | tonight: two-card Qwen3.8 prefill bitwise one card; Kolibri prefill and serving on the real checkpoint |
 | `r27.mtp`, `r27.mtp_kv8`, `r27.prefix`, `r27.prefix_kv8`, `r27.serve`, `r27.golden`, `r27.ornith` | tonight: two-card serving - MTP across the split, the prefix cache (bf16 and int8 KV), start-up at 262,144, one request end to end, Ornith |
 | `r32.k3`, `r32.golden`, `r33.prefill`, `r33.golden`, `r34.snapshot`, `r34.mtp`, `r34.serve`, `r34.pp` | tonight: Flash-Next decode, prefill, snapshots, MTP, serving and two cards on the synthetic checkpoints (`r34.mtp`'s first part still SKIPs until `r34.fixture`) |
-| `r35.grid`, `r35.per_class` | the W4A4 accuracy grids ran (2026-10-28); their verdict table is a Mac job (item 7), then delete |
 
 ## hold - decide with open-work Now 4, the expert-tiering probe (4)
 
@@ -256,6 +255,11 @@ pin, alias; PASSed, so outside this triage) and `probe_offload` belong to the sa
 `r1.a4`, `r1.prefix_benchy`, `r1.vllm`, `r27.agnes`: gone from `stages.sh` with the model (tonight's `r27.agnes` FAIL
 is from the build before the removal).
 
+## Removed after their verdict (w4a4-verdict, 2026-11-07)
+
+`r35.grid`, `r35.per_class`: the W4A4 accuracy grids (PASS 2026-10-28); the verdict is
+docs/probes/probe-w4a4-2026-10-28.md (no), so the stages and `tools/box_validate/w4a4_grid.sh` are gone.
+
 ## Suggested order
 
 1. The next validation run on main (it has today's fixes): rows 55-75 after the recap rewiring (item 1); then
@@ -271,9 +275,9 @@ is from the build before the removal).
 | selection | stages | a | a-done | b | c | hold |
 |---|---|---|---|---|---|---|
 | default, never passed | 112 | 46 | 20 | 5 | 39 | 2 |
-| opt-in | 106 | 27 | 22 | 39 | 16 | 2 |
+| opt-in | 104 | 27 | 20 | 39 | 16 | 2 |
 | manual | 15 | 1 | 1 | 1 | 12 | 0 |
-| **all** | **233** | **74** | **43** | **45** | **67** | **4** |
+| **all** | **231** | **74** | **41** | **45** | **67** | **4** |
 
 Sources: `tools/box_validate.sh --list` on main 5e8147c (303 default, 106 opt-in, 15 manual stages, the 4 G0 stages and
 `pre`), the stage bodies in `tools/box_validate/stages.sh`, the box test list, `docs/open-work.md`, the specs,

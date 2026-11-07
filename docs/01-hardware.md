@@ -131,7 +131,9 @@ L2 error against the bf16 result. See
 [probe-w4a8-2026-09-23.md](probes/probe-w4a8-2026-09-23.md).
 
 The one DPAS lever on this device worth more than 2x is **4-bit by 4-bit**, at
-4.000x. Whether W4A4 is reachable at acceptable accuracy is untested here.
+4.000x. W4A4 is not reachable at acceptable accuracy: int4 activations at group 256, even after the
+Hadamard rotation, double Qwen3.8's output error against int8's
+([probe-w4a4-2026-10-28.md](probes/probe-w4a4-2026-10-28.md)).
 
 ### FP4 and FP8 are not available
 
