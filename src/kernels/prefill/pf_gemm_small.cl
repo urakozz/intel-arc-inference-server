@@ -36,6 +36,9 @@
 #ifndef SILU_EPI
 #define SILU_EPI 0
 #endif
+#ifndef NFAST
+#define NFAST 0   /* 1: grid dimension 0 walks the column tiles, 1 the row tiles */
+#endif
 #if NA != 1 && NA != 2 && NA != 4
 #error "pf_gemm_small: NA is 1, 2 or 4"
 #endif
@@ -92,8 +95,13 @@ __kernel void pf_gemm_small(__global const ushort* restrict A, __global const us
                             __global float* restrict C_base, uint M, uint K, uint N, uint lda,
                             uint ldb, uint ldc) {
   const uint s = get_sub_group_id();
+#if NFAST
+  const uint mb = get_group_id(1) * R;
+  const uint nb = get_group_id(0) * (CN * SN) + CN * s;
+#else
   const uint mb = get_group_id(0) * R;
   const uint nb = get_group_id(1) * (CN * SN) + CN * s;
+#endif
 #if SILU_EPI
   __global ushort* restrict X = (__global ushort*)C_base;   // bf16 x, `ldc` carries ldx
 #else

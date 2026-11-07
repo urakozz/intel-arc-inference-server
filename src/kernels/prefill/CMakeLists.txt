@@ -147,6 +147,12 @@ foreach(tile IN LISTS _pf_small_tiles)
                    DEFINES NA=${NA} NB=${NB} SN=${SN} ${_grf})
   add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
                    DEFINES NA=${NA} NB=${NB} SN=${SN} SILU_EPI=1 ${_grf})
+  if(B70_PF_SMALL_SWEEP)
+    add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_NF SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                     DEFINES NA=${NA} NB=${NB} SN=${SN} NFAST=1 ${_grf})
+    add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_NF_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                     DEFINES NA=${NA} NB=${NB} SN=${SN} NFAST=1 SILU_EPI=1 ${_grf})
+  endif()
 endforeach()
 
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
