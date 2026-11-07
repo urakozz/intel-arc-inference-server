@@ -3,6 +3,9 @@
 For open-work "Now 3" (everything coded but never run on the box). **A proposal for the operator to approve; no
 stage is deleted or edited yet.**
 
+**Agnes stages removed** (branch drop-agnes, 2026-11-07: Agnes 3.0 Flash dropped by the operator): row 1's stages, `r27.agnes`
+and the Agnes arms of other stages are gone from `tools/box_validate/stages.sh`; their entries below are marked REMOVED.
+
 **Scope.** Every opt-in and manual stage (106 + 17 = 123), plus every default stage with no PASS in
 `~/b70/logs/stage-latest.txt` (the latest result of each stage over all runs, as of 2026-11-04) nor in tonight's
 run (113). 236 stages in all.
@@ -61,7 +64,7 @@ measured by hand outside the runbook), the box's `stage-latest.txt`, tonight's
 2. CPU references, one at a time under the memory cap, outside timed sessions: Qwen3.8 A4 reference (new) ->
    `r25.a4_ref` (K2 bf16 hot) -> `r57.golden`, `r57.hfcheck`, `r57.ppl` (Bolt) -> `r57.golden_bf16`, `r57.a4_ref`,
    `r57.a4_bf16`, `r57.gateq` (Bolt, days) -> `r34.fixture`, `r34.a4_ref` (Flash-Next) -> `r54.d1_ref` (DFlash) ->
-   the Kolibri A4 reference (`a4_ref.sh kolibri ref`, after the 156 GB download) -> `r1.a4`'s Agnes reference.
+   the Kolibri A4 reference (`a4_ref.sh kolibri ref`, after the 156 GB download).
 3. Card runs after their references: `r11.a4` + `r11.near_ties` (one card), `r25.a4`, `r21.passkey` (look at its FAIL
    first), `r28.passkey`, `r28.a4`, `r62.a4`, `r62.agentic`, `r60.golden32k`, `r61.golden32k`, `r59.load_real`.
 
@@ -83,13 +86,13 @@ measured by hand outside the runbook), the box's `stage-latest.txt`, tonight's
 
 ## The stages, by row
 
-### Row 1 - spec 14 - Agnes 3.0 Flash, ModelDesc (2026-10-03-spec14-validation-checklist.md)
+### Row 1 - spec 14 - Agnes 3.0 Flash, ModelDesc - REMOVED (drop-agnes, 2026-11-07)
 
 | stage | kind | last result | verdict | reason |
 |---|---|---|---|---|
-| `r1.a4` | manual | never run | **a** | Agnes's tool-call score against its bf16 reference (agentic quality on the second Qwen-family model). Needs the Agnes bf16 original downloaded and hours of CPU under the memory cap; after the Qwen3.8 / K2 / Kolibri / Bolt references |
-| `r1.prefix_benchy` | optin, gpu-self | never run | **b** | llama-benchy prefix-cache rows on Agnes: a speed record |
-| `r1.vllm` | manual | never run | **c** | Agnes's vLLM row needs an unmerged vLLM PR overlaid on the image; the quiet session's vLLM baseline is Qwen3.8's (r41.vllm). Manual: no code |
+| `r1.a4` | manual | never run | REMOVED | Agnes's tool-call score against its bf16 reference (agentic quality on the second Qwen-family model). Needs the Agnes bf16 original downloaded and hours of CPU under the memory cap; after the Qwen3.8 / K2 / Kolibri / Bolt references |
+| `r1.prefix_benchy` | optin, gpu-self | never run | REMOVED | llama-benchy prefix-cache rows on Agnes: a speed record |
+| `r1.vllm` | manual | never run | REMOVED | Agnes's vLLM row needs an unmerged vLLM PR overlaid on the image; the quiet session's vLLM baseline is Qwen3.8's (r41.vllm). Manual: no code |
 
 ### Row 2 - spec 13b Task 1 (step_many signature) and spec 8 §10 (--spec auto)
 
@@ -286,7 +289,7 @@ measured by hand outside the runbook), the box's `stage-latest.txt`, tonight's
 | `r27.prefix_kv8` | default, gpu | SKIP | **a** | the same over the int8 KV cache; tonight |
 | `r27.serve` | default, gpu | SKIP | **a** | b70-serve --parallel pp start-up at 262144 with MTP / int8 KV: the long-context two-card serve; tonight |
 | `r27.golden` | default, gpu | SKIP | **a** | one request end to end through b70-serve --parallel pp = one-card b70-decode, plain and MTP; tonight |
-| `r27.agnes` | default, gpu | SKIP | **a** | the same on Agnes (72 layers); cheap; tonight |
+| `r27.agnes` | default, gpu | SKIP | REMOVED | the same on Agnes (72 layers) - removed with Agnes (drop-agnes, 2026-11-07) |
 | `r27.ornith` | default, gpu | SKIP | **a** | the same on Ornith (MoE head on device 1); cheap; tonight |
 | `r27.p3_mtp` | optin, gpu | PASS | **a-done** | passkey at ~250k with --parallel pp --spec auto: PASS |
 | `r27.benchy` | optin, gpu-self | never run | **b** | one card vs --parallel pp llama-benchy rows |
@@ -515,7 +518,7 @@ measured by hand outside the runbook), the box's `stage-latest.txt`, tonight's
 
 | stage | kind | last result | verdict | reason |
 |---|---|---|---|---|
-| `r66.check` | default, gpu | SKIP | **b** | the 13a batching probe's correctness check (row builds bitwise per slot): run first in the quiet session, before r66.cost; drop its Agnes arms (spec 13 §11: Qwen3.8 only) |
+| `r66.check` | default, gpu | SKIP | **b** | the 13a batching probe's correctness check (row builds bitwise per slot): run first in the quiet session, before r66.cost; its Agnes arms are removed (drop-agnes, 2026-11-07) |
 | `r66.cost` | optin, gpu | SKIP | **b** | the batching step table (Now 4: batching speed); Qwen3.8 arms only |
 | `r66.chunk` | optin, gpu | SKIP | **b** | the interleave chunk cost; Qwen3.8 arms only |
 

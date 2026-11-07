@@ -10,7 +10,7 @@
 #       The stages' NEEDS name these keys (tools/box_validate/stages.sh).
 #   tools/box_validate/data.sh resolve <repo id | snapshot dir>
 #       the snapshot directory the CLIs would load (refs/main for a repo id).
-# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_AGNES, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_DFLASH, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
+# Env: SNAP_QWEN, SNAP_QWEN_BF16, SNAP_ORNITH, SNAP_K2, SNAP_KOLIBRI, SNAP_Q4EXP_{TINY,INTEL,BF16}, SNAP_DFLASH, HF_HOME, TOK_PYTHON, OPENCODE_LOG,
 #      A4_REF_DIR, ORACLE_IMAGE. Run from a tree root (the oracle-out* checks look there).
 set -u
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
@@ -78,10 +78,6 @@ case "${1:-}" in
   have)
     have qwen "Qwen3.8 gate checkpoint ${SNAP_QWEN:-?}" complete "${SNAP_QWEN:-/nonexistent}"
     have oracle_qwen "oracle-out-primary/ (Qwen3.8 golden set)" test -d oracle-out-primary
-    have agnes "Agnes checkpoint ${SNAP_AGNES:-?} (spec 14 checklist step 1: rsync from the Mac)" \
-      complete "${SNAP_AGNES:-/nonexistent}"
-    have oracle_agnes "oracle-out-agnes/ (rsync from the Mac: spec 14 checklist step 6)" test -d oracle-out-agnes
-    have oracle_agnes_mtp "oracle-out-agnes-mtp/ (rsync from the Mac)" test -d oracle-out-agnes-mtp
     have ornith "Ornith int4 checkpoint ${SNAP_ORNITH:-?} (spec 15a)" complete "${SNAP_ORNITH:-/nonexistent}"
     have oracle_ornith "oracle-out-ornith/ with router_logits.L* (spec 15a)" test -d oracle-out-ornith
     have oracle_ornith_mtp "oracle-out-ornith-mtp/ (spec 15a's MTP head dump: mtp_head_ornith_test, M1)" \

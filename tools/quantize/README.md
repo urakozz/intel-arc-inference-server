@@ -124,8 +124,7 @@ now does not reproduce them byte for byte unless the version matches:
 `141e4c99` plus `auto-round-local.patch`, `--format auto_gptq`, bf16 lm_head); the int4-lm_head RTN
 checkpoint of docs/13 by 0.14.2 (`autoround_version` 0.14.2, `tests/loader/quant_test.cc`'s
 fixture); `urakozz/Ornith-1.5-35B-A3B-W4A16-g64-AutoRound-GPTQ` by **0.15.0** (its config's
-`autoround_version`); Agnes and K2 by 0.16.0 (docs/probes/probe-agnes-2026-10-03.md,
-docs/probes/probe-k2-2026-10-05.md). On the tiny models the 0.14.2 and 0.17.0 tuned exports are
+`autoround_version`); K2 by 0.16.0 (docs/probes/probe-k2-2026-10-05.md). On the tiny models the 0.14.2 and 0.17.0 tuned exports are
 byte-identical, which is evidence, not proof, for the 27B.
 
 Re-run the check on any export:

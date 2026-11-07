@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""Reference renders of Agnes 3.0 Flash's chat template (spec 14, Review Focus 5).
+"""Reference renders of a checkpoint's chat template on a cases file (spec 15e).
 
-    dump_agnes_template.py <agnes-snapshot-dir>
-    dump_agnes_template.py <snapshot-dir> <prefix> <cases.json>     (spec 15e)
+    dump_agnes_template.py <snapshot-dir> [<prefix> <cases.json>]
 
-Renders every case of tests/tokenizer/agnes_template_cases.json through
-transformers' own Jinja path - `apply_chat_template` when the snapshot has a
-tokenizer, else `render_jinja_template` with the checkpoint's chat_template.jinja
-and its tokenizer_config.json special tokens (the same call apply_chat_template
-makes; it needs no tokenizer files) - into tests/tokenizer/agnes_template_<name>.txt.
+Renders every case of tests/tokenizer/<cases.json> through transformers' own Jinja
+path - `apply_chat_template` when the snapshot has a tokenizer, else
+`render_jinja_template` with the checkpoint's chat_template.jinja and its
+tokenizer_config.json special tokens (the same call apply_chat_template makes; it
+needs no tokenizer files) - into tests/tokenizer/<prefix>_template_<name>.txt.
 tests/tokenizer/template_test.cc compares the engine's renderer against them.
-
-Note (2026-10-03): Agnes's chat_template.jinja is byte-identical to Qwen3.8's
-(sha256 c3cf9e34...), so the engine takes the same minja fallback for it.
-
-Spec 15e: the same renders for another model - `<prefix>_template_<name>.txt` from
-tests/tokenizer/<cases.json>. Ornith's: `dump_agnes_template.py tests/tokenizer/ornith
-ornith ornith_template_cases.json` (the two snapshot files vendored there, no
-tokenizer.json, so render_jinja_template).
+Ornith's: `dump_agnes_template.py tests/tokenizer/ornith ornith ornith_template_cases.json`
+(the two snapshot files vendored there, no tokenizer.json, so render_jinja_template).
+The defaults (prefix `agnes`, agnes_template_cases.json) render the fixtures
+tests/tokenizer/agnes_template_*.txt: written for Agnes 3.0 Flash (spec 14, dropped
+2026-11-07), whose template is byte-identical to Qwen3.8's - Qwen3.8-Flash-Next's and
+Ornith's tests read them, so the script and the fixture names stay.
 """
 import hashlib
 import json

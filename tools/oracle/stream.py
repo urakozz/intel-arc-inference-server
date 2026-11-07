@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Layer-streamed weights for the CPU oracle (spec 14, the Mac path).
 
-Agnes 3.0 Flash dequantised to bf16 is ~62 GB; a Mac's Docker VM is 34-64 GB.
+A 27B-class checkpoint dequantised to bf16 is 54-62 GB; a Mac's Docker VM is 34-64 GB.
 So the model is built on `meta` exactly as dump.py builds it, the small
 non-layer tensors (embedding, final norm, lm_head) are made resident, and each
 decoder layer's weights are materialised by a forward PRE-hook and dropped back
@@ -10,7 +10,7 @@ rotary, the cache, the decode loop - so a streamed run computes what a resident
 run computes (same modules, same dequantised bf16 tensors, same op order); only
 where the weights live between layers differs. A background thread dequantises
 the next layer while the current one runs (prefetch depth 1, two layers resident
-at most, ~1.7 GB on Agnes), and `keep` names layers that stay resident once
+at most, ~1.7 GB on a 27B-class model), and `keep` names layers that stay resident once
 loaded, as RAM allows.
 
 The cost is one dequant of every streamed layer per forward: a prompt forward
@@ -117,11 +117,11 @@ def conv1d_single_thread() -> None:
 
     On the Mac's Docker VM (i9-9980HK, AVX2, 16 vCPUs, torch 2.14 CPU) a depthwise
     bf16 F.conv1d is pathologically slow multi-threaded: 512 channels x 7 positions
-    takes 28 s on 16 threads and 8 ms on one; Agnes's 10240-channel conv did not finish
+    takes 28 s on 16 threads and 8 ms on one; a 10240-channel conv did not finish
     in 10 minutes. Outputs are bitwise equal across thread counts (checked at 256 x 42,
     256 x 1, 512 x 7) - each output element is one channel's 4-tap dot product - so this
-    changes time only. Patched on torch.nn.functional, which modeling_qwen3_5.py and
-    modeling_agnes.py both call through `F`."""
+    changes time only. Patched on torch.nn.functional, which modeling_qwen3_5.py calls
+    through `F`."""
     import torch.nn.functional as F
     if getattr(F.conv1d, "_single_thread", False):
         return
@@ -203,7 +203,7 @@ def attach(model, layers, layer_sd, resident_sd: dict, rebuild=(), keep=()):
     resident_sd: every tensor outside `layers`, by full name (loaded strict over
     the non-layer part). rebuild: (parent, attr, factory) for non-persistent
     buffers meta construction left empty (rotary inv_freq). keep: layer indices whose
-    weights stay resident once loaded (~0.83 GB each on Agnes). Returns the prefetcher
+    weights stay resident once loaded (~0.83 GB each on a 27B-class model). Returns the prefetcher
     (its `.seconds` is the dequant wait).
     """
     layer_ids = {id(m) for m in layers}

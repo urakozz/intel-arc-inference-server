@@ -344,7 +344,7 @@ def sec_tokens(src: Source, q38: str | None) -> None:
     for fn in ("chat_template.jinja",):
         if src.exists(fn):
             sha = hashlib.sha256(src.small(fn)).hexdigest()
-            print(f"{fn}: sha256 {sha} (Qwen3.8's / Agnes's c3cf9e34...: {sha == QWEN38_TEMPLATE_SHA})")
+            print(f"{fn}: sha256 {sha} (Qwen3.8's c3cf9e34...: {sha == QWEN38_TEMPLATE_SHA})")
     tcfg = src.json("tokenizer_config.json")
     print(f"tokenizer_config.json: class {tcfg.get('tokenizer_class')}, eos {tcfg.get('eos_token')}, pad "
           f"{tcfg.get('pad_token')}, chat_template key present: {'chat_template' in tcfg}")

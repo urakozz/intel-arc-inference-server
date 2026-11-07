@@ -352,7 +352,6 @@ def cmd_run(a) -> None:
     from safetensors import safe_open
     from safetensors.torch import save_file
     from transformers.models.qwen3_5 import modeling_qwen3_5 as m
-    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
     variants = tuple(a.variants.split(","))
     if a.fp32_matmul:
         fp32_linear()
@@ -381,20 +380,11 @@ def cmd_run(a) -> None:
     elif a.cont_ids:
         ids += _read_ids(a.cont_ids)[:a.gen]
     print(f"ids: {n_prompt} prompt + {len(ids) - n_prompt} teacher-forced from {a.ids}", flush=True)
-    with open(os.path.join(a.snapshot, "config.json"), encoding="utf-8") as f:
-        raw = json.load(f)
-    agnes = D._agnes.is_agnes(raw)
-    if agnes:
-        kwargs, parallel = D._agnes.translate_text_config(raw)
-        tc = Qwen3_5TextConfig(**kwargs)
-    else:
-        from transformers import AutoConfig
-        tc = AutoConfig.from_pretrained(a.snapshot).get_text_config()
+    from transformers import AutoConfig
+    tc = AutoConfig.from_pretrained(a.snapshot).get_text_config()
     tc._attn_implementation = "eager"
     with torch.device("meta"):
         model = m.Qwen3_5ForCausalLM(tc)
-        if agnes:
-            D._agnes.attach_parallel_ffn(model, tc, parallel)
     pf = D.stream_weights(model, a.snapshot, group_size, tc, 0)
     model.eval()
     fa = [i for i, t in enumerate(tc.layer_types) if t == "full_attention"]
@@ -434,13 +424,13 @@ def cmd_run(a) -> None:
                                               "fa_layers": ",".join(map(str, fa))})
         print(f"captured {len(fa)} FA layers -> {a.capture}", flush=True)
         del capture, tens
-    vocab = a.vocab_used or (248089 if agnes else 248077)
+    vocab = a.vocab_used or 248077
     w = model.lm_head.weight[:vocab].float()
     t_l = time.time()
     res = logits_metrics(hs, w, variants)
     print(f"logits metrics: {time.time() - t_l:.1f}s (vocab_used {vocab})", flush=True)
     out = {"meta": {"ids": a.ids, "n_prompt": n_prompt, "n": len(ids), "variants": variants,
-                    "agnes": agnes, "forward_s": t_fwd, "wall_s": time.time() - t0,
+                    "forward_s": t_fwd, "wall_s": time.time() - t0,
                     "vocab_used": vocab, "threads": torch.get_num_threads(), "fp32_matmul": FP32_MATMUL},
            "metrics": res}
     if golden is not None:

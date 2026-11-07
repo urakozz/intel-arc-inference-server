@@ -29,11 +29,11 @@
 #                    commit starts a new state, `--state <old>` continues an old one
 #   --no-wait        launch and return (re-run the same command later to re-attach)
 #   --no-sync        do not rsync the tree (the box keeps what it has)
-#   --push-data      first rsync the Agnes checkpoint, oracle-out-agnes* and (spec 15a, made on
-#                    the Mac from the int4 checkpoint) oracle-out-ornith* from this Mac - with
+#   --push-data      first rsync (spec 15a, made on the Mac from the int4 checkpoint)
+#                    oracle-out-ornith* from this Mac - with
 #                    the A4 sets and references tools/toolcall/a4_ref.sh made here
 #                    (oracle-out-ornith-a4, oracle-out-k2-a4, oracle-out-kolibri-a4; spec 15e / 18d /
-#                    20e); the Agnes checkpoint is skipped when this Mac no longer has it
+#                    20e)
 #   --out FILE       summary path (default box-validation-<date>.md in the repo root)
 #   --poll SECONDS   poll interval (default 120)
 #   --device N       the card this orchestrator runs on (default 0; ZE_AFFINITY_MASK=N, PORT
@@ -54,7 +54,7 @@
 # Env: BOX (tools/box.env), REMOTE_DIR / BOX_SUFFIX (default suffix `validate`: the tree
 # ~/b70-inference-server-validate), BASE_DIR (~/b70-inference-server-g0-<sha>), DATA_DIR
 # (the tree holding oracle-out*, default b70-inference-server), JOBS, DEVICE (0, as --device), PORT,
-# CMAKE_ARGS, SNAP_QWEN / SNAP_AGNES / SNAP_ORNITH / SNAP_K2 / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
+# CMAKE_ARGS, SNAP_QWEN / SNAP_ORNITH / SNAP_K2 / SNAP_KOLIBRI, TOK_PYTHON, OPENCODE_LOG,
 # A4_REF_DIR, ORACLE_IMAGE, G0_BITWISE_RE, G0_ALLOW_REMOVED, R10_RUNS, R2_ROUNDS (the server
 # rows' rounds, 3), R8_DRAFT_VOCAB (r8.auto_rows' size, 128k), K2_ORACLE_MODEL /
 # K2_REF_MIN_GB / K2_HFCHECK (r14.oracle), B70_K2_TIE_TOL (r14.golden, r15.golden), B70_KOL_TIE_TOL (r24 / r26 golden), LOCAL_DATA
@@ -176,7 +176,7 @@ remote_env() {
   s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
   s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_REDO=$(q "$REDO_IDS")"
   local v
-  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_AGNES SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
+  for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
            A4_REF_DIR ORACLE_IMAGE G0_BITWISE_RE G0_ALLOW_REMOVED R10_RUNS R2_ROUNDS R8_DRAFT_VOCAB \
            K2_ORACLE_MODEL K2_REF_MIN_GB K2_HFCHECK B70_K2_TIE_TOL B70_KOL_TIE_TOL; do
     if [ -n "${!v:-}" ]; then s="$s $v=$(q "${!v}")"; fi
@@ -197,7 +197,6 @@ POLL_CMD="cat \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; tail -1 \
 STATUS_CMD="cd \"\$HOME/$STATE_REL\" 2>/dev/null && cat *.status 2>/dev/null; echo @@; tail -8 \"\$HOME/$STATE_REL/progress.log\" 2>/dev/null; echo @@; d=\"\$HOME/$RUNS_REL\"; for f in \"\$d\"/.run-*.lock; do [ -e \"\$f\" ] || continue; k=\${f##*/.run-}; k=\${k%.lock}; if flock -n \"\$f\" true; then s=idle; else s=RUNNING; fi; echo \"\$k \$s \$(cat \"\$d/.current-\$k\" 2>/dev/null)\"; done"
 FETCH_SRC="b70-validate/$REMOTE_DIR/$STATE_NAME/"
 LOCAL_DATA="${LOCAL_DATA:-$(cd "$(git rev-parse --git-common-dir)/.." && pwd)}"
-AGNES_HF="models--urakozz--Agnes-3.0-Flash-W4A16-AutoRound-GPTQ"
 
 # ---- the registry, for the summary ----------------------------------------------------------
 write_registry() {   # write_registry FILE
@@ -313,8 +312,7 @@ if [ "$MODE" = dry ]; then
   echo "  ssh \$BOX '$CHECK_CMD'"
   if [ "$PUSH" = 1 ]; then
     echo "== 1b. --push-data"
-    echo "  rsync -a --info=progress2 ~/.cache/huggingface/hub/$AGNES_HF \$BOX:.cache/huggingface/hub/   (only if this Mac still has it)"
-    echo "  rsync -a $LOCAL_DATA/oracle-out-agnes $LOCAL_DATA/oracle-out-agnes-mtp $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-k2-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
+    echo "  rsync -a $LOCAL_DATA/oracle-out-ornith $LOCAL_DATA/oracle-out-ornith-mtp $LOCAL_DATA/oracle-out-ornith-a4 $LOCAL_DATA/oracle-out-k2-a4 $LOCAL_DATA/oracle-out-kolibri-a4 \$BOX:$DATA_DIR/   (each that exists)"
   fi
   echo "== 2. sync the tree under test"
   [ "$SYNC" = 1 ] && echo "  REMOTE_DIR=$REMOTE_DIR tools/box.sh sync   (not while another device's orchestrator runs from the tree)" || echo "  (--no-sync)"
@@ -424,13 +422,8 @@ EOF
 fi
 
 if [ "$PUSH" = 1 ]; then
-  # spec 14 checklist steps 1 and 6: the Mac's complete Agnes checkpoint and golden sets
-  # The Agnes checkpoint only when this Mac still has it (it may have been dropped from the HF
-  # cache - then download it on the box); the golden sets are pushed either way.
-  agnes_src="${HF_HOME:-$HOME/.cache/huggingface}/hub/$AGNES_HF"
-  if [ -d "$agnes_src" ]; then rsync -a --info=progress2 "$agnes_src" "$BOX:.cache/huggingface/hub/"
-  else echo "push-data: no $agnes_src on this Mac - download Agnes on the box (docs/box-day-plan.md)"; fi
-  for d in oracle-out-agnes oracle-out-agnes-mtp oracle-out-ornith oracle-out-ornith-mtp oracle-out-ornith-a4 oracle-out-k2-a4 oracle-out-kolibri-a4; do
+  # the golden sets and A4 references made on the Mac
+  for d in oracle-out-ornith oracle-out-ornith-mtp oracle-out-ornith-a4 oracle-out-k2-a4 oracle-out-kolibri-a4; do
     if [ -d "$LOCAL_DATA/$d" ]; then rsync -a "$LOCAL_DATA/$d" "$BOX:$DATA_DIR/"; else echo "push-data: no $LOCAL_DATA/$d"; fi
   done
 fi

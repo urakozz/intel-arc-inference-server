@@ -92,7 +92,7 @@ class JunitTest(Tmp):
     def test_todo_pick_labels_also_in(self):
         write(self.p("tests.json"), tests_json([
             ("a_test", []), ("b_test", ["checkpoint"]), ("c_kv8_test", ["checkpoint", "kv8"]),
-            ("d_agnes_test", ["agnes"]), ("new_test", [])]))
+            ("d_ornith_test", ["ornith"]), ("new_test", [])]))
         write(self.p("base.json"), tests_json([("a_test", []), ("b_test", []), ("c_kv8_test", [])]))
         write(self.p("g0.junit.xml"), junit_xml([("a_test", "run", None, "")]))
         run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), *a],
@@ -447,14 +447,14 @@ class G0CompareTest(Tmp):
 class DataTest(Tmp):
     def test_link_and_resolve_and_complete(self):
         write(self.p("data", "oracle-out-primary", "x"), "1")
-        write(self.p("data", "oracle-out-agnes", "x"), "1")
+        write(self.p("data", "oracle-out-ornith", "x"), "1")
         os.makedirs(self.p("tree"))
-        write(self.p("tree2", "oracle-out-agnes", "own"), "1")
+        write(self.p("tree2", "oracle-out-ornith", "own"), "1")
         sh = os.path.join(HERE, "data.sh")
         r = subprocess.run([sh, "link", self.p("data"), self.p("tree"), self.p("tree2")], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.path.islink(self.p("tree", "oracle-out-primary")))
-        self.assertFalse(os.path.islink(self.p("tree2", "oracle-out-agnes")))   # kept, not replaced
+        self.assertFalse(os.path.islink(self.p("tree2", "oracle-out-ornith")))   # kept, not replaced
         r = subprocess.run([sh, "link", self.p("data"), self.p("tree")], capture_output=True, text=True)
         self.assertIn("kept", r.stdout)
         # an HF cache with one complete and one partial snapshot
@@ -468,13 +468,12 @@ class DataTest(Tmp):
                   json.dumps({"weight_map": {"w1": "a.safetensors", "w2": "b.safetensors"}}))
             for f in files:
                 write(os.path.join(snap, f), "")
-        env = dict(os.environ, HF_HOME=self.p("hf"), SNAP_QWEN="o/full", SNAP_AGNES="o/part",
-                   SNAP_ORNITH="o/absent", SNAP_K2="o/absent")
+        env = dict(os.environ, HF_HOME=self.p("hf"), SNAP_QWEN="o/full",
+                   SNAP_ORNITH="o/part", SNAP_K2="o/absent")
         r = subprocess.run([sh, "resolve", "o/full"], capture_output=True, text=True, env=env)
         self.assertEqual(r.stdout.strip(), os.path.join(hub, "models--o--full", "snapshots", "abc"))
         r = subprocess.run([sh, "have"], capture_output=True, text=True, env=env, cwd=self.p("tree"))
         self.assertIn("HAVE_qwen=1", r.stdout)
-        self.assertIn("HAVE_agnes=0", r.stdout)
         self.assertIn("HAVE_ornith=0", r.stdout)
         self.assertIn("HAVE_k2=0", r.stdout)
         self.assertIn("HAVE_oracle_k2=0", r.stdout)
@@ -1411,7 +1410,7 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r27").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order, ["pre", "r27.host", "r27.k0", "r27.reject", "r27.mtp", "r27.mtp_kv8", "r27.prefix",
-                                 "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden", "r27.agnes",
+                                 "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden",
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
         self.assertIn("--re '^cli_reject_serve_pp_(value|split_alone|handoff_value)$'", out)
@@ -1439,9 +1438,9 @@ class DriverTest(unittest.TestCase):
         self.assertIn("free -g | head -2", out)
         r = self.run_driver("--dry-run", "--only", "r99", ok=False)
         self.assertEqual(r.returncode, 2)
-        out = self.run_driver("--dry-run", "--redo", "r1").stdout
-        self.assertIn("# redo: r1.host r1.load", out)
-        self.assertIn("BV_REDO=r1.host\\ r1.load", out)
+        out = self.run_driver("--dry-run", "--redo", "r5").stdout
+        self.assertIn("# redo: r5.host r5.r0", out)
+        self.assertIn("BV_REDO=r5.host\\ r5.r0", out)
 
     def test_list_and_bash32(self):
         out = self.run_driver("--list").stdout
@@ -1515,18 +1514,18 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(g0, first, "the G0 stages come first")
 
     def test_device_and_lock_lines(self):
-        out = self.run_driver("--dry-run", "--device", "1", "--only", "r1.load,r1.speed").stdout
+        out = self.run_driver("--dry-run", "--device", "1", "--only", "r2.suite,r2.cost").stdout
         self.assertIn("# device 1: ZE_AFFINITY_MASK=1, PORT 8113, orchestrator lock ~/b70-validate/", out)
         self.assertIn("/.run-1.lock", out)
         self.assertIn("/orchestrator-1.log", out)
         self.assertIn(" DEVICE=1 ", out)
-        blk = out.split("--- r1.load ")[1].split("\n--- ")[0]
+        blk = out.split("--- r2.suite ")[1].split("\n--- ")[0]
         self.assertIn("lock: holds the card lock for device 1 for the whole stage (tools/gpu_lock.sh card 1: "
                       "~/b70-gpu1.lock exclusive + ~/b70-gpu.lock shared, ZE_AFFINITY_MASK=1)", blk)
-        blk = out.split("--- r1.speed ")[1].split("\n--- ")[0]
+        blk = out.split("--- r2.cost ")[1].split("\n--- ")[0]
         self.assertIn("lock: holds the whole box for the whole stage (tools/gpu_lock.sh box", blk)
-        self.assertIn("# note: these take the WHOLE box even on device 1: r1.speed", out)
-        out = self.run_driver("--dry-run", "--only", "r1.load").stdout                  # device 0 by default
+        self.assertIn("# note: these take the WHOLE box even on device 1: r2.cost", out)
+        out = self.run_driver("--dry-run", "--only", "r2.suite").stdout                  # device 0 by default
         self.assertIn("lock: holds the card lock for device 0", out)
         self.assertNotIn("# note: these take", out)
         out = self.run_driver("--dry-run", "--only", "g0").stdout
@@ -1534,8 +1533,8 @@ class DriverTest(unittest.TestCase):
         self.assertIn("G0 - deferred while another orchestrator is active on this tree", out)
         self.assertEqual(self.run_driver("--dry-run", "--device", "0,1", ok=False).returncode, 2)
         out = self.run_driver("--list", "--device", "1").stdout
-        self.assertRegex(out, r"(?m)^r1\.load\*? +1 +default +card +card1 ")
-        self.assertRegex(out, r"(?m)^r1\.speed\*? +1 +default +gpu +box ")
+        self.assertRegex(out, r"(?m)^r2\.suite\*? +2 +default +card +card1 ")
+        self.assertRegex(out, r"(?m)^r2\.cost\*? +2 +default +gpu +box ")
         self.assertRegex(out, r"(?m)^g0\.build\*? +0 +g0 +cpu +cpu\+build ")
 
     def test_card_stages_follow_the_rules(self):
