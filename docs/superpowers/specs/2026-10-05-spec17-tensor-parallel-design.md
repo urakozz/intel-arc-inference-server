@@ -744,3 +744,13 @@ Idle box (both cards free of other DRM holders), interleaved pairs against one c
   generalises to more partials, but this spec builds and gates two).
 - Expert parallel for MoE (spec 15's Ornith), multi-tile devices. **[2026-10-23: expert parallel is in scope for
   Bolt / Kolibri - §4.3.]**
+
+## 10. For 17b: what saber-engine does (2026-11-07)
+
+saber-engine runs Qwen3.8-27B at TP=2 on two AMD R9700 over PCIe with the same all-reduce as 17a's winner (each card
+pushes its partial into the peer's memory and waits on a flag): 129 calls a token, ~14 us each (ours measured 3.6 us),
+~53 t/s without a drafter. Two things 17b takes from it: (1) the all-reduce fused into the row-parallel GEMM's
+epilogue together with the residual add, the RMS norm and the next quantisation - one dispatch instead of three;
+(2) the exact all-reduce for decode-size messages, a compressed (lossy, rotated 6-bit) one only for prefill-size
+messages above ~128 KiB, gated against its own error bound - decode stays bitwise exact across the cards.
+

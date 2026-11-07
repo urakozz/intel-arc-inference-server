@@ -335,3 +335,12 @@ replica engine refuse `--parallel replica` by name.
   (a slot's rejected drafts leave every other slot byte-identical) stays bitwise - it is a memory isolation check.
 - **B2-B4** as §4 / §9, through the server, on the replica engine first, then on slots.
 
+### 11.4 For 13c: one shared paged KV pool (2026-11-07, from saber-engine)
+
+saber-engine (2x AMD R9700) serves several requests from ONE KV pool of 16-token pages, admitting a request by
+reserving prompt + max_tokens + its speculative rows, and freeing pages as requests end - so a 128k session and three
+32k ones need ~224k positions only while all four are live, and a lone session can take the whole pool. 13c considers
+this instead of fixed slot lengths (128k + 3 x 32k): the slot table becomes a page table per sequence, the decode
+attention reads KV through it (one more indirection in v2's per-row stride), and admission replaces the layout. Measured
+against the fixed slots before choosing; the GDN state stays per sequence (fixed size, independent of length).
+
