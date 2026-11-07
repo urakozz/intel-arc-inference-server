@@ -133,8 +133,12 @@ identical to a baseline build) first and stop-the-line on a G0 failure, resumabl
 drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its results are on the box under `~/b70-validate/`, the latest result of every stage in
 `~/b70/logs/stage-latest.txt`.
 
-**When each runs.** `box_check` gates every merge; the validation run is not per merge - it runs once a
-night on the latest main and covers the day's merges together (operator, 2026-11-06).
+**When each runs.** Merges go in after the Mac checks (operator, 2026-11-07); the validation run is not per
+merge - it runs once a night on the latest main, `tools/box_validate.sh --nightly`, and covers the day's merges
+together. `--nightly` launches nothing when only documentation changed since the newest finished run
+(`tools/box_validate/changed_since.sh`: everything but `docs/` and `*.md` counts), and runs every test
+(`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
+reuse every unchanged PASS.
 
 **A test whose inputs did not change keeps its PASS.** Every test runs through
 `tools/test_launcher.sh`; under box_check and box_validate it runs under `strace`, which records every
