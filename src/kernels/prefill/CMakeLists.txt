@@ -115,6 +115,24 @@ endforeach()
 # is what makes "every other linear is untouched" a build fact.
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+# Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
+# NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group. 256 GRF where
+# the accumulators alone fill 128 (NA x NB >= 8). Additive: no existing binary changes.
+foreach(NA 1 2 4)
+  foreach(NB 2 4)
+    foreach(SN 1 2 4)
+      math(EXPR _acc "${NA} * ${NB}")
+      set(_grf "")
+      if(_acc GREATER_EQUAL 8)
+        set(_grf OPTIONS -cl-intel-256-GRF-per-thread)
+      endif()
+      add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                       DEFINES NA=${NA} NB=${NB} SN=${SN} ${_grf})
+      add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                       DEFINES NA=${NA} NB=${NB} SN=${SN} SILU_EPI=1 ${_grf})
+    endforeach()
+  endforeach()
+endforeach()
 
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
