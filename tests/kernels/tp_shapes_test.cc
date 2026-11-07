@@ -2,8 +2,8 @@
 // `ModelDesc` through a tp_rank / tp_size view - spec 17 §R2.5. Qwen3.8: 128 all-reduces a token (+ the head's
 // exchange), 20 KiB a row; the per-card linears (qkv‖z 5120 x 8192 L1, out_proj / o_proj 3072 x 5120,
 // q‖k‖v 5120 x 7168, gate‖up 5120 x 17408, down 8704 x 5120, the int8 head 5120 x 124160); every K slice a whole
-// number of 64-groups; the fused layouts re-fused per card from the card's heads. Agnes: 144 + 1, its folded
-// gate‖up' 19456 and down' 9728. tp 1 is the one-card table; a MoE model and an uneven split are refused. Host only.
+// number of 64-groups; the fused layouts re-fused per card from the card's heads.
+// tp 1 is the one-card table; a MoE model and an uneven split are refused. Host only.
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -112,20 +112,6 @@ void check_qwen38() {
   CHECK_EQ(s.vocab_offset, 0u);
 }
 
-void check_agnes() {
-  const tp::Shapes s = tp::tp_shapes(model::agnes(), 0, 2);
-  CHECK_EQ(s.calls, 144u);
-  CHECK_EQ(s.head_exchanges, 1u);
-  CHECK_EQ(s.row_bytes, 20480u);
-  check_card(*find(s, "qkvz"), 5120, 8192, 1, 1, 54);
-  check_card(*find(s, "out"), 3072, 5120, 4, 0, 54);
-  check_card(*find(s, "qkv"), 5120, 7168, 2, 0, 18);
-  check_card(*find(s, "o"), 3072, 5120, 4, 0, 18);
-  check_card(*find(s, "gateup"), 5120, 19456, 8, 0, 72);
-  check_card(*find(s, "down"), 9728, 5120, 4, 0, 72);
-  CHECK_EQ(find(s, "down")->card.K / 64, 152u);
-}
-
 void check_tp1_and_refusals() {
   const tp::Shapes s = tp::tp_shapes(model::qwen38(), 0, 1);
   CHECK_EQ(s.tp_size, 1u);
@@ -144,7 +130,7 @@ void check_tp1_and_refusals() {
   CHECK(throws([] { tp::tp_shapes(model::qwen38(), 0, 0); }));
   // by name, as the probe's --model takes it
   CHECK_EQ(&tp::model_by_name("qwen38"), &model::qwen38());
-  CHECK_EQ(&tp::model_by_name("agnes"), &model::agnes());
+  CHECK(throws([] { tp::model_by_name("agnes"); }));   // dropped 2026-11-07
   CHECK(throws([] { tp::model_by_name("bolt"); }));
 }
 
@@ -152,7 +138,6 @@ void check_tp1_and_refusals() {
 
 int main() {
   check_qwen38();
-  check_agnes();
   check_tp1_and_refusals();
   std::printf("tp_shapes_test: PASS\n");
   return 0;

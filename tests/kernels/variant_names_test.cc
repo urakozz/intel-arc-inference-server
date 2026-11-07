@@ -1,5 +1,5 @@
 // Spec 15b: the kernel variant names the runtime builds from a model descriptor.
-// Host-only, no device and no compiled kernels: at Qwen3.8's and Agnes's shapes
+// Host-only, no device and no compiled kernels: at Qwen3.8's shapes
 // every name is exactly the one main built before spec 15b (so no binary is
 // renamed - the kernel command-line diff covers the build side), and Ornith's
 // shapes add the suffixes of kernels/shape_suffix.h.
@@ -101,13 +101,6 @@ int main() {
            std::string("attn_verify_dpas_M4_T32_KV8"));
   CHECK_EQ(kernels::attn_verify_dpas_variant(4, 32, true), std::string("attn_verify_dpas_M4_T32_KV8"));
 
-  // Agnes: Qwen3.8's shapes, so the same names but for spec 14's three suffixes.
-  const Names a = names(model::agnes());
-  check_main_names(a);
-  CHECK_EQ(a.gdn_slots, std::string("gdn_step_slots_M2_G54"));
-  CHECK_EQ(a.silu, std::string("prep_silu_mul_M1_I19456"));
-  CHECK_EQ(a.argmax, std::string("argmax_stage1_M1_V248089"));
-
   // Ornith: every shape-baking kernel names its own binary (built from spec 15c).
   const Names o = names(model::ornith());
   CHECK_EQ(o.embed, std::string("embed_gather_M1_D2048"));
@@ -137,7 +130,7 @@ int main() {
   // in_proj_a / in_proj_b bf16), and its tokenizer's 248077 ids - Qwen3.8's argmax binary.
   CHECK_EQ(o.gemv_ab_int4, std::string("gemv_M1_K2048_N128_S1_L1"));
   CHECK_EQ(o.argmax, std::string("argmax_stage1_M1"));
-  // Qwen3.8's / Agnes's checkpoints ship a||b bf16: their int4 row exists in the descriptor
+  // Qwen3.8's checkpoints ship a||b bf16: their int4 row exists in the descriptor
   // (the same contract at K 5120) but no binary is built for it - a capture would name it.
   CHECK_EQ(q.gemv_ab_int4, std::string("gemv_M1_K5120_N128_S1_L1"));
   // Spec 15c: the MoE block's binaries (src/kernels/CMakeLists.txt's Ornith block) and the

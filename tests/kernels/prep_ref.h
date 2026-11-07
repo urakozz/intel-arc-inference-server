@@ -178,7 +178,7 @@ inline void norm_finish(const float* sumsq, const uint16_t* resid, const float* 
 //   g_b = rne(Σ_s partials[s][m][gflat]) ;  u_b likewise
 //   s_b = rne(silu_f32(f32(g_b)))
 //   x_out[m][k] = rne(f32(s_b) · f32(u_b))
-// `N` is the MLP intermediate: Qwen3.8's kSiluN by default, Agnes's 19456 (spec 14);
+// `N` is the MLP intermediate: Qwen3.8's kSiluN by default;
 // gate||up is 2N wide.
 inline void silu_mul(const float* partials, uint16_t* x_out, uint32_t M, uint32_t N = kSiluN) {
   const size_t FN = size_t(2) * N;

@@ -6,7 +6,7 @@
 //   1. ChatFormat::for_model_type("qwen4_exp") is Kind::Qwen, and the request's chat_template_kwargs do not reach
 //      the template (template_kwargs() false: Qwen3.8's server path, reasoning_effort not forwarded);
 //   2. a tools request with thinking off: the engine's prompt is transformers' render (agnes_template_tools.txt:
-//      the template is Agnes's / Qwen3.8's byte for byte), and two parallel Qwen XML calls come back as two OpenAI
+//      the template is Qwen3.8's byte for byte), and two parallel Qwen XML calls come back as two OpenAI
 //      tool calls, finish_reason "tool_calls" - buffered and streamed (SSE) in 5-byte pieces;
 //   3. a history whose assistant turn carries an OpenAI-form tool call (arguments a JSON string) and a tool result:
 //      the prompt equals transformers' render of the object form (agnes_template_tool_call_history.txt);

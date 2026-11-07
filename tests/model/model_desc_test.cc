@@ -117,7 +117,7 @@ void check_layers(const ModelDesc& d) {
   if (d.ffn == model::FfnKind::Dense) CHECK_EQ(d.intermediate % 1024, uint32_t(0));
 }
 
-// Qwen3.8's shapes, which Agnes shares (spec 15b R0: both unchanged).
+// Qwen3.8's shapes (spec 15b R0: unchanged).
 void check_qwen38_shapes(const ModelDesc& d) {
   CHECK_EQ(d.hidden, uint32_t(5120));
   CHECK_EQ(d.fa_q_heads, uint32_t(24));
@@ -135,7 +135,7 @@ void check_qwen38_shapes(const ModelDesc& d) {
   CHECK(d.ffn == model::FfnKind::Dense);
   CHECK(!d.is_moe());
   CHECK(!d.tied_embeddings);
-  CHECK_EQ(d.mtp_intermediate, uint32_t(17408));            // no parallel FFN in Agnes's head
+  CHECK_EQ(d.mtp_intermediate, uint32_t(17408));
   CHECK_EQ(d.mtp_checkpoint_bytes(), size_t(849398784));    // docs/03: 0.849 GB
   CHECK(!d.mtp_head_moe());                                 // spec 15e: dense head
   CHECK_EQ(d.mtp_checkpoint_tensors(), size_t(15));
@@ -148,7 +148,7 @@ void check_qwen38_shapes(const ModelDesc& d) {
   CHECK_EQ(sl.gdn_off_gated_norm, q.gdn_off_gated_norm);
   CHECK_EQ(sl.gdn_block_bytes, q.gdn_block_bytes);
   CHECK_EQ(sl.final_norm_bytes, q.final_norm_bytes);
-  // The kernel-name suffixes are empty: every Qwen3.8 / Agnes binary keeps its name.
+  // The kernel-name suffixes are empty: every Qwen3.8 binary keeps its name.
   CHECK_EQ(d.hidden_suffix(), std::string());
   CHECK_EQ(d.gdn_suffix(), std::string());
   CHECK_EQ(d.fa_suffix(), std::string());
@@ -163,78 +163,19 @@ int main() {
   CHECK_EQ(q.gdn_layers, uint32_t(48));
   CHECK_EQ(q.fa_layers, uint32_t(16));
   CHECK_EQ(q.intermediate, uint32_t(17408));
-  CHECK(!q.has_parallel_ffn());
   CHECK_EQ(q.intermediate_suffix(), std::string());
-  CHECK_EQ(q.to_engine("layers.0.linear_attn.A_log"), std::string("layers.0.linear_attn.A_log"));
-  CHECK_EQ(q.to_checkpoint("layers.3.self_attn.q_proj"), std::string("layers.3.self_attn.q_proj"));
   check_layers(q);
   check_qwen38_shapes(q);
-  // Qwen3.8's MLP rows are exactly the measured production map, no fold.
+  // Qwen3.8's MLP rows are exactly the measured production map.
   CHECK_EQ(q.shape(LinearId::GateUp).N, uint32_t(34816));
   CHECK_EQ(q.shape(LinearId::GateUp).S, uint32_t(8));
   CHECK_EQ(q.shape(LinearId::Down).K, uint32_t(17408));
   CHECK_EQ(q.shape(LinearId::Down).S, uint32_t(4));
-  for (size_t i = 0; i < model::kLinearCount; ++i)
-    CHECK(q.linear(static_cast<LinearId>(i)).fold == model::Fold::None);
   CHECK(&model::desc_for_architecture("Qwen3_5ForConditionalGeneration") == &q);
 
   CHECK_EQ(q.doc_w, 15.519e9);
   CHECK_EQ(q.vocab_used, model::Qwen35::kVocabUsed);
   CHECK(!q.provisional_tuning);
-
-  // Spec 14: Agnes 3.0 Flash.
-  const ModelDesc& a = model::agnes();
-  CHECK(&model::desc_for_architecture("AgnesForConditionalGeneration") == &a);
-  CHECK_EQ(a.layers, uint32_t(72));
-  CHECK_EQ(a.gdn_layers, uint32_t(54));
-  CHECK_EQ(a.fa_layers, uint32_t(18));
-  CHECK_EQ(a.parallel_ffn, uint32_t(2048));
-  CHECK_EQ(a.intermediate, uint32_t(19456));
-  CHECK_EQ(a.vocab_used, uint32_t(248089));   // 248077 + the 12 Agnes specials
-  CHECK_EQ(a.intermediate_suffix(), std::string("_I19456"));
-  CHECK(a.provisional_tuning);
-  check_layers(a);
-  check_qwen38_shapes(a);
-  // The fold's alignment (spec 14 §2): g64 groups and 1024-column slabs / blocks.
-  CHECK_EQ(17408u % 64, 0u);
-  CHECK_EQ(a.intermediate % 1024, 0u);
-  CHECK_EQ(a.shape(LinearId::GateUp).N % 1024, 0u);
-  // The two folded rows and nothing else differ from Qwen3.8's table.
-  for (size_t i = 0; i < model::kLinearCount; ++i) {
-    const auto id = static_cast<LinearId>(i);
-    const model::FusedLinear& fa = a.linear(id);
-    const model::FusedLinear& fq = q.linear(id);
-    CHECK(fa.parts == fq.parts);
-    if (id == LinearId::GateUp || id == LinearId::Down) continue;
-    CHECK(fa.fold == model::Fold::None);
-    CHECK_EQ(fa.shape.K, fq.shape.K);
-    CHECK_EQ(fa.shape.N, fq.shape.N);
-    CHECK_EQ(fa.shape.S, fq.shape.S);
-    CHECK_EQ(fa.shape.layout, fq.shape.layout);
-  }
-  const model::FusedLinear& gu = a.linear(LinearId::GateUp);
-  CHECK(gu.fold == model::Fold::N);
-  CHECK_EQ(gu.shape.K, uint32_t(5120));
-  CHECK_EQ(gu.shape.N, uint32_t(38912));
-  CHECK_EQ(gu.shape.S, uint32_t(8));     // PROVISIONAL (copied from Qwen3.8's gate||up)
-  CHECK_EQ(gu.shape.layout, uint32_t(0));
-  CHECK(gu.fold_parts == std::vector<std::string>({"mlp.parallel_ffn.gate_proj",
-                                                   "mlp.parallel_ffn.up_proj"}));
-  const model::FusedLinear& dn = a.linear(LinearId::Down);
-  CHECK(dn.fold == model::Fold::K);
-  CHECK_EQ(dn.shape.K, uint32_t(19456));
-  CHECK_EQ(dn.shape.N, uint32_t(5120));
-  CHECK_EQ(dn.shape.S, uint32_t(4));     // PROVISIONAL (copied from Qwen3.8's down)
-  CHECK(dn.fold_parts == std::vector<std::string>({"mlp.parallel_ffn.down_proj"}));
-  // The name map, both directions, on real checkpoint spellings.
-  CHECK_EQ(a.to_engine("layers.0.delta_attn.in_proj_qkv.qweight"),
-           std::string("layers.0.linear_attn.in_proj_qkv.qweight"));
-  CHECK_EQ(a.to_engine("mtp.layers.0.global_attn.q_proj.weight"),
-           std::string("mtp.layers.0.self_attn.q_proj.weight"));
-  CHECK_EQ(a.to_engine("layers.0.mlp.parallel_ffn.down_proj.scales"),
-           std::string("layers.0.mlp.parallel_ffn.down_proj.scales"));
-  CHECK_EQ(a.to_checkpoint("layers.7.self_attn.o_proj"), std::string("layers.7.global_attn.o_proj"));
-  CHECK_EQ(a.to_checkpoint("layers.4.linear_attn.A_log"), std::string("layers.4.delta_attn.A_log"));
 
   // Spec 15b: Ornith 1.5 35B-A3B (spec 15 §1; its config.json and index).
   const ModelDesc& o = model::ornith();
@@ -273,7 +214,6 @@ int main() {
   // (the base checkpoint's stopped at </think> = 248069, which 248070 was read from).
   CHECK_EQ(o.vocab_used, uint32_t(248077));
   CHECK(!o.tied_embeddings);
-  CHECK(o.name_map.empty());                  // linear_attn. / self_attn., as Qwen3.8
   CHECK_EQ(o.mtp_intermediate, uint32_t(0));  // its MTP head is one MoE layer (15e)
   // Spec 15e: the head's 785 bf16 tensors, 1,689,281,536 B - the sum over the published
   // checkpoint's shard 16 header (2026-10-05): fc, q/k/v/o, the five norms, q/k_norm,
@@ -312,13 +252,11 @@ int main() {
   // The FFN's partials for the next residual fold: the dense down's S, none on a MoE
   // model (moe_down folds into the residual stream itself).
   CHECK_EQ(q.ffn_fold_s(), uint32_t(4));
-  CHECK_EQ(a.ffn_fold_s(), uint32_t(4));
   CHECK_EQ(o.ffn_fold_s(), uint32_t(0));
   // The loader's gate (loader::load calls it after picking the descriptor): from spec
   // 15c Ornith loads (decode), and so do the dense models.
   model::require_loadable(o);
   model::require_loadable(q);
-  model::require_loadable(a);
   // A MoE shape the kernels are not written for is refused by name (here: no shared
   // expert gate; top-k 9, past the 8-slot route row; and - spec 18b - 96 and 100 experts:
   // a multiple of 16 and not, but neither the power of two moe.cl's route work-group is).
@@ -339,7 +277,6 @@ int main() {
   // experts); a MoE shape the prefill kernels are not written for is refused by name
   // (here: a hidden size that is not whole 1024-k rotation blocks).
   model::require_prefill(q);
-  model::require_prefill(a);
   model::require_prefill(o);
   bool pf_threw = false;
   try {
@@ -351,7 +288,7 @@ int main() {
   }
   CHECK(pf_threw);
 
-  // An unknown architecture throws, naming it and the three supported ones.
+  // An unknown architecture throws, naming it and the two supported ones.
   bool threw = false;
   try {
     model::desc_for_architecture("LlamaForCausalLM");
@@ -361,6 +298,15 @@ int main() {
             w.find("Qwen3_5MoeForConditionalGeneration") != std::string::npos;
   }
   CHECK(threw);
+  // Spec 14's Agnes 3.0 Flash was dropped (2026-11-07): its architecture is refused by name.
+  bool agnes_refused = false;
+  try {
+    model::desc_for_architecture("AgnesForConditionalGeneration");
+  } catch (const std::runtime_error& e) {
+    const std::string w = e.what();
+    agnes_refused = w.find("Agnes 3.0 Flash") != std::string::npos && w.find("dropped") != std::string::npos;
+  }
+  CHECK(agnes_refused);
 
   std::puts("model_desc_test OK");
   return 0;

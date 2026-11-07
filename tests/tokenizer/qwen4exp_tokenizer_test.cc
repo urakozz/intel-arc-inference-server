@@ -17,7 +17,7 @@
 //     and with special tokens (identical: no BOS), both decodes, the streamer's pieces concatenating to the decode;
 //     the facts record which texts Qwen3.8's file encodes differently (the gate tells the files apart);
 //   - tests/tokenizer/corpus.txt's 10240 lines: FNV-1a digests of the ids and the decodes, in 10 chunks;
-//   - the template: chat_template.jinja's sha256 is c3cf9e34... (Qwen3.8's / Agnes's - chat::Template's fallback
+//   - the template: chat_template.jinja's sha256 is c3cf9e34... (Qwen3.8's - chat::Template's fallback
 //     for that hash applies, src/tokenizer/chat_template.cc), two of agnes_template_cases.json's cases render byte
 //     for byte as agnes_template_<name>.txt through the snapshot's own file, and three renders' ids equal
 //     transformers' apply_chat_template(tokenize = True) (transformers 5.19.0 - 5.15.0 builds this checkpoint's
@@ -208,7 +208,7 @@ int check_template(const tok::Tokenizer& t, const json& facts, const std::string
   const std::string source = slurp(snapshot + "/chat_template.jinja");
   CHECK_EQ(sha256(source), facts.at("chat_template_sha256").get<std::string>());
   CHECK_EQ(sha256(source), std::string("c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"));
-  std::printf("template: chat_template.jinja sha256 c3cf9e34... (Qwen3.8's / Agnes's: chat::Template's fallback)\n");
+  std::printf("template: chat_template.jinja sha256 c3cf9e34... (Qwen3.8's: chat::Template's fallback)\n");
   const json cases = json::parse(slurp(dir + "/agnes_template_cases.json"));
   const chat::Template tmpl(snapshot);
   CHECK_EQ(tmpl.eos_token(), std::string("<|im_end|>"));

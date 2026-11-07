@@ -3,7 +3,7 @@
 //
 // The published Ornith int4 checkpoint (urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ)
 // quantised linear_attn.in_proj_a / in_proj_b - int4 g64 sym, qweight [256][32], f16 scales
-// [32][32] per layer - where Qwen3.8's and Agnes's exports keep them bf16. The test WRITES a
+// [32][32] per layer - where Qwen3.8's exports keep them bf16. The test WRITES a
 // one-layer safetensors fixture at Ornith's real a/b shape (K 2048, 32 + 32 columns) in both
 // forms, reads it back through loader::SafetensorsSet and LinearSrc::classify exactly as the
 // loader does, and checks:
@@ -320,7 +320,7 @@ void check_bf16(const fs::path& root) {
   const loader::LinearSrc sa = loader::LinearSrc::classify(set, kA);
   CHECK(sa.kind == loader::WKind::Bf16);
   // 1. the bf16 row is the table's own AB row - the object load_linear always took.
-  for (const model::ModelDesc* d : {&model::ornith(), &model::qwen38(), &model::agnes()}) {
+  for (const model::ModelDesc* d : {&model::ornith(), &model::qwen38()}) {
     const model::FusedLinear& row = loader::ab_row_for(*d, sa.kind);
     CHECK(&row == &d->linear(LinearId::AB));
     CHECK(row.kind == WeightKind::Bf16);
@@ -341,7 +341,7 @@ void check_bf16(const fs::path& root) {
     threw = true;
   }
   CHECK(threw);
-  std::printf("  bf16 a||b: the table row itself on Ornith, Qwen3.8 and Agnes\n");
+  std::printf("  bf16 a||b: the table row itself on Ornith and Qwen3.8\n");
 }
 
 void check_refusals() {
@@ -355,7 +355,7 @@ void check_refusals() {
   s.scales = p.scales.data();
   s.name = "wide";
   model::FusedLinear row{LinearId::AB, {128, 128, 1, 1}, WeightKind::Int4, model::Fuse::Concat,
-                         {"a", "b"}, 128, model::Fold::None, {}};
+                         {"a", "b"}, 128};
   auto throws = [](auto&& f) {
     try {
       f();

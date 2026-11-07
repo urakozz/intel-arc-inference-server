@@ -32,22 +32,15 @@ constexpr size_t kQwenBf16Weights = 18086971392ull - 4194304ull;            // 1
 // scales (loader::lm_head_int8_bytes) for 2,542,796,800 B of bf16. Derived.
 constexpr size_t kLmBf16 = 2542796800ull, kLmInt8 = 1271398400ull + 993280ull;
 constexpr size_t kQwenInt8Weights = kQwenBf16Weights - kLmBf16 + kLmInt8;  // 16,812,371,968
-// Agnes with the int8 head, derived from its safetensors headers (load_agnes_test pins
-// the first two): int4 14,816,378,880 + scales 926,023,680 + a||b bf16 54 x 983,040 +
-// a||b pad 54 x 327,680 + small (54 x 205,440 + 18 x 43,008 + 20,480 final norm) +
-// embed 2,542,796,800 + the int8 head.
-constexpr size_t kAgnesInt8Weights = 14816378880ull + 926023680ull + 54ull * 983040 +
-                                     54ull * 327680 + (54ull * 205440 + 18ull * 43008 + 20480) +
-                                     2542796800ull + kLmInt8;               // 19,640,258,304
 // The MTP head's device bytes (loader.cc load_mtp): 424,673,280 bf16 weight elements
 // (fc, qkv, o, gate||up, down at mtp_intermediate 17408) + five fp32 norms + the FA
-// block. Derived; Qwen3.8 and Agnes alike.
+// block. Derived; Qwen3.8's.
 constexpr size_t kMtpWeights = 424673280ull * 2 + 5ull * 5120 * 4 + 2048;  // 849,451,008
 // The device total memory_line() printed in spec 6 §8.4: 32.530 GB (rounded there,
 // so +-0.5 MB here).
 constexpr size_t kDevice = 32530000000ull;
 constexpr size_t kReserve = size_t(runtime::kDefaultReserveGb * 1e9);
-constexpr uint32_t kTrained = 262144;   // max_position_embeddings, Qwen3.8 and Agnes
+constexpr uint32_t kTrained = 262144;   // max_position_embeddings, Qwen3.8
 
 void check_sizes_qwen38() {
   const model::ModelDesc& q = model::qwen38();
@@ -106,29 +99,6 @@ void check_sizes_qwen38() {
            size_t{84680704});
 }
 
-void check_sizes_agnes() {
-  // Agnes (spec 14): 54 GDN + 18 FA layers, the MLP folded to 19456; every width
-  // else is Qwen3.8's.
-  const model::ModelDesc& a = model::agnes();
-  const runtime::PersistentSizes p = runtime::PersistentDims::sizes(16384, a);
-  CHECK_EQ(p.gdn_state, size_t{54} * 48 * 128 * 128 * 4);         // 169,869,312
-  CHECK_EQ(p.conv_ring, size_t{54} * 16 * 10240 * 2);              //  17,694,720
-  CHECK_EQ(p.kv_k, size_t{18} * 16384 * 4 * 256 * 2);              // 603,979,776
-  // 72 KiB of KV per position (spec 14 §3.3).
-  CHECK_EQ(runtime::PersistentDims::sizes(1, a).kv_k * 2, size_t{72} * 1024);
-  const runtime::DecodeScratchSizes d = runtime::DecodeScratchDims::sizes(16384, a);
-  CHECK_EQ(d.x, size_t{8} * 19456 * 2);
-  CHECK_EQ(d.partials, size_t{8} * 8 * 38912 * 4);                 // gate||up N = 2 x 19456
-  const runtime::PrefillScratchSizes s = runtime::PrefillScratchDims::sizes(16384, a, runtime::PrefillScratchDims::kCDefault);
-  CHECK_EQ(s.x, size_t{2048} * 19456 * 2);
-  CHECK_EQ(s.partials, size_t{2048} * 38912 * 4);
-  CHECK_EQ(s.slab, size_t{19456} * 1024 * 2);
-  CHECK_EQ(runtime::MtpDims::sizes(16384, a).gdn_spec, size_t{3} * 169869312);
-  CHECK_EQ(runtime::int8_scratch_sizes(19456, runtime::PrefillScratchDims::kCDefault).xq, size_t{2048} * 19456);
-  CHECK_EQ(runtime::int8_scale_bytes(a),
-           size_t{8} * (54 * (16384 + 5120 + 38912 + 5120) + 18 * (14336 + 5120 + 38912 + 5120)));
-}
-
 // Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor and - spec
 // 15 §13 - the int4 checkpoint's a||b form: 30 GDN layers x (qkv||z 2048 x 12288 int4 +
 // scales 13,369,344, out_proj 4096 x 2048 4,456,448, a||b int4 layout 1 at 128 columns
@@ -164,7 +134,6 @@ void check_sizes_ornith() {
   CHECK_EQ(d.attn_part, size_t{16} * 32 * 8 * 258 * 4);             // v2 at 16 q-heads
   // Dense models carry no MoE scratch: their sizes are what they were.
   CHECK_EQ(runtime::DecodeScratchDims::sizes(16384, model::qwen38()).moe, size_t{0});
-  CHECK_EQ(runtime::moe_scratch_layout(model::agnes()).total, size_t{0});
   // The plan (decode only: Ornith's prefill is spec 15d) carries both MoE terms, and the
   // full trained context fits the card with the default reserve (spec 15 §2: "262k
   // context fits", derived).
@@ -207,7 +176,6 @@ void check_sizes_ornith() {
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});
   CHECK_EQ(runtime::prefill_int8_max_k(model::qwen38()), uint32_t(17408));
-  CHECK_EQ(runtime::prefill_int8_max_k(model::agnes()), uint32_t(19456));
   CHECK_EQ(runtime::prefill_int8_max_k(o), uint32_t(4096));
   // h8's column scales: the four mixer linears (the shared expert's GateUp / Down rows are
   // inside the expert blocks, not linears) + every layer's 257 x 1024-column gate||up array.
@@ -301,16 +269,12 @@ uint32_t check_fit(const model::ModelDesc& d, bool mtp, size_t weights, const ch
 
 void check_max_len_that_fits() {
   const model::ModelDesc& q = model::qwen38();
-  const model::ModelDesc& a = model::agnes();
   const uint32_t q8 = check_fit(q, false, kQwenInt8Weights, "qwen3.8 int8 head");
   const uint32_t q8m = check_fit(q, true, kQwenInt8Weights + kMtpWeights, "qwen3.8 int8 head + MTP");
   const uint32_t qb = check_fit(q, false, kQwenBf16Weights, "qwen3.8 bf16 head");
-  const uint32_t a8 = check_fit(a, false, kAgnesInt8Weights, "agnes int8 head");
-  const uint32_t a8m = check_fit(a, true, kAgnesInt8Weights + kMtpWeights, "agnes int8 head + MTP");
-  CHECK(q8m < q8 && qb < q8 && a8 < q8 && a8m < a8);
+  CHECK(q8m < q8 && qb < q8);
   // Every one of them is above 128k but below the trained 262144 on one card.
   CHECK(q8 > 131072 && q8 < kTrained);
-  CHECK(a8 > 131072 && a8m < a8);
 
   // A huge card: the trained context caps it, rounded down to the quantum.
   CHECK_EQ(runtime::max_len_that_fits(q, false, kQwenInt8Weights, size_t{1} << 40, kReserve, kTrained),
@@ -391,12 +355,11 @@ void check_draft_vocab() {
 }
 // Spec 12b (`--kv-cache int8`): the KV term follows the cache's form. One position of one
 // FA layer is 4 kv-heads x (256 int8 + one fp16 scale) = 1032 B for K and as much for V,
-// against 2048 + 2048 at bf16: 32 KiB + 256 B per position on Qwen3.8 (16 layers), 36 KiB
-// + 288 B on Agnes (18). The scales follow every layer's rows in the same allocation.
+// against 2048 + 2048 at bf16: 32 KiB + 256 B per position on Qwen3.8 (16 layers).
+// The scales follow every layer's rows in the same allocation.
 void check_kv_int8() {
   using runtime::KvCache;
   const model::ModelDesc& q = model::qwen38();
-  const model::ModelDesc& a = model::agnes();
   // bf16 is the allocation it always was, whatever B70_KV_CACHE says when it is explicit.
   CHECK_EQ(runtime::PersistentDims::sizes(16384, q, KvCache::Bf16).kv_k, size_t{536870912});
   const runtime::PersistentSizes p8 = runtime::PersistentDims::sizes(16384, q, KvCache::Int8);
@@ -405,7 +368,6 @@ void check_kv_int8() {
   CHECK_EQ(p8.total() - p8.kv_k - p8.kv_v,
            runtime::PersistentDims::sizes(16384, q, KvCache::Bf16).total() - 2 * size_t{536870912});
   CHECK_EQ(runtime::PersistentDims::sizes(1, q, KvCache::Int8).kv_k * 2, size_t{32} * 1024 + 256);
-  CHECK_EQ(runtime::PersistentDims::sizes(1, a, KvCache::Int8).kv_k * 2, size_t{36} * 1024 + 288);
   // 262144 (the trained context) at int8: 8,657,043,456 B - 0.8 % over bf16 at 131072.
   CHECK_EQ(runtime::PersistentDims::sizes(262144, q, KvCache::Int8).kv_k * 2, size_t{8657043456ull});
   // The MTP head's one layer in the same form.
@@ -481,8 +443,6 @@ void check_kv_int8() {
       {&q, true, kQwenInt8Weights + kMtpWeights, "qwen3.8 int8 head + MTP"},
       {&q, false, kQwenBf16Weights, "qwen3.8 bf16 head"},
       {&q, true, kQwenBf16Weights + kMtpWeights, "qwen3.8 bf16 head + MTP"},
-      {&a, false, kAgnesInt8Weights, "agnes int8 head"},
-      {&a, true, kAgnesInt8Weights + kMtpWeights, "agnes int8 head + MTP"},
   };
   for (const Row& r : rows) {
     const uint32_t l16 = runtime::max_len_that_fits(*r.d, r.mtp, r.w, kDevice, kReserve, kTrained, {},
@@ -591,7 +551,6 @@ void check_chunk_cap() {
   CHECK(throws([&] { runtime::check_prefill_chunk_cap(o, 4096); }, o.name.c_str()));
   runtime::check_prefill_chunk_cap(o, 2048);
   runtime::check_prefill_chunk_cap(q, 4096);
-  runtime::check_prefill_chunk_cap(model::agnes(), 4096);
   // A --prefill-chunk width to the cap it needs: 0 = none asked; up to 2048 -> 2048; up to
   // 4096 -> 4096; above, and Ornith above 2048, refused.
   CHECK_EQ(runtime::prefill_chunk_cap_for(0, q), 0u);
@@ -644,8 +603,6 @@ void check_chunk_cap() {
       {&q, true, kQwenInt8Weights + kMtpWeights, runtime::KvCache::Bf16, "qwen3.8 + MTP, bf16 KV"},
       {&q, false, kQwenInt8Weights, runtime::KvCache::Int8, "qwen3.8, int8 KV"},
       {&q, true, kQwenInt8Weights + kMtpWeights, runtime::KvCache::Int8, "qwen3.8 + MTP, int8 KV"},
-      {&model::agnes(), false, kAgnesInt8Weights, runtime::KvCache::Bf16, "agnes, bf16 KV"},
-      {&model::agnes(), true, kAgnesInt8Weights + kMtpWeights, runtime::KvCache::Int8, "agnes + MTP, int8 KV"},
       {&o, false, kOrnithInt8Weights, runtime::KvCache::Bf16, "ornith, bf16 KV"},
   };
   for (const Row& r : rows)
@@ -679,7 +636,6 @@ void check_chunk_cap() {
 int main() {
   check_chunk_cap();
   check_sizes_qwen38();
-  check_sizes_agnes();
   check_sizes_ornith();
   check_spec6_line();
   check_paths();

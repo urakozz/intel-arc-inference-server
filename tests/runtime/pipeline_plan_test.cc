@@ -1,5 +1,5 @@
 // Spec 16b: the pipeline-parallel planner on the host - the stages, the weights by device,
-// the per-device memory plan, the auto split and the auto length - for Qwen3.8, Agnes and
+// the per-device memory plan, the auto split and the auto length - for Qwen3.8 and
 // Ornith, and K2-Horizon's bytes per card through the descriptor-free balance (K2 has its
 // own engine; PP for it is future work). No device, no checkpoint.
 #include <array>
@@ -24,10 +24,9 @@ using model::WeightKind;
 using runtime::KvCache;
 
 // The measured Qwen3.8 load (memory_plan_test's constant: docs/13's printout less the RoPE
-// table) and the derived int8-head / Agnes figures beside it.
+// table) and the derived int8-head figure beside it.
 constexpr size_t kQwenBf16Weights = 18082777088ull;
 constexpr size_t kQwenInt8Weights = 16812371968ull;
-constexpr size_t kAgnesInt8Weights = 19640258304ull;
 // One B70 as memory_line() prints it (memory_plan_test's kDevice), and the default reserve.
 constexpr size_t kDevice = 32530000000ull;
 constexpr size_t kReserve = size_t(runtime::kDefaultReserveGb * 1e9);
@@ -45,7 +44,7 @@ bool throws(const std::function<void()>& f) {
 
 void check_stage_sizes() {
   // The stage overload at the model's own counts is the single-card formula.
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()})
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
       for (uint32_t len : {4096u, 16384u, 131072u}) {
         const runtime::PersistentSizes a = runtime::PersistentDims::sizes(len, *d, kv);
@@ -61,10 +60,9 @@ void check_stage_sizes() {
 
 void check_weights() {
   // The descriptor's device forms sum to the loads: Qwen3.8's measured total exactly, the
-  // derived int8-head and Agnes figures exactly.
+  // derived int8-head figure exactly.
   CHECK_EQ(runtime::pp_weights(model::qwen38(), WeightKind::Bf16).total(), kQwenBf16Weights);
   CHECK_EQ(runtime::pp_weights(model::qwen38(), WeightKind::Int8).total(), kQwenInt8Weights);
-  CHECK_EQ(runtime::pp_weights(model::agnes(), WeightKind::Int8).total(), kAgnesInt8Weights);
   const runtime::PpWeights q = runtime::pp_weights(model::qwen38(), WeightKind::Bf16);
   CHECK_EQ(q.layer.size(), size_t{64});
   CHECK_EQ(q.layer[0], size_t{204841600});   // a GDN layer: qkv||z, a||b, out, gate||up, down, small
@@ -102,12 +100,12 @@ void check_stages() {
     CHECK(throws([&] { runtime::require_split(q, bad); }));
   for (uint32_t ok : {4u, 32u, 62u}) runtime::require_split(q, ok);
   // Every model, every legal split: the two stages' compute launches are the single-card
-  // list's (runtime::decode_launches: 774 / 870 / 526), cut in two.
+  // list's (runtime::decode_launches: 774 / 526), cut in two.
   struct M {
     const model::ModelDesc* d;
     size_t launches;
   };
-  for (const M m : {M{&model::qwen38(), 774}, M{&model::agnes(), 870}, M{&model::ornith(), 526}}) {
+  for (const M m : {M{&model::qwen38(), 774}, M{&model::ornith(), 526}}) {
     size_t legal = 0;
     for (uint32_t sp = 1; sp < m.d->layers; ++sp) {
       if (throws([&] { runtime::require_split(*m.d, sp); })) continue;
@@ -166,9 +164,6 @@ void check_auto_splits() {
   CHECK_EQ(check_auto("qwen3.8 int8 head 262144", q, WeightKind::Int8, 262144, KvCache::Bf16), 32u);
   CHECK_EQ(check_auto("qwen3.8 bf16 head 262144", q, WeightKind::Bf16, 262144, KvCache::Bf16), 32u);
   CHECK_EQ(check_auto("qwen3.8 int8 head int8 KV", q, WeightKind::Int8, 262144, KvCache::Int8), 31u);
-  CHECK_EQ(check_auto("agnes int8 head", model::agnes(), WeightKind::Int8, 16384, KvCache::Bf16), 33u);
-  CHECK_EQ(check_auto("agnes int8 head 131072", model::agnes(), WeightKind::Int8, 131072,
-                      KvCache::Bf16), 35u);
   CHECK_EQ(check_auto("ornith bf16 head", model::ornith(), WeightKind::Bf16, 16384, KvCache::Bf16), 20u);
   CHECK_EQ(check_auto("ornith int8 head 262144", model::ornith(), WeightKind::Int8, 262144,
                       KvCache::Bf16), 20u);
@@ -224,9 +219,9 @@ void check_landing() {
     CHECK_EQ(l.total, l.flag_off + runtime::kPpPage);
   }
   // Spec 20c: the descriptor-free form is the ModelDesc form at the same two sizes, field for
-  // field (Qwen3.8, Agnes, Ornith); at Kolibri-1's (one 2560-wide bf16 row, 20 fp32 sums) the
+  // field (Qwen3.8, Ornith); at Kolibri-1's (one 2560-wide bf16 row, 20 fp32 sums) the
   // regions are page-aligned and the flag has a page of its own.
-  for (const model::ModelDesc* d : {&model::qwen38(), &model::agnes(), &model::ornith()}) {
+  for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()}) {
     const runtime::PpLandingLayout a = runtime::pp_landing_layout(*d);
     const runtime::PpLandingLayout b = runtime::pp_landing_layout(a.resid_bytes, a.sumsq_bytes);
     CHECK(a.resid_bytes == b.resid_bytes && a.sumsq_bytes == b.sumsq_bytes && a.sumsq_off == b.sumsq_off &&

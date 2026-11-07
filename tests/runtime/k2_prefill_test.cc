@@ -28,7 +28,7 @@
 //   alike - so neither path is the outlier: K2's routing amplifies rounding-sized differences
 //   (the bf16 reference against its own f32 control differs in 20% / 11% of the short goldens'
 //   MoE / MoVA sets). The K / same-set V medians sit ~3.4x their measured distance (0.99921 /
-//   0.99675) below 1, Agnes's rule (prefill_split_test); kSameSets is the decode-reference
+//   0.99675) below 1, the rule spec 14 set (prefill_split_test); kSameSets is the decode-reference
 //   agreement on the last chunk's rows (MoE 0.491, MoVA 0.640: 0.5655), which prefill-decode
 //   meets (0.592). The p01s (K 0.913) are printed, not gated.
 //     6. tokens: prefill + 32 greedy against ingest + 32 greedy, ruling A26's rule - every row

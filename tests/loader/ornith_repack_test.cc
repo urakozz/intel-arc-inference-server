@@ -423,7 +423,6 @@ int main() {
   CHECK_EQ(loader::moe_bytes(o), size_t(17224171520ull));
   CHECK_EQ(ob.per_token(8), size_t(1114112) + size_t(9) * (1114112 + 557056));   // 16.15 MB
   CHECK_EQ(loader::moe_bytes(model::qwen38()), size_t(0));
-  CHECK_EQ(loader::moe_layer_bytes(model::agnes()).total(), size_t(0));
   CHECK_EQ(loader::moe_expert_part(12, "down_proj"), std::string("mlp.experts.12.down_proj"));
 
   std::puts("ornith_repack_test OK");

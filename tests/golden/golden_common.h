@@ -287,7 +287,7 @@ bool exists(const std::string& p) { return std::ifstream(p).good(); }
 // --force, k2_ref.py --mode f32 --force; tools/box_validate/f32_oracle.sh), so its logits rows
 // are the bf16 golden's contexts row for row - with the tie rule applied to ITS logits, widened
 // by the operator's second ruling of the day to a top-2 gap within one bf16 ulp (judge_row
-// below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's and Agnes's
+// below). The bf16 golden stays a printed diagnostic beside it. Qwen3.8's
 // gates take no judge and are unchanged.
 //
 // `--judge=<dir>` anywhere in argv names the judge directory (<dir>/<prompt>.golden.safetensors);
