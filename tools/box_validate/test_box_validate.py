@@ -1442,6 +1442,44 @@ class DriverTest(unittest.TestCase):
         self.assertIn("# redo: r5.host r5.r0", out)
         self.assertIn("BV_REDO=r5.host\\ r5.r0", out)
 
+    def test_resume_keeps_the_state_baseline(self):
+        """--state X continues with the baseline X was started against: never a re-resolved --baseline main"""
+        rev = lambda ref: subprocess.run(["git", "rev-parse", ref], capture_output=True, text=True,
+                                         cwd=ROOT).stdout.strip()
+        old, new = rev("HEAD~1"), rev("HEAD")
+        state = f"abc123-vs-{old[:12]}"
+        # no --baseline: the name's sha, not the default
+        out = self.run_driver("--dry-run", "--only", "g0", "--state", state).stdout
+        self.assertIn(f"# baseline: {old[:12]} = {old} -> $BOX:~/b70-inference-server-g0-{old[:12]}", out)
+        self.assertIn(f"BV_BASE_SHA={old}", out)
+        # a --baseline naming the same commit is fine
+        out = self.run_driver("--dry-run", "--only", "g0", "--state", state, "--baseline", old[:8]).stdout
+        self.assertIn(f"= {old} ->", out)
+        # one naming another commit (main moved on) is refused, naming both shas and the ways on
+        r = self.run_driver("--dry-run", "--only", "g0", "--state", state, "--baseline", new, ok=False)
+        self.assertEqual(r.returncode, 2, r.stdout[-500:])
+        for s in (state, f"started against baseline {old[:12]}", f"is {new[:12]} now", "without --baseline",
+                  "drop --state"):
+            self.assertIn(s, r.stderr)
+        self.assertEqual(r.stdout, "")
+        # a name without -vs-<sha> records nothing: --baseline as given
+        out = self.run_driver("--dry-run", "--only", "g0", "--state", "custom", "--baseline", new).stdout
+        self.assertIn(f"= {new} ->", out)
+        # the box side: the baselines the state's meta-<device>.env files record
+        lines = out.splitlines()
+        cmd = lines[next(i for i, l in enumerate(lines) if l.startswith("== 1a.")) + 1].strip()
+        self.assertTrue(cmd.startswith("ssh $BOX '") and cmd.endswith("'"), cmd)
+        with tempfile.TemporaryDirectory() as home:
+            run = lambda: subprocess.run(["sh", "-c", cmd[len("ssh $BOX '"):-1]], capture_output=True, text=True,
+                                         env=dict(os.environ, HOME=home)).stdout
+            self.assertEqual(run(), "", "a new state records nothing")
+            d = os.path.join(home, re.search(r'\$HOME/(\S+?)"/meta', cmd).group(1))
+            os.makedirs(d)
+            for dev in (0, 1):
+                with open(os.path.join(d, f"meta-{dev}.env"), "w") as f:
+                    f.write(f"tree_sha=abc123\nbaseline_sha={old}\nbaseline_ref=main\n")
+            self.assertEqual(run(), old + "\n")
+
     def test_list_and_bash32(self):
         out = self.run_driver("--list").stdout
         self.assertIn("r11.kernels*", out)
