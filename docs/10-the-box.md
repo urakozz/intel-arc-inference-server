@@ -134,8 +134,8 @@ drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its res
 `~/b70/logs/stage-latest.txt`.
 
 **When each runs.** Merges go in after the Mac checks (operator, 2026-11-07); the validation run is not per
-merge - it runs once a night on the latest main, `tools/box_validate.sh --nightly`, and covers the day's merges
-together. `--nightly` launches nothing when only documentation changed since the newest finished run
+merge and not every night - it runs ON DEMAND, when the operator asks (2026-11-07), on the latest main,
+`tools/box_validate.sh --nightly`, and covers every merge since the last run together. `--nightly` launches nothing when only documentation changed since the newest finished run
 (`tools/box_validate/changed_since.sh`: everything but `docs/` and `*.md` counts), and runs every test
 (`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
 reuse every unchanged PASS.
