@@ -18,7 +18,8 @@ Each prompt's ids as the server encoded them are checked against the set's commi
 <name>.ids (`prompt_ids_match`; a mismatch is reported, the request still counts). By default
 the request asks for exactly --max-tokens ids (`ignore_eos`), so arms time the same work;
 --stop-at-eos lets the model stop. One JSON line per request in --out: label, round, set,
-name, endpoint, prompt / output token counts, out_ids, text, finish_reason, usage, wall
+name, endpoint, prompt / output token counts, prompt_ids (as the server encoded them: serve_judge.py's
+context), out_ids, text, finish_reason, usage, wall
 seconds, wall_tps (output ids / wall, prefill included) and - with --server-log (the
 server's --log-requests directory) - prefill_s, gen_s and gen_tps ((ids - 1) / (t_end -
 t_first_token): decode only) from the server's own record of that request. Accepted drafts:
@@ -31,7 +32,8 @@ over rounds of --metric per arm, then `RATIO <arm>/<ref> <set> geomean x` per ar
 --ratio A/B pair): the geometric mean over the set's prompts of the median ratio.
 `compare` checks greedy identity: every request of every other arm's round has the --ref
 arm's output ids; prints `IDENTICAL a vs ref: n/n` or the first differing index; exit 1 on
-any difference or missing request.
+any difference or missing request. Since spec 28b / 28c a speculative arm's identity is a recorded
+number, not a bar: serve_judge.py judges each difference by the f32 judge (spec_judge.h's rule).
 """
 import argparse
 import glob
@@ -161,6 +163,7 @@ def run(a):
             rec = {"label": a.label, "round": a.round, "set": sname, "name": name, "endpoint": ep,
                    "prompt_tokens": usage.get("prompt_tokens", len(pids) if pids else None),
                    "prompt_ids_match": (pids == want) if (pids is not None and want is not None) else None,
+                   "prompt_ids": pids,
                    "completion_tokens": usage.get("completion_tokens", len(ids)), "out_ids": ids,
                    "text": text, "finish_reason": ch.get("finish_reason"), "usage": usage,
                    "accepted": accepted_of(usage), "wall_s": round(wall, 4),

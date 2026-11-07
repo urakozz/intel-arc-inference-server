@@ -117,19 +117,22 @@ st_r2_cost() {
   finish
 }
 
-stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --spec auto against --spec mtp --spec-max 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); greedy output identical across the arms"
+stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --spec auto against --spec mtp --spec-max 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes) - identity to --spec off a recorded number, not the bar (operator 2026-11-07)"
 st_r2_auto_rows() {
   idle before
   serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
     "off|--max-len 16384 --spec off" "k1|--max-len 16384 --spec mtp --spec-max 1" "k3|--max-len 16384 --spec mtp --spec-max 3" \
     "auto|--max-len 16384 --spec auto"
   idle after
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output identical to --spec off in every arm"
+  # identity is a number since spec 28b / 28c (the verify rows round differently): recorded, not the bar
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "every speculative arm's first difference from --spec off by the f32 judge"
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --ratio auto/k1 --ratio auto/k3"
   grab_all ratio '^RATIO ' 20
-  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all idle '^IDLE '
-  finish
+  judged_finish
 }
 
 stage r2.opencode 2 optin gpu-self qwen,opencode_log - "the opencode replay with --spec auto (OPENCODE_LOG=<request log dir>), prefix cache on"
@@ -582,16 +585,19 @@ st_r12_d2() {
   grab_all lookup 'spec lookup:|lookup:|SEEDED' 12
   finish
 }
-stage r12.a4 12 default gpu qwen - "D2 on A4: the 36 tool-call scenarios (chat, with their tools) and the golden prompts through b70-serve --spec off / --spec lookup, greedy, max_tokens 192 - output identical to --spec off"
+stage r12.a4 12 default gpu qwen - "D2 on A4: the 36 tool-call scenarios (chat, with their tools) and the golden prompts through b70-serve --spec off / --spec lookup, greedy, max_tokens 192 - each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes); identity to --spec off a recorded number, not the bar (operator 2026-11-07)"
 st_r12_a4() {
   serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set toolcall --set golden --max-tokens 192 --stop-at-eos" \
     "off|--max-len 16384 --spec off" "lookup|--max-len 16384 --spec lookup"
-  chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off" "greedy output through --spec lookup identical to --spec off"
+  # identity is a number since spec 28b / 28c (the verify rows round differently): recorded, not the bar
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
+  serve_judge "$STATE/$STAGE" off "--spec lookup's first differences from --spec off by the f32 judge"
   x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref off --metric wall_tps"
-  grab_all identical '^(IDENTICAL|NOT IDENTICAL|DIFFER)' 20
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
   grab_all ratio '^RATIO ' 10
   grab_all lookup 'spec lookup:|lookup:' 12
-  finish
+  judged_finish
 }
 stage r12.d5 12 optin gpu-self qwen,opencode_log - "D5 on the opencode recording (OPENCODE_LOG): lookup_accept.py first, then --spec off / --spec auto / --spec lookup replayed through b70-serve, 3 rounds in rotated order"
 st_r12_d5() {

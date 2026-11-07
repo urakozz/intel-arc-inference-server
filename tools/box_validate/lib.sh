@@ -303,5 +303,23 @@ serve_arms() {
   done
 }
 
+# serve_judge DIR REF WHAT - a server row's speculative arms against its plain arm REF by the f32 judge (spec 28
+# N6, tests/server/spec_judge.h; operator 2026-11-07): tools/box_validate/serve_judge.py dumps each first
+# difference's forced contexts to $DATA/oracle-forced-dumps/qwen-serve and judges them with the int8-head f32
+# references (b70-serve loads the int8 head, prefills with l0). A difference without its reference is a SKIP, never a
+# pass: the step is accounted, and BV_JUDGE_RC (77) makes judged_finish return SKIP when nothing failed.
+serve_judge() {
+  chk "python3 tools/box_validate/test_serve_judge.py" "serve_judge.py's own tests (its numpy path runs on the box only)"
+  x "python3 tools/box_validate/serve_judge.py --dir $1 --ref $2 --dump $DATA/oracle-forced-dumps/qwen-serve --judge $DATA/oracle-out-qwen-f32-i8head-forced --bf16 $DATA/oracle-out-qwen-bf16top-forced"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "$3"
+}
+# judged_finish - finish, then SKIP (77) when serve_judge's step awaited references and nothing failed (the
+# arms' own steps passing must not turn an unjudged difference into a stage PASS)
+judged_finish() {
+  finish || return
+  [ "${BV_JUDGE_RC:-0}" != 77 ] || return 77
+}
+
 # bench_cmd SNAP ARGS... - a b70-decode bench line carrying the Mac's sha into the row
 bench_cmd() { local s="$1"; shift; echo "B70_GIT_SHA=$B70_GIT_SHA build/src/cli/b70-decode $s --bench $*"; }
