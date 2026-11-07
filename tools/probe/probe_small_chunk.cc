@@ -1,8 +1,8 @@
 // probe_small_chunk - open-work 3a: where a SHORT prefill chunk's linear time goes, and what a
 // short-chunk GEMM buys. Qwen3.8's five int4 linear shapes at M rows, each through
 //   l0     runtime/prefill/linear_l0.cc's walk (the default backend): per 1024-column slab
-//          pf_dequant_slab_K<K>_N<N>_L<l> + pf_gemm (gemm_l0 / gemm_l0_silu, 256 x 256 tiles,
-//          rows padded to 256)
+//          pf_dequant_slab_K<K>_N<N>_L<l> + pf_gemm (256 x 256 tiles, rows padded to 256: gemm_l0's
+//          launch before open-work 3a)
 //   dq     the walk's dequants alone (every slab), g256 the walk's GEMMs alone (every slab)
 //   aXbYsZ pf_gemm_small_A<X>_B<Y>_S<Z> (pf_gemm_small.cl: X 8-row blocks x Y 16-column atoms a
 //          sub-group, Z sub-groups a work-group; rows padded to 8 X only) alone, every slab
@@ -19,7 +19,7 @@
 // to 35 %). Medians. The summary multiplies each shape by its layer count: one chunk's linears.
 //
 //   probe_small_chunk [--rounds 7] [--rows 16,32,64,128,256,512,1024,2048]
-//                     [--shape all|gu,down,qkvz,out,faqkv] [--small a2b4s1,...]
+//                     [--shape all|gu,down,qkvz,out,faqkv] [--small a1b2s1,a2b2s1,a4b2s1,a4b4s4]
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -46,7 +46,6 @@
 namespace {
 
 using runtime::prefill::arg_val;
-using runtime::prefill::GemmBatch;
 using runtime::prefill::pad256;
 using runtime::prefill::PtrArg;
 
@@ -156,16 +155,14 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   auto deq = [&](uint32_t n0) {
     cx.launch(dq, kNs / 16, K / 64, 1, {PtrArg(dw.ptr()), PtrArg(scales), PtrArg(slab.ptr()), arg_val(n0)});
   };
+  // pf_gemm itself (gemm_l0 now hands M <= kPfSmallMaxRows to pf_gemm_small): gemm_l0's launch
+  l0::Kernel& big = kc(sh.silu ? kernels::pf_gemm_silu_variant() : kernels::pf_gemm_variant(false), "pf_gemm");
   auto g256 = [&](uint32_t M, uint32_t n0, l0::Mem& o) {
-    if (sh.silu) {
-      const GemmBatch b{M, K, kNs, 1, K, kNs, 0, 0, 0, 0};
-      runtime::prefill::gemm_l0_silu(cx, kc, b, dx.as<uint16_t>(), slab.as<uint16_t>(),
-                                     static_cast<uint16_t*>(c_at(o, n0)), N / 2);
-    } else {
-      const GemmBatch b{M, K, kNs, 1, K, kNs, N, 0, 0, 0};
-      runtime::prefill::gemm_l0(cx, kc, b, dx.as<uint16_t>(), slab.as<uint16_t>(),
-                                static_cast<float*>(c_at(o, n0)), false);
-    }
+    const uint32_t Mp = pad256(M), lda = K, ldb = kNs;
+    const uint64_t z = 0;
+    cx.launch(big, Mp / 256, kNs / 256, 1,
+              {PtrArg(dx.ptr()), PtrArg(slab.ptr()), PtrArg(c_at(o, n0)), arg_val(Mp), arg_val(K),
+               arg_val(kNs), arg_val(lda), arg_val(ldb), arg_val(ldc), arg_val(z), arg_val(z), arg_val(z)});
   };
   auto gs = [&](uint32_t M, const Small& v, uint32_t n0, l0::Mem& o) {
     const uint32_t Mt = pad_to(M, v.rows());
@@ -279,7 +276,9 @@ int main(int argc, char** argv) {
   try {
     int rounds = 7;
     std::string want = "all", rows_s = "16,32,64,128,256,512,1024,2048";
-    std::string small_s = "a1b2s1,a1b4s1,a2b2s1,a2b4s1,a4b2s1,a4b4s1,a2b4s4,a4b4s4";
+    // the four tiles the build carries (pf_small_tile's); the 2026-11-08 sweep built NA 1/2/4 x
+    // NB 2/4 x SN 1/2/4 - a tile the build lacks is skipped with a line
+    std::string small_s = "a1b2s1,a2b2s1,a4b2s1,a4b4s4";
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--rounds" && i + 1 < argc) rounds = std::atoi(argv[++i]);
@@ -313,6 +312,17 @@ int main(int argc, char** argv) {
                 ctx.name().c_str(), rounds);
     runtime::prefill::Context cx(ctx);
     runtime::prefill::KernelCache kc(ctx);
+    std::vector<Small> built;
+    for (const Small& v : smalls) {
+      try {
+        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, false), "pf_gemm_small");
+        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, true), "pf_gemm_small");
+        built.push_back(v);
+      } catch (const std::exception&) {
+        std::printf("# %s: not built, skipped\n", v.tag().c_str());
+      }
+    }
+    smalls = built;
     std::mt19937 rng(5);
     std::printf("## checks\n\n| shape | check | result |\n|---|---|---|\n");
     Table sum;   // arm -> rows -> ms summed over shapes x layers
