@@ -552,9 +552,19 @@ st_r11_passkey262k() {
   grab_all passkey '^passkey [^ ]+: [0-9]/3'
   finish
 }
-stage r11.a4 11 optin card qwen,a4_ref r11.kernels "Q4: A4 with the int8 cache, scored against the bf16 reference run (A4_REF_DIR holds <name>.bf16.txt): >= 25/36"
+stage r11.a4_ref 11 optin cpu qwen_bf16,oracle_image - "Q4's data on the box CPU: Qwen3.8's A4 reference - the committed set tests/golden/toolcall and oracle_generate.py --model qwen on the bf16 original Qwen/Qwen3.8-27B (layer-streamed, bf16 GEMMs as fp32 rounded once, 192 ids, resumable) into \$DATA/oracle-out-qwen-a4 - HOURS (ESTIMATED 10-16 h); score.py's parse of every reference call; then re-links oracle-out*"
+st_r11_a4_ref() {
+  chk "OUT=$DATA/oracle-out-qwen-a4 tools/toolcall/a4_ref.sh qwen set" "Qwen3.8's tool-call set (tests/golden/toolcall)"
+  chk "OUT=$DATA/oracle-out-qwen-a4 tools/toolcall/a4_ref.sh qwen ref" "the Qwen3.8 reference run (the bf16 original)"
+  x "tools/box_validate/data.sh link $DATA $TREE $BASE"
+  x "OUT=$DATA/oracle-out-qwen-a4 tools/toolcall/a4_ref.sh qwen status"
+  chk "python3 tools/toolcall/score.py $DATA/oracle-out-qwen-a4 bf16" "every reference call parses (Qwen XML)"
+  x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(oracle_qwen_a4|a4_ref)=' $STATE/have.env"
+  finish
+}
+stage r11.a4 11 optin card qwen,a4_ref r11.kernels "Q4: A4 with the int8 cache, scored against the bf16 reference run (A4_REF_DIR, default oracle-out-qwen-a4 from r11.a4_ref: <name>.bf16.txt): >= 25/36"
 st_r11_a4() {
-  x "mkdir -p $STATE/a4-kv8 && cp $A4_REF_DIR/*.bf16.txt $STATE/a4-kv8/"
+  x "mkdir -p $STATE/a4-kv8 && cp ${A4_REF_DIR:-$TREE/oracle-out-qwen-a4}/*.bf16.txt $STATE/a4-kv8/"
   chk "B70_KV_CACHE=int8 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-kv8 l0-int8" "A4 engine runs, int8 KV"
   chk "python3 tools/toolcall/score.py $STATE/a4-kv8 bf16 l0-int8-i8head | tee $STATE/a4-kv8/score.md" "scoring"
   grab_all a4 'match|/36|total' 6
@@ -3807,13 +3817,14 @@ st_r75_p0() {
 stage r75.gates 75 default card qwen  r75.k0                "prefill_gate / consistency / determinism at cap 4096 (l0-int8, l0), prefill_split at cap 4096 (one 2600-row chunk; the split at 2048 = the 2048 chunking, bitwise), buffers_test, A4 on l0-int8, MTP prefill"
 st_r75_gates() {
   run_tests '^(buffers_test|linear_i8_cap4096_test|gdn_chunk_cap4096_test|prefill_smoke_cap4096_test|prefill_gate_l0_cap4096_test|prefill_gate_int8_cap4096_test|prefill_consistency_l0_cap4096_test|prefill_determinism_l0_cap4096_test|mtp_prefill_cap4096_test|prefill_split_l0_cap4096_test|prefill_split_l0-int8_cap4096_test)$'
-  if [ -n "${A4_REF_DIR:-}" ] && [ -d "${A4_REF_DIR:-/nonexistent}" ]; then
-    x "mkdir -p $STATE/a4-c4096 && cp $A4_REF_DIR/*.bf16.txt $STATE/a4-c4096/"
+  local a4ref="${A4_REF_DIR:-$TREE/oracle-out-qwen-a4}"
+  if [ -d "$a4ref" ] && { [ -n "${A4_REF_DIR:-}" ] || [ "$(ls "$a4ref"/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 ]; }; then
+    x "mkdir -p $STATE/a4-c4096 && cp $a4ref/*.bf16.txt $STATE/a4-c4096/"
     chk "PREFILL_CHUNK=4096 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-c4096 l0-int8" "A4 engine runs at cap 4096"
     chk "python3 tools/toolcall/score.py $STATE/a4-c4096 bf16 l0-int8-i8head | tee $STATE/a4-c4096/score.md" "A4 scoring (>= 25 / 36)"
     grab_all a4 'match|/36|total' 6
   else
-    say "A4 skipped: A4_REF_DIR unset (<name>.bf16.txt reference runs)"
+    say "A4 skipped: A4_REF_DIR unset and oracle-out-qwen-a4 incomplete (<name>.bf16.txt: r11.a4_ref, tools/toolcall/a4_ref.sh qwen)"
   fi
   # plan == allocation at cap 4096 (MTP hidden rows, Int8State xq / xs, the scratch), both backends
   chk "build/tests/memory_plan_box_test $SNAP_QWEN mtp 16384 --chunk-cap 4096" "memory_plan_box_test at cap 4096, l0, MTP"

@@ -1,8 +1,19 @@
 #!/bin/bash
 # tools/toolcall/a4_ref.sh - the A4 tool-call set and its CPU reference run for a MoE model
 # (spec 15e Task 3: Ornith; spec 18d K4: K2-Horizon; spec 20e KL4: Kolibri-1; spec 21e Task 5:
-# Qwen3.8-Flash-Next), from the repo (or worktree) root.
+# Qwen3.8-Flash-Next) - and for Qwen3.8 itself (operator, 2026-11-07) - from the repo (or worktree) root.
 #
+#   tools/toolcall/a4_ref.sh qwen set|ref|status    Qwen3.8's own A4 reference (the one r11.a4 / r75.gates score
+#                                                   against, A4_REF_DIR; the earlier one was lost): `set` copies
+#                                                   the committed set tests/golden/toolcall (Qwen3.8's 36, the
+#                                                   set the engine runs) to $OUT/set; `ref` runs
+#                                                   oracle_generate.py --model qwen on the bf16 original
+#                                                   Qwen/Qwen3.8-27B (54 GB): Qwen3_5ForCausalLM layer-streamed,
+#                                                   the first K layers kept once read (K from the memory plan
+#                                                   under the cap: ~54 of 64 at the box's 56g), bf16 GEMMs as fp32
+#                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 192 new ids,
+#                                                   one scenario at a time -> $OUT/<name>.bf16.{ids,txt}
+#                                                   (resumable; no .gap). OUT default oracle-out-qwen-a4.
 #   tools/toolcall/a4_ref.sh <ornith|k2|kolibri|qwen4exp> set   the model's set: make_set.py --from
 #                                                   tests/golden/toolcall (the 36 conversations of
 #                                                   Qwen3.8's set, re-rendered and re-tokenised by
@@ -23,7 +34,7 @@
 #                                                   how many of the 36 are Qwen3.8's ids exactly
 #   tools/toolcall/a4_ref.sh <ornith|k2|qwen4exp> ref  the reference: oracle_generate.py over $OUT/set
 #                                                   -> $OUT/<name>.bf16.{ids,txt} (resumable)
-#   tools/toolcall/a4_ref.sh <ornith|k2> status    what is done
+#   tools/toolcall/a4_ref.sh <ornith|k2|qwen> status  what is done
 #   tools/toolcall/a4_ref.sh bolt set|ref|status    spec 25a: `set` copies the committed set
 #                                                   tests/golden/toolcall-bolt (make_set.py --from
 #                                                   tests/golden/toolcall --model bolt: the checkpoint's template,
@@ -102,12 +113,16 @@
 # sequential, ~0.6-1 day batched (8) + RESIDENT at 54-60g (ESTIMATED). Each scenario's seconds,
 # and every prompt pass's (and every 25th pass's) seconds, are in $OUT/ref.log. Ornith batched
 # needs transformers 5.15 (agnes-ref-img; ornith_ref.layer_major refuses another version).
+# Qwen3.8 (qwen, ESTIMATED from the box's fp32 rate and memory bandwidth, not measured): a prompt pass
+# (960-2990 ids, mean ~1900) ~2-4 min, a decode step ~5-8 s (10 of 64 layers re-read, every bf16
+# weight upcast to fp32 per call), up to 192 steps a scenario - ~10-16 h the set, one scenario at a
+# time (the dense path does not batch).
 #
 # Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), DEVICE (kolibri's
 # reference: cpu, cuda or xpu), MODEL_DIR (a snapshot
 # directory instead of the HF cache's), NEW_TOKENS, KWARGS (K2's template variables, JSON;
 # default make_set.py's {"tool_call_format": "xml", "reasoning_effort": "low"}), IMAGE, MEM,
-# ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
+# ORACLE_THREADS (12), HF_CACHE, FORCE, BATCH (auto; qwen: ignored), RESIDENT (auto), ONLY, NAME, FOREGROUND; qwen4exp only:
 # TOK_DIR (the original's small files for `set`), SITE, Q4_LAYERS, Q4_PLE, MASK;
 # bolt: FORM, SITE, BOLT_LAYERS, BOLT_EXPERT_CACHE_GB (an LRU of dequantised experts across decode steps).
 set -eu
@@ -115,6 +130,7 @@ cd "$(dirname "$0")/../.."
 m=${1:-}
 step=${2:-}
 case "$m" in
+  qwen) repo=Qwen/Qwen3.8-27B; new=${NEW_TOKENS:-192} ;;   # the bf16 original (MODEL_DIR for another snapshot)
   ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
   kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
@@ -136,6 +152,13 @@ if [ "$m" = bolt ] && [ "$step" = set ]; then   # the committed set (spec 25a Ta
   mkdir -p "$OUT/set"
   cp tests/golden/toolcall-bolt/* "$OUT/set/"
   echo "a4_ref: bolt set: tests/golden/toolcall-bolt -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
+  exit 0
+fi
+if [ "$m" = qwen ] && [ "$step" = set ]; then   # Qwen3.8's own committed set: the one r11.a4's engine run reads
+  OUT=${OUT:-oracle-out-qwen-a4}
+  mkdir -p "$OUT/set"
+  cp tests/golden/toolcall/* "$OUT/set/"
+  echo "a4_ref: qwen set: tests/golden/toolcall -> $OUT/set ($(ls "$OUT"/set/*.ids | wc -l | tr -d ' ') scenarios)"
   exit 0
 fi
 if [ "$m" = bolt ] && [ "$FORM" = both ]; then   # both references, one after the other
@@ -212,6 +235,7 @@ if [ "$step" = set ]; then
 else
   [ -s "$OUT/set/manifest.json" ] || { echo "a4_ref: no set in $OUT/set - run '$0 $m set' first" >&2; exit 2; }
   cmd_ref="python3 tools/toolcall/oracle_generate.py"
+  [ "$m" = qwen ] && cmd_ref="$cmd_ref --model qwen"
   [ "$m" = kolibri ] && cmd_ref="$cmd_ref --model kolibri --device ${DEVICE:-cpu}"
   [ "$m" = qwen4exp ] && cmd_ref="$cmd_ref --model qwen4exp"
   [ "$m" = bolt ] && cmd_ref="$cmd_ref --model bolt --weights $FORM"
