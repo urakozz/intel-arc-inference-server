@@ -13,6 +13,7 @@
 #include "l0/memory.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
+#include "runtime/batch_rows.h"
 #include "runtime/buffers.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
@@ -64,13 +65,19 @@ class Engine {
   // must outlive the Engine. The Engine then allocates 8 GDN state slots (TapVerifyDims) and captures the verify
   // lists at M = 1 .. drafter->max_k() + 1 with the taps (build_verify_taps); ingest(), generate() and commit() keep
   // the drafter's ring filled (see "spec 19c" below). Not with the MTP head (one proposer per engine): throws.
+  //
+  // `slots` (spec 13c): the lengths of the engine's sequence slots, summing to max_len - see "spec 13c" below. Empty
+  // (the default) is one slot of max_len: today's engine, allocation for allocation and list for list.
   Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len,
-         bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr);
+         bool debug_resid = false, KvCache kv = default_kv_cache(), TapDrafter* drafter = nullptr,
+         std::vector<uint32_t> slot_lens = {});
 
   // Zeroes exactly the persistent group - control, gdn_state, conv_ring, kv_k,
   // kv_v. Scratch is deliberately NOT zeroed: no step may read scratch it has
   // not first written, and replay_determinism_test's run C is the standing
   // proof of that. Zeroing scratch here would mask a regression of it.
+  // Spec 13c: with several sequence slots, the SELECTED slot's persistent state only - its Control and head
+  // Control, its GDN states, conv ring, hh rows and KV range (main and head); no other slot's byte moves.
   void reset();
 
   // Feeds prompt ids one per replay (argmax result overwritten by the next
@@ -251,7 +258,7 @@ class Engine {
   // device idle and q_i in mtp_logits_device() row i; its return value replaces the
   // on-card argmax as d_{i+1} (the next draft's input, cur_token[1 + i], draft_ids()).
   void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
-  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  const std::vector<uint32_t>& draft_ids() const { return seq().draft_ids; }
   const float* mtp_logits_device() const;      // [kMaxDraft][kVocab] fp32, device memory
   // Spec 8 §11: |V'| when the model was loaded with a draft vocabulary (the draft lists
   // then run the compact head and draft only V' ids; mtp_logits_device() rows hold -inf
@@ -310,14 +317,76 @@ class Engine {
   // the buffers it was captured against.
   void replay_aux(l0::CmdList& list);
 
+  // --- spec 13c: sequence slots - several requests on one card ------------------------------------------------
+  //
+  // `slots` (the constructor's): the engine's sequence slots, their lengths summing to max_len (empty: one slot of
+  // max_len - today's engine). Slot q is the position range [slot_base(q), + slot_len(q)) of the KV caches (the main
+  // one and the MTP head's), with its own GDN states (gdn_slots() of them: the live one and, with MTP, three
+  // speculative), conv ring, Control, head Control and hh rows, and its own copy of every captured list (plain, verify
+  // and draft) bound to them - so a slot alone runs exactly today's kernels over its own state: bitwise what a
+  // one-slot engine computes for that session.
+  //
+  // Every single-sequence call above and below (reset, ingest, prefill, generate, draft, verify, commit,
+  // max_verify_k, pos, max_len, the snapshots, control) acts on the SELECTED slot - select(q); 0 at construction.
+  //
+  // verify_rows(runs) is ONE decode step over several slots' rows (spec 13 §9's row table; runtime::build_rows, the
+  // small-batch kernels): each run is a slot's pending id and its k drafts (cur_token[0..k] of that slot's Control -
+  // draft(k) with the slot selected writes them, as for verify) at the slot's pos .. pos + k; at least two rows, at
+  // most kMaxRows, each slot at most once, at pos >= 1 with MTP. rows_ids() / rows_logits_device() then hold every
+  // row's argmax and logits in run order, and per run select(slot) + commit(j, t) commits that slot exactly as after
+  // its own verify(k) (row j's GDN state live, pos + j + 1, row j's hidden its h_{pos-1}) - or not yet: as after
+  // verify(), the run stays committable until the slot's next verify. Rows of one step never read each other's slot
+  // (gdn_step's state indices, the KV bases), and a rejected row writes only its own slot's speculative state, ring
+  // positions and KV rows past the commit, which nothing reads (spec 13 §9: B3).
+  static constexpr uint32_t kMaxRows = DecodeScratchDims::kM;   // 8
+  uint32_t slots() const { return static_cast<uint32_t>(seqs_.size()); }
+  void select(uint32_t slot);
+  uint32_t selected() const { return cur_; }
+  uint32_t slot_len(uint32_t slot) const { return seqs_.at(slot).len; }
+  uint32_t slot_base(uint32_t slot) const { return seqs_.at(slot).base; }
+  struct Run {
+    uint32_t slot = 0;
+    uint32_t k = 0;   // drafts in the slot's cur_token[1..k]
+  };
+  void verify_rows(const std::vector<Run>& runs);
+  // The MTP drafts of several slots at once (runtime::build_draft_rows: the head and lm_head read once a draft index
+  // for all of them): runs[r] = (slot, k), 2 <= runs <= kMaxDraftRows, every k in 1..max_verify_k() of its slot and
+  // every slot room for max(k). Each run drafts max(k) ids and keeps its first k: they land in its cur_token[1..k] and
+  // its draft_ids(), as draft(k) with the slot selected leaves them. `pick(r, i, argmax)` (sampled drafting): called
+  // after draft index i, per run, with the device idle and run r's draft logits in rows_logits_device() row r; its
+  // return replaces the row's argmax as d_{i+1} (draft()'s `pick`).
+  static constexpr uint32_t kMaxDraftRows = 4;
+  void draft_rows(const std::vector<Run>& runs,
+                  const std::function<uint32_t(size_t r, uint32_t i, uint32_t argmax)>& pick = {});
+  const uint32_t* rows_ids() const;            // [rows] the argmax of every row, run order
+  const float* rows_logits_device() const;     // [rows][kVocab] fp32, device memory (verify_logits_device()'s)
+  // The selected slot's Control (shared memory): the pending id cur_token[0], the drafts cur_token[1..k].
+  Control* control() const { return control_; }
+  // Tests and probes: slot q's device state - its GDN states (state0, then gdn_slots() - 1 at spec), conv ring, hh
+  // rows (MTP; [kM + 1][hidden]) - its Control and its KV range.
+  struct SlotView {
+    const uint8_t* state0 = nullptr;
+    const uint8_t* spec = nullptr;
+    uint32_t states = 1;
+    const uint8_t* ring = nullptr;
+    const uint8_t* hh = nullptr;
+    Control* control = nullptr;
+    uint32_t base = 0, len = 0;
+  };
+  SlotView slot_view(uint32_t q) const {
+    const Seq& s = seqs_.at(q);
+    return {s.state0, s.spec, gdn_slots(), s.ring, s.hh, s.control, s.base, s.len};
+  }
+
   l0::Context& context() const { return ctx_; }
   const loader::LoadedModel& model() const { return model_; }
   KvCache kv_cache() const { return persist_.kv_lay.form; }   // spec 12b
   DecodeBuffers& buffers() { return buffers_; }
-  const CapturedStep& step() const { return step_; }
+  const CapturedStep& step() const { return plain(); }
   // Position of the next token, i.e. how many tokens this session has consumed.
   uint32_t pos() const { return control_->pos; }
-  uint32_t max_len() const { return buffers_.max_len; }
+  // Spec 13c: the selected slot's positions (max_len with one slot).
+  uint32_t max_len() const { return seqs_[cur_].len; }
 
  private:
   // One replay: the precondition, the submit, the wait. Every attention
@@ -336,7 +405,7 @@ class Engine {
   // callers see the live slot): copy the live slot into slot 0 and make 0 live.
   // Spec 19c: from the drafter's slots as well.
   void mtp_normalise_live();
-  // The live GDN slot's device address (slot 0 = gdn_state; MTP's or the drafter's slots).
+  // The live GDN slot's device address (slot 0 = gdn_state; MTP's or the drafter's slots) - the selected sequence's.
   const void* live_gdn_slot() const;
   // Spec 19c (defined in engine_prefill.cc): the prefill tail of the drafter's ring - the n staged tap rows
   // (df_pf_taps_ rows 0..n-1) at positions pos .. pos + n - 1, projected 8 rows a replay.
@@ -363,35 +432,71 @@ class Engine {
   // Spec 8: null unless the model carries the MTP head. Declared before step_ so it
   // exists when the lists are captured (constructor body).
   std::unique_ptr<MtpBuffers> mtp_;
-  CapturedStep step_;
-  std::vector<CapturedStep> draft_steps_;    // [kMaxDraft], MTP on only
-  std::vector<CapturedStep> verify_steps_;   // [M - 1] for M = 1..kSlots
-  // Spec 28c (§3, the operator's decision 3 of 2026-10-31: two lists per M are acceptable): where the measured
-  // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the
-  // list at M is captured twice - verify_steps_ by the rule at row 0's key count 1 (v2) and verify_deep_ with DPAS
-  // bound - and verify() submits the deep one when row 0's keys (pos + 1) reach verify_deep_from_. Null / never
-  // where one list serves every depth.
-  std::vector<std::unique_ptr<CapturedStep>> verify_deep_;   // [M - 1], parallel to verify_steps_
-  std::vector<uint32_t> verify_deep_from_;
+  // Spec 13c: the further sequence slots' state (null with one slot).
+  std::unique_ptr<SlotBuffers> slot_bufs_;
+  CapturedStep step_;   // slot 0's plain list (the other slots' are Seq::plain)
+
+  // Spec 13c: one sequence slot - its range of the KV caches, the device addresses of its state, its Control blocks
+  // and every list captured for it (slot 0's: the buffers' own state, today's lists; Seq::bind all null).
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  struct Seq {
+    uint32_t base = 0, len = 0;
+    SlotBind bind;                  // what its lists were captured with
+    Control* control = nullptr;
+    Control* hctl = nullptr;        // MTP
+    uint8_t* state0 = nullptr;      // GDN state 0, one whole-model state
+    uint8_t* spec = nullptr;        // states 1..: MTP's (kSlots - 1) or the drafter's (slot 0 only)
+    uint8_t* ring = nullptr;
+    uint8_t* hh = nullptr;          // MTP: [kM + 1] rows, row 0 = h_{pos-1}
+    std::vector<CapturedStep> plain;   // slots >= 1: the plain list (slot 0's is step_)
+    std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
+    std::vector<CapturedStep> verify_steps;   // [M - 1] for M = 1..kSlots
+    // Spec 28c (§3, the operator's decision 3 of 2026-10-31: two lists per M are acceptable): where the measured
+    // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the
+    // list at M is captured twice - verify_steps by the rule at row 0's key count 1 (v2) and verify_deep with DPAS
+    // bound - and verify() submits the deep one when row 0's keys (pos + 1) reach verify_deep_from. Null / never
+    // where one list serves every depth.
+    std::vector<std::unique_ptr<CapturedStep>> verify_deep;   // [M - 1], parallel to verify_steps
+    std::vector<uint32_t> verify_deep_from;
+    std::vector<uint32_t> draft_ids;
+    uint32_t verify_k = kNoVerify, verify_pos = 0;
+    // Where commit(j) takes row j's hidden: hh row 1 after verify(), the row list's saved row r0 after verify_rows.
+    const uint8_t* verify_hidden = nullptr;
+  };
+  std::vector<Seq> seqs_;
+  uint32_t cur_ = 0;
+  Seq& seq() { return seqs_[cur_]; }
+  const Seq& seq() const { return seqs_[cur_]; }
+  const CapturedStep& plain() const { return cur_ == 0 ? step_ : seqs_[cur_].plain.at(0); }
+  CapturedStep& plain() { return cur_ == 0 ? step_ : seqs_[cur_].plain.at(0); }
+  // Spec 13c: the row lists at M = 2..kMaxRows (index M - 2) and what they read - several slots only.
+  std::vector<CapturedStep> rows_steps_;
+  BatchRowsBind rows_bind_;
+  std::vector<CapturedStep> draft_rows_steps_;   // MTP: the row draft lists at M = 2..min(slots, kMaxDraftRows)
+  DraftRowsBind draft_bind_;
+  BatchLayout layout_;
+  uint32_t rows_m_ = 0;   // the rows of the last verify_rows
+  void setup_slots(const std::vector<uint32_t>& lens);
+  void capture_slot(uint32_t q);
+  uint32_t gdn_index(uint32_t slot, uint32_t k) const { return slot * gdn_slots() + k; }
+  void zero_slot();
+
   double verify_deep_ms_ = 0;   // the deep lists' capture time
   void capture_verify(uint32_t M, const CaptureOptions& opt);
   std::unique_ptr<l0::Mem> mtp_pf_hid_;      // prefill: bf16 [chunk_cap + 1][hidden], lazy
-  std::vector<uint32_t> draft_ids_;
   // Spec 19c: the borrowed drafter, its 7 GDN slots (TapVerifyDims), what the verify lists bind, and the
   // prefill's tap staging (bf16 [chunk_cap][taps][hidden], lazy: the first prefill).
   TapDrafter* drafter_ = nullptr;
   std::unique_ptr<l0::Mem> df_slots_;
   TapVerify df_tv_;
   std::unique_ptr<l0::Mem> df_pf_taps_;
-  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
-  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
   l0::Queue queue_;
   l0::Fence fence_;
   // Uploads, readbacks and snapshot copies only, never a token. `mutable`: the
   // save_* calls are const on the session and still append to it.
   mutable l0::CmdList imm_;
-  Control* control_;               // shared memory, inside buffers_.control
-  Control* hctl_ = nullptr;        // spec 8: the head's control block (MtpBuffers::hctl)
+  Control* control_;               // shared memory: the selected slot's (slot 0's is buffers_.control)
+  Control* hctl_ = nullptr;        // spec 8: the selected slot's head control block (slot 0's: MtpBuffers::hctl)
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
 };
 

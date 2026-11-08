@@ -39,6 +39,7 @@
 #include "cli/qwen4exp_chat.h"
 #include "cli/qwen4exp_serve.h"
 #include "cli/replica_engine.h"     // plan 13b: --parallel replica
+#include "cli/slots_engine.h"      // plan 13c: sequence slots on one card
 #include "cli/served_name.h"
 #include "cli/spec_args.h"
 #include "cli/serve_adapters.h"
@@ -1296,15 +1297,42 @@ int run(int argc, char** argv) {
   // planned with max_len and given to the engine.
   pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
-  const uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
+  uint32_t max_len = cli::settle(context, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
   const uint32_t chunk_cap =
       cli::settle_chunk_cap(context, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, 0);
+  // Plan 13c (spec 13 §11.2): an asked --max-len's spare memory becomes 32768-position sequence slots - several
+  // requests at once on this card (Qwen3.8; not beside a drafter or a draft vocabulary). auto: one slot, today's.
+  std::vector<uint32_t> slot_lens{max_len};
+  if (!max_len_arg.is_auto && !drafter_load && model.draft_vocab == nullptr &&
+      cli::replica_architecture(model.desc->architecture)) {
+    runtime::PrefillPath sp = pp_path;
+    sp.chunk_cap = chunk_cap;
+    const size_t weights = model.report.total() - model.report.rope_bytes;
+    slot_lens = runtime::slot_layout(*model.desc, max_len, model.mtp != nullptr, weights, context.memory_bytes(),
+                                     mem_reserve, sp, {}, kv_cache);
+    if (slot_lens.size() > 1) {
+      uint32_t total = 0;
+      for (uint32_t l : slot_lens) total += l;
+      loader::set_max_len(context, model, total);   // one RoPE table, one KV allocation at the slots' sum
+      max_len = total;
+      std::fprintf(stderr, "slots: %zu (%s) - several requests at once on this card; %s\n", slot_lens.size(),
+                   runtime::slot_layout_name(slot_lens).c_str(),
+                   runtime::describe(runtime::plan_slots(*model.desc, slot_lens, model.mtp != nullptr, weights, sp,
+                                                         {}, kv_cache),
+                                     context.memory_bytes(), mem_reserve)
+                       .c_str());
+    } else {
+      std::fprintf(stderr, "slots: 1 (no room for a %u-position slot beside --max-len %u)\n",
+                   runtime::SlotDims::kShortLen, max_len);
+    }
+  }
   std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
   if (drafter_load)
     drafter = std::make_unique<runtime::dflash::DFlashDrafter>(context, std::move(drafter_load->w),
                                                                drafter_load->head_rows, max_len, dflash.max_k);
   const bool draft_vocab_on = model.draft_vocab != nullptr;
-  runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get());
+  runtime::Engine engine(context, std::move(model), max_len, /*debug_resid=*/false, kv_cache, drafter.get(),
+                         slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{});
   if (drafter) drafter->attach(engine, draft_vocab_on);
   if (have_pp_backend) engine.set_prefill_backend(pp_backend);
   engine.set_prefill_chunk_cap(chunk_cap);   // plan 5d
@@ -1335,7 +1363,17 @@ int run(int argc, char** argv) {
   const std::unique_ptr<PinnedAlloc> prefix_alloc =
       make_prefix_alloc(context, prefix_auto, prefix_cache_gb, options);
   options.parallel_desc = "1 card";
-  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  // Plan 13c: several slots - the scheduler over cli::SlotsEngine (the serial server's EngineAdapter per slot, the
+  // row lists for a step of several requests).
+  std::unique_ptr<cli::SlotsEngine> slots_engine;
+  if (engine.slots() > 1) {
+    slots_engine = std::make_unique<cli::SlotsEngine>(engine, tokenizer.vocab_used(), mtp_k, spec_lookup,
+                                                      /*hooked=*/options.prefix_cache_bytes != 0);
+    options.parallel_desc = "1 card, " + std::to_string(engine.slots()) + " sequence slots (" +
+                            runtime::slot_layout_name(slot_lens) + ")";
+  }
+  server::Server server({tokenizer, chat_template, slots_engine ? slots_engine->adapter(0) : engine_adapter}, options,
+                        slots_engine.get());
 
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
                options.host.c_str(), options.port, max_len);

@@ -239,8 +239,9 @@ struct MtpBuffers : MtpDims {
   // `slots` (spec 19a, plan 19a Task 4): the GDN state slots, kSlots (4) for every engine
   // and pipeline stage; tools/probe/probe_mtp_steps alone builds a second set at 8 for its
   // verify lists at M = 5..8 (build_verify binds `gdn_step_slots_M<M>_N8` over them).
+  // `seqs` (spec 13c): the engine's sequence slots - gdn_spec and hh hold every further sequence's too (MtpDims::sizes).
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache(), uint32_t slots = kSlots);
+             uint32_t draft_vocab = 0, KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
@@ -255,6 +256,7 @@ struct MtpBuffers : MtpDims {
   // GDN state slots: slot 0 is gdn_state, gdn_spec holds slots - 1 more. A verify list
   // at M rows needs M <= slots; row m writes slot (live + m) % slots.
   uint32_t slots = kSlots;
+  uint32_t seqs = 1;   // spec 13c: the sequence slots gdn_spec / hh are sized for
 
   size_t bytes() const;
   // What Engine::reset() zeroes when MTP is on (all of it: the head's KV rows are
@@ -267,7 +269,27 @@ struct MtpBuffers : MtpDims {
 
  private:
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-             uint32_t draft_vocab, const KvLayout& kv, uint32_t slots);   // the delegate
+             uint32_t draft_vocab, const KvLayout& kv, uint32_t slots, uint32_t seqs);   // the delegate
+};
+
+// Spec 13c (plan 13c Task 2): an engine's further sequence slots - what PersistentBuffers (slot 0's state, the KV at
+// every slot's positions) and MtpBuffers (with MTP: every slot's GDN states and hh rows, MtpDims' `seqs`) do not hold.
+// Allocated only with seqs > 1; sizes SlotDims::sizes (runtime/buffer_sizes.h):
+//
+//   states    without MTP: slots 1..seqs-1's GDN state, one whole-model state each, slot-major (null with MTP)
+//   rings     slots 1..seqs-1's conv ring, one whole-model ring each, slot-major
+//   controls  shared: their Control blocks, their head Control blocks, the row lists' Control / head Control /
+//             gather Control and the two row tables, at SlotDims' offsets
+struct SlotBuffers : SlotDims {
+  SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t seqs, bool mtp);
+  std::unique_ptr<l0::Mem> states;
+  l0::Mem rings;
+  l0::Mem controls;
+  uint32_t seqs;
+
+  size_t bytes() const;
+  void zero(l0::CmdList& imm);   // every byte (Engine::reset)
+  uint8_t* control_block(size_t off) const { return controls.as<uint8_t>() + off; }
 };
 
 // The VIEW. Every public name capture.cc uses, with the same types as before

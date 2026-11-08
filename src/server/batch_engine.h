@@ -129,6 +129,11 @@ struct BatchEngineIface {
   };
   virtual uint32_t spec_k() { return 0; }
   virtual uint32_t verify_k() { return 0; }
+  // Spec 13c (the 8-row budget, spec 13 §9): the most rows one step_spec may carry when `active` rows decode (each
+  // row's pending id counts one, each draft one more); 0 = no limit, every engine before 13c. The scheduler clips the
+  // rows' K to it - every row keeps its pending id, the drafts go to the longest-running requests first - and feeds
+  // each request's policy the K it was given.
+  virtual uint32_t row_budget(uint32_t /*active*/) { return 0; }
   virtual std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) {
     std::vector<Row> plain;
     for (const SpecRow& r : rows) plain.push_back({r.slot, r.sampling, r.rng});

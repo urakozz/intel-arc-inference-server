@@ -134,6 +134,16 @@ KvLayer KvLayout::layer(void* k_base, void* v_base, uint32_t l) const {
   return r;
 }
 
+KvLayer KvLayout::at_base(KvLayer l, uint32_t base) const {
+  if (base == 0) return l;
+  auto at = [](void* p, size_t off) { return p ? static_cast<void*>(static_cast<uint8_t*>(p) + off) : nullptr; };
+  l.k = at(l.k, size_t(base) * row_bytes());
+  l.v = at(l.v, size_t(base) * row_bytes());
+  l.ks = at(l.ks, size_t(base) * scale_row_bytes());
+  l.vs = at(l.vs, size_t(base) * scale_row_bytes());
+  return l;
+}
+
 // One K (or V) allocation of `layers` FA layers in the given form (KvLayout).
 KvLayout kv_layout(uint32_t max_len, const model::ModelDesc& desc, uint32_t layers, KvCache kv) {
   KvLayout l;
@@ -250,22 +260,62 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
 }
 
 MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab,
-                        KvCache kv, uint32_t slots) {
+                        KvCache kv, uint32_t slots, uint32_t seqs) {
   if (slots < kSlots || slots > kMaxSlots)
     throw std::invalid_argument("runtime::MtpDims::sizes: " + std::to_string(slots) +
                                 " GDN state slots is outside [" + std::to_string(kSlots) + ", " +
                                 std::to_string(kMaxSlots) + "]");
+  if (seqs == 0 || seqs > SlotDims::kMaxSeqs || (seqs > 1 && slots != kSlots))
+    throw std::invalid_argument("runtime::MtpDims::sizes: " + std::to_string(seqs) +
+                                " sequences (1.." + std::to_string(SlotDims::kMaxSeqs) +
+                                ", each with kSlots GDN states)");
   MtpSizes s{};
   s.hctl = sizeof(Control);
-  s.gdn_spec = size_t{slots - 1} * gdn_state_bytes(desc);
+  // Spec 13c: every further sequence's kSlots states after the first's slots - 1.
+  s.gdn_spec = (size_t{slots - 1} + size_t{slots} * (seqs - 1)) * gdn_state_bytes(desc);
   s.kv_k = kv_layout(max_len, desc, 1, kv).bytes();   // the head's own (17th) KV layer
   s.kv_v = s.kv_k;
-  s.hh = size_t{DecodeScratchDims::kM + 1} * desc.hidden * kBf16;
+  s.hh = size_t{hh_rows(seqs)} * desc.hidden * kBf16;
   s.dh = size_t{desc.hidden} * kBf16;
   s.logits = size_t{kMaxK} * Q::kVocab * kFp32;
   s.dv_logits = size_t{draft_vocab} * kFp32;   // spec 8 §11: the compact head's logits
   return s;
 }
+
+uint32_t MtpDims::hh_rows(uint32_t seqs) {
+  const uint32_t one = DecodeScratchDims::kM + 1;
+  return seqs <= 1 ? one : seqs * one + 3 * DecodeScratchDims::kM;
+}
+
+// --- spec 13c: SlotDims --------------------------------------------------------------------
+
+namespace {
+constexpr size_t kCtl = sizeof(Control), kTable = 256;   // runtime::BatchRowTable (batch_rows.h)
+}  // namespace
+
+SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp) {
+  if (seqs == 0 || seqs > kMaxSeqs)
+    throw std::invalid_argument("runtime::SlotDims::sizes: " + std::to_string(seqs) + " sequence slots is outside [1, " +
+                                std::to_string(kMaxSeqs) + "]");
+  SlotSizes s;
+  if (seqs == 1) return s;
+  const size_t more = seqs - 1;
+  s.states = mtp ? 0 : more * gdn_state_bytes(desc);
+  s.rings = more * PersistentDims::sizes(0, desc).conv_ring;
+  s.controls = draft_table_at(seqs) + kTable;
+  return s;
+}
+// The controls block: [slot 1..seqs-1 Control][their head Control][rows][rows head][gather][draft head]
+// [rows table][head table][draft table].
+size_t SlotDims::control_at(uint32_t /*seqs*/, uint32_t seq) { return size_t(seq - 1) * kCtl; }
+size_t SlotDims::head_control_at(uint32_t seqs, uint32_t seq) { return size_t(seqs - 1 + seq - 1) * kCtl; }
+size_t SlotDims::rows_control_at(uint32_t seqs) { return size_t(2 * (seqs - 1)) * kCtl; }
+size_t SlotDims::rows_head_control_at(uint32_t seqs) { return rows_control_at(seqs) + kCtl; }
+size_t SlotDims::gather_control_at(uint32_t seqs) { return rows_control_at(seqs) + 2 * kCtl; }
+size_t SlotDims::draft_control_at(uint32_t seqs) { return rows_control_at(seqs) + 3 * kCtl; }
+size_t SlotDims::rows_table_at(uint32_t seqs) { return rows_control_at(seqs) + 4 * kCtl; }
+size_t SlotDims::head_table_at(uint32_t seqs) { return rows_table_at(seqs) + kTable; }
+size_t SlotDims::draft_table_at(uint32_t seqs) { return head_table_at(seqs) + kTable; }
 
 size_t TapVerifyDims::gdn_spec_bytes(const model::ModelDesc& desc) {
   return size_t{kSlots - 1} * gdn_state_bytes(desc);
