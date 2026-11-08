@@ -117,3 +117,50 @@ int4 linear on the default l0 backend) run a chunk of **<= 384 rows** (gate‖up
 
 Automatic, no flag or variable; the build carries those six binaries (`-DB70_PF_Q4_SWEEP=ON` the probe's sweep).
 The l0-int8 backend (`linear_i8`), the MTP head's bf16 linears and other models' own walks are unchanged.
+
+## 6. The engine, before / after
+
+`b70-decode --bench --prefill-length N --tg 1` (device-side ms, first launch to first id; card 1; main's build
+`122fb36d` and this branch as back-to-back pairs, two rounds in alternating order - the rounds agree within 3 ms):
+
+| ids | before | after | |
+|---:|---:|---:|---:|
+| 1 | 228 | **73** | 3.1x |
+| 54 | 237 | **109** | 2.2x |
+| 237 (gate‖up on the slab) | 287 | **259** | 1.11x |
+| 512 | 408 | 408 | - |
+| 1024 | 656 | 656 | - |
+| 2048 | 1164 | 1163 | - |
+| 2102 (2048 + 54) | 1405 | **1266** | 1.11x |
+
+A short turn's first token: 73 ms at 1 id, 109 at 54 (the target "well under 100 ms" holds for the shortest
+turns only; at 54 ids the linears are ~77 ms of the 109). 2102 ids: 1266 ms, below the 1.4 s target.
+
+**Tests (card 1, this branch).** `pf_gemm_test` (the new bitwise q4 cases, 0 words differ everywhere);
+prefill_smoke (+ cap4096; the launch arithmetic re-derived: a chunk of <= 192 rows is 1089 launches instead of
+8449, and the live counter agrees), prefill_gate_l0 (+ c16, i8head, kv8), prefill_consistency_l0 (+ kv8),
+prefill_determinism_l0 (+ kv8), prefill_split_l0, prefix_gpu_split_l0, snapshot, mtp_prefill, Ornith's
+ornith_prefill_l0 / l0-int8 and prefill_split_ornith_l0 (its mixer linears take the same path): all pass. The
+four l0 golden gates' printouts are **byte-identical** to main's build (every line; only the load-time lines
+differ).
+
+`b70-serve` (card 1, `--spec off`, `/v1/completions`, max_tokens 1, temperature 0; main's build and this branch
+alternating, two rounds each, the same prompts; the server's own `prefix:` prefill_ms and the client's wall):
+
+| request | prefill before | after | wall before | after |
+|---|---:|---:|---:|---:|
+| cold, 2058 ids (2048 + 10) | 1392 | **1241** | 1.49 s | 1.35 s |
+| follow-up, 4150 ids (2091 new = 2048 + 43) | 1437 | **1308** | 1.53 s | 1.40 s |
+| next turn, 4359 ids (208 new; gate‖up on the slab) | 292 | **267** | 0.36 s | 0.34 s |
+
+## 7. What is left
+
+- **193-384 rows and gate‖up.** gate‖up (47 % of the weights) goes back to the slab walk above 192 rows: its SiLU
+  epilogue needs two atoms a sub-group, and NA 8 x NB 2 spills. A 237-id turn gains only 11 %. A tile that keeps
+  64 rows x 32 columns without spilling (or the gate / up halves on two sub-groups with the epilogue through SLM)
+  would carry gate‖up to ~384 rows.
+- **A 54-id turn is 109 ms**, not "well under 100": the linears are ~77 ms of it at 33-64 rows (the conversion
+  repeats per 64-row tile and the DPAS work grows); the rest (norms, GDN, attention, head) ~30 ms.
+- `gemm_sm` (30-35 ms at 16 rows, rounds differently) is not needed for <= 16 rows any more: `pf_gemm_q4` does
+  one chunk's linears in ~51-58 ms there, bit-identical.
+- Two-card (pp) prefill runs the same `linear_l0` and gets the same kernel; not timed here.
