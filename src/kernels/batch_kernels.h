@@ -3,9 +3,9 @@
 
 #include "kernels/shape_suffix.h"
 
-// Spec 13a (plan 13a Task 2): the batching probe's device binaries by name - the host half of src/kernels/
-// CMakeLists.txt's B70_BATCH_PROBE block, in its own header so kernels.h is not edited (dflash_kernels.h's
-// arrangement). Define-free, so the host test (tests/runtime/batch_rows_test.cc) includes it without a kernel dir.
+// Spec 13a (plan 13a Task 2) / 13c: the row builds' device binaries by name - the host half of src/kernels/
+// CMakeLists.txt's "rows of different sequences" block (built by default since plan 13c), in its own header so
+// kernels.h is not edited (dflash_kernels.h's arrangement). Define-free, so the host test (tests/runtime/batch_rows_test.cc) includes it without a kernel dir.
 //
 // A `_ROWS` binary is its production twin with -DBATCH_ROWS: the per-sequence quantities - the position, the KV base,
 // the GDN state read and written, the conv ring - come from the row table (runtime::BatchRowTable, the extra last
@@ -14,7 +14,7 @@
 namespace kernels {
 
 // The row table's words as the kernels index it: the BROW_DEFINES line of src/kernels/CMakeLists.txt. The host
-// struct is runtime::BatchRow (runtime/batch_rows.h); src/runtime/capture.cc (B70_BATCH_PROBE) static_asserts the
+// struct is runtime::BatchRow (runtime/batch_rows.h); src/runtime/capture.cc static_asserts the
 // two together and tests/runtime/batch_rows_test.cc repeats the values.
 namespace batch_row {
 inline constexpr unsigned kWords = 8;    // BROW_WORDS: one row's stride

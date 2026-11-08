@@ -30,7 +30,10 @@
 // isolation: no src state and no KV row of a window [pos - 8, pos + 16) of any slot moves in the B-row step but the
 // rows' own. Then the PRODUCTION tie for slot 0 at the deep depth: Engine::verify(0) and verify(3) with MTP (the lists
 // that ship at M = 1 and 4), Engine::generate(1) without - logits bitwise the row list's for slot 0 alone (state 0 is
-// restored around them). "CHECK <arm>: PASS|FAIL ..." per arm, "check: PASS|FAIL" at the end.
+// restored around them). "CHECK <arm>: PASS|FAIL ..." per arm, "check: PASS|FAIL" at the end. Since plan 13c two
+// rounding classes are printed, not failed (spec 13 section 11.3: the f32 judge grades them): a one-row run inside a
+// step of several rows against its M = 1 list (gemm_sm against the GEMV), and the production M > 1 tie at a depth
+// where the production list binds the DPAS verify attention.
 //
 // **The timing** (unless --no-time): every arm against the baseline `1x1@<shallow>` (one row of slot 1) as INTERLEAVED
 // PAIRS - baseline and arm back to back, the order alternating by round, `calls` replays each - after a warm-up of
@@ -386,7 +389,7 @@ struct Probe {
     }
     replay(l, t);
     const std::vector<RowOut> batch = outputs(t);
-    int bad = 0;
+    int bad = 0, rounding = 0;
     std::string why;
     for (uint32_t s = 0; s < B; ++s) {
       if (state_hash(s) != src0[s]) {
@@ -404,6 +407,15 @@ struct Probe {
       const std::vector<runtime::BatchRow> ta = table(a, int(a.slots[i]));
       replay(list(ta), ta);
       const std::vector<RowOut> alone = outputs(ta);
+      // A one-row run alone is the M = 1 list (the GEMV); inside a step of several rows its linears are spec 28b's
+      // gemm_sm - a different rounding, which spec 13 section 11.3 judges by the f32 judge (plan 13c's slots_test
+      // S4, r78.batch), not here: counted and printed, not failed. Runs of two or more rows stay bitwise.
+      if (ta.size() == 1 && t.size() > 1) {
+        const RowOut &x = batch[m0], &y = alone[0];
+        rounding += std::memcmp(x.logits.data(), y.logits.data(), x.logits.size() * 4) != 0 || x.id != y.id;
+        m0 += 1;
+        continue;
+      }
       for (size_t j = 0; j < ta.size(); ++j) {
         const RowOut &x = batch[m0 + j], &y = alone[j];
         const std::string w = " row" + std::to_string(m0 + j);
@@ -415,8 +427,11 @@ struct Probe {
       }
       m0 += uint32_t(ta.size());
     }
+    if (rounding)
+      why += " (" + std::to_string(rounding) + " one-row run(s) differ from their M = 1 list: GEMV against gemm_sm, "
+             "not compared)";
     std::printf("CHECK %-20s M=%u: %s%s\n", a.name.c_str(), a.m(), bad ? "FAIL" : "PASS",
-                bad ? why.c_str() : " (each slot's rows bitwise its run alone: logits, ids, GDN states, KV and head KV "
+                bad || rounding ? why.c_str() : " (each slot's rows bitwise its run alone: logits, ids, GDN states, KV and head KV "
                                     "rows; no other slot's source or KV moved)");
     return bad;
   }
@@ -454,10 +469,15 @@ struct Probe {
       int b = 0;
       for (uint32_t r = 0; r <= k; ++r)
         b += std::memcmp(prod[r].logits.data(), rowsout[r].logits.data(), prod[r].logits.size() * 4) != 0;
+      // The production M > 1 verify list binds spec 28c's DPAS verify attention at depth (the rows: attention v2) -
+      // printed, not failed; the M = 1 tie is bitwise.
+      const bool dpas = k > 0 && b;
       std::printf("CHECK production M=%u (%s) vs rows 1x%u@%s: %s\n", k + 1,
                   mtp ? "Engine::verify" : "Engine::generate, the plain list", k + 1, kname(deep).c_str(),
-                  b ? "FAIL (logits differ)" : "PASS (logits bitwise)");
-      bad += b;
+                  !b ? "PASS (logits bitwise)"
+                     : dpas ? "differ (the production list's DPAS verify attention at this depth; not compared)"
+                            : "FAIL (logits differ)");
+      if (!dpas) bad += b;
     }
     restore();
     return bad;
