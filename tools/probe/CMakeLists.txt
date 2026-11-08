@@ -530,8 +530,8 @@ if(B70_MTP)
 endif()
 # --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
-# Only with -DB70_BATCH_PROBE=ON (src/kernels' row builds; b70_runtime then compiles runtime::build_rows).
-if(B70_BATCH_PROBE)
+# Spec 13c: built by default (the row builds and runtime::build_rows are the batched engine's since plan 13c).
+if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   add_executable(probe_batch_step probe_batch_step.cc)
   target_include_directories(probe_batch_step PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_batch_step PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
