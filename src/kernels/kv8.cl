@@ -710,6 +710,16 @@ inline uint2 kv8_bf4(uint w) {
                  kv8_bf(c.s2) | (kv8_bf(c.s3) << 16));
 }
 
+inline float kv8_flash_scale(__global const ushort* p, size_t i) {
+#if KV8_RAW
+  // The writer saturates scales at 65504. Native widening is exact for every finite
+  // fp16 code, including subnormals and signed zero (kv8_scale_test).
+  return vload_half(i, (__global const half*)p);
+#else
+  return kv8_f16f(p[i]);
+#endif
+}
+
 #if KV8_RAW
 // Every input row has 4 * HD values, a multiple of the 16-value vector below.
 __attribute__((reqd_work_group_size(256, 1, 1)))
@@ -802,8 +812,8 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     for (uint b = 0; b < NKA; ++b) {
       const uint key = t0 + 16u * b + l;
       const bool live = key < depth;
-      const float sk = live ? kv8_f16f(Ks[(size_t)key * 4u + j]) : 0.0f;
-      svl[b] = live ? kv8_f16f(Vs[(size_t)key * 4u + j]) : 0.0f;
+      const float sk = live ? kv8_flash_scale(Ks, (size_t)key * 4u + j) : 0.0f;
+      svl[b] = live ? kv8_flash_scale(Vs, (size_t)key * 4u + j) : 0.0f;
 #define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && live) ? (sacc[b].s##r * sk) * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
 #undef MASK
