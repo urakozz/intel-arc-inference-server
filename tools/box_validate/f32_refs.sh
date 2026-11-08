@@ -138,7 +138,7 @@ case "$what" in
         k=$(basename "$f" .prompt.ids)
         case "$k" in
           mtp_gpu_*) c="$part/ctx-pfi8" ;;
-          mtp_verify_qwen3.8_*|dflash_*) c="$part/ctx" ;;
+          mtp_verify_qwen3.8_*|dflash_*|serve_*|slots_*) c="$part/ctx" ;;   # serve / slots: serve_judge.py's contexts
           *) continue ;;
         esac
         [ -e "$c/$k.prompt.ids" ] && continue
