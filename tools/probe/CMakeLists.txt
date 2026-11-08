@@ -944,6 +944,16 @@ target_link_libraries(probe_small_chunk PRIVATE b70_prefill_host b70_runtime b70
 b70_target_kernel_dir(probe_small_chunk)
 add_dependencies(probe_small_chunk ${PCR_PF_KERNELS} ${ALL_KERNELS})
 
+# --- probe_fused_small: open-work 3b, short chunks' int4 linears without the bf16 slab ------------
+# Record: docs/probes/probe-fused-small-chunk-2026-11-08.md. pf_gemm_q4 (src/kernels/prefill/
+# pf_gemm_q4.cl) against the slab walk (pf_dequant_slab + gemm_l0), bitwise, then timed interleaved.
+# -DB70_PF_Q4_SWEEP=ON builds every tile it sweeps; a tile the build lacks is skipped with a line.
+add_executable(probe_fused_small probe_fused_small.cc)
+target_include_directories(probe_fused_small PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_fused_small PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_fused_small)
+add_dependencies(probe_fused_small ${PCR_PF_KERNELS})
+
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
 # Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime

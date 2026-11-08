@@ -145,6 +145,12 @@ inline std::string pf_gemm_small_variant(unsigned NA, unsigned NB, unsigned SN, 
   return "pf_gemm_small_A" + std::to_string(NA) + "_B" + std::to_string(NB) + "_S" + std::to_string(SN) +
          (silu ? "_SILU" : "");
 }
+// Open-work 3b: pf_gemm_small reading the int4 weights directly (pf_gemm_q4.cl), one launch per
+// linear at the weight's layout; bit-identical to the slab walk (pf_dequant_slab + the above).
+inline std::string pf_gemm_q4_variant(unsigned NA, unsigned NB, unsigned SN, unsigned layout, bool silu) {
+  return "pf_gemm_q4_A" + std::to_string(NA) + "_B" + std::to_string(NB) + "_S" + std::to_string(SN) + "_L" +
+         std::to_string(layout) + (silu ? "_SILU" : "");
+}
 inline constexpr unsigned kPfSlabWidth = 1024;   // columns per pf_dequant_slab / slab GEMM
 inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout) {
   return "pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N) + "_L" +

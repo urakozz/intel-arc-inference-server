@@ -150,6 +150,44 @@ foreach(tile IN LISTS _pf_small_tiles)
                    DEFINES NA=${NA} NB=${NB} SN=${SN} SILU_EPI=1 ${_grf})
 endforeach()
 
+# Open-work 3b: pf_gemm_small reading the int4 weights directly (pf_gemm_q4.cl) - no bf16 slab,
+# bit-identical to the slab walk; per tile a layout-0 and a layout-1 plain binary and a layout-0
+# SiLU one (gate||up is GPTQ-native). 256 GRF where the accumulators and the two groups of words
+# fill the default 128. -DB70_PF_Q4_SWEEP=ON builds tools/probe/probe_fused_small.cc's sweep
+# (NA 1/2/4 x NB 1/2/4 x SN 1/2/4) instead.
+option(B70_PF_Q4_SWEEP "build every pf_gemm_q4 tile probe_fused_small sweeps" OFF)
+set(_pf_q4_tiles "1 2 1")
+if(B70_PF_Q4_SWEEP)
+  set(_pf_q4_tiles "")
+  foreach(NA 1 2 4)
+    foreach(NB 1 2 4)
+      foreach(SN 1 2 4)
+        list(APPEND _pf_q4_tiles "${NA} ${NB} ${SN}")
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
+foreach(tile IN LISTS _pf_q4_tiles)
+  separate_arguments(_t UNIX_COMMAND "${tile}")
+  list(GET _t 0 NA)
+  list(GET _t 1 NB)
+  list(GET _t 2 SN)
+  math(EXPR _acc "${NA} * ${NB}")
+  set(_grf "")
+  if(_acc GREATER_EQUAL 4)
+    set(_grf OPTIONS -cl-intel-256-GRF-per-thread)
+  endif()
+  foreach(L 0 1)
+    add_ocloc_kernel(pf_gemm_q4_A${NA}_B${NB}_S${SN}_L${L} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
+                     DEFINES NA=${NA} NB=${NB} SN=${SN} LAYOUT=${L} ${_grf})
+  endforeach()
+  math(EXPR _odd "${NB} % 2")
+  if(_odd EQUAL 0)
+    add_ocloc_kernel(pf_gemm_q4_A${NA}_B${NB}_S${SN}_L0_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
+                     DEFINES NA=${NA} NB=${NB} SN=${SN} LAYOUT=0 SILU_EPI=1 ${_grf})
+  endif()
+endforeach()
+
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
 set(PF_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_dequant_slab.cl)
