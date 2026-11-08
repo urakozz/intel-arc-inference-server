@@ -5,10 +5,10 @@
 // Pinned:
 //   1. one slot is plan() itself, field for field (--max-len auto and an explicit length that leaves no room: today);
 //   2. the layout §9.1 decided (1 x 131072 + 3 x 32768, int8 KV, MTP) reconciles byte for byte with spec 13 §9.1's
-//      method (runtime::batch_memory) - plan_slots counts exactly three things more: the RoPE table at the summed
+//      method (runtime::batch_memory) - plan_slots also counts the RoPE table at the summed
 //      positions (the engine loads one table at max_len = the sum; batch_memory's at the longest slot), the further
 //      slots' hh rows and the row lists' (MtpDims::hh_rows) and SlotDims' control blocks - and its total to §9.1's
-//      printed precision (on the l0 prefill path: §9.1 priced l0-int8);
+//      printed precision, plus int8 prefill's raw scratch at the summed positions (3e);
 //   3. slot_layout's rule: slot 0 at the asked length, then 32768-position slots while they fit with the reserve, at
 //      most four in all, never a shorter one; the layouts of the bf16 and int8 KV forms at the asked lengths an agentic
 //      session would pick (printed: they are the startup lines the operator reads).
@@ -64,20 +64,22 @@ void check_decided_layout() {
   CHECK(p.slot_lens == lens);
   const runtime::BatchMemory b = runtime::batch_memory(q, runtime::main_and_short(4, 131072, 32768, true),
                                                        KvCache::Int8, kQwenInt8Weights, kMtpWeights);
-  // The three things plan_slots counts beyond §9.1's method, exactly.
+  // The engine sizes RoPE and its reusable raw-widening buffer at the summed positions.
   const size_t rope = model::Qwen35::rope_table_bytes(229376) - model::Qwen35::rope_table_bytes(131072);
   const size_t hh = size_t(runtime::MtpDims::hh_rows(4) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
   const size_t ctl = runtime::SlotDims::sizes(q, 4, true).controls;
+  const size_t raw = size_t{229376 - 131072} * 4 * 256 * 2 * 2;
   CHECK_EQ(ctl, size_t{10} * 128 + 3 * 256);
-  CHECK_EQ(p.total(), b.total() + rope + hh + ctl);
+  CHECK_EQ(p.total(), b.total() + rope + hh + ctl + raw);
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
   CHECK_EQ(p.slot_state, size_t{3} * (4 * size_t{150994944} + 15728640) + hh + ctl);
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
-  CHECK_NEAR(p.total() / kGB, 29.03, 0.01);
+  CHECK_NEAR(p.total() / kGB, 29.03 + double(size_t{229376} * 4 * 256 * 2 * 2) / kGB, 0.01);
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
-              "controls %zu B), spare %.3f GB\n",
-              p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, (double(kDevice - kReserve) - p.total()) / kGB);
+              "controls %zu B + raw %.3f GB), spare %.3f GB\n",
+              p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, raw / kGB,
+              (double(kDevice - kReserve) - p.total()) / kGB);
   // Without MTP: one GDN state a further slot (SlotDims' states), no head KV, no hh rows.
   const runtime::MemoryPlan n = runtime::plan_slots(q, lens, false, kQwenInt8Weights, {}, {}, KvCache::Int8);
   CHECK_EQ(n.slot_state, size_t{3} * (size_t{150994944} + 15728640) + ctl);
