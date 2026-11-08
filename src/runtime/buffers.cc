@@ -152,12 +152,12 @@ size_t PrefillScratch::lazy_bytes() const {
 // --- MtpBuffers (spec 8) -----------------------------------------------------
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                       uint32_t draft_vocab_size, KvCache kv, uint32_t n_slots)
-    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv, n_slots),
-                 draft_vocab_size, kv_layout(max_len, desc, 1, kv), n_slots) {}
+                       uint32_t draft_vocab_size, KvCache kv, uint32_t n_slots, uint32_t n_seqs)
+    : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv, n_slots, n_seqs),
+                 draft_vocab_size, kv_layout(max_len, desc, 1, kv), n_slots, n_seqs) {}
 
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
-                       uint32_t draft_vocab_size, const KvLayout& kv, uint32_t n_slots)
+                       uint32_t draft_vocab_size, const KvLayout& kv, uint32_t n_slots, uint32_t n_seqs)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),
       gdn_spec(ctx, l0::MemKind::Device, s.gdn_spec),
       kv_k(ctx, l0::MemKind::Device, s.kv_k),
@@ -171,7 +171,8 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
       max_len(max_len),
       draft_vocab(draft_vocab_size),
       kv_lay(kv),
-      slots(n_slots) {
+      slots(n_slots),
+      seqs(n_seqs) {
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
 }
@@ -186,6 +187,27 @@ void MtpBuffers::zero(l0::CmdList& imm) {
 size_t MtpBuffers::bytes() const {
   return hctl.size() + gdn_spec.size() + kv_k.size() + kv_v.size() + hh.size() + dh.size() +
          logits.size() + (dv_logits ? dv_logits->size() : 0);
+}
+
+// --- SlotBuffers (spec 13c) --------------------------------------------------
+
+SlotBuffers::SlotBuffers(l0::Context& ctx, const model::ModelDesc& desc, uint32_t n_seqs, bool mtp)
+    : states(SlotDims::sizes(desc, n_seqs, mtp).states
+                 ? std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, SlotDims::sizes(desc, n_seqs, mtp).states)
+                 : nullptr),
+      rings(ctx, l0::MemKind::Device, SlotDims::sizes(desc, n_seqs, mtp).rings),
+      controls(ctx, l0::MemKind::Shared, SlotDims::sizes(desc, n_seqs, mtp).controls),
+      seqs(n_seqs) {
+  l0::CmdList imm = l0::CmdList::immediate(ctx);
+  zero(imm);
+}
+
+size_t SlotBuffers::bytes() const { return (states ? states->size() : 0) + rings.size() + controls.size(); }
+
+void SlotBuffers::zero(l0::CmdList& imm) {
+  if (states) imm.fill(states->ptr(), 0u, states->size());
+  imm.fill(rings.ptr(), 0u, rings.size());
+  imm.fill(controls.ptr(), 0u, controls.size());
 }
 
 // --- DecodeBuffers, the view -------------------------------------------------

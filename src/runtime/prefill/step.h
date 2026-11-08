@@ -44,11 +44,22 @@ struct PrefillTaps {
   uint32_t n_taps = 0;
   uint32_t r0 = 0;
 };
+//
+// `slot` (spec 13c, an engine with sequence slots): the chunk belongs to that slot - its GDN state and conv ring
+// (one whole-model state / ring each, in place of gdn_state_mem / conv_ring_mem, which then only size-check the
+// layout) and its KV range from `kv_base` (every layer's rows and scales moved there, KvLayout::at_base: the
+// attention writes and reads the slot's positions only). `pos` is the slot's own position. Null is the walk
+// above, unchanged.
+struct PrefillSlot {
+  void* gdn_state = nullptr;
+  void* conv_ring = nullptr;
+  uint32_t kv_base = 0;
+};
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C,
                 l0::Mem& gdn_state_mem, l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem,
                 l0::Mem& kv_v_mem, const KvLayout& kv, PrefillBackend backend, Int8State* q,
-                const PrefillTaps* taps = nullptr);
+                const PrefillTaps* taps = nullptr, const PrefillSlot* slot = nullptr);
 
 // Spec 16c (pipeline parallel prefill across two B70s): step_chunk restricted to one pipeline
 // stage's layers [st.first, st.last), on the device `cx` / `s` / `m` belong to - `m` a stage
