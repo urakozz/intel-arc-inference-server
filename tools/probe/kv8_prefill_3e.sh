@@ -6,13 +6,16 @@ mode=${1:?profile or bench}
 snap=${2:?snapshot}
 before=${3:?baseline build directory}
 after=${4:-$before}
+unset B70_PREFILL_PROFILE
 out="$HOME/b70/logs/3e"
 mkdir -p "$out"
 
 run() {
   local build=$1 kv=$2 n=$3 log=$4
+  local max_len=131072
+  if [ "$mode" = profile ]; then max_len=65536; fi
   "$build/src/cli/b70-decode" "$snap" --bench --prefill-length "$n" \
-    --max-len 131072 --tg 16 --parallel 1 --kv-cache "$kv" > "$out/$log.log" 2>&1
+    --max-len "$max_len" --tg 16 --parallel 1 --kv-cache "$kv" > "$out/$log.log" 2>&1
   sed -n '/^pp:/p; /^  attn_flash /p; /^  TOTAL /p' "$out/$log.log"
 }
 
@@ -27,6 +30,7 @@ case "$mode" in
     done
     ;;
   bench)
+    [ "$before" != "$after" ] || { echo "bench needs distinct before/after builds" >&2; exit 2; }
     for build in "$before" "$after"; do
       for kv in bf16 int8; do
         run "$build" "$kv" 15257 "warmup-${build##*/}-$kv"
