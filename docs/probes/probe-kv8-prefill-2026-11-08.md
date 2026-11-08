@@ -27,3 +27,21 @@ Logs: `~/b70/logs/3e/profile-{bf16,int8}-before.log` and
 exited 1 because its script was updated in place during execution; subsequent
 jobs must run fixed script copies. This does not invalidate the completed
 profile tables or benchmark rows.
+
+
+## First candidate: 2D int8 block reads
+
+K uses transposed 32-bit block reads, V uses the 8-bit transform read. Raw
+int8 values widen exactly to bf16 in registers; the scales, accumulation
+order, tile order and probability rounding are unchanged. No runtime switch.
+
+The detached build and comparison completed with `ALLDONE rc=0`. Every
+fp32 output word (including padding) and gated bf16 word matched the original
+kernel for nine shapes, through a last position of 128000. Initial 15257-id
+unprofiled times were bf16 9875.6 ms and int8 10721.0 ms (8.56% behind bf16).
+Profiled flash GPU time fell from 11876.6 to 1904.8 ms (bf16 1179.8 ms).
+This is a substantial improvement but does not yet meet the approximately
+5% target. Next: full-chunk bitwise cases at long positions, register-resident
+Q / GRF compile probes, the required engine gates and interleaved paired runs.
+
+Log: `~/b70/logs/3e/block-read-driver.log`.
