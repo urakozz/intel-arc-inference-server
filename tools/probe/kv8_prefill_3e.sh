@@ -22,11 +22,11 @@ run() {
 case "$mode" in
   profile)
     for kv in bf16 int8; do
-      run "$before" "$kv" 15257 "profile-warmup-$kv"
+      run "$before" "$kv" 15257 "profile-${before##*/}-warmup-$kv"
     done
     export B70_PREFILL_PROFILE=1
     for kv in bf16 int8; do
-      run "$before" "$kv" 15257 "profile-$kv"
+      run "$before" "$kv" 15257 "profile-${before##*/}-$kv"
     done
     ;;
   bench)
