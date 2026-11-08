@@ -154,7 +154,7 @@ endforeach()
 # bit-identical to the slab walk; per tile a layout-0 and a layout-1 plain binary and a layout-0
 # SiLU one (gate||up is GPTQ-native). 256 GRF where the accumulators and the two groups of words
 # fill the default 128. -DB70_PF_Q4_SWEEP=ON builds tools/probe/probe_fused_small.cc's sweep
-# (NA 1/2/4 x NB 1/2/4 x SN 1/2/4) instead.
+# (NA 1/2/4 x NB 1/2/4 x SN 1/2/4, and NA 8 x NB 1/2 x SN 1/2) instead.
 option(B70_PF_Q4_SWEEP "build every pf_gemm_q4 tile probe_fused_small sweeps" OFF)
 set(_pf_q4_tiles "1 2 1")
 if(B70_PF_Q4_SWEEP)
@@ -166,6 +166,7 @@ if(B70_PF_Q4_SWEEP)
       endforeach()
     endforeach()
   endforeach()
+  list(APPEND _pf_q4_tiles "8 1 1" "8 2 1" "8 1 2" "8 2 2")
 endif()
 foreach(tile IN LISTS _pf_q4_tiles)
   separate_arguments(_t UNIX_COMMAND "${tile}")

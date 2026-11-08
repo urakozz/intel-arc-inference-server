@@ -33,7 +33,7 @@
 #pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
 
 #ifndef NA
-#error "pf_gemm_q4: NA (8-row blocks per sub-group: 1, 2 or 4) must be defined"
+#error "pf_gemm_q4: NA (8-row blocks per sub-group: 1, 2, 4 or 8) must be defined"
 #endif
 #ifndef NB
 #error "pf_gemm_q4: NB (16-column atoms per sub-group: 1, 2 or 4) must be defined"
@@ -50,8 +50,8 @@
 #ifndef PFD
 #define PFD 2   /* layout 0: the 2D prefetch distance, in 64-k groups */
 #endif
-#if NA != 1 && NA != 2 && NA != 4
-#error "pf_gemm_q4: NA is 1, 2 or 4"
+#if NA != 1 && NA != 2 && NA != 4 && NA != 8
+#error "pf_gemm_q4: NA is 1, 2, 4 or 8"
 #endif
 #if NB != 1 && NB != 2 && NB != 4
 #error "pf_gemm_q4: NB is 1, 2 or 4"
@@ -65,6 +65,8 @@
 #define GROUP 64
 #define TILE_U32 136
 #define R (8 * NA)          /* a sub-group's rows */
+#define RA (R < 32 ? R : 32)  /* the rows one A block read carries (NA 8: two reads of 32) */
+#define NR (R / RA)
 #define CN (16 * NB)        /* a sub-group's columns */
 
 // **Copied verbatim from pf_dequant_slab.cl** (and pf_prep.cl's, the SiLU chain's): round to
@@ -104,9 +106,10 @@ inline int8 q4_half(uint w0, uint w1, float scale) {
   return as_int8(v);
 }
 
-// The A fragment of one 32-k tile: R rows x 32 k (pf_gemm_small.cl's read_a).
+// The A fragment of one 32-k tile: RA rows x 32 k, afrag[c RA + r] = A[mb + r][k0 + 16 c + lane]
+// (pf_gemm_small.cl's read_a; NA 8 reads twice, rows mb and mb + 32).
 inline void read_a(__global const ushort* A, int a_w, int a_h, int a_p, int k0, int mb, __private ushort* afrag) {
-#if NA == 4
+#if NA >= 4
   intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)A, a_w, a_h, a_p, (int2)(k0, mb), afrag);
 #elif NA == 2
   intel_sub_group_2d_block_read_16b_16r16x2c((__global void*)A, a_w, a_h, a_p, (int2)(k0, mb), afrag);
@@ -115,8 +118,11 @@ inline void read_a(__global const ushort* A, int a_w, int a_h, int a_p, int k0, 
 #endif
 }
 inline void prefetch_a(__global const ushort* A, int a_w, int a_h, int a_p, int k, int mb) {
-#if NA == 4
+#if NA >= 4
   intel_sub_group_2d_block_prefetch_16b_32r16x2c((__global void*)A, a_w, a_h, a_p, (int2)(k, mb));
+#if NA == 8
+  intel_sub_group_2d_block_prefetch_16b_32r16x2c((__global void*)A, a_w, a_h, a_p, (int2)(k, mb + 32));
+#endif
 #elif NA == 2
   intel_sub_group_2d_block_prefetch_16b_16r16x2c((__global void*)A, a_w, a_h, a_p, (int2)(k, mb));
 #else
@@ -202,12 +208,13 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
 #pragma unroll
     for (int h = 0; h < 2; ++h) {   // the group's two 32-k tiles, in k order
       const uint k0 = g * GROUP + (uint)h * WG_K;
-      ushort afrag[2 * R];
+      ushort afrag[NR][2 * RA];
       // A's k moves in the BASE (k0 bf16 = 64-byte multiples), not the block's x coordinate: with
       // the coordinate, IGC 2.41's layout-1 build read k 0..63 in every group (the read's payload
       // kept its first x; the layout-0 build, with 2D weight reads beside it, did not) - found by
       // probe_fused_small's bitwise gate, 2026-11-08.
-      read_a(A + k0, a_w - (int)(2u * k0), a_h, a_p, 0, (int)mb, afrag);
+#pragma unroll
+      for (int r = 0; r < NR; ++r) read_a(A + k0, a_w - (int)(2u * k0), a_h, a_p, 0, (int)mb + RA * r, afrag[r]);
       if (g + 1 < num_groups)
         prefetch_a(A + k0 + GROUP, a_w - (int)(2u * (k0 + GROUP)), a_h, a_p, 0, (int)mb);
       // pf_gemm's k16 halves, the same DPAS per accumulator in the same order.
@@ -215,7 +222,8 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
       for (int ks = 0; ks < 2; ++ks) {
         short8 af[NA];
 #pragma unroll
-        for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag + (uint)(ks * R + 8 * a)));
+        for (int a = 0; a < NA; ++a)
+          af[a] = as_short8(vload8(0, afrag[a / (RA / 8)] + (uint)(ks * RA + 8 * (a % (RA / 8)))));
 #pragma unroll
         for (int b = 0; b < NB; ++b) {
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
