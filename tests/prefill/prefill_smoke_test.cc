@@ -129,12 +129,13 @@ int main(int argc, char** argv) {
 
   // The launch arithmetic, pinned. `step_chunk_launches(model::qwen38(), )` is derived from the
   // walk itself (src/runtime/prefill/step.cc's closing block); one chunk from a fresh engine
-  // advances the counter by it + 5 for the head (8449 + 5 in Flash mode, 8625 + 5 composed, at
-  // this C). If this ever differs, print both and re-derive the arithmetic from the walk.
+  // advances the counter by it + 5 for the head (1089 + 5 in Flash mode, 1265 + 5 composed, at
+  // this C: open-work 3b runs each int4 linear of a chunk this short as ONE pf_gemm_q4 launch).
+  // If this ever differs, print both and re-derive the arithmetic from the walk.
   const size_t per_chunk =
       runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort);
   const size_t head = runtime::prefill::kStepHeadLaunches;
-  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 8449 : 8625));
+  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 1089 : 1265));
   CHECK_EQ(head, size_t(5));
   CHECK_EQ(eng.prefill_launches(), per_chunk + head);
   std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk\n", per_chunk, head,
@@ -148,18 +149,20 @@ int main(int argc, char** argv) {
   // GEMM's epilogue and every layer loses one launch. 8625 while one block covers the chunk
   // (C <= 256, this test's own shape) and 9073 at the C = 2048 the bench and the server run
   // (1 + 48 x 135 + 16 x (130 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
-  // block).
+  // block). Open-work 3b: at C <= 192 every int4 linear is one launch (1 + 48 x 19 + 16 x 22 =
+  // 1265 composed at this C), at 193..384 all but gate||up.
   runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
   CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort),
-           size_t(8625));
+           size_t(1265));
   CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048),
            size_t(9073));
   // Spec 6: in Flash mode attention is ONE launch per FA layer, so a chunk drops by
-  // 16 x (attn_chunk_launches_composed(C) - 1) and stops depending on C: 8449 on L0 and
-  // 8705 on l0-int8 at C = 64 (drop 176), 1000 (drop 368) and 2048 (drop 624). Derived:
-  // 1 + 48 x 135 + 16 x 123.
+  // 16 x (attn_chunk_launches_composed(C) - 1): 8449 on L0 and 8705 on l0-int8 at C = 1000
+  // (drop 368) and 2048 (drop 624), 1 + 48 x 135 + 16 x 123 (derived); at C = 64 (drop 176)
+  // l0-int8 is 8705 and L0 1089 (open-work 3b: 1 + 48 x 19 + 16 x 11, one pf_gemm_q4 launch
+  // a linear), at C = 300 L0 5377 (gate||up back on its 68 slab launches: 1 + 48 x 86 + 16 x 78).
   for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0, runtime::PrefillBackend::L0Int8})
-    for (uint32_t C : {kShort, 1000u, 2048u}) {
+    for (uint32_t C : {kShort, 300u, 1000u, 2048u}) {
       runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
       const size_t composed = runtime::prefill::step_chunk_launches(model::qwen38(), b, C);
       runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
@@ -169,19 +172,21 @@ int main(int argc, char** argv) {
       std::printf("  %s C = %4u: composed %zu, flash %zu (drop %zu)\n",
                   runtime::prefill_backend_name(b), C, composed, flash, drop);
       CHECK_EQ(composed - flash, drop);
-      CHECK_EQ(flash, size_t(b == runtime::PrefillBackend::L0 ? 8449 : 8705));
-      CHECK_EQ(drop, size_t(C == kShort ? 176 : C == 1000u ? 368 : 624));
+      const bool l0 = b == runtime::PrefillBackend::L0;
+      CHECK_EQ(flash, size_t(!l0 ? 8705 : C == kShort ? 1089 : C == 300u ? 5377 : 8449));
+      CHECK_EQ(drop, size_t(C == kShort ? 176 : C == 300u ? 240 : C == 1000u ? 368 : 624));
     }
   runtime::prefill::set_attn_mode_for_test(env_mode);
   // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
-  // adds exactly one launch (the activation quantiser): 4 per layer, +256 per chunk.
+  // adds exactly one launch (the activation quantiser): 4 per layer, +256 per chunk - above
+  // kPfQ4MaxRows, where L0 walks the same slabs (open-work 3b: below, L0 is one launch a linear).
   {
     runtime::PrefillBackend b{};
     CHECK(runtime::parse_prefill_backend("l0-int8", b) && b == runtime::PrefillBackend::L0Int8);
     CHECK(std::string(runtime::prefill_backend_name(runtime::PrefillBackend::L0Int8)) ==
           "l0-int8");
     CHECK(!runtime::parse_prefill_backend("sycl-tla", b));
-    for (uint32_t C : {kShort, 1000u, 2048u})
+    for (uint32_t C : {1000u, 2048u})
       CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0Int8, C),
                runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C) + 256);
     std::printf("l0-int8 backend: %zu launches at C = %u and %zu at C = 2048 (L0 + 256)\n",

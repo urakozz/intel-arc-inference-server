@@ -12,6 +12,7 @@
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/linear_l0.h"
 #include "runtime/prefill/moe.h"
@@ -481,21 +482,32 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
 // chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8705).
 // The composed reference (a test's set_attn_mode_for_test) gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
+// L0 (open-work 3b): an int4 linear of C <= kPfQ4MaxRows rows (gate||up's SiLU form: C <=
+// kPfQ4SiluMaxRows) is ONE pf_gemm_q4 launch instead of its slab walk (pf_q4_tile), so the count
+// depends on C again: Flash, C <= 192: 1 + 48 x 19 + 16 x 11 = 1089; 193..384: gate||up back on
+// its 68 slab launches, 1 + 48 x 86 + 16 x 78 = 5377; above, 8449 as before (derived). l0-int8's
+// linears are its own walk (linear_i8) and keep the slab count.
 namespace {
 constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
-// The 2 x N / 1024 slab launches of one layer kind's four int4 linears.
-size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind) {
+// One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0
+// runs it as pf_gemm_q4 (linear_l0.cc). l0-int8's quantiser is counted by the callers.
+size_t linear_launches(const model::ModelDesc& d, LinearId id, PrefillBackend b, uint32_t C) {
+  if (b == PrefillBackend::L0 && pf_q4_tile(C, id == LinearId::GateUp) != nullptr) return 1;
+  return 2 * size_t(d.shape(id).N / 1024);
+}
+// The launches of one layer kind's four int4 linears.
+size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind, PrefillBackend b, uint32_t C) {
   size_t n = 0;
   for (LinearId id : Qwen35::linear_order(kind))
-    if (d.linear(id).kind == model::WeightKind::Int4) n += 2 * (d.shape(id).N / 1024);
+    if (d.linear(id).kind == model::WeightKind::Int4) n += linear_launches(d, id, b, C);
   return n;
 }
-size_t l0_gdn_layer_launches(const model::ModelDesc& d) {
-  return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN) - 1;   // - 1: the fused SiLU
+size_t l0_gdn_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
+  return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN, b, C) - 1;   // - 1: the fused SiLU
 }
-size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
+size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0) + kAttnGateLaunches +
-         2 + 1 + slab_launches(d, model::LayerKind::FA) - 1;   // - 1: the fused SiLU
+         2 + 1 + slab_launches(d, model::LayerKind::FA, b, C) - 1;   // - 1: the fused SiLU
 }
 }  // namespace
 // Spec 15d, a MoE model. Per layer: the input norm 2, the mixer's two
@@ -508,7 +520,7 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, uint32_t C) {
 namespace {
 size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   auto lin = [&](LinearId id) {
-    return 2 * size_t(d.shape(id).N / 1024) + (b == PrefillBackend::L0Int8 ? 1 : 0);
+    return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
   };
   const size_t ffn = 2 + moe_chunk_launches(d, b);
   const size_t gdn = 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn;
@@ -521,7 +533,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   if (d.is_moe()) return moe_step_chunk_launches(d, b, C);
   const size_t base =
-      1 + d.gdn_layers * l0_gdn_layer_launches(d) + d.fa_layers * l0_fa_layer_launches(d, C);
+      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C);
   if (b != PrefillBackend::L0Int8) return base;
   // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
   // layer, the slab walk being the same 2 x N/1024 launches.
@@ -533,14 +545,14 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   const bool gdn = kind == model::LayerKind::GDN;
   if (d.is_moe()) {
     auto lin = [&](LinearId id) {
-      return 2 * size_t(d.shape(id).N / 1024) + (b == PrefillBackend::L0Int8 ? 1 : 0);
+      return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
     };
     const size_t ffn = 2 + moe_chunk_launches(d, b);
     return gdn ? 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn
                : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   }
-  const size_t l0n = gdn ? l0_gdn_layer_launches(d) : l0_fa_layer_launches(d, C);
+  const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C);
   return b == PrefillBackend::L0Int8 ? l0n + 4 : l0n;
 }
 
