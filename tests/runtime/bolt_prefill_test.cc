@@ -29,7 +29,9 @@
 //   what is upstream of it (the logits if no flip at or before the last prompt row; each block's last-row tap, each Mamba
 //   block's state / conv columns at (n - 1, block); each attention block's K / V rows at (position, block)), 5 fails on a
 //   Beyond difference before it, 6 binds on the decision rows wholly before it; everything after it is printed. Our export
-//   keeps 4 - 6 as above. The bf16-state arm on a synthetic (operator ruling 2026-11-05, the third): 3's other chunk sizes
+//   keeps 4 and 6 as above; its 5 is PRINTED (operator ruling 2026-11-08, A, until Bolt's f32 reference - B: its
+//   prefill compares the last chunk's routes only, so no causal cut-off exists there, and the tokens / logits / states
+//   carry the gate). The bf16-state arm on a synthetic (operator ruling 2026-11-05, the third): 3's other chunk sizes
 //   and the cuts off the 2048-grid are printed (the arm rounds the state once a chunk), and 4's state / conv comparison
 //   against decode (which rounds every token) is printed; every other check unchanged.
 //   7. pp2[:<split>]: the same prefill on two cards (the copy hand-off a chunk) bitwise one card (when it fits one)
@@ -345,8 +347,8 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
               (unsigned long long)cut.exact, (unsigned long long)cut.ties, double(tie_tol()),
               (unsigned long long)cut.undetermined, (unsigned long long)(cut.bad_before + cut.bad_after),
               cut.bad_after ? (" (" + std::to_string(cut.bad_after) + " after the flip, printed)").c_str() : "",
-              cut.bad_before == 0 ? "" : "  ** FAIL **");
-  ok = ok && f4 && cut.bad_before == 0;
+              cut.bad_before == 0 ? "" : g_synth ? "  ** FAIL **" : " (our export: printed, A)");
+  ok = ok && f4 && (!g_synth || cut.bad_before == 0);
 
   // ---- 6. tokens, tie-aware --------------------------------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -395,7 +397,7 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
   if (g_synth && cut.bad_before)
     std::printf("; a Beyond route difference before the flip in the generated rows  ** FAIL **");
   std::printf("\n");
-  ok = ok && det_agree == det && cut.bad_before == 0;
+  ok = ok && det_agree == det && (!g_synth || cut.bad_before == 0);
   return ok ? 0 : 1;
 }
 
