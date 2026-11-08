@@ -738,6 +738,12 @@ target_include_directories(batch_rows_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(batch_rows_test PRIVATE b70_plan)
 add_test(NAME batch_rows_test COMMAND batch_rows_test)
 
+# Spec 13c (plan 13c Task 1): the planner's sequence slots (plan_slots, slot_layout), host only.
+add_executable(slot_plan_test runtime/slot_plan_test.cc)
+target_include_directories(slot_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(slot_plan_test PRIVATE b70_plan)
+add_test(NAME slot_plan_test COMMAND slot_plan_test)
+
 # The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
 # default with no argument to the HF repo id
 # "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ", which loader::resolve_snapshot
@@ -1385,6 +1391,28 @@ if(B70_MTP)
   set_tests_properties(mtp_verify_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  # Spec 13c (plan 13c Tasks 2-3): runtime::Engine's sequence slots - S1 a slot alone is today's engine, S2 the slots'
+  # isolation (prefill, decode, reset, snapshots), S3 B1 / B3 for the row kernels (bitwise, mixed K and depth), S4 B1
+  # by the f32 judge (the int8 head's references; a divergence without one AWAITS it: 77), S5 determinism. Both KV forms.
+  if(B70_VERIFY_M8 AND B70_KV8)   # the row builds (src/kernels: B70_MTP, B70_VERIFY_M8, B70_KV8)
+    add_executable(slots_test runtime/slots_test.cc)
+    target_include_directories(slots_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+      ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
+    target_link_libraries(slots_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+    add_dependencies(slots_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
+    add_test(NAME slots_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
+    add_test(NAME slots_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
+    add_test(NAME slots_nomtp_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --mtp off)
+    set_tests_properties(slots_nomtp_test PROPERTIES LABELS "checkpoint;slots" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+    set_tests_properties(slots_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+    set_tests_properties(slots_kv8_test PROPERTIES LABELS "checkpoint;mtp;slots;kv8" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
+  endif()
   # Plan 8c: M3 (greedy MTP is identical to plain), RF1 on the card, M5, M4 end to end,
   # through EngineAdapter (the server's engine calls); and the D1/D2 bench (--bench K).
   if(B70_TOKENIZER_ENABLED)

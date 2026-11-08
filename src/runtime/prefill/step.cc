@@ -91,12 +91,16 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
                  void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                  l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
                  PrefillBackend backend, Int8State* q, const Walk& w, uint32_t& gdn, uint32_t& fa,
-                 const PrefillTaps* taps = nullptr) {
+                 const PrefillTaps* taps = nullptr, const PrefillSlot* slot = nullptr) {
   const model::ModelDesc& d = *m.desc;
   const bool kv8 = kv.form == KvCache::Int8;
   const size_t gdn_state_stride =
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
+  // Spec 13c: a sequence slot's state, ring and KV range (step.h, PrefillSlot); the buffers' own otherwise.
+  uint8_t* const gdn_base = static_cast<uint8_t*>(slot && slot->gdn_state ? slot->gdn_state : gdn_state_mem.ptr());
+  uint8_t* const ring_base = static_cast<uint8_t*>(slot && slot->conv_ring ? slot->conv_ring : conv_ring_mem.ptr());
+  const uint32_t kv_base = slot ? slot->kv_base : 0;
   bool resume = w.resume;
   for (const model::LayerDesc& L : d.layer_descs()) {
     const uint32_t l = L.index;
@@ -137,15 +141,15 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
         profile_wait(cx, Phase::kAbGdn);
       }
       gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
-                reinterpret_cast<float*>(at(gdn_state_mem, size_t(gdn) * gdn_state_stride)),
-                reinterpret_cast<uint16_t*>(at(conv_ring_mem, size_t(gdn) * conv_ring_stride)),
+                reinterpret_cast<float*>(gdn_base + size_t(gdn) * gdn_state_stride),
+                reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
                 small.gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride v-heads x 128
       ++gdn;
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
                backend, q);
     } else {
       pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend, q);
-      const KvLayer lay = kv.layer(kv_k_mem.ptr(), kv_v_mem.ptr(), fa);
+      const KvLayer lay = kv.at_base(kv.layer(kv_k_mem.ptr(), kv_v_mem.ptr(), fa), kv_base);
       uint16_t* kk = static_cast<uint16_t*>(lay.k);
       uint16_t* vv = static_cast<uint16_t*>(lay.v);
       // `Control::{pos, n_active}` were set by the caller before this chunk and
@@ -224,12 +228,13 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
 void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
                 uint32_t max_len, void* ctrl, uint32_t pos, uint32_t C, l0::Mem& gdn_state_mem,
                 l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem,
-                const KvLayout& kv, PrefillBackend backend, Int8State* q, const PrefillTaps* taps) {
+                const KvLayout& kv, PrefillBackend backend, Int8State* q, const PrefillTaps* taps,
+                const PrefillSlot* slot) {
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
           "the int8 state must be given iff the backend is l0-int8");
   require(C > 0 && C <= s.chunk_cap(),
           "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
-  require(size_t(pos) + C <= size_t(max_len), "pos + C exceeds max_len");
+  require(size_t(pos) + C + (slot ? slot->kv_base : 0) <= size_t(max_len), "pos + C exceeds max_len");
   // Spec 19c: the taps' sites cover every layer and none is the final norm's fold (step.h).
   require(!taps || (taps->dst && taps->sites && taps->sites->size() == size_t(m.desc->layers) + 1 &&
                     taps->sites->back().empty()),
@@ -270,7 +275,7 @@ void step_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
 
   uint32_t gdn = 0, fa = 0;
   walk_layers(cx, kc, s, m, ctrl, pos, C, gdn_state_mem, conv_ring_mem, kv_k_mem, kv_v_mem, kv,
-              backend, q, Walk{0, d.layers, false, false}, gdn, fa, taps);
+              backend, q, Walk{0, d.layers, false, false}, gdn, fa, taps, slot);
   require(gdn == d.gdn_layers && fa == d.fa_layers,
           "the layer table did not give " + gdn_n + " GDN and " + fa_n + " FA layers");
 }

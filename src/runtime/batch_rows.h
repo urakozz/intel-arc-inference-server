@@ -1,8 +1,10 @@
 #pragma once
 // Spec 13 §9 (plan 13a): the row table - a decode step's rows as (slot, position, GDN state index) - and the host
 // arithmetic around it: the rules a table must keep, the slots' KV bases, and the memory of a layout by spec 13
-// §9.1's method. Device-free and header-only. Plan 13a's probe (tools/probe/probe_batch_step, runtime::build_rows
-// under B70_BATCH_PROBE) is its only user so far; plan 13c promotes it into the engine and the planner.
+// §9.1's method. Device-free and header-only. Plan 13a's probe (tools/probe/probe_batch_step) and, since plan 13c,
+// runtime::Engine's sequence slots (Engine::verify_rows, runtime::build_rows) use it; the planner's own arithmetic
+// for the engine's layouts is runtime::plan_slots (memory_plan.h) - batch_memory below is section 9.1's method,
+// which tests/runtime/slot_plan_test reconciles it with byte for byte.
 //
 // **The device layout.** BatchRowTable is 256 B of shared memory the host writes before a replay; the kernels'
 // BATCH_ROWS builds (gdn_step.cl, attn.cl, attn_v2.cl, kv8.cl) read row m's words at m * kBatchRowWords with the

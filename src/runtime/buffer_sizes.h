@@ -69,6 +69,10 @@ struct KvLayout {
   size_t bytes() const { return size_t(layers) * (layer_rows() + layer_scales()); }
   // Layer `layer`'s pointers inside the K and V allocations at `k_base` / `v_base`.
   KvLayer layer(void* k_base, void* v_base, uint32_t layer) const;
+  // Spec 13c: a layer's pointers moved to position `base` - the rows by base rows, the scales by base scale rows - so
+  // a kernel that indexes positions from the pointers it is given reads and writes [base, base + n) (a sequence
+  // slot's KV range). base 0 is `l` itself.
+  KvLayer at_base(KvLayer l, uint32_t base) const;
 };
 KvLayout kv_layout(uint32_t max_len, const model::ModelDesc& desc, uint32_t layers, KvCache kv);
 
@@ -312,8 +316,54 @@ struct MtpDims {
   // `slots` (spec 19a): the GDN state slots, kSlots for every engine; only
   // tools/probe/probe_mtp_steps' M = 5..8 lists ask for more (gdn_spec grows by one
   // gdn_state per slot). Must be in [kSlots, kMaxSlots].
+  // `seqs` (spec 13c): the engine's sequence slots (SlotDims below; 1 = today's engine, every
+  // size unchanged). Each further sequence adds its kSlots GDN states to gdn_spec (after the
+  // first sequence's kSlots - 1: sequence q's state k is GDN index q x kSlots + k, index 0 being
+  // PersistentBuffers::gdn_state and index i > 0 gdn_spec's state i - 1 - the row lists' GDN
+  // index) and its hh rows (hh_rows).
   static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
-                        KvCache kv = default_kv_cache(), uint32_t slots = kSlots);
+                        KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
+  // Spec 13c: MtpBuffers::hh's rows. One sequence: kM + 1 (row 0 = h_{pos-1}, rows 1..M the
+  // verify rows' hidden). `seqs` > 1: each sequence's kM + 1 rows (sequence q's from row
+  // q x (kM + 1)), then the row lists' saved hidden rows (kM: the rows' post-final-norm `x`),
+  // the head's input rows (kM, gathered from the two regions before by embed_gather) and the
+  // row draft list's chain rows (kM: runtime::build_draft_rows' dh).
+  static uint32_t hh_rows(uint32_t seqs);
+};
+
+// --- spec 13c: the sequence slots of one card ----------------------------------------------
+//
+// An engine with `seqs` > 1 sequence slots (spec 13 §11.2: the memory an asked --max-len leaves
+// becomes 32768-position slots) holds ONE KV allocation at the slots' summed positions (slot q is
+// a position range of it, from its KV base), and per slot beyond the first a GDN state group, a
+// conv ring and control blocks. What PersistentBuffers / MtpBuffers do not already hold,
+// SlotBuffers (buffers.h) allocates, sized here:
+//
+//   states    without MTP: the fp32 GDN states of slots 1..seqs-1, one whole-model state each
+//             (with MTP they are MtpBuffers::gdn_spec's: MtpDims::sizes' `seqs`)
+//   rings     the bf16 conv rings of slots 1..seqs-1, one whole-model ring each
+//   controls  shared memory: slots 1..seqs-1's Control (and with MTP their head's), the row
+//             lists' Control, head Control and gather Control, the row draft list's head Control,
+//             and their three row tables
+struct SlotSizes {
+  size_t states = 0, rings = 0, controls = 0;
+  size_t total() const { return states + rings + controls; }
+};
+struct SlotDims {
+  static constexpr uint32_t kMaxSeqs = 4;         // slot 0 and at most 3 short slots (spec 13 §11.2)
+  static constexpr uint32_t kShortLen = 32768;    // a short slot's positions (none shorter)
+  // All zero at seqs = 1. Throws std::invalid_argument outside [1, kMaxSeqs].
+  static SlotSizes sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp);
+  // Byte offsets inside SlotBuffers::controls (a Control is 128 B, a row table 256 B).
+  static size_t control_at(uint32_t seqs, uint32_t seq);        // slot seq's Control, 1 <= seq < seqs
+  static size_t head_control_at(uint32_t seqs, uint32_t seq);   // its head's Control (MTP)
+  static size_t rows_control_at(uint32_t seqs);       // the row lists' Control
+  static size_t rows_head_control_at(uint32_t seqs);  // the row lists' head Control (MTP)
+  static size_t gather_control_at(uint32_t seqs);     // the head's input gather (MTP)
+  static size_t draft_control_at(uint32_t seqs);      // the row draft list's head Control (MTP)
+  static size_t rows_table_at(uint32_t seqs);         // runtime::BatchRowTable, the main rows
+  static size_t head_table_at(uint32_t seqs);         // the head's rows (MTP)
+  static size_t draft_table_at(uint32_t seqs);        // the row draft list's head rows (MTP)
 };
 // --- spec 19c: a tap drafter's verify state (DFlash) --------------------------------------
 //

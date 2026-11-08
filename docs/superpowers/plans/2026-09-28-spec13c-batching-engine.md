@@ -1,5 +1,27 @@
 # Spec 13c - batching in the engine
 
+**As built (2026-11-08, branch `spec13c-slots`, not merged).** Every task below is built and run on the card; what
+differs from the text:
+
+- **Task 1:** `runtime::plan_slots` / `runtime::slot_layout` (memory_plan.h) - slot 0 at the asked `--max-len`, then
+  32768-position slots while they fit with the reserve, at most four; `--max-len auto` one slot. 131072 + 3 x 32768
+  at int8 KV with MTP: 29.03 GB on the l0 path (section 9.1's 29.10 priced l0-int8); at bf16 KV 131072 keeps one slot,
+  65536 gets 65536 + 2 x 32768, 32768 gets four (slot_plan_test).
+- **Tasks 2-3:** one change. The slots' state is addressed through capture.h's `SlotBind` (each slot's lists are
+  today's lists with its own pointers and KV base - so a lone slot is bitwise today's engine) and the row lists are
+  ONE per M (2..8): the MTP head's input rows are gathered by one embed_gather over MtpBuffers::hh instead of
+  per-shape copies, so no list depends on the rows' slots or run lengths. `Engine::verify_rows` + per-slot `commit`
+  instead of `step_rows`.
+- **Drafts (P7):** measured (4.2 ms a slot's draft index), so the second form is built: `runtime::build_draft_rows` /
+  `Engine::draft_rows`, one head pass per draft index for 2..4 slots (+12 gemv_bf16 / fold binaries).
+- **Task 4:** `cli::SlotsEngine` (src/cli/slots_engine.h): a lone request is its slot's own `EngineAdapter` (today's
+  host code and lists, bitwise the serial server - measured on the card), several rows one `verify_rows`. The 8-row
+  budget is `BatchEngineIface::row_budget` + the scheduler's clip, the drafts dealt round the rows (measured: K 1 each
+  at four requests beats K 3 for the oldest by 15 %).
+- **Task 5:** `tools/probe/probe_slots_speed` (the engine API) and `tools/box_validate/slots_bench.py` (b70-serve);
+  validation row 78 (`r78.host / engine / lone / batch / speed`). Numbers: docs/probes/probe-batching-2026-10-23.md
+  section 8.
+
 **Status (2026-11-07): REVISED for spec 13 §11 - Qwen3.8 only; starts AFTER plan 13b (two engines behind the
 scheduler) and after the int8 KV ruling (the zero-config list B, quiet-box session); NOT built.** What changed against
 the 2026-10-23 text below, which this paragraph overrides where they differ:

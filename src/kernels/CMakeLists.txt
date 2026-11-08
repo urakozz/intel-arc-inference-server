@@ -1770,11 +1770,11 @@ endif()
 set(B70_BOLT_VERIFY_KERNELS ${B70_BOLT_VERIFY_KERNELS} CACHE INTERNAL "spec 26c's Bolt verify binaries (bolt_variant_names_test)")
 # ==== Spec 26c: LiLiCorr in Bolt's loop ==== (end) ====
 
-# ==== Spec 13a: the batching probe (rows of different sequences) ==== (begin) ====
-# Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
-# OFF by default: a default build compiles exactly what it compiled before, and no engine binds any of these - only
-# tools/probe/probe_batch_step through runtime::build_rows (capture.cc, compiled under the same option).
-# tools/kernel_cmdlines lists them (it turns the option on), so box_check's cmdlines stage sees every command line here.
+# ==== Spec 13a / 13c: rows of different sequences (the batched engine) ==== (begin) ====
+# Plans: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md (Task 2, the probe), 2026-09-28-spec13c-batching-
+# engine.md (Task 3: promoted - built by default since 13c; until then behind B70_BATCH_PROBE). runtime::build_rows
+# (capture.cc) binds them for runtime::Engine's sequence slots; tools/probe/probe_batch_step too.
+# Record: docs/probes/probe-batching-2026-10-23.md.
 #   gdn_step_rows_M<M>                  gdn_step.cl BATCH_ROWS: per row its position, slot (conv ring) and GDN state
 #                                       indices (src at a slot's first row, dst after every row); the strides of one
 #                                       whole-model state and one whole-model ring baked (48 GDN layers)
@@ -1783,14 +1783,10 @@ set(B70_BOLT_VERIFY_KERNELS ${B70_BOLT_VERIFY_KERNELS} CACHE INTERNAL "spec 26c'
 #   attn_v2_M<M>_T32[_KV8]_ROWS         attention v2 / its kv8 twin: groups = a slot's rows at one stride, each over
 #                                       its own slot's keys
 # at M = 1..8 (the 8-row budget, spec 13 §9). Every other
-# binary the probe's lists bind is B70_MTP's (M = 1..4) or B70_VERIFY_M8's (M = 5..8). The source edits are BATCH_ROWS
-# blocks only: no existing command line defines it, so every existing binary's preprocessed source is unchanged.
+# binary a row list binds is B70_MTP's (M = 1..4) or B70_VERIFY_M8's (M = 5..8). The source edits are BATCH_ROWS
+# blocks only: no other command line defines it, so every other binary's preprocessed source is unchanged.
 # BROW_DEFINES is the row table's word layout (runtime::BatchRow, kernels::batch_row - the host mirror).
-option(B70_BATCH_PROBE "build the batching probe: the row builds, build_rows and probe_batch_step (spec 13a)" OFF)
-if(B70_BATCH_PROBE)
-  if(NOT (B70_MTP AND B70_VERIFY_M8 AND B70_KV8))
-    message(FATAL_ERROR "B70_BATCH_PROBE needs B70_MTP, B70_VERIFY_M8 and B70_KV8 (their M-row binaries)")
-  endif()
+if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set(BROW_DEFINES BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SRC=2 BROW_DST=3 BROW_SLOT=4)
   # One whole-model GDN state (gdn_layers x 48 x 128 x 128 floats) and conv ring (gdn_layers x 16 x 10240 ushorts).
   set(BR_GDN_QWEN SPEC_SLOT_STRIDE=37748736 RING_SLOT_STRIDE=7864320)
@@ -1807,8 +1803,17 @@ if(B70_BATCH_PROBE)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS SOURCE ${KV8_CL}
                      DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
   endforeach()
+  # Spec 13c: the MTP head's draft at M = 2..4 rows of different slots (runtime::build_draft_rows - every other binary
+  # it binds is the verify lists' or the rows' above): the head's o, gate||up and down at M rows (bf16, the {64, 1}
+  # tiling of their M = 1 twins) and the post-attention fold over o's S = 1 output.
+  foreach(MM 2 3 4)
+    add_gemv_bf16_variant(${MM} 6144 5120 64 1)
+    add_gemv_bf16_variant(${MM} 5120 34816 64 1)
+    add_gemv_bf16_variant(${MM} 17408 5120 64 1)
+    add_prep_res_fold(${MM} 5120 1 20)
+  endforeach()
 endif()
-# ==== Spec 13a ==== (end) ====
+# ==== Spec 13a / 13c ==== (end) ====
 
 # Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
 # the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's

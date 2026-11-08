@@ -212,7 +212,7 @@ struct EngineAdapter : server::EngineIface {
     ++mtp_iters_at_k[k];
     if (k == 0) return {step(sampling)};   // K = 0, or the last positions of max_len: plain
     const uint32_t n = eng.pos();
-    auto* control = eng.buffers().control.as<runtime::Control>();
+    auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
     server::AcceptResult a{};
     constexpr size_t V = model::Qwen35::kVocab;
@@ -262,7 +262,7 @@ struct EngineAdapter : server::EngineIface {
     ++mtp_iters_at_k[k];
     if (k == 0) return {step(sampling)};
     const uint32_t n = eng.pos();
-    auto* control = eng.buffers().control.as<runtime::Control>();
+    auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
     server::AcceptResult a{};
     std::vector<uint32_t> drafts;
@@ -321,7 +321,7 @@ struct EngineAdapter : server::EngineIface {
   std::vector<uint32_t> step_drafts(const server::Sampling& sampling,
                                     const Proposer& propose) override {
     flush_commit();
-    auto* control = eng.buffers().control.as<runtime::Control>();
+    auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
     const uint32_t k = std::min<uint32_t>({static_cast<uint32_t>(d.size()),
@@ -370,7 +370,7 @@ struct EngineAdapter : server::EngineIface {
                                             const Proposer& propose) override {
     if (!dflash_lookup_) throw std::logic_error("EngineAdapter::step_drafts_or_many without --spec dflash-lookup");
     flush_commit();
-    auto* control = eng.buffers().control.as<runtime::Control>();
+    auto* control = eng.control();
     const uint32_t x = control->cur_token[0];
     const std::vector<uint32_t> d = propose(x);
     if (d.empty()) return step_dflash(sampling, k_dflash);
@@ -492,7 +492,7 @@ struct EngineAdapter : server::EngineIface {
     imm.copy(host_logits.data(), eng.buffers().logits.ptr(),
              model::Qwen35::kVocab * sizeof(float));
     const uint32_t id = sample(host_logits.data(), vocab_used, sampling, rng);
-    eng.buffers().control.as<runtime::Control>()->cur_token[0] = id;
+    eng.control()->cur_token[0] = id;
   }
 
   runtime::Engine& eng;

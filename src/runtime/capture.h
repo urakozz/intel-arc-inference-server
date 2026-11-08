@@ -125,9 +125,22 @@ struct CapturedStep {
 // Spec 28c: at M >= 2 a v2 list's attention binds attn_verify_dpas where runtime/verify_attn.h's measured table
 // says so; `opt` (tests and probes only) forces v2 or DPAS at every M >= 2 - build, build_verify and
 // build_verify_taps take it, every other builder follows the rule.
+//
+// Spec 13c: `slot` - the sequence slot whose persistent state the list reads and writes, for an engine with several
+// (runtime::Engine's slots). Every pointer null and kv_base 0 (the default) binds exactly what the list always bound:
+// the same commands with the same arguments. build, build_verify and build_draft take it.
+struct SlotBind {
+  void* control = nullptr;     // the slot's Control (null: DecodeBuffers::control)
+  void* gdn_state = nullptr;   // its GDN state 0, one whole-model state (null: DecodeBuffers::gdn_state)
+  void* gdn_spec = nullptr;    // its kSlots - 1 speculative GDN states, slot-major (null: MtpBuffers::gdn_spec)
+  void* conv_ring = nullptr;   // its conv ring, one whole-model ring (null: DecodeBuffers::conv_ring)
+  uint32_t kv_base = 0;        // its first position in the KV allocations, the main cache's and the head's
+  void* hctl = nullptr;        // its head Control (null: MtpBuffers::hctl)
+  void* hh = nullptr;          // its hh rows, bf16 [kM + 1][hidden] (null: MtpBuffers::hh)
+};
 CapturedStep build(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                    l0::Mem* debug_resid = nullptr, ProfileEvents* prof = nullptr,
-                   uint32_t M = 1, const CaptureOptions& opt = {});
+                   uint32_t M = 1, const CaptureOptions& opt = {}, const SlotBind& slot = {});
 
 // The decode list's launch count (`CapturedStep::kernel_count` of `build`), which the
 // walk asserts on itself: embed_gather, 12 per dense layer (the input norm pair, the
@@ -167,9 +180,9 @@ size_t draft_launches(const model::ModelDesc& d);
 // observer only; null (every engine call) appends the identical list it always did.
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                           const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof = nullptr,
-                          const CaptureOptions& opt = {});
+                          const CaptureOptions& opt = {}, const SlotBind& slot = {});
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                         const MtpBuffers& mtp, uint32_t i);
+                         const MtpBuffers& mtp, uint32_t i, const SlotBind& slot = {});
 
 // --- spec 19c: a tap drafter's verify list (DFlash) ------------------------------------
 //
@@ -268,33 +281,56 @@ CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel
                                      const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M,
                                      const CaptureOptions& opt = {});
 
-#if B70_BATCH_PROBE
-// --- spec 13a: rows of different sequences (the batching probe; B70_BATCH_PROBE builds only) ---------------------
+// --- spec 13c: rows of different sequences (spec 13a's probe build, promoted) -----------------------------------------
 //
 // build_rows: the decode list at M rows whose per-sequence sites read the row table (runtime/batch_rows.h) - gdn_step,
 // attn_prep and decode attention v2 bound to their `_ROWS` builds (kernels/batch_kernels.h), every row-agnostic kernel
-// at M rows exactly as build() binds it. Row m is (position, KV base, GDN src / dst, slot) from `rows`; the KV cache is
-// ONE allocation (DecodeBuffers::kv_k / kv_v at the slots' summed length) in which a slot is a position range; GDN
-// state index 0 is DecodeBuffers::gdn_state and i >= 1 is state_pool's whole-model state i - 1; the conv ring of slot 0
-// is DecodeBuffers::conv_ring and slot s >= 1's is ring_pool's whole-model ring s - 1. The host writes the table, and
-// Control::n_active = M and cur_token[0..M), before every replay; nothing in the list reads Control::pos.
+// at M rows exactly as build() binds it (spec 28b's gemm_sm at M >= 2). Row m is (position, KV base, GDN src / dst,
+// slot) from `rows`; the KV caches are ONE allocation each (DecodeBuffers::kv_k / kv_v at the slots' summed length), in
+// which a slot is a position range; GDN state index 0 is DecodeBuffers::gdn_state and i >= 1 is `state_pool`'s
+// whole-model state i - 1; slot 0's conv ring is DecodeBuffers::conv_ring and slot s >= 1's is `ring_pool`'s ring s - 1.
+// The host writes the table, and the list's own Control (`control`: n_active = M, cur_token[0..M)), before every
+// replay; nothing in the list reads a Control's pos. argmax_stage2's in-list advance lands in that Control too, where
+// nobody reads it: the host commits each slot (runtime::Engine::verify_rows).
 //
-// With `mtp` the MTP head's KV fill follows over the same rows (build_verify's tail), each run of a slot fed its own
-// hidden rows: hh[r0] <- hprev[slot] (the slot's h_{pos-1}), hh[r0 + j] <- x[r0 + j - 1] for the run's later rows
-// (device copies, captured for `run_slots` / `run_lengths` - the list is then one per shape); the head's attn_prep at
-// `head_rows` (each row's position - 1, its slot's KV base, in the head's own KV layer at the same layout). The host
-// sets the head's control (hctl): n_active = M, cur_token[0..M) the rows' ids. decode_launches (+ 10 with the head).
+// With `mtp` the MTP head's KV fill follows over the same rows (build_verify's tail): the rows' post-final-norm hidden
+// copied to `saved`, then ONE embed_gather over `gctl` - cur_token[m] the row of `table` that is row m's input hidden:
+// its slot's h_{pos-1} (the slot's hh row 0) at a run's first row, the saved hidden of row m - 1 otherwise - into
+// `hin`, and the head's front over `hin` with `hctl` (n_active = M, cur_token the rows' ids) and its attn_prep at
+// `head_rows` (each row's position - 1 and its slot's KV base, in the head's KV layer). So one list serves every shape
+// of M rows: M = 2..8, one list each. rows_launches(d, head) launches.
 struct BatchRowsBind {
-  l0::Mem* rows = nullptr;               // runtime::BatchRowTable, shared
-  const l0::Mem* state_pool = nullptr;   // GDN state indices 1..: one whole-model gdn_state each (null: index 0 only)
-  const l0::Mem* ring_pool = nullptr;    // conv rings of slots 1..: one whole-model conv_ring each (null: slot 0 only)
-  const MtpBuffers* mtp = nullptr;       // the head's buffers (the engine's), or null: the decode list alone
-  l0::Mem* head_rows = nullptr;          // runtime::BatchRowTable for the head's attn_prep
-  const l0::Mem* hprev = nullptr;        // bf16 [slots][hidden]
-  std::vector<uint32_t> run_slots, run_lengths;   // the table's shape (runtime::run_lengths), with the head
+  void* rows = nullptr;                 // runtime::BatchRowTable, shared
+  void* control = nullptr;              // the list's Control, shared
+  const void* state_pool = nullptr;     // GDN indices 1..: one whole-model state each (null: index 0 only)
+  const void* ring_pool = nullptr;      // conv rings of slots 1..: one whole-model ring each (null: slot 0 only)
+  const MtpBuffers* mtp = nullptr;      // the head's buffers, or null: the decode list alone
+  void* head_rows = nullptr;            // runtime::BatchRowTable for the head's attn_prep, shared
+  void* hctl = nullptr;                 // the head's Control, shared
+  void* gctl = nullptr;                 // the gather's Control, shared
+  const void* table = nullptr;          // bf16 rows of hidden the gather reads (embed_gather's `embed`)
+  void* saved = nullptr;                // bf16 [M][hidden], rows of `table`: the rows' hidden
+  void* hin = nullptr;                  // bf16 [M][hidden]: the head's input rows
 };
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,
                         uint32_t M);
-#endif
+// decode_launches(d), or with the head verify_launches(d) + 1 (the gather).
+size_t rows_launches(const model::ModelDesc& d, bool head);
+
+// build_draft_rows: the MTP head's draft list (build_draft's walk) at M rows of DIFFERENT sequences - one draft index
+// of M slots in one replay, the head's weights and lm_head read once for all of them (spec 13 §9.1 P7's second form).
+// Row m is (hctl.cur_token[m], dh row m) at the head row table's row m (its draft position, its slot's KV base): the
+// head's attn_prep and decode attention are their `_ROWS` builds over the head's KV layer; every other launch is
+// build_draft's at M rows. The rows' post-mtp.norm hidden go back into dh rows 0..M-1, their logits into `logits`
+// [M][kVocab] fp32 and their argmax into hctl.out_token[0..M) (argmax_stage2's in-list advance lands in hctl, which
+// the host rewrites before every replay). draft_launches(d) launches. Dense heads only (Qwen3.8).
+struct DraftRowsBind {
+  void* hctl = nullptr;        // the head Control, shared: n_active = M, cur_token[0..M) the rows' input ids
+  void* head_rows = nullptr;   // runtime::BatchRowTable, shared: each row's draft position, KV base, slot
+  void* dh = nullptr;          // bf16 [M][hidden]: in, each row's chain hidden; out, the next
+  void* logits = nullptr;      // fp32 [M][kVocab]
+};
+CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                              const DraftRowsBind& dr, uint32_t M);
 
 }  // namespace runtime

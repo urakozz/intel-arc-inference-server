@@ -69,9 +69,11 @@ MemoryComponents Engine::memory_use() const {
   c.model = model_.report.total();
   c.kv = persist_.kv_k.size() + persist_.kv_v.size();
   // Spec 8: the MTP head's buffers (its KV, the GDN slots, hh/dh, draft logits) count as
-  // decode state; the head's weights are in `model` (LoadReport::mtp_bytes).
+  // decode state; the head's weights are in `model` (LoadReport::mtp_bytes). Spec 13c: so do
+  // the further sequence slots' (SlotBuffers; their MTP part is in MtpBuffers already).
   c.decode_state = persist_.bytes() - c.kv + decode_scratch_.bytes() +
-                   (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0);
+                   (mtp_ ? mtp_->bytes() : 0) + (mtp_pf_hid_ ? mtp_pf_hid_->size() : 0) +
+                   (slot_bufs_ ? slot_bufs_->bytes() : 0);
   // Spec 19c: a drafter's verify slots are decode state, its prefill tap staging prefill scratch, and the drafter
   // itself (weights, ring, taps, scratch) its own term.
   if (df_slots_) c.decode_state += df_slots_->size();
@@ -145,11 +147,11 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           " is outside the vocabulary (" + std::to_string(model::Qwen35::kVocab) +
           " rows) -- pf_embed_gather has no debug_flag channel, so the host is the only bound");
   const uint32_t base = control_->pos;
-  if (size_t(base) + ids.size() > size_t(buffers_.max_len))
+  if (size_t(base) + ids.size() > size_t(max_len()))
     throw std::runtime_error(
         "runtime::Engine::prefill: pos " + std::to_string(base) + " + " +
         std::to_string(ids.size()) + " ids exceeds max_len " +
-        std::to_string(buffers_.max_len) +
+        std::to_string(max_len()) +
         " -- the KV cache and the RoPE table stop there. Start a new session with reset(), or"
         " load the model and the engine with a larger max_len.");
 
@@ -185,7 +187,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       throw std::runtime_error("runtime::Engine::prefill: the drafter taps the last layer's output, whose fold "
                                "prefill runs for the last row only - not built (no published drafter does)");
     mtp_normalise_live();
-    verify_k_ = kNoVerify;
+    seq().verify_k = kNoVerify;
     if (!df_pf_taps_)
       df_pf_taps_ = std::make_unique<l0::Mem>(
           ctx_, l0::MemKind::Device,
@@ -196,13 +198,20 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   }
   if (mtp_) {
     mtp_normalise_live();
-    verify_k_ = kNoVerify;
+    seq().verify_k = kNoVerify;
     if (!mtp_pf_hid_)
       mtp_pf_hid_ = std::make_unique<l0::Mem>(ctx_, l0::MemKind::Device,
                                               mtp_prefill_hidden_bytes(*model_.desc, pf_->chunk_cap()));
     hid = mtp_pf_hid_->as<uint16_t>();
   }
   const size_t hid_row = size_t(model_.desc->hidden) * 2;
+  // Spec 13c: the selected slot's state, ring and KV range (slot 0 of a one-slot engine: the buffers' own, unchanged).
+  const Seq& sq = seq();
+  prefill::PrefillSlot pslot;
+  pslot.gdn_state = sq.state0;
+  pslot.conv_ring = sq.ring;
+  pslot.kv_base = sq.base;
+  const prefill::PrefillSlot* slot = slots() > 1 ? &pslot : nullptr;
   uint32_t C = 0;
   for (size_t off = 0; off < ids.size(); off += C) {
     C = prefill_chunk_rows(base + uint32_t(off), ids.size() - off, chunk, hooked, kBlock, /*wide_stride=*/true);
@@ -214,7 +223,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       const uint32_t pos = base + uint32_t(off);
       hctl_->pos = pos == 0 ? 0 : pos - 1;
       hctl_->n_active = prefill::mtp_kv_rows(pos, C);
-      imm_.copy(hid, mtp_->hh.ptr(), hid_row);   // h_{pos-1} into row 0
+      imm_.copy(hid, sq.hh, hid_row);   // h_{pos-1} into row 0
     }
     // Spec 19c: this chunk's rows from df_from on (r0 = C: none).
     const uint32_t cpos = base + uint32_t(off);
@@ -228,14 +237,14 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
     prefill::step_chunk(pfx_->cx, pfx_->kc, *pf_, model_, buffers_.max_len, control_,
                       base + uint32_t(off), C, persist_.gdn_state, persist_.conv_ring,
                       persist_.kv_k, persist_.kv_v, persist_.kv_lay, backend, q,
-                      drafter_ ? &df_taps : nullptr);
+                      drafter_ ? &df_taps : nullptr, slot);
     if (mtp_)
-      prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C,
-                           hid, mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0));
+      prefill::step_mtp_kv(pfx_->cx, pfx_->kc, *pf_, model_, hctl_, base + uint32_t(off), C, hid,
+                           mtp_->kv_lay.at_base(mtp_->kv_lay.layer(mtp_->kv_k.ptr(), mtp_->kv_v.ptr(), 0), sq.base));
     pfx_->cx.wait();                       // the chunk's state has landed
     if (drafter_ && df_taps.r0 < C) drafter_project_staged(cpos + df_taps.r0, C - df_taps.r0);   // spec 19c
     if (mtp_)   // h_{end-1}: the next chunk's row 0, a snapshot's hidden, the first draft's h
-      imm_.copy(mtp_->hh.ptr(), reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row, hid_row);
+      imm_.copy(sq.hh, reinterpret_cast<uint8_t*>(hid) + size_t(C) * hid_row, hid_row);
     const uint32_t end = base + uint32_t(off) + C;
     if (hooked && off + C < ids.size() && end % kBlock == 0) {
       // Mid-prompt block end: the state is exactly at `end`; say so in Control before

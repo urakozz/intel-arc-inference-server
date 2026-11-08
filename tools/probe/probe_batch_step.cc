@@ -1,5 +1,5 @@
 // probe_batch_step - spec 13a (plan 13a Task 2): a decode step whose rows belong to DIFFERENT sequences, on one card.
-// Built only with -DB70_BATCH_PROBE=ON (tools/probe/CMakeLists.txt); record: docs/probes/probe-batching-2026-10-23.md.
+// Built by default since plan 13c (tools/probe/CMakeLists.txt); record: docs/probes/probe-batching-2026-10-23.md.
 //
 //   probe_batch_step <snapshot> [--kv bf16|int8] [--mtp on|off] [--slots L0,L1,..] [--deep 32768] [--shallow 4096]
 //                    [--calls 32] [--rounds 3] [--arms a,b,..] [--no-check] [--no-time] [--no-chunks]
@@ -10,7 +10,10 @@
 //   GDN states   index 0 = the engine's gdn_state = slot 0's; a pool of (slots - 1) sources (slot s's is index s) and
 //                8 destinations (index slots + m for row m - the probe's scratch: 13c gives each slot its own);
 //   conv rings   slot 0's = the engine's; a pool of slots - 1;
-//   hprev        bf16 [slots][hidden], each slot's h_{pos-1} (the MTP head's input at a run's first row).
+//   hprev        bf16 [slots + 2 x 8][hidden]: rows 0..slots-1 each slot's h_{pos-1} (the MTP head's input at a run's
+//                first row), then the row list's saved hidden rows and the head's gathered input rows (spec 13c's
+//                build_rows: one embed_gather over this table, so one list per M);
+//   controls     the row list's own Control, head Control and gather Control (13c: nothing touches the engine's).
 // Default slots (spec 13 §9.1 / §9.2's layouts at the probe's depths): Qwen3.8 36864 + 3 x 8192. Each slot's sequence - tests/golden/prompts/long32k.ids from a per-slot
 // offset, repeated past its end - is prefilled into slot 0 by Engine::prefill (the served path, MTP head included) and
 // copied out (state, ring, KV rows and scales, the head's KV rows, h_{pos-1}); slot 0's is prefilled last and stays.
@@ -19,7 +22,7 @@
 // **The arms.** An arm is a table: per slot its rows (1 = a plain row, K + 1 = an MTP verify run) at the slot's depth
 // - "@<shallow>" every slot at the shallow depth (slot 0 rewound there: the attention reads `shallow` keys; its GDN
 // state is the deep one - a step's cost does not depend on the values), "@<deep>+<shallow>" slot 0 deep. Each arm's
-// list is runtime::build_rows at M = its rows (plus the head's KV fill with MTP).
+// list is runtime::build_rows at M = its rows (plus the head's KV fill with MTP) - one list per M since 13c.
 //
 // **The check** (unless --no-check; plan 13a Review Focus 2-3), every arm: the B-row step, then every slot's run alone
 // (the same rows, the same src / dst, at M = its rows): logits rows BITWISE, the argmax ids, every row's dst GDN state,
@@ -27,7 +30,10 @@
 // isolation: no src state and no KV row of a window [pos - 8, pos + 16) of any slot moves in the B-row step but the
 // rows' own. Then the PRODUCTION tie for slot 0 at the deep depth: Engine::verify(0) and verify(3) with MTP (the lists
 // that ship at M = 1 and 4), Engine::generate(1) without - logits bitwise the row list's for slot 0 alone (state 0 is
-// restored around them). "CHECK <arm>: PASS|FAIL ..." per arm, "check: PASS|FAIL" at the end.
+// restored around them). "CHECK <arm>: PASS|FAIL ..." per arm, "check: PASS|FAIL" at the end. Since plan 13c two
+// rounding classes are printed, not failed (spec 13 section 11.3: the f32 judge grades them): a one-row run inside a
+// step of several rows against its M = 1 list (gemm_sm against the GEMV), and the production M > 1 tie at a depth
+// where the production list binds the DPAS verify attention.
 //
 // **The timing** (unless --no-time): every arm against the baseline `1x1@<shallow>` (one row of slot 1) as INTERLEAVED
 // PAIRS - baseline and arm back to back, the order alternating by round, `calls` replays each - after a warm-up of
@@ -40,10 +46,7 @@
 // beside the measured 1-row steps, and the worst inter-token gap of a decoding slot while a prompt prefills at that
 // chunk (one chunk + one step, DERIVED from the two measured numbers).
 //
-// runtime::build_rows exists only when b70_runtime is built with B70_BATCH_PROBE (src/runtime/CMakeLists.txt), and
-// tools/probe/CMakeLists.txt builds this file only then. A compile without the define (the Mac's section 2 syntax
-// check walks every probe source) sees the stub at the end; the real body is checked with -DB70_BATCH_PROBE=1.
-#if B70_BATCH_PROBE
+// Spec 13c: runtime::build_rows is b70_runtime's (the batched engine's), so this file always has its body.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -163,7 +166,7 @@ struct Probe {
   std::vector<std::vector<uint32_t>> seq;   // each slot's ids (prompt + continuation)
   std::vector<uint32_t> pend;               // each slot's pending id after its prefill
   size_t state_bytes, ring_bytes, hid_bytes;
-  std::unique_ptr<l0::Mem> state_pool, ring_pool, hprev, rows, hrows, host, backup0;
+  std::unique_ptr<l0::Mem> state_pool, ring_pool, hprev, rows, hrows, rctl, rhctl, gctl, host, backup0;
   l0::Queue q;
   l0::Fence fence;
   l0::CmdList imm;
@@ -178,9 +181,13 @@ struct Probe {
     hid_bytes = size_t(d.hidden) * 2;
     state_pool = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, state_bytes * (B - 1 + runtime::DecodeScratchDims::kM));
     if (B > 1) ring_pool = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, ring_bytes * (B - 1));
-    hprev = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, hid_bytes * B);
+    hprev = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, hid_bytes * (B + 2 * runtime::DecodeScratchDims::kM));
     rows = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sizeof(runtime::BatchRowTable));
     hrows = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sizeof(runtime::BatchRowTable));
+    rctl = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
+    rhctl = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
+    gctl = std::make_unique<l0::Mem>(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
+    for (l0::Mem* c : {rctl.get(), rhctl.get(), gctl.get()}) std::memset(c->ptr(), 0, sizeof(runtime::Control));
     host = std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, std::max<size_t>(state_bytes, size_t(8) * 248320 * 4));
     backup0 = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, state_bytes);
     imm.fill(state_pool->ptr(), 0u, state_pool->size());
@@ -295,24 +302,22 @@ struct Probe {
     return (r.pos == deep || r.pos == shallow) ? pend[r.slot] : seq[r.slot][r.pos % seq[r.slot].size()];
   }
   runtime::CapturedStep& list(const std::vector<runtime::BatchRow>& t) {
-    const std::vector<uint32_t> shape = runtime::run_lengths(t);
-    std::string key = std::to_string(t.size());
-    std::vector<uint32_t> run_slots;
-    for (size_t m = 0; m < t.size(); ++m)
-      if (m == 0 || t[m - 1].slot != t[m].slot) run_slots.push_back(t[m].slot);
-    for (size_t i = 0; i < shape.size(); ++i) key += ":" + std::to_string(run_slots[i]) + "x" + std::to_string(shape[i]);
+    const std::string key = std::to_string(t.size());   // spec 13c: one list per M
     auto it = lists.find(key);
     if (it != lists.end()) return it->second;
     runtime::BatchRowsBind bind;
-    bind.rows = rows.get();
-    bind.state_pool = state_pool.get();
-    bind.ring_pool = ring_pool.get();
+    bind.rows = rows->ptr();
+    bind.control = rctl->ptr();
+    bind.state_pool = state_pool->ptr();
+    bind.ring_pool = ring_pool ? ring_pool->ptr() : nullptr;
     if (mtp) {
       bind.mtp = e.mtp_buffers();
-      bind.head_rows = hrows.get();
-      bind.hprev = hprev.get();
-      bind.run_slots = run_slots;
-      bind.run_lengths = shape;
+      bind.head_rows = hrows->ptr();
+      bind.hctl = rhctl->ptr();
+      bind.gctl = gctl->ptr();
+      bind.table = hprev->ptr();
+      bind.saved = u8(hprev->ptr()) + size_t(B) * hid_bytes;
+      bind.hin = u8(hprev->ptr()) + size_t(B + runtime::DecodeScratchDims::kM) * hid_bytes;
     }
     return lists.emplace(key, runtime::build_rows(ctx, e.model(), e.buffers(), bind, uint32_t(t.size()))).first->second;
   }
@@ -320,19 +325,24 @@ struct Probe {
   void replay(runtime::CapturedStep& l, const std::vector<runtime::BatchRow>& t) {
     runtime::BatchRowTable* rt = rows->as<runtime::BatchRowTable>();
     runtime::BatchRowTable* ht = hrows->as<runtime::BatchRowTable>();
-    runtime::Control* c = ctl();
+    runtime::Control* c = rctl->as<runtime::Control>();
     c->n_active = uint32_t(t.size());
     for (size_t m = 0; m < t.size(); ++m) {
       rt->row[m] = t[m];
       c->cur_token[m] = row_id(t[m]);
     }
     if (mtp) {
-      runtime::Control* h = hctl();
+      runtime::Control* h = rhctl->as<runtime::Control>();
+      runtime::Control* g = gctl->as<runtime::Control>();
       h->n_active = uint32_t(t.size());
+      g->n_active = uint32_t(t.size());
       for (size_t m = 0; m < t.size(); ++m) {
         ht->row[m] = t[m];
         ht->row[m].pos = t[m].pos - 1;   // the head's pair (h_{p-1}, x_p) sits at p - 1
         h->cur_token[m] = c->cur_token[m];
+        // The head's input hidden: the slot's h_{pos-1} (table row = slot) at a run's first row, else the saved row
+        // m - 1 (table row B + m - 1).
+        g->cur_token[m] = (m == 0 || t[m - 1].slot != t[m].slot) ? t[m].slot : B + uint32_t(m) - 1;
       }
     }
     q.execute(l.list, &fence);
@@ -350,7 +360,7 @@ struct Probe {
     imm.copy(host->ptr(), e.buffers().logits.ptr(), t.size() * V * 4);
     for (size_t m = 0; m < t.size(); ++m) {
       o[m].logits.assign(host->as<float>() + m * V, host->as<float>() + (m + 1) * V);
-      o[m].id = ctl()->out_token[m];
+      o[m].id = rctl->as<runtime::Control>()->out_token[m];
     }
     for (size_t m = 0; m < t.size(); ++m) {
       o[m].dst = state_hash(t[m].dst);
@@ -379,7 +389,7 @@ struct Probe {
     }
     replay(l, t);
     const std::vector<RowOut> batch = outputs(t);
-    int bad = 0;
+    int bad = 0, rounding = 0;
     std::string why;
     for (uint32_t s = 0; s < B; ++s) {
       if (state_hash(s) != src0[s]) {
@@ -397,6 +407,15 @@ struct Probe {
       const std::vector<runtime::BatchRow> ta = table(a, int(a.slots[i]));
       replay(list(ta), ta);
       const std::vector<RowOut> alone = outputs(ta);
+      // A one-row run alone is the M = 1 list (the GEMV); inside a step of several rows its linears are spec 28b's
+      // gemm_sm - a different rounding, which spec 13 section 11.3 judges by the f32 judge (plan 13c's slots_test
+      // S4, r78.batch), not here: counted and printed, not failed. Runs of two or more rows stay bitwise.
+      if (ta.size() == 1 && t.size() > 1) {
+        const RowOut &x = batch[m0], &y = alone[0];
+        rounding += std::memcmp(x.logits.data(), y.logits.data(), x.logits.size() * 4) != 0 || x.id != y.id;
+        m0 += 1;
+        continue;
+      }
       for (size_t j = 0; j < ta.size(); ++j) {
         const RowOut &x = batch[m0 + j], &y = alone[j];
         const std::string w = " row" + std::to_string(m0 + j);
@@ -408,8 +427,11 @@ struct Probe {
       }
       m0 += uint32_t(ta.size());
     }
+    if (rounding)
+      why += " (" + std::to_string(rounding) + " one-row run(s) differ from their M = 1 list: GEMV against gemm_sm, "
+             "not compared)";
     std::printf("CHECK %-20s M=%u: %s%s\n", a.name.c_str(), a.m(), bad ? "FAIL" : "PASS",
-                bad ? why.c_str() : " (each slot's rows bitwise its run alone: logits, ids, GDN states, KV and head KV "
+                bad || rounding ? why.c_str() : " (each slot's rows bitwise its run alone: logits, ids, GDN states, KV and head KV "
                                     "rows; no other slot's source or KV moved)");
     return bad;
   }
@@ -447,10 +469,15 @@ struct Probe {
       int b = 0;
       for (uint32_t r = 0; r <= k; ++r)
         b += std::memcmp(prod[r].logits.data(), rowsout[r].logits.data(), prod[r].logits.size() * 4) != 0;
+      // The production M > 1 verify list binds spec 28c's DPAS verify attention at depth (the rows: attention v2) -
+      // printed, not failed; the M = 1 tie is bitwise.
+      const bool dpas = k > 0 && b;
       std::printf("CHECK production M=%u (%s) vs rows 1x%u@%s: %s\n", k + 1,
                   mtp ? "Engine::verify" : "Engine::generate, the plain list", k + 1, kname(deep).c_str(),
-                  b ? "FAIL (logits differ)" : "PASS (logits bitwise)");
-      bad += b;
+                  !b ? "PASS (logits bitwise)"
+                     : dpas ? "differ (the production list's DPAS verify attention at this depth; not compared)"
+                            : "FAIL (logits differ)");
+      if (!dpas) bad += b;
     }
     restore();
     return bad;
@@ -687,10 +714,3 @@ int main(int argc, char** argv) {
   std::printf("probe_batch_step: done%s\n", do_check ? (bad ? " - CHECK FAILED" : " - check PASS") : "");
   return bad ? 1 : 0;
 }
-#else
-#include <cstdio>
-int main() {
-  std::fprintf(stderr, "probe_batch_step: built without B70_BATCH_PROBE (cmake -DB70_BATCH_PROBE=ON)\n");
-  return 2;
-}
-#endif
