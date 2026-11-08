@@ -31,7 +31,7 @@ sync_tree() {
   echo "box: $BOX:$REMOTE_DIR" >&2
   rsync -az --delete \
     --exclude build --exclude 'build-*' --exclude .git --exclude 'cmake-build-*' --exclude .idea \
-    --exclude oracle-out --exclude 'oracle-out-*' \
+    --exclude oracle-out --exclude 'oracle-out-*' --exclude oracle-forced-dumps --exclude q4exp-site \
     ./ "$BOX:$REMOTE_DIR/"
   # The sync excludes oracle-out*, so a new tree has no golden set and every golden test
   # skips (exit 77) rather than runs. Link the main tree's sets into any tree that lacks them.
