@@ -278,11 +278,12 @@ int main(int argc, char** argv) {
   if (prefill) {
     // Spec 25d: the prompt through BoltEngine::prefill (chunks of `chunk`, every chunk on the 64-grid from position 0); the
     // routing on the rows the last chunk's route buffer holds; the h taps at the last prompt row (the prefill's tap). On a
-    // synthetic one prefill call a chunk (bitwise one call: Review Focus 1), so every prompt row's routes feed the cut-off.
+    // synthetic and (since 2026-11-08) our export one prefill call a chunk (bitwise one call: Review Focus 1), so every
+    // prompt row's routes feed the cut-off.
     const uint32_t c = chunk ? chunk : rb::kPfC;
     rb::check_prefill_chunk(c);
     uint32_t row0 = ((T - 1) / c) * c;
-    if (synth) {
+    if (cut.enabled) {
       row0 = 0;
       for (uint32_t s0 = 0; s0 < T; s0 += c) {
         const uint32_t s1 = std::min(T, s0 + c);
