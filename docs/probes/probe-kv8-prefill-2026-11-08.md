@@ -114,3 +114,32 @@ capacity, while the older batch estimate uses the longest slot; the
 byte-for-byte reconciliation includes that difference. All five related
 host tests pass (`host-memory-green.log`); pipeline-plan tests also pass.
 The existing four-slot int8/MTP layout still fits the memory reserve.
+
+
+## Final scale reader and review fix
+
+Raw flash now loads fp16 scales with native, exact widening. The cache
+writer saturates at 65504, so every stored scale is finite. An exhaustive
+GPU test checks all 63,488 finite fp16 encodings against the original host
+converter bit for bit, including both signs, every subnormal, signed zero
+and the largest finite value. Scale multiplications and probability rounding
+remain in their original places. The direct int8 register-reader control
+keeps the original software converter.
+
+The final build passed all 15 selected tests without skips (282.45 s),
+including that exhaustive test and all full-output comparisons. At a 128k
+position/full chunk, the raw kernel's three-run median is 168.003 ms
+(previous raw software-scale reader 172.230 ms; direct int8 block reads
+264.468 ms).
+
+The independent review's pipeline statistics finding was reproduced by
+`pp_prefill_kv8_test` at its actual-versus-expected launch-count assertion.
+Passing the engine's KV form fixes it: the full two-card test now passes
+(207.09 s), including bitwise one-card/two-card state, KV and generated-token
+comparisons, copy/peer hand-offs and extreme pipeline splits. No review
+findings remain. Logs: `pp-review-red.log` and `native-driver-v1.log`.
+
+The first raw software-scale matrix was stopped before the long 128k arms;
+its completed rows are preserved under `raw-software-matrix/`. The final
+native-scale driver runs the actual opencode replay, a fresh profile, then
+a clean three-round interleaved matrix.
