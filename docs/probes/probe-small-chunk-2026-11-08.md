@@ -91,6 +91,10 @@ The follow-up's new ids now read at 1,439 t/s (1,105 before).
 
 ## 4. What is left
 
+**Update 2026-11-08:** the dequant floor is gone - 3b (`docs/probes/probe-fused-small-chunk-2026-11-08.md`) reads the
+int4 weights straight into the DPAS, bitwise identical: one chunk's linears 51-58 ms at 1-16 rows. What remains is
+open-work row 3d.
+
 - **The dequant floor.** A short chunk still pays ~100 ms of slab dequant plus ~110 ms of GEMM: 1 row costs
   ~227 ms. A GEMM straight from the int4 weights skips the bf16 slab: `gemm_sm` (spec 28b, decode's small-M
   kernel) takes one chunk's linears at 16 rows in **30-35 ms** (vs ~215 with the dequant). It rounds differently
