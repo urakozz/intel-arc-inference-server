@@ -15,7 +15,7 @@ That is this probe.
 
 The control is the production walk as built after 3a: per 1024-column slab `pf_dequant_slab` then `gemm_l0`
 (`pf_small_tile`: A2_B2_S4 to 896 rows, A4_B2_S4 to 1024). One chunk's five linears (each shape x its layer count:
-gate||up 64, down 64, GDN qkv||z 48, out_proj / o_proj 64, FA q||k||v 16), ms, from 3a's sweep (busy-box grade,
+gate‖up 64, down 64, GDN qkv‖z 48, out_proj / o_proj 64, FA q‖k‖v 16), ms, from 3a's sweep (busy-box grade,
 card 1, interleaved medians):
 
 | rows | slab dequant (fixed) | slab walk total (dequant + `pf_gemm_small`) | a fused kernel must beat |
@@ -49,7 +49,7 @@ first token well under 100 ms with the ~15-30 ms of norms, GDN, attention and he
 atoms, a work-group SN sub-groups along the columns, the grid is (N / (16 NB SN), pad(M, 8 NA) / 8 NA) - but N is the
 linear's **whole** width, one launch a linear instead of a dequant + GEMM per 1024 columns. Per 64-k group a
 sub-group loads its columns' 8 int4 words and the group scale (layout 0: one 2D block read of the `[K/8][N]` words
-and one block read of the scales; layout 1, the tiled GDN qkv||z: the tile's 136 words), one group ahead in
+and one block read of the scales; layout 1, the tiled GDN qkv‖z: the tile's 136 words), one group ahead in
 registers, and converts them with `pf_dequant_slab`'s statements (the same xor, sign-extension shift,
 `(float)q * scale`, single RNE) into the DPAS B fragment the slab's VNNI transform read would give (the 09-22
 probe's `pf_dequant8`). Each accumulator takes `pf_gemm_small`'s DPAS chain, so the output is the slab walk's.
@@ -66,7 +66,7 @@ same arithmetic, so no rounding question. IGC 2.41 on the box; the kernel's comm
 `tools/probe/probe_fused_small.cc` compares every candidate tile against the slab walk (`pf_dequant_slab` +
 `gemm_l0`, the production launches) as raw 32-bit words over the M real rows before timing anything; a difference
 throws. Three runs: **2,276 comparisons** (31 tiles x 1..1024 rows x the five Qwen3.8 shapes, plain for all five,
-gate||up's SiLU epilogue and gate||up plain too), **0 words differ**. `tests/prefill/pf_gemm_test.cc` now checks
+gate‖up's SiLU epilogue and gate‖up plain too), **0 words differ**. `tests/prefill/pf_gemm_test.cc` now checks
 the tiles `pf_q4_tile` binds the same way at 1-384 rows (both layouts, plain and SiLU, K 5120 and 17408): 0 words
 differ.
 
@@ -76,7 +76,7 @@ Busy-box grade (card 1; the other agent's work and CPU jobs on the box). One chu
 layers), ms, sums of interleaved medians (7 rounds after a warm-up), the slab walk (`l0_now`) and the rule built
 (section 5) in the same runs:
 
-| rows | slab walk (dequant + `pf_gemm_small`) | `pf_gemm_q4` rule | gate||up part | the four plain linears | |
+| rows | slab walk (dequant + `pf_gemm_small`) | `pf_gemm_q4` rule | gate‖up part | the four plain linears | |
 |---:|---:|---:|---:|---:|---:|
 | 1 | 241.9 | **51.5** | 15.3 | 36.2 | 4.7x |
 | 8 | 240.5 | **50.5** | 15.2 | 35.3 | 4.8x |
@@ -92,7 +92,7 @@ layers), ms, sums of interleaved medians (7 rounds after a warm-up), the slab wa
 Every row clears the break-even (section 1) by far more than 5 %; the target (<= 70 ms at <= 64 rows) holds to 32
 rows (59) and misses at 64 (77). Per linear, where the fused kernel stops winning (ms a linear):
 
-| | gate||up (SiLU) | down | GDN qkv||z | out_proj | FA q||k||v |
+| | gate‖up (SiLU) | down | GDN qkv‖z | out_proj | FA q‖k‖v |
 |---|---|---|---|---|---|
 | fused / slab at 192 rows | 1.45 / 1.66 | 0.42 / 1.31 | 0.42 / 0.72 | 0.16 / 0.29 | 0.37 / 0.67 |
 | at 224 | 1.63 / 1.69 (4 %) | 0.79 / 1.32 | 0.56 / 0.75 | 0.27 / 0.29 | 0.47 / 0.66 |
@@ -107,13 +107,13 @@ NA 8 x NB 2 spill (32-46 registers) and lose.
 ## 5. Built
 
 `runtime::prefill::pf_q4_tile(M, silu)` (`gemm_l0.cc`) and `gemm_q4`; `linear_l0` / `linear_l0_silu` (every Qwen3.8
-int4 linear on the default l0 backend) run a chunk of **<= 384 rows** (gate||up's SiLU form **<= 192**) as one
+int4 linear on the default l0 backend) run a chunk of **<= 384 rows** (gate‖up's SiLU form **<= 192**) as one
 `pf_gemm_q4` launch, the slab walk above:
 
 | | <= 8 rows | 9-32 | 33-192 | 193-384 | above |
 |---|---|---|---|---|---|
 | plain (both layouts) | A4_B1_S1 | A4_B1_S1 | A8_B1_S2 | A8_B1_S2 | slab walk |
-| gate||up, SiLU epilogue | A1_B2_S4 | A4_B2_S1 | A4_B2_S1 | slab walk | slab walk |
+| gate‖up, SiLU epilogue | A1_B2_S4 | A4_B2_S1 | A4_B2_S1 | slab walk | slab walk |
 
 Automatic, no flag or variable; the build carries those six binaries (`-DB70_PF_Q4_SWEEP=ON` the probe's sweep).
 The l0-int8 backend (`linear_i8`), the MTP head's bf16 linears and other models' own walks are unchanged.
