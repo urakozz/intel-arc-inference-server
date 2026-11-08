@@ -50,6 +50,9 @@ target_link_libraries(pf_gemm_test PRIVATE b70_prefill_host b70_l0)
 b70_target_kernel_dir(pf_gemm_test)
 add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm_T0_SILU
                  kernel_pf_silu_mul)
+foreach(_t A2_B2_S4 A4_B2_S4)   # open-work 3a: gemm_l0's short-chunk tiles
+  add_dependencies(pf_gemm_test kernel_pf_gemm_small_${_t} kernel_pf_gemm_small_${_t}_SILU)
+endforeach()
 add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
 set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 

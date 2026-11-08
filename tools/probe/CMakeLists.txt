@@ -935,6 +935,15 @@ b70_target_kernel_dir(probe_chunk_rows)
 get_property(PCR_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_chunk_rows ${PCR_PF_KERNELS})
 
+# --- probe_small_chunk: open-work 3a, the prefill linears at short chunks ------------------------
+# The production walk (pf_int8) at M = 16 .. 256 itemised (requant / GEMM), against the split GEMM
+# (pf_gemm_i8_part + pf_gemm_i8_fold, bit-checked) and gemm_sm (spec 28b) where built.
+add_executable(probe_small_chunk probe_small_chunk.cc)
+target_include_directories(probe_small_chunk PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_small_chunk PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_small_chunk)
+add_dependencies(probe_small_chunk ${PCR_PF_KERNELS} ${ALL_KERNELS})
+
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
 # Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
