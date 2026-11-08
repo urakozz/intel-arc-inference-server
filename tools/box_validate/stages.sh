@@ -3482,6 +3482,13 @@ st_r78_batch() {
   grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON' 40
   judged_finish
 }
+stage r78.b4     78 default card qwen r78.lone                       "B4 on the slots server (b70-serve --max-len 32768): a stream dropped mid-request frees its slot (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text (replica_check.py's b4 on one card)"
+st_r78_b4() {
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE $DEVICE $SNAP_QWEN --max-len 32768 --spec off -- --mode b4" "b4 on the slots server"
+  chk "python3 tools/box_validate/replica_check.py b4 --replica $STATE/$STAGE/requests.jsonl" "B4"
+  grab_all b4 '^B4|^slots:' 20
+  finish
+}
 stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts restored from the prefix cache and 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
 st_r78_speed() {
   idle before
