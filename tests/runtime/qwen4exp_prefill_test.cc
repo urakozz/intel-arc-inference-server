@@ -37,6 +37,12 @@
 //        gap is at least one bf16 ulp of the top logit agrees; teacher-forced on decode's;
 //     7. the injected run chunked == whole, bitwise: a fixed valid selection (the last 512 complete blocks + the tail)
 //        fed by set_prefill_injector, one call against chunks of 64.
+//     **A truncated real checkpoint (`layers:N`; operator ruling 2026-11-08, A', until Flash-Next's f32 reference - B):**
+//     the model cut to N layers has near-flat logits and its sparse selections flip with rounding, so the same engine
+//     moves as far between chunks of 16 and 2048 (step 3, rounding only) as between prefill and decode. Step 4's state
+//     bars become that control's: each of the first QSA layer's worst, the median and p01 within 2x the control's
+//     cosine distance (the 2026-11-01 slack); step 6 gates the last logits the same way (prefill vs decode within 2x
+//     the control's distance) and prints the tokens; step 5's routing and selections are printed, not gated.
 //   mode `split` (Review Focus 5): the kN ids in ONE prefill against TWO calls split at 64, 2048, 2051, 4097 - every
 //     layer's state, the last logits, the first token. Gated: the multiples of 64 bitwise, the others within the
 //     split test's bars (logits cosine >= 0.9995, state rows: first QSA layer >= 0.999, median >= 0.9998, p01 >= 0.99)
@@ -309,7 +315,10 @@ void inject_rows(uint32_t pos, uint32_t rows, uint32_t* lists) {
   }
 }
 
-int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
+// Within 2x the control's cosine distance (A', header).
+bool near_control(double x, double control) { return 1 - x <= 2 * (1 - control) + 1e-9; }
+
+int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   const uint32_t n = uint32_t(prompt.size());
   bool ok = true;
@@ -342,6 +351,8 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   ok = ok && same;
 
   // ---- 3. chunking ------------------------------------------------------------------------------------------------
+  StateCmp control;            // chunks of 16 against the default: A''s bars (header)
+  double control_logits = 1;
   {
     e.reset();
     e.prefill(prompt, 64);
@@ -353,6 +364,8 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     const Snap s16 = snap(e, false);
     const bool c16 = s16.state_equal(a);
     const StateCmp cmp = compare_state(d, a, s16, n, e.max_len());
+    control = cmp;
+    control_logits = cos_f32(a.logits.data(), s16.logits.data(), a.logits.size());
     std::printf("3. chunks of 64 vs %u: every layer's state, logits, first token %s; chunks of 16: %s (first QSA layer "
                 "worst %.6f, median %.7f, p01 %.6f, logits cosine %.7f - the GDN's 64-row sub-chunks move with the chunk)\n",
                 rq::kPfC, c64 ? "bitwise" : "DIFFER", c16 ? "bitwise" : "not bitwise", cmp.first_qsa_worst, cmp.median,
@@ -445,7 +458,13 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
   }
   const Snap dec = snap(e, false);
   const StateCmp sc = compare_state(d, a, dec, n, e.max_len());
-  const bool sok = state_ok(sc) && sc.rings_exact;
+  const bool sok = (control_rule ? near_control(sc.first_qsa_worst, control.first_qsa_worst) &&
+                                        near_control(sc.median, control.median) && near_control(sc.p01, control.p01)
+                                  : state_ok(sc)) &&
+                   sc.rings_exact;
+  if (control_rule)
+    std::printf("4. (A', a truncated checkpoint: the bars are 2x the chunk-16 control's distance - worst %.6f, median %.7f, "
+                "p01 %.6f)\n", control.first_qsa_worst, control.median, control.p01);
   std::printf("4. prefill state vs decode's fill (%u positions x %u layers): first QSA layer's worst %.6f, median %.7f, p01 "
               "%.6f, %u rows < 0.99, worst %.4f (L%u); PLE id ring %s; tail rings %u words differ (max %u bf16 ulp)%s\n", n,
               d.layers, sc.first_qsa_worst, sc.median, sc.p01, sc.below99, sc.worst, sc.worst_layer,
@@ -459,8 +478,9 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
               "beyond; selections %llu (row, QSA layer) - %llu exact, %llu near-ties, %llu beyond%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)near, (unsigned long long)undet,
               (unsigned long long)bad, (unsigned long long)srows, (unsigned long long)sexact, (unsigned long long)snear,
-              (unsigned long long)sbad, bad == 0 && sbad == 0 ? "" : "  ** FAIL **");
-  ok = ok && sok && bad == 0 && sbad == 0;
+              (unsigned long long)sbad, bad == 0 && sbad == 0 ? "" : control_rule ? " (printed: A')" : "  ** FAIL **");
+  ok = ok && sok && (control_rule || (bad == 0 && sbad == 0));
+  const double pf_dec_logits = cos_f32(a.logits.data(), dec.logits.data(), a.logits.size());
 
   // ---- 6. tokens, ruling A26's rule ----------------------------------------------------------------------------------
   std::vector<uint32_t> dtok(kGen);
@@ -486,9 +506,17 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt) {
     }
     e.ingest({dtok[j]});   // teacher-forced on decode's token
   }
-  std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
-              det_agree == det ? "" : "  ** FAIL **");
-  ok = ok && det_agree == det;
+  if (control_rule) {
+    const bool lok = near_control(pf_dec_logits, control_logits);
+    std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree (printed: A'); the last logits, prefill vs decode, "
+                "cosine %.7f against the chunk-16 control's %.7f%s\n", agree, kGen, det_agree, det, pf_dec_logits,
+                control_logits, lok ? "" : "  ** FAIL **");
+    ok = ok && lok;
+  } else {
+    std::printf("6. tokens: %u / %u agree; %u / %u determined rows agree%s\n", agree, kGen, det_agree, det,
+                det_agree == det ? "" : "  ** FAIL **");
+    ok = ok && det_agree == det;
+  }
 
   // ---- 7. the injected run: chunked == whole -------------------------------------------------------------------------
   {
@@ -797,7 +825,7 @@ int main(int argc, char** argv) {
   std::printf("%s: %u layers, %s dense, %s attention (B70_Q4_ATTN), %u device(s), max_len %u; prompt %u ids\n",
               snap_dir.c_str(), rig.eng->model().desc.layers, model::q4_form_name(rig.eng->model().desc.forms.dense),
               rq::q4_attn_name(rig.eng->attention()), rig.eng->devices(), rig.eng->max_len(), kN);
-  const int rc = mode == "split" ? run_split(*rig.eng, prompt) : run_all(*rig.eng, prompt);
+  const int rc = mode == "split" ? run_split(*rig.eng, prompt) : run_all(*rig.eng, prompt, o.layers != 0);
   std::puts(rc == 0 ? "qwen4exp_prefill_test OK" : "qwen4exp_prefill_test FAILED");
   return rc;
 }
