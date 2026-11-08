@@ -131,9 +131,9 @@ of the two-card prefill (row 23) is not measured:
 # every command below: no speed row yet
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 # an agentic session over both cards: 262144 tokens with MTP (derived; one card: ~170k)
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --parallel pp --prefix-split-last
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --kv-cache int8 --host 0.0.0.0 --port 8000 --parallel pp --prefix-split-last
 # the same by itself: --parallel auto takes two cards when 262144 does not fit one
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --max-len 262144 --prefix-split-last
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --kv-cache int8 --max-len 262144 --prefix-split-last
 # the same with the int8 KV cache and the peer hand-off (both cards ~16 GB, derived)
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $Q --parallel pp --kv-cache int8 --pipeline-handoff peer
 # b70-decode: the same ids as one card, greedy, with MTP across the split
@@ -186,18 +186,18 @@ Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 # agentic session, the configuration that has run on the card: 131072 context, an explicit
 # prefix cache size (spec 7 measured 32 GiB; pick what your RAM allows), no proposer
-./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 \
+./build/src/cli/b70-serve $Q --kv-cache int8 --host 0.0.0.0 --port 8000 \
     --max-len 131072 --prefix-cache-gb 32 --prefix-split-last --spec off
 
 # the default for agentic use: the largest context that fits beside the MTP head (~170k, derived),
 # the cache sized from the machine's RAM, MTP choosing 0-3 guesses per step
-./build/src/cli/b70-serve $Q --prefix-split-last                                   # no speed row yet
+./build/src/cli/b70-serve $Q --kv-cache int8 --prefix-split-last                                   # no speed row yet
 
 # the full trained context, 262144, with the int8 KV cache (accuracy gates pending)
 ./build/src/cli/b70-serve $Q --prefix-split-last --kv-cache int8                   # no speed row yet
 
 # prompt lookup instead of the MTP guesses (one proposer per server)
-./build/src/cli/b70-serve $Q --prefix-split-last --spec lookup                     # no speed row yet
+./build/src/cli/b70-serve $Q --kv-cache int8 --prefix-split-last --spec lookup                     # no speed row yet
 ```
 
 ```sh
@@ -303,7 +303,7 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 # every command below: no speed row yet
 # agentic session: the full trained context, 262144, fits with or without MTP (derived)
-./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --prefix-split-last
+./build/src/cli/b70-serve $O --kv-cache int8 --host 0.0.0.0 --port 8000 --prefix-split-last
 
 ./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
@@ -363,7 +363,7 @@ python3 tools/oracle/tokenize.py <k2-snapshot> encode --bos prompt.txt > k2.ids
 ./build/src/cli/b70-decode $K --ids k2.ids --n 32 --prefill --max-len auto   # ~46k, derived
 
 # serving (spec 18d): int8 head, prefix cache on, --max-len auto (~46k bf16 KV, ~90k int8 KV)
-./build/src/cli/b70-serve $K --port 8000
+./build/src/cli/b70-serve $K --kv-cache int8 --port 8000
 ./build/src/cli/b70-serve $K --kv-cache int8
 # K2's template variables per request: "chat_template_kwargs": {"tool_call_format": "xml" |
 # "xml_typed" | "json", "reasoning_effort": "high" | "medium" | "low"}
@@ -439,9 +439,9 @@ beside the full layers' KV (20 KiB a position). `--max-len auto` reaches 262144 
 
 ```sh
 # every command below: no speed row yet; needs two cards
-./build/src/cli/b70-serve $K                                    # two cards, --max-len auto (262144), int8 head
-./build/src/cli/b70-serve $K --pipeline-handoff peer --max-len 131072
-./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn restores at len - 1
+./build/src/cli/b70-serve $K --kv-cache int8                                    # two cards, --max-len auto (262144), int8 head
+./build/src/cli/b70-serve $K --kv-cache int8 --pipeline-handoff peer --max-len 131072
+./build/src/cli/b70-serve $K --kv-cache int8 --prefix-split-last                # agentic sessions: the next turn restores at len - 1
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
   [{"role": "user", "content": "Wie spät ist es in Berlin?"}], "chat_template_kwargs": {"reasoning_effort": "low"}}'
 ```
@@ -512,8 +512,8 @@ I=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound
 ./build/src/cli/b70-decode $I --layers 37 --parallel pp --bench --prefill-length 32768 --tg 16 --max-len 33024
 # spec 21e: served truncated from a snapshot that ships the original's tokenizer.json, MTP K = 2, one card / two
 F=~/b70/models/qwen3.8-flash-next   # Intel's files, the original's tokenizer.json
-./build/src/cli/b70-serve $F --layers 18 --spec mtp --spec-max 2
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --layers 37 --parallel pp --spec mtp --spec-max 2
+./build/src/cli/b70-serve $F --kv-cache int8 --layers 18 --spec mtp --spec-max 2
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve $F --kv-cache int8 --layers 37 --parallel pp --spec mtp --spec-max 2
 ```
 
 **Limits.** Prefill on `l0` only (`--prefill-backend l0-int8`: spec 5's h8 linears rotate in whole 1024-k Hadamard
@@ -562,7 +562,7 @@ small checkpoint; `--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes
 the prefill scratch planned in (Decision 14), the int8 head by default, prefill on `l0` only:
 
 ```sh
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --kv-cache int8 --port 8000 --prefix-cache-gb auto --log-requests ~/bolt-log
 ```
 
 - **Chat template.** The snapshot's `chat_template.jinja` (sha256 `6521afc7...`, NVIDIA's, byte-identical in our
@@ -613,7 +613,7 @@ both `off` and `lookup` on the agentic set (and nowhere > 3 % slower). Two cards
 
 ```sh
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec dflash      # the LiLiCorr drafter, K <= 7 adaptive
-ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec lookup --spec-max 4
+ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --kv-cache int8 --spec lookup --spec-max 4
 ```
 
 **Limits.** No `--spec mtp` (no MTP head) and no `--spec dflash-lookup` (Qwen3.8's), no `--draft-vocab`, bf16 KV only
