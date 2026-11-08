@@ -3,9 +3,9 @@
 // (8 m x 4 n, each 32 m x 64 n), so a 1024-column slab is 4 work-groups for any chunk up to 256
 // rows: 4 of the 32 Xe cores, each doing a whole 256-row tile's DPAS for the few rows the chunk
 // has. Here a sub-group owns NA row blocks of 8 (8 NA rows) x NB 16-column atoms, a work-group
-// SN such sub-groups side by side along n, and the grid covers only pad(M, 8 NA) rows - so a
-// short chunk's slab is many small work-groups spread over every core, each doing only the
-// rows that exist.
+// SN such sub-groups side by side along n, and the grid - (N / (16 NB SN), pad(M, 8 NA) / 8 NA),
+// columns first - covers only the rows that exist: a short chunk's slab is many small
+// work-groups spread over every core.
 //
 // **Bit-identical to pf_gemm.** Each accumulator (one 8-row block x one 16-column atom) starts
 // at zero and takes the same DPAS chain pf_gemm's does - per 32-k tile, the k16 half ks = 0
@@ -35,9 +35,6 @@
 #endif
 #ifndef SILU_EPI
 #define SILU_EPI 0
-#endif
-#ifndef NFAST
-#define NFAST 0   /* 1: grid dimension 0 walks the column tiles, 1 the row tiles */
 #endif
 #if NA != 1 && NA != 2 && NA != 4
 #error "pf_gemm_small: NA is 1, 2 or 4"
@@ -95,13 +92,12 @@ __kernel void pf_gemm_small(__global const ushort* restrict A, __global const us
                             __global float* restrict C_base, uint M, uint K, uint N, uint lda,
                             uint ldb, uint ldc) {
   const uint s = get_sub_group_id();
-#if NFAST
+  // Column tiles on grid dimension 0, row tiles on 1: consecutive work-groups share A's rows
+  // and walk B's columns. The other order (pf_gemm's, rows first) timed erratically on the
+  // engine's walk - 2x slower at some row counts (256, 320, 448 rows), not at their neighbours
+  // (probe_small_chunk, 2026-11-08) - and slower on average.
   const uint mb = get_group_id(1) * R;
   const uint nb = get_group_id(0) * (CN * SN) + CN * s;
-#else
-  const uint mb = get_group_id(0) * R;
-  const uint nb = get_group_id(1) * (CN * SN) + CN * s;
-#endif
 #if SILU_EPI
   __global ushort* restrict X = (__global ushort*)C_base;   // bf16 x, `ldc` carries ldx
 #else
