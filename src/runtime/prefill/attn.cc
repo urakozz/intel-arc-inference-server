@@ -219,12 +219,20 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
   require(pos + C <= s.max_len, "pos + C = " + std::to_string(pos + C) + " exceeds max_len " +
                                     std::to_string(s.max_len));
   // pf_flash_attn's launch, unchanged in shape: grid (ceil(C / 8), kv-heads, 1), pf_o's
-  // [q-heads][rows][256] at rows = pad256(C). The kernel reads cache rows [0, pos + C) only.
+  // [q-heads][rows][256] at rows = pad256(C). Widen raw integers once for all query tiles;
+  // flash still applies K's scale to scores and V's scale to probabilities, bit for bit.
   const uint32_t rows = attn_rows(C, backend);
   require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float), "pf_o is undersized");
-  cx.launch(kc(kernels::pf_flash_attn_kv8_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
+  auto& raw = s.kv8_raw_buffer();
+  auto* k = raw.as<uint16_t>();
+  auto* v = k + size_t(s.max_len) * kv_heads * kHeadDim;
+  const uint32_t count = (pos + C) * kv_heads * kHeadDim;
+  const auto variant = kernels::pf_flash_attn_kv8_raw_variant(q_heads, kv_heads);
+  cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
+            {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count)});
+  cx.launch(kc(variant, "pf_flash_attn_kv8"),
             (C + 7u) / 8u, kv_heads, 1,
-            {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs),
+            {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
              PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows)});
   profile_wait(cx, Phase::kAttnFlash);
 }

@@ -1578,7 +1578,7 @@ if(B70_KV8)
     kernel_attn_prep_M1_KV8 kernel_attn_prep_M2_KV8 kernel_attn_prep_M3_KV8 kernel_attn_prep_M4_KV8
     kernel_attn_v2_M1_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M2_T${ATTN_V2_TGT}_KV8
     kernel_attn_v2_M3_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M4_T${ATTN_V2_TGT}_KV8
-    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_attn_gate_kv8)
+    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8)
   if(B70_MTP)
     list(APPEND B70_KV8_KERNELS kernel_attn_prep_M1_S1_KV8 kernel_attn_prep_M2_S1_KV8
       kernel_attn_prep_M3_S1_KV8 kernel_attn_prep_M4_S1_KV8)
@@ -1605,9 +1605,12 @@ if(B70_KV8)
   target_link_libraries(kv8_flash_bitwise_test PRIVATE b70_l0)
   b70_target_kernel_dir(kv8_flash_bitwise_test)
   add_dependencies(kv8_flash_bitwise_test kernel_kv8_flash_control
-    kernel_pf_flash_attn_kv8 kernel_pf_attn_gate_kv8)
+    kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8)
   add_test(NAME kv8_flash_bitwise_test COMMAND kv8_flash_bitwise_test)
   set_tests_properties(kv8_flash_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
+  add_test(NAME kv8_flash_raw_bitwise_test COMMAND kv8_flash_bitwise_test
+    ${B70_KERNEL_DIR}/pf_flash_attn_kv8_raw.bin --raw)
+  set_tests_properties(kv8_flash_raw_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
 
   # The gates of spec 12 §4 over the int8 cache: the SAME binaries and command lines as the
   # bf16 registrations they twin, with B70_KV_CACHE=int8 (runtime::default_kv_cache - the

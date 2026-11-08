@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <random>
 #include <string>
 #include <utility>
@@ -19,7 +20,9 @@ namespace {
 constexpr uint32_t kHD = 256, kQH = 24, kKVH = 4;
 
 void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
-             l0::Kernel& gate, uint32_t pos, uint32_t C, bool time) {
+             l0::Kernel& gate, uint32_t pos, uint32_t C, bool time, uint32_t head_groups,
+             l0::Kernel* widen) {
+  const bool raw = widen != nullptr;
   const uint32_t depth = pos + C, rows = (C + 255u) & ~255u;
   std::mt19937 rng(pos + C);
   std::vector<int8_t> k(size_t(depth) * kKVH * kHD), v(k.size());
@@ -38,6 +41,29 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
   const auto part = pf_harness::random_f32(size_t(C) * 14336, pos + 1, 0.0f, 1.5f);
   auto dk = pf_harness::upload(d.ctx, d.imm, k);
   auto dv = pf_harness::upload(d.ctx, d.imm, v);
+  std::unique_ptr<l0::Mem> dkraw, dvraw;
+  if (raw) {
+    std::vector<uint16_t> kr(k.size() + 16, 0xA55A), vr(v.size() + 16, 0xA55A);
+    for (size_t i = 0; i < k.size(); ++i) {
+      kr[i] = common::f32_to_bf16(float(k[i]));
+      vr[i] = common::f32_to_bf16(float(v[i]));
+    }
+    dkraw = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, kr.size() * 2);
+    dvraw = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, vr.size() * 2);
+    d.imm.fill(dkraw->ptr(), 0xA55AA55Au, dkraw->size());
+    d.imm.fill(dvraw->ptr(), 0xA55AA55Au, dvraw->size());
+    widen->arg_ptr(0, dk.ptr());
+    widen->arg_ptr(1, dv.ptr());
+    widen->arg_ptr(2, dkraw->ptr());
+    widen->arg_ptr(3, dvraw->ptr());
+    widen->arg(4, uint32_t(k.size()));
+    d.run(*widen, (uint32_t(k.size()) + 4095u) / 4096u, 1);
+    std::vector<uint16_t> expanded(kr.size());
+    pf_harness::download(d.imm, expanded, *dkraw);
+    CHECK(std::memcmp(expanded.data(), kr.data(), dkraw->size()) == 0);
+    pf_harness::download(d.imm, expanded, *dvraw);
+    CHECK(std::memcmp(expanded.data(), vr.data(), dvraw->size()) == 0);
+  }
   auto dks = pf_harness::upload(d.ctx, d.imm, ks);
   auto dvs = pf_harness::upload(d.ctx, d.imm, vs);
   auto dq = pf_harness::upload(d.ctx, d.imm, q);
@@ -56,15 +82,20 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
                  std::vector<uint16_t>& gated_result) {
     d.imm.fill(o.ptr(), 0x3F123456u, o.size());
     kernel.arg_ptr(0, dq.ptr());
-    kernel.arg_ptr(1, dk.ptr());
+    kernel.arg_ptr(1, &kernel == &fast && raw ? dkraw->ptr() : dk.ptr());
     kernel.arg_ptr(2, dks.ptr());
-    kernel.arg_ptr(3, dv.ptr());
+    kernel.arg_ptr(3, &kernel == &fast && raw ? dvraw->ptr() : dv.ptr());
     kernel.arg_ptr(4, dvs.ptr());
     kernel.arg_ptr(5, o.ptr());
     kernel.arg(6, pos);
     kernel.arg(7, C);
     kernel.arg(8, rows);
-    d.run2(kernel, (C + 7u) / 8u, kKVH, gate, kQH, C);
+    auto list = l0::CmdList::regular(d.ctx);
+    list.launch(kernel, (C + 7u) / 8u, kKVH, &kernel == &fast ? head_groups : 1);
+    list.launch(gate, kQH, C);
+    list.close();
+    d.q.execute(list, &d.fence);
+    d.fence.wait();
     pf_harness::download(d.imm, result, o);
     pf_harness::download(d.imm, gated_result, out);
   };
@@ -85,7 +116,7 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
     l0::EventPool pool(d.ctx, 1);
     l0::Event event(pool, 0);
     auto list = l0::CmdList::regular(d.ctx);
-    list.launch(fast, (C + 7u) / 8u, kKVH, 1, &event);
+    list.launch(fast, (C + 7u) / 8u, kKVH, head_groups, &event);
     list.close();
     for (uint32_t i = 0; i < 4; ++i) {
       event.reset();
@@ -100,9 +131,13 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
 }  // namespace
 
 int main(int argc, char** argv) {
-  CHECK(argc <= 3);
-  const bool time = argc == 3;
-  if (time) CHECK_EQ(std::string(argv[2]), std::string("--time"));
+  CHECK(argc <= 4);
+  bool time = false, raw = false;
+  for (int i = 2; i < argc; ++i) {
+    if (std::string(argv[i]) == "--time") time = true;
+    else if (std::string(argv[i]) == "--raw") raw = true;
+    else CHECK(false);
+  }
   pf_harness::Dev d;
   l0::Module fm(d.ctx, argc > 1 ? argv[1] : kernels::path("pf_flash_attn_kv8"));
   l0::Module cm(d.ctx, kernels::path("kv8_flash_control"));
@@ -110,13 +145,25 @@ int main(int argc, char** argv) {
   auto fast = fm.kernel("pf_flash_attn_kv8");
   auto control = cm.kernel("pf_flash_attn_kv8");
   auto gate = gm.kernel("pf_attn_gate_kv8");
-  fast.group_size(96);
+  std::unique_ptr<l0::Kernel> widen;
+  if (raw) {
+    widen = std::make_unique<l0::Kernel>(fm.kernel("kv8_widen"));
+    widen->group_size(256);
+  }
+  ze_kernel_properties_t props{};
+  props.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+  ZE_CHECK(zeKernelGetProperties(fast.handle(), &props));
+  // Probe binaries keep RPW=8 and vary how many of the six heads share a group.
+  const uint32_t hpw = props.requiredGroupSizeX / 16;
+  CHECK(hpw > 0 && props.requiredGroupSizeX == hpw * 16 && 6 % hpw == 0);
+  fast.group_size(props.requiredGroupSizeX);
+  std::printf("kernel: HPW %u, private %u B, spill %u B\n", hpw, props.privateMemSize, props.spillMemSize);
   control.group_size(96);
   gate.group_size(256);
   for (const auto& shape : {std::pair{0u, 1u}, {0u, 9u}, {0u, 64u}, {777u, 300u},
                             {2000u, 2048u}, {13209u, 2048u}, {30963u, 37u},
                             {64991u, 9u}, {127743u, 257u}, {28952u, 2048u},
                             {62952u, 2048u}, {125952u, 2048u}, {0u, 4096u}})
-    compare(d, fast, control, gate, shape.first, shape.second, time);
+    compare(d, fast, control, gate, shape.first, shape.second, time, 6 / hpw, widen.get());
   std::puts("kv8_flash_bitwise_test: PASS");
 }

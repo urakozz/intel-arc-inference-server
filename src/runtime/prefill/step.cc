@@ -535,10 +535,11 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
 }
 }  // namespace
 
-size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
-  if (d.is_moe()) return moe_step_chunk_launches(d, b, C);
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv) {
+  const size_t widen = kv == KvCache::Int8 ? d.fa_layers : 0;
+  if (d.is_moe()) return moe_step_chunk_launches(d, b, C) + widen;
   const size_t base =
-      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C);
+      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C) + widen;
   if (b != PrefillBackend::L0Int8) return base;
   // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
   // layer, the slab walk being the same 2 x N/1024 launches.
@@ -546,8 +547,9 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
 }
 // Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           model::LayerKind kind) {
+                           model::LayerKind kind, KvCache kv) {
   const bool gdn = kind == model::LayerKind::GDN;
+  const size_t widen = !gdn && kv == KvCache::Int8 ? 1 : 0;
   if (d.is_moe()) {
     auto lin = [&](LinearId id) {
       return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
@@ -555,17 +557,17 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     const size_t ffn = 2 + moe_chunk_launches(d, b);
     return gdn ? 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn
                : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
-                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
+                     kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }
   const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C);
-  return b == PrefillBackend::L0Int8 ? l0n + 4 : l0n;
+  return (b == PrefillBackend::L0Int8 ? l0n + 4 : l0n) + widen;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           const PpStage& st) {
+                           const PpStage& st, KvCache kv) {
   size_t n = 0;
   for (const model::LayerDesc& L : d.layer_descs())
-    if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind);
+    if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind, kv);
   n += st.has_embed() ? 1 : 0;   // pf_embed_gather
   n -= st.has_embed() ? 0 : 1;   // layer `first`'s pf_res_fold ran on the previous device
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold

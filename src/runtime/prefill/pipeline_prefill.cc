@@ -636,13 +636,16 @@ void PipelineEngine::prepare_prefill() {
     check_prefill_chunk_cap(d, cap);
     // The two stages' walks add up to one card's, launch for launch (step.h).
     for (uint32_t C : {1u, 256u, cap})
-      if (prefill::step_stage_launches(d, b, C, stage(0)) + prefill::step_stage_launches(d, b, C, stage(1)) !=
-          prefill::step_chunk_launches(d, b, C))
+      if (prefill::step_stage_launches(d, b, C, stage(0), kv_) +
+              prefill::step_stage_launches(d, b, C, stage(1), kv_) !=
+          prefill::step_chunk_launches(d, b, C, kv_))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
     pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff, cap);
   }
   if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
+  if (kv_ == KvCache::Int8)
+    for (auto& dev : as_pf(*pf_).dev) dev->scratch.kv8_raw_buffer();
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
   // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every int4

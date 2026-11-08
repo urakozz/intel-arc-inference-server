@@ -664,8 +664,18 @@ __kernel void pf_attn_gate_kv8(__global const float* restrict o,
 //   multiplies the score: s = (dot q8 * sk) * SCORE_SCALE.
 // V operand: lane l = dim, 8 pairs of consecutive keys (VNNI), int8 as bf16 exactly; the
 //   key's scale goes into P: pa = rne_bf16(p * sv) (lane = key), the row sum stays sum p.
+// KV8_RAW reads those same unscaled integer values from a bf16 scratch, widened once
+// by kv8_widen. Scale multiplications and all rounding points stay in this kernel.
 // Keys at or past `depth` load as 0 and score -INF; nothing past the cache's rows is read.
 // ---------------------------------------------------------------------------
+#ifndef KV8_RAW
+#define KV8_RAW 0
+#endif
+#if KV8_RAW
+#define KV8_VALUE ushort
+#else
+#define KV8_VALUE char
+#endif
 #ifndef KT
 #error "KT (KV positions per tile, 32 or 64) must be defined"
 #endif
@@ -700,12 +710,27 @@ inline uint2 kv8_bf4(uint w) {
                  kv8_bf(c.s2) | (kv8_bf(c.s3) << 16));
 }
 
+#if KV8_RAW
+// Every input row has 4 * HD values, a multiple of the 16-value vector below.
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void kv8_widen(__global const char* restrict K,
+                       __global const char* restrict V,
+                       __global ushort* restrict Kr,
+                       __global ushort* restrict Vr, uint count) {
+  const size_t i = get_global_id(0) * 16u;
+  if (i >= count) return;
+  const char16 k = vload16(0, K + i), v = vload16(0, V + i);
+  vstore16(convert_ushort16(as_uint16(convert_float16(k)) >> 16), 0, Kr + i);
+  vstore16(convert_ushort16(as_uint16(convert_float16(v)) >> 16), 0, Vr + i);
+}
+#endif
+
 __attribute__((reqd_work_group_size(SG * SGS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
-                                __global const char* restrict Kc,
+                                __global const KV8_VALUE* restrict Kc,
                                 __global const ushort* restrict Ks,
-                                __global const char* restrict Vc,
+                                __global const KV8_VALUE* restrict Vc,
                                 __global const ushort* restrict Vs,
                                 __global float* restrict O, uint pos, uint C, uint rows) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
@@ -740,6 +765,18 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     float8 sacc[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) sacc[b] = (float8)(0.0f);
+#if KV8_RAW
+#pragma unroll
+    for (uint kk = 0; kk < NDA; ++kk)
+#pragma unroll
+      for (uint b = 0; b < NKA; ++b) {
+        uint kb[8];
+        intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
+            (__global void*)Kc, 4 * HD * 2, (int)depth, 4 * HD * 2,
+            (int2)((int)((j * HD + 16u * kk) / 2u), (int)(t0 + 16u * b)), kb);
+        sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk], as_int8(vload8(0, kb)), sacc[b]);
+      }
+#else
 #pragma unroll
     for (uint kk = 0; kk < NDA; kk += 2)
 #pragma unroll
@@ -757,6 +794,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk], as_int8(vload8(0, kb)), sacc[b]);
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk + 1u], as_int8(vload8(1, kb)), sacc[b]);
       }
+#endif
     // scale by the key's K scale, mask, running max (component r = row r0 + r, lane = key)
     float8 tmax = (float8)(-INFINITY);
     float svl[NKA];   // this lane's key's V scale, per key atom
@@ -800,6 +838,12 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     for (uint b = 0; b < NKA; b += 2)
 #pragma unroll
       for (uint dd = 0; dd < NDA; dd += 2) {
+#if KV8_RAW
+        uint vb[32];
+        intel_sub_group_2d_block_read_transform_16b_32r16x2c(
+            (__global void*)Vc, 4 * HD * 2, (int)depth, 4 * HD * 2,
+            (int2)((int)(j * HD + 16u * dd), (int)(t0 + 16u * b)), vb);
+#else
         uint vb[32];   // [c * 16 + jj]: c = dim half, jj = key pair of the 32 keys
 #pragma unroll
         for (uint c = 0; c < 2u; ++c) {
@@ -814,6 +858,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
             vb[c * 16u + 2u * z + 1u] = pair.s1;
           }
         }
+#endif
 #pragma unroll
         for (uint c = 0; c < 2u; ++c)
 #pragma unroll

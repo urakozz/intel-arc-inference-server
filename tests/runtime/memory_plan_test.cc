@@ -397,7 +397,7 @@ void check_kv_int8() {
     CHECK(!l16.layer(k, v, 2).int8());
   }
 
-  // The plan's kv term and the MTP head's buffers follow the form; nothing else moves.
+  // The int8 prefill also widens one layer's raw K/V values exactly into bf16 scratch.
   const runtime::MemoryPlan b16 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
                                                 KvCache::Bf16);
   const runtime::MemoryPlan b8 = runtime::plan(q, 131072, true, kQwenInt8Weights + kMtpWeights, {}, {},
@@ -406,7 +406,12 @@ void check_kv_int8() {
   CHECK_EQ(b8.kv, size_t{131072} * 33024);
   CHECK_EQ(b16.mtp_buffers - b8.mtp_buffers, size_t{2} * 131072 * (2048 - 1032));
   CHECK_EQ(b16.model, b8.model);
-  CHECK_EQ(b16.prefill_scratch, b8.prefill_scratch);
+  CHECK_EQ(b8.prefill_scratch - b16.prefill_scratch, size_t{131072} * 4 * 256 * 2 * 2);
+  CHECK_EQ(b8.prefill_lazy - b16.prefill_lazy, size_t{536870912});
+  runtime::PrefillPath decode_only;
+  decode_only.prefill = false;
+  CHECK_EQ(runtime::plan(q, 131072, false, kQwenInt8Weights, decode_only, {}, KvCache::Int8).prefill_scratch,
+           size_t{0});
   CHECK_EQ(b16.int8, b8.int8);
   CHECK(runtime::describe(b8, kDevice, kReserve).find(", int8 KV cache)") != std::string::npos);
   CHECK(runtime::describe(b16, kDevice, kReserve).find("int8 KV") == std::string::npos);

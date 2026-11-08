@@ -65,3 +65,43 @@ not the required interleaved end-to-end benchmark.
 
 Oracle scratch honors TMPDIR so this run keeps its gate logs under
 `~/b70/logs/3e/tmp/kv8_vs_oracle`.
+
+
+## Exact raw widening once per layer/chunk
+
+Repeated integer-to-bf16 conversion inside every query tile is the remaining
+cost. Widening the **unscaled integers** once per attention call preserves
+all bits: every int8 value is exactly representable in bf16. The flash still
+multiplies scores by K's fp16 scale and probabilities by V's scale in their
+original order, with the original rounding. This adds no scaled-dequantization
+rounding and needs no numerical judge or runtime switch.
+
+The first raw-reader probe matched all 13 shapes and reduced the synthetic
+128k-position/full-chunk kernel from about264 to172ms. Register-resident Q
+spilled2240B and did not help. Native-half-scale loads and alternative head
+work-groups offered little benefit; keep the existing scale helper and
+HPW6/QREG0/256GRF.
+
+The integrated writer is checked against every host-widened K/V word with
+16-word tail guards. The raw flash's complete fp32 and gated bf16 outputs
+match the frozen original. A deliberately corrupted V operand failed the
+comparison at C=1 (49104 fp32 words differ). Feeding widened rows to the old
+reader also failed before the new reader existed (48864 words differ).
+
+One reusable layer's K/V temporary costs4096 bytes per context position:
+512MiB at max_len131072, included in both one-card and two-card plans and
+allocated only for int8 prefill. The planners' new512MiB assertions failed
+before implementation and passed afterward. Actual one-card allocations and
+launch counts match the plans at16384 and131072 for both cache formats.
+At131072 with an int8 lm_head, the int8 engine totals22.637GB including
+1.272GB prefill scratch.
+
+The integrated full build and11 selected tests passed without skips
+(281.43s, `final-driver.log`): the eight original gates, the GPU raw-widening
+comparison, and the one-card/two-card host memory-plan tests. Fresh review
+found a missed int8 argument in the pipeline's runtime launch-statistics
+calculation; its existing two-card regression is queued before the fix.
+
+Final15k profile: flash GPU1191.8ms bf16 versus1309.6ms int8 including
+widening; instrumented wall10438.4/10538.5ms. Initial unprofiled warmups
+9856.9/9974.0ms. Interleaved matrix and recorded opencode replay pending.

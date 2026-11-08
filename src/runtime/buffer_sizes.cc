@@ -249,12 +249,14 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.pf_attn = size_t{kC} * desc.fa_value_dim() * kBf16;
   s.pf_o = size_t{desc.fa_q_heads} * kC * Q::kFaHeadDim * kFp32;
   s.pf_rowsum = size_t{desc.fa_q_heads} * kC * kFp32;
-  // The lazy three (spec 2.1 §3.3, spec 6): the L0 slab [intermediate][1024] (one pf_gemm
+  // The lazy buffers: the L0 slab [intermediate][1024] (one pf_gemm
   // slab of the widest K); the composed attention's S and P, [one GQA group][kC][max_len]
-  // fp32 and bf16 - the only prefill scratch that scales with max_len.
+  // fp32 and bf16, and int8 attention's exact raw K/V widening for one layer.
   s.slab = size_t{slab_k(desc)} * kernels::kPfSlabWidth * kBf16;
   s.pf_s = size_t{desc.fa_gqa()} * kC * max_len * kFp32;
   s.pf_p = size_t{desc.fa_gqa()} * kC * max_len * kBf16;
+  if (desc.fa_q_heads == 24 && desc.fa_kv_heads == 4)
+    s.kv8_raw = size_t{max_len} * desc.fa_kv_n() * kBf16 * 2;
   s.moe = moe_prefill_layout(desc).total;   // spec 15d: 0 on a dense model
   return s;
 }

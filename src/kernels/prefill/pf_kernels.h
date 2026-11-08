@@ -105,6 +105,10 @@ inline std::string pf_flash_attn_kv8_variant(unsigned q = kRefFaQHeads,
 inline std::string pf_attn_gate_kv8_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_attn_gate_kv8" + fa_suffix(q, kv);
 }
+inline std::string pf_flash_attn_kv8_raw_variant(unsigned q = kRefFaQHeads,
+                                                 unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8_raw" + fa_suffix(q, kv);
+}
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant(unsigned hidden = kRefHidden) {
