@@ -182,7 +182,9 @@ ctest --test-dir build
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 
 ./build/src/cli/b70-decode urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-serve  urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ   # OpenAI compatible endpoint
+./build/src/cli/b70-serve  urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --kv-cache int8   # OpenAI compatible endpoint
+# the KV cache defaults to bf16, as in every engine; the commands here pass --kv-cache int8 (half the KV bytes:
+# more context, more requests at once - spec 12b); --spec dflash needs bf16 (its 8-row verify)
 ```
 
 Both CLIs take the repo id and resolve it through the local cache
@@ -204,11 +206,11 @@ actually run on a B70:
 # the card beside the weights and the MTP head (--max-len auto: ~170k, derived), MTP speculative
 # decoding with K chosen per request (--spec auto), the prefix cache on - plus the prompt-end
 # snapshot one id early so each turn restores where the next one diverges
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ \
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --kv-cache int8 \
     --host 0.0.0.0 --port 8000 --prefix-split-last
 
 # plain decoding, no speculative proposer (auto context: ~201k, derived)
-./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --spec off
+./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --kv-cache int8 --spec off
 
 # measure it the way the vLLM rows were measured (the server answers to any model name;
 # /v1/models lists it as the repo id)
