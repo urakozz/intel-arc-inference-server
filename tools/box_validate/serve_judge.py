@@ -24,7 +24,8 @@ compare's pairing: the ref arm's lowest round):
                                    bf16-unstable rule (operator 2026-11-04): it needs the ENGINE's plain M = 1 logits
                                    row on that context, which b70-serve does not return - so such a miss stays on
                                    the strict bar and FAILS (spec_judge.h: "a miss with no plain row stays on the
-                                   strict bar"), unless it matches a kReviewedRows entry of spec_judge.h (read from
+                                   strict bar"), unless the bf16 reference itself picks the speculative id there (bf16-
+                                   unstable, operator 2026-11-08: PASS) or it matches a kReviewedRows entry of spec_judge.h (read from
                                    --header; exactly, or by tag / row / ids / f32 gap as match_reviewed). The bf16
                                    gap is printed when --bf16 has the key's <key>.bf16top.safetensors
                                    (tools/oracle/qwen_bf16_top.py), as spec_judge.h does.
@@ -322,7 +323,12 @@ def judge_context(a, kp, ks, fp, fs, reviewed):
                 why = (f"bf16 gap {g16:.2f} ulp - bf16-UNSTABLE, but no plain row (b70-serve returns no logits): "
                        f"the strict bar")
             rv, by_gap = match_reviewed(reviewed, ks, row, top, fid, g32)
-            if rv:
+            if not math.isnan(g16) and abs(g16 - g32) > NEAR_MISS_ULP and g16 < 0:
+                # operator 2026-11-08 (A): bf16-unstable and the standard bf16 model itself picks the speculative id -
+                # a precision flip, passed without the plain row b70-serve cannot return
+                lines.append(f"row {row}: ids {top} (f32 top) / {fid} (speculative): f32 gap {g32:.2f} ulp; bf16 gap "
+                             f"{g16:.2f} ulp - bf16-UNSTABLE, the bf16 reference picks the speculative id: PASS")
+            elif rv:
                 lines.append(f"row {row}: ids {top} (f32 top) / {fid} (speculative): f32 gap {g32:.2f} ulp; {why} - "
                              f"REVIEWED (operator {rv[5]}: {rv[0]}, {rv[4]:.2f} ulp when reviewed"
                              f"{', matched by tag / row / ids / f32 gap' if by_gap else ''}): PASS as REVIEWED")
