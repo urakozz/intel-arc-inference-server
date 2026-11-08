@@ -47,7 +47,7 @@ fi
 stop
 trap - EXIT
 echo "--- b70-serve [$label r$round], startup and per-request lines"
-grep -E 'max_len|memory:|mtp|spec lookup|lookup:|draft vocab|prefix cache:|lm_head|error|refus' "$out/server.log" | grep -v '^prefix: ' | head -40
+grep -E 'slots:|max_len|memory:|mtp|spec lookup|lookup:|draft vocab|prefix cache:|lm_head|error|refus' "$out/server.log" | grep -v '^prefix: ' | head -40
 [ "$up" = 1 ] || tail -20 "$out/server.log"
 echo "SERVE_RUN [$label r$round] rc=$rc"
 exit "$rc"

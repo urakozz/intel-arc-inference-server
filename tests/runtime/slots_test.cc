@@ -20,6 +20,13 @@
 //       spec_judge::streams' rule (tag slots_<kv>_<n>: the int8 head's references) - a divergence whose context has no
 //       f32 reference yet AWAITS it (exit 77).
 //   S5  determinism: the S4 batched run twice from the same state gives the same ids.
+//   `--mtp off` (slots_nomtp_test): the engine without the head - one GDN state a slot (SlotBuffers' states): S1 and
+//   S2 with plain steps, S3's isolation over a plain four-row step, S4 / S5 plain rows only; no S6.
+//   S6  the batched drafts (Engine::draft_rows: one head pass per draft index for several slots): slots 0..2 at K 3 /
+//       2 / 1 against each slot's own draft lists from the same state - the drafts printed (equal unless a near-tie:
+//       the lm_head's small-batch GEMM rounds differently from the M = 1 GEMV), and B3 for drafts: slot 3 (not
+//       drafting) and every slot's state and committed KV byte-identical (a draft writes only its slot's head KV
+//       rows past its last committed position).
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -70,9 +77,9 @@ struct Ctx {
   }
   size_t state_bytes() const { return e.buffers().gdn_state.size(); }
   // Every byte of slot q's persistent state, its KV rows [0, npos) of every layer (main and head) included.
-  uint64_t slot_hash(uint32_t q, uint32_t npos) {
+  uint64_t slot_hash(uint32_t q, uint32_t npos, bool with_control = true) {
     const Engine::SlotView v = e.slot_view(q);
-    uint64_t h = fnv(v.control, sizeof(runtime::Control));
+    uint64_t h = with_control ? fnv(v.control, sizeof(runtime::Control)) : 1469598103934665603ull;
     h = dev_hash(v.state0, state_bytes(), h);
     if (v.spec) h = dev_hash(v.spec, state_bytes() * (v.states - 1), h);
     h = dev_hash(v.ring, e.buffers().conv_ring.size(), h);
@@ -110,11 +117,20 @@ std::vector<uint32_t> cut(const std::vector<uint32_t>& src, size_t from, size_t 
   return out;
 }
 
-// One greedy step of the selected slot through its own lists: k = 0 plain (verify(0) + commit), else draft + verify +
-// the longest agreeing prefix. Returns the ids emitted; `logits` gets every verify row's logits hash.
+// One greedy step of the selected slot through its own lists: k = 0 plain (verify(0) + commit; without the head the
+// plain list, generate(1)), else draft + verify + the longest agreeing prefix. Returns the ids emitted; `logits` gets
+// every verify row's logits hash.
 std::vector<uint32_t> lone_step(Ctx& c, uint32_t k, std::vector<uint64_t>* logits = nullptr) {
   Engine& e = c.e;
   std::vector<uint32_t> out{e.control()->cur_token[0]};
+  if (!e.mtp()) {
+    e.generate(1);
+    if (logits) {
+      const std::vector<float> r = c.rows(e.buffers().logits.as<float>(), 0, 1);
+      logits->push_back(fnv(r.data(), r.size() * 4));
+    }
+    return out;
+  }
   if (k > 0) e.draft(k);
   e.verify(k);
   if (logits) {
@@ -139,7 +155,7 @@ bool s1(Ctx& c, const std::vector<uint32_t>& prompt) {
     for (int i = 0; i < 32; ++i)
       for (uint32_t id : lone_step(c, 0, &lg)) ids.push_back(id);
     for (int i = 0; i < 8; ++i)
-      for (uint32_t id : lone_step(c, 3, &lg)) ids.push_back(id);
+      for (uint32_t id : lone_step(c, e.mtp() ? 3 : 0, &lg)) ids.push_back(id);
     return ids;
   };
   std::vector<uint64_t> l0, l2;
@@ -160,7 +176,7 @@ bool s2(Ctx& c, const std::vector<uint32_t>& p1, const std::vector<uint32_t>& p2
   }
   e.select(1);
   e.prefill(p1);
-  for (int i = 0; i < 6; ++i) lone_step(c, i % 2 ? 3 : 0);   // a rejected draft or two leave speculative states
+  for (int i = 0; i < 6; ++i) lone_step(c, i % 2 && e.mtp() ? 3 : 0);   // a rejected draft or two: speculative states
   const uint32_t n1 = e.pos() + 16;
   auto others = [&](uint32_t busy) {
     std::vector<uint64_t> h;
@@ -171,7 +187,7 @@ bool s2(Ctx& c, const std::vector<uint32_t>& p1, const std::vector<uint32_t>& p2
   std::vector<uint64_t> before = others(2);
   e.select(2);
   e.prefill(p2);
-  for (int i = 0; i < 6; ++i) lone_step(c, i % 2 ? 3 : 0);
+  for (int i = 0; i < 6; ++i) lone_step(c, i % 2 && e.mtp() ? 3 : 0);
   bool r = others(2) == before;
   std::printf("S2 slot 2's prefill + decode: the other slots %s\n", r ? "byte-identical" : "MOVED - FAIL");
   ok &= r;
@@ -200,10 +216,10 @@ bool s2(Ctx& c, const std::vector<uint32_t>& p1, const std::vector<uint32_t>& p2
   std::vector<uint32_t> a, b;
   e.select(1);
   for (int i = 0; i < 16; ++i)
-    for (uint32_t id : lone_step(c, i % 2 ? 2 : 0)) a.push_back(id);
+    for (uint32_t id : lone_step(c, i % 2 && e.mtp() ? 2 : 0)) a.push_back(id);
   e.select(3);
   for (int i = 0; i < 16; ++i)
-    for (uint32_t id : lone_step(c, i % 2 ? 2 : 0)) b.push_back(id);
+    for (uint32_t id : lone_step(c, i % 2 && e.mtp() ? 2 : 0)) b.push_back(id);
   std::printf("S2 slot 1's snapshot loaded into slot 3: the other slots %s; slot 3 continues as slot 1: %s\n",
               r ? "byte-identical" : "MOVED - FAIL", a == b ? "yes (ids bitwise)" : "NO - FAIL");
   return ok && r && a == b;
@@ -215,9 +231,39 @@ struct RowOut {
   uint32_t id = 0;
   uint64_t dst = 0, kv = 0;
 };
+bool s3_plain(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts) {
+  // Without the head: one plain verify_rows step of slots 0..2 leaves slot 3 and every slot's committed KV untouched,
+  // and its rows' ids are what the slots' own commits take.
+  Engine& e = c.e;
+  for (uint32_t q = 0; q < e.slots(); ++q) {
+    e.select(q);
+    e.reset();
+    e.prefill(prompts[q]);
+  }
+  std::vector<uint32_t> pos;
+  std::vector<uint64_t> kv;
+  for (uint32_t q = 0; q < e.slots(); ++q) {
+    e.select(q);
+    pos.push_back(e.pos());
+    kv.push_back(c.kv_hash(q, 0, e.pos()));
+  }
+  const uint64_t slot3 = c.slot_hash(3, pos[3] + 16);
+  e.verify_rows({{0, 0}, {1, 0}, {2, 0}});
+  bool ok = c.slot_hash(3, pos[3] + 16) == slot3;
+  for (uint32_t q = 0; q < 3; ++q) {
+    ok = ok && c.kv_hash(q, 0, pos[q]) == kv[q];
+    e.select(q);
+    e.commit(0, e.rows_ids()[q]);
+    ok = ok && e.pos() == pos[q] + 1 && e.control()->cur_token[0] == e.rows_ids()[q];
+  }
+  std::printf("S3 B3 (isolation, a plain three-row step without the head): %s\n", ok ? "PASS" : "FAIL");
+  return ok;
+}
+
 bool s3(Ctx& c, const std::vector<uint32_t>& deep, const std::vector<uint32_t>& p1, const std::vector<uint32_t>& p2,
         const std::vector<uint32_t>& p3) {
   Engine& e = c.e;
+  if (!e.mtp()) return s3_plain(c, {deep, p1, p2, p3});
   for (uint32_t q = 0; q < e.slots(); ++q) {
     e.select(q);
     e.reset();
@@ -312,6 +358,52 @@ bool s3(Ctx& c, const std::vector<uint32_t>& deep, const std::vector<uint32_t>& 
   return b1 && b3;
 }
 
+// S6.
+bool s6(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts) {
+  Engine& e = c.e;
+  for (uint32_t q = 0; q < e.slots(); ++q) {
+    e.select(q);
+    e.reset();
+    e.prefill(prompts[q]);
+  }
+  const std::vector<uint32_t> ks = {3, 2, 1};
+  std::vector<uint64_t> before, committed;
+  std::vector<uint32_t> pos;
+  for (uint32_t q = 0; q < e.slots(); ++q) {
+    e.select(q);
+    pos.push_back(e.pos());
+    before.push_back(c.slot_hash(q, e.pos()));                 // KV rows [0, pos), every state, the Control
+    committed.push_back(c.slot_hash(q, e.pos() - 1, false));   // the same without the Control and row pos - 1
+  }
+  // The head KV rows a draft writes (pos - 1 ...) are not committed state, and the slot's own drafts land in its
+  // Control's cur_token[1..]: compare those slots' hashes over [0, pos - 1) and without the Control after the drafts.
+  e.draft_rows({{0, ks[0]}, {1, ks[1]}, {2, ks[2]}});
+  std::vector<std::vector<uint32_t>> rows(3);
+  for (uint32_t q = 0; q < 3; ++q) {
+    e.select(q);
+    rows[q] = e.draft_ids();
+  }
+  bool iso = c.slot_hash(3, pos[3]) == before[3];
+  for (uint32_t q = 0; q < 3; ++q) iso = iso && c.slot_hash(q, pos[q] - 1, false) == committed[q];
+  std::vector<std::vector<uint32_t>> own(3);
+  size_t same = 0, total = 0;
+  for (uint32_t q = 0; q < 3; ++q) {
+    e.select(q);
+    e.draft(ks[q]);
+    own[q] = e.draft_ids();
+    iso = iso && rows[q].size() == ks[q];
+    for (uint32_t i = 0; i < ks[q] && i < rows[q].size(); ++i) {
+      same += rows[q][i] == own[q][i];
+      ++total;
+    }
+  }
+  std::printf("S6 draft_rows (K 3 / 2 / 1) against each slot's own draft lists: %zu / %zu drafts equal; B3 for drafts: "
+              "%s\n", same, total,
+              iso ? "PASS (slot 3 byte-identical; slots 0..2's states and committed KV too; every run its K drafts)"
+                  : "FAIL");
+  return iso;
+}
+
 // S4 / S5: four requests alone and together.
 struct Streams {
   std::vector<std::vector<uint32_t>> ids;
@@ -331,10 +423,16 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
     e.prefill(prompts[q]);
     plain[q].push_back(e.control()->cur_token[0]);
     for (int i = 0; i < 48; ++i) {
-      e.verify(0);
-      const std::vector<float> row = c.rows(e.verify_logits_device(), 0, 1);
-      steps[q].push_back(greedy_tie::ref_step(row.data(), c.VU));
-      e.commit(0, e.verify_ids()[0]);
+      if (e.mtp()) {
+        e.verify(0);
+        const std::vector<float> row = c.rows(e.verify_logits_device(), 0, 1);
+        steps[q].push_back(greedy_tie::ref_step(row.data(), c.VU));
+        e.commit(0, e.verify_ids()[0]);
+      } else {
+        e.generate(1);
+        const std::vector<float> row = c.rows(e.buffers().logits.as<float>(), 0, 1);
+        steps[q].push_back(greedy_tie::ref_step(row.data(), c.VU));
+      }
       plain[q].push_back(e.control()->cur_token[0]);
     }
   }
@@ -345,7 +443,7 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
       e.reset();
       e.prefill(prompts[q]);
     }
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < (e.mtp() ? 32 : 48); ++i) {
       std::vector<Engine::Run> runs;
       for (uint32_t q = 0; q < S; ++q) {
         e.select(q);
@@ -358,7 +456,7 @@ bool s4(Ctx& c, const std::vector<std::vector<uint32_t>>& prompts, const std::st
         e.commit(0, e.rows_ids()[q]);
       }
     }
-    for (int i = 0; i < 8; ++i) {   // greedy MTP, K = 1 each: 8 rows
+    for (int i = 0; e.mtp() && i < 8; ++i) {   // greedy MTP, K = 1 each: 8 rows
       std::vector<Engine::Run> runs;
       std::vector<std::vector<uint32_t>> d(S);
       for (uint32_t q = 0; q < S; ++q) {
@@ -405,7 +503,8 @@ int main(int argc, char** argv) {
   uint32_t total = 0;
   for (uint32_t l : kSlots) total += l;
   l0::Context ctx(0);
-  Engine e(ctx, loader::load(ctx, checkpoint, total, /*mtp=*/true, loader::LmHeadForm::Int8), total, false,
+  const bool mtp = !(argc > 3 && std::string(argv[2]) == "--mtp" && std::string(argv[3]) == "off");
+  Engine e(ctx, loader::load(ctx, checkpoint, total, mtp, loader::LmHeadForm::Int8), total, false,
            runtime::default_kv_cache(), nullptr, kSlots);
   e.prepare_prefill();
   std::printf("slots_test: %u slots (%s), %s KV; %s\n", e.slots(), runtime::slot_layout_name(kSlots).c_str(),
@@ -425,8 +524,9 @@ int main(int argc, char** argv) {
   ok &= s1(c, p1);
   ok &= s2(c, p1, p2, p3);
   ok &= s3(c, p_deep, p1, p2, p3);
-  const std::string tag = std::string("slots_") + runtime::kv_cache_name(e.kv_cache());
+  const std::string tag = std::string("slots_") + runtime::kv_cache_name(e.kv_cache()) + (e.mtp() ? "" : "_nomtp");
   ok &= s4(c, {p_deep, p1, p2, p3}, tag);
+  if (e.mtp()) ok &= s6(c, {p_deep, p1, p2, p3});
   std::printf("slots_test: %s\n", ok ? "PASS" : "FAIL");
   return spec_judge::exit_code(ok, "slots_test");
 }

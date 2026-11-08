@@ -349,6 +349,15 @@ class Engine {
     uint32_t k = 0;   // drafts in the slot's cur_token[1..k]
   };
   void verify_rows(const std::vector<Run>& runs);
+  // The MTP drafts of several slots at once (runtime::build_draft_rows: the head and lm_head read once a draft index
+  // for all of them): runs[r] = (slot, k), 2 <= runs <= kMaxDraftRows, every k in 1..max_verify_k() of its slot and
+  // every slot room for max(k). Each run drafts max(k) ids and keeps its first k: they land in its cur_token[1..k] and
+  // its draft_ids(), as draft(k) with the slot selected leaves them. `pick(r, i, argmax)` (sampled drafting): called
+  // after draft index i, per run, with the device idle and run r's draft logits in rows_logits_device() row r; its
+  // return replaces the row's argmax as d_{i+1} (draft()'s `pick`).
+  static constexpr uint32_t kMaxDraftRows = 4;
+  void draft_rows(const std::vector<Run>& runs,
+                  const std::function<uint32_t(size_t r, uint32_t i, uint32_t argmax)>& pick = {});
   const uint32_t* rows_ids() const;            // [rows] the argmax of every row, run order
   const float* rows_logits_device() const;     // [rows][kVocab] fp32, device memory (verify_logits_device()'s)
   // The selected slot's Control (shared memory): the pending id cur_token[0], the drafts cur_token[1..k].
@@ -463,6 +472,8 @@ class Engine {
   // Spec 13c: the row lists at M = 2..kMaxRows (index M - 2) and what they read - several slots only.
   std::vector<CapturedStep> rows_steps_;
   BatchRowsBind rows_bind_;
+  std::vector<CapturedStep> draft_rows_steps_;   // MTP: the row draft lists at M = 2..min(slots, kMaxDraftRows)
+  DraftRowsBind draft_bind_;
   BatchLayout layout_;
   uint32_t rows_m_ = 0;   // the rows of the last verify_rows
   void setup_slots(const std::vector<uint32_t>& lens);

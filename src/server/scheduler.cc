@@ -446,11 +446,37 @@ bool Scheduler::spec_round() {
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::SpecRow> rows;
   const uint32_t cap = impl_->cap;
+  std::vector<uint32_t> ks;
   for (const auto& j : impl_->slots) {
     if (!j || j->state != Job::State::Decoding) continue;
     jobs.push_back(j);
     const uint32_t k = j->policy ? j->policy->next() : std::min(opts_.spec_fixed_k, cap);
-    BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, std::min(k, cap), nullptr};
+    ks.push_back(std::min(k, cap));
+  }
+  // Spec 13c: the engine's row budget for this many rows (0: none) - every row keeps its pending id, and the drafts
+  // left are dealt one at a time round the rows, the longest-running request first, each up to its own K (measured,
+  // docs/probes/probe-batching-2026-10-23.md section 8: K 1 each at four requests beats K 3 for the oldest by 15 %,
+  // K 2 / 2 / 1 at three beats 3 / 2 / 0 by 15 %).
+  if (const uint32_t budget = engine_.row_budget(static_cast<uint32_t>(jobs.size())); budget != 0) {
+    std::vector<size_t> by_age(jobs.size());
+    for (size_t i = 0; i < by_age.size(); ++i) by_age[i] = i;
+    std::sort(by_age.begin(), by_age.end(), [&](size_t a, size_t b) { return jobs[a]->order < jobs[b]->order; });
+    uint32_t left = budget > jobs.size() ? budget - static_cast<uint32_t>(jobs.size()) : 0;
+    std::vector<uint32_t> want = ks;
+    std::fill(ks.begin(), ks.end(), 0u);
+    for (bool dealt = true; left > 0 && dealt;) {
+      dealt = false;
+      for (size_t i : by_age)
+        if (left > 0 && ks[i] < want[i]) {
+          ++ks[i];
+          --left;
+          dealt = true;
+        }
+    }
+  }
+  for (size_t i = 0; i < jobs.size(); ++i) {
+    const auto& j = jobs[i];
+    BatchEngineIface::SpecRow row{static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng, ks[i], nullptr};
     if (impl_->lookup) {
       j->iter_k = row.k;
       j->proposed = 0;

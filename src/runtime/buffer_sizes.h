@@ -325,8 +325,9 @@ struct MtpDims {
                         KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
   // Spec 13c: MtpBuffers::hh's rows. One sequence: kM + 1 (row 0 = h_{pos-1}, rows 1..M the
   // verify rows' hidden). `seqs` > 1: each sequence's kM + 1 rows (sequence q's from row
-  // q x (kM + 1)), then the row lists' saved hidden rows (kM: the rows' post-final-norm `x`)
-  // and the head's input rows (kM, gathered from the two regions before by embed_gather).
+  // q x (kM + 1)), then the row lists' saved hidden rows (kM: the rows' post-final-norm `x`),
+  // the head's input rows (kM, gathered from the two regions before by embed_gather) and the
+  // row draft list's chain rows (kM: runtime::build_draft_rows' dh).
   static uint32_t hh_rows(uint32_t seqs);
 };
 
@@ -342,7 +343,8 @@ struct MtpDims {
 //             (with MTP they are MtpBuffers::gdn_spec's: MtpDims::sizes' `seqs`)
 //   rings     the bf16 conv rings of slots 1..seqs-1, one whole-model ring each
 //   controls  shared memory: slots 1..seqs-1's Control (and with MTP their head's), the row
-//             lists' Control, head Control and gather Control, and their two row tables
+//             lists' Control, head Control and gather Control, the row draft list's head Control,
+//             and their three row tables
 struct SlotSizes {
   size_t states = 0, rings = 0, controls = 0;
   size_t total() const { return states + rings + controls; }
@@ -358,8 +360,10 @@ struct SlotDims {
   static size_t rows_control_at(uint32_t seqs);       // the row lists' Control
   static size_t rows_head_control_at(uint32_t seqs);  // the row lists' head Control (MTP)
   static size_t gather_control_at(uint32_t seqs);     // the head's input gather (MTP)
+  static size_t draft_control_at(uint32_t seqs);      // the row draft list's head Control (MTP)
   static size_t rows_table_at(uint32_t seqs);         // runtime::BatchRowTable, the main rows
   static size_t head_table_at(uint32_t seqs);         // the head's rows (MTP)
+  static size_t draft_table_at(uint32_t seqs);        // the row draft list's head rows (MTP)
 };
 // --- spec 19c: a tap drafter's verify state (DFlash) --------------------------------------
 //

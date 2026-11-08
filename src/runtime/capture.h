@@ -317,4 +317,20 @@ CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBu
 // decode_launches(d), or with the head verify_launches(d) + 1 (the gather).
 size_t rows_launches(const model::ModelDesc& d, bool head);
 
+// build_draft_rows: the MTP head's draft list (build_draft's walk) at M rows of DIFFERENT sequences - one draft index
+// of M slots in one replay, the head's weights and lm_head read once for all of them (spec 13 §9.1 P7's second form).
+// Row m is (hctl.cur_token[m], dh row m) at the head row table's row m (its draft position, its slot's KV base): the
+// head's attn_prep and decode attention are their `_ROWS` builds over the head's KV layer; every other launch is
+// build_draft's at M rows. The rows' post-mtp.norm hidden go back into dh rows 0..M-1, their logits into `logits`
+// [M][kVocab] fp32 and their argmax into hctl.out_token[0..M) (argmax_stage2's in-list advance lands in hctl, which
+// the host rewrites before every replay). draft_launches(d) launches. Dense heads only (Qwen3.8).
+struct DraftRowsBind {
+  void* hctl = nullptr;        // the head Control, shared: n_active = M, cur_token[0..M) the rows' input ids
+  void* head_rows = nullptr;   // runtime::BatchRowTable, shared: each row's draft position, KV base, slot
+  void* dh = nullptr;          // bf16 [M][hidden]: in, each row's chain hidden; out, the next
+  void* logits = nullptr;      // fp32 [M][kVocab]
+};
+CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                              const DraftRowsBind& dr, uint32_t M);
+
 }  // namespace runtime

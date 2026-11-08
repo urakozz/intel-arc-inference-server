@@ -3,12 +3,13 @@
 
   serve_client.py run --url http://127.0.0.1:8013 --out arm.r1/requests.jsonl \\
       [--set golden] [--set toolcall] [--set DIR] [--only NAME,...] [--max-tokens 256]
-      [--label ARM] [--round N] [--server-log DIR] [--warmup 1] [--stop-at-eos]
+      [--label ARM] [--round N] [--server-log DIR] [--warmup 1] [--stop-at-eos] [--concurrency N]
   serve_client.py table   --dir D [--ref ARM] [--ratio A/B]... [--metric gen_tps|wall_tps]
   serve_client.py compare --dir D --ref ARM [--round N]
   serve_client.py record  --out arm.r1/requests.jsonl --label ARM --set S --name N --prompt P.ids --ids OUT.ids
 
-`run` sends one OpenAI request per prompt, one at a time, temperature 0 (greedy), with
+`run` sends one OpenAI request per prompt, one at a time (--concurrency N: N at a time, sent together - spec
+13c's slots; each request's server record is then found by its `user` field), temperature 0 (greedy), with
 `return_token_ids` so the output ids come back:
   golden    tests/golden/prompts/{prose,code,cjk}.txt as /v1/completions (text prompts)
   toolcall  the A4 set, tests/golden/toolcall/<name>.json (messages, tools, enable_thinking,
@@ -132,10 +133,12 @@ def run(a):
     base = a.url.rstrip("/")
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
 
-    def body_for(endpoint, extra, max_tokens):
+    def body_for(endpoint, extra, max_tokens, user=None):
         b = {"model": a.model, "max_tokens": max_tokens, "temperature": 0, "return_token_ids": True}
         if not a.stop_at_eos:
             b["ignore_eos"] = True
+        if user is not None:
+            b["user"] = user
         b.update(extra)
         return b
 
@@ -143,55 +146,92 @@ def run(a):
         _, _, ep, extra, _ = prompts[i % len(prompts)]
         post(base + ep, body_for(ep, extra, 16), a.timeout)
     failed = 0
-    with open(a.out, "a", encoding="utf-8") as out:
-        for sname, name, ep, extra, want in prompts:
-            before = log_files(a.server_log)
-            t0 = time.monotonic()
+    conc = max(1, a.concurrency)
+
+    def send(p):
+        """(prompt, response or exception, wall seconds)"""
+        sname, name, ep, extra, _ = p
+        t0 = time.monotonic()
+        try:
+            r = post(base + ep, body_for(ep, extra, a.max_tokens, f"{a.label}/{sname}/{name}" if conc > 1 else None),
+                     a.timeout)
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            r = e
+        return p, r, time.monotonic() - t0
+
+    def log_of(new, sname, name):
+        """The server's record of one request: the newest of `new`, or with --concurrency the one whose user it is."""
+        if conc == 1:
+            return new[-1] if new else None
+        for path in new:
             try:
-                resp = post(base + ep, body_for(ep, extra, a.max_tokens), a.timeout)
-            except (urllib.error.URLError, OSError, ValueError) as e:
-                failed += 1
-                print(f"REQ {a.label} {sname}/{name} FAILED: {e}", flush=True)
-                continue
-            wall = time.monotonic() - t0
-            ch = resp["choices"][0]
-            ids = ch.get("token_ids") or []
-            if "message" in ch:
-                m = ch["message"]
-                text = (m.get("content") or "") + ("".join(json.dumps(c, sort_keys=True) for c in m["tool_calls"])
-                                                   if m.get("tool_calls") else "")
-            else:
-                text = ch.get("text", "")
-            pids = resp.get("prompt_token_ids")
-            usage = resp.get("usage", {})
-            rec = {"label": a.label, "round": a.round, "set": sname, "name": name, "endpoint": ep,
-                   "prompt_tokens": usage.get("prompt_tokens", len(pids) if pids else None),
-                   "prompt_ids_match": (pids == want) if (pids is not None and want is not None) else None,
-                   "prompt_ids": pids,
-                   "completion_tokens": usage.get("completion_tokens", len(ids)), "out_ids": ids,
-                   "text": text, "finish_reason": ch.get("finish_reason"), "usage": usage,
-                   "accepted": accepted_of(usage), "wall_s": round(wall, 4),
-                   "wall_tps": round(len(ids) / wall, 3) if wall > 0 else None,
-                   "prefill_s": None, "gen_s": None, "gen_tps": None}
+                with open(path, encoding="utf-8") as f:
+                    if json.load(f).get("request", {}).get("user") == f"{a.label}/{sname}/{name}":
+                        return path
+            except (OSError, ValueError):
+                pass
+        return None
+
+    import threading
+
+    with open(a.out, "a", encoding="utf-8") as out:
+        for g in range(0, len(prompts), conc):
+            group = prompts[g:g + conc]
+            before = log_files(a.server_log)
+            results = [None] * len(group)
+
+            def go(i):
+                results[i] = send(group[i])
+
+            ts = [threading.Thread(target=go, args=(i,)) for i in range(len(group))]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
             new = sorted(log_files(a.server_log) - before)
-            if new:
-                try:
-                    with open(new[-1], encoding="utf-8") as f:
-                        lg = json.load(f)
-                    gen = lg["t_end"] - lg["t_first_token"]
-                    rec["prefill_s"] = round(lg["t_first_token"] - lg["t_start"], 4)
-                    rec["gen_s"] = round(gen, 4)
-                    n = len(lg.get("out_ids", ids))
-                    rec["gen_tps"] = round((n - 1) / gen, 3) if gen > 0 and n > 1 else None
-                    rec["server_log"] = os.path.basename(new[-1])
-                except (OSError, ValueError, KeyError) as e:
-                    rec["server_log_error"] = str(e)
-            out.write(json.dumps(rec) + "\n")
-            out.flush()
-            match = {True: "ids match", False: "ids DIFFER from the set's", None: "ids unchecked"}[rec["prompt_ids_match"]]
-            print(f"REQ {a.label} r{a.round} {sname}/{name} prompt={rec['prompt_tokens']} ({match}) "
-                  f"out={len(ids)} finish={rec['finish_reason']} wall={wall:.2f}s wall_tps={rec['wall_tps']} "
-                  f"gen_tps={rec['gen_tps']} accepted={rec['accepted']}", flush=True)
+            for (sname, name, ep, extra, want), resp, wall in results:
+                if isinstance(resp, Exception):
+                    failed += 1
+                    print(f"REQ {a.label} {sname}/{name} FAILED: {resp}", flush=True)
+                    continue
+                ch = resp["choices"][0]
+                ids = ch.get("token_ids") or []
+                if "message" in ch:
+                    m = ch["message"]
+                    text = (m.get("content") or "") + ("".join(json.dumps(c, sort_keys=True) for c in m["tool_calls"])
+                                                       if m.get("tool_calls") else "")
+                else:
+                    text = ch.get("text", "")
+                pids = resp.get("prompt_token_ids")
+                usage = resp.get("usage", {})
+                rec = {"label": a.label, "round": a.round, "set": sname, "name": name, "endpoint": ep,
+                       "prompt_tokens": usage.get("prompt_tokens", len(pids) if pids else None),
+                       "prompt_ids_match": (pids == want) if (pids is not None and want is not None) else None,
+                       "prompt_ids": pids,
+                       "completion_tokens": usage.get("completion_tokens", len(ids)), "out_ids": ids,
+                       "text": text, "finish_reason": ch.get("finish_reason"), "usage": usage,
+                       "accepted": accepted_of(usage), "wall_s": round(wall, 4),
+                       "wall_tps": round(len(ids) / wall, 3) if wall > 0 else None,
+                       "prefill_s": None, "gen_s": None, "gen_tps": None}
+                lg_path = log_of(new, sname, name)
+                if lg_path:
+                    try:
+                        with open(lg_path, encoding="utf-8") as f:
+                            lg = json.load(f)
+                        gen = lg["t_end"] - lg["t_first_token"]
+                        rec["prefill_s"] = round(lg["t_first_token"] - lg["t_start"], 4)
+                        rec["gen_s"] = round(gen, 4)
+                        n = len(lg.get("out_ids", ids))
+                        rec["gen_tps"] = round((n - 1) / gen, 3) if gen > 0 and n > 1 else None
+                        rec["server_log"] = os.path.basename(lg_path)
+                    except (OSError, ValueError, KeyError) as e:
+                        rec["server_log_error"] = str(e)
+                out.write(json.dumps(rec) + "\n")
+                out.flush()
+                match = {True: "ids match", False: "ids DIFFER from the set's", None: "ids unchecked"}[rec["prompt_ids_match"]]
+                print(f"REQ {a.label} r{a.round} {sname}/{name} prompt={rec['prompt_tokens']} ({match}) "
+                      f"out={len(ids)} finish={rec['finish_reason']} wall={wall:.2f}s wall_tps={rec['wall_tps']} "
+                      f"gen_tps={rec['gen_tps']} accepted={rec['accepted']}", flush=True)
     print(f"serve_client: {len(prompts) - failed}/{len(prompts)} requests answered -> {a.out}")
     return 1 if failed else 0
 
@@ -312,6 +352,7 @@ def main(argv=None):
     r.add_argument("--server-log", help="the server's --log-requests directory")
     r.add_argument("--warmup", type=int, default=1)
     r.add_argument("--stop-at-eos", action="store_true")
+    r.add_argument("--concurrency", type=int, default=1, help="requests sent together (spec 13c's slots)")
     r.add_argument("--timeout", type=float, default=1800)
     r.add_argument("--root", default=ROOT)
     t = sub.add_parser("table")

@@ -1803,6 +1803,15 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
     add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8_ROWS SOURCE ${KV8_CL}
                      DEFINES ${CTRL_DEFINES} ${BROW_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
   endforeach()
+  # Spec 13c: the MTP head's draft at M = 2..4 rows of different slots (runtime::build_draft_rows - every other binary
+  # it binds is the verify lists' or the rows' above): the head's o, gate||up and down at M rows (bf16, the {64, 1}
+  # tiling of their M = 1 twins) and the post-attention fold over o's S = 1 output.
+  foreach(MM 2 3 4)
+    add_gemv_bf16_variant(${MM} 6144 5120 64 1)
+    add_gemv_bf16_variant(${MM} 5120 34816 64 1)
+    add_gemv_bf16_variant(${MM} 17408 5120 64 1)
+    add_prep_res_fold(${MM} 5120 1 20)
+  endforeach()
 endif()
 # ==== Spec 13a / 13c ==== (end) ====
 
