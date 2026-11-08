@@ -3,7 +3,7 @@
 Baseline: main ba99cb9f, compiled unchanged in this worktree's `build-before`
 on the box with 16 build jobs. Card 1 through `tools/gpu_lock.sh card 1`.
 Qwen3.8-27B GPTQ, l0 prefill, 2048-row chunks, 15,257 synthetic ids, one card,
-16 generated ids. Each KV form warmed before its instrumented run.
+16 generated ids, max_len 131072. Each KV form warmed before its instrumented run.
 
 | measurement, ms | bf16 KV | int8 KV |
 |---|---:|---:|
@@ -22,8 +22,8 @@ The int8 kernel constructs its K operand with scattered vector loads and its
 V operand with scalar loads, while bf16 uses 2D block reads. This is the first
 load-path hypothesis to test; the scale arithmetic and accumulation order stay.
 
-Logs: `~/b70/logs/3e/profile-{bf16,int8}.log` and
-`profile-warmup-{bf16,int8}.log`. Both profiles completed. The driver later
+Logs: `~/b70/logs/3e/profile-{bf16,int8}-before.log` and
+`profile-warmup-{bf16,int8}-before.log`. Both profiles completed. The driver later
 exited 1 because its script was updated in place during execution; subsequent
 jobs must run fixed script copies. This does not invalidate the completed
 profile tables or benchmark rows.
