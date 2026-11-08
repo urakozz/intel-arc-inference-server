@@ -29,7 +29,7 @@
 //   what is upstream of it (the logits if no flip at or before the last prompt row; each block's last-row tap, each Mamba
 //   block's state / conv columns at (n - 1, block); each attention block's K / V rows at (position, block)), 5 fails on a
 //   Beyond difference before it, 6 binds on the decision rows wholly before it; everything after it is printed. Our export
-//   keeps 4's logits bar and 6 as above; 4's other bars and 5 are PRINTED (operator ruling 2026-11-08, A, until Bolt's f32 reference - B: its
+//   keeps 4 (its two median bars at 0.999, operator 2026-11-08) and 6 as above; 5 is PRINTED (operator ruling 2026-11-08, A, until Bolt's f32 reference - B: its
 //   prefill compares the last chunk's routes only, so no causal cut-off exists there, and the tokens / logits / states
 //   carry the gate). The bf16-state arm on a synthetic (operator ruling 2026-11-05, the third): 3's other chunk sizes
 //   and the cuts off the 2048-grid are printed (the arm rounds the state once a chunk), and 4's state / conv comparison
@@ -327,14 +327,15 @@ int run_all(rb::BoltEngine& e, const Ids& prompt) {
   const double kv_med = kv.empty() ? 1.0 : kv[kv.size() / 2], kv_p01 = kv.empty() ? 1.0 : kv[kv.size() / 100];
   const double kg_med = kvgate.empty() ? 1.0 : kvgate[kvgate.size() / 2],
                kg_p01 = kvgate.empty() ? 1.0 : kvgate[kvgate.size() / 100];
-  // Our export (operator 2026-11-08, A): the logits bar binds, the taps / states / conv / K / V bars are printed - its
-  // prefill has no causal cut-off to bound them by (header).
+  // Our export (operator 2026-11-08): every bar binds, the two medians at 0.999 (a synthetic's 0.9998 is not reachable by
+  // 88 real blocks of rounding; the operator: "0.999 is fine") until Bolt's f32 reference (header).
+  const double med_bar = g_synth ? 0.9998 : 0.999;
   const bool f4 = (!lgate || lcos >= 0.9995) &&
-                  (!g_synth || ((tgate.empty() || (tgate[tgate.size() / 2] >= 0.9998 && tgate.front() >= 0.99)) &&
-                                sgate >= 0.999 && cgate >= 0.999 && kg_med >= 0.9998 && kg_p01 >= 0.99));
+                  (tgate.empty() || (tgate[tgate.size() / 2] >= med_bar && tgate.front() >= 0.99)) && sgate >= 0.999 &&
+                  cgate >= 0.999 && kg_med >= med_bar && kg_p01 >= 0.99;
   std::printf("4. prefill vs decode's fill (%u positions): logits cosine %.7f (bar 0.9995); h taps median %.7f / min %.6f "
-              "(bars 0.9998 / 0.99); SSM states worst %.7f, conv columns worst %.7f (bars 0.999); K / V rows median %.7f, "
-              "p01 %.6f%s\n", n, lcos, ts[ts.size() / 2], ts.front(), sworst, cworst, kv_med, kv_p01,
+              "(bars %.4f / 0.99); SSM states worst %.7f, conv columns worst %.7f (bars 0.999); K / V rows median %.7f, "
+              "p01 %.6f%s\n", n, lcos, ts[ts.size() / 2], ts.front(), med_bar, sworst, cworst, kv_med, kv_p01,
               f4 ? "" : "  ** FAIL **");
   if (g_synth)
     std::printf("   the first-flip cut-off (synthetic; header): %s; gated upstream of it - logits %s, %zu of %u last-row "
