@@ -213,6 +213,53 @@ void silu_case(Dev& d, uint32_t M) {
   CHECK_EQ(words, size_t(0));
 }
 
+// (e) Open-work 3a: gemm_l0 / gemm_l0_silu hand an untransposed one-batch GEMM of M <=
+// kPfSmallMaxRows rows to pf_gemm_small (pf_small_tile), which must be pf_gemm bit for bit over
+// the M rows - the same DPAS chain per accumulator. pf_gemm launched directly is the reference;
+// two slabs (the second at a column offset) of a full-width output.
+void small_case(Dev& d, uint32_t M, uint32_t K, bool silu) {
+  using runtime::prefill::arg_val;
+  using runtime::prefill::PtrArg;
+  constexpr uint32_t kN = 2 * kSlab;
+  const uint32_t Mp = pad256(M), ldc = silu ? kN / 2 : kN;
+  const std::vector<uint16_t> a = random_bf16(size_t(Mp) * K, 51 + M + K);
+  const std::vector<uint16_t> bb = random_bf16(size_t(K) * kN, 53 + M);
+  l0::Mem A = upload(d.ctx, a), B = upload(d.ctx, bb);
+  const size_t out_bytes = size_t(Mp) * ldc * (silu ? 2 : 4);
+  l0::Mem Csm(d.ctx, l0::MemKind::Device, out_bytes), Cbig(d.ctx, l0::MemKind::Device, out_bytes);
+  l0::Kernel& big = d.kc(silu ? kernels::pf_gemm_silu_variant() : kernels::pf_gemm_variant(false), "pf_gemm");
+  for (uint32_t n0 = 0; n0 < kN; n0 += kSlab) {
+    const uint16_t* bp = B.as<uint16_t>() + n0;   // [K][kN], the slab at column n0, ldb kN
+    char* cs = static_cast<char*>(Csm.ptr()) + size_t(silu ? n0 / 2 * 2 : n0 * 4);
+    char* cb = static_cast<char*>(Cbig.ptr()) + size_t(silu ? n0 / 2 * 2 : n0 * 4);
+    const GemmBatch b{M, K, kSlab, 1, K, kN, silu ? 0u : kN, 0, 0, 0};
+    if (silu)
+      runtime::prefill::gemm_l0_silu(d.cx, d.kc, b, A.as<uint16_t>(), bp, reinterpret_cast<uint16_t*>(cs), ldc);
+    else
+      runtime::prefill::gemm_l0(d.cx, d.kc, b, A.as<uint16_t>(), bp, reinterpret_cast<float*>(cs), false);
+    const uint32_t lda = K, ldb = kN;
+    const uint64_t z = 0;
+    d.cx.launch(big, Mp / 256, kSlab / 256, 1,
+                {PtrArg(A.ptr()), PtrArg(bp), PtrArg(cb), arg_val(Mp), arg_val(K), arg_val(kSlab),
+                 arg_val(lda), arg_val(ldb), arg_val(ldc), arg_val(z), arg_val(z), arg_val(z)});
+  }
+  d.cx.wait();
+  const size_t words = size_t(M) * ldc * (silu ? 2 : 4) / 4;
+  const std::vector<float> got = download(d.ctx, Csm.ptr(), words), want = download(d.ctx, Cbig.ptr(), words);
+  const size_t differ = std::memcmp(got.data(), want.data(), words * 4) == 0 ? 0 : [&] {
+    size_t n = 0;
+    for (size_t i = 0; i < words; ++i) n += std::memcmp(&got[i], &want[i], 4) != 0;
+    return n;
+  }();
+  const runtime::prefill::PfSmallTile* t = runtime::prefill::pf_small_tile(M);
+  char name[96];
+  std::snprintf(name, sizeof name, "%s M=%u K=%u (tile %s)", silu ? "silu " : "plain", M, K,
+                t ? kernels::pf_gemm_small_variant(t->na, t->nb, t->sn, silu).c_str() : "pf_gemm");
+  std::printf("  %-60s %s (%zu of %zu words differ)\n", name, differ == 0 ? "bitwise" : "**DIFFERS**",
+              differ, words);
+  CHECK_EQ(differ, size_t(0));
+}
+
 // (b) Q·K^T: 6 q-heads of kv group 1 against the K cache in place (transB), N = depth.
 // (c) P·V: the same group's P against the V cache, K = depth (pf: padded to 256).
 void attention_case(Dev& d, uint32_t C, uint32_t depth) {
@@ -324,6 +371,10 @@ int main() {
     for (uint32_t C : {2048u, 40u}) attention_case(d, C, depth);
   std::puts("pf_gemm's fused SiLU epilogue vs the GEMM + pf_silu_mul pair, bitwise:");
   for (uint32_t M : {2048u, 772u}) silu_case(d, M);
+  std::puts("pf_gemm_small (gemm_l0 at M <= kPfSmallMaxRows) vs pf_gemm, bitwise over the M rows:");
+  for (uint32_t M : {1u, 16u, 54u, 256u, 772u, 896u, 897u, 1024u, 1025u})
+    for (bool silu : {false, true}) small_case(d, M, 5120, silu);
+  for (uint32_t M : {9u, 200u, 1000u}) small_case(d, M, 17408, false);
   std::puts("pf_gemm_test OK");
   return 0;
 }

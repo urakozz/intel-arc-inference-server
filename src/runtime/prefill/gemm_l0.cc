@@ -16,7 +16,31 @@ bool aligned64(const void* p, size_t elem_bytes, size_t stride_elems, uint32_t L
   if (base % 64 != 0) return false;
   return L <= 1 || (stride_elems * elem_bytes) % 64 == 0;
 }
+// pf_gemm_small over the rows pad(M, 8 NA) covers: same arguments as pf_gemm's minus the batch
+// strides, `ldc` carrying ldx under the SiLU epilogue.
+void launch_small(Context& cx, KernelCache& kc, const PfSmallTile& t, bool silu, uint32_t M,
+                  uint32_t K, uint32_t N, const uint16_t* A, const uint16_t* B, void* C, uint32_t lda,
+                  uint32_t ldb, uint32_t ldc) {
+  require(N % t.cols() == 0, "N = " + std::to_string(N) + " is not a multiple of the small tile's " +
+                                 std::to_string(t.cols()) + " columns");
+  const uint32_t Mt = (M + t.rows() - 1) / t.rows() * t.rows();
+  l0::Kernel& k = kc(kernels::pf_gemm_small_variant(t.na, t.nb, t.sn, silu), "pf_gemm_small");
+  cx.launch(k, N / t.cols(), Mt / t.rows(), 1,   // columns first (pf_gemm_small.cl)
+            {PtrArg(A), PtrArg(B), PtrArg(C), arg_val(Mt), arg_val(K), arg_val(N), arg_val(lda),
+             arg_val(ldb), arg_val(ldc)});
+}
 }  // namespace
+
+const PfSmallTile* pf_small_tile(uint32_t M) {
+  // probe_small_chunk on the engine's walk (each slab's dequant, then its GEMM), one chunk's five
+  // Qwen3.8 linears with their dequants (ms, 2026-11-08, card 1): pf_gemm 680-770 at every M up
+  // to 1024 (the dequants ~100 of it); A2_B2_S4 205-228 up to 224 rows, 239 at 256, 333 at 512,
+  // 407 at 768, 460 at 896; A4_B2_S4 483 at 1024 (A2_B2_S4 513); above 1024 no tile beats pf_gemm
+  // (A4_B4_S4 792-830 against 805-823 at 1280-2048).
+  static constexpr PfSmallTile kTo896{2, 2, 4}, kTo1024{4, 2, 4};
+  if (M == 0 || M > kPfSmallMaxRows) return nullptr;
+  return M <= 896 ? &kTo896 : &kTo1024;
+}
 
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
              const uint16_t* B, float* C, bool transB) {
@@ -36,8 +60,12 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
   require(aligned64(B, 2, b.strideB, b.L), "B (or a batch of it) is not 64-byte aligned");
   require(aligned64(C, 4, b.strideC, b.L), "C (or a batch of it) is not 64-byte aligned");
 
-  l0::Kernel& k = kc(kernels::pf_gemm_variant(transB), "pf_gemm");
   const uint32_t lda = uint32_t(b.lda), ldb = uint32_t(b.ldb), ldc = uint32_t(b.ldc);
+  if (const PfSmallTile* t = !transB && b.L == 1 ? pf_small_tile(b.M) : nullptr) {
+    launch_small(cx, kc, *t, /*silu=*/false, b.M, b.K, N, A, B, C, lda, ldb, ldc);
+    return;
+  }
+  l0::Kernel& k = kc(kernels::pf_gemm_variant(transB), "pf_gemm");
   const uint64_t sA = b.strideA, sB = b.strideB, sC = b.strideC;
   cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, b.L,
             {PtrArg(A), PtrArg(B), PtrArg(C), arg_val(M), arg_val(b.K), arg_val(N),
@@ -63,8 +91,12 @@ void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16
   require(aligned64(B, 2, b.strideB, b.L), "B is not 64-byte aligned");
   require(aligned64(X, 2, 0, 1), "X is not 64-byte aligned");
 
-  l0::Kernel& k = kc(kernels::pf_gemm_silu_variant(), "pf_gemm");
   const uint32_t lda = uint32_t(b.lda), ldb = uint32_t(b.ldb);
+  if (const PfSmallTile* t = pf_small_tile(b.M)) {
+    launch_small(cx, kc, *t, /*silu=*/true, b.M, b.K, N, A, B, X, lda, ldb, ldx);
+    return;
+  }
+  l0::Kernel& k = kc(kernels::pf_gemm_silu_variant(), "pf_gemm");
   const uint64_t sA = b.strideA, sB = b.strideB, sC = 0;
   cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, 1,
             {PtrArg(A), PtrArg(B), PtrArg(X), arg_val(M), arg_val(b.K), arg_val(N),

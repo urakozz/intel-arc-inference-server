@@ -116,6 +116,40 @@ endforeach()
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
 
+# Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
+# NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the two tiles
+# runtime::prefill::pf_small_tile binds (A2_B2_S4 to 896 rows, A4_B2_S4 to 1024;
+# tools/probe/probe_small_chunk.cc). 256 GRF where the accumulators alone fill 128 (NA x NB >= 8).
+# Additive: no existing binary changes. -DB70_PF_SMALL_SWEEP=ON builds the probe's whole sweep
+# (NA 1/2/4 x NB 2/4 x SN 1/2/4) instead.
+option(B70_PF_SMALL_SWEEP "build every pf_gemm_small tile probe_small_chunk sweeps" OFF)
+set(_pf_small_tiles "2 2 4" "4 2 4")
+if(B70_PF_SMALL_SWEEP)
+  set(_pf_small_tiles "")
+  foreach(NA 1 2 4)
+    foreach(NB 2 4)
+      foreach(SN 1 2 4)
+        list(APPEND _pf_small_tiles "${NA} ${NB} ${SN}")
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
+foreach(tile IN LISTS _pf_small_tiles)
+  separate_arguments(_t UNIX_COMMAND "${tile}")
+  list(GET _t 0 NA)
+  list(GET _t 1 NB)
+  list(GET _t 2 SN)
+  math(EXPR _acc "${NA} * ${NB}")
+  set(_grf "")
+  if(_acc GREATER_EQUAL 8)
+    set(_grf OPTIONS -cl-intel-256-GRF-per-thread)
+  endif()
+  add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                   DEFINES NA=${NA} NB=${NB} SN=${SN} ${_grf})
+  add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
+                   DEFINES NA=${NA} NB=${NB} SN=${SN} SILU_EPI=1 ${_grf})
+endforeach()
+
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
 set(PF_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_dequant_slab.cl)
