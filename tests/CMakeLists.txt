@@ -1597,6 +1597,18 @@ if(B70_KV8)
   add_test(NAME kv8_kernels_test COMMAND kv8_kernels_test)
   set_tests_properties(kv8_kernels_test PROPERTIES LABELS kv8 TIMEOUT 1800)
 
+  add_ocloc_kernel(kv8_flash_control SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_flash_control.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_executable(kv8_flash_bitwise_test kernels/kv8_flash_bitwise_test.cc)
+  target_include_directories(kv8_flash_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kv8_flash_bitwise_test PRIVATE b70_l0)
+  b70_target_kernel_dir(kv8_flash_bitwise_test)
+  add_dependencies(kv8_flash_bitwise_test kernel_kv8_flash_control
+    kernel_pf_flash_attn_kv8 kernel_pf_attn_gate_kv8)
+  add_test(NAME kv8_flash_bitwise_test COMMAND kv8_flash_bitwise_test)
+  set_tests_properties(kv8_flash_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
+
   # The gates of spec 12 §4 over the int8 cache: the SAME binaries and command lines as the
   # bf16 registrations they twin, with B70_KV_CACHE=int8 (runtime::default_kv_cache - the
   # Engine's, the planner's and b70-decode's default). Bars unchanged unless named:
