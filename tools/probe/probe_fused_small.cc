@@ -309,6 +309,8 @@ int main(int argc, char** argv) {
       for (uint32_t na : {1u, 2u, 4u})
         for (uint32_t nb : {1u, 2u, 4u})
           for (uint32_t sn : {1u, 2u, 4u}) q4s.push_back({na, nb, sn});
+      for (uint32_t nb : {1u, 2u})
+        for (uint32_t sn : {1u, 2u}) q4s.push_back({8, nb, sn});
     } else {
       for (const std::string& v : split(q4_s)) {
         unsigned na = 0, nb = 0, sn = 0;
