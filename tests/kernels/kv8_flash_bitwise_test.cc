@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -10,6 +11,7 @@
 #include "common/bf16.h"
 #include "common/kv8.h"
 #include "kernels/kernels.h"
+#include "l0/event.h"
 #include "prefill/pf_harness.h"
 
 namespace {
@@ -17,7 +19,7 @@ namespace {
 constexpr uint32_t kHD = 256, kQH = 24, kKVH = 4;
 
 void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
-             l0::Kernel& gate, uint32_t pos, uint32_t C) {
+             l0::Kernel& gate, uint32_t pos, uint32_t C, bool time) {
   const uint32_t depth = pos + C, rows = (C + 255u) & ~255u;
   std::mt19937 rng(pos + C);
   std::vector<int8_t> k(size_t(depth) * kKVH * kHD), v(k.size());
@@ -79,13 +81,30 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
               pos, C, count, bad, gated.size(), gate_same);
   CHECK(same);
   CHECK(gate_same);
+  if (time) {
+    l0::EventPool pool(d.ctx, 1);
+    l0::Event event(pool, 0);
+    auto list = l0::CmdList::regular(d.ctx);
+    list.launch(fast, (C + 7u) / 8u, kKVH, 1, &event);
+    list.close();
+    for (uint32_t i = 0; i < 4; ++i) {
+      event.reset();
+      d.q.execute(list, &d.fence);
+      d.fence.wait();
+      if (i != 0)
+        std::printf("  time pos %6u C %4u run %u: %.3f us\n", pos, C, i, event.duration_us());
+    }
+  }
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  CHECK(argc <= 3);
+  const bool time = argc == 3;
+  if (time) CHECK_EQ(std::string(argv[2]), std::string("--time"));
   pf_harness::Dev d;
-  l0::Module fm(d.ctx, kernels::path("pf_flash_attn_kv8"));
+  l0::Module fm(d.ctx, argc > 1 ? argv[1] : kernels::path("pf_flash_attn_kv8"));
   l0::Module cm(d.ctx, kernels::path("kv8_flash_control"));
   l0::Module gm(d.ctx, kernels::path("pf_attn_gate_kv8"));
   auto fast = fm.kernel("pf_flash_attn_kv8");
@@ -96,7 +115,8 @@ int main() {
   gate.group_size(256);
   for (const auto& shape : {std::pair{0u, 1u}, {0u, 9u}, {0u, 64u}, {777u, 300u},
                             {2000u, 2048u}, {13209u, 2048u}, {30963u, 37u},
-                            {64991u, 9u}, {127743u, 257u}})
-    compare(d, fast, control, gate, shape.first, shape.second);
+                            {64991u, 9u}, {127743u, 257u}, {28952u, 2048u},
+                            {62952u, 2048u}, {125952u, 2048u}, {0u, 4096u}})
+    compare(d, fast, control, gate, shape.first, shape.second, time);
   std::puts("kv8_flash_bitwise_test: PASS");
 }

@@ -19,8 +19,8 @@
 cd "$(dirname "$0")/../.."
 oracle=${1:-oracle-out-primary}
 snap=${2:-urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}
-# Scratch in /tmp, as every tools/probe/*.sh keeps its own.
-out=/tmp/kv8_vs_oracle
+# Keep the four gate logs together; detached box jobs supply their own TMPDIR.
+out=${TMPDIR:-/tmp}/kv8_vs_oracle
 mkdir -p $out
 num='^[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
 rc=0

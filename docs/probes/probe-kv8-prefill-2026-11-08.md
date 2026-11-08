@@ -45,3 +45,23 @@ This is a substantial improvement but does not yet meet the approximately
 Q / GRF compile probes, the required engine gates and interleaved paired runs.
 
 Log: `~/b70/logs/3e/block-read-driver.log`.
+
+
+## Expanded comparison and engine gates
+
+The comparison now also runs full 2048-row chunks ending at 31000, 65000 and
+128000, and a 4096-row chunk. All 13 shapes match every output byte.
+`register-driver-2155.log` ended `ALLDONE rc=0`: 8/8 required tests PASS, no
+skips (kv8_kernels, kv8_flash_bitwise, prefill_gate_l0_kv8,
+prefill_consistency_l0_kv8, prefill_determinism_l0_kv8, kv8_vs_oracle,
+prefill_gate_l0, prefill_smoke).
+
+QREG=1 and the default 128-register builds also passed all 13 comparisons,
+but were slower. At pos 13209 / C 2048 the three-run median kernel times
+were Q0/G256 26.380 ms, Q0/G128 71.506 ms, Q1/G256 39.105 ms and Q1/G128
+61.911 ms. At pos 125952 / C 2048: 264.468 / 1861.903 / 366.692 / 1279.859 ms.
+Keep QREG=0 and 256 registers. These are kernel-only synthetic-input times,
+not the required interleaved end-to-end benchmark.
+
+Oracle scratch honors TMPDIR so this run keeps its gate logs under
+`~/b70/logs/3e/tmp/kv8_vs_oracle`.
