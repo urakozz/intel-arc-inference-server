@@ -151,24 +151,35 @@ foreach(tile IN LISTS _pf_small_tiles)
 endforeach()
 
 # Open-work 3b: pf_gemm_small reading the int4 weights directly (pf_gemm_q4.cl) - no bf16 slab,
-# bit-identical to the slab walk; per tile a layout-0 and a layout-1 plain binary and a layout-0
-# SiLU one (gate||up is GPTQ-native). 256 GRF where the accumulators and the two groups of words
-# fill the default 128. -DB70_PF_Q4_SWEEP=ON builds tools/probe/probe_fused_small.cc's sweep
-# (NA 1/2/4 x NB 1/2/4 x SN 1/2/4, and NA 8 x NB 1/2 x SN 1/2) instead.
+# bit-identical to the slab walk. The tiles runtime::prefill::pf_q4_tile binds: plain (both
+# layouts) A4_B1_S1 to 32 rows and A8_B1_S2 to 384; gate||up's SiLU form (layout 0) A1_B2_S4 to 8
+# rows and A4_B2_S1 to 192 (tools/probe/probe_fused_small.cc). 256 GRF where the accumulators and
+# the two groups of words fill the default 128 (NA x NB >= 4). Additive: no existing binary
+# changes. -DB70_PF_Q4_SWEEP=ON builds the probe's sweep (NA 1/2/4 x NB 1/2/4 x SN 1/2/4 and NA 8
+# x NB 1/2 x SN 1/2, every one plain at both layouts and, NB even, SiLU) instead.
 option(B70_PF_Q4_SWEEP "build every pf_gemm_q4 tile probe_fused_small sweeps" OFF)
-set(_pf_q4_tiles "1 2 1")
+set(_pf_q4_plain "4 1 1" "8 1 2")
+set(_pf_q4_silu "1 2 4" "4 2 1")
 if(B70_PF_Q4_SWEEP)
-  set(_pf_q4_tiles "")
+  set(_pf_q4_plain "8 1 1" "8 2 1" "8 1 2" "8 2 2")
   foreach(NA 1 2 4)
     foreach(NB 1 2 4)
       foreach(SN 1 2 4)
-        list(APPEND _pf_q4_tiles "${NA} ${NB} ${SN}")
+        list(APPEND _pf_q4_plain "${NA} ${NB} ${SN}")
       endforeach()
     endforeach()
   endforeach()
-  list(APPEND _pf_q4_tiles "8 1 1" "8 2 1" "8 1 2" "8 2 2")
+  set(_pf_q4_silu "")
+  foreach(tile IN LISTS _pf_q4_plain)
+    separate_arguments(_t UNIX_COMMAND "${tile}")
+    list(GET _t 1 NB)
+    math(EXPR _odd "${NB} % 2")
+    if(_odd EQUAL 0)
+      list(APPEND _pf_q4_silu "${tile}")
+    endif()
+  endforeach()
 endif()
-foreach(tile IN LISTS _pf_q4_tiles)
+function(add_pf_gemm_q4 tile suffix)   # suffix: _L0, _L1 or _L0_SILU
   separate_arguments(_t UNIX_COMMAND "${tile}")
   list(GET _t 0 NA)
   list(GET _t 1 NB)
@@ -178,15 +189,21 @@ foreach(tile IN LISTS _pf_q4_tiles)
   if(_acc GREATER_EQUAL 4)
     set(_grf OPTIONS -cl-intel-256-GRF-per-thread)
   endif()
-  foreach(L 0 1)
-    add_ocloc_kernel(pf_gemm_q4_A${NA}_B${NB}_S${SN}_L${L} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
-                     DEFINES NA=${NA} NB=${NB} SN=${SN} LAYOUT=${L} ${_grf})
-  endforeach()
-  math(EXPR _odd "${NB} % 2")
-  if(_odd EQUAL 0)
-    add_ocloc_kernel(pf_gemm_q4_A${NA}_B${NB}_S${SN}_L0_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
-                     DEFINES NA=${NA} NB=${NB} SN=${SN} LAYOUT=0 SILU_EPI=1 ${_grf})
+  set(_defs LAYOUT=0)
+  if(suffix STREQUAL "_L1")
+    set(_defs LAYOUT=1)
+  elseif(suffix STREQUAL "_L0_SILU")
+    set(_defs LAYOUT=0 SILU_EPI=1)
   endif()
+  add_ocloc_kernel(pf_gemm_q4_A${NA}_B${NB}_S${SN}${suffix} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
+                   DEFINES NA=${NA} NB=${NB} SN=${SN} ${_defs} ${_grf})
+endfunction()
+foreach(tile IN LISTS _pf_q4_plain)
+  add_pf_gemm_q4("${tile}" _L0)
+  add_pf_gemm_q4("${tile}" _L1)
+endforeach()
+foreach(tile IN LISTS _pf_q4_silu)
+  add_pf_gemm_q4("${tile}" _L0_SILU)
 endforeach()
 
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)

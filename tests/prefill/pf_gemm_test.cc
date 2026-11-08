@@ -260,6 +260,70 @@ void small_case(Dev& d, uint32_t M, uint32_t K, bool silu) {
   CHECK_EQ(differ, size_t(0));
 }
 
+// (f) Open-work 3b: an int4 linear of M <= kPfQ4MaxRows rows (kPfQ4SiluMaxRows with gate||up's
+// SiLU epilogue) runs as pf_gemm_q4 (pf_q4_tile) - the int4 words converted in registers, one
+// launch over the whole N - which must be the slab walk (pf_dequant_slab + gemm_l0 per 1024
+// columns, linear_l0's) bit for bit over the M rows. Random words (every nibble) and positive f16
+// scales, at Qwen3.8's (K, N, layout).
+uint16_t f16_bits(float f) {   // positive normal values only (the scales)
+  uint32_t u;
+  std::memcpy(&u, &f, 4);
+  return uint16_t(((int((u >> 23) & 0xFF) - 112) << 10) | ((u >> 13) & 0x3FF));
+}
+void q4_case(Dev& d, uint32_t M, uint32_t K, uint32_t N, uint32_t layout, bool silu) {
+  using runtime::prefill::arg_val;
+  using runtime::prefill::PtrArg;
+  const runtime::prefill::PfSmallTile* t = runtime::prefill::pf_q4_tile(M, silu);
+  CHECK(t != nullptr);
+  std::mt19937 rng(61 + M + K + N + layout);
+  std::uniform_real_distribution<float> su(0.005f, 0.02f);
+  const size_t w_u32 = layout == 0 ? size_t(K / 8) * N : size_t(N / 16) * (K / 64) * 136;
+  std::vector<uint32_t> w(w_u32);
+  for (uint32_t& v : w) v = rng();
+  if (layout == 1)   // each tile's last 8 words are its 16 columns' f16 scales
+    for (size_t i = 0; i < w_u32 / 136; ++i)
+      for (uint32_t j = 0; j < 8; ++j)
+        w[i * 136 + 128 + j] = uint32_t(f16_bits(su(rng))) | (uint32_t(f16_bits(su(rng))) << 16);
+  std::vector<uint16_t> sc(layout == 0 ? size_t(K / 64) * N : 32);
+  for (uint16_t& v : sc) v = f16_bits(su(rng));
+  const uint32_t Mp = pad256(M), ldc = silu ? N / 2 : N;
+  const std::vector<uint16_t> a = random_bf16(size_t(Mp) * K, 63 + M + K);
+  l0::Mem A = upload(d.ctx, a), S = upload(d.ctx, sc), Slab(d.ctx, l0::MemKind::Device, size_t(K) * kSlab * 2);
+  l0::Mem W(d.ctx, l0::MemKind::Device, w.size() * 4);
+  l0::CmdList::immediate(d.ctx).copy(W.ptr(), w.data(), w.size() * 4);
+  const size_t out_bytes = size_t(Mp) * ldc * (silu ? 2 : 4);
+  l0::Mem Cq(d.ctx, l0::MemKind::Device, out_bytes), Cw(d.ctx, l0::MemKind::Device, out_bytes);
+  const void* scales = layout == 0 ? S.ptr() : nullptr;
+  l0::Kernel& dq = d.kc(kernels::pf_dequant_slab_variant(K, N, layout), "pf_dequant_slab");
+  for (uint32_t n0 = 0; n0 < N; n0 += kSlab) {   // linear_l0's walk
+    d.cx.launch(dq, kSlab / 16, K / 64, 1, {PtrArg(W.ptr()), PtrArg(scales), PtrArg(Slab.ptr()), arg_val(n0)});
+    if (silu) {
+      const GemmBatch b{M, K, kSlab, 1, K, kSlab, 0, 0, 0, 0};
+      runtime::prefill::gemm_l0_silu(d.cx, d.kc, b, A.as<uint16_t>(), Slab.as<uint16_t>(),
+                                     Cw.as<uint16_t>() + n0 / 2, ldc);
+    } else {
+      const GemmBatch b{M, K, kSlab, 1, K, kSlab, N, 0, 0, 0};
+      runtime::prefill::gemm_l0(d.cx, d.kc, b, A.as<uint16_t>(), Slab.as<uint16_t>(), Cw.as<float>() + n0, false);
+    }
+  }
+  runtime::prefill::gemm_q4(d.cx, d.kc, *t, layout, silu, M, K, N, A.as<uint16_t>(), K, W.ptr(), scales,
+                            Cq.ptr(), ldc);
+  d.cx.wait();
+  const size_t words = size_t(M) * ldc * (silu ? 2 : 4) / 4;
+  const std::vector<float> got = download(d.ctx, Cq.ptr(), words), want = download(d.ctx, Cw.ptr(), words);
+  const size_t differ = std::memcmp(got.data(), want.data(), words * 4) == 0 ? 0 : [&] {
+    size_t n = 0;
+    for (size_t i = 0; i < words; ++i) n += std::memcmp(&got[i], &want[i], 4) != 0;
+    return n;
+  }();
+  char name[112];
+  std::snprintf(name, sizeof name, "%s M=%u K=%u N=%u L%u (%s)", silu ? "silu " : "plain", M, K, N, layout,
+                kernels::pf_gemm_q4_variant(t->na, t->nb, t->sn, layout, silu).c_str());
+  std::printf("  %-64s %s (%zu of %zu words differ)\n", name, differ == 0 ? "bitwise" : "**DIFFERS**",
+              differ, words);
+  CHECK_EQ(differ, size_t(0));
+}
+
 // (b) Q·K^T: 6 q-heads of kv group 1 against the K cache in place (transB), N = depth.
 // (c) P·V: the same group's P against the V cache, K = depth (pf: padded to 256).
 void attention_case(Dev& d, uint32_t C, uint32_t depth) {
@@ -375,6 +439,13 @@ int main() {
   for (uint32_t M : {1u, 16u, 54u, 256u, 772u, 896u, 897u, 1024u, 1025u})
     for (bool silu : {false, true}) small_case(d, M, 5120, silu);
   for (uint32_t M : {9u, 200u, 1000u}) small_case(d, M, 17408, false);
+  std::puts("pf_gemm_q4 (linear_l0 at M <= kPfQ4MaxRows) vs the slab walk, bitwise over the M rows:");
+  for (uint32_t M : {1u, 8u, 9u, 32u, 33u, 54u, 128u, 192u, 384u}) {
+    q4_case(d, M, 5120, 34816, 0, false);
+    q4_case(d, M, 5120, 16384, 1, false);
+  }
+  for (uint32_t M : {1u, 16u, 200u}) q4_case(d, M, 17408, 5120, 0, false);
+  for (uint32_t M : {1u, 8u, 9u, 54u, 192u}) q4_case(d, M, 5120, 34816, 0, true);
   std::puts("pf_gemm_test OK");
   return 0;
 }
