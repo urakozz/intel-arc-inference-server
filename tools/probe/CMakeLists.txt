@@ -539,6 +539,13 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   get_property(BS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_batch_step ${BS_KERNELS} ${BS_PF_KERNELS})
 endif()
+# --- probe_slots_speed: spec 13c Task 5, the decode speed of the engine's sequence slots (the engine API) ---
+if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
+  add_executable(probe_slots_speed probe_slots_speed.cc)
+  target_include_directories(probe_slots_speed PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_slots_speed PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(probe_slots_speed ${BS_KERNELS} ${BS_PF_KERNELS})
+endif()
 # --- probe_draft_cost: spec 19a Task 4, one DFlash2 block's GEMVs (int8 / bf16 / int4) ---
 # Plan: docs/superpowers/plans/2026-10-05-spec19a-dflash-p0.md, Task 4. Random weights of
 # the drafter's shapes (draft_cost_shapes.h); the binaries are B70_VERIFY_M8's

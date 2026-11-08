@@ -85,8 +85,20 @@ and no KV row of a window [depth - 8, depth + 16) of any slot moves but the step
 |---|---|---|
 | `gdn_step` rows (4 x 1; 2 x 4; 3 + 1 + 2 in slot order 0, 2, 1) against the plain M = 1 kernel per slot: outputs, dst states, rings | Mac, `tools/mac/clrun/batch_rows_run` (UHD 630, emulated subgroups - INDICATIVE) | **bitwise** (measured); a broken window reload or KV base is caught (mutation, measured) |
 | `attn_prep` / `attn_prep_kv8` rows (5 rows, 3 slots) against the M = 1 kernel on the slot alone: q, gate, K / V rows, scales; no other row moved | Mac, the same | **bitwise** (measured) |
-| attention v2 / kv8 decode rows (shuffles, 2D block reads: not runnable on the Mac) | box, row 66 `r66.check` | PENDING (box) |
-| every arm: rows = runs alone; isolation; the production tie | box, `r66.check` (Qwen3.8 and Agnes, bf16 and int8 KV, Agnes also `--mtp off`) | PENDING (box) |
+| attention v2 / kv8 decode rows (shuffles, 2D block reads: not runnable on the Mac) | box, row 66 `r66.check` | **bitwise** wherever both sides run the row kernels (measured 2026-11-08, below) |
+| every arm: rows = runs alone; isolation; the production tie | box, `r66.check` (Qwen3.8, bf16 and int8 KV; Agnes dropped 2026-11-07) | measured 2026-11-08 (plan 13c): see below |
+
+**r66.check on the box (2026-11-08, Qwen3.8, int8 and bf16 KV, the same verdicts in both).** Every arm whose runs all
+have two or more rows - 1x2, 1x4, 2x2, 2x4, 4x2, at 4k and 32k + 4k - PASS: each slot's rows bitwise its run alone
+(logits, ids, GDN states, KV and head KV rows). Every arm with a ONE-row run beside other rows (2x1, 3x1, 4x1,
+1x4 + 1x1, 1x4 + 3x1) differs in exactly those one-row runs: alone, a one-row run is the M = 1 list, whose linears are
+the GEMV; inside the step they are spec 28b's `gemm_sm` - two kernels that round differently (the "1-row" arms
+`1x1@4k` / `1x1@32k` are bitwise). The production tie: `rows 1x1@32k` = `Engine::verify(0)` bitwise; `rows 1x4@32k`
+differs from `Engine::verify(3)` because the production M = 4 list binds spec 28c's DPAS verify attention at 32k.
+No isolation failure in any arm (no source state or KV window of another slot moved). Both differences are the
+rounding class spec 13 §11.3 rules on: a batched row is judged against its lone run by the f32 judge, the isolation
+stays bitwise. The probe's lists since plan 13c are one per M (the head's input rows gathered by one embed_gather),
+which `tests/runtime/slots_test` S3 checks again through the engine (bitwise at mixed K and depth).
 
 ## 3. The step table
 
@@ -213,3 +225,73 @@ engine's measured line and the pools.
 | interleave vs batched admission (spec 13 §8) | `r66.chunk` and the mock's ticks | interleave unless a burst's batched prefill beats N interleaved chunks by more than its gap cost |
 | the row build's overhead | `rows 1x1@32k vs production verify(0)` | <= 1.02 (spec 13 §5's "a single request within 2 %"); above it, 13c keeps the production M = 1 list for a lone request (it does anyway at `--batch 1`) |
 | the check | `r66.check` | every arm PASS on both models and KV forms; a FAIL stops 13c until the row build is fixed |
+
+## 8. Engine (plan 13c, measured 2026-11-08)
+
+The slots in `runtime::Engine` (plan 13c Tasks 2-4; branch `spec13c-slots`). Measured on the box, card 0 (the whole box
+held, not an idle-graded session: indicative to a few %), Qwen3.8 int8 head with its MTP head, four 32768-position
+slots, each prefilled with 4096 ids of `long32k.ids` (its own offset), 48 greedy steps an arm, median of 3 rotated
+rounds - `tools/probe/probe_slots_speed` (the engine API: host writes, submit, fence; no HTTP, no scheduler). "K=a,b"
+is each slot's drafts; real drafts, real acceptance (so ids a step move with the text).
+
+| arm (bf16 KV) | rows | ms a step | ids a step | aggregate t/s | t/s per request | x lone plain |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 plain (today's step) | 1 | 31.33 | 1.000 | 31.9 | 31.9 | 1.000 |
+| 1 MTP K=3 (today's `--spec mtp`) | 4 | 46.97 | 4.000 | 85.2 | 85.2 | 1.499 |
+| 2 plain | 2 | 32.96 | 2.000 | 60.7 | 30.3 | 1.052 |
+| 2 K=3,3 | 8 | 58.49 | 6.875 | 117.5 | 58.8 | 1.867 |
+| 3 plain | 3 | 35.33 | 3.000 | 84.9 | 28.3 | 1.128 |
+| 3 K=2,2,1 | 8 | 56.82 | 7.542 | 132.7 | 44.2 | 1.814 |
+| 3 K=3,2,0 (oldest first) | 8 | 60.49 | 7.000 | 115.7 | 38.6 | 1.931 |
+| 4 plain | 4 | 37.61 | 4.000 | 106.4 | 26.6 | 1.201 |
+| 4 K=1,1,1,1 | 8 | 52.36 | 7.542 | **144.0** | 36.0 | 1.671 |
+| 4 K=1,1,1,1, each slot's own draft lists | 8 | 64.13 | 7.729 | 120.5 | 30.1 | 2.047 |
+| 4 K=3,1,0,0 (oldest first) | 8 | 62.14 | 7.792 | 125.4 | 31.3 | 1.984 |
+| 4 K=3,0,0,0 (13a's `1x4+3x1`) | 7 | 59.85 | 7.000 | 117.0 | 29.2 | 1.911 |
+
+At int8 KV the same arms run 4-15 % slower at this depth (4 K=1,1,1,1: 122.7 t/s; 4 plain 96.5; 1 MTP K=3 61.2 with
+lower acceptance on its text); the full table is r78.speed's.
+
+What it decides (13a section 7's rules, measured):
+
+- **Slots:** four plain rows cost 1.20 lone steps (aggregate 3.3x), two 1.05 (1.9x) - section 7's bars (1.6x at 2,
+  2.0x at 4) pass with room; four slots kept.
+- **Drafts across slots (P7):** a slot's draft index costs 4.2 ms on its own lists (the head and the int8 lm_head
+  read, 2.1 GB); one `build_draft_rows` pass over 2..4 slots costs 4.2-4.6 ms for all of them. Four slots at K 1:
+  64.1 -> 52.4 ms a step, 120.5 -> 144.0 t/s. Built (the second form).
+- **The row budget's allocation:** `1x4+3x1` (117.0) loses to `4x2` (144.0), so section 7 says K 1 everywhere; at
+  three requests 2 / 2 / 1 (132.7) beats 3 / 2 / 0 (115.7). The scheduler deals the drafts one at a time round the
+  rows (the oldest request first), each up to its own AdaptiveK K.
+- **MTP above a few requests:** at every count measured the best MTP arm beats plain rows (four requests: 144.0
+  against 106.4), so drafting stays on at four (`cli::SlotsEngine`'s mtp_active_max is the 8-row budget).
+- **The row build's overhead for a lone request:** none - a lone request runs its slot's own lists (today's), and
+  through b70-serve it is bitwise the serial server's at the serial server's speed (r78.lone; golden + A4, 39
+  requests: 33.9 against 33.8 t/s plain, 77.9 against 77.9 with MTP).
+
+**Through b70-serve** (`tools/box_validate/slots_bench.py`, r78.speed's arms; the whole box held, card 0;
+`--max-len 32768` = four 32768-position slots; N requests sent together, each `long.txt` (2820 ids) behind its own
+first line, greedy, `ignore_eos`: first 32 ids cold - TTFT under load - then the same prompts again, restored by the
+prefix cache, 512 ids each - the card's decode throughput while they run together; the serial server is
+`--max-len auto`, one slot):
+
+| server, KV, `--spec` | requests | decode throughput t/s | per request t/s | TTFT cold median / max s |
+|---|---:|---:|---:|---|
+| serial (`auto`), bf16, mtp | 1 | 72.1 | 72.1 | 2.36 |
+| serial (`auto`), bf16, mtp | 4 | 63.8 (one at a time) | 71.8 | 6.56 / 10.71 (queued) |
+| slots, bf16, mtp | 1 | 72.3 | 72.3 | 2.35 |
+| slots, bf16, mtp | 2 | 106.2 | 58.7 | 3.56 / 4.77 |
+| slots, bf16, mtp | 4 | **125.0** | 35.2 | 6.00 / 9.64 |
+| slots, bf16, mtp | 8 (4 decode, 4 wait) | 122.1 | 33.1 | 11.03 / 19.86 |
+| slots, bf16, off | 1 / 2 / 4 / 8 | 33.2 / 58.9 / 95.1 / 93.0 | 33.2 / 30.5 / 25.9 / 24.0 | 2.34 / 3.53 / 5.90 / 11.14 (median) |
+| slots, int8, mtp | 1 / 2 / 4 / 8 | 71.7 / 110.7 / 107.6 / 104.2 | 71.7 / 61.7 / 30.7 / 29.7 | 2.95 / 4.46 / 7.49 / 13.71 (median) |
+| slots, int8, off | 1 / 2 / 4 / 8 | 32.7 / 55.7 / 85.9 / 83.4 | 32.7 / 29.1 / 23.8 / 21.6 | 2.93 / 4.41 / 7.39 / 13.83 (median) |
+
+Four requests on one card decode 1.96x what the serial server gives them (125.0 against 63.8 t/s, bf16 KV with MTP),
+each at about half its lone rate (35.2 against 72.3), and the per-request rate matches the engine-level arm (36.0 at
+four slots, K 1 each): the scheduler and HTTP cost little. Cold TTFT is the prefills in a row (2.3 s each at 2820
+ids, bf16; the interleave chunk is the serial server's whole 2048-id chunk, so a prefill stalls the decoding rows for
+~1 s a chunk). Against the other engine's 177 t/s at four users (int4 + MTP, one B70): 125 here, 144 at the engine's
+best arm - the gap is the verify step of 8 rows from 4 slots (47.8 ms against the lone plain step's 31.3: each slot
+reads its own GDN states and KV) and the 8-row cap (K 1 each at four requests). The int8 KV cache is slower than bf16
+at this depth (125.0 -> 107.6 at four requests) - the decode attention's dequant; it fits the long slot (131072 +
+3 x 32768) where bf16 does not.

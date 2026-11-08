@@ -3145,27 +3145,25 @@ row 66 "spec 13a - the batching probe: rows of different sequences in one decode
 rownote 66 "Written blind on the Mac (docs/probes/probe-batching-2026-10-23.md): B70_BATCH_PROBE is OFF by default, so G0's build is main's (capture.cc's default token stream and all 105 existing command lines of gdn_step.cl / attn.cl / attn_v2.cl / kv8.cl preprocess to main's tokens; G0's g0.sha holds the binaries). r66.build is the first ocloc compile of the 80 row builds (tools/kernel_cmdlines lists them with the option on: +80 / -0 / ~0) and of build_rows; the Mac ran gdn_step's and attn_prep's row builds bitwise against the production kernels (tools/mac/clrun/batch_rows_run), never attention v2's."
 rownote 66 "Timed stages (r66.cost, r66.chunk): an idle box (the quiet-box session; the idle protocol, docs/10-the-box.md), BOTH cards free of DRM holders, RECORD grade, device 0, the GPU lock for the whole stage; every arm is an interleaved pair against 1x1@4k after a warm-up, median of 3 (probe_batch_step's module comment). Qwen3.8 at int8 KV is the decided form, bf16 the comparison."
 rownote 66 "Hand back: every 'CHECK' line and the 'check:' verdict of r66.check (a FAIL stops 13c); r66.cost's tables ('| arm |' rows, the production verify(0) pair) per model and KV form; r66.chunk's chunk tables; the 'memory:' lines. They fill docs/probes/probe-batching-2026-10-23.md sections 2-4 and the operator's section 7 decisions (the slots per model, the row budget's allocation, the interleave chunk)."
-stage r66.build 66 default cpu -           g0.build "build-batch-probe: -DB70_BATCH_PROBE=ON (the 56 row builds' first ocloc compile, build_rows, probe_batch_step), -j\$JOBS"
+stage r66.build 66 default cpu -           g0.build "the row builds and probe_batch_step in the default build since plan 13c (the 56 row builds, build_rows, probe_batch_step): present in build/"
 st_r66_build() {
-  chk "cmake -S . -B build-batch-probe -DCMAKE_BUILD_TYPE=Release -DB70_BATCH_PROBE=ON $CMAKE_ARGS > /dev/null && cmake --build build-batch-probe -j$JOBS --target probe_batch_step" \
-    "the probe build"
-  chk "miss=0; for b in gdn_step_rows_M8 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS; do if [ -s build-batch-probe/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ]" \
-    "the row builds are in build-batch-probe/kernels"
+  chk "miss=0; for b in gdn_step_rows_M8 attn_prep_M8_ROWS attn_prep_M8_S1_KV8_ROWS attn_v2_M8_T32_ROWS attn_v2_M8_T32_KV8_ROWS; do if [ -s build/kernels/\$b.bin ]; then echo \"built \$b\"; else echo \"NOT BUILT \$b\"; miss=1; fi; done; [ \$miss = 0 ] && [ -x build/tools/probe/probe_batch_step ]" \
+    "the row builds and the probe are in build/"
   finish
 }
-stage r66.check 66 default gpu qwen        r66.build "the check: every arm's rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production verify / plain tie - Qwen3.8, bf16 and int8 KV. Plan 13c's probe, left as it is: when 13c builds slots, its B1 (a slot in a batch equals it alone) is judged by the f32 judge, not bitwise (spec 13 §11.3; B3, the isolation, stays bitwise)"
+stage r66.check 66 default gpu qwen        r66.build "the check: every arm's runs of two or more rows bitwise their slot's run alone (logits, ids, GDN states, KV and head KV rows), isolation, the production M = 1 tie - Qwen3.8, bf16 and int8 KV; a one-row run against its M = 1 list and the production M = 4 tie at 32k (DPAS) are printed, not failed (spec 13 §11.3: the f32 judge grades them - r78)"
 st_r66_check() {
   x "uptime"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-time --no-chunks" "Qwen3.8, int8 KV, MTP"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-time --no-chunks" "Qwen3.8, bf16 KV, MTP"
+  chk "build/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-time --no-chunks" "Qwen3.8, int8 KV, MTP"
+  chk "build/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-time --no-chunks" "Qwen3.8, bf16 KV, MTP"
   grab_all check '^CHECK |^check: |^probe_batch_step: |^memory: ' 200
   finish
 }
 stage r66.cost  66 optin   gpu qwen        r66.check "the step table: every arm against 1x1@4k as interleaved pairs, median of 3 - Qwen3.8 int8 and bf16 KV - idle box, both cards free of DRM holders (timed)"
 st_r66_cost() {
   idle before
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, int8 KV (the decided form)"
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, bf16 KV"
+  chk "build/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, int8 KV (the decided form)"
+  chk "build/tools/probe/probe_batch_step $SNAP_QWEN --kv bf16 --no-check --no-chunks --calls 32 --rounds 3" "Qwen3.8, bf16 KV"
   idle after
   grab_all cost '^probe_batch_step: |^memory: |^timing: |^\| ' 200
   grab_all idle '^IDLE '
@@ -3174,7 +3172,7 @@ st_r66_cost() {
 stage r66.chunk 66 optin   gpu qwen        r66.check "the interleave chunk: one Engine::prefill chunk of 512 / 1024 / 2048 at depth 4096 and 32768 beside the 1-row steps, rotated rounds, median of 3 - Qwen3.8, int8 KV - idle box (timed)"
 st_r66_chunk() {
   idle before
-  chk "build-batch-probe/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Qwen3.8, int8 KV"
+  chk "build/tools/probe/probe_batch_step $SNAP_QWEN --kv int8 --no-check --arms 1x1@4k,1x1@32k --chunks 512,1024,2048 --chunk-depths 4096,32768" "Qwen3.8, int8 KV"
   idle after
   grab_all chunk '^probe_batch_step: |^chunks: |^timing: |^\| ' 80
   grab_all idle '^IDLE '
@@ -3443,6 +3441,63 @@ st_r77_b4() {
 stage r77.serial  77 default card qwen r77.host                   "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
 st_r77_serial() {
   run_tests '^golden_server_test$'
+  finish
+}
+
+# ======================================================================================
+row 78 "spec 13c - several requests at once on ONE card: runtime::Engine's sequence slots (an asked --max-len's spare memory becomes 32768-position slots, spec 13 §11.2) behind server::Scheduler (cli::SlotsEngine); a lone request bitwise today's server, batched rows by the f32 judge (B1), the slots' isolation bitwise (B3), speed (plan 13c Tasks 2-5)"
+rownote 78 "One card (kind card) for the gates; r78.speed holds the whole box (timed, opt-in, an idle box). Hand back: r78.engine's S lines, r78.lone's IDENTICAL lines and the slots: startup line, r78.batch's IDENTICAL / JUDGED lines and serve_judge's SKIP_REASON (the contexts awaiting their f32 reference, dumped to oracle-forced-dumps/qwen-slots and qwen-serve - f32_refs.sh forced-qwen makes them), r78.speed's tables (probe_slots_speed's '| arm |' rows and rule line, SLOTS_BENCH lines)."
+stage r78.host   78 default cpu  -    -                              "host: slot_plan_test (the planner's slots), batch_rows_test, scheduler_test, dflash_scheduler_test (S6: the 8-row budget)"
+st_r78_host() {
+  run_tests '^(slot_plan_test|batch_rows_test|scheduler_test|dflash_scheduler_test)$'
+  finish
+}
+stage r78.engine 78 default card qwen r78.host                       "slots_test / slots_kv8_test / slots_nomtp_test (16384 + 3 x 8192): S1 a slot alone = today's engine (bitwise), S2 the slots' isolation (prefill, decode, reset, a snapshot into another slot), S3 B1 / B3 for the row kernels (bitwise, K 3 + 1 + 1, depths 6000 / 1200 / 900), S4 four requests batched vs alone by the f32 judge (the int8 head's references; the contexts dumped to oracle-forced-dumps/qwen-slots), S5 determinism"
+st_r78_engine() {
+  run_tests '^slots(_kv8|_nomtp)?_test$' "" "" "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-slots"
+  grab_all s '^S[0-9] |^slots_test|awaiting f32' 60
+  finish
+}
+stage r78.lone   78 default card qwen r78.engine                     "B2 for a lone request: the golden and A4 prompts one at a time through b70-serve --max-len 32768 (four slots at bf16 KV, the scheduler) equal --max-len auto (one slot, the serial server) - bitwise, --spec off and mtp, prefix cache off (its restores are the two servers' own)"
+st_r78_lone() {
+  local sp
+  for sp in off mtp; do
+    chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/auto.r1 auto 1 $SNAP_QWEN --max-len auto --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec $sp: --max-len auto (one slot)"
+    chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/slots.r1 slots 1 $SNAP_QWEN --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec $sp: --max-len 32768 (slots), one request at a time"
+    chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref auto" "--spec $sp: a lone request on the slots server is the serial server's, bitwise"
+  done
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^slots:' 20
+  finish
+}
+stage r78.batch  78 default card qwen r78.lone                       "B1 through the server: the golden and A4 prompts two and four at a time (serve_client.py --concurrency) on b70-serve --max-len 32768 against one at a time - identity recorded, every first difference by the f32 judge (serve_judge.py, the int8 head's references; one awaiting its reference SKIPs, never passes) - --spec off and mtp, prefix cache off"
+st_r78_batch() {
+  local sp c
+  for sp in off mtp; do
+    for c in 1 2 4; do
+      chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/c$c.r1 c$c 1 $SNAP_QWEN --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128 --concurrency $c" "--spec $sp: $c at a time"
+    done
+    x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref c1"
+    serve_judge "$STATE/$STAGE/$sp" c1 "--spec $sp: every first difference from one at a time by the f32 judge"
+  done
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON' 40
+  judged_finish
+}
+stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts restored from the prefix cache and 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
+st_r78_speed() {
+  idle before
+  local kv sp
+  for kv in bf16 int8; do
+    chk "build/tools/probe/probe_slots_speed $SNAP_QWEN --kv $kv" "probe_slots_speed, $kv KV"
+  done
+  for kv in bf16 int8; do
+    for sp in off mtp; do
+      chk "PORT=$PORT tools/box_validate/slots_serve_bench.sh $STATE/$STAGE/$kv.$sp $SNAP_QWEN $kv.$sp --max-len 32768 --kv-cache $kv --spec $sp" "slots_bench, $kv KV, --spec $sp"
+    done
+  done
+  chk "PORT=$PORT tools/box_validate/slots_serve_bench.sh $STATE/$STAGE/auto.mtp $SNAP_QWEN auto.mtp --max-len auto --spec mtp -- --counts 1,4" "slots_bench, the one-slot server, --spec mtp"
+  idle after
+  grab_all speed '^\| |^rule:|^SLOTS_BENCH|^slots:' 200
+  grab_all idle '^IDLE '
   finish
 }
 
