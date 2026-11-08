@@ -721,7 +721,8 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const size_t peer = opt_.handoff == PpHandoff::Peer ? 1 : 0;   // pp_send / pp_recv per chunk
   for (const PpChunk& c : chunks)
     for (uint32_t i = 0; i < kPpDevices; ++i)
-      pf_stats_.expected_launches[i] += prefill::step_stage_launches(*st(i).model.desc, backend, c.rows, stage(i)) + peer;
+      pf_stats_.expected_launches[i] +=
+          prefill::step_stage_launches(*st(i).model.desc, backend, c.rows, stage(i), kv_) + peer;
   pf_stats_.expected_launches[1] += prefill::kStepHeadLaunches;
   if (mtp()) {   // spec 16d: step_mtp_kv per chunk; the head's two norm launches are skipped
     for (const PpChunk& c : chunks) pf_stats_.expected_launches[1] += prefill::step_mtp_kv_launches(c.pos, c.rows);
