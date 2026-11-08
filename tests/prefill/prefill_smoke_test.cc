@@ -247,8 +247,8 @@ int main(int argc, char** argv) {
   // ---- 8. the L0 backend's launch arithmetic, MEASURED (ruling E1) --------
   // Section 2 measured one chunk from a fresh engine; this one measures it again after
   // sections 3-7 have used the engine. One chunk on L0 from a reset must advance the SAME
-  // counter by `step_chunk_launches(model::qwen38(), L0, C) + kStepHeadLaunches` (8625 + 5 = 8630
-  // at this C, derived from src/runtime/prefill/step.cc's closing block). The delta
+  // counter by `step_chunk_launches(model::qwen38(), L0, C) + kStepHeadLaunches` (1089 + 5 = 1094
+  // at this C in Flash mode, 1265 + 5 composed, derived from src/runtime/prefill/step.cc's closing block). The delta
   // is taken rather than the absolute, because `prefill_launches()` is cumulative
   // over the engine's whole life and sections 2-7 already spent some of it.
   const size_t l0_before = eng.prefill_launches();
@@ -268,7 +268,7 @@ int main(int argc, char** argv) {
               runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(l0_delta, l0_want);
-  CHECK_EQ(l0_want, size_t(env_mode == AttnMode::Flash ? 8454 : 8630));
+  CHECK_EQ(l0_want, size_t(env_mode == AttnMode::Flash ? 1094 : 1270));   // open-work 3b: one launch a linear
 
   // The shape that S3 actually changed: C = 2048 is eight QK^T row blocks, so the
   // same counter must advance by 9073 + 5. One chunk, so the ragged-tail arithmetic is
