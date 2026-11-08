@@ -1,6 +1,7 @@
 #include "runtime/buffers.h"
 
 #include <cstddef>
+#include <stdexcept>
 #include "l0/cmdlist.h"
 #include "runtime/control.h"
 
@@ -144,9 +145,18 @@ l0::Mem& PrefillScratch::pf_p_buffer() {
     pf_p_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, sizes(max_len, *desc_, chunk_cap_).pf_p);
   return *pf_p_;
 }
+l0::Mem& PrefillScratch::kv8_raw_buffer() {
+  if (!kv8_raw_) {
+    const size_t bytes = sizes(max_len, *desc_, chunk_cap_).kv8_raw;
+    if (bytes == 0) throw std::runtime_error("int8 raw prefill scratch requires 24 query / 4 KV heads");
+    kv8_raw_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, bytes);
+  }
+  return *kv8_raw_;
+}
 size_t PrefillScratch::lazy_bytes() const {
   return (slab_ ? slab_->size() : 0) +
-         (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0);
+         (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0) +
+         (kv8_raw_ ? kv8_raw_->size() : 0);
 }
 
 // --- MtpBuffers (spec 8) -----------------------------------------------------

@@ -239,6 +239,14 @@ runtime::PrefillPath path(PrefillBackend b) {
 }
 
 void check_plan() {
+  {
+    const auto& q = model::qwen38();
+    const auto w = runtime::pp_weights(q, WeightKind::Int8);
+    const auto bf = runtime::pp_plan(q, 32, 131072, w, KvCache::Bf16, path(PrefillBackend::L0));
+    const auto kv8 = runtime::pp_plan(q, 32, 131072, w, KvCache::Int8, path(PrefillBackend::L0));
+    for (uint32_t i = 0; i < 2; ++i)
+      CHECK_EQ(kv8.dev[i].prefill_scratch - bf.dev[i].prefill_scratch, size_t{536870912});
+  }
   for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()})
     for (PrefillBackend b : {PrefillBackend::L0, PrefillBackend::L0Int8})
       for (uint32_t len : {16384u, 131072u}) {

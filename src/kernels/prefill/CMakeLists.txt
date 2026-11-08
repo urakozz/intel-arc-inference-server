@@ -269,6 +269,9 @@ if(B70_KV8)
   add_ocloc_kernel(pf_flash_attn_kv8 SOURCE ${KV8_CL}
                    DEFINES KV8_FLASH=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
 endif()
 

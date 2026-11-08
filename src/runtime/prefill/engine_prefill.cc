@@ -102,6 +102,7 @@ void Engine::prepare_prefill() {
   const uint32_t cap = prefill_chunk_cap();
   check_prefill_chunk_cap(*model_.desc, cap);
   if (!pf_) pf_.reset(new PrefillScratch(ctx_, buffers_.max_len, *model_.desc, cap));
+  if (kv_cache() == KvCache::Int8) pf_->kv8_raw_buffer();
   if (!pfx_)
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);

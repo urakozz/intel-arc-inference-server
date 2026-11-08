@@ -34,6 +34,7 @@
 #include "runtime/engine.h"
 #include "runtime/memory_plan.h"
 #include "runtime/prefill/attn.h"
+#include "runtime/prefill/step.h"
 
 namespace {
 
@@ -98,7 +99,12 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   // One short prefill: the lazy buffers a session builds on its first chunk.
   std::vector<uint32_t> ids(300);
   for (uint32_t i = 0; i < ids.size(); ++i) ids[i] = 1000 + i;
+  const size_t before = eng.prefill_launches();
   eng.prefill(ids);
+  if (!mtp)
+    CHECK_EQ(eng.prefill_launches() - before,
+             runtime::prefill::step_chunk_launches(d, o.backend, uint32_t(ids.size()), eng.kv_cache()) +
+                 runtime::prefill::kStepHeadLaunches);
   std::printf("after a prefill:          %s\n", eng.memory_line().c_str());
 
   // The five components memory_line() prints.

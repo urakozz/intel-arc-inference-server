@@ -195,10 +195,11 @@ struct PrefillScratch : PrefillScratchDims {
                                // spec 15d: Ornith's 4096, out_proj / o_proj)
   // Spec 6 (plan 6b): the composed attention's score scratch, allocated on the first
   // composed `attn_chunk` (the tests' reference, set_attn_mode_for_test). The
-  // flash path never touches them, so prefill scratch no longer scales with max_len.
+  // flash path never touches them; int8 flash uses its smaller kv8_raw_buffer instead.
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
-  size_t lazy_bytes() const;   // whichever of the three exist
+  l0::Mem& kv8_raw_buffer();   // bf16 [2][max_len][4][256], exact int8 values, scales applied by flash
+  size_t lazy_bytes() const;
 
  private:
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
@@ -206,7 +207,7 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
   uint32_t chunk_cap_;
-  std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_;
+  std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_, kv8_raw_;
 };
 
 // Spec 8 (plan 8b): the MTP head's state, allocated ONLY when the model carries the

@@ -30,8 +30,8 @@ class Int8State;   // runtime/prefill/int8.h, spec 5's h8 path
 // the host, which a recorded chunk must never contain.
 //
 // `kv` (spec 12b) is kv_k_mem / kv_v_mem's layout (PersistentBuffers::kv_lay): at int8 the
-// FA layers write and read the int8 rows and scales through attn_*_kv8 (one launch each,
-// as the bf16 flash path), on the flash attention only.
+// FA layers write the int8 rows and scales through attn_prep_kv8, then widen the raw
+// integers once and run flash with the original scale arithmetic.
 //
 // `taps` (spec 19c, a drafter - runtime/tap_drafter.h): after the input fold of layer s (`resid` = layer s - 1's
 // output) the chunk's rows r0 .. C - 1 of every tap whose site is s go to `dst` laid out [row - r0][tap][hidden]
@@ -122,16 +122,17 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 // program's S3 the composed attention issues its QK^T GEMM per 256-row block, so a chunk's
 // launch count depends on it there (8625 at C <= 256, 9073 at C = 2048).
 // Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
-// launch per FA layer and the count no longer depends on C (8449; step.cc).
+// launch per FA layer; int8 KV adds one exact raw-widening launch per FA layer.
 // Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
-size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C);
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
+                           KvCache kv = KvCache::Bf16);
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
 // the two stages add up to step_chunk_launches (the pipeline asserts it).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           model::LayerKind kind);
+                           model::LayerKind kind, KvCache kv = KvCache::Bf16);
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           const PpStage& st);
+                           const PpStage& st, KvCache kv = KvCache::Bf16);
 
 }  // namespace runtime::prefill
