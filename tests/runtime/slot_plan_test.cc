@@ -68,7 +68,7 @@ void check_decided_layout() {
   const size_t rope = model::Qwen35::rope_table_bytes(229376) - model::Qwen35::rope_table_bytes(131072);
   const size_t hh = size_t(runtime::MtpDims::hh_rows(4) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
   const size_t ctl = runtime::SlotDims::sizes(q, 4, true).controls;
-  CHECK_EQ(ctl, size_t{9} * 128 + 2 * 256);
+  CHECK_EQ(ctl, size_t{10} * 128 + 3 * 256);
   CHECK_EQ(p.total(), b.total() + rope + hh + ctl);
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.

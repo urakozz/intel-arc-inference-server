@@ -152,7 +152,8 @@ void require(bool ok, const std::string& what) {
 // restricted to one pipeline stage (capture.h, build_stage_verify_taps).
 // Spec 13a / 13c: `Rows` is build_rows' list (capture.h) - the plain walk with the per-sequence sites bound to their
 // row builds, and the MTP head's KV fill over the rows when it has the head.
-enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows };
+// Spec 13c: `DraftRows` is build_draft_rows' list - the draft walk at M rows of different sequences.
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows };
 
 class Capture {
  public:
@@ -214,6 +215,13 @@ class Capture {
     sb_.control = br.control;
     sb_.hctl = br.hctl;
   }
+  // Spec 13c: build_draft_rows' list at M rows.
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+          const DraftRowsBind& dr, uint32_t cap_m)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, &mtp, Mode::DraftRows) {
+    dr_ = &dr;
+    sb_.hctl = dr.hctl;
+  }
 
   // Spec 28b: the test / probe override of runtime::gemv_kind (runtime/gemv_kind.h).
   // Spec 28c: the test / probe override of the verify-attention rule (runtime/verify_attn.h).
@@ -243,7 +251,7 @@ class Capture {
     if (mode_ == Mode::StageDraft)
       require(stage_ != nullptr && stage_->has_head(d_),
               "a stage's draft list runs on the device that holds the head");
-    if (mode_ == Mode::Draft || mode_ == Mode::StageDraft) {
+    if (mode_ == Mode::Draft || mode_ == Mode::StageDraft || mode_ == Mode::DraftRows) {
       layer_ = head_layer();
       draft();
       // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches).
@@ -465,6 +473,12 @@ class Capture {
     require((mode_ != Mode::Draft && mode_ != Mode::StageDraft) ||
                 (kCapM == 1 && draft_i_ < MtpBuffers::kMaxK),
             "a draft list is M = 1 with draft index < kMaxK");
+    // Spec 13c: a row draft list - its table, Control, rows and logits; a dense head, the main cache's form.
+    require(mode_ != Mode::DraftRows ||
+                (dr_ != nullptr && dr_->hctl && dr_->head_rows && dr_->dh && dr_->logits && !d_.mtp_head_moe() &&
+                 !m_.draft_vocab && stage_ == nullptr),
+            "a row draft list needs its head Control, row table, hidden rows and logits rows (a dense head, no draft "
+            "vocabulary, one card)");
     // Spec 13c: an engine with sequence slots holds every further sequence's kSlots states after them.
     require(mtp_->gdn_spec.size() ==
                 gdn_state_stride() * d_.gdn_layers * ((mtp_->slots - 1) + size_t(mtp_->slots) * (mtp_->seqs - 1)),
@@ -492,7 +506,9 @@ class Capture {
   // control block (the head's `hctl` in the draft list); both read q from attn_q, write
   // partials into attn_part and the gated bf16 rows into attn_out.
   void attn_pair(void* ctrl, const KvLayer& kv) {
-    if (mode_ == Mode::Rows) {   // spec 13a: the main layers' pair over the row table (the head runs none here)
+    // Spec 13a: the main layers' pair over the row table (a row list's head runs none); spec 13c: a row draft list's
+    // head over its own table.
+    if (mode_ == Mode::Rows || mode_ == Mode::DraftRows) {
       attn_pair_rows(ctrl, kv);
       return;
     }
@@ -629,7 +645,7 @@ class Capture {
       k.arg_ptr(i++, kv.v);
       if (kv8_) k.arg_ptr(i++, kv.vs);
       k.arg_ptr(i++, b_.attn_part.ptr());
-      k.arg_ptr(i, br_->rows);
+      k.arg_ptr(i, rows_table());
       launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
     }
     {
@@ -638,7 +654,7 @@ class Capture {
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.attn_gate.ptr());
       k.arg_ptr(3, b_.attn_out.ptr());
-      k.arg_ptr(4, br_->rows);
+      k.arg_ptr(4, rows_table());
       launch(k, d_.fa_q_heads, kCapM);
     }
   }
@@ -1378,6 +1394,8 @@ class Capture {
   uint8_t* ring0() const { return static_cast<uint8_t*>(sb_.conv_ring ? sb_.conv_ring : b_.conv_ring.ptr()); }
   uint8_t* spec0() const { return static_cast<uint8_t*>(sb_.gdn_spec && !tv_ && !gdn_spec_ ? sb_.gdn_spec : spec_mem().ptr()); }
   void* hctl() const { return sb_.hctl ? sb_.hctl : mtp_->hctl.ptr(); }
+  // The row table decode attention's row build reads: a row list's main rows, a row draft list's head rows.
+  void* rows_table() const { return mode_ == Mode::DraftRows ? dr_->head_rows : br_->rows; }
   uint8_t* hh() const { return static_cast<uint8_t*>(sb_.hh ? sb_.hh : mtp_->hh.ptr()); }
 
   // Spec 19c: what a tap drafter's verify list needs - its slots (one whole gdn_state each, slot 0
@@ -1509,8 +1527,8 @@ class Capture {
               b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
     const KvLayer kv = head_kv();
-    if (mode_ == Mode::Rows)   // spec 13a: the head's rows (each at its position - 1, its slot's base)
-      attn_prep_rows(hctl(), h.fa.ptr(), kv, true, br_->head_rows);
+    if (mode_ == Mode::Rows || mode_ == Mode::DraftRows)   // spec 13a / 13c: the head's rows over its own table
+      attn_prep_rows(hctl(), h.fa.ptr(), kv, true, mode_ == Mode::Rows ? br_->head_rows : dr_->head_rows);
     else if (kv8_) {   // spec 12b: the head's KV in the main cache's form
       l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, hctl());
@@ -1558,7 +1576,8 @@ class Capture {
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
     const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
-    head_front(mtp_->dh.ptr());
+    void* const dh = mode_ == Mode::DraftRows ? dr_->dh : mtp_->dh.ptr();   // spec 13c: the rows' chain hidden
+    head_front(dh);
     attn_pair(hctl(), head_kv());
     head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
     const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
@@ -1589,8 +1608,9 @@ class Capture {
       fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
                 b_.x.ptr());
     }
-    step_.list.copy(mtp_->dh.ptr(), b_.x.ptr(), size_t(H) * kBf16);
-    float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
+    step_.list.copy(dh, b_.x.ptr(), size_t(H) * kBf16 * kCapM);
+    float* logits = mode_ == Mode::DraftRows ? static_cast<float*>(dr_->logits)
+                                             : mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
     if (m_.draft_vocab) {
       draft_vocab_head(logits);
       return;
@@ -1737,6 +1757,7 @@ class Capture {
   std::vector<std::vector<uint32_t>> sites_;
   const BatchRowsBind* br_ = nullptr;   // spec 13a / 13c: build_rows' table, pools and head bindings
   SlotBind sb_{};                        // spec 13c: the bound slot (capture.h; all null: the buffers' own)
+  const DraftRowsBind* dr_ = nullptr;    // spec 13c: build_draft_rows' table, Control, rows and logits
 };
 
 }  // namespace
@@ -1829,6 +1850,14 @@ CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel
     throw std::logic_error("runtime::build_stage_verify_taps: the stages' launches do not add up to " +
                            std::to_string(decode_launches(d)));
   return Capture(ctx, m, b, st, link, tv, M).options(opt).run();
+}
+
+CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                              const DraftRowsBind& dr, uint32_t M) {
+  if (M < 2 || M > DecodeBuffers::kM)
+    throw std::runtime_error("runtime::build_draft_rows: M " + std::to_string(M) + " is outside [2, " +
+                             std::to_string(DecodeBuffers::kM) + "] (one row is build_draft's list)");
+  return Capture(ctx, m, b, mtp, dr, M).run();
 }
 
 CapturedStep build_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const BatchRowsBind& br,

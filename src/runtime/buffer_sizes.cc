@@ -284,7 +284,7 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t
 
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
-  return seqs <= 1 ? one : seqs * one + 2 * DecodeScratchDims::kM;
+  return seqs <= 1 ? one : seqs * one + 3 * DecodeScratchDims::kM;
 }
 
 // --- spec 13c: SlotDims --------------------------------------------------------------------
@@ -302,17 +302,20 @@ SlotSizes SlotDims::sizes(const model::ModelDesc& desc, uint32_t seqs, bool mtp)
   const size_t more = seqs - 1;
   s.states = mtp ? 0 : more * gdn_state_bytes(desc);
   s.rings = more * PersistentDims::sizes(0, desc).conv_ring;
-  s.controls = head_table_at(seqs) + kTable;
+  s.controls = draft_table_at(seqs) + kTable;
   return s;
 }
-// The controls block: [slot 1..seqs-1 Control][their head Control][rows][rows head][gather][rows table][head table].
+// The controls block: [slot 1..seqs-1 Control][their head Control][rows][rows head][gather][draft head]
+// [rows table][head table][draft table].
 size_t SlotDims::control_at(uint32_t /*seqs*/, uint32_t seq) { return size_t(seq - 1) * kCtl; }
 size_t SlotDims::head_control_at(uint32_t seqs, uint32_t seq) { return size_t(seqs - 1 + seq - 1) * kCtl; }
 size_t SlotDims::rows_control_at(uint32_t seqs) { return size_t(2 * (seqs - 1)) * kCtl; }
 size_t SlotDims::rows_head_control_at(uint32_t seqs) { return rows_control_at(seqs) + kCtl; }
 size_t SlotDims::gather_control_at(uint32_t seqs) { return rows_control_at(seqs) + 2 * kCtl; }
-size_t SlotDims::rows_table_at(uint32_t seqs) { return rows_control_at(seqs) + 3 * kCtl; }
+size_t SlotDims::draft_control_at(uint32_t seqs) { return rows_control_at(seqs) + 3 * kCtl; }
+size_t SlotDims::rows_table_at(uint32_t seqs) { return rows_control_at(seqs) + 4 * kCtl; }
 size_t SlotDims::head_table_at(uint32_t seqs) { return rows_table_at(seqs) + kTable; }
+size_t SlotDims::draft_table_at(uint32_t seqs) { return head_table_at(seqs) + kTable; }
 
 size_t TapVerifyDims::gdn_spec_bytes(const model::ModelDesc& desc) {
   return size_t{kSlots - 1} * gdn_state_bytes(desc);

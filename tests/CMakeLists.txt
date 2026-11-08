@@ -1397,6 +1397,10 @@ if(B70_MTP)
     add_dependencies(slots_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME slots_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
     add_test(NAME slots_kv8_test COMMAND slots_test ${B70_TEST_SNAPSHOT})
+    add_test(NAME slots_nomtp_test COMMAND slots_test ${B70_TEST_SNAPSHOT} --mtp off)
+    set_tests_properties(slots_nomtp_test PROPERTIES LABELS "checkpoint;slots" SKIP_RETURN_CODE 77
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)
     set_tests_properties(slots_test PROPERTIES LABELS "checkpoint;mtp;slots" SKIP_RETURN_CODE 77
       ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 3600)

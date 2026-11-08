@@ -27,6 +27,8 @@ constexpr uint32_t kCapM = 1;
 // The tap is bf16 [layers][kCapM][hidden] - the descriptor's layer count (spec 14)
 // and hidden size (spec 15b; 5120 on Qwen3.8).
 size_t tap_elems(const model::ModelDesc& d) { return size_t(d.layers) * kCapM * d.hidden; }
+// One bf16 hidden row: the descriptor's hidden x 2 (spec 15b; 10240 B on Qwen3.8).
+size_t hid_bytes(const model::ModelDesc& d) { return size_t(d.hidden) * 2; }
 
 // Checked in the member-initialiser list so it throws before DecodeBuffers
 // allocates ~1.2 GB. runtime::build() checks the same identity, but only after
@@ -127,6 +129,9 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
   for (uint32_t q = 1; q < slots(); ++q) capture_slot(q);
   if (slots() > 1)
     for (uint32_t M = 2; M <= kMaxRows; ++M) rows_steps_.push_back(build_rows(ctx, model_, buffers_, rows_bind_, M));
+  if (slots() > 1 && mtp_)
+    for (uint32_t M = 2; M <= std::min(slots(), kMaxDraftRows); ++M)
+      draft_rows_steps_.push_back(build_draft_rows(ctx, model_, buffers_, *mtp_, draft_bind_, M));
   for (uint32_t q = slots(); q-- > 0;) {
     select(q);
     reset();
@@ -197,6 +202,12 @@ void Engine::setup_slots(const std::vector<uint32_t>& lens) {
     b.table = mtp_->hh.ptr();
     b.saved = mtp_->hh.as<uint8_t>() + size_t(S) * (DecodeScratchDims::kM + 1) * hid;
     b.hin = static_cast<uint8_t*>(b.saved) + size_t(DecodeScratchDims::kM) * hid;
+    // The row draft lists: their own head Control and table, the chain rows after the gather's, the logits rows of
+    // the decode scratch (read before the verify that rewrites them).
+    draft_bind_.hctl = slot_bufs_->control_block(SlotDims::draft_control_at(S));
+    draft_bind_.head_rows = slot_bufs_->control_block(SlotDims::draft_table_at(S));
+    draft_bind_.dh = static_cast<uint8_t*>(b.hin) + size_t(DecodeScratchDims::kM) * hid;
+    draft_bind_.logits = buffers_.logits.ptr();
   }
 }
 
@@ -318,6 +329,63 @@ void Engine::verify_rows(const std::vector<Run>& runs) {
     s.verify_hidden = mtp_ ? static_cast<const uint8_t*>(rows_bind_.saved) + size_t(r0) * hid : nullptr;
     s.control->n_active = x.rows;
     r0 += x.rows;
+  }
+}
+
+void Engine::draft_rows(const std::vector<Run>& runs,
+                        const std::function<uint32_t(size_t, uint32_t, uint32_t)>& pick) {
+  require_mtp("draft_rows");
+  const uint32_t M = static_cast<uint32_t>(runs.size());
+  if (M < 2 || M - 2 >= draft_rows_steps_.size())
+    throw std::runtime_error("runtime::Engine::draft_rows: " + std::to_string(M) + " runs; 2.." +
+                             std::to_string(draft_rows_steps_.size() + 1) + " (one is the slot's own draft())");
+  uint32_t K = 0;
+  for (const Run& r : runs) K = std::max(K, r.k);
+  const size_t hid = hid_bytes(*model_.desc);
+  auto* hc = static_cast<Control*>(draft_bind_.hctl);
+  auto* table = static_cast<BatchRowTable*>(draft_bind_.head_rows);
+  for (size_t m = 0; m < runs.size(); ++m) {
+    Seq& s = seqs_.at(runs[m].slot);
+    const uint32_t pos = s.control->pos;
+    if (runs[m].k == 0 || runs[m].k > kMaxDraft || pos == 0 || size_t(pos) + K + 1 > s.len)
+      throw std::runtime_error("runtime::Engine::draft_rows: slot " + std::to_string(runs[m].slot) + ": k " +
+                               std::to_string(runs[m].k) + " (the step drafts " + std::to_string(K) + ") at pos " +
+                               std::to_string(pos) + " of its " + std::to_string(s.len) + " positions");
+    for (size_t n = 0; n < m; ++n)
+      if (runs[n].slot == runs[m].slot) throw std::runtime_error("runtime::Engine::draft_rows: a slot twice");
+    // The chain's first hidden is the slot's h_{pos-1}; its first input the pending id (draft()'s start).
+    imm_.copy(static_cast<uint8_t*>(draft_bind_.dh) + m * hid, s.hh, hid);
+    hc->cur_token[m] = s.control->cur_token[0];
+    s.draft_ids.clear();
+  }
+  hc->n_active = M;
+  CapturedStep& list = draft_rows_steps_[M - 2];
+  for (uint32_t i = 0; i < K; ++i) {
+    for (size_t m = 0; m < runs.size(); ++m) {
+      const Seq& s = seqs_[runs[m].slot];
+      BatchRow row;
+      row.pos = s.control->pos - 1 + i;   // draft i of the slot at position pos - 1 + i (draft())
+      row.kv_base = s.base;
+      row.slot = runs[m].slot;
+      table->row[m] = row;
+    }
+    queue_.execute(list.list, &fence_);
+    fence_.wait();
+    for (size_t m = 0; m < runs.size(); ++m) {
+      Seq& s = seqs_[runs[m].slot];
+      uint32_t d = hc->out_token[m];
+      if (pick) {
+        d = pick(m, i, d);
+        if (d >= Qwen35::kVocab)
+          throw std::runtime_error("runtime::Engine::draft_rows: picked id " + std::to_string(d) +
+                                   " is outside the vocabulary");
+      }
+      hc->cur_token[m] = d;   // the next draft index's input
+      if (i < runs[m].k) {
+        s.draft_ids.push_back(d);
+        s.control->cur_token[1 + i] = d;
+      }
+    }
   }
 }
 
@@ -454,10 +522,6 @@ std::vector<uint32_t> Engine::generate(uint32_t n,
 
 // --- spec 8: MTP -------------------------------------------------------------------
 
-namespace {
-// One bf16 hidden row: the descriptor's hidden x 2 (spec 15b; 10240 B on Qwen3.8).
-size_t hid_bytes(const model::ModelDesc& d) { return size_t(d.hidden) * 2; }
-}  // namespace
 
 void Engine::require_mtp(const char* what) const {
   if (!mtp_)
@@ -573,8 +637,9 @@ void Engine::verify(uint32_t k) {
 }
 
 void Engine::commit(uint32_t j, uint32_t next_token) {
-  require_spec("commit");
   Seq& s = seq();
+  // Spec 13c: a slot of a verify_rows step commits without a proposer too (its plain row, j = 0).
+  if (s.verify_k == kNoVerify || (!mtp_ && !drafter_ && slots() == 1)) require_spec("commit");
   if (s.verify_k == kNoVerify || j > s.verify_k)
     throw std::runtime_error("runtime::Engine::commit: j " + std::to_string(j) +
                              (s.verify_k == kNoVerify ? " with no verify() pending"

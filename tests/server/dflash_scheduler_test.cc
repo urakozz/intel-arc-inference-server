@@ -17,6 +17,10 @@
 //       uninterrupted session's (A then A' by Continue on one slot). The 19c mutant (the ring not in the snapshot)
 //       is caught: A''s record differs.
 //   S5  a fixed K (SchedulerOptions::spec_fixed_k) asks every row for that K.
+//   S6  spec 13c's row budget (BatchEngineIface::row_budget): with 4 rows decoding at K 3 an engine of 8 rows a step
+//       gets at most 8 rows - every row its pending id, the drafts dealt one at a time round the rows (K 1 each at
+//       four rows, 2 / 2 / 1 at three, the oldest first) - and one that drafts nothing above 2 rows gets plain rows;
+//       the ids are the plain scheduler's either way.
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -248,6 +252,61 @@ void test_fixed_k() {
   std::printf("S5: spec_fixed_k 3 asks every row for 3 drafts OK\n");
 }
 
+// Spec 13c: an engine with a row budget (cli::SlotsEngine's rule: none for a lone row; `budget` rows a step; no drafts
+// above `plain_above` rows).
+struct BudgetMock : MockBatchEngine {
+  using MockBatchEngine::MockBatchEngine;
+  uint32_t budget = 8, plain_above = 8;
+  uint32_t row_budget(uint32_t active) override {
+    return active <= 1 ? 0 : active > plain_above ? active : budget;
+  }
+};
+
+void test_row_budget() {
+  const std::vector<Req> reqs = {R(P(1, 9), 60), R(P(2, 13), 60), R(P(3, 7), 60), R(P(4, 11), 60)};
+  const std::vector<Out> plain = serve(reqs, 4, 0);
+  for (uint32_t plain_above : {8u, 2u}) {
+    BudgetMock e(4);
+    configure(e, 7);
+    e.plain_above = plain_above;
+    std::vector<Out> out(reqs.size());
+    {
+      Scheduler s(e, opts(3));
+      for (size_t i = 0; i < reqs.size(); ++i) CHECK(s.submit(make(reqs[i], out[i])) != nullptr);
+      drain(s);
+    }
+    for (size_t i = 0; i < reqs.size(); ++i) CHECK(out[i].ids == plain[i].ids);
+    size_t full = 0, lone3 = 0;
+    for (const std::string& ev : e.events) {
+      if (ev.rfind("spec", 0) != 0) continue;
+      std::vector<std::pair<uint32_t, uint32_t>> rows;   // (slot, k) in row order
+      for (size_t at = ev.find(':'); at != std::string::npos; at = ev.find(':', at + 1))
+        rows.push_back({uint32_t(ev[at - 1] - '0'), uint32_t(ev[at + 1] - '0')});
+      uint32_t n = 0;
+      for (const auto& r : rows) n += r.second + 1;
+      if (rows.size() == 1) {
+        lone3 += rows[0].second == 3;
+        continue;
+      }
+      CHECK(n <= 8);
+      if (rows.size() > plain_above)
+        for (const auto& r : rows) CHECK_EQ(r.second, 0u);
+      // K 3 asked by every row in an 8-row budget: four rows K 1 each, three rows 2 / 2 / 1.
+      if (plain_above == 8 && rows.size() >= 3) {
+        std::vector<uint32_t> ks;
+        for (const auto& r : rows) ks.push_back(r.second);
+        std::sort(ks.begin(), ks.end());
+        CHECK(rows.size() == 4 ? ks == std::vector<uint32_t>{1, 1, 1, 1} : ks == std::vector<uint32_t>{1, 2, 2});
+        full += rows.size() == 4;
+      }
+    }
+    CHECK(plain_above == 2 || full > 0);
+    (void)lone3;
+    std::printf("S6: row budget 8, no drafts above %u rows - every step within it, the drafts dealt round the rows "
+                "(%zu four-row steps at K 1 each), the plain scheduler's ids OK\n", plain_above, full);
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -256,6 +315,7 @@ int main() {
   test_sampled();
   test_restore_other_slot();
   test_fixed_k();
+  test_row_budget();
   std::printf("dflash_scheduler_test OK\n");
   return 0;
 }
