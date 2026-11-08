@@ -372,7 +372,7 @@ int main() {
   std::puts("pf_gemm's fused SiLU epilogue vs the GEMM + pf_silu_mul pair, bitwise:");
   for (uint32_t M : {2048u, 772u}) silu_case(d, M);
   std::puts("pf_gemm_small (gemm_l0 at M <= kPfSmallMaxRows) vs pf_gemm, bitwise over the M rows:");
-  for (uint32_t M : {1u, 16u, 17u, 54u, 128u, 129u, 256u, 257u, 772u, 1024u})
+  for (uint32_t M : {1u, 16u, 54u, 256u, 772u, 896u, 897u, 1024u, 1025u})
     for (bool silu : {false, true}) small_case(d, M, 5120, silu);
   for (uint32_t M : {9u, 200u, 1000u}) small_case(d, M, 17408, false);
   std::puts("pf_gemm_test OK");

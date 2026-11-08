@@ -115,14 +115,15 @@ endforeach()
 # is what makes "every other linear is untouched" a build fact.
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+
 # Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
-# NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the four tiles
-# runtime::prefill::pf_small_tile binds (A1_B2_S1 to 16 rows, A2_B2_S1 to 128, A4_B2_S1 to 256,
-# A4_B4_S4 to 1024; tools/probe/probe_small_chunk.cc swept NA 1/2/4 x NB 2/4 x SN 1/2/4). 256 GRF
-# where the accumulators alone fill 128 (NA x NB >= 8). Additive: no existing binary changes.
-# -DB70_PF_SMALL_SWEEP=ON builds the probe's whole sweep instead (probe_small_chunk --small ...).
+# NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the two tiles
+# runtime::prefill::pf_small_tile binds (A2_B2_S4 to 896 rows, A4_B2_S4 to 1024;
+# tools/probe/probe_small_chunk.cc). 256 GRF where the accumulators alone fill 128 (NA x NB >= 8).
+# Additive: no existing binary changes. -DB70_PF_SMALL_SWEEP=ON builds the probe's whole sweep
+# (NA 1/2/4 x NB 2/4 x SN 1/2/4) instead.
 option(B70_PF_SMALL_SWEEP "build every pf_gemm_small tile probe_small_chunk sweeps" OFF)
-set(_pf_small_tiles "1 2 1" "2 2 1" "4 2 1" "4 4 4")
+set(_pf_small_tiles "2 2 4" "4 2 4")
 if(B70_PF_SMALL_SWEEP)
   set(_pf_small_tiles "")
   foreach(NA 1 2 4)
@@ -147,12 +148,6 @@ foreach(tile IN LISTS _pf_small_tiles)
                    DEFINES NA=${NA} NB=${NB} SN=${SN} ${_grf})
   add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
                    DEFINES NA=${NA} NB=${NB} SN=${SN} SILU_EPI=1 ${_grf})
-  if(B70_PF_SMALL_SWEEP)
-    add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_NF SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
-                     DEFINES NA=${NA} NB=${NB} SN=${SN} NFAST=1 ${_grf})
-    add_ocloc_kernel(pf_gemm_small_A${NA}_B${NB}_S${SN}_NF_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_small.cl
-                     DEFINES NA=${NA} NB=${NB} SN=${SN} NFAST=1 SILU_EPI=1 ${_grf})
-  endif()
 endforeach()
 
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)

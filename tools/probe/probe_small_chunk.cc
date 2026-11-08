@@ -22,8 +22,7 @@
 // to 35 %). Medians. The summary multiplies each shape by its layer count: one chunk's linears.
 //
 //   probe_small_chunk [--rounds 7] [--rows 16,32,64,128,256,512,1024,2048]
-//                     [--shape all|gu,down,qkvz,out,faqkv] [--small a1b2s1,a2b2s1,a4b2s1,a4b4s4]
-// (a trailing n, a4b2s4n: the _NF build, the column tiles on grid dimension 0)
+//                     [--shape all|gu,down,qkvz,out,faqkv] [--small a2b2s4,a4b2s4]
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -74,9 +73,8 @@ const Shape kShapes[] = {
 
 struct Small {
   uint32_t na, nb, sn;
-  bool nfast = false;   // the _NF build: grid dimension 0 walks the column tiles
   std::string tag() const {
-    return "a" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn) + (nfast ? "n" : "");
+    return "a" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn);
   }
   uint32_t rows() const { return 8 * na; }
   uint32_t cols() const { return 16 * nb * sn; }
@@ -182,9 +180,8 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   };
   auto gs = [&](uint32_t M, const Small& v, uint32_t n0, l0::Mem& o) {
     const uint32_t Mt = pad_to(M, v.rows());
-    l0::Kernel& g = kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, sh.silu, v.nfast), "pf_gemm_small");
-    const uint32_t gm = Mt / v.rows(), gn = kNs / v.cols();
-    cx.launch(g, v.nfast ? gn : gm, v.nfast ? gm : gn, 1,
+    l0::Kernel& g = kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, sh.silu), "pf_gemm_small");
+    cx.launch(g, kNs / v.cols(), Mt / v.rows(), 1,   // columns first
               {PtrArg(dx.ptr()), PtrArg(slab.ptr()), PtrArg(c_at(o, n0)), arg_val(Mt), arg_val(K),
                arg_val(kNs), arg_val(K), arg_val(kNs), arg_val(ldc)});
   };
@@ -295,9 +292,9 @@ int main(int argc, char** argv) {
   try {
     int rounds = 7;
     std::string want = "all", rows_s = "16,32,64,128,256,512,1024,2048";
-    // the four tiles the build carries (pf_small_tile's); the 2026-11-08 sweep built NA 1/2/4 x
+    // the two tiles the build carries (pf_small_tile's); -DB70_PF_SMALL_SWEEP=ON builds NA 1/2/4 x
     // NB 2/4 x SN 1/2/4 - a tile the build lacks is skipped with a line
-    std::string small_s = "a1b2s1,a2b2s1,a4b2s1,a4b4s4";
+    std::string small_s = "a2b2s4,a4b2s4";
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--rounds" && i + 1 < argc) rounds = std::atoi(argv[++i]);
@@ -321,8 +318,8 @@ int main(int argc, char** argv) {
     for (const std::string& v : split(small_s)) {
       unsigned na = 0, nb = 0, sn = 0;
       if (std::sscanf(v.c_str(), "a%ub%us%u", &na, &nb, &sn) != 3)
-        throw std::runtime_error("--small: '" + v + "' is not aXbYsZ[n]");
-      smalls.push_back({na, nb, sn, v.back() == 'n'});
+        throw std::runtime_error("--small: '" + v + "' is not aXbYsZ");
+      smalls.push_back({na, nb, sn});
     }
     const char* mask = std::getenv("ZE_AFFINITY_MASK");
     l0::Context ctx(0);
@@ -334,8 +331,8 @@ int main(int argc, char** argv) {
     std::vector<Small> built;
     for (const Small& v : smalls) {
       try {
-        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, false, v.nfast), "pf_gemm_small");
-        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, true, v.nfast), "pf_gemm_small");
+        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, false), "pf_gemm_small");
+        kc(kernels::pf_gemm_small_variant(v.na, v.nb, v.sn, true), "pf_gemm_small");
         built.push_back(v);
       } catch (const std::exception&) {
         std::printf("# %s: not built, skipped\n", v.tag().c_str());
