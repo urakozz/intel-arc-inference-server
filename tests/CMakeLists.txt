@@ -733,6 +733,12 @@ target_include_directories(batch_rows_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(batch_rows_test PRIVATE b70_plan)
 add_test(NAME batch_rows_test COMMAND batch_rows_test)
 
+# Spec 13c (plan 13c Task 1): the planner's sequence slots (plan_slots, slot_layout), host only.
+add_executable(slot_plan_test runtime/slot_plan_test.cc)
+target_include_directories(slot_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(slot_plan_test PRIVATE b70_plan)
+add_test(NAME slot_plan_test COMMAND slot_plan_test)
+
 # The five checkpoint-labelled tests below (loader::load, argv[1] or [3])
 # default with no argument to the HF repo id
 # "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ", which loader::resolve_snapshot

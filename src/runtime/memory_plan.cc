@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include <string>
+#include <vector>
 #include "loader/draft_vocab.h"
 #include "loader/moe_layout.h"
 #include "runtime/buffer_sizes.h"
@@ -122,6 +124,57 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
              : PrefillScratchDims::kCDefault;
 }
 
+MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
+                      const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv) {
+  if (lens.empty() || lens.size() > SlotDims::kMaxSeqs)
+    throw std::invalid_argument("runtime::plan_slots: " + std::to_string(lens.size()) + " slots (1.." +
+                                std::to_string(SlotDims::kMaxSeqs) + ")");
+  if (lens.size() == 1) return plan(desc, lens[0], mtp, model_bytes, path, dv, kv);
+  if (dv.rows != 0) throw std::invalid_argument("runtime::plan_slots: a draft vocabulary beside sequence slots is not built");
+  uint64_t total = 0;
+  for (uint32_t l : lens) total += l;
+  if (total > 0xFFFFFFFFull) throw std::invalid_argument("runtime::plan_slots: the slots' positions overflow 32 bits");
+  const uint32_t seqs = static_cast<uint32_t>(lens.size());
+  MemoryPlan p = plan(desc, static_cast<uint32_t>(total), mtp, model_bytes, path, dv, kv);
+  p.slot_lens = lens;
+  p.slot_state = SlotDims::sizes(desc, seqs, mtp).total();
+  if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`
+    const size_t more = MtpDims::sizes(p.max_len, desc, 0, kv, MtpDims::kSlots, seqs).total() -
+                        MtpDims::sizes(p.max_len, desc, 0, kv).total();
+    p.slot_state += more;
+    p.mtp_buffers += more;
+  }
+  p.decode_state += p.slot_state;   // plan() counted MtpBuffers at one sequence
+  return p;
+}
+
+std::vector<uint32_t> slot_layout(const model::ModelDesc& desc, uint32_t asked, bool mtp, size_t model_bytes,
+                                  size_t device_bytes, size_t reserve_bytes, const PrefillPath& path,
+                                  const DraftVocabPlan& dv, KvCache kv) {
+  std::vector<uint32_t> lens{asked};
+  if (dv.rows != 0) return lens;
+  while (lens.size() < SlotDims::kMaxSeqs) {
+    std::vector<uint32_t> more = lens;
+    more.push_back(SlotDims::kShortLen);
+    if (plan_slots(desc, more, mtp, model_bytes, path, dv, kv).total() + reserve_bytes > device_bytes) break;
+    lens = std::move(more);
+  }
+  return lens;
+}
+
+std::string slot_layout_name(const std::vector<uint32_t>& lens) {
+  if (lens.empty()) return "no slot";
+  std::string s = std::to_string(lens[0]);
+  size_t i = 1;
+  while (i < lens.size()) {
+    size_t j = i;
+    while (j < lens.size() && lens[j] == lens[i]) ++j;
+    s += " + " + (j - i > 1 ? std::to_string(j - i) + " x " : std::string()) + std::to_string(lens[i]);
+    i = j;
+  }
+  return s;
+}
+
 std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_bytes) {
   const double gb = 1e9;
   const std::string label = "plan at max_len " + std::to_string(p.max_len);
@@ -152,6 +205,11 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
   }
   if (p.drafter_taps != 0) {
     std::snprintf(buf, sizeof buf, ", drafter's prefill taps %.3f GB in prefill scratch", p.drafter_taps / gb);
+    s += buf;
+  }
+  if (!p.slot_lens.empty()) {   // spec 13c
+    std::snprintf(buf, sizeof buf, ", %zu slots (%s), their state %.3f GB in decode state", p.slot_lens.size(),
+                  slot_layout_name(p.slot_lens).c_str(), p.slot_state / gb);
     s += buf;
   }
   if (p.kv_cache == KvCache::Int8) s += ", int8 KV cache";   // spec 12b; bf16 says nothing
