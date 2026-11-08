@@ -296,7 +296,9 @@ void test_row_budget() {
         std::vector<uint32_t> ks;
         for (const auto& r : rows) ks.push_back(r.second);
         std::sort(ks.begin(), ks.end());
-        CHECK(rows.size() == 4 ? ks == std::vector<uint32_t>{1, 1, 1, 1} : ks == std::vector<uint32_t>{1, 2, 2});
+        const std::vector<uint32_t> four{1, 1, 1, 1}, three{1, 2, 2};
+        const bool dealt = rows.size() == 4 ? ks == four : ks == three;
+        CHECK(dealt);
         full += rows.size() == 4;
       }
     }
