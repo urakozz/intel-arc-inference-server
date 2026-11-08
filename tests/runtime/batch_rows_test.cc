@@ -119,13 +119,16 @@ void check_memory() {
   print("Qwen3.8 1 x 131072 + 3 x 32768, MTP (decided)", qd);
   // 2026-10-27: the prefill default is l0 (spec 13 §9.1 priced l0-int8): the shared scratch loses
   // Int8State and keeps the slab, 0.087 GB less on Qwen3.8 than §9.1's rows.
+  // 3e adds one layer's unscaled bf16 K/V temporary at the longest slot's capacity.
+  const double raw128 = gb(size_t{131072} * 4 * 256 * 2 * 2);
   CHECK_NEAR(gb(qd.weights), 17.70, 0.015);
-  CHECK_NEAR(gb(qd.scratch), 0.78, 0.015);
-  CHECK_NEAR(gb(qd.total()), 29.01, 0.015);
-  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 2.02, 0.015);
+  CHECK_NEAR(gb(qd.scratch), 0.78 + raw128, 0.015);
+  CHECK_NEAR(gb(qd.total()), 29.01 + raw128, 0.015);
+  CHECK_NEAR((double(kBudget) - double(qd.total())) / kGB, 2.02 - raw128, 0.015);
   const runtime::BatchMemory q4 = runtime::batch_memory(q, mk(4, 65536, 65536, true), KvCache::Int8, kQwenInt8Weights, kMtpWeights);
   print("Qwen3.8 4 x 65536, MTP", q4);
-  CHECK_NEAR((double(kBudget) - double(q4.total())) / kGB, 0.89, 0.015);
+  CHECK_NEAR((double(kBudget) - double(q4.total())) / kGB,
+             0.89 - gb(size_t{65536} * 4 * 256 * 2 * 2), 0.015);
   print("Qwen3.8 1 x 131072 + 3 x 32768, MTP, bf16 KV",
         runtime::batch_memory(q, mk(4, 131072, 32768, true), KvCache::Bf16, kQwenInt8Weights, kMtpWeights));
   print("Qwen3.8 1 x 131072 (today's engine), MTP",

@@ -105,3 +105,12 @@ calculation; its existing two-card regression is queued before the fix.
 Final15k profile: flash GPU1191.8ms bf16 versus1309.6ms int8 including
 widening; instrumented wall10438.4/10538.5ms. Initial unprofiled warmups
 9856.9/9974.0ms. Interleaved matrix and recorded opencode replay pending.
+
+
+The related host slot/batch memory tests initially failed their old totals.
+The tests now add the exact temporary size to those totals with their
+original tolerances. The slot planner sizes this buffer at the summed
+capacity, while the older batch estimate uses the longest slot; the
+byte-for-byte reconciliation includes that difference. All five related
+host tests pass (`host-memory-green.log`); pipeline-plan tests also pass.
+The existing four-slot int8/MTP layout still fits the memory reserve.
