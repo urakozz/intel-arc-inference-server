@@ -16,6 +16,8 @@ namespace runtime::prefill {
 // in-order list with NO host wait -- between the two, between slabs, or before the consumer.
 // M is padded to 256 by gemm_l0; rows [M, pad256(M)) of x are read and of partials written,
 // and both buffers have chunk_cap() rows (a multiple of 256), so every padded row exists.
+// Open-work 3b: a chunk of at most kPfQ4MaxRows rows skips the slab - pf_gemm_q4 reads the int4
+// words over the whole N in one launch (gemm_l0.h's pf_q4_tile), bit-identical to the walk.
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
                const uint16_t* x, uint32_t M);
 
@@ -32,8 +34,9 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, uint16_t* out,
                     uint32_t ldx);
 
-// Launches one linear appends: a dequant and a GEMM per slab. The same for both
-// forms above -- the fusion removes a CONSUMER launch, not a slab.
+// Launches one linear appends on the slab walk: a dequant and a GEMM per slab. The same for
+// both forms above -- the fusion removes a CONSUMER launch, not a slab. (A pf_gemm_q4 chunk,
+// open-work 3b, appends one.)
 size_t linear_l0_launches(const model::GemvShape& sh);
 
 }  // namespace runtime::prefill

@@ -11,6 +11,9 @@ inline constexpr uint32_t kPfGemmTile = 256;
 inline uint32_t pad256(uint32_t v) { return (v + kPfGemmTile - 1) / kPfGemmTile * kPfGemmTile; }
 // Open-work 3a: the most rows a GEMM runs as pf_gemm_small (pf_small_tile).
 inline constexpr uint32_t kPfSmallMaxRows = 1024;
+// Open-work 3b: the most rows an int4 linear runs as pf_gemm_q4 (pf_q4_tile) - plain, and with
+// gate||up's SiLU epilogue.
+inline constexpr uint32_t kPfQ4MaxRows = 384, kPfQ4SiluMaxRows = 192;
 
 // Open-work 3a: the pf_gemm_small tile (src/kernels/prefill/pf_gemm_small.cl) an untransposed,
 // unbatched GEMM of M rows binds - NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups
@@ -25,6 +28,25 @@ struct PfSmallTile {
   uint32_t cols() const { return 16 * nb * sn; }   // the columns a work-group owns
 };
 const PfSmallTile* pf_small_tile(uint32_t M);
+
+// Open-work 3b: the pf_gemm_q4 tile (src/kernels/prefill/pf_gemm_q4.cl) an int4 linear of M rows
+// runs as - pf_gemm_small reading the int4 words and converting them in registers, one launch over
+// the weight's whole N, no bf16 slab - or null: the slab walk (pf_dequant_slab, then gemm_l0, per
+// 1024 columns). `silu`: gate||up's fused epilogue (its atoms pair, NB even). The slab's dequant is
+// ~110 ms a Qwen3.8 chunk whatever the rows; the fused kernel converts each weight once per row
+// tile, so it wins for few rows only. Bit-identical to the slab walk (the same conversion, the same
+// DPAS chain per accumulator), so the choice is speed only - tools/probe/probe_fused_small.cc
+// (docs/probes/probe-fused-small-chunk-2026-11-08.md).
+const PfSmallTile* pf_q4_tile(uint32_t M, bool silu);
+
+// One int4 linear through pf_gemm_q4 at tile `t`: C [pad(M, 8 NA)][N] (fp32 at pitch ldc, or
+// with `silu` bf16 x [..][N / 2] at pitch ldc = ldx) = A [M][K] (pitch lda) x the weight
+// (`qw` / `scales` in loader layout `layout`: 0 GPTQ-native with its f16 scales, 1 tiled with
+// them inside). Rows [M, pad(M, 8 NA)) are computed and never read - the caller's buffers hold
+// them. Throws on N % t.cols(), K % 64 and the 2D block-IO rules.
+void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout, bool silu, uint32_t M,
+             uint32_t K, uint32_t N, const uint16_t* A, uint32_t lda, const void* qw, const void* scales,
+             void* C, uint32_t ldc);
 
 // Launch pf_gemm (src/kernels/prefill/pf_gemm.cl) on cx's list for the LOGICAL problem `b`.
 // M is padded to 256 here; so is N when transB (the untransposed shapes, a 1024-column slab

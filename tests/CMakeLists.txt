@@ -53,6 +53,11 @@ add_dependencies(pf_gemm_test kernel_pf_gemm_T0 kernel_pf_gemm_T1 kernel_pf_gemm
 foreach(_t A2_B2_S4 A4_B2_S4)   # open-work 3a: gemm_l0's short-chunk tiles
   add_dependencies(pf_gemm_test kernel_pf_gemm_small_${_t} kernel_pf_gemm_small_${_t}_SILU)
 endforeach()
+foreach(_t A4_B1_S1_L0 A4_B1_S1_L1 A8_B1_S2_L0 A8_B1_S2_L1 A1_B2_S4_L0_SILU A4_B2_S1_L0_SILU)   # open-work 3b
+  add_dependencies(pf_gemm_test kernel_pf_gemm_q4_${_t})
+endforeach()
+add_dependencies(pf_gemm_test kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K5120_N16384_L1
+                 kernel_pf_dequant_slab_K17408_N5120_L0)
 add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
 set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 

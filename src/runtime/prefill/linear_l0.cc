@@ -42,9 +42,15 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
   require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
 
-  l0::Mem& slab = s.slab_buffer();
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   float* out = s.partials.as<float>();
+  // Open-work 3b: a short chunk reads the int4 words directly - one launch, no slab, the same bits.
+  if (const PfSmallTile* t = pf_q4_tile(M, /*silu=*/false)) {
+    gemm_q4(cx, kc, *t, sh.layout, false, M, sh.K, sh.N, x, sh.K, w.mem.ptr(), scales, out, sh.N);
+    profile_wait(cx, Phase::kSlabGemm);
+    return;
+  }
+  l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(slab.ptr()), arg_val(n0)});
@@ -71,8 +77,13 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
   // the kernel's "atom b is gate iff b is even" true of the global column too.
   static_assert(kNs % 32 == 0, "the slab width must keep the gate||up 32-column phase");
 
-  l0::Mem& slab = s.slab_buffer();
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
+  if (const PfSmallTile* t = pf_q4_tile(M, /*silu=*/true)) {   // open-work 3b, as linear_l0
+    gemm_q4(cx, kc, *t, sh.layout, true, M, sh.K, sh.N, x, sh.K, w.mem.ptr(), scales, out, ldx);
+    profile_wait(cx, Phase::kSlabGemm);
+    return;
+  }
+  l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(slab.ptr()), arg_val(n0)});
