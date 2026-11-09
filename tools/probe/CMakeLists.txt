@@ -968,6 +968,15 @@ add_test(NAME probe_fused_small_cli_test COMMAND python3
   ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_small_cli.py $<TARGET_FILE:probe_fused_small>)
 set_tests_properties(probe_fused_small_cli_test PROPERTIES TIMEOUT 30)
 
+# --- probe_prefill_split: open-work 3k, a full chunk's int4 linears on l0 and l0-int8, itemised ------
+# Record: docs/probes/probe-prefill-chunk-split-2026-11-10.md. Production kernels only (pf_dequant_slab +
+# gemm_l0; pf_quant_had + pf_requant_rot + pf_gemm_i8) over 3i's distinct-layer walk; no candidate.
+add_executable(probe_prefill_split probe_prefill_split.cc)
+target_include_directories(probe_prefill_split PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_prefill_split PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_prefill_split)
+add_dependencies(probe_prefill_split ${PCR_PF_KERNELS})
+
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
 # Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
