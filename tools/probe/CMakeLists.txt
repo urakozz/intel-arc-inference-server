@@ -521,12 +521,16 @@ endif()
 # --- probe_mtp_steps: spec 8 plan 8b, the production MTP lists' wall time per call ---
 # Record: docs/probes/probe-mtp-2026-09-27.md, "Engine". Needs B70_MTP (the default).
 if(B70_MTP)
+  add_executable(probe_longctx_decode probe_longctx_decode.cc)
+  target_include_directories(probe_longctx_decode PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_longctx_decode PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
   add_executable(probe_mtp_steps probe_mtp_steps.cc)
   target_include_directories(probe_mtp_steps PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_mtp_steps PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
   get_property(MS_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY BUILDSYSTEM_TARGETS)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
+  add_dependencies(probe_longctx_decode ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
 # --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.
