@@ -71,4 +71,9 @@ inline constexpr size_t kGdnChunkLaunches = 10;
 const char* gdn_scan_entry_name();
 const char* gdn_scan_launched_entry();
 
+// The `pf_gdn_wy` entry that makes the scan's A2 (launch 8). Open-work 3n: the scan reads A2 as
+// packed hi / lo bf16 words (runtime/prefill/gdn_a2_pack.h), so a walk that binds
+// `gdn_scan_entry_name()` binds this A2 entry with it.
+const char* gdn_a2_entry_name();
+
 }  // namespace runtime::prefill

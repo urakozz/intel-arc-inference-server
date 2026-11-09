@@ -18,6 +18,12 @@
 // state reset is appended before the first timestamp), one warm-up of every arm, then `rounds`
 // rounds in a rotating order. Medians.
 //
+// Open-work 3n: the production entry reads A2 as the packed hi / lo words `pf_gdn_A2_hilo` writes
+// (runtime/prefill/gdn_a2_pack.h; packed here on the host from the same fp32 tiles), and the pre-3n
+// entry is kept as `pf_gdn_scan_dpas_split_staged` (fp32 A2, split in its SLM). The probe times
+// both: a second sanity line requires the two to agree bitwise over all 48 heads, and the arm
+// "staged 48" (the pre-3n kernel, all 192 work-groups) runs in the same rotation.
+//
 //   probe_gdn_scan_occ [--rounds 7] [--rows 2048]
 #include <algorithm>
 #include <cmath>
@@ -35,6 +41,7 @@
 #include "l0/kernel.h"
 #include "l0/memory.h"
 #include "runtime/prefill/context.h"
+#include "runtime/prefill/gdn_a2_pack.h"
 #include "runtime/prefill/kernels.h"
 
 namespace {
@@ -81,6 +88,8 @@ int main(int argc, char** argv) {
     runtime::prefill::Context cx(ctx);
     runtime::prefill::KernelCache kc(ctx);
     l0::Kernel& scan = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split");
+    l0::Kernel& staged = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split_staged");
+    l0::Kernel& wg8 = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split_wg8");
 
     // Synthetic inputs at the model's shapes and magnitudes: q / k as l2-normalised rows, w / u and
     // A2 small, the cumulative gate a steady decay restarting every 64 positions, the state small.
@@ -96,9 +105,12 @@ int main(int argc, char** argv) {
     for (uint32_t m = 0; m < C; ++m)
       for (uint32_t h = 0; h < kHeads; ++h) g[size_t(m) * kHeads + h] = -0.02f * float(m % kCt + 1);
     for (auto& x : st) x = nd(rng) * 0.01f;
+    std::vector<uint32_t> a2hl(size_t(nch) * kHeads * runtime::prefill::kA2HlWords);
+    runtime::prefill::pack_a2_hilo(a2.data(), size_t(nch) * kHeads, a2hl.data());
 
     l0::Mem d_xb(ctx, l0::MemKind::Device, xb.size() * 2), d_w(ctx, l0::MemKind::Device, w.size() * 2),
         d_u(ctx, l0::MemKind::Device, u.size() * 2), d_a2(ctx, l0::MemKind::Device, a2.size() * 4),
+        d_a2hl(ctx, l0::MemKind::Device, a2hl.size() * 4),
         d_g(ctx, l0::MemKind::Device, g.size() * 4), d_st0(ctx, l0::MemKind::Device, st.size() * 4),
         d_st(ctx, l0::MemKind::Device, st.size() * 4),
         d_o(ctx, l0::MemKind::Device, size_t(C) * kHeads * kDim * 4);
@@ -106,6 +118,7 @@ int main(int argc, char** argv) {
     cx.copy(d_w.ptr(), w.data(), w.size() * 2);
     cx.copy(d_u.ptr(), u.data(), u.size() * 2);
     cx.copy(d_a2.ptr(), a2.data(), a2.size() * 4);
+    cx.copy(d_a2hl.ptr(), a2hl.data(), a2hl.size() * 4);
     cx.copy(d_g.ptr(), g.data(), g.size() * 4);
     cx.copy(d_st0.ptr(), st.data(), st.size() * 4);
     cx.wait();
@@ -113,12 +126,18 @@ int main(int argc, char** argv) {
     l0::Mem d_stamp(ctx, l0::MemKind::Host, 64);
     uint64_t* stamp = d_stamp.as<uint64_t>();
 
-    auto run = [&](uint32_t h) {
+    // h in 1..48: the production entry over the first h heads; kStaged: the pre-3n entry over all
+    // 48; 100 + h: candidate 2's 8-sub-group entry (`pf_gdn_scan_dpas_split_wg8`) over h heads.
+    constexpr uint32_t kStaged = 0;
+    auto run = [&](uint32_t arm) {
+      const bool pre3n = arm == kStaged;
+      const uint32_t h = pre3n ? kHeads : arm % 100;
       cx.copy(d_st.ptr(), d_st0.ptr(), st.size() * 4);
       cx.timestamp(stamp);
-      cx.launch(scan, h, kColChunks, 1,
-                {PtrArg(d_xb.ptr()), PtrArg(d_w.ptr()), PtrArg(d_u.ptr()), PtrArg(d_a2.ptr()),
-                 PtrArg(d_g.ptr()), PtrArg(d_st.ptr()), PtrArg(d_o.ptr()), arg_val(C)});
+      cx.launch(pre3n ? staged : (arm > 100 ? wg8 : scan), h, kColChunks, 1,
+                {PtrArg(d_xb.ptr()), PtrArg(d_w.ptr()), PtrArg(d_u.ptr()),
+                 PtrArg(pre3n ? d_a2.ptr() : d_a2hl.ptr()), PtrArg(d_g.ptr()), PtrArg(d_st.ptr()),
+                 PtrArg(d_o.ptr()), arg_val(C)});
       cx.timestamp(stamp + 1);
       cx.wait();
       const double ms = cx.timestamp_ms(stamp[0], stamp[1]);
@@ -153,7 +172,23 @@ int main(int argc, char** argv) {
                 diff == 0 && nonfinite == 0 && nonzero > 0 ? "PASS" : "FAIL");
     if (!(diff == 0 && nonfinite == 0 && nonzero > 0)) return 1;
 
-    const std::vector<uint32_t> arms = {6, 12, 18, 24, 32, 36, 48};
+    // Sanity 2 (3n): the production entry over 48 heads against the pre-3n one and candidate 2, bitwise.
+    for (uint32_t arm : {kStaged, 148u}) {
+      std::vector<float> oS(o48.size()), sS(st.size());
+      run(arm);
+      cx.copy(oS.data(), d_o.ptr(), oS.size() * 4);
+      cx.copy(sS.data(), d_st.ptr(), sS.size() * 4);
+      cx.wait();
+      size_t d2 = 0;
+      for (size_t i = 0; i < size_t(C) * kHeads * kDim; ++i) d2 += std::memcmp(&oS[i], &o48[i], 4) != 0;
+      for (size_t i = 0; i < sS.size(); ++i) d2 += std::memcmp(&sS[i], &s48[i], 4) != 0;
+      std::printf("SANITY 3n: pf_gdn_scan_dpas_split (packed A2) vs %s, 48 heads: "
+                  "differing words %zu of %zu -> %s\n", arm == kStaged ? "_staged (fp32 A2)" : "_wg8", d2, size_t(C) * kHeads * kDim + sS.size(),
+                  d2 == 0 ? "PASS" : "FAIL");
+      if (d2 != 0) return 1;
+    }
+
+    const std::vector<uint32_t> arms = {6, 12, 18, 24, 32, 36, 48, kStaged, 124, 136, 148};
     for (uint32_t h : arms) run(h);   // warm-up
     std::vector<std::vector<double>> t(arms.size());
     for (int r = 0; r < rounds; ++r)
@@ -165,13 +200,15 @@ int main(int argc, char** argv) {
                 "|---:|---:|---:|---:|---:|\n", rounds);
     std::vector<double> med(arms.size());
     for (size_t i = 0; i < arms.size(); ++i) med[i] = median(t[i]);
-    const double m48 = med.back();
+    const double m48 = med[6];
     for (size_t i = 0; i < arms.size(); ++i) {
-      std::printf("| %u | %u | %.4f | %.4f | %.3f |\n", arms[i], arms[i] * kColChunks, med[i],
-                  med[i] / arms[i], med[i] / m48);
-      std::printf("ARM {\"heads\":%u,\"wgs\":%u,\"gpu_ms\":%.6f,\"min\":%.6f,\"max\":%.6f}\n", arms[i],
-                  arms[i] * kColChunks, med[i], *std::min_element(t[i].begin(), t[i].end()),
-                  *std::max_element(t[i].begin(), t[i].end()));
+      const uint32_t h = arms[i] == kStaged ? kHeads : arms[i] % 100;
+      const char* entry = arms[i] == kStaged ? "staged" : (arms[i] > 100 ? "wg8" : "packed");
+      std::printf("| %u (%s) | %u | %.4f | %.4f | %.3f |\n", h, entry, h * kColChunks, med[i], med[i] / h,
+                  med[i] / m48);
+      std::printf("ARM {\"entry\":\"%s\",\"heads\":%u,\"wgs\":%u,\"gpu_ms\":%.6f,\"min\":%.6f,\"max\":%.6f}\n",
+                  entry, h, h * kColChunks, med[i],
+                  *std::min_element(t[i].begin(), t[i].end()), *std::max_element(t[i].begin(), t[i].end()));
     }
     return 0;
   } catch (const std::exception& e) {

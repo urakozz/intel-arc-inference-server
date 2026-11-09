@@ -74,8 +74,8 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   cx.launch(kc(wy, "pf_gdn_wu"), kVHeads, nch, 2,
             {PtrArg(b.xb), PtrArg(b.A), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnWu);
-  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i.
-  cx.launch(kc(wy, "pf_gdn_A2"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
+  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i, as the scan's packed hi / lo words (gdn.h).
+  cx.launch(kc(wy, prefill::gdn_a2_entry_name()), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of the state.
   cx.launch(kc(scan, scan_entry), kVHeads, kStateColChunks, 1,

@@ -2,6 +2,11 @@
 // entry point: their expected values are hand-derived scalar recurrences, not
 // the scan implementation or the chunk reference.  Removing any of the three
 // low DPAS chains (S, A2, D) changes a checked value by orders of magnitude.
+//
+// Open-work 3n: the walk's entry reads A2 as the packed hi / lo words
+// (runtime/prefill/gdn_a2_pack.h), so every fixture's fp32 A2 is packed on the
+// host for it, and the same fixture is run through the pre-3n entry
+// (`pf_gdn_scan_dpas_split_staged`, fp32 A2) as well: state and o bitwise equal.
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +21,7 @@
 #include "l0/memory.h"
 #include "prefill/pf_harness.h"
 #include "runtime/prefill/context.h"
+#include "runtime/prefill/gdn_a2_pack.h"
 #include "runtime/prefill/kernels.h"
 
 namespace {
@@ -51,18 +57,23 @@ struct Output {
   std::vector<float> state, o;
 };
 
-Output run(Dev& d, const Input& in) {
+Output run_entry(Dev& d, const Input& in, bool staged) {
   l0::Mem xb = pf_harness::upload(d.ctx, d.imm, in.xb);
   l0::Mem w = pf_harness::upload(d.ctx, d.imm, in.w);
   l0::Mem u = pf_harness::upload(d.ctx, d.imm, in.u);
-  l0::Mem a2 = pf_harness::upload(d.ctx, d.imm, in.a2);
+  std::vector<uint32_t> packed(in.a2.size() / (64 * 64) * runtime::prefill::kA2HlWords);
+  runtime::prefill::pack_a2_hilo(in.a2.data(), in.a2.size() / (64 * 64), packed.data());
+  l0::Mem a2 = staged ? pf_harness::upload(d.ctx, d.imm, in.a2)
+                      : pf_harness::upload(d.ctx, d.imm, packed);
   l0::Mem gc = pf_harness::upload(d.ctx, d.imm, in.gc);
   l0::Mem state = pf_harness::upload(d.ctx, d.imm, in.state);
   l0::Mem o(d.ctx, l0::MemKind::Device, size_t(in.C) * kHeads * kDim * sizeof(float));
   // A zero-output fixture must prove stores happened; zero initialization would
   // let an unwritten output pass it.
   d.imm.fill(o.ptr(), 0x7fc00000u, o.size());
-  d.cx.launch(d.kc(kernels::pf_gdn_scan_variant(), "pf_gdn_scan_dpas_split"), kHeads, 4, 1,
+  d.cx.launch(d.kc(kernels::pf_gdn_scan_variant(),
+                   staged ? "pf_gdn_scan_dpas_split_staged" : "pf_gdn_scan_dpas_split"),
+              kHeads, 4, 1,
               {PtrArg(xb.ptr()), PtrArg(w.ptr()), PtrArg(u.ptr()), PtrArg(a2.ptr()),
                PtrArg(gc.ptr()), PtrArg(state.ptr()), PtrArg(o.ptr()), arg_val(in.C)});
   d.cx.wait();
@@ -70,6 +81,15 @@ Output run(Dev& d, const Input& in) {
   d.imm.copy(out.state.data(), state.ptr(), state.size());
   d.imm.copy(out.o.data(), o.ptr(), o.size());
   return out;
+}
+
+// The walk's entry, checked bitwise against the pre-3n one on the same fixture.
+Output run(Dev& d, const Input& in) {
+  const Output got = run_entry(d, in, false);
+  const Output ref = run_entry(d, in, true);
+  CHECK(std::memcmp(got.state.data(), ref.state.data(), got.state.size() * sizeof(float)) == 0);
+  CHECK(std::memcmp(got.o.data(), ref.o.data(), got.o.size() * sizeof(float)) == 0);
+  return got;
 }
 
 size_t cv(uint32_t m, uint32_t h, uint32_t x) {
