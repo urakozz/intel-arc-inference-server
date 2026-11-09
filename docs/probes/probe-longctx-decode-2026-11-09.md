@@ -388,3 +388,25 @@ not timed. (3) Step 0's short-chunk prefill attention (~0.43 s per chunk at 128k
 Logs: `~/b70/logs/3h/matrix/{base-int8,new-int8,new-bf16}-r{0,1,2}.log`, `comparison.md`;
 kernel probes `~/b70/logs/3h/{profile-M1,profile-M4,snaps-*}.log`; step 0
 `~/b70/logs/3h/step0-chunk-time.log`.
+
+## 3l (1): MTP verify attention at long context - 2026-11-10
+
+Branch `verify-attn-3l`. With `--spec auto` most serving decode steps are MTP verify steps at
+M = 4, and from 4096 keys row 0 they run `attn_verify_dpas[_kv8]` (src/kernels/attn_verify_dpas.cl),
+which 3h left untouched; at 150k its int8 form costs ~1.28 x bf16's attention.
+
+### Acceptance (fixed before any timing)
+
+- **Gain:** the whole verify step (probe_longctx_decode's uninstrumented wall, median paired
+  reduction of three rounds, base = main `865da900` built in its own tree) is **>= 5 % faster at
+  M = 4, and at M = 2 and 3, at depths 81920 and 150000, for both bf16 and int8 KV**.
+- **No regression:** nothing else more than 2 % slower - plain decode M = 1 at every depth,
+  every M at 4096 / 32768, and the 13c row builds (`attn_v2_M<M>_T32[_KV8]_ROWS`: they never
+  bind the verify kernel; checked by their unchanged command lines and source).
+- **Bitwise:** every partial word (mx, sm, acc[256]) and every reduced output word of the
+  changed verify kernel equals a frozen copy of today's (`tests/kernels/attn_verify_control.cl`)
+  at M = 2..8 (bf16) and 2..4 (int8), tails, inactive rows, finite fp16 scales incl. -0 and
+  subnormals. A switch-depth change in `src/runtime/verify_attn.h` is made only where measured,
+  and only if each kernel's output stays what it computes today at that depth; a change that
+  swaps v2 and DPAS at a depth changes rounding (fp32 v2 against the DPAS hi + lo products) and
+  is reported for the f32 judge instead of being made.
