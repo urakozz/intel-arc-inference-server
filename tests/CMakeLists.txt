@@ -62,6 +62,26 @@ add_dependencies(pf_gemm_test kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU)
 add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
 set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 
+# 3g: unused setup, bitwise output and later slab fallback, without a checkpoint.
+add_executable(linear_l0_lazy_test prefill/linear_l0_lazy_test.cc)
+target_include_directories(linear_l0_lazy_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(linear_l0_lazy_test PRIVATE b70_prefill_host b70_runtime b70_l0)
+b70_target_kernel_dir(linear_l0_lazy_test)
+foreach(_layout 0 1)
+  add_ocloc_kernel(pf_dequant_slab_K256_N2048_L${_layout}
+    SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
+    DEFINES K=256 N=2048 LAYOUT=${_layout})
+  add_dependencies(linear_l0_lazy_test kernel_pf_dequant_slab_K256_N2048_L${_layout})
+endforeach()
+foreach(_t A4_B1_S1_L0 A4_B1_S1_L1 A8_B1_S2_L0 A8_B1_S2_L1
+           A1_B2_S4_L0_SILU A4_B2_S1_L0_SILU A8_B1_S4_L0_SLM_SILU)
+  add_dependencies(linear_l0_lazy_test kernel_pf_gemm_q4_${_t})
+endforeach()
+add_dependencies(linear_l0_lazy_test kernel_pf_gemm_small_A2_B2_S4
+                 kernel_pf_gemm_small_A2_B2_S4_SILU)
+add_test(NAME linear_l0_lazy_test COMMAND linear_l0_lazy_test)
+set_tests_properties(linear_l0_lazy_test PROPERTIES TIMEOUT 120)
+
 add_executable(pf_int8_test prefill/pf_int8_test.cc)
 target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pf_int8_test PRIVATE b70_l0)
@@ -920,6 +940,18 @@ set(B70_PREFILL_KERNELS
 # The three spec 2 §6 gates. `tests/golden` is on the include path for
 # golden_common.h -- the decode gate's machinery, extracted verbatim, so the
 # prefill gate grades on the same code rather than on a copy of it.
+add_executable(prefill_lazy_setup_test prefill/prefill_lazy_setup_test.cc)
+target_include_directories(prefill_lazy_setup_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(prefill_lazy_setup_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(prefill_lazy_setup_test ${B70_PREFILL_KERNELS})
+add_test(NAME prefill_lazy_setup_test COMMAND prefill_lazy_setup_test ${B70_TEST_SNAPSHOT}
+  bf16 ${CMAKE_CURRENT_BINARY_DIR}/prefill-lazy-setup-bf16.raw)
+set_tests_properties(prefill_lazy_setup_test PROPERTIES LABELS "checkpoint;prefill" TIMEOUT 180)
+if(B70_KV8)
+  add_test(NAME prefill_lazy_setup_kv8_test COMMAND prefill_lazy_setup_test ${B70_TEST_SNAPSHOT}
+    int8 ${CMAKE_CURRENT_BINARY_DIR}/prefill-lazy-setup-int8.raw)
+  set_tests_properties(prefill_lazy_setup_kv8_test PROPERTIES LABELS "checkpoint;prefill;kv8" TIMEOUT 180)
+endif()
 foreach(t prefill_gate prefill_consistency prefill_determinism prefill_int8)
   add_executable(${t}_test prefill/${t}_test.cc)
   target_include_directories(${t}_test PRIVATE ${CMAKE_SOURCE_DIR}/src
@@ -1703,7 +1735,7 @@ if(B70_KV8)
     endif()
   endmacro()
 
-  foreach(exe replay_determinism_test engine_smoke_test golden_gate_test prefill_gate_test
+  foreach(exe replay_determinism_test engine_smoke_test golden_gate_test prefill_gate_test prefill_lazy_setup_test
               prefill_determinism_test prefill_consistency_test snapshot_test
               flash_long_test memory_plan_box_test mtp_verify_test mtp_gpu_test prefix_gpu_test)
     if(TARGET ${exe})
