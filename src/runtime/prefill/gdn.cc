@@ -105,6 +105,11 @@ static const char* gdn_scan_entry() {
   return entry;
 }
 
+// Open-work 3n: the A2 entry the scan's input is made by. `pf_gdn_scan_dpas_split` reads A2 as
+// the packed hi / lo bf16 words `pf_gdn_A2_hilo` writes (runtime/prefill/gdn_a2_pack.h), not as
+// `pf_gdn_A2`'s fp32 tile, so the two names move together; qwen4exp's walk binds both through gdn.h.
+static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
+
 // The entry the last scan launch was built with; see gdn.h for why it exists.
 // Written by `gdn_chunk` below, read by the gate/determinism/consistency/replay
 // tests so a selector run carries its own dispatch evidence. Atomic (plan 13b): two engines
@@ -114,6 +119,7 @@ static std::atomic<const char*> g_scan_launched{nullptr};
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
+const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
 
 // Stage S4's solve: `pf_gdn_solve`. The register entry (`pf_gdn_solve_register`, bit-identical
 // by construction) and its B70_PREFILL_GDN_SOLVE selector went in the zero-config cleanup; the
@@ -193,8 +199,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i. NOTE the diagonal.
   //      Grid.z is A28's quadrant split: a work-group owns a 32 x 32 block of
   //      the 64 x 64 tile, which is what lets both operands be staged fp32 in
-  //      32,768 B = four resident work-groups per Xe-core.
-  cx.launch(kc(wy, "pf_gdn_A2"), heads, nch, 4,
+  //      32,768 B = four resident work-groups per Xe-core. Written as the
+  //      scan's packed hi / lo bf16 words (open-work 3n), not as fp32.
+  cx.launch(kc(wy, gdn_a2_entry()), heads, nch, 4,
             {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
   profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.

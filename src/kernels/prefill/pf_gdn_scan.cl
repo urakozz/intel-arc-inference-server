@@ -4,7 +4,10 @@
 // kernel - BUILT, MEASURED and REVERTED, kept in-tree and launched by nothing),
 // and the D3 entry `pf_gdn_scan_dpas_split` - the walk's scan since 2026-09-23 (its
 // selector, B70_PREFILL_GDN_SCAN, went in the zero-config cleanup; the vector entry
-// stays compiled, unbound).
+// stays compiled, unbound). Since open-work 3n the split entry reads `A2` as the packed
+// hi / lo words `pf_gdn_A2_hilo` writes; its pre-3n text, which split `A2` itself, is
+// kept as `pf_gdn_scan_dpas_split_staged` for the bitwise tests (the vector entries
+// still read `pf_gdn_A2`'s fp32 tile).
 // It is the only kernel in the GDN family that touches `gdn_state`.
 //
 // ---------------------------------------------------------------------------
@@ -177,6 +180,10 @@
 #define SB_LD 17          /* SbW / VNbW row stride in UINTS (34 ushorts): odd */
 #define DT_LD 33          /* DtW row stride in UINTS (66 ushorts): odd */
 #define A2_BLKS 10        /* the live (nt, kb) blocks of A2^T: kb <= nt */
+/* Open-work 3n: `pf_gdn_A2_hilo`'s packed A2 per (sub-chunk, head), in uints - the hi words of the
+   A2_BLKS blocks, then the lo words. pf_gdn_wy.cl and src/runtime/prefill/gdn_a2_pack.h say the same. */
+#define A2HL_LO (A2_BLKS * SG * DM)       /* 1,280: the lo words' offset */
+#define A2HL_WORDS (2 * A2HL_LO)          /* 2,560 uints = 10,240 B */
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
@@ -220,8 +227,21 @@ inline ushort rne_bf16(float f) {
 // in each product (bf16 x bf16 -> fp32) and the two chains are combined once,
 // in fp32, after the last position block - the treatment `S` and `D` get.
 //
-// SLM: SbHi/SbLo 17,408 + VNb 4,352 + DtHi/DtLo 8,448 + A2bHi/A2bLo 10,240
-//      = 40,448 B.  DPAS per work-item per sub-chunk: 53.0 average (16 + 21 +
+// **Open-work 3n (2026-11-10): `A2`'s limbs come from global, packed.**  The
+// entry used to stage `A2`'s fp32 tile into two SLM arrays every sub-chunk -
+// `hi = rne(x)`, `lo = rne(x - hi)`, two bf16 per uint in the DPAS B-operand
+// order - which cost 10,240 B of SLM (40,448 B a work-group: 3 resident per
+// Xe-core, so the 192 work-groups ran in two waves) and a 10-block staging loop.
+// `pf_gdn_A2_hilo` now writes those same words itself, from the same fp32 value
+// with the same `rne` (src/runtime/prefill/gdn_a2_pack.h is the layout), and
+// stage 2 reads its B operands straight from that buffer: A2HL_WORDS uints per
+// (sub-chunk, head), block `blk` of A2_BLKS at `blk * SG * DM`, lane `l`'s
+// 8 words at `l * DM`, the lo words at +A2HL_LO. No DPAS operand, chain or sum
+// changes, so it is bitwise today's entry, which stays below as
+// `pf_gdn_scan_dpas_split_staged` (gdn_chunk_test case 7 compares the two).
+//
+// SLM: SbHi/SbLo 17,408 + VNb 4,352 + DtHi/DtLo 8,448 = 30,208 B (was 40,448
+//      with the A2 limbs).  DPAS per work-item per sub-chunk: 53.0 average (16 + 21 +
 //      16; stage 2's A2 chains are 2(nt+1), i.e. 2..8 by subgroup).
 // ---------------------------------------------------------------------------
 __attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
@@ -229,10 +249,389 @@ __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_gdn_scan_dpas_split(__global const ushort* restrict xb,
                                      __global const ushort* restrict w,
                                      __global const ushort* restrict u,
-                                     __global const float* restrict A2,
+                                     __global const uint* restrict A2hl,
                                      __global const float* restrict g_cum,
                                      __global float* restrict state,
                                      __global float* restrict gdn_o, uint c_count) {
+  const uint h = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);
+  const uint sg = lid / SG, lane = lid % SG, kh = h / V_PER_K;
+  const uint mt = sg >> 2, nt = sg & 3u, col0 = mt * DM, pos_l = nt * DK + lane;
+
+  __local uint SbHiW[DIM * SB_LD], SbLoW[DIM * SB_LD];
+  __local uint VNbW[CT * SB_LD];
+  __local uint DtHiW[CHUNK_V * DT_LD], DtLoW[CHUNK_V * DT_LD];
+  __local ushort* const SbHi = (__local ushort*)SbHiW;
+  __local ushort* const SbLo = (__local ushort*)SbLoW;
+  __local ushort* const DtHi = (__local ushort*)DtHiW;
+  __local ushort* const DtLo = (__local ushort*)DtLoW;
+
+  const size_t sbase =
+      (size_t)h * DIM * DIM + (size_t)(sg * DM) * DIM + c * CHUNK_V + lane;
+  float8 S0, S1;
+  {
+    float f0[DM], f1[DM];
+#pragma unroll
+    for (uint m = 0; m < DM; ++m) {
+      f0[m] = state[sbase + (size_t)m * DIM];
+      f1[m] = state[sbase + (size_t)m * DIM + SG];
+    }
+    S0 = vload8(0, f0);
+    S1 = vload8(0, f1);
+  }
+
+  const uint nch = (c_count + CT - 1) / CT;
+  for (uint t = 0; t < nch; ++t) {
+    const uint base_m = t * CT, L = min((uint)CT, c_count - base_m), ilast = L - 1;
+    const uint posc = min(pos_l, ilast);
+
+    // S is split only at the DPAS boundary.  S0/S1 remain the fp32 master.
+    {
+      float f0[DM], f1[DM];
+      vstore8(S0, 0, f0);
+      vstore8(S1, 0, f1);
+      __local ushort* restrict dhi = SbHi + (size_t)(sg * DM) * (2 * SB_LD) + lane;
+      __local ushort* restrict dlo = SbLo + (size_t)(sg * DM) * (2 * SB_LD) + lane;
+#pragma unroll
+      for (uint m = 0; m < DM; ++m) {
+        const ushort h0 = rne_bf16(f0[m]), h1 = rne_bf16(f1[m]);
+        dhi[(size_t)m * (2 * SB_LD)] = h0;
+        dhi[(size_t)m * (2 * SB_LD) + SG] = h1;
+        dlo[(size_t)m * (2 * SB_LD)] = rne_bf16(f0[m] - bf16f(h0));
+        dlo[(size_t)m * (2 * SB_LD) + SG] = rne_bf16(f1[m] - bf16f(h1));
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];
+    const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];
+
+    // 1. Two separate chains preserve S's BF16 residual until the fp32 sum.
+    {
+      float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
+      __global const uint* restrict wp =
+          (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
+      for (uint kb = 0; kb < KBLKS; ++kb) {
+        const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
+            as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4)), b, hi);
+        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
+            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
+      }
+      const uint4 uw = vload4(0, (__global const uint*)(
+          u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + col0));
+      ushort ua[DM], vb[DM];
+      float hf[DM], lf[DM];
+      vstore8(as_ushort8(uw), 0, ua);
+      vstore8(hi, 0, hf);
+      vstore8(lo, 0, lf);
+      const bool live = pos_l < L;
+      const float sc = exp(gl - gcp);
+      __local ushort* restrict dthi = DtHi + (size_t)col0 * (2 * DT_LD) + pos_l;
+      __local ushort* restrict dtlo = DtLo + (size_t)col0 * (2 * DT_LD) + pos_l;
+#pragma unroll
+      for (uint m = 0; m < DM; ++m) {
+        const float vnv = live ? (bf16f(ua[m]) - (hf[m] + lf[m])) : 0.0f;
+        const float d = vnv * sc;
+        const ushort dh = rne_bf16(d);
+        vb[m] = rne_bf16(vnv);  // controlled D2 A2*vn operand
+        dthi[(size_t)m * (2 * DT_LD)] = dh;
+        dtlo[(size_t)m * (2 * DT_LD)] = rne_bf16(d - bf16f(dh));
+      }
+      vstore4(as_uint4(vload8(0, vb)), 0, VNbW + pos_l * SB_LD + mt * 4);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 2. Q.S is a split pair, and so is A2 - the operand the 2026-09-23 2x2
+    //    above found responsible for the whole gate failure. `vn` stays single
+    //    BF16 because moving it to fp32 changed no printed cosine at all.
+    {
+      float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
+      __global const uint* restrict qp = (__global const uint*)(
+          xb + (size_t)(base_m + posc) * CONV_ROWS + Q_OFF + kh * DIM);
+      for (uint kb = 0; kb < KBLKS; ++kb) {
+        const int8 b = as_int8(vload8(0, qp + kb * (DK / 2)));
+        hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
+            as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mt * 4)), b, hi);
+        lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
+            as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mt * 4)), b, lo);
+      }
+      float8 o = (hi + lo) * (Q_SCALE * exp(gcp));
+      // The high chain accumulates on top of the q.S term; the low chain starts
+      // at zero so A2's residual is not swamped by it, and they meet once below.
+      float8 olo = (float8)(0.0f);
+      const uint blk0 = (nt * (nt + 1)) >> 1;
+      __global const uint* restrict a2t =
+          A2hl + (size_t)(t * HEADS + h) * A2HL_WORDS + (size_t)blk0 * (SG * DM) + lane * DM;
+      for (uint kb = 0; kb <= nt; ++kb) {
+        const short8 a = as_short8(vload4(0, VNbW + (kb * DK + lane) * SB_LD + mt * 4));
+        const int8 bh = as_int8(vload8(0, a2t + kb * (SG * DM)));
+        const int8 bl = as_int8(vload8(0, a2t + A2HL_LO + kb * (SG * DM)));
+        o = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bh, o);
+        olo = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bl, olo);
+      }
+      o += olo;
+      if (pos_l < L)
+        vstore8(o, 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
+                            c * CHUNK_V + col0);
+    }
+
+    // 3. The high chain begins with decayed fp32 master state; the low chain
+    // begins at zero.  Combine exactly once after all position blocks.
+    {
+      const float dl = exp(gl);
+      float8 lo0 = (float8)(0.0f), lo1 = (float8)(0.0f);
+      S0 *= dl;
+      S1 *= dl;
+      __global const ushort* restrict kp = xb + K_OFF + kh * DIM + sg * DM;
+      for (uint kb = 0; kb < PBLKS; ++kb) {
+        const uint p = min(kb * DK + lane, ilast);
+        const short8 a = as_short8(vload4(0, (__global const uint*)(
+            kp + (size_t)(base_m + p) * CONV_ROWS)));
+        const int8 b0h = as_int8(vload8(0, DtHiW + (size_t)lane * DT_LD + kb * (DK / 2)));
+        const int8 b1h = as_int8(vload8(0, DtHiW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+        const int8 b0l = as_int8(vload8(0, DtLoW + (size_t)lane * DT_LD + kb * (DK / 2)));
+        const int8 b1l = as_int8(vload8(0, DtLoW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+        S0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0h, S0);
+        S1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1h, S1);
+        lo0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0l, lo0);
+        lo1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1l, lo1);
+      }
+      S0 += lo0;
+      S1 += lo1;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+  {
+    float f0[DM], f1[DM];
+    vstore8(S0, 0, f0);
+    vstore8(S1, 0, f1);
+#pragma unroll
+    for (uint m = 0; m < DM; ++m) {
+      state[sbase + (size_t)m * DIM] = f0[m];
+      state[sbase + (size_t)m * DIM + SG] = f1[m];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (3c) `pf_gdn_scan_dpas_split_wg8` - open-work 3n's candidate 2, a PROBE entry:
+//      entry (3)'s work in 8-sub-group work-groups. Sub-group `s` does the jobs of
+//      entry (3)'s sub-groups `s` and `s + 8` (the same position block `nt`, the
+//      column tiles `mt` and `mt + 2`, the state rows `8 s` and `64 + 8 s`), each
+//      DPAS chain the same (a, b, acc) sequence as there, so it is bitwise entry (3).
+//      To fit 6 work-groups (48 threads) an Xe-core by SLM, the D limbs are kept in
+//      registers through stage 2 and then written over the dead S limbs (two more
+//      barriers a sub-chunk): SLM = Sb 17,408 + VNb 4,352 = 21,760 B.
+// ---------------------------------------------------------------------------
+#define WG_SCAN8 128
+__attribute__((reqd_work_group_size(WG_SCAN8, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_gdn_scan_dpas_split_wg8(__global const ushort* restrict xb,
+                                         __global const ushort* restrict w,
+                                         __global const ushort* restrict u,
+                                         __global const uint* restrict A2hl,
+                                         __global const float* restrict g_cum,
+                                         __global float* restrict state,
+                                         __global float* restrict gdn_o, uint c_count) {
+  const uint h = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);
+  const uint sg = lid / SG, lane = lid % SG, kh = h / V_PER_K;
+  const uint nt = sg & 3u, pos_l = nt * DK + lane;
+  const uint mtj[2] = {sg >> 2, (sg >> 2) + 2};   // jobs 0 / 1: entry (3)'s sg and sg + 8
+  const uint rowj[2] = {sg * DM, (sg + 8) * DM};
+
+  __local uint SbW[2 * DIM * SB_LD];               // S hi / lo; later D hi / lo over it
+  __local uint VNbW[CT * SB_LD];
+  __local uint* const SbHiW = SbW;
+  __local uint* const SbLoW = SbW + DIM * SB_LD;
+  __local uint* const DtHiW = SbW;
+  __local uint* const DtLoW = SbW + CHUNK_V * DT_LD;
+  __local ushort* const SbHi = (__local ushort*)SbHiW;
+  __local ushort* const SbLo = (__local ushort*)SbLoW;
+  __local ushort* const DtHi = (__local ushort*)DtHiW;
+  __local ushort* const DtLo = (__local ushort*)DtLoW;
+
+  float8 S[2][2];
+#pragma unroll
+  for (uint j = 0; j < 2; ++j) {
+    const size_t sbase = (size_t)h * DIM * DIM + (size_t)rowj[j] * DIM + c * CHUNK_V + lane;
+    float f0[DM], f1[DM];
+#pragma unroll
+    for (uint m = 0; m < DM; ++m) {
+      f0[m] = state[sbase + (size_t)m * DIM];
+      f1[m] = state[sbase + (size_t)m * DIM + SG];
+    }
+    S[j][0] = vload8(0, f0);
+    S[j][1] = vload8(0, f1);
+  }
+
+  const uint nch = (c_count + CT - 1) / CT;
+  for (uint t = 0; t < nch; ++t) {
+    const uint base_m = t * CT, L = min((uint)CT, c_count - base_m), ilast = L - 1;
+    const uint posc = min(pos_l, ilast);
+
+#pragma unroll
+    for (uint j = 0; j < 2; ++j) {
+      float f0[DM], f1[DM];
+      vstore8(S[j][0], 0, f0);
+      vstore8(S[j][1], 0, f1);
+      __local ushort* restrict dhi = SbHi + (size_t)rowj[j] * (2 * SB_LD) + lane;
+      __local ushort* restrict dlo = SbLo + (size_t)rowj[j] * (2 * SB_LD) + lane;
+#pragma unroll
+      for (uint m = 0; m < DM; ++m) {
+        const ushort h0 = rne_bf16(f0[m]), h1 = rne_bf16(f1[m]);
+        dhi[(size_t)m * (2 * SB_LD)] = h0;
+        dhi[(size_t)m * (2 * SB_LD) + SG] = h1;
+        dlo[(size_t)m * (2 * SB_LD)] = rne_bf16(f0[m] - bf16f(h0));
+        dlo[(size_t)m * (2 * SB_LD) + SG] = rne_bf16(f1[m] - bf16f(h1));
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    const float gcp = g_cum[(size_t)(base_m + posc) * HEADS + h];
+    const float gl = g_cum[(size_t)(base_m + ilast) * HEADS + h];
+
+    // 1. vn and D for both jobs; D's limbs stay in registers until stage 2 is done.
+    uint dtp[2][DM];                 // D hi (low half) / lo (high half), packed
+    {
+      __global const uint* restrict wp =
+          (__global const uint*)(w + ((size_t)(base_m + posc) * HEADS + h) * DIM);
+      const bool live = pos_l < L;
+      const float sc = exp(gl - gcp);
+#pragma unroll
+      for (uint j = 0; j < 2; ++j) {
+        float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
+        for (uint kb = 0; kb < KBLKS; ++kb) {
+          const int8 b = as_int8(vload8(0, wp + kb * (DK / 2)));
+          hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
+              as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mtj[j] * 4)), b, hi);
+          lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
+              as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mtj[j] * 4)), b, lo);
+        }
+        const uint4 uw = vload4(0, (__global const uint*)(
+            u + ((size_t)(base_m + posc) * HEADS + h) * DIM + c * CHUNK_V + mtj[j] * DM));
+        ushort ua[DM], vb[DM];
+        float hf[DM], lf[DM];
+        vstore8(as_ushort8(uw), 0, ua);
+        vstore8(hi, 0, hf);
+        vstore8(lo, 0, lf);
+#pragma unroll
+        for (uint m = 0; m < DM; ++m) {
+          const float vnv = live ? (bf16f(ua[m]) - (hf[m] + lf[m])) : 0.0f;
+          const float d = vnv * sc;
+          const ushort dh = rne_bf16(d);
+          vb[m] = rne_bf16(vnv);
+          dtp[j][m] = ((uint)rne_bf16(d - bf16f(dh)) << 16) | (uint)dh;
+        }
+        vstore4(as_uint4(vload8(0, vb)), 0, VNbW + pos_l * SB_LD + mtj[j] * 4);
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 2. o for both jobs, one job after the other (entry (3)'s chains each).
+    {
+      __global const uint* restrict qp = (__global const uint*)(
+          xb + (size_t)(base_m + posc) * CONV_ROWS + Q_OFF + kh * DIM);
+      const uint blk0 = (nt * (nt + 1)) >> 1;
+      __global const uint* restrict a2t =
+          A2hl + (size_t)(t * HEADS + h) * A2HL_WORDS + (size_t)blk0 * (SG * DM) + lane * DM;
+#pragma unroll
+      for (uint j = 0; j < 2; ++j) {
+        float8 hi = (float8)(0.0f), lo = (float8)(0.0f);
+        for (uint kb = 0; kb < KBLKS; ++kb) {
+          const int8 b = as_int8(vload8(0, qp + kb * (DK / 2)));
+          hi = intel_sub_group_bf16_bf16_matrix_mad_k16(
+              as_short8(vload4(0, SbHiW + (kb * DK + lane) * SB_LD + mtj[j] * 4)), b, hi);
+          lo = intel_sub_group_bf16_bf16_matrix_mad_k16(
+              as_short8(vload4(0, SbLoW + (kb * DK + lane) * SB_LD + mtj[j] * 4)), b, lo);
+        }
+        float8 o = (hi + lo) * (Q_SCALE * exp(gcp));
+        float8 olo = (float8)(0.0f);
+        for (uint kb = 0; kb <= nt; ++kb) {
+          const short8 a = as_short8(vload4(0, VNbW + (kb * DK + lane) * SB_LD + mtj[j] * 4));
+          const int8 bh = as_int8(vload8(0, a2t + kb * (SG * DM)));
+          const int8 bl = as_int8(vload8(0, a2t + A2HL_LO + kb * (SG * DM)));
+          o = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bh, o);
+          olo = intel_sub_group_bf16_bf16_matrix_mad_k16(a, bl, olo);
+        }
+        o += olo;
+        if (pos_l < L)
+          vstore8(o, 0, gdn_o + ((size_t)(base_m + pos_l) * HEADS + h) * DIM +
+                            c * CHUNK_V + mtj[j] * DM);
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);   // every read of the S limbs is done: D goes over them
+
+#pragma unroll
+    for (uint j = 0; j < 2; ++j) {
+      __local ushort* restrict dthi = DtHi + (size_t)(mtj[j] * DM) * (2 * DT_LD) + pos_l;
+      __local ushort* restrict dtlo = DtLo + (size_t)(mtj[j] * DM) * (2 * DT_LD) + pos_l;
+#pragma unroll
+      for (uint m = 0; m < DM; ++m) {
+        dthi[(size_t)m * (2 * DT_LD)] = (ushort)dtp[j][m];
+        dtlo[(size_t)m * (2 * DT_LD)] = (ushort)(dtp[j][m] >> 16);
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // 3. Both jobs' state rows, one job after the other (entry (3)'s chain each).
+    {
+      const float dl = exp(gl);
+#pragma unroll
+      for (uint j = 0; j < 2; ++j) {
+        float8 lo0 = (float8)(0.0f), lo1 = (float8)(0.0f);
+        S[j][0] *= dl;
+        S[j][1] *= dl;
+        __global const ushort* restrict kp = xb + K_OFF + kh * DIM + rowj[j];
+        for (uint kb = 0; kb < PBLKS; ++kb) {
+          const uint p = min(kb * DK + lane, ilast);
+          const short8 a = as_short8(vload4(0, (__global const uint*)(
+              kp + (size_t)(base_m + p) * CONV_ROWS)));
+          const int8 b0h = as_int8(vload8(0, DtHiW + (size_t)lane * DT_LD + kb * (DK / 2)));
+          const int8 b1h = as_int8(vload8(0, DtHiW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+          const int8 b0l = as_int8(vload8(0, DtLoW + (size_t)lane * DT_LD + kb * (DK / 2)));
+          const int8 b1l = as_int8(vload8(0, DtLoW + (size_t)(SG + lane) * DT_LD + kb * (DK / 2)));
+          S[j][0] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0h, S[j][0]);
+          S[j][1] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1h, S[j][1]);
+          lo0 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b0l, lo0);
+          lo1 = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b1l, lo1);
+        }
+        S[j][0] += lo0;
+        S[j][1] += lo1;
+      }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+  }
+#pragma unroll
+  for (uint j = 0; j < 2; ++j) {
+    const size_t sbase = (size_t)h * DIM * DIM + (size_t)rowj[j] * DIM + c * CHUNK_V + lane;
+    float f0[DM], f1[DM];
+    vstore8(S[j][0], 0, f0);
+    vstore8(S[j][1], 0, f1);
+#pragma unroll
+    for (uint m = 0; m < DM; ++m) {
+      state[sbase + (size_t)m * DIM] = f0[m];
+      state[sbase + (size_t)m * DIM + SG] = f1[m];
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (3b) `pf_gdn_scan_dpas_split` EXACTLY as it stood before open-work 3n, kept as
+//      the bitwise reference for `tests/prefill/gdn_chunk_test.cc` (case 7) and
+//      `gdn_scan_split_test`, and launched by nothing else. It reads `A2` as
+//      `pf_gdn_A2`'s fp32 tiles and splits them into hi / lo limbs in its own
+//      SLM every sub-chunk (A2bHiW / A2bLoW, 10,240 B: 40,448 B a work-group,
+//      3 resident per Xe-core, so the 192 work-groups ran in two waves).
+// ---------------------------------------------------------------------------
+__attribute__((reqd_work_group_size(WG_SCAN, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(SG)))
+__kernel void pf_gdn_scan_dpas_split_staged(__global const ushort* restrict xb,
+                                            __global const ushort* restrict w,
+                                            __global const ushort* restrict u,
+                                            __global const float* restrict A2,
+                                            __global const float* restrict g_cum,
+                                            __global float* restrict state,
+                                            __global float* restrict gdn_o, uint c_count) {
   const uint h = get_group_id(0), c = get_group_id(1), lid = get_local_id(0);
   const uint sg = lid / SG, lane = lid % SG, kh = h / V_PER_K;
   const uint mt = sg >> 2, nt = sg & 3u, col0 = mt * DM, pos_l = nt * DK + lane;
