@@ -182,6 +182,7 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
 // An engine of `lens.size()` sequence slots (runtime::Engine's `slots`): plan() at the summed positions (one KV
 // allocation; the RoPE table and the head's KV at it too) plus the further slots' state - SlotDims' rings, controls
 // and (MTP off) GDN states, and with MTP the further slots' GDN states and hh rows in MtpBuffers (MtpDims' `seqs`).
+// Int8 prefill's widening scratch is at the LONGEST slot (3j: one sequence prefills at a time; PrefillScratch::kv8_len).
 // One length is plan(desc, lens[0], ...) exactly. Throws std::invalid_argument for no slot, more than
 // SlotDims::kMaxSeqs, or a draft vocabulary beside slots (not built).
 MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,

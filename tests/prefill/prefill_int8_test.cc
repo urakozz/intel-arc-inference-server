@@ -17,9 +17,10 @@
 //      and some positions are sensitive to it. So on `long` the cosine is printed, not
 //      gated (2026-09-24, plan 5b Task 2);
 //   3. (the replay check went with the experimental prefill replay, zero-config cleanup)
-//   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(model::qwen38(), L0Int8, 2048)
+//   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(model::qwen38(), L0Int8, 2048, kv)
 //      + the head's 5, i.e. l0's + 256, which is the proof the walk really ran the h8
-//      linears (on the bf16 walk it would be 256 short).
+//      linears (on the bf16 walk it would be 256 short). `kv` is the engine's KV form (3j:
+//      B70_KV_CACHE=int8 adds the raw K/V widening, one launch per FA layer).
 //
 // `--first-cost <backend>`: a FRESH engine, three 4096-id prefills at chunk 2048, each
 // timed around Engine::prefill (host wall). The first call's excess over the later ones
@@ -216,8 +217,9 @@ int main(int argc, char** argv) {
     if (c.cos_bar) CHECK(cos >= 0.99);
     if (c.ids->size() == 2048) {
       // One chunk, the scales already built by the prose case: nothing but the walk.
-      const size_t want = runtime::prefill::step_chunk_launches(model::qwen38(), PrefillBackend::L0Int8, 2048) +
-                          runtime::prefill::kStepHeadLaunches;
+      const size_t want =
+          runtime::prefill::step_chunk_launches(model::qwen38(), PrefillBackend::L0Int8, 2048, eng.kv_cache()) +
+          runtime::prefill::kStepHeadLaunches;
       std::printf("  launch delta %zu, predicted %zu (l0 + 256 + head)\n", delta, want);
       CHECK_EQ(delta, want);
     }

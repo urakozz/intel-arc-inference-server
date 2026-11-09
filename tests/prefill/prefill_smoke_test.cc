@@ -104,15 +104,24 @@ int main(int argc, char** argv) {
   const AttnMode env_mode = runtime::prefill::attn_mode();
   std::printf("attention mode: %s\n", runtime::prefill::attn_mode_name(env_mode));
 
+  // 3j: the engines' KV form (B70_KV_CACHE, the Engine's default) goes into every LIVE launch count, as the
+  // production counts take it (step_chunk_launches' `kv`): int8 widens each FA layer's raw K/V first, one launch a
+  // layer (+16 on Qwen3.8).
+  const runtime::KvCache kv = runtime::default_kv_cache();
+  const size_t widen = kv == runtime::KvCache::Int8 ? model::qwen38().fa_layers : 0;
+  std::printf("KV cache: %s (+%zu launches a chunk)\n", runtime::kv_cache_name(kv), widen);
+
   l0::Context ctx(0);
   {
   loader::LoadedModel model = loader::load(ctx, snap, kMaxLen);
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
+  CHECK(eng.kv_cache() == kv);
 
   // ---- 1. ruling R7: nothing prefill-shaped is allocated yet ---------------
   CHECK(eng.prefill_scratch() == nullptr);
   CHECK_EQ(eng.prefill_launches(), size_t(0));
-  CHECK_EQ(eng.buffers().persistent_bytes(), size_t(1240465536));
+  // int8 KV: 32 KiB of rows + 256 B of scales a position instead of 64 KiB (PersistentDims::sizes).
+  CHECK_EQ(eng.buffers().persistent_bytes(), size_t(kv == runtime::KvCache::Int8 ? 707788928 : 1240465536));
   CHECK_EQ(eng.step().kernel_count, size_t(774));
   std::printf("R7: persistent %zu B, decode list %zu launches / %zu modules, PrefillScratch"
               " not allocated\n",
@@ -133,9 +142,9 @@ int main(int argc, char** argv) {
   // this C: open-work 3b runs each int4 linear of a chunk this short as ONE pf_gemm_q4 launch).
   // If this ever differs, print both and re-derive the arithmetic from the walk.
   const size_t per_chunk =
-      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort);
+      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort, kv);
   const size_t head = runtime::prefill::kStepHeadLaunches;
-  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 1089 : 1265));
+  CHECK_EQ(per_chunk, size_t(env_mode == AttnMode::Flash ? 1089 : 1265) + widen);
   CHECK_EQ(head, size_t(5));
   CHECK_EQ(eng.prefill_launches(), per_chunk + head);
   std::printf("launch arithmetic: %zu L0 per chunk + %zu head = %zu for one chunk\n", per_chunk, head,
@@ -261,16 +270,16 @@ int main(int argc, char** argv) {
     CHECK_EQ(eng.pos(), C);
     const size_t l0_delta = eng.prefill_launches() - l0_before;
     const size_t l0_want =
-        runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C) +
+        runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C, kv) +
         runtime::prefill::kStepHeadLaunches;
     // Print the prediction and live count before asserting so a wrong launch count is visible.
     std::printf("L0 live: one chunk of %u ids advanced the L0 counter by %zu launches;"
                 " the arithmetic says %zu (%zu per chunk + %zu head)\n",
                 C, l0_delta, l0_want,
-                runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C),
+                runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C, kv),
                 runtime::prefill::kStepHeadLaunches);
     CHECK_EQ(l0_delta, l0_want);
-    const size_t flash_count = 1094;
+    const size_t flash_count = 1094 + widen;
     CHECK_EQ(l0_want, env_mode == AttnMode::Flash ? flash_count : flash_count + (C <= 256u ? 176 : 240));
   }
 
@@ -283,15 +292,15 @@ int main(int argc, char** argv) {
   CHECK_EQ(eng.pos(), uint32_t(2048));
   const size_t wide_delta = eng.prefill_launches() - wide_before;
   const size_t wide_want =
-      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048) +
+      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv) +
       runtime::prefill::kStepHeadLaunches;
   std::printf("L0 live: one chunk of 2048 ids advanced the L0 counter by %zu launches;"
               " the arithmetic says %zu (%zu per chunk + %zu head)\n",
               wide_delta, wide_want,
-              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048),
+              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv),
               runtime::prefill::kStepHeadLaunches);
   CHECK_EQ(wide_delta, wide_want);
-  CHECK_EQ(wide_want, size_t(env_mode == AttnMode::Flash ? 8454 : 9078));
+  CHECK_EQ(wide_want, size_t(env_mode == AttnMode::Flash ? 8454 : 9078) + widen);
   }   // the first engine is gone: the Review Focus below needs fresh ones
 
   // ---- 9. spec 6 Review Focus: a composed session after a flash session ----
@@ -299,7 +308,11 @@ int main(int argc, char** argv) {
   // flash, then reset() and composed. Engine 2, fresh: composed, then reset() and flash.
   // Each mode's two outputs (last logits, GDN state, Control) must be bitwise equal: the
   // first-in-a-fresh-engine run against the run that follows the other mode.
-  {
+  // 3j: int8 KV prefills through the flash attention only (attn.cc, require_kv8_path) - the composed
+  // attention is the bf16-KV reference, so this section is bf16's.
+  if (kv == runtime::KvCache::Int8) {
+    std::printf("review focus: skipped at int8 KV (the composed attention is the bf16-KV reference)\n");
+  } else {
     const std::vector<uint32_t> prose(kSeed, kSeed + kSeedLen);
     State flash1, comp1, comp2, flash2;
     {
