@@ -137,6 +137,15 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
   if (total > 0xFFFFFFFFull) throw std::invalid_argument("runtime::plan_slots: the slots' positions overflow 32 bits");
   const uint32_t seqs = static_cast<uint32_t>(lens.size());
   MemoryPlan p = plan(desc, static_cast<uint32_t>(total), mtp, model_bytes, path, dv, kv);
+  // 3j: int8 prefill's widening scratch holds one sequence's rows (one prefills at a time, slot-relative), so the
+  // engine sizes it at the longest slot (PrefillScratch::kv8_len), not at the sum plan() counted.
+  if (path.prefill && kv == KvCache::Int8) {
+    const uint32_t longest = *std::max_element(lens.begin(), lens.end());
+    const size_t extra = PrefillScratchDims::sizes(p.max_len, desc, path.chunk_cap).kv8_raw -
+                         PrefillScratchDims::sizes(longest, desc, path.chunk_cap).kv8_raw;
+    p.prefill_lazy -= extra;
+    p.prefill_scratch -= extra;
+  }
   p.slot_lens = lens;
   p.slot_state = SlotDims::sizes(desc, seqs, mtp).total();
   if (mtp) {   // the further slots' GDN states and hh rows: MtpBuffers at `seqs`

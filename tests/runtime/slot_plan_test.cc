@@ -8,7 +8,9 @@
 //      method (runtime::batch_memory) - plan_slots also counts the RoPE table at the summed
 //      positions (the engine loads one table at max_len = the sum; batch_memory's at the longest slot), the further
 //      slots' hh rows and the row lists' (MtpDims::hh_rows) and SlotDims' control blocks - and its total to §9.1's
-//      printed precision, plus int8 prefill's raw scratch at the summed positions (3e);
+//      printed precision. Int8 prefill's raw widening scratch is at the longest slot in both (3j: one sequence
+//      prefills at a time, so the engine sizes it at PrefillScratch::kv8_len; 3e had it at the summed positions,
+//      384 MiB more on this layout - 896 MiB vs 512 MiB);
 //   3. slot_layout's rule: slot 0 at the asked length, then 32768-position slots while they fit with the reserve, at
 //      most four in all, never a shorter one; the layouts of the bf16 and int8 KV forms at the asked lengths an agentic
 //      session would pick (printed: they are the startup lines the operator reads).
@@ -64,26 +66,34 @@ void check_decided_layout() {
   CHECK(p.slot_lens == lens);
   const runtime::BatchMemory b = runtime::batch_memory(q, runtime::main_and_short(4, 131072, 32768, true),
                                                        KvCache::Int8, kQwenInt8Weights, kMtpWeights);
-  // The engine sizes RoPE and its reusable raw-widening buffer at the summed positions.
+  // The engine sizes RoPE at the summed positions; its raw-widening buffer at the longest slot, as batch_memory (3j).
   const size_t rope = model::Qwen35::rope_table_bytes(229376) - model::Qwen35::rope_table_bytes(131072);
   const size_t hh = size_t(runtime::MtpDims::hh_rows(4) - runtime::MtpDims::hh_rows(1)) * q.hidden * 2;
   const size_t ctl = runtime::SlotDims::sizes(q, 4, true).controls;
-  const size_t raw = size_t{229376 - 131072} * 4 * 256 * 2 * 2;
   CHECK_EQ(ctl, size_t{10} * 128 + 3 * 256);
-  CHECK_EQ(p.total(), b.total() + rope + hh + ctl + raw);
+  CHECK_EQ(p.total(), b.total() + rope + hh + ctl);
+  // 3e sized the widening scratch at the sum: 384 MiB (98304 positions x 4 KiB) more than the longest slot needs.
+  CHECK_EQ(runtime::plan(q, 229376, true, kQwenInt8Weights + kMtpWeights, {}, {}, KvCache::Int8).prefill_lazy -
+               p.prefill_lazy,
+           size_t{402653184});
   CHECK_EQ(p.kv, b.kv - (runtime::MtpDims::sizes(229376, q, 0, KvCache::Int8).kv_k * 2));   // the head's KV is MTP's
   // The further slots' state: 3 x (4 GDN states + a ring) + the hh rows + the controls.
   CHECK_EQ(p.slot_state, size_t{3} * (4 * size_t{150994944} + 15728640) + hh + ctl);
   // §9.1: "total 29.10 GB, 1.93 GB spare" (l0-int8); on the l0 default 0.087 GB less (batch_rows_test's 29.01).
-  CHECK_NEAR(p.total() / kGB, 29.03 + double(size_t{229376} * 4 * 256 * 2 * 2) / kGB, 0.01);
+  CHECK_NEAR(p.total() / kGB, 29.03 + double(size_t{131072} * 4 * 256 * 2 * 2) / kGB, 0.01);
   std::printf("plan_slots 131072 + 3 x 32768, int8 KV, MTP: %.3f GB (batch_memory %.3f + RoPE %.3f + hh %.6f + "
-              "controls %zu B + raw %.3f GB), spare %.3f GB\n",
-              p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl, raw / kGB,
+              "controls %zu B), spare %.3f GB\n",
+              p.total() / kGB, b.total() / kGB, rope / kGB, hh / kGB, ctl,
               (double(kDevice - kReserve) - p.total()) / kGB);
   // Without MTP: one GDN state a further slot (SlotDims' states), no head KV, no hh rows.
   const runtime::MemoryPlan n = runtime::plan_slots(q, lens, false, kQwenInt8Weights, {}, {}, KvCache::Int8);
   CHECK_EQ(n.slot_state, size_t{3} * (size_t{150994944} + 15728640) + ctl);
-  CHECK_EQ(n.total() - n.slot_state, runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Int8).total());
+  // ... less the widening scratch's further 98304 positions (3j: at the longest slot, not the sum).
+  CHECK_EQ(n.total() - n.slot_state,
+           runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Int8).total() - size_t{402653184});
+  // bf16 KV widens nothing: plan() at the sum, unchanged by 3j.
+  const runtime::MemoryPlan nb = runtime::plan_slots(q, lens, false, kQwenInt8Weights, {}, {}, KvCache::Bf16);
+  CHECK_EQ(nb.total() - nb.slot_state, runtime::plan(q, 229376, false, kQwenInt8Weights, {}, {}, KvCache::Bf16).total());
 }
 
 void check_layout_rule() {
