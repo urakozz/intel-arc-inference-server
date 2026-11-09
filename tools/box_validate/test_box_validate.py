@@ -1446,6 +1446,12 @@ class DriverTest(unittest.TestCase):
         out = self.run_driver("--dry-run", "--only", "r65.serve", "--device", "1").stdout
         self.assertIn("WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=", out)
 
+    def test_row75_pp_sees_both_cards(self):
+        out = self.run_driver("--dry-run", "--only", "r75.pp", "--device", "1").stdout
+        self.assertRegex(out, r"env ZE_AFFINITY_MASK=0,1 B70_TRACE_DIR=\S+ ctest")
+        self.assertIn("--re '^pp_prefill_cap4096_test$'", out)
+        self.assertIn("lock: holds the whole box", out)
+
     def test_row36_sees_both_cards(self):
         # Row 36 (spec 22 P0): the run exports ZE_AFFINITY_MASK=$DEVICE (one card); every probe_offload command must
         # see both cards itself, as row 22's do - else its --dev 1 / both arms SKIP and the row measures one card.
