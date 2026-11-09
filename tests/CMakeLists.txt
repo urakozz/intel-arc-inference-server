@@ -58,6 +58,7 @@ foreach(_t A4_B1_S1_L0 A4_B1_S1_L1 A8_B1_S2_L0 A8_B1_S2_L1 A1_B2_S4_L0_SILU A4_B
 endforeach()
 add_dependencies(pf_gemm_test kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K5120_N16384_L1
                  kernel_pf_dequant_slab_K17408_N5120_L0)
+add_dependencies(pf_gemm_test kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU)
 add_test(NAME pf_gemm_test COMMAND pf_gemm_test)
 set_tests_properties(pf_gemm_test PROPERTIES TIMEOUT 1800)
 
@@ -895,6 +896,7 @@ set_tests_properties(golden_gate_i8head_test PROPERTIES
 # spec 2.1 S2/S3 the L0 backend's own binaries are in the list too: pf_gemm IS
 # its linears' and its attention's GEMM, and the slab dequants feed them.
 set(B70_PREFILL_KERNELS
+  kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
   kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
@@ -1622,6 +1624,36 @@ if(B70_KV8)
   add_dependencies(kv8_scale_test kernel_kv8_scale_test)
   add_test(NAME kv8_scale_test COMMAND kv8_scale_test)
   set_tests_properties(kv8_scale_test PROPERTIES LABELS kv8 TIMEOUT 60)
+
+  # 3f: production and probe loads versus the frozen reader.
+  foreach(_m 1 2 3 4 8)
+    set(_rows "")
+    if(_m EQUAL 8)
+      set(_rows BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SLOT=4)
+    endif()
+    foreach(_kind 0 1 2)
+      set(_name kv8_decode_probe${_kind}_M${_m})
+      add_ocloc_kernel(${_name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_decode_control.cl
+        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${_m} TGT=32 KV8_PROBE_KIND=${_kind} ${_rows}
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/probe/kv8_decode_loads.cl)
+      list(APPEND KV8_DECODE_PROBE_KERNELS kernel_${_name})
+    endforeach()
+  endforeach()
+  add_ocloc_kernel(kv8_decode_scale_prod SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_decode_scale_prod.cl
+    DEFINES CTRL_POS=0 CTRL_NACT=1 KV8_DEC=1 M=1 TGT=32 DEPENDS ${CMAKE_SOURCE_DIR}/src/kernels/kv8.cl)
+  add_executable(kv8_decode_bitwise_test kernels/kv8_decode_bitwise_test.cc)
+  target_include_directories(kv8_decode_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kv8_decode_bitwise_test PRIVATE b70_l0)
+  b70_target_kernel_dir(kv8_decode_bitwise_test)
+  add_dependencies(kv8_decode_bitwise_test ${KV8_DECODE_PROBE_KERNELS} kernel_kv8_decode_scale_prod
+    kernel_attn_v2_M1_T32_KV8 kernel_attn_v2_M2_T32_KV8 kernel_attn_v2_M3_T32_KV8
+    kernel_attn_v2_M4_T32_KV8)
+  if(TARGET kernel_attn_v2_M8_T32_KV8_ROWS)
+    target_compile_definitions(kv8_decode_bitwise_test PRIVATE B70_KV8_TEST_ROWS=1)
+    add_dependencies(kv8_decode_bitwise_test kernel_attn_v2_M8_T32_KV8_ROWS)
+  endif()
+  add_test(NAME kv8_decode_bitwise_test COMMAND kv8_decode_bitwise_test)
+  set_tests_properties(kv8_decode_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 600)
 
   # The gates of spec 12 §4 over the int8 cache: the SAME binaries and command lines as the
   # bf16 registrations they twin, with B70_KV_CACHE=int8 (runtime::default_kv_cache - the

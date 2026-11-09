@@ -150,7 +150,8 @@ int main(int argc, char** argv) {
   // (C <= 256, this test's own shape) and 9073 at the C = 2048 the bench and the server run
   // (1 + 48 x 135 + 16 x (130 + 4 x 8), derived from src/runtime/prefill/step.cc's closing
   // block). Open-work 3b: at C <= 192 every int4 linear is one launch (1 + 48 x 19 + 16 x 22 =
-  // 1265 composed at this C), at 193..384 all but gate||up.
+  // 1265 composed at this C). Open-work 3d's SLM gate/up epilogue keeps one launch through
+  // 320 rows; above that, through 384 rows, every linear but gate||up remains fused.
   runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
   CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort),
            size_t(1265));
@@ -160,9 +161,10 @@ int main(int argc, char** argv) {
   // 16 x (attn_chunk_launches_composed(C) - 1): 8449 on L0 and 8705 on l0-int8 at C = 1000
   // (drop 368) and 2048 (drop 624), 1 + 48 x 135 + 16 x 123 (derived); at C = 64 (drop 176)
   // l0-int8 is 8705 and L0 1089 (open-work 3b: 1 + 48 x 19 + 16 x 11, one pf_gemm_q4 launch
-  // a linear), at C = 300 L0 5377 (gate||up back on its 68 slab launches: 1 + 48 x 86 + 16 x 78).
+  // a linear). Open-work 3d keeps L0 at 1089 through C = 320 (the SLM gate/up epilogue is
+  // one launch); at C = 321 it is 5377 (gate||up's 68 slab launches: 1 + 48 x 86 + 16 x 78).
   for (runtime::PrefillBackend b : {runtime::PrefillBackend::L0, runtime::PrefillBackend::L0Int8})
-    for (uint32_t C : {kShort, 300u, 1000u, 2048u}) {
+    for (uint32_t C : {kShort, 250u, 300u, 320u, 321u, 1000u, 2048u}) {
       runtime::prefill::set_attn_mode_for_test(AttnMode::Composed);
       const size_t composed = runtime::prefill::step_chunk_launches(model::qwen38(), b, C);
       runtime::prefill::set_attn_mode_for_test(AttnMode::Flash);
@@ -173,8 +175,8 @@ int main(int argc, char** argv) {
                   runtime::prefill_backend_name(b), C, composed, flash, drop);
       CHECK_EQ(composed - flash, drop);
       const bool l0 = b == runtime::PrefillBackend::L0;
-      CHECK_EQ(flash, size_t(!l0 ? 8705 : C == kShort ? 1089 : C == 300u ? 5377 : 8449));
-      CHECK_EQ(drop, size_t(C == kShort ? 176 : C == 300u ? 240 : C == 1000u ? 368 : 624));
+      CHECK_EQ(flash, size_t(!l0 ? 8705 : C <= 320u ? 1089 : C == 321u ? 5377 : 8449));
+      CHECK_EQ(drop, size_t(C <= 256u ? 176 : C <= 321u ? 240 : C == 1000u ? 368 : 624));
     }
   runtime::prefill::set_attn_mode_for_test(env_mode);
   // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
@@ -251,24 +253,26 @@ int main(int argc, char** argv) {
   // at this C in Flash mode, 1265 + 5 composed, derived from src/runtime/prefill/step.cc's closing block). The delta
   // is taken rather than the absolute, because `prefill_launches()` is cumulative
   // over the engine's whole life and sections 2-7 already spent some of it.
-  const size_t l0_before = eng.prefill_launches();
-  eng.set_prefill_backend(runtime::PrefillBackend::L0);
-  eng.reset();
-  eng.prefill(ids(kShort));
-  CHECK_EQ(eng.pos(), kShort);
-  const size_t l0_delta = eng.prefill_launches() - l0_before;
-  const size_t l0_want =
-      runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort) +
-      runtime::prefill::kStepHeadLaunches;
-  // Printed BEFORE the assertion so a mismatch shows both numbers rather than only
-  // the macro's text: the formula is a prediction about the walk, not a target.
-  std::printf("L0 live: one chunk of %u ids advanced the L0 counter by %zu launches;"
-              " the arithmetic says %zu (%zu per chunk + %zu head)\n",
-              kShort, l0_delta, l0_want,
-              runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort),
-              runtime::prefill::kStepHeadLaunches);
-  CHECK_EQ(l0_delta, l0_want);
-  CHECK_EQ(l0_want, size_t(env_mode == AttnMode::Flash ? 1094 : 1270));   // open-work 3b: one launch a linear
+  for (uint32_t C : {kShort, 250u, 300u}) {
+    const size_t l0_before = eng.prefill_launches();
+    eng.set_prefill_backend(runtime::PrefillBackend::L0);
+    eng.reset();
+    eng.prefill(ids(C));
+    CHECK_EQ(eng.pos(), C);
+    const size_t l0_delta = eng.prefill_launches() - l0_before;
+    const size_t l0_want =
+        runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C) +
+        runtime::prefill::kStepHeadLaunches;
+    // Print the prediction and live count before asserting so a wrong launch count is visible.
+    std::printf("L0 live: one chunk of %u ids advanced the L0 counter by %zu launches;"
+                " the arithmetic says %zu (%zu per chunk + %zu head)\n",
+                C, l0_delta, l0_want,
+                runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, C),
+                runtime::prefill::kStepHeadLaunches);
+    CHECK_EQ(l0_delta, l0_want);
+    const size_t flash_count = 1094;
+    CHECK_EQ(l0_want, env_mode == AttnMode::Flash ? flash_count : flash_count + (C <= 256u ? 176 : 240));
+  }
 
   // The shape that S3 actually changed: C = 2048 is eight QK^T row blocks, so the
   // same counter must advance by 9073 + 5. One chunk, so the ragged-tail arithmetic is

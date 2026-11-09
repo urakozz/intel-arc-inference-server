@@ -336,9 +336,9 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 //
 // K: sub-group s owns position p; lane l's 16 elements are dims l + 16 t (two uchar8
 //    sub-group block reads, attn_v2.cl's order), dequantised as float(q8) * f16f(scale[p]).
-// V: work-item d's 16 values of the wave, dim d of positions p0 .. p0 + 15, plain loads
-//    (lanes read 16 consecutive bytes), zero past `last` (the 2D read's surface height in
-//    the bf16 kernel), dequantised the same way.
+// V: packed 16-bit 2D reads, with each lane selecting its signed byte. One scale
+//    gather per lane supplies the wave through subgroup broadcasts; rows past
+//    `last` remain zero. Dequantisation and all arithmetic orders are unchanged.
 // The online softmax and its orders are attn_v2.cl's, unchanged.
 // ---------------------------------------------------------------------------
 #ifndef M
@@ -374,6 +374,11 @@ inline uint v2_ppw(uint len) {
   return max(64u, p);
 }
 
+// Writer scales are finite fp16; native widening preserves every stored bit.
+inline float kv8_decode_scale(__global const ushort* p, size_t index) {
+  return vload_half(index, (__global const half*)p);
+}
+
 // K stays int8 in registers with its row's scale beside it (16 bytes + one float per lane,
 // where 16 dequantised floats would be 16 GRF); the score dot dequantises at use, and since
 // float(q8) * scale is exact the operand is the same value either way.
@@ -382,7 +387,7 @@ inline void load_k8(__global const char* restrict kv_k, __global const ushort* r
   if (ok) {   // uniform within the sub-group
     const size_t r = (size_t)p * KV_HEADS + j;
     __global const uchar* row = (__global const uchar*)(kv_k + r * HD);
-    *ksc = kv8_f16f(k_scale[r]);
+    *ksc = kv8_decode_scale(k_scale, r);
     const uchar8 a = intel_sub_group_block_read_uc8(row);
     const uchar8 b = intel_sub_group_block_read_uc8(row + 128);
     kq[0] = as_char(a.s0);  kq[1] = as_char(a.s1);  kq[2] = as_char(a.s2);  kq[3] = as_char(a.s3);
@@ -397,14 +402,21 @@ inline void load_k8(__global const char* restrict kv_k, __global const ushort* r
 
 inline void load_v8(__global const char* restrict kv_v, __global const ushort* restrict v_scale,
                     uint p0, uint j, uint lid, uint last, float* vreg) {
+  // A lane loads one packed pair per position. Broadcast the pair for dim lid,
+  // then select its signed byte. Overlapping blocks stay within the head's
+  // bounded surface; lanes past the last row read zero.
+  ushort packed[WAVE_P];
+  const uint lane = lid & 15u;
+  intel_sub_group_2d_block_read_16b_16r16x1c((__global void*)(kv_v + (size_t)j * HD),
+      HD, last + 1, KV_HEADS * HD, (int2)((int)((lid >> 4) * 8u), (int)p0), packed);
+  const uint p = p0 + lane;
+  const float scale = p <= last ? kv8_decode_scale(v_scale, (size_t)p * KV_HEADS + j) : 0.0f;
+#pragma unroll
   for (uint s = 0; s < WAVE_P; ++s) {
-    const uint p = p0 + s;
-    if (p <= last) {
-      const size_t r = (size_t)p * KV_HEADS + j;
-      vreg[s] = (float)kv_v[r * HD + lid] * kv8_f16f(v_scale[r]);
-    } else {
-      vreg[s] = 0.0f;   // never loaded: an unwritten slot cannot turn 0 x into a NaN
-    }
+    const uint pair = intel_sub_group_shuffle((uint)packed[s], lane >> 1);
+    const char value = as_char((uchar)(pair >> ((lane & 1u) * 8u)));
+    const float sc = intel_sub_group_shuffle(scale, s);
+    vreg[s] = p0 + s <= last ? (float)value * sc : 0.0f;
   }
 }
 
