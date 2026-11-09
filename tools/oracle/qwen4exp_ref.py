@@ -314,7 +314,7 @@ def _cast(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return t.to(dtype) if t.is_floating_point() and t.dtype != dtype else t
 
 
-def _dequant(ck: Ckpt, base: str, checked: set) -> torch.Tensor:
+def _dequant(ck: Ckpt, base: str, checked: set, dtype=torch.bfloat16) -> torch.Tensor:
     """`base`.{qweight, scales, qzeros} -> the nn.Linear weight [N][K] bf16: bf16(float(q - 8) x float(scale)),
     the group size from the scales' shape (64 ours, 128 Intel's experts). qzeros must be the sym constant."""
     qw, sc = ck.get(base + ".qweight"), ck.get(base + ".scales")
@@ -323,7 +323,12 @@ def _dequant(ck: Ckpt, base: str, checked: set) -> torch.Tensor:
         qz = ck.get(base + ".qzeros")
         if not bool((qz == 0x77777777).all()):
             die(f"{base}.qzeros is not 0x77777777: not symmetric int4 (the engine's rule is (q - 8) x scale)")
-    out = _stream.dequant_t(qw, sc, g, check=base not in checked)
+    if dtype == torch.float32:
+        # Keep the int4 x scale product: widening dequant_t's bf16 output loses the reference's precision.
+        q = ((qw.unsqueeze(1) >> (4 * torch.arange(8).view(1, 8, 1))) & 15).reshape(-1, qw.shape[1])
+        out = ((q.float() - 8).reshape(sc.shape[0], g, -1) * sc.float().unsqueeze(1)).flatten(0, 1).t().contiguous()
+    else:
+        out = _stream.dequant_t(qw, sc, g, check=base not in checked)
     checked.add(base)
     return out
 
@@ -336,7 +341,7 @@ def layer_state(ck: Ckpt, keys, dtype: torch.dtype, checked: set) -> dict[str, t
             continue
         if k.endswith(".qweight"):
             b = k[: -len(".qweight")]
-            sd[model_name(b) + ".weight"] = _cast(_dequant(ck, b, checked), dtype)
+            sd[model_name(b) + ".weight"] = _cast(_dequant(ck, b, checked, dtype), dtype)
         else:
             sd[model_name(k)] = _cast(ck.get(k), dtype)
     return sd
@@ -390,7 +395,7 @@ class LazyExperts:
             dn = ck.get_rows(b + "down_proj", e, e + 1)[0]
             return _cast(gu, self.dtype), _cast(dn, self.dtype)
         if f"{b}{e}.gate_proj.qweight" in ck:
-            g, u, d = (_dequant(ck, f"{b}{e}.{s}", self.checked) for s in SHARED_LINEARS)
+            g, u, d = (_dequant(ck, f"{b}{e}.{s}", self.checked, self.dtype) for s in SHARED_LINEARS)
         elif f"{b}{e}.gate_proj.weight" in ck:
             g, u, d = (ck.get(f"{b}{e}.{s}.weight") for s in SHARED_LINEARS)
         else:
@@ -1025,15 +1030,68 @@ def auto_chunk(n: int, chunk: int) -> int:
     return 0 if n <= 4096 else 2048
 
 
+class StateDump:
+    """Prompt-boundary state in engine order; floats stay f32, rings use absolute position modulo capacity.
+
+    HF retains only the PLE convolution's live history. Capture norm_conv's rows to preserve the engine's
+    entire ring; GDN's dead conv slots are zero, as in qwen4exp_prefill_test's snap().
+    """
+
+    def __init__(self, model):
+        self.ple = {}
+        self.hooks = []
+        for i, layer in enumerate(model.model.layers):
+            if layer.ple is not None:
+                def capture(_m, _a, out, i=i):
+                    old = self.ple.get(i)
+                    rows = out.detach()[0].float()
+                    self.ple[i] = (rows if old is None else torch.cat([old, rows]))[-16:].clone()
+                self.hooks.append(layer.ple.norm_conv.register_forward_hook(capture))
+
+    def tensors(self, cache, tc, ids):
+        n = len(ids)
+        out = {"prompt.ids": torch.tensor(ids, dtype=torch.int32)}
+
+        def ring(rows, size):
+            r = torch.zeros((size, *rows.shape[1:]), dtype=rows.dtype)
+            start = n - rows.shape[0]
+            for j, row in enumerate(rows):
+                r[(start + j) % size] = row
+            return r.contiguous()
+
+        for i, layer in enumerate(cache.layers):
+            b = f"state.L{i}."
+            if tc.layer_types[i] == "linear_attention":
+                out[b + "gdn"] = layer.recurrent_states[0][0].float().clone().contiguous()
+                live = layer.conv_states[0][0, :, -min(n, 3):].t().float()
+                out[b + "conv"] = ring(live, 16)
+            else:
+                out[b + "k"] = layer.keys[0].transpose(0, 1).flatten(1).float().contiguous()
+                out[b + "v"] = layer.values[0].transpose(0, 1).flatten(1).float().contiguous()
+                out[b + "ckeys"] = layer._q4_blocks.float().clone().contiguous()
+                out[b + "tail"] = ring(layer.indexer_keys[0, -min(n, 8):].float(), 8)
+            if i in self.ple:
+                out[b + "ple"] = ring(self.ple[i], 16)
+                out[b + "ple_ids"] = ring(torch.tensor(ids[-16:], dtype=torch.int32), 16)
+        for h in self.hooks:
+            h.remove()
+        return out
+
+
 def cmd_run(a) -> None:
     from safetensors.torch import save_file
     t0 = time.time()
     torch.manual_seed(0)
     print(f"torch {torch.__version__}, transformers {PINNED_TRANSFORMERS}, intra-op threads {torch.get_num_threads()} "
           f"(OMP_NUM_THREADS={os.environ.get('OMP_NUM_THREADS', 'unset')})")
-    tc = text_config(a.snapshot, a.layers, a.experts)
+    dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[a.dtype]
+    tc = text_config(a.snapshot, a.layers, a.experts, dtype=dtype)
     require_cacheable(tc)
     ids = read_ids(a.prompt)
+    if a.cycle:
+        if not ids or a.cycle < 1:
+            die("--cycle needs a nonempty prompt and a positive length")
+        ids = [ids[i % len(ids)] for i in range(a.cycle)]
     T = len(ids)
     if not 1 <= T <= a.max_prompt:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
@@ -1046,7 +1104,8 @@ def cmd_run(a) -> None:
           f"{tc.num_experts} experts top-{tc.num_experts_per_tok}, hidden {tc.hidden_size} x {tc.hc_count} streams, "
           f"attn eager, experts {tc._experts_implementation}; PLE {ple.kind}; prompt {T} ids, chunk {chunk or 'whole'}; "
           f"activations from row {act_from}, logits from row {log_from}; built {time.time() - t0:.1f}s", flush=True)
-    rec = Recorder(model, tc, act_from=act_from, want_scores=True)
+    rec = Recorder(model, tc, act_from=act_from, acts=not a.state_dump, want_scores=True)
+    state_dump = StateDump(model) if a.state_dump else None
     rows, nll = [], torch.empty(max(T - 1, 0))
     ids_t = torch.tensor(ids)
 
@@ -1062,6 +1121,7 @@ def cmd_run(a) -> None:
                 rows.append(lf[max(0, log_from - ra):].clone())
     t1 = time.time()
     cache = forward_chunks(model, ids, chunk, rec=rec, on_logits=on_logits)
+    state = state_dump.tensors(cache, tc, ids) if state_dump else {}
     print(f"prompt forward {time.time() - t1:.1f}s ({lazy.filled} expert dequants, {ple.reads} PLE rows)", flush=True)
     tokens: list[int] = []
     t2 = time.time()
@@ -1090,12 +1150,35 @@ def cmd_run(a) -> None:
                 die(f"{k}.L{i} has {t[f'{k}.L{i}'].shape[0]} rows, expected {n_rows}")
     if t["ple.ids"].shape[0] != n_rows:
         die(f"ple.ids has {t['ple.ids'].shape[0]} rows, expected {n_rows}")
-    if not torch.isfinite(t[f"H.L{tc.num_hidden_layers - 1}"].float()).all():
+    if not a.state_dump and not torch.isfinite(t[f"H.L{tc.num_hidden_layers - 1}"].float()).all():
         die("the last layer's output has NaN/Inf - the weights are wrong")
     for line in gap_summary(t, tc):
         print(line)
+    row0 = ((T - 1) // (chunk or T)) * (chunk or T)
+    if a.state_dump:
+        # Keep only the final prompt chunk's decisions; generation logits are teacher-forced on tokens below.
+        for i in range(tc.num_hidden_layers):
+            for k in ("route.ids", "route.w", "route.gap", "route.top.ids", "route.top.p"):
+                name = f"{k}.L{i}"
+                t[name] = t[name][row0:T].clone()
+            name = f"qsa.sel.L{i}"
+            if name in t:
+                first = max(0, tc.indexer_budget + tc.indexer_compress_ratio - 1)
+                for k in ("qsa.sel", "qsa.score"):
+                    key = f"{k}.L{i}"
+                    if key in t:
+                        t[key] = t[key][max(0, row0 - first):max(0, T - first)].clone()
+                t[f"qsa.gap.L{i}"] = t[f"qsa.gap.L{i}"][row0:T].clone()
+        t["logits"] = t["logits"][T - 1 - log_from:].clone()
+        t["ple.ids"] = t["ple.ids"][row0:T].clone()
+        t["state.spec"] = torch.tensor([1, int(dtype == torch.float32), tc.num_hidden_layers, T, row0, a.gen],
+                                       dtype=torch.int32)
+        t.update(state)
+        log_from = T - 1
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
             "gen": str(a.gen), "layers": str(tc.num_hidden_layers), "chunk": str(chunk), "ple": ple.kind,
+            "dtype": a.dtype, "state_format": "qwen4exp-prefill-v1" if a.state_dump else "",
+            "route_row0": str(row0),
             "act_row0": str(act_from), "logits_row0": str(log_from), "qsa_row0": str(QSA_DENSE_ROWS),
             "attn_implementation": "eager", "experts_implementation": tc._experts_implementation,
             "transformers": PINNED_TRANSFORMERS, "torch": torch.__version__,
@@ -1413,6 +1496,9 @@ def main() -> None:
     r.add_argument("--max-prompt", type=int, default=65536)
     r.add_argument("--logits-tail", type=int, default=1024, help="keep logits from row T - L (-1: all)")
     r.add_argument("--act-tail", type=int, default=256, help="keep H / mixer / moe from row T - A (-1: all)")
+    r.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
+    r.add_argument("--cycle", type=int, default=0, help="cycle prompt ids to this many positions (prefill gate: 4500)")
+    r.add_argument("--state-dump", action="store_true", help="save prompt-boundary state and last-chunk decisions")
     p = sub.add_parser("ppl")
     common(p)
     p.add_argument("--text", action="append", default=[], help="NAME=FILE (tokenized by the snapshot's tokenizer.json)")
