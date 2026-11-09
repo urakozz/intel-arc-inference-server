@@ -2026,7 +2026,7 @@ rownote 33 "Bars PROPOSED (spec 18c's family; the tests print the distributions)
 rownote 33 "Data: r33.prefill / r33.golden need the synthetic checkpoints and their golden sets (r31.synth, r32.oracle_synth); r33.golden_real needs 21a's --layers 18 set (r30.golden_layers) and the PLE int8 file (r31.ple_convert); r33.pp needs two GPUs (after r22.p1). With prefill planned Intel's forms fit 18 layers on one card (max_len auto 70144) and 37 on two at 32768 (derived) - 38 does not fit beside the 1.49 GB prefill scratch a device: the real two-card runs use --layers 37."
 stage r33.host 33 default cpu - - "host: qwen4exp_pf_ref_test (the 512-expert sort and its adversaries == pf_moe_ref::sort, row independence, the combine == 21c's down chain, dense_rows, the sparse attention's tiled fp64 walk == the direct softmax and the eager chain == q4ref's, the indexer and the PLE over chunks == decode's M = 1 chains with their rings), qwen4exp_pf_variant_names_test, qwen4exp_plan_test (358 / 361 / 360 launches at --layers 4, 3944 / 3968 at 48, the 1.49 GB prefill scratch, N with prefill 18 / 37)"
 st_r33_host() {
-  run_tests '^(qwen4exp_pf_ref_test|qwen4exp_pf_variant_names_test|qwen4exp_plan_test)$'
+  run_tests '^(qwen4exp_pf_ref_test|qwen4exp_pf_variant_names_test|qwen4exp_plan_test|qwen4exp_f32_judge_test)$'
   jgrab host '^qwen4exp_(pf_ref|pf_variant_names|plan)_test$' 'sort:|combine:|dense_rows:|sparse|indexer|PLE|21d:|OK'
   finish
 }
@@ -2050,9 +2050,9 @@ st_r33_reject() {
 }
 stage r33.prefill 33 default card oracle_q4exp_synth r33.k1,r32.k3 "F4 on prefill, one card: qwen4exp_prefill_synth_{ours,intel}_test, _eager_test (4500 ids of q4exp_4k: chunks at 0 (dense), 2048 (3 dense rows), 4096 (sparse)) - launches = prefill_chunk_launches per chunk + 6, plan == allocation, two immediate prefills bitwise, chunks of 64 bitwise (16 printed), Review Focus 5 (state, routes, selections and tokens against decode's fill, per layer), the injected run chunked == whole; prefill_split_qwen4exp_test (splits at 64 / 2048 bitwise, 2051 / 4097 within the bars)"
 st_r33_prefill() {
-  run_tests '^(qwen4exp_prefill_synth_(ours|intel|eager)_test|prefill_split_qwen4exp_test)$' qwen4exp '' \
+  run_tests '^(qwen4exp_prefill_synth_(ours|intel|eager)_test|qwen4exp_prefill_intel_test|prefill_split_qwen4exp_test)$' qwen4exp '' \
     "${B70_Q4_TIE_TOL:+B70_Q4_TIE_TOL=$B70_Q4_TIE_TOL}"
-  jgrab prefill '^(qwen4exp_prefill_synth|prefill_split_qwen4exp)' 'walk|F4|chunks|median|p01|routing|tokens|injected|split at|OK|FAIL'
+  jgrab prefill '^(qwen4exp_prefill_synth|qwen4exp_prefill_intel|prefill_split_qwen4exp)' 'walk|F4|chunks|median|p01|routing|tokens|injected|split at|f32|OK|FAIL'
   finish
 }
 stage r33.golden 33 default card oracle_q4exp_synth_golden r33.prefill "F3 on prefill, the synthetic golden sets: qwen4exp_golden_prefill_synth_{ours,intel}_test, _c16, _i8head, _inject (the reference's selections through set_prefill_injector: every determined row), _eager - the tie-aware token gate from row T - 1, the routing diagnostic and gate S on the last chunk's rows"
@@ -2075,7 +2075,7 @@ st_r33_pp() {
   run_tests '^(qwen4exp_prefill_pp_test|prefill_split_qwen4exp_pp_test|qwen4exp_golden_prefill_synth_pp_test|qwen4exp_prefill_intel_pp_test)$' \
     '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^(qwen4exp_prefill_pp|prefill_split_qwen4exp_pp|qwen4exp_golden_prefill_synth_pp|qwen4exp_prefill_intel_pp)' \
-    'pp:|P4|split at|gate:|walk|median|OK|FAIL|SKIP'
+    'pp:|P4|split at|gate:|walk|median|f32|OK|FAIL|SKIP'
   finish
 }
 stage r33.cli 33 default gpu oracle_q4exp_synth r33.pp "CLI: b70-decode <ours synthetic> --layers 4 --ids q4exp_4k.ids --n 32 --prefill on one card against --parallel pp (the same ids) and against the decode-only run (a difference judged by the tie rule); --prefill-chunk 1000; --bench --prefill-length 4096 (the pp row); --layers auto --max-len auto with --prefill (the prefill scratch planned)"

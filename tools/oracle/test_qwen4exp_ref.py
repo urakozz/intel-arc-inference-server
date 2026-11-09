@@ -723,14 +723,21 @@ def test_fp32_state_dump():
     p = os.path.join(d, "p.ids")
     open(p, "w").write("3 7 11 255 9")
     dumps = {}
-    for dtype in ("bf16", "fp32"):
-        out = os.path.join(d, dtype + ".safetensors")
+    for dtype, head in (("bf16", "bf16"), ("fp32", "bf16"), ("fp32", "int8")):
+        out = os.path.join(d, dtype + "-" + head + ".safetensors")
         ref.cmd_run(Namespace(snapshot=d, layers=4, experts="eager", ple="bf16", prompt=p, out=out,
-                              dtype=dtype, cycle=35, state_dump=True, gen=3, max_prompt=100,
+                              dtype=dtype, lm_head=head, vocab_used=7 if head == "int8" else None,
+                              cycle=35, state_dump=True, gen=3, max_prompt=100,
                               chunk=16, act_tail=0, logits_tail=1))
-        t = dumps[dtype] = load_file(out)
+        t = load_file(out)
+        if head == "bf16":
+            dumps[dtype] = t
         with safe_open(out, framework="pt") as h:
             assert h.metadata()["dtype"] == dtype
+            assert h.metadata()["lm_head"] == head
+        used = 7 if head == "int8" else 256
+        assert t["state.spec"].tolist() == [1, int(dtype == "fp32"), 4, 35, 32, 3, int(head == "int8"), 0, used]
+        assert all(0 <= int(v) < used for v in t["tokens"])
         expected = {"state.L3.k": (35, 32), "state.L3.v": (35, 32),
                     "state.L3.ckeys": (8, 32), "state.L3.tail": (8, 32),
                     "state.L1.ple": (16, 128), "state.L1.ple_ids": (16,),
@@ -749,15 +756,21 @@ def test_fp32_state_dump():
         assert torch.count_nonzero(t["state.L0.conv"][3:]) == 0
         tc = ref.text_config(d, experts="eager", dtype=BF if dtype == "bf16" else F32)
         pm, _, _ = ref.build_streamed(d, tc)
+        if head == "int8":
+            pm.lm_head.weight = torch.nn.Parameter(ref._load("int8_sim").int8_head_weight(pm.lm_head.weight),
+                                                   requires_grad=False)
         cap = []
         h = pm.model.layers[1].ple.norm_conv.register_forward_hook(lambda _m, _a, o: cap.append(o[0].clone()))
-        cache = ref.forward_chunks(pm, t["prompt.ids"].tolist(), 16, logits_to_keep=1)
+        lg = []
+        cache = ref.forward_chunks(pm, t["prompt.ids"].tolist(), 16,
+                                   on_logits=lambda _r, v: lg.append(v.detach().float()))
         h.remove()
         assert torch.equal(t["state.L0.gdn"], cache.layers[0].recurrent_states[0][0].float())
         rows = torch.cat(cap).float()
         for pos in range(19, 35):
             assert torch.equal(t["state.L1.ple"][pos % 16], rows[pos])
         assert torch.equal(t["state.L3.k"], cache.layers[3].keys[0].transpose(0, 1).flatten(1).float())
+        assert torch.equal(t["logits"][0], lg[-1][-1])
     for k, f in dumps["fp32"].items():
         if k.startswith("state.") and f.dtype == F32:
             b = dumps["bf16"][k]

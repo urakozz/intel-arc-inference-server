@@ -3137,6 +3137,10 @@ target_include_directories(qwen4exp_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(qwen4exp_ref_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_ref_test COMMAND qwen4exp_ref_test)
 set_tests_properties(qwen4exp_ref_test PROPERTIES LABELS qwen4exp TIMEOUT 600)
+add_executable(qwen4exp_f32_judge_test runtime/qwen4exp_f32_judge_test.cc)
+target_include_directories(qwen4exp_f32_judge_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME qwen4exp_f32_judge_test COMMAND qwen4exp_f32_judge_test)
+set_tests_properties(qwen4exp_f32_judge_test PROPERTIES LABELS qwen4exp)
 if(B70_Q4EXP)
   # Task 2: every binary a Qwen3.8-Flash-Next decode list binds, any dense arm / head / attention / PLE scale form
   # (src/kernels/CMakeLists.txt's spec 21c block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
@@ -3304,8 +3308,19 @@ if(B70_Q4EXP)
   # beside the prefill scratch)
   add_test(NAME qwen4exp_prefill_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2)
   add_test(NAME prefill_split_qwen4exp_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split pp2:2)
+  foreach(n 18 37)
+    set(_q4judge${n} "")
+    set(_q4ref "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-f32-L${n}/q4exp_4k.state.safetensors")
+    if(EXISTS "${_q4ref}")
+      set(_q4judge${n} "judge:${_q4ref}")
+    endif()
+  endforeach()
+  add_test(NAME qwen4exp_prefill_intel_test COMMAND qwen4exp_prefill_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4ids} all
+    layers:18 int8 ${_q4judge18})
+  set_tests_properties(qwen4exp_prefill_intel_test
+    PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   add_test(NAME qwen4exp_prefill_intel_pp_test COMMAND qwen4exp_prefill_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4ids} all pp2
-    layers:37 int8)
+    layers:37 int8 ${_q4judge37})
   set_tests_properties(qwen4exp_prefill_pp_test prefill_split_qwen4exp_pp_test qwen4exp_prefill_intel_pp_test
     PROPERTIES LABELS "checkpoint;qwen4exp;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   # F3 on prefill: 21c's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on

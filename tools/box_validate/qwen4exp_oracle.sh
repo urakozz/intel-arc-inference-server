@@ -76,6 +76,17 @@ SITE=oracle-out-q4exp-site
 case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; curve|project) need="${Q4_REF_MIN_GB:-8}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
 case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt|synth) model="$ORIG" ;; *) model="$INTEL" ;; esac
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
+if [ "$mode" = intel-f32 ]; then
+  snapdir=""
+  if [ -r "$hf/hub/$model/refs/main" ]; then
+    snapdir="$hf/hub/$model/snapshots/$(cat "$hf/hub/$model/refs/main")"
+    [ -f "$snapdir/config.json" ] || snapdir=""
+  else
+    for candidate in "$hf/hub/$model"/snapshots/*; do
+      [ -f "$candidate/config.json" ] && { snapdir="$candidate"; break; }
+    done
+  fi
+fi
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "qwen4exp_oracle: $mode${nl:+ $nl} -> $data; checkpoint $model (${snapdir:-absent}); MemAvailable ${avail} GB (need $need)"
 
@@ -86,6 +97,13 @@ if [ -z "$ple" ]; then
     ple="int8:/hf/hub/$model/snapshots/$(basename "$snapdir")-ple-int8"
   else
     ple=bf16
+  fi
+fi
+if [ "$mode" = intel-f32 ]; then
+  engine_ple="int8:/hf/hub/$model/snapshots/$(basename "${snapdir:-absent}")-ple-int8"
+  if [ -z "$snapdir" ] || [ ! -s "${snapdir%/}-ple-int8/model.safetensors.index.json" ] || [ "$ple" != "$engine_ple" ]; then
+    echo "qwen4exp_oracle: intel-f32 needs the checkpoint's sibling int8 PLE file (the engine's table)" >&2
+    exit 2
   fi
 fi
 
@@ -131,6 +149,11 @@ rc=0
 # in_box <command> - one oracle-image run with the 5.19.0 site first on PYTHONPATH ($SNAP = the checkpoint).
 in_box() {
   local cmd="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && $1"
+  if [ "$mode" = intel-f32 ]; then
+    if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=$snapdir tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
+    ORACLE_SNAP="$snapdir" tools/oracle/run_in_container.sh "$cmd"
+    return
+  fi
   if [ "$mode" = curve ] || [ "$mode" = project ]; then   # no checkpoint read: the config-only stand-in satisfies run_in_container's $SNAP
     if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=${snapdir%/} tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
     ORACLE_SNAP="${snapdir%/}" tools/oracle/run_in_container.sh "$cmd"
@@ -198,7 +221,7 @@ case "$mode" in
       echo "qwen4exp_oracle: f32 L$nl, 4500 cycled ids, 32 greedy tokens, ORACLE_MEMORY=64g"
       if ORACLE_MEMORY=64g in_box "python3 tools/oracle/qwen4exp_ref.py run \"\$SNAP\" \
             --prompt tests/golden/prompts/q4exp_4k.ids --out /ws/$part/q4exp_4k.state.safetensors \
-            --dtype fp32 --layers $nl --cycle 4500 --state-dump --chunk 2048 --gen 32 \
+            --dtype fp32 --lm-head int8 --layers $nl --cycle 4500 --state-dump --chunk 2048 --gen 32 \
             --act-tail 0 --logits-tail 1 --ple $ple > /ws/$part/q4exp_4k.log 2>&1"; then
         if [ "$dry" != 1 ]; then
           mv -f "$part/q4exp_4k.log" "$out/q4exp_4k.log"
