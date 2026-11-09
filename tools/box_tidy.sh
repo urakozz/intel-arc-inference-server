@@ -18,10 +18,10 @@ _box_env="$PWD/tools/box.env"
 dry=0
 [ "${1:-}" = --dry-run ] && dry=1
 # The local branches, as the box tree names tools/box_dir.sh gives them (a branch's slashes become dashes).
-branches=$(git for-each-ref --format='%(refname:short)' refs/heads | tr '/' '-' | tr '\n' ' ')
+branches=$(git for-each-ref --format='%(refname:short)' refs/heads | tr '/' '-' | paste -sd, -)   # one word: ssh joins its arguments
 ssh -o ConnectTimeout=20 "$BOX" bash -s -- "$dry" "${KEEP_G0:-2}" "$branches" <<'REMOTE' | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g'
 set -u
-dry=$1 keep=$2 branches=" $3 "
+dry=$1 keep=$2 branches=" $(echo "$3" | tr , ' ') "
 keepers=" cpu-refs hf-tier validate-reuse main "
 T=~/b70/trash/$(date +%F)-tidy
 busy() { pgrep -f "$1" > /dev/null 2>&1; }
