@@ -2414,7 +2414,7 @@ already exceeded by the vector default since 2026-09-05. The scan row falls 297.
 ms (2.33x, 170 ms, ABBA, 96 launches); throughput ABBA before the fix (vector 1496.3 t/s,
 split 1587.9 t/s, 158 ms ahead) stands as a selector comparison. A fixture aimed at the A2
 chain (`A2 = 22.65625 = 22.625 + 2^-5`: `o` reads 0.000232638 against 0.000354708 for a
-high-only chain, 24x its bar) was verified RED by deleting the low chain.
+high-only chain, 24x its bar) was verified RED by deleting the low chain. Since open-work 3n (2026-11-10) `pf_gdn_A2_hilo` writes those `A2` hi / lo words itself and the scan reads them from global: SLM 30,208 B, 4 work-groups a core instead of 3, the scan row 64.1 -> 44.7 ms a 2048 chunk, bitwise (docs/probes/probe-gdn-prefill-2026-11-10.md section 8).
 
 **The dispatch rule behind it.** The kernel was first declared green by runs that were
 executing the vector kernel (two runs three days apart printed bit-identical cosines, which

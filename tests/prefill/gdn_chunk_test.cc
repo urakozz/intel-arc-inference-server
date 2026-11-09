@@ -27,6 +27,13 @@
 //   6. determinism: the same call twice from a zeroed state - `gdn_state`,
 //      `conv_ring`, `gdn_o` and `y` all bit-identical. No fp atomic exists in
 //      any of the ten kernels; this is the standing proof.
+//   7. open-work 3n: the walk against the pre-3n A2 / scan pair, BIT-IDENTICAL.
+//      After every `gdn_chunk` call of several walks (2 x 2048, one call of 100,
+//      37 and 1, 200 as 77 + 77 + 46), `pf_gdn_A2`'s fp32 tile is made from the
+//      same scratch and packed on the host (runtime/prefill/gdn_a2_pack.h): every
+//      packed word equals `pf_gdn_A2_hilo`'s; then `pf_gdn_scan_dpas_split_staged`
+//      runs on that fp32 tile from the call's starting state: every `gdn_state`
+//      and `gdn_o` word equals the walk's.
 //
 // **kC is the chunk cap: 2048 by default (ruling A13), so plan 6b Task 8's "C = 4096 in
 // one call" is not legal there** - `gdn_chunk` throws above the scratch's chunk cap. The
@@ -58,6 +65,7 @@
 #include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/prefill/context.h"
+#include "runtime/prefill/gdn_a2_pack.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/kernels.h"
 
@@ -249,12 +257,64 @@ ScanOutput run_direct_scan(Dev& d, runtime::PrefillScratch& s, l0::Mem& state,
   return out;
 }
 
+// Case 7's walk: `positions` in calls of `width`, each call checked against the pre-3n pair.
+// Returns the number of words compared.
+size_t check_vs_staged(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz, l0::Mem& d_ab,
+                       l0::Mem& d_small, l0::Mem& d_state, l0::Mem& d_ring, l0::Mem& d_y,
+                       uint32_t positions, uint32_t width) {
+  d.imm.fill(d_state.ptr(), 0u, d_state.size());
+  d.imm.fill(d_ring.ptr(), 0u, d_ring.size());
+  l0::Mem pre(d.ctx, l0::MemKind::Device, d_state.size());
+  const uint32_t max_nch = (kC + 63) / 64;
+  l0::Mem a2f(d.ctx, l0::MemKind::Device, size_t(max_nch) * G::kHeads * 64 * 64 * 4);
+  l0::Mem o2(d.ctx, l0::MemKind::Device, size_t(kC) * kMixerN * 4);
+  size_t words = 0;
+  for (uint32_t p = 0; p < positions; p += width) {
+    const uint32_t C = std::min(width, positions - p), nch = (C + 63) / 64;
+    const size_t tiles = size_t(nch) * G::kHeads;
+    d.imm.copy(pre.ptr(), d_state.ptr(), d_state.size());
+    runtime::prefill::gdn_chunk(
+        d.cx, d.kc, s, p, C, static_cast<const float*>(d_qkvz.ptr()) + size_t(p) * G::kQkvzN,
+        static_cast<const float*>(d_ab.ptr()) + size_t(p) * G::kAbStride, d_state.as<float>(),
+        d_ring.as<uint16_t>(), d_small.ptr(), d_y.as<uint16_t>());
+    d.cx.wait();
+    // The intermediate: pf_gdn_A2's fp32 tile from the call's own xb and gate, packed here.
+    d.cx.launch(d.kc(kernels::pf_gdn_wy_variant(), "pf_gdn_A2"), G::kHeads, nch, 4,
+                {PtrArg(s.gdn_xb.ptr()), PtrArg(s.gdn_g.ptr()), PtrArg(a2f.ptr()), arg_val(C)});
+    d.cx.launch(d.kc(kernels::pf_gdn_scan_variant(), "pf_gdn_scan_dpas_split_staged"),
+                G::kHeads, 4, 1,
+                {PtrArg(s.gdn_xb.ptr()), PtrArg(s.gdn_w.ptr()), PtrArg(s.gdn_u.ptr()),
+                 PtrArg(a2f.ptr()), PtrArg(s.gdn_g.ptr()), PtrArg(pre.ptr()), PtrArg(o2.ptr()),
+                 arg_val(C)});
+    d.cx.wait();
+    std::vector<float> a2(tiles * 64 * 64);
+    std::vector<uint32_t> want(tiles * runtime::prefill::kA2HlWords), got(want.size());
+    d.imm.copy(a2.data(), a2f.ptr(), a2.size() * 4);
+    d.imm.copy(got.data(), s.gdn_A2.ptr(), got.size() * 4);
+    runtime::prefill::pack_a2_hilo(a2.data(), tiles, want.data());
+    CHECK(std::memcmp(got.data(), want.data(), got.size() * 4) == 0);
+    std::vector<float> st_got(kStateElems), st_ref(kStateElems);
+    std::vector<float> o_got(size_t(C) * kMixerN), o_ref(o_got.size());
+    d.imm.copy(st_got.data(), d_state.ptr(), d_state.size());
+    d.imm.copy(st_ref.data(), pre.ptr(), pre.size());
+    d.imm.copy(o_got.data(), s.gdn_o.ptr(), o_got.size() * 4);
+    d.imm.copy(o_ref.data(), o2.ptr(), o_ref.size() * 4);
+    CHECK(std::memcmp(st_got.data(), st_ref.data(), st_got.size() * 4) == 0);
+    CHECK(std::memcmp(o_got.data(), o_ref.data(), o_got.size() * 4) == 0);
+    for (float v : st_got) CHECK(std::isfinite(v));
+    words += got.size() + st_got.size() + o_got.size();
+  }
+  return words;
+}
+
 void check_selected_dispatch(Dev& d, runtime::PrefillScratch& s, l0::Mem& d_qkvz,
                              l0::Mem& d_ab, l0::Mem& d_small, l0::Mem& d_state,
                              l0::Mem& d_ring, l0::Mem& d_y, const char* selected,
                              const char* opposite) {
   // A nonzero state makes S's low chain live.  The normal fixture makes D's
   // residual live; a hard-wired vector dispatch cannot match the split entry.
+  // (Since open-work 3n `s.gdn_A2` holds the packed hi / lo words, which the
+  // vector entry reads as fp32 tiles: it differs all the more.)
   constexpr uint32_t C = 64;
   std::vector<float> initial(kStateElems, 1.0f + 0x1p-8f);
   d.imm.copy(d_state.ptr(), initial.data(), d_state.size());
@@ -489,6 +549,19 @@ int main(int argc, char** argv) {
     CHECK(std::memcmp(again.y.data(), got.y.data(), got.y.size() * 2) == 0);
     std::puts("case 6: the 2 x 2048 walk twice from a zeroed state - gdn_state, conv_ring, "
               "gdn_o and y all bit-identical");
+  }
+
+  // --- 7. the pre-3n A2 / scan pair, bitwise ---------------------------------
+  {
+    struct Shape { uint32_t positions, width; };
+    const Shape shapes[] = {{kPositions, kC}, {100, 100}, {37, 37}, {1, 1}, {200, 77}};
+    size_t words = 0;
+    for (const Shape& sh : shapes)
+      words += check_vs_staged(d, s, d_qkvz, d_ab, d_small, d_state, d_ring, d_y, sh.positions,
+                               sh.width);
+    std::printf("case 7: pf_gdn_A2_hilo + pf_gdn_scan_dpas_split == pf_gdn_A2 (packed on the host) "
+                "+ pf_gdn_scan_dpas_split_staged, bit-identical (packed A2, gdn_state, gdn_o; "
+                "%zu words over 5 walks)\n", words);
   }
 
   // --- the guard rails -------------------------------------------------------

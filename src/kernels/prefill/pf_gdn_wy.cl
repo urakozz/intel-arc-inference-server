@@ -472,6 +472,92 @@ __kernel void pf_gdn_A2(__global const ushort* restrict xb,
 }
 
 // ---------------------------------------------------------------------------
+// (2c) `pf_gdn_A2_hilo` - the walk's A2 since open-work 3n (2026-11-10): `pf_gdn_A2`
+//      above, the same grid, staging, `tile_dot`, gate and mask, line for line,
+//      with ONE difference: instead of storing the fp32 value it stores the scan's
+//      DPAS B-operand words for it, `hi = rne(v)` and `lo = rne(v - hi)`, the split
+//      `pf_gdn_scan_dpas_split` used to make in its own SLM every sub-chunk
+//      (pf_gdn_scan.cl entry (3); the packed layout is
+//      src/runtime/prefill/gdn_a2_pack.h). Only the A2_BLKS blocks on or below the
+//      diagonal are stored: block (bnt, bkb), bkb <= bnt, is 16 rows i of 8 uints,
+//      uint r holding columns j = 16 bkb + 2r (low half) and +1 (high half), at
+//      `((bnt (bnt + 1)) / 2 + bkb) * 128 + (i % 16) * 8 + r`; the lo words follow
+//      the hi ones at +A2HL_LO. A work-item's 2 x 2 tile is two such uints of each.
+//      Quadrant (0, 1) holds no stored block and writes nothing.
+//
+//      The value split is the value `pf_gdn_A2` stores, so the words are the ones
+//      the scan made from it: bitwise (`gdn_chunk_test` case 7 packs `pf_gdn_A2`'s
+//      output on the host and compares every word). FP_CONTRACT is off in the body
+//      so `v - hi` cannot become an `fma` with the product that made `v`.
+// ---------------------------------------------------------------------------
+#define A2_BLKS 10                    /* pf_gdn_scan.cl's: the live (nt, kb) blocks */
+#define A2HL_LO (A2_BLKS * 16 * 8)    /* 1,280 uints: the lo words' offset */
+#define A2HL_WORDS (2 * A2HL_LO)      /* 2,560 uints per (sub-chunk, head) */
+__attribute__((reqd_work_group_size(WG_TRI, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(ASG)))
+__kernel void pf_gdn_A2_hilo(__global const ushort* restrict xb,
+                             __global const float* restrict g_cum,
+                             __global uint* restrict A2hl, uint c_count) {
+#pragma OPENCL FP_CONTRACT OFF
+  const uint h = get_group_id(0), chunk = get_group_id(1), z = get_group_id(2);
+  const uint iz = z >> 1, jz = z & 1u;
+  const uint kh = h / V_PER_K;
+  const uint base_m = chunk * CT;
+  const uint L = min((uint)CT, c_count - base_m);
+  const uint lid = get_local_id(0);
+  const uint bi = lid / ASG, bj = lid % ASG;    // a 16 x 16 grid of 2 x 2 tiles
+  const uint i0 = iz * AQ + bi * TI, j0 = jz * AQ + bj * TJ;
+
+  if (iz == 0 && jz == 1) return;               // wholly above the diagonal: no stored block
+  __global uint* restrict Ht = A2hl + (size_t)(chunk * HEADS + h) * A2HL_WORDS;
+
+  __local float qs[AQ * DIM], ks[AQ * DIM];
+  const uint qbase = Q_OFF + kh * DIM, kbase = K_OFF + kh * DIM;
+  const float4 zero4 = (float4)(0.0f, 0.0f, 0.0f, 0.0f);
+  for (uint p = lid; p < AQ * DIM / 4; p += WG_TRI) {
+    const uint r = p / (DIM / 4), d = (p % (DIM / 4)) * 4;
+    const uint gi = iz * AQ + r, gj = jz * AQ + r;
+    const ushort4 wq =
+        vload4(0, xb + (size_t)(base_m + min(gi, L - 1)) * CONV_ROWS + qbase + d);
+    vstore4(gi < L ? (float4)(bf16f(wq.s0) * Q_SCALE, bf16f(wq.s1) * Q_SCALE,
+                              bf16f(wq.s2) * Q_SCALE, bf16f(wq.s3) * Q_SCALE)
+                   : zero4,
+            0, qs + r * DIM + d);
+    const ushort4 wk =
+        vload4(0, xb + (size_t)(base_m + min(gj, L - 1)) * CONV_ROWS + kbase + d);
+    vstore4(gj < L ? (float4)(bf16f(wk.s0), bf16f(wk.s1), bf16f(wk.s2), bf16f(wk.s3)) : zero4,
+            0, ks + r * DIM + d);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  const uint qr = bi * TI * DIM, kr = bj * TJ * DIM;
+  const float4 dot = tile_dot(qs + qr, qs + qr + DIM, ks + kr, ks + kr + DIM);
+  const float dv[4] = {dot.s0, dot.s1, dot.s2, dot.s3};
+
+  const float gi[TI] = {
+      i0 < L ? g_cum[(size_t)(base_m + i0) * HEADS + h] : 0.0f,
+      i0 + 1 < L ? g_cum[(size_t)(base_m + i0 + 1) * HEADS + h] : 0.0f};
+  const float gj[TJ] = {
+      j0 < L ? g_cum[(size_t)(base_m + j0) * HEADS + h] : 0.0f,
+      j0 + 1 < L ? g_cum[(size_t)(base_m + j0 + 1) * HEADS + h] : 0.0f};
+
+  const uint bkb = j0 / 16, r = (j0 % 16) / 2;
+#pragma unroll
+  for (uint a = 0; a < TI; ++a) {
+    const uint i = i0 + a, bnt = i / 16;
+    if (bkb > bnt) continue;                    // the diagonal quadrants' upper block
+    const float v0 =
+        (i < L && j0 < L && j0 <= i) ? dv[a * TJ] * exp(gi[a] - gj[0]) : 0.0f;
+    const float v1 =
+        (i < L && j0 + 1 < L && j0 + 1 <= i) ? dv[a * TJ + 1] * exp(gi[a] - gj[1]) : 0.0f;
+    const ushort h0 = rne_bf16(v0), h1 = rne_bf16(v1);
+    const size_t p = (size_t)(((bnt * (bnt + 1)) >> 1) + bkb) * 128 + (i % 16) * 8 + r;
+    Ht[p] = ((uint)h1 << 16) | (uint)h0;
+    Ht[A2HL_LO + p] = ((uint)rne_bf16(v1 - bf16f(h1)) << 16) | (uint)rne_bf16(v0 - bf16f(h0));
+  }
+}
+
+// ---------------------------------------------------------------------------
 // (2b) `pf_gdn_A2` EXACTLY as it stood before ruling A28's rewrite, kept as the
 //      bitwise reference for `tests/prefill/gdn_wy_test.cc` and launched by
 //      nothing else -- `src/runtime/prefill/gdn.cc` binds only the tiled kernel
