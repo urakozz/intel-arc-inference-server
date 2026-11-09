@@ -524,7 +524,7 @@ st_r11_a4_ref() {
   chk "OUT=$DATA/oracle-out-qwen-a4 tools/toolcall/a4_ref.sh qwen ref" "the Qwen3.8 reference run (the bf16 original)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "OUT=$DATA/oracle-out-qwen-a4 tools/toolcall/a4_ref.sh qwen status"
-  chk "python3 tools/toolcall/score.py $DATA/oracle-out-qwen-a4 bf16" "every reference call parses (Qwen XML)"
+  chk "python3 tools/toolcall/score.py $DATA/oracle-out-qwen-a4 bf16 bf16" "every reference call parses (Qwen XML; the reference scored against itself)"
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(oracle_qwen_a4|a4_ref)=' $STATE/have.env"
   finish
 }
@@ -2227,7 +2227,7 @@ st_r34_a4_ref() {
   chk "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp ref" "the reference run (qwen4exp_ref.py)"
   x "tools/box_validate/data.sh link $DATA $TREE $BASE"
   x "OUT=$DATA/oracle-out-q4exp-a4 tools/toolcall/a4_ref.sh qwen4exp status"
-  chk "python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16" "every reference call parses (Qwen XML)"
+  chk "python3 tools/toolcall/score.py $DATA/oracle-out-q4exp-a4 bf16 bf16" "every reference call parses (Qwen XML; the reference scored against itself)"
   finish
 }
 stage r34.a4 34 optin gpu q4exp_intel,q4exp_intel_ple,oracle_q4exp_a4 r34.serve "A4 on Flash-Next against r34.a4_ref's reference (oracle-out-q4exp-a4, Intel's checkpoint, all 48 layers) - engine_generate.sh on its set, two cards (--parallel auto), l0, 192 ids, the int8 head; score.py (Qwen XML) - recorded beside Qwen3.8's 25 / 36, no bar, as r11.a4 / r25.a4. The engine refuses the whole model without --layers until the expert tier exists (open-work Now 4: 512 experts x 48 layers do not fit two cards); a truncated --layers run is not the reference's model, so until then the stage SKIPs, never scores a truncated run"
