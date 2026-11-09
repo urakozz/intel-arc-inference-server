@@ -263,4 +263,7 @@ checks, but **skips** on 27 divergences in nine contexts. Its required
 references cannot substitute for this gate's int8 prompt arithmetic. This
 remaining skip is not counted as a pass. Logs are under `~/b70/logs/3f`:
 `checkpoint-regressions.log`, `baseline-mtp-verify.log` and
-`mtp-verify-judged.log`. The final non-checkpoint suite is pending.
+`mtp-verify-judged.log`. The operator stopped additional non-checkpoint validation after integration.
+The merge-gate build and command-line checks pass (1451 variants, one addition,
+zero changes/removals); no complete 310-test pass is claimed. The final SLM
+build also passes all 17 named prefill tests and all four byte-compared goldens.

@@ -64,15 +64,16 @@ continue within 3f with the next reader candidate; do not create a new item.
 
 - [x] Freeze a baseline build from the current engine before kernel edits.
 - [x] Probe 3d candidates in the specified order, with the committed 5% rule.
-- [ ] Integrate the winning gate‖up tile automatically, or record a measured no-go.
-- [ ] Verify the named prefill gates and byte-identical golden printouts; measure
+- [x] Integrate the winning gate‖up tile automatically, or record a measured no-go.
+- [x] Verify the named prefill gates and byte-identical golden printouts; measure
   237/300/384-id prefill and the server turn against the baseline.
-- [ ] Measure one-card versus pp at all six lengths and the two server requests.
+- [ ] Refresh final SLM one-card/pp measurements — cancelled by the operator
+  after the exploratory two-pass runs; no final SLM pp result is claimed.
 - [x] Freeze the original int8 decode reader; verify candidate/reference bitwise
   partials and outputs across depths, tail waves, M values and finite scales.
-- [ ] Integrate the winning 3f reader and run int8 attention, batching, MTP,
+- [x] Integrate the winning 3f reader and run int8 attention, batching, MTP,
   snapshot and golden regressions; measure interleaved whole-step wall gains.
-- [ ] Review the combined changes, update the existing probe records, close
+- [x] Review the combined changes, update the existing probe records, close
   3d/3f with their measured results, and append the uncommitted report.
 
 ### 3d full-engine check, 2026-11-09
@@ -88,3 +89,13 @@ one accumulator atom per subgroup and avoids the second launch/output round
 trip. Prove indexing and bitwise arithmetic before building it, then apply
 the same interleaved controls and full-engine checks. It remains item 3d;
 do not add an item for this candidate or the non-winning row ranges.
+
+### Operator close-out, 2026-11-09
+
+Merged locally as `ee5882b8`; 3e/3d/3f are in Closed recently. All 17 final
+prefill gates, four golden comparisons, production reader bitwise checks
+and matched performance measurements pass. One long MTP GPU gate remains
+unjudged without its required f32 references. Additional non-checkpoint
+validation and the final pp refresh were explicitly stopped by the operator.
+Do not restart them without a new instruction. Follow-ups 3g–3i were added
+only after the operator explicitly requested all three.

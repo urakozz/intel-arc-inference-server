@@ -322,3 +322,15 @@ serve as controls. These probe comparisons are diagnostic measurements,
 not a new headline record. Raw logs under `~/b70/logs/3d`: `slm-first.log`,
 `slm-confirm.log`, `slm-selector-{red,green}.log`, `slm-engine/walls/`,
 `slm-engine/server/` and the validated `slm-engine/summary.json`.
+
+### Integration and validation close-out
+
+Merged locally to main as `ee5882b8`. The final SLM build passes 17/17 named
+prefill tests with no skips (1160.47 s), and all four complete golden
+printouts match the immutable baseline after masking only numeric elapsed
+time fields. The merge-gate build and kernel command-line checks pass
+(1451 variants, +1 SLM, no existing changes/removals). The operator then
+stopped further validation and the final one-card/pp refresh. Earlier
+exploratory pp runs used the superseded two-pass candidate; they are kept
+as historical logs and are not presented as final SLM measurements.
+No complete non-checkpoint-suite pass is claimed for this integration.
