@@ -47,6 +47,13 @@
 #ifndef SILU_EPI
 #define SILU_EPI 0
 #endif
+// Probe-only split epilogue: 1 stores gate bf16 in X, 2 consumes X and stores SiLU * up.
+#ifndef SILU_SPLIT
+#define SILU_SPLIT 0
+#endif
+#if SILU_SPLIT && (NB != 1 || LAYOUT != 0 || SILU_EPI)
+#error "pf_gemm_q4: the split SiLU passes need NB 1, layout 0 and no paired epilogue"
+#endif
 #ifndef PFD
 #define PFD 2   /* layout 0: the 2D prefetch distance, in 64-k groups */
 #endif
@@ -76,7 +83,7 @@ inline ushort rne_bf16(float f) {
   const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
   return (ushort)((u + rounding) >> 16);
 }
-#if SILU_EPI
+#if SILU_EPI || SILU_SPLIT == 2
 // **Copied verbatim from pf_prep.cl** (pf_gemm.cl / pf_gemm_small.cl carry the same copy): both
 // bf16 RNE steps, plain `exp` (never `native_exp`), silu the LAST factor.
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -155,8 +162,12 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
   const uint s = get_sub_group_id();
   // Column tiles on grid dimension 0, row tiles on 1 (pf_gemm_small.cl's order and its reason).
   const uint mb = get_group_id(1) * R;
+#if SILU_SPLIT
+  const uint nb = 2u * (get_group_id(0) * (CN * SN) + CN * s) + (SILU_SPLIT == 2 ? CN : 0u);
+#else
   const uint nb = get_group_id(0) * (CN * SN) + CN * s;
-#if SILU_EPI
+#endif
+#if SILU_EPI || SILU_SPLIT
   __global ushort* restrict X = (__global ushort*)C_base;   // bf16 x, `ldc` carries ldx
 #else
   __global float* restrict C = C_base;
@@ -244,7 +255,38 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
 #endif
   }
 
-#if SILU_EPI
+#if SILU_SPLIT
+  // Gate and up atoms have the identical DPAS chain. The paired epilogue rounds both to bf16
+  // before SiLU, so X can carry the gate's bf16 between the two in-order launches without losing
+  // any value the paired epilogue uses. Each pass owns the same disjoint 16-column X rectangles.
+  const int x_w = (int)N, x_h = (int)M, x_p = (int)(ldc * 2u);
+  const uint nx = (nb - (SILU_SPLIT == 2 ? CN : 0u)) / 2u;
+#if SILU_SPLIT == 2
+#define PF_SPLIT_ROW(r)                                                   \
+  do {                                                                   \
+    const ushort u_b = rne_bf16(uv.s##r);                                  \
+    const ushort s_b = rne_bf16(silu_f32(bf16f(gv[r])));                     \
+    xv[r] = rne_bf16(bf16f(s_b) * bf16f(u_b));                              \
+  } while (0)
+#else
+#define PF_SPLIT_ROW(r) xv[r] = rne_bf16(uv.s##r)
+#endif
+#pragma unroll
+  for (int a = 0; a < NA; ++a) {
+    const float8 uv = acc[a][0];
+    ushort xv[8];
+#if SILU_SPLIT == 2
+    ushort gv[8];
+    intel_sub_group_2d_block_read_16b_8r16x1c((__global void*)X, x_w, x_h, x_p,
+                                               (int2)((int)nx, (int)(mb + 8u * a)), gv);
+#endif
+    PF_SPLIT_ROW(0); PF_SPLIT_ROW(1); PF_SPLIT_ROW(2); PF_SPLIT_ROW(3);
+    PF_SPLIT_ROW(4); PF_SPLIT_ROW(5); PF_SPLIT_ROW(6); PF_SPLIT_ROW(7);
+    intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, x_w, x_h, x_p,
+                                                (int2)((int)nx, (int)(mb + 8u * a)), xv);
+  }
+#undef PF_SPLIT_ROW
+#elif SILU_EPI
   // pf_gemm's SiLU epilogue: atom 2p is a gate block, 2p + 1 its up block; x column = gate
   // column / 2 + lane.
   // x is N / 2 bf16 columns: N bytes wide (pf_gemm_small's N * 2 bound is a slab's, inside the

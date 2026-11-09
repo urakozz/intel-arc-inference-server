@@ -70,11 +70,12 @@ const Shape kShapes[] = {
 
 struct Q4 {
   uint32_t na, nb, sn;
+  bool split = false;
   std::string tag() const {
-    return "q" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn);
+    return "q" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn) + (split ? "split" : "");
   }
   uint32_t rows() const { return 8 * na; }
-  uint32_t cols() const { return 16 * nb * sn; }
+  uint32_t cols() const { return (split ? 32 : 16) * nb * sn; }
 };
 uint32_t pad_to(uint32_t v, uint32_t t) { return (v + t - 1) / t * t; }
 
@@ -167,11 +168,20 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   };
   auto fused = [&](uint32_t M, const Q4& v, bool silu, l0::Mem& o) {
     const uint32_t Mt = pad_to(M, v.rows());
-    l0::Kernel& g = kc(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, sh.layout, silu), "pf_gemm_q4");
     const uint32_t ldc = silu ? N / 2 : N;
-    cx.launch(g, N / v.cols(), Mt / v.rows(), 1,   // columns first
-              {PtrArg(dx.ptr()), PtrArg(dw.ptr()), PtrArg(scales), PtrArg(o.ptr()), arg_val(Mt), arg_val(K),
-               arg_val(N), arg_val(K), arg_val(ldc)});
+    auto launch = [&](const std::string& variant) {
+      l0::Kernel& g = kc(variant, "pf_gemm_q4");
+      cx.launch(g, N / v.cols(), Mt / v.rows(), 1,   // columns first
+                {PtrArg(dx.ptr()), PtrArg(dw.ptr()), PtrArg(scales), PtrArg(o.ptr()), arg_val(Mt), arg_val(K),
+                 arg_val(N), arg_val(K), arg_val(ldc)});
+    };
+    if (v.split) {
+      const std::string base = kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, sh.layout, false);
+      launch(base + "_GATE");
+      launch(base + "_UP_SILU");
+    } else {
+      launch(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, sh.layout, silu));
+    }
   };
   auto timed = [&](const std::function<void()>& launches) {
     cx.timestamp(stamp);
@@ -191,8 +201,9 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
       walk(M, silu, out_a);
       cx.wait();
       download(ctx, a.data(), out_a, size_t(M) * row_bytes);
+      size_t compared = 0;
       for (const Q4& v : q4s) {
-        if (silu && v.nb % 2) continue;
+        if (v.split ? !silu : silu && v.nb % 2) continue;
         std::vector<uint8_t> poison(size_t(M) * row_bytes, 0xA5);
         upload(ctx, out_b, poison.data(), poison.size());
         fused(M, v, silu, out_b);
@@ -207,6 +218,7 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
           return d;
         }();
         ++checks;
+        ++compared;
         if (diff) {
           std::printf("| %s | M %u %s: %s vs the slab walk, %zu words | **%zu differ** |\n", sh.tag, M,
                       silu ? "SiLU" : "plain", v.tag().c_str(), words, diff);
@@ -224,7 +236,7 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
         }
       }
       std::printf("| %s | M %u %s: %zu tiles vs the slab walk | 0 words differ |\n", sh.tag, M,
-                  silu ? "SiLU" : "plain", q4s.size());
+                  silu ? "SiLU" : "plain", compared);
     }
   std::fflush(stdout);
 
@@ -239,7 +251,8 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
     arms.push_back({"l0_now", M, [&, M] { walk(M, sh.silu, out_a); }});
     arms.push_back({"dq", M, [&] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(n0); }});
     for (const Q4& v : q4s)
-      if (!(sh.silu && v.nb % 2)) arms.push_back({v.tag(), M, [&, M, v] { fused(M, v, sh.silu, out_b); }});
+      if (!(v.split ? !sh.silu : sh.silu && v.nb % 2))
+        arms.push_back({v.tag(), M, [&, M, v] { fused(M, v, sh.silu, out_b); }});
   }
   for (Arm& arm : arms) arm.run();
   cx.wait();
@@ -314,9 +327,14 @@ int main(int argc, char** argv) {
     } else {
       for (const std::string& v : split(q4_s)) {
         unsigned na = 0, nb = 0, sn = 0;
-        if (std::sscanf(v.c_str(), "q%ub%us%u", &na, &nb, &sn) != 3)
-          throw std::runtime_error("--q4: '" + v + "' is not qXbYsZ");
-        q4s.push_back({na, nb, sn});
+        int used = 0;
+        if (std::sscanf(v.c_str(), "q%ub%us%u%n", &na, &nb, &sn, &used) != 3 ||
+            (v.substr(size_t(used)) != "" && v.substr(size_t(used)) != "split"))
+          throw std::runtime_error("--q4: '" + v + "' is not qXbYsZ[split]");
+        const bool is_split = v.substr(size_t(used)) == "split";
+        if (is_split && (nb != 1 || na != 8 || (sn != 1 && sn != 2 && sn != 4)))
+          throw std::runtime_error("--q4: split tiles are q8b1s1split, q8b1s2split or q8b1s4split");
+        q4s.push_back({na, nb, sn, is_split});
       }
     }
     const char* mask = std::getenv("ZE_AFFINITY_MASK");
@@ -329,11 +347,19 @@ int main(int argc, char** argv) {
     std::vector<Q4> built;
     for (const Q4& v : q4s) {
       try {
+        if (v.split) {
+          const std::string base = kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, 0, false);
+          kc(base + "_GATE", "pf_gemm_q4");
+          kc(base + "_UP_SILU", "pf_gemm_q4");
+          built.push_back(v);
+          continue;
+        }
         kc(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, 0, false), "pf_gemm_q4");
         kc(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, 1, false), "pf_gemm_q4");
         if (v.nb % 2 == 0) kc(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, 0, true), "pf_gemm_q4");
         built.push_back(v);
       } catch (const std::exception&) {
+        if (!q4_s.empty()) throw;
         std::printf("# %s: not built, skipped\n", v.tag().c_str());
       }
     }
@@ -351,7 +377,7 @@ int main(int argc, char** argv) {
       const Table tab = run_shape(ctx, cx, kc, sh, rows, q4s, rounds, rng, checks);
       std::printf("\n### %s (K %u, N %u, layout %u, %u layers): ms per linear, medians\n\n", sh.name, sh.K,
                   sh.N, sh.layout, sh.layers);
-      print_table(tab, rows, " %.3f |");
+      print_table(tab, rows, " %.6f |");
       for (const auto& [arm, by_m] : tab)
         for (const auto& [M, ms] : by_m) sum[arm][M] += sh.layers * ms;
       std::fflush(stdout);

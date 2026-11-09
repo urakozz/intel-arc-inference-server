@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
@@ -17,6 +18,7 @@
 #include "l0/fence.h"
 #include "l0/queue.h"
 #include "loader/loader.h"
+#include "loader/snapshot.h"
 #include "runtime/capture.h"
 #include "runtime/control.h"
 #include "runtime/engine.h"
@@ -75,10 +77,66 @@ struct Arm {
     return runtime::build_verify(ctx, e.model(), e.buffers(), *e.mtp_buffers(), M, prof, options);
   }
 };
+
+// Optional probe-only snapshots avoid repeating long prefill between paired
+// executable builds. Engine's existing state/KV format is unchanged; metadata
+// binds the cache to the model snapshot, prompt, capacity and cache form.
+struct PrefixFiles {
+  std::string stem, identity;
+  PrefixFiles(const std::string& directory, const std::string& model, const char* kv,
+              uint32_t capacity, uint32_t depth, const std::vector<uint32_t>& ids,
+              runtime::Engine& engine) {
+    if (directory.empty()) return;
+    std::filesystem::create_directories(directory);
+    stem = directory + "/" + kv + "-" + std::to_string(depth);
+    uint64_t hash = 14695981039346656037ull;
+    for (uint32_t id : ids) { hash ^= id; hash *= 1099511628211ull; }
+    identity = "3f-prefix-v1\n" + loader::resolve_snapshot(model) + "\n" + kv + "\n" +
+        std::to_string(capacity) + " " + std::to_string(depth) + " " + std::to_string(hash) + " " +
+        std::to_string(engine.state_bytes()) + " " + std::to_string(engine.kv_bytes(depth)) + "\n";
+  }
+  void transfer(const std::string& suffix, l0::Mem& memory, bool write) {
+    const std::string path = stem + suffix;
+    if (write) {
+      std::ofstream file(path + ".tmp", std::ios::binary | std::ios::trunc);
+      file.write(memory.as<const char>(), std::streamsize(memory.size()));
+      file.close();
+      if (!file) throw std::runtime_error("cannot save prefix " + path);
+      std::filesystem::rename(path + ".tmp", path);
+    } else {
+      if (std::filesystem::file_size(path) != memory.size())
+        throw std::runtime_error("prefix size mismatch " + path);
+      std::ifstream file(path, std::ios::binary);
+      file.read(memory.as<char>(), std::streamsize(memory.size()));
+      if (!file) throw std::runtime_error("cannot read prefix " + path);
+    }
+  }
+  bool restore(l0::Context& ctx, runtime::Engine& engine, uint32_t depth) {
+    if (stem.empty() || !std::filesystem::exists(stem + ".meta")) return false;
+    std::ifstream file(stem + ".meta");
+    const std::string found((std::istreambuf_iterator<char>(file)), {});
+    if (found != identity) throw std::runtime_error("prefix metadata mismatch " + stem);
+    l0::Mem state(ctx, l0::MemKind::Host, engine.state_bytes());
+    l0::Mem kv(ctx, l0::MemKind::Host, engine.kv_bytes(depth));
+    transfer(".state", state, false); transfer(".kv", kv, false);
+    engine.load_kv(0, depth, kv.ptr()); engine.load_state(state.ptr(), depth);
+    return true;
+  }
+  void save(l0::Context& ctx, runtime::Engine& engine, uint32_t depth) {
+    if (stem.empty()) return;
+    l0::Mem state(ctx, l0::MemKind::Host, engine.state_bytes());
+    l0::Mem kv(ctx, l0::MemKind::Host, engine.kv_bytes(depth));
+    engine.save_state(state.ptr()); engine.save_kv(0, depth, kv.ptr());
+    transfer(".state", state, true); transfer(".kv", kv, true);
+    std::ofstream file(stem + ".meta.tmp"); file << identity; file.close();
+    if (!file) throw std::runtime_error("cannot save prefix metadata " + stem);
+    std::filesystem::rename(stem + ".meta.tmp", stem + ".meta");
+  }
+};
 }  // namespace
 
 int main(int argc, char** argv) try {
-  if (argc < 3 || argc > 9) throw std::runtime_error("usage: probe_longctx_decode SNAPSHOT KV [device] [round] [depths] [max_len] [wall_calls] [profile_calls]");
+  if (argc < 3 || argc > 10) throw std::runtime_error("usage: probe_longctx_decode SNAPSHOT KV [device] [round] [depths] [max_len] [wall_calls] [profile_calls] [prefix_directory]");
   const auto kv = runtime::parse_kv_cache(argv[2]);
   const uint32_t device = argc > 3 ? std::stoul(argv[3]) : 0;
   const uint32_t round = argc > 4 ? std::stoul(argv[4]) : 0;
@@ -86,6 +144,7 @@ int main(int argc, char** argv) try {
   const uint32_t capacity = argc > 6 ? std::stoul(argv[6]) : 150272;
   const uint32_t calls = argc > 7 ? std::stoul(argv[7]) : 128;
   const uint32_t samples = argc > 8 ? std::stoul(argv[8]) : 32;
+  const std::string prefix_directory = argc > 9 ? argv[9] : "";
   if (uint64_t(depths.back()) + std::max(calls, 4u) >= capacity || !calls || !samples)
     throw std::runtime_error("capacity must leave room for calls and four verify rows; counts must be positive");
   std::ifstream input("tests/golden/prompts/long32k.ids");
@@ -106,12 +165,16 @@ int main(int argc, char** argv) try {
   auto* ctl = b.control.as<runtime::Control>();
   auto* mtp = engine.mtp_buffers();
   auto* hctl = mtp->hctl.as<runtime::Control>();
+  engine.prepare_prefill();   // identical scratch allocation for cold and restored arms
   for (uint32_t depth : depths) {
+    PrefixFiles files(prefix_directory, argv[1], argv[2], capacity, depth, base, engine);
     std::vector<uint32_t> ids;
     for (uint32_t pos = engine.pos(); pos < depth; ++pos) ids.push_back(base[pos % base.size()]);
     const auto prefill_start = Clock::now();
-    engine.prefill(ids);
+    const bool restored = files.restore(ctx, engine, depth);
+    if (!restored) { engine.prefill(ids); files.save(ctx, engine, depth); }
     std::printf("# populated depth=%u prefill_ms=%.3f pos=%u\n", depth, elapsed(prefill_start), engine.pos());
+    if (!prefix_directory.empty()) std::printf("# prefix-cache depth=%u restored=%u\n", depth, unsigned(restored));
     std::printf("# memory %s\n", engine.memory_line().c_str());
     std::fflush(stdout);
     if (engine.pos() != depth || ctl->gdn_live != 0) throw std::runtime_error("unexpected prefix state");
