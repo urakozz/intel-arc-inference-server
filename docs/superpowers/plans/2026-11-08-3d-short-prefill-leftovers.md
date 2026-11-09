@@ -64,7 +64,7 @@ continue within 3f with the next reader candidate; do not create a new item.
 
 - [x] Freeze a baseline build from the current engine before kernel edits.
 - [x] Probe 3d candidates in the specified order, with the committed 5% rule.
-- [x] Integrate the winning gate‖up tile automatically, or record a measured no-go.
+- [ ] Integrate the winning gate‖up tile automatically, or record a measured no-go.
 - [ ] Verify the named prefill gates and byte-identical golden printouts; measure
   237/300/384-id prefill and the server turn against the baseline.
 - [ ] Measure one-card versus pp at all six lengths and the two server requests.
@@ -74,3 +74,17 @@ continue within 3f with the next reader candidate; do not create a new item.
   snapshot and golden regressions; measure interleaved whole-step wall gains.
 - [ ] Review the combined changes, update the existing probe records, close
   3d/3f with their measured results, and append the uncommitted report.
+
+### 3d full-engine check, 2026-11-09
+
+The two-launch S4 split passed the fixed primitive criterion, but its actual
+237-id CLI prefill and warm 200/250-id server requests were 1–1.6% slower.
+That candidate is not accepted as an end-to-end fix. Keep the original 5%
+gate/slab rule and require the engine confirmation to support the selection.
+Before concluding no-go, test the alternative already identified in 3b's
+completion notes: one launch with gate/up on paired NB1 subgroups, sharing
+the rounded gate through SLM before the unchanged SiLU epilogue. This keeps
+one accumulator atom per subgroup and avoids the second launch/output round
+trip. Prove indexing and bitwise arithmetic before building it, then apply
+the same interleaved controls and full-engine checks. It remains item 3d;
+do not add an item for this candidate or the non-winning row ranges.
