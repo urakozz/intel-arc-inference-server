@@ -496,6 +496,8 @@ if [ "$("${SSH[@]}" "$BOX" "$BASE_CHECK_CMD")" != "$BASE_SHA" ]; then
   echo "baseline: extracting $BASELINE_REF ($BASE_SHORT) into ~/$BASE_DIR"
   git archive --format=tar "$BASE_SHA" | "${SSH[@]}" "$BOX" "$BASE_EXTRACT_CMD"
 fi
+# The box's system disk (operator 2026-11-10): finished branches' trees and old baselines go to trash at every launch.
+tools/box_tidy.sh | grep -E '^(moved|trash|system disk)' || true
 echo "launch: $(echo "$SELECTED" | wc -w | tr -d ' ') stages, state ~/$STATE_REL"
 tools/box.sh run "$LAUNCH_CMD"
 if [ "$WAIT" = 0 ]; then
