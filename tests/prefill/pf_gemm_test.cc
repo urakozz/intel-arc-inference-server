@@ -317,7 +317,7 @@ void q4_case(Dev& d, uint32_t M, uint32_t K, uint32_t N, uint32_t layout, bool s
     return n;
   }();
   const std::string variant = silu && t->nb == 1
-                                  ? kernels::pf_gemm_q4_split_variant(t->na, t->sn, false) + " + UP_SILU"
+                                  ? kernels::pf_gemm_q4_slm_variant(t->na, t->sn)
                                   : kernels::pf_gemm_q4_variant(t->na, t->nb, t->sn, layout, silu);
   char name[144];
   std::snprintf(name, sizeof name, "%s M=%u K=%u N=%u L%u (%s)", silu ? "silu " : "plain", M, K, N, layout,
@@ -428,11 +428,11 @@ void attention_case(Dev& d, uint32_t C, uint32_t depth) {
 int main() {
   Dev d;
   // Open-work 3d: the gate||up fused path above 192 rows retains every slab-walk word,
-  // including partial row tiles and the 256-row endpoint. Larger SiLU chunks keep the slab.
-  std::puts("pf_gemm_q4's 193-256-row SiLU range vs the slab walk, bitwise:");
-  for (uint32_t M : {193u, 224u, 237u, 240u, 241u, 248u, 250u, 256u})
+  // including partial row tiles and the 320-row endpoint. Larger chunks keep the slab.
+  std::puts("pf_gemm_q4's 193-320-row SiLU range vs the slab walk, bitwise:");
+  for (uint32_t M : {300u, 193u, 224u, 237u, 240u, 241u, 248u, 250u, 256u, 257u, 288u, 319u, 320u})
     q4_case(d, M, 5120, 34816, 0, true);
-  for (uint32_t M : {257u, 300u, 384u}) CHECK(runtime::prefill::pf_q4_tile(M, true) == nullptr);
+  for (uint32_t M : {321u, 352u, 384u}) CHECK(runtime::prefill::pf_q4_tile(M, true) == nullptr);
   std::puts("pf_gemm vs a host fp64 reference over the logical rectangle (cos and max-ulp bars):");
   // Controller ruling: the brief's heterogeneous braced list of pairs will not deduce
   // under -Werror, so this is a typed array of the same five cells instead.

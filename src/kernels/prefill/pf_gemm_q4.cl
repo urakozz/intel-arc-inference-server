@@ -54,6 +54,13 @@
 #if SILU_SPLIT && (NB != 1 || LAYOUT != 0 || SILU_EPI)
 #error "pf_gemm_q4: the split SiLU passes need NB 1, layout 0 and no paired epilogue"
 #endif
+// Adjacent NB1 sub-groups exchange gate bf16 through SLM in one launch.
+#ifndef SILU_SLM
+#define SILU_SLM 0
+#endif
+#if SILU_SLM && (NA != 8 || NB != 1 || (SN != 2 && SN != 4) || LAYOUT != 0 || SILU_EPI || SILU_SPLIT)
+#error "pf_gemm_q4: SLM SiLU needs A8_B1_S2/S4, layout 0 and no other epilogue"
+#endif
 #ifndef PFD
 #define PFD 2   /* layout 0: the 2D prefetch distance, in 64-k groups */
 #endif
@@ -83,7 +90,7 @@ inline ushort rne_bf16(float f) {
   const uint rounding = ((u >> 16) & 1u) + 0x7FFFu;
   return (ushort)((u + rounding) >> 16);
 }
-#if SILU_EPI || SILU_SPLIT == 2
+#if SILU_EPI || SILU_SPLIT == 2 || SILU_SLM
 // **Copied verbatim from pf_prep.cl** (pf_gemm.cl / pf_gemm_small.cl carry the same copy): both
 // bf16 RNE steps, plain `exp` (never `native_exp`), silu the LAST factor.
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
@@ -167,13 +174,16 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
 #else
   const uint nb = get_group_id(0) * (CN * SN) + CN * s;
 #endif
-#if SILU_EPI || SILU_SPLIT
+#if SILU_EPI || SILU_SPLIT || SILU_SLM
   __global ushort* restrict X = (__global ushort*)C_base;   // bf16 x, `ldc` carries ldx
 #else
   __global float* restrict C = C_base;
 #endif
   const int a_w = (int)(K * 2u), a_h = (int)M, a_p = (int)(lda * 2u);
   const uint num_groups = K / GROUP;
+#if SILU_SLM
+  __local ushort gate_slm[(SN / 2) * R * SG];
+#endif
 
   float8 acc[NA][NB];
 #pragma unroll
@@ -255,7 +265,41 @@ __kernel void pf_gemm_q4(__global const ushort* restrict A, __global const uint*
 #endif
   }
 
-#if SILU_SPLIT
+#if SILU_SLM
+  // Even sub-groups own gate atoms; the adjacent odd sub-group owns their up atoms.
+  // The original epilogue rounds gate to bf16 before SiLU, so this exchange is exact.
+  const uint lane = get_sub_group_local_id();
+  const uint pair_base = (s / 2u) * R * SG;
+  if ((s & 1u) == 0) {
+#pragma unroll
+    for (int a = 0; a < NA; ++a)
+#pragma unroll
+      for (int r = 0; r < 8; ++r)
+        gate_slm[pair_base + (8u * a + r) * SG + lane] = rne_bf16(acc[a][0][r]);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);   // all sub-groups, before the up atoms read their paired gate
+  if (s & 1u) {
+    const int x_w = (int)N, x_h = (int)M, x_p = (int)(ldc * 2u);
+    const uint nx = (nb - CN) / 2u;
+#define PF_SLM_ROW(r)                                                       \
+    do {                                                                   \
+      const ushort g_b = gate_slm[pair_base + (8u * a + r) * SG + lane];      \
+      const ushort u_b = rne_bf16(uv.s##r);                                  \
+      const ushort s_b = rne_bf16(silu_f32(bf16f(g_b)));                      \
+      xv[r] = rne_bf16(bf16f(s_b) * bf16f(u_b));                              \
+    } while (0)
+#pragma unroll
+    for (int a = 0; a < NA; ++a) {
+      const float8 uv = acc[a][0];
+      ushort xv[8];
+      PF_SLM_ROW(0); PF_SLM_ROW(1); PF_SLM_ROW(2); PF_SLM_ROW(3);
+      PF_SLM_ROW(4); PF_SLM_ROW(5); PF_SLM_ROW(6); PF_SLM_ROW(7);
+      intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, x_w, x_h, x_p,
+                                                  (int2)((int)nx, (int)(mb + 8u * a)), xv);
+    }
+#undef PF_SLM_ROW
+  }
+#elif SILU_SPLIT
   // Gate and up atoms have the identical DPAS chain. The paired epilogue rounds both to bf16
   // before SiLU, so X can carry the gate's bf16 between the two in-order launches without losing
   // any value the paired epilogue uses. Each pass owns the same disjoint 16-column X rectangles.

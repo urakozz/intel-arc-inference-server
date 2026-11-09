@@ -489,18 +489,16 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // The composed reference (a test's set_attn_mode_for_test) gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
 // L0 (open-work 3b): an int4 linear of C <= kPfQ4MaxRows rows (gate||up's SiLU form: C <=
 // kPfQ4SiluMaxRows) is ONE pf_gemm_q4 launch instead of its slab walk (pf_q4_tile), so the count
-// depends on C again: Flash, C <= 192: 1 + 48 x 19 + 16 x 11 = 1089. Open-work 3d: 193..256
-// uses two gate/up passes, 1 + 48 x 20 + 16 x 12 = 1153. At 257..384 gate||up returns to its
-// 68 slab launches, 1 + 48 x 86 + 16 x 78 = 5377; above, 8449 as before (derived). l0-int8's
+// depends on C again: Flash, C <= 320: 1 + 48 x 19 + 16 x 11 = 1089. Open-work 3d's SLM
+// gate/up epilogue keeps one launch at 193..320. At 321..384 gate||up returns to its 68 slab
+// launches, 1 + 48 x 86 + 16 x 78 = 5377; above, 8449 as before (derived). l0-int8's
 // linears are its own walk (linear_i8) and keep the slab count.
 namespace {
 constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
 // One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0
-// runs it as pf_gemm_q4 (two for split gate/up). l0-int8's quantiser is counted by the callers.
+// runs it as pf_gemm_q4 (including SLM gate/up). l0-int8's quantiser is counted by the callers.
 size_t linear_launches(const model::ModelDesc& d, LinearId id, PrefillBackend b, uint32_t C) {
-  if (b == PrefillBackend::L0)
-    if (const PfSmallTile* t = pf_q4_tile(C, id == LinearId::GateUp))
-      return id == LinearId::GateUp && t->nb == 1 ? 2 : 1;
+  if (b == PrefillBackend::L0 && pf_q4_tile(C, id == LinearId::GateUp) != nullptr) return 1;
   return 2 * size_t(d.shape(id).N / 1024);
 }
 // The launches of one layer kind's four int4 linears.

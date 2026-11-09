@@ -71,8 +71,10 @@ const Shape kShapes[] = {
 struct Q4 {
   uint32_t na, nb, sn;
   bool split = false;
+  bool slm = false;
   std::string tag() const {
-    return "q" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn) + (split ? "split" : "");
+    return "q" + std::to_string(na) + "b" + std::to_string(nb) + "s" + std::to_string(sn) +
+           (slm ? "slm" : split ? "split" : "");
   }
   uint32_t rows() const { return 8 * na; }
   uint32_t cols() const { return (split ? 32 : 16) * nb * sn; }
@@ -175,7 +177,9 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
                 {PtrArg(dx.ptr()), PtrArg(dw.ptr()), PtrArg(scales), PtrArg(o.ptr()), arg_val(Mt), arg_val(K),
                  arg_val(N), arg_val(K), arg_val(ldc)});
     };
-    if (v.split) {
+    if (v.slm) {
+      launch(kernels::pf_gemm_q4_slm_variant(v.na, v.sn));
+    } else if (v.split) {
       launch(kernels::pf_gemm_q4_split_variant(v.na, v.sn, false));
       launch(kernels::pf_gemm_q4_split_variant(v.na, v.sn, true));
     } else {
@@ -202,7 +206,7 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
       download(ctx, a.data(), out_a, size_t(M) * row_bytes);
       size_t compared = 0;
       for (const Q4& v : q4s) {
-        if (v.split ? !silu : silu && v.nb % 2) continue;
+        if ((v.split || v.slm) ? !silu : silu && v.nb % 2) continue;
         std::vector<uint8_t> poison(size_t(M) * row_bytes, 0xA5);
         upload(ctx, out_b, poison.data(), poison.size());
         fused(M, v, silu, out_b);
@@ -250,7 +254,7 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
     arms.push_back({"l0_now", M, [&, M] { walk(M, sh.silu, out_a); }});
     arms.push_back({"dq", M, [&] { for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(n0); }});
     for (const Q4& v : q4s)
-      if (!(v.split ? !sh.silu : sh.silu && v.nb % 2))
+      if (!((v.split || v.slm) ? !sh.silu : sh.silu && v.nb % 2))
         arms.push_back({v.tag(), M, [&, M, v] { fused(M, v, sh.silu, out_b); }});
   }
   for (Arm& arm : arms) arm.run();
@@ -328,12 +332,16 @@ int main(int argc, char** argv) {
         unsigned na = 0, nb = 0, sn = 0;
         int used = 0;
         if (std::sscanf(v.c_str(), "q%ub%us%u%n", &na, &nb, &sn, &used) != 3 ||
-            (v.substr(size_t(used)) != "" && v.substr(size_t(used)) != "split"))
-          throw std::runtime_error("--q4: '" + v + "' is not qXbYsZ[split]");
+            (v.substr(size_t(used)) != "" && v.substr(size_t(used)) != "split" &&
+             v.substr(size_t(used)) != "slm"))
+          throw std::runtime_error("--q4: '" + v + "' is not qXbYsZ[split|slm]");
         const bool is_split = v.substr(size_t(used)) == "split";
+        const bool is_slm = v.substr(size_t(used)) == "slm";
         if (is_split && (nb != 1 || na != 8 || (sn != 1 && sn != 2 && sn != 4)))
           throw std::runtime_error("--q4: split tiles are q8b1s1split, q8b1s2split or q8b1s4split");
-        q4s.push_back({na, nb, sn, is_split});
+        if (is_slm && (nb != 1 || na != 8 || (sn != 2 && sn != 4)))
+          throw std::runtime_error("--q4: SLM tiles are q8b1s2slm or q8b1s4slm");
+        q4s.push_back({na, nb, sn, is_split, is_slm});
       }
     }
     const char* mask = std::getenv("ZE_AFFINITY_MASK");
@@ -346,6 +354,11 @@ int main(int argc, char** argv) {
     std::vector<Q4> built;
     for (const Q4& v : q4s) {
       try {
+        if (v.slm) {
+          kc(kernels::pf_gemm_q4_slm_variant(v.na, v.sn), "pf_gemm_q4");
+          built.push_back(v);
+          continue;
+        }
         if (v.split) {
           kc(kernels::pf_gemm_q4_split_variant(v.na, v.sn, false), "pf_gemm_q4");
           kc(kernels::pf_gemm_q4_split_variant(v.na, v.sn, true), "pf_gemm_q4");
