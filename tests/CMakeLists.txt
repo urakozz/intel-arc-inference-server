@@ -423,6 +423,43 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   set_tests_properties(attn_verify_dpas_test PROPERTIES TIMEOUT 3600)
 endif()
 
+# 3l: the production attn_verify_dpas[_kv8] against its frozen copy (kernels/attn_verify_control.cl, main 865da900's
+# source with main's levers and options, hardcoded here so a lever change shows up as a mismatch), every partial and
+# reduced word, bf16 at M = 2..8 (2..4 without B70_VERIFY_M8) and int8 at M = 2..4.
+if(B70_VERIFY_DPAS AND B70_MTP AND B70_KV8)
+  set(_vctl_m 2 3 4)
+  if(B70_VERIFY_M8)
+    list(APPEND _vctl_m 5 6 7 8)
+  endif()
+  set(_vctl_deps)
+  foreach(MM ${_vctl_m})
+    foreach(_kv 0 1)
+      set(_sfx "")
+      if(_kv)
+        set(_sfx _KV8)
+        if(MM GREATER 4)
+          continue()
+        endif()
+      endif()
+      add_ocloc_kernel(attn_verify_control_M${MM}${_sfx} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/attn_verify_control.cl
+        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1 KV8=${_kv}
+        OPTIONS -cl-intel-256-GRF-per-thread)
+      list(APPEND _vctl_deps kernel_attn_verify_control_M${MM}${_sfx} kernel_attn_verify_dpas_M${MM}_T32${_sfx}
+                             kernel_attn_v2_M${MM}_T32${_sfx})
+    endforeach()
+  endforeach()
+  add_executable(attn_verify_bitwise_test kernels/attn_verify_bitwise_test.cc)
+  target_include_directories(attn_verify_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(attn_verify_bitwise_test PRIVATE b70_l0)
+  b70_target_kernel_dir(attn_verify_bitwise_test)
+  add_dependencies(attn_verify_bitwise_test ${_vctl_deps})
+  if(B70_VERIFY_M8)
+    target_compile_definitions(attn_verify_bitwise_test PRIVATE B70_VERIFY_TEST_M8=1)
+  endif()
+  add_test(NAME attn_verify_bitwise_test COMMAND attn_verify_bitwise_test)
+  set_tests_properties(attn_verify_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 900)
+endif()
+
 add_executable(gemv_test kernels/gemv_test.cc)
 target_include_directories(gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(gemv_test PRIVATE b70_l0)
