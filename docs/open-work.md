@@ -23,7 +23,7 @@ Last updated: 2026-11-09 (3i merged and closed; dedicated tests only).
 
 | group | stages | what they need |
 |---|---|---|
-| **Qwen3.8** (after 3h / 3k, operator 2026-11-10) | `r11.near_ties` (A4's 6 mismatches: near-ties or mistakes - a CPU analysis on `r11.a4`'s output); `r69.forced_dumps` (~6-8 h, one card) then `r69.forced_refs` (CPU: the long MTP tests' bf16 references); `r66.check` (13a's probe check on the card) | spare box time after 3h / 3k |
+| **Qwen3.8** (after 3h / 3k, operator 2026-11-10) | `r11.near_ties` (A4's 6 mismatches: near-ties or mistakes - a CPU analysis on `r11.a4`'s output); `r69.forced_dumps` (~6-8 h, one card) then `r69.forced_refs` (CPU: the long MTP tests' bf16 references); `r66.check` (13a's probe check on the card); **A4 at 384 ids** (operator 2026-11-10: at 192 the three `t3_rename` scenarios ended before their call, in the bf16 reference too - 33 / 36 reference calls parse; `r11.a4` gave 27 / 36 with those 3 incomplete): move the three `t3_rename-*.bf16.*` outputs of `oracle-out-qwen-a4` to trash, `a4_ref.sh qwen ref` (resumable: only those 3, CPU), then `r11.a4` again (384 ids, the 6 grep / edit / glob mismatches looked at after) | spare box time after 3h / 3k |
 | **Ornith** (squeezed in 2026-11-10) | `r16.mtp`: `ornith_mtp_test` / `_bf16head` SKIP on 2 f32 references - the tests set no `B70_FORCED_JUDGE` (tests/CMakeLists.txt ~2222): add it (`oracle-out-ornith-f32-i8head-forced` / `-f32-forced`), dump with `B70_DUMP_FORCED`, `f32_refs.sh forced ornith`; `r16.cost` is a timed probe (item 5) | in progress |
 
 ## Waiting - only a box run or a CPU job left
