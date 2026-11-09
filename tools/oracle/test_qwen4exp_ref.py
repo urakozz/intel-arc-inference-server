@@ -691,7 +691,86 @@ def test_cli_run_and_hfcheck():
     print("  run: the golden layout; hfcheck: BITWISE; facts: names and the topk tie rule")
 
 
-TESTS = [test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
+def test_fp32_dequant():
+    # An fp32 model must not inherit dequant_t's bf16 rounding of the weights.
+    from safetensors.torch import save_file
+    d = os.path.join(TMP, "fp32-dequant")
+    os.makedirs(d, exist_ok=True)
+    save_file({"x.qweight": torch.full((16, 8), 0xBBBBBBBB - 2**32, dtype=torch.int32),
+               "x.qzeros": torch.full((1, 1), 0x77777777, dtype=torch.int32),
+               "x.scales": torch.full((1, 8), 0.1234, dtype=torch.float16)}, os.path.join(d, "model.safetensors"))
+    ck = ref.Ckpt(d)
+    f = ref.layer_state(ck, ck.keys(), F32, set())["x.weight"]
+    b = ref.layer_state(ck, ck.keys(), BF, set())["x.weight"]
+    want = torch.full((8, 128), 3 * float(torch.tensor(0.1234, dtype=torch.float16)))
+    assert torch.equal(f, want), "fp32 int4 dequant rounded through bf16"
+    assert torch.equal(f.to(BF), b)
+    assert not torch.equal(f, b.float())
+
+
+def test_fp32_state_dump():
+    # The dump is a prompt-boundary snapshot, in absolute engine ring slots, before greedy decode mutates it.
+    from argparse import Namespace
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+    d = os.path.join(TMP, "state-tiny")
+    mk.make(d, hidden=32, experts=4, topk=2, indexer_budget=16, ple_base=80,
+            vocab_size=256, eos_token_id=255, bos_token_id=255, hc_lowrank=16,
+            moe_intermediate_size=32, shared_expert_intermediate_size=32,
+            linear_num_key_heads=2, linear_num_value_heads=4, linear_key_head_dim=16,
+            linear_value_head_dim=16, num_attention_heads=2, num_key_value_heads=1,
+            head_dim=32, indexer_head_dim=32, indexer_n_heads=2)
+    p = os.path.join(d, "p.ids")
+    open(p, "w").write("3 7 11 255 9")
+    dumps = {}
+    for dtype in ("bf16", "fp32"):
+        out = os.path.join(d, dtype + ".safetensors")
+        ref.cmd_run(Namespace(snapshot=d, layers=4, experts="eager", ple="bf16", prompt=p, out=out,
+                              dtype=dtype, cycle=35, state_dump=True, gen=3, max_prompt=100,
+                              chunk=16, act_tail=0, logits_tail=1))
+        t = dumps[dtype] = load_file(out)
+        with safe_open(out, framework="pt") as h:
+            assert h.metadata()["dtype"] == dtype
+        expected = {"state.L3.k": (35, 32), "state.L3.v": (35, 32),
+                    "state.L3.ckeys": (8, 32), "state.L3.tail": (8, 32),
+                    "state.L1.ple": (16, 128), "state.L1.ple_ids": (16,),
+                    "logits": (4, 256), "tokens": (3,), "prompt.ids": (35,),
+                    "qsa.sel.L3": (3, 4)}
+        for l in range(3):
+            expected[f"state.L{l}.gdn"] = (4, 16, 16)
+            expected[f"state.L{l}.conv"] = (16, 128)
+        for l in range(4):
+            expected[f"route.ids.L{l}"] = (3, 2)
+        for k, shape in expected.items():
+            assert tuple(t[k].shape) == shape, (k, t[k].shape, shape)
+        assert torch.equal(t["prompt.ids"], torch.tensor([3, 7, 11, 255, 9] * 7, dtype=torch.int32))
+        # Positions 19..34 occupy slots 3..15,0..2; only 32..34 are live in the GDN conv ring.
+        assert t["state.L1.ple_ids"].tolist() == [11, 255, 9, 9, 3, 7, 11, 255, 9, 3, 7, 11, 255, 9, 3, 7]
+        assert torch.count_nonzero(t["state.L0.conv"][3:]) == 0
+        tc = ref.text_config(d, experts="eager", dtype=BF if dtype == "bf16" else F32)
+        pm, _, _ = ref.build_streamed(d, tc)
+        cap = []
+        h = pm.model.layers[1].ple.norm_conv.register_forward_hook(lambda _m, _a, o: cap.append(o[0].clone()))
+        cache = ref.forward_chunks(pm, t["prompt.ids"].tolist(), 16, logits_to_keep=1)
+        h.remove()
+        assert torch.equal(t["state.L0.gdn"], cache.layers[0].recurrent_states[0][0].float())
+        rows = torch.cat(cap).float()
+        for pos in range(19, 35):
+            assert torch.equal(t["state.L1.ple"][pos % 16], rows[pos])
+        assert torch.equal(t["state.L3.k"], cache.layers[3].keys[0].transpose(0, 1).flatten(1).float())
+    for k, f in dumps["fp32"].items():
+        if k.startswith("state.") and f.dtype == F32:
+            b = dumps["bf16"][k]
+            cos = torch.nn.functional.cosine_similarity(f.flatten().double(), b.flatten().double(), dim=0)
+            assert cos > 0.999, (k, float(cos))
+    # The CLI owns these arguments too (including cycling the source rather than padding with zeros).
+    import subprocess
+    r = subprocess.run([sys.executable, os.path.join(_HERE, "qwen4exp_ref.py"), "run", "--help"],
+                       capture_output=True, text=True)
+    assert r.returncode == 0 and all(s in r.stdout for s in ("--dtype", "--cycle", "--state-dump"))
+
+
+TESTS = [test_fp32_dequant, test_fp32_state_dump, test_expected_names_tiny, test_real_names, test_hc_chain, test_ple_ids, test_sigmoid_gate, test_v_head_map,
          test_streamed_equals_hf_bf16, test_streamed_equals_hf_fp32, test_chunked_prefill_equals_hf,
          test_indexer_cache_bitwise, test_indexer_gaps_small_budget, test_layers_truncation, test_route_ties, test_int4_experts, test_fused_experts,
          test_ple_int8, test_trace_equals_run, test_cli_run_and_hfcheck]
