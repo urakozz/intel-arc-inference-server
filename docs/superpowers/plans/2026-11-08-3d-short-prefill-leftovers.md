@@ -36,3 +36,55 @@ quiet-box session (open-work item 5) - a whole-box, timed job.
 ## Cost
 
 (a): one agent, a probe of a few hours (one card), a build only if it wins. (b): ~30 min of the quiet-box session.
+
+## Execution authorized 2026-11-09: finish 3d and 3f
+
+The operator requested both fixes and no additional work-list items. Stay in
+the existing `kv8-prefill-fast` worktree, preserve the uncommitted report,
+use signed `3d:` commits without trailers, and do not push or merge.
+Implementation of the two independent kernel families may proceed in parallel;
+the coordinator owns commits, shared documentation, builds and GPU scheduling.
+All builds use JOBS=16 on the box. Timed jobs hold the whole-box lock, run
+detached under `~/b70`, and retain the already authorized 1–2 minute checks.
+
+**Fixed before measuring:** 3d's rule above remains unchanged: at least 5%
+below the slab walk, in the same interleaved run, with every output word
+bitwise identical. No candidate is selected from the old busy-box numbers.
+
+For existing item 3f, first probe exact native finite-fp16 scale conversion
+and packed V reads in the int8 plain-decode reader. Preserve scale multiply
+locations, all fp32 arithmetic and reduction order, the 32-way partition,
+cache representation, bf16 kernels and automatic attention selection.
+Keep the original int8 reader as a frozen test/probe reference. No new engine
+flags or environment variables. Promote only a bitwise-identical candidate
+that reduces uninstrumented whole-step wall time by at least 5% at both
+81920 and 150000 positions in interleaved before/after pairs after warm-up;
+4k/32k and M = 4 must not regress by more than 2%. If a candidate misses,
+continue within 3f with the next reader candidate; do not create a new item.
+
+- [x] Freeze a baseline build from the current engine before kernel edits.
+- [x] Probe 3d candidates in the specified order, with the committed 5% rule.
+- [ ] Integrate the winning gate‖up tile automatically, or record a measured no-go.
+- [ ] Verify the named prefill gates and byte-identical golden printouts; measure
+  237/300/384-id prefill and the server turn against the baseline.
+- [ ] Measure one-card versus pp at all six lengths and the two server requests.
+- [x] Freeze the original int8 decode reader; verify candidate/reference bitwise
+  partials and outputs across depths, tail waves, M values and finite scales.
+- [ ] Integrate the winning 3f reader and run int8 attention, batching, MTP,
+  snapshot and golden regressions; measure interleaved whole-step wall gains.
+- [ ] Review the combined changes, update the existing probe records, close
+  3d/3f with their measured results, and append the uncommitted report.
+
+### 3d full-engine check, 2026-11-09
+
+The two-launch S4 split passed the fixed primitive criterion, but its actual
+237-id CLI prefill and warm 200/250-id server requests were 1–1.6% slower.
+That candidate is not accepted as an end-to-end fix. Keep the original 5%
+gate/slab rule and require the engine confirmation to support the selection.
+Before concluding no-go, test the alternative already identified in 3b's
+completion notes: one launch with gate/up on paired NB1 subgroups, sharing
+the rounded gate through SLM before the unchanged SiLU epilogue. This keeps
+one accumulator atom per subgroup and avoids the second launch/output round
+trip. Prove indexing and bitwise arithmetic before building it, then apply
+the same interleaved controls and full-engine checks. It remains item 3d;
+do not add an item for this candidate or the non-winning row ranges.

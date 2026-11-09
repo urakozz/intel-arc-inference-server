@@ -50,9 +50,15 @@ const PfSmallTile* pf_q4_tile(uint32_t M, bool silu) {
   // behind). One chunk's five linears: 51 ms at 1-8 rows, 56 at 16, 59 at 32, 76 at 64, 112 at
   // 128, 156 at 192, 247 at 384 (gate||up on the slab), against the slab walk's 236-297.
   static constexpr PfSmallTile kPlainTo32{4, 1, 1}, kPlain{8, 1, 2}, kSiluTo8{1, 2, 4}, kSilu{4, 2, 1};
+  // Open-work 3d (2026-11-09, whole box): paired A8_B1_S4 sub-groups exchange gate bf16 in
+  // SLM, then up folds SiLU into the output, all in one launch. Every row count 193-320 is
+  // bitwise and 16.03-26.81% below the interleaved slab control; 321 misses the fixed 5% bar.
+  // The earlier two-pass form gained in isolation but regressed on the real engine.
+  static constexpr PfSmallTile kSiluSlm{8, 1, 4};
   if (M == 0) return nullptr;
   if (silu) {
     if (M > kPfQ4SiluMaxRows) return nullptr;
+    if (M > 192) return &kSiluSlm;
     return M <= 8 ? &kSiluTo8 : &kSilu;
   }
   if (M > kPfQ4MaxRows) return nullptr;
@@ -66,9 +72,12 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
   require(layout == 0 || layout == 1, "layout " + std::to_string(layout) + " is neither 0 nor 1");
   require(layout == 1 || scales != nullptr, "a layout-0 weight needs its scales");
   require(K % 64 == 0, "K = " + std::to_string(K) + " is not a multiple of the group size 64");
+  const bool slm = silu && t.nb == 1;
   require(N % t.cols() == 0, "N = " + std::to_string(N) + " is not a multiple of the q4 tile's " +
                                  std::to_string(t.cols()) + " columns");
-  require(!silu || t.nb % 2 == 0, "the SiLU epilogue needs an even NB");
+  require(!silu || t.nb % 2 == 0 || slm, "the SiLU epilogue needs paired atoms or NB1 sub-groups");
+  require(!slm || (layout == 0 && t.na == 8 && (t.sn == 2 || t.sn == 4)),
+          "the SLM SiLU epilogue needs A8_B1_S2/S4 and layout 0");
   require(lda >= K && ldc >= (silu ? N / 2 : N), "a leading dimension does not cover its matrix");
   require((lda * 2) % 16 == 0 && (size_t(ldc) * (silu ? 2 : 4)) % 16 == 0 && (N * 4) % 16 == 0,
           "a pitch is not a multiple of 16 bytes");
@@ -76,7 +85,9 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
               (scales == nullptr || aligned64(scales, 2, 0, 1)),
           "a base is not 64-byte aligned");
   const uint32_t Mt = (M + t.rows() - 1) / t.rows() * t.rows();
-  l0::Kernel& k = kc(kernels::pf_gemm_q4_variant(t.na, t.nb, t.sn, layout, silu), "pf_gemm_q4");
+  const std::string variant = slm ? kernels::pf_gemm_q4_slm_variant(t.na, t.sn)
+                                  : kernels::pf_gemm_q4_variant(t.na, t.nb, t.sn, layout, silu);
+  l0::Kernel& k = kc(variant, "pf_gemm_q4");
   cx.launch(k, N / t.cols(), Mt / t.rows(), 1,   // columns first (pf_gemm_q4.cl)
             {PtrArg(A), PtrArg(qw), PtrArg(scales), PtrArg(C), arg_val(Mt), arg_val(K), arg_val(N),
              arg_val(lda), arg_val(ldc)});

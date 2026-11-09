@@ -2,7 +2,8 @@
 
 Work item 3c complete. **GO for a dedicated decode-attention follow-up:** at
 150k, attention is 41.9% of the plain bf16 step and 57.9% of the int8 step.
-The follow-up is proposed as item 3f; no decode optimization is built here.
+These are the original 3c measurements. The later 3f implementation and its
+separate before/after measurements are recorded below.
 
 ## Method
 
@@ -172,3 +173,94 @@ Changing the sequence partition would change reduction association and needs
 its own numerical judgment. M = 4 already uses the DPAS verify path at these
 depths, so merely enabling that existing selector is not a new optimization.
 These are source-based hypotheses; no decode kernel is modified in 3c.
+
+## 3f: packed int8 decode reads — 2026-11-09
+
+Production code `8a5ccb1c` replaces the int8 v2 reader's scalar V loads with
+packed 16-bit 2D reads. Each subgroup lane selects its signed byte from a
+loaded pair; overlapping blocks stay within a head-bounded surface. One
+scale gather per lane feeds subgroup broadcasts for the sixteen positions.
+K keeps its existing byte block reads. Both readers widen finite fp16 scales
+with `vload_half`, preserving the original fp32 value exactly. The scale
+multiply locations, FP32 dot/FMA/softmax/reduction order, 32-way sequence
+partition, persistent KV representation and automatic DPAS selection remain
+the same. There is no new engine flag, environment variable or scratch buffer.
+
+### Selection and correctness
+
+The acceptance rule was fixed in `338c74dc` before measuring: at least 5%
+lower whole-step wall time at 81920 and 150000, and no regression above 2%
+at 4k/32k or M = 4, with bitwise equality. The native-scale-only prototype
+improved the long M = 1 attention pair about 1.074x; adding packed V reads
+reached about 1.66x. These are single-layer probe ratios; whole-step results
+below determine acceptance.
+
+`kv8_decode_bitwise_test` compares actual production kernels against a frozen
+copy of the reader from `800783f2`. All raw partial and output words match in
+140 case executions: M = 1..4 and batched M = 8, short/tail boundaries through
+150015, mixed slot offsets and inactive rows. All 63,488 finite fp16 codes,
+including signed zeros and subnormals, widen bitwise; output/partial guards
+remain intact. Deliberately zeroing V fails the comparison. An unchanged
+reader compared against itself fails the required performance gain, as expected.
+
+### Matched whole-step measurements
+
+Three before/after pairs use the same model, int8 head, capacity 150272,
+physical card 1 and whole-box lock. Each arm/phase has 128 warm-up calls,
+128 unprofiled wall calls and 32 profiled calls. Round 1 reverses build order;
+the probe also reverses M = 1 / M = 4 order by round and phase. Each executable
+loads the same real populated prefixes through the existing engine snapshot
+APIs, with model/prompt/capacity/form/size metadata checks.
+
+The first setup pair mixed cold prefill with restoration. Review caught the
+extra lazy slab/head allocations; both logs were archived under
+`~/b70/logs/3f/cold-setup` and the pair was repeated. Every accepted run now
+restores all four prefixes and reports identical 24.935 GB engine buffers:
+17.700 GB model, 4.963 GB KV, 0.957 GB decode state, 1.315 GB eager prefill
+scratch. The comparison rejects incomplete runs, duplicates, cold prefixes
+or unequal memory reports before checking the fixed performance rule.
+
+All 48 accepted measurements validate. Times are medians of three round
+means; gains are medians of paired wall-time reductions. Ranges describe
+observed paired variation, not confidence intervals. Attention is the
+profiled sum including prep/scan/reduce; wall is uninstrumented.
+
+| depth | M | old wall ms | new wall ms | paired gain % | gain range % | old attention ms | new attention ms | new rows/s |
+|---:|---:|---:|---:|---:|:---|---:|---:|---:|
+| 4096 | 1 | 30.643 | 29.869 | 2.53 | 2.53–2.54 | 1.962 | 1.167 | 33.48 |
+| 4096 | 4 | 33.939 | 33.967 | -0.14 | -0.14–-0.02 | 1.905 | 1.909 | 117.76 |
+| 32768 | 1 | 38.026 | 34.740 | 8.63 | 8.59–8.64 | 9.444 | 5.940 | 28.79 |
+| 32768 | 4 | 40.132 | 40.147 | -0.06 | -0.10–-0.01 | 8.069 | 8.051 | 99.63 |
+| 81920 | 1 | 50.634 | 42.830 | 15.36 | 15.30–15.42 | 21.779 | 13.883 | 23.35 |
+| 81920 | 4 | 49.595 | 49.589 | -0.03 | -0.06–0.02 | 17.374 | 17.395 | 80.66 |
+| 150000 | 1 | 67.320 | 53.789 | 20.12 | 20.10–20.14 | 38.463 | 24.794 | 18.59 |
+| 150000 | 4 | 62.162 | 62.164 | -0.03 | -0.05–0.03 | 30.126 | 30.149 | 64.35 |
+
+The M = 4 production path already uses DPAS at these depths and remains
+effectively unchanged. Rows/s for verify still excludes drafting/acceptance.
+Both long plain-decode gains clear 5%; every regression check stays within 2%.
+Raw logs: `~/b70/logs/3f/{before,after}-r{0,1,2}.log`, `comparison.{md,json}`,
+`production-bitwise.log` and `production-negative.log`.
+
+The named prefill regressions pass 17/17, including both snapshot forms and
+MTP prefill; all four l0 golden printouts match the baseline byte for byte
+after masking only numeric elapsed-time fields. The default int8 MTP
+verification registration initially skips on two contexts, identically on
+the immutable baseline:
+`mtp_verify_qwen3.8_int8_n1998_m2a_7015c7519decf848` and
+`mtp_verify_qwen3.8_int8_n2053_m2a_24d74a876aefabe2`. Its twin registration
+does not copy the normal test's judge environment. Both exact references
+already exist in `oracle-out-qwen-f32-forced`; rerunning with that existing
+`B70_FORCED_JUDGE` directory and the existing bf16-top references **passes**
+(132.70 s), with numerical thresholds unchanged.
+
+The ten int8 checkpoint registrations complete with eight passes and two
+initial skips; the judged rerun resolves one skip. Slots, replay, engine
+smoke, both decode goldens, memory planning and both prefix-cache forms
+pass. The long MTP GPU gate reports zero failing runs and passes its other
+checks, but **skips** on 27 divergences in nine contexts. Its required
+`oracle-out-qwen-f32-pfi8-forced` references are absent. The normal f32
+references cannot substitute for this gate's int8 prompt arithmetic. This
+remaining skip is not counted as a pass. Logs are under `~/b70/logs/3f`:
+`checkpoint-regressions.log`, `baseline-mtp-verify.log` and
+`mtp-verify-judged.log`. The final non-checkpoint suite is pending.
