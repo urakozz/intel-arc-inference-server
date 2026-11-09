@@ -3,7 +3,7 @@
 #   tools/toolcall/engine_generate.sh <snapshot> <set dir> <out dir> <backend>
 # For every scenario in <set dir>/manifest.json: check the .ids file's SHA-256
 # against the manifest (the bf16 and engine runs must see byte-identical ids),
-# run b70-decode with 192 greedy ids through the prefill path on <backend>
+# run b70-decode with 384 greedy ids through the prefill path on <backend>
 # (l0 or l0-int8), save its stdout as
 # <out>/<name>.<backend>.ids and decode it with the snapshot's tokenizer into
 # <out>/<name>.<backend>.txt (special tokens kept). Scenarios whose two outputs
@@ -14,7 +14,7 @@
 # and the resolved tokenizer.json mounted.
 # Env: B70_DECODE (default build/src/cli/b70-decode), PYTHON (default python3),
 #      ORACLE_IMAGE (the int8 lm_head: outputs are <name>.<backend>-i8head.*),
-#      N_NEW (the greedy ids per scenario, default 192 - the reference run's --new-tokens:
+#      N_NEW (the greedy ids per scenario, default 384 - the reference run's --new-tokens:
 #      K2-Horizon's A4 uses 512, spec 18d), MAX_LEN (default 16384), PREFILL_CHUNK (plan 5d:
 #      passed as b70-decode's existing --prefill-chunk, e.g. 4096; unset = the engine's default).
 # K2-Horizon (spec 18d): b70-decode dispatches on config.json, so the same line runs K2's

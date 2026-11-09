@@ -11,7 +11,7 @@
 #                                                   Qwen/Qwen3.8-27B (54 GB): Qwen3_5ForCausalLM layer-streamed,
 #                                                   the first K layers kept once read (K from the memory plan
 #                                                   under the cap: ~54 of 64 at the box's 64g), bf16 GEMMs as fp32
-#                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 192 new ids,
+#                                                   GEMMs rounded to bf16 (cpu_bf16.py), HF generate, 384 new ids,
 #                                                   one scenario at a time -> $OUT/<name>.bf16.{ids,txt}
 #                                                   (resumable; no .gap). OUT default oracle-out-qwen-a4.
 #   tools/toolcall/a4_ref.sh <ornith|k2|kolibri|qwen4exp> set   the model's set: make_set.py --from
@@ -51,19 +51,19 @@
 #
 # The references (tools/toolcall/oracle_generate.py, by config.json's model_type):
 #   ornith  tools/oracle/ornith_ref.py's layer-streamed Qwen3_5MoeForCausalLM on the INT4
-#           checkpoint dequantised (15a: the engine's own weights), 192 new ids;
+#           checkpoint dequantised (15a: the engine's own weights), 384 new ids;
 #   k2      tools/oracle/k2_ref.py's port in bf16 mode on the int4 checkpoint dequantised (18a's
 #           reference; MODEL_DIR=<the bf16 original's snapshot> for the true bf16 model), 512 new
 #           ids (its replies open with reasoning; the set renders reasoning_effort low);
 #   kolibri tools/oracle/kolibri_ref.py's KolibriRef in bf16 mode (`--model kolibri`) on the 156 GB
 #           bf16 SOURCE (Aleph-Alpha/Kolibri-1-BF16 - KL4's reference; it runs wherever 20b runs,
-#           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 192 new ids (the set renders
+#           decision 1: MODEL_DIR, DEVICE=cuda|xpu where there is one), 384 new ids (the set renders
 #           thinking off). Score with `score.py --format hermes` (0 parse failures of the reference:
 #           the hard bar).
 #   qwen4exp tools/oracle/qwen4exp_ref.py's layer-streamed model (spec 21a) on Intel's W4A16
 #           AutoRound checkpoint (Intel/Qwen3.8-Flash-Next-W4A16-AutoRound: int4 g128 experts
 #           dequantised, the PLE table from <snapshot>-ple-int8/ when present - the engine's format),
-#           192 new ids, transformers 5.19.0 from the qwen4exp site first on PYTHONPATH (SITE: the Mac
+#           384 new ids, transformers 5.19.0 from the qwen4exp site first on PYTHONPATH (SITE: the Mac
 #           oracle-out-q4exp/site, the box oracle-out-q4exp-site - tools/oracle/qwen4exp_env.sh makes
 #           it in the container once). Q4_LAYERS=N truncates as the engine's --layers N (a test run;
 #           the A4 reference is the whole model). Prepared for spec 22: the engine's A4 run on the
@@ -110,7 +110,7 @@
 # needs transformers 5.15 (agnes-ref-img; ornith_ref.layer_major refuses another version).
 # Qwen3.8 (qwen, ESTIMATED from the box's fp32 rate and memory bandwidth, not measured): a prompt pass
 # (960-2990 ids, mean ~1900) ~2-4 min, a decode step ~5-8 s (10 of 64 layers re-read, every bf16
-# weight upcast to fp32 per call), up to 192 steps a scenario - ~10-16 h the set, one scenario at a
+# weight upcast to fp32 per call), up to 384 steps a scenario - ~10-16 h the set, one scenario at a
 # time (the dense path does not batch).
 #
 # Env: OUT (oracle-out-<model>-a4; git-ignored like every oracle-out*), DEVICE (kolibri's
