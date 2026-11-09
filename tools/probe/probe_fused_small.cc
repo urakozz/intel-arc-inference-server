@@ -176,9 +176,8 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
                  arg_val(N), arg_val(K), arg_val(ldc)});
     };
     if (v.split) {
-      const std::string base = kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, sh.layout, false);
-      launch(base + "_GATE");
-      launch(base + "_UP_SILU");
+      launch(kernels::pf_gemm_q4_split_variant(v.na, v.sn, false));
+      launch(kernels::pf_gemm_q4_split_variant(v.na, v.sn, true));
     } else {
       launch(kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, sh.layout, silu));
     }
@@ -348,9 +347,8 @@ int main(int argc, char** argv) {
     for (const Q4& v : q4s) {
       try {
         if (v.split) {
-          const std::string base = kernels::pf_gemm_q4_variant(v.na, v.nb, v.sn, 0, false);
-          kc(base + "_GATE", "pf_gemm_q4");
-          kc(base + "_UP_SILU", "pf_gemm_q4");
+          kc(kernels::pf_gemm_q4_split_variant(v.na, v.sn, false), "pf_gemm_q4");
+          kc(kernels::pf_gemm_q4_split_variant(v.na, v.sn, true), "pf_gemm_q4");
           built.push_back(v);
           continue;
         }

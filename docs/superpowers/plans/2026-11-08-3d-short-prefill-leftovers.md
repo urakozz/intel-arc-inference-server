@@ -64,7 +64,7 @@ continue within 3f with the next reader candidate; do not create a new item.
 
 - [x] Freeze a baseline build from the current engine before kernel edits.
 - [x] Probe 3d candidates in the specified order, with the committed 5% rule.
-- [ ] Integrate the winning gate‖up tile automatically, or record a measured no-go.
+- [x] Integrate the winning gate‖up tile automatically, or record a measured no-go.
 - [ ] Verify the named prefill gates and byte-identical golden printouts; measure
   237/300/384-id prefill and the server turn against the baseline.
 - [ ] Measure one-card versus pp at all six lengths and the two server requests.
