@@ -155,9 +155,12 @@ inline std::string pf_gemm_q4_variant(unsigned NA, unsigned NB, unsigned SN, uns
   return "pf_gemm_q4_A" + std::to_string(NA) + "_B" + std::to_string(NB) + "_S" + std::to_string(SN) + "_L" +
          std::to_string(layout) + (silu ? "_SILU" : "");
 }
-// Open-work 3d: NB1 gate/up passes share bf16 X between their in-order launches.
+// Open-work 3d probe controls: NB1 gate/up passes share bf16 X between their launches.
 inline std::string pf_gemm_q4_split_variant(unsigned NA, unsigned SN, bool up) {
   return pf_gemm_q4_variant(NA, 1, SN, 0, false) + (up ? "_UP_SILU" : "_GATE");
+}
+inline std::string pf_gemm_q4_slm_variant(unsigned NA, unsigned SN) {
+  return pf_gemm_q4_variant(NA, 1, SN, 0, false) + "_SLM_SILU";
 }
 inline constexpr unsigned kPfSlabWidth = 1024;   // columns per pf_dequant_slab / slab GEMM
 inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout) {
