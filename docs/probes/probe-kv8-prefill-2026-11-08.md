@@ -3,7 +3,8 @@
 Completed 2026-11-09 on `kv8-prefill-fast`, code head `a23222f7`, against
 main `ba99cb9f`. On one Arc Pro B70, int8 prefill is within 1.19–4.43% of
 bf16 from 15,257 to 128,000 ids, with bitwise original int8 attention outputs.
-No runtime flags or environment switches were added. No push or merge.
+No runtime flags or environment switches were added. Local merge to main
+was authorized on 2026-11-09; no push was requested.
 
 ## Before/after timings
 
