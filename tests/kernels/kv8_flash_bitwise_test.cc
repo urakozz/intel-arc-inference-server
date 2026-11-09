@@ -1,4 +1,8 @@
 // Item 3e: the production flash against its frozen int8 control, every output byte.
+// 3h step 0 (--chunk-time): short chunks deep in a session, the int8 in-place flash versus
+// the widening pair (kv8_widen over pos + C rows, then the raw flash) and the frozen control.
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -135,9 +139,132 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
   }
 }
 
+// 3h step 0: one FA layer's attention for a C-row chunk at `pos`, as each path issues it,
+// sixteen times in one list (Qwen3.8's FA layers). Arms interleave in rotating order after
+// a warm-up; the medians and the paired ratios against the widening pair are printed.
+void chunk_time(pf_harness::Dev& d, l0::Kernel& inplace, l0::Kernel& raw, l0::Kernel& widen,
+                l0::Kernel& control, uint32_t pos, const std::vector<uint32_t>& chunks) {
+  using Clock = std::chrono::steady_clock;
+  const uint32_t cmax = *std::max_element(chunks.begin(), chunks.end());
+  const uint32_t depth_max = pos + cmax, max_len = ((depth_max + 255u) & ~255u) + 256u;
+  std::mt19937 rng(pos);
+  std::vector<int8_t> k(size_t(depth_max) * kKVH * kHD), v(k.size());
+  for (size_t i = 0; i < k.size(); ++i) {
+    k[i] = int8_t(int(rng() % 255) - 127);
+    v[i] = int8_t(int(rng() % 255) - 127);
+  }
+  std::vector<uint16_t> ks(size_t(depth_max) * kKVH), vs(ks.size());
+  for (size_t i = 0; i < ks.size(); ++i) {
+    ks[i] = common::kv8::f32_to_f16_rne(float(1 + rng() % 100) / 4096.0f);
+    vs[i] = common::kv8::f32_to_f16_rne(float(1 + rng() % 100) / 4096.0f);
+  }
+  const auto q = pf_harness::random_bf16(size_t(cmax) * kQH * kHD, pos, -2.0f, 2.0f);
+  auto dk = pf_harness::upload(d.ctx, d.imm, k);
+  auto dv = pf_harness::upload(d.ctx, d.imm, v);
+  auto dks = pf_harness::upload(d.ctx, d.imm, ks);
+  auto dvs = pf_harness::upload(d.ctx, d.imm, vs);
+  auto dq = pf_harness::upload(d.ctx, d.imm, q);
+  const size_t plane = size_t(max_len) * kKVH * kHD;
+  l0::Mem draw(d.ctx, l0::MemKind::Device, 2 * plane * sizeof(uint16_t));
+  uint16_t* kraw = draw.as<uint16_t>();
+  uint16_t* vraw = kraw + plane;
+  const uint32_t rows_max = (cmax + 255u) & ~255u;
+  l0::Mem o(d.ctx, l0::MemKind::Device, size_t(kQH) * rows_max * kHD * sizeof(float));
+  enum { kControl, kInplace, kWiden, kArms };
+  const char* names[kArms] = {"control", "inplace", "widen+raw"};
+  for (const uint32_t C : chunks) {
+    const uint32_t depth = pos + C, rows = (C + 255u) & ~255u;
+    const uint32_t count = depth * kKVH * kHD;
+    auto bind = [&](l0::Kernel& kernel, bool is_raw) {
+      kernel.arg_ptr(0, dq.ptr());
+      kernel.arg_ptr(1, is_raw ? static_cast<void*>(kraw) : dk.ptr());
+      kernel.arg_ptr(2, dks.ptr());
+      kernel.arg_ptr(3, is_raw ? static_cast<void*>(vraw) : dv.ptr());
+      kernel.arg_ptr(4, dvs.ptr());
+      kernel.arg_ptr(5, o.ptr());
+      kernel.arg(6, pos);
+      kernel.arg(7, C);
+      kernel.arg(8, rows);
+    };
+    bind(control, false);
+    bind(inplace, false);
+    bind(raw, true);
+    widen.arg_ptr(0, dk.ptr());
+    widen.arg_ptr(1, dv.ptr());
+    widen.arg_ptr(2, kraw);
+    widen.arg_ptr(3, vraw);
+    widen.arg(4, count);
+    std::vector<l0::CmdList> lists;
+    for (int a = 0; a < kArms; ++a) {
+      lists.push_back(l0::CmdList::regular(d.ctx));
+      for (uint32_t layer = 0; layer < 16; ++layer) {
+        if (a == kWiden) lists.back().launch(widen, (count + 4095u) / 4096u, 1, 1);
+        lists.back().launch(a == kControl ? control : a == kInplace ? inplace : raw, (C + 7u) / 8u, kKVH, 1);
+      }
+      lists.back().close();
+    }
+    // The three paths' pf_o, bitwise, on this shape.
+    std::vector<float> ref(size_t(kQH) * rows * kHD), got(ref.size());
+    for (int a = 0; a < kArms; ++a) {
+      d.imm.fill(o.ptr(), 0x3F123456u, o.size());
+      d.q.execute(lists[a], &d.fence);
+      d.fence.wait();
+      pf_harness::download(d.imm, a == kControl ? ref : got, o);
+      if (a != kControl) CHECK(std::memcmp(got.data(), ref.data(), ref.size() * sizeof(float)) == 0);
+    }
+    auto once = [&](int a) {
+      const auto t0 = Clock::now();
+      d.q.execute(lists[a], &d.fence);
+      d.fence.wait();
+      return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    };
+    for (int w = 0; w < 3; ++w)
+      for (int a = 0; a < kArms; ++a) once(a);
+    std::vector<double> ms[kArms], vs_widen[kArms];
+    for (uint32_t round = 0; round < 9; ++round) {
+      double t[kArms];
+      for (int i = 0; i < kArms; ++i) {
+        const int a = int((round + i) % kArms);
+        t[a] = once(a);
+      }
+      for (int a = 0; a < kArms; ++a) {
+        ms[a].push_back(t[a]);
+        vs_widen[a].push_back(t[a] / t[kWiden]);
+      }
+    }
+    for (int a = 0; a < kArms; ++a) {
+      std::sort(ms[a].begin(), ms[a].end());
+      std::sort(vs_widen[a].begin(), vs_widen[a].end());
+      std::printf("chunk-time pos %u C %4u %-9s 16 layers %9.3f ms  vs widen+raw %.4f [%.4f, %.4f]\n", pos, C,
+                  names[a], ms[a][4], vs_widen[a][4], vs_widen[a].front(), vs_widen[a].back());
+    }
+    std::fflush(stdout);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::string(argv[1]) == "--chunk-time") {
+    // --chunk-time [pos]: the production in-place and raw binaries against the control.
+    const uint32_t pos = argc > 2 ? uint32_t(std::stoul(argv[2])) : 128000u;
+    pf_harness::Dev d;
+    l0::Module im(d.ctx, kernels::path("pf_flash_attn_kv8"));
+    l0::Module rm(d.ctx, kernels::path("pf_flash_attn_kv8_raw"));
+    l0::Module cm(d.ctx, kernels::path("kv8_flash_control"));
+    auto inplace = im.kernel("pf_flash_attn_kv8");
+    auto raw = rm.kernel("pf_flash_attn_kv8");
+    auto widen = rm.kernel("kv8_widen");
+    auto control = cm.kernel("pf_flash_attn_kv8");
+    inplace.group_size(96);
+    raw.group_size(96);
+    control.group_size(96);
+    widen.group_size(256);
+    chunk_time(d, inplace, raw, widen, control, pos,
+               {1, 8, 16, 32, 64, 128, 300, 512, 1024, 2048});
+    std::puts("kv8_flash_bitwise_test --chunk-time: done");
+    return 0;
+  }
   CHECK(argc <= 4);
   bool time = false, raw = false;
   for (int i = 2; i < argc; ++i) {

@@ -336,10 +336,18 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 //
 // K: sub-group s owns position p; lane l's 16 elements are dims l + 16 t (two uchar8
 //    sub-group block reads, attn_v2.cl's order), dequantised as float(q8) * f16f(scale[p]).
-// V: packed 16-bit 2D reads, with each lane selecting its signed byte. One scale
-//    gather per lane supplies the wave through subgroup broadcasts; rows past
-//    `last` remain zero. Dequantisation and all arithmetic orders are unchanged.
-// The online softmax and its orders are attn_v2.cl's, unchanged.
+// V: packed 16-bit 2D reads; sub-group pairs share a block and take its low / high bytes, so
+//    a work-item's dim is v8_dim(sgid, lane), a fixed permutation of the work-group's 256
+//    (3h; the 3f reader shuffled each lane's byte in). One scale gather per lane supplies
+//    the wave through subgroup broadcasts; rows past `last` remain zero.
+// The online softmax and its orders are attn_v2.cl's, unchanged. 3h: each (q head, row)
+// pair's max, weights and sum are computed by one owner sub-group per wave and passed
+// through SLM (one more barrier a wave), where every sub-group used to repeat them; each
+// value is the same operation on the same operands, so the partials are bitwise the 3f
+// reader's (tests/kernels/kv8_decode_bitwise_test.cc). Also 3h: at M = 1 the score dot's lane
+// partials reach the owner through SLM (DOT_SLM), x s dequantises in one fma (kv8_deq), and
+// the K / V rows and scales PFD waves ahead are prefetched into the cache. At 150k this
+// reader takes ~0.53 of bf16's time where the 3f one took ~1.27 (probe_kv8_decode, 3h record).
 // ---------------------------------------------------------------------------
 #ifndef M
 #define M 1
@@ -365,6 +373,11 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 #define PER_LANE 16
 #define PART 258
 #define NPR (M * GQA)
+#define NOWN ((NPR + SG - 1) / SG)   /* the (q head, row) pairs one sub-group owns (3h) */
+// 3h: the score dot's lane partials go through SLM and the owner sums them, the shuffle
+// tree's adds in its order, in its own lanes (M = 1: measured slower at M = 4).
+#define DOT_SLM (NPR <= 6)
+#define PFD 2u   /* 3h: waves ahead the cache prefetch runs (2 measured best of 2, 3, 4, 6) */
 #define SSCALE 0.0625f       /* attn_v2's shipped EXP2 = 0 form: exp and 1/16 */
 #define EXPF(x) exp(x)
 
@@ -378,6 +391,12 @@ inline uint v2_ppw(uint len) {
 inline float kv8_decode_scale(__global const ushort* p, size_t index) {
   return vload_half(index, (__global const half*)p);
 }
+
+// 3h: an int8 times its scale, x s, in one fma: as_float(0x4B400000 + x) is 12582912 + x exactly
+// (the float's unit in [2^23, 2^24)) and ns = -12582912 s is exact (12582912 = 3 x 2^22), so the
+// fma's single rounding is of x s itself, which is exact (8 x 11 bits). Only a zero product's sign
+// can differ from (float)x * s (+0 here); every reader adds it to a sum that is +0 or nonzero.
+inline float kv8_deq(int x, float s, float ns) { return fma(as_float(0x4B400000 + x), s, ns); }
 
 // K stays int8 in registers with its row's scale beside it (16 bytes + one float per lane,
 // where 16 dequantised floats would be 16 GRF); the score dot dequantises at use, and since
@@ -400,23 +419,32 @@ inline void load_k8(__global const char* restrict kv_k, __global const ushort* r
   }
 }
 
+// The wave's 16 V values of dim v8_dim(sgid, lane): sub-groups 2h and 2h + 1 read the same
+// packed 16-bit block (lane l: the byte pair 32 h + 2 l, + 1) and take its low / high byte,
+// so no lane needs another's pair. One scale gather per lane supplies the wave through
+// subgroup broadcasts; rows past `last` remain zero.
+inline uint v8_dim(uint sgid, uint lane) { return 32u * (sgid >> 1) + 2u * lane + (sgid & 1u); }
+
 inline void load_v8(__global const char* restrict kv_v, __global const ushort* restrict v_scale,
-                    uint p0, uint j, uint lid, uint last, float* vreg) {
-  // A lane loads one packed pair per position. Broadcast the pair for dim lid,
-  // then select its signed byte. Overlapping blocks stay within the head's
-  // bounded surface; lanes past the last row read zero.
+                    uint p0, uint j, uint sgid, uint lane, uint last, float* vreg) {
   ushort packed[WAVE_P];
-  const uint lane = lid & 15u;
   intel_sub_group_2d_block_read_16b_16r16x1c((__global void*)(kv_v + (size_t)j * HD),
-      HD, last + 1, KV_HEADS * HD, (int2)((int)((lid >> 4) * 8u), (int)p0), packed);
+      HD, last + 1, KV_HEADS * HD, (int2)((int)((sgid >> 1) * 16u), (int)p0), packed);
   const uint p = p0 + lane;
   const float scale = p <= last ? kv8_decode_scale(v_scale, (size_t)p * KV_HEADS + j) : 0.0f;
+  const float nscale = -12582912.0f * scale;
+  // A row past `last` reads 0 (the 2D read's bound) with scale 0, so its value is +0.0
+  // without a select, as the 3f reader's 0.0f.
+  if (sgid & 1u) {
 #pragma unroll
-  for (uint s = 0; s < WAVE_P; ++s) {
-    const uint pair = intel_sub_group_shuffle((uint)packed[s], lane >> 1);
-    const char value = as_char((uchar)(pair >> ((lane & 1u) * 8u)));
-    const float sc = intel_sub_group_shuffle(scale, s);
-    vreg[s] = p0 + s <= last ? (float)value * sc : 0.0f;
+    for (uint s = 0; s < WAVE_P; ++s)
+      vreg[s] = kv8_deq((int)as_short(packed[s]) >> 8, intel_sub_group_shuffle(scale, s),
+                        intel_sub_group_shuffle(nscale, s));
+  } else {
+#pragma unroll
+    for (uint s = 0; s < WAVE_P; ++s)
+      vreg[s] = kv8_deq((int)as_char((uchar)packed[s]), intel_sub_group_shuffle(scale, s),
+                        intel_sub_group_shuffle(nscale, s));
   }
 }
 
@@ -474,7 +502,13 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
 #endif
 
   __local float qpack[NPR * HD];
+#if DOT_SLM
+  __local float dot_x[NPR][WAVE_P * (SG + 1)];   // [pr][position * 17 + lane]: lane l's partial
+#else
   __local float sc_x[2][NPR][WAVE_P];
+#endif
+  __local float wt_x[2][NPR][WAVE_P];   // 3h: the owner's weights (lane = position) and rescale
+  __local float rs_x[2][NPR];
   for (uint i = lid; i < NPR * HD; i += KV8_WG) {
     const uint pr = i / HD, d = i % HD;
     const uint m = pr / GQA, qhl = pr % GQA;
@@ -482,8 +516,13 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  float mx[NPR], sm[NPR], acc[NPR];
-  for (uint q = 0; q < NPR; ++q) { mx[q] = -INFINITY; sm[q] = 0.0f; acc[q] = 0.0f; }
+  // 3h: (q head, row) pair pr's running max and sum live in ONE sub-group, its owner
+  // (pr % 16 == sgid), which computes the wave's weights once for the work-group; acc
+  // (lane = dim v8_dim) is every sub-group's. The values and their orders are unchanged.
+  float mx[NOWN], sm[NOWN], acc[NPR];
+  for (uint k = 0; k < NOWN; ++k) { mx[k] = -INFINITY; sm[k] = 0.0f; }
+  for (uint q = 0; q < NPR; ++q) acc[q] = 0.0f;
+  const uint dim = v8_dim(sgid, lane);
   uint wc = 0;
 
 #ifndef BATCH_ROWS
@@ -513,10 +552,18 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
     char kq[PER_LANE];
     float ksc, vreg[WAVE_P];
     load_k8(kv_k, k_scale, bstart + sgid, j, bstart + sgid <= last, kq, &ksc);
-    load_v8(kv_v, v_scale, bstart, j, lid, last, vreg);
+    load_v8(kv_v, v_scale, bstart, j, sgid, lane, last, vreg);
     for (uint w = 0; w < nwaves; ++w, ++wc) {
       const uint p0 = bstart + w * WAVE_P;
       const uint buf = wc & 1u;
+      // 3h: the wave PFD ahead into the cache - 64-byte quarters of its K rows (sub-groups
+      // 0..3) and V rows (4..7), its K and V scales (8, 9). Hints only: no value depends on them.
+      if (w + PFD < nwaves && sgid < 8u)
+        intel_sub_group_2d_block_prefetch_16b_16r16x2c(
+            (__global void*)((sgid < 4u ? (__global const char*)kv_k : kv_v) + (size_t)j * HD), HD,
+            last + 1, KV_HEADS * HD, (int2)((int)(32u * (sgid & 3u)), (int)(p0 + PFD * WAVE_P)));
+      if (w + PFD < nwaves && (sgid == 8u || sgid == 9u))
+        prefetch((sgid == 8u ? k_scale : v_scale) + (size_t)(p0 + PFD * WAVE_P) * KV_HEADS, WAVE_P * KV_HEADS);
 #pragma unroll
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
@@ -531,46 +578,69 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
         qv[11] = as_float(qb.s3); qv[12] = as_float(qb.s4); qv[13] = as_float(qb.s5);
         qv[14] = as_float(qb.s6); qv[15] = as_float(qb.s7);
         float a = 0.0f;
-        for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], (float)kq[t] * ksc, a);   // exact operand
+        const float nks = -12582912.0f * ksc;
+        for (uint t = 0; t < PER_LANE; ++t) a = fma(qv[t], kv8_deq(kq[t], ksc, nks), a);   // exact operand
+#if DOT_SLM
+        dot_x[pr][sgid * (SG + 1) + lane] = a;
+#else
         for (uint stride = SG / 2; stride > 0; stride >>= 1)
           a += intel_sub_group_shuffle_down(a, a, stride);
         if (lane == 0) sc_x[buf][pr][sgid] = a;
+#endif
+      }
+      barrier(CLK_LOCAL_MEM_FENCE);
+      // The owners: the wave's max, weights and sum, once per work-group.
+#pragma unroll
+      for (uint k = 0; k < NOWN; ++k) {
+        const uint pr = sgid + SG * k;
+        const uint m = pr / GQA;
+        if (pr >= NPR || m < mlo || m >= mhi) continue;
+#ifndef BATCH_ROWS
+        const uint bound = pos + m;
+#else
+        const uint bound = rp[m];
+#endif
+#if DOT_SLM
+        // The shuffle tree's sums (stride 8, 4, 2, 1 into lane 0) in this lane, for position lane.
+        float x[SG];
+        for (uint l = 0; l < SG; ++l) x[l] = dot_x[pr][lane * (SG + 1) + l];
+        for (uint stride = SG / 2; stride > 0; stride >>= 1)
+          for (uint l = 0; l < stride; ++l) x[l] += x[l + stride];
+        const float mine = p0 + lane <= bound ? x[0] * SSCALE : -INFINITY;
+#else
+        const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
+#endif
+        const float nmx = fmax(mx[k], sub_group_reduce_max(mine));
+        float resc, wl;
+        if (nmx > -INFINITY) {
+          resc = EXPF(mx[k] - nmx);
+          wl = EXPF(mine - nmx);
+        } else {
+          resc = 1.0f;
+          wl = 0.0f;
+        }
+        float ssum = 0.0f;
+        for (uint s2 = 0; s2 < WAVE_P; ++s2) ssum += intel_sub_group_shuffle(wl, s2);
+        if (nmx > -INFINITY) {
+          sm[k] = fma(sm[k], resc, ssum);
+          mx[k] = nmx;
+        }
+        wt_x[buf][pr][lane] = wl;
+        if (lane == 0) rs_x[buf][pr] = resc;
       }
       barrier(CLK_LOCAL_MEM_FENCE);
 #pragma unroll
       for (uint pr = 0; pr < NPR; ++pr) {
         const uint m = pr / GQA;
         if (m < mlo || m >= mhi) continue;
-#ifndef BATCH_ROWS
-        const uint bound = pos + m;
-#else
-        const uint bound = rp[m];
-#endif
-        const float mine = p0 + lane <= bound ? sc_x[buf][pr][lane] * SSCALE : -INFINITY;
-        const float nmx = fmax(mx[pr], sub_group_reduce_max(mine));
-        float resc, wl;
-        if (nmx > -INFINITY) {
-          resc = EXPF(mx[pr] - nmx);
-          wl = EXPF(mine - nmx);
-        } else {
-          resc = 1.0f;
-          wl = 0.0f;
-        }
-        float ssum = 0.0f, tsum = 0.0f;
-        for (uint s2 = 0; s2 < WAVE_P; ++s2) {
-          const float ws = intel_sub_group_shuffle(wl, s2);
-          ssum += ws;
-          tsum = fma(ws, vreg[s2], tsum);
-        }
-        if (nmx > -INFINITY) {
-          sm[pr] = fma(sm[pr], resc, ssum);
-          mx[pr] = nmx;
-        }
-        acc[pr] = fma(acc[pr], resc, tsum);
+        const float wl = wt_x[buf][pr][lane];
+        float tsum = 0.0f;
+        for (uint s2 = 0; s2 < WAVE_P; ++s2) tsum = fma(intel_sub_group_shuffle(wl, s2), vreg[s2], tsum);
+        acc[pr] = fma(acc[pr], rs_x[buf][pr], tsum);
       }
       if (w + 1 < nwaves) {
         load_k8(kv_k, k_scale, p0 + WAVE_P + sgid, j, p0 + WAVE_P + sgid <= last, kq, &ksc);
-        load_v8(kv_v, v_scale, p0 + WAVE_P, j, lid, last, vreg);
+        load_v8(kv_v, v_scale, p0 + WAVE_P, j, sgid, lane, last, vreg);
       }
     }
 #pragma unroll
@@ -579,8 +649,8 @@ __kernel void attn_decode_v2_kv8(__global const uint* restrict ctrl,
       if (m < mlo || m >= mhi) continue;
       __global float* restrict out =
           attn_part + (((size_t)(j * GQA + qhl) * TGT + blk) * M + m) * PART;
-      out[2 + lid] = acc[pr];
-      if (lid == 0) { out[0] = mx[pr]; out[1] = sm[pr]; }
+      out[2 + dim] = acc[pr];
+      if (pr % SG == sgid && lane == 0) { out[0] = mx[pr / SG]; out[1] = sm[pr / SG]; }
     }
   }
 }
