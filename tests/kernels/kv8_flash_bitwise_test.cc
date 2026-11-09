@@ -41,28 +41,35 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
   const auto part = pf_harness::random_f32(size_t(C) * 14336, pos + 1, 0.0f, 1.5f);
   auto dk = pf_harness::upload(d.ctx, d.imm, k);
   auto dv = pf_harness::upload(d.ctx, d.imm, v);
-  std::unique_ptr<l0::Mem> dkraw, dvraw;
+  // 3j: --raw widens into ONE buffer laid out as the engine's PrefillScratch::kv8_raw_buffer - K's rows, then V's
+  // at k + max_len x 4 x 256 (attn_chunk_kv8) - at a max_len past the rows used, so the V offset is this test's to
+  // catch: K and V exact, the gap between them and the tail untouched, and the flash below reads both from there.
+  std::unique_ptr<l0::Mem> draw;
+  uint16_t *kraw = nullptr, *vraw = nullptr;
   if (raw) {
-    std::vector<uint16_t> kr(k.size() + 16, 0xA55A), vr(v.size() + 16, 0xA55A);
+    const uint32_t max_len = ((depth + 255u) & ~255u) + 256u;   // > depth: a nonzero gap before V
+    const size_t plane = size_t(max_len) * kKVH * kHD;
+    std::vector<uint16_t> want(2 * plane + 16, 0xA55A);
     for (size_t i = 0; i < k.size(); ++i) {
-      kr[i] = common::f32_to_bf16(float(k[i]));
-      vr[i] = common::f32_to_bf16(float(v[i]));
+      want[i] = common::f32_to_bf16(float(k[i]));
+      want[plane + i] = common::f32_to_bf16(float(v[i]));
     }
-    dkraw = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, kr.size() * 2);
-    dvraw = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, vr.size() * 2);
-    d.imm.fill(dkraw->ptr(), 0xA55AA55Au, dkraw->size());
-    d.imm.fill(dvraw->ptr(), 0xA55AA55Au, dvraw->size());
+    draw = std::make_unique<l0::Mem>(d.ctx, l0::MemKind::Device, want.size() * 2);
+    d.imm.fill(draw->ptr(), 0xA55AA55Au, draw->size());
+    kraw = draw->as<uint16_t>();
+    vraw = kraw + plane;
     widen->arg_ptr(0, dk.ptr());
     widen->arg_ptr(1, dv.ptr());
-    widen->arg_ptr(2, dkraw->ptr());
-    widen->arg_ptr(3, dvraw->ptr());
+    widen->arg_ptr(2, kraw);
+    widen->arg_ptr(3, vraw);
     widen->arg(4, uint32_t(k.size()));
     d.run(*widen, (uint32_t(k.size()) + 4095u) / 4096u, 1);
-    std::vector<uint16_t> expanded(kr.size());
-    pf_harness::download(d.imm, expanded, *dkraw);
-    CHECK(std::memcmp(expanded.data(), kr.data(), dkraw->size()) == 0);
-    pf_harness::download(d.imm, expanded, *dvraw);
-    CHECK(std::memcmp(expanded.data(), vr.data(), dvraw->size()) == 0);
+    std::vector<uint16_t> expanded(want.size());
+    pf_harness::download(d.imm, expanded, *draw);
+    CHECK(std::memcmp(expanded.data(), want.data(), draw->size()) == 0);
+    size_t v_nonzero = 0;
+    for (size_t i = 0; i < k.size(); ++i) v_nonzero += expanded[plane + i] != 0;
+    CHECK(v_nonzero > 0);
   }
   auto dks = pf_harness::upload(d.ctx, d.imm, ks);
   auto dvs = pf_harness::upload(d.ctx, d.imm, vs);
@@ -82,9 +89,9 @@ void compare(pf_harness::Dev& d, l0::Kernel& fast, l0::Kernel& control,
                  std::vector<uint16_t>& gated_result) {
     d.imm.fill(o.ptr(), 0x3F123456u, o.size());
     kernel.arg_ptr(0, dq.ptr());
-    kernel.arg_ptr(1, &kernel == &fast && raw ? dkraw->ptr() : dk.ptr());
+    kernel.arg_ptr(1, &kernel == &fast && raw ? static_cast<void*>(kraw) : dk.ptr());
     kernel.arg_ptr(2, dks.ptr());
-    kernel.arg_ptr(3, &kernel == &fast && raw ? dvraw->ptr() : dv.ptr());
+    kernel.arg_ptr(3, &kernel == &fast && raw ? static_cast<void*>(vraw) : dv.ptr());
     kernel.arg_ptr(4, dvs.ptr());
     kernel.arg_ptr(5, o.ptr());
     kernel.arg(6, pos);

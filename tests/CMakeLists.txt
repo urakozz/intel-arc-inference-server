@@ -1651,6 +1651,14 @@ if(B70_KV8)
   if(TARGET kernel_attn_v2_M8_T32_KV8_ROWS)
     target_compile_definitions(kv8_decode_bitwise_test PRIVATE B70_KV8_TEST_ROWS=1)
     add_dependencies(kv8_decode_bitwise_test kernel_attn_v2_M8_T32_KV8_ROWS)
+    # 3j: the production row reader at M = 2..7 too, each against the frozen reader's BATCH_ROWS build.
+    foreach(_m 2 3 4 5 6 7)
+      add_ocloc_kernel(kv8_decode_probe0_M${_m}_ROWS SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_decode_control.cl
+        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${_m} TGT=32 KV8_PROBE_KIND=0
+                BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SLOT=4
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/probe/kv8_decode_loads.cl)
+      add_dependencies(kv8_decode_bitwise_test kernel_kv8_decode_probe0_M${_m}_ROWS kernel_attn_v2_M${_m}_T32_KV8_ROWS)
+    endforeach()
   endif()
   add_test(NAME kv8_decode_bitwise_test COMMAND kv8_decode_bitwise_test)
   set_tests_properties(kv8_decode_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 600)
