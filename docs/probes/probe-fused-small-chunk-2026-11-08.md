@@ -372,3 +372,117 @@ int8 single pair is correctness evidence, not a stable performance estimate.
 All original GPU binary hashes match. Static review found no issues. The
 operator requested dedicated tests only; no broad end-of-branch suite ran.
 Logs and raw comparisons: `~/b70/logs/3g/`.
+
+## 10. 3i: distinct-layer weight walks — 2026-11-09
+
+`probe_fused_small` now defaults to `--weights layers`: independent live
+GPU allocations and independently generated synthetic values for every
+layer of the selected linear family. These have the model's shapes and
+footprint, not checkpoint contents. Families run sequentially, so their
+weight banks are never simultaneously resident.
+
+| family | layout | copies | bytes per copy | total weight bytes |
+|---|---:|---:|---:|---:|
+| gate/up | 0 | 64 | 94,699,520 | 6,060,769,280 |
+| down | 0 | 64 | 47,349,760 | 3,030,384,640 |
+| GDN qkv/z | 1 | 48 | 44,564,480 | 2,139,095,040 |
+| output projection | 0 | 64 | 16,711,680 | 1,069,547,520 |
+| FA q/k/v | 0 | 16 | 38,993,920 | 623,902,720 |
+
+Layout 0 includes its separate fp16 scales; layout 1 includes inline
+scales. The harness verifies live packed-weight addresses are distinct
+and allocation bytes equal the plan. `--plan` prints `PLAN` JSON without
+initializing a GPU; it is a storage plan, not a check of installed kernels
+or shape/tile compatibility. Explicit `--weights resident` keeps one matrix and
+labels chunk projections **ESTIMATED**; it preserves the original first
+matrix and activations. Layers mode reports measured walks without
+extrapolation. Example focused comparison:
+
+```sh
+build/tools/probe/probe_fused_small --weights layers --shape gu \
+  --rows 237,250 --q4 q8b1s4split,q8b1s4slm --rounds 7
+```
+
+Before timing a family, every applicable candidate is compared against
+the explicit dequant/slab GEMM control at every selected row count and
+every layer. Candidate output is poisoned before each comparison.
+`--negative-check` deliberately uses the first layer's candidate weights
+at the last layer; it must fail before that family's timing begins.
+
+Every arm visits layers in ascending order with the same input/output
+scratch addresses. Complete walks are warmed, then arm/row order rotates
+between rounds. One timestamp pair and final wait enclose the entire
+walk; independent host wall time includes submission and waiting. GPU
+span can include submission gaps; it is not summed kernel-active time.
+`SAMPLE` JSON retains each round, and `WALK` JSON records its median GPU
+and host span. Both are measured in either mode: `extrapolated` describes
+the mode's subsequent chunk projection, not an estimate of these spans.
+The per-linear table divides the measured GPU walk by
+copies. The layers-mode chunk table sums measured family walk medians;
+resident mode alone multiplies single-matrix medians by model layers.
+
+This remains an isolated linear-family probe: activations and scratch
+are reused, and surrounding operators, dependencies, activation
+production, and serving scheduling are absent. Its ratios require an
+engine check before changing production dispatch. No runtime code or
+kernel is changed by 3i.
+
+### Focused validation and calibration
+
+The host-only CLI regression first fails against the frozen old executable
+on the missing `--plan`, then passes all 10 tests. The box builds only the
+probe executable against matching existing host libraries. The dedicated
+GPU run on device 0 takes 36 seconds (19:25:34–19:26:10 UTC): resident GU
+at 237/250 rows, 64-layer GU at the same rows, 48-layer layout-1 qkv/z at
+54 rows, and the deliberate wrong-last-layer negative control.
+
+All **308 comparisons** pass bitwise (4 resident GU, 256 distinct GU,
+48 layout 1). The negative fails at GU layer 63 before any timing record.
+The 121 raw samples cover every requested arm/row/round exactly once;
+their medians, metadata, per-linear normalization and chunk-table totals
+are checked from the emitted records. All **2397 original GPU binary
+hashes** match. Static review finds no correctness defect. No broad suite
+or new serving campaign runs.
+
+The operator explicitly allows bypassing the lock and running on GPU 0.
+Another card-0 lock is held during the final run, so these are **potentially
+contended diagnostic measurements**, not quiet-box performance evidence.
+The original queued attempt and a briefly overlapping duplicate are
+discarded; only the fresh `gpu0-final/` logs below are used.
+
+Measured complete-walk medians, GPU / host wall milliseconds (resident
+walks contain one linear; layers walks contain all 64):
+
+| mode | rows | slab control | split S4 | SLM S4 |
+|---|---:|---:|---:|---:|
+| resident | 237 | 1.613 / 1.619 | 1.694 / 1.711 | 1.226 / 1.233 |
+| resident | 250 | 1.618 / 1.623 | 1.616 / 1.621 | 1.222 / 1.227 |
+| layers | 237 | 203.381 / 203.402 | 122.282 / 122.298 | 120.821 / 120.848 |
+| layers | 250 | 155.804 / 155.821 | 216.974 / 217.785 | 170.207 / 170.226 |
+
+Median within-round GPU reductions versus the control are, respectively,
+split / SLM: resident 237 **−1.20% / 24.03%**, resident 250 **0.10% /
+24.36%**, layers 237 **7.14% / 24.98%**, layers 250 **9.75% / 27.59%**.
+These paired statistics differ substantially from ratios of arm medians:
+the 64-layer control spans range 114.118–236.842 ms at 237 rows and
+117.202–246.314 ms at 250. Rotation cannot correct arbitrary external GPU
+contention. Layout-1's 48-layer walk measures 28.318 / 28.404 ms control
+and 6.799 / 6.806 ms fused; its timing has the same limitation.
+
+Calibration against the **previously recorded** engine runs in section 8:
+two-pass worsened CLI 237 from 254.0 to 256.2 ms and fresh server 250 from
+247.0 to 250.2 ms, whereas SLM improved CLI 237 from 254.9 to 232.2 ms
+and fresh server 250 from 246.5 to 227.3 ms. The new paired SLM direction
+agrees; the new paired split direction still disagrees with serving.
+Because the new run is contended, it establishes neither that weight
+streaming resolves the old false positive nor a stable new ranking. The
+recorded whole-engine rejection of split remains authoritative. 3i closes
+the tooling and correctness work; production dispatch still requires
+quiet whole-engine pairs in any subsequent kernel work.
+
+Two minor protocol improvements are deferred: reject incompatible
+shape/tile selections during `--plan`, and rename the resident `WALK`
+extrapolation flag to make its chunk-projection scope explicit. The
+current semantics are documented above; neither affects measured spans.
+
+Accepted raw logs and hash checks: `~/b70/logs/3i/gpu0-final/`.

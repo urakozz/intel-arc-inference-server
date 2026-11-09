@@ -964,6 +964,9 @@ target_include_directories(probe_fused_small PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_fused_small PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 b70_target_kernel_dir(probe_fused_small)
 add_dependencies(probe_fused_small ${PCR_PF_KERNELS})
+add_test(NAME probe_fused_small_cli_test COMMAND python3
+  ${CMAKE_CURRENT_SOURCE_DIR}/test_fused_small_cli.py $<TARGET_FILE:probe_fused_small>)
+set_tests_properties(probe_fused_small_cli_test PROPERTIES TIMEOUT 30)
 
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
 # Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
