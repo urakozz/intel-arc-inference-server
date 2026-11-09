@@ -1087,6 +1087,11 @@ def cmd_run(a) -> None:
     dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[a.dtype]
     tc = text_config(a.snapshot, a.layers, a.experts, dtype=dtype)
     require_cacheable(tc)
+    if a.lm_head == "int8" and dtype != torch.float32:
+        die("--lm-head int8 is a quantisation-aware fp32 judge: use --dtype fp32")
+    used = a.vocab_used if a.vocab_used is not None else min(248077, tc.vocab_size) if a.state_dump else tc.vocab_size
+    if not 1 <= used <= tc.vocab_size:
+        die(f"--vocab-used {used}: expected 1..{tc.vocab_size}")
     ids = read_ids(a.prompt)
     if a.cycle:
         if not ids or a.cycle < 1:
@@ -1097,6 +1102,10 @@ def cmd_run(a) -> None:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
     ple = PleTable(ple_source(a.snapshot, a.ple), tc)
     model, pf, lazy = build_streamed(a.snapshot, tc, ple)
+    if a.lm_head == "int8":
+        with torch.no_grad():
+            model.lm_head.weight = torch.nn.Parameter(_load("int8_sim").int8_head_weight(model.lm_head.weight),
+                                                       requires_grad=False)
     chunk = auto_chunk(T, a.chunk)
     act_from = max(0, T - a.act_tail) if a.act_tail >= 0 else 0
     log_from = max(0, T - max(1, a.logits_tail)) if a.logits_tail >= 0 else 0   # the last prompt row: greedy
@@ -1127,7 +1136,7 @@ def cmd_run(a) -> None:
     t2 = time.time()
     last = rows[-1][-1]
     for step in range(a.gen):
-        nxt = int(torch.argmax(last).item())
+        nxt = int(torch.argmax(last[:used]).item())
         tokens.append(nxt)
         rec.base[0] = T + step
         with torch.no_grad():
@@ -1171,13 +1180,15 @@ def cmd_run(a) -> None:
                 t[f"qsa.gap.L{i}"] = t[f"qsa.gap.L{i}"][row0:T].clone()
         t["logits"] = t["logits"][T - 1 - log_from:].clone()
         t["ple.ids"] = t["ple.ids"][row0:T].clone()
-        t["state.spec"] = torch.tensor([1, int(dtype == torch.float32), tc.num_hidden_layers, T, row0, a.gen],
+        t["state.spec"] = torch.tensor([1, int(dtype == torch.float32), tc.num_hidden_layers, T, row0, a.gen,
+                                       int(a.lm_head == "int8"), int(ple.kind == "int8"), used],
                                        dtype=torch.int32)
         t.update(state)
         log_from = T - 1
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
             "gen": str(a.gen), "layers": str(tc.num_hidden_layers), "chunk": str(chunk), "ple": ple.kind,
             "dtype": a.dtype, "state_format": "qwen4exp-prefill-v1" if a.state_dump else "",
+            "lm_head": a.lm_head, "vocab_used": str(used),
             "route_row0": str(row0),
             "act_row0": str(act_from), "logits_row0": str(log_from), "qsa_row0": str(QSA_DENSE_ROWS),
             "attn_implementation": "eager", "experts_implementation": tc._experts_implementation,
@@ -1497,6 +1508,8 @@ def main() -> None:
     r.add_argument("--logits-tail", type=int, default=1024, help="keep logits from row T - L (-1: all)")
     r.add_argument("--act-tail", type=int, default=256, help="keep H / mixer / moe from row T - A (-1: all)")
     r.add_argument("--dtype", choices=["bf16", "fp32"], default="bf16")
+    r.add_argument("--lm-head", choices=["bf16", "int8"], default="bf16", help="int8-aware fp32 reference head")
+    r.add_argument("--vocab-used", type=int, help="usable output ids (state dump: 248077, capped at config vocab)")
     r.add_argument("--cycle", type=int, default=0, help="cycle prompt ids to this many positions (prefill gate: 4500)")
     r.add_argument("--state-dump", action="store_true", help="save prompt-boundary state and last-chunk decisions")
     p = sub.add_parser("ppl")
