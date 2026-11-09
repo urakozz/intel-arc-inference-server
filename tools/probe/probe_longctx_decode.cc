@@ -165,7 +165,9 @@ int main(int argc, char** argv) try {
   auto* ctl = b.control.as<runtime::Control>();
   auto* mtp = engine.mtp_buffers();
   auto* hctl = mtp->hctl.as<runtime::Control>();
-  engine.prepare_prefill();   // identical scratch allocation for cold and restored arms
+  // Allocate eager scratch; paired cache benchmarks require fully restored arms
+  // because cold prefill also allocates the lazy slab.
+  engine.prepare_prefill();
   for (uint32_t depth : depths) {
     PrefixFiles files(prefix_directory, argv[1], argv[2], capacity, depth, base, engine);
     std::vector<uint32_t> ids;
