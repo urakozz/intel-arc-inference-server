@@ -128,6 +128,8 @@ case "${1:-}" in
       bash -c 'for p in q4exp_short q4exp_4k q4exp_8k q4exp_32k q4exp_agentic; do test -s oracle-out-q4exp/$p.ids && test -s oracle-out-q4exp/$p.golden.safetensors || exit 1; done'
     have oracle_q4exp_layers "oracle-out-q4exp-L4/ and -L18/ q4exp_{short,4k,agentic} (spec 21a: qwen4exp_oracle.sh intel-layers 4 / 18 - 21c's --layers N gate)" \
       bash -c 'for n in 4 18; do for p in q4exp_short q4exp_4k q4exp_agentic; do test -s oracle-out-q4exp-L$n/$p.golden.safetensors || exit 1; done; done'
+    have oracle_q4exp_f32 "oracle-out-q4exp-f32-L{18,37}/q4exp_4k.state.safetensors (qwen4exp_oracle.sh intel-f32 N)" \
+      bash -c 'for n in 18 37; do test -s oracle-out-q4exp-f32-L$n/q4exp_4k.state.safetensors || exit 1; done'
     have oracle_q4exp_traces "oracle-out-q4exp-traces/*.routes.safetensors (spec 21a Task 7: qwen4exp_oracle.sh trace - spec 22 P0.6 / P0.8's input)" \
       bash -c 'test "$(ls oracle-out-q4exp-traces/*.routes.safetensors 2>/dev/null | wc -l)" -ge 39'
     # Spec 21b: the original's small files (config.json + tokenizer files, a few MB - make_synth.py's input), the

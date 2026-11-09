@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
-#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project
+#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps
@@ -11,6 +11,7 @@
 #                  -> <data>/oracle-out-q4exp/<p>.{ids,golden.safetensors,log}
 #   intel-layers N the reference truncated to N layers (what 21c's --layers N gate reads) on short / 4k / agentic
 #                  -> <data>/oracle-out-q4exp-L<N>/
+#   intel-f32 N    fp32 prefill judge, 4500 cycled ids + 32 greedy, 64g cap -> oracle-out-q4exp-f32-L<N>/
 #   ours           our AutoRound g64 checkpoint (21q) when it exists -> <data>/oracle-out-q4exp-ours/
 #   ppl            perplexity on prose.txt, code.txt and the agentic transcript (F1's third bullet: finite and
 #                  below a sanity ceiling of 30 on prose, ESTIMATED) -> <data>/oracle-out-q4exp/ppl.log
@@ -58,11 +59,11 @@
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2; }
 data="$1" mode="$2" nl="${3:-}"
 case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project) ;;
-  intel-layers) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: intel-layers N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
-  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2 ;;
+  intel-layers|intel-f32) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: $mode N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
+  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2 ;;
 esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 dry="${DRY_RUN:-0}"
@@ -188,6 +189,29 @@ gaps() {   # the gap distributions (decision 3's tau, R2's MoE tolerance)
 }
 
 case "$mode" in
+  intel-f32)
+    out="$data/oracle-out-q4exp-f32-L$nl" part="oracle-out-q4exp-f32-L$nl.partial"
+    if [ -s "$out/q4exp_4k.state.safetensors" ]; then
+      echo "qwen4exp_oracle: f32 L$nl kept ($out/q4exp_4k.state.safetensors)"
+    else
+      [ "$dry" = 1 ] || mkdir -p "$out" "$part"
+      echo "qwen4exp_oracle: f32 L$nl, 4500 cycled ids, 32 greedy tokens, ORACLE_MEMORY=64g"
+      if ORACLE_MEMORY=64g in_box "python3 tools/oracle/qwen4exp_ref.py run \"\$SNAP\" \
+            --prompt tests/golden/prompts/q4exp_4k.ids --out /ws/$part/q4exp_4k.state.safetensors \
+            --dtype fp32 --layers $nl --cycle 4500 --state-dump --chunk 2048 --gen 32 \
+            --act-tail 0 --logits-tail 1 --ple $ple > /ws/$part/q4exp_4k.log 2>&1"; then
+        if [ "$dry" != 1 ]; then
+          mv -f "$part/q4exp_4k.log" "$out/q4exp_4k.log"
+          mv -f "$part/q4exp_4k.state.safetensors" "$out/q4exp_4k.state.safetensors"
+          tail -3 "$out/q4exp_4k.log"
+        fi
+      else
+        echo "qwen4exp_oracle: f32 L$nl FAILED"
+        tail -20 "$part/q4exp_4k.log" 2>/dev/null
+        rc=1
+      fi
+    fi
+    ;;
   tests)
     in_box "python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py" || rc=1
     ;;
