@@ -125,11 +125,11 @@ cd "$(dirname "$0")/../.."
 m=${1:-}
 step=${2:-}
 case "$m" in
-  qwen) repo=Qwen/Qwen3.8-27B; new=${NEW_TOKENS:-192} ;;   # the bf16 original (MODEL_DIR for another snapshot)
-  ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-192} ;;
+  qwen) repo=Qwen/Qwen3.8-27B; new=${NEW_TOKENS:-384} ;;   # the bf16 original (MODEL_DIR for another snapshot)
+  ornith) repo=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-384} ;;
   k2) repo=urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ; new=${NEW_TOKENS:-512} ;;
-  kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-192} ;;
-  qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-192} ;;
+  kolibri) repo=Aleph-Alpha/Kolibri-1-BF16; new=${NEW_TOKENS:-384} ;;
+  qwen4exp) repo=Intel/Qwen3.8-Flash-Next-W4A16-AutoRound; new=${NEW_TOKENS:-384} ;;
   bolt)   # spec 25a: FORM int4 (our g64 export, the served checkpoint) | bf16 (the original) | both (the box)
     FORM=${FORM:-both}
     case "$FORM" in
