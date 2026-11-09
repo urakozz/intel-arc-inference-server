@@ -41,8 +41,15 @@
 **Files:** Create `docs/probes/probe-longctx-decode-2026-11-09.md`; modify `docs/open-work.md`; append uncommitted `REPORT-3e.md`.
 **Interfaces:** Consume complete per-round probe output; produce tables for all sixteen depth/KV/M combinations and the operator's >=25% / verify-scaling verdict.
 
-- [ ] Run three paired bf16/int8 rounds in alternating order, with warm-up and M-arm interleaving, on a quiet box. Reuse one populated maximum-depth cache per engine load; never keep two engines on a card.
-- [ ] Validate all expected rows, timestamps, launch counts and arithmetic. Compare M = 4 attention per row with M = 1 and distinguish kernel sums from wall throughput.
-- [ ] Record method, raw-log locations, tables and limitations. Move 3c to Closed recently. If the specified threshold is met, add a measured follow-up to Now, plan only.
-- [ ] Obtain one fresh final review of probe/method/results, resolve material findings, and verify documentation against the complete measurements.
-- [ ] Commit the probe record and work-list update with a signed `3c:` subject. Leave the report uncommitted and do not merge 3c.
+- [x] Run three paired bf16/int8 rounds in alternating order, with warm-up and M-arm interleaving, on a quiet box. Populate the cache incrementally through all four depths per engine load; never keep two engines on a card.
+- [x] Validate all expected rows, timestamps, launch counts and arithmetic. Compare M = 4 attention per row with M = 1 and distinguish kernel sums from wall throughput.
+- [x] Record method, raw-log locations, tables and limitations. Move 3c to Closed recently. If the specified threshold is met, add a measured follow-up to Now, plan only.
+- [x] Obtain one fresh final review of probe/method/results, resolve material findings, and verify documentation against the complete measurements.
+- [x] Commit the probe record and work-list update with a signed `3c:` subject. Leave the report uncommitted and do not merge 3c.
+
+Completed 2026-11-09: probe code `bfa3be0d`; full box build, both cache-form
+smokes and five summary tests passed. All 48 measurements validated. Final
+review found no Critical, Important or Minor findings; all 16 anatomy rows
+and four paired-ratio rows were also checked against generated output.
+GO under the operator's plain-step threshold; 3f proposed only. No engine
+changes, no 3c merge or push, report left uncommitted.
