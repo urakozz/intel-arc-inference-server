@@ -12,6 +12,7 @@
 //      anchor at cosine >= 0.999 (prefill's taps are decode's to a cosine bar, spec 25 §6.2 - the bar ESTIMATED; the worst
 //      MEASURED cosine printed)
 // Exit 77 (SKIP) without two GPUs, the Bolt export or the drafter.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -64,6 +65,56 @@ double worst_cosine(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b
     ay[i] = fb[i];
   }
   return std::min(worst, cos(ax.data(), ay.data(), hidden));
+}
+
+// Printed only (the gate stays worst_cosine's): per ring layer and K / V, the worst and median row cosine and the
+// worst row's slot, then the anchor's - smooth with depth is the prefill's rounding drift, one layer far below its
+// neighbours a tap / projection fault.
+void print_ring_profile(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, size_t hidden) {
+  const size_t anchor = hidden * 4, ring = a.size() - anchor, row = 256, slots = 1024;
+  const size_t layers = ring / (2 * slots * row * 2);
+  auto cos = [](const std::vector<double>& x, const std::vector<double>& y) {
+    double xy = 0, xx = 0, yy = 0;
+    for (size_t i = 0; i < x.size(); ++i) {
+      xy += x[i] * y[i];
+      xx += x[i] * x[i];
+      yy += y[i] * y[i];
+    }
+    return xx == 0 && yy == 0 ? 1.0 : xy / std::sqrt(xx * yy + 1e-300);
+  };
+  std::vector<double> x(row), y(row);
+  for (size_t l = 0; l < layers; ++l)
+    for (size_t kv = 0; kv < 2; ++kv) {
+      std::vector<double> c;
+      size_t worst_slot = 0;
+      for (size_t s = 0; s < slots; ++s) {
+        const size_t off = ((l * 2 + kv) * slots + s) * row * 2;
+        const uint16_t* p = reinterpret_cast<const uint16_t*>(a.data() + off);
+        const uint16_t* q = reinterpret_cast<const uint16_t*>(b.data() + off);
+        bool zero = true;
+        for (size_t i = 0; i < row; ++i) {
+          x[i] = common::bf16_to_f32(p[i]);
+          y[i] = common::bf16_to_f32(q[i]);
+          zero = zero && p[i] == 0 && q[i] == 0;
+        }
+        if (zero) continue;   // a slot the prompt never reached
+        c.push_back(cos(x, y));
+        if (c.back() <= *std::min_element(c.begin(), c.end())) worst_slot = s;
+      }
+      if (c.empty()) continue;
+      std::vector<double> sorted = c;
+      std::sort(sorted.begin(), sorted.end());
+      std::printf("   ring layer %zu %s: %zu rows, worst %.6f (slot %zu), median %.6f\n", l, kv ? "V" : "K", c.size(),
+                  sorted.front(), worst_slot, sorted[sorted.size() / 2]);
+    }
+  std::vector<double> ax(hidden), ay(hidden);
+  const float* fa = reinterpret_cast<const float*>(a.data() + ring);
+  const float* fb = reinterpret_cast<const float*>(b.data() + ring);
+  for (size_t i = 0; i < hidden; ++i) {
+    ax[i] = fa[i];
+    ay[i] = fb[i];
+  }
+  std::printf("   anchor: cosine %.6f\n", cos(ax, ay));
 }
 
 }  // namespace
@@ -137,7 +188,9 @@ int main(int argc, char** argv) {
     }
     e.reset();   // the decode path: one projected row a step
     e.ingest(P);
-    const double c = worst_cosine(rings[0], ring_of(e, *dr.drafter), d.hidden);
+    const std::vector<uint8_t> dec = ring_of(e, *dr.drafter);
+    const double c = worst_cosine(rings[0], dec, d.hidden);
+    print_ring_profile(rings[0], dec, d.hidden);
     if (c < 0.999) {
       std::fprintf(stderr, "L %u: the prefill's ring vs the decode path's: worst cosine %.6f < 0.999\n", L, c);
       ++bad;
