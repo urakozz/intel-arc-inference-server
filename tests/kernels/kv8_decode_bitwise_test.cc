@@ -1,10 +1,13 @@
 // 3f: full partial/output words against the frozen reader, including batched tails.
+// 3j: the batched-rows reader (BATCH_ROWS, the slots' row lists) at every M = 2..8, not only 8: rows split over two
+// slots (the second at KV base 150080), each M against kv8_decode_control.cl's own BATCH_ROWS build.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "check.h"
@@ -57,9 +60,10 @@ struct Inputs {
     c->n_active = active;
     auto* table = rows.as<runtime::BatchRowTable>();
     *table = runtime::BatchRowTable{};
+    const uint32_t split = M == 8 ? 5 : (M + 1) / 2;   // the second slot's first row (M = 1: none)
     for (uint32_t r = 0; r < M; ++r) {
-      const bool second = r >= 5;
-      table->row[r].pos = second ? 4096 + r - 5 : pos + r;
+      const bool second = M > 1 && r >= split;
+      table->row[r].pos = second ? 4096 + r - split : pos + r;
       table->row[r].kv_base = second ? 150080 : 0;
       table->row[r].slot = second ? 1 : 0;
     }
@@ -70,10 +74,12 @@ struct Step {
   l0::Kernel dec, reduce;
   l0::Mem partial, out;
   l0::CmdList list;
-  Step(pf_harness::Dev& d, Inputs& in, uint32_t kind, uint32_t M)
+  // `rows`: the BATCH_ROWS builds (always at M = 8; M = 2..7 only for the production reader and its control).
+  Step(pf_harness::Dev& d, Inputs& in, uint32_t kind, uint32_t M, bool rows)
       : module(d.ctx, kernels::path(kind == 3
-          ? (M == 8 ? kernels::attn_v2_rows_variant(M, kBlocks, true) : kernels::attn_v2_kv8_variant(M, kBlocks))
-          : "kv8_decode_probe" + std::to_string(kind) + "_M" + std::to_string(M))),
+          ? (rows ? kernels::attn_v2_rows_variant(M, kBlocks, true) : kernels::attn_v2_kv8_variant(M, kBlocks))
+          : "kv8_decode_probe" + std::to_string(kind) + "_M" + std::to_string(M) +
+                (rows && M != 8 ? "_ROWS" : ""))),
         dec(module.kernel("attn_decode_v2_kv8")), reduce(module.kernel("attn_reduce_v2_kv8")),
         partial(d.ctx, l0::MemKind::Device, (size_t(kHeads) * kBlocks * M * 258 + 16) * 4),
         out(d.ctx, l0::MemKind::Device, (size_t(M) * kRow + 16) * 2), list(l0::CmdList::regular(d.ctx)) {
@@ -84,7 +90,7 @@ struct Step {
     dec.arg_ptr(4, in.v.ptr()); dec.arg_ptr(5, in.vs.ptr()); dec.arg_ptr(6, partial.ptr());
     reduce.arg_ptr(0, in.control.ptr()); reduce.arg_ptr(1, partial.ptr());
     reduce.arg_ptr(2, in.gate.ptr()); reduce.arg_ptr(3, out.ptr());
-    if (M == 8) { dec.arg_ptr(7, in.rows.ptr()); reduce.arg_ptr(4, in.rows.ptr()); }
+    if (rows) { dec.arg_ptr(7, in.rows.ptr()); reduce.arg_ptr(4, in.rows.ptr()); }
     list.launch(dec, 4, kBlocks);
     list.launch(reduce, kHeads, M);
     list.close();
@@ -154,11 +160,17 @@ int main(int argc, char** argv) {
   check_scales(d, kind);
   Inputs input(d);
   size_t cases = 0;
-  for (uint32_t M : {1u, 2u, 3u, 4u, 8u}) {
-#ifndef B70_KV8_TEST_ROWS
-    if (M == 8 && kind == 3) continue;
+  // (M, rows): the plain builds at M = 1..4, the BATCH_ROWS builds at 8 and (production only) 2..7.
+  std::vector<std::pair<uint32_t, bool>> shapes = {{1, false}, {2, false}, {3, false}, {4, false}, {8, true}};
+#ifdef B70_KV8_TEST_ROWS
+  if (kind == 3)
+    for (uint32_t m = 2; m <= 7; ++m) shapes.push_back({m, true});
 #endif
-    Step before(d, input, 0, M), candidate(d, input, kind, M);
+  for (const auto& [M, rows] : shapes) {
+#ifndef B70_KV8_TEST_ROWS
+    if (rows && kind == 3) continue;
+#endif
+    Step before(d, input, 0, M, rows), candidate(d, input, kind, M, rows);
     for (uint32_t pos : {0u, 1u, 15u, 16u, 63u, 64u, 2047u, 2048u, 4095u, 4096u,
                          32768u, 81920u, 150000u, 150015u}) {
       for (uint32_t active : {M, M > 1 ? M - 1 : 1}) {
@@ -171,12 +183,13 @@ int main(int argc, char** argv) {
         }
         candidate.run(d);
         const size_t bad = compare(d, before, candidate);
-        std::printf("bitwise M=%u active=%u pos=%u kind=%u bad_words=%zu\n", M, active, pos, kind, bad);
+        std::printf("bitwise M=%u%s active=%u pos=%u kind=%u bad_words=%zu\n", M, rows ? " rows" : "", active, pos,
+                    kind, bad);
         CHECK_EQ(bad, size_t(0));
         ++cases;
       }
     }
-    if (time && (M == 1 || M == 4)) {
+    if (time && !rows && (M == 1 || M == 4)) {
       for (uint32_t depth : {4096u, 32768u, 81920u, 150000u}) {
         input.set(M, depth, M);
         std::vector<double> old_ms, new_ms, ratios;
