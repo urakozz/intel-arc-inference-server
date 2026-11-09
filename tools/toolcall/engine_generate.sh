@@ -29,7 +29,7 @@ DECODE="${B70_DECODE:-build/src/cli/b70-decode}"
 PY="${PYTHON:-python3}"
 [ -x "$DECODE" ] || { echo "no b70-decode at $DECODE" >&2; exit 2; }
 [ -f "$SNAP/tokenizer.json" ] || { echo "$SNAP has no tokenizer.json" >&2; exit 2; }
-N_DEFAULT=192
+N_DEFAULT=384   # 2026-11-10: 192 cut the three t3_rename scenarios off before their call (the reference too)
 mkdir -p "$OUT"
 OUT_ABS=$(cd "$OUT" && pwd)
 TOK_JSON=$(readlink -f "$SNAP/tokenizer.json")
