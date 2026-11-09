@@ -9,6 +9,7 @@
 
 #include "check.h"
 #include "common/kv8.h"
+#include "kernels/batch_kernels.h"
 #include "kernels/kernels.h"
 #include "prefill/pf_harness.h"
 #include "runtime/batch_rows.h"
@@ -70,7 +71,9 @@ struct Step {
   l0::Mem partial, out;
   l0::CmdList list;
   Step(pf_harness::Dev& d, Inputs& in, uint32_t kind, uint32_t M)
-      : module(d.ctx, kernels::path("kv8_decode_probe" + std::to_string(kind) + "_M" + std::to_string(M))),
+      : module(d.ctx, kernels::path(kind == 3
+          ? (M == 8 ? kernels::attn_v2_rows_variant(M, kBlocks, true) : kernels::attn_v2_kv8_variant(M, kBlocks))
+          : "kv8_decode_probe" + std::to_string(kind) + "_M" + std::to_string(M))),
         dec(module.kernel("attn_decode_v2_kv8")), reduce(module.kernel("attn_reduce_v2_kv8")),
         partial(d.ctx, l0::MemKind::Device, (size_t(kHeads) * kBlocks * M * 258 + 16) * 4),
         out(d.ctx, l0::MemKind::Device, (size_t(M) * kRow + 16) * 2), list(l0::CmdList::regular(d.ctx)) {
@@ -117,7 +120,8 @@ void check_scales(pf_harness::Dev& d, uint32_t kind) {
   auto input = pf_harness::upload(d.ctx, d.imm, codes);
   l0::Mem out(d.ctx, l0::MemKind::Device, (codes.size() + 16) * 4);
   d.imm.fill(out.ptr(), 0x3F123456u, out.size());
-  l0::Module module(d.ctx, kernels::path("kv8_decode_probe" + std::to_string(kind) + "_M1"));
+  l0::Module module(d.ctx, kernels::path(kind == 3 ? "kv8_decode_scale_prod"
+      : "kv8_decode_probe" + std::to_string(kind) + "_M1"));
   auto kernel = module.kernel("kv8_decode_scale_probe");
   kernel.group_size(256);
   kernel.arg_ptr(0, input.ptr()); kernel.arg_ptr(1, out.ptr()); kernel.arg(2, uint32_t(codes.size()));
@@ -136,13 +140,14 @@ void check_scales(pf_harness::Dev& d, uint32_t kind) {
 
 int main(int argc, char** argv) {
   bool time = false, negative = false, require_gain = false;
-  uint32_t kind = 2;
+  uint32_t kind = 3;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     if (arg == "--time") time = true;
     else if (arg == "--negative") negative = true;
     else if (arg == "--require-gain") require_gain = true;
     else if (arg == "--native") kind = 1;
+    else if (arg == "--packed-probe") kind = 2;
     else { std::fprintf(stderr, "unknown probe argument %s\n", argv[i]); return 2; }
   }
   pf_harness::Dev d;
@@ -150,6 +155,9 @@ int main(int argc, char** argv) {
   Inputs input(d);
   size_t cases = 0;
   for (uint32_t M : {1u, 2u, 3u, 4u, 8u}) {
+#ifndef B70_KV8_TEST_ROWS
+    if (M == 8 && kind == 3) continue;
+#endif
     Step before(d, input, 0, M), candidate(d, input, kind, M);
     for (uint32_t pos : {0u, 1u, 15u, 16u, 63u, 64u, 2047u, 2048u, 4095u, 4096u,
                          32768u, 81920u, 150000u, 150015u}) {

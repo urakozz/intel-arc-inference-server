@@ -47,7 +47,7 @@
 #ifndef SILU_EPI
 #define SILU_EPI 0
 #endif
-// Probe-only split epilogue: 1 stores gate bf16 in X, 2 consumes X and stores SiLU * up.
+// Split epilogue: 1 stores gate bf16 in X, 2 consumes X and stores SiLU * up.
 #ifndef SILU_SPLIT
 #define SILU_SPLIT 0
 #endif
