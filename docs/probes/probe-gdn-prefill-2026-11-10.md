@@ -173,3 +173,70 @@ of the qkv||z GEMM. None is a build item under this rule.
 - `tools/probe/probe_fma_rate.cc` / `.cl` - the sustained fp32 vector `fma` rate (new; probe only).
 - `tools/probe/probe_gdn_scan_occ.cc` - the production scan over the first h heads, with a bitwise sanity (new).
 - `tools/probe/gdn_prefill_3m.sh` - the whole timed run under one box lock.
+
+## 8. Open-work 3n: the scan's residency, built (2026-11-10, branch `gdn-scan-3n`)
+
+**The rule, fixed here before timing** (from the 3n row): bitwise identical to today's scan and GDN outputs (memcmp
+of every state, output and intermediate word) at every shape tested, else stop (a reordered sum would need the f32
+judge and an operator decision). Accept a candidate only if, in interleaved before / after pairs on the whole box,
+the 2048-row chunk's GDN time drops by >= 2 % of the chunk **or** the scan's profile row by >= 25 %, and nothing
+else regresses > 1 %. Candidates in order: (1) `pf_gdn_A2` writes the A2 hi / lo limbs in the scan's packed layout,
+(2) 8-sub-group work-groups.
+
+**Candidate 1 (taken).** A new `pf_wy` entry `pf_gdn_A2_hilo` is `pf_gdn_A2` line for line up to the value it used
+to store, then stores the scan's two DPAS B-operand words for it instead: `hi = rne(v)`, `lo = rne(v - hi)`, two
+bf16 per uint (column j even in the low half), the 10 blocks on or below the diagonal only, 2,560 uints per
+(sub-chunk, head) in the same `gdn_A2` buffer (`src/runtime/prefill/gdn_a2_pack.h` states the layout for the host;
+FP_CONTRACT is off in the kernel body so `v - hi` cannot fuse with the product that made `v`).
+`pf_gdn_scan_dpas_split` reads its stage-2 B operands from that buffer instead of staging them: SLM **40,448 ->
+30,208 B** a work-group, the 10-block staging loop gone, every DPAS operand, chain and sum unchanged. The pre-3n
+entry is kept as `pf_gdn_scan_dpas_split_staged` (launched by tests and the probe only). `gdn.cc` and qwen4exp's
+walk bind the A2 entry through `gdn_a2_entry_name()` (gdn.h), so the pair moves together. Residency (**derived**
+from the probe's step): 4 per Xe-core, the thread cap of a 16-sub-group work-group (64 threads a core), so 128 of
+the 192 are resident and the launch runs 1.5 waves instead of 2.
+
+**Candidate 2 (measured, dropped).** `pf_gdn_scan_dpas_split_wg8` (commit 2d320eca): 128-lane work-groups, each
+sub-group doing two of the old sub-groups' jobs with each DPAS chain in its old order, and the D limbs kept in
+registers through stage 2 and then written over the dead S limbs (two more barriers a sub-chunk), so SLM is
+21,760 B and 6 work-groups (48 threads) fit a core: all 192 resident. Bitwise (probe sanity, 0 of 13.4 M words), but
+128 GRF with ~13 spilled, and 0.797 ms against candidate 1's 0.830 (-4 %, ~1.6 ms of a 2048 chunk, **derived**)
+- not worth two more barriers and the spills; removed in the next commit.
+
+**Bitwise evidence.** `gdn_chunk_test` case 7 (new): after every `gdn_chunk` call of five walks (2 x 2048, one call
+of 100, 37 and 1, 200 as 77 + 77 + 46) `pf_gdn_A2`'s fp32 tile is made from the call's own scratch and packed on the
+host - every packed word equals `pf_gdn_A2_hilo`'s - and the staged scan, run on it from the call's starting state,
+gives the walk's `gdn_state` and `gdn_o` word for word: 42,504,192 words, 0 differ. `gdn_scan_split_test` runs each
+hand-derived fixture through both entries (bitwise) and still meets its scalar bars. `probe_gdn_scan_occ`: packed vs
+staged over 48 heads, 0 of 13,369,344 words differ. The focused suite on card 1 (`gdn_conv`, `gdn_wy`, `gdn_chunk`,
+both dispatch tests, `gdn_chunk_cap4096`, `gdn_scan_split`, `prefill_split_l0`, `prefill_gate_l0` and `_c16`,
+`prefill_consistency_l0`, `prefill_determinism_l0`, `prefill_smoke`): 13 / 13 pass. The `prefill_gate_l0_test` and
+`_c16` printouts (`ctest -V`) of this branch and of a main build (f3579684, its own box tree) are identical except
+the load-time and ctest-time lines. Logs: `~/b70/logs/3n/` (`tests-branch.log`, `gate-main.log`,
+`gate-branch.log`, `post-drop.log`).
+
+**Timing** (`tools/probe/gdn_scan_3n.sh` under `tools/gpu_lock.sh box`, 00:38:55-00:44:36 box clock, load average
+2.3-4.6; main's build vs this branch's, one warm-up each, three rounds of six arms rotating, before / after
+adjacent). `l0`, bf16 KV, real weights, card 0.
+
+| | before (main) | after (3n) | change |
+|---|---:|---:|---:|
+| wall, 2048 ids (median of 3) | 1189.9 ms (1186.1 / 1189.9 / 1190.7) | **1174.5** (1172.0 / 1174.5 / 1174.6) | **-15.4 ms, -1.3 %** (1,744 t/s) |
+| wall, 15,257 ids | 10117.3 ms (10109.0 / 10129.2 / 10117.3) | **10039.0** (10028.2 / 10039.0 / 10039.8) | **-78.3 ms, -0.8 %** |
+| profile row `gdn_scan` (48 layers, 2048) | 64.1 ms (63.4 / 64.1 / 64.2) | **44.7** (44.7 / 44.2 / 45.0) | **-30.3 %** |
+| profile row `gdn_A2` | 15.2 | 14.9 | -0.3 |
+| the ten `gdn_*` rows | 213.5 | 195.1 | -18.4 ms = -1.55 % of the chunk |
+| probe, 192 work-groups (synthetic, median of 7) | 1.196 ms (staged) | **0.830** (packed) | -30.6 % |
+
+Every other `gdn_*` row is within +-0.5 ms of its before value (the largest, `gdn_solve` 37.0 -> 37.5, is code this
+change does not touch: 0.04 % of the chunk). **Verdict: accepted on the scan-row bar** (-30 % >= 25 %); the GDN
+total drop (1.55 % of the chunk) is under the 2 % bar, and nothing regresses. The scan is now 3.8 % of a 2048 chunk.
+What is left of it is the per-work-group sequential walk (0.27 ms alone, probe), not residency: the 3m estimate of
+-40 % assumed all 192 resident at no cost per extra group, which candidate 2 shows is not the case.
+
+**The parked fp32 `w` / `u`** (`g0-fix-gdn-fp32`) adds a `w` lo chain to stage 1 with `w` as a global B operand:
+no SLM, so it fits beside this change unchanged.
+
+Files: `src/kernels/prefill/pf_gdn_wy.cl` (entry (2c) `pf_gdn_A2_hilo`), `src/kernels/prefill/pf_gdn_scan.cl`
+(entry (3) reads the packed words; (3b) `_staged`), `src/runtime/prefill/gdn_a2_pack.h`, `gdn.cc` / `gdn.h`,
+`src/runtime/qwen4exp/qwen4exp_prefill_gdn.cc`, `tests/prefill/gdn_chunk_test.cc` (case 7),
+`tests/prefill/gdn_scan_split_test.cc`, `tools/probe/probe_gdn_scan_occ.cc`, `tools/probe/gdn_scan_3n.sh`.

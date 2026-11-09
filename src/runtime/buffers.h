@@ -158,7 +158,8 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Mem gdn_g;        // fp32 [kC][48]     the intra-chunk cumulative gate
   l0::Mem gdn_beta;     // fp32 [kC][48]
   l0::Mem gdn_A;        // fp32 [kC/kGdnChunk][48][64][64]  A, then T in place
-  l0::Mem gdn_A2;       // fp32 [kC/kGdnChunk][48][64][64]
+  l0::Mem gdn_A2;       // fp32 [kC/kGdnChunk][48][64][64] in size; holds the packed hi / lo
+                        // bf16 words (2,560 uints per tile, runtime/prefill/gdn_a2_pack.h, 3n)
   l0::Mem gdn_w, gdn_u; // bf16 [kC][48][128] each
   // composed attention (plan 6d-composed Task 5's fields, allocated here)
   l0::Mem pf_q;         // bf16 [kC][24][256]  RoPE'd queries (ruling A9)
