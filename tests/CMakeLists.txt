@@ -2226,6 +2226,12 @@ if(B70_ORNITH AND B70_MTP)
     # ornith-mtp), the engine missing no more rows than the bf16 reference.
     set_tests_properties(mtp_head_ornith_test PROPERTIES
       ENVIRONMENT "B70_MTP_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-mtp-f32/m1")
+    # r16.mtp's f32 judges (spec 28 N6): the forced contexts of each head form (B70_DUMP_FORCED ->
+    # oracle-forced-dumps/ornith-mtp, f32_refs.sh forced ornith ... [-i8head --lm-head int8]).
+    set_tests_properties(ornith_mtp_test PROPERTIES
+      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-i8head-forced")
+    set_tests_properties(ornith_mtp_bf16head_test PROPERTIES
+      ENVIRONMENT "B70_FORCED_JUDGE=${CMAKE_SOURCE_DIR}/oracle-out-ornith-f32-forced")
   endif()
 endif()
 # ==== Spec 15e ============================================================= (end) ====
