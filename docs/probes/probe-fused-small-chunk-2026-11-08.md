@@ -164,3 +164,161 @@ alternating, two rounds each, the same prompts; the server's own `prefix:` prefi
 - `gemm_sm` (30-35 ms at 16 rows, rounds differently) is not needed for <= 16 rows any more: `pf_gemm_q4` does
   one chunk's linears in ~51-58 ms there, bit-identical.
 - Two-card (pp) prefill runs the same `linear_l0` and gets the same kernel; not timed here.
+
+## 8. 3d: short-prefill leftovers — 2026-11-09
+
+The acceptance rule was committed before timing (`338c74dc`): select a row
+count only when the candidate is at least 5% below the slab walk in the same
+interleaved run, with every output word bitwise identical. These runs hold
+the whole-box lock, use nine rotating rounds after warm-up, and time the
+actual per-slab dequant/GEMM walk rather than a resident-slab GEMM.
+
+### Candidate selection
+
+The first candidate's 256-GRF option was already present for NA × NB >= 4.
+Its A8_B2 S1/S2 builds lose at every sampled row count. A4_B2 with S2/S4
+also misses the rule: its best observed gain is 4.42% at 224 rows.
+Each family has 40 plain/SiLU bitwise comparisons with zero differing words.
+
+The third candidate separates gate and up into NB1 launches. The original
+paired epilogue rounds both fp32 accumulators to bf16 before SiLU, so the
+first launch can store gate bf16 in the existing output X; the second reads
+that exact value, rounds up, and executes the same SiLU-RNE, multiplication
+and final-RNE chain. DPAS accumulation and q4 conversion orders are unchanged.
+The existing MLP input is `mixer_out`, distinct from output `x`, so storing
+the gate cannot overwrite the up launch's input. No extra scratch is needed.
+
+An initial split S1/S2 sweep found only a marginal 256-row winner. S4 was then
+checked at the boundary counts and confirmed at **every row from 193 through
+256**, with six-decimal timing output to avoid rounding the 5% decision.
+All 64 counts pass bitwise and clear the rule: gains range from **5.0825% at
+217 to 8.5483% at 251**. Different runs' controls moved; only same-run ratios
+were used for selection.
+
+Representative final-confirmation medians, ms per gate/up linear (64 per chunk):
+
+| rows | slab walk | split S4 | gain |
+|---:|---:|---:|---:|
+| 193 | 1.745625 | 1.640521 | 6.0210% |
+| 217 | 1.755417 | 1.666198 | 5.0825% |
+| 237 | 1.798177 | 1.668125 | 7.2324% |
+| 250 | 1.789219 | 1.643073 | 8.1681% |
+| 256 | 1.784687 | 1.651406 | 7.4680% |
+
+The upper-range control run rejects expansion: at 257 / 272 / 288 / 300 /
+320 / 352 / 384, S4 is respectively 11.12 / 9.78 / 10.87 / 8.74 / 10.47 /
+28.33 / 26.78% slower than its in-run slab control. These counts retain the
+slab path; no additional work item is created.
+
+### Two-pass integration: rejected by the engine check
+
+The intermediate build `8a5ccb1c` selects A8_B1_S4 split gate/up at 193–256
+rows. The default build adds only `_GATE` and `_UP_SILU` for this tile; S1/S2
+remain sweep controls. The four plain linears and all other SiLU ranges keep
+their previous selection. There is no engine flag, environment variable or
+additional buffer.
+
+`pf_gemm_test` first reproduced the missing 193-row dispatch (RED at the
+null tile), then passed the new real slab-walk comparisons and its full
+existing suite. Bounds at 257 / 300 / 384 require the slab path. Shared launch
+accounting charges two gate/up launches: a 250-row Flash chunk is 1153 launches
+(1158 including the head), while 300 stays 5377. The smoke test checks the
+actual 250-row engine counter against this prediction.
+
+The default build with the sweep disabled passes all 17 named prefill tests.
+All four golden forms (base, chunk 16, int8 head, int8 KV) match the baseline
+byte for byte after masking only numeric loader/quantisation elapsed times.
+However, actual engine timings reject this dispatch:
+
+| request | baseline prefill ms | two-pass prefill ms |
+|---|---:|---:|
+| CLI 237 ids | 254.0 | 256.2 |
+| CLI 300 ids | 288.7 | 290.4 |
+| CLI 384 ids | 314.0 | 314.7 |
+| warm server, cached 200 new ids | 246.9 | 250.9 |
+| warm server, fresh 250 ids | 247.0 | 250.2 |
+
+These are medians from three alternating rounds. The server uses int8 KV,
+one card and one generated id; matching prompt and generated ids are checked.
+The warm requests are also slower, so cold module loading alone does not
+explain the result. The primitive probe reuses one 94.7 MB gate/up allocation
+and scales its time by 64; the engine walks 64 distinct matrices (6.06 GB)
+and queues surrounding work continuously. Its ratios cannot establish an
+engine gain. The two-pass tile also adds roughly 1.14 GB of logical X
+reads/writes per 250-row chunk. No hardware traffic attribution is claimed.
+
+This dispatch is not accepted for the final change. Before recording no-go,
+test the one-launch paired-subgroup/SLM alternative already suggested in
+section 7, under the same bitwise and 5% rule and the actual engine check.
+No additional work item is created. Raw logs are under `~/b70/logs/3d`: `large-grf.log`, `smaller.log`,
+`split.log`, `split-dense.log`, `split-confirm.log`, `split-upper.log`,
+`selector-{red,green}.log`, `final-gates/`, `pp-final/` and `server-pairs/`.
+
+### One-launch paired-subgroup SLM candidate
+
+A8_B1_S4 gives even subgroups the gate atom and adjacent odd subgroups its
+up atom. Each pair exchanges 64 × 16 rounded gate bf16 values through SLM
+(4 KiB per workgroup), then the odd subgroup runs the unchanged
+up-RNE / SiLU-RNE / multiply / final-RNE epilogue. Every subgroup reaches
+the workgroup barrier. Physical adjacent gate/up weight columns and the
+DPAS accumulation order remain unchanged; there is one launch and no global
+gate intermediate.
+
+The initial S2/S4 comparison passes all 14 bitwise checks. S4 is then
+confirmed at **every row from 193 through 384**, with 192/192 bitwise
+comparisons and zero differing words. All **128 rows from 193 through 320**
+clear the fixed 5% bar: 16.0293% at 263 through 26.8091% at 247.
+The selector uses that contiguous range. Row 321 immediately misses;
+isolated upper cells barely above 5% do not extend the range.
+
+| rows | slab walk ms/linear | S4 SLM ms/linear | reduction |
+|---:|---:|---:|---:|
+| 193 | 1.835052 | 1.370000 | 25.3427% |
+| 237 | 1.789583 | 1.340990 | 25.0669% |
+| 250 | 1.804323 | 1.339635 | 25.7541% |
+| 263 | 1.953125 | 1.640052 | 16.0293% |
+| 300 | 2.000573 | 1.640156 | 18.0157% |
+| 320 | 2.023281 | 1.648125 | 18.5420% |
+| 321 | 2.022604 | 1.942813 | 3.9450% |
+| 384 | 2.094792 | 1.995781 | 4.7265% |
+
+The real selector regression first fails against the old host library at
+300 rows (`t != nullptr`), then the full GEMM suite passes after integration
+in signed `2fb9d99e`. The default build adds only the S4 SLM module. S2 SLM
+and all two-pass modules remain sweep controls. A selected linear has one
+launch again. The smoke test pins the 320/321 boundary and checks actual
+250/300-row engine counters: 1089 per Flash chunk, 1094 including the head.
+The composed forms add 176 launches at 250 rows and 240 at 300.
+
+### Accepted engine and server confirmation
+
+The same immutable baseline and the final default build alternate over three
+rounds after warm-up, under the whole-box lock. CLI times are host wall
+around prefill, with int8 output head, bf16 KV, chunk width 2048 and one
+generated id. The printed `l0 pp` row denotes prompt processing even when
+the command selects one card. Medians and median paired time reductions:
+
+| CLI prompt ids | baseline ms | SLM ms | paired reduction |
+|---:|---:|---:|---:|
+| 237 | 254.9 | 232.2 | 8.93% |
+| 300 | 289.4 | 269.5 | 6.88% |
+| 384 | 313.6 | 313.8 | -0.06% |
+
+The server comparison uses one card, int8 KV, `--spec off`, temperature 0
+and one generated id. Each process first warms separate 2048/2248/250-id
+prompts. The measured 200-id follow-up restores exactly 2048 prompt ids;
+the fresh 250-id request restarts at zero. All 18 records are complete,
+with identical prompt and generated ids across builds in each round.
+
+| server request | baseline prefill ms | SLM prefill ms | paired reduction | baseline client ms | SLM client ms |
+|---|---:|---:|---:|---:|---:|
+| cold 2048 ids | 1190.1 | 1193.9 | -0.34% | 1264.8 | 1267.4 |
+| cached, 200 new ids | 247.1 | 226.4 | 8.38% | 324.2 | 304.0 |
+| fresh 250 ids | 246.5 | 227.3 | 7.83% | 311.7 | 293.4 |
+
+The SLM candidate confirms its gain in both CLI and warm serving, unlike
+the rejected two-pass route. The unchanged 384-row slab and 2048-row paths
+serve as controls. These probe comparisons are diagnostic measurements,
+not a new headline record. Raw logs under `~/b70/logs/3d`: `slm-first.log`,
+`slm-confirm.log`, `slm-selector-{red,green}.log`, `slm-engine/walls/`,
+`slm-engine/server/` and the validated `slm-engine/summary.json`.
