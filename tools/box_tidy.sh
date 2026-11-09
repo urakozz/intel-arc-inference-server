@@ -2,7 +2,8 @@
 # Tidy the box (operator 2026-11-10: finished work kept piling up on the 915 GB system disk). From the Mac:
 #   tools/box_tidy.sh            move to ~/b70/trash/<date>-tidy:
 #                                  - ~/b70/trees/<branch> whose branch no longer exists in this checkout (merged and
-#                                    deleted), except the long-lived trees below and any tree a process runs in;
+#                                    deleted), except the long-lived trees below, a live branch's companion trees
+#                                    (<branch>-base, <branch>-main: an agent's baselines) and any tree a process runs in;
 #                                  - ~/b70-inference-server-g0-<sha> baseline trees except the KEEP_G0 newest (default 2)
 #                                    and any a running box_validate uses;
 #                                then print the trash's size (only the operator's rm frees it).
@@ -32,6 +33,9 @@ for d in ~/b70/trees/*/; do
   n=$(basename "$d")
   case "$keepers" in *" $n "*) continue ;; esac
   case "$branches" in *" $n "*) continue ;; esac
+  owned=0   # an agent's companion trees: <branch>-base, <branch>-main (its baseline builds)
+  for b in $branches; do case "$n" in "$b"-*) owned=1 ;; esac; done
+  [ "$owned" = 1 ] && continue
   busy "b70/trees/$n" && { echo "kept $d (a process runs in it)"; continue; }
   move "${d%/}"
 done
