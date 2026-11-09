@@ -3084,19 +3084,20 @@ st_r65_d3() {
 }
 stage r65.d2      65 default gpu  bolt_int4,lilicorr         r65.d3   "D2 on two cards: bolt_dflash_{int8,exact,int4}_test - --spec dflash greedy = --spec off token for token on the golden short prose / short code prompts and the agentic transcript, at every fixed K 1..7 and with AdaptiveK, through the server's adapter and the real drafter; the tokens a verify per K (MEASURED: D5's acceptance)"
 st_r65_d2() {
-  run_tests '^bolt_dflash_(int8|exact|int4)_test$'
+  # The whole-box lock excludes other jobs; the orchestrator still masks to DEVICE.
+  run_tests '^bolt_dflash_(int8|exact|int4)_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab d2 '^bolt_dflash_(int8|exact|int4)_test$' '^drafter:|tokens a verify|differs|OK'
   finish
 }
 stage r65.prefill 65 default gpu  bolt_int4,lilicorr         r65.d3   "Decision 7 on two cards: bolt_dflash_prefill_test - the drafter's ring and anchor after prefills of 4096 / 5000 / 300 ids bitwise across chunks 2048 / 1024 / 512, complete at the block end 4096, and against the decode path at cosine >= 0.999 (the worst MEASURED)"
 st_r65_prefill() {
-  run_tests '^bolt_dflash_prefill_test$'
+  run_tests '^bolt_dflash_prefill_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab prefill '^bolt_dflash_prefill_test$' '^L [0-9]|cosine|differ|OK'
   finish
 }
 stage r65.prefix  65 default gpu  bolt_int4,lilicorr         r65.prefill "Review Focus 4 on two cards: bolt_dflash_prefix_gpu_test - restores at 2048 / 4096 bitwise the cold run (ring, anchor, the first block's drafts, 32 ids), the junction's sibling (vLLM a608b6e6e0), a ring of zeros (the output unchanged), state_bytes + 5,259,264 B, the store root"
 st_r65_prefix() {
-  run_tests '^bolt_dflash_prefix_gpu_test$'
+  run_tests '^bolt_dflash_prefix_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab prefix '^bolt_dflash_prefix_gpu_test$' '^restore at|sibling|ring of zeros|differ|OK'
   finish
 }
@@ -3332,7 +3333,7 @@ st_r75_gates() {
 }
 stage r75.pp    75 default gpu  qwen  g0.sha                "--parallel pp prefill at cap 4096: pp_prefill_test (both cards)"
 st_r75_pp() {
-  run_tests '^pp_prefill_cap4096_test$'
+  run_tests '^pp_prefill_cap4096_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
 stage r75.speed 75 optin   gpu  qwen  r75.gates             "pp4096 / 16384 / 32768 / 65536 (and 512 / 1024) at chunk 4096 vs 2048; idle, interleaved, median of 3"
