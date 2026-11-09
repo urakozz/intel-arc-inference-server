@@ -334,3 +334,41 @@ stopped further validation and the final one-card/pp refresh. Earlier
 exploratory pp runs used the superseded two-pass candidate; they are kept
 as historical logs and are not presented as final SLM measurements.
 No complete non-checkpoint-suite pass is claimed for this integration.
+
+## 9. 3g: skip unused fused-prefill setup — 2026-11-09
+
+Merged locally as `af09c1a7`. Common weight/row validation is separated from
+slab allocation and dequant-module loading. Both linear entry points check
+their output contract and return through the existing fused selector before
+preparing any slab. Kernels, arithmetic, selectors and launch counts are unchanged.
+
+Dedicated regression first fails on the original fresh-call slab allocation,
+then passes 22 bitwise comparisons (plain layouts 0/1, original/SLM SiLU,
+384/385 and 320/321 boundaries), nine invalid-input cases and repeated
+short → slab → short → slab allocation/module reuse. Deliberate output-byte
+corruption fails. The memory-plan fixture now requests 385 rows to exercise
+its slab allowance; the single explicit 4096-capacity case passes.
+
+A real-checkpoint test executes 237/237/300/321/385/237-row requests per
+engine, comparing full prefill-logit bytes and generated ids. Three bf16
+before/after pairs reverse build order in the middle round; one int8 pair
+checks that KV form. All 24 request pairs (48 executions) match byte for byte.
+Before the first fallback, allocation drops by exactly 35,651,584 B (34 MiB);
+after fallback it matches the original and remains reusable. The slab can
+still be needed by the MTP bf16 head, whose path is unchanged.
+
+| bf16 KV request | before median ms | after median ms |
+|---|---:|---:|
+| first 237 rows | 231.854 | 231.031 |
+| warm 237 rows | 221.263 | 221.774 |
+| warm 300 rows | 278.297 | 277.605 |
+| fallback 321 rows | 322.577 | 322.448 |
+| fallback 385 rows | 403.459 | 403.895 |
+| return to 237 rows | 234.152 | 234.440 |
+
+Paired median wall changes stay within 0.33% in these bf16 runs. This is a
+resource/setup improvement; no meaningful throughput gain is claimed. The
+int8 single pair is correctness evidence, not a stable performance estimate.
+All original GPU binary hashes match. Static review found no issues. The
+operator requested dedicated tests only; no broad end-of-branch suite ran.
+Logs and raw comparisons: `~/b70/logs/3g/`.
