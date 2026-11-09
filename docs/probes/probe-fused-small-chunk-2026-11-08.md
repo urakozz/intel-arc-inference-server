@@ -375,6 +375,8 @@ Logs and raw comparisons: `~/b70/logs/3g/`.
 
 ## 10. 3i: distinct-layer weight walks — 2026-11-09
 
+Merged locally to main as `36a452fa`.
+
 `probe_fused_small` now defaults to `--weights layers`: independent live
 GPU allocations and independently generated synthetic values for every
 layer of the selected linear family. These have the model's shapes and

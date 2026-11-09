@@ -11,7 +11,7 @@
 - [x] Host-only CLI/protocol tests: plan counts/bytes, explicit modes, zero extrapolation in layers mode, invalid inputs fail before GPU initialization. Observe RED against old probe.
 - [x] Implement bank allocation, per-layer bitwise checks, complete-walk warm-up/timing, structured raw samples and explicit resident estimates.
 - [x] Run focused GPU checks: GU resident/layers at 237/250 with split and SLM, one layout-1 family, and a wrong-last-layer negative control.
-- [ ] Compare recorded engine evidence, document results/limits, static review, signed local merge and move existing 3i to done.
+- [x] Compare recorded engine evidence, document results/limits, static review, signed local merge and move existing 3i to done.
 
 **Verification limit:** no full/end-of-branch suite, no repeated model-serving campaign, no new work items. Builds on the box with JOBS=16; card lock for correctness, whole-box lock for timed comparisons; detached jobs and masked output. Preserve unrelated worktrees and untracked reports.
 
