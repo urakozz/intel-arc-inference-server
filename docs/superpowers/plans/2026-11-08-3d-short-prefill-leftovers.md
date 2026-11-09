@@ -62,13 +62,13 @@ that reduces uninstrumented whole-step wall time by at least 5% at both
 4k/32k and M = 4 must not regress by more than 2%. If a candidate misses,
 continue within 3f with the next reader candidate; do not create a new item.
 
-- [ ] Freeze a baseline build from the current engine before kernel edits.
-- [ ] Probe 3d candidates in the specified order, with the committed 5% rule.
+- [x] Freeze a baseline build from the current engine before kernel edits.
+- [x] Probe 3d candidates in the specified order, with the committed 5% rule.
 - [ ] Integrate the winning gate‖up tile automatically, or record a measured no-go.
 - [ ] Verify the named prefill gates and byte-identical golden printouts; measure
   237/300/384-id prefill and the server turn against the baseline.
 - [ ] Measure one-card versus pp at all six lengths and the two server requests.
-- [ ] Freeze the original int8 decode reader; verify candidate/reference bitwise
+- [x] Freeze the original int8 decode reader; verify candidate/reference bitwise
   partials and outputs across depths, tail waves, M values and finite scales.
 - [ ] Integrate the winning 3f reader and run int8 attention, batching, MTP,
   snapshot and golden regressions; measure interleaved whole-step wall gains.

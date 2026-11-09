@@ -1623,6 +1623,28 @@ if(B70_KV8)
   add_test(NAME kv8_scale_test COMMAND kv8_scale_test)
   set_tests_properties(kv8_scale_test PROPERTIES LABELS kv8 TIMEOUT 60)
 
+  # 3f: frozen reader versus probe-only loads, before changing production.
+  foreach(_m 1 2 3 4 8)
+    set(_rows "")
+    if(_m EQUAL 8)
+      set(_rows BATCH_ROWS=1 BROW_WORDS=8 BROW_POS=0 BROW_KVB=1 BROW_SLOT=4)
+    endif()
+    foreach(_kind 0 1 2)
+      set(_name kv8_decode_probe${_kind}_M${_m})
+      add_ocloc_kernel(${_name} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/kernels/kv8_decode_control.cl
+        DEFINES CTRL_POS=0 CTRL_NACT=1 M=${_m} TGT=32 KV8_PROBE_KIND=${_kind} ${_rows}
+        DEPENDS ${CMAKE_SOURCE_DIR}/tools/probe/kv8_decode_loads.cl)
+      list(APPEND KV8_DECODE_PROBE_KERNELS kernel_${_name})
+    endforeach()
+  endforeach()
+  add_executable(kv8_decode_bitwise_test kernels/kv8_decode_bitwise_test.cc)
+  target_include_directories(kv8_decode_bitwise_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(kv8_decode_bitwise_test PRIVATE b70_l0)
+  b70_target_kernel_dir(kv8_decode_bitwise_test)
+  add_dependencies(kv8_decode_bitwise_test ${KV8_DECODE_PROBE_KERNELS})
+  add_test(NAME kv8_decode_bitwise_test COMMAND kv8_decode_bitwise_test)
+  set_tests_properties(kv8_decode_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 600)
+
   # The gates of spec 12 §4 over the int8 cache: the SAME binaries and command lines as the
   # bf16 registrations they twin, with B70_KV_CACHE=int8 (runtime::default_kv_cache - the
   # Engine's, the planner's and b70-decode's default). Bars unchanged unless named:

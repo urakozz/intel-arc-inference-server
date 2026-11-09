@@ -206,6 +206,24 @@ foreach(tile IN LISTS _pf_q4_silu)
   add_pf_gemm_q4("${tile}" _L0_SILU)
 endforeach()
 
+# Open-work 3d probe: two NB1 launches share X as gate-bf16 scratch, then final SiLU output.
+# No runtime binding until the bitwise and same-run >=5% gates clear.
+if(B70_PF_Q4_SWEEP)
+  foreach(SN 1 2 4)
+    foreach(pass GATE UP_SILU)
+      if(pass STREQUAL "GATE")
+        set(_split 1)
+      else()
+        set(_split 2)
+      endif()
+      add_ocloc_kernel(pf_gemm_q4_A8_B1_S${SN}_L0_${pass}
+                       SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gemm_q4.cl
+                       DEFINES NA=8 NB=1 SN=${SN} LAYOUT=0 SILU_SPLIT=${_split}
+                       OPTIONS -cl-intel-256-GRF-per-thread)
+    endforeach()
+  endforeach()
+endif()
+
 # Spec 2.1 (plan 9a): the 1024-column slab dequant, one variant per production (K, N, layout)
 # -- the layouts the loader actually ships (qkv||z tiled, the rest GPTQ-native).
 set(PF_SLAB_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_dequant_slab.cl)
