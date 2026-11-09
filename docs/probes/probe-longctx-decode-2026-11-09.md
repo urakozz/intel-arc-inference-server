@@ -267,3 +267,124 @@ remaining skip is not counted as a pass. Logs are under `~/b70/logs/3f`:
 The merge-gate build and command-line checks pass (1451 variants, one addition,
 zero changes/removals); no complete 310-test pass is claimed. The final SLM
 build also passes all 17 named prefill tests and all four byte-compared goldens.
+
+## 3h: int8 decode attention after the reader fix - 2026-11-10
+
+Branch `longctx-attn-3h`. The acceptance was fixed and committed (`a0e955bf`) before any
+decode timing: int8 plain attention at 150k <= 0.6 x bf16's (12.26 ms against 3c's 20.43),
+whole-step plain wall gain >= 5 % at 81920 / 150000, no regression above 2 % at 4096 /
+32768 plain or any M = 4 row, outputs bitwise today's reader. Bandwidth estimate written
+first: a plain int8 step at 150k reads 4.95 GB (16 layers x 150001 x 2064 bytes), 8.4 ms at
+the card's 590 GB/s; bf16's 9.83 GB is 16.7 ms and its measured 20.43 ms is 82 % of that.
+
+### Step 0: short prefill chunks deep in a session
+
+`kv8_flash_bitwise_test --chunk-time 128000` times one chunk's attention over 16 FA layers
+at pos 128000 (random int8 K / V and scales), interleaved after warm-up, 9 rounds each, all
+three paths bitwise on every shape: the frozen original int8 flash (`kv8_flash_control.cl`),
+today's in-place int8 flash (`pf_flash_attn_kv8`, reads int8 directly) and today's
+production pair (`kv8_widen` over pos + C rows, then the raw flash).
+
+| C | original ms | in-place ms | widen + raw ms | in-place / widen + raw |
+|---:|---:|---:|---:|---:|
+| 1 | 3514.2 | 454.6 | 426.5 | 1.066 |
+| 8 | 3526.2 | 455.5 | 426.6 | 1.068 |
+| 16 | 3516.5 | 454.7 | 428.5 | 1.061 |
+| 32 | 3505.3 | 455.0 | 425.6 | 1.069 |
+| 64 | 3500.9 | 478.7 | 423.5 | 1.130 |
+| 128 | 3897.8 | 510.1 | 425.7 | 1.198 |
+| 300 | 4183.2 | 618.9 | 488.1 | 1.288 |
+| 512 | 7743.1 | 1181.0 | 853.9 | 1.385 |
+| 1024 | 15582.7 | 2395.7 | 1616.9 | 1.474 |
+| 2048 | 27982.0 | 4528.3 | 2842.1 | 1.596 |
+
+The widening pair is fastest at every chunk size, so **no chunk-size switch was built**:
+re-widening the prefix costs ~1.4 ms a layer at 128k, less than the in-place reader's
+per-tile conversions even at C = 1. The real cost of a short turn is elsewhere: below
+~128 rows the flash's grid is ceil(C / 8) x 4 work-groups, each walking all 128k keys, so
+any 1..128-row chunk at 128k costs ~0.43 s of attention (bf16 has the same kernel shape).
+A sequence split for small chunks would change the online softmax's association (an
+f32-judged change) - recorded as an open lever, not built.
+
+### Profile (probe_kv8_decode, today's reader)
+
+`tools/probe/probe_kv8_decode` times 16 layers' launches over 16 separate random caches
+(incompressible: the card compresses constant memory), arms interleaved, 11 rounds.
+`kv8_decode_ablate.cl` is today's reader with one part removed each (timing only).
+At 150k, M = 1 (ratios to today's reader, same run): bf16 0.815; no K loads 1.058; no V
+loads 1.047; no K / V loads 1.051; no scale loads 0.997; no K / V / scale loads 0.991; no
+score dots 0.980; no softmax / V accumulation 0.752; the 32-way reduce alone 0.0054
+(0.13 ms for 16 layers). Achieved 205 GB/s against 590. **The reader was compute-bound**:
+removing every load changed nothing, while the per-sub-group softmax - repeated by all 16
+sub-groups of a work-group - and the byte unpacking were the time.
+
+### What changed (src/kernels/kv8.cl, KV8_DEC only)
+
+1. **Owner sub-groups.** Each (q head, row) pair's wave max, weights, exp and sum are
+   computed once per work-group by its owner sub-group (pr % 16) and passed through SLM
+   (one more barrier a wave); every sub-group then only accumulates its V dims.
+2. **V bytes without shuffles.** Sub-group pairs read the same packed 16-bit block and take
+   its low / high byte, so a work-item's dim is a fixed permutation (`v8_dim`) and the 3f
+   reader's per-element index shuffle and select are gone (a row past `last` is +0 from the
+   2D read's bound and a zero scale).
+3. **One-fma dequant.** x s = fma(as_float(0x4B400000 + x), s, -12582912 s), exact (only a
+   zero product's sign can differ, and every such product is added to a +0 or nonzero sum).
+4. **SLM dot tree at M = 1.** The score's 16 lane partials go to SLM; the owner sums them in
+   the shuffle tree's order (stride 8, 4, 2, 1). Slower at M = 4, so M = 1 only.
+5. **Cache prefetch two waves ahead.** Sub-groups 0..7 prefetch the K / V rows and 8, 9 the
+   scales of wave w + 2 (distance 2 best of 2 / 3 / 4 / 6; the scale prefetch alone ~5 %).
+
+Rejected on measurement: two waves per barrier step (1.07x slower), deferring the
+conversions behind the next loads (1.13x slower: the compiler serialised registers),
+256-GRF mode and register-resident q (1.46x / 1.21x slower: occupancy).
+Kernel-level at 150k, M = 1, same run: today's reader 26.51 ms, new 11.55 ms (0.436),
+bf16 20.74 ms (new / bf16 0.557). The partition, the blocks, waves, value orders and the
+persistent format are unchanged; no flag, environment variable or buffer was added.
+
+### Correctness
+
+`kv8_decode_bitwise_test`: **308 cases PASS** - every partial and output word against the
+frozen reader at M = 1..4, the row builds at M = 2..8 (two slots), tails to 150015, inactive
+rows, all 63,488 finite fp16 scales including -0 and subnormals. Focused tests on card 0,
+13 run: 11 pass (slots_kv8, kv8_kernels, kv8_flash_bitwise, kv8_flash_raw_bitwise,
+kv8_scale, kv8_decode_bitwise, replay_determinism_kv8, golden_gate_kv8, prefill_gate_l0_kv8,
+prefill_determinism_l0_kv8, prefill_consistency_l0_kv8); mtp_verify_kv8 skips by default as
+on 3f's baseline and **passes** with 3f's judge directories (133 s); mtp_gpu_kv8 skips (3f's
+missing pfi8 references; not counted as a pass). Logs: `~/b70/logs/3h/`.
+
+### Whole-step before / after
+
+The 3c / 3f probe (`probe_longctx_decode`), physical card 1, whole-box lock per run, capacity
+150272, int8 head, 128 warm-up / 128 wall / 32 profiled calls, prefixes restored from
+`~/b70/probes/3h/prefix-cache` (int8 copied from 3f's, bf16 made by an untimed setup run).
+Base = main `4b714dbe` built in its own tree; new = this branch; bf16 from the new build (its
+code is unchanged). Three rounds, arm order base / new / bf16, bf16 / new / base,
+new / base / bf16. Walls and attention (prep + scan + reduce, profiled) are medians of the
+three rounds; gain is the median paired wall reduction with its range; new / bf16 is the
+median per-round attention ratio. A CPU reference job of another agent ran throughout.
+
+| depth | M | base int8 wall | new int8 wall | gain % [range] | base int8 attn | new int8 attn | bf16 attn | new / bf16 attn | bf16 wall |
+|---:|---:|---:|---:|:---|---:|---:|---:|---:|---:|
+| 4096 | 1 | 30.407 | 29.942 | 1.54 [1.22, 2.33] | 1.153 | 0.684 | 0.915 | 0.745 | 30.119 |
+| 4096 | 4 | 34.864 | 34.736 | 0.27 [-0.16, 2.06] | 1.882 | 1.880 | 1.451 | 1.296 | 34.107 |
+| 32768 | 1 | 34.814 | 31.805 | 9.17 [8.07, 9.92] | 5.917 | 2.718 | 4.838 | 0.561 | 34.088 |
+| 32768 | 4 | 40.702 | 40.845 | -0.65 [-1.69, 1.59] | 8.014 | 8.006 | 6.379 | 1.255 | 38.566 |
+| 81920 | 1 | 43.104 | 35.829 | 17.43 [16.54, 17.44] | 13.832 | 6.134 | 11.368 | 0.540 | 40.898 |
+| 81920 | 4 | 49.999 | 49.979 | 0.01 [-0.18, 0.39] | 17.268 | 17.206 | 13.512 | 1.274 | 46.347 |
+| 150000 | 1 | 54.152 | 40.943 | 24.39 [24.36, 24.54] | 24.656 | 10.918 | 20.304 | 0.538 | 49.782 |
+| 150000 | 4 | 63.010 | 62.898 | -0.06 [-0.11, 0.24] | 29.842 | 29.772 | 23.191 | 1.284 | 55.697 |
+
+**Every bar is met.** Int8 plain attention at 150k is 10.92 ms, 0.538 x bf16's (bar 0.6;
+the bandwidth estimate's ~11.5 ms); plain decode gains 24.4 % at 150k and 17.4 % at 81920,
+and int8 plain steps are now faster than bf16 from 32k on (40.94 vs 49.78 ms at 150k).
+4096 plain gains 1.5 %; M = 4 runs the unchanged DPAS verify kernel from 4096 keys on and
+stays within its noise (worst paired round -1.69 %, medians -0.65..+0.27 %).
+
+Open, not built: (1) int8 MTP verify at M = 4 still costs ~1.28 x bf16's attention (the
+DPAS int8 kernel); the same owner / prefetch ideas, or v2 at M = 2..4 (now ~0.56 x the 3f v2
+at M = 4 in the kernel probe), could be re-timed against `verify_attn.h`'s table. (2) The
+row builds (13c slots, M = 2..8) carry the same reader changes and are bitwise, but were
+not timed. (3) Step 0's short-chunk prefill attention (~0.43 s per chunk at 128k).
+Logs: `~/b70/logs/3h/matrix/{base-int8,new-int8,new-bf16}-r{0,1,2}.log`, `comparison.md`;
+kernel probes `~/b70/logs/3h/{profile-M1,profile-M4,snaps-*}.log`; step 0
+`~/b70/logs/3h/step0-chunk-time.log`.
