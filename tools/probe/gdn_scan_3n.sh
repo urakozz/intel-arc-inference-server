@@ -2,7 +2,7 @@
 # On the box, under tools/gpu_lock.sh box: open-work 3n's timed before / after, one lock.
 # Record: docs/probes/probe-gdn-prefill-2026-11-10.md (section 8).
 #   1. probe_gdn_scan_occ (this tree's build): the packed scan over h heads, the pre-3n staged entry
-#      and candidate 2 (_wg8), in one rotation
+#      and (at commit 2d320eca, since dropped) candidate 2 (_wg8), in one rotation
 #   2. b70-decode --bench, l0, bf16 KV, real weights, BEFORE (main's build) and AFTER (this tree's):
 #      one warm-up each, then three rounds of six arms (before / after x 2048 plain, 15257 plain,
 #      2048 B70_PREFILL_PROFILE=1), the arm order rotating each round
