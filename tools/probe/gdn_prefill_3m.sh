@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # On the box, under tools/gpu_lock.sh box: open-work 3m's whole timed measurement, one lock.
 # Record: docs/probes/probe-gdn-prefill-2026-11-10.md.
-#   1. probe_fma_rate (fp32 vector peak) and probe_dpas_rate --sweep (bf16 DPAS peak)
+#   1. probe_fma_rate (fp32 vector peak), probe_dpas_rate --sweep (bf16 DPAS peak), probe_gdn_scan_occ
+#      (the production scan over the first h heads: residency)
 #   2. b70-decode --bench, l0, bf16 KV, real weights: one warm-up, then three rounds of four arms
 #      (2048 / 15257 ids, plain / B70_PREFILL_PROFILE=1), the arm order rotating each round
 #   3. probe_fma_rate again (clock state after the run)
@@ -33,6 +34,10 @@ grep -E "^\||peak|checksum" "$out/fma-pre.log" || true
 stamp dpas-pre
 "$build/tools/probe/probe_dpas_rate" --sweep > "$out/dpas-pre.log" 2>&1
 grep -E "bf16_bf16" "$out/dpas-pre.log" | tail -1 || true
+
+stamp scan-occ
+"$build/tools/probe/probe_gdn_scan_occ" --rounds 7 > "$out/scan-occ.log" 2>&1
+grep -E "^SANITY|^\|" "$out/scan-occ.log" || true
 
 stamp engine-warmup
 eng plain 2048 warmup-2048

@@ -987,6 +987,14 @@ target_link_libraries(probe_fma_rate PRIVATE b70_l0)
 b70_target_kernel_dir(probe_fma_rate)
 add_dependencies(probe_fma_rate kernel_pfr_f32)
 
+# --- probe_gdn_scan_occ: open-work 3m, the production GDN scan over the first h heads (residency) ---
+# Record: docs/probes/probe-gdn-prefill-2026-11-10.md. Production kernel only; no candidate.
+add_executable(probe_gdn_scan_occ probe_gdn_scan_occ.cc)
+target_include_directories(probe_gdn_scan_occ PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_gdn_scan_occ PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_gdn_scan_occ)
+add_dependencies(probe_gdn_scan_occ kernel_pf_gdn_scan)
+
 # --- probe_tp: spec 17a (plan 17a), the tensor-parallel P0 on two cards, Qwen3.8 first -----------------
 # Plan: docs/superpowers/plans/2026-10-05-spec17a-tp-probe.md. Record: docs/probes/probe-tp-2026-11-01.md.
 # `probe_tp.cl` is a PROBE kernel (tp_send / tp_wait / tp_ping; the protocol is tp_protocol.h's): no runtime
