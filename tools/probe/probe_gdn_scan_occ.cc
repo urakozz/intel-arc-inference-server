@@ -22,7 +22,8 @@
 // (runtime/prefill/gdn_a2_pack.h; packed here on the host from the same fp32 tiles), and the pre-3n
 // entry is kept as `pf_gdn_scan_dpas_split_staged` (fp32 A2, split in its SLM). The probe times
 // both: a second sanity line requires the two to agree bitwise over all 48 heads, and the arm
-// "staged 48" (the pre-3n kernel, all 192 work-groups) runs in the same rotation.
+// "staged 48" (the pre-3n kernel, all 192 work-groups) runs in the same rotation. (Candidate 2,
+// an 8-sub-group entry, was timed here at commit 2d320eca and dropped: the 3m record, section 8.)
 //
 //   probe_gdn_scan_occ [--rounds 7] [--rows 2048]
 #include <algorithm>
@@ -89,7 +90,6 @@ int main(int argc, char** argv) {
     runtime::prefill::KernelCache kc(ctx);
     l0::Kernel& scan = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split");
     l0::Kernel& staged = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split_staged");
-    l0::Kernel& wg8 = kc(kernels::pf_gdn_scan_variant(kKHeads, kHeads), "pf_gdn_scan_dpas_split_wg8");
 
     // Synthetic inputs at the model's shapes and magnitudes: q / k as l2-normalised rows, w / u and
     // A2 small, the cumulative gate a steady decay restarting every 64 positions, the state small.
@@ -126,15 +126,14 @@ int main(int argc, char** argv) {
     l0::Mem d_stamp(ctx, l0::MemKind::Host, 64);
     uint64_t* stamp = d_stamp.as<uint64_t>();
 
-    // h in 1..48: the production entry over the first h heads; kStaged: the pre-3n entry over all
-    // 48; 100 + h: candidate 2's 8-sub-group entry (`pf_gdn_scan_dpas_split_wg8`) over h heads.
+    // h in 1..48: the production entry over the first h heads; kStaged: the pre-3n entry over all 48.
     constexpr uint32_t kStaged = 0;
     auto run = [&](uint32_t arm) {
       const bool pre3n = arm == kStaged;
-      const uint32_t h = pre3n ? kHeads : arm % 100;
+      const uint32_t h = pre3n ? kHeads : arm;
       cx.copy(d_st.ptr(), d_st0.ptr(), st.size() * 4);
       cx.timestamp(stamp);
-      cx.launch(pre3n ? staged : (arm > 100 ? wg8 : scan), h, kColChunks, 1,
+      cx.launch(pre3n ? staged : scan, h, kColChunks, 1,
                 {PtrArg(d_xb.ptr()), PtrArg(d_w.ptr()), PtrArg(d_u.ptr()),
                  PtrArg(pre3n ? d_a2.ptr() : d_a2hl.ptr()), PtrArg(d_g.ptr()), PtrArg(d_st.ptr()),
                  PtrArg(d_o.ptr()), arg_val(C)});
@@ -172,8 +171,9 @@ int main(int argc, char** argv) {
                 diff == 0 && nonfinite == 0 && nonzero > 0 ? "PASS" : "FAIL");
     if (!(diff == 0 && nonfinite == 0 && nonzero > 0)) return 1;
 
-    // Sanity 2 (3n): the production entry over 48 heads against the pre-3n one and candidate 2, bitwise.
-    for (uint32_t arm : {kStaged, 148u}) {
+    // Sanity 2 (3n): the production entry over 48 heads against the pre-3n one, bitwise.
+    {
+      const uint32_t arm = kStaged;
       std::vector<float> oS(o48.size()), sS(st.size());
       run(arm);
       cx.copy(oS.data(), d_o.ptr(), oS.size() * 4);
@@ -183,12 +183,12 @@ int main(int argc, char** argv) {
       for (size_t i = 0; i < size_t(C) * kHeads * kDim; ++i) d2 += std::memcmp(&oS[i], &o48[i], 4) != 0;
       for (size_t i = 0; i < sS.size(); ++i) d2 += std::memcmp(&sS[i], &s48[i], 4) != 0;
       std::printf("SANITY 3n: pf_gdn_scan_dpas_split (packed A2) vs %s, 48 heads: "
-                  "differing words %zu of %zu -> %s\n", arm == kStaged ? "_staged (fp32 A2)" : "_wg8", d2, size_t(C) * kHeads * kDim + sS.size(),
+                  "differing words %zu of %zu -> %s\n", "_staged (fp32 A2)", d2, size_t(C) * kHeads * kDim + sS.size(),
                   d2 == 0 ? "PASS" : "FAIL");
       if (d2 != 0) return 1;
     }
 
-    const std::vector<uint32_t> arms = {6, 12, 18, 24, 32, 36, 48, kStaged, 124, 136, 148};
+    const std::vector<uint32_t> arms = {6, 12, 18, 24, 32, 36, 48, kStaged};
     for (uint32_t h : arms) run(h);   // warm-up
     std::vector<std::vector<double>> t(arms.size());
     for (int r = 0; r < rounds; ++r)
@@ -202,8 +202,8 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < arms.size(); ++i) med[i] = median(t[i]);
     const double m48 = med[6];
     for (size_t i = 0; i < arms.size(); ++i) {
-      const uint32_t h = arms[i] == kStaged ? kHeads : arms[i] % 100;
-      const char* entry = arms[i] == kStaged ? "staged" : (arms[i] > 100 ? "wg8" : "packed");
+      const uint32_t h = arms[i] == kStaged ? kHeads : arms[i];
+      const char* entry = arms[i] == kStaged ? "staged" : "packed";
       std::printf("| %u (%s) | %u | %.4f | %.4f | %.3f |\n", h, entry, h * kColChunks, med[i], med[i] / h,
                   med[i] / m48);
       std::printf("ARM {\"entry\":\"%s\",\"heads\":%u,\"wgs\":%u,\"gpu_ms\":%.6f,\"min\":%.6f,\"max\":%.6f}\n",
