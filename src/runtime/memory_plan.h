@@ -61,7 +61,8 @@ std::string format_memory(const char* label, const MemoryComponents& c, size_t d
 // What a session's prefill allocates, which is a property of the backend and the
 // attention path (PrefillScratch's lazy accessors, Engine::prepare_prefill):
 //
-//   l0 (default)        the slab ([intermediate][1024] bf16), every int4 linear.
+//   l0 (default)        allowance for the slab ([intermediate][1024] bf16); fully fused short
+//                       linears leave it unallocated until a later slab-backed call.
 //   l0-int8             Int8State (xq, xs, w8, every int4 linear's column scales - on a MoE
 //                       model also every layer's expert gate||up array, spec 15d); the L0
 //                       slab only with MTP (step_mtp_kv's bf16 linears walk it).

@@ -14,8 +14,8 @@
 // builds it: the plan's `draft_vocab` term must equal the loader's compact head + id
 // table, and MtpBuffers' compact logits its MtpDims size. The lengths default to
 // "16384 auto". The default l0 backend and the flash attention are planned and run.
-// One short prefill runs
-// first, so the lazy buffers (the MTP prefill hidden rows, the slab on an MTP engine)
+// One prefill beyond the fused-linear range runs
+// first, so the lazy buffers (the MTP prefill hidden rows and the slab)
 // exist when the engine is measured. At `auto` the engine fills the card up to the
 // reserve: if the reserve is too small for what the plan does not count (driver,
 // kernel modules, command lists), this test is where the allocation fails.
@@ -96,8 +96,9 @@ void check_engine(l0::Context& ctx, const std::string& arg, const Opts& o,
   eng.set_prefill_backend(o.backend);
   eng.prepare_prefill();
   std::printf("before the first prefill: %s\n", eng.memory_line().c_str());
-  // One short prefill: the lazy buffers a session builds on its first chunk.
-  std::vector<uint32_t> ids(300);
+  // 3g: fully fused short chunks skip the slab. Exercise its lazy fallback before
+  // comparing allocation with the planner's allowance for arbitrary chunk lengths.
+  std::vector<uint32_t> ids(385);
   for (uint32_t i = 0; i < ids.size(); ++i) ids[i] = 1000 + i;
   const size_t before = eng.prefill_launches();
   eng.prefill(ids);
