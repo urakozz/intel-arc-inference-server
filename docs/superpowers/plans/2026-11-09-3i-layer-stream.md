@@ -8,8 +8,8 @@
 
 **Limits:** distinct weights have real shapes and addresses, but synthetic values. This isolates a linear family, not surrounding model operators, dependencies or complete serving. Compare both candidates with the existing recorded CLI/server evidence; report any ranking disagreement rather than forcing a desired result.
 
-- [ ] Host-only CLI/protocol tests: plan counts/bytes, explicit modes, zero extrapolation in layers mode, invalid inputs fail before GPU initialization. Observe RED against old probe.
-- [ ] Implement bank allocation, per-layer bitwise checks, complete-walk warm-up/timing, structured raw samples and explicit resident estimates.
+- [x] Host-only CLI/protocol tests: plan counts/bytes, explicit modes, zero extrapolation in layers mode, invalid inputs fail before GPU initialization. Observe RED against old probe.
+- [x] Implement bank allocation, per-layer bitwise checks, complete-walk warm-up/timing, structured raw samples and explicit resident estimates.
 - [ ] Run focused GPU checks: GU resident/layers at 237/250 with split and SLM, one layout-1 family, and a wrong-last-layer negative control.
 - [ ] Compare recorded engine evidence, document results/limits, static review, signed local merge and move existing 3i to done.
 

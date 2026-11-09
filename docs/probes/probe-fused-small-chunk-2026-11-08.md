@@ -372,3 +372,57 @@ int8 single pair is correctness evidence, not a stable performance estimate.
 All original GPU binary hashes match. Static review found no issues. The
 operator requested dedicated tests only; no broad end-of-branch suite ran.
 Logs and raw comparisons: `~/b70/logs/3g/`.
+
+## 10. 3i: distinct-layer weight walks — 2026-11-09
+
+`probe_fused_small` now defaults to `--weights layers`: independent live
+GPU allocations and independently generated synthetic values for every
+layer of the selected linear family. These have the model's shapes and
+footprint, not checkpoint contents. Families run sequentially, so their
+weight banks are never simultaneously resident.
+
+| family | layout | copies | bytes per copy | total weight bytes |
+|---|---:|---:|---:|---:|
+| gate/up | 0 | 64 | 94,699,520 | 6,060,769,280 |
+| down | 0 | 64 | 47,349,760 | 3,030,384,640 |
+| GDN qkv/z | 1 | 48 | 44,564,480 | 2,139,095,040 |
+| output projection | 0 | 64 | 16,711,680 | 1,069,547,520 |
+| FA q/k/v | 0 | 16 | 38,993,920 | 623,902,720 |
+
+Layout 0 includes its separate fp16 scales; layout 1 includes inline
+scales. The harness verifies live packed-weight addresses are distinct
+and allocation bytes equal the plan. `--plan` prints `PLAN` JSON without
+initializing a GPU; it is a storage plan, not a check of installed kernels
+or shape/tile compatibility. Explicit `--weights resident` keeps one matrix and
+labels chunk projections **ESTIMATED**; it preserves the original first
+matrix and activations. Layers mode reports measured walks without
+extrapolation. Example focused comparison:
+
+```sh
+build/tools/probe/probe_fused_small --weights layers --shape gu \
+  --rows 237,250 --q4 q8b1s4split,q8b1s4slm --rounds 7
+```
+
+Before timing a family, every applicable candidate is compared against
+the explicit dequant/slab GEMM control at every selected row count and
+every layer. Candidate output is poisoned before each comparison.
+`--negative-check` deliberately uses the first layer's candidate weights
+at the last layer; it must fail before that family's timing begins.
+
+Every arm visits layers in ascending order with the same input/output
+scratch addresses. Complete walks are warmed, then arm/row order rotates
+between rounds. One timestamp pair and final wait enclose the entire
+walk; independent host wall time includes submission and waiting. GPU
+span can include submission gaps; it is not summed kernel-active time.
+`SAMPLE` JSON retains each round, and `WALK` JSON records its median GPU
+and host span. Both are measured in either mode: `extrapolated` describes
+the mode's subsequent chunk projection, not an estimate of these spans.
+The per-linear table divides the measured GPU walk by
+copies. The layers-mode chunk table sums measured family walk medians;
+resident mode alone multiplies single-matrix medians by model layers.
+
+This remains an isolated linear-family probe: activations and scratch
+are reused, and surrounding operators, dependencies, activation
+production, and serving scheduling are absent. Its ratios require an
+engine check before changing production dispatch. No runtime code or
+kernel is changed by 3i.
