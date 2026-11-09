@@ -3333,7 +3333,7 @@ st_r75_gates() {
 }
 stage r75.pp    75 default gpu  qwen  g0.sha                "--parallel pp prefill at cap 4096: pp_prefill_test (both cards)"
 st_r75_pp() {
-  run_tests '^pp_prefill_cap4096_test$'
+  run_tests '^pp_prefill_cap4096_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
 stage r75.speed 75 optin   gpu  qwen  r75.gates             "pp4096 / 16384 / 32768 / 65536 (and 512 / 1024) at chunk 4096 vs 2048; idle, interleaved, median of 3"
