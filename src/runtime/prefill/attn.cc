@@ -223,9 +223,13 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
   // flash still applies K's scale to scores and V's scale to probabilities, bit for bit.
   const uint32_t rows = attn_rows(C, backend);
   require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float), "pf_o is undersized");
+  // 3j: pos is slot-relative (the layer's K / V are at the slot's kv_base), so the widened rows fit one sequence's
+  // positions - kv8_len, the longest slot - and V starts there.
+  require(pos + C <= s.kv8_len, "pos + C = " + std::to_string(pos + C) + " exceeds the widening scratch's " +
+                                    std::to_string(s.kv8_len) + " positions");
   auto& raw = s.kv8_raw_buffer();
   auto* k = raw.as<uint16_t>();
-  auto* v = k + size_t(s.max_len) * kv_heads * kHeadDim;
+  auto* v = k + size_t(s.kv8_len) * kv_heads * kHeadDim;
   const uint32_t count = (pos + C) * kv_heads * kHeadDim;
   const auto variant = kernels::pf_flash_attn_kv8_raw_variant(q_heads, kv_heads);
   cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,

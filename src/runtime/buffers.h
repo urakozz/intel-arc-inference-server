@@ -137,8 +137,10 @@ struct PrefillScratch : PrefillScratchDims {
   // kCDefault = 2048 (ruling A13), kCMax = 4096 (plan 5d), kGdnChunk = 64 and kNormGroups:
   // PrefillScratchDims. `kC` in the comments below is this scratch's chunk_cap().
 
-  // Throws std::invalid_argument for a cap check_prefill_chunk_cap refuses.
-  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap);
+  // Throws std::invalid_argument for a cap check_prefill_chunk_cap refuses. `kv8_len` (3j): the most positions one
+  // sequence holds - the longest spec 13c slot; 0 = max_len (one sequence, and the two-card pipeline).
+  PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
+                 uint32_t kv8_len = 0);
 
   l0::Mem ids;          // uint32 [kC], Host  - pf_embed_gather's input
   l0::Mem resid;        // bf16 [kC][5120]
@@ -170,6 +172,10 @@ struct PrefillScratch : PrefillScratchDims {
   // on a dense model (runtime/prefill/moe.cc).
   std::unique_ptr<l0::Mem> moe;
   uint32_t max_len;
+  // 3j: the positions kv8_raw_buffer() holds, K's then V's at k + kv8_len x kv-heads x 256. One sequence prefills at
+  // a time and its rows are slot-relative (kv_base apart), so with sequence slots it is the LONGEST slot, not
+  // max_len (their sum) - runtime::plan_slots counts it the same way.
+  uint32_t kv8_len;
 
   // The most rows a chunk may have in this scratch (plan 5d): every per-chunk buffer above
   // has this many. Every site that bounds a chunk asks it.
@@ -198,12 +204,12 @@ struct PrefillScratch : PrefillScratchDims {
   // flash path never touches them; int8 flash uses its smaller kv8_raw_buffer instead.
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
-  l0::Mem& kv8_raw_buffer();   // bf16 [2][max_len][4][256], exact int8 values, scales applied by flash
+  l0::Mem& kv8_raw_buffer();   // bf16 [2][kv8_len][4][256], exact int8 values, scales applied by flash
   size_t lazy_bytes() const;
 
  private:
   PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc, uint32_t chunk_cap,
-                 const PrefillScratchSizes& s);   // the delegate
+                 uint32_t kv8_len, const PrefillScratchSizes& s);   // the delegate
   l0::Context* ctx_;
   const model::ModelDesc* desc_;
   uint32_t chunk_cap_;

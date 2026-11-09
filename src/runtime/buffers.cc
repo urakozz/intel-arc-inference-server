@@ -80,11 +80,11 @@ size_t DecodeScratch::bytes() const {
 // --- PrefillScratch ----------------------------------------------------------
 
 PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                               uint32_t chunk_cap)
-    : PrefillScratch(ctx, max_len, desc, chunk_cap, sizes(max_len, desc, chunk_cap)) {}
+                               uint32_t chunk_cap, uint32_t kv8_len)
+    : PrefillScratch(ctx, max_len, desc, chunk_cap, kv8_len, sizes(max_len, desc, chunk_cap)) {}
 
 PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
-                               uint32_t chunk_cap, const PrefillScratchSizes& s)
+                               uint32_t chunk_cap, uint32_t kv8_len, const PrefillScratchSizes& s)
     // `ids` is the one Host allocation: the host writes C ids per chunk and
     // the device gathers embeddings from them.
     : ids(ctx, l0::MemKind::Host, s.ids),
@@ -110,6 +110,7 @@ PrefillScratch::PrefillScratch(l0::Context& ctx, uint32_t max_len, const model::
       pf_o(ctx, l0::MemKind::Device, s.pf_o),
       pf_rowsum(ctx, l0::MemKind::Device, s.pf_rowsum),
       max_len(max_len),
+      kv8_len(kv8_len ? kv8_len : max_len),
       ctx_(&ctx),
       desc_(&desc),
       chunk_cap_(chunk_cap) {
@@ -147,7 +148,7 @@ l0::Mem& PrefillScratch::pf_p_buffer() {
 }
 l0::Mem& PrefillScratch::kv8_raw_buffer() {
   if (!kv8_raw_) {
-    const size_t bytes = sizes(max_len, *desc_, chunk_cap_).kv8_raw;
+    const size_t bytes = sizes(kv8_len, *desc_, chunk_cap_).kv8_raw;   // 3j: one sequence's positions
     if (bytes == 0) throw std::runtime_error("int8 raw prefill scratch requires 24 query / 4 KV heads");
     kv8_raw_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, bytes);
   }
