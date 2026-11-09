@@ -14,10 +14,8 @@ void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::linear_l0: " + what);
 }
 
-// Everything both walks below require of the weight and of `M`. The slab
-// buffer is checked here too; only the OUTPUT rectangle differs between them.
-l0::Kernel& check_and_dequant_kernel(KernelCache& kc, PrefillScratch& s,
-                                     const loader::DeviceWeight& w, uint32_t M) {
+// Shared checks do not allocate scratch or open a module: a fused call needs neither slab nor dequant.
+void check_linear(const PrefillScratch& s, const loader::DeviceWeight& w, uint32_t M) {
   const model::GemvShape& sh = w.shape;
   require(w.kind == model::WeightKind::Int4, "the prefill walk's linears are all int4; this one is not");
   require(sh.N % kNs == 0, "N = " + std::to_string(sh.N) + " is not a whole number of 1024-column slabs");
@@ -27,6 +25,10 @@ l0::Kernel& check_and_dequant_kernel(KernelCache& kc, PrefillScratch& s,
   require(M > 0 && pad256(M) <= s.chunk_cap(),
           "M = " + std::to_string(M) + " padded to 256 exceeds the " + std::to_string(s.chunk_cap()) +
               "-row scratch (the chunk cap)");
+}
+
+l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w) {
+  const model::GemvShape& sh = w.shape;
   require(s.slab_buffer().size() >= size_t(sh.K) * kNs * 2,
           "the slab buffer is smaller than [K][1024] bf16");
   return kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout), "pf_dequant_slab");
@@ -38,7 +40,7 @@ size_t linear_l0_launches(const model::GemvShape& sh) { return 2 * (size_t(sh.N)
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
                const uint16_t* x, uint32_t M) {
   const model::GemvShape& sh = w.shape;
-  l0::Kernel& dq = check_and_dequant_kernel(kc, s, w, M);
+  check_linear(s, w, M);
   require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
 
@@ -50,6 +52,7 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
+  l0::Kernel& dq = dequant_kernel(kc, s, w);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
@@ -66,7 +69,7 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, uint16_t* out,
                     uint32_t ldx) {
   const model::GemvShape& sh = w.shape;
-  l0::Kernel& dq = check_and_dequant_kernel(kc, s, w, M);
+  check_linear(s, w, M);
   // The interleave is `gflat = (k/16).32 + k%16`: the linear's N columns are
   // N/2 gate||up PAIRS, so the x row this writes is exactly N/2 wide and the
   // pitch must be it. An `ldx` that is not N/2 would mean a caller whose x is
@@ -83,6 +86,7 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
+  l0::Kernel& dq = dequant_kernel(kc, s, w);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
