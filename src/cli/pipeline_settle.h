@@ -77,6 +77,23 @@ inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& 
   return p.total() + reserve <= card_bytes ? 1u : 2u;
 }
 
+// Spec 17d (operator decision D3, applied after 17d's bars): --parallel auto's tensor-parallel choice for b70-serve -
+// Qwen3.8 (config.json's architectures[0]) on two visible B70s (the hardware gate holds two cards to peer access both
+// ways), when the context is auto and nothing asked is something TP does not run (`blocked`: DFlash, a draft
+// vocabulary, the l0-int8 prefill). An asked --max-len keeps auto's one-card / pp rule: its spare memory may become
+// one card's sequence slots (spec 13c - "slots stay one-card"), several requests at once, which TP does not have.
+inline bool tp_auto(const std::string& snapshot_dir, const MaxLenArg& max_len, uint32_t cards, bool blocked) {
+  if (cards != 2 || !max_len.is_auto || blocked) return false;
+  std::ifstream f(snapshot_dir + "config.json");
+  if (!f) return false;
+  std::stringstream ss;
+  ss << f.rdbuf();
+  const common::json::Value config = common::json::parse(ss.str());
+  const common::json::Value* archs = config.find("architectures");
+  return archs && archs->is_array() && !archs->arr().empty() && archs->arr()[0].is_string() &&
+         archs->arr()[0].str() == "Qwen3_5ForConditionalGeneration";
+}
+
 inline PpSettled pp_settle(const model::ModelDesc& d, const runtime::PpWeights& w,
                            const std::array<size_t, runtime::kPpDevices>& dev, const MaxLenArg& max_len,
                            uint32_t trained, size_t reserve, runtime::KvCache kv,

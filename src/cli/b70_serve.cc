@@ -120,8 +120,9 @@ void usage() {
                "                  nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr).\n"
                "  --max-len L     auto (default): the largest context that fits beside the weights, at most\n"
                "                  the trained one; N: any multiple of 256 up to it, refused if it does not fit.\n"
-               "  --parallel P    auto (default): one card when the model and the asked context fit it, else\n"
-               "                  pp; 1: one card; pp: the layers split over two cards (spec 16). Kolibri-1 and\n"
+               "  --parallel P    auto (default): Qwen3.8 on two B70s with --max-len auto: tp; else one card\n"
+               "                  when the model and the asked context fit it, else pp; 1: one card; pp: the\n"
+               "                  layers split over two cards (spec 16). Kolibri-1 and\n"
                "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
                "                  replica (Qwen3.8): the model on both cards, one engine each - two\n"
                "                  requests at once, each exactly what it is alone on its card.\n"
@@ -1332,8 +1333,21 @@ int run(int argc, char** argv) {
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
   }
+  // Spec 17d (operator decision D3): --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto) -
+  // one request at a time, faster; --parallel replica (two at once) and one card's slots stay opt-in.
+  std::string tp_why;
+  if (pipe.mode == cli::Parallel::Auto &&
+      cli::tp_auto(snapshot_dir, max_len_arg, hw.cards,
+                   dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty() ||
+                       (have_pp_backend && pp_backend != runtime::PrefillBackend::L0))) {
+    pipe.mode = cli::Parallel::Tp;
+    tp_why = " (auto: two B70s with peer access, Qwen3.8)";
+    std::fprintf(stderr, "parallel: auto -> tp (two B70s with peer access, Qwen3.8: every layer split over both)\n");
+    if (mtp_on && spec.adaptive) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
+  }
   if (pipe.tp()) {   // spec 17d: tensor parallel, serve_tp's own flow
     TpServe ts;
+    ts.auto_why = tp_why;
     ts.snapshot_dir = snapshot_dir;
     ts.max_len_arg = max_len_arg;
     ts.trained = trained;

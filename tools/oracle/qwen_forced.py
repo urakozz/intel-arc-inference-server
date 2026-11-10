@@ -58,9 +58,10 @@ import time  # noqa: E402
 # The tests that load the engine's int8 head (loader::LmHeadForm::Int8): every DFlash test, and mtp_gpu_test with
 # --lm-head int8 (its tags carry the head form: mtp_gpu_<form>_, mtp_gpu_rf1_<form>_), and b70-serve's speculative
 # arms (tools/box_validate/serve_judge.py: serve_int8_<set>_<name>; the server loads the int8 head, prefills with l0).
-# mtp_verify_test's qwen3.8_int8 is the KV cache, not the head. Spec 17c's tp_prefill_test (tp_prefill_, both KV forms)
+# mtp_verify_test's qwen3.8_int8 is the KV cache, not the head. Spec 17c's tp_prefill_test (tp_prefill_, both KV forms) and
+# spec 17d's tp_mtp_test (tp_mtp_)
 # runs b70-decode's int8 head.
-I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|serve_int8_|slots_|tp_prefill_)"
+I8HEAD_RE = r"^(dflash_|mtp_gpu_(rf1_)?int8_|serve_int8_|slots_|tp_prefill_|tp_mtp_)"
 # The tests that prefill with l0-int8 (tests/CMakeLists.txt: mtp_gpu_test <snapshot> l0-int8 ..., every form).
 PFI8_RE = r"^mtp_gpu_"
 REPO = os.path.normpath(os.path.join(_HERE, "..", ".."))
