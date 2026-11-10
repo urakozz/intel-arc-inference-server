@@ -505,6 +505,12 @@ target_include_directories(probe_row_taps PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAK
 target_link_libraries(probe_row_taps PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
 b70_target_kernel_dir(probe_row_taps)
 add_dependencies(probe_row_taps ${PT_KERNELS} ${PT_PF_KERNELS})
+# open-work 3o: the prompt's KV / state after prefill, saved, swapped between KV forms and restored before a decision row
+add_executable(probe_kv_state probe_kv_state.cc)
+target_include_directories(probe_kv_state PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(probe_kv_state PRIVATE b70_prefill_host b70_runtime b70_loader b70_model b70_l0 pthread)
+b70_target_kernel_dir(probe_kv_state)
+add_dependencies(probe_kv_state ${PT_KERNELS} ${PT_PF_KERNELS})
 # --- probe_verify_m: spec 8 P0, the MTP verify step at M = 1..4 (2026-09-27) ---
 # Plan: docs/superpowers/plans/2026-09-27-spec8a-mtp-probe.md, Task 3.
 # Record: docs/probes/probe-mtp-2026-09-27.md. Needs B70_MTP (the default: the M = 2..4
