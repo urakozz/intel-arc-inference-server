@@ -29,10 +29,11 @@ constexpr uint32_t kTile = 64;   // pf_flash_attn's KT: spans are whole tiles
 // 3l (2): the split-K rule, from flash_split_test --time (docs/probes/probe-longctx-decode-2026-11-09.md,
 // "3l (2)"; 16 FA layers, interleaved, card 1). Today's grid is ceil(C / 8) x kv-heads work-groups, each
 // walking every key; the card keeps ~5 of these 96-lane 256-GRF work-groups per Xe core resident (32 cores).
-// The key range [0, pos) is cut into n spans: n = max(64 / row blocks, 16, pos / 2048) - at least ~256
-// work-groups (one or two row blocks), and spans of at most ~2048 keys deep in the cache (measured fastest
-// at 32k-128k for every C up to 128) - never a span under 256 keys (below it the merge and the per-span
-// setup outweigh the walk), and no more spans than pf_o's spare rows hold (13 at C = 128). It is taken for
+// The key range [0, pos) is cut into n = max(64 / row blocks, 16) spans - ~256 work-groups for one or two
+// row blocks, 16 spans for more - never a span under 256 keys (below it the merge and the per-span setup
+// outweigh the walk), and no more spans than pf_o's spare rows hold (13 at C = 128). At 128k keys more spans
+// (~2048 keys each) measured up to 1.17x faster still at C = 64 (84.5 vs 98.5 ms for 16 layers): a later
+// refinement, not taken (the whole-chunk timings and the judged runs are of this rule). It is taken for
 // C <= kSplitMaxRows at pos >= kSplitMinPos (at 512 keys a 64-row split was slower: 1.19 -> 1.42 ms for 16
 // layers); larger chunks keep today's launch, bitwise as before (C = 256 deep in the cache would gain too -
 // 0.88 x at 8192, 0.73 x at 131072 - but pf_o's spare rows hold only 6 of its spans: not built).
@@ -85,7 +86,7 @@ uint32_t flash_split_span(const model::ModelDesc& d, uint32_t pos, uint32_t C) {
   // the smallest chunk cap's (PrefillScratchDims::kCDefault) spare rows.
   const uint32_t c8 = (C + 7u) & ~7u, rows = attn_rows(C, PrefillBackend::L0);
   const uint32_t room = uint32_t(uint64_t(PrefillScratchDims::kCDefault - rows) * kHeadDim / (uint64_t(c8) * (kHeadDim + 2)));
-  const uint32_t n = std::max({64u / (c8 / 8u), 16u, (pos + 2047u) / 2048u});
+  const uint32_t n = std::max(64u / (c8 / 8u), 16u);
   uint32_t span = std::max(mode == FlashSplit::On ? kTile : kSplitMinSpan, ((pos + n - 1) / n + kTile - 1) / kTile * kTile);
   while (flash_split_count(pos, span) > room) span += kTile;
   return flash_split_count(pos, span) > 1 || mode == FlashSplit::On ? span : 0;
