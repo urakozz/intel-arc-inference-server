@@ -43,13 +43,15 @@
 //     bars become that control's: each of the first QSA layer's worst, the median and p01 within 2x the control's
 //     cosine distance (the 2026-11-01 slack); step 6 gates the last logits the same way (prefill vs decode within 2x
 //     the control's distance) and prints the tokens; step 5's routing and selections are printed, not gated.
-//     With judge:<file>, B applies: per layer and state kind the cosine distance to f32, and each layer's mean
-//     set distance over the last chunk's routes / selections, prefill <= 2x decode. Last logits use the same rule;
-//     both paths' tokens use golden's one-bf16-ulp f32 judge, teacher-forced on its tokens. All distances printed.
+//     With judge:<file>, the relative count rule applies (operator 2026-11-10): f32-rejected routes on prefill
+//     <= 1.2x decode's total over all prompt/generated layer-position decisions; prefill's accepted tokens >=
+//     decode's. Both paths use golden's one-bf16-ulp token judge on the same teacher-forced continuation.
+//     State, logits, route-set and selection distances are printed diagnostics, with no distance-ratio gate.
 //     A paired v2 judge supplies a separate f32 companion for each path: engine expert sets/order replayed only
 //     when the actual boundary swaps fit the f32 cut logit's one-bf16-ulp window. Every prompt/generated route is
-//     checked against the capture; rejected swaps fail routing and prevent attributing residual drift to prefill.
-//     Both companions use the original f32 continuation as their fixed teacher-forced context. The 2x bar is unchanged.
+//     checked against the capture; outside-window choices contribute to the rejected count and remain unforced.
+//     Both companions use the original f32 continuation as their fixed teacher-forced context. Legacy v1 dumps
+//     lack the complete count audit and cannot be used as a count judge; without a paired dump, A' remains.
 //   mode `split` (Review Focus 5): the kN ids in ONE prefill against TWO calls split at 64, 2048, 2051, 4097 - every
 //     layer's state, the last logits, the first token. Gated: the multiples of 64 bitwise, the others within the
 //     split test's bars (logits cosine >= 0.9995, state rows: first QSA layer >= 0.999, median >= 0.9998, p01 >= 0.99)
@@ -329,15 +331,18 @@ bool near_control(double x, double control) { return 1 - x <= 2 * (1 - control) 
 
 struct F32Judge {
   golden::Golden file;
-  bool paired, routing_valid = true;
+  bool paired;
+  q4judge::RelativeCounts counts;
   uint32_t rows, row0, experts;
   std::vector<double> route_pf, route_dec, sel_pf, sel_dec;
   F32Judge(const std::string& path, const model::Qwen4ExpDesc& d, const Ids& prompt, bool int8_head)
       : file(path), paired(file.has("prefill.logits")), rows(uint32_t(prompt.size() - ((prompt.size() - 1) / rq::kPfC) * rq::kPfC)),
         row0(uint32_t(prompt.size()) - rows), experts(d.experts),
         route_pf(d.layers), route_dec(d.layers), sel_pf(d.layers), sel_dec(d.layers) {
+    if (!paired) std::fprintf(stderr, "f32 count judge requires a paired v2 dump with complete route audits\n");
+    CHECK(paired);
     const int32_t* spec = file.i32("state.spec", 9);
-    CHECK_EQ(spec[0], paired ? 2 : 1);   // aligned staging files (v3) cannot bypass the routing judge
+    CHECK_EQ(spec[0], 2);   // staging and legacy files cannot bypass the complete count audit
     CHECK_EQ(spec[1], 1);   // fp32 compute, not a bf16 dump widened to f32
     CHECK_EQ(spec[2], int32_t(d.layers));
     CHECK_EQ(spec[3], int32_t(prompt.size()));
@@ -350,7 +355,12 @@ struct F32Judge {
     for (size_t i = 0; i < prompt.size(); ++i) CHECK_EQ(ids[i], int32_t(prompt[i]));
     CHECK_EQ(file.dim("logits", 2, 0), uint64_t(kGen + 1));
     CHECK_EQ(file.dim("logits", 2, 1), uint64_t(d.vocab));
-    file.f32("logits", size_t(kGen + 1) * d.vocab);
+    const auto validate_logits = [&](const std::string& name) {
+      const float* lg = file.f32(name, size_t(kGen + 1) * d.vocab);
+      for (uint32_t j = 0; j <= kGen; ++j)
+        CHECK(q4judge::finite_reference(lg + size_t(j) * d.vocab, d.vocab_used));
+    };
+    validate_logits("logits");
     const int32_t* tokens = file.i32("tokens", kGen);
     for (uint32_t j = 0; j < kGen; ++j) {
       CHECK(tokens[j] >= 0 && uint32_t(tokens[j]) < d.vocab_used);
@@ -362,6 +372,7 @@ struct F32Judge {
       for (const std::string mode : {"prefill", "decode"}) {
         CHECK_EQ(file.dim(mode + ".logits", 2, 0), uint64_t(kGen + 1));
         CHECK_EQ(file.dim(mode + ".logits", 2, 1), uint64_t(d.vocab));
+        validate_logits(mode + ".logits");
         const int32_t* capture = file.i32(mode + ".engine.trace.spec", 10);
         const std::array<int32_t, 10> want{1, int32_t(d.layers), int32_t(prompt.size()), int32_t(kGen),
             int32_t(rq::kPfC), int32_t(kMaxLen), int32_t(int8_head), 1, int32_t(d.vocab_used), int32_t(d.vocab)};
@@ -380,16 +391,19 @@ struct F32Judge {
             CHECK(verdict[p] >= 0 && verdict[p] <= 2);
             CHECK(std::isfinite(span[p]) && std::isfinite(cut[p]));
             CHECK_EQ(double(ulp[p]), golden::bf16_ulp_at(cut[p]));
-            if (verdict[p] == 0) ++exact;
+            if (verdict[p] == 0) { CHECK_EQ(span[p], 0.0f); ++exact; }
             else if (verdict[p] == 1) { CHECK(span[p] <= ulp[p]); ++ties; }
-            else if (++bad <= 8) std::printf("   f32 %s route REJECT L%u row %zu: span %.9g > ulp %.9g\n",
-                                            mode.c_str(), l, p, double(span[p]), double(ulp[p]));
+            else {
+              CHECK(span[p] >= ulp[p]);   // saved f32 span can round down to the exact boundary
+              if (++bad <= 8) std::printf("   f32 %s route REJECT L%u row %zu: span %.9g > ulp %.9g\n",
+                                          mode.c_str(), l, p, double(span[p]), double(ulp[p]));
+            }
           }
         }
         std::printf("f32 %s route alignment: %llu exact, %llu accepted near-ties, %llu rejected%s\n", mode.c_str(),
                     (unsigned long long)exact, (unsigned long long)ties, (unsigned long long)bad,
                     bad ? " - state distances are not an aligned-path attribution" : "");
-        routing_valid = routing_valid && bad == 0;
+        (mode == "prefill" ? counts.prefill_rejected : counts.decode_rejected) = bad;
       }
     }
     std::printf("f32 judge: %s (%u layers, %zu cycled prompt ids, last %u rows)\n", path.c_str(), d.layers,
@@ -404,15 +418,12 @@ struct F32Judge {
     const int32_t* expected = file.i32(name, size_t(row0 + rows + kGen) * kq::kTopK) + size_t(pos) * kq::kTopK;
     for (uint32_t k = 0; k < kq::kTopK; ++k) CHECK_EQ(actual[k], uint32_t(expected[k]));
   }
-  bool report(uint32_t l, const char* kind, double p, double d) const {
-    const bool pass = q4judge::within_twice(p, d);
-    std::printf("   f32 L%u %-10s distance prefill %.9g / decode %.9g (x%.5g, bar 2)%s\n", l, kind, p, d,
-                q4judge::ratio(p, d), pass ? "" : "  ** FAIL **");
-    return pass;
+  void report(uint32_t l, const char* kind, double p, double d) const {
+    std::printf("   f32 L%u %-10s distance prefill %.9g / decode %.9g (x%.5g, diagnostic)\n", l, kind, p, d,
+                q4judge::ratio(p, d));
   }
   // One complete state kind per layer, in the same layout on all three paths.
-  bool state(const model::Qwen4ExpDesc& d, const Snap& pf, const Snap& dec, uint32_t max_len) const {
-    bool ok = true;
+  void state(const model::Qwen4ExpDesc& d, const Snap& pf, const Snap& dec, uint32_t max_len) const {
     for (uint32_t l = 0; l < d.layers; ++l) {
       const uint8_t* p = pf.layers[l].data();
       const uint8_t* v = dec.layers[l].data();
@@ -421,6 +432,8 @@ struct F32Judge {
         const std::string key = "state.L" + std::to_string(l) + "." + kind;
         const float* pr = file.f32(this->key("prefill", key), elems);
         const float* dr = file.f32(this->key("decode", key), elems);
+        CHECK(q4judge::finite_reference(pr, elems));
+        CHECK(q4judge::finite_reference(dr, elems));
         q4judge::Cosine pc, dc;
         for (size_t i = 0; i < elems; ++i) {
           const double pv = fp32 ? reinterpret_cast<const float*>(p + off)[i]
@@ -430,7 +443,7 @@ struct F32Judge {
           pc.add(pv, pr[i]);
           dc.add(dv, dr[i]);
         }
-        ok = report(l, kind, pc.distance(), dc.distance()) && ok;
+        report(l, kind, pc.distance(), dc.distance());
       };
       if (d.is_qsa(l)) {
         compare("k", size_t(pf.pos) * d.kv_n());
@@ -464,7 +477,7 @@ struct F32Judge {
       pc.add(pf.logits[i], pr[i]);
       dc.add(dec.logits[i], dr[i]);
     }
-    return report(d.layers, "logits", pc.distance(), dc.distance()) && ok;
+    report(d.layers, "logits", pc.distance(), dc.distance());
   }
   void routes(uint32_t l, uint32_t r, const uint32_t* pf, const uint32_t* dec) {
     for (const char* mode : {"prefill", "decode"}) {
@@ -497,14 +510,18 @@ struct F32Judge {
     }
   }
   bool sets(const model::Qwen4ExpDesc& d) const {
-    bool ok = true;
     for (uint32_t l = 0; l < d.layers; ++l) {
-      ok = report(l, "routes", route_pf[l], route_dec[l]) && ok;
-      if (d.is_qsa(l)) ok = report(l, "selections", sel_pf[l], sel_dec[l]) && ok;
+      report(l, "routes", route_pf[l], route_dec[l]);
+      if (d.is_qsa(l)) report(l, "selections", sel_pf[l], sel_dec[l]);
     }
-    return ok && routing_valid;
+    const bool ok = counts.routes_ok();
+    std::printf("   f32 rejected-route count: prefill %llu / decode %llu (x%.5g, bar 1.2)%s\n",
+                (unsigned long long)counts.prefill_rejected, (unsigned long long)counts.decode_rejected,
+                q4judge::ratio(double(counts.prefill_rejected), double(counts.decode_rejected)),
+                ok ? "" : "  ** FAIL **");
+    return ok;
   }
-  bool tokens(rq::Qwen4ExpEngine& e, const char* path) const {
+  uint32_t tokens(rq::Qwen4ExpEngine& e, const char* path) const {
     const auto& d = e.model().desc;
     const int32_t* tok = file.i32("tokens", kGen);
     uint32_t accepted = 0, exact = 0;
@@ -525,7 +542,7 @@ struct F32Judge {
     }
     std::printf("6. f32 tokens %s: %u / %u accepted (one bf16 ulp), %u exact; teacher-forced on f32\n", path,
                 accepted, kGen, exact);
-    return accepted == kGen;
+    return accepted;
   }
 };
 
@@ -685,9 +702,10 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule, F32Judg
   }
   const Snap dec = snap(e, false);
   const StateCmp sc = compare_state(d, a, dec, n, e.max_len());
-  const bool sok = judge ? judge->state(d, a, dec, e.max_len()) : (control_rule ? near_control(sc.first_qsa_worst, control.first_qsa_worst) &&
+  if (judge) judge->state(d, a, dec, e.max_len());
+  const bool sok = (judge || (control_rule ? near_control(sc.first_qsa_worst, control.first_qsa_worst) &&
                                         near_control(sc.median, control.median) && near_control(sc.p01, control.p01)
-                                  : state_ok(sc)) &&
+                                  : state_ok(sc))) &&
                    sc.rings_exact;
   if (control_rule && !judge)
     std::printf("4. (A', a truncated checkpoint: the bars are 2x the chunk-16 control's distance - worst %.6f, median %.7f, "
@@ -695,7 +713,8 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule, F32Judg
   std::printf("4. prefill state vs decode's fill (%u positions x %u layers): first QSA layer's worst %.6f, median %.7f, p01 "
               "%.6f, %u rows < 0.99, worst %.4f (L%u); PLE id ring %s; tail rings %u words differ (max %u bf16 ulp)%s\n", n,
               d.layers, sc.first_qsa_worst, sc.median, sc.p01, sc.below99, sc.worst, sc.worst_layer,
-              sc.rings_exact ? "bitwise" : "DIFFERS", sc.tail_words_differ, sc.tail_max_ulp, sok ? "" : "  ** FAIL **");
+              sc.rings_exact ? "bitwise" : "DIFFERS", sc.tail_words_differ, sc.tail_max_ulp,
+              !sok ? "  ** FAIL **" : judge ? " (distances diagnostic)" : "");
   print_layers(sc);
   if (!sok) print_diffs(d, a, dec, e.max_len());
   std::printf("   the last QSA layer's block scores, prefill vs decode per row: cosine >= %.7f, max |diff| %.3e; selections: "
@@ -712,11 +731,14 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule, F32Judg
 
   // ---- 6. tokens, ruling A26's rule ----------------------------------------------------------------------------------
   if (judge) {
-    const bool dec_ok = judge->tokens(e, "decode");
+    judge->counts.decode_accepted = judge->tokens(e, "decode");
     e.reset();
     e.prefill(prompt);
-    const bool pf_ok = judge->tokens(e, "prefill");
-    ok = ok && pf_ok && dec_ok;
+    judge->counts.prefill_accepted = judge->tokens(e, "prefill");
+    const bool tokens_ok = judge->counts.tokens_ok();
+    std::printf("   f32 accepted-token count: prefill %u >= decode %u%s\n", judge->counts.prefill_accepted,
+                judge->counts.decode_accepted, tokens_ok ? "" : "  ** FAIL **");
+    ok = ok && judge->counts.passes();
   } else {
   std::vector<uint32_t> dtok(kGen);
   std::vector<bool> determined(kGen);

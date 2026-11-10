@@ -5,6 +5,25 @@
 #include "runtime/qwen4exp_f32_judge.h"
 
 int main() {
+  const auto accepts = [](uint64_t pf_bad, uint64_t dec_bad, uint32_t pf_tokens, uint32_t dec_tokens) {
+    return q4judge::RelativeCounts{pf_bad, dec_bad, pf_tokens, dec_tokens}.passes();
+  };
+  CHECK(accepts(1279, 1089, 32, 32));   // measured L18
+  CHECK(accepts(8885, 8413, 29, 28));   // measured L37
+  CHECK(accepts(6, 5, 0, 0));          // exactly 1.2x
+  CHECK(!accepts(7, 5, 0, 0));
+  CHECK(!accepts(5, 4, 0, 0));         // no rounding up an integer budget
+  CHECK(accepts(0, 0, 32, 32));
+  CHECK(!accepts(1, 0, 32, 32));
+  CHECK(!accepts(1279, 1089, 31, 32)); // token loss fails even with acceptable routing
+  CHECK(!accepts(1307, 1089, 32, 32)); // routing regression fails even with equal tokens
+  const uint64_t max_count = std::numeric_limits<uint64_t>::max();
+  CHECK(accepts(max_count, max_count, 32, 32));
+  CHECK(!accepts(max_count, 0, 32, 32));
+  const float reference[] = {0, -1, 2, NAN, INFINITY};
+  CHECK(q4judge::finite_reference(reference, 3));  // padded logits outside vocab_used are not judged
+  CHECK(!q4judge::finite_reference(reference, 4));
+  CHECK(!q4judge::finite_reference(reference + 4, 1));
   using q4judge::within_twice;
   CHECK(within_twice(0.0, 0.0));
   CHECK(within_twice(0.2, 0.1));
