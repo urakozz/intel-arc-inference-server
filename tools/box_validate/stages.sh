@@ -3215,11 +3215,14 @@ st_r69_gates() {
 # tests/golden/forced_judge.h) -> tools/box_validate/f32_refs.sh forced-qwen (one f32 trie forward on the box CPU)
 # -> $DATA/oracle-out-qwen-f32{,-i8head,-pfi8}-forced, which the tests' registrations read (B70_FORCED_JUDGE, tests/
 # CMakeLists.txt). Until a context's judge is there its divergences AWAIT it: the test SKIPs (77), not FAILs.
-stage r69.forced_dumps 69 optin card qwen,dflash r69.kernels "the Qwen3.8 spec tests' forced contexts: mtp_verify_test, mtp_gpu_test (+ dv128k, both heads; + max_len 32768 / 131072, r6.mtp_long's), dflash_engine_test, dflash_gpu_test, dflash_lookup_gpu_test with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/qwen-spec/ (their verdicts here are not the gate: r69.gates / g0.suite are)"
+stage r69.forced_dumps 69 optin card qwen,dflash r69.kernels "the Qwen3.8 spec tests' forced contexts: mtp_verify_test, mtp_gpu_test (+ dv128k, both heads; + max_len 32768 / 131072, r6.mtp_long's, mtp_verify_test too), dflash_engine_test, dflash_gpu_test, dflash_lookup_gpu_test with B70_DUMP_FORCED -> \$DATA/oracle-forced-dumps/qwen-spec/ (their verdicts here are not the gate: r69.gates / g0.suite are)"
 st_r69_forced_dumps() {
   local D="$DATA/oracle-forced-dumps/qwen-spec" dm="${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   x "mkdir -p $D"
   x "B70_DUMP_FORCED=$D timeout 3600 build/tests/mtp_verify_test $SNAP_QWEN"
+  # r6.mtp_long's mtp_verify_{32k,128k}_test: their max_len gives their own contexts (2026-11-10: one each awaited)
+  x "B70_DUMP_FORCED=$D timeout 3600 build/tests/mtp_verify_test $SNAP_QWEN 32768"
+  x "B70_DUMP_FORCED=$D timeout 3600 build/tests/mtp_verify_test $SNAP_QWEN 131072"
   x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8"
   x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8 --lm-head int8 --draft-vocab 128k"
   x "B70_DUMP_FORCED=$D timeout 5400 build/tests/mtp_gpu_test $SNAP_QWEN l0-int8 --lm-head bf16 --draft-vocab 128k"
