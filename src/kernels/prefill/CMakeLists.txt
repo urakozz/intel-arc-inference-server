@@ -450,18 +450,29 @@ if(B70_TP)
   add_ocloc_kernel(pf_attn_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl DEFINES ${PF_TP_FA})
   add_ocloc_kernel(pf_flash_attn_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA} OPTIONS -cl-intel-256-GRF-per-thread)
+  # 3l (2): the short-chunk split and its merge at the card's heads.
+  add_ocloc_kernel(pf_flash_attn_split_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 SPLIT=1 ${PF_TP_FA} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_merge_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 FLASH_MERGE=1 ${PF_TP_FA})
   add_ocloc_kernel(pf_tp_res_fold_K5120_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_tp.cl DEFINES K=5120 FOLD_G=20)
   list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_gdn_conv_GK8V24 kernel_pf_gdn_wy_GK8V24 kernel_pf_gdn_scan_GK8V24
        kernel_pf_gated_head_GK8V24 kernel_pf_attn_prep_q16_Q12KV2 kernel_pf_attn_Q12KV2 kernel_pf_flash_attn_Q12KV2
-       kernel_pf_tp_res_fold_K5120_G20)
+       kernel_pf_flash_attn_split_Q12KV2 kernel_pf_flash_merge_Q12KV2 kernel_pf_tp_res_fold_K5120_G20)
   if(B70_KV8)
     add_ocloc_kernel(pf_attn_prep_kv8_Q12KV2 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 ${PF_TP_FA})
     add_ocloc_kernel(pf_flash_attn_kv8_raw_Q12KV2 SOURCE ${KV8_CL}
                      DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA}
                      OPTIONS -cl-intel-256-GRF-per-thread)
     add_ocloc_kernel(pf_attn_gate_kv8_Q12KV2 SOURCE ${KV8_CL} DEFINES KV8_GATE=1 ${PF_TP_FA})
+    add_ocloc_kernel(pf_flash_attn_kv8_split_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_split_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
     list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_attn_prep_kv8_Q12KV2 kernel_pf_flash_attn_kv8_raw_Q12KV2
-         kernel_pf_attn_gate_kv8_Q12KV2)
+         kernel_pf_attn_gate_kv8_Q12KV2 kernel_pf_flash_attn_kv8_split_Q12KV2 kernel_pf_flash_attn_kv8_raw_split_Q12KV2)
   endif()
   set(B70_TP_PREFILL_KERNELS ${B70_TP_PREFILL_KERNELS} CACHE INTERNAL "spec 17c: the binaries a TP prefill chunk binds")
 endif()
