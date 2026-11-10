@@ -290,10 +290,13 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           io.ids = k.ids_of(h);
           io.resid = k.resid(h);
           io.own = k.own_of(h);
+          const bool cross = !opt_.prefill_timing_no_crossing;
           if (u > 0) {
             // The previous unit's halves: this card's copy has read own[h], the peer's has filled land[h].
-            k.cx.wait_event(p.ev.handle(p.sent(1 - r, h, u - 1)));
-            k.cx.wait_event(p.ev.handle(p.sent(r, h, u - 1)));
+            if (cross) {
+              k.cx.wait_event(p.ev.handle(p.sent(1 - r, h, u - 1)));
+              k.cx.wait_event(p.ev.handle(p.sent(r, h, u - 1)));
+            }
             const float* mine = k.own_of(h);
             const float* theirs = k.land_of(h, (u - 1) & 1u);
             io.p0 = r == 0 ? mine : theirs;
@@ -302,6 +305,7 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           prefill::step_tp_unit(k.cx, k.kc, k.s, card.model, max_len_, k.control(h), pp.pos[h], C, u,
                                 card.persist.gdn_state, card.persist.conv_ring, card.persist.kv_k, card.persist.kv_v,
                                 card.persist.kv_lay, io);
+          if (!cross) continue;
           if (u + 1 < U) {
             k.send(peer.land_of(h, u & 1u), k.own_of(h), size_t(C) * row, p.ev.handle(p.ready(r, h, u)),
                    p.ev.handle(p.sent(r, h, u)));
@@ -324,8 +328,10 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
       }
       for (uint32_t r = 0; r < model::kTpSize; ++r) {
         TpPfCard& k = *p.c[r];
-        k.cx.wait_event(p.ev.handle(p.sent(1 - r, last_h, U - 1)));
-        k.cx.wait_event(p.ev.handle(p.sent(r, last_h, U - 1)));
+        if (!opt_.prefill_timing_no_crossing) {
+          k.cx.wait_event(p.ev.handle(p.sent(1 - r, last_h, U - 1)));
+          k.cx.wait_event(p.ev.handle(p.sent(r, last_h, U - 1)));
+        }
         const float* mine = k.own_of(last_h) + at;
         const float* theirs = k.land_of(last_h, (U - 1) & 1u) + at;
         const uint32_t first = r * rows;

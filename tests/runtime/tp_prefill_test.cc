@@ -20,6 +20,7 @@
 // argv: [1] the checkpoint. B70_KV_CACHE selects the KV form (tp_prefill_kv8_test). The int8 head (b70-decode's).
 // Exits 77 (SKIP) with fewer than two GPUs or without peer access both ways.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -115,6 +116,40 @@ int main(int argc, char** argv) {
   if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0)) {
     std::printf("SKIP: the cards cannot access each other's memory (zeDeviceCanAccessPeer)\n");
     return 77;
+  }
+  if (argc > 3 && std::string(argv[2]) == "time") {
+    // Timing only (spec 17c's diagnosis): N ids of long32k, the prefill with its crossings and without (the seam -
+    // wrong numbers, the cards' compute alone), interleaved after a warm-up, 3 rounds each.
+    const uint32_t n = uint32_t(std::atoi(argv[3]));
+    std::vector<uint32_t> ids = golden::read_ids("tests/golden/prompts/long32k.ids");
+    ids.resize(n);
+    runtime::TpOptions o;
+    runtime::TpEngine e(d0, d1,
+                        {loader::load_tp(d0, ckpt, {0, runtime::kTpDefaultCrossing}, 32768, kHead),
+                         loader::load_tp(d1, ckpt, {1, runtime::kTpDefaultCrossing}, 32768, kHead)},
+                        32768, o, kv);
+    runtime::TpOptions seam = o;
+    seam.prefill_timing_no_crossing = true;
+    auto timed = [&](runtime::TpEngine& eng) {
+      eng.reset();
+      const auto t0 = std::chrono::steady_clock::now();
+      eng.prefill(ids);
+      return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    };
+    e.prepare_prefill();
+    timed(e);
+    std::vector<double> with, without;
+    for (int round = 0; round < 3; ++round) {
+      with.push_back(timed(e));
+      e.set_options_for_test(seam);
+      without.push_back(timed(e));
+      e.set_options_for_test(o);
+    }
+    std::sort(with.begin(), with.end());
+    std::sort(without.begin(), without.end());
+    std::printf("time %u ids: with crossings %.1f ms, without (compute alone, wrong numbers) %.1f ms (medians of 3)\n",
+                n, with[1], without[1]);
+    return 0;
   }
   const std::vector<uint32_t> prose = golden::read_ids("tests/golden/prompts/prose.ids");
   const std::vector<uint32_t> code = golden::read_ids("tests/golden/prompts/code.ids");

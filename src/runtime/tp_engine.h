@@ -68,6 +68,10 @@ struct TpOptions {
   uint32_t timeout_ms = 30000;                  // one step's fence wait (a step is ~18 ms)
   uint32_t spin_limit = tp::kDefaultSpinLimit;  // flag loads one wait spins before it gives up
   bool debug_resid = false;                     // the per-layer residual tap on both cards (T1 / T2 tests)
+  // Spec 17c's timing seam (tp_prefill_test `time`): the prefill appends no crossing and no wait for one - each fold
+  // adds whatever its landing slot holds - so the wall is the cards' compute alone. The numbers are WRONG; never set
+  // outside that measurement.
+  bool prefill_timing_no_crossing = false;
 };
 
 class TpEngine {
@@ -131,6 +135,8 @@ class TpEngine {
   // T4's test hook: the next step submits only the other card's list - card `card`'s parts never arrive. The step
   // must throw within the bounds, never hang; reset() recovers.
   void drop_next(uint32_t card) { drop_ = int(card); }
+  // tp_prefill_test's timing seam (TpOptions::prefill_timing_no_crossing) switched between calls.
+  void set_options_for_test(const TpOptions& o) { opt_ = o; }
 
  private:
   struct Card;
