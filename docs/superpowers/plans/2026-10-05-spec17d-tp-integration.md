@@ -1,5 +1,66 @@
 # Spec 17d - tensor parallel: Qwen3.8 speculation, snapshots, sampling, the server, the record (the Bolt-first text is kept below)
 
+**Status (2026-11-10): BUILT on branch spec17d-tp** (not merged) - see "As built".
+
+## As built 2026-11-10 (branch spec17d-tp; box row 81 run by hand under `gpu_lock.sh box`)
+
+Review items 2, 4-9 built; item 3 (DFlash under TP) is not - refused by name (decision D12 below).
+
+- [x] **MTP under TP (item 2).** The MTP head loads WHOLE on each card (`loader::load_tp(..., mtp)`: one card's shapes,
+  0.85 GB a card) - both cards hold the same residual, so both run the same head on the same input, no crossing, and
+  keep the same head KV (MtpBuffers' TP form: the GDN slots at the card's shapes, the head's KV layer at its own 24 / 4
+  heads). Code:
+  - `runtime::build_tp_verify` / `build_tp_draft` (capture.cc's `TpVerify` / `TpDraft` modes): the TP walk at M rows
+    (17b's crossings at M rows, the per-row GDN slots at the card's heads, tp.cl's argmax per row) plus spec 8's tail
+    at the head's shapes (`TpLink::head`, checked to fit the card's decode scratch at M <= 4); the draft list's lm_head
+    is the card's int8 vocabulary half and tp.cl's argmax, the host merges the two winners (D2's rule) before the next
+    draft list. 912 launches a verify list, 23 a draft list.
+  - `TpEngine`: draft / verify / commit / mtp_step1 (ingest and generate run verify(0) + commit with the head, as
+    Engine), spec 28c's deep lists (DPAS by depth), max_verify_k, set_draft_input, the T4 drop on any list.
+  - Per-card binaries (src/kernels/CMakeLists.txt "Spec 17d", the folded crossing): gdn_step_slots_M1..4_GK8V24,
+    prep_gated_head / prep_silu_mul (I8704) / attn_prep / attn_v2 (+ _KV8) at M = 2..4, attn_verify_dpas at 12 / 2
+    (the kernel takes FA_Q_HEADS / FA_KV_HEADS with GQA 6; its default binaries byte-identical to main's, checked by
+    compiling both sources on the box), tp_cross / tp_argmax at M = 2..4, and six gemm_sm rows at the per-card shapes
+    (kSmallMTuning, kSmVerify4; gate||up at grid S 8). verify_attn.h's table applies to 12 / 2 (verify_attn_heads).
+- [x] **AdaptiveK (item 4).** `MtpCost::tp_int8_head()` measured by `tp_mtp_test cost` (medians of 5 interleaved
+  rounds): verify 1.00 / 1.09 / 1.13 / 1.20, drafts 0.16 / 0.32 / 0.48 of the K = 0 iteration (18.93 ms at depth 4096);
+  at 32768 1.00 / 1.01 / 1.07 / 1.13 and 0.15 a draft. b70-serve and b70-decode use it under TP.
+- [x] **Sampling (item 5, D9).** `TpEngine::read_logits_into` / `read_draft_logits_into` gather both cards' halves of
+  each row into the full row (2 x 0.5 MB a row); the sampler is one card's (PipelineEngineAdapterT). tp_mtp_test holds
+  every verify row's gathered argmax to the merged id and a draft picked from the gathered row to the merged draft.
+- [x] **The server (item 6).** `b70-serve --parallel tp` (serve_tp): spec 16d's `PipelineEngineAdapterT<TpEngine>` -
+  `--spec off / auto / mtp / lookup`, host sampling, the prefix cache. Refused by name: DFlash, a draft vocabulary, the
+  l0-int8 prefill, other models (cli::check_tp, check_tp_model).
+- [x] **Snapshots / prefix cache (item 7).** `TpEngine::load_state` / `load_kv` scatter the one-card host layouts
+  (tp_gather.h: `scatter_state`, `scatter_kv`, the head's KV layer spliced in after the FA layers - Engine's MTP
+  layout), save_state takes the live GDN slot and the head's hidden row. Prefill's block hook under TP: a pair never
+  straddles the hook's stride (`tp_hook_stride`: 2 x the chunk cap rounded to blocks, 4096 at cap 2048 - plan 5d's
+  rule (A)), the hook runs after such a pair and after the prompt. With the head, TP prefill crosses the last unit's
+  every row and each card runs the head's KV per chunk (`prefill::step_tp_final` + `step_tp_mtp_kv`, in passes of
+  cap / 2 rows the card's scratch holds, a [10240][1024] head slab).
+- [x] **D3 (item 8).** `--parallel auto` in b70-serve picks tp for Qwen3.8 on two B70s (peer access: the hardware gate)
+  with `--max-len auto` and nothing TP refuses (cli::tp_auto); an asked --max-len keeps one card / pp (its spare memory
+  may be sequence slots). b70-decode's auto is unchanged (decision D13).
+- [x] **Box row 81** (tools/box_validate/stages.sh): r81.host, r81.kernels, r81.mtp, r81.kv8, r81.prior, r81.cli,
+  r81.serve, opt-in r81.cost and r81.speed (tools/box_validate/depth_prompts.py).
+
+**Tests (box, 2026-11-10).** Host: tp_slice_test (+ scatter, splice), verify_attn_test (12 / 2), gemm_sm_names_test,
+pipeline_args_test, tp_desc_test, cli_reject_tp_* pass. gemm_sm_test on the six per-card rows: PASS (N2 vs fp64, vs
+gemv, property R). tp_mtp_test, bf16 KV: M1 (plain ids with the head) identical to plain TP on prose / code / long /
+long32k[:6000]; M2 at K = 1..3 identical on prose, code, long32k[:6000] (acceptance at K = 3 0.39 / 0.85 / 0.65);
+on `long` every K diverges at id 62 (198 -> 271, 23 ulp, rank 1) - the f32 judge of that exact context (17c's D10 file,
+the same 64 ids) REJECTS 271 (decision D11). int8 KV: the mirror image - plain TP takes 271 there (17c's D10 row), MTP
+takes 198 (the f32 top; its judge being made). T1 the head bitwise between the cards; D9 gathers exact; S1 the hook at
+4096 and 6000, restore bitwise (state, KV, 64 ids); S2 one card's snapshot into TP and TP's into one card: identical or
+a near-tie (0.22 / 0.86 ulp); T4 a dropped verify step throws in ~0.8 s, reset() recovers. 17b / 17c's tests unchanged
+(tp_kernels / tp_decode / tp_fail / tp_prefill PASS). The teacher-forced verify-rows probe (`rows` / `rows1`): TP's
+verify rows drift from its plain rows exactly as one card's do (max |dlogit| up to ~9 vs ~13 over 30 steps) - the
+id-62 flip is the verify path's rounding landing on a sensitive row, not a TP fault. b70-serve (golden + tool-call
+sets, 39 requests, prefix cache on): `--parallel tp --spec off / auto` and one card's `--spec auto` against one card's
+`--spec off` - 0 FAIL by the f32 judge, the rest identical or awaiting references (SERVE_JUDGE_TBD).
+
+**Speed** (SPEED_TBD).
+
 ## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17d starts after 17c)
 
 Every task below the status lines is Bolt's (`BoltEngine` snapshots, LiLiCorr, `b70-serve <bolt> --tp 2`, row 71).
