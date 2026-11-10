@@ -1184,6 +1184,8 @@ class TokDiffTest(Tmp):
         self.assertEqual(self.run_diff(a, self.p("absent.json")).returncode, 2)
 
 
+@unittest.skipUnless(os.path.exists(os.path.join(ROOT, ".git")),
+                     "validation driver needs checkout git metadata (.git is absent in rsync box trees)")
 class DriverTest(unittest.TestCase):
     """tools/box_validate.sh without a box: --list, --dry-run, --registry, selection."""
 
