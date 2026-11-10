@@ -18,6 +18,7 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != _HERE]
 
+import glob  # noqa: E402
 import copy  # noqa: E402
 import importlib.util  # noqa: E402
 
@@ -140,9 +141,27 @@ def test_run_end_to_end():
     assert os.stat(c1).st_ino == os.stat(c2).st_ino, "one context's ids under two keys: one file"
     c3 = os.path.join(out8, [k for k in ctx if k.startswith("dflash_gpu_int8_g")][0] + ".golden.safetensors")
     assert os.stat(c1).st_ino != os.stat(c3).st_ino, "the same ids at another prompt length: another file"
-    assert not os.path.exists(os.path.join(work, "hidden.pt")), "the checkpoint is removed once done"
+    assert not glob.glob(os.path.join(work, "**", "hidden.pt"), recursive=True), "the checkpoints are removed"
     # a second run finds every judge and does nothing
     QF.main()
+    # Force several memory groups and chunked singletons through the real streamed run/output path.
+    cap = QF.estimate_peak(214, 150, TD.TEXT, chunk_rows=64, output_rows=81)
+    groups = QF.memory_plan(ctx, TD.TEXT, cap, chunk_rows=64)
+    assert len(groups) > 1 and any(g[2] for g in groups)
+    out_group, out8_group = out + "-group", out8 + "-group"
+    sys.argv = ["qwen_forced.py", "run", snap, "--ctx", cdir, "--out", out_group, "--out-i8head", out8_group,
+                "--work", work, "--vocab-used", str(TD.VOCAB_USED), "--chunk-rows", "64",
+                "--memory-gib", str(cap / 2**30)]
+    QF.main()
+    for k in ctx:
+        old, new = (out8, out8_group) if k.startswith("dflash") else (out, out_group)
+        with safe_open(os.path.join(old, k + ".golden.safetensors"), framework="pt") as f:
+            want = f.get_tensor("logits")
+        with safe_open(os.path.join(new, k + ".golden.safetensors"), framework="pt") as f:
+            got = f.get_tensor("logits")
+        err = ((got - want).abs().max() / want.abs().max()).item()
+        assert err < 2e-5, (k, err)
+    assert not glob.glob(os.path.join(work, "**", "hidden.pt"), recursive=True)
     # a key whose ids do not hash to it is refused
     bad = os.path.join(cdir, "mtp_gpu_bf16_x_0123456789abcdef")
     for ext in (".prompt.ids", ".force.ids"):
@@ -313,7 +332,63 @@ def test_pfi8():
           f"{worst8:.1e}, boundary codes); a position is shared only by keys that computed it the same way")
 
 
-TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8]
+def test_memory_plan():
+    ctx = keyed(contexts())
+    cap = QF.estimate_peak(160, 160, TD.TEXT)
+    groups = QF.memory_plan(ctx, TD.TEXT, cap, chunk_rows=64)
+    assert len(groups) > 1
+    assert {k for g in groups for k in g[1]} == set(ctx)
+    assert all(g[3] <= cap for g in groups)
+    long = keyed({"mtp_verify_long": (TD.seq(31742, 31), [1, 2]),
+                  "mtp_verify_longer": (TD.seq(130046, 32), [3, 4])})
+    groups = QF.memory_plan(long, QF.DEFAULT_CONFIG, 64 * 2**30, chunk_rows=256)
+    assert len(groups) == 2 and all(len(g[1]) == 1 for g in groups)
+    assert all(g[3] <= 64 * 2**30 for g in groups)
+    assert any(g[2] for g in groups), "the 130k context needs chunking"
+    try:
+        QF.memory_plan(long, TD.TEXT, 1, chunk_rows=64)
+        raise AssertionError("an impossible memory cap was accepted")
+    except ValueError as e:
+        assert "memory cap" in str(e)
+
+
+def test_branch_state_memory():
+    # Deepest path first: DFS descends the spine before visiting its side leaves, so GDN
+    # must retain every unfinished ancestor's recurrent state at once.
+    ctx = {f"mtp_verify_comb_{d:02}": ([1] * (12 - d) + [2], [3]) for d in range(12)}
+    trie, _ = QF.plan(ctx)
+    cap = QF.estimate_peak(len(trie.tok), 14, TD.TEXT)
+    groups = QF.memory_plan(ctx, TD.TEXT, cap)
+    assert len(groups) > 1, "a comb's retained recurrent states must count against the cap"
+    assert all(g[3] <= cap for g in groups)
+    assert {k for g in groups for k in g[1]} == set(ctx)
+    print("memory plan: unfinished GDN branch states are included in each capped group")
+
+
+def test_chunked_forward():
+    ctx = keyed({"mtp_verify_a": (TD.seq(150, 11), TD.seq(7, 12))})
+    trie, _ = QF.plan(ctx)
+    m = ref_model()
+    with torch.no_grad():
+        full = QF.trie_forward(m, trie, log=lambda s: None)
+        for chunk in (64, 73):
+            got = QF.trie_forward(m, trie, chunk_rows=chunk, log=lambda s: None)
+            err = ((got - full).abs().max() / full.abs().max()).item()
+            assert err < 2e-5, (chunk, err)
+    # The stream/checkpoint path must use the same chunked computation on resume.
+    work = tempfile.mkdtemp(prefix="qwen_forced_chunk_resume_")
+    layers = m.model.layers
+    m.model.layers = layers[:5]
+    with torch.no_grad():
+        QF.trie_forward(m, trie, chunk_rows=64, work=work, log=lambda s: None)
+        m.model.layers = layers
+        got = QF.trie_forward(m, trie, chunk_rows=64, work=work, log=lambda s: None)
+    err = ((got - full).abs().max() / full.abs().max()).item()
+    assert err < 2e-5, err
+    print("chunked: f32 hidden states match one-shot, including resume and non-aligned chunks")
+
+
+TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8, test_memory_plan, test_branch_state_memory, test_chunked_forward]
 
 if __name__ == "__main__":
     want = set(sys.argv[1:])
