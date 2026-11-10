@@ -50,9 +50,28 @@
 // D8). Each unit then folds both halves (pf_tp_res_fold, card 0's first): the cards stay bitwise each other (T1); one
 // card's prefill sums the K halves in one chain, so the result is judged against it, not bitwise (plan 17c).
 //
-// Not here: MTP / DFlash / lookup, the restore and the server (17d), profiling, prefill's block hook (spec 7's
-// snapshots, 17d with the prefix cache), the l0-int8 prefill backend. save_state / save_kv ARE here, in the one-card
-// host layouts (runtime/tp_gather.h).
+// **MTP (spec 17d).** With the MTP head loaded (loader::load_tp's `mtp`) the head is WHOLE on each card at one card's
+// shapes: both cards hold the same residual, so both run the same head on the same input - no crossing - and keep the
+// same head KV (MtpBuffers' TP form). Engine's MTP contract, per card:
+//   draft(k)      each card's draft list i (runtime::build_tp_draft: the head, its lm_head the card's vocabulary
+//                 half, tp.cl's argmax) and the host's merge of the two winners (D2's rule) into both head Controls
+//                 before list i + 1 - a fence per draft list, as one card's draft() has;
+//   verify(k)     each card's verify list at M = k + 1 (runtime::build_tp_verify: the TP walk at M rows with the
+//                 crossings, the per-row GDN slots, the head's KV fill), the per-row merge as a decode step's;
+//   commit(j, t)  both cards: row j's GDN slot live, row j's hidden into hh row 0, pos, the pending id.
+// ingest() / generate() run verify(0) + commit(0) then (pos 0: the plain list and the hidden copy), as Engine's. The
+// verify lists bind DPAS attention by depth (spec 28c's second list), as Engine's. Built for the folded crossing
+// (kTpDefaultCrossing); the slices form runs plain decode. No draft vocabulary, no DFlash drafter (not built).
+//
+// **The server's calls (spec 17d).** PipelineEngineAdapterT's interface (cli/pipeline_serve_adapter.h), so b70-serve
+// --parallel tp is that adapter over this engine: pending / set_draft_input / host_rows, read_logits_into gathering
+// both cards' halves of each row into one full row (operator decision D9: the gather; the sampler then filters the
+// whole row on the host exactly as one card's), read_draft_logits_into likewise, and spec 7's snapshots in the
+// one-card host layouts both ways (runtime/tp_gather.h: save gathers, load scatters; with MTP the head's hidden row
+// and KV layer, card 0's - the cards' are the same bytes), and prefill's block hook (runtime/prefill/tp_prefill.cc).
+//
+// Not here: DFlash / prompt lookup's own proposer (lookup verifies through the MTP verify lists, so it needs the head
+// loaded), profiling, the l0-int8 prefill backend.
 namespace runtime {
 
 struct TpPrefill;   // runtime/prefill/tp_prefill.cc
@@ -88,6 +107,7 @@ class TpEngine {
   // Engine's contract on both cards: zeroes both persistent groups (both Controls), the landing buffers, the counters
   // and the state words; clears a failure.
   void reset();
+  // With MTP each id runs verify(0) + commit(0) (pos 0: the plain list and the hidden copy) - Engine's rule.
   void ingest(const std::vector<uint32_t>& ids);
   // Spec 17c: the prompt by prefill on both cards (the header's **Prefill**), from pos(): afterwards pos() is
   // pos + ids.size() and the first generated id is in both Controls' cur_token, as after ingest(). `chunk` (0 = the
@@ -103,6 +123,7 @@ class TpEngine {
   bool prefill_overlaps() const;
   std::vector<uint32_t> generate(uint32_t n, const std::function<void(uint32_t)>& on_token = {});
   void set_token(uint32_t id);   // the pending id, into both Controls
+  uint32_t pending() const;      // spec 17d: the pending id (both Controls hold it)
   double last_tok_per_s() const { return last_tok_per_s_; }
   double last_gen_ms() const { return last_gen_ms_; }
   double last_fence_ms() const { return last_fence_ms_; }
@@ -119,10 +140,43 @@ class TpEngine {
 
   // Spec 7's host layouts of ONE card (runtime/tp_gather.h): the same bytes Engine::save_state / save_kv write at the
   // same position on one card - bitwise equal under the slices crossing.
+  // Spec 17d: with MTP the state ends with the head's hidden row h_{pos-1} and the KV carries the head's layer after
+  // the last FA layer (Engine's MTP layouts); load_* are the scatters - state into slot 0 of each card (gdn_live 0),
+  // pos set, n_active 0, cur_token NOT restored (prefill at least one id after a restore, spec 7 §3.3).
+  static constexpr uint32_t kBlock = 2048;   // Engine::kBlock
   size_t state_bytes() const;
   size_t kv_bytes(uint32_t n_pos) const;
   void save_state(void* host) const;
   void save_kv(uint32_t begin, uint32_t end, void* host) const;
+  void load_state(const void* host, uint32_t pos);
+  void load_kv(uint32_t begin, uint32_t end, const void* host);
+  // Spec 7 §3.2 under TP (runtime/prefill/tp_prefill.cc): called after a pair of chunks that ends on a block end of
+  // the hook's stride (both cards finished it), and after the prompt's end - Engine's contract. The stride is a
+  // pair's rows rounded up to whole blocks (2 x the chunk cap: 4096 at cap 2048 - plan 5d's rule (A) for a chunk
+  // wider than a block); a pair never straddles one.
+  using BlockHook = std::function<void(uint32_t end_pos, bool is_block_end)>;
+  void set_block_hook(BlockHook hook) { block_hook_ = std::move(hook); }
+
+  // --- spec 17d: MTP (the header's **MTP**) ------------------------------------------------------------------------
+  static constexpr uint32_t kMaxDraft = MtpBuffers::kMaxK;   // 3
+  bool mtp() const { return mtp_; }
+  uint32_t max_draft() const { return mtp_ ? kMaxDraft : 0; }
+  uint32_t draft_vocab() const { return 0; }
+  uint32_t max_verify_k() const;
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick = {});
+  const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
+  void verify(uint32_t k);
+  const uint32_t* verify_ids() const;   // the merged argmax of each verify row (both Controls hold it)
+  void commit(uint32_t j, uint32_t next_token);
+  void set_draft_input(uint32_t i, uint32_t id);   // cur_token[1 + i] of both Controls (prompt lookup's drafts)
+  // The last step's logits, `rows` full rows of kVocab: each row card 0's half then card 1's (D9: the gather).
+  void read_logits_into(float* host, uint32_t rows = 1) const;
+  void read_draft_logits_into(float* host, uint32_t i) const;   // draft i's full row, the same gather
+  float* host_rows(size_t floats);   // pinned host rows of the one context (either card's copies reach them)
+  const CapturedStep& verify_step(uint32_t card, uint32_t M) const;
+  const CapturedStep& draft_step(uint32_t card, uint32_t i) const;
+  uint32_t verify_deep_lists() const;   // the per-M lists captured twice (by depth), one card's count
+  const MtpBuffers* mtp_buffers(uint32_t card) const;   // tests: a card's head buffers (null without the head)
 
   // The last step's full logits row, card 0's half then card 1's (fp32 [kVocab]) - T2's comparison.
   std::vector<float> read_logits() const;
@@ -133,7 +187,7 @@ class TpEngine {
   std::string memory_line(uint32_t card) const;
 
   // T4's test hook: the next step submits only the other card's list - card `card`'s parts never arrive. The step
-  // must throw within the bounds, never hang; reset() recovers.
+  // must throw within the bounds, never hang; reset() recovers. Spec 17d: a verify (or draft) step too.
   void drop_next(uint32_t card) { drop_ = int(card); }
   // tp_prefill_test's timing seam (TpOptions::prefill_timing_no_crossing) switched between calls.
   void set_options_for_test(const TpOptions& o) { opt_ = o; }
@@ -141,6 +195,13 @@ class TpEngine {
  private:
   struct Card;
   void step_once();
+  // Spec 17d: one step of the given lists (each card's), bounded as step_once; with `crossings` (a decode or verify
+  // list) the cards' state words are read and the head's rows merged after the fences (a draft list merges itself).
+  void run_lists(const std::array<l0::CmdList*, model::kTpSize>& lists, bool crossings, const char* what);
+  void mtp_step1();
+  void mtp_normalise_live();
+  void require_mtp(const char* what) const;
+  void capture_mtp_lists(uint32_t card);
   void merge_heads();
   bool settle(uint32_t card);
   [[noreturn]] void fail(const std::string& what);
@@ -156,6 +217,13 @@ class TpEngine {
   int drop_ = -1;
   std::array<bool, model::kTpSize> pending_{};
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  // Spec 17d: MTP's session state (Engine::Seq's for one sequence), the hook, the pinned rows.
+  static constexpr uint32_t kNoVerify = 0xFFFFFFFFu;
+  bool mtp_ = false;
+  uint32_t verify_k_ = kNoVerify, verify_pos_ = 0;
+  std::vector<uint32_t> draft_ids_;
+  BlockHook block_hook_;
+  std::unique_ptr<l0::Mem> host_rows_;
   // Spec 17c: the prefill half (allocated by prepare_prefill; deleted through the pointer prefill code set, so this
   // archive needs none of it), its chunk cap and each card's device bytes (memory_use). Declared after cards_: it
   // goes first.

@@ -1,5 +1,6 @@
 #include "runtime/prefill/step.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
@@ -418,15 +419,19 @@ void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedM
 }
 
 void step_tp_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl,
-                  const float* p0, const float* p1, void* resid_row, uint32_t vocab_used, uint32_t id_base) {
+                  const float* p0, const float* p1, void* resid_row, uint32_t vocab_used, uint32_t id_base,
+                  const void* normed_row) {
   const DeviceWeight& lm = m.linears.at({loader::kTopLevel, LinearId::LmHead});
   require(lm.kind == model::WeightKind::Int8,
           "a TP card's head is the int8 vocabulary half (loader::load_tp, LmHeadForm::Int8)");
-  tp_fold(cx, kc, s, p0, p1, resid_row, 1u);
-  pf_norm_finish(cx, kc, s, m.final_norm.ptr(), resid_row, s.x.ptr(), 1u);
+  if (!normed_row) {   // spec 17d: with the MTP head step_tp_final already folded and normed every row
+    tp_fold(cx, kc, s, p0, p1, resid_row, 1u);
+    pf_norm_finish(cx, kc, s, m.final_norm.ptr(), resid_row, s.x.ptr(), 1u);
+  }
   cx.launch(kc(kernels::gemv_i8w_variant(1, lm.shape.K, lm.shape.N), "gemv_i8w"),
             lm.shape.N / kernels::kGemvI8wCols, 1, 1,
-            {PtrArg(lm.mem.ptr()), PtrArg(lm.scales->ptr()), PtrArg(s.x.ptr()), PtrArg(s.logits.ptr())});
+            {PtrArg(lm.mem.ptr()), PtrArg(lm.scales->ptr()), PtrArg(normed_row ? normed_row : s.x.ptr()),
+             PtrArg(s.logits.ptr())});
   // tp.cl's argmax over the card's half (capture.cc's Tp head): the winner's global id and its value into ctrl,
   // pos += n_active; the caller merges the two cards' winners (runtime::TpEngine).
   const uint32_t rows = lm.shape.N;
@@ -496,13 +501,13 @@ namespace {
 // walk with the dequant replaced by a copy.
 void linear_bf16(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
                  const uint16_t* x, uint32_t M, uint32_t n_begin, uint32_t n_end, float* out,
-                 uint32_t ldc) {
+                 uint32_t ldc, l0::Mem* slab_override = nullptr) {
   const model::GemvShape& sh = w.shape;
   constexpr uint32_t kNs = kernels::kPfSlabWidth;
   require(w.kind == model::WeightKind::Bf16, "linear_bf16 on an int4 weight");
   require(n_begin % kNs == 0 && n_end % kNs == 0 && n_end <= sh.N, "slab range is not whole slabs");
   require(M > 0 && pad256(M) <= s.chunk_cap(), "M padded to 256 exceeds the scratch's chunk cap");
-  l0::Mem& slab = s.slab_buffer();
+  l0::Mem& slab = slab_override ? *slab_override : s.slab_buffer();   // spec 17d: a TP card's head slab
   require(slab.size() >= size_t(sh.K) * kNs * 2, "the slab buffer is smaller than [K][1024]");
   l0::Kernel& un = kc(kernels::pf_bf16_slab_variant(sh.K), "pf_bf16_slab");
   for (uint32_t n0 = n_begin; n0 < n_end; n0 += kNs) {
@@ -566,6 +571,74 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   else
     attn_prep_chunk(cx, kc, s, rows, hctl, s.partials.as<float>(), h.fa.as<float>(),
                     m.rope.as<float>(), static_cast<uint16_t*>(kv.k), static_cast<uint16_t*>(kv.v));
+  profile_wait(cx, Phase::kAttnPrep);
+}
+
+void step_tp_final(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, const float* p0,
+                   const float* p1, void* resid, uint16_t* hid, uint32_t C) {
+  require(m.desc->ffn_fold_s() != 0, "a TP card's last unit ends in down's halves (a dense model)");
+  require(C > 0 && C <= s.chunk_cap(), "C is outside (0, the scratch's chunk cap]");
+  tp_fold(cx, kc, s, p0, p1, resid, C);
+  pf_norm_finish(cx, kc, s, m.final_norm.ptr(), resid, hid + m.desc->hidden, C);
+  profile_wait(cx, Phase::kNorm);
+}
+
+void step_tp_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m,
+                    const model::ModelDesc& head, void* const* hctl, l0::Mem& slab, const uint32_t* ids, uint32_t pos,
+                    uint32_t C, uint16_t* hid, const KvLayer& kv) {
+  require(m.mtp != nullptr && !head.mtp_head_moe() && head.hidden == m.desc->hidden,
+          "step_tp_mtp_kv: a dense MTP head at the card's hidden");
+  require(C > 0 && C <= s.chunk_cap(), "C is outside (0, the scratch's chunk cap]");
+  const loader::MtpHead& h = *m.mtp;
+  const uint32_t H = head.hidden, G = PrefillScratch::kNormGroups;
+  const uint32_t kv_n0 = head.fa_q_proj_n();
+  require(kv_n0 % kernels::kPfSlabWidth == 0, "q_proj is not a whole number of slabs");
+  require(slab.size() >= size_t(h.fc.shape.K) * kernels::kPfSlabWidth * 2 &&
+              slab.size() >= size_t(h.qkv.shape.K) * kernels::kPfSlabWidth * 2,
+          "the head's slab is smaller than [K][1024] for fc / q||k||v");
+  const uint32_t rows = mtp_kv_rows(pos, C), P = tp_mtp_kv_pass(s);
+  if (rows == 0) return;
+  // A pass's rows: pf_q holds pad(C) x the card's q heads x 256 bf16, the head writes 2x the card's heads a row.
+  require(size_t(P) * head.fa_value_dim() <= size_t(s.chunk_cap()) * s.desc().fa_value_dim() &&
+              size_t(P) * h.qkv.shape.N * 4 <= s.partials.size() &&
+              size_t(P) * 2 * H * 2 <= s.x.size(),
+          "a pass of the head does not fit the card's prefill scratch");
+  const uint32_t r0 = C - rows;
+  const std::string fold0 = kernels::pf_res_fold_variant(H, 0, G);
+  const std::string cat = kernels::pf_norm_finish_strided_variant(H, G, G, 2 * H);
+  for (uint32_t o = 0, p = 0; o < rows; o += P, ++p) {
+    const uint32_t n = std::min(P, rows - o);
+    auto fold_norm = [&](const std::string& fv, const std::string& nv, const void* partials, void* resid,
+                         const void* w, void* out) {
+      cx.launch(kc(fv, "pf_res_fold"), G, n, 1,
+                {PtrArg(partials), PtrArg(resid), PtrArg(s.norm_sumsq.ptr()), arg_val(n)});
+      cx.launch(kc(nv, "pf_norm_finish"), G, n, 1,
+                {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(w), PtrArg(out), arg_val(n)});
+    };
+    // step_mtp_kv's 2-5 over rows r0 + o .. + n: embed, the two pre-fc norms, fc, input_layernorm, k||v, attn_prep.
+    cx.launch(kc(kernels::pf_embed_gather_variant(H), "pf_embed_gather"), 1, n, 1,
+              {PtrArg(ids + r0 + o), PtrArg(m.embed.ptr()), PtrArg(s.resid.ptr()), arg_val(n)});
+    fold_norm(fold0, cat, s.partials.ptr(), s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(head, loader::kMtpNormPreE)),
+              s.x.ptr());
+    fold_norm(fold0, cat, s.partials.ptr(), hid + size_t(r0 + o) * H,
+              at_const(h.norms, loader::mtp_norm_off(head, loader::kMtpNormPreH)), s.x.as<uint16_t>() + H);
+    linear_bf16(cx, kc, s, h.fc, s.x.as<uint16_t>(), n, 0, H, s.partials.as<float>(), H, &slab);
+    fold_norm(kernels::pf_res_fold_zero_variant(H, G), kernels::pf_norm_finish_variant(H, G, G), s.partials.ptr(),
+              s.resid.ptr(), at_const(h.norms, loader::mtp_norm_off(head, loader::kMtpNormInput)), s.x.ptr());
+    linear_bf16(cx, kc, s, h.qkv, s.x.as<uint16_t>(), n, kv_n0, h.qkv.shape.N, s.partials.as<float>(), h.qkv.shape.N,
+                &slab);
+    // attn_prep_chunk(_kv8) at the head's heads (24 q / 4 kv), the pass's own head Control.
+    if (kv.int8())
+      cx.launch(kc(kernels::pf_attn_prep_kv8_variant(head.fa_q_heads, head.fa_kv_heads), "attn_prep_kv8"),
+                head.fa_q_heads + head.fa_kv_heads, n, 1,
+                {PtrArg(hctl[p]), PtrArg(s.partials.ptr()), PtrArg(h.fa.ptr()), PtrArg(m.rope.ptr()),
+                 PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v), PtrArg(kv.ks), PtrArg(kv.vs)});
+    else
+      cx.launch(kc(kernels::pf_attn_prep_q16_variant(head.fa_q_heads, head.fa_kv_heads), "pf_attn_prep"),
+                head.fa_q_heads + head.fa_kv_heads, n, 1,
+                {PtrArg(hctl[p]), PtrArg(s.partials.ptr()), PtrArg(h.fa.ptr()), PtrArg(m.rope.ptr()),
+                 PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv.k), PtrArg(kv.v)});
+  }
   profile_wait(cx, Phase::kAttnPrep);
 }
 

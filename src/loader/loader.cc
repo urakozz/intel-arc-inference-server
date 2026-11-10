@@ -941,8 +941,10 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
   const model::ModelDesc& one = model::desc_for_architecture(archs->arr()[0].str());
   // Spec 17b: under TP the card's descriptor; `one` stays the checkpoint's (the slices are cut from its rows).
-  if (tp && (mtp || draft_vocab.size != 0))
-    throw std::runtime_error("tensor parallel (spec 17b) loads no MTP head and no draft vocabulary (17d)");
+  // Spec 17d: the MTP head loads whole on each card (replicated at one card's shapes); a draft vocabulary does not.
+  if (tp && draft_vocab.size != 0)
+    throw std::runtime_error("tensor parallel loads no draft vocabulary (spec 17d: the draft's head is the card's "
+                             "vocabulary half of lm_head); drop --draft-vocab");
   const model::ModelDesc& desc = tp ? model::tp_card_desc(one, tp->crossing) : one;
   // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
   // implemented (spec 15c)") stops here, before a byte is read - and before the
@@ -1188,7 +1190,8 @@ LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uin
   // The MTP head's widening goes into its own Widen: the W cross-check is over
   // the main model's read-per-token bytes, which the head is not part of.
   Widen mtp_widen;
-  if (mtp) m.mtp = load_mtp(ctx, imm, set, view, desc, m.report, mtp_widen);
+  // Spec 17d: under TP the head is the checkpoint's whole head on every card - `one`'s shapes, not the card's.
+  if (mtp) m.mtp = load_mtp(ctx, imm, set, view, tp ? one : desc, m.report, mtp_widen);
 
   // Up to five names, so a checkpoint that grew a family of tensors says which
   // family rather than making the reader re-run with a debugger.
@@ -1368,11 +1371,11 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 }
 
 LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const TpSlice& tp, uint32_t max_len,
-                    LmHeadForm lm_head) {
+                    LmHeadForm lm_head, bool mtp) {
   if (tp.rank >= model::kTpSize)
     throw std::invalid_argument("loader::load_tp: rank " + std::to_string(tp.rank) + " of " +
                                 std::to_string(model::kTpSize));
-  return load_impl(ctx, snapshot_or_repo, max_len, false, lm_head, DraftVocabSpec{}, &tp);
+  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_head, DraftVocabSpec{}, &tp);
 }
 
 void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len) {

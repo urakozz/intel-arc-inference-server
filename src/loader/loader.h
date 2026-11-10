@@ -255,13 +255,15 @@ void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len);
 // GDN small tensors take the card's conv channels (q, k, v) and v-heads (A_log, dt_bias); norms, q_norm / k_norm,
 // the gated norm, the embedding, the final norm and the RoPE table are whole on both cards. So every device byte
 // of a card is a byte of the one-card repack (tests/loader/tp_slice_test.cc) and the two cards' int4 bytes sum to
-// one card's. No MTP head and no draft vocabulary (17d); the checkpoint's a||b must be bf16 (Qwen3.8's).
+// one card's. The checkpoint's a||b must be bf16 (Qwen3.8's). Spec 17d: `mtp` loads the MTP head WHOLE on the card
+// (LoadedModel::mtp at the checkpoint's one-card shapes - both cards hold the same head and run it on the same
+// residual); never a draft vocabulary.
 struct TpSlice {
   uint32_t rank = 0;
   model::TpCrossing crossing = model::TpCrossing::Slices;
 };
 LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const TpSlice& tp,
-                    uint32_t max_len = 16384, LmHeadForm lm_head = LmHeadForm::Checkpoint);
+                    uint32_t max_len = 16384, LmHeadForm lm_head = LmHeadForm::Checkpoint, bool mtp = false);
 
 // The slicing rules as host functions (load_tp's, and tp_slice_test's on a synthetic checkpoint): the one-card
 // fused column indices card `rank` takes of a column-parallel linear, in the card's column order; and the source

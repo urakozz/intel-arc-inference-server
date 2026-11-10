@@ -250,6 +250,10 @@ struct MtpBuffers : MtpDims {
   // `seqs` (spec 13c): the engine's sequence slots - gdn_spec and hh hold every further sequence's too (MtpDims::sizes).
   MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& desc,
              uint32_t draft_vocab = 0, KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
+  // Spec 17d: a tensor-parallel card's (MtpDims::tp_sizes): the GDN slots at the card's shapes, the head's KV layer
+  // at the whole head's.
+  MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head,
+             KvCache kv);
 
   l0::Mem hctl;
   l0::Mem gdn_spec;
