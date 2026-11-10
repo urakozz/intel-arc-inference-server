@@ -8,7 +8,8 @@
 # Both KV forms (KVS, default "bf16 int8"). Each b70-decode run's ids go to <out>/<kv>/ids/<arm>/<name>.ids and into
 # <out>/<kv>/decode/<arm>.r1/requests.jsonl (serve_client.py record); each server arm into
 # <out>/<kv>/serve/<arm>.r1 (serve_run.sh). Resumable: a b70-decode run with its N ids already there is skipped, a
-# server arm with its requests.jsonl complete (39 lines) too. tools/box_validate/twin_count.py reads <out>.
+# server arm with its requests.jsonl complete (39 lines) too. A file <out>/STOP ends the script before its next run (a
+# clean resume point: the cards handed to another job). tools/box_validate/twin_count.py reads <out>.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 out="${1:?out dir}" side="${2:?one | tp}"
@@ -43,6 +44,7 @@ for kv in $KVS; do
     while read -r set name ids; do
       f="$out/$kv/ids/$a/$name.ids"
       if [ "$(grep -c . "$f" 2>/dev/null)" = "$N" ]; then continue; fi
+      [ -e "$out/STOP" ] && { echo "tp_twin_count: STOP before $kv $a $name"; exit 3; }
       t0=$(date +%s)
       # shellcheck disable=SC2086
       build/src/cli/b70-decode $M --ids "$ids" --n "$N" --max-len "$LEN" --kv-cache "$kv" $par $flags \
@@ -63,6 +65,7 @@ for kv in $KVS; do
     a="$side"; [ "$spec" = auto ] && a="$side-auto"
     d="$out/$kv/serve/$a.r1"
     if [ "$(grep -c . "$d/requests.jsonl" 2>/dev/null)" = 39 ]; then continue; fi
+    [ -e "$out/STOP" ] && { echo "tp_twin_count: STOP before $kv serve $a"; exit 3; }
     PORT=${PORT:-8047} tools/box_validate/serve_run.sh "$d" "$a" 1 "$M" --max-len "$LEN" $par --spec "$spec" \
       --kv-cache "$kv" -- --set golden --set toolcall --max-tokens "$N" | grep -E '^(SERVE_RUN|serve_run:|max_len|memory)' || true
     [ "$(grep -c . "$d/requests.jsonl" 2>/dev/null)" = 39 ] || { echo "FAIL $kv serve $a"; rc=1; }
