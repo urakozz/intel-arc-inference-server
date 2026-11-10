@@ -886,6 +886,9 @@ int serve_tp(const TpServe& a, server::Options options) {
 // Level Zero context (spec 16 decision 1) so the prefix cache's pinned host store is device-visible to both - a
 // snapshot saved by card 0 restores on card 1; nothing else crosses (no peer access is used). The refusals
 // (another model, one visible card, the pp override flags, DFlash) ran in run(), before the device.
+// Replica x slots (2026-11-10): each card's asked --max-len leaves its spare memory to 32768-position sequence slots by
+// plan 13c's rule (runtime::slot_layout over that card's own memory; --max-len auto: one slot), and a card with
+// several is a cli::SlotsEngine behind the replica engine - two cards x their slots requests at once.
 struct ReplicaServe {
   std::string snapshot_dir;
   cli::MaxLenArg max_len_arg;
@@ -915,6 +918,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
   std::array<l0::Context*, 2> ctx{&d0, &d1};
   std::vector<std::unique_ptr<runtime::Engine>> engines;
   std::vector<uint32_t> lens, caps;
+  std::vector<std::vector<uint32_t>> layouts;   // per card: its slots' lengths
   for (uint32_t i = 0; i < 2; ++i) {
     l0::Context& c = *ctx[i];
     loader::LoadedModel model = [&] {
@@ -929,33 +933,79 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     runtime::PrefillPath pf = a.pp_path;
     pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
     std::fprintf(stderr, "card %u: ", i);
-    const uint32_t max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache);
+    uint32_t max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache);
     const uint32_t chunk_cap = cli::settle_chunk_cap(c, model, max_len, a.mem_reserve, pf, a.kv_cache, {}, 0);
-    auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache);
+    // Plan 13c's slots on this card (the one-card server's rule, b70-serve --parallel 1).
+    std::vector<uint32_t> slot_lens{max_len};
+    if (!a.max_len_arg.is_auto && model.draft_vocab == nullptr) {
+      runtime::PrefillPath sp = pf;
+      sp.chunk_cap = chunk_cap;
+      const size_t weights = model.report.total() - model.report.rope_bytes;
+      slot_lens = runtime::slot_layout(*model.desc, max_len, model.mtp != nullptr, weights, c.memory_bytes(),
+                                       a.mem_reserve, sp, {}, a.kv_cache);
+      if (slot_lens.size() > 1) {
+        uint32_t total = 0;
+        for (uint32_t l : slot_lens) total += l;
+        loader::set_max_len(c, model, total);   // one RoPE table, one KV allocation at the slots' sum
+        max_len = total;
+        std::fprintf(stderr, "card %u: slots: %zu (%s); %s\n", i, slot_lens.size(),
+                     runtime::slot_layout_name(slot_lens).c_str(),
+                     runtime::describe(runtime::plan_slots(*model.desc, slot_lens, model.mtp != nullptr, weights, sp,
+                                                           {}, a.kv_cache),
+                                       c.memory_bytes(), a.mem_reserve)
+                         .c_str());
+      } else {
+        std::fprintf(stderr, "card %u: slots: 1 (no room for a %u-position slot beside --max-len %u)\n", i,
+                     runtime::SlotDims::kShortLen, max_len);
+      }
+    }
+    auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache,
+                                                    /*drafter=*/nullptr,
+                                                    slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{});
     if (a.have_pp_backend) engine->set_prefill_backend(a.pp_backend);
     engine->set_prefill_chunk_cap(chunk_cap);   // plan 5d
     engine->prepare_prefill();
     std::fprintf(stderr, "card %u: max_len %u, prefill chunk %u, %s\n", i, max_len, chunk_cap,
                  engine->memory_line().c_str());
-    lens.push_back(max_len);
+    lens.push_back(slot_lens[0]);
     caps.push_back(chunk_cap);
+    layouts.push_back(slot_lens);
     engines.push_back(std::move(engine));
   }
   TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
   TemplateAdapter chat_template(a.snapshot_dir);
-  std::vector<std::unique_ptr<EngineAdapter>> adapters;
-  for (auto& e : engines)
-    adapters.push_back(std::make_unique<EngineAdapter>(*e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup));
   options.eos_ids = a.eos;
   // The prefix store: one pinned allocation in the shared context, sized after both loads.
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
-  // The prompt's cut is the serial server's: hooked (every chunk ends at a stride end) when the cache is on.
-  cli::ReplicaEngine replica({{adapters[0].get(), caps[0]}, {adapters[1].get(), caps[1]}},
-                             /*hooked=*/options.prefix_cache_bytes != 0, /*wide_stride=*/true);
-  options.parallel_desc = "replica - one copy of the model per card, two requests at once";
-  server::Server server({tokenizer, chat_template, *adapters[0]}, options, &replica);
-  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, --parallel replica: 2 requests at once, max_len %u / %u, eos ",
-               options.served_model.c_str(), options.host.c_str(), options.port, lens[0], lens[1]);
+  // The prompt's cut is the serial server's: hooked (every chunk ends at a stride end) when the cache is on. A card
+  // with one slot is today's EngineAdapter; one with several, 13c's SlotsEngine (an EngineAdapter per slot).
+  const bool hooked = options.prefix_cache_bytes != 0;
+  std::vector<std::unique_ptr<EngineAdapter>> adapters;
+  std::vector<std::unique_ptr<cli::SlotsEngine>> slots_engines;
+  std::vector<cli::ReplicaEngine::Card> cards;
+  uint32_t requests = 0;
+  for (size_t i = 0; i < engines.size(); ++i) {
+    runtime::Engine& e = *engines[i];
+    if (e.slots() > 1) {
+      slots_engines.push_back(
+          std::make_unique<cli::SlotsEngine>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup, hooked));
+      cards.push_back({nullptr, caps[i], slots_engines.back().get()});
+    } else {
+      adapters.push_back(std::make_unique<EngineAdapter>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup));
+      cards.push_back({adapters.back().get(), caps[i], nullptr});
+    }
+    requests += e.slots();
+  }
+  cli::ReplicaEngine replica(cards, hooked, /*wide_stride=*/true);
+  // The serial server's view (startup line, refusals): card 0's engine - its slot 0's adapter when it has slots.
+  server::EngineIface& first = cards[0].engine != nullptr ? *cards[0].engine : slots_engines[0]->adapter(0);
+  options.parallel_desc = "replica - one copy of the model per card, " + std::to_string(requests) + " requests at once";
+  if (!slots_engines.empty())
+    options.parallel_desc += " (card 0 " + runtime::slot_layout_name(layouts[0]) + ", card 1 " +
+                             runtime::slot_layout_name(layouts[1]) + ")";
+  server::Server server({tokenizer, chat_template, first}, options, &replica);
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, --parallel replica: %u requests at once, max_len %u / %u, eos ",
+               options.served_model.c_str(), options.host.c_str(), options.port, requests, lens[0], lens[1]);
   print_eos(a.eos);
   std::fprintf(stderr, ", prefill backend %s, mtp %s%u, lm_head %s, kv cache %s\n",
                runtime::prefill_backend_name(engines[0]->prefill_backend()), a.mtp_auto ? "auto, max " : "", a.mtp_k,

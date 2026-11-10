@@ -17,7 +17,8 @@
 // (runtime::Engine::kMaxRows), and with more than mtp_active_max rows decoding no drafts at all (plain batched decode:
 // the measured costs decide, docs/probes/probe-batching-2026-10-23.md "Engine"). The scheduler clips the rows' K to it.
 //
-// One device, one thread: every call comes from the scheduler's tick thread; nothing here is thread-safe.
+// One device, one thread: every call comes from the scheduler's tick thread (under --parallel replica, from its card's
+// worker thread - cli::ReplicaEngine); nothing here is thread-safe.
 #include <algorithm>
 #include <cstdint>
 #include <memory>

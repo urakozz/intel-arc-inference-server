@@ -228,14 +228,15 @@ def load(path):
 
 
 def slots(log_dir):
-    """key -> (slot, t_start, t_end) from the server's --log-requests records."""
+    """key -> (card, t_start, t_end) from the server's --log-requests records (`card` since replica x slots, where a
+    card has several slots; before it the slot was the card)."""
     out = {}
     for p in glob.glob(os.path.join(log_dir, "*.json")):
         with open(p, encoding="utf-8") as f:
             r = json.load(f)
         req = r.get("request")
         if isinstance(req, dict) and "user" in req:
-            out[req["user"]] = (r.get("slot", -1), r.get("t_start"), r.get("t_end"))
+            out[req["user"]] = (r.get("card", r.get("slot", -1)), r.get("t_start"), r.get("t_end"))
     return out
 
 
