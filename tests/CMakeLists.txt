@@ -3181,8 +3181,10 @@ if(B70_Q4EXP)
   # full and truncated sets. SKIP 77 without the data.
   set(B70_Q4EXP_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp"
     CACHE PATH "21a's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
-  foreach(t qwen4exp_decode_test qwen4exp_golden_test qwen4exp_partial_test)
-    if(t STREQUAL "qwen4exp_decode_test")
+  foreach(t qwen4exp_decode_test qwen4exp_decode_ref_probe qwen4exp_golden_test qwen4exp_partial_test)
+    if(t STREQUAL "qwen4exp_decode_ref_probe")
+      add_executable(${t} ${CMAKE_SOURCE_DIR}/tools/probe/qwen4exp_decode_ref.cc)
+    elseif(t STREQUAL "qwen4exp_decode_test")
       add_executable(${t} runtime/${t}.cc)
     else()
       add_executable(${t} golden/${t}.cc)
