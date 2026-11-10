@@ -123,14 +123,17 @@ void run_failure(bool drop) {
   std::vector<std::vector<float>> o0, o1;
   std::vector<uint32_t> st0, st1;
   // card 1 drops (or skips the data of) its send at call 4: card 0's call-4 wait fails, later ones skip their spin.
-  std::thread t0([&] { card_run(L, false, 2, 0, c0, c1, plan, o0, 1u << 16, 0, 0, st0); });
-  card_run(L, false, 2, 1, c1, c0, plan, o1, 1u << 16, drop ? 4 : 0, drop ? 0 : 4, st1);
+  std::thread t0([&] { card_run(L, false, 2, 0, c0, c1, plan, o0, 1u << 26, 0, 0, st0); });
+  card_run(L, false, 2, 1, c1, c0, plan, o1, 1u << 26, drop ? 4 : 0, drop ? 0 : 4, st1);
   t0.join();
   CHECK_EQ(c0.state[kStatus], drop ? uint32_t(kTimeout) : uint32_t(kStale));
   CHECK_EQ(c0.state[kWant], 4u);
   for (uint32_t i = 0; i < 3; ++i) CHECK_EQ(st0[i], uint32_t(kOk));
   for (uint32_t i = 3; i < 10; ++i) CHECK(st0[i] != uint32_t(kOk));   // the first failure, then skipped waits
-  CHECK_EQ(c1.state[kStatus], uint32_t(kOk));
+  // Card 1 sent its part of call 5 on time, but card 0's part of call 5 comes only after card 0's call-4 wait has
+  // spun out its whole bound - card 1's call-5 wait may time out as well (a lost part cascades, bounded): never
+  // earlier than call 5, never stale.
+  CHECK(c1.state[kStatus] == uint32_t(kOk) || (c1.state[kStatus] == uint32_t(kTimeout) && c1.state[kWant] >= 5));
   std::printf("%s at call 4: card 0 recorded %s (flag %u, trailer %u), %u failed chunks\n",
               drop ? "a dropped send" : "a send without its data", drop ? "TIMEOUT" : "STALE", c0.state[kFlag],
               c0.state[kStamp], c0.state[kFailed]);

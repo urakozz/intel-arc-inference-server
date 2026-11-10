@@ -14,6 +14,7 @@
 // instead times one engine (the speed stage's folded arm: b70-decode has no crossing switch, decision D1's constant).
 // B70_KV_CACHE selects the KV form (tp_decode_kv8_test). The int8 head (b70-decode's). Exits 77 (SKIP) with fewer than
 // two GPUs or without peer access both ways.
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -99,23 +100,27 @@ Record run_tp(runtime::TpEngine& e, const std::vector<uint32_t>& prompt) {
 }
 
 runtime::TpEngine make_tp(l0::Context& d0, l0::Context& d1, const std::string& ckpt, model::TpCrossing c,
-                          runtime::KvCache kv, bool taps) {
+                          runtime::KvCache kv, bool taps, uint32_t max_len = kMaxLen) {
   runtime::TpOptions opt;
   opt.debug_resid = taps;
   return runtime::TpEngine(d0, d1,
-                           {loader::load_tp(d0, ckpt, {0, c}, kMaxLen, kHead), loader::load_tp(d1, ckpt, {1, c}, kMaxLen, kHead)},
-                           kMaxLen, opt, kv);
+                           {loader::load_tp(d0, ckpt, {0, c}, max_len, kHead),
+                            loader::load_tp(d1, ckpt, {1, c}, max_len, kHead)},
+                           max_len, opt, kv);
 }
 
 int bench(l0::Context& d0, l0::Context& d1, const std::string& ckpt, model::TpCrossing c, uint32_t depth,
           uint32_t tg, runtime::KvCache kv) {
-  runtime::TpEngine e = make_tp(d0, d1, ckpt, c, kv, false);
+  // b70-decode's bench arms run at --max-len 32768 (row 79's speed stage); the same here.
+  const uint32_t len = std::max(32768u, (depth + tg + 255) / 256 * 256);
+  runtime::TpEngine e = make_tp(d0, d1, ckpt, c, kv, false, len);
   const std::vector<uint32_t> prose = golden::read_ids("tests/golden/prompts/prose.ids");
   std::vector<uint32_t> ids;
   while (ids.size() < depth) ids.push_back(prose[ids.size() % prose.size()]);
   e.ingest(ids);
   e.generate(tg);
-  std::printf("| tp_decode_test bench%s tp2-%s | %u | %u | %.2f | %.2f |\n",
+  // b70-decode --bench's row (tools/box_validate/summary.py reads it), the arm in the tag.
+  std::printf("| b70-decode tp_decode_test int8-head%s tp2-%s | %u | %u | %.2f | %.2f |\n",
               kv == runtime::KvCache::Int8 ? " int8-kv" : "", model::tp_crossing_name(c), depth, tg,
               e.last_tok_per_s(), e.last_gen_ms() / tg);
   return 0;
