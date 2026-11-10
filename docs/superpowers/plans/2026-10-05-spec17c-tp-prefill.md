@@ -70,13 +70,23 @@ judged TP prefill is acceptable or the hybrid's bitwise property is required.
   code, long (2820), long32k[:6000] identical 64 ids; the two-call session a near-tie at id 10 (0.07 ulp). Replay
   bitwise.
 - tp_prefill_kv8_test (int8 KV): prose, code, the two-call session identical; long32k[:6000] a near-tie (0.32 ulp);
-  long diverged at id 62 (4.79 ulp, rank 1) - sent to its f32 judge (`f32_refs.sh forced-qwen`, key
-  `tp_prefill_kv8_long_fa12c9167b2eaa28`, 4 min of CPU): see the row-80 result line below.
+  long diverged at id 62 (4.79 ulp, rank 1) - its f32 judge (`f32_refs.sh forced-qwen`, key
+  `tp_prefill_kv8_long_fa12c9167b2eaa28`, 4 min of CPU) REJECTS TP's id there (2.87 logits = 23 bf16 ulp below the f32
+  top; one card's id is the top). **r80.kv8 FAILs** on that one row; operator decision D10 (REPORT-17c.md). Evidence:
+  one card walking TP's own chunk list keeps one card's 64 ids (the K split, not the chunking, moves it); the bf16
+  runs of the same prompt are identical; `tools/probe/tp_prefill_kv8_drift_17c.sh` (128 ids, both KV forms, one card
+  and TP, prefill and decode ingest): under int8 KV every path pair diverges somewhere on q4exp_8k / q4exp_agentic -
+  one card's own prefill vs its ingest at ids 45 / 76, 17b's merged TP decode vs one card at 23 / 82, TP prefill vs one
+  card's at 23 / 6 (long32k 120, code identical); under bf16 KV TP prefill = one card's on long32k, q4exp_8k and code,
+  at 117 on q4exp_agentic, while one card's own prefill vs ingest differs at 66 on q4exp_8k.
 - Chunk invariance: KV bitwise and the first id equal at chunk 1024 vs 2048; the GDN state at the prompt end is not
   - and one card walking the same two chunk lists differs in the same ~2.49 MB, so it is a property of the GDN prefill
   (the end state depends on the last chunk's rows; one card's uniform cuts never vary them), not of TP. Open item.
-- tp_decode_test / tp_decode_kv8_test / tp_fail_test (17b's decode): PASS.
-- Smoke: `b70-decode --parallel tp --prefill --ids prose --n 24` = `--parallel 1 --prefill`'s ids.
+- tp_decode_test / tp_decode_kv8_test / tp_fail_test (17b's decode): PASS (r80.decode).
+- r80.cli: `b70-decode --parallel tp --prefill --ids long --n 64` = `--parallel 1 --prefill`'s 64 ids (2820 ids in
+  1153 ms, 2445 t/s); cli_reject_tp_* PASS. Default kernel binaries unchanged (kv8 / pf_res_fold / pf_flash_attn
+  byte-identical to main's build). test_box_validate.py on the box: 13 failures, all "not a git repository" (the box
+  tree has no .git; 17b's tree the same), none from row 80.
 
 **Speed** (`interleave.sh`, median of 3 after a warm-up, order reversed every other round, box shared with 3l between
 our locked runs; spreads <= 0.3 %), `b70-decode --bench --prefill-length N --tg 32 --max-len 32768`:
@@ -91,7 +101,8 @@ with crossings, 714 ms without (compute alone; one card's half would be ~586 ms)
 crossings hide all but 100 / 400 ms; the rest is a card's compute being ~22 % (2048, two 1024-row chunks) / ~7 % (16384)
 above half of one card's.
 
-**Decisions (built at the recommendation; the options in REPORT-17c.md):** D8 the wavefront with fp32 crossings on the
+**Decisions (built at the recommendation; the options in REPORT-17c.md):** D10 int8 KV under TP prefill kept built,
+its stage left FAILing on the one f32-rejected row until the operator rules; D8 the wavefront with fp32 crossings on the
 copy engines, judged (not the hybrid, not bf16 crossings, not in-order T); l0-int8 prefill refused under TP; the
 snapshot hook under TP (spec 7 §3.2) left to 17d with the prefix cache; chunk cap 2048 (4096 by --prefill-chunk).
 
