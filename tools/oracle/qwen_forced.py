@@ -2,7 +2,7 @@
 """Qwen3.8's f32 judges of the forced contexts (spec 28 N4 / N6, tests/server/spec_judge.h), on the CPU.
 
     qwen_forced.py run <snapshot> --ctx DIR [--ctx DIR ...] --out DIR --out-i8head DIR
-                   [--i8head-re REGEX] [--pfi8-re REGEX] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
+                   [--memory-gib 64] [--chunk-rows 256] [--i8head-re REGEX] [--pfi8-re REGEX] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
     qwen_forced.py plan --ctx DIR [--ctx DIR ...] [--pfi8-re REGEX] [--match REGEX] [--done FILE]
 
 A context is tests/golden/forced_judge.h's dump: <key>.prompt.ids and <key>.force.ids (B70_DUMP_FORCED). Its judge
@@ -34,6 +34,12 @@ parent's state - full attention over the segment's ancestors' K / V, the GDN cau
 the path, the gated delta rule (modeling_qwen3_5.torch_chunk_gated_delta_rule) from the parent segment's final
 recurrent state. Mathematically that is each context's own causal forward; the f32 rounding differs from a
 one-sequence forward only in summation order (test_qwen_forced.py checks it against transformers' own forward).
+
+Memory: contexts are packed into groups whose estimated peak fits --memory-gib (also capped by the container's
+memory.max). An oversized singleton streams each layer in --chunk-rows chunks: its FA KV remains f32 for just
+that layer; GDN keeps its f32 recurrent state and the causal-conv halo. No activation is truncated to bf16. The
+estimate includes resident weights, prefetched/converting layer weights, hidden buffers, KV, workspaces and head
+output copies; impossible caps are refused before weights are loaded. `plan` prints each group's peak estimate.
 
 Resumable: the hidden state is checkpointed after every layer in --work (a killed run restarts at the layer it was
 on, for the same set of contexts); keys listed in --done (one per line) or already in --out are skipped. Contexts
@@ -246,6 +252,80 @@ def _out_key(j):
     return (j["n_prompt"], j["seq"], j["form"], j["pfi8"])
 
 
+# The shipped Qwen3.8 text config; `run` reads the actual snapshot (tiny tests use theirs).
+DEFAULT_CONFIG = dict(hidden_size=5120, intermediate_size=17408, vocab_size=248320,
+                      num_attention_heads=24, num_key_value_heads=4, head_dim=256,
+                      linear_num_key_heads=16, linear_num_value_heads=48,
+                      linear_key_head_dim=128, linear_value_head_dim=128)
+
+
+def estimate_peak(n, longest, config, chunk_rows=0, output_rows=0):
+    """Conservative live bytes: resident embed/head, current f32 + prefetched bf16 layer and conversion
+    scratch, hidden buffers, projections, GDN's 64-wide chunk workspace, FA scores and logits copies.
+    Chunked single chains retain only this layer's f32 KV (no bf16 truncation) and bounded GDN state.
+    Includes 4 GiB for Python/torch, allocator slack and checkpoint/page-cache headroom.
+    """
+    h, mid, v = (config[k] for k in ("hidden_size", "intermediate_size", "vocab_size"))
+    nh, nk, hd = (config[k] for k in ("num_attention_heads", "num_key_value_heads", "head_dim"))
+    kh = config["linear_num_key_heads"] * config["linear_key_head_dim"]
+    vh = config["linear_num_value_heads"] * config["linear_value_head_dim"]
+    conv = 2 * kh + vh
+    weights = 4 * v * h + 10 * (3 * h * mid + h * (2 * nh * hd + 2 * nk * hd))
+    head = 16 * v * h + 16 * max(HEAD_ROWS, output_rows) * v + 12 * n * h
+    rows = min(n, chunk_rows) if chunk_rows else n
+    hidden = 12 * n * h
+    projections = 4 * rows * (6 * h + 6 * conv + 8 * vh + 4 * nh * hd + 3 * mid)
+    gdn_work = 4 * rows * config["linear_num_value_heads"] * (8 * 64 + 8 * config["linear_value_head_dim"])
+    kv = 16 * longest * nk * hd
+    scores = 12 * min(rows, Q_BLOCK) * longest * (1 if chunk_rows else nh)
+    return int(4 * 2**30 + max(weights + hidden + projections + gdn_work + kv + scores, head))
+
+
+def memory_cap(gib):
+    cap = int(gib * 2**30)
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                value = f.read().strip()
+            if value.isdigit():
+                cap = min(cap, int(value))
+    return cap
+
+
+def memory_plan(ctx, config, cap, chunk_rows=256, i8head_re=I8HEAD_RE, pfi8_re=None, root=REPO):
+    """[(trie, jobs, chunk_rows (0: trie forward), estimated peak bytes)], each <= cap.
+    Greedily pack short contexts; an oversized singleton runs one layer at a time in bounded chunks.
+    """
+    groups, pending = [], {}
+
+    def group(contexts, chunk=0):
+        trie, jobs = plan(contexts, i8head_re, pfi8_re, root)
+        peak = estimate_peak(len(trie.tok), max(len(j["seq"]) for j in jobs.values()), config, chunk,
+                             max(len(j["rows"]) for j in jobs.values()))
+        return trie, jobs, chunk, peak
+
+    for key in sorted(ctx):
+        candidate = group(pending | {key: ctx[key]})
+        if candidate[3] <= cap:
+            pending[key] = ctx[key]
+            continue
+        if pending:
+            groups.append(group(pending))
+            pending = {}
+        single = group({key: ctx[key]})
+        if single[3] <= cap:
+            pending[key] = ctx[key]
+        else:
+            single = group({key: ctx[key]}, chunk_rows)
+            if single[3] > cap:
+                raise ValueError(f"{key}: estimated peak {single[3] / 2**30:.1f} GiB exceeds memory cap "
+                                 f"{cap / 2**30:.1f} GiB even with {chunk_rows}-row chunks")
+            groups.append(single)
+    if pending:
+        groups.append(group(pending))
+    return groups
+
+
 def estimate_hours(n_pos, n_rows, longest):
     """Rough, from the box's f32 sgemm (2048x2560x2560 in 37.8 ms on ~19 threads, memory cpu-bf16-slow): ~54 GFLOP a
     position over the linears, the head 2.5 GFLOP a written row, attention over a segment's ancestors, the weight
@@ -362,11 +442,14 @@ def attention(A, h, trie, cos, sin, M, q8=None):
     return q8.rows(A.o_proj, o)
 
 
-def gdn(G, h, trie, M, q8=None):
+def gdn(G, h, trie, M, q8=None, initial_state=None, prefix=0, return_state=False):
     """Qwen3_5GatedDeltaNet over the trie: the projections token-parallel; the causal conv (kernel K) as the sum of
     K taps up the path (a position's own and its K - 1 ancestors', zero above a root); the gated delta rule per
     segment from its parent segment's final state (modeling_qwen3_5.torch_chunk_gated_delta_rule, fp32). `q8`: the
-    int8 prompt pass's linears (in_proj_qkv, in_proj_z, out_proj; in_proj_b / in_proj_a stay exact: pf_ab_proj)."""
+    int8 prompt pass's linears (in_proj_qkv, in_proj_z, out_proj; in_proj_b / in_proj_a stay exact: pf_ab_proj).
+    For a chunk's single chain, `prefix` rows supply only the conv halo; recurrence starts at `initial_state`,
+    skips those halo rows, and `return_state` returns its final state beside the output.
+    """
     import torch
     import torch.nn.functional as F
     q8 = q8 or Int8Pass(None)
@@ -401,7 +484,8 @@ def gdn(G, h, trie, M, q8=None):
     states, left = {}, list(trie.n_children)
     for s in range(len(trie.seg_start)):
         a, L, ps = trie.seg_start[s], trie.seg_len[s], trie.seg_parent[s]
-        init = states[ps] if ps >= 0 else None
+        a, L = a + prefix, L - prefix
+        init = states[ps] if ps >= 0 else initial_state
         o, fin = M.torch_chunk_gated_delta_rule(query[None, a:a + L], key[None, a:a + L], value[None, a:a + L],
                                                 g=g[None, a:a + L], beta=beta[None, a:a + L], initial_state=init,
                                                 output_final_state=True, use_qk_l2norm_in_kernel=True)
@@ -412,8 +496,11 @@ def gdn(G, h, trie, M, q8=None):
             left[ps] -= 1
             if not left[ps]:
                 del states[ps]
-    core = G.norm(core.reshape(-1, G.head_v_dim), z.reshape(-1, G.head_v_dim)).reshape(N, -1)
-    return q8.rows(G.out_proj, core)
+    core = G.norm(core[prefix:].reshape(-1, G.head_v_dim),
+                  z[prefix:].reshape(-1, G.head_v_dim)).reshape(N - prefix, -1)
+    out = _rows_m(lambda x, m: q8.lin(G.out_proj, x, m), core,
+                  None if q8.mask is None else q8.mask[prefix:])
+    return (out, fin) if return_state else out
 
 
 def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
@@ -435,7 +522,61 @@ def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
     return X + _rows_m(block, X, q8.mask)
 
 
-def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log=print):
+def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask):
+    """One unbranched context, layer-major: f32 KV for this FA layer only, GDN state + conv halo.
+    X/Y hold the whole layer's hidden rows; all projection/GDN work is bounded by chunk_rows + halo.
+    FA runs one query head at a time without expanded KV or an all-head score tensor.
+    """
+    import torch
+    N = len(trie.tok)
+    assert trie.parent == [-1] + list(range(N - 1)), "chunking requires a single context"
+    Y = torch.empty_like(X)
+    state, K, V = None, None, None
+    for a in range(0, N, chunk_rows):
+        b = min(N, a + chunk_rows)
+        halo = min(a, lay.linear_attn.conv1d.kernel_size[0] - 1) if lay.block_type == "linear_attention" else 0
+        h = lay.input_layernorm(X[a - halo:b])
+        mask = None if i8_mask is None else i8_mask[a - halo:b]
+        q8 = Int8Pass(mask)
+        if lay.block_type == "linear_attention":
+            local = Trie([trie.tok[a - halo:b]])
+            mix, state = gdn(lay.linear_attn, h, local, M, q8, state, halo, True)
+        else:
+            A, L = lay.self_attn, b - a
+            hd = A.head_dim
+            qg = q8.rows(A.q_proj, h).view(L, -1, 2 * hd)
+            q, gate = torch.chunk(qg, 2, dim=-1)
+            q = A.q_norm(q.contiguous()).transpose(0, 1)[None]
+            k = A.k_norm(q8.rows(A.k_proj, h).view(L, -1, hd)).transpose(0, 1)[None]
+            q, k = M.apply_rotary_pos_emb(q, k, cos[:, a:b], sin[:, a:b])
+            v = q8.rows(A.v_proj, h).view(L, -1, hd).transpose(0, 1)
+            k = k[0]
+            K = k if K is None else torch.cat([K, k], dim=1)
+            V = v if V is None else torch.cat([V, v], dim=1)
+            nH, nKV = q.shape[1], K.shape[0]
+            out = torch.empty(nH, L, hd, dtype=h.dtype)
+            for head in range(nH):
+                kv = head // (nH // nKV)
+                for r0 in range(0, L, Q_BLOCK):
+                    r1 = min(L, r0 + Q_BLOCK)
+                    sc = (q[0, head, r0:r1] @ K[kv, :a + r1].t()) * A.scaling
+                    own = torch.ones(r1 - r0, r1, dtype=torch.bool).triu(r0 + 1)
+                    sc[:, a:].masked_fill_(own, float("-inf"))
+                    out[head, r0:r1] = torch.softmax(sc, -1) @ V[kv, :a + r1]
+            mix = q8.rows(A.o_proj, out.transpose(0, 1).reshape(L, -1) * torch.sigmoid(gate.reshape(L, -1)))
+        x = X[a:b] + mix
+        q8 = Int8Pass(None if i8_mask is None else i8_mask[a:b])
+        mlp = lay.mlp
+
+        def block(xb, mb):
+            hn = lay.post_attention_layernorm(xb)
+            return q8.lin(mlp.down_proj, mlp.act_fn(q8.lin(mlp.gate_proj, hn, mb)) *
+                          q8.lin(mlp.up_proj, hn, mb), mb)
+        Y[a:b] = x + _rows_m(block, x, q8.mask)
+    return Y
+
+
+def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log=print, chunk_rows=0):
     """The final hidden state (after the last norm) of every trie position, f32 [N, H]. `load_layer(i)` makes layer
     i's weights present (streamed runs), `unload_layer(i)` drops them; `work`: a directory for the per-layer
     checkpoint (resume)."""
@@ -444,7 +585,7 @@ def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log
     tok = torch.tensor(trie.tok)
     pos = torch.tensor(trie.depth)
     i8_mask = torch.tensor(trie.i8, dtype=torch.bool) if any(trie.i8) else None
-    fp = trie.fingerprint()
+    fp = trie.fingerprint() + (f"-chunk{chunk_rows}" if chunk_rows else "")
     start, X = 0, None
     ck = os.path.join(work, "hidden.pt") if work else None
     if ck and os.path.exists(ck):
@@ -462,7 +603,10 @@ def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log
             load_layer(i)
         lay = layers[i].float()
         with torch.no_grad():
-            X = layer_forward(lay, X, trie, cos, sin, M, i8_mask)
+            if chunk_rows:
+                X = chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask)
+            else:
+                X = layer_forward(lay, X, trie, cos, sin, M, i8_mask)
         if unload_layer:
             unload_layer(i)
         if ck:
@@ -531,18 +675,32 @@ def write_outputs(final, jobs, w_bf16, outs, meta, log=print):
     return written
 
 
+def planned_groups(a, ctx):
+    snapshot = getattr(a, "snapshot", None)
+    config = DEFAULT_CONFIG
+    if snapshot:
+        with open(os.path.join(snapshot, "config.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        config = raw.get("text_config", raw)
+    cap = memory_cap(a.memory_gib)
+    groups = memory_plan(ctx, config, cap, a.chunk_rows, a.i8head_re, a.pfi8_re)
+    for i, (trie, jobs, chunk, peak) in enumerate(groups):
+        print(f"memory group {i + 1}/{len(groups)}: " + describe(trie, jobs, config["vocab_size"])[0], flush=True)
+        print(f"  peak estimate {peak / 2**30:.1f} GiB <= cap {cap / 2**30:.1f} GiB; "
+              f"{'chunked ' + str(chunk) + ' rows, one layer KV/state' if chunk else 'trie forward'}", flush=True)
+        _, n_pos, n_rows = describe(trie, jobs, config["vocab_size"])
+        hours = estimate_hours(n_pos, n_rows, max(len(j["seq"]) for j in jobs.values()))
+        print(f"  compute estimate ~{hours:.1f} h (assumed rates; chunk/stream overhead excluded)", flush=True)
+    return groups
+
+
 def cmd_plan(a):
     done = set(read_lines(a.done)) if a.done else set()
     ctx = load_contexts(a.ctx, a.match, done)
     if not ctx:
         print("no context to do")
         return None
-    trie, jobs = plan(ctx, a.i8head_re, a.pfi8_re)
-    line, n_pos, n_rows = describe(trie, jobs)
-    longest = max(len(j["seq"]) for j in jobs.values())
-    print(line)
-    print(f"estimate: ~{estimate_hours(n_pos, n_rows, longest):.1f} h on the box CPU (22 threads, f32; assumed rates)")
-    return ctx, trie, jobs
+    return planned_groups(a, ctx)
 
 
 def read_lines(path):
@@ -560,11 +718,7 @@ def cmd_run(a):
     if not ctx:
         print("no context to do (every one has its judge)")
         return
-    trie, jobs = plan(ctx, a.i8head_re, a.pfi8_re)
-    line, n_pos, n_rows = describe(trie, jobs)
-    longest = max(len(j["seq"]) for j in jobs.values())
-    print(line, flush=True)
-    print(f"estimate: ~{estimate_hours(n_pos, n_rows, longest):.1f} h (assumed rates)", flush=True)
+    groups = planned_groups(a, ctx)
     if a.dry_run:
         return
     import resource
@@ -580,18 +734,21 @@ def cmd_run(a):
 
     def unload_layer(i):
         layers[i].to_empty(device="meta")
-    if a.work:
-        os.makedirs(a.work, exist_ok=True)
-    final = trie_forward(model, trie, load_layer, unload_layer, a.work,
-                         log=lambda s: print(s + f" (wall {time.time() - t0:.0f} s)", flush=True))
     meta = {"snapshot": os.path.abspath(a.snapshot), "dtype": "f32", "lean": "1", "dump_kv": "False",
-            "vocab_used": str(a.vocab_used), "model": "qwen3.8 (tools/oracle/qwen_forced.py: one trie forward, f32)",
+            "vocab_used": str(a.vocab_used), "model": "qwen3.8 (tools/oracle/qwen_forced.py: f32)",
             "pfi8_re": a.pfi8_re or ""}
-    write_outputs(final, jobs, model.lm_head.weight, {"bf16": a.out, "int8": a.out_i8head}, meta,
-                  log=lambda s: print(s, flush=True))
-    if a.work and os.path.exists(os.path.join(a.work, "hidden.pt")):
-        os.remove(os.path.join(a.work, "hidden.pt"))
-    print(f"done: {len(jobs)} judges, wall {time.time() - t0:.0f} s, peak RSS "
+    for trie, jobs, chunk, peak in groups:
+        work = os.path.join(a.work, trie.fingerprint() + f"-chunk{chunk}") if a.work else None
+        if work:
+            os.makedirs(work, exist_ok=True)
+        final = trie_forward(model, trie, load_layer, unload_layer, work, chunk_rows=chunk,
+                             log=lambda s: print(s + f" (wall {time.time() - t0:.0f} s)", flush=True))
+        write_outputs(final, jobs, model.lm_head.weight, {"bf16": a.out, "int8": a.out_i8head}, meta,
+                      log=lambda s: print(s, flush=True))
+        del final
+        if work and os.path.exists(os.path.join(work, "hidden.pt")):
+            os.remove(os.path.join(work, "hidden.pt"))
+    print(f"done: {len(ctx)} judges, wall {time.time() - t0:.0f} s, peak RSS "
           f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20:.1f} GiB", flush=True)
 
 
@@ -607,6 +764,10 @@ def main():
             p.add_argument("--work", help="the per-layer checkpoint's directory (resume)")
             p.add_argument("--vocab-used", type=int, default=248077)
             p.add_argument("--dry-run", action="store_true")
+        if name == "plan":
+            p.add_argument("--snapshot", help="config for the memory estimate (default Qwen3.8)")
+        p.add_argument("--memory-gib", type=float, default=64, help="peak cap, also bounded by the cgroup cap")
+        p.add_argument("--chunk-rows", type=int, default=256, help="rows per oversized singleton chunk")
         p.add_argument("--ctx", action="append", required=True)
         p.add_argument("--match")
         p.add_argument("--done")
@@ -614,6 +775,8 @@ def main():
         p.add_argument("--pfi8-re", help="the keys whose test prefills with l0-int8: their test's prompt takes the "
                        "int8 prompt pass (e.g. PFI8_RE, '%s'); default none" % PFI8_RE)
     a = ap.parse_args()
+    if a.memory_gib <= 0 or a.chunk_rows <= 0:
+        ap.error("--memory-gib and --chunk-rows must be positive")
     if a.cmd == "plan":
         cmd_plan(a)
     else:
