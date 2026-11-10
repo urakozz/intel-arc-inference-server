@@ -2,8 +2,8 @@
 
 **Goal:** judge `r60.golden` (Nemotron 3.5 Bolt, our g64 export, two cards) against an f32 CPU reference, the way
 Ornith and K2 are judged (memory rulings 2026-10-23 / 10-28 / 10-31), instead of the bf16-computed golden. Until it
-exists the real checkpoint runs under option A (the synthetics' first-flip cut-off, tokens gated on every row;
-`tests/golden/bolt_golden_test.cc`, 2026-11-08).
+exists the real-checkpoint tests SKIP 77; synthetics retain option A (the first-flip cut-off;
+`tests/golden/bolt_golden_test.cc`).
 
 **Why:** the 2026-11-07 run gave 32 / 32 exact tokens on every prompt and logits cosine >= 0.99983, yet FAILed on
 expert sets beyond the 1e-3 near-tie (gaps 1.0e-3 - 7.2e-3, after a true near-tie flip at row 0 L1, gap 4e-5) and on
@@ -25,22 +25,62 @@ in bf16 like the engine, so it is not the truth either: on K2 the bf16 golden di
 
 ## Tasks
 
-1. **`bolt_ref.py run --dtype fp32`** (`tools/oracle/bolt_ref.py`): `build_streamed(..., dtype=torch.float32)`, the
+1. [x] **`bolt_ref.py run --dtype fp32`** (`tools/oracle/bolt_ref.py`): `build_streamed(..., dtype=torch.float32)`, the
    int4 export dequantised to f32 (the router bias stays fp32 as now, the SSM / conv cache fp32 as now), the same golden
    layout (route.ids / sel / gap / w, ssm, conv, h taps, logits). The box CPU has no AVX-512 bf16, so f32 is the fast
    path (memory: cpu-bf16-slow). Mac test: `test_bolt_ref.py` on the tiny puzzle - fp32 vs bf16 runs agree to bf16
    rounding, the layout keys identical.
-2. **`bolt_oracle.sh golden-f32`** -> `$DATA/oracle-out-bolt-f32/<p>.golden.safetensors` for bolt_short, bolt_4k,
+2. [x] **`bolt_oracle.sh golden-f32`** -> `$DATA/oracle-out-bolt-f32/<p>.golden.safetensors` for bolt_short, bolt_4k,
    bolt_agentic (bolt_32k later, if its time allows), each `--force` on `oracle-out-bolt/<p>.cont*.ids`; resumable per
    prompt; under the 64 GB CPU cap (`run_in_container.sh`); a data key `oracle_bolt_f32` in `tools/box_validate/data.sh`.
    First measure bolt_short's time and peak RAM, then queue the rest as a CPU chain line (class A, peak <= 64).
-3. **`bolt_golden_test --judge <dir>`**: reads the f32 golden beside the bf16 one and applies the rules above;
+3. [x] **`bolt_golden_test --judge <dir>`**: reads the f32 golden beside the bf16 one and applies the rules above;
    `r60.golden`'s real-checkpoint tests pass `--judge $DATA/oracle-out-bolt-f32` (CMake, like the Ornith gates). Unit
    test for the counting / near-tie helper on the Mac (`bolt_cutoff_test`'s pattern).
-4. **Box:** `r57.host` (the Python tests), then `r60.golden` against the f32 reference; record both counts in
+4. [ ] **Box:** `r57.host` (the Python tests), then `r60.golden` against the f32 reference; record both counts in
    open-work and close the Waiting row.
 
 ## Cost
 
 One agent, after 3a (one agent slot). CPU: hours per prompt for the 74B-A9B model at f32 (ESTIMATED; Task 2 measures
 bolt_short first). No engine change.
+
+## Route-aligned state references (operator follow-up 2026-11-10)
+
+Token forcing alone does not align recurrent state after an expert-set flip. Keep the natural f32 golden for tokens
+and expert counts; do not substitute route-forced logits for its decisions. `run --forced-routes <tape>` takes a complete
+text tape (`row block id0 ... id8`, all prompt + generated rows, expert ids unique and in range). State companions
+replay the complete engine set on every row in BOTH dtypes.
+Count differing choices within the one-bf16-ulp cut band separately (preserving high experts and excluding low
+candidates when classifying a legitimate near-tie); print other forced choices too. Natural f32 routes still bind
+the expert-count gate, so replay never excuses an incorrect routing decision. Recompute weights from the reference's
+sigmoid scores on the replayed ids. Hooks run before lazy expert materialisation. Record `forced.L*` (all changed
+choices), `near.L*` (f32 near-tie classification) and `engine.ids.L*`, and print both counts.
+`--routes-mask <aligned-f32.golden.safetensors>` carries the f32 near-tie classification into the bf16 baseline; both
+replay every engine choice. Float state,
+conv and h tensors stay fp32 in the f32 reference (same names/shapes; no bf16 rounding of the truth).
+
+The test's existing `B70_DUMP_FORCED=<dir>` convention writes prompt/force ids plus the complete route tape, keyed by
+prompt, forced tokens and engine configuration (head, attention, state, placement, fuse, prefill chunk). Decode and
+prefill need separate tapes. `golden-f32 <route-dump-dir>` additionally builds the aligned f32 and bf16 companions,
+resumable per context with input/source hashes; changed routes or reference source preserve old files under a stale
+directory and rebuild. State comparisons use these companions, validate BOTH actual route sets against this engine
+run, and print
+both cosines per block; missing references SKIP 77. Natural references remain the token and route-count judges.
+No engine flag or environment variable is added. Dumping is a test/tool operation; no GPU job is run by this task.
+
+The actual CPU job remains held. Run bolt_short first and measure wall/RSS before releasing 4k/agentic. Task 4's
+real-checkpoint validation and Waiting-row closure require those measurements and later GPU validation.
+
+
+## Verification and held work (2026-11-10)
+
+- Box build (`JOBS=16`), `bolt_ref_test`, `bolt_cutoff_test` and `bolt_judge_test`: PASS.
+- Box CPU reference suite: 30 `test_bolt_ref.py` tests PASS, including exact f32 dequantisation, dtype/layout/token
+  forcing and full route replay with a deliberately non-near exchange; 12 tiny-maker tests PASS.
+- Wrapper unit test (Mac and box), Python syntax, shell syntax and both missing-reference `--judge` spellings: PASS
+  (missing f32 files return 77 before device access). Independent review fixes verified.
+- CPU queue: `#HOLD-bolt bolt-f32-short` (class A, 64 GB cap, 16 threads); `#HOLD-bolt-after-short bolt-f32-rest`
+  holds 4k/agentic until short wall/RSS is measured. The queue's fourth column is output GB; threads are in the command.
+- Task 4 stays open: no real CPU reference job or GPU route-dump/validation run was started. The uncommitted
+  `REPORT-bolt-f32.md` gives queue/release and later route-dump/companion commands. Waiting rows remain open.

@@ -4036,6 +4036,10 @@ add_test(NAME bolt_ref_test COMMAND bolt_ref_test)
 add_executable(bolt_cutoff_test golden/bolt_cutoff_test.cc)
 target_include_directories(bolt_cutoff_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 add_test(NAME bolt_cutoff_test COMMAND bolt_cutoff_test)
+add_executable(bolt_judge_test golden/bolt_judge_test.cc)
+target_include_directories(bolt_judge_test PRIVATE ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+add_test(NAME bolt_judge_test COMMAND bolt_judge_test)
+set_tests_properties(bolt_judge_test PROPERTIES LABELS bolt)
 set_tests_properties(bolt_ref_test PROPERTIES LABELS bolt TIMEOUT 600)
 if(B70_BOLT)
   # Task 3: every binary a Bolt decode list binds, any head / attention / card count / arm / state precision
@@ -4084,6 +4088,8 @@ if(B70_BOLT)
   # 25a's golden sets made from it, data key oracle_bolt). SKIP 77 without the data.
   set(B70_BOLT_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
     "25a's golden sets on our g64 export (bolt_oracle.sh golden, its SNAPSHOT file naming the export; data key oracle_bolt)")
+  set(B70_BOLT_F32_DIR "${CMAKE_SOURCE_DIR}/oracle-out-bolt-f32" CACHE PATH
+    "Bolt natural f32 judge and per-engine route-aligned state references")
   set(B70_BOLT_SYNTH_ORACLE "${CMAKE_SOURCE_DIR}/oracle-out-bolt" CACHE PATH
     "the synthetics' golden sets: <this>-n12-g128 / <this>-n12-g64x (bolt_oracle.sh export <synthetic>; data key oracle_bolt_synth)")
   set(_bolt_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/bolt_short.ids)
@@ -4134,24 +4140,24 @@ if(B70_BOLT)
   add_test(NAME bolt_decode_real_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --pp 48,40)
   list(APPEND _bolt_tests bolt_decode_real_test)
   foreach(p bolt_short bolt_4k bolt_agentic)
-    add_test(NAME bolt_golden_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p})
+    add_test(NAME bolt_golden_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p} --judge=${B70_BOLT_F32_DIR})
     list(APPEND _bolt_tests bolt_golden_real_${p}_test)
   endforeach()
   add_test(NAME bolt_golden_real_short_split40_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_short pp2:40 peer)
+    bolt_short pp2:40 peer --judge=${B70_BOLT_F32_DIR})
   add_test(NAME bolt_golden_real_short_bf16head_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_short bf16)
+    bolt_short bf16 --judge=${B70_BOLT_F32_DIR})
   add_test(NAME bolt_golden_real_short_eager_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_short eager)
+    bolt_short eager --judge=${B70_BOLT_F32_DIR})
   list(APPEND _bolt_tests bolt_golden_real_short_split40_test bolt_golden_real_short_bf16head_test
     bolt_golden_real_short_eager_test)
   set_tests_properties(${_bolt_tests} PROPERTIES LABELS "checkpoint;golden;bolt" SKIP_RETURN_CODE 77 TIMEOUT 7200)
   # Decision 2's arm on the real model (r60.state_arm, opt-in) and the 32k prompt (opt-in, ~33k replays)
   add_test(NAME bolt_golden_real_short_b16state_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_short b16)
+    bolt_short b16 --judge=${B70_BOLT_F32_DIR})
   add_test(NAME bolt_golden_real_agentic_b16state_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_agentic b16)
-  add_test(NAME bolt_golden_real_32k_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} bolt_32k)
+    bolt_agentic b16 --judge=${B70_BOLT_F32_DIR})
+  add_test(NAME bolt_golden_real_32k_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} bolt_32k --judge=${B70_BOLT_F32_DIR})
   set_tests_properties(bolt_golden_real_short_b16state_test bolt_golden_real_agentic_b16state_test bolt_golden_real_32k_test
     PROPERTIES LABELS "checkpoint;golden;bolt;optin" SKIP_RETURN_CODE 77 TIMEOUT 28800)
 endif()
@@ -4260,16 +4266,16 @@ if(B70_BOLT)
   list(APPEND _bolt_gpf_tests bolt_golden_prefill_synth_c512_test bolt_golden_prefill_synth_eager_test)
   foreach(p bolt_short bolt_4k bolt_agentic)
     add_test(NAME bolt_golden_prefill_real_${p}_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR} ${p}
-      prefill)
+      prefill --judge=${B70_BOLT_F32_DIR})
     list(APPEND _bolt_gpf_tests bolt_golden_prefill_real_${p}_test)
   endforeach()
   add_test(NAME bolt_golden_prefill_real_short_eager_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT}
-    ${B70_BOLT_ORACLE_DIR} bolt_short eager prefill)
+    ${B70_BOLT_ORACLE_DIR} bolt_short eager prefill --judge=${B70_BOLT_F32_DIR})
   list(APPEND _bolt_gpf_tests bolt_golden_prefill_real_short_eager_test)
   set_tests_properties(${_bolt_gpf_tests} PROPERTIES LABELS "checkpoint;golden;bolt;prefill" SKIP_RETURN_CODE 77
     TIMEOUT 7200)
   add_test(NAME bolt_golden_prefill_real_32k_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_32k prefill)
+    bolt_32k prefill --judge=${B70_BOLT_F32_DIR})
   set_tests_properties(bolt_golden_prefill_real_32k_test PROPERTIES LABELS "checkpoint;golden;bolt;prefill;optin"
     SKIP_RETURN_CODE 77 TIMEOUT 14400)
 endif()
