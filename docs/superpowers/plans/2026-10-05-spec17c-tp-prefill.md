@@ -1,4 +1,39 @@
-# Spec 17c - tensor parallel: Bolt prefill across two cards
+# Spec 17c - tensor parallel: Qwen3.8 prefill across two cards (the Bolt-first text is kept below)
+
+## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17c starts when the owner has reviewed 17b)
+
+Every task below the status lines is still Bolt's (`bolt_prefill*`, `nb_pf_*`, rows 61 / 68 / 70). Stale, and what
+replaces it for Qwen3.8:
+
+1. **The engine and the baselines.** Qwen3.8's prefill is `runtime::Engine::prefill` (src/runtime/prefill/*, the l0
+   backend by default since sycl-tla was dropped; l0-int8 opt-in) and, on two cards, `PipelineEngine::prefill` (spec
+   16c's chunk pipeline). The baselines are one card's prefill and `--parallel pp`'s, measured by `b70-decode --bench
+   --prefill-length N` (rows 23 / 75), not `r61.speed` / `r68.prefill`. Chunk 4096 (plan 5d) and the 2048 / 4096 cap
+   rule (`prefill_chunk_cap_that_fits`) apply per card.
+2. **Bitwise.** The prefill GEMMs (pf_gemm*, the q4 / int8 tiles) accumulate a tile's whole K in one register chain.
+   Splitting K over two cards changes that order, so TP prefill is **judged** against one card's prefill (golden tie
+   rule / the f32 judge), not bitwise, whatever crossing form 17b ships. The column-parallel GEMMs and the per-head
+   prefill kernels stay bitwise per column / head if they bind the same tiles. The **hybrid** (prefill as `--parallel pp`,
+   then scatter the state into the TP layout) is bitwise one card's prefill, because pp is. It needs either both
+   layouts resident or a reshuffle after prefill (memory; spec 17 §4.5).
+3. **The options to measure** (Task 1): (W) the wavefront - chunk i + 1's layer l overlapping chunk i's all-reduce at
+   layer l (external engine, spec 17 §R2.8); (T) plain TP prefill with the chunk's crossings on a copy engine; (H) the
+   hybrid. The crossing at 2048 rows is 40 MiB fp32 (folded) or 80 MiB (slices) a call. The probe measured only M <= 8,
+   so the first box step is that rate (P2P push, landing in the reader's VRAM, probe §3.3) overlapped and not.
+4. **int8 KV prefill (3e).** `attn_chunk_kv8` widens the cache through `kv8_raw`, and buffer_sizes.cc:258 allocates it
+   only at 24 / 4 heads. Per-card 12 / 2 needs that scratch and `pf_flash_attn_kv8_raw_variant(12, 2)`, plus the
+   l0-int8 path's per-card column scales.
+5. **The snapshot hook** (spec 7 §3.2) under TP fires when both cards have finished the block, and `save_state` /
+   `save_kv` gather into the one-card layout (17b builds the gather). `--prefix-split-last` (the last id by one decode
+   replay) works unchanged on 17b's decode.
+6. **CLI.** No new flag: `--parallel tp --prefill` / `--bench --prefill-length` lift 17b's refusals.
+7. **Box row 80** (79 is 17b's); every two-card stage kind `gpu`.
+
+Operator decisions for 17c (in REPORT-17-review.md): the option (W / T / H) after the crossing-rate step; whether a
+judged TP prefill is acceptable or the hybrid's bitwise property is required.
+
+## The plan as written before the review (Bolt-first text kept for Bolt's later TP plan)
+
 
 **Conditions (operator, 2026-10-23; for Bolt - superseded for Qwen3.8 by the 2026-10-27 status below):** this plan starts only after **plan 17b is merged and its row passed on the box**,
 which itself needed spec 17 §9's GO (P0 after `r22.devices` / `r22.p1`; Bolt's rows 59-62 passed; the crossing cost

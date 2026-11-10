@@ -1,4 +1,119 @@
-# Spec 17b - tensor parallel: Bolt decode across two cards
+# Spec 17b - tensor parallel: Qwen3.8 decode across two cards (the Bolt-first text is kept below)
+
+## Review 2026-11-10 (against main 16fe2a14; the plan is built from this section, not from the Bolt text below)
+
+The 2026-10-27 status line retargeted this plan to Qwen3.8 but the tasks were never rewritten: every task below the
+status lines is Bolt's (`BoltDesc`, `bolt_loader`, `nb_*` kernels, `--pp 2` as the reference, rows 69 / 72). What is
+stale against today's code, and what replaces it:
+
+1. **The engine is the main one, not Bolt's.** Qwen3.8 runs `runtime::Engine` / `runtime::capture` /
+   `loader::load` on `model::ModelDesc`. The descriptor already carries per-model head counts, and the kernels already
+   take them as defines with name suffixes (`_GK<k>V<v>`, `_Q<q>KV<kv>`, `_I<intermediate>`; spec 15c built Ornith that
+   way). So a per-card TP descriptor (8 / 24 GDN heads, 12 / 2 FA heads, intermediate 8704, the head's 124160 rows)
+   gives per-card shapes, buffer sizes and binary names through the existing code. TP is a new capture mode beside
+   `Stage` (the crossing after out_proj / o_proj / down, its wait fused into the next residual fold), a new
+   `runtime::TpEngine` beside `PipelineEngine` (one Level Zero context over both cards, one list per card), and a
+   loader path that slices the checkpoint per card through the column map `load_linear` already builds
+   (column-parallel: a sub-range of columns; row-parallel: the qweight / scales pointers offset by the card's K rows).
+2. **The reference is one card, not `--pp 2`.** Qwen3.8 fits one card, and `--parallel pp` is bitwise one card anyway
+   (spec 16 P1). T2 compares with `runtime::Engine` on card 0.
+3. **Bitwise to one card is possible, which spec 17 §5 says it is not.** Per output, at M = 1:
+   - column-parallel linears (qkv‖z, a‖b, q‖k‖v, gate‖up, the lm_head rows): bitwise per column. Same K, same S, the
+     same per-column reduction in gemv.cl / gemv_bf16.cl / gemv_i8w.cl, and the per-card weights are byte subsets of
+     the one-card repack.
+   - per-head kernels (gdn_step and its conv ring, prep_gated_head, attn_prep, decode attention v2 or its kv8 twin,
+     the reduce) and prep_silu_mul (per element): bitwise per head or element.
+   - row-parallel linears plus the residual fold (out_proj, o_proj, down into `prep_res_fold`): one card sums the
+     split-K slices in order, `((p0 + p1) + p2) + p3` (prep.cl). **Fold-then-send** (the probe's form: each card folds
+     its own slices and sends one fp32 row, and the reader adds card 0's row then card 1's) gives
+     `(p0 + p1) + (p2 + p3)`. That is not one card's order, so this form **needs the f32 judge**. Both cards still agree
+     bitwise with each other (T1). **Slice exchange** (each card runs the row-parallel GEMV at the one-card S / 2 over
+     the one-card slice boundaries, sends its raw slices, and the fold sums all four in one-card order) is **bitwise
+     one card**. It costs about 2x the crossing bytes and half the work-groups on those three GEMVs. Derived: about
+     +0.4 ms a token for the crossing and +0.6 to 1.0 ms for the GEMVs, so roughly 52 instead of 56 t/s. Both forms are
+     one kernel pair with defines. The plan builds both and measures both (operator decision D1).
+   - the RMS norms (prep_norm_finish), the embedding and argmax: bitwise, because the residual is bitwise on both cards
+     (and to one card in the slice form) and the argmax tie rule (lower id) is bracket-free.
+   - MTP verify at M >= 2 (17d): gemm_sm rows are matched on exact (K, N, S, layout). Per-card rows with the same knobs
+     would keep the slice form bitwise one card's verify too.
+4. **The crossing is route (P) only, and it lands in the reader's own VRAM** (probe §3.3: a card never sees a flag
+   change in memory it does not own). The flag is a plain store plus a system-scope release fence, not the atomic
+   store `pp_send` uses (1.6 us a call slower). Each wait is bounded. Once one wait has failed, every later wait in the
+   list skips its spin, so a lost card costs one bound, not 128. The host reads the state words after the fences and
+   throws by name, and the engine stays failed until `reset()`.
+5. **The head exchange is a host merge** (operator decision D2). Each card's argmax over its vocabulary half writes its
+   global id and value into its Control (`out_value`, carved from Control's pad). After both fences the host picks the
+   larger value (ties to the lower id, which is card 0's) and writes the id into both Controls, as `--parallel pp`
+   already mirrors Control every token. That is no device crossing and no extra wait.
+6. **The CLI is zero-config.** `--tp N` / `--tensor-parallel-size` are void. TP is the existing `--parallel` flag's
+   `tp` value (`parse_parallel` refuses it today by name). `--pipeline-split` / `--pipeline-handoff` belong to pp and
+   are refused with `tp`. replica is serve-only and refused in b70-decode anyway. Two visible B70s and peer access 0 -> 1
+   and 1 -> 0 are required, refused by name before the load. `--parallel auto` is unchanged in 17b (decision D3).
+7. **Other parallel modes.** replica (13b) and TP both take both cards, and the single `--parallel` value makes them
+   exclusive. Slots (13c) are one-card only (b70_serve.cc chooses them after the pp / replica paths return). TP plus
+   slots is out of scope for spec 17 (§8). The M-row crossing that would carry them exists (decision D4).
+8. **int8 KV.** The default is still bf16 (`kDefaultKvCache`), with `--kv-cache int8` as the option. TP builds both.
+   `kv8.cl` hard-codes 24 q / 4 kv heads (lines 92-99). 17b adds an `FA_Q_HEADS` / `FA_KV_HEADS` override like attn.cl's,
+   which leaves the default token stream unchanged. 3f / 3h's plain-decode reader changes live in that file, so the
+   per-card binaries inherit them. 3e's prefill widening (`kv8_raw`, allocated only at 24 / 4 heads) is 17c's.
+   `attn_verify_dpas.cl` `#error`s on any other heads, and 3l (branch verify-attn-3l) is rewriting it now. The per-card
+   DPAS verify is 17d's, after 3l merges.
+9. **17b is plain decode at M = 1.** MTP, DFlash, lookup, AdaptiveK, the prefix cache, `--prefix-split-last` and serving
+   are 17d's. Prefill is 17c's, so under `--parallel tp` the prompt is ingested by decode replays and `--prefill` /
+   `--prefill-length` are refused by name (decision D5). `--bench --depth N` ingests by replays on one card too, so the
+   arms stay like for like.
+10. **Snapshots.** `save_state` / `save_kv` in the one-card host layout (the gather) move into 17b, test-only in use,
+    because T1 / T2 compare state and KV with one card through them. The restore (scatter) and the prefix cache stay
+    17d's.
+11. **The box.** Rows 69 / 72 are taken. The next free row is **79** (17c 80, 17d 81 when built). Every TP stage is
+    kind `gpu` (`gpu_lock.sh box`); kind `card` forbids two-card work. `remote.sh` runs no prerequisite closure: a stage
+    runs only when its AFTER stages are PASS in the state, so run the row's stages in order (`--only r79` plus `--with`
+    for the opt-in speed stage). Builds go through `tools/box.sh build` from this worktree (tree `~/b70/trees/spec17b`).
+12. **Speed bar.** D1-dense plain is `--parallel tp` against `--parallel 1` (>= 1.35x, the operator's 2026-10-27 bar),
+    interleaved (tools/box_validate/interleave.sh), median of 3, at depth 4096 and a long context. The `--spec auto`
+    bar (>= 1.25x, the spelling that replaced `--mtp auto`) is 17d's.
+13. **Later levers, recorded but not in 17b:** the send fused into the row-parallel GEMV's epilogue (saber-engine,
+    spec 17 §10; 17b ships the send as its own launch, +128 a token, and the wait fused into the fold) and the qkv‖z
+    per-card cell re-tune (S2 or layout 0, probe §6, about 0.8 ms a token).
+
+### Tasks (Qwen3.8, 2026-11-10) - these replace Tasks 1-4 below for this plan
+
+- **Task 1 - the TP view, the slices, the plan (host tests).** `model::tp_card_desc(one, crossing)` (per-card widths,
+  table, small tables; doc_w 0, so the W check is void per card and the test sums the two cards instead);
+  `loader::load(..., TpSlice{rank, size})` (column / row slicing of every linear, the GDN small tensors per channel and
+  head, a‖b's rows, the head's rows); `runtime::tp_plan` (per-card bytes, `--max-len auto` from the tighter card).
+  Tests: `tp_desc_test` (shapes against spec 17 §R2.5, both crossings), `tp_slice_test` (a synthetic GPTQ checkpoint
+  sliced per card: every card column / row is the one-card repack's, both cards together are the whole), `tp_plan_test`.
+- **Task 2 - the crossing and the per-card lists.** `src/kernels/tp.cl` (`tp_send`, `tp_res_fold`, the vocabulary-half
+  argmax pair), `src/runtime/tp_protocol.h` (the host mirror, promoted from tools/probe with slices and the
+  skip-after-failure rule) and `tp_protocol_test` on host threads, the capture's `Tp` mode, `runtime::TpEngine`, the CMake
+  block of per-card binaries (bf16 and int8 KV), and kv8.cl's and prep.cl's additive head / width overrides. Box tests:
+  `tp_kernels_test` (the fold and send against `prep_res_fold` bitwise, both forms), `tp_decode_test` (T1 bitwise
+  between the cards; T2 bitwise one card in the slice form, judged in the folded form; replay determinism),
+  `tp_fail_test` (T4: a dropped list, a stale stamp, reset() recovers).
+- **Task 3 - the CLI.** `b70-decode --parallel tp` (cli/tp_decode.h), its refusals before any device, `cli_reject_tp_*`.
+- **Task 4 - box row 79**, below.
+
+```text
+row 79 "spec 17b - Qwen3.8 decode under tensor parallel (--parallel tp, plan 17b)"
+stage r79.host   79 default cpu -                g0.sha    "tp_desc_test, tp_slice_test, tp_plan_test, tp_protocol_test, pipeline_args_test"
+stage r79.k1     79 default gpu -                r79.host  "tp_kernels_test on both cards: the TP fold = prep_res_fold bitwise (slices), the fixed-order sum (folded), stale / dropped caught"
+stage r79.decode 79 default gpu qwen             r79.k1    "tp_decode_test (bf16 KV, int8 head): T1 bitwise between the cards, T2 vs one card (bitwise slices, judged folded), replay"
+stage r79.kv8    79 default gpu qwen             r79.decode "tp_decode_kv8_test: the same over --kv-cache int8"
+stage r79.fail   79 default gpu qwen             r79.k1    "tp_fail_test: T4 - a dropped list, a crossing timeout, reset() recovers"
+stage r79.cli    79 default gpu qwen             r79.decode "b70-decode --parallel tp --ids: ids equal --parallel 1's (slices); refusals"
+stage r79.speed  79 optin   gpu qwen             r79.decode "D1-dense plain: --parallel tp (both crossings) vs --parallel 1, depth 4096 and 16384, interleaved, median of 3"
+```
+
+### Operator decisions (17b; the built default is the recommendation, each one a constant or one line)
+
+D1 crossing form, D2 head exchange, D3 `--parallel auto`, D4 TP plus slots, D5 the prompt path under 17b,
+D6 row numbers - the options and recommendations are in `.claude/worktrees/spec17b-tp/REPORT-17-review.md` (untracked)
+and the 17b record.
+
+
+## The plan as written before the review (Bolt-first text kept for Bolt's later TP plan; its Tasks 1-4 are NOT this plan's)
+
 
 **Conditions (operator, 2026-10-23; for Bolt - superseded for Qwen3.8 by the 2026-10-27 status below):** this plan starts only when **spec 17 §9 records GO** - P0 (plan 17a) ran after
 `r22.devices` / `r22.p1`, **Bolt's rows 59-62 passed**, and P0 measured one Bolt token's crossings at **<= ~1 ms**
