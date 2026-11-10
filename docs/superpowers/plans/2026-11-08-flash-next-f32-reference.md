@@ -73,3 +73,18 @@ Tokens accepted by the one-ulp judge: L18 decode24/32, prefill27/32; L37 both20/
 baseline also disagrees with the reference. Keep Waiting21 open and the branch unmerged pending the
 operator-requested decode-only audit of PLE identity/dequantization, int4 weights, and earliest states.
 Task4's checkbox records execution and measurements; it does not claim a passing gate or a closed row.
+
+## Decode-only follow-up (2026-11-10)
+
+The requested one-agent diagnostic is complete in signed commit `c26343b1`; no engine, reference default
+or acceptance-bar changes. Four layers/eight teacher-forced prefix tokens: all128sampled PLE rows/IDs/scales
+match the Python reader, C++mmap and engine pinned table; all4,915,200sampled device-packed expert products
+match direct fp32 dequantization. The earliest state discrepancy is token0/L0 conv (distance2.12649e-6,
+relative L2 0.0021512). BF16 activations reduce that conv discrepancy to3.04e-11, while GDN/HC agreement
+is still unresolved. The first route flip is token0/L2 at an exact engine cut tie (fp32 gap3.67714e-5).
+Rounding only int4 products to bf16 leaves the same four route flips. All8short-prefix argmax IDs match.
+At row6, hidden-state distance rises from2.43726e-5 before L2 to0.00127353 after it, with a route flip.
+
+See `docs/probes/q4exp-f32-decode-diagnostic-2026-11-10.md` and its504-row CSV. These observations do
+not establish the full4500-token/N37 decode baseline or prove a prefill-specific defect. Keep the branch
+unmerged and Waiting21 open; the next isolated comparison is decode GDN/HC/router under identical inputs.
