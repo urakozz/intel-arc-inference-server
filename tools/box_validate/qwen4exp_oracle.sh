@@ -105,6 +105,8 @@ if [ "$mode" = intel-f32 ]; then
     echo "qwen4exp_oracle: intel-f32 needs the checkpoint's sibling int8 PLE file (the engine's table)" >&2
     exit 2
   fi
+  ple_dir=$(cd "${snapdir%/}-ple-int8" && pwd -P)
+  ple=int8:/ple
 fi
 
 if [ "$dry" = 1 ]; then
@@ -150,8 +152,8 @@ rc=0
 in_box() {
   local cmd="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && $1"
   if [ "$mode" = intel-f32 ]; then
-    if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=$snapdir tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
-    ORACLE_SNAP="$snapdir" tools/oracle/run_in_container.sh "$cmd"
+    if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=$snapdir ORACLE_PLE=$ple_dir tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
+    ORACLE_SNAP="$snapdir" ORACLE_PLE="$ple_dir" tools/oracle/run_in_container.sh "$cmd"
     return
   fi
   if [ "$mode" = curve ] || [ "$mode" = project ]; then   # no checkpoint read: the config-only stand-in satisfies run_in_container's $SNAP
