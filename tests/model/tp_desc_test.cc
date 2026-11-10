@@ -8,6 +8,7 @@
 //           list's launches (774 + 128); --max-len auto under TP is limited by the tighter card.
 //   names   kernels::tp_cross_variant / tp_argmax_variant: the CMake block's names.
 #include <array>
+#include <cstddef>
 #include <cstdio>
 #include <functional>
 #include <stdexcept>
@@ -17,6 +18,7 @@
 #include "kernels/tp_kernels.h"
 #include "model/model_desc.h"
 #include "runtime/buffer_sizes.h"
+#include "runtime/control.h"
 #include "runtime/memory_plan.h"
 #include "runtime/tp_plan.h"
 #include "runtime/tp_protocol.h"
