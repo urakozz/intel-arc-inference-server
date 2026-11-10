@@ -1060,11 +1060,39 @@ if(B70_KV8)
     endforeach()
   endforeach()
 endif()
+# 3l: vdpas_abl_<tag>_M<M>[_KV8]: tools/probe/verify_dpas_ablate.cl (main 865da900's attn_verify_dpas with one part of
+# the work dropped, the production levers and 256 GRF), timed against the production pair by probe_kv8_decode.
+if(B70_VERIFY_DPAS AND B70_MTP)
+  foreach(_abl "full;" "nok;ABL_K=1" "nokcvt;ABL_KCVT=1" "nov;ABL_V=1" "novcvt;ABL_VCVT=1" "nosc;ABL_SCALE=1"
+               "noloads;ABL_K=1;ABL_V=1;ABL_SCALE=1" "noqk;ABL_QK=1" "nosoft;ABL_SOFT=1" "nopv;ABL_PV=1")
+    list(GET _abl 0 _tag)
+    list(REMOVE_AT _abl 0)
+    foreach(MM 2 4)
+      foreach(_kv 0 1)
+        if(_kv)
+          set(_sfx _KV8)
+        else()
+          set(_sfx "")
+        endif()
+        if(NOT _kv AND (_tag STREQUAL "nokcvt" OR _tag STREQUAL "novcvt" OR _tag STREQUAL "nosc"))
+          continue()
+        endif()
+        add_ocloc_kernel(vdpas_abl_${_tag}_M${MM}${_sfx} SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/verify_dpas_ablate.cl
+                         DEFINES CTRL_POS=0 CTRL_NACT=1 M=${MM} TGT=32 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1
+                                 PSPLIT=1 KV8=${_kv} ${_abl}
+                         OPTIONS -cl-intel-256-GRF-per-thread)
+        list(APPEND PKD_TARGETS kernel_vdpas_abl_${_tag}_M${MM}${_sfx})
+      endforeach()
+    endforeach()
+  endforeach()
+endif()
 add_executable(probe_kv8_decode probe_kv8_decode.cc)
 target_include_directories(probe_kv8_decode PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(probe_kv8_decode PRIVATE b70_l0)
 b70_target_kernel_dir(probe_kv8_decode)
-foreach(v attn_v2_M1_T32 attn_v2_M4_T32 attn_v2_M1_T32_KV8 attn_v2_M4_T32_KV8)
+foreach(v attn_v2_M1_T32 attn_v2_M4_T32 attn_v2_M1_T32_KV8 attn_v2_M4_T32_KV8 attn_v2_M2_T32 attn_v2_M2_T32_KV8
+          attn_v2_M3_T32 attn_v2_M3_T32_KV8 attn_verify_dpas_M2_T32 attn_verify_dpas_M3_T32 attn_verify_dpas_M4_T32
+          attn_verify_dpas_M2_T32_KV8 attn_verify_dpas_M3_T32_KV8 attn_verify_dpas_M4_T32_KV8)
   if(TARGET kernel_${v})
     list(APPEND PKD_TARGETS kernel_${v})
   endif()
