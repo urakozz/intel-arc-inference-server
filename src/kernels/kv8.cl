@@ -845,8 +845,28 @@ __kernel void kv8_widen(__global const char* restrict K,
 }
 #endif
 
+// 3l (2): KV8_SPLIT=1 is pf_flash_attn.cl's SPLIT form (its header: spans of the key range,
+// unnormalised O and m, l into the partials area; pf_flash_merge folds them). Unset, the token
+// stream is unchanged.
+#ifndef KV8_SPLIT
+#define KV8_SPLIT 0
+#endif
 __attribute__((reqd_work_group_size(SG * SGS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
+#if KV8_SPLIT
+__kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
+                                __global const KV8_VALUE* restrict Kc,
+                                __global const ushort* restrict Ks,
+                                __global const KV8_VALUE* restrict Vc,
+                                __global const ushort* restrict Vs,
+                                __global float* restrict O, uint pos, uint C, uint rows,
+                                __global float* restrict ML, uint span) {
+  const uint s = get_sub_group_id(), l = get_sub_group_local_id();
+  const uint j = get_group_id(1);
+  const uint hgs = KV8F_GQAU / HPW;
+  const uint sp = get_group_id(2) / hgs, nsp = get_num_groups(2) / hgs;
+  const uint h = j * KV8F_GQAU + (get_group_id(2) % hgs) * HPW + s / (RPW / 8u);
+#else
 __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global const KV8_VALUE* restrict Kc,
                                 __global const ushort* restrict Ks,
@@ -856,6 +876,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);
   const uint h = j * KV8F_GQAU + get_group_id(2) * HPW + s / (RPW / 8u);
+#endif
   const uint r0 = get_group_id(0) * RPW + 8u * (s % (RPW / 8u));
   if (r0 >= C) return;
   const uint depth = pos + C;
@@ -878,7 +899,12 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
   for (uint dd = 0; dd < NDA; ++dd) o[dd] = (float8)(0.0f);
   float8 m = (float8)(-INFINITY), lsum = (float8)(0.0f);
   const uint last = min(depth, pos + r0 + 8u);
+#if KV8_SPLIT
+  const uint kend = sp + 1u == nsp ? last : sp * span + span;
+  for (uint t0 = sp * span; t0 < kend; t0 += KT) {
+#else
   for (uint t0 = 0; t0 < last; t0 += KT) {
+#endif
 #if !QREG
     LOAD_Q();
 #endif
@@ -987,6 +1013,19 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                 pa[b + ks], as_int8(vload8(0, vb + c * 16u + 8u * ks)), o[dd + c]);
       }
   }
+#if KV8_SPLIT
+  const uint c8 = (C + 7u) & ~7u;
+  const size_t slot = (size_t)(sp * KV8F_Q + h) * c8;
+  __global float* Op = O + slot * HD;
+#pragma unroll
+  for (uint dd = 0; dd < NDA; ++dd)
+    intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Op, HD * 4, (int)c8, HD * 4,
+                                               (int2)((int)(16u * dd), (int)r0), (__private uint*)&o[dd]);
+  if (l == 0) {
+    vstore8(m, 0, ML + slot + r0);
+    vstore8(lsum, 0, ML + (size_t)nsp * KV8F_Q * c8 + slot + r0);
+  }
+#else
   const float8 inv = 1.0f / lsum;
   __global float* Oh = O + (size_t)h * rows * HD;
 #pragma unroll
@@ -995,5 +1034,6 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Oh, HD * 4, (int)rows, HD * 4,
                                                (int2)((int)(16u * dd), (int)r0), (__private uint*)&w);
   }
+#endif
 }
 #endif  // KV8_FLASH

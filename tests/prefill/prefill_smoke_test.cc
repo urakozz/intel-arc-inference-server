@@ -188,6 +188,31 @@ int main(int argc, char** argv) {
       CHECK_EQ(drop, size_t(C <= 256u ? 176 : C <= 321u ? 240 : C == 1000u ? 368 : 624));
     }
   runtime::prefill::set_attn_mode_for_test(env_mode);
+  // 3l (2): a short chunk deep in the cache splits its attention - one merge launch more a FA layer, and with
+  // int8 KV up to 64 rows read in place (no kv8_widen). Live: a 64-row chunk at pos 1024 (kSplitMinPos) after a
+  // 1024-id prefill advances the counter by the count at that pos.
+  if (env_mode == AttnMode::Flash) {
+    using runtime::KvCache;
+    CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort,
+                                                   KvCache::Bf16, 32768), size_t(1089 + 16));
+    CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort,
+                                                   KvCache::Int8, 32768), size_t(1089 + 16));
+    CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 128,
+                                                   KvCache::Int8, 32768), size_t(1089 + 32));
+    CHECK_EQ(runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv, 32768),
+             runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, 2048, kv));
+    eng.reset();
+    eng.prefill(ids(1024));
+    const size_t before = eng.prefill_launches();
+    eng.prefill(ids(kShort), kShort);
+    CHECK_EQ(eng.prefill_launches() - before,
+             runtime::prefill::step_chunk_launches(model::qwen38(), runtime::PrefillBackend::L0, kShort, kv, 1024) +
+                 head);
+    std::printf("3l (2): a %u-row chunk at pos 1024 splits: %zu launches (+16 merges%s)\n", kShort,
+                eng.prefill_launches() - before, kv == KvCache::Int8 ? ", no widening" : "");
+    eng.reset();
+    eng.prefill(ids(kShort));   // section 2's state again, for the handoff below
+  }
   // Spec 5 (plan 5b Task 1): l0-int8 is L0 but for the int4 linears, and each of those
   // adds exactly one launch (the activation quantiser): 4 per layer, +256 per chunk - above
   // kPfQ4MaxRows, where L0 walks the same slabs (open-work 3b: below, L0 is one launch a linear).

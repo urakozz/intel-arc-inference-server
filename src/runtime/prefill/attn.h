@@ -71,6 +71,22 @@ AttnMode attn_mode();
 void set_attn_mode_for_test(AttnMode m);
 const char* attn_mode_name(AttnMode m);
 
+// 3l (2): the split-K flash for a short chunk deep in the cache. `flash_split_span` is the rule:
+// 0 runs today's one-pass launch (bitwise as before); otherwise the key range [0, pos) is cut
+// into flash_split_count(pos, span) spans of `span` keys (a multiple of the 64-key tile), one
+// work-group each per 8 rows and kv head, folded by pf_flash_merge (attn.cc has the measurement
+// behind the rule). Built at Qwen3.8's heads (24 / 4) and a tensor-parallel card's (12 / 2); any
+// other model keeps today's launch. Auto is the engine's; Off / On are a test seam (the timing
+// pairs and the f32 judge's two runs): On splits whenever a split is possible (pos >= 64).
+enum class FlashSplit { Auto, Off, On };
+FlashSplit flash_split_mode();
+void set_flash_split_for_test(FlashSplit m);
+uint32_t flash_split_span(const model::ModelDesc& d, uint32_t pos, uint32_t C);
+inline uint32_t flash_split_count(uint32_t pos, uint32_t span) { return span ? (pos + span - 1) / span : 1; }
+// int8 KV: a split chunk of few rows reads the int8 rows in place (no kv8_widen launch); a larger one
+// widens and runs the raw split.
+bool kv8_split_in_place(const model::ModelDesc& d, uint32_t pos, uint32_t C);
+
 // (1) q/k RMSNorm, partial RoPE, and the chunk's K/V written into the cache at
 //     absolute positions [pos, pos + C). Reads `pos` and `n_active` out of the
 //     shared `Control` block, which the caller has already set (and waited for).
@@ -133,12 +149,13 @@ inline size_t attn_chunk_launches_composed(const model::ModelDesc& d, uint32_t C
                                            PrefillBackend b) {
   return size_t(d.fa_kv_heads) * (2 + size_t(attn_row_blocks(C, b)));
 }
+// 3l (2): a split chunk (flash_split_span at `pos`) adds the merge.
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b,
-                                  AttnMode mode) {
-  return mode == AttnMode::Flash ? 1 : attn_chunk_launches_composed(d, C, b);
+                                  AttnMode mode, uint32_t pos = 0) {
+  return mode == AttnMode::Flash ? 1 + (flash_split_span(d, pos, C) ? 1 : 0) : attn_chunk_launches_composed(d, C, b);
 }
-inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b) {
-  return attn_chunk_launches(d, C, b, attn_mode());
+inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0) {
+  return attn_chunk_launches(d, C, b, attn_mode(), pos);
 }
 
 }  // namespace runtime::prefill

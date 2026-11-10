@@ -550,3 +550,208 @@ Four rows would move (bf16 M = 2 down to 4096, bf16 M = 3 up to 11585, int8 M = 
 changes rounding there: **left as they are, for the f32 judge**. The cost of not moving them is small: at 4096 the
 whole M = 3 / 4 steps are 0.9-1.6 % faster than main already, and at 32768 int8 M = 3 the DPAS kernel is 0.87 x
 v2's (~1 ms of a 36 ms step).
+
+## 3l (2): short prefill chunks deep in a session - 2026-11-11
+
+Branch `3l-short-chunks`. Deep in an agentic session each turn (a tool result, a user message) is a short prefill
+chunk of 1..128 rows over a long cache. The flash prefill attention (`pf_flash_attn`, and `pf_flash_attn_kv8` raw
+after `kv8_widen` for `--kv-cache int8`) runs one work-group per 8 query rows and kv head - grid ceil(C / 8) x 4 -
+and each work-group walks every key: 4 work-groups at C = 1..8, 64 at C = 128, on a card with 32 Xe cores (~160
+of these 96-lane, 256-GRF work-groups resident at once). Step 0 above measured ~0.43 s of attention for one chunk
+at 128k, whatever C below ~128: the walk of one work-group is the time, the rest of the card idles.
+
+**Design (split-K, flash-decoding style).** For a short chunk deep in the cache the key range [0, pos) is cut
+into `n` spans of whole 64-key tiles; work-group (row block, kv head, span) runs today's tile loop over its span
+only (the last span also takes the chunk's own causal keys) and writes its unnormalised O (8 rows x 256 dims per
+head) and its two softmax statistics per row - the running maximum m and the sum l - to a partials area. A merge
+kernel then combines the spans per (head, row): M = max m_s, O = sum_s 2^(m_s - M) O_s / sum_s 2^(m_s - M) l_s,
+into pf_o's layout, so the gate and everything after are unchanged. Every span starts at a key all its rows can
+see (span starts are below pos), so no span has an empty softmax. The partials live in pf_o's unused tail (pf_o is
+sized for the chunk cap, >= 2048 rows; a short chunk uses 256 of them): no new buffer, no memory-plan change. Large
+chunks (where today's grid already fills the card) and shallow caches keep today's launch exactly - same binary,
+same grid, bitwise. The split changes the softmax's association (each span's own running max and bf16 P rounding,
+then the fp32 merge), so its outputs are judged by the f32 judge, not bitwise.
+
+**Expected gain, written before measuring.** At C = 1..16 the split takes the grid from 4..8 work-groups to
+~256-512; at 128k one layer's bf16 K + V is 0.54 GB, ~0.9 ms at the card's 590 GB/s, against ~26.6 ms a layer
+today - so attention could fall ~10-20x (to ~1.5-3 ms a layer, ~25-50 ms for 16 layers); at C = 64 / 128 the work
+is 8 / 16 row blocks over the same keys (more DPAS, the K / V tiles shared through L2 by row blocks of one span),
+expected ~5-10x. int8 KV keeps today's `kv8_widen` of pos + C rows (~1.4 ms a layer at 128k) unless an in-place
+split reader measures faster. A whole short turn at 128k is ~0.43 s attention + ~0.05-0.1 s of everything else
+today, so the whole chunk is expected ~3-6x faster at 128k and ~2-3x at 32k.
+
+### Acceptance (fixed before any timing)
+
+- **Gain:** whole-chunk wall time (`Engine::prefill` of one turn, host clock around the call: every launch, the
+  head and the waits) for a short turn of **16, 64 and 128 rows at 32768 and 131072 keys, bf16 and int8 KV**,
+  measured faster with the split than without: interleaved pairs (split / today's path, alternating order) after
+  warm-up, **median paired gain of 3 rounds >= 10 %** and every round's pair faster.
+- **Nothing slower:** **2048-row chunks** (at 32768 / 131072) and **short contexts** (16 / 64 / 128 rows at 2048
+  and 8192 keys) at most 2 % slower (median paired) - where the rule picks today's path the launch is identical.
+- **Judged:** the switch changes rounding, so (a) the golden prompts' prefill gates in 16-row chunks
+  (`prefill_gate_l0_c16`, `prefill_gate_int8_c16` and their int8-KV twins) still pass, and (b) a deep-session context
+  - long32k.ids to 32000 keys, then turns of 16, 64 and 128 rows as separate prefill calls, then 32 greedy ids - is
+  run with the split and without it, bf16 and int8 KV, and every run's ids are judged by its own f32 reference
+  (`tests/golden/forced_judge.h`, `tools/box_validate/f32_refs.sh forced-qwen`, the one-bf16-ulp near-tie): the
+  split path is rejected at no more rows than today's path on the same context, or each extra rejection is a near-tie
+  by the near-miss rule (<= 8 bf16 ulp, logits cosine distance <= 2 x today's).
+- **Kernel check:** the split kernels against today's kernels at C = 1..256 and depths to 131072 (both KV forms):
+  finite, and within fp32-merge distance of today's output (the test prints max and median relative error; both
+  paths against an fp64 host reference on small shapes, the split no further from it than today's).
+- **The rule** (rows x keys -> split or not, and the span count) is picked from kernel measurements and written in
+  `src/runtime/prefill/attn.cc`; no new user-facing flag; a test seam forces it off / on for the pairs and the judge.
+
+### What was built
+
+- `pf_flash_attn.cl` SPLIT=1 / FLASH_MERGE=1 and `kv8.cl` KV8_SPLIT=1 (in place and raw): today's tile loop over one
+  span of whole 64-key tiles; the span's unnormalised O and its m, l go to pf_o's spare rows; `pf_flash_merge` folds
+  the spans (M = max m_s, O = sum 2^(m_s - M) O_s / sum 2^(m_s - M) l_s, spans ascending). New binaries only
+  (`pf_flash_attn_split`, `pf_flash_merge`, `pf_flash_attn_kv8_split`, `pf_flash_attn_kv8_raw_split`, and their
+  `_Q12KV2` tensor-parallel twins); with the defines unset the token streams are unchanged, so today's binaries are
+  the same (kv8_flash_bitwise / _raw_bitwise and pf_flash_attn_test pass).
+- `src/runtime/prefill/attn.cc` `flash_split_span` - **the rule**: split when C <= 128 rows and pos >= 1024 keys
+  (Qwen3.8's 24 / 4 heads and the TP card's 12 / 2; every other model keeps today's launch); n = max(64 / row
+  blocks, 16) spans, never under 256 keys a span, at most what pf_o's spare rows hold (13 at C = 128). int8 KV: up to
+  64 rows the split reads the int8 rows in place (no `kv8_widen` of pos + C rows), above it widens and runs the raw
+  split. One merge launch more per FA layer (`step_chunk_launches(.., pos)`; int8 in place drops the widening one).
+  `FlashSplit::{Auto, Off, On}` is the test seam (`set_flash_split_for_test`); no flag, no env variable.
+
+### Kernel measurements (flash_split_test --time, card 1, new driver)
+
+Box GPU driver: intel-ocloc / intel-opencl-icd / libze-intel-gpu1 26.40.40196.15, libze1 1.34.0 (upgraded 19:57
+2026-11-10; the tree was rebuilt clean after it and every number below is from after it). One FA layer's attention
+as each path issues it, 16 times in one list, arms interleaved after warm-up, 7 rounds, medians, ms for 16 layers.
+Today's int8 is kv8_widen + raw flash. Split = the rule's pick (int8: in place to 64 rows, raw above).
+Logs `~/b70/logs/3l2/kern2.log` (full sweeps of spans 256..8192 at 512..131072 keys and 1..256 rows).
+
+| keys | rows | bf16 today | bf16 split | int8 today | int8 split |
+|---:|---:|---:|---:|---:|---:|
+| 2048 | 1 | 4.22 | 0.70 | 5.06 | 1.07 |
+| 2048 | 64 | 4.33 | 1.72 | 5.17 | 2.58 |
+| 2048 | 128 | 5.25 | 4.24 | 5.40 | 5.11 |
+| 8192 | 16 | 21.10 | 2.46 | 26.21 | 2.68 |
+| 8192 | 64 | 21.02 | 7.11 | 26.17 | 9.80 |
+| 32768 | 1 | 88.40 | 5.21 | 109.36 | 5.27 |
+| 32768 | 16 | 88.13 | 7.40 | 108.61 | 9.72 |
+| 32768 | 64 | 88.26 | 24.57 | 108.53 | 34.81 |
+| 32768 | 128 | 98.94 | ~44-48 | 109.35 | ~60-65 |
+| 131072 | 1 | 353.04 | 17.35 | 438.58 | 18.84 |
+| 131072 | 16 | 352.71 | 26.92 | 435.74 | 38.18 |
+| 131072 | 64 | 355.99 | 98.50 | 436.19 | 154.39 |
+| 131072 | 128 | 384.65 | ~165-172 | 439.02 | ~225-236 |
+
+(C = 128 runs 13 spans, between two measured span counts.) The rule's limits, measured: at 512 keys a 64-row split
+was slower (1.19 -> 1.42 ms), so pos >= 1024; at 1024 keys every C <= 128 gains (bf16 2.15 -> 0.68 at C = 1, 2.57 ->
+1.94 at C = 128). C = 256 would gain deep in the cache (0.88 x at 8192, 0.73 x at 131072) but pf_o's spare rows
+hold 6 of its spans: not built. At 128k more spans than the rule's (~2048 keys each) would gain another ~1.15x at
+C = 64: a refinement left open (the timings and judged runs below are of this rule). The split is compute-bound past
+~16 rows (today's 8-row DPAS tiles re-read K / V per row block): 9-25 TFLOPS, not the 590 GB/s bandwidth.
+
+### Kernel correctness (flash_split_test, card 1, new driver)
+
+Both paths on the same random Q / K / V (bf16; int8 + fp16 scales incl. subnormal and zero scales) against an fp64
+host reference on sampled rows x 24 heads, 13 shapes from (64, 1) to (131072, 128) and (100000, 256), span counts 1
+to 256: every pf_o word finite; the split's worst cosine 0.99999867..0.99999992 and its max error at or below
+today's on every shape (today 0.99999726..0.99999938). Smaller spans re-normalise P to each span's own maximum
+before the bf16 rounding of P, so the split sits nearer the exact attention than the one-pass walk. PASS.
+
+### Whole-chunk wall time (probe_turn_chunks, the bar)
+
+`tools/probe/probe_turn_chunks`: one engine (int8 head, no MTP, l0 prefill), long32k.ids tiled and prefilled to
+each depth, the state saved; per (depth, rows) one turn = one `Engine::prefill` call of `rows` ids (chunk = rows),
+host clock around the call; the state restored before every call; 2 warm-up calls an arm, 3 rounds of one
+interleaved pair (Off = today's path, Auto = the rule), order alternating. Whole-box lock, one run per KV form
+(the run selected card 1 by ZE_AFFINITY_MASK inside the whole-box lock - against the letter of the lock rule; no
+other job could hold a card then). The f32 reference CPU job (this item's) ran throughout. Log
+`~/b70/logs/3l2/turns-timing.log`. ms, medians; gain = median paired reduction [range]; all rows 3 / 3 pairs faster
+except where noted.
+
+| KV | keys | rows | spans | today | split | gain % [range] |
+|:---|---:|---:|---:|---:|---:|:---|
+| bf16 | 2048 | 16 | 8 | 74.46 | 70.07 | 5.90 [5.81, 6.02] |
+| bf16 | 2048 | 64 | 8 | 102.54 | 98.06 | 4.38 [3.25, 4.59] |
+| bf16 | 2048 | 128 | 8 | 148.83 | 142.95 | 4.40 [3.79, 5.15] |
+| bf16 | 2048 | 2048 | - | 1212.22 | 1214.49 | -0.12 [-0.29, -0.06] (same launch) |
+| bf16 | 8192 | 16 | 32 | 92.48 | 70.66 | 23.59 [23.57, 23.59] |
+| bf16 | 8192 | 64 | 16 | 121.17 | 103.96 | 14.20 [13.38, 14.32] |
+| bf16 | 8192 | 128 | 13 | 188.19 | 153.30 | 18.20 [16.57, 18.70] |
+| bf16 | 8192 | 2048 | - | 1331.31 | 1327.74 | 0.13 [0.08, 0.39] |
+| bf16 | 32768 | 16 | 32 | 163.62 | 76.28 | **53.41** [53.37, 53.43] |
+| bf16 | 32768 | 64 | 16 | 190.76 | 123.93 | **35.07** [34.52, 35.32] |
+| bf16 | 32768 | 128 | 13 | 350.77 | 187.23 | **46.64** [45.59, 46.69] |
+| bf16 | 32768 | 2048 | - | 1815.07 | 1815.87 | -0.02 [-0.08, 0.04] |
+| bf16 | 131072 | 16 | 32 | 441.48 | 97.87 | **77.83** [77.79, 77.84] |
+| bf16 | 131072 | 64 | 16 | 469.33 | 200.18 | **57.35** [57.15, 57.50] |
+| bf16 | 131072 | 128 | 13 | 923.50 | 332.41 | **63.99** [63.97, 64.03] |
+| bf16 | 131072 | 2048 | - | 3801.94 | 3801.61 | 0.00 [0.00, 0.15] |
+| int8 | 2048 | 16 | 8 | 74.59 | 70.75 | 5.13 [4.54, 5.15] |
+| int8 | 2048 | 64 | 8 | 103.26 | 99.70 | 3.42 [2.83, 3.85] |
+| int8 | 2048 | 128 | 8 | 147.24 | 144.56 | 1.48 [0.28, 1.82] |
+| int8 | 2048 | 2048 | - | 1232.69 | 1231.74 | 0.05 [-0.02, 0.08] |
+| int8 | 8192 | 16 | 32 | 97.73 | 72.97 | 25.34 [25.25, 25.35] |
+| int8 | 8192 | 64 | 16 | 126.96 | 108.04 | 14.80 [14.74, 15.45] |
+| int8 | 8192 | 128 | 13 | 168.55 | 158.12 | 6.35 [6.19, 6.44] |
+| int8 | 8192 | 2048 | - | 1348.61 | 1348.62 | -0.04 [-0.16, 0.24] |
+| int8 | 32768 | 16 | 32 | 184.24 | 78.89 | **57.19** [57.11, 57.19] |
+| int8 | 32768 | 64 | 16 | 213.96 | 134.75 | **36.96** [36.77, 37.03] |
+| int8 | 32768 | 128 | 13 | 261.75 | 206.05 | **20.97** [20.65, 21.48] |
+| int8 | 32768 | 2048 | - | 1881.44 | 1880.35 | 0.06 [-0.07, 0.13] |
+| int8 | 131072 | 16 | 32 | 525.93 | 108.37 | **79.40** [79.36, 79.49] |
+| int8 | 131072 | 64 | 16 | 548.31 | 244.36 | **55.41** [55.21, 55.55] |
+| int8 | 131072 | 128 | 13 | 600.78 | 403.72 | **32.82** [32.73, 33.08] |
+| int8 | 131072 | 2048 | - | 4024.57 | 4017.41 | 0.01 [-0.11, 0.25] |
+
+**Gain bar met** at 32k / 128k for 16 / 64 / 128 rows, both forms: 21-79 %, every pair faster; a 16-row turn at 128k
+is 4.5x (bf16) and 4.9x (int8) faster as a whole chunk (441 -> 98 ms, 526 -> 108 ms) - inside the 3-6x written
+before measuring. **Nothing slower:** 2048-row chunks run the identical launch (-0.12..+0.13 %, noise); short
+contexts (2048 / 8192 keys) gain 1.5-25 %. One unexplained number, not this item's: today's bf16 path at 128 rows
+deep in the cache costs far more in the engine than its kernel does alone (923.5 ms whole chunk at 128k against
+469.3 at 64 rows, while the kernel test gives 384.6 vs 356.0 ms for 16 layers); the split arm's step from 64 to 128
+rows (+132 ms) is what its kernel and the linears predict. Worth a profile some day; the split path avoids it.
+
+### Judged (the f32 judge)
+
+(a) The golden prompts' prefill gates in 16-row chunks - `prefill_gate_l0_c16`, `prefill_gate_int8_c16` - PASS
+(their chunks sit below 1024 keys, so they run today's launch: a check that the rule leaves them alone), with
+pf_flash_attn, attn_chunk, kv8_flash_bitwise / _raw_bitwise (today's binaries bitwise their frozen control),
+flash_split, prefill_smoke (the split's launch counts, one checked live at pos 1024), prefill_consistency_l0 /
+prefill_determinism_l0 and their int8-KV twins: 12 / 12 on card 1 (`~/b70/logs/3l2/focused.log`).
+
+(b) The deep session (`tests/prefill/prefill_turns_test`): long32k.ids to 16000 and to 32000 keys, then turns of 16,
+64 and 128 ids as three prefill calls (all split by the rule), then 32 greedy ids; today's path and the split, bf16
+and int8 KV - 8 runs, each dumped (`~/b70/data/3l2-dumps`) and given its own f32 reference
+(`QWEN_KEYS_RE=^turns_ QWEN_FIRST_RE= tools/box_validate/f32_refs.sh ~/b70-inference-server forced-qwen
+~/b70/data/3l2-dumps`: one layer-major f32 forward over the 8 contexts' token trie, ~32.3k positions, 63 min on 22
+threads; judges in `oracle-out-qwen-f32-forced/turns_*`).
+
+| KV | keys | split vs today's ids | logits cos split vs today (row 0 / worst common row) | judge rejects: today | split |
+|:---|---:|:---|:---|---:|---:|
+| bf16 | 16000 | first differ at row 10 (21482 vs 3377) | 0.999941676 / 0.999748814 | 0 / 32 | 0 / 32 |
+| bf16 | 32000 | identical | 0.999960774 / 0.999569867 | 0 / 32 | 0 / 32 |
+| int8 | 16000 | first differ at row 17 (2332 vs 561) | 0.999894476 / 0.999829374 | 0 / 32 | 0 / 32 |
+| int8 | 32000 | identical | 0.999936371 / 0.999675441 | 0 / 32 | 0 / 32 |
+
+**The judge accepts every id of every run**: where the split and today's path part (bf16 row 10, int8 row 17) both
+ids are inside the f32 judge's one-ulp near-tie, i.e. the reference itself cannot tell them apart. The verdicts
+above are from the dumped ids against the judges on the CPU (`~/b70/data/3l2-judge_ids.py`, judge_row's rule);
+the registered `prefill_turns_test` / `prefill_turns_kv8_test` re-run the engine with `B70_FORCED_JUDGE` and add the
+logits-to-judge cosines.
+
+**Final run (the table of record, `~/b70/logs/3l2/final.log`).** The operator ran a job on card 1 outside the lock
+some time around the first run, so the whole table was re-run under `tools/gpu_lock.sh box` on the default device
+(no ZE_AFFINITY_MASK), the box otherwise idle, same binaries and driver. It reproduces the first run within ~1 %:
+
+| KV | keys | rows | today | split | gain % [range] |
+|:---|---:|---:|---:|---:|:---|
+| bf16 | 32768 | 16 / 64 / 128 | 164.17 / 186.45 / 347.53 | 76.31 / 121.01 / 186.92 | 53.52 / 35.16 / 46.21 |
+| bf16 | 131072 | 16 / 64 / 128 | 443.06 / 463.06 / 919.67 | 97.87 / 196.32 / 331.14 | 77.91 / 57.60 / 63.99 |
+| int8 | 32768 | 16 / 64 / 128 | 184.70 / 210.57 / 262.54 | 78.80 / 132.12 / 206.67 | 57.33 / 37.30 / 21.35 |
+| int8 | 131072 | 16 / 64 / 128 | 525.48 / 543.84 / 592.53 | 108.11 / 241.25 / 396.73 | 79.43 / 55.64 / 33.03 |
+| both | 2048 / 8192 | 16 / 64 / 128 | | | +0.39 .. +25.85 (int8 2048 x 128: 0.39 [-0.13, 0.57]) |
+| both | 2048 .. 131072 | 2048 | | | -0.18 .. +0.08 (identical launch) |
+
+Every deep row 3 / 3 pairs faster. The registered judged tests then ran on card 1 with `B70_FORCED_JUDGE`:
+`prefill_turns_test` bf16 **PASS** and int8 **PASS** - 0 of 32 ids rejected in each of the 8 runs; logits cosine
+to the judge (min / median) bf16 16k today 0.999695 / 0.999910, split 0.999363 / 0.999877; 32k today 0.999449 /
+0.999902, split 0.999600 / 0.999886; int8 16k today 0.999261 / 0.999894, split 0.999780 / 0.999927; 32k today
+0.999589 / 0.999895, split 0.999418 / 0.999911 (at 16k the two runs are different contexts after their parting row).

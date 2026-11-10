@@ -182,8 +182,10 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C);
 // Spec 6: the count follows `attn_mode()`; in Flash mode (the default) attention is one
 // launch per FA layer; int8 KV adds one exact raw-widening launch per FA layer.
 // Spec 14: per model - the layer counts and the gate||up slab count are the descriptor's.
+// 3l (2): `pos` is the chunk's first position - a short chunk deep in the cache splits its
+// attention (flash_split_span) and adds the merge per FA layer.
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           KvCache kv = KvCache::Bf16);
+                           KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so

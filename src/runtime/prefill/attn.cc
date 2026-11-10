@@ -22,8 +22,75 @@ void require(bool ok, const std::string& what) {
 
 
 std::atomic<int> g_mode{int(AttnMode::Flash)};   // the flash attention unless a test sets Composed
+std::atomic<int> g_split{int(FlashSplit::Auto)};  // 3l (2): the rule unless a test sets Off / On
+
+constexpr uint32_t kTile = 64;   // pf_flash_attn's KT: spans are whole tiles
+
+// 3l (2): the split-K rule, from flash_split_test --time (docs/probes/probe-longctx-decode-2026-11-09.md,
+// "3l (2)"; 16 FA layers, interleaved, card 1). Today's grid is ceil(C / 8) x kv-heads work-groups, each
+// walking every key; the card keeps ~5 of these 96-lane 256-GRF work-groups per Xe core resident (32 cores).
+// The key range [0, pos) is cut into n = max(64 / row blocks, 16) spans - ~256 work-groups for one or two
+// row blocks, 16 spans for more - never a span under 256 keys (below it the merge and the per-span setup
+// outweigh the walk), and no more spans than pf_o's spare rows hold (13 at C = 128). At 128k keys more spans
+// (~2048 keys each) measured up to 1.17x faster still at C = 64 (84.5 vs 98.5 ms for 16 layers): a later
+// refinement, not taken (the whole-chunk timings and the judged runs are of this rule). It is taken for
+// C <= kSplitMaxRows at pos >= kSplitMinPos (at 512 keys a 64-row split was slower: 1.19 -> 1.42 ms for 16
+// layers); larger chunks keep today's launch, bitwise as before (C = 256 deep in the cache would gain too -
+// 0.88 x at 8192, 0.73 x at 131072 - but pf_o's spare rows hold only 6 of its spans: not built).
+constexpr uint32_t kSplitMaxRows = 128;
+constexpr uint32_t kSplitMinPos = 1024;
+constexpr uint32_t kSplitMinSpan = 256;
+// int8 KV: up to this many rows the split reads the int8 rows in place (no kv8_widen of pos + C rows - the
+// widening alone is ~1 ms a layer at 32k); above it, kv8_widen + the raw split (its tiles convert nothing).
+constexpr uint32_t kSplitInPlaceMaxRows = 64;
+
+// 3l (2): where a split chunk's spans go - pf_o past its `rows` rows: the unnormalised O
+// [n][q-heads][c8][256], then m and l [n][q-heads][c8] each.
+struct SplitArea {
+  uint32_t n;
+  float* part;
+  float* ml;
+};
+SplitArea split_area(PrefillScratch& s, uint32_t pos, uint32_t C, uint32_t span) {
+  const uint32_t q_heads = s.desc().fa_q_heads, c8 = (C + 7u) & ~7u;
+  SplitArea a{flash_split_count(pos, span), nullptr, nullptr};
+  a.part = s.pf_o.as<float>() + size_t(q_heads) * attn_rows(C, PrefillBackend::L0) * kHeadDim;
+  a.ml = a.part + size_t(a.n) * q_heads * c8 * kHeadDim;
+  require(size_t(a.ml - s.pf_o.as<float>()) + size_t(2) * a.n * q_heads * c8 <= s.pf_o.size() / sizeof(float),
+          "the split's partials do not fit pf_o's spare rows");
+  return a;
+}
+// The merge: the spans folded into pf_o's [q-heads][rows][256], grid (C, q-heads).
+void launch_merge(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, uint32_t rows, const SplitArea& a) {
+  const uint32_t q_heads = s.desc().fa_q_heads;
+  cx.launch(kc(kernels::pf_flash_merge_variant(q_heads, s.desc().fa_kv_heads), "pf_flash_merge"), C, q_heads, 1,
+            {PtrArg(a.part), PtrArg(a.ml), PtrArg(s.pf_o.ptr()), arg_val(C), arg_val(rows), arg_val(a.n)});
+}
 
 }  // namespace
+
+bool kv8_split_in_place(const model::ModelDesc& d, uint32_t pos, uint32_t C) {
+  return C <= kSplitInPlaceMaxRows && flash_split_span(d, pos, C) != 0;
+}
+
+FlashSplit flash_split_mode() { return FlashSplit(g_split.load(std::memory_order_relaxed)); }
+
+void set_flash_split_for_test(FlashSplit m) { g_split.store(int(m)); }
+
+uint32_t flash_split_span(const model::ModelDesc& d, uint32_t pos, uint32_t C) {
+  const FlashSplit mode = flash_split_mode();
+  const bool built = (d.fa_q_heads == 24 && d.fa_kv_heads == 4) || (d.fa_q_heads == 12 && d.fa_kv_heads == 2);
+  if (mode == FlashSplit::Off || !built || pos < kTile || C > kSplitMaxRows) return 0;
+  if (mode == FlashSplit::Auto && pos < kSplitMinPos) return 0;
+  // The spans' partials live in pf_o past its `rows` rows: n x c8 x (256 + 2) floats a head, within
+  // the smallest chunk cap's (PrefillScratchDims::kCDefault) spare rows.
+  const uint32_t c8 = (C + 7u) & ~7u, rows = attn_rows(C, PrefillBackend::L0);
+  const uint32_t room = uint32_t(uint64_t(PrefillScratchDims::kCDefault - rows) * kHeadDim / (uint64_t(c8) * (kHeadDim + 2)));
+  const uint32_t n = std::max(64u / (c8 / 8u), 16u);
+  uint32_t span = std::max(mode == FlashSplit::On ? kTile : kSplitMinSpan, ((pos + n - 1) / n + kTile - 1) / kTile * kTile);
+  while (flash_split_count(pos, span) > room) span += kTile;
+  return flash_split_count(pos, span) > 1 || mode == FlashSplit::On ? span : 0;
+}
 
 AttnMode attn_mode() { return AttnMode(g_mode.load(std::memory_order_relaxed)); }
 
@@ -74,6 +141,15 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     const uint32_t rows = attn_rows(C, backend);
     require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float),
             "pf_o is undersized");
+    if (const uint32_t span = flash_split_span(s.desc(), pos, C)) {   // 3l (2): a short chunk deep in the cache
+      const SplitArea a = split_area(s, pos, C, span);
+      cx.launch(kc(kernels::pf_flash_attn_split_variant(q_heads, kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
+                a.n, {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(a.part), arg_val(pos), arg_val(C), arg_val(rows),
+                      PtrArg(a.ml), arg_val(span)});
+      launch_merge(cx, kc, s, C, rows, a);
+      profile_wait(cx, Phase::kAttnFlash);
+      return;
+    }
     cx.launch(kc(kernels::pf_flash_attn_variant(s.desc().fa_q_heads, s.desc().fa_kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
               1,
               {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
@@ -231,9 +307,30 @@ void attn_chunk_kv8(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t po
   auto* k = raw.as<uint16_t>();
   auto* v = k + size_t(s.kv8_len) * kv_heads * kHeadDim;
   const uint32_t count = (pos + C) * kv_heads * kHeadDim;
+  const uint32_t span = flash_split_span(s.desc(), pos, C);
+  if (span && kv8_split_in_place(s.desc(), pos, C)) {   // 3l (2): a short chunk deep in the cache, read in place
+    const SplitArea a = split_area(s, pos, C, span);
+    cx.launch(kc(kernels::pf_flash_attn_kv8_split_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
+              (C + 7u) / 8u, kv_heads, a.n,
+              {PtrArg(q), PtrArg(kv.k), PtrArg(kv.ks), PtrArg(kv.v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+               arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
+    launch_merge(cx, kc, s, C, rows, a);
+    profile_wait(cx, Phase::kAttnFlash);
+    return;
+  }
   const auto variant = kernels::pf_flash_attn_kv8_raw_variant(q_heads, kv_heads);
   cx.launch(kc(variant, "kv8_widen"), (count + 4095u) / 4096u, 1, 1,
             {PtrArg(kv.k), PtrArg(kv.v), PtrArg(k), PtrArg(v), arg_val(count)});
+  if (span) {   // 3l (2): a short chunk deep in the cache, over the widened rows
+    const SplitArea a = split_area(s, pos, C, span);
+    cx.launch(kc(kernels::pf_flash_attn_kv8_raw_split_variant(q_heads, kv_heads), "pf_flash_attn_kv8"),
+              (C + 7u) / 8u, kv_heads, a.n,
+              {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs), PtrArg(a.part), arg_val(pos),
+               arg_val(C), arg_val(rows), PtrArg(a.ml), arg_val(span)});
+    launch_merge(cx, kc, s, C, rows, a);
+    profile_wait(cx, Phase::kAttnFlash);
+    return;
+  }
   cx.launch(kc(variant, "pf_flash_attn_kv8"),
             (C + 7u) / 8u, kv_heads, 1,
             {PtrArg(q), PtrArg(k), PtrArg(kv.ks), PtrArg(v), PtrArg(kv.vs),
