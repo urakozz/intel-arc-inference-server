@@ -174,6 +174,7 @@ int main(int argc, char** argv) {
   // --- the one-card reference on card 0 (freed before the TP cards load) ---------------------------------------
   std::vector<Record> ref;
   bool one_card_invariant = false, one_card_kv_invariant = false;
+  std::vector<uint32_t> ref_tp_chunks;
   {
     runtime::Engine e(d0, loader::load(d0, ckpt, kMaxLen, false, kHead), kMaxLen, /*debug_resid=*/false, kv);
     l0::CmdList imm = l0::CmdList::immediate(d0);
@@ -200,6 +201,9 @@ int main(int argc, char** argv) {
     };
     std::vector<uint8_t> sa, ka, sb, kb;
     walk(2048, sa, ka);
+    // Diagnostic: one card's 64 ids after walking TP's own chunk list of long (1472 + 1348) - how much of a
+    // divergence on `long` the chunk list alone (the GDN end state, above) explains, without the K split.
+    ref_tp_chunks = e.generate(kGen);
     walk(1024, sb, kb);
     one_card_invariant = sa == sb && ka == kb;
     std::printf("reference chunk invariance (one card over TP's two chunk lists of long): %s (state %zu / KV %zu "
@@ -250,6 +254,14 @@ int main(int argc, char** argv) {
     std::printf("\n  diagnostics: row 1 cosine %.9f; state %zu of %zu bytes differ; KV %zu of %zu bytes differ\n",
                 cosine(r.rows[1], g.rows[1], model::Qwen35::kVocabUsed), differing(r.state, g.state), r.state.size(),
                 differing(r.kv, g.kv), r.kv.size());
+    if (i == 2 && v.v != greedy_tie::Verdict::Same) {
+      size_t d = 0;
+      while (d < ref_tp_chunks.size() && ref_tp_chunks[d] == r.ids[d]) ++d;
+      size_t dt = 0;
+      while (dt < ref_tp_chunks.size() && ref_tp_chunks[dt] == g.ids[dt]) ++dt;
+      std::printf("  one card over TP's chunk list of long: first differs from one card's at id %zu, from tp's at id "
+                  "%zu (of %u)\n", d, dt, kGen);
+    }
     if (v.v == greedy_tie::Verdict::Diverged) {
       // The f32 judge decides (operator ruling 2026-10-29; tests/golden/forced_judge.h): the context is the prompt
       // and TP's own ids, the judge's row v.at the decision of TP's id there. Without a judge the case awaits one.

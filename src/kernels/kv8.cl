@@ -903,7 +903,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
       for (uint b = 0; b < NKA; ++b) {
         uint k4[8], kb[16];
         intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
-            (__global void*)Kc, 4 * HD, (int)depth, 4 * HD,
+            (__global void*)Kc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
             (int2)((int)((j * HD + 16u * kk) / 4u), (int)(t0 + 16u * b)), k4);
 #pragma unroll
         for (uint z = 0; z < 8u; ++z) {
@@ -969,7 +969,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
         for (uint c = 0; c < 2u; ++c) {
           uint v4[8];
           intel_sub_group_2d_block_read_transform_8b_32r16x1c(
-              (__global void*)Vc, 4 * HD, (int)depth, 4 * HD,
+              (__global void*)Vc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
               (int2)((int)(j * HD + 16u * (dd + c)), (int)(t0 + 16u * b)), v4);
 #pragma unroll
           for (uint z = 0; z < 8u; ++z) {
