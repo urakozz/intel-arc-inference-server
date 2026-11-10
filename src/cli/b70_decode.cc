@@ -896,7 +896,7 @@ int run(int argc, char** argv) {
   const bool mtp_auto = mtp_on && spec.adaptive;
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
   // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
-  cli::check_tp(pipe, {prefill || have_prefill_len, have_spec && spec_arg != "off", profile,
+  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8", have_spec && spec_arg != "off", profile,
                        fam_bolt || fam_kol || fam_q4 || fam_k2});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
@@ -1159,6 +1159,9 @@ int run(int argc, char** argv) {
     ta.lm_head = lm_head;
     ta.kv = kv_cache;
     ta.check_len = check_len;
+    ta.prefill = prefill || have_prefill_len;   // spec 17c
+    ta.bench_prefill = have_prefill_len;
+    ta.chunk = pp_chunk;
     return cli::run_tp_decode<StdoutToStderr>(ta);
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else

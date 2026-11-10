@@ -3566,6 +3566,55 @@ tp-folded 'build/src/cli/b70-decode $SNAP_QWEN --bench --depth $d --tg 256 --max
   finish
 }
 
+row 80 "spec 17c - Qwen3.8 prefill under tensor parallel (b70-decode --parallel tp --prefill): both cards' prefill walks as a wavefront of two chunks, each card's half crossing on its copy engine while the other chunk computes; T1 the cards bitwise each other, T2 judged against one card's prefill (golden tie rule), speed against one card's prefill (plan 17c)"
+rownote 80 "Every two-card stage is kind gpu (the whole box, gpu_lock.sh box). remote.sh runs no prerequisite closure: run the row in order (--only r80, and --with r80.speed on an idle box). Hand back: r80.prefill / r80.kv8's T1 / T2 / chunk-invariance / replay lines, r80.decode's lines (17b's decode unchanged), r80.cli's ids, r80.speed's medians and pp ratios (tp / one card at 2048 and 16384 ids)."
+stage r80.host    80 default cpu -    g0.sha      "host: tp_desc_test (+ the prefill's chunk pairs and plan), pipeline_args_test (--parallel tp's prefill refusal: l0-int8 only)"
+st_r80_host() {
+  run_tests '^(tp_desc_test|pipeline_args_test)$'
+  finish
+}
+stage r80.prefill 80 default gpu qwen r80.host    "tp_prefill_test (bf16 KV, int8 head): against one card's prefill on card 0 over prose / code / long / long32k[:6000] / a two-call session - T1 bitwise between the cards, T2 by the golden tie rule, chunk 1024 bitwise chunk 2048, replay bitwise"
+st_r80_prefill() {
+  run_tests '^tp_prefill_test$'
+  grab_all t '^(prose|code|long|reference|chunk|replay|tp:|  diag)' 40
+  finish
+}
+stage r80.kv8     80 default gpu qwen r80.prefill "tp_prefill_kv8_test: the same over --kv-cache int8 (the widening scratch and flash at the card's 12 / 2 heads)"
+st_r80_kv8() {
+  run_tests '^tp_prefill_kv8_test$'
+  grab_all t '^(prose|code|long|reference|chunk|replay|tp:|  diag)' 40
+  finish
+}
+stage r80.decode  80 default gpu qwen r80.host    "17b's decode unchanged: tp_decode_test and tp_fail_test again (the TpEngine gained the prefill half, the step's head merge moved into merge_heads)"
+st_r80_decode() {
+  run_tests '^(tp_decode_test|tp_fail_test)$'
+  grab_all t '^(slices|folded|reference|card )' 16
+  finish
+}
+stage r80.cli     80 default gpu qwen r80.prefill "b70-decode --parallel tp --prefill --ids long 64 ids beside --parallel 1 --prefill's (recorded; a difference is tp_prefill_test's to judge); the refusal (cli_reject_tp_prefill: l0-int8)"
+st_r80_cli() {
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/long.ids --n 64 --prefill --parallel 1 > $STATE/$STAGE.one.ids" "--parallel 1 --prefill"
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/long.ids --n 64 --prefill --parallel tp > $STATE/$STAGE.tp.ids 2> $STATE/$STAGE.tp.err" "--parallel tp --prefill"
+  x "cmp $STATE/$STAGE.one.ids $STATE/$STAGE.tp.ids && echo 'ids identical' || echo 'ids differ (tp_prefill_test judges)'"
+  x "grep -E '^(engine|memory|prefill|pp|generate):' $STATE/$STAGE.tp.err"
+  run_tests '^cli_reject_tp_'
+  finish
+}
+stage r80.speed   80 optin   gpu qwen r80.prefill "TP prefill speed (idle box): b70-decode --bench --prefill-length 2048 and 16384 (tg 32), --parallel tp against --parallel 1, interleaved, median of 3; bar: tp's pp t/s > one card's at both lengths"
+st_r80_speed() {
+  idle before
+  local d
+  for d in 2048 16384; do
+    chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.$d.rows -r 3 --ratio tp/one -- \
+one 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 32 --max-len 32768' \
+tp 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 32 --max-len 32768 --parallel tp'" "$d ids: one card, tp"
+  done
+  idle after
+  grab_all speed '^RATIO |^MEDIAN |^\| b70-decode' 40
+  grab_all idle '^IDLE '
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {

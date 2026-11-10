@@ -100,6 +100,11 @@
 #define QKV_N 14336       /* q||gate (12288) || k (1024) || v (1024) */
 #define K_OFF 12288
 #define V_OFF 13312
+/* KV8_FLASH's literals by name (spec 17c), token for token the numbers they replaced */
+#define KV8F_Q 24
+#define KV8F_KV 4
+#define KV8F_KVU 4u
+#define KV8F_GQAU 6u
 #else
 #ifndef FA_KV_HEADS
 #error "kv8: FA_Q_HEADS needs FA_KV_HEADS"
@@ -112,6 +117,10 @@
 #define K_OFF (2 * FA_Q_HEADS * HD)
 #define V_OFF (K_OFF + FA_KV_HEADS * HD)
 #define QKV_N (V_OFF + FA_KV_HEADS * HD)
+#define KV8F_Q FA_Q_HEADS
+#define KV8F_KV FA_KV_HEADS
+#define KV8F_KVU ((uint)FA_KV_HEADS)
+#define KV8F_GQAU ((uint)GQA)
 #if FA_Q_HEADS % FA_KV_HEADS != 0
 #error "kv8: q-heads must be a multiple of kv-heads"
 #endif
@@ -846,11 +855,11 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
                                 __global float* restrict O, uint pos, uint C, uint rows) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);
-  const uint h = j * 6u + get_group_id(2) * HPW + s / (RPW / 8u);
+  const uint h = j * KV8F_GQAU + get_group_id(2) * HPW + s / (RPW / 8u);
   const uint r0 = get_group_id(0) * RPW + 8u * (s % (RPW / 8u));
   if (r0 >= C) return;
   const uint depth = pos + C;
-  const int q_w = 24 * HD * 2, q_h = (int)C, q_p = 24 * HD * 2;
+  const int q_w = KV8F_Q * HD * 2, q_h = (int)C, q_p = KV8F_Q * HD * 2;
 
   short8 qa[NDA];
 #define LOAD_Q()                                                                      \
@@ -883,7 +892,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
       for (uint b = 0; b < NKA; ++b) {
         uint kb[8];
         intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
-            (__global void*)Kc, 4 * HD * 2, (int)depth, 4 * HD * 2,
+            (__global void*)Kc, KV8F_KV * HD * 2, (int)depth, KV8F_KV * HD * 2,
             (int2)((int)((j * HD + 16u * kk) / 2u), (int)(t0 + 16u * b)), kb);
         sacc[b] = intel_sub_group_bf16_bf16_matrix_mad_k16(qa[kk], as_int8(vload8(0, kb)), sacc[b]);
       }
@@ -894,7 +903,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
       for (uint b = 0; b < NKA; ++b) {
         uint k4[8], kb[16];
         intel_sub_group_2d_block_read_transpose_32b_16r8x1c(
-            (__global void*)Kc, 4 * HD, (int)depth, 4 * HD,
+            (__global void*)Kc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
             (int2)((int)((j * HD + 16u * kk) / 4u), (int)(t0 + 16u * b)), k4);
 #pragma unroll
         for (uint z = 0; z < 8u; ++z) {
@@ -913,8 +922,8 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
     for (uint b = 0; b < NKA; ++b) {
       const uint key = t0 + 16u * b + l;
       const bool live = key < depth;
-      const float sk = live ? kv8_flash_scale(Ks, (size_t)key * 4u + j) : 0.0f;
-      svl[b] = live ? kv8_flash_scale(Vs, (size_t)key * 4u + j) : 0.0f;
+      const float sk = live ? kv8_flash_scale(Ks, (size_t)key * KV8F_KVU + j) : 0.0f;
+      svl[b] = live ? kv8_flash_scale(Vs, (size_t)key * KV8F_KVU + j) : 0.0f;
 #define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && live) ? (sacc[b].s##r * sk) * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
 #undef MASK
@@ -952,7 +961,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
 #if KV8_RAW
         uint vb[32];
         intel_sub_group_2d_block_read_transform_16b_32r16x2c(
-            (__global void*)Vc, 4 * HD * 2, (int)depth, 4 * HD * 2,
+            (__global void*)Vc, KV8F_KV * HD * 2, (int)depth, KV8F_KV * HD * 2,
             (int2)((int)(j * HD + 16u * dd), (int)(t0 + 16u * b)), vb);
 #else
         uint vb[32];   // [c * 16 + jj]: c = dim half, jj = key pair of the 32 keys
@@ -960,7 +969,7 @@ __kernel void pf_flash_attn_kv8(__global const ushort* restrict Q,
         for (uint c = 0; c < 2u; ++c) {
           uint v4[8];
           intel_sub_group_2d_block_read_transform_8b_32r16x1c(
-              (__global void*)Vc, 4 * HD, (int)depth, 4 * HD,
+              (__global void*)Vc, KV8F_KV * HD, (int)depth, KV8F_KV * HD,
               (int2)((int)(j * HD + 16u * (dd + c)), (int)(t0 + 16u * b)), v4);
 #pragma unroll
           for (uint z = 0; z < 8u; ++z) {
