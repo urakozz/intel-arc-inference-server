@@ -1077,6 +1077,25 @@ unfused 1.62x); measured 1.61x - the send is its own launch (128 a token) and th
 slices crossing (bitwise one card) costs 7.3 % against folded: twice the bytes a crossing and half the work-groups on
 out_proj / o_proj / down. `--spec auto` under TP is 17d's bar (>= 1.25x against one card's `--spec auto`).
 
+### Prefill under tensor parallel (spec 17c)
+
+`b70-decode --bench --prefill-length N --tg 32 --max-len 32768`, `--parallel tp` (plan 17c: both cards' prefill walks
+as a wavefront of two chunks, each card's half of every row-parallel linear crossing on its copy engine while the other
+chunk computes; fp32 crossings, the folded decode after it) against `--parallel 1`. l0 backend, int8 head, bf16 KV,
+chunk cap 2048. 2026-11-10, branch spec17c-tp, `tools/box_validate/interleave.sh`, median of 3 after a warm-up, order
+reversed every other round; box grade ITERATE (shared with the 3l agent between our locked runs; load 1.2-10 at the
+start, from a CPU reference job that had just ended). Spreads were under 0.3 %.
+
+| prompt ids | one card pp t/s | tp pp t/s | x one card | tg 32 after it: one / tp t/s |
+|---|---|---|---|---|
+| 2048 | 1746.32 | 2479.27 | **1.42** | 33.79 / 54.74 |
+| 16384 | 1524.28 | 2672.68 | **1.75** | 31.64 / 50.24 |
+
+The crossing is 40 MiB of fp32 each way at 2048 rows, 4.35 ms with both directions at once (~9.6 GB/s a direction:
+docs/probes/probe-tp-prefill-2026-11-10.md). Without the crossings (a timing seam, wrong numbers) the walls are 714 /
+5756 ms against 814 / 6159 with them: the copy engines hide all but ~100 / ~400 ms; the rest of the gap to 2x is a
+card's compute, 22 % above half of one card's at 2048 ids (two 1024-row chunks) and 7 % at 16384.
+
 ## Ornith 1.5 MoE (spec 15)
 
 **Nothing here is measured yet.** Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
