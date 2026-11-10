@@ -64,4 +64,22 @@ judge, the tables).
 
 ## Results
 
-(pending)
+**The arms** (2026-11-10 09:33-15:32, box `~/b70/twin-count/run1`, log `~/b70/logs/twin-count/arms.log`): every
+b70-decode run and every server arm completed, none failed - one card under `gpu_lock.sh card 1`, TP under
+`gpu_lock.sh box`. 154 distinct forced contexts dumped to `oracle-forced-dumps/tp-twin` (the same divergence reached
+by two pairs is one context).
+
+| class | path | KV | pairs | identical | first divergences |
+|---|---|---|---:|---:|---:|
+| TP | prefill | bf16 / int8 | 41 / 41 | 15 / 16 | 26 / 25 |
+| TP | plain decode | bf16 / int8 | 41 / 41 | 12 / 12 | 29 / 29 |
+| TP | MTP | bf16 / int8 | 41 / 41 | 19 / 14 | 22 / 27 |
+| TP | served `--spec off` | bf16 / int8 | 39 / 39 | 15 / 16 | 24 / 23 |
+| TP | served `--spec auto` | bf16 / int8 | 39 / 39 | 19 / 14 | 20 / 25 |
+| own | prefill vs token by token | bf16 / int8 | 41 / 41 | 12 / 14 | 29 / 27 |
+| own | MTP vs plain | bf16 / int8 | 41 / 41 | 22 / 19 | 19 / 22 |
+| own | served off vs auto | bf16 / int8 | 39 / 39 | 22 / 19 | 17 / 20 |
+
+Totals: TP 402 pairs, 250 first divergences; one card's own 242 pairs, 134 first divergences. Per pair the classes
+diverge alike (TP 0.62, own 0.55): in 256 greedy ids a legitimate rounding change leaves the stream about as often
+as TP does. The judge's verdicts: (pending the f32 references, `f32_refs.sh forced-qwen`, CPU).
