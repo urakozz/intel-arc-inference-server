@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "kernels/kernels.h"
+#include "kernels/tp_kernels.h"
+#include "loader/loader.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
 #include "runtime/control.h"
@@ -153,7 +155,8 @@ void require(bool ok, const std::string& what) {
 // Spec 13a / 13c: `Rows` is build_rows' list (capture.h) - the plain walk with the per-sequence sites bound to their
 // row builds, and the MTP head's KV fill over the rows when it has the head.
 // Spec 13c: `DraftRows` is build_draft_rows' list - the draft walk at M rows of different sequences.
-enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows };
+// Spec 17b: `Tp` is build_tp's list (capture.h) - the plain walk at a TP card's shapes with the crossings.
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows, Tp };
 
 class Capture {
  public:
@@ -215,6 +218,11 @@ class Capture {
     sb_.control = br.control;
     sb_.hctl = br.hctl;
   }
+  // Spec 17b: one TP card's decode list (M = 1).
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, l0::Mem* tap, const TpLink& link)
+      : Capture(ctx, m, b, tap, nullptr, 1, nullptr, Mode::Tp) {
+    tp_ = &link;
+  }
   // Spec 13c: build_draft_rows' list at M rows.
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
           const DraftRowsBind& dr, uint32_t cap_m)
@@ -246,6 +254,8 @@ class Capture {
       check_taps();
     else if (mode_ == Mode::Rows)
       check_rows();
+    else if (mode_ == Mode::Tp)
+      check_tp();
     else if (mode_ != Mode::Plain)
       check_mtp();
     if (mode_ == Mode::StageDraft)
@@ -318,6 +328,9 @@ class Capture {
       }
       head_kv_fill(br_->hin);
     }
+    require(mode_ != Mode::Tp || step_.kernel_count == tp_launches(d_),
+            "the TP list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
+                std::to_string(tp_launches(d_)));
     require(mode_ != Mode::Rows || step_.kernel_count == rows_launches(d_, mtp_ != nullptr),
             "the row list has " + std::to_string(step_.kernel_count) + " launches, not rows_launches()'s " +
                 std::to_string(rows_launches(d_, mtp_ != nullptr)));
@@ -802,6 +815,8 @@ class Capture {
     // single-card walks.
     if (resume_) {
       resume_ = false;
+    } else if (mode_ == Mode::Tp && s_prev != 0) {
+      tp_fold(s_prev);   // spec 17b: both cards' parts of the row-parallel linear, after the peer's arrives
     } else {
       l0::Kernel& k =
           kernel(kernels::prep_res_fold_variant(kCapM, d_.hidden, s_prev, g),
@@ -874,7 +889,49 @@ class Capture {
       launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
       launch(k, s.N / kGemvColsPerWg, s.S);
+    if (mode_ == Mode::Tp && layer != loader::kTopLevel && loader::tp_row_parallel(id)) tp_send(s.S);   // spec 17b
     return t ? kernels::gemm_sm_out_s(*t) : s.S;
+  }
+
+  // --- spec 17b: the TP crossings (capture.h, build_tp; src/kernels/tp.cl) ----------------------------------------
+  // tp_send(partials, peer_land, send_ctr, own) after a row-parallel linear of `s` slices, grid (kNormGroups, M).
+  void tp_send(uint32_t s) {
+    require(s == tp_s_, "a row-parallel linear writes " + std::to_string(s) + " slices, the crossing sends " +
+                            std::to_string(tp_s_));
+    l0::Kernel& k = kernel(tp_cross(), "tp_send", kWgResFold);
+    k.arg_ptr(0, b_.partials.ptr());
+    k.arg_ptr(1, tp_->peer_land);
+    k.arg_ptr(2, tp_->send_ctr);
+    k.arg_ptr(3, tp_->folded ? tp_->own : b_.partials.ptr());
+    launch(k, DecodeBuffers::kNormGroups, kCapM);
+  }
+  // tp_res_fold(mine, land, resid, sumsq, fold_ctr, state, spin_limit) in place of prep_res_fold.
+  void tp_fold(uint32_t s_prev) {
+    require(s_prev == tp_s_, "a TP fold of " + std::to_string(s_prev) + " slices, the crossing's are " +
+                                 std::to_string(tp_s_));
+    l0::Kernel& k = kernel(tp_cross(), "tp_res_fold", kWgResFold);
+    k.arg_ptr(0, tp_->folded ? tp_->own : b_.partials.ptr());
+    k.arg_ptr(1, tp_->land);
+    k.arg_ptr(2, b_.resid.ptr());
+    k.arg_ptr(3, b_.norm_sumsq.ptr());
+    k.arg_ptr(4, tp_->fold_ctr);
+    k.arg_ptr(5, tp_->state);
+    k.arg(6, tp_->spin_limit);
+    launch(k, DecodeBuffers::kNormGroups, kCapM);
+  }
+  std::string tp_cross() const {
+    return kernels::tp_cross_variant(kCapM, d_.hidden, DecodeBuffers::kNormGroups, tp_s_, tp_->folded, tp_->rank);
+  }
+  void check_tp() {
+    require(tp_ != nullptr && tp_->peer_land && tp_->land && tp_->send_ctr && tp_->fold_ctr && tp_->state &&
+                (!tp_->folded || tp_->own) && tp_->spin_limit != 0 && tp_->rank < model::kTpSize,
+            "a TP list needs both landing buffers, the counters, the state words, the spin bound (and the folded "
+            "row for the folded form)");
+    require(prof_ == nullptr && kCapM == 1, "a TP list is M = 1 with no profiling events (spec 17b)");
+    tp_s_ = d_.shape(LinearId::Down).S;
+    require(d_.shape(LinearId::OutProj).S == tp_s_ && d_.shape(LinearId::OProj).S == tp_s_,
+            "the row-parallel linears of a TP card share one S");
+    require(d_.ffn_fold_s() == tp_s_, "the FFN's fold is not the crossing's");
   }
   uint32_t gemv(uint32_t layer, LinearId id, const void* x) { return gemv(layer, id, x, b_.partials); }
 
@@ -1205,6 +1262,23 @@ class Capture {
     }
     // argmax_stage1(logits, part) - src/kernels/argmax.cl (Task 3), grid
     // (kVocab/1024 = 243, M), WG 256.
+    if (mode_ == Mode::Tp) {   // spec 17b: the card's vocabulary half, the global id and its value into Control
+      const uint32_t rows = lm.shape.N;
+      const std::string v = kernels::tp_argmax_variant(kCapM, rows, tp_->vocab_used, tp_->rank * rows);
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage1", kWgArgmax);
+        k.arg_ptr(0, b_.logits.ptr());
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, (rows + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);
+      }
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage2", kWgArgmax);
+        k.arg_ptr(0, ctrl());
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, 1, 1);
+      }
+      return;
+    }
     {
       l0::Kernel& k = kernel(kernels::argmax_stage1_variant(kCapM, d_.vocab_used), "argmax_stage1",
                              kWgArgmax);
@@ -1754,6 +1828,8 @@ class Capture {
   const l0::Mem* gdn_spec_ = nullptr;
   // Spec 19c: a tap drafter's verify list - its slots, taps and copy sites (null / empty otherwise).
   const TapVerify* tv_ = nullptr;
+  const TpLink* tp_ = nullptr;   // spec 17b
+  uint32_t tp_s_ = 0;            // the crossing's slices (the row-parallel linears' S)
   std::vector<std::vector<uint32_t>> sites_;
   const BatchRowsBind* br_ = nullptr;   // spec 13a / 13c: build_rows' table, pools and head bindings
   SlotBind sb_{};                        // spec 13c: the bound slot (capture.h; all null: the buffers' own)
@@ -1761,6 +1837,13 @@ class Capture {
 };
 
 }  // namespace
+
+size_t tp_launches(const model::ModelDesc& d) { return decode_launches(d) + 2 * size_t(d.layers); }
+
+CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
+                      l0::Mem* debug_resid) {
+  return Capture(ctx, m, b, debug_resid, link).run();
+}
 
 size_t decode_launches(const model::ModelDesc& d) {
   return 1 + size_t(d.layers) * (d.is_moe() ? 13 : 12) + 5;

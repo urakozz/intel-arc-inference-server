@@ -2514,7 +2514,7 @@ endif()
 # card: with ZE_AFFINITY_MASK=0 the driver shows one GPU and --parallel pp must stop with the
 # count, before the load (the model path does not exist).
 b70_cli_reject(cli_reject_pipeline_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 3
-  EXPECT "--parallel expects auto, 1, pp or replica")
+  EXPECT "--parallel expects auto, 1, pp, replica or tp")
 # (Spec 16c lifted 16b's two prefill refusals; what it refuses is in its own block below.
 # Spec 16d lifted the --spec mtp one, cli_reject_pipeline_mtp: --parallel pp --spec mtp runs.)
 # Plan 13b: two requests at once is b70-serve's.
@@ -2539,6 +2539,79 @@ exit 0
   --n 4 --parallel pp)
 set_tests_properties(cli_reject_pipeline_one_gpu PROPERTIES LABELS pp TIMEOUT 60)
 # ==== Spec 16b ============================================================= (end) ====
+
+# ==== Spec 17b: tensor parallel decode across two B70s (`--parallel tp`) ================================
+# Box queue row 79 (tools/box_validate/stages.sh). Host, no device: the per-card descriptor, plan and kernel names
+# (tp_desc_test); the per-card slicing rules, card tiles = one-card tiles, the one-card gather of state and KV
+# (tp_slice_test); the crossing's protocol on two host threads, both forms, a stale and a dropped send
+# (tp_protocol_test).
+add_executable(tp_desc_test model/tp_desc_test.cc)
+target_include_directories(tp_desc_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_desc_test PRIVATE b70_plan b70_model)
+b70_target_kernel_dir(tp_desc_test)
+add_test(NAME tp_desc_test COMMAND tp_desc_test)
+add_executable(tp_slice_test loader/tp_slice_test.cc)
+target_include_directories(tp_slice_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_slice_test PRIVATE b70_loader b70_plan b70_model)
+add_test(NAME tp_slice_test COMMAND tp_slice_test)
+add_executable(tp_protocol_test runtime/tp_protocol_test.cc)
+target_include_directories(tp_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_protocol_test PRIVATE b70_model Threads::Threads)
+add_test(NAME tp_protocol_test COMMAND tp_protocol_test)
+set_tests_properties(tp_protocol_test PROPERTIES TIMEOUT 300)
+
+# On the box, both cards (gpu_lock.sh box); SKIP (77) with fewer than two GPUs or without peer access both ways.
+# tp_kernels_test (no checkpoint): the crossing against prep_res_fold, bitwise (slices) / the host's sum (folded),
+# 300 replays. tp_decode_test (T1 / T2): the prose prompt + 64 greedy ids against one card on card 0 - slices BITWISE
+# (ids, logits, residual taps, state, KV), folded judged by the golden tie rule, both T1 bitwise between the cards and
+# replayed after reset; its `bench` mode times one crossing (row 79's speed stage). tp_fail_test (T4): a card's list
+# dropped, the step throws within its bounds, reset() recovers.
+add_executable(tp_kernels_test kernels/tp_kernels_test.cc)
+target_include_directories(tp_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(tp_kernels_test PRIVATE b70_l0 b70_model)
+b70_target_kernel_dir(tp_kernels_test)
+add_dependencies(tp_kernels_test ${B70_TP_KERNELS} kernel_prep_res_fold_M1_K5120_SP4_G20)
+add_test(NAME tp_kernels_test COMMAND tp_kernels_test)
+add_executable(tp_decode_test runtime/tp_decode_test.cc)
+target_include_directories(tp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
+target_link_libraries(tp_decode_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_decode_test ${B70_DECODE_LIST_KERNELS} ${B70_TP_KERNELS})
+add_test(NAME tp_decode_test COMMAND tp_decode_test ${B70_TEST_SNAPSHOT} both)
+add_executable(tp_fail_test runtime/tp_fail_test.cc)
+target_include_directories(tp_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(tp_fail_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_fail_test ${B70_TP_KERNELS})
+add_test(NAME tp_fail_test COMMAND tp_fail_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(tp_kernels_test PROPERTIES LABELS tp SKIP_RETURN_CODE 77 TIMEOUT 600)
+set_tests_properties(tp_decode_test tp_fail_test PROPERTIES
+  LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+if(B70_KV8 AND COMMAND b70_kv8_twin)
+  add_test(NAME tp_decode_kv8_test COMMAND tp_decode_test ${B70_TEST_SNAPSHOT} both)
+  b70_kv8_twin(tp_decode)
+endif()
+
+# b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
+b70_cli_reject(cli_reject_tp_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --prefill
+  EXPECT "--parallel tp has no prefill yet (spec 17c)")
+b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec mtp
+  EXPECT "--spec mtp / dflash under tensor parallel")
+b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32
+  EXPECT "--pipeline-split belongs to --parallel pp")
+b70_cli_reject(cli_reject_tp_profile ${B70_NO_MODEL} --profile --parallel tp
+  EXPECT "it has no --parallel tp")
+add_test(NAME cli_reject_tp_one_gpu COMMAND sh -c [==[
+out=$(ZE_AFFINITY_MASK=0 "$@" 2>&1)
+rc=$?
+printf '%s\n' "$out" >&2
+[ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc" >&2; exit 1; }
+printf '%s\n' "$out" | grep -qF -- '--parallel tp needs two GPUs and Level Zero shows 1' ||
+  { echo "the refusal does not name the device count" >&2; exit 1; }
+exit 0
+]==] cli_reject_tp_one_gpu $<TARGET_FILE:b70-decode> ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp)
+set_tests_properties(cli_reject_tp_one_gpu PROPERTIES LABELS tp TIMEOUT 60)
+# ==== Spec 17b ============================================================= (end) ====
 
 # ==== Spec 16c: pipeline parallel PREFILL across two B70s (the chunk pipeline) ==========
 # Written blind on the Mac, like 16b; box-validation-queue.md row 23 is the order to run the
@@ -2674,7 +2747,7 @@ endif()
 # updated), the rest before the snapshot is resolved (the model path does not exist).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_pp_value ${B70_NO_MODEL} --parallel 4096
-    EXPECT "--parallel expects auto, 1, pp or replica")
+    EXPECT "--parallel expects auto, 1, pp, replica or tp")
   b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --parallel 1 --pipeline-split 20
     EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p

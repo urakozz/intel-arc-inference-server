@@ -19,7 +19,10 @@ struct Control {
   // SPEC_SLOTS gdn_step variants (the MTP verify lists) read it; everything else
   // uses slot 0 (`gdn_state`) and never looks. 0 whenever MTP is off.
   uint32_t gdn_live;
-  uint32_t pad[12];        // pad to 128 B
+  // Spec 17b (tensor parallel): each card's argmax over its vocabulary half writes the winner's fp32 bits here
+  // (tp.cl's tp_argmax_stage2, CTRL_OUTV); the host merges the two cards' rows. Untouched by every other list.
+  uint32_t out_value[8];
+  uint32_t pad[4];         // pad to 128 B
 };
 static_assert(sizeof(Control) == 128, "control block is two cache lines");
 }  // namespace runtime

@@ -108,8 +108,11 @@
 #elif INTERMEDIATE == 19456
 #define SILU_N 19456
 #define SILU_FUSED_N 38912
+#elif INTERMEDIATE == 8704   /* spec 17b: Qwen3.8's MLP half on one card under tensor parallel */
+#define SILU_N 8704
+#define SILU_FUSED_N 17408
 #else
-#error "INTERMEDIATE: only 17408 (Qwen3.8) and 19456 (Agnes 3.0 Flash) are built"
+#error "INTERMEDIATE: only 17408 (Qwen3.8), 19456 (Agnes 3.0 Flash) and 8704 (Qwen3.8 per TP card) are built"
 #endif
 #define SILU_CHUNK 4096   /* 5 work-groups cover 17408; the last does 1024 */
 

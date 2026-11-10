@@ -8,8 +8,13 @@
 //                               family's rule: cli/pipeline_settle.h parallel_auto, Kolibri-1's and
 //                               Nemotron 3.5 Bolt's two cards for the whole model); 1: one card;
 //                               pp: the model's layers split over GPUs 0 and 1 of what Level Zero
-//                               shows (spec 16). `tp` is the name kept for tensor parallel (spec 17),
-//                               refused until it is built.
+//                               shows (spec 16).
+//                               tp (b70-decode, Qwen3.8 - spec 17b): tensor parallel, every layer's
+//                               linears split over GPUs 0 and 1 (half the heads, half the MLP, half
+//                               the head's vocabulary a card), the two halves added after each
+//                               layer by P2P writes; needs peer access both ways. Decode only:
+//                               the prompt is ingested by decode replays (prefill is 17c's),
+//                               no --spec (17d's); b70-serve refuses it by name until 17d.
 //                               replica (b70-serve, Qwen3.8 only - spec 13 §11, plan 13b): the model
 //                               on both cards, one engine each, two requests served at once (each
 //                               bitwise what it is alone on its card); every other model and
@@ -32,7 +37,7 @@
 namespace cli {
 
 // The parallel mode as given; `devices` is the resolved device count (1 or 2).
-enum class Parallel { Auto, One, Pp, Replica };
+enum class Parallel { Auto, One, Pp, Replica, Tp };
 
 struct PipelineArgs {
   Parallel mode = Parallel::Auto;
@@ -43,6 +48,7 @@ struct PipelineArgs {
   bool have_split = false, have_handoff = false;
   bool on() const { return devices > 1; }   // pipeline parallel (replica keeps devices 1: one engine per card)
   bool replica() const { return mode == Parallel::Replica; }
+  bool tp() const { return mode == Parallel::Tp; }   // spec 17b (devices stays 1: on() is pipeline parallel's)
   // The mode was named (1 or pp) - each family's default applies otherwise.
   bool given() const { return mode != Parallel::Auto; }
 };
@@ -60,12 +66,51 @@ inline void parse_parallel(const std::string& v, PipelineArgs& a) {
   } else if (v == "replica") {   // plan 13b: one engine per card (b70-serve, Qwen3.8)
     a.mode = Parallel::Replica;
     a.devices = 1;
-  } else if (v == "tp") {
-    throw std::runtime_error("--parallel tp: tensor parallel is not built yet (spec 17) - --parallel auto, 1, pp or "
-                             "replica");
+  } else if (v == "tp") {   // spec 17b: tensor parallel (b70-decode, Qwen3.8)
+    a.mode = Parallel::Tp;
+    a.devices = 1;
   } else {
-    throw std::runtime_error("--parallel expects auto, 1, pp or replica, got '" + v + "'");
+    throw std::runtime_error("--parallel expects auto, 1, pp, replica or tp, got '" + v + "'");
   }
+}
+
+// Spec 17b: --parallel tp's refusals that need no device. What 17b does not run under tensor parallel is refused by
+// name, with the plan that builds it.
+struct TpContext {
+  bool prefill = false;        // --prefill / --bench --prefill-length
+  bool spec = false;           // --spec other than off
+  bool profile = false;        // --profile
+  bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next / K2-Horizon
+};
+inline void check_tp(const PipelineArgs& a, const TpContext& c) {
+  if (!a.tp()) return;
+  if (a.have_split)
+    throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel tp "
+                             "splits every layer");
+  if (a.have_handoff)
+    throw std::runtime_error("--pipeline-handoff belongs to --parallel pp; --parallel tp's cards add their halves by "
+                             "P2P writes");
+  if (c.other_family)
+    throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b); this model runs --parallel auto, 1 or pp");
+  if (c.prefill)
+    throw std::runtime_error("--parallel tp has no prefill yet (spec 17c): drop --prefill / --prefill-length, the "
+                             "prompt is ingested by decode replays");
+  if (c.spec)
+    throw std::runtime_error("--parallel tp runs plain decode (spec 17b); --spec mtp / dflash under tensor parallel "
+                             "are spec 17d's");
+  if (c.profile) throw std::runtime_error("--profile instruments one device's list; it has no --parallel tp");
+}
+// b70-serve: tensor parallel behind the server is spec 17d's.
+inline void refuse_tp_in_serve(const PipelineArgs& a) {
+  if (a.tp())
+    throw std::runtime_error("--parallel tp is b70-decode's until spec 17d (the server under tensor parallel); "
+                             "b70-serve runs --parallel auto, 1, pp or replica");
+}
+// Two cards visible, before anything is loaded (peer access both ways is checked on the opened devices).
+inline void require_two_devices_for_tp(uint32_t gpus) {
+  if (gpus < 2)
+    throw std::runtime_error("--parallel tp needs two GPUs and Level Zero shows " + std::to_string(gpus) +
+                             " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
 }
 
 // The override flags under --parallel auto mean pipeline parallel (they have no meaning on one card).
