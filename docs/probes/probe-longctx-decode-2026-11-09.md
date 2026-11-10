@@ -550,3 +550,53 @@ Four rows would move (bf16 M = 2 down to 4096, bf16 M = 3 up to 11585, int8 M = 
 changes rounding there: **left as they are, for the f32 judge**. The cost of not moving them is small: at 4096 the
 whole M = 3 / 4 steps are 0.9-1.6 % faster than main already, and at 32768 int8 M = 3 the DPAS kernel is 0.87 x
 v2's (~1 ms of a 36 ms step).
+
+## 3l (2): short prefill chunks deep in a session - 2026-11-11
+
+Branch `3l-short-chunks`. Deep in an agentic session each turn (a tool result, a user message) is a short prefill
+chunk of 1..128 rows over a long cache. The flash prefill attention (`pf_flash_attn`, and `pf_flash_attn_kv8` raw
+after `kv8_widen` for `--kv-cache int8`) runs one work-group per 8 query rows and kv head - grid ceil(C / 8) x 4 -
+and each work-group walks every key: 4 work-groups at C = 1..8, 64 at C = 128, on a card with 32 Xe cores (~160
+of these 96-lane, 256-GRF work-groups resident at once). Step 0 above measured ~0.43 s of attention for one chunk
+at 128k, whatever C below ~128: the walk of one work-group is the time, the rest of the card idles.
+
+**Design (split-K, flash-decoding style).** For a short chunk deep in the cache the key range [0, pos) is cut
+into `n` spans of whole 64-key tiles; work-group (row block, kv head, span) runs today's tile loop over its span
+only (the last span also takes the chunk's own causal keys) and writes its unnormalised O (8 rows x 256 dims per
+head) and its two softmax statistics per row - the running maximum m and the sum l - to a partials area. A merge
+kernel then combines the spans per (head, row): M = max m_s, O = sum_s 2^(m_s - M) O_s / sum_s 2^(m_s - M) l_s,
+into pf_o's layout, so the gate and everything after are unchanged. Every span starts at a key all its rows can
+see (span starts are below pos), so no span has an empty softmax. The partials live in pf_o's unused tail (pf_o is
+sized for the chunk cap, >= 2048 rows; a short chunk uses 256 of them): no new buffer, no memory-plan change. Large
+chunks (where today's grid already fills the card) and shallow caches keep today's launch exactly - same binary,
+same grid, bitwise. The split changes the softmax's association (each span's own running max and bf16 P rounding,
+then the fp32 merge), so its outputs are judged by the f32 judge, not bitwise.
+
+**Expected gain, written before measuring.** At C = 1..16 the split takes the grid from 4..8 work-groups to
+~256-512; at 128k one layer's bf16 K + V is 0.54 GB, ~0.9 ms at the card's 590 GB/s, against ~26.6 ms a layer
+today - so attention could fall ~10-20x (to ~1.5-3 ms a layer, ~25-50 ms for 16 layers); at C = 64 / 128 the work
+is 8 / 16 row blocks over the same keys (more DPAS, the K / V tiles shared through L2 by row blocks of one span),
+expected ~5-10x. int8 KV keeps today's `kv8_widen` of pos + C rows (~1.4 ms a layer at 128k) unless an in-place
+split reader measures faster. A whole short turn at 128k is ~0.43 s attention + ~0.05-0.1 s of everything else
+today, so the whole chunk is expected ~3-6x faster at 128k and ~2-3x at 32k.
+
+### Acceptance (fixed before any timing)
+
+- **Gain:** whole-chunk wall time (`Engine::prefill` of one turn, host clock around the call: every launch, the
+  head and the waits) for a short turn of **16, 64 and 128 rows at 32768 and 131072 keys, bf16 and int8 KV**,
+  measured faster with the split than without: interleaved pairs (split / today's path, alternating order) after
+  warm-up, **median paired gain of 3 rounds >= 10 %** and every round's pair faster.
+- **Nothing slower:** **2048-row chunks** (at 32768 / 131072) and **short contexts** (16 / 64 / 128 rows at 2048
+  and 8192 keys) at most 2 % slower (median paired) - where the rule picks today's path the launch is identical.
+- **Judged:** the switch changes rounding, so (a) the golden prompts' prefill gates in 16-row chunks
+  (`prefill_gate_l0_c16`, `prefill_gate_int8_c16` and their int8-KV twins) still pass, and (b) a deep-session context
+  - long32k.ids to 32000 keys, then turns of 16, 64 and 128 rows as separate prefill calls, then 32 greedy ids - is
+  run with the split and without it, bf16 and int8 KV, and every run's ids are judged by its own f32 reference
+  (`tests/golden/forced_judge.h`, `tools/box_validate/f32_refs.sh forced-qwen`, the one-bf16-ulp near-tie): the
+  split path is rejected at no more rows than today's path on the same context, or each extra rejection is a near-tie
+  by the near-miss rule (<= 8 bf16 ulp, logits cosine distance <= 2 x today's).
+- **Kernel check:** the split kernels against today's kernels at C = 1..256 and depths to 131072 (both KV forms):
+  finite, and within fp32-merge distance of today's output (the test prints max and median relative error; both
+  paths against an fp64 host reference on small shapes, the split no further from it than today's).
+- **The rule** (rows x keys -> split or not, and the span count) is picked from kernel measurements and written in
+  `src/runtime/prefill/attn.cc`; no new user-facing flag; a test seam forces it off / on for the pairs and the judge.
