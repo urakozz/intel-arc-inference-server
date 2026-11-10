@@ -259,9 +259,10 @@ DEFAULT_CONFIG = dict(hidden_size=5120, intermediate_size=17408, vocab_size=2483
                       linear_key_head_dim=128, linear_value_head_dim=128)
 
 
-def estimate_peak(n, longest, config, chunk_rows=0, output_rows=0):
+def estimate_peak(n, longest, config, chunk_rows=0, output_rows=0, recurrent_states=2):
     """Conservative live bytes: resident embed/head, current f32 + prefetched bf16 layer and conversion
-    scratch, hidden buffers, projections, GDN's 64-wide chunk workspace, FA scores and logits copies.
+    scratch, hidden buffers, projections, GDN's 64-wide chunk workspace and retained branch states,
+    FA scores and logits copies.
     Chunked single chains retain only this layer's f32 KV (no bf16 truncation) and bounded GDN state.
     Includes 4 GiB for Python/torch, allocator slack and checkpoint/page-cache headroom.
     """
@@ -277,8 +278,10 @@ def estimate_peak(n, longest, config, chunk_rows=0, output_rows=0):
     projections = 4 * rows * (6 * h + 6 * conv + 8 * vh + 4 * nh * hd + 3 * mid)
     gdn_work = 4 * rows * config["linear_num_value_heads"] * (8 * 64 + 8 * config["linear_value_head_dim"])
     kv = 16 * longest * nk * hd
+    states = 4 * recurrent_states * config["linear_num_value_heads"] * config["linear_key_head_dim"] * \
+        config["linear_value_head_dim"]
     scores = 12 * min(rows, Q_BLOCK) * longest * (1 if chunk_rows else nh)
-    return int(4 * 2**30 + max(weights + hidden + projections + gdn_work + kv + scores, head))
+    return int(4 * 2**30 + max(weights + hidden + projections + gdn_work + kv + scores + states, head))
 
 
 def memory_cap(gib):
@@ -300,8 +303,19 @@ def memory_plan(ctx, config, cap, chunk_rows=256, i8head_re=I8HEAD_RE, pfi8_re=N
 
     def group(contexts, chunk=0):
         trie, jobs = plan(contexts, i8head_re, pfi8_re, root)
+        # Mirror gdn's DFS state lifetime: keep a parent's state until its last child.
+        # Two extra states cover the current result and the previous loop's local references.
+        left, live, peak_states = list(trie.n_children), 0, 2
+        for si, ps in enumerate(trie.seg_parent):
+            peak_states = max(peak_states, live + 2)
+            if left[si]:
+                live += 1
+            if ps >= 0:
+                left[ps] -= 1
+                if not left[ps]:
+                    live -= 1
         peak = estimate_peak(len(trie.tok), max(len(j["seq"]) for j in jobs.values()), config, chunk,
-                             max(len(j["rows"]) for j in jobs.values()))
+                             max(len(j["rows"]) for j in jobs.values()), peak_states)
         return trie, jobs, chunk, peak
 
     for key in sorted(ctx):
