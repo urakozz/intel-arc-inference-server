@@ -744,6 +744,75 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   endif()
 endif()
 
+# ==== Spec 17d: tensor parallel MTP verify (`--parallel tp --spec mtp|auto`, Qwen3.8) ======= (begin) ====
+# Additive only: new names (attn_verify_dpas.cl takes the per-card 12 / 2 heads by define; its default lines keep
+# their preprocessed source). What a card's verify list at M = 1..4 binds (runtime::build_tp_verify, capture.cc) at
+# model::tp_card_desc's shapes beyond 17b's M = 1 list - the folded crossing only (runtime::kTpDefaultCrossing):
+#   GDN      gdn_step_slots_M<M>_GK8V24 (SPEC_SLOT_STRIDE one card's slot: 48 x 24 x 128 x 128 floats), M = 1..4;
+#            prep_gated_head_M<M>_GK8V24, M = 2..4
+#   FA       attn_prep / attn_v2 at M = 2..4, 12 q / 2 kv, and their _KV8 twins; attn_verify_dpas at 12 / 2 with the
+#            one-card M = 2..4 lines' levers (3l's PAIR split, PVX by M)
+#   MLP      prep_silu_mul_M<M>_I8704 (gate||up at S 8: the per-card gemm_sm row has no 2x8 work-group)
+#   tp.cl    tp_cross at M = 2..4 (folded, S4) per rank, tp_argmax at M = 2..4 per vocabulary half
+#   linears  the per-card gemm_sm rows (kernels::kSmallMTuning's Spec 17d rows, built in the 28b block below)
+# The MTP head runs at one card's shapes on each card (replicated, its own KV layer at 24 / 4 heads): its draft list
+# and its verify-tail KV fill bind spec 8's binaries, and the draft's lm_head is the card's int8 vocabulary half
+# (17b's gemv_i8w_M1_K5120_N124160 and tp_argmax_M1).
+if(B70_TP AND B70_MTP)
+  set(TP_GDN_SLOT_DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 ${TP_GDN_HEADS}
+                          SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=18874368)
+  set(B70_TP_VERIFY_KERNELS "")
+  foreach(MM 1 2 3 4)
+    add_ocloc_kernel(gdn_step_slots_M${MM}_GK8V24 SOURCE ${GDN_CL} DEFINES ${TP_GDN_SLOT_DEFINES} M=${MM})
+    list(APPEND B70_TP_VERIFY_KERNELS kernel_gdn_step_slots_M${MM}_GK8V24)
+  endforeach()
+  foreach(MM 2 3 4)
+    add_ocloc_kernel(prep_gated_head_M${MM}_GK8V24 SOURCE ${PREP_CL} DEFINES M=${MM} ${TP_GDN_HEADS})
+    add_ocloc_kernel(prep_silu_mul_M${MM}_I8704 SOURCE ${PREP_CL} DEFINES M=${MM} INTERMEDIATE=8704)
+    add_ocloc_kernel(attn_prep_M${MM}_Q12KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=${MM} ${TP_FA_HEADS})
+    add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${TP_FA_HEADS})
+    list(APPEND B70_TP_VERIFY_KERNELS kernel_prep_gated_head_M${MM}_GK8V24 kernel_prep_silu_mul_M${MM}_I8704
+                kernel_attn_prep_M${MM}_Q12KV2 kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2)
+    if(B70_KV8)
+      add_ocloc_kernel(attn_prep_M${MM}_Q12KV2_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2 ${TP_FA_HEADS})
+      add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT} ${TP_FA_HEADS})
+      list(APPEND B70_TP_VERIFY_KERNELS kernel_attn_prep_M${MM}_Q12KV2_KV8
+                  kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8)
+    endif()
+    if(B70_VERIFY_DPAS)
+      add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2 SOURCE ${VDPAS_CL}
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
+                               KV8=0 ${TP_FA_HEADS}
+                       OPTIONS ${VDPAS_OPTIONS})
+      list(APPEND B70_TP_VERIFY_KERNELS kernel_attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2)
+      if(B70_KV8)
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR}
+                                 PVX=${_vdpas_pvx_${MM}} KV8=1 ${TP_FA_HEADS}
+                         OPTIONS ${VDPAS_OPTIONS})
+        list(APPEND B70_TP_VERIFY_KERNELS kernel_attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_Q12KV2_KV8)
+      endif()
+    endif()
+    foreach(R 0 1)
+      add_ocloc_kernel(tp_cross_M${MM}_K5120_G20_S4_F_R${R} SOURCE ${TP_CL}
+                       DEFINES TP_CROSS=1 M=${MM} K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R})
+      list(APPEND B70_TP_VERIFY_KERNELS kernel_tp_cross_M${MM}_K5120_G20_S4_F_R${R})
+    endforeach()
+    set(_tp_am ${CTRL_DEFINES} CTRL_OUTV=20 TP_ARGMAX=1 M=${MM} VOCAB=124160)
+    add_ocloc_kernel(tp_argmax_M${MM}_N124160_U124160_B0 SOURCE ${TP_CL}
+                     DEFINES ${_tp_am} VOCAB_USED=124160 ID_BASE=0)
+    add_ocloc_kernel(tp_argmax_M${MM}_N124160_U123917_B124160 SOURCE ${TP_CL}
+                     DEFINES ${_tp_am} VOCAB_USED=123917 ID_BASE=124160)
+    list(APPEND B70_TP_VERIFY_KERNELS kernel_tp_argmax_M${MM}_N124160_U124160_B0
+                kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
+  endforeach()
+  set(B70_TP_VERIFY_KERNELS ${B70_TP_VERIFY_KERNELS} CACHE INTERNAL "spec 17d: the binaries a TP verify list binds")
+endif()
+# ==== Spec 17d ============================================================= (end) ====
+
 # ==== Spec 18b: K2-Horizon decode (model::k2()) ============================= (begin) ====
 # Additive only: no existing source is edited, so every binary above keeps its name, its
 # command line and its bytes (tools/kernel_cmdlines' diff: additions only). K2-only
@@ -1996,6 +2065,15 @@ set(GEMM_SM_Q4EXP "2560 16384 1 0 MG" "2560 13312 2 0 MG" "6144 2560 4 0 MG" "25
 if(B70_Q4EXP AND B70_MTP)
   set(_m234 2 3 4)
   gemm_sm_rows(GEMM_SM_Q4EXP _m234)
+endif()
+# Spec 17d: a tensor-parallel card's shapes (model::tp_card_desc, the folded crossing) at its verify lists' M = 2..4 -
+# the one-card rows' knobs for the per-card cell of each shape (gemv's S / layout, magic dequant, the 2D read where
+# the one-card cell has it); gate||up keeps gemv's grid split-K (no 2x8 work-group: its SiLU is the S 8 build).
+set(GEMM_SM_TP17D "5120 8192 1 1 MG" "5120 7168 2 0 MG B2D" "5120 17408 8 0 MG" "3072 5120 4 0 MG B2D"
+                  "8704 5120 4 0 MG B2D" "5120 124160 1 2 WG")
+if(B70_TP AND B70_MTP)
+  set(_m234 2 3 4)
+  gemm_sm_rows(GEMM_SM_TP17D _m234)
 endif()
 # tests/CMakeLists.txt reads the list (gemm_sm_names_test, gemm_sm_test).
 set_property(GLOBAL PROPERTY B70_GEMM_SM_KERNELS ${GEMM_SM_TARGETS})

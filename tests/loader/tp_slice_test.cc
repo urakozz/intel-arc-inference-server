@@ -11,6 +11,7 @@
 //   small    loader::tp_small_elems: the conv taps of the card's q / k / v channels, its v-heads' A_log / dt_bias,
 //            everything else whole.
 //   gather   runtime::tp::gather_state / gather_kv: a one-card state and KV split by the card rules, gathered back,
+//            (spec 17d) scattered again, and the MTP head's KV layer spliced in / split out,
 //            byte-identical (bf16 and int8 KV).
 #include <algorithm>
 #include <cstdint>
@@ -154,6 +155,19 @@ int main() {
     runtime::tp::gather_state(card, gp, cp, out.data());
     CHECK(std::memcmp(out.data(), gdn.data(), gdn.size()) == 0);
     CHECK(std::memcmp(out.data() + gdn.size(), conv.data(), conv.size()) == 0);
+    {   // spec 17d: the scatter is the gather's inverse, byte for byte
+      std::vector<uint8_t> sg[2], sc2[2];
+      uint8_t* sgp[2];
+      uint8_t* scp[2];
+      for (uint32_t r = 0; r < 2; ++r) {
+        sg[r].assign(cg[r].size(), 0xA5);
+        sc2[r].assign(cc[r].size(), 0x5A);
+        sgp[r] = sg[r].data();
+        scp[r] = sc2[r].data();
+      }
+      runtime::tp::scatter_state(card, out.data(), sgp, scp);
+      for (uint32_t r = 0; r < 2; ++r) CHECK(sg[r] == cg[r] && sc2[r] == cc[r]);
+    }
 
     for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
       constexpr uint32_t n = 37;
@@ -178,8 +192,40 @@ int main() {
       std::vector<uint8_t> got(kvb.size());
       runtime::tp::gather_kv(card, kv, n, kp, got.data());
       CHECK(got == kvb);
+      // Spec 17d: the scatter back into the cards' layouts, byte for byte.
+      std::vector<uint8_t> back[2] = {std::vector<uint8_t>(cards[0].size(), 0xEE),
+                                      std::vector<uint8_t>(cards[1].size(), 0xEE)};
+      uint8_t* bp[2] = {back[0].data(), back[1].data()};
+      runtime::tp::scatter_kv(card, kv, n, got.data(), bp);
+      CHECK(back[0] == cards[0] && back[1] == cards[1]);
+      // Spec 17d: the MTP head's layer spliced in after the FA layers (Engine::save_kv with MTP on: per tensor the
+      // FA rows, the head's rows, the FA scales, the head's scales) and split back out.
+      const runtime::tp::KvSplit ks = runtime::tp::kv_split(one.fa_layers, 4, 4, kv, n);
+      CHECK_EQ(2 * ks.main_tensor(), kvb.size());
+      std::vector<uint8_t> headb(2 * ks.head_tensor());
+      for (size_t i = 0; i < headb.size(); ++i) headb[i] = uint8_t(i * 7 + 3);
+      std::vector<uint8_t> spliced(kvb.size() + headb.size());
+      runtime::tp::splice_head_kv(ks, kvb.data(), headb.data(), spliced.data());
+      size_t at = 0;
+      for (uint32_t t = 0; t < 2; ++t) {   // the expected order, written out
+        CHECK(std::memcmp(&spliced[at], &kvb[t * tensor], L * n * row) == 0);
+        at += L * n * row;
+        CHECK(std::memcmp(&spliced[at], &headb[t * ks.head_tensor()], ks.rows_head) == 0);
+        at += ks.rows_head;
+        if (sc) {
+          CHECK(std::memcmp(&spliced[at], &kvb[t * tensor + L * n * row], L * n * sc) == 0);
+          at += L * n * sc;
+          CHECK(std::memcmp(&spliced[at], &headb[t * ks.head_tensor() + ks.rows_head], ks.scales_head) == 0);
+          at += ks.scales_head;
+        }
+      }
+      CHECK_EQ(at, spliced.size());
+      std::vector<uint8_t> m2(kvb.size()), h2(headb.size());
+      runtime::tp::split_head_kv(ks, spliced.data(), m2.data(), h2.data());
+      CHECK(m2 == kvb && h2 == headb);
     }
-    std::printf("gather: state, bf16 and int8 KV byte-identical to the one-card layouts\n");
+    std::printf("gather: state, bf16 and int8 KV byte-identical to the one-card layouts; scatter and the MTP head's "
+                "splice their inverses (spec 17d)\n");
   }
   std::printf("tp_slice_test: OK\n");
   return 0;

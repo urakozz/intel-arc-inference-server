@@ -285,6 +285,13 @@ MtpSizes MtpDims::sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t
   return s;
 }
 
+MtpSizes MtpDims::tp_sizes(uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head, KvCache kv) {
+  MtpSizes s = sizes(max_len, card, 0, kv);
+  s.kv_k = kv_layout(max_len, head, 1, kv).bytes();   // the head's layer at its own kv heads
+  s.kv_v = s.kv_k;
+  return s;
+}
+
 uint32_t MtpDims::hh_rows(uint32_t seqs) {
   const uint32_t one = DecodeScratchDims::kM + 1;
   return seqs <= 1 ? one : seqs * one + 3 * DecodeScratchDims::kM;

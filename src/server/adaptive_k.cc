@@ -21,6 +21,17 @@ MtpCost MtpCost::int8_head() {
   return c;
 }
 
+// Spec 17d: tensor parallel (`--parallel tp`), in units of the TP plain step. PROVISIONAL (derived) until
+// tp_mtp_test's `cost` mode measures it on the box: verify - the one-card rows plus the M-row crossings' growth;
+// drafts - the whole head's layer (0.85 GB) plus the card's half of the int8 head (0.64 GB) at ~570 GB/s, ~3 ms of
+// an ~18.5 ms TP plain step a draft.
+MtpCost MtpCost::tp_int8_head() {
+  MtpCost c;
+  c.verify = {1.00, 1.06, 1.12, 1.18};
+  c.draft = {0.16, 0.32, 0.48};
+  return c;
+}
+
 MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
   MtpCost c = i8_head ? int8_head() : bf16_head();
   // Spec 28b: M = 5..8 measured (int8 head; the bf16 head's taken equal - adaptive_k.h)

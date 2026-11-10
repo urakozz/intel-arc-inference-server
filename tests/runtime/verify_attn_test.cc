@@ -8,7 +8,9 @@
 //      list) is dpas_from exactly where it is finite and > 1, never elsewhere and at Ornith's heads;
 //   6. every (M, KV form) the rule can return Dpas for has its binary on src/kernels/CMakeLists.txt's B70_VERIFY_DPAS
 //      lines (the built names passed as arguments by tests/CMakeLists.txt), and an (M, KV form) without a row
-//      returns V2 (M = 5..8 int8, M = 9).
+//      returns V2 (M = 5..8 int8, M = 9);
+//   7. spec 17d: a tensor-parallel card's 12 / 2 heads follow the same table at every row and override, and the
+//      MTP verify rows (M = 2..4, both forms) have their per-card binary built (the 17d block).
 #include <cstdio>
 #include <set>
 #include <string>
@@ -59,6 +61,12 @@ int main(int argc, char** argv) {
     const bool two = r.dpas_from != runtime::kDpasNever && r.dpas_from > 1;
     CHECK(runtime::verify_attn_deep_from(r.m, r.kv8, 24, 4) == (two ? r.dpas_from : runtime::kDpasNever));
     CHECK(runtime::verify_attn_deep_from(r.m, r.kv8, 16, 2) == runtime::kDpasNever);
+    // 7: the per-card heads, row for row the one-card rule
+    for (VerifyAttnForce ov : ovs)
+      for (uint32_t keys : depths)
+        CHECK(runtime::verify_attn_kind(r.m, keys, r.kv8, 12, 2, ov) == runtime::verify_attn_kind(r.m, keys, r.kv8, 24, 4, ov));
+    CHECK(runtime::verify_attn_deep_from(r.m, r.kv8, 12, 2) == runtime::verify_attn_deep_from(r.m, r.kv8, 24, 4));
+    if (r.m <= 4) CHECK(built.count(kernels::attn_verify_dpas_variant(r.m, 32, r.kv8, 12, 2)) == 1);
     std::printf("row M=%u %s: dpas_from %s\n", r.m, r.kv8 ? "int8" : "bf16",
                 r.dpas_from == runtime::kDpasNever ? "never" : std::to_string(r.dpas_from).c_str());
   }

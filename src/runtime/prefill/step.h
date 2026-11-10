@@ -120,8 +120,31 @@ void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const loader:
 // norm, the card's int8 vocabulary half of lm_head (17b's gemv_i8w binary) and tp.cl's argmax over it, whose ids
 // start at `id_base` with `vocab_used` real rows - the winner's id and value into ctrl (out_token / out_value,
 // cur_token, pos += n_active). The caller merges the two cards' winners, as TpEngine's decode step does.
+// Spec 17d: `normed_row` non-null when the last row's fold and final norm were already run (step_tp_final, with the
+// MTP head): the fold and the norm are skipped and lm_head reads it (p0 / p1 / resid_row unused).
 void step_tp_head(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, void* ctrl,
-                  const float* p0, const float* p1, void* resid_row, uint32_t vocab_used, uint32_t id_base);
+                  const float* p0, const float* p1, void* resid_row, uint32_t vocab_used, uint32_t id_base,
+                  const void* normed_row = nullptr);
+
+// Spec 17d: the MTP head's KV for a TP card's chunk (runtime/prefill/tp_prefill.cc). The head is whole on each card
+// (loader::load_tp's `mtp`), so its front runs at the head's own shapes (`head`: the one-card descriptor) in the
+// card's scratch. step_tp_final first: the last unit's two halves (p0 card 0's, p1 card 1's) folded into every row of
+// `resid` and the final norm of every row into `hid` rows 1..C (step_mtp_kv's step 1 with the TP fold). Then
+// step_tp_mtp_kv: step_mtp_kv's steps 2-5 over the pairs (hid[r], ids[r]) at positions pos - 1 + r (pos 0: rows
+// 1..C-1) in passes of at most tp_mtp_kv_pass(s) rows - the card's pf_q holds a row of half the head's q heads - each
+// pass on its own head Control hctl[p] (the host sets pos = the pass's first position, n_active its rows, before the
+// pair is appended; tp_mtp_kv_passes(pos, C, s) of them), its bf16 linears dequantised through `slab` (bf16
+// [10240][1024] at least: the card's own slab is [8704][1024]). `kv` is the head's layer on this card.
+void step_tp_final(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, const float* p0,
+                   const float* p1, void* resid, uint16_t* hid, uint32_t C);
+inline uint32_t tp_mtp_kv_pass(const PrefillScratch& s) { return s.chunk_cap() / 2; }
+inline uint32_t tp_mtp_kv_passes(uint32_t pos, uint32_t C, const PrefillScratch& s) {
+  const uint32_t rows = pos == 0 ? C - 1 : C, P = tp_mtp_kv_pass(s);
+  return (rows + P - 1) / P;
+}
+void step_tp_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m,
+                    const model::ModelDesc& head, void* const* hctl, l0::Mem& slab, const uint32_t* ids, uint32_t pos,
+                    uint32_t C, uint16_t* hid, const KvLayer& kv);
 
 // The tail only the LAST chunk runs: the final norm on the last row, `lm_head`
 // at M = 1 through the EXISTING decode binary, and the two argmax stages --
