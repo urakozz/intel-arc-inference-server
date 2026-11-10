@@ -352,6 +352,19 @@ def test_memory_plan():
         assert "memory cap" in str(e)
 
 
+def test_branch_state_memory():
+    # Deepest path first: DFS descends the spine before visiting its side leaves, so GDN
+    # must retain every unfinished ancestor's recurrent state at once.
+    ctx = {f"mtp_verify_comb_{d:02}": ([1] * (12 - d) + [2], [3]) for d in range(12)}
+    trie, _ = QF.plan(ctx)
+    cap = QF.estimate_peak(len(trie.tok), 14, TD.TEXT)
+    groups = QF.memory_plan(ctx, TD.TEXT, cap)
+    assert len(groups) > 1, "a comb's retained recurrent states must count against the cap"
+    assert all(g[3] <= cap for g in groups)
+    assert {k for g in groups for k in g[1]} == set(ctx)
+    print("memory plan: unfinished GDN branch states are included in each capped group")
+
+
 def test_chunked_forward():
     ctx = keyed({"mtp_verify_a": (TD.seq(150, 11), TD.seq(7, 12))})
     trie, _ = QF.plan(ctx)
@@ -375,7 +388,7 @@ def test_chunked_forward():
     print("chunked: f32 hidden states match one-shot, including resume and non-aligned chunks")
 
 
-TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8, test_memory_plan, test_chunked_forward]
+TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8, test_memory_plan, test_branch_state_memory, test_chunked_forward]
 
 if __name__ == "__main__":
     want = set(sys.argv[1:])
