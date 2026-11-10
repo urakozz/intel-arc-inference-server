@@ -1062,6 +1062,7 @@ int run(int argc, char** argv) {
   runtime::PrefillPath pp_path = cli::prefill_path(
       have_prefill_len || prefill,
       have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  if (have_prefill_len || prefill) cli::warn_int8_prefill_kv8(pp_path.backend, kv_cache);
   if (profile && kv_cache == runtime::KvCache::Int8)
     throw std::runtime_error("--profile captures its own bf16-KV list; it has no --kv-cache int8");
   // Spec 16b: --parallel's refusals are argument-only, so they come before the device too.

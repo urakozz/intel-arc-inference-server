@@ -77,6 +77,15 @@ inline runtime::PrefillPath prefill_path(bool prefill, runtime::PrefillBackend b
   return {prefill, backend};
 }
 
+// 3o (operator 2026-11-10, accepted as a known FAIL): the l0-int8 prefill with int8 KV compounds two roundings
+// (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md) - one of A4's 36 tool-call scenarios writes an invalid edit.
+inline void warn_int8_prefill_kv8(runtime::PrefillBackend backend, runtime::KvCache kv) {
+  if (backend == runtime::PrefillBackend::L0Int8 && kv == runtime::KvCache::Int8)
+    std::fprintf(stderr, "warning: --prefill-backend l0-int8 with --kv-cache int8: ~3%% of tool calls copying exact "
+                         "text from a long prompt can come out wrong (A4: 1 of 36 invalid); the default l0 prefill "
+                         "does not have this\n");
+}
+
 // Spec 12b: `--kv-cache bf16|int8` (default runtime::default_kv_cache(): B70_KV_CACHE, unset
 // = bf16). int8 decodes through attention v2's kv8 twin and prefills through the flash
 // attention.

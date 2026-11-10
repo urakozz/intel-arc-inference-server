@@ -1331,6 +1331,7 @@ int run(int argc, char** argv) {
 
   runtime::PrefillPath pp_path = cli::prefill_path(
       true, have_pp_backend ? pp_backend : runtime::prefill::default_prefill_backend());
+  cli::warn_int8_prefill_kv8(pp_path.backend, kv_cache);
 
   // Spec 16d: the pipeline's refusals that need no checkpoint (cli/pipeline_serve.h) - the override flags on
   // one card and prefill profiling - before the snapshot is even resolved; the model's own follow below.
