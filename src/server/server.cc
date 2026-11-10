@@ -574,6 +574,8 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
       {"response_text", outcome.raw_text},
   };
   if (outcome.slot >= 0) record["slot"] = outcome.slot;   // plan 13b: which card (the serial record is unchanged)
+  if (outcome.slot >= 0 && impl_->batch != nullptr && impl_->batch->overlaps_prefill())   // replica x slots: the card
+    record["card"] = impl_->batch->card_of(static_cast<uint32_t>(outcome.slot));
   char name[32];
   std::snprintf(name, sizeof(name), "/%06llu.json",
                 static_cast<unsigned long long>(++impl_->next_log));
