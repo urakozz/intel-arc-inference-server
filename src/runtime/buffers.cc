@@ -167,6 +167,10 @@ MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDes
     : MtpBuffers(ctx, max_len, sizes(max_len, desc, draft_vocab_size, kv, n_slots, n_seqs),
                  draft_vocab_size, kv_layout(max_len, desc, 1, kv), n_slots, n_seqs) {}
 
+MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const model::ModelDesc& card,
+                       const model::ModelDesc& head, KvCache kv)
+    : MtpBuffers(ctx, max_len, tp_sizes(max_len, card, head, kv), 0, kv_layout(max_len, head, 1, kv), kSlots, 1) {}
+
 MtpBuffers::MtpBuffers(l0::Context& ctx, uint32_t max_len, const MtpSizes& s,
                        uint32_t draft_vocab_size, const KvLayout& kv, uint32_t n_slots, uint32_t n_seqs)
     : hctl(ctx, l0::MemKind::Shared, s.hctl),

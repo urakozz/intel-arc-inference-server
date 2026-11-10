@@ -21,6 +21,19 @@ MtpCost MtpCost::int8_head() {
   return c;
 }
 
+// Spec 17d: tensor parallel (`--parallel tp`), in units of the K = 0 iteration (verify(0) + commit: 18.93 ms at depth
+// 4096). Measured 2026-11-10 by tp_mtp_test `cost` (medians of 5 interleaved rounds of 16, box shared with a CPU
+// job): verify M = 1..4 18.93 / 20.60 / 21.43 / 22.66 ms, drafts k = 1..3 3.01 / 6.02 / 9.00 ms at 4096 (at 32768:
+// 1.010 / 1.070 / 1.128 and 0.151 a draft). The M-row crossings make TP's verify rows dearer than one card's
+// (1.04 / 1.09 / 1.13); the draft (the whole head's layer plus the card's half of the int8 head) is 0.16 of a TP step
+// against one card's 0.13.
+MtpCost MtpCost::tp_int8_head() {
+  MtpCost c;
+  c.verify = {1.00, 1.09, 1.13, 1.20};
+  c.draft = {0.16, 0.32, 0.48};
+  return c;
+}
+
 MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
   MtpCost c = i8_head ? int8_head() : bf16_head();
   // Spec 28b: M = 5..8 measured (int8 head; the bf16 head's taken equal - adaptive_k.h)

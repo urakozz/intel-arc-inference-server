@@ -390,7 +390,7 @@ add_test(NAME attn_verify_ref_test COMMAND attn_verify_ref_test)
 # attn_verify_dpas names are its arguments (every (M, KV form) the rule can bind must be on a CMake line).
 set(_vattn_built)
 foreach(MM 2 3 4 5 6 7 8)
-  foreach(SFX "" _KV8)
+  foreach(SFX "" _KV8 _Q12KV2 _Q12KV2_KV8)   # spec 17d: the per-card 12 / 2 builds
     if(TARGET kernel_attn_verify_dpas_M${MM}_T32${SFX})
       list(APPEND _vattn_built attn_verify_dpas_M${MM}_T32${SFX})
     endif()
@@ -2651,11 +2651,32 @@ if(B70_KV8)
     ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge}")
 endif()
 
+# Spec 17d: MTP, the snapshots' restore and the server's calls under tensor parallel (gpu_lock.sh box) - tp_mtp_test:
+# speculative greedy ids at K = 1..3 against plain TP decode (the golden tie rule, then the f32 judge of a non-tie's
+# context: tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_mtp_'), T1 of the head between the cards,
+# the logits gathers (D9), the block hook and a restore bitwise the cold run, one card's snapshot into TP and back
+# (judged), a dropped verify step bounded; bf16 and (the _kv8 twin) int8 KV. `cost <depth>` measures the TP cost table.
+add_executable(tp_mtp_test runtime/tp_mtp_test.cc)
+target_include_directories(tp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
+target_link_libraries(tp_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_mtp_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS} ${B70_TP_VERIFY_KERNELS})
+add_test(NAME tp_mtp_test COMMAND tp_mtp_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(tp_mtp_test PROPERTIES
+  LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
+  ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
+if(B70_KV8)
+  add_test(NAME tp_mtp_kv8_test COMMAND tp_mtp_test ${B70_TEST_SNAPSHOT})
+  set_tests_properties(tp_mtp_kv8_test PROPERTIES
+    LABELS "checkpoint;tp;kv8" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
+    ENVIRONMENT "B70_KV_CACHE=int8;B70_FORCED_JUDGE=${_tp_pf_judge}")
+endif()
+
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
 b70_cli_reject(cli_reject_tp_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --prefill
   --prefill-backend l0-int8 EXPECT "--parallel tp prefills on the l0 backend only")
-b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec mtp
-  EXPECT "--spec mtp / dflash under tensor parallel")
+b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec dflash
+  --draft-model ${B70_NO_MODEL} EXPECT "--spec dflash / dflash-lookup under tensor parallel are not built")
 b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32
   EXPECT "--pipeline-split belongs to --parallel pp")
 b70_cli_reject(cli_reject_tp_profile ${B70_NO_MODEL} --profile --parallel tp

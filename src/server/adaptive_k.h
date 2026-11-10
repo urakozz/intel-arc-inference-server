@@ -19,6 +19,9 @@ struct MtpCost {
 
   static MtpCost bf16_head();   // measured (verify: spec 28b; drafts: spec 8 P0 / §8)
   static MtpCost int8_head();   // verify measured (spec 28b, interleaved pairs); drafts derived from spec 9 H2
+  // Spec 17d: `--parallel tp`'s table (the int8 head's halves, the head's layer whole on each card), in units of the
+  // TP plain step - its verify rows cross at M rows and its drafts read half the head, so the ratios move.
+  static MtpCost tp_int8_head();
 
   // Spec 8 §11: the share of ONE draft's cost that is its lm_head read, per head form -
   // what a reduced draft vocabulary scales. **Derived, not measured:** the head's bytes at

@@ -163,6 +163,16 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {2560, 13312, 2, 0, false, true, false, false, kSmVerify4},      // QSA q||gate||k||v
     {6144, 2560, 4, 0, false, true, false, false, kSmVerify4},       // GDN out_proj, QSA o_proj
     {2560, 248320, 1, 2, true, false, false, false, kSmVerify4},     // the int8 lm_head
+    // Spec 17d: a tensor-parallel card's shapes (model::tp_card_desc, the folded crossing) at its verify lists'
+    // M = 2..4 - each the one-card row's knobs for the per-card cell (gemv's S / layout, magic dequant, the 2D read
+    // where the one-card cell has it); gate||up at gemv's grid S 8 (its SiLU the S 8 build), the int8 head's
+    // vocabulary half in the in-work-group form, as the one-card head's.
+    {5120, 8192, 1, 1, false, true, false, false, kSmVerify4},       // qkv||z, a card's heads
+    {5120, 7168, 2, 0, false, true, false, true, kSmVerify4},        // q||k||v
+    {5120, 17408, 8, 0, false, true, false, false, kSmVerify4},      // gate||up, the card's half
+    {3072, 5120, 4, 0, false, true, false, true, kSmVerify4},        // out_proj, o_proj: the card's K rows
+    {8704, 5120, 4, 0, false, true, false, true, kSmVerify4},        // down
+    {5120, 124160, 1, 2, true, false, false, false, kSmVerify4},     // the int8 head's vocabulary half
 };
 // The row of a shape, or null (that shape keeps gemv / gemv_i8w at every M). int8: layout 2, S 1.
 inline constexpr const SmallMTuning* small_m_tuning(unsigned K, unsigned N, unsigned S, unsigned layout) {

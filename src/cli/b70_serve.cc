@@ -2,7 +2,8 @@
 // Ornith), runtime::k2::K2Engine (K2-Horizon, spec 18d) or runtime::kolibri::KolibriEngine
 // (Kolibri-1, spec 20e: two cards by default), picked by config.json's model_type; with --parallel pp
 // (spec 16d) over runtime::PipelineEngine, the Qwen-family model split over two B70s
-// (cli/pipeline_serve.h has what it serves and refuses).
+// (cli/pipeline_serve.h has what it serves and refuses); with --parallel tp (spec 17d) over runtime::TpEngine, Qwen3.8
+// with every layer split over two B70s.
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -56,6 +57,8 @@
 #include "runtime/pipeline_plan.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/backend.h"
+#include "runtime/tp_engine.h"   // spec 17d: --parallel tp
+#include "runtime/tp_plan.h"
 #include "server/lookup_in_dflash.h"   // spec 19f: --spec dflash-lookup's constants (the startup line)
 #include "server/server.h"
 
@@ -94,7 +97,7 @@ void stop_server(int) {
 void usage() {
   std::fprintf(stderr,
                "usage: b70-serve <snapshot-or-repo> [--spec auto|off|mtp|lookup|dflash] [--max-len auto|N]\n"
-               "                 [--parallel auto|1|pp|replica] [--host 0.0.0.0] [--port 8000]\n"
+               "                 [--parallel auto|1|pp|replica|tp] [--host 0.0.0.0] [--port 8000]\n"
                "\n"
                "  The model is chosen from the checkpoint's config.json (Qwen3.8, Ornith 1.5,\n"
                "  K2-Horizon, Kolibri-1, Qwen3.8-Flash-Next, Nemotron 3.5 Bolt) and served under its name\n"
@@ -122,6 +125,8 @@ void usage() {
                "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
                "                  replica (Qwen3.8): the model on both cards, one engine each - two\n"
                "                  requests at once, each exactly what it is alone on its card.\n"
+               "                  tp (Qwen3.8, spec 17): every layer split over both cards (needs peer\n"
+               "                  access) - one request at a time, faster; --spec auto / mtp / lookup.\n"
                "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
                "                  holds the fewest bytes). An override, for experiments; it implies pp.\n"
                "  --host H, --port P   where to listen (0.0.0.0:8000).\n"
@@ -770,6 +775,111 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   return listen_until_stopped(server, options);
 }
 
+// Spec 17d: b70-serve --parallel tp - Qwen3.8 with every layer split over two B70s (runtime::TpEngine) behind spec 16d's
+// cli::pp::PipelineEngineAdapterT, whose engine interface TpEngine has (MTP, prompt lookup, the host sampler over the
+// gathered logits rows - operator decision D9 - and the snapshots). b70-decode --parallel tp's flow (cli/tp_decode.h):
+// both cards in one Level Zero context with peer access both ways, each card's slice loaded straight onto it (with the
+// MTP head whole on each card when a proposer needs it), max_len planned on both cards with the prefill scratch and
+// the head, the two-card prefill prepared before the first request. The prefix cache's entries are the one-card host
+// layouts (runtime/tp_gather.h), keyed like one card's, and its hook fires at the TP pair stride (tp_hook_stride).
+// --parallel's refusals ran in run(), before the device.
+struct TpServe {
+  std::string snapshot_dir;
+  cli::MaxLenArg max_len_arg;
+  size_t mem_reserve = 0;
+  runtime::KvCache kv_cache = runtime::KvCache::Bf16;
+  loader::LmHeadForm lm_head = loader::LmHeadForm::Int8;
+  uint32_t mtp_k = 0;
+  bool mtp_auto = false, spec_lookup = false;
+  uint32_t spec_max = 0;
+  bool prefix_auto = true;
+  uint32_t prefix_cache_gb = 0;
+  uint32_t trained = 0;
+  std::vector<uint32_t> eos;
+  std::string auto_why;   // set when --parallel auto chose tp (D3): the reason, printed
+};
+
+int serve_tp(const TpServe& a, server::Options options) {
+  cli::require_two_devices_for_tp(l0::Context::gpu_count());
+  l0::Context d0(0u);
+  l0::Context d1(d0, 1u);
+  std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel tp: one context]\n", d0.name().c_str(),
+               d0.eu_count(), d1.name().c_str(), d1.eu_count());
+  if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0))
+    throw std::runtime_error(
+        "--parallel tp: the cards cannot access each other's memory (zeDeviceCanAccessPeer 0 -> 1 and 1 -> 0), and "
+        "every crossing writes the other card's VRAM. Peer access needs the P2P-capable kernel and both cards under "
+        "one root complex (docs/10-the-box.md)");
+  const bool head = a.mtp_k > 0 || a.spec_lookup;
+  const model::TpCrossing crossing = runtime::kTpDefaultCrossing;
+  runtime::PrefillPath path;
+  path.prefill = true;   // every request prefills (TP's prefill: the l0 backend, flash attention)
+  path.chunk_cap = runtime::PrefillScratchDims::kCDefault;
+  std::array<loader::LoadedModel, 2> cards = [&] {
+    StdoutToStderr redirect;
+    const uint32_t len = cli::load_len(a.max_len_arg, a.trained);
+    return std::array<loader::LoadedModel, 2>{
+        loader::load_tp(d0, a.snapshot_dir, loader::TpSlice{0, crossing}, len, a.lm_head, head),
+        loader::load_tp(d1, a.snapshot_dir, loader::TpSlice{1, crossing}, len, a.lm_head, head)};
+  }();
+  const model::ModelDesc& card = *cards[0].desc;
+  const std::array<size_t, 2> weights{cards[0].report.total() - cards[0].report.rope_bytes,
+                                      cards[1].report.total() - cards[1].report.rope_bytes};
+  const std::array<size_t, 2> dev{d0.memory_bytes(), d1.memory_bytes()};
+  uint32_t len = a.max_len_arg.value;
+  if (a.max_len_arg.is_auto) {
+    len = runtime::tp_max_len_that_fits(card, crossing, weights, dev, a.mem_reserve, cards[0].trained_max_len,
+                                        a.kv_cache, path, head);
+    if (len == 0)
+      throw std::runtime_error("--parallel tp --max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
+                               " positions fit both cards beside the weights");
+    std::fprintf(stderr,
+                 "max_len: auto -> %u (the largest multiple of %u that fits BOTH cards, %.3f and %.3f GB, with a "
+                 "%.3f GB reserve each; trained context %u)\n",
+                 len, runtime::kMaxLenQuantum, dev[0] / 1e9, dev[1] / 1e9, a.mem_reserve / 1e9,
+                 cards[0].trained_max_len);
+    for (uint32_t r = 0; r < 2; ++r) loader::set_max_len(r == 0 ? d0 : d1, cards[r], len);
+  } else {
+    for (uint32_t r = 0; r < 2; ++r) {
+      const runtime::MemoryPlan p = runtime::tp_card_plan(card, crossing, len, weights[r], a.kv_cache, path, head);
+      if (p.total() + a.mem_reserve > dev[r])
+        throw std::runtime_error("--parallel tp --max-len " + std::to_string(len) + " does not fit card " +
+                                 std::to_string(r) + ": " + runtime::describe(p, dev[r], a.mem_reserve) +
+                                 " - --max-len auto gives the largest that fits");
+    }
+  }
+  runtime::TpEngine engine(d0, d1, std::move(cards), len, {}, a.kv_cache);
+  engine.set_prefill_chunk_cap(path.chunk_cap);
+  engine.prepare_prefill();   // the two cards' prefill scratch, crossings and head rows at load, not in a request
+  for (uint32_t r = 0; r < 2; ++r) std::fprintf(stderr, "%s\n", engine.memory_line(r).c_str());
+  TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
+  if (tokenizer.vocab_used() != card.vocab_used)
+    std::fprintf(stderr, "note: tokenizer.json defines %u ids, Qwen3.8's greedy argmax masks from %u; sampling masks "
+                         "from %u\n",
+                 tokenizer.vocab_used(), card.vocab_used, tokenizer.vocab_used());
+  TemplateAdapter chat_template(a.snapshot_dir);
+  cli::pp::PipelineEngineAdapterT<runtime::TpEngine> engine_adapter(engine, tokenizer.vocab_used(),
+                                                                    model::Qwen35::kVocab, a.mtp_k, a.spec_lookup);
+  options.eos_ids = a.eos;
+  // Pinned host memory of the one context both cards share: either card's copies reach it.
+  const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(d0, a.prefix_auto, a.prefix_cache_gb, options);
+  options.parallel_desc = "tp - every layer split over 2 cards";
+  server::Server server({tokenizer, chat_template, engine_adapter}, options);
+  std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
+               options.host.c_str(), options.port, len);
+  print_eos(a.eos);
+  std::fprintf(stderr,
+               ", --parallel tp%s (crossing %s, prefill backend l0, chunk cap %u, crossings %s), mtp %s%u%s, lm_head "
+               "%s, kv cache %s\n",
+               a.auto_why.c_str(), model::tp_crossing_name(engine.crossing()), engine.prefill_chunk_cap(),
+               engine.prefill_overlaps() ? "on the copy engines" : "on the compute lists",
+               a.mtp_auto ? "auto, max " : "", a.mtp_k, engine.mtp() ? " (the head whole on each card)" : "",
+               loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
+  print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
+                 false, card.name);
+  return listen_until_stopped(server, options);
+}
+
 // Plan 13b (spec 13 §10 / §11): b70-serve --parallel replica - Qwen3.8 on both cards, one runtime::Engine each (each
 // card's own plan: its --max-len auto, its prefill chunk cap, MTP / lookup per --spec), behind cli::ReplicaEngine and
 // server::Scheduler: two requests at once, each bitwise what it is alone on its card. Both cards are views of ONE
@@ -959,13 +1069,12 @@ int run(int argc, char** argv) {
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
   cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
-  cli::refuse_tp_in_serve(pipe);  // spec 17b: tensor parallel is b70-decode's until 17d
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (pipe.mode == cli::Parallel::One && pipe.have_handoff)
     throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses)");
-  if (pipe.replica()) {   // plan 13b: Qwen3.8 only, by name, before any device or weight file
-    cli::check_replica_flags(pipe, /*dflash=*/false);
+  if (pipe.replica() || pipe.tp()) {   // plan 13b / spec 17d: Qwen3.8 only, by name, before any device or weight file
+    if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash=*/false);
     std::string architecture, name;
     try {
       const std::string snap = loader::resolve_snapshot(path);
@@ -987,7 +1096,10 @@ int run(int argc, char** argv) {
         name = (name.empty() ? std::string("this model") : name) + " (" + architecture + ")";
       }
     }
-    cli::check_replica_model(architecture, name);
+    if (pipe.replica())
+      cli::check_replica_model(architecture, name);
+    else
+      cli::check_tp_model(architecture, name);
   }
   const bool pp_given = pipe.given();
   if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
@@ -1009,6 +1121,7 @@ int run(int argc, char** argv) {
   // cli::bolt::check_args and check_serve_flags replace them), as b70-decode dispatches it. A path that does not resolve is not
   // Bolt: the flow below reports it.
   if (cli::bolt::is_bolt(path)) {
+    cli::check_tp(pipe, {false, false, false, /*other_family=*/true});   // spec 17d: --parallel tp is Qwen3.8's
     cli::bolt::ServeFlags flags;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     // Spec 26c: --spec / --spec-max / --draft-model through cli::resolve_spec (SpecFamily::Bolt), refused by name before the
@@ -1070,6 +1183,10 @@ int run(int argc, char** argv) {
   dflash.max_k = dflash.on ? spec.max_k : dflash.max_k;
   options.spec_dflash_lookup = dflash_lookup;
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
+  // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
+  // dispatch, so another model under --parallel tp is refused by name.
+  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8", dflash.on, false, is_q4 || is_kol || is_k2,
+                       draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
@@ -1090,6 +1207,8 @@ int run(int argc, char** argv) {
     options.mtp_auto = true;
     options.mtp_adaptive.max_k = spec.max_k;
     options.mtp_adaptive.cost = server::MtpCost::int8_head();
+    // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its drafts read half the head).
+    if (pipe.tp()) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
     // Spec 8 §11: a draft over V' reads |V'| / 248320 of the head, so the drafts' head share scales with it
     // (derived; MtpCost::kInt8DraftHeadShare).
     if (draft_vocab != 0)
@@ -1212,6 +1331,37 @@ int run(int argc, char** argv) {
     dv_spec.added = loader::added_token_ids_file(snapshot_dir + "tokenizer.json");
     dv_spec.eos = eos;
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
+  }
+  // Spec 17d (operator decision D3): --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto,
+  // gated by cli::kTpAuto until the operator rules on D18) - one request at a time, faster; --parallel replica (two at
+  // once) and one card's slots stay opt-in.
+  std::string tp_why;
+  if (pipe.mode == cli::Parallel::Auto &&
+      cli::tp_auto(snapshot_dir, max_len_arg, hw.cards,
+                   dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty() ||
+                       (have_pp_backend && pp_backend != runtime::PrefillBackend::L0))) {
+    pipe.mode = cli::Parallel::Tp;
+    tp_why = " (auto: two B70s with peer access, Qwen3.8)";
+    std::fprintf(stderr, "parallel: auto -> tp (two B70s with peer access, Qwen3.8: every layer split over both)\n");
+    if (mtp_on && spec.adaptive) options.mtp_adaptive.cost = server::MtpCost::tp_int8_head();
+  }
+  if (pipe.tp()) {   // spec 17d: tensor parallel, serve_tp's own flow
+    TpServe ts;
+    ts.auto_why = tp_why;
+    ts.snapshot_dir = snapshot_dir;
+    ts.max_len_arg = max_len_arg;
+    ts.trained = trained;
+    ts.mem_reserve = mem_reserve;
+    ts.kv_cache = kv_cache;
+    ts.lm_head = lm_head;
+    ts.mtp_k = mtp_k;
+    ts.mtp_auto = mtp_on && spec.adaptive;
+    ts.spec_lookup = spec_lookup;
+    ts.spec_max = spec.max_k;
+    ts.prefix_auto = prefix_auto;
+    ts.prefix_cache_gb = prefix_cache_gb;
+    ts.eos = eos;
+    return serve_tp(ts, options);
   }
   if (pipe.replica()) {   // plan 13b: one engine per card behind the scheduler
     ReplicaServe rs;

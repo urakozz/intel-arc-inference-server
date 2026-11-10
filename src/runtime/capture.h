@@ -356,10 +356,36 @@ struct TpLink {
   void* state = nullptr;            // shared, tp::kStateWords: the first failure
   uint32_t spin_limit = 0;
   uint32_t vocab_used = 0;          // the real rows of this card's head half (its first id: rank x rows)
+  const model::ModelDesc* head = nullptr;   // spec 17d: the MTP head's descriptor (the one-card one), or null
 };
 CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
                       l0::Mem* debug_resid = nullptr);
 // decode_launches(d) + one tp_send per row-parallel linear (2 a layer): Qwen3.8's card 774 + 128 = 902.
 size_t tp_launches(const model::ModelDesc& d);
+
+// --- spec 17d: MTP under tensor parallel ---------------------------------------------------------------------------
+//
+// The MTP head is WHOLE on each card (loader::load_tp's `mtp`: one card's shapes, `link.head` its descriptor), runs
+// in the card's decode scratch (which holds its rows at M <= 4 - checked at capture) and keeps its own KV layer on
+// each card (MtpBuffers' TP form: the GDN slots at the card's shapes, the head's layer at its own). Both cards hold
+// the same residual, so both run the same head on the same input and write the same head KV.
+//
+// build_tp_verify: build_verify's contract on one TP card - build_tp's walk at M rows (positions pos .. pos + M - 1,
+// ids cur_token[0..M) of the card's Control; the crossings at M rows, whose counters keep every row's count level),
+// gdn_step's SPEC_SLOTS build at the card's heads over mtp.gdn_spec, then tp.cl's argmax at M rows (each row's winner
+// of the card's half and its value: the host merges, TpEngine), the rows' post-final-norm hidden into hh rows 1..M
+// and the head's KV fill of M rows at hctl.pos - spec 8's tail at the head's shapes. tp_verify_launches(d) launches.
+// `opt` as build_verify's (spec 28c's deep list: CaptureOptions::force_attn).
+//
+// build_tp_draft: build_draft on one TP card - the head at M = 1 on (hctl.cur_token[0], dh) at hctl.pos at its own
+// shapes; its lm_head is the card's int8 vocabulary half into MtpBuffers::logits row `i` (the card's rows only) and
+// tp.cl's argmax into hctl (out_token, out_value, cur_token, pos + 1). The host merges the two cards' winners into
+// both hctl.cur_token[0] before the next draft list (TpEngine::draft). draft_launches(head) launches.
+CapturedStep build_tp_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                             const TpLink& link, uint32_t M, const CaptureOptions& opt = {});
+CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                            const TpLink& link, uint32_t i);
+// tp_launches(d) + the head's 10-launch KV fill: Qwen3.8's card 912 at every M.
+size_t tp_verify_launches(const model::ModelDesc& d);
 
 }  // namespace runtime
