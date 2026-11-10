@@ -109,6 +109,20 @@ inline std::string pf_flash_attn_kv8_raw_variant(unsigned q = kRefFaQHeads,
                                                  unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_kv8_raw" + fa_suffix(q, kv);
 }
+// 3l (2): the split-K forms for short chunks deep in the cache (pf_flash_attn.cl SPLIT,
+// kv8.cl KV8_SPLIT) and the merge that folds their spans into pf_o (FLASH_MERGE).
+inline std::string pf_flash_attn_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_split" + fa_suffix(q, kv);
+}
+inline std::string pf_flash_attn_kv8_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8_split" + fa_suffix(q, kv);
+}
+inline std::string pf_flash_attn_kv8_raw_split_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_kv8_raw_split" + fa_suffix(q, kv);
+}
+inline std::string pf_flash_merge_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_merge" + fa_suffix(q, kv);
+}
 // The a||b projection, mirroring gemv_bf16's {COLS_PER_WG 16, KSPLIT 16}
 // tiling so that at M = 1 it is BIT-IDENTICAL to the binary capture.cc binds.
 inline std::string pf_ab_proj_variant(unsigned hidden = kRefHidden) {

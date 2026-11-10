@@ -1677,6 +1677,16 @@ if(B70_KV8)
   b70_target_kernel_dir(kv8_flash_bitwise_test)
   add_dependencies(kv8_flash_bitwise_test kernel_kv8_flash_control
     kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8)
+  # 3l (2): the split-K short-chunk attention (both KV forms) against today's kernels and fp64.
+  add_executable(flash_split_test prefill/flash_split_test.cc)
+  target_include_directories(flash_split_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/prefill)
+  target_link_libraries(flash_split_test PRIVATE b70_l0)
+  b70_target_kernel_dir(flash_split_test)
+  add_dependencies(flash_split_test kernel_pf_flash_attn kernel_pf_flash_attn_split kernel_pf_flash_merge
+    kernel_pf_flash_attn_kv8_raw kernel_pf_flash_attn_kv8_raw_split kernel_pf_flash_attn_kv8_split)
+  add_test(NAME flash_split_test COMMAND flash_split_test)
+  set_tests_properties(flash_split_test PROPERTIES LABELS kv8 TIMEOUT 1800)
   add_test(NAME kv8_flash_bitwise_test COMMAND kv8_flash_bitwise_test)
   set_tests_properties(kv8_flash_bitwise_test PROPERTIES LABELS kv8 TIMEOUT 1800)
   add_test(NAME kv8_flash_raw_bitwise_test COMMAND kv8_flash_bitwise_test

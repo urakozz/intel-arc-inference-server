@@ -30,6 +30,15 @@
 // it anyway (default EXP2=1, K3a tol 1e-5 on l0). RPW 8 alone is bitwise neutral (K3a numbers identical to RPW 16).
 // Rows past C in the last 8-row block are computed (finite); rows of blocks wholly past
 // C are not written.
+//
+// 3l (2): SPLIT=1 builds the split-K form for short chunks deep in the cache (the same
+// tile loop; SPLIT unset is the token stream above, unchanged). Grid (ceil(C / 8), kv,
+// (GQA / HPW) x n): work-group span sp walks keys [sp * span, sp * span + span) only - the
+// last span to `last`, its rows' causal end - so every span starts at a key below pos,
+// which every row sees. O is the partials area [n][24][c8][256] (c8 = C rounded up to 8),
+// unnormalised; ML holds each row's running max m [n][24][c8], then its sum l, the same.
+// pf_flash_merge (FLASH_MERGE=1) folds the spans into pf_o: M = max m_s, w_s = EXPF(m_s - M),
+// O = (sum w_s O_s) * (1 / sum w_s l_s), spans ascending.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
@@ -82,14 +91,32 @@ inline ushort rne_bf16(float f) {
   return (ushort)((u + (((u >> 16) & 1u) + 0x7FFFu)) >> 16);
 }
 
+#ifndef SPLIT
+#define SPLIT 0
+#endif
+#ifndef FLASH_MERGE
+#define FLASH_MERGE 0
+#endif
+#if !FLASH_MERGE
 __attribute__((reqd_work_group_size(SG * SGS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
+#if SPLIT
+__kernel void pf_flash_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
+                  __global const ushort* restrict Vc, __global float* restrict O,
+                  uint pos, uint C, uint rows, __global float* restrict ML, uint span) {
+  const uint s = get_sub_group_id(), l = get_sub_group_local_id();
+  const uint j = get_group_id(1);                                  // kv head
+  const uint hgs = FA_GQA / HPW;                                   // head groups per kv head
+  const uint sp = get_group_id(2) / hgs, nsp = get_num_groups(2) / hgs;   // this span, the spans
+  const uint h = j * FA_GQA + (get_group_id(2) % hgs) * HPW + s / (RPW / 8u);  // q head
+#else
 __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
                   __global const ushort* restrict Vc, __global float* restrict O,
                   uint pos, uint C, uint rows) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);                                  // kv head
   const uint h = j * FA_GQA + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
+#endif
   const uint r0 = get_group_id(0) * RPW + 8u * (s % (RPW / 8u));   // first of 8 rows
   if (r0 >= C) return;                                             // no barriers below
   const uint depth = pos + C;
@@ -115,7 +142,12 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
   for (uint dd = 0; dd < NDA; ++dd) o[dd] = (float8)(0.0f);
   float8 m = (float8)(-INFINITY), lsum = (float8)(0.0f);
   const uint last = min(depth, pos + r0 + 8u);          // keys this SG's rows can see
+#if SPLIT
+  const uint kend = sp + 1u == nsp ? last : sp * span + span;   // span starts are < pos
+  for (uint t0 = sp * span; t0 < kend; t0 += KT) {
+#else
   for (uint t0 = 0; t0 < last; t0 += KT) {
+#endif
 #if !QREG
     LOAD_Q();
 #endif
@@ -181,6 +213,21 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
                 pa[b + ks], as_int8(vload8(0, vb + c * 16u + 8u * ks)), o[dd + c]);
       }
   }
+#if SPLIT
+  // the span's unnormalised O and its m, l (row r0 + r in component r, every lane alike)
+  const uint c8 = (C + 7u) & ~7u;
+  const size_t slot = (size_t)(sp * FA_QH + h) * c8;
+  __global float* Op = O + slot * HD;
+#pragma unroll
+  for (uint dd = 0; dd < NDA; ++dd)
+    intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Op, HD * 4, (int)c8, HD * 4,
+                                               (int2)((int)(16u * dd), (int)r0), (__private uint*)&o[dd]);
+  if (l == 0) {
+    vstore8(m, 0, ML + slot + r0);
+    vstore8(lsum, 0, ML + (size_t)nsp * FA_QH * c8 + slot + r0);
+  }
+}
+#else
   // O / l, into pf_o's layout [24][rows][256] fp32
   const float8 inv = 1.0f / lsum;
   __global float* Oh = O + (size_t)h * rows * HD;
@@ -191,3 +238,25 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
                                                (int2)((int)(16u * dd), (int)r0), (__private uint*)&w);
   }
 }
+#endif  // SPLIT
+#endif  // !FLASH_MERGE
+
+#if FLASH_MERGE
+// pf_flash_merge(Op, ML, O, C, rows, n): grid (C, q-heads), one work-item a dim.
+__attribute__((reqd_work_group_size(HD, 1, 1)))
+__kernel void pf_flash_merge(__global const float* restrict Op, __global const float* restrict ML,
+                             __global float* restrict O, uint C, uint rows, uint nsp) {
+  const uint r = get_group_id(0), h = get_group_id(1), d = get_local_id(0);
+  const uint c8 = (C + 7u) & ~7u;
+  const size_t stride = (size_t)FA_QH * c8, at = (size_t)h * c8 + r;
+  float mx = -INFINITY;
+  for (uint sp = 0; sp < nsp; ++sp) mx = fmax(mx, ML[sp * stride + at]);
+  float acc = 0.0f, lsum = 0.0f;
+  for (uint sp = 0; sp < nsp; ++sp) {
+    const float w = EXPF(ML[sp * stride + at] - mx);
+    lsum += w * ML[(nsp + sp) * stride + at];
+    acc += w * Op[(sp * stride + at) * HD + d];
+  }
+  O[((size_t)h * rows + r) * HD + d] = acc * (1.0f / lsum);
+}
+#endif  // FLASH_MERGE

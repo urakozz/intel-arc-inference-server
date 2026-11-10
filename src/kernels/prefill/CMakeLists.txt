@@ -272,6 +272,13 @@ add_ocloc_kernel(pf_gemm_i8_SILU SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1 SILU_
 # the operator enabled exp2 on 2026-09-27 accepting its 7.6e-6 K3a miss on l0 (spec 6 §9).
 add_ocloc_kernel(pf_flash_attn SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                  DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 OPTIONS -cl-intel-256-GRF-per-thread)
+# 3l (2): the split-K form for short chunks deep in the cache (SPLIT=1: spans of the key range into
+# pf_o's spare rows) and the merge that folds the spans into pf_o. Additive: pf_flash_attn's
+# command line and token stream are unchanged.
+add_ocloc_kernel(pf_flash_attn_split SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                 DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 SPLIT=1 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pf_flash_merge SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                 DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 FLASH_MERGE=1)
 
 # Spec 8 (plan 8b Task 3): the MTP head's KV fill during prefill. The two pre-fc norms
 # write the two halves of one [C][10240] row (X_STRIDE), fc's output starts the head's
@@ -302,6 +309,13 @@ if(B70_KV8)
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_flash_attn_kv8_raw SOURCE ${KV8_CL}
                    DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # 3l (2): the split forms over int8 (in place, and raw after kv8_widen); pf_flash_merge folds them.
+  add_ocloc_kernel(pf_flash_attn_kv8_split SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_flash_attn_kv8_raw_split SOURCE ${KV8_CL}
+                   DEFINES KV8_FLASH=1 KV8_RAW=1 KV8_SPLIT=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1
                    OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_attn_gate_kv8 SOURCE ${KV8_CL} DEFINES KV8_GATE=1)
 endif()
