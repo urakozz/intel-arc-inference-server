@@ -30,7 +30,7 @@ in bf16 like the engine, so it is not the truth either: on K2 the bf16 golden di
    layout (route.ids / sel / gap / w, ssm, conv, h taps, logits). The box CPU has no AVX-512 bf16, so f32 is the fast
    path (memory: cpu-bf16-slow). Mac test: `test_bolt_ref.py` on the tiny puzzle - fp32 vs bf16 runs agree to bf16
    rounding, the layout keys identical.
-2. **`bolt_oracle.sh golden-f32`** -> `$DATA/oracle-out-bolt-f32/<p>.golden.safetensors` for bolt_short, bolt_4k,
+2. [x] **`bolt_oracle.sh golden-f32`** -> `$DATA/oracle-out-bolt-f32/<p>.golden.safetensors` for bolt_short, bolt_4k,
    bolt_agentic (bolt_32k later, if its time allows), each `--force` on `oracle-out-bolt/<p>.cont*.ids`; resumable per
    prompt; under the 64 GB CPU cap (`run_in_container.sh`); a data key `oracle_bolt_f32` in `tools/box_validate/data.sh`.
    First measure bolt_short's time and peak RAM, then queue the rest as a CPU chain line (class A, peak <= 64).
