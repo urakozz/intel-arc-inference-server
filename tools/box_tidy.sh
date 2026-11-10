@@ -17,8 +17,13 @@ _box_env="$PWD/tools/box.env"
 : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
 dry=0
 [ "${1:-}" = --dry-run ] && dry=1
-# The local branches, as the box tree names tools/box_dir.sh gives them (a branch's slashes become dashes).
-branches=$(git for-each-ref --format='%(refname:short)' refs/heads | tr '/' '-' | paste -sd, -)   # one word: ssh joins its arguments
+# The local branches, as the box tree names tools/box_dir.sh gives them: spec<N>[.<M>][<letter>]... -> spec17c,
+# research-* -> research, else the branch with its slashes as dashes (it moved spec17c-tp's live tree as "spec17c").
+branches=$(git for-each-ref --format='%(refname:short)' refs/heads | while read -r b; do
+  if [[ "$b" =~ ^(spec[0-9]+(\.[0-9]+)?[a-z]?) ]]; then echo "${BASH_REMATCH[1]}"
+  elif [[ "$b" == research-* ]]; then echo research
+  else echo "${b//\//-}"; fi
+done | sort -u | paste -sd, -)   # one word: ssh joins its arguments
 ssh -o ConnectTimeout=20 "$BOX" bash -s -- "$dry" "${KEEP_G0:-2}" "$branches" <<'REMOTE' | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g'
 set -u
 dry=$1 keep=$2 branches=" $(echo "$3" | tr , ' ') "
