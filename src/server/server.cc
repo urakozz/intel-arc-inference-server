@@ -172,7 +172,8 @@ bool Server::listen() {
     if (impl_->batch) {
       for (uint32_t s = 0; s < impl_->batch->slots(); ++s)
         ctx += (s ? " / " : "") + std::to_string(impl_->batch->slot_max_len(s));
-      ctx += " ids (card 0 / card 1)";
+      // One slot per card (plan 13b) names the cards; several slots on a card (13c, replica x slots) per slot.
+      ctx += impl_->batch->overlaps_prefill() && impl_->batch->slots() == 2 ? " ids (card 0 / card 1)" : " ids per slot";
     } else {
       ctx = std::to_string(e.max_len()) + " ids";
     }

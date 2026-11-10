@@ -44,6 +44,12 @@
 //     every id it consumed, plus with lookup_history the slot's earlier requests' generated
 //     ids) - never another slot's (Review Focus 4); its K from its own AdaptiveK over
 //     lookup_adaptive, fed (drafts proposed, drafts kept) as server.cc's loop feeds it;
+//   - replica x slots (several slots per card, BatchEngineIface::card_of): at most one chunk in
+//     flight per card; while it runs that card's rows sit out the step and nothing else touches
+//     the card; a card with rows decoding starts its next chunk after the step (chunk, step,
+//     chunk, ...). A request goes to the slot holding its prefix (affinity), else to the card
+//     with the most free slots; each card's rows are dealt drafts against that card's own
+//     budget (card_row_budget);
 //   - per-slot failures: an engine that throws SlotsFailed fails only the rows it names; a
 //     callback (on_token / on_done) that throws ends its own request with Error and nothing
 //     else - the other rows of the step still get their ids, the engine stays usable.
@@ -238,7 +244,9 @@ class Scheduler {
   BatchEngineIface::Chunk next_chunk(const Job& job, bool cut);
   bool prefill_plan(PrefillCall& call);
   void prefill_done(PrefillCall& call, std::exception_ptr error);
-  bool overlapped_prefills();   // plan 13b: join the finished chunks, start the next ones
+  bool overlapped_prefills(bool after_step);   // plan 13b: join the finished chunks, start the next ones
+  bool card_busy(uint32_t card) const;         // replica x slots: a chunk still runs on the card
+  std::vector<bool> busy_cards() const;
   void lookup_begin(uint32_t slot, const std::vector<uint32_t>& prompt);   // plan 13b
   void lookup_end(uint32_t slot, const std::vector<uint32_t>& out);
   bool decode_round();

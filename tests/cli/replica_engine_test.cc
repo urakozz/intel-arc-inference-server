@@ -4,12 +4,17 @@
 // serial server's call sequence); each card's calls run on that card's own thread, the two cards' steps at once; a
 // failure on one card ends that card's request only; a snapshot saved on card 0 restores on card 1 (one shared host
 // store); the prompt cut where one runtime::Engine::prefill call cuts it; --prefix-split-last's replay; a lookup
-// row's proposer reaches its card; cards that differ are refused.
+// row's proposer reaches its card; cards that differ are refused. Replica x slots (2026-11-10): cards with several
+// slots (SlotsCard, a host stand-in for cli::SlotsEngine) - one call per card per step on its thread, ids as alone,
+// the routing (affinity, then the card with the most free slots), a card's chunk and its decoding rows alternating,
+// a card's failed row failing alone.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -421,6 +426,209 @@ void test_cards_must_agree() {
   std::printf("cards that differ in block are refused; per-card max_len reported\n");
 }
 
+// Replica x slots: a host stand-in for cli::SlotsEngine - one card's slots, each a CardMock, behind
+// server::BatchEngineIface. Records the thread of every call, the rows of every step call and the order of its prefill
+// and step calls ('p' / 's'); a failing slot fails its own row only (SlotsFailed), as SlotsEngine's rows are separate.
+struct SlotsCard : server::BatchEngineIface {
+  std::vector<std::unique_ptr<CardMock>> slot;
+  std::mutex mu;
+  std::set<std::thread::id> threads;
+  std::vector<size_t> step_rows;
+  std::string log;
+  uint32_t budget = 8;
+  explicit SlotsCard(uint32_t n) {
+    for (uint32_t i = 0; i < n; ++i) {
+      slot.push_back(std::make_unique<CardMock>());
+      setup(*slot.back());
+    }
+  }
+  void seen() {
+    std::lock_guard<std::mutex> lock(mu);
+    threads.insert(std::this_thread::get_id());
+  }
+  uint32_t slots() override { return static_cast<uint32_t>(slot.size()); }
+  uint32_t max_len() override { return slot[0]->maxlen; }
+  uint32_t slot_max_len(uint32_t s) override { return slot.at(s)->maxlen; }
+  uint32_t pos(uint32_t s) override {
+    seen();
+    return slot.at(s)->pos();
+  }
+  void reset(uint32_t s) override {
+    seen();
+    slot.at(s)->reset();
+  }
+  void prefill(const std::vector<Chunk>& chunks) override {
+    seen();
+    log += 'p';
+    for (const Chunk& c : chunks) {
+      std::vector<uint32_t> ids(c.ids, c.ids + c.n);
+      if (c.replay) slot.at(c.slot)->ingest(ids);
+      else slot.at(c.slot)->prefill(ids);
+    }
+  }
+  std::vector<uint32_t> step_batch(const std::vector<Row>& rows) override {
+    seen();
+    log += 's';
+    step_rows.push_back(rows.size());
+    std::vector<uint32_t> ids(rows.size(), 0);
+    std::vector<std::string> errors(rows.size());
+    std::vector<std::vector<uint32_t>> runs(rows.size());
+    bool failed = false;
+    for (size_t i = 0; i < rows.size(); ++i) {
+      try {
+        ids[i] = slot.at(rows[i].slot)->step(*rows[i].sampling);
+        runs[i] = {ids[i]};
+      } catch (const std::exception& e) {
+        errors[i] = e.what();
+        failed = true;
+      }
+    }
+    if (failed) throw server::SlotsFailed(std::move(errors), std::move(runs));
+    return ids;
+  }
+  uint32_t row_budget(uint32_t active) override { return active <= 1 ? 0 : budget; }
+  uint32_t block() override { return slot[0]->blk; }
+  size_t state_bytes() override { return slot[0]->state_bytes(); }
+  size_t kv_bytes(uint32_t n) override { return slot[0]->kv_bytes(n); }
+  void save_state(uint32_t s, void* h) override {
+    seen();
+    slot.at(s)->save_state(h);
+  }
+  void load_state(uint32_t s, const void* h, uint32_t at) override {
+    seen();
+    slot.at(s)->load_state(h, at);
+  }
+  void save_kv(uint32_t s, uint32_t b, uint32_t e, void* h) override { slot.at(s)->save_kv(b, e, h); }
+  void load_kv(uint32_t s, uint32_t b, uint32_t e, const void* h) override { slot.at(s)->load_kv(b, e, h); }
+};
+
+// Two cards of two slots: four requests at once, each as alone; one step call per card (its two rows), on that
+// card's thread; the slots are card 0's then card 1's; the grants spread over the cards (the most free slots first).
+void test_slots_per_card() {
+  SlotsCard c0(2), c1(2);
+  cli::ReplicaEngine eng({{nullptr, 8, &c0}, {nullptr, 8, &c1}}, /*hooked=*/false, /*wide_stride=*/true);
+  CHECK_EQ(eng.slots(), 4U);
+  CHECK_EQ(eng.card_of(0), 0U);
+  CHECK_EQ(eng.card_of(1), 0U);
+  CHECK_EQ(eng.card_of(2), 1U);
+  CHECK_EQ(eng.card_of(3), 1U);
+  CHECK_EQ(eng.card_row_budget(0, 2), 8U);
+  CHECK_EQ(eng.card_row_budget(1, 1), 0U);
+  Scheduler s(eng, SchedulerOptions{});
+  server::Sampling seeded;
+  seeded.greedy = false;
+  seeded.seed = 5;
+  seeded.has_seed = true;
+  Out a, b, c, d;
+  CHECK(s.submit(req(P(21, 17), 25, a)) != nullptr);
+  CHECK(s.submit(req(P(22, 9), 25, b, seeded)) != nullptr);
+  CHECK(s.submit(req(P(23, 12), 25, c)) != nullptr);
+  CHECK(s.submit(req(P(24, 20), 25, d)) != nullptr);
+  drain(s);
+  // a: card 0 (2 free each, the first); b: card 1 (2 free against 1); c: card 0; d: card 1.
+  CHECK_EQ(a.fin.slot, 0);
+  CHECK_EQ(b.fin.slot, 2);
+  CHECK_EQ(c.fin.slot, 1);
+  CHECK_EQ(d.fin.slot, 3);
+  CHECK(a.ids == alone(P(21, 17), 25));
+  CHECK(b.ids == alone(P(22, 9), 25, seeded));
+  CHECK(c.ids == alone(P(23, 12), 25));
+  CHECK(d.ids == alone(P(24, 20), 25));
+  CHECK_EQ(c0.threads.size(), size_t(1));
+  CHECK_EQ(c1.threads.size(), size_t(1));
+  CHECK(*c0.threads.begin() == eng.thread_of(0));
+  CHECK(*c1.threads.begin() == eng.thread_of(1));
+  CHECK(*std::max_element(c0.step_rows.begin(), c0.step_rows.end()) == 2);
+  CHECK(*std::max_element(c1.step_rows.begin(), c1.step_rows.end()) == 2);
+  std::printf("slots per card: 4 requests on 2 x 2 slots as alone; one step call per card on its thread; grants "
+              "0, 2, 1, 3\n");
+}
+
+// Routing: a continuation goes to the slot (card) holding its prefix even when the other card has more free slots;
+// cold requests go to the card with the most free slots.
+void test_slots_affinity() {
+  SlotsCard c0(2), c1(2);
+  cli::ReplicaEngine eng({{nullptr, 8, &c0}, {nullptr, 8, &c1}}, true, true);
+  MallocAlloc alloc;
+  server::PrefixSlots cache(eng, 1 << 20, alloc);
+  Scheduler s(eng, SchedulerOptions{}, &cache);
+  const std::vector<uint32_t> A = P(31, 14);
+  Out a;
+  CHECK(s.submit(req(A, 6, a)) != nullptr);
+  drain(s);
+  CHECK_EQ(a.fin.slot, 0);
+  Out x, y;
+  CHECK(s.submit(req(P(32, 9), 400, x)) != nullptr);   // cold: card 0 and 1 have 2 free - slot 1 holds nothing
+  s.tick();
+  CHECK(s.submit(req(P(33, 9), 400, y)) != nullptr);   // cold: card 1 has 2 free, card 0 one
+  s.tick();
+  std::vector<uint32_t> a2 = A;
+  a2.insert(a2.end(), a.ids.begin(), a.ids.end());
+  a2.push_back(9100);
+  Out b;
+  CHECK(s.submit(req(a2, 5, b)) != nullptr);           // its prefix on slot 0: card 0, though card 1 has more free
+  drain(s);
+  CHECK_EQ(x.fin.slot, 1);
+  CHECK_EQ(y.fin.slot, 2);
+  CHECK_EQ(b.fin.slot, 0);
+  CHECK_EQ(cache.last_kind(0), server::PrefixCache::Plan::Continue);
+  CHECK(b.ids == alone(a2, 5));
+  std::printf("slots affinity: cold requests to the card with the most free slots (1, 2), the continuation to its "
+              "slot 0\n");
+}
+
+// A card with slots beside a single-sequence card; a long prompt on a card whose other slot decodes: the card runs
+// chunk, step, chunk, step (its rows sit out the ticks its chunk runs), and the other card steps on.
+void test_slots_chunk_step_alternate() {
+  SlotsCard c0(2);
+  CardMock c1;
+  setup(c1);
+  cli::ReplicaEngine eng({{nullptr, 8, &c0}, {&c1, 8}}, false, true);
+  CHECK_EQ(eng.slots(), 3U);
+  CHECK_EQ(eng.card_of(2), 1U);
+  CHECK_EQ(eng.card_row_budget(1, 1), 0U);
+  Scheduler s(eng, SchedulerOptions{});
+  Out a, b;
+  CHECK(s.submit(req(P(41, 5), 300, a)) != nullptr);   // card 0 (2 free against 1): slot 0
+  for (int i = 0; i < 50 && a.ids.size() < 3; ++i) s.tick();
+  CHECK(a.ids.size() >= 3);
+  CHECK(s.submit(req(P(42, 40), 4, b)) != nullptr);    // 1 free each: the lower slot, card 0's slot 1 - 5 chunks of 8
+  drain(s);
+  CHECK_EQ(a.fin.slot, 0);
+  CHECK_EQ(b.fin.slot, 1);
+  CHECK(a.ids == alone(P(41, 5), 300));
+  CHECK(b.ids == alone(P(42, 40), 4));
+  const std::string& log = c0.log;
+  const size_t first = log.find('p', 1), last = log.rfind('p');
+  CHECK(first != std::string::npos && last > first);
+  CHECK_EQ(std::count(log.begin() + long(first), log.begin() + long(last) + 1, 'p'), long(5));
+  for (size_t i = first; i < last; ++i) CHECK(log[i] != log[i + 1]);   // p s p s ... p
+  std::printf("chunk / step alternate: card 0's calls %s...; a single-sequence card beside a slots card\n",
+              log.substr(0, std::min<size_t>(log.size(), 20)).c_str());
+}
+
+// A row failing on a card with slots ends that request only: the card's other row and the other card's go on.
+void test_slots_row_failure() {
+  SlotsCard c0(2), c1(2);
+  c0.slot[1]->fail_step = 4;
+  cli::ReplicaEngine eng({{nullptr, 8, &c0}, {nullptr, 8, &c1}}, false, true);
+  Scheduler s(eng, SchedulerOptions{});
+  Out a, b, c;
+  CHECK(s.submit(req(P(51, 9), 20, a)) != nullptr);   // slot 0
+  CHECK(s.submit(req(P(52, 9), 20, b)) != nullptr);   // slot 2
+  CHECK(s.submit(req(P(53, 9), 20, c)) != nullptr);   // slot 1: fails at its 4th step
+  drain(s);
+  CHECK_EQ(c.fin.slot, 1);
+  CHECK_EQ(c.fin.reason, Finish::Error);
+  CHECK(c.fin.error.find("device lost") != std::string::npos);
+  CHECK_EQ(c.ids.size(), size_t(3));
+  CHECK_EQ(a.fin.reason, Finish::Length);
+  CHECK_EQ(b.fin.reason, Finish::Length);
+  CHECK(a.ids == alone(P(51, 9), 20));
+  CHECK(b.ids == alone(P(52, 9), 20));
+  std::printf("slots row failure: card 0's slot 1 failed alone (after 3 ids); its slot 0 and card 1 ran on\n");
+}
+
 }  // namespace
 
 int main() {
@@ -431,6 +639,10 @@ int main() {
   test_split_last_and_lookup();
   test_cards_must_agree();
   test_cards_do_not_wait();
+  test_slots_per_card();
+  test_slots_affinity();
+  test_slots_chunk_step_alternate();
+  test_slots_row_failure();
   std::printf("replica_engine_test: all cases passed\n");
   return 0;
 }

@@ -127,6 +127,10 @@ struct Scheduler::Impl {
   std::vector<std::unique_ptr<PromptLookup>> matchers;            // plan 13b: one per slot
   std::vector<std::deque<std::vector<uint32_t>>> history;        // per slot (lookup_history)
   size_t inflight = 0;                        // plan 13b: chunks prefill_begin'd, not yet joined
+  // Replica x slots: overlaps_prefill(), each slot's card (BatchEngineIface::card_of) and the number of cards.
+  bool overlap = false;
+  std::vector<uint32_t> slot_card;
+  uint32_t n_cards = 0;
 };
 
 struct Scheduler::PrefillCall {
@@ -144,6 +148,11 @@ Scheduler::Scheduler(BatchEngineIface& engine, SchedulerOptions opts, SlotCacheI
     impl_->max_len = std::max(impl_->max_len, impl_->slot_len.back());
   }
   impl_->slots.resize(impl_->n_slots);
+  impl_->overlap = engine_.overlaps_prefill();
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    impl_->slot_card.push_back(impl_->overlap ? engine_.card_of(s) : 0);
+    impl_->n_cards = std::max(impl_->n_cards, impl_->slot_card.back() + 1);
+  }
   impl_->eos.insert(opts_.eos_ids.begin(), opts_.eos_ids.end());
   if (opts_.lookup) {   // plan 13b: server.cc's refusals for --spec lookup, per engine
     if (engine_.verify_k() == 0)
@@ -225,23 +234,46 @@ double Scheduler::hold_remaining() const {
   return std::max(0.0, opts_.burst_hold_s - (now() - impl_->waiting.front()->arrived));
 }
 
+// Replica x slots: a card is busy while one of its slots has a chunk in flight that has not finished - any call on
+// the card would wait behind it, so the tick leaves the card alone (no grant, step or request end there).
+bool Scheduler::card_busy(uint32_t card) const {
+  if (!impl_->overlap) return false;
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    const std::shared_ptr<Job>& j = impl_->slots[s];
+    if (impl_->slot_card[s] == card && j && j->inflight && !engine_.prefill_ready(s)) return true;
+  }
+  return false;
+}
+
 // Review Focus 5: the free slot the prompt fits whose resident session matches the most of
-// it; among equal matches (plan 13b) the one whose session holds least - a new conversation
-// does not evict a long one from a card while another card holds nothing.
+// it (affinity: the card that holds the request's prefix); among equal matches (plan 13b) the
+// one whose session holds least - a new conversation does not evict a long one from a card
+// while another card holds nothing. Replica x slots: with no match anywhere, the card with the
+// most free slots first (then the least held there). One slot per card (plan 13b) or one card
+// (13c): every card has one free slot or the same count, so the rule is the earlier one. The
+// chosen slot's card busy (a chunk running there): the request waits for the next tick.
 int Scheduler::pick_slot(const Job& job) const {
   int best = -1;
-  uint32_t best_match = 0, best_held = 0;
+  uint32_t best_match = 0, best_held = 0, best_free = 0;
   const size_t need = job.req.prompt.size() + 1;
+  std::vector<uint32_t> free_on(impl_->n_cards, 0);
+  for (uint32_t s = 0; s < impl_->n_slots; ++s)
+    if (!impl_->slots[s]) ++free_on[impl_->slot_card[s]];
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     if (impl_->slots[s] || impl_->slot_len[s] < need) continue;
     const uint32_t m = cache_ ? cache_->match(s, job.req.prompt) : 0;
     const uint32_t h = cache_ ? cache_->held(s) : 0;
-    if (best < 0 || m > best_match || (m == best_match && h < best_held)) {
+    const uint32_t f = free_on[impl_->slot_card[s]];
+    const bool better = best < 0 || m > best_match ||
+                        (m == best_match && (m == 0 && f != best_free ? f > best_free : h < best_held));
+    if (better) {
       best = static_cast<int>(s);
       best_match = m;
       best_held = h;
+      best_free = f;
     }
   }
+  if (best >= 0 && card_busy(impl_->slot_card[static_cast<uint32_t>(best)])) return -1;
   return best;
 }
 
@@ -447,8 +479,9 @@ bool Scheduler::spec_round() {
   std::vector<BatchEngineIface::SpecRow> rows;
   const uint32_t cap = impl_->cap;
   std::vector<uint32_t> ks;
+  const std::vector<bool> busy = busy_cards();
   for (const auto& j : impl_->slots) {
-    if (!j || j->state != Job::State::Decoding) continue;
+    if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
     jobs.push_back(j);
     const uint32_t k = j->policy ? j->policy->next() : std::min(opts_.spec_fixed_k, cap);
     ks.push_back(std::min(k, cap));
@@ -457,13 +490,12 @@ bool Scheduler::spec_round() {
   // left are dealt one at a time round the rows, the longest-running request first, each up to its own K (measured,
   // docs/probes/probe-batching-2026-10-23.md section 8: K 1 each at four requests beats K 3 for the oldest by 15 %,
   // K 2 / 2 / 1 at three beats 3 / 2 / 0 by 15 %).
-  if (const uint32_t budget = engine_.row_budget(static_cast<uint32_t>(jobs.size())); budget != 0) {
-    std::vector<size_t> by_age(jobs.size());
-    for (size_t i = 0; i < by_age.size(); ++i) by_age[i] = i;
+  // Replica x slots (overlaps_prefill()): each card's rows against that card's own budget.
+  const auto deal = [&](std::vector<size_t> by_age, uint32_t budget) {
     std::sort(by_age.begin(), by_age.end(), [&](size_t a, size_t b) { return jobs[a]->order < jobs[b]->order; });
-    uint32_t left = budget > jobs.size() ? budget - static_cast<uint32_t>(jobs.size()) : 0;
+    uint32_t left = budget > by_age.size() ? budget - static_cast<uint32_t>(by_age.size()) : 0;
     std::vector<uint32_t> want = ks;
-    std::fill(ks.begin(), ks.end(), 0u);
+    for (size_t i : by_age) ks[i] = 0;
     for (bool dealt = true; left > 0 && dealt;) {
       dealt = false;
       for (size_t i : by_age)
@@ -473,6 +505,20 @@ bool Scheduler::spec_round() {
           dealt = true;
         }
     }
+  };
+  if (impl_->overlap) {
+    std::vector<std::vector<size_t>> on_card(impl_->n_cards);
+    for (size_t i = 0; i < jobs.size(); ++i)
+      on_card[impl_->slot_card[static_cast<uint32_t>(jobs[i]->slot)]].push_back(i);
+    for (uint32_t c = 0; c < impl_->n_cards; ++c) {
+      if (on_card[c].empty()) continue;
+      if (const uint32_t budget = engine_.card_row_budget(c, static_cast<uint32_t>(on_card[c].size())); budget != 0)
+        deal(on_card[c], budget);
+    }
+  } else if (const uint32_t budget = engine_.row_budget(static_cast<uint32_t>(jobs.size())); budget != 0) {
+    std::vector<size_t> all(jobs.size());
+    for (size_t i = 0; i < all.size(); ++i) all[i] = i;
+    deal(all, budget);
   }
   for (size_t i = 0; i < jobs.size(); ++i) {
     const auto& j = jobs[i];
@@ -579,8 +625,9 @@ bool Scheduler::decode_round() {
   if (impl_->spec) return spec_round();   // spec 19d; plan 13b: prompt lookup
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::Row> rows;
+  const std::vector<bool> busy = busy_cards();
   for (const auto& j : impl_->slots) {
-    if (!j || j->state != Job::State::Decoding) continue;
+    if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
     jobs.push_back(j);
     rows.push_back({static_cast<uint32_t>(j->slot), &j->req.sampling, &j->rng});
   }
@@ -635,13 +682,24 @@ bool Scheduler::decode_round() {
   return true;
 }
 
+std::vector<bool> Scheduler::busy_cards() const {
+  std::vector<bool> busy(impl_->n_cards, false);
+  for (uint32_t c = 0; c < impl_->n_cards; ++c) busy[c] = card_busy(c);
+  return busy;
+}
+
 // Plan 13b: the overlapping engine's prefills. Joins every slot whose chunk is done (its
 // prefill_done: the cache hooks, Decoding when the prompt is in), then starts the next chunk of
 // every prefilling slot with none in flight - all of them in one prefill_begin, so two prompts
 // prefill on their two cards at once. Returns true when it joined or started anything.
-bool Scheduler::overlapped_prefills() {
+// Replica x slots: at most one chunk in flight per card - the oldest prefilling request's there.
+// Before the step (!after_step) the joins and the cards with no decoding row; after the step the
+// other cards, so a card with rows decoding runs chunk, step, chunk, step (13c's interleave on
+// one card) and its rows sit out only the ticks its chunk runs. One slot per card (plan 13b): a
+// prefilling card has no decoding row, so everything starts before the step, as before.
+bool Scheduler::overlapped_prefills(bool after_step) {
   bool did = false;
-  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+  for (uint32_t s = 0; s < impl_->n_slots && !after_step; ++s) {
     const std::shared_ptr<Job> j = impl_->slots[s];
     if (!j || !j->inflight || !engine_.prefill_ready(s)) continue;
     std::exception_ptr error;
@@ -658,10 +716,24 @@ bool Scheduler::overlapped_prefills() {
     prefill_done(call, error);
     did = true;
   }
-  PrefillCall start;
+  std::vector<bool> taken(impl_->n_cards, false), decoding(impl_->n_cards, false);
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
-    const std::shared_ptr<Job> j = impl_->slots[s];
+    const std::shared_ptr<Job>& j = impl_->slots[s];
+    if (!j) continue;
+    if (j->inflight) taken[impl_->slot_card[s]] = true;
+    if (j->state == Job::State::Decoding) decoding[impl_->slot_card[s]] = true;
+  }
+  std::vector<std::shared_ptr<Job>> oldest(impl_->n_cards);
+  for (uint32_t s = 0; s < impl_->n_slots; ++s) {
+    const std::shared_ptr<Job>& j = impl_->slots[s];
+    const uint32_t c = impl_->slot_card[s];
     if (!j || j->inflight || j->state != Job::State::Prefilling || j->cancelled_) continue;
+    if (taken[c] || (!after_step && decoding[c])) continue;
+    if (!oldest[c] || j->order < oldest[c]->order) oldest[c] = j;
+  }
+  PrefillCall start;
+  for (const std::shared_ptr<Job>& j : oldest) {
+    if (!j) continue;
     start.jobs.push_back(j);
     start.chunks.push_back(next_chunk(*j, true));
   }
@@ -701,7 +773,7 @@ bool Scheduler::tick() {
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
     const std::shared_ptr<Job> j = impl_->slots[s];
     if (!j || !j->cancelled_) continue;
-    if (j->inflight && !engine_.prefill_ready(s)) continue;   // plan 13b: its card finishes the chunk first
+    if (card_busy(impl_->slot_card[s])) continue;   // plan 13b: its card finishes the chunk first
     finish(j, Finish::Cancelled);
     did = true;
   }
@@ -739,10 +811,12 @@ bool Scheduler::tick() {
 
   // 3. At most one prefill call; 4. one decode step. Plan 13b: with overlaps_prefill() (one card
   // per slot) every prefilling slot has a chunk in flight on its card while the others step - the
-  // step never waits for a prefill.
-  if (engine_.overlaps_prefill()) {
-    if (overlapped_prefills()) did = true;
+  // step never waits for a prefill. Replica x slots: a card's rows skip the step while its chunk
+  // runs, and a card with rows decoding starts its next chunk after the step.
+  if (impl_->overlap) {
+    if (overlapped_prefills(false)) did = true;
     if (decode_round()) did = true;
+    if (overlapped_prefills(true)) did = true;
   } else {
     PrefillCall call;
     const bool prefill = prefill_plan(call);
