@@ -1040,6 +1040,15 @@ foreach(v gemv_M1_K5120_N16384_S1_L1 gemv_M1_K6144_N5120_S4_L0 gemv_M1_K5120_N14
     add_dependencies(probe_tp kernel_${v})
   endif()
 endforeach()
+# --- probe_tp_pf: spec 17c step 1, tensor-parallel prefill's 2048-row crossing (D8) ----------------------------
+# Plan: docs/superpowers/plans/2026-10-05-spec17c-tp-prefill.md. `probe_tp_pf.cl` is a PROBE kernel (ptpf_copy, the
+# kernel push / pull arms): no runtime path binds it. The GEMM load is the production pf_gemm_T0.
+add_ocloc_kernel(ptpf_kernels SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/probe_tp_pf.cl)
+add_executable(probe_tp_pf probe_tp_pf.cc)
+target_include_directories(probe_tp_pf PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_tp_pf PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_tp_pf)
+add_dependencies(probe_tp_pf kernel_ptpf_kernels kernel_pf_gemm_T0)
 # --- probe_reset: what Engine::reset()'s persistent fills cost at max_len small vs auto (branch cheap-reset) ---
 add_executable(probe_reset probe_reset.cc)
 target_include_directories(probe_reset PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR})
