@@ -1,9 +1,28 @@
 """Score tool calls: the first tool call of each output against a reference run.
 
-    score.py [--format qwen|qwen-think|hermes] <out dir> <reference run> <candidate run>...
+    score.py [--format qwen|qwen-think|hermes] [--min N] <out dir> <reference run> <candidate run>...
 
 Reads <out dir>/<scenario>.<run>.txt (the generated text, special tokens kept) and compares
 each candidate's first call - its name and raw argument strings - with the reference's.
+
+Validity (open-work 3o, operator 2026-11-10): every first call is also checked against the scenario's
+files - tests/golden/toolcall/tree.json, the repository the 36 conversations were made from (its file
+list and the full text of the six files they read; revision in the file, the one whose lines every
+prompt's read results show; Ornith's, K2's, Bolt's, Agnes's and Flash-Next's sets re-render the same
+conversations). Not for `--format hermes`: Kolibri-1's German set was made from a later tree. A call is
+'invalid' when it does not parse ('incomplete') or when its
+arguments would not work there:
+  edit   filePath one of the six files; oldString occurs in it exactly once (opencode's edit refuses
+         none and several); newString differs from it
+  read   filePath a file of the tree; offset / limit integers, offset within a known file's lines
+  grep   pattern compiles; path a file or directory of the tree
+  glob   path a directory of the tree
+  A search that finds nothing is an answer, not an error (the tools print "No files found"): the
+  reference itself globs tests/**/*linear* in t5_test-linear_l0, which matched no file then.
+  bash / write and any other tool: parsing only. A path may be relative (to /work).
+A valid alternative (a narrower grep, a broader glob, other wording) stays valid; it is a mismatch
+against the reference, not a failure. An invalid call never counts as a match. --min N (A4's bar):
+exit 1 when a candidate has fewer than N matches or any invalid call.
 
 Two call syntaxes, told apart by their tags (the two sets share none):
   Qwen XML (Qwen3.8, Ornith): <tool_call>\\n<function=NAME>\\n<parameter=K>\\nV\\n</parameter>
@@ -42,6 +61,10 @@ import json
 import os
 import re
 import sys
+
+TREE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "golden", "toolcall",
+                    "tree.json")
+WORK = "/work"
 
 CALL = re.compile(r"<tool_call>(.*?)</tool_call>", re.S)
 FUNC = re.compile(r"<function=([^>\n]+)>(.*?)</function>", re.S)
@@ -199,6 +222,78 @@ def parse_first_call(text: str, fmt: str = "auto"):
     return ("call", f.group(1).strip(), params, len(calls))
 
 
+def load_tree(path: str = TREE):
+    """-> (files, dirs, text): the scenario tree's paths relative to /work and the six files' text."""
+    with open(path, encoding="utf-8") as f:
+        t = json.load(f)
+    files = set(t["files"])
+    dirs = {""} | {os.path.dirname(f) for f in files}
+    for d in list(dirs):
+        while d:
+            d = os.path.dirname(d)
+            dirs.add(d)
+    return files, dirs, t["text"]
+
+
+def _rel(p: str):
+    """A tool path -> its path under /work ('' for /work itself), or None outside it."""
+    p = os.path.normpath(p if p.startswith("/") else os.path.join(WORK, p))
+    if p == WORK:
+        return ""
+    return p[len(WORK) + 1:] if p.startswith(WORK + "/") else None
+
+
+def check_call(name: str, params: dict, tree) -> str:
+    """'' when the call works against the scenario's files, else why not."""
+    files, dirs, text = tree
+    p = {k: v if isinstance(v, str) else json.dumps(v) for k, v in params.items()}
+    if name == "edit":
+        f = _rel(p.get("filePath", ""))
+        if f not in text:
+            return f"edit of {p.get('filePath')!r}, not a file the conversation read"
+        old = p.get("oldString", "")
+        n = text[f].count(old) if old else 0
+        if n != 1 and not (n > 1 and p.get("replaceAll") == "true"):
+            return f"edit's oldString occurs {n} times in {f}"
+        if p.get("newString") == old:
+            return "edit's newString equals its oldString"
+        return ""
+    if name == "read":
+        f = _rel(p.get("filePath", ""))
+        if f not in files:
+            return f"read of {p.get('filePath')!r}, not a file of the tree"
+        for k in ("offset", "limit"):
+            if k in p and not re.fullmatch(r"\d+", p[k].strip()):
+                return f"read's {k} {p[k]!r} is not an integer"
+        if f in text and "offset" in p and int(p["offset"]) > text[f].count("\n"):
+            return f"read's offset {p['offset']} is past the end of {f}"
+        return ""
+    if name == "grep":
+        try:
+            re.compile(p.get("pattern", ""))
+        except re.error as e:
+            return f"grep's pattern does not compile: {e}"
+        root = _rel(p.get("path", WORK))
+        if root is None or (root not in files and root not in dirs):
+            return f"grep's path {p.get('path')!r} is not in the tree"
+        return ""
+    if name == "glob":
+        root = _rel(p.get("path", WORK))
+        if root is None or root not in dirs:
+            return f"glob's path {p.get('path')!r} is not a directory of the tree"
+        return ""
+    return ""
+
+
+def validity(got, tree) -> str:
+    """'' for a valid first call (or none at all), else why it is invalid."""
+    if got[0] == "incomplete":
+        return "the call does not parse"
+    if got[0] != "call":
+        return ""
+    return check_call(got[1], got[2], tree)
+
+
 def main() -> None:
     args = sys.argv[1:]
     fmt = "auto"
@@ -206,11 +301,16 @@ def main() -> None:
         if len(args) < 2 or args[1] not in ("qwen", "qwen-think", "hermes"):
             sys.exit("--format expects qwen, qwen-think or hermes")
         fmt, args = args[1], args[2:]
+    need = None
+    if args[:1] == ["--min"]:
+        need, args = int(args[1]), args[2:]
     if len(args) < 3:
         sys.exit(__doc__)
     out, ref, cands = args[0], args[1], args[2:]
     names = sorted(n[: -len(f".{ref}.txt")] for n in os.listdir(out) if n.endswith(f".{ref}.txt"))
     matches = {c: 0 for c in cands}
+    invalid = {c: [] for c in cands}
+    tree = load_tree() if fmt != "hermes" else None
     print(f"| scenario | {ref} | " + " | ".join(cands) + " |")
     print("|---|---|" + "---|" * len(cands))
     for n in names:
@@ -222,7 +322,11 @@ def main() -> None:
                 cells.append("missing")
                 continue
             got = parse_first_call(open(p, encoding="utf-8").read(), fmt)
-            if got[0] != "call":
+            why = validity(got, tree) if tree else ""
+            if why:
+                cells.append("invalid")
+                invalid[c].append(f"{n} ({why})")
+            elif got[0] != "call":
                 cells.append(got[0])
             elif r[0] == "call" and got[1:3] == r[1:3]:
                 cells.append("match")
@@ -234,10 +338,18 @@ def main() -> None:
     print()
     for c in cands:
         print(f"{c}: {matches[c]} / {len(names)} match {ref}")
+    for c in cands:
+        print(f"{c}: {len(invalid[c])} invalid call(s)" + (": " + "; ".join(invalid[c]) if invalid[c] else ""))
     if fmt in ("hermes", "qwen-think"):   # KL4's / 25 B5's bar: every reference call parses
         bad = [n for n in names if parse_first_call(
             open(os.path.join(out, f"{n}.{ref}.txt"), encoding="utf-8").read(), fmt)[0] == "incomplete"]
         print(f"{ref}: {len(bad)} parse failure(s)" + (f": {', '.join(bad)}" if bad else ""))
+    if need is not None:
+        short = [c for c in cands if matches[c] < need or invalid[c]]
+        print(f"bar: >= {need} / {len(names)} matches and no invalid call: "
+              + (f"FAIL ({', '.join(short)})" if short else "PASS"))
+        if short:
+            sys.exit(1)
 
 
 if __name__ == "__main__":
