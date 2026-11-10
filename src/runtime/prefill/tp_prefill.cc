@@ -30,6 +30,16 @@
 //
 // Without a copy-only queue group the crossings go on the compute lists in order (correct, no overlap) - not this
 // box (every B70 shows ordinal 1, COPY-only, one queue).
+//
+// **Spec 17d: the MTP head and the block hook.** With the head (whole on each card) every row's hidden is needed - the
+// head's KV of a chunk is built over (h_{pos-1+r}, x[pos+r]) - so the last unit's halves cross for EVERY row of every
+// chunk, and after the pair's units each card runs, per chunk in order, its tail on the compute list: the fold of the
+// last unit's halves and the final norm of every row (prefill::step_tp_final) into the hidden rows (row 0 = h_{pos-1},
+// copied from MtpBuffers::hh row 0), the head's KV (prefill::step_tp_mtp_kv, in passes the card's scratch holds), and
+// the chunk's last hidden back into hh row 0 - Engine::prefill's per-chunk MTP steps. The prompt's head then reads the
+// last row's normed hidden. With a block hook every pair ends on a multiple of the hook's stride (tp_hook_stride: a
+// pair's rows rounded up to whole blocks) or at the prompt's end; the hook runs after such a pair has drained on both
+// cards (Control pos = the end, n_active 0) and after the prompt's head, as Engine::prefill's.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -53,6 +63,7 @@
 #include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/kernels.h"
 #include "runtime/prefill/profile.h"
+#include "kernels/prefill/pf_kernels.h"
 #include "runtime/prefill/step.h"
 #include "runtime/tp_engine.h"
 #include "runtime/tp_engine_card.h"
@@ -112,6 +123,17 @@ struct TpPfCard {
   TpPfCard(const TpPfCard&) = delete;
   TpPfCard& operator=(const TpPfCard&) = delete;
 
+  // Spec 17d: the MTP head's prefill buffers (allocated by TpEngine::prepare_prefill with the head): the hidden rows
+  // bf16 [cap + 1][hidden] (row 0 = h_{pos-1}), the head's bf16 slab [2 x hidden][1024] (fc's K: the card's own slab
+  // is [intermediate 8704][1024]) and its Controls, one per (chunk, pass) of a pair (host USM: written while idle).
+  void make_mtp(uint32_t cap) {
+    hid = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, (size_t(cap) + 1) * hidden() * 2);
+    hslab = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(2) * hidden() * kernels::kPfSlabWidth * 2);
+    hctl = std::make_unique<l0::Mem>(ctx, l0::MemKind::Host, size_t(kPair) * kHeadPasses * sizeof(Control));
+    std::memset(hctl->ptr(), 0, hctl->size());
+  }
+  static constexpr uint32_t kHeadPasses = 2;   // prefill::tp_mtp_kv_passes at most: chunk rows / (cap / 2)
+  Control* head_ctl(uint32_t h, uint32_t p) { return hctl->as<Control>() + h * kHeadPasses + p; }
   size_t hidden() const { return s.desc().hidden; }
   void* resid(uint32_t h) { return h == 0 ? s.resid.ptr() : resid_b.ptr(); }
   float* own_of(uint32_t h) { return own.as<float>() + size_t(h) * s.chunk_cap() * hidden(); }
@@ -120,7 +142,10 @@ struct TpPfCard {
   }
   Control* control(uint32_t h) { return ctl.as<Control>() + h; }
   uint32_t* ids_of(uint32_t h) { return ids.as<uint32_t>() + size_t(h) * s.chunk_cap(); }
-  size_t device_bytes() const { return s.bytes() + s.lazy_bytes() + resid_b.size() + own.size() + land.size(); }
+  size_t device_bytes() const {
+    return s.bytes() + s.lazy_bytes() + resid_b.size() + own.size() + land.size() + (hid ? hid->size() : 0) +
+           (hslab ? hslab->size() : 0);
+  }
 
   // The crossing's copy, on the copy engine after `ready`, or in order on the compute list.
   void send(void* dst, const void* src, size_t bytes, ze_event_handle_t ready, ze_event_handle_t sent) {
@@ -149,6 +174,7 @@ struct TpPfCard {
   l0::Mem ctl;       // Control [kPair]
   l0::Mem ids;       // u32 [kPair][cap]
   ze_command_list_handle_t bcs = nullptr;   // the copy engine's list (null: crossings on the compute list)
+  std::unique_ptr<l0::Mem> hid, hslab, hctl;   // spec 17d: the MTP head's (make_mtp)
 };
 
 struct TpPrefill {
@@ -227,6 +253,7 @@ void TpEngine::prepare_prefill() {
     TpPfCard& k = *pf_->c[r];
     if (kv_ == KvCache::Int8) k.s.kv8_raw_buffer();   // spec 12b's widening scratch, at the card's 2 kv heads
     k.s.slab_buffer();   // the l0 linears' slab: allocated here, outside the first timed chunk
+    if (mtp_) k.make_mtp(pf_cap_);   // spec 17d
     pf_bytes_[r] = k.device_bytes();
   }
 }
@@ -259,7 +286,15 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   const model::ModelDesc& d = *cd(0).model.desc;
   const uint32_t U = p.units;
   const size_t row = size_t(d.hidden) * 4;
-  const std::vector<std::array<uint32_t, 2>> chunks = tp_prefill_chunks(base, ids.size(), chunk);
+  // Spec 17d: the prefill GDN path reads slot 0, so a live slot left by a commit goes there first; with a hook every
+  // pair ends on the hook's stride or the prompt's end.
+  if (mtp_) {
+    mtp_normalise_live();
+    verify_k_ = kNoVerify;
+  }
+  const bool hooked = static_cast<bool>(block_hook_);
+  const std::vector<std::array<uint32_t, 2>> chunks =
+      tp_prefill_chunks(base, ids.size(), chunk, hooked ? tp_hook_stride(chunk, kBlock) : 0);
   for (size_t j = 0; j < chunks.size(); j += kPair) {
     PairPlan pp;
     const uint32_t n_ch = uint32_t(std::min<size_t>(kPair, chunks.size() - j));
@@ -306,7 +341,7 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                                 card.persist.gdn_state, card.persist.conv_ring, card.persist.kv_k, card.persist.kv_v,
                                 card.persist.kv_lay, io);
           if (!cross) continue;
-          if (u + 1 < U) {
+          if (u + 1 < U || mtp_) {   // spec 17d: with the head the last unit's every row crosses too
             k.send(peer.land_of(h, u & 1u), k.own_of(h), size_t(C) * row, p.ev.handle(p.ready(r, h, u)),
                    p.ev.handle(p.sent(r, h, u)));
           } else if (last_pair && h == last_h) {
@@ -316,9 +351,45 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
                    p.ev.handle(p.sent(r, h, u)));
           }
         }
+    if (mtp_) {
+      // Spec 17d: each card's MTP tail of every chunk, in order (the header's **Spec 17d**).
+      const size_t hrow = size_t(d.hidden) * 2;
+      for (uint32_t h = 0; h < n_ch; ++h)
+        for (uint32_t r = 0; r < model::kTpSize; ++r) {
+          TpPfCard& k = *p.c[r];
+          Card& card = cd(r);
+          if (!opt_.prefill_timing_no_crossing) {
+            k.cx.wait_event(p.ev.handle(p.sent(1 - r, h, U - 1)));
+            k.cx.wait_event(p.ev.handle(p.sent(r, h, U - 1)));
+          }
+          const uint32_t C = pp.rows[h], pos = pp.pos[h];
+          const float* mine = k.own_of(h);
+          const float* theirs = k.land_of(h, (U - 1) & 1u);
+          uint16_t* hid = k.hid->as<uint16_t>();
+          k.cx.copy(hid, card.mtp->hh.ptr(), hrow);   // h_{pos-1} into row 0
+          prefill::step_tp_final(k.cx, k.kc, k.s, card.model, r == 0 ? mine : theirs, r == 0 ? theirs : mine,
+                                 k.resid(h), hid, C);
+          void* hctl[TpPfCard::kHeadPasses] = {nullptr, nullptr};
+          const uint32_t passes = prefill::tp_mtp_kv_passes(pos, C, k.s);
+          if (passes > TpPfCard::kHeadPasses)
+            fail("the MTP head's prefill needs " + std::to_string(passes) + " passes a chunk (built for " +
+                 std::to_string(TpPfCard::kHeadPasses) + ")");
+          for (uint32_t q = 0; q < passes; ++q) {
+            Control* c = k.head_ctl(h, q);
+            c->pos = (pos == 0 ? 0 : pos - 1) + q * prefill::tp_mtp_kv_pass(k.s);
+            c->n_active = std::min(prefill::tp_mtp_kv_pass(k.s), prefill::mtp_kv_rows(pos, C) - q * prefill::tp_mtp_kv_pass(k.s));
+            hctl[q] = c;
+          }
+          const MtpBuffers& m = *card.mtp;
+          prefill::step_tp_mtp_kv(k.cx, k.kc, k.s, card.model, model::qwen38(), hctl, *k.hslab, k.ids_of(h), pos, C,
+                                  hid, m.kv_lay.layer(m.kv_k.ptr(), m.kv_v.ptr(), 0));
+          k.cx.copy(card.mtp->hh.ptr(), hid + size_t(C) * d.hidden, hrow);   // h_{end-1}: the next chunk's row 0
+        }
+    }
     if (last_pair) {
       // The head: the last row's fold, the final norm, the card's vocabulary half, its argmax into the card's
-      // Control (pos = the last position, n_active 1: tp_argmax_stage2 leaves pos = base + n).
+      // Control (pos = the last position, n_active 1: tp_argmax_stage2 leaves pos = base + n). Spec 17d: with the
+      // MTP head the fold and the norm ran in the last chunk's tail - lm_head reads its last hidden row.
       const uint32_t C = pp.rows[last_h];
       const size_t at = size_t(C - 1) * d.hidden;
       const uint32_t rows = cd(0).model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
@@ -337,7 +408,8 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
         const uint32_t first = r * rows;
         const uint32_t used = d.vocab_used > first ? std::min(rows, d.vocab_used - first) : 0;
         prefill::step_tp_head(k.cx, k.kc, k.s, cd(r).model, cd(r).ctl, r == 0 ? mine : theirs,
-                              r == 0 ? theirs : mine, static_cast<uint8_t*>(k.resid(last_h)) + at * 2, used, first);
+                              r == 0 ? theirs : mine, static_cast<uint8_t*>(k.resid(last_h)) + at * 2, used, first,
+                              mtp_ ? k.hid->as<uint16_t>() + size_t(C) * d.hidden : nullptr);
       }
     }
     for (uint32_t r = 0; r < model::kTpSize; ++r)
@@ -349,8 +421,21 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
              " did not finish within " + std::to_string(opt_.timeout_ms) + " ms");
       }
     p.in_flight = false;
+    // Spec 17d: a mid-prompt pair that ends on a block end - the state is exactly at its end on both cards.
+    const uint32_t end = pp.pos[last_h] + pp.rows[last_h];
+    if (hooked && !last_pair && end % kBlock == 0) {
+      for (uint32_t r = 0; r < model::kTpSize; ++r) {
+        cd(r).ctl->pos = end;
+        cd(r).ctl->n_active = 0;
+      }
+      block_hook_(end, true);
+    }
   }
   merge_heads();
+  if (hooked) {
+    const uint32_t end = base + uint32_t(ids.size());
+    block_hook_(end, end % kBlock == 0);
+  }
 }
 
 }  // namespace runtime

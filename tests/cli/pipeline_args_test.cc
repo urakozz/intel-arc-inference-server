@@ -51,10 +51,10 @@ void check_parse() {
   CHECK(p.mode == cli::Parallel::Tp && p.tp() && !p.on() && !p.replica() && p.given() && p.devices == 1u);
   cli::check_tp(p, {});   // plain decode: nothing to refuse
   CHECK(says([&] { cli::check_tp(p, {true, false, false, false}); }, "--parallel tp prefills on the l0 backend only"));
-  CHECK(says([&] { cli::check_tp(p, {false, true, false, false}); }, "--spec mtp / dflash under tensor parallel"));
+  CHECK(says([&] { cli::check_tp(p, {false, true, false, false}); }, "--spec dflash / dflash-lookup under tensor parallel are not built"));
   CHECK(says([&] { cli::check_tp(p, {false, false, true, false}); }, "it has no --parallel tp"));
   CHECK(says([&] { cli::check_tp(p, {false, false, false, true}); }, "--parallel tp is built for Qwen3.8"));
-  CHECK(says([&] { cli::refuse_tp_in_serve(p); }, "--parallel tp is b70-decode's until spec 17d"));
+  CHECK(says([&] { cli::check_tp(p, {false, false, false, false, true}); }, "--draft-vocab is not built under tensor parallel"));
   CHECK(says([] { cli::require_two_devices_for_tp(1); }, "--parallel tp needs two GPUs and Level Zero shows 1"));
   cli::require_two_devices_for_tp(2);
   {
@@ -68,8 +68,7 @@ void check_parse() {
     CHECK(says([&] { cli::check_tp(th, {}); }, "--pipeline-handoff belongs to --parallel pp"));
   }
   cli::PipelineArgs not_tp;
-  cli::check_tp(not_tp, {true, true, true, true});   // not tp: nothing to refuse here
-  cli::refuse_tp_in_serve(not_tp);
+  cli::check_tp(not_tp, {true, true, true, true, true});   // not tp: nothing to refuse here
   for (const char* bad : {"0", "2", "3", "", "two", "PP", "TP", "4096"})
     CHECK(says([&] { cli::parse_parallel(bad, p); }, "--parallel expects auto, 1, pp, replica or tp"));
   // Plan 13b: replica - one engine per card, not pipeline parallel (on() stays false).

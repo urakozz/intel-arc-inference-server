@@ -323,6 +323,10 @@ struct MtpDims {
   // index) and its hh rows (hh_rows).
   static MtpSizes sizes(uint32_t max_len, const model::ModelDesc& desc, uint32_t draft_vocab = 0,
                         KvCache kv = default_kv_cache(), uint32_t slots = kSlots, uint32_t seqs = 1);
+  // Spec 17d: a tensor-parallel card's - the GDN state slots at the card's shapes (`card`, model::tp_card_desc), the
+  // head's KV layer at the head's own (`head`: the one-card descriptor - the MTP head is whole on each card). No draft
+  // vocabulary, one sequence, kSlots.
+  static MtpSizes tp_sizes(uint32_t max_len, const model::ModelDesc& card, const model::ModelDesc& head, KvCache kv);
   // Spec 13c: MtpBuffers::hh's rows. One sequence: kM + 1 (row 0 = h_{pos-1}, rows 1..M the
   // verify rows' hidden). `seqs` > 1: each sequence's kM + 1 rows (sequence q's from row
   // q x (kM + 1)), then the row lists' saved hidden rows (kM: the rows' post-final-norm `x`),

@@ -5,7 +5,7 @@
 // capture (runtime/capture.cc's attn_pair) asks it, tests/runtime/verify_attn_test.cc checks it on the host.
 //
 // The rule (spec 28c §3): V2 at M = 1 (plain decode never switches: spec 28 §8 decision 1), at any heads but
-// Qwen3.8's 24 / 4, for an (M, KV form) the table lacks (no binary is built there); else the
+// Qwen3.8's 24 / 4 (and spec 17d's per-card 12 / 2, verify_attn_heads), for an (M, KV form) the table lacks (no binary is built there); else the
 // measured table: Dpas from `dpas_from` keys of row 0 (pos + 1) on. Ties and noise keep v2 (plan 28c Task 4's
 // verdict rule: paired v2 / dpas >= 1.03 with the range's low end > 1.00).
 //
@@ -65,9 +65,16 @@ inline const char* verify_attn_force_name(VerifyAttnForce f) {
   return f == VerifyAttnForce::V2 ? "v2" : f == VerifyAttnForce::Dpas ? "dpas" : "rule";
 }
 
+// The heads attn_verify_dpas is built at: Qwen3.8's 24 / 4, and (spec 17d) a tensor-parallel card's 12 / 2 - the same
+// groups of 6, the same walk per work-group, half the work-groups; the table's crossovers are the one-card build's
+// (measured at 24 / 4; the per-card lists bind at the same depths, operator decision recorded in plan 17d).
+inline bool verify_attn_heads(uint32_t q_heads, uint32_t kv_heads) {
+  return (q_heads == 24 && kv_heads == 4) || (q_heads == 12 && kv_heads == 2);
+}
+
 inline VerifyAttn verify_attn_kind(uint32_t M, uint32_t keys, bool kv8, uint32_t q_heads, uint32_t kv_heads,
                                    VerifyAttnForce f = VerifyAttnForce::Auto) {
-  if (M < 2 || q_heads != 24 || kv_heads != 4) return VerifyAttn::V2;   // before the table or the override
+  if (M < 2 || !verify_attn_heads(q_heads, kv_heads)) return VerifyAttn::V2;   // before the table or the override
   if (f == VerifyAttnForce::V2) return VerifyAttn::V2;
   const VerifyAttnRow* r = verify_attn_row(M, kv8);
   if (r == nullptr) return VerifyAttn::V2;

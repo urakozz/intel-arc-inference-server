@@ -11,7 +11,9 @@
 //      then both RoPE tables re-tabled; an explicit length is held to each card's plan;
 //   4. the prompt by decode replays, or (spec 17c, --prefill / --bench --prefill-length) by TpEngine::prefill - the
 //      wavefront of both cards' prefill walks with the crossings on the copy engines; then generate (--ids) or time
-//      --tg ids (--bench; with --prefill-length the pp row too, one card's columns).
+//      --tg ids (--bench; with --prefill-length the pp row too, one card's columns);
+//   5. spec 17d: --spec mtp / auto (--ids): the MTP head loaded whole on each card, planned on each, and the ids by
+//      b70-decode's greedy speculative loop (generate_mtp over TpEngine's draft / verify / commit).
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -49,6 +51,8 @@ struct TpDecodeArgs {
   bool prefill = false;         // spec 17c: the prompt by prefill
   bool bench_prefill = false;   // --prefill-length: print the pp row
   uint32_t chunk = 0;           // --prefill-chunk (0: the cap)
+  bool mtp = false;             // spec 17d: --spec mtp / auto
+  std::function<int(runtime::TpEngine&)> run_mtp;   // b70_decode.cc's generate_mtp
 };
 
 template <class Redirect>
@@ -73,8 +77,8 @@ int run_tp_decode(const TpDecodeArgs& a) {
   std::array<loader::LoadedModel, 2> cards = [&] {
     Redirect redirect;
     return std::array<loader::LoadedModel, 2>{
-        loader::load_tp(d0, a.path, loader::TpSlice{0, a.crossing}, load_len, a.lm_head),
-        loader::load_tp(d1, a.path, loader::TpSlice{1, a.crossing}, load_len, a.lm_head)};
+        loader::load_tp(d0, a.path, loader::TpSlice{0, a.crossing}, load_len, a.lm_head, a.mtp),
+        loader::load_tp(d1, a.path, loader::TpSlice{1, a.crossing}, load_len, a.lm_head, a.mtp)};
   }();
   const model::ModelDesc& card = *cards[0].desc;
   const std::array<size_t, 2> weights{cards[0].report.total() - cards[0].report.rope_bytes,
@@ -83,14 +87,14 @@ int run_tp_decode(const TpDecodeArgs& a) {
   uint32_t len = a.max_len.value;
   if (a.max_len.is_auto) {
     len = runtime::tp_max_len_that_fits(card, a.crossing, weights, dev, a.reserve, cards[0].trained_max_len, a.kv,
-                                        path);
+                                        path, a.mtp);
     if (len == 0)
       throw std::runtime_error("--parallel tp --max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) +
                                " positions fit both cards beside the weights");
     for (uint32_t r = 0; r < 2; ++r) loader::set_max_len(r == 0 ? d0 : d1, cards[r], len);
   } else {
     for (uint32_t r = 0; r < 2; ++r) {
-      const runtime::MemoryPlan p = runtime::tp_card_plan(card, a.crossing, len, weights[r], a.kv, path);
+      const runtime::MemoryPlan p = runtime::tp_card_plan(card, a.crossing, len, weights[r], a.kv, path, a.mtp);
       if (p.total() + a.reserve > dev[r])
         throw std::runtime_error("--parallel tp --max-len " + std::to_string(len) + " does not fit card " +
                                  std::to_string(r) + ": " + runtime::describe(p, dev[r], a.reserve) +
@@ -101,9 +105,11 @@ int run_tp_decode(const TpDecodeArgs& a) {
 
   runtime::TpEngine eng(d0, d1, std::move(cards), len, {}, a.kv);
   std::fprintf(stderr,
-               "engine: --parallel tp, crossing %s; %zu launches a card (%zu modules / %zu), max_len %u, kv cache %s\n",
+               "engine: --parallel tp, crossing %s; %zu launches a card (%zu modules / %zu), max_len %u, kv cache %s%s\n",
                model::tp_crossing_name(eng.crossing()), eng.step(0).kernel_count, eng.step(0).modules.size(),
-               eng.step(1).modules.size(), eng.max_len(), runtime::kv_cache_name(eng.kv_cache()));
+               eng.step(1).modules.size(), eng.max_len(), runtime::kv_cache_name(eng.kv_cache()),
+               eng.mtp() ? ", MTP head on both cards (verify lists M = 1..4, draft lists on each card's vocabulary half)"
+                         : "");
   if (a.prefill) {   // outside the timed window, as one card's prepare_prefill
     eng.set_prefill_chunk_cap(path.chunk_cap);
     eng.prepare_prefill();
@@ -131,6 +137,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
                  eng.last_tok_per_s(), n ? eng.last_gen_ms() / n : 0.0,
                  eng.last_gen_ms() > 0.0 ? 100.0 * eng.last_fence_ms() / eng.last_gen_ms() : 0.0);
   };
+  if (!a.bench && a.mtp) return a.run_mtp(eng);   // spec 17d
   if (!a.bench) {
     eng.generate(a.n, [](uint32_t id) {
       std::printf("%u\n", id);

@@ -620,15 +620,17 @@ uint32_t pending_of(runtime::Engine& e) {
   return e.buffers().control.as<runtime::Control>()->cur_token[0];
 }
 uint32_t pending_of(runtime::PipelineEngine& e) { return e.pending(); }
+uint32_t pending_of(runtime::TpEngine& e) { return e.pending(); }   // spec 17d
 
 template <class Eng>
-int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::LmHeadForm lm_head) {
+int generate_mtp(Eng& eng, uint32_t n, bool mtp_auto, uint32_t mtp_k, loader::LmHeadForm lm_head, bool tp = false) {
   std::optional<server::AdaptiveK> policy;
   if (mtp_auto) {
     server::AdaptiveKOptions o;
     o.max_k = mtp_k;   // --spec-max (default 3, runtime::Engine::kMaxDraft)
-    o.cost = lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head()
-                                                 : server::MtpCost::bf16_head();
+    // Spec 17d: tensor parallel's own table (its verify rows cross at M rows, its draft reads half the head).
+    o.cost = tp ? server::MtpCost::tp_int8_head()
+                : lm_head == loader::LmHeadForm::Int8 ? server::MtpCost::int8_head() : server::MtpCost::bf16_head();
     policy.emplace(o);
   }
   uint32_t printed = 0;
@@ -896,7 +898,9 @@ int run(int argc, char** argv) {
   const bool mtp_auto = mtp_on && spec.adaptive;
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
   // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
-  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8", have_spec && spec_arg != "off", profile,
+  // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash does not.
+  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8",
+                       spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
                        fam_bolt || fam_kol || fam_q4 || fam_k2});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
@@ -1162,6 +1166,8 @@ int run(int argc, char** argv) {
     ta.prefill = prefill || have_prefill_len;   // spec 17c
     ta.bench_prefill = have_prefill_len;
     ta.chunk = pp_chunk;
+    ta.mtp = mtp_on;   // spec 17d: --ids only (synthetic runs refused --spec above)
+    ta.run_mtp = [&](runtime::TpEngine& e) { return generate_mtp(e, n, mtp_auto, mtp_k, lm_head, true); };
     return cli::run_tp_decode<StdoutToStderr>(ta);
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else

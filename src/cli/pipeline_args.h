@@ -9,12 +9,13 @@
 //                               Nemotron 3.5 Bolt's two cards for the whole model); 1: one card;
 //                               pp: the model's layers split over GPUs 0 and 1 of what Level Zero
 //                               shows (spec 16).
-//                               tp (b70-decode, Qwen3.8 - spec 17b): tensor parallel, every layer's
-//                               linears split over GPUs 0 and 1 (half the heads, half the MLP, half
-//                               the head's vocabulary a card), the two halves added after each
-//                               layer by P2P writes; needs peer access both ways. Decode only:
-//                               the prompt is ingested by decode replays (prefill is 17c's),
-//                               no --spec (17d's); b70-serve refuses it by name until 17d.
+//                               tp (Qwen3.8 - spec 17b-d): tensor parallel, every layer's linears
+//                               split over GPUs 0 and 1 (half the heads, half the MLP, half the
+//                               head's vocabulary a card), the two halves added after each layer
+//                               by P2P writes; needs peer access both ways. Prefill by the
+//                               wavefront (17c), --spec mtp / auto / lookup with the MTP head whole
+//                               on each card, b70-serve with the prefix cache (17d); no DFlash, no
+//                               draft vocabulary, no l0-int8 prefill (refused by name).
 //                               replica (b70-serve, Qwen3.8 only - spec 13 §11, plan 13b): the model
 //                               on both cards, one engine each, two requests served at once (each
 //                               bitwise what it is alone on its card); every other model and
@@ -78,9 +79,10 @@ inline void parse_parallel(const std::string& v, PipelineArgs& a) {
 // by name, with the plan that builds it (or why not).
 struct TpContext {
   bool prefill_int8 = false;   // --prefill-backend l0-int8 (spec 17c prefills on l0)
-  bool spec = false;           // --spec other than off
+  bool dflash = false;         // --spec dflash / dflash-lookup (spec 17d: not built under TP)
   bool profile = false;        // --profile
   bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next / K2-Horizon
+  bool draft_vocab = false;    // --draft-vocab / --draft-vocab-ids (spec 17d: the draft head is the card's half)
 };
 inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (!a.tp()) return;
@@ -95,16 +97,21 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (c.prefill_int8)
     throw std::runtime_error("--parallel tp prefills on the l0 backend only (spec 17c): l0-int8's activation quantiser "
                              "rotates 1024-k blocks and a card's down has K 8704; drop --prefill-backend l0-int8");
-  if (c.spec)
-    throw std::runtime_error("--parallel tp runs plain decode (spec 17b); --spec mtp / dflash under tensor parallel "
-                             "are spec 17d's");
+  if (c.dflash)
+    throw std::runtime_error("--parallel tp drafts with the MTP head (--spec auto, mtp or lookup - spec 17d); --spec "
+                             "dflash / dflash-lookup under tensor parallel are not built - one card or --parallel pp");
+  if (c.draft_vocab)
+    throw std::runtime_error("--parallel tp's draft head is each card's vocabulary half of lm_head (spec 17d); "
+                             "--draft-vocab is not built under tensor parallel - drop it");
   if (c.profile) throw std::runtime_error("--profile instruments one device's list; it has no --parallel tp");
 }
-// b70-serve: tensor parallel behind the server is spec 17d's.
-inline void refuse_tp_in_serve(const PipelineArgs& a) {
-  if (a.tp())
-    throw std::runtime_error("--parallel tp is b70-decode's until spec 17d (the server under tensor parallel); "
-                             "b70-serve runs --parallel auto, 1, pp or replica");
+// Spec 17d: b70-serve --parallel tp's model, by config.json's architecture before any device (Qwen3.8 only: its per-card
+// descriptor is the one built, model::tp_card_desc).
+inline void check_tp_model(const std::string& architecture, const std::string& model) {
+  if (architecture == "Qwen3_5ForConditionalGeneration") return;
+  throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b-d); " +
+                           (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
+                           " runs --parallel auto, 1 or pp");
 }
 // Two cards visible, before anything is loaded (peer access both ways is checked on the opened devices).
 inline void require_two_devices_for_tp(uint32_t gpus) {

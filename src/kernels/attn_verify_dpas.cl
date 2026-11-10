@@ -114,7 +114,10 @@
 // builds the 1024-lane shapes at 128 GRF only. SLM: q (RB x 4 KB, x 2 at QSPLIT) + the slice merge
 // (RB x 8 KB at KS > 1) + PAIR's exchange (2 KB a sub-group, 3 KB a slice and row block) <= 128 KB.
 //
-// Heads: Qwen3.8's 24 q / 4 kv (Agnes shares them) only; another model's heads keep v2 (the rule).
+// Heads: Qwen3.8's 24 q / 4 kv (Agnes shares them), or (spec 17d) a tensor-parallel card's half, 12 q / 2 kv - the
+// same groups of 6, so a work-group's walk, operands and order are the 24 / 4 build's for those heads (property R:
+// row for row bitwise the one-card kernel's heads 12 r .. 12 r + 11); the grid is (2, TGT). Another model's heads
+// keep v2 (the rule).
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
@@ -144,8 +147,11 @@
 #ifndef PVX
 #define PVX 0
 #endif
-#ifdef FA_Q_HEADS
-#error "attn_verify_dpas: Qwen3.8's 24 / 4 heads only (spec 28c §3); other heads keep attn_v2"
+#if defined(FA_Q_HEADS) != defined(FA_KV_HEADS)
+#error "attn_verify_dpas: FA_Q_HEADS and FA_KV_HEADS come together"
+#endif
+#if defined(FA_Q_HEADS) && !(FA_Q_HEADS == 12 && FA_KV_HEADS == 2)
+#error "attn_verify_dpas: Qwen3.8's 24 / 4 heads, or a tensor-parallel card's 12 / 2 (spec 17d); other heads keep attn_v2"
 #endif
 #if !((M >= 2 && M <= 8) || M == 16)
 #error "attn_verify_dpas: M is 2..8 (16 for the probe's record)"
@@ -160,8 +166,13 @@
 #error "attn_verify_dpas: DSPLIT is 256 or 128"
 #endif
 
+#ifdef FA_Q_HEADS
+#define Q_HEADS FA_Q_HEADS
+#define KV_HEADS FA_KV_HEADS
+#else
 #define Q_HEADS 24
 #define KV_HEADS 4
+#endif
 #define GQA 6
 #define HD 256
 #define SG 16

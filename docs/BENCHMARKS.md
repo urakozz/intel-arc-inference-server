@@ -1096,6 +1096,28 @@ docs/probes/probe-tp-prefill-2026-11-10.md). Without the crossings (a timing sea
 5756 ms against 814 / 6159 with them: the copy engines hide all but ~100 / ~400 ms; the rest of the gap to 2x is a
 card's compute, 22 % above half of one card's at 2048 ids (two 1024-row chunks) and 7 % at 16384.
 
+### Speculative decoding under tensor parallel (spec 17d)
+
+`b70-serve --spec auto --prefix-cache-gb 0`, `--parallel tp` (plan 17d: the MTP head whole on each card, per-card
+verify lists at M = 2..4, AdaptiveK over the TP cost table) against `--parallel 1`, one request at a time, 256 ids
+after a prompt of the repo's docs (tools/box_validate/depth_prompts.py), decode-only t/s (`gen_tps`: the server's own
+record, first id excluded), a warm-up request a server, 3 rounds in rotated order, medians. Int8 head, bf16 KV,
+`--max-len auto`. 2026-11-10, branch spec17d-tp; box grade ITERATE (a CPU reference job ran beside some rounds).
+
+| depth (prompt ids) | one card `--spec auto` t/s | tp `--spec auto` t/s | x one card | acceptance one / tp |
+|---|---|---|---|---|
+| 4096 (4063) | 62.12 | 90.39 | **1.455** | (both: K 3 throughout) |
+| 32768 (31821) | 62.36 | 91.68 | **1.470** | 0.707 / 0.695 |
+
+Rounds: one card 62.21 / 62.12 / 62.01 and 62.36 / 62.21 / 62.36, tp 90.39 / 90.39 / 90.51 and 91.68 / 91.66 / 91.78 (spread
+under 0.3 %); load average 2.6 - 9 (the box otherwise idle; a first run beside a CPU reference job, prompts of 5199 /
+40046 ids, gave 1.451x / 1.458x).
+
+The TP cost table behind AdaptiveK (tp_mtp_test `cost`, medians of 5 interleaved rounds of 16): at depth 4096 the K = 0
+iteration 18.93 ms, verify M = 2 / 3 / 4 x 1.09 / 1.13 / 1.20, a draft 3.01 ms (0.16); at 32768 21.65 ms, x 1.01 /
+1.07 / 1.13, a draft 3.26 ms (0.15). One card's: x 1.04 / 1.09 / 1.13 and 0.13 a draft - TP's verify rows pay their
+M-row crossings, its draft reads the whole head's layer on each card and half the int8 head.
+
 ## Ornith 1.5 MoE (spec 15)
 
 **Nothing here is measured yet.** Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,

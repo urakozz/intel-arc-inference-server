@@ -156,7 +156,11 @@ void require(bool ok, const std::string& what) {
 // row builds, and the MTP head's KV fill over the rows when it has the head.
 // Spec 13c: `DraftRows` is build_draft_rows' list - the draft walk at M rows of different sequences.
 // Spec 17b: `Tp` is build_tp's list (capture.h) - the plain walk at a TP card's shapes with the crossings.
-enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows, Tp };
+// Spec 17d: `TpVerify` is build_tp_verify's - the TP walk at M rows with the per-row GDN slots, then the MTP head's KV
+// fill at the head's own (one-card) shapes; `TpDraft` is build_tp_draft's - the head at M = 1 whose lm_head is the
+// card's vocabulary half and whose argmax is tp.cl's (the host merges the two cards' winners).
+enum class Mode { Plain, Verify, Draft, Stage, StageVerify, StageDraft, VerifyTaps, StageVerifyTaps, Rows, DraftRows, Tp,
+                  TpVerify, TpDraft };
 
 class Capture {
  public:
@@ -223,6 +227,12 @@ class Capture {
       : Capture(ctx, m, b, tap, nullptr, 1, nullptr, Mode::Tp) {
     tp_ = &link;
   }
+  // Spec 17d: one TP card's verify list at M rows (TpVerify) or its draft list `draft_i` (TpDraft, M = 1).
+  Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+          const TpLink& link, uint32_t cap_m, Mode mode, uint32_t draft_i)
+      : Capture(ctx, m, b, nullptr, nullptr, cap_m, &mtp, mode, draft_i) {
+    tp_ = &link;
+  }
   // Spec 13c: build_draft_rows' list at M rows.
   Capture(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
           const DraftRowsBind& dr, uint32_t cap_m)
@@ -256,18 +266,23 @@ class Capture {
       check_rows();
     else if (mode_ == Mode::Tp)
       check_tp();
-    else if (mode_ != Mode::Plain)
+    else if (mode_ == Mode::TpVerify || mode_ == Mode::TpDraft) {   // spec 17d
+      check_tp();
+      check_mtp();
+      check_tp_head();
+    } else if (mode_ != Mode::Plain)
       check_mtp();
     if (mode_ == Mode::StageDraft)
       require(stage_ != nullptr && stage_->has_head(d_),
               "a stage's draft list runs on the device that holds the head");
-    if (mode_ == Mode::Draft || mode_ == Mode::StageDraft || mode_ == Mode::DraftRows) {
+    if (mode_ == Mode::Draft || mode_ == Mode::StageDraft || mode_ == Mode::DraftRows || mode_ == Mode::TpDraft) {
       layer_ = head_layer();
       draft();
-      // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches).
-      require(step_.kernel_count == draft_launches(d_),
+      // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches). Spec 17d: the head's own
+      // descriptor under TP (tp.cl's two argmax stages replace argmax.cl's one for one).
+      require(step_.kernel_count == draft_launches(hd()),
               "the draft list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                  std::to_string(draft_launches(d_)) + " draft_launches() gives " + d_.name);
+                  std::to_string(draft_launches(hd())) + " draft_launches() gives " + hd().name);
       require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
       require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
       step_.list.close();
@@ -303,7 +318,7 @@ class Capture {
     }
     layer_ = kBoundary;
     head();
-    if (mode_ == Mode::Verify) {
+    if (mode_ == Mode::Verify || mode_ == Mode::TpVerify) {   // spec 17d: TP's tail is the same, at the head's shapes
       // The verify rows' post-final-norm hidden (`x`, what lm_head read) into hh rows
       // 1..M; row 0 is h_{pos-1}, left by the previous commit or prefill. Then the
       // head's KV fill over hh rows 0..M-1 (MtpBuffers).
@@ -331,6 +346,9 @@ class Capture {
     require(mode_ != Mode::Tp || step_.kernel_count == tp_launches(d_),
             "the TP list has " + std::to_string(step_.kernel_count) + " launches, not tp_launches()'s " +
                 std::to_string(tp_launches(d_)));
+    require(mode_ != Mode::TpVerify || step_.kernel_count == tp_verify_launches(d_),
+            "the TP verify list has " + std::to_string(step_.kernel_count) + " launches, not tp_verify_launches()'s " +
+                std::to_string(tp_verify_launches(d_)));
     require(mode_ != Mode::Rows || step_.kernel_count == rows_launches(d_, mtp_ != nullptr),
             "the row list has " + std::to_string(step_.kernel_count) + " launches, not rows_launches()'s " +
                 std::to_string(rows_launches(d_, mtp_ != nullptr)));
@@ -471,11 +489,11 @@ class Capture {
     require(mtp_ != nullptr && m_.mtp != nullptr, "an MTP list needs the loaded head and MtpBuffers");
     // Spec 15e: the head's FFN in the descriptor's form - a dense head's two bf16 linears,
     // or a MoE head's layer (its route row is the MoE scratch's last layer slot).
-    require(d_.mtp_head_moe() ? m_.mtp->moe != nullptr && !m_.mtp->gate_up
-                              : m_.mtp->gate_up != nullptr && m_.mtp->down != nullptr && !m_.mtp->moe,
+    require(hd().mtp_head_moe() ? m_.mtp->moe != nullptr && !m_.mtp->gate_up
+                                : m_.mtp->gate_up != nullptr && m_.mtp->down != nullptr && !m_.mtp->moe,
             std::string("the loaded MTP head's FFN is not ") +
-                (d_.mtp_head_moe() ? "the MoE layer" : "the dense MLP") + " " + d_.name + " has");
-    require(!d_.mtp_head_moe() || moe_scratch_layout(d_).layer_slots == d_.layers + 1,
+                (hd().mtp_head_moe() ? "the MoE layer" : "the dense MLP") + " " + hd().name + " has");
+    require(!hd().mtp_head_moe() || moe_scratch_layout(d_).layer_slots == d_.layers + 1,
             "the MoE scratch has no layer slot for the MTP head's MoE layer");
     require(mtp_->max_len == b_.max_len, "MtpBuffers max_len != buffers max_len");
     // Spec 19a: a buffer with more slots (probe_mtp_steps' M = 5..8 lists) takes up to
@@ -497,7 +515,7 @@ class Capture {
                 gdn_state_stride() * d_.gdn_layers * ((mtp_->slots - 1) + size_t(mtp_->slots) * (mtp_->seqs - 1)),
             "gdn_spec is not (slots - 1) x " + std::to_string(d_.gdn_layers) + " slices (+ slots per further sequence)");
     require(mtp_->kv_lay.form == b_.kv_lay.form && mtp_->kv_lay.layers == 1 &&
-                mtp_->kv_lay.layer_rows() == kv_stride_ && mtp_->kv_k.size() == mtp_->kv_lay.bytes() &&
+                mtp_->kv_lay.layer_rows() == head_kv_stride() && mtp_->kv_k.size() == mtp_->kv_lay.bytes() &&
                 mtp_->kv_v.size() == mtp_->kv_lay.bytes(),
             "the head's KV is not one [max_len][kv-heads][256] layer in the main cache's form");
     require(mtp_->hh.size() >= size_t(kCapM + 1) * d_.hidden * kBf16, "hh is too small");
@@ -518,20 +536,23 @@ class Capture {
   // over an int8 cache, spec 12b). `ctrl` is the list's
   // control block (the head's `hctl` in the draft list); both read q from attn_q, write
   // partials into attn_part and the gated bf16 rows into attn_out.
-  void attn_pair(void* ctrl, const KvLayer& kv) {
+  void attn_pair(void* ctrl, const KvLayer& kv) { attn_pair(ctrl, kv, d_); }
+  // `ad`: the descriptor whose heads the cache holds - the walk's, or (spec 17d) the MTP head's own under TP.
+  void attn_pair(void* ctrl, const KvLayer& kv, const model::ModelDesc& ad) {
     // Spec 13a: the main layers' pair over the row table (a row list's head runs none); spec 13c: a row draft list's
     // head over its own table.
     if (mode_ == Mode::Rows || mode_ == Mode::DraftRows) {
       attn_pair_rows(ctrl, kv);
       return;
     }
+    require(&ad == &d_ || vattn_ == VerifyAttn::V2, "the head's attention runs v2 (its lists are M = 1)");
     void* kk = kv.k;
     void* vv = kv.v;
     if (kv8_) {
       // Spec 12b: kv8.cl's attn_decode_v2_kv8 / attn_reduce_v2_kv8 - v2's grid, partials and
       // stride, reading int8 K / V and their fp16 scales; the reduce un-rotates each head's
       // output before the gate.
-      const std::string v = kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
+      const std::string v = kernels::attn_v2_kv8_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads);
       {
         // Spec 28c: attn_verify_dpas_kv8 takes attn_decode_v2_kv8's arguments and writes its partials.
         l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2_kv8", kWgAttn);
@@ -542,7 +563,7 @@ class Capture {
         k.arg_ptr(4, kv.v);
         k.arg_ptr(5, kv.vs);
         k.arg_ptr(6, b_.attn_part.ptr());
-        launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+        launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
       }
       {
         l0::Kernel& k = kernel(v, "attn_reduce_v2_kv8", kWgAttn);
@@ -550,13 +571,13 @@ class Capture {
         k.arg_ptr(1, b_.attn_part.ptr());
         k.arg_ptr(2, b_.attn_gate.ptr());
         k.arg_ptr(3, b_.attn_out.ptr());
-        launch(k, d_.fa_q_heads, kCapM);
+        launch(k, ad.fa_q_heads, kCapM);
       }
       return;
     }
     // attn_v2.cl: grid (4 kv-heads, kAttnV2Blocks), WG 256; the stride is derived per
     // row from Control::pos on the device, so one list serves every depth.
-    const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, d_.fa_q_heads, d_.fa_kv_heads);
+    const std::string v = kernels::attn_v2_variant(kCapM, DecodeBuffers::kAttnV2Blocks, ad.fa_q_heads, ad.fa_kv_heads);
     {
       // Spec 28c: attn_verify_dpas takes attn_decode_v2's arguments and writes its partials.
       l0::Kernel& k = vattn_ == VerifyAttn::Dpas ? dpas_kernel() : kernel(v, "attn_decode_v2", kWgAttn);
@@ -565,7 +586,7 @@ class Capture {
       k.arg_ptr(2, kk);
       k.arg_ptr(3, vv);
       k.arg_ptr(4, b_.attn_part.ptr());
-      launch(k, d_.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
+      launch(k, ad.fa_kv_heads, DecodeBuffers::kAttnV2Blocks);
     }
     // attn_reduce_v2(ctrl, attn_part, attn_gate, attn_out), grid (24 q-heads, M).
     {
@@ -574,7 +595,7 @@ class Capture {
       k.arg_ptr(1, b_.attn_part.ptr());
       k.arg_ptr(2, b_.attn_gate.ptr());
       k.arg_ptr(3, b_.attn_out.ptr());
-      launch(k, d_.fa_q_heads, kCapM);
+      launch(k, ad.fa_q_heads, kCapM);
     }
   }
 
@@ -815,7 +836,7 @@ class Capture {
     // single-card walks.
     if (resume_) {
       resume_ = false;
-    } else if (mode_ == Mode::Tp && s_prev != 0) {
+    } else if (tp_main() && s_prev != 0) {
       tp_fold(s_prev);   // spec 17b: both cards' parts of the row-parallel linear, after the peer's arrives
     } else {
       l0::Kernel& k =
@@ -889,7 +910,8 @@ class Capture {
       launch(k, s.N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
       launch(k, s.N / kGemvColsPerWg, s.S);
-    if (mode_ == Mode::Tp && layer != loader::kTopLevel && loader::tp_row_parallel(id)) tp_send(s.S);   // spec 17b
+    if (tp_main() && layer != loader::kTopLevel && loader::tp_row_parallel(id))   // spec 17b
+      tp_send(t ? kernels::gemm_sm_out_s(*t) : s.S);
     return t ? kernels::gemm_sm_out_s(*t) : s.S;
   }
 
@@ -927,12 +949,42 @@ class Capture {
                 (!tp_->folded || tp_->own) && tp_->spin_limit != 0 && tp_->rank < model::kTpSize,
             "a TP list needs both landing buffers, the counters, the state words, the spin bound (and the folded "
             "row for the folded form)");
-    require(prof_ == nullptr && kCapM == 1, "a TP list is M = 1 with no profiling events (spec 17b)");
+    require(prof_ == nullptr && (mode_ == Mode::TpVerify ? kCapM <= MtpBuffers::kSlots : kCapM == 1),
+            "a TP list is M = 1 (a verify list M <= 4) with no profiling events (spec 17b / 17d)");
     tp_s_ = d_.shape(LinearId::Down).S;
     require(d_.shape(LinearId::OutProj).S == tp_s_ && d_.shape(LinearId::OProj).S == tp_s_,
             "the row-parallel linears of a TP card share one S");
     require(d_.ffn_fold_s() == tp_s_, "the FFN's fold is not the crossing's");
   }
+  // Spec 17d: the MTP head runs at its own (one-card) shapes in a TP card's decode scratch, which is sized for kM rows
+  // at the card's - so it holds the head's rows at M <= 4 (its 24 q heads are two cards' 12) and its draft's
+  // intermediate at M = 1. Checked, not assumed; the head's lm_head is the card's int8 vocabulary half.
+  void check_tp_head() {
+    const model::ModelDesc& h = hd();
+    require(tp_->head != nullptr && h.hidden == d_.hidden && !h.mtp_head_moe() && !m_.draft_vocab,
+            "a TP card's head lists need the head's descriptor at the card's hidden (a dense head, no draft "
+            "vocabulary)");
+    const size_t M = kCapM, qv = size_t(h.fa_value_dim());
+    require(b_.attn_q.size() >= M * qv * kFp32 && b_.attn_gate.size() >= M * qv * kFp32 &&
+                b_.attn_out.size() >= M * qv * kBf16 &&
+                b_.attn_part.size() >= size_t(h.fa_q_heads) * DecodeBuffers::kAttnV2Blocks * M * 258 * kFp32 &&
+                b_.x.size() >= M * 2 * h.hidden * kBf16 &&
+                b_.partials.size() >= M * size_t(m_.mtp->qkv.shape.N) * kFp32,
+            "the card's decode scratch does not hold the MTP head's " + std::to_string(kCapM) + " rows");
+    if (mode_ == Mode::TpDraft)
+      require(b_.x.size() >= size_t(m_.mtp->down->shape.K) * kBf16 &&
+                  b_.partials.size() >= size_t(m_.mtp->gate_up->shape.N) * kFp32,
+              "the card's decode scratch does not hold the MTP head's intermediate");
+    require(m_.linears.at({loader::kTopLevel, LinearId::LmHead}).kind == model::WeightKind::Int8,
+            "a TP card's draft head is the int8 vocabulary half (loader::load_tp, LmHeadForm::Int8)");
+  }
+  // The MTP head's descriptor: the model's own, or under TP (spec 17d) the one-card descriptor the head was loaded
+  // at (TpLink::head) - the card's is half the heads.
+  const model::ModelDesc& hd() const { return tp_ && tp_->head ? *tp_->head : d_; }
+  size_t head_kv_stride() const {
+    return size_t(b_.max_len) * hd().fa_kv_heads * Qwen35::kFaHeadDim * (kv8_ ? 1 : kBf16);
+  }
+  bool tp_main() const { return mode_ == Mode::Tp || mode_ == Mode::TpVerify; }
   uint32_t gemv(uint32_t layer, LinearId id, const void* x) { return gemv(layer, id, x, b_.partials); }
 
   // Spec 28b: the gemm_sm row this list binds for a shape, or null (gemv / gemv_i8w): the rule
@@ -1121,11 +1173,11 @@ class Capture {
       // verify list binds its own slots' allocation (spec_mem(), pp_gdn_spec_bytes) at its
       // own slice g - the same binary, the same whole-model slot stride.
       const bool slots = mode_ == Mode::Verify || mode_ == Mode::StageVerify || mode_ == Mode::VerifyTaps ||
-                         mode_ == Mode::StageVerifyTaps;
+                         mode_ == Mode::StageVerifyTaps || mode_ == Mode::TpVerify;   // spec 17d: TP's too
       // Spec 19a: the slot count is the buffers' (kSlots on every engine: the historical
       // names); a stage's verify list keeps kSlots (its spec_mem() is pp_gdn_spec_bytes').
       // Spec 19c: a tap drafter's verify list binds its own TapVerifyDims::kSlots (8).
-      const uint32_t n_slots = mode_ == Mode::Verify                                          ? mtp_->slots
+      const uint32_t n_slots = mode_ == Mode::Verify || mode_ == Mode::TpVerify               ? mtp_->slots
                                : mode_ == Mode::VerifyTaps || mode_ == Mode::StageVerifyTaps ? tv_->slots
                                                                                               : MtpBuffers::kSlots;
       l0::Kernel& k = kernel(slots ? kernels::gdn_step_slots_variant(kCapM, d_.gdn_layers, d_.gdn_k_heads,
@@ -1262,7 +1314,7 @@ class Capture {
     }
     // argmax_stage1(logits, part) - src/kernels/argmax.cl (Task 3), grid
     // (kVocab/1024 = 243, M), WG 256.
-    if (mode_ == Mode::Tp) {   // spec 17b: the card's vocabulary half, the global id and its value into Control
+    if (tp_main()) {   // spec 17b: the card's vocabulary half, the global id and its value into Control (17d: M rows)
       const uint32_t rows = lm.shape.N;
       const std::string v = kernels::tp_argmax_variant(kCapM, rows, tp_->vocab_used, tp_->rank * rows);
       {
@@ -1581,9 +1633,10 @@ class Capture {
   // queries in attn_q / attn_gate and the head's residual in `resid`.
   void head_front(const void* hidden) {
     const loader::MtpHead& h = *m_.mtp;
-    const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden, X = 2 * H;
+    const model::ModelDesc& hd_ = hd();   // spec 17d: the head's own shapes under TP
+    const uint32_t G = DecodeBuffers::kNormGroups, H = hd_.hidden, X = 2 * H;
     {
-      l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM, d_.hidden), "embed_gather", kWgEmbed);
+      l0::Kernel& k = kernel(kernels::embed_gather_variant(kCapM, hd_.hidden), "embed_gather", kWgEmbed);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, m_.embed.ptr());
       k.arg_ptr(2, b_.resid.ptr());
@@ -1591,20 +1644,20 @@ class Capture {
     }
     const std::string fold0 = kernels::prep_res_fold_variant(kCapM, H, 0, G);
     const std::string cat = kernels::prep_norm_finish_strided_variant(kCapM, H, G, G, X);
-    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPreE)),
+    fold_norm(fold0, cat, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreE)),
               b_.x.ptr());
     fold_norm(fold0, cat, b_.partials.ptr(), const_cast<void*>(hidden),
-              at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPreH)), at(b_.x, size_t(H) * kBf16));
+              at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPreH)), at(b_.x, size_t(H) * kBf16));
     head_gemv(h.fc, b_.x.ptr(), b_.partials.ptr());
     fold_norm(kernels::prep_res_fold_zero_variant(kCapM, H, G),
               kernels::prep_norm_finish_variant(kCapM, H, G, G), b_.partials.ptr(),
-              b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormInput)), b_.x.ptr());
+              b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormInput)), b_.x.ptr());
     head_gemv(h.qkv, b_.x.ptr(), b_.partials.ptr());
     const KvLayer kv = head_kv();
     if (mode_ == Mode::Rows || mode_ == Mode::DraftRows)   // spec 13a / 13c: the head's rows over its own table
       attn_prep_rows(hctl(), h.fa.ptr(), kv, true, mode_ == Mode::Rows ? br_->head_rows : dr_->head_rows);
     else if (kv8_) {   // spec 12b: the head's KV in the main cache's form
-      l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
+      l0::Kernel& k = kernel(kernels::attn_prep_s1_kv8_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads), "attn_prep_kv8", kWgAttn);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, h.fa.ptr());
@@ -1615,9 +1668,9 @@ class Capture {
       k.arg_ptr(7, kv.v);
       k.arg_ptr(8, kv.ks);
       k.arg_ptr(9, kv.vs);
-      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
+      launch(k, hd_.fa_q_heads + hd_.fa_kv_heads, kCapM);
     } else {
-      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM, d_.fa_q_heads, d_.fa_kv_heads), "attn_prep", kWgAttn);
+      l0::Kernel& k = kernel(kernels::attn_prep_s1_variant(kCapM, hd_.fa_q_heads, hd_.fa_kv_heads), "attn_prep", kWgAttn);
       k.arg_ptr(0, hctl());
       k.arg_ptr(1, b_.partials.ptr());
       k.arg_ptr(2, h.fa.ptr());
@@ -1626,7 +1679,7 @@ class Capture {
       k.arg_ptr(5, b_.attn_gate.ptr());
       k.arg_ptr(6, kv.k);   // layer 0 of the head's cache (at the bound slot's base)
       k.arg_ptr(7, kv.v);
-      launch(k, d_.fa_q_heads + d_.fa_kv_heads, kCapM);
+      launch(k, hd_.fa_q_heads + hd_.fa_kv_heads, kCapM);
     }
   }
 
@@ -1649,14 +1702,15 @@ class Capture {
   // head's FFN is the four-launch MoE block in place of gate||up, SiLU, down - 24.
   void draft() {
     const loader::MtpHead& h = *m_.mtp;
-    const uint32_t G = DecodeBuffers::kNormGroups, H = d_.hidden;
+    const model::ModelDesc& hd_ = hd();   // spec 17d: the head's own shapes under TP
+    const uint32_t G = DecodeBuffers::kNormGroups, H = hd_.hidden;
     void* const dh = mode_ == Mode::DraftRows ? dr_->dh : mtp_->dh.ptr();   // spec 13c: the rows' chain hidden
     head_front(dh);
-    attn_pair(hctl(), head_kv());
+    attn_pair(hctl(), head_kv(), hd_);
     head_gemv(h.o, b_.attn_out.ptr(), b_.partials.ptr());
     const std::string fold1 = kernels::prep_res_fold_variant(kCapM, H, 1, G);
     const std::string fin = kernels::prep_norm_finish_variant(kCapM, H, G, G);
-    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormPost)),
+    fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormPost)),
               b_.x.ptr());
     if (h.moe) {
       // Spec 15e: a MoE head's FFN is the main layers' block (moe.cl at M = 1) on the
@@ -1665,7 +1719,7 @@ class Capture {
       // launches in all, one more than the dense head's 23.
       moe_block(*h.moe, d_.layers);
       fold_norm(kernels::prep_res_fold_variant(kCapM, H, 0, G), fin, b_.partials.ptr(),
-                b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
+                b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormFinal)),
                 b_.x.ptr());
     } else {
       head_gemv(*h.gate_up, b_.x.ptr(), b_.partials.ptr());
@@ -1679,7 +1733,7 @@ class Capture {
         launch(k, (head_i + kSiluChunk - 1) / kSiluChunk, kCapM);
       }
       head_gemv(*h.down, b_.x.ptr(), b_.partials.ptr());
-      fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(d_, loader::kMtpNormFinal)),
+      fold_norm(fold1, fin, b_.partials.ptr(), b_.resid.ptr(), at(h.norms, loader::mtp_norm_off(hd_, loader::kMtpNormFinal)),
                 b_.x.ptr());
     }
     step_.list.copy(dh, b_.x.ptr(), size_t(H) * kBf16 * kCapM);
@@ -1690,6 +1744,26 @@ class Capture {
       return;
     }
     const loader::DeviceWeight& lm = m_.linears.at({loader::kTopLevel, LinearId::LmHead});
+    if (mode_ == Mode::TpDraft) {
+      // Spec 17d: the card's int8 vocabulary half and tp.cl's argmax over it into hctl (out_token, out_value,
+      // cur_token, pos + 1) - the host merges the two cards' winners before the next draft list (TpEngine::draft).
+      gemv_i8w(lm, b_.x.ptr(), logits);
+      const uint32_t rows = lm.shape.N;
+      const std::string v = kernels::tp_argmax_variant(kCapM, rows, tp_->vocab_used, tp_->rank * rows);
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage1", kWgArgmax);
+        k.arg_ptr(0, logits);
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, (rows + kArgmaxChunk - 1) / kArgmaxChunk, kCapM);
+      }
+      {
+        l0::Kernel& k = kernel(v, "tp_argmax_stage2", kWgArgmax);
+        k.arg_ptr(0, hctl());
+        k.arg_ptr(1, b_.argmax_part.ptr());
+        launch(k, 1, 1);
+      }
+      return;
+    }
     if (lm.kind == model::WeightKind::Int4) {
       const model::GemvShape& s = lm.shape;
       l0::Kernel& k =
@@ -1839,10 +1913,27 @@ class Capture {
 }  // namespace
 
 size_t tp_launches(const model::ModelDesc& d) { return decode_launches(d) + 2 * size_t(d.layers); }
+size_t tp_verify_launches(const model::ModelDesc& d) { return tp_launches(d) + 10; }
 
 CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
                       l0::Mem* debug_resid) {
   return Capture(ctx, m, b, debug_resid, link).run();
+}
+
+CapturedStep build_tp_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                             const TpLink& link, uint32_t M, const CaptureOptions& opt) {
+  if (M == 0 || M > mtp.slots || M > MtpBuffers::kSlots)
+    throw std::runtime_error("runtime::build_tp_verify: M " + std::to_string(M) + " is outside [1, " +
+                             std::to_string(MtpBuffers::kSlots) + "]");
+  return Capture(ctx, m, b, mtp, link, M, Mode::TpVerify, 0).options(opt).run();
+}
+
+CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
+                            const TpLink& link, uint32_t i) {
+  if (i >= MtpBuffers::kMaxK)
+    throw std::runtime_error("runtime::build_tp_draft: draft index " + std::to_string(i) + " is outside [0, " +
+                             std::to_string(MtpBuffers::kMaxK) + ")");
+  return Capture(ctx, m, b, mtp, link, 1, Mode::TpDraft, i).run();
 }
 
 size_t decode_launches(const model::ModelDesc& d) {

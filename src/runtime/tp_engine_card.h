@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <vector>
 
 #include "l0/cmdlist.h"
 #include "l0/fence.h"
@@ -52,6 +53,21 @@ struct TpEngine::Card {
   std::unique_ptr<l0::Mem> own;    // folded: this card's folded row
   std::unique_ptr<l0::Mem> tap;    // debug_resid
   std::optional<CapturedStep> step;
+  // Spec 17d: the MTP head's buffers and lists (null / empty without the head), and the link the lists were captured
+  // with (kept for spec 28c's deep lists).
+  TpLink link;
+  std::unique_ptr<MtpBuffers> mtp;
+  Control* hctl = nullptr;
+  std::vector<CapturedStep> drafts;                          // [kMaxDraft]
+  std::vector<CapturedStep> verifies;                        // [M - 1], M = 1..kSlots, by the rule at row 0's key 1
+  std::vector<std::unique_ptr<CapturedStep>> verify_deep;    // [M - 1]: DPAS bound where the rule switches by depth
+  std::vector<uint32_t> verify_deep_from;
+  // The live GDN state (slot 0, or a speculative slot after a commit) and the hh rows (row 0 = h_{pos-1}).
+  uint8_t* live_gdn() const {
+    const uint32_t live = mtp ? ctl->gdn_live : 0;
+    return live == 0 ? persist.gdn_state.as<uint8_t>()
+                     : mtp->gdn_spec.as<uint8_t>() + size_t(live - 1) * persist.gdn_state.size();
+  }
 
   size_t bytes_crossing() const {
     return land.size() + send_ctr.size() + fold_ctr.size() + state.size() + (own ? own->size() : 0);
