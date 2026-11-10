@@ -8,6 +8,22 @@
 
 namespace q4judge {
 
+inline bool finite_reference(const float* values, size_t count) {
+  return std::all_of(values, values + count, [](float x) { return std::isfinite(x); });
+}
+
+// Compare the same number of layer-position decisions and teacher-forced token rows on both paths.
+struct RelativeCounts {
+  uint64_t prefill_rejected = 0, decode_rejected = 0;
+  uint32_t prefill_accepted = 0, decode_accepted = 0;
+  bool routes_ok() const {
+    // prefill <= floor(1.2 * decode), without overflow or a floating-point boundary.
+    return prefill_rejected <= decode_rejected || prefill_rejected - decode_rejected <= decode_rejected / 5;
+  }
+  bool tokens_ok() const { return prefill_accepted >= decode_accepted; }
+  bool passes() const { return routes_ok() && tokens_ok(); }
+};
+
 // Distances, rather than cosines: an exact decode reference gives no allowance beyond numerical noise.
 inline bool within_twice(double prefill, double decode) {
   return std::isfinite(prefill) && std::isfinite(decode) && prefill >= 0 && decode >= 0 &&
