@@ -7,7 +7,7 @@
   replica_check.py b4 --replica FILE [--wall 120]
 
 Every request carries a key in the OpenAI `user` field; the server's --log-requests record keeps the request body,
-and under --parallel replica the `slot` (card) that served it. One JSON line per request in --out: key, mode, ids,
+and under --parallel replica the `card` and `slot` that served it. One JSON line per request in --out: key, mode, ids,
 text, finish_reason, t0 / t1 (client wall clock), the error if any.
 
 The requests (the golden prompts, tests/golden/prompts/{prose,code,cjk}.txt, as /v1/completions and as one chat
@@ -22,9 +22,10 @@ message, greedy and seeded sampled - temperature 0.7, seed 11 -, ignore_eos, --m
           not change, and two requests right after must both start at once); a stop string ending one row of a
           pair; a stream beside a plain request (the streamed text equals the same request's non-streamed text).
 
-`compare` (R1 / B2): every pairs request's ids equal the same request alone on the card that served it (its log
-record's slot) - bitwise, greedy and seeded; prints `R1 <key> card <c> IDENTICAL` or the first difference; also
-checks the pairs really overlapped (t_start of one before t_end of the other, both cards used). `b3` checks A' was
+`compare` (R1 / B2): requests alone on their card must equal that card's serial run bitwise. Requests overlapping
+on different slots of the same card may share batched steps: their first differences go through serve_judge.py's
+f32 judge (missing references SKIP, exit 77). Also checks that pairs really overlapped and both cards were used.
+`b3` checks A' was
 restored on the other card (cached_tokens > 0, slot != A's) and equals A' on that card alone. `b4` checks the
 dropped stream's neighbour finished, the two requests after it both answered within --wall seconds, the stop row
 ended with "stop" and its neighbour ran to its length, and the streamed text equals the non-streamed one. Exit 1 on
@@ -83,6 +84,7 @@ def one(base, key, ep, body, timeout, mode):
         j = post(base + ep, body, timeout)
         c = j["choices"][0]
         rec["ids"] = c.get("token_ids", [])
+        rec["prompt_ids"] = j.get("prompt_token_ids")
         rec["text"] = c["message"]["content"] if "message" in c else c.get("text", "")
         rec["finish_reason"] = c.get("finish_reason")
         rec["cached"] = j.get("usage", {}).get("prompt_tokens_details", {}).get("cached_tokens")
@@ -227,17 +229,33 @@ def load(path):
         return {r["key"]: r for r in (json.loads(x) for x in f if x.strip())}
 
 
-def slots(log_dir):
-    """key -> (card, t_start, t_end) from the server's --log-requests records (`card` since replica x slots, where a
-    card has several slots; before it the slot was the card)."""
+def server_records(log_dir):
+    """key -> the server's --log-requests record (card, slot, timings and exact prompt ids)."""
     out = {}
     for p in glob.glob(os.path.join(log_dir, "*.json")):
         with open(p, encoding="utf-8") as f:
             r = json.load(f)
         req = r.get("request")
         if isinstance(req, dict) and "user" in req:
-            out[req["user"]] = (r.get("card", r.get("slot", -1)), r.get("t_start"), r.get("t_end"))
+            out[req["user"]] = r
     return out
+
+
+def slots(log_dir):
+    """key -> (card, t_start, t_end); legacy logs used slot as the card number."""
+    return {key: (r.get("card", r.get("slot", -1)), r.get("t_start"), r.get("t_end"))
+            for key, r in server_records(log_dir).items()}
+
+
+def shared_card(key, records):
+    """Different slots on one card, overlapping in the server. Legacy logs have no per-card batching."""
+    r = records[key]
+    if "card" not in r or "slot" not in r:
+        return False
+    return any(k != key and q.get("card") == r["card"] and "slot" in q and q["slot"] != r["slot"]
+               and all(x.get(t) is not None for x in (r, q) for t in ("t_start", "t_end"))
+               and r["t_start"] < q["t_end"] and q["t_start"] < r["t_end"]
+               for k, q in records.items())
 
 
 def first_diff(a, b):
@@ -251,10 +269,18 @@ def compare(a):
     rep = load(a.replica)
     cards = [load(a.card0), load(a.card1)]
     where = slots(a.server_log)
-    bad = 0
+    logs = server_records(a.server_log)
+    alone_logs = [server_records(os.path.join(os.path.dirname(path), "server-log")) for path in (a.card0, a.card1)]
+    import serve_judge as sj
+    reviewed, cache, awaiting = sj.reviewed_rows(a.header), {}, set()
+    bad = skipped = 0
     used = set()
-    for key, r in sorted(rep.items()):
+    expected = set(cards[0]) | set(cards[1])
+    for key in sorted(expected | set(rep)):
+        r = rep.get(key, {})
         if "ids" not in r:
+            print(f"R1 {key}: missing reply or request error: FAIL")
+            bad += 1
             continue
         slot = where.get(key, (-1,))[0]
         if slot not in (0, 1):
@@ -270,8 +296,17 @@ def compare(a):
         d = first_diff(r["ids"], ref["ids"])
         if d < 0:
             print(f"R1 {key} card {slot} IDENTICAL ({len(r['ids'])} ids)")
+        elif shared_card(key, logs):
+            plain = dict(set="replica", name=key, out_ids=ref["ids"],
+                         prompt_ids=ref.get("prompt_ids") or alone_logs[slot].get(key, {}).get("prompt_ids"))
+            batched = dict(set="replica", name=key, out_ids=r["ids"], prompt_ids=logs[key].get("prompt_ids"))
+            verdict, text, keys = sj.judge_pair(plain, batched, a, cache, reviewed)
+            awaiting.update(keys)
+            bad += verdict == sj.Verdict.FAIL
+            skipped += verdict == sj.Verdict.SKIP
+            print(f"R1 {key} card {slot} JUDGED (shared card): {verdict}: {text}")
         else:
-            print(f"R1 {key} card {slot} DIFFERS at id {d} of {len(r['ids'])}")
+            print(f"R1 {key} card {slot} DIFFERS at id {d} of {len(r['ids'])} (alone on card: bitwise required)")
             bad += 1
     if used != {0, 1}:
         print(f"R1: only card(s) {sorted(used)} served - not two at once")
@@ -286,8 +321,13 @@ def compare(a):
     print(f"R1: {overlapped}/{len(keys) // 2} pairs overlapped in the server")
     if overlapped == 0:
         bad += 1
-    print("R1 PASS" if bad == 0 else f"R1 FAIL ({bad})")
-    return 1 if bad else 0
+    for key in sorted(awaiting):
+        print(f"    awaiting f32 reference: {key}")
+    if skipped:
+        print(f"SKIP_REASON replica_check: {skipped} differing request(s) not judged; "
+              f"{len(awaiting)} awaiting f32 reference (contexts dumped to {a.dump})")
+    print(f"R1 FAIL ({bad})" if bad else (f"R1 SKIP ({skipped})" if skipped else "R1 PASS"))
+    return 1 if bad else (77 if skipped else 0)
 
 
 def b3(a):
@@ -354,6 +394,14 @@ def main():
         c.add_argument("--server-log", required=True)
         c.add_argument("--card0", required=True)
         c.add_argument("--card1", required=True)
+        if name == "compare":
+            c.add_argument("--dump", default=os.path.join(ROOT, "oracle-forced-dumps", "qwen-serve"))
+            c.add_argument("--judge", default=os.path.join(ROOT, "oracle-out-qwen-f32-i8head-forced"))
+            c.add_argument("--bf16", default=os.path.join(ROOT, "oracle-out-qwen-bf16top-forced"))
+            c.add_argument("--tag", default="serve_int8")
+            c.add_argument("--header", default=os.path.join(ROOT, "tests", "server", "spec_judge.h"))
+            c.add_argument("--vocab-used", type=int, default=248077)
+            c.add_argument("--root", default=ROOT)
     c = sub.add_parser("b4")
     c.add_argument("--replica", required=True)
     c.add_argument("--wall", type=float, default=120)
