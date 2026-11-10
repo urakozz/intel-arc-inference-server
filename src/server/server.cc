@@ -172,7 +172,8 @@ bool Server::listen() {
     if (impl_->batch) {
       for (uint32_t s = 0; s < impl_->batch->slots(); ++s)
         ctx += (s ? " / " : "") + std::to_string(impl_->batch->slot_max_len(s));
-      ctx += " ids (card 0 / card 1)";
+      // One slot per card (plan 13b) names the cards; several slots on a card (13c, replica x slots) per slot.
+      ctx += impl_->batch->overlaps_prefill() && impl_->batch->slots() == 2 ? " ids (card 0 / card 1)" : " ids per slot";
     } else {
       ctx = std::to_string(e.max_len()) + " ids";
     }
@@ -573,6 +574,8 @@ void Server::log_request(bool chat, const std::string& body, double t_start,
       {"response_text", outcome.raw_text},
   };
   if (outcome.slot >= 0) record["slot"] = outcome.slot;   // plan 13b: which card (the serial record is unchanged)
+  if (outcome.slot >= 0 && impl_->batch != nullptr && impl_->batch->overlaps_prefill())   // replica x slots: the card
+    record["card"] = impl_->batch->card_of(static_cast<uint32_t>(outcome.slot));
   char name[32];
   std::snprintf(name, sizeof(name), "/%06llu.json",
                 static_cast<unsigned long long>(++impl_->next_log));

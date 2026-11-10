@@ -89,6 +89,12 @@ struct BatchEngineIface {
   virtual void prefill_begin(const std::vector<Chunk>& chunks) { prefill(chunks); }
   virtual bool prefill_ready(uint32_t /*slot*/) { return true; }
   virtual void prefill_end(uint32_t /*slot*/) {}
+  // Replica x slots (several slots per card, cli::ReplicaEngine over cli::SlotsEngine): the card slot `slot` runs on.
+  // With overlaps_prefill() a card runs one call at a time, so the scheduler keeps at most one chunk in flight per
+  // card and touches none of a card's slots while its chunk runs (the card is busy: the call would wait behind it).
+  // The default - each slot its own card - is plan 13b's replica; an engine without overlaps_prefill() is one device
+  // whatever this says.
+  virtual uint32_t card_of(uint32_t slot) { return slot; }
 
   // One decode step over the active rows (distinct slots, each with an id pending). Returns,
   // per row in order, the slot's pending id (consumed). The next pending id is the argmax,
@@ -134,6 +140,9 @@ struct BatchEngineIface {
   // rows' K to it - every row keeps its pending id, the drafts go to the longest-running requests first - and feeds
   // each request's policy the K it was given.
   virtual uint32_t row_budget(uint32_t /*active*/) { return 0; }
+  // Replica x slots: the budget of one card's step when `active` of its rows decode - with overlaps_prefill() the
+  // scheduler deals each card's rows their drafts against that card's own budget (each card runs its own step).
+  virtual uint32_t card_row_budget(uint32_t /*card*/, uint32_t active) { return row_budget(active); }
   virtual std::vector<std::vector<uint32_t>> step_spec(const std::vector<SpecRow>& rows) {
     std::vector<Row> plain;
     for (const SpecRow& r : rows) plain.push_back({r.slot, r.sampling, r.rng});
