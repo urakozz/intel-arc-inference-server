@@ -10,11 +10,17 @@
 //                T2  judged against one card by the golden tie rule (tests/server/greedy_tie.h, tp_decode_test's
 //                    folded rule): the ids identical, or the first divergence a near-tie (<= 1 bf16 ulp) of the
 //                    reference row. The first id after a prefill has no recorded row, so a divergence there fails.
+//                    A divergence that is not a near-tie goes to the f32 judge of its context (forced_judge.h:
+//                    B70_DUMP_FORCED dumps it, tools/box_validate/f32_refs.sh forced-qwen makes the judge,
+//                    B70_FORCED_JUDGE reads it): TP's id there must be one the judge accepts; without the judge the
+//                    test ends SKIP (77) "awaiting", never PASS.
 //                    The K split of the row-parallel linears is another summation order than one card's: logits,
 //                    state and KV are printed (how many bytes differ, the second row's cosine), not gated - spec 2
 //                    §6.3's rule, "tokens gate, tensors diagnose";
-//                chunk invariance  the 2820-id prompt at chunk 1024 (two pairs) bitwise the same at chunk 2048
-//                    (one pair): the 64-grid cuts are the walk's own, so the wavefront's pairing changes nothing;
+//                chunk invariance  the 2820-id prompt at chunk 1024 (two pairs) against chunk 2048 (one pair),
+//                    held to one card walking the same two chunk lists (prefill_split_test's rule: cuts on the 64-grid
+//                    are bitwise; the lists also differ in their last chunk's rows): bitwise where one card is, KV
+//                    and first id where only one card's KV is;
 //                replay  reset() and the first prompt again, bitwise the first run.
 //
 // argv: [1] the checkpoint. B70_KV_CACHE selects the KV form (tp_prefill_kv8_test). The int8 head (b70-decode's).
@@ -26,11 +32,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "check.h"
+#include "forced_judge.h"
 #include "golden_common.h"
 #include "greedy_tie.h"
 #include "l0/cmdlist.h"
@@ -55,6 +63,7 @@ struct Case {
 struct Record {
   std::vector<uint32_t> ids;
   std::vector<std::vector<float>> rows;   // rows[i] decided ids[i] (rows[0]: none recorded, empty)
+  std::vector<uint32_t> mid;              // the two-call case: the 8 ids between the calls
   std::vector<uint8_t> state, kv;         // right after the (last) prefill
   uint32_t pos = 0;
 };
@@ -88,7 +97,7 @@ Record run(E& e, const Case& c, const Logits& logits, const std::function<void()
   e.reset();
   e.prefill(c.first);
   if (!c.second.empty()) {
-    e.generate(8);
+    r.mid = e.generate(8);
     e.prefill(c.second);
   }
   if (after_prefill) after_prefill();
@@ -164,6 +173,7 @@ int main(int argc, char** argv) {
 
   // --- the one-card reference on card 0 (freed before the TP cards load) ---------------------------------------
   std::vector<Record> ref;
+  bool one_card_invariant = false, one_card_kv_invariant = false;
   {
     runtime::Engine e(d0, loader::load(d0, ckpt, kMaxLen, false, kHead), kMaxLen, /*debug_resid=*/false, kv);
     l0::CmdList imm = l0::CmdList::immediate(d0);
@@ -177,6 +187,24 @@ int main(int argc, char** argv) {
       std::printf("reference (one card, card 0): %s, pos %u, %s KV\n", c.name.c_str(), ref.back().pos,
                   runtime::kv_cache_name(kv));
     }
+    // One card's own chunk invariance (prefill_split_test's rule: cuts at multiples of 64 are bitwise): the long
+    // prompt at chunk 1024 against chunk 2048 - the yardstick the TP check below is held to.
+    // TP's chunk lists differ in the LAST chunk too (2048: 1472 + 1348; 1024: 1024 + 1024 + 448 + 324), which one
+    // card's uniform cuts never vary, so one card walks TP's two lists exactly (one prefill call a chunk).
+    const auto walk = [&](uint32_t chunk, std::vector<uint8_t>& st, std::vector<uint8_t>& k) {
+      e.reset();
+      for (const auto& c : runtime::tp_prefill_chunks(0, longp.size(), chunk))
+        e.prefill(std::vector<uint32_t>(longp.begin() + c[0], longp.begin() + c[0] + c[1]));
+      st = bytes_of(e.state_bytes(), [&](void* h) { e.save_state(h); });
+      k = bytes_of(e.kv_bytes(e.pos()), [&](void* h) { e.save_kv(0, e.pos(), h); });
+    };
+    std::vector<uint8_t> sa, ka, sb, kb;
+    walk(2048, sa, ka);
+    walk(1024, sb, kb);
+    one_card_invariant = sa == sb && ka == kb;
+    std::printf("reference chunk invariance (one card over TP's two chunk lists of long): %s (state %zu / KV %zu "
+                "bytes differ)\n", one_card_invariant ? "bitwise" : "DIFFERS", differing(sa, sb), differing(ka, kb));
+    one_card_kv_invariant = ka == kb;
   }
 
   runtime::TpOptions opt;
@@ -197,7 +225,7 @@ int main(int argc, char** argv) {
   };
   const auto tp_logits = [&] { return e.read_logits(); };
 
-  bool ok = true;
+  bool ok = true, awaiting = false;
   std::vector<Record> got;
   for (size_t i = 0; i < cases.size(); ++i) {
     const Case& c = cases[i];
@@ -222,7 +250,38 @@ int main(int argc, char** argv) {
     std::printf("\n  diagnostics: row 1 cosine %.9f; state %zu of %zu bytes differ; KV %zu of %zu bytes differ\n",
                 cosine(r.rows[1], g.rows[1], model::Qwen35::kVocabUsed), differing(r.state, g.state), r.state.size(),
                 differing(r.kv, g.kv), r.kv.size());
-    ok &= v.v != greedy_tie::Verdict::Diverged;
+    if (v.v == greedy_tie::Verdict::Diverged) {
+      // The f32 judge decides (operator ruling 2026-10-29; tests/golden/forced_judge.h): the context is the prompt
+      // and TP's own ids, the judge's row v.at the decision of TP's id there. Without a judge the case awaits one.
+      const golden::ForcedJudge fj;
+      std::vector<uint32_t> prompt = c.first;
+      if (!c.second.empty()) {
+        CHECK(g.mid == r.mid);   // the second call continues one context on both sides
+        prompt.insert(prompt.end(), g.mid.begin(), g.mid.end());
+        prompt.insert(prompt.end(), c.second.begin(), c.second.end());
+      }
+      const std::string tag = std::string("tp_prefill_") + (kv == runtime::KvCache::Int8 ? "kv8_" : "") + c.name;
+      const std::string k = golden::ForcedJudge::key(tag, prompt, g.ids);
+      fj.dump(k, prompt, g.ids);
+      const std::unique_ptr<golden::Golden> judge = fj.open(k, kGen, model::Qwen35::kVocab);
+      if (!judge) {
+        std::printf("  AWAITING the f32 judge of %s (B70_DUMP_FORCED, then tools/box_validate/f32_refs.sh forced-qwen "
+                    "with QWEN_KEYS_RE='^tp_prefill_'; B70_FORCED_JUDGE=<the int8-head judges' dir>)\n", k.c_str());
+        awaiting = true;
+      } else {
+        const uint32_t row = uint32_t(v.at);
+        const bool tp_ok = golden::judge_accepts(*judge, row, g.ids[row], model::Qwen35::kVocab,
+                                                 model::Qwen35::kVocabUsed);
+        const bool ref_ok = golden::judge_accepts(*judge, row, r.ids[row], model::Qwen35::kVocab,
+                                                  model::Qwen35::kVocabUsed);
+        if (!tp_ok) golden::judge_explain(*judge, row, g.ids[row], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, "tp");
+        if (!ref_ok)
+          golden::judge_explain(*judge, row, r.ids[row], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, "one card's");
+        std::printf("  the f32 judge at id %u: tp's %u %s, one card's %u %s\n", row, g.ids[row],
+                    tp_ok ? "accepted" : "REJECTED", r.ids[row], ref_ok ? "accepted" : "rejected");
+        ok &= tp_ok;
+      }
+    }
   }
 
   // Chunk invariance: the long prompt at chunk 1024 (two pairs) against its chunk-2048 run above (one pair).
@@ -233,11 +292,15 @@ int main(int argc, char** argv) {
     const std::vector<uint8_t> k = bytes_of(e.kv_bytes(e.pos()), [&](void* h) { e.save_kv(0, e.pos(), h); });
     const uint32_t first = e.control(0).cur_token[0];
     const bool same = st == got[2].state && k == got[2].kv && first == got[2].ids[0];
-    std::printf("chunk invariance (long, %zu ids: chunks of 1024 in %zu pairs vs of 2048 in %zu): %s\n", longp.size(),
+    std::printf("chunk invariance (long, %zu ids: chunks of 1024 in %zu pairs vs of 2048 in %zu): %s "
+                "(state %zu / KV %zu bytes differ, first id %s)\n", longp.size(),
                 (runtime::tp_prefill_chunks(0, longp.size(), 1024).size() + 1) / 2,
                 (runtime::tp_prefill_chunks(0, longp.size(), 2048).size() + 1) / 2,
-                same ? "bitwise" : "DIFFERS");
-    ok &= same;
+                same ? "bitwise" : "DIFFERS", differing(st, got[2].state), differing(k, got[2].kv),
+                first == got[2].ids[0] ? "equal" : "differs");
+    // Held to one card's own property over the same two chunk lists: bitwise where one card is bitwise, and the KV
+    // (every FA layer's input rows) and the first id where only one card's KV is.
+    ok &= one_card_invariant ? same : (!one_card_kv_invariant || (k == got[2].kv && first == got[2].ids[0]));
   }
   // Replay: the first case again after reset(), bitwise.
   {
@@ -247,6 +310,11 @@ int main(int argc, char** argv) {
     ok &= same;
   }
   CHECK(ok);
+  if (awaiting) {
+    std::printf("SKIP: tp_prefill_test - every check passed but a divergence awaits its f32 judge (%s KV)\n",
+                runtime::kv_cache_name(kv));
+    return 77;
+  }
   std::printf("tp_prefill_test: OK (%s KV)\n", runtime::kv_cache_name(kv));
   return 0;
 }
