@@ -24,7 +24,7 @@ bolt_remote.continue_forward (R's kernel path has no such branch).
     bolt_ref.py gateq --ref DIR --cand DIR [--a4-ref DIR --a4-cand DIR]        (spec 25 B5's table)
 
 `run`'s golden layout (rows are absolute positions; `h_row0` / `logits_row0` in the metadata):
-    h.L<l>          bf16 [A][4096]  the residual after block l: every row for T <= 4096, else the last --act-tail
+    h.L<l>          model dtype [A][4096]  the residual after block l: every row for T <= 4096, else the last --act-tail
                                     (256) prompt rows; plus every generated row
     route.ids.L<l>  i32  [T+gen][9] MoE blocks: the selected ids ASCENDING (the set; torch's sorted=False order is
                                     not kept)
@@ -33,8 +33,8 @@ bolt_remote.continue_forward (R's kernel path has no such branch).
     route.gap.L<l>  f32  [T+gen]    sel(9th) - sel(10th) (0 = an exact tie at the cut: undetermined)
     route.sum.L<l>  f32  [T+gen]    the sum of the nine s in R's order (before the + 1e-20)
     ssm.L<l>        f32  [H][P][N]  Mamba blocks: the SSM state after the prompt ([128][64][128] on Bolt)
-    conv.L<l>       bf16 [3][C]     the last three RAW xBC columns before the first generated row, oldest first
-    tap.L<i>        bf16 [T+gen][4096]  (--taps) the residual after block i for i in 1, 18, 35, 51, 68, 85 (those
+    conv.L<l>       model dtype [3][C]     the last three RAW xBC columns before the first generated row, oldest first
+    tap.L<i>        model dtype [T+gen][4096]  (--taps) the residual after block i for i in 1, 18, 35, 51, 68, 85 (those
                                     that exist), every row: dump_taps' names, = output_hidden_states[i + 1]
     logits          f32  [Lr][V]    rows logits_row0 .. T+gen-1 (the last --logits-tail 1024 prompt rows)
     tokens          i32  [gen]      greedy (the lower id on an exact tie);  nll f32 [T-1] the prompt's NLL
@@ -194,11 +194,21 @@ def expected_names(cfg: dict, form: str, trunk: str | None = None) -> list[str]:
 # ------------------------------------------------------------------------------------------------
 # the checkpoint
 
+def dequant_fp32(qw: torch.Tensor, sc: torch.Tensor, g: int) -> torch.Tensor:
+    """Exact int4 x F16 product, without stream.dequant_t's intermediate bf16 rounding."""
+    out = torch.empty(qw.shape[1], qw.shape[0] * 8, dtype=torch.float32)
+    scales = sc.float().repeat_interleave(g // 8, 0)
+    for j in range(8):
+        out[:, j::8] = ((((qw >> (4 * j)) & 15).float() - 8) * scales).t()
+    return out
+
+
 class Ckpt:
     """Name -> tensor over a snapshot's shards (the index, or a single model.safetensors), R's names in and out:
     `language_model.` + R's name, `model.` read as `backbone.` when the checkpoint spells the trunk so (NVIDIA)."""
 
-    def __init__(self, snapshot: str):
+    def __init__(self, snapshot: str, dtype: torch.dtype = torch.bfloat16):
+        self.dtype = dtype
         from safetensors import safe_open
         self.dir = snapshot
         idx = os.path.join(snapshot, "model.safetensors.index.json")
@@ -272,7 +282,7 @@ class Ckpt:
             sc, g = sc.repeat_interleave(2, 0).contiguous(), 64                  # the exact expansion (docs/13)
         elif g != 64:
             die(f"{b}: group {g} (the engine's format is g64, or g128 through its exact expansion)")
-        return _stream.dequant_t(qw, sc, g, check=first)
+        return dequant_fp32(qw, sc, g) if self.dtype == torch.float32 else _stream.dequant_t(qw, sc, g, check=first)
 
 
 def _cast(name: str, t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -354,7 +364,7 @@ def build_streamed(snapshot: str, cfg: dict, weights: str = "int4", dtype: torch
     reference) or "bf16" (the original); a snapshot of the other form is refused. The model carries `bolt_pf` (the
     prefetcher), `bolt_lazy`, `bolt_ckpt`, `bolt_layer_sd`, `bolt_cfg`."""
     ns = ns_for(snapshot)
-    ck = Ckpt(snapshot)
+    ck = Ckpt(snapshot, dtype)
     if weights not in ("int4", "bf16"):
         die(f"weights {weights!r}: int4 or bf16")
     if ck.form() != weights:
@@ -398,7 +408,7 @@ def build_streamed(snapshot: str, cfg: dict, weights: str = "int4", dtype: torch
 def build_resident(snapshot: str, cfg: dict, dtype: torch.dtype = torch.bfloat16, path: str = "kernel"):
     """R's model of a (tiny) checkpoint, un-streamed: build_lm + a strict load of every tensor (int4 dequantised)."""
     ns_for(snapshot)
-    ck = Ckpt(snapshot)
+    ck = Ckpt(snapshot, dtype)
     model = br.build_lm(cfg, dtype, path=path)
     sd = {k: _cast(k, ck.weight(k), dtype) for k in model.state_dict()}
     model.load_state_dict(sd, strict=True)
@@ -741,7 +751,7 @@ class Recorder:
         def fn(_m, _a, out):
             t = (out[0] if isinstance(out, tuple) else out).detach()[0]
             if i in self.taps:
-                self._put(f"tap.L{i}", t.to(torch.bfloat16).clone())
+                self._put(f"tap.L{i}", t.clone())
             if self.acts:
                 skip = max(0, self.h_from - self.base.get(self.key, 0))
                 if skip < t.shape[0]:
@@ -768,14 +778,14 @@ class Recorder:
         return {k: torch.cat(v, 0).contiguous() for k, v in self.rows.get(key, {}).items()}
 
 
-def mamba_states(cache, cfg: dict) -> dict[str, torch.Tensor]:
+def mamba_states(cache, cfg: dict, dtype: torch.dtype = torch.bfloat16) -> dict[str, torch.Tensor]:
     """ssm.L<l> fp32 [H][P][N] and conv.L<l> bf16 [3][C] (the last three raw columns, oldest first; R's cache keeps
     four, the oldest unread by the next step) of every Mamba block."""
     out = {}
     for i, t in enumerate(kinds(cfg)):
         if t == "mamba":
             out[f"ssm.L{i}"] = cache.ssm_states[i][0].float().clone()
-            out[f"conv.L{i}"] = cache.conv_states[i][0, :, 1:].t().to(torch.bfloat16).contiguous()
+            out[f"conv.L{i}"] = cache.conv_states[i][0, :, 1:].t().to(dtype).contiguous()
     return out
 
 
@@ -807,6 +817,86 @@ def state_summary(t: dict, cfg: dict) -> list[str]:
             s = t[f"ssm.L{i}"].double()
             out.append(f"L{i} max {s.abs().max().item():.3g} rms {s.pow(2).mean().sqrt().item():.3g}")
     return ["SSM state after the prompt: " + "; ".join(out)] if out else []
+
+
+def near_routes(sel: torch.Tensor, ids: torch.Tensor, engine: torch.Tensor):
+    """Only exchanges inside the one-bf16-ulp band at the natural f32 cut are replayable."""
+    k = ids.shape[1]
+    top = sel.topk(k + 1, dim=-1).values
+    cut = top[:, k - 1]
+    _, exp = torch.frexp(cut.abs())
+    ulp = torch.ldexp(torch.ones_like(cut), exp - 8)
+    near = top[:, k - 1] - top[:, k] <= ulp
+    chosen = sel.gather(1, engine)
+    # Preserve every expert strictly above the band, and exclude every expert below it.
+    allowed = (chosen >= (cut - ulp)[:, None]).all(-1)
+    high = sel > (cut + ulp)[:, None]
+    present = torch.zeros_like(high).scatter_(1, engine, True)
+    allowed &= (~high | present).all(-1)
+    changed = (ids.sort(-1).values != engine.sort(-1).values).any(-1)
+    mask = near & allowed & changed
+    return torch.where(mask[:, None], engine, ids), mask
+
+
+class ForcedRoutes:
+    """Complete engine route tape for state comparisons; carry the f32 near-tie counts into the bf16 baseline."""
+
+    def __init__(self, model, cfg, path, rows, mask_path=None):
+        from safetensors.torch import load_file
+        self.routes = {}
+        moe = [i for i, k in enumerate(kinds(cfg)) if k == "moe"]
+        for line in open(path, encoding="utf-8"):
+            vals = [int(v) for v in line.split()]
+            if len(vals) != TOP_K + 2:
+                raise ValueError("forced routes: expected row layer and nine expert ids")
+            row, layer, *ids = vals
+            if layer not in moe or not 0 <= row < rows or (row, layer) in self.routes:
+                raise ValueError("forced routes: duplicate or out-of-range row/layer")
+            n = cfg["block_configs"][layer]["n_routed_experts"]
+            if len(set(ids)) != TOP_K or min(ids) < 0 or max(ids) >= n:
+                raise ValueError("forced routes: invalid expert set")
+            self.routes[row, layer] = ids
+        if len(self.routes) != rows * len(moe):
+            raise ValueError("forced routes: incomplete tape")
+        self.pos = {i: 0 for i in moe}
+        self.masks = load_file(mask_path) if mask_path else None
+        self.record, self.hooks, self.count, self.near_count = {}, [], 0, 0
+        for i in moe:
+            self.hooks.append(model.model.layers[i].mixer.gate.register_forward_hook(self._hook(i), prepend=True))
+
+    def _hook(self, layer):
+        def fn(mod, args, out):
+            ids, weights = out
+            a, n = self.pos[layer], ids.shape[0]
+            engine = torch.tensor([self.routes[r, layer] for r in range(a, a + n)], dtype=torch.long)
+            x = args[0].reshape(-1, mod.config.hidden_size).float()
+            scores = F.linear(x, mod.weight.float()).sigmoid()
+            sel = scores + mod.e_score_correction_bias[None]
+            changed = (ids.sort(-1).values != engine.sort(-1).values).any(-1)
+            if self.masks is None:
+                _, near = near_routes(sel, ids, engine)
+            else:
+                near = self.masks[f"near.L{layer}"][a:a + n].bool()
+                expected = self.masks[f"engine.ids.L{layer}"][a:a + n].long()
+                if not torch.equal(engine.sort(-1).values, expected.sort(-1).values):
+                    raise ValueError("routes mask belongs to another engine tape")
+            # State-only references follow every engine route. The separate natural run judges routing correctness.
+            w = scores.gather(1, engine)
+            w = w / (w.sum(-1, keepdim=True) + 1e-20) * mod.routed_scaling_factor
+            self.record.setdefault(f"forced.L{layer}", []).append(changed.to(torch.int32))
+            self.record.setdefault(f"near.L{layer}", []).append(near.to(torch.int32))
+            self.record.setdefault(f"engine.ids.L{layer}", []).append(engine.to(torch.int32))
+            self.pos[layer] += n
+            self.count += int(changed.sum())
+            self.near_count += int(near.sum())
+            return torch.where(changed[:, None], engine, ids), torch.where(changed[:, None], w, weights)
+        return fn
+
+    def finish(self):
+        for h in self.hooks:
+            h.remove()
+        print(f"forced near-tie choices: {self.near_count}; all differing choices: {self.count}", flush=True)
+        return {k: torch.cat(v).contiguous() for k, v in self.record.items()}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -861,6 +951,11 @@ def cmd_run(a) -> None:
     T = len(ids)
     if not 1 <= T <= a.max_prompt:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
+    forced = read_ids(a.force) if a.force else None
+    if forced is not None and len(forced) < a.gen:
+        die(f"--force has {len(forced)} ids, need {a.gen}")
+    if a.routes_mask and not a.forced_routes:
+        die("--routes-mask requires --forced-routes")
     dtype = torch.float32 if a.dtype == "fp32" else torch.bfloat16
     model = build_streamed(a.snapshot, cfg, a.weights, dtype, a.path, keep=parse_keep(a.keep, cfg),
                            expert_cache_gb=a.expert_cache_gb)
@@ -873,6 +968,7 @@ def cmd_run(a) -> None:
           f"moe), hidden {cfg['hidden_size']}, weights {a.weights} ({model.bolt_ckpt.trunk} trunk), {a.dtype}, mamba path "
           f"{a.path}, cache {a.cache}; prompt {T} ids, chunk {chunk or 'whole'}; h from row {h_from}, logits from row "
           f"{log_from}; built {time.time() - t0:.1f}s", flush=True)
+    replay = ForcedRoutes(model, cfg, a.forced_routes, T + a.gen, a.routes_mask) if a.forced_routes else None
     rec = Recorder(model, cfg, h_from=h_from, taps=a.taps)
     rows, nll = [], torch.empty(max(T - 1, 0))
     ids_t = torch.tensor(ids)
@@ -891,12 +987,12 @@ def cmd_run(a) -> None:
     cache = forward_chunks(model, ids, chunk, new_cache(model, a.cache), rec=rec, on_logits=on_logits)
     t_prompt = time.time() - t1
     print(f"prompt forward {t_prompt:.1f}s ({model.bolt_lazy.filled} expert reads)", flush=True)
-    states = mamba_states(cache, cfg)
+    states = mamba_states(cache, cfg, dtype)
     tokens: list[int] = []
     t2 = time.time()
     last = rows[-1][-1]
     for step in range(a.gen):
-        nxt = greedy_id(last)
+        nxt = forced[step] if forced is not None else greedy_id(last)
         tokens.append(nxt)
         rec.base[0] = T + step
         with torch.no_grad():
@@ -908,8 +1004,11 @@ def cmd_run(a) -> None:
     print(f"greedy {a.gen}: {time.time() - t2:.1f}s -> {tokens}", flush=True)
     rec.remove()
     t = rec.tensors()
+    if replay is not None:
+        t.update(replay.finish())
     t.update(states)
     t["logits"] = torch.cat(rows, 0).contiguous()
+    t["prompt.ids"] = torch.tensor(ids, dtype=torch.int32)
     t["tokens"] = torch.tensor(tokens, dtype=torch.int32)
     t["nll"] = nll.float().contiguous()
     n_rows = T + a.gen
@@ -1231,6 +1330,9 @@ def main() -> None:
     common(r)
     r.add_argument("--prompt", required=True)
     r.add_argument("--out", required=True)
+    r.add_argument("--force", help="teacher-force on these continuation ids (first --gen)")
+    r.add_argument("--forced-routes", help="complete engine tape: row layer id0 ... id8, every prompt/decode row")
+    r.add_argument("--routes-mask", help="aligned f32 golden: reuse its near.L classification in the bf16 baseline")
     r.add_argument("--gen", type=int, default=32)
     r.add_argument("--max-prompt", type=int, default=262144)
     r.add_argument("--logits-tail", type=int, default=1024, help="keep logits from row T - L (-1: all)")

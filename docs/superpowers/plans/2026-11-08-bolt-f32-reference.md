@@ -25,7 +25,7 @@ in bf16 like the engine, so it is not the truth either: on K2 the bf16 golden di
 
 ## Tasks
 
-1. **`bolt_ref.py run --dtype fp32`** (`tools/oracle/bolt_ref.py`): `build_streamed(..., dtype=torch.float32)`, the
+1. [x] **`bolt_ref.py run --dtype fp32`** (`tools/oracle/bolt_ref.py`): `build_streamed(..., dtype=torch.float32)`, the
    int4 export dequantised to f32 (the router bias stays fp32 as now, the SSM / conv cache fp32 as now), the same golden
    layout (route.ids / sel / gap / w, ssm, conv, h taps, logits). The box CPU has no AVX-512 bf16, so f32 is the fast
    path (memory: cpu-bf16-slow). Mac test: `test_bolt_ref.py` on the tiny puzzle - fp32 vs bf16 runs agree to bf16
@@ -44,3 +44,30 @@ in bf16 like the engine, so it is not the truth either: on K2 the bf16 golden di
 
 One agent, after 3a (one agent slot). CPU: hours per prompt for the 74B-A9B model at f32 (ESTIMATED; Task 2 measures
 bolt_short first). No engine change.
+
+## Route-aligned state references (operator follow-up 2026-11-10)
+
+Token forcing alone does not align recurrent state after an expert-set flip. Keep the natural f32 golden for tokens
+and expert counts; do not substitute route-forced logits for its decisions. `run --forced-routes <tape>` takes a complete
+text tape (`row block id0 ... id8`, all prompt + generated rows, expert ids unique and in range). State companions
+replay the complete engine set on every row in BOTH dtypes.
+Count differing choices within the one-bf16-ulp cut band separately (preserving high experts and excluding low
+candidates when classifying a legitimate near-tie); print other forced choices too. Natural f32 routes still bind
+the expert-count gate, so replay never excuses an incorrect routing decision. Recompute weights from the reference's
+sigmoid scores on the replayed ids. Hooks run before lazy expert materialisation. Record `forced.L*` (all changed
+choices), `near.L*` (f32 near-tie classification) and `engine.ids.L*`, and print both counts.
+`--routes-mask <aligned-f32.golden.safetensors>` carries the f32 near-tie classification into the bf16 baseline; both
+replay every engine choice. Float state,
+conv and h tensors stay fp32 in the f32 reference (same names/shapes; no bf16 rounding of the truth).
+
+The test's existing `B70_DUMP_FORCED=<dir>` convention writes prompt/force ids plus the complete route tape, keyed by
+prompt, forced tokens and engine configuration (head, attention, state, placement, fuse, prefill chunk). Decode and
+prefill need separate tapes. `golden-f32 <route-dump-dir>` additionally builds the aligned f32 and bf16 companions,
+resumable per context with input/source hashes; changed routes or reference source preserve old files under a stale
+directory and rebuild. State comparisons use these companions, validate BOTH actual route sets against this engine
+run, and print
+both cosines per block; missing references SKIP 77. Natural references remain the token and route-count judges.
+No engine flag or environment variable is added. Dumping is a test/tool operation; no GPU job is run by this task.
+
+The actual CPU job remains held. Run bolt_short first and measure wall/RSS before releasing 4k/agentic. Task 4's
+real-checkpoint validation and Waiting-row closure require those measurements and later GPU validation.

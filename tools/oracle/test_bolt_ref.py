@@ -974,6 +974,94 @@ def test_a_exp_engine():
           f"A_from_log / engine_A_of switch bitwise")
 
 
+def test_fp32_dequant_no_bf16_rounding():
+    # 7 * F16(0.1) = 0.6998291015625; an intermediate bf16 round loses bits.
+    qw = torch.full((8, 2), -1, dtype=torch.int32)
+    sc = torch.full((1, 2), 0.1, dtype=torch.float16)
+    got = ref.dequant_fp32(qw, sc, 64)
+    assert got.dtype == F32 and got.shape == (2, 64)
+    assert torch.all(got == 0.6998291015625)
+    assert not torch.equal(got, got.to(BF).float())
+
+
+def test_forced_route_cut_window():
+    s = torch.tensor([[0.9, 0.8, 0.799, 0.1], [0.9, 0.8, 0.7, 0.1]])
+    ids = torch.tensor([[0, 1], [0, 1]])
+    engine = torch.tensor([[0, 2], [0, 2]])
+    got, mask = ref.near_routes(s, ids, engine)
+    assert got.tolist() == [[0, 2], [0, 1]] and mask.tolist() == [True, False]
+    # A small cut gap never licenses replacing an expert far above the cut.
+    got, mask = ref.near_routes(s[:1], ids[:1], torch.tensor([[1, 2]]))
+    assert got.tolist() == [[0, 1]] and not mask.any()
+    # Inclusive boundary at one bf16 ulp of 0.8 (0.00390625).
+    s[0, 2] = s[0, 1] - 0.00390625
+    got, mask = ref.near_routes(s[:1], ids[:1], engine[:1])
+    assert mask.item()
+
+
+def test_run_fp32_layout_and_force():
+    import subprocess
+    import tempfile
+    from safetensors import safe_open
+    from safetensors.torch import load_file
+    d = variant("int4-g64")
+    with tempfile.TemporaryDirectory() as td:
+        prompt, force = os.path.join(td, "prompt.ids"), os.path.join(td, "force.ids")
+        open(prompt, "w").write("1 2 3 4 5 6 7 8\n")
+        open(force, "w").write("19 23\n")
+        result = []
+        for dtype in ("bf16", "fp32"):
+            out = os.path.join(td, dtype + ".safetensors")
+            subprocess.run([sys.executable, ref.__file__, "run", d, "--prompt", prompt, "--force", force,
+                            "--gen", "2", "--dtype", dtype, "--taps", "--out", out], check=True)
+            t = load_file(out)
+            assert t["tokens"].tolist() == [19, 23]
+            assert t["conv.L2"].dtype == (BF if dtype == "bf16" else F32)
+            with safe_open(out, framework="pt") as f:
+                assert f.metadata()["dtype"] == dtype
+            result.append(t)
+        a, b = result
+        assert a.keys() == b.keys()
+        assert all(a[k].shape == b[k].shape for k in a)
+        # Before the first MoE cut, agreement is limited only by bf16 rounding.
+        # Later tensors can follow different routes and are checked by the replay below.
+        for k in ("h.L0", "ssm.L0", "conv.L0"):
+            x, y = a[k].double().flatten(), b[k].double().flatten()
+            cos = torch.dot(x, y) / (x.norm() * y.norm())
+            assert cos > 0.999, (k, cos)
+        tape = os.path.join(td, "engine.routes")
+        with open(tape, "w") as f:
+            for k, v in a.items():
+                if k.startswith("route.ids.L"):
+                    layer = int(k.split("L")[1])
+                    for row, experts in enumerate(v.tolist()):
+                        if row == 0 and layer == 1:
+                            experts = list(range(9))   # a deliberate non-near choice: state replay must still align
+                        f.write(" ".join(map(str, [row, layer] + experts)) + "\n")
+        aligned = os.path.join(td, "aligned.safetensors")
+        for dtype in ("fp32", "bf16"):
+            out = aligned if dtype == "fp32" else os.path.join(td, "baseline.safetensors")
+            cmd = [sys.executable, ref.__file__, "run", d, "--prompt", prompt, "--force", force,
+                   "--gen", "2", "--dtype", dtype, "--forced-routes", tape, "--out", out]
+            if dtype == "bf16":
+                cmd += ["--routes-mask", aligned]
+            subprocess.run(cmd, check=True)
+            t = load_file(out)
+            assert not t["near.L1"][0].item()
+            for k in (k for k in t if k.startswith("forced.L")):
+                layer = k.split("L")[1]
+                mask = t[k].bool()
+                assert torch.equal(t["route.ids.L" + layer], t["engine.ids.L" + layer])
+            if dtype == "fp32":
+                replay_masks = {k: v for k, v in t.items() if k.startswith("near.L")}
+            else:
+                assert all(torch.equal(t[k], v) for k, v in replay_masks.items())
+        # The fp32 weights rounded once to bf16 equal the bf16 path's weights.
+        ck = ref.Ckpt(d, F32)
+        name = "model.layers.2.mixer.in_proj.weight"
+        assert torch.equal(ck.weight(name).to(BF), ref.Ckpt(d).weight(name))
+
+
 if __name__ == "__main__":
     want = sys.argv[1:]
     tests = [(n, f) for n, f in sorted(globals().items()) if n.startswith("test_") and callable(f)
