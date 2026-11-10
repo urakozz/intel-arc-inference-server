@@ -708,3 +708,31 @@ contexts (2048 / 8192 keys) gain 1.5-25 %. One unexplained number, not this item
 deep in the cache costs far more in the engine than its kernel does alone (923.5 ms whole chunk at 128k against
 469.3 at 64 rows, while the kernel test gives 384.6 vs 356.0 ms for 16 layers); the split arm's step from 64 to 128
 rows (+132 ms) is what its kernel and the linears predict. Worth a profile some day; the split path avoids it.
+
+### Judged (the f32 judge)
+
+(a) The golden prompts' prefill gates in 16-row chunks - `prefill_gate_l0_c16`, `prefill_gate_int8_c16` - PASS
+(their chunks sit below 1024 keys, so they run today's launch: a check that the rule leaves them alone), with
+pf_flash_attn, attn_chunk, kv8_flash_bitwise / _raw_bitwise (today's binaries bitwise their frozen control),
+flash_split, prefill_smoke (the split's launch counts, one checked live at pos 1024), prefill_consistency_l0 /
+prefill_determinism_l0 and their int8-KV twins: 12 / 12 on card 1 (`~/b70/logs/3l2/focused.log`).
+
+(b) The deep session (`tests/prefill/prefill_turns_test`): long32k.ids to 16000 and to 32000 keys, then turns of 16,
+64 and 128 ids as three prefill calls (all split by the rule), then 32 greedy ids; today's path and the split, bf16
+and int8 KV - 8 runs, each dumped (`~/b70/data/3l2-dumps`) and given its own f32 reference
+(`QWEN_KEYS_RE=^turns_ QWEN_FIRST_RE= tools/box_validate/f32_refs.sh ~/b70-inference-server forced-qwen
+~/b70/data/3l2-dumps`: one layer-major f32 forward over the 8 contexts' token trie, ~32.3k positions, 63 min on 22
+threads; judges in `oracle-out-qwen-f32-forced/turns_*`).
+
+| KV | keys | split vs today's ids | logits cos split vs today (row 0 / worst common row) | judge rejects: today | split |
+|:---|---:|:---|:---|---:|---:|
+| bf16 | 16000 | first differ at row 10 (21482 vs 3377) | 0.999941676 / 0.999748814 | 0 / 32 | 0 / 32 |
+| bf16 | 32000 | identical | 0.999960774 / 0.999569867 | 0 / 32 | 0 / 32 |
+| int8 | 16000 | first differ at row 17 (2332 vs 561) | 0.999894476 / 0.999829374 | 0 / 32 | 0 / 32 |
+| int8 | 32000 | identical | 0.999936371 / 0.999675441 | 0 / 32 | 0 / 32 |
+
+**The judge accepts every id of every run**: where the split and today's path part (bf16 row 10, int8 row 17) both
+ids are inside the f32 judge's one-ulp near-tie, i.e. the reference itself cannot tell them apart. The verdicts
+above are from the dumped ids against the judges on the CPU (`~/b70/data/3l2-judge_ids.py`, judge_row's rule);
+the registered `prefill_turns_test` / `prefill_turns_kv8_test` re-run the engine with `B70_FORCED_JUDGE` and add the
+logits-to-judge cosines.
