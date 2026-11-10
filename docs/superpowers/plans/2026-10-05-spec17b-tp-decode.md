@@ -112,6 +112,47 @@ D6 row numbers - the options and recommendations are in `.claude/worktrees/spec1
 and the 17b record.
 
 
+## As built 2026-11-10 (branch spec17b-tp; box row 79 run by hand under `gpu_lock.sh box`)
+
+- **Code.**
+  - `model::tp_card_desc` (model_desc.*) is the per-card descriptor: 8 / 24 GDN heads, 12 / 2 FA heads, MLP 8704, the
+    head's 124160 rows.
+  - `loader::load_tp` (loader.*) slices each card straight from the checkpoint: about 9.7 GB a card, the two cards'
+    int4 bytes summing to one card's.
+  - `src/kernels/tp.cl`: `tp_send`, `tp_res_fold` (the wait fused into the fold) and the vocabulary-half argmax. The
+    CMake block "Spec 17b" builds the per-card binaries, plus additive overrides in kv8.cl (FA heads) and prep.cl
+    (INTERMEDIATE 8704). Main's kv8.cl and the edited one give byte-identical binaries (checked on the box).
+  - `runtime::build_tp`, the capture's Tp mode: 902 launches a card.
+  - `runtime::TpEngine` (tp_engine.*): the host merge of the head (D2), bounded waits, the gather into the one-card
+    snapshot layout (tp_gather.h).
+  - The plan (tp_plan.*), `b70-decode --parallel tp` (cli/tp_decode.h), and b70-serve's refusal until 17d.
+- **Tests.**
+  - Host: tp_desc_test, tp_slice_test, tp_protocol_test and pipeline_args_test pass.
+  - Box: tp_kernels_test passes (300 replays: slices bitwise prep_res_fold, folded equal to the host's sum).
+  - tp_decode_test, bf16 and int8 KV:
+    - slices: T1 bitwise and T2 **BITWISE one card** (64 ids, logits, residual taps, 166.7 MB of state, the KV), and
+      the same again after reset;
+    - folded: T1 bitwise; T2 identical ids against one card (judged by the golden tie rule, not needed); logits not
+      bitwise (another summation order, as expected); the run again after reset is bitwise the first.
+  - tp_fail_test: each card dropped once throws in ~65 ms, naming the timeout, and reset() recovers.
+  - `b70-decode --parallel tp --ids prose --n 64` gives the same ids as `--parallel 1`.
+- **Speed** (docs/BENCHMARKS.md "Tensor parallel (spec 17)"), tg 256, interleaved, median of 3:
+
+  | depth | one card | slices | folded |
+  |---|---|---|---|
+  | 4096 | 33.49 t/s | 49.99 t/s (1.49x) | 53.95 t/s (1.61x) |
+  | 16384 | 31.65 t/s | 47.24 t/s (1.49x) | 50.80 t/s (1.61x) |
+
+  The D1-dense bar (>= 1.35x) holds for both crossings.
+- **D1 applied by its rule.** Slices are 7.3 % slower than folded, more than the ~5 % allowed, so
+  `runtime::kTpDefaultCrossing` is Folded. Slices stays built and tested; switching back is one word.
+- **Open (17c / 17d and the record):**
+  - prefill under TP;
+  - MTP / DFlash / lookup, the restore and the server;
+  - the send fused into the GEMV epilogue;
+  - the qkv‖z per-card cell;
+  - a RECORD-grade (idle box) re-run of r79.speed before any README line.
+
 ## The plan as written before the review (Bolt-first text kept for Bolt's later TP plan; its Tasks 1-4 are NOT this plan's)
 
 

@@ -1057,6 +1057,26 @@ state `e89445916986-vs-0fb0cb914a37`, greedy, every arm's output identical to `-
 | `--pp 2` adapter (`pp_dflash_serve_test`) | greedy at K 7 / 3 / auto = plain; seeded sampling reproducible; a restored turn drafts as the unbroken one |
 | D2 / D3 / ring / --pp 2 bitwise on the card | measured 2026-10-27 - PASS (r55.engine, r55.gpu, r55.decode, r55.serve, r56.prefix, r56.pp, r56.pp_serve; "On the card" above) |
 
+## Tensor parallel (spec 17)
+
+Qwen3.8, `b70-decode --parallel tp` (plan 17b): every layer's linears split over the two B70s, the two halves added
+after each row-parallel linear by P2P writes into the other card's VRAM (spec 17a's route). Plain greedy decode, int8
+head, bf16 KV, tg 256 after the depth; one card prefills to the depth, TP ingests it by decode replays (17b has no
+prefill). 2026-11-10, branch spec17b-tp, `tools/box_validate/interleave.sh`, median of 3 after a warm-up, order
+reversed every other round; box grade ITERATE (no container, two idle desktop DRM holders, load 1.2-2.2; the 3l agent's
+jobs waited behind the lock). Spreads were under 0.1 %.
+
+| arm | depth 4096 t/s | ms/token | x one card | depth 16384 t/s | ms/token | x one card |
+|---|---|---|---|---|---|---|
+| one card (`--parallel 1`) | 33.49 | 29.86 | 1.00 | 31.65 | 31.60 | 1.00 |
+| tp, slices crossing (bitwise one card) | 49.99 | 20.01 | **1.49** | 47.24 | 21.17 | **1.49** |
+| tp, folded crossing (the default since D1) | 53.95 | 18.54 | **1.61** | 50.80 | 19.69 | **1.61** |
+
+The operator's D1-dense bar (plain TP >= 1.35x one card) holds for both crossings. Spec 17a derived 1.68x (folded,
+unfused 1.62x); measured 1.61x - the send is its own launch (128 a token) and the wait is fused into the fold. The
+slices crossing (bitwise one card) costs 7.3 % against folded: twice the bytes a crossing and half the work-groups on
+out_proj / o_proj / down. `--spec auto` under TP is 17d's bar (>= 1.25x against one card's `--spec auto`).
+
 ## Ornith 1.5 MoE (spec 15)
 
 **Nothing here is measured yet.** Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
