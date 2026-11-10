@@ -13,3 +13,5 @@ The existing Ornith judge supplies the logit-ulp rule. Replay must check the act
 Execution: inline, worktree q4exp-f32-ref. Existing box/lock/64g/sanitization rules remain in force. Negative controls must demonstrate that unconditional forcing cannot pass.
 
 Implementation reviewed with the existing diagnostic agent. Seven route/packaging tests PASS on the box; both capture and paired reader targets build PASS. Two wrapper tests PASS, including inherited110g overridden to64g. Bounded replay and full route captures were detached at07:55:49UTC; CPU replay waits on the shared CPU-model lock. Measurement steps remain open.
+
+08:29UTC: L18 engine capture complete; L37 waits for whole-box lock. User states release is at least4h away and requests no frequent checks. Detached `~/b70/logs/q4exp-f32/aligned-full.log` runner uses filesystem notifications to wait for completed captures, then the CPU lock; runs bounded validation, host regressions, both paired references and registered locked gates automatically. No status checks before12:30UTC. Measurement and final records remain pending.
