@@ -66,13 +66,17 @@ case "$what" in
     ;;
   cpu-job)
     grep -qE "^(#[A-Z-]+ )?$arg\|" "$CPU_LOG/queue.txt" || { echo "refused: '$arg' is not a job in $CPU_LOG/queue.txt"; exit 2; }
+    # Snapshot before checking the PID: stopping it releases the CPU lock, and the
+    # chain can start the next container during stop_pids' ten-second wait.
+    c=$(cpu_containers)
     pf=$CPU_LOG/state/$arg.pid
-    if [ -f "$pf" ] && kill -0 "$(cat "$pf")" 2>/dev/null; then
-      stop_pids $(tree_pids "$(cat "$pf")")
+    p=$(cat "$pf" 2>/dev/null || true)
+    if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+      stop_pids $(tree_pids "$p")
+      [ -z "$c" ] || { echo "killing the selected CPU job's container(s): $c"; docker kill $c >/dev/null; }
     else
       echo "job $arg has no live process"
     fi
-    c=$(cpu_containers); [ -n "$c" ] && { echo "killing the CPU tree's container(s): $c"; docker kill $c >/dev/null; }
     ;;
   hf-tier)
     pids=""; for p in $(pgrep -f 'b70/scripts/hf-tier-chain'); do pids="$pids $(tree_pids "$p")"; done
