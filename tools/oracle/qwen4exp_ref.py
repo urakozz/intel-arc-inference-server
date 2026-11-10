@@ -49,6 +49,13 @@ not part of the text model (the MTP head is qwen4exp_mtp.py).
     ple.ids       i64  [T+gen][16] the 16 n-gram rows each token read
     logits        f32  [Lr][V]     rows logits_row0 .. T+gen-1
     tokens        i32  [gen]       greedy;   nll f32 [T-1] the prompt's teacher-forced NLL
+
+With --state-dump --engine-routes, the f32 judge replays the captured set/order only for exact sets or
+actual swaps within one bf16 ulp of the f32 router cut. Weights are recomputed from the f32 softmax.
+Rejected swaps stay unforced. route.{judge,span,ulp,cut}.L<l> covers every prompt/generated row;
+engine.trace.{spec,path} and engine.route.ids.L<l> preserve capture identity. Staging state.spec v3
+cannot be used directly by a gate: qwen4exp_align.py packages both paths as a paired v2 judge with
+the original f32 continuation as the common teacher-forced context.
 """
 import os
 import sys
@@ -1007,7 +1014,7 @@ def read_ids(path: str) -> list[int]:
 
 @torch.no_grad()
 def forward_chunks(model, ids: list[int], chunk: int, cache=None, rec: "Recorder | None" = None,
-                   on_logits=None, logits_to_keep: int = 0):
+                   on_logits=None, logits_to_keep: int = 0, route_replay=None):
     """model(input_ids=chunk, past_key_values=cache) over `ids` in chunks (whole when chunk <= 0): the
     reference's prefill. on_logits(row0, logits bf16 [c][V]) sees every chunk's logits. Returns the cache."""
     pos = 0 if cache is None else cache.get_seq_length()
@@ -1016,6 +1023,8 @@ def forward_chunks(model, ids: list[int], chunk: int, cache=None, rec: "Recorder
         part = ids[a:a + c]
         if rec is not None:
             rec.base[rec.key] = pos + a
+        if route_replay is not None:
+            route_replay.row0 = pos + a
         out = model(input_ids=torch.tensor([part]), past_key_values=cache, use_cache=True,
                     logits_to_keep=logits_to_keep)
         cache = out.past_key_values
@@ -1101,11 +1110,27 @@ def cmd_run(a) -> None:
     if not 1 <= T <= a.max_prompt:
         die(f"{a.prompt}: {T} ids (1..{a.max_prompt})")
     ple = PleTable(ple_source(a.snapshot, a.ple), tc)
+    replay, force = None, None
+    if getattr(a, "engine_routes", None):
+        from safetensors.torch import load_file
+        if dtype != torch.float32 or not a.state_dump:
+            die("--engine-routes requires --dtype fp32 --state-dump")
+        trace = load_file(a.engine_routes)
+        route_module = _load("qwen4exp_routes")
+        route_module.validate_trace(trace, tc.num_hidden_layers, T, a.gen, a.lm_head == "int8",
+                                    ple.kind == "int8", used, tc.vocab_size)
+        if trace["prompt.ids"].tolist() != ids or trace["tokens"].numel() != a.gen:
+            die("engine route trace prompt / forced continuation mismatch")
+        force = trace["tokens"].tolist()
+        replay = route_module.RouteReplay(trace, tc.num_hidden_layers, tc.num_experts_per_tok,
+                                                    tc.norm_topk_prob)
     model, pf, lazy = build_streamed(a.snapshot, tc, ple)
     if a.lm_head == "int8":
         with torch.no_grad():
             model.lm_head.weight = torch.nn.Parameter(_load("int8_sim").int8_head_weight(model.lm_head.weight),
                                                        requires_grad=False)
+    if replay is not None:
+        replay.attach(model)   # Recorder must see the judged, possibly aligned route, not the original top-k.
     chunk = auto_chunk(T, a.chunk)
     act_from = max(0, T - a.act_tail) if a.act_tail >= 0 else 0
     log_from = max(0, T - max(1, a.logits_tail)) if a.logits_tail >= 0 else 0   # the last prompt row: greedy
@@ -1129,16 +1154,18 @@ def cmd_run(a) -> None:
             if r1 > log_from:
                 rows.append(lf[max(0, log_from - ra):].clone())
     t1 = time.time()
-    cache = forward_chunks(model, ids, chunk, rec=rec, on_logits=on_logits)
+    cache = forward_chunks(model, ids, chunk, rec=rec, on_logits=on_logits, route_replay=replay)
     state = state_dump.tensors(cache, tc, ids) if state_dump else {}
     print(f"prompt forward {time.time() - t1:.1f}s ({lazy.filled} expert dequants, {ple.reads} PLE rows)", flush=True)
     tokens: list[int] = []
     t2 = time.time()
     last = rows[-1][-1]
     for step in range(a.gen):
-        nxt = int(torch.argmax(last[:used]).item())
+        nxt = force[step] if force is not None else int(torch.argmax(last[:used]).item())
         tokens.append(nxt)
         rec.base[0] = T + step
+        if replay is not None:
+            replay.row0 = T + step
         with torch.no_grad():
             out = model(input_ids=torch.tensor([[nxt]]), past_key_values=cache, use_cache=True)
         cache = out.past_key_values
@@ -1152,6 +1179,14 @@ def cmd_run(a) -> None:
     t["logits"] = torch.cat(rows, 0).contiguous()
     t["tokens"] = torch.tensor(tokens, dtype=torch.int32)
     t["nll"] = nll.float().contiguous()
+    if replay is not None:
+        replay.remove()
+        t.update(replay.tensors())
+        t["engine.trace.spec"] = trace["trace.spec"].clone()
+        t["engine.trace.path"] = trace["trace.path"].clone()
+        for l in range(tc.num_hidden_layers):
+            t[f"engine.route.ids.L{l}"] = trace[f"route.ids.L{l}"].to(torch.int32)
+        print(f"f32 route judge: {replay.bad} rejected engine choices; only accepted near-ties replayed", flush=True)
     n_rows = T + a.gen
     for i in range(tc.num_hidden_layers):
         for k in ("route.ids", "route.w", "route.gap"):
@@ -1180,15 +1215,17 @@ def cmd_run(a) -> None:
                 t[f"qsa.gap.L{i}"] = t[f"qsa.gap.L{i}"][row0:T].clone()
         t["logits"] = t["logits"][T - 1 - log_from:].clone()
         t["ple.ids"] = t["ple.ids"][row0:T].clone()
-        t["state.spec"] = torch.tensor([1, int(dtype == torch.float32), tc.num_hidden_layers, T, row0, a.gen,
+        t["state.spec"] = torch.tensor([3 if replay else 1, int(dtype == torch.float32), tc.num_hidden_layers, T, row0, a.gen,
                                        int(a.lm_head == "int8"), int(ple.kind == "int8"), used],
                                        dtype=torch.int32)
         t.update(state)
         log_from = T - 1
     meta = {"snapshot": os.path.abspath(a.snapshot), "prompt": os.path.abspath(a.prompt), "n_prompt": str(T),
             "gen": str(a.gen), "layers": str(tc.num_hidden_layers), "chunk": str(chunk), "ple": ple.kind,
-            "dtype": a.dtype, "state_format": "qwen4exp-prefill-v1" if a.state_dump else "",
+            "dtype": a.dtype, "state_format": ("qwen4exp-prefill-aligned-staging-v3" if replay else
+                                                "qwen4exp-prefill-v1") if a.state_dump else "",
             "lm_head": a.lm_head, "vocab_used": str(used),
+            "route_replay": "f32-bf16-ulp" if replay else "", "route_rejects": str(replay.bad if replay else 0),
             "route_row0": str(row0),
             "act_row0": str(act_from), "logits_row0": str(log_from), "qsa_row0": str(QSA_DENSE_ROWS),
             "attn_implementation": "eager", "experts_implementation": tc._experts_implementation,
@@ -1512,6 +1549,7 @@ def main() -> None:
     r.add_argument("--vocab-used", type=int, help="usable output ids (state dump: 248077, capped at config vocab)")
     r.add_argument("--cycle", type=int, default=0, help="cycle prompt ids to this many positions (prefill gate: 4500)")
     r.add_argument("--state-dump", action="store_true", help="save prompt-boundary state and last-chunk decisions")
+    r.add_argument("--engine-routes", help="engine route trace: replay only f32-judged bf16-ulp boundary ties")
     p = sub.add_parser("ppl")
     common(p)
     p.add_argument("--text", action="append", default=[], help="NAME=FILE (tokenized by the snapshot's tokenizer.json)")

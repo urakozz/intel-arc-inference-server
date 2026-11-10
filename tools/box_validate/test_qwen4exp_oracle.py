@@ -37,6 +37,15 @@ class OracleJobTest(unittest.TestCase):
             self.assertEqual(list(Path(d).glob("oracle-out-*")), [])
             r = subprocess.run(cmd, env=dict(env, Q4_PLE="bf16"), text=True, capture_output=True)
             self.assertNotEqual(r.returncode, 0, "accepted a PLE table different from the engine's")
+            cmd[-2] = "intel-f32-aligned"
+            r = subprocess.run(cmd, env=dict(env, ORACLE_MEMORY="110g"), text=True, capture_output=True)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            for arg in ("qwen4exp_align.py split", "qwen4exp_align.py merge", "prefill.routes.safetensors",
+                        "decode.routes.safetensors", "--engine-routes", "--dtype fp32", "--lm-head int8",
+                        "--layers 18", "--cycle 4500", "--gen 32", "ORACLE_MEMORY=64g",
+                        "ORACLE_PLE=" + str(external_ple.resolve())):
+                self.assertIn(arg, r.stdout)
+            self.assertEqual(list(Path(d).glob("oracle-out-*")), [])
 
     def test_container_mounts_external_ple(self):
         # HF snapshots on the box link their PLE sibling outside the cache mount.
