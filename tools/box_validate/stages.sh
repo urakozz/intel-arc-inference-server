@@ -3615,6 +3615,85 @@ tp 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 32 --ma
   finish
 }
 
+row 81 "spec 17d - Qwen3.8 MTP, snapshots and the server under tensor parallel (b70-serve --parallel tp): the MTP head whole on each card, the verify lists at M = 2..4 per card, the restore in the one-card layouts, the logits gathers (D9), the block hook at the pair stride; greedy MTP against plain TP and the server against one card, judged by the f32 judge; speed against one card's --spec auto (plan 17d)"
+rownote 81 "Every two-card stage is kind gpu (the whole box, gpu_lock.sh box). remote.sh runs no prerequisite closure: run the row in order (--only r81, and --with r81.cost,r81.speed on an idle box). A divergence without its f32 judge SKIPs: dump it (the tests' B70_DUMP_FORCED, serve_judge.py), then tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_mtp_' (CPU). Hand back: r81.mtp / r81.kv8's M1 / M2 / S1 / S2 / T4 lines and acceptances, r81.prior's lines, r81.cli's ids, r81.serve's IDENTICAL / JUDGED lines, r81.cost's tables, r81.speed's gen_tps medians and the tp / one ratios at depth 4096 and 32768."
+stage r81.host    81 default cpu -    g0.sha     "host: tp_slice_test (+ the scatter and the MTP head's KV splice), tp_desc_test, verify_attn_test (the per-card 12 / 2 DPAS rows), gemm_sm_names_test (the per-card rows), pipeline_args_test (--parallel tp's refusals: DFlash, draft vocabulary), adaptive_k_test"
+st_r81_host() {
+  run_tests '^(tp_slice_test|tp_desc_test|verify_attn_test|gemm_sm_names_test|pipeline_args_test|adaptive_k_test)$'
+  finish
+}
+stage r81.kernels 81 default gpu -    r81.host   "gemm_sm_test on the six per-card rows (N2 vs fp64 and gemv, property R) at M = 2..4"
+st_r81_kernels() {
+  local o
+  for o in N8192_S1 N7168_S2 N17408_S8 K3072_N5120 K8704_N5120 N124160; do
+    chk "build/tests/gemm_sm_test --only $o" "gemm_sm_test --only $o"
+  done
+  finish
+}
+stage r81.mtp     81 default gpu qwen r81.kernels "tp_mtp_test (bf16 KV, int8 head): M1 plain ids with the head == plain TP; M2 speculative K = 1..3 against plain TP (tie rule, then the f32 judge); T1 the head bitwise between the cards; D9 the gathers; S1 the hook at 4096 and a restore bitwise the cold run; S2 one card's snapshot into TP and back (judged); T4 a dropped verify step bounded"
+st_r81_mtp() {
+  run_tests '^tp_mtp_test$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp17d"
+  grab_all t '^(prose|code|long|S1|S2|T4|tp with|  the f32|  AWAIT)' 40
+  finish
+}
+stage r81.kv8     81 default gpu qwen r81.mtp    "tp_mtp_kv8_test: the same over --kv-cache int8"
+st_r81_kv8() {
+  run_tests '^tp_mtp_kv8_test$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp17d"
+  grab_all t '^(prose|code|long|S1|S2|T4|tp with|  the f32|  AWAIT)' 40
+  finish
+}
+stage r81.prior   81 default gpu qwen r81.host   "17b / 17c's tests unchanged: tp_kernels_test, tp_decode_test, tp_fail_test, tp_prefill_test (the TpEngine gained the head, the restore and the hook; the prefill's chunk pairs take the hook's stride)"
+st_r81_prior() {
+  run_tests '^(tp_kernels_test|tp_decode_test|tp_fail_test|tp_prefill_test)$'
+  grab_all t '^(slices|folded|prose|code|long|chunk|replay|card )' 30
+  finish
+}
+stage r81.cli     81 default gpu qwen r81.mtp    "b70-decode --parallel tp --prefill --spec mtp --ids prose / code / long 64 ids beside --parallel tp --spec off's (recorded: tp_mtp_test judges); the tp refusals (cli_reject_tp_*)"
+st_r81_cli() {
+  local p
+  for p in prose code long; do
+    chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/$p.ids --n 64 --prefill --parallel tp --spec off > $STATE/$STAGE.$p.off.ids" "$p: --parallel tp --spec off"
+    chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/$p.ids --n 64 --prefill --parallel tp --spec mtp > $STATE/$STAGE.$p.mtp.ids 2> $STATE/$STAGE.$p.mtp.err" "$p: --parallel tp --spec mtp"
+    x "cmp $STATE/$STAGE.$p.off.ids $STATE/$STAGE.$p.mtp.ids && echo '$p: ids identical' || echo '$p: ids differ (tp_mtp_test judges)'"
+    x "grep -E '^(generate|mtp):' $STATE/$STAGE.$p.mtp.err"
+  done
+  run_tests '^cli_reject_tp_'
+  finish
+}
+stage r81.serve   81 default gpu qwen,oracle_qwen r81.mtp "b70-serve --parallel tp --spec off / auto against --parallel 1 --spec off / auto (golden + tool-call sets, greedy, the prefix cache on): every arm's first difference from one card's --spec off by the f32 judge (serve_judge.py)"
+st_r81_serve() {
+  serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
+    "one|--max-len 16384 --parallel 1 --spec off" "one-auto|--max-len 16384 --parallel 1 --spec auto" \
+    "tp|--max-len 16384 --parallel tp --spec off" "tp-auto|--max-len 16384 --parallel tp --spec auto"
+  x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref one"
+  serve_judge "$STATE/$STAGE" one "every arm's first difference from one card's --spec off by the f32 judge"
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)' 20
+  grab_all judged '^(JUDGED|SKIP_REASON serve_judge)' 20
+  judged_finish
+}
+stage r81.cost    81 optin   gpu qwen r81.mtp    "the TP cost table (idle box): tp_mtp_test cost at depth 4096 and 32768 - verify M = 1..4 and drafts k = 1..3 in units of the K = 0 iteration, medians of 5 interleaved rounds (MtpCost::tp_int8_head)"
+st_r81_cost() {
+  idle before
+  local d
+  for d in 4096 32768; do chk "build/tests/tp_mtp_test $SNAP_QWEN cost $d" "depth $d"; done
+  idle after
+  grab_all cost '^(tp cost|  the cost table|  ms:)' 12
+  grab_all idle '^IDLE '
+  finish
+}
+stage r81.speed   81 optin   gpu qwen r81.serve  "serve speed (idle box): single-user decode, --parallel tp --spec auto against --parallel 1 --spec auto at depth 4096 and 32768 (tools/box_validate/depth_prompts.py: the repo's docs), 256 ids, a warm-up request a server, 3 rounds in rotated order, gen_tps medians; bar: tp faster than one card at both depths"
+st_r81_speed() {
+  idle before
+  chk "python3 tools/box_validate/depth_prompts.py $STATE/$STAGE.prompts 4096 32768" "the depth prompts"
+  serve_arms "$STATE/$STAGE" 3 "$SNAP_QWEN" "--set $STATE/$STAGE.prompts --max-tokens 256 --warmup 1" \
+    "one|--parallel 1 --spec auto --prefix-cache-gb 0" "tp|--parallel tp --spec auto --prefix-cache-gb 0"
+  idle after
+  x "python3 tools/box_validate/serve_client.py table --dir $STATE/$STAGE --ref one --ratio tp/one --metric gen_tps"
+  grab_all ratio '^RATIO |depth' 20
+  grab_all idle '^IDLE '
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
