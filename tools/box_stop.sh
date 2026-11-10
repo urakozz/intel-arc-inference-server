@@ -11,6 +11,7 @@
 #                                       a swap is one atomic rename
 #   tools/box_stop.sh validation        the newest box_validate run (its remote.sh process group);
 #                                       re-running tools/box_validate.sh with the same state resumes
+#   tools/box_stop.sh q4exp-count-wait  the Flash-Next count-gate driver, only while its GPU job is waiting
 # Anything else is refused. Signals are TERM, then KILL after 10 s for what is left.
 set -euo pipefail
 _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
@@ -21,7 +22,7 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 usage() { sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 what="${1:-}"; arg="${2:-}"
 case "$what" in
-  list|cpu-chain|hf-tier|validation) [ -z "$arg" ] || usage ;;
+  list|cpu-chain|hf-tier|validation|q4exp-count-wait) [ -z "$arg" ] || usage ;;
   cpu-job) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ ]] || usage ;;
   *) usage ;;
 esac
@@ -54,6 +55,29 @@ stop_pids() {  # TERM, wait up to 10 s, KILL what is left
 cpu_containers() { docker ps -q --filter "volume=$CPU_TREE"; }
 
 case "$what" in
+  q4exp-count-wait)
+    task_tree="$HOME/b70/trees/q4exp-f32-ref"
+    driver='bash .superpowers/sdd/2026-11-08-flash-next-f32-reference/count-gates.sh'
+    stopped=0
+    for p in $(pgrep -f "^$driver$"); do
+      [ "$(readlink "/proc/$p/cwd")" = "$task_tree" ] || continue
+      pids=$(tree_pids "$p")
+      waiting=0
+      for child in $pids; do
+        cmd=$(tr '\0' ' ' < "/proc/$child/cmdline" 2>/dev/null)
+        case "$cmd" in
+          "$driver "|"bash tools/gpu_lock.sh card "*) ;;
+          "flock "*) waiting=1 ;;
+          *) echo "refused: count driver has active or unexpected child $child: $cmd"; exit 2 ;;
+        esac
+      done
+      [ "$waiting" = 1 ] || { echo "refused: count driver is not waiting for a lock"; exit 2; }
+      # Stop the driver first, so a failed lock child cannot advance it to the next GPU test.
+      stop_pids "$p" $(printf '%s\n' "$pids" | grep -vx "$p")
+      stopped=1
+    done
+    [ "$stopped" = 1 ] || { echo "no waiting Flash-Next count driver"; exit 2; }
+    ;;
   list)
     echo "== cpu chain";   pgrep -af 'b70/scripts/cpu-refs-chain.sh' | grep -v pgrep || echo "  not running"
     echo "== cpu jobs";    for f in "$CPU_LOG"/state/*.pid; do [ -e "$f" ] || continue; p=$(cat "$f"); kill -0 "$p" 2>/dev/null && echo "  $(basename "$f" .pid) pid $p"; done
