@@ -187,6 +187,8 @@ case "${1:-}" in
       complete "$(bolt_snap "${SNAP_BOLT_BF16:-}" models--nvidia--NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 567021037ff88364143e24ea05e6abd0f72086ff)"
     have oracle_bolt "oracle-out-bolt/bolt_{short,4k,agentic,32k}.{ids,golden.safetensors} + SNAPSHOT = our export's (spec 25a: bolt_oracle.sh golden - the engine-format reference)" \
       bash -c 'test "$(cat oracle-out-bolt/SNAPSHOT 2>/dev/null)" = "$1" || exit 1; for p in bolt_short bolt_4k bolt_agentic bolt_32k; do test -s oracle-out-bolt/$p.ids && test -s oracle-out-bolt/$p.golden.safetensors || exit 1; done' _ "$bolt_ours"
+    have oracle_bolt_f32 "oracle-out-bolt-f32/bolt_{short,4k,agentic}.golden.safetensors and SNAPSHOT = our export's (bolt_oracle.sh golden-f32)" \
+      bash -c 'test "$(cat oracle-out-bolt-f32/SNAPSHOT 2>/dev/null)" = "$1" && for p in bolt_short bolt_4k bolt_agentic; do test -s oracle-out-bolt-f32/$p.golden.safetensors || exit 1; done' _ "$bolt_ours"
     have oracle_bolt_bf16 "oracle-out-bolt-bf16/bolt_{short,agentic}.{ids,golden.safetensors} (spec 25a: bolt_oracle.sh golden-bf16)" \
       bash -c 'for p in bolt_short bolt_agentic; do test -s oracle-out-bolt-bf16/$p.ids && test -s oracle-out-bolt-bf16/$p.golden.safetensors || exit 1; done'
     have bolt_a4_int4 "oracle-out-bolt-a4/ with Bolt's set, 36 <name>.int4.txt and SNAPSHOT = our export's (spec 25a: bolt_oracle.sh a4 - the int4 reference alone, no BF16 needed)" \
