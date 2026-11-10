@@ -67,3 +67,9 @@ requeued from occupied GPU0 to GPU1 at17:07UTC on user instruction; the original
 while waiting, through the narrowly guarded `tools/box_stop.sh q4exp-count-wait`. GPU1 L18 and the
 subsequent two-GPU L37 registered checks use the existing paired references. Logs are
 `~/b70/logs/q4exp-f32/count-{gpu1,one-card-gpu1,r33-pp}.log`; first scheduled status check17:37UTC.
+
+
+17:16:30UTC, user-requested status check: registered one-card L18 count gate **PASS** on GPU1,
+346.06s, finished17:12:56UTC. Tokens accepted32/32 on both paths; determinism, chunking, capture
+identity and injected-selection checks pass. The driver advanced to the L37 whole-box GPU lock;
+GPU0 is held by another test. L37 verdict remains pending; no CPU reference rerun.
