@@ -4,8 +4,8 @@
   depth_prompts.py <out dir> <tokens>...      e.g. depth_prompts.py /tmp/d 4096 32768
 
 Writes <out dir>/depth<N>.txt per N: the repo's own prose (docs/**/*.md, sorted by path, then the spec documents)
-concatenated and cut at ~N tokens (4.0 characters a token, which Qwen3.8's tokenizer gives this text within a few
-per cent; the server reports the exact count as prompt_tokens), ending with a line asking for a summary - so the
+concatenated and cut at ~N tokens (3.14 characters a token: Qwen3.8's tokenizer gave this text 5199 / 40046 tokens
+for 16334 / 130977 characters, 2026-11-10; the server reports the exact count as prompt_tokens), ending with a line asking for a summary - so the
 continuation is natural text and both arms of a row decode the same prompt. serve_client.py run --set <out dir>
 sends every *.txt as a /v1/completions prompt.
 """
@@ -13,7 +13,7 @@ import os
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CHARS_PER_TOKEN = 4.0
+CHARS_PER_TOKEN = 3.14
 TAIL = "\n\nSummarise the documents above in plain words, section by section:\n\n"
 
 
