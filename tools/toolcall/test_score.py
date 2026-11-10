@@ -15,7 +15,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from score import is_k2, k2_split_reasoning, parse_first_call  # noqa: E402
+from score import is_k2, k2_split_reasoning, load_tree, main, parse_first_call, validity  # noqa: E402
 
 TOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "tests", "tokenizer")
 
@@ -241,6 +241,111 @@ def test_qwen_think_bolt_template_round_trip():
         got = parse_first_call(span, "qwen-think")
         assert got[:3] == ("call", fn, args), (name, got)
     print(f"  {len(want)} spans of Bolt's own renders parse back to their calls")
+
+
+# ---- validity against the scenario's files (open-work 3o) ----------------------------------
+
+TREE = load_tree()
+LL = "/work/src/runtime/prefill/linear_l0.cc"
+
+
+def edit_call(old: str, new: str, path: str = LL) -> str:
+    return (f"<tool_call>\n<function=edit>\n<parameter=filePath>\n{path}\n</parameter>\n<parameter=oldString>\n"
+            f"{old}\n</parameter>\n<parameter=newString>\n{new}\n</parameter>\n</function>\n</tool_call><|im_end|>")
+
+
+# r11.a4's t3_rename-linear_l0 under l0-int8 prefill + int8 KV on 2026-11-10 (uint32_t copied as uint3_t),
+# and the bf16 reference's call: the same edit with the right digit.
+T3_OLD = ("  const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;\n  float* out = s.partials.as<float>();\n"
+          "  for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {\n    cx.launch(dq, kNs / 16, sh.K / 64, 1,\n"
+          "              {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(slab.ptr()), arg_val(n0)});")
+T3_NEW = T3_OLD.replace("scales =", "scales_val =").replace("PtrArg(scales)", "PtrArg(scales_val)")
+
+
+def v(text: str) -> str:
+    return validity(parse_first_call(text), TREE)
+
+
+def test_tree_is_what_the_prompts_show():
+    """Every read result of the 36 conversations is the snapshot's text, line for line."""
+    d = os.path.join(TOK, "..", "golden", "toolcall")
+    names = [m["name"] for m in json.load(open(os.path.join(d, "manifest.json")))]
+    seen = 0
+    for n in names:
+        msgs = json.load(open(os.path.join(d, n + ".json")))["messages"]
+        for i, m in enumerate(msgs):
+            if m["role"] == "tool" and m["content"].startswith("<file>"):
+                a = msgs[i - 1]["tool_calls"][0]["function"]["arguments"]
+                a = json.loads(a) if isinstance(a, str) else a
+                lines = TREE[2][a["filePath"][len("/work/"):]].split("\n")
+                for k, ln in re.findall(r"^(\d{5})\| (.*)$", m["content"], re.M):
+                    assert lines[int(k) - 1] == ln, (n, k)
+                    seen += 1
+    assert len(names) == 36 and seen > 1000
+
+
+def test_negative_control_uint3_t_fails_its_twin_passes():
+    bad = edit_call(T3_OLD.replace("uint32_t", "uint3_t"), T3_NEW.replace("uint32_t", "uint3_t"))
+    assert v(bad) == "edit's oldString occurs 0 times in src/runtime/prefill/linear_l0.cc"
+    assert v(edit_call(T3_OLD, T3_NEW)) == ""
+
+
+def test_edit_rules():
+    narrower = T3_OLD.split("\n")[:2]
+    assert v(edit_call("\n".join(narrower), "\n".join(T3_NEW.split("\n")[:2]))) == ""      # a narrower oldString
+    assert "occurs 2 times" in v(edit_call(narrower[0], "x"))                                   # linear_l0_silu has it too
+    assert "occurs 3 times" in v(edit_call("  const model::GemvShape& sh = w.shape;", "x"))
+    assert "equals" in v(edit_call(T3_OLD, T3_OLD))
+    assert "not a file the conversation read" in v(edit_call("x", "y", "/work/src/runtime/prefill/linear_l0.h"))
+    assert "occurs 0 times" in v(edit_call(T3_OLD.replace("\n    cx.launch", "\n  cx.launch"), T3_NEW))  # indentation counts
+
+
+def call(name: str, **kw) -> str:
+    ps = "".join(f"<parameter={k}>\n{x}\n</parameter>\n" for k, x in kw.items())
+    return f"<tool_call>\n<function={name}>\n{ps}</function>\n</tool_call>"
+
+
+def test_read_grep_glob_rules():
+    assert v(call("read", filePath="/work/tools/box.sh", offset="15", limit="20")) == ""
+    assert v(call("read", filePath="src/runtime/prefill/linear_l0.h")) == ""                 # relative to /work
+    assert "not a file of the tree" in v(call("read", filePath="/work/src/runtime/prefill/linear.cc"))
+    assert "not an integer" in v(call("read", filePath=LL, offset="ten"))
+    assert "past the end" in v(call("read", filePath=LL, offset="5000"))
+    assert v(call("grep", pattern=r"\bsilu_fused\b", path="/work")) == ""
+    assert v(call("grep", pattern="kv_stride", path="/work/src/runtime/prefill/step.cc")) == ""   # narrower
+    assert v(call("grep", pattern="step", path="/work/tests", include="CMakeLists.txt")) == ""
+    assert v(call("grep", pattern="nothing_has_this_name", path="/work")) == ""                  # no hit is an answer
+    assert "does not compile" in v(call("grep", pattern="invalid(", path="/work"))
+    assert "not in the tree" in v(call("grep", pattern="x", path="/work/src/nowhere"))
+    assert v(call("glob", pattern="tests/**/*linear*", path="/work")) == ""                    # the reference's, no hit
+    assert v(call("glob", pattern="tools/**", path="/work")) == ""                             # broader
+    assert "not a directory" in v(call("glob", pattern="*", path=LL))
+    assert v(call("bash", command="ctest -R x", description="y")) == ""
+    assert v("<tool_call>\n<function=edit>\n<parameter=oldString>\nhalf") == "the call does not parse"
+    assert v("I am done.") == ""
+
+
+def test_bar_fails_on_an_invalid_call():
+    import io
+    import tempfile
+    from contextlib import redirect_stdout
+    with tempfile.TemporaryDirectory() as d:
+        for n in ("a", "b"):
+            open(os.path.join(d, f"{n}.bf16.txt"), "w").write(edit_call(T3_OLD, T3_NEW))
+            open(os.path.join(d, f"{n}.good.txt"), "w").write(edit_call(T3_OLD, T3_NEW))
+        open(os.path.join(d, "a.bad.txt"), "w").write(edit_call(T3_OLD.replace("uint32_t", "uint3_t"), T3_NEW))
+        open(os.path.join(d, "b.bad.txt"), "w").write(edit_call(T3_OLD, T3_NEW))
+        for cands, rc in ((["good"], None), (["bad"], 1)):
+            sys.argv = ["score.py", "--min", "1", d, "bf16"] + cands
+            out = io.StringIO()
+            try:
+                with redirect_stdout(out):
+                    main()
+                got = None
+            except SystemExit as e:
+                got = e.code
+            assert got == rc, (cands, out.getvalue())
+        assert "| a | edit | invalid |" in out.getvalue() and "bad: 1 / 2 match bf16" in out.getvalue()
 
 
 if __name__ == "__main__":

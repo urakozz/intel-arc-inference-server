@@ -528,12 +528,12 @@ st_r11_a4_ref() {
   x "tools/box_validate/data.sh have > $STATE/have.env.\$\$; mv -f $STATE/have.env.\$\$ $STATE/have.env; grep -E '^HAVE_(oracle_qwen_a4|a4_ref)=' $STATE/have.env"
   finish
 }
-stage r11.a4 11 optin card qwen,a4_ref r11.kernels "Q4: A4 with the int8 cache, scored against the bf16 reference run (A4_REF_DIR, default oracle-out-qwen-a4 from r11.a4_ref: <name>.bf16.txt): >= 25/36"
+stage r11.a4 11 optin card qwen,a4_ref r11.kernels "Q4: A4 with the int8 cache, scored against the bf16 reference run (A4_REF_DIR, default oracle-out-qwen-a4 from r11.a4_ref: <name>.bf16.txt): >= 25/36 and no invalid call (score.py --min 25: every call parses and works against the scenario's files)"
 st_r11_a4() {
   x "mkdir -p $STATE/a4-kv8 && cp ${A4_REF_DIR:-$TREE/oracle-out-qwen-a4}/*.bf16.txt $STATE/a4-kv8/"
   chk "B70_KV_CACHE=int8 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-kv8 l0-int8" "A4 engine runs, int8 KV"
-  chk "python3 tools/toolcall/score.py $STATE/a4-kv8 bf16 l0-int8-i8head | tee $STATE/a4-kv8/score.md" "scoring"
-  grab_all a4 'match|/36|total' 6
+  chk "python3 tools/toolcall/score.py --min 25 $STATE/a4-kv8 bf16 l0-int8-i8head | tee $STATE/a4-kv8/score.md" "scoring: >= 25 / 36 and no invalid call"
+  grab_all a4 'match|/36|total|invalid|bar:' 8
   finish
 }
 stage r11.near_ties 11 manual - qwen - "Q4: 256 greedy ids on the golden prompts with int8 KV diverging only at near-ties"
@@ -3324,8 +3324,8 @@ st_r75_gates() {
   if [ -d "$a4ref" ] && { [ -n "${A4_REF_DIR:-}" ] || [ "$(ls "$a4ref"/*.bf16.txt 2>/dev/null | wc -l)" -eq 36 ]; }; then
     x "mkdir -p $STATE/a4-c4096 && cp $a4ref/*.bf16.txt $STATE/a4-c4096/"
     chk "PREFILL_CHUNK=4096 tools/toolcall/engine_generate.sh $SNAP_QWEN tests/golden/toolcall $STATE/a4-c4096 l0-int8" "A4 engine runs at cap 4096"
-    chk "python3 tools/toolcall/score.py $STATE/a4-c4096 bf16 l0-int8-i8head | tee $STATE/a4-c4096/score.md" "A4 scoring (>= 25 / 36)"
-    grab_all a4 'match|/36|total' 6
+    chk "python3 tools/toolcall/score.py --min 25 $STATE/a4-c4096 bf16 l0-int8-i8head | tee $STATE/a4-c4096/score.md" "A4 scoring (>= 25 / 36, no invalid call)"
+    grab_all a4 'match|/36|total|invalid|bar:' 8
   else
     say "A4 skipped: A4_REF_DIR unset and oracle-out-qwen-a4 incomplete (<name>.bf16.txt: r11.a4_ref, tools/toolcall/a4_ref.sh qwen)"
   fi
