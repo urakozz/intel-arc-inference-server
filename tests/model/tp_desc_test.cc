@@ -8,6 +8,7 @@
 //           list's launches (774 + 128); --max-len auto under TP is limited by the tighter card.
 //   names   kernels::tp_cross_variant / tp_argmax_variant: the CMake block's names.
 #include <array>
+#include <vector>
 #include <cstddef>
 #include <cstdio>
 #include <functional>
@@ -44,7 +45,43 @@ bool throws(const std::function<void()>& f, const char* what) {
 }
 }  // namespace
 
+// Spec 17c: where a TP prefill cuts a prompt (runtime::tp_prefill_chunks) and its prefill plan.
+void check_prefill() {
+  using C = std::vector<std::array<uint32_t, 2>>;
+  CHECK(runtime::tp_prefill_chunks(0, 2048, 2048) == (C{{0, 1024}, {1024, 1024}}));
+  CHECK(runtime::tp_prefill_chunks(0, 16384, 2048).size() == 8);
+  for (const auto& c : runtime::tp_prefill_chunks(0, 16384, 2048)) CHECK_EQ(c[1], 2048u);
+  CHECK(runtime::tp_prefill_chunks(0, 2820, 2048) == (C{{0, 1472}, {1472, 1348}}));
+  CHECK(runtime::tp_prefill_chunks(0, 2820, 1024) == (C{{0, 1024}, {1024, 1024}, {2048, 448}, {2496, 324}}));
+  CHECK(runtime::tp_prefill_chunks(0, 6000, 2048) == (C{{0, 2048}, {2048, 2048}, {4096, 960}, {5056, 944}}));
+  CHECK(runtime::tp_prefill_chunks(100, 42, 2048) == (C{{100, 42}}));    // one chunk: no pair
+  CHECK(runtime::tp_prefill_chunks(7, 100, 2048) == (C{{7, 64}, {71, 36}}));
+  bool threw = false;
+  try {
+    runtime::tp_prefill_chunks(0, 10, 1000);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  CHECK(threw);
+  // The prefill plan: the one-card scratch term at the card's shapes plus the TP buffers (one 2048-row residual,
+  // two own halves, four landing slots: 2048 x 5120 x 26 B), and auto gives a shorter context with it.
+  const model::ModelDesc& d = model::tp_card_desc(model::qwen38(), model::TpCrossing::Folded);
+  CHECK_EQ(runtime::tp_prefill_extra_bytes(d, 2048), size_t(2048) * 5120 * 26);
+  runtime::PrefillPath pf;
+  const runtime::MemoryPlan with = runtime::tp_card_plan(d, model::TpCrossing::Folded, 32768, size_t(10) << 30,
+                                                         runtime::KvCache::Bf16, pf);
+  const runtime::MemoryPlan without = runtime::tp_card_plan(d, model::TpCrossing::Folded, 32768, size_t(10) << 30);
+  CHECK(with.prefill_scratch > without.prefill_scratch + runtime::tp_prefill_extra_bytes(d, 2048) / 2);
+  CHECK_EQ(without.prefill_scratch, size_t(0));
+  const std::array<size_t, 2> w{size_t(10) << 30, size_t(10) << 30}, dev{size_t(16) << 30, size_t(16) << 30};   // below the 262144 cap
+  CHECK(runtime::tp_max_len_that_fits(d, model::TpCrossing::Folded, w, dev, 0, 262144, runtime::KvCache::Bf16, pf) <
+        runtime::tp_max_len_that_fits(d, model::TpCrossing::Folded, w, dev, 0, 262144));
+  // The int8 KV widening exists at the card's 12 / 2 heads (PrefillScratch::kv8_raw_buffer).
+  CHECK(runtime::PrefillScratchDims::sizes(32768, d, 2048).kv8_raw == size_t(32768) * 512 * 2 * 2);
+}
+
 int main() {
+  check_prefill();
   const model::ModelDesc& one = model::qwen38();
   for (model::TpCrossing c : {model::TpCrossing::Slices, model::TpCrossing::Folded}) {
     const model::ModelDesc& d = model::tp_card_desc(one, c);

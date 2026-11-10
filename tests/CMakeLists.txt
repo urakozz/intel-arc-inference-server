@@ -2592,9 +2592,25 @@ if(B70_KV8 AND COMMAND b70_kv8_twin)
   b70_kv8_twin(tp_decode)
 endif()
 
+# Spec 17c: tensor-parallel prefill on both cards (gpu_lock.sh box) - tp_prefill_test against one card's Engine::prefill
+# on card 0: T1 (Controls, the following decode steps' residual taps) bitwise between the cards, T2 judged by the
+# golden tie rule (ids), chunk invariance (1024 vs 2048) and replay bitwise; bf16 and (the _kv8 twin) int8 KV.
+add_executable(tp_prefill_test runtime/tp_prefill_test.cc)
+target_include_directories(tp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden ${CMAKE_SOURCE_DIR}/tests/server)
+target_link_libraries(tp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_prefill_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS})
+add_test(NAME tp_prefill_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(tp_prefill_test PROPERTIES
+  LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+if(B70_KV8 AND COMMAND b70_kv8_twin)
+  add_test(NAME tp_prefill_kv8_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
+  b70_kv8_twin(tp_prefill)
+endif()
+
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
 b70_cli_reject(cli_reject_tp_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --prefill
-  EXPECT "--parallel tp has no prefill yet (spec 17c)")
+  --prefill-backend l0-int8 EXPECT "--parallel tp prefills on the l0 backend only")
 b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec mtp
   EXPECT "--spec mtp / dflash under tensor parallel")
 b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32

@@ -399,3 +399,56 @@ if(B70_ORNITH AND B70_MTP)
   endforeach()
 endif()
 # ==== Spec 15e ================================================================ (end) ====
+
+# ==== Spec 17c: tensor parallel PREFILL over two cards (`--parallel tp --prefill`, Qwen3.8) ======== (begin) ====
+# Additive only: new names (every binary above keeps its name and command line) and one new source, pf_tp.cl (the
+# fold of the two cards' halves). What a card's chunk binds (runtime/prefill/step.cc step_tp_unit / step_tp_head) at
+# model::tp_card_desc's shapes - GDN 8 k / 24 v heads (NEGA_OFF / DTBIAS_OFF 20480 / 20504 floats, as 17b's
+# gdn_step_M1_GK8V24), FA 12 q / 2 kv heads (GQA 6: pf_flash_attn's HPW 6 as one card's), MLP 8704:
+#   linears  the slab dequant at the card's (K, N, layout): qkv||z 5120 x 8192 L1, q||k||v 5120 x 7168 L0, gate||up
+#            5120 x 17408 L0 (column-parallel), out_proj / o_proj 3072 x 5120 and down 8704 x 5120 L0 (row-parallel);
+#            pf_gemm / pf_gemm_small / pf_gemm_q4 are shape-free
+#   GDN, FA  the pf_gdn_* chain and pf_gated_head at 8 / 24; pf_attn_prep_q16, pf_attn (the gate) and pf_flash_attn at
+#            12 / 2; with B70_KV8 the int8 cache's writer, widening flash and gate at 12 / 2
+#   fold     pf_tp_res_fold at K 5120, FOLD_G 20 (pf_res_fold's grid)
+# Reused: pf_embed_gather, pf_res_fold SP0 (layer 0), pf_norm_finish, pf_ab_proj (a||b zero-padded to 128 columns, 48
+# real), and the head's 17b binaries (gemv_i8w_M1_K5120_N124160, tp_argmax_M1_*). Not built: the l0-int8 backend's
+# h8 quantiser (down's per-card K 8704 is not whole 1024-k rotation blocks - refused by name under TP).
+if(B70_TP)
+  set(PF_TP_GDN GDN_K_HEADS=8 GDN_V_HEADS=24)
+  set(PF_TP_FA FA_Q_HEADS=12 FA_KV_HEADS=2)
+  set(B70_TP_PREFILL_KERNELS)
+  foreach(row "5120 8192 1" "5120 7168 0" "5120 17408 0" "3072 5120 0" "8704 5120 0")
+    separate_arguments(f UNIX_COMMAND "${row}")
+    list(GET f 0 K)
+    list(GET f 1 N)
+    list(GET f 2 L)
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL} DEFINES K=${K} N=${N} LAYOUT=${L})
+    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K${K}_N${N}_L${L})
+  endforeach()
+  add_ocloc_kernel(pf_gdn_conv_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 ${PF_TP_GDN})
+  add_ocloc_kernel(pf_gdn_wy_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_wy.cl DEFINES ${PF_TP_GDN})
+  add_ocloc_kernel(pf_gdn_scan_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_scan.cl DEFINES ${PF_TP_GDN})
+  add_ocloc_kernel(pf_gated_head_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl DEFINES ${PF_TP_GDN})
+  add_ocloc_kernel(pf_attn_prep_q16_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
+                   DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_TP_FA})
+  add_ocloc_kernel(pf_attn_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl DEFINES ${PF_TP_FA})
+  add_ocloc_kernel(pf_flash_attn_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA} OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_tp_res_fold_K5120_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_tp.cl DEFINES K=5120 FOLD_G=20)
+  list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_gdn_conv_GK8V24 kernel_pf_gdn_wy_GK8V24 kernel_pf_gdn_scan_GK8V24
+       kernel_pf_gated_head_GK8V24 kernel_pf_attn_prep_q16_Q12KV2 kernel_pf_attn_Q12KV2 kernel_pf_flash_attn_Q12KV2
+       kernel_pf_tp_res_fold_K5120_G20)
+  if(B70_KV8)
+    add_ocloc_kernel(pf_attn_prep_kv8_Q12KV2 SOURCE ${KV8_CL} DEFINES ${KV8_PREP_DEFINES} PF=1 ${PF_TP_FA})
+    add_ocloc_kernel(pf_flash_attn_kv8_raw_Q12KV2 SOURCE ${KV8_CL}
+                     DEFINES KV8_FLASH=1 KV8_RAW=1 KT=64 RPW=8 HPW=6 QREG=0 EXP2=1 ${PF_TP_FA}
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    add_ocloc_kernel(pf_attn_gate_kv8_Q12KV2 SOURCE ${KV8_CL} DEFINES KV8_GATE=1 ${PF_TP_FA})
+    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_attn_prep_kv8_Q12KV2 kernel_pf_flash_attn_kv8_raw_Q12KV2
+         kernel_pf_attn_gate_kv8_Q12KV2)
+  endif()
+  set(B70_TP_PREFILL_KERNELS ${B70_TP_PREFILL_KERNELS} CACHE INTERNAL "spec 17c: the binaries a TP prefill chunk binds")
+endif()
+# ==== Spec 17c ============================================================= (end) ====

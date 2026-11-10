@@ -38,14 +38,14 @@ l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::Dev
 size_t linear_l0_launches(const model::GemvShape& sh) { return 2 * (size_t(sh.N) / kNs); }
 
 void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w,
-               const uint16_t* x, uint32_t M) {
+               const uint16_t* x, uint32_t M, float* out) {
   const model::GemvShape& sh = w.shape;
   check_linear(s, w, M);
-  require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
+  require(out != nullptr || s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
 
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
-  float* out = s.partials.as<float>();
+  if (out == nullptr) out = s.partials.as<float>();
   // Open-work 3b: a short chunk reads the int4 words directly - one launch, no slab, the same bits.
   if (const PfSmallTile* t = pf_q4_tile(M, /*silu=*/false)) {
     gemm_q4(cx, kc, *t, sh.layout, false, M, sh.K, sh.N, x, sh.K, w.mem.ptr(), scales, out, sh.N);

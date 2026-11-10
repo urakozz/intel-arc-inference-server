@@ -115,6 +115,12 @@ inline std::string pf_ab_proj_variant(unsigned hidden = kRefHidden) {
   return "pf_ab_proj" + hidden_suffix(hidden);
 }
 
+// Spec 17c: tensor parallel prefill's residual fold of the two cards' halves (pf_tp.cl): pf_res_fold at S_PREV 1
+// with its one slice replaced by p0 + p1.
+inline std::string pf_tp_res_fold_variant(unsigned K, unsigned G) {
+  return "pf_tp_res_fold_K" + std::to_string(K) + "_G" + std::to_string(G);
+}
+
 // --- gdn_chunk's nine kernels, three files (plan 6b Tasks 6-8) --------------
 // One variant per .cl file, several entry points each, because they share the
 // same literals (CONV_ROWS, HEADS, DIM, Q_OFF/K_OFF/V_OFF, RING) and a reader

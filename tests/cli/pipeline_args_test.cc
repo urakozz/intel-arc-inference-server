@@ -50,7 +50,7 @@ void check_parse() {
   cli::parse_parallel("tp", p);
   CHECK(p.mode == cli::Parallel::Tp && p.tp() && !p.on() && !p.replica() && p.given() && p.devices == 1u);
   cli::check_tp(p, {});   // plain decode: nothing to refuse
-  CHECK(says([&] { cli::check_tp(p, {true, false, false, false}); }, "--parallel tp has no prefill yet (spec 17c)"));
+  CHECK(says([&] { cli::check_tp(p, {true, false, false, false}); }, "--parallel tp prefills on the l0 backend only"));
   CHECK(says([&] { cli::check_tp(p, {false, true, false, false}); }, "--spec mtp / dflash under tensor parallel"));
   CHECK(says([&] { cli::check_tp(p, {false, false, true, false}); }, "it has no --parallel tp"));
   CHECK(says([&] { cli::check_tp(p, {false, false, false, true}); }, "--parallel tp is built for Qwen3.8"));

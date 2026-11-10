@@ -255,7 +255,8 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.slab = size_t{slab_k(desc)} * kernels::kPfSlabWidth * kBf16;
   s.pf_s = size_t{desc.fa_gqa()} * kC * max_len * kFp32;
   s.pf_p = size_t{desc.fa_gqa()} * kC * max_len * kBf16;
-  if (desc.fa_q_heads == 24 && desc.fa_kv_heads == 4)
+  // The int8 flash path's widening is built at Qwen3.8's heads and (spec 17c) a tensor-parallel card's 12 / 2.
+  if ((desc.fa_q_heads == 24 && desc.fa_kv_heads == 4) || (desc.fa_q_heads == 12 && desc.fa_kv_heads == 2))
     s.kv8_raw = size_t{max_len} * desc.fa_kv_n() * kBf16 * 2;
   s.moe = moe_prefill_layout(desc).total;   // spec 15d: 0 on a dense model
   return s;

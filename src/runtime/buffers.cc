@@ -149,7 +149,7 @@ l0::Mem& PrefillScratch::pf_p_buffer() {
 l0::Mem& PrefillScratch::kv8_raw_buffer() {
   if (!kv8_raw_) {
     const size_t bytes = sizes(kv8_len, *desc_, chunk_cap_).kv8_raw;   // 3j: one sequence's positions
-    if (bytes == 0) throw std::runtime_error("int8 raw prefill scratch requires 24 query / 4 KV heads");
+    if (bytes == 0) throw std::runtime_error("int8 raw prefill scratch requires 24 query / 4 KV heads (or a TP card's 12 / 2)");
     kv8_raw_ = std::make_unique<l0::Mem>(*ctx_, l0::MemKind::Device, bytes);
   }
   return *kv8_raw_;
