@@ -957,7 +957,7 @@ set(B70_PREFILL_KERNELS
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
   kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
-  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn
+  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_split kernel_pf_flash_merge
   kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
   kernel_pf_dequant_tile_K5120_N16384_L1_T0
   kernel_pf_dequant_tile_K6144_N5120_L0_T0
@@ -1088,6 +1088,23 @@ add_test(NAME prefill_gate_int8_c16_test COMMAND prefill_gate_test
   prose,code,cjk 16 l0-int8 1)
 set_tests_properties(prefill_gate_l0_c16_test prefill_gate_int8_c16_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+# 3l (2): short turns deep in a session (16 / 64 / 128 rows at 16000 / 32000 keys) with the split-K flash and
+# without, each run judged by its own f32 reference (B70_FORCED_JUDGE; SKIP 77 without one). Both KV forms.
+add_executable(prefill_turns_test prefill/prefill_turns_test.cc)
+target_include_directories(prefill_turns_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+  ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(prefill_turns_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(prefill_turns_test ${B70_PREFILL_KERNELS})
+add_test(NAME prefill_turns_test COMMAND prefill_turns_test ${B70_TEST_SNAPSHOT} bf16)
+set_tests_properties(prefill_turns_test PROPERTIES LABELS "checkpoint;golden;prefill"
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+if(B70_KV8)
+  add_dependencies(prefill_turns_test kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8
+    kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
+  add_test(NAME prefill_turns_kv8_test COMMAND prefill_turns_test ${B70_TEST_SNAPSHOT} int8)
+  set_tests_properties(prefill_turns_kv8_test PROPERTIES LABELS "checkpoint;golden;prefill;kv8"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+endif()
 add_test(NAME prefill_consistency_l0_test COMMAND prefill_consistency_test
   ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT} l0)
 add_test(NAME prefill_determinism_l0_test COMMAND prefill_determinism_test
@@ -1649,7 +1666,8 @@ if(B70_KV8)
     kernel_attn_prep_M1_KV8 kernel_attn_prep_M2_KV8 kernel_attn_prep_M3_KV8 kernel_attn_prep_M4_KV8
     kernel_attn_v2_M1_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M2_T${ATTN_V2_TGT}_KV8
     kernel_attn_v2_M3_T${ATTN_V2_TGT}_KV8 kernel_attn_v2_M4_T${ATTN_V2_TGT}_KV8
-    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8)
+    kernel_pf_attn_prep_kv8 kernel_pf_flash_attn_kv8 kernel_pf_flash_attn_kv8_raw kernel_pf_attn_gate_kv8
+    kernel_pf_flash_attn_kv8_split kernel_pf_flash_attn_kv8_raw_split)
   if(B70_MTP)
     list(APPEND B70_KV8_KERNELS kernel_attn_prep_M1_S1_KV8 kernel_attn_prep_M2_S1_KV8
       kernel_attn_prep_M3_S1_KV8 kernel_attn_prep_M4_S1_KV8)
