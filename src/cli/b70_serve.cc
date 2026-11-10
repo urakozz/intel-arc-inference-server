@@ -948,16 +948,14 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
         for (uint32_t l : slot_lens) total += l;
         loader::set_max_len(c, model, total);   // one RoPE table, one KV allocation at the slots' sum
         max_len = total;
-        std::fprintf(stderr, "card %u: slots: %zu (%s); %s
-", i, slot_lens.size(),
+        std::fprintf(stderr, "card %u: slots: %zu (%s); %s\n", i, slot_lens.size(),
                      runtime::slot_layout_name(slot_lens).c_str(),
                      runtime::describe(runtime::plan_slots(*model.desc, slot_lens, model.mtp != nullptr, weights, sp,
                                                            {}, a.kv_cache),
                                        c.memory_bytes(), a.mem_reserve)
                          .c_str());
       } else {
-        std::fprintf(stderr, "card %u: slots: 1 (no room for a %u-position slot beside --max-len %u)
-", i,
+        std::fprintf(stderr, "card %u: slots: 1 (no room for a %u-position slot beside --max-len %u)\n", i,
                      runtime::SlotDims::kShortLen, max_len);
       }
     }

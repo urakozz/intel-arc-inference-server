@@ -235,7 +235,7 @@ double Scheduler::hold_remaining() const {
 }
 
 // Replica x slots: a card is busy while one of its slots has a chunk in flight that has not finished - any call on
-// the card would wait behind it, so the tick leaves the card alone (no grant, step or request end there).
+// the card would wait behind it, so the tick grants and cancels nothing there (its steps: chunk_on_card).
 bool Scheduler::card_busy(uint32_t card) const {
   if (!impl_->overlap) return false;
   for (uint32_t s = 0; s < impl_->n_slots; ++s) {
@@ -479,7 +479,7 @@ bool Scheduler::spec_round() {
   std::vector<BatchEngineIface::SpecRow> rows;
   const uint32_t cap = impl_->cap;
   std::vector<uint32_t> ks;
-  const std::vector<bool> busy = busy_cards();
+  const std::vector<bool> busy = chunk_on_card();
   for (const auto& j : impl_->slots) {
     if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
     jobs.push_back(j);
@@ -625,7 +625,7 @@ bool Scheduler::decode_round() {
   if (impl_->spec) return spec_round();   // spec 19d; plan 13b: prompt lookup
   std::vector<std::shared_ptr<Job>> jobs;
   std::vector<BatchEngineIface::Row> rows;
-  const std::vector<bool> busy = busy_cards();
+  const std::vector<bool> busy = chunk_on_card();
   for (const auto& j : impl_->slots) {
     if (!j || j->state != Job::State::Decoding || busy[impl_->slot_card[static_cast<uint32_t>(j->slot)]]) continue;
     jobs.push_back(j);
@@ -682,10 +682,15 @@ bool Scheduler::decode_round() {
   return true;
 }
 
-std::vector<bool> Scheduler::busy_cards() const {
-  std::vector<bool> busy(impl_->n_cards, false);
-  for (uint32_t c = 0; c < impl_->n_cards; ++c) busy[c] = card_busy(c);
-  return busy;
+// Replica x slots: the cards with a chunk in flight (started, not yet joined - finished or not). Their rows sit out
+// the step: the step would wait behind a running chunk, and one that finished is joined (with the cache's hooks) at
+// the next tick before the card steps - so a card runs chunk, step, chunk, step. One slot per card: a card with a
+// chunk has no decoding row, nothing changes.
+std::vector<bool> Scheduler::chunk_on_card() const {
+  std::vector<bool> on(impl_->n_cards, false);
+  for (uint32_t s = 0; s < impl_->n_slots; ++s)
+    if (impl_->slots[s] && impl_->slots[s]->inflight) on[impl_->slot_card[s]] = true;
+  return on;
 }
 
 // Plan 13b: the overlapping engine's prefills. Joins every slot whose chunk is done (its
