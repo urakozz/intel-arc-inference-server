@@ -410,3 +410,143 @@ which 3h left untouched; at 150k its int8 form costs ~1.28 x bf16's attention.
   and only if each kernel's output stays what it computes today at that depth; a change that
   swaps v2 and DPAS at a depth changes rounding (fp32 v2 against the DPAS hi + lo products) and
   is reported for the f32 judge instead of being made.
+
+### Profile (probe_kv8_decode, main's verify kernel, M = 4)
+
+`tools/probe/probe_kv8_decode` now also times a DPAS arm (`<attn_verify_dpas binary>+<v2 binary>`: the DPAS
+decode with v2's reduce, 16 layers on 16 random caches, interleaved, 11 rounds). `tools/probe/verify_dpas_ablate.cl`
+is main's kernel with one part removed per define (timing only). Logs `~/b70/logs/3l/profile-M4*.log`. At 150k
+(ratios to main's int8 kernel, 28.98 ms; main's bf16 kernel 22.97 ms = 0.79, 428 GB/s):
+
+| removed | int8 | bf16 |
+|:---|---:|---:|
+| K loads (the per-key 16-byte gathers) | 0.775 | 0.780 |
+| K widening only | 0.984 | - |
+| V loads | 1.32 (registers synthesised: slower codegen) | 0.505 |
+| V widening only | 0.793 | - |
+| all loads | 1.19 | 0.277 |
+| q K^T DPAS | 0.759 | 0.781 |
+| softmax (reductions, exp) | 0.886 | 0.713 |
+| P V DPAS | 0.904 | 0.796 |
+| only row block 0 loads K and V | 1.01 | 1.63 |
+| a barrier every tile step | 1.03 | 1.02 |
+| prefetch 1 / 2 / 3 steps ahead | 0.97 / 0.99 / 1.02 | 1.22 / 1.35 / 1.39 |
+
+**Neither compute- nor bandwidth-bound: latency-bound per sub-group.** int8 ran at 171 GB/s and bf16 at 428 of
+590; every sub-group paid its own load latencies (loads by one row block only made the work-group slower, not
+faster), the int8 K path was 64 four-byte gathers a tile, and ~100-150 registers spilled (o alone is 128) at every
+M and form. One 24- (or two 12-) sub-group work-groups a core left a quarter of the 256-GRF slots idle.
+
+### What changed (src/kernels/attn_verify_dpas.cl; production M = 2..4 only)
+
+1. **int8 K by 2D transposed reads**: 16 keys x 32 dims a message (rows past `end` read 0 = the old zeros), then
+   each byte widened as before. Alone: int8 0.66 x at 150k.
+2. **PAIR** (DSPLIT 128): a row block's two sub-groups compute one key atom of S each (the same DPAS chain) and
+   swap them through SLM; both run the same softmax. No spills (o is 64-72 registers).
+3. **P V by dim atom over every row block**: the pair publishes P (hi, lo) and corr in SLM; each sub-group of a
+   slice owns dim atoms for all row blocks, so V is read (and, int8, widened) once a slice, not once a row block.
+   Every O accumulator still takes corr, then hi kh 0, hi kh 1, lo kh 0, lo kh 1. The slice merge is split the
+   same way (dim owners merge O, the pair its sums; the merged maximum is the slices' fmax chain).
+4. **PVX = 2 at M = 3 / 4**: two P V-only sub-groups a slice make the work-group 32 sub-groups (a whole core at
+   256 GRF); while the pairs compute S they prefetch the step's V rows. At M = 2 (two row blocks, two 16-sub-group
+   work-groups a core already) helpers were slower, so PVX = 0 there.
+
+Measured and rejected: the plain (non-transform) V read with a register VNNI interleave (1.10x slower), four-byte
+widening by convert_float4 (same), per-16-dim V widening (same), 128 GRF (1.14-1.48x slower: spills), prefetching
+future tiles (bf16 1.04-1.35x slower), a q K^T loop unroll below 16 (spills unchanged). M = 5..8 (bf16, DFlash)
+keep main's levers and code path (six row blocks exceed 32 sub-groups in the PAIR split).
+
+Kernel level, 16 layers, 150k (82k), production pairs, same runs (`~/b70/logs/3l/old-vs-new.log`, depth 149999 /
+81919 - the latter straddles a v2 stride change, two row groups):
+
+| M | int8 old | int8 new | bf16 old | bf16 new |
+|---:|---:|---:|---:|---:|
+| 2 | 20.21 | 10.48 (0.52) | 20.73 | 17.31 (0.83) |
+| 3 | 29.84 | 16.73 (0.56) | 23.79 | 18.04 (0.76) |
+| 4 | 29.53 | 16.95 (0.57) | 23.26 | 18.23 (0.78) |
+
+Int8 verify attention is now 0.61 / 0.93 / 0.93 x bf16's at M = 2 / 3 / 4 (was ~1.27).
+
+### Correctness
+
+`attn_verify_bitwise_test` (new): production against `tests/kernels/attn_verify_control.cl` (main's source frozen,
+main's levers): every partial word and every reduced word, bf16 M = 2..8, int8 M = 2..4, positions 0 .. 150015
+through the block-stride changes, all rows and one inactive, patterned scales (-0, subnormals, 65504) and then all
+63,488 finite fp16 codes cycled over K and V scales: **448 cases PASS**; zeroing V between the runs fails every
+case (the negative control). Logs `~/b70/logs/3l/bitwise-final*.log`.
+Focused tests on card 0 (`~/b70/logs/3l/tests-focused.log`), 12 run: 11 pass (attn_verify_ref, verify_attn,
+attn_verify_dpas - spec 28c's N1 / property R on the production binaries -, attn_verify_bitwise, golden_gate,
+mtp_verify, slots, slots_kv8, kv8_decode_bitwise, replay_determinism_kv8, golden_gate_kv8); mtp_verify_kv8 skips by
+default as on 3f's / 3h's baseline and **passes** with 3f's judge directories
+(`~/b70/logs/3l/mtp-verify-kv8-judged.log`).
+
+### Whole-step before / after
+
+`probe_longctx_decode` (now with an M list: M = 1, 2, 3, 4 per depth, arms rotated by round), physical card 1,
+whole-box lock per run, capacity 150272, int8 head, 128 warm-up / 128 wall / 32 profiled calls, prefixes restored
+from 3h's `~/b70/hdd/probes/3h/prefix-cache`. Base = main `865da900` built in its own tree (with the same probe
+source); new = this branch. Three rounds, run order B8 N8 B16 N16 / N16 B16 N8 B8 / N8 B8 N16 B16; walls and
+attention (prep + scan + reduce, profiled) are medians; gain is the median paired wall reduction [range]. Another
+agent's whole-box job delayed one run of round 1 by an hour (pairs stay within a round).
+`tools/probe/compare_longctx_ab.py ~/b70/logs/3l/matrix` (logs and `comparison.md` there).
+
+| KV | depth | M | base wall | new wall | gain % [range] | base attn | new attn |
+|:---|---:|---:|---:|---:|:---|---:|---:|
+| bf16 | 4096 | 1 | 29.654 | 29.696 | -0.14 [-0.19, 0.03] | 0.921 | 0.916 |
+| bf16 | 4096 | 2 | 31.356 | 31.437 | 0.10 [-0.29, 0.39] | 1.373 | 1.368 |
+| bf16 | 4096 | 3 | 32.689 | 32.657 | 0.39 [0.07, 0.47] | 1.638 | 1.676 |
+| bf16 | 4096 | 4 | 33.536 | 33.610 | -0.04 [-0.22, 0.05] | 1.515 | 1.706 |
+| bf16 | 32768 | 1 | 33.628 | 33.680 | -0.10 [-0.20, -0.03] | 4.877 | 4.889 |
+| bf16 | 32768 | 2 | 35.618 | 34.399 | 3.39 [3.38, 3.42] | 5.623 | 4.426 |
+| bf16 | 32768 | 3 | 37.659 | 36.323 | 3.61 [3.55, 3.69] | 6.704 | 5.447 |
+| bf16 | 32768 | 4 | 38.527 | 37.369 | 3.01 [2.92, 3.13] | 6.674 | 5.622 |
+| bf16 | 81920 | 1 | 40.287 | 40.314 | -0.07 [-0.25, -0.00] | 11.406 | 11.402 |
+| bf16 | 81920 | 2 | 42.196 | 39.687 | **6.01** [5.70, 6.35] | 12.302 | 9.812 |
+| bf16 | 81920 | 3 | 44.782 | 41.705 | **6.89** [6.63, 7.10] | 13.889 | 10.914 |
+| bf16 | 81920 | 4 | 46.044 | 42.703 | **7.26** [7.14, 7.54] | 14.298 | 11.011 |
+| bf16 | 150000 | 1 | 49.472 | 49.413 | 0.01 [-0.11, 0.12] | 20.400 | 20.418 |
+| bf16 | 150000 | 2 | 51.368 | 47.066 | **8.34** [8.20, 8.58] | 21.426 | 17.243 |
+| bf16 | 150000 | 3 | 54.668 | 49.225 | **9.96** [9.79, 10.18] | 23.779 | 18.411 |
+| bf16 | 150000 | 4 | 56.633 | 50.173 | **11.40** [11.36, 11.43] | 24.777 | 18.401 |
+| int8 | 4096 | 1 | 29.446 | 29.379 | -0.02 [-0.17, 0.30] | 0.693 | 0.691 |
+| int8 | 4096 | 2 | 31.016 | 31.008 | 0.03 [-0.16, 0.31] | 0.991 | 0.986 |
+| int8 | 4096 | 3 | 33.148 | 32.636 | 1.62 [1.44, 1.65] | 1.980 | 1.738 |
+| int8 | 4096 | 4 | 33.934 | 33.623 | 0.89 [0.88, 0.93] | 1.932 | 1.815 |
+| int8 | 32768 | 1 | 31.608 | 31.592 | 0.05 [0.01, 0.10] | 2.752 | 2.752 |
+| int8 | 32768 | 2 | 36.113 | 33.391 | 7.52 [7.51, 7.58] | 5.892 | 3.285 |
+| int8 | 32768 | 3 | 39.470 | 36.167 | 8.25 [8.05, 8.38] | 8.245 | 5.268 |
+| int8 | 32768 | 4 | 40.190 | 37.180 | 7.48 [7.39, 7.49] | 8.140 | 5.407 |
+| int8 | 81920 | 1 | 35.275 | 35.266 | 0.02 [-0.06, 0.04] | 6.208 | 6.194 |
+| int8 | 81920 | 2 | 42.769 | 36.730 | **14.22** [14.12, 14.42] | 12.591 | 6.536 |
+| int8 | 81920 | 3 | 48.857 | 41.367 | **15.32** [15.15, 15.33] | 17.711 | 10.388 |
+| int8 | 81920 | 4 | 49.631 | 42.475 | **14.37** [14.32, 14.42] | 17.429 | 10.515 |
+| int8 | 150000 | 1 | 40.509 | 40.481 | 0.07 [-0.05, 0.32] | 11.049 | 11.039 |
+| int8 | 150000 | 2 | 51.494 | 41.236 | **19.91** [19.84, 19.94] | 21.197 | 11.008 |
+| int8 | 150000 | 3 | 62.195 | 48.690 | **21.71** [21.43, 21.77] | 30.728 | 17.545 |
+| int8 | 150000 | 4 | 62.531 | 49.693 | **20.53** [20.24, 20.64] | 30.351 | 17.676 |
+
+**Every bar is met.** M = 2..4 gain 6.0-11.4 % (bf16) and 14.2-21.7 % (int8) at 81920 / 150000; no row is worse
+than -0.14 % (M = 1 runs unchanged code; at 4096 M = 2 runs v2 by the table). The one kernel-level loss is bf16
+M = 4 at 4096 (attention 1.515 -> 1.706 ms: one tile a slice, two barriers and the split merge), -0.04 % of the
+step. The 13c row builds never bind this kernel and are unchanged (source and command lines). With int8 KV the
+150k verify step at M = 4 is now 49.7 ms against bf16's 50.2 (was 62.5 against 56.6).
+
+### The switch depths (src/runtime/verify_attn.h) - measured, NOT changed
+
+v2 / new DPAS, kernel level (16 layers, `~/b70/logs/3l/switch-depths.log`) at the table's keys 512 | 1448 | 4096 |
+11585 | 32768 | 130816 (> 1: DPAS faster):
+
+| M | KV | today's dpas_from | v2 / dpas | measured first DPAS-faster depth |
+|---:|:---|---:|:---|---:|
+| 2 | bf16 | 11585 | 1.19 0.78 1.22 1.39 1.21 1.90 | 4096 |
+| 3 | bf16 | 4096 | 0.87 0.67 0.94 1.40 1.47 2.30 | 11585 |
+| 4 | bf16 | 4096 | 1.01 0.75 1.12 1.60 1.73 2.94 | 4096 (unchanged) |
+| 2 | int8 | 11585 | 0.83 0.57 0.85 1.13 1.11 1.62 | 11585 (unchanged) |
+| 3 | int8 | 4096 | 0.64 0.50 0.61 0.90 0.87 1.38 | 130816 |
+| 4 | int8 | 4096 | 0.73 0.55 0.76 1.12 1.09 1.79 | 11585 |
+
+Four rows would move (bf16 M = 2 down to 4096, bf16 M = 3 up to 11585, int8 M = 3 up to 130816, int8 M = 4 up to
+11585). Each move swaps v2 (fp32 q, fp32 P) and DPAS (bf16 hi + lo products) at the depths in between, so it
+changes rounding there: **left as they are, for the f32 judge**. The cost of not moving them is small: at 4096 the
+whole M = 3 / 4 steps are 0.9-1.6 % faster than main already, and at 32768 int8 M = 3 the DPAS kernel is 0.87 x
+v2's (~1 ms of a 36 ms step).
