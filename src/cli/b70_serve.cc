@@ -1383,7 +1383,7 @@ int run(int argc, char** argv) {
     if (!draft_vocab_ids.empty()) dv_spec.ranked = loader::read_ranked_ids(draft_vocab_ids);
   }
   // Spec 17d (operator decision D3): --parallel auto on two B70s serves Qwen3.8 under tensor parallel (cli::tp_auto,
-  // gated by cli::kTpAuto until the operator rules on D18) - one request at a time, faster; --parallel replica (two at
+  // on since the twin count, cli::kTpAuto) - one request at a time, faster; --parallel replica (two at
   // once) and one card's slots stay opt-in.
   std::string tp_why;
   if (pipe.mode == cli::Parallel::Auto &&

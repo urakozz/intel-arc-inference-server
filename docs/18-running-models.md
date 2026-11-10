@@ -68,8 +68,8 @@ checkpoint's `config.json`; there is no model flag.
 
 **What you choose, what the engine decides** (the zero-config cleanup, operator 2026-11-06). You
 choose the model, the speculative decoding (`--spec`, default `auto`: the model's validated
-proposer), the context length (`--max-len`) and the parallel mode (`--parallel auto|1|pp`, default
-`auto`: one card when the model and the context fit it, else two; `--pipeline-split` overrides the
+proposer), the context length (`--max-len`) and the parallel mode (`--parallel auto|1|pp|tp|replica`, default
+`auto`: Qwen3.8 on two B70s at `--max-len auto` runs tensor parallel, otherwise one card when the model and the context fit it, else two; `--pipeline-split` overrides the
 cut). The engine decides the rest - the int8 `lm_head`, the memory it leaves free (1.5 GB), the
 draft model's form (int8), the speculative cost tables, the served name (the repo id), the tokenizer,
 chat template and generation defaults (the snapshot's) - and refuses at startup, by name, what does
@@ -114,6 +114,8 @@ python3 tools/oracle/tokenize.py <snapshot> decode $(cat out.ids)
 
 `tests/golden/prompts/{prose,code,cjk}.ids` are ready-made ids for the Qwen tokenizer
 (Qwen3.8's).
+
+**Two cards, tensor parallel (`--parallel tp`, spec 17).** Qwen3.8 splits every layer over both cards (half the heads and the MLP a card, the halves added by P2P after each layer): decode ~1.6x one card, prefill 1.42x at 2048 ids / 1.75x at 16384, `b70-serve` with `--spec auto` ~1.46x (shared-box numbers; the record run is open), and both cards' memory for the context. `b70-serve --parallel auto` picks it on two B70s at `--max-len auto` (operator 2026-11-10, after the f32-judged twin count). One request at a time; DFlash, `--draft-vocab` and the l0-int8 prefill are refused under it.
 
 **Two cards (`--parallel pp`, spec 16).** Qwen3.8 and Ornith run with their layers split over
 GPUs 0 and 1 of what `ZE_AFFINITY_MASK` shows: `b70-decode --parallel pp` (decode, spec 16b; the
