@@ -59,7 +59,21 @@ id-62 flip is the verify path's rounding landing on a sensitive row, not a TP fa
 sets, 39 requests, prefix cache on): `--parallel tp --spec off / auto` and one card's `--spec auto` against one card's
 `--spec off` - 0 FAIL by the f32 judge, the rest identical or awaiting references (SERVE_JUDGE_TBD).
 
-**Speed** (SPEED_TBD).
+**Speed** (the bar: single-user serve decode with `--spec auto`, TP faster than one card at depth 4096 and 32768).
+`b70-serve --spec auto --prefix-cache-gb 0`, 256 ids, decode-only t/s, a warm-up request a server, 3 rounds in rotated
+order, medians (docs/BENCHMARKS.md "Speculative decoding under tensor parallel"):
+
+| depth (prompt ids) | one card `--spec auto` t/s | tp `--spec auto` t/s | x one card | acceptance one / tp |
+|---|---|---|---|---|
+| 4096 (4063) | 62.12 | 90.39 | **1.455** | (both: K 3 throughout) |
+| 32768 (31821) | 62.36 | 91.68 | **1.470** | 0.707 / 0.695 |
+
+Rounds: one card 62.21 / 62.12 / 62.01 and 62.36 / 62.21 / 62.36, tp 90.39 / 90.39 / 90.51 and 91.68 / 91.66 / 91.78 (spread
+under 0.3 %); load average 2.6 - 9 (the box otherwise idle; a first run beside a CPU reference job, prompts of 5199 /
+40046 ids, gave 1.451x / 1.458x).
+
+At `--ids long` through b70-decode (2820-id prompt, 64 ids, K 3): one card 86.9 t/s, tp 110.3 t/s (1.27x; plain 33.8 /
+54.0). The bar holds at both depths: **1.46x / 1.47x**.
 
 ## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17d starts after 17c)
 
