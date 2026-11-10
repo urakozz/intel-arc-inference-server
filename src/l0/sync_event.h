@@ -36,4 +36,25 @@ class SyncEvent {
   ze_event_pool_handle_t pool_ = nullptr;
   ze_event_handle_t e_ = nullptr;
 };
+
+// Spec 17c (tensor parallel prefill): `count` events of SyncEvent's kind in ONE pool - a chunk pair's crossings need
+// ~1000 (each unit's ready and sent, per card and chunk), too many for a pool each. The same flags (host-visible,
+// IPC so the driver keeps them plain events), the same scopes; created for every device in `devices`.
+class SyncEventPool {
+ public:
+  SyncEventPool(Context& ctx, const std::vector<const Context*>& devices, uint32_t count);
+  ~SyncEventPool();
+  SyncEventPool(const SyncEventPool&) = delete;
+  SyncEventPool& operator=(const SyncEventPool&) = delete;
+
+  uint32_t size() const { return uint32_t(e_.size()); }
+  ze_event_handle_t handle(uint32_t i) const { return e_.at(i); }
+  void host_reset(uint32_t i);
+  void host_signal(uint32_t i);
+  bool signalled(uint32_t i) const;
+
+ private:
+  ze_event_pool_handle_t pool_ = nullptr;
+  std::vector<ze_event_handle_t> e_;
+};
 }  // namespace l0

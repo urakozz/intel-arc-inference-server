@@ -54,4 +54,50 @@ bool SyncEvent::host_wait(uint64_t timeout_ns) const {
   ZE_CHECK(r);
   return true;
 }
+
+SyncEventPool::SyncEventPool(Context& ctx, const std::vector<const Context*>& devices, uint32_t count) {
+  if (devices.empty() || count == 0) throw std::runtime_error("l0::SyncEventPool: no device or no event");
+  std::vector<ze_device_handle_t> devs;
+  for (const Context* c : devices) {
+    if (c->handle() != ctx.handle())
+      throw std::runtime_error("l0::SyncEventPool: every device must be a view of one context");
+    devs.push_back(c->device());
+  }
+  ze_event_pool_desc_t pd{};
+  pd.stype = ZE_STRUCTURE_TYPE_EVENT_POOL_DESC;
+  pd.flags = ZE_EVENT_POOL_FLAG_HOST_VISIBLE | ZE_EVENT_POOL_FLAG_IPC;   // SyncEvent's reason
+  pd.count = count;
+  ZE_CHECK(zeEventPoolCreate(ctx.handle(), &pd, static_cast<uint32_t>(devs.size()), devs.data(), &pool_));
+  e_.reserve(count);
+  for (uint32_t i = 0; i < count; ++i) {
+    ze_event_desc_t ed{};
+    ed.stype = ZE_STRUCTURE_TYPE_EVENT_DESC;
+    ed.index = i;
+    ed.signal = ZE_EVENT_SCOPE_FLAG_HOST;
+    ed.wait = ZE_EVENT_SCOPE_FLAG_HOST;
+    ze_event_handle_t e = nullptr;
+    const ze_result_t r = zeEventCreate(pool_, &ed, &e);
+    if (r != ZE_RESULT_SUCCESS) {
+      for (ze_event_handle_t x : e_) zeEventDestroy(x);
+      zeEventPoolDestroy(pool_);
+      pool_ = nullptr;
+      ZE_CHECK(r);
+    }
+    e_.push_back(e);
+  }
+}
+
+SyncEventPool::~SyncEventPool() {
+  for (ze_event_handle_t e : e_) zeEventDestroy(e);
+  if (pool_) zeEventPoolDestroy(pool_);
+}
+
+void SyncEventPool::host_reset(uint32_t i) { ZE_CHECK(zeEventHostReset(e_.at(i))); }
+void SyncEventPool::host_signal(uint32_t i) { ZE_CHECK(zeEventHostSignal(e_.at(i))); }
+bool SyncEventPool::signalled(uint32_t i) const {
+  const ze_result_t r = zeEventQueryStatus(e_.at(i));
+  if (r == ZE_RESULT_NOT_READY) return false;
+  ZE_CHECK(r);
+  return true;
+}
 }  // namespace l0

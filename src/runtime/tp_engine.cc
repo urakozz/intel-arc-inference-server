@@ -8,6 +8,7 @@
 
 #include "model/qwen35.h"
 #include "runtime/pipeline_place.h"
+#include "runtime/tp_engine_card.h"
 #include "runtime/tp_gather.h"
 
 namespace runtime {
@@ -21,57 +22,6 @@ const char* status_name(uint32_t s) {
 }
 }  // namespace
 
-// One card's half (Engine's members for one device, PipelineEngine::Stage's shape) and its crossing buffers.
-struct TpEngine::Card {
-  Card(l0::Context& c, loader::LoadedModel m, uint32_t max_len, KvCache kv, const tp::Layout& L, bool folded,
-       bool tap_on)
-      : ctx(c),
-        model(std::move(m)),
-        persist(c, max_len, *model.desc, kv),
-        scratch(c, max_len, *model.desc),
-        buffers(persist, scratch),
-        queue(c),
-        fence(queue),
-        imm(l0::CmdList::immediate(c)),
-        ctl(buffers.control.as<Control>()),
-        land(c, l0::MemKind::Device, L.total_bytes(), 4096),
-        send_ctr(c, l0::MemKind::Device, L.counter_bytes()),
-        fold_ctr(c, l0::MemKind::Device, L.counter_bytes()),
-        state(c, l0::MemKind::Shared, tp::kStateWords * 4),
-        own(folded ? std::make_unique<l0::Mem>(c, l0::MemKind::Device,
-                                               size_t(tp::kMRows) * model.desc->hidden * 4)
-                   : nullptr),
-        tap(tap_on ? std::make_unique<l0::Mem>(c, l0::MemKind::Device,
-                                                size_t(model.desc->layers) * model.desc->hidden * 2)
-                   : nullptr) {}
-  l0::Context& ctx;
-  loader::LoadedModel model;
-  // Declaration order is construction order: `buffers` binds references into the two above it (Engine's rule).
-  PersistentBuffers persist;
-  DecodeScratch scratch;
-  DecodeBuffers buffers;
-  l0::Queue queue;
-  l0::Fence fence;
-  mutable l0::CmdList imm;
-  Control* ctl;
-  l0::Mem land;                    // written by the OTHER card's tp_send, read by this card's tp_res_fold
-  l0::Mem send_ctr, fold_ctr;      // this card's call counters (device, advanced by its kernels)
-  l0::Mem state;                   // shared: the first failure, read after the fence
-  std::unique_ptr<l0::Mem> own;    // folded: this card's folded row
-  std::unique_ptr<l0::Mem> tap;    // debug_resid
-  std::optional<CapturedStep> step;
-
-  size_t bytes_crossing() const {
-    return land.size() + send_ctr.size() + fold_ctr.size() + state.size() + (own ? own->size() : 0);
-  }
-  void zero_crossing() {
-    imm.fill(land.ptr(), 0u, land.size());
-    imm.fill(send_ctr.ptr(), 0u, send_ctr.size());
-    imm.fill(fold_ctr.ptr(), 0u, fold_ctr.size());
-    std::memset(state.ptr(), 0, state.size());
-  }
-};
-
 TpEngine::Card& TpEngine::cd(uint32_t card) const {
   if (card >= model::kTpSize)
     throw std::out_of_range("runtime::TpEngine: card " + std::to_string(card) + " (two are built)");
@@ -80,7 +30,7 @@ TpEngine::Card& TpEngine::cd(uint32_t card) const {
 
 TpEngine::TpEngine(l0::Context& d0, l0::Context& d1, std::array<loader::LoadedModel, 2> cards, uint32_t max_len,
                    const TpOptions& opt, KvCache kv)
-    : max_len_(max_len), opt_(opt), kv_(kv) {
+    : max_len_(max_len), opt_(opt), kv_(kv), pf_cap_(default_prefill_chunk_cap()) {
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::TpEngine: card 1 is not a view of card 0's Level Zero context");
   if (!d0.can_access_peer(d1) || !d1.can_access_peer(d0))
@@ -195,6 +145,10 @@ void TpEngine::step_once() {
            std::to_string(w[tp::kStamp]) + "; " + std::to_string(w[tp::kFailed]) + " failed chunk(s)" + dropped);
   }
   if (drop >= 0) fail("card " + std::to_string(drop) + "'s list was not submitted (drop_next()) but no wait failed");
+  merge_heads();
+}
+
+void TpEngine::merge_heads() {
   Control& a = *cd(0).ctl;
   Control& b = *cd(1).ctl;
   if (a.pos != b.pos || a.n_active != b.n_active)
@@ -335,6 +289,7 @@ MemoryComponents TpEngine::memory_use(uint32_t card) const {
   m.model = model_device_bytes(c.model);
   m.kv = c.persist.kv_k.size() + c.persist.kv_v.size();
   m.decode_state = c.persist.bytes() - m.kv + c.scratch.bytes() + c.bytes_crossing() + (c.tap ? c.tap->size() : 0);
+  m.prefill_scratch = pf_bytes_[card];   // spec 17c: after prepare_prefill()
   return m;
 }
 

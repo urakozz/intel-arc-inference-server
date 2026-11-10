@@ -41,9 +41,21 @@
 // a failure recorded in each card's state words and every later wait skipping its spin. A failed step throws naming
 // what did not arrive and marks the engine: every later step throws until reset().
 //
-// Not here (plan 17b): prefill (17c - the prompt is ingested by decode replays), MTP / DFlash / lookup, the restore
-// and the server (17d), profiling. save_state / save_kv ARE here, in the one-card host layouts (runtime/tp_gather.h).
+// **Prefill (spec 17c).** prefill() runs the prompt through both cards' prefill walks (runtime/prefill/tp_prefill.cc,
+// compiled into b70_prefill_host as Engine::prefill is: a decode-only binary links no prefill code). The prompt is cut
+// into chunks of at most the chunk cap and the chunks go in PAIRS: each card walks the pair's two chunks layer by
+// layer, half-layer by half-layer (runtime::prefill::step_tp_unit), alternating - chunk A's mixer of layer l, chunk
+// B's, A's MLP, B's - and after each row-parallel linear the card's half crosses to the other card on its COPY ENGINE
+// while its compute engine runs the other chunk's unit (the wavefront: spec 17 §R2.8's option W, operator decision
+// D8). Each unit then folds both halves (pf_tp_res_fold, card 0's first): the cards stay bitwise each other (T1); one
+// card's prefill sums the K halves in one chain, so the result is judged against it, not bitwise (plan 17c).
+//
+// Not here: MTP / DFlash / lookup, the restore and the server (17d), profiling, prefill's block hook (spec 7's
+// snapshots, 17d with the prefix cache), the l0-int8 prefill backend. save_state / save_kv ARE here, in the one-card
+// host layouts (runtime/tp_gather.h).
 namespace runtime {
+
+struct TpPrefill;   // runtime/prefill/tp_prefill.cc
 
 // Operator decision D1 (plan 17b's review): the crossing a `--parallel tp` engine runs. One constant. The rule
 // recorded with the decision - slices (bitwise one card) unless they cost more than ~5 % against folded - chose folded
@@ -56,6 +68,10 @@ struct TpOptions {
   uint32_t timeout_ms = 30000;                  // one step's fence wait (a step is ~18 ms)
   uint32_t spin_limit = tp::kDefaultSpinLimit;  // flag loads one wait spins before it gives up
   bool debug_resid = false;                     // the per-layer residual tap on both cards (T1 / T2 tests)
+  // Spec 17c's timing seam (tp_prefill_test `time`): the prefill appends no crossing and no wait for one - each fold
+  // adds whatever its landing slot holds - so the wall is the cards' compute alone. The numbers are WRONG; never set
+  // outside that measurement.
+  bool prefill_timing_no_crossing = false;
 };
 
 class TpEngine {
@@ -73,6 +89,18 @@ class TpEngine {
   // and the state words; clears a failure.
   void reset();
   void ingest(const std::vector<uint32_t>& ids);
+  // Spec 17c: the prompt by prefill on both cards (the header's **Prefill**), from pos(): afterwards pos() is
+  // pos + ids.size() and the first generated id is in both Controls' cur_token, as after ingest(). `chunk` (0 = the
+  // cap) bounds a chunk's rows. prepare_prefill() allocates the scratch, the crossing's buffers and events (prefill()
+  // calls it; the CLI calls it before its timed window); set_prefill_chunk_cap (2048 or 4096) before it.
+  void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
+  void prepare_prefill();
+  uint32_t prefill_chunk_cap() const { return pf_cap_; }
+  void set_prefill_chunk_cap(uint32_t cap);
+  size_t prefill_launches() const;   // the prefill lists' launches so far, both cards'
+  // Whether the crossings ran on the copy engines (the wavefront) or, on a device without a copy-only queue group,
+  // in order on the compute lists. Valid after prepare_prefill().
+  bool prefill_overlaps() const;
   std::vector<uint32_t> generate(uint32_t n, const std::function<void(uint32_t)>& on_token = {});
   void set_token(uint32_t id);   // the pending id, into both Controls
   double last_tok_per_s() const { return last_tok_per_s_; }
@@ -107,10 +135,13 @@ class TpEngine {
   // T4's test hook: the next step submits only the other card's list - card `card`'s parts never arrive. The step
   // must throw within the bounds, never hang; reset() recovers.
   void drop_next(uint32_t card) { drop_ = int(card); }
+  // tp_prefill_test's timing seam (TpOptions::prefill_timing_no_crossing) switched between calls.
+  void set_options_for_test(const TpOptions& o) { opt_ = o; }
 
  private:
   struct Card;
   void step_once();
+  void merge_heads();
   bool settle(uint32_t card);
   [[noreturn]] void fail(const std::string& what);
   Card& cd(uint32_t card) const;
@@ -125,6 +156,12 @@ class TpEngine {
   int drop_ = -1;
   std::array<bool, model::kTpSize> pending_{};
   double last_tok_per_s_ = 0.0, last_gen_ms_ = 0.0, last_fence_ms_ = 0.0;
+  // Spec 17c: the prefill half (allocated by prepare_prefill; deleted through the pointer prefill code set, so this
+  // archive needs none of it), its chunk cap and each card's device bytes (memory_use). Declared after cards_: it
+  // goes first.
+  uint32_t pf_cap_;
+  std::array<size_t, model::kTpSize> pf_bytes_{};
+  std::unique_ptr<TpPrefill, void (*)(TpPrefill*)> pf_{nullptr, nullptr};
 };
 
 }  // namespace runtime
