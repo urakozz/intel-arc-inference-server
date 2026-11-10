@@ -35,6 +35,7 @@
 // (SKIP) with fewer than two GPUs or without peer access both ways.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -231,6 +232,83 @@ runtime::TpEngine make_tp(l0::Context& d0, l0::Context& d1, const std::string& c
                            max_len, {}, kv);
 }
 
+// Diagnostic (`rows <K> [prompt]`): the verify rows teacher-forced on plain TP's own continuation - drafts set to the
+// reference ids (set_draft_input), every row's gathered logits against the plain row that decided the same id, then
+// commit(K) at the reference's id whatever the verify chose. Prints each row's max |logit difference| and whether its
+// argmax agrees: rounding noise is small and flat; a wrong state shows as a jump that grows.
+int rows_probe(l0::Context& d0, l0::Context& d1, const std::string& ckpt, uint32_t K, const std::string& prompt,
+               runtime::KvCache kv) {
+  const std::vector<uint32_t> ids = golden::read_ids(prompt);
+  Run ref;
+  {
+    runtime::TpEngine e = make_tp(d0, d1, ckpt, false, kv);
+    float* pinned = e.host_rows(size_t(4) * kV);
+    ref = plain(e, ids, [&] { return full_row(e, pinned); });
+  }
+  runtime::TpEngine e = make_tp(d0, d1, ckpt, true, kv);
+  float* pinned = e.host_rows(size_t(4) * kV);
+  e.reset();
+  e.prefill(ids);
+  CHECK_EQ(e.pending(), ref.ids[0]);
+  std::printf("rows probe: %s, K = %u, %s KV (row m of the verify at step i decides ref id i + 1 + m)\n", prompt.c_str(),
+              K, runtime::kv_cache_name(kv));
+  for (uint32_t i = 0; i + 1 + K < kGen;) {
+    const uint32_t k = std::min(K, e.max_verify_k());
+    for (uint32_t m = 0; m < k; ++m) e.set_draft_input(m, ref.ids[i + 1 + m]);
+    const uint32_t p0 = e.pos();
+    e.verify(k);
+    e.read_logits_into(pinned, k + 1);
+    for (uint32_t m = 0; m <= k; ++m) {
+      const float* got = pinned + size_t(m) * kV;
+      const std::vector<float>& want = ref.rows[i + 1 + m];
+      double mx = 0;
+      for (uint32_t v = 0; v < kUsed; ++v) mx = std::max(mx, double(std::fabs(got[v] - want[v])));
+      const uint32_t a = argmax_of(got), b = argmax_of(want.data());
+      std::printf("  step %2u row %u (pos %u): max |dlogit| %.4f, top logit %.4f vs %.4f, argmax %u %s ref %u\n", i, m,
+                  p0 + m, mx, got[b], want[b], a, a == b ? "==" : "!=", b);
+    }
+    e.commit(k, ref.ids[i + 1 + k]);
+    i += k + 1;
+  }
+  return 0;
+}
+
+// The same probe on one card (runtime::Engine with the head, card 0): its yardstick for the verify rows' drift.
+int rows_probe_one(l0::Context& d0, const std::string& ckpt, uint32_t K, const std::string& prompt, runtime::KvCache kv) {
+  const std::vector<uint32_t> ids = golden::read_ids(prompt);
+  runtime::Engine e(d0, loader::load(d0, ckpt, kMaxLen, /*mtp=*/true, kHead), kMaxLen, false, kv);
+  l0::CmdList imm = l0::CmdList::immediate(d0);
+  std::vector<float> rows(size_t(4) * kV);
+  const auto row = [&] {
+    std::vector<float> r(kV);
+    imm.copy(r.data(), e.buffers().logits.ptr(), r.size() * sizeof(float));
+    return r;
+  };
+  const Run ref = plain(e, ids, row);
+  e.reset();
+  e.prefill(ids);
+  std::printf("rows probe (one card): %s, K = %u, %s KV\n", prompt.c_str(), K, runtime::kv_cache_name(kv));
+  for (uint32_t i = 0; i + 1 + K < kGen;) {
+    const uint32_t k = std::min(K, e.max_verify_k());
+    for (uint32_t m = 0; m < k; ++m) e.control()->cur_token[1 + m] = ref.ids[i + 1 + m];
+    const uint32_t p0 = e.pos();
+    e.verify(k);
+    imm.copy(rows.data(), e.verify_logits_device(), size_t(k + 1) * kV * sizeof(float));
+    for (uint32_t m = 0; m <= k; ++m) {
+      const float* got = rows.data() + size_t(m) * kV;
+      const std::vector<float>& want = ref.rows[i + 1 + m];
+      double mx = 0;
+      for (uint32_t v = 0; v < kUsed; ++v) mx = std::max(mx, double(std::fabs(got[v] - want[v])));
+      const uint32_t a = argmax_of(got), b = argmax_of(want.data());
+      std::printf("  step %2u row %u (pos %u): max |dlogit| %.4f, top logit %.4f vs %.4f, argmax %u %s ref %u\n", i, m,
+                  p0 + m, mx, got[b], want[b], a, a == b ? "==" : "!=", b);
+    }
+    e.commit(k, ref.ids[i + 1 + k]);
+    i += k + 1;
+  }
+  return 0;
+}
+
 double median(std::vector<double> v) {
   std::sort(v.begin(), v.end());
   return v[v.size() / 2];
@@ -287,6 +365,11 @@ int main(int argc, char** argv) {
   const std::string ckpt = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::string mode = argc > 2 ? argv[2] : "gate";
   const runtime::KvCache kv = runtime::default_kv_cache();
+  if (mode == "rows1") {   // one card: its own lock (gpu_lock.sh card N)
+    l0::Context c0(0u);
+    return rows_probe_one(c0, ckpt, argc > 3 ? uint32_t(std::atoi(argv[3])) : 3u,
+                          argc > 4 ? argv[4] : "tests/golden/prompts/long.ids", kv);
+  }
   const uint32_t gpus = l0::Context::gpu_count();
   if (gpus < 2) {
     std::printf("SKIP: --parallel tp needs two GPUs, Level Zero shows %u\n", gpus);
@@ -305,6 +388,9 @@ int main(int argc, char** argv) {
     }
     return cost(d0, d1, ckpt, uint32_t(std::atoi(argv[3])), kv);
   }
+  if (mode == "rows")
+    return rows_probe(d0, d1, ckpt, argc > 3 ? uint32_t(std::atoi(argv[3])) : 3u,
+                      argc > 4 ? argv[4] : "tests/golden/prompts/long.ids", kv);
   const char* kvn = kv == runtime::KvCache::Int8 ? "kv8_" : "";
   std::vector<uint32_t> six = golden::read_ids("tests/golden/prompts/long32k.ids");
   six.resize(6000);
