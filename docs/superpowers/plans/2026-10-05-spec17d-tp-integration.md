@@ -38,9 +38,11 @@ Review items 2, 4-9 built; item 3 (DFlash under TP) is not - refused by name (de
   rule (A)), the hook runs after such a pair and after the prompt. With the head, TP prefill crosses the last unit's
   every row and each card runs the head's KV per chunk (`prefill::step_tp_final` + `step_tp_mtp_kv`, in passes of
   cap / 2 rows the card's scratch holds, a [10240][1024] head slab).
-- [x] **D3 (item 8).** `--parallel auto` in b70-serve picks tp for Qwen3.8 on two B70s (peer access: the hardware gate)
-  with `--max-len auto` and nothing TP refuses (cli::tp_auto); an asked --max-len keeps one card / pp (its spare memory
-  may be sequence slots). b70-decode's auto is unchanged (decision D13).
+- [x] **D3 (item 8), built but OFF.** `--parallel auto` in b70-serve picks tp for Qwen3.8 on two B70s (peer access: the
+  hardware gate) with `--max-len auto` and nothing TP refuses (cli::tp_auto); an asked --max-len keeps one card / pp (its
+  spare memory may be sequence slots). Run on the box (`parallel: auto -> tp`, max_len auto 262144); switched off by
+  one constant (cli::kTpAuto = false) because two f32-rejected rows remain (D11, D18) - the brief's "if the bars hold".
+  b70-decode's auto is unchanged (decision D13).
 - [x] **Box row 81** (tools/box_validate/stages.sh): r81.host, r81.kernels, r81.mtp, r81.kv8, r81.prior, r81.cli,
   r81.serve, opt-in r81.cost and r81.speed (tools/box_validate/depth_prompts.py).
 
@@ -57,7 +59,10 @@ a near-tie (0.22 / 0.86 ulp); T4 a dropped verify step throws in ~0.8 s, reset()
 verify rows drift from its plain rows exactly as one card's do (max |dlogit| up to ~9 vs ~13 over 30 steps) - the
 id-62 flip is the verify path's rounding landing on a sensitive row, not a TP fault. b70-serve (golden + tool-call
 sets, 39 requests, prefix cache on): `--parallel tp --spec off / auto` and one card's `--spec auto` against one card's
-`--spec off` - 0 FAIL by the f32 judge, the rest identical or awaiting references (SERVE_JUDGE_TBD).
+`--spec off` - one card's `--spec auto` 0 FAIL (22 identical, 17 accepted), tp `--spec off` 0 FAIL (15 / 24), tp
+`--spec auto` 1 FAIL (18 identical, 20 accepted): toolcall/t5_test-loader, after an accepted first difference at index 10,
+row 77 takes 2665 where the f32 top is 248068 (100.55 ulp; the bf16 reference is unstable there, 12.08 ulp, but b70-serve
+returns no plain row, so the strict bar) - D18. The f32 / bf16 references were made for these contexts (CPU, ~1 h).
 
 **Speed** (the bar: single-user serve decode with `--spec auto`, TP faster than one card at depth 4096 and 32768).
 `b70-serve --spec auto --prefix-cache-gb 0`, 256 ids, decode-only t/s, a warm-up request a server, 3 rounds in rotated
@@ -88,6 +93,9 @@ At `--ids long` through b70-decode (2820-id prompt, 64 ids, K 3): one card 86.9 
 - D16 the block hook's stride under TP is a pair's rows rounded to blocks (4096 at cap 2048), not every block (which
   would cut 2048-row pairs into two 1024-row chunks at every block, 17c's slower 2048-id rate).
 - D17 the per-card verify attention binds DPAS at one card's measured crossovers (not re-timed at 12 / 2).
+- D18 the one serve FAIL (t5_test-loader row 77 under `--parallel tp --spec auto`) and D3's switch: kept OFF
+  (cli::kTpAuto) until the operator rules; recommendation: rule D11 / D18 as the verify path's rounding (one card's
+  MTP carries the same class of row: r6.mtp_long's row 68) and switch D3 on.
 
 ## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17d starts after 17c)
 
