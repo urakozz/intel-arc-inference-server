@@ -537,6 +537,11 @@ if(B70_MTP)
   get_property(MS_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
   add_dependencies(probe_mtp_steps ${MS_KERNELS} ${MS_PF_KERNELS})
   add_dependencies(probe_longctx_decode ${MS_KERNELS} ${MS_PF_KERNELS})
+  # 3l (2): a short turn's whole-chunk wall time deep in a session, the split-K attention against today's.
+  add_executable(probe_turn_chunks probe_turn_chunks.cc)
+  target_include_directories(probe_turn_chunks PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_turn_chunks PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  add_dependencies(probe_turn_chunks ${MS_KERNELS} ${MS_PF_KERNELS})
 endif()
 # --- probe_batch_step: spec 13a, rows of different sequences in one decode step ---
 # Plan: docs/superpowers/plans/2026-09-28-spec13a-batching-probe.md, Task 2. Record: docs/probes/probe-batching-2026-10-23.md.

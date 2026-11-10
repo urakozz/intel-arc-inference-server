@@ -690,8 +690,8 @@ size_t slab_launches(const model::ModelDesc& d, model::LayerKind kind, PrefillBa
 size_t l0_gdn_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   return kGdnLayerFixed + slab_launches(d, model::LayerKind::GDN, b, C) - 1;   // - 1: the fused SiLU
 }
-size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
-  return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0) + kAttnGateLaunches +
+size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, uint32_t pos = 0) {
+  return 2 + kAttnPrepLaunches + attn_chunk_launches(d, C, PrefillBackend::L0, pos) + kAttnGateLaunches +
          2 + 1 + slab_launches(d, model::LayerKind::FA, b, C) - 1;   // - 1: the fused SiLU
 }
 }  // namespace
@@ -715,11 +715,12 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
 }
 }  // namespace
 
-size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv) {
-  const size_t widen = kv == KvCache::Int8 ? d.fa_layers : 0;
+size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos) {
+  // 3l (2): an int8 split read in place widens nothing.
+  const size_t widen = kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? d.fa_layers : 0;
   if (d.is_moe()) return moe_step_chunk_launches(d, b, C) + widen;
   const size_t base =
-      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C) + widen;
+      1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C, pos) + widen;
   if (b != PrefillBackend::L0Int8) return base;
   // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
   // layer, the slab walk being the same 2 x N/1024 launches.
