@@ -959,6 +959,7 @@ int run(int argc, char** argv) {
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
   cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  cli::refuse_tp_in_serve(pipe);  // spec 17b: tensor parallel is b70-decode's until 17d
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (pipe.mode == cli::Parallel::One && pipe.have_handoff)

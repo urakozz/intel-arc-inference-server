@@ -333,4 +333,33 @@ struct DraftRowsBind {
 CapturedStep build_draft_rows(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
                               const DraftRowsBind& dr, uint32_t M);
 
+// --- spec 17b: tensor parallel decode (`--parallel tp`) ---------------------------------------------------------
+//
+// build_tp: ONE card's decode list under TP - build()'s walk at the card's shapes (`m` loaded by loader::load_tp, `b`
+// sized by model::tp_card_desc), with three differences (src/kernels/tp.cl has the kernels, runtime/tp_protocol.h the
+// protocol):
+//   - after each row-parallel linear (out_proj, o_proj, down) a tp_send pushes this card's part into the PEER's
+//     landing buffer (128 launches a token on Qwen3.8);
+//   - the residual fold that consumes such a linear is tp_res_fold: it waits for the peer's part in this card's own
+//     landing buffer and folds both cards' parts in one fixed order (the slices form: prep_res_fold's one-card chain);
+//   - the head is the card's vocabulary half (gemv_i8w at its 124160 rows) and tp_argmax's two stages: the global id
+//     and its value into this card's Control (out_token, out_value); the host merges the two cards (TpEngine).
+// Launches: tp_launches(d). No profiling events; the residual tap (debug_resid) as build()'s.
+struct TpLink {
+  uint32_t rank = 0;
+  bool folded = false;              // model::TpCrossing::Folded
+  void* peer_land = nullptr;        // the peer's landing buffer (this card's sends write it)
+  void* land = nullptr;             // this card's landing buffer (its folds read it)
+  void* send_ctr = nullptr;         // device, tp::Layout::counter_bytes() each
+  void* fold_ctr = nullptr;
+  void* own = nullptr;              // folded: this card's folded row, fp32 [kM][hidden]
+  void* state = nullptr;            // shared, tp::kStateWords: the first failure
+  uint32_t spin_limit = 0;
+  uint32_t vocab_used = 0;          // the real rows of this card's head half (its first id: rank x rows)
+};
+CapturedStep build_tp(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const TpLink& link,
+                      l0::Mem* debug_resid = nullptr);
+// decode_launches(d) + one tp_send per row-parallel linear (2 a layer): Qwen3.8's card 774 + 128 = 902.
+size_t tp_launches(const model::ModelDesc& d);
+
 }  // namespace runtime

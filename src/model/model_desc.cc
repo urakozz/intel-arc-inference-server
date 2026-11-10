@@ -265,7 +265,51 @@ ModelDesc make_ornith() {
   return d;
 }
 
+// Spec 17b: Qwen3.8's per-card descriptor under TP (model_desc.h, tp_card_desc). The column-parallel rows keep the
+// one-card S and layout - each card's column is the one-card column, K for K - and the row-parallel rows halve K and,
+// under Slices, S too, so a card's slices ARE one-card slices (K / S unchanged).
+ModelDesc make_tp_card(const ModelDesc& one, TpCrossing c) {
+  if (one.architecture != "Qwen3_5ForConditionalGeneration" || one.is_moe())
+    throw std::runtime_error(one.name + ": tensor parallel is built for Qwen3.8 only (spec 17b)");
+  ModelDesc d;
+  d.name = one.name + "-tp2" + (c == TpCrossing::Folded ? "-folded" : "");
+  d.architecture = one.architecture;
+  d.layers = one.layers;
+  d.fa_layers = one.fa_layers;
+  d.gdn_layers = one.gdn_layers;
+  set_qwen38_shapes(d);
+  d.fa_q_heads /= kTpSize;
+  d.fa_kv_heads /= kTpSize;
+  d.gdn_k_heads /= kTpSize;
+  d.gdn_v_heads /= kTpSize;
+  d.mtp_intermediate = 0;   // no MTP head under TP before 17d
+  d.intermediate = one.intermediate / kTpSize;
+  d.doc_w = 0;
+  d.vocab_used = one.vocab_used;   // the global count; each card's argmax masks its own half (runtime/tp_*)
+  TableTuning t = kQwen38Tuning;
+  if (c == TpCrossing::Slices) {
+    t.out_proj.S /= kTpSize;
+    t.o_proj.S /= kTpSize;
+    t.down.S /= kTpSize;
+  }
+  finish(d, t);
+  const uint32_t vocab_card = Qwen35::kVocab / kTpSize;   // 124160: whole 64-column tiles
+  d.table[size_t(LinearId::LmHead)].shape.N = vocab_card;
+  d.lm_int4.shape.N = vocab_card;
+  d.lm_int8.shape.N = vocab_card;
+  return d;
+}
+
 }  // namespace
+
+const char* tp_crossing_name(TpCrossing c) { return c == TpCrossing::Slices ? "slices" : "folded"; }
+
+const ModelDesc& tp_card_desc(const ModelDesc& one, TpCrossing c) {
+  if (&one != &qwen38()) make_tp_card(one, c);   // throws, naming the model
+  static const ModelDesc s = make_tp_card(qwen38(), TpCrossing::Slices);
+  static const ModelDesc f = make_tp_card(qwen38(), TpCrossing::Folded);
+  return c == TpCrossing::Slices ? s : f;
+}
 
 const FusedLinear& ModelDesc::linear(LinearId id) const {
   const size_t i = static_cast<size_t>(id);

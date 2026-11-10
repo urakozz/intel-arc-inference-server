@@ -3509,9 +3509,66 @@ st_r78_speed() {
   finish
 }
 
+# ======================================================================================
+row 79 "spec 17b - Qwen3.8 decode under tensor parallel (b70-decode --parallel tp): every layer split over both cards, the halves added after each layer by P2P writes; T1 the cards bitwise each other, T2 bitwise one card (slices) / judged (folded), T4 bounded failures, D1 speed (plan 17b)"
+rownote 79 "Every two-card stage is kind gpu (the whole box, gpu_lock.sh box). remote.sh runs no prerequisite closure: run the row in order (--only r79, and --with r79.speed on an idle box). Hand back: r79.decode / r79.kv8's T1 / T2 lines, r79.fail's threw-after lines, r79.cli's cmp, r79.speed's medians and ratios (tp2-slices / one card, tp2-folded / one card at 4096 and 16384)."
+stage r79.host   79 default cpu -    g0.sha     "host: tp_desc_test (the card descriptor, plan, names), tp_slice_test (the slicing rules, card tiles = one-card tiles, the one-card gather), tp_protocol_test (the crossing on two threads, both forms, stale / dropped), pipeline_args_test (--parallel tp)"
+st_r79_host() {
+  run_tests '^(tp_desc_test|tp_slice_test|tp_protocol_test|pipeline_args_test)$'
+  finish
+}
+stage r79.k1     79 default gpu -    r79.host   "tp_kernels_test on both cards: tp.cl's crossing bitwise prep_res_fold SP4 (slices) / the host's two-row sum (folded), 300 replays"
+st_r79_k1() {
+  run_tests '^tp_kernels_test$'
+  grab_all k1 '^(slices|folded):' 4
+  finish
+}
+stage r79.decode 79 default gpu qwen r79.k1     "tp_decode_test (bf16 KV, int8 head): T1 bitwise between the cards, T2 vs one card - slices BITWISE (ids, logits, residual taps, state, KV), folded by the golden tie rule; replayed after reset"
+st_r79_decode() {
+  run_tests '^tp_decode_test$'
+  grab_all t '^(slices|folded|reference)' 12
+  finish
+}
+stage r79.kv8    79 default gpu qwen r79.decode "tp_decode_kv8_test: the same over --kv-cache int8 (kv8.cl's per-card 12 / 2 heads)"
+st_r79_kv8() {
+  run_tests '^tp_decode_kv8_test$'
+  grab_all t '^(slices|folded|reference)' 12
+  finish
+}
+stage r79.fail   79 default gpu qwen r79.k1     "tp_fail_test (T4): each card's list dropped once - the step throws within its bounds naming the timeout, the engine stays failed, reset() recovers bitwise"
+st_r79_fail() {
+  run_tests '^tp_fail_test$'
+  grab_all fail '^card ' 6
+  finish
+}
+stage r79.cli    79 default gpu qwen r79.decode "b70-decode --parallel tp --ids prose 64 ids == --parallel 1's (the default crossing, folded since D1's measurement: identical on this prompt in tp_decode_test; a difference goes to tp_decode_test's tie rule); the tp refusals (cli_reject_tp_*)"
+st_r79_cli() {
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel 1 > $STATE/$STAGE.one.ids" "--parallel 1"
+  chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel tp > $STATE/$STAGE.tp.ids 2> $STATE/$STAGE.tp.err" "--parallel tp"
+  chk "cmp $STATE/$STAGE.one.ids $STATE/$STAGE.tp.ids" "--parallel tp's ids are --parallel 1's"
+  x "grep -E '^(engine|memory|generate):' $STATE/$STAGE.tp.err"
+  run_tests '^cli_reject_tp_'
+  finish
+}
+stage r79.speed  79 optin   gpu qwen r79.decode "D1-dense plain (idle box): --parallel tp (the default crossing, b70-decode) and both crossings (tp_decode_test bench) against --parallel 1, tg 256 at depth 4096 and 16384 (TP ingests by replays; one card prefills to the depth), interleaved, median of 3; bar >= 1.35x"
+st_r79_speed() {
+  idle before
+  local d
+  for d in 4096 16384; do
+    chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.$d.rows -r 3 --ratio tp-slices/one --ratio tp-folded/one -- \
+one 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 256 --max-len 32768' \
+tp-slices 'build/tests/tp_decode_test $SNAP_QWEN bench slices $d 256' \
+tp-folded 'build/src/cli/b70-decode $SNAP_QWEN --bench --depth $d --tg 256 --max-len 32768 --parallel tp'" "depth $d: one card, tp slices, tp folded (b70-decode's default)"
+  done
+  idle after
+  grab_all speed '^RATIO |^MEDIAN |^\| b70-decode' 60
+  grab_all idle '^IDLE '
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr labels belong to their rows)"
+stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr'
+  run_tests '.' '' 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp'
   finish
 }

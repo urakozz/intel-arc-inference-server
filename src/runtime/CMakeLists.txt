@@ -17,11 +17,13 @@
 # archive with no Level Zero dependency - the allocations in buffers.cc and the plan
 # are the same functions, and the planner's test runs on any host.
 add_library(b70_plan STATIC buffer_sizes.cc memory_plan.cc pipeline_plan.cc
-            pipeline_prefill_plan.cc)   # spec 16c: the two-card prefill pipeline's order
+            pipeline_prefill_plan.cc    # spec 16c: the two-card prefill pipeline's order
+            tp_plan.cc)                 # spec 17b: a tensor-parallel card's plan
 target_include_directories(b70_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_plan PUBLIC b70_model)
 
-add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc pipeline_place.cc pipeline_engine.cc)
+add_library(b70_runtime STATIC buffers.cc capture.cc engine.cc pipeline_place.cc pipeline_engine.cc
+            tp_engine.cc)   # spec 17b: tensor parallel decode
 target_include_directories(b70_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_runtime PUBLIC b70_l0 b70_model b70_loader b70_plan)
 b70_target_kernel_dir(b70_runtime)

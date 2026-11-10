@@ -1,4 +1,38 @@
-# Spec 17d - tensor parallel: Bolt's snapshots, LiLiCorr, sampling, the server, the record
+# Spec 17d - tensor parallel: Qwen3.8 speculation, snapshots, sampling, the server, the record (the Bolt-first text is kept below)
+
+## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17d starts after 17c)
+
+Every task below the status lines is Bolt's (`BoltEngine` snapshots, LiLiCorr, `b70-serve <bolt> --tp 2`, row 71).
+Stale, and what replaces it for Qwen3.8:
+
+1. **Task 2 (LiLiCorr under TP) is out of scope**: LiLiCorr was Bolt's drafter (spec 26, dropped 2026-10-27).
+   Qwen3.8's proposers under TP are the MTP head, the DFlash drafter and prompt lookup (`--spec` values today: auto,
+   off, mtp, lookup, dflash, dflash-lookup; `--mtp auto` is now `--spec auto`, b70-serve's default).
+2. **MTP verify on the per-card shapes.** gemm_sm rows are matched on exact (K, N, S, layout) (`kSmallMTuning`), so each
+   per-card shape needs its own row and binaries at M 2..8. With 17b's slice form and the one-card knobs, verify stays
+   bitwise one card's verify. The DPAS verify attention (`attn_verify_dpas.cl`) `#error`s on any heads but 24 / 4, and
+   3l (branch verify-attn-3l) is rewriting it now: the 12 / 2 build comes after 3l merges. The crossing at M rows uses
+   17b's kernels at M (counters per work-group and row, kept equal across lists of different M). The head: TP'd like a
+   layer (2 crossings a draft step) or replicated (0.85 GB a card, no crossing), to be measured. The draft vocabulary
+   (`--draft-vocab`) splits at the vocabulary boundary.
+3. **DFlash.** Replicated on both cards (int8, ~2.05 GB): both hold the identical residual, so the taps are local. Its
+   verify lists are build_verify_taps at per-card shapes. The 8 GDN slots per card are half-size.
+4. **AdaptiveK** (src/server/adaptive_k.*) picks K from an `MtpCost` table of verify / draft costs in plain steps. TP
+   needs its own table (`tp`) from measured per-card verify(M) / draft costs, since the M-row crossing moves the
+   ratios.
+5. **Sampling.** The server reads full logits rows (`read_logits_into`). Under TP either gather both halves (2 x 0.5 MB
+   a row over PCIe) or merge per-card top-k plus partial log-sum-exps (spec 17 §4.4). Proposed: the gather, which is
+   exact and simple.
+6. **The server.** `b70-serve --parallel tp` (no new flag) behind the one-card adapter path (`cli::EngineAdapter`-like,
+   server::EngineIface), not `BatchEngineIface` (one sequence). replica and slots stay exclusive with tp.
+7. **Snapshots / prefix cache.** The one-card host layout (17b's gather plus 17d's scatter). With 17b's slice form an
+   entry is bitwise interchangeable between `--parallel 1`, pp, replica and tp.
+8. **Bars.** D1-dense `--parallel tp --spec auto` vs `--parallel 1 --spec auto` >= 1.25x on the tool-call set; D4
+   `--spec dflash`. `--parallel auto` choosing tp is decided here (D3).
+9. **Box row 81**; the benchy stage `gpu-self`.
+
+## The plan as written before the review (Bolt-first text kept for Bolt's later TP plan; Task 2 void)
+
 
 **Conditions (operator, 2026-10-23; for Bolt - superseded for Qwen3.8 by the 2026-10-27 status below):** this plan starts only after **plans 17b and 17c are merged and their rows passed**
 (which needed spec 17 §9's GO: P0 after `r22.devices` / `r22.p1`; Bolt's rows 59-62 passed; the crossing cost <= ~1 ms
@@ -65,7 +99,7 @@ commit), spec 16d (snapshots byte-identical across modes).
 - [ ] Failing tests (`bolt_tp_snapshot_test` host, Review Focus 1-2), implement, PASS. Commit
   `git commit -S -m "runtime: Bolt snapshots under --tp 2 in the one-card host layout, the split-vocabulary sampling merge (spec 17d)"`.
 
-### Task 2: LiLiCorr under TP (Mac)
+### Task 2: LiLiCorr under TP (Mac) - VOID: Bolt's drafter, out of scope for Qwen3.8 (review 2026-11-10)
 
 - [ ] The drafter placement per spec 17 §4.8's recorded decision; the M-row verify across the crossings; Review
   Focus 3's tests. Commit `git commit -S -m "runtime: LiLiCorr under --tp 2 (spec 17d)"`.

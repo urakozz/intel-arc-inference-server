@@ -42,6 +42,7 @@
 #include "cli/max_len.h"
 #include "cli/pipeline_args.h"
 #include "cli/pipeline_decode.h"
+#include "cli/tp_decode.h"
 #include "cli/spec_args.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
@@ -98,7 +99,7 @@ void usage() {
   std::fprintf(
       stderr,
       "usage: b70-decode <snapshot-or-repo> --ids <file> --n <N> [--prefill] [--spec mtp|dflash]\n"
-      "                                     [--max-len 16384|auto] [--parallel auto|1|pp]\n"
+      "                                     [--max-len 16384|auto] [--parallel auto|1|pp|tp]\n"
       "\n"
       "  ids in, ids out (no tokenizer: tools/oracle/tokenize.py turns text into an --ids file);\n"
       "  stdout is one generated id per line, everything else goes to stderr. The model is chosen\n"
@@ -120,6 +121,8 @@ void usage() {
       "  --parallel P   auto (default): one card when the model and the context fit it, else pp; 1;\n"
       "                 pp: the layers over two cards (spec 16; --prefill runs the two-card chunk\n"
       "                 pipeline). Kolibri-1 and Nemotron 3.5 Bolt default to two cards.\n"
+      "                 tp (Qwen3.8): tensor parallel, every layer split over two cards (spec 17b;\n"
+      "                 decode only: no --prefill / --spec yet).\n"
       "  --pipeline-split auto|N   pp: device 0 runs layers [0, N); an override, it implies pp.\n"
       "  Kolibri-1 / Nemotron 3.5 Bolt / Qwen3.8-Flash-Next: --layers N (and Flash-Next's REQUIRED\n"
       "                 --layers N|auto, until spec 22) loads only the first N layers (development mode).\n"
@@ -892,6 +895,9 @@ int run(int argc, char** argv) {
   const bool mtp_on = spec.kind == cli::SpecKind::Mtp;
   const bool mtp_auto = mtp_on && spec.adaptive;
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
+  // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
+  cli::check_tp(pipe, {prefill || have_prefill_len, have_spec && spec_arg != "off", profile,
+                       fam_bolt || fam_kol || fam_q4 || fam_k2});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
   // rejection, so `b70_cli_reject` can grade them without a device - and so a
@@ -1138,6 +1144,23 @@ int run(int argc, char** argv) {
     for (uint32_t i = 0; i < depth; ++i) ids[i] = kBenchPrompt[i % kBenchPromptLen];
   }
 
+  // Spec 17b: tensor parallel, its own flow (cli/tp_decode.h).
+  if (pipe.tp()) {
+    cli::TpDecodeArgs ta;
+    ta.path = path;
+    ta.ids = ids;
+    ta.bench = bench;
+    ta.n = n;
+    ta.depth = depth;
+    ta.tg = tg;
+    ta.max_len = max_len_arg;
+    ta.trained = trained;
+    ta.reserve = mem_reserve;
+    ta.lm_head = lm_head;
+    ta.kv = kv_cache;
+    ta.check_len = check_len;
+    return cli::run_tp_decode<StdoutToStderr>(ta);
+  }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
   // pipeline parallel (cli::parallel_auto, from the checkpoint's descriptor before the load).
   if (pipe.mode == cli::Parallel::Auto) {
