@@ -88,3 +88,14 @@ At row6, hidden-state distance rises from2.43726e-5 before L2 to0.00127353 after
 See `docs/probes/q4exp-f32-decode-diagnostic-2026-11-10.md` and its504-row CSV. These observations do
 not establish the full4500-token/N37 decode baseline or prove a prefill-specific defect. Keep the branch
 unmerged and Waiting21 open; the next isolated comparison is decode GDN/HC/router under identical inputs.
+
+
+## F32-judged near-tie replay follow-up (2026-11-10)
+
+User-requested engine expert replay is implemented in signed `a44d0a43` and measured under
+[the aligned-routes plan](2026-11-10-q4exp-aligned-routes.md). Four paired CPU companions completed;
+both registered GPU gates FAIL. Token acceptance improved to32/32 on both L18 paths and28/32
+Decode,29/32Prefill atL37. Outside-window route choices remain rejected and unforced: decode/prefill
+1089/1279 atL18,8413/8885 atL37, already at layer0. The residual conv/GDN ratios therefore do not
+isolate a prefill defect. See [full results](../../probes/q4exp-f32-aligned-routes-2026-11-10.md).
+Waiting21 remains open and the branch is unmerged. No engine or acceptance-threshold change.
