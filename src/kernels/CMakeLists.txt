@@ -700,7 +700,7 @@ endif()
 # and partials, so the reduce is the attn_v2_M<M>_T32[_KV8] binary's attn_reduce_v2[_kv8] (no new reduce).
 #   attn_verify_dpas_M<M>_T<TGT>       bf16 KV at the verify lists' M = 2..4 (B70_MTP) and 5..8 (B70_VERIFY_M8)
 #   attn_verify_dpas_M<M>_T<TGT>_KV8   int8 KV at M = 2..4 (the int8 decode lists that exist)
-# One lever setting per KV form for every M (property R, the kernel's header). Additive only: a new source,
+# One value lever setting per KV form for every M (property R, the kernel's header). Additive only: a new source,
 # new names; nothing binds them until the capture's rule (src/runtime/verify_attn.h) says so.
 option(B70_VERIFY_DPAS "build the DPAS verify attention (spec 28c)" ON)
 if(B70_VERIFY_DPAS AND B70_MTP)
@@ -710,23 +710,36 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   # PSPLIT=1 since 2026-11-04 (P as bf16 hi + lo): P in bf16 alone moved real verify rows off the f32 top
   # (attn_verify_dpas.cl's header, docs/07-open-questions.md §11).
   set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
-  set(VDPAS_LEVERS_KV8 KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
   set(VDPAS_OPTIONS -cl-intel-256-GRF-per-thread)
-  set(VDPAS_OPTIONS_KV8 -cl-intel-256-GRF-per-thread)
+  # 3l (docs/probes/probe-longctx-decode-2026-11-09.md): the MTP verify rows M = 2..4, both KV forms, split the same
+  # values over the work-group differently - PAIR (S by key atom in each row block's two sub-groups, P V by dim
+  # atom over every row block) and, at M = 3 / 4 (three row blocks), PVX = 2 P V-only sub-groups a slice: 32
+  # sub-groups, a whole core. Bitwise the frozen kernel (tests/kernels/attn_verify_bitwise_test.cc). M = 5..8
+  # (DFlash only, not re-timed) keep VDPAS_LEVERS; their 6+ row blocks exceed 32 sub-groups in the PAIR split.
+  set(VDPAS_LEVERS_PAIR KT=32 PACK_H=0 KS=4 DSPLIT=128 QSPLIT=1 PSPLIT=1 PAIR=1)
+  set(_vdpas_pvx_2 0)
+  set(_vdpas_pvx_3 2)
+  set(_vdpas_pvx_4 2)
   set(_vdpas_m 2 3 4)
   if(B70_VERIFY_M8)
     list(APPEND _vdpas_m 5 6 7 8)
   endif()
   foreach(MM ${_vdpas_m})
+    if(MM LESS_EQUAL 4)
+      set(_vdpas_lv ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}})
+    else()
+      set(_vdpas_lv ${VDPAS_LEVERS})
+    endif()
     add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT} SOURCE ${VDPAS_CL}
-                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=0
+                     DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${_vdpas_lv} KV8=0
                      OPTIONS ${VDPAS_OPTIONS})
   endforeach()
   if(B70_KV8)
     foreach(MM 2 3 4)
       add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${VDPAS_CL}
-                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_KV8} KV8=1
-                       OPTIONS ${VDPAS_OPTIONS_KV8})
+                       DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS_PAIR} PVX=${_vdpas_pvx_${MM}}
+                               KV8=1
+                       OPTIONS ${VDPAS_OPTIONS})
     endforeach()
   endif()
 endif()

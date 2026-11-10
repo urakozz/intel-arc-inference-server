@@ -1,6 +1,7 @@
 // 3c: production decode/verify anatomy; no engine or kernel changes.
 // probe_longctx_decode SNAPSHOT KV [device=0] [round=0] [depths=4096,32768,81920,150000]
-//                       [max_len=150272] [wall_calls=128] [profile_calls=32]
+//                       [max_len=150272] [wall_calls=128] [profile_calls=32] [prefix_directory] [Ms=1,4]
+// 3l: Ms lists the rows per call (1 = the plain step, 2..4 = verify steps), each its own arm; arms rotate by round.
 // Use a card lock for smoke, or a whole-box lock and an explicit device for timings.
 #include <algorithm>
 #include <chrono>
@@ -136,7 +137,7 @@ struct PrefixFiles {
 }  // namespace
 
 int main(int argc, char** argv) try {
-  if (argc < 3 || argc > 10) throw std::runtime_error("usage: probe_longctx_decode SNAPSHOT KV [device] [round] [depths] [max_len] [wall_calls] [profile_calls] [prefix_directory]");
+  if (argc < 3 || argc > 11) throw std::runtime_error("usage: probe_longctx_decode SNAPSHOT KV [device] [round] [depths] [max_len] [wall_calls] [profile_calls] [prefix_directory] [Ms]");
   const auto kv = runtime::parse_kv_cache(argv[2]);
   const uint32_t device = argc > 3 ? std::stoul(argv[3]) : 0;
   const uint32_t round = argc > 4 ? std::stoul(argv[4]) : 0;
@@ -144,7 +145,19 @@ int main(int argc, char** argv) try {
   const uint32_t capacity = argc > 6 ? std::stoul(argv[6]) : 150272;
   const uint32_t calls = argc > 7 ? std::stoul(argv[7]) : 128;
   const uint32_t samples = argc > 8 ? std::stoul(argv[8]) : 32;
-  const std::string prefix_directory = argc > 9 ? argv[9] : "";
+  const std::string prefix_directory = argc > 9 && std::string(argv[9]) != "-" ? argv[9] : "";
+  std::vector<uint32_t> ms;
+  {
+    const std::string text = argc > 10 ? argv[10] : "1,4";
+    for (size_t at = 0; at < text.size();) {
+      const size_t comma = text.find(',', at);
+      ms.push_back(std::stoul(text.substr(at, comma - at)));
+      if (comma == std::string::npos) break;
+      at = comma + 1;
+    }
+    for (uint32_t m : ms)
+      if (m < 1 || m > 4) throw std::runtime_error("Ms are 1..4");
+  }
   if (uint64_t(depths.back()) + std::max(calls, 4u) >= capacity || !calls || !samples)
     throw std::runtime_error("capacity must leave room for calls and four verify rows; counts must be positive");
   std::ifstream input("tests/golden/prompts/long32k.ids");
@@ -186,9 +199,9 @@ int main(int argc, char** argv) try {
       state.restore(imm); ring.restore(imm); control.restore(imm);
       head_hidden.restore(imm); head_control.restore(imm);
     };
-    std::unique_ptr<Arm> arms[2];
-    arms[0] = std::make_unique<Arm>(ctx, engine, 1, depth);
-    arms[1] = std::make_unique<Arm>(ctx, engine, 4, depth);
+    const size_t na = ms.size();
+    std::vector<std::unique_ptr<Arm>> arms(na);
+    for (size_t a = 0; a < na; ++a) arms[a] = std::make_unique<Arm>(ctx, engine, ms[a], depth);
     auto submit = [&](Arm& arm, bool profile) {
       ctl->pos = depth;
       ctl->n_active = arm.M;
@@ -203,11 +216,11 @@ int main(int argc, char** argv) try {
       fence.wait();
     };
     // Alternate paired chunks within every depth, and reverse their order by outer round.
-    double wall_ms[2] = {}, total_us[2] = {}, prep_us[2] = {}, core_us[2] = {}, reduce_us[2] = {}, head_us[2] = {};
-    uint32_t attn_launches[2] = {};
+    std::vector<double> wall_ms(na), total_us(na), prep_us(na), core_us(na), reduce_us(na), head_us(na);
+    std::vector<uint32_t> attn_launches(na);
     for (unsigned phase = 0; phase < 2; ++phase) {
-      for (unsigned order = 0; order < 2; ++order) {
-        const unsigned a = (order + round + phase) % 2;
+      for (unsigned order = 0; order < na; ++order) {
+        const unsigned a = (order + round + phase) % na;
         auto& arm = *arms[a];
         restore();
         for (uint32_t w = 0; w < 128; ++w) submit(arm, false);
@@ -241,7 +254,7 @@ int main(int argc, char** argv) try {
         }
       }
     }
-    for (unsigned a = 0; a < 2; ++a) {
+    for (unsigned a = 0; a < na; ++a) {
       const auto& arm = *arms[a];
       if (!(wall_ms[a] > 0) || !(total_us[a] > 0) || !attn_launches[a]) throw std::runtime_error("incomplete measurements");
       std::printf("{\"kv\":\"%s\",\"round\":%u,\"depth\":%u,\"M\":%u,\"capacity\":%u,\"launches\":%zu,\"attn_launches\":%u,\"wall_ms\":%.9f,\"gpu_ms\":%.9f,\"prep_ms\":%.9f,\"core_ms\":%.9f,\"reduce_ms\":%.9f,\"head_attn_ms\":%.9f,\"rows_per_s\":%.6f}\n",

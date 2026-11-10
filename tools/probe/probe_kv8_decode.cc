@@ -7,8 +7,12 @@
 // by round against the first arm are printed.
 //
 //   probe_kv8_decode <M> <depths,...> <arm> [<arm> ...]
-//     arm = <binary>[@dec|@red]   int8 when the binary's name holds "KV8" or "kv8", else bf16;
-//                                 @dec: the decode launches only, @red: the reduces only
+//     arm = <binary>[+<reduce binary>][@dec|@red]
+//                                 int8 when the binary's name holds "KV8" or "kv8", else bf16;
+//                                 @dec: the decode launches only, @red: the reduces only;
+//                                 3l: `+<v2 binary>` takes the reduce from that binary, and a decode
+//                                 binary named *verify_dpas* / *vdpas* binds attn_verify_dpas[_kv8] at its
+//                                 own reqd_work_group_size (the verify list's pair)
 //
 // Depth is Control::pos (row 0 reads pos + 1 keys).
 #include <algorithm>
@@ -30,6 +34,7 @@
 #include "l0/memory.h"
 #include "l0/module.h"
 #include "l0/queue.h"
+#include <level_zero/ze_api.h>
 #include "runtime/control.h"
 
 namespace {
@@ -62,9 +67,9 @@ void seed(l0::Context& ctx, l0::CmdList& imm, void* dst, size_t bytes, uint32_t 
 }
 
 struct Arm {
-  std::string spec, binary;
-  bool kv8 = false, dec = true, red = true;
-  std::unique_ptr<l0::Module> module;
+  std::string spec, binary, red_binary;
+  bool kv8 = false, dec = true, red = true, dpas = false;
+  std::unique_ptr<l0::Module> module, red_module;
   std::unique_ptr<l0::CmdList> list;
   std::vector<l0::Kernel> kernels;
 };
@@ -91,6 +96,12 @@ int main(int argc, char** argv) {
     Arm& arm = arms[a];
     arm.spec = argv[3 + a];
     arm.binary = arm.spec.substr(0, arm.spec.find('@'));
+    if (arm.binary.find('+') != std::string::npos) {
+      arm.red_binary = arm.binary.substr(arm.binary.find('+') + 1);
+      arm.binary = arm.binary.substr(0, arm.binary.find('+'));
+    }
+    arm.dpas = arm.binary.find("verify_dpas") != std::string::npos || arm.binary.find("vdpas") != std::string::npos;
+    if (arm.dpas && arm.red_binary.empty()) fail(arm.spec + ": a DPAS arm needs +<v2 binary> for its reduce");
     const std::string part = arm.spec.find('@') == std::string::npos ? "" : arm.spec.substr(arm.spec.find('@') + 1);
     if (part == "dec") arm.red = false;
     else if (part == "red") arm.dec = false;
@@ -98,6 +109,7 @@ int main(int argc, char** argv) {
     arm.kv8 = arm.binary.find("KV8") != std::string::npos || arm.binary.find("kv8") != std::string::npos;
     (arm.kv8 ? any8 : any16) = true;
     arm.module = std::make_unique<l0::Module>(ctx, kernels::path(arm.binary));
+    if (!arm.red_binary.empty()) arm.red_module = std::make_unique<l0::Module>(ctx, kernels::path(arm.red_binary));
   }
   // Per layer: its own K / V (and scales) at `capacity` positions.
   const size_t kv8_bytes = size_t(capacity) * kKvRow, kv16_bytes = kv8_bytes * 2, sc_bytes = size_t(capacity) * 4 * 2;
@@ -148,13 +160,22 @@ int main(int argc, char** argv) {
   for (Arm& arm : arms) {
     arm.kernels.reserve(2 * kLayers);
     arm.list = std::make_unique<l0::CmdList>(l0::CmdList::regular(ctx));
-    const std::string dn = arm.kv8 ? "attn_decode_v2_kv8" : "attn_decode_v2";
+    const std::string dn = arm.dpas ? (arm.kv8 ? "attn_verify_dpas_kv8" : "attn_verify_dpas")
+                                    : (arm.kv8 ? "attn_decode_v2_kv8" : "attn_decode_v2");
     const std::string rn = arm.kv8 ? "attn_reduce_v2_kv8" : "attn_reduce_v2";
     for (uint32_t l = 0; l < kLayers; ++l) {
       if (arm.dec) {
         arm.kernels.push_back(arm.module->kernel(dn.c_str()));
         l0::Kernel& k = arm.kernels.back();
-        k.group_size(256);
+        if (arm.dpas) {
+          ze_kernel_properties_t p{};
+          p.stype = ZE_STRUCTURE_TYPE_KERNEL_PROPERTIES;
+          if (zeKernelGetProperties(k.handle(), &p) != ZE_RESULT_SUCCESS || p.requiredGroupSizeX < 16)
+            fail(arm.binary + ": no reqd_work_group_size");
+          k.group_size(p.requiredGroupSizeX);
+        } else {
+          k.group_size(256);
+        }
         k.arg_ptr(0, control.ptr());
         k.arg_ptr(1, attn_q.ptr());
         if (arm.kv8) {
@@ -166,7 +187,7 @@ int main(int argc, char** argv) {
         arm.list->launch(k, 4, kBlocks);
       }
       if (arm.red) {
-        arm.kernels.push_back(arm.module->kernel(rn.c_str()));
+        arm.kernels.push_back((arm.red_module ? arm.red_module : arm.module)->kernel(rn.c_str()));
         l0::Kernel& k = arm.kernels.back();
         k.group_size(256);
         k.arg_ptr(0, control.ptr()); k.arg_ptr(1, part.ptr());
