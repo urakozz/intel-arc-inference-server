@@ -33,7 +33,9 @@ constexpr uint32_t kTile = 64;   // pf_flash_attn's KT: spans are whole tiles
 // work-groups (one or two row blocks), and spans of at most ~2048 keys deep in the cache (measured fastest
 // at 32k-128k for every C up to 128) - never a span under 256 keys (below it the merge and the per-span
 // setup outweigh the walk), and no more spans than pf_o's spare rows hold (13 at C = 128). It is taken for
-// C <= kSplitMaxRows at pos >= kSplitMinPos; larger chunks keep today's launch (bitwise as before).
+// C <= kSplitMaxRows at pos >= kSplitMinPos (at 512 keys a 64-row split was slower: 1.19 -> 1.42 ms for 16
+// layers); larger chunks keep today's launch, bitwise as before (C = 256 deep in the cache would gain too -
+// 0.88 x at 8192, 0.73 x at 131072 - but pf_o's spare rows hold only 6 of its spans: not built).
 constexpr uint32_t kSplitMaxRows = 128;
 constexpr uint32_t kSplitMinPos = 1024;
 constexpr uint32_t kSplitMinSpan = 256;
