@@ -286,7 +286,7 @@ class ReplicaEngine : public server::BatchEngineIface {
         for (uint32_t id : b.step_batch(own)) got.push_back({id});
         return got;
       }));
-    join(done, std::move(errors), &runs);
+    join(done, errors, &runs);
     std::vector<uint32_t> ids;
     for (const auto& run : runs) ids.push_back(run.at(0));
     return ids;
@@ -320,7 +320,7 @@ class ReplicaEngine : public server::BatchEngineIface {
                                [](server::BatchEngineIface& b, const std::vector<SpecRow>& own) {
                                  return b.step_spec(own);
                                }));
-    join(done, std::move(errors), &runs);
+    join(done, errors, &runs);
     return runs;
   }
   void truncate_to(uint32_t slot, uint32_t p) override {
@@ -443,8 +443,10 @@ class ReplicaEngine : public server::BatchEngineIface {
   // Waits for every posted call; a call that threw fails its rows, and with the rows a card's SlotsFailed named
   // (`errors`, per row) they become one SlotsFailed (per row, in order) with the completed rows' results - nothing
   // returns before every card is done (no task outlives the call's locals).
-  static void join(std::vector<Post>& done, std::vector<std::string> errors,
+  // `errors` is read only after every call is done (the cards' tasks write into it).
+  static void join(std::vector<Post>& done, std::vector<std::string>& errors,
                    std::vector<std::vector<uint32_t>>* runs) {
+    for (Post& p : done) p.done.wait();
     bool failed = false;
     for (const std::string& e : errors)
       if (!e.empty()) failed = true;
