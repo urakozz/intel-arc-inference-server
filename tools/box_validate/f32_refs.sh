@@ -116,6 +116,7 @@ case "$what" in
         ORACLE_MODEL="${SNAP_QWEN_CACHE:-models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ}" \
         tools/oracle/run_in_container.sh "python3 tools/oracle/qwen_forced.py run \"\$SNAP\" --ctx /ws/$part/ctx \
           --out /ws/$part/out --out-i8head /ws/$part/out-i8head --work /ws/$part/work --done /ws/$part/done.txt \
+          --memory-gib ${QWEN_MEMORY_GIB:-64} --chunk-rows ${QWEN_CHUNK_ROWS:-256} \
           ${re:+--match '$re'} $pfi8 >> /ws/$part/run.log 2>&1" ||
         { echo "f32_refs: pass $pass FAILED"; tail -20 "$part/run.log"; rc=1; }
       [ -n "${B70_CPU_MODEL_LOCK_HELD:-}" ] || flock -u 9

@@ -1819,12 +1819,16 @@ if(B70_KV8)
   if(TEST mtp_verify_test)
     add_test(NAME mtp_verify_kv8_test COMMAND mtp_verify_test ${B70_TEST_SNAPSHOT})
     b70_kv8_twin(mtp_verify)
+    set_property(TEST mtp_verify_kv8_test APPEND PROPERTY ENVIRONMENT
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE}")
     add_test(NAME memory_plan_box_mtp_kv8_test COMMAND memory_plan_box_test ${B70_TEST_SNAPSHOT} mtp)
     b70_kv8_twin(memory_plan_box_mtp)
   endif()
   if(TEST mtp_gpu_test)
     add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     b70_kv8_twin(mtp_gpu)
+    set_property(TEST mtp_gpu_kv8_test APPEND PROPERTY ENVIRONMENT
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   if(TEST prefix_gpu_int8_test)
     add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
