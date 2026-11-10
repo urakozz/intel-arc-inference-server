@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spec 25a: the Nemotron 3.5 Bolt 74B-A9B CPU reference runs (kolibri_oracle.sh's shape), ON THE BOX
 # CPU - the Mac runs `tests` only (the real checkpoints need more RAM than its 40 GB container cap; BOLT_REF_MIN_GB).
-#   tools/box_validate/bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq
+#   tools/box_validate/bolt_oracle.sh <data tree> tests|ppl|hfcheck|golden|golden-f32|golden-bf16|export <dir>|a4|a4-bf16|gateq
 #
 # Every mode runs tools/oracle/bolt_ref.py (the checkpoint's own remote code, layer-streamed, its Mamba mixers on the
 # kernel path through bolt_mamba_ops, an fp32 SSM / conv cache) in the oracle image (tools/oracle/run_in_container.sh)
@@ -20,6 +20,8 @@
 #                (BOLT_PROMPTS: bolt_short bolt_4k bolt_agentic bolt_32k), --gen 32 --taps -> <data>/oracle-out-bolt/
 #                <p>.{ids,golden.safetensors,log}; each log's gap lines (the 9th / 10th sel per MoE block:
 #                B70_BOLT_TIE_TOL's evidence, Decision 11) and SSM-state magnitudes
+#   golden-f32   int4 weights computed in fp32, forced on oracle-out-bolt tokens; optional third argument: route-dump
+#                directory for per-engine aligned f32/bf16 state companions (B70_DUMP_FORCED); default short/4k/agentic
 #   golden-bf16  the BF16 original on BOLT_BF16_PROMPTS (bolt_short bolt_agentic) -> <data>/oracle-out-bolt-bf16/
 #   export <dir> the golden prompts on an int4 checkpoint dequantised (25b's synthetics; mounted as ORACLE_SNAP)
 #                -> <data>/oracle-out-bolt-<name>/ (<name> = the directory's base name)
@@ -47,10 +49,10 @@
 #      BOLT_MEM_GB, BOLT_LOCK, BOLT_LOCK_HELD, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-MODES="tests|ppl|hfcheck|golden|golden-bf16|export <dir>|a4|a4-bf16|gateq"
+MODES="tests|ppl|hfcheck|golden|golden-f32|golden-bf16|export <dir>|a4|a4-bf16|gateq"
 [ $# -ge 2 ] || { echo "usage: $0 <data tree> $MODES" >&2; exit 2; }
 data="$1" mode="$2" arg="${3:-}"
-case "$mode" in tests|ppl|hfcheck|golden|golden-bf16|a4|a4-bf16|gateq) ;;
+case "$mode" in tests|ppl|hfcheck|golden|golden-f32|golden-bf16|a4|a4-bf16|gateq) ;;
   export) [ -n "$arg" ] || { echo "bolt_oracle: export needs the export's directory" >&2; exit 2; } ;;
   *) echo "bolt_oracle: mode $mode is not one of $MODES" >&2; exit 2 ;;
 esac
@@ -64,6 +66,7 @@ gen="${BOLT_GEN:-32}"
 keep="${BOLT_KEEP:-}"
 [ -z "$keep" ] || [[ "$keep" =~ ^(all|[0-9,]+)$ ]] || { echo "bolt_oracle: BOLT_KEEP=$keep" >&2; exit 2; }
 prompts="${BOLT_PROMPTS:-bolt_short bolt_4k bolt_agentic bolt_32k}"
+[ "$mode" != golden-f32 ] || prompts="${BOLT_PROMPTS:-bolt_short bolt_4k bolt_agentic}"
 bprompts="${BOLT_BF16_PROMPTS:-bolt_short bolt_agentic}"
 for p in $prompts $bprompts; do
   [ -s "tests/golden/prompts/$p.ids" ] || { echo "bolt_oracle: no tests/golden/prompts/$p.ids" >&2; exit 2; }
@@ -151,7 +154,7 @@ miss() { echo "SKIP_REASON bolt_oracle: $1"; exit 77; }
 if [ "$dry" != 1 ]; then
   case "$mode" in
     tests) small "$INT4" || miss "the pinned snapshot's small files are not in $hf/hub (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d1844f91056c5b9433448075a842b9156 --exclude '*.safetensors')" ;;
-    golden) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d...: 41 GB, df -h ~ first)" ;;
+    golden|golden-f32) complete "$INT4" || miss "$INT4 is absent or incomplete (hf download urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ --revision 8932aa8d...: 41 GB, df -h ~ first)" ;;
     a4) complete "$INT4" || miss "$INT4 is absent or incomplete (41 GB)" ;;
     golden-bf16|a4-bf16) complete "$BF16" || miss "$BF16 is absent or incomplete (hf download nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-BF16 --revision 56702103...: 149.8 GB, df -h ~ first)" ;;
     gateq) { complete "$INT4" && complete "$BF16"; } || miss "gate Q needs both $INT4 and $BF16 complete (41 + 149.8 GB)" ;;
@@ -209,6 +212,73 @@ golden() {
   echo "bolt_oracle: $p done ($(date '+%F %T')); $(grep -E '^wall' "$out/$p.log")"
 }
 
+# Every container path is tree-local; publication to an absolute data tree happens outside the container.
+f32_one() {
+  local key="$1" prompt="$2" force="$3" dtype="$4" extra="$5"
+  local out="$data/oracle-out-bolt-f32" part=oracle-out-bolt-f32.partial
+  local sig="" old="" aside
+  if [ "$dry" != 1 ]; then
+    sig=$(python3 - "$dtype" "$gen" "$extra" "$prompt" "$force" tools/oracle/bolt_ref.py tools/oracle/bolt_mamba_ops.py <<'EOF'
+import hashlib, shlex, sys
+h = hashlib.sha256()
+h.update(repr(sys.argv[1:4]).encode())
+paths = sys.argv[4:] + [v.removeprefix("/ws/") for v in shlex.split(sys.argv[3]) if v.startswith("/ws/")]
+for path in paths:
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+print(h.hexdigest())
+EOF
+    ) || return 1
+    old=$(cat "$out/$key.inputs.sha256" 2>/dev/null)
+    if [ -s "$out/$key.golden.safetensors" ] && [ "$old" = "$sig" ]; then
+      echo "bolt_oracle: $key kept (same inputs)"; return 0
+    fi
+    if [ -e "$out/$key.golden.safetensors" ]; then
+      aside="$out/stale-$key-$(date +%Y%m%d-%H%M%S)"
+      mkdir -p "$aside" || return 1
+      for f in "$key.golden.safetensors" "$key.ids" "$key.log" "$key.inputs.sha256"; do
+        [ ! -e "$out/$f" ] || mv "$out/$f" "$aside/" || return 1
+      done
+    fi
+  fi
+  if [ "$dry" != 1 ]; then
+    mkdir -p "$part" "$out" || return 1
+    cp "$prompt" "$part/$key.ids" && { [ "$force" = "$part/$key.force.ids" ] || cp "$force" "$part/$key.force.ids"; } || return 1
+  fi
+  in_box "$INT4" "python3 tools/oracle/bolt_ref.py run \"\$SNAP\" --prompt /ws/$part/$key.ids \
+    --force /ws/$part/$key.force.ids --gen $gen --dtype $dtype --taps $kflag $extra \
+    --out /ws/$part/$key.golden.safetensors > /ws/$part/$key.log 2>&1" || return 1
+  [ "$dry" = 1 ] && return 0
+  printf '%s\n' "$sig" > "$part/$key.inputs.sha256" || return 1
+  for f in "$key.ids" "$key.log" "$key.inputs.sha256" "$key.golden.safetensors"; do
+    mv -f "$part/$f" "$out/$f" || return 1
+  done
+  grep '^wall\|^forced near-tie' "$out/$key.log"
+}
+
+# Existing golden sets need not have a .cont*.ids sidecar: recover their exact I32 tokens without torch on the host.
+force_ids() {
+  python3 - "$1" "$2" "$gen" <<'EOF'
+import glob, json, struct, sys
+stem, out, gen = sys.argv[1], sys.argv[2], int(sys.argv[3])
+sidecars = sorted(glob.glob(stem + ".cont*.ids"))
+if sidecars:
+    ids = [int(v) for v in open(sidecars[0]).read().split()][:gen]
+else:
+    with open(stem + ".golden.safetensors", "rb") as f:
+        hlen = struct.unpack("<Q", f.read(8))[0]
+        h = json.loads(f.read(hlen))["tokens"]
+        if h["dtype"] != "I32":
+            raise ValueError("golden tokens must be I32")
+        f.seek(8 + hlen + h["data_offsets"][0])
+        ids = list(struct.unpack("<" + "i" * gen, f.read(4 * gen)))
+if len(ids) != gen:
+    raise ValueError("short forced continuation")
+open(out, "w").write(" ".join(map(str, ids)) + "\n")
+EOF
+}
+
 summary() {   # the routing gaps (B70_BOLT_TIE_TOL's evidence, Decision 11), the SSM state magnitudes, walls and RSS
   echo "--- the 9th / 10th sel gap per MoE block, the SSM state after the prompt, walls"
   # shellcheck disable=SC2086 # the glob is meant
@@ -217,7 +287,7 @@ summary() {   # the routing gaps (B70_BOLT_TIE_TOL's evidence, Decision 11), the
 
 case "$mode" in
   tests)
-    in_box "$INT4" "python3 tools/oracle/bolt_tiny_check.py \"\$SNAP\" && python3 tools/oracle/test_bolt_make_tiny.py && \
+    in_box "$INT4" "python3 tools/box_validate/test_bolt_oracle.py && python3 tools/oracle/bolt_tiny_check.py \"\$SNAP\" && python3 tools/oracle/test_bolt_make_tiny.py && \
       python3 tools/oracle/test_bolt_ref.py && python3 tools/toolcall/test_score.py && \
       python3 tools/toolcall/test_make_set.py && python3 tools/toolcall/test_oracle_batched.py test_bolt" || rc=1
     ;;
@@ -252,6 +322,35 @@ case "$mode" in
       golden "$INT4" "$data/oracle-out-bolt" oracle-out-bolt.partial "$p" "$gen" "--weights int4 --taps" || true
     done
     summary "$data/oracle-out-bolt/bolt_*.log"
+    ;;
+  golden-f32)
+    out="$data/oracle-out-bolt-f32" part=oracle-out-bolt-f32.partial
+    [ "$dry" = 1 ] || {
+      [ "$(cat "$data/oracle-out-bolt/SNAPSHOT" 2>/dev/null)" = "$(snap_want)" ] || miss "the bf16 golden is not our export's"
+    }
+    own_dir "$out" || exit 1
+    [ "$dry" = 1 ] || mkdir -p "$part"
+    for p in $prompts; do
+      if [ "$dry" != 1 ]; then
+        force_ids "$data/oracle-out-bolt/$p" "$part/$p.force.ids" || { rc=1; continue; }
+      fi
+      f32_one "$p" "tests/golden/prompts/$p.ids" "$part/$p.force.ids" fp32 "" || { rc=1; continue; }
+      [ -n "$arg" ] || continue
+      for tape in "$arg"/"$p"_*.routes; do
+        [ -s "$tape" ] || continue
+        key=$(basename "$tape" .routes)
+        # A key is generated by the test, not an arbitrary shell fragment.
+        [[ "$key" =~ ^[A-Za-z0-9_.-]+$ ]] || { rc=1; continue; }
+        [ "$dry" = 1 ] || cp "$tape" "$part/$key.routes" || { rc=1; continue; }
+        f32_one "$key.f32" "$arg/$key.prompt.ids" "$arg/$key.force.ids" fp32 \
+          "--forced-routes /ws/$part/$key.routes" || { rc=1; continue; }
+        # The f32 result may live in an absolute data tree outside /ws.
+        [ "$dry" = 1 ] || cp "$out/$key.f32.golden.safetensors" "$part/$key.mask.safetensors" || { rc=1; continue; }
+        f32_one "$key.bf16" "$arg/$key.prompt.ids" "$arg/$key.force.ids" bf16 \
+          "--forced-routes /ws/$part/$key.routes --routes-mask /ws/$part/$key.mask.safetensors" || rc=1
+      done
+    done
+    summary "$out/bolt_*.log"
     ;;
   golden-bf16)
     for p in $bprompts; do
