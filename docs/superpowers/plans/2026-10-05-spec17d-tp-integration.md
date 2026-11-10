@@ -75,6 +75,20 @@ under 0.3 %); load average 2.6 - 9 (the box otherwise idle; a first run beside a
 At `--ids long` through b70-decode (2820-id prompt, 64 ids, K 3): one card 86.9 t/s, tp 110.3 t/s (1.27x; plain 33.8 /
 54.0). The bar holds at both depths: **1.46x / 1.47x**.
 
+**Decisions (built at the recommendation; options in REPORT-17d):**
+- D11 `long`'s id 62 (bf16 KV): MTP under TP takes 271, which the f32 judge rejects (23 ulp below the f32 top 198);
+  plain TP and one card's MTP take 198. The teacher-forced probe shows TP's verify rows drift from its plain rows as
+  one card's do, so it is the verify path's rounding on a sensitive row (the same row as D10, mirrored at int8 KV
+  where plain TP takes 271 and MTP 198). Kept built and on (r81.mtp FAILs on that one row until the operator rules).
+- D12 DFlash and the draft vocabulary under TP: not built, refused by name.
+- D13 D3 applied in b70-serve only, at `--max-len auto`; b70-decode's `--parallel auto` is unchanged (tp explicit),
+  so every timed b70-decode row keeps its meaning.
+- D14 the MTP head whole on each card (no crossing; 0.85 GB a card), not split like a layer.
+- D15 MTP under TP for the folded crossing only (the slices form runs plain decode).
+- D16 the block hook's stride under TP is a pair's rows rounded to blocks (4096 at cap 2048), not every block (which
+  would cut 2048-row pairs into two 1024-row chunks at every block, 17c's slower 2048-id rate).
+- D17 the per-card verify attention binds DPAS at one card's measured crossovers (not re-timed at 12 / 2).
+
 ## Review 2026-11-10 (against main 16fe2a14; nothing here is built - 17d starts after 17c)
 
 Every task below the status lines is Bolt's (`BoltEngine` snapshots, LiLiCorr, `b70-serve <bolt> --tp 2`, row 71).
