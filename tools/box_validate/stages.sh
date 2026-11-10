@@ -3541,7 +3541,7 @@ st_r79_fail() {
   grab_all fail '^card ' 6
   finish
 }
-stage r79.cli    79 default gpu qwen r79.decode "b70-decode --parallel tp --ids prose 64 ids == --parallel 1's (the slices crossing: bitwise); the tp refusals (cli_reject_tp_*)"
+stage r79.cli    79 default gpu qwen r79.decode "b70-decode --parallel tp --ids prose 64 ids == --parallel 1's (the default crossing, folded since D1's measurement: identical on this prompt in tp_decode_test; a difference goes to tp_decode_test's tie rule); the tp refusals (cli_reject_tp_*)"
 st_r79_cli() {
   chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel 1 > $STATE/$STAGE.one.ids" "--parallel 1"
   chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel tp > $STATE/$STAGE.tp.ids 2> $STATE/$STAGE.tp.err" "--parallel tp"
@@ -3550,15 +3550,15 @@ st_r79_cli() {
   run_tests '^cli_reject_tp_'
   finish
 }
-stage r79.speed  79 optin   gpu qwen r79.decode "D1-dense plain (idle box): --parallel tp (slices, b70-decode) and the folded crossing (tp_decode_test bench) against --parallel 1, tg 256 at depth 4096 and 16384 (TP ingests by replays; one card prefills to the depth), interleaved, median of 3; bar >= 1.35x"
+stage r79.speed  79 optin   gpu qwen r79.decode "D1-dense plain (idle box): --parallel tp (the default crossing, b70-decode) and both crossings (tp_decode_test bench) against --parallel 1, tg 256 at depth 4096 and 16384 (TP ingests by replays; one card prefills to the depth), interleaved, median of 3; bar >= 1.35x"
 st_r79_speed() {
   idle before
   local d
   for d in 4096 16384; do
     chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.$d.rows -r 3 --ratio tp-slices/one --ratio tp-folded/one -- \
 one 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 256 --max-len 32768' \
-tp-slices 'build/src/cli/b70-decode $SNAP_QWEN --bench --depth $d --tg 256 --max-len 32768 --parallel tp' \
-tp-folded 'build/tests/tp_decode_test $SNAP_QWEN bench folded $d 256'" "depth $d: one card, tp slices, tp folded"
+tp-slices 'build/tests/tp_decode_test $SNAP_QWEN bench slices $d 256' \
+tp-folded 'build/src/cli/b70-decode $SNAP_QWEN --bench --depth $d --tg 256 --max-len 32768 --parallel tp'" "depth $d: one card, tp slices, tp folded (b70-decode's default)"
   done
   idle after
   grab_all speed '^RATIO |^MEDIAN |^\| b70-decode' 60
