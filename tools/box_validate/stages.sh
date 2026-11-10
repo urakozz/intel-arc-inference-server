@@ -3393,11 +3393,12 @@ st_r76_speed() {
 }
 
 # ======================================================================================
-row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise per card, B2 two concurrent chat clients, B3 a snapshot from card 0 restored on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
+row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise alone / f32 judge for shared-card slots, B2 two concurrent chat clients, B3 a snapshot from card 0 restored on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
 rownote 77 "Everything two-card holds the whole box (kind gpu, ZE_AFFINITY_MASK=0,1 set by each arm). Hand back: r77.r1's R1 lines per --spec (off / mtp / lookup), r77.b2's golden lines, r77.b3 / r77.b4's PASS lines, each card's startup lines (devices, card 0 / card 1 max_len, memory) - the device-1 gap is recorded by Task 6, not gated."
 rownote 77 "Task 6 (speed and record) is not staged yet: aggregate t/s at concurrency 2 against 1 (serve_bench.sh / llama-benchy, admission timing stated), a lone request within 2 % of --parallel 1, the opencode-shaped replay (tools/prefix/make_synth_log.py) against the serial server, and the overlap share of a real opencode session from --log-requests. Rows are added when Task 5 is green."
 stage r77.host    77 default cpu  -    -                          "host: scheduler_test, dflash_scheduler_test, replica_engine_test, replica_server_test, pipeline_args_test and the serial server's protocol / prefix / mtp / lookup server tests"
 st_r77_host() {
+  chk "python3 tools/box_validate/test_replica_check.py" "replica comparison and f32 judge plumbing (synthetic logs)"
   run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
   finish
 }
@@ -3407,17 +3408,21 @@ st_r77_reject() {
   chk "out=\$(ZE_AFFINITY_MASK=0 timeout 120 build/src/cli/b70-serve $SNAP_QWEN --parallel replica 2>&1); rc=\$?; echo \"\$out\" | tail -3; [ \$rc -eq 1 ] && echo \"\$out\" | grep -q 'parallel replica needs two GPUs' && ! echo \"\$out\" | grep -q '^device'" "one visible card: refused"
   finish
 }
-stage r77.r1      77 default gpu  qwen r77.reject                 "R1: every request (golden prose / code / cjk, completion and chat, greedy and seeded) sent two at a time to --parallel replica equals it alone on the card that served it (--parallel 1 on card 0 and on card 1) - bitwise, --spec off, mtp and lookup, --max-len 65536"
+stage r77.r1      77 default gpu  qwen r77.reject                 "R1: every request (golden prose / code / cjk, completion and chat, greedy and seeded) sent two at a time to --parallel replica equals it alone on the card that served it (--parallel 1 on card 0 and on card 1) - bitwise alone on its card, otherwise the f32 judge (awaiting references SKIP); --spec off, mtp and lookup, --max-len 65536"
 st_r77_r1() {
-  local sp
+  local sp rc
+  BV_JUDGE_RC=0
   for sp in off mtp lookup; do
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/replica 0,1 $SNAP_QWEN --parallel replica --spec $sp --max-len 65536 -- --mode pairs" "--spec $sp: pairs on the replica server"
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card0 0 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 0"
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card1 1 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 1"
-    chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/r1/$sp/replica/requests.jsonl --server-log $STATE/r1/$sp/replica/server-log --card0 $STATE/r1/$sp/card0/requests.jsonl --card1 $STATE/r1/$sp/card1/requests.jsonl" "--spec $sp: R1"
+    x "python3 tools/box_validate/replica_check.py compare --replica $STATE/r1/$sp/replica/requests.jsonl --server-log $STATE/r1/$sp/replica/server-log --card0 $STATE/r1/$sp/card0/requests.jsonl --card1 $STATE/r1/$sp/card1/requests.jsonl --dump $DATA/oracle-forced-dumps/qwen-serve --judge $DATA/oracle-out-qwen-f32-i8head-forced --bf16 $DATA/oracle-out-qwen-bf16top-forced"
+    rc=$?
+    [ "$rc" != 77 ] || BV_JUDGE_RC=77
+    step_rc "$rc" "--spec $sp: R1"
   done
-  grab_all r1 '^R1 |card [01]: max_len|^devices:' 120
-  finish
+  grab_all r1 '^R1 |^SKIP_REASON|awaiting f32 reference|card [01]: max_len|^devices:' 120
+  judged_finish
 }
 stage r77.b2      77 default gpu  qwen r77.r1                     "B2: golden_server_test --chat with two concurrent clients (B70_SERVE_CLIENTS=2) on --parallel replica: both replies of every prompt equal b70-decode's 32 ids on one card (decoded after the server stops)"
 st_r77_b2() {
