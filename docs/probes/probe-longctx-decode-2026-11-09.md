@@ -736,3 +736,22 @@ ids are inside the f32 judge's one-ulp near-tie, i.e. the reference itself canno
 above are from the dumped ids against the judges on the CPU (`~/b70/data/3l2-judge_ids.py`, judge_row's rule);
 the registered `prefill_turns_test` / `prefill_turns_kv8_test` re-run the engine with `B70_FORCED_JUDGE` and add the
 logits-to-judge cosines.
+
+**Final run (the table of record, `~/b70/logs/3l2/final.log`).** The operator ran a job on card 1 outside the lock
+some time around the first run, so the whole table was re-run under `tools/gpu_lock.sh box` on the default device
+(no ZE_AFFINITY_MASK), the box otherwise idle, same binaries and driver. It reproduces the first run within ~1 %:
+
+| KV | keys | rows | today | split | gain % [range] |
+|:---|---:|---:|---:|---:|:---|
+| bf16 | 32768 | 16 / 64 / 128 | 164.17 / 186.45 / 347.53 | 76.31 / 121.01 / 186.92 | 53.52 / 35.16 / 46.21 |
+| bf16 | 131072 | 16 / 64 / 128 | 443.06 / 463.06 / 919.67 | 97.87 / 196.32 / 331.14 | 77.91 / 57.60 / 63.99 |
+| int8 | 32768 | 16 / 64 / 128 | 184.70 / 210.57 / 262.54 | 78.80 / 132.12 / 206.67 | 57.33 / 37.30 / 21.35 |
+| int8 | 131072 | 16 / 64 / 128 | 525.48 / 543.84 / 592.53 | 108.11 / 241.25 / 396.73 | 79.43 / 55.64 / 33.03 |
+| both | 2048 / 8192 | 16 / 64 / 128 | | | +0.39 .. +25.85 (int8 2048 x 128: 0.39 [-0.13, 0.57]) |
+| both | 2048 .. 131072 | 2048 | | | -0.18 .. +0.08 (identical launch) |
+
+Every deep row 3 / 3 pairs faster. The registered judged tests then ran on card 1 with `B70_FORCED_JUDGE`:
+`prefill_turns_test` bf16 **PASS** and int8 **PASS** - 0 of 32 ids rejected in each of the 8 runs; logits cosine
+to the judge (min / median) bf16 16k today 0.999695 / 0.999910, split 0.999363 / 0.999877; 32k today 0.999449 /
+0.999902, split 0.999600 / 0.999886; int8 16k today 0.999261 / 0.999894, split 0.999780 / 0.999927; 32k today
+0.999589 / 0.999895, split 0.999418 / 0.999911 (at 16k the two runs are different contexts after their parting row).
