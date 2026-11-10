@@ -82,8 +82,11 @@ inline uint32_t parallel_auto(const std::string& snapshot_dir, const MaxLenArg& 
 // ways), when the context is auto and nothing asked is something TP does not run (`blocked`: DFlash, a draft
 // vocabulary, the l0-int8 prefill). An asked --max-len keeps auto's one-card / pp rule: its spare memory may become
 // one card's sequence slots (spec 13c - "slots stay one-card"), several requests at once, which TP does not have.
+// OFF until the operator rules (plan 17d's D18): the speed bar holds (1.46x / 1.47x), but two rows the f32 judge rejects
+// remain (D11, D18). One constant to switch it on; everything below is built and was run on the box (D3's smoke).
+inline constexpr bool kTpAuto = false;
 inline bool tp_auto(const std::string& snapshot_dir, const MaxLenArg& max_len, uint32_t cards, bool blocked) {
-  if (cards != 2 || !max_len.is_auto || blocked) return false;
+  if (!kTpAuto || cards != 2 || !max_len.is_auto || blocked) return false;
   std::ifstream f(snapshot_dir + "config.json");
   if (!f) return false;
   std::stringstream ss;
