@@ -244,4 +244,32 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 // allocation; every kernel indexes it by position (capture.cc, prefill/step.cc).
 void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len);
 
+// --- spec 17b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
+//
+// One card's slice of the checkpoint, loaded straight onto that card (no whole-model load first): `desc` is
+// model::tp_card_desc(one, crossing) and every linear is the one-card fused linear's slice, through the column map
+// load() builds for the one-card row - column-parallel rows (qkv||z, q||k||v, gate||up, the head) take the card's
+// columns (its heads' q, k, v, z / q||gate, k, v; its contiguous half of the 16-column interleave; its vocabulary
+// half), row-parallel rows (out_proj, o_proj, down) take the card's K rows (the qweight / scales pointers offset by
+// rank x K/2 rows), a||b (bf16) its v-heads' rows of in_proj_a and in_proj_b, zero-padded to 128 as one card's. The
+// GDN small tensors take the card's conv channels (q, k, v) and v-heads (A_log, dt_bias); norms, q_norm / k_norm,
+// the gated norm, the embedding, the final norm and the RoPE table are whole on both cards. So every device byte
+// of a card is a byte of the one-card repack (tests/loader/tp_slice_test.cc) and the two cards' int4 bytes sum to
+// one card's. No MTP head and no draft vocabulary (17d); the checkpoint's a||b must be bf16 (Qwen3.8's).
+struct TpSlice {
+  uint32_t rank = 0;
+  model::TpCrossing crossing = model::TpCrossing::Slices;
+};
+LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const TpSlice& tp,
+                    uint32_t max_len = 16384, LmHeadForm lm_head = LmHeadForm::Checkpoint);
+
+// The slicing rules as host functions (load_tp's, and tp_slice_test's on a synthetic checkpoint): the one-card
+// fused column indices card `rank` takes of a column-parallel linear, in the card's column order; and the source
+// element indices of a small tensor (`name` layer-relative, e.g. "linear_attn.conv1d.weight"), or an empty vector
+// when the card takes it whole.
+std::vector<uint32_t> tp_columns(const model::ModelDesc& one, model::LinearId id, uint32_t rank);
+std::vector<uint32_t> tp_small_elems(const model::ModelDesc& one, const std::string& name, uint32_t rank);
+// True for the row-parallel linears (their K is split; an all-reduce follows them).
+bool tp_row_parallel(model::LinearId id);
+
 }  // namespace loader

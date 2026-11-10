@@ -194,6 +194,21 @@ struct ModelDesc {
 };
 
 const ModelDesc& qwen38();
+// Spec 17b: tensor parallel over two cards (`--parallel tp`). How the two cards add their halves of a row-parallel
+// linear (out_proj, o_proj, down) into the residual - plan 17b's review, operator decision D1:
+//   Slices  each card runs the linear at the one-card S / 2 over the one-card slice boundaries (card 0 slices
+//           0 .. S/2 - 1, card 1 the rest) and sends its raw slices; both cards fold all S in one-card order, so
+//           every output is BITWISE one card's;
+//   Folded  each card runs the one-card S over its K half and sends one folded fp32 row (spec 17a's form); both
+//           cards add card 0's row then card 1's - bitwise between the cards, judged against one card.
+enum class TpCrossing { Slices, Folded };
+constexpr uint32_t kTpSize = 2;   // spec 17 builds and gates two cards
+const char* tp_crossing_name(TpCrossing c);
+// The per-card descriptor of `one` under TP (both ranks share it; the rank only decides which slice the loader
+// takes): half the GDN and FA heads, half the MLP width, the head's vocabulary half (124160 rows), the row-parallel
+// rows' S per `c`. doc_w 0 (the loader's W check is per model; tests sum the two cards instead), no MTP head (17d).
+// Qwen3.8 only; anything else throws naming the model.
+const ModelDesc& tp_card_desc(const ModelDesc& one, TpCrossing c);
 const ModelDesc& ornith();   // Ornith 1.5 35B-A3B (spec 15): decode from spec 15c
 // The descriptor for config.json's `architectures[0]`; throws std::runtime_error
 // naming the architecture and the supported ones (a dropped model - Agnes 3.0 Flash's

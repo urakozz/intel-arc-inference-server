@@ -699,15 +699,233 @@ void check_max_len(const model::ModelDesc& desc, uint32_t max_len, uint32_t trai
         "are RoPE angles the model never saw");
 }
 
+// --- spec 17b: one card's slice (loader.h, load_tp) ----------------------------------------------------------------
+
+// One card's slice of a fused linear: the ONE-card row's column map (load_linear's), cut to the card's columns
+// (column-parallel) or its K rows (row-parallel), repacked at the card's shape. Same repack, same buckets, same
+// upload as load_linear; nothing is dequantised or re-quantised except the int8 head, which is quantised per row
+// (so a card's rows are the one-card rows' bytes).
+DeviceWeight load_linear_tp(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set, NameView& view,
+                            const std::string& layer_prefix, const model::ModelDesc& one,
+                            const model::FusedLinear& one_row, const model::FusedLinear& fl, uint32_t rank,
+                            Staging& st, LoadReport& rep) {
+  const model::GemvShape& sh = fl.shape;
+  const std::string id = std::string(id_name(fl.id)) + " (" + layer_prefix + fl.parts[0] + ", TP card " +
+                         std::to_string(rank) + ")";
+  if (one_row.parts != fl.parts || one_row.fuse != fl.fuse)
+    throw std::logic_error(id + ": the per-card row is not the one-card row's slice");
+  std::vector<LinearSrc> srcs;
+  for (const std::string& part : fl.parts) {
+    LinearSrc s = LinearSrc::classify(set, ckpt_name(layer_prefix + part));
+    const bool int4 = s.kind == WKind::Int4;
+    if (int4 != (fl.kind == model::WeightKind::Int4))
+      throw std::runtime_error(id + ": part '" + part + "' is " + (int4 ? "int4" : "bf16") +
+                               " but the model description says otherwise");
+    if (s.K != one_row.shape.K)
+      throw std::runtime_error(id + ": part '" + part + "' has K=" + std::to_string(s.K) + ", the one-card row " +
+                               std::to_string(one_row.shape.K));
+    for (const std::string& suffix : s.suffixes()) view.consumed.insert(layer_prefix + part + suffix);
+    srcs.push_back(s);
+  }
+  const bool rowp = tp_row_parallel(fl.id);
+  if (rowp ? (sh.K * model::kTpSize != one_row.shape.K || sh.N != one_row.shape.N)
+           : (sh.K != one_row.shape.K))
+    throw std::logic_error(id + ": the per-card shape is not a half of the one-card row");
+
+  if (fl.kind == model::WeightKind::Int4) {
+    if (fl.id == model::LinearId::AB)
+      throw std::runtime_error(id + ": an int4 a||b is not split for TP (Qwen3.8's exports keep it bf16)");
+    Int4Pad pad;
+    const std::vector<common::ColSource> full = int4_row_cols(one_row, srcs, pad, id);
+    std::vector<common::ColSource> cols;
+    if (rowp) {
+      // The card's K rows: qweight is [K/8][n_part] words, scales [K/64][n_part] f16.
+      for (common::ColSource c : full) {
+        c.qweight += size_t(rank) * (sh.K / 8) * c.n_part;
+        c.scales += size_t(rank) * (sh.K / 64) * c.n_part;
+        cols.push_back(c);
+      }
+    } else {
+      for (uint32_t i : tp_columns(one, fl.id, rank)) cols.push_back(full.at(i));
+    }
+    if (cols.size() != sh.N)
+      throw std::logic_error(id + ": " + std::to_string(cols.size()) + " columns for N=" + std::to_string(sh.N));
+    const size_t words = int4_words(sh), scale_elems = int4_scale_elems(sh);
+    if (words > st.i4.size() || scale_elems > st.i4_scales.size())
+      throw std::runtime_error(id + ": exceeds the int4 staging buffers");
+    if (sh.layout == 0)
+      common::repack_int4_layout0_cols(sh.K, sh.N, cols, st.i4.data(), st.i4_scales.data());
+    else
+      common::repack_int4_layout1_cols(sh.K, sh.N, cols, st.i4.data());
+    if (fl.id == model::LinearId::LmHead) {
+      rep.lm_head_bytes += size_t(sh.K) * sh.N / 2 + size_t(sh.K) * sh.N / 32;
+    } else {
+      rep.int4_bytes += size_t(sh.K) * sh.N / 2;
+      rep.scale_bytes += size_t(sh.K) * sh.N / 32;
+    }
+    l0::Mem weight = upload(ctx, imm, st.i4.data(), words * 4);
+    std::unique_ptr<l0::Mem> scales;
+    if (sh.layout == 0)
+      scales = std::make_unique<l0::Mem>(upload(ctx, imm, st.i4_scales.data(), scale_elems * sizeof(uint16_t)));
+    return {std::move(weight), std::move(scales), sh, fl.kind};
+  }
+  if (fl.kind == model::WeightKind::Int8) {
+    // The head's vocabulary half: rows [rank x N, + N) of the bf16 [V][K] tensor, quantised per row.
+    if (fl.id != model::LinearId::LmHead || srcs.size() != 1 || srcs[0].N != one_row.shape.N)
+      throw std::runtime_error(id + ": int8 is implemented for the unpadded lm_head only");
+    if (size_t(sh.N) * sh.K > st.i8.size() || sh.N > st.i8_scales.size())
+      throw std::runtime_error(id + ": exceeds the int8 staging buffer");
+    const auto q0 = std::chrono::steady_clock::now();
+    quantise_int8_tiled(srcs[0].weight + size_t(rank) * sh.N * sh.K, sh.K, sh.N, st.i8.data(), st.i8_scales.data());
+    rep.lm_head_quant_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - q0).count();
+    rep.lm_head_bytes += lm_head_int8_bytes(sh.K, sh.N);
+    l0::Mem weight = upload(ctx, imm, st.i8.data(), size_t(sh.N) * sh.K);
+    auto scales = std::make_unique<l0::Mem>(upload(ctx, imm, st.i8_scales.data(), size_t(sh.N) * sizeof(float)));
+    return {std::move(weight), std::move(scales), sh, fl.kind};
+  }
+  const size_t elems = size_t(sh.N) * sh.K;
+  if (elems > st.bf_tiled.size() || elems > st.bf_src.size())
+    throw std::runtime_error(id + ": exceeds the bf16 staging buffers");
+  size_t real = 0;
+  if (fl.id == model::LinearId::LmHead) {
+    common::repack_bf16_tiled(srcs[0].weight + size_t(rank) * sh.N * sh.K, sh.K, sh.N, st.bf_tiled.data());
+    real = sh.N;
+    rep.lm_head_bytes += real * sh.K * 2;
+  } else {
+    // a||b: the card's v-heads' rows of each part, stacked, zero rows to the padded N (load_linear's form).
+    std::memset(st.bf_src.data(), 0, elems * 2);
+    for (const LinearSrc& s : srcs) {
+      const uint32_t n = s.N / model::kTpSize;
+      std::memcpy(st.bf_src.data() + real * sh.K, s.weight + size_t(rank) * n * sh.K, size_t(n) * sh.K * 2);
+      real += n;
+    }
+    if (real != fl.pad_n) throw std::logic_error(id + ": " + std::to_string(real) + " real rows, not pad_n");
+    common::repack_bf16_tiled(st.bf_src.data(), sh.K, sh.N, st.bf_tiled.data());
+    rep.bf16_linear_bytes += real * sh.K * 2;
+  }
+  rep.pad_bytes += size_t(sh.N - real) * sh.K * 2;
+  return {upload(ctx, imm, st.bf_tiled.data(), elems * 2), nullptr, sh, fl.kind};
+}
+
+// load_small's walk over the card's table: a sliced tensor is gathered from the one-card source by
+// tp_small_elems, then baked exactly as one card bakes it.
+SmallTensors load_small_tp(l0::Context& ctx, l0::CmdList& imm, const SafetensorsSet& set, NameView& view,
+                           const model::ModelDesc& one, const model::ModelDesc& desc, const model::LayerDesc& ld,
+                           uint32_t rank, LoadReport& rep, Widen& widen) {
+  const std::string lp = Qwen35::layer_prefix(ld.index);
+  const SmallLayout sl = desc.small_layout();
+  const size_t kind_bytes = ld.kind == model::LayerKind::FA ? kFaBlockBytes : sl.gdn_block_bytes;
+  std::vector<uint8_t> norms(sl.norms_block_bytes, 0), kind(kind_bytes, 0);
+  size_t filled_norms = 0, filled_kind = 0;
+  for (const model::SmallTensor& t : ld.small_tensors) {
+    const model::SmallTensor* t1 = nullptr;
+    for (const model::SmallTensor& u : one.small_tensors(ld.kind))
+      if (u.name == t.name) t1 = &u;
+    if (!t1) throw std::logic_error("small tensor '" + t.name + "' is not in the one-card table");
+    const uint8_t* src = small_src(view, set, lp + t.name, *t1);
+    const std::vector<uint32_t> pick = tp_small_elems(one, t.name, rank);
+    const size_t esz = src_elem_bytes(t);
+    std::vector<uint8_t> gathered;
+    if (!pick.empty()) {
+      if (pick.size() != t.elems)
+        throw std::logic_error("small tensor '" + lp + t.name + "': the card takes " + std::to_string(pick.size()) +
+                               " elements, its table says " + std::to_string(t.elems));
+      gathered.resize(pick.size() * esz);
+      for (size_t i = 0; i < pick.size(); ++i) std::memcpy(&gathered[i * esz], src + size_t(pick[i]) * esz, esz);
+      src = gathered.data();
+    } else if (t.elems != t1->elems) {
+      throw std::logic_error("small tensor '" + lp + t.name + "' is whole on a card but its sizes differ");
+    }
+    const bool in_norms = t.block == model::SmallBlock::Norms;
+    std::vector<uint8_t>& dst = in_norms ? norms : kind;
+    const size_t bytes = size_t(t.elems) * bake_elem_bytes(t.bake);
+    if (size_t(t.offset) + bytes > dst.size())
+      throw std::runtime_error("small tensor '" + lp + t.name + "' overruns its block");
+    bake_small(t, src, dst.data() + t.offset, widen);
+    (in_norms ? filled_norms : filled_kind) += bytes;
+  }
+  if (filled_norms != norms.size() || filled_kind != kind.size())
+    throw std::runtime_error("layer " + std::to_string(ld.index) + ": a small block is not filled exactly (TP card)");
+  rep.small_bytes += norms.size() + kind.size();
+  return {upload(ctx, imm, norms.data(), norms.size()), upload(ctx, imm, kind.data(), kind.size())};
+}
+
 }  // namespace
+
+bool tp_row_parallel(model::LinearId id) {
+  return id == model::LinearId::OutProj || id == model::LinearId::OProj || id == model::LinearId::Down;
+}
+
+std::vector<uint32_t> tp_columns(const model::ModelDesc& one, model::LinearId id, uint32_t rank) {
+  using model::LinearId;
+  const uint32_t t = model::kTpSize;
+  if (rank >= t) throw std::invalid_argument("loader::tp_columns: rank " + std::to_string(rank));
+  std::vector<uint32_t> out;
+  const auto range = [&](uint32_t base, uint32_t width) {   // the card's share of [base, base + width)
+    const uint32_t w = width / t;
+    for (uint32_t i = 0; i < w; ++i) out.push_back(base + rank * w + i);
+  };
+  constexpr uint32_t kG = model::Qwen35::kGdnHeadDim;
+  switch (id) {
+    case LinearId::QkvZ: {   // q (k-heads) | k (k-heads) | v (v-heads) | z (v-heads), x 128
+      const uint32_t kq = one.gdn_k_heads * kG, v = one.gdn_v_heads * kG;
+      range(0, kq);
+      range(kq, kq);
+      range(2 * kq, v);
+      range(2 * kq + v, v);
+      break;
+    }
+    case LinearId::Qkv:   // q||gate per q-head | k | v (kv-heads x 256)
+      range(0, one.fa_q_proj_n());
+      range(one.fa_q_proj_n(), one.fa_kv_n());
+      range(one.fa_q_proj_n() + one.fa_kv_n(), one.fa_kv_n());
+      break;
+    case LinearId::GateUp:   // gate||up in 16-column blocks: a card's gate half and up half are one contiguous half
+      if ((one.intermediate / t) % 16 != 0) throw std::logic_error("gate||up's half is not whole 16-column blocks");
+      range(0, 2 * one.intermediate);
+      break;
+    case LinearId::LmHead:
+      range(0, model::Qwen35::kVocab);
+      break;
+    case LinearId::AB:   // the real columns: a (v-heads) | b (v-heads)
+      range(0, one.gdn_v_heads);
+      range(one.gdn_v_heads, one.gdn_v_heads);
+      break;
+    default:
+      throw std::invalid_argument("loader::tp_columns: a row-parallel linear has no column slice");
+  }
+  return out;
+}
+
+std::vector<uint32_t> tp_small_elems(const model::ModelDesc& one, const std::string& name, uint32_t rank) {
+  const uint32_t t = model::kTpSize;
+  std::vector<uint32_t> out;
+  if (name == "linear_attn.conv1d.weight") {   // [conv channels][1][4]: the card's q, k, v channels, 4 taps each
+    const uint32_t kq = one.gdn_k_heads * model::Qwen35::kGdnHeadDim, v = one.gdn_v_heads * model::Qwen35::kGdnHeadDim;
+    const auto chans = [&](uint32_t base, uint32_t width) {
+      const uint32_t w = width / t;
+      for (uint32_t c = base + rank * w; c < base + (rank + 1) * w; ++c)
+        for (uint32_t tap = 0; tap < kConvTaps; ++tap) out.push_back(c * kConvTaps + tap);
+    };
+    chans(0, kq);
+    chans(kq, kq);
+    chans(2 * kq, v);
+  } else if (name == "linear_attn.A_log" || name == "linear_attn.dt_bias") {   // per v-head
+    const uint32_t w = one.gdn_v_heads / t;
+    for (uint32_t h = rank * w; h < (rank + 1) * w; ++h) out.push_back(h);
+  }
+  return out;
+}
 
 size_t LoadReport::total() const {
   return int4_bytes + scale_bytes + bf16_linear_bytes + embed_bytes + lm_head_bytes + small_bytes +
          pad_bytes + mtp_bytes + moe_bytes + ab_prefill_bytes;
 }
 
-LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len,
-                 bool mtp, LmHeadForm lm_form, const DraftVocabSpec& draft_vocab) {
+namespace {
+// load() and load_tp(): `tp` null is one card, exactly as before.
+LoadedModel load_impl(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len, bool mtp,
+                      LmHeadForm lm_form, const DraftVocabSpec& draft_vocab, const TpSlice* tp) {
   const auto t0 = std::chrono::steady_clock::now();
   const std::string snap = resolve_snapshot(snapshot_or_repo);
 
@@ -721,18 +939,22 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   const common::json::Value* archs = config.find("architectures");
   if (!archs || !archs->is_array() || archs->arr().empty() || !archs->arr()[0].is_string())
     throw std::runtime_error(snap + "config.json has no architectures[0] string");
-  const model::ModelDesc& desc = model::desc_for_architecture(archs->arr()[0].str());
+  const model::ModelDesc& one = model::desc_for_architecture(archs->arr()[0].str());
+  // Spec 17b: under TP the card's descriptor; `one` stays the checkpoint's (the slices are cut from its rows).
+  if (tp && (mtp || draft_vocab.size != 0))
+    throw std::runtime_error("tensor parallel (spec 17b) loads no MTP head and no draft vocabulary (17d)");
+  const model::ModelDesc& desc = tp ? model::tp_card_desc(one, tp->crossing) : one;
   // Spec 15b: a described model the engine cannot run yet (Ornith: "MoE not
   // implemented (spec 15c)") stops here, before a byte is read - and before the
   // quantisation config is parsed, so a bf16-only checkpoint (Ornith ships no
   // quantization_config) gets this message rather than the quant parser's.
-  model::require_loadable(desc);
+  model::require_loadable(one);
   const QuantConfig qc = QuantConfig::parse(config);
   // Spec 6 §10: the trained context bounds max_len; whether it fits on the card is the
   // memory plan's question (runtime/memory_plan.h), asked by the CLI once the weights'
   // bytes are known.
   const uint32_t trained = trained_context(config);
-  check_max_len(desc, max_len, trained);
+  check_max_len(one, max_len, trained);
 
   SafetensorsSet set(snap);
   // Requirement 6: before a single byte is repacked. Returns what it counted
@@ -845,10 +1067,12 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
   // row when the checkpoint quantised it (the published Ornith export). Every GDN layer
   // loads with that row; one in the other form throws in load_linear by name.
   const model::FusedLinear* ab_row = &desc.linear(model::LinearId::AB);
+  WKind ab_kind = WKind::Bf16;
   for (const model::LayerDesc& ld : layers)
     if (ld.kind == model::LayerKind::GDN) {
       const std::string a = ckpt_name(Qwen35::layer_prefix(ld.index) + ab_row->parts[0]);
-      ab_row = &ab_row_for(desc, LinearSrc::kind_of(set, a));
+      ab_kind = LinearSrc::kind_of(set, a);
+      ab_row = &ab_row_for(desc, ab_kind);
       break;
     }
   const bool ab_int4 = ab_row->kind == model::WeightKind::Int4;
@@ -890,12 +1114,19 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
           (fl.id == model::LinearId::GateUp || fl.id == model::LinearId::Down))
         continue;
       const model::FusedLinear& row = fl.id == model::LinearId::AB ? *ab_row : fl;
+      if (tp) {   // spec 17b: the card's slice of the one-card row
+        const model::FusedLinear& row1 = fl.id == model::LinearId::AB ? ab_row_for(one, ab_kind) : one.linear(fl.id);
+        m.linears.emplace(std::make_pair(ld.index, fl.id),
+                          load_linear_tp(ctx, imm, set, view, lp, one, row1, row, tp->rank, st, m.report));
+        continue;
+      }
       m.linears.emplace(std::make_pair(ld.index, fl.id),
                         load_linear(ctx, imm, set, view, lp, row, st, m.report));
       if (fl.id == model::LinearId::AB && ab_int4)
         m.ab_prefill.emplace(ld.index, load_ab_prefill(ctx, imm, set, lp, row, m.report));
     }
-    m.layer_small.push_back(load_small(ctx, imm, set, view, desc, ld, m.report, widen));
+    m.layer_small.push_back(tp ? load_small_tp(ctx, imm, set, view, one, desc, ld, tp->rank, m.report, widen)
+                               : load_small(ctx, imm, set, view, desc, ld, m.report, widen));
     if (desc.is_moe()) {
       const auto r0 = std::chrono::steady_clock::now();
       m.moe.push_back(load_moe_layer(ctx, imm, set, view, desc, ld.index, moe_host, m.report));
@@ -908,7 +1139,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                            " B, not the " + std::to_string(moe_bytes(desc)) +
                            " B loader::moe_bytes() plans");
   m.linears.emplace(std::make_pair(kTopLevel, model::LinearId::LmHead),
-                    load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
+                    tp ? load_linear_tp(ctx, imm, set, view, "", one, one.lm_head(lm_row.kind), lm_row, tp->rank, st,
+                                        m.report)
+                       : load_linear(ctx, imm, set, view, "", lm_row, st, m.report));
   // Spec 8 §11: V' and its compact head, gathered from the host copy of the head
   // `load_linear` just made and uploaded - st.i8 / st.i8_scales for int8 (the
   // quantisation), st.bf_tiled for bf16 (the tiling) - so no byte comes back from the
@@ -1125,6 +1358,21 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
                              std::to_string(uint64_t(expected)) + " by " +
                              std::to_string(delta * 100.0) + "% (> 2%) - the table above is the breakdown");
   return m;
+}
+
+}  // namespace
+
+LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t max_len, bool mtp,
+                 LmHeadForm lm_form, const DraftVocabSpec& draft_vocab) {
+  return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_form, draft_vocab, nullptr);
+}
+
+LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const TpSlice& tp, uint32_t max_len,
+                    LmHeadForm lm_head) {
+  if (tp.rank >= model::kTpSize)
+    throw std::invalid_argument("loader::load_tp: rank " + std::to_string(tp.rank) + " of " +
+                                std::to_string(model::kTpSize));
+  return load_impl(ctx, snapshot_or_repo, max_len, false, lm_head, DraftVocabSpec{}, &tp);
 }
 
 void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len) {

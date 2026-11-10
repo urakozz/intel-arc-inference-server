@@ -89,6 +89,9 @@
 #endif
 
 // The model's dimensions (model::Qwen35; FA heads as attn.cl bakes them).
+// Spec 17b: another head count comes in as -DFA_Q_HEADS / -DFA_KV_HEADS (attn.cl's override; the binary is
+// `_Q<q>KV<kv>_KV8`) - tensor parallel's per-card 12 / 2. Unset, the eight lines below are token for token as before.
+#ifndef FA_Q_HEADS
 #define Q_HEADS 24
 #define KV_HEADS 4
 #define GQA 6
@@ -97,6 +100,22 @@
 #define QKV_N 14336       /* q||gate (12288) || k (1024) || v (1024) */
 #define K_OFF 12288
 #define V_OFF 13312
+#else
+#ifndef FA_KV_HEADS
+#error "kv8: FA_Q_HEADS needs FA_KV_HEADS"
+#endif
+#define Q_HEADS FA_Q_HEADS
+#define KV_HEADS FA_KV_HEADS
+#define GQA (FA_Q_HEADS / FA_KV_HEADS)
+#define HD 256
+#define OUT_N (FA_Q_HEADS * HD)
+#define K_OFF (2 * FA_Q_HEADS * HD)
+#define V_OFF (K_OFF + FA_KV_HEADS * HD)
+#define QKV_N (V_OFF + FA_KV_HEADS * HD)
+#if FA_Q_HEADS % FA_KV_HEADS != 0
+#error "kv8: q-heads must be a multiple of kv-heads"
+#endif
+#endif
 #define KV8_WG 256        /* every KV8_PREP / KV8_DEC reduce / KV8_GATE work-group: one head */
 
 // The probe's signs (src/common/kv8.h kSignWords).

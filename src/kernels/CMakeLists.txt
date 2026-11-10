@@ -21,6 +21,13 @@ function(add_gemv_variant M K N S L)
     list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
   elseif(L EQUAL 1 AND K EQUAL 5120 AND N EQUAL 248320 AND S EQUAL 1)
     list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
+  # Spec 17b: a TP card's halves take their one-card cell's defines (the probe_tp step's ptp_gemv_* cells).
+  elseif(L EQUAL 0 AND N EQUAL 5120 AND (K EQUAL 3072 OR K EQUAL 8704) AND (S EQUAL 2 OR S EQUAL 4) AND M EQUAL 1)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 7168 AND S EQUAL 2 AND M EQUAL 1)
+    list(APPEND extra_defs GEMV_BLOCK2D=8 GEMV_DEQ_SHIFT=1)
+  elseif(L EQUAL 0 AND K EQUAL 5120 AND N EQUAL 17408 AND S EQUAL 8 AND M EQUAL 1)
+    list(APPEND extra_defs GEMV_DEQ_SHIFT=1)
   endif()
   add_ocloc_kernel(gemv_M${M}_K${K}_N${N}_S${S}_L${L} SOURCE ${GEMV_CL}
                    DEFINES M=${M} K=${K} N=${N} S=${S} LAYOUT=${L} ${extra_defs})
@@ -620,6 +627,74 @@ if(B70_KV8)
     endif()
   endforeach()
 endif()
+
+# ==== Spec 17b: tensor parallel decode over two cards (`--parallel tp`, Qwen3.8) ============= (begin) ====
+# Additive only: new names, and the .cl edits (kv8.cl's FA head override, prep.cl's INTERMEDIATE 8704) leave the
+# default token streams untouched. What a card's M = 1 decode list binds (runtime::build_tp, capture.cc) at
+# model::tp_card_desc's shapes - GDN 8 k / 24 v heads (conv 5120: NEGA_OFF / DTBIAS_OFF = make_small_layout(5120, 5120,
+# 24)'s 81920 / 82016 B), FA 12 q / 2 kv heads, MLP 8704, the head's 124160 rows:
+#   linears  qkv||z 5120 x 8192 S1 L1, q||k||v 5120 x 7168 S2 L0, gate||up 5120 x 17408 S8 L0 (column-parallel: the
+#            one-card cells' S, layout and GEMV_* defines); out_proj / o_proj 3072 x 5120 and down 8704 x 5120 at S2
+#            (slices: the one-card S / 2) and S4 (folded), L0 with the one-card cells' defines (add_gemv_variant);
+#            the int8 head 5120 x 124160; a||b is the one-card binary (128 columns, 48 real)
+#   prep     prep_silu_mul_M1_I8704, prep_gated_head_M1_GK8V24; the norm pair's SP0 fold and finish are one card's
+#   GDN, FA  gdn_step_M1_GK8V24, attn_prep_M1_Q12KV2 / attn_v2_M1_T32_Q12KV2 and their _KV8 twins
+#   tp.cl    tp_cross (tp_send + tp_res_fold) per rank and form, tp_argmax per vocabulary half
+option(B70_TP "build the tensor-parallel decode variants (spec 17b)" ON)
+if(B70_TP)
+  set(TP_CL ${CMAKE_CURRENT_SOURCE_DIR}/tp.cl)
+  add_gemv_variant(1 5120 8192 1 1)     # qkv||z, a card's heads
+  add_gemv_variant(1 5120 7168 2 0)     # q||k||v
+  add_gemv_variant(1 5120 17408 8 0)    # gate||up, the card's half
+  foreach(S 2 4)                        # slices (S2) / folded (S4)
+    add_gemv_variant(1 3072 5120 ${S} 0)    # out_proj, o_proj: the card's K rows
+    add_gemv_variant(1 8704 5120 ${S} 0)    # down
+  endforeach()
+  add_gemv_i8w_variant(1 5120 124160)   # the int8 head's vocabulary half
+  add_ocloc_kernel(prep_silu_mul_M1_I8704 SOURCE ${PREP_CL} DEFINES M=1 INTERMEDIATE=8704)
+  set(TP_GDN_HEADS GDN_K_HEADS=8 GDN_V_HEADS=24)
+  add_ocloc_kernel(prep_gated_head_M1_GK8V24 SOURCE ${PREP_CL} DEFINES M=1 ${TP_GDN_HEADS})
+  add_ocloc_kernel(gdn_step_M1_GK8V24 SOURCE ${GDN_CL}
+                   DEFINES ${CTRL_DEFINES} NEGA_OFF=20480 DTBIAS_OFF=20504 ${TP_GDN_HEADS} M=1)
+  set(TP_FA_HEADS FA_Q_HEADS=12 FA_KV_HEADS=2)
+  add_ocloc_kernel(attn_prep_M1_Q12KV2 SOURCE ${ATTN_CL} DEFINES ${ATTN_DEFINES} M=1 ${TP_FA_HEADS})
+  add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q12KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/attn_v2.cl
+                   DEFINES ${CTRL_DEFINES} M=1 TGT=${ATTN_V2_TGT} EXP2=${ATTN_V2_EXP2} ${TP_FA_HEADS})
+  if(B70_KV8)
+    add_ocloc_kernel(attn_prep_M1_Q12KV2_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${KV8_PREP_DEFINES} M=1 QKV_S=2 ${TP_FA_HEADS})
+    add_ocloc_kernel(attn_v2_M1_T${ATTN_V2_TGT}_Q12KV2_KV8 SOURCE ${KV8_CL}
+                     DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=1 TGT=${ATTN_V2_TGT} ${TP_FA_HEADS})
+  endif()
+  # tp_cross_M<M>_K<hidden>_G<fold groups>_S<local slices>_{X slices|F folded}_R<rank> (kernels::tp_cross_variant).
+  foreach(R 0 1)
+    add_ocloc_kernel(tp_cross_M1_K5120_G20_S2_X_R${R} SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=1 K=5120 FOLD_G=20 S_LOC=2 FOLDED=0 RANK=${R})
+    add_ocloc_kernel(tp_cross_M1_K5120_G20_S4_F_R${R} SOURCE ${TP_CL}
+                     DEFINES TP_CROSS=1 M=1 K=5120 FOLD_G=20 S_LOC=4 FOLDED=1 RANK=${R})
+  endforeach()
+  # tp_argmax_M<M>_N<rows>_U<real rows>_B<first id> (kernels::tp_argmax_variant): card 0 ids 0..124159 (all real),
+  # card 1 ids 124160..248319 of which 248077 - 124160 = 123917 real (argmax.cl's VOCAB_USED mask, per half).
+  set(TP_ARGMAX_DEFINES ${CTRL_DEFINES} CTRL_OUTV=20 TP_ARGMAX=1 M=1 VOCAB=124160)
+  add_ocloc_kernel(tp_argmax_M1_N124160_U124160_B0 SOURCE ${TP_CL}
+                   DEFINES ${TP_ARGMAX_DEFINES} VOCAB_USED=124160 ID_BASE=0)
+  add_ocloc_kernel(tp_argmax_M1_N124160_U123917_B124160 SOURCE ${TP_CL}
+                   DEFINES ${TP_ARGMAX_DEFINES} VOCAB_USED=123917 ID_BASE=124160)
+  set(B70_TP_KERNELS
+      kernel_gemv_M1_K5120_N8192_S1_L1 kernel_gemv_M1_K5120_N7168_S2_L0 kernel_gemv_M1_K5120_N17408_S8_L0
+      kernel_gemv_M1_K3072_N5120_S2_L0 kernel_gemv_M1_K8704_N5120_S2_L0 kernel_gemv_M1_K3072_N5120_S4_L0
+      kernel_gemv_M1_K8704_N5120_S4_L0 kernel_gemv_i8w_M1_K5120_N124160 kernel_prep_silu_mul_M1_I8704
+      kernel_prep_gated_head_M1_GK8V24 kernel_gdn_step_M1_GK8V24 kernel_attn_prep_M1_Q12KV2
+      kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q12KV2
+      kernel_tp_cross_M1_K5120_G20_S2_X_R0 kernel_tp_cross_M1_K5120_G20_S2_X_R1
+      kernel_tp_cross_M1_K5120_G20_S4_F_R0 kernel_tp_cross_M1_K5120_G20_S4_F_R1
+      kernel_tp_argmax_M1_N124160_U124160_B0 kernel_tp_argmax_M1_N124160_U123917_B124160)
+  if(B70_KV8)
+    list(APPEND B70_TP_KERNELS kernel_attn_prep_M1_Q12KV2_KV8 kernel_attn_v2_M1_T${ATTN_V2_TGT}_Q12KV2_KV8)
+  endif()
+  set(B70_TP_KERNELS ${B70_TP_KERNELS} CACHE INTERNAL "spec 17b: the binaries a TP decode list binds")
+endif()
+# ==== Spec 17b ============================================================= (end) ====
 
 # Spec 28c (plan 28c Task 2): the verify step's attention on DPAS (attn_verify_dpas.cl), in v2's blocking
 # and partials, so the reduce is the attn_v2_M<M>_T32[_KV8] binary's attn_reduce_v2[_kv8] (no new reduce).
