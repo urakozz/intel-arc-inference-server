@@ -45,8 +45,12 @@
 // and the server (17d), profiling. save_state / save_kv ARE here, in the one-card host layouts (runtime/tp_gather.h).
 namespace runtime {
 
-// Operator decision D1 (plan 17b's review): the crossing a `--parallel tp` engine runs. One constant.
-constexpr model::TpCrossing kTpDefaultCrossing = model::TpCrossing::Slices;
+// Operator decision D1 (plan 17b's review): the crossing a `--parallel tp` engine runs. One constant. The rule
+// recorded with the decision - slices (bitwise one card) unless they cost more than ~5 % against folded - chose folded
+// on row 79's first measurement (2026-11-10, depth 4096, interleaved, median of 3: one card 33.5 t/s, slices 50.0
+// (1.49x), folded 53.9 (1.61x): slices 7.3 % slower). Folded is bitwise between the cards and judged against one card
+// (tp_decode_test: identical ids on the gate prompts); Slices stays built and tested, one word to switch back.
+constexpr model::TpCrossing kTpDefaultCrossing = model::TpCrossing::Folded;
 
 struct TpOptions {
   uint32_t timeout_ms = 30000;                  // one step's fence wait (a step is ~18 ms)
