@@ -3290,6 +3290,10 @@ target_include_directories(qwen4exp_ref_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${C
 target_link_libraries(qwen4exp_ref_test PRIVATE b70_qwen4exp_loader)
 add_test(NAME qwen4exp_ref_test COMMAND qwen4exp_ref_test)
 set_tests_properties(qwen4exp_ref_test PROPERTIES LABELS qwen4exp TIMEOUT 600)
+add_executable(qwen4exp_f32_judge_test runtime/qwen4exp_f32_judge_test.cc)
+target_include_directories(qwen4exp_f32_judge_test PRIVATE ${CMAKE_SOURCE_DIR}/tests)
+add_test(NAME qwen4exp_f32_judge_test COMMAND qwen4exp_f32_judge_test)
+set_tests_properties(qwen4exp_f32_judge_test PROPERTIES LABELS qwen4exp)
 if(B70_Q4EXP)
   # Task 2: every binary a Qwen3.8-Flash-Next decode list binds, any dense arm / head / attention / PLE scale form
   # (src/kernels/CMakeLists.txt's spec 21c block; the reused binaries other blocks build - Qwen3.8's gdn_step_M1 and
@@ -3330,8 +3334,10 @@ if(B70_Q4EXP)
   # full and truncated sets. SKIP 77 without the data.
   set(B70_Q4EXP_ORACLE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp"
     CACHE PATH "21a's golden sets on Intel's checkpoint (qwen4exp_oracle.sh intel): <prompt>.ids + .golden.safetensors")
-  foreach(t qwen4exp_decode_test qwen4exp_golden_test qwen4exp_partial_test)
-    if(t STREQUAL "qwen4exp_decode_test")
+  foreach(t qwen4exp_decode_test qwen4exp_decode_ref_probe qwen4exp_golden_test qwen4exp_partial_test)
+    if(t STREQUAL "qwen4exp_decode_ref_probe")
+      add_executable(${t} ${CMAKE_SOURCE_DIR}/tools/probe/qwen4exp_decode_ref.cc)
+    elseif(t STREQUAL "qwen4exp_decode_test")
       add_executable(${t} runtime/${t}.cc)
     else()
       add_executable(${t} golden/${t}.cc)
@@ -3438,6 +3444,11 @@ if(B70_Q4EXP)
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
   add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_executable(qwen4exp_route_capture ${CMAKE_SOURCE_DIR}/tools/probe/qwen4exp_route_capture.cc)
+  b70_target_kernel_dir(qwen4exp_route_capture)
+  target_include_directories(qwen4exp_route_capture PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(qwen4exp_route_capture PRIVATE b70_qwen4exp_prefill b70_l0)
+  add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
   set(_q4s ${B70_Q4EXP_SYNTH_DIR})
   set(_q4ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
   set(_q4pf "")
@@ -3457,8 +3468,20 @@ if(B70_Q4EXP)
   # beside the prefill scratch)
   add_test(NAME qwen4exp_prefill_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} pp pp2:2)
   add_test(NAME prefill_split_qwen4exp_pp_test COMMAND qwen4exp_prefill_test ${_q4s}/ours/ckpt ${_q4ids} split pp2:2)
+  foreach(n 18 37)
+    set(_q4judge${n} "")
+    # Relative counts require both complete routing audits; legacy single-reference dumps lack them.
+    set(_q4ref "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-f32-aligned-L${n}/q4exp_4k.state.safetensors")
+    if(EXISTS "${_q4ref}")
+      set(_q4judge${n} "judge:${_q4ref}")
+    endif()
+  endforeach()
+  add_test(NAME qwen4exp_prefill_intel_test COMMAND qwen4exp_prefill_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4ids} all
+    layers:18 int8 ${_q4judge18})
+  set_tests_properties(qwen4exp_prefill_intel_test
+    PROPERTIES LABELS "checkpoint;qwen4exp;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   add_test(NAME qwen4exp_prefill_intel_pp_test COMMAND qwen4exp_prefill_test ${B70_Q4EXP_INTEL_SNAPSHOT} ${_q4ids} all pp2
-    layers:37 int8)
+    layers:37 int8 ${_q4judge37})
   set_tests_properties(qwen4exp_prefill_pp_test prefill_split_qwen4exp_pp_test qwen4exp_prefill_intel_pp_test
     PROPERTIES LABELS "checkpoint;qwen4exp;prefill;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
   # F3 on prefill: 21c's golden test in its prefill mode (one chunk, chunks of 16, the int8 head, injected, eager) on

@@ -3,7 +3,7 @@
 // synth-ckpt: 4 layers - 3 GDN incl. the PLE layer, 1 QSA) carry it before Intel's; the golden gate itself is
 // qwen4exp_golden_test's `prefill` mode.
 //
-//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | gdn] [pp2[:split]] [int8] [layers:N]
+//   qwen4exp_prefill_test <checkpoint> <ids> [all | split | pp | gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]
 //
 // The prompt: <ids> cycled to kN = 4500 positions - three chunks at the default width: 0..2047 (all dense), 2048..4095
 // (rows 2048..2050 dense, the rest sparse: Review Focus 1's straddling chunk) and 4096..4499 (all sparse, a 404-row
@@ -43,6 +43,15 @@
 //     bars become that control's: each of the first QSA layer's worst, the median and p01 within 2x the control's
 //     cosine distance (the 2026-11-01 slack); step 6 gates the last logits the same way (prefill vs decode within 2x
 //     the control's distance) and prints the tokens; step 5's routing and selections are printed, not gated.
+//     With judge:<file>, the relative count rule applies (operator 2026-11-10): f32-rejected routes on prefill
+//     <= 1.2x decode's total over all prompt/generated layer-position decisions; prefill's accepted tokens >=
+//     decode's. Both paths use golden's one-bf16-ulp token judge on the same teacher-forced continuation.
+//     State, logits, route-set and selection distances are printed diagnostics, with no distance-ratio gate.
+//     A paired v2 judge supplies a separate f32 companion for each path: engine expert sets/order replayed only
+//     when the actual boundary swaps fit the f32 cut logit's one-bf16-ulp window. Every prompt/generated route is
+//     checked against the capture; outside-window choices contribute to the rejected count and remain unforced.
+//     Both companions use the original f32 continuation as their fixed teacher-forced context. Legacy v1 dumps
+//     lack the complete count audit and cannot be used as a count judge; without a paired dump, A' remains.
 //   mode `split` (Review Focus 5): the kN ids in ONE prefill against TWO calls split at 64, 2048, 2051, 4097 - every
 //     layer's state, the last logits, the first token. Gated: the multiples of 64 bitwise, the others within the
 //     split test's bars (logits cosine >= 0.9995, state rows: first QSA layer >= 0.999, median >= 0.9998, p01 >= 0.99)
@@ -75,6 +84,7 @@
 
 #include "check.h"
 #include "common/bf16.h"
+#include "golden/forced_judge.h"
 #include "kernels/kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "l0/cmdlist.h"
@@ -84,6 +94,7 @@
 #include "l0/module.h"
 #include "loader/small_layout.h"
 #include "qwen4exp_rig.h"
+#include "runtime/qwen4exp_f32_judge.h"
 #include "runtime/control.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/gdn.h"
@@ -318,7 +329,224 @@ void inject_rows(uint32_t pos, uint32_t rows, uint32_t* lists) {
 // Within 2x the control's cosine distance (A', header).
 bool near_control(double x, double control) { return 1 - x <= 2 * (1 - control) + 1e-9; }
 
-int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
+struct F32Judge {
+  golden::Golden file;
+  bool paired;
+  q4judge::RelativeCounts counts;
+  uint32_t rows, row0, experts;
+  std::vector<double> route_pf, route_dec, sel_pf, sel_dec;
+  F32Judge(const std::string& path, const model::Qwen4ExpDesc& d, const Ids& prompt, bool int8_head)
+      : file(path), paired(file.has("prefill.logits")), rows(uint32_t(prompt.size() - ((prompt.size() - 1) / rq::kPfC) * rq::kPfC)),
+        row0(uint32_t(prompt.size()) - rows), experts(d.experts),
+        route_pf(d.layers), route_dec(d.layers), sel_pf(d.layers), sel_dec(d.layers) {
+    if (!paired) std::fprintf(stderr, "f32 count judge requires a paired v2 dump with complete route audits\n");
+    CHECK(paired);
+    const int32_t* spec = file.i32("state.spec", 9);
+    CHECK_EQ(spec[0], 2);   // staging and legacy files cannot bypass the complete count audit
+    CHECK_EQ(spec[1], 1);   // fp32 compute, not a bf16 dump widened to f32
+    CHECK_EQ(spec[2], int32_t(d.layers));
+    CHECK_EQ(spec[3], int32_t(prompt.size()));
+    CHECK_EQ(spec[4], int32_t(prompt.size() - rows));
+    CHECK_EQ(spec[5], int32_t(kGen));
+    CHECK_EQ(spec[6], int32_t(int8_head));
+    CHECK_EQ(spec[7], 1);   // the engine's int8 PLE table
+    CHECK_EQ(spec[8], int32_t(d.vocab_used));
+    const int32_t* ids = file.i32("prompt.ids", prompt.size());
+    for (size_t i = 0; i < prompt.size(); ++i) CHECK_EQ(ids[i], int32_t(prompt[i]));
+    CHECK_EQ(file.dim("logits", 2, 0), uint64_t(kGen + 1));
+    CHECK_EQ(file.dim("logits", 2, 1), uint64_t(d.vocab));
+    const auto validate_logits = [&](const std::string& name) {
+      const float* lg = file.f32(name, size_t(kGen + 1) * d.vocab);
+      for (uint32_t j = 0; j <= kGen; ++j)
+        CHECK(q4judge::finite_reference(lg + size_t(j) * d.vocab, d.vocab_used));
+    };
+    validate_logits("logits");
+    const int32_t* tokens = file.i32("tokens", kGen);
+    for (uint32_t j = 0; j < kGen; ++j) {
+      CHECK(tokens[j] >= 0 && uint32_t(tokens[j]) < d.vocab_used);
+      const auto r = golden::judge_row(file.f32("logits", size_t(kGen + 1) * d.vocab) + size_t(j) * d.vocab,
+                                       d.vocab, d.vocab_used);
+      CHECK_EQ(uint32_t(tokens[j]), r.top);
+    }
+    if (paired) {
+      for (const std::string mode : {"prefill", "decode"}) {
+        CHECK_EQ(file.dim(mode + ".logits", 2, 0), uint64_t(kGen + 1));
+        CHECK_EQ(file.dim(mode + ".logits", 2, 1), uint64_t(d.vocab));
+        validate_logits(mode + ".logits");
+        const int32_t* capture = file.i32(mode + ".engine.trace.spec", 10);
+        const std::array<int32_t, 10> want{1, int32_t(d.layers), int32_t(prompt.size()), int32_t(kGen),
+            int32_t(rq::kPfC), int32_t(kMaxLen), int32_t(int8_head), 1, int32_t(d.vocab_used), int32_t(d.vocab)};
+        CHECK(std::equal(want.begin(), want.end(), capture));
+        CHECK_EQ(*file.i32(mode + ".engine.trace.path", 1), mode == "prefill" ? 1 : 0);
+        uint64_t exact = 0, ties = 0, bad = 0;
+        for (uint32_t l = 0; l < d.layers; ++l) {
+          const std::string b = mode + ".route.";
+          const std::string ls = ".L" + std::to_string(l);
+          const size_t count = prompt.size() + kGen;
+          const int32_t* verdict = file.i32(b + "judge" + ls, count);
+          const float* span = file.f32(b + "span" + ls, count);
+          const float* ulp = file.f32(b + "ulp" + ls, count);
+          const float* cut = file.f32(b + "cut" + ls, count);
+          for (size_t p = 0; p < count; ++p) {
+            CHECK(verdict[p] >= 0 && verdict[p] <= 2);
+            CHECK(std::isfinite(span[p]) && std::isfinite(cut[p]));
+            CHECK_EQ(double(ulp[p]), golden::bf16_ulp_at(cut[p]));
+            if (verdict[p] == 0) { CHECK_EQ(span[p], 0.0f); ++exact; }
+            else if (verdict[p] == 1) { CHECK(span[p] <= ulp[p]); ++ties; }
+            else {
+              CHECK(span[p] >= ulp[p]);   // saved f32 span can round down to the exact boundary
+              if (++bad <= 8) std::printf("   f32 %s route REJECT L%u row %zu: span %.9g > ulp %.9g\n",
+                                          mode.c_str(), l, p, double(span[p]), double(ulp[p]));
+            }
+          }
+        }
+        std::printf("f32 %s route alignment: %llu exact, %llu accepted near-ties, %llu rejected%s\n", mode.c_str(),
+                    (unsigned long long)exact, (unsigned long long)ties, (unsigned long long)bad,
+                    bad ? " - state distances are not an aligned-path attribution" : "");
+        (mode == "prefill" ? counts.prefill_rejected : counts.decode_rejected) = bad;
+      }
+    }
+    std::printf("f32 judge: %s (%u layers, %zu cycled prompt ids, last %u rows)\n", path.c_str(), d.layers,
+                prompt.size(), rows);
+  }
+  std::string key(const char* mode, const std::string& name) const { return paired ? std::string(mode) + "." + name : name; }
+  void trace(const char* mode, uint32_t l, uint32_t pos, const uint32_t* actual) const {
+    if (!paired) return;
+    const std::string name = key(mode, "engine.route.ids.L" + std::to_string(l));
+    CHECK_EQ(file.dim(name, 2, 0), uint64_t(row0 + rows + kGen));
+    CHECK_EQ(file.dim(name, 2, 1), uint64_t(kq::kTopK));
+    const int32_t* expected = file.i32(name, size_t(row0 + rows + kGen) * kq::kTopK) + size_t(pos) * kq::kTopK;
+    for (uint32_t k = 0; k < kq::kTopK; ++k) CHECK_EQ(actual[k], uint32_t(expected[k]));
+  }
+  void report(uint32_t l, const char* kind, double p, double d) const {
+    std::printf("   f32 L%u %-10s distance prefill %.9g / decode %.9g (x%.5g, diagnostic)\n", l, kind, p, d,
+                q4judge::ratio(p, d));
+  }
+  // One complete state kind per layer, in the same layout on all three paths.
+  void state(const model::Qwen4ExpDesc& d, const Snap& pf, const Snap& dec, uint32_t max_len) const {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      const uint8_t* p = pf.layers[l].data();
+      const uint8_t* v = dec.layers[l].data();
+      size_t off = 0;
+      const auto compare = [&](const char* kind, size_t elems, bool fp32 = false) {
+        const std::string key = "state.L" + std::to_string(l) + "." + kind;
+        const float* pr = file.f32(this->key("prefill", key), elems);
+        const float* dr = file.f32(this->key("decode", key), elems);
+        CHECK(q4judge::finite_reference(pr, elems));
+        CHECK(q4judge::finite_reference(dr, elems));
+        q4judge::Cosine pc, dc;
+        for (size_t i = 0; i < elems; ++i) {
+          const double pv = fp32 ? reinterpret_cast<const float*>(p + off)[i]
+                                 : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(p + off)[i]);
+          const double dv = fp32 ? reinterpret_cast<const float*>(v + off)[i]
+                                 : common::bf16_to_f32(reinterpret_cast<const uint16_t*>(v + off)[i]);
+          pc.add(pv, pr[i]);
+          dc.add(dv, dr[i]);
+        }
+        report(l, kind, pc.distance(), dc.distance());
+      };
+      if (d.is_qsa(l)) {
+        compare("k", size_t(pf.pos) * d.kv_n());
+        off += size_t(max_len) * d.kv_n() * 2;
+        compare("v", size_t(pf.pos) * d.kv_n());
+        off += size_t(max_len) * d.kv_n() * 2;
+        compare("ckeys", size_t(pf.pos / d.idx_compress) * d.idx_dim);
+        off += size_t(max_len / d.idx_compress) * d.idx_dim * 2;
+        compare("tail", size_t(rq::kIdxTail) * d.idx_dim);
+        off += size_t(rq::kIdxTail) * d.idx_dim * 2;
+      } else {
+        compare("gdn", rq::gdn_state_bytes_per_layer(d) / 4, true);
+        off += rq::gdn_state_bytes_per_layer(d);
+        compare("conv", rq::conv_ring_bytes_per_layer(d) / 2);
+        off += rq::conv_ring_bytes_per_layer(d);
+      }
+      if (l == d.ple_layer) {
+        const int32_t* ids = file.i32(key("prefill", "state.L" + std::to_string(l) + ".ple_ids"), rq::kPleRing);
+        for (uint32_t j = 0; j < rq::kPleRing; ++j) {
+          CHECK_EQ(reinterpret_cast<const uint32_t*>(p + off)[j], uint32_t(ids[j]));
+          CHECK_EQ(reinterpret_cast<const uint32_t*>(v + off)[j], uint32_t(ids[j]));
+        }
+        off += rq::kPleConvOff;
+        compare("ple", size_t(rq::kPleRing) * d.hc_n());
+      }
+    }
+    q4judge::Cosine pc, dc;
+    const float* pr = file.f32(key("prefill", "logits"), size_t(kGen + 1) * d.vocab);
+    const float* dr = file.f32(key("decode", "logits"), size_t(kGen + 1) * d.vocab);
+    for (uint32_t i = 0; i < d.vocab_used; ++i) {
+      pc.add(pf.logits[i], pr[i]);
+      dc.add(dec.logits[i], dr[i]);
+    }
+    report(d.layers, "logits", pc.distance(), dc.distance());
+  }
+  void routes(uint32_t l, uint32_t r, const uint32_t* pf, const uint32_t* dec) {
+    for (const char* mode : {"prefill", "decode"}) {
+      const std::string name = key(mode, "route.ids.L" + std::to_string(l));
+      CHECK_EQ(file.dim(name, 2, 0), uint64_t(rows));
+      CHECK_EQ(file.dim(name, 2, 1), uint64_t(kq::kTopK));
+      const int32_t* ref = file.i32(name, size_t(rows) * kq::kTopK) + size_t(r) * kq::kTopK;
+      std::array<uint32_t, kq::kTopK> ids{};
+      for (uint32_t i = 0; i < kq::kTopK; ++i) { CHECK(ref[i] >= 0); ids[i] = uint32_t(ref[i]); }
+      CHECK(q4judge::valid_set(ids.data(), ids.size(), experts));
+      (mode[0] == 'p' ? route_pf[l] : route_dec[l]) += q4judge::set_distance(mode[0] == 'p' ? pf : dec, ids.data(), ids.size()) / rows;
+    }
+  }
+  void selections(uint32_t l, uint32_t r, const uint32_t* pf, const uint32_t* dec) {
+    const std::string name = "qsa.sel.L" + std::to_string(l);
+    std::array<uint32_t, kq::kTopBlocks> p{}, d{};
+    for (uint32_t i = 0; i < kq::kTopBlocks; ++i) {
+      p[i] = pf[4 * i] / 4;
+      d[i] = dec[4 * i] / 4;
+    }
+    for (const char* mode : {"prefill", "decode"}) {
+      const std::string k = key(mode, name);
+      CHECK_EQ(file.dim(k, 2, 0), uint64_t(rows));
+      CHECK_EQ(file.dim(k, 2, 1), uint64_t(kq::kTopBlocks));
+      const int32_t* ref = file.i32(k, size_t(rows) * kq::kTopBlocks) + size_t(r) * kq::kTopBlocks;
+      std::array<uint32_t, kq::kTopBlocks> ids{};
+      for (uint32_t i = 0; i < kq::kTopBlocks; ++i) { CHECK(ref[i] >= 0); ids[i] = uint32_t(ref[i]); }
+      CHECK(q4judge::valid_set(ids.data(), ids.size(), (row0 + r + 1) / 4));
+      (mode[0] == 'p' ? sel_pf[l] : sel_dec[l]) += q4judge::set_distance(mode[0] == 'p' ? p.data() : d.data(), ids.data(), ids.size()) / rows;
+    }
+  }
+  bool sets(const model::Qwen4ExpDesc& d) const {
+    for (uint32_t l = 0; l < d.layers; ++l) {
+      report(l, "routes", route_pf[l], route_dec[l]);
+      if (d.is_qsa(l)) report(l, "selections", sel_pf[l], sel_dec[l]);
+    }
+    const bool ok = counts.routes_ok();
+    std::printf("   f32 rejected-route count: prefill %llu / decode %llu (x%.5g, bar 1.2)%s\n",
+                (unsigned long long)counts.prefill_rejected, (unsigned long long)counts.decode_rejected,
+                q4judge::ratio(double(counts.prefill_rejected), double(counts.decode_rejected)),
+                ok ? "" : "  ** FAIL **");
+    return ok;
+  }
+  uint32_t tokens(rq::Qwen4ExpEngine& e, const char* path) const {
+    const auto& d = e.model().desc;
+    const int32_t* tok = file.i32("tokens", kGen);
+    uint32_t accepted = 0, exact = 0;
+    for (uint32_t j = 0; j < kGen; ++j) {
+      const uint32_t id = e.control(e.devices() - 1).cur_token[0];
+      const float* ref = file.f32(key(path, "logits"), size_t(kGen + 1) * d.vocab) + size_t(j) * d.vocab;
+      const auto jr = golden::judge_row(ref, d.vocab, d.vocab_used);
+      const bool pass = jr.d.determined() ? id == jr.top : jr.d.contains(id);
+      if (!pass) std::printf("   f32 %s row %u rejects id %u, top %u, gap %.4g bf16 ulp\n", path, j, id,
+                             jr.top, (double(ref[jr.top]) - ref[id]) / jr.ulp);
+      accepted += pass;
+      exact += id == jr.top;
+      e.ingest({uint32_t(tok[j])});
+      if (paired) {
+        const auto actual = e.read_routes();
+        for (uint32_t l = 0; l < d.layers; ++l) trace(path, l, row0 + rows + j, actual.data() + size_t(l) * rq::kRouteWords);
+      }
+    }
+    std::printf("6. f32 tokens %s: %u / %u accepted (one bf16 ulp), %u exact; teacher-forced on f32\n", path,
+                accepted, kGen, exact);
+    return accepted;
+  }
+};
+
+int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule, F32Judge* judge) {
   const model::Qwen4ExpDesc& d = e.model().desc;
   const uint32_t n = uint32_t(prompt.size());
   bool ok = true;
@@ -349,6 +577,18 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
   const bool same = snap(e, true) == a;
   std::printf("2. F4: immediate twice %s\n", same ? "bitwise" : "DIFFERS");
   ok = ok && same;
+  if (judge && judge->paired) {
+    e.reset();
+    for (uint32_t p = 0; p < n; p += rq::kPfC) {
+      const uint32_t count = std::min(rq::kPfC, n - p);
+      e.prefill(Ids(prompt.begin() + p, prompt.begin() + p + count));
+      const auto actual = e.read_prefill_routes();
+      for (uint32_t l = 0; l < d.layers; ++l)
+        for (uint32_t r = 0; r < count; ++r) judge->trace("prefill", l, p + r, pf_route(actual, l, r));
+    }
+    CHECK(snap(e, true) == a);
+    std::printf("   aligned capture: all %u prefill route rows match; chunk-call snapshot bitwise\n", n);
+  }
 
   // ---- 3. chunking ------------------------------------------------------------------------------------------------
   StateCmp control;            // chunks of 16 against the default: A''s bars (header)
@@ -385,12 +625,15 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
     if (d.is_qsa(l)) last_qsa = l;
   for (uint32_t p = 0; p < n; ++p) {
     e.ingest({prompt[p]});
+    const auto dr = (p >= n - lastd || (judge && judge->paired)) ? e.read_routes() : std::vector<uint32_t>{};
+    if (judge && judge->paired)
+      for (uint32_t l = 0; l < d.layers; ++l) judge->trace("decode", l, p, dr.data() + size_t(l) * rq::kRouteWords);
     if (p < n - lastd) continue;
     const uint32_t r = p - (n - lastd);
-    const std::vector<uint32_t> dr = e.read_routes();
     for (uint32_t l = 0; l < d.layers; ++l) {
       const uint32_t* drow = dr.data() + size_t(l) * rq::kRouteWords;
       const uint32_t* prow = pf_route(a.routes, l, r);
+      if (judge) judge->routes(l, r, prow, drow);
       std::array<uint32_t, kq::kTopK> g{}, w{};   // (fixed arrays: gcc 15 flags the vector pair falsely, -Wfree-nonheap-object)
       std::copy_n(drow, kq::kTopK, g.begin());
       std::copy_n(prow, kq::kTopK, w.begin());
@@ -421,6 +664,7 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
         const uint32_t qi = d.qsa_before(l);
         const std::vector<uint32_t> ds = e.read_selection(l);
         const uint32_t* prow = a.sel[qi].data() + size_t(r) * rq::kListRow;
+        if (judge) judge->selections(l, r, prow, ds.data());
         ++srows;
         const uint32_t cnt = ds.back();
         if (cnt == prow[rq::kCountWord] && std::equal(ds.begin(), ds.begin() + cnt, prow)) {
@@ -458,17 +702,19 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
   }
   const Snap dec = snap(e, false);
   const StateCmp sc = compare_state(d, a, dec, n, e.max_len());
-  const bool sok = (control_rule ? near_control(sc.first_qsa_worst, control.first_qsa_worst) &&
+  if (judge) judge->state(d, a, dec, e.max_len());
+  const bool sok = (judge || (control_rule ? near_control(sc.first_qsa_worst, control.first_qsa_worst) &&
                                         near_control(sc.median, control.median) && near_control(sc.p01, control.p01)
-                                  : state_ok(sc)) &&
+                                  : state_ok(sc))) &&
                    sc.rings_exact;
-  if (control_rule)
+  if (control_rule && !judge)
     std::printf("4. (A', a truncated checkpoint: the bars are 2x the chunk-16 control's distance - worst %.6f, median %.7f, "
                 "p01 %.6f)\n", control.first_qsa_worst, control.median, control.p01);
   std::printf("4. prefill state vs decode's fill (%u positions x %u layers): first QSA layer's worst %.6f, median %.7f, p01 "
               "%.6f, %u rows < 0.99, worst %.4f (L%u); PLE id ring %s; tail rings %u words differ (max %u bf16 ulp)%s\n", n,
               d.layers, sc.first_qsa_worst, sc.median, sc.p01, sc.below99, sc.worst, sc.worst_layer,
-              sc.rings_exact ? "bitwise" : "DIFFERS", sc.tail_words_differ, sc.tail_max_ulp, sok ? "" : "  ** FAIL **");
+              sc.rings_exact ? "bitwise" : "DIFFERS", sc.tail_words_differ, sc.tail_max_ulp,
+              !sok ? "  ** FAIL **" : judge ? " (distances diagnostic)" : "");
   print_layers(sc);
   if (!sok) print_diffs(d, a, dec, e.max_len());
   std::printf("   the last QSA layer's block scores, prefill vs decode per row: cosine >= %.7f, max |diff| %.3e; selections: "
@@ -478,11 +724,22 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
               "beyond; selections %llu (row, QSA layer) - %llu exact, %llu near-ties, %llu beyond%s\n",
               (unsigned long long)rows, (unsigned long long)exact, (unsigned long long)near, (unsigned long long)undet,
               (unsigned long long)bad, (unsigned long long)srows, (unsigned long long)sexact, (unsigned long long)snear,
-              (unsigned long long)sbad, bad == 0 && sbad == 0 ? "" : control_rule ? " (printed: A')" : "  ** FAIL **");
-  ok = ok && sok && (control_rule || (bad == 0 && sbad == 0));
+              (unsigned long long)sbad, judge ? " (f32 distances below)" : bad == 0 && sbad == 0 ? "" : control_rule ? " (printed: A')" : "  ** FAIL **");
+  const bool sets_ok = judge ? judge->sets(d) : control_rule || (bad == 0 && sbad == 0);
+  ok = ok && sok && sets_ok;
   const double pf_dec_logits = cos_f32(a.logits.data(), dec.logits.data(), a.logits.size());
 
   // ---- 6. tokens, ruling A26's rule ----------------------------------------------------------------------------------
+  if (judge) {
+    judge->counts.decode_accepted = judge->tokens(e, "decode");
+    e.reset();
+    e.prefill(prompt);
+    judge->counts.prefill_accepted = judge->tokens(e, "prefill");
+    const bool tokens_ok = judge->counts.tokens_ok();
+    std::printf("   f32 accepted-token count: prefill %u >= decode %u%s\n", judge->counts.prefill_accepted,
+                judge->counts.decode_accepted, tokens_ok ? "" : "  ** FAIL **");
+    ok = ok && judge->counts.passes();
+  } else {
   std::vector<uint32_t> dtok(kGen);
   std::vector<bool> determined(kGen);
   for (uint32_t j = 0; j < kGen; ++j) {   // decode side: the state after ingest(prompt) is still there
@@ -518,6 +775,7 @@ int run_all(rq::Qwen4ExpEngine& e, const Ids& prompt, bool control_rule) {
     ok = ok && det_agree == det;
   }
 
+  }
   // ---- 7. the injected run: chunked == whole -------------------------------------------------------------------------
   {
     e.set_prefill_injector([](uint32_t, uint32_t pos, uint32_t rws, uint32_t* lists) { inject_rows(pos, rws, lists); });
@@ -779,10 +1037,11 @@ int run_gdn() {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|gdn] [pp2[:split]] [int8] [layers:N]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [all|split|pp|gdn] [pp2[:split]] [int8] [layers:N] [judge:<file>]\n", argv[0]);
     return 2;
   }
   std::string mode = "all";
+  std::string judge_path;
   qwen4exp_rig::Options o;
   o.max_len = kMaxLen;
   o.timeout_ms = 60000;
@@ -793,6 +1052,7 @@ int main(int argc, char** argv) {
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
     else if (a == "int8") o.int8_head = true;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
+    else if (a.rfind("judge:", 0) == 0) judge_path = a.substr(6);
     else {
       std::fprintf(stderr, "qwen4exp_prefill_test: unknown argument %s\n", a.c_str());
       return 2;
@@ -825,7 +1085,13 @@ int main(int argc, char** argv) {
   std::printf("%s: %u layers, %s dense, %s attention (B70_Q4_ATTN), %u device(s), max_len %u; prompt %u ids\n",
               snap_dir.c_str(), rig.eng->model().desc.layers, model::q4_form_name(rig.eng->model().desc.forms.dense),
               rq::q4_attn_name(rig.eng->attention()), rig.eng->devices(), rig.eng->max_len(), kN);
-  const int rc = mode == "split" ? run_split(*rig.eng, prompt) : run_all(*rig.eng, prompt, o.layers != 0);
+  std::unique_ptr<F32Judge> judge;
+  if (!judge_path.empty()) {
+    if (golden::exists(judge_path)) judge = std::make_unique<F32Judge>(judge_path, rig.eng->model().desc, prompt,
+                                                                  rig.eng->model().int8_head);
+    else std::printf("f32 judge absent (%s): A' applies\n", judge_path.c_str());
+  }
+  const int rc = mode == "split" ? run_split(*rig.eng, prompt) : run_all(*rig.eng, prompt, o.layers != 0, judge.get());
   std::puts(rc == 0 ? "qwen4exp_prefill_test OK" : "qwen4exp_prefill_test FAILED");
   return rc;
 }

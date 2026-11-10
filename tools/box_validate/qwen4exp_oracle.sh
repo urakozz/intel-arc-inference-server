@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Spec 21a: the Qwen3.8-Flash-Next (qwen4_exp) CPU reference runs, ON THE BOX CPU (kolibri_oracle.sh's shape).
-#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project
+#   tools/box_validate/qwen4exp_oracle.sh <data tree> tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project
 #
 # Every mode runs tools/oracle/qwen4exp_ref.py in the oracle image (tools/oracle/run_in_container.sh) with
 # transformers 5.19.0 from a site directory BESIDE the image (tools/oracle/qwen4exp_env.sh: pip --no-deps
@@ -11,6 +11,10 @@
 #                  -> <data>/oracle-out-q4exp/<p>.{ids,golden.safetensors,log}
 #   intel-layers N the reference truncated to N layers (what 21c's --layers N gate reads) on short / 4k / agentic
 #                  -> <data>/oracle-out-q4exp-L<N>/
+#   intel-f32 N    fp32 prefill judge, 4500 cycled ids + 32 greedy, 64g cap -> oracle-out-q4exp-f32-L<N>/
+#   intel-f32-aligned N  paired fp32 companions replaying f32-judged engine routes from
+#                  oracle-out-q4exp-align-L<N>.partial/engine.safetensors, same fixed 32-token continuation
+#                  -> oracle-out-q4exp-f32-aligned-L<N>/ (64g cap; rejects remain gate failures)
 #   ours           our AutoRound g64 checkpoint (21q) when it exists -> <data>/oracle-out-q4exp-ours/
 #   ppl            perplexity on prose.txt, code.txt and the agentic transcript (F1's third bullet: finite and
 #                  below a sanity ceiling of 30 on prose, ESTIMATED) -> <data>/oracle-out-q4exp/ppl.log
@@ -58,11 +62,11 @@
 #      OPENCODE_LOG, HF_HOME, ORACLE_IMAGE, ORACLE_THREADS.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
-[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2; }
+[ $# -ge 2 ] || { echo "usage: $0 <data tree> tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2; }
 data="$1" mode="$2" nl="${3:-}"
 case "$mode" in tests|tiny|intel|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project) ;;
-  intel-layers) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: intel-layers N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
-  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2 ;;
+  intel-layers|intel-f32|intel-f32-aligned) [[ "$nl" =~ ^[0-9]+$ ]] && [ "$nl" -ge 4 ] || { echo "qwen4exp_oracle: $mode N needs N >= 4 (the first QSA layer: a cached run needs one)" >&2; exit 2; } ;;
+  *) echo "qwen4exp_oracle: mode $mode is not one of tests|tiny|intel|intel-layers N|intel-f32 N|ours|ppl|hfcheck|trace|synth-ckpt|ple-int8|synth|mtp-fixture|mtp-accept|curve|project" >&2; exit 2 ;;
 esac
 hf="${HF_HOME:-$HOME/.cache/huggingface}"
 dry="${DRY_RUN:-0}"
@@ -75,6 +79,17 @@ SITE=oracle-out-q4exp-site
 case "$mode" in tests|tiny|synth-ckpt|ple-int8) need="${Q4_REF_MIN_GB:-24}" ;; curve|project) need="${Q4_REF_MIN_GB:-8}" ;; synth|mtp-fixture) need="${Q4_REF_MIN_GB:-32}" ;; *) need="${Q4_REF_MIN_GB:-64}" ;; esac
 case "$mode" in tests|tiny) model="$TINY" ;; ours) model="$OURS" ;; synth-ckpt|synth) model="$ORIG" ;; *) model="$INTEL" ;; esac
 snapdir=$(ls -d "$hf/hub/$model"/snapshots/*/ 2>/dev/null | head -1)
+if [ "$mode" = intel-f32 ] || [ "$mode" = intel-f32-aligned ]; then
+  snapdir=""
+  if [ -r "$hf/hub/$model/refs/main" ]; then
+    snapdir="$hf/hub/$model/snapshots/$(cat "$hf/hub/$model/refs/main")"
+    [ -f "$snapdir/config.json" ] || snapdir=""
+  else
+    for candidate in "$hf/hub/$model"/snapshots/*; do
+      [ -f "$candidate/config.json" ] && { snapdir="$candidate"; break; }
+    done
+  fi
+fi
 avail=$(awk '/^MemAvailable:/ { print int($2 / 1048576) }' /proc/meminfo 2>/dev/null || echo 0)
 echo "qwen4exp_oracle: $mode${nl:+ $nl} -> $data; checkpoint $model (${snapdir:-absent}); MemAvailable ${avail} GB (need $need)"
 
@@ -86,6 +101,15 @@ if [ -z "$ple" ]; then
   else
     ple=bf16
   fi
+fi
+if [ "$mode" = intel-f32 ] || [ "$mode" = intel-f32-aligned ]; then
+  engine_ple="int8:/hf/hub/$model/snapshots/$(basename "${snapdir:-absent}")-ple-int8"
+  if [ -z "$snapdir" ] || [ ! -s "${snapdir%/}-ple-int8/model.safetensors.index.json" ] || [ "$ple" != "$engine_ple" ]; then
+    echo "qwen4exp_oracle: intel-f32 needs the checkpoint's sibling int8 PLE file (the engine's table)" >&2
+    exit 2
+  fi
+  ple_dir=$(cd "${snapdir%/}-ple-int8" && pwd -P)
+  ple=int8:/ple
 fi
 
 if [ "$dry" = 1 ]; then
@@ -130,6 +154,11 @@ rc=0
 # in_box <command> - one oracle-image run with the 5.19.0 site first on PYTHONPATH ($SNAP = the checkpoint).
 in_box() {
   local cmd="tools/oracle/qwen4exp_env.sh /ws/$SITE > /dev/null && export PYTHONPATH=/ws/$SITE && $1"
+  if [ "$mode" = intel-f32 ] || [ "$mode" = intel-f32-aligned ]; then
+    if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_MEMORY=${ORACLE_MEMORY:-64g} ORACLE_SNAP=$snapdir ORACLE_PLE=$ple_dir tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
+    ORACLE_SNAP="$snapdir" ORACLE_PLE="$ple_dir" tools/oracle/run_in_container.sh "$cmd"
+    return
+  fi
   if [ "$mode" = curve ] || [ "$mode" = project ]; then   # no checkpoint read: the config-only stand-in satisfies run_in_container's $SNAP
     if [ "$dry" = 1 ]; then echo "DRY_RUN: ORACLE_SNAP=${snapdir%/} tools/oracle/run_in_container.sh '$cmd'"; return 0; fi
     ORACLE_SNAP="${snapdir%/}" tools/oracle/run_in_container.sh "$cmd"
@@ -188,8 +217,59 @@ gaps() {   # the gap distributions (decision 3's tau, R2's MoE tolerance)
 }
 
 case "$mode" in
+  intel-f32-aligned)
+    export ORACLE_MEMORY=64g   # also overrides an inherited larger cap
+    out="$data/oracle-out-q4exp-f32-aligned-L$nl" part="oracle-out-q4exp-align-L$nl.partial"
+    if [ -s "$out/q4exp_4k.state.safetensors" ]; then
+      echo "qwen4exp_oracle: aligned f32 L$nl kept"
+    else
+      if [ "$dry" != 1 ]; then
+        [ -s "$part/engine.safetensors" ] || { echo "need qwen4exp_route_capture -> $part/engine.safetensors" >&2; exit 2; }
+        mkdir -p "$out" "$part"
+        cp -f "$data/oracle-out-q4exp-f32-L$nl/q4exp_4k.state.safetensors" "$part/original.safetensors" || exit 1
+      fi
+      in_box "python3 tools/oracle/qwen4exp_align.py split /ws/$part/engine.safetensors /ws/$part" || exit 1
+      for path in prefill decode; do
+        if [ -s "$part/$path.state.safetensors" ]; then continue; fi
+        in_box "python3 tools/oracle/qwen4exp_ref.py run \"\$SNAP\" --dtype fp32 --lm-head int8 --layers $nl \
+          --cycle 4500 --state-dump --gen 32 --chunk 2048 --act-tail 0 --logits-tail 1 --ple $ple \
+          --prompt tests/golden/prompts/q4exp_4k.ids --engine-routes /ws/$part/$path.routes.safetensors \
+          --out /ws/$part/$path.state.safetensors > /ws/$part/$path.log 2>&1" || exit 1
+      done
+      in_box "python3 tools/oracle/qwen4exp_align.py merge /ws/$part/original.safetensors /ws/$part \
+        /ws/$part/paired.safetensors > /ws/$part/merge.log 2>&1" || exit 1
+      if [ "$dry" != 1 ]; then
+        cp -f "$part/merge.log" "$out/q4exp_4k.log" || exit 1
+        mv -f "$part/paired.safetensors" "$out/q4exp_4k.state.safetensors" || exit 1
+        cat "$out/q4exp_4k.log"
+      fi
+    fi
+    ;;
+  intel-f32)
+    out="$data/oracle-out-q4exp-f32-L$nl" part="oracle-out-q4exp-f32-L$nl.partial"
+    if [ -s "$out/q4exp_4k.state.safetensors" ]; then
+      echo "qwen4exp_oracle: f32 L$nl kept ($out/q4exp_4k.state.safetensors)"
+    else
+      [ "$dry" = 1 ] || mkdir -p "$out" "$part"
+      echo "qwen4exp_oracle: f32 L$nl, 4500 cycled ids, 32 greedy tokens, ORACLE_MEMORY=64g"
+      if ORACLE_MEMORY=64g in_box "python3 tools/oracle/qwen4exp_ref.py run \"\$SNAP\" \
+            --prompt tests/golden/prompts/q4exp_4k.ids --out /ws/$part/q4exp_4k.state.safetensors \
+            --dtype fp32 --lm-head int8 --layers $nl --cycle 4500 --state-dump --chunk 2048 --gen 32 \
+            --act-tail 0 --logits-tail 1 --ple $ple > /ws/$part/q4exp_4k.log 2>&1"; then
+        if [ "$dry" != 1 ]; then
+          mv -f "$part/q4exp_4k.log" "$out/q4exp_4k.log"
+          mv -f "$part/q4exp_4k.state.safetensors" "$out/q4exp_4k.state.safetensors"
+          tail -3 "$out/q4exp_4k.log"
+        fi
+      else
+        echo "qwen4exp_oracle: f32 L$nl FAILED"
+        tail -20 "$part/q4exp_4k.log" 2>/dev/null
+        rc=1
+      fi
+    fi
+    ;;
   tests)
-    in_box "python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py" || rc=1
+    in_box "python3 tools/oracle/test_qwen4exp_routes.py && python3 tools/oracle/test_qwen4exp_ref.py && python3 tools/oracle/test_qwen4exp_mtp.py" || rc=1
     ;;
   synth-ckpt)
     # spec 21b Task 1: written in the tree (the container mounts only it), moved under <data> when checked; an
