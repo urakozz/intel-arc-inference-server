@@ -61,9 +61,23 @@ documented f32 near-miss bar of eight ulps (`spec_judge.h`, doc 14); missing
 references print their context keys and SKIP. `--one-card` diagnoses the existing
 one-card int8 pass on the same contexts. The int8 prefill + int8 KV warning stays.
 
-Build, kernel, linear, memory-plan, one-card prefill and bf16 TP prefill checks
-pass. Five additional f32 contexts are running detached; quality and the padded
-path's speed table remain pending. See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
+The box build and kernel, linear, memory-plan, one-card prefill and bf16 TP
+prefill checks pass. The TP int8 quality gate passes all 40 contexts at 64 tokens:
+29 identical, 11 judged, with all 12 differing rows accepted (worst 6.70 ulp).
+The deliberately corrupted judge fails as intended. Serving answers all 39
+requests, and default MTP answers the three golden prompts.
+
+Idle medians of three, interleaved against TP bf16 (2048-row chunks, int8 head,
+bf16 KV, max_len 32768, tg 32):
+
+| Prompt tokens | TP bf16, t/s | TP int8, t/s | Gain |
+|---|---:|---:|---:|
+| 4096 | 2934.67 | 3322.73 | 13.2% |
+| 16384 | 2673.31 | 3047.73 | 14.0% |
+
+Both cards and the CPU model lane were locked; runs overlapping compiler work
+were excluded. The original ~3700 / ~3400 figures were estimates, not thresholds
+(operator). See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
 
 ## Why decode stays int4 and bf16
 

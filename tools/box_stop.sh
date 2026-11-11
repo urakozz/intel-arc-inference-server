@@ -13,6 +13,7 @@
 #                                       re-running tools/box_validate.sh with the same state resumes
 #   tools/box_stop.sh q4exp-count-wait  the Flash-Next count-gate driver, only while its GPU job is waiting
 #   tools/box_stop.sh tree <branch>      jobs whose working directory is that branch's ~/b70/trees tree, plus its oracle containers
+#   tools/box_stop.sh job <branch> <pid> one process tree, verified to be working in that branch
 # Anything else is refused. Signals are TERM, then KILL after 10 s for what is left.
 set -euo pipefail
 _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
@@ -20,19 +21,20 @@ _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 [ -r "$_box_env" ] && . "$_box_env"
 : "${BOX:?set BOX=user@host in the environment or in tools/box.env (see tools/box.env.example)}"
 
-usage() { sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
-what="${1:-}"; arg="${2:-}"
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+what="${1:-}"; arg="${2:-}"; job_pid="${3:-}"
 case "$what" in
   list|cpu-chain|hf-tier|validation|q4exp-count-wait) [ -z "$arg" ] || usage ;;
   cpu-job|tree) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ ]] || usage ;;
+  job) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ && "$job_pid" =~ ^[1-9][0-9]*$ ]] || usage ;;
   *) usage ;;
 esac
 
 # The remote side: fixed snippets only; the one argument is checked above and again on the box.
 # shellcheck disable=SC2016
-ssh -o ConnectTimeout=20 "$BOX" bash -s -- "$what" "$arg" <<'REMOTE' | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g'
+ssh -o ConnectTimeout=20 "$BOX" bash -s -- "$what" "$arg" "$job_pid" <<'REMOTE' | sed -E 's/[0-9]{1,3}(\.[0-9]{1,3}){3}/<ip>/g'
 set -u
-what=$1; arg=${2:-}
+what=$1; arg=${2:-}; job_pid=${3:-}
 CPU_TREE=$HOME/b70/trees/cpu-refs
 CPU_LOG=$HOME/b70/logs/cpu-refs
 VROOT=$HOME/b70-validate/b70-inference-server-validate
@@ -85,6 +87,14 @@ case "$what" in
     echo "== cpu containers"; c=$(cpu_containers); [ -n "$c" ] && docker ps --filter "volume=$CPU_TREE" --format '  {{.ID}} {{.RunningFor}}' || echo "  none"
     echo "== hf-tier";     pgrep -af 'hf-tier-chain|tools/hf_tier.py' | grep -v pgrep || echo "  not running"
     echo "== validation";  pgrep -af 'box_validate/remote.sh' | grep -v pgrep | cut -c1-160 || echo "  not running"
+    ;;
+  job)
+    tree="$HOME/b70/trees/$arg"
+    wd=$(readlink "/proc/$job_pid/cwd" 2>/dev/null || true)
+    case "$wd" in
+      "$tree"|"$tree"/*) stop_pids $(tree_pids "$job_pid") ;;
+      *) echo "refused: process $job_pid is not working in branch '$arg'"; exit 2 ;;
+    esac
     ;;
   tree)
     tree="$HOME/b70/trees/$arg"

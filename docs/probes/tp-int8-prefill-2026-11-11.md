@@ -1,7 +1,8 @@
 # TP int8 prefill validation, 2026-11-11
 
 Branch `tp-int8-prefill`, rebased onto main `02ec4323`. Implementation and validation
-fixes through `cdf28a36`; subgroup lane tuning in `538d97e3`. No push.
+fixes through `cdf28a36`; discarded 512-wide lane tuning in `538d97e3`; selected
+padded implementation in signed commit `0e41b221`. No push.
 
 ## Rotation choice
 
@@ -50,7 +51,7 @@ Completion logs: `~/b70/logs/tp-int8-prefill/completion-cdf28a36/`.
 - Initial `tp_prefill_int8_test`: 31 of 40 contexts had identical ids; nine await
   their f32 references. The test teacher-forces one card's bf16 continuation on TP
   and requires every differing id to pass the f32 judge at that same context.
-- The nine references are being generated under `/tmp/b70-cpu-model.lock`.
+- The nine references were generated under `/tmp/b70-cpu-model.lock`.
   An inherited scratch symlink was inaccessible inside the oracle container;
   its link was moved to `~/b70/trash/2026-11-11/` and a local scratch directory
   now holds this branch's reference work.
@@ -58,10 +59,9 @@ Completion logs: `~/b70/logs/tp-int8-prefill/completion-cdf28a36/`.
   fail warning (`kv8-warning.log`). No attempt was made to fix that combination.
 - Server runs use `serve_run.sh`, max_len 32768, prefix cache off, spec off,
   temperature zero, 256 output tokens, three golden and 36 tool-call requests.
-  The bf16 arm answered all 39; the int8 arm and f32 comparisons are in progress.
+  Both arms answered all 39; extended stream contexts were saved for follow-up.
 - A separate, deliberately corrupted cjk judge is queued as the negative control.
-  It never overwrites a real reference. Real-reference quality gates and final
-  speed measurements remain pending.
+  It never overwrites a real reference. Final real-reference quality and speed results follow below.
 
 ## The 512-wide path failed quality
 
@@ -95,3 +95,51 @@ still fails this rule. The padded path's known differences are 1.38–2.55 ulp;
 five additional references are running detached before the final verdict.
 An optional one-card diagnostic keeps the same teacher-forced contexts and
 separates native int8 behaviour from TP differences.
+
+## Final padded-path results
+
+Code: `0e41b221`, branch `tp-int8-prefill`, based on main `02ec4323`.
+Logs: `~/b70/logs/tp-int8-prefill/padded-1024/`.
+
+| Prompt tokens | TP bf16, t/s | TP int8, t/s | Gain |
+|---|---:|---:|---:|
+| 4096 | 2934.67 | 3322.73 | 13.2% |
+| 16384 | 2673.31 | 3047.73 | 14.0% |
+
+Three interleaved runs per backend and length; 2048-row chunks, int8 head,
+bf16 KV, max_len 32768, tg 32. GPU box lock and CPU-model lock held throughout
+the timing batch. Each accepted run began with no compiler process and at least
+90% CPU idle; whole-command CPU idle also exceeded 90%. Runs overlapping another
+branch's compile were moved to `bench-idle/busy/` and excluded. Valid logs and
+CPU grades are in `bench-idle/` and `bench-idle-driver.log`. The operator confirmed
+the ~3700 / ~3400 figures were estimates, not acceptance thresholds.
+
+- Committed-source production build PASS (`committed-build.log`).
+- Kernel, linear, memory-plan, one-card prefill and bf16 TP prefill PASS
+  (`tests.log`); CLI argument checks passed in the initial validation log.
+- All 40 TP int8 quality contexts PASS, no SKIP: 29 identical, 11 judged,
+  12 differing rows, worst 6.70 ulp under the documented 8-ulp rule
+  (`quality-final.log`, `quality-status`). This is 64 tokens per context.
+- The five additional f32 judges completed (3668 trie positions, 534 seconds,
+  peak RSS 35.9 GiB; `refs.log`, `refs-status`). No quality reference is missing.
+- Negative control PASS: the corrupted cjk judge produces `REJECTED` and
+  `CHECK failed: ok`, exit 1 (`negative-control.log`, `negative-status`).
+- Plain server: all 39 requests return 256 output tokens, three golden and
+  36 tool-call prompts (`serve.log`, `serve/l0-int8/requests.jsonl`).
+- Default MTP server: all three golden requests return 64 tokens, adaptive
+  MTP enabled (`mtp-serve.log`, `serve-mtp/requests.jsonl`, `mtp-status`).
+- TP int8 prefill with int8 KV starts, runs, and retains the accepted known-fail
+  warning (`kv8-warning.log`, `kv8-status`). Its quality is not claimed fixed.
+
+The optional one-card diagnostic also identified pre-existing native int8
+misses on long rows 16 and 61 (63.50 / 50.26 ulp). The selected TP padding does
+not reproduce those differences against the bf16 reference in this gate.
+
+An additional comparison of the full 256-token server streams found 27 differing
+request pairs and dumped 54 contexts (`serve-forced/`, `serve-judge-initial.log`).
+These extended streams are not claimed f32-judged. Their dumps are preserved for
+follow-up; they are outside the requested 64-token engine quality gate. No extra
+CPU job for them remains running.
+
+No required task work remains. The validated branch is ready for operator review;
+it has not been merged or pushed.

@@ -10,8 +10,13 @@ Constraints: own worktree, no Mac C++ compilation, no push. Box validation autho
 - [x] Add rotation variants and direct output to the int8 walk. Check every TP linear K/N before chunks; precompute scales while both lists are idle.
 - [x] Add backend selection to TpEngine, memory planning and both CLIs. Retain the int8 KV warning.
 - [x] Register a TP int8 golden/tool-call gate with f32 judging and explicit missing-reference skips.
-- [x] Review diff and kernel indexing locally. Read-only independent review found no blocking issue; corrected int8 memory-log categorisation. `git diff --check` and a local staging/index coverage audit passed. Build and focused tests started on the box after rebasing onto main `02ec4323`; logs: `~/b70/logs/tp-int8-prefill/validation-324952f5/`. Target dependencies now include the 3072/8704 quantisers and padded requant variants. Negative controls, quality results, serve checks and median-of-three measurements remain pending; item 10 stays open in docs/open-work.md.
+- [x] Review diff and kernel indexing locally; independent review found no blocking issue.
+- [x] Build and validate on the box. `pipeline_args_test`, `pf_int8_test`, `linear_i8_test`, `memory_plan_test`, `prefill_int8_test` and `tp_prefill_test` pass. The fresh targeted build exposed missing bf16 short-chunk kernel dependencies; those were corrected.
+- [x] Generate missing f32 references detached under the CPU-model lock. The final five-context batch completed successfully.
+- [x] Apply the documented 8-ulp near-miss rule. `tp_prefill_int8_test` passes all 40 contexts, with no SKIP; worst differing row 6.70 ulp. The negative control rejects the bad judge.
+- [x] Serve 39 golden/tool-call requests, smoke-test default MTP on three golden prompts, and verify the int8 KV known-fail warning.
+- [x] Measure three interleaved idle runs at 4k / 16k: TP int8 3322.73 / 3047.73 t/s versus bf16 2934.67 / 2673.31, gains 13.2% / 14.0%. The operator confirmed the earlier figures were estimates, not thresholds.
 
-Validation started: targeted build PASS; `pf_int8_test`, `linear_i8_test`, `pipeline_args_test` and `prefill_int8_test` PASS. First model run aborted because the shared prefill test dependency list omitted bf16 short-chunk kernels. Added the variants selected by `pf_q4_tile` / `pf_small_tile`; rebuilt and reran affected tests only. TP gates are running in `tests-2.log`; the separate product build is in `product-build.log`. Missing f32 references will be listed by the gate; Reference creation was subsequently authorised as part of completing the task.
+Code commit: `0e41b221` (signed), branch `tp-int8-prefill`, rebased onto main `02ec4323`; never pushed. Full results and log paths: [validation record](../../probes/tp-int8-prefill-2026-11-11.md). Item 10 moves to Closed recently in `docs/open-work.md`.
 
-Operator decision: keep and commit the padded path, remove unused 512 variants, apply the documented 8-ulp near-miss rule, generate the five additional f32 references detached, then measure TP bf16 versus TP int8 at 4k/16k (three interleaved runs, idle box). The five-context run is active under `padded-1024/refs.log`.
+The extra 256-token server-stream comparison produced 54 contexts. Its dumps are preserved for follow-up; it is outside the requested 64-token quality gate and is not claimed judged.
