@@ -29,6 +29,20 @@ is `--max-num-seqs N` (N up to 8 on two cards, 4 on one). MTP's speed depends on
 per-request rates move a few t/s between runs (`tools/box_validate/slots_bench.py`, logs on the box under
 `~/b70/logs/brag-speed/`).
 
+**Prefill (reading the prompt)** - from [docs/BENCHMARKS.md](docs/BENCHMARKS.md), each row with its own date and
+conditions:
+
+| | prompt | t/s |
+|---|---:|---:|
+| one card, `l0-int8`, the record (2026-09-25, idle box; vLLM on the same checkpoint: 1,610) | 4,096 | **2,125** |
+| one card, bf16 prompt pass (2026-11-10, shared box) | 2,048 / 16,384 | 1,746 / 1,524 |
+| `--parallel tp`, bf16 prompt pass (2026-11-10, shared box) | 2,048 / 16,384 | 2,479 / **2,673** (1.42x / 1.75x one card) |
+| one card, `l0-int8`, prompt continuing a long session (2026-11-06, busy box) | at depth 8k / 32k / 128k | 2,100 / 1,675 / 925 |
+
+A short agentic turn deep in a session is fast too: 16 new tokens at 128k of history take 98 ms (bf16 cache) or
+108 ms (int8), from 441 / 526 ms before split-K attention for short chunks (2026-11-11). One table of every mode on
+today's stack comes with the quiet-box measurement session (docs/open-work.md).
+
 Measured on one Arc Pro B70, same checkpoint and same prompt on both sides,
 median of three runs on an idle machine:
 
