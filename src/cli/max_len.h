@@ -20,6 +20,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "kernels/kernels.h"
 #include "l0/context.h"
@@ -154,6 +155,54 @@ inline uint32_t settle(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg
                                  reserve_bytes)
                    .c_str());
   return len;
+}
+
+// Step 4 under --max-num-seqs (operator 2026-11-11): a card's `seqs` > 1 sequence slots (plan 13c), slot 0 the
+// largest context that fits beside seqs - 1 slots of SlotDims::kShortLen (auto) or exactly the asked N, refused with
+// the plan's numbers when it does not fit beside them. `m` is re-tabled at the slots' sum (one RoPE table, one KV
+// allocation). Returns the layout; prints the choice and the plan's breakdown like settle(). No drafter and no draft
+// vocabulary beside slots (refused before the load).
+inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel& m, const MaxLenArg& a, uint32_t seqs,
+                                          size_t reserve_bytes, const runtime::PrefillPath& path, runtime::KvCache kv) {
+  const model::ModelDesc& d = *m.desc;
+  const bool mtp = m.mtp != nullptr;
+  const size_t weights = m.report.total() - m.report.rope_bytes;
+  const size_t device = ctx.memory_bytes();
+  const double gb = 1e9;
+  const uint32_t cap = m.trained_max_len != 0 ? m.trained_max_len : a.value;
+  const uint32_t fit = cap < runtime::kMaxLenQuantum
+                           ? 0
+                           : runtime::slot0_len_that_fits(d, seqs, mtp, weights, device, reserve_bytes, cap, path, kv);
+  const std::string beside = " beside " + std::to_string(seqs - 1) + " slot" + (seqs > 2 ? "s" : "") + " of " +
+                             std::to_string(runtime::SlotDims::kShortLen) + " (--max-num-seqs " +
+                             std::to_string(seqs) + ")";
+  const uint32_t len = a.is_auto ? fit : a.value;
+  if (len == 0)
+    throw std::runtime_error(
+        "--max-len auto: not even " + std::to_string(runtime::kMinAutoMaxLen) + " positions fit slot 0" + beside +
+        " - " +
+        runtime::describe(runtime::plan_slots(d, runtime::slot_layout(runtime::kMinAutoMaxLen, seqs), mtp, weights,
+                                              path, {}, kv),
+                          device, reserve_bytes) +
+        ". A smaller --max-num-seqs");
+  const std::vector<uint32_t> lens = runtime::slot_layout(len, seqs);
+  const runtime::MemoryPlan p = runtime::plan_slots(d, lens, mtp, weights, path, {}, kv);
+  if (!a.is_auto && p.total() + reserve_bytes > device)
+    throw std::runtime_error("--max-len " + std::to_string(len) + " does not fit" + beside + ": " +
+                             runtime::describe(p, device, reserve_bytes) + ". The largest slot 0 that fits beside them is " +
+                             std::to_string(fit) + " (--max-len auto), or a smaller --max-num-seqs");
+  if (a.is_auto)
+    std::fprintf(stderr,
+                 "max_len: auto -> slot 0 %u (the largest multiple of %u that fits%s in %.3f GB with a %.3f GB "
+                 "reserve; trained context %u)\n",
+                 len, runtime::kMaxLenQuantum, beside.c_str(), device / gb, reserve_bytes / gb, m.trained_max_len);
+  else
+    std::fprintf(stderr, "max_len: slot 0 %u (--max-len)%s\n", len, beside.c_str());
+  uint32_t total = 0;
+  for (uint32_t l : lens) total += l;
+  loader::set_max_len(ctx, m, total);
+  std::fprintf(stderr, "%s\n", runtime::describe(p, device, reserve_bytes).c_str());
+  return lens;
 }
 
 // Plan 5d: the prefill chunk cap (2048 or 4096), in two steps around settle().

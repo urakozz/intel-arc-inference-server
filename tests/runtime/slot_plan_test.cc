@@ -1,5 +1,6 @@
-// Spec 13c (plan 13c Task 1): the planner's sequence slots on the host - runtime::plan_slots and runtime::slot_layout
-// (spec 13 §11.2: an asked --max-len's spare memory becomes 32768-position slots). No device: the sizes are
+// Spec 13c (plan 13c Task 1): the planner's sequence slots on the host - runtime::plan_slots, runtime::slot_layout and
+// runtime::slot0_len_that_fits (spec 13 §11.2's shape; --max-num-seqs N, operator 2026-11-11: slot 0 the largest that
+// fits beside N - 1 slots of 32768). No device: the sizes are
 // runtime/buffer_sizes.h's functions, the weights memory_plan_test's derived byte counts.
 //
 // Pinned:
@@ -11,9 +12,9 @@
 //      printed precision. Int8 prefill's raw widening scratch is at the longest slot in both (3j: one sequence
 //      prefills at a time, so the engine sizes it at PrefillScratch::kv8_len; 3e had it at the summed positions,
 //      384 MiB more on this layout - 896 MiB vs 512 MiB);
-//   3. slot_layout's rule: slot 0 at the asked length, then 32768-position slots while they fit with the reserve, at
-//      most four in all, never a shorter one; the layouts of the bf16 and int8 KV forms at the asked lengths an agentic
-//      session would pick (printed: they are the startup lines the operator reads).
+//   3. --max-num-seqs' rule: slot 0 then N - 1 slots of 32768; under --max-len auto slot 0 is the largest multiple of
+//      256 that fits with the reserve (one slot: max_len_that_fits); the layouts of the bf16 and int8 KV forms at
+//      N = 1..4 (printed: they are the startup lines the operator reads).
 #include <cstdint>
 #include <cstdio>
 #include <vector>
@@ -99,38 +100,39 @@ void check_decided_layout() {
 void check_layout_rule() {
   const model::ModelDesc& q = model::qwen38();
   const size_t w = kQwenInt8Weights + kMtpWeights;
-  auto lay = [&](uint32_t asked, KvCache kv) {
-    return runtime::slot_layout(q, asked, true, w, kDevice, kReserve, {}, {}, kv);
-  };
-  const std::vector<uint32_t> d = lay(131072, KvCache::Int8);
+  constexpr uint32_t kTrained = 262144;
+  const std::vector<uint32_t> d = runtime::slot_layout(131072, 4);
   CHECK(d == (std::vector<uint32_t>{131072, 32768, 32768, 32768}));
+  CHECK(runtime::slot_layout(65536, 1) == (std::vector<uint32_t>{65536}));
   CHECK(runtime::slot_layout_name(d) == "131072 + 3 x 32768");
   CHECK(runtime::slot_layout_name({65536, 32768}) == "65536 + 32768");
-  // bf16 KV: the decided layout does not fit (§9: "at bf16 KV the slots are fewer"); 131072 keeps one slot.
-  CHECK(lay(131072, KvCache::Bf16) == (std::vector<uint32_t>{131072}));
-  CHECK(lay(65536, KvCache::Bf16) == (std::vector<uint32_t>{65536, 32768, 32768}));
-  CHECK(lay(32768, KvCache::Bf16) == (std::vector<uint32_t>{32768, 32768, 32768, 32768}));
-  // The rule itself, at every asked length: each layout fits with the reserve, one more short slot does not (or four).
-  for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
-    for (uint32_t asked = 4096; asked <= 196608; asked += 4096) {
-      if (runtime::plan(q, asked, true, w, {}, {}, kv).total() + kReserve > kDevice) continue;
-      const std::vector<uint32_t> l = lay(asked, kv);
-      CHECK(!l.empty() && l[0] == asked && l.size() <= runtime::SlotDims::kMaxSeqs);
-      for (size_t i = 1; i < l.size(); ++i) CHECK_EQ(l[i], runtime::SlotDims::kShortLen);
-      CHECK(runtime::plan_slots(q, l, true, w, {}, {}, kv).total() + kReserve <= kDevice);
-      if (l.size() < runtime::SlotDims::kMaxSeqs) {
-        std::vector<uint32_t> more = l;
-        more.push_back(runtime::SlotDims::kShortLen);
-        CHECK(runtime::plan_slots(q, more, true, w, {}, {}, kv).total() + kReserve > kDevice);
-      }
+  auto fit = [&](uint32_t seqs, KvCache kv) {
+    return runtime::slot0_len_that_fits(q, seqs, true, w, kDevice, kReserve, kTrained, {}, kv);
+  };
+  // The decided layout fits at int8 KV; at bf16 KV slot 0 is shorter (§9: "at bf16 KV the slots are fewer").
+  CHECK(fit(4, KvCache::Int8) >= 131072u);
+  CHECK(fit(4, KvCache::Bf16) < 131072u);
+  // The rule at every N: slot 0 a multiple of 256 whose layout fits with the reserve, 256 more does not (or the
+  // trained context); one slot is max_len_that_fits.
+  for (KvCache kv : {KvCache::Bf16, KvCache::Int8}) {
+    CHECK_EQ(fit(1, kv), runtime::max_len_that_fits(q, true, w, kDevice, kReserve, kTrained, {}, {}, kv));
+    for (uint32_t seqs = 1; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+      const uint32_t l0 = fit(seqs, kv);
+      CHECK(l0 != 0 && l0 % runtime::kMaxLenQuantum == 0 && l0 <= kTrained);
+      CHECK(runtime::plan_slots(q, runtime::slot_layout(l0, seqs), true, w, {}, {}, kv).total() + kReserve <= kDevice);
+      if (l0 < kTrained)
+        CHECK(runtime::plan_slots(q, runtime::slot_layout(l0 + runtime::kMaxLenQuantum, seqs), true, w, {}, {}, kv)
+                      .total() +
+                  kReserve >
+              kDevice);
     }
-  std::printf("| --max-len | KV | slots (MTP) | total GB | spare GB |\n");
+  }
+  std::printf("| --max-num-seqs | KV | slots (MTP, --max-len auto) | total GB | spare GB |\n");
   for (KvCache kv : {KvCache::Bf16, KvCache::Int8})
-    for (uint32_t asked : {32768u, 65536u, 98304u, 131072u, 163840u}) {
-      if (runtime::plan(q, asked, true, w, {}, {}, kv).total() + kReserve > kDevice) continue;
-      const std::vector<uint32_t> l = lay(asked, kv);
+    for (uint32_t seqs = 1; seqs <= runtime::SlotDims::kMaxSeqs; ++seqs) {
+      const std::vector<uint32_t> l = runtime::slot_layout(fit(seqs, kv), seqs);
       const double t = runtime::plan_slots(q, l, true, w, {}, {}, kv).total() / kGB;
-      std::printf("| %u | %s | %s | %.3f | %.3f |\n", asked, runtime::kv_cache_name(kv),
+      std::printf("| %u | %s | %s | %.3f | %.3f |\n", seqs, runtime::kv_cache_name(kv),
                   runtime::slot_layout_name(l).c_str(), t, double(kDevice - kReserve) / kGB - t);
     }
   // Refusals: no slot, five slots, a draft vocabulary beside slots.

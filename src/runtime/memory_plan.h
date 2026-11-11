@@ -188,13 +188,17 @@ std::string describe(const MemoryPlan& p, size_t device_bytes, size_t reserve_by
 MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>& lens, bool mtp, size_t model_bytes,
                       const PrefillPath& path = {}, const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache());
 
-// The slots of an asked --max-len (spec 13 §11.2): slot 0 at `asked`, then SlotDims::kShortLen-position slots while
-// plan_slots of the layout + the reserve still fits the device, at most SlotDims::kMaxSeqs in all - never a shorter
-// one, nothing in host RAM. `asked` alone must fit (the caller refused it otherwise: it is returned alone). `--max-len
-// auto` does not come here: it is one slot, today's layout. A draft vocabulary keeps one slot (plan_slots refuses it).
-std::vector<uint32_t> slot_layout(const model::ModelDesc& desc, uint32_t asked, bool mtp, size_t model_bytes,
-                                  size_t device_bytes, size_t reserve_bytes, const PrefillPath& path = {},
-                                  const DraftVocabPlan& dv = {}, KvCache kv = default_kv_cache());
+// --max-num-seqs N's layout on a card (operator 2026-11-11; spec 13 §11.2's shape): slot 0 at `slot0`, then
+// seqs - 1 slots of SlotDims::kShortLen positions.
+std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs);
+// The largest slot 0 - a multiple of kMaxLenQuantum, at most `cap` (the trained context) - whose
+// slot_layout(slot0, seqs) plan_slots total + `reserve_bytes` <= `device_bytes`: --max-len auto under
+// --max-num-seqs. 0 when not even min(kMinAutoMaxLen, cap) fits. One slot is max_len_that_fits without a drafter or a
+// draft vocabulary. Throws std::invalid_argument when `cap` is below one quantum or `seqs` is outside
+// [1, SlotDims::kMaxSeqs].
+uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
+                             size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path = {},
+                             KvCache kv = default_kv_cache());
 // "131072 + 3 x 32768" - the startup line's form of a layout.
 std::string slot_layout_name(const std::vector<uint32_t>& lens);
 

@@ -82,20 +82,11 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
   return p;
 }
 
-uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
-                           size_t device_bytes, size_t reserve_bytes, uint32_t cap,
-                           const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
-                           const DrafterPlan& drafter) {
-  if (cap < kMaxLenQuantum)
-    throw std::invalid_argument("max_len_that_fits: the cap " + std::to_string(cap) +
-                                " is below one " + std::to_string(kMaxLenQuantum) +
-                                "-position quantum");
-  const auto fits = [&](uint32_t len) {
-    return plan(desc, len, mtp, model_bytes, path, dv, kv, drafter).total() + reserve_bytes <= device_bytes;
-  };
-  // Every term of the plan is non-decreasing in max_len (the KV, attn_part's block
-  // count, the RoPE table, the MTP head's KV, the composed pf_s / pf_p), so the
-  // quanta that fit are a prefix and a bisection finds its end.
+namespace {
+// The largest multiple of kMaxLenQuantum in [min(kMinAutoMaxLen, cap), cap] that `fits` (non-decreasing in the
+// length: the lengths that fit are a prefix), by bisection; 0 when not even the lowest fits.
+template <class Fits>
+uint32_t largest_that_fits(uint32_t cap, const Fits& fits) {
   uint32_t lo = std::min(kMinAutoMaxLen, cap) / kMaxLenQuantum;   // in quanta
   uint32_t hi = cap / kMaxLenQuantum;
   if (!fits(lo * kMaxLenQuantum)) return 0;
@@ -107,6 +98,23 @@ uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_
       hi = mid - 1;
   }
   return lo * kMaxLenQuantum;
+}
+}  // namespace
+
+uint32_t max_len_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
+                           size_t device_bytes, size_t reserve_bytes, uint32_t cap,
+                           const PrefillPath& path, const DraftVocabPlan& dv, KvCache kv,
+                           const DrafterPlan& drafter) {
+  if (cap < kMaxLenQuantum)
+    throw std::invalid_argument("max_len_that_fits: the cap " + std::to_string(cap) +
+                                " is below one " + std::to_string(kMaxLenQuantum) +
+                                "-position quantum");
+  // Every term of the plan is non-decreasing in max_len (the KV, attn_part's block
+  // count, the RoPE table, the MTP head's KV, the composed pf_s / pf_p), so the
+  // quanta that fit are a prefix and a bisection finds its end.
+  return largest_that_fits(cap, [&](uint32_t len) {
+    return plan(desc, len, mtp, model_bytes, path, dv, kv, drafter).total() + reserve_bytes <= device_bytes;
+  });
 }
 
 uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, size_t model_bytes,
@@ -158,18 +166,24 @@ MemoryPlan plan_slots(const model::ModelDesc& desc, const std::vector<uint32_t>&
   return p;
 }
 
-std::vector<uint32_t> slot_layout(const model::ModelDesc& desc, uint32_t asked, bool mtp, size_t model_bytes,
-                                  size_t device_bytes, size_t reserve_bytes, const PrefillPath& path,
-                                  const DraftVocabPlan& dv, KvCache kv) {
-  std::vector<uint32_t> lens{asked};
-  if (dv.rows != 0) return lens;
-  while (lens.size() < SlotDims::kMaxSeqs) {
-    std::vector<uint32_t> more = lens;
-    more.push_back(SlotDims::kShortLen);
-    if (plan_slots(desc, more, mtp, model_bytes, path, dv, kv).total() + reserve_bytes > device_bytes) break;
-    lens = std::move(more);
-  }
+std::vector<uint32_t> slot_layout(uint32_t slot0, uint32_t seqs) {
+  std::vector<uint32_t> lens(seqs, SlotDims::kShortLen);
+  lens[0] = slot0;
   return lens;
+}
+
+uint32_t slot0_len_that_fits(const model::ModelDesc& desc, uint32_t seqs, bool mtp, size_t model_bytes,
+                             size_t device_bytes, size_t reserve_bytes, uint32_t cap, const PrefillPath& path,
+                             KvCache kv) {
+  if (cap < kMaxLenQuantum)
+    throw std::invalid_argument("slot0_len_that_fits: the cap " + std::to_string(cap) + " is below one " +
+                                std::to_string(kMaxLenQuantum) + "-position quantum");
+  // plan_slots is plan() at the summed positions plus terms of the slot count (or the longest slot), so it is
+  // non-decreasing in slot 0 like plan() in max_len.
+  return largest_that_fits(cap, [&](uint32_t len) {
+    return plan_slots(desc, slot_layout(len, seqs), mtp, model_bytes, path, {}, kv).total() + reserve_bytes <=
+           device_bytes;
+  });
 }
 
 std::string slot_layout_name(const std::vector<uint32_t>& lens) {

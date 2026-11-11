@@ -272,6 +272,40 @@ void check_hardware_rule() {
 }
 }  // namespace
 
+// --max-num-seqs (operator 2026-11-11): tp keeps one slot, pp one request, replica 2..8 (2 unasked); auto with N > 1
+// is replica on two cards and one card's slots on one; 4 slots a card.
+void check_max_num_seqs() {
+  cli::PipelineArgs a;
+  CHECK_EQ(cli::check_max_num_seqs(a, 1, false), 1u);
+  CHECK_EQ(cli::check_max_num_seqs(a, 4, true), 4u);
+  cli::PipelineArgs tp;
+  cli::parse_parallel("tp", tp);
+  CHECK_EQ(cli::check_max_num_seqs(tp, 1, true), 1u);
+  CHECK(says([&] { cli::check_max_num_seqs(tp, 2, true); }, "--parallel tp runs one request at a time"));
+  cli::PipelineArgs pp;
+  cli::parse_parallel("pp", pp);
+  CHECK(says([&] { cli::check_max_num_seqs(pp, 2, true); }, "--parallel pp runs one request at a time"));
+  cli::PipelineArgs rep;
+  cli::parse_parallel("replica", rep);
+  CHECK_EQ(cli::check_max_num_seqs(rep, 1, false), 2u);
+  CHECK_EQ(cli::check_max_num_seqs(rep, 8, true), 8u);
+  CHECK(says([&] { cli::check_max_num_seqs(rep, 1, true); }, "--parallel replica runs a request on each card"));
+  // After the hardware gate.
+  cli::PipelineArgs two;
+  cli::resolve_max_num_seqs(two, 8, 2);
+  CHECK(two.replica() && !two.on());
+  cli::PipelineArgs one;
+  cli::resolve_max_num_seqs(one, 4, 1);
+  CHECK(one.mode == cli::Parallel::One && !one.on());
+  cli::PipelineArgs auto1;
+  cli::resolve_max_num_seqs(auto1, 1, 2);   // N = 1: --parallel auto's own choice later
+  CHECK(auto1.mode == cli::Parallel::Auto);
+  CHECK(says([&] { cli::PipelineArgs x; cli::resolve_max_num_seqs(x, 5, 1); }, "one card runs at most 4 requests"));
+  CHECK(says([&] { cli::PipelineArgs x; cli::resolve_max_num_seqs(x, 9, 2); }, "two cards run at most 8 requests"));
+  CHECK(says([&] { cli::PipelineArgs x; cli::parse_parallel("1", x); cli::resolve_max_num_seqs(x, 5, 2); },
+             "--parallel replica runs up to 8 on two"));
+}
+
 int main() {
   check_parse();
   check_names_and_spec();
@@ -279,6 +313,7 @@ int main() {
   check_device_refusal();
   check_serve();
   check_hardware_rule();
+  check_max_num_seqs();
   std::printf("pipeline_args_test: OK\n");
   return 0;
 }
