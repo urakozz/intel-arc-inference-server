@@ -142,6 +142,9 @@ evidence, not narrative, and the numbered guides cite them where they matter.
   28c: the verify step's attention on DPAS (attn_verify_dpas) against v2 at M = 2..8 x
   depth 512..130816, bf16 and int8 KV - the levers, the table the rule is built from,
   numerics, the in-list and end-to-end speed (busy box)
+- [dflash-vs-sly-2026-11-11.md](probes/dflash-vs-sly-2026-11-11.md) - spec 19 v2's
+  starting point: our DFlash against vllm-sly-radiance and saber-engine (same drafter, same
+  8-row block), from code and docs - the gap was the cost of a round, not tokens per round
 - [probe-decode-attn-2026-09-28.md](probes/probe-decode-attn-2026-09-28.md) - spec
   10a: decode attention at depth. P0 (69% of the step at 128k, 149 GB/s), the
   lever sweep at M = 1 and 4 on real KV, and the v2 design: device-derived
