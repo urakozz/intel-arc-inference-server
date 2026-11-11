@@ -119,76 +119,72 @@ void test_order_checks() {
   CHECK(threw);
 }
 
-// A stream of drafts whose stated probability is the truth: p from a mix of sure (code-like) and unsure stretches,
-// each draft accepted with its p. Returns ids per plain-step cost.
-struct Stream {
+// A text whose every position carries the head's probability for drafting it, which is also the chance the main
+// model accepts that draft: stretches of sure positions (code-like, p in [0.85, 1]) and unsure ones (p in [0, 0.6]),
+// ~20 positions each. An iteration at position t drafts positions t, t + 1, ... and moves t on by the ids it keeps.
+// Returns ids per plain-step cost.
+struct Text {
+  std::vector<float> p;
   std::mt19937_64 rng;
-  explicit Stream(uint64_t seed) : rng(seed) {}
-  bool sure = true;
-  float next_p() {
+  Text(uint64_t seed, size_t n) : rng(seed + 1) {
+    std::mt19937_64 g(seed);
     std::uniform_real_distribution<double> u(0.0, 1.0);
-    if (u(rng) < 0.05) sure = !sure;   // stretches of ~20 drafts
-    return static_cast<float>(sure ? 0.85 + 0.15 * u(rng) : 0.6 * u(rng));
+    bool sure = true;
+    for (size_t i = 0; i < n; ++i) {
+      if (u(g) < 0.05) sure = !sure;
+      p.push_back(static_cast<float>(sure ? 0.85 + 0.15 * u(g) : 0.6 * u(g)));
+    }
   }
-  bool accept(float p) {
-    std::uniform_real_distribution<double> u(0.0, 1.0);
-    return u(rng) < p;
-  }
+  bool accept(float q) { return std::uniform_real_distribution<double>(0.0, 1.0)(rng) < q; }
 };
 
-double run_step_k(const MtpCost& cost, uint64_t seed, size_t iters) {
+double run_step_k(const MtpCost& cost, uint64_t seed, size_t n) {
   DraftCalib c;
   StepK s(opts(cost), c);
-  Stream st(seed);
+  Text text(seed, n + 8);
   double ids = 0, spent = 0;
-  for (size_t it = 0; it < iters; ++it) {
+  for (size_t t = 0; t < n;) {
     const uint32_t cap = s.begin();
-    std::vector<float> ps;
-    uint32_t v = 0;
+    uint32_t drafted = 0, v = 0;
     for (uint32_t j = 1; j <= cap; ++j) {
-      ps.push_back(st.next_p());
-      const int r = s.choose(j, ps.back());
+      drafted = j;
+      const int r = s.choose(j, text.p[t + j - 1]);
       if (r >= 0) {
         v = static_cast<uint32_t>(r);
         break;
       }
     }
     uint32_t acc = 0;
-    while (acc < v && st.accept(ps[acc])) ++acc;
+    while (acc < v && text.accept(text.p[t + acc])) ++acc;
     s.observe(acc);
     ids += acc + 1;
-    spent += cost.verify[v] + (ps.empty() ? 0.0 : cost.draft[ps.size() - 1]);
+    spent += cost.verify[v] + (drafted > 0 ? cost.draft[drafted - 1] : 0.0);
+    t += acc + 1;
   }
   return ids / spent;
 }
 
-double run_adaptive(const MtpCost& cost, uint64_t seed, size_t iters) {
+double run_adaptive(const MtpCost& cost, uint64_t seed, size_t n) {
   AdaptiveKOptions o;
   o.cost = cost;
   AdaptiveK a(o);
-  Stream st(seed);
+  Text text(seed, n + 8);
   double ids = 0, spent = 0;
-  for (size_t it = 0; it < iters; ++it) {
+  for (size_t t = 0; t < n;) {
     const uint32_t k = a.next();
     uint32_t acc = 0;
-    bool going = true;
-    for (uint32_t j = 0; j < k; ++j) {
-      const float p = st.next_p();
-      if (going && st.accept(p))
-        ++acc;
-      else
-        going = false;
-    }
+    while (acc < k && text.accept(text.p[t + acc])) ++acc;
     a.observe(k, acc);
     ids += acc + 1;
     spent += cost.cost(k);
+    t += acc + 1;
   }
   return ids / spent;
 }
 
 void test_beats_per_request() {
   for (const MtpCost& cost : {MtpCost::int8_head(), MtpCost::bf16_head(), MtpCost::tp_int8_head()}) {
-    const double step = run_step_k(cost, 7, 20000), req = run_adaptive(cost, 7, 20000);
+    const double step = run_step_k(cost, 7, 60000), req = run_adaptive(cost, 7, 60000);
     std::printf("synthetic stream: per step %.3f ids per plain step, per request %.3f (%+.1f %%)\n", step, req,
                 100.0 * (step / req - 1.0));
     CHECK(step > req);

@@ -188,6 +188,12 @@ target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(adaptive_k_test PRIVATE b70_server)
 add_test(NAME adaptive_k_test COMMAND adaptive_k_test)
 
+# Open-work 13: the per-step draft choice (server::StepK) from given probabilities, costs and calibration, host only.
+add_executable(step_k_test server/step_k_test.cc)
+target_include_directories(step_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(step_k_test PRIVATE b70_server)
+add_test(NAME step_k_test COMMAND step_k_test)
+
 # Spec 13 B4 (plan 13b Task 1): the batching scheduler over a mock batched engine, host only.
 add_executable(scheduler_test server/scheduler_test.cc)
 target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
