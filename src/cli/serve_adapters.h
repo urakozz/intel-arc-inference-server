@@ -526,10 +526,11 @@ struct EngineAdapter : server::EngineIface {
 // The budget is kPiece allocations, not one (2026-11-11). On two cards the runtime gives the
 // second card a dma-buf import of the first card's allocation and maps it there at the first
 // copy that needs it. The kernel (7.4) builds that mapping from one scatterlist segment per
-// physically contiguous run of up to 4 GiB; when one allocation holds a run that long, the
-// IOMMU's 4 GiB boundary padding overflows the segment length, the map fails, xe reports
-// EBUSY and the runtime retries the bind forever - the first prefix restore (TP) or snapshot
-// (replica) hung at 100 % CPU. An allocation under 4 GiB never needs that padding.
+// physically contiguous run (up to 4 GiB each) and the IOMMU pads a segment that would cross
+// a 4 GiB boundary of the mapping; when two long runs sit there, the padding overflows the
+// 32-bit segment length, the map fails, xe reports EBUSY and the runtime retries the bind
+// forever - the first prefix restore (TP) or snapshot (replica) hung at 100 % CPU. An
+// allocation of at most 4 GiB never crosses such a boundary.
 struct PinnedAlloc : server::HostAlloc {
   static constexpr size_t kUnit = size_t(64) << 10;
   static constexpr size_t kPiece = size_t(2) << 30;
