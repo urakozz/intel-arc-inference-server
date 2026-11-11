@@ -23,7 +23,9 @@ matter (every .qzeros word, every .scales f16, every .g_idx):
   coverage --source DIR (the unquantised model): every 2-D `.weight` of the
            source except the embeddings is either packed in the export or
            excluded by the config (extra_config bits 16 / dynamic "-:" / an
-           lm_head left in fp) - so a silently skipped linear is a FAIL. Also
+           lm_head left in fp) - so a silently skipped linear is a FAIL
+           (--skip-prefix P: source tensors under P are not counted - a tower
+           the engine never loads, e.g. model.visual. of Flash-Next). Also
            WARNs (not fatal) for every unpacked tensor whose dtype differs from
            the source's: AutoRound on a CPU without bf16 writes them as F32.
 
@@ -103,6 +105,8 @@ def main():
     ap.add_argument("--group", type=int, default=64, help="the group size the recipe asked for (64)")
     ap.add_argument("--lm-head", choices=["quant", "keep"], default="quant")
     ap.add_argument("--source", help="the unquantised model directory, for the coverage check")
+    ap.add_argument("--skip-prefix", action="append", default=[],
+                    help="coverage: ignore source tensors under this prefix (repeatable)")
     a = ap.parse_args()
 
     fails = []
@@ -197,7 +201,7 @@ def main():
         src = index_dir(a.source)
         covered = 0
         for k, (t, _, _) in sorted(src.items()):
-            if not k.endswith(".weight") or len(t["shape"]) != 2 or "embed" in k:
+            if not k.endswith(".weight") or len(t["shape"]) != 2 or "embed" in k or k.startswith(tuple(a.skip_prefix)):
                 continue
             p = k[: -len(".weight")]
             if p + ".qweight" in ts:
