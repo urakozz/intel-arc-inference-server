@@ -76,8 +76,7 @@ Zero-config: `--parallel auto` picks `tp` for Flash-Next only when it is measure
 
 In order of the measured gap (spec 21 v2 §7): the launch count (fuse the gated residual's three launches and QSA's
 five, after measuring Flash-Next's fraction of roofline); union-aware verify MoE; a fused QSA decode kernel and int8
-KV on the QSA layers (OpenVINO `3b0ee89623` as the reference); int8 hyper-connections (measured first, spec 21
-decision 2); the int8 DPAS grouped prefill GEMM and strip-ordered work-groups. If the gates are missed, the mixed
+KV on the QSA layers (OpenVINO `3b0ee89623` as the reference); int8 hyper-connections converted at load (approved 2026-11-12, f32-judged); the int8 DPAS grouped prefill GEMM and strip-ordered work-groups. If the gates are missed, the mixed
 3/4-bit question goes to the operator (spec 21 v2 §12 question 1).
 
 - **Gate (each lever):** its measured gain at 4k (interleaved pairs), the f32 judge passing, bitwise where it changes

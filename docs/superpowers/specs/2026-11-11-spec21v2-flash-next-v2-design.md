@@ -313,8 +313,14 @@ for our g64 export (the loader expands Intel's g128 only); built only if load ti
 4. **QSA, with OpenVINO as the Intel reference.** OpenVINO `3b0ee89623` added fused GPU ops for QSA (the indexer and
    the sparse attention, paged) with a quantised KV layout: the reference for a fused decode kernel and for int8 KV on
    the 12 QSA layers (int8 KV frees ~3.3 GB at 262k for experts); not its paging (fixed slots, ruled).
-5. **int8 hyper-connections:** 1.29 -> 0.65 GB a token, now ~14 % of ours (spec 21 decision 2: measured first).
-6. **Prefill GEMM:** int8 DPAS (s8) grouped GEMM decoding the int4 weights in registers (Strata ESIMD, +12-21 % below
+5. **int8 hyper-connections (operator 2026-11-12: do it):** the 4-stream mixers stay bf16 in the export and are converted
+   to int8 **at load** (one fp16 scale per 32 values, basalt's and saber's "hc8"), as the output head is today. 1.29 ->
+   ~0.65 GB a token: 4.71 -> ~4.06 GB, the decode ceiling ~97 -> ~112 t/s (derived). basalt reports ~0.006 KL for it.
+   Gate: the f32 judge on our export (twin count no worse than with bf16 mixers) and the measured decode gain.
+6. **Prefill GEMM - built on Ornith first (operator 2026-11-12):** Flash-Next's prefill reuses Ornith's grouped expert GEMM
+   (`pf_moe_gemm.cl`) and the same separate unpack pass (`q4_pf_dequant_*`), so the Ornith MoE prefill rework - int4
+   unpacked in registers inside the grouped GEMM, bigger MoE chunks and tiles, persistent scheduling - lands here unchanged.
+   Also: int8 DPAS (s8) grouped GEMM decoding the int4 weights in registers (Strata ESIMD, +12-21 % below
    ~130 rows an expert; our l0-int8 prefill is the base), XeStrata's strip-ordered work-group numbering for wide GEMMs
    (105 -> 145 TFLOP/s on Xe2).
 
