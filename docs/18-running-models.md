@@ -35,7 +35,7 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 
 | recipe | mode | context | speed |
 |---|---|---:|---|
-| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer-to-peer between them | **262,144** (bf16) | **123 t/s**, prefill 2,939 t/s (4k prompt) |
+| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer-to-peer between them | **262,144** (bf16) | **123 t/s**, prefill 2,939 t/s, 3,323 with `--prefill-backend l0-int8` (4k prompt) |
 | two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or **262,144** (int8) each | 140 / 164 t/s total |
 | most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | **250 / 258 t/s** total at 8 requests, 36 t/s each |
 
@@ -47,7 +47,7 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 
 With `--max-num-seqs N`, slot 0 is the largest context that fits beside N - 1 slots of 32,768; on two cards the
 slots are split between the cards (card 0 takes the odd one). An explicit `--max-len` that does not fit beside the
-other slots is refused at startup with the numbers. `tp` runs one request at a time and the bf16 prompt pass only.
+other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,323 instead of 2,939 t/s at 4k).
 Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
 Qwen3.8 fits one card even at full context, so it gains nothing there.
 
