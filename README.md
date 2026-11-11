@@ -98,7 +98,7 @@ Two cards run in one of three modes (`--parallel`):
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
 | `--draft-model PATH` | the model's default | the draft model for `--spec dflash` |
 | `--kv-cache bf16\|int8` | `bf16` | how the context is stored; `int8` halves it (more context, more requests) |
-| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; one card or replica) |
+| `--prefill-backend l0\|l0-int8` | `l0` | the prompt pass: bf16, or int8 on the matrix engines (faster; every mode) |
 | `--prefix-cache-gb auto\|N` | `auto` | the prefix cache in pinned system RAM; `auto` = up to 32 GiB from what is free, `0` = off |
 | `--prefix-split-last` | off | for chat clients that drop the reasoning (opencode): the next turn is a prefix cache hit exactly where it diverges. On for agentic sessions, off for benchmarks |
 | `--host H`, `--port P` | `0.0.0.0`, `8000` | where it listens |
