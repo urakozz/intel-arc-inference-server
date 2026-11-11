@@ -6,8 +6,8 @@ and `$BOX` in every command. Nothing here requires that arrangement, but
 everything here assumes it, and a few of the consequences are worth writing
 down.
 
-Since 2026-11-03 the box is also *the check*: there is no Mac-side build or test run any
-more (`tools/mac_check.sh` was retired). New things on the box go under `~/b70`, and nothing new
+The Mac never compiles C++: every build and test runs on the box (`tools/box_check.sh` for a branch,
+`tools/box_validate.sh` for the full list). New things on the box go under `~/b70`, and nothing new
 sits at the top level of the home directory:
 
 | path | what |
@@ -22,22 +22,21 @@ sits at the top level of the home directory:
 Still at the top level until one box session moves them (they are in use by every
 validation run): the base tree `~/b70-inference-server` (main's tree, and the golden sets
 `oracle-out*` that every other tree links to), the validation tree
-`~/b70-inference-server-validate`, its G0 baselines `~/b70-inference-server-g0-<sha12>` and
+`~/b70-inference-server-validate`, its baseline builds `~/b70-inference-server-g0-<sha12>` (what the
+identical-binaries check compares against) and
 its results `~/b70-validate/<tree>/<state>/`. The GPU lock files `~/b70-gpu*.lock` /
 `~/b70-gpu.wait` stay in `$HOME` for good: every script and habit opens them there, and a
 lock moved under a running holder no longer excludes anything.
 
-The box is a Linux workstation with **two cards**, and the layout extends to four
-(spec 16's pipeline parallel is written for two and keeps the device count a
-parameter).
+The box is a Linux workstation (a Dell T5810-class Broadwell-EP host) with **two cards** on PCIe 3.0 x16.
 
 ## What the box has to be
 
 | | |
 |---|---|
 | OS | Linux. Ubuntu is what this was developed against; no Windows or macOS runtime exists |
-| CPU / RAM | a many-core CPU and about 128 GB of RAM: the CPU oracle wants ~70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
-| GPU | **2 x Intel Arc Pro B70**, 32 GB each, extendable to 4. One is enough for everything except pipeline parallel (spec 16); a second is also useful as an idle control |
+| CPU / RAM | a many-core CPU and 121 GB of RAM (this box): the CPU oracle wants ~70 GB free for a layer-streamed 27B forward. The engine's own build is comfortable at full width; the reference vLLM container's torch build is not (doc 09) |
+| GPU | **2 x Intel Arc Pro B70** (Battlemage / Xe2), 32 GB each. One card is enough for everything except the two-card modes (tensor parallel, replica, pipeline parallel, [BENCHMARKS.md](BENCHMARKS.md)); the second is also useful as an idle control |
 | Driver | `libze_intel_gpu`, IGC and `intel-ocloc`. The B70 is `bmg-g31`, so kernels build with `ocloc -device bmg-g31` |
 | Level Zero | headers and loader from the distribution packages |
 | Host compilers | `g++` 15.2 and CMake 4.2 or later, plus `ccache` |
@@ -53,7 +52,7 @@ at its cap the kernel kills the job inside its container and nothing else notice
 ~65 GiB of the 121 GiB are for one GPU job's host side (measured ~52 GiB: the pinned prefix cache,
 up to 32 GiB, plus weight staging), the OS and the page cache of the GPU job's weight reads. A job
 that needs more says so (`ORACLE_MEMORY=96g`) and runs only with the cards idle: it holds the
-whole-box GPU lock for its run, and is refused (exit 75) while a GPU job runs. Why: on 2026-11-06 an
+lock on both cards for its run, and is refused (exit 75) while a GPU job runs. Why: on 2026-11-06 an
 uncapped reference (its `MEM=80g` only sized its own plan) plus a GPU job's ~63 GB of driver-held
 host memory filled RAM and swap; the kernel killed the reference, and the next job's swapping
 beside a GPU job's weight reads took the NVMe off the bus.
@@ -74,13 +73,24 @@ row. A finished reference lands in the data tree (`~/b70-inference-server/oracle
 
 | | version |
 |---|---|
-| kernel (running) | Linux 7.4.0-rc2, with peer-to-peer (P2P, one card writing straight into the other's memory over PCIe) supported natively; before 2026-11-04 it was 7.3.0-rc4 with a local P2P patch |
+| kernel (running) | Linux 7.4.0-rc2 (mainline), with peer-to-peer (P2P, one card writing straight into the other's memory over PCIe) supported natively; before 2026-11-04 it was 7.3.0-rc4 with a local P2P patch |
 | IGC (Intel Graphics Compiler, which turns OpenCL C into GPU code) | 2.42.6, from the GitHub release debs |
-| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.8, from the GitHub release debs |
+| compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.8, from the GitHub release debs (held, so an apt upgrade does not move it) |
+| Level Zero loader | 1.34 |
+
+**BAR (the window through which the host or the other card reaches a card's memory).** The firmware's
+resizable-BAR setting (ReBarState 14) caps it at 16 GB (15 does not POST); the `xe` driver resizes both
+cards' BARs to the full 32 GB when it loads.
+
+**The driver can answer EBUSY (busy) to a request, and the runtime retries that forever.** There is no
+retry limit, so an EBUSY that never clears is a hang, not an error. It happened with one large pinned
+host allocation that the second card maps through a shared import (the prefix-cache restore hang,
+2026-11-11); the rule since then is that any host allocation both cards use stays at or below 4 GiB
+(the prefix cache is made of 2 GiB pieces).
 
 The 2026-11-04 upgrade changed the compiler and the runtime, so **every speed row in
 BENCHMARKS taken before it comes from the older stack** (compute runtime 26.35, IGC 2.41.5)
-until it is re-measured on a quiet box (open-work, "After the table is empty"). Kernel
+until it is re-measured on a quiet box (the quiet-box measurement session in [open-work.md](open-work.md)). Kernel
 binaries cannot go stale silently: `cmake/ocloc_stamp.cmake` records `ocloc --version` and
 the real paths of the `libigc` / `libigdfcl` libraries the loader resolves, rewrites a stamp
 file only when they change, and every kernel target depends on it, so a new compiler
@@ -119,7 +129,7 @@ not fastidiousness: BuildKit discards *all* completed work, including finished
 layers, if the docker client dies, and a dropped connection can silently lose
 hours.
 
-**The merge check** is `tools/box_check.sh`, run before every merge: it syncs this checkout,
+**The branch check** is `tools/box_check.sh` (it does not gate merges, see "When each runs"): it syncs this checkout,
 does the full build, compares every kernel's `ocloc` command line against a base
 (`tools/kernel_cmdlines`: an existing variant's command line must not change or vanish), and
 runs `ctest -LE checkpoint` (every test that needs no model files) on a free card. Passed,
@@ -127,9 +137,9 @@ Failed and Skipped are counted apart, because a Skipped test is not a pass. Logs
 `~/b70/logs`.
 
 **GPU access is serialised.** Every job that touches a card goes through
-`tools/gpu_lock.sh`: `box` takes the whole machine (timed rows, two-card work, anything that
+`tools/gpu_lock.sh`: `box` takes both cards (timed rows, two-card work, anything that
 wants an idle grade), `card N` takes one card and runs the command with `ZE_AFFINITY_MASK=N`
-so a second job can use the other card. A whole-box job waiting at the gate stops new card
+so a second job can use the other card. A both-cards job waiting at the gate stops new card
 jobs, so timed work cannot starve. The details, and how two validation streams share the
 cards, are in "Two streams, one per card" below.
 
@@ -139,14 +149,14 @@ validation` - it stops only those (TERM, then KILL after 10 s) and refuses anyth
 **Validating work in bulk** is one command, `tools/box_validate.sh`
 (`--dry-run` first to read what it will do). It runs the rows of
 [box-validation-queue.md](superpowers/plans/box-validation-queue.md) as stages in one
-detached orchestrator on the box, under the GPU lock, G0 (kernel binaries and gate outputs
-identical to a baseline build) first and stop-the-line on a G0 failure, resumable after an ssh
+detached orchestrator on the box, under the GPU lock, with the identical-binaries check "G0" (kernel
+binaries and gate outputs identical to a baseline build) first and stopping the run when it fails, resumable after an ssh
 drop or a reboot, and writes `box-validation-<date>.md` when it is done. Its results are on the box under `~/b70-validate/`, the latest result of every stage in
 `~/b70/logs/stage-latest.txt`.
 
-**When each runs.** Merges go in after the Mac checks (operator, 2026-11-07); the validation run is not per
-merge and not every night - it runs ON DEMAND, when the operator asks (2026-11-07), on the latest main,
-`tools/box_validate.sh --nightly`, and covers every merge since the last run together. `--nightly` launches nothing when only documentation changed since the newest finished run
+**When each runs.** Merges do not wait for a box run (operator, 2026-11-07); the validation run is not per
+merge and not on a timer - it runs ON DEMAND, when the operator asks, on the latest main, and covers
+every merge since the last run together. The command for that is `tools/box_validate.sh --nightly`: it launches nothing when only documentation changed since the newest finished run
 (`tools/box_validate/changed_since.sh`: everything but `docs/` and `*.md` counts), and runs every test
 (`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
 reuse every unchanged PASS.
@@ -171,12 +181,12 @@ the stages in order) enforces, and what follows from them:
 
 - **A state is commit x baseline.** Results live in `~/b70-validate/<tree>/<HEAD sha12>-vs-<baseline sha12>/`
   (default baseline `ce36d2d`; `--baseline main` when validating a branch before its merge). Every launch that
-  should add to one state must come from the same commit with the same baseline, or G0 (the stop-the-line
-  check: kernel binaries and gate outputs identical to the baseline build) is not PASS there and every later
+  should add to one state must come from the same commit with the same baseline, or G0 (the identical-binaries check:
+  kernel binaries and gate outputs identical to the baseline build) is not PASS there and every later
   stage is SKIP "blocked". So when main may move under a long run, launch from a detached worktree
   (`git worktree add --detach ../b70-boxday main`, with the untracked `tools/box.env` copied in; never commit
   it). A `-dirty` suffix in the state name means the tree had uncommitted changes. A fix is a new commit and so
-  a new state (G0 again); `--state <old name>` keeps adding to the old one, only for fixes that touch no device
+  a new state (G0 runs again); `--state <old name>` keeps adding to the old one, only for fixes that touch no device
   code and nothing G0 compares.
 - **Selecting stages.** `--list` and `--dry-run` print every stage with the lock it will take - read them
   first. `--only <ids or row prefixes>` runs the preflight `pre` plus those and never adds G0 (it must already be
@@ -209,10 +219,10 @@ locks are `flock(2)` (a lock on a file, released when the holder exits) on files
 | job | takes, in this order | runs beside |
 |---|---|---|
 | card N: a `card` stage of the device-N orchestrator, or `tools/gpu_lock.sh card N -- <cmd>` | `~/b70-gpu<N>.lock` exclusive, the gate `~/b70-gpu.wait` for an instant, `~/b70-gpu.lock` **shared**; `ZE_AFFINITY_MASK=N` | a card job on the other card |
-| whole box: a `gpu` stage, or `tools/gpu_lock.sh box -- <cmd>` | the gate exclusive while it waits, then `~/b70-gpu.lock` **exclusive** (the gate dropped) | nothing |
-| whole box, the old way: `flock ~/b70-gpu.lock <cmd>`, `gpu-self` stages (their scripts lock themselves) | `~/b70-gpu.lock` exclusive | nothing |
+| both cards: a `gpu` stage, or `tools/gpu_lock.sh box -- <cmd>` | the gate exclusive while it waits, then `~/b70-gpu.lock` **exclusive** (the gate dropped) | nothing |
+| both cards, the old way: `flock ~/b70-gpu.lock <cmd>`, `gpu-self` stages (their scripts lock themselves) | `~/b70-gpu.lock` exclusive | nothing |
 
-- **The rule.** A card job starts when its card is free and no whole-box job runs *or waits*; a whole-box job
+- **The rule.** A card job starts when its card is free and no both-cards job runs *or waits*; a both-cards job
   starts when no job holds either card. The gate exists because Linux flock has no queue: a shared lock is
   granted whenever no exclusive one is *held*, so two overlapping card streams would starve a waiting timed job
   forever. The old `flock ~/b70-gpu.lock` form still excludes everything but skips the gate, so while card
@@ -230,14 +240,14 @@ locks are `flock(2)` (a lock on a file, released when the holder exits) on files
   `tools/box_validate.sh --device 1 --only <stages> --no-wait`, then `--status` to see both. The driver refuses
   another state or commit beside a running orchestrator, and `--push-data` (push before the first launch).
 - **Device 1 runs correctness only.** Timed and series rows belong on device 0 (device 1 is ~3.4 % slower on
-  prefill, "Device selection" below); the device-1 dry-run names every whole-box stage in its selection.
-  Two-card stages (`*.pp`, the pipeline-parallel rows) take the whole box when they come.
+  prefill, "Device selection" below); the device-1 dry-run names every both-cards stage in its selection.
+  Two-card stages (`*.pp`, the pipeline-parallel rows) take both cards when they come.
 - **Split by row family, not inside a chain.** A stage whose prerequisite is RUNNING in the other stream at that
   moment is SKIP "needs PASS first" (relaunch it later). Pair families that are mostly `card` stages;
   `tools/box_validate.sh --list --only <rows>` shows each stage's lock.
 - **Host RAM.** Two engines load at once, and each `b70-serve` pins up to 32 GiB of prefix cache sized from
   MemAvailable at its start. Stages with a host-RAM budget (Qwen3.8-Flash-Next's 51.8 GB PLE table) and the
-  passkey probes (fixed `/tmp/*passkey` directories) therefore stay whole-box.
+  passkey probes (fixed `/tmp/*passkey` directories) therefore take both cards.
 
 ## Device selection, and the gotcha
 
@@ -293,7 +303,7 @@ is a corroboration and not a proof.
    both cards too; killing Xwayland takes the desktop down, so ask.
 3. **Zero containers**: no CPU reference job, no vLLM. Stop the CPU lane for the timed window.
 4. **No second stream**: `tools/box_validate.sh --status` lists both orchestrators, and
-   `tools/gpu_lock.sh status` on the box should show the box, both cards and the gate free.
+   `tools/gpu_lock.sh status` on the box should show the box lock, both cards and the gate free.
 5. **Two-card rows need both cards free of other holders.** Their commands set `ZE_AFFINITY_MASK=0,1`
    themselves; series rows stay on device 0.
 

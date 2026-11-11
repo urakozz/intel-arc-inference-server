@@ -30,7 +30,8 @@ benchmarked, and attributed individually.
 **The patch stack was a prefill win and a decode loss. Pristine `p0` was the
 fastest decode configuration on both quantisations.**
 
-MXFP4 (`--max-num-seqs 2`, pp4096/tg256):
+MXFP4 (`--max-num-seqs 2`, pp4096/tg256). Column key: p0 is the pristine source build with no
+patches, v5 has patches 01-05, v6 has 01-06, v11 has 01-11; c1 / c2 are 1 / 2 requests at once.
 
 | | p0 | v5 (01-05) | v6 (01-06) | v11 (all) |
 |---|---|---|---|---|
