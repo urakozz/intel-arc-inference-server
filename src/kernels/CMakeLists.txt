@@ -389,6 +389,12 @@ if(B70_MTP)
     add_gemv_bf16_variant(1 5120 ${NV} 64 1)
     add_ocloc_kernel(dv_argmax_N${NV} SOURCE ${DRAFT_VOCAB_CL} DEFINES ${CTRL_DEFINES} NV=${NV})
   endforeach()
+
+  # Open-work 13: the draft's probability (draft_prob.cl, both stages in one binary) after the draft list's argmax -
+  # draft_prob_N<row length>_U<real ids> (kernels::draft_prob_variant): the whole head's row here, a TP card's half in
+  # the TP block. CTRL_DSTAT = runtime::Control::draft_stat (kernels::ctrl_index::kDraftStat). Additive only.
+  set(DRAFT_PROB_CL ${CMAKE_CURRENT_SOURCE_DIR}/draft_prob.cl)
+  add_ocloc_kernel(draft_prob_N248320_U248077 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=248320 VOCAB_USED=248077)
 endif()
 
 # ==== Spec 19a Task 4: the verify cost at M = 5..8 and DFlash's draft cost ==== (begin) ==
@@ -809,6 +815,11 @@ if(B70_TP AND B70_MTP)
     list(APPEND B70_TP_VERIFY_KERNELS kernel_tp_argmax_M${MM}_N124160_U124160_B0
                 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
   endforeach()
+  # Open-work 13: each card's draft probability over its vocabulary half (draft_prob.cl; the B70_MTP block has the
+  # whole row's).
+  add_ocloc_kernel(draft_prob_N124160_U124160 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=124160 VOCAB_USED=124160)
+  add_ocloc_kernel(draft_prob_N124160_U123917 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=124160 VOCAB_USED=123917)
+  list(APPEND B70_TP_VERIFY_KERNELS kernel_draft_prob_N124160_U124160 kernel_draft_prob_N124160_U123917)
   set(B70_TP_VERIFY_KERNELS ${B70_TP_VERIFY_KERNELS} CACHE INTERNAL "spec 17d: the binaries a TP verify list binds")
 endif()
 # ==== Spec 17d ============================================================= (end) ====

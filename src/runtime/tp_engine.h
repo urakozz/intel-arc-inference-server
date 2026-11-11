@@ -166,7 +166,10 @@ class TpEngine {
   uint32_t max_draft() const { return mtp_ ? kMaxDraft : 0; }
   uint32_t draft_vocab() const { return 0; }
   uint32_t max_verify_k() const;
-  void draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick = {});
+  // `more` (open-work 13): Engine::draft's - the head's probability for the merged draft from both cards' halves.
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick = {},
+             const std::function<bool(uint32_t, float)>& more = {});
+  bool draft_probs() const;
   const std::vector<uint32_t>& draft_ids() const { return draft_ids_; }
   void verify(uint32_t k);
   const uint32_t* verify_ids() const;   // the merged argmax of each verify row (both Controls hold it)

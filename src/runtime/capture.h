@@ -181,8 +181,10 @@ size_t draft_launches(const model::ModelDesc& d);
 CapturedStep build_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                           const MtpBuffers& mtp, uint32_t M, ProfileEvents* prof = nullptr,
                           const CaptureOptions& opt = {}, const SlotBind& slot = {});
+// Open-work 13: `prob` appends the draft's probability (draft_prob.cl: the logits row's softmax max and normaliser
+// into hctl.draft_stat) - draft_launches(head) + 2 launches; the list without it is unchanged.
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                         const MtpBuffers& mtp, uint32_t i, const SlotBind& slot = {});
+                         const MtpBuffers& mtp, uint32_t i, const SlotBind& slot = {}, bool prob = false);
 
 // --- spec 19c: a tap drafter's verify list (DFlash) ------------------------------------
 //
@@ -384,7 +386,7 @@ size_t tp_launches(const model::ModelDesc& d);
 CapturedStep build_tp_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
                              const TpLink& link, uint32_t M, const CaptureOptions& opt = {});
 CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
-                            const TpLink& link, uint32_t i);
+                            const TpLink& link, uint32_t i, bool prob = false);
 // tp_launches(d) + the head's 10-launch KV fill: Qwen3.8's card 912 at every M.
 size_t tp_verify_launches(const model::ModelDesc& d);
 

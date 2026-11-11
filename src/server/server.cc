@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,7 @@
 #include "server/lookup_in_dflash.h"
 #include "server/prompt_lookup.h"
 #include "server/scheduler.h"
+#include "server/step_k.h"
 
 namespace server {
 namespace {
@@ -78,6 +80,11 @@ struct Server::Impl {
   std::mutex prompt_mutex;   // render + encode, one request at a time (as the serial server's queue made them)
   std::unique_ptr<PrefixSlots> slot_cache;
   std::unique_ptr<Scheduler> sched;
+  // Open-work 13: `--mtp auto` chooses each iteration's drafts (server::StepK) for greedy requests on an engine that
+  // reports the head's probabilities - one calibration for the server (the head's, not a request's). B70_MTP_STEP_K=0
+  // keeps the per-request K (A/B runs).
+  bool step_k = false;
+  DraftCalib draft_calib;
 };
 
 Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
@@ -106,6 +113,11 @@ Server::Server(Deps deps, Options opts, BatchEngineIface* batch)
     o.window = deps_.engine.dflash_window();
     o.max_k = deps_.engine.mtp_k();
     impl_->lookup_in_dflash.emplace(o);
+  }
+  {
+    const char* env = std::getenv("B70_MTP_STEP_K");
+    impl_->step_k = opts_.mtp_auto && !impl_->batch && deps_.engine.chooses_drafts() &&
+                    !(env != nullptr && std::string(env) == "0");
   }
   // Plan 13b: under the scheduler the cache is per slot (PrefixSlots) and deps_.engine is never hooked or driven.
   impl_->prefix = std::make_unique<PrefixSession>(deps_.engine, impl_->batch ? 0 : opts_.prefix_cache_bytes,
@@ -174,7 +186,7 @@ bool Server::listen() {
       spec = "prompt lookup, K <= " + std::to_string(e.verify_k()) + " adaptive per request";
     } else if (e.mtp_k() > 0) {
       spec = std::string(e.dflash_window() > 0 ? "dflash" : "mtp") + ", K <= " + std::to_string(e.mtp_k()) +
-             (opts_.mtp_auto ? " adaptive per request" : " fixed") +
+             (opts_.mtp_auto ? (impl_->step_k ? " adaptive per step" : " adaptive per request") : " fixed") +
              (opts_.spec_dflash_lookup ? ", lookup inside dflash" : "");
     }
     std::string ctx;
@@ -392,7 +404,14 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   bool burst_head_indexed = false;   // burst[0] went into the matcher in the proposer
   // Spec 8 §10: --spec mtp keeps one policy per request, fed only by this request's own
   // acceptance, so the K sequence (and a seeded request's output) is reproducible.
-  if (speculative && opts_.mtp_auto) {
+  // Open-work 13: a greedy request's drafts chosen every iteration (server::StepK) where the engine can.
+  std::optional<StepK> step_k;
+  if (speculative && opts_.mtp_auto && impl_->step_k && sampling.greedy && !lookup && !dflash_lookup) {
+    StepKOptions o;
+    o.max_k = std::min(opts_.mtp_adaptive.max_k, deps_.engine.mtp_k());
+    o.cost = opts_.mtp_adaptive.cost;
+    step_k.emplace(o, impl_->draft_calib);
+  } else if (speculative && opts_.mtp_auto) {
     AdaptiveKOptions o = opts_.mtp_adaptive;
     o.max_k = std::min(o.max_k, deps_.engine.mtp_k());
     policy.emplace(o);
@@ -461,7 +480,13 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     if (lookup) return next_lookup();
     if (dflash_lookup) return next_dflash_lookup();
     if (!speculative) return deps_.engine.step(sampling);
-    if (burst_at == burst.size()) {
+    if (burst_at == burst.size() && step_k) {
+      burst = deps_.engine.step_chosen(sampling, step_k->begin(),
+                                       [&](uint32_t j, float p) { return step_k->choose(j, p); });
+      burst_at = 0;
+      if (burst.empty()) throw std::runtime_error("EngineIface::step_chosen returned no ids");
+      step_k->observe(uint32_t(burst.size() - 1));
+    } else if (burst_at == burst.size()) {
       const uint32_t k = policy ? policy->next() : deps_.engine.mtp_k();
       burst = deps_.engine.step_many(sampling, k);
       burst_at = 0;
