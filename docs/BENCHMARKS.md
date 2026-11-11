@@ -910,8 +910,9 @@ MTP auto **73.2 t/s** (README's one-card row), plain decode **33.5 t/s** at dept
 Both saved requests contain **identical 3,425 prompt ids** and each generates **512 ids**, greedy with `ignore_eos`.
 The earlier 2,820-token shape label was stale. Both warm requests restore the prefix at token 2048, with the
 remaining prompt tail prefilling; prefix cache budget 32 GiB. MTP's recorded slot had context 32768. DFlash is
-**1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. Tasks 3-7 await the
-operator's decision; this single shape does **not** establish Task 8's replay/regression G-speed gate.
+**1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. The operator chose to
+continue Tasks 3-7 after baseline gates clear; that is when this early bar is recorded as passed. Task 8 will
+rerun against the updated MTP arm. This single shape does **not** establish its replay/regression G-speed gate.
 
 Provenance on the box: `~/b70/logs/brag-speed/20261111-1536/card-bf16/{bench.jsonl,server-log/000003.json}`
 and `~/b70/logs/dflash-v2/baseline/slots/{bench.jsonl,server-log/000003.json,server.log}`. The DFlash command is

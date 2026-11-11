@@ -78,7 +78,8 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
     same prompt, output length and prefix-cache shape. One sequence slot (DFlash does not support slots).
   - One golden + A4 greedy correctness round, using the existing references; no repeated plain/MTP serving arms.
   - Skip llama-benchy and rotated rounds here. The opencode replay with all three arms belongs to Tasks 7b/8.
-- [x] **Early stop:** 88.806 > 80.5 t/s; operator decision pending, Tasks 3-7 paused. If DFlash exceeds
+- [ ] **Early bar:** 88.806 > 80.5 t/s; record PASS once baseline gates clear. Operator chose to continue
+  Tasks 3-7 (2026-11-12), then 7b and Task 8 against a freshly measured, updated MTP arm. If DFlash exceeds
   **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
   Tasks 3-7. This shape is an early screen, not a substitute for Task 8's final G-speed gate.
 - [x] Record the result and the provenance of the reused baselines in BENCHMARKS.
