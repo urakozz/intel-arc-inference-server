@@ -178,7 +178,7 @@ st_r5_host() {
 
 # ======================================================================================
 row 6 "spec 8 §12 - MTP at every context length"
-rownote 6 "Spec 7 C1 restore with MTP at 64k is mtp_verify_128k_test's RF4 at 69931 (max_len / 2 + 4395); snapshot_test itself stays at 16384."
+rownote 6 "Spec 7 C1 prefix cache hit with MTP at 64k is mtp_verify_128k_test's RF4 at 69931 (max_len / 2 + 4395); snapshot_test itself stays at 16384."
 rownote 6 "The passkey at 120k with --spec auto (r6.passkey120k) and A12's 32k / 64k rows (r6.d1) are opt-in: hours each."
 stage r6.memory 6 default card qwen - "the memory line at 131072 with MTP (~30.5 GB derived): memory_plan_box_test mtp 131072, plan == allocation"
 st_r6_memory() {
@@ -1102,7 +1102,7 @@ st_r22_devices() {
   run_tests '^cli_reject_pipeline_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r22.p1 22 default gpu qwen r22.devices "P1 (Review Focus 1-3, 5): pp_decode_test and _i8head - ingest + 64 ids and a spec 7 restore at 4395 under copy and peer, the auto split and the cuts at 5 and 62: ids, logits, GDN state, conv ring, KV and both Control blocks bitwise one card on device 0; a reset and the run again, bitwise"
+stage r22.p1 22 default gpu qwen r22.devices "P1 (Review Focus 1-3, 5): pp_decode_test and _i8head - ingest + 64 ids and a spec 7 prefix cache hit at 4395 under copy and peer, the auto split and the cuts at 5 and 62: ids, logits, GDN state, conv ring, KV and both Control blocks bitwise one card on device 0; a reset and the run again, bitwise"
 st_r22_p1() {
   run_tests '^(pp_decode_test|pp_decode_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab p1 '^pp_decode' 'bitwise|memory, device|OK|differ'
@@ -1415,7 +1415,7 @@ st_r25_reject() {
   run_tests '^cli_reject_serve_(k2_spec_mtp|k2_lookup|k2_prefill_int8|pp)$'
   finish
 }
-stage r25.snapshot 25 default card k2 r15.prefill "Review Focus 3 on the card: k2_prefix_gpu_test and _split - K2Engine's save_kv / load_kv byte-exact over 4100 positions, C1 bitwise (restored at the block end 4096 + prefill [4096, 4100) = the cold run's 32 ids and logits rows), C2's sequences a-g through PrefixSession over b70-serve's adapter under the tie-aware rule (the bitwise rows counted; c / d / f restore at block ends and should be bitwise)"
+stage r25.snapshot 25 default card k2 r15.prefill "Review Focus 3 on the card: k2_prefix_gpu_test and _split - K2Engine's save_kv / load_kv byte-exact over 4100 positions, C1 bitwise (a prefix cache hit at the block end 4096 + prefill [4096, 4100) = the cold run's 32 ids and logits rows), C2's sequences a-g through PrefixSession over b70-serve's adapter under the tie-aware rule (the bitwise rows counted; c / d / f restore at block ends and should be bitwise)"
 st_r25_snapshot() {
   run_tests '^k2_prefix_gpu(_split)?_test$' k2
   jgrab c1-c2 '^k2_prefix_gpu' 'byte-identical|C1|bitwise|restore|continue|near-tie|bad|OK|FAIL'
@@ -1719,8 +1719,8 @@ row 28 "spec 20e - Kolibri-1 served: its template and tokenizer, reasoning and h
 rownote 28 "Written blind on the Mac after rows 24 / 26 (20c's decode, 20d's prefill on the card) and 27 (16d): nothing of 20e ran on a card. 20e adds NO kernel (KolibriEngine's snapshot calls are copies on the immediate lists; kernel_cmdlines +0 / -0 / ~0): G0's g0.sha is the 'nothing moved' check. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1; Kolibri serves on --parallel pp by default)."
 rownote 28 "The synthetic checkpoints (oracle-out-kolibri-synth, r24.oracle_synth) carry the engine side before spec 20b: make_synth.py copies the BF16 release's tokenizer.json / tokenizer_config.json (its chat_template string - the release ships no chat_template.jinja; chat::Template reads it) / generation_config.json into each ckpt, which b70-serve needs. kolibri_tokenizer_test reads the release's tokenizer.json from the HF cache (B70_KOLIBRI_TOKENIZER_JSON) - SKIP 77 without it."
 rownote 28 "After spec 20b (SNAP_KOLIBRI): r28.real, r28.passkey (KL4: 3 / 3 at 262144 with the int8 head), r28.benchy. KL4's A4 reference is the bf16 SOURCE (156 GB) run wherever 20b runs (decision 1: tools/toolcall/a4_ref.sh kolibri ref, MODEL_DIR / DEVICE there) and pushed as oracle-out-kolibri-a4; r28.a4 then scores the engine on two cards against it - the hard bar is 0 parse failures of the reference (score.py --format hermes); the first-call agreement is recorded, no bar."
-rownote 28 "A request-end restore (2049, 300) is bitwise the session that never left, not ONE cold prefill of the whole prompt (20d's split rule: a split off a multiple of 64 is within the split bars, not bitwise); block-end restores (4096) are bitwise the cold run."
-stage r28.host 28 default cpu - - "host: template_kolibri_test (16 renders byte-identical to apply_chat_template), kolibri_tokenizer_test (127998 ids, the tags, 24 texts, corpus.txt, three renders' ids), toolcall_kolibri_test (the HF renders parse back, Review Focus 1 / 2 / 5, a 2000-output fuzz split-invariant), kolibri_server_test (kwargs, list content, both EOS ids, streaming, the 1.0 / 0.97 / 128 defaults), kolibri_snapshot_test (the layouts on the real shapes, restores at 2048 / 4096 / 2049 / 5000 / 300 == cold through PrefixSession, one card <-> two, the server over HTTP), pipeline_args_test; the toolcall Python tests"
+rownote 28 "A request-end prefix cache hit (2049, 300) is bitwise the session that never left, not ONE cold prefill of the whole prompt (20d's split rule: a split off a multiple of 64 is within the split bars, not bitwise); block-end restores (4096) are bitwise the cold run."
+stage r28.host 28 default cpu - - "host: template_kolibri_test (16 renders byte-identical to apply_chat_template), kolibri_tokenizer_test (127998 ids, the tags, 24 texts, corpus.txt, three renders' ids), toolcall_kolibri_test (the HF renders parse back, Review Focus 1 / 2 / 5, a 2000-output fuzz split-invariant), kolibri_server_test (kwargs, list content, both EOS ids, streaming, the 1.0 / 0.97 / 128 defaults), kolibri_snapshot_test (the layouts on the real shapes, prefix cache hits at 2048 / 4096 / 2049 / 5000 / 300 == cold through PrefixSession, one card <-> two, the server over HTTP), pipeline_args_test; the toolcall Python tests"
 st_r28_host() {
   run_tests '^(template_kolibri_test|kolibri_tokenizer_test|toolcall_kolibri_test|kolibri_server_test|kolibri_snapshot_test|pipeline_args_test)$'
   jgrab snapshot '^kolibri_snapshot_test$' 'layout|round trip|restore at|pp:|server:|OK'
@@ -1732,7 +1732,7 @@ st_r28_reject() {
   run_tests '^cli_reject_serve_(kolibri_spec_mtp|kolibri_lookup|kolibri_kv8|kolibri_prefill_int8|kolibri_one_card|kolibri_max_len)$'
   finish
 }
-stage r28.snapshot 28 default gpu oracle_kolibri_synth r26.prefill "Review Focus 4 on the card, synthetic int4attn: kolibri_snapshot_gpu_synth_test (one card) and _synth_pp_test (--parallel pp, split 3) - the sizes; a restore at the block end 4096 from the hook's own saves BITWISE the cold run (32 ids, logits, KV, the rings from 3584); restores at the request ends 2049 and 300 bitwise the session that never left; _cross_test: a snapshot taken on two cards continues on one, and the reverse"
+stage r28.snapshot 28 default gpu oracle_kolibri_synth r26.prefill "Review Focus 4 on the card, synthetic int4attn: kolibri_snapshot_gpu_synth_test (one card) and _synth_pp_test (--parallel pp, split 3) - the sizes; a prefix cache hit at the block end 4096 from the hook's own saves BITWISE the cold run (32 ids, logits, KV, the rings from 3584); prefix cache hits at the request ends 2049 and 300 bitwise the session that never left; _cross_test: a snapshot taken on two cards continues on one, and the reverse"
 st_r28_snapshot() {
   run_tests '^kolibri_snapshot_gpu_synth(_pp)?_test$|^kolibri_snapshot_gpu_cross_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab snapshot '^kolibri_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
@@ -2191,16 +2191,16 @@ st_r34_serve() {
   chk "PORT=$PORT tools/box_validate/serve_run.sh $d/cold cold 1 $ck --layers 4 --prefix-cache-gb 0 -- $cl --warmup 0" \
     "the cache-off server"
   chk "PORT=$PORT tools/box_validate/serve_run.sh $d/plain plain 1 $ck --layers 4 -- $cl --warmup 2" \
-    "the prefix-cache repeat (each scenario warmed once, then served)"
+    "the prefix-cache repeat (each scenario run once cold, then served as prefix cache hits)"
   chk "PORT=$PORT tools/box_validate/serve_run.sh $d/mtp2 mtp2 1 $ck --layers 4 --spec mtp --spec-max 2 -- $cl --warmup 2" \
     "the prefix-cache repeat through --spec mtp --spec-max 2"
-  chk "python3 tools/box_validate/serve_client.py compare --dir $d --ref cold" "the warmed outputs identical to the cache-off server's"
+  chk "python3 tools/box_validate/serve_client.py compare --dir $d --ref cold" "the prefix cache hit outputs identical to the cache-off server's"
   chk "python3 -c 'import json, sys; c = [json.loads(l)[\"usage\"].get(\"prompt_tokens_details\", {}).get(\"cached_tokens\", 0) for f in sys.argv[1:] for l in open(f)]; print(\"cached_tokens\", c); sys.exit(0 if c and min(c) >= 2048 else 1)' $d/plain/requests.jsonl $d/mtp2/requests.jsonl" \
-    "every warmed request reused at least one 2048-id block"
+    "every prefix cache hit reused at least one 2048-id block"
   grab_all serve '^IDENTICAL|chat of|^cached_tokens|prefix cache:|mtp|max_len' 20
   finish
 }
-stage r34.pp 34 default gpu oracle_q4exp_synth r34.serve,r22.p1 "two cards: qwen4exp_snapshot_gpu_synth_pp_test (the snapshot runs on --parallel pp, bitwise a cold run's), _cross_{,mtp_}test (one host layout: taken under --parallel pp, restored under --parallel 1 and back, bitwise; with the head), qwen4exp_mtp_synth_pp_test (M2 / M3 and the cost on --parallel pp --pipeline-split 2: the head on device 1 reading device 0's embedding over peer), golden_server_test --chat with b70-serve --parallel pp --spec mtp --spec-max 2 = b70-decode on one card"
+stage r34.pp 34 default gpu oracle_q4exp_synth r34.serve,r22.p1 "two cards: qwen4exp_snapshot_gpu_synth_pp_test (the snapshot runs on --parallel pp, bitwise a cold run's), _cross_{,mtp_}test (one host layout: taken under --parallel pp, a prefix cache hit under --parallel 1 and back, bitwise; with the head), qwen4exp_mtp_synth_pp_test (M2 / M3 and the cost on --parallel pp --pipeline-split 2: the head on device 1 reading device 0's embedding over peer), golden_server_test --chat with b70-serve --parallel pp --spec mtp --spec-max 2 = b70-decode on one card"
 st_r34_pp() {
   run_tests '^qwen4exp_(snapshot_gpu_(synth_pp|cross|cross_mtp)|mtp_synth_pp)_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^qwen4exp_(snapshot_gpu_(synth_pp|cross)|mtp_synth_pp)' 'snapshot|bitwise|M2|M3|cost|OK|FAIL|SKIP'
@@ -2536,21 +2536,21 @@ st_r55_tps() {
 # ======================================================================================
 row 56 "spec 19d - DFlash in the server: the drafter's ring in the prefix cache's snapshots (decision 5 as ruled: the whole ring after the state, the store keyed by the drafter), the batching scheduler's speculative hook (per-slot rings, a mock engine), --spec dflash --parallel pp (the drafter on device 1, tap verify stage lists, the pipeline prefill's taps), D5 against --spec auto (plan 19d)"
 rownote 56 "Written blind on the Mac after rows 54 / 55 (themselves unvalidated): nothing of 19d has run on a card. No new binary (kernel_cmdlines +0 / -0 / ~0): the --parallel pp tap verify stage lists bind 19c's gdn_step_slots_M<M>_N8 and B70_VERIFY_M8's M = 5..8 variants per stage. Nothing changes without --spec dflash: D0 is G0 (shared edits: Engine's snapshots gain the ring only with a drafter, PipelineEngine / place_stages / pp_plan gain defaulted drafter arguments, capture.cc a new mode, step_stage a defaulted PrefillTaps*, the prefix store's root store_root(kv_form, 0) = kv_form)."
-rownote 56 "Decision 5 as ruled in 19d (spec 19 §12): every snapshot carries the drafter's WHOLE ring (41,943,040 B, +25 % a snapshot) - a restore is a copy, bitwise by construction; a mid-call block end's snapshot holds the ring as that call left it (positions outside the call's last 2048 not yet projected): lower acceptance after a restore there with a short tail, never another output (r56.prefix's R2 caveat line counts it)."
+rownote 56 "Decision 5 as ruled in 19d (spec 19 §12): every snapshot carries the drafter's WHOLE ring (41,943,040 B, +25 % a snapshot) - a prefix cache hit is a copy, bitwise by construction; a mid-call block end's snapshot holds the ring as that call left it (positions outside the call's last 2048 not yet projected): lower acceptance after a prefix cache hit there with a short tail, never another output (r56.prefix's R2 caveat line counts it)."
 rownote 56 "Data: the gate checkpoint (qwen), the drafter (dflash), both cards for r56.pp / r56.pp_serve. Hand back: every stage's lines - the K / R1 / R2 lines of dflash_prefix_gpu_test, dflash_engine_test's SR and L lines, pp_dflash_test's bitwise lines per split, the serve rows' judged tables and 'dflash:' lines. D5 (the speed verdict) is closed (spec 19, 2026-10-28: --spec dflash is an option, not the default; the numbers are in docs/BENCHMARKS.md), so its stages are gone."
-stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession restore, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a restore onto another slot), pp_dflash_serve_test (the --parallel pp adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --parallel pp refusals (peer, b70-decode)"
+stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession prefix cache hit, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a prefix cache hit onto another slot), pp_dflash_serve_test (the --parallel pp adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --parallel pp refusals (peer, b70-decode)"
 st_r56_host() {
   run_tests '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test|pp_serve_plan_test|dflash_plan_test|scheduler_test|prefix_cache_test|pp_serve_test|cli_reject_(serve_)?dflash_pp)$'
   jgrab host '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test)$' '^(K|R1|R2|S[1-5]|[1-4])[:.] |OK$|FAIL' 40
   finish
 }
-stage r56.engine 56 default card qwen,dflash r55.engine "dflash_engine_test again (19d's L and SR: the snapshot is the state plus the ring - 41,943,040 B - and a reset + restore brings the ring back bitwise; T1 / D3 / P / D2 / RF3 / PF as row 55)"
+stage r56.engine 56 default card qwen,dflash r55.engine "dflash_engine_test again (19d's L and SR: the snapshot is the state plus the ring - 41,943,040 B - and a reset + a prefix cache hit brings the ring back bitwise; T1 / D3 / P / D2 / RF3 / PF as row 55)"
 st_r56_engine() {
   run_tests '^dflash_engine_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   jgrab engine '^dflash_engine_test$' '^L:|^SR |^T1 \+ D3|  D2 K=|^RF3|^PF|^dflash_engine_test' 60
   finish
 }
-stage r56.prefix 56 default card qwen,dflash r56.engine "dflash_prefix_gpu_test (decision 5 on the card, 19c's deferred restore-and-continue test): K (the store keyed by the drafter), R1 (a turn restored from the previous turn's request-end snapshot after a side request: the ring after the tail BITWISE the uninterrupted session's, the next 128 ids and every iteration's acceptance identical; the cold-ring control's acceptance printed), R2 (a block-end restore with a 2500-id tail = a cold run's ring bitwise; the 300-id caveat counted)"
+stage r56.prefix 56 default card qwen,dflash r56.engine "dflash_prefix_gpu_test (decision 5 on the card, 19c's deferred prefix-cache-hit-and-continue test): K (the store keyed by the drafter), R1 (a turn served as a prefix cache hit from the previous turn's request-end snapshot after a side request: the ring after the tail BITWISE the uninterrupted session's, the next 128 ids and every iteration's acceptance identical; the cold-ring control's acceptance printed), R2 (a block-end prefix cache hit with a 2500-id tail = a cold run's ring bitwise; the 300-id caveat counted)"
 st_r56_prefix() {
   run_tests '^dflash_prefix_gpu_test$' dflash '' "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   jgrab prefix '^dflash_prefix_gpu_test$' '^K:|^R1|^R2|turn of|^dflash_prefix_gpu_test' 60
@@ -2919,13 +2919,13 @@ st_r62_reject() {
   run_tests '^cli_reject_serve_bolt_'
   finish
 }
-stage r62.snap_synth 62 default gpu bolt_synth              r61.synth   "bolt_snapshot_gpu_test on the N 12 synthetics (Review Focus 4 on the card): _synth_test (n12-g128, one card), _synth_g64x_test, _synth_b16_test (the bf16 state arm), _synth_pp_test (pp2:6), _cross_test (a snapshot taken on two cards continues on one, and the reverse): the sizes (170,229,760 B of state / 86,343,680 with b16 at the real shapes, n x 8,192 B of KV), restores at the block ends 2048 / 4096 BITWISE the cold run (32 ids, logits, KV, the last three conv columns, the SSM states), at the request ends 2049 / 5000 / 300 / 3 / 2 / 1 / 0 bitwise the session that never left"
+stage r62.snap_synth 62 default gpu bolt_synth              r61.synth   "bolt_snapshot_gpu_test on the N 12 synthetics (Review Focus 4 on the card): _synth_test (n12-g128, one card), _synth_g64x_test, _synth_b16_test (the bf16 state arm), _synth_pp_test (pp2:6), _cross_test (a snapshot taken on two cards continues on one, and the reverse): the sizes (170,229,760 B of state / 86,343,680 with b16 at the real shapes, n x 8,192 B of KV), a prefix cache hit at the block ends 2048 / 4096 is BITWISE the cold run (32 ids, logits, KV, the last three conv columns, the SSM states), at the request ends 2049 / 5000 / 300 / 3 / 2 / 1 / 0 bitwise the session that never left"
 st_r62_snap_synth() {
   run_tests '^bolt_snapshot_gpu_synth(_g64x|_b16)?_test$|^bolt_snapshot_gpu_synth_pp_test$|^bolt_snapshot_gpu_cross_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab snapshot '^bolt_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
   finish
 }
-stage r62.snapshot  62 default gpu  bolt_int4               -           "bolt_snapshot_gpu_test: restores bitwise the cold run, two cards, split change"
+stage r62.snapshot  62 default gpu  bolt_int4               -           "bolt_snapshot_gpu_test: a prefix cache hit is bitwise the cold run, two cards, split change"
 st_r62_snapshot() {
   run_tests '^bolt_snapshot_gpu_real_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab snapshot '^bolt_snapshot_gpu_real_test$' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
@@ -3095,7 +3095,7 @@ st_r65_prefill() {
   jgrab prefill '^bolt_dflash_prefill_test$' '^L [0-9]|cosine|differ|OK'
   finish
 }
-stage r65.prefix  65 default gpu  bolt_int4,lilicorr         r65.prefill "Review Focus 4 on two cards: bolt_dflash_prefix_gpu_test - restores at 2048 / 4096 bitwise the cold run (ring, anchor, the first block's drafts, 32 ids), the junction's sibling (vLLM a608b6e6e0), a ring of zeros (the output unchanged), state_bytes + 5,259,264 B, the store root"
+stage r65.prefix  65 default gpu  bolt_int4,lilicorr         r65.prefill "Review Focus 4 on two cards: bolt_dflash_prefix_gpu_test - prefix cache hits at 2048 / 4096 bitwise the cold run (ring, anchor, the first block's drafts, 32 ids), the junction's sibling (vLLM a608b6e6e0), a ring of zeros (the output unchanged), state_bytes + 5,259,264 B, the store root"
 st_r65_prefix() {
   run_tests '^bolt_dflash_prefix_gpu_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab prefix '^bolt_dflash_prefix_gpu_test$' '^restore at|sibling|ring of zeros|differ|OK'
@@ -3393,7 +3393,7 @@ st_r76_speed() {
 }
 
 # ======================================================================================
-row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise alone / f32 judge for shared-card slots, B2 two concurrent chat clients, B3 a snapshot from card 0 restored on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
+row 77 "spec 13b - two requests at once: b70-serve --parallel replica (Qwen3.8 on both cards, one engine each, behind server::Scheduler); R1 bitwise alone / f32 judge for shared-card slots, B2 two concurrent chat clients, B3 a snapshot from card 0 used as a prefix cache hit on card 1, B4 disconnect / per-row stop / streaming order (plan 13b Task 5)"
 rownote 77 "Everything two-card holds the whole box (kind gpu, ZE_AFFINITY_MASK=0,1 set by each arm). Hand back: r77.r1's R1 lines per --spec (off / mtp / lookup), r77.b2's golden lines, r77.b3 / r77.b4's PASS lines, each card's startup lines (devices, card 0 / card 1 max_len, memory) - the device-1 gap is recorded by Task 6, not gated."
 rownote 77 "Task 6 (speed and record) is not staged yet: aggregate t/s at concurrency 2 against 1 (serve_bench.sh / llama-benchy, admission timing stated), a lone request within 2 % of --parallel 1, the opencode-shaped replay (tools/prefix/make_synth_log.py) against the serial server, and the overlap share of a real opencode session from --log-requests. Rows are added when Task 5 is green."
 stage r77.host    77 default cpu  -    -                          "host: scheduler_test, dflash_scheduler_test, replica_engine_test, replica_server_test, pipeline_args_test and the serial server's protocol / prefix / mtp / lookup server tests"
@@ -3431,7 +3431,7 @@ st_r77_b2() {
   grab_all b2 'generated ids identical' 12
   finish
 }
-stage r77.b3      77 default gpu  qwen r77.r1                     "B3: A on card 0, X (A's best match) holding card 0, A' (A continued) restored on card 1 from A's request-end snapshot in the one host store - equal to the same order on card 1 alone (C2 across cards)"
+stage r77.b3      77 default gpu  qwen r77.r1                     "B3: A on card 0, X (A's best match) holding card 0, A' (A continued) a prefix cache hit on card 1 from A's request-end snapshot in the one host store - equal to the same order on card 1 alone (C2 across cards)"
 st_r77_b3() {
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec off --max-len 65536 -- --mode b3" "b3 on the replica server"
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/card0 0 $SNAP_QWEN --parallel 1 --spec off --max-len 65536 -- --mode b3" "b3 alone on card 0"
@@ -3511,7 +3511,7 @@ st_r78_b4() {
   grab_all b4 '^B4|^slots:' 20
   finish
 }
-stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-num-seqs 4 --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts restored from the prefix cache and 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
+stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-num-seqs 4 --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts again as prefix cache hits, 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
 st_r78_speed() {
   idle before
   local kv sp
@@ -3636,7 +3636,7 @@ tp 'build/src/cli/b70-decode $SNAP_QWEN --bench --prefill-length $d --tg 32 --ma
   finish
 }
 
-row 81 "spec 17d - Qwen3.8 MTP, snapshots and the server under tensor parallel (b70-serve --parallel tp): the MTP head whole on each card, the verify lists at M = 2..4 per card, the restore in the one-card layouts, the logits gathers (D9), the block hook at the pair stride; greedy MTP against plain TP and the server against one card, judged by the f32 judge; speed against one card's --spec auto (plan 17d)"
+row 81 "spec 17d - Qwen3.8 MTP, snapshots and the server under tensor parallel (b70-serve --parallel tp): the MTP head whole on each card, the verify lists at M = 2..4 per card, the prefix cache hit in the one-card layouts, the logits gathers (D9), the block hook at the pair stride; greedy MTP against plain TP and the server against one card, judged by the f32 judge; speed against one card's --spec auto (plan 17d)"
 rownote 81 "Every two-card stage is kind gpu (the whole box, gpu_lock.sh box). remote.sh runs no prerequisite closure: run the row in order (--only r81, and --with r81.cost,r81.speed on an idle box). A divergence without its f32 judge SKIPs: dump it (the tests' B70_DUMP_FORCED, serve_judge.py), then tools/box_validate/f32_refs.sh forced-qwen with QWEN_KEYS_RE='^tp_mtp_' (CPU). Hand back: r81.mtp / r81.kv8's M1 / M2 / S1 / S2 / T4 lines and acceptances, r81.prior's lines, r81.cli's ids, r81.serve's IDENTICAL / JUDGED lines, r81.cost's tables, r81.speed's gen_tps medians and the tp / one ratios at depth 4096 and 32768."
 stage r81.host    81 default cpu -    g0.sha     "host: tp_slice_test (+ the scatter and the MTP head's KV splice), tp_desc_test, verify_attn_test (the per-card 12 / 2 DPAS rows), gemm_sm_names_test (the per-card rows), pipeline_args_test (--parallel tp's refusals: DFlash, draft vocabulary), adaptive_k_test"
 st_r81_host() {
@@ -3651,7 +3651,7 @@ st_r81_kernels() {
   done
   finish
 }
-stage r81.mtp     81 default gpu qwen r81.kernels "tp_mtp_test (bf16 KV, int8 head): M1 plain ids with the head == plain TP; M2 speculative K = 1..3 against plain TP (tie rule, then the f32 judge); T1 the head bitwise between the cards; D9 the gathers; S1 the hook at 4096 and a restore bitwise the cold run; S2 one card's snapshot into TP and back (judged); T4 a dropped verify step bounded"
+stage r81.mtp     81 default gpu qwen r81.kernels "tp_mtp_test (bf16 KV, int8 head): M1 plain ids with the head == plain TP; M2 speculative K = 1..3 against plain TP (tie rule, then the f32 judge); T1 the head bitwise between the cards; D9 the gathers; S1 the hook at 4096 and a prefix cache hit bitwise the cold run; S2 one card's snapshot into TP and back (judged); T4 a dropped verify step bounded"
 st_r81_mtp() {
   run_tests '^tp_mtp_test$' '' '' "B70_DUMP_FORCED=$DATA/oracle-forced-dumps/qwen-tp17d"
   grab_all t '^(prose|code|long|S1|S2|T4|tp with|  the f32|  AWAIT)' 40
@@ -3663,7 +3663,7 @@ st_r81_kv8() {
   grab_all t '^(prose|code|long|S1|S2|T4|tp with|  the f32|  AWAIT)' 40
   finish
 }
-stage r81.prior   81 default gpu qwen r81.host   "17b / 17c's tests unchanged: tp_kernels_test, tp_decode_test, tp_fail_test, tp_prefill_test (the TpEngine gained the head, the restore and the hook; the prefill's chunk pairs take the hook's stride)"
+stage r81.prior   81 default gpu qwen r81.host   "17b / 17c's tests unchanged: tp_kernels_test, tp_decode_test, tp_fail_test, tp_prefill_test (the TpEngine gained the head, the prefix cache hit path and the hook; the prefill's chunk pairs take the hook's stride)"
 st_r81_prior() {
   run_tests '^(tp_kernels_test|tp_decode_test|tp_fail_test|tp_prefill_test)$'
   grab_all t '^(slices|folded|prose|code|long|chunk|replay|card )' 30

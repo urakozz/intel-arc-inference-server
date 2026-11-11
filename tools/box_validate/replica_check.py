@@ -352,7 +352,7 @@ def b3(a):
                   f"(first at {first_diff(got or [], (ref or {}).get('ids', []))})")
             bad += 1
         else:
-            print(f"B3: A' restored on card {sa2} IDENTICAL to card {sa2} alone ({len(got)} ids)")
+            print(f"B3: A' as a prefix cache hit on card {sa2} IDENTICAL to card {sa2} alone ({len(got)} ids)")
     print("B3 PASS" if bad == 0 else f"B3 FAIL ({bad})")
     return 1 if bad else 0
 
