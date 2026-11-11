@@ -22,7 +22,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 | group | stages | what they need |
 |---|---|---|
 | **Qwen3.8** | Proof check for the 3 accepted `mtp_gpu_kv8_test` rows: rerun those contexts with the bf16 prompt pass and the int8 cache - if they pass, the int8 prompt pass is the cause as accepted; if not, it is a new failure | after the replica row; ~20 min on a card plus new f32 references |
-| **Replica + per-card slots** (merged 2026-11-10, untested on the cards) | Each card runs its own slots with `--parallel replica --max-num-seqs N`. Left: `box_validate.sh --only r77 --force` (its new `r77.batch` stage: 1 / 4 / 8 requests at once on `--max-num-seqs 8 --max-len 32768`, judged by the f32 judge), then throughput against one card's slots and plain replica | both cards; the prefix-restore hang (stages run the prefix cache off where they can) |
+| **Replica + per-card slots** (merged 2026-11-10, untested on the cards) | Each card runs its own slots with `--parallel replica --max-num-seqs N`. Left: `box_validate.sh --only r77 --force` (its new `r77.batch` stage: 1 / 4 / 8 requests at once on `--max-num-seqs 8 --max-len 32768`, judged by the f32 judge), then throughput against one card's slots and plain replica | both cards |
 
 ## Waiting - only a box run or a CPU job left
 
@@ -42,6 +42,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-11 | 7 | **The prefix-restore hang fixed:** the prefix cache is now 2 GiB pinned pieces - one 32 GiB allocation, mapped by the second card through a shared import, could overflow the kernel's 4 GiB mapping segments; the kernel answered "busy" and the GPU driver retried forever. TP bf16 32 GiB, TP int8 16 GiB and replica pass with restores (324 restores, 0 hangs) |
 | 2026-11-11 | 9 | **`--max-num-seqs N` merged:** one card up to 4 requests, two cards (replica) up to 8; startup prints each card's slots (bf16 cache, one card: 171008 alone, 46080 + 3 x 32768 at N = 4); a too-long `--max-len` and TP with N > 1 are refused; the slot tests pass |
 | 2026-11-11 | Qwen3.8 | **`mtp_gpu_kv8_test` PASS** with its 3 f32-rejected rows accepted as the int8 prompt pass + int8 cache known fail (operator) |
 | 2026-11-11 | Qwen3.8 | **Long-context MTP verify passes:** f32 references for the 32k and 130k contexts (8.1 h on the CPU, 37 GiB peak), then `mtp_verify_32k_test`, `_128k_test` and `mtp_verify_kv8_test` PASS on one card |
