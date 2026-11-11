@@ -7,12 +7,19 @@
 // B70_COPY_STRESS_PINNED_GB=<n>: the pinned buffer is n GiB, like the server's prefix cache (16-32 GiB), and each pinned
 // copy walks to the next 64 MiB of it.
 // The device is ZE_AFFINITY_MASK's (run under tools/gpu_lock.sh card N).
+//
+// B70_COPY_PINNED_GB=<n> (run under tools/gpu_lock.sh box): instead, the prefix cache's first use on both cards - ONE
+// context holding cards 0 and 1 (the server's), n GiB of l0::MemKind::Host memory written by the CPU, then a 1 MiB copy
+// out of the end of every allocation on card 0 and then on card 1. B70_COPY_PINNED_PIECE_GB=<p>: the n GiB as p GiB
+// allocations (default one). A copy that takes over B70_COPY_PINNED_WATCHDOG seconds (default 120) prints COPY_HANG
+// and exits 2.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <thread>
 #include <vector>
 #include "check.h"
@@ -94,9 +101,66 @@ int stress(l0::Context& ctx, l0::CmdList& imm, double seconds) {
   return 0;
 }
 
+int pinned_probe(size_t gb) {
+  const char* piece_env = std::getenv("B70_COPY_PINNED_PIECE_GB");
+  const char* wd_env = std::getenv("B70_COPY_PINNED_WATCHDOG");
+  const size_t piece = (piece_env ? std::strtoull(piece_env, nullptr, 10) : gb) << 30;
+  const int watchdog_s = wd_env ? std::atoi(wd_env) : 120;
+  CHECK(piece > 0);
+  CHECK(l0::Context::gpu_count() >= 2);
+  l0::Context c0(0);
+  l0::Context c1(c0, 1);
+
+  const Clock::time_point t0 = Clock::now();
+  const auto secs = [&] { return std::chrono::duration<double>(Clock::now() - t0).count(); };
+  std::atomic<double> started{-1};   // seconds since t0 of the copy in flight, -1 between copies
+  std::thread([&] {
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      const double s = started;
+      if (s >= 0 && secs() - s > watchdog_s) {
+        std::printf("COPY_HANG: a first copy has not returned after %d s\n", watchdog_s);
+        std::fflush(stdout);
+        std::_Exit(2);
+      }
+    }
+  }).detach();
+
+  std::vector<std::unique_ptr<l0::Mem>> pieces;
+  for (size_t left = gb << 30; left > 0;) {
+    const size_t n = left < piece ? left : piece;
+    pieces.push_back(std::make_unique<l0::Mem>(c0, l0::MemKind::Host, n, size_t(64) << 10));
+    std::memset(pieces.back()->ptr(), 0x5A, n);
+    left -= n;
+  }
+  std::printf("pinned probe: %zu GiB as %zu allocation(s), allocated and written in %.1f s\n", gb, pieces.size(),
+              secs());
+  std::fflush(stdout);
+
+  const size_t n = 1u << 20;
+  for (l0::Context* c : {&c0, &c1}) {
+    l0::Mem dev(*c, l0::MemKind::Device, n);
+    l0::CmdList imm = l0::CmdList::immediate(*c);
+    std::vector<uint8_t> back(n);
+    for (size_t i = 0; i < pieces.size(); ++i) {
+      started = secs();
+      imm.copy(dev.ptr(), pieces[i]->as<uint8_t>() + pieces[i]->size() - n, n);
+      imm.copy(back.data(), dev.ptr(), n);
+      std::printf("pinned probe: card %d allocation %zu first copy %.3f s\n", c == &c0 ? 0 : 1, i, secs() - started);
+      std::fflush(stdout);
+      started = -1;
+      CHECK_EQ(back[0], uint8_t(0x5A));
+      CHECK_EQ(back[n - 1], uint8_t(0x5A));
+    }
+  }
+  std::puts("copy_test pinned probe OK");
+  return 0;
+}
+
 }  // namespace
 
 int main() {
+  if (const char* gb = std::getenv("B70_COPY_PINNED_GB")) return pinned_probe(std::strtoull(gb, nullptr, 10));
   l0::Context ctx(0);
   std::printf("device: %s, EUs: %u\n", ctx.name().c_str(), ctx.eu_count());
   CHECK(ctx.eu_count() > 0);
