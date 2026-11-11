@@ -58,7 +58,10 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
 - [x] **Step 1: the probe, the profile option, the EOS line.** Built on the box; 7 selected host/oracle tests pass.
   `tools/mac_check.sh` is absent in this checkout; no C++ was compiled on the Mac.
   Commit `probe_dflash_iter: draft / verify(1..8) / projection / host round trip, the draft list per launch (spec 19 v2 Task 1)`.
-- [ ] **Step 2 (box): `r82.iter` at 4096 and 32768.** Record the table in BENCHMARKS "DFlash (spec 19)" as a new
+- [x] **Step 2 (box): `r82.iter` at 4096 and 32768.** Calibrated plain replay passes both depths. At 4096:
+  draft 8.978 ms, verify(8) 1.245386 plain, iteration 1.579196 plain; C7 targets not met. Per-launch host-gap
+  residual is an upper bound, with the limitation recorded. Table and grades in BENCHMARKS's "v2 baseline".
+  Record the table in BENCHMARKS "DFlash (spec 19)" as a new
   "v2 baseline" block. **Gate (objective, recorded):** every C7 row has a measured value with its grade; verify(8) shows
   whether 28c's DPAS attention brought it to ~1.1.
 - [ ] **Step 3 (box + CPU): `r82.accept`.** The engine's taps over the A4 / golden recorded continuations and one

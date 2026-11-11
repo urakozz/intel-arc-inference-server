@@ -922,8 +922,63 @@ One golden/A4 serving round: **39/39 pass the f32 judge**, 37 bitwise identical 
 golden cjk (first difference 16) and prose (74) each have zero f32-rejected ids on either suffix. No missing
 references or skipped requests. Logs: `~/b70/logs/dflash-v2/{identity.log,baseline/identity/}`; saved plain
 reference: validation state `e88ce65d57d8-vs-e88ce65d57d8`, `r55.serve/off.r1/requests.jsonl`.
-Engine-tap CPU acceptance and calibrated iteration costs remain pending. Initial cost-probe ratios were invalid
-because its restored plain row was inactive; those ratios are excluded.
+Engine-tap CPU acceptance remains pending. Initial cost-probe ratios were invalid because its restored plain
+row was inactive; those ratios are excluded. The corrected probe requires its plain replay to consume one row
+and match verify(1)'s greedy id before timing. Both depths pass that calibration.
+
+Uninstrumented production lists, interleaved pairs with a restored snapshot before every call; one warm-up
+round, then medians of three rounds of 16 calls. **Busy box:** another card job and the CPU reference ran
+concurrently. Plain normalization is each arm's paired plain replay (about 29.0 / 32.8 ms), not the reused
+33.5 t/s decode baseline above. The iteration includes live greedy acceptance and its commit.
+
+| arm | depth 4096, ms | / paired plain | depth 32768, ms | / paired plain |
+|---|---:|---:|---:|---:|
+| draft, K=7 | 8.978022 | 0.309880 | 8.963257 | 0.273906 |
+| verify(1) | 28.966064 | 1.000578 | 32.852369 | 1.000564 |
+| verify(2) | 30.350444 | 1.047126 | 33.445930 | 1.020956 |
+| verify(3) | 31.751969 | 1.091869 | 35.302113 | 1.077380 |
+| verify(4) | 32.644368 | 1.121579 | 36.335702 | 1.108764 |
+| verify(5) | 33.865681 | 1.168254 | 38.812380 | 1.183860 |
+| verify(6) | 35.023325 | 1.205641 | 40.052069 | 1.221439 |
+| verify(7) | 35.741238 | 1.229004 | 41.244214 | 1.256987 |
+| verify(8) | 36.254194 | 1.245386 | 41.750586 | 1.272373 |
+| projection | 0.567761 | 0.019453 | 0.563306 | 0.017169 |
+| empty submit + fence | 0.020969 | 0.000723 | 0.019653 | 0.000600 |
+| K=7 iteration | 45.830047 | 1.579196 | 51.413898 | 1.562625 |
+
+The C7 grades at depth 4096:
+
+| quantity | measured | target | grade |
+|---|---:|---:|---|
+| draft | 8.978 ms / 0.309880 plain | <=4.5 ms / <=0.15 | FAIL |
+| verify(8) | 1.245386 plain | <=1.15 | FAIL; faster than the older 1.57, still above target |
+| projection + host gaps | instrumented upper bound 1.797466 ms; projection alone 0.567761 ms wall | <=0.5 ms | NOT PASSED; exact host gap not isolated |
+| iteration | 1.579196 plain | <=1.35 | FAIL |
+
+Separate timestamped lists have **87 draft / 8 projection launches**. At depth 4096 the draft's device sum is
+8.605521 ms: GEMMs 5.390208 ms (full int8 head **2.165104 ms**, remaining GEMMs 3.225104 ms), attention part
+2.711250 ms, attention reduce 0.047396 ms, norms 0.127500 ms, top-k stages 0.204375 / 0.028333 ms. The
+projection's device sum is 0.436563 ms (GEMMs 0.421042 ms). Per-launch details are retained in
+`~/b70/logs/dflash-v2/iter-{4096,32768}.log`. Device draft/projection sums at 32768 are 8.621875 / 0.438646 ms.
+The host-gap upper bounds are 1.401320 / 1.282363 ms, and projection + host upper bounds 1.797466 / 1.664446 ms:
+per-launch timestamp signals add host-scope flushes and device dispatch gaps remain in the residual. These
+instrumented bounds are diagnostics, not exact uninstrumented host costs or the benchmark timings above.
+
+EOS-stopped free runs (capped at 256 ids), separate from the teacher-forced acceptance anchors:
+
+| corpus | requests | ids / iterations | ids per iteration | requests reaching EOS |
+|---|---:|---:|---:|---:|
+| A4 | 34 | 2622 / 394 | 6.65482 | 32 |
+| golden code | 1 | 146 / 24 | 6.08333 | 1 |
+| golden prose | 1 | 256 / 99 | 2.58586 | 0 |
+| golden cjk | 1 | 256 / 124 | 2.06452 | 0 |
+| held-out opencode | 1 | 97 / 23 | 4.21739 | 1 |
+
+The original engine-tap baseline is `~/b70/logs/dflash-v2/baseline/engine/`: 38 tap files and 4256 draft records
+(16 anchors per source at each K=1..7). The CPU comparison drafts every active K separately: allocated eight-row
+lists still mask noncausal attention at K+1, so smaller K's are not prefixes of K=7. Two A4 recordings with fewer
+than eight EOS-stopped continuation ids cannot supply these anchors and are excluded. The separate serving
+correctness round above covers all 36 A4 requests.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
