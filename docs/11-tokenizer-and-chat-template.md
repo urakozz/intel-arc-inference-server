@@ -104,7 +104,7 @@ The release static archive is 16,217,384 bytes and a fresh Cargo build takes
 `B70_TOKENIZER` is `AUTO` by default and may be set to `ON` to require the
 component or `OFF` to omit it.
 
-Replace it with a hand-written BPE only once the parity test proves the
+A hand-written BPE could replace it only if the parity test proves the
 replacement. **The parity test is the deliverable that makes the swap safe**, so
 it was written first and it is kept forever.
 
@@ -131,8 +131,9 @@ took renderer changes, not a K2 fallback: minja is patched where it was not Jinj
 index attribute getters, empty mappings falsy, `none`; the tool-call capability probe),
 each listed in `third_party/VERSIONS` and tested against Jinja2 by `minja_ext_test`.
 The request's `chat_template_kwargs` reach the template through
-`chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (K2
-only). K2's tokenizer (`tokenizer.json`, BPE + NFC + a BOS post-processor) passes
+`chat::Template::render(..., kwargs)` for models whose `server::ChatFormat` reads them (K2, Kolibri
+and Bolt; Qwen only gets `enable_thinking`). Ornith, Kolibri and Bolt have their own template tests
+(`template_ornith_test`, `template_kolibri_test`, `template_bolt_test`). K2's tokenizer (`tokenizer.json`, BPE + NFC + a BOS post-processor) passes
 `k2_tokenizer_test`: a varied text set with every chat / tool tag, corpus.txt's digests,
 and three chat renders whose ids equal HF's - the template writes the BOS, so the prompt is
 encoded without special tokens (one BOS, id 0).
@@ -143,7 +144,7 @@ encoded without special tokens (one BOS, id 0).
 ### What it costs at run time
 
 `b70-serve` consumes this tokenizer, template and streamer on the real
-checkpoint. `golden_server_test` reproduces `b70-decode --ids --prefill`'s exact
+checkpoint (numbers below are from the first Qwen3.8 server campaign, on an older stack). `golden_server_test` reproduces `b70-decode --ids --prefill`'s exact
 ids on all three golden prompts, both sides on the same engine path.
 
 The host cost is **not measurably present**. Decode over HTTP measured
