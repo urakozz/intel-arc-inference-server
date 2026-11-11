@@ -35,7 +35,7 @@ The packed nibble layout **is** GPTQ's. What differs:
   overrides that let a single checkpoint mix bit-widths.
 
 So **one unpacking routine covers both formats.** Only the metadata parser
-differs, and it must accept two spellings of the same thing. The gate checkpoint
+differs, and it must accept two spellings of the same thing. The Qwen3.8 checkpoint
 says `quant_method: "gptq"`, `provider: "auto-round"`, `desc_act: false`,
 `group_size: 64`, `sym: true`, `lm_head: false`; others say
 `quant_method: "auto-round"` with `packing_format: "auto_round:auto_gptq"`. Same
@@ -67,11 +67,9 @@ round-to-nearest. Keep using it, or consume checkpoints others produced with it.
 What this project drops is **ARK** (`auto_round_kernel`), its runtime `woqgemm`
 library. We write that ourselves.
 
-Which AutoRound build each quantise script pins (0.17.0 @ `6afaecdb` for every
-script since 2026-10-06, with `auto-round-local.patch` on the Qwen3.8 ones and
-`--disable_low_cpu_mem_usage` on the RTN one for its int4 `lm_head`), why, and which version made each published checkpoint:
-`tools/quantize/README.md`, "AutoRound version". The `auto_round:auto_gptq`
-config keys and packing above are the same in 0.14.2 and 0.17.0.
+Which AutoRound build each quantise script pins, why, and which version made each published checkpoint:
+`tools/quantize/README.md`, "AutoRound version". The `auto_round:auto_gptq` config keys and packing above
+are the same in 0.14.2 and 0.17.0.
 
 Clean separation: keep the recipe, discard the oven.
 
@@ -86,7 +84,7 @@ The loader must therefore treat **per-layer width as data, not as a global
 constant**, from day one. Retrofitting that is painful; vLLM's XPU path still
 hard-gates it and raises `NotImplementedError` on 8-bit.
 
-The gate checkpoint exercises this in a mild form: its 98 `dynamic` exclusion
+The Qwen3.8 checkpoint exercises this in a mild form: its 98 `dynamic` exclusion
 rules leave `linear_attn.in_proj_a` / `in_proj_b` in **bf16** in all 48 GDN
 layers (`[48, 5120]` each, 0.5 MB - the gate and decay projections), plus the
 whole MTP head in bf16 (0.85 GB). Everything else is int4. The loader reads the
@@ -105,7 +103,7 @@ model load. Consequences:
   where the repack would go). That is measurable headroom sitting on the floor.
 - **Adding a format is a loader change**, not a kernel change.
 
-**The canonical int4 layout is layout 1**: a tiled 544-byte block per 16 `n` by
+**The canonical int4 layout is "layout 1"** (the second of two candidates in [12-kernels.md](12-kernels.md); "layout 0" is plain row-major): a tiled 544-byte block per 16 `n` by
 64 `k`, scales inline. The decision was made by measuring both candidate layouts
 at all five decode shapes, and it is close - 2713 against 2667 GB/s summed, so
 the two are within 2% by the deciding metric. The whole lead comes from one
@@ -162,11 +160,12 @@ scales. Pick the group size your kernels' tile geometry wants.
 ## What the engine serves today
 
 Every supported model runs from an int4 checkpoint in this one format family: AutoRound, GPTQ
-packing, symmetric, group 64 (our own exports for Qwen3.8, Ornith, K2-Horizon, Kolibri-1 and
-Bolt). The loader also reads the g128 spelling (Intel's interim Flash-Next checkpoint, a third-party Bolt
-export) through an exact expansion to g64, which is how the synthetic test checkpoints exercise it. On
-top of that format three choices are made per run, not per file: the output head is quantised to int8
-per row at load (spec 9; the only head the CLIs run since the zero-config cleanup); the KV cache is bf16 or, with `--kv-cache int8`,
-a rotated int8 form (spec 12); and prefill linears are bf16 or, with `--prefill-backend l0-int8`, the
+packing, symmetric, group 64, re-quantised by us (Qwen3.8, Ornith, K2-Horizon, Kolibri-1, Bolt). The loader
+also reads the g128 spelling (Intel's interim Flash-Next checkpoint, a third-party Bolt export) through an
+exact expansion to g64. On top of that format three choices are made per run, not per file: the output head
+is quantised to int8 per row at load (spec 9); the KV cache is bf16 or, with `--kv-cache int8`, a rotated
+int8 form (spec 12); and prefill linears are bf16 or, with `--prefill-backend l0-int8`, the
 Hadamard-rotated int8 path of [17-int8-prefill.md](17-int8-prefill.md), computed from the same int4 file.
-MXFP4 and FP8 stay rejected for the reasons above.
+The int8 prefill together with the int8 KV cache is a known fail (startup warning; about 3% of tool calls
+that copy exact text from a long prompt come out wrong, see [low-priority-work.md](low-priority-work.md)).
+MXFP4 and FP8 stay rejected for the reasons above, and no other third-party quantisation format is supported.
