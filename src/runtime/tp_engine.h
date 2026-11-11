@@ -19,6 +19,7 @@
 #include "runtime/control.h"
 #include "runtime/memory_plan.h"
 #include "runtime/tp_protocol.h"
+#include "runtime/prefill_backend.h"
 
 // Spec 17b: Qwen3.8 decode with tensor parallelism over two B70s (`b70-decode --parallel tp`).
 //
@@ -71,7 +72,7 @@
 // and KV layer, card 0's - the cards' are the same bytes), and prefill's block hook (runtime/prefill/tp_prefill.cc).
 //
 // Not here: DFlash / prompt lookup's own proposer (lookup verifies through the MTP verify lists, so it needs the head
-// loaded), profiling, the l0-int8 prefill backend.
+// loaded), profiling.
 namespace runtime {
 
 struct TpPrefill;   // runtime/prefill/tp_prefill.cc
@@ -115,6 +116,8 @@ class TpEngine {
   // calls it; the CLI calls it before its timed window); set_prefill_chunk_cap (2048 or 4096) before it.
   void prefill(const std::vector<uint32_t>& ids, uint32_t chunk = 0);
   void prepare_prefill();
+  PrefillBackend prefill_backend() const { return pf_backend_; }
+  void set_prefill_backend(PrefillBackend backend);
   uint32_t prefill_chunk_cap() const { return pf_cap_; }
   void set_prefill_chunk_cap(uint32_t cap);
   size_t prefill_launches() const;   // the prefill lists' launches so far, both cards'
@@ -228,7 +231,8 @@ class TpEngine {
   // archive needs none of it), its chunk cap and each card's device bytes (memory_use). Declared after cards_: it
   // goes first.
   uint32_t pf_cap_;
-  std::array<size_t, model::kTpSize> pf_bytes_{};
+  PrefillBackend pf_backend_ = PrefillBackend::L0;
+  std::array<size_t, model::kTpSize> pf_bytes_{}, pf_int8_bytes_{};
   std::unique_ptr<TpPrefill, void (*)(TpPrefill*)> pf_{nullptr, nullptr};
 };
 

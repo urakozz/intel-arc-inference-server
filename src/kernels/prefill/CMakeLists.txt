@@ -254,12 +254,16 @@ endforeach()
 # The quantiser and requant run at the default 128 GRF (probe_w8a8 measured 256
 # halving their occupancy); the GEMM needs 256 for its 64 int32 accumulators.
 set(PF_INT8_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_int8.cl)
-set(PF_HAD_K 5120 6144 17408)
+set(PF_HAD_K 3072 5120 6144 17408)
 foreach(K IN LISTS PF_HAD_K)
   math(EXPR NBLK "${K} / 1024")
   add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
 endforeach()
+add_ocloc_kernel(pf_quant_had_K8704 SOURCE ${PF_INT8_CL}
+                 DEFINES PF_QUANT_HAD=1 NBLK=17 ROT_BLOCK=512)
 foreach(L 0 1)
+  add_ocloc_kernel(pf_requant_rot_L${L}_R512 SOURCE ${PF_INT8_CL}
+                   DEFINES PF_REQUANT_ROT=1 LAYOUT=${L} ROT_BLOCK=512)
   add_ocloc_kernel(pf_requant_rot_L${L} SOURCE ${PF_INT8_CL} DEFINES PF_REQUANT_ROT=1 LAYOUT=${L})
 endforeach()
 add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1

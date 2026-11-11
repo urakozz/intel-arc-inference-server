@@ -80,7 +80,6 @@ inline void parse_parallel(const std::string& v, PipelineArgs& a) {
 // Spec 17b: --parallel tp's refusals that need no device. What 17b / 17c do not run under tensor parallel is refused
 // by name, with the plan that builds it (or why not).
 struct TpContext {
-  bool prefill_int8 = false;   // --prefill-backend l0-int8 (spec 17c prefills on l0)
   bool dflash = false;         // --spec dflash / dflash-lookup (spec 17d: not built under TP)
   bool profile = false;        // --profile
   bool other_family = false;   // Bolt / Kolibri-1 / Qwen3.8-Flash-Next / K2-Horizon
@@ -96,9 +95,6 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
                              "P2P writes");
   if (c.other_family)
     throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b); this model runs --parallel auto, 1 or pp");
-  if (c.prefill_int8)
-    throw std::runtime_error("--parallel tp prefills on the l0 backend only (spec 17c): l0-int8's activation quantiser "
-                             "rotates 1024-k blocks and a card's down has K 8704; drop --prefill-backend l0-int8");
   if (c.dflash)
     throw std::runtime_error("--parallel tp drafts with the MTP head (--spec auto, mtp or lookup - spec 17d); --spec "
                              "dflash / dflash-lookup under tensor parallel are not built - one card or --parallel pp");

@@ -14,17 +14,17 @@
 namespace runtime::prefill {
 namespace {
 constexpr uint32_t kNs = kernels::kPfSlabWidth;
-constexpr uint32_t kRotBlock = 1024;   // the Hadamard block; every K is a multiple
+uint32_t rot_block(uint32_t K) { return K % 1024 == 0 ? 1024 : 512; }
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::linear_i8: " + what);
 }
 
 // What pf_colmax_rot / pf_requant_rot need of the weight: int4, either layout,
-// whole 1024-k rotation blocks up to the largest K the scratch holds.
+// whole 512-k rotation blocks up to the largest K the scratch holds.
 void check_weight(const loader::DeviceWeight& w, uint32_t max_k) {
   const model::GemvShape& sh = w.shape;
   require(w.kind == model::WeightKind::Int4, "the h8 path's linears are all int4; this one is not");
-  require(sh.K % kRotBlock == 0, "K = " + std::to_string(sh.K) + " is not a whole number of 1024-k rotation blocks");
+  require(sh.K % rot_block(sh.K) == 0, "K = " + std::to_string(sh.K) + " is not a whole number of 512-k rotation blocks");
   require(sh.K <= max_k, "K = " + std::to_string(sh.K) + " exceeds the int8 scratch's " +
                              std::to_string(max_k));
   require(sh.layout == 0 || sh.layout == 1, "layout " + std::to_string(sh.layout) + " is neither 0 nor 1");
@@ -55,7 +55,7 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
   const l0::Mem& sgn = q.signs_f32(sh.K);
   const l0::Mem& bits = q.sign_bits(sh.K);
   l0::Kernel& quant = kc(kernels::pf_quant_had_variant(sh.K), "pf_quant_had");
-  l0::Kernel& requant = kc(kernels::pf_requant_rot_variant(sh.layout), "pf_requant_rot");
+  l0::Kernel& requant = kc(kernels::pf_requant_rot_variant(sh.layout, rot_block(sh.K)), "pf_requant_rot");
   l0::Kernel& gemm = kc(kernels::pf_gemm_i8_variant(silu), "pf_gemm_i8");
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   const float* ws = sc.first.as<float>();
@@ -67,7 +67,7 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
              arg_val(sh.K)});
   profile_wait(cx, Phase::kI8Quant);
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
-    cx.launch(requant, kNs / 16, sh.K / kRotBlock, 1,
+    cx.launch(requant, kNs / 16, sh.K / rot_block(sh.K), 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(sc.second.ptr()),
                PtrArg(w8.ptr()), arg_val(n0), arg_val(sh.N), arg_val(sh.K), arg_val(kNs)});
     profile_wait(cx, Phase::kI8Requant);
@@ -125,7 +125,7 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales_layout1(Context& cx, Kernel
                                                              uint32_t N) {
   auto it = scales_.find(qw);
   if (it != scales_.end()) return it->second;
-  require(K % kRotBlock == 0 && K <= max_k_,
+  require(K % 1024 == 0 && K <= max_k_,
           "the expert array's K = " + std::to_string(K) + " is not whole rotation blocks within " +
               std::to_string(max_k_));
   return compute_scales(cx, kc, qw, nullptr, model::GemvShape{K, N, 1, 1});
@@ -141,8 +141,8 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, Kernel
   l0::Mem colmax(ctx_, l0::MemKind::Device, size_t{sh.N} * 4);
   imm_.copy(colmax.ptr(), zero.data(), zero.size() * 4);
   const l0::Mem& bits = sign_bits(sh.K);
-  cx.launch(kc(kernels::pf_requant_rot_variant(sh.layout), "pf_colmax_rot"), sh.N / 16,
-            sh.K / kRotBlock, 1,
+  cx.launch(kc(kernels::pf_requant_rot_variant(sh.layout, rot_block(sh.K)), "pf_colmax_rot"), sh.N / 16,
+            sh.K / rot_block(sh.K), 1,
             {PtrArg(qw), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
              arg_val(0u), arg_val(sh.N), arg_val(sh.K)});
   cx.wait();
@@ -176,12 +176,12 @@ size_t Int8State::bytes() const {
 size_t linear_i8_launches(const model::GemvShape& sh) { return 1 + 2 * (size_t(sh.N) / kNs); }
 
 void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
-               const loader::DeviceWeight& w, const uint16_t* x, uint32_t M) {
+               const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, float* out) {
   check_walk(w, M, q.max_k(), std::min(q.chunk_cap(), s.chunk_cap()));
   const model::GemvShape& sh = w.shape;
-  require(s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
+  require(out != nullptr || s.partials.size() >= size_t(pad256(M)) * sh.N * 4,
           "`partials` is smaller than the [pad256(M)][N] fp32 this linear writes");
-  float* out = s.partials.as<float>();
+  if (!out) out = s.partials.as<float>();
   walk(cx, kc, q, w, x, M, /*silu=*/false, [out](uint32_t n0) { return out + n0; }, sh.N);
 }
 

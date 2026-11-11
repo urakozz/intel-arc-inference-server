@@ -62,6 +62,7 @@
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill/int8.h"
 #include "runtime/prefill/profile.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "runtime/prefill/step.h"
@@ -144,7 +145,7 @@ struct TpPfCard {
   uint32_t* ids_of(uint32_t h) { return ids.as<uint32_t>() + size_t(h) * s.chunk_cap(); }
   size_t device_bytes() const {
     return s.bytes() + s.lazy_bytes() + resid_b.size() + own.size() + land.size() + (hid ? hid->size() : 0) +
-           (hslab ? hslab->size() : 0);
+           (hslab ? hslab->size() : 0) + (int8 ? int8->bytes() : 0);
   }
 
   // The crossing's copy, on the copy engine after `ready`, or in order on the compute list.
@@ -166,6 +167,7 @@ struct TpPfCard {
   prefill::Context cx;
   prefill::KernelCache kc;
   PrefillScratch s;
+  std::unique_ptr<prefill::Int8State> int8;
   l0::Mem resid_b;   // chunk B's residual rows (chunk A's are s.resid): bf16 [cap][hidden]
   l0::Mem own;       // fp32 [kPair][cap][hidden]: this card's half of the last row-parallel output, per chunk
   l0::Mem land;      // fp32 [kPair][kLandSlots][cap][hidden]: the peer's halves, written only by the peer
@@ -223,6 +225,12 @@ struct PairPlan {
 };
 }  // namespace
 
+void TpEngine::set_prefill_backend(PrefillBackend backend) {
+  if (pf_ && backend != pf_backend_)
+    throw std::logic_error("runtime::TpEngine::set_prefill_backend: set the backend before prepare_prefill()");
+  pf_backend_ = backend;
+}
+
 void TpEngine::set_prefill_chunk_cap(uint32_t cap) {
   check_prefill_chunk_cap(*cd(0).model.desc, cap);
   if (pf_ && pf_->c[0]->s.chunk_cap() != cap)
@@ -252,9 +260,20 @@ void TpEngine::prepare_prefill() {
   for (uint32_t r = 0; r < model::kTpSize; ++r) {
     TpPfCard& k = *pf_->c[r];
     if (kv_ == KvCache::Int8) k.s.kv8_raw_buffer();   // spec 12b's widening scratch, at the card's 2 kv heads
-    k.s.slab_buffer();   // the l0 linears' slab: allocated here, outside the first timed chunk
+    if (pf_backend_ == PrefillBackend::L0Int8) {
+      k.int8 = std::make_unique<prefill::Int8State>(k.ctx, prefill_int8_max_k(d), pf_cap_);
+      for (const auto& [key, w] : cd(r).model.linears) {
+        if (key.second == model::LinearId::LmHead || key.second == model::LinearId::AB) continue;
+        if (w.shape.N % kernels::kPfSlabWidth != 0)
+          throw std::runtime_error("runtime::TpEngine::prepare_prefill: int8 N is not whole 1024-column slabs");
+        k.int8->scales(k.cx, k.kc, w);
+      }
+    } else {
+      k.s.slab_buffer();   // the l0 linears' slab: outside the first timed chunk
+    }
     if (mtp_) k.make_mtp(pf_cap_);   // spec 17d
-    pf_bytes_[r] = k.device_bytes();
+    pf_int8_bytes_[r] = k.int8 ? k.int8->bytes() : 0;
+    pf_bytes_[r] = k.device_bytes() - pf_int8_bytes_[r];
   }
 }
 
@@ -339,7 +358,7 @@ void TpEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           }
           prefill::step_tp_unit(k.cx, k.kc, k.s, card.model, max_len_, k.control(h), pp.pos[h], C, u,
                                 card.persist.gdn_state, card.persist.conv_ring, card.persist.kv_k, card.persist.kv_v,
-                                card.persist.kv_lay, io);
+                                card.persist.kv_lay, io, pf_backend_, k.int8.get());
           if (!cross) continue;
           if (u + 1 < U || mtp_) {   // spec 17d: with the head the last unit's every row crosses too
             k.send(peer.land_of(h, u & 1u), k.own_of(h), size_t(C) * row, p.ev.handle(p.ready(r, h, u)),

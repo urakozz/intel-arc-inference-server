@@ -899,8 +899,7 @@ int run(int argc, char** argv) {
   const uint32_t mtp_k = mtp_on ? spec.max_k : 0;
   // Spec 17b: --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp).
   // Spec 17d: --spec mtp / auto run under tensor parallel (the head whole on each card); DFlash does not.
-  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8",
-                       spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
+  cli::check_tp(pipe, {spec.kind == cli::SpecKind::DFlash || spec.kind == cli::SpecKind::DFlashLookup, profile,
                        fam_bolt || fam_kol || fam_q4 || fam_k2});
   // The prefill flags (spec 2, interfaces.md's CLI contract). They are pure
   // argument validation and are checked BEFORE l0::Context like every other
@@ -1167,6 +1166,7 @@ int run(int argc, char** argv) {
     ta.prefill = prefill || have_prefill_len;   // spec 17c
     ta.bench_prefill = have_prefill_len;
     ta.chunk = pp_chunk;
+    ta.backend = pp_path.backend;
     ta.mtp = mtp_on;   // spec 17d: --ids only (synthetic runs refused --spec above)
     ta.run_mtp = [&](runtime::TpEngine& e) { return generate_mtp(e, n, mtp_auto, mtp_k, lm_head, true); };
     return cli::run_tp_decode<StdoutToStderr>(ta);

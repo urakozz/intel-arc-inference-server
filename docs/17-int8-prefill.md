@@ -40,6 +40,26 @@ same session, paired **1.28x**. Decode is unchanged at 29.40 t/s. Accuracy on
 the golden gate matches the bf16 prefill, with one accepted bf16 near-tie
 (spec 5 §8).
 
+## Tensor parallel
+
+The TP int8 implementation uses 512-wide Hadamard blocks for the per-card down
+projection (K=8704, 17 blocks), normalised by 1/sqrt(512). Other linears retain
+1024-wide blocks. All per-card output widths are multiples of the 1024-column
+slab: QkvZ 8192, Qkv 7168, gate/up 17408, and out/o/down 5120. The out/o
+projections have K=3072; the column-parallel linears keep K=5120.
+
+This chooses the local 512-wide rotation over rotating the full down input
+before splitting: the full 1024 rotation mixes channels across the 8704 boundary,
+requiring activation and weight exchanges. The local rotation keeps the existing
+TP wavefront, but changes quantisation numerics and needs its own f32 quality gate.
+`tp_prefill_int8_test` covers the golden and tool-call prompts, teacher-forcing
+one card's bf16 ids and judging every differing id on that same context. Missing
+judges print their context keys and SKIP with “awaiting f32 reference”.
+
+Build, quality gates, server validation and speed measurements are pending
+(operator requested implementation without box tests). No TP int8 quality or
+speed claim is established yet. The int8 prefill + int8 KV warning remains.
+
 ## Why decode stays int4 and bf16
 
 Decode multiplies one token's row by every weight matrix. With one row there is
