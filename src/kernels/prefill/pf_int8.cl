@@ -113,10 +113,11 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
 #error "pf_requant_rot: LAYOUT (0 GPTQ-native, 1 tiled) must be defined"
 #endif
 // One work-group = 16 columns x one rotation block; sub-group c owns column c,
-// lane l owns k = 64 l .. 64 l + 63 (one scale group). Stages h = 1..32 are
-// register butterflies, h = 64..512 lane shuffles, ascending. The int4 tile
-// goes through SLM column-major at pitch 129 (conflict-free); signs arrive as a
+// lane l owns ROT_VALUES consecutive k values (64 or 32). Register butterflies
+// precede lane shuffles, with the canonical ascending stages in either layout.
+// The int4 tile goes through SLM column-major at pitch 129 (conflict-free); signs arrive as a
 // bitmask, applied as a sign-bit xor (bit-identical to multiplying by -1).
+#define ROT_VALUES (ROT_BLOCK / SG)
 inline void pf_rot_load(__global const uint* restrict qw, __global const half* restrict sc,
                         __global const uint* restrict sbits, uint nbase, uint blk, uint Nfull,
                         uint K, __local uint* tin, __local float* tsc, float* v) {
@@ -153,12 +154,15 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  const bool active = l < ROT_BLOCK / 64u;
-  const float s = active ? tsc[c * 17u + l] : 0.0f;
-  const uint2 sb = active ? vload2(0, sbits + blk * (ROT_BLOCK / 32u) + 2u * l) : (uint2)(0u);
+  const float s = tsc[c * 17u + l * ROT_VALUES / 64u];
+#if ROT_BLOCK == 1024
+  const uint2 sb = vload2(0, sbits + blk * 32u + 2u * l);
+#else
+  const uint2 sb = (uint2)(sbits[blk * 16u + l], 0u);
+#endif
 #pragma unroll
-  for (uint i = 0; i < 8u; ++i) {
-    const uint word = active ? tin[c * 129u + 8u * l + i] : 0x88888888u;
+  for (uint i = 0; i < ROT_VALUES / 8u; ++i) {
+    const uint word = tin[c * 129u + (ROT_VALUES / 8u) * l + i];
 #pragma unroll
     for (uint b = 0; b < 8u; ++b) {
       const uint j = 8u * i + b;
@@ -167,9 +171,9 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
     }
   }
 #pragma unroll
-  for (uint h = 1u; h < 64u; h <<= 1) {
+  for (uint h = 1u; h < ROT_VALUES; h <<= 1) {
 #pragma unroll
-    for (uint j = 0; j < 64u; ++j) {
+    for (uint j = 0; j < ROT_VALUES; ++j) {
       if ((j & h) == 0u) {
         const float a = v[j], e = v[j + h];
         v[j] = a + e;
@@ -178,9 +182,9 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
     }
   }
 #pragma unroll
-  for (uint h = 1u; h < ROT_BLOCK / 64u; h <<= 1) {
+  for (uint h = 1u; h < SG; h <<= 1) {
 #pragma unroll
-    for (uint j = 0; j < 64u; ++j) {
+    for (uint j = 0; j < ROT_VALUES; ++j) {
       const float o = sub_group_shuffle_xor(v[j], h);
       v[j] = (l & h) ? (o - v[j]) : (v[j] + o);
     }
@@ -201,16 +205,16 @@ __kernel void pf_requant_rot(__global const uint* restrict qw, __global const ha
   __local uint tin[16 * 129];
   __local float tsc[16 * 17];
   __local uint tout[16 * 257];
-  float v[64];
+  float v[ROT_VALUES];
   pf_rot_load(qw, sc, sbits, nbase, blk, Nfull, K, tin, tsc, v);
   const float iv = inv[nbase + c];
 #pragma unroll
-  for (uint d = 0; d < 16u; ++d) {
+  for (uint d = 0; d < ROT_VALUES / 4u; ++d) {
     uint w = 0u;
 #pragma unroll
     for (uint b = 0; b < 4u; ++b)
       w |= ((uint)(uchar)convert_char_sat_rte((v[4u * d + b] * ROT_SCALE) * iv)) << (8u * b);
-    if (l < ROT_BLOCK / 64u) tout[c * 257u + 16u * l + d] = w;
+    tout[c * 257u + (ROT_VALUES / 4u) * l + d] = w;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 #pragma unroll
@@ -234,11 +238,11 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
   const uint nbase = n0 + get_group_id(0) * 16u;
   __local uint tin[16 * 129];
   __local float tsc[16 * 17];
-  float v[64];
+  float v[ROT_VALUES];
   pf_rot_load(qw, sc, sbits, nbase, blk, Nfull, K, tin, tsc, v);
   float amax = 0.0f;
 #pragma unroll
-  for (uint j = 0; j < 64u; ++j) amax = fmax(amax, fabs(v[j] * ROT_SCALE));
+  for (uint j = 0; j < ROT_VALUES; ++j) amax = fmax(amax, fabs(v[j] * ROT_SCALE));
   amax = sub_group_reduce_max(amax);
   if (l == 0u) atomic_max((volatile __global uint*)(colmax + nbase + c), as_uint(amax));
 }
