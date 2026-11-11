@@ -5,6 +5,9 @@
 #include <initializer_list>
 #include <functional>
 #include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "l0/context.h"
 #include "l0/kernel.h"
@@ -55,6 +58,8 @@ class Context {
     double gpu_ms = 0;
     double host_submit_ms = 0;
     size_t launches = 0;
+    // B70_PREFILL_PROFILE=2 only: every launch's entry name and device ms, in launch order.
+    std::vector<std::pair<std::string, double>> each;
   };
   Context(ze_context_handle_t ze_ctx, ze_device_handle_t ze_dev);
   explicit Context(l0::Context& c) : Context(c.handle(), c.device()) {}
@@ -104,7 +109,7 @@ class Context {
 
   // Diagnostic only: timestamp L0 launches and measure host launch submission.
   // GPU execution and host submission overlap; these times are not additive.
-  // Enabled by B70_PREFILL_PROFILE=1, or explicitly by tests. Changing mode
+  // Enabled by B70_PREFILL_PROFILE=1 (=2 also names every launch), or explicitly by tests. Changing mode
   // drains the list. take_launch_metrics() drains timestamp results and clears
   // the counters after the caller has waited; it does not synchronize itself.
   void set_profiling(bool enabled);
