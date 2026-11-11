@@ -17,6 +17,7 @@ import glob
 import importlib.util
 import json
 from collections import defaultdict
+from types import SimpleNamespace
 
 
 def prefix_counts(ids, drafts, greedy, p, tap_from):
@@ -53,6 +54,8 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
         lines = [json.loads(s) for s in f if s.strip()]
     run = lines[0]['run']
     drafter = d1.reference_drafter(run, drafter_dir, target_dir)
+    acc = d1._load('dflash_accept')
+    head = SimpleNamespace(logits=drafter.head_logits)
     records = defaultdict(list)
     for rec in lines[1:]:
         records[rec['dump']].append(rec)
@@ -81,8 +84,18 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
             for p, rows in by_anchor.items():
                 if set(rows) != set(range(1, 8)):
                     raise ValueError(f'{name} p={p}: need K=1..7 on every anchor')
+            ps = list(by_anchor)
+            references = {}
+            for k in range(1, 8):
+                references[k] = acc.draft_batch(drafter, head, [ids[p] for p in ps], ps, k, ctx,
+                                                {'full': None})['full'].tolist()
+                if not detail and references[k][0] != drafter.draft_block(ids[ps[0]], ps[0], k, ctx).ids.tolist():
+                    raise ValueError(f'{name} K={k}: batched reference differs from the single-anchor calibration')
+            if not detail:
+                print('REFERENCE_BATCH_CALIBRATION K=1..7 ids match the single-anchor reference', flush=True)
+            for index, (p, rows) in enumerate(by_anchor.items()):
                 for k, rec in sorted(rows.items()):
-                    ref = drafter.draft_block(ids[p], p, k, ctx).ids.tolist()
+                    ref = references[k][index]
                     corpus = name.split('/')[0]
                     key = (corpus, k)
                     if key not in totals:
@@ -98,7 +111,7 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
                     total['anchors'] += 1
                     total['verified_ids'] += 1 + rec['accepted']
                     detail.append({'name': name, 'p': p, 'k': k, 'reference': ref, 'engine': rec['ids']})
-            print(f"ENGINE_ACCEPT {name}: {len(by_anchor)} anchors, K=1..7 (matching active widths)", flush=True)
+            print(f"ENGINE_ACCEPT {name}: {len(by_anchor)} anchors batched, K=1..7 (matching active widths)", flush=True)
     report = {'run': run, 'corpora': {}, 'drafts': detail}
     passed = True
     for (corpus, k), row in sorted(totals.items()):
