@@ -1,6 +1,6 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-11): PLANNED.** Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
+**Status (2026-11-11): IN PROGRESS.** Task 1 instrumentation builds; host checks pass; device gates pending. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
@@ -55,7 +55,8 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
 - Modify `tools/box_validate/stages.sh`: row 82 and its stages `r82.k0` (G0), `r82.iter` (the probe), `r82.accept`
   (engine taps -> `tools/oracle/dflash_d1.py`'s reference drafting -> E_K per corpus), `r82.d5` (Task 2).
 
-- [ ] **Step 1 (Mac): the probe, the profile option, the EOS line.** `tools/mac_check.sh` / host tests green.
+- [x] **Step 1: the probe, the profile option, the EOS line.** Built on the box; 7 selected host/oracle tests pass.
+  `tools/mac_check.sh` is absent in this checkout; no C++ was compiled on the Mac.
   Commit `probe_dflash_iter: draft / verify(1..8) / projection / host round trip, the draft list per launch (spec 19 v2 Task 1)`.
 - [ ] **Step 2 (box): `r82.iter` at 4096 and 32768.** Record the table in BENCHMARKS "DFlash (spec 19)" as a new
   "v2 baseline" block. **Gate (objective, recorded):** every C7 row has a measured value with its grade; verify(8) shows
@@ -66,15 +67,18 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
   - **Gate G-accept:** engine-taps E_7 within 0.15 of the reference on A4 and code.
   - FAIL -> root-cause (tap layer, ring position, RoPE position, anchor row) with a failing test, before Task 3.
 
-### Task 2: D5 again on today's main - the baseline and the bar's first reading (box)
+### Task 2: DFlash against today's recorded baselines (box; operator 2026-11-12)
 
-- [ ] **Step 1: `r82.d5`.** `tools/prefix/replay_ab.sh` on `opencode-session-int8`:
-  - arms off / `--mtp auto` / `--spec dflash`, 3 rotated rounds, prefix cache on;
-  - A4 + golden through `b70-serve` (as the old `r56.d5_a4`);
-  - llama-benchy tg128 and tg128 @ d32768, pp4096 (as the old `r56.d5_benchy`).
-  - Greedy outputs judged as G-D2.
-- [ ] **Gate:** the numbers recorded (BENCHMARKS, spec v2 §1.2's "today" column replaced by measured values). If G-speed
-  already passes, stop and ask the operator (the stop rule).
+- [ ] **Step 1: `r82.d5`.** Do not re-run `--spec off` or `--mtp auto` for performance. Reuse today's main:
+  - one card, MTP auto, slots_bench shape (2,820-token prompt, 512 ids, prefix cache hits): **73.2 t/s** (README);
+  - plain decode at depth 4096: **33.5 t/s** (BENCHMARKS).
+  - Run only `--spec dflash` through `tools/box_validate/slots_serve_bench.sh ... --spec dflash -- --counts 1`,
+    same prompt, output length and prefix-cache shape. One sequence slot (DFlash does not support slots).
+  - One golden + A4 greedy correctness round, using the existing references; no repeated plain/MTP serving arms.
+  - Skip llama-benchy and rotated rounds here. The opencode replay with all three arms belongs to Tasks 7b/8.
+- [ ] **Early stop:** if DFlash exceeds **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
+  Tasks 3-7. This shape is an early screen, not a substitute for Task 8's final G-speed gate.
+- [ ] Record the result and the provenance of the reused baselines in BENCHMARKS.
 
 ### Task 3: AdaptiveK on measured costs (Mac)
 
