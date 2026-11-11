@@ -207,7 +207,7 @@ std::unique_ptr<PinnedAlloc> make_prefix_alloc(l0::Context& context, bool prefix
   if (prefix_cache_gb > 0) {
     const auto t0 = std::chrono::steady_clock::now();
     prefix_alloc = std::make_unique<PinnedAlloc>(context, size_t(prefix_cache_gb) << 30);
-    options.prefix_cache_bytes = prefix_alloc->mem.size();
+    options.prefix_cache_bytes = prefix_alloc->size();
     options.prefix_alloc = prefix_alloc.get();
     std::fprintf(stderr, "prefix cache: %u GiB pinned system RAM (%s), allocated in %.0f ms\n",
                  prefix_cache_gb, prefix_why.c_str(),

@@ -160,7 +160,7 @@ int main(int argc, char** argv) {
   {
     const size_t gdn = e.buffers().gdn_state.size(), conv = e.buffers().conv_ring.size();
     bool k_ok = d.key() != 0 && d.ring_bytes() == 41943040 && e.state_bytes() == gdn + conv + d.ring_bytes();
-    server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+    server::PrefixSession s(ad, alloc.size(), &alloc);
     k_ok &= s.cache()->kv_form() == server::store_root(0, d.key()) && s.cache()->kv_form() != 0;
     std::printf("K: drafter key %016llx, state %zu B (+ the ring %zu B), the store's root = store_root(bf16, key): "
                 "%s\n",
@@ -175,14 +175,14 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> ring_ref, ring_got;
     std::printf("R1 uninterrupted:\n");
     {
-      server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+      server::PrefixSession s(ad, alloc.size(), &alloc);
       ref1 = turn(s, ad, A, 96);
       ref2 = turn(s, ad, cat(cat(A, ref1.ids), B), 128, [&] { ring_ref = ring(imm, d); });
       ok &= ref2.rep.kind == server::PrefixCache::Plan::Continue;
     }
     std::printf("R1 restored:\n");
     {
-      server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+      server::PrefixSession s(ad, alloc.size(), &alloc);
       got1 = turn(s, ad, A, 96);
       (void)turn(s, ad, side, 16);
       got2 = turn(s, ad, cat(cat(A, got1.ids), B), 128, [&] { ring_got = ring(imm, d); });
@@ -190,7 +190,7 @@ int main(int argc, char** argv) {
     }
     std::printf("R1 cold ring (19c's restore):\n");
     {
-      server::PrefixSession s(cold_ad, alloc.mem.size(), &alloc);
+      server::PrefixSession s(cold_ad, alloc.size(), &alloc);
       (void)turn(s, cold_ad, A, 96);
       (void)turn(s, cold_ad, side, 16);
       cold2 = turn(s, cold_ad, cat(cat(A, got1.ids), B), 128);
@@ -214,11 +214,11 @@ int main(int argc, char** argv) {
                          Gen* got) {
       const Ids t2 = cat(slice(L, 0, 4096), slice(C, 0, tail));
       {   // the cold run of the same prompt (its own store: Cold, reset, the hooked chunks from 0)
-        server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+        server::PrefixSession s(ad, alloc.size(), &alloc);
         *cold = turn(s, ad, t2, 64, [&] { *cold_ring = ring(imm, d); });
         ok &= cold->rep.kind == server::PrefixCache::Plan::Cold;
       }
-      server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+      server::PrefixSession s(ad, alloc.size(), &alloc);
       (void)turn(s, ad, slice(L, 0, 5000), 8);
       (void)turn(s, ad, side, 8);
       *got = turn(s, ad, t2, 64, [&] { *got_ring = ring(imm, d); });

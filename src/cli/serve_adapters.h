@@ -518,16 +518,34 @@ struct EngineAdapter : server::EngineIface {
   uint64_t mtp_iters_at_k[kMaxIterK + 1] = {};  // step_many calls per K
 };
 
-// Spec 7 §3.1: the prefix cache's pinned host memory. ONE l0::MemKind::Host allocation of
-// the whole budget at server start (the P0 probe measured ~100 ms per GiB to allocate, too
-// slow per entry), carved first-fit in 64 KiB units with coalescing frees. Host-resident
-// and device-visible, so the engine's snapshot copies run at the probe's 12-14 GB/s.
+// Spec 7 §3.1: the prefix cache's pinned host memory. l0::MemKind::Host allocations of the
+// whole budget at server start (the P0 probe measured ~100 ms per GiB to allocate, too slow
+// per entry), carved first-fit in 64 KiB units with coalescing frees. Host-resident and
+// device-visible, so the engine's snapshot copies run at the probe's 12-14 GB/s.
+//
+// The budget is kPiece allocations, not one (2026-11-11). On two cards the runtime gives the
+// second card a dma-buf import of the first card's allocation and maps it there at the first
+// copy that needs it. The kernel (7.4) builds that mapping from one scatterlist segment per
+// physically contiguous run of up to 4 GiB; when one allocation holds a run that long, the
+// IOMMU's 4 GiB boundary padding overflows the segment length, the map fails, xe reports
+// EBUSY and the runtime retries the bind forever - the first prefix restore (TP) or snapshot
+// (replica) hung at 100 % CPU. An allocation under 4 GiB never needs that padding.
 struct PinnedAlloc : server::HostAlloc {
   static constexpr size_t kUnit = size_t(64) << 10;
-  PinnedAlloc(l0::Context& ctx, size_t bytes)
-      : mem(ctx, l0::MemKind::Host, bytes / kUnit * kUnit, kUnit) {
-    free_[0] = mem.size();
+  static constexpr size_t kPiece = size_t(2) << 30;
+  // Piece i's free space is keyed from i * kStride: the unit between pieces is never free, so a
+  // coalescing free never joins two pieces.
+  static constexpr size_t kStride = kPiece + kUnit;
+  PinnedAlloc(l0::Context& ctx, size_t bytes) {
+    for (size_t left = bytes / kUnit * kUnit; left > 0;) {
+      const size_t n = left < kPiece ? left : kPiece;
+      free_[pieces.size() * kStride] = n;
+      pieces.emplace_back(ctx, l0::MemKind::Host, n, kUnit);
+      bytes_ += n;
+      left -= n;
+    }
   }
+  size_t size() const { return bytes_; }
   void* alloc(size_t bytes) override {
     const size_t n = (bytes + kUnit - 1) / kUnit * kUnit;
     for (auto it = free_.begin(); it != free_.end(); ++it) {
@@ -535,13 +553,16 @@ struct PinnedAlloc : server::HostAlloc {
       const size_t off = it->first, len = it->second;
       free_.erase(it);
       if (len > n) free_[off + n] = len - n;
-      return mem.as<uint8_t>() + off;
+      return pieces[off / kStride].as<uint8_t>() + off % kStride;
     }
     return nullptr;
   }
   void free(void* p, size_t bytes) override {
     const size_t n = (bytes + kUnit - 1) / kUnit * kUnit;
-    size_t off = size_t(static_cast<uint8_t*>(p) - mem.as<uint8_t>()), len = n;
+    const auto* q = static_cast<uint8_t*>(p);
+    size_t i = 0;
+    while (q < pieces[i].as<uint8_t>() || q >= pieces[i].as<uint8_t>() + pieces[i].size()) ++i;
+    size_t off = i * kStride + size_t(q - pieces[i].as<uint8_t>()), len = n;
     auto next = free_.lower_bound(off);
     if (next != free_.end() && next->first == off + len) {
       len += next->second;
@@ -557,6 +578,7 @@ struct PinnedAlloc : server::HostAlloc {
     }
     free_[off] = len;
   }
-  l0::Mem mem;
-  std::map<size_t, size_t> free_;   // offset -> length
+  std::vector<l0::Mem> pieces;
+  size_t bytes_ = 0;
+  std::map<size_t, size_t> free_;   // offset (piece i's from i * kStride) -> length
 };

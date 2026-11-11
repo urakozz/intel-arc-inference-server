@@ -11,8 +11,9 @@
 // B70_COPY_PINNED_GB=<n> (run under tools/gpu_lock.sh box): instead, the prefix cache's first use on both cards - ONE
 // context holding cards 0 and 1 (the server's), n GiB of l0::MemKind::Host memory written by the CPU, then a 1 MiB copy
 // out of the end of every allocation on card 0 and then on card 1. B70_COPY_PINNED_PIECE_GB=<p>: the n GiB as p GiB
-// allocations (default one). A copy that takes over B70_COPY_PINNED_WATCHDOG seconds (default 120) prints COPY_HANG
-// and exits 2.
+// allocations (default one). B70_COPY_PINNED_FILL_GB=<f>: f GiB of device memory allocated and written on each card
+// first. B70_COPY_PINNED_RESIDENT=1: zeContextMakeMemoryResident on card 0 then card 1 before the copies. A step that
+// takes over B70_COPY_PINNED_WATCHDOG seconds (default 120) prints COPY_HANG and exits 2.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -25,6 +26,7 @@
 #include "check.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
+#include "l0/error.h"
 #include "l0/memory.h"
 
 namespace {
@@ -126,6 +128,18 @@ int pinned_probe(size_t gb) {
     }
   }).detach();
 
+  std::vector<l0::Mem> fill;
+  if (const char* f = std::getenv("B70_COPY_PINNED_FILL_GB")) {
+    for (l0::Context* c : {&c0, &c1}) {
+      l0::CmdList imm = l0::CmdList::immediate(*c);
+      for (int g = 0; g < std::atoi(f); ++g) {
+        fill.emplace_back(*c, l0::MemKind::Device, size_t(1) << 30);
+        imm.fill(fill.back().ptr(), 0x5A5A5A5Au, size_t(1) << 30);
+      }
+    }
+    std::printf("pinned probe: %zu GiB of device memory filled over both cards\n", fill.size());
+  }
+
   std::vector<std::unique_ptr<l0::Mem>> pieces;
   for (size_t left = gb << 30; left > 0;) {
     const size_t n = left < piece ? left : piece;
@@ -136,6 +150,19 @@ int pinned_probe(size_t gb) {
   std::printf("pinned probe: %zu GiB as %zu allocation(s), allocated and written in %.1f s\n", gb, pieces.size(),
               secs());
   std::fflush(stdout);
+
+  if (std::getenv("B70_COPY_PINNED_RESIDENT")) {
+    for (l0::Context* c : {&c0, &c1}) {
+      for (size_t i = 0; i < pieces.size(); ++i) {
+        started = secs();
+        ZE_CHECK(zeContextMakeMemoryResident(c0.handle(), c->device(), pieces[i]->ptr(), pieces[i]->size()));
+        std::printf("pinned probe: card %d allocation %zu made resident in %.3f s\n", c == &c0 ? 0 : 1, i,
+                    secs() - started);
+        std::fflush(stdout);
+        started = -1;
+      }
+    }
+  }
 
   const size_t n = 1u << 20;
   for (l0::Context* c : {&c0, &c1}) {
