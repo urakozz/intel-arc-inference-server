@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <stdexcept>
 #include <utility>
@@ -101,6 +102,8 @@ void TpEngine::capture_mtp_lists(uint32_t card) {
   c.mtp = std::make_unique<MtpBuffers>(c.ctx, max_len_, *c.model.desc, model::qwen38(), kv_);
   c.hctl = c.mtp->hctl.as<Control>();
   for (uint32_t i = 0; i < kMaxDraft; ++i) c.drafts.push_back(build_tp_draft(c.ctx, c.model, c.buffers, *c.mtp, c.link, i));
+  for (uint32_t i = 0; i < kMaxDraft; ++i)   // open-work 13: the same with the card's half of the draft probability
+    c.draft_probs.push_back(build_tp_draft(c.ctx, c.model, c.buffers, *c.mtp, c.link, i, true));
   const model::ModelDesc& d = *c.model.desc;
   for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M) {
     c.verifies.push_back(build_tp_verify(c.ctx, c.model, c.buffers, *c.mtp, c.link, M));
@@ -448,7 +451,8 @@ void TpEngine::set_draft_input(uint32_t i, uint32_t id) {
   for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).ctl->cur_token[1 + i] = id;
 }
 
-void TpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
+void TpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
+                     const std::function<bool(uint32_t, float)>& more) {
   require_mtp("draft");
   const uint32_t pos = cd(0).ctl->pos;
   if (k == 0 || k > kMaxDraft || k > max_verify_k())
@@ -464,7 +468,10 @@ void TpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) 
   }
   draft_ids_.clear();
   for (uint32_t i = 0; i < k; ++i) {
-    run_lists({&cd(0).drafts[i].list, &cd(1).drafts[i].list}, false, "draft list");
+    if (more)
+      run_lists({&cd(0).draft_probs[i].list, &cd(1).draft_probs[i].list}, false, "draft list");
+    else
+      run_lists({&cd(0).drafts[i].list, &cd(1).drafts[i].list}, false, "draft list");
     // The head's merge (D2's rule over the two vocabulary halves' winners), into both head Controls.
     Control& a = *cd(0).hctl;
     Control& b = *cd(1).hctl;
@@ -483,8 +490,20 @@ void TpEngine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) 
     a.cur_token[0] = b.cur_token[0] = d;   // the next draft list's input
     draft_ids_.push_back(d);
     for (uint32_t r = 0; r < model::kTpSize; ++r) cd(r).ctl->cur_token[1 + i] = d;
+    if (more) {
+      // Open-work 13: the two halves' softmax (max, normaliser) merged - the head's probability for the merged winner.
+      float ma, sa, mb, sb;
+      std::memcpy(&ma, &a.draft_stat[0], 4);
+      std::memcpy(&sa, &a.draft_stat[1], 4);
+      std::memcpy(&mb, &b.draft_stat[0], 4);
+      std::memcpy(&sb, &b.draft_stat[1], 4);
+      const float m = std::max(ma, mb);
+      if (!more(i, 1.0f / (sa * std::exp(ma - m) + sb * std::exp(mb - m)))) break;
+    }
   }
 }
+
+bool TpEngine::draft_probs() const { return mtp_ && !cd(0).draft_probs.empty(); }
 
 void TpEngine::verify(uint32_t k) {
   require_mtp("verify");

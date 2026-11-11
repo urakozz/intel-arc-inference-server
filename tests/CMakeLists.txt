@@ -188,6 +188,12 @@ target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(adaptive_k_test PRIVATE b70_server)
 add_test(NAME adaptive_k_test COMMAND adaptive_k_test)
 
+# Open-work 13: the per-step draft choice (server::StepK) from given probabilities, costs and calibration, host only.
+add_executable(step_k_test server/step_k_test.cc)
+target_include_directories(step_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(step_k_test PRIVATE b70_server)
+add_test(NAME step_k_test COMMAND step_k_test)
+
 # Spec 13 B4 (plan 13b Task 1): the batching scheduler over a mock batched engine, host only.
 add_executable(scheduler_test server/scheduler_test.cc)
 target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -664,6 +670,17 @@ target_link_libraries(argmax_test PRIVATE b70_l0 b70_model)
 b70_target_kernel_dir(argmax_test)
 add_dependencies(argmax_test kernel_argmax_stage1_M1 kernel_argmax_stage2)
 add_test(NAME argmax_test COMMAND argmax_test)
+
+# Open-work 13: draft_prob.cl against a host reference (the whole row, a TP card's half, the halves merged).
+if(B70_TP AND B70_MTP)
+  add_executable(draft_prob_test kernels/draft_prob_test.cc)
+  target_include_directories(draft_prob_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(draft_prob_test PRIVATE b70_l0 b70_model)
+  b70_target_kernel_dir(draft_prob_test)
+  add_dependencies(draft_prob_test kernel_draft_prob_N248320_U248077 kernel_draft_prob_N124160_U124160
+                   kernel_draft_prob_N124160_U123917)
+  add_test(NAME draft_prob_test COMMAND draft_prob_test)
+endif()
 
 add_executable(json_test common/json_test.cc)
 target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)

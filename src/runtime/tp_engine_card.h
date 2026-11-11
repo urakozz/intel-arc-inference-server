@@ -59,6 +59,7 @@ struct TpEngine::Card {
   std::unique_ptr<MtpBuffers> mtp;
   Control* hctl = nullptr;
   std::vector<CapturedStep> drafts;                          // [kMaxDraft]
+  std::vector<CapturedStep> draft_probs;                     // [kMaxDraft], open-work 13: drafts ending in draft_prob
   std::vector<CapturedStep> verifies;                        // [M - 1], M = 1..kSlots, by the rule at row 0's key 1
   std::vector<std::unique_ptr<CapturedStep>> verify_deep;    // [M - 1]: DPAS bound where the rule switches by depth
   std::vector<uint32_t> verify_deep_from;

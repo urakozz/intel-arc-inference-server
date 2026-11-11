@@ -22,7 +22,10 @@ struct Control {
   // Spec 17b (tensor parallel): each card's argmax over its vocabulary half writes the winner's fp32 bits here
   // (tp.cl's tp_argmax_stage2, CTRL_OUTV); the host merges the two cards' rows. Untouched by every other list.
   uint32_t out_value[8];
-  uint32_t pad[4];         // pad to 128 B
+  // Open-work 13: a draft list's softmax max and normaliser (fp32 bits, draft_prob.cl) - the head's probability for
+  // its draft is 1 / normaliser. Written only by the draft lists captured with the probability (runtime::build_draft).
+  uint32_t draft_stat[2];
+  uint32_t pad[2];         // pad to 128 B
 };
 static_assert(sizeof(Control) == 128, "control block is two cache lines");
 }  // namespace runtime
