@@ -74,6 +74,8 @@ static_assert(offsetof(Control, debug_flag) == kernels::ctrl_index::kDebugFlag *
               "CTRL_DEBUG moved");
 // Spec 8: CTRL_LIVE=19 in src/kernels/CMakeLists.txt's GDN_SLOT_DEFINES.
 static_assert(offsetof(Control, gdn_live) == kernels::ctrl_index::kGdnLive * 4, "CTRL_LIVE moved");
+// Open-work 13: CTRL_DSTAT=28 in src/kernels/CMakeLists.txt's draft_prob lines.
+static_assert(offsetof(Control, draft_stat) == kernels::ctrl_index::kDraftStat * 4, "CTRL_DSTAT moved");
 // Spec 15c: the MoE route row - buffer_sizes.h sizes it, moe.cl (RW) writes it.
 static_assert(kMoeRouteWords == kernels::moe_route::kWords, "the MoE route row's width moved");
 // Spec 13a / 13c: the row table as the BATCH_ROWS builds index it (BROW_DEFINES, src/kernels/CMakeLists.txt) - the
@@ -252,6 +254,11 @@ class Capture {
     sb_ = sb;
     return *this;
   }
+  // Open-work 13: a draft list followed by its probability's two launches (draft_prob).
+  Capture& prob(bool on) {
+    prob_ = on;
+    return *this;
+  }
 
   CapturedStep run() {
     // One layer's K (or V) rows; at int8 (spec 12b) the scales follow every layer's rows
@@ -278,11 +285,14 @@ class Capture {
     if (mode_ == Mode::Draft || mode_ == Mode::StageDraft || mode_ == Mode::DraftRows || mode_ == Mode::TpDraft) {
       layer_ = head_layer();
       draft();
+      if (prob_) draft_prob();
       // Spec 15e: 23 launches with a dense head, 24 with a MoE head (draft_launches). Spec 17d: the head's own
-      // descriptor under TP (tp.cl's two argmax stages replace argmax.cl's one for one).
-      require(step_.kernel_count == draft_launches(hd()),
-              "the draft list has " + std::to_string(step_.kernel_count) + " launches, not the " +
-                  std::to_string(draft_launches(hd())) + " draft_launches() gives " + hd().name);
+      // descriptor under TP (tp.cl's two argmax stages replace argmax.cl's one for one). Open-work 13: 2 more with
+      // the probability.
+      const size_t want = draft_launches(hd()) + (prob_ ? 2 : 0);
+      require(step_.kernel_count == want, "the draft list has " + std::to_string(step_.kernel_count) +
+                                              " launches, not the " + std::to_string(want) + " draft_launches() gives " +
+                                              hd().name);
       require(step_.kernels.size() == step_.kernel_count, "a Kernel was created but never launched");
       require(step_.labels.size() == step_.kernel_count, "a launch went unlabelled");
       step_.list.close();
@@ -1793,6 +1803,29 @@ class Capture {
     }
   }
 
+  // Open-work 13: the draft's probability, after the draft list's argmax - draft_prob.cl over the logits row this
+  // list wrote (a TP card's vocabulary half, or the whole row: under a draft vocabulary -inf outside V'), its softmax
+  // max and normaliser into hctl.draft_stat. argmax_part is free again once the argmax's stage 2 has read it.
+  void draft_prob() {
+    require(mode_ == Mode::Draft || mode_ == Mode::TpDraft, "the draft probability is a draft list's (one card or TP)");
+    float* logits = mtp_->logits.as<float>() + size_t(draft_i_) * Qwen35::kVocab;
+    const bool tp = mode_ == Mode::TpDraft;
+    const uint32_t rows = tp ? m_.linears.at({loader::kTopLevel, LinearId::LmHead}).shape.N : Qwen35::kVocab;
+    const std::string v = kernels::draft_prob_variant(rows, tp ? tp_->vocab_used : d_.vocab_used);
+    {
+      l0::Kernel& k = kernel(v, "draft_prob_stage1", kWgArgmax);
+      k.arg_ptr(0, logits);
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, (rows + kArgmaxChunk - 1) / kArgmaxChunk, 1);
+    }
+    {
+      l0::Kernel& k = kernel(v, "draft_prob_stage2", kWgArgmax);
+      k.arg_ptr(0, hctl());
+      k.arg_ptr(1, b_.argmax_part.ptr());
+      launch(k, 1, 1);
+    }
+  }
+
   // Spec 8 §11: the draft's head over the reduced vocabulary V' (loader::DraftVocab) in
   // place of the full one - three launches for three:
   //
@@ -1908,6 +1941,7 @@ class Capture {
   const BatchRowsBind* br_ = nullptr;   // spec 13a / 13c: build_rows' table, pools and head bindings
   SlotBind sb_{};                        // spec 13c: the bound slot (capture.h; all null: the buffers' own)
   const DraftRowsBind* dr_ = nullptr;    // spec 13c: build_draft_rows' table, Control, rows and logits
+  bool prob_ = false;                    // open-work 13: the draft list ends with draft_prob
 };
 
 }  // namespace
@@ -1929,11 +1963,11 @@ CapturedStep build_tp_verify(l0::Context& ctx, const loader::LoadedModel& m, Dec
 }
 
 CapturedStep build_tp_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b, const MtpBuffers& mtp,
-                            const TpLink& link, uint32_t i) {
+                            const TpLink& link, uint32_t i, bool prob) {
   if (i >= MtpBuffers::kMaxK)
     throw std::runtime_error("runtime::build_tp_draft: draft index " + std::to_string(i) + " is outside [0, " +
                              std::to_string(MtpBuffers::kMaxK) + ")");
-  return Capture(ctx, m, b, mtp, link, 1, Mode::TpDraft, i).run();
+  return Capture(ctx, m, b, mtp, link, 1, Mode::TpDraft, i).prob(prob).run();
 }
 
 size_t decode_launches(const model::ModelDesc& d) {
@@ -1991,8 +2025,8 @@ CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, D
 }
 
 CapturedStep build_draft(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
-                         const MtpBuffers& mtp, uint32_t i, const SlotBind& slot) {
-  return Capture(ctx, m, b, nullptr, nullptr, 1, &mtp, Mode::Draft, i).slot(slot).run();
+                         const MtpBuffers& mtp, uint32_t i, const SlotBind& slot, bool prob) {
+  return Capture(ctx, m, b, nullptr, nullptr, 1, &mtp, Mode::Draft, i).slot(slot).prob(prob).run();
 }
 
 CapturedStep build_stage_verify(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
