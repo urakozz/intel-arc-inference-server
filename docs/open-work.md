@@ -16,10 +16,6 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 | 4 | **Flash-Next at full size - the expert-tiering probe** (from saber-engine, 2026-11-07). Flash-Next's 48 layers do not fit two 32 GB cards whole: keep the most-used experts in VRAM by a recorded route profile and read the rest in place, from (a) pinned host RAM over PCIe 3.0 (saber) or (b) card 1's VRAM over P2P (basalt); experts stay int4. The box's 121 GB of RAM holds every expert, so the VRAM hit rate decides it. Bar on one card: XeStrata, ~28 t/s | routing traces recorded 2026-11-09 (39 sources, 474 MB); the probe itself not started | the measured hit rate and t/s; then the operator decides whether spec 22 comes back |
 | 5 | **The quiet-box measurement session** - one record-grade speed run at the end, on an idle box and the newest driver. It measures every speed number (tensor parallel, 3l, TP + slots and replica throughput: tonight's numbers ran beside CPU jobs and are not records) and settles the open speed choices: list B (card hand-off copy vs peer, int8 KV, int8 prefill, draft vocabulary, Flash-Next's MTP norm and eager attention: the winner stays, the rest is deleted), 4096-row prefill chunks (+4.2 %, under the +5 % bar: the operator decides), MTP acceptance cold vs a prefix cache hit (< 1 % closes spec 16), and our adaptive MTP depth against saber's rule. The stages: `tools/box_validate.sh --with optin` (`--list` shows them); parked models' stages wait for those models | after everything above it | measured; README.md, docs/BENCHMARKS.md and docs/18-running-models.md refreshed |
 
-### The needed stages that have never passed (validation run `f73b249`, 2026-11-07: 232 PASS, 75 SKIP, 16 FAIL)
-
-Each row closes with a PASS (or moves to Waiting with its reason). A gate we touch gets a negative control - a deliberately broken input it must FAIL on (saber's rule: a gate nobody has watched fail is not a gate).
-
 ## Waiting - only a box run or a CPU job left
 
 | spec | what | proved by | state |
