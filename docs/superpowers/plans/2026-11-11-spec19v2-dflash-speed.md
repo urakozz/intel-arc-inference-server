@@ -69,16 +69,19 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
 
 ### Task 2: DFlash against today's recorded baselines (box; operator 2026-11-12)
 
-- [ ] **Step 1: `r82.d5`.** Do not re-run `--spec off` or `--mtp auto` for performance. Reuse today's main:
+- [x] **Step 1: `r82.d5`.** DFlash 88.806 t/s; golden/A4 39/39 f32-judge PASS (37 identical).
+  Saved MTP/DFlash prompts match exactly at 3,425 ids; the nominal 2,820 label was stale.
+  Do not re-run `--spec off` or `--mtp auto` for performance. Reuse today's main:
   - one card, MTP auto, slots_bench shape (2,820-token prompt, 512 ids, prefix cache hits): **73.2 t/s** (README);
   - plain decode at depth 4096: **33.5 t/s** (BENCHMARKS).
   - Run only `--spec dflash` through `tools/box_validate/slots_serve_bench.sh ... --spec dflash -- --counts 1`,
     same prompt, output length and prefix-cache shape. One sequence slot (DFlash does not support slots).
   - One golden + A4 greedy correctness round, using the existing references; no repeated plain/MTP serving arms.
   - Skip llama-benchy and rotated rounds here. The opencode replay with all three arms belongs to Tasks 7b/8.
-- [ ] **Early stop:** if DFlash exceeds **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
+- [x] **Early stop:** 88.806 > 80.5 t/s; operator decision pending, Tasks 3-7 paused. If DFlash exceeds
+  **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
   Tasks 3-7. This shape is an early screen, not a substitute for Task 8's final G-speed gate.
-- [ ] Record the result and the provenance of the reused baselines in BENCHMARKS.
+- [x] Record the result and the provenance of the reused baselines in BENCHMARKS.
 
 ### Task 3: AdaptiveK on measured costs (Mac)
 

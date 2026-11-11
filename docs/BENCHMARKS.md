@@ -896,6 +896,34 @@ drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers, int8 at load, beside the gate
 target's own hidden states and verifies up to 8 rows at once (specs 19b-19d; box queue rows 54-56). The acceptance in
 "P0" is measured on the Mac CPU (spec 19a, `docs/probes/probe-dflash-2026-10-08.md`); "D5" below is measured on the card. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
 
+### V2 baseline (2026-11-11, spec 19 v2 Tasks 1-2)
+
+Branch `spec19v2-dflash-speed`, base `8d21b9f9`, int8 drafter and full int8 head; no speed changes yet.
+Card 0, **busy box** (another card job ran concurrently). The operator's slim Task 2 reuses today's main baselines:
+MTP auto **73.2 t/s** (README's one-card row), plain decode **33.5 t/s** at depth 4096. Neither baseline was rerun.
+
+| slots_bench, one request | warm decode | cold / warm first token |
+|---|---:|---:|
+| recorded main, MTP auto, four sequence slots | 73.181 t/s | 2.316 / 1.091 s |
+| DFlash, one sequence slot, context 32768, bf16 KV | **88.806 t/s** | 2.502 / 1.171 s |
+
+Both saved requests contain **identical 3,425 prompt ids** and each generates **512 ids**, greedy with `ignore_eos`.
+The earlier 2,820-token shape label was stale. Both warm requests restore the prefix at token 2048, with the
+remaining prompt tail prefilling; prefix cache budget 32 GiB. MTP's recorded slot had context 32768. DFlash is
+**1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. Tasks 3-7 await the
+operator's decision; this single shape does **not** establish Task 8's replay/regression G-speed gate.
+
+Provenance on the box: `~/b70/logs/brag-speed/20261111-1536/card-bf16/{bench.jsonl,server-log/000003.json}`
+and `~/b70/logs/dflash-v2/baseline/slots/{bench.jsonl,server-log/000003.json,server.log}`. The DFlash command is
+`tools/box_validate/dflash_v2.sh d5`; its driver log is `~/b70/logs/dflash-v2/d5.log`.
+
+One golden/A4 serving round: **39/39 pass the f32 judge**, 37 bitwise identical to the saved plain stream;
+golden cjk (first difference 16) and prose (74) each have zero f32-rejected ids on either suffix. No missing
+references or skipped requests. Logs: `~/b70/logs/dflash-v2/{identity.log,baseline/identity/}`; saved plain
+reference: validation state `e88ce65d57d8-vs-e88ce65d57d8`, `r55.serve/off.r1/requests.jsonl`.
+Engine-tap CPU acceptance and calibrated iteration costs remain pending. Initial cost-probe ratios were invalid
+because its restored plain row was inactive; those ratios are excluded.
+
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
 **`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,

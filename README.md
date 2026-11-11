@@ -19,7 +19,7 @@ Why group size 64 rather than the usual 128: better accuracy, at the price of ab
 
 ## Numbers
 
-Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512 generated tokens:
+Qwen3.8-27B, MTP speculative decoding, each request a 3,425-token prompt and 512 generated tokens:
 
 | setup | requests at once | **total t/s** | per request t/s | first token, cold | first token, prefix cache hit |
 |---|---:|---:|---:|---:|---:|
