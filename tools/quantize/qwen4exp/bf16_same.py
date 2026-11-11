@@ -10,7 +10,8 @@ ignore list's linears, the routers, the hyper-connections, norms, the embedding,
 shards of the PLE table (which ple_int8.py then converts). On the box's XPU AutoRound writes them bf16 as it found
 them; on a CPU without bf16 (DEVICE=cpu) it writes fp32 widenings - those are checked to be exactly the widened
 source and restored to the source's bf16 bytes (the shard rewritten, config.json's dtype set back to bfloat16).
-Anything else - a changed value, a dtype other than bf16 / fp32 - is refused (exit 1). Streams one tensor at a
+Anything else - a changed value, another dtype than the source's (the PLE's I64 constants included) - is
+refused (exit 1). Streams one tensor at a
 time (the real export: ~172 GB read beside the source's same bytes).
 """
 import argparse
@@ -56,13 +57,12 @@ def main() -> None:
                 if n.endswith(INT4) or n not in src_map:
                     continue
                 t, s = f.get_tensor(n), src(n)
-                if t.shape != s.shape or t.dtype not in (torch.bfloat16, torch.float32) or \
-                        not torch.equal(t.float(), s.float()):
-                    errs.append(f"{fn}: {n} {t.dtype} {list(t.shape)} is not the source's {s.dtype} {list(s.shape)}")
-                elif t.dtype == torch.float32 and s.dtype == torch.bfloat16:
+                if t.dtype == s.dtype and torch.equal(t, s):
+                    same += 1
+                elif t.dtype == torch.float32 and s.dtype == torch.bfloat16 and torch.equal(t, s.float()):
                     widened[n] = s
                 else:
-                    same += 1
+                    errs.append(f"{fn}: {n} {t.dtype} {list(t.shape)} is not the source's {s.dtype} {list(s.shape)}")
         if widened and not errs:
             out = {}
             with safe_open(path, "pt") as f:
