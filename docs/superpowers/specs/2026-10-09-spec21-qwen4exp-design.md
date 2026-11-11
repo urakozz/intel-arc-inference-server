@@ -2,7 +2,7 @@
 
 **Implemented; continued in [spec 21 v2](2026-11-11-spec21v2-flash-next-v2-design.md) (2026-11-11).**
 
-**2026-11-07 (operator): plan 21q (our own AutoRound g64 export) DROPPED** - the engine serves Intel's AutoRound W4A16 g128 checkpoint through the exact g64 expansion (the one-format rule allows it), with the original's tokenizer beside it (`~/b70/models/qwen3.8-flash-next/` on the box); a 360 GB re-quantisation on a rented machine is not worth the slightly finer groups. `r31.ple_kl` (its evaluate.py, never written) dropped with it. Revisit only if Intel's checkpoint misses on our own tool-call checks.
+**2026-11-12 (operator): reversed - our own AutoRound g64 export, head and MTP experts included, is the weights again; spec 21 v2 §0 / §2 and plan 21v2a Tasks 1-3 carry it.** **2026-11-07 (operator): plan 21q (our own AutoRound g64 export) DROPPED** - the engine serves Intel's AutoRound W4A16 g128 checkpoint through the exact g64 expansion (the one-format rule allows it), with the original's tokenizer beside it (`~/b70/models/qwen3.8-flash-next/` on the box); a 360 GB re-quantisation on a rented machine is not worth the slightly finer groups. `r31.ple_kl` (its evaluate.py, never written) dropped with it. Revisit only if Intel's checkpoint misses on our own tool-call checks.
 
 > **Zero-config cleanup (operator 2026-11-06):** `--ple-dir` / `B70_Q4_PLE` (the PLE file is `<snapshot>-ple-int8/` only), `--tokenizer` (the snapshot's file is served; Intel's checkpoint is refused) and `B70_Q4_MTP_SELECT` (reuse only) were removed; MTP is `--spec mtp --spec-max K` (a fixed K).
 
