@@ -30,7 +30,7 @@
 # **PROMPTS names which sets to build** (default: the three short ones). Spec
 # 2 §6.2's long prompt is one invocation of the same loop:
 #
-#   OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_SNAP=<primary snapshot> \
+#   OUT_DIR=oracle-out-primary PROMPTS=long \
 #   ORACLE_THREADS=22 setsid nohup tools/oracle/golden.sh \
 #     > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
 #

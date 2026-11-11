@@ -213,11 +213,12 @@ It is part of the primary checkpoint's golden set (the RTN checkpoint it was fir
 run 2026-11-12). On the box, from the repo root, detached, behind the CPU model lock:
 
 ```bash
-S=$HOME/.cache/huggingface/hub/models--urakozz--Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ/snapshots/84575a18f209992ef96d819b31f924b489e3d55d
+# the primary checkpoint is run_in_container.sh's default (ORACLE_MODEL, through the HF cache mount); ORACLE_SNAP
+# would mount only the snapshot folder, whose files are links into blobs/ outside that mount
 mkdir -p ~/b70/logs/oracle-long
-OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_SNAP=$S ORACLE_THREADS=22 \
+OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_THREADS=22 \
   nohup setsid flock /tmp/b70-cpu-model.lock tools/oracle/golden.sh > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
-OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_SNAP=$S tools/oracle/check.sh
+OUT_DIR=oracle-out-primary PROMPTS=long tools/oracle/check.sh
 ```
 
 **Pre-registered cost, so the run has something to be scored against**
