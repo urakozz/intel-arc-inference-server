@@ -3454,7 +3454,7 @@ st_r77_serial() {
 }
 
 # ======================================================================================
-row 78 "spec 13c - several requests at once on ONE card: runtime::Engine's sequence slots (an asked --max-len's spare memory becomes 32768-position slots, spec 13 §11.2) behind server::Scheduler (cli::SlotsEngine); a lone request bitwise today's server, batched rows by the f32 judge (B1), the slots' isolation bitwise (B3), speed (plan 13c Tasks 2-5)"
+row 78 "spec 13c - several requests at once on ONE card: runtime::Engine's sequence slots (--max-num-seqs N: slot 0 beside N - 1 slots of 32768, spec 13 §11.2) behind server::Scheduler (cli::SlotsEngine); a lone request bitwise today's server, batched rows by the f32 judge (B1), the slots' isolation bitwise (B3), speed (plan 13c Tasks 2-5)"
 rownote 78 "One card (kind card) for the gates; r78.speed holds the whole box (timed, opt-in, an idle box). Hand back: r78.engine's S lines, r78.lone's IDENTICAL lines and the slots: startup line, r78.batch's IDENTICAL / JUDGED lines and serve_judge's SKIP_REASON (the contexts awaiting their f32 reference, dumped to oracle-forced-dumps/qwen-slots and qwen-serve - f32_refs.sh forced-qwen makes them), r78.speed's tables (probe_slots_speed's '| arm |' rows and rule line, SLOTS_BENCH lines)."
 stage r78.host   78 default cpu  -    -                              "host: slot_plan_test (the planner's slots), batch_rows_test, scheduler_test, dflash_scheduler_test (S6: the 8-row budget)"
 st_r78_host() {
@@ -3467,23 +3467,23 @@ st_r78_engine() {
   grab_all s '^S[0-9] |^slots_test|awaiting f32' 60
   finish
 }
-stage r78.lone   78 default card qwen r78.engine                     "B2 for a lone request: the golden and A4 prompts one at a time through b70-serve --max-len 32768 (four slots at bf16 KV, the scheduler) equal --max-len auto (one slot, the serial server) - bitwise, --spec off and mtp, prefix cache off (its restores are the two servers' own)"
+stage r78.lone   78 default card qwen r78.engine                     "B2 for a lone request: the golden and A4 prompts one at a time through b70-serve --max-num-seqs 4 --max-len 32768 (four slots of 32768, the scheduler) equal --max-len auto (one slot, the serial server) - bitwise, --spec off and mtp, prefix cache off (its restores are the two servers' own)"
 st_r78_lone() {
   local sp
   for sp in off mtp; do
     chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/auto.r1 auto 1 $SNAP_QWEN --max-len auto --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec $sp: --max-len auto (one slot)"
-    chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/slots.r1 slots 1 $SNAP_QWEN --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec $sp: --max-len 32768 (slots), one request at a time"
+    chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/slots.r1 slots 1 $SNAP_QWEN --max-num-seqs 4 --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128" "--spec $sp: --max-num-seqs 4 --max-len 32768 (slots), one request at a time"
     chk "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref auto" "--spec $sp: a lone request on the slots server is the serial server's, bitwise"
   done
   grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^slots:' 20
   finish
 }
-stage r78.batch  78 default card qwen r78.lone                       "B1 through the server: the golden and A4 prompts two and four at a time (serve_client.py --concurrency) on b70-serve --max-len 32768 against one at a time - identity recorded, every first difference by the f32 judge (serve_judge.py, the int8 head's references; one awaiting its reference SKIPs, never passes) - --spec off and mtp, prefix cache off"
+stage r78.batch  78 default card qwen r78.lone                       "B1 through the server: the golden and A4 prompts two and four at a time (serve_client.py --concurrency) on b70-serve --max-num-seqs 4 --max-len 32768 against one at a time - identity recorded, every first difference by the f32 judge (serve_judge.py, the int8 head's references; one awaiting its reference SKIPs, never passes) - --spec off and mtp, prefix cache off"
 st_r78_batch() {
   local sp c
   for sp in off mtp; do
     for c in 1 2 4; do
-      chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/c$c.r1 c$c 1 $SNAP_QWEN --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128 --concurrency $c" "--spec $sp: $c at a time"
+      chk "PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/c$c.r1 c$c 1 $SNAP_QWEN --max-num-seqs 4 --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128 --concurrency $c" "--spec $sp: $c at a time"
     done
     x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref c1"
     serve_judge "$STATE/$STAGE/$sp" c1 "--spec $sp: every first difference from one at a time by the f32 judge"
@@ -3491,14 +3491,14 @@ st_r78_batch() {
   grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON' 40
   judged_finish
 }
-stage r78.b4     78 default card qwen r78.lone                       "B4 on the slots server (b70-serve --max-len 32768): a stream dropped mid-request frees its slot (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text (replica_check.py's b4 on one card)"
+stage r78.b4     78 default card qwen r78.lone                       "B4 on the slots server (b70-serve --max-num-seqs 4 --max-len 32768): a stream dropped mid-request frees its slot (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text (replica_check.py's b4 on one card)"
 st_r78_b4() {
-  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE $DEVICE $SNAP_QWEN --max-len 32768 --spec off -- --mode b4" "b4 on the slots server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE $DEVICE $SNAP_QWEN --max-num-seqs 4 --max-len 32768 --spec off -- --mode b4" "b4 on the slots server"
   chk "python3 tools/box_validate/replica_check.py b4 --replica $STATE/$STAGE/requests.jsonl" "B4"
   grab_all b4 '^B4|^slots:' 20
   finish
 }
-stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts restored from the prefix cache and 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
+stage r78.speed  78 optin   gpu  qwen r78.engine                     "speed (an idle box, held whole): probe_slots_speed (the engine API: 1 plain / MTP, 2..4 requests plain and MTP rows at 4096 ids, bf16 and int8 KV) and slots_bench.py through b70-serve --max-num-seqs 4 --max-len 32768 (1 / 2 / 4 / 8 requests at once behind 2820-id prompts: TTFT cold, then the same prompts restored from the prefix cache and 512 ids each - decode throughput, per-request t/s) --spec off and mtp, bf16 and int8 KV, and the --max-len auto server's 1 / 4 beside them (timed)"
 st_r78_speed() {
   idle before
   local kv sp
@@ -3507,7 +3507,7 @@ st_r78_speed() {
   done
   for kv in bf16 int8; do
     for sp in off mtp; do
-      chk "PORT=$PORT tools/box_validate/slots_serve_bench.sh $STATE/$STAGE/$kv.$sp $SNAP_QWEN $kv.$sp --max-len 32768 --kv-cache $kv --spec $sp" "slots_bench, $kv KV, --spec $sp"
+      chk "PORT=$PORT tools/box_validate/slots_serve_bench.sh $STATE/$STAGE/$kv.$sp $SNAP_QWEN $kv.$sp --max-num-seqs 4 --max-len 32768 --kv-cache $kv --spec $sp" "slots_bench, $kv KV, --spec $sp"
     done
   done
   chk "PORT=$PORT tools/box_validate/slots_serve_bench.sh $STATE/$STAGE/auto.mtp $SNAP_QWEN auto.mtp --max-len auto --spec mtp -- --counts 1,4" "slots_bench, the one-slot server, --spec mtp"
