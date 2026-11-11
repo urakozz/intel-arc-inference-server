@@ -67,7 +67,7 @@ N` is split between the cards (card 0 takes the odd one), up to 4 per card.
   else touches that card; the other card keeps stepping, and both cards may prefill at once. A card with rows decoding
   starts its next chunk after its step (chunk, step, chunk, ...).
 - **Cards fail apart:** a card that throws fails only its own rows. The prefix cache is the one shared piece: a
-  snapshot saved by card 0 restores on card 1.
+  snapshot saved by card 0 gives a prefix cache hit on card 1.
 
 ### Tensor parallel (`--parallel tp`): one request, both cards
 

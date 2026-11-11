@@ -84,7 +84,7 @@ cards' BARs to the full 32 GB when it loads.
 
 **The driver can answer EBUSY (busy) to a request, and the runtime retries that forever.** There is no
 retry limit, so an EBUSY that never clears is a hang, not an error. It happened with one large pinned
-host allocation that the second card maps through a shared import (the prefix-cache restore hang,
+host allocation that the second card maps through a shared import (the prefix cache hit hang,
 2026-11-11); the rule since then is that any host allocation both cards use stays at or below 4 GiB
 (the prefix cache is made of 2 GiB pieces).
 
