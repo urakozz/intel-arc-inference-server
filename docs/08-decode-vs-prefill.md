@@ -85,21 +85,15 @@ OpenVINO's GEMV is hard-gated at `M == 1`, so the moment speculative decoding
 produces two or more tokens it drops onto a general path. vLLM's tile only
 becomes fully utilised *at* `M = 8`.
 
-**This was an opportunity nobody had taken; since 2026-11-01 this engine has (spec 28b, `gemm_sm`,
-doc 12).** Weights dominate
-decode traffic and activations are negligible, so a **weight-stationary kernel
-parameterised on `M ∈ [1,8]`** would amortise the entire weight read across `M`
-tokens: stream each weight tile once, multiply it into `M` activation vectors
-held in registers. It would compound with speculative decoding rather than
-competing with it, because speculation's whole cost today is paying full weight
-traffic on every draft step.
+Weights dominate decode traffic and activations are negligible, so the right kernel for `M` in 2..8 is
+**weight-stationary**: stream each weight tile once and multiply it into all `M` activation vectors held in
+registers, so the whole weight read is shared by `M` tokens. That compounds with speculative decoding instead
+of competing with it, because speculation's cost is otherwise a full weight read on every draft step.
 
-The engine now has speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup),
-so `M` is 2..8 on every verify step. Those lists run a small-batch DPAS GEMM that streams each weight
-tile once and multiplies it into all `M` rows (`gemm_sm`, spec 28b): verify(8) went from 3.17 plain
-steps to 1.57 (busy box, to be re-checked quiet; BENCHMARKS). `M = 1` keeps the GEMV, bitwise as
-before. Weight traffic was the reason, and the numbers agree with it: the speculation's cost is no
-longer a full weight read per guessed row.
+The engine has that kernel. Speculative decoding (the model's MTP head, a DFlash draft model, prompt lookup)
+makes `M` 2..8 on every verify step, and those steps run a small-batch DPAS GEMM (`gemm_sm`, spec 28b, doc 12)
+that reads each weight tile once for all `M` rows. Verifying 8 rows went from 3.17 plain decode steps to 1.57
+(measured on a busy box; the table is in [BENCHMARKS.md](BENCHMARKS.md)). `M = 1` keeps the GEMV, bit for bit.
 
 ## Design rules that follow
 
@@ -196,19 +190,13 @@ extracted weight equals the fp32 dequant product **truncated** to bf16 (zero sig
 at most one bf16 ULP from our round-to-nearest oracle. Slower and not identical: do not
 adopt.
 
-**Intel's chunked delta net kernel: not a target.** It builds torch-free (two probe-side
-shims: a minimal ATen stand-in, and `int` overloads for a barrier-scope constant that fails
-to compile as shipped). The first probe fed raw Q and K (the file's comments describe an
-input precondition, not code: it normalizes nothing), and after fixing that its state still
-sat at a mean relative error near 1.0 against the CPU reference, so its 0.795 ms per chunk
-(against our 303 ms then, 382x) was never a price. After the probe's input and reset
-contract were repaired, the revision vLLM's build carries passes the CPU-reference bands
-(state max / mean relative error 0.040 / 0.0016 at 129 tokens, 0.056 / 0.0016 at 2048) but
-returns **differing bytes across repetitions** of one call, which fails the determinism gate
-outright. A newer upstream revision (local-space barriers replaced by
-`sycl::group_barrier`, split-barrier scopes typed) is byte-identical over eight repetitions
-and four fixtures. It is a numerical and performance reference, not a drop-in: no
-model-level gate for vendor arithmetic was ever run.
+**Intel's chunked delta net kernel: not a target.** It builds without torch (with two small
+shims in the probe). Once the probe's input contract was repaired, the revision vLLM's build
+carries passes the CPU-reference bands (state max / mean relative error 0.040 / 0.0016 at 129
+tokens, 0.056 / 0.0016 at 2048) but returns **differing bytes across repetitions** of one call,
+which fails the determinism gate outright. A newer upstream revision is byte-identical over
+eight repetitions and four fixtures. It is a numerical and performance reference, not a
+drop-in: no model-level gate for vendor arithmetic was ever run.
 
 **The matched comparison (2026-09-20).** Same box, checkpoint, 4096 ids, chunk 2048, three
 warm requests: this engine 2748.2 ms (1490 t/s), with recorded L0 chunks 2734.4 ms, vLLM
@@ -263,12 +251,12 @@ L0's state, with splits at multiples of 64 bitwise, and not the last logits.
 | Decode `M=2..8` | tile partly used | falls off to oneDNN | small-batch DPAS GEMM `gemm_sm`, weights read once for all rows (spec 28b) |
 | Prefill | W4A16 XMX tiles | W4A16 via oneDNN | W4A16, own DPAS GEMM, zero host waits |
 
-Prefill is ahead, decode `M=1` is about 5% behind, and the `M ∈ [1,8]` kernel that
-motivated the original thesis now exists here, for `M >= 2`.
+Prefill is ahead of vLLM; decode at `M=1` was about 5% behind it in the last matched comparison
+([BENCHMARKS.md](BENCHMARKS.md)); the `M ∈ [1,8]` kernel that motivated the original thesis exists here for `M >= 2`.
 
 ## Still open
 
-Why OpenVINO's prefill is slower than vLLM's is **not established**. oneDNN does
+Why OpenVINO's prefill is slower than vLLM's is **not established** ([07-open-questions.md](07-open-questions.md)). oneDNN does
 use XMX and does handle int4, so "it does not use XMX" is not the explanation:
 both engines upconvert int4 in a W4A16 mainloop. The remaining plausible causes,
 untested, are that oneDNN's generic path is less tuned for Battlemage than
