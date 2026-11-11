@@ -50,8 +50,7 @@ const void* at_const(const l0::Mem& m, size_t off) {
 void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr) {
   if (backend == PrefillBackend::L0Int8) {
-    require(out == nullptr, "the l0-int8 linears write partials only");
-    linear_i8(cx, kc, s, *q, w, x, M);
+    linear_i8(cx, kc, s, *q, w, x, M, out);
     return;
   }
   linear_l0(cx, kc, s, w, x, M, out);
@@ -381,7 +380,9 @@ void tp_fold(Context& cx, KernelCache& kc, PrefillScratch& s, const float* p0, c
 void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, uint32_t max_len,
                   void* ctrl, uint32_t pos, uint32_t C, uint32_t unit, l0::Mem& gdn_state_mem,
                   l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
-                  const TpUnitIo& io) {
+                  const TpUnitIo& io, PrefillBackend backend, Int8State* q) {
+  require((q != nullptr) == (backend == PrefillBackend::L0Int8),
+          "the int8 state must be given iff the backend is l0-int8");
   const model::ModelDesc& d = *m.desc;
   require(C > 0 && C <= s.chunk_cap(),
           "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
@@ -406,7 +407,7 @@ void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedM
   pf_norm_finish(cx, kc, s, norm_w, io.resid, normed, C);
   profile_wait(cx, Phase::kNorm);
   if (!mixer) {
-    mlp_body(cx, kc, s, m, l, C, PrefillBackend::L0, nullptr, io.own);
+    mlp_body(cx, kc, s, m, l, C, backend, q, io.own);
     return;
   }
   // The layer's GDN / FA ordinal: its state slice.
@@ -414,8 +415,7 @@ void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedM
   for (uint32_t i = 0; i < l; ++i) (d.is_fa(i) ? fa : gdn) += 1;
   const model::LayerDesc L{l, d.is_fa(l) ? model::LayerKind::FA : model::LayerKind::GDN, {}, {}};
   mixer_body(cx, kc, s, m, ctrl, pos, C, L, small, static_cast<uint8_t*>(gdn_state_mem.ptr()),
-             static_cast<uint8_t*>(conv_ring_mem.ptr()), 0, kv_k_mem, kv_v_mem, kv, PrefillBackend::L0, nullptr, gdn,
-             fa, io.own);
+             static_cast<uint8_t*>(conv_ring_mem.ptr()), 0, kv_k_mem, kv_v_mem, kv, backend, q, gdn, fa, io.own);
 }
 
 void step_tp_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, void* ctrl,

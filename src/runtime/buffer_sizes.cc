@@ -425,7 +425,7 @@ size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t l
 }
 
 uint32_t prefill_int8_max_k(const model::ModelDesc& desc) {
-  return desc.is_moe() ? slab_k(desc) : desc.intermediate;
+  return int8_padded_k(desc.is_moe() ? slab_k(desc) : desc.intermediate);
 }
 
 // --- spec 15d: the MoE prefill scratch ------------------------------------------------
