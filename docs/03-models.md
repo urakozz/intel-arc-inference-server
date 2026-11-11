@@ -1,23 +1,22 @@
 # The target model
 
-The engine supports one model family, `model_type: qwen3_5`, on purpose. A
-general engine cannot hardcode the things this one hardcodes; specialisation is
-the whole strategy.
+This document is about Qwen3.8-27B (`model_type: qwen3_5`), the engine's first and main model: a general engine
+cannot hardcode the things this one hardcodes, and specialisation is the whole strategy. The focus is Qwen3.8-27B
+for agentic coding first, then Qwen3.8-Flash-Next; the order is kept in [open-work.md](open-work.md).
 
-This document is that target. The families added since each have their own
-engine, specialised the same way, and their own spec: Ornith (15),
-K2-Horizon (18), Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and
-Nemotron 3.5 Bolt (25). LFM2.5, Muse-Glimmer and LiLiCorr were dropped on
-2026-10-27, Agnes 3.0 Flash (spec 14) on 2026-11-07; Flint (spec 27) and Nanbeige (spec 29) are parked since 2026-11-04.
-Qwen3.8-Flash-Next is 12 QSA sparse-attention + 36 GDN layers, a 512-expert MoE
-(mixture of experts: a router picks a few expert networks per token), 4-stream
-hyper-connections and a 51.8 GB host-resident n-gram embedding. It is built through
-serving (decode 21c, prefill 21d, `b70-serve` with its prefix cache and MTP head
-21e) and is **in progress**: its prefill correctness fix is open, and it is served
-**truncated** (`--layers N`) because the whole model needs spec 22's expert-offload
-tier. Its chat template is Qwen3.8's byte for byte; its tokenizer is not (the
-original's split adds `\p{M}`, and Intel's interim checkpoint ships Qwen3.8's
-file). What each one runs, and with which flags:
+The other models each have their own engine, specialised the same way, and their own spec: Ornith (spec 15),
+K2-Horizon (18), Kolibri-1 (20), Qwen3.8-Flash-Next (`qwen4_exp`, spec 21) and Nemotron 3.5 Bolt (25), which is
+parked until Flash-Next is done. LFM2.5, Muse-Glimmer and LiLiCorr as a model were dropped on 2026-10-27 (LiLiCorr
+lives on as Bolt's draft model) and Agnes 3.0 Flash on 2026-11-07; Flint (spec 27) and Nanbeige (spec 29) are
+parked and not built.
+
+Qwen3.8-Flash-Next is 12 QSA sparse-attention layers and 36 GDN layers, a 512-expert MoE (mixture of experts: a
+router picks a few expert networks per token), 4-stream hyper-connections and a 51.8 GB host-resident n-gram
+embedding. Decode, prefill and `b70-serve` (with the prefix cache and the MTP head) are built, and its prefill
+matches an f32 reference. It is served truncated (`--layers N`), because the whole model does not fit two 32 GB
+cards; the expert-tiering probe that decides how to run it whole is open-work item 4. Its chat template is
+Qwen3.8's byte for byte; its tokenizer is not (the original's split adds `\p{M}`, and Intel's interim
+checkpoint ships Qwen3.8's file). What each model runs, and with which flags:
 [18-running-models.md](18-running-models.md).
 
 ## The checkpoint
@@ -215,8 +214,8 @@ the zero-config cleanup (`b70-decode --lm-head bf16` was the byte-matched arm); 
 
 1. **No MoE.** The hardest kernel family in the larger models of this family is
    simply absent. No grouped GEMM.
-2. **vLLM is already at 81.7% of the roofline on this model.** 31.01 t/s times
-   15.540 GB is 482 GB/s of a measured 590. Decode is not won by one big lever;
+2. **vLLM was already at 81.7% of the roofline on this model** (its early baseline, 31.01 t/s on the first
+   stack): 31.01 t/s times 15.540 GB is 482 GB/s of a measured 590. Decode is not won by one big lever;
    it is won by several small ones that multiply (doc 05).
 3. **GDN dominates the layer count, not the byte count.** 48 of 64 layers, and
    `sycl-tla` has no example for them - but the recurrent state is
@@ -266,7 +265,7 @@ manifest**. The 27B happens not to need that rule; the next checkpoint may.
 
 ## Benchmark command
 
-Every vLLM number in these docs comes from this, so new ones must too:
+Every vLLM number in these docs came from this, so new ones must too:
 
 ```bash
 uvx llama-benchy --base-url http://0.0.0.0:8000/v1 --model "$MODEL" \

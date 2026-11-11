@@ -188,15 +188,20 @@ a first-class path in Intel's own kernel library either.
 
 ## Two cards, and which software stack these numbers come from
 
-The box has two B70s. Peer-to-peer access (P2P: one card reading or writing the other's memory
-directly over PCIe, without bouncing through host RAM) works natively on Linux 7.4.0-rc1, which the
-box has run since 2026-11-04; before that it needed a local kernel patch. The engine uses it for the
-pipeline-parallel hand-off of the hidden state (`--pipeline-handoff peer`; `copy` is the default).
-The second card is not interchangeable with the first: prefill runs 3.2-3.4% slower on it (doc 10).
+The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM. Peer-to-peer access (P2P: one
+card writing straight into the other's memory over PCIe, without bouncing through host RAM) works natively on
+the mainline Linux 7.4.0-rc2 kernel; earlier kernels needed a local patch. The engine uses it for the
+pipeline-parallel hand-off of the hidden state (`--pipeline-handoff peer`; `copy` is the default) and for the
+two-card tensor-parallel runs. The second card is not interchangeable with the first: prefill runs 3.2-3.4%
+slower on it ([10-the-box.md](10-the-box.md)).
 
-The properties above (the `driver_version` line in particular) and the rates measured in this
-document were taken on earlier stacks. The box has run **compute runtime 26.40.40196.8 and IGC (the
-Intel Graphics Compiler) 2.42.6** since 2026-11-04. The hardware rates (DPAS, bandwidth) are
-properties of the silicon and are not expected to move; the kernel timings in the other documents
-are to be re-measured on a quiet box after the upgrade, as the opening sentence of this file says to
-do after any driver bump.
+The card's firmware caps each card's BAR (the window the CPU sees its memory through) at 16 GB (ReBarState 14;
+15 does not POST); the xe kernel driver resizes both cards to the full 32 GB when it loads. The Level Zero
+runtime retries an ioctl that returns EBUSY forever, so a lasting EBUSY is a hang, not an error. This is why
+any host allocation that both cards map stays at or below 4 GiB (the prefix cache is pinned in 2 GiB pieces).
+
+The software is compute runtime 26.40.40196.8 (held at that version), IGC (the Intel Graphics Compiler)
+2.42.6 and Level Zero loader 1.34. The `driver_version` line and the rates measured in this document come
+from earlier stacks. The hardware rates (DPAS, bandwidth) are properties of the silicon and are not expected
+to move; the kernel timings in the other documents are re-measured in one quiet-box session
+([open-work.md](open-work.md), item 5), as the opening sentence of this file says to do after any driver bump.
