@@ -22,7 +22,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 
 | group | stages | what they need |
 |---|---|---|
-| **Qwen3.8** | `mtp_verify_32k_test` / `_128k_test` (contexts n31742 / n130046): their f32 references computing on the CPU (memory-bounded, 130k layer by layer, ~07:30 2026-11-11). `mtp_verify_kv8_test` / `mtp_gpu_kv8_test`: wired to their f32 judges, a card-0 rerun left | the references, then card 0 (~1 h) |
+| **Qwen3.8** | One test fails: `mtp_gpu_kv8_test` (int8 KV with the int8 prefill, MTP) - 3 contexts rejected by the f32 judge by 13-24 ulp. It looks like the accepted int8 prefill + int8 KV known fail, not the MTP verify (`mtp_verify_kv8_test` passes bitwise) | the operator: accept the 3 as that known fail, or wait for its fix ([low-priority-work.md](low-priority-work.md)) |
 | **Replica + per-card slots** (merged 2026-11-10, untested on the cards) | `--parallel replica` with an asked `--max-len` gives each card 13c's slots. Left: `box_validate.sh --only r77 --force` (G0 not rerun for these merges), 4-8 requests at once on `--parallel replica --max-len 32768` (by hand: `r78.batch` has no replica mode) with first differences by the f32 judge, throughput against one card's slots and plain replica | both cards after TP + slots, tonight |
 
 ## Waiting - only a box run or a CPU job left
@@ -43,6 +43,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 
 | date | spec | what |
 |---|---|---|
+| 2026-11-11 | Qwen3.8 | **Long-context MTP verify passes:** f32 references for the 32k and 130k contexts (8.1 h on the CPU, 37 GiB peak), then `mtp_verify_32k_test`, `_128k_test` and `mtp_verify_kv8_test` PASS on one card |
 | 2026-11-11 | 7 | **TP + slots ruled out** (operator): with MTP, 4 requests at once gave 121 t/s against replica's 206, and its batched rows had crossing failures and a 100-ulp f32-rejected id; kept on branch `tp-slots`, notes in [low-priority-work.md](low-priority-work.md) |
 | 2026-11-11 | 3l (2) | **Short prefill chunks deep in a session 4.5-4.9x faster**: split-K flash attention for chunks of <= 128 rows; a 16-row turn at 128k 441 -> 98 ms (bf16), 526 -> 108 ms (int8); the f32 judge rejects 0 ids ([record](probes/probe-longctx-decode-2026-11-09.md)) |
 | 2026-11-10 | 17b-d | **Tensor parallel for Qwen3.8 on two B70s merged**: decode 1.61x one card, prefill 1.42-1.75x, serve `--spec auto` ~1.46x |
