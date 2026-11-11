@@ -1,5 +1,8 @@
 # Prior art: what to borrow, what to avoid
 
+What other projects' code taught this one. None of it is built into the engine: the engine is C++ on Level
+Zero with its own OpenCL C kernels, and these are references to read.
+
 ## `sycl-tla` - the kernel templates
 
 A fork of NVIDIA CUTLASS extending CUTLASS and CuTe to Intel GPUs via SYCL.
@@ -8,12 +11,12 @@ example targets this silicon directly.
 
 | Example | Use |
 |---------|-----|
-| `00_bmg_gemm` | Baseline bf16 GEMM - start here to validate the toolchain |
+| `00_bmg_gemm` | Baseline bf16 GEMM, the first thing to build to check a toolchain |
 | `02_bmg_gemm_mixed_dtype` | int4/int8 weights times bf16 activations |
 | `03_bmg_gemm_streamk` | Stream-K, the split-K relative. Read for how `sycl-tla` fills the device when `M x N` tiles are too few; the same problem the decode GEMV solves with split-K |
 | `05_bmg_gemm_with_epilogues` | Fusing SiLU, bias and residual into the GEMM |
-| `06_bmg_flash_attention` | The 16 full-attention layers |
-| `04_bmg_grouped_gemm`, `10_bmg_grouped_gemm_mixed_dtype` | MoE, if a MoE model is ever served |
+| `06_bmg_flash_attention` | Flash attention, a different approach from the engine's own `pf_flash_attn` |
+| `04_bmg_grouped_gemm`, `10_bmg_grouped_gemm_mixed_dtype` | MoE grouped GEMM (the engine's MoE models use their own kernels) |
 | `08_bmg_gemm_f8`, `09_bmg_grouped_gemm_f8` | FP8 - not used; there is no reachable FP8 matmul on this device (doc 01) |
 | `50_xe35_*`, `51_xe35_*` | Block-scaled MX - **Xe3.5, not Battlemage** |
 | `12_xe20_moe_gemm_cute_interface` | Xe2 MoE via the CuTe interface |
@@ -60,8 +63,8 @@ touched these files, so their failure modes are already known.
 | `compute-runtime` | Intel NEO. When L0 behaviour surprises you, the answer is here |
 | `intel-graphics-compiler` | IGC, what `ocloc` runs. Relevant the moment you read generated assembly |
 | `openvino.genai` | A working C++ LLM pipeline. Read its scheduling and KV handling; ignore its model format. Also the reference for the **tokenizer layer**: `openvino_tokenizers` for BPE, `google/minja` for chat templates, and `text_streamer.cpp` for incremental UTF-8-safe detokenisation (doc 11) |
-| `auto-round` | The quantiser we keep, and `auto_round_extension/ark` - the runtime we are replacing |
-| `vllm`, `vllm-xpu-kernels` | The incumbent and the baseline. Their XPU kernels are the reference implementation to beat |
+| `auto-round` | The quantiser we use for every checkpoint (our own AutoRound int4 g64 re-quants), and `auto_round_extension/ark` - the runtime we replaced |
+| `vllm`, `vllm-xpu-kernels` | The incumbent and the speed baseline. Their XPU kernels are the reference implementation to beat |
 | **`oneDNN`** | **The most valuable checkout after `sycl-tla`.** Intel's own JIT GEMM generator (`gemmstone`), where OpenVINO's prefill actually runs, and where hardware capability is written down as explicit gates |
 | `openvino` | The GPU plugin: `fully_connected_gpu_gemv.cl` is the decode kernel that beats vLLM. Read it (doc 08) |
 | `model_server` | OpenVINO Model Server, OpenAI-compatible serving on top of OpenVINO. Reference for the HTTP/SSE layer, not for the engine |

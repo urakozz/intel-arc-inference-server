@@ -1,207 +1,84 @@
 # Open questions
 
-What is genuinely not known, ranked by how much the answer would change the
-design. Nothing here is settled, and nothing here should become an assumption in
-a design document without being measured first.
+What is genuinely not known, ranked by how much the answer would change the design. These are questions about
+the card and the numerics, not work items: scheduled work is in [open-work.md](open-work.md), ruled-out work
+in [low-priority-work.md](low-priority-work.md). Nothing here is settled, and nothing here should become an
+assumption in a design document without being measured first.
 
-Questions that have been answered are not listed. Their answers live where they
-are used: the DPAS rate landscape in [01-hardware.md](01-hardware.md), the
-format decisions in [02-formats.md](02-formats.md), the time decomposition and
-the rejected optimisations in [05-perf-model.md](05-perf-model.md), the
-execution model in [04-architecture.md](04-architecture.md).
+Questions that have been answered are not listed; their answers live where they are used: the DPAS rate
+landscape in [01-hardware.md](01-hardware.md), the format decisions in [02-formats.md](02-formats.md), the
+time decomposition and the rejected optimisations in [05-perf-model.md](05-perf-model.md), the execution
+model in [04-architecture.md](04-architecture.md). Recently answered, in one line each:
 
-## 1. Why is decode still about 5% behind vLLM, on the same bytes?
+- **Is W4A4 (int4 weights times int4 activations) reachable?** No: the DPAS rate is real (4.000x bf16) but the
+  activations roughly double the output error ([probe](probes/probe-w4a4-2026-10-28.md), doc 05).
+- **Is W8A8 worth anything for prefill?** Yes: the int8 prefill path (int4 weights turned into rotated int8, int8
+  matrix math) is the `l0-int8` backend, about 30% faster than the bf16 walk (doc 17, BENCHMARKS.md).
+- **Does quantising `lm_head` to int8 cost accuracy?** Not measurably against the gates; it is the serving default
+  (spec 9, BENCHMARKS.md "int8 lm_head"). The int4 head is the open part, below.
+- **Why did the DPAS verify-attention kernel pick the wrong token at 8 rows?** It rounded the softmax weights to
+  bf16 before the P x V product. Splitting them into two bf16 halves fixed it, and the f32 judge (doc 14) now
+  covers the kernel ([probe](probes/probe-verify-attn-2026-11-03.md)).
+- **Can a profile see inside the prefill walk?** Yes: `B70_PREFILL_PROFILE=1` times each phase with Level Zero
+  kernel timestamps (it perturbs the walk, so it attributes and does not give the headline wall).
+- **Can a SYCL kernel share a Level Zero command list with ours?** No longer asked: the sycl-tla path was removed
+  and nothing in the engine uses SYCL.
 
-The standing rows are **29.45 t/s against 31.01**, byte-matched, on a roofline
-of 37.97. This is the project's largest open question and it has resisted the
-obvious answers.
+## 1. What made decode 5% slower than vLLM on the same bytes?
 
-What is ruled out, each by measurement:
+In 2026-09 the byte-matched rows were 29.45 t/s against vLLM's 31.01, on a roofline of 37.97, and the cause was
+never found. What is ruled out, each by measurement (doc 05): host overhead (99.77% of the step is inside the
+GPU fence), the linears (89-97% of their per-shape bandwidth ceilings), `gdn_step` (92% of device bandwidth),
+launch count (the dispatch gap is 1.1% of a step) and the attention grid's early-out (0.11%). A 5% gap made of
+ten 0.5% terms is a different problem from a 5% gap with one cause, and which this was has not been established.
+It no longer decides anything: the serving default (int8 head, later decode work) is faster than that vLLM number,
+though not byte-matched with it, and the vLLM comparison is not re-run (operator, 2026-11-10).
 
-- **Host overhead.** 99.77% of the step is inside the GPU fence and the host
-  spends 97 us per token. There is nothing left to delete.
-- **The linears.** They run at 89-97% of their per-shape bandwidth ceilings, and
-  `lm_head` alone runs at 98.5% of the measured 590 GB/s.
-- **`gdn_step`.** 1.7% of the step at 1.09x its own traffic floor, 92% of device
-  bandwidth.
-- **Launch count.** The in-situ dispatch gap is 0.473 ms, about 1.1% of a step.
-- **The attention grid's early-out.** 0.11% of a step for 3072 idle
-  work-groups.
+## 2. What sets `attn_decode`'s per-launch term?
 
-What remains is the attention kernel's unexplained per-launch term, below, plus
-the accumulation of several kernels each within a few percent of their own
-ceilings. A 5% gap made of ten 0.5% terms is a different problem from a 5% gap
-with one cause, and which of the two this is has not been established.
+At the 2026-08 stack the retiled attention launch cost 224.046 us, its dominant named term the **KV load path at
+55.4%** (39.2% the 32-byte load messages themselves, 16.2% cache service), and **four successive cost models
+died** on it: two to a third depth point, a per-work-group occupancy ceiling to a bit-identical rewrite, a
+fill-fraction model and its refit to a block sweep. What is missing is a model that predicts the launch time from
+the shape, which any further lever here would have to be designed against. The kernel has been reworked since
+(int8 KV readers, the DPAS verify attention), so a model would be built on the current kernels.
 
-## 2. The 224 us per-launch term in `attn_decode`
+A methodology warning that belongs with it: **a "hold the address constant" ablation is not a cache ablation.** A
+loop-invariant address over a `restrict` pointer is legally hoistable, IGC hoisted it, and that turned a
+cache-miss probe into a message-count probe and inverted the answer. Make the hot address a function of the loop
+variable.
 
-**Four successive cost models have died on this kernel.** Two attention models
-died to a third depth point, a per-work-group occupancy ceiling died to a
-bit-identical rewrite, and a fill-fraction model and its refit died to a block
-sweep.
+## 3. What would an int4 `lm_head` cost in accuracy?
 
-What is measured: the retiled launch costs 224.046 us, its dominant named term
-is the **KV load path at 55.4%** - 39.2% the 32-byte load messages themselves,
-16.2% cache service - and the shape is throughput-bound rather than a latency
-chain. What is not measured is a model that predicts the launch time from the
-shape, which is what any further lever here would have to be designed against.
+The speed is known (-3.05 ms a token at record grade against the bf16 head) and the int8 head already ships. The
+accuracy of the int4 head has never been run, and `lm_head` is known to be quantisation-sensitive. A clean
+experiment does not exist: comparing a self-quantised checkpoint against a published one confounds the head with
+everything else two quantiser runs differ in (`quant_method` spelling, `packing_format`, whether `g_idx` is
+shipped, how modules are excluded, the published checkpoint's unpublished tuning). The answering experiment is
+**one pair quantised by the same script and version, differing only in whether the head is packed**, judged by
+perplexity or `lm_eval`.
 
-A methodology warning that belongs with it: **a "hold the address constant"
-ablation is not a cache ablation.** A loop-invariant address over a `restrict`
-pointer is legally hoistable, IGC hoisted it, and that turned a cache-miss probe
-into a message-count probe and inverted the answer. Make the hot address a
-function of the loop variable.
+## 4. Can 24 MB of L2 be exploited deliberately?
 
-## 3. Is W4A4 reachable, and what does it cost in accuracy?
+Unusually large for this class of card. A 4096x4096 int4 tile is 8 MB, so multi-layer weight residency is
+arguable. Whether it is achievable or the replacement policy defeats it is unknown. Measure before designing
+around it. One data point the other way: L2 did absorb a 6x KV reread in the attention kernel before
+register-packed GQA removed the reread, so the cache helps when you do not plan for it; that does not show it can
+be planned around.
 
-`i4_i4_matrix_mad_k64` measures **733.80 TIOP/s, 4.000x bf16**, and the assembly
-shows `:s4` on both operands of a single `dpas.8x8`, so it is a genuine
-single-instruction rate and not an emulation. The unsigned form measures
-identically, so an asymmetric checkpoint's packing costs nothing.
+## 5. Why is the second card slower, and only at prefill?
 
-**It is the only DPAS lever on this device worth more than 2x.** Everything
-narrower buys nothing further, and FP4 is refused by the backend outright.
+Same binary, same checkpoint, same ten minutes: prefill loses 3.2% to 3.4% on device 1 and decode 0.2% to 0.4%,
+reproducing on two checkpoints and far outside the spreads (BENCHMARKS.md, "The two cards are not
+interchangeable"). That is a difference in sustained compute, not bandwidth. **Unattributed**: neither card drives
+a display, both report identical unprivileged PCIe link fields, and the frequency interface needs root. Until it
+is explained, every series row in [BENCHMARKS.md](BENCHMARKS.md) is taken on one named card and says so.
 
-Unknown, and in this order:
+## 6. The split-BF16 scan's remaining single-precision operand
 
-- What 4-bit activations cost in output quality. The W4A8 probe already measured
-  **2.79% relative L2 error** from int8 activations alone, driven by outliers,
-  which is not encouraging for int4.
-- Whether a W4A4 kernel would keep the production GEMM's 88.1% efficiency. If it
-  did, the rate would be about 646 TIOP/s - an estimate by proportion with no
-  kernel written.
-- Whether the per-group rescale that sank W4A8 sinks this too. That cost was
-  3.0 to 3.4 ms of a 5.440 ms kernel, and it does not obviously get cheaper.
-
-The order matters: measure the accuracy on a probe before writing a mainloop.
-That is the mistake W4A8 made and it cost a kernel.
-
-**Answered 2026-10-28: no - closed on accuracy** ([probe-w4a4-2026-10-28.md](probes/probe-w4a4-2026-10-28.md)).
-h8's rotation, then int4 on both operands at group 256 (projected ~2.5x bf16, ~1.4x over h8, derived)
-roughly doubles the output error: held-out logits 23.3 % relative L2 against h8's 12.5 %, +7.7 to +13.6
-points over h8 on four prompts, 3.4 argmax positions in 100 lost (the stopping rule allowed 2 and 2).
-Power-of-two scales are worse still. Only o_proj alone stays inside the rule, and it is 2.1 % of the
-prefill GEMM work. The rescale microprobe did not run.
-
-## 4. Is W8A8 worth anything for prefill?
-
-int8 XMX has 2x bf16 throughput and prefill is compute-bound. The rate is now
-known exactly - `i8_i8_k32` at 366.90 TIOP/s - and it is **the same rate as the
-mixed 4-bit form**, so W8A8 and W4A8 share one ceiling.
-
-That makes W8A8 strictly worse than W4A8 on weight bytes for the same compute
-ceiling, and W4A8 already lost. The remaining argument for W8A8 is that it needs
-no per-group weight rescale, which is the term that sank W4A8 - but it would
-need the checkpoint re-quantised to int8, and it still pays the activation
-quantiser and the activation-outlier accuracy cost. Nobody has priced that
-combination.
-
-## 5. How much accuracy does quantising `lm_head` cost?
-
-**The speed half is closed and the accuracy half has never been run.**
-
-At int4 the head is 2.543 GB to 0.675 GB per token, worth a measured -3.05 ms
-per token at record grade. `lm_head` is known to be quantisation-sensitive and
-checkpoint authors routinely decline to quantise it, so this needs a perplexity
-or `lm_eval` comparison against the unquantised baseline before anyone adopts
-it.
-
-**The clean experiment does not exist yet**, and that is the useful part of this
-entry. Comparing a self-quantised checkpoint against a published one confounds
-the head with everything else that differs between two quantiser runs:
-`quant_method` spelling, `packing_format`, whether `g_idx` is shipped at all,
-whether exclusions are regexes or per-module objects, how many `mtp` tensors
-there are, and the published checkpoint's own unpublished tuning
-hyper-parameters. The experiment that answers the title question is **one pair
-quantised by the same script and version, differing only in whether the head is
-packed**.
-
-## 6. Can 24 MB of L2 be exploited deliberately?
-
-Unusually large for this class of card. A 4096x4096 int4 tile is 8 MB, so
-multi-layer weight residency is arguable. Whether it is achievable or whether
-the replacement policy defeats it is unknown. Measure before designing around
-it.
-
-One data point in the opposite direction: L2 did absorb a 6x KV reread in the
-attention kernel before register-packed GQA removed the reread. That says the
-cache helps when you do not plan for it, not that it can be planned around.
-
-## 7. The two cards are not interchangeable, and only prefill sees it
-
-Same binary, same checkpoint, same ten minutes: prefill loses 3.2% to 3.4% on
-the second card and decode loses 0.2% to 0.4%. The separation is far outside the
-spreads and reproduces on two checkpoints.
-
-That is a difference in sustained compute rather than in bandwidth, seen by the
-compute-bound workload and not by the bandwidth-bound one. **Unattributed**:
-neither card drives a display, both report identical unprivileged PCIe link
-fields, and the frequency interface needs root. Until it is explained, every
-series row in [BENCHMARKS.md](BENCHMARKS.md) is taken on one named card and says
-so.
-
-## 8. The split-BF16 scan's remaining single-precision operand
-
-The delta net scan is the one approximation in the default prefill path. It is
-gated on tokens and state cosines rather than bitwise, and it holds: 93 of 93
-determined rows exact, state cosines 0.9997 and better against a 0.999 bar.
-
-**One honest limit**: `vn` inside the A2 term is still a single BF16 operand,
-measured harmless on three prompts of one checkpoint and not proven in general.
-Whether a longer prompt, a different checkpoint or a different numerical regime
-reaches it is untested. Details in
+The delta net scan is the one approximation in the default prefill path. It is gated on tokens and state cosines
+rather than bitwise, and it holds: 93 of 93 determined rows exact, state cosines 0.9997 and better against a
+0.999 bar. **One honest limit**: `vn` inside the A2 term is still a single BF16 operand, measured harmless on
+three prompts of one checkpoint and not proven in general. Whether a longer prompt, a different checkpoint or a
+different numerical regime reaches it is untested. Details in
 [12-kernels.md, "How the prefill kernels got here"](12-kernels.md#how-the-prefill-kernels-got-here).
-
-## 9. The profiler cannot see inside the prefill walk
-
-`--profile` builds two captured steps and grades one against the other. The
-prefill walk is not a capture and never will be, because its arguments are
-resolved per launch, so the profile events have nothing to attach to.
-
-**A cheap version exists and is priced.** `B70_PREFILL_PROFILE=1` times every
-drain in the walk, which is a complete attribution when there is a drain at
-every boundary. Its own overhead measures -2.0%, inside the run-to-run spread.
-What it cannot do is separate two Level Zero kernels appended back to back
-without inserting a drain between them - which it does, in profile mode only,
-and which is why the profiled total is an upper bound.
-
-**The full version is one task and is not scheduled**: an optional event pool
-signalled per launch, giving device timestamps without extra drains. What is
-*not* recommended is capturing the walk. Arguments change per chunk and per
-layer, so there is nothing to capture.
-
-## 10. Can a SYCL kernel be appended to a raw Level Zero command list at all?
-
-The decode list deliberately contains no SYCL kernels, which sidesteps this, and
-prefill now runs its own GEMM on the Level Zero list rather than sycl-tla's,
-which sidesteps it again. So this is no longer on any critical path.
-
-It is kept because it is cheap and it settles a real architectural question:
-take a `sycl-tla` example, extract its `ze_kernel_handle_t` via
-`sycl::get_native<backend::ext_oneapi_level_zero>` on a named kernel bundle,
-append it to a regular command list, replay twice, diff. That would say whether
-the two toolchains can ever share one list, which matters the moment a kernel
-family exists that is genuinely easier to write in CuTe.
-
-## 11. Why does the DPAS verify-attention kernel pick the wrong token at 8 rows?
-
-`attn_verify_dpas` (spec 28c, doc 12) checks a speculative block's attention on the DPAS matrix
-engine and is up to 8.4x faster than the decode attention kernel. On one DFlash case (`t6_usage-loader`,
-7 guessed tokens, position 103) it returned a token at f32 rank 3, 4.0 below the top, whose own margin over
-the runner-up was 3.44: a kernel error, not a near-tie, and one the f32 judge (doc 14) caught where the
-bitwise comparison could not have been applied. Every M was switched back to the v2 kernel on 2026-11-04.
-
-**Answered 2026-11-04: P's bf16 rounding, not the compiler.** The new toolchain (IGC 2.42.6) gave the same
-token, bit for bit. `tools/probe/probe_vattn_ab` ran the real DFlash case with every verify done twice on the
-same state (DPAS, then v2) and replayed each full-attention layer's attention on v2's inputs against fp64:
-the 256-GRF build, a 128-GRF build (no spill), a `-cl-opt-disable` build and the scalar EAGER walk of the
-same algorithm all gave the same rows, so no compiler optimisation is involved. Their common cause is that
-the kernel rounded the softmax weights P to bf16 (8 bits) before the P x V product. On random data that
-error averages out (cosine 0.99999 against fp64, the test's bar); on real heads the key blocks' P x V
-partly cancel when merged, so a row's error grew to 1 - cos ~2e-5 (v2: ~1e-8), and over 16 layers a
-verify row's logits moved by up to 9. The fix splits P into two bf16 halves (hi + lo, as the kernel already
-did for q), one more matrix multiply per key pair: every layer is now at v2's level, the DFlash run is
-token-identical to plain, the kernel test's bar is tightened to 0.999997 (the old kernel fails it), and the
-re-timed table keeps every threshold (docs/probes/probe-verify-attn-2026-11-03.md §5). No register array is
-indexed at run time; masks, the causal bound inside the block, the partial tiles and the slice merge were
-checked block by block against fp64 (mx / sm / acc agree to ~1e-6).

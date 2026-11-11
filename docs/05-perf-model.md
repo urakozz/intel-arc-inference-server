@@ -5,11 +5,13 @@ figure is labelled **measured**, **derived** (arithmetic on measured inputs,
 with the inputs shown) or **estimated**. Every measured row and its grade lives
 in [BENCHMARKS.md](BENCHMARKS.md); this document is the reasoning over them.
 
-The measurements here were taken before the 2026-11-04 toolchain upgrade (compute runtime
-26.35 + IGC 2.41.5 then; 26.40 + 2.42.6 now, doc 10). The ceilings are properties of the card and
-stand; every timing is to be re-taken on a quiet box (open-work, "After the table is empty").
+The profile tables here were taken on older stacks (the decode profile before any lever, the prefill
+phases on the 2026-09 compute runtime and IGC; the box now runs runtime 26.40 with IGC 2.42.6, doc 10). The
+ceilings are properties of the card and stand; the speed numbers are re-taken in one record-grade run on a quiet
+box (the quiet-box measurement session in [open-work.md](open-work.md)).
 Speculative decoding (MTP, DFlash, lookup) changes the decode arithmetic - one step checks M rows
-for the weight traffic of about 1.04 to 1.6 plain steps - and its rows are in BENCHMARKS, not here.
+for the weight traffic of about 1.04 to 1.6 plain steps - and so do several requests at once and tensor parallel
+(every layer split over both cards); their rows are in BENCHMARKS, not here.
 
 ## The two ceilings
 
@@ -130,38 +132,29 @@ throughput-shaped rather than a latency chain.
 
 The step has since moved from 36.32 to **33.96 ms/token** (derived from the
 standing 29.45 t/s) through the loader and per-shape retune work recorded in
-BENCHMARKS.md. **Decode trails vLLM by about 5% on the same bytes**, and none of
+BENCHMARKS.md. **On the byte-matched bf16 head, decode trails vLLM by about 5%**, and none of
 the prefill work since moved it, by construction: prefill selects the backend
-and the replayed decode list is byte-identical either way.
+and the replayed decode list is byte-identical either way. The serving default reads an int8
+`lm_head` (below) and measured 31.21 t/s in that comparison's own pair run; on 2026-11-10 one card measured
+33.49 t/s at depth 4096 (int8 head, iterate grade) and tensor parallel 53.95 t/s, 1.61x
+(BENCHMARKS.md, "Tensor parallel"). Those are not byte-matched with vLLM's 31.01.
 
 ## Where prefill time goes
 
-Phase attribution from the Level Zero and sycl-tla backends in one session,
-instrumented (iterate grade by construction, since the extra waits are the
-instrument), one run each, at the 1502.83 t/s state:
+The Level Zero backend (our own DPAS GEMM and slab dequant on one in-order list) replaced the sycl-tla one
+because the linears were the whole of the difference: one instrumented session at 1502.83 t/s had `linear_l0`
+at 61.2% of the 2728 ms run, replacing sycl-tla's `dequant` plus `gemm` (1816.5 ms) with 1668.9 ms, and 512 host
+waits a run disappeared with it. Every other phase moved by under 2 ms. Since then the causal `QK^T` (the
+attention kernel stops computing the masked half), SiLU folded into the gate‖up GEMM epilogue, a split-BF16
+delta net scan (`gdn_scan` from about 297 ms to about 127) and the flash attention landed; each is in
+BENCHMARKS.md with its grade. The bf16 walk stood at **1670.72 t/s against vLLM's 1610.04** on matched files.
 
-| phase | Level Zero ms | share | sycl-tla ms | share |
-|---|---:|---:|---:|---:|
-| `dequant` | 0.0 | 0.0% | 413.3 | 14.3% |
-| `gemm` (sycl-tla) | 0.0 | 0.0% | 1403.2 | 48.7% |
-| `linear_l0` | **1668.9** | **61.2%** | 0.0 | 0.0% |
-| `attn_QK^T` | 84.6 | 3.1% | 83.0 | 2.9% |
-| `attn_softmax` | 60.5 | 2.2% | 60.6 | 2.1% |
-| `attn_PV` | 8.3 | 0.3% | 8.3 | 0.3% |
-| `gdn_scan` | 328.8 | 12.1% | 330.8 | 11.5% |
-| `norm` | 98.4 | 3.6% | 98.7 | 3.4% |
-| `silu` | 99.6 | 3.6% | 98.5 | 3.4% |
-| **total** | **2728.1** | | **2881.1** | |
-
-**The linears are the whole of the backend win**: `linear_l0`'s 1668.9 ms
-replaces `dequant` plus `gemm`'s 1816.5 ms, 8.1% less, and 512 host waits per
-run disappear with them. Every other phase moves by under 2 ms.
-
-Three levers have landed since that table and each is in BENCHMARKS.md with its
-grade: causal `QK^T` (the attention kernel stops computing the masked half),
-SiLU folded into the gate‖up GEMM epilogue, and a split-BF16 delta net scan that
-took `gdn_scan` from about 297 ms to about 127, a 2.33x on its own profile row.
-Prefill now stands at **1670.72 t/s against vLLM's 1610.04** on matched files.
+The current split is the 2026-11-10 probe ([record](probes/probe-prefill-chunk-split-2026-11-10.md); one card,
+real weights, bf16 KV, interleaved). A 2048-row chunk takes 1189.7 ms on `l0` (1,721 t/s) and 913.7 ms on
+`l0-int8` (2,241 t/s). The int4 multiply is the largest share on both: 61% of the chunk on `l0`, running at
+77.6% of the measured bf16 peak (a new bf16 kernel is a no-go), and 44% on `l0-int8`, running at 67.6% of the
+int8 peak (a possible lever, not scheduled). The delta net is about 20% of a chunk
+([record](probes/probe-gdn-prefill-2026-11-10.md)).
 
 The split-BF16 scan is the **one approximation in the default path**. It is
 gated on tokens and state cosines rather than on `memcmp`, and it is the only
@@ -178,9 +171,10 @@ wins did.
 | **W4A8 on the mixed 4-bit by 8-bit DPAS** | The mixed builtin's K is 32, the same as int8's, so it runs at 2.000x bf16 and not 4x (doc 01). Measured 1.017x the bf16 two-pass control, 0.965x once the activation quantiser it needs is counted, against a 1.53x bar: the per-group rescale costs 3.0 to 3.4 of the 5.440 ms while the matrix math it rescales costs 1.99. Separately, **2.79% relative L2 error** against the bf16 result, worst-row cosine 0.9976, driven by activation outliers. |
 | **Removing barriers from the GDN triangular solve** | The design assumed synchronisation dominated that kernel. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so all 128 are about 4.6% of it and the premise was wrong by roughly 18x. Both barrier-free variants were bit-identical and both were slower. The row is the serialised recurrence itself. |
 | **bf16 intermediate buffers** | Halving the bytes changed nothing: `ocloc` exposes no 16-bit block write wider than 8 rows, so the epilogue is bound by store message count rather than by bytes. |
+| **W4A4: int4 weights times int4 activations** | The DPAS rate is real (4.000x bf16, 733.80 TIOP/s), but after the Hadamard rotation int4 activations roughly double the output error: held-out logits 23.3% relative L2 against the int8 path's 12.5%, and 3.4 argmax positions in 100 lost against 2 allowed. Only `o_proj` alone passes, 2.1% of the prefill GEMM work ([probe](probes/probe-w4a4-2026-10-28.md)). |
 | **oneDNN's fused int4 W4A16 matmul** | Measured 98.28 TFLOP/s on gate‖up at M=2048, below the 115.7 TFLOP/s an in-kernel int4 GEMM would need to beat the two-pass path. It also failed a bitwise identity extraction against our dequant oracle on 39.6% of weights, every mismatch a 1-ULP bf16 neighbour. |
 
-The pattern across all five is the same: **the thing that looked like the cost
+The pattern across all six is the same: **the thing that looked like the cost
 was not the cost.** Price the mechanism before building the kernel.
 
 ## Specialisations a general engine will not take
@@ -191,21 +185,16 @@ Ranked by expected value.
 
 `lm_head.weight` is BF16, 248320 x 5120 = **2.54 GB, 16.4% of `W`**, read in
 full on every token at 98.5% of achievable bandwidth. There is nothing to tune
-and only bytes to remove: at int4 it is 0.675 GB, at int8 1.27 GB. It costs one
-offline conversion pass and no kernel work at all, and it measured **-3.05 ms
-per token at record grade**.
+and only bytes to remove. The engine's serving default is an **int8 head** (one fp32 scale per row, quantised at
+load, spec 9): it halves the head's bytes and measured 31.21 t/s against 29.38 for the bf16 head in interleaved
+pairs, -2.00 ms a token; it passed its accuracy gates (logits cosine 0.9999147 at worst, one near-tie argmax
+flip in 2790 rows, the golden and prefill gates exact on the determined rows; BENCHMARKS.md, "int8 lm_head").
+An int4 head would save more (-3.05 ms a token at record grade) but its accuracy has never been run, and
+`lm_head` is known to be quantisation-sensitive; it is not adopted.
 
-**It is not quoted in any comparison, deliberately.** vLLM cannot load a
-quantised `lm_head`, so a margin measured against it prices an inability of the
-comparison rather than a difference in kernels. The standing numbers in this
-project are byte-matched with bf16 `lm_head` on both sides. The lever is real
-and it is available; it is simply not evidence about this engine against that
-one.
-
-Its accuracy cost is also **unmeasured**. `lm_head` is known to be
-quantisation-sensitive and checkpoint authors routinely decline to quantise it.
-Adopting it needs a perplexity or `lm_eval` comparison against the unquantised
-baseline, and none has been run.
+**The comparison with vLLM stays byte-matched, deliberately**: vLLM cannot load a quantised
+`lm_head`, so a margin measured against it would price an inability of the comparison rather than a difference
+in kernels. The byte-matched rows use the bf16 head on both sides.
 
 ### 2. Pre-swizzle weights at load
 
@@ -217,8 +206,7 @@ path (doc 02).
 ### 3. Delete per-step allocations
 
 Static allocation makes per-step allocation zero. `vllm-xpu-kernels`' MoE path
-allocates 5 tensors per layer per step. This matters most for model families
-this engine does not yet serve.
+allocates 5 tensors per layer per step. This matters most for the MoE model families.
 
 ### 4. Exploit 24 MB of L2
 
@@ -228,11 +216,13 @@ designing around it.
 
 ## The honest projection
 
-Decode's remaining gap to the roofline is **1.29x** (33.96 ms against 26.34),
-and to vLLM it is **1.05x the wrong way**. Prefill is **1.038x ahead** of vLLM
-and at about half of its own DPAS ceiling.
+On the byte-matched bf16 head, decode's gap to the roofline is **1.29x** (33.96 ms against 26.34) and to vLLM
+**1.05x the wrong way**; prefill is ahead of vLLM (1670.72 t/s on the bf16 walk, about 2125 on the int8 path,
+against 1610.04) at about half of its own DPAS ceiling on the bf16 walk. The levers that moved decode past
+that are byte-removal and parallelism (the int8 head, speculative decoding, both cards), not single-card kernel
+speed.
 
-Nothing here supports a claim of several times faster. The MBU argument sets the
+Nothing here supports a claim of several times faster on one card. The MBU argument sets the
 bound: vLLM is already at 81.7% of the measured bandwidth on this model, so
 there is at most a 1.23x of bandwidth left for *anyone*, and the levers that
 reach past it are byte-removal levers (a quantised head) rather than kernel
