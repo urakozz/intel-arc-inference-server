@@ -173,9 +173,6 @@ case "${1:-}" in
       bash -c 'ls oracle-out-19a/dumps/*.taps.safetensors'
     have oracle_image "the oracle container image (tools/oracle/run_in_container.sh; passkey ids)" \
       docker image inspect "${ORACLE_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
-    # Queue row 41 (the llama-benchy comparison matrix): the vLLM XPU image tools/probe/vllm_benchy.sh serves.
-    have vllm_image "the vLLM XPU image ${VLLM_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest} (tools/probe/vllm_benchy.sh)" \
-      docker image inspect "${VLLM_IMAGE:-vllm-xpu-env-next-p314-t216-vxkp0:latest}"
     # Queue row 57 (spec 25a, plan 25a): Nemotron 3.5 Bolt - our int4 g64 export (the served checkpoint, the only one),
     # the BF16 original (gate Q's reference), the pinned small files (the tiny tests' remote code) and the CPU reference's
     # outputs (tools/box_validate/bolt_oracle.sh). Download pinned: --revision 8932aa8d... / 56702103... (df -h ~ first);

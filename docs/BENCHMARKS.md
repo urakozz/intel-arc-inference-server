@@ -122,29 +122,24 @@ as exactly 4096 tokens.
 
 ### llama-benchy comparisons (queue row 41)
 
-One client, one set of flags, one card for every server, so these rows compare with vLLM's and
-with tables others publish. They are **HTTP-inclusive** and sit beside, never replace, the
-engine-internal records in the sections below. Runbook `r41.ours`, `r41.vllm`, `r41.vllm_mtp`
-(box-day Session 6c, idle box, device 0); servers `tools/probe/serve_benchy.sh` and
-`tools/probe/vllm_benchy.sh`; llama-benchy pinned at 0.4.0 (`BENCHY_VERSION`); Qwen3.8 int4 g64
+One client, one set of flags, one card, so these rows compare with tables others publish. They are **HTTP-inclusive** and sit beside, never replace, the
+engine-internal records in the sections below. Runbook `r41.ours`
+(box-day Session 6c, idle box, device 0); server `tools/probe/serve_benchy.sh`; llama-benchy pinned at 0.4.0 (`BENCHY_VERSION`); Qwen3.8 int4 g64
 (`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`) for every arm.
 
 | matrix | llama-benchy flags |
 |---|---|
 | A | `--pp 512 4096 --tg 128 --concurrency 1 2 4 8 --runs 2 --format md` (the usual published form; a repeated prompt may hit a server's prefix cache) |
-| B | A + `--no-cache` (the fair cross-engine reading) |
+| B | A + `--no-cache` (the cache-free reading) |
 | D | `--pp 512 --tg 128 --depth 4096 32768 --concurrency 1 --runs 2 --no-cache --format md` (agentic depth) |
 
 | arm | server | A | B | D |
 |---|---|---|---|---|
 | b70-serve `--mtp 0` | int8 head, bf16 KV, `--max-len 40960` | pending | pending | pending |
 | b70-serve `--mtp auto` | the same, MTP head on | pending | pending | pending |
-| vLLM, no speculation | recorded baseline flags, bf16 KV, `--max-num-seqs 8` | pending | pending | pending |
-| vLLM MTP-4, fp8 KV | the same + `--speculative-config` mtp 4, `--kv-cache-dtype fp8` | pending | pending | pending |
 
 b70-serve has no batched decode yet (spec 13b / 13c): its concurrency 2 / 4 / 8 cells are requests
-served one after another, recorded as the baseline batching has to beat. Every vLLM cell names the
-version string `vllm_benchy.sh` prints.
+served one after another, recorded as the baseline batching has to beat.
 
 ## Prefill
 
@@ -1188,9 +1183,6 @@ at TP 2 are PUBLISHED, his card, one self-reported run (his flags: fp8 KV, `--bl
 |---|---|---|---|
 | decode at depth 886 / 8192 / 32000 / 65536 | SergiioB's vLLM 0.31 XPU, TP 2, fp8 KV (PUBLISHED) | 60.5 / 50.7 / 33.5 / 23.0 t/s | - |
 | prefill at 886 / 8192 / 32000 / 65536 prompt tokens | the same (PUBLISHED) | 2925 / 2014 / 871 / 486 t/s | - |
-| b70-serve, llama-benchy pp = 886 / 8192 / 32000 / 65536, tg 128, depth 0 | two cards (copy), int8 head, bf16 KV, `--max-len 262144`, `--concurrency 1 --no-cache --exact-tg --latency-mode generation --runs 2`, llama-benchy 0.4.0 | pending | r62.benchy |
-| b70-serve, llama-benchy decode at depth 886 / 8192 / 32000 / 65536 | pp 512, tg 128, the same flags (row 41's D) | pending | r62.benchy |
-| vLLM XPU, the same llama-benchy rows, the same checkpoint | the operator's run (SergiioB's README flags) | pending | r62.benchy (operator) |
 | A4 through b70-serve vs the g128 / BF16 references | 36 scenarios, greedy, up to 2048 new ids, `medium_effort` + thinking on (25a ruling 4); `score.py --format qwen-think` | pending (B5's engine row; the reference's parse failures counted; 0 where the scorer finds a call is the bar PROPOSED) | r62.a4 |
 | the agentic transcript's prefix-cache hit rate | `tests/golden/prompts/bolt_agentic.json` as a live loop, three arms (default, `truncate_history_thinking` false, cache off) | pending; no bar - the miss at each new user message (`truncate_history_thinking`) and at a call whose arguments the model wrote unsorted is recorded with its divergence token | r62.agentic |
 | snapshot sizes | state 170,229,760 B (167,772,160 B of fp32 SSM states + 2,457,600 B of conv columns; 86,343,680 B with `B70_BOLT_SSM=bf16`), KV 8,192 B a position | derived, asserted by `bolt_snapshot_test` (host, measured on the Mac) and `bolt_snapshot_gpu_test` (card) | r62.snap_synth, r62.snapshot |

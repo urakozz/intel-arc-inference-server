@@ -24,17 +24,7 @@ model in [04-architecture.md](04-architecture.md). Recently answered, in one lin
 - **Can a SYCL kernel share a Level Zero command list with ours?** No longer asked: the sycl-tla path was removed
   and nothing in the engine uses SYCL.
 
-## 1. What made decode 5% slower than vLLM on the same bytes?
-
-In 2026-09 the byte-matched rows were 29.45 t/s against vLLM's 31.01, on a roofline of 37.97, and the cause was
-never found. What is ruled out, each by measurement (doc 05): host overhead (99.77% of the step is inside the
-GPU fence), the linears (89-97% of their per-shape bandwidth ceilings), `gdn_step` (92% of device bandwidth),
-launch count (the dispatch gap is 1.1% of a step) and the attention grid's early-out (0.11%). A 5% gap made of
-ten 0.5% terms is a different problem from a 5% gap with one cause, and which this was has not been established.
-It no longer decides anything: the serving default (int8 head, later decode work) is faster than that vLLM number,
-though not byte-matched with it, and the vLLM comparison is not re-run (operator, 2026-11-10).
-
-## 2. What sets `attn_decode`'s per-launch term?
+## 1. What sets `attn_decode`'s per-launch term?
 
 At the 2026-08 stack the retiled attention launch cost 224.046 us, its dominant named term the **KV load path at
 55.4%** (39.2% the 32-byte load messages themselves, 16.2% cache service), and **four successive cost models
@@ -48,7 +38,7 @@ loop-invariant address over a `restrict` pointer is legally hoistable, IGC hoist
 cache-miss probe into a message-count probe and inverted the answer. Make the hot address a function of the loop
 variable.
 
-## 3. What would an int4 `lm_head` cost in accuracy?
+## 2. What would an int4 `lm_head` cost in accuracy?
 
 The speed is known (-3.05 ms a token at record grade against the bf16 head) and the int8 head already ships. The
 accuracy of the int4 head has never been run, and `lm_head` is known to be quantisation-sensitive. A clean
@@ -58,7 +48,7 @@ shipped, how modules are excluded, the published checkpoint's unpublished tuning
 **one pair quantised by the same script and version, differing only in whether the head is packed**, judged by
 perplexity or `lm_eval`.
 
-## 4. Can 24 MB of L2 be exploited deliberately?
+## 3. Can 24 MB of L2 be exploited deliberately?
 
 Unusually large for this class of card. A 4096x4096 int4 tile is 8 MB, so multi-layer weight residency is
 arguable. Whether it is achievable or the replacement policy defeats it is unknown. Measure before designing
@@ -66,7 +56,7 @@ around it. One data point the other way: L2 did absorb a 6x KV reread in the att
 register-packed GQA removed the reread, so the cache helps when you do not plan for it; that does not show it can
 be planned around.
 
-## 5. Why is the second card slower, and only at prefill?
+## 4. Why is the second card slower, and only at prefill?
 
 Same binary, same checkpoint, same ten minutes: prefill loses 3.2% to 3.4% on device 1 and decode 0.2% to 0.4%,
 reproducing on two checkpoints and far outside the spreads (BENCHMARKS.md, "The two cards are not
@@ -74,7 +64,7 @@ interchangeable"). That is a difference in sustained compute, not bandwidth. **U
 a display, both report identical unprivileged PCIe link fields, and the frequency interface needs root. Until it
 is explained, every series row in [BENCHMARKS.md](BENCHMARKS.md) is taken on one named card and says so.
 
-## 6. The split-BF16 scan's remaining single-precision operand
+## 5. The split-BF16 scan's remaining single-precision operand
 
 The delta net scan is the one approximation in the default prefill path. It is gated on tokens and state cosines
 rather than bitwise, and it holds: 93 of 93 determined rows exact, state cosines 0.9997 and better against a
