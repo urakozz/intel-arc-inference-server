@@ -29,18 +29,17 @@ is `--max-num-seqs N` (N up to 8 on two cards, 4 on one). MTP's speed depends on
 per-request rates move a few t/s between runs (`tools/box_validate/slots_bench.py`, logs on the box under
 `~/b70/logs/brag-speed/`).
 
-**Prefill (reading the prompt)** - from [docs/BENCHMARKS.md](docs/BENCHMARKS.md), each row with its own date and
-conditions:
+**Prefill (reading the prompt)**, t/s, median of three:
 
-| | prompt | t/s |
+| | 4,096-token prompt | 16,384-token prompt |
 |---|---:|---:|
-| one card, `l0-int8`, the record (2026-09-25, idle box; vLLM on the same checkpoint: 1,610) | 4,096 | **2,125** |
-| one card, bf16 prompt pass (2026-11-10, shared box) | 2,048 / 16,384 | 1,746 / 1,524 |
-| `--parallel tp`, bf16 prompt pass (2026-11-10, shared box) | 2,048 / 16,384 | 2,479 / **2,673** (1.42x / 1.75x one card) |
+| one card, bf16 prompt pass (`--prefill-backend l0`) | 1,709 | 1,539 |
+| one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
+| `--parallel tp` (both cards), bf16 prompt pass | **2,939** | **2,686** |
 
-A short agentic turn deep in a session is fast too: 16 new tokens at 128k of history take 98 ms (bf16 cache) or
-108 ms (int8), from 441 / 526 ms before split-K attention for short chunks (2026-11-11). One table of every mode on
-today's stack comes with the quiet-box measurement session (docs/open-work.md).
+TP runs the bf16 prompt pass only for now; the int8 pass under TP (one card gains ~1.27x from it) is open-work
+item 10. A short agentic turn deep in a session is fast too: 16 new tokens at 128k of history take 98 ms (bf16
+cache) or 108 ms (int8).
 
 Measured on one Arc Pro B70, same checkpoint and same prompt on both sides,
 median of three runs on an idle machine:
