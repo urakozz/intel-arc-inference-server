@@ -10,21 +10,31 @@ converted, branched on, or discovered at run time.
 `src/loader/small_layout.h` (the small-tensor block offsets, shared with the
 model description and the device kernels), driven by the model description in
 `src/model/qwen35.{h,cc}` (doc 03) and the canonical layouts in
-`src/common/repack.h` (doc 12). Every figure below is measured against real
-checkpoint files.
+`src/common/repack.h` (doc 12). The walk-through below is Qwen3.8-27B; its figures
+come from real checkpoint files (the box report of an earlier build; the load is
+not re-measured on every change).
 
-**Two checkpoint shapes are supported and the loader takes both without a
-conditional anywhere in the walk**: a published checkpoint with a bf16
-`lm_head`, and a self-quantised one with the head packed at int4
-(`tools/quantize_qwen38_rtn.sh` produces the second; it made the published one
-on auto-round 0.14.2 and runs 0.17.0 @ `6afaecdb` since 2026-10-06, as does
-`quantize_qwen38_tuned.sh` - the same config keys and packing,
-`tools/quantize/README.md`, "AutoRound version", which also records why the RTN
-script needs `--disable_low_cpu_mem_usage` there: 0.17.0's default RTN path ships
-`lm_head.weight` unpacked while `extra_config` declares it bits 4). Everything in this
-document that differs between them says which one it is; the section **"The
-packed-head checkpoint"** below is the delta list, and it was measured against
-the files rather than assumed.
+**One loader per model family**, side by side, sharing the snapshot, safetensors,
+quant-config and `LinearSrc::classify` code described here:
+
+| Loader | Models | Files |
+|---|---|---|
+| `load` (and `load_tp`, which slices every layer for tensor parallel: each card takes half) | Qwen3.8-27B (dense) and Ornith 1.5 35B-A3B (mixture of experts, MoE: many small expert MLPs, a few used per token) - the two model descriptions the engine knows | `loader.cc`, `moe.*` |
+| `load_k2` | K2-Horizon | `k2_*` |
+| `load_kolibri1` | Kolibri-1 | `kolibri1_*` |
+| `load_qwen4exp` | Qwen3.8-Flash-Next (below) | `qwen4exp_*` |
+| `load_bolt` | Nemotron 3.5 Bolt (below; parked until Flash-Next is done) | `bolt_*` |
+| `load_dflash`, `load_lilicorr` | the draft models (DFlash, LiLiCorr) | `dflash_*`, `lilicorr_*` |
+
+**Two Qwen3.8 checkpoint shapes are supported and the loader takes both without a
+conditional anywhere in the walk**: the published one with a bf16 `lm_head`, and a
+self-quantised one with the head packed at int4 (`tools/quantize_qwen38_rtn.sh`
+produces it; both quantise scripts run auto-round 0.17.0 @ `6afaecdb`, see
+`tools/quantize/README.md`, "AutoRound version", which also records why the RTN script
+needs `--disable_low_cpu_mem_usage`: 0.17.0's default RTN path ships `lm_head.weight`
+unpacked while `extra_config` declares it bits 4). Everything below that differs between
+them says which one it is; the section **"The packed-head checkpoint"** is the delta list,
+measured against the files rather than assumed.
 
 **A third head form is made, not shipped (spec 9).** `load(..., LmHeadForm::Int8)`
 reads the bf16 `lm_head`, quantises it on the host (`src/loader/lm_head_int8.h`:
@@ -32,7 +42,7 @@ reads the bf16 `lm_head`, quantises it on the host (`src/loader/lm_head_int8.h`:
 0.35-0.75 s) into `gemv_i8w`'s `[N/16][K/16][16 k][16 n]` int8 tiles, and puts the fp32
 `[N]` scales in `DeviceWeight::scales`. The report's `lm_head` line names the form and
 the quantisation time; the W cross-check itemises -1.270 GB. It refuses a checkpoint
-whose head is already int4.
+whose head is already int4. The int8 head is what the CLIs run.
 
 ## Snapshot resolution - and why it never downloads
 
@@ -62,14 +72,13 @@ against the file's actual data section, with the length check written as
 `hlen > n - 8` rather than `8 + hlen > n` so a crafted 64-bit header length
 cannot wrap past it.
 
-This dedup rule is the **one lasting lesson of the 9B that was not**
-(`letechlead/Ornith-1.5-9B-INT4-W4A16-AutoRound`, doc 03): it shipped a
+The dedup rule exists because of a 9B checkpoint that was dropped
+(`letechlead/Ornith-1.5-9B-INT4-W4A16-AutoRound`): it shipped a
 `model_extra_tensors.safetensors` that overlapped the numbered shards, so a
 loader that globbed `*.safetensors` and merged headers got two different tensors
 under one name and no way to tell which was live. The 27B ships a
 `model_extra_tensors.safetensors` too - the index points at it for some tensors
-- and has no duplicated names, so it does not need the rule. It is kept because
-the *next* checkpoint might, and because a wrong weight is a silent failure.
+- and has no duplicated names. The rule stays because a wrong weight is a silent failure.
 
 ## Classification: suffixes decide, labels are never trusted
 
@@ -93,26 +102,25 @@ and everything else int4, and `load_linear` throws if a part classifies the
 other way ("the checkpoint's dynamic exclusions moved"). A regex the loader
 cannot read cannot mislead it.
 
-**Since spec 15 §13, `a‖b`'s kind is the checkpoint's, like `lm_head`'s.** The published
-Ornith int4 checkpoint (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`) quantised
-`in_proj_a` / `in_proj_b` (int4 g64), where Qwen3.8's export keeps them bf16. The
-loader classifies the first GDN layer's `in_proj_a` by content (`loader/ab.h`) and takes the
-table's bf16 `AB` row or the descriptor's `ab_int4` row - the same 128-column contract, the
-real columns zero-padded with the int4 zero (nibble 8, scale +0), an S 1 layout-1 GEMV through
-`gemv.cl` that writes `ab_out` exactly where `gemv_bf16` did. Every GDN layer must agree (a
+**`a‖b`'s kind is the checkpoint's, like `lm_head`'s.** The Ornith int4 checkpoint
+(`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`) quantised `in_proj_a` / `in_proj_b`
+(int4 g64), where Qwen3.8's export keeps them bf16. The loader classifies the first
+delta-net layer's `in_proj_a` by content (`loader/ab.h`) and takes the table's bf16 `AB` row
+or the descriptor's `ab_int4` row - the same 128-column contract, the real columns
+zero-padded with the int4 zero (nibble 8, scale +0), read by the layout-1 GEMV in `gemv.cl`,
+which writes `ab_out` exactly where `gemv_bf16` did. Every delta-net layer must agree (a
 layer in the other form still throws, by name). For prefill the loader keeps a bf16 copy
-dequantised once with the prefill dequant's arithmetic (`LoadedModel::ab_prefill`, in
-`total()`, not per-token), which `pf_ab_proj` reads unchanged. The padded int4 columns are
-`pad` bytes, like the bf16 row's zero rows.
+dequantised once with the prefill dequant's arithmetic (`LoadedModel::ab_prefill`, counted in
+`total()`, not per token), which `pf_ab_proj` reads unchanged.
 
-`QuantConfig::parse` additionally throws unless `bits == 4`,
-`group_size == 64`, `sym == true`, and `desc_act` is false **or absent** (see
-"The packed-head checkpoint" below - absence is auto-round's spelling of false and is
-proven from the shipped `g_idx` count, not taken on trust). It throws on any
-`+:` dynamic rule that is not an exact restatement of the top level (spec 25b) - the exact pattern that made a published MTP head unusable
-(BENCHMARKS.md); the published checkpoint's copy has been corrected to `-:`. It
-also throws on an unrecognised `quant_method` or `packing_format`, and on an
-`extra_config` module that claims to be packed at anything but g64 symmetric
+`QuantConfig::parse` additionally throws unless `bits == 4`, the group size is 64 (or
+128, see "g128 checkpoints"), `sym == true`, and `desc_act` is false **or absent** (see "The
+packed-head checkpoint" - absence is auto-round's spelling of false and is proven from the
+shipped `g_idx` count, not taken on trust). It throws on any `+:` dynamic rule that is not
+an exact restatement of the top level (see the Bolt section) - the pattern that made a
+published MTP head unusable (BENCHMARKS.md). It also throws on an unrecognised
+`quant_method` or `packing_format`, and on an `extra_config` module that claims to be
+packed at anything but g64 symmetric int4.
 int4.
 
 ### The three data asserts, and what measured them
@@ -134,15 +142,13 @@ scans every word of every `.qzeros`, `.g_idx` and `.scales` in the checkpoint
 
 - **Every `.scales` f16 is finite.** The dequant is `scale·(q − 8)` with no
   guard anywhere downstream, so one NaN or Inf scale poisons a group of 64
-  weights silently. This assert was added last and it immediately found
-  something: **1658 of the 380 108 800 scales in this checkpoint are
+  weights silently. On the published checkpoint **1658 of the 380 108 800 scales are
   subnormal f16** (the first is `layers.10.linear_attn.in_proj_qkv.scales[1444]
   = 0x00A8` ≈ 1.0e-5). Subnormals are *counted and reported, not rejected* -
   they are exact f16 values, the kernel reads the f16 word natively, and
-  `common::f16_to_f32` was corrected the same day to decode them exactly
-  (`man · 2⁻²⁴`) instead of flushing them to zero as its old "normal range
-  only" comment allowed. Flushing would have made the host-side reference
-  disagree with both the kernel and the oracle on 1658 groups.
+  `common::f16_to_f32` decodes them exactly (`man · 2⁻²⁴`) rather than flushing them to
+  zero, which would make the host-side reference disagree with both the kernel and the
+  oracle on 1658 groups.
 
 **Binding constraint for every device kernel:** because real group scales are
 subnormal f16, kernels must never be compiled with `-cl-denorms-are-zero`, or
@@ -253,15 +259,13 @@ checkpoint (doc 03, "Layer math"). Storing `1 + w` makes the kernel a plain
 RMSNorm - one multiply, no constant to materialise per element.
 
 The bake is **one fp32 add, stored as fp32, with no cast back to bf16.** The
-original design stored bf16 and was changed for this reason: the reference HF computes the whole of `x·rsqrt(…)·(1 + w)` in fp32
-and never rounds the multiplier. Storing `1 + w` as bf16 introduces a rounding
-the oracle does not have, and it lands where bf16 is weakest - `w` is small, so
-`1 + w` sits just above 1.0, where bf16's 8-bit mantissa steps by 2⁻⁸: up to
-**0.39% error on the multiplier**, at ~130 sites (128 layernorms + the final
-norm), compounding down 64 layers. Storing fp32 **removes** that rounding
-entirely and closes the divergence; it costs 1 337 344 B of VRAM (below), which
-is 0.0086% of the weights. Applied to `input_layernorm`,
-`post_attention_layernorm`, FA's `q_norm`/`k_norm`, and the final `norm`.
+reference HF computes the whole of `x·rsqrt(…)·(1 + w)` in fp32 and never rounds the
+multiplier. Storing `1 + w` as bf16 would introduce a rounding the oracle does not have,
+and it lands where bf16 is weakest - `w` is small, so `1 + w` sits just above 1.0, where
+bf16's 8-bit mantissa steps by 2⁻⁸: up to **0.39% error on the multiplier**, at ~130
+sites (128 layernorms + the final norm), compounding down 64 layers. fp32 removes that
+rounding and costs 1 337 344 B of VRAM, which is 0.0086% of the weights. Applied to
+`input_layernorm`, `post_attention_layernorm`, FA's `q_norm`/`k_norm`, and the final `norm`.
 
 **`linear_attn.norm.weight` is left alone - plain `w`, and still bf16.**
 `Qwen3_5RMSNormGated` is plain `w`: it is the one norm in the model *without*
@@ -362,33 +366,25 @@ The loader does not choose layouts. `model::Qwen35`'s per-linear row carries
 
 All rows are layout 1 today, and layout 1 **loses four of the five int4
 shapes** (doc 12): it wins the sum only because `QkvZ` at `N = 16384` is the one
-power-of-two stride where layout 0 collapses from about 550 to 419 GB/s. Both
-repack paths were kept rather than deleting the loser, because flipping
-individual rows to layout 0 is a measured +3.5% best-per-shape option - a tuning
-knob to be measured end to end, not a decision to relitigate in the loader.
-
-**Turning that knob is not a one-row edit, and the loader now says so.** Only
-the *kernel* side of layout 0 exists today: `gemv.cl` compiles it, and the probe
-measured it. The loader implements the layout-1 repack alone, and
-`loader::DeviceWeight` holds a single `l0::Mem` - while `gemv.cl`'s `LAYOUT == 0`
-binds `w` (`qweight[K/8][N]`, as shipped) and `scales[K/64][N]` as **two
-separate buffers**. Flipping a row to layout 0 therefore needs (a) a loader path
-that keeps the GPTQ-native arrays instead of repacking, and (b) a second device
-allocation in `DeviceWeight`. Until both exist, `load_linear` **throws** on any
-int4 row whose `layout` is not 1, naming the linear and both missing pieces - so
-forgetting is loud at load rather than silent bytes the kernel cannot read.
-(This doc previously claimed "change one row … with no other edit anywhere";
-that was wrong, and the guard is what makes it stay corrected.) bf16 weights
-(`AB`, `LmHead`) have exactly one tiled layout and carry `layout 0` as a filler,
-which is why the guard is scoped to int4 rows.
+power-of-two stride where layout 0 collapses from about 550 to 419 GB/s. Flipping
+individual rows to layout 0 would be a measured +3.5% best-per-shape option, but it is
+not a one-row edit: only the *kernel* side of layout 0 exists (`gemv.cl` binds `w`
+(`qweight[K/8][N]`, as shipped) and `scales[K/64][N]` as two separate buffers), while the
+loader implements the layout-1 repack alone and `loader::DeviceWeight` holds a single
+`l0::Mem`. So `load_linear` **throws** on any int4 row whose `layout` is not 1, naming the
+linear and the two missing pieces (a loader path that keeps the GPTQ-native arrays, and a
+second allocation in `DeviceWeight`). bf16 weights (`AB`, `LmHead`) have exactly one tiled
+layout and carry `layout 0` as a filler, which is why the guard is scoped to int4 rows.
 
 ## Memory and the `W` cross-check
 
 Repack is single-threaded, staged through one reused host buffer per kind
 (sized from the linears **this** load will repack - see "Staging is sized from
-the linears this load will repack" below; with a bf16 head that is `gate‖up`'s
+the linears this load will repack"; with a bf16 head that is `gate‖up`'s
 94.7 MB of int4 and `lm_head`'s 2.54 GB of bf16 tiles, and with a packed head
 the two swap ends), and uploaded with **one synchronous copy per linear**. `embed_tokens` skips staging entirely - it is gathered one
+row per token, so row-major *is* its canonical layout and the mmap is copied
+verbatim.
 row per token, so row-major *is* its canonical layout and the mmap is copied
 verbatim.
 
@@ -450,17 +446,13 @@ the decode step streams; **total 18.087 GB** adds `embed_tokens` (gathered one
 row at a time, ~0 traffic) and the RoPE table (~256 B read per token). All three
 are printed, labelled.
 
-**Load time: 13.6 s** on a warm page cache, up about 0.4 s from before the
-`.scales` finiteness scan was added, against a 120 s budget. No thread pool was
-built: the
-known lever (a `std::async` pool over per-linear repack) is not worth its
-complexity at 13 s. On a cold page cache this is bounded below by reading 19 GB
-off the disk, and the figure should be re-measured before anyone calls it fast.
+**Load time** was 13.6 s on a warm page cache against a 120 s budget (a cold cache is
+bounded below by reading 19 GB off the disk). No thread pool was built: a `std::async` pool
+over the per-linear repack is the known lever and is not worth its complexity at 13 s.
 
-Device VRAM is 32.6 GB (doc 01), so 18.1 GB of weights leaves room for KV, GDN
-state and activations without relaxed allocation games - though `l0::Mem` does
-chain `ze_relaxed_allocation_limits_exp_desc_t` automatically for the two
-allocations (`lm_head`, `embed_tokens`) that exceed the device's
+Device VRAM is 32.6 GB (doc 01), so 18.1 GB of weights leaves room for KV, delta-net
+state and activations - and `l0::Mem` chains `ze_relaxed_allocation_limits_exp_desc_t`
+automatically for the two allocations (`lm_head`, `embed_tokens`) that exceed the device's
 `maxMemAllocSize`.
 
 ## Proving the bytes: the device round-trip
@@ -619,32 +611,16 @@ naming the linear, never a heap overrun.
 
 ### The repack at 5120×248320 - the overflow audit
 
-`lm_head` at int4 is **7.1× the largest int4 tensor this repack had ever seen**
-by element count (1 271 398 400 against `gate‖up`'s 178 257 920), so every
-integer expression on the path was read for width before the first run. The
-result: **nothing overflows, and nothing needed changing.**
-
-| site (`src/common/repack.h`, `src/loader/loader.cc`) | expression | width | max value here |
-|---|---|---|---|
-| tile base | `out + (size_t(nt) * G + g) * 136` | `size_t` - `nt` is promoted first | 168 857 464 |
-| nibble source | `c.qweight[size_t(g * 8 + j) * c.n_part + c.n]` | `g*8+j` is `uint32_t` but ≤ 639; the product is `size_t` | 158 876 799 |
-| scale source | `c0.scales[size_t(g) * c0.n_part + c0.n]` | `size_t` | 19 859 519 |
-| column map index | `cols[nt * 16 + l]` | `uint32_t` | 248 319 |
-| staging bound | `size_t(sh.N / 16) * (sh.K / 64) * 136` | `size_t` | 168 857 600 |
-| byte buckets | `size_t(sh.K) * sh.N / 2`, `/32` | `size_t` | 635 699 200 |
-| bf16 head tiling | `out[((size_t(n / 16) * K8 + k / 8) * 8 + k % 8) * 16 + n % 16]` | `size_t` | 1 271 398 399 |
-| safetensors offsets | `TensorInfo::begin/end` | `uint64_t`; `bytes()` returns `size_t` | 3.2 GB shards |
-
-The one expression that is *not* 64-bit - `g * 8 + j` - is bounded by
-`K/64 · 8 + 7 = 647` for any `K` this model has, and the shape table is
-enforced by name before it runs. It is called out here rather than widened so
-that the next person does not have to re-derive the bound.
-
-**The size change did surface a real defect, and it was under-sizing, not
-overflow**: the int4 staging buffer was sized from `gate‖up` alone and is 7.1×
-too small for a packed head. It would have thrown - `load_linear` checks
-`words > st.i4.size()` and names the linear - rather than corrupting anything,
-which is the behaviour that check exists for. It is fixed above.
+`lm_head` at int4 is 7.1× the largest int4 tensor the repack had seen by element count
+(1 271 398 400 against `gate‖up`'s 178 257 920), so every integer expression on the path
+(`src/common/repack.h`, `src/loader/loader.cc`: tile base, nibble and scale source, column
+map, staging bound, byte buckets, bf16 head tiling, safetensors offsets) was read for width.
+Nothing overflows: every product that can pass 2³² is computed in `size_t`. The one
+expression that is not 64-bit, `g * 8 + j`, is bounded by `K/64 · 8 + 7 = 647` for any `K`
+this model has, and the shape table is enforced by name before it runs. The size change did
+surface one real defect: the int4 staging buffer had been sized from `gate‖up` alone, 7.1×
+too small for a packed head. `load_linear` checks `words > st.i4.size()` and names the
+linear, so it would have thrown rather than corrupted anything; the sizing is fixed above.
 
 ### `mtp.*` and `model_extra_tensors.safetensors` are ignored cleanly
 
@@ -694,18 +670,17 @@ measured), and it is why the packed-head checkpoint's `qzeros` count is **401**
   W check     13.673 GB vs 13.673 GB expected = … -1.867 lm_head  ->  -0.000%
 ```
 
-Load times from that session are **not** comparable to the 13.6 s recorded
-above: the machine was under a 12-core compile throughout, and a cold page cache
-read 41.4 s against a warm 12.6 s. Nothing about load time was being measured
-there.
 
 ## Picking the model
 
 The model is picked from `config.json`'s `architectures[0]` - no flag
-(`model::desc_for_architecture`; an unknown architecture throws, naming it and the supported ones). The descriptor
-(`src/model/model_desc.h`, spec 14 §3.1 / spec 15b) carries what differs per model: layer counts, widths, the MLP
-intermediate, `W`, the tokenizer's id count. (Agnes 3.0 Flash, the first model after Qwen3.8 the descriptor ran, was dropped on
-2026-11-07 with its parallel-FFN fold and name map; its config.json is refused by name - spec 14's DROPPED note.)
+(`model::desc_for_architecture`): `Qwen3_5ForConditionalGeneration` (Qwen3.8) and
+`Qwen3_5MoeForConditionalGeneration` (Ornith) get a `ModelDesc` (`src/model/model_desc.h`:
+layer counts, widths, the MLP intermediate, `W`, the tokenizer's id count); an unknown
+architecture throws, naming it and the supported ones. Agnes 3.0 Flash, which the
+descriptor once ran, was dropped on 2026-11-07 and its config.json is refused by name.
+K2, Kolibri, Flash-Next and Bolt have their own loaders and descriptors, chosen by the
+entry point that serves them.
 
 ## g128 checkpoints
 
@@ -723,21 +698,18 @@ The cost: g64's bytes (4.25 bits per weight instead of g128's 4.125, docs/02), a
 RAM for the expanded scales during the load. Asymmetric checkpoints (a zero point per
 group) and act-order (`desc_act`) stay refused.
 
-**Future idea, not scheduled: a dedicated g128 kernel.** Native g128 would read ~3 % fewer
-weight bytes, ~2.9 % faster decode if tuned as well as g64 (prefill gains nothing: h8
-rebuilds per-channel int8 per slab). The price is ongoing: a g128 variant and its own box
-sweep for every int4 shape and every new int4 kernel (MoE, K2, TP halves), a g128 golden
-reference and gates per checkpoint, and doubled binaries. The cheap half, if it is ever
-wanted, is the decode GEMV only (`gemv.cl` with `GROUP` a define), prefill keeping g64 by
-reading scale row `g >> 1`. Worth it only if a model we mainly serve exists only as g128;
-re-quantising such a model at g64 ourselves is the other answer.
+A dedicated g128 kernel is not planned: native g128 would read about 3 % fewer weight
+bytes (about 2.9 % faster decode if tuned as well as g64; prefill gains nothing) but
+costs a g128 variant and box sweep for every int4 kernel, golden references per
+checkpoint and doubled binaries. Re-quantising such a model at g64 ourselves is the
+answer.
 
 ## compressed-tensors symmetric checkpoints
 
 llm-compressor writes its W4A16 releases (RedHatAI's `*-quantized.w4a16`, `*-INT4`) in
 compressed-tensors' `pack-quantized` format. For the **symmetric** int4 group scheme
 that format holds exactly what GPTQ's does, laid out the other way round, so the loader
-reads it with a repack and no kernel change (spec 20 §9, operator ruling 2026-10-05).
+reads it with a repack and no kernel change (spec 20 §9).
 
 **The format, per linear.** `weight_packed` int32 [N][K/8]: eight consecutive input
 columns per word, k = 8r in the low nibble, each stored as q + 8. `weight_scale` [N][K/g],
@@ -815,143 +787,98 @@ our own g64 AutoRound quantisation: llm-compressor's g128 group is twice as coar
 GPTQ calibration is not our recipe (spec 20 §3). The bytes on the card are g64's either
 way, so W and the speed match the g64 checkpoint.
 
-**Real repos checked (config.json only, 2026-10-05).** Accepted: RedHatAI/Qwen3.8-27B-INT4
-(the architecture this engine runs, `Qwen3_5ForConditionalGeneration`, hidden 5120, 64
-layers; sym int4 g128, actorder static, bf16 scales, fp8 `kv_cache_scheme`; its header
-matches the published checkpoint's structure: in_proj_a/b, lm_head, the visual tower and
-the 15-tensor MTP head in bf16) and RedHatAI/Qwen3-32B-quantized.w4a16 (sym g128 actorder
-weight; a `Qwen3ForCausalLM` the engine does not describe). Refused: Padakovec/Kolibri-1-
-W4A16-GPTQ and RedHatAI/Qwen3-8B-quantized.w4a16 (`symmetric = false`), and
-halt95/Qwen3.8-Flash-Next-W4A16-Merlin (an int8 channel group). The configs are fixtures
-in `tests/loader/ct/`.
+**Configs checked.** Accepted: RedHatAI/Qwen3.8-27B-INT4 (the architecture this engine
+runs; sym int4 g128, actorder static, bf16 scales, fp8 `kv_cache_scheme`). Refused: the
+checkpoints with `symmetric = false` (Kolibri's W4A16-GPTQ, RedHatAI's Qwen3-8B) and one
+with an int8 channel group. The configs are fixtures in `tests/loader/ct/`.
 
-## Qwen3.8-Flash-Next (spec 21b): two checkpoint forms, the g128 expansion, the PLE file
+## Qwen3.8-Flash-Next: two checkpoint forms, the g128 expansion, the PLE file
 
-`loader::load_qwen4exp` (`src/loader/qwen4exp_{layout.h,repack.*,ple*,loader.*}`) is a loader BESIDE
-`loader::load`, `load_k2` and `load_kolibri1`; it reuses `resolve_snapshot`, `QuantConfig::parse`,
-`SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`, `LinearSrc::classify`, the int8 head and
-`rtn_int4_g64`, and touches none of their files.
+`loader::load_qwen4exp` (`src/loader/qwen4exp_*`, spec 21) is a loader beside the others; it
+reuses `resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants`
+/ `check_quant_scan`, `LinearSrc::classify`, the int8 head and `rtn_int4_g64`.
 
-- **Forms, from the names.** One weight format (AutoRound int4 g64 sym, `auto_round:auto_gptq`) plus the
-  operator's one exact conversion. `q4_forms` reads three groups all-or-nothing - the dense projections (GDN
-  `in_proj_qkv` / `in_proj_z` / `out_proj`, QSA `q/k/v/o_proj`), the shared experts, the MTP head's experts
-  - as `.qweight` (int4) or `.weight` (bf16), and refuses a mixed group naming the first odd tensor. Ours
-  (21q): int4 everywhere AutoRound quantises. Intel's interim export: bf16 dense / shared / MTP, routed
-  experts int4 **g128**. A bf16 or fused (`mlp.experts.gate_up_proj`, the original's) routed expert in the
-  main model is refused by name: the bf16 original is the reference's input, never the engine's.
-- **The g128 expansion** is `LinearSrc::classify`'s (above, "g128 checkpoints"), expert by expert: g64
-  scale rows 2j and 2j + 1 both take g128 row j, so each expert's layout-1 block dequantises to `(q - 8) x
-  scale` of its g128 source bit for bit (`qwen4exp_repack_test` checks every block word for word and every
-  weight of sampled columns). `quantization_config.group_size` must equal the experts' scales (64 / 128).
-- **Layouts** (`qwen4exp_layout.h`, the planner's and the loader's one formula): routed experts as layout-1
-  blocks, block e at `e x 1,740,800` (gate||up `cols_interleave16`) and `e x 870,400` (down) - each expert one
-  contiguous range per allocation, the offsets spec 22's indirection table will replace; HC blocks
-  (down||inject bf16 tiles {10240, 336}, up {320, 10240}, the `(1 + w)` norm fp32); the router {2560, 528}
-  with `shared_expert_gate` as row 512; dense int4 GPTQ layout 0, bf16 tiles in Intel's form; the GDN small
-  block `make_small_layout(2560, 10240, 48)`; every `(1 + w)` norm baked fp32 at load.
-- **The MTP head's bf16 experts** (both checkpoints ship `mtp.*` bf16) are RTN-quantised to int4 g64 at
-  load (`rtn_int4_g64`, spec 15e's precedent: the head only drafts), until decision 6.
-- **The PLE table** is not in device memory. The checkpoint's 128 bf16 shards are skipped by design; the
-  engine reads `<snapshot>-ple-int8/` (the only place since the zero-config cleanup), made once by `tools/quantize/qwen4exp/ple_int8.py`:
-  per n-gram head `ple.h<h>.q` I8 `[prime_h][160]` and `ple.h<h>.s` BF16 / F32 `[prime_h]` (spec 9's row
-  rule), the three I64 constants. A checkpoint without the file is refused naming the converter's command.
-  Both the checkpoint's and the file's I64 tensors are held to the formula (`qwen4exp_ple_hash.h`, exact
-  integers = transformers' builders). `load_q4_ple` refuses a table larger than MemAvailable - 16 GiB, then
-  pins it as **16 + 16 host-USM ranges** (one per head, ~3.2 GB each - never one 51.8 GB allocation, above the
-  largest pinned allocation measured), writes and reads back a tag per 2 MiB page of every range before the
-  data (the alias check), copies the rows, compares sampled rows, and uploads the device pointer table the
-  gather (21c) indexes.
-- **Names both ways**: every tensor is read once or skipped by design and counted - `model.visual.*`, the
-  PLE shards, `mtp.*` without the MTP head, the later layers with `--layers N` (N >= 2: the PLE layer is 1).
-- **The plan before the first allocation**: `runtime::qwen4exp::plan` + `require_fits` (weights + persistent
-  state; the full model is refused naming spec 22's expert-offload tier).
-- **Serving (spec 21e) adds no loader code.** `b70-serve` loads through `load_qwen4exp` as `b70-decode` does
-  (`--layers N`; `mtp = true` with `--spec mtp` or `--spec lookup`, the head's bf16 experts RTN int4 g64 as
-  above), and the planner counts the head's buffers (Intel's forms at 32768: 18 layers on one card and 37 on two with
-  the head, decode-only). The one file it checks besides the weights is `tokenizer.json`: the served file must be
-  the original's (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it (the
-  snapshot's own file is the only one served).
+- **Forms, from the names.** `q4_forms` reads three groups all-or-nothing - the dense
+  projections (delta-net `in_proj_qkv` / `in_proj_z` / `out_proj`, attention
+  `q/k/v/o_proj`), the shared experts, the MTP head's experts - as `.qweight` (int4) or
+  `.weight` (bf16), and refuses a mixed group naming the first odd tensor. Ours: int4
+  everywhere AutoRound quantises. Intel's export: bf16 dense / shared / MTP, routed experts
+  int4 **g128**. A bf16 or fused (`mlp.experts.gate_up_proj`) routed expert in the main
+  model is refused by name: the bf16 original is the reference's input, never the engine's.
+- **The g128 expansion** is `LinearSrc::classify`'s, expert by expert, so each expert's
+  layout-1 block dequantises to `(q - 8) x scale` of its g128 source bit for bit
+  (`qwen4exp_repack_test`). `quantization_config.group_size` must equal the experts' scales.
+- **Layouts** (`qwen4exp_layout.h`, the one formula the planner and the loader share):
+  routed experts as layout-1 blocks, one contiguous range per allocation, block `e` at
+  `e x 1,740,800` (gate||up, `cols_interleave16`) and `e x 870,400` (down); the router
+  with `shared_expert_gate` as row 512; dense int4 GPTQ layout 0; the delta-net small block
+  from `make_small_layout`; every `(1 + w)` norm baked fp32.
+- **The MTP head's bf16 experts** (both checkpoints ship `mtp.*` bf16) are RTN-quantised
+  to int4 g64 at load (`rtn_int4_g64`; the head only drafts).
+- **The PLE table** (a large per-token embedding table, 51.8 GB) is not in device memory.
+  The checkpoint's 128 bf16 shards are skipped by design; the engine reads
+  `<snapshot>-ple-int8/`, made once by `tools/quantize/qwen4exp/ple_int8.py` (per n-gram
+  head an int8 row table with per-row scales, plus three I64 constants; doc 18 has the
+  command). A checkpoint without the file is refused naming the converter's command. The
+  I64 tensors are held to the hash formula (`qwen4exp_ple_hash.h`). `load_q4_ple` refuses a
+  table larger than MemAvailable - 16 GiB, then pins it as **16 + 16 host-USM ranges** (one
+  per head, about 3.2 GB each, never one 51.8 GB allocation), writes and reads back a tag per
+  2 MiB page of every range before the data (the alias check), copies the rows, compares
+  sampled rows, and uploads the device pointer table the gather indexes.
+- **Names both ways**: every tensor is read once or skipped by design and counted -
+  `model.visual.*`, the PLE shards, `mtp.*` without the MTP head, the later layers with
+  `--layers N`.
+- **The plan before the first allocation**: `runtime::qwen4exp::plan` + `require_fits`
+  (weights + persistent state); the full model is refused, naming the expert-offload tier
+  (spec 22, open-work item 4).
+- **Serving adds no loader code.** `b70-serve` loads through `load_qwen4exp` as
+  `b70-decode` does (`mtp = true` with `--spec mtp` or `--spec lookup`). The one file it
+  checks besides the weights is `tokenizer.json`: the served file must be the original's
+  (its split has `\p{M}`); Intel's checkpoint ships Qwen3.8's, so `b70-serve` refuses it and
+  the original's file is linked beside the snapshot (doc 18).
 
-## Nemotron 3.5 Bolt (spec 25b): the exact relaxations, signed scales, one layout from two sources
+## Nemotron 3.5 Bolt: the exact relaxations, signed scales, one layout from two sources
 
-Bolt's GPTQ g128 spelling (the third-party AutoRound g128 export spec 25 §1.3 chose first; since 2026-10-29 the served
-checkpoint is our own g64 export `urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ`, the g128 spelling a
-format the synthetics keep tested) needs two loader relaxations and an audit, all in `src/loader/quant.{h,cc}` - shared code, so each is the narrowest change and every existing test and
-refusal stays as it was (`tests/loader/quant_test.cc`, the Bolt block, is written first and holds both directions):
+Bolt is parked until Flash-Next is done; its loader stays built and tested. The served
+checkpoint is our own g64 export
+(`urakozz/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-W4A16-g64-AutoRound-GPTQ`); the third-party g128
+spelling is kept tested by synthetics. Reading it needed two relaxations in the shared
+`src/loader/quant.{h,cc}`, each the narrowest change (`tests/loader/quant_test.cc` holds both
+directions):
 
-- **A restating `+:` dynamic rule is accepted, nothing else.** `QuantConfig::parse` used to refuse every `+:` rule
-  (the broken-MTP-config guard: a `+:` rule that CHANGES a module's quantisation). The g128 spelling's `dynamic` carries 44 `-:`
-  exclusions and one `"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": true}` - exactly the top level
-  restated. A `+:` rule whose value is an object of exactly the three keys `bits`, `group_size`, `sym`, each equal to
-  the top level's, is a no-op, counted in `QuantConfig::dynamic_restating` (the 44 `-:` rules stay in
-  `dynamic_rule_count`). A `+:` rule that changes bits, group or sym, carries any other key, omits one of the three, is
-  `{}` or is not an object still throws, naming the rule (`quantization_config.dynamic has a non-exclusion rule
-  '+:...'`). `LinearSrc::classify` still checks every module against its shipped tensors, so a restating rule cannot
-  smuggle a differently-quantised module past the loader.
-- **BF16 GPTQ `.scales` are exact-or-refused.** `classify` (and the `.scales` branch of `assert_quant_invariants`)
-  accept `.scales` stored BF16 beside a GPTQ `.qweight` and convert each value with the existing `bf16_to_f16_exact`
-  (compressed-tensors' converter): a value f16 cannot hold exactly (above 65504, below f16's subnormals' bits, NaN /
-  Inf) throws naming `<linear>.scales[<element>]`. Our served g64 export ships them: its 40 Mamba `out_proj` linears' `.scales`
-  are BF16 (every other linear's F16; read from its shard headers 2026-10-29) - r59.load_real is the first load of real
-  BF16 scales; any dtype other than F16 / BF16 is still refused.
-- **Signed scales: audited, nothing to change.** AutoRound's symmetric scale is signed (about half of every Bolt
-  linear's scales are negative - spec 25 §1.3, measured on the synthetics at 50.0 %); the dequant is `(q - 8) x scale`
-  everywhere. The sign is the f16 word's top bit and every path moves f16 words verbatim: the g128 -> g64 expansion
-  (`expand_g128`), the BF16 conversion (`bf16_to_f16_exact` compares the sign bit), `repack_int4_layout0_cols` /
-  `repack_int4_layout1[_cols]` (inline scale words), and `assert_quant_invariants` / `check_quant_scan` only look for
-  NaN / Inf, never for a sign. `quant_test` holds each of them with negative scales (bit for bit, and the dequant
-  `float(q - 8) x scale`); the spec 25b layout tests hold the device buffers.
-- One departure from a helper's name: `common::f32_to_f16` flushes f16 subnormals to zero (a test helper); the loader's
-  exact converter uses `common::kv8::f32_to_f16_rne`, which does not - the tests use the latter.
+- **A restating `+:` dynamic rule is accepted, nothing else.** `QuantConfig::parse` refuses
+  a `+:` rule that changes a module's quantisation (the broken-MTP-config guard). The g128
+  spelling carries one `"+:.*mixer\\.out_proj$": {"bits": 4, "group_size": 128, "sym": true}`,
+  exactly the top level restated: a `+:` rule whose value is an object of exactly the keys
+  `bits`, `group_size`, `sym`, each equal to the top level's, is a no-op, counted in
+  `QuantConfig::dynamic_restating`. Any rule that changes a value, carries another key, omits
+  one, is `{}` or is not an object still throws, naming the rule. `classify` still checks
+  every module against its shipped tensors.
+- **BF16 GPTQ `.scales` are exact-or-refused.** Our export ships the 40 Mamba `out_proj`
+  linears' `.scales` as BF16 (every other linear's F16). `classify` and
+  `assert_quant_invariants` convert them with `bf16_to_f16_exact` (the compressed-tensors
+  converter): a value f16 cannot hold exactly throws naming `<linear>.scales[<element>]`; any
+  dtype other than F16 / BF16 is refused.
+- **Signed scales: audited, nothing to change.** AutoRound's symmetric scale is signed (about
+  half of Bolt's scales are negative); the dequant is `(q - 8) x scale` everywhere. The sign is
+  the f16 word's top bit and every path moves f16 words verbatim (the g128 -> g64 expansion,
+  the BF16 conversion, the repacks); the finite check never looks at a sign. `quant_test` holds
+  each path with negative scales.
 
-`loader::load_bolt` (`src/loader/bolt_{layout.h,repack.*,loader.*}`, a loader BESIDE the others; it reuses
-`resolve_snapshot`, `QuantConfig::parse`, `SafetensorsSet`, `assert_quant_invariants` / `check_quant_scan`,
-`LinearSrc::classify`, `DeviceWeight` and `quantise_int8_tiled`) reads **either** spelling into one device layout:
-
-- **One layout from two sources.** A checkpoint in the GPTQ g128 spelling (`g_idx` = `i // 128`, signed F16 scales, the
-  restating `+:` rule) goes through `classify`'s exact g128 -> g64 scale expansion; our g64 export (no `g_idx`,
-  `extra_config` naming the 40 routers as kept, the trunk spelled `language_model.backbone.`) is read as it is.
-  A linear's group is decided by its scale rows (a g64 and a g128 linear may even share a checkpoint), never by a label,
-  and the repack only ever sees g64 words and scales - so the same weights packed g64 with each g128 scale written to both
-  g64 rows give **byte-identical** device buffers (`bolt_repack_test`: both layouts, fused, the expert block;
-  `bolt_synth_host_pair_test`: every block of two real-width synthetics, N 8 - 20,400 sampled words equal the shards' too).
-- **Heterogeneous MoE.** E and I come from each block's own `block_configs` entry (`model::BoltDesc::experts / inter`),
-  never the top level's `num_experts` (512, a maximum) or `intermediate_size` (2688, used by no block). One MoE block's routed
-  experts are ONE allocation of E blocks, a block = the expert's up (K 1024, N I) then its down (K I, N 1024), both layout 1,
-  `I x 544` B each: expert `id` is at `id x block(I)` (up) and `+ up(I)` (down), from the layer's own I
-  (`loader/bolt_layout.h`); every size and offset is a multiple of 64 B. The router is bf16 tiles `{4096, E}` (E is a
-  multiple of 16 in every layer: no padding rows).
-- **Per-linear `{S, layout}`** (PROVISIONAL until 25c's P0): layout 1 for every routed expert and every N = 4096 linear
-  (`out_proj`, `o_proj`, `fc2`, `shared_down`), layout 0 for `in_proj` and the fused `q||k||v` (N 4608) and `fc1||shared_up`
-  (N 6400); S 1. `BoltDesc::linears(l)` is the one source; the byte count is the same at either layout.
-- **Kept tensors.** The block norms, conv taps (`[10240][1][4]`, tap 0 the OLDEST position) and bias, the gated-norm weight
-  widened to fp32 (exact); `D`, `dt_bias` verbatim and `A = -exp(A_log)` (fp32; `A_log` / `D` / `dt_bias` accepted F32 -
-  our export's - or BF16 - NVIDIA's original -, each finite, `A_log <= 80`); `e_score_correction_bias` F32. The
-  exp is `common::exp_torch` (`src/common/exp_torch.h`, Sleef's expf u10 in plain C++: the same on every host).
-  **Measured** (tools: a dump of the C++ values compared in the oracle image, torch 2.14.1 CPU, MKL): over all 33,266 bf16
-  values in [-7, 9] (A_log's range is -6.81 .. 8.81) `exp_torch` differs from `torch.exp(x.float())` on 196 values (0.59 %),
-  never by more than 1 ulp; libm's `expf` differs on 192 (`tools/oracle/bolt_exp_dump.cc` + `bolt_exp_compare.py` reproduce it). No host function reproduces torch's MKL `vsExp` bitwise; `A`
-  feeds `exp(dt x A)` on the card, so a 1 ulp difference in a constant is far below the kernels' own tolerance.
-- **What is skipped is named.** The 458 vision / projector tensors of our export (`vision_model.*`,
-  `vision_projector.*`, `mlp1.*`) are skipped by prefix and counted; every other tensor is consumed (unconsumed = 0, the
-  `.qzeros` / `.g_idx` beside a linear excepted: their invariants are `assert_quant_invariants`'s). The trunk is
-  `language_model.model.`; NVIDIA's own `language_model.backbone.` is accepted only when a checkpoint ships it
-  (`bolt_trunk_prefix`; both or neither is refused). `bolt_names_test` holds `bolt_expected_names(model::bolt())` to the
-  published index's 112,091 language names exactly (+ 849 vision) - the typed pattern and the typed (E, I) table are the
-  real ones.
-- **The untied head.** `language_model.lm_head.weight` is its own bf16 tensor: the int8 head (spec 9, Decision 18) is
-  quantised from it on the last device, or its own bf16 tiles are uploaded (the tests' bf16 form: 1,073,741,824 B against
-  the int8 head's 537,395,200 B); the embedding's tiles stay on device 0 (no replica).
-- **The memory plan before the first allocation** (`runtime::bolt::plan`, `src/runtime/bolt/`): per device its blocks'
-  weights (the loader asserts its allocation equals `loader::bolt::device_weight_bytes`), KV for its attention blocks at
-  `max_len` (8,192 B a position over the 8), one SSM state (fp32, 4 MiB) per Mamba block it holds x (1 + verify slots), the
-  raw-xBC rings, caller-given decode / prefill scratch and - on the last device - spec 26's drafter and its embedding replica,
-  the 1.5 GB reserve. The split is `runtime::pp_balance` over the blocks' weights alone: **48** (device 0 holds blocks 0-47 -
-  22 Mamba, 5 attention - and the embedding: 19,928,067,776 B; device 1 blocks 48-87, norm_f and the int8 head: 20,540,610,880
-  B). `--max-len auto` is the largest multiple of 256 that fits every device and is at most `max_position_embeddings`
-  (262144): on two 32 GiB cards with the scratch, the drafter, its replica and 7 verify slots all reserved it is 262144
-  (device 1: 27.23 GB of 34.36 GB); one 32 GiB card is refused naming the bytes and Decision 4. Every figure is printed by
-  `bolt_repack_test` / `bolt_plan_test`; none is typed.
+`loader::load_bolt` reads **either** spelling into one device layout. A linear's group is
+decided by its scale rows, never by a label, and the repack only ever sees g64 words and
+scales, so the same weights packed g64 or g128 give byte-identical device buffers
+(`bolt_repack_test`). Heterogeneous MoE: the expert count and width come from each block's
+own `block_configs` entry (`model::BoltDesc`), never the top level's maximum; a block's routed
+experts are one allocation of `E` blocks (up then down, both layout 1). Per-linear
+`{S, layout}` comes from `BoltDesc::linears(l)`. The conv taps, norms, `D`, `dt_bias` and
+`A = -exp(A_log)` are baked fp32 at load; the exp is `common::exp_torch`, the same on every
+host (it differs from torch's `exp` by at most 1 ulp on 0.59 % of the bf16 values in range,
+far below the kernels' own tolerance). The vision tensors are skipped by prefix and counted;
+everything else is consumed. The untied `lm_head` is quantised to the int8 head on the last
+device. `runtime::bolt::plan` fixes the layer split between the cards and `--max-len auto`
+before the first allocation; its figures are printed by `bolt_repack_test` /
+`bolt_plan_test`, not typed here.
 
 ## Deliberately not loaded
 
