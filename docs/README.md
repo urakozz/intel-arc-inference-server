@@ -19,6 +19,8 @@ short version; this is where the reasoning and the evidence live.
 - **[18-running-models.md](18-running-models.md)** - the commands to download, serve,
   decode and benchmark each model (Qwen3.8, Ornith 1.5, K2-Horizon, Kolibri-1, Nemotron 3.5 Bolt, Flash-Next),
   what each supports, its limits, the speculative-decoding modes and how their output is judged.
+- **[environment-variables.md](environment-variables.md)** - what the CLIs, tests and tools read from the
+  environment (none of it needed to run the engine).
 
 ## The design
 
