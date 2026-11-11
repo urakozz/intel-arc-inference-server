@@ -1,22 +1,23 @@
 # Know-how - what building this taught us
 
 The transferable findings from writing an LLM inference engine from scratch
-against one GPU. Every number is measured on the box unless marked otherwise;
-the derivation for each lives in the doc cited.
+against Intel Arc Pro B70 cards. Every number is measured on the box unless
+marked otherwise; the derivation for each lives in the doc cited.
 
-**The headline.** A 15-kLOC engine - pure Level Zero and OpenCL C, no PyTorch,
-no vLLM, no vendor kernel library in the hot path - runs prefill at
-**1670.72 t/s against vLLM's 1610.04** on the same card and the same checkpoint
-files, and decode at **29.45 t/s against 31.01**. (The default
-bf16 prefill; the opt-in int8 prefill, `--prefill-backend l0-int8`, reaches 2125 t/s, docs/17.) Good prefill, decode still
-behind. It reproduces a CPU-torch oracle element-exact on every determined token
-row and replays bitwise deterministically.
+**The headline (one card, 2026-09 stack, same checkpoint files as vLLM).** An
+engine in pure Level Zero and OpenCL C - no PyTorch, no vLLM, no vendor kernel
+library in the hot path - ran prefill at **1670.72 t/s against vLLM's 1610.04**
+and decode at **29.45 t/s against 31.01** (the opt-in int8 prefill,
+`--prefill-backend l0-int8`, reached 2125 t/s, docs/17). Good prefill, decode
+behind; speculative decoding, several requests at once and two cards have moved
+the picture since (current numbers: BENCHMARKS.md). It reproduces a CPU-torch
+oracle element-exact on every determined token row and replays bitwise
+deterministically.
 
-**What that headline is not.** It is not efficient yet. Decode sits at 77.6% of
-the measured bandwidth against vLLM's 81.7%, and prefill sustains about
+**What that headline is not.** It was not efficient yet. Decode sat at 77.6% of
+the measured bandwidth against vLLM's 81.7%, and prefill sustained about
 81.8 TFLOP/s against a 183.45 TFLOP/s pipe. Beating the reference
-implementation and using the silicon well turned out to be different questions,
-and only one of them is answered.
+implementation and using the silicon well turned out to be different questions.
 
 ## 1. The hardware (BMG-G31 / B70)
 
@@ -55,15 +56,15 @@ and only one of them is answered.
 ## 2. Level Zero as the whole runtime
 
 - **Capture once, replay per token.** A regular in-order command list with every
-  argument baked - 774 kernels across 19 modules - replays at 0.4 to 0.7 us per
+  argument baked - 774 kernels - replays at 0.4 to 0.7 us per
   launch, and per-token host work is 97 us, 0.3% of the step. The three values
   that change per token live in a device-resident control block the kernels read
   and the sampler writes (docs/04).
 - **Arguments are resolved at append time**, proven by test, so mutable-argument
   extensions are unnecessary for decode.
-- **More launches can be faster.** The Level Zero prefill walk issues 8,689
-  launches per chunk against sycl-tla's 1,201 and has **zero** host waits
-  against 656 (the sycl-tla backend was removed on 2026-10-27, our own kernels won).
+- **More launches can be faster.** The Level Zero prefill walk issued 8,689
+  launches per chunk (9,073 with today's composed attention) against sycl-tla's
+  1,201 and has **zero** host waits against 656 (the sycl-tla backend was removed on 2026-10-27, our own kernels won).
   Launch count was never the cost; cross-runtime boundaries were.
 - **Two software queues on this device share one hardware compute queue and
   cannot be ordered against each other.** The driver reports exactly one compute
@@ -199,11 +200,11 @@ and only one of them is answered.
   judge, doc 14), accept a near-miss of at most 8 bf16 ulps, and still fail a real error - the
   DPAS verify-attention kernel's token was at f32 rank 3, 4.0 below a top whose margin was 3.44,
   and the kernel was switched off for it.
-- **The box is the check.** A Mac-side build and test run proves the host code compiles, not that
-  the cards behave; since 2026-11-03 every merge goes through `tools/box_check.sh` (build, kernel
-  command lines against a base, the suite that needs no model files, Passed / Failed / Skipped
-  counted apart because a Skipped test is not a pass), cards are taken only through
-  `tools/gpu_lock.sh`, and model-level rows run through `tools/box_validate.sh`.
+- **The cards are the check.** A Mac-side build and test run proves the host code compiles, not that
+  the cards behave. Merges go in after the checks that need no card; the full validation
+  (`tools/box_validate.sh`) runs on main on demand, counts Passed / Failed / Skipped apart (a Skipped
+  test is not a pass) and reuses the PASS of an unchanged test. Cards are taken only through
+  `tools/gpu_lock.sh`.
 - **A compiler upgrade must invalidate its own kernels.** The 2026-11-04 move to IGC 2.42.6 and
   compute runtime 26.40 left every binary the old compiler had built, because only the `.cl`
   sources were build dependencies. `cmake/ocloc_stamp.cmake` now records `ocloc --version` and the
@@ -213,3 +214,16 @@ and only one of them is answered.
   a sorted map re-prints tools and call arguments in another order than transformers and vLLM do,
   and the prompt ids differ from the first tool definition on (0 of 36 matched before
   `nlohmann::ordered_json`, 36 of 36 after).
+
+## 7. Two cards, the driver and the host
+
+- **A hang at 100 % CPU inside the GPU driver, with the cards idle, is the runtime retrying an ioctl that
+  returns EBUSY forever** (it has no retry limit). Before blaming the kernel or the driver, look at what our
+  code changed and whether the exact setup ever passed before. The 2026-11-11 prefix-restore hang was our own
+  allocation size, not the kernel.
+- **Host allocations both cards use stay at 4 GiB or less each.** One bigger pinned allocation that the second
+  card maps through a shared import can fail in the kernel ("busy"), and the runtime then retries forever. The
+  prefix cache is therefore pinned host RAM in 2 GiB pieces.
+- **A one-card copy test cannot reproduce a two-card import problem.** The restore hang lived in the second card's
+  mapping of memory shared with the first, and copy stress that did not use that path passed cleanly. Test the
+  path with both cards taking part.
