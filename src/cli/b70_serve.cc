@@ -143,7 +143,7 @@ void usage() {
                "  --prefix-cache-gb auto|N   the prefix cache in SYSTEM RAM (pinned host memory), GiB. auto\n"
                "                  (default): min(32, half the RAM, available - 8), off below 4; 0 = off.\n"
                "  --prefix-split-last   chat requests: prefill to len - 1 and run the last id as one decode\n"
-               "                  step, so a thinking model's next turn restores right there (agentic sessions;\n"
+               "                  step, so a thinking model's next turn is a prefix cache hit right there (agentic sessions;\n"
                "                  off for benchmarks and the golden gates).\n"
                "  --layers N|auto Qwen3.8-Flash-Next only, REQUIRED until spec 22: load its first N layers\n"
                "                  (development mode); its PLE int8 file is <snapshot>-ple-int8/.\n"
@@ -893,7 +893,7 @@ int serve_tp(const TpServe& a, server::Options options) {
 // card's own plan: its --max-len auto, its prefill chunk cap, MTP / lookup per --spec), behind cli::ReplicaEngine and
 // server::Scheduler: two requests at once, each bitwise what it is alone on its card. Both cards are views of ONE
 // Level Zero context (spec 16 decision 1) so the prefix cache's pinned host store is device-visible to both - a
-// snapshot saved by card 0 restores on card 1; nothing else crosses (no peer access is used). The refusals
+// snapshot saved by card 0 gives a prefix cache hit on card 1; nothing else crosses (no peer access is used). The refusals
 // (another model, one visible card, the pp override flags, DFlash) ran in run(), before the device.
 // Replica x slots (2026-11-10; --max-num-seqs, operator 2026-11-11): --max-num-seqs N splits between the cards (card 0
 // the odd one); a card's slots are plan 13c's (cli::settle_slots over that card's own memory), and a card with

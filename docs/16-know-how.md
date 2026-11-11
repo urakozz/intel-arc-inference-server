@@ -219,11 +219,11 @@ implementation and using the silicon well turned out to be different questions.
 
 - **A hang at 100 % CPU inside the GPU driver, with the cards idle, is the runtime retrying an ioctl that
   returns EBUSY forever** (it has no retry limit). Before blaming the kernel or the driver, look at what our
-  code changed and whether the exact setup ever passed before. The 2026-11-11 prefix-restore hang was our own
+  code changed and whether the exact setup ever passed before. The 2026-11-11 prefix cache hit hang was our own
   allocation size, not the kernel.
 - **Host allocations both cards use stay at 4 GiB or less each.** One bigger pinned allocation that the second
   card maps through a shared import can fail in the kernel ("busy"), and the runtime then retries forever. The
   prefix cache is therefore pinned host RAM in 2 GiB pieces.
-- **A one-card copy test cannot reproduce a two-card import problem.** The restore hang lived in the second card's
+- **A one-card copy test cannot reproduce a two-card import problem.** The prefix cache hit hang lived in the second card's
   mapping of memory shared with the first, and copy stress that did not use that path passed cleanly. Test the
   path with both cards taking part.

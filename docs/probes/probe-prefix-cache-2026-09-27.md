@@ -207,7 +207,7 @@ the cold run's. The synthetic history re-renders each answer, so each prompt div
 from the previous request at that prompt's last id (`analyze_log.py`: lcp = len - 1 on
 every main request) and the default path falls back to the last block end.
 
-With `--prefix-split-last` (the prompt-end snapshot at len - 1) the same replay restores
+With `--prefix-split-last` (the prompt-end snapshot at len - 1) the same replay gets prefix cache hits
 at len - 1 of the previous prompt (cached 1702, 1791, 3434, 4981, ... 10152) and sums
 12.74 s of time to first token, but 4 of 15 requests differ from the cold run. Judged by
 `probe_tie_judge` against the reproduced cold row:

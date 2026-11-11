@@ -30,7 +30,7 @@ restores it before the 76 decode steps.
 
 | prompt state from | decoded with | 17 - 516 |
 |---|---|---:|
-| l0-int8 + int8 KV prefill (restored as is) | int8 KV | -1.34 (= the prefilled run, bitwise) |
+| l0-int8 + int8 KV prefill (prefix cache hit as is) | int8 KV | -1.34 (= the prefilled run, bitwise) |
 | l0-int8 + bf16 KV prefill, KV quantised on the host | int8 KV | **+1.03** |
 | l0-int8 + int8 KV prefill, KV dequantised on the host | bf16 KV | **-0.39** |
 | l0 + bf16 KV prefill, KV quantised on the host | int8 KV | +2.00 |
