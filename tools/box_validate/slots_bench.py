@@ -5,7 +5,7 @@
                  [--prompt tests/golden/prompts/long.txt] [--out FILE]
 
 For each count N, two rounds of N /v1/completions requests sent together, greedy, ignore_eos, each the prompt
-(long.txt, 2820 ids) behind its own first line (no two share a prefix):
+(long.txt) behind its own first line (3,425 ids with Qwen3.8's tokenizer; no two share a prefix):
 
   cold   --cold-tokens ids each, the prompts new to the server: TTFT under load - t_first_token - t_start on the
          server's clock (its --log-requests records, matched by the request's `user`): queue wait + its own prefill +
