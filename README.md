@@ -47,11 +47,10 @@ text is, so per-request rates move by a few t/s between prompts. Every measureme
 **Correctness** is checked, not eyeballed: kernels that replace others must match bitwise, and the engine's tokens
 are judged against an f32 CPU reference of the model on golden prompts, tool-call sessions and long contexts.
 
-## Install and run
+## Install
 
-You need Linux with the `xe` driver (tensor parallel needs peer-to-peer between the two cards, native from kernel
-7.4), Intel's compute runtime
-with `ocloc` and the Level Zero loader, g++, CMake and Rust (for the tokenizer).
+You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and
+Rust (for the tokenizer). Tensor parallel on two cards needs peer-to-peer between them (native from kernel 7.4).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -60,7 +59,11 @@ ctest --test-dir build
 
 # the engine never downloads; fetch the checkpoint into the Hugging Face cache once
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
+```
 
+## Run
+
+```sh
 # an OpenAI-compatible server on port 8000
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last
 ```
@@ -69,18 +72,17 @@ With no other flags the engine picks everything itself: on two cards one session
 context, on one card the largest context that fits, MTP on, the prefix cache sized from your RAM. It refuses at
 startup, naming why, anything that does not fit.
 
-Which setup for what:
+**Recipes** for one card and two cards - full context, fastest prefill, several sessions - with their context
+lengths and speeds: [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5,
+Qwen3.8-Flash-Next, Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); only Qwen3.8 is tuned.
 
-| you want | run |
-|---|---|
-| one session, as fast as possible | the default (`--parallel tp` on two cards; needs peer-to-peer) |
-| a main session plus helper requests (subagents) | `--max-num-seqs N` - up to 8 on two cards, 4 on one |
-| the longest context on one card (the full 262,144), or beside several requests | add `--kv-cache int8` |
-| the fastest first token | add `--prefill-backend l0-int8` (not with `--kv-cache int8`) |
+Two cards run in one of three modes (`--parallel`):
 
-Recipes for every model and setup, what each supports and refuses: [docs/18-running-models.md](docs/18-running-models.md).
-Other models load too - Ornith 1.5, Qwen3.8-Flash-Next, Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt - but only
-Qwen3.8 is tuned.
+| mode | for | Qwen3.8 |
+|---|---|---|
+| `tp` - every layer split over both cards (needs peer-to-peer) | one session at maximum speed | the default: 123 t/s, full context |
+| `replica` - a model copy per card | several sessions at once (`--max-num-seqs 2` to `8`) | up to 258 t/s total |
+| `pp` - the layers split between the cards | models that do not fit one card | not needed: the full context fits one card |
 
 ## Flags
 
