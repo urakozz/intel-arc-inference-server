@@ -145,6 +145,18 @@ deferred projection equals today's at every flush point: plain step, request end
 - [ ] **Step 2 (box):** `r82.iter`. **Gate:** draft pass <= 4.5 ms (0.15 plain steps) at depth 4096 with Tasks 5-6;
   iteration at K = 7 <= 1.35 plain steps; launches per draft printed.
 
+### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
+
+- [ ] **Step 1 (harness):** adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
+  the prefix cache with `--spec off` fixed; Task 8 needs `--spec off` / `--mtp auto` / `--spec dflash` with the prefix
+  cache ON in every arm. Take the cards through `tools/gpu_lock.sh` (never set `ZE_AFFINITY_MASK` by hand) and stop the
+  server the way `tools/box_validate/serve_run.sh` does (its own child, wait for exit), not a bare `kill`.
+- [ ] **Step 2 (cost table):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
+  medians; **Gate:** the table equals the new medians, so Task 8 does not run on Task 3's pre-optimisation costs.
+- [ ] **Step 3 (combined acceptance):** measure E_K of the final drafter (int4 + the chosen draft head) against Task 1's
+  **original int8 / full-head baseline** on A4, code, prose and the held-out opencode slice. **Gate:** within 0.05 of that
+  baseline in total - the per-task gates of Tasks 5 and 6 must not add up to an unnoticed loss.
+
 ### Task 8: the bar (box, idle) - G-speed
 
 - [ ] **Step 1:** `r82.d5` on the branch head, idle box, both other recordings as checks.
