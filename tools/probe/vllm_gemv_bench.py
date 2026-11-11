@@ -62,7 +62,7 @@ Two differences from the C++ probe, both recorded rather than papered over:
 PRE-REGISTRATION - written before a single number was measured
 --------------------------------------------------------------
 Anchor: vLLM does 31.50 t/s on this checkpoint = 489 GB/s effective = 83.0% of
-the measured 590 GB/s DRAM wall (docs/05-perf-model.md:47), over W = 15.52 GB
+the measured 590 GB/s DRAM wall (docs/05-perf-model.md, "Decode: bandwidth"), over W = 15.52 GB
 of weight bytes per token. That 489 is an END-TO-END average: it contains
 attention, norms, sampling and whatever host gap survives XPU graphs, all of
 which run below the wall. The pure int4 GEMV must therefore be ABOVE 489, and

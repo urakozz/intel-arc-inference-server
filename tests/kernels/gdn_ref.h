@@ -6,7 +6,7 @@
 // including every bf16 rounding and every reduction tree, so the device can be
 // held to a few ulp rather than to a hand-waved tolerance. Every block below
 // has a twin in gdn_step.cl and the two must be edited together. The maths
-// itself is docs/03-models.md, "Layer math - verified in the modeling file"
+// itself is docs/03-models.md, "Layer math, verified against the modeling file"
 // (the GDN block), which wins over any other text.
 //
 // ---------------------------------------------------------------------------

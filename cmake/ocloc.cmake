@@ -33,8 +33,8 @@ add_custom_target(ocloc_toolchain ALL
 # OPTIONS appends further `-cl-` build options for one kernel. One rule:
 # `-cl-denorms-are-zero` is FORBIDDEN project-wide -- the 27B's int4 scales go
 # subnormal and flushing them makes the device disagree with both the host
-# reference and the oracle (docs/13-loader.md, "the no-denorm-flush build
-# constraint").
+# reference and the oracle (docs/13-loader.md, "The three data asserts, and what
+# measured them").
 function(add_ocloc_kernel NAME)
   cmake_parse_arguments(K "" "SOURCE" "DEFINES;DEPENDS;OPTIONS" ${ARGN})
   if(NOT K_SOURCE)

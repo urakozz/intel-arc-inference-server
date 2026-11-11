@@ -2,7 +2,7 @@
 // term removed at a time. It exists to answer the question spec 1.5's
 // re-assessment memo ranks above every design (§5.2): **what does
 // `attn_decode`'s 224.046 µs/launch actually buy?** Four pre-registered cost
-// models have died on that kernel (docs/15 §2, §L5) and this file is the
+// models have died on that kernel (docs/15 part 2) and this file is the
 // project's answer to "stop fitting, start subtracting".
 //
 // **It is a copy, not an include.** `src/kernels/attn.cl` is production and
@@ -558,7 +558,7 @@ __kernel void probe_attn(__global const uint* restrict ctrl,
           // Every read and every write in this loop is inside ONE subgroup, so
           // three of the four steps need only a subgroup fence. The LAST one
           // must stay work-group wide: `dot_red[s*SG]` is then read by all 256
-          // work-items across all 16 subgroups. docs/12 lists this as "not
+          // work-items across all 16 subgroups. docs/12 ("Decode attention" -> Rejected) lists this as "not
           // used, not measured - worth trying with a probe in hand"; PB_SG_TREE
           // is the probe. The arithmetic and its order do not move at all.
 #if PB_SG_TREE

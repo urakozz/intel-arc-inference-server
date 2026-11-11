@@ -63,7 +63,7 @@
 //   PGL_PREFETCH  D: OpenCL `prefetch()` of the weight tile D k-groups ahead.
 //                    A prefetch returns no data, so it costs NO registers --
 //                    which is the whole point: the attention probe's prefetch
-//                    row was confounded by +32 floats per lane (docs/15, M1),
+//                    row was confounded by +32 floats per lane (docs/15, "What `attn_decode`'s launch buys, named by subtraction"),
 //                    and this form cannot be.
 //   PGL_PFBUF     1: the register form -- next group's `block_read8` issued
 //                    before this group's arithmetic. +8 u32 per lane live.

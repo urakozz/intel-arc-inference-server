@@ -51,7 +51,7 @@ namespace {
 namespace avr = attn_verify_ref;
 // N1's bar. Spec 28c §4 says 0.99999; the kernel with P in bf16 alone met it here (0.999991 - 0.999994 on random data,
 // 0.9999880 on the int8 dump's row at 4096, which the operator ruling of 2026-11-03 accepted) and still moved real
-// DFlash verify rows off the f32 top (docs/07-open-questions.md §11): random rows do not show the cancellation that
+// DFlash verify rows off the f32 top (docs/07-open-questions.md, "Recently answered"): random rows do not show the cancellation that
 // amplifies P's rounding on real heads. P as hi + lo (PSPLIT=1) measures 0.9999984 - 0.99999999 on both parts, so the
 // bar sits between the two kernels: a return to P in bf16 fails it. That also retires the int8 4096 exception.
 constexpr double kN1 = 0.999997;

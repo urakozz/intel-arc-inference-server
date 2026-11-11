@@ -208,8 +208,8 @@ uint32_t argmax_full(const float* row, uint32_t n) { return argmax_masked(row, n
 // bf16), so a decision row carries ~8 mantissa bits and two candidates can land
 // on the same word. When they do, `torch.argmax` returns the lower index - and
 // that is a property of torch's tie-break, not an output of the model. Asserting
-// it would make this gate grade the engine on a coin toss (docs/14, "The
-// RTN-checkpoint gate").
+// it would make this gate grade the engine on a coin toss (docs/14, "Undetermined
+// rows: the rule, and why it is not a weakening").
 //
 // This is NOT a tolerance and it is NOT a relaxation of the bar. On a row where
 // the maximum IS unique the gate is exactly as strict as it always was: one id,

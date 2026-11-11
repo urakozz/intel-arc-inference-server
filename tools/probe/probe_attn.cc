@@ -3,7 +3,7 @@
 // Spec 1.5's re-assessment memo (§5.2) ranks this measurement above every
 // design on its menu: `attn_decode` is 3.585 ms/token - 9.9% of the step and
 // the largest non-GEMV row - and **four pre-registered cost models have died on
-// it** (docs/15 §2 models A and B, §L5 models C and D). Nobody knows what the
+// it** (docs/15, "What the measurement says that nothing else did", the four models). Nobody knows what the
 // launch spends. This probe does not fit a fifth model. It transplants the
 // launch out of the engine and then removes ONE term at a time, so that what
 // each term costs is a subtraction between two measurements rather than a
@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
               "%u KV caches rotated, device %s (%u EUs)\n"
               "Per-launch us are kernelStart->kernelEnd from the same timestamp events\n"
               "`b70-decode --profile` uses, so they are directly comparable to the in-situ\n"
-              "224.046 us/launch this row exists to reproduce (docs/15 §L5).\n\n",
+              "224.046 us/launch this row exists to reproduce (docs/15, "The attribution floor").\n\n",
               pos, reps, kReplays - kWarmup, kWarmup, kvsets, ctx.name().c_str(),
               ctx.eu_count());
   std::printf("| variant | live WGs | us/launch (median) | mean | min .. max | vs base |"

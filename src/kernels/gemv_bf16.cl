@@ -6,7 +6,7 @@
 //
 // Two compile-time knobs shape the grid, and both exist for ONE shape - `a‖b`,
 // which at the default tiling is **8 subgroups for the whole launch** and takes
-// 48.8 µs to read 1.31 MB (26.9 GB/s, 4.6% of the device; docs/15 §L2).
+// 48.8 µs to read 1.31 MB (26.9 GB/s, 4.6% of the device; docs/12 `gemv_bf16`).
 //
 // **COLS_PER_WG** - output columns per work-group, i.e. the work-group size. A
 // subgroup owns one 16-column tile; COLS_PER_WG / 16 tiles share a work-group,
@@ -22,7 +22,7 @@
 //
 // **KSPLIT is the knob that worked, and it worked because it is the only one
 // that changes the number of hardware threads.** Measured in situ at `a‖b`
-// (docs/15 §L2), KSPLIT 1 / 4 / 16 at COLS_PER_WG 16 - 8 / 32 / 128 subgroups -
+// (docs/12 `gemv_bf16`), KSPLIT 1 / 4 / 16 at COLS_PER_WG 16 - 8 / 32 / 128 subgroups -
 // read **48.774 / 13.115 / 5.340 µs** per launch, i.e. 26.9 / 99.9 / 245 GB/s
 // and 3.36 / 3.12 / 1.92 GB/s **per subgroup**. A subgroup pulls what it pulls;
 // the launch was slow because it only ever had eight of them. The shipped
@@ -41,7 +41,7 @@
 // There is no atomic and no data-dependent branch, so a replayed list still
 // gives the same bits every time.
 //
-// **What was measured and rejected, in situ, 2026-08-25** (docs/15 §L2) - both
+// **What was measured and rejected, in situ, 2026-08-25** (docs/15, "The three changes of 2026-08-25") - both
 // were bit-identical and both were worth nothing, which is why this file does
 // not carry them:
 //

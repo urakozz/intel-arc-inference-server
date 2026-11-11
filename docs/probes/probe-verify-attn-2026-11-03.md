@@ -200,7 +200,7 @@ where the rule keeps v2. At 32768 keys K = 3 is 9.5 % faster end to end (plain d
 
 ## §5 The fixed kernel (PSPLIT 1), re-timed 2026-11-04 (busy box, card 1)
 
-`attn_verify_dpas` now carries P as bf16 hi + lo (docs/07-open-questions.md §11: P in bf16 alone was the cause of the
+`attn_verify_dpas` now carries P as bf16 hi + lo (docs/07-open-questions.md ("Recently answered"): P in bf16 alone was the cause of the
 t6_usage-loader error). Tag `K32_Pg_S4_D256_Q1_G256_P1` = the production line; `probe_verify_attn arms --time --rounds 5
 --reps 10` against v2 on the same two dumps, beside a whole-box validation run's other card. Paired v2 / dpas (median):
 
