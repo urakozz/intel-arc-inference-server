@@ -40,8 +40,6 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
 | two cards, `--parallel tp` | **2,939** | **2,686** |
 
-Every measurement and how it was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
 ## Install
 
 You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and
@@ -63,13 +61,18 @@ uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-G
 ./build/src/cli/b70-serve urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ --prefix-split-last
 ```
 
-With no other flags the engine picks everything itself: on two cards one session in tensor parallel at the full
-context, on one card the largest context that fits, MTP on, the prefix cache sized from your RAM. It refuses at
-startup, naming why, anything that does not fit.
+You choose one thing: **how many requests run at once**, `--max-num-seqs N`. The engine sizes everything else
+from it - context, cards, cache - and refuses at startup, naming why, anything that does not fit.
 
-**Recipes** for one card and two cards - full context, fastest prefill, several sessions - with their context
-lengths and speeds: [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5,
-Qwen3.8-Flash-Next, Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); only Qwen3.8 is tuned.
+- **`N = 1` (the default):** one request with the largest context that fits. On two cards it runs tensor parallel,
+  the fastest single session, at the model's full 262,144 tokens. On one card add `--kv-cache int8` to get the full
+  context there too.
+- **`N = 2` to `4` on one card, up to `8` on two:** the first request gets the largest context that fits beside the
+  others, each of which gets 32,768 tokens; on two cards every card runs its own copy of the model.
+
+MTP speculative decoding and the prefix cache are on by default. Recipes with their contexts and speeds:
+[docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
+Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); only Qwen3.8 is tuned.
 
 Two cards run in one of three modes (`--parallel`):
 
