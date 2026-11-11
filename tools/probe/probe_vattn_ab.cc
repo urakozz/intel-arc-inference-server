@@ -1,4 +1,4 @@
-// probe_vattn_ab - spec 28c's open error (docs/07-open-questions.md §11): attn_verify_dpas against attn_v2 on a REAL
+// probe_vattn_ab - spec 28c's open error (docs/07-open-questions.md, "Recently answered"): attn_verify_dpas against attn_v2 on a REAL
 // DFlash run, the operator's plan of 2026-11-04 step 2 (a direct A/B on the failing input).
 //
 //   probe_vattn_ab <snapshot> <ids file> <n> [--max-len 16384] [--bins a,b,...] [--thresh T] [--all]

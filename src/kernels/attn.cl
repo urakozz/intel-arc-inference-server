@@ -5,7 +5,7 @@
 // blocks, divide by the softmax denominator, apply the output gate). 16 of the
 // model's 64 layers run all three.
 //
-// The maths is docs/03-models.md, "Layer math - verified in the modeling file"
+// The maths is docs/03-models.md, "Layer math, verified against the modeling file"
 // (the full-attention block), a transcription of `Qwen3_5Attention.forward`.
 // Doc 03 wins over any other text, this comment included.
 // `tests/kernels/attn_ref.h` is the same chain on the host and repeats every
@@ -57,7 +57,7 @@
 // q-heads (GQA 6:1) and the tokens in flight.
 //
 // **The block is 64 positions, and that is the whole of spec 1.5's lever L5.**
-// It was 256. docs/15 §2's four in-situ points fit `F + fill · P` - F ≈ 90.8 µs
+// It was 256. docs/15 part 2's four in-situ points fit `F + fill · P` - F ≈ 90.8 µs
 // of per-launch fixed cost, P ≈ 247.4 µs for one work-group's serial walk of
 // one FULL block - so at depth 4096 roughly 73% of a 361 µs launch was one
 // work-group walking one block, and the same measurement found work-group
@@ -121,7 +121,7 @@
 // exactly `nb(m) = (pos+m)/ATTN_BLOCK + 1` blocks - every one of which starts at or
 // before `pos+m` and therefore ran - so it never reads a block the early-out
 // skipped, and needs no data-dependent skip logic of its own.
-// What that costs at short context is doc 07 #12, measured in Task 9.
+// What that costs at short context is in doc 15 (idle work-groups), measured in Task 9.
 //
 // ---------------------------------------------------------------------------
 // The orders (stated identically in tests/kernels/attn_ref.h)
@@ -269,7 +269,7 @@
 // the same reason (src/kernels/CMakeLists.txt).
 //
 // It was 256 until spec 1.5's lever L5, and it is now **64** - a number that
-// was measured, not derived. docs/15 §2's `F + fill·P` fit (F ≈ 90.8 µs fixed,
+// was measured, not derived. docs/15 part 2's `F + fill·P` fit (F ≈ 90.8 µs fixed,
 // P ≈ 247.4 µs per full block, from the `nb` = 1 and 5 points) predicted
 // 214.5 µs/launch at a 128-position block; the retile measured **296.684**,
 // +38%, which is the third model this kernel has falsified - and the refit on
@@ -293,7 +293,7 @@
 // 0.070 ms. What is *measured* and not fitted: the three points 256 → 128 → 64 each cost
 // ~73 µs less per launch than the last, which is linear in log2(block) and not
 // in the block; nothing here explains that, and this file does not invent a
-// fifth model to fit it (docs/12 `attn` → Measured).
+// fifth model to fit it (docs/12 "Decode attention" → Measured).
 #ifndef ATTN_BLOCK
 #error "attn: ATTN_BLOCK must be defined (src/kernels/CMakeLists.txt); it must equal runtime::DecodeBuffers::kAttnBlock"
 #endif
@@ -644,7 +644,7 @@ __kernel void attn_reduce(__global const uint* restrict ctrl,
   // judged on the attn FAMILY's net and not on `attn_decode` alone, and it is
   // also what stops the retile one step earlier than `attn_decode` would like:
   // at ATTN_BLOCK 32 this row reaches 450.208 µs/step and eats the whole
-  // remaining gain (docs/12 `attn` -> Measured).
+  // remaining gain (docs/12 "Decode attention" -> Measured).
   __local float hmx[NBLOCKS], hsm[NBLOCKS];
 
   const uint pos = ctrl[CTRL_POS];

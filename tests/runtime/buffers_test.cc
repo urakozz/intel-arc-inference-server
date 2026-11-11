@@ -33,7 +33,7 @@
 //
 // `attn_part` grew 4x with spec 1.5's lever L5: `DecodeBuffers::kAttnBlock`
 // went 256 -> 64 KV positions per `attn_decode` work-group, which shortens each
-// work-group's serial walk of a block (the critical path docs/15 §2 measured)
+// work-group's serial walk of a block (the critical path docs/15 part 2 measured)
 // and quadruples the block count this buffer is strided by. It is the ONE home
 // for that number on the host - `attn_part`'s size, `attn_decode`'s grid in
 // capture.cc, and the `_B64` half of both compiled variant names all read it,
@@ -45,7 +45,7 @@
 // largest line in this table, and it is worth stating what it is NOT: it is not
 // persistent (1240.47 MB of KV and GDN state dwarf it) and it is not close to
 // any limit on a device holding a 15.5 GB checkpoint. What it buys is
-// measured - the attn family 6.058 -> 3.839 ms/token, docs/15 §L5 - and it is
+// measured - the attn family 6.058 -> 3.839 ms/token, docs/15, "The three changes of 2026-08-25" - and it is
 // the reason the sweep stopped at 64: `kAttnBlock` 32 would take this buffer to
 // 101 MB for 0.070 ms/token that the step's own total does not show.
 //

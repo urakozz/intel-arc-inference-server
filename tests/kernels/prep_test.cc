@@ -188,7 +188,7 @@ void case_res_norm(Dev& d, uint32_t M, uint32_t K, uint32_t S_PREV) {
 //      bf16 ulp wherever |ref| >= rms/8. This is the ONE quantity the lever
 //      moves, it moves it by reordering a fp32 sum, and the printed max ulp is
 //      the number the report carries. The arbiter for the change is the golden
-//      gate, not this tolerance (docs/12, `prep_res_norm` -> Measured).
+//      gate, not this tolerance (docs/12, `prep_res_fold` + `prep_norm_finish`).
 //
 // `norm_wgs` is stage B's own work-group count: 20 is what the runtime binds,
 // 1 is the plan's literal single-work-group finish. Both are run and both must

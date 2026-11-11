@@ -90,7 +90,7 @@ add_gemv_i8w_variant(1 5120 248320)
 # a‖b as the runtime binds it since spec 1.5's lever L2 (kernels::gemv_bf16_tiling):
 # 8 work-groups of 16 K-slice subgroups = 128 threads, against 8. `16` is
 # measured, not chosen: 1 / 4 / 16 read 48.774 / 13.115 / 5.340 us in situ
-# (docs/15 §L2). The `{64, 1}` build above is kept and still compiled --
+# (docs/12 `gemv_bf16`). The `{64, 1}` build above is kept and still compiled --
 # gemv_bf16_test runs both over one set of inputs and holds their outputs to the
 # reference tolerance, which is the bar a reordered sum gets.
 add_gemv_bf16_variant(1 5120 128 16 16)
@@ -135,7 +135,7 @@ function(add_prep_norm_finish M K G W)
                    DEFINES M=${M} K=${K} NORM_G=${G} NORM_WGS=${W})
 endfunction()
 # G = 20 at K = 5120 is one element per lane in a 256-lane work-group, which is
-# 320 subgroups against the single-WG kernel's 16 (docs/15 §L2: the subgroup is
+# 320 subgroups against the single-WG kernel's 16 (docs/15, "What the measurement says that nothing else did": the subgroup is
 # the unit that priced out, not the work-group).
 add_prep_res_fold(1 5120 0 20)
 add_prep_res_fold(1 5120 4 20)     # Task 4 production mixer/down split
@@ -215,13 +215,13 @@ add_ocloc_kernel(argmax_stage2 SOURCE ${ARGMAX_CL} DEFINES ${ARGMAX_DEFINES})
 # it at another. `attn_prep` does not block, so it carries no `B` either.
 #
 # **64, from 256, is spec 1.5's lever L5** and the number is MEASURED, not
-# extrapolated. docs/15 §2's fit over four low-depth points predicted 214.5 us
+# extrapolated. docs/15 part 2's fit over four low-depth points predicted 214.5 us
 # per launch at a 128-position block; the retile measured **296.684**, +38%, so
 # that model died the way its two predecessors did -- and so did the refit that
 # replaced it, which called 260.0 us at a 64-position block and measured
 # 224.046, -13.8% the other way. Four models dead on this kernel, and no fifth
 # is offered. Four block sizes were then
-# measured in situ at depth 4096 (docs/12 `attn` -> Measured, docs/15 §L5),
+# measured in situ at depth 4096 (docs/12 "Decode attention" -> Measured, docs/15, "The three changes of 2026-08-25"),
 # attn_decode us/launch and the attn FAMILY ms/token:
 #
 #   B256  369.988  6.058 | B128  296.684  4.931 | B64  224.046  3.839
@@ -708,7 +708,7 @@ if(B70_VERIFY_DPAS AND B70_MTP)
   # Plan 28c Task 4's kept settings (docs/probes/probe-verify-attn-2026-11-03.md §1): KT=32 PACK=g KS=4 DSPLIT=256 QSPLIT=1,
   # 256 GRF for both KV forms - the fastest passing N1 / N2 at M = 8, depth 32768 (QSPLIT=0 fails N1 at int8).
   # PSPLIT=1 since 2026-11-04 (P as bf16 hi + lo): P in bf16 alone moved real verify rows off the f32 top
-  # (attn_verify_dpas.cl's header, docs/07-open-questions.md §11).
+  # (attn_verify_dpas.cl's header, docs/07-open-questions.md, "Recently answered").
   set(VDPAS_LEVERS KT=32 PACK_H=0 KS=4 DSPLIT=256 QSPLIT=1 PSPLIT=1)
   set(VDPAS_OPTIONS -cl-intel-256-GRF-per-thread)
   # 3l (docs/probes/probe-longctx-decode-2026-11-09.md): the MTP verify rows M = 2..4, both KV forms, split the same
