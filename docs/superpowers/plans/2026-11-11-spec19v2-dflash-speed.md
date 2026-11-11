@@ -1,6 +1,9 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-11): IN PROGRESS.** Task 1 instrumentation builds; host checks pass; device gates pending. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
+**Status (2026-11-12): PAUSED before the next GPU test round, at the operator's request.** Task 1's calibrated
+costs, G0 and GPU profiling checks pass; the Task 2 serving screen is 88.806 t/s and correctness is 39/39 f32-judge
+PASS. CPU engine-tap acceptance continues unattended; the 80.5 t/s early bar remains pending until that gate
+clears. Then Tasks 3-7 and 7b, and Task 8 against the updated MTP arm, as already authorized. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
