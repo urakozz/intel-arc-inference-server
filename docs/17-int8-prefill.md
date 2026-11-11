@@ -3,7 +3,8 @@
 The short version of spec 5 and the two weeks of probes behind it. The
 evidence is `docs/probes/probe-w4a8-2026-09-23.md` (sections 1 to 15), the design is
 `docs/superpowers/specs/2026-09-24-spec5-int8-prefill-linears-design.md`, and the rows are
-in `BENCHMARKS.md`. Every number is **measured** unless marked **derived**.
+in `BENCHMARKS.md`. Every number is **measured** unless marked **derived**, and comes from the 2026-09-24 one-card stack (the
+current speeds are in `BENCHMARKS.md`).
 
 ## What runs
 
@@ -32,7 +33,7 @@ PREFILL, per linear layer, per chunk, on the fly:
 - **The weight scales** (one per output column of the rotated weights) are a
   property of the weights. They are computed once, when the model loads.
 - **`--prefill-backend l0-int8`** is opt-in; `l0` (the bf16 prefill) is the default for
-  every model since 2026-10-27 (operator ruling).
+  every model since 2026-10-27 (operator ruling). The recipe is called "h8" (Hadamard rotation, int8 math) below.
 
 **Result:** pp4096 **2104.50 t/s**, against 1643.52 for the bf16 prefill in the
 same session, paired **1.28x**. Decode is unchanged at 29.40 t/s. Accuracy on
@@ -66,7 +67,7 @@ which turn decode into a small GEMM that XMX can run.
 | 4 | int8 activations without rotation (CPU, real layers) | gate‖up 2.8 %, down 5.1 % error, worst rows 0.998 / 0.957 | rejected, accuracy | §14.2 |
 | 5 | SmoothQuant instead of rotation | helps gate‖up, fails on down (outliers move per token) | rejected | §14.2 |
 | 6 | int4 activations (W4A4), rotated, g256 on both operands (CPU, whole model) | held-out 23.3 % rel L2 vs h8's 12.5 %; +7.7 to +13.6 points on four prompts, 3.4 argmax in 100 lost; pow2 scales worse | **rejected, accuracy** | probe-w4a4-2026-10-28 |
-| 7 | rotating the weights inside the engine: rot1 to rot4, including an exact DPAS factorisation | rot2 (SLM butterflies) fastest; the DPAS form was exact but not faster | **rot2 kept** | §14.6 |
+| 7 | rotating the weights inside the engine: four variants, including an exact DPAS factorisation | the shared-memory butterfly variant was fastest; the DPAS form was exact but not faster | **butterfly kept** | §14.6 |
 | 8 | a rotated checkpoint, made offline (rotate bf16, then AutoRound) | the rotation is exact (3.9e-7) but makes int4 weights ~25 % worse | rejected; model deleted | §15.1-15.2 |
 | 9 | per-channel int4, AutoRound on the rotated model | 22.9 % logit error vs 7.77 % for g64 | rejected; checkpoint deleted | §15.2 |
 | 10 | OpenVINO's own int4 IR (asym g128, dynamic int8 activations) | 1298 t/s prefill, 21.6 decode, 26 % logit error | rejected | §15.3 |
@@ -95,19 +96,25 @@ The int8 GEMM itself runs at 264 to 297 TOP/s, 2.0x to 2.3x the bf16 GEMM.
 Part of that 2x is spent rebuilding the rotated int8 weights every chunk: the
 requant is the one cost here that is not matrix math.
 
-## Open, and closed
+## Status
 
-- (closed) **Gate A4, tool calls**, 36 agentic prompts against the unquantised
+- (closed) **The tool-call test**, 36 agentic prompts against the unquantised
   bf16 model: `l0-int8` matches **25 / 36**, the W4A16 prefill `l0` 23 / 36
-  (spec 5 §9).
-- **The short-prompt floor:** about 0.7 s of prefill whatever the length
-  (probe-w4a8 §15.6). It is separate from int8 and matters for every
-  agentic turn; prefix caching (spec 7) removes most of it for a continued session.
+  (spec 5 §9; measured at the time, not re-run since).
+- **A known fail: `l0-int8` together with `--kv-cache int8`.** Each prefill attention layer then reads K / V rows
+  the chunk just wrote in int8, and the int8 linears amplify that rounding: about 3 % of tool calls that copy exact
+  text from a long prompt come out wrong ([record](probes/a4-int8-prefill-int8-kv-2026-11-10.md)). The operator
+  accepted it; the server prints a startup warning, and the l0 prefill or the bf16 cache avoids it. Fix ideas are
+  in [low-priority-work.md](low-priority-work.md).
+- **The short-prompt floor:** about 0.7 s of prefill whatever the length when measured
+  (probe-w4a8 §15.6, 2026-09). It is separate from int8 and mattered for every agentic turn; prefix caching
+  (spec 7) and the short-chunk work since (open-work.md, Closed recently) cut it.
 - (done) **Flash attention and 128k context**, spec 6, on top of this path:
   pp4096 2125.12 t/s (docs/BENCHMARKS.md, "Flash attention and 128k").
 - (done) **Prefix caching** (spec 7), **MTP** (spec 8) and the other proposers (DFlash, lookup) work on
   either prefill backend; `--parallel pp` (spec 16) splits the prefill across both cards with the same backends.
 - **Where it does not apply:** `l0-int8` rotates in whole 1024-column Hadamard blocks, so a model whose hidden
-  size is not a multiple of 1024 (Kolibri-1's 2560, Flash-Next's 2560) refuses it, and on a mixture-of-experts
+  size is not a multiple of 1024 (Kolibri-1's and Flash-Next's 2560) refuses it, and on a mixture-of-experts
   model such as Ornith it costs routing accuracy (a near-tie between two experts can flip), so there it is
-  for speed only. Prefill chunks of 4096 (spec 5d) are written but not merged, awaiting a box speed run.
+  for speed only. Prefill chunks of 4096 rows (spec 5d) are built and opt-in; the default is decided in the speed
+  run in [open-work.md](open-work.md) (item 5).
