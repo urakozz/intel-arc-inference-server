@@ -271,6 +271,14 @@ and stays), its route Task 6's at 512 experts top-10.
   profile doc's "after phase 2" table, docs/12-kernels.md's GDN section, open-work -> Closed recently. Commit; offer
   the ff-merge to main.
 
+- [ ] **Step 4 (box, idle, both cards; operator 2026-11-12):** once plan 1 and this plan are both on main, a full
+  validation run on main, unattended: `tools/box_validate.sh` with the opt-in stages of open-work's "28 speculative
+  serving" row added (r2.auto_rows, r12.a4, r6.greedy_long, r8.auto_rows, r16.mtp_rows, r27.cli_mtp, r55.serve,
+  r55.decode, r56.pp_serve, r70.d2, r70.speed - the exact names and the `--with` syntax from `--list`). Report PASS /
+  FAIL / SKIP per row. The f32 judge decides each first difference; one with no reference yet SKIPs with its context
+  dumped, and `tools/box_validate/f32_refs.sh <data> forced-qwen` makes the reference on the CPU afterwards. This
+  closes open-work item 15 and the speculative-serving row together.
+
 **Which tasks need the box:**
 
 | task | Mac | box | numerics |
