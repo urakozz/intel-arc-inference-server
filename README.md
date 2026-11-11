@@ -75,7 +75,7 @@ Which setup for what:
 |---|---|
 | one session, as fast as possible | the default (`--parallel tp` on two cards; needs peer-to-peer) |
 | a main session plus helper requests (subagents) | `--max-num-seqs N` - up to 8 on two cards, 4 on one |
-| the longest context beside several requests | add `--kv-cache int8` |
+| the longest context on one card (the full 262,144), or beside several requests | add `--kv-cache int8` |
 | the fastest first token | add `--prefill-backend l0-int8` (not with `--kv-cache int8`) |
 
 Recipes for every model and setup, what each supports and refuses: [docs/18-running-models.md](docs/18-running-models.md).
