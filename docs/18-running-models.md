@@ -153,7 +153,7 @@ devices 0 and 1 of what `ZE_AFFINITY_MASK` shows - `ZE_AFFINITY_MASK=1` runs on 
 `http://<host>:8000/v1`; the server lists the model under its repo id (or the snapshot directory's name)
 and answers to any model name in a request.
 
-**Benchmarking.** The command behind the vLLM comparison rows, against a running server (no
+**Benchmarking.** The llama-benchy command against a running server (no
 `--prefix-split-last`; it is for sessions, not benchmarks):
 
 ```sh
