@@ -38,7 +38,8 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 |---|---:|---:|
 | one card, bf16 prompt pass | 1,709 | 1,539 |
 | one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
-| two cards, `--parallel tp` | **2,939** | **2,686** |
+| two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
+| two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
 
 ## Install
 
