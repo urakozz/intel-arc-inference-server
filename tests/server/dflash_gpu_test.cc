@@ -38,6 +38,7 @@
 #include "runtime/dflash/dflash_drafter.h"
 #include "runtime/engine.h"
 #include "server/adaptive_k.h"
+#include "server/openai.h"
 
 namespace {
 using golden::read_ids;
@@ -71,7 +72,7 @@ struct Gen {
 // `steps` (the plain run only): after every step() the row that decided the next id; steps[i] belongs to ids[i].
 Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
              uint32_t k_fixed, bool policy, std::vector<greedy_tie::RefStep>* steps = nullptr,
-             runtime::Engine* eng = nullptr) {
+             runtime::Engine* eng = nullptr, const std::vector<uint32_t>* eos = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
@@ -103,9 +104,18 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, 
     ++g.iters;
     g.drafted += k;
     g.accepted += burst.size() - 1;
-    const size_t keep = std::min<size_t>(burst.size(), n - g.ids.size());
+    size_t keep = std::min<size_t>(burst.size(), n - g.ids.size());
+    bool stopped = false;
+    if (eos)
+      for (size_t j = 0; j < keep; ++j)
+        if (std::find(eos->begin(), eos->end(), burst[j]) != eos->end()) {
+          keep = j + 1;
+          stopped = true;
+          break;
+        }
     g.ids.insert(g.ids.end(), burst.begin(), burst.begin() + keep);
     if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
+    if (stopped) break;
   }
   return g;
 }
@@ -131,6 +141,10 @@ int main(int argc, char** argv) {
   EngineAdapter a(e, model::Qwen35::kVocabUsed, kK, /*lookup=*/false, /*dflash=*/true);
   bool ok = true;
   server::Sampling greedy;   // greedy = true by default
+  std::ifstream gen_config(snap + "/generation_config.json");
+  nlohmann::json generation;
+  gen_config >> generation;
+  const auto eos = server::generation_eos_ids(generation);
 
   // --- D2 -------------------------------------------------------------------------------------------------
   uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0, beyond = 0, judged = 0;
@@ -157,6 +171,10 @@ int main(int argc, char** argv) {
       tot_iters[i] += g.iters;
       tot_ids[i] += kGen;
     }
+    const Gen stopped = generate(a, p.ids, kGen, greedy, kK, false, nullptr, nullptr, &eos);
+    std::printf("EOS %-28s K=7 %zu ids, %llu iterations, %.3f ids an iteration\n", p.name.c_str(),
+                stopped.ids.size(), (unsigned long long)stopped.iters,
+                double(stopped.ids.size()) / double(std::max<uint64_t>(1, stopped.iters)));
   }
   std::printf("D2: %llu failing runs (spec 28 N6); tie census %llu near-ties, %llu beyond the 1-ulp rule, %llu judged by "
               "f32; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n",

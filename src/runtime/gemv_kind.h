@@ -23,6 +23,8 @@
 
 namespace runtime {
 
+struct ProfileEvents;
+
 using kernels::LinearKind;
 using kernels::gemv_kind;   // constexpr LinearKind gemv_kind(unsigned M): Gemv at M = 1, SmallM at M >= 2
 
@@ -38,6 +40,9 @@ struct CaptureOptions {
   // attn_gate (fp32 [8][6144]) and attn_out (bf16 [8][6144]); rows past the list's M are left as they were. Null
   // (every production capture): nothing is appended.
   void* attn_dump = nullptr;
+  // DFlash tests / probes only: one event per launch; one pool per live profiled list.
+  ProfileEvents* profile = nullptr;
+  uint32_t profile_m = 0;   // tap verify: instrument this width only; 0 leaves verify uninstrumented
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

@@ -3849,6 +3849,12 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_dependencies(dflash_draft_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
   add_test(NAME dflash_draft_test COMMAND dflash_draft_test ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_draft_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_executable(dflash_profile_test runtime/dflash_profile_test.cc)
+  target_include_directories(dflash_profile_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_profile_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime)
+  add_dependencies(dflash_profile_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
+  add_test(NAME dflash_profile_test COMMAND dflash_profile_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_profile_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
 # ==== Spec 19b ==== (end) ====
 
@@ -3883,6 +3889,9 @@ target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server PkgConfig::ZE)
 add_test(NAME dflash_engine_host_test COMMAND dflash_engine_host_test)
 set_tests_properties(dflash_engine_host_test PROPERTIES LABELS dflash)
+add_test(NAME dflash_engine_accept_oracle_test COMMAND python3
+  ${CMAKE_SOURCE_DIR}/tools/oracle/test_dflash_engine_accept.py)
+set_tests_properties(dflash_engine_accept_oracle_test PROPERTIES LABELS dflash)
 # The engine with the real drafter beside the gate checkpoint (int8 head, bf16 KV): the lists' counts, the taps and
 # the commit projection (Task 1), D3 at M = 1..8, partial acceptance (the GDN state at the last accepted row, the
 # ring), D2 on the card at K 7 / 3 / 1, the last positions of max_len. SKIP 77 without either checkpoint.

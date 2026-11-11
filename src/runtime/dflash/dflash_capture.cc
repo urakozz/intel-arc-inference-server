@@ -34,7 +34,9 @@ const uint8_t* at(const void* p, size_t off) { return static_cast<const uint8_t*
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt)
-      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
+    if (opt_.profile) opt_.profile->events.clear();
+  }
 
   CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) {
     check_common();
@@ -350,7 +352,13 @@ class Walk {
   }
   void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
     require(!pending_entry_.empty(), "launch() without a preceding kernel()");
-    step_.list.launch(k, gx, gy, 1, nullptr);
+    l0::Event* event = nullptr;
+    if (opt_.profile) {
+      require(step_.kernel_count < opt_.profile->pool.capacity(), "the profile event pool is full");
+      opt_.profile->events.emplace_back(opt_.profile->pool, uint32_t(step_.kernel_count));
+      event = &opt_.profile->events.back();
+    }
+    step_.list.launch(k, gx, gy, 1, event);
     step_.labels.push_back((layer_ < 0 ? std::string("--") : "D" + std::to_string(layer_)) + " " + pending_entry_ +
                            " " + pending_variant_);
     pending_entry_.clear();

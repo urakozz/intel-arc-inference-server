@@ -20,7 +20,7 @@ bin="${B70_SERVE:-build/src/cli/b70-serve}"
 echo "slots_serve_bench: [$label] $bin $model --port $port --log-requests $out/server-log ${serve[*]+${serve[*]}}"
 "$bin" "$model" --port "$port" --log-requests "$out/server-log" ${serve[@]+"${serve[@]}"} > "$out/server.log" 2>&1 &
 srv=$!
-stop() { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; }
+stop() { tools/box_stop.sh child "$srv"; wait "$srv" 2>/dev/null; }
 trap stop EXIT
 up=0
 for _ in $(seq 1 "${WAIT:-900}"); do

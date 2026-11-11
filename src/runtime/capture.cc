@@ -245,6 +245,7 @@ class Capture {
   // Spec 28c: the test / probe override of the verify-attention rule (runtime/verify_attn.h).
   Capture& options(const CaptureOptions& o) {
     opt_ = o;
+    if (mode_ == Mode::VerifyTaps && kCapM == o.profile_m) prof_ = o.profile;
     return *this;
   }
   // Spec 13c: the sequence slot the list binds (capture.h, SlotBind).

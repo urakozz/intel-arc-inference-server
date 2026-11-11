@@ -3683,6 +3683,55 @@ st_r81_speed() {
   finish
 }
 
+# Spec 19 v2: the measured baseline, live acceptance, and the operator's slim serving screen.
+row 82 "spec 19 v2 - DFlash costs and engine-tap acceptance, then one-card DFlash against recorded main baselines"
+rownote 82 "Operator 2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
+stage r82.k0 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
+st_r82_k0() {
+  run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test|dflash_prefix_test)$'
+  finish
+}
+stage r82.profile 82 default card qwen,dflash r82.k0 "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
+st_r82_profile() {
+  run_tests '^dflash_profile_test$' dflash
+  jgrab profile '^dflash_profile_test$' '^dflash_profile_test' 4
+  finish
+}
+stage r82.iter 82 default card qwen,dflash r82.profile "unprofiled interleaved list costs at 4096/32768; separate instrumented per-family costs"
+st_r82_iter() {
+  idle before
+  for depth in 4096 32768; do
+    chk "build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --depth $depth" "DFlash costs at $depth"
+  done
+  idle after
+  grab_all costs '^DFLASH_' 120
+  finish
+}
+stage r82.accept_gpu 82 default card qwen,dflash,oracle_dflash_dumps r82.profile "engine taps and in-loop drafts at the same anchors, K=1..7, EOS-stopped continuations"
+st_r82_accept_gpu() {
+  chk "tools/box_validate/dflash_v2.sh sources $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "recorded sources and held-out slice"
+  chk "tools/box_validate/dflash_v2.sh gpu $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "engine-tap dumps and live drafts"
+  grab_all taps '^ENGINE_TAPS' 40
+  finish
+}
+stage r82.accept 82 default cpu qwen,dflash,oracle_image r82.accept_gpu "CPU reference on the engine's taps: E_7 gap <= 0.15 on A4/code, E_K recorded per corpus"
+st_r82_accept() {
+  chk "tools/box_validate/dflash_v2.sh ref $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "G-accept on identical anchors"
+  grab_all acceptance '^G_ACCEPT' 40
+  finish
+}
+stage r82.d5 82 optin card qwen,dflash r82.iter "DFlash-only slots_bench count 1; existing MTP baseline 73.2 t/s, early stop above 80.5"
+st_r82_d5() {
+  idle before
+  chk "PORT=$PORT tools/box_validate/dflash_v2.sh d5 $STATE/r82.d5 $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "DFlash one-request serving screen"
+  x "PORT=$PORT tools/box_validate/dflash_v2.sh identity $STATE/r82.d5 $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "one golden/A4 round against the recorded plain outputs"
+  idle after
+  grab_all speed '^SLOTS_BENCH|^DFLASH_EARLY' 4
+  judged_finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
