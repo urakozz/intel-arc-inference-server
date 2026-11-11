@@ -1131,7 +1131,6 @@ form (plan 15e Review Focus 5).
 | MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | pending | r16.mtp_rows |
 | llama-benchy pp4096 tg256 depth 1 | b70-serve, `--no-cache --exact-tg --latency-mode generation` | pending | r16.benchy |
 | llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r16.benchy |
-| vLLM / llama.cpp on the same card | if either serves Ornith on XPU / SYCL | not run | - |
 
 ## K2-Horizon (spec 18)
 
