@@ -67,8 +67,9 @@ from it - context, cards, cache - and refuses at startup, naming why, anything t
 - **`N = 1` (the default):** one request with the largest context that fits. On two cards it runs tensor parallel,
   the fastest single session, at the model's full 262,144 tokens. On one card add `--kv-cache int8` to get the full
   context there too.
-- **`N = 2` to `4` on one card, up to `8` on two:** the first request gets the largest context that fits beside the
-  others, each of which gets 32,768 tokens; on two cards every card runs its own copy of the model.
+- **`N = 2` to `4` on one card, up to `8` on two:** shaped for a coding agent with subagents. The first slot (one
+  per card on two cards) is guaranteed the largest context that fits - the main session; the other slots get a
+  shorter context, enough for subagent tasks. On two cards every card runs its own copy of the model.
 
 MTP speculative decoding and the prefix cache are on by default. Recipes with their contexts and speeds:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
