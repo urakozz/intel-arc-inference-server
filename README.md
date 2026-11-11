@@ -5,8 +5,9 @@ Zero with its own OpenCL C kernels - no PyTorch, no vLLM, no vendor kernel libra
 OpenAI-compatible API made for long agentic coding sessions (opencode and similar).
 
 It is tuned today for **Qwen3.8-27B**: speculative decoding with the model's own MTP head, a prefix cache in system
-RAM that turns every follow-up turn into a prefix cache hit, the full 262,144-token context, and on two cards either
-tensor parallel for one fast session or a model copy per card for up to 8 requests at once.
+RAM that turns every follow-up turn into a prefix cache hit, and the model's full 262,144-token context **on a single
+card** (with the int8 KV cache). On two cards: tensor parallel for one fast session, or a model copy per card for up
+to 8 requests at once.
 
 ## The model
 
@@ -14,13 +15,7 @@ tensor parallel for one fast session or a model copy per card for up to 8 reques
 Qwen3.8-27B quantised with AutoRound to int4 weights, one scale per 64 input channels, bf16 activations, GPTQ
 packing; the output head and the MTP head stay bf16 in the file.
 
-Why group size 64 rather than the usual 128:
-
-- **Accuracy.** Finer groups follow the weights' outliers better; on this model a per-channel int4 checkpoint has
-  about three times g64's logit error.
-- **Almost free.** Decode is bound by memory bandwidth, and g64 adds only a few percent of bytes over g128.
-- **Prefill does not care.** The engine rebuilds per-channel int8 weights from the int4 file on the fly and runs the
-  prompt on the card's int8 matrix engines, so the file keeps g64's accuracy and prefill still runs at int8 speed.
+Why group size 64 rather than the usual 128: better accuracy, at the price of about 2 % prefill speed.
 
 ## Numbers
 
@@ -45,8 +40,7 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
 | two cards, `--parallel tp` | **2,939** | **2,686** |
 
-On the same checkpoint and prompt vLLM reads 1,610 t/s on one card. A short agentic turn deep in a session stays
-fast: 16 new tokens on top of 128k tokens of history take about 0.1 s. MTP's speed depends on how predictable the
+A short agentic turn deep in a session stays fast: 16 new tokens on top of 128k tokens of history take about 0.1 s. MTP's speed depends on how predictable the
 text is, so per-request rates move by a few t/s between prompts. Every measurement and how it was taken:
 [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
@@ -55,7 +49,8 @@ are judged against an f32 CPU reference of the model on golden prompts, tool-cal
 
 ## Install and run
 
-You need Linux with the `xe` driver (two cards need peer-to-peer, native from kernel 7.4), Intel's compute runtime
+You need Linux with the `xe` driver (tensor parallel needs peer-to-peer between the two cards, native from kernel
+7.4), Intel's compute runtime
 with `ocloc` and the Level Zero loader, g++, CMake and Rust (for the tokenizer).
 
 ```sh
@@ -78,7 +73,7 @@ Which setup for what:
 
 | you want | run |
 |---|---|
-| one session, as fast as possible | the default (`--parallel tp` on two cards) |
+| one session, as fast as possible | the default (`--parallel tp` on two cards; needs peer-to-peer) |
 | a main session plus helper requests (subagents) | `--max-num-seqs N` - up to 8 on two cards, 4 on one |
 | the longest context beside several requests | add `--kv-cache int8` |
 | the fastest first token | add `--prefill-backend l0-int8` (not with `--kv-cache int8`) |
@@ -96,7 +91,7 @@ Qwen3.8 is tuned.
 | `<snapshot-or-repo>` | required | a Hugging Face repo id in the local cache, or a snapshot directory; never downloads |
 | `--max-num-seqs N` | `1` | how many requests run at once; the context follows. Slot 0 gets the largest context that fits beside N - 1 slots of 32,768 tokens. Up to 4 per card; on two cards N > 1 runs a model copy per card |
 | `--max-len auto\|L` | `auto` | context length (slot 0's with `--max-num-seqs`). `auto`: the largest that fits, up to the model's 262,144 |
-| `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
+| `--parallel auto\|1\|tp\|replica\|pp` | `auto` | `tp`: every layer split over both cards (one request; needs peer-to-peer between them). `replica`: a model copy per card. `pp`: the layers split between the cards, for models that do not fit one card. `1`: one card |
 | `--spec auto\|off\|mtp\|lookup\|dflash\|dflash-lookup` | `auto` | speculative decoding: a proposer guesses tokens, the model checks them all in one pass; the output never changes. `auto` = the MTP head on Qwen-family models |
 | `--spec-max K` | the most | the proposer's cap on guesses per step |
 | `--draft-model PATH` | the model's default | the draft model for `--spec dflash` |
