@@ -42,7 +42,9 @@ double StepK::best(const double* q, uint32_t j, uint32_t lo, uint32_t hi, uint32
   uint32_t best_k = lo;
   for (uint32_t k = 0; k <= hi; ++k) {
     if (k > 0) {
-      all *= k - 1 < j ? q[k - 1] : position_rate(k - 1);
+      // A draft not yet made: like the last one made (a sure draft is followed by sure ones in a stretch of code),
+      // or before any, the request's recent acceptance at that position.
+      all *= k - 1 < j ? q[k - 1] : j > 0 ? q[j - 1] : position_rate(k - 1);
       e += all;
     }
     if (k < lo) continue;

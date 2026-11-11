@@ -10,7 +10,7 @@
 //   E(K) = 1 + q_1 + q_1 q_2 + ... + q_1 ... q_K,
 // its cost (in plain steps, MtpCost) verify[K] + draft[d - 1] when d drafts were made. After each draft StepK either
 // stops - verifying the K <= j with the most E(K) per cost - or drafts another, when some deeper K (the drafts not
-// yet made counted at the request's own recent acceptance at their position) promises more ids per cost. So a
+// yet made counted at the last draft's q: confidence comes in stretches) promises more ids per cost. So a
 // confident stretch (code) verifies all three, an unsure draft stops the chain at the previous one, and before any
 // draft the request's recent acceptance decides whether to draft at all (a K = 0 run probes K = 1 now and then, as
 // AdaptiveK does). Only which drafts are verified changes: the main model checks every one, so the output does not.
@@ -40,8 +40,8 @@ class DraftCalib {
 
 struct StepKOptions {
   uint32_t max_k = 3;
-  // The per-request acceptance at each draft position (conditional on the drafts before it accepted) - what a draft
-  // not yet made is counted at: AdaptiveK's prior, weight and decay.
+  // The per-request acceptance at each draft position (conditional on the drafts before it accepted) - what the
+  // drafts are counted at before the first is made: AdaptiveK's prior, weight and decay.
   double prior = 0.8;
   double prior_weight = 4;
   double decay = 0.9;
@@ -67,7 +67,8 @@ class StepK {
   uint32_t max_k() const { return max_k_; }
   double position_rate(uint32_t i) const { return s_[i] / t_[i]; }
 
-  // E(K) / cost for the known q's q[0..j) and the request's rates past them: the best K in [lo, hi] and its rate.
+  // E(K) / cost for the known q's q[0..j) and the last one (or, with none, the request's rates) past them: the best K
+  // in [lo, hi] and its rate.
   // `drafted` drafts already made (their cost counted whatever K); deeper K draft up to K.
   double best(const double* q, uint32_t j, uint32_t lo, uint32_t hi, uint32_t drafted, uint32_t* k_out) const;
 
