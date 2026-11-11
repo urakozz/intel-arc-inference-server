@@ -403,16 +403,23 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
     return drafter_ ? build_verify_taps(ctx_, model_, buffers_, df_tv_, M, o)
                     : build_verify(ctx_, model_, buffers_, *mtp_, M, nullptr, o, s.bind);
   };
-  s.verify_steps.push_back(one(opt));
   // Spec 28c: the deep list where the rule switches this M at a depth (and nothing forces one kind).
   const model::ModelDesc& d = *model_.desc;
   const uint32_t from = opt.force_attn == VerifyAttnForce::Auto
                             ? verify_attn_deep_from(M, kv_cache() == KvCache::Int8, d.fa_q_heads, d.fa_kv_heads)
                             : kDpasNever;
   const bool by_depth = from != kDpasNever;
+  CaptureOptions shallow = opt;
+  if (by_depth && opt.profile_keys >= from) shallow.profile = nullptr;
+  s.verify_steps.push_back(one(shallow));
   if (by_depth) {
     const auto t0 = std::chrono::steady_clock::now();
-    s.verify_deep.push_back(std::make_unique<CapturedStep>(one(attn_forced(VerifyAttnForce::Dpas))));
+    CaptureOptions deep = attn_forced(VerifyAttnForce::Dpas);
+    if (opt.profile_keys >= from) {
+      deep.profile = opt.profile;
+      deep.profile_m = opt.profile_m;
+    }
+    s.verify_deep.push_back(std::make_unique<CapturedStep>(one(deep)));
     verify_deep_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     s.verify_deep_from.push_back(from);
   } else {

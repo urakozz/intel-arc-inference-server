@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
     std::printf("SKIP: %s\n", ex.what());
     return 77;
   }
-  constexpr uint32_t max_len = 4096;
+  constexpr uint32_t max_len = 8192;
   l0::Context ctx(0);
   auto model = loader::load(ctx, target, max_len, false, loader::LmHeadForm::Int8);
   auto weights = loader::load_drafter(ctx, drafter, model, loader::DraftFormat::Int8);
@@ -81,6 +81,28 @@ int main(int argc, char** argv) {
   imm.copy(observed.data(), d.taps().ptr(), observed.size());
   CHECK(taps == observed);
   for (const auto& event : verify_events.events) CHECK(event.duration_us() > 0);
-  std::printf("dflash_profile_test OK: %zu draft and %zu projection events; readback and ring bitwise\n",
+  // M = 3 switches to a second attention list at 4096 keys. Profile the list actually replayed.
+  e.reset();
+  e.prefill(std::vector<uint32_t>(4096, 760));
+  e.save_state(state.ptr());
+  const uint32_t deep_pos = e.pos(), deep_anchor = e.control()->cur_token[0];
+  d.draft(e, 2, 0.0f, 0);
+  e.verify(2);
+  const std::vector<uint32_t> deep_ids(e.verify_ids(), e.verify_ids() + 3);
+  runtime::ProfileEvents deep_events(ctx);
+  opt.profile = &deep_events;
+  opt.profile_m = 3;
+  opt.profile_keys = deep_pos + 1;
+  e.recapture_verify(opt);
+  CHECK_EQ(deep_events.events.size(), e.verify_step_at(3, deep_pos + 1).kernel_count);
+  e.load_state(state.ptr(), deep_pos);
+  e.control()->cur_token[0] = deep_anchor;
+  d.draft(e, 2, 0.0f, 0);
+  for (auto& event : deep_events.events) event.reset();
+  e.verify(2);
+  CHECK(deep_ids == std::vector<uint32_t>(e.verify_ids(), e.verify_ids() + 3));
+  for (const auto& event : deep_events.events) CHECK(event.duration_us() > 0);
+  e.recapture_verify({});   // release the profiled list before its event pool
+  std::printf("dflash_profile_test OK: %zu draft and %zu projection events; readback/ring and shallow/deep verify bitwise\n",
               draft_events.events.size(), project_events.events.size());
 }

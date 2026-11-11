@@ -43,6 +43,7 @@ struct CaptureOptions {
   // DFlash tests / probes only: one event per launch; one pool per live profiled list.
   ProfileEvents* profile = nullptr;
   uint32_t profile_m = 0;   // tap verify: instrument this width only; 0 leaves verify uninstrumented
+  uint32_t profile_keys = 1;   // select its shallow/deep list at this row-0 key count
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;
