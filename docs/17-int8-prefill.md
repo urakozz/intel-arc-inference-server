@@ -56,9 +56,13 @@ TP wavefront, but changes quantisation numerics and needs its own f32 quality ga
 one card's bf16 ids and judging every differing id on that same context. Missing
 judges print their context keys and SKIP with “awaiting f32 reference”.
 
-Build, quality gates, server validation and speed measurements are pending
-(operator requested implementation without box tests). No TP int8 quality or
-speed claim is established yet. The int8 prefill + int8 KV warning remains.
+Box validation started after rebasing onto main: the targeted build, int8
+kernel and linear tests, CLI argument checks and one-card int8 prefill test pass.
+The fresh targeted build exposed missing bf16 short-chunk kernel dependencies;
+the shared test list now includes the selected variants. TP gates, production
+build, server validation and speed measurements are pending. Logs are under
+`~/b70/logs/tp-int8-prefill/validation-324952f5/`. No TP int8 quality or speed
+claim is established yet. The int8 prefill + int8 KV warning remains.
 
 ## Why decode stays int4 and bf16
 

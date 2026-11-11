@@ -955,6 +955,11 @@ set_tests_properties(golden_gate_i8head_test PROPERTIES
 # spec 2.1 S2/S3 the L0 backend's own binaries are in the list too: pf_gemm IS
 # its linears' and its attention's GEMM, and the slab dequants feed them.
 set(B70_PREFILL_KERNELS
+  kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
+  kernel_pf_gemm_small_A2_B2_S4_SILU kernel_pf_gemm_small_A4_B2_S4_SILU
+  kernel_pf_gemm_q4_A4_B1_S1_L0 kernel_pf_gemm_q4_A4_B1_S1_L1
+  kernel_pf_gemm_q4_A8_B1_S2_L0 kernel_pf_gemm_q4_A8_B1_S2_L1
+  kernel_pf_gemm_q4_A1_B2_S4_L0_SILU kernel_pf_gemm_q4_A4_B2_S1_L0_SILU
   kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
