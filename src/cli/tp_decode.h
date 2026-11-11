@@ -48,6 +48,7 @@ struct TpDecodeArgs {
   runtime::KvCache kv = runtime::KvCache::Bf16;
   std::function<void(uint32_t)> check_len;   // b70-decode's prompt + n <= max_len bound
   model::TpCrossing crossing = runtime::kTpDefaultCrossing;
+  runtime::PrefillBackend backend = runtime::PrefillBackend::L0;
   bool prefill = false;         // spec 17c: the prompt by prefill
   bool bench_prefill = false;   // --prefill-length: print the pp row
   uint32_t chunk = 0;           // --prefill-chunk (0: the cap)
@@ -71,6 +72,7 @@ int run_tp_decode(const TpDecodeArgs& a) {
   // Spec 17c: the prefill's chunk cap (2048, or 4096 when --prefill-chunk asks for more) is planned on each card.
   runtime::PrefillPath path;
   path.prefill = a.prefill;
+  path.backend = a.backend;
   path.chunk_cap = a.chunk > runtime::PrefillScratchDims::kCDefault ? runtime::PrefillScratchDims::kCMax
                                                                      : runtime::PrefillScratchDims::kCDefault;
   const uint32_t load_len = cli::load_len(a.max_len, a.trained);
@@ -111,9 +113,11 @@ int run_tp_decode(const TpDecodeArgs& a) {
                eng.mtp() ? ", MTP head on both cards (verify lists M = 1..4, draft lists on each card's vocabulary half)"
                          : "");
   if (a.prefill) {   // outside the timed window, as one card's prepare_prefill
+    eng.set_prefill_backend(a.backend);
     eng.set_prefill_chunk_cap(path.chunk_cap);
     eng.prepare_prefill();
-    std::fprintf(stderr, "prefill backend: l0, chunk cap %u, crossings %s\n", eng.prefill_chunk_cap(),
+    std::fprintf(stderr, "prefill backend: %s, chunk cap %u, crossings %s\n",
+                 runtime::prefill_backend_name(eng.prefill_backend()), eng.prefill_chunk_cap(),
                  eng.prefill_overlaps() ? "on the copy engines (the wavefront)" : "on the compute lists (no overlap)");
   }
   for (uint32_t r = 0; r < 2; ++r) std::fprintf(stderr, "%s\n", eng.memory_line(r).c_str());
@@ -157,8 +161,8 @@ int run_tp_decode(const TpDecodeArgs& a) {
   std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, tags.c_str(), a.depth, a.tg, eng.last_tok_per_s(),
               eng.last_gen_ms() / double(a.tg));
   if (a.bench_prefill)   // spec 17c: one card's pp row, the configuration in the tag
-    std::printf("| b70-decode %s%s l0 pp | %u | %u | %.1f | %.2f |\n", sha, tags.c_str(), a.depth,
-                a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
+    std::printf("| b70-decode %s%s %s pp | %u | %u | %.1f | %.2f |\n", sha, tags.c_str(),
+                runtime::prefill_backend_name(a.backend), a.depth, a.chunk ? a.chunk : eng.prefill_chunk_cap(), ingest_ms,
                 ingest_ms > 0.0 ? double(a.ids.size()) * 1000.0 / ingest_ms : 0.0);
   std::fprintf(stderr,
                "(measured, one run. docs/BENCHMARKS.md records the median of three on an idle box, interleaved with\n"

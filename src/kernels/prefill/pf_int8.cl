@@ -7,7 +7,8 @@
 //   PF_REQUANT_ROT (LAYOUT)    pf_requant_rot  int4 g64 -> per-channel int8 of (W R_K)
 //                              pf_colmax_rot   max |W R_K| per column (load-time scales)
 //   PF_GEMM_I8   (SILU_EPI)    pf_gemm_i8      i8 x i8, scales in the epilogue only
-// R_K = D_K blockdiag(H_1024) / 32 over K. D_K comes from
+// R_K = D_K blockdiag(H_ROT_BLOCK) / sqrt(ROT_BLOCK) over K.
+// ROT_BLOCK defaults to 1024; TP down (K=8704) uses 512. D_K comes from
 // runtime/prefill/int8_signs.h. The quantiser holds block element 16 j + lane
 // and the requant holds 64 lane + j; both run the canonical Sylvester FWHT on
 // the natural index with ascending stages, so they rotate identically
@@ -18,32 +19,40 @@
 #pragma OPENCL EXTENSION cl_intel_subgroups_char : enable
 #pragma OPENCL EXTENSION cl_intel_split_work_group_barrier : enable
 
+#ifndef ROT_BLOCK
+#define ROT_BLOCK 1024
+#endif
+#if ROT_BLOCK == 1024
+#define ROT_SCALE (1.0f / 32.0f)
+#else
+#define ROT_SCALE 0.04419417382415922f  // 1 / sqrt(512)
+#endif
 #define SG 16
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 #ifdef PF_QUANT_HAD
 #ifndef NBLK
-#error "pf_quant_had: NBLK (= K / 1024) must be defined"
+#error "pf_quant_had: NBLK (= K / ROT_BLOCK) must be defined"
 #endif
-// One sub-group per 1024-block, NBLK sub-groups per token row. Lane l's value j
+// One sub-group per rotation block, NBLK sub-groups per token row. Lane l's value j
 // is element 16 j + l of the block (sub-group block reads). FWHT stages
-// h = 1..8 are lane shuffles and 16..512 register butterflies, ascending.
+// h = 1..8 are lane shuffles; the remaining stages are register butterflies, ascending.
 __attribute__((reqd_work_group_size(16 * NBLK, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void pf_quant_had(__global const ushort* restrict x, __global const float* restrict sgn,
                            __global char* restrict xq, __global float* restrict xs, uint ldx) {
-  const uint K = NBLK * 1024u;
+  const uint K = NBLK * ROT_BLOCK;
   const uint m = get_group_id(0);
   const uint b = get_sub_group_id();
   const uint l = get_sub_group_local_id();
-  __global const ushort* src = x + (size_t)m * ldx + b * 1024u;
+  __global const ushort* src = x + (size_t)m * ldx + b * ROT_BLOCK;
   __local float red[NBLK];
-  float v[64];
+  float v[ROT_BLOCK / 16];
 #pragma unroll
-  for (uint r = 0; r < 8u; ++r) {
+  for (uint r = 0; r < ROT_BLOCK / 128u; ++r) {
     const ushort8 u = intel_sub_group_block_read_us8(src + r * 128u);
     const float8 sg = as_float8(intel_sub_group_block_read8(
-        (__global const uint*)(sgn + b * 1024u + r * 128u)));
+        (__global const uint*)(sgn + b * ROT_BLOCK + r * 128u)));
     v[8u * r + 0u] = bf16f(u.s0) * sg.s0; v[8u * r + 1u] = bf16f(u.s1) * sg.s1;
     v[8u * r + 2u] = bf16f(u.s2) * sg.s2; v[8u * r + 3u] = bf16f(u.s3) * sg.s3;
     v[8u * r + 4u] = bf16f(u.s4) * sg.s4; v[8u * r + 5u] = bf16f(u.s5) * sg.s5;
@@ -52,15 +61,15 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
 #pragma unroll
   for (uint h = 1u; h < 16u; h <<= 1) {
 #pragma unroll
-    for (uint j = 0; j < 64u; ++j) {
+    for (uint j = 0; j < ROT_BLOCK / 16u; ++j) {
       const float o = sub_group_shuffle_xor(v[j], h);
       v[j] = (l & h) ? (o - v[j]) : (v[j] + o);
     }
   }
 #pragma unroll
-  for (uint hj = 1u; hj < 64u; hj <<= 1) {
+  for (uint hj = 1u; hj < ROT_BLOCK / 16u; hj <<= 1) {
 #pragma unroll
-    for (uint j = 0; j < 64u; ++j) {
+    for (uint j = 0; j < ROT_BLOCK / 16u; ++j) {
       if ((j & hj) == 0u) {
         const float a = v[j], c = v[j + hj];
         v[j] = a + c;
@@ -70,8 +79,8 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
   }
   float amax = 0.0f;
 #pragma unroll
-  for (uint j = 0; j < 64u; ++j) {
-    v[j] *= (1.0f / 32.0f);
+  for (uint j = 0; j < ROT_BLOCK / 16u; ++j) {
+    v[j] *= ROT_SCALE;
     amax = fmax(amax, fabs(v[j]));
   }
   amax = sub_group_reduce_max(amax);
@@ -82,9 +91,9 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
   const float scale = amax / 127.0f;
   const float iv = scale == 0.0f ? 0.0f : 1.0f / scale;
   if (b == 0u && l == 0u) xs[m] = scale;
-  __global uchar* dst = (__global uchar*)(xq + (size_t)m * K + b * 1024u);
+  __global uchar* dst = (__global uchar*)(xq + (size_t)m * K + b * ROT_BLOCK);
 #pragma unroll
-  for (uint r = 0; r < 8u; ++r) {
+  for (uint r = 0; r < ROT_BLOCK / 128u; ++r) {
     uchar8 o;
     o.s0 = (uchar)convert_char_sat_rte(v[8u * r + 0u] * iv);
     o.s1 = (uchar)convert_char_sat_rte(v[8u * r + 1u] * iv);
@@ -103,7 +112,7 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
 #ifndef LAYOUT
 #error "pf_requant_rot: LAYOUT (0 GPTQ-native, 1 tiled) must be defined"
 #endif
-// One work-group = 16 columns x one 1024-k block; sub-group c owns column c,
+// One work-group = 16 columns x one rotation block; sub-group c owns column c,
 // lane l owns k = 64 l .. 64 l + 63 (one scale group). Stages h = 1..32 are
 // register butterflies, h = 64..512 lane shuffles, ascending. The int4 tile
 // goes through SLM column-major at pitch 129 (conflict-free); signs arrive as a
@@ -116,39 +125,40 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
   const uint l = get_sub_group_local_id();
 #if LAYOUT == 0
 #pragma unroll
-  for (uint i = 0; i < 8u; ++i) {
+  for (uint i = 0; i < ROT_BLOCK / 128u; ++i) {
     const uint t = lid + 256u * i;
-    tin[(t % 16u) * 129u + t / 16u] = qw[(size_t)(blk * 128u + t / 16u) * Nfull + nbase + (t % 16u)];
+    tin[(t % 16u) * 129u + t / 16u] = qw[(size_t)(blk * (ROT_BLOCK / 8u) + t / 16u) * Nfull + nbase + (t % 16u)];
   }
-  tsc[(lid % 16u) * 17u + lid / 16u] =
-      vload_half((size_t)(blk * 16u + lid / 16u) * Nfull + nbase + (lid % 16u), sc);
+  if (lid / 16u < ROT_BLOCK / 64u) tsc[(lid % 16u) * 17u + lid / 16u] =
+      vload_half((size_t)(blk * (ROT_BLOCK / 64u) + lid / 16u) * Nfull + nbase + (lid % 16u), sc);
 #else
   // The WG's 16 columns are exactly tile nt = nbase / 16. Tile (nt, group gi)
   // is 136 u32 at (nt G + gi) 136: word j of lane c at j 16 + c, then 16 f16
   // scales (common/repack.h, repack_int4_layout1). Row r of the block is
-  // group blk 16 + r / 8, word r % 8.
+  // group blk (ROT_BLOCK / 64) + r / 8, word r % 8.
   const uint G = K / 64u;
   __global const uint* tiles = qw + (size_t)(nbase / 16u) * G * 136u;
 #pragma unroll
-  for (uint i = 0; i < 8u; ++i) {
+  for (uint i = 0; i < ROT_BLOCK / 128u; ++i) {
     const uint t = lid + 256u * i;
     const uint r = t / 16u, cc = t % 16u;
-    tin[cc * 129u + r] = tiles[(size_t)(blk * 16u + r / 8u) * 136u + (r % 8u) * 16u + cc];
+    tin[cc * 129u + r] = tiles[(size_t)(blk * (ROT_BLOCK / 64u) + r / 8u) * 136u + (r % 8u) * 16u + cc];
   }
-  {
+  if (lid / 16u < ROT_BLOCK / 64u) {
     const uint g = lid / 16u, cc = lid % 16u;
     const __global ushort* sp =
-        (const __global ushort*)(tiles + (size_t)(blk * 16u + g) * 136u + 128u);
+        (const __global ushort*)(tiles + (size_t)(blk * (ROT_BLOCK / 64u) + g) * 136u + 128u);
     tsc[cc * 17u + g] = (float)as_half(sp[cc]);
   }
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);
 
-  const float s = tsc[c * 17u + l];
-  const uint2 sb = vload2(0, sbits + blk * 32u + 2u * l);
+  const bool active = l < ROT_BLOCK / 64u;
+  const float s = active ? tsc[c * 17u + l] : 0.0f;
+  const uint2 sb = active ? vload2(0, sbits + blk * (ROT_BLOCK / 32u) + 2u * l) : (uint2)(0u);
 #pragma unroll
   for (uint i = 0; i < 8u; ++i) {
-    const uint word = tin[c * 129u + 8u * l + i];
+    const uint word = active ? tin[c * 129u + 8u * l + i] : 0x88888888u;
 #pragma unroll
     for (uint b = 0; b < 8u; ++b) {
       const uint j = 8u * i + b;
@@ -168,7 +178,7 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
     }
   }
 #pragma unroll
-  for (uint h = 1u; h < 16u; h <<= 1) {
+  for (uint h = 1u; h < ROT_BLOCK / 64u; h <<= 1) {
 #pragma unroll
     for (uint j = 0; j < 64u; ++j) {
       const float o = sub_group_shuffle_xor(v[j], h);
@@ -199,14 +209,14 @@ __kernel void pf_requant_rot(__global const uint* restrict qw, __global const ha
     uint w = 0u;
 #pragma unroll
     for (uint b = 0; b < 4u; ++b)
-      w |= ((uint)(uchar)convert_char_sat_rte((v[4u * d + b] * (1.0f / 32.0f)) * iv)) << (8u * b);
-    tout[c * 257u + 16u * l + d] = w;
+      w |= ((uint)(uchar)convert_char_sat_rte((v[4u * d + b] * ROT_SCALE) * iv)) << (8u * b);
+    if (l < ROT_BLOCK / 64u) tout[c * 257u + 16u * l + d] = w;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 #pragma unroll
-  for (uint i = 0; i < 16u; ++i) {
+  for (uint i = 0; i < ROT_BLOCK / 64u; ++i) {
     const uint t = lid + 256u * i;
-    out[(size_t)(blk * 256u + t / 16u) * ldo + nc + (t % 16u)] = tout[(t % 16u) * 257u + t / 16u];
+    out[(size_t)(blk * (ROT_BLOCK / 4u) + t / 16u) * ldo + nc + (t % 16u)] = tout[(t % 16u) * 257u + t / 16u];
   }
 }
 
@@ -228,7 +238,7 @@ __kernel void pf_colmax_rot(__global const uint* restrict qw, __global const hal
   pf_rot_load(qw, sc, sbits, nbase, blk, Nfull, K, tin, tsc, v);
   float amax = 0.0f;
 #pragma unroll
-  for (uint j = 0; j < 64u; ++j) amax = fmax(amax, fabs(v[j] * (1.0f / 32.0f)));
+  for (uint j = 0; j < 64u; ++j) amax = fmax(amax, fabs(v[j] * ROT_SCALE));
   amax = sub_group_reduce_max(amax);
   if (l == 0u) atomic_max((volatile __global uint*)(colmax + nbase + c), as_uint(amax));
 }

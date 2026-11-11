@@ -2676,6 +2676,15 @@ add_test(NAME tp_prefill_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(tp_prefill_test PROPERTIES
   LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
   ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
+add_executable(tp_prefill_int8_test runtime/tp_prefill_int8_test.cc)
+target_include_directories(tp_prefill_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(tp_prefill_int8_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_prefill_int8_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS})
+add_test(NAME tp_prefill_int8_test COMMAND tp_prefill_int8_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(tp_prefill_int8_test PROPERTIES
+  LABELS "checkpoint;tp;prefill" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77 TIMEOUT 3600 ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
 if(B70_KV8)
   add_test(NAME tp_prefill_kv8_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_prefill_kv8_test PROPERTIES
@@ -2705,8 +2714,6 @@ if(B70_KV8)
 endif()
 
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
-b70_cli_reject(cli_reject_tp_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --prefill
-  --prefill-backend l0-int8 EXPECT "--parallel tp prefills on the l0 backend only")
 b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec dflash
   --draft-model ${B70_NO_MODEL} EXPECT "--spec dflash / dflash-lookup under tensor parallel are not built")
 b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32

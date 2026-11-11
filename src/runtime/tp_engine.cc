@@ -627,6 +627,7 @@ MemoryComponents TpEngine::memory_use(uint32_t card) const {
   m.decode_state = c.persist.bytes() - m.kv + c.scratch.bytes() + c.bytes_crossing() + (c.tap ? c.tap->size() : 0) +
                    (c.mtp ? c.mtp->bytes() : 0);   // spec 17d: the head's buffers
   m.prefill_scratch = pf_bytes_[card];   // spec 17c: after prepare_prefill()
+  m.int8 = pf_int8_bytes_[card];
   return m;
 }
 

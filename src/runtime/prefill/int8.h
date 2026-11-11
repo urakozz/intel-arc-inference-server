@@ -63,9 +63,9 @@ class Int8State {
                                                     const model::GemvShape& sh);
 };
 
-// linear_l0's contract (fp32 partials [pad256(M)][N]) on the h8 path.
+// linear_l0's contract (fp32 [pad256(M)][N]) on the h8 path; null out selects partials.
 void linear_i8(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
-               const loader::DeviceWeight& w, const uint16_t* x, uint32_t M);
+               const loader::DeviceWeight& w, const uint16_t* x, uint32_t M, float* out = nullptr);
 // linear_l0_silu's contract (bf16 out [pad256(M)][N/2] at pitch ldx, partials untouched).
 void linear_i8_silu(Context& cx, KernelCache& kc, PrefillScratch& s, Int8State& q,
                     const loader::DeviceWeight& w, const uint16_t* x, uint32_t M,

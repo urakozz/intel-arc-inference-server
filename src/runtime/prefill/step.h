@@ -103,7 +103,7 @@ void step_stage(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::L
 //
 // Only io.resid and io.own outlive a unit; every other scratch buffer is dead between units, so the chunks in flight
 // share one PrefillScratch. The fold replaces one card's pf_res_fold, so a unit differs from one card only in the
-// row-parallel linears' K split (judged, not bitwise; both cards compute the same bits). L0 backend, flash
+// row-parallel linears' K split (judged, not bitwise; both cards compute the same bits). L0 backends, flash
 // attention, bf16 or int8 KV; `ctrl` holds the chunk's pos / n_active. The caller orders the crossings.
 struct TpUnitIo {
   const void* ids = nullptr;   // unit 0: the chunk's C ids
@@ -115,7 +115,7 @@ struct TpUnitIo {
 void step_tp_unit(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, uint32_t max_len,
                   void* ctrl, uint32_t pos, uint32_t C, uint32_t unit, l0::Mem& gdn_state_mem,
                   l0::Mem& conv_ring_mem, l0::Mem& kv_k_mem, l0::Mem& kv_v_mem, const KvLayout& kv,
-                  const TpUnitIo& io);
+                  const TpUnitIo& io, PrefillBackend backend = PrefillBackend::L0, Int8State* q = nullptr);
 // After the last unit of the prompt's last chunk: the last row's fold (p0 / p1 / resid_row at that row), the final
 // norm, the card's int8 vocabulary half of lm_head (17b's gemv_i8w binary) and tp.cl's argmax over it, whose ids
 // start at `id_base` with `vocab_used` real rows - the winner's id and value into ctrl (out_token / out_value,
