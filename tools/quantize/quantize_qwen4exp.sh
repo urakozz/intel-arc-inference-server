@@ -74,7 +74,11 @@ SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
 DATASET="${DATASET:-nvidia/OpenCodeInstruct:apply_chat_template}"
 export AR_COMMIT=a6cf748739f2dd58e6c16b0ac849e92af7396e32 AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
 CURRENT="$QUANT_ROOT/flash-next-current"
+# HEAD=bf16 (default, operator 2026-11-12): lm_head stays bf16 in the export and the engine builds its int8 head at load,
+# as for Qwen3.8 - no RTN int4 head; HEAD=int4 runs the head stage (RTN g64, head_rtn.py) instead.
+HEAD=${HEAD:-bf16}
 STAGES=(quant bf16 head ple check)
+[ "$HEAD" = bf16 ] && STAGES=(quant bf16 ple check)
 
 die() { echo "quantize_qwen4exp: $*" >&2; exit 2; }
 
@@ -135,7 +139,8 @@ stage_ple() {
 stage_check() {
   local ex ok=1; ex=$(export_dir)
   "$VENVPY" "$Q/check.py" "$ex" --ple "$ex-ple-int8" || ok=0
-  "$VENVPY" "$HERE/quantize/check_gptq_export.py" "$ex" --group 64 --lm-head quant --source "$SNAP" \
+  local lmh=keep; [ "$HEAD" = int4 ] && lmh=quant
+  "$VENVPY" "$HERE/quantize/check_gptq_export.py" "$ex" --group 64 --lm-head "$lmh" --source "$SNAP" \
     --skip-prefix model.visual. || ok=0
   if [ $ok = 1 ]; then
     cat >> "$ex/README.md" <<EOF
@@ -147,11 +152,10 @@ stage_check() {
   auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the
   PLE layer, norms, the embedding, vision, the MTP head's attention and shared expert; the MTP head's routed
-  experts RTN int4 g64 (not tuned: transformers does not build the head); \`lm_head\` RTN int4 g64 by
-  the engine's rule (\`tools/quantize/qwen4exp/head_rtn.py\`); qwen4exp_recipe.json has the call
+  experts RTN int4 g64 (not tuned: transformers does not build the head); \`lm_head\` $( [ "$HEAD" = int4 ] && echo 'RTN int4 g64 by the engine'"'"'s rule (tools/quantize/qwen4exp/head_rtn.py)' || echo 'kept bf16 (the engine builds its int8 head at load)'); qwen4exp_recipe.json has the call
 - source: \`$MODEL\` at \`$(basename "$SNAP")\`; made $(date -u +%Y-%m-%dT%H:%MZ)
 - checked by \`tools/quantize/qwen4exp/check.py\` (with the int8 PLE file \`$(basename "$ex")-ple-int8\`) and
-  \`tools/quantize/check_gptq_export.py --lm-head quant --source\`
+  \`tools/quantize/check_gptq_export.py --lm-head $( [ "$HEAD" = int4 ] && echo quant || echo keep) --source\`
 EOF
     echo "FLASH-NEXT QUANT: OK $ex" | tee "$OUT/RESULT"
   else

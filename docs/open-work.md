@@ -33,6 +33,18 @@ Expected: `FLASH-NEXT QUANT: OK .../export/...-w4g64.`
 
 Output, about 172 GB to the 8TB. A temporary 102 GB n-gram/PLE to the NVMe
 
+The output head stays bf16 in the export; the engine builds its int8 head at load, as for Qwen3.8.
+
+Optional: to quantise the head afterwards (plain-rounded int4 g64, not calibrated; the engine needs an int4-head loader
+before it can use it, so only for a later test):
+
+```sh
+HEAD=int4 tools/quantize/quantize_qwen4exp.sh run --only head    # rounds lm_head in the finished export, minutes
+HEAD=int4 tools/quantize/quantize_qwen4exp.sh run --only check   # must print: FLASH-NEXT QUANT: OK ...
+```
+
+A calibrated int4 head (GPTQ codes) is a separate later job in `docs/low-priority-work.md`.
+
 ## Waiting - only a box run or a CPU job left
 
 | spec | what | proved by | state |

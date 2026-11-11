@@ -11,7 +11,7 @@ onwards begins on the operator's go after Task 6's record. Tensor parallel with 
 > implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox
 > (`- [ ]`) syntax for tracking.
 
-**Goal:** our own AutoRound int4 g64 export of Flash-Next (head and MTP experts included), then the whole 48-layer
+**Goal:** our own AutoRound int4 g64 export of Flash-Next (MTP experts included, the head kept bf16), then the whole 48-layer
 model run and served on two B70s with the layers split - the most-used experts in VRAM by a recorded route profile,
 the rest read in place from pinned host memory - bitwise equal to the resident engine wherever the experts live,
 judged against an f32 reference, at ≥ 30 t/s decode.
@@ -51,8 +51,8 @@ flag, the engine decides instead (zero-config); test-only choices are environmen
 What was built instead of the steps' first guesses (tools/quantize/README.md, "Qwen3.8-Flash-Next"): AutoRound at
 the operator's fork commit `a6cf7487` (intel/auto-round `b58069ea` of 2026-11-11 + cached OpenCodeInstruct) rather
 than 0.17.0 `6afaecdb` - per-block resume, the vectorised QSA indexer, its own MTP export; calibration on
-nvidia/OpenCodeInstruct through the chat template (operator 2026-11-12); the tuned path only (no RTN arm, operator 2026-11-12); `lm_head` packed by
-our RTN g64 rule in a `head` stage (AutoRound RTNs the head on the tuned path too, and writes its scales BF16); the MTP
+nvidia/OpenCodeInstruct through the chat template (operator 2026-11-12); the tuned path only (no RTN arm, operator 2026-11-12); `lm_head` kept bf16
+(the engine's int8 head at load; `HEAD=int4` packs it by our RTN g64 rule in a `head` stage, operator 2026-11-12); the MTP
 head's routed experts RTN int4 g64 by AutoRound at export, its attention and shared expert bf16; the vision tower bf16
 and not counted by the checks. The tiny model is `tools/quantize/qwen4exp/make_tiny_vl.py` (the fused original's
 form with a vision tower and the processor files: AutoRound takes the multimodal path for this architecture).
@@ -93,11 +93,10 @@ layers, 512 experts, random weights) on card 1: one GDN block **57 min**, peak V
 - [ ] **Step 1 (operator):** `tools/quantize/quantize_qwen4exp.sh start` - detached, resumable per block, on card 1;
   output to the cold disk (`~/b70/hdd/quant/`); `status` shows the blocks done and AutoRound's time left.
 - [ ] **Step 2 (the script's last stages):** the PLE int8 file (`ple_int8.py`, beside the export), `check.py` and
-  `check_gptq_export.py --lm-head quant --source`, provenance appended to its README (version, commit, flags, source
+  `check_gptq_export.py --lm-head keep --source`, provenance appended to its README (version, commit, flags, source
   revision, date): `FLASH-NEXT QUANT: OK`. Then `tools/hf_tier.sh` makes it hot.
-- [ ] **Step 3:** the qwen4exp loader accepts the checkpoint's int4 head (`LmHeadForm::Checkpoint` for this family:
-  int4 g64 layout 0 and the int4 head GEMV Qwen3.8 already has; the int8-from-bf16 path stays for Intel's form);
-  `r31.load` on our export at `--layers 18` and `--layers 37 --parallel pp`.
+- [ ] **Step 3:** the qwen4exp loader on our export (the bf16 head takes the int8-from-bf16 path Intel's form uses;
+  no int4-head loader needed while `HEAD=bf16`); `r31.load` on our export at `--layers 18` and `--layers 37 --parallel pp`.
 - **Gate:** both checks `ACCEPTED`; the engine loads our export with 0 unconsumed tensors; `r32.k3` / `r33.prefill`
   run on it.
 
@@ -107,7 +106,7 @@ The 2026-11-09 traces (`$DATA/oracle-out-q4exp-traces/`, 39 sources, Intel's che
 exist; `r36.curve` has never run.
 
 - [ ] **Step 1: rebase the curve and the projection on our forms.** `tools/oracle/offload_curve.py`: the judged budget
-  row is ours (int4 dense, int4 head: D = 3.46 GB, spec 21 v2 §3), Intel's bf16 row printed beside it;
+  row is ours (int4 dense, int8 head: D = 3.76 GB, spec 21 v2 §3), Intel's bf16 row printed beside it;
   `STOP_TPS = 40.0` becomes spec 21 v2 §11's rule (`pp` < 30 and `tp` < 50 t/s -> STOP). Update
   `test_offload_curve.py`; PASS.
 - [ ] **Step 2: add the `tp` layout to `project`** (spec 21 v2 §5 (b): D 2.38 and R 0.627 per card, both links at P,
