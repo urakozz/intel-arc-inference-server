@@ -74,7 +74,7 @@ row. A finished reference lands in the data tree (`~/b70-inference-server/oracle
 
 | | version |
 |---|---|
-| kernel (running) | Linux 7.4.0-rc1, with peer-to-peer (P2P, one card writing straight into the other's memory over PCIe) supported natively; before 2026-11-04 it was 7.3.0-rc4 with a local P2P patch |
+| kernel (running) | Linux 7.4.0-rc2, with peer-to-peer (P2P, one card writing straight into the other's memory over PCIe) supported natively; before 2026-11-04 it was 7.3.0-rc4 with a local P2P patch |
 | IGC (Intel Graphics Compiler, which turns OpenCL C into GPU code) | 2.42.6, from the GitHub release debs |
 | compute runtime (`libze-intel-gpu1`, `intel-opencl-icd`, `intel-ocloc`) | 26.40.40196.8, from the GitHub release debs |
 
