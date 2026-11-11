@@ -320,6 +320,9 @@ for our g64 export (the loader expands Intel's g128 only); built only if load ti
    **If accuracy is bad, suspect these first:** the mixers touch every token's residual stream, so they are the first thing
    to switch back to bf16 when a quality gate fails - a load-time choice, no re-export needed - before suspecting the int4
    weights, the int4 head or the MTP experts.
+   **Test switch (operator 2026-11-12):** an environment variable, `B70_Q4_HC=int8|bf16` (default `int8` once the lever
+   passes its gate), picks the mixers' form at load - for A/B timing and quality checks only, not a user flag; listed in
+   docs/environment-variables.md when it is built.
 6. **Prefill GEMM - built on Ornith first (operator 2026-11-12):** Flash-Next's prefill reuses Ornith's grouped expert GEMM
    (`pf_moe_gemm.cl`) and the same separate unpack pass (`q4_pf_dequant_*`), so the Ornith MoE prefill rework - int4
    unpacked in registers inside the grouped GEMM, bigger MoE chunks and tiles, persistent scheduling - lands here unchanged.
