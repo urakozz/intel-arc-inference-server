@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
               "%u KV caches rotated, device %s (%u EUs)\n"
               "Per-launch us are kernelStart->kernelEnd from the same timestamp events\n"
               "`b70-decode --profile` uses, so they are directly comparable to the in-situ\n"
-              "224.046 us/launch this row exists to reproduce (docs/15, "The attribution floor").\n\n",
+              "224.046 us/launch this row exists to reproduce (docs/15, \"The attribution floor\").\n\n",
               pos, reps, kReplays - kWarmup, kWarmup, kvsets, ctx.name().c_str(),
               ctx.eu_count());
   std::printf("| variant | live WGs | us/launch (median) | mean | min .. max | vs base |"

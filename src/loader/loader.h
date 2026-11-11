@@ -242,7 +242,9 @@ LoadedModel load(l0::Context& ctx, const std::string& snapshot_or_repo, uint32_t
 // **Only before anything has captured `m.rope.ptr()`** - before the Engine is built:
 // a captured list bakes the old pointer. Nothing reads the table's length from the
 // allocation; every kernel indexes it by position (capture.cc, prefill/step.cc).
-void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len);
+// `longest`: under sequence slots the table spans the slots' sum, but a slot counts its positions from 0, so the
+// trained-context bound holds the longest slot instead (0: max_len itself).
+void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len, uint32_t longest = 0);
 
 // --- spec 17b: tensor parallel (`--parallel tp`) -----------------------------------------------------------------
 //

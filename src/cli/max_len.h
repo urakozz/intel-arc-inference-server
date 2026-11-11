@@ -200,7 +200,7 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
     std::fprintf(stderr, "max_len: slot 0 %u (--max-len)%s\n", len, beside.c_str());
   uint32_t total = 0;
   for (uint32_t l : lens) total += l;
-  loader::set_max_len(ctx, m, total);
+  loader::set_max_len(ctx, m, total, len);   // slot 0 is the longest; the sum may pass the trained context
   std::fprintf(stderr, "%s\n", runtime::describe(p, device, reserve_bytes).c_str());
   return lens;
 }

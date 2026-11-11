@@ -595,7 +595,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "  - Per-kernel us are in-situ and flush-free: compare them directly with the\n"
       "    probe-transplant floors in docs/12 (`gemv` -> Measured) and with docs/05's table.\n"
       "  - The gap is NOT a dispatch cost this engine pays: subtract the flush\n"
-      "    (probe_replay's 0.52 us/kernel is the unprofiled estimate; docs/15 "The dispatch gap").\n"
+      "    (probe_replay's 0.52 us/kernel is the unprofiled estimate; docs/15 \"The dispatch gap\").\n"
       "  - The fence wall above is inflated by the same flushes and is NOT ms/token.\n"
       "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n"
       "  - A mean without a spread is not an attribution: run --repeats R (R >= 5) before\n"

@@ -1378,8 +1378,8 @@ LoadedModel load_tp(l0::Context& ctx, const std::string& snapshot_or_repo, const
   return load_impl(ctx, snapshot_or_repo, max_len, mtp, lm_head, DraftVocabSpec{}, &tp);
 }
 
-void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len) {
-  check_max_len(*m.desc, max_len, m.trained_max_len);
+void set_max_len(l0::Context& ctx, LoadedModel& m, uint32_t max_len, uint32_t longest) {
+  check_max_len(*m.desc, longest != 0 ? longest : max_len, m.trained_max_len);
   const std::vector<float> rope = rope_table(max_len);
   const size_t bytes = rope.size() * 4;
   // The planner's figure for the same table (spec 6 §10) - one formula, checked here.
