@@ -20,10 +20,6 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 
 Each row closes with a PASS (or moves to Waiting with its reason). A gate we touch gets a negative control - a deliberately broken input it must FAIL on (saber's rule: a gate nobody has watched fail is not a gate).
 
-| group | stages | what they need |
-|---|---|---|
-| **Qwen3.8** | Proof check for the 3 accepted `mtp_gpu_kv8_test` rows: rerun those contexts with the bf16 prompt pass and the int8 cache - if they pass, the int8 prompt pass is the cause as accepted; if not, it is a new failure | after the replica row; ~20 min on a card plus new f32 references |
-
 ## Waiting - only a box run or a CPU job left
 
 | spec | what | proved by | state |
@@ -45,6 +41,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 | 2026-11-11 | 13 | **Replica with per-card slots passes on the cards:** row 77 all PASS on main (two at a time vs alone, two chat clients, a snapshot served on the other card, disconnects / stop strings / streaming, and 1 / 4 / 8 requests at once with `--max-num-seqs 8`: every difference passes the f32 judge, 1 request awaits its f32 reference). Rough speed from that run (128-token replies, cold prompts): MTP 1 / 4 / 8 requests ~44 / 117 / 132 t/s in total, one request alone 78 t/s while generating; the record run is item 5 |
 | 2026-11-11 | 7 | **The prefix cache hang fixed:** the prefix cache is now 2 GiB pinned pieces - one 32 GiB allocation, mapped by the second card through a shared import, could overflow the kernel's 4 GiB mapping segments; the kernel answered "busy" and the GPU driver retried forever. TP bf16 32 GiB, TP int8 16 GiB and replica pass with prefix cache hits (324 hits, 0 hangs) |
 | 2026-11-11 | 9 | **`--max-num-seqs N` merged:** one card up to 4 requests, two cards (replica) up to 8; startup prints each card's slots (bf16 cache, one card: 171008 alone, 46080 + 3 x 32768 at N = 4); a too-long `--max-len` and TP with N > 1 are refused; the slot tests pass |
+| 2026-11-11 | Qwen3.8 | **The int8 prompt pass is the cause of the 3 accepted `mtp_gpu_kv8_test` rows:** the same test with the bf16 prompt pass (`l0`) and the int8 cache has 0 failing runs; t4_comment-loader is identical to the plain steps at K 1/2/3, t5_test-linear_l0 and t2_explain-openai differ only at near-ties under 0.11 ulp (other positions), so none of the three f32-rejected rows (gaps 20.94 / 23.86 / 13.01) appears |
 | 2026-11-11 | Qwen3.8 | **`mtp_gpu_kv8_test` PASS** with its 3 f32-rejected rows accepted as the int8 prompt pass + int8 cache known fail (operator) |
 | 2026-11-11 | Qwen3.8 | **Long-context MTP verify passes:** f32 references for the 32k and 130k contexts (8.1 h on the CPU, 37 GiB peak), then `mtp_verify_32k_test`, `_128k_test` and `mtp_verify_kv8_test` PASS on one card |
 | 2026-11-11 | 7 | **TP + slots ruled out** (operator): with MTP, 4 requests at once gave 121 t/s against replica's 206, and its batched rows had crossing failures and a 100-ulp f32-rejected id; kept on branch `tp-slots`, notes in [low-priority-work.md](low-priority-work.md) |
