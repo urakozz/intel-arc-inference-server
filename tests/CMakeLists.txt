@@ -86,7 +86,9 @@ add_executable(pf_int8_test prefill/pf_int8_test.cc)
 target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pf_int8_test PRIVATE b70_l0)
 b70_target_kernel_dir(pf_int8_test)
-add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
+add_dependencies(pf_int8_test kernel_pf_quant_had_K3072 kernel_pf_quant_had_K8704
+                 kernel_pf_requant_rot_L0_R512 kernel_pf_requant_rot_L1_R512
+                 kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
                  kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
                  kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
 add_test(NAME pf_int8_test COMMAND pf_int8_test)
