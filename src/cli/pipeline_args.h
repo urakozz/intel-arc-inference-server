@@ -20,6 +20,7 @@
 //                               on both cards, one engine each, two requests served at once (each
 //                               bitwise what it is alone on its card); every other model and
 //                               b70-decode refuse it by name, one visible card is refused.
+//   --max-num-seqs N            b70-serve: requests at once (check_max_num_seqs / resolve_max_num_seqs below).
 //   --pipeline-split auto|N     the override, for experiments: device 0 runs layers [0, N), device 1
 //                               [N, layers); auto (default) balances the bytes each card holds
 //                               (runtime::pp_auto_split). Given under --parallel auto, it means pp.
@@ -32,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "runtime/buffer_sizes.h"
 #include "runtime/pipeline_plan.h"
 #include "runtime/prefill_backend.h"
 
@@ -215,6 +217,52 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
     throw std::runtime_error("--parallel replica needs two GPUs (one engine per card) and Level Zero shows " +
                              std::to_string(gpus) +
                              " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
+}
+
+// --max-num-seqs N (operator 2026-11-11; vLLM's flag, the same meaning): how many requests run at once - the user's
+// choice, and the context follows (slot 0 the largest that fits beside N - 1 slots of 32768 on its card,
+// cli::settle_slots). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
+// odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Qwen3.8 only (b70_serve.cc refuses
+// the others by config.json, DFlash and a draft vocabulary beside slots).
+inline constexpr uint32_t kSlotsPerCard = runtime::SlotDims::kMaxSeqs;
+// Before the device: --parallel tp keeps one slot (TP + slots was ruled out, 2026-11-11) and pp runs one request;
+// replica runs a request on each card, so N is 2 to 8 there and 2 (one slot a card) when not given. Returns N.
+inline uint32_t check_max_num_seqs(const PipelineArgs& a, uint32_t n, bool given) {
+  if (a.replica()) {
+    if (!given) return 2;
+    if (n < 2)
+      throw std::runtime_error("--parallel replica runs a request on each card: --max-num-seqs 2 to " +
+                               std::to_string(2 * kSlotsPerCard) +
+                               " (2: one full-context slot a card); one request at a time is --parallel auto");
+  }
+  if (n <= 1) return n;
+  if (a.tp())
+    throw std::runtime_error("--parallel tp runs one request at a time (tensor parallel with slots was ruled out); "
+                             "--max-num-seqs " + std::to_string(n) +
+                             " runs on --parallel replica (two cards, each its slots) - or --parallel auto");
+  if (a.mode == Parallel::Pp)
+    throw std::runtime_error("--parallel pp runs one request at a time; --max-num-seqs " + std::to_string(n) +
+                             " runs on --parallel replica (two cards, each its slots) or one card's slots "
+                             "(--parallel 1)");
+  return n;
+}
+// After the hardware gate (`cards` visible): --parallel auto with N > 1 is replica on two cards, one card's slots on
+// one; then the limit - kSlotsPerCard a card.
+inline void resolve_max_num_seqs(PipelineArgs& a, uint32_t n, uint32_t cards) {
+  if (n <= 1) return;
+  if (a.mode == Parallel::Auto) {
+    a.mode = cards >= 2 ? Parallel::Replica : Parallel::One;
+    a.devices = 1;
+  }
+  const uint32_t limit = a.replica() ? 2 * kSlotsPerCard : kSlotsPerCard;
+  if (n > limit)
+    throw std::runtime_error("--max-num-seqs " + std::to_string(n) + ": " +
+                             (a.replica() ? std::string("two cards run") : std::string("one card runs")) + " at most " +
+                             std::to_string(limit) + " requests at once (" + std::to_string(kSlotsPerCard) +
+                             " slots a card)" +
+                             (!a.replica() && cards >= 2 ? "; --parallel replica runs up to " +
+                                                               std::to_string(2 * kSlotsPerCard) + " on two"
+                                                         : std::string()));
 }
 
 // The device count the driver shows (l0::Context::gpu_count), held to two before anything

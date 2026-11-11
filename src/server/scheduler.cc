@@ -355,6 +355,11 @@ void Scheduler::finish(const std::shared_ptr<Job>& job, Finish::Reason reason, s
   job->fin.error = std::move(error);
   if (job->slot >= 0) {
     const uint32_t slot = static_cast<uint32_t>(job->slot);
+    // --max-num-seqs (operator 2026-11-11): a request cut by its slot's end, not its max_tokens, is said.
+    if (reason == Finish::Length && job->req.prompt.size() + job->steps >= impl_->slot_len[slot])
+      std::fprintf(stderr, "scheduler: a request reached the end of slot %u (%u positions%s): finished with length\n",
+                   slot, impl_->slot_len[slot],
+                   impl_->n_cards > 1 ? (", card " + std::to_string(impl_->slot_card[slot])).c_str() : "");
     if (job->inflight) {   // a chunk still on the card: join it first (the tick only gets here once it is ready)
       try {
         engine_.prefill_end(slot);
