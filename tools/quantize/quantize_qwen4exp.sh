@@ -4,31 +4,36 @@
 #
 #   tools/quantize/quantize_qwen4exp.sh check-download [--sha]   the original complete? (144 files, sizes / sha256)
 #   tools/quantize/quantize_qwen4exp.sh start                    start (or resume) the run, detached
-#   tools/quantize/quantize_qwen4exp.sh status                   where it is, the ETA, RAM, the result
-#   tools/quantize/quantize_qwen4exp.sh measure                  the first 4 layers only: s/block and peak RAM
+#   tools/quantize/quantize_qwen4exp.sh status                   blocks done, s per block, the ETA, RAM, the result
+#   tools/quantize/quantize_qwen4exp.sh stop                     stop the run (TERM to its process group); start resumes
 #   tools/quantize/quantize_qwen4exp.sh selftest                 the whole pipeline on a tiny model (~5 min)
 #   tools/quantize/quantize_qwen4exp.sh run [--only S | --from S]   the stages in the foreground (what start runs)
 #
 # Stages of `run` (a finished stage leaves $OUT/.done-<stage>; a rerun skips it):
-#   quant  AutoRound (tools/quantize/qwen4exp/autoround_run.py): W4A16, group 64, symmetric, --quant_lm_head,
-#          format auto_round:auto_gptq, tuned sign-SGD ITERS (200) on NSAMPLES (128) x SEQLEN (2048) rows of
+#   quant  AutoRound (tools/quantize/qwen4exp/autoround_run.py): W4A16, group 64, symmetric, format
+#          auto_round:auto_gptq, tuned sign-SGD ITERS (200) on NSAMPLES (128) x SEQLEN (2048) rows of
 #          NeelNanda/pile-10k (the Qwen3.8 tuned recipe's defaults), low CPU memory (the fused-MoE checkpoint
 #          is read one block at a time), low GPU memory; on card CARD (1) through tools/gpu_lock.sh, or the box
-#          CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume - after a
-#          stop, `start` again continues at the first unfinished block.
+#          CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32
+#          files of the calibration activations, 21.5 GB, overwritten each block) - after a stop, `start` again
+#          continues at the first unfinished block. The PLE table (102 GB) is streamed once into a raw file in
+#          PLE_DIR (NVMe) and read from there by mmap (autoround_run.py: AutoRound's own load would need ~190 GB).
 #   bf16   every tensor AutoRound did not quantise is bitwise the source's (the ignore list, routers, norms, the
 #          PLE table, ...); on DEVICE=cpu its fp32 widenings are restored to bf16 (tools/quantize/qwen4exp/bf16_same.py)
-#   head   lm_head re-packed from the source by the engine's RTN g64 rule (tools/quantize/qwen4exp/head_rtn.py):
-#          AutoRound only RTNs the head too, and at the pinned commit writes its scales BF16 (the loader
-#          reads F16)
+#   head   lm_head packed by the engine's RTN g64 rule and declared 4-bit (tools/quantize/qwen4exp/head_rtn.py):
+#          AutoRound's quant_lm_head would turn its low-CPU-memory mode and the resume off, for a head it only
+#          RTNs anyway (with BF16 scales the loader refuses)
 #   ple    the PLE table to the engine's int8 file, $EXPORT-ple-int8 (tools/quantize/qwen4exp/ple_int8.py)
 #   check  tools/quantize/qwen4exp/check.py (the engine's rules for this family, the int8 PLE file sampled bit
 #          for bit) and tools/quantize/check_gptq_export.py --lm-head quant --source (every linear packed or
-#          declared bf16; the vision tower, which the engine never loads, not counted); provenance appended to the export's README.md; the last line is
-#          "FLASH-NEXT QUANT: OK <export>" or "FLASH-NEXT QUANT: FAIL ..." (also in $OUT/RESULT)
+#          declared bf16; the vision tower, which the engine never loads, not counted); provenance appended to
+#          the export's README.md; the last line is "FLASH-NEXT QUANT: OK <export>" or "FLASH-NEXT QUANT: FAIL ..." (also in $OUT/RESULT)
 #
-# Guards: `start` refuses unless the download check passes, MemAvailable >= RAM_MIN_GB (100) and the disk
-# under QUANT_ROOT has >= DISK_MIN_GB (300) free; AutoRound runs in a systemd scope capped at RAM_CAP_GB
+# Disks: QUANT_ROOT (the 8 TB disk: the export grows ~1.4 GB a layer, +102 GB of bf16 PLE table after layer 1,
+# ~172 GB at the end, + the int8 PLE file 51.8 GB + resume/ 21.5 GB = ~250 GB) and PLE_DIR (NVMe, 102 GB while
+# `quant` runs; move it to ~/b70/trash afterwards).
+# Guards: `start` refuses unless the download check passes, MemAvailable >= RAM_MIN_GB (100), QUANT_ROOT has
+# >= DISK_MIN_GB (300) and PLE_DIR's disk >= 110 GB free (or holds the file already); AutoRound runs in a systemd scope capped at RAM_CAP_GB
 # (115) with no swap, so a memory overrun kills the run (resumable) instead of the box.
 #
 # AutoRound: intel/auto-round main at AR_COMMIT (b58069ea, 2026-11-11, version string 0.17.0), from
@@ -43,7 +48,8 @@
 #
 # Overridables (environment): MODEL (Qwen/Qwen3.8-Flash-Next or a snapshot dir), QUANT_ROOT
 # ($HOME/b70/hdd/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
-# W4A16-g64-<date>), DEVICE (xpu | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
+# W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | xpu2: both cards, each block split
+# over them | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
 # DISK_MIN_GB, VENVPY, SITE, AR_REPO, LOGDIR ($HOME/b70/logs/flash-next-quant).
 set -euo pipefail
 
@@ -62,6 +68,7 @@ BATCH="${BATCH:-8}"
 RAM_CAP_GB="${RAM_CAP_GB:-115}"
 RAM_MIN_GB="${RAM_MIN_GB:-100}"
 DISK_MIN_GB="${DISK_MIN_GB:-300}"
+PLE_DIR="${PLE_DIR:-$HOME/b70/scratch/flash-next-ple}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"
 SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
 export AR_COMMIT=b58069eab70c984bf1df2aaba730f29c1d0764ff AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
@@ -97,6 +104,8 @@ locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
     "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
+  elif [ "$DEVICE" = xpu2 ]; then
+    "$HERE/gpu_lock.sh" box -- "${cap[@]}" "$@"
   else
     AR_DISABLE_META_LOAD=1 flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
   fi
@@ -107,8 +116,8 @@ export_dir() { dirname "$(find "$OUT/export" -name config.json -printf '%d %p\n'
 stage_quant() {
   mkdir -p "$OUT/work" "$OUT/resume"
   AR_WORK_SPACE="$OUT/work" AR_RESUME_DIR="$OUT/resume" locked "$VENVPY" "$Q/autoround_run.py" \
-    --model "$SNAP" --out "$OUT/export" --device "$DEVICE" --iters "$ITERS" --nsamples "$NSAMPLES" \
-    --seqlen "$SEQLEN" --batch-size "$BATCH" ${NUM_LAYERS:+--num-layers "$NUM_LAYERS"}
+    --model "$SNAP" --out "$OUT/export" --device "$(case $DEVICE in xpu2) echo 0,1 ;; *) echo "$DEVICE" ;; esac)" --iters "$ITERS" --nsamples "$NSAMPLES" \
+    --seqlen "$SEQLEN" --batch-size "$BATCH" --ple-dir "$PLE_DIR"
 }
 
 stage_bf16() {
@@ -116,7 +125,7 @@ stage_bf16() {
 }
 
 stage_head() {
-  "$VENVPY" "$Q/head_rtn.py" "$(export_dir)" "$SNAP"
+  "$VENVPY" "$Q/head_rtn.py" "$(export_dir)"
 }
 
 stage_ple() {
@@ -135,7 +144,7 @@ stage_check() {
 ## Quantisation provenance
 
 - tool: auto-round, intel/auto-round commit \`$AR_COMMIT\` (version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)')), no local patch
-- recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, \`quant_lm_head\`, format
+- recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, format
   auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of NeelNanda/pile-10k, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the
   PLE layer, norms, the embedding, vision, the MTP head's attention and shared expert; the MTP head's routed
@@ -194,6 +203,10 @@ case "${1:-}" in
     [ -f "$MODEL/config.json" ] || "$VENVPY" "$Q/check_download.py" --repo "$MODEL" || die "the download is not complete"
     m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB - something else is using the RAM"
     d=$(disk_free_gb "$QUANT_ROOT"); [ "$d" -ge "$DISK_MIN_GB" ] || die "$QUANT_ROOT has ${d} GB free < DISK_MIN_GB $DISK_MIN_GB"
+    mkdir -p "$PLE_DIR"
+    if ! ls "$PLE_DIR"/*.bf16.json >/dev/null 2>&1; then
+      d=$(disk_free_gb "$PLE_DIR"); [ "$d" -ge 110 ] || die "$PLE_DIR has ${d} GB free < 110 (the 102 GB PLE file)"
+    fi
     if [ -z "$OUT" ]; then
       OUT="$QUANT_ROOT/Qwen3.8-Flash-Next-W4A16-g64-$(date +%F)"
       mkdir -p "$OUT"; ln -sfn "$OUT" "$CURRENT"
@@ -221,25 +234,19 @@ case "${1:-}" in
       echo "NOT RUNNING and not finished - resume with: $SELF start"
     fi
     if [ -e "$OUT/run.log" ]; then
-      echo "-- blocks (AutoRound's progress: done/total [elapsed<remaining, s per block]):"
-      tr '\r' '\n' < "$OUT/run.log" | grep -E "^Quantizing (model\.language_model\.layers|mtp)\.[0-9]+:" | tail -1
+      echo "-- blocks (AutoRound's bar: block, done/48 [elapsed<remaining, s per block]; on a resume it counts this process):"
+      tr '\r' '\n' < "$OUT/run.log" | grep -E "^Quantizing model\.language_model\.layers\.[0-9]+:" | tail -1
+      echo "-- seconds per finished block (AutoRound's per-block memory lines; the first includes the warm-up):"
+      grep -E "INFO device.py .*'peak_ram'" "$OUT/run.log" | awk '{ split($2, t, ":"); s = t[1] * 3600 + t[2] * 60 + t[3];
+        if (p != "") { d = s - p; if (d < 0) d += 86400; printf " %d", d }; p = s } END { print "" }'
       echo "-- last log lines:"
       tr '\r' '\n' < "$OUT/run.log" | grep -v -E "^(Quantizing|packing|Writing|Map|Filter)" | grep -v '^\s*$' | tail -5
     fi ;;
-  measure)
-    OUT="$QUANT_ROOT/measure-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$OUT" "$LOGDIR"
-    log="$LOGDIR/measure-$(date +%Y%m%d-%H%M%S).log"
-    SNAP=$(snapshot); env_py
-    m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB"
-    # 4 layers: 3 GDN (layer 1 holds the PLE table) and the first QSA - a model of GDN layers only has no cache
-    # transformers can ask for its length, and its calibration forward fails
-    echo "measure: the first 4 layers, tuned as the real run -> $OUT, log $log"
-    NUM_LAYERS=4 stage_quant > "$log" 2>&1 || { tail -20 "$log"; die "measure failed (log $log)"; }
-    echo "seconds per block (from AutoRound's per-block memory lines; the first includes torch.compile's warm-up):"
-    grep -E "INFO device.py .*'peak_ram'" "$log" | awk '{ split($2, t, ":"); s = t[1] * 3600 + t[2] * 60 + t[3];
-      if (p != "") printf "  block %d: %d s\n", n++, s - p; p = s }'
-    grep -E "peak RSS" "$log" | tail -1
-    echo "projection: 48 x the mean of blocks 1-3 + ~1 h (the MTP head, the export, the bf16 / ple / check stages)" ;;
+  stop)
+    resolve_out
+    [ -n "$OUT" ] && [ -f "$OUT/run.pid" ] && kill -0 "$(cat "$OUT/run.pid")" 2>/dev/null || die "no run is running"
+    kill -TERM -- "-$(cat "$OUT/run.pid")"
+    echo "stopped the run in $OUT (pid $(cat "$OUT/run.pid") and its children); resume with: $SELF start" ;;
   selftest)
     W="$QUANT_ROOT/selftest-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$W"
     SNAP0=$(MODEL="$MODEL" snapshot 2>/dev/null || true)
@@ -248,7 +255,7 @@ case "${1:-}" in
     tok=$(ls -d "$HOME"/.cache/huggingface/hub/models--qikp--tiny-random-Qwen4-Exp_Qwen3.8-Flash-Next/snapshots/*/ | head -1)
     env_py
     "$VENVPY" "$Q/make_tiny_vl.py" "$W/tiny" --tokenizer "$tok" --processor "$proc"
-    MODEL="$W/tiny" OUT="$W/out" ITERS=2 NSAMPLES=8 SEQLEN=128 BATCH=4 "$SELF" run ;;
+    MODEL="$W/tiny" OUT="$W/out" PLE_DIR="$W/ple" ITERS=2 NSAMPLES=8 SEQLEN=128 BATCH=4 "$SELF" run ;;
   run)
     shift
     resolve_out
