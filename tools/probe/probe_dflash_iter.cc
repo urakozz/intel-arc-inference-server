@@ -177,8 +177,17 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   auto restore = [&]() {
     e.load_state(saved.ptr(), depth);
     e.control()->cur_token[0] = anchor;
+    e.control()->n_active = 1;
   };
   auto plain = runtime::build(e.context(), e.model(), e.buffers());
+  restore();
+  e.verify(0);
+  const uint32_t reference = e.verify_ids()[0];
+  restore();
+  e.replay_aux(plain.list);
+  if (e.pos() != depth + 1 || e.control()->out_token[0] != reference)
+    throw std::runtime_error("plain baseline did not consume one active row or match verify(1)");
+  std::printf("DFLASH_CALIBRATION depth=%u plain row matches verify(1), pos=%u\n", depth, e.pos());
   l0::Queue queue(e.context());
   l0::Fence fence(queue);
   auto empty = l0::CmdList::regular(e.context());
@@ -243,6 +252,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
     auto& prof = which ? pp : dp;
     auto& list = which ? project : draft;
     std::map<std::string, std::vector<double>> families;
+    std::vector<std::vector<double>> launches(prof.events.size());
     std::vector<double> device, walls;
     for (unsigned r = 0; r <= rounds; ++r) {
       restore();
@@ -254,7 +264,9 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
       for (size_t i = 0; i < prof.events.size(); ++i) {
         const std::string& label = list.labels[i];
         const auto start = label.find(' ') + 1, end = label.find(' ', start);
-        sums[label.substr(start, end - start)] += prof.events[i].duration_us() / 1000.0;
+        const double ms = prof.events[i].duration_us() / 1000.0;
+        sums[label.substr(start, end - start)] += ms;
+        if (r) launches[i].push_back(ms);
       }
       if (r) {
         double sum = 0;
@@ -266,12 +278,16 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
     for (const auto& [family, ms] : families)
       std::printf("DFLASH_PROFILE depth=%u list=%s family=%s ms=%.6f\n", depth, which ? "projection" : "draft",
                   family.c_str(), median(ms));
+    for (size_t i = 0; i < launches.size(); ++i)
+      std::printf("DFLASH_LAUNCH depth=%u list=%s index=%zu ms=%.6f label=%s\n", depth,
+                  which ? "projection" : "draft", i, median(launches[i]), list.labels[i].c_str());
     std::printf("DFLASH_PROFILE_TOTAL depth=%u list=%s device_ms=%.6f wall_ms=%.6f (instrumented)\n", depth,
                 which ? "projection" : "draft", median(device), median(walls));
   }
   runtime::ProfileEvents vp(e.context());
   opt.profile = &vp;
   opt.profile_m = 8;
+  opt.profile_keys = depth + 1;
   e.recapture_verify(opt);
   std::vector<double> gap, projection_host;
   for (unsigned r = 0; r <= rounds; ++r) {
@@ -299,6 +315,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   }
   std::printf("DFLASH_GAP depth=%u host_upper_ms=%.6f projection_plus_host_upper_ms=%.6f "
               "(instrumented signals include host-scope flush overhead)\n", depth, median(gap), median(projection_host));
+  e.recapture_verify({});   // the engine's lists must release vp's events before it dies
 }
 }  // namespace
 
