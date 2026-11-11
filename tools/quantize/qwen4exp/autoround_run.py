@@ -3,7 +3,8 @@
 """Stage `quant` of tools/quantize/quantize_qwen4exp.sh: AutoRound with spec 21 v2 §2's settings.
 
     autoround_run.py --model <bf16 snapshot> --out <dir> [--device xpu|cpu] [--iters 200]
-                     [--nsamples 128] [--seqlen 2048] [--batch-size 8] [--dataset NeelNanda/pile-10k]
+                     [--nsamples 128] [--seqlen 2048] [--batch-size 8]
+                     [--dataset nvidia/OpenCodeInstruct:apply_chat_template]
                      --ple-dir <dir on NVMe> [--print-only]
 
 Quantised, int4 g64 symmetric, export `auto_round:auto_gptq`: the routed experts (AutoRound unfuses the
@@ -27,7 +28,14 @@ shared expert bf16 (spec 21 v2 §2, `loader::q4_mtp_desc`), so those two are in 
 experts come out int4 g64 per expert, the rest bf16, declared in `extra_config`.
 
 Low CPU memory: the fused-MoE original is built as a meta skeleton and each block materialised from the
-checkpoint, tuned, written to the export and freed - except the PLE table, see ple_table_from_file. Resumable through AutoRound's per-block checkpoint
+checkpoint, tuned, written to the export and freed - except the PLE table, see ple_table_from_file. Calibration (operator, 2026-11-12): nvidia/OpenCodeInstruct through the checkpoint's chat template (each row a
+user turn and the assistant's answer, ending in <|im_end|>; the per-sample BOS/EOS reset is upstream, #2591) -
+the model is for agentic coding. The pinned commit is the operator's fork commit whose `calib_dataset.py` reads the
+dataset's cached parquet shards (`_load_cached_parquet_dataset`); its fallback is a hub download, which the offline
+environment turns into an error. Before AutoRound starts, the cache must hold all of the dataset's
+`data/train-*.parquet` shards (OPENCODE_SHARDS), or this refuses - the run can never fall back to pile-10k.
+
+Resumable through AutoRound's per-block checkpoint
 (`AR_RESUME_DIR`, set by the script): a rerun with the same settings skips the blocks already written.
 """
 import argparse
@@ -37,6 +45,8 @@ import os
 import resource
 import time
 
+OPENCODE = "nvidia/OpenCodeInstruct"
+OPENCODE_SHARDS = 50
 IGNORE = ["shared_expert_gate", "in_proj_a", "in_proj_b", "indexer", ".ple.", "mtp.layers.0.self_attn",
           "mtp.layers.0.mlp.shared_expert"]
 
@@ -103,6 +113,19 @@ def ple_table_from_file(ple_dir: str) -> None:
     ds._assemble_sharded_tensor = ours
 
 
+def require_opencode() -> None:
+    """The cached OpenCodeInstruct parquet shards, all of them, or exit (no silent fallback)."""
+    from huggingface_hub import snapshot_download
+    try:
+        snap = snapshot_download(OPENCODE, repo_type="dataset", local_files_only=True)
+    except Exception as e:  # noqa: BLE001 - the hub's errors for a missing cache entry vary
+        raise SystemExit(f"calibration data: {OPENCODE} is not in the HF cache ({e}) - refusing to run")
+    shards = sorted(glob.glob(os.path.join(snap, "data", "train-*.parquet")))
+    if len(shards) != OPENCODE_SHARDS:
+        raise SystemExit(f"calibration data: {snap} has {len(shards)} of {OPENCODE_SHARDS} train parquet shards")
+    print(f"calibration data: {OPENCODE} from {snap} ({len(shards)} parquet shards)", flush=True)
+
+
 def autoround_info() -> dict:
     import auto_round
     return {"version": auto_round.__version__, "path": os.path.dirname(auto_round.__file__),
@@ -118,7 +141,7 @@ def main() -> None:
     ap.add_argument("--nsamples", type=int, default=128)
     ap.add_argument("--seqlen", type=int, default=2048)
     ap.add_argument("--batch-size", type=int, default=8)
-    ap.add_argument("--dataset", default="NeelNanda/pile-10k")
+    ap.add_argument("--dataset", default=OPENCODE + ":apply_chat_template")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--ple-dir", required=True, help="where the PLE table's raw bf16 file goes (fast disk, ~102 GB)")
     ap.add_argument("--print-only", action="store_true")
@@ -129,6 +152,8 @@ def main() -> None:
     print(call, flush=True)
     if a.print_only:
         return
+    if a.dataset.split(":")[0] in (OPENCODE, "opencode-instruct"):
+        require_opencode()
     import torch
     from auto_round import AutoRound
     drop_shared_expert_rule()
