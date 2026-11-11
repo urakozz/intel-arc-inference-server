@@ -85,7 +85,7 @@ two rounds each, the same prompts; the server's own `prefix:` prefill_ms, and th
 |---|---:|---:|---:|---:|
 | cold, 2102 ids | 1885 | 1412 | 2.02 s | 1.54 s |
 | follow-up, 4233 ids (the first 2103 cached; 2130 new = 2048 + 82) | 1927 | 1480 | 2.04 s | 1.59 s |
-| next turn, 4333 ids (restored at 4096; 237 new) | 741 | 299 | 0.85 s | 0.40 s |
+| next turn, 4333 ids (prefix cache hit at 4096; 237 new) | 741 | 299 | 0.85 s | 0.40 s |
 
 The follow-up's new ids now read at 1,439 t/s (1,105 before).
 

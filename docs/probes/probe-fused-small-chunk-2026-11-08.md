@@ -306,7 +306,7 @@ the command selects one card. Medians and median paired time reductions:
 
 The server comparison uses one card, int8 KV, `--spec off`, temperature 0
 and one generated id. Each process first warms separate 2048/2248/250-id
-prompts. The measured 200-id follow-up restores exactly 2048 prompt ids;
+prompts. The measured 200-id follow-up is a prefix cache hit on exactly 2048 prompt ids;
 the fresh 250-id request restarts at zero. All 18 records are complete,
 with identical prompt and generated ids across builds in each round.
 

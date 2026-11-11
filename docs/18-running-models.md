@@ -67,7 +67,7 @@ tuning flags and runs on B70 only. What you choose:
   accuracy, and DFlash does not run on it. Built for Qwen3.8 and K2-Horizon; the other models are bf16
   only (table below).
 - **`--prefix-cache-gb auto|N`** (default `auto`). The prefix cache lives in pinned system RAM, not on
-  the card: every prefill is written through to it, so a later request with the same history restores
+  the card: every prefill is written through to it, so a later request with the same history is a prefix cache hit
   instead of re-prefilling. `auto` takes the smallest of 32 GiB, half the RAM and the available RAM
   minus 8 GiB, and is off below 4 GiB; `0` is off. It is allocated as 2 GiB pieces (a host allocation
   that both cards use must stay under 4 GiB, or the second card's mapping can fail).
@@ -77,7 +77,7 @@ tuning flags and runs on B70 only. What you choose:
 - **`--max-len auto|L`**: context capacity. `auto` is the largest multiple of 256 whose memory plan fits
   with the engine's 1.5 GB reserve left, capped at the trained context (262144 for the Qwen models);
   both CLIs print the length and the plan at startup. `b70-decode` keeps 16384 unless asked.
-- **`--prefix-split-last`**: for agentic sessions with a thinking model, so each turn restores exactly
+- **`--prefix-split-last`**: for agentic sessions with a thinking model, so each turn is a prefix cache hit exactly
   where the next one diverges (README, `b70-serve` flags). Off for benchmarks.
 - **`--prefill-backend l0|l0-int8`**: `l0-int8` runs the prompt pass with int8 activations (faster).
   Together with `--kv-cache int8` it is an accepted known fail (a startup warning: about 3 % of tool
@@ -298,10 +298,10 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 - **Refused, by name:** `--kv-cache int8` (the int8 attention is built for M <= 4 verify rows, DFlash needs
   8), `--parallel pp --pipeline-handoff peer`, `--parallel tp` and `replica`, several slots a card
   (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.
-- **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation restored
+- **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation that gets a prefix cache hit
   from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one. **Caveat:** a
   snapshot at a block end inside a long prefill holds the ring as that prefill left it (the prefill
-  projects only its last 2048 positions), so a restore there drafts worse - never differently - until 2048
+  projects only its last 2048 positions), so a prefix cache hit there drafts worse - never differently - until 2048
   new positions have refilled the ring.
 
 Re-running the acceptance measurement (a Mac or the box CPU; ~20-25 h on a 64 GB Mac with the container at
@@ -485,7 +485,7 @@ beside the full layers' KV (20 KiB a position). `--max-len auto` reaches 262144 
 # every command below: no speed row yet; needs two cards
 ./build/src/cli/b70-serve $K                                    # two cards, --max-len auto (262144), int8 head
 ./build/src/cli/b70-serve $K --pipeline-handoff peer --max-len 131072
-./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn restores at len - 1
+./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn is a prefix cache hit at len - 1
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
   [{"role": "user", "content": "Wie spät ist es in Berlin?"}], "chat_template_kwargs": {"reasoning_effort": "low"}}'
 ```
@@ -633,7 +633,7 @@ ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --port 8000 --prefix-c
 - **Prefix cache.** A snapshot at an aligned 2048-position block end (and at a request's end) carries, per Mamba block, the
   SSM state (fp32: 4 MiB; 2 MiB with `B70_BOLT_SSM=bf16`, which is another store key) and the three raw conv columns
   before the position - 170,229,760 B in all (derived) - and the 8 attention blocks' KV, 8,192 B a position (one state per
-  block end: a 64k-token prompt writes 32 of them, ~6.0 GB with the KV, derived - size `--prefix-cache-gb` for it). A hit restores
+  block end: a 64k-token prompt writes 32 of them, ~6.0 GB with the KV, derived - size `--prefix-cache-gb` for it). A hit copies back
   the largest block end <= the common prefix and prefills the rest. A new user message re-renders every earlier assistant
   turn without its reasoning (`truncate_history_thinking`), so the cache diverges at the first assistant turn before the
   last user message; within one user turn (the agentic tool loop) the re-render equals what was generated.

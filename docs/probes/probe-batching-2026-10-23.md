@@ -270,7 +270,7 @@ What it decides (13a section 7's rules, measured):
 
 **Through b70-serve** (`tools/box_validate/slots_bench.py`, r78.speed's arms; the whole box held, card 0;
 `--max-len 32768` = four 32768-position slots; N requests sent together, each `long.txt` (2820 ids) behind its own
-first line, greedy, `ignore_eos`: first 32 ids cold - TTFT under load - then the same prompts again, restored by the
+first line, greedy, `ignore_eos`: first 32 ids cold - TTFT under load - then the same prompts again, as prefix cache hits from the
 prefix cache, 512 ids each - the card's decode throughput while they run together; the serial server is
 `--max-len auto`, one slot):
 

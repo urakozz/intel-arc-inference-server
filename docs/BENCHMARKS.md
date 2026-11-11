@@ -470,7 +470,7 @@ are bit-identical to main's (`l0` 0.999960061, `l0-int8` 0.999934564).
 ## Prefix caching (spec 7)
 
 Spec 7 (plans 7a-7c, 2026-09-27/28): `b70-serve --prefix-cache-gb 32` (the default)
-continues the resident session or restores the deepest host snapshot and prefills only the
+continues the resident session or takes a prefix cache hit from the deepest host snapshot and prefills only the
 tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probes/probe-prefix-cache-2026-09-27.md.
 
 - **P0**: pinned host copies at 14.2 GB/s device to host, 12.2-12.9 GB/s host to device;
@@ -478,7 +478,7 @@ tail. Device 0, `l0-int8`, max_len 131072. Records: docs/probes/probe-prefix-cac
 - **S3** write-through: +2.03% on cold pp4096, +1.24% on pp32768 (bar 3%).
 - **S1** continuation, 60000 ids of history + a 1000-id tail, time to first token:
   **1233.4 ms** (bar 1500; cold prefill of the history alone: 45.2 s). Load 8.6-11.9.
-- **S2** the same after a 300-id side request: restore **347.7 ms** (3933 MB of KV + the
+- **S2** the same after a 300-id side request: prefix cache hit **347.7 ms** (3933 MB of KV + the
   state from host, bar 1000), time to first token 1581.2 ms.
 - **Replay** of a synthetic opencode-shaped session (15 requests, 2 side), cache on vs off:
   outputs bitwise equal, time to first token per request:
@@ -510,7 +510,7 @@ Decode is unchanged by the cache (tg64 30.78 / 25.79 / 21.26 t/s off, 30.79 / 25
 4096, 1631.5 → 1609.7 at 32768). The cached follow-up at 32k is 2.66 s rather than the
 ~1.0 s a pure 1k-token continuation takes (P0): llama-benchy's follow-up is a new user
 message, so the prompt diverges at the previous prompt's assistant header, a few ids
-before its end, and the restore falls back to the last 2048-id block snapshot, re-prefilling
+before its end, and the prefix cache hit falls back to the last 2048-id block snapshot, re-prefilling
 up to ~2000 extra ids. A snapshot at the generation prompt's start would close that.
 
 ## Decode attention at depth (spec 10)
@@ -924,7 +924,7 @@ The `dflash-fix` table (before the rulings):
 | r54.draft | PASS | 87 / 8 launches; at p 2053 rows cos 0.9999927 (int8) / 1.0000000 (bf16), sets and walks equal; the 32k draft vocabulary bitwise the full head; **the draft list 20.6 / 25.0 ms int8, 19.1 / 23.3 ms bf16** (host-timed replay, one fence - against spec 19's derived 0.17-0.2 plain steps) |
 | r54.d1 (engine half) | PASS | 592 drafts an arm (37 dumps x 16 anchors, K 7, T 0); 15.5 ms (i8), 16.9 ms (bf16), 12.7 ms (i8 + 32k vocabulary) a draft list, host-timed |
 | **r54.d1_ref (D1)** | **FAIL** | see D1 below |
-| r55.engine | **FAIL** (PF only) | L ok (774 launches a verify at M 1..8, draft 87, projection 8); D3 (pre-§13 form) **bitwise** at k = 1..7 (logits, GDN slots, taps) at n 1998 and 2062; T1 bitwise; P (partial commit, K 7 and 4, every j) bitwise, 64 further ids equal; SR (the ring across reset + restore) bitwise; D2 on the card 0 of 160 ids differ at K 7 / 3 / 1; RF3 yes; memory 21.254 GB of 32.530 at max_len 16384 (drafter 2.116 GB). **PF: split at 1024 bitwise, decode path median cos 0.999824 (bar 0.999), chunks of 1000 median cos 0.9998879 against the bar 0.9999** |
+| r55.engine | **FAIL** (PF only) | L ok (774 launches a verify at M 1..8, draft 87, projection 8); D3 (pre-§13 form) **bitwise** at k = 1..7 (logits, GDN slots, taps) at n 1998 and 2062; T1 bitwise; P (partial commit, K 7 and 4, every j) bitwise, 64 further ids equal; SR (the ring across reset + a prefix cache hit) bitwise; D2 on the card 0 of 160 ids differ at K 7 / 3 / 1; RF3 yes; memory 21.254 GB of 32.530 at max_len 16384 (drafter 2.116 GB). **PF: split at 1024 bitwise, decode path median cos 0.999824 (bar 0.999), chunks of 1000 median cos 0.9998879 against the bar 0.9999** |
 | `dflash_gpu_test` (r55.gpu's test, run by G0's suite) | PASS | D2 through `EngineAdapter` on the 3 golden prompts + 36 A4 scenarios at K 7 / 3 / auto: **0 divergences**; ids an iteration K 7 4.10, K 3 3.01, auto 3.52; RF1 (a truncated burst continued) = plain; a seeded sampled K 7 run twice bitwise |
 | r55.gpu (the stage), r55.decode, r55.serve, r56.engine, r56.prefix, r56.pp, r56.pp_serve, D5 | not run | blocked behind r55.engine (each needs it PASS) |
 | G0 (D0) | sha FAIL (expected), bitwise PASS, suite 10 fails | sha: `df_attn` (the fix) + 49 `nb_*` that embed the tree's `-I` path (not this change); `g0.bitwise` 11 of 11 identical; the suite's other 9 failures (memory_plan_box x 4, k2_prefill x 2, k2_prefix_gpu x 2, bolt_pf_kernels_test) fail the same on main 01e9b51's build |
@@ -1052,9 +1052,9 @@ state `e89445916986-vs-0fb0cb914a37`, greedy, every arm's output identical to `-
 | gate | result |
 |---|---|
 | D4, sampling exact (`dflash_accept_test`) | 10^6 seeded draws: chi-square p 0.59 / 0.23 unfiltered, 0.29 / 0.91 filtered; no accepted draft outside the candidates |
-| the ring across a restore (`dflash_prefix_test`) | a turn restored from its predecessor's request-end snapshot leaves the ring equal to the unbroken session's; a ring-less snapshot (19c's) is caught |
+| the ring across a prefix cache hit (`dflash_prefix_test`) | a turn served as a prefix cache hit from its predecessor's request-end snapshot leaves the ring equal to the unbroken session's; a ring-less snapshot (19c's) is caught |
 | batching (`dflash_scheduler_test`) | 4 requests on 4 slots: ids = the plain scheduler's, each request's speculative record = its record alone |
-| `--pp 2` adapter (`pp_dflash_serve_test`) | greedy at K 7 / 3 / auto = plain; seeded sampling reproducible; a restored turn drafts as the unbroken one |
+| `--pp 2` adapter (`pp_dflash_serve_test`) | greedy at K 7 / 3 / auto = plain; seeded sampling reproducible; a prefix cache hit turn drafts as the unbroken one |
 | D2 / D3 / ring / --pp 2 bitwise on the card | measured 2026-10-27 - PASS (r55.engine, r55.gpu, r55.decode, r55.serve, r56.prefix, r56.pp, r56.pp_serve; "On the card" above) |
 
 ## Tensor parallel (spec 17)
@@ -1172,7 +1172,7 @@ layers that fit, or on the synthetic checkpoints (4 real-width layers), and says
 | MTP verify cost | M = 1..4 against a plain step, ms; a draft step; synthetic `--layers 4` and Intel's `--layers 18` | pending (launches 86-91 at 4 layers, 790-795 at 48, derived) | r34.mtp |
 | MTP verify: experts a layer | the union over the K + 1 = 4 verify rows (spec 22 P0.6's MTP term) | pending | r34.mtp |
 | MTP acceptance by depth, K <= 3 | the CPU reference on Intel's checkpoint, teacher-forced greedy, the engine's RTN head; `pre_fc_norm_hidden` single / per stream (decision 4), selection reused / fresh (decision 5) | pending (the engine's is spec 22's) | r34.accept |
-| prefix-cache snapshot | bytes and a restore's continuation, 48 layers | 115.7 MB state + 25,344 B a position (+ 21 KB / 2,112 B with the head; derived); restore bitwise pending | r34.snapshot |
+| prefix-cache snapshot | bytes and a prefix cache hit's continuation, 48 layers | 115.7 MB state + 25,344 B a position (+ 21 KB / 2,112 B with the head; derived); prefix cache hit bitwise pending | r34.snapshot |
 
 ## Nemotron 3.5 Bolt (spec 25)
 

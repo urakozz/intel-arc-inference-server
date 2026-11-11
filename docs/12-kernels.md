@@ -794,7 +794,7 @@ kernel has to stay fast from 4k to 128k+. Two decisions define v2:
    positions per work-group, so at most 32 blocks for any `L`. `ppw` moves only every 2048 keys, so the rows of
    one launch have at most two different strides, and each row therefore sees exactly the blocks, waves and orders of the one-row step at that
    position, and **a verify row is bitwise the plain step at the same position** (`attn_v2_test`). The stride
-   is recomputed from `pos` every step: no control word, so a restored snapshot or a rewound `pos` needs
+   is recomputed from `pos` every step: no control word, so a snapshot copied back from the prefix cache or a rewound `pos` needs
    nothing.
 2. **The grid is (4 kv-heads, 32) at every `max_len`** and the partial table is `[24][32][M][258]`. No row
    needs more than 32 work-groups, so one binary per `M` (`attn_v2_M<M>_T32`) serves every context length and
