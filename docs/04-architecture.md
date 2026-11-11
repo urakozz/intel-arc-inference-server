@@ -323,7 +323,7 @@ one resident session on the card and a write-through store in pinned host RAM
 (`--prefix-cache-gb`, default `auto`: at most 32 GiB, sized from the machine's RAM; `0` = off). The store is 2 GiB pinned
 allocations, never one large one: on two cards the second card maps the first card's allocation through a shared
 import, and an import larger than 4 GiB can fail in the kernel (it answers "busy") while the GPU driver retries
-forever - the 2026-11-11 prefix cache hit hang. Any host allocation both cards use stays at most 4 GiB. The GDN state cannot be rewound, so
+forever - the 2026-11-11 prefix cache hang. Any host allocation both cards use stays at most 4 GiB. The GDN state cannot be rewound, so
 reuse needs snapshots of it: the store (`src/server/prefix_cache.{h,cc}`) keeps KV
 blocks of 2048 positions and state snapshots (at every block end, at every prompt's
 end, at every request's end) in a tree keyed by exact token ids, LRU over leaves.
