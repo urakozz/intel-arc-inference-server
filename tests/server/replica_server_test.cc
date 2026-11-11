@@ -38,10 +38,12 @@ struct MallocAlloc : server::HostAlloc {
   void free(void* p, size_t) override { std::free(p); }
 };
 
-// A mock card that can be slow (to hold a slot) - StateMockEngine otherwise.
+// A mock card that can be slow (to hold a slot, or to prefill long) - StateMockEngine otherwise.
 struct Card : StateMockEngine {
   std::atomic<int> step_us{0};
   std::atomic<uint64_t> steps{0};
+  std::atomic<int> prefill_us_per_id{0};
+  std::atomic<uint64_t> prefill_ids{0};
   uint32_t step(const server::Sampling& s) override {
     if (step_us != 0) std::this_thread::sleep_for(std::chrono::microseconds(step_us.load()));
     ++steps;
@@ -49,6 +51,9 @@ struct Card : StateMockEngine {
   }
   // The sampler re-arms per request, as EngineAdapter's does (seed_rng after prefill / ingest).
   void prefill(const std::vector<uint32_t>& ids) override {
+    if (prefill_us_per_id != 0)
+      std::this_thread::sleep_for(std::chrono::microseconds(int64_t(prefill_us_per_id.load()) * int64_t(ids.size())));
+    prefill_ids += ids.size();
     rng = 0;
     StateMockEngine::prefill(ids);
   }
@@ -177,6 +182,18 @@ struct Fixture {
     return r;
   }
 
+  // The client hangs up `after_ms` into its request (streamed or not) without having read a frame.
+  void hang_up(const json& messages, uint32_t max_tokens, bool stream, int after_ms) {
+    httplib::Client client("127.0.0.1", server->bound_port());
+    client.set_read_timeout(0, after_ms * 1000);
+    json b = body(messages, max_tokens, json::object());
+    b["stream"] = stream;
+    const auto response = client.Post("/v1/chat/completions", b.dump(), "application/json");
+    CHECK(!response);
+  }
+  uint64_t steps() const { return c0.steps + c1.steps; }
+  uint64_t prefill_ids() const { return c0.prefill_ids + c1.prefill_ids; }
+
   FlakyTok tok;
   MockTemplate tmpl;
   Card c0, c1;
@@ -299,6 +316,54 @@ void test_disconnect_and_busy() {
   std::printf("disconnect frees the card; both slots busy and no queue: 503\n");
 }
 
+// A client that hangs up before any frame - not streamed, mid-decode; or during a long prefill, streamed or not (the
+// role frame waits for the first id, so nothing is written that could fail) - stops its request: no step after it, a
+// prefill under the scheduler cut at the chunk in flight, and the next requests are answered as a fresh server answers
+// them (the engine and the prefix cache are left clean).
+void test_hang_up(bool replica) {
+  Fixture f(replica, size_t(1) << 20, false), fresh(replica, size_t(1) << 20, false);
+  const json first = json::array({msg("user", "write forever")});
+  const json next = json::array({msg("user", "after the hang-up")});
+  const json long_a = json::array({msg("user", words("pa", 300))});
+  const json long_b = json::array({msg("user", words("pb", 300))});
+  // MockTok numbers a word at its first sight: both fixtures see the prompts in one order first.
+  size_t long_ids = 0;
+  for (Fixture* x : {&f, &fresh})
+    for (const json* m : {&first, &next, &long_a, &long_b})
+      long_ids = x->tok.encode(x->tmpl.render(*m, json::array(), false)).size();
+  CHECK(long_ids >= 300);
+
+  // Not streamed, mid-decode: 5 ms a step, about 1000 steps to the end of the context.
+  f.c0.step_us = f.c1.step_us = 5000;
+  f.hang_up(first, 100000, false, 300);
+  std::this_thread::sleep_for(std::chrono::milliseconds(400));
+  const uint64_t decoded = f.steps();
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  CHECK_EQ(f.steps(), decoded);
+  CHECK(decoded > 0 && decoded < 300);
+  f.c0.step_us = f.c1.step_us = 0;
+
+  // During the prefill: 5 ms an id, 1.5 s for the prompt; the client leaves after 0.3 s.
+  f.c0.prefill_us_per_id = f.c1.prefill_us_per_id = 5000;
+  for (const bool stream : {false, true}) {
+    const uint64_t steps0 = f.steps(), ids0 = f.prefill_ids();
+    f.hang_up(stream ? long_b : long_a, 50, stream, 300);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1700));   // the serial server's one prefill call ends
+    CHECK_EQ(f.steps(), steps0);   // not a step for the dead request
+    // Under the scheduler the prefill stops at the chunk in flight; the serial server's one call runs to its end.
+    if (replica) CHECK(f.prefill_ids() - ids0 < long_ids);
+    else CHECK_EQ(f.prefill_ids() - ids0, uint64_t(long_ids));
+  }
+  f.c0.prefill_us_per_id = f.c1.prefill_us_per_id = 0;
+
+  // The next requests (a new one, and the dead ones again) are the fresh server's.
+  same("after hang-up: next", f.chat(next, 10), fresh.chat(next, 10));
+  same("after hang-up: first again", f.chat(first, 10), fresh.chat(first, 10));
+  same("after hang-up: long again", f.chat(long_a, 10), fresh.chat(long_a, 10));
+  std::printf("hang-up (%s): not streamed mid-decode and during prefill (streamed or not) stops the request; the "
+              "next replies are a fresh server's\n", replica ? "replica" : "serial");
+}
+
 // --log-requests from the scheduler path: one record per request, server.cc's fields, t_start <= t_first_token <=
 // t_end, the ids the reply carried.
 void test_request_log() {
@@ -376,6 +441,8 @@ int main() {
   test_sequential(size_t(1) << 20, true);
   test_concurrent();
   test_disconnect_and_busy();
+  test_hang_up(false);
+  test_hang_up(true);
   test_request_log();
   test_text_rules_throw();
   std::printf("replica_server_test: all cases passed\n");

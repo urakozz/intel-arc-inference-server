@@ -111,21 +111,28 @@ class Server {
     double t_first_token = 0;
     PrefixSession::Report prefix;
     int slot = -1;         // plan 13b: the slot (card) that served it under the scheduler; -1 on the serial path
+    bool cancelled = false;   // the client hung up: generation stopped early
   };
   struct Impl;
 
-  Outcome generate(const Request& r, const std::function<void(const Delta&)>& emit);
+  // `gone` is true once the client has hung up: checked before the prefill (ClientGone) and before every id (the
+  // request then stops as the scheduler's cancel does, its state kept for the prefix cache).
+  Outcome generate(const Request& r, const std::function<void(const Delta&)>& emit,
+                   const std::function<bool()>& gone);
   std::string render_prompt(const Request& r);
   // Plan 13b: the scheduler path - submit (throws BadRequest, or Busy when the queue is full), then wait for the
-  // request's deltas; `emit` returns false when the client is gone (the request is then cancelled).
+  // request's deltas; `emit` returns false, or `gone` (polled while nothing arrives) true, when the client is gone (the
+  // request is then cancelled).
   struct BatchedRun;
   std::shared_ptr<BatchedRun> submit_batched(const Request& r);
-  Outcome wait_batched(BatchedRun& run, const std::function<bool(const Delta&)>& emit);
+  Outcome wait_batched(BatchedRun& run, const std::function<bool(const Delta&)>& emit,
+                       const std::function<bool()>& gone);
   void cancel_batched(BatchedRun& run);
   void handle_batched(const httplib::Request& request, httplib::Response& response, const Request& parsed,
                       double t_start);
   void generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
-                     Outcome& outcome, const std::function<void(const Delta&)>& emit);
+                     Outcome& outcome, const std::function<void(const Delta&)>& emit,
+                     const std::function<bool()>& gone);
   bool acquire(uint64_t& ticket);
   void release();
   bool bind();

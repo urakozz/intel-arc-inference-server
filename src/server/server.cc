@@ -43,6 +43,15 @@ struct Busy : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
 
+// The client hung up before its request's prefill (the serial server's queue): nothing ran, nobody reads the reply.
+struct ClientGone : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
+
+// How often a request waiting for its deltas under the scheduler asks whether its client is still there (a hang-up
+// during a long prefill writes nothing that could fail).
+constexpr auto kClientPoll = std::chrono::milliseconds(200);
+
 }  // namespace
 
 struct Server::Impl {
@@ -259,7 +268,8 @@ std::string Server::render_prompt(const Request& r) {
 }
 
 Server::Outcome Server::generate(const Request& r,
-                                 const std::function<void(const Delta&)>& emit) {
+                                 const std::function<void(const Delta&)>& emit,
+                                 const std::function<bool()>& gone) {
   Outcome outcome;
   const std::string prompt = render_prompt(r);
   outcome.prompt_ids = deps_.tok.encode(prompt);
@@ -272,6 +282,7 @@ Server::Outcome Server::generate(const Request& r,
   const uint32_t budget = static_cast<uint32_t>(max_len - outcome.prompt_ids.size());
   const uint32_t max_tokens = std::min(r.max_tokens.value_or(budget), budget);
   outcome.usage.prompt_tokens = static_cast<uint32_t>(outcome.prompt_ids.size());
+  if (gone()) throw ClientGone("the client hung up before its request started");
 
   // Spec 7 §3.3: restart from the resident session or the deepest host snapshot, prefill
   // the tail (the block hook writes it through); with the cache off, reset() + prefill.
@@ -288,19 +299,20 @@ Server::Outcome Server::generate(const Request& r,
     std::fflush(stderr);
   }
   try {
-    generate_tail(r, prompt, max_tokens, outcome, emit);
+    generate_tail(r, prompt, max_tokens, outcome, emit, gone);
   } catch (...) {
     session.fail();
     throw;
   }
   // --max-num-seqs (operator 2026-11-11): a request cut by the slot's end, not its max_tokens, is said.
-  if (outcome.finish_reason == "length" && max_tokens == budget)
+  if (!outcome.cancelled && outcome.finish_reason == "length" && max_tokens == budget)
     std::fprintf(stderr, "request: reached the end of slot 0 (%u positions): finished with length\n", max_len);
   return outcome;
 }
 
 void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t max_tokens,
-                           Outcome& outcome, const std::function<void(const Delta&)>& emit) {
+                           Outcome& outcome, const std::function<void(const Delta&)>& emit,
+                           const std::function<bool()>& gone) {
   PrefixSession& session = *impl_->prefix;
   // Spec 24e (decision 1): a request with a repetition penalty carries the distinct ids of its prompt and of every id
   // consumed so far, for an engine adapter that applies it (the host sampler, before temperature / top-k / top-p).
@@ -459,6 +471,10 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
     return burst[burst_at++];
   };
   for (uint32_t generated = 0; generated < max_tokens; ++generated) {
+    if (gone()) {   // the client hung up: stop here, the engine's state is every id fed so far
+      outcome.cancelled = true;
+      break;
+    }
     const uint32_t id = next_id();
     session.fed(id);
     if (penalised) seen.add(id);
@@ -490,6 +506,12 @@ void Server::generate_tail(const Request& r, const std::string& prompt, uint32_t
   }
   if (burst_at < burst.size())
     deps_.engine.truncate_to(deps_.engine.pos() - static_cast<uint32_t>(burst.size() - burst_at));
+  if (outcome.cancelled) {   // as the scheduler's cancel: no end-of-text rules, no lookup history
+    outcome.usage.completion_tokens = static_cast<uint32_t>(outcome.out_ids.size());
+    std::fprintf(stderr, "request: the client hung up; stopped after %zu generated ids\n", outcome.out_ids.size());
+    std::fflush(stderr);
+    return;
+  }
   if (outcome.finish_reason == "length") add_text(streamer->flush());
   if (parser && (eos_stop || outcome.finish_reason == "length")) route(parser->finish());
   flush_pending(true);
@@ -622,7 +644,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
 
   if (!parsed.stream) {
     try {
-      const Outcome outcome = generate(parsed, [](const Delta&) {});
+      const Outcome outcome = generate(parsed, [](const Delta&) {}, request.is_connection_closed);
       log_request(parsed.chat, request.body, t_start, outcome);
       const auto* prompt_ids = parsed.return_token_ids ? &outcome.prompt_ids : nullptr;
       const auto* out_ids = parsed.return_token_ids ? &outcome.out_ids : nullptr;
@@ -647,11 +669,14 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
   response.set_header("X-Accel-Buffering", "no");
   response.set_chunked_content_provider(
       "text/event-stream",
-      [this, parsed, body = request.body, t_start](size_t, httplib::DataSink& sink) mutable {
+      [this, parsed, body = request.body, t_start, closed = request.is_connection_closed](
+          size_t, httplib::DataSink& sink) mutable {
         const std::string id = request_id(parsed.chat, ++impl_->next_id);
         const uint64_t created = unix_time();
-        const auto write = [&sink](const std::string& frame) {
-          return sink.write(frame.data(), frame.size());
+        bool alive = true;   // every frame written so far went out
+        const auto write = [&sink, &alive](const std::string& frame) {
+          alive = sink.write(frame.data(), frame.size()) && alive;
+          return alive;
         };
         // The role frame goes out with the first delta, after prefill, as vLLM
         // sends it: clients time prefill to the first chunk with `choices`
@@ -674,7 +699,7 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
             } else {
               (void)write(stream_frame_text(parsed, id, created, d.text));
             }
-          });
+          }, [&] { return !alive || closed(); });
           send_role();
           (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
           if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
@@ -701,7 +726,8 @@ void Server::handle(const httplib::Request& request, httplib::Response& response
 // on_token / on_done (the streamer, the stop strings, the tool-call parser, the repetition penalty's seen ids) -
 // the same steps in the same order as the serial loop - and queues the deltas; the request's own HTTP thread waits
 // for them and writes them out. A write that fails (the client is gone) cancels the request: its slot is free at
-// the next tick (Review Focus 6).
+// the next tick (Review Focus 6). So does a closed connection seen while it waits (queued, prefilling, or not
+// streamed - nothing written to fail).
 struct Server::BatchedRun {
     std::mutex mu;
     std::condition_variable cv;
@@ -860,7 +886,8 @@ void Server::cancel_batched(BatchedRun& run) {
   if (std::shared_ptr<Job> job = run.job.lock()) impl_->sched->cancel(job);
 }
 
-Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(const Delta&)>& emit) {
+Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(const Delta&)>& emit,
+                                     const std::function<bool()>& gone) {
   BatchedRun* const run = &r;
   const Outcome& outcome = run->out;
   bool alive = true;
@@ -869,7 +896,7 @@ Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(con
     bool done = false;
     {
       std::unique_lock<std::mutex> lock(run->mu);
-      run->cv.wait(lock, [&] { return !run->deltas.empty() || run->done; });
+      run->cv.wait_for(lock, kClientPoll, [&] { return !run->deltas.empty() || run->done; });
       deltas.swap(run->deltas);
       done = run->done;
     }
@@ -880,6 +907,10 @@ Server::Outcome Server::wait_batched(BatchedRun& r, const std::function<bool(con
       }
     }
     if (done) break;
+    if (alive && gone()) {
+      alive = false;
+      cancel_batched(*run);
+    }
   }
   const Finish& fin = run->fin;
   if (impl_->slot_cache) {
@@ -916,7 +947,7 @@ void Server::handle_batched(const httplib::Request& request, httplib::Response& 
   }
   if (!parsed.stream) {
     try {
-      const Outcome outcome = wait_batched(*run, [](const Delta&) { return true; });
+      const Outcome outcome = wait_batched(*run, [](const Delta&) { return true; }, request.is_connection_closed);
       log_request(parsed.chat, request.body, t_start, outcome);
       const auto* prompt_ids = parsed.return_token_ids ? &outcome.prompt_ids : nullptr;
       const auto* out_ids = parsed.return_token_ids ? &outcome.out_ids : nullptr;
@@ -935,7 +966,8 @@ void Server::handle_batched(const httplib::Request& request, httplib::Response& 
   response.set_header("X-Accel-Buffering", "no");
   response.set_chunked_content_provider(
       "text/event-stream",
-      [this, parsed, run, refused, body = request.body, t_start](size_t, httplib::DataSink& sink) mutable {
+      [this, parsed, run, refused, body = request.body, t_start, closed = request.is_connection_closed](
+          size_t, httplib::DataSink& sink) mutable {
         const std::string id = request_id(parsed.chat, ++impl_->next_id);
         const uint64_t created = unix_time();
         const auto write = [&sink](const std::string& frame) { return sink.write(frame.data(), frame.size()); };
@@ -961,7 +993,7 @@ void Server::handle_batched(const httplib::Request& request, httplib::Response& 
                 ok = write(stream_frame_text(parsed, id, created, d.text)) && ok;
               }
               return ok;
-            });
+            }, closed);
             (void)send_role();
             (void)write(stream_frame_finish(parsed, id, created, outcome.finish_reason));
             if (parsed.include_usage) (void)write(stream_frame_usage(parsed, id, created, outcome.usage));
