@@ -3,9 +3,9 @@
 
   dflash_engine_accept.py --engine DIR --drafter SNAPSHOT --target SNAPSHOT [--out FILE] [--threads 16]
 
-The engine always computes an eight-row block, even at K < 7. The CPU reference likewise drafts all seven rows
-once per anchor, then tests each prefix. A recorded continuation which disagrees with the target's greedy id
-censors later rows, as in dflash_accept.accept_rows. Actual in-loop acceptance is reported separately.
+The captured lists allocate eight rows, but noncausal attention masks the block at K + 1. Draft each K separately
+on both sides. A recorded continuation which disagrees with the target's greedy id censors later rows, as in
+dflash_accept.accept_rows. Actual in-loop acceptance is reported separately.
 """
 import os
 import sys
@@ -81,8 +81,8 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
             for p, rows in by_anchor.items():
                 if set(rows) != set(range(1, 8)):
                     raise ValueError(f'{name} p={p}: need K=1..7 on every anchor')
-                ref = drafter.draft_block(ids[p], p, 7, ctx).ids.tolist()
                 for k, rec in sorted(rows.items()):
+                    ref = drafter.draft_block(ids[p], p, k, ctx).ids.tolist()
                     corpus = name.split('/')[0]
                     key = (corpus, k)
                     if key not in totals:
@@ -90,15 +90,15 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
                                        'reference_counted': [0]*k, 'reference_accepted': [0]*k,
                                        'anchors': 0, 'verified_ids': 0}
                     total = totals[key]
-                    for arm, drafts in [('engine', rec['ids']), ('reference', ref[:k])]:
+                    for arm, drafts in [('engine', rec['ids']), ('reference', ref)]:
                         c, a = prefix_counts(ids, drafts, greedy, p, dump['tap_from'])
                         for j in range(k):
                             total[arm + '_counted'][j] += c[j]
                             total[arm + '_accepted'][j] += a[j]
                     total['anchors'] += 1
                     total['verified_ids'] += 1 + rec['accepted']
-                    detail.append({'name': name, 'p': p, 'k': k, 'reference': ref[:k], 'engine': rec['ids']})
-            print(f"ENGINE_ACCEPT {name}: {len(by_anchor)} anchors, K=1..7 (fixed 8-row block)", flush=True)
+                    detail.append({'name': name, 'p': p, 'k': k, 'reference': ref, 'engine': rec['ids']})
+            print(f"ENGINE_ACCEPT {name}: {len(by_anchor)} anchors, K=1..7 (matching active widths)", flush=True)
     report = {'run': run, 'corpora': {}, 'drafts': detail}
     passed = True
     for (corpus, k), row in sorted(totals.items()):

@@ -4,8 +4,14 @@ import os
 import sys
 sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != os.path.dirname(os.path.abspath(__file__))]
 import importlib.util
+import contextlib
+import io
+import json
 from pathlib import Path
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('dflash_engine_accept', Path(__file__).with_name('dflash_engine_accept.py'))
 m = importlib.util.module_from_spec(spec)
@@ -34,6 +40,46 @@ class AcceptanceTest(unittest.TestCase):
     def test_no_observations_is_not_a_pass(self):
         with self.assertRaises(ValueError):
             m.expected([0], [0])
+
+    def test_each_width_uses_its_own_noncausal_reference(self):
+        class Tensor(list):
+            def long(self): return self
+            def tolist(self): return list(self)
+
+        class Dump:
+            def __init__(self, path, **kwargs): self.name = Path(path).stem.split('.')[0]
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def metadata(self): return {'name': self.name, 'tap_from': '0', 'n': '9', 'layers': '5'}
+            def get_tensor(self, name):
+                return Tensor(range(10 if name == 'ids' else 11, 19 if name == 'ids' else 20))
+
+        widths = []
+        def draft(anchor, p, k, ctx):
+            widths.append(k)
+            return SimpleNamespace(ids=Tensor([11] if k == 1 else [99] * k))
+
+        drafter = SimpleNamespace(context_kv=lambda *args: None, draft_block=draft)
+        module = SimpleNamespace(reference_drafter=lambda *args: drafter)
+        spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda *args: None))
+        torch = SimpleNamespace(set_num_threads=lambda n: None, inference_mode=contextlib.nullcontext,
+                                arange=lambda a, b: range(a, b))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            rows = [{'run': {}}]
+            for name in ('a4', 'code'):
+                (root / (name + '.taps.safetensors')).touch()
+                rows.extend({'dump': name, 'p': 0, 'k': k, 'ids': [11] if k == 1 else [99] * k,
+                             'accepted': int(k == 1)} for k in range(1, 8))
+            (root / 'engine.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
+            with patch.dict(sys.modules, {'torch': torch, 'safetensors': SimpleNamespace(safe_open=Dump)}), \
+                 patch.object(m.importlib.util, 'spec_from_file_location', return_value=spec), \
+                 patch.object(m.importlib.util, 'module_from_spec', return_value=module), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(m.evaluate(tmp, '', '', str(root / 'report.json'), 1))
+            report = json.loads((root / 'report.json').read_text())
+            self.assertEqual(report['corpora']['code']['1']['reference_E'], 2.0)
+            self.assertEqual(widths, list(range(1, 8)) * 2)
 
 
 if __name__ == '__main__':
