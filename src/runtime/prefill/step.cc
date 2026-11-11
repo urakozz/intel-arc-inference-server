@@ -728,27 +728,27 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
 }
 // Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           model::LayerKind kind, KvCache kv) {
+                           model::LayerKind kind, KvCache kv, uint32_t pos) {
   const bool gdn = kind == model::LayerKind::GDN;
-  const size_t widen = !gdn && kv == KvCache::Int8 ? 1 : 0;
+  const size_t widen = !gdn && kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? 1 : 0;
   if (d.is_moe()) {
     auto lin = [&](LinearId id) {
       return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
     };
     const size_t ffn = 2 + moe_chunk_launches(d, b);
     return gdn ? 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn
-               : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
+               : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }
-  const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C);
+  const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C, pos);
   return (b == PrefillBackend::L0Int8 ? l0n + 4 : l0n) + widen;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           const PpStage& st, KvCache kv) {
+                           const PpStage& st, KvCache kv, uint32_t pos) {
   size_t n = 0;
   for (const model::LayerDesc& L : d.layer_descs())
-    if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind, kv);
+    if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind, kv, pos);
   n += st.has_embed() ? 1 : 0;   // pf_embed_gather
   n -= st.has_embed() ? 0 : 1;   // layer `first`'s pf_res_fold ran on the previous device
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold

@@ -189,10 +189,10 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
-// the two stages add up to step_chunk_launches (the pipeline asserts it).
+// the two stages add up to step_chunk_launches (the pipeline asserts it). `pos` as there (3l (2)).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           model::LayerKind kind, KvCache kv = KvCache::Bf16);
+                           model::LayerKind kind, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
-                           const PpStage& st, KvCache kv = KvCache::Bf16);
+                           const PpStage& st, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 
 }  // namespace runtime::prefill
