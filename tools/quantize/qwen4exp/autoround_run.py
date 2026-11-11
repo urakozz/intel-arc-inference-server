@@ -23,8 +23,9 @@ in the ignore list; its 512 routed experts come out int4 g64 per expert, the res
 `extra_config`.
 
 Resumable through AutoRound's own per-block checkpoint (`AR_RESUME_DIR`, set by the script): a rerun with
-the same settings skips the blocks already written. `--num-layers N` quantises only the first N layers
-(AutoRound's debug option) - the sizing measurement.
+the same settings skips the blocks already written. `--num-layers N` loads and quantises only the first N layers
+(AutoRound's `AR_DEBUG_LAYER_NUM`, the CLI's `--num_hidden_layers`; as an API keyword it is ignored) - the sizing
+measurement.
 """
 import argparse
 import glob
@@ -44,8 +45,6 @@ def settings(a) -> dict:
         "dataset": a.dataset, "low_gpu_mem_usage": True, "low_cpu_mem_usage": True, "device_map": a.device,
         "ignore_layers": ",".join(IGNORE), "seed": a.seed, "disable_model_free": True,
     }
-    if a.num_layers:
-        kw["num_hidden_layers"] = a.num_layers
     return kw
 
 
@@ -86,6 +85,8 @@ def main() -> None:
     print(call, flush=True)
     if a.print_only:
         return
+    if a.num_layers:
+        os.environ["AR_DEBUG_LAYER_NUM"] = str(a.num_layers)
     import torch
     from auto_round import AutoRound
     drop_shared_expert_rule()
