@@ -40,12 +40,7 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
 | two cards, `--parallel tp` | **2,939** | **2,686** |
 
-A short agentic turn deep in a session stays fast: 16 new tokens on top of 128k tokens of history take about 0.1 s. MTP's speed depends on how predictable the
-text is, so per-request rates move by a few t/s between prompts. Every measurement and how it was taken:
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
-
-**Correctness** is checked, not eyeballed: kernels that replace others must match bitwise, and the engine's tokens
-are judged against an f32 CPU reference of the model on golden prompts, tool-call sessions and long contexts.
+Every measurement and how it was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Install
 
