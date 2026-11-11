@@ -31,6 +31,15 @@ int stress(l0::Context& ctx, l0::CmdList& imm, double seconds) {
   const size_t pinned_bytes = gb ? size_t(std::atof(gb) * double(size_t(1) << 30)) / kMax * kMax : kMax;
   l0::Mem pinned(ctx, l0::MemKind::Host, pinned_bytes);
   std::printf("copy stress: pinned buffer %.1f GiB\n", pinned_bytes / double(size_t(1) << 30));
+  // B70_COPY_STRESS_FILL_GB=<n>: n GiB of device memory allocated and written first, the card as full as a server's
+  std::vector<l0::Mem> fill;
+  if (const char* f = std::getenv("B70_COPY_STRESS_FILL_GB")) {
+    for (int g = 0; g < std::atoi(f); ++g) {
+      fill.emplace_back(ctx, l0::MemKind::Device, size_t(1) << 30);
+      imm.fill(fill.back().ptr(), 0x5A5A5A5Au, size_t(1) << 30);
+    }
+    std::printf("copy stress: %zu GiB of device memory filled\n", fill.size());
+  }
   std::atomic<int64_t> started{0};   // ns since t0 of the copy in flight, -1 between copies
   std::atomic<uint64_t> iter{0};
   std::atomic<bool> done{false};
