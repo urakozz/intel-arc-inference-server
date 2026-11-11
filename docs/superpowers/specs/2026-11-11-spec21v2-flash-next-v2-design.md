@@ -317,6 +317,9 @@ for our g64 export (the loader expands Intel's g128 only); built only if load ti
    to int8 **at load** (one fp16 scale per 32 values, basalt's and saber's "hc8"), as the output head is today. 1.29 ->
    ~0.65 GB a token: 4.71 -> ~4.06 GB, the decode ceiling ~97 -> ~112 t/s (derived). basalt reports ~0.006 KL for it.
    Gate: the f32 judge on our export (twin count no worse than with bf16 mixers) and the measured decode gain.
+   **If accuracy is bad, suspect these first:** the mixers touch every token's residual stream, so they are the first thing
+   to switch back to bf16 when a quality gate fails - a load-time choice, no re-export needed - before suspecting the int4
+   weights, the int4 head or the MTP experts.
 6. **Prefill GEMM - built on Ornith first (operator 2026-11-12):** Flash-Next's prefill reuses Ornith's grouped expert GEMM
    (`pf_moe_gemm.cl`) and the same separate unpack pass (`q4_pf_dequant_*`), so the Ornith MoE prefill rework - int4
    unpacked in registers inside the grouped GEMM, bigger MoE chunks and tiles, persistent scheduling - lands here unchanged.
@@ -356,6 +359,10 @@ decode stays within 5 % of 32768's (spec 22 decision 5's rule, proposed); `--max
 - **The tool-call test:** the 36 scenarios on the whole model against the CPU reference (`r34.a4_ref`), every first
   difference judged by the f32 judge (`serve_judge.py`), as for Qwen3.8.
 
+
+**When a quality gate fails, check in this order:** (1) the int8 hyper-connection mixers (§7 lever 5) - switch them back
+to bf16 at load and re-judge; (2) the int4 output head (against the f32 reference's head); (3) the MTP experts (acceptance, `r34.accept`); (4) the int4 g64
+dense layers themselves.
 ## 11. Speed gates (approved 2026-11-12) and the goal
 
 | stage | decode, one request, 4k depth, MTP off | prefill at 4k |
