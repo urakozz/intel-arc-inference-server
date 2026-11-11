@@ -5,7 +5,10 @@
 #include "runtime/prefill/context.h"
 
 // Per-phase diagnostic timing of the prefill walk, off unless
-// `B70_PREFILL_PROFILE=1` is in the environment.
+// `B70_PREFILL_PROFILE=1` is in the environment. `=2` (phase 2 Task 1) also names every
+// launch: the report adds a trace of (phase, entry) rows - launches and device ms - so a
+// launch timed in another phase's bucket (one with no `profile_wait` of its own lands in the
+// next phase's) is seen by name.
 //
 // Context timestamps L0 kernels and records host launch submission separately.
 // A wait measures only residual synchronization after submission; the GPU can
@@ -59,10 +62,14 @@ enum class Phase : uint32_t {
   kMoeWeights,  // the expert weights into the grouped GEMMs' B form (requant / dequant)
   kMoeGemm,     // the grouped GEMMs, gate||up and down
   kMoeCombine,  // pf_moe_combine (the weighted sum and the residual fold)
+  // Phase 2 Task 1: the one-time setup outside the measured call (l0-int8's pf_colmax_rot
+  // scale pass, Int8State::compute_scales). Closed by its own wait so it no longer lands in
+  // the walk's first bucket (it was 73 of the 114 ms "norm" row at 4k l0-int8).
+  kSetup,
   kCount
 };
 
-// True iff B70_PREFILL_PROFILE=1. Read once, at first use.
+// True iff B70_PREFILL_PROFILE=1 or 2. Read once, at first use.
 bool profile_enabled();
 
 // `cx.wait()`, timed into `p` when profiling is on and a bare wait otherwise.
