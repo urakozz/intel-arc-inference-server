@@ -292,6 +292,25 @@ Test and benchmark runs (Task 1 step 2, the box steps' measurements) go to a Son
   item 5's choice of 4096-row chunks.
 - **Stop rule of Task 1:** if no fused arm beats break-even, whether to probe a chunk cap of 8192 instead.
 
+### Rulings (operator, 2026-11-12)
+
+- **D1: yes, then revised the same day.** First ruling: l0-int8's experts run on the fused bf16 path, judged against
+  the f32 reference. Revised with the new target (Ornith l0-int8 prefill >= 11,000 t/s at 4k on one card, ~370 ms for
+  4096 tokens): **l0-int8's fused expert GEMM is W4A8** - int4 unpacked to int8 in registers (exact, no requant pass),
+  int8 DPAS accumulated in int32 per 64-wide k group, then the g64 weight scale x the activation scale applied in fp32
+  per group. The bf16 fused GEMM stays the l0 path and is l0-int8's fallback only if W4A8 fails the f32 judge. Task 1's
+  probe gets a W4A8 arm under the same break-even rule. Implementer's note, sent to the operator: unrotated int4 weights
+  cannot take Hadamard-rotated activations (x W = (H x)(H W), and H W is not int4), so the arm runs unrotated
+  activations, per token and per token and 64-k group, and its error on real Ornith activations decides whether it
+  reaches the engine (the 2026-09-23 study measured 2.8 % / 5.1 % for the per-token form on Qwen3.8).
+  Agreed the same day, with one numerics-only arm (nothing built in the engine): the Hadamard folded offline into
+  the expert weights (H^T W over gate||up's 2048 inputs and down's 512), re-quantised to int4 g64 by RTN, then W4A8
+  with rotated int8 activations - it prices a rotated re-quantised checkpoint, which the operator decides on if it
+  passes and the unrotated forms do not. Down may stay W4A16 (bf16) on its own if only gate||up passes.
+- **D2: chunk cap 4096 for MoE models** if the f32 judge passes, even if the gain is under 5 %.
+- **Scope:** Ornith and Flash-Next only. K2, Kolibri and Bolt stay on the old kernels, bitwise unchanged under G0.
+- **Stretch:** the ~6.3k of this plan is the floor; the record names what is left, in ms a phase, toward 370 ms.
+
 ## Later (not in this plan)
 
 K2 (100 experts top-8 plus MoVA, `k2_pf_moe.cl`), Kolibri (384 top-6, ushort sort, bf16 shared slot, `kol_pf_moe.cl`)
