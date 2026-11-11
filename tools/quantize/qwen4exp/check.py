@@ -10,9 +10,11 @@ assert_quant_invariants) plus what spec 21 §5 / plan 21b fix for this family:
   quantization_config  bits 4, group_size 64 (ours) or 128 (Intel's), sym, desc_act false or absent,
                        quant_method auto-round | gptq, packing_format auto_round:auto_gptq; every
                        extra_config entry bits 16, or bits 4 at g64 / g128 symmetric
-  names                exactly qwen4exp_ref.expected_names(text config, form, mtp) - the form read from
-                       the names (layer 0's linear_attn.in_proj_qkv.qweight: ours, .weight: intel); visual
-                       tensors ignored (the engine skips the tower)
+  names                exactly qwen4exp_ref.expected_names(text config, form, mtp, head_q, mtp_q) - the form
+                       read from the names (layer 0's linear_attn.in_proj_qkv.qweight: ours, .weight: intel),
+                       head_q from lm_head.qweight and mtp_q from the MTP head's expert 0 gate_proj.qweight
+                       (tools/quantize/quantize_qwen4exp.sh's export: both int4 g64); visual tensors ignored
+                       (the engine skips the tower)
   dtypes / shapes      every tensor against make_synth's table of the real widths; int4 linears qweight
                        I32 [K/8, N], scales F16 [K/g, N] (g 64; 128 for Intel's routed experts), qzeros I32
                        [K/g, N/8] all 0x77777777, scales finite; no g_idx
@@ -110,10 +112,12 @@ def check(ckpt: str, ple_dir: str | None = None, sample: int = 64, seed: int = 0
     names = {n for n in tm if not n.startswith("model.visual.")}
     form = "ours" if MS.P + "layers.0.linear_attn.in_proj_qkv.qweight" in names else "intel"
     mtp = any(n.startswith("mtp.") for n in names)
+    head_q = "lm_head.qweight" in names
+    mtp_q = "mtp.layers.0.mlp.experts.0.gate_proj.qweight" in names
     parse_quant_config(cfg, form, errs)
     r = MS.ref()
     tc = r.text_config(ckpt, raw=cfg)
-    want = set(r.expected_names(tc, form, mtp=mtp))
+    want = set(r.expected_names(tc, form, mtp=mtp, head_q=head_q, mtp_q=mtp_q))
     for n in sorted(want - names)[:10]:
         errs.append(f"missing {n}")
     for n in sorted(names - want)[:10]:
