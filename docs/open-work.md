@@ -18,6 +18,21 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 | 4 | **Flash-Next at full size - our own weights, then the expert tier on two cards** ([spec 21 v2](superpowers/specs/2026-11-11-spec21v2-flash-next-v2-design.md), [plan 21v2a](superpowers/plans/2026-11-11-spec21v2a-whole-model-tiering.md), then [21v2b](superpowers/plans/2026-11-12-spec21v2b-tensor-parallel.md)). The operator ruled on 2026-11-12: re-quantise the model ourselves (AutoRound int4 g64 from the 360 GB bf16 original, head and MTP experts included), split the layers first and tensor parallel after, and aim past Strata's 66 t/s on two B70s at 4-bit quality. The whole model needs ~70 GB against ~62 on two cards, so the most-used experts stay in VRAM and the rest are read from pinned host memory | the bf16 original is downloading; the quantisation script is ready and sized (~2 days on card 1, the operator row above); next: the operator's weekend run, then plan 21v2a Tasks 3-7 | `b70-serve` serves the whole model on our weights, judged by the f32 reference, at 30 t/s or more on `pp`; then 50 t/s decode and 1000 t/s prefill on `tp` (21v2b) |
 | 5 | **The quiet-box measurement session** - one record-grade speed run at the end, on an idle box and the newest driver. It measures every speed number (tensor parallel, 3l, TP + slots and replica throughput: tonight's numbers ran beside CPU jobs and are not records) and settles the open speed choices: list B (card hand-off copy vs peer, int8 KV, int8 prefill, draft vocabulary, Flash-Next's MTP norm and eager attention: the winner stays, the rest is deleted), 4096-row prefill chunks (+4.2 %, under the +5 % bar: the operator decides), MTP acceptance cold vs a prefix cache hit (< 1 % closes spec 16), and our adaptive MTP depth against saber's rule. The stages: `tools/box_validate.sh --with optin` (`--list` shows them); parked models' stages wait for those models | after everything above it | measured; README.md, docs/BENCHMARKS.md and docs/18-running-models.md refreshed |
 
+## Qwen Flash Next quant
+
+Calibration is on `nvidia/OpenCodeInstruct`
+
+```sh
+tools/quantize/quantize_qwen4exp.sh check-download   # must print: DOWNLOAD OK: 144 files, 360.02 GB
+tools/quantize/quantize_qwen4exp.sh start            # detached; refuses if anything isn't ready
+tools/quantize/quantize_qwen4exp.sh status           # layers done of 48, minutes per layer, time left
+tools/quantize/quantize_qwen4exp.sh stop             # if you need to stop it; `start` again resumes
+```
+
+Expected: `FLASH-NEXT QUANT: OK .../export/...-w4g64.`
+
+Output, about 172 GB to the 8TB. A temporary 102 GB n-gram/PLE to the NVMe
+
 ## Waiting - only a box run or a CPU job left
 
 | spec | what | proved by | state |
