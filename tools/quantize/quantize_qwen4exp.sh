@@ -11,8 +11,9 @@
 #
 # Stages of `run` (a finished stage leaves $OUT/.done-<stage>; a rerun skips it):
 #   quant  AutoRound (tools/quantize/qwen4exp/autoround_run.py): W4A16, group 64, symmetric, format
-#          auto_round:auto_gptq, tuned sign-SGD ITERS (200) on NSAMPLES (128) x SEQLEN (2048) rows of
-#          NeelNanda/pile-10k (the Qwen3.8 tuned recipe's defaults), low CPU memory (the fused-MoE checkpoint
+#          auto_round:auto_gptq, tuned sign-SGD ITERS (200) on NSAMPLES (128) x SEQLEN (2048) rows of DATASET
+#          (nvidia/OpenCodeInstruct through the chat template, from the HF cache; refused if any of its 50
+#          parquet shards is missing - operator 2026-11-12: the model is for agentic coding), low CPU memory (the fused-MoE checkpoint
 #          is read one block at a time), low GPU memory; on card CARD (1) through tools/gpu_lock.sh, or the box
 #          CPU (DEVICE=cpu, /tmp/b70-cpu-model.lock). Per-block resume: AR_RESUME_DIR=$OUT/resume (two fp32
 #          files of the calibration activations, 21.5 GB, overwritten each block) - after a stop, `start` again
@@ -36,10 +37,10 @@
 # >= DISK_MIN_GB (300) and PLE_DIR's disk >= 110 GB free (or holds the file already); AutoRound runs in a systemd scope capped at RAM_CAP_GB
 # (115) with no swap, so a memory overrun kills the run (resumable) instead of the box.
 #
-# AutoRound: intel/auto-round main at AR_COMMIT (b58069ea, 2026-11-11, version string 0.17.0), from
-# AR_REPO (default: the operator's clone ~/auto-round, which contains it), no local patch (AR_PATCH=0):
-# the BOS/EOS fix of auto-round-local.patch is upstream (#2591) and nothing on this path reads
-# WrapperLinear.in_features. Why not the Qwen3.8 scripts' 6afaecdb: b58069ea adds the per-block resume
+# AutoRound: AR_COMMIT a6cf7487 of the operator's fork ~/auto-round (AR_REPO; the commit is only there): upstream
+# main b58069ea (2026-11-11, version string 0.17.0) + one local commit that reads OpenCodeInstruct's cached parquet
+# and loads snapshots local-only; no patch file (AR_PATCH=0): the BOS/EOS fix of auto-round-local.patch is
+# upstream (#2591) and nothing on this path reads WrapperLinear.in_features. Why not the Qwen3.8 scripts' 6afaecdb: b58069ea adds the per-block resume
 # (AR_RESUME_DIR), the vectorised QSA indexer (#2579, the 12 QSA blocks) and routed MoE forward (#2615);
 # both commits pin Qwen4's ngram table on the CPU and export the MTP head (tools/quantize/README.md,
 # "Qwen3.8-Flash-Next: our AutoRound export"). Installed by tools/quantize/ar_pin.sh beside VENVPY
@@ -48,9 +49,8 @@
 #
 # Overridables (environment): MODEL (Qwen/Qwen3.8-Flash-Next or a snapshot dir), QUANT_ROOT
 # ($HOME/b70/hdd/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
-# W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | xpu2: both cards, each block split
-# over them | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
-# DISK_MIN_GB, VENVPY, SITE, AR_REPO, LOGDIR ($HOME/b70/logs/flash-next-quant).
+# W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
+# DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, LOGDIR ($HOME/b70/logs/flash-next-quant).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
@@ -71,7 +71,8 @@ DISK_MIN_GB="${DISK_MIN_GB:-300}"
 PLE_DIR="${PLE_DIR:-$HOME/b70/scratch/flash-next-ple}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"
 SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
-export AR_COMMIT=b58069eab70c984bf1df2aaba730f29c1d0764ff AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
+DATASET="${DATASET:-nvidia/OpenCodeInstruct:apply_chat_template}"
+export AR_COMMIT=a6cf748739f2dd58e6c16b0ac849e92af7396e32 AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
 CURRENT="$QUANT_ROOT/flash-next-current"
 STAGES=(quant bf16 head ple check)
 
@@ -104,8 +105,6 @@ locked() {
   local cap=(systemd-run --user --scope -q -p "MemoryMax=${RAM_CAP_GB}G" -p MemorySwapMax=0)
   if [ "$DEVICE" = xpu ]; then
     "$HERE/gpu_lock.sh" card "$CARD" -- "${cap[@]}" "$@"
-  elif [ "$DEVICE" = xpu2 ]; then
-    "$HERE/gpu_lock.sh" box -- "${cap[@]}" "$@"
   else
     AR_DISABLE_META_LOAD=1 flock /tmp/b70-cpu-model.lock "${cap[@]}" "$@"
   fi
@@ -116,8 +115,8 @@ export_dir() { dirname "$(find "$OUT/export" -name config.json -printf '%d %p\n'
 stage_quant() {
   mkdir -p "$OUT/work" "$OUT/resume"
   AR_WORK_SPACE="$OUT/work" AR_RESUME_DIR="$OUT/resume" locked "$VENVPY" "$Q/autoround_run.py" \
-    --model "$SNAP" --out "$OUT/export" --device "$(case $DEVICE in xpu2) echo 0,1 ;; *) echo "$DEVICE" ;; esac)" --iters "$ITERS" --nsamples "$NSAMPLES" \
-    --seqlen "$SEQLEN" --batch-size "$BATCH" --ple-dir "$PLE_DIR"
+    --model "$SNAP" --out "$OUT/export" --device "$DEVICE" --iters "$ITERS" --nsamples "$NSAMPLES" \
+    --seqlen "$SEQLEN" --batch-size "$BATCH" --ple-dir "$PLE_DIR" --dataset "$DATASET"
 }
 
 stage_bf16() {
@@ -143,9 +142,9 @@ stage_check() {
 
 ## Quantisation provenance
 
-- tool: auto-round, intel/auto-round commit \`$AR_COMMIT\` (version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)')), no local patch
+- tool: auto-round at \`$AR_COMMIT\` (the operator's fork: intel/auto-round \`b58069ea\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
 - recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, format
-  auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of NeelNanda/pile-10k, batch $BATCH;
+  auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the
   PLE layer, norms, the embedding, vision, the MTP head's attention and shared expert; the MTP head's routed
   experts RTN int4 g64 (not tuned: transformers does not build the head); \`lm_head\` RTN int4 g64 by
@@ -173,7 +172,7 @@ run_stages() {
   SNAP=$(snapshot)
   env_py
   echo "quantize_qwen4exp: $(date -u +%FT%TZ) MODEL=$MODEL ($SNAP) OUT=$OUT DEVICE=$DEVICE CARD=$CARD ITERS=$ITERS" \
-       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH auto-round ${AR_COMMIT:0:8}"
+       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH DATASET=$DATASET auto-round ${AR_COMMIT:0:8}"
   for s in "${STAGES[@]}"; do
     [ "$s" = "$from" ] && hit=1
     if [ -n "$only" ] && [ "$s" != "$only" ]; then continue; fi
@@ -201,6 +200,10 @@ case "${1:-}" in
       die "the run in $OUT is finished ($(cat "$OUT/RESULT")); for a new one: OUT=<new dir> $SELF start"
     fi
     [ -f "$MODEL/config.json" ] || "$VENVPY" "$Q/check_download.py" --repo "$MODEL" || die "the download is not complete"
+    if [ "${DATASET%%:*}" = nvidia/OpenCodeInstruct ]; then
+      n=$(ls "$HOME"/.cache/huggingface/hub/datasets--nvidia--OpenCodeInstruct/snapshots/*/data/train-*.parquet 2>/dev/null | wc -l)
+      [ "$n" = 50 ] || die "calibration data: $n of 50 nvidia/OpenCodeInstruct parquet shards in the HF cache"
+    fi
     m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB - something else is using the RAM"
     d=$(disk_free_gb "$QUANT_ROOT"); [ "$d" -ge "$DISK_MIN_GB" ] || die "$QUANT_ROOT has ${d} GB free < DISK_MIN_GB $DISK_MIN_GB"
     mkdir -p "$PLE_DIR"
