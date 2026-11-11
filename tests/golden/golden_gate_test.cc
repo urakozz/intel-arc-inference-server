@@ -16,8 +16,8 @@
 //   * generate 32 ids as 32 x generate(1), reading `buffers().logits` before
 //     each step - that fp32 row is exactly the row whose argmax the step is
 //     about to consume, so a mismatch can be reported with both top-5s;
-//   * **GATE**, under the controller's ruling of 2026-08-26 (docs/14, "The
-//     RTN-checkpoint gate"): a golden decision row whose top-1 is **not unique**
+//   * **GATE**, under the controller's ruling of 2026-08-26 (docs/14, "Undetermined
+//     rows: the rule, and why it is not a weakening"): a golden decision row whose top-1 is **not unique**
 //     is UNDETERMINED, and the three clauses are
 //       (i)   determined rows - the engine's id == the golden id, element-exact,
 //             every one of them. Unchanged strictness; this is the gate.

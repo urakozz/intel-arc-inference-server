@@ -38,7 +38,7 @@ struct VerifyAttnRow {
 // and N1); dpas_from = the smallest measured depth from which every verdict is dpas.
 // One row per built (M, KV form): bf16 at M = 2..8, int8 at M = 2..4 (production's int8 decode lists).
 // 2026-11-04: the error that put every row on v2 for a day (DFlash K = 7, t6_usage-loader, position 103: f32 rank 3,
-// 4.0 below the top) was P's bf16 rounding in attn_verify_dpas, not a compiler (docs/07-open-questions.md §11); the
+// 4.0 below the top) was P's bf16 rounding in attn_verify_dpas, not a compiler (docs/07-open-questions.md, "Recently answered"); the
 // kernel now carries P as hi + lo (PSPLIT=1). Re-timed at that kernel (§5), every row's dpas_from is what it was.
 inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {2, false, 11585},  // 0.49 | 0.53 | 0.92 | 1.20 | 1.22 | 1.36

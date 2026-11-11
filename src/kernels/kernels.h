@@ -36,7 +36,7 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
 // `lm_head` (N = 248320) keeps `{64, 1}`: 3880 work-groups at 98.5% of measured
 // bandwidth in situ, nothing to win, and measured unmoved in situ across the
 // change - **4378.555 -> 4379.089 µs/launch, +0.012%** (before at `43bb720`,
-// after at the committed `a1e2d3a`; docs/15 §L2 carries both rollups).
+// after at the committed `a1e2d3a`; docs/12 `gemv_bf16` carries both rollups).
 //
 // Its **binary is not** byte-identical, though its ocloc command line is:
 // restructuring the K loop for `KSPLIT` changed IGC's output at `KSPLIT == 1`
@@ -51,7 +51,7 @@ inline std::string gemv_variant(unsigned M, unsigned K, unsigned N, unsigned S, 
 // pair earn their place: the `ksplit` is what creates the threads and the
 // `cols` is what spreads them over eight Xe-cores rather than one.
 //
-// The width is measured, not chosen (docs/15 §L2, in situ, three points):
+// The width is measured, not chosen (docs/12 `gemv_bf16`, in situ, three points):
 // ksplit 1 / 4 / 16 read **48.774 / 13.115 / 5.340 µs** per launch. 16 stops
 // 2.4x above the shape's 2.22 µs traffic floor, so at most 0.15 ms/token is
 // left in it and a 32-way split cannot repay its own gate run.

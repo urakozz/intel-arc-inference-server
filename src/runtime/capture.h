@@ -91,7 +91,7 @@ struct CapturedStep {
 // to move in both directions across it (`code`'s worst cosine 0.829 → 0.914,
 // `prose`'s 0.99945 → 0.99481) while the gate's token ids stayed 96/96
 // element-exact. Read the taps as diagnostics of one engine build, never as a
-// contract between two (docs/14, "The diagnostics move with every lever").
+// contract between two (docs/14, "How the tap is compared, and why it is not a layer output").
 //
 // So tap[L]
 // holds the hidden state with layer L's *mixer* contribution folded in and

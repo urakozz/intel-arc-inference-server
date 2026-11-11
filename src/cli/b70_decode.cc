@@ -595,7 +595,7 @@ int run_profile(l0::Context& ctx, const loader::LoadedModel& model,
       "  - Per-kernel us are in-situ and flush-free: compare them directly with the\n"
       "    probe-transplant floors in docs/12 (`gemv` -> Measured) and with docs/05's table.\n"
       "  - The gap is NOT a dispatch cost this engine pays: subtract the flush\n"
-      "    (doc 07 #5's 0.52 us/kernel from probe_replay is the unprofiled estimate).\n"
+      "    (probe_replay's 0.52 us/kernel is the unprofiled estimate; docs/15 "The dispatch gap").\n"
       "  - The fence wall above is inflated by the same flushes and is NOT ms/token.\n"
       "    The recorded step time is the --bench median in docs/BENCHMARKS.md.\n"
       "  - A mean without a spread is not an attribution: run --repeats R (R >= 5) before\n"
@@ -1333,7 +1333,7 @@ int run(int argc, char** argv) {
 
   // MBU against the two measured constants, spelled out so the reader can
   // check the arithmetic without leaving the terminal. The kernel-count line
-  // is an *estimate* carried from doc 07 #5 (0.52 µs/kernel, probe_replay) -
+  // is an *estimate* carried from probe_replay (0.52 µs/kernel; docs/15 "The dispatch gap") -
   // it is what the captured list costs in dispatch alone, and it is printed
   // beside the fence time to show how little of the fence it can explain.
   const double bytes_per_token = double(eng.model().report.read_per_token) / 1e9;

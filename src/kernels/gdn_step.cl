@@ -3,7 +3,7 @@
 // the model's 64 layers run this, `sycl-tla` has no example for it, and no
 // library implements it - it is the engine's original-work kernel.
 //
-// The maths is docs/03-models.md, "Layer math - verified in the modeling file"
+// The maths is docs/03-models.md, "Layer math, verified against the modeling file"
 // (the GDN block), a transcription of `torch_recurrent_gated_delta_rule` and
 // `causal_conv1d_update`. Doc 03 wins over any other text, this comment
 // included. `tests/kernels/gdn_ref.h` is the same chain on the host and repeats

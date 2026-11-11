@@ -27,7 +27,7 @@
 // `src/runtime/capture.cc:436-452` actually binds.
 //
 // The a||b tiling `{COLS_PER_WG 16, KSPLIT 16}` is `kernels::gemv_bf16_tiling`'s
-// choice for N = 128 and is measured, not chosen (docs/15 SS L2: ksplit
+// choice for N = 128 and is measured, not chosen (docs/12 `gemv_bf16`: ksplit
 // 1 / 4 / 16 read 48.774 / 13.115 / 5.340 us per launch at M = 1). Whether it
 // is still the right tiling at M = C is a question for the measurement, not for
 // this file: at M = 2048 the grid is 8 x 256 work-groups rather than 8, so the

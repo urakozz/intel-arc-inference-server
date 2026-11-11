@@ -156,7 +156,7 @@ struct DecodeScratchDims {
   // fallback). A device-free cross-check - a static_assert or a generated
   // header - is recorded as spec-1.6 work and is deliberately NOT added here.
   //
-  // **64 is measured, not derived - but it is not a knee either.** docs/15 §2's
+  // **64 is measured, not derived - but it is not a knee either.** docs/15 part 2's
   // `F + fill·P` fit predicted 214.5 µs/launch at a 128-position block; the
   // retile measured 296.684. So the block size was swept in situ at depth 4096
   // instead - `attn_decode` µs/launch, then the attn family's ms/token:
@@ -172,7 +172,7 @@ struct DecodeScratchDims {
   // about a third of one run's drift), because `attn_reduce` is on a steep ramp
   // (80 → 127 → 196 → 450 µs/step), and because B32 would double `attn_part`
   // again - 50.7 → 101.4 MB, per-step scratch 77.6 → 128.3 MB - to buy that
-  // 0.070 ms. docs/12 `attn` → Measured carries the arithmetic.
+  // 0.070 ms. docs/12 "Decode attention" → Measured carries the arithmetic.
   static constexpr uint32_t kAttnBlock = 64;
   // Spec 10 (plan 10b): decode attention v2's work-groups per kv head, TGT in
   // src/kernels/attn_v2.cl and `_T32` in its variant name. v2 walks a row of L keys in
@@ -191,7 +191,7 @@ struct DecodeScratchDims {
   //
   // 20 at kHidden = 5120 is one element per lane in a 256-lane work-group:
   // 320 subgroups against the single-work-group kernel's 16, which is the axis
-  // docs/15 §L2 measured as the one that pays.
+  // docs/15, "What the measurement says that nothing else did" measured as the one that pays.
   static constexpr uint32_t kNormGroups = 20;
 
   static DecodeScratchSizes sizes(uint32_t max_len, const model::ModelDesc& desc);

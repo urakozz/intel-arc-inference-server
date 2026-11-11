@@ -3,7 +3,7 @@
 # docs/BENCHMARKS.md.
 #
 #   tools/bench_decode.sh                        3 runs at depth 4096, tg 256
-#   tools/bench_decode.sh --depth 64             the doc 07 #12 experiment
+#   tools/bench_decode.sh --depth 64             the doc 15 idle-work-group experiment
 #   tools/bench_decode.sh --runs 1 --no-build    one run against what is already built
 #   tools/bench_decode.sh --prefill-length 4096  3 runs of spec 2's PREFILL at kC = 2048
 #   tools/bench_decode.sh --prefill-length 4096 --prefill-chunk 1024
