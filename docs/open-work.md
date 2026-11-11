@@ -22,7 +22,7 @@ Each row closes with a PASS (or moves to Waiting with its reason). A gate we tou
 | group | stages | what they need |
 |---|---|---|
 | **Qwen3.8** | Proof check for the 3 accepted `mtp_gpu_kv8_test` rows: rerun those contexts with the bf16 prompt pass and the int8 cache - if they pass, the int8 prompt pass is the cause as accepted; if not, it is a new failure | after the replica row; ~20 min on a card plus new f32 references |
-| **Replica + per-card slots** (merged 2026-11-10, untested on the cards) | `--parallel replica` with an asked `--max-len` gives each card 13c's slots. Left: `box_validate.sh --only r77 --force` (G0 not rerun for these merges), 4-8 requests at once on `--parallel replica --max-len 32768` (by hand: `r78.batch` has no replica mode) with first differences by the f32 judge, throughput against one card's slots and plain replica | both cards after TP + slots, tonight |
+| **Replica + per-card slots** (merged 2026-11-10, untested on the cards) | Each card runs its own slots with `--parallel replica --max-num-seqs N`. Left: `box_validate.sh --only r77 --force` (its new `r77.batch` stage: 1 / 4 / 8 requests at once on `--max-num-seqs 8 --max-len 32768`, judged by the f32 judge), then throughput against one card's slots and plain replica | both cards; the prefix-restore hang (stages run the prefix cache off where they can) |
 
 ## Waiting - only a box run or a CPU job left
 

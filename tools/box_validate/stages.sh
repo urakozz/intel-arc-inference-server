@@ -3413,7 +3413,7 @@ st_r77_r1() {
   local sp rc
   BV_JUDGE_RC=0
   for sp in off mtp lookup; do
-    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/replica 0,1 $SNAP_QWEN --parallel replica --spec $sp --max-len 65536 -- --mode pairs" "--spec $sp: pairs on the replica server"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec $sp --max-len 65536 -- --mode pairs" "--spec $sp: pairs on the replica server"
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card0 0 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 0"
     chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/r1/$sp/card1 1 $SNAP_QWEN --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "--spec $sp: alone on card 1"
     x "python3 tools/box_validate/replica_check.py compare --replica $STATE/r1/$sp/replica/requests.jsonl --server-log $STATE/r1/$sp/replica/server-log --card0 $STATE/r1/$sp/card0/requests.jsonl --card1 $STATE/r1/$sp/card1/requests.jsonl --dump $DATA/oracle-forced-dumps/qwen-serve --judge $DATA/oracle-out-qwen-f32-i8head-forced --bf16 $DATA/oracle-out-qwen-bf16top-forced"
@@ -3426,14 +3426,14 @@ st_r77_r1() {
 }
 stage r77.b2      77 default gpu  qwen r77.r1                     "B2: golden_server_test --chat with two concurrent clients (B70_SERVE_CLIENTS=2) on --parallel replica: both replies of every prompt equal b70-decode's 32 ids on one card (decoded after the server stops)"
 st_r77_b2() {
-  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel replica --max-len 65536' B70_SERVE_CLIENTS=2 B70_SERVE_DECODE_AFTER=1 timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_QWEN --chat" \
+  chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel replica --max-num-seqs 2 --max-len 65536' B70_SERVE_CLIENTS=2 B70_SERVE_DECODE_AFTER=1 timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_QWEN --chat" \
     "golden_server_test --chat, two clients, --parallel replica"
   grab_all b2 'generated ids identical' 12
   finish
 }
 stage r77.b3      77 default gpu  qwen r77.r1                     "B3: A on card 0, X (A's best match) holding card 0, A' (A continued) restored on card 1 from A's request-end snapshot in the one host store - equal to the same order on card 1 alone (C2 across cards)"
 st_r77_b3() {
-  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/replica 0,1 $SNAP_QWEN --parallel replica --spec off --max-len 65536 -- --mode b3" "b3 on the replica server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec off --max-len 65536 -- --mode b3" "b3 on the replica server"
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/card0 0 $SNAP_QWEN --parallel 1 --spec off --max-len 65536 -- --mode b3" "b3 alone on card 0"
   chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b3/card1 1 $SNAP_QWEN --parallel 1 --spec off --max-len 65536 -- --mode b3" "b3 alone on card 1"
   chk "python3 tools/box_validate/replica_check.py b3 --replica $STATE/b3/replica/requests.jsonl --server-log $STATE/b3/replica/server-log --card0 $STATE/b3/card0/requests.jsonl --card1 $STATE/b3/card1/requests.jsonl" "B3"
@@ -3442,12 +3442,25 @@ st_r77_b3() {
 }
 stage r77.b4      77 default gpu  qwen r77.r1                     "B4: a stream dropped mid-request frees its card (two requests right after both answered at once), a stop string ends one row of a pair, a stream beside a request streams the non-streamed text"
 st_r77_b4() {
-  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b4/replica 0,1 $SNAP_QWEN --parallel replica --spec off --max-len 65536 -- --mode b4" "b4 on the replica server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/b4/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec off --max-len 65536 -- --mode b4" "b4 on the replica server"
   chk "python3 tools/box_validate/replica_check.py b4 --replica $STATE/b4/replica/requests.jsonl" "B4"
   grab_all b4 '^B4' 20
   finish
 }
-stage r77.serial  77 default card qwen r77.host                   "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
+stage r77.batch   77 default gpu  qwen r77.r1                     "replica x slots: the golden and A4 prompts one, four and eight at a time on b70-serve --parallel replica --max-num-seqs 8 --max-len 32768 (4 slots a card) against one at a time - identity recorded, every first difference by the f32 judge (one awaiting its reference SKIPs) - --spec off and mtp, prefix cache off"
+st_r77_batch() {
+  local sp c
+  for sp in off mtp; do
+    for c in 1 4 8; do
+      chk "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_run.sh $STATE/$STAGE/$sp/c$c.r1 c$c 1 $SNAP_QWEN --parallel replica --max-num-seqs 8 --max-len 32768 --spec $sp --prefix-cache-gb 0 -- --set golden --set toolcall --max-tokens 128 --concurrency $c" "--spec $sp: $c at a time"
+    done
+    x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE/$sp --ref c1"
+    serve_judge "$STATE/$STAGE/$sp" c1 "--spec $sp: every first difference from one at a time by the f32 judge"
+  done
+  grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON|card [01]: slots' 40
+  judged_finish
+}
+stage r77.serial  77 default card qwen r77.host                  "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
 st_r77_serial() {
   run_tests '^golden_server_test$'
   finish
