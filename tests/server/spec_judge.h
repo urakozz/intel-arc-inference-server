@@ -96,6 +96,8 @@ struct ReviewedRow {
   const char* reason;
 };
 inline constexpr const char* kReviewedReason = "chaotic turn boundary, reviewed 2026-11-05, see spec 28 sec 10";
+inline constexpr const char* kInt8PrefillKvReason =
+    "known fail of l0-int8 prefill with int8 KV, accepted 2026-11-10 (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md)";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
@@ -113,6 +115,11 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 128, 248068, 248046, 10.53, "2026-11-05", kReviewedReason},
     {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 137, 248068, 248046, 11.68, "2026-11-05", kReviewedReason},
     {"dflash_gpu_int8_t5_test-box_a69c16de36a6edd8", 143, 248046, 248068, 16.27, "2026-11-05", kReviewedReason},
+    // mtp_gpu_kv8_test (int8 KV under the l0-int8 prefill): the accepted known fail of that combination (3o),
+    // operator 2026-11-11; mtp_verify_kv8_test shows the verify rows bitwise the plain steps
+    {"mtp_gpu_bf16_t5_test-linear_l0_48240f936b6319ce", 58, 248046, 248045, 20.94, "2026-11-11", kInt8PrefillKvReason},
+    {"mtp_gpu_bf16_t2_explain-openai_7aefc7634c90dcf3", 0, 248045, 248046, 23.86, "2026-11-11", kInt8PrefillKvReason},
+    {"mtp_gpu_bf16_t4_comment-loader_fcc02a22cb3a07cd", 0, 74455, 846, 13.01, "2026-11-11", kInt8PrefillKvReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
