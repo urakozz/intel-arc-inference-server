@@ -86,7 +86,9 @@ add_executable(pf_int8_test prefill/pf_int8_test.cc)
 target_include_directories(pf_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pf_int8_test PRIVATE b70_l0)
 b70_target_kernel_dir(pf_int8_test)
-add_dependencies(pf_int8_test kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
+add_dependencies(pf_int8_test kernel_pf_quant_had_K3072 kernel_pf_quant_had_K8704
+                 kernel_pf_requant_rot_L0_PAD kernel_pf_requant_rot_L1_PAD
+                 kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144
                  kernel_pf_quant_had_K17408 kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1
                  kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU)
 add_test(NAME pf_int8_test COMMAND pf_int8_test)
@@ -953,6 +955,11 @@ set_tests_properties(golden_gate_i8head_test PROPERTIES
 # spec 2.1 S2/S3 the L0 backend's own binaries are in the list too: pf_gemm IS
 # its linears' and its attention's GEMM, and the slab dequants feed them.
 set(B70_PREFILL_KERNELS
+  kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
+  kernel_pf_gemm_small_A2_B2_S4_SILU kernel_pf_gemm_small_A4_B2_S4_SILU
+  kernel_pf_gemm_q4_A4_B1_S1_L0 kernel_pf_gemm_q4_A4_B1_S1_L1
+  kernel_pf_gemm_q4_A8_B1_S2_L0 kernel_pf_gemm_q4_A8_B1_S2_L1
+  kernel_pf_gemm_q4_A1_B2_S4_L0_SILU kernel_pf_gemm_q4_A4_B2_S1_L0_SILU
   kernel_pf_gemm_q4_A8_B1_S4_L0_SLM_SILU
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
@@ -2676,6 +2683,15 @@ add_test(NAME tp_prefill_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(tp_prefill_test PROPERTIES
   LABELS "checkpoint;tp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600
   ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
+add_executable(tp_prefill_int8_test runtime/tp_prefill_int8_test.cc)
+target_include_directories(tp_prefill_int8_test PRIVATE ${CMAKE_SOURCE_DIR}/src
+  ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
+target_link_libraries(tp_prefill_int8_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+add_dependencies(tp_prefill_int8_test ${B70_PREFILL_KERNELS} ${B70_TP_KERNELS} ${B70_TP_PREFILL_KERNELS})
+add_test(NAME tp_prefill_int8_test COMMAND tp_prefill_int8_test ${B70_TEST_SNAPSHOT})
+set_tests_properties(tp_prefill_int8_test PROPERTIES
+  LABELS "checkpoint;tp;prefill" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  SKIP_RETURN_CODE 77 TIMEOUT 3600 ENVIRONMENT "B70_FORCED_JUDGE=${_tp_pf_judge}")
 if(B70_KV8)
   add_test(NAME tp_prefill_kv8_test COMMAND tp_prefill_test ${B70_TEST_SNAPSHOT})
   set_tests_properties(tp_prefill_kv8_test PROPERTIES
@@ -2705,8 +2721,6 @@ if(B70_KV8)
 endif()
 
 # b70-decode --parallel tp's refusals, before any device (cli/pipeline_args.h check_tp), and the missing card.
-b70_cli_reject(cli_reject_tp_prefill ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --prefill
-  --prefill-backend l0-int8 EXPECT "--parallel tp prefills on the l0 backend only")
 b70_cli_reject(cli_reject_tp_spec ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --spec dflash
   --draft-model ${B70_NO_MODEL} EXPECT "--spec dflash / dflash-lookup under tensor parallel are not built")
 b70_cli_reject(cli_reject_tp_split ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel tp --pipeline-split 32

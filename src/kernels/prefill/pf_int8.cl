@@ -8,7 +8,8 @@
 //                              pf_colmax_rot   max |W R_K| per column (load-time scales)
 //   PF_GEMM_I8   (SILU_EPI)    pf_gemm_i8      i8 x i8, scales in the epilogue only
 // R_K = D_K blockdiag(H_1024) / 32 over K. D_K comes from
-// runtime/prefill/int8_signs.h. The quantiser holds block element 16 j + lane
+// runtime/prefill/int8_signs.h. PAD_K zero-extends TP down from K=8704 to 9216
+// before rotating; weights still use their raw K for addressing. The quantiser holds block element 16 j + lane
 // and the requant holds 64 lane + j; both run the canonical Sylvester FWHT on
 // the natural index with ascending stages, so they rotate identically
 // (pf_int8_test's cross case pins it).
@@ -41,7 +42,12 @@ __kernel void pf_quant_had(__global const ushort* restrict x, __global const flo
   float v[64];
 #pragma unroll
   for (uint r = 0; r < 8u; ++r) {
+#ifdef PAD_K
+    const ushort8 u = b * 1024u + r * 128u < ldx ? intel_sub_group_block_read_us8(src + r * 128u)
+                                                : (ushort8)(0u);
+#else
     const ushort8 u = intel_sub_group_block_read_us8(src + r * 128u);
+#endif
     const float8 sg = as_float8(intel_sub_group_block_read8(
         (__global const uint*)(sgn + b * 1024u + r * 128u)));
     v[8u * r + 0u] = bf16f(u.s0) * sg.s0; v[8u * r + 1u] = bf16f(u.s1) * sg.s1;
@@ -118,10 +124,20 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
 #pragma unroll
   for (uint i = 0; i < 8u; ++i) {
     const uint t = lid + 256u * i;
+#ifdef PAD_K
+    tin[(t % 16u) * 129u + t / 16u] = (blk * 128u + t / 16u) * 8u < K
+        ? qw[(size_t)(blk * 128u + t / 16u) * Nfull + nbase + (t % 16u)] : 0x88888888u;
+#else
     tin[(t % 16u) * 129u + t / 16u] = qw[(size_t)(blk * 128u + t / 16u) * Nfull + nbase + (t % 16u)];
+#endif
   }
+#ifdef PAD_K
+  tsc[(lid % 16u) * 17u + lid / 16u] = blk * 16u + lid / 16u < K / 64u
+      ? vload_half((size_t)(blk * 16u + lid / 16u) * Nfull + nbase + (lid % 16u), sc) : 0.0f;
+#else
   tsc[(lid % 16u) * 17u + lid / 16u] =
       vload_half((size_t)(blk * 16u + lid / 16u) * Nfull + nbase + (lid % 16u), sc);
+#endif
 #else
   // The WG's 16 columns are exactly tile nt = nbase / 16. Tile (nt, group gi)
   // is 136 u32 at (nt G + gi) 136: word j of lane c at j 16 + c, then 16 f16
@@ -133,13 +149,25 @@ inline void pf_rot_load(__global const uint* restrict qw, __global const half* r
   for (uint i = 0; i < 8u; ++i) {
     const uint t = lid + 256u * i;
     const uint r = t / 16u, cc = t % 16u;
+#ifdef PAD_K
+    tin[cc * 129u + r] = blk * 16u + r / 8u < G
+        ? tiles[(size_t)(blk * 16u + r / 8u) * 136u + (r % 8u) * 16u + cc] : 0x88888888u;
+#else
     tin[cc * 129u + r] = tiles[(size_t)(blk * 16u + r / 8u) * 136u + (r % 8u) * 16u + cc];
+#endif
   }
   {
     const uint g = lid / 16u, cc = lid % 16u;
-    const __global ushort* sp =
-        (const __global ushort*)(tiles + (size_t)(blk * 16u + g) * 136u + 128u);
-    tsc[cc * 17u + g] = (float)as_half(sp[cc]);
+#ifdef PAD_K
+    if (blk * 16u + g >= G) {
+      tsc[cc * 17u + g] = 0.0f;
+    } else
+#endif
+    {
+      const __global ushort* sp =
+          (const __global ushort*)(tiles + (size_t)(blk * 16u + g) * 136u + 128u);
+      tsc[cc * 17u + g] = (float)as_half(sp[cc]);
+    }
   }
 #endif
   barrier(CLK_LOCAL_MEM_FENCE);

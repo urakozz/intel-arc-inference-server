@@ -40,6 +40,45 @@ same session, paired **1.28x**. Decode is unchanged at 29.40 t/s. Accuracy on
 the golden gate matches the bf16 prefill, with one accepted bf16 near-tie
 (spec 5 §8).
 
+## Tensor parallel
+
+TP uses the same 1024-wide rotation. Each card's down has raw K=8704, so the
+activation and weight kernels zero-extend it to K=9216 before rotation and int8
+GEMM. Checkpoint addressing retains raw K; only int8 scratch and GEMM use the
+padded width. This leaves the dot product unchanged before quantisation and
+requires neither another activation crossing nor a persistent weight copy.
+Other per-card widths already fit whole 1024 blocks: out/o K=3072, and the
+column-parallel linears K=5120. Every output width is whole 1024-column slabs.
+
+A 512-wide local rotation was tried and removed after f32-rejected differences
+of up to 30.67 bf16 ulps. Full-width rotation before splitting would require
+activation and weight data from the other card at the split boundary. The
+padded local path keeps TP's wavefront and the established rotation size.
+
+`tp_prefill_int8_test` covers four golden and 36 tool-call prompts, teacher-forces
+one card's bf16 ids, and judges differences on that same context. It uses the
+documented f32 near-miss bar of eight ulps (`spec_judge.h`, doc 14); missing
+references print their context keys and SKIP. `--one-card` diagnoses the existing
+one-card int8 pass on the same contexts. The int8 prefill + int8 KV warning stays.
+
+The box build and kernel, linear, memory-plan, one-card prefill and bf16 TP
+prefill checks pass. The TP int8 quality gate passes all 40 contexts at 64 tokens:
+29 identical, 11 judged, with all 12 differing rows accepted (worst 6.70 ulp).
+The deliberately corrupted judge fails as intended. Serving answers all 39
+requests, and default MTP answers the three golden prompts.
+
+Idle medians of three, interleaved against TP bf16 (2048-row chunks, int8 head,
+bf16 KV, max_len 32768, tg 32):
+
+| Prompt tokens | TP bf16, t/s | TP int8, t/s | Gain |
+|---|---:|---:|---:|
+| 4096 | 2934.67 | 3322.73 | 13.2% |
+| 16384 | 2673.31 | 3047.73 | 14.0% |
+
+Both cards and the CPU model lane were locked; runs overlapping compiler work
+were excluded. The original ~3700 / ~3400 figures were estimates, not thresholds
+(operator). See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
+
 ## Why decode stays int4 and bf16
 
 Decode multiplies one token's row by every weight matrix. With one row there is

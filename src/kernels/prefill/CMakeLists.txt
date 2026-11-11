@@ -254,12 +254,16 @@ endforeach()
 # The quantiser and requant run at the default 128 GRF (probe_w8a8 measured 256
 # halving their occupancy); the GEMM needs 256 for its 64 int32 accumulators.
 set(PF_INT8_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_int8.cl)
-set(PF_HAD_K 5120 6144 17408)
+set(PF_HAD_K 3072 5120 6144 17408)
 foreach(K IN LISTS PF_HAD_K)
   math(EXPR NBLK "${K} / 1024")
   add_ocloc_kernel(pf_quant_had_K${K} SOURCE ${PF_INT8_CL} DEFINES PF_QUANT_HAD=1 NBLK=${NBLK})
 endforeach()
+add_ocloc_kernel(pf_quant_had_K8704 SOURCE ${PF_INT8_CL}
+                 DEFINES PF_QUANT_HAD=1 NBLK=9 PAD_K=1)
 foreach(L 0 1)
+  add_ocloc_kernel(pf_requant_rot_L${L}_PAD SOURCE ${PF_INT8_CL}
+                   DEFINES PF_REQUANT_ROT=1 LAYOUT=${L} PAD_K=1)
   add_ocloc_kernel(pf_requant_rot_L${L} SOURCE ${PF_INT8_CL} DEFINES PF_REQUANT_ROT=1 LAYOUT=${L})
 endforeach()
 add_ocloc_kernel(pf_gemm_i8 SOURCE ${PF_INT8_CL} DEFINES PF_GEMM_I8=1
@@ -426,12 +430,13 @@ endif()
 #            12 / 2; with B70_KV8 the int8 cache's writer, widening flash and gate at 12 / 2
 #   fold     pf_tp_res_fold at K 5120, FOLD_G 20 (pf_res_fold's grid)
 # Reused: pf_embed_gather, pf_res_fold SP0 (layer 0), pf_norm_finish, pf_ab_proj (a||b zero-padded to 128 columns, 48
-# real), and the head's 17b binaries (gemv_i8w_M1_K5120_N124160, tp_argmax_M1_*). Not built: the l0-int8 backend's
-# h8 quantiser (down's per-card K 8704 is not whole 1024-k rotation blocks - refused by name under TP).
+# real), and the head's 17b binaries (gemv_i8w_M1_K5120_N124160, tp_argmax_M1_*). The l0-int8 backend adds
+# the 3072/8704 quantisers and zero-padded requant variants below.
 if(B70_TP)
   set(PF_TP_GDN GDN_K_HEADS=8 GDN_V_HEADS=24)
   set(PF_TP_FA FA_Q_HEADS=12 FA_KV_HEADS=2)
-  set(B70_TP_PREFILL_KERNELS)
+  set(B70_TP_PREFILL_KERNELS kernel_pf_quant_had_K3072 kernel_pf_quant_had_K8704
+      kernel_pf_requant_rot_L0_PAD kernel_pf_requant_rot_L1_PAD)
   foreach(row "5120 8192 1" "5120 7168 0" "5120 17408 0" "3072 5120 0" "8704 5120 0")
     separate_arguments(f UNIX_COMMAND "${row}")
     list(GET f 0 K)

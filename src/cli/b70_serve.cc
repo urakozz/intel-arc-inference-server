@@ -793,6 +793,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
 // layouts (runtime/tp_gather.h), keyed like one card's, and its hook fires at the TP pair stride (tp_hook_stride).
 // --parallel's refusals ran in run(), before the device.
 struct TpServe {
+  runtime::PrefillBackend backend = runtime::PrefillBackend::L0;
   std::string snapshot_dir;
   cli::MaxLenArg max_len_arg;
   size_t mem_reserve = 0;
@@ -822,7 +823,8 @@ int serve_tp(const TpServe& a, server::Options options) {
   const bool head = a.mtp_k > 0 || a.spec_lookup;
   const model::TpCrossing crossing = runtime::kTpDefaultCrossing;
   runtime::PrefillPath path;
-  path.prefill = true;   // every request prefills (TP's prefill: the l0 backend, flash attention)
+  path.prefill = true;   // every request prefills, with flash attention
+  path.backend = a.backend;
   path.chunk_cap = runtime::PrefillScratchDims::kCDefault;
   std::array<loader::LoadedModel, 2> cards = [&] {
     StdoutToStderr redirect;
@@ -858,6 +860,7 @@ int serve_tp(const TpServe& a, server::Options options) {
     }
   }
   runtime::TpEngine engine(d0, d1, std::move(cards), len, {}, a.kv_cache);
+  engine.set_prefill_backend(a.backend);
   engine.set_prefill_chunk_cap(path.chunk_cap);
   engine.prepare_prefill();   // the two cards' prefill scratch, crossings and head rows at load, not in a request
   for (uint32_t r = 0; r < 2; ++r) std::fprintf(stderr, "%s\n", engine.memory_line(r).c_str());
@@ -878,9 +881,10 @@ int serve_tp(const TpServe& a, server::Options options) {
                options.host.c_str(), options.port, len);
   print_eos(a.eos);
   std::fprintf(stderr,
-               ", --parallel tp%s (crossing %s, prefill backend l0, chunk cap %u, crossings %s), mtp %s%u%s, lm_head "
+               ", --parallel tp%s (crossing %s, prefill backend %s, chunk cap %u, crossings %s), mtp %s%u%s, lm_head "
                "%s, kv cache %s\n",
-               a.auto_why.c_str(), model::tp_crossing_name(engine.crossing()), engine.prefill_chunk_cap(),
+               a.auto_why.c_str(), model::tp_crossing_name(engine.crossing()),
+               runtime::prefill_backend_name(engine.prefill_backend()), engine.prefill_chunk_cap(),
                engine.prefill_overlaps() ? "on the copy engines" : "on the compute lists",
                a.mtp_auto ? "auto, max " : "", a.mtp_k, engine.mtp() ? " (the head whole on each card)" : "",
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engine.kv_cache()));
@@ -1185,7 +1189,7 @@ int run(int argc, char** argv) {
   // cli::bolt::check_args and check_serve_flags replace them), as b70-decode dispatches it. A path that does not resolve is not
   // Bolt: the flow below reports it.
   if (cli::bolt::is_bolt(path)) {
-    cli::check_tp(pipe, {false, false, false, /*other_family=*/true});   // spec 17d: --parallel tp is Qwen3.8's
+    cli::check_tp(pipe, {false, false, /*other_family=*/true});   // spec 17d: --parallel tp is Qwen3.8's
     cli::bolt::ServeFlags flags;
     flags.draft_vocab = draft_vocab != 0 || !draft_vocab_ids.empty();
     // Spec 26c: --spec / --spec-max / --draft-model through cli::resolve_spec (SpecFamily::Bolt), refused by name before the
@@ -1249,7 +1253,7 @@ int run(int argc, char** argv) {
   uint32_t mtp_k = mtp_on ? spec.max_k : 0;   // the head's drafts per iteration at most
   // Spec 17d: --parallel tp's refusals that need no device (cli/pipeline_args.h check_tp) - before the families'
   // dispatch, so another model under --parallel tp is refused by name.
-  cli::check_tp(pipe, {have_pp_backend && pp_backend_arg == "l0-int8", dflash.on, false, is_q4 || is_kol || is_k2,
+  cli::check_tp(pipe, {dflash.on, false, is_q4 || is_kol || is_k2,
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
@@ -1418,6 +1422,7 @@ int run(int argc, char** argv) {
   }
   if (pipe.tp()) {   // spec 17d: tensor parallel, serve_tp's own flow
     TpServe ts;
+    ts.backend = pp_path.backend;
     ts.auto_why = tp_why;
     ts.snapshot_dir = snapshot_dir;
     ts.max_len_arg = max_len_arg;
