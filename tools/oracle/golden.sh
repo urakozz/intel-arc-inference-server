@@ -30,10 +30,9 @@
 # **PROMPTS names which sets to build** (default: the three short ones). Spec
 # 2 §6.2's long prompt is one invocation of the same loop:
 #
-#   OUT_DIR=oracle-out-long PROMPTS=long \
-#   ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
-#   ORACLE_THREADS=28 setsid nohup tools/oracle/golden.sh \
-#     > oracle-out-long/golden.log 2>&1 </dev/null &
+#   OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_SNAP=<primary snapshot> \
+#   ORACLE_THREADS=22 setsid nohup tools/oracle/golden.sh \
+#     > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
 #
 # `--max-prompt` below is the ceiling `PrefillScratch::kC` sets, not dump.py's
 # default 64: that default would abort at id 65 of a 2820-id prompt. It is
