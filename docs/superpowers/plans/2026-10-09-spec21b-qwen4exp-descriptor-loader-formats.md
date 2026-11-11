@@ -1,5 +1,7 @@
 # Spec 21b - Qwen3.8-Flash-Next: the descriptor, the loader, the formats, synthetic checkpoints, the memory plan
 
+**Implemented; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-09): built on the Mac, branch `spec21b-qwen4exp-loader`; the card runs pending (queue row 31).**
 Tasks 1-7 done and their Mac gates green: the four host tests, `test_qwen4exp_quant.py` 6 / 6, both synthetic
 checkpoints `ACCEPTED`, Level Zero syntax, kernel_cmdlines +0 / -0 / ~0, `tools/box_check.sh --base main`

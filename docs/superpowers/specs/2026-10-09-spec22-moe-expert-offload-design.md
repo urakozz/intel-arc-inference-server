@@ -1,5 +1,7 @@
 # Spec 22 - the MoE expert-offload tier
 
+**Implemented in part (the probe's tools; the tier itself was not built); continued in [spec 21 v2](2026-11-11-spec21v2-flash-next-v2-design.md) (2026-11-11).**
+
 **Status:** outline, probe-first, 2026-10-09; the operator approved the design on 2026-10-08. This document gives
 P0 in full, the design as a sketch and the decisions P0 feeds, marked **(decide)**. The design is detailed after
 P0's record. Nothing is built.

@@ -1,5 +1,7 @@
 # Spec 21a - Qwen3.8-Flash-Next (`qwen4_exp`): the facts, the CPU reference, golden sets, routing traces
 
+**Implemented; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-09): built on the Mac, branch `spec21a-qwen4exp-reference`; the box CPU runs pending (queue
 row 30).** Tasks 1-5 and 8 done and their Mac gates green (F1 bitwise on the tiny model in bf16 and fp32; the
 MTP head = an independent build bitwise); Tasks 6-7's scripts written, `DRY_RUN=1` checked - the real-weight

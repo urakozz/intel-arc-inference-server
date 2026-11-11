@@ -1,5 +1,7 @@
 # Spec 22d - Qwen3.8-Flash-Next whole, served: the context default, MTP, snapshots, A4, passkey, the record
 
+**Not built; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-10): planned; begins after plan 22b (and 22c when decision 3 or 7 built it), only on the operator's go
 after plan 22a's record.** Task 6 runs only when plan 22m has merged. Box queue row 39 (renumbers at build time if
 taken).

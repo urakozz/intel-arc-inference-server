@@ -1,5 +1,7 @@
 # Spec 22m - the coding mask: `--expert-mask coding`, a lossy opt-in mode that drops cold experts
 
+**Not built; the pruning tools were removed 2026-11-07 and the coding mask is not continued ([spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md), 2026-11-11).**
+
 **Status (2026-10-10): planned; begins when decision 9 sets the coding mask's kept fraction** (from plan 22a's pruning
 curve, P0.8, against P0.7's cache speed) - whatever the tier's go / no-go. It needs plan 22b's expert table (22b's Task
 1, Task 3's table and Task 4's binding with O0; built first on 22b's branch when decision 9 comes before the go), not

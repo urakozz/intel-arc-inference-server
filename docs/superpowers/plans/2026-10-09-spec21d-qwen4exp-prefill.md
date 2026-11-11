@@ -1,5 +1,7 @@
 # Spec 21d - Qwen3.8-Flash-Next prefill: dense flash below 2052, the indexer and sparse flash above, grouped MoE at 512
 
+**Implemented; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-09): Tasks 1-4 built on the Mac (branch `spec21d-qwen4exp-prefill`; as built: spec 21 §15 "21d as
 built"); nothing on a card yet - box queue row 33 (`tools/box_validate.sh --only r33`), Task 5 is its opt-in
 `r33.speed` / manual `r33.p0`.** Real-weight gates SKIP (77) until Intel's checkpoint and 21a's sets exist on the box.

@@ -1,5 +1,7 @@
 # Spec 22c - adaptive expert swaps between steps, and prefill streaming on the copy engine
 
+**Not built; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-10): planned; begins after plan 22b, and only on the operator's go after plan 22a's record.** Tasks 1-2
 (swaps) are built only if decision 3 admits swaps (22a's `swap` simulation shows a gain worth their cost); Task 3
 (prefill streaming) is built in either case, in the form decision 7 picks. Box queue row 38 (renumbers at build time if

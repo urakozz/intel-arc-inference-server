@@ -1,5 +1,7 @@
 # Spec 22a - the expert-offload probe (P0): the links, zero-copy reads, pinned capacity, the hit-rate curve, the pruning curve, the projection
 
+**Implemented; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-13): Tasks 1-4 built on the Mac and Task 5 Step 1 in (branch `spec22a-offload-probe`); Task 5
 Steps 2-7 are the box's - queue row 36, box-day plan Session 9c.** Everything that can be written and checked without
 the box is (the Mac gates below, measured); every number is the box's. Plans 22b-22d begin only on the operator's go
