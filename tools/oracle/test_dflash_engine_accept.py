@@ -54,13 +54,18 @@ class AcceptanceTest(unittest.TestCase):
             def get_tensor(self, name):
                 return Tensor(range(10 if name == 'ids' else 11, 19 if name == 'ids' else 20))
 
-        widths = []
+        widths, batches = [], []
         def draft(anchor, p, k, ctx):
             widths.append(k)
-            return SimpleNamespace(ids=Tensor([11] if k == 1 else [99] * k))
+            return SimpleNamespace(ids=Tensor([11 + p] if k == 1 else [99] * k))
 
-        drafter = SimpleNamespace(context_kv=lambda *args: None, draft_block=draft)
-        module = SimpleNamespace(reference_drafter=lambda *args: drafter)
+        def batch(d, head, anchors, ps, k, ctx, masks):
+            batches.append((len(anchors), k))
+            return {'full': Tensor([draft(a, p, k, ctx).ids for a, p in zip(anchors, ps)])}
+
+        drafter = SimpleNamespace(context_kv=lambda *args: None, draft_block=draft, head_logits=None)
+        module = SimpleNamespace(reference_drafter=lambda *args: drafter,
+                                 _load=lambda name: SimpleNamespace(draft_batch=batch))
         spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda *args: None))
         torch = SimpleNamespace(set_num_threads=lambda n: None, inference_mode=contextlib.nullcontext,
                                 arange=lambda a, b: range(a, b))
@@ -69,8 +74,8 @@ class AcceptanceTest(unittest.TestCase):
             rows = [{'run': {}}]
             for name in ('a4', 'code'):
                 (root / (name + '.taps.safetensors')).touch()
-                rows.extend({'dump': name, 'p': 0, 'k': k, 'ids': [11] if k == 1 else [99] * k,
-                             'accepted': int(k == 1)} for k in range(1, 8))
+                rows.extend({'dump': name, 'p': p, 'k': k, 'ids': [11 + p] if k == 1 else [99] * k,
+                             'accepted': int(k == 1)} for p in (0, 1) for k in range(1, 8))
             (root / 'engine.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in rows))
             with patch.dict(sys.modules, {'torch': torch, 'safetensors': SimpleNamespace(safe_open=Dump)}), \
                  patch.object(m.importlib.util, 'spec_from_file_location', return_value=spec), \
@@ -79,7 +84,9 @@ class AcceptanceTest(unittest.TestCase):
                 self.assertTrue(m.evaluate(tmp, '', '', str(root / 'report.json'), 1))
             report = json.loads((root / 'report.json').read_text())
             self.assertEqual(report['corpora']['code']['1']['reference_E'], 2.0)
-            self.assertEqual(widths, list(range(1, 8)) * 2)
+            self.assertEqual(batches, [(2, k) for k in range(1, 8)] * 2)
+            self.assertEqual(widths, [k for k in range(1, 8) for _ in range(3)] +
+                             [k for k in range(1, 8) for _ in range(2)])
 
 
 if __name__ == '__main__':
