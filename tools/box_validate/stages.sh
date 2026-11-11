@@ -3447,7 +3447,7 @@ st_r77_b4() {
   grab_all b4 '^B4' 20
   finish
 }
-stage r77.batch   77 default gpu  qwen r77.r1                     "replica x slots: the golden and A4 prompts one, four and eight at a time on b70-serve --parallel replica --max-num-seqs 8 --max-len 32768 (4 slots a card) against one at a time - identity recorded, every first difference by the f32 judge (one awaiting its reference SKIPs) - --spec off and mtp, prefix cache off"
+stage r77.batch   77 default gpu  qwen r77.reject                     "replica x slots: the golden and A4 prompts one, four and eight at a time on b70-serve --parallel replica --max-num-seqs 8 --max-len 32768 (4 slots a card) against one at a time - identity recorded, every first difference by the f32 judge (one awaiting its reference SKIPs) - --spec off and mtp, prefix cache off"
 st_r77_batch() {
   local sp c
   for sp in off mtp; do
