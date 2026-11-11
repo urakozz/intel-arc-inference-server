@@ -10,6 +10,25 @@ least for prefill.
 
 ## Where it stands
 
+**Serving Qwen3.8-27B on two Arc Pro B70s** (2026-11-11, `b70-serve`, MTP speculative decoding, each request a
+2820-token prompt and 512 generated tokens, greedy; time to first token cold, then again as a prefix cache hit):
+
+| setup | requests at once | **total t/s** | per request t/s | first token, cold | first token, prefix cache hit |
+|---|---:|---:|---:|---:|---:|
+| `--parallel tp` (both cards, one session - the two-card default) | 1 | **123.1** | 123.1 | 1.84 s | 1.34 s |
+| `--max-num-seqs 8` (replica: a model copy per card, 4 slots each) | 1 | 73.0 | 73.0 | 2.30 s | 1.08 s |
+| | 2 | 140.5 | 73.8 | 2.36 s | 1.10 s |
+| | 4 | 209.1 | 58.5 | 3.61 s | 1.65 s |
+| | 8 | **250.0** | 36.0 | 7.27 s | 2.79 s |
+| same, `--kv-cache int8` (slot 0 holds 167,936 tokens instead of 46,080) | 1 / 2 / 4 / 8 | 74.0 / 163.5 / 213.9 / **258.5** | 74.0 / 84.1 / 58.8 / 37.2 | 2.33 / 2.37 / 3.63 / 7.30 s | 1.09 / 1.11 / 1.64 / 2.81 s |
+| same, `--prefill-backend l0-int8` (int8 prompt pass, bf16 cache) | 1 / 2 / 4 / 8 | 82.0 / 138.5 / 202.2 / 250.1 | 82.0 / 76.3 / 60.6 / 35.0 | **1.80** / 1.88 / 2.82 / 5.76 s | **0.86** / 0.89 / 1.33 / 2.24 s |
+| one card, `--max-num-seqs 4` | 1 / 2 / 4 | 73.2 / 107.5 / 126.6 | 73.2 / 59.5 / 35.6 | 2.32 / 3.52 / 5.91 s | 1.09 / 1.65 / 2.77 s |
+
+Pick by use: one session as fast as possible is TP (the default on two cards); a main session with helper requests
+is `--max-num-seqs N` (N up to 8 on two cards, 4 on one). MTP's speed depends on how predictable the text is, so
+per-request rates move a few t/s between runs (`tools/box_validate/slots_bench.py`, logs on the box under
+`~/b70/logs/brag-speed/`).
+
 Measured on one Arc Pro B70, same checkpoint and same prompt on both sides,
 median of three runs on an idle machine:
 
