@@ -1,11 +1,91 @@
 // Round-trips 1 MiB host -> device -> host through the immediate list.
+//
+// B70_COPY_STRESS=<seconds> (2026-11-11, the snapshot-copy hangs: 100 % CPU inside the xe VM_BIND ioctl under
+// l0::CmdList::copy, kernel 7.4.0-rc2 / runtime 26.40.40196.15): afterwards, for that long, the copy pattern of a
+// prefix snapshot - 1..64 MiB each way, from a freshly malloc'd buffer (a new host-pointer bind each time) and from
+// pinned host memory - with a watchdog: a copy that takes over 20 s prints COPY_HANG and exits 2 instead of hanging.
+// B70_COPY_STRESS_PINNED_GB=<n>: the pinned buffer is n GiB, like the server's prefix cache (16-32 GiB), and each pinned
+// copy walks to the next 64 MiB of it.
+// The device is ZE_AFFINITY_MASK's (run under tools/gpu_lock.sh card N).
+#include <atomic>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
 #include "check.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+int stress(l0::Context& ctx, l0::CmdList& imm, double seconds) {
+  constexpr size_t kMax = size_t(64) << 20;
+  l0::Mem dev(ctx, l0::MemKind::Device, kMax);
+  const char* gb = std::getenv("B70_COPY_STRESS_PINNED_GB");
+  const size_t pinned_bytes = gb ? size_t(std::atof(gb) * double(size_t(1) << 30)) / kMax * kMax : kMax;
+  l0::Mem pinned(ctx, l0::MemKind::Host, pinned_bytes);
+  std::printf("copy stress: pinned buffer %.1f GiB\n", pinned_bytes / double(size_t(1) << 30));
+  std::atomic<int64_t> started{0};   // ns since t0 of the copy in flight, -1 between copies
+  std::atomic<uint64_t> iter{0};
+  std::atomic<bool> done{false};
+  const Clock::time_point t0 = Clock::now();
+  const auto ns = [&] { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0).count(); };
+  started = -1;
+  std::thread watchdog([&] {
+    while (!done) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      const int64_t s = started;
+      if (s >= 0 && ns() - s > 20'000'000'000) {
+        std::printf("COPY_HANG: copy %llu has not returned after 20 s (%.0f s into the run)\n",
+                    static_cast<unsigned long long>(iter.load()), ns() / 1e9);
+        std::fflush(stdout);
+        std::_Exit(2);
+      }
+    }
+  });
+  uint64_t bytes = 0;
+  double last = 0;
+  for (uint64_t i = 0; ns() < seconds * 1e9; ++i) {
+    const size_t n = size_t(1) << (20 + i % 7);   // 1, 2, 4 .. 64 MiB
+    const bool fresh = i % 2 == 0;
+    std::vector<uint8_t> heap;
+    uint8_t* host = pinned.as<uint8_t>() + (i / 2 * kMax) % pinned_bytes;
+    if (fresh) {
+      heap.resize(n);
+      host = heap.data();
+    }
+    host[0] = static_cast<uint8_t>(i);
+    host[n - 1] = static_cast<uint8_t>(i * 3);
+    iter = i;
+    started = ns();
+    imm.copy(dev.ptr(), host, n);
+    host[0] = host[n - 1] = 0;
+    imm.copy(host, dev.ptr(), n);
+    started = -1;
+    CHECK_EQ(host[0], static_cast<uint8_t>(i));
+    CHECK_EQ(host[n - 1], static_cast<uint8_t>(i * 3));
+    bytes += 2 * n;
+    if (ns() / 1e9 - last >= 10) {
+      last = ns() / 1e9;
+      std::printf("copy stress: %.0f s, %llu round trips, %.1f GB\n", last, static_cast<unsigned long long>(i + 1),
+                  bytes / 1e9);
+      std::fflush(stdout);
+    }
+  }
+  done = true;
+  watchdog.join();
+  std::printf("copy stress OK: %llu round trips, %.1f GB in %.0f s\n", static_cast<unsigned long long>(iter + 1),
+              bytes / 1e9, ns() / 1e9);
+  return 0;
+}
+
+}  // namespace
 
 int main() {
   l0::Context ctx(0);
@@ -27,5 +107,6 @@ int main() {
   CHECK_EQ(shared.as<uint32_t>()[0], 0xA5A5A5A5u);
   CHECK_EQ(shared.as<uint32_t>()[15], 0xA5A5A5A5u);
   std::puts("copy_test OK");
+  if (const char* s = std::getenv("B70_COPY_STRESS")) return stress(ctx, imm, std::atof(s));
   return 0;
 }
