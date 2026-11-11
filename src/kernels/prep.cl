@@ -245,9 +245,9 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 // **Why two kernels.** RMSNorm's mean is over the whole row, so a single kernel
 // cannot split the row across work-groups: the work-group IS the reduction
 // domain, and at M = 1 that is ONE work-group - 16 subgroups on one Xe-core,
-// measured at 22.3 µs and 17.0 GB/s in situ (docs/12 `prep_res_norm` →
-// Measured). What the measurement says is scarce is the **subgroup**
-// (docs/15 §L2: 8 → 32 → 128 subgroups took the `a‖b` GEMV 48.8 → 13.1 →
+// measured at 22.3 µs and 17.0 GB/s in situ (docs/12 `prep_res_fold` +
+// `prep_norm_finish`). What the measurement says is scarce is the **subgroup**
+// (docs/15, "What the measurement says that nothing else did": 8 → 32 → 128 subgroups took the `a‖b` GEMV 48.8 → 13.1 →
 // 5.3 µs, while spreading the same 8 over 4× the work-groups bought zero). A
 // grid-wide reduction needs a second launch, and a second launch is what this
 // pair is.
@@ -273,8 +273,8 @@ __kernel void prep_res_norm(__global const float* restrict partials,
 // tap 0.829 → 0.914, `prose`'s 0.99945 → 0.99481 - while the token ids stayed
 // 96/96 element-exact. The arbiter is the gate, not a tolerance and not a
 // bit-identity argument, and the standing rule is that every lever which
-// reorders a sum runs it **before as well as after** (docs/14, "The diagnostics
-// move with every lever"; docs/12 `prep_res_fold` → the numerics contract).
+// reorders a sum runs it **before as well as after** (docs/14, "How the tap is compared";
+// docs/12 "Rounding discipline").
 //
 // Nothing here is data-dependent, there is no atomic, FOLD_G is fixed at
 // compile time and the `g` loop is in index order, so two replays of the

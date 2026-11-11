@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The oracle: layer-by-layer golden tensors for one prompt, from transformers on CPU.
 
-This is the reference the C++ engine is tested against (doc 04 §testing, doc 10).
+This is the reference the C++ engine is tested against (doc 14, doc 10).
 The model is built from the config and loaded from a state dict we dequantise
 ourselves with tools/oracle/dequant.py - the SAME function the C++ loader is
 bit-compared against - so the oracle and the engine start from identical bf16

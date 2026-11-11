@@ -23,7 +23,7 @@ Runs INSIDE the reference container, on the box (it needs the XPU). The exact
 `docker run` is in docs/14 - the `-u $(id -u):$(id -g)` is not optional, or the
 outputs come back root-owned.
 
-Reading the verdict (docs/14 §cross-check, `tools/oracle/README.md` §trust
+Reading the verdict (docs/14 "The third implementation", `tools/oracle/README.md` §trust
 chain):
 
     all three agree                    -> the chain is closed.
@@ -241,7 +241,7 @@ def main() -> int:
     total = sum(len(golden[p]) for p in PROMPTS)
     print(f"\n=== VERDICT: {total_ok}/{total} ids equal across {len(PROMPTS)} prompts")
     if all_match:
-        print("=== ALL THREE AGREE - the trust chain is closed (docs/14 §cross-check).")
+        print("=== ALL THREE AGREE - the trust chain is closed (docs/14, "The third implementation").")
         return 0
     print(
         "=== vLLM DIVERGES from engine==oracle. docs/14's ruling: suspect\n"

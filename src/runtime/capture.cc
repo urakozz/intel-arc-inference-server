@@ -824,7 +824,7 @@ class Capture {
   // directions** across this lever while the token ids stayed 96/96 exact
   // (docs/14). That is why this lever's acceptance ran the gate before as well
   // as after - the gate is the arbiter, not the bit-identity of `resid`
-  // (prep.cl states the tree, docs/12 the contract).
+  // (prep.cl states the tree, docs/12 "Rounding discipline" the contract).
   //
   // `b_.norm_sumsq` is a single 640-byte allocation shared by all 129 sites:
   // the list is in-order, so a site's stage B has consumed its own stage A's

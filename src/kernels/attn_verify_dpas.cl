@@ -49,7 +49,7 @@
 //     as the DPAS A operand - S's layout, so P goes to PV with no data movement; V by the
 //     VNNI-transform 2D read (KV8: the 8-bit transform read, key pairs widened to exact bf16);
 //   PSPLIT = 1: P = hi + lo like q's (QSPLIT), two DPAS per key atom pair (hi first) - ~16 significant
-//     bits of p; PSPLIT = 0: hi alone. Why 1 ships (2026-11-04, docs/07-open-questions.md §11): P's
+//     bits of p; PSPLIT = 0: hi alone. Why 1 ships (2026-11-04, docs/07-open-questions.md, "Recently answered"): P's
 //     bf16 rounding (2^-9 a weight) is not averaged away on real heads - their blocks' P V partly
 //     cancel in the merge, so a row's error grows to 1 - cos ~2e-5 against fp64 (v2: ~1e-8), and over
 //     16 FA layers that moved a DFlash verify row's logits by up to 9 and its argmax off the f32 top

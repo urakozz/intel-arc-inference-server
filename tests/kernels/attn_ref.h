@@ -7,7 +7,7 @@
 // the same order**, every bf16 rounding and every reduction/merge order
 // included, so the device can be held to a few ulp rather than to a hand-waved
 // tolerance. Every block below has a twin in attn.cl and the two must be edited
-// together. The maths itself is docs/03-models.md, "Layer math - verified in the
+// together. The maths itself is docs/03-models.md, "Layer math, verified against the
 // modeling file" (the full-attention block), which wins over any other text.
 //
 // ---------------------------------------------------------------------------

@@ -62,7 +62,7 @@ The reference image (`vllm-xpu-env-next-p314-t216-vxkp0:latest` since
 | `kv8_qwen38_repeat.sh` | Spec 12 §8 "Before 12b" on the Mac: the 12a probe on `Qwen/Qwen3.8-27B` (bf16) in a 28 GB container, golden rows, A4, long32k[:4096] + replay, resumable; how to run and what decides the tolerances: plan 12b "Task A". |
 | `k2_kv8_probe.py` | Spec 18e Task 1 (Review Focus 1): the int8 KV probe on K2-Horizon over `k2_ref.py` - variants bf16 (the reference), `rotkv` (the engine's head_dim-128 scheme bit for bit: `src/common/kv8.h` hd128), per token, fp32 attention, each with its own residual stream and KV cache; `run` (decision-row logits metrics + the routing diagnostic + q/K/V capture), `replay` (fp64, real and tiled depths), `summary`. `test_k2_kv8_probe.py` checks it on tiny weights (no checkpoint, seconds). |
 | `kv8_k2_repeat.sh` | Spec 18e Task 1 on the Mac: `k2_kv8_probe.py` on the int4 K2 checkpoint (`hf download urakozz/IFM-K2-Horizon-MoVA-36B-A4B-W4A16-AutoRound-GPTQ`, 22.2 GB) in a 28 GB container - check, K2 tokenisation (BOS 0), golden rows (18a's tokens when `oracle-out-k2/` is here, else 32 greedy steps), long[:4096] + capture, replay to 64k; resumable, `STEPS=` subsets. |
-| `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md` §cross-check). |
+| `vllm_check.py` | The third implementation: vLLM's own greedy 32 tokens on the same three prompt id files, compared against the golden `tokens`. Closes the trust chain's last link - run and recorded 2026-08-25, **96/96** (`docs/14-golden-gate.md`, "The third implementation"). |
 
 Prompts live in `tests/golden/prompts/`: `prose.txt` (plain English, **42 ids**),
 `code.txt` (a Python function, **61 ids** - 3 under the ceiling, so do not edit
@@ -1046,10 +1046,10 @@ moves the engine and the oracle **together** and the golden test still passes.
    element-exact against the golden `tokens`, on both the compiled and the
    `enforce_eager` path.** The chain is closed for these three prompts, and
    `dequant.py` is cross-checked rather than merely self-consistent. Full
-   record - command, ids, caveats - in `docs/14-golden-gate.md` §cross-check.
+   record - command, ids, caveats - in `docs/14-golden-gate.md`, "The third implementation".
 
 > **The chain has a resolution limit, found 2026-08-26 and recorded in
-> docs/14 ("The RTN-checkpoint gate").** `dump.py` records
+> docs/14 ("Undetermined rows: the rule, and why it is not a weakening").** `dump.py` records
 > `out.logits[0].to(torch.float32)`, and `out.logits` from a bf16 model *is*
 > bf16 - so every value in a golden `logits` tensor lands exactly on the bf16
 > grid (verified: zero low 16 bits, all six files). The reference therefore

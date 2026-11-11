@@ -911,7 +911,7 @@ get_property(PVD_SRC_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels PROPERTY 
 get_property(PVD_PF_KERNELS DIRECTORY ${CMAKE_SOURCE_DIR}/src/kernels/prefill PROPERTY BUILDSYSTEM_TARGETS)
 add_dependencies(probe_verify_attn pvd_kernels ${PVD_SRC_KERNELS} ${PVD_PF_KERNELS})
 
-# --- probe_vattn_ab: spec 28c's open error (docs/07-open-questions.md §11), attn_verify_dpas against v2 on a real
+# --- probe_vattn_ab: spec 28c's open error (docs/07-open-questions.md, "Recently answered"), attn_verify_dpas against v2 on a real
 # DFlash run - every verify twice (DPAS, then v2), the flagged iterations replayed layer by layer on v2's inputs
 # (CaptureOptions::attn_dump) against fp64. `pvab_<arm>` are attn_verify_dpas.cl at the production bf16 lever line, M = 8,
 # built differently for the compiler / precision A/B (build-time only; no production binary binds them):
