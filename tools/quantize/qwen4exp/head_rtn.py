@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage `head` of tools/quantize/quantize_qwen4exp.sh: the output head packed by the engine's int4 g64 rule.
 
-    head_rtn.py <export dir> <source snapshot>
+    head_rtn.py <export dir>
 
-AutoRound tunes the decoder blocks only; `lm_head` (outside every block) is quantised by plain RTN either way
-("using rtn to quantize lm_head" in its log). At the pinned commit that path writes `lm_head.scales` as BF16,
-which the loader refuses (scales are F16: src/loader/quant.cc, check_gptq_export.py) - proven on the tiny
-model. So the head is re-packed here from the source's bf16 `lm_head.weight` by loader::rtn_int4_g64
-(src/loader/rtn.h, spec 15e: symmetric, group 64, scale f16(2 amax / 15) rounded to nearest even, q =
-clamp(rint(w / scale) + 8, 0, 15) with the stored scale, an all-zero group scale 0 and q 8; GPTQ v1 packing,
-qzeros 0x77777777) and the export's `lm_head.qweight` / `scales` / `qzeros` replaced in their file. Nothing
-is lost against AutoRound's own head: both are RTN, this one with the F16 scale the kernels read.
-Idempotent (the same bytes on a rerun).
+AutoRound runs without `quant_lm_head` (autoround_run.py says why: a quantised layer outside the blocks turns its
+low-CPU-memory mode and the per-block resume off), so the export ships the bf16 `lm_head.weight` (the `bf16`
+stage checked it bitwise against the source). This packs it by loader::rtn_int4_g64 (src/loader/rtn.h, spec 15e:
+symmetric, group 64, scale f16(2 amax / 15) rounded to nearest even, q = clamp(rint(w / scale) + 8, 0, 15) with
+the stored scale, an all-zero group scale 0 and q 8; GPTQ v1 packing, qzeros 0x77777777) into `lm_head.qweight`
+/ `scales` / `qzeros` in the same file, updates the index and declares the head 4-bit in `quantization_config`
+(config.json and quantization_config.json: `extra_config["lm_head"]`, as AutoRound's `quant_lm_head` does).
+AutoRound's own head would be RTN too ("using rtn to quantize lm_head", and at the pinned commit with BF16
+scales the loader refuses); nothing tuned is lost. A rerun on a packed head does nothing.
 """
 import argparse
 import json
@@ -23,6 +23,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 QZ = 0x77777777
+HEAD = {"bits": 4, "group_size": 64, "sym": True, "data_type": "int"}
 
 
 def rtn_int4_g64(w: torch.Tensor):
@@ -43,32 +44,55 @@ def rtn_int4_g64(w: torch.Tensor):
     return qweight.contiguous(), s16.t().contiguous(), qzeros
 
 
-def weight_map(d: str) -> dict:
-    with open(os.path.join(d, "model.safetensors.index.json"), encoding="utf-8") as f:
-        return json.load(f)["weight_map"]
+def update_json(path: str, fn) -> None:
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    fn(d)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(d, f, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def declare(qc: dict) -> None:
+    qc.setdefault("extra_config", {})["lm_head"] = dict(HEAD)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("export")
-    ap.add_argument("source")
     a = ap.parse_args()
-    with safe_open(os.path.join(a.source, weight_map(a.source)["lm_head.weight"]), "pt") as f:
-        w = f.get_tensor("lm_head.weight")
-    new = dict(zip(("lm_head.qweight", "lm_head.scales", "lm_head.qzeros"), rtn_int4_g64(w)))
-    fn = weight_map(a.export)["lm_head.qweight"]
+    idx_path = os.path.join(a.export, "model.safetensors.index.json")
+    with open(idx_path, encoding="utf-8") as f:
+        wm = json.load(f)["weight_map"]
+    if "lm_head.weight" not in wm:
+        if "lm_head.qweight" in wm:
+            print("head_rtn: lm_head is already packed - nothing to do")
+            return
+        raise SystemExit(f"head_rtn: {a.export} has no lm_head.weight")
+    fn = wm["lm_head.weight"]
     path = os.path.join(a.export, fn)
     out = {}
     with safe_open(path, "pt") as f:
         meta = f.metadata()
         for n in f.keys():
-            out[n] = new[n] if n in new else f.get_tensor(n)
-    missing = set(new) - set(out)
-    if missing:
-        raise SystemExit(f"head_rtn: {fn} lacks {sorted(missing)} - not AutoRound's packed head")
+            out[n] = f.get_tensor(n)
+    w = out.pop("lm_head.weight")
+    out.update(zip(("lm_head.qweight", "lm_head.scales", "lm_head.qzeros"), rtn_int4_g64(w)))
     save_file(out, path + ".tmp", metadata=meta or {"format": "pt"})
     os.replace(path + ".tmp", path)
-    print(f"head_rtn: lm_head [{w.shape[0]}][{w.shape[1]}] packed by loader::rtn_int4_g64 into {fn} (scales F16)")
+
+    def index(d):
+        m = d["weight_map"]
+        del m["lm_head.weight"]
+        for n in ("lm_head.qweight", "lm_head.scales", "lm_head.qzeros"):
+            m[n] = fn
+        d["weight_map"] = dict(sorted(m.items()))
+    update_json(idx_path, index)
+    update_json(os.path.join(a.export, "config.json"), lambda c: declare(c["quantization_config"]))
+    qcj = os.path.join(a.export, "quantization_config.json")
+    if os.path.exists(qcj):
+        update_json(qcj, declare)
+    print(f"head_rtn: lm_head [{w.shape[0]}][{w.shape[1]}] packed by loader::rtn_int4_g64 into {fn}, declared 4-bit")
 
 
 if __name__ == "__main__":
