@@ -38,18 +38,48 @@ remains is kernel efficiency, which is a different problem (doc 05).
 
 ## More than one model
 
-The layout below is Qwen3.8's. Every other family has its own engine and descriptor on the same
-foundations (Level Zero lists, our own OpenCL C, the loader, the server): Ornith (spec 15, a mixture-of-experts, MoE, where a
-router picks a few expert networks per token), K2-Horizon (spec 18, MoE with routed value-expert
-attention), Kolibri-1 (spec 20, Aleph Alpha's MoE with sliding-window layers), Nemotron 3.5 Bolt (spec 25,
-Mamba-2 state-space blocks plus attention plus latent MoE) and Qwen3.8-Flash-Next (spec 21, in progress:
-the whole model needs an expert-offload tier). The model is chosen from the checkpoint's `config.json`.
-LFM2.5, Muse and LiLiCorr were dropped on 2026-10-27; Flint (spec 27) and Nanbeige (spec 29) are parked.
-Per-model status and commands: [18-running-models.md](18-running-models.md).
+The layout below is Qwen3.8's (the focus model, for agentic coding). Every other family has its own engine
+and descriptor on the same foundations (Level Zero lists, our own OpenCL C, the loader, the server): Ornith
+(spec 15, a mixture-of-experts, MoE, where a router picks a few expert networks per token), K2-Horizon (spec 18,
+MoE with routed value-expert attention), Kolibri-1 (spec 20, Aleph Alpha's MoE with sliding-window layers),
+Qwen3.8-Flash-Next (spec 21; it loads its first layers only, until the expert-tiering probe decides how the whole
+model fits two cards) and Nemotron 3.5 Bolt (spec 25: Mamba-2 state-space blocks plus attention plus latent MoE;
+parked until Flash-Next is done). The model is chosen from the checkpoint's `config.json`. LFM2.5, Muse and
+Agnes were dropped; Flint (spec 27) and Nanbeige (spec 29) are parked. Per-model status and commands:
+[18-running-models.md](18-running-models.md).
 
-Two cross-cutting pieces sit on top of the decode and prefill paths. **Pipeline parallel**
-(`--parallel pp`, spec 16) splits a model's layers across both cards, so each holds about half and the
-context can be longer; the prefix cache and the MTP head work across the split. **Speculative decoding**
+### Run modes
+
+`b70-serve --parallel` picks how the cards are used. The default, `auto`, runs Qwen3.8 on two cards as `tp` at
+one request and as `replica` above one request; any other model runs on one card when it and the asked context
+fit, else on `pp`.
+
+- **one card** (`--parallel 1`): the whole engine on one card.
+- **tp** (tensor parallel, spec 17; Qwen3.8): every layer split over both cards, half the heads and half the
+  MLP each. After each linear that is split by rows, the cards add their halves with P2P writes (one card
+  writing straight into the other's memory). The fastest way to serve one request, with the full context;
+  one request at a time.
+- **replica** (spec 13b; Qwen3.8): a complete copy of the model on each card, one engine per card, requests
+  spread over the cards. The choice for 2 to 8 requests at once.
+- **pp** (pipeline parallel, spec 16): the layers split between the cards, so about one card's speed but
+  each card holds half the weights; for models with no tensor-parallel path or too big for one card. The prefix
+  cache and the MTP head work across the split.
+
+Speed numbers per mode are in [BENCHMARKS.md](BENCHMARKS.md).
+
+### Several requests at once: `--max-num-seqs`
+
+`--max-num-seqs N` (vLLM's name) is how many requests run at once; the context follows from it. The default,
+1, is one request at the largest context that fits. With N above 1 (Qwen3.8) a card holds *sequence slots*:
+slot 0 gets the largest context that fits beside N - 1 further slots of 32768 positions each. One card takes up
+to 4 slots; two cards run `replica` and split the slots between them, up to 8 (4 a card). `tp` and `pp` refuse
+N above 1. An explicit `--max-len` that does not fit beside the other slots fails at startup, naming the plan;
+`--parallel replica` alone means N = 2, one request a card. A request that runs into the end of its slot finishes
+with `length` and is logged.
+Tensor parallel with slots was built and ruled out (replica is faster for several requests at once;
+[low-priority-work.md](low-priority-work.md)).
+
+Two cross-cutting pieces sit on top of the decode and prefill paths. **Speculative decoding**
 (`--spec mtp|lookup|dflash|dflash-lookup`, specs 8, 19, 19e, 19f) checks several guessed tokens in one
 verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
 int8 linears, doc 17) is opt-in (operator 2026-10-27).
@@ -60,13 +90,16 @@ int8 linears, doc 17) is opt-in (operator 2026-10-27).
 src/
   loader/      safetensors mmap, dedup by name, per-layer width metadata,
                repack into the canonical on-device layout, upload once
-  model/       qwen3_5 graph description: layer types, shapes, weight bindings
+  model/       the graph descriptions: layer types, shapes, weight bindings (Qwen3.8 and the other families)
   kernels/     OpenCL C: GEMV, GDN step, conv1d, attention, RMSNorm, RoPE,
                SiLU, sampling - plus kernels/prefill/ for the pf_* family
   l0/          the Level Zero wrappers: context, memory, modules, lists, events
   runtime/     allocations, the captured decode command list, KV cache,
-               sequence state; runtime/prefill/ for the prefill walk
-  server/      HTTP, OpenAI schema, SSE streaming
+               sequence state; runtime/prefill/ for the prefill walk; the tensor- and
+               pipeline-parallel engines
+  server/      HTTP, OpenAI schema, SSE streaming, the scheduler, the prefix cache
+  cli/         b70-serve and b70-decode: arguments, the hardware check, the memory plan,
+               the engine adapters (one card, slots, replica, tp, pp)
   tokenizer/   leaf: HF `tokenizers` BPE encode/decode, chat template,
                streaming detokeniser - see doc 11. Host code, request path only
 third_party/   pinned header-only minja and nlohmann/json
@@ -124,42 +157,25 @@ Dynamic shapes, so nothing is captured: every argument is resolved per launch.
 A prefill chunk runs on **one in-order asynchronous Level Zero immediate command
 list** (`ZE_COMMAND_QUEUE_FLAG_IN_ORDER`, `MODE_ASYNCHRONOUS`) and makes **no
 SYCL call and no host wait at all**. The int4 weights are dequantised into 1024
-column slabs and multiplied by our own DPAS GEMM, interleaved on that one list.
-Attention and the delta net scan are ours too.
+column slabs and multiplied by our own DPAS GEMM, interleaved on that one list (a short chunk, up to 384 rows, uses small tiles
+that read the int4 words directly, `pf_gemm_small` / `pf_gemm_q4`). Attention and the delta net scan are ours too.
 
-That is the second design of this path, and the first one is worth recording
-because the reason it was replaced is not the obvious one. The original prefill
-called sycl-tla's GEMM from a SYCL queue built by interop from the same
-`ze_context` and `ze_device`, which made the engine's `zeMemAllocDevice`
-pointers valid USM inside it. **The two queues are not orderable against each
-other on this device, and that is a measurement rather than a design
-preference**: `zeDeviceGetCommandQueueGroupProperties` on the B70 reports
-exactly two groups, ordinal 0 COMPUTE+COPY+COOPERATIVE with `numQueues = 1` and
-ordinal 1 COPY-only with `numQueues = 1`, and `(0,1)` and `(1,1)` are both
-refused with `ZE_RESULT_ERROR_INVALID_ARGUMENT`. There is one compute queue, the
-two software queues share it, and no device-side cross-runtime dependency
-primitive exists. So every L0-to-SYCL and SYCL-to-L0 boundary was a **host
-wait**: 656 per chunk at a measured 22.35 us each.
+That is the second design of this path, and the first one is worth recording because the reason it was
+replaced is not the obvious one. The original prefill called sycl-tla's GEMM from a SYCL queue built by
+interop from the same `ze_context` and `ze_device`. **The two queues are not orderable against each other on
+this device, and that is a measurement rather than a design preference**:
+`zeDeviceGetCommandQueueGroupProperties` on the B70 reports exactly two groups, ordinal 0
+COMPUTE+COPY+COOPERATIVE with `numQueues = 1` and ordinal 1 COPY-only with `numQueues = 1`, and `(0,1)` and
+`(1,1)` are both refused with `ZE_RESULT_ERROR_INVALID_ARGUMENT`. There is one compute queue, the two software
+queues share it, and no device-side cross-runtime dependency primitive exists. So every hand-over between
+Level Zero and SYCL was a **host wait**: 656 per chunk at a measured 22.35 us each.
 
-Moving the GEMM onto the Level Zero list deleted all of them. Measured on an
-idle card in one session, both backends:
-
-| | Level Zero | sycl-tla control |
-|---|---:|---:|
-| pp t/s | **1502.83** | 1407.63 |
-| launches per chunk | 8689 | 1201 |
-| host waits per chunk | **0** | 656 |
-| SYCL GEMM calls | **0** | 384 |
-| prefill scratch | 35,651,584 B | 356,515,840 B |
-
-Note the direction of the launch count: the Level Zero walk issues seven times
-as many launches and has *fewer* host stalls, not more. The worry that 8,689
-launches would cost host time in situ does not appear at all.
-
-The sycl-tla control was removed on 2026-10-27 (operator ruling: our own kernels
-over library layers); until then `prefill_backend_equivalence_test` held the two
-paths **bitwise equal** on all five case families. `--prefill-backend` is `l0`
-(the default) or `l0-int8` (doc 17, opt-in).
+Moving the GEMM onto the Level Zero list deleted all of them, and the Level Zero walk, with seven times as many
+launches (8,689 against 1,201 a chunk), was faster on an idle card (1502.83 against 1407.63 t/s) and used a
+tenth of the scratch. The worry that thousands of launches would cost host time does not appear at all. The
+sycl-tla path was removed on 2026-10-27 (operator ruling: our own kernels over library layers) after
+`prefill_backend_equivalence_test` had held the two bitwise equal. `--prefill-backend` is `l0` (the default)
+or `l0-int8` (doc 17, opt-in).
 
 Two host-side rules follow from the list being asynchronous, and are stated once
 here rather than at each site:
@@ -197,7 +213,7 @@ have no such problem: their state is fixed-size.
 
 There is no device flag (the zero-config cleanup, operator 2026-11-06, removed
 `--device` and the `ONEAPI_DEVICE_SELECTOR` parse): the CLIs run on the cards the
-driver shows - one card is device 0, two are devices 0 and 1 (`--parallel pp`).
+driver shows - one card is device 0, two are devices 0 and 1 (`tp`, `replica`, `pp`).
 **`ZE_AFFINITY_MASK`**, a Level Zero *driver*-level filter, decides which cards
 are enumerated at all; we respect it and never set it, and under a mask every
 index refers to the masked view (`ZE_AFFINITY_MASK=1` runs on the second card as
@@ -205,7 +221,7 @@ device 0).
 
 Before any weight is read, the hardware gate (`cli/hardware_check.h`) checks what
 the driver shows: one or two Intel Arc Pro B70s (vendor 0x8086, device id 0xE223;
-the B65 and B60 are refused as not yet tested), the Xe-core count the kernels are
+the B65 and B60 are refused as not tested), the Xe-core count the kernels are
 built for (32), and peer access both ways when there are two. The fit checks that
 run before a device opens use the memory the gate read from the cards.
 
@@ -251,7 +267,8 @@ bound by `capture.cc`, `M` a runtime argument in all of them:
 | `pf_gemv_bf16` | the `a‖b` bf16 projection |
 | `pf_dequant_slab` | one int4 linear into a bf16 column slab |
 | `pf_gemm` | our own DPAS GEMM |
-| `pf_attn_prep`, `pf_attn` | q/k norm, RoPE, the KV write, then the composed attention |
+| `pf_gemm_small`, `pf_gemm_q4` | the same on small tiles for short chunks; `pf_gemm_q4` converts the int4 words itself, no slab |
+| `pf_attn_prep`, `pf_attn`, `pf_flash_attn` | q/k norm, RoPE, the KV write, then attention (the fused flash form is the default; the composed form remains) |
 | `pf_gdn_conv`, `pf_gdn_wy`, `pf_gdn_scan` | the chunked delta net |
 
 The decode kernels' split-K exists to buy hardware threads at `M = 1`. At
@@ -263,47 +280,41 @@ decode row exactly where it was.
 
 ## Server
 
-OpenAI-compatible, single stream. No scheduler, no paged KV, no continuous
-batching. A ring KV buffer sized to `max_model_len` is sufficient when there is
-exactly one sequence.
-
-`src/server/` provides `/v1/models`, `/v1/chat/completions` and
-`/v1/completions`, including OpenAI-shaped errors and SSE responses, against
-`TokIface`, `TemplateIface` and `EngineIface`. `b70-serve` wires those
-interfaces to the real checkpoint tokenizer and template and to one
-`runtime::Engine`, using `Engine::prefill` for every request prompt. Requests
-share one engine through a bounded FIFO; requests beyond the configured waiting
-depth receive 503. The one intentional parsing deviation is that an absent
-`temperature` means greedy sampling. The parser also accepts the `min_tokens`,
-`ignore_eos`, `return_token_ids`, `seed` and `stream_options.include_usage`
+OpenAI-compatible. `src/server/` provides `/v1/models`, `/v1/chat/completions` and `/v1/completions`,
+including OpenAI-shaped errors and SSE responses, against `TokIface`, `TemplateIface` and `EngineIface`.
+`b70-serve` wires those interfaces to the real checkpoint tokenizer and template and to the engine its run mode
+needs. The one intentional parsing deviation is that an absent `temperature` means greedy sampling. The parser
+also accepts the `min_tokens`, `ignore_eos`, `return_token_ids`, `seed` and `stream_options.include_usage`
 extension fields.
 
-`golden_server_test` proves the server reproduces `b70-decode --ids --prefill`'s
-exact ids on the three golden prompts, both sides on the same engine path.
+**One request at a time** (`--max-num-seqs 1`, the default; one card, `tp`, `pp`): requests share one engine
+through a bounded FIFO; requests beyond the waiting depth (4) receive 503. `Engine::prefill` runs every prompt.
+`golden_server_test` proves the server reproduces `b70-decode --ids --prefill`'s exact ids on the three golden
+prompts, both sides on the same engine path.
 
-**HTTP costs nothing measurable.** Decode over HTTP measured 29.902 t/s against
-the same session's CLI control of 29.31, i.e. 102.0%: the per-token host cost of
-detokenising and writing an SSE frame overlaps the next replay and is not merely
-under bar, it is not measurably present. Prefill over HTTP measured 2915.83 ms
-for 4096 tokens against the CLI's 2919.6, a derived cost of -3.77 ms, which is
-indistinguishable from zero against the run-to-run spread both sides show.
+**Several at once** (`--max-num-seqs` above 1, `replica`): the scheduler (`src/server/scheduler.{h,cc}`)
+owns a batch engine and serves up to that many requests. A request waits in a queue (also 4 beyond the free
+slots, then 503), takes a free slot, prefills, and then decodes one step shared with every other decoding slot.
+At most one prefill chunk runs at a time per card and alternates with the decode steps, so a long prompt does not
+stall the others for its whole length. On one card the batch engine is `cli::SlotsEngine` (the per-slot engine
+adapters; a step over several slots is one batched replay of small-batch kernels); under `replica` it is
+`cli::ReplicaEngine` over one such engine per card, each on its own thread: a prompt goes to the slot that
+holds its prefix (else the card with the most free slots), and both cards can prefill at once. Speculative
+decoding (MTP, prompt lookup) runs per slot inside the shared step, within a row budget of 8 rows per step.
+A lone request is bitwise what the one-request server computes; several at once are judged against their lone
+runs by the f32 judge (doc 14), because the many-row kernels round differently.
 
-Host sampling (temperature, top-k, top-p) is implemented in the CLI's engine
-adapter: the replay's fp32 logits row is read back once per sampled token
-through a reused immediate command list, masked to `vocab_used`, top-k/softmax/
-top-p sampled, and written into `cur_token[0]` - the same protocol `Control`
-already supports for ingest. It measured **0.537 ms/token** against a 0.62 ms
-bar registered before the measurement, so it ships on: any request with
-`temperature > 0` is sampled. Greedy is never slowed, because the readback only
-runs when a request asks for sampling.
+**HTTP costs nothing measurable.** On the first server build, decode over HTTP measured 102.0% of the same
+session's CLI control: the per-token host cost of detokenising and writing an SSE frame overlaps the next
+replay. Prefill over HTTP measured 2915.83 ms for 4096 tokens against the CLI's 2919.6, indistinguishable from
+zero against the run-to-run spread.
 
-The scheduler for batching several requests in one decode step (spec 13, `src/server/scheduler.h`) exists
-and is tested against a host mock, but the engine side (spec 13c: per-slot state and one captured list per
-batch size) is not built, so the server still runs one sequence at a time.
-
-Deferring batching is not a shortcut. It isolates the variable being tested,
-which is per-token host and kernel cost, and keeps the first milestone
-reachable.
+Host sampling (temperature, top-k, top-p) is implemented in the CLI's engine adapter: the replay's fp32 logits
+row is read back once per sampled token through a reused immediate command list, masked to `vocab_used`,
+sampled on the host, and written into `cur_token[0]` - the same protocol `Control` already supports for
+ingest. It measured **0.537 ms/token** against a 0.62 ms bar registered before the measurement, so any request
+with `temperature > 0` is sampled. Greedy is never slowed, because the readback only runs when a request asks
+for sampling.
 
 ### Prefix caching
 
@@ -320,7 +331,8 @@ A request continues the resident session when its ids extend it, otherwise resto
 the deepest snapshot that is a prefix of the prompt (state plus the KV the card does
 not already hold), and prefills only the tail; `usage.prompt_tokens_details.cached_tokens`
 reports the restart point. opencode's side requests (titles, subagents) evict the card,
-not the store. Results: [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching (spec 7)".
+not the store. With several slots each slot is its own resident session over the one shared store (under `replica`
+a snapshot saved on one card restores on the other). Results: [BENCHMARKS.md](BENCHMARKS.md), "Prefix caching (spec 7)".
 
 The server owns the **tokenizer and chat template**. Both are host code on the
 request path: encode once per request, detokenise once per token, off the card's
