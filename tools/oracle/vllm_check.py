@@ -241,7 +241,7 @@ def main() -> int:
     total = sum(len(golden[p]) for p in PROMPTS)
     print(f"\n=== VERDICT: {total_ok}/{total} ids equal across {len(PROMPTS)} prompts")
     if all_match:
-        print("=== ALL THREE AGREE - the trust chain is closed (docs/14, "The third implementation").")
+        print("=== ALL THREE AGREE - the trust chain is closed (docs/14, 'The third implementation').")
         return 0
     print(
         "=== vLLM DIVERGES from engine==oracle. docs/14's ruling: suspect\n"
