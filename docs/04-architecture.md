@@ -79,6 +79,14 @@ with `length` and is logged.
 Tensor parallel with slots was built and ruled out (replica is faster for several requests at once;
 [low-priority-work.md](low-priority-work.md)).
 
+**Why fixed slots and not a shared KV pool (operator, 2026-11-11).** The engine is tuned for one or two people
+running local agentic sessions: a main session that needs its full context plus a few short helper requests. Each
+slot's KV memory is reserved at startup, so the main session always has its context, nothing is ever preempted
+(stopped and recomputed later to free memory), and no request races another for memory. vLLM's paged pool (one
+pool of small KV blocks shared by all requests, `max_model_len` the most any one request may reach) uses memory
+better when request sizes vary, at the cost of block tables in every attention kernel, a preemption policy and
+the latency spikes it causes. That option was considered and postponed ([low-priority-work.md](low-priority-work.md)).
+
 Two cross-cutting pieces sit on top of the decode and prefill paths. **Speculative decoding**
 (`--spec mtp|lookup|dflash|dflash-lookup`, specs 8, 19, 19e, 19f) checks several guessed tokens in one
 verify list. Prefill is bf16 on the Level Zero list by default; `--prefill-backend l0-int8` (Hadamard-rotated
