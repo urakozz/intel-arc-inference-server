@@ -88,7 +88,7 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
                     if key not in totals:
                         totals[key] = {'engine_counted': [0]*k, 'engine_accepted': [0]*k,
                                        'reference_counted': [0]*k, 'reference_accepted': [0]*k,
-                                       'anchors': 0, 'live_ids': 0}
+                                       'anchors': 0, 'verified_ids': 0}
                     total = totals[key]
                     for arm, drafts in [('engine', rec['ids']), ('reference', ref[:k])]:
                         c, a = prefix_counts(ids, drafts, greedy, p, dump['tap_from'])
@@ -96,7 +96,7 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
                             total[arm + '_counted'][j] += c[j]
                             total[arm + '_accepted'][j] += a[j]
                     total['anchors'] += 1
-                    total['live_ids'] += 1 + rec['accepted']
+                    total['verified_ids'] += 1 + rec['accepted']
                     detail.append({'name': name, 'p': p, 'k': k, 'reference': ref[:k], 'engine': rec['ids']})
             print(f"ENGINE_ACCEPT {name}: {len(by_anchor)} anchors, K=1..7 (fixed 8-row block)", flush=True)
     report = {'run': run, 'corpora': {}, 'drafts': detail}
@@ -105,14 +105,14 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
         row['engine_E'] = expected(row['engine_counted'], row['engine_accepted'])
         row['reference_E'] = expected(row['reference_counted'], row['reference_accepted'])
         row['gap'] = abs(row['engine_E'] - row['reference_E'])
-        row['live_ids_per_iteration'] = row['live_ids'] / row['anchors']
+        row['verified_ids_per_anchor'] = row['verified_ids'] / row['anchors']
         report['corpora'].setdefault(corpus, {})[str(k)] = row
         # G-accept is the A4/code gate. Other corpora remain recorded for G-drafter.
         gated = corpus in ('a4', 'code') and k == 7
         ok = row['gap'] <= 0.15
         passed &= not gated or ok
         print(f"G_ACCEPT corpus={corpus} K={k} engine_E={row['engine_E']:.5f} reference_E={row['reference_E']:.5f} "
-              f"gap={row['gap']:.5f} live_ids={row['live_ids_per_iteration']:.5f} "
+              f"gap={row['gap']:.5f} verified_ids_per_anchor={row['verified_ids_per_anchor']:.5f} "
               f"{'PASS' if ok else 'FAIL'}{' (gate)' if gated else ' (recorded)'}", flush=True)
     if not {'a4', 'code'} <= set(report['corpora']):
         passed = False
