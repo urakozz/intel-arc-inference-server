@@ -218,7 +218,8 @@ __kernel void q4_pf_sparse_attn(__global const ushort* restrict Q, __global cons
 #if EAGER
     const float8 w = o[dd];                      // already normalised; rounded once below
 #else
-    const float8 w = o[dd] / lsum;
+    // An empty list (count 0 - q4_qsa_select never writes one: count >= 2048) ran no tile: O 0, not 0 / 0.
+    const float8 w = count != 0u ? o[dd] / lsum : (float8)(0.0f);
 #endif
     float wv[8];
     vstore8(w, 0, wv);
