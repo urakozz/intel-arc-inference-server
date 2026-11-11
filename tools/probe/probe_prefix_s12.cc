@@ -96,7 +96,7 @@ int main(int argc, char** argv) {
   eng.prepare_prefill();
   EngineAdapter ad(eng, model::Qwen35::kVocabUsed);
   PinnedAlloc alloc(ctx, size_t(gb) << 30);
-  server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+  server::PrefixSession s(ad, alloc.size(), &alloc);
   const bool sp = split != 0;
   const auto begin = [&](const Ids& p) { return s.begin(p, sp); };
   std::printf("probe_prefix_s12: history %u, tail %u, cache %u GiB, split_last %u, backend %s\n",

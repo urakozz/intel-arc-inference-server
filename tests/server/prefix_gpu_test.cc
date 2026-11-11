@@ -164,7 +164,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
       cand_tok.push_back(rig.ad.step(greedy));
     }
   } else {
-    server::PrefixSession s(rig.ad, rig.alloc.mem.size(), &rig.alloc);
+    server::PrefixSession s(rig.ad, rig.alloc.size(), &rig.alloc);
     const char n = want.name[0];
     if (n == 'a' || n == 'b') {
       const Ids t1 = slice(L, 0, 3000);

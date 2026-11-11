@@ -166,7 +166,7 @@ bool run_seq(runtime::k2::K2Engine& eng, Adapter& ad, PinnedAlloc& alloc, const 
       cand_tok.push_back(ad.step(greedy));
     }
   } else {
-    server::PrefixSession s(ad, alloc.mem.size(), &alloc);
+    server::PrefixSession s(ad, alloc.size(), &alloc);
     const char n = want.name[0];
     if (n == 'a' || n == 'b') {
       const Ids t1 = slice(L, 0, 3000);
