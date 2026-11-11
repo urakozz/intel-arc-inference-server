@@ -1,95 +1,66 @@
 # Running the models
 
-How to download, serve, decode and benchmark each model the engine knows, what each one supports today,
-and which of those configurations have actually run on a B70. Every flag and environment variable is
-explained in the project README's tables; this page says which ones matter for which model, and which
-setup to pick for which job.
-
-Numbers are **measured** (on the card, with its row in [BENCHMARKS.md](BENCHMARKS.md)) or **derived**
-(arithmetic from the memory planner or byte counts), as in the specs. The speed numbers below were taken
-on a shared box; the quiet-box measurement session in [open-work.md](open-work.md) re-takes them.
-
-## Which setup for what
-
-All of this is Qwen3.8-27B, the model everything is tuned for. The box has two cards; the engine also
-runs on one. The flags are explained in the next section.
-
-| you want | run | why |
-|---|---|---|
-| the fastest single session (one agent, one request at a time) | nothing extra: `--parallel auto` on two cards is **tp** (tensor parallel: every layer split over both cards) | about 1.46x one card's decode with `--spec auto`; the context is the full 262144 with the bf16 cache |
-| 2 to 8 requests at once (several agents, or an agent and its helpers) | `--max-num-seqs N`: on two cards that is **replica** (one copy of the model on each card, the requests spread over both) | aggregate speed grows with N: 1 / 2 / 4 requests 72 / 137 / 206 t/s (measured, MTP, shared box) |
-| a model too big for one card that has no tp | `--parallel pp` (pipeline parallel: the layers split between the cards) | about one card's speed, but each card holds half the weights, so more context fits |
-| one card only | `--max-num-seqs` up to 4 slots on that card; `--kv-cache int8` for long context beside the slots | 1 / 2 / 4 requests 72 / 106 / 125 t/s (measured, MTP, shared box) |
-
-How long the contexts are (derived, per card, with MTP):
-
-| `--max-num-seqs` on a card | bf16 cache | int8 cache |
-|---|---|---|
-| 1 | 171008 | 262144 |
-| 2 | 129536 + 32768 | 258048 + 32768 |
-| 4 | 46080 + 3 x 32768 | 167936 + 3 x 32768 |
-
-The first number is slot 0, the largest context that fits beside the other slots; the others are slots
-of 32768. On two cards `--max-num-seqs 2` is one slot a card (each the "1" row), 4 is two slots a card,
-8 is four slots a card. Tensor parallel with several slots was tried and ruled out (replica is faster at
-4 requests, 206 against 121 t/s; notes in [low-priority-work.md](low-priority-work.md)).
+Recipes first for Qwen3.8-27B, the model everything is tuned for; the other models follow. Every flag is explained
+in the [README](../README.md#flags). Speeds are MTP speculative decoding with a 2,820-token prompt and 512 generated
+tokens per request; context lengths are the memory planner's, per card, with the MTP head loaded.
 
 ```sh
+uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
-./build/src/cli/b70-serve $Q --prefix-split-last                                   # one session, tp on two cards
-./build/src/cli/b70-serve $Q --max-num-seqs 4 --kv-cache int8 --prefix-split-last  # 4 requests, replica (2 a card)
-./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8         # one card, 4 slots
 ```
 
-## What the CLIs take
+`--prefix-split-last` is in every agentic recipe: with chat clients that drop the reasoning (opencode) it makes
+each next turn a prefix cache hit exactly where it diverges. Leave it off for benchmarks.
 
-`b70-serve` (the OpenAI-compatible server) and `b70-decode` (ids in, ids out, plus benchmark and profile
-modes) choose the model from the checkpoint's `config.json`; there is no model flag. The engine has no
-tuning flags and runs on B70 only. What you choose:
+## Qwen3.8-27B on one card
 
-- **`--parallel auto|1|pp|tp|replica`** (default `auto`). `auto` on two cards: Qwen3.8 runs **tp** when
-  `--max-len` is auto and `--max-num-seqs` is 1, **replica** when `--max-num-seqs` is above 1; in every
-  other case one card if the model and the asked context fit it, else **pp**. `1`: one card. `pp`: the
-  layers split over both cards (`--pipeline-split auto|N` and `--pipeline-handoff copy|peer` are its
-  overrides and imply pp). `tp` and `replica` are Qwen3.8 only; every other model refuses them by name.
-  Kolibri-1 and Nemotron 3.5 Bolt need both cards and run on two by default. `b70-decode` takes `auto`,
-  `1`, `pp` and `tp` (replica is the server's).
-- **`--max-num-seqs N`** (`b70-serve`, Qwen3.8; default 1; vLLM's flag, the same meaning): how many
-  requests run at once, and the context follows (the table above). One card takes up to 4, two cards
-  (replica) up to 8; `--parallel replica` alone means 2 (one request a card). `--parallel tp` and `pp`
-  with N above 1 are refused, and so are `--spec dflash` and `--draft-vocab` beside several slots on a
-  card. A request that reaches the end of its slot finishes with `length` and the server log says so. An
-  explicit `--max-len L` is slot 0's length; one that does not fit beside the other slots fails at
-  startup. Startup prints each card's slot layout.
-- **`--kv-cache bf16|int8`** (default `bf16`). The context (the KV cache) stored as 16-bit numbers, or as
-  8-bit numbers with a scale per token and head. int8 halves the cache, which is what puts the full
-  262144 tokens on one card beside MTP and leaves room for several slots; the price is a little
-  accuracy, and DFlash does not run on it. Built for Qwen3.8 and K2-Horizon; the other models are bf16
-  only (table below).
-- **`--prefix-cache-gb auto|N`** (default `auto`). The prefix cache lives in pinned system RAM, not on
-  the card: every prefill is written through to it, so a later request with the same history is a prefix cache hit
-  instead of re-prefilling. `auto` takes the smallest of 32 GiB, half the RAM and the available RAM
-  minus 8 GiB, and is off below 4 GiB; `0` is off. It is allocated as 2 GiB pieces (a host allocation
-  that both cards use must stay under 4 GiB, or the second card's mapping can fail).
-- **`--spec auto|off|mtp|lookup|dflash|dflash-lookup`** (default `auto`) with `--spec-max K`: the
-  speculative proposer, explained after this list. `auto` is the model's own MTP head where it has one
-  (Qwen3.8, Ornith) and off elsewhere. `b70-decode` defaults to off so its rows stay comparable.
-- **`--max-len auto|L`**: context capacity. `auto` is the largest multiple of 256 whose memory plan fits
-  with the engine's 1.5 GB reserve left, capped at the trained context (262144 for the Qwen models);
-  both CLIs print the length and the plan at startup. `b70-decode` keeps 16384 unless asked.
-- **`--prefix-split-last`**: for agentic sessions with a thinking model, so each turn is a prefix cache hit exactly
-  where the next one diverges (README, `b70-serve` flags). Off for benchmarks.
-- **`--prefill-backend l0|l0-int8`**: `l0-int8` runs the prompt pass with int8 activations (faster).
-  Together with `--kv-cache int8` it is an accepted known fail (a startup warning: about 3 % of tool
-  calls that copy exact text from a long prompt come out wrong); pair the int8 cache with `l0`.
-- **`--draft-vocab off|32k|64k|128k`**, `--draft-model PATH`, `--layers N|auto`, `--log-requests DIR`,
-  `--host`, `--port`: as in the README.
+| recipe | context | speed |
+|---|---:|---|
+| default, bf16 KV cache | 171,008 | 73 t/s |
+| full context: int8 KV cache | **262,144** | 73 t/s |
+| fastest prefill: int8 prompt pass, bf16 cache | 171,008 | prefill 2,205 t/s instead of 1,709 (4k prompt) |
+| several requests: `--max-num-seqs 4` | 46,080 + 3 x 32,768 (bf16), 167,936 + 3 x 32,768 (int8) | 73 / 108 / 127 t/s at 1 / 2 / 4 requests |
 
-The engine decides the rest: the int8 `lm_head`, the memory it leaves free (1.5 GB), the draft model's
-form (int8), the speculative cost tables, the served name (the repo id), the tokenizer, chat template and
-generation defaults (the snapshot's). It refuses at startup, by name, what does not fit or is not built.
-The int8 prefill and int8 cache, the hand-off between cards and the draft vocabulary are still being
-measured; they go when the quiet-box session decides them (open-work.md).
+```sh
+./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last                                 # default
+./build/src/cli/b70-serve $Q --parallel 1 --kv-cache int8 --prefix-split-last                 # full context
+./build/src/cli/b70-serve $Q --parallel 1 --prefill-backend l0-int8 --prefix-split-last       # fastest prefill
+./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8 --prefix-split-last # 4 requests
+```
+
+On a machine with one card `--parallel 1` can be left out. The int8 prompt pass and the int8 cache are not combined:
+together they round too much (about 3 % of tool calls that copy exact text from a long prompt come out wrong).
+
+## Qwen3.8-27B on two cards
+
+| recipe | mode | context | speed |
+|---|---|---:|---|
+| one session, fastest (the default) | `tp`: every layer split over both cards; needs peer-to-peer between them | **262,144** (bf16) | **123 t/s**, prefill 2,939 t/s (4k prompt) |
+| two sessions at full context: `--max-num-seqs 2` | `replica`: a model copy per card, one request each | 171,008 (bf16) or **262,144** (int8) each | 140 / 164 t/s total |
+| most requests at once: `--max-num-seqs 8` | `replica`, 4 slots per card | 46,080 + 3 x 32,768 (bf16) or 167,936 + 3 x 32,768 (int8) per card | **250 / 258 t/s** total at 8 requests, 36 t/s each |
+
+```sh
+./build/src/cli/b70-serve $Q --prefix-split-last                                    # one session, tp
+./build/src/cli/b70-serve $Q --max-num-seqs 2 --kv-cache int8 --prefix-split-last   # two sessions, full context each
+./build/src/cli/b70-serve $Q --max-num-seqs 8 --kv-cache int8 --prefix-split-last   # up to 8 requests
+```
+
+With `--max-num-seqs N`, slot 0 is the largest context that fits beside N - 1 slots of 32,768; on two cards the
+slots are split between the cards (card 0 takes the odd one). An explicit `--max-len` that does not fit beside the
+other slots is refused at startup with the numbers. `tp` runs one request at a time and the bf16 prompt pass only.
+Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
+Qwen3.8 fits one card even at full context, so it gains nothing there.
+
+## Qwen3.8-27B: benchmarks and greedy runs
+
+```sh
+./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256           # prefill 4096, then decode 256
+./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 32 --parallel tp
+./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --spec mtp > out.ids
+./build/src/cli/b70-decode $Q --profile --depth 4096 --steps 32 --repeats 5    # per-launch decode timing
+```
+
+`b70-decode` defaults to one card, `--max-len 16384` and no speculative decoding so its rows stay comparable.
 
 ## Which models, and what each supports
 
@@ -214,63 +185,7 @@ doc 14): a speculative stream passes when it is no further from a float32 refere
 the same context, or when every miss is a near-miss (`golden::NearMiss`, within 8 bf16 ulps of the f32
 top). Plain, unchanged code paths still gate bitwise.
 
-## Qwen3.8-27B
-
-`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: the model everything is tuned for. 64 layers (48 delta
-net, 16 attention), int4 g64, bf16 `lm_head` and MTP head in the file (the engine runs the head as int8).
-
-**On the card (measured, [BENCHMARKS.md](BENCHMARKS.md)):** decode and prefill at depth (including 128k),
-the 131072 and longer contexts with passkey, the prefix cache and `--prefix-split-last`, MTP and DFlash,
-tensor parallel (plain decode at depth 4096: 33.49 t/s on one card, 53.95 t/s on tp; `--spec auto`:
-62.12 against 90.39 t/s), replica and the slots (the table at the top), the golden gates and the
-tool-call test.
-
-```sh
-uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
-Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
-
-# agentic session on two cards, the default: tp, the largest context (262144 with the bf16 cache),
-# MTP choosing 0-3 guesses per step, the prefix cache sized from the machine's RAM
-./build/src/cli/b70-serve $Q --host 0.0.0.0 --port 8000 --prefix-split-last
-
-# the same on one card: the largest context that fits beside the MTP head (171008 bf16, 262144 int8)
-./build/src/cli/b70-serve $Q --parallel 1 --kv-cache int8 --prefix-split-last
-
-# several agents at once: 4 requests, replica on two cards (see the table at the top for the contexts)
-./build/src/cli/b70-serve $Q --max-num-seqs 4 --kv-cache int8 --prefix-split-last
-
-# an explicit context and cache size, no proposer
-./build/src/cli/b70-serve $Q --parallel 1 --kv-cache int8 --max-len 131072 --prefix-cache-gb 32 \
-    --prefix-split-last --spec off
-
-# prompt lookup instead of the MTP guesses (one proposer per server)
-./build/src/cli/b70-serve $Q --kv-cache int8 --prefix-split-last --spec lookup
-```
-
-```sh
-# the BENCHMARKS.md rows: prefill 4096, then decode 256 at that depth (b70-decode defaults to one card)
-./build/src/cli/b70-decode $Q --bench --prefill-length 4096 --tg 256
-./build/src/cli/b70-decode $Q --bench --depth 4096 --tg 256 --max-len 131072  # decode at a deep cache
-./build/src/cli/b70-decode $Q --bench --depth 4096 --tg 256 --parallel tp     # the same on both cards
-
-# greedy ids in, ids out
-./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill > out.ids
-./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --spec mtp
-
-# per-launch anatomy of the decode step
-./build/src/cli/b70-decode $Q --profile --depth 4096 --steps 32 --repeats 5
-```
-
-**Limits.** The trained context is 262144; with the bf16 KV cache one card holds 171008 with the MTP head
-and ~201k plain (derived), and tp reaches the full 262144 because each card holds half the cache.
-`--kv-cache int8` needs the `l0` or `l0-int8` prefill. Under tp: no DFlash, no draft vocabulary, no
-`l0-int8` prefill, no `--profile`, one request at a time. `b70-decode` keeps `--max-len 16384` and
-`--spec off` by default so its rows stay comparable.
-
-**Relevant variables:** `B70_KV_CACHE` (the default of `--kv-cache`), `B70_PREFILL_PROFILE` for prefill
-phase timings, `B70_GIT_SHA` for bench rows.
-
-### DFlash draft model (spec 19)
+## Qwen3.8-27B with the DFlash draft model (spec 19)
 
 `z-lab/Qwen3.8-27B-DFlash2` drafts a block of up to 7 tokens per step from Qwen3.8's own hidden states (the
 outputs of layers 5 / 19 / 33 / 47 / 61). Its acceptance on our prompts was measured on the Mac CPU
