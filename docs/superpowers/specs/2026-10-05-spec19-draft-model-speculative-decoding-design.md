@@ -1,5 +1,7 @@
 # Spec 19 - speculative decoding with a draft model
 
+Implemented; continued in [spec 19 v2](2026-11-11-spec19v2-dflash-v2-design.md) (2026-11-11).
+
 > **Zero-config cleanup (operator 2026-11-06):** `--draft-format` (int8 at load), `--spec-cost`, `--spec-min-match` (3) and `--spec-history` were removed; `--spec dflash` takes `--spec-max` and `--draft-model` only.
 
 **Status:** design, 2026-10-05, for operator review. Open decisions are marked **(decide)**.
