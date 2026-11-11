@@ -1,5 +1,7 @@
 # Spec 21e - Qwen3.8-Flash-Next served: template and tokens, prefix-cache snapshots, the MTP head, draft / verify
 
+**Implemented; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-09): Tasks 1-6 built on the Mac (branch `spec21e-qwen4exp-serving`; as built: spec 21 §16 "21e as
 built"); nothing on a card yet - box queue row 34 (`tools/box_validate.sh --only r34`); Task 3 Step 4 and Task 5
 Step 2 are its opt-in CPU stages `r34.accept` / `r34.a4_ref` (hours, Intel's checkpoint), M1's data `r34.fixture`.**

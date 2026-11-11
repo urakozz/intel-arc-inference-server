@@ -1,5 +1,7 @@
 # Spec 22b - the expert table, the pinned host mirror and the static cache; Qwen3.8-Flash-Next whole on two cards
 
+**Not built; continued in [spec 21 v2](../specs/2026-11-11-spec21v2-flash-next-v2-design.md) and [plan 21v2a](2026-11-11-spec21v2a-whole-model-tiering.md) (2026-11-11).**
+
 **Status (2026-10-10): planned; begins only on the operator's go after plan 22a's record** (spec 22 §3's stopping
 rule). Task 1, Task 3's table (identity rows, no mirror) and Task 4's binding with O0 are also plan 22m's prerequisite (the coding mask addresses its kept experts through
 the same table) and may begin on decision 9 alone (Dependencies). Box queue row 37 (renumbers at build time if taken).
