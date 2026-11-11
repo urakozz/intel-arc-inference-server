@@ -1085,8 +1085,8 @@ set_tests_properties(prefill_gate_int8_c1000_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # Multi-chunk on the golden set: chunk 16 puts every prompt through 3 or 4 chunks (the
 # quantiser scratch reused across chunks, KV and GDN carried). The plan's multi-chunk pin
-# is prefill_gate_long_int8_test below, which is registered only while the RTN checkpoint
-# and oracle-out-long exist; neither does on the box (2026-09-24), so this pair stands in.
+# is prefill_gate_long_int8_test below (2820 ids at C = 1024); this pair covers chunk counts
+# the long prompt does not.
 add_test(NAME prefill_gate_l0_c16_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
   prose,code,cjk 16 l0)
@@ -1163,7 +1163,7 @@ if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
   set_tests_properties(prefill_gate_rtn_test PROPERTIES
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 else()
-  message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
+  message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test not registered")
 endif()
 
 # Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
@@ -1178,24 +1178,21 @@ endif()
 # rows exact on the short prompts. What is still untested here and nowhere
 # else is DEPTH: 2820 positions of chunked GDN carry against 141.
 #
-# `oracle-out-long` does not exist yet: producing it is one CPU run inside the
-# reference container, and the L1-engine stage is barred from starting
-# containers (its brief's operational rules). The test SKIPs (77) until the
-# directory is there, which is the same contract the other three golden
-# registrations use, and tools/oracle/README.md carries the one command.
-if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
-  add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT} long 1024)
-  set_tests_properties(prefill_gate_long_test PROPERTIES
-    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-  # Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
-  add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT} long 1024 l0-int8 1)
-  set_tests_properties(prefill_gate_long_int8_test PROPERTIES
-    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-endif()
+# The long prompt's reference is in the primary golden set beside the short three
+# (`long.golden.safetensors`, `PROMPTS=long tools/oracle/golden.sh`, tools/oracle/README.md);
+# the test SKIPs (77) until it is there. It was wired to the RTN checkpoint until
+# 2026-11-12, which left the box, so neither test was registered.
+add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+  ${B70_TEST_SNAPSHOT} long 1024)
+set_tests_properties(prefill_gate_long_test PROPERTIES
+  LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+# Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
+add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+  ${B70_TEST_SNAPSHOT} long 1024 l0-int8 1)
+set_tests_properties(prefill_gate_long_int8_test PROPERTIES
+  LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 
 # --- b70-decode's host-side rejections ---------------------------------------
 # The product binary had no automated test at all. These are the argument
