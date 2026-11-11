@@ -42,27 +42,28 @@ the golden gate matches the bf16 prefill, with one accepted bf16 near-tie
 
 ## Tensor parallel
 
-The TP int8 implementation uses 512-wide Hadamard blocks for the per-card down
-projection (K=8704, 17 blocks), normalised by 1/sqrt(512). Other linears retain
-1024-wide blocks. All per-card output widths are multiples of the 1024-column
-slab: QkvZ 8192, Qkv 7168, gate/up 17408, and out/o/down 5120. The out/o
-projections have K=3072; the column-parallel linears keep K=5120.
+TP uses the same 1024-wide rotation. Each card's down has raw K=8704, so the
+activation and weight kernels zero-extend it to K=9216 before rotation and int8
+GEMM. Checkpoint addressing retains raw K; only int8 scratch and GEMM use the
+padded width. This leaves the dot product unchanged before quantisation and
+requires neither another activation crossing nor a persistent weight copy.
+Other per-card widths already fit whole 1024 blocks: out/o K=3072, and the
+column-parallel linears K=5120. Every output width is whole 1024-column slabs.
 
-This chooses the local 512-wide rotation over rotating the full down input
-before splitting: the full 1024 rotation mixes channels across the 8704 boundary,
-requiring activation and weight exchanges. The local rotation keeps the existing
-TP wavefront, but changes quantisation numerics and needs its own f32 quality gate.
-`tp_prefill_int8_test` covers the golden and tool-call prompts, teacher-forcing
-one card's bf16 ids and judging every differing id on that same context. Missing
-judges print their context keys and SKIP with “awaiting f32 reference”.
+A 512-wide local rotation was tried and removed after f32-rejected differences
+of up to 30.67 bf16 ulps. Full-width rotation before splitting would require
+activation and weight data from the other card at the split boundary. The
+padded local path keeps TP's wavefront and the established rotation size.
 
-Box validation started after rebasing onto main: the targeted build, int8
-kernel and linear tests, CLI argument checks and one-card int8 prefill test pass.
-The fresh targeted build exposed missing bf16 short-chunk kernel dependencies;
-the shared test list now includes the selected variants. TP gates, production
-build, server validation and speed measurements are pending. Logs are under
-`~/b70/logs/tp-int8-prefill/validation-324952f5/`. No TP int8 quality or speed
-claim is established yet. The int8 prefill + int8 KV warning remains.
+`tp_prefill_int8_test` covers four golden and 36 tool-call prompts, teacher-forces
+one card's bf16 ids, and judges differences on that same context. It uses the
+documented f32 near-miss bar of eight ulps (`spec_judge.h`, doc 14); missing
+references print their context keys and SKIP. `--one-card` diagnoses the existing
+one-card int8 pass on the same contexts. The int8 prefill + int8 KV warning stays.
+
+Build, kernel, linear, memory-plan, one-card prefill and bf16 TP prefill checks
+pass. Five additional f32 contexts are running detached; quality and the padded
+path's speed table remain pending. See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
 
 ## Why decode stays int4 and bf16
 
