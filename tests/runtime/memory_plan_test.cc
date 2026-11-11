@@ -176,6 +176,7 @@ void check_sizes_ornith() {
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});
   CHECK_EQ(runtime::prefill_int8_max_k(model::qwen38()), uint32_t(17408));
+  CHECK_EQ(runtime::prefill_int8_max_k(model::tp_card_desc(model::qwen38(), model::TpCrossing::Folded)), uint32_t(9216));
   CHECK_EQ(runtime::prefill_int8_max_k(o), uint32_t(4096));
   // h8's column scales: the four mixer linears (the shared expert's GateUp / Down rows are
   // inside the expert blocks, not linears) + every layer's 257 x 1024-column gate||up array.

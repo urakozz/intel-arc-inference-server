@@ -14,18 +14,18 @@
 namespace runtime::prefill {
 namespace {
 constexpr uint32_t kNs = kernels::kPfSlabWidth;
-uint32_t rot_block(uint32_t K) { return K % 1024 == 0 ? 1024 : 512; }
+constexpr uint32_t kRotBlock = 1024;
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::linear_i8: " + what);
 }
 
 // What pf_colmax_rot / pf_requant_rot need of the weight: int4, either layout,
-// whole 512-k rotation blocks up to the largest K the scratch holds.
+// zero-extended 1024-k rotation blocks up to the largest K the scratch holds.
 void check_weight(const loader::DeviceWeight& w, uint32_t max_k) {
   const model::GemvShape& sh = w.shape;
   require(w.kind == model::WeightKind::Int4, "the h8 path's linears are all int4; this one is not");
-  require(sh.K % rot_block(sh.K) == 0, "K = " + std::to_string(sh.K) + " is not a whole number of 512-k rotation blocks");
-  require(sh.K <= max_k, "K = " + std::to_string(sh.K) + " exceeds the int8 scratch's " +
+  require(sh.K % 64 == 0, "K is not a whole number of int4 scale groups");
+  require(int8_padded_k(sh.K) <= max_k, "rotated K = " + std::to_string(int8_padded_k(sh.K)) + " exceeds the int8 scratch's " +
                              std::to_string(max_k));
   require(sh.layout == 0 || sh.layout == 1, "layout " + std::to_string(sh.layout) + " is neither 0 nor 1");
   require(sh.layout != 0 || w.scales != nullptr, "layout 0 weight has no independent scales allocation");
@@ -51,29 +51,30 @@ void walk(Context& cx, KernelCache& kc, Int8State& q, const loader::DeviceWeight
   const model::GemvShape& sh = w.shape;
   const std::pair<l0::Mem, l0::Mem>& sc = q.scales(cx, kc, w);   // cached after the first call
   const uint32_t Mp = pad256(M);
-  const uint32_t ldxq = sh.K / 2;
-  const l0::Mem& sgn = q.signs_f32(sh.K);
-  const l0::Mem& bits = q.sign_bits(sh.K);
+  const uint32_t Kq = int8_padded_k(sh.K);
+  const uint32_t ldxq = Kq / 2;
+  const l0::Mem& sgn = q.signs_f32(Kq);
+  const l0::Mem& bits = q.sign_bits(Kq);
   l0::Kernel& quant = kc(kernels::pf_quant_had_variant(sh.K), "pf_quant_had");
-  l0::Kernel& requant = kc(kernels::pf_requant_rot_variant(sh.layout, rot_block(sh.K)), "pf_requant_rot");
+  l0::Kernel& requant = kc(kernels::pf_requant_rot_variant(sh.layout, sh.K != int8_padded_k(sh.K)), "pf_requant_rot");
   l0::Kernel& gemm = kc(kernels::pf_gemm_i8_variant(silu), "pf_gemm_i8");
   const void* scales = sh.layout == 0 ? w.scales->ptr() : nullptr;
   const float* ws = sc.first.as<float>();
   l0::Mem& w8 = q.w8_slab();
 
-  // x [pad256(M)][K] at pitch K -> xq [pad256(M)][K] int8, xs [pad256(M)].
+  // x [pad256(M)][K] at pitch K -> xq [pad256(M)][Kq] int8, xs [pad256(M)].
   cx.launch(quant, Mp, 1, 1,
             {PtrArg(x), PtrArg(sgn.ptr()), PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()),
              arg_val(sh.K)});
   profile_wait(cx, Phase::kI8Quant);
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
-    cx.launch(requant, kNs / 16, sh.K / rot_block(sh.K), 1,
+    cx.launch(requant, kNs / 16, int8_padded_k(sh.K) / kRotBlock, 1,
               {PtrArg(w.mem.ptr()), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(sc.second.ptr()),
                PtrArg(w8.ptr()), arg_val(n0), arg_val(sh.N), arg_val(sh.K), arg_val(kNs)});
     profile_wait(cx, Phase::kI8Requant);
     cx.launch(gemm, Mp / 256, kNs / 128, 1,
               {PtrArg(q.xq().ptr()), PtrArg(q.xs().ptr()), PtrArg(w8.ptr()), PtrArg(ws + n0),
-               PtrArg(c_at(n0)), arg_val(Mp), arg_val(sh.K), arg_val(kNs), arg_val(ldxq),
+               PtrArg(c_at(n0)), arg_val(Mp), arg_val(Kq), arg_val(kNs), arg_val(ldxq),
                arg_val(kNs), arg_val(ldc)});
     profile_wait(cx, Phase::kI8Gemm);
   }
@@ -140,9 +141,9 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, Kernel
   const std::vector<uint32_t> zero(sh.N, 0u);
   l0::Mem colmax(ctx_, l0::MemKind::Device, size_t{sh.N} * 4);
   imm_.copy(colmax.ptr(), zero.data(), zero.size() * 4);
-  const l0::Mem& bits = sign_bits(sh.K);
-  cx.launch(kc(kernels::pf_requant_rot_variant(sh.layout, rot_block(sh.K)), "pf_colmax_rot"), sh.N / 16,
-            sh.K / rot_block(sh.K), 1,
+  const l0::Mem& bits = sign_bits(int8_padded_k(sh.K));
+  cx.launch(kc(kernels::pf_requant_rot_variant(sh.layout, sh.K != int8_padded_k(sh.K)), "pf_colmax_rot"), sh.N / 16,
+            int8_padded_k(sh.K) / kRotBlock, 1,
             {PtrArg(qw), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
              arg_val(0u), arg_val(sh.N), arg_val(sh.K)});
   cx.wait();

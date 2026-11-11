@@ -25,7 +25,7 @@ namespace runtime::prefill {
 class Int8State {
  public:
   // `max_k`: the largest int4 linear K the scratch must hold - the model's MLP
-  // intermediate (down's K): 17408 on Qwen3.8.
+  // intermediate (down's K), rounded to 1024: 17408 on one card, 9216 under TP.
   // `chunk_cap` (plan 5d): the rows of xq / xs - the session's prefill chunk cap, 2048 or 4096.
   Int8State(l0::Context& ctx, uint32_t max_k, uint32_t chunk_cap);
   // ws/inv for this weight, computed on first call (pf_colmax_rot + host

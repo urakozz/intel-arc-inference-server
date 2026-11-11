@@ -190,8 +190,8 @@ inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layo
 
 // Spec 5: the int8 prefill linears (pf_int8.cl).
 inline std::string pf_quant_had_variant(unsigned K) { return "pf_quant_had_K" + std::to_string(K); }
-inline std::string pf_requant_rot_variant(unsigned layout, unsigned block = 1024) {
-  return "pf_requant_rot_L" + std::to_string(layout) + (block == 1024 ? "" : "_R512");
+inline std::string pf_requant_rot_variant(unsigned layout, bool padded = false) {
+  return "pf_requant_rot_L" + std::to_string(layout) + (padded ? "_PAD" : "");
 }
 inline std::string pf_gemm_i8_variant(bool silu) { return silu ? "pf_gemm_i8_SILU" : "pf_gemm_i8"; }
 
