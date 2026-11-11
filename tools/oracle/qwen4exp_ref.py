@@ -194,7 +194,7 @@ SHARED_LINEARS = ("gate_proj", "up_proj", "down_proj")
 INT4 = (".qweight", ".qzeros", ".scales")
 
 
-def expected_names(tc, form: str, mtp: bool = True) -> list[str]:
+def expected_names(tc, form: str, mtp: bool = True, head_q: bool = False, mtp_q: bool = False) -> list[str]:
     """Every text-model tensor of a checkpoint in `form` (vision excluded):
       "bf16"  the original: fused routed experts `mlp.experts.gate_up_proj` / `down_proj`, all bf16
       "intel" Intel's AutoRound export: per-expert int4 `qweight` / `qzeros` / `scales` (g128), the rest bf16
@@ -203,7 +203,9 @@ def expected_names(tc, form: str, mtp: bool = True) -> list[str]:
               GDN in_proj_qkv / in_proj_z / out_proj; everything else bf16 (ple ignored); MTP as Intel's
               (decision 6 open)
       "tiny"  qikp/tiny-random-...: `model.layers.*` prefix, per-expert `.weight` experts
-    `mtp` adds the head's `mtp.*` (the original's and Intel's sets; the tiny has none)."""
+    `mtp` adds the head's `mtp.*` (the original's and Intel's sets; the tiny has none). Spec 21 v2 §2's export
+    (tools/quantize/quantize_qwen4exp.sh): "ours" with `head_q` (`lm_head` int4) and `mtp_q` (the MTP head's
+    routed experts int4, the rest of the head bf16)."""
     if form not in ("bf16", "intel", "ours", "tiny"):
         raise ValueError(form)
     P = "model." if form == "tiny" else "model.language_model."
@@ -239,7 +241,7 @@ def expected_names(tc, form: str, mtp: bool = True) -> list[str]:
 
     q_dense = form == "ours"
     ex_form = {"bf16": "fused", "intel": "int4", "ours": "int4", "tiny": "weight"}[form]
-    names = [P + "embed_tokens.weight", "lm_head.weight"] + hc(P + "hyper_connection_mixer", False)
+    names = [P + "embed_tokens.weight"] + lin("lm_head", head_q) + hc(P + "hyper_connection_mixer", False)
     ple_layers = {i - 1 for i in tc.ple_layer_ids}
     for i, t in enumerate(tc.layer_types):
         b = f"{P}layers.{i}."
@@ -263,7 +265,7 @@ def expected_names(tc, form: str, mtp: bool = True) -> list[str]:
         names += ["mtp.fc_embedding.weight", "mtp.fc_hidden.weight", "mtp.pre_fc_norm_embedding.weight",
                   "mtp.pre_fc_norm_hidden.weight"] + hc("mtp.hyper_connection_mixer", False)
         names += hc(b + "attn_hyper_connection", True) + hc(b + "mlp_hyper_connection", True)
-        names += moe(b, "fused" if form == "bf16" else "weight", False) + qsa(b, False)
+        names += moe(b, "fused" if form == "bf16" else ("int4" if mtp_q else "weight"), False) + qsa(b, False)
     return names
 
 

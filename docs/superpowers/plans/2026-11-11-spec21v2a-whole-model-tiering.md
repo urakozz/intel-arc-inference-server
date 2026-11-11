@@ -1,8 +1,10 @@
 # Spec 21 v2a - Qwen3.8-Flash-Next whole on two cards: our AutoRound export, the tiering probe, the tier on `--parallel pp`
 
-**Status (2026-11-12): planned, revised with the operator's decisions** (spec 21 v2 §0). Tasks 1-6 need no further
-operator go except where a task says so (Task 2's machine time, Task 6's go); Task 8 onwards begins on the operator's
-go after Task 6's record. Tensor parallel with the expert split is plan
+**Status (2026-11-12): planned, revised with the operator's decisions** (spec 21 v2 §0, including the same day's
+follow-up: tuned AutoRound, our export only, no comparison with Intel's checkpoint). Task 1 is done on branch
+`flash-next-quant` (`tools/quantize/quantize_qwen4exp.sh`, proven on the tiny model); Tasks 2-3 are the operator's
+weekend run (open-work's "Quantise Flash-Next" row). Tasks 4-6 need no further operator go except Task 6's go; Task 8
+onwards begins on the operator's go after Task 6's record. Tensor parallel with the expert split is plan
 [21v2b](2026-11-12-spec21v2b-tensor-parallel.md), after this plan's Task 10.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
@@ -44,47 +46,55 @@ flag, the engine decides instead (zero-config); test-only choices are environmen
 
 ---
 
-### Task 1: the bf16 original on the box and the AutoRound toolchain on the tiny model
+### Task 1: the bf16 original on the box and the AutoRound toolchain on the tiny model (done 2026-11-12, `flash-next-quant`)
 
-- [ ] **Step 1 (operator): the download.** The command for the operator: `HF_HUB_CACHE=~/b70/hdd/hf-hub hf download
-  Qwen/Qwen3.8-Flash-Next`, then the HF cache entry linked to that cold copy, the form `tools/hf_tier.sh cold` leaves
-  (`tools/hf_tier.sh status` shows it as cold). Then check: every shard the index names exists with its size, the LFS sha256 of each shard equals the
-  hub's, total ~360 GB; the PLE table shards hashed against Intel's snapshot's (equal -> the existing
-  `qwen3.8-flash-next-ple-int8/` file is reused, spec 21 v2 §2).
-- [ ] **Step 2: the pinned AutoRound on the tiny fused model.** `ar_pin.sh`'s 0.17.0 @ `6afaecdb` + the patch, the
-  tiny model in the original's form with fused experts (`tools/oracle/qwen4exp_make_tiny.py --form bf16 --mtp`), the recipe of spec 21 v2 §2 with
-  `--quant_lm_head`, low-CPU-memory mode, `--iters 0` and `--iters 2`. Record file:line of AutoRound's `qwen4_exp` /
-  fused-expert handling.
-- [ ] **Step 3: the head and the MTP head.** The tuned export packs `lm_head` (int4 g64); the RTN export in
-  low-CPU-memory mode does not (README's 0.17.0 bug) - add the head packing by our RTN g64 rule (`loader/rtn.h`'s, as
-  a Python step in the script) for that path. The MTP head: a small AutoRound pass over `mtp.*` with captured inputs if
-  the pinned API allows it on the tiny model, and RTN g64 at export in any case; both write per-expert `mtp.*`
-  `qweight` / `scales` / `qzeros`.
-- [ ] **Step 4:** the script `tools/quantize_qwen4exp.sh` (plan 21q's stages, `--dry-run` / `--only` / `--from`),
-  `check.py` extended: `lm_head` int4 g64 packed, `mtp.*` experts int4 g64, `ple.*` untouched, every name of
-  `expected_names` both ways.
-- **Gate:** the download check passes (sizes and hashes); on the tiny model the tuned and the RTN exports both print
-  `ACCEPTED` from `check.py` and `check_gptq_export.py --lm-head quant`, per-expert tensors for every routed, shared
-  and MTP expert, the ignore list's tensors bitwise the source; or a STOP naming what the pinned AutoRound cannot do.
+What was built instead of the steps' first guesses (tools/quantize/README.md, "Qwen3.8-Flash-Next"): AutoRound at
+the operator's fork commit `a6cf7487` (intel/auto-round `b58069ea` of 2026-11-11 + cached OpenCodeInstruct) rather
+than 0.17.0 `6afaecdb` - per-block resume, the vectorised QSA indexer, its own MTP export; calibration on
+nvidia/OpenCodeInstruct through the chat template (operator 2026-11-12); the tuned path only (no RTN arm, operator 2026-11-12); `lm_head` packed by
+our RTN g64 rule in a `head` stage (AutoRound RTNs the head on the tuned path too, and writes its scales BF16); the MTP
+head's routed experts RTN int4 g64 by AutoRound at export, its attention and shared expert bf16; the vision tower bf16
+and not counted by the checks. The tiny model is `tools/quantize/qwen4exp/make_tiny_vl.py` (the fused original's
+form with a vision tower and the processor files: AutoRound takes the multimodal path for this architecture).
 
-### Task 2: size the run (box, one card, ~hours)
+- [ ] **Step 1 (operator): the download** (running since 2026-11-11 to `~/b70/usb/hf-hub`, linked into the HF cache).
+  Check: `tools/quantize/quantize_qwen4exp.sh check-download [--sha]` - the hub's 144 files at the snapshot's
+  revision, sizes (and LFS sha256), 360.02 GB. The PLE int8 file is made from our export by the script's `ple` stage
+  (not reused from Intel's snapshot: one source of truth, ~30 min).
+- [x] **Step 2: AutoRound on the tiny fused model.** `a6cf7487` via `ar_pin.sh` (`AR_COMMIT`, `AR_PATCH=0`), the
+  tiny `make_tiny_vl.py` model, the recipe of spec 21 v2 §2, low-CPU-memory mode (AutoRound: "Fused-MoE checkpoint
+  detected: building a meta skeleton and materializing weights per block"), 2 iterations; the per-block resume
+  (stopped after block 0, resumed at block 1, `OK`); the PLE table file-backed (AutoRound's own load: ~190 GiB).
+- [x] **Step 3: the head and the MTP head.** `lm_head`: not AutoRound's (`quant_lm_head` turns low CPU memory and
+  the resume off); the `head` stage packs and declares it (`head_rtn.py`, `loader/rtn.h`'s rule). The
+  MTP head: AutoRound's own export (`missing_tensors.py`: the source's `mtp.*` copied, the fused experts split per
+  expert, RTN int4 g64; attention and shared expert kept bf16 by the ignore list). A tuned pass over the MTP layer is
+  not available (transformers builds no MTP module); acceptance with the RTN experts is measured in Task 7 Step 4.
+- [x] **Step 4:** the script `tools/quantize/quantize_qwen4exp.sh` (stages quant / bf16 / head / ple / check, `run --only` /
+  `--from`, `start` / `status` / `stop` / `selftest`); `check.py` and `expected_names` extended: `lm_head` int4,
+  the MTP head's experts int4; `check_gptq_export.py --skip-prefix model.visual.`.
+- **Gate (passed on the tiny model, card 1 and the box CPU):** `check.py` ACCEPTED with the int8 PLE file,
+  `check_gptq_export.py --lm-head quant --source` VERIFIED, per-expert int4 tensors for every routed, shared and MTP
+  expert; the download check is the operator's.
 
-- [ ] **Step 1:** on card 1 (`tools/gpu_lock.sh card 1`), the real model's first block: RTN, and tuned at 200
-  iterations with `NSAMPLES` 512 x 2048 (proposed); each its wall time, peak VRAM, peak RSS, disk read time; the same
-  RTN block on the box CPU (fp32) for comparison. The calibration rows' per-expert routed-token counts on the first
-  block (coverage floor 2048, proposed).
-- [ ] **Step 2:** the projection: x 48 blocks + the MTP head + `lm_head`, for RTN and tuned, on a card and on the CPU;
-  the record `docs/probes/flash-next-quant-sizing-<date>.md`.
-- **Gate:** the record exists with every number measured or derived; **the operator picks** tuned or RTN and the
-  card time (spec 21 v2 §12 question 2).
+### Task 2: size the run (measured on a stand-in 2026-11-11; the operator confirms on the real model)
+
+The operator ruled tuned (spec 21 v2 §0.1), so there is no RTN arm and no CPU arm to size. A real-width stand-in (4
+layers, 512 experts, random weights) on card 1: one GDN block **57 min**, peak VRAM 38.9 GiB on the 31.9 GiB card
+(spilled by the driver; the tuning state alone is ~34 GiB), two cards no help; projection **~48 h on one card**
+(tools/quantize/README.md, "Sizing").
+
+- [ ] **Step 1 (operator):** after `start`, `status` once the first block is done (~1 h): the seconds per block and
+  AutoRound's time left; `stop` if a block is far above ~60 min or the RAM nears 115 GB (the run resumes).
+- **Gate:** the first real block's time and the RAM recorded in the run's README; the run continues (Task 3).
 
 ### Task 3: the run and the export (box, detached)
 
-- [ ] **Step 1:** `tools/quantize_qwen4exp.sh` with the chosen recipe, detached, resumable, checked every 30 min;
-  output to the cold disk.
-- [ ] **Step 2:** `check.py` and `check_gptq_export.py --lm-head quant` on the export; the PLE int8 file (reused by
-  hash, or `ple_int8.py`); `tools/hf_tier.sh` makes it hot; provenance appended to its README (version, commit,
-  flags, source revision, date).
+- [ ] **Step 1 (operator):** `tools/quantize/quantize_qwen4exp.sh start` - detached, resumable per block, on card 1;
+  output to the cold disk (`~/b70/hdd/quant/`); `status` shows the blocks done and AutoRound's time left.
+- [ ] **Step 2 (the script's last stages):** the PLE int8 file (`ple_int8.py`, beside the export), `check.py` and
+  `check_gptq_export.py --lm-head quant --source`, provenance appended to its README (version, commit, flags, source
+  revision, date): `FLASH-NEXT QUANT: OK`. Then `tools/hf_tier.sh` makes it hot.
 - [ ] **Step 3:** the qwen4exp loader accepts the checkpoint's int4 head (`LmHeadForm::Checkpoint` for this family:
   int4 g64 layout 0 and the int4 head GEMV Qwen3.8 already has; the int8-from-bf16 path stays for Intel's form);
   `r31.load` on our export at `--layers 18` and `--layers 37 --parallel pp`.
@@ -142,8 +152,8 @@ exist; `r36.curve` has never run.
 
 ### Task 7: the quality of our export (box CPU, beside Tasks 5-8)
 
-- [ ] **Step 1: ours against Intel's and the bf16 original** (spec 21 v2 §2, plan 21q's F6): KL and top-1 per held-out
-  set (golden prompts, tool-call prompts), both checkpoints on the same rows, layer-streamed from the original in f32
+- [ ] **Step 1: ours against the bf16 original** (spec 21 v2 §2; no Intel comparison, operator 2026-11-12): KL and
+  top-1 per held-out set (golden prompts, tool-call prompts), layer-streamed from the original in f32
   (`/tmp/b70-cpu-model.lock`; above 64 GB also the box GPU lock).
 - [ ] **Step 2: the whole-model f32 reference of our weights:** all 48 layers on `q4exp_4k` (+ 32 forced continuation
   steps), as the 18 / 37 layer ones ([plan](2026-11-08-flash-next-f32-reference.md)); ~90 GiB, holds
@@ -153,9 +163,9 @@ exist; `r36.curve` has never run.
   overlap; below 90 % overlap, re-record the 39 sources on ours and rerun Task 4.
 - [ ] **Step 4:** `r34.fixture` / `r34.accept` / `r34.a4_ref` on our export: MTP acceptance with our int4 MTP experts
   against the bf16 head.
-- **Gate:** the KL / top-1 table recorded; ours not worse than Intel's on both, or the operator rules (spec 21 v2 §12
-  question 3); the paired reference files published with their identity checks; the twin counts and the acceptance
-  pair recorded.
+- **Gate:** the KL / top-1 table against the bf16 original recorded; the paired reference files published with their
+  identity checks; the twin counts and the acceptance pair recorded (spec 21 v2 §10's bars decide, not a
+  comparison).
 
 ### Task 8: the table, the mirror and the static fill on `--parallel pp` (box)
 
