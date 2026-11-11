@@ -41,49 +41,13 @@ TP runs the bf16 prompt pass only for now; the int8 pass under TP (one card gain
 item 10. A short agentic turn deep in a session is fast too: 16 new tokens at 128k of history take 98 ms (bf16
 cache) or 108 ms (int8).
 
-Measured on one Arc Pro B70, same checkpoint and same prompt on both sides,
-median of three runs on an idle machine:
+Against vLLM on the same checkpoint and prompt, one card reads a 4,096-token prompt at 2,205 t/s to vLLM's 1,610.
+Context reaches the model's full 262,144 tokens (TP on two cards, or one card with `--kv-cache int8`), and long
+sessions keep their history in the prefix cache in system RAM: a turn at 60k tokens of history is a prefix cache hit
+with its first token in about 1.2 s instead of 45 s of prefill.
 
-| | this engine | vLLM | |
-|---|---:|---:|---|
-| prefill, 4096 tokens (`--prefill-backend l0-int8`) | **2125.12 t/s** | 1610.04 t/s | we are 32.0% ahead |
-| decode, 256 tokens | 29.45 t/s | 31.01 t/s | we are 5% behind |
-| decode, int8 `lm_head` (our serving default) | 31.21 t/s | - | not byte-matched |
-
-Rows above are byte-matched: both engines read the checkpoint's bf16 `lm_head` (`b70-decode --lm-head bf16`,
-which the zero-config cleanup removed: the CLIs run the int8 head).
-`b70-serve` quantises that head to int8 per row at load (spec 9, gated on the golden
-prompts and the tool-call set), which is 31.21 t/s against 29.38 t/s for bf16 in the same
-interleaved run (docs/BENCHMARKS.md, "int8 lm_head"); vLLM cannot load that head, so the
-two are not compared. All three decode rows predate spec 10's decode attention v2 (they
-ran attn.cl's v1 pair); v2 is 5.9% faster per step at depth 4096 (docs/BENCHMARKS.md,
-"Decode attention at depth"), not yet re-measured in this table.
-
-Prefill went from 1406 t/s to 1670 t/s over a couple of weeks of kernel work,
-then to 2104 t/s by moving every int4 linear onto the card's int8 matrix engines
-(spec 5: Hadamard-rotated int8 activations against per-channel int8 weights
-rebuilt on the fly from the int4 checkpoint, at W4A16 accuracy; see
-docs/probes/probe-w4a8-2026-09-23.md sections 14 and 15), and to 2125 t/s with the
-fused flash attention of spec 6.
-Decode has been parked for a while and vLLM is still ahead there, so that is
-the honest picture: good prefill, decode still to do.
-
-Context now goes to 131072 tokens (`--max-len 131072`, 28.1 GB of the card's 32.5):
-prefill attention is a fused flash-attention kernel of our own, and a passkey
-stated once in 120k tokens of filler is found at 5, 50 and 95% depth (spec 6).
-Prefill attention is still slow at depth (747 t/s at 128k); decode attention
-was rebuilt for depth (spec 10): 20.1 t/s decode at 128k, from 10.2 (captured
-decode step, bf16 `lm_head`).
-
-Long agentic sessions reuse their history (spec 7): the server keeps the last session on
-the card and writes every prefill through to a pinned host store in system RAM (`--prefix-cache-gb`,
-by default sized from the machine's RAM, up to 32 GiB), so a turn at 60k tokens of history reaches its first token in 1.23 s instead
-of re-prefilling for 45 s, and 1.58 s when a side request evicted the card in between.
-
-Checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`, int4 weights with
-group size 64, bf16 activations (why g64: see below). vLLM serves the exact same
-files, which is what makes the comparison fair. Full protocol and every row is in
-[docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+The checkpoint is `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: int4 weights, group size 64 (why: see below),
+bf16 activations. Every measurement and its protocol is in [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Scope
 
