@@ -1,6 +1,7 @@
 #include "runtime/prefill/moe.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -33,13 +34,23 @@ T* at(l0::Mem& m, size_t off) {
 
 }  // namespace
 
+bool moe_old_walk() {
+  static const bool old = [] {
+    const char* v = std::getenv("B70_PF_MOE");
+    return v != nullptr && std::string(v) == "old";
+  }();
+  return old;
+}
+
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
-  // router GEMV + moe_route + sort + combine, and the down batches' dequant + GEMM pairs.
-  size_t n = 4 + 2 * size_t(batches(d, MoeWeightForm::DownBf16));
+  // router GEMV + moe_route + combine; the sort (one launch, or the multi-work-group sort's three); down: the
+  // fused GEMM (one launch) or the batches' dequant + GEMM pairs.
+  const bool old = moe_old_walk();
+  size_t n = 3 + (old ? 1 : 3) + (old ? 2 * size_t(batches(d, MoeWeightForm::DownBf16)) : 1);
   if (b == PrefillBackend::L0Int8)
     n += 4;   // quantiser, gather_i8, requant (the whole array), the i8 GEMM
   else
-    n += 1 + 2 * size_t(batches(d, MoeWeightForm::GateUpBf16));   // gather, dequant + GEMM pairs
+    n += 1 + (old ? 2 * size_t(batches(d, MoeWeightForm::GateUpBf16)) : 1);   // gather, the gate||up GEMM(s)
   return n;
 }
 
@@ -66,6 +77,12 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const uint32_t tmax = moe_prefill_tiles(d, C);
   const uint32_t rows = tmax * kernels::pf_moe::kTileM;
   require(tmax <= L.tmax, "tmax(C) exceeds the scratch's tile table");
+  const uint32_t ibound = moe_prefill_items(d, C);
+  require(ibound <= L.ibound, "the work items' bound at C exceeds the scratch's item table");
+  uint32_t* items = at<uint32_t>(*s.moe, L.items_off);
+  // one layout-1 int4 block's u32 words (136 a 16-column x 64-k tile): the shared expert is block E
+  const size_t gu_words = size_t(NG / 16) * (H / 64) * 136, dn_words = size_t(H / 16) * (I / 64) * 136;
+  require(NG % kernels::pf_moe::kQ4WgN == 0 && H % kernels::pf_moe::kQ4WgN == 0, "the expert shape is not whole fused-GEMM work-groups");
   require(NG % kernels::pf_moe::kGemmWgN == 0 && H % kernels::pf_moe::kGemmWgN == 0 &&
               H % kernels::pf_moe::kCombineWg == 0,
           "the expert shape is not whole 256-column work-groups");
@@ -93,10 +110,24 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
             {PtrArg(logits), PtrArg(route)});
   profile_wait(cx, Phase::kMoeRoute);
-  // 2. The sort: one work-group, the header, the tile table padded to tmax, the rows.
-  cx.launch(kc(pv, "pf_moe_sort"), 1, 1, 1,
-            {PtrArg(route), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(pair_row),
-             arg_val(C), arg_val(tmax)});
+  // 2. The sort: the header, the tile table padded to tmax, the rows - by pf_moe_sort_mw's histogram, scan and
+  //    scatter over 64-token blocks (plan 2026-11-12 Task 2, bitwise the one-work-group pf_moe_sort, which
+  //    B70_PF_MOE=old binds).
+  if (moe_old_walk()) {
+    cx.launch(kc(pv, "pf_moe_sort"), 1, 1, 1,
+              {PtrArg(route), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(pair_row),
+               arg_val(C), arg_val(tmax)});
+  } else {
+    const std::string sv = kernels::pf_moe_sort_mw_variant(E, m.top_k);
+    uint32_t* cnt = at<uint32_t>(*s.moe, L.cnt_off);
+    const uint32_t nblk = (C + 63) / 64;
+    cx.launch(kc(sv, "pf_moe_hist"), nblk, 1, 1, {PtrArg(route), PtrArg(cnt), arg_val(C)});
+    cx.launch(kc(sv, "pf_moe_scan"), 1, 1, 1,
+              {PtrArg(cnt), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(items), arg_val(C), arg_val(tmax),
+               arg_val(ibound)});
+    cx.launch(kc(sv, "pf_moe_scatter"), nblk, 1, 1,
+              {PtrArg(route), PtrArg(cnt), PtrArg(row_tok), PtrArg(pair_row), arg_val(C)});
+  }
   profile_wait(cx, Phase::kMoeSort);
 
   // 3. gate||up, SiLU fused -> h [rows][I].
@@ -127,6 +158,16 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
               {PtrArg(tiles), PtrArg(xg), PtrArg(xs), PtrArg(wb), PtrArg(sc.first.ptr()), PtrArg(h),
                arg_val(0u), arg_val(B), arg_val(nall)});
     profile_wait(cx, Phase::kMoeGemm);
+  } else if (!moe_old_walk()) {
+    // plan 2026-11-12 Task 3: one launch over the work items, B read from the int4 blocks (no weight pass)
+    cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,
+              {PtrArg(s.x.ptr()), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg)});
+    profile_wait(cx, Phase::kMoeGather);
+    cx.launch(kc(kernels::pf_moe_q4gemm_variant(H, NG, true), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
+              ibound, 1,
+              {PtrArg(items), PtrArg(xg), PtrArg(w.gate_up.ptr()),
+               PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words), PtrArg(h)});
+    profile_wait(cx, Phase::kMoeGemm);
   } else {
     cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,
               {PtrArg(s.x.ptr()), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg)});
@@ -146,8 +187,14 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   }
 
   // 4. down (bf16 on both backends: its K = I is not whole 1024-k rotation blocks) -> y,
-  //    rne'd, into xg's region (gate||up has consumed the gathered A).
-  {
+  //    rne'd, into xg's region (gate||up has consumed the gathered A). Plan 2026-11-12 Task 3: one fused launch.
+  if (!moe_old_walk()) {
+    cx.launch(kc(kernels::pf_moe_q4gemm_variant(I, H, false), "pf_moe_q4gemm"), H / kernels::pf_moe::kQ4WgN,
+              ibound, 1,
+              {PtrArg(items), PtrArg(h), PtrArg(w.down.ptr()), PtrArg(w.down.as<uint32_t>() + size_t(E) * dn_words),
+               PtrArg(xg)});
+    profile_wait(cx, Phase::kMoeGemm);
+  } else {
     const uint32_t per = moe_prefill_batch_blocks(d, MoeWeightForm::DownBf16);
     l0::Kernel& gemm = kc(kernels::pf_moe_gemm_variant(I, H, false, false), "pf_moe_gemm");
     for (uint32_t b0 = 0; b0 < B; b0 += per) {

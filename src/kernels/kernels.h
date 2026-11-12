@@ -415,6 +415,7 @@ inline constexpr unsigned kCurToken = 2;    // Control::cur_token[8]
 inline constexpr unsigned kOutToken = 10;   // Control::out_token[8]
 inline constexpr unsigned kDebugFlag = 18;  // Control::debug_flag
 inline constexpr unsigned kGdnLive = 19;    // Control::gdn_live (spec 8, SPEC_SLOTS only)
+inline constexpr unsigned kDraftStat = 28;  // Control::draft_stat[2] (open-work 13, draft_prob.cl's CTRL_DSTAT)
 }  // namespace ctrl_index
 
 // The token-boundary kernels (src/kernels/embed_gather.cl, argmax.cl). `M` is
@@ -433,6 +434,11 @@ inline std::string argmax_stage1_variant(unsigned M, unsigned vocab_used) {
 // Stage 2 is a single work-group that loops m < ctrl.n_active internally: no
 // variants at all, so the binary is named after the entry point.
 inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
+// Open-work 13: the draft's probability over a logits row of `rows` entries, `used` of them real ids
+// (src/kernels/draft_prob.cl: draft_prob_stage1 / _stage2 in one binary, WG 256, 1024 logits per stage-1 group).
+inline std::string draft_prob_variant(unsigned rows, unsigned used) {
+  return "draft_prob_N" + std::to_string(rows) + "_U" + std::to_string(used);
+}
 // Spec 16b: the pipeline stages' peer hand-off (pp_handoff.cl: pp_send, pp_recv), one binary.
 inline std::string pp_handoff_variant() { return "pp_handoff"; }
 inline constexpr unsigned kPpHandoffWg = 256;   // pp_handoff.cl WG

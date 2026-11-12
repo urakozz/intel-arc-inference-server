@@ -1,7 +1,9 @@
 # Sourced by tools/quantize_qwen38_{tuned,rtn}.sh: installs auto-round at AR_COMMIT (0.17.0),
 # with tools/quantize/auto-round-local.patch applied unless AR_PATCH=0, beside the venv, once.
+# tools/quantize/quantize_qwen4exp.sh pins its own AR_COMMIT (and AR_PATCH=0) before sourcing.
 #
 # In:  HERE (tools/), VENVPY (python with torch/transformers; NOT modified),
+#      AR_COMMIT the commit to build (default 6afaecdb, 0.17.0: the Qwen3.8 scripts' pin)
 #      AR_REPO  where the source comes from: a git URL or a local clone that contains AR_COMMIT
 #               (default https://github.com/intel/auto-round)
 #      AR_PATCH 1 (default): apply auto-round-local.patch - neither fix is upstream in 0.17.0:
@@ -12,7 +14,7 @@
 #      the shell is left in /tmp: `python -` puts the cwd ahead of PYTHONPATH, so an
 #      auto-round checkout as cwd would shadow the pinned package.
 AR_VERSION=0.17.0
-AR_COMMIT=6afaecdbe4092dc803f3e91026fe81a65b64b372      # intel/auto-round main, 2026-09-30, version 0.17.0
+AR_COMMIT="${AR_COMMIT:-6afaecdbe4092dc803f3e91026fe81a65b64b372}"   # default: intel/auto-round main, 2026-09-30, version 0.17.0
 AR_REPO="${AR_REPO:-https://github.com/intel/auto-round}"
 AR_PATCH="${AR_PATCH:-1}"
 AR_PATCH_FILE="$HERE/quantize/auto-round-local.patch"

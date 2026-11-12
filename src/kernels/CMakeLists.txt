@@ -389,6 +389,12 @@ if(B70_MTP)
     add_gemv_bf16_variant(1 5120 ${NV} 64 1)
     add_ocloc_kernel(dv_argmax_N${NV} SOURCE ${DRAFT_VOCAB_CL} DEFINES ${CTRL_DEFINES} NV=${NV})
   endforeach()
+
+  # Open-work 13: the draft's probability (draft_prob.cl, both stages in one binary) after the draft list's argmax -
+  # draft_prob_N<row length>_U<real ids> (kernels::draft_prob_variant): the whole head's row here, a TP card's half in
+  # the TP block. CTRL_DSTAT = runtime::Control::draft_stat (kernels::ctrl_index::kDraftStat). Additive only.
+  set(DRAFT_PROB_CL ${CMAKE_CURRENT_SOURCE_DIR}/draft_prob.cl)
+  add_ocloc_kernel(draft_prob_N248320_U248077 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=248320 VOCAB_USED=248077)
 endif()
 
 # ==== Spec 19a Task 4: the verify cost at M = 5..8 and DFlash's draft cost ==== (begin) ==
@@ -809,6 +815,11 @@ if(B70_TP AND B70_MTP)
     list(APPEND B70_TP_VERIFY_KERNELS kernel_tp_argmax_M${MM}_N124160_U124160_B0
                 kernel_tp_argmax_M${MM}_N124160_U123917_B124160)
   endforeach()
+  # Open-work 13: each card's draft probability over its vocabulary half (draft_prob.cl; the B70_MTP block has the
+  # whole row's).
+  add_ocloc_kernel(draft_prob_N124160_U124160 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=124160 VOCAB_USED=124160)
+  add_ocloc_kernel(draft_prob_N124160_U123917 SOURCE ${DRAFT_PROB_CL} DEFINES CTRL_DSTAT=28 VOCAB=124160 VOCAB_USED=123917)
+  list(APPEND B70_TP_VERIFY_KERNELS kernel_draft_prob_N124160_U124160 kernel_draft_prob_N124160_U123917)
   set(B70_TP_VERIFY_KERNELS ${B70_TP_VERIFY_KERNELS} CACHE INTERNAL "spec 17d: the binaries a TP verify list binds")
 endif()
 # ==== Spec 17d ============================================================= (end) ====
@@ -1312,6 +1323,14 @@ if(B70_Q4EXP)
                    DEFINES K=2560 N=1280 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_gemm.cl
                    DEFINES K=640 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+  # plan 2026-11-12 Task 2: the multi-work-group sort at this family's 512 experts, top 10 (bound in Task 7)
+  add_ocloc_kernel(pf_moe_sort_mw_E512_T10 SOURCE ${Q4_PF_REUSE}/pf_moe_sort_mw.cl
+                   DEFINES EXPERTS=512 TOP_K=10 TM=32 TB=64 MI=64)
+  # plan 2026-11-12 Task 3 / 7: the grouped GEMMs read straight from the int4 blocks, at this family's shapes
+  add_ocloc_kernel(pf_moe_q4gemm_K2560_N1280_SILU SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                   DEFINES K=2560 N=1280 EXPERTS=512 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_q4gemm_K640_N2560 SOURCE ${Q4_PF_REUSE}/pf_moe_q4gemm.cl
+                   DEFINES K=640 N=2560 EXPERTS=512 OPTIONS -cl-intel-256-GRF-per-thread)
   # the PLE block over a chunk
   add_ocloc_kernel(q4_pf_ple_C2048 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=2048)
 endif()

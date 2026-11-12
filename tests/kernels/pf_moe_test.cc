@@ -371,6 +371,45 @@ uint32_t expert_of(const Run& r, uint32_t t, uint32_t k) {
   return k < kS.top_k ? r.route[size_t(t) * 32 + k] : kS.shared_block();
 }
 
+// 4b. plan 2026-11-12 Task 3: pf_moe_q4gemm (B straight from the int4 blocks, over the sort's work items) ==
+// today's grouped GEMM over pf_moe_dequant_*'s bf16 blocks, every used row bitwise - gate||up + SiLU on the walk's
+// gathered rows, down on the walk's bf16 h.
+void fused_vs_grouped(Dev& d, Layer& L, Bufs& b, const Run& r) {
+  l0::Module mgu(d.ctx, kernels::path(kernels::pf_moe_q4gemm_variant(kH, kNG, true))),
+      mdn(d.ctx, kernels::path(kernels::pf_moe_q4gemm_variant(kI, kH, false)));
+  l0::Kernel gu(mgu, "pf_moe_q4gemm"), dn(mdn, "pf_moe_q4gemm");
+  gu.group_size(16 * (kernels::pf_moe::kQ4WgN / 32));
+  dn.group_size(16 * (kernels::pf_moe::kQ4WgN / 32));
+  pf_moe_ref::Sorted st;
+  st.hdr = r.hdr;
+  st.tiles = r.tiles;
+  const std::vector<uint32_t> it = pf_moe_ref::items(st, kS, r.C, kernels::pf_moe::kItemM);
+  const uint32_t nit = uint32_t(it.size() / 4), used = r.hdr[kernels::pf_moe::kHdrRows];
+  l0::Mem itd = d.upload(it), hf = d.zeros(size_t(used) * kI * 2), yf = d.zeros(size_t(used) * kH * 2);
+  d.imm.copy(b.xg.ptr(), r.xg.data(), size_t(used) * kH * 2);
+  d.imm.copy(b.h.ptr(), r.h_bf.data(), size_t(used) * kI * 2);
+  gu.arg_ptr(0, itd.ptr());
+  gu.arg_ptr(1, b.xg.ptr());
+  gu.arg_ptr(2, L.gu.ptr());
+  gu.arg_ptr(3, L.gu.as<uint32_t>() + kS.gate_up_words() * kS.experts);
+  gu.arg_ptr(4, hf.ptr());
+  d.run(gu, kNG / kernels::pf_moe::kQ4WgN, nit);
+  dn.arg_ptr(0, itd.ptr());
+  dn.arg_ptr(1, b.h.ptr());
+  dn.arg_ptr(2, L.dn.ptr());
+  dn.arg_ptr(3, L.dn.as<uint32_t>() + kS.down_words() * kS.experts);
+  dn.arg_ptr(4, yf.ptr());
+  d.run(dn, kH / kernels::pf_moe::kQ4WgN, nit);
+  const std::vector<uint16_t> h = d.read<uint16_t>(hf, size_t(used) * kI), y = d.read<uint16_t>(yf, size_t(used) * kH);
+  size_t bh = 0, by = 0;
+  for (size_t i = 0; i < h.size(); ++i) bh += h[i] != r.h_bf[i];
+  for (size_t i = 0; i < y.size(); ++i) by += y[i] != r.y[i];
+  std::printf("  4b. fused int4 GEMM == grouped, C %u (%u items): h %zu of %zu, y %zu of %zu values differ\n", r.C,
+              nit, bh, h.size(), by, y.size());
+  CHECK_EQ(bh, size_t(0));
+  CHECK_EQ(by, size_t(0));
+}
+
 // 4: grouped == dense, bitwise, for expert e (all three GEMMs).
 void grouped_vs_dense(Dev& d, Kernels& k, Layer& L, Bufs& b, const Run& r, uint32_t e) {
   const uint32_t C = r.C, Mp = pad256(C);
@@ -589,6 +628,82 @@ int main() {
     sort_only(rt, 1, "C = 1");
   }
   std::puts("  2. pf_moe_sort: header, padded tile table, pair_row, rows exactly the host walk's");
+  // 2b. plan 2026-11-12 Task 2: pf_moe_sort_mw (hist + scan + scatter) - every buffer exactly the host walk's (so
+  // pf_moe_sort's), and its work items the host's, on the device routes, the crafted ones, C = 1 / 37, and random routes past the old KC (4096,
+  // 16384), in its own buffers
+  {
+    l0::Module mw(d.ctx, kernels::path(kernels::pf_moe_sort_mw_variant(256, 8)));
+    l0::Kernel hist(mw, "pf_moe_hist"), scan(mw, "pf_moe_scan"), scat(mw, "pf_moe_scatter");
+    hist.group_size(256);
+    scan.group_size(256);
+    scat.group_size(256);
+    constexpr uint32_t kCx = 16384;
+    const uint32_t Tx = pf_moe_ref::tmax(kS, kCx);
+    l0::Mem rt_d = d.zeros(size_t(kCx) * 32 * 4), hdr_d = d.zeros(size_t(kernels::pf_moe::hdr_words(256)) * 4),
+            tl_d = d.zeros(size_t(Tx) * 8), rtk_d = d.zeros(size_t(Tx) * kTm * 4),
+            pr_d = d.zeros(size_t(kCx) * 8 * 4), cnt_d = d.zeros(size_t(kCx / 64) * 256 * 4),
+            it_d = d.zeros(size_t(pf_moe_ref::items_bound(kS, kCx, kernels::pf_moe::kItemM)) * 16);
+    auto mw_sort = [&](const std::vector<uint32_t>& route, uint32_t Cc, const char* what) {
+      d.imm.copy(rt_d.ptr(), route.data(), size_t(Cc) * 32 * 4);
+      Run r;
+      r.C = Cc;
+      r.tmax = pf_moe_ref::tmax(kS, Cc);
+      const uint32_t nb = (Cc + 63) / 64;
+      hist.arg_ptr(0, rt_d.ptr());
+      hist.arg_ptr(1, cnt_d.ptr());
+      hist.arg(2, Cc);
+      d.run(hist, nb);
+      scan.arg_ptr(0, cnt_d.ptr());
+      scan.arg_ptr(1, hdr_d.ptr());
+      scan.arg_ptr(2, tl_d.ptr());
+      scan.arg_ptr(3, rtk_d.ptr());
+      scan.arg_ptr(4, it_d.ptr());
+      scan.arg(5, Cc);
+      scan.arg(6, r.tmax);
+      const uint32_t ib = pf_moe_ref::items_bound(kS, Cc, kernels::pf_moe::kItemM);
+      scan.arg(7, ib);
+      d.run(scan, 1);
+      scat.arg_ptr(0, rt_d.ptr());
+      scat.arg_ptr(1, cnt_d.ptr());
+      scat.arg_ptr(2, rtk_d.ptr());
+      scat.arg_ptr(3, pr_d.ptr());
+      scat.arg(4, Cc);
+      d.run(scat, nb);
+      r.hdr = d.read<uint32_t>(hdr_d, kernels::pf_moe::hdr_words(256));
+      r.tiles = d.read<uint32_t>(tl_d, size_t(r.tmax) * 2);
+      r.row_tok = d.read<uint32_t>(rtk_d, size_t(r.tmax) * kTm);
+      r.pair_row = d.read<uint32_t>(pr_d, size_t(Cc) * 8);
+      check_sort(route, r);
+      CHECK(d.read<uint32_t>(it_d, size_t(ib) * 4) ==
+            pf_moe_ref::items(pf_moe_ref::sort(route.data(), Cc, kS), kS, Cc, kernels::pf_moe::kItemM));
+      std::printf("     mw sort %-22s C %5u: %4u tiles of %4u - exact\n", what, Cc, r.hdr[kernels::pf_moe::kHdrTiles],
+                  r.tmax);
+    };
+    mw_sort(a.route, C, "the device routes");
+    std::vector<uint32_t> rt(size_t(C) * 32, 0);
+    for (uint32_t t = 0; t < C; ++t)
+      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = 7 - s;
+    mw_sort(rt, C, "all to experts 0..7");
+    uint32_t single = 8;
+    for (uint32_t t = 0; t < C; ++t) {
+      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = s;
+      if (single < 256) rt[size_t(t) * 32] = single++;
+    }
+    mw_sort(rt, C, "one-row experts");
+    mw_sort(rt, 1, "C = 1");
+    mw_sort(a.route, 37, "the device routes");
+    for (uint32_t Cc : {4096u, kCx}) {
+      std::vector<uint32_t> big(size_t(Cc) * 32, 0);
+      std::mt19937 rng(Cc);
+      std::vector<uint32_t> ids(256);
+      for (uint32_t t = 0; t < Cc; ++t) {
+        std::iota(ids.begin(), ids.end(), 0u);
+        std::shuffle(ids.begin(), ids.end(), rng);
+        for (uint32_t s = 0; s < 8; ++s) big[size_t(t) * 32 + s] = ids[s];
+      }
+      mw_sort(big, Cc, "random routes");
+    }
+  }
   // 3. the gathers of the device's own inputs
   {
     // The walk reads the WHOLE buffers (tmax x TM rows); the gathers write rows
@@ -625,6 +740,7 @@ int main() {
   d.imm.copy(b.pair_row.ptr(), a.pair_row.data(), a.pair_row.size() * 4);
   std::puts("  4. grouped == dense, bitwise, per (token, expert):");
   for (uint32_t e : sample_experts(a)) grouped_vs_dense(d, k, L, b, a, e);
+  fused_vs_grouped(d, L, b, a);
   // 6. the combine
   check_combine(a, resid0);
   // 5. row independence: the reversed chunk
@@ -670,6 +786,7 @@ int main() {
     check_sort(c.route, c);
     std::printf("  8. ragged C = %u: %u tiles\n", Cr, c.hdr[kernels::pf_moe::kHdrTiles]);
     for (uint32_t e : sample_experts(c)) grouped_vs_dense(d, k, L, b, c, e);
+    fused_vs_grouped(d, L, b, c);
     check_combine(c, r0);
     // the same 37 tokens inside the full chunk: every (token, slot) result bitwise
     size_t bad = 0;

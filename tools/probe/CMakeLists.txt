@@ -1129,3 +1129,55 @@ endforeach()
 if(PKD_TARGETS)
   add_dependencies(probe_kv8_decode ${PKD_TARGETS})
 endif()
+
+# --- probe_moe_prefill: plan 2026-11-12 (Ornith MoE prefill) Task 1 - the fused int4 grouped GEMM arms and the ---------
+# multi-work-group sort on real routes. Record: docs/probes/probe-moe-prefill-2026-11-12.md. `probe_moe_prefill.cl`
+# is a PROBE kernel: no runtime path binds `pmp_gemm`; the control runs the production binaries. PMP_ARMS is
+# "FORM NA NB WGM WGN CVT XSG", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
+# at Ornith's and Flash-Next's gate||up (SiLU epilogue) and down shapes, FORM 3 also with EPI 2 (the fp32 check).
+if(B70_ORNITH AND B70_Q4EXP)
+  set(PMP_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_moe_prefill.cl)
+  set(PMP_ARMS "1 4 4 1 4 0 0 0" "1 4 4 1 4 2 0 0" "1 4 4 1 4 2 0 1" "2 4 4 4 4 2 0 0" "2 4 4 4 4 2 0 1"
+               "2 4 4 4 4 2 0 2" "2 4 4 4 4 2 0 3" "2 4 4 8 4 2 0 3" "2 4 4 2 4 2 0 3" "3 4 4 1 4 0 0 0"
+               "3 4 4 1 4 0 0 1" "3 4 2 4 8 0 0 0" "3 4 2 4 8 0 0 1" "3 4 4 1 4 0 1 1" "3 4 2 4 8 0 1 1"
+               "1 4 4 1 4 9 0 1" "1 4 4 1 4 2 0 5" "2 4 4 4 4 9 0 3" "2 4 4 4 4 2 0 7"
+               "1 8 2 1 8 2 0 1" "1 8 2 2 8 2 0 1" "2 8 2 2 8 2 0 3" "1 8 2 1 8 9 0 1"
+               "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3")
+  set(PMP_SHAPES "2048 1024 1" "512 2048 0" "2560 1280 1" "640 2560 0")
+  set(PMP_TARGETS "")
+  foreach(arm ${PMP_ARMS})
+    separate_arguments(a UNIX_COMMAND "${arm}")
+    list(GET a 0 F)
+    list(GET a 1 NA)
+    list(GET a 2 NB)
+    list(GET a 3 WM)
+    list(GET a 4 WN)
+    list(GET a 5 CV)
+    list(GET a 6 XS)
+    list(GET a 7 OP)
+    foreach(shape ${PMP_SHAPES})
+      separate_arguments(s UNIX_COMMAND "${shape}")
+      list(GET s 0 K)
+      list(GET s 1 N)
+      list(GET s 2 EP)
+      set(_epis ${EP})
+      if(F EQUAL 3)
+        list(APPEND _epis 2)
+      endif()
+      foreach(E ${_epis})
+        set(_n pmp_F${F}_A${NA}B${NB}M${WM}N${WN}_C${CV}X${XS}O${OP}_K${K}_N${N}_E${E})
+        add_ocloc_kernel(${_n} SOURCE ${PMP_CL}
+                         DEFINES K=${K} N=${N} FORM=${F} NA=${NA} NB=${NB} WGM=${WM} WGN=${WN} CVT=${CV}
+                                 XSG=${XS} OPT=${OP} EPI=${E}
+                         OPTIONS -cl-intel-256-GRF-per-thread)
+        list(APPEND PMP_TARGETS kernel_${_n})
+      endforeach()
+    endforeach()
+  endforeach()
+  add_executable(probe_moe_prefill probe_moe_prefill.cc)
+  target_include_directories(probe_moe_prefill PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(probe_moe_prefill PRIVATE b70_prefill_host b70_l0)
+  b70_target_kernel_dir(probe_moe_prefill)
+  add_dependencies(probe_moe_prefill ${PMP_TARGETS} ${PCR_PF_KERNELS} ${ALL_KERNELS})
+endif()

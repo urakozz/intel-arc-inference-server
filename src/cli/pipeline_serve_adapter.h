@@ -61,6 +61,13 @@ struct HasTapDrafter<E, std::void_t<decltype(std::declval<E&>().draft_tap(1u, 0.
                                     decltype(std::declval<const E&>().tap_samples()),
                                     decltype(std::declval<const E&>().drafter_key())>> : std::true_type {};
 
+// Open-work 13: engines whose draft lists can stop on the head's probability (runtime::TpEngine) - the per-step K is
+// compiled only for those.
+template <class E, class = void>
+struct HasDraftProbs : std::false_type {};
+template <class E>
+struct HasDraftProbs<E, std::void_t<decltype(std::declval<const E&>().draft_probs())>> : std::true_type {};
+
 template <class Engine>
 struct PipelineEngineAdapterT : server::EngineIface {
   static constexpr bool kTap = HasTapDrafter<Engine>::value;
@@ -183,6 +190,43 @@ struct PipelineEngineAdapterT : server::EngineIface {
       eng.read_logits_into(p, k + 1);
       a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V_, sampling, rng);
     }
+    return spec_run(n, x, k, a);
+  }
+
+  // Open-work 13: EngineAdapter::step_chosen - the head's drafts chosen one at a time, greedy.
+  bool chooses_drafts() override {
+    if constexpr (HasDraftProbs<Engine>::value) return !df_ && k_ > 0 && eng.draft_probs();
+    return false;
+  }
+  std::vector<uint32_t> step_chosen(const server::Sampling& sampling, uint32_t k_req,
+                                    const DraftChoice& choose) override {
+    if constexpr (HasDraftProbs<Engine>::value) {
+      if (!sampling.greedy) throw std::logic_error("PipelineEngineAdapterT::step_chosen: greedy requests only");
+      flush_commit();
+      const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
+      if (k == 0) {
+        ++mtp_iters_at_k[0];
+        return {step(sampling)};
+      }
+      const uint32_t n = eng.pos();
+      const uint32_t x = eng.pending();
+      int v = -1;
+      eng.draft(k, {}, [&](uint32_t i, float p) {
+        v = choose(i + 1, p);
+        return v < 0;
+      });
+      const uint32_t kv = v < 0 ? static_cast<uint32_t>(eng.draft_ids().size()) : static_cast<uint32_t>(v);
+      ++mtp_iters_at_k[kv];
+      eng.verify(kv);
+      return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
+    } else {
+      (void)choose;
+      return step_many(sampling, k_req);   // chooses_drafts() is false: the server never calls this
+    }
+  }
+
+  // The iteration's deferred commit and counters; returns x and the kept drafts.
+  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a) {
     pending_ = true;
     pending_pos_ = n;
     pending_j_ = a.accepted;

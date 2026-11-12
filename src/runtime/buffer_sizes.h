@@ -247,7 +247,10 @@ struct PrefillScratchSizes {
 struct MoePrefillLayout {
   uint32_t tmax = 0, rows = 0;   // at kC
   size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
-         row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0;
+         row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0,
+         cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
+         items_off = 0;          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
+  uint32_t ibound = 0;           // at kC
   size_t w = 0;                  // the weight batch's bytes
   size_t total = 0;
   size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
@@ -255,6 +258,9 @@ struct MoePrefillLayout {
 MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc);   // all zero when dense
 // tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
 uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
+// The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
+// GEMMs' grid, a function of C alone.
+uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C);
 // How many expert weight blocks one rebuild of `w` holds, for each B form (Ornith: 257,
 // 257, 129), so the host walks the blocks in ceil(blocks / that) batches.
 enum class MoeWeightForm { GateUpInt8, GateUpBf16, DownBf16 };

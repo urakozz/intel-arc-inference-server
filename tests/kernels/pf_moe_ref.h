@@ -103,6 +103,59 @@ inline Sorted sort(const uint32_t* route, uint32_t C, const Shape& s) {
   return o;
 }
 
+// pf_moe_sort_mw.cl's work items: each block's tiles `mi` rows at a time, (block, first row, rows, 0), in tile-table
+// order, NONE to (C top_k + experts (mi - 1)) / mi + ceil(C / mi).
+inline uint32_t items_bound(const Shape& s, uint32_t C, uint32_t mi) {
+  return (C * s.top_k + s.experts * (mi - 1)) / mi + (C + mi - 1) / mi;
+}
+inline std::vector<uint32_t> items(const Sorted& st, const Shape& s, uint32_t C, uint32_t mi) {
+  std::vector<uint32_t> it;
+  for (uint32_t t = 0; t < st.tiles_used();) {
+    const uint32_t e = st.tiles[2 * t], r0 = st.tiles[2 * t + 1];
+    uint32_t n = 1;
+    while (t + n < st.tiles_used() && n * kTm < mi && st.tiles[2 * (t + n)] == e) ++n;
+    it.insert(it.end(), {e, r0, n * kTm, 0});
+    t += n;
+  }
+  while (it.size() / 4 < items_bound(s, C, mi)) it.insert(it.end(), {kNone, 0, 0, 0});
+  return it;
+}
+
+// pf_moe_sort_mw.cl's walk (plan 2026-11-12 Task 2): per block of `tb` tokens the experts' counts, a prefix over the
+// blocks per expert (an expert's first row of each block), then each block's pairs scattered in ascending (token,
+// slot) order. pf_moe_ref_test holds it equal to sort() - the reason the kernel is bitwise the one-work-group sort.
+inline Sorted sort_blocked(const uint32_t* route, uint32_t C, const Shape& s, uint32_t tb = 64) {
+  const uint32_t E = s.experts, K = s.top_k, nblk = (C + tb - 1) / tb;
+  auto id = [&](uint32_t t, uint32_t j) {
+    return std::min(route[size_t(t) * moe_ref::kWords + moe_ref::kIds + j], E - 1);
+  };
+  std::vector<uint32_t> cnt(size_t(nblk) * E, 0), tot(E, 0), toff(E + 1, 0);
+  for (uint32_t t = 0; t < C; ++t)
+    for (uint32_t j = 0; j < K; ++j) ++cnt[size_t(t / tb) * E + id(t, j)];
+  for (uint32_t b = 0; b < nblk; ++b)
+    for (uint32_t e = 0; e < E; ++e) tot[e] += cnt[size_t(b) * E + e];
+  for (uint32_t e = 0; e < E; ++e) toff[e + 1] = toff[e] + (tot[e] + kTm - 1) / kTm;
+  Sorted o = sort(route, C, s);   // the tiles, padding rows, shared rows and header: the same formulas
+  std::fill(o.row_tok.begin(), o.row_tok.begin() + toff[E] * kTm, kNone);
+  std::fill(o.pair_row.begin(), o.pair_row.end(), kNone);
+  for (uint32_t e = 0; e < E; ++e) {
+    uint32_t run = toff[e] * kTm;
+    for (uint32_t b = 0; b < nblk; ++b) {
+      const uint32_t v = cnt[size_t(b) * E + e];
+      cnt[size_t(b) * E + e] = run;
+      run += v;
+    }
+  }
+  for (uint32_t b = 0; b < nblk; ++b)
+    for (uint32_t t = b * tb; t < std::min(C, (b + 1) * tb); ++t)
+      for (uint32_t j = 0; j < K; ++j) {
+        const uint32_t row = cnt[size_t(b) * E + id(t, j)]++;
+        o.row_tok[row] = t;
+        o.pair_row[size_t(t) * K + j] = row;
+      }
+  return o;
+}
+
 // Row r of the sorted A operand: x row row_tok[r], or zeros for a padding row. `width`
 // elements of T per row (bf16 hidden, or int8 hidden bytes).
 template <class T>
