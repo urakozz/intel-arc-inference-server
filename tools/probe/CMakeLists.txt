@@ -1124,7 +1124,7 @@ endif()
 # --- probe_moe_prefill: plan 2026-11-12 (Ornith MoE prefill) Task 1 - the fused int4 grouped GEMM arms and the ---------
 # multi-work-group sort on real routes. Record: docs/probes/probe-moe-prefill-2026-11-12.md. `probe_moe_prefill.cl`
 # is a PROBE kernel: no runtime path binds `pmp_gemm`; the control runs the production binaries. PMP_ARMS is
-# "FORM NA NB WGM WGN CVT XSG", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
+# "FORM NA NB WGM WGN CVT XSG OPT", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
 # at Ornith's and Flash-Next's gate||up (SiLU epilogue) and down shapes, FORM 3 also with EPI 2 (the fp32 check).
 if(B70_ORNITH AND B70_Q4EXP)
   set(PMP_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_moe_prefill.cl)
@@ -1133,7 +1133,8 @@ if(B70_ORNITH AND B70_Q4EXP)
                "3 4 4 1 4 0 0 1" "3 4 2 4 8 0 0 0" "3 4 2 4 8 0 0 1" "3 4 4 1 4 0 1 1" "3 4 2 4 8 0 1 1"
                "1 4 4 1 4 9 0 1" "1 4 4 1 4 2 0 5" "2 4 4 4 4 9 0 3" "2 4 4 4 4 2 0 7"
                "1 8 2 1 8 2 0 1" "1 8 2 2 8 2 0 1" "2 8 2 2 8 2 0 3" "1 8 2 1 8 9 0 1"
-               "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3")
+               "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3"
+               "1 4 2 1 8 4 0 1" "1 4 4 1 4 4 0 1" "1 8 2 1 8 2 0 9")
   set(PMP_SHAPES "2048 1024 1" "512 2048 0" "2560 1280 1" "640 2560 0")
   set(PMP_TARGETS "")
   foreach(arm ${PMP_ARMS})
@@ -1152,7 +1153,7 @@ if(B70_ORNITH AND B70_Q4EXP)
       list(GET s 1 N)
       list(GET s 2 EP)
       set(_epis ${EP})
-      if(F EQUAL 3)
+      if(F EQUAL 3 OR CV EQUAL 4)
         list(APPEND _epis 2)
       endif()
       foreach(E ${_epis})
@@ -1164,6 +1165,16 @@ if(B70_ORNITH AND B70_Q4EXP)
         list(APPEND PMP_TARGETS kernel_${_n})
       endforeach()
     endforeach()
+  endforeach()
+  # phase 3 Task 1, arm `shd`: the shared expert's two linears (block E, layout 1) through the production slab dequant
+  # and pf_gemm, at Ornith's shapes: gate||up K 2048 N 1024, down K 512 N 2048
+  foreach(shd "2048 1024" "512 2048")
+    separate_arguments(s UNIX_COMMAND "${shd}")
+    list(GET s 0 K)
+    list(GET s 1 N)
+    add_ocloc_kernel(pmp_shd_slab_K${K}_N${N}_L1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
+                     DEFINES K=${K} N=${N} LAYOUT=1)
+    list(APPEND PMP_TARGETS kernel_pmp_shd_slab_K${K}_N${N}_L1)
   endforeach()
   add_executable(probe_moe_prefill probe_moe_prefill.cc)
   target_include_directories(probe_moe_prefill PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
