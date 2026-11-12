@@ -251,12 +251,13 @@ int main(int argc, char** argv) {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
     // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch). The MoE block, plan 2026-11-12: 9 (router,
-    // route, the sort's three launches, gather, one fused GEMM a projection, combine; our int4 shared expert)
-    const size_t moe = 9;
-    const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + moe,
+    // route, the sort's three launches, gather, one fused GEMM a projection, combine; our int4 shared expert);
+    // phase 3 Task 8: the router and a||b are a slab re-lay + pf_gemm each - the MoE 10, a||b 2
+    const size_t moe = 10;
+    const size_t gdn = 2 * 4 + 32 + 2 + rq::gdn_chunk_q4_launches() + 6 + moe,
                  qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + moe, ple = 1 + 1 + 26 + 3;
-    CHECK_EQ(gdn, size_t(56) + rq::gdn_chunk_q4_launches());
-    CHECK_EQ(qsa, size_t(55));
+    CHECK_EQ(gdn, size_t(58) + rq::gdn_chunk_q4_launches());
+    CHECK_EQ(qsa, size_t(56));
     CHECK_EQ(rq::pf_batches_gu(ours), 7u);
     CHECK_EQ(rq::pf_batches_dn(ours), 4u);
     CHECK_EQ(rq::pf_batch_blocks_gu(ours), 81u);
