@@ -812,7 +812,7 @@ st_r15_speed() {
 row 16 "spec 15e - Ornith 1.5 served: template, tool calls, the MoE MTP head (spec 15 §12, plan 15e)"
 rownote 16 "Everything after r16.kernels needs the int4 checkpoint (SNAP_ORNITH, 15a) and should follow rows 10 and 13; mtp_head_ornith_test (M1) also needs 15a's oracle-out-ornith-mtp/. Without them those stages SKIP with 'missing data'."
 rownote 16 "Since spec 15 §13 Ornith's greedy argmax masks from 248077, the int4 checkpoint's tokenizer.json count (Qwen3.8's argmax_stage1_M{1..4}; the _V248070 binaries stay built, unbound), so b70-serve's startup note comparing the two does not fire for Ornith: r16.serve checks it is absent. Its a||b is int4 (gemv_M{1..4}_K2048_N128_S1_L1: the tests that bind them fail when one is not built)."
-rownote 16 "An Ornith MTP cost default (and a default K) from r16.cost's table is an edit on a branch after the run."
+rownote 16 "r16.cost was run directly on 2026-11-12 (BENCHMARKS 'Ornith 1.5 MoE'): the measured table lost 6-10 % decode against Qwen3.8's table in the speed A/B, so it is not wired and Ornith keeps K up to 3."
 rownote 16 "A4 against the Ornith reference (plan 15e Task 3 Step 1) needs oracle-out-ornith-a4/ - the Ornith tool-call set (Qwen3.8's 36 conversations rendered by Ornith's own template) and the reference's <name>.bf16.txt - made on the Mac from the int4 checkpoint (r16.a4_ref: tools/toolcall/a4_ref.sh ornith set / ref, hours) and copied by --push-data; r16.a4 (opt-in) then runs the engine and scores. No bar: recorded beside Qwen3.8's 25/36."
 rownote 16 "Determinism and replay on Ornith (plan 15e Task 3 Step 1) are row 10's / 13's gates (ornith_decode_test, ornith_prefill_* replay and chunking bitwise); C2 is r16.prefix, passkey r16.passkey (opt-in), the comparison rows r16.benchy (opt-in). The record (BENCHMARKS 'Ornith 1.5 MoE (spec 15)', spec 15 §10) is filled from those numbers on a branch."
 
@@ -839,7 +839,7 @@ st_r16_m1() {
   jgrab m1 '^mtp_head_ornith_test$' 'cos|top|M1|OK|PASS|FAIL'
   finish
 }
-stage r16.serve 16 default card ornith r16.kernels "b70-serve <ornith> startup: --max-len auto -> 262144 with and without --spec auto (derived), the --spec auto cost note (Qwen3.8's table until r16.cost), the MTP head's load line; NO tokenizer / argmax vocab note (both 248077 since spec 15 §13); then the A4 set as chat requests with their tools, greedy, 192 ids (tool calls back as OpenAI tool calls)"
+stage r16.serve 16 default card ornith r16.kernels "b70-serve <ornith> startup: --max-len auto -> 262144 with and without --spec auto (derived), the --spec auto cost note (Qwen3.8's table, measured Ornith table not wired), the MTP head's load line; NO tokenizer / argmax vocab note (both 248077 since spec 15 §13); then the A4 set as chat requests with their tools, greedy, 192 ids (tool calls back as OpenAI tool calls)"
 st_r16_serve() {
   serve "$SNAP_ORNITH"
   serve "$SNAP_ORNITH" --spec auto

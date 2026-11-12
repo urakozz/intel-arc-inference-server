@@ -641,12 +641,11 @@ void print_proposer(const server::Options& options, bool spec_lookup, uint32_t s
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, " (plain steps)\n");
-    // Spec 15e Review Focus 2: the defaults are Qwen3.8's measured table. A MoE model's
-    // verify at M rows touches up to top_k x M distinct experts, so its costs are its own -
-    // unmeasured until the box records them (then they become the engine's table).
+    // A MoE model's verify at M rows touches up to top_k x M distinct experts, so its costs differ from Qwen3.8's;
+    // Ornith's measured table (docs/BENCHMARKS.md) was 6-10 % slower in the speed A/B than Qwen3.8's, so it keeps these.
     if (moe_default_costs)
-      std::fprintf(stderr, "mtp auto: %s's own costs are not measured yet; the table above is "
-                           "Qwen3.8's\n",
+      std::fprintf(stderr, "mtp auto: %s runs on Qwen3.8's table (its own measured one decoded slower, "
+                           "docs/BENCHMARKS.md)\n",
                    model_name.c_str());
   }
 }
