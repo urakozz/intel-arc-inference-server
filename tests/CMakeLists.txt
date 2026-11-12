@@ -1078,7 +1078,7 @@ add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 # Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0 and the
-# l0 + 256 launch delta. The int8 kernels are in
+# l0 + 128 launch delta (open-work 17: two quantisers a layer, the MLP's). The int8 kernels are in
 # B70_PREFILL_KERNELS above.
 add_test(NAME prefill_int8_test COMMAND prefill_int8_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_int8_test PROPERTIES LABELS "checkpoint;prefill"
