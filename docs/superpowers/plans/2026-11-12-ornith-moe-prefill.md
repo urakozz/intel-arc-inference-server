@@ -217,8 +217,18 @@ weights inside the GEMM costs more than the pass.
 int8` and the requant scratch go), `buffer_sizes.cc` (the weight batch region goes for Ornith entirely), tests' launch
 counts, `tools/box_validate/stages.sh` r13 descriptions.
 
-- [ ] **Step 1 (Mac):** implement behind D1; `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `prefill_gate_ornith_l0-int8_test` (+ `_c16`), `prefill_split_ornith_l0-int8_test`,
+- [x] **Step 1 (Mac):** implement behind D1; `mac_check` green. Commit. **Done 2026-11-12**: `pf_moe_w4a8.cl`
+  (pf_quant_g64 per token and 64-k group, pf_moe_gather_i8g, the s4 DPAS GEMM over the work items, SiLU epilogue)
+  and the bf16 experts (`pf_moe_q4gemm`) for l0-int8, both as test switches (`B70_PF_MOE=w4a8` / `=i8bf16`);
+  pf_moe_test 4c: quantiser and gather exact, h exact against the host's integer sums.
+- [x] **Step 2 (box, card 0):** **Done 2026-11-12 - neither candidate passes the f32 judge's token gate; l0-int8 keeps
+  the rotated int8 gate||up (its down is fused since Task 3).** R3 (determined rows exact, one chunk / chunks of 16):
+  today 90/92 (one accepted) / 92/92 PASS; W4A8 89/92 / 91/92 FAIL; bf16 experts 90/92 (row 18 not accepted) /
+  90/92 FAIL. R2 differing sets (f32 judge, bf16 golden 1140): today 1314, W4A8 1264, bf16 experts 1326.
+  pp4096 / pp16384 (card 0, 3 rounds): today's l0-int8 3,913; W4A8 7,593; bf16 experts 6,804 / 5,879 (l0 6,538 /
+  5,676). The operator's further evidence (2026-11-12: the misses' margins, A4, the f32-judged serving rows, all
+  three forms on card 1) decides whether W4A8 becomes the default. `prefill_gate_ornith_l0-int8_test` (+ `_c16`),
+  `prefill_split_ornith_l0-int8_test`,
   `ornith_prefill_l0-int8_test`, interleaved 4k / 16k l0-int8 bench.
   - **Gates (judged):** by the plain f32 reference, the engine's differing MoE sets and token misses no more than
     today's l0-int8 (printed beside the bf16 golden's); 4k l0-int8 t/s >= today's l0-int8 x 1.5 (derived: ~1.6x).
