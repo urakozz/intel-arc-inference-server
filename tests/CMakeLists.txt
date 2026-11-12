@@ -3492,6 +3492,7 @@ if(B70_Q4EXP)
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
     kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512 kernel_pf_ab_proj_D2560
     kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front
+    kernel_pf_gdn_intra kernel_pf_route_ab_D2560 kernel_pf_route_router_K2560_N528
     kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
     kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2

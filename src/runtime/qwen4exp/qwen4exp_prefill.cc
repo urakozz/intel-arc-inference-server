@@ -238,8 +238,11 @@ class Walk {
                 L.gdn_ab->shape.K == d_.hidden,
             "a||b is not bf16 {2560, 128} (pf_ab_proj's tiles)");
     linear(*L.gdn_qkvz, s_.x.ptr(), s_.partials.ptr(), pf_ld(d_.qkvz_n()));
-    // pf_ab_proj(w, x, out, m_count) - grid (128 / 16, ceil(C / 8))
-    launch(kc_(kq::pf_ab_variant(), "pf_ab_proj"), model::Qwen4ExpDesc::kAbPaddedN / 16, (C_ + 7) / 8, 1,
+    // pf_gemv_rows(w, x, out, m_count) - phase 2 Task 8: pf_ab_proj's arithmetic at 16 rows x 2 column tiles a
+    // work-group (pf_route.cl), bitwise it; grid (ceil(128 / 16 / 2), ceil(C / 16))
+    launch(kc_(kq::pf_route_ab_variant(), "pf_gemv_rows"),
+           (model::Qwen4ExpDesc::kAbPaddedN / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
+           (C_ + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
            {PtrArg(L.gdn_ab->mem.ptr()), PtrArg(s_.x.ptr()), PtrArg(s_.ab.ptr()), arg_val(C_)});
     const GdnScratchSizes g = gdn_scratch_sizes(kPfC);
     GdnChunkBuffers gb;
@@ -357,8 +360,11 @@ class Walk {
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden && L.router->kind == model::WeightKind::Bf16,
             "the router is not bf16 [528][2560]");
     void* rt = at(s_.routes, pf_route_at(l));
-    // pf_ab_proj(w, x, out, m_count) at {2560, 528} - grid (528 / 16, ceil(C / 8)): decode's {16, 16} tiling
-    launch(kc_(kq::pf_router_variant(), "pf_ab_proj"), d_.router_n() / 16, (C_ + 7) / 8, 1,
+    // pf_gemv_rows(w, x, out, m_count) at {2560, 528} - phase 2 Task 8: decode's {16, 16} rows, bitwise, at 16 rows
+    // x 2 column tiles a work-group (pf_route.cl); grid (ceil(528 / 16 / 2), ceil(C / 16))
+    launch(kc_(kq::pf_route_router_variant(), "pf_gemv_rows"),
+           (d_.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
+           (C_ + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
            {PtrArg(L.router->mem.ptr()), PtrArg(s_.x.ptr()), PtrArg(s_.logits.ptr()), arg_val(C_)});
     // q4_route(logits, route) - decode's binary, row m of [C][528]
     launch(kc_(kq::route_variant(1), "q4_route"), 1, C_, 1, {PtrArg(s_.logits.ptr()), PtrArg(rt)});

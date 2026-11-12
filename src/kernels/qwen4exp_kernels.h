@@ -266,7 +266,11 @@ inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_va
 // The reused prefill binaries at this family's shapes.
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560
 inline std::string pf_ab_variant() { return pf_ab_proj_variant(kHidden); }                  // pf_ab_proj_D2560
-inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }  // pf_moe_router_K2560_N528
+inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }
+// MoE-model prefill phase 2 (Task 8): what the walk binds in place of the two GEMVs above (kept for the kernel tests'
+// decode-row references).
+inline std::string pf_route_ab_variant() { return kernels::pf_route_ab_variant(kHidden); }            // pf_route_ab_D2560
+inline std::string pf_route_router_variant() { return kernels::pf_route_router_variant(kHidden, kRouterN); }  // pf_moe_router_K2560_N528
 inline std::string pf_gemm_gu_variant() { return pf_moe_gemm_variant(kHidden, 2 * kInter, false, true); }
 inline std::string pf_gemm_dn_variant() { return pf_moe_gemm_variant(kInter, kHidden, false, false); }
 inline std::string pf_gated_head_sig_variant() { return pf_gated_head_variant() + "_SIG"; }   // pf_gated_head_SIG
@@ -294,6 +298,9 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gdn_wy_variant(),
       pf_gdn_scan_variant(),
       pf_gdn_front_variant(),       // MoE-model prefill phase 2: conv + l2norm in one launch
+      pf_gdn_intra_variant(),       // ... A / T / w, u / A2 in one launch
+      pf_route_ab_variant(),
+      pf_route_router_variant(),
       pf_gated_head_sig_variant(),
       pf_bf16_slab_variant(kHidden, kIdxN),
       pf_attn_prep_q4_variant(),
