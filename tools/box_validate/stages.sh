@@ -3683,6 +3683,20 @@ st_r81_speed() {
   finish
 }
 
+row 83 "plan 2026-11-12 - Ornith / Flash-Next MoE prefill: the fused int4 grouped GEMM arms (bf16 per sub-group and SLM-shared, W4A8 on the s4 DPAS operand) and the multi-work-group sort on real routes (probe_moe_prefill, Task 1)"
+rownote 83 "The numerics half of Task 1 (tools/probe/moe_w4a8_accuracy.py: the W4A8 forms against f32 on real Ornith activations, rotated-checkpoint arm included) is a CPU reference job under /tmp/b70-cpu-model.lock in the oracle container, run by hand: tools/oracle/run_in_container.sh 'python3 tools/probe/moe_w4a8_accuracy.py \"\$SNAP\" --prompt tests/golden/prompts/prose.ids' with ORACLE_MODEL the Ornith cache name."
+stage r83.routes 83 default card ornith - "the route dump: ornith_prefill_test --dump-routes (every layer's route rows after a real prefill of long32k[0, 4096) in chunks of 2048, l0) -> \$STATE/ornith.routes"
+st_r83_routes() {
+  chk "build/tests/ornith_prefill_test $SNAP_ORNITH tests/golden/prompts l0 --dump-routes=$STATE/ornith.routes --dump-ids=tests/golden/prompts/long32k.ids" "the Ornith route dump"
+  finish
+}
+stage r83.probe 83 optin card ornith r83.routes "probe_moe_prefill on Ornith's dump at C = 2048 and 4096: the bitwise / integer-oracle checks, then every arm's ms a layer and chunk, interleaved (card 0; the record: docs/probes/probe-moe-prefill-2026-11-12.md)"
+st_r83_probe() {
+  chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5" "probe_moe_prefill ornith"
+  grab_all result '^(RESULT|# checks|# FAILED|\| check)' 400
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {

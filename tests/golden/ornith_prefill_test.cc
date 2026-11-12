@@ -166,13 +166,21 @@ bool decode_tie(const std::vector<float>& lg) {
 
 int main(int argc, char** argv) {
   std::string judge_dir;   // --judge=<dir>, anywhere after the positional arguments
-  for (int i = 1; i < argc; ++i)
-    if (std::string(argv[i]).rfind("--judge=", 0) == 0) {
-      judge_dir = argv[i] + 8;
-      for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
-      --argc;
-      break;
+  std::string dump_routes, dump_ids;   // --dump-routes=<file> --dump-ids=<ids>: plan 2026-11-12 Task 1's dump
+  for (int i = 1; i < argc;) {
+    const std::string a = argv[i];
+    std::string* to = a.rfind("--judge=", 0) == 0          ? &judge_dir
+                      : a.rfind("--dump-routes=", 0) == 0  ? &dump_routes
+                      : a.rfind("--dump-ids=", 0) == 0     ? &dump_ids
+                                                           : nullptr;
+    if (!to) {
+      ++i;
+      continue;
     }
+    *to = a.substr(a.find('=') + 1);
+    for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+    --argc;
+  }
   if (argc < 4) {
     std::fprintf(stderr, "usage: %s <snapshot> <prompt ids dir> <l0|l0-int8> [oracle dir] [lm_head]\n",
                  argv[0]);
@@ -208,6 +216,32 @@ int main(int argc, char** argv) {
               eng.memory_line().c_str(),
               diagnostic ? "\n  DIAGNOSTIC: l0-int8 on a MoE model - sections 4-6 printed, not gated (operator "
                            "2026-10-31)" : "");
+  // Plan 2026-11-12 Task 1: every layer's route rows after a real prefill of the first two chunks of --dump-ids
+  // (chunks of 2048, the second continuing the first), for probe_moe_prefill: "B70ROUTE", u32 version 1, layers,
+  // tokens, words (32), then [layers][tokens][32] u32. No gate runs in this mode.
+  if (!dump_routes.empty()) {
+    const uint32_t C = runtime::PrefillScratchDims::kCDefault, n2 = 2 * C;
+    const std::vector<uint32_t> ids = golden::read_ids(dump_ids);
+    CHECK(ids.size() >= n2);
+    const runtime::MoePrefillLayout L = runtime::moe_prefill_layout(d);
+    std::vector<uint32_t> rows(size_t(d.layers) * n2 * 32);
+    eng.reset();
+    for (uint32_t c0 = 0; c0 < n2; c0 += C) {
+      eng.prefill(std::vector<uint32_t>(ids.begin() + c0, ids.begin() + c0 + C), C);
+      for (uint32_t l = 0; l < d.layers; ++l)
+        imm.copy(rows.data() + (size_t(l) * n2 + c0) * 32,
+                 static_cast<const uint8_t*>(eng.prefill_scratch()->moe->ptr()) + L.route_at(l), size_t(C) * 32 * 4);
+    }
+    std::FILE* f = std::fopen(dump_routes.c_str(), "wb");
+    CHECK(f != nullptr);
+    const uint32_t hdr[4] = {1, d.layers, n2, 32};
+    CHECK(std::fwrite("B70ROUTE", 1, 8, f) == 8 && std::fwrite(hdr, 4, 4, f) == 4 &&
+          std::fwrite(rows.data(), 4, rows.size(), f) == rows.size());
+    std::fclose(f);
+    std::printf("dump-routes: %u layers x %u tokens (chunks of %u, %s) -> %s\n", d.layers, n2, C,
+                runtime::prefill_backend_name(backend), dump_routes.c_str());
+    return 0;
+  }
   const std::vector<uint32_t> prose = golden::read_ids(pdir + "/prose.ids");
   const uint32_t n = one_chunk(uint32_t(prose.size()));
 
