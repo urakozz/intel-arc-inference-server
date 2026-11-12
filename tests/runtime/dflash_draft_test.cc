@@ -521,6 +521,28 @@ int main(int argc, char** argv) {
     e.run(draft);
     bad += quantised ? judge_draft(e, b, tj, ring, rope, 1234, P, 3, 0.0f, 0, draft, *dg, "K 3")
               : compare_draft(e, b, tw, ring, rope, 1234, P, 3, 0.0f, 0, "K 3");
+    if (f == loader::DraftFormat::Int4G64) {
+      const auto reference = dfref::draft(tj, dfref::Numerics::Reference, ring, rope, 1234, P, 3, 0.0f, 0);
+      for (bool body_gemv : {false, true}) {
+        runtime::CaptureOptions mixed;
+        mixed.force_linear = body_gemv ? runtime::LinearForce::Gemv : runtime::LinearForce::SmallM;
+        mixed.force_dflash_head = body_gemv ? runtime::LinearForce::SmallM : runtime::LinearForce::Gemv;
+        auto step = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, mixed);
+        const auto& base = body_gemv ? *dg : draft;
+        CHECK_EQ(step.labels.size(), base.labels.size());
+        size_t changed = 0;
+        for (size_t i = 0; i < step.labels.size(); ++i)
+          if (step.labels[i] != base.labels[i]) {
+            ++changed;
+            CHECK(step.labels[i].find("_M7_") != std::string::npos);
+          }
+        CHECK_EQ(changed, size_t(1));   // the override changes only the head, never the body
+        e.run(step);
+        const auto m = measure(*b.readback(), e.read<float>(b.h, size_t(M) * H), reference, P, 3, 0.0f, 0);
+        std::printf("DFLASH_LINEAR_DIAG body=%s head=%s K=3 rows_cos=%.9f scores_cos=%.9f sets_off=%d walk_to=%u\n",
+                    body_gemv ? "gemv" : "gemm_sm", body_gemv ? "gemm_sm" : "gemv", m.hc, m.sc, m.sets_bad, m.walk_at);
+      }
+    }
 
     // 5. sampled
     b.ctl()->k = 7;

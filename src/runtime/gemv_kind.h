@@ -48,6 +48,8 @@ struct CaptureOptions {
   uint32_t profile_keys = 1;   // select its shallow/deep list at this row-0 key count
   // Test / probe: the same projection with timestamps, used instead of a pending production projection.
   l0::CmdList* profile_projection = nullptr;
+  // Test / probe: isolate the DFlash target head from its body when comparing linear arithmetic.
+  LinearForce force_dflash_head = LinearForce::Auto;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;
