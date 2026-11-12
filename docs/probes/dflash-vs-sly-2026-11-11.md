@@ -215,8 +215,11 @@ passing bitwise checks; both local K-cache representations fail and are rejected
 is the next step. Full cost targets and Task 8 remain unpassed.
 
 H1/B4 policy integration subsequently passes four device checks with no skips (kernel, profile, engine,
-golden/A4 greedy identity); the full numerical check remains queued. The int8-body candidate arm measures
+golden/A4 greedy identity); the full int8 H1/B4 numerical check subsequently passes on card0
+(`resume-numerical-card0.log`, DONE rc0). The int8-body candidate arm measures
 8.429809 ms draft / 1.558631 plain-step iteration at 4k, and 8.527476 ms / 1.530302 at 32k. C7 targets still
 fail; resource grade is exclusive card1/busy box with concurrent CPU references. See BENCHMARKS for the full
 paired full-head/candidate table. The operator deferred proper AutoRound conversion to a later follow-up;
-finish the RTN cost diagnostics, but use the quality-safe int8 body for Task 8.
+RTN cost diagnostics are complete, with the candidate 4k wall result explicitly noisy. Task 8 uses the
+quality-safe int8 body and is collecting on card1 against fresh default per-step MTP. Its completed first
+rotation on card0 is validated and reused with per-arm card provenance; no final speed gate is claimed.

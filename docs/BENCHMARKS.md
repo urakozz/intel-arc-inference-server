@@ -912,8 +912,8 @@ The earlier 2,820-token shape label was stale. Both warm requests restore the pr
 remaining prompt tail prefilling; prefix cache budget 32 GiB. MTP's recorded slot had context 32768. DFlash is
 **1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. The operator chose to
 continue Tasks 3-7 after baseline gates clear. **The 80.5 t/s early bar PASSED** once CPU G-accept cleared below.
-Task 8 is deferred to the quiet-box session and must compare against main's per-step MTP (`f65ae50e` or later),
-the default for `--mtp auto`. This single shape does **not** establish its replay/regression G-speed gate.
+Task 8 compares against freshly measured main per-step MTP (`f65ae50e` or later), the default for `--mtp auto`.
+The operator subsequently allowed one idle GPU with >16/44 CPU threads available, graded busy box. This single shape does **not** establish its replay/regression G-speed gate.
 
 Provenance on the box: `~/b70/logs/brag-speed/20261111-1536/card-bf16/{bench.jsonl,server-log/000003.json}`
 and `~/b70/logs/dflash-v2/baseline/slots/{bench.jsonl,server-log/000003.json,server.log}`. The DFlash command is
@@ -1122,8 +1122,8 @@ Evidence: `~/b70/logs/dflash-v2/task7b/h1b4-candidate-int8/iter-int4-{full,candi
 
 At the GPU handoff, the next baseline calibration was interrupted: 2463 complete rows match the original
 4256-row baseline, with one truncated line. This is **partial, not a passed calibration**; it is archived under
-`paused-2026-11-12T1523/` beside `calibration-status.json`. Combined H1/B4/candidate acceptance, the full numerical
-check and Task 8 remain pending. Card1 was released for the operator at 15:23 UTC; no queued DFlash job remains.
+`paused-2026-11-12T1523/` beside `calibration-status.json`. That partial run is superseded by the complete 4256-row calibration and all 35 acceptance rows below.
+The full int8 H1/B4 numerical check also passes; Task 8 is collecting on card1 after the operator pause.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
@@ -1586,4 +1586,12 @@ On card0, the int8-body H1/B4/candidate64/exact-rerank arm matches the original 
 exactly**. The earlier interrupted 2463-row run remains archived; `calibration-status.json` now records the
 completed calibration. Evidence: `~/b70/logs/dflash-v2/resume-accept-card0.log` (DONE rc0) and
 `task7b/h1b4-candidate-int8/{calibration-status.json,acceptance.json}`. The int8 cost table is already refreshed;
-full numerical validation and the rotated Task 8 comparison remain pending. This is not an RTN int4 promotion.
+the full int8 H1/B4 numerical check subsequently passes (`resume-numerical-card0.log`, DONE rc0). Forced-GV
+projection has zero differences, ring cosine is 0.9999978, and the existing aggregate f32-set criterion passes
+4 misses versus 8 for forced GV. The individual BF16-head diagnostic (3 versus 2) remains recorded; no bar changed.
+
+Task 8 is collecting on card1 (`task8-card1-continue.log`): the complete first rotation on card0 (78 requests per
+arm) was checked against the original server logs and recording before reuse. Binary SHA remains
+`9afaed8f866f1e7ba824ce97485ae78353a237d4b25bc6202535cd4ddb9c2f03`; each arm records its card. The resumed
+CPU guard measured 19.59–20.07 available threads out of 44. Final speed and serving correctness gates remain
+pending. This does not promote RTN int4 or change the speculation default.
