@@ -19,6 +19,40 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 | 4 | **Flash-Next at full size - our own weights, then the expert tier on two cards** ([spec 21 v2](superpowers/specs/2026-11-11-spec21v2-flash-next-v2-design.md), [plan 21v2a](superpowers/plans/2026-11-11-spec21v2a-whole-model-tiering.md), then [21v2b](superpowers/plans/2026-11-12-spec21v2b-tensor-parallel.md)). The operator ruled on 2026-11-12: re-quantise the model ourselves (AutoRound int4 g64 from the 360 GB bf16 original, MTP experts included; the output head stays bf16 and becomes int8 at load), split the layers first and tensor parallel after, and aim past Strata's 66 t/s on two B70s at 4-bit quality. The whole model needs ~70 GB against ~62 on two cards, so the most-used experts stay in VRAM and the rest are read from pinned host memory | the bf16 original is downloading (222 of 360 GB, 2026-11-12); the quantisation script is ready and sized (~2 days on card 1, the operator row above); next: the operator's weekend run, then plan 21v2a Tasks 3-7 | `b70-serve` serves the whole model on our weights, judged by the f32 reference, at 30 t/s or more on `pp`; then 50 t/s decode and 1000 t/s prefill on `tp` (21v2b) |
 | 5 | **The quiet-box measurement session** - one record-grade speed run at the end, on an idle box and the newest driver. It measures every speed number (tensor parallel, 3l, TP + slots and replica throughput: tonight's numbers ran beside CPU jobs and are not records) and settles the open speed choices: list B (card hand-off copy vs peer, int8 KV, int8 prefill, draft vocabulary, Flash-Next's MTP norm and eager attention: the winner stays, the rest is deleted), 4096-row prefill chunks (+4.2 %, under the +5 % bar: the operator decides), MTP acceptance cold vs a prefix cache hit (< 1 % closes spec 16), and our adaptive MTP depth against saber's rule. The stages: `tools/box_validate.sh --with optin` (`--list` shows them); parked models' stages wait for those models | after everything above it | measured; README.md, docs/BENCHMARKS.md and docs/18-running-models.md refreshed |
 
+## DFlash drafter quant (follow-up)
+
+Quantise `z-lab/Qwen3.8-27B-DFlash2` with **tuned AutoRound W4A16, group size 64, symmetric**, exported as
+`auto_round:auto_gptq` (4-bit weights, 16-bit activations; `w = (q - 8) * scale`, symmetric GPTQ zeros,
+no activation-order permutation). Start with 200 tuning iterations and 128 calibration samples, seed 42;
+record the pinned AutoRound commit and the actual recipe with the export. This replaces the failed at-load RTN
+experiment; int8 stays the serving format until the calibrated export passes acceptance.
+
+**Queued, not runnable yet:** implement and validate the DFlash calibration adapter, export checker and packed
+DFlash loader first. The intended operator commands are:
+
+```sh
+# Planned entry point: tools/quantize/quantize_dflash.sh does not exist yet.
+tools/quantize/quantize_dflash.sh start    # detached; one card through gpu_lock, logs under ~/b70/logs/dflash-quant/
+tools/quantize/quantize_dflash.sh status
+tools/quantize/quantize_dflash.sh stop     # through box_stop; start should resume
+```
+
+The runner must calibrate the actual non-causal `DFlash2DraftModel` with block size 8 and the quantised target's
+hidden-state taps (layers 5/19/33/47/61). Use the training opencode recordings; keep A4/golden and the whole
+`opencode-session-2` out of calibration. Quantise the drafter linears, including `fc` and the selector projection;
+preserve norms, conv bases, selector codebooks and mask embedding at their source precision. Embedding and
+output head remain shared with the target, so the drafter job does not use `--quant_lm_head`. Store the export
+under `~/b70/hdd/quant/Qwen3.8-27B-DFlash2-W4A16-g64-<date>/`.
+
+The generic `MODEL=... tools/quantize_qwen38_tuned.sh` is not a DFlash conversion command: the source config
+says `model_type=qwen3` but `architectures=[DFlash2DraftModel]`, and our current DFlash checkpoint reader accepts
+BF16 tensors rather than packed GPTQ linears. The follow-up needs both the custom calibration forward and the
+packed loader. Before promotion: validate packing/unquantised tensors, run the f32 numerical checks, compare
+all K/corpora against the original int8/full-head acceptance baseline (loss <= 0.05 tokens/verify), then G-D2
+and the updated-MTP serving comparison. Sources: [drafter config](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/blob/main/config.json),
+[AutoRound schemes/API](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md),
+[our quantisation rules](../tools/quantize/README.md).
+
 ## Qwen Flash Next quant
 
 Calibration is on `nvidia/OpenCodeInstruct`
