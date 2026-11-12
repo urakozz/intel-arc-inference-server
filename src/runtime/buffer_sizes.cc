@@ -435,6 +435,24 @@ uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C) {
   const uint32_t tm = kernels::pf_moe::kTileM;
   return (C * desc.moe.top_k + desc.moe.experts * (tm - 1)) / tm + (C + tm - 1) / tm;
 }
+namespace {
+std::string pf_moe_env() {
+  const char* v = std::getenv("B70_PF_MOE");
+  return v ? v : "";
+}
+}  // namespace
+bool moe_pf_old_walk() {
+  static const bool old = pf_moe_env() == "old";
+  return old;
+}
+bool moe_pf_w4a8() {
+  static const bool w = pf_moe_env() == "w4a8";
+  return w;
+}
+bool moe_pf_i8bf16() {
+  static const bool b = pf_moe_env() == "i8bf16";
+  return b;
+}
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C) {
   if (!desc.is_moe()) return 0;
   const uint32_t mi = kernels::pf_moe::kItemM;
@@ -465,7 +483,8 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
   l.tmax = moe_prefill_tiles(desc, PrefillScratchDims::kCDefault);
   l.rows = l.tmax * kernels::pf_moe::kTileM;
   // The weight batch: every block in the int8 gate||up and bf16 down forms, half the
-  // blocks (rounded up) in the bf16 gate||up form - whichever is largest.
+  // blocks (rounded up) in the bf16 gate||up form - whichever is largest. (The fused GEMMs read the blocks in
+  // place, plan 2026-11-12; l0-int8's default rotated int8 gate||up still requantises into it.)
   const uint32_t half = (m.blocks() + 1) / 2;
   l.w = std::max({moe_block_bytes(desc, MoeWeightForm::GateUpInt8) * m.blocks(),
                   moe_block_bytes(desc, MoeWeightForm::DownBf16) * m.blocks(),
@@ -490,6 +509,8 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
   l.cnt_off = region((kC + 63) / 64 * m.experts * sizeof(uint32_t));
   l.ibound = moe_prefill_items(desc, PrefillScratchDims::kCDefault);
   l.items_off = region(size_t{l.ibound} * 4 * sizeof(uint32_t));
+  l.xsg_tok_off = region(kC * (desc.hidden / 64) * kFp32);
+  l.xsg_off = region(size_t{l.rows} * (desc.hidden / 64) * kFp32);
   l.total = at;
   return l;
 }

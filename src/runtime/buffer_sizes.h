@@ -249,7 +249,9 @@ struct MoePrefillLayout {
   size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
          row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0,
          cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
-         items_off = 0;          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
+         items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
+         xsg_tok_off = 0,        // W4A8 (l0-int8): the chunk's per-token 64-k group scales, fp32 [C][hidden / 64]
+         xsg_off = 0;            // and the sorted rows', fp32 [rows][hidden / 64]
   uint32_t ibound = 0;           // at kC
   size_t w = 0;                  // the weight batch's bytes
   size_t total = 0;
@@ -261,6 +263,13 @@ uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
 // The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
 // GEMMs' grid, a function of C alone.
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C);
+// Plan 2026-11-12: B70_PF_MOE=old (env; tests and probes only) puts a MoE prefill back on today's walk (the
+// one-work-group sort, the per-chunk weight pass + grouped GEMMs, the rotated int8 gate||up). Read once.
+bool moe_pf_old_walk();
+// B70_PF_MOE=w4a8 (experiment): l0-int8's gate||up as W4A8 (pf_moe_w4a8.cl). Read once.
+bool moe_pf_w4a8();
+// B70_PF_MOE=i8bf16 (experiment): l0-int8's experts on the bf16 fused GEMMs (pf_moe_q4gemm.cl). Read once.
+bool moe_pf_i8bf16();
 // How many expert weight blocks one rebuild of `w` holds, for each B form (Ornith: 257,
 // 257, 129), so the host walks the blocks in ceil(blocks / that) batches.
 enum class MoeWeightForm { GateUpInt8, GateUpBf16, DownBf16 };

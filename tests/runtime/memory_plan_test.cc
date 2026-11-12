@@ -163,10 +163,11 @@ void check_sizes_ornith() {
   // The weight batch: the bf16 gate||up of ceil(257 / 2) = 129 blocks (2048 x 1024 x 2 B
   // each) outgrows the int8 gate||up and the bf16 down of all 257 (2 MiB each).
   CHECK_EQ(ml2.w, size_t{129} * 2048 * 1024 * 2);                  // 541,065,216
-  // plan 2026-11-12 Task 2: + the mw sort's counts (32 blocks x 256 experts) and its work items (540 x 4 u32)
+  // plan 2026-11-12: + the mw sort's counts (32 blocks x 256 experts), its work items (540 x 4 u32) and W4A8's
+  // group scales (2048 tokens and 26368 rows x 32 groups, fp32)
   CHECK_EQ(runtime::moe_prefill_items(o, 2048), uint32_t(540));     // (16384 + 256 x 63) / 64 + 32
-  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 105472 +
-                          27000832 + 108003328 + 541065216 + 32768 + 8704);   // 689,109,248
+  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 105472 + 27000832 + 108003328 +
+                          541065216 + 32768 + 8704 + 262144 + 3375104);   // 692,746,496
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpInt8), uint32_t(257));
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::DownBf16), uint32_t(257));
   CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpBf16), uint32_t(129));
