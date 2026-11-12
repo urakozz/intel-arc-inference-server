@@ -65,12 +65,15 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <utility>
 #include <vector>
 
 #include "attn_ref.h"
 #include "check.h"
 #include "common/bf16.h"
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -358,6 +361,63 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
   return ok;
 }
 
+// MoE prefill phase 3 Task 7: attn_chunk's flash launch (pf_flash_attn_r32, 32 rows a work-group, Q in registers)
+// against TODAY's RPW 8 binary launched directly on the same Q / K / V, at the descriptor's heads. Bar: pf_o's words
+// bitwise equal on every head and every row of the computed 8-row blocks [0, ceil8(C)).
+bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos,
+                            uint32_t C) {
+  using runtime::prefill::PtrArg;
+  using runtime::prefill::arg_val;
+  const uint32_t qh = desc.fa_q_heads, kvh = desc.fa_kv_heads;
+  const uint32_t depth = pos + C, rows = runtime::prefill::attn_rows(C, runtime::PrefillBackend::L0);
+  const uint32_t max_len = runtime::prefill::pad256(depth), c8 = (C + 7u) & ~7u;
+  runtime::prefill::Context cx(ctx);
+  runtime::prefill::KernelCache kc(ctx);
+  runtime::PrefillScratch s(ctx, max_len, desc, runtime::PrefillScratchDims::kCMax);
+  const std::vector<float> qf = random_f32(size_t(C) * qh * kHD, 2200 + pos + C, 0.f, 1.f);
+  const std::vector<float> kvf = random_f32(size_t(depth) * kvh * kHD * 2, 2201 + pos + C, 0.f, 1.f);
+  std::vector<uint16_t> q(qf.size()), kk(size_t(depth) * kvh * kHD), vv(kk.size());
+  for (size_t i = 0; i < qf.size(); ++i) q[i] = rne(qf[i]);
+  for (size_t i = 0; i < kk.size(); ++i) {
+    kk[i] = rne(kvf[i]);
+    vv[i] = rne(kvf[i + kk.size()]);
+  }
+  imm.copy(s.pf_q.ptr(), q.data(), q.size() * 2);
+  l0::Mem dk(ctx, l0::MemKind::Device, kk.size() * 2), dv(ctx, l0::MemKind::Device, vv.size() * 2);
+  imm.copy(dk.ptr(), kk.data(), kk.size() * 2);
+  imm.copy(dv.ptr(), vv.data(), vv.size() * 2);
+  const size_t o_elems = size_t(qh) * rows * kHD;
+  l0::Mem dctl(ctx, l0::MemKind::Device, o_elems * 4);
+  cx.launch(kc(kernels::pf_flash_attn_variant(qh, kvh), "pf_flash_attn"), (C + 7u) / 8u, kvh, 1,
+            {PtrArg(s.pf_q.ptr()), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(dctl.ptr()), arg_val(pos), arg_val(C),
+             arg_val(rows)});
+  runtime::prefill::set_attn_mode_for_test(runtime::prefill::AttnMode::Flash);
+  runtime::prefill::attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), dk.as<uint16_t>(), dv.as<uint16_t>(),
+                               runtime::PrefillBackend::L0);
+  cx.wait();
+  std::vector<float> ctl(o_elems), got(o_elems);
+  imm.copy(ctl.data(), dctl.ptr(), o_elems * 4);
+  imm.copy(got.data(), s.pf_o.ptr(), o_elems * 4);
+  size_t differ = 0, first = SIZE_MAX, nonfinite = 0;
+  for (uint32_t h = 0; h < qh; ++h)
+    for (uint32_t m = 0; m < c8; ++m)
+      for (uint32_t dd = 0; dd < kHD; ++dd) {
+        const size_t i = (size_t(h) * rows + m) * kHD + dd;
+        if (m < C && !std::isfinite(got[i])) ++nonfinite;
+        if (std::memcmp(&got[i], &ctl[i], 4) != 0) {
+          if (first == SIZE_MAX) first = i;
+          ++differ;
+        }
+      }
+  const bool ok = differ == 0 && nonfinite == 0;
+  std::printf("\n--- flash r32 vs today's RPW 8 binary (%u q / %u kv heads), pos %u C %u: %zu of %zu words differ, "
+              "non-finite %zu -- %s\n", qh, kvh, pos, C, differ, size_t(qh) * c8 * kHD, nonfinite, ok ? "PASS" : "FAIL");
+  if (first != SIZE_MAX)
+    std::printf("  first differing word: head %zu row %zu dim %zu: got %.9g today %.9g\n", first / (size_t(rows) * kHD),
+                first / kHD % rows, first % kHD, got[first], ctl[first]);
+  return ok;
+}
+
 }  // namespace
 
 // Every case prints before anything is judged, so a failure leaves the whole
@@ -371,6 +431,17 @@ int main(int argc, char** argv) {
     ok &= case_flash_vs_composed(d.ctx, d.imm, 777, 300);
     if (!ok) {
       std::fprintf(stderr, "GATE FAILED: flash vs composed under cosine 0.99999\n");
+      return 1;
+    }
+  }
+  // Phase 3 Task 7: the 32-row binding bitwise today's binary, Qwen3.8's heads and Ornith's.
+  {
+    bool ok = true;
+    for (const model::ModelDesc* m : {&model::qwen38(), &model::ornith()})
+      for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
+        ok &= case_flash_r32_bitwise(d.ctx, d.imm, *m, pos, C);
+    if (!ok) {
+      std::fprintf(stderr, "GATE FAILED: pf_flash_attn_r32 is not bitwise today's pf_flash_attn\n");
       return 1;
     }
   }
