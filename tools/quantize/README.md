@@ -40,6 +40,7 @@ them.
 | `quantize_qwen38_rtn.sh` | **0.17.0 @ `6afaecdb` + `auto-round-local.patch`, with `--disable_low_cpu_mem_usage`** (since 2026-10-06; 0.14.2 before) | that flag takes the path that packs `lm_head`; the default low-CPU-memory RTN path still drops it on 0.17.0 (below). Holds the whole bf16 model in RAM: refuses below `RTN_MIN_RAM_GB` (64) available |
 | `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
 | `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
+| `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the operator's fork commit `a6cf748739f2dd58e6c16b0ac849e92af7396e32`** = intel/auto-round main `b58069ea` (2026-11-11, version string 0.17.0) + the cached-OpenCodeInstruct commit, **no patch file** (`AR_PATCH=0`), only in the clone `~/auto-round` (`AR_REPO`) | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; see "Qwen3.8-Flash-Next: our AutoRound export" below |
 
 **Install (Qwen3.8 scripts, `tools/quantize/ar_pin.sh`).** Clones `AR_REPO` (default
 `https://github.com/intel/auto-round`, or any local clone that contains the commit) into
@@ -230,6 +231,168 @@ plus `kolibri/test_kolibri_quant.py` (packing, the tool-call turn == the templat
 greedy top-up, restore + check accepting the right export and rejecting a bad qzeros word, a
 permuting g_idx, a changed expert_bias, a quantised shared expert, a column-permuted qweight and an
 asymmetric config, the KL arithmetic, the card's choice, the prompt lists).
+
+## Qwen3.8-Flash-Next: our AutoRound export (`tools/quantize/quantize_qwen4exp.sh`, spec 21 v2 §2)
+
+The operator's rulings (2026-11-12): our own export of the bf16 original `Qwen/Qwen3.8-Flash-Next` (360 GB), int4 g64
+symmetric everywhere it quantises (the routed and shared experts, QSA q/k/v/o, GDN qkv / z / out, `lm_head`, the MTP
+head's routed experts), **tuned** (sign-SGD, 200 iterations, 128 x 2048 rows, batch 8 - the Qwen3.8 tuned recipe's
+sizes - of **nvidia/OpenCodeInstruct** through the checkpoint's chat template: the model is for agentic coding,
+operator 2026-11-12), **no comparison with Intel's checkpoint** - quality is ours against the bf16
+original and the f32 judge. The operator runs it on the box; the commands are in docs/open-work.md's "Quantise
+Flash-Next" row.
+
+### The commands (on the box, in the repo tree)
+
+```sh
+tools/quantize/quantize_qwen4exp.sh check-download   # DOWNLOAD OK: 144 files, 360.02 GB ... (--sha: also hashes, ~30 min)
+tools/quantize/quantize_qwen4exp.sh start            # detached, card 1; refuses unless download, RAM and disks are ready
+tools/quantize/quantize_qwen4exp.sh status           # blocks done / 48, s per block, AutoRound's time left, RAM, the result
+tools/quantize/quantize_qwen4exp.sh stop             # TERM to the run's process group
+tools/quantize/quantize_qwen4exp.sh start            # after a stop, a crash or a reboot: resumes at the first unfinished block
+tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the tiny model, ~5 min (card 1; DEVICE=cpu: the CPU)
+```
+
+- **Card:** one card, `tools/gpu_lock.sh card 1` (`CARD`): card 0 stays free for other card jobs. A whole-box job
+  (`tools/gpu_lock.sh box`, e.g. a validation run) waits until the quantisation ends - the lock protocol lets no
+  whole-box job start while a card job runs - so start validation runs before, or `stop` and `start` around them.
+- **Output and disks:** `QUANT_ROOT` = `~/b70/hdd/quant/` (the 8 TB disk, ~6 TB free) holds
+  `Qwen3.8-Flash-Next-W4A16-g64-<date>/` (`flash-next-current` points at it): `export/<snapshot>-w4g64/` (the
+  checkpoint), `export/<snapshot>-w4g64-ple-int8/` (the engine's PLE file), `resume/`, `work/`, `RESULT`, `run.log`
+  (-> `~/b70/logs/flash-next-quant/run-<time>.log`). `PLE_DIR` = `~/b70/scratch/flash-next-ple/` on the NVMe holds the
+  PLE table as one raw 102 GB file while `quant` runs (below). Growth (derived from the real-width probe and the tiny
+  runs): `resume/` 21.5 GB from the first block on, overwritten each block (two fp32 files: 128 x 2048 x 10240 x 4 B
+  each); the export ~1.4 GB a layer (512 experts 1.34 GB + the dense part), +102.4 GB of bf16 PLE table once layer 1
+  is written, ~172 GB at the end (experts 64.2, MTP experts 1.3, dense ~1.7, embedding 1.3, head 0.34, vision ~0.9,
+  PLE 102.4); then the int8 PLE file 51.8 GB: **~245 GB on the 8 TB disk, 102 GB on the NVMe**. Not the USB disk:
+  it holds the 360 GB download and keeps ~98 GB free. Not the NVMe for the export: ~236 GB free today. `start` wants
+  300 GB free under `QUANT_ROOT` and 110 GB under `PLE_DIR`; after `FLASH-NEXT QUANT: OK` move `PLE_DIR` to
+  `~/b70/trash/<date>`.
+- **Stages** (`run --only S` / `--from S` reruns one): `quant` (AutoRound, the ~2 days), `bf16` (every unquantised
+  tensor bitwise the source's: reads the ~172 GB export and the same bytes of the source, ~30-40 min, estimated),
+  `head` (`lm_head` packed by `loader/rtn.h`'s rule and declared 4-bit, a minute), `ple` (`ple_int8.py`, reads
+  102 GB: ~30 min, estimated), `check` (`check.py` + `check_gptq_export.py`, minutes); the last line
+  `FLASH-NEXT QUANT: OK <export>` or `FAIL`, also in `RESULT`.
+- **Resume:** AutoRound's per-block checkpoint (`AR_RESUME_DIR`): each finished block is written to the export and
+  the chained activations to `resume/`; a new process with the same settings logs "ResumeState: resuming after k/48
+  already-quantized blocks" and continues (proven on the tiny model: stopped after block 0, `start` resumed at block 1
+  and ended `OK`). `start` on an unfinished run resumes it; a finished one is refused (a new run needs `OUT=<dir>`).
+- **Guards:** `start` refuses unless `check-download` passes, MemAvailable >= 100 GB (`RAM_MIN_GB`) and the disks have
+  room; AutoRound runs inside `systemd-run --user --scope -p MemoryMax=115G -p MemorySwapMax=0`, so running out of
+  RAM kills the run (then `start` resumes it), never the box.
+
+### What the pinned AutoRound needed (each found on the tiny model or the real-width probe)
+
+The operator's clone `~/auto-round` (branch `local-patches-v2`) is upstream main `b58069ea` + one local commit,
+`a6cf7487`: `calib_dataset.py` reads OpenCodeInstruct's cached parquet shards (`_load_cached_parquet_dataset`, before
+its hub fallback) and the model loaders try the local snapshot first. The script builds `a6cf7487` through
+`ar_pin.sh` (`AR_COMMIT`, `AR_PATCH=0`, `AR_REPO=~/auto-round`: the commit is only in that clone). Against the Qwen3.8
+scripts' 0.17.0 `6afaecdb`:
+
+| | 0.17.0 `6afaecdb` | `a6cf7487` (`b58069ea` 2026-11-11 + the local commit) |
+|---|---|---|
+| per-sample BOS/EOS reset (`auto-round-local.patch`, `calib_dataset.py`) | needs the patch | upstream (#2591, `b3d11504`); the patch no longer applies (both hunks fail) |
+| `WrapperLinear.in_features` (the patch's `wrapper.py`) | needs the patch | not read on the compressors / sign-round path; not needed (tiny runs) |
+| resume after a stop | none | `AR_RESUME_DIR` per block (`utils/resume.py`) |
+| the 12 QSA layers | transformers' per-token indexer loop | vectorised indexer (#2579) |
+| fused experts (`mlp.experts.gate_up_proj [512, 1280, 2560]`) | the same `modeling/fused_moe` code (not run here) | "Fused-MoE checkpoint detected: building a meta skeleton and materializing weights per block"; exported per expert |
+| the MTP head (`mtp.*`, not a transformers module) | has `AR_DISABLE_COPY_MTP_WEIGHTS` (not run here) | `missing_tensors.py`: copied, fused experts split per expert, every linear not ignored RTN int4 g64, the rest declared bits 16 in `extra_config` - no pass of our own; ours ignores the head's attention and shared expert (spec 21 v2 §2) |
+| Qwen4's predefined ignore list | `hyper_connection`, `mlp.gate`, `shared_expert` | same - ours drops `shared_expert` (our shared experts are int4, spec 21 §5 "Ours"; `autoround_run.py`) |
+
+What the script does about the rest (`autoround_run.py`, `head_rtn.py`):
+
+- **No `quant_lm_head`.** A quantised layer outside the blocks makes AutoRound switch low CPU memory off
+  (`compressors/base.py`: "`low_cpu_mem_usage` is not fully supported when there are quantized layers outside
+  blocks"): every finished block would stay resident (the whole model by the end) and the resume is disabled ("
+  AR_RESUME_DIR is set but neither immediate saving nor low_cpu_mem_usage is active", seen on the probe). AutoRound
+  only RTNs the head anyway, and at this commit with **BF16 scales** the loader refuses (tiny run). The `head` stage
+  packs it by the engine's rule and declares it (`extra_config["lm_head"]` bits 4 g64 sym).
+- **The PLE table file-backed.** Materialising layer 1, AutoRound reads all 128 `ngram_embedding.shard_*` tensors
+  and `torch.cat`s them (`utils/disk_stream_util.py` `_assemble_sharded_tensor`): ~95 GiB of shards + a 95 GiB
+  result on a 121 GiB box - the run would die at layer 1. `autoround_run.py` replaces that one function for the
+  table: the shards are streamed once into a raw bf16 file in `PLE_DIR` and the table is `torch.from_file` of it
+  (mmap), so only the rows the calibration tokens hit are read and the kernel may drop them again. On the NVMe
+  because the first lookups are millions of small random reads (an hour-scale stall on the HDD, estimated). The
+  `bf16` stage proves the exported table bitwise the source's (tiny runs: 255 tensors).
+- **The CPU path** (`DEVICE=cpu`, the tiny model only) needs `AR_DISABLE_META_LOAD=1` (the script sets it): with the
+  per-block meta load AutoRound turns amp off on a CPU without bf16 but materialises the ignored layers' weights in
+  bf16 ("expected m1 and m2 to have the same dtype"); and it writes the unquantised tensors as fp32, which the
+  `bf16` stage restores (222 of 254 on the tiny model).
+
+Other settings: transformers **5.19.0** (the reference's pin; `SITE`, installed `--no-deps` beside the venv), the
+venv `~/auto-round/.venv` (python 3.12, torch 2.14.0+xpu), `TORCHINDUCTOR_COMPILE_THREADS=4`, offline hub and
+datasets (the box's WiFi is flaky). **Calibration data:** `DATASET` = `nvidia/OpenCodeInstruct:apply_chat_template`
+(AutoRound's registered loader `get_opencode_instruct_dataset`: 128 x 100 rows drawn, each a user turn + the
+assistant's answer through Qwen's template, ending in `<|im_end|>`, packed to 2048-token rows with the per-sample
+BOS/EOS reset of #2591); the 50 parquet shards come from the HF cache
+(`~/.cache/huggingface/hub/datasets--nvidia--OpenCodeInstruct`, 6.4 GB, hot on the NVMe). `autoround_run.py`
+refuses to start unless all 50 are there, and offline the fork's hub fallback is an error too, so the run cannot
+fall back to pile-10k: with an empty cache it exits "calibration data: nvidia/OpenCodeInstruct is not in the HF
+cache ... refusing to run" (checked). AutoRound takes the multimodal path for
+`Qwen4ExpForConditionalGeneration` and, with a text dataset and `quant_nontext_module` off, calibrates through the
+standard text loader; the vision tower stays bf16 (the engine never loads it; `check_gptq_export.py --skip-prefix
+model.visual.`).
+
+### Proven on the tiny model (2026-11-11 evening, box time)
+
+`make_tiny_vl.py`: `qwen4exp_make_tiny.py`'s fused `bf16` form (hidden 128, layers lllq, 16 experts top-4, the PLE at
+layer 1, the MTP head) + a 1-block vision tower + the tokenizer (qikp's tiny) + the processor files (Intel's
+snapshot until the original's are downloaded). The downloaded qikp tiny itself cannot be used: hidden 16, so no
+linear is a multiple of 64, and per-expert (not fused) experts. `selftest` (2 iterations, 8 x 128 rows):
+
+| | card (XPU) | box CPU (`DEVICE=cpu`) |
+|---|---|---|
+| `quant` | ~70 s, peak RSS 5.7 GiB; meta skeleton; 218 of 263 linears quantised; the PLE table from the file | 80 s, peak RSS 3.0 GiB; full load |
+| per-expert int4 | 64 routed experts (4 layers x 16), every shared expert, QSA q/k/v/o, GDN qkv / z / out | same |
+| MTP head | 16 experts x 3 RTN int4 g64, its attention and shared expert bf16 | same |
+| `bf16` | 255 unquantised tensors bitwise the source's (the PLE table's 128 shards included) | 254, of which 222 restored from fp32 |
+| `head` | `lm_head [248320][128]` packed, scales F16, declared 4-bit | same |
+| `ple` / `check` | 16 heads; `check.py` ACCEPTED with the PLE file; `check_gptq_export.py` VERIFIED B70-READY | same |
+| result | `FLASH-NEXT QUANT: OK` | `FLASH-NEXT QUANT: OK` |
+
+Logs in `~/b70/logs/flash-next-quant/`: `selftest-cpu-opencode.log` (the final code: AutoRound `a6cf7487`,
+OpenCodeInstruct from the cache's 50 shards, 800 rows drawn for 8 x 128), `selftest-xpu-3.log` (card 1, the same
+code with pile-10k), the resume test
+in `tiny-resume/` (100 iterations, 128 x 2048 rows: stopped after block 0, the
+second `start` resumed at block 1, `OK`).
+
+### Sizing (2026-11-11, a real-width stand-in on the box)
+
+The download had 4 of 131 shards, so the measurement used a stand-in at the real widths: 4 layers (GDN, GDN with a
+small PLE, GDN, QSA), hidden 2560, 512 experts top-10 of width 640, 24 q heads, random bf16 weights
+(`qwen4exp_make_tiny.make`, 23.4 GB), quantised with the run's settings (200 iterations, 128 x 2048, batch 8) on
+card 1 (calibrated on pile-10k then; the data does not change a block's cost - the same 128 x 2048 tokens):
+
+| | measured |
+|---|---|
+| block 0 (GDN, 512 experts), tuned (`measure-20261111-195942.log`) | **3441 s = 57 min** (incl. ~4 min of loading, caching 128 x 2048 rows and torch.compile); loss 4.23e-3 -> 1.66e-3 (best at iteration 177) |
+| AutoRound's MoE path | "grouped tuning needs 150.7 GiB on xpu:0 (free 15.4) -- switching this run to linear_loop": the 512 experts run one after another |
+| peak VRAM (`torch.xpu.memory_reserved`) | **38.88 GiB on a 31.89 GiB card** |
+| peak RAM | 70 GB - on the probe's path only: a run that loads a few layers (AutoRound's debug option) skips the meta skeleton and holds the whole stand-in, unfused, in RAM |
+| `resume/` | 21.5 GB after block 0 (2 x 10.74 GB fp32), overwritten per block, not growing (`utils/resume.py`) |
+
+**The VRAM peak (read from AutoRound's `tune_memory.py`, not run again):** the block's tuning state is ~14 bytes for
+each of its 2.52 G expert weights (the rounding value 4 + its gradient 4 + a bf16 copy 2 + the best-iterate
+snapshot 4; AutoRound printed `state 14.5` = 6/14 of it = 33.8 GiB in all) plus the bf16 weights - ~39 GiB, more
+than one card has, whatever the batch: `batch_size`, `nsamples` and `low_gpu_mem_usage` (on: the calibration
+activations live on the CPU) only move the activations, not the state. On Xe the kernel driver lets the allocation
+exceed VRAM and evicts the overflow to host RAM (the Xe hazard of spec 21 v2 §8), so the run works and is slowed by
+it by an amount not measured; it is in the 57 min. **Two cards do not help:** `--device 0,1` (tried 2026-11-11 on
+the stand-in) ran AutoRound's data-parallel path with the whole block on xpu:1 (32 GB resident, all the compute,
+"Major device (xpu:1) has reached memory threshold") and xpu:0 at 7.6 GB idle; block 0 had not finished after 64 min (one card: 57); and
+on the tiny model it fails at the first QSA block ("Expected all tensors to be on the same device, xpu:1 and xpu:0",
+with and without torch.compile). So the recipe is one card with `tools/gpu_lock.sh card 1`.
+
+**Projection (derived):** 48 blocks x ~57 min = ~46 h (the 12 QSA blocks are not measured; the 512 experts dominate
+both kinds), + ~10 min for the PLE file, + the export of the MTP head and the `bf16` / `head` / `ple` / `check`
+stages ~1.5 h (estimated): **~48 h on card 1**, e.g. Friday evening to Sunday evening. RAM on the real path
+(estimated): the activations 21.5 GB + the next block's 10.7 GB + one block's weights and their unfused copies
+~10 GB + ~10 GB of runtime, ~55 GB, plus the PLE table's touched pages (page cache, reclaimable) - under the 115 GB
+cap.
+
+**Re-measure on the real model (the operator):** `start`, then `status` after the first block (~1 h): AutoRound's bar
+prints the seconds per block and its own time left; the `-- seconds per finished block` line lists each one. A
+block far above ~60 min, or RAM in `status` near 115 GB, is the moment to `stop` (the run resumes later).
 
 ## Qwen3.8-Flash-Next (spec 21b): synthetic checkpoints, the PLE int8 file, the export check
 

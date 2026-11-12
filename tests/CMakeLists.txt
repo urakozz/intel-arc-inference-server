@@ -188,6 +188,12 @@ target_include_directories(adaptive_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMA
 target_link_libraries(adaptive_k_test PRIVATE b70_server)
 add_test(NAME adaptive_k_test COMMAND adaptive_k_test)
 
+# Open-work 13: the per-step draft choice (server::StepK) from given probabilities, costs and calibration, host only.
+add_executable(step_k_test server/step_k_test.cc)
+target_include_directories(step_k_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(step_k_test PRIVATE b70_server)
+add_test(NAME step_k_test COMMAND step_k_test)
+
 # Spec 13 B4 (plan 13b Task 1): the batching scheduler over a mock batched engine, host only.
 add_executable(scheduler_test server/scheduler_test.cc)
 target_include_directories(scheduler_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -665,6 +671,17 @@ b70_target_kernel_dir(argmax_test)
 add_dependencies(argmax_test kernel_argmax_stage1_M1 kernel_argmax_stage2)
 add_test(NAME argmax_test COMMAND argmax_test)
 
+# Open-work 13: draft_prob.cl against a host reference (the whole row, a TP card's half, the halves merged).
+if(B70_TP AND B70_MTP)
+  add_executable(draft_prob_test kernels/draft_prob_test.cc)
+  target_include_directories(draft_prob_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(draft_prob_test PRIVATE b70_l0 b70_model)
+  b70_target_kernel_dir(draft_prob_test)
+  add_dependencies(draft_prob_test kernel_draft_prob_N248320_U248077 kernel_draft_prob_N124160_U124160
+                   kernel_draft_prob_N124160_U123917)
+  add_test(NAME draft_prob_test COMMAND draft_prob_test)
+endif()
+
 add_executable(json_test common/json_test.cc)
 target_include_directories(json_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 add_test(NAME json_test COMMAND json_test)
@@ -1085,8 +1102,8 @@ set_tests_properties(prefill_gate_int8_c1000_test PROPERTIES
   LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 # Multi-chunk on the golden set: chunk 16 puts every prompt through 3 or 4 chunks (the
 # quantiser scratch reused across chunks, KV and GDN carried). The plan's multi-chunk pin
-# is prefill_gate_long_int8_test below, which is registered only while the RTN checkpoint
-# and oracle-out-long exist; neither does on the box (2026-09-24), so this pair stands in.
+# is prefill_gate_long_int8_test below (2820 ids at C = 1024); this pair covers chunk counts
+# the long prompt does not.
 add_test(NAME prefill_gate_l0_c16_test COMMAND prefill_gate_test
   ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts ${B70_TEST_SNAPSHOT}
   prose,code,cjk 16 l0)
@@ -1163,7 +1180,7 @@ if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
   set_tests_properties(prefill_gate_rtn_test PROPERTIES
     LABELS "checkpoint;golden;prefill" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 else()
-  message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test and prefill_gate_long_test not registered")
+  message(STATUS "b70: RTN checkpoint absent (${B70_RTN_SNAPSHOT}) -- prefill_gate_rtn_test not registered")
 endif()
 
 # Spec 2 §6.2: the multi-chunk golden gate. ONE oracle prompt of >= 2048 ids
@@ -1178,24 +1195,21 @@ endif()
 # rows exact on the short prompts. What is still untested here and nowhere
 # else is DEPTH: 2820 positions of chunked GDN carry against 141.
 #
-# `oracle-out-long` does not exist yet: producing it is one CPU run inside the
-# reference container, and the L1-engine stage is barred from starting
-# containers (its brief's operational rules). The test SKIPs (77) until the
-# directory is there, which is the same contract the other three golden
-# registrations use, and tools/oracle/README.md carries the one command.
-if(EXISTS "${B70_RTN_SNAPSHOT}/config.json")
-  add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT} long 1024)
-  set_tests_properties(prefill_gate_long_test PROPERTIES
-    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-  # Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
-  add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
-    ${CMAKE_SOURCE_DIR}/oracle-out-long ${CMAKE_SOURCE_DIR}/tests/golden/prompts
-    ${B70_RTN_SNAPSHOT} long 1024 l0-int8 1)
-  set_tests_properties(prefill_gate_long_int8_test PROPERTIES
-    LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
-endif()
+# The long prompt's reference is in the primary golden set beside the short three
+# (`long.golden.safetensors`, `PROMPTS=long tools/oracle/golden.sh`, tools/oracle/README.md);
+# the test SKIPs (77) until it is there. It was wired to the RTN checkpoint until
+# 2026-11-12, which left the box, so neither test was registered.
+add_test(NAME prefill_gate_long_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+  ${B70_TEST_SNAPSHOT} long 1024)
+set_tests_properties(prefill_gate_long_test PROPERTIES
+  LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
+# Spec 5 (plan 5b Task 3): the same 2820-id, two-chunk gate on l0-int8.
+add_test(NAME prefill_gate_long_int8_test COMMAND prefill_gate_test
+  ${B70_TEST_ORACLE_DIR} ${CMAKE_SOURCE_DIR}/tests/golden/prompts
+  ${B70_TEST_SNAPSHOT} long 1024 l0-int8 1)
+set_tests_properties(prefill_gate_long_int8_test PROPERTIES
+  LABELS "checkpoint;golden;prefill;long" SKIP_RETURN_CODE 77 TIMEOUT 7200)
 
 # --- b70-decode's host-side rejections ---------------------------------------
 # The product binary had no automated test at all. These are the argument
@@ -1904,6 +1918,7 @@ if(B70_ORNITH)
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
     kernel_pf_gated_head_GK16V32 kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
     kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K512_N2048
     kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
     kernel_pf_moe_gemm_K512_N2048
     kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU

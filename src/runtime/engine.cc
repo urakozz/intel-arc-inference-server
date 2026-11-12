@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -123,6 +124,11 @@ Engine::Engine(l0::Context& ctx, loader::LoadedModel model, uint32_t max_len, bo
     seqs_[0].hctl = hctl_;
     for (uint32_t i = 0; i < kMaxDraft; ++i)
       seqs_[0].draft_steps.push_back(build_draft(ctx, model_, buffers_, *mtp_, i));
+    // Open-work 13: the same lists ending with the draft's probability, for the serial server's per-step K (an
+    // engine of one slot: several slots run under the scheduler, whose K stays per request).
+    if (slots() == 1)
+      for (uint32_t i = 0; i < kMaxDraft; ++i)
+        seqs_[0].draft_prob_steps.push_back(build_draft(ctx, model_, buffers_, *mtp_, i, {}, true));
     for (uint32_t M = 1; M <= MtpBuffers::kSlots; ++M) capture_verify(M, {});
   }
   // Spec 13c: every further slot's own lists, then the row lists; then every slot reset (slot 0 last: selected).
@@ -579,9 +585,12 @@ const CapturedStep& Engine::draft_step(uint32_t i) const {
   return seq().draft_steps.at(i);
 }
 
-void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
+void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
+                   const std::function<bool(uint32_t, float)>& more) {
   require_mtp("draft");
   Seq& s = seq();
+  if (more && s.draft_prob_steps.empty())
+    throw std::runtime_error("runtime::Engine::draft: no draft lists with the probability on this slot (draft_probs())");
   const uint32_t pos = control_->pos;
   if (k == 0 || k > kMaxDraft || k > max_verify_k())
     throw std::runtime_error("runtime::Engine::draft: k " + std::to_string(k) +
@@ -595,7 +604,7 @@ void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
   hctl_->cur_token[0] = control_->cur_token[0];
   s.draft_ids.clear();
   for (uint32_t i = 0; i < k; ++i) {
-    queue_.execute(s.draft_steps[i].list, &fence_);
+    queue_.execute((more ? s.draft_prob_steps : s.draft_steps)[i].list, &fence_);
     fence_.wait();
     uint32_t d = hctl_->out_token[0];
     if (pick) {
@@ -607,8 +616,15 @@ void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick) {
     }
     s.draft_ids.push_back(d);
     control_->cur_token[1 + i] = d;
+    if (more) {
+      float norm;
+      std::memcpy(&norm, &hctl_->draft_stat[1], 4);
+      if (!more(i, 1.0f / norm)) break;
+    }
   }
 }
+
+bool Engine::draft_probs() const { return mtp_ && !seq().draft_prob_steps.empty(); }
 
 void Engine::verify(uint32_t k) {
   require_spec("verify");

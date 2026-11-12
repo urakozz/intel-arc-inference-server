@@ -33,7 +33,7 @@ with safe_open(path, framework="pt") as f:
           f"attn={md['attn_implementation']} group_size={md['group_size']}")
 open(ids_out, "w").write(" ".join(str(i) for i in tok))
 PY
-for p in prose code cjk; do
+for p in ${PROMPTS:-prose code cjk}; do
   echo "=== $p  ($(stat -c %s "$OUT_DIR/$p".golden.safetensors) bytes)"
   tools/oracle/run_in_container.sh 'python3 -P /ws/'"$OUT_DIR"'/_check.py /ws/'"$OUT_DIR/$p"'.golden.safetensors /ws/'"$OUT_DIR/$p"'.tokens 2>/dev/null
      python3 tools/oracle/tokenize.py "$SNAP" decode $(cat /ws/'"$OUT_DIR/$p"'.tokens) 2>/dev/null > /ws/'"$OUT_DIR/$p"'.cont.txt

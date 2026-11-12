@@ -131,6 +131,19 @@ struct EngineIface {
   }
   virtual void truncate_to(uint32_t pos) { (void)pos; }
 
+  // Open-work 13 (`--spec mtp` with auto K, greedy requests): the drafts chosen as they are made (server::StepK).
+  // chooses_drafts() == false (the default) means the server never calls step_chosen(). Otherwise step_chosen(s, k,
+  // choose) is step_many(s, k) whose MTP head drafts one at a time and, after draft j (1-based), calls choose(j, p)
+  // with the head's probability p for it: < 0 drafts another (up to k; the engine may stop sooner near max_len, and
+  // then verifies every draft made), otherwise the first that-many drafts are verified (0: one plain step after the
+  // drafts). It returns what step_many returns.
+  using DraftChoice = std::function<int(uint32_t j, float p)>;
+  virtual bool chooses_drafts() { return false; }
+  virtual std::vector<uint32_t> step_chosen(const Sampling& s, uint32_t k, const DraftChoice& choose) {
+    (void)choose;
+    return step_many(s, k);
+  }
+
   // Spec 19e (`--spec lookup`, spec 19 §3 C): verify drafts proposed OUTSIDE the engine
   // (prompt lookup). verify_k() == 0 (the default) means the engine cannot, and the server
   // never calls step_drafts(). Otherwise step_drafts(s, propose) runs one iteration:

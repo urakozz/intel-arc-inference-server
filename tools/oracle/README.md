@@ -126,7 +126,6 @@ changes what the gate means. Since spec 1.6 §5.1 there are two:
 |---|---|---|
 | `oracle-out/` | `Vishva007/Qwen3.8-27B-W4A16-AutoRound-GPTQ` (HF cache) | bf16 |
 | `oracle-out-rtn/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** |
-| `oracle-out-long/` | `~/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64` | **int4 g64** - the spec 2 §6.2 long prompt only, **NOT YET RUN** (below) |
 
 `golden.sh` takes `OUT_DIR` and neither default clobbers the other. It reads the
 **committed** `tests/golden/prompts/*.ids` rather than re-tokenizing: the two
@@ -198,7 +197,7 @@ per-prompt logs in `oracle-out/{prose,code,cjk}.log`.
 | code  | 61 | 324.9 s | 118.1 s | 19.0 s | 187.7 s | 61.5 GiB | 350.2 MiB (367,258,272 B) | 290 tensors |
 | cjk   | 38 | 316.1 s | 117.7 s | 13.9 s | 184.4 s | 61.4 GiB | 285.3 MiB (299,192,968 B) | 290 tensors |
 
-### The spec 2 §6.2 long prompt (`oracle-out-long`) - staged, NOT RUN
+### The spec 2 §6.2 long prompt (`oracle-out-primary/long.*`)
 
 `tools/oracle/make_long_prompt.sh` builds **`tests/golden/prompts/long.ids`,
 2820 ids** (20 repetitions of prose+code+cjk = 20 × 141), committed. It builds
@@ -210,21 +209,16 @@ streams, which is not the tokenization of the concatenated text** - a real
 tokenizer would merge differently across each seam. That is irrelevant to the
 gate, which compares the engine against the oracle on the same ids.
 
-**The oracle run itself has not been taken.** It is one `docker run` inside the
-reference container, and the L1-engine stage that staged everything else here
-was operationally barred from starting containers. The command is one line and
-everything it needs is committed:
+It is part of the primary checkpoint's golden set (the RTN checkpoint it was first staged for left the box; first
+run 2026-11-12). On the box, from the repo root, detached, behind the CPU model lock:
 
 ```bash
-# on the box, from the repo root, detached so it outlives the ssh session
-mkdir -p oracle-out-long
-OUT_DIR=oracle-out-long PROMPTS=long \
-ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 \
-ORACLE_THREADS=28 \
-  setsid nohup tools/oracle/golden.sh > oracle-out-long/golden.log 2>&1 </dev/null &
-tail -f oracle-out-long/golden.log
-OUT_DIR=oracle-out-long PROMPTS=long \
-ORACLE_SNAP=$HOME/models/qwen38-27b-w4g64-rtn/Qwen3.8-27B-w4g64 tools/oracle/check.sh
+# the primary checkpoint is run_in_container.sh's default (ORACLE_MODEL, through the HF cache mount); ORACLE_SNAP
+# would mount only the snapshot folder, whose files are links into blobs/ outside that mount
+mkdir -p ~/b70/logs/oracle-long
+OUT_DIR=oracle-out-primary PROMPTS=long ORACLE_THREADS=22 \
+  nohup setsid flock /tmp/b70-cpu-model.lock tools/oracle/golden.sh > ~/b70/logs/oracle-long/golden.log 2>&1 </dev/null &
+OUT_DIR=oracle-out-primary PROMPTS=long tools/oracle/check.sh
 ```
 
 **Pre-registered cost, so the run has something to be scored against**
@@ -247,12 +241,7 @@ is measured yet; **the run's own `/usr/bin/time -v` is the number that goes in
 the record**, and whichever it lands on, this sentence stays. Check
 `df -h ~/b70-inference-server` first and give the container **no** memory limit.
 
-The RTN checkpoint is the one to run: it is the gate checkpoint (spec §7 records
-on RTN) and one CPU oracle run is what §6.2 budgets. A Vishva long set is the
-same command with `ORACLE_SNAP` unset and `OUT_DIR=oracle-out-long-vishva`;
-priced here, not run.
-
-`ctest -R prefill_gate_long_test` SKIPs (77) until `oracle-out-long/` exists,
+`ctest -R prefill_gate_long` SKIPs (77) until `oracle-out-primary/long.golden.safetensors` exists,
 then gates the prefill path at **C = 1024** over 2820 ids - two chunk
 boundaries crossed in attention-over-cache and in the GDN state carry.
 

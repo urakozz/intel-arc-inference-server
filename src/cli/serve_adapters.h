@@ -234,6 +234,36 @@ struct EngineAdapter : server::EngineIface {
       imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
       a = server::accept_sampled(p, q, eng.draft_ids().data(), k, vocab_used, V, sampling, rng);
     }
+    return spec_run(n, x, k, a);
+  }
+
+  // Open-work 13: the MTP head's drafts chosen one at a time (EngineIface::step_chosen), greedy - the draft lists with
+  // the probability (runtime::Engine::draft's `more`).
+  bool chooses_drafts() override { return !df_ && k_ > 0 && eng.draft_probs(); }
+  std::vector<uint32_t> step_chosen(const server::Sampling& sampling, uint32_t k_req,
+                                    const DraftChoice& choose) override {
+    if (!sampling.greedy) throw std::logic_error("EngineAdapter::step_chosen: greedy requests only");
+    flush_commit();
+    const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
+    if (k == 0) {
+      ++mtp_iters_at_k[0];
+      return {step(sampling)};
+    }
+    const uint32_t n = eng.pos();
+    const uint32_t x = eng.control()->cur_token[0];
+    int v = -1;
+    eng.draft(k, {}, [&](uint32_t i, float p) {
+      v = choose(i + 1, p);
+      return v < 0;
+    });
+    const uint32_t kv = v < 0 ? static_cast<uint32_t>(eng.draft_ids().size()) : static_cast<uint32_t>(v);
+    ++mtp_iters_at_k[kv];
+    eng.verify(kv);
+    return spec_run(n, x, kv, server::accept_greedy(eng.verify_ids(), eng.draft_ids().data(), kv));
+  }
+
+  // The iteration's deferred commit and counters; returns x and the kept drafts.
+  std::vector<uint32_t> spec_run(uint32_t n, uint32_t x, uint32_t k, const server::AcceptResult& a) {
     pending_ = true;
     pending_pos_ = n;
     pending_j_ = a.accepted;

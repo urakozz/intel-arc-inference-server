@@ -257,7 +257,13 @@ class Engine {
   // `pick` (plan 8c, sampled drafting): called on the host after draft list i with the
   // device idle and q_i in mtp_logits_device() row i; its return value replaces the
   // on-card argmax as d_{i+1} (the next draft's input, cur_token[1 + i], draft_ids()).
-  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {});
+  // `more` (open-work 13, the serial server's per-step K): called after draft list i with the device idle and the
+  // head's probability for draft i (its softmax at the drafted id, draft_prob.cl); false stops drafting there, so
+  // draft_ids() may hold fewer than k. Needs draft_probs().
+  void draft(uint32_t k, const std::function<uint32_t(uint32_t i)>& pick = {},
+             const std::function<bool(uint32_t i, float p)>& more = {});
+  // Open-work 13: the selected slot has the draft lists with the probability (one-slot engines with the head).
+  bool draft_probs() const;
   const std::vector<uint32_t>& draft_ids() const { return seq().draft_ids; }
   const float* mtp_logits_device() const;      // [kMaxDraft][kVocab] fp32, device memory
   // Spec 8 §11: |V'| when the model was loaded with a draft vocabulary (the draft lists
@@ -450,6 +456,7 @@ class Engine {
     uint8_t* hh = nullptr;          // MTP: [kM + 1] rows, row 0 = h_{pos-1}
     std::vector<CapturedStep> plain;   // slots >= 1: the plain list (slot 0's is step_)
     std::vector<CapturedStep> draft_steps;    // [kMaxDraft], MTP on only
+    std::vector<CapturedStep> draft_prob_steps;   // open-work 13: the same ending in draft_prob, slot 0 of one slot
     std::vector<CapturedStep> verify_steps;   // [M - 1] for M = 1..kSlots
     // Spec 28c (§3, the operator's decision 3 of 2026-10-31: two lists per M are acceptable): where the measured
     // verify-attention table switches an M to DPAS at a depth (runtime/verify_attn.h, a finite dpas_from > 1), the

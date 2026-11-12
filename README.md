@@ -41,6 +41,14 @@ Qwen3.8-27B, MTP speculative decoding, each request a 3,425-token prompt and 512
 | two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
 | two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
 
+**Ornith 1.5 35B-A3B** (Qwen3.5 MoE architecture, ~3B active parameters per token), one card, the full 262,144
+context with the bf16 cache:
+
+| | without MTP | with MTP |
+|---|---:|---:|
+| decode, one request | 142.8 t/s | **234.9 t/s** |
+| prefill, 4,096-token prompt | 3,362 t/s (bf16 prompt pass), **3,937 t/s** (int8) | |
+
 ## Install
 
 You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and

@@ -1,7 +1,7 @@
 # Spec 21 v2 - Qwen3.8-Flash-Next whole on two B70s: our own weights, expert tiering, the second card
 
 **Status:** design, 2026-11-11; **revised 2026-11-12** with the operator's answers to the first draft's questions
-(§0) and what the other engines on this model do (Strata, XeStrata, saber, basalt: read from their repos, nothing of
+(§0, and the follow-up of the same day: the tuned run, our export only) and what the other engines on this model do (Strata, XeStrata, saber, basalt: read from their repos, nothing of
 theirs run here). It continues spec 21 (the `qwen4_exp` family, built) and spec 22 (the expert-offload tier: its
 probe tools built, the tier not built), which stay as the historical record.
 **Plans:** [21v2a](../plans/2026-11-11-spec21v2a-whole-model-tiering.md) (our quantisation, the probe, the tier on
@@ -15,10 +15,13 @@ Every number is **measured** unless marked **derived** (from the checkpoint head
 
 1. **Our own weights.** Flash-Next is re-quantised by us with AutoRound int4 g64 symmetric (the one format) from the
    bf16 original `Qwen/Qwen3.8-Flash-Next` (360 GB; the operator downloads it to the cold disk `~/b70/hdd/hf-hub` and
-   links it into the HF cache), **the output head included** (`--quant_lm_head`) and **the MTP head's experts
-   included**. AutoRound's low-CPU-memory mode reads one block at a time, so the cold disk is fast enough. Intel's
-   g128 checkpoint stays the comparison and the development vehicle until ours passes (§2). This reverses the
-   2026-11-07 drop of plan 21q.
+   links it into the HF cache), **the output head kept bf16** (the engine builds its int8 head at load, as for Qwen3.8; operator 2026-11-12, §2) and
+   **the MTP head's experts included**. AutoRound's low-CPU-memory mode reads one block at a time, so the cold disk is fast enough. **Tuned**
+   AutoRound (full calibration), not RTN; the operator runs it himself around the weekend of 2026-11-14 from
+   `tools/quantize/quantize_qwen4exp.sh` (§2). **Our export only:** no comparison against Intel's checkpoint (a
+   month of CPU references; Qwen4-27B support starts in the coming weeks) - its quality is judged against the bf16
+   original and by the f32 judge (§10). Intel's g128 checkpoint stays only the development vehicle until ours
+   loads. This reverses the 2026-11-07 drop of plan 21q.
 2. **Pipeline parallel (the layer split) first, tensor parallel after.**
 3. **Gates to start:** decode ≥ 30 t/s with `pp`, ≥ 50 t/s with `tp`, prefill ≥ 1000 t/s at 4k with `tp` (§11). **The
    goal is to beat Strata** (two B70s, 66 t/s on IQ3_XXS) at our better 4-bit quality. Take the best of Strata,
@@ -26,8 +29,8 @@ Every number is **measured** unless marked **derived** (from the checkpoint head
 4. **The MTP head's experts** are quantised with the model; acceptance is measured (§7.2).
 5. **Host RAM:** 128 GB in the box, **~115 GB usable** by our jobs (5 GB kept for the system).
 
-Not decided (§12 question 1): the base format stays int4 g64 everywhere and mixed 3/4-bit experts (Strata's way to
-fit two cards) are only a later lever if the gates are missed - the **recommended** default, awaiting the operator.
+6. **The base format is int4 g64 everywhere** (operator, follow-up 2026-11-12); mixed 3/4-bit experts (Strata's way
+   to fit two cards) only as a later lever if the gates are missed.
 
 ## 1. Where Flash-Next stands today (2026-11-12)
 
@@ -68,7 +71,7 @@ activation rounding in layer 0's convolution, amplified where a route flips
 
 **What changed since spec 21 / 22 were written:**
 1. **Weights:** Intel's checkpoint (bf16 dense, ~9.3 GB a token) was the weights from 2026-11-07; from 2026-11-12 our
-   own AutoRound export is (§0.1, §2), with int4 dense layers and head: ~4.7 GB a token (§3).
+   own tuned AutoRound export is (§0.1, §2), with int4 dense layers and an int8 head built at load: ~5.0 GB a token (§3).
 2. **Spec 22 was dropped on 2026-11-06** (host-RAM offload on PCIe 3.0) and came back as a probe on 2026-11-07
    (open-work item 4) after the other engines' tiering designs.
 3. **The two-card modes exist:** `--parallel tp` (tensor parallel over P2P, Qwen3.8 only; an all-reduce costs
@@ -86,46 +89,60 @@ activation rounding in layer 0's convolution, amplified where a route flips
 
 ## 2. Our weights: the AutoRound re-quantisation
 
-**What is quantised** (spec 21 §5 "Ours", with the head and the MTP experts now in): int4 g64 sym, export
+**What is quantised** (spec 21 §5 "Ours", with the MTP experts now in): int4 g64 sym, export
 `auto_round:auto_gptq` - routed and shared experts, QSA `q/k/v/o_proj`, GDN `in_proj_qkv` / `in_proj_z` /
-`out_proj`, **`lm_head`** (`--quant_lm_head`), **the MTP head's 512 routed experts**. Kept bf16: routers,
-`shared_expert_gate`, `in_proj_a/b`, the indexer, hyper-connections, every norm, the embedding, the MTP head's dense
-projections and shared expert (`loader::q4_mtp_desc`), vision. **`ple` is in the ignore list**; the PLE table is
-converted by `tools/quantize/qwen4exp/ple_int8.py`, and since AutoRound never touches it, the int8 file already made
-from Intel's snapshot is reused if the original's table hashes equal (checked, not assumed).
+`out_proj`, **the MTP head's 512 routed experts**. Kept bf16: `lm_head` (int8 at load), routers, `shared_expert_gate`,
+`in_proj_a/b`, the indexer, hyper-connections, every norm, the embedding, the MTP head's dense projections, attention
+and shared expert (`loader::q4_mtp_desc`), vision. **`ple` is in the ignore list**: AutoRound writes the bf16 table
+back as it read it (checked bitwise), and the script's `ple` stage converts it with
+`tools/quantize/qwen4exp/ple_int8.py` beside the export.
 
-**The recipe:** `tools/quantize_qwen38_tuned.sh`'s flags (`--scheme W4A16 --group_size 64 --quant_lm_head --format
-auto_round:auto_gptq --low_gpu_mem_usage`), AutoRound 0.17.0 @ `6afaecdb` + `auto-round-local.patch` via
-`tools/quantize/ar_pin.sh` (`tools/quantize/README.md`). Three things to prove on the tiny model before the 360 GB run
-(plan 21v2a Task 1):
-- **the `lm_head` packing.** On 0.17.0 the tuned path packs the head; the RTN path in low-CPU-memory mode does **not**
-  (it ships `lm_head.weight` unpacked while `extra_config` says 4-bit) and its workaround,
-  `--disable_low_cpu_mem_usage`, holds the whole model in RAM - impossible at 360 GB on 115 GB. So an RTN run packs the
-  head by our own RTN g64 (the loader's rule, `loader/rtn.h`) into the export, checked by `check_gptq_export.py`;
-- **per-expert export from the fused original** (`mlp.experts.gate_up_proj [512, 1280, 2560]`): per-expert
-  `qweight` / `scales` / `qzeros`, what our loader reads (Intel's 0.15.0 export did it; prove the pinned commit does);
-- **the MTP head:** transformers drops `mtp.*`, so AutoRound never sees it. Its experts go into the export either by
-  a second, small AutoRound pass over the MTP layer (its inputs captured from the main model's last hidden on the
-  calibration rows) or by RTN g64 (today's load-time rule, spec 15e) - Task 1 says which the toolchain can do, Task 2
-  sizes both; acceptance against the bf16 head decides (§7.2).
+**The recipe (built 2026-11-12, plan 21v2a Task 1): `tools/quantize/quantize_qwen4exp.sh`**, details and the evidence
+in `tools/quantize/README.md` ("Qwen3.8-Flash-Next: our AutoRound export"):
+- **AutoRound at the operator's fork commit `a6cf7487`** = intel/auto-round `b58069ea` (2026-11-11) + its cached-
+  OpenCodeInstruct commit, built by `ar_pin.sh` from the operator's clone - not the Qwen3.8 scripts' 0.17.0
+  `6afaecdb`: it resumes per block (`AR_RESUME_DIR`), vectorises the QSA
+  indexer, routes the MoE forward, and exports the MTP head itself; the BOS/EOS fix of `auto-round-local.patch` is
+  upstream. transformers 5.19.0 (the reference's pin), torch 2.14 + XPU, **one card** (card 1) under
+  `tools/gpu_lock.sh card 1`, in a 115 GB memory-capped scope.
+- **Tuned:** sign-SGD, 200 iterations, 128 x 2048 rows, batch 8 (the Qwen3.8 tuned recipe's sizes) of
+  **nvidia/OpenCodeInstruct** through the chat template (operator 2026-11-12: agentic coding; from the HF cache, the
+  run refuses without all 50 shards), low CPU memory (the fused original is materialised one block at a time) and low GPU memory.
+- **The fused experts** (`mlp.experts.gate_up_proj [512, 1280, 2560]`) are unfused per block and exported per
+  expert - proven on the tiny model.
+- **`lm_head`:** stays bf16 in the export (`HEAD=bf16`, the default, operator 2026-11-12); the engine builds its int8
+  head at load. AutoRound would only RTN it (`quant_lm_head` also turns its low-CPU-memory mode and the per-block resume
+  off). `HEAD=int4` runs the script's `head` stage instead (RTN g64, `loader/rtn.h`'s rule) for a later test; a
+  GPTQ-calibrated int4 head is in `docs/low-priority-work.md`.
+- **The PLE table** (95.4 GiB) is streamed once into a raw file on the NVMe and read by mmap during the tuning
+  (`autoround_run.py`); AutoRound's own load concatenates the 128 shards in RAM (~190 GiB at the peak).
+- **The MTP head:** transformers builds no MTP module, so no tuned pass is possible. AutoRound's export copies
+  `mtp.*`, splits the fused experts and RTN-quantises them int4 g64; the head's attention and shared expert stay bf16
+  (ignore list). Acceptance against the bf16 head is measured (§7.2, plan 21v2a Task 7 Step 4).
+- **Self-checking:** every unquantised tensor bitwise the source's (`bf16_same.py`), then `check.py` (the engine's
+  rules for this family, the int8 PLE file sampled bit for bit) and `check_gptq_export.py --lm-head keep --source` (`quant` with `HEAD=int4`);
+  the last line is `FLASH-NEXT QUANT: OK <export>`.
+- **Calibration coverage (not measured):** top-10 of 512 routes ~2 % of tokens to an expert; 262,144 calibration
+  tokens give an expert ~5,100 routed tokens on average (derived), but rarely-routed experts get far fewer. Plan 21q's
+  per-expert coverage count (floor 2048) is not part of this run; an expert no calibration token reaches gets no
+  gradient and keeps its RTN start. The f32 judge (§10) is the check.
 
-**Sizing (an early task, not a guess):** 48 blocks of ~5.2 GB bf16 each (512 experts x 3 x 2560 x 640 x 2 B
-= 5.03 GB + the dense part, derived), 24,576 routed experts; read from the cold disk at ~26 s a block (estimated,
-~200 MB/s). The tuned run's cost per block is unknown on a B70; Kolibri's estimate was 10-30 h for 384 experts a
-block on an H100. Plan 21v2a Task 2 measures the first block on a card (RTN, and tuned at 200 iterations) and on the
-box CPU (which has no bf16 / AVX-512: fp32 only, `cpu-bf16-slow`), projects x 48 + the MTP head, and records peak RAM
-and VRAM; the operator then picks tuned or RTN and the machine time (§12 question 2). Every expert must see
-calibration tokens: top-10 of 512 routes ~2 % of tokens to an expert, so the per-expert coverage count of plan 21q
-(floor 2048 routed tokens, proposed) is part of the recipe for a tuned run.
+**Sizing:** measured 2026-11-11 on a real-width stand-in (4 layers, 512 experts, random weights) on card 1:
+one GDN block tuned in **57 min**, peak VRAM 38.9 GiB on the 31.9 GiB card (the block's tuning state alone is ~34
+GiB: the driver spills the rest to host RAM; batch and samples do not change it), AutoRound's per-expert loop (its
+grouped path would need 150 GiB). Two cards (`--device 0,1`) do not help: one card does all the work and the QSA
+block fails with a device mismatch. Projection: **~48 h on one card** for 48 blocks + the export; host RAM ~55 GB
+(estimated) once the PLE table is file-backed (AutoRound's own load would need ~190 GB). Details and the
+re-measure: `tools/quantize/README.md`, "Sizing".
 
-**Export size (derived):** experts 64.2 + MTP experts 1.3 + dense ~1.7 + embedding 1.3 + head 0.34 GB, plus the bf16
-PLE table (102 GB) if AutoRound copies it through: ~70-172 GB, on the cold disk, moved hot by `tools/hf_tier.sh`.
+**Export size (derived):** experts 64.2 + MTP experts 1.3 + dense ~1.7 + embedding 1.3 + head 0.64 (bf16 1.27 on disk) + vision ~0.9 GB
++ the bf16 PLE table 102.4 GB (written back by AutoRound) = ~172 GB, plus the int8 PLE file 51.8 GB, on the cold disk
+(`~/b70/hdd/quant/`), moved hot by `tools/hf_tier.sh`.
 
-**Quality of our export against Intel's** (plan 21v2a Task 7): KL and top-1 of each against the bf16 original on the
-same held-out rows (golden prompts and the tool-call prompts; layer-streamed CPU reference, f32 arithmetic), and the
-engine's own count rule and twin count against an f32 reference of our weights. Ours trades Intel's bf16 dense layers
-for int4 g64 ones and gains g64 experts and a tuned head; if it comes out worse than Intel's on both KL and top-1, the
-work stops for the operator (§12 question 3).
+**Quality of our export** (plan 21v2a Task 7): KL and top-1 against the bf16 original on held-out rows (golden
+prompts and the tool-call prompts; layer-streamed CPU reference, f32 arithmetic), and the engine's own count rule and
+twin count against an f32 reference of our weights (§10). No comparison with Intel's checkpoint (operator,
+2026-11-12: a month of CPU references, and Qwen4-27B support comes first).
 
 ## 3. The bytes (derived)
 
@@ -140,13 +157,13 @@ bits a weight with its f16 g64 scales); 512 of them are 1,336,934,400 B a layer.
 |---|---:|---:|
 | non-routed layer weights (36 GDN + 12 QSA: projections, shared expert, router, hyper-connections) | **3.04** (36 x 63.7 MB + 12 x 62.0 MB) | 7.31 (36 x 155.6 + 12 x 142.4) |
 | of which hyper-connections (bf16 in both) | 1.29 | 1.29 |
-| head and fixed (`lm_head`, PLE block 0.066, final mixer 0.013) | **0.42** (int4 head 0.338) | 0.72 (int8 head 0.637) |
-| **D, non-routed** | **3.46** | 8.03 |
+| head and fixed (`lm_head`, PLE block 0.066, final mixer 0.013) | **0.72** (int8 head 0.637) | 0.72 (int8 head 0.637) |
+| **D, non-routed** | **3.76** | 8.03 |
 | **R, routed** (48 x 10 x 2.611 MB) | 1.253 | 1.253 |
-| **total** | **4.71** | 9.28 |
+| **total** | **5.01** | 9.28 |
 
-- **Roofline** at 590 GB/s, every expert in VRAM: ours 125 t/s, at the 77.6 % of roofline Qwen3.8 reaches **97 t/s**
-  (Intel's form: 64 / 49). This is spec 21 §3's figure (119 / 93 with the int8 head) come back.
+- **Roofline** at 590 GB/s, every expert in VRAM: ours 118 t/s, at the 77.6 % of roofline Qwen3.8 reaches **91 t/s**
+  (Intel's form: 64 / 49) - spec 21 §3's int8-head figure (119 / 93). An int4 head would save 0.3 GB (~97 t/s).
 - **Weights in VRAM for the whole model (ours):** experts 64.17 + non-routed 3.04 + embedding 1.27 + head and fixed
   0.42 + the MTP head 1.52 (its dense part bf16, its experts int4) = **~70.4 GB** (Intel's: ~75.0), against ~62 GB
   usable on two cards (32.53 GB each less the 1.5 GB reserve).
@@ -213,11 +230,11 @@ The cost model is spec 22 §2's with the VRAM part at Qwen3.8's 77.6 % of roofli
   routed experts and the shared one, and their partial sums ride the post-MoE all-reduce TP already does - no extra
   traffic. Two all-reduces a layer over P2P (~98 a token x 3.5 µs = 0.34 ms). saber measured this against expert
   parallel (whole experts per card): one request 162 -> 167 t/s, 8 requests 414 -> 420, MoE imbalance 2.42 -> 0.06 ms.
-  Both links stream misses at once, each card only its own halves. D per card ≈ 1.29 + (3.46 - 1.29) / 2 = 2.38 GB,
-  R per card 0.627 GB. `t = (2.38 + h·0.627) / 457.8 + (1 - h)·0.627 / P + 0.34 ms`. f per card about as in (a).
+  Both links stream misses at once, each card only its own halves. D per card ≈ 1.29 + (3.76 - 1.29) / 2 = 2.53 GB,
+  R per card 0.627 GB. `t = (2.53 + h·0.627) / 457.8 + (1 - h)·0.627 / P + 0.34 ms`. f per card about as in (a).
 - **(c) card 1 as a peer expert tier** (basalt's design: card 0 runs everything, cold experts live in card 1's VRAM and
   are read over P2P, or card 1 computes the experts it holds). basalt measured this beating a layer split on NVIDIA
-  with a small dense part; with our int4 dense part (3.46 GB) it is closer than it was with Intel's 8 GB, but every
+  with a small dense part; with our int4 dense part (3.76 GB) it is closer than it was with Intel's 8 GB, but every
   token still sends most routed bytes or activations across the bus, and (b) uses both cards' bandwidth on every
   layer. Not built unless the probe's P2P read rate (plan 21v2a Task 5) is far above the host link's.
 
@@ -313,8 +330,20 @@ for our g64 export (the loader expands Intel's g128 only); built only if load ti
 4. **QSA, with OpenVINO as the Intel reference.** OpenVINO `3b0ee89623` added fused GPU ops for QSA (the indexer and
    the sparse attention, paged) with a quantised KV layout: the reference for a fused decode kernel and for int8 KV on
    the 12 QSA layers (int8 KV frees ~3.3 GB at 262k for experts); not its paging (fixed slots, ruled).
-5. **int8 hyper-connections:** 1.29 -> 0.65 GB a token, now ~14 % of ours (spec 21 decision 2: measured first).
-6. **Prefill GEMM:** int8 DPAS (s8) grouped GEMM decoding the int4 weights in registers (Strata ESIMD, +12-21 % below
+5. **int8 hyper-connections (operator 2026-11-12: do it):** the 4-stream mixers stay bf16 in the export and are converted
+   to int8 **at load** (one fp16 scale per 32 values, basalt's and saber's "hc8"), as the output head is today. 1.29 ->
+   ~0.65 GB a token: 5.01 -> ~4.36 GB, the decode ceiling ~91 -> ~105 t/s (derived). basalt reports ~0.006 KL for it.
+   Gate: the f32 judge on our export (twin count no worse than with bf16 mixers) and the measured decode gain.
+   **If accuracy is bad, suspect these first:** the mixers touch every token's residual stream, so they are the first thing
+   to switch back to bf16 when a quality gate fails - a load-time choice, no re-export needed - before suspecting the int4
+   weights, the int4 head or the MTP experts.
+   **Test switch (operator 2026-11-12):** an environment variable, `B70_Q4_HC=int8|bf16` (default `int8` once the lever
+   passes its gate), picks the mixers' form at load - for A/B timing and quality checks only, not a user flag; listed in
+   docs/environment-variables.md when it is built.
+6. **Prefill GEMM - built on Ornith first (operator 2026-11-12):** Flash-Next's prefill reuses Ornith's grouped expert GEMM
+   (`pf_moe_gemm.cl`) and the same separate unpack pass (`q4_pf_dequant_*`), so the Ornith MoE prefill rework - int4
+   unpacked in registers inside the grouped GEMM, bigger MoE chunks and tiles, persistent scheduling - lands here unchanged.
+   Also: int8 DPAS (s8) grouped GEMM decoding the int4 weights in registers (Strata ESIMD, +12-21 % below
    ~130 rows an expert; our l0-int8 prefill is the base), XeStrata's strip-ordered work-group numbering for wide GEMMs
    (105 -> 145 TFLOP/s on Xe2).
 
@@ -340,8 +369,7 @@ decode stays within 5 % of 32768's (spec 22 decision 5's rule, proposed); `--max
 - **The tier changes no arithmetic:** with every expert resident it is bitwise today's engine (O0); forced residency
   of 0 / 50 / 100 %, random and adversarial, is bitwise the 100 % run in decode, prefill and verify (O1); swaps every
   step are bitwise the no-swap run (O2). A difference is a bug, never a tolerance.
-- **Our export against Intel's and the bf16 original** (§2): KL and top-1 per held-out set, both checkpoints on the
-  same rows.
+- **Our export against the bf16 original** (§2): KL and top-1 per held-out set (no Intel comparison, §0.1).
 - **The whole model against an f32 reference of our weights:** a CPU f32 reference of all 48 layers on `q4exp_4k`
   (37 layers peaked at 68 GiB, so ~90 GiB estimated: it holds both cards' lock as a > 64 GB job). Prefill by the
   operator's count rule (its rejected routes ≤ 1.2x decode's, its f32-accepted tokens ≥ decode's).
@@ -350,6 +378,10 @@ decode stays within 5 % of 32768's (spec 22 decision 5's rule, proposed); `--max
 - **The tool-call test:** the 36 scenarios on the whole model against the CPU reference (`r34.a4_ref`), every first
   difference judged by the f32 judge (`serve_judge.py`), as for Qwen3.8.
 
+
+**When a quality gate fails, check in this order:** (1) the int8 hyper-connection mixers (§7 lever 5) - switch them back
+to bf16 at load and re-judge; (2) the int4 output head (against the f32 reference's head); (3) the MTP experts (acceptance, `r34.accept`); (4) the int4 g64
+dense layers themselves.
 ## 11. Speed gates (approved 2026-11-12) and the goal
 
 | stage | decode, one request, 4k depth, MTP off | prefill at 4k |
@@ -359,18 +391,12 @@ decode stays within 5 % of 32768's (spec 22 decision 5's rule, proposed); `--max
 | **the goal** | **> 66 t/s** (Strata, two B70s, IQ3_XXS) at int4 g64 | |
 
 **Stopping rule:** if the probe's projection at the measured h gives (a) < 30 t/s and (b) < 50 t/s, stop before
-engine work and bring the levers to the operator (§12 question 1). If the gates pass and the goal is missed, §7's
+engine work and bring the levers to the operator (the mixed 3/4-bit form first, §0.6). If the gates pass and the goal is missed, §7's
 levers go in order of measured gain.
 
-## 12. Open questions for the operator
+## 12. Questions for the operator
 
-1. **Base format (recommended, not decided):** int4 g64 for every expert, as the one format; mixed 3/4-bit experts
-   (Strata's way to fit two cards: 3-bit for the cold experts would put nearly all of them in VRAM) only as a later
-   lever if the gates are missed, judged by the f32 judge. Recommendation: yes - int4 g64 now, the mixed form only on
-   evidence.
-2. **The quantisation run's machine time,** after plan 21v2a Task 2's sizing: tuned AutoRound or RTN, and how long a
-   card (or both) may be held for it. Recommendation: tuned if the projection fits in about three days on one card
-   (the other card keeps working), else RTN with the head packed by our rule.
-3. **If our export loses to Intel's** on both KL and top-1 against the bf16 original (§2): keep ours anyway (one
-   format), or keep Intel's bf16 dense layers beside our g64 experts? Recommendation: decide on the numbers; the f32
-   judge and the tool-call test are the tie-breakers.
+None open. Answered 2026-11-12: the base format is int4 g64 everywhere, the mixed 3/4-bit form only if the gates are
+missed (§0.6); the run is tuned and the operator starts it himself (§0.1, §2); there is no comparison with Intel's
+checkpoint, so the question "keep Intel's bf16 dense layers beside our experts if ours loses" is gone - our export is
+judged against the bf16 original and by the f32 judge (§10).
