@@ -1187,7 +1187,8 @@ if(B70_ORNITH)
                    kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
 endif()
 
-# --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time) ---------------
+# --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time); phase 3 Task 1: + the
+# dense pf_gemm arm ---------------
 if(B70_ORNITH)
   set(_pfr_targets)
   foreach(N 272 128)
@@ -1204,5 +1205,5 @@ if(B70_ORNITH)
   target_include_directories(probe_route PRIVATE ${CMAKE_SOURCE_DIR}/src)
   target_link_libraries(probe_route PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(probe_route)
-  add_dependencies(probe_route ${_pfr_targets} kernel_pf_moe_router_K2048_N272 kernel_pf_ab_proj_D2048)
+  add_dependencies(probe_route ${_pfr_targets} kernel_pf_moe_router_K2048_N272 kernel_pf_ab_proj_D2048 kernel_pf_gemm_T0)
 endif()
