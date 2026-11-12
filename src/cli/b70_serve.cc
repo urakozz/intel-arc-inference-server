@@ -123,7 +123,8 @@ void usage() {
                "                  card holds up to 4 slots - slot 0 the largest context that fits beside N - 1\n"
                "                  slots of 32768 positions (e.g. 131072 + 3 x 32768); one card up to 4, two cards\n"
                "                  (replica, the slots split between the cards) up to 8. A request that reaches its\n"
-               "                  slot's end finishes with \"length\" and is logged.\n"
+               "                  slot's end finishes with \"length\" and is logged. Ornith: 2 on two cards\n"
+               "                  (replica, one request a card).\n"
                "  --max-len L     auto (default): the largest context that fits beside the weights (beside the\n"
                "                  other slots with --max-num-seqs), at most the trained one; L: slot 0 exactly L,\n"
                "                  any multiple of 256 up to the trained context, refused if it does not fit.\n"
@@ -132,8 +133,9 @@ void usage() {
                "                  and the asked context fit it, else pp; 1: one card; pp: the\n"
                "                  layers split over two cards (spec 16). Kolibri-1 and\n"
                "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
-               "                  replica (Qwen3.8): the model on both cards, one engine each - --max-num-seqs\n"
-               "                  2 to 8 (2 when not given: one request a card), each exactly what it is alone.\n"
+               "                  replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
+               "                  --max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
+               "                  exactly what it is alone.\n"
                "                  tp (Qwen3.8, spec 17): every layer split over both cards (needs peer\n"
                "                  access) - one request at a time, faster; --spec auto / mtp / lookup.\n"
                "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
@@ -893,7 +895,8 @@ int serve_tp(const TpServe& a, server::Options options) {
   return listen_until_stopped(server, options);
 }
 
-// Plan 13b (spec 13 §10 / §11): b70-serve --parallel replica - Qwen3.8 on both cards, one runtime::Engine each (each
+// Plan 13b (spec 13 §10 / §11): b70-serve --parallel replica - Qwen3.8 or Ornith (one request a card: its engine has
+// no slots) on both cards, one runtime::Engine each (each
 // card's own plan: its --max-len auto, its prefill chunk cap, MTP / lookup per --spec), behind cli::ReplicaEngine and
 // server::Scheduler: two requests at once, each bitwise what it is alone on its card. Both cards are views of ONE
 // Level Zero context (spec 16 decision 1) so the prefix cache's pinned host store is device-visible to both - a
@@ -942,7 +945,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     }();
     model::require_prefill(*model.desc);
     if (!cli::replica_architecture(model.desc->architecture))   // run() read config.json; the loader is the truth
-      throw std::runtime_error("--parallel replica serves Qwen3.8 only (spec 13b); this checkpoint loads as " +
+      throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (spec 13b); this checkpoint loads as " +
                                model.desc->name);
     runtime::PrefillPath pf = a.pp_path;
     pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
@@ -1012,7 +1015,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
                runtime::prefill_backend_name(engines[0]->prefill_backend()), a.mtp_auto ? "auto, max " : "", a.mtp_k,
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engines[0]->kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
-                 false, engines[0]->model().desc->name);
+                 engines[0]->model().desc->is_moe(), engines[0]->model().desc->name);
   return listen_until_stopped(server, options);
 }
 
@@ -1132,10 +1135,11 @@ int run(int argc, char** argv) {
   if (pipe.mode == cli::Parallel::One && pipe.have_handoff)
     throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses)");
   max_num_seqs = cli::check_max_num_seqs(pipe, max_num_seqs, have_max_num_seqs);
-  // Plan 13b / spec 17d / --max-num-seqs above 1: Qwen3.8 only, by name, before any device or weight file.
+  // Plan 13b / spec 17d / --max-num-seqs above 1: Qwen3.8 (replica: and Ornith) only, by name, before any device or
+  // weight file.
+  std::string architecture, name;
   if (pipe.replica() || pipe.tp() || max_num_seqs > 1) {
     if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash=*/false);
-    std::string architecture, name;
     try {
       const std::string snap = loader::resolve_snapshot(path);
       if (std::ifstream cf(snap + "config.json"); cf) {
@@ -1161,9 +1165,11 @@ int run(int argc, char** argv) {
     else if (pipe.tp())
       cli::check_tp_model(architecture, name);
     else if (!cli::replica_architecture(architecture))
-      throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots, plan 13c); " +
+      throw std::runtime_error("--max-num-seqs above 1 is built for Qwen3.8 (its sequence slots, plan 13c) and "
+                               "Ornith (2: one request a card, replica); " +
                                (name.empty() ? std::string("this checkpoint (no readable config.json)") : name) +
                                " serves one request at a time - drop --max-num-seqs");
+    cli::check_one_request_a_card(pipe, max_num_seqs, architecture, name);   // Ornith: no slots
   }
   const bool pp_given = pipe.given();
   if (have_q4_layers && !cli::qwen4exp::is_qwen4exp(path))
@@ -1182,6 +1188,7 @@ int run(int argc, char** argv) {
     std::fprintf(stderr, "parallel: auto -> %s (--max-num-seqs %u)\n",
                  hw.cards >= 2 ? "replica (two B70s: each card its slots)" : "1 (one card: its slots)", max_num_seqs);
   cli::resolve_max_num_seqs(pipe, max_num_seqs, hw.cards);
+  cli::check_one_request_a_card(pipe, max_num_seqs, architecture, name);   // Ornith's 2 on one card: auto -> 1
   if (pipe.replica()) cli::require_two_devices_for_replica(hw.cards);   // plan 13b: one engine per card
 
   // Spec 25e: Nemotron 3.5 Bolt (model_type nemotron_h_omni over nemotron_h_puzzle) runs runtime::bolt::BoltEngine behind
