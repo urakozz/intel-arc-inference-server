@@ -1159,6 +1159,25 @@ bf16 operand, measured harmless on three prompts of one checkpoint and not prove
   18×; both barrier-free variants were bit-identical and both were slower. The row is the serialised
   recurrence itself.
 
+**The MoE models' form (phase 2, 2026-11-12;
+[record](probes/probe-prefill-phase2-2026-11-12.md)).** Ornith and Flash-Next run `pf_gdn_front` in place of
+`pf_gdn_conv` + `pf_gdn_l2norm`. It is bitwise: each (position, head)'s 128-lane l2norm tree is evaluated by one
+sub-group, with the same pairs and the same adds. On l0, Ornith also runs `pf_gdn_intra` in place of `pf_gdn_A`,
+`pf_gdn_solve`, `pf_gdn_wu` and `pf_gdn_A2_hilo`: one work-group per (head, 64-position sub-chunk). Inside it:
+
+- A and A2 are bf16 DPAS dots, whose operands are exact.
+- T is a blocked 16 × 16 fp32 solve. The diagonal blocks use `pf_gdn_solve`'s own column chain; each
+  off-diagonal block is T_ij = −T_ii Σ A_ik T_kj.
+- W and U are DPAS with T as hi / lo bf16 limbs.
+
+That takes 80.6 ms to about 24 ms at 4k. It is judged rather than bitwise: per stage it is within 1.15× of the
+four kernels' fp64 error. On l0-int8 it misses one determined row of the f32-judged gate, so l0-int8 keeps the
+four launches. Carrying Q1-Q4 in fp32 (u and w as limb planes) brought the state error from 1e-3 to 5e-6, but
+it missed more token rows and was removed. The rest of a MoE model's layer is also bitwise:
+
+- `pf_res_norm` (`pf_norm_fused.cl`) is the residual fold and RMSNorm in one work-group per row.
+- `pf_gemv_rows` (`pf_route.cl`) is the router and a||b GEMVs at 16 rows × 2 column tiles a work-group.
+
 ### How the prefill kernels got here
 
 The kernel-level conclusions of the September 2026 prefill investigations, folded in from their standalone
