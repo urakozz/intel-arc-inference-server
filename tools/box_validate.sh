@@ -22,6 +22,11 @@
 #   --nightly     the nightly run (docs/10-the-box.md): no run at all when nothing but documentation
 #                 changed since the newest finished run of this tree (tools/box_validate/changed_since.sh);
 #                 a full run (--no-reuse) when the newest finished full run is older than 7 days
+#   --quick       the quick run (about an hour, for every change): the stages stages.sh's --quick block names,
+#                 some with a smaller input (--list shows which and how); every other selected stage is
+#                 recorded SKIP "full only". Its own state (<sha>-quick-vs-<baseline>, --state NAME must contain
+#                 -quick): a quick PASS never stands for a full one. No box tidy at launch. With --status /
+#                 --summary / --dry-run: the quick state
 # Run control:
 #   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
 #                    commit, a86dd86; `--baseline main` when validating a branch before merging)
@@ -73,7 +78,7 @@ ROOT="$PWD"
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 die() { echo "box_validate.sh: $*" >&2; exit 2; }
 
-MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 NIGHTLY=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
+MODE=run ONLY="" WITH="" SKIP="" REDO="" FORCE=0 NO_REUSE=0 NIGHTLY=0 QUICK=0 WAIT=1 SYNC=1 PUSH=0 OUT="" POLL=120
 BASELINE_REF="${BASELINE_REF:-}" STATE_NAME=""
 BASELINE_GIVEN=0; [ -z "$BASELINE_REF" ] || BASELINE_GIVEN=1
 need() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"; }
@@ -91,6 +96,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1; shift ;;
     --no-reuse) NO_REUSE=1; shift ;;
     --nightly) NIGHTLY=1; shift ;;
+    --quick) QUICK=1; shift ;;
     --baseline) need "$@"; BASELINE_REF="$2"; BASELINE_GIVEN=1; shift 2 ;;
     --state) need "$@"; STATE_NAME="$2"; shift 2 ;;
     --no-wait) WAIT=0; shift ;;
@@ -107,6 +113,8 @@ DEVICE="${DEVICE:-0}"
 export DEVICE
 BASELINE_REF="${BASELINE_REF:-ce36d2d}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
+[ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
+BV_QUICK=$QUICK   # the stage bodies' quick_or, for --dry-run
 
 # ---- selection ------------------------------------------------------------------------
 # expand "a,b,r11" [noopt] -> the ids those name, in registry order (manual stages never
@@ -190,18 +198,24 @@ export REMOTE_DIR
 BASE_DIR_ENV="${BASE_DIR:-}"
 BASE_DIR="${BASE_DIR_ENV:-b70-inference-server-g0-$BASE_SHORT}"
 DATA_DIR="${DATA_DIR:-b70-inference-server}"
+# a quick run keeps its own state: its PASSes are never kept as, or taken for, a full run's
+if [ "$QUICK" = 1 ]; then STATE_NAME="${STATE_NAME:-${SHA}-quick-vs-$BASE_SHORT}"; fi
 STATE_NAME="${STATE_NAME:-${SHA}-vs-$BASE_SHORT}"
+case "$STATE_NAME" in
+  *-quick|*-quick-*) [ "$QUICK" = 1 ] || die "state $STATE_NAME is a quick run's: add --quick, or name a full run's state" ;;
+  *) [ "$QUICK" = 0 ] || die "--quick runs in a quick state: drop --state (<sha>-quick-vs-<baseline>), or name one containing -quick" ;;
+esac
 STATE_REL="b70-validate/$REMOTE_DIR/$STATE_NAME"
 LOCAL_STATE="build/box-validation/$STATE_NAME"
 DATE="$(date +%F)"
-OUT="${OUT:-box-validation-$DATE.md}"
+OUT="${OUT:-box-validation-$DATE$(quick_or '' -quick).md}"
 
 # ---- the commands the driver itself sends ------------------------------------------------
 q() { printf '%q' "$1"; }
 remote_env() {
   local s
   s="B70_GIT_SHA=$(q "$SHA") BV_BASE_SHA=$BASE_SHA BV_BASE_REF=$(q "$BASELINE_REF")"
-  s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_REDO=$(q "$REDO_IDS")"
+  s="$s BV_BASE=\"\$HOME/$BASE_DIR\" BV_DATA=\"\$HOME/$DATA_DIR\" BV_FORCE=$FORCE BV_NO_REUSE=$NO_REUSE BV_QUICK=$QUICK BV_REDO=$(q "$REDO_IDS")"
   local v
   for v in JOBS DEVICE PORT CMAKE_ARGS SNAP_QWEN SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON OPENCODE_LOG \
            A4_REF_DIR ORACLE_IMAGE G0_BITWISE_RE G0_ALLOW_REMOVED R10_RUNS R2_ROUNDS R8_DRAFT_VOCAB \
@@ -303,14 +317,26 @@ print_stage() {
   echo "    needs: ${BV_NEEDS[$i]}   after: ${BV_AFTERS[$i]}"
   echo "    lock: $(lock_of "$id")"
   echo "    log: ~/$STATE_REL/$id.log   status: ~/$STATE_REL/$id.status"
+  if [ "$QUICK" = 1 ]; then
+    case "${BV_QUICKS[$i]}" in
+      "") echo "    quick: full only - recorded SKIP, not run"; return 0 ;;
+      same) echo "    quick: as in the full run" ;;
+      *) echo "    quick: ${BV_QUICKS[$i]}" ;;
+    esac
+  fi
   dry_body "$id"
+}
+quick_count() {   # the selected stages the quick run runs
+  local id n=0
+  for id in $SELECTED; do [ -z "$(bv_field "$id" quick)" ] || n=$((n + 1)); done
+  echo "$n"
 }
 
 # ---- modes ----------------------------------------------------------------------------
 if [ "$MODE" = registry ]; then write_registry "$REGISTRY_OUT"; exit 0; fi
 
 if [ "$MODE" = list ]; then
-  printf '%-18s %-4s %-8s %-9s %-12s %-28s %s\n' STAGE ROW SEL KIND LOCK NEEDS TITLE
+  printf '%-18s %-4s %-8s %-9s %-12s %-5s %-28s %s\n' STAGE ROW SEL KIND LOCK QUICK NEEDS TITLE
   for i in "${!BV_IDS[@]}"; do
     mark=""; in_list "${BV_IDS[$i]}" "$SELECTED" && mark="*"
     case "${BV_KINDS[$i]}" in
@@ -318,13 +344,19 @@ if [ "$MODE" = list ]; then
       cpu) lk=cpu; [ "${BV_SELS[$i]}" = always ] && lk=- ;; *) lk=- ;;
     esac
     bv_builds "${BV_IDS[$i]}" && lk="$lk+build"
-    printf '%-18s %-4s %-8s %-9s %-12s %-28s %s\n' "${BV_IDS[$i]}$mark" "${BV_ROWS[$i]}" "${BV_SELS[$i]}" \
-      "${BV_KINDS[$i]}" "$lk" "${BV_NEEDS[$i]}" "${BV_TITLES[$i]}"
+    case "${BV_QUICKS[$i]}" in "") qk=- ;; same) qk=same ;; *) qk=less ;; esac
+    printf '%-18s %-4s %-8s %-9s %-12s %-5s %-28s %s\n' "${BV_IDS[$i]}$mark" "${BV_ROWS[$i]}" "${BV_SELS[$i]}" \
+      "${BV_KINDS[$i]}" "$lk" "$qk" "${BV_NEEDS[$i]}" "${BV_TITLES[$i]}"
   done
   echo ""
   echo "* = in this launch's selection ($(echo "$SELECTED" | wc -w | tr -d ' ') stages). LOCK: box = the whole box"
   echo "(~/b70-gpu.lock exclusive), card$DEVICE = card $DEVICE only (--device), self = the stage's script locks,"
-  echo "cpu = one cpu stage at a time per tree, +build = the tree's build lock. Rows:"
+  echo "cpu = one cpu stage at a time per tree, +build = the tree's build lock. QUICK (--quick): same = runs as in"
+  echo "the full run, less = a smaller input (below), - = full only (recorded SKIP). The smaller inputs:"
+  for i in "${!BV_IDS[@]}"; do
+    case "${BV_QUICKS[$i]}" in ""|same) ;; *) printf '  %-18s %s\n' "${BV_IDS[$i]}" "${BV_QUICKS[$i]}" ;; esac
+  done
+  echo "Rows:"
   for i in "${!BV_ROW_IDS[@]}"; do printf '  %-3s %s\n' "${BV_ROW_IDS[$i]}" "${BV_ROW_TITLES[$i]}"; done
   exit 0
 fi
@@ -337,6 +369,7 @@ if [ "$MODE" = dry ]; then
   echo "# state: \$BOX:~/$STATE_REL  (fetched to $LOCAL_STATE)"
   echo "# stages ($(echo "$SELECTED" | wc -w | tr -d ' ')): $SELECTED"
   [ -n "$REDO_IDS" ] && echo "# redo: $REDO_IDS"
+  [ "$QUICK" = 1 ] && echo "# quick run: $(quick_count) of these run, the rest are recorded SKIP (full only)"
   echo "# device $DEVICE: ZE_AFFINITY_MASK=$DEVICE, PORT ${PORT:-$((8013 + 100 * DEVICE))}, orchestrator lock ~/$RUNS_REL/.run-$DEVICE.lock, log ~/$STATE_REL/$ORCH_LOG"
   device_note
   echo ""
@@ -389,7 +422,7 @@ if [ "$MODE" = status ]; then
   rest="${out#*@@}"
   echo "orchestrators in ~/$RUNS_REL (one per device):"
   printf '%s\n' "${rest#*@@}" | awk 'NF >= 2 { printf "  device %s: %s%s\n", $1, $2, (NF >= 3 ? ", state " $3 : "") }'
-  echo "state ~/$STATE_REL (DEV: the device that ran the stage and its lock):"
+  echo "state ~/$STATE_REL$(quick_or '' ' - a QUICK run (--quick)') (DEV: the device that ran the stage and its lock):"
   printf '%s\n' "${out%%@@*}" | awk -F'\t' 'NF >= 2 { printf "  %-18s %-8s %-8s %s\n", $1, $2, (NF >= 9 ? $8 " " $9 : "-"), $7 }'
   echo "recent:"; printf '%s\n' "${rest%%@@*}" | sed '/^$/d; s/^/  /'
   exit 0
@@ -474,7 +507,7 @@ if [ "$NIGHTLY" = 1 ]; then
   # The newest FINISHED run of this tree (its progress.log says the orchestrator is done), and whether a finished
   # full run (a state marked full-run) is younger than 7 days.
   runs="~/b70-validate/$REMOTE_DIR"
-  last=$("${SSH[@]}" "$BOX" "cd $runs 2>/dev/null && for s in \$(ls -td *-vs-* 2>/dev/null); do grep -q 'orchestrator done' \$s/progress.log 2>/dev/null && { echo \$s; break; }; done") || die "ssh failed"
+  last=$("${SSH[@]}" "$BOX" "cd $runs 2>/dev/null && for s in \$(ls -td *-vs-* 2>/dev/null | grep -v -- -quick); do grep -q 'orchestrator done' \$s/progress.log 2>/dev/null && { echo \$s; break; }; done") || die "ssh failed"
   recent_full=$("${SSH[@]}" "$BOX" "cd $runs 2>/dev/null && for f in \$(find . -maxdepth 2 -name full-run -mtime -7); do grep -q 'orchestrator done' \$(dirname \$f)/progress.log 2>/dev/null && { echo \$f; break; }; done") || die "ssh failed"
   if [ -n "$last" ] && [ "${SHA%-dirty}" = "$SHA" ]; then
     lsha=${last%%-vs-*}; lsha=${lsha%-dirty}
@@ -491,13 +524,14 @@ if [ "$NIGHTLY" = 1 ]; then
   fi
 fi
 if [ "$SYNC" = 1 ]; then tools/box.sh sync; fi
-if [ "$NO_REUSE" = 1 ]; then "${SSH[@]}" "$BOX" "mkdir -p ~/$STATE_REL && touch ~/$STATE_REL/full-run" || die "ssh failed"; fi
+if [ "$NO_REUSE" = 1 ] && [ "$QUICK" = 0 ]; then "${SSH[@]}" "$BOX" "mkdir -p ~/$STATE_REL && touch ~/$STATE_REL/full-run" || die "ssh failed"; fi
 if [ "$("${SSH[@]}" "$BOX" "$BASE_CHECK_CMD")" != "$BASE_SHA" ]; then
   echo "baseline: extracting $BASELINE_REF ($BASE_SHORT) into ~/$BASE_DIR"
   git archive --format=tar "$BASE_SHA" | "${SSH[@]}" "$BOX" "$BASE_EXTRACT_CMD"
 fi
-# The box's system disk (operator 2026-11-10): finished branches' trees and old baselines go to trash at every launch.
-tools/box_tidy.sh | grep -E '^(moved|trash|system disk)' || true
+# The box's system disk (operator 2026-11-10): finished branches' trees and old baselines go to trash at every full
+# launch (not a quick one: it runs for every change, often beside another branch's work).
+if [ "$QUICK" = 0 ]; then tools/box_tidy.sh | grep -E '^(moved|trash|system disk)' || true; fi
 echo "launch: $(echo "$SELECTED" | wc -w | tr -d ' ') stages, state ~/$STATE_REL"
 tools/box.sh run "$LAUNCH_CMD"
 if [ "$WAIT" = 0 ]; then

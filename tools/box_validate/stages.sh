@@ -20,6 +20,12 @@
 # Speed stages (timed: interleaved arms, cost tables, llama-benchy) are opt-in: their numbers count only in the
 # quiet-box session (docs/open-work.md, Now), which names them; a busy nightly run would only record noise.
 # No per-row recap of G0: a row's first stage waits on g0.sha (and G0's other stages gate every run anyway).
+# The quick run (--quick, about an hour; the block at the end of this file): G0 as in the full run but the suite's
+# model-free tests only, then a fixed sample of each model's kernel / decode / prefill / serving stages; every
+# other stage is full only. Same gates and bars, less input.
+
+# The quick run's server prompts: 2 golden, 3 tool-call (r2.auto_rows)
+QUICK_PROMPTS=prose,code,t1_define-linear_l0,t2_explain-linear_l0,t3_rename-linear_l0
 
 # What G0 compares OUTPUT-for-output against the baseline build (timings dropped): the gates
 # the spec 14 and 15b checklists name as "bitwise identical to main's last record".
@@ -85,12 +91,14 @@ st_g0_bitwise() {
 
 stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
 st_g0_suite() {
+  # --quick: the model-free tests only (no `checkpoint` label); g0.bitwise is the quick run's model check
+  local f="--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8$(quick_or '' ' --no-label checkpoint')"
   xb "ctest --test-dir build --show-only=json-v1 > $STATE/tests.baseline.json"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
-  reuse_claim "$STATE/tests.json" "--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8"
-  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_claim "$STATE/tests.json" "$f"
+  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/tests.json $f --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
   reuse_record "$STATE/tests.json"
-  chk "python3 tools/box_validate/junit.py pick $STATE/tests.json --also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --junit \"$STATE/*.junit.xml\"" \
+  chk "python3 tools/box_validate/junit.py pick $STATE/tests.json $f --junit \"$STATE/*.junit.xml\"" \
     "the baseline's suite on the tree under test"
   finish
 }
@@ -102,7 +110,8 @@ rownote 2 "Updating MtpCost's defaults from r2.cost's table is an edit on a bran
 
 stage r2.suite 2 default card qwen,oracle_qwen - "the suite around the changed signature: mtp_gpu, mtp_server, golden_server, prefix_gpu_*, mtp_verify, scheduler, adaptive_k"
 st_r2_suite() {
-  run_tests '^(mtp_gpu_test|mtp_server_test|golden_server_test|prefix_gpu_.*|mtp_verify_test|scheduler_test|adaptive_k_test)$' '' 'kv8'
+  run_tests "$(quick_or '^(mtp_gpu_test|mtp_server_test|golden_server_test|prefix_gpu_.*|mtp_verify_test|scheduler_test|adaptive_k_test)$' \
+    '^(mtp_server_test|golden_server_test|prefix_gpu_l0_test|mtp_verify_test|scheduler_test|adaptive_k_test)$')" '' 'kv8'
   finish
 }
 
@@ -120,9 +129,14 @@ st_r2_cost() {
 stage r2.auto_rows 2 default gpu qwen - "D1-style rows through b70-serve: --spec auto against --spec mtp --spec-max 1 / 3 and off on the golden and A4 prompts, 256 ids, greedy (decode t/s per request from the server's records, R2_ROUNDS = 3 rounds rotated); each request's first difference from --spec off judged by the f32 judge (spec 28 N6, spec_judge.h's rule: serve_judge.py on the int8-head forced references; a difference without its reference SKIPs, never passes) - identity to --spec off a recorded number, not the bar (operator 2026-11-07)"
 st_r2_auto_rows() {
   idle before
-  serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
-    "off|--max-len 16384 --spec off" "k1|--max-len 16384 --spec mtp --spec-max 1" "k3|--max-len 16384 --spec mtp --spec-max 3" \
-    "auto|--max-len 16384 --spec auto"
+  if [ "$BV_QUICK" = 1 ]; then
+    serve_arms "$STATE/$STAGE" 1 "$SNAP_QWEN" "--set golden --set toolcall --only $QUICK_PROMPTS --max-tokens 256" \
+      "off|--max-len 16384 --spec off" "auto|--max-len 16384 --spec auto"
+  else
+    serve_arms "$STATE/$STAGE" "${R2_ROUNDS:-3}" "$SNAP_QWEN" "--set golden --set toolcall --max-tokens 256" \
+      "off|--max-len 16384 --spec off" "k1|--max-len 16384 --spec mtp --spec-max 1" "k3|--max-len 16384 --spec mtp --spec-max 3" \
+      "auto|--max-len 16384 --spec auto"
+  fi
   idle after
   # identity is a number since spec 28b / 28c (the verify rows round differently): recorded, not the bar
   x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref off"
@@ -188,7 +202,7 @@ st_r6_memory() {
 }
 stage r6.mtp_long 6 default card qwen r6.memory "M2 / RF3 / RF4 (C1 with MTP at ~70k) and M3 greedy equality at max_len 32768 and 131072: mtp_verify_{32k,128k}_test, mtp_gpu_{32k,128k}_test (label longctx, B70_LONGCTX_TESTS=1)"
 st_r6_mtp_long() {
-  run_tests '^(mtp_verify|mtp_gpu)_(32k|128k)_test$' longctx '' 'B70_LONGCTX_TESTS=1'
+  run_tests "$(quick_or '^(mtp_verify|mtp_gpu)_(32k|128k)_test$' '^mtp_verify_32k_test$')" longctx '' 'B70_LONGCTX_TESTS=1'
   jgrab m2 'mtp_verify_(32k|128k)' '^M2:|^RF[345]|max_len'
   jgrab m3 'mtp_gpu_(32k|128k)' 'M3:|M3 pooled|mtp_gpu_test .*(PASS|FAIL)|max_len'
   finish
@@ -3725,6 +3739,25 @@ st_r84_probe() {
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
-  run_tests '.' '' 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp'
+  run_tests '.' '' "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
   finish
 }
+
+# ======================================================================================
+# --quick: the stages the quick run runs (lib.sh `quick`, `quick_form`); every other stage is full only - the
+# speed rows, the CPU reference builds, the long-context and many-prompt runs, Bolt / LiLiCorr (parked), and the
+# variants (kv8, i8head, eager, two-card twins) the sample below stands for. Each stage's `after` must be here too.
+quick pre g0.build g0.sha g0.bitwise
+quick_form g0.suite "the baseline's model-free tests only (no checkpoint label)"
+quick_form r2.suite "mtp_server, golden_server, prefix_gpu_l0, mtp_verify, scheduler, adaptive_k (no mtp_gpu_test, the other prefix_gpu twins)"
+quick_form r2.auto_rows "one round, --spec off and auto, 2 golden + 3 tool-call prompts (QUICK_PROMPTS)"
+quick r6.memory
+quick_form r6.mtp_long "32k only: mtp_verify_32k_test"
+quick r7.serve r9.auto r69.kernels r76.tests
+quick r10.nockpt r10.load r10.gates r13.kernels r13.prefill
+quick r14.k1 r15.k1
+quick r24.k1 r24.load r24.k3 r24.golden r26.host r26.k1
+quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
+quick r54.kernels r54.load r55.kernels
+quick r22.devices r22.p1 r79.host r79.k1 r79.decode
+quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr or tp label)"
