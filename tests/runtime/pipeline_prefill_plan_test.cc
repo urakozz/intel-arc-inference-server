@@ -260,7 +260,11 @@ void check_plan() {
         for (uint32_t i = 0; i < 2; ++i) {
           CHECK_EQ(pf.dev[i].model, dec.dev[i].model);
           CHECK_EQ(pf.dev[i].kv, dec.dev[i].kv);
-          CHECK_EQ(pf.dev[i].prefill_scratch, one.prefill_scratch);
+          // A MoE model's router / a||b slabs on l0 are per layer: a device keeps its own layers' only.
+          const size_t others = b == PrefillBackend::L0
+                                    ? runtime::route_slab_bytes(*d, i == 0 ? s : 0, i == 0 ? d->layers : s)
+                                    : 0;
+          CHECK_EQ(pf.dev[i].prefill_scratch, one.prefill_scratch - others);
           CHECK_EQ(pf.dev[i].decode_state, dec.dev[i].decode_state + runtime::pp_prefill_link_bytes(*d, i, runtime::PrefillScratchDims::kCDefault));
           CHECK_EQ(pf.dev[i].prefill_link, runtime::pp_prefill_link_bytes(*d, i, runtime::PrefillScratchDims::kCDefault));
           CHECK_EQ(dec.dev[i].prefill_scratch + dec.dev[i].int8 + dec.dev[i].prefill_link, size_t{0});
