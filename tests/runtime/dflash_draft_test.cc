@@ -76,6 +76,7 @@ dfref::Lin host_lin(const loader::DFlashHostLinear& h) {
   dfref::Lin l;
   l.K = h.K;
   l.N = h.N;
+  l.slices = h.slices;
   l.ksplit = kernels::gemv_bf16_tiling(h.N).ksplit;
   l.bf16 = h.bf16;
   l.i8 = h.i8;
@@ -402,7 +403,7 @@ int main(int argc, char** argv) {
     t.head = &head_d;
     t.vocab_rows = V;
     t.vocab_used = USED;
-    runtime::dflash::DFlashBuffers b(e.ctx, d, w.target_hidden, V, 8192);
+    runtime::dflash::DFlashBuffers b(e.ctx, d, w.target_hidden, V, 8192, w.format);
     l0::Mem control(e.ctx, l0::MemKind::Shared, sizeof(runtime::Control));
     std::memset(control.ptr(), 0, sizeof(runtime::Control));
     runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control);
@@ -575,7 +576,7 @@ int main(int argc, char** argv) {
       runtime::dflash::DFlashTarget tc = t;
       tc.head = &ch;
       tc.ids = &ids_d;
-      runtime::dflash::DFlashBuffers bc(e.ctx, d, w.target_hidden, NV, 8192);
+      runtime::dflash::DFlashBuffers bc(e.ctx, d, w.target_hidden, NV, 8192, w.format);
       e.imm.copy(bc.ring_k.ptr(), b.ring_k.ptr(), b.ring_k.size());
       e.imm.copy(bc.ring_v.ptr(), b.ring_v.ptr(), b.ring_v.size());
       runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control);

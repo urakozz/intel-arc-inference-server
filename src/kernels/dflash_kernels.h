@@ -30,9 +30,10 @@ struct Shape {
 inline constexpr Shape kQwen38{};
 
 inline std::string s_(unsigned v) { return std::to_string(v); }
-inline std::string prep_variant(const Shape& s = kQwen38) {
+inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
   return "df_prep_M" + s_(kM) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
-         s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab);
+         s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
+         (split ? "_F8Q4R4U8C16H16K8" : "");
 }
 inline std::string attn_variant(const Shape& s = kQwen38) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
@@ -42,8 +43,9 @@ inline std::string attn_variant(const Shape& s = kQwen38) {
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
-inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
-  return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab)
+inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
+  return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
+                   (split ? "_H16" : "")
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 
@@ -51,7 +53,7 @@ inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
 // since spec 28d - gemv_i8w under `k` Gemv, the test / probe override runtime::CaptureOptions::force_linear; else
 // gemv_bf16 at the tiling kernels::gemv_bf16_tiling gives N). The target's int8 head at the 7 draft rows: the same.
 inline std::string linear_variant(unsigned fmt, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
-  if (fmt == 2) return int4_linear_variant(k, M, K, N, 1, 1);
+  if (fmt == 2) return int4_linear_variant(k, M, K, N, int4_slices(K, N), 1);
   return fmt == 1 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
 }
 // Spec 23f (kept for spec 26b's LiLiCorr drafter): the three formats (`fmt` 0 bf16, 1 int8, 2 int4 g64: gemv.cl
@@ -72,7 +74,7 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k, LinearKind head) {
   const Shape& s = kQwen38;
-  std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(), select_variant(v2, s, fmt == 2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up

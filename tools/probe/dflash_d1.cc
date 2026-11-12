@@ -297,7 +297,7 @@ int main(int argc, char** argv) {
   const loader::LoadedModel m = loader::load(ctx, snap, max_len, dv != 0, head, dvs);
   const loader::DFlashWeights w = loader::load_drafter(ctx, drafter, m, fmt);
   const runtime::dflash::DFlashTarget t = runtime::dflash::dflash_target(m, dv != 0);
-  runtime::dflash::DFlashBuffers b(ctx, w.desc, w.target_hidden, t.head_rows(), max_len);
+  runtime::dflash::DFlashBuffers b(ctx, w.desc, w.target_hidden, t.head_rows(), max_len, w.format);
   l0::Mem control(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   std::memset(control.ptr(), 0, sizeof(runtime::Control));
   runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(ctx, w, t, b, control);

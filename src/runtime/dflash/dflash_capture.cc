@@ -69,7 +69,8 @@ class Walk {
 
     layer_ = -1;
     {   // df_embed(ctrl, embed, mask_row, in_scale, resid), grid (1, M)
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_embed", kd::kWg);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_embed", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, t.embed->ptr());
       k.arg_ptr(2, w_.mask_row->ptr());
@@ -94,7 +95,8 @@ class Walk {
       }
       gemv(L.qkv, qkv_in, b_.gout.ptr());
       {   // df_qkv_prep(ctrl, qkv, qn_kn, rope, q, kb, vb), grid (NH + 2 NKV, M), WG HD
-        l0::Kernel& k = kernel(kd::prep_variant(), "df_qkv_prep", d_.head_dim);
+        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_qkv_prep", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.gout.ptr());
         k.arg_ptr(2, at(w_.qk_norm->ptr(), loader::dflash_qk_norm_off(d_, l, 0) * 4));
@@ -139,7 +141,8 @@ class Walk {
       }
       gemv(L.gate_up, mlp_in, b_.gout.ptr());
       {   // df_silu_mul(gu, a), grid (ceil(I / 256), M)
-        l0::Kernel& k = kernel(kd::prep_variant(), "df_silu_mul", kd::kWg);
+        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_silu_mul", kd::kWg);
         k.arg_ptr(0, b_.gout.ptr());
         k.arg_ptr(1, b_.xa.ptr());
         launch(k, (d_.inter + kd::kWg - 1) / kd::kWg, M);
@@ -182,7 +185,7 @@ class Walk {
     }
     if (d_.v2()) gemv(*w_.sel_proj, b_.x.ptr(), b_.hid->ptr());
     {   // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256
-      l0::Kernel& k = kernel(kd::select_variant(d_.v2()), "df_select", kd::kWg);
+      l0::Kernel& k = kernel(kd::select_variant(d_.v2(), kd::kQwen38, w_.format == loader::DraftFormat::Int4G64), "df_select", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.dctl.ptr());
       k.arg_ptr(2, b_.cand.ptr());
@@ -200,7 +203,7 @@ class Walk {
   CapturedStep project() {
     check_common();
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
-    for (const std::string& v : {kd::prep_variant(),
+    for (const std::string& v : {kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
                                  kd::linear_variant(fmt, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
                                  kd::linear_variant(fmt, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
       require(std::ifstream(kernels::path(v)).good(),
@@ -208,7 +211,8 @@ class Walk {
     layer_ = -1;
     gemv(*w_.fc, b_.taps.ptr(), b_.gout.ptr());
     {   // df_norm(src, w, h, x) with hidden_norm
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_norm", kd::kWg);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             w_.format == loader::DraftFormat::Int4G64 ? "df_norm_fc" : "df_norm", kd::kWg);
       k.arg_ptr(0, b_.gout.ptr());
       k.arg_ptr(1, w_.hidden_norm->ptr());
       k.arg_ptr(2, b_.h.ptr());
@@ -220,7 +224,8 @@ class Walk {
       layer_ = int(l);
       const loader::DeviceWeight& qkv = w_.layers[l].qkv;
       const size_t K = d_.hidden, rows = d_.q_n(), n = 2 * d_.kv_n();
-      void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * kd::kM * n * 4));
+      const unsigned S = w_.format == loader::DraftFormat::Int4G64 ? kd::int4_slices(uint32_t(K), uint32_t(n)) : 1;
+      void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * S * kd::kM * n * 4));
       if (qkv.kind == model::WeightKind::Int4) {
         i4_linear(uint32_t(K), uint32_t(n),
                   at(qkv.mem.ptr(), loader::dflash_linear_bytes(uint32_t(K), uint32_t(rows), w_.format)), b_.x.ptr(), out);
@@ -240,7 +245,8 @@ class Walk {
     }
     layer_ = -1;
     {   // df_ctx_store(dctl, kv, qk_norm, rope, ring_k, ring_v), grid (L x 2 NKV, M), WG HD
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_ctx_store", d_.head_dim);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_ctx_store", d_.head_dim);
       k.arg_ptr(0, b_.dctl.ptr());
       k.arg_ptr(1, b_.kv.ptr());
       k.arg_ptr(2, w_.qk_norm->ptr());
@@ -278,7 +284,8 @@ class Walk {
   }
 
   void norm(const void* src, const float* w) {   // df_norm(src, w, h, x), grid (1, M)
-    l0::Kernel& k = kernel(kd::prep_variant(), "df_norm", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_norm", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, w);
     k.arg_ptr(2, b_.h.ptr());
@@ -287,7 +294,8 @@ class Walk {
   }
   // df_conv_prep(src, co, base, out) (prepare: out bf16) - only the prepare side goes through here.
   void conv(bool prep, const void* src, const void* base, const void* out) {
-    l0::Kernel& k = kernel(kd::prep_variant(), prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                           prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.co->ptr());
     k.arg_ptr(2, base);
@@ -300,7 +308,8 @@ class Walk {
       conv(false, src, base, b_.resid.ptr());
       return;
     }
-    l0::Kernel& k = kernel(kd::prep_variant(), "df_add", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.resid.ptr());
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
@@ -332,14 +341,15 @@ class Walk {
     else
       launch(k, N / kernels::kGemvI8wCols);
   }
-  // Int4 g64 layout 1, one output slice, at the block's M rows; scales travel inside the weight tiles.
+  // Int4 g64 layout 1, grid split-K, at the block's M rows; scales travel inside the weight tiles.
   void i4_linear(uint32_t K, uint32_t N, const void* w, const void* x, const void* out) {
+    const unsigned S = kd::int4_slices(K, N);
     const kernels::SmallMTuning* t =
-        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 1) : nullptr;
+        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, 1) : nullptr;
     require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm row for the int4 linear " + std::to_string(K) +
                                                        " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kd::kM, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
-                      : kernel(kernels::gemv_variant(kd::kM, K, N, 1, 1), "gemv", 64);
+                      : kernel(kernels::gemv_variant(kd::kM, K, N, S, 1), "gemv", 64);
     k.arg_ptr(0, w);
     k.arg_ptr(1, w);
     k.arg_ptr(2, x);
@@ -347,7 +357,7 @@ class Walk {
     if (t)
       launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
     else
-      launch(k, N / 64);
+      launch(k, N / 64, S);
   }
   // A drafter linear at the block's M rows: a quantised linear above or gemv_bf16(w, x, out).
   void gemv(const loader::DeviceWeight& w, const void* x, const void* out) {

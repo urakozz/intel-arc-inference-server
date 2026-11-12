@@ -10,6 +10,14 @@ inline constexpr unsigned kWg = 256;       // df_prep's, df_topk's, df_select's 
 inline constexpr unsigned kAttnPb = 128, kAttnWg = 128;   // df_attn_part: ring offsets per block, its work-group
 inline constexpr unsigned kTopkChunk = 4096;              // df_topk_stage1's logits per work-group
 
+// Grid split-K for the int4 layout-1 block linears. Consumers fold these slices inside their existing launch.
+inline constexpr unsigned int4_slices(unsigned K, unsigned N) {
+  if ((K == 5120 && N == 6144) || (K == 4096 && N == 5120) || (K == 17408 && N == 5120)) return 4;
+  if ((K == 5120 && (N == 34816 || N == 2048)) || (K == 25600 && N == 5120)) return 8;
+  if (K == 5120 && (N == 1280 || N == 256)) return 16;
+  return 1;
+}
+
 // The DFlash control block's word indices (runtime/dflash/dflash_control.h holds the struct to them).
 inline constexpr unsigned kDctlK = 0, kDctlProjPos = 1, kDctlProjN = 2, kDctlTemp = 3, kDctlSeedLo = 4,
                           kDctlSeedHi = 5;

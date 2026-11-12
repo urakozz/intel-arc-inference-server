@@ -23,13 +23,13 @@
 //   taps         bf16 [M][taps x target hidden]: the projection's input rows (19c's verify list writes them)
 //   resid, h     fp32 [M][hidden]; x bf16 [M][hidden] (every norm's output and its GEMV copy)
 //   xa           bf16 [M][max(hidden, q_n, inter)]: the conv's / attention's / SiLU's GEMV input
-//   gout         fp32 [M][max(qkv_n, hidden, 2 inter)]: the block's GEMV outputs
-//   co           fp32 [M][kproj_n] (DFlash 2): a conv's kernel projection (one live at a time)
+//   gout         fp32 [S][M][N]: the largest block linear output (int4 grid split-K, otherwise S=1)
+//   co           fp32 [S][M][kproj_n] (DFlash 2): a conv's kernel projection (one live at a time)
 //   q            fp32 [M][q_n]; kb, vb fp32 [M][kv_n] (the block's own K / V - never the ring's)
 //   part         fp32 [q heads][ring / 128][M][head_dim + 2]: df_attn_part's blocks
-//   kv           fp32 [layers][M][2 kv_n]: the projection's k || v rows
+//   kv           fp32 [layers][S][M][2 kv_n]: the projection's k || v rows
 //   logits       fp32 [R][head_rows]; tpart fp32 [R][ceil(head_rows / 4096)][16][2]; cand u32 / unary fp32 [R][16]
-//   hid          fp32 [M][selector rank] (DFlash 2)
+//   hid          fp32 [S][M][selector rank] (DFlash 2)
 namespace runtime::dflash {
 
 struct DFlashSizes {
@@ -48,7 +48,8 @@ std::vector<float> rope_table(double theta, uint32_t head_dim, uint32_t rows);
 
 // Every slot count of the ring for layer l: the window, or max_len for a full-attention layer.
 uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len);
-DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len);
+DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
+                  loader::DraftFormat format = loader::DraftFormat::Int8);
 
 // The planner's term (runtime/memory_plan.h DrafterPlan): the weights (loader::dflash_weight_bytes) plus the buffers,
 // split into what max_len does not move and what it adds per position (the RoPE rows; a full layer's ring rows).
