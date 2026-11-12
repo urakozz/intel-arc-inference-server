@@ -5,7 +5,7 @@
 
 Takes the whole-box GPU lock, or only --card N, and forces --parallel 1. The lock helper sets device affinity.
 For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use bf16 KV,
-int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
+the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
 'adaptive per step'. Writes serve_client-compatible requests.jsonl per arm/round, table.txt and the f32 judge's
 judge.log/forced contexts. Missing f32 references return 77, never a pass. Final G-speed also needs Task 8's
 other corpora and prefill checks. Existing output is refused so stale request records cannot enter the result.
@@ -79,13 +79,11 @@ def run(a):
             logs = d / 'server-log'
             logs.mkdir(parents=True)
             spec = ['--spec', arm]
-            if arm == 'mtp':
-                spec += ['--mtp', 'auto']
-            elif arm == 'dflash':
+            if arm == 'dflash':
                 spec += ['--draft-model', a.drafter]
             command = [str(binary), a.model,
                        '--parallel', '1', '--max-num-seqs', '1', '--max-len', '131072', '--kv-cache', 'bf16',
-                       '--lm-head', 'int8', '--prefix-cache-gb', '32', '--port', str(a.port),
+                       '--prefix-cache-gb', '32', '--port', str(a.port),
                        '--log-requests', str(logs), *spec]
             print(f'REPLAY_SPEC {arm} round {round_}, cache on', flush=True)
             with (d/'server.log').open('w') as log:
