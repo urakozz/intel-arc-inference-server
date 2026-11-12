@@ -34,6 +34,13 @@ PREFILL, per linear layer, per chunk, on the fly:
   property of the weights. They are computed once, when the model loads.
 - **`--prefill-backend l0-int8`** is opt-in; `l0` (the bf16 prefill) is the default for
   every model since 2026-10-27 (operator ruling). The recipe is called "h8" (Hadamard rotation, int8 math) below.
+- **Which linears (since 2026-11-13, open-work item 17).** On the dense model Qwen3.8 only the MLP runs h8: gate‖up
+  and down, the two linears with K = 17,408 where most of the gain is. The four mixer linears (the delta-net input
+  and output projections, attention's q‖k‖v and o_proj) run bf16, exactly as on `l0`. Why: on a 2,820-token prompt
+  the int8 mixer linears made one row pick a token the f32 reference puts 7.9 logits below its own top (not a
+  near-tie); with them in bf16 the long gate passes 32/32 and the logits sit as close to f32 as `l0`'s. The price is
+  about a quarter of the gain (see the Status section). Mixture-of-experts models (Ornith) keep the earlier form,
+  every dense linear h8 and the experts W4A8, until open-work item 16 is decided.
 
 **Result:** pp4096 **2104.50 t/s**, against 1643.52 for the bf16 prefill in the
 same session, paired **1.28x**. Decode is unchanged at 29.40 t/s. Accuracy on
