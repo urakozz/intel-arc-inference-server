@@ -152,11 +152,13 @@ The qkv||z GEMM writing bf16 instead of fp32 (rounded in its epilogue by the sam
 (the conv and `pf_gated_head`'s z) rounds the fp32 value once with rne and nothing else reads it - checked in Step 1
 by reading both kernels; then it is bitwise too and halves the front's read.
 
-- [ ] **Step 1 (Mac):** the kernel, the binding, the test; the qkv||z bf16 check written down in the commit message
+- [x] **Step 1 (Mac):** the kernel, the binding, the test; the qkv||z bf16 check written down in the commit message
   (and done, or not, by its result). `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `gdn_conv_test`, `gdn_chunk_test`, the extended G0 compare (Ornith l0 and l0-int8
+- [x] **Step 2 (box, card 0):** `gdn_conv_test`, `gdn_chunk_test`, the extended G0 compare (Ornith l0 and l0-int8
   bitwise main's), `B70_PREFILL_PROFILE=1` 4k l0.
   - **Gates:** bitwise; the GDN front rows <= 12 ms at 4k l0 (today ~26); Qwen3.8's G0 untouched.
+  - **Result (2026-11-12):** bitwise (kernel test and end to end); front 24.8 -> 20.5 ms (the 12 ms bar missed: the
+    fp32 qkv||z read is the floor; the bf16 qkv||z was not taken - pf_gemm.cl records it as a wash). Landed.
 
 ### Task 3: the GDN intra-chunk kernel (Mac, then box) - JUDGED
 
@@ -177,6 +179,9 @@ test.cc`'s band printed for the new arm.
   - **Gates (judged):** the f32 judge as in Global constraints, on every Ornith prefill gate; `prefill_split_ornith`'s
     near-miss rule; replay bitwise; GDN intra rows <= 28 ms at 4k l0 (today 80.6).
   - FAIL on numerics with Q1-Q4 as bf16: D2.
+  - **Result (2026-11-12): STOPPED.** bf16 Q1-Q4 (23.6 ms for 80.6): l0 gates PASS, prefill_gate_ornith_l0-int8 one
+    determined row missed. D2 (Q1-Q4 fp32, u / w hi / lo, pf_gdn_scan_hl; 37.4 + 31.1 ms): per-layer far closer to
+    fp64, yet l0 cjk and three l0-int8 rows missed. Not bound; `B70_PF_GDN_INTRA=hl` for experiments. Operator call.
 
 ### Task 4: the scan and the gated head (box, then Mac) - per arm
 
@@ -209,9 +214,12 @@ launches them apart); CMake at hidden 2048 / 2560; `tests/prefill/pf_prep_test.c
 Before the code: Task 1's trace names what fills l0-int8's 114 ms. If it is a launch timed in the wrong bucket, the
 fix is its `profile_wait` and the real cost goes to its own row; the fold then targets whatever that launch is.
 
-- [ ] **Step 1 (Mac):** the kernel, the binding, the test. `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `pf_prep_test`, `pf_int8_test`, the extended G0 compare.
+- [x] **Step 1 (Mac):** the kernel, the binding, the test. `mac_check` green. Commit.
+- [x] **Step 2 (box, card 0):** `pf_prep_test`, `pf_int8_test`, the extended G0 compare.
   - **Gates:** bitwise; the norm row (with the folded quantisers) <= 12 ms at 4k l0 and <= 15 ms at 4k l0-int8.
+  - **Result (2026-11-12):** bitwise; norm 41.5 -> 15.8 ms at 4k l0 (12 missed by 3.8; l0-int8's 114 was the setup
+    pass mis-bucketed, its real row is the same 41 -> 16). The int8 quantiser fold (I8_OUT) was not built: 5.5 ms at
+    stake. Landed.
 
 ### Task 6: the route in one pass (Mac, then box) - BITWISE first; JUDGED only by D3
 
