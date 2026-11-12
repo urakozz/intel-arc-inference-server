@@ -34,20 +34,27 @@ MtpCost MtpCost::tp_int8_head() {
   return c;
 }
 
-MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
+MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
   // docs/BENCHMARKS.md, DFlash v2 baseline: paired medians at depth 4096, 2026-11-11, busy box.
   // The unmeasured bf16-head verify ratios are taken equal (derived).
   c.verify = {1.000578, 1.047126, 1.091869, 1.121579, 1.168254, 1.205641, 1.229004, 1.245386};
-  const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +
-                   (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
+  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
+                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
+  double d = body + (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
+  if (candidate_head) {
+    d = drafter_format == 2 ? kDFlashDraftCandidateInt4 : kDFlashDraftCandidateInt8;
+    if (drafter_format == 0) d += kDFlashDrafterBf16 - kDFlashDrafterInt8;
+  }
   c.draft.assign(7, d);
   return c;
 }
 
-double MtpCost::dflash_head_share(bool i8_head, bool int8_drafter) {
+double MtpCost::dflash_head_share(bool i8_head, unsigned drafter_format) {
   const double h = i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16;
-  return h / (h + (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16));
+  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
+                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
+  return h / (h + body);
 }
 
 MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {

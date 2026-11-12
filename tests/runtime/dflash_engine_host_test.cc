@@ -105,6 +105,13 @@ void head_policy_case() {
     CHECK(!cli::dflash::candidate_head(false, n));
   }
   CHECK(cli::dflash::Args{}.format == loader::DraftFormat::Int8);
+  const auto full = server::MtpCost::dflash(true, true);
+  CHECK(cli::dflash::cost({}, loader::LmHeadForm::Int8, 0).draft[0] < full.draft[0]);
+  cli::dflash::Args int4;
+  int4.format = loader::DraftFormat::Int4G64;
+  CHECK(cli::dflash::cost(int4, loader::LmHeadForm::Int8, 32768).draft[0] <
+        cli::dflash::cost({}, loader::LmHeadForm::Int8, 32768).draft[0]);
+
 }
 
 void cost_case() {

@@ -103,6 +103,9 @@ void test_dflash_measured_cost() {
   for (size_t i = 0; i < 8; ++i) CHECK_NEAR(c.verify[i], verify[i], 1e-12);
   for (double d : c.draft) CHECK_NEAR(d, 0.309880, 1e-12);
   CHECK_NEAR(c.draft[0] * MtpCost::dflash_head_share(true, true), 2.165104 / 28.972533, 1e-12);
+  const auto int4 = MtpCost::dflash(true, 2u);
+  CHECK(int4.draft[0] < c.draft[0]);
+  CHECK(int4.draft[0] != MtpCost::dflash(true, 0u).draft[0]);
   AdaptiveKOptions o;
   o.cost = c;
   o.max_k = 7;
