@@ -70,7 +70,7 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
-                                               LinearKind k = LinearKind::SmallM) {
+                                               LinearKind k, LinearKind head) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
@@ -85,9 +85,13 @@ inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_
     v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  v.push_back(linear_variant(int8_head, kR, s.H, N, k));
+  v.push_back(linear_variant(int8_head, kR, s.H, N, head));
   v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
   return v;
+}
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
+                                               LinearKind k = LinearKind::SmallM) {
+  return draft_variants(v2, fmt, int8_head, dv, k, k);
 }
 
 // ==== Spec 26b: the LiLiCorr drafter (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr beside Bolt) ====

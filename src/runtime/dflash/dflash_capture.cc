@@ -61,7 +61,7 @@ class Walk {
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind()))
+                                                   compact ? N : 0, lkind(), hkind()))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -307,13 +307,19 @@ class Walk {
   }
   // The int8 linears' kernel (runtime/gemv_kind.h): the lists are M >= 2, so SmallM unless a test forces gemv.
   kernels::LinearKind lkind() const { return linear_kind(kd::kM, opt_); }
+  kernels::LinearKind hkind() const {
+    CaptureOptions head = opt_;
+    if (head.force_dflash_head != LinearForce::Auto) head.force_linear = head.force_dflash_head;
+    return linear_kind(kd::kR, head);
+  }
   // An int8 linear at M rows (spec 28d): gemm_sm_i8w(w, scales, x, out) at the shape's kSmallMTuning row - the
   // in-work-group split-K, grid N / 32, WG 256 - or, forced, gemv_i8w(w, scales, x, out), grid N / 64, WG 64. The same
   // arguments, the same [M][N] fp32 output, scaled.
   void i8_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* scales, const void* x, const void* out) {
+    const auto kind = M == kd::kR ? hkind() : lkind();
     const kernels::SmallMTuning* t =
-        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
-    require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 linear " + std::to_string(K) +
+        kind == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
+    require(kind == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 linear " + std::to_string(K) +
                                                            " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
                       : kernel(kernels::gemv_i8w_variant(M, K, N), "gemv_i8w", kernels::kGemvI8wCols);
