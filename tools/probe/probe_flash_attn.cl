@@ -18,6 +18,13 @@
 // with `exp`, never `native_exp`; P = exp(s - m) rounded to bf16 as the PV operand;
 // O / l at the end.
 //
+// Phase 3 Task 1 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase3.md): FA_Q_HEADS / FA_KV_HEADS (Ornith
+// 16 / 2, GQA 8, HPW 8) and EXP2 as src/kernels/prefill/pf_flash_attn.cl has them - at KT 64 RPW 8 QREG 0 EXP2 1
+// this is today's kernel text, so an arm that differs from it only in RPW / QREG can be compared bitwise. Unset
+// (every spec-6 arm): Qwen3.8's 24 / 4, `exp`. NOTE: RPW is the query rows a WORK-GROUP covers a head; a sub-group
+// still owns 8 rows (16 rows x 256 dims of fp32 O alone is 256 GRF), so RPW 16 / 32 change the work-group shape
+// (more sub-groups sharing each K / V tile through the caches) and, with QREG 1, whether Q is reloaded per tile.
+//
 // PROBE-ONLY: no runtime path binds `pfa`.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -31,12 +38,34 @@
 #if RPW % 8
 #error "RPW must be a multiple of 8"
 #endif
+#ifndef FA_Q_HEADS
+#define FA_QH 24
+#define FA_KVH 4
+#define FA_GQA 6u
+#else
+#define FA_QH FA_Q_HEADS
+#define FA_KVH FA_KV_HEADS
+#define FA_GQA ((uint)(FA_Q_HEADS / FA_KV_HEADS))
+#if FA_Q_HEADS % FA_KV_HEADS != 0 || (FA_Q_HEADS / FA_KV_HEADS) % HPW != 0
+#error "q-heads must be a multiple of kv-heads, and the GQA group of HPW"
+#endif
+#endif
 #define SG 16
 #define HD 256
 #define NDA (HD / 16)                 /* 16 dim-atoms of O */
 #define NKA (KT / 16)                 /* key atoms of S per tile */
 #define SGS (HPW * RPW / 8)           /* sub-groups per work-group */
 #define ATTN_SCALE (1.0f / 16.0f)
+#ifndef EXP2
+#define EXP2 0
+#endif
+#if EXP2
+#define SCORE_SCALE (ATTN_SCALE * M_LOG2E_F)
+#define EXPF(x) exp2(x)
+#else
+#define SCORE_SCALE ATTN_SCALE
+#define EXPF(x) exp(x)
+#endif
 
 inline ushort rne_bf16(float f) {
   uint u = as_uint(f);
@@ -50,13 +79,13 @@ __kernel void pfa(__global const ushort* restrict Q, __global const ushort* rest
                   uint pos, uint C, uint rows) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);                                  // kv head
-  const uint h = j * 6u + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
+  const uint h = j * FA_GQA + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
   const uint r0 = get_group_id(0) * RPW + 8u * (s % (RPW / 8u));   // first of 8 rows
   if (r0 >= C) return;                                             // no barriers below
   const uint depth = pos + C;
-  const int q_w = 24 * HD * 2, q_h = (int)C, q_p = 24 * HD * 2;
-  const int kt_w = 4 * HD * 2, kt_h = (int)depth, kt_p = 4 * HD * 2;   // K as dwords: 512 wide
-  const int v_w = 4 * HD * 2, v_h = (int)depth, v_p = 4 * HD * 2;
+  const int q_w = FA_QH * HD * 2, q_h = (int)C, q_p = FA_QH * HD * 2;
+  const int kt_w = FA_KVH * HD * 2, kt_h = (int)depth, kt_p = FA_KVH * HD * 2;   // K as dwords: 512 wide
+  const int v_w = FA_KVH * HD * 2, v_h = (int)depth, v_p = FA_KVH * HD * 2;
 
   short8 qa[NDA];                      // Q, 8 rows x 256 dims, as 16 A operands
   // t[c*8 + r] = Q[r0 + r][h*256 + 16 (kk + c) + lane], the 8-row form of pf_gemm's A read.
@@ -98,7 +127,7 @@ __kernel void pfa(__global const ushort* restrict Q, __global const ushort* rest
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) {
       const uint key = t0 + 16u * b + l;
-#define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && key < depth) ? sacc[b].s##r * ATTN_SCALE : -INFINITY;
+#define MASK(r) sacc[b].s##r = (key <= pos + r0 + r && key < depth) ? sacc[b].s##r * SCORE_SCALE : -INFINITY;
       MASK(0) MASK(1) MASK(2) MASK(3) MASK(4) MASK(5) MASK(6) MASK(7)
 #undef MASK
       tmax = fmax(tmax, sacc[b]);
@@ -107,12 +136,12 @@ __kernel void pfa(__global const ushort* restrict Q, __global const ushort* rest
 #define RED(r) mnew.s##r = fmax(m.s##r, sub_group_reduce_max(tmax.s##r));
     RED(0) RED(1) RED(2) RED(3) RED(4) RED(5) RED(6) RED(7)
 #undef RED
-    const float8 corr = exp(m - mnew);          // m = -INF on the first tile: exp(-INF) = 0
+    const float8 corr = EXPF(m - mnew);          // m = -INF on the first tile: exp(-INF) = 0
     float8 psum = (float8)(0.0f);
     short8 pa[NKA];
 #pragma unroll
     for (uint b = 0; b < NKA; ++b) {
-      const float8 p = exp(sacc[b] - mnew);     // masked: exp(-INF) = 0
+      const float8 p = EXPF(sacc[b] - mnew);     // masked: exp(-INF) = 0
       psum += p;
 #define CV(r) pa[b].s##r = as_short(rne_bf16(p.s##r));
       CV(0) CV(1) CV(2) CV(3) CV(4) CV(5) CV(6) CV(7)
