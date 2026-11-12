@@ -50,8 +50,9 @@ inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
 // The drafter's linears at the block's M rows, in their form (`int8`: gemm_sm_i8w at kSmallMTuning's row of the shape
 // since spec 28d - gemv_i8w under `k` Gemv, the test / probe override runtime::CaptureOptions::force_linear; else
 // gemv_bf16 at the tiling kernels::gemv_bf16_tiling gives N). The target's int8 head at the 7 draft rows: the same.
-inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
-  return int8 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
+inline std::string linear_variant(unsigned fmt, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
+  if (fmt == 2) return int4_linear_variant(k, M, K, N, 1, 1);
+  return fmt == 1 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
 }
 // Spec 23f (kept for spec 26b's LiLiCorr drafter): the three formats (`fmt` 0 bf16, 1 int8, 2 int4 g64: gemv.cl
 // layout 1 at S 1, the [M][N] rows the df_* kernels read).
@@ -68,7 +69,7 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Every binary the draft list and the projection list bind for Qwen3.8's drafter: `v2` (DFlash 2 or v1), `int8`
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
-inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv,
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k = LinearKind::SmallM) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
@@ -78,10 +79,10 @@ inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_hea
                       {s.I, s.H},                                                            // down
                       {5 * s.H, s.H},                                                        // fc (5 taps)
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
-    v.push_back(linear_variant(int8, kM, K, N, k));
+    v.push_back(linear_variant(fmt, kM, K, N, k));
   if (v2) {
-    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
-    v.push_back(linear_variant(int8, kM, s.H, s.rank, k));                          // the selector's projection
+    v.push_back(linear_variant(fmt, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
+    v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
   v.push_back(linear_variant(int8_head, kR, s.H, N, k));

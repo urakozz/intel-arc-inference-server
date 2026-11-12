@@ -59,8 +59,8 @@ class Walk {
     require(b_.head_rows == N, "the buffers were sized for a head of " + std::to_string(b_.head_rows) + " rows, not " +
                                    std::to_string(N));
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
-    const bool int8 = w_.format == loader::DraftFormat::Int8;
-    for (const std::string& v : kd::draft_variants(d_.v2(), int8, t.head->kind == model::WeightKind::Int8,
+    const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
+    for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
                                                    compact ? N : 0, lkind()))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
@@ -199,10 +199,10 @@ class Walk {
 
   CapturedStep project() {
     check_common();
-    const bool int8 = w_.format == loader::DraftFormat::Int8;
+    const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : {kd::prep_variant(),
-                                 kd::linear_variant(int8, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
-                                 kd::linear_variant(int8, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
+                                 kd::linear_variant(fmt, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
+                                 kd::linear_variant(fmt, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     layer_ = -1;
@@ -221,7 +221,10 @@ class Walk {
       const loader::DeviceWeight& qkv = w_.layers[l].qkv;
       const size_t K = d_.hidden, rows = d_.q_n(), n = 2 * d_.kv_n();
       void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * kd::kM * n * 4));
-      if (qkv.kind == model::WeightKind::Int8) {
+      if (qkv.kind == model::WeightKind::Int4) {
+        i4_linear(uint32_t(K), uint32_t(n),
+                  at(qkv.mem.ptr(), loader::dflash_linear_bytes(uint32_t(K), uint32_t(rows), w_.format)), b_.x.ptr(), out);
+      } else if (qkv.kind == model::WeightKind::Int8) {
         // the int8 tiles are [N/16][K/16][16][16]: row q_n (a multiple of 16) starts tile q_n / 16
         i8_linear(kd::kM, uint32_t(K), uint32_t(n), at(qkv.mem.ptr(), rows * K), at(qkv.scales->ptr(), rows * 4),
                   b_.x.ptr(), out);
@@ -323,13 +326,32 @@ class Walk {
     else
       launch(k, N / kernels::kGemvI8wCols);
   }
-  // A drafter linear at the block's M rows: the int8 linear above or gemv_bf16(w, x, out).
+  // Int4 g64 layout 1, one output slice, at the block's M rows; scales travel inside the weight tiles.
+  void i4_linear(uint32_t K, uint32_t N, const void* w, const void* x, const void* out) {
+    const kernels::SmallMTuning* t =
+        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 1) : nullptr;
+    require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm row for the int4 linear " + std::to_string(K) +
+                                                       " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(kd::kM, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_variant(kd::kM, K, N, 1, 1), "gemv", 64);
+    k.arg_ptr(0, w);
+    k.arg_ptr(1, w);
+    k.arg_ptr(2, x);
+    k.arg_ptr(3, out);
+    if (t)
+      launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, N / 64);
+  }
+  // A drafter linear at the block's M rows: a quantised linear above or gemv_bf16(w, x, out).
   void gemv(const loader::DeviceWeight& w, const void* x, const void* out) {
     const model::GemvShape& s = w.shape;
-    if (w.kind == model::WeightKind::Int8) {
+    if (w.kind == model::WeightKind::Int4) {
+      i4_linear(s.K, s.N, w.mem.ptr(), x, out);
+    } else if (w.kind == model::WeightKind::Int8) {
       i8_linear(kd::kM, s.K, s.N, w.mem.ptr(), w.scales->ptr(), x, out);
     } else {
-      require(w.kind == model::WeightKind::Bf16, "a drafter linear is neither int8 nor bf16");
+      require(w.kind == model::WeightKind::Bf16, "a drafter linear is not int4, int8 or bf16");
       const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(s.N);
       l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kM, s.K, s.N, tl), "gemv_bf16", tl.cols * tl.ksplit);
       k.arg_ptr(0, w.mem.ptr());

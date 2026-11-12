@@ -19,6 +19,63 @@ spec.loader.exec_module(m)
 
 
 class AcceptanceTest(unittest.TestCase):
+    def baseline_fixture(self, root):
+        class Tensor(list):
+            def tolist(self): return list(self)
+        class Dump:
+            def __init__(self, path, **kwargs): self.name = Path(path).stem.split('.')[0]
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def metadata(self): return {'name': self.name, 'tap_from': '0'}
+            def get_tensor(self, name):
+                return Tensor(range(10)) if name == 'ids' else Tensor(range(1, 11))
+        rows, drafts, corpora = [{'run': {'format': 'int4'}}], [], {}
+        for name in ('a4', 'code', 'prose', 'cjk', 'opencode'):
+            (root / (name + '.taps.safetensors')).touch()
+            corpora[name] = {}
+            for k in range(1, 8):
+                corpora[name][str(k)] = {'engine_E': float(k + 1)}
+                for p in (0, 1):
+                    ids = list(range(p + 1, p + k + 1))
+                    rows.append({'dump': name, 'p': p, 'k': k, 'ids': ids})
+                    drafts.append({'name': name, 'p': p, 'k': k, 'engine': ids})
+        (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+        (root/'baseline.json').write_text(json.dumps({'corpora': corpora, 'drafts': drafts, 'pass': True}))
+        return Dump, rows
+
+    def test_precision_gate_reuses_original_engine_baseline_without_loading_a_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, _ = self.baseline_fixture(root)
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+            report = json.loads((root/'report.json').read_text())
+            self.assertEqual(report['corpora']['opencode']['7']['engine_E'], 8.0)
+            self.assertEqual(report['corpora']['opencode']['7']['gap'], 0.0)
+
+    def test_precision_gate_does_not_pool_away_a_smaller_width_regression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, rows = self.baseline_fixture(root)
+            for r in rows[1:]:
+                if r['dump'] == 'code' and r['k'] == 1: r['ids'] = [99]
+            (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+            report = json.loads((root/'report.json').read_text())
+            self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
+            self.assertEqual(report['corpora']['code']['7']['gap'], 0.0)
+
+    def test_precision_gate_rejects_missing_anchors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _, rows = self.baseline_fixture(root)
+            (root/'engine.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in rows[:-1]))
+            with self.assertRaisesRegex(ValueError, 'anchors'):
+                m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json'))
+
     def test_prefix_acceptance_stops_on_first_rejection(self):
         counted, accepted = m.prefix_counts([10, 11, 12, 13], [11, 99, 13], [11, 12, 13, 14], 0, 0)
         self.assertEqual(counted, [1, 1, 0])
