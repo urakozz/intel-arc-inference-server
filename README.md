@@ -8,6 +8,7 @@ no vLLM underneath - and an OpenAI-compatible API built for long coding-agent se
 - **3,323 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**.
 - **Ornith 1.5 35B-A3B:** prompts read at **8,877 t/s**, answers written at **180.5 t/s on one card, 351.9 t/s on two**.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
+- **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
 
 One choice to make - how many requests run at once. The engine sizes everything else.
 
