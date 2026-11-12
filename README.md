@@ -41,10 +41,8 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
 | two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
 
-**Ornith 1.5 35B-A3B** (Qwen3.5 35B A3B MoE), `b70-serve --parallel replica --max-num-seqs 2` on two cards (one engine
-and the full 262,144 context per card, bf16 cache, bf16 prompt pass), measured through the server with llama-benchy
-(256-token replies, no prefix-cache reuse, the mean of 6 runs in two sessions, quiet box, 2026-11-12). Two requests
-are totals over both cards:
+**Ornith 1.5 35B-A3B** (Qwen3.5 35B A3B MoE), two cards with `--parallel replica --max-num-seqs 2` (the full 262,144
+context per card, bf16 cache); two requests are the total over both cards:
 
 | | 4,096-token prompt, 1 request | 2 requests | 16,384-token prompt, 1 request | 2 requests |
 |---|---:|---:|---:|---:|
