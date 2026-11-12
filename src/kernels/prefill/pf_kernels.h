@@ -96,8 +96,8 @@ inline std::string pf_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRef
 inline std::string pf_flash_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn" + fa_suffix(q, kv);
 }
-// MoE prefill phase 3 Task 7: the same source at RPW 32 / QREG 1 (bitwise the above), built at Qwen3.8's 24 / 4 and
-// Ornith's 16 / 2 only (the TP card's 12 / 2 keeps pf_flash_attn); grid (ceil(C / kPfFlashR32Rows), kv-heads, 1).
+// MoE prefill phase 3 Task 7: the same source at RPW 32 / QREG 1 (bitwise the above), built at Ornith's 16 / 2 only
+// (Qwen3.8 and the TP card keep pf_flash_attn); grid (ceil(C / kPfFlashR32Rows), kv-heads, 1).
 constexpr unsigned kPfFlashR32Rows = 32;
 inline std::string pf_flash_attn_r32_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_r32" + fa_suffix(q, kv);

@@ -361,7 +361,7 @@ bool case_flash_vs_composed(l0::Context& ctx, l0::CmdList& imm, uint32_t pos, ui
   return ok;
 }
 
-// MoE prefill phase 3 Task 7: attn_chunk's flash launch (pf_flash_attn_r32, 32 rows a work-group, Q in registers)
+// MoE prefill phase 3 Task 7: attn_chunk's flash launch (Ornith: pf_flash_attn_r32_Q16KV2, 32 rows a work-group, Q in registers)
 // against TODAY's RPW 8 binary launched directly on the same Q / K / V, at the descriptor's heads. Bar: pf_o's words
 // bitwise equal on every head and every row of the computed 8-row blocks [0, ceil8(C)).
 bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos,
@@ -434,12 +434,11 @@ int main(int argc, char** argv) {
       return 1;
     }
   }
-  // Phase 3 Task 7: the 32-row binding bitwise today's binary, Qwen3.8's heads and Ornith's.
+  // Phase 3 Task 7: Ornith's 32-row binding bitwise today's binary.
   {
     bool ok = true;
-    for (const model::ModelDesc* m : {&model::qwen38(), &model::ornith()})
-      for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
-        ok &= case_flash_r32_bitwise(d.ctx, d.imm, *m, pos, C);
+    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
+      ok &= case_flash_r32_bitwise(d.ctx, d.imm, model::ornith(), pos, C);
     if (!ok) {
       std::fprintf(stderr, "GATE FAILED: pf_flash_attn_r32 is not bitwise today's pf_flash_attn\n");
       return 1;

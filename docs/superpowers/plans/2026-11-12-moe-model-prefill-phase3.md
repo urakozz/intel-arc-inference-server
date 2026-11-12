@@ -255,12 +255,24 @@ Today a sub-group is one q-head x 8 query rows and reloads Q every key tile (`pf
 `src/runtime/prefill/attn.cc` (bind for Ornith; grid from the new RPW); `tests/kernels/attn_chunk_test.cc`,
 `flash_long_test.cc`.
 
-- [ ] **Step 1 (Mac):** tests: o and l against `attn_ref.h` at C 4096 pos 0, C 300 pos 5000, C 16 pos 20000 (the
+- [x] **Step 1 (Mac):** tests: o and l against `attn_ref.h` at C 4096 pos 0, C 300 pos 5000, C 16 pos 20000 (the
   split-K path keeps today's binary); bitwise today's when the arm kept each row's key order. Then the binding. Commit.
-- [ ] **Step 2 (box, card 0):** the attention tests, the Ornith `l0` set (bitwise compare if the arm is bitwise, the
+- [x] **Step 2 (box, card 0):** the attention tests, the Ornith `l0` set (bitwise compare if the arm is bitwise, the
   judge otherwise), `--kv-cache int8`'s prefill gates unchanged (they keep today's kernel), pp4096 and pp16384.
   - **Gates:** its numerics kind; attention <= 33 ms at 4k and <= 0.7x today's at 16k (`l0`).
-- [ ] **Step 3 (only if bitwise):** bind for Qwen3.8 too; its G0 stays PASS, its pp16384 not slower.
+- [x] **Step 3 (only if bitwise):** bind for Qwen3.8 too; its G0 stays PASS, its pp16384 not slower.
+- **Result (2026-11-12, card 1, busy box; branch `moe-pf-phase3-t7`): bitwise, Ornith only.** Bound: the probe's arm
+  `pfao_KT64_R32_H8_Q1` as `pf_flash_attn_r32_Q16KV2` (KT 64 RPW 32 HPW 8 QREG 1 EXP2 1, grid ceil(C / 32)), both
+  backends; split-K, int8 KV and the TP card keep today's binaries. Operator ruled 2026-11-12 to take it though it
+  missed Task 1's 0.7x bar, because it is bitwise.
+  - `attn_chunk_test` PASS: 0 differing words against today's binary at C 4096 pos 0, C 300 pos 5000, C 37 pos 0.
+    `flash_long_test` PASS. `pf_phase2_bitwise.sh` against a7a75e61: the Ornith `prefill_gate_*` (l0, l0-int8, c16)
+    identical; `ornith_prefill_l0` / `l0-int8` differ only in the f32 reference's tree path.
+  - Ornith `l0` 4k (`B70_PREFILL_PROFILE=1`, 3 interleaved pairs): attn_flash 38.0 -> 29.3 ms (<= 33: PASS); wall
+    within noise (526-531 vs 520-528 ms). pp16384: 6948 -> 7272 t/s (+4.7 %).
+  - **Qwen3.8 not bound (Step 3 fails):** with the same form at its HPW 6 (`pf_flash_attn_r32`, bitwise on the attention
+    test and its prefill gates) pp16384 fell 1563 -> 1544 t/s (-1.2 %, 2 interleaved pairs) and the profiled attn_flash
+    median rose 1243 / 1267 -> 1493 / 1500 ms (+19 %). The binary was removed; Qwen3.8 keeps `pf_flash_attn`.
 
 ### Task 8: Flash-Next on the phase 3 kernels (Mac, then box)
 
