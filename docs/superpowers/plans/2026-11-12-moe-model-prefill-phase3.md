@@ -303,7 +303,11 @@ Router (K 2560, N 528 -> padded 768) and a||b by Task 2; the shared expert by Ta
     rows 71 / 95 against main's 74, logits worst cosine higher on all three prompts (0.956 / 0.980 / 0.978 against
     0.947 / 0.961 / 0.973), 20 sets beyond a near-tie on both. Only the f32 judge settles it: waits for the re-made
     Flash-Next f32 reference (open-work, Waiting). `qwen4exp_prefill_intel_test` differs from its recorded trace, by
-    construction. A Fable review found no runtime defect; its one test-wiring defect is fixed.
+    construction. A Fable review found no runtime defect; its one test-wiring defect is fixed; a second found none.
+    Expected kernel diff against main: +4 (`pf_route_slab_K2560_N528_P768`, `pf_route_slab_K2560_N128_P256`,
+    `q4_route_M1_E512_T10_N528_L256_P768`, `pf_gdn_conv_AB256`) / -2 (`pf_route_ab_D2560`,
+    `pf_route_router_K2560_N528`, no longer bound): G0's compare needs `G0_ALLOW_REMOVED=1` and `tools/box_check.sh`
+    `--allow-kernel-changes` for the removals.
 
 ### Task 9: the record, the clean-up, the final gate (box idle, then Mac)
 
