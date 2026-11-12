@@ -254,6 +254,27 @@ Decode (B2): `tools/bench_decode.sh --runs 3` right after the four passes gave
 and by construction, since the decode list is byte-identical on every prefill
 backend. **B2 passes.**
 
+#### 2026-11-13: int8 in the MLP only (open-work item 17)
+
+On the dense model `l0-int8` now runs only gate‖up and down int8; the four mixer linears take the bf16 slab walk
+(they carried the long-prompt miss, docs/17-int8-prefill.md). `b70-decode --bench --prefill-length N --tg 32
+--max-len 32768 --parallel 1`, Qwen3.8, one card (card 1; card 0 ran a test throughout: busy box), main (cf22d86a)
+against branch `int8-mlp-only`, three rounds with the order changed each round, median:
+
+| prompt | arm | t/s (3 rounds) | median | launches |
+|---|---|---|---:|---:|
+| 4096 | main `l0` | 1738.95, 1737.69, 1736.11 | 1737.69 | 16903 |
+| 4096 | branch `l0` | 1744.73, 1739.40, 1739.89 | 1739.89 | 16903 |
+| 4096 | main `l0-int8` | 2260.87, 2256.32, 2254.74 | 2256.32 | 17415 |
+| 4096 | branch `l0-int8` | 2082.52, 2083.80, 2080.13 | **2082.52** | 17159 |
+| 16384 | main `l0` | 1571.54, 1566.46, 1567.84 | 1567.84 | 67597 |
+| 16384 | branch `l0` | 1569.51, 1568.69, 1566.28 | 1568.69 | 67597 |
+| 16384 | main `l0-int8` | 1980.57, 1980.51, 1977.38 | 1980.51 | 69645 |
+| 16384 | branch `l0-int8` | 1844.60, 1844.74, 1844.60 | **1844.60** | 68621 |
+
+`l0-int8` against `l0`: 1.20x / 1.18x (main's all-int8 form 1.30x / 1.26x); against main's form 0.923x / 0.931x.
+`l0` is the same build either side (its logs bitwise main's). Logs on the box: `~/b70/logs/int8-mlp-only/speed1.log`.
+
 ### The Level Zero backend, and what it was worth
 
 Before 2026-09-18 the prefill GEMM was sycl-tla's, called from SYCL, with a
