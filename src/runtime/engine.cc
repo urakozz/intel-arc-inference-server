@@ -435,6 +435,8 @@ void Engine::capture_verify(uint32_t M, const CaptureOptions& opt) {
 }
 
 void Engine::recapture_verify(const CaptureOptions& opt) {
+  flush_projection();
+  profile_projection_ = opt.profile_projection;
   // The constructor's loops, with `opt`: index M - 1 is the list at M rows (a CapturedStep moves, it does not
   // assign: the old lists go first). Spec 13c: every slot's.
   const uint32_t keep = cur_;
@@ -669,7 +671,8 @@ void Engine::verify(uint32_t k, l0::CmdList* draft) {
   if (draft) {
     ze_command_list_handle_t lists[3];
     uint32_t count = 0;
-    if (pending_projection_) lists[count++] = pending_projection_->handle();
+    if (pending_projection_)
+      lists[count++] = (profile_projection_ ? profile_projection_ : pending_projection_)->handle();
     lists[count++] = draft->handle();
     lists[count++] = list.list.handle();
     queue_.execute(count, lists, &fence_);
