@@ -1578,3 +1578,12 @@ generation phase only. vLLM's figures are HTTP-inclusive where they come from
   gate this engine must reproduce exactly. Dumping them follows
   `model.safetensors.index.json` so the oracle reads the same shard set the
   engine loads, rather than a stale set sitting beside it.
+
+### Combined int8 acceptance after H1/B4 (2026-11-12)
+
+On card0, the int8-body H1/B4/candidate64/exact-rerank arm matches the original int8/full-head baseline on
+**all 35 corpus/K acceptance rows, gap zero**. Its cached-tap mode first reproduced all **4256 original draft IDs
+exactly**. The earlier interrupted 2463-row run remains archived; `calibration-status.json` now records the
+completed calibration. Evidence: `~/b70/logs/dflash-v2/resume-accept-card0.log` (DONE rc0) and
+`task7b/h1b4-candidate-int8/{calibration-status.json,acceptance.json}`. The int8 cost table is already refreshed;
+full numerical validation and the rotated Task 8 comparison remain pending. This is not an RTN int4 promotion.

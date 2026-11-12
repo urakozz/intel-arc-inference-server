@@ -194,8 +194,7 @@ deferred projection equals today's at every flush point: plain step, request end
 H1/B4 attention geometry is selected at `f0a3261e` after primitive and real-model bitwise checks: five-launch
 attention sum 2.696458 → 2.084063 ms at pos4096/K7. Norms account for only ~0.1275 ms; the ledger records the
 profile-driven choice. Parallel-exp passes bitwise but regresses steady K7; both local K-cache controls fail
-bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The full numerical and
-combined acceptance checks are pending. GPU work is paused for the operator; card1 released at 15:23 UTC.
+bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The combined int8 acceptance check passes; the full numerical check is pending. Card1 was released at 15:23 UTC; the operator subsequently assigned card0 for the remaining one-card gates.
 
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
@@ -214,9 +213,11 @@ combined acceptance checks are pending. GPU work is paused for the operator; car
 **Operator 2026-11-12:** finish RTN cost diagnostics, defer proper AutoRound conversion. Evaluate the quality-safe
 int8 body with the selected head/geometry in Task 8; this does not close C2 or qualify the failed RTN arm.
 
-- [ ] **Step 3 (combined acceptance):** measure E_K of the final drafter (int4 + the chosen draft head) against Task 1's
-  **original int8 / full-head baseline** on A4, code, prose and the held-out opencode slice. **Gate:** within 0.05 of that
-  baseline in total - the per-task gates of Tasks 5 and 6 must not add up to an unnoticed loss.
+- [x] **Step 3 (current int8 arm):** H1/B4 plus the candidate64/exact-rerank head matches Task 1's **original
+  int8/full-head baseline** exactly on all 35 corpus/K acceptance rows (A4, code, prose, CJK and held-out opencode).
+  Card0 replay first reproduced all 4256 original draft IDs exactly; report `task7b/h1b4-candidate-int8/acceptance.json`.
+  **Gate PASS:** total acceptance gap 0, within 0.05. The combined int4 check remains part of the operator-deferred
+  AutoRound follow-up; this pass does not qualify the failed RTN arm.
 
 ### Task 8: the bar (one idle GPU) - G-speed
 
