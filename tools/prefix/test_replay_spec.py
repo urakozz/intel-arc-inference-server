@@ -74,7 +74,7 @@ class ReplaySpecTest(unittest.TestCase):
 
     def args(self, rounds=1):
         return SimpleNamespace(log=self.recording, out=self.root / 'out', model='/target', drafter='/drafter',
-                               rounds=rounds, port=self.port, wait=5,
+                               rounds=rounds, card=None, port=self.port, wait=5,
                                judge=self.root / 'judge', bf16=self.root / 'bf16')
 
     def run_replay(self, args, **env):
@@ -90,11 +90,20 @@ class ReplaySpecTest(unittest.TestCase):
         self.assertTrue(argv[0].endswith('/tools/gpu_lock.sh'))
         self.assertIn('--under-lock', argv)
 
+    def test_public_entry_can_reserve_only_the_idle_card(self):
+        with patch.object(replay_spec.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as run:
+            self.assertEqual(replay_spec.main([str(self.recording), str(self.root/'out'), '--card', '1']), 0)
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[1:4], ['card', '1', '--'])
+        self.assertTrue(argv[0].endswith('/tools/gpu_lock.sh'))
+        self.assertIn('--under-lock', argv)
+
     def test_three_rotated_rounds_preserve_shape_ids_and_cache(self):
         args = self.args(3)
         self.assertEqual(self.run_replay(args), 0)
         manifest = json.loads((args.out/'run.json').read_text())
         self.assertEqual(manifest['orders'], [['off','mtp','dflash'], ['mtp','dflash','off'], ['dflash','off','mtp']])
+        self.assertEqual((manifest['card'], manifest['grade']), (None, 'quiet box'))
         for round_ in range(1,4):
             for arm in ('off','mtp','dflash'):
                 d=args.out/f'{arm}.r{round_}'
