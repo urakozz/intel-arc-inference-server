@@ -529,9 +529,9 @@ if [ "$("${SSH[@]}" "$BOX" "$BASE_CHECK_CMD")" != "$BASE_SHA" ]; then
   echo "baseline: extracting $BASELINE_REF ($BASE_SHORT) into ~/$BASE_DIR"
   git archive --format=tar "$BASE_SHA" | "${SSH[@]}" "$BOX" "$BASE_EXTRACT_CMD"
 fi
-# The box's system disk (operator 2026-11-10): finished branches' trees and old baselines go to trash at every full
-# launch (not a quick one: it runs for every change, often beside another branch's work).
-if [ "$QUICK" = 0 ]; then tools/box_tidy.sh | grep -E '^(moved|trash|system disk)' || true; fi
+# The box's system disk (operator 2026-11-10): a full launch lists the finished branches' trees and old baselines
+# tools/box_tidy.sh would move; the operator runs it (2026-11-12: a launch's tidy moved another tool's live tree).
+if [ "$QUICK" = 0 ]; then tools/box_tidy.sh --dry-run | grep -E '^(would move|system disk)' || true; fi
 echo "launch: $(echo "$SELECTED" | wc -w | tr -d ' ') stages, state ~/$STATE_REL"
 tools/box.sh run "$LAUNCH_CMD"
 if [ "$WAIT" = 0 ]; then
