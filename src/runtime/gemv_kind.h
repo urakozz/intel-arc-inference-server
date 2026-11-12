@@ -50,9 +50,10 @@ struct CaptureOptions {
   l0::CmdList* profile_projection = nullptr;
   // Test / probe: isolate the DFlash target head from its body when comparing linear arithmetic.
   LinearForce force_dflash_head = LinearForce::Auto;
-  // Test / probe: query heads per DFlash attention workgroup (0 keeps the current four).
-  uint32_t dflash_attn_heads = 0;
-  uint32_t dflash_attn_rows = 0;   // test / probe: block rows per group (0 keeps all eight)
+  // DFlash H1/B4 measured geometry; tests/probes may force the original H4/B8 with zeros.
+  uint32_t dflash_attn_heads = 1;
+  bool dflash_attn_parallel_exp = false;
+  uint32_t dflash_attn_rows = 4;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

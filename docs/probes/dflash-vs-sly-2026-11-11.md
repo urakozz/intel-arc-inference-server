@@ -179,7 +179,7 @@ their quality and performance are not established by this result.
 The `8a16f5a4` grid split-K diagnostic (same int4 weights/head, fused consumer folds, unchanged 87/8 launches)
 reduces the 4k draft to **7.84970 ms**, saving 1.12832 ms against the original int8 baseline; the 2.5 ms Task 5
 gate is still unmet. At 32k it is 8.29017 ms. Projection is 0.33730/0.45911 ms, and K7 iteration is
-1.52810/1.52793 plain steps (4k/32k). These are idle-card/busy-box diagnostics, with precision gates outstanding.
+1.52810/1.52793 plain steps (4k/32k). These are idle-card/busy-box diagnostics.
 At 4k, sums of per-launch medians are 1.91240 ms for the int4 body, 2.16833 ms for the full int8 head,
 2.76844 ms for attention-part, and 0.23677 ms for both top-k stages. Attention is the next measured non-GEMM target.
 Evidence: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`.
@@ -197,3 +197,19 @@ Task 7's fewer-heads geometry is bitwise the real drafter at short and full-wind
 H4/H1/H2 attention-part sums are 2.700417/2.525833/2.872083 ms (interleaved timestamp medians, five launches,
 busy box/card1). H1 saves only 0.174584 ms here, despite a larger short-context saving. Splitting rows as well
 is the next experiment; the runtime geometry stays unchanged until its gates pass.
+
+The later split-K numerical regression passes after the CPU twin mirrors GEMV's verified fused multiply-add
+order (zero projection differences for both paths, aggregate f32 sets 5 versus 6 misses). RTN corpus loss remains;
+this arithmetic-reference correction does not qualify RTN for promotion. Evidence: `task5-contracted-twin.log`.
+
+C3's full-vocabulary int4 candidate head plus exact top-64 int8 rerank **passes isolated quality**: all 35
+corpus/K acceptance values equal the original int8/full-head baseline (gap zero). One-load `--all-k` first
+reproduced all 4256 original engine drafts. At depth4096 the head path costs 1.789271 ms (candidate GEMM
+1.214896, top-64 0.365000/0.073750, rerank 0.135625), so the plan's 0.5 ms head-share gate **fails**.
+Draft wall is 8.723402/8.618562 ms and iteration 1.591323/1.556495 plain steps (4k/32k), original H4 attention,
+exclusive card1/busy box. Source `18d366bf`; `task6/candidate64-int8/{acceptance.json,iter-*.log}`.
+
+The H1/B4 row split subsequently passes all primitive and real-model bitwise checks. At pos4096/K7 attention
+falls 2.696458 → 2.084063 ms; at K2, 1.595521 → 1.227500 ms. Parallel-exp is slower at steady K7 despite
+passing bitwise checks; both local K-cache representations fail and are rejected. H1/B4 policy integration
+is the next step. Full cost targets and Task 8 remain unpassed.

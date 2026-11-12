@@ -1040,7 +1040,7 @@ these losses exceed 0.05. C2 therefore requires an AutoRound-exported drafter be
 Full table and provenance: [DFlash record](probes/dflash-vs-sly-2026-11-11.md#7-spec-19v2-measurements-2026-11-12).
 
 `8a16f5a4` splits the int4 producers across K and folds their partials inside the existing consumers (87 draft /
-8 projection launches). **Exclusive card 1, busy box; diagnostics only, numerical gates outstanding.**
+8 projection launches). **Exclusive card 1, busy box; cost diagnostics only.**
 
 | quantity | depth 4096 | depth 32768 |
 |---|---:|---:|
@@ -1052,9 +1052,44 @@ Full table and provenance: [DFlash record](probes/dflash-vs-sly-2026-11-11.md#7-
 
 The 4k draft saves 1.128320 ms against Task 1, below Task 5's 2.5 ms gate. The 4k profile has body GEMMs
 1.912396 ms, full head 2.168333 ms, attention-part 2.768438 ms, and top-k stages 0.208125 / 0.028646 ms.
-New split consumers and H1/H2 attention geometry pass the bitwise kernel tests; end-to-end f32/corpus gates
-remain separate. Logs: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`,
+New split consumers pass the bitwise kernel tests. The later contracted-CPU-twin regression passes the full
+int4 numerical test: both projection paths have zero differing values, ring f32 cosine is 0.9999978, and the
+aggregate f32 candidate-set gate is 5 misses versus 6 for forced GEMV. The CPU twin now mirrors the verified
+GEMV fused multiply-add order; GPU arithmetic and judge bars are unchanged. This does not repair RTN corpus loss. Logs: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`,
 `task5-split-kernels-card1.log`. These numbers do not refresh AdaptiveK or establish the final speed bar.
+
+### Task 6: candidate head and exact rerank (2026-11-12)
+
+At `18d366bf`, the full-vocabulary int4 candidate head selects 64 candidates per row, then reranks their
+original int8 rows exactly. The unchanged int8 body isolates head quality. All 35 corpus/K acceptance values
+match the original baseline exactly; the one-load `--all-k` harness first reproduced all 4256 original drafts.
+This passes isolated head quality, including the held-out opencode session, but does not pass the cost gate.
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| candidate GEMM, ms | 1.214896 | 1.199167 |
+| top-64 stages 1 / 2, ms | 0.365000 / 0.073750 | 0.367812 / 0.074375 |
+| exact rerank, ms | 0.135625 | 0.134167 |
+| sum of head-path launch medians, ms | 1.789271 | 1.775521 |
+| draft wall, ms | 8.723402 | 8.618562 |
+| K7 iteration, paired plain steps | 1.591323 | 1.556495 |
+
+The Task 6 head-share target of 0.5 ms **fails**. These are exclusive-card-1/busy-box diagnostics with the
+original H4/B8 attention geometry, not final AdaptiveK costs or the Task 8 speed bar. Capture has 88 draft /
+8 projection launches. No serving default changed. Evidence: `~/b70/logs/dflash-v2/task6/candidate64-int8/`
+(`acceptance.json`, `iter-{4096,32768}.log`) and `task6-candidate-{pilot,cost}.log`.
+
+### Task 7: attention geometry (2026-11-12)
+
+Random wrap/mask/long-position tests and real-model readback/hidden-state comparisons pass bitwise for H1/B4
+(one query head and four block rows per workgroup). Interleaved timestamp medians for the five attention-part
+launches are 2.084063 ms versus 2.696458 ms for H4/B8 at pos4096/K7; 1.227500 versus 1.595521 ms at K2;
+0.554583 versus 1.144688 ms at pos16/K7. Evidence: `task7-attn-rows.log`.
+
+Parallel exponentials remain a probe control: bitwise checks pass, but steady K7 slows to 2.393125 ms versus
+2.074167 ms for serial H1/B4 in the paired experiment. Both 16-bit and packed-32-bit local K-cache experiments
+fail the bitwise gate and are rejected before timing. Production-policy integration and full cost gates are
+still pending; no Task 7 completion or final speed claim follows from these component results.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 

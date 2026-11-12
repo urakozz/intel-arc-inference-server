@@ -107,9 +107,9 @@ struct Bins {
   bool split;
   unsigned attn_heads, attn_rows;
   l0::Module prep, attn, topk, topk_c, sel;
-  Bins(Dev& d, bool split_k = false, unsigned heads = 0, unsigned rows = 0)
+  Bins(Dev& d, bool split_k = false, unsigned heads = 0, unsigned rows = 0, bool parallel_exp = false)
       : split(split_k), attn_heads(heads), attn_rows(rows), prep(d.ctx, kernels::path(kd::prep_variant(S, split))),
-        attn(d.ctx, kernels::path(kd::attn_variant(S, heads, rows))),
+        attn(d.ctx, kernels::path(kd::attn_variant(S, heads, rows, parallel_exp))),
         topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used, false))),
         topk_c(d.ctx, kernels::path(kd::topk_variant(32768, 32768, true))),
         sel(d.ctx, kernels::path(kd::select_variant(true, S, split))) {}
@@ -591,6 +591,8 @@ int main() {
     Bins grouped(d, false, 1, rows);
     bad += check_attn(d, grouped);
   }
+  Bins parallel(d, false, 1, 4, true);
+  bad += check_attn(d, parallel);
   if (bad) {
     std::printf("dflash_kernels_test: FAIL (%d)\n", bad);
     return 1;
