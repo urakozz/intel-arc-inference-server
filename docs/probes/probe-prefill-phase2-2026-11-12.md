@@ -140,3 +140,10 @@ Ornith set 12 / 12 PASS; host / kernel / Flash-Next tests 15 / 15 PASS; end to e
 (prefill_gate_ornith l0 / l0-int8 / l0_c16, ornith_prefill_l0, qwen4exp_prefill_synth_ours, the Flash-Next golden
 prefill): identical but for timing, memory and launch-count lines. Speed (card 0, interleaved, unprofiled, busy box,
 on phase 1's 66b7b234): **pp4096 l0 6,553 -> 7,035 t/s (+7.4 %, -42 ms)**.
+
+## 7. The intra-chunk kernel on l0 (operator ruling 2026-11-12), env switches removed
+
+`pf_gdn_intra` (bf16 Q1-Q4) is bound for MoE models on l0; l0-int8 keeps the four launches. Branch over main 9824d434:
+Ornith set 12 / 12 PASS, host / kernel / Flash-Next tests 17 / 17 PASS; l0-int8 (prefill_gate_ornith_l0-int8 and
+_c16) and Flash-Next (qwen4exp_prefill_synth_ours) print the same logs as main's build (bitwise unchanged). Speed
+(card 0, interleaved, 3 rounds, unprofiled, busy box): **pp4096 l0 6,953 -> 7,668 t/s (+10.3 %, -54 ms)** over main.
