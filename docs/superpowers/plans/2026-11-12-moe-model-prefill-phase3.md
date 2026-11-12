@@ -161,12 +161,21 @@ already an argument - decode's binaries stay byte for byte); `tests/kernels/pf_m
 **Interfaces - produces:** router logits fp32 [C][512] (columns 0..271 meaningful, as today: 256 experts, the shared
 gate at 256); a||b fp32 [C][256] (columns 0..127).
 
-- [ ] **Step 1 (Mac):** tests first: `pf_moe_test` case `router_gemm` - logits within 1e-5 relative of the host's
+- [x] **Step 1 (Mac):** tests first: `pf_moe_test` case `router_gemm` - logits within 1e-5 relative of the host's
   double-precision sum of the same bf16 operands, at C 2048 and C 37, pad columns never read by `moe_route`;
   `pf_gemv_test` case `ab_gemm` the same for a||b. Then the entry and the bindings. Host tests green. Commit.
-- [ ] **Step 2 (box, card 0):** `pf_moe_test`, `pf_gemv_test`, the judged Ornith `l0` set (`tools/probe/
+- [x] **Step 2 (box, card 0):** `pf_moe_test`, `pf_gemv_test`, the judged Ornith `l0` set (`tools/probe/
   pf_phase2_gates.sh`), the `l0-int8` gates bitwise main's, `B70_PREFILL_PROFILE=1` 4k `l0`.
   - **Gates:** judged PASS on `l0`; `l0-int8` logs identical to main's; route row <= 10 ms and a||b <= 2 ms at 4k.
+  - **Result (2026-11-12, card 1, busy box): PASS.** The weights are re-laid per chunk by `pf_route_slab` into a
+    [2048][P] slab in xg's region (no new bytes), `tiled_gemm` runs them on `pf_gemm_T0`; `moe_route` /
+    `pf_gdn_gate` read pitch 512 / 256 from their own builds (`_R512`, `_AB256`; the old binaries md5-identical).
+    Unit: slab exact, max err 7.7e-8 of sum|w x|, the consumers bitwise the old ones with NaN pads. Judged: gate 90/90
+    determined rows, `_c16` 89/90 (cjk 15, the accepted row), golden 90/90; split logits cosine distance x0.54-0.79
+    of the bf16 twin's, median x0.99-1.02; R2 1068 differing sets (base 1098, bf16 golden 1140). Route diagnostic vs
+    decode: 4040 equal / 1410 near-tie / 895 differing (base 4027 / 1421 / 927). `l0-int8` logs identical (two
+    differ only in the tree path). 4k profile, 3 interleaved pairs: route 8.4 ms (base 27.2-27.7), a||b 1.9 (7.5),
+    wall median 501.5 ms vs 512.2, launches 1777 vs 1707.
 
 ### Task 3: the shared expert through the dense GEMMs (Mac, then box) - JUDGED
 
