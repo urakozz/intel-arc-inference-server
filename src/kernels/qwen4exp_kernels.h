@@ -267,10 +267,6 @@ inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_va
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560
 inline std::string pf_ab_variant() { return pf_ab_proj_variant(kHidden); }                  // pf_ab_proj_D2560
 inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }
-// MoE-model prefill phase 2 (Task 8): what the walk binds in place of the two GEMVs above (kept for the kernel tests'
-// decode-row references).
-inline std::string pf_route_ab_variant() { return kernels::pf_route_ab_variant(kHidden); }            // pf_route_ab_D2560
-inline std::string pf_route_router_variant() { return kernels::pf_route_router_variant(kHidden, kRouterN); }  // pf_moe_router_K2560_N528
 // MoE-model prefill phase 3 Task 8: what the walk binds for the router and a||b now - their weights re-laid as
 // pf_gemm_T0's B slabs each chunk, the GEMM's rows at pitch P read by q4_route (ROUTE_LN = P) and pf_gdn_gate
 // (AB_STRIDE = P). The two GEMVs above stay for the kernel tests' decode-row references.
@@ -306,8 +302,6 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gdn_wy_variant(),
       pf_gdn_scan_variant(),
       pf_gdn_front_variant(),       // MoE-model prefill phase 2: conv + l2norm in one launch
-      pf_route_ab_variant(),
-      pf_route_router_variant(),
       pf_router_slab_variant(),     // phase 3 Task 8: the router and a||b on the dense GEMM
       pf_ab_slab_variant(),
       pf_route_gemm_variant(),
