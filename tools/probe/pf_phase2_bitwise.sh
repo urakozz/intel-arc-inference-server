@@ -13,7 +13,7 @@ for t in "$@"; do
     dir=$CTRL; [ $v = cand ] && dir=$CAND
     ctest --test-dir "$dir" -V -R "^$t\$" 2>&1 |
       grep -vE 'sec$|Test time|load +[0-9]|repacked in|Start|Test #|tests passed|Total Test|^[0-9]+: Test command|UpdateCTest|Constructing|Checking test|Test project|Parse|Running|Updating|ms\b|t/s|sec.proc|MemAvailable|launches|Working Directory' |
-      sed -E 's/^[0-9]+: //' > "$OUT/$t.$v.log"
+      sed -E 's/^[0-9]+: //; s#/b70/trees/[^/]+/#/b70/trees/<tree>/#g' > "$OUT/$t.$v.log"   # the build's own tree in paths
   done
   if diff -q "$OUT/$t.ctrl.log" "$OUT/$t.cand.log" > /dev/null; then echo "BITWISE $t: identical ($(wc -l < "$OUT/$t.cand.log") lines)"
   else echo "DIFFER $t: $(diff "$OUT/$t.ctrl.log" "$OUT/$t.cand.log" | grep -c '^[<>]') lines"; fi

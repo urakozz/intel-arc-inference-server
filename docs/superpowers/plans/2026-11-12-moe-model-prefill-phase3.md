@@ -1,6 +1,11 @@
 # MoE-model prefill, phase 3 - the route on the matrix engine, the expert GEMM's conversion, the shared expert, the attention tile (Ornith, then Flash-Next)
 
-**Status (2026-11-12): written, not started.** Follows phase 1 (`2026-11-12-moe-model-prefill-phase1.md`) and phase 2
+**Status (2026-11-12): CLOSED.** Landed: Tasks 2 (router + a||b on pf_gemm, slabs made once per engine), 5
+(combine + next norm, bitwise), 7 (32-row flash attention for Ornith only, then the output gate fused into its
+epilogue, bitwise), and the pipeline-parallel launch-count fix for MoE models. Dropped by their probes: Tasks 3, 4, 6.
+Not done: Task 8 (Flash-Next binding; waits for Flash-Next work). Record (Task 9, busy box against main's build): 4k
+`l0` 8,463 -> 9,263 t/s, 16k +10 %; the quiet-box server record is the README's Ornith table and open-work's Closed
+recently. 9,500 missed by ~11 ms. Follows phase 1 (`2026-11-12-moe-model-prefill-phase1.md`) and phase 2
 (`2026-11-12-moe-model-prefill-phase2.md`), both closed. Main at 14dd0260.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. The

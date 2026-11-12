@@ -41,12 +41,19 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
 | two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
 
-**Ornith 1.5 35B-A3B** (Qwen3.5 35B A3B MoE), one card, the full 262,144 context, bf16 cache:
+**Ornith 1.5 35B-A3B** (Qwen3.5 35B A3B MoE), `b70-serve --parallel replica --max-num-seqs 2` on two cards (one engine
+and the full 262,144 context per card, bf16 cache, bf16 prompt pass), measured through the server with llama-benchy
+(256-token replies, no prefix-cache reuse, 3 runs, quiet box, 2026-11-12). Two requests are totals over both cards:
 
-| | without MTP | with MTP |
-|---|---:|---:|
-| decode, one request | 142.8 t/s | **234.9 t/s** |
-| prefill, 4,096-token prompt | **8,080 t/s** (bf16 prompt pass), **8,518 t/s** (int8, `--prefill-backend l0-int8`) | |
+| | 4,096-token prompt, 1 request | 2 requests | 16,384-token prompt, 1 request | 2 requests |
+|---|---:|---:|---:|---:|
+| prefill | **8,965 t/s** | 15,367 t/s | 7,098 t/s | 11,745 t/s |
+| decode, without MTP | 140.4 t/s | 274.5 t/s | 125.5 t/s | 214.2 t/s |
+| decode, with MTP | **179.8 t/s** | **359.3 t/s** | 147.3 t/s | 289.7 t/s |
+
+The prompt pass alone, one card, 4,096 tokens: **9,263 t/s** (device-side; the server's figure adds HTTP and
+tokenisation). llama-benchy's prompts are random text, the hardest case for MTP's guesses; real coding sessions accept
+more of them.
 
 ## Install
 
