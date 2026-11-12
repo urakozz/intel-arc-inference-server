@@ -176,6 +176,13 @@ gate at 256); a||b fp32 [C][256] (columns 0..127).
     decode: 4040 equal / 1410 near-tie / 895 differing (base 4027 / 1421 / 927). `l0-int8` logs identical (two
     differ only in the tree path). 4k profile, 3 interleaved pairs: route 8.4 ms (base 27.2-27.7), a||b 1.9 (7.5),
     wall median 501.5 ms vs 512.2, launches 1777 vs 1707.
+  - **Follow-up (2026-11-12, rebased on be5f5418, card 1, busy box): the slabs made once.** `make_route_slabs`
+    (Engine / PipelineEngine `prepare_prefill`, l0) builds every router / a||b B slab per weight in
+    `PrefillScratch::gemm_slab`; `runtime::route_slab_bytes` adds them to both memory plans (Ornith 115,343,360 B,
+    a stage its own layers). Per-chunk launches back to the base's (moe_route 80, ab_proj 30 at 4k); the 70 slab
+    launches run once per engine, inside the first prefill. Unit, the five judged gates (same counts as above) and
+    the four `l0-int8` logs identical again. 4k, 3 interleaved pairs against be5f5418: route 8.5-8.7 ms (27.1-27.6),
+    a||b 1.9 (7.4-7.5), kernel sum 450.2-451.9 (474.3-475.0), wall median 477.7 ms (8,574 t/s) vs 520.8 (7,865).
 
 ### Task 3: the shared expert through the dense GEMMs (Mac, then box) - JUDGED
 
