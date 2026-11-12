@@ -250,8 +250,9 @@ int main(int argc, char** argv) {
   {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
-    const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + 27,   // phase 2: 9 (10 with B70_PF_PHASE2=old) qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + 27, ple = 1 + 1 + 26 + 3;
-    CHECK_EQ(gdn, size_t(84));
+    // phase 2: gdn_chunk_q4_launches() is 9 (10 with B70_PF_PHASE2=old)
+    const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + 27, qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + 27, ple = 1 + 1 + 26 + 3;
+    CHECK_EQ(gdn, size_t(74) + rq::gdn_chunk_q4_launches());
     CHECK_EQ(qsa, size_t(73));
     CHECK_EQ(rq::pf_batches_gu(ours), 7u);
     CHECK_EQ(rq::pf_batches_dn(ours), 4u);
