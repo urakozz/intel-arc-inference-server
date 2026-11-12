@@ -20,6 +20,10 @@ import json,os,sys,time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,HTTPServer
 args=sys.argv[1:]
+allowed={'--spec','--draft-model','--parallel','--max-num-seqs','--max-len','--kv-cache',
+         '--prefix-cache-gb','--port','--log-requests'}
+for flag in args[1::2]:
+ if flag not in allowed: raise SystemExit('unknown option '+flag)
 value=lambda k: args[args.index(k)+1]
 arm=value('--spec')
 logs=Path(value('--log-requests'))
@@ -111,7 +115,9 @@ class ReplaySpecTest(unittest.TestCase):
                 for k,v in (('--prefix-cache-gb','32'),('--max-len','131072'),('--parallel','1')):
                     self.assertEqual(argv['args'][argv['args'].index(k)+1],v)
                 self.assertIsNone(argv['step_k'])
-                if arm=='mtp':self.assertEqual(argv['args'][argv['args'].index('--mtp')+1],'auto')
+                self.assertNotIn('--mtp',argv['args'])
+                self.assertNotIn('--lm-head',argv['args'])
+                self.assertEqual(argv['args'][argv['args'].index('--spec')+1],arm)
                 rows=[json.loads(s) for s in (d/'requests.jsonl').read_text().splitlines()]
                 self.assertEqual([r['out_ids'] for r in rows],[[11,12,13],[21,22,23]])
                 self.assertEqual([r['cached_tokens'] for r in rows],[0,2])

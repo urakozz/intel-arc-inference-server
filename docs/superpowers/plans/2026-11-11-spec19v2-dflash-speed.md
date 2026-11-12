@@ -225,7 +225,9 @@ int8 body with the selected head/geometry in Task 8; this does not close C2 or q
   checks. Operator permits the other card to be busy if more than 16 of 44 CPU threads are available; verify
   that before the run and record the resource conditions with the busy-box grade. Use `--card N` for that run;
   omitting it reserves the whole box for a quiet-box grade. The MTP arm includes main `f65ae50e` or later and uses the
-  default per-step policy for `--mtp auto` (no disabling `B70_MTP_STEP_K`). Task 2's slim `r82.d5` screen is not
+  default per-step policy for `--mtp auto` (no disabling `B70_MTP_STEP_K`). The current CLI spells this arm
+  `--spec mtp`; `--mtp auto` and `--lm-head` were removed in the zero-config cleanup. The replay uses the fixed
+  int8-head default, clears the step-policy override, and verifies the startup's adaptive-per-step line. Task 2's slim `r82.d5` screen is not
   this final replay bar. All final DFlash speed numbers require an idle card.
 - [ ] **Gate (spec 19 D5, unchanged):**
   - `--spec dflash` >= 1.10x `--mtp auto` on `opencode-session-int8`;
