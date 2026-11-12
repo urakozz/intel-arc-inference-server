@@ -110,8 +110,14 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
         // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
       const DeviceWeight& w = loader::prefill_ab(m, l);
-      cx.launch(kc(kernels::pf_ab_proj_variant(d.hidden), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
-                {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
+      if (pf_phase2(d))   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
+        cx.launch(kc(kernels::pf_route_ab_variant(d.hidden), "pf_gemv_rows"),
+                  (w.shape.N / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
+                  (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
+                  {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
+      else
+        cx.launch(kc(kernels::pf_ab_proj_variant(d.hidden), "pf_ab_proj"), w.shape.N / 16, (C + 7) / 8, 1,
+                  {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
       profile_wait(cx, Phase::kAbGdn);
     }
     gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
