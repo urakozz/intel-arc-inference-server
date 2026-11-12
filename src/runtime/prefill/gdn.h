@@ -77,6 +77,8 @@ size_t gdn_chunk_launches(const model::ModelDesc& d);
 //
 // Neither is a configuration API: the selector stays private to `gdn.cc`.
 const char* gdn_scan_entry_name();
+// The entry gdn_chunk binds for `d`: phase 2's pf_gdn_scan_hl on a MoE model (pf_phase2), else the above.
+const char* gdn_scan_entry_name(const model::ModelDesc& d);
 const char* gdn_scan_launched_entry();
 
 // The `pf_gdn_wy` entry that makes the scan's A2 (launch 8). Open-work 3n: the scan reads A2 as

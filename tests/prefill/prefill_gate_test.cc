@@ -177,13 +177,14 @@ int main(int argc, char** argv) {
   kHid = model.desc->hidden;
   kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
   const bool kMoe = model.desc->is_moe();
+  const char* const scan_entry = runtime::prefill::gdn_scan_entry_name(*model.desc);   // phase 2: per model
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
   // under a scan selector (gone since the zero-config cleanup) was not evidence unless it said which kernel it
   // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
-  std::printf("gdn scan entry: %s\n", runtime::prefill::gdn_scan_entry_name());
+  std::printf("gdn scan entry: %s\n", scan_entry);
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
   // (645 + lever L1's 129); 13 per MoE
   // layer, 526 on Ornith (spec 15c).
@@ -222,8 +223,7 @@ int main(int argc, char** argv) {
     // The other half of the dispatch proof: the entry a scan launch was really
     // built with, read back after the walk rather than before it.
     CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
-    CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()),
-             std::string(runtime::prefill::gdn_scan_entry_name()));
+    CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()), std::string(scan_entry));
     std::printf("gdn scan entry LAUNCHED: %s\n",
                 runtime::prefill::gdn_scan_launched_entry());
 

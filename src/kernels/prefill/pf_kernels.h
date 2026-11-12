@@ -157,6 +157,13 @@ inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
 }
+// Phase 2 Task 3 under D2: pf_gdn_intra.cl's WU_HILO build and pf_gdn_scan_hl.cl (w / u as hi / lo planes).
+inline std::string pf_gdn_intra_hl_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_intra_hl" + gdn_suffix(gdn_k, gdn_v);
+}
+inline std::string pf_gdn_scan_hl_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_scan_hl" + gdn_suffix(gdn_k, gdn_v);
+}
 // Phase 2 Task 2: pf_gdn_front.cl, pf_gdn_conv + pf_gdn_l2norm in one launch.
 inline std::string pf_gdn_front_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_front" + gdn_suffix(gdn_k, gdn_v);

@@ -241,8 +241,10 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   s.gdn_seed = size_t{3} * desc.gdn_conv_dim() * kBf16;
   s.gdn_g = size_t{kC} * desc.gdn_v_heads * kFp32;
   s.gdn_beta = size_t{kC} * desc.gdn_v_heads * kFp32;
-  s.gdn_A = size_t{kC / kGdnChunk} * desc.gdn_v_heads * kGdnChunk * kGdnChunk * kFp32;
-  s.gdn_A2 = s.gdn_A;
+  s.gdn_A2 = size_t{kC / kGdnChunk} * desc.gdn_v_heads * kGdnChunk * kGdnChunk * kFp32;
+  // MoE-model prefill phase 2 (D2): a MoE model's GDN keeps A / T in the intra kernel's SLM and this
+  // buffer holds w's and u's lo planes instead, bf16 [kC][v-heads][128] each - twice A2's size.
+  s.gdn_A = s.gdn_A2 * (desc.is_moe() ? 2 : 1);
   s.gdn_w = size_t{kC} * desc.gdn_value_dim() * kBf16;
   s.gdn_u = size_t{kC} * desc.gdn_value_dim() * kBf16;
   s.pf_q = size_t{kC} * desc.fa_value_dim() * kBf16;
