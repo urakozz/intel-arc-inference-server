@@ -1,10 +1,13 @@
 #include "runtime/prefill/gdn.h"
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
@@ -51,6 +54,37 @@ constexpr uint32_t kConvBlock = 128;
 
 void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::prefill::gdn_chunk: " + what);
+}
+
+// Phase 2 Task 1 (probes only): B70_PF_GDN_DUMP=<dir> writes the intra-chunk stages' REAL inputs - the
+// l2normed xb [C][conv rows] bf16, g_cum and beta [C][v-heads] fp32 - of the process's gdn_chunk calls
+// 0, 9 and 21 (Ornith's layers 0, 12 and 28 in the first chunk) as <dir>/gdn<call>_{xb,g,beta}.bin and
+// a one-line <dir>/gdn<call>.txt (C, k-heads, v-heads, conv rows). It waits on the host: never in a timed run.
+void dump_gdn_inputs(Context& cx, const PrefillScratch& s, uint32_t C) {
+  static const char* const dir = std::getenv("B70_PF_GDN_DUMP");
+  static std::atomic<uint32_t> calls{0};
+  if (dir == nullptr) return;
+  const uint32_t call = calls++;
+  if (call != 0 && call != 9 && call != 21) return;
+  const model::ModelDesc& d = s.desc();
+  const size_t nxb = size_t(C) * d.gdn_conv_dim() * 2, ng = size_t(C) * d.gdn_v_heads * 4;
+  std::vector<uint8_t> xb(nxb), g(ng), beta(ng);
+  cx.wait();
+  cx.copy(xb.data(), s.gdn_xb.ptr(), nxb);
+  cx.copy(g.data(), s.gdn_g.ptr(), ng);
+  cx.copy(beta.data(), s.gdn_beta.ptr(), ng);
+  cx.wait();
+  const std::string base = std::string(dir) + "/gdn" + std::to_string(call);
+  for (const auto& [name, v] : {std::pair<const char*, std::vector<uint8_t>*>{"_xb.bin", &xb},
+                                {"_g.bin", &g}, {"_beta.bin", &beta}}) {
+    FILE* f = std::fopen((base + name).c_str(), "wb");
+    require(f != nullptr && std::fwrite(v->data(), 1, v->size(), f) == v->size(), "B70_PF_GDN_DUMP: write " + base + name);
+    std::fclose(f);
+  }
+  FILE* f = std::fopen((base + ".txt").c_str(), "w");
+  require(f != nullptr, "B70_PF_GDN_DUMP: write " + base + ".txt");
+  std::fprintf(f, "%u %u %u %u\n", C, d.gdn_k_heads, d.gdn_v_heads, d.gdn_conv_dim());
+  std::fclose(f);
 }
 
 }  // namespace
@@ -178,6 +212,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(conv, "pf_gdn_gate"), heads, nch, 1,
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
+  dump_gdn_inputs(cx, s, C);
   //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
   //      quadrant split, as step 8's.
   cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 4,

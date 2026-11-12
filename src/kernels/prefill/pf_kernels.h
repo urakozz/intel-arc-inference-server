@@ -153,6 +153,11 @@ inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
 }
+// Phase 2 Task 3: pf_gdn_intra.cl, the intra-chunk stages in one launch (replaces pf_gdn_wy's four).
+inline std::string pf_gdn_intra_variant(unsigned gdn_k = kRefGdnKHeads,
+                                        unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_intra" + gdn_suffix(gdn_k, gdn_v);
+}
 
 // The execution-context probe (Task 2); bound by context_test.cc alone.
 inline std::string pf_probe_chain_variant() { return "pf_probe_chain"; }

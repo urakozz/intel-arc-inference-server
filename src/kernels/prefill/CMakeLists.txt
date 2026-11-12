@@ -377,6 +377,9 @@ if(B70_ORNITH)
                    DEFINES ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN})
+  # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
+  add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
+                   DEFINES ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_attn_prep_q16_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA})
   add_ocloc_kernel(pf_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl
