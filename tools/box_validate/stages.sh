@@ -3697,7 +3697,7 @@ st_r82_profile() {
   jgrab profile '^dflash_profile_test$' '^dflash_profile_test' 4
   finish
 }
-stage r82.iter 82 default card qwen,dflash r82.profile "unprofiled interleaved list costs at 4096/32768; separate instrumented per-family costs"
+stage r82.iter 82 default gpu qwen,dflash r82.profile "unprofiled interleaved list costs at 4096/32768; separate instrumented per-family costs"
 st_r82_iter() {
   idle before
   for depth in 4096 32768; do
@@ -3720,7 +3720,7 @@ st_r82_accept() {
   grab_all acceptance '^G_ACCEPT' 40
   finish
 }
-stage r82.d5 82 optin card qwen,dflash r82.iter "DFlash-only slots_bench count 1; existing MTP baseline 73.2 t/s, early stop above 80.5"
+stage r82.d5 82 optin gpu qwen,dflash r82.iter "DFlash-only slots_bench count 1; existing MTP baseline 73.2 t/s, early stop above 80.5"
 st_r82_d5() {
   idle before
   chk "PORT=$PORT tools/box_validate/dflash_v2.sh d5 $STATE/r82.d5 $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "DFlash one-request serving screen"
