@@ -23,7 +23,7 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 One fast session on two cards (the default): **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
 on a prefix cache hit.
 
-Several requests at once - decode with MTP, total t/s over all requests (per request in brackets):
+Decode with MTP, t/s - one session, or several at once (the total, per request in brackets):
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
