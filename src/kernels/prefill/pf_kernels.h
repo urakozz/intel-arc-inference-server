@@ -219,6 +219,11 @@ inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
 inline std::string pf_moe_q4gemm_variant(unsigned K, unsigned N, bool silu) {
   return "pf_moe_q4gemm_K" + std::to_string(K) + "_N" + std::to_string(N) + (silu ? "_SILU" : "");
 }
+// pf_moe_w4a8.cl (plan 2026-11-12 Task 5): l0-int8's W4A8 gate||up - pf_quant_g64, pf_moe_gather_i8g,
+// pf_moe_w4a8 - at hidden K and one block's gate||up N.
+inline std::string pf_moe_w4a8_variant(unsigned K, unsigned N) {
+  return "pf_moe_w4a8_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
 // pf_moe_gemm.cl at one expert block's K x N: bf16 or int8 (h8), SiLU epilogue (gate||up)
 // or the plain bf16 one (down). Entry `pf_moe_gemm`.
 inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool silu) {

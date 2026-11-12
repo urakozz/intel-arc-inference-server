@@ -407,6 +407,9 @@ if(B70_ORNITH)
                    DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K512_N2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
                    DEFINES K=512 N=2048 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
+  # Plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (per-token-and-group int8 rows x the s4 blocks).
+  add_ocloc_kernel(pf_moe_w4a8_K2048_N1024 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_w4a8.cl
+                   DEFINES K=2048 N=1024 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
 
 # ==== Spec 15e: Ornith's MTP head KV fill during prefill (runtime/prefill/step.cc) == (begin) ==
