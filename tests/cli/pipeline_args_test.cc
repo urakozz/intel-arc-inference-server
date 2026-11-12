@@ -75,11 +75,10 @@ void check_parse() {
   CHECK(p.mode == cli::Parallel::Replica && p.replica() && !p.on() && p.given() && p.devices == 1u);
   CHECK(says([&] { cli::refuse_replica_in_decode(p); }, "--parallel replica is b70-serve's"));
   CHECK(says([] { cli::check_replica_model("LlamaForCausalLM", "llama"); },
-             "--parallel replica serves Qwen3.8 only"));
-  CHECK(says([] { cli::check_replica_model("Qwen3_5MoeForConditionalGeneration", "Ornith 1.5"); },
-             "Ornith 1.5 has no replica engine"));
+             "--parallel replica serves Qwen3.8 and Ornith only"));
   CHECK(says([] { cli::check_replica_model("", ""); }, "no readable config.json"));
-  cli::check_replica_model("Qwen3_5ForConditionalGeneration", "Qwen3.8");   // no throw
+  cli::check_replica_model("Qwen3_5ForConditionalGeneration", "Qwen3.8");     // no throw
+  cli::check_replica_model("Qwen3_5MoeForConditionalGeneration", "Ornith");   // no throw: one request a card
   CHECK(says([] { cli::require_two_devices_for_replica(1); }, "--parallel replica needs two GPUs"));
   cli::require_two_devices_for_replica(2);
   cli::check_replica_flags(p, false);
@@ -303,6 +302,15 @@ void check_max_num_seqs() {
   CHECK(says([&] { cli::PipelineArgs x; cli::resolve_max_num_seqs(x, 9, 2); }, "two cards run at most 8 requests"));
   CHECK(says([&] { cli::PipelineArgs x; cli::parse_parallel("1", x); cli::resolve_max_num_seqs(x, 5, 2); },
              "--parallel replica runs up to 8 on two"));
+  // Ornith has no slots: 2 on two cards (replica, or auto before the hardware gate), else 1; Qwen3.8 is not held.
+  const std::string orn = "Qwen3_5MoeForConditionalGeneration", q38 = "Qwen3_5ForConditionalGeneration";
+  cli::check_one_request_a_card(rep, 2, orn, "Ornith");
+  cli::check_one_request_a_card(a, 2, orn, "Ornith");   // auto: replica on two cards, refused after on one
+  cli::check_one_request_a_card(rep, 8, q38, "Qwen3.8");
+  CHECK(says([&] { cli::check_one_request_a_card(rep, 4, orn, "Ornith"); }, "Ornith runs one request a card"));
+  CHECK(says([&] { cli::check_one_request_a_card(a, 3, orn, "Ornith"); }, "--max-num-seqs 3 gives a card several"));
+  CHECK(says([&] { cli::check_one_request_a_card(one, 2, orn, "Ornith"); }, "--max-num-seqs 2 on two cards"));
+  cli::check_one_request_a_card(one, 1, orn, "Ornith");
 }
 
 int main() {

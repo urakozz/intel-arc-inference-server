@@ -214,7 +214,11 @@ def cmd_report(a):
                 r = dict(r, result="INCOMPLETE", reason="started, never finished (the orchestrator died?)")
         res[sid] = r
 
-    out = [f"# Box validation - {a.date or meta.get('finished', '')[:10] or 'run'}", ""]
+    quick = meta.get("quick") == "1"
+    out = [f"# Box validation{' (quick)' if quick else ''} - {a.date or meta.get('finished', '')[:10] or 'run'}", ""]
+    if quick:
+        out += ["A quick run (box_validate.sh --quick): a sample of the stages, some with a smaller input; the rest are "
+                "SKIP \"full only\". It does not stand for a full run.", ""]
     keys = ["tree_sha", "baseline_sha", "baseline_ref", "state", "tree", "baseline_tree"]
     if len(per_device) <= 1:
         keys += ["started", "finished", "selected"]

@@ -29,7 +29,8 @@
 # and progress.log (one line per event, tagged [d<DEVICE>]), meta-<DEVICE>.env (shas, trees,
 # times of this device's launch).
 # Env (from the driver): BV_TREE_LABEL, BV_BASE, BV_DATA, BV_REDO ("id ..." | all),
-#   BV_FORCE, BV_NO_REUSE, B70_GIT_SHA, BV_BASE_SHA, BV_BASE_REF, JOBS, CMAKE_ARGS, DEVICE, PORT, SNAP_*.
+#   BV_FORCE, BV_NO_REUSE, BV_QUICK (--quick: a stage without a quick form is SKIP "full only"),
+#   B70_GIT_SHA, BV_BASE_SHA, BV_BASE_REF, JOBS, CMAKE_ARGS, DEVICE, PORT, SNAP_*.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
 TREE="$PWD"
@@ -85,6 +86,7 @@ progress() {
   echo "started=$(ts)"
   echo "selected=$*"
   echo "device=$DEVICE"
+  echo "quick=$BV_QUICK"
 } > "$STATE/meta-$DEVICE.env"
 
 is_redo() { case " ${BV_REDO:-} " in *" all "*|*" $1 "*) return 0 ;; esac; return 1; }
@@ -144,6 +146,10 @@ run_claimed() {
   start=$(ts)
   if [ "$prev" = PASS ] && [ "$sel" != always ] && ! is_redo "$id"; then
     progress "$id PASS (kept from an earlier launch; --redo $id runs it again)"; return
+  fi
+  if [ "$BV_QUICK" = 1 ] && [ -z "$(bv_field "$id" quick)" ]; then
+    write_status "$id" SKIP 77 "$start" "$start" 0 "full only: not in the quick run (stages.sh, the --quick block)"
+    progress "$id SKIP full only"; return
   fi
   if [ "$sel" = g0 ]; then
     others=$(others_active)

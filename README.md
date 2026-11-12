@@ -41,8 +41,7 @@ Qwen3.8-27B, MTP speculative decoding, each request a 2,820-token prompt and 512
 | two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
 | two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
 
-**Ornith 1.5 35B-A3B** (Qwen3.5 MoE architecture, ~3B active parameters per token), one card, the full 262,144
-context with the bf16 cache:
+**Ornith 1.5 35B-A3B** (Qwen3.5 35B A3B MoE), one card, the full 262,144 context, bf16 cache:
 
 | | without MTP | with MTP |
 |---|---:|---:|
