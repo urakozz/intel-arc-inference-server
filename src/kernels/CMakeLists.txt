@@ -1262,11 +1262,8 @@ endif()
 if(B70_Q4EXP)
   set(Q4_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
   add_ocloc_kernel(pf_gated_head_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl DEFINES GDN_GATE_SIGMOID=1)
-  # MoE-model prefill phase 2 (Task 8): the GDN front at Qwen3.8's GDN shape, which this family shares; the router
-  # and a||b on pf_route.cl's tiling.
+  # MoE-model prefill phase 2 (Task 8): the GDN front at Qwen3.8's GDN shape, which this family shares.
   add_ocloc_kernel(pf_gdn_front SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl)
-  add_ocloc_kernel(pf_route_ab_D2560 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=128 MT=16 TC=2)
-  add_ocloc_kernel(pf_route_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=528 MT=16 TC=2)
   # MoE-model prefill phase 3 Task 8: the router and a||b by pf_gemm_T0, as Ornith's (prefill/CMakeLists.txt) - the
   # weights re-laid as zero-padded [K][P] slabs each chunk, and the two consumers at the GEMM's row pitch P (decode's
   # q4_route and Qwen3.8's pf_gdn_conv keep theirs).
