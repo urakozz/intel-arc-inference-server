@@ -11,7 +11,6 @@
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/gdn.h"   // pf_phase2
-#include "runtime/prefill/phase2.h"
 #include "runtime/prefill/profile.h"
 
 namespace runtime::prefill {
@@ -109,11 +108,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const loader::DeviceWeight& rw = w.router;
   require(rw.kind == model::WeightKind::Bf16 && rw.shape.N == m.router_n() && rw.shape.K == H,
           "the router is not bf16 [router_n][hidden]");
-  if (pf_phase2(d) && pf_route_dpas_on())   // D3, opt-in (B70_PF_ROUTE=dpas): bf16 DPAS logits, judged
-    cx.launch(kc(kernels::pf_route_router_dpas_variant(H, m.router_n()), "pf_route_dpas"),
-              (m.router_n() / 16 + 15) / 16, (C + 31) / 32, 1,
-              {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
-  else if (pf_phase2(d))   // phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles), bitwise pf_ab_proj
+  if (pf_phase2(d))   // phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles), bitwise pf_ab_proj
     cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
               (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
               (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
