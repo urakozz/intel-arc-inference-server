@@ -146,7 +146,9 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, Kernel
             int8_padded_k(sh.K) / kRotBlock, 1,
             {PtrArg(qw), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
              arg_val(0u), arg_val(sh.N), arg_val(sh.K)});
-  cx.wait();
+  // Profiled, its own bucket: a bare wait left these launches to the walk's first phase wait
+  // (73.9 of the 114.3 ms "norm" row at 4k l0-int8, phase 2 Task 1's trace). Unprofiled, cx.wait().
+  timed_wait(cx, Phase::kSetup);
   std::vector<uint32_t> mx(sh.N);
   imm_.copy(mx.data(), colmax.ptr(), mx.size() * 4);
   std::vector<float> ws(sh.N), inv(sh.N);

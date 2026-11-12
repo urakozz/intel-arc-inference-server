@@ -1171,4 +1171,16 @@ if(B70_ORNITH AND B70_Q4EXP)
   target_link_libraries(probe_moe_prefill PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(probe_moe_prefill)
   add_dependencies(probe_moe_prefill ${PMP_TARGETS} ${PCR_PF_KERNELS} ${ALL_KERNELS})
+# --- probe_gdn_intra: phase 2 Task 1, the GDN intra-chunk stages on real inputs (Ornith) ---------
+# Control: today's pf_gdn_wy entries; D-a: pf_gdn_intra (src/kernels/prefill/pf_gdn_intra.cl), and its
+# INTRA_DBG build (A and T written out for the per-stage error). Record: docs/probes/probe-prefill-phase2-2026-11-12.md.
+if(B70_ORNITH)
+  add_ocloc_kernel(pf_gdn_intra_dbg_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                   DEFINES INTRA_DBG=1 GDN_K_HEADS=16 GDN_V_HEADS=32)
+  add_executable(probe_gdn_intra probe_gdn_intra.cc)
+  target_include_directories(probe_gdn_intra PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_gdn_intra PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  b70_target_kernel_dir(probe_gdn_intra)
+  add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg_GK16V32 kernel_pf_gdn_intra_GK16V32
+                   kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
 endif()
