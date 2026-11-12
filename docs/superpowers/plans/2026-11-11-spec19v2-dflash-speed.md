@@ -113,13 +113,17 @@ moved to the front of the next submit; one `zeCommandQueueExecuteCommandLists` o
 path shares the call (keep pp bitwise its one-card form), `tests/runtime/dflash_engine_test.cc` (the ring after a
 deferred projection equals today's at every flush point: plain step, request end, snapshot, truncate).
 
-- [ ] **Step 1 (Mac):** failing host test on the mock (the projection is flushed before every snapshot and truncate),
-  implement, green. Commit.
+- [x] **Step 1:** projection deferral/batching implemented. Regression first failed on the missing Engine API;
+  box host/syntax checks and the real GPU ring/snapshot/truncate/request-end checks pass. Ruling: use the actual
+  queue and device buffers instead of adding a single-use host queue mock to the concrete Engine.
 - [ ] **Step 2 (box):** `dflash_engine_test`, `dflash_gpu_test`, `dflash_prefix_gpu_test`, `pp_dflash_test`,
   `r82.iter`.
   - **Gates:** G-D2; the ring and snapshots bitwise today's; host gap (iteration wall minus the lists' device time)
     <= 0.5 ms at K = 7.
   - Commit the numbers.
+  - One-card checks PASS (four actual passes, no skips); host gap 0.422639 / 0.381236 ms at 4096 / 32768,
+    below 0.5 ms. Combined projection + host still 0.804514 / 0.766757 ms; iteration 1.577007 / 1.558300 plain
+    steps. Full table in BENCHMARKS. PP regression pending both cards; Step 2 remains open until it passes.
 
 ### Task 5: the int4 g64 drafter (Mac, then box) - C2
 

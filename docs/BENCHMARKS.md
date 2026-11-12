@@ -1002,6 +1002,35 @@ lists still mask noncausal attention at K+1, so smaller K's are not prefixes of 
 than eight EOS-stopped continuation ids cannot supply these anchors and are excluded. The separate serving
 correctness round above covers all 36 A4 requests.
 
+### Task 4: one-submit iteration (2026-11-12, `882989b8`)
+
+The production DFlash path submits the pending projection, draft and verify together. Four device regressions
+passed with no skips: `dflash_profile_test`, `dflash_engine_test`, `dflash_gpu_test` and
+`dflash_prefix_gpu_test` (1620 s total). They check one submission per iteration, bitwise draft/readback,
+verify rows and ring, and projection materialization at snapshots, truncate and request end. The two-card
+`pp_dflash_test` remains pending while card 0 is occupied; Task 4 is not fully complete.
+
+**Busy box, exclusive card 1**, paired medians with calibrated active plain rows at both depths. The steady-state
+probe prepares the last prompt row through verify/commit outside timing, leaving its projection pending for the
+batched iteration; plain pairs use the same preparation. This is not a final serving speed measurement.
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| draft, ms | 9.039839 | 9.080943 |
+| verify(8), paired plain steps | 1.254267 | 1.274542 |
+| projection wall, ms | 0.490908 | 0.506852 |
+| K=7 iteration, ms | 45.939428 | 51.677500 |
+| K=7 iteration, paired plain steps | 1.577007 | 1.558300 |
+| instrumented host outside device lists, ms | **0.422639** | **0.381236** |
+| projection + host outside device lists, ms | 0.804514 | 0.766757 |
+| old kernel-sum host residual upper bound, ms | 1.371910 | 1.323840 |
+
+Task 4's host-only gap bar (<=0.5 ms) passes at both depths. C7's combined projection + host bar (<=0.5 ms)
+and full iteration bar (<=1.35 plain steps) remain unmet. Device-list intervals run from the first kernel start
+to the last kernel end, including dispatch and timestamp signal flushes within each list. The host figure is
+instrumented wall time minus those intervals; the older wall-minus-kernel-sums residual remains an upper bound.
+Evidence: `~/b70/logs/dflash-v2/task4/{device.xml,iter-4096.log,iter-32768.log}` and `task4-device.log`.
+
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
 **`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,
