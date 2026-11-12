@@ -1117,7 +1117,16 @@ M-row crossings, its draft reads the whole head's layer on each card and half th
 
 **Prefill after the MoE prefill plan (2026-11-12, one card, card 0 while card 1 ran another agent's jobs and a CPU job ran, median of 3, `b70-decode --bench --max-len auto`, 4096-row chunks):** 4k **8,080** t/s (`l0`, bf16 prompt pass) / **8,518** (`l0-int8`, W4A8 experts); 16k 6,800 / 7,059. The same run's main (7cfbf058, 2048-row chunks): 7,578 / 5,460 at 4k, 6,509 / 4,869 at 16k. Record and per-phase times: [probes/probe-moe-prefill-2026-11-12.md](probes/probe-moe-prefill-2026-11-12.md), "Task 8". The prefill numbers in the next paragraph predate it.
 
-**Measured on one card (2026-11-11, main, idle box between validation stages, median of 3):** prefill 3,362 / 3,259 t/s at 4k / 16k (bf16 prompt pass), 3,937 / 3,676 t/s (`--prefill-backend l0-int8`); plain decode 142.8 t/s at depth 4096 (`b70-decode --bench`); through `b70-serve` with MTP at the full 262,144 context, bf16 KV (`--max-len auto`, 27.3 GB planned of 32.5), one request, a 2,820-token prompt and 512 generated tokens (`tools/box_validate/slots_serve_bench.sh`): **234.9 t/s**, first token 1.28 s cold / 0.59 s as a prefix cache hit. Ornith's MTP cost table is still Qwen3.8's (startup note). The rows below predate these numbers. Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
+**Measured on one card (2026-11-11, main, idle box between validation stages, median of 3):** prefill 3,362 / 3,259 t/s at 4k / 16k (bf16 prompt pass), 3,937 / 3,676 t/s (`--prefill-backend l0-int8`); plain decode 142.8 t/s at depth 4096 (`b70-decode --bench`); through `b70-serve` with MTP at the full 262,144 context, bf16 KV (`--max-len auto`, 27.3 GB planned of 32.5), one request, a 2,820-token prompt and 512 generated tokens (`tools/box_validate/slots_serve_bench.sh`): **234.9 t/s**, first token 1.28 s cold / 0.59 s as a prefix cache hit. The rows below predate these numbers.
+
+**Ornith's MTP cost table (2026-11-12, one card, `probe_mtp_steps` at depth 4096, 64 calls x 9 rounds, `tools/gpu_lock.sh card`; two int8 runs agree within 0.01; r16.cost's commands, run directly):** in units of one plain step (verify M = 1 is 7.88 ms with the int8 head, 8.73 ms with the bf16 head), verify M = 1..4 and draft k = 1..3:
+
+| lm_head | verify M = 2 / 3 / 4 | draft k = 1 / 2 / 3 |
+|---|---|---|
+| int8 | 1.15 / 1.34 / 1.52 (9.05 / 10.61 / 12.03 ms) | 0.19 / 0.38 / 0.57 (1.52 / 3.00 / 4.49 ms) |
+| bf16 | 1.15 / 1.30 / 1.48 | 0.28 / 0.56 / 0.84 |
+
+Qwen3.8's int8 table is 1.04 / 1.09 / 1.13 and 0.13 / 0.26 / 0.38: Ornith's verify rows climb about four times as fast (a MoE layer reads up to 8 M distinct experts). **The table does not win:** `b70-serve --spec auto` with it wired in (after) against the same server on Qwen3.8's table (before), interleaved over 3 rounds, golden + tool-call prompts, 256 ids, `--max-len 16384`, ids identical, median decode t/s: golden prose / code / cjk 246.0 / 252.0 / 210.8 against 269.9 / 278.3 / 237.0 (geomean 0.90), the 36 tool-call prompts geomean 0.94 (about 185-240 t/s). The step-K policy drafts less under the dearer measured rows and loses more in accepted ids than it saves. So Ornith keeps Qwen3.8's table and K up to 3 (the startup note says so); the measured rows are recorded here, not wired. Open: why the probe's rows overstate the in-server cost (the probe times verify + commit one call at a time). Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
 the int4 checkpoint, spec 15 §13) was built without the card (specs 15c-15e); this section is the
 record's skeleton (plan 15e Task 3 Step 3), each cell filled from the box-validation-queue stage
 named beside it. Every row will state the card, the clocks if known, the quant and the `lm_head`
@@ -1130,7 +1139,7 @@ form (plan 15e Review Focus 5).
 | A4 tool calls, scenarios matching the reference's first call | Ornith's own set (36), the int4 checkpoint's CPU reference (`ornith_ref.py`), 192 ids; l0-int8 bf16 / int8 head, l0 | pending (Qwen3.8: 25/36) | r16.a4 |
 | prefix caching C2 | `prefix_gpu_test` l0-int8, l0, l0-int8 `--mtp 3` | pending | r16.prefix |
 | passkey | 120k (l0-int8, l0), 250k (l0-int8, max_len 262144) | pending | r16.passkey |
-| MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | pending | r16.mtp_rows |
+| MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | auto on Qwen3.8's table 269.9 / 278.3 / 237.0 t/s (golden prose / code / cjk, 2026-11-12, `--max-len 16384`); the off / 1 / 3 arms and the f32 judge not run | r16.mtp_rows (partial) |
 | llama-benchy pp4096 tg256 depth 1 | b70-serve, `--no-cache --exact-tg --latency-mode generation` | pending | r16.benchy |
 | llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r16.benchy |
 
