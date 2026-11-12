@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <vector>
 #include "l0/context.h"
@@ -206,6 +207,9 @@ struct PrefillScratch : PrefillScratchDims {
   l0::Mem& pf_s_buffer();      // fp32 [s_heads()][kC][max_len]  S = QK^T
   l0::Mem& pf_p_buffer();      // bf16 [s_heads()][kC][max_len]  P = softmax(S)
   l0::Mem& kv8_raw_buffer();   // bf16 [2][kv8_len][4][256], exact int8 values, scales applied by flash
+  // Phase 3 Task 2 (MoE, l0): weight `w`'s pf_gemm B slab, `bytes` long, allocated on the first call (`fresh` true:
+  // the caller fills it - prefill::tiled_slab) and kept for the session; runtime::route_slab_bytes counts them.
+  l0::Mem& gemm_slab(const void* w, size_t bytes, bool& fresh);
   size_t lazy_bytes() const;
 
  private:
@@ -215,6 +219,7 @@ struct PrefillScratch : PrefillScratchDims {
   const model::ModelDesc* desc_;
   uint32_t chunk_cap_;
   std::unique_ptr<l0::Mem> slab_, pf_s_, pf_p_, kv8_raw_;
+  std::map<const void*, l0::Mem> gemm_slabs_;
 };
 
 // Spec 8 (plan 8b): the MTP head's state, allocated ONLY when the model carries the

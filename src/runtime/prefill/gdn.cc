@@ -159,7 +159,6 @@ size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
 }
 bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b) { return d.is_moe() && b == PrefillBackend::L0; }
-size_t ab_launches(const model::ModelDesc& d, PrefillBackend b) { return ab_on_gemm(d, b) ? 2 : 1; }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }

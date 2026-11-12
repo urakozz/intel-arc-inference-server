@@ -28,7 +28,7 @@
 //   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6;
 //   9. combine_norm (phase 3 Task 5): pf_moe_combine_norm's residual and x every byte pf_moe_combine then
 //      pf_res_norm (S_PREV 0), at C 2048 and 37, and the rows past C untouched.
-//  10. router_gemm (phase 3 Task 2): the router by runtime::prefill::tiled_gemm (pf_route_slab + the dense GEMM, what
+//  10. router_gemm (phase 3 Task 2): the router by runtime::prefill::route_slab + tiled_gemm (the B slab, the dense GEMM - what
 //      moe_chunk binds on l0) at C 2048 and 37 - the slab exactly the weight with zero columns past 272, every logit
 //      of a row < C within 1e-5 x sum|w x| of the host's double sum of the same bf16 operands, and moe_route at row
 //      pitch 512 with the pad columns poisoned (NaN) every route word decode's moe_route gives on the same logits at
@@ -718,8 +718,8 @@ void check_router_gemm(Dev& d, Kernels& k, const Layer& L, const std::vector<uin
   l0::Mem slab(d.ctx, l0::MemKind::Device, size_t(kH) * P * 2), out(d.ctx, l0::MemKind::Device, size_t(Mp) * P * 4);
   d.imm.fill(slab.ptr(), 0x7F7F7F7Fu, slab.size());
   d.imm.fill(out.ptr(), 0x7FC00000u, out.size());
-  runtime::prefill::tiled_gemm(cx, kc, L.router.ptr(), N, kH, xb.as<uint16_t>(), C, slab.as<uint16_t>(),
-                               out.as<float>());
+  runtime::prefill::route_slab(cx, kc, L.router.ptr(), N, kH, slab.as<uint16_t>());
+  runtime::prefill::tiled_gemm(cx, kc, slab.as<uint16_t>(), N, kH, xb.as<uint16_t>(), C, out.as<float>());
   cx.wait();
   const std::vector<uint16_t> sl = d.read<uint16_t>(slab, size_t(kH) * P);
   size_t bad_slab = 0;

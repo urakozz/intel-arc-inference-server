@@ -113,11 +113,10 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
         // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
       const DeviceWeight& w = loader::prefill_ab(m, l);
       if (ab_on_gemm(d, backend)) {   // phase 3 Task 2: the dense GEMM, rows at pitch 256 in the MoE scratch
-        const MoePrefillLayout ml = moe_prefill_layout(d, s.chunk_cap());
-        uint8_t* base = static_cast<uint8_t*>(s.moe->ptr());
-        ab = reinterpret_cast<float*>(base + ml.gemm_out_off);
-        tiled_gemm(cx, kc, w.mem.ptr(), w.shape.N, d.hidden, s.x.as<uint16_t>(), C,
-                   reinterpret_cast<uint16_t*>(base + ml.gemm_slab_off), ab);
+        ab = reinterpret_cast<float*>(static_cast<uint8_t*>(s.moe->ptr()) +
+                                      moe_prefill_layout(d, s.chunk_cap()).gemm_out_off);
+        tiled_gemm(cx, kc, tiled_slab(cx, kc, s, w.mem.ptr(), w.shape.N, d.hidden), w.shape.N, d.hidden,
+                   s.x.as<uint16_t>(), C, ab);
       } else if (d.is_moe())   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
         cx.launch(kc(kernels::pf_route_ab_variant(d.hidden), "pf_gemv_rows"),
                   (w.shape.N / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
@@ -741,7 +740,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
   };
   const size_t nrm = res_norm_launches(d);
   const size_t ffn = nrm + moe_chunk_launches(d, b);
-  const size_t gdn = nrm + lin(LinearId::QkvZ) + ab_launches(d, b) + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
+  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
   const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
@@ -770,7 +769,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     };
     const size_t nrm = res_norm_launches(d);
     const size_t ffn = nrm + moe_chunk_launches(d, b);
-    return gdn ? nrm + lin(LinearId::QkvZ) + ab_launches(d, b) + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
+    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
                : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }

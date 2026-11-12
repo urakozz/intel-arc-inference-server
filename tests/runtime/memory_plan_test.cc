@@ -169,6 +169,10 @@ void check_sizes_ornith() {
   CHECK_EQ(ps.moe, ml2.total);
   CHECK_EQ(ps.slab, size_t{4096} * 1024 * 2);                       // out_proj / o_proj's K
   CHECK_EQ(ps.partials, size_t{2048} * 12288 * 4);                  // qkv||z's N
+  // Phase 3 Task 2: l0's router / a||b B slabs - 40 x [2048][512] + 30 x [2048][256] bf16, per stage by layer range.
+  CHECK_EQ(runtime::route_slab_bytes(o, 0, o.layers), size_t{40} * 2048 * 512 * 2 + size_t{30} * 2048 * 256 * 2);
+  CHECK_EQ(runtime::route_slab_bytes(o, 0, 4), size_t{4} * 2048 * 512 * 2 + size_t{3} * 2048 * 256 * 2);
+  CHECK_EQ(runtime::route_slab_bytes(model::qwen38(), 0, model::qwen38().layers), size_t{0});
   // Dense models carry none, and their slab / int8 K are what they were.
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});

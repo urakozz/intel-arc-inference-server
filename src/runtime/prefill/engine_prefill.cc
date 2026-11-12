@@ -109,6 +109,9 @@ void Engine::prepare_prefill() {
   if (!pfx_)
     pfx_ = std::unique_ptr<PrefillEngine, void (*)(PrefillEngine*)>(new PrefillEngine(ctx_),
                                                                     &destroy_prefill);
+  // Phase 3 Task 2: a MoE model's router / a||b B slabs, once, outside any chunk (counted by the memory plan).
+  if (prefill_backend() == PrefillBackend::L0)
+    prefill::make_route_slabs(pfx_->cx, pfx_->kc, *pf_, model_, 0, model_.desc->layers);
   if (prefill_backend() != PrefillBackend::L0Int8) return;
   if (!pfx_->int8)   // the largest int4 K the h8 walk runs: down's on a dense model (spec
                      // 14), the widest mixer linear's on a MoE model (spec 15d)

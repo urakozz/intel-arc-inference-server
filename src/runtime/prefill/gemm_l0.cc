@@ -5,6 +5,7 @@
 #include <string>
 
 #include "kernels/prefill/pf_kernels.h"
+#include "runtime/buffers.h"
 
 namespace runtime::prefill {
 namespace {
@@ -154,12 +155,22 @@ void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16
              arg_val(lda), arg_val(ldb), arg_val(ldx), arg_val(sA), arg_val(sB), arg_val(sC)});
 }
 
-void tiled_gemm(Context& cx, KernelCache& kc, const void* w, uint32_t N, uint32_t K, const uint16_t* A, uint32_t C,
-                uint16_t* slab, float* out) {
+void route_slab(Context& cx, KernelCache& kc, const void* w, uint32_t N, uint32_t K, uint16_t* slab) {
   require(K % 8 == 0, "K = " + std::to_string(K) + " is not whole 8-k groups");
-  const uint32_t P = kernels::pf_route_slab_pitch(N);
-  cx.launch(kc(kernels::pf_route_slab_variant(K, N), "pf_route_slab"), P / 256, K / 8, 1,
+  cx.launch(kc(kernels::pf_route_slab_variant(K, N), "pf_route_slab"), kernels::pf_route_slab_pitch(N) / 256, K / 8, 1,
             {PtrArg(w), PtrArg(slab)});
+}
+
+const uint16_t* tiled_slab(Context& cx, KernelCache& kc, PrefillScratch& s, const void* w, uint32_t N, uint32_t K) {
+  bool fresh = false;
+  l0::Mem& m = s.gemm_slab(w, size_t(K) * kernels::pf_route_slab_pitch(N) * 2, fresh);
+  if (fresh) route_slab(cx, kc, w, N, K, m.as<uint16_t>());
+  return m.as<uint16_t>();
+}
+
+void tiled_gemm(Context& cx, KernelCache& kc, const uint16_t* slab, uint32_t N, uint32_t K, const uint16_t* A,
+                uint32_t C, float* out) {
+  const uint32_t P = kernels::pf_route_slab_pitch(N);
   gemm_l0(cx, kc, GemmBatch{C, K, P, 1, K, P, P, 0, 0, 0}, A, slab, out, /*transB=*/false);
 }
 
