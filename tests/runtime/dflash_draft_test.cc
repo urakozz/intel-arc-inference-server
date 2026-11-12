@@ -82,6 +82,7 @@ dfref::Lin host_lin(const loader::DFlashHostLinear& h) {
   l.i8 = h.i8;
   l.scales = h.scales;
   if (!h.int4.empty()) {
+    l.contracted = true;
     l.q4.resize(size_t(h.K / 8) * h.N);
     l.s4.resize(size_t(h.K / 64) * h.N);
     for (uint32_t n = 0; n < h.N; ++n)
