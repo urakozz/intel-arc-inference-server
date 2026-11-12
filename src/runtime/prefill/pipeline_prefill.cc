@@ -634,11 +634,11 @@ void PipelineEngine::prepare_prefill() {
   if (!pf_) {
     const uint32_t cap = prefill_chunk_cap();
     check_prefill_chunk_cap(d, cap);
-    // The two stages' walks add up to one card's, launch for launch (step.h).
+    // The two stages' walks add up to one card's, launch for launch, plus what the cut adds (step.h).
     for (uint32_t C : {1u, 256u, cap})
       if (prefill::step_stage_launches(d, b, C, stage(0), kv_) +
               prefill::step_stage_launches(d, b, C, stage(1), kv_) !=
-          prefill::step_chunk_launches(d, b, C, kv_))
+          prefill::step_chunk_launches(d, b, C, kv_) + prefill::step_cut_extra_launches(d))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
     pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff, cap);
