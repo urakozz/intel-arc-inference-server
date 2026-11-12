@@ -112,7 +112,9 @@
 #define K_OFF (GDN_K_HEADS * DIM)
 #define V_OFF (2 * GDN_K_HEADS * DIM)
 #define RING 16
+#ifndef AB_STRIDE         /* phase 3 Task 2: _AB<P> builds read the dense GEMM's rows at pitch P */
 #define AB_STRIDE 128     /* the a||b GEMV's padded row (model_desc.cc kAbPaddedN) */
+#endif
 #define B_OFF GDN_V_HEADS
 #define CT 64
 #define K_HEADS GDN_K_HEADS

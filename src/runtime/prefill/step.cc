@@ -11,6 +11,7 @@
 #include "kernels/tp_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/prefill/attn.h"
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/gemm.h"
@@ -106,11 +107,18 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
   if (L.kind == model::LayerKind::GDN) {
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
+    float* ab = s.ab_out.as<float>();
     {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape. The bf16
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
         // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
       const DeviceWeight& w = loader::prefill_ab(m, l);
-      if (d.is_moe())   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
+      if (ab_on_gemm(d, backend)) {   // phase 3 Task 2: the dense GEMM, rows at pitch 256 in the MoE scratch
+        const MoePrefillLayout ml = moe_prefill_layout(d, s.chunk_cap());
+        uint8_t* base = static_cast<uint8_t*>(s.moe->ptr());
+        ab = reinterpret_cast<float*>(base + ml.gemm_out_off);
+        tiled_gemm(cx, kc, w.mem.ptr(), w.shape.N, d.hidden, s.x.as<uint16_t>(), C,
+                   reinterpret_cast<uint16_t*>(base + ml.gemm_slab_off), ab);
+      } else if (d.is_moe())   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
         cx.launch(kc(kernels::pf_route_ab_variant(d.hidden), "pf_gemv_rows"),
                   (w.shape.N / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
                   (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
@@ -120,7 +128,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
                   {PtrArg(w.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(s.ab_out.ptr()), arg_val(C)});
       profile_wait(cx, Phase::kAbGdn);
     }
-    gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
+    gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), ab,
               reinterpret_cast<float*>(gdn_base + size_t(gdn) * gdn_state_stride),
               reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
               small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend);   // y stride v-heads x 128
@@ -733,7 +741,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
   };
   const size_t nrm = res_norm_launches(d);
   const size_t ffn = nrm + moe_chunk_launches(d, b);
-  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
+  const size_t gdn = nrm + lin(LinearId::QkvZ) + ab_launches(d, b) + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
   const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
@@ -762,7 +770,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     };
     const size_t nrm = res_norm_launches(d);
     const size_t ffn = nrm + moe_chunk_launches(d, b);
-    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
+    return gdn ? nrm + lin(LinearId::QkvZ) + ab_launches(d, b) + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
                : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }

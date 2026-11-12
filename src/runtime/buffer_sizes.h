@@ -247,7 +247,12 @@ struct MoePrefillLayout {
          cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
          items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
          xsg_tok_off = 0,        // W4A8 (l0-int8): the chunk's per-token 64-k group scales, fp32 [C][hidden / 64]
-         xsg_off = 0;            // and the sorted rows', fp32 [rows][hidden / 64]
+         xsg_off = 0,            // and the sorted rows', fp32 [rows][hidden / 64]
+         // Phase 3 Task 2 (l0): the router || shared gate's and the a||b's dense GEMM, INSIDE xg (no bytes of its
+         // own): fp32 [pad256(kC)][gemm_pitch] rows, then the bf16 [hidden][gemm_pitch] B slab. The router's rows
+         // are consumed by moe_route before the gather writes xg, the a||b's by pf_gdn_gate before the layer's MoE.
+         gemm_out_off = 0, gemm_slab_off = 0;
+  uint32_t gemm_pitch = 0;       // the wider of the two GEMMs' padded N (pf_route_slab_pitch)
   uint32_t ibound = 0;           // at the chunk cap
   size_t total = 0;
   size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }

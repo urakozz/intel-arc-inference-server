@@ -64,6 +64,12 @@ inline constexpr size_t kGdnChunkLaunches = 10;
 // The launches one gdn_chunk call appends for `d` on backend `b`.
 size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
+// Phase 3 Task 2: on a MoE model's l0 backend the a||b runs as the dense GEMM (tiled_gemm: its slab, pf_gemm - two
+// launches) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's GEMM region, and gdn_chunk's
+// pf_gdn_gate reads that pitch (pf_gdn_conv _AB256). Elsewhere one pf_gemv_rows / pf_ab_proj launch into ab_out.
+bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b);
+size_t ab_launches(const model::ModelDesc& d, PrefillBackend b);
+
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
 // gate run was not admissible evidence unless the run itself said which scan

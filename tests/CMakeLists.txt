@@ -271,6 +271,13 @@ target_include_directories(pf_gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_
 target_link_libraries(pf_gemv_test PRIVATE b70_l0)
 b70_target_kernel_dir(pf_gemv_test)
 add_dependencies(pf_gemv_test kernel_pf_ab_proj kernel_gemv_bf16_M1_K5120_N128_C16_S16)
+if(B70_ORNITH)   # phase 3 Task 2: the ab_gemm case (Ornith's a||b by tiled_gemm, pf_gdn_gate at pitch 256)
+  target_compile_definitions(pf_gemv_test PRIVATE B70_PF_AB_GEMM=1)
+  target_link_libraries(pf_gemv_test PRIVATE b70_prefill_host)
+  add_dependencies(pf_gemv_test kernel_pf_route_slab_K2048_N128_P256 kernel_pf_gemm_T0
+                   kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
+                   kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_conv_GK16V32_AB256)
+endif()
 add_test(NAME pf_gemv_test COMMAND pf_gemv_test)
 
 add_executable(pf_attn_test prefill/pf_attn_test.cc)
@@ -1920,6 +1927,8 @@ if(B70_ORNITH)
     kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
     kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
     kernel_pf_moe_combine_norm_E256_T8_D2048_I512_G20
+    kernel_pf_route_slab_K2048_N272_P512 kernel_pf_route_slab_K2048_N128_P256 kernel_moe_M1_E256_T8_D2048_I512_R512
+    kernel_pf_gdn_conv_GK16V32_AB256 kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
     kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K512_N2048
     kernel_pf_moe_w4a8_K2048_N1024
     kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
@@ -1949,7 +1958,7 @@ if(B70_ORNITH)
 
   add_executable(pf_moe_test kernels/pf_moe_test.cc)
   target_include_directories(pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(pf_moe_test PRIVATE b70_l0)
+  target_link_libraries(pf_moe_test PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(pf_moe_test)
   add_dependencies(pf_moe_test ${B70_ORNITH_PREFILL_KERNELS})
   add_test(NAME pf_moe_test COMMAND pf_moe_test)

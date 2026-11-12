@@ -154,4 +154,13 @@ void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16
              arg_val(lda), arg_val(ldb), arg_val(ldx), arg_val(sA), arg_val(sB), arg_val(sC)});
 }
 
+void tiled_gemm(Context& cx, KernelCache& kc, const void* w, uint32_t N, uint32_t K, const uint16_t* A, uint32_t C,
+                uint16_t* slab, float* out) {
+  require(K % 8 == 0, "K = " + std::to_string(K) + " is not whole 8-k groups");
+  const uint32_t P = kernels::pf_route_slab_pitch(N);
+  cx.launch(kc(kernels::pf_route_slab_variant(K, N), "pf_route_slab"), P / 256, K / 8, 1,
+            {PtrArg(w), PtrArg(slab)});
+  gemm_l0(cx, kc, GemmBatch{C, K, P, 1, K, P, P, 0, 0, 0}, A, slab, out, /*transB=*/false);
+}
+
 }  // namespace runtime::prefill

@@ -22,8 +22,10 @@ class Int8State;
 // output is FOLDED into PrefillScratch::resid (pf_moe_combine, as decode's moe_down), so
 // the next norm folds nothing (S_PREV 0). Launches, in order:
 //
-//   router GEMV (pf_moe_router, entry pf_ab_proj)    logits [C][router_n]
-//   moe_route (decode's moe.cl binary, grid (1, C))  route rows, this layer's slice
+//   l0-int8: router GEMV (pf_route_router, entry pf_gemv_rows)   logits [C][router_n]
+//            moe_route (decode's moe.cl binary, grid (1, C))      route rows, this layer's slice
+//   l0:      pf_route_slab + pf_gemm (tiled_gemm, phase 3 Task 2)  logits [C][512] in xg's region
+//            moe_route (moe.cl at ROUTER_N 512, grid (1, C))       route rows, this layer's slice
 //   pf_moe_hist, pf_moe_scan, pf_moe_scatter         header, tile table, sorted rows, work items
 //   l0-int8: pf_quant_g64 (the chunk's x, once), pf_moe_gather_i8g, pf_moe_w4a8 (SiLU) -> h
 //   l0:      pf_moe_gather, pf_moe_q4gemm (SiLU)                               -> h
@@ -37,7 +39,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
                uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q,
                const void* next_norm = nullptr);
 
-// What one moe_chunk appends (a function of the backend, never of C): 10 on l0-int8, 9 on l0.
+// What one moe_chunk appends (a function of the backend, never of C): 10 on l0-int8, 10 on l0.
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
 }  // namespace runtime::prefill

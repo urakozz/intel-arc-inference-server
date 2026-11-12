@@ -7,6 +7,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "runtime/buffer_sizes.h"
 #include "runtime/prefill/backend.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8.h"
 #include "runtime/prefill/profile.h"
 
@@ -27,8 +28,9 @@ T* at(l0::Mem& m, size_t off) {
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   (void)d;
   // router GEMV + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
-  // (l0), or the W4A8 quantiser, gather and GEMM (l0-int8).
-  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 3 : 2);
+  // (l0), or the W4A8 quantiser, gather and GEMM (l0-int8). Phase 3 Task 2: on l0 the router is two launches (its
+  // slab, the dense GEMM).
+  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 3 : 2) + (b == PrefillBackend::L0 ? 1 : 0);
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
@@ -71,13 +73,24 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const loader::DeviceWeight& rw = w.router;
   require(rw.kind == model::WeightKind::Bf16 && rw.shape.N == m.router_n() && rw.shape.K == H,
           "the router is not bf16 [router_n][hidden]");
-  // Phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles a work-group), bitwise pf_ab_proj.
-  cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
-            (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-            (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-            {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
-  cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
-            {PtrArg(logits), PtrArg(route)});
+  if (backend == PrefillBackend::L0) {
+    // Phase 3 Task 2: the router by the dense GEMM (judged by the f32 judge; its last bits are not decode's), rows
+    // at pitch gemm_pitch, and moe_route built at that pitch.
+    float* glog = at<float>(*s.moe, L.gemm_out_off);
+    tiled_gemm(cx, kc, rw.mem.ptr(), m.router_n(), H, s.x.as<uint16_t>(), C, at<uint16_t>(*s.moe, L.gemm_slab_off),
+               glog);
+    cx.launch(kc(kernels::pf_moe_route_gemm_variant(E, m.top_k, H, I, kernels::pf_route_slab_pitch(m.router_n())),
+                 "moe_route"),
+              1, C, 1, {PtrArg(glog), PtrArg(route)});
+  } else {
+    // Phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles a work-group), bitwise pf_ab_proj.
+    cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
+              (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
+              (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
+              {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
+    cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
+              {PtrArg(logits), PtrArg(route)});
+  }
   profile_wait(cx, Phase::kMoeRoute);
   // 2. The sort: the header, the tile table padded to tmax, the rows and the work items - pf_moe_sort_mw's
   //    histogram, scan and scatter over 64-token blocks (plan 2026-11-12 Task 2: bitwise the one-work-group sort).

@@ -93,3 +93,26 @@ __kernel void pf_gemv_rows(__global const ushort* restrict w,
     if (m < m_count && nt < NTILES) out[(size_t)m * N + nt * SG + lane] = red[0][t][i][lane];
   }
 }
+
+#ifdef ROUTE_SLAB
+// pf_route_slab (phase 3 Task 2; built only with ROUTE_SLAB = the padded width NP, kernels::pf_route_slab_variant) -
+// the weight pf_gemv_rows reads (gemv_bf16's tiled [N][K]: tile n / 16, k8 group, lane n % 16, eight k) re-laid as
+// pf_gemm's untransposed B, bf16 [K][NP] (ldb NP), columns N..NP-1 zero, so the dense GEMM writes the logits (or
+// a||b) rows [M][NP] at row pitch NP. Its sums are DPAS's, not the GEMV's order: judged, not bitwise.
+//
+// Grid (NP / 256, K / 8); work-group 256: one column n and eight k a work-item (the stores coalesce along n).
+#define NP ROUTE_SLAB
+#if NP % 256 != 0 || NP < N
+#error "pf_route_slab: ROUTE_SLAB must be whole 256-column GEMM tiles covering N"
+#endif
+__attribute__((reqd_work_group_size(256, 1, 1)))
+__kernel void pf_route_slab(__global const ushort* restrict w, __global ushort* restrict slab) {
+  const uint n = get_global_id(0);
+  const uint k8 = get_group_id(1);
+  ushort8 v = (ushort8)(0);
+  if (n < N) v = vload8(0, w + (size_t)(n / SG) * K8 * 128 + (size_t)k8 * 128 + (n % SG) * 8);
+  __global ushort* restrict o = slab + (size_t)k8 * 8 * NP + n;
+  o[0] = v.s0; o[NP] = v.s1; o[2 * NP] = v.s2; o[3 * NP] = v.s3;
+  o[4 * NP] = v.s4; o[5 * NP] = v.s5; o[6 * NP] = v.s6; o[7 * NP] = v.s7;
+}
+#endif

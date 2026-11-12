@@ -163,6 +163,23 @@ inline constexpr unsigned kPfRouteMt = 16, kPfRouteTc = 2;
 inline std::string pf_route_router_variant(unsigned K, unsigned N) {
   return "pf_route_router_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
+// Phase 3 Task 2 (Ornith l0): the router || shared gate and the a||b by the dense GEMM. pf_route.cl's pf_route_slab
+// re-lays the tiled bf16 [N][K] weight as pf_gemm's B [K][P], P = N padded to whole 256-column tiles; the two
+// consumers read the GEMM's rows at pitch P: moe.cl's moe_route built at ROUTER_N = P (decode's binary keeps 272)
+// and pf_gdn_conv.cl's pf_gdn_gate at AB_STRIDE = P.
+inline unsigned pf_route_slab_pitch(unsigned N) { return (N + 255) / 256 * 256; }
+inline std::string pf_route_slab_variant(unsigned K, unsigned N) {
+  return "pf_route_slab_K" + std::to_string(K) + "_N" + std::to_string(N) + "_P" +
+         std::to_string(pf_route_slab_pitch(N));
+}
+inline std::string pf_moe_route_gemm_variant(unsigned experts, unsigned top_k, unsigned hidden, unsigned inter,
+                                             unsigned pitch) {
+  return "moe_M1_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" + std::to_string(hidden) +
+         "_I" + std::to_string(inter) + "_R" + std::to_string(pitch);
+}
+inline std::string pf_gdn_gate_gemm_variant(unsigned gdn_k, unsigned gdn_v, unsigned pitch) {
+  return pf_gdn_conv_variant(gdn_k, gdn_v) + "_AB" + std::to_string(pitch);
+}
 // Phase 2 Task 2: pf_gdn_front.cl, pf_gdn_conv + pf_gdn_l2norm in one launch.
 inline std::string pf_gdn_front_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_front" + gdn_suffix(gdn_k, gdn_v);

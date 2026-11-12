@@ -386,6 +386,16 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_route_ab_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl DEFINES K=2048 N=128 MT=16 TC=2)
   add_ocloc_kernel(pf_route_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
                    DEFINES K=2048 N=272 MT=16 TC=2)
+  # Phase 3 Task 2 (l0): the router and a||b by pf_gemm_T0 - their weights re-laid as zero-padded [K][P] slabs, and
+  # the two consumers at the GEMM's row pitch P (decode's moe_M1 binary and pf_gdn_conv_GK16V32 keep theirs).
+  add_ocloc_kernel(pf_route_slab_K2048_N272_P512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=272 ROUTE_SLAB=512)
+  add_ocloc_kernel(pf_route_slab_K2048_N128_P256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=128 ROUTE_SLAB=256)
+  add_ocloc_kernel(moe_M1_E256_T8_D2048_I512_R512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../moe.cl
+                   DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=512)
+  add_ocloc_kernel(pf_gdn_conv_GK16V32_AB256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN} AB_STRIDE=256)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
                    DEFINES ${PF_ORNITH_GDN})

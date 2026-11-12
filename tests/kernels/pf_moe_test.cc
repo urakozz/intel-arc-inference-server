@@ -28,6 +28,11 @@
 //   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6;
 //   9. combine_norm (phase 3 Task 5): pf_moe_combine_norm's residual and x every byte pf_moe_combine then
 //      pf_res_norm (S_PREV 0), at C 2048 and 37, and the rows past C untouched.
+//  10. router_gemm (phase 3 Task 2): the router by runtime::prefill::tiled_gemm (pf_route_slab + the dense GEMM, what
+//      moe_chunk binds on l0) at C 2048 and 37 - the slab exactly the weight with zero columns past 272, every logit
+//      of a row < C within 1e-5 x sum|w x| of the host's double sum of the same bf16 operands, and moe_route at row
+//      pitch 512 with the pad columns poisoned (NaN) every route word decode's moe_route gives on the same logits at
+//      pitch 272.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -53,7 +58,10 @@
 #include "l0/module.h"
 #include "l0/queue.h"
 #include "pf_moe_ref.h"
+#include "runtime/prefill/context.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8_signs.h"
+#include "runtime/prefill/kernels.h"
 
 namespace {
 
@@ -699,6 +707,66 @@ void check_combine_norm(Dev& d, Kernels& k, const Run& r, const std::vector<uint
   CHECK(std::memcmp(vb.data(), r.resid.data(), size_t(C) * kH * 2) == 0);   // and the walk's own combine
 }
 
+// 10: router_gemm - the l0 router (tiled_gemm) against the host, and moe_route at the GEMM's pitch against decode's.
+void check_router_gemm(Dev& d, Kernels& k, const Layer& L, const std::vector<uint16_t>& x, uint32_t C) {
+  constexpr uint32_t N = 272, P = 512;
+  CHECK_EQ(kernels::pf_route_slab_pitch(N), P);
+  const uint32_t Mp = pad256(C);
+  runtime::prefill::Context cx{d.ctx};
+  runtime::prefill::KernelCache kc{d.ctx};
+  l0::Mem xb = d.upload(x);   // kKc rows: the GEMM reads rows up to its padded M, never writes them
+  l0::Mem slab(d.ctx, l0::MemKind::Device, size_t(kH) * P * 2), out(d.ctx, l0::MemKind::Device, size_t(Mp) * P * 4);
+  d.imm.fill(slab.ptr(), 0x7F7F7F7Fu, slab.size());
+  d.imm.fill(out.ptr(), 0x7FC00000u, out.size());
+  runtime::prefill::tiled_gemm(cx, kc, L.router.ptr(), N, kH, xb.as<uint16_t>(), C, slab.as<uint16_t>(),
+                               out.as<float>());
+  cx.wait();
+  const std::vector<uint16_t> sl = d.read<uint16_t>(slab, size_t(kH) * P);
+  size_t bad_slab = 0;
+  for (uint32_t kk = 0; kk < kH; ++kk)
+    for (uint32_t n = 0; n < P; ++n)
+      bad_slab += sl[size_t(kk) * P + n] != (n < N ? L.rows[size_t(n) * kH + kk] : uint16_t(0));
+  const std::vector<float> lg = d.read<float>(out, size_t(C) * P);
+  double worst = 0;
+  size_t bad = 0;
+  for (uint32_t m = 0; m < C; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      double ref = 0, S = 0;
+      for (uint32_t kk = 0; kk < kH; ++kk) {
+        const double p = double(f32(L.rows[size_t(n) * kH + kk])) * double(f32(x[size_t(m) * kH + kk]));
+        ref += p;
+        S += std::fabs(p);
+      }
+      const double e = std::fabs(double(lg[size_t(m) * P + n]) - ref) / (S > 0 ? S : 1.0);
+      worst = std::max(worst, e);
+      bad += !(e <= 1e-5);
+    }
+  // moe_route at pitch 512, pad columns poisoned, against decode's binary on the same logits at pitch 272
+  std::vector<float> poisoned(lg), compact(size_t(C) * N);
+  for (uint32_t m = 0; m < C; ++m) {
+    std::fill(poisoned.begin() + size_t(m) * P + N, poisoned.begin() + size_t(m + 1) * P, std::nanf(""));
+    std::copy(lg.begin() + size_t(m) * P, lg.begin() + size_t(m) * P + N, compact.begin() + size_t(m) * N);
+  }
+  l0::Module rm(d.ctx, kernels::path(kernels::pf_moe_route_gemm_variant(256, 8, kH, kI, P)));
+  l0::Kernel r512(rm, "moe_route");
+  r512.group_size(256);
+  l0::Mem lp = d.upload(poisoned), lc = d.upload(compact), ra = d.zeros(size_t(C) * 32 * 4),
+          rb = d.zeros(size_t(C) * 32 * 4);
+  r512.arg_ptr(0, lp.ptr());
+  r512.arg_ptr(1, ra.ptr());
+  d.run(r512, 1, C);
+  k.route.arg_ptr(0, lc.ptr());
+  k.route.arg_ptr(1, rb.ptr());
+  d.run(k.route, 1, C);
+  const std::vector<uint32_t> va = d.read<uint32_t>(ra, size_t(C) * 32), vb = d.read<uint32_t>(rb, size_t(C) * 32);
+  std::printf(" 10. router_gemm C %u: slab %zu words off; logits max |err| / sum|w x| %.3g (%zu over 1e-5); "
+              "moe_route at pitch %u (pad NaN) %s decode's at %u\n",
+              C, bad_slab, worst, bad, P, va == vb ? "every word" : "DIFFERS from", N);
+  CHECK_EQ(bad_slab, size_t(0));
+  CHECK_EQ(bad, size_t(0));
+  CHECK(va == vb);
+}
+
 void check_sort(const std::vector<uint32_t>& route, const Run& r) {
   const pf_moe_ref::Sorted want = pf_moe_ref::sort(route.data(), r.C, kS);
   CHECK(r.hdr == want.hdr);
@@ -972,6 +1040,9 @@ int main() {
     CHECK(std::memcmp(a.resid.data(), c.resid.data(), size_t(Cr) * kH * 2) == 0);
     std::puts("     the 37 tokens as their own chunk and inside the 2048-row one: bitwise equal");
   }
+  // 10. router_gemm
+  check_router_gemm(d, k, L, x, C);
+  check_router_gemm(d, k, L, x, 37);
   std::puts("pf_moe_test OK");
   return 0;
 }
