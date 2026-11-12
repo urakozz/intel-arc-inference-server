@@ -34,7 +34,7 @@ std::vector<std::string> dflash_expected_names(const model::DFlashDesc& d);
 std::string dflash_canon(const std::string& name);
 
 // One linear in its device form: Bf16 - gemv_bf16's tiles [N/16][K/8][8][16] as uint16; Int8 - gemv_i8w's tiles
-// [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 26b, the LiLiCorr drafter's DraftFormat::Int4G64) -
+// [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 19v2 / 26b, DraftFormat::Int4G64) -
 // rtn's GPTQ words and f16 scales repacked into gemv.cl's layout-1 tiles [N/16][K/64][136] u32.
 struct DFlashHostLinear {
   model::WeightKind kind = model::WeightKind::Bf16;

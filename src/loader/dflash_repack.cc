@@ -11,6 +11,7 @@
 #include "common/json.h"
 #include "common/repack.h"
 #include "loader/lm_head_int8.h"
+#include "loader/rtn.h"
 #include "loader/snapshot.h"
 
 // dflash_repack.cc - the host half of the DFlash drafter loader (dflash_repack.h has the contract).
@@ -219,9 +220,9 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
     const uint16_t* src = bf16(p);
     rows.insert(rows.end(), src, src + (t.end - t.begin) / 2);
   }
-  if (f != DraftFormat::Bf16 && f != DraftFormat::Int8)
+  if (f == DraftFormat::Exact)
     refuse(dir_, std::string("--draft-format ") + draft_format_name(f) +
-                     " is the LiLiCorr drafter's (spec 26b): load bf16 or int8");
+                     " is the LiLiCorr drafter's (spec 26b): load bf16, int8 or int4 g64");
   DFlashHostLinear h;
   h.K = K;
   h.N = uint32_t(rows.size() / K);
@@ -230,6 +231,14 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
     h.kind = model::WeightKind::Bf16;
     h.bf16.resize(rows.size());
     common::repack_bf16_tiled(rows.data(), K, h.N, h.bf16.data());
+  } else if (f == DraftFormat::Int4G64) {
+    if (K % 64) refuse(dir_, "an int4 g64 linear's K is not a multiple of 64: " + parts[0]);
+    h.kind = model::WeightKind::Int4;
+    std::vector<uint32_t> q(size_t(K / 8) * h.N);
+    std::vector<uint16_t> scales(size_t(K / 64) * h.N);
+    rtn_int4_g64(rows.data(), K, h.N, q.data(), scales.data());
+    h.int4.resize(size_t(h.N / 16) * (K / 64) * 136);
+    common::repack_int4_layout1(q.data(), scales.data(), K, h.N, h.int4.data());
   } else {
     h.kind = model::WeightKind::Int8;
     h.i8.resize(rows.size());
