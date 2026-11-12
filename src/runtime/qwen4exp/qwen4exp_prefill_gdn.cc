@@ -9,9 +9,9 @@
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/profile.h"
 
-// gdn_chunk_q4 - runtime/prefill/gdn.cc's launches (a MoE model's four-launch intra form: nine), statement for
-// statement in their order, grids and arguments, over GdnChunkBuffers instead of a PrefillScratch; the one binding that differs is the tenth
-// (pf_gated_head_SIG). The comments of gdn.cc hold for every launch here (ordering is the in-order list's alone;
+// gdn_chunk_q4 - runtime/prefill/gdn.cc's launches (a MoE model's l0 form: six), statement for statement in their
+// order, grids and arguments, over GdnChunkBuffers instead of a PrefillScratch; the one binding that differs is the
+// last (pf_gated_head_SIG). The comments of gdn.cc hold for every launch here (ordering is the in-order list's alone;
 // launch 9 is the only writer of the state).
 namespace runtime::qwen4exp {
 namespace {
@@ -32,9 +32,6 @@ void require(bool ok, const std::string& what) {
   if (!ok) throw std::runtime_error("runtime::qwen4exp::gdn_chunk_q4: " + what);
 }
 
-// gdn.cc's solve entry (its selector went in the zero-config cleanup).
-const char* solve_entry() { return "pf_gdn_solve"; }
-
 }  // namespace
 
 void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunkBuffers& b, uint32_t pos, uint32_t C) {
@@ -43,12 +40,10 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
               b.u && b.o,
           "a buffer is missing");
   const char* const scan_entry = prefill::gdn_scan_entry_name();   // gdn.cc's (gdn.h)
-  const char* const solve = solve_entry();
   const uint32_t nch = (C + kGdnChunk - 1) / kGdnChunk;
   const uint32_t conv_groups = kConvDim / kConvWg;
   const void* gated_w = static_cast<const uint8_t*>(b.small) + b.gated_norm_off;
   const std::string conv = kernels::pf_gdn_conv_variant(kKHeads, kVHeads);
-  const std::string wy = kernels::pf_gdn_wy_variant(kKHeads, kVHeads);
   const std::string scan = kernels::pf_gdn_scan_variant(kKHeads, kVHeads);
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1, {PtrArg(b.ring), PtrArg(b.seed), arg_val(pos)});
@@ -61,19 +56,10 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   cx.launch(kc(conv, "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
-  cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).
-  cx.launch(kc(wy, solve), kVHeads, nch, 1, {PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnSolve);
-  //  7 - u = T vb and w = T kb.
-  cx.launch(kc(wy, "pf_gdn_wu"), kVHeads, nch, 2,
-            {PtrArg(b.xb), PtrArg(b.A), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), arg_val(C)});
+  //  5-8 - A, T, w / u and A2 in one launch (phase 2 Task 3 / 8, gdn.cc's pf_gdn_intra), judged.
+  cx.launch(kc(kernels::pf_gdn_intra_variant(kKHeads, kVHeads), "pf_gdn_intra"), kVHeads, nch, 1,
+            {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnWu);
-  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i, as the scan's packed hi / lo words (gdn.h).
-  cx.launch(kc(wy, prefill::gdn_a2_entry_name()), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA2);
   //  9 - the sequential chunk-to-chunk state scan; the only writer of the state.
   cx.launch(kc(scan, scan_entry), kVHeads, kStateColChunks, 1,
             {PtrArg(b.xb), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), PtrArg(b.g), PtrArg(b.state), PtrArg(b.o), arg_val(C)});

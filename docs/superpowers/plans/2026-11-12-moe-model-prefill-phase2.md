@@ -201,6 +201,12 @@ commit and its own verdict:
 - [ ] **Step 2 (Mac, then box):** the winners built, the rest deleted; the gates of the candidate's kind (bitwise: the
   extended G0 compare; judged: Task 3's).
   - **Gate:** a candidate is taken only if it saves >= 3 ms at 4k l0 and passes its numerics gate.
+  - **Result (2026-11-12): nothing taken.** The gated head with one sub-group a (position, head) (bitwise end to end:
+    prefill_gate_ornith l0 / l0-int8 and ornith_prefill_l0 print main's logs) saved 1.5 ms (13.1 -> 11.6, 3 pairs):
+    under the 3 ms bar, removed. The scan with 8 column chunks was not built: at 30 KB of SLM and 256 lanes the
+    128 work-groups already fill every Xe-core's 64 thread slots, so 256 would run in two waves of half the work.
+    The bf16-z head needs a bf16 qkv||z (recorded as a wash in pf_gemm.cl); the fwd_o form needs a trace showing the
+    scan's traffic as the cost, which the profile does not.
 
 ### Task 5: residual + RMSNorm in one launch, l0-int8's quantiser folded in (Mac, then box) - BITWISE
 

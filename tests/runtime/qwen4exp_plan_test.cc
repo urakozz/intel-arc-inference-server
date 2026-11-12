@@ -250,7 +250,7 @@ int main(int argc, char** argv) {
   {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
-    // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch). The MoE block, plan 2026-11-12: 9 (router,
+    // phase 2: gdn_chunk_q4_launches() is 6 (conv + l2norm one launch, A..A2 one). The MoE block, plan 2026-11-12: 9 (router,
     // route, the sort's three launches, gather, one fused GEMM a projection, combine; our int4 shared expert)
     const size_t moe = 9;
     const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + moe,
