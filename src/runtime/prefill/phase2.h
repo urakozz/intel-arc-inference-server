@@ -23,4 +23,13 @@ inline bool pf_gdn_intra_on() {
   }();
   return on && pf_phase2_on();
 }
+// Task 6 under D3: the router || shared gate as bf16 DPAS (pf_route.cl ROUTE_DPAS), judged - opt-in until its
+// gates pass: B70_PF_ROUTE=dpas.
+inline bool pf_route_dpas_on() {
+  static const bool on = [] {
+    const char* v = std::getenv("B70_PF_ROUTE");
+    return v != nullptr && std::strcmp(v, "dpas") == 0;
+  }();
+  return on;
+}
 }  // namespace runtime::prefill
