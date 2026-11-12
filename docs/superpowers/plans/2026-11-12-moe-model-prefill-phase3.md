@@ -293,6 +293,17 @@ Router (K 2560, N 528 -> padded 768) and a||b by Task 2; the shared expert by Ta
   against main. `qwen4exp_prefill_intel_test` compares routes bitwise against a recorded engine trace: it will differ
   by construction; report its differing-route count and leave the re-made reference to open-work's Flash-Next row.
   - **Gates:** synthetic and golden gates PASS; pp4096 at `--layers 18` >= 1.05x main's.
+  - **Result (2026-11-12, branch `flashnext-pf-router`):** the router (N 528 -> pitch 768) and a||b (N 128 -> 256) on
+    pf_gemm_T0, the weight re-laid into the walk's existing slab buffer each chunk (no new memory; Ornith's persistent
+    slabs would cost ~236 MB here); q4_route `_P768`, pf_gdn_conv `_AB256` (Qwen3.8's binaries unchanged); MoE 10
+    launches, a||b 2. Synthetic gates PASS (qwen4exp_pf_kernels, prefill synth ours / intel, golden synth ours /
+    intel), plan and names tests PASS. Intel's checkpoint at `--layers 18` (card 0, interleaved, median of 3): pp4096
+    872.0 -> **848.9 ms** (4,697 -> 4,825 t/s, -23 ms, +2.7 %; under the 1.05x bar - the router is a smaller share at
+    18 layers). `qwen4exp_golden_prefill_intel_test` fails on both builds (its old gap rule, as on main): determined
+    rows 71 / 95 against main's 74, logits worst cosine higher on all three prompts (0.956 / 0.980 / 0.978 against
+    0.947 / 0.961 / 0.973), 20 sets beyond a near-tie on both. Only the f32 judge settles it: waits for the re-made
+    Flash-Next f32 reference (open-work, Waiting). `qwen4exp_prefill_intel_test` differs from its recorded trace, by
+    construction. A Fable review found no runtime defect; its one test-wiring defect is fixed.
 
 ### Task 9: the record, the clean-up, the final gate (box idle, then Mac)
 
