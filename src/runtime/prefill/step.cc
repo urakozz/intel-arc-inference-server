@@ -708,7 +708,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
     return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
   };
   const size_t ffn = 2 + moe_chunk_launches(d, b);
-  const size_t gdn = 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn;
+  const size_t gdn = 2 + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn;
   const size_t fa = 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa;
@@ -736,7 +736,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
       return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
     };
     const size_t ffn = 2 + moe_chunk_launches(d, b);
-    return gdn ? 2 + lin(LinearId::QkvZ) + 1 + kGdnChunkLaunches + lin(LinearId::OutProj) + ffn
+    return gdn ? 2 + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn
                : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }

@@ -53,6 +53,14 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
 // arithmetic reads it.
 inline constexpr size_t kGdnChunkLaunches = 10;
 
+// MoE-model prefill phase 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): a MoE
+// model's walk (Ornith) binds the phase 2 kernels - Task 3's pf_gdn_intra in place of pf_gdn_A, _solve,
+// _wu and _A2_hilo - unless B70_PF_PHASE2=old (env, tests and probes only: today's kernels). Dense
+// models (Qwen3.8, its TP card) keep today's walk, bitwise.
+bool pf_phase2(const model::ModelDesc& d);
+// The launches one gdn_chunk call appends for `d`: kGdnChunkLaunches on today's walk.
+size_t gdn_chunk_launches(const model::ModelDesc& d);
+
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
 // gate run was not admissible evidence unless the run itself said which scan

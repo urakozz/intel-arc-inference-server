@@ -151,6 +151,16 @@ static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
 // writer stores the same entry, so the value read is unchanged.
 static std::atomic<const char*> g_scan_launched{nullptr};
 
+bool pf_phase2(const model::ModelDesc& d) {
+  static const bool old = [] {
+    const char* v = std::getenv("B70_PF_PHASE2");
+    return v != nullptr && std::string(v) == "old";
+  }();
+  return d.is_moe() && !old;
+}
+// Phase 2 Task 3: launches 5-8 become one.
+size_t gdn_chunk_launches(const model::ModelDesc& d) { return pf_phase2(d) ? kGdnChunkLaunches - 3 : kGdnChunkLaunches; }
+
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
 const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
@@ -213,32 +223,41 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
   dump_gdn_inputs(cx, s, C);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
-  //      quadrant split, as step 8's.
-  cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 4,
-            {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_A), arg_val(C)});
-  profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I + A)^-1, IN PLACE over A. **`(I + A)`, not `(I - A)`**: FLA
-  //      negates A at staging (solve_tril.py:82), which `pf_gdn_wy.cl`'s entry
-  //      (3) derives at length and `gdn_wy_test`'s case 2 checks as an
-  //      identity. This comment said `(I - A)` until stage S4.
-  cx.launch(kc(wy, solve_entry), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
-  profile_wait(cx, Phase::kGdnSolve);
-  //  7 - vb/kb, then u = T vb and w = T kb. Grid.z is A27's column split: a
-  //      work-group owns 64 of the 128 output columns, which is what lets the
-  //      operands be staged fp32 in the same SLM budget class.
-  cx.launch(kc(wy, "pf_gdn_wu"), heads, nch, 2,
-            {PtrArg(p_xb), PtrArg(p_A), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u),
-             arg_val(C)});
-  profile_wait(cx, Phase::kGdnWu);
-  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i. NOTE the diagonal.
-  //      Grid.z is A28's quadrant split: a work-group owns a 32 x 32 block of
-  //      the 64 x 64 tile, which is what lets both operands be staged fp32 in
-  //      32,768 B = four resident work-groups per Xe-core. Written as the
-  //      scan's packed hi / lo bf16 words (open-work 3n), not as fp32.
-  cx.launch(kc(wy, gdn_a2_entry()), heads, nch, 4,
-            {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
-  profile_wait(cx, Phase::kGdnA2);
+  if (pf_phase2(d)) {
+    //  5-8 (phase 2 Task 3) - A, T, w / u and A2 in one launch: pf_gdn_intra.cl, one work-group per
+    //      (v-head, sub-chunk). Judged, not bitwise: DPAS dots, a blocked solve, T as hi / lo limbs.
+    cx.launch(kc(kernels::pf_gdn_intra_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
+              {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2),
+               arg_val(C)});
+    profile_wait(cx, Phase::kGdnWu);
+  } else {
+    //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
+    //      quadrant split, as step 8's.
+    cx.launch(kc(wy, "pf_gdn_A"), heads, nch, 4,
+              {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_A), arg_val(C)});
+    profile_wait(cx, Phase::kGdnA);
+    //  6 - T = (I + A)^-1, IN PLACE over A. **`(I + A)`, not `(I - A)`**: FLA
+    //      negates A at staging (solve_tril.py:82), which `pf_gdn_wy.cl`'s entry
+    //      (3) derives at length and `gdn_wy_test`'s case 2 checks as an
+    //      identity. This comment said `(I - A)` until stage S4.
+    cx.launch(kc(wy, solve_entry), heads, nch, 1, {PtrArg(p_A), arg_val(C)});
+    profile_wait(cx, Phase::kGdnSolve);
+    //  7 - vb/kb, then u = T vb and w = T kb. Grid.z is A27's column split: a
+    //      work-group owns 64 of the 128 output columns, which is what lets the
+    //      operands be staged fp32 in the same SLM budget class.
+    cx.launch(kc(wy, "pf_gdn_wu"), heads, nch, 2,
+              {PtrArg(p_xb), PtrArg(p_A), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u),
+               arg_val(C)});
+    profile_wait(cx, Phase::kGdnWu);
+    //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i. NOTE the diagonal.
+    //      Grid.z is A28's quadrant split: a work-group owns a 32 x 32 block of
+    //      the 64 x 64 tile, which is what lets both operands be staged fp32 in
+    //      32,768 B = four resident work-groups per Xe-core. Written as the
+    //      scan's packed hi / lo bf16 words (open-work 3n), not as fp32.
+    cx.launch(kc(wy, gdn_a2_entry()), heads, nch, 4,
+              {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_A2), arg_val(C)});
+    profile_wait(cx, Phase::kGdnA2);
+  }
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
   cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
             {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
