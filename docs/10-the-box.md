@@ -192,7 +192,7 @@ The rules the orchestrator (the one detached `tools/box_validate/remote.sh` proc
 the stages in order) enforces, and what follows from them:
 
 - **A state is commit x baseline.** Results live in `~/b70-validate/<tree>/<HEAD sha12>-vs-<baseline sha12>/`
-  (default baseline `ce36d2d`; `--baseline main` when validating a branch before its merge). Every launch that
+  (default baseline `0f449db6`; `--baseline main` when validating a branch before its merge). Every launch that
   should add to one state must come from the same commit with the same baseline, or G0 (the identical-binaries check:
   kernel binaries and gate outputs identical to the baseline build) is not PASS there and every later
   stage is SKIP "blocked". So when main may move under a long run, launch from a detached worktree

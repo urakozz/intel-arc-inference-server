@@ -28,8 +28,9 @@
 #                 -quick): a quick PASS never stands for a full one. No box tidy at launch. With --status /
 #                 --summary / --dry-run: the quick state
 # Run control:
-#   --baseline REF   G0's reference build (default ce36d2d: main before the first blind code
-#                    commit, a86dd86; `--baseline main` when validating a branch before merging)
+#   --baseline REF   G0's reference build (default 0f449db6: main on 2026-11-12, after the MoE prefill phases;
+#                    the first baseline ce36d2d differed from it in report text and buffer sizes only, no token
+#                    or logit; `--baseline main` when validating a branch before merging)
 #   --state NAME     results directory on the box (default <sha>-vs-<baseline sha>); a new
 #                    commit starts a new state, `--state <old>` continues an old one - with
 #                    the baseline it was started against (its meta-*.env, else the name's
@@ -111,7 +112,7 @@ while [ $# -gt 0 ]; do
 done
 DEVICE="${DEVICE:-0}"
 export DEVICE
-BASELINE_REF="${BASELINE_REF:-ce36d2d}"
+BASELINE_REF="${BASELINE_REF:-0f449db6}"
 [ "$NIGHTLY" = 0 ] || [ -z "$ONLY" ] || die "--nightly runs the default selection: drop --only"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 BV_QUICK=$QUICK   # the stage bodies' quick_or, for --dry-run
