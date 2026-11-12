@@ -49,6 +49,10 @@ inline std::string pf_res_fold_variant(unsigned K, unsigned SP, unsigned G) {
   return "pf_res_fold_K" + std::to_string(K) + "_SP" + std::to_string(SP) + "_G" +
          std::to_string(G);
 }
+// Phase 2 Task 5: pf_norm_fused.cl, pf_res_fold + pf_norm_finish (NORM_G = NORM_WGS = G) in one launch.
+inline std::string pf_res_norm_variant(unsigned K, unsigned SP, unsigned G) {
+  return "pf_res_norm_K" + std::to_string(K) + "_SP" + std::to_string(SP) + "_G" + std::to_string(G);
+}
 inline std::string pf_norm_finish_variant(unsigned K, unsigned G, unsigned W) {
   return "pf_norm_finish_K" + std::to_string(K) + "_G" + std::to_string(G) + "_W" +
          std::to_string(W);
@@ -152,6 +156,10 @@ inline std::string pf_gdn_wy_variant(unsigned gdn_k = kRefGdnKHeads,
 inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
+}
+// Phase 2 Task 2: pf_gdn_front.cl, pf_gdn_conv + pf_gdn_l2norm in one launch.
+inline std::string pf_gdn_front_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_front" + gdn_suffix(gdn_k, gdn_v);
 }
 // Phase 2 Task 3: pf_gdn_intra.cl, the intra-chunk stages in one launch (replaces pf_gdn_wy's four).
 inline std::string pf_gdn_intra_variant(unsigned gdn_k = kRefGdnKHeads,

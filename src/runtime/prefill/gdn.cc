@@ -158,8 +158,8 @@ bool pf_phase2(const model::ModelDesc& d) {
   }();
   return d.is_moe() && !old;
 }
-// Phase 2 Task 3: launches 5-8 become one.
-size_t gdn_chunk_launches(const model::ModelDesc& d) { return pf_phase2(d) ? kGdnChunkLaunches - 3 : kGdnChunkLaunches; }
+// Phase 2: launches 2-3 become one (Task 2), 5-8 one (Task 3).
+size_t gdn_chunk_launches(const model::ModelDesc& d) { return pf_phase2(d) ? kGdnChunkLaunches - 4 : kGdnChunkLaunches; }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
@@ -207,17 +207,26 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1,
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
   profile_wait(cx, Phase::kGdnSeed);
-  //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
-  //      Grid.y is A27's position blocking; grid.x and the work-group are
-  //      unchanged.
-  const uint32_t conv_blocks = (C + kConvBlock - 1) / kConvBlock;
-  cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, conv_blocks, 1,
-            {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb),
-             PtrArg(conv_ring), arg_val(pos), arg_val(C)});
-  profile_wait(cx, Phase::kGdnConv);
-  //  3 - l2norm q and k in place.
-  cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * k_heads, C, 1, {PtrArg(p_xb), arg_val(C)});
-  profile_wait(cx, Phase::kGdnL2);
+  if (pf_phase2(d)) {
+    //  2-3 (phase 2 Task 2) - the conv1d + SiLU and the q / k l2norm in one launch (pf_gdn_front.cl),
+    //      bitwise the pair below; FB = 32 positions a work-group.
+    cx.launch(kc(kernels::pf_gdn_front_variant(k_heads, heads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
+              {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb), PtrArg(conv_ring),
+               arg_val(pos), arg_val(C)});
+    profile_wait(cx, Phase::kGdnConv);
+  } else {
+    //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
+    //      Grid.y is A27's position blocking; grid.x and the work-group are
+    //      unchanged.
+    const uint32_t conv_blocks = (C + kConvBlock - 1) / kConvBlock;
+    cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, conv_blocks, 1,
+              {PtrArg(qkvz_partials), PtrArg(p_seed), PtrArg(small), PtrArg(p_xb),
+               PtrArg(conv_ring), arg_val(pos), arg_val(C)});
+    profile_wait(cx, Phase::kGdnConv);
+    //  3 - l2norm q and k in place.
+    cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * k_heads, C, 1, {PtrArg(p_xb), arg_val(C)});
+    profile_wait(cx, Phase::kGdnL2);
+  }
   //  4 - head scalars and the intra-chunk cumulative gate.
   cx.launch(kc(conv, "pf_gdn_gate"), heads, nch, 1,
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});

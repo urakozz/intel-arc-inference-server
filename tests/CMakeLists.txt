@@ -1916,7 +1916,8 @@ if(B70_ORNITH)
     kernel_pf_dequant_slab_K2048_N12288_L1 kernel_pf_dequant_slab_K4096_N2048_L0
     kernel_pf_dequant_slab_K2048_N9216_L0 kernel_pf_quant_had_K2048 kernel_pf_quant_had_K4096
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
-    kernel_pf_gated_head_GK16V32 kernel_pf_gdn_intra_GK16V32 kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
+    kernel_pf_gated_head_GK16V32 kernel_pf_gdn_intra_GK16V32 kernel_pf_gdn_front_GK16V32 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20
+    kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
     kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
     kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K512_N2048
     kernel_pf_moe_w4a8_K2048_N1024
@@ -1925,6 +1926,25 @@ if(B70_ORNITH)
     kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
     kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU
     ${B70_ORNITH_DECODE_KERNELS})
+
+  add_executable(gdn_front_test prefill/gdn_front_test.cc)
+  target_include_directories(gdn_front_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_front_test PRIVATE b70_l0)
+  b70_target_kernel_dir(gdn_front_test)
+  add_dependencies(gdn_front_test kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_front_GK16V32)
+  add_test(NAME gdn_front_test COMMAND gdn_front_test)
+  set_tests_properties(gdn_front_test PROPERTIES LABELS "ornith;prefill")
+
+  add_executable(pf_norm_fused_test prefill/pf_norm_fused_test.cc)
+  target_include_directories(pf_norm_fused_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(pf_norm_fused_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_norm_fused_test)
+  add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
+                   kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20)
+  add_test(NAME pf_norm_fused_test COMMAND pf_norm_fused_test)
+  set_tests_properties(pf_norm_fused_test PROPERTIES LABELS "ornith;prefill")
 
   add_executable(pf_moe_test kernels/pf_moe_test.cc)
   target_include_directories(pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)

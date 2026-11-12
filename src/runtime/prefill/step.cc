@@ -77,6 +77,13 @@ void pf_norm_finish(Context& cx, KernelCache& kc, PrefillScratch& s, const void*
 }
 void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_prev,
                  const void* norm_w, const void* partials, void* resid, void* x, uint32_t M) {
+  if (pf_phase2(s.desc())) {
+    // Phase 2 Task 5: the pair in one launch (pf_norm_fused.cl), bitwise; no norm sums written.
+    cx.launch(kc(kernels::pf_res_norm_variant(s.desc().hidden, s_prev, PrefillScratch::kNormGroups), "pf_res_norm"),
+              1, M, 1, {PtrArg(partials), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
+    profile_wait(cx, Phase::kNorm);
+    return;
+  }
   pf_res_fold(cx, kc, s, s_prev, partials, resid, M);
   pf_norm_finish(cx, kc, s, norm_w, resid, x, M);
   profile_wait(cx, Phase::kNorm);
@@ -703,13 +710,16 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_
 // so 1 + 30 x 54 + 10 x 40 = 2021; l0-int8 2 more per layer (the quantisers) and 1 fewer
 // (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived).
 namespace {
+// A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
+size_t res_norm_launches(const model::ModelDesc& d) { return pf_phase2(d) ? 1 : 2; }
 size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   auto lin = [&](LinearId id) {
     return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
   };
-  const size_t ffn = 2 + moe_chunk_launches(d, b);
-  const size_t gdn = 2 + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn;
-  const size_t fa = 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
+  const size_t nrm = res_norm_launches(d);
+  const size_t ffn = nrm + moe_chunk_launches(d, b);
+  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn;
+  const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa;
 }
@@ -735,9 +745,10 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     auto lin = [&](LinearId id) {
       return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
     };
-    const size_t ffn = 2 + moe_chunk_launches(d, b);
-    return gdn ? 2 + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn
-               : 2 + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
+    const size_t nrm = res_norm_launches(d);
+    const size_t ffn = nrm + moe_chunk_launches(d, b);
+    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn
+               : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }
   const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C, pos);
@@ -750,7 +761,8 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   for (const model::LayerDesc& L : d.layer_descs())
     if (L.index >= st.first && L.index < st.last) n += step_layer_launches(d, b, C, L.kind, kv, pos);
   n += st.has_embed() ? 1 : 0;   // pf_embed_gather
-  n -= st.has_embed() ? 0 : 1;   // layer `first`'s pf_res_fold ran on the previous device
+  // layer `first`'s pf_res_fold ran on the previous device: its norm is the lone pf_norm_finish
+  n -= st.has_embed() ? 0 : res_norm_launches(d) - 1;
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold
   return n;
 }
