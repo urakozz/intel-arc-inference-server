@@ -82,10 +82,11 @@ inline bool candidate_head(bool int8_head, uint32_t draft_vocab) {
 // The AdaptiveK cost table: MtpCost::dflash for the head and drafter forms, a draft vocabulary scaling the head's
 // share of the draft row (derived, as the MTP head's).
 inline server::MtpCost cost(const Args& a, loader::LmHeadForm head, uint32_t draft_vocab) {
-  const bool i8h = head == loader::LmHeadForm::Int8, i8d = a.format == loader::DraftFormat::Int8;
-  server::MtpCost c = server::MtpCost::dflash(i8h, i8d);
+  const bool i8h = head == loader::LmHeadForm::Int8;
+  const unsigned format = a.format == loader::DraftFormat::Int4G64 ? 2u : a.format == loader::DraftFormat::Int8 ? 1u : 0u;
+  server::MtpCost c = server::MtpCost::dflash(i8h, format, candidate_head(i8h, draft_vocab));
   if (draft_vocab != 0)
-    c = c.with_draft_vocab(server::MtpCost::dflash_head_share(i8h, i8d), double(draft_vocab) / model::Qwen35::kVocab);
+    c = c.with_draft_vocab(server::MtpCost::dflash_head_share(i8h, format), double(draft_vocab) / model::Qwen35::kVocab);
   if (c.max_k() < a.max_k)
     throw std::runtime_error("the drafter's cost table covers K up to " + std::to_string(c.max_k()) +
                              ", below --spec-max " + std::to_string(a.max_k));

@@ -144,7 +144,8 @@ deferred projection equals today's at every flush point: plain step, request end
 - [ ] **Step 1 (Mac):** loader + capture + host twin tests, `mac_check` green. Commit.
   - Source checkpoints `70d66833` / `a8c213b7`: RTN int4 layout-1 loader/upload, distinct prefix key, all eight
     drafter shapes on M=8 `gemm_sm`, forced-GEMV twin and f32 judge. Four host checks, GPU/probe syntax and
-    app/kernel build PASS on the box. Device precision/cost gates are running; serving default remains int8.
+    app/kernel build PASS on the box. The split-K numerical regression later passes, but RTN corpus acceptance
+    and the 2.5 ms saving gate fail (below); serving format remains int8.
     The existing byte formula reports 843,439,104 B saved. Nine acceptance-comparator unit tests PASS; it reuses
     the original int8 baseline without loading a CPU model and requires matching anchors and all K/corpora.
 - [ ] **Step 2 (box):** `dflash_draft_test`, `r82.accept` with the int4 arm, `r82.iter`.
@@ -173,6 +174,11 @@ deferred projection equals today's at every flush point: plain step, request end
   continue Step 4. Cached-tap fast path first matched all 4256 original engine drafts exactly.
 - [ ] **Step 4 (only on Step 3's FAIL):** the int4 g64 candidate head (made at load), top-64, exact re-rank against
   the int8 head rows, top-16 to the selector. A new small kernel `df_rerank`, with its twin test. Same gates.
+  - `18d366bf`: primitive/host checks pass; candidate64/exact rerank preserves all 35 original acceptance rows
+    exactly on the int8 body. Measured head path 1.789271 ms at 4k, so the 0.5 ms component gate fails.
+    `e7404f8d` wires the quality-safe fallback into serving and both planner paths; 18 host/CLI checks pass.
+    Serving G-D2 and final combined/cost refresh remain pending. No global DFlash default or int4 promotion.
+
 
 ### Task 7: the draft list's small kernels (Mac, then box) - C5
 
@@ -184,6 +190,11 @@ deferred projection equals today's at every flush point: plain step, request end
   - Each one is a commit with `dflash_kernels_test` / `dflash_draft_test` green (the f32 judge for order changes).
 - [ ] **Step 2 (box):** `r82.iter`. **Gate:** draft pass <= 4.5 ms (0.15 plain steps) at depth 4096 with Tasks 5-6;
   iteration at K = 7 <= 1.35 plain steps; launches per draft printed.
+
+H1/B4 attention geometry is selected at `f0a3261e` after primitive and real-model bitwise checks: five-launch
+attention sum 2.696458 → 2.084063 ms at pos4096/K7. Norms account for only ~0.1275 ms; the ledger records the
+profile-driven choice. Parallel-exp passes bitwise but regresses steady K7; both local K-cache controls fail
+bitwise and are rejected. The detached policy integration/numerical/cost round is running; C7 is not passed.
 
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
