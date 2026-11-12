@@ -121,17 +121,6 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
                         w.shape);
 }
 
-const std::pair<l0::Mem, l0::Mem>& Int8State::scales_layout1(Context& cx, KernelCache& kc,
-                                                             const void* qw, uint32_t K,
-                                                             uint32_t N) {
-  auto it = scales_.find(qw);
-  if (it != scales_.end()) return it->second;
-  require(K % 1024 == 0 && K <= max_k_,
-          "the expert array's K = " + std::to_string(K) + " is not whole rotation blocks within " +
-              std::to_string(max_k_));
-  return compute_scales(cx, kc, qw, nullptr, model::GemvShape{K, N, 1, 1});
-}
-
 const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, KernelCache& kc,
                                                              const void* qw, const void* scales,
                                                              const model::GemvShape& sh) {

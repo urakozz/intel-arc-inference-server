@@ -123,8 +123,6 @@ void Engine::prepare_prefill() {
     if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
         w.kind == model::WeightKind::Int4)
       pfx_->int8->scales(pfx_->cx, pfx_->kc, w);
-  // Spec 15d: and every MoE layer's expert gate||up array, the same way.
-  prefill::moe_prepare_int8(pfx_->cx, pfx_->kc, *pfx_->int8, model_);
 }
 
 void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {

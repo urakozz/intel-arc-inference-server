@@ -180,7 +180,6 @@ uint32_t pf_tiles(const model::Qwen4ExpDesc& d, uint32_t C);
 // Plan 2026-11-12 Task 7: the multi-work-group sort's work-item bound (MI = kernels::pf_moe::kItemM rows an item) -
 // the fused GEMMs' grid; 856 at C = 2048.
 uint32_t pf_items(const model::Qwen4ExpDesc& d, uint32_t C);
-// B70_PF_MOE=old puts this family's MoE back on q4_pf_sort + the weight batches (runtime::moe_pf_old_walk).
 // The expert weight batches: blocks of [K][N] bf16 (513 a layer: 512 routed + the shared) in kPfBatchBytes regions -
 // gate||up 6,553,600 B a block, 81 a batch, 7 batches; down 3,276,800 B, 163, 4 (derived).
 size_t pf_block_gu_bytes(const model::Qwen4ExpDesc& d);
@@ -216,8 +215,8 @@ uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d);
 //                                                gn rows: 2 x [kPfC][10240] fit)
 //   h          bf16 [tmax x 32][640]             the gate||up GEMM's SiLU output
 //   y          bf16 [kPfC][2560]                 the MoE block's output (the next combine folds it)
-//   w          bf16 kPfBatchBytes                the expert weight batch (B70_PF_MOE=old; else one gate||up block:
-//                                                Intel's bf16 shared expert's copy, plan 2026-11-12)
+//   w          bf16 one gate||up block           Intel's bf16 shared expert's copy (plan 2026-11-12: the routed
+//                                                experts are read in place)
 //   cnt, items u32 [kPfC / 64][512], [items][4]  pf_moe_sort_mw's block counts and work items
 //   ple_ids    u64  [kPfC][16]                   the PLE row ids of the chunk's rows
 struct PrefillSizes {

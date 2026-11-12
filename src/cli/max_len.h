@@ -208,8 +208,7 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
 // Plan 5d: the prefill chunk cap (2048 or 4096), in two steps around settle().
 //
 //   asked = runtime::prefill_chunk_cap_for(--prefill-chunk C, desc)   0 when no C was given;
-//                                                                     refuses C > 4096 and a
-//                                                                     MoE model above 2048
+//                                                                     refuses C > 4096
 //   path.chunk_cap = planned_chunk_cap(asked)    what settle() plans max_len at
 //   max_len = settle(..., path, ...)
 //   cap = settle_chunk_cap(..., max_len, path, ..., asked)   what the engine is given
@@ -218,8 +217,9 @@ inline std::vector<uint32_t> settle_slots(l0::Context& ctx, loader::LoadedModel&
 // shortens what auto gives the context. With nothing asked, kPrefillChunkCapRule decides:
 // off, the default 2048; on, operator ruling (i) of 2026-10-27 (context first) - max_len is
 // planned at 2048 and 4096 is taken only when the plan at that max_len has room for it
-// (runtime::prefill_chunk_cap_that_fits). There is no environment variable or server flag for
-// it (operator, 2026-11-03): the engine side chooses.
+// (runtime::prefill_chunk_cap_that_fits). A MoE model takes that rule regardless (plan 2026-11-12 D2: its chunk
+// cap 4096 - the expert GEMMs and l0-int8's quantiser amortise over twice the rows). There is no environment
+// variable or server flag for it (operator, 2026-11-03): the engine side chooses.
 inline constexpr bool kPrefillChunkCapRule = false;
 inline uint32_t planned_chunk_cap(uint32_t asked) {
   return asked != 0 ? asked : runtime::PrefillScratchDims::kCDefault;
@@ -237,7 +237,7 @@ inline uint32_t settle_chunk_cap(l0::Context& ctx, const loader::LoadedModel& m,
   if (!path.prefill) return path.chunk_cap;
   const char* why = asked != 0 ? "--prefill-chunk" : nullptr;
   uint32_t cap = path.chunk_cap;
-  if (why == nullptr && kPrefillChunkCapRule) {
+  if (why == nullptr && (kPrefillChunkCapRule || m.desc->is_moe())) {
     cap = runtime::prefill_chunk_cap_that_fits(*m.desc, m.mtp != nullptr, m.report.total() - m.report.rope_bytes,
                                                ctx.memory_bytes(), reserve_bytes, max_len, path,
                                                draft_vocab_plan(m), kv, drafter);

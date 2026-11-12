@@ -8,7 +8,6 @@
 
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/qwen4exp_layout.h"
-#include "runtime/buffer_sizes.h"
 #include "runtime/control.h"
 
 namespace runtime::qwen4exp {
@@ -232,7 +231,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.xg = std::max(R * d.hidden * 2, 2 * C * d.hc_n() * 2);   // also the PLE gate's gated / gn rows
   s.h = R * d.moe_inter * 2;
   s.y = C * d.hidden * 2;
-  s.w = runtime::moe_pf_old_walk() ? kPfBatchBytes : pf_block_gu_bytes(d);
+  s.w = pf_block_gu_bytes(d);   // Intel's bf16 shared expert's one-block copy (plan 2026-11-12)
   s.ple_ids = C * d.ple_heads * 8;
   s.cnt = (C + 63) / 64 * d.experts * 4;
   s.items = size_t(pf_items(d, kPfC)) * 16;
@@ -254,9 +253,7 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
   // router, route, sort, gather, the batches' dequant + GEMM pairs, combine; plan 2026-11-12: the sort's three
   // launches, one fused GEMM a projection, and Intel's bf16 shared expert's dequant + GEMM pair a projection
-  const size_t moe = runtime::moe_pf_old_walk()
-                         ? 4 + 2 * size_t(pf_batches_gu(d)) + 2 * size_t(pf_batches_dn(d)) + 1
-                         : 9 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
+  const size_t moe = 9 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
   const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
   size_t qsa = 2 * hc + lin(d.qkvg_n()) + lin(d.idx_n()) + 3 + 1 + lin(d.linear(model::Q4LinearId::QsaO).shape.N) + moe;
   if (sparse > 0 && !injected) qsa += 2;          // q4_qsa_score, q4_qsa_select

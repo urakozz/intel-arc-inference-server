@@ -24,28 +24,18 @@ class Int8State;
 //
 //   router GEMV (pf_moe_router, entry pf_ab_proj)    logits [C][router_n]
 //   moe_route (decode's moe.cl binary, grid (1, C))  route rows, this layer's slice
-//   pf_moe_sort                                      header, tile table, sorted rows
-//   l0-int8: pf_quant_had (the chunk's x, once), pf_moe_gather_i8, pf_requant_rot over the
-//            layer's whole gate||up array, pf_moe_gemm_i8 (SiLU)               -> h
-//   l0:      pf_moe_gather, then per batch of blocks pf_moe_dequant_gu +
-//            pf_moe_gemm (SiLU)                                                 -> h
-//   per batch of blocks pf_moe_dequant_dn + pf_moe_gemm (down)                  -> y
+//   pf_moe_hist, pf_moe_scan, pf_moe_scatter         header, tile table, sorted rows, work items
+//   l0-int8: pf_quant_g64 (the chunk's x, once), pf_moe_gather_i8g, pf_moe_w4a8 (SiLU) -> h
+//   l0:      pf_moe_gather, pf_moe_q4gemm (SiLU)                               -> h
+//   pf_moe_q4gemm (down)                                                         -> y
 //   pf_moe_combine                                   resid += the block's output
 //
-// `layer` picks the route rows' slice (kept per layer for R2). The l0-int8 form needs the
-// layer's expert scales already in `q` (moe_prepare_int8, outside any recording).
+// (plan 2026-11-12: the GEMMs read the int4 blocks in place - no per-chunk weight pass.) `layer` picks the route
+// rows' slice (kept per layer for R2).
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
                uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q);
 
-// What one moe_chunk appends (a function of the shape and the backend, never of C):
-// Ornith 12 on l0-int8, 13 on l0 (B70_PF_MOE=old: 10 / 11).
+// What one moe_chunk appends (a function of the backend, never of C): 10 on l0-int8, 9 on l0.
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
-
-// Plan 2026-11-12: B70_PF_MOE=old (env; tests and probes only) puts the walk back on today's kernels. Read once.
-bool moe_old_walk();
-
-// Engine::prepare_prefill on l0-int8: every layer's expert gate||up array's rotated column
-// scales (Int8State::scales_layout1, cached; one pf_colmax_rot and a host finish each).
-void moe_prepare_int8(Context& cx, KernelCache& kc, Int8State& q, const loader::LoadedModel& m);
 
 }  // namespace runtime::prefill

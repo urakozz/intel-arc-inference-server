@@ -361,11 +361,7 @@ void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap) {
     throw std::invalid_argument("prefill chunk cap " + std::to_string(chunk_cap) + " is neither " +
                                 std::to_string(PrefillScratchDims::kCDefault) + " nor " +
                                 std::to_string(PrefillScratchDims::kCMax));
-  if (chunk_cap > PrefillScratchDims::kCDefault && desc.is_moe() && moe_pf_old_walk())
-    throw std::invalid_argument(desc.name + " prefills in chunks of at most " +
-                                std::to_string(PrefillScratchDims::kCDefault) +
-                                " on B70_PF_MOE=old: pf_moe bakes KC = 2048 into its SLM sort staging (unset "
-                                "B70_PF_MOE for 4096-row chunks)");
+  (void)desc;   // every model takes either cap (a MoE model's sort has no chunk bound since plan 2026-11-12)
 }
 
 uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc) {
@@ -435,24 +431,6 @@ uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C) {
   const uint32_t tm = kernels::pf_moe::kTileM;
   return (C * desc.moe.top_k + desc.moe.experts * (tm - 1)) / tm + (C + tm - 1) / tm;
 }
-namespace {
-std::string pf_moe_env() {
-  const char* v = std::getenv("B70_PF_MOE");
-  return v ? v : "";
-}
-}  // namespace
-bool moe_pf_old_walk() {
-  static const bool old = pf_moe_env() == "old";
-  return old;
-}
-bool moe_pf_w4a8() {
-  static const bool w = pf_moe_env() == "w4a8";
-  return w;
-}
-bool moe_pf_i8bf16() {
-  static const bool b = pf_moe_env() == "i8bf16";
-  return b;
-}
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C) {
   if (!desc.is_moe()) return 0;
   const uint32_t mi = kernels::pf_moe::kItemM;
@@ -460,17 +438,6 @@ uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C) {
 }
 
 namespace {
-// One expert weight block in each grouped-GEMM B form (pf_moe_gemm.cl).
-size_t moe_block_bytes(const model::ModelDesc& d, MoeWeightForm f) {
-  const size_t gu = size_t{d.hidden} * 2 * d.moe.expert_intermediate;   // elements
-  const size_t dn = size_t{d.moe.expert_intermediate} * d.hidden;
-  switch (f) {
-    case MoeWeightForm::GateUpInt8: return gu;            // int8 (VNNI-4 u32 words)
-    case MoeWeightForm::GateUpBf16: return gu * kBf16;
-    case MoeWeightForm::DownBf16: return dn * kBf16;
-  }
-  return 0;
-}
 size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 }  // namespace
 
@@ -478,19 +445,10 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
   MoePrefillLayout l;
   if (!desc.is_moe()) return l;
   const model::MoeDesc& m = desc.moe;
-  // The session's chunk cap: 2048, or 4096 on the new walk (check_prefill_chunk_cap; pf_moe_sort's KC = 2048
-  // bounds only today's walk).
-  check_prefill_chunk_cap(desc, chunk_cap);
+  check_prefill_chunk_cap(desc, chunk_cap);   // the session's chunk cap, 2048 or 4096
   const size_t kC = chunk_cap;
   l.tmax = moe_prefill_tiles(desc, chunk_cap);
   l.rows = l.tmax * kernels::pf_moe::kTileM;
-  // The weight batch: every block in the int8 gate||up and bf16 down forms, half the
-  // blocks (rounded up) in the bf16 gate||up form - whichever is largest. (The fused GEMMs read the blocks in
-  // place, plan 2026-11-12; l0-int8's default rotated int8 gate||up still requantises into it.)
-  const uint32_t half = (m.blocks() + 1) / 2;
-  l.w = std::max({moe_block_bytes(desc, MoeWeightForm::GateUpInt8) * m.blocks(),
-                  moe_block_bytes(desc, MoeWeightForm::DownBf16) * m.blocks(),
-                  moe_block_bytes(desc, MoeWeightForm::GateUpBf16) * half});
   size_t at = 0;
   auto region = [&](size_t bytes) {
     const size_t off = at;
@@ -504,10 +462,8 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
   l.tiles_off = region(size_t{l.tmax} * 2 * sizeof(uint32_t));
   l.row_tok_off = region(size_t{l.rows} * sizeof(uint32_t));
   l.pair_row_off = region(kC * m.top_k * sizeof(uint32_t));
-  l.xs_off = region(size_t{l.rows} * kFp32);
   l.h_off = region(size_t{l.rows} * m.expert_intermediate * kBf16);
   l.xg_off = region(size_t{l.rows} * desc.hidden * kBf16);
-  l.w_off = region(l.w);
   l.cnt_off = region((kC + 63) / 64 * m.experts * sizeof(uint32_t));
   l.ibound = moe_prefill_items(desc, chunk_cap);
   l.items_off = region(size_t{l.ibound} * 4 * sizeof(uint32_t));
@@ -515,12 +471,6 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
   l.xsg_off = region(size_t{l.rows} * (desc.hidden / 64) * kFp32);
   l.total = at;
   return l;
-}
-
-uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f) {
-  if (!desc.is_moe()) return 0;
-  const size_t per = std::max<size_t>(moe_prefill_layout(desc).w / moe_block_bytes(desc, f), 1);
-  return uint32_t(std::min<size_t>(per, desc.moe.blocks()));
 }
 
 }  // namespace runtime
