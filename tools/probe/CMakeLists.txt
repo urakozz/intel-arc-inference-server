@@ -1171,6 +1171,8 @@ if(B70_ORNITH AND B70_Q4EXP)
   target_link_libraries(probe_moe_prefill PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(probe_moe_prefill)
   add_dependencies(probe_moe_prefill ${PMP_TARGETS} ${PCR_PF_KERNELS} ${ALL_KERNELS})
+endif()
+
 # --- probe_gdn_intra: phase 2 Task 1, the GDN intra-chunk stages on real inputs (Ornith) ---------
 # Control: today's pf_gdn_wy entries; D-a: pf_gdn_intra (src/kernels/prefill/pf_gdn_intra.cl), and its
 # INTRA_DBG build (A and T written out for the per-stage error). Record: docs/probes/probe-prefill-phase2-2026-11-12.md.
