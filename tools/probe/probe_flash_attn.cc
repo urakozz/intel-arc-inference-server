@@ -33,6 +33,7 @@
 #include <cstring>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -41,6 +42,7 @@
 
 #include "common/bf16.h"
 #include "kernels/kernels.h"
+#include "kernels/prefill/pf_kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "l0/memory.h"
@@ -60,18 +62,25 @@ using runtime::prefill::arg_val;
 using runtime::prefill::pad256;
 using runtime::prefill::PtrArg;
 
-constexpr uint32_t kQH = 24, kKvH = 4, kHD = 256, kQRow = kQH * kHD, kKvRow = kKvH * kHD;
+constexpr uint32_t kHD = 256;
+// Qwen3.8's 24 / 4 heads, or (--heads 16x2) Ornith's: set once in main before anything reads them.
+uint32_t kQH = 24, kKvH = 4, kQRow = kQH * kHD, kKvRow = kKvH * kHD;
 constexpr double kPeakTflops = 183.45;   // bf16 DPAS peak (spec 6 §5 F2)
 
 // The arms. Same list as tools/probe/CMakeLists.txt's PFA foreach; nothing checks the two
 // against each other, a missing binary is reported by name and skipped.
 struct Arm {
   uint32_t kt, rpw, hpw, qreg;
+  bool orn = false;   // phase 3: Ornith's heads (16 / 2) and today's exp2 (pfao_*)
   std::string name() const {
-    return "pfa_KT" + std::to_string(kt) + "_R" + std::to_string(rpw) + "_H" +
+    return std::string(orn ? "pfao_KT" : "pfa_KT") + std::to_string(kt) + "_R" + std::to_string(rpw) + "_H" +
            std::to_string(hpw) + "_Q" + std::to_string(qreg);
   }
 };
+// Phase 3 Task 1: today's tile (R8 Q0 - the same text as pf_flash_attn, so it must be bitwise the control), Q held in
+// registers (R8 Q1) and the 16 / 32-row work-groups with and without it, at Ornith's GQA group of 8.
+const Arm kArmsO[] = {{64, 8, 8, 0, true},  {64, 8, 8, 1, true},  {64, 16, 8, 0, true},
+                      {64, 16, 8, 1, true}, {64, 32, 8, 0, true}, {64, 32, 8, 1, true}};
 const Arm kArms[] = {{32, 16, 6, 1}, {32, 32, 6, 1}, {64, 16, 6, 1}, {32, 16, 3, 1},
                      {32, 16, 1, 1}, {32, 16, 6, 0}, {64, 16, 6, 0}, {32, 32, 3, 1}};
 
@@ -108,14 +117,14 @@ int main(int argc, char** argv) {
     if (argc < 3) {
       std::fprintf(stderr,
                    "usage: probe_flash_attn <pos> <C> [--arms all|none|<name>[,...]] "
-                   "[--qscale S] [--bar B] [--time]\n");
+                   "[--qscale S] [--bar B] [--time] [--heads 24x4|16x2]\n");
       return 2;
     }
     const uint32_t pos = uint32_t(std::stoul(argv[1]));
     const uint32_t C = uint32_t(std::stoul(argv[2]));
     std::string arms_arg = "all";
     double qscale = 1.0, bar = 0.99999;
-    bool timing = false;
+    bool timing = false, ornith = false;
     for (int i = 3; i < argc; ++i) {
       const std::string a = argv[i];
       auto val = [&]() -> std::string {
@@ -126,16 +135,26 @@ int main(int argc, char** argv) {
       else if (a == "--qscale") qscale = std::stod(val());
       else if (a == "--bar") bar = std::stod(val());
       else if (a == "--time") timing = true;
+      else if (a == "--heads") {
+        const std::string v = val();
+        if (v == "16x2") ornith = true;
+        else if (v != "24x4") throw std::runtime_error("--heads: 24x4 or 16x2");
+      }
       else throw std::runtime_error("unknown argument " + a);
     }
     if (C == 0 || C > PrefillScratchDims::kCMax) throw std::runtime_error("C must be in (0, 4096]");
+    if (ornith) { kQH = 16; kKvH = 2; }
+    kQRow = kQH * kHD;
+    kKvRow = kKvH * kHD;
+    const uint32_t gqa = kQH / kKvH;
     const uint32_t depth = pos + C;
     const uint32_t rows = pad256(C);
     const uint32_t max_len = pad256(depth);
 
     std::vector<Arm> arms;
     if (arms_arg == "all") {
-      arms.assign(std::begin(kArms), std::end(kArms));
+      if (ornith) arms.assign(std::begin(kArmsO), std::end(kArmsO));
+      else arms.assign(std::begin(kArms), std::end(kArms));
     } else if (arms_arg != "none") {
       size_t st = 0;
       while (st <= arms_arg.size()) {
@@ -143,6 +162,8 @@ int main(int argc, char** argv) {
         const std::string nm = arms_arg.substr(st, e - st);
         bool found = false;
         for (const Arm& a : kArms)
+          if (a.name() == nm) { arms.push_back(a); found = true; }
+        for (const Arm& a : kArmsO)
           if (a.name() == nm) { arms.push_back(a); found = true; }
         if (!found) throw std::runtime_error("unknown arm " + nm);
         st = e + 1;
@@ -166,13 +187,21 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i < size_t(depth) * kKvRow; ++i) kc[i] = common::f32_to_bf16(nd(rng));
     for (size_t i = 0; i < size_t(depth) * kKvRow; ++i) vc[i] = common::f32_to_bf16(nd(rng));
 
-    PrefillScratch s(ctx, max_len, model::qwen38(),
-                     C > PrefillScratchDims::kCDefault ? PrefillScratchDims::kCMax : PrefillScratchDims::kCDefault);
+    // Ornith's control is the production kernel launched on buffers of this probe's own; only the 24 / 4 composed
+    // control needs the Qwen3.8 scratch (whose score buffers grow with the depth).
+    std::unique_ptr<PrefillScratch> sp;
+    if (!ornith)
+      sp = std::make_unique<PrefillScratch>(ctx, max_len, model::qwen38(),
+                                            C > PrefillScratchDims::kCDefault ? PrefillScratchDims::kCMax : PrefillScratchDims::kCDefault);
+    l0::Mem dq_own(ctx, l0::MemKind::Device, ornith ? q.size() * 2 : 64);
+    l0::Mem dctl_own(ctx, l0::MemKind::Device, ornith ? size_t(kQH) * rows * kHD * 4 : 64);
+    void* const q_ptr = ornith ? dq_own.ptr() : sp->pf_q.ptr();
+    void* const ctl_ptr = ornith ? dctl_own.ptr() : sp->pf_o.ptr();
     l0::Mem dk(ctx, l0::MemKind::Device, kc.size() * 2);
     l0::Mem dv(ctx, l0::MemKind::Device, vc.size() * 2);
     const size_t o_elems = size_t(kQH) * rows * kHD;
     l0::Mem dout(ctx, l0::MemKind::Device, o_elems * 4);
-    upload(ctx, s.pf_q.ptr(), q.data(), q.size() * 2);
+    upload(ctx, q_ptr, q.data(), q.size() * 2);
     upload(ctx, dk.ptr(), kc.data(), kc.size() * 2);
     upload(ctx, dv.ptr(), vc.data(), vc.size() * 2);
 
@@ -203,7 +232,7 @@ int main(int argc, char** argv) {
       auto work = [&](size_t t0, size_t t1) {
         std::vector<double> sc(depth);
         for (size_t t = t0; t < t1; ++t) {
-          const uint32_t m = srows[t / kQH], h = uint32_t(t % kQH), j = h / 6;
+          const uint32_t m = srows[t / kQH], h = uint32_t(t % kQH), j = h / gqa;
           double qd[kHD];
           for (uint32_t d = 0; d < kHD; ++d)
             qd[d] = common::bf16_to_f32(q[size_t(m) * kQRow + size_t(h) * kHD + d]);
@@ -264,8 +293,16 @@ int main(int argc, char** argv) {
     };
 
     // --- the composed control ---------------------------------------------------
+    // Ornith: TODAY's pf_flash_attn (KT 64 RPW 8 HPW 8 QREG 0 EXP2 1, its Q16KV2 binary) on this probe's inputs.
+    l0::Kernel* k_today = ornith ? &kcache(kernels::pf_flash_attn_variant(16, 2), "pf_flash_attn") : nullptr;
     auto run_control = [&]() {
-      runtime::prefill::attn_chunk(cx, kcache, s, pos, C, s.pf_q.as<uint16_t>(),
+      if (ornith) {
+        cx.launch(*k_today, (C + 7) / 8, kKvH, 1,
+                  {PtrArg(q_ptr), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(ctl_ptr), arg_val(pos), arg_val(C),
+                   arg_val(rows)});
+        return;
+      }
+      runtime::prefill::attn_chunk(cx, kcache, *sp, pos, C, static_cast<const uint16_t*>(q_ptr),
                                    dk.as<uint16_t>(), dv.as<uint16_t>(), PrefillBackend::L0);
     };
     run_control();
@@ -273,18 +310,20 @@ int main(int argc, char** argv) {
     // pf_o is the control's output; copy into dout's host view through `out`.
     Check cc;
     {
-      download(ctx, out.data(), s.pf_o.ptr(), o_elems * 4);
+      download(ctx, out.data(), ctl_ptr, o_elems * 4);
       upload(ctx, dout.ptr(), out.data(), o_elems * 4);
       cc = check(false);
     }
-    std::printf("composed: worst cos %.9f at (h %u, m %u), max abs %.3e, non-finite %zu\n",
-                cc.worst_cos, cc.wh, cc.wm, cc.max_abs, cc.nonfinite);
+    const std::vector<float> ctl_out = out;   // the control's rows, for the bitwise column
+    std::printf("%s: worst cos %.9f at (h %u, m %u), max abs %.3e, non-finite %zu\n",
+                ornith ? "today's pf_flash_attn" : "composed", cc.worst_cos, cc.wh, cc.wm, cc.max_abs, cc.nonfinite);
     std::fflush(stdout);
 
     // --- the arms -----------------------------------------------------------------
     struct Live {
       Arm a;
       l0::Kernel* k;
+      size_t differ = 0;   // words of o (rows < C, every head) that differ from the control's
     };
     std::vector<Live> live;
     bool any_fail = false;
@@ -296,24 +335,31 @@ int main(int argc, char** argv) {
         continue;
       }
       l0::Kernel& k = kcache(nm, "pfa");
-      const uint32_t gx = (C + a.rpw - 1) / a.rpw, gz = 6 / a.hpw;
+      const uint32_t gx = (C + a.rpw - 1) / a.rpw, gz = gqa / a.hpw;
       auto run = [&, gx, gz]() {
         cx.launch(k, gx, kKvH, gz,
-                  {PtrArg(s.pf_q.ptr()), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(dout.ptr()),
+                  {PtrArg(q_ptr), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(dout.ptr()),
                    arg_val(pos), arg_val(C), arg_val(rows)});
       };
       l0::CmdList::immediate(ctx).fill(dout.ptr(), 0u, o_elems * 4);
       run();
       cx.wait();
       const Check c = check(true);
+      size_t differ = 0;
+      for (uint32_t h = 0; h < kQH; ++h)
+        for (uint32_t m = 0; m < C; ++m)
+          for (uint32_t d = 0; d < kHD; ++d) {
+            const size_t i = (size_t(h) * rows + m) * kHD + d;
+            differ += std::memcmp(&out[i], &ctl_out[i], 4) != 0;
+          }
       const bool ok = c.worst_cos >= bar && c.nonfinite == 0 && c.pad_nonfinite == 0;
       std::printf("%s: worst cos %.9f at (h %u, m %u), max abs %.3e, non-finite %zu, "
-                  "pad rows non-finite %zu -- %s\n",
+                  "pad rows non-finite %zu, o words differing from %s: %zu of %zu -- %s\n",
                   nm.c_str(), c.worst_cos, c.wh, c.wm, c.max_abs, c.nonfinite, c.pad_nonfinite,
-                  ok ? "PASS" : "FAIL");
+                  ornith ? "today's" : "the control's", differ, size_t(kQH) * C * kHD, ok ? "PASS" : "FAIL");
       std::fflush(stdout);
       if (!ok) { any_fail = true; continue; }
-      live.push_back({a, &k});
+      live.push_back({a, &k, differ});
     }
 
     // --- timing -------------------------------------------------------------------
@@ -327,11 +373,11 @@ int main(int argc, char** argv) {
       };
       std::vector<std::function<void()>> runs;
       for (const Live& L : live) {
-        const uint32_t gx = (C + L.a.rpw - 1) / L.a.rpw, gz = 6 / L.a.hpw;
+        const uint32_t gx = (C + L.a.rpw - 1) / L.a.rpw, gz = gqa / L.a.hpw;
         l0::Kernel* k = L.k;
         runs.push_back([&, k, gx, gz]() {
           cx.launch(*k, gx, kKvH, gz,
-                    {PtrArg(s.pf_q.ptr()), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(dout.ptr()),
+                    {PtrArg(q_ptr), PtrArg(dk.ptr()), PtrArg(dv.ptr()), PtrArg(dout.ptr()),
                      arg_val(pos), arg_val(C), arg_val(rows)});
         });
       }
@@ -366,13 +412,18 @@ int main(int argc, char** argv) {
                   "(derived)\n\n", pos, C, kRounds, gflop);
       std::printf("| path | median ms | min .. max | paired ratio composed / arm (median) | "
                   "range | TFLOP/s (derived) | %% of 183.45 |\n|---|---:|---:|---:|---:|---:|---:|\n");
-      std::printf("| composed attn_chunk (L0) | %.3f | %.3f .. %.3f | 1 | | %.1f | %.1f |\n",
-                  med(tc), lo(tc), hi(tc), gflop / med(tc), 100.0 * gflop / med(tc) / kPeakTflops);
+      std::printf("| %s | %.3f | %.3f .. %.3f | 1 | | %.1f | %.1f |\n",
+                  ornith ? "today's pf_flash_attn" : "composed attn_chunk (L0)", med(tc), lo(tc), hi(tc),
+                  gflop / med(tc), 100.0 * gflop / med(tc) / kPeakTflops);
       for (size_t i = 0; i < runs.size(); ++i) {
         const double mt = med(ta[i]);
         std::printf("| %s | %.3f | %.3f .. %.3f | **%.3fx** | %.3fx .. %.3fx | %.1f | %.1f |\n",
                     live[i].a.name().c_str(), mt, lo(ta[i]), hi(ta[i]), med(ratio[i]),
                     lo(ratio[i]), hi(ratio[i]), gflop / mt, 100.0 * gflop / mt / kPeakTflops);
+        std::printf("GATE {\"pos\":%u,\"C\":%u,\"arm\":\"%s\",\"ms\":%.3f,\"today_ms\":%.3f,\"ratio_vs_today\":%.3f,"
+                    "\"limit\":0.7,\"bitwise\":%s,\"speed\":\"%s\"}\n",
+                    pos, C, live[i].a.name().c_str(), mt, med(tc), mt / med(tc), live[i].differ == 0 ? "true" : "false",
+                    mt / med(tc) <= 0.7 ? "PASS" : "FAIL");
       }
       cx.set_profiling(false);
     }
