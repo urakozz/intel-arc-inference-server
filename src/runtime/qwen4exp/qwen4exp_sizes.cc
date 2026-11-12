@@ -1,4 +1,3 @@
-#include "runtime/prefill/phase2.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
 #include <algorithm>
@@ -152,9 +151,7 @@ constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwe
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
 }  // namespace
 
-size_t gdn_chunk_q4_launches() {
-  return kGdnChunkLaunches - (prefill::pf_phase2_on() ? 1 : 0) - (prefill::pf_gdn_intra_on() ? 3 : 0);
-}
+size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 1; }   // phase 2: conv + l2norm in one launch
 
 GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   // Qwen3.8's GDN shape (the family's): 16 k / 48 v heads x 128, 10240 conv channels.
@@ -166,7 +163,7 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   s.g = size_t(C) * kVHeads * 4;
   s.beta = size_t(C) * kVHeads * 4;
   s.A2 = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
-  s.A = s.A2 * (prefill::pf_gdn_intra_on() ? 2 : 1);   // phase 2 D2 (opt-in): w's / u's lo planes, bf16 [C][48][128] each
+  s.A = s.A2;
   s.w = size_t(C) * kVHeads * kHd * 2;
   s.u = s.w;
   s.o = size_t(C) * kVHeads * kHd * 4;

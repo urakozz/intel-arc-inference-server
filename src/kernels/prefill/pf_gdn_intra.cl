@@ -35,10 +35,6 @@
 // blocks hold the solve's temporaries) and Ts fp32 [64][64] (T); then the hi / lo T words
 // [64][TLD] replace them for the W / U stage.
 //
-// -DWU_HILO=1 (pf_gdn_intra_hl, operator decision D2 of 2026-11-12): Q1-Q4 are not rounded - vb / kb stay fp32
-// and enter the DPAS as hi / lo pairs, and u / w leave as hi / lo bf16 planes (two extra arguments, wl / ul)
-// for pf_gdn_scan_hl.cl. Taken because the bf16 form missed prefill_gate_ornith_l0-int8 by one determined row.
-//
 // -DINTRA_DBG=1 (the probe's binary only) adds two fp32 [nch][heads][64][64] outputs, A and T,
 // for tools/probe/probe_gdn_intra.cc's per-stage error against fp64.
 
@@ -78,9 +74,6 @@
 #ifndef INTRA_DBG
 #define INTRA_DBG 0
 #endif
-#ifndef WU_HILO
-#define WU_HILO 0     /* D2: Q1-Q4 in fp32, u / w as hi / lo planes (pf_gdn_scan_hl.cl's input) */
-#endif
 
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 inline ushort rne_bf16(float f) {
@@ -107,9 +100,6 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
                            __global ushort* restrict u,
                            __global uint* restrict A2hl,
                            uint c_count
-#if WU_HILO
-                           , __global ushort* restrict wl, __global ushort* restrict ul
-#endif
 #if INTRA_DBG
                            , __global float* restrict Adbg, __global float* restrict Tdbg
 #endif
@@ -259,68 +249,6 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
   }
   barrier(CLK_LOCAL_MEM_FENCE);
 
-#if WU_HILO
-  // ---- 4 (D2, operator 2026-11-12). Q1-Q4 NOT rounded: vb = v beta and kb = k beta exp(gc) stay fp32 and enter
-  //         the DPAS as hi / lo pairs, T as its hi / lo pair: x T ~ xh Th + (xh Tl + xl Th), two chains summed
-  //         in fp32; u and w leave as hi / lo bf16 planes (u = f32(uh) + f32(ul)), which
-  //         pf_gdn_scan_hl.cl reads. u's pass, then w's: 8 A operands live at a time. -----------------------
-  {
-    const uint x0 = sg * 8;
-    __local const uint* const ThW = (__local const uint*)Th;
-    __local const uint* const TlW = (__local const uint*)Tl;
-    for (uint pass = 0; pass < 2; ++pass) {
-      short8 ah[CT / 16], al[CT / 16];
-#pragma unroll
-      for (uint kb = 0; kb < CT / 16; ++kb) {
-        const uint j = kb * 16 + lane;
-        const uint jr = min(j, L - 1);
-        const size_t row = (size_t)(base_m + jr) * CONV_ROWS;
-        const size_t gi = (size_t)(base_m + jr) * HEADS + h;
-        const float bt = beta[gi];
-        const float sc = pass == 0 ? bt : bt * exp(g_cum[gi]);
-        const ushort8 xw = vload8(0, xb + row + (pass == 0 ? V_OFF + h * DIM : K_OFF + kh * DIM) + x0);
-        ushort xv[8], oh[8], ol[8];
-        vstore8(xw, 0, xv);
-#pragma unroll
-        for (uint r = 0; r < 8; ++r) {
-          const float f = j < L ? bf16f(xv[r]) * sc : 0.0f;   // Q1 / Q2 in fp32
-          oh[r] = rne_bf16(f);
-          ol[r] = rne_bf16(f - bf16f(oh[r]));
-        }
-        ah[kb] = as_short8(vload8(0, oh));
-        al[kb] = as_short8(vload8(0, ol));
-      }
-      __global ushort* restrict dh = pass == 0 ? u : w;
-      __global ushort* restrict dl = pass == 0 ? ul : wl;
-#pragma unroll
-      for (uint ni = 0; ni < CT / 16; ++ni) {
-        const uint i = ni * 16 + lane;
-        float8 ch = (float8)(0.0f), cl = (float8)(0.0f);
-#pragma unroll
-        for (uint kb = 0; kb <= ni; ++kb) {
-          const int8 bh = as_int8(vload8(0, ThW + (i * TLD + kb * 16) / 2));
-          const int8 bl = as_int8(vload8(0, TlW + (i * TLD + kb * 16) / 2));
-          ch = intel_sub_group_bf16_bf16_matrix_mad_k16(ah[kb], bh, ch);
-          cl = intel_sub_group_bf16_bf16_matrix_mad_k16(ah[kb], bl, cl);
-          cl = intel_sub_group_bf16_bf16_matrix_mad_k16(al[kb], bh, cl);
-        }
-        if (i < L) {
-          float f[8];
-          vstore8(ch + cl, 0, f);
-          ushort oh[8], ol[8];
-#pragma unroll
-          for (uint r = 0; r < 8; ++r) {
-            oh[r] = rne_bf16(f[r]);
-            ol[r] = rne_bf16(f[r] - bf16f(oh[r]));
-          }
-          const size_t out = ((size_t)(base_m + i) * HEADS + h) * DIM + x0;
-          vstore8(vload8(0, oh), 0, dh + out);
-          vstore8(vload8(0, ol), 0, dl + out);
-        }
-      }
-    }
-  }
-#else
   // ---- 4. u^T = vb^T T^T and w^T = kb^T T^T by DPAS (M = 8 channels, K = 16 positions j,
   //         N = 16 positions i); sub-group sg owns channels 8sg..8sg+7 of both ----------------
   {
@@ -379,5 +307,4 @@ __kernel void pf_gdn_intra(__global const ushort* restrict xb,
       }
     }
   }
-#endif
 }

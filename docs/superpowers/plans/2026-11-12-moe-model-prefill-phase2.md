@@ -80,7 +80,9 @@ the record (Task 9).
   G0**, unless the operator switches it (D1) with its own gates. **K2, Kolibri and Bolt are untouched** (host and
   binaries; G0).
 - **A/B switch:** `B70_PF_PHASE2=old` (env, tests and probes only) puts Ornith / Flash-Next back on today's kernels. No
-  user-facing flag. Task 9 deletes the losers and the variable.
+  user-facing flag. Task 9 deletes the losers and the variable. **Done early (operator 2026-11-12):** the variable,
+  `B70_PF_GDN_INTRA` and the old paths they selected are gone; A/B runs compare a control build against the branch's
+  (`tools/probe/pf_phase2_ab.sh`, `pf_phase2_bitwise.sh`).
 - **Numerics:** bitwise tasks are checked by the G0 mechanism extended for the run (`G0_BITWISE_RE` plus
   `prefill_gate_ornith_{l0,l0-int8}_test`, `_c16`, `ornith_prefill_{l0,l0-int8}_test`, `--baseline main`). Judged tasks
   use the f32 judge with the 1-bf16-ulp near-tie rule (memory: moe-gates-f32-judge): the engine's differing MoE sets and
@@ -181,7 +183,9 @@ test.cc`'s band printed for the new arm.
   - FAIL on numerics with Q1-Q4 as bf16: D2.
   - **Result (2026-11-12): STOPPED.** bf16 Q1-Q4 (23.6 ms for 80.6): l0 gates PASS, prefill_gate_ornith_l0-int8 one
     determined row missed. D2 (Q1-Q4 fp32, u / w hi / lo, pf_gdn_scan_hl; 37.4 + 31.1 ms): per-layer far closer to
-    fp64, yet l0 cjk and three l0-int8 rows missed. Not bound; `B70_PF_GDN_INTRA=hl` for experiments. Operator call.
+    fp64, yet l0 cjk and three l0-int8 rows missed. Operator ruling (2026-11-12): the bf16-Q form is the
+    default on l0, where every gate passes; l0-int8 keeps the four launches (not supported yet: it flips a determined
+    row). D2 (pf_gdn_intra_hl / pf_gdn_scan_hl) removed.
 
 ### Task 4: the scan and the gated head (box, then Mac) - per arm
 
