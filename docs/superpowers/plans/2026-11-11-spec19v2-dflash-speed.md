@@ -166,7 +166,10 @@ deferred projection equals today's at every flush point: plain step, request end
 
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
-- [ ] **Step 1 (harness):** adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
+- [x] **Step 1 (harness):** `tools/prefix/replay_spec.py` uses three rotated speculation arms, prefix cache on,
+  whole-box lock and one-card serving, default per-step MTP, controlled child shutdown, server-clock metrics
+  and f32 judging. Five stand-in tests PASS; no real replay run. Implemented independently while Task 4's
+  frozen C++ build waits for GPU validation. Adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
   the prefix cache with `--spec off` fixed; Task 8 needs `--spec off` / `--mtp auto` / `--spec dflash` with the prefix
   cache ON in every arm. Take the cards through `tools/gpu_lock.sh` (never set `ZE_AFFINITY_MASK` by hand) and stop the
   server the way `tools/box_validate/serve_run.sh` does (its own child, wait for exit), not a bare `kill`.
