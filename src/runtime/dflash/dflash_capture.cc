@@ -61,7 +61,7 @@ class Walk {
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads))
+                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -107,7 +107,7 @@ class Walk {
         launch(k, d_.q_heads + 2 * d_.kv_heads, M);
       }
       {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128
-        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads), "df_attn_part", kd::kAttnWg);
+        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -116,10 +116,10 @@ class Walk {
         k.arg(5, scale_);
         k.arg_ptr(6, b_.part.ptr());
         launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
-               d_.window[l] / kd::kAttnPb);
+               d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
       {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
-        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads), "df_attn_reduce", d_.head_dim);
+        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows), "df_attn_reduce", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.part.ptr());
@@ -389,7 +389,7 @@ class Walk {
     pending_variant_ = variant;
     return k;
   }
-  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
+  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1) {
     require(!pending_entry_.empty(), "launch() without a preceding kernel()");
     l0::Event* event = nullptr;
     if (opt_.profile) {
@@ -397,7 +397,7 @@ class Walk {
       opt_.profile->events.emplace_back(opt_.profile->pool, uint32_t(step_.kernel_count));
       event = &opt_.profile->events.back();
     }
-    step_.list.launch(k, gx, gy, 1, event);
+    step_.list.launch(k, gx, gy, gz, event);
     step_.labels.push_back((layer_ < 0 ? std::string("--") : "D" + std::to_string(layer_)) + " " + pending_entry_ +
                            " " + pending_variant_);
     pending_entry_.clear();

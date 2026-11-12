@@ -52,6 +52,10 @@ struct DFlashHostLinear {
   model::GemvShape shape() const { return {K, N, slices, kind == model::WeightKind::Int4 ? 1u : 0u}; }
 };
 
+// Spec 19v2 C3: an int4 candidate copy of the loaded int8 head. Quantise its effective fp32 weights directly;
+// the original int8 rows remain the exact rerank source. K%64=0, N%16=0, as for every target head.
+DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_scales, uint32_t K, uint32_t N);
+
 enum class DFlashLinear { Qkv, O, GateUp, Down, AttnKproj, MlpKproj };
 
 class DFlashCheckpoint {

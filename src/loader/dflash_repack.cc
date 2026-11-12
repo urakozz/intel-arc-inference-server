@@ -211,6 +211,38 @@ const uint16_t* DFlashCheckpoint::bf16(const std::string& c) const {
   return reinterpret_cast<const uint16_t*>(set_->data(t));
 }
 
+DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_scales, uint32_t K, uint32_t N) {
+  DFlashHostLinear h;
+  h.K = K;
+  h.N = N;
+  h.kind = model::WeightKind::Int4;
+  std::vector<uint32_t> q(size_t(K / 8) * N);
+  std::vector<uint16_t> scales(size_t(K / 64) * N);
+  for (uint32_t n = 0; n < N; ++n)
+    for (uint32_t g = 0; g < K / 64; ++g) {
+      const auto* p = tiled + (size_t(n / 16) * (K / 16) + g * 4) * 256 + n % 16;
+      float amax = 0;
+      for (uint32_t k = 0; k < 64; ++k)
+        amax = std::fmax(amax, std::fabs(float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n]));
+      const uint16_t sh = common::kv8::f32_to_f16_rne(2.0f * amax / 15.0f);
+      scales[size_t(g) * N + n] = sh;
+      const float scale = common::f16_to_f32(sh);
+      for (uint32_t j = 0; j < 8; ++j) {
+        uint32_t word = 0;
+        for (uint32_t t = 0; t < 8; ++t) {
+          const uint32_t k = j * 8 + t;
+          const float v = float(p[(k / 16) * 256 + (k % 16) * 16]) * row_scales[n];
+          const float code = scale > 0 ? std::rint(v / scale) + 8.0f : 8.0f;
+          word |= uint32_t(std::fmin(std::fmax(code, 0.0f), 15.0f)) << (4 * t);
+        }
+        q[size_t(g * 8 + j) * N + n] = word;
+      }
+    }
+  h.int4.resize(size_t(N / 16) * (K / 64) * 136);
+  common::repack_int4_layout1(q.data(), scales.data(), K, N, h.int4.data());
+  return h;
+}
+
 DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& parts, uint32_t K, DraftFormat f,
                                                unsigned threads) const {
   // Concatenate the parts' rows ([N_i][K] each, row-major) into one [N][K], then the device form.

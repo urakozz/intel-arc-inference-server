@@ -15,13 +15,15 @@
 #include "runtime/dflash/dflash_drafter.h"
 
 // Same real weights and ring, with only the attention grid changed. Interleave timestamp measurements.
-void check_attn_heads(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint32_t K) {
-  std::array<std::unique_ptr<runtime::ProfileEvents>, 3> events;
-  std::array<std::unique_ptr<runtime::CapturedStep>, 3> lists;
-  for (unsigned h = 0; h < 3; ++h) {
+void check_attn_grid(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint32_t K) {
+  constexpr std::array<std::pair<unsigned, unsigned>, 6> forms = {{{0, 0}, {1, 0}, {2, 0}, {1, 4}, {1, 2}, {1, 1}}};
+  std::array<std::unique_ptr<runtime::ProfileEvents>, forms.size()> events;
+  std::array<std::unique_ptr<runtime::CapturedStep>, forms.size()> lists;
+  for (unsigned h = 0; h < forms.size(); ++h) {
     events[h] = std::make_unique<runtime::ProfileEvents>(e.context());
     runtime::CaptureOptions opt;
-    opt.dflash_attn_heads = h;
+    opt.dflash_attn_heads = forms[h].first;
+    opt.dflash_attn_rows = forms[h].second;
     opt.profile = events[h].get();
     lists[h] = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(
         e.context(), d.weights(), runtime::dflash::dflash_target(e.model()), d.buffers(), e.buffers().control, opt));
@@ -31,10 +33,10 @@ void check_attn_heads(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uin
   l0::CmdList imm = l0::CmdList::immediate(e.context());
   std::vector<uint8_t> hidden(d.buffers().h.size()), observed(hidden.size());
   imm.copy(hidden.data(), d.buffers().h.ptr(), hidden.size());
-  std::array<std::vector<double>, 3> timings;
+  std::array<std::vector<double>, forms.size()> timings;
   for (unsigned r = 0; r < 6; ++r)
-    for (unsigned a = 0; a < 3; ++a) {
-      const unsigned h = (a + r) % 3;
+    for (unsigned a = 0; a < forms.size(); ++a) {
+      const unsigned h = (a + r) % forms.size();
       for (auto& event : events[h]->events) event.reset();
       e.replay_aux(lists[h]->list);
       CHECK(std::memcmp(&base, d.buffers().readback(), sizeof(base)) == 0);
@@ -47,10 +49,10 @@ void check_attn_heads(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uin
       CHECK(ms > 0);
       if (r) timings[h].push_back(ms);
     }
-  for (unsigned h = 0; h < 3; ++h) {
+  for (unsigned h = 0; h < forms.size(); ++h) {
     std::sort(timings[h].begin(), timings[h].end());
-    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u ms=%.6f readback_hidden=bitwise\n",
-                e.pos(), K, h ? h : 4, timings[h][2]);
+    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u rows=%u ms=%.6f readback_hidden=bitwise\n",
+                e.pos(), K, forms[h].first ? forms[h].first : 4, forms[h].second ? forms[h].second : 8, timings[h][2]);
   }
 }
 
@@ -96,7 +98,7 @@ int main(int argc, char** argv) {
     CHECK(draft_events.events.back().elapsed_us(draft_events.events.front()) >= kernel_us);
     CHECK(draft_events.events.front().elapsed_us(draft_events.events.front()) == draft_events.events.front().duration_us());
   }
-  check_attn_heads(e, d, 7);
+  check_attn_grid(e, d, 7);
   e.verify(0);
   e.commit(0, e.verify_ids()[0]);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -136,8 +138,8 @@ int main(int argc, char** argv) {
   e.prefill(std::vector<uint32_t>(4096, 760));
   e.save_state(state.ptr());
   const uint32_t deep_pos = e.pos(), deep_anchor = e.control()->cur_token[0];
-  check_attn_heads(e, d, 7);
-  check_attn_heads(e, d, 2);
+  check_attn_grid(e, d, 7);
+  check_attn_grid(e, d, 2);
   d.draft(e, 2, 0.0f, 0);
   e.verify(2);
   const std::vector<uint32_t> deep_ids(e.verify_ids(), e.verify_ids() + 3);
