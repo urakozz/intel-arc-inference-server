@@ -1,6 +1,6 @@
 # MoE prefill probe, 2026-11-12: the expert GEMM straight from int4, and the multi-work-group sort
 
-Plan `docs/superpowers/plans/2026-11-12-ornith-moe-prefill.md`, Task 1. Probe `tools/probe/probe_moe_prefill`
+Plan `../superpowers/plans/2026-11-12-moe-model-prefill-phase1.md`, Task 1. Probe `tools/probe/probe_moe_prefill`
 (`.cc` + `.cl`), box row 83 (`r83.routes`, `r83.probe`). Card 0, box state not checked idle (another agent's card
 jobs ran on card 1 at times): **busy box**. Every time is an L0 timestamp span around one arm's whole walk over
 every layer-chunk of a real route dump, after a warm-up, arms interleaved in rotating order, median of 5 rounds
