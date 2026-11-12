@@ -49,8 +49,8 @@ Prefill, t/s:
 |---|---:|---:|
 | one card | 1,709 | 1,539 |
 | one card, `--prefill-backend l0-int8` | 2,205 | 1,940 |
-| two cards | 2,939 | 2,686 |
-| two cards, `--prefill-backend l0-int8` | **3,323** | **3,048** |
+| two cards, TP | 2,939 | 2,686 |
+| two cards, TP, `--prefill-backend l0-int8` | **3,323** | **3,048** |
 
 **Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt:
 
