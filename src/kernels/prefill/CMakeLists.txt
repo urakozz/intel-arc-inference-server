@@ -384,6 +384,8 @@ if(B70_ORNITH)
   endforeach()
   # Phase 2 Task 6: the a||b GEMV over a chunk at 16 rows x 2 column tiles a work-group, bitwise pf_ab_proj_D2048.
   add_ocloc_kernel(pf_route_ab_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl DEFINES K=2048 N=128 MT=16 TC=2)
+  add_ocloc_kernel(pf_route_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=272 MT=16 TC=2)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
                    DEFINES ${PF_ORNITH_GDN})
