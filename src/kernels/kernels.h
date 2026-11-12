@@ -156,15 +156,15 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 65536, 1, 2, true, false, false, false, kSmDraft7},
     {5120, 131072, 1, 2, true, false, false, false, kSmDraft7},
     // Spec 19v2: the RTN int4 g64 drafter, layout 1 and one output slice. Only the block's M 8; other lists keep
-    // their existing rows. In-work-group split-K and magic dequant are provisional until the device cost gate.
-    {5120, 6144, 1, 1, true, true, false, false, kSmDraft8},
-    {4096, 5120, 1, 1, true, true, false, false, kSmDraft8},
-    {5120, 34816, 1, 1, true, true, false, false, kSmDraft8},
-    {17408, 5120, 1, 1, true, true, false, false, kSmDraft8},
-    {25600, 5120, 1, 1, true, true, false, false, kSmDraft8},
-    {5120, 2048, 1, 1, true, true, false, false, kSmDraft8},
-    {5120, 1280, 1, 1, true, true, false, false, kSmDraft8},
-    {5120, 256, 1, 1, true, true, false, false, kSmDraft8},
+    // their existing rows. Groups stay ascending as in gemv; magic dequant is exact. Device cost gates still apply.
+    {5120, 6144, 1, 1, false, true, false, false, kSmDraft8},
+    {4096, 5120, 1, 1, false, true, false, false, kSmDraft8},
+    {5120, 34816, 1, 1, false, true, false, false, kSmDraft8},
+    {17408, 5120, 1, 1, false, true, false, false, kSmDraft8},
+    {25600, 5120, 1, 1, false, true, false, false, kSmDraft8},
+    {5120, 2048, 1, 1, false, true, false, false, kSmDraft8},
+    {5120, 1280, 1, 1, false, true, false, false, kSmDraft8},
+    {5120, 256, 1, 1, false, true, false, false, kSmDraft8},
     // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections (GPTQ layout 0, model::qwen4exp's S) and its int8 head at
     // its verify lists' M = 2..4 (runtime/qwen4exp/qwen4exp_capture.cc) - magic dequant (bit-identical to the shift
     // form), no lever swept; the head the in-work-group form (28b's int8-head choice). Its bf16 linears (a||b, the

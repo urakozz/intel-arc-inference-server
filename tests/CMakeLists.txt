@@ -3818,7 +3818,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   # under the tests' override, CaptureOptions::force_linear).
   foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048 K5120_N1280 K5120_N256)
     list(APPEND _v19b_reused kernel_gemm_sm_i8w_M8_${KN}_wg)
-    list(APPEND _v19b_reused kernel_gemm_sm_M8_${KN}_S1_L1_wg_mg kernel_gemv_M8_${KN}_S1_L1)
+    list(APPEND _v19b_reused kernel_gemm_sm_M8_${KN}_S1_L1_mg kernel_gemv_M8_${KN}_S1_L1)
   endforeach()
   foreach(NV 32768 65536 131072 248320)
     list(APPEND _v19b_reused kernel_gemm_sm_i8w_M7_K5120_N${NV}_wg)
