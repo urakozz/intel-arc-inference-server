@@ -97,6 +97,16 @@ void plan_case() {
   std::printf("plan with a drafter at 32768: %s\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
 }
 
+void head_policy_case() {
+  CHECK(cli::dflash::candidate_head(true, 0));
+  CHECK(!cli::dflash::candidate_head(false, 0));
+  for (uint32_t n : {32768u, 65536u, 131072u}) {
+    CHECK(!cli::dflash::candidate_head(true, n));
+    CHECK(!cli::dflash::candidate_head(false, n));
+  }
+  CHECK(cli::dflash::Args{}.format == loader::DraftFormat::Int8);
+}
+
 void cost_case() {
   using server::MtpCost;
   const MtpCost c = MtpCost::dflash(/*int8_head=*/true, /*int8_drafter=*/true);
@@ -148,6 +158,7 @@ int main() {
   dims_case();
   plan_case();
   cost_case();
+  head_policy_case();
   std::printf("dflash_engine_host_test OK\n");
   return 0;
 }
