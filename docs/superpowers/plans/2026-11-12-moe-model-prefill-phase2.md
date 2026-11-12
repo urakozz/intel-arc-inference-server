@@ -280,6 +280,14 @@ and stays), its route Task 6's at 512 experts top-10.
   `r33.speed`'s pp4096 at `--layers 18` interleaved against main.
   - **Gates:** bitwise tasks bitwise main's Flash-Next output; Task 3's GDN judged by r33.golden's gate and
     r33.golden_real; pp4096 at `--layers 18` faster than main's (the phase table printed and recorded).
+  - **Result (2026-11-12):** Flash-Next binds the GDN front (bitwise, on main since Task 2) and the router (K 2560,
+    N 528) and a||b on pf_route.cl's tiling (bitwise). k1 / prefill / golden synthetic and qwen4exp_prefill_intel_test
+    (routes against the recorded engine trace) 19 / 19 PASS, the synthetic logs identical to main's. pp4096 at
+    --layers 18 (card 1, 2 interleaved pairs): 4,663 -> 4,698 t/s (+0.7 %, within noise). The intra-chunk kernel is
+    not bound for Flash-Next: it passed the synthetic and golden gates (golden_real 77 vs main's 74 determined rows
+    over three prompts, a test main fails too), but qwen4exp_prefill_intel_test matches routes bitwise against the
+    engine trace recorded in oracle-out-q4exp-f32-aligned-L18. That reference has to be re-made on the CPU first.
+    The one-sub-group gated head (Task 4) saved under 3 ms on Ornith, so it was not bound here either.
 
 ### Task 9: the record, the clean-up, the final gate (box idle, then Mac)
 
