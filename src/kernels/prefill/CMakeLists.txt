@@ -386,6 +386,9 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_route_ab_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl DEFINES K=2048 N=128 MT=16 TC=2)
   add_ocloc_kernel(pf_route_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
                    DEFINES K=2048 N=272 MT=16 TC=2)
+  # ... and D3's opt-in DPAS form (B70_PF_ROUTE=dpas), judged.
+  add_ocloc_kernel(pf_route_router_dpas_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=272 ROUTE_DPAS=1)
   # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
   add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
                    DEFINES ${PF_ORNITH_GDN})
