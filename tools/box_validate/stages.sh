@@ -3696,6 +3696,9 @@ st_r83_probe() {
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5" "probe_moe_prefill ornith"
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/flashnext.routes --model flashnext --C 2048,4096 --rounds 5" "probe_moe_prefill flashnext"
   grab_all result '^(RESULT|# checks|# FAILED|\| check)' 400
+  finish
+}
+
 # ======================================================================================
 row 84 "phase 2 of the MoE-model prefill - Ornith's GDN prompt pass, the small kernels (plan 2026-11-12-moe-model-prefill-phase2 Task 1)"
 rownote 84 "Opt-in probes. r84.trace: B70_PREFILL_PROFILE=2's (phase, entry) trace at pp4096, l0 and l0-int8. r84.dump + r84.probe: the GDN intra-chunk inputs of layers 0 / 12 / 28 (B70_PF_GDN_DUMP) and probe_gdn_intra on them - each stage's error against fp64 for today's four kernels and the one-launch DPAS kernel, then their times. Record: docs/probes/probe-prefill-phase2-2026-11-12.md."
