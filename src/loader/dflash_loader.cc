@@ -25,6 +25,8 @@ std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void
 }
 DeviceWeight upload_linear(l0::Context& ctx, l0::CmdList& imm, const DFlashHostLinear& h, size_t& bytes) {
   bytes += h.bytes();
+  if (h.kind == model::WeightKind::Int4)
+    return DeviceWeight{upload(ctx, imm, h.int4.data(), h.int4.size() * 4), nullptr, h.shape(), model::WeightKind::Int4};
   if (h.kind == model::WeightKind::Int8) {
     DeviceWeight w{upload(ctx, imm, h.i8.data(), h.i8.size()), upload_u(ctx, imm, h.scales.data(), h.scales.size() * 4),
                    h.shape(), model::WeightKind::Int8};
@@ -126,7 +128,7 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   std::snprintf(buf, sizeof buf,
                 "DFlash drafter: %s, %u layers, taps %s, block %u, %s (%s %.1f s), mask row from the %s, %zu B, %.1f s",
                 d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Int8 ? "quantised at load" : "tiled at load", quant,
+                format == DraftFormat::Bf16 ? "tiled at load" : "quantised at load", quant,
                 w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
   w.line = buf;
   std::printf("%s\n", buf);

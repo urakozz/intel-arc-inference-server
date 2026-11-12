@@ -33,6 +33,7 @@
 #include "loader/dflash_layout.h"
 #include "loader/dflash_repack.h"
 #include "loader/lm_head_int8.h"
+#include "loader/rtn.h"
 #include "model/dflash.h"
 #include "model/model_desc.h"
 #include "model/qwen35.h"
@@ -99,6 +100,15 @@ void check_linear(const loader::DFlashHostLinear& h, const std::vector<uint16_t>
     common::repack_bf16_tiled(rows.data(), K, N, want.data());
     CHECK(h.bf16 == want);
     CHECK(h.i8.empty() && h.scales.empty());
+  } else if (f == loader::DraftFormat::Int4G64) {
+    CHECK(h.kind == model::WeightKind::Int4);
+    CHECK(h.shape().layout == 1 && h.shape().S == 1);
+    std::vector<uint32_t> q(size_t(K / 8) * N), want(size_t(N / 16) * (K / 64) * 136);
+    std::vector<uint16_t> scales(size_t(K / 64) * N);
+    loader::rtn_int4_g64(rows.data(), K, N, q.data(), scales.data());
+    common::repack_int4_layout1(q.data(), scales.data(), K, N, want.data());
+    CHECK(h.int4 == want);
+    CHECK(h.bf16.empty() && h.i8.empty() && h.scales.empty());
   } else {
     CHECK(h.kind == model::WeightKind::Int8);
     std::vector<int8_t> q(size_t(K) * N);
@@ -205,6 +215,7 @@ void test_config_refusals(const std::string& path) {
 void test_checkpoint(uint32_t version) {
   fx::Shape s;
   s.version = version;
+  s.inter = 128;   // down's K must hold whole int4 groups of 64
   const fx::Tensors ts = fx::make(s, 7 + version);
   const fs::path dir = tmpdir("v" + std::to_string(version));
   fx::write(dir, s, ts);
@@ -227,7 +238,7 @@ void test_checkpoint(uint32_t version) {
   }
 
   const uint32_t H = s.hidden;
-  for (loader::DraftFormat f : {loader::DraftFormat::Bf16, loader::DraftFormat::Int8}) {
+  for (loader::DraftFormat f : {loader::DraftFormat::Bf16, loader::DraftFormat::Int8, loader::DraftFormat::Int4G64}) {
     size_t linears = 0;
     loader::DFlashHostLinear fc = ck.fc(f, 2);
     check_linear(fc, rows_of(ts, {"fc.weight"}), 128, H, f);
@@ -375,7 +386,7 @@ void test_checkpoint(uint32_t version) {
 
 void test_real_bytes(const std::string& path) {
   const model::DFlashDesc d = parse(slurp(path));
-  for (loader::DraftFormat f : {loader::DraftFormat::Bf16, loader::DraftFormat::Int8}) {
+  for (loader::DraftFormat f : {loader::DraftFormat::Bf16, loader::DraftFormat::Int8, loader::DraftFormat::Int4G64}) {
     const loader::DFlashBytes b = loader::dflash_weight_bytes(d, 5120, f);
     std::printf("Qwen3.8-27B-DFlash2 %s: linears %zu B, small %zu B, codebooks %zu B, total %.3f GB\n",
                 loader::draft_format_name(f), b.linears, b.small, b.codebooks, b.total() / 1e9);

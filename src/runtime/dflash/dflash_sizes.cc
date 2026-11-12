@@ -100,7 +100,7 @@ uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const vo
   for (uint32_t w : d.window) h.u32(w);
   h.f64(d.theta);
   h.f64(d.eps);
-  h.u32(f == loader::DraftFormat::Int8 ? 8u : 16u);
+  h.u32(f == loader::DraftFormat::Int4G64 ? 4u : f == loader::DraftFormat::Int8 ? 8u : 16u);
   if (norm_bytes != 0) h.bytes(norms, norm_bytes);
   return h.h != 0 ? h.h : 1;
 }

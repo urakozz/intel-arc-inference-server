@@ -65,7 +65,7 @@ int main(int argc, char** argv) {
               s.total(), s.ring_k + s.ring_v, s.taps, s.rope, s.logits, s32.total());
 
   // 2. the planner's term
-  for (loader::DraftFormat f : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16}) {
+  for (loader::DraftFormat f : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16, loader::DraftFormat::Int4G64}) {
     const runtime::DrafterPlan p = rd::drafter_plan(d, 5120, V, f);
     CHECK_EQ(p.weights, loader::dflash_weight_bytes(d, 5120, f).total());
     CHECK_EQ(p.per_position, size_t(512));
@@ -147,6 +147,8 @@ int main(int argc, char** argv) {
     std::vector<float> norms(2 * 5120, 1.0f);
     const uint64_t k8 = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
     const uint64_t k16 = rd::drafter_key(d, loader::DraftFormat::Bf16, norms.data(), norms.size() * 4);
+    const uint64_t k4 = rd::drafter_key(d, loader::DraftFormat::Int4G64, norms.data(), norms.size() * 4);
+    CHECK(k4 != 0 && k4 != k8 && k4 != k16);
     norms[17] = 1.0078125f;   // one norm weight another checkpoint has
     const uint64_t k8b = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
     model::DFlashDesc other = d;
