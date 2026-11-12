@@ -66,6 +66,16 @@ int main(int argc, char** argv) {
   CHECK_EQ(s4.hid, 16 * s.hid);
   CHECK_EQ(s4.ring_k, s.ring_k);
   CHECK_EQ(s4.ring_v, s.ring_v);
+  const auto hc = rd::sizes(d, 5120, V, 16384, loader::DraftFormat::Int8, true);
+  CHECK_EQ(hc.tpart, 4 * s.tpart);
+  CHECK_EQ(hc.candidate, size_t(7) * 64 * 4);
+  CHECK_EQ(hc.logits, s.logits);
+  CHECK_EQ(hc.ring_k + hc.ring_v, s.ring_k + s.ring_v);
+  const auto hp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8, true);
+  CHECK_EQ(hp.weights, loader::dflash_weight_bytes(d, 5120, loader::DraftFormat::Int8).total() +
+                          loader::dflash_linear_bytes(5120, V, loader::DraftFormat::Int4G64));
+  CHECK_EQ(hp.fixed + hp.per_position * 16384, hc.total());
+  CHECK_EQ(rd::draft_launches(d, true), 88u);
   CHECK_EQ(s.total() - s32.total(), (s.logits - s32.logits) + (s.tpart - s32.tpart));
   std::printf("buffers at max_len 16384: %zu B (ring %zu, taps %zu, rope %zu, logits %zu); with a 32k draft "
               "vocabulary %zu B\n",

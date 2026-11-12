@@ -16,7 +16,7 @@
 // row `mask_id` (copied once at load), or the checkpoint's mask_embedding.safetensors (Review Focus 4).
 //
 // The layouts are loader/dflash_layout.h's (the planner's formula); load_drafter asserts its allocations add up to
-// loader::dflash_weight_bytes exactly.
+// loader::dflash_weight_bytes exactly (plus the optional C3 candidate head).
 namespace loader {
 
 struct DFlashLayerWeights {
@@ -29,6 +29,7 @@ struct DFlashWeights {
   model::DFlashDesc desc;
   DraftFormat format = DraftFormat::Int8;
   uint32_t target_hidden = 0;
+  std::unique_ptr<DeviceWeight> candidate_head;      // C3: optional int4 copy; exact int8 head stays in target
   std::unique_ptr<DeviceWeight> fc;                  // taps x target hidden -> hidden
   std::unique_ptr<l0::Mem> hidden_norm, final_norm;  // fp32 [hidden] each
   std::vector<DFlashLayerWeights> layers;
@@ -38,7 +39,7 @@ struct DFlashWeights {
   std::unique_ptr<l0::Mem> pred, succ;               // DFlash 2: bf16 [vocab][sel_rank] each
   std::unique_ptr<l0::Mem> mask_row;                 // fp32 [hidden]
   bool mask_from_checkpoint = false;
-  size_t bytes = 0;                                  // == dflash_weight_bytes(desc, target_hidden, format).total()
+  size_t bytes = 0;                                  // body weights plus the optional candidate head
   double seconds = 0, quant_seconds = 0;
   std::string line;                                  // the load line (also printed)
 };
@@ -50,7 +51,7 @@ struct DFlashWeights {
 //   DFlash drafter: DFlash2DraftModel, 5 layers, taps 5/19/33/47/61, block 8, int8 (quantised at load 3.1 s),
 //   mask row from the target's embedding, 2015363072 B, 4.2 s
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
-                           DraftFormat format, unsigned threads = 0);
+                           DraftFormat format, unsigned threads = 0, bool candidate_head = false);
 // The same against a target given by its parts: its descriptor, its lm_head rows and its embedding (bf16
 // [rows][hidden] on this device) - what the overload above reads off a LoadedModel; a device test passes a synthetic
 // target (tests/runtime/dflash_draft_test.cc).

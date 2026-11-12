@@ -10,12 +10,12 @@ l0::Mem dev(l0::Context& ctx, size_t bytes) { return l0::Mem(ctx, l0::MemKind::D
 }  // namespace
 
 DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t th, uint32_t rows, uint32_t ml,
-                             loader::DraftFormat format)
+                             loader::DraftFormat format, bool candidate_head)
     : desc(d),
       target_hidden(th),
       head_rows(rows),
       max_len(ml),
-      sz(sizes(d, th, rows, ml, format)),
+      sz(sizes(d, th, rows, ml, format, candidate_head)),
       dctl(ctx, l0::MemKind::Shared, sz.dctl),
       out(ctx, l0::MemKind::Shared, sz.out),
       rope(dev(ctx, sz.rope)),
@@ -37,6 +37,7 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
       cand(dev(ctx, sz.cand)),
       unary(dev(ctx, sz.unary)) {
   if (sz.co) co = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.co);
+  if (sz.candidate) candidate = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.candidate);
   if (sz.hid) hid = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.hid);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
@@ -49,6 +50,7 @@ size_t DFlashBuffers::bytes() const {
     b += m->size();
   if (co) b += co->size();
   if (hid) b += hid->size();
+  if (candidate) b += candidate->size();
   return b;
 }
 
@@ -58,6 +60,7 @@ void DFlashBuffers::zero(l0::CmdList& imm) {
     imm.fill(m->ptr(), 0u, m->size());
   if (co) imm.fill(co->ptr(), 0u, co->size());
   if (hid) imm.fill(hid->ptr(), 0u, hid->size());
+  if (candidate) imm.fill(candidate->ptr(), 0u, candidate->size());
   std::memset(dctl.ptr(), 0, dctl.size());
   std::memset(out.ptr(), 0, out.size());
   const std::vector<float> t = rope_table(desc.theta, desc.head_dim, max_len + kernels::dflash::kM);
