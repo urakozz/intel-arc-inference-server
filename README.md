@@ -20,14 +20,14 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 
 ### Qwen3.8-27B
 
-One fast session on two cards (the default): **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
+One session on two cards (the default) with TP 2: **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
 on a prefix cache hit.
 
 Decode with MTP, t/s - one session, or several at once (the total, per request in brackets):
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
-| two cards, tensor parallel (the default for one session) | **123.1** | | | |
+| two cards, tensor parallel | **123.1** | - | - | - |
 | one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
