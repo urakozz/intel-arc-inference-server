@@ -31,7 +31,7 @@ uint32_t ring_slots(const model::DFlashDesc& d, uint32_t layer, uint32_t max_len
 }
 
 DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows, uint32_t max_len,
-                  loader::DraftFormat format) {
+                  loader::DraftFormat format, bool candidate_head) {
   const size_t M = kd::kM, R = kd::kR, H = d.hidden;
   DFlashSizes s;
   s.dctl = sizeof(DFlashCtl);
@@ -66,16 +66,21 @@ DFlashSizes sizes(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t h
     s.kv *= kd::int4_slices(d.hidden, 2 * d.kv_n());
     s.hid *= kd::int4_slices(d.hidden, d.sel_rank);
   }
+  if (candidate_head) {
+    s.tpart *= 4;   // top64 rather than top16
+    s.candidate = R * 64 * 4;
+  }
   return s;
 }
 
 DrafterPlan drafter_plan(const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows,
-                         loader::DraftFormat f) {
+                         loader::DraftFormat f, bool candidate_head) {
   DrafterPlan p;
   p.weights = loader::dflash_weight_bytes(d, target_hidden, f).total();
+  if (candidate_head) p.weights += loader::dflash_linear_bytes(target_hidden, head_rows, loader::DraftFormat::Int4G64);
   // Linear in max_len: the difference between two lengths is the per-position term.
-  const size_t a = sizes(d, target_hidden, head_rows, 4096, f).total();
-  const size_t b = sizes(d, target_hidden, head_rows, 8192, f).total();
+  const size_t a = sizes(d, target_hidden, head_rows, 4096, f, candidate_head).total();
+  const size_t b = sizes(d, target_hidden, head_rows, 8192, f, candidate_head).total();
   p.per_position = (b - a) / 4096;
   p.fixed = a - p.per_position * 4096;
   p.n_taps = uint32_t(d.taps.size());   // spec 19c: the engine's prefill tap staging
@@ -116,8 +121,8 @@ uint64_t drafter_key(const model::DFlashDesc& d, loader::DraftFormat f, const vo
   return h.h != 0 ? h.h : 1;
 }
 
-size_t draft_launches(const model::DFlashDesc& d) {
-  return 1 + size_t(d.layers) * (d.v2() ? 16 : 12) + (d.v2() ? 6 : 5);
+size_t draft_launches(const model::DFlashDesc& d, bool candidate_head) {
+  return 1 + size_t(d.layers) * (d.v2() ? 16 : 12) + (d.v2() ? 6 : 5) + size_t(candidate_head);
 }
 size_t project_launches(const model::DFlashDesc& d) { return 3 + d.layers; }
 

@@ -4,6 +4,7 @@
 // Host only (names, no device).
 //
 //   dflash_variant_names_test <config.json> kernel_<new>... -- kernel_<reused>...
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <fstream>
@@ -63,6 +64,17 @@ int main(int argc, char** argv) {
                 if (rows && heads != 1) continue;
                 for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows)) bound.insert(v);
               }
+  const auto* candidate = kernels::small_m_tuning(5120, 248320, 1, 1);
+  CHECK(candidate && kernels::gemm_sm_built_m(*candidate) == std::vector<unsigned>{7});
+  for (bool v2 : {false, true})
+    for (unsigned fmt : {0u, 1u, 2u})
+      for (auto k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv}) {
+        const auto names = kd::draft_variants(v2, fmt, true, 0, k, k, 0, 0, true);
+        CHECK(std::find(names.begin(), names.end(), kd::candidate_topk_variant()) != names.end());
+        CHECK(std::find(names.begin(), names.end(), kd::rerank_variant()) != names.end());
+        CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
+        bound.insert(names.begin(), names.end());
+      }
   int bad = 0;
   for (const std::string& v : bound)
     if (!fresh.count(v) && !reused.count(v)) {

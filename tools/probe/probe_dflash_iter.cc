@@ -78,7 +78,7 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
   records.exceptions(std::ios::failbit | std::ios::badbit);
   live.exceptions(std::ios::failbit | std::ios::badbit);
   records << Json{{"run", {{"format", loader::draft_format_name(d.weights().format)}, {"head", "int8"},
-                           {"draft_vocab", 0}, {"vocab_used", e.model().desc->vocab_used}, {"v_ids", Json::array()}}}}.dump() << '\n';
+                           {"draft_vocab", 0}, {"candidate_head", bool(d.weights().candidate_head)}, {"vocab_used", e.model().desc->vocab_used}, {"v_ids", Json::array()}}}}.dump() << '\n';
   for (const auto& source : sources) {
     const std::string name = source.at("name");
     const auto prompt = source.at("prompt_ids").get<std::vector<uint32_t>>();
@@ -336,12 +336,20 @@ int main(int argc, char** argv) {
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
+    bool candidate_head = false;
+    auto format = loader::DraftFormat::Int4G64;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
       else if (arg == "--rounds") rounds = std::stoul(argv[++i]);
+      else if (arg == "--candidate-head") candidate_head = true;
+      else if (arg == "--format") {
+        const std::string f = argv[++i];
+        if (f == "int4") format = loader::DraftFormat::Int4G64;
+        else if (!loader::parse_draft_format(f, format)) throw std::runtime_error("--format int8|bf16|int4");
+      }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }
       else throw std::runtime_error("unknown option: " + arg);
@@ -357,7 +365,7 @@ int main(int argc, char** argv) {
     }
     l0::Context ctx(0);
     auto model = loader::load(ctx, argv[1], max_len, false, loader::LmHeadForm::Int8);
-    auto weights = loader::load_drafter(ctx, argv[2], model, loader::DraftFormat::Int4G64);
+    auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head);
     const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     df::DFlashDrafter drafter(ctx, std::move(weights), rows, max_len, 7);
     runtime::Engine e(ctx, std::move(model), max_len, false, runtime::KvCache::Bf16, &drafter);
