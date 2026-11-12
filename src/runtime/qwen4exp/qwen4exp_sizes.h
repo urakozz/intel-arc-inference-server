@@ -167,6 +167,9 @@ inline uint32_t pf_dense_rows(uint32_t pos, uint32_t C) {
 //   xb bf16 [C][10240], seed bf16 [3][10240], g / beta fp32 [C][48], A / A2 fp32 [C/64][48][64][64],
 //   w / u bf16 [C][48][128], o fp32 [C][48][128]   (PrefillScratch's gdn_* fields at this family's - Qwen3.8's - shape)
 inline constexpr size_t kGdnChunkLaunches = 10;
+// Phase 2 (runtime/prefill/phase2.h): conv + l2norm one launch (9), and with B70_PF_GDN_INTRA=hl A / solve / wu /
+// A2 one launch (6); 10 with B70_PF_PHASE2=old.
+size_t gdn_chunk_q4_launches();
 inline constexpr uint32_t kGdnChunk = 64;   // the WY sub-chunk (PrefillScratchDims::kGdnChunk)
 struct GdnScratchSizes {
   size_t xb = 0, seed = 0, g = 0, beta = 0, A = 0, A2 = 0, w = 0, u = 0, o = 0;

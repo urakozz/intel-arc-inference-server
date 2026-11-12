@@ -7,6 +7,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "kernels/qwen4exp_kernels.h"
 #include "runtime/prefill/gdn.h"
+#include "runtime/prefill/phase2.h"
 #include "runtime/prefill/profile.h"
 
 // gdn_chunk_q4 - runtime/prefill/gdn.cc's ten launches, statement for statement in their order, grids and
@@ -53,34 +54,57 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1, {PtrArg(b.ring), PtrArg(b.seed), arg_val(pos)});
   prefill::profile_wait(cx, Phase::kGdnSeed);
-  //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
-  cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, (C + kConvBlock - 1) / kConvBlock, 1,
-            {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnConv);
-  //  3 - l2norm q and k in place.
-  cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * kKHeads, C, 1, {PtrArg(b.xb), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnL2);
+  const bool p2 = prefill::pf_phase2_on();
+  if (p2) {
+    //  2-3 (phase 2 Task 2) - conv + SiLU + q / k l2norm in one launch (gdn.cc's), bitwise.
+    cx.launch(kc(kernels::pf_gdn_front_variant(kKHeads, kVHeads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
+              {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnConv);
+  } else {
+    //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
+    cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, (C + kConvBlock - 1) / kConvBlock, 1,
+              {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnConv);
+    //  3 - l2norm q and k in place.
+    cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * kKHeads, C, 1, {PtrArg(b.xb), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnL2);
+  }
   //  4 - head scalars and the intra-chunk cumulative gate.
   cx.launch(kc(conv, "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
-  cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA);
-  //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).
-  cx.launch(kc(wy, solve), kVHeads, nch, 1, {PtrArg(b.A), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnSolve);
-  //  7 - u = T vb and w = T kb.
-  cx.launch(kc(wy, "pf_gdn_wu"), kVHeads, nch, 2,
-            {PtrArg(b.xb), PtrArg(b.A), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnWu);
-  //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i, as the scan's packed hi / lo words (gdn.h).
-  cx.launch(kc(wy, prefill::gdn_a2_entry_name()), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnA2);
-  //  9 - the sequential chunk-to-chunk state scan; the only writer of the state.
-  cx.launch(kc(scan, scan_entry), kVHeads, kStateColChunks, 1,
-            {PtrArg(b.xb), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), PtrArg(b.g), PtrArg(b.state), PtrArg(b.o), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnScan);
+  if (prefill::pf_gdn_intra_on()) {
+    //  5-8 + 9 (phase 2 Task 3, D2) - gdn.cc's: pf_gdn_intra_hl (w / u hi planes in w / u, lo planes in A) and the
+    //      scan that reads both.
+    uint8_t* const wl = static_cast<uint8_t*>(b.A);
+    uint8_t* const ul = wl + size_t(C) * kVHeads * kHd * 2;
+    cx.launch(kc(kernels::pf_gdn_intra_hl_variant(kKHeads, kVHeads), "pf_gdn_intra"), kVHeads, nch, 1,
+              {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), arg_val(C),
+               PtrArg(wl), PtrArg(ul)});
+    prefill::profile_wait(cx, Phase::kGdnWu);
+    cx.launch(kc(kernels::pf_gdn_scan_hl_variant(kKHeads, kVHeads), "pf_gdn_scan_hl"), kVHeads, kStateColChunks, 1,
+              {PtrArg(b.xb), PtrArg(b.w), PtrArg(wl), PtrArg(b.u), PtrArg(ul), PtrArg(b.A2), PtrArg(b.g),
+               PtrArg(b.state), PtrArg(b.o), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnScan);
+  } else {
+    //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
+    cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnA);
+    //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).
+    cx.launch(kc(wy, solve), kVHeads, nch, 1, {PtrArg(b.A), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnSolve);
+    //  7 - u = T vb and w = T kb.
+    cx.launch(kc(wy, "pf_gdn_wu"), kVHeads, nch, 2,
+              {PtrArg(b.xb), PtrArg(b.A), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.w), PtrArg(b.u), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnWu);
+    //  8 - A2 = (q_i . k_j) exp(gc_i - gc_j), j <= i, as the scan's packed hi / lo words (gdn.h).
+    cx.launch(kc(wy, prefill::gdn_a2_entry_name()), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.A2), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnA2);
+    //  9 - the sequential chunk-to-chunk state scan; the only writer of the state.
+    cx.launch(kc(scan, scan_entry), kVHeads, kStateColChunks, 1,
+              {PtrArg(b.xb), PtrArg(b.w), PtrArg(b.u), PtrArg(b.A2), PtrArg(b.g), PtrArg(b.state), PtrArg(b.o), arg_val(C)});
+    prefill::profile_wait(cx, Phase::kGdnScan);
+  }
   // 10 - the gated head with the SIGMOID gate (pf_gated_head_SIG): the mixer's last launch, y post-gate.
   cx.launch(kc(kq::pf_gated_head_sig_variant(), "pf_gated_head"), kVHeads, C, 1,
             {PtrArg(b.qkvz), PtrArg(b.o), PtrArg(gated_w), PtrArg(b.y), arg_val(C)});

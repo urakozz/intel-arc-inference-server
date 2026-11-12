@@ -1,3 +1,4 @@
+#include "runtime/prefill/phase2.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
 
 #include <algorithm>
@@ -151,6 +152,10 @@ constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwe
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
 }  // namespace
 
+size_t gdn_chunk_q4_launches() {
+  return kGdnChunkLaunches - (prefill::pf_phase2_on() ? 1 : 0) - (prefill::pf_gdn_intra_on() ? 3 : 0);
+}
+
 GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   // Qwen3.8's GDN shape (the family's): 16 k / 48 v heads x 128, 10240 conv channels.
   constexpr uint32_t kVHeads = 48, kHd = 128, kConvDim = 10240;
@@ -160,8 +165,8 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   s.seed = size_t(3) * kConvDim * 2;
   s.g = size_t(C) * kVHeads * 4;
   s.beta = size_t(C) * kVHeads * 4;
-  s.A = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
-  s.A2 = s.A;
+  s.A2 = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
+  s.A = 2 * s.A2;   // phase 2 (D2): w's and u's lo planes, bf16 [C][48][128] each (A / T stay in the intra kernel)
   s.w = size_t(C) * kVHeads * kHd * 2;
   s.u = s.w;
   s.o = size_t(C) * kVHeads * kHd * 4;
@@ -243,7 +248,7 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
   const auto lin = [&](uint32_t N) { return size_t(2) * pf_slabs(N); };   // a slab kernel + pf_gemm per slab
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
   const size_t moe = 4 + 2 * size_t(pf_batches_gu(d)) + 2 * size_t(pf_batches_dn(d)) + 1;
-  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + kGdnChunkLaunches + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
+  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
   size_t qsa = 2 * hc + lin(d.qkvg_n()) + lin(d.idx_n()) + 3 + 1 + lin(d.linear(model::Q4LinearId::QsaO).shape.N) + moe;
   if (sparse > 0 && !injected) qsa += 2;          // q4_qsa_score, q4_qsa_select
   if (dense > 0) qsa += 1;                        // pf_flash_attn

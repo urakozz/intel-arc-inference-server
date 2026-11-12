@@ -12,6 +12,7 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
+#include "runtime/prefill/phase2.h"
 #include "runtime/prefill/profile.h"
 
 // The ten launches of one GDN layer's chunk, in order. Every one takes `C` as a
@@ -151,18 +152,16 @@ static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
 // writer stores the same entry, so the value read is unchanged.
 static std::atomic<const char*> g_scan_launched{nullptr};
 
-bool pf_phase2(const model::ModelDesc& d) {
-  static const bool old = [] {
-    const char* v = std::getenv("B70_PF_PHASE2");
-    return v != nullptr && std::string(v) == "old";
-  }();
-  return d.is_moe() && !old;
-}
+bool pf_phase2(const model::ModelDesc& d) { return d.is_moe() && pf_phase2_on(); }
 // Phase 2: launches 2-3 become one (Task 2), 5-8 one (Task 3).
-size_t gdn_chunk_launches(const model::ModelDesc& d) { return pf_phase2(d) ? kGdnChunkLaunches - 4 : kGdnChunkLaunches; }
+size_t gdn_chunk_launches(const model::ModelDesc& d) {
+  return kGdnChunkLaunches - (pf_phase2(d) ? 1 : 0) - (pf_phase2(d) && pf_gdn_intra_on() ? 3 : 0);
+}
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
-const char* gdn_scan_entry_name(const model::ModelDesc& d) { return pf_phase2(d) ? "pf_gdn_scan_hl" : gdn_scan_entry(); }
+const char* gdn_scan_entry_name(const model::ModelDesc& d) {
+  return pf_phase2(d) && pf_gdn_intra_on() ? "pf_gdn_scan_hl" : gdn_scan_entry();
+}
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
 const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
 
@@ -236,7 +235,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
   dump_gdn_inputs(cx, s, C);
-  if (pf_phase2(d)) {
+  if (pf_phase2(d) && pf_gdn_intra_on()) {
     //  5-8 (phase 2 Task 3) - A, T, w / u and A2 in one launch: pf_gdn_intra.cl, one work-group per
     //      (v-head, sub-chunk). Judged, not bitwise: DPAS dots, a blocked solve, T as hi / lo limbs.
     //      Operator decision D2: Q1-Q4 in fp32 - w and u leave as hi / lo planes, the lo planes in gdn_A
@@ -274,7 +273,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
     profile_wait(cx, Phase::kGdnA2);
   }
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
-  if (pf_phase2(d)) {
+  if (pf_phase2(d) && pf_gdn_intra_on()) {
     cx.launch(kc(kernels::pf_gdn_scan_hl_variant(k_heads, heads), "pf_gdn_scan_hl"), heads, kStateColChunks, 1,
               {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_wl), PtrArg(p_u), PtrArg(p_ul), PtrArg(p_A2), PtrArg(p_g),
                PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});

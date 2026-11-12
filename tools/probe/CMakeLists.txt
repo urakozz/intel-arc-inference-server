@@ -1185,3 +1185,23 @@ if(B70_ORNITH)
                    kernel_pf_gdn_intra_hl_GK16V32 kernel_pf_gdn_scan_hl_GK16V32
                    kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
 endif()
+
+# --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time) ---------------
+if(B70_ORNITH)
+  set(_pfr_targets)
+  foreach(N 272 128)
+    foreach(cfg "16 2" "32 1" "32 2" "16 4" "64 1")
+      separate_arguments(c UNIX_COMMAND "${cfg}")
+      list(GET c 0 MT)
+      list(GET c 1 TC)
+      add_ocloc_kernel(pfr_K2048_N${N}_MT${MT}_TC${TC} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_route.cl
+                       DEFINES K=2048 N=${N} MT=${MT} TC=${TC})
+      list(APPEND _pfr_targets kernel_pfr_K2048_N${N}_MT${MT}_TC${TC})
+    endforeach()
+  endforeach()
+  add_executable(probe_route probe_route.cc)
+  target_include_directories(probe_route PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_route PRIVATE b70_prefill_host b70_l0)
+  b70_target_kernel_dir(probe_route)
+  add_dependencies(probe_route ${_pfr_targets} kernel_pf_moe_router_K2048_N272 kernel_pf_ab_proj_D2048)
+endif()

@@ -267,7 +267,7 @@ class Walk {
     gb.o = carve(g.o);
     require(off == s_.gdn.size(), "the GDN scratch is not gdn_scratch_sizes'");
     gdn_chunk_q4(cx_, kc_, gb, pos_, C_);
-    n_ += kGdnChunkLaunches;
+    n_ += gdn_chunk_q4_launches();
     linear(*L.gdn_out, s_.attn_out.ptr(), s_.partials.ptr(), pf_ld(d_.hidden));
     src_ = HcSrc::Slices;
   }
