@@ -10,6 +10,14 @@
 //   F2.*      fused bf16, the B slab converted once into SLM (FORM 2)
 //   F3.*      W4A8, int8 activations x the s4 operand          (FORM 3; quantiser timed beside it)
 //   sort      pf_moe_sort / q4_pf_sort against pf_moe_sort_mw's hist + scan + scatter
+//   c4        (phase 3 Task 1) F1 with the EXACT integer weights (q - 8) and the g64 scale on the accumulator, per
+//             64-k group: acc = fma(tile, scale, acc); checked bitwise against a host oracle of the same order on
+//             integer-valued A rows (the DPAS partial sums are then exact whatever its summation order)
+//   o9        (phase 3 Task 1, the plan's `o8`) F1.a8b2m1n8.c2x0o1 with A read through row_tok from the chunk's x;
+//             bitwise the chosen arm; reported with the gather's own ms
+//   shd       (phase 3 Task 1, Ornith) the shared expert out of the item walk: pf_dequant_slab + pf_gemm (SiLU
+//             epilogue) for gate||up and pf_dequant_slab + pf_gemm for down on the chunk's rows in token order, the
+//             routed items alone in the chosen arm's walk; timed as the sum against the chosen arm's full walk
 //
 // Gates before any time: the mw sort's four buffers equal the one-work-group sort's (C <= 2048) and the host twin's
 // (tests/kernels/pf_moe_ref.h, every C) on the checked layer-chunks; every F1 / F2 arm's h and y equal the control's
@@ -75,6 +83,8 @@ struct Arm {
   uint32_t mi() const { return 8u * na * wgm; }          // rows a work item
   uint32_t wg_n() const { return 16u * nb * wgn; }
   bool nfirst() const { return opt & 1; }
+  bool exact() const { return cvt == 4; }     // not bitwise the control: checked against an integer-order oracle
+  bool indexed() const { return form == 1 && (opt & 8); }   // A through row_tok
   bool diag() const { return cvt == 9 || (opt & 4); }   // the DIAGNOSTIC forms: timed, not values
   std::string variant(uint32_t K, uint32_t N, int epi) const {
     char b[96];
@@ -96,7 +106,11 @@ const Arm kArms[] = {
     {1, 8, 2, 1, 8, 2, 0, 1}, {1, 8, 2, 2, 8, 2, 0, 1}, {2, 8, 2, 2, 8, 2, 0, 3}, {1, 8, 2, 1, 8, 9, 0, 1},
     // round 4: the inline-vISA conversion (bfe, int -> f32, one mixed-mode bf16 multiply)
     {1, 4, 4, 1, 4, 3, 0, 1}, {1, 8, 2, 1, 8, 3, 0, 1}, {2, 4, 4, 4, 4, 3, 0, 3},
+    // phase 3 Task 1: c4 = exact integer weights, the scale on the group's partial sum (NA 4: a tile per atom);
+    // o9 = the chosen arm with A read through row_tok
+    {1, 4, 2, 1, 8, 4, 0, 1}, {1, 4, 4, 1, 4, 4, 0, 1}, {1, 8, 2, 1, 8, 2, 0, 9},
 };
+const char* const kChosen = "F1.a8b2m1n8.c2x0o1";
 
 uint16_t f32_to_bf16(float f) {
   uint32_t u;
@@ -202,10 +216,29 @@ float w4a8_ref(const uint32_t* blk, const int8_t* a, const float* xs, uint32_t K
   return xsg ? acc : acc * xs[0];
 }
 
+// Host oracle of CVT 4's fp32 result (EPI 2) for A row `a` (small integers) and column n of block `blk`: per 64-k
+// group the exact integer partial sum, then acc = fma(sum, scale, acc) - the kernel's order, group ascending.
+float c4_ref(const uint32_t* blk, const int8_t* a, uint32_t K, uint32_t n) {
+  const uint32_t G = K / 64;
+  float acc = 0.0f;
+  for (uint32_t g = 0; g < G; ++g) {
+    const uint32_t* tile = blk + (size_t(n / 16) * G + g) * kTileU32;
+    int32_t t = 0;
+    for (uint32_t j = 0; j < 8; ++j) {
+      const uint32_t w = tile[j * 16 + n % 16];
+      for (uint32_t i = 0; i < 8; ++i) t += int32_t(a[g * 64 + j * 8 + i]) * (int32_t((w >> (4 * i)) & 0xF) - 8);
+    }
+    acc = std::fma(float(t), f16_to_f32(reinterpret_cast<const uint16_t*>(tile + 128)[n % 16]), acc);
+  }
+  return acc;
+}
+
 struct LayerChunk {
   const uint32_t* route;   // device
   std::vector<uint32_t> hdr, tiles;
-  std::map<uint32_t, l0::Mem*> items;   // mi -> device items
+  std::map<uint32_t, l0::Mem*> items;     // mi -> device items
+  std::map<uint32_t, l0::Mem*> items_r;   // mi -> the routed experts' items alone (shd)
+  l0::Mem* rowtok = nullptr;              // device row_tok of this layer-chunk
   double gu_flop = 0, dn_flop = 0;
 };
 
@@ -266,6 +299,25 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   l0::Mem wb(ctx, l0::MemKind::Device, std::max(size_t(per_gu) * H * NG, size_t(B) * I * H) * 2);
   l0::Mem ts(ctx, l0::MemKind::Host, 64);
   uint64_t* stamp = ts.as<uint64_t>();
+  // shd (Ornith): the shared block is block E of the same weights, one layout-1 [K][N] linear per half, so the
+  // production slab dequant takes it as it is. Not for Flash-Next (N 1280 is not a whole 1024-column slab).
+  bool have_shd = !m.q4exp && NG % 1024 == 0 && H % 64 == 0 && I % 64 == 0 && H % 1024 == 0 && C % 256 == 0;
+  l0::Kernel *k_slab_gu = nullptr, *k_slab_dn = nullptr, *k_dgemm_silu = nullptr, *k_dgemm = nullptr;
+  std::unique_ptr<l0::Mem> d_slab, d_hsh, d_ysh;
+  if (have_shd) {
+    try {
+      k_slab_gu = &kc("pmp_shd_slab_K" + std::to_string(H) + "_N" + std::to_string(NG) + "_L1", "pf_dequant_slab");
+      k_slab_dn = &kc("pmp_shd_slab_K" + std::to_string(I) + "_N" + std::to_string(H) + "_L1", "pf_dequant_slab");
+      k_dgemm_silu = &kc(kernels::pf_gemm_silu_variant(), "pf_gemm");
+      k_dgemm = &kc(kernels::pf_gemm_variant(false), "pf_gemm");
+      d_slab = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(std::max(H, I)) * 1024 * 2);
+      d_hsh = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(C) * I * 2);
+      d_ysh = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, size_t(C) * H * 4);
+    } catch (const std::exception& e) {
+      std::printf("# shd: not built (%s), skipped\n", e.what());
+      have_shd = false;
+    }
+  }
   {   // A: random bf16 rows (the timed walks; the checks gather the real rows)
     std::vector<uint16_t> a(size_t(rows) * H);
     std::normal_distribution<float> nd(0.0f, 1.0f);
@@ -325,6 +377,23 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
                                          PtrArg(nullptr), PtrArg(yout), arg_val(0u), arg_val(B), arg_val(0u)});
   };
 
+  // shd's dense half: the shared expert's C rows in token order (x -> h -> y fp32 [C][H]), two slab walks
+  auto shd_dense = [&](int copy) {
+    const uint32_t* wg = dgu[copy]->as<uint32_t>() + size_t(E) * gu_u32;
+    const uint32_t* wd = ddn[copy]->as<uint32_t>() + size_t(E) * dn_u32;
+    cx.launch(*k_slab_gu, 1024 / 16, H / 64, 1, {PtrArg(wg), PtrArg(nullptr), PtrArg(d_slab->ptr()), arg_val(0u)});
+    cx.launch(*k_dgemm_silu, C / 256, NG / 256, 1,
+              {PtrArg(dx.ptr()), PtrArg(d_slab->ptr()), PtrArg(d_hsh->ptr()), arg_val(C), arg_val(H), arg_val(NG),
+               arg_val(H), arg_val(NG), arg_val(I), arg_val(uint64_t(0)), arg_val(uint64_t(0)), arg_val(uint64_t(0))});
+    for (uint32_t n0 = 0; n0 < H; n0 += 1024) {
+      cx.launch(*k_slab_dn, 1024 / 16, I / 64, 1, {PtrArg(wd), PtrArg(nullptr), PtrArg(d_slab->ptr()), arg_val(n0)});
+      cx.launch(*k_dgemm, C / 256, 1024 / 256, 1,
+                {PtrArg(d_hsh->ptr()), PtrArg(d_slab->ptr()), PtrArg(d_ysh->as<float>() + n0), arg_val(C), arg_val(I),
+                 arg_val(1024u), arg_val(I), arg_val(1024u), arg_val(H), arg_val(uint64_t(0)), arg_val(uint64_t(0)),
+                 arg_val(uint64_t(0))});
+    }
+  };
+
   // ---- the fused arms that exist in this build ----------------------------------------------------------------
   struct Built {
     Arm a;
@@ -335,6 +404,10 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     if (!want.empty() && std::find(want.begin(), want.end(), a.tag()) == want.end()) continue;
     try {
       Built b{a, &kc(a.variant(H, NG, 1), "pmp_gemm"), &kc(a.variant(I, H, 0), "pmp_gemm")};
+      if (a.exact()) {
+        b.gu_chk = &kc(a.variant(H, NG, 2), "pmp_gemm");
+        b.dn_chk = &kc(a.variant(I, H, 2), "pmp_gemm");
+      }
       if (a.form == 3) {
         b.gu_chk = &kc(a.variant(H, NG, 2), "pmp_gemm");
         b.dn_chk = &kc(a.variant(I, H, 2), "pmp_gemm");
@@ -350,6 +423,22 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   // (items, n-blocks) or, OPT bit 1, (n-blocks, items)
 #define GRID(b, nit, NN) (b).a.nfirst() ? (NN) / (b).a.wg_n() : (nit), (b).a.nfirst() ? (nit) : (NN) / (b).a.wg_n(), 1
   for (const Built& b : arms) bound[b.a.mi()] = items_bound(m, C, b.a.mi());
+  std::map<uint32_t, uint32_t> bound_r;   // the routed experts' items alone: no shared-expert term
+  for (const auto& [mi, bd] : bound) bound_r[mi] = (C * TK + E * (mi - 1)) / mi;
+  // c4's check inputs: A rows of small integers (exact in bf16; the DPAS partial sums are then exact integers
+  // in any summation order), host and device
+  std::vector<int8_t> ai8(size_t(rows) * H), hi8(size_t(rows) * I);
+  l0::Mem d_ai(ctx, l0::MemKind::Device, size_t(rows) * H * 2), d_hi(ctx, l0::MemKind::Device, size_t(rows) * I * 2);
+  const bool any_c4 = std::any_of(arms.begin(), arms.end(), [](const Built& b) { return b.a.exact(); });
+  if (any_c4) {
+    std::uniform_int_distribution<int> ui(-8, 8);
+    std::vector<uint16_t> t(ai8.size());
+    for (size_t i = 0; i < ai8.size(); ++i) ai8[i] = int8_t(ui(rng)), t[i] = f32_to_bf16(float(ai8[i]));
+    upload(ctx, d_ai.ptr(), t.data(), t.size() * 2);
+    t.resize(hi8.size());
+    for (size_t i = 0; i < hi8.size(); ++i) hi8[i] = int8_t(ui(rng)), t[i] = f32_to_bf16(float(hi8[i]));
+    upload(ctx, d_hi.ptr(), t.data(), t.size() * 2);
+  }
 
   // ---- per layer-chunk: the sort's tables (and the checks) ---------------------------------------------------
   std::vector<LayerChunk> lcs(nlc);
@@ -366,6 +455,11 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     // the mw sort, checked against the host twin (and the old sort) on the first check_lc layer-chunks
     sort_mw(L.route);
     cx.wait();
+    std::vector<uint32_t> rowtok_h(rows);
+    download(ctx, rowtok_h.data(), row_tok.ptr(), rowtok_h.size() * 4);
+    keep.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, rowtok_h.size() * 4));
+    upload(ctx, keep.back()->ptr(), rowtok_h.data(), rowtok_h.size() * 4);
+    L.rowtok = keep.back().get();
     L.hdr.resize(hw);
     L.tiles.resize(size_t(T) * 2);
     download(ctx, L.hdr.data(), hdr.ptr(), hw * 4);
@@ -408,6 +502,16 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
       upload(ctx, keep.back()->ptr(), it.data(), it.size() * 4);
       L.items[mi] = keep.back().get();
     }
+    if (have_shd) {   // the routed experts' tiles come first; the shared expert's (block E) follow
+      uint32_t nr = 0;
+      while (nr < L.hdr[0] && L.tiles[2 * nr] < E) ++nr;
+      for (const auto& [mi, bd] : bound_r) {
+        const std::vector<uint32_t> it = make_items(L.tiles, nr, mi, bd);
+        keep.push_back(std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, it.size() * 4));
+        upload(ctx, keep.back()->ptr(), it.data(), it.size() * 4);
+        L.items_r[mi] = keep.back().get();
+      }
+    }
     if (lc >= check_lc) continue;
     // ---- the GEMM checks: real gathered rows, copy lc % 2 of the weights ----
     const int copy = int(lc % 2);
@@ -420,11 +524,13 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     download(ctx, hc.data(), h_c.ptr(), hc.size() * 4);
     download(ctx, yc.data(), y_c.ptr(), yc.size() * 4);
     for (const Built& b : arms) {
-      if (b.a.form == 3 || b.a.diag() || failed.count(b.a.tag())) continue;
+      if (b.a.form == 3 || b.a.diag() || b.a.exact() || failed.count(b.a.tag())) continue;
       const uint32_t nit = bound[b.a.mi()];
       std::vector<uint8_t> poison(hc.size() * 4, 0xA5);
       upload(ctx, h_f.ptr(), poison.data(), poison.size());
-      cx.launch(*b.gu, GRID(b, nit, NG), {PtrArg(L.items[b.a.mi()]->ptr()), PtrArg(A.ptr()), PtrArg(nullptr),
+      // an indexed arm reads the chunk's x through this layer-chunk's row_tok instead of the gathered rows
+      cx.launch(*b.gu, GRID(b, nit, NG), {PtrArg(L.items[b.a.mi()]->ptr()), PtrArg(b.a.indexed() ? dx.ptr() : A.ptr()),
+                                                 PtrArg(b.a.indexed() ? L.rowtok->ptr() : nullptr),
                                                  PtrArg(dgu[copy]->ptr()), PtrArg(h_f.ptr()), arg_val(0u)});
       cx.launch(*b.dn, GRID(b, nit, H), {PtrArg(L.items[b.a.mi()]->ptr()), PtrArg(h_c.ptr()), PtrArg(nullptr),
                                                 PtrArg(ddn[copy]->ptr()), PtrArg(y_f.ptr()), arg_val(0u)});
@@ -439,9 +545,65 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
                   hc.size(), dy, yc.size());
       if (dh || dy) failed.insert(b.a.tag());
     }
+    if (have_shd) {   // the shared expert as dense: h and y against the control's shared rows (token order)
+      shd_dense(copy);
+      cx.wait();
+      const uint32_t rs = L.hdr[1];
+      std::vector<uint32_t> hs(size_t(C) * I / 2);
+      std::vector<float> ys(size_t(C) * H);
+      download(ctx, hs.data(), d_hsh->ptr(), hs.size() * 4);
+      download(ctx, ys.data(), d_ysh->ptr(), ys.size() * 4);
+      size_t dh = 0, dy = 0;
+      double maxdy = 0;
+      for (uint32_t t = 0; t < C; ++t) {
+        for (uint32_t w = 0; w < I / 2; ++w) dh += hs[size_t(t) * (I / 2) + w] != hc[size_t(rs + t) * (I / 2) + w];
+        for (uint32_t n = 0; n < H; ++n) {
+          const uint16_t want_y = uint16_t(yc[size_t(rs + t) * (H / 2) + n / 2] >> (16 * (n & 1)));
+          const uint16_t got_y = f32_to_bf16(ys[size_t(t) * H + n]);
+          dy += want_y != got_y;
+          const uint32_t a32 = uint32_t(want_y) << 16;
+          float fa;
+          std::memcpy(&fa, &a32, 4);
+          maxdy = std::max(maxdy, double(std::fabs(fa - ys[size_t(t) * H + n])));
+        }
+      }
+      std::printf("| check | lc %u | shd | h %zu of %zu words differ from the control's shared rows, y bf16 %zu of %zu "
+                  "(max |control y - dense y fp32| %.3e) |\n", lc, dh, size_t(C) * I / 2, dy, size_t(C) * H, maxdy);
+    }
     // W4A8: the quantisers, then the EPI 2 result on the rows of the first routed tile and the first shared tile
     // against the integer oracle (copy 1 of the weights is the host's)
     if (copy != 1) continue;
+    for (const Built& b : arms) {   // CVT 4: the fp32 result on integer-valued rows against the host oracle
+      if (!b.a.exact() || failed.count(b.a.tag())) continue;
+      const uint32_t nit = bound[b.a.mi()];
+      std::vector<float> gu(size_t(used) * NG), dn(size_t(used) * H);
+      cx.launch(*b.gu_chk, GRID(b, nit, NG), {PtrArg(L.items[b.a.mi()]->ptr()), PtrArg(d_ai.ptr()), PtrArg(nullptr),
+                                              PtrArg(dgu[copy]->ptr()), PtrArg(cf.ptr()), arg_val(0u)});
+      cx.wait();
+      download(ctx, gu.data(), cf.ptr(), gu.size() * 4);
+      cx.launch(*b.dn_chk, GRID(b, nit, H), {PtrArg(L.items[b.a.mi()]->ptr()), PtrArg(d_hi.ptr()), PtrArg(nullptr),
+                                             PtrArg(ddn[copy]->ptr()), PtrArg(cf.ptr()), arg_val(0u)});
+      cx.wait();
+      download(ctx, dn.data(), cf.ptr(), dn.size() * 4);
+      size_t diff = 0, n = 0;
+      for (uint32_t tsel : {0u, L.hdr[0] - 1}) {   // the first tile (a routed expert) and the last (the shared one)
+        const uint32_t e = L.tiles[2 * tsel], r0 = L.tiles[2 * tsel + 1];
+        for (uint32_t r = r0; r < r0 + kTm; ++r) {
+          for (uint32_t col = 0; col < NG; ++col, ++n) {
+            const float want_v = c4_ref(wgu.data() + size_t(e) * gu_u32, ai8.data() + size_t(r) * H, H, col);
+            diff += std::memcmp(&want_v, &gu[size_t(r) * NG + col], 4) != 0;
+          }
+          for (uint32_t col = 0; col < H; ++col, ++n) {
+            const float want_v = c4_ref(wdn.data() + size_t(e) * dn_u32, hi8.data() + size_t(r) * I, I, col);
+            diff += std::memcmp(&want_v, &dn[size_t(r) * H + col], 4) != 0;
+          }
+        }
+      }
+      ++w4a8_checks;
+      std::printf("| check | lc %u | %s | %zu of %zu fp32 results differ from the integer-order oracle |\n", lc,
+                  b.a.tag().c_str(), diff, n);
+      if (diff) failed.insert(b.a.tag());
+    }
     for (const Built& b : arms) {
       if (b.a.form != 3 || failed.count(b.a.tag())) continue;
       const uint32_t kq = b.a.xsg ? 64u : H, kqd = b.a.xsg ? 64u : I;
@@ -508,8 +670,10 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     const bool w8 = b.a.form == 3;
     tw.push_back({b.a.tag() + ".gu", [&, b, nit, w8] {
       for (uint32_t lc = 0; lc < nlc; ++lc)
-        cx.launch(*b.gu, GRID(b, nit, NG), {PtrArg(lcs[lc].items[b.a.mi()]->ptr()), PtrArg(w8 ? a8.ptr() : A.ptr()),
-                                                   PtrArg(xs8.ptr()), PtrArg(dgu[lc % 2]->ptr()), PtrArg(h_f.ptr()), arg_val(0u)});
+        cx.launch(*b.gu, GRID(b, nit, NG), {PtrArg(lcs[lc].items[b.a.mi()]->ptr()),
+                                                   PtrArg(w8 ? a8.ptr() : b.a.indexed() ? dx.ptr() : A.ptr()),
+                                                   PtrArg(b.a.indexed() ? lcs[lc].rowtok->ptr() : xs8.ptr()),
+                                                   PtrArg(dgu[lc % 2]->ptr()), PtrArg(h_f.ptr()), arg_val(0u)});
     }, gu_flop});
     tw.push_back({b.a.tag() + ".dn", [&, b, nit, w8] {
       for (uint32_t lc = 0; lc < nlc; ++lc)
@@ -523,6 +687,44 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
           const uint32_t used = lcs[lc].hdr[2];
           cx.launch(*b.quant, used, 1, 1, {PtrArg(A.ptr()), PtrArg(a8.ptr()), PtrArg(xs8.ptr()), arg_val(used), arg_val(kq)});
           cx.launch(*b.quant_dn, used, 1, 1, {PtrArg(h_c.ptr()), PtrArg(h8.ptr()), PtrArg(hs8.ptr()), arg_val(used), arg_val(kqd)});
+        }
+      }, 0});
+    }
+  }
+  // the gather the indexed arm removes, and the shared-expert split: the chosen arm over the routed items alone,
+  // then the dense half; "chosen.total" / "shd.total" are the two walks the gate compares
+  tw.push_back({"gather", [&] {
+    for (uint32_t lc = 0; lc < nlc; ++lc)
+      cx.launch(k_gather, rows, 1, 1, {PtrArg(dx.ptr()), PtrArg(lc_hdr[lc]->ptr()), PtrArg(lcs[lc].rowtok->ptr()), PtrArg(A.ptr())});
+  }, 0});
+  const Built* chosen = nullptr;
+  for (const Built& b : arms) if (b.a.tag() == kChosen) chosen = &b;
+  if (chosen) {
+    const Built cb = *chosen;
+    const uint32_t nit = bound[cb.a.mi()];
+    auto chosen_walk = [&, cb, nit](bool routed_only) {
+      for (uint32_t lc = 0; lc < nlc; ++lc) {
+        const l0::Mem* it = routed_only ? lcs[lc].items_r[cb.a.mi()] : lcs[lc].items[cb.a.mi()];
+        const uint32_t n_it = routed_only ? bound_r[cb.a.mi()] : nit;
+        cx.launch(*cb.gu, GRID(cb, n_it, NG), {PtrArg(it->ptr()), PtrArg(A.ptr()), PtrArg(xs8.ptr()),
+                                               PtrArg(dgu[lc % 2]->ptr()), PtrArg(h_f.ptr()), arg_val(0u)});
+        cx.launch(*cb.dn, GRID(cb, n_it, H), {PtrArg(it->ptr()), PtrArg(h_c.ptr()), PtrArg(xs8.ptr()),
+                                              PtrArg(ddn[lc % 2]->ptr()), PtrArg(y_f.ptr()), arg_val(0u)});
+      }
+    };
+    tw.push_back({"chosen.total", [chosen_walk] { chosen_walk(false); }, gu_flop + dn_flop});
+    if (have_shd) {
+      tw.push_back({"shd.routed", [chosen_walk] { chosen_walk(true); }, 0});
+      tw.push_back({"shd.dense", [&] { for (uint32_t lc = 0; lc < nlc; ++lc) shd_dense(int(lc % 2)); }, 0});
+      tw.push_back({"shd.total", [&, cb] {
+        for (uint32_t lc = 0; lc < nlc; ++lc) {
+          const l0::Mem* it = lcs[lc].items_r[cb.a.mi()];
+          const uint32_t n_it = bound_r[cb.a.mi()];
+          cx.launch(*cb.gu, GRID(cb, n_it, NG), {PtrArg(it->ptr()), PtrArg(A.ptr()), PtrArg(xs8.ptr()),
+                                                 PtrArg(dgu[lc % 2]->ptr()), PtrArg(h_f.ptr()), arg_val(0u)});
+          cx.launch(*cb.dn, GRID(cb, n_it, H), {PtrArg(it->ptr()), PtrArg(h_c.ptr()), PtrArg(xs8.ptr()),
+                                                PtrArg(ddn[lc % 2]->ptr()), PtrArg(y_f.ptr()), arg_val(0u)});
+          shd_dense(int(lc % 2));
         }
       }, 0});
     }
@@ -551,6 +753,35 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
                 tw[i].flop > 0 ? tw[i].flop / (w * 1e-3) / 1e12 : 0.0, w);
     std::printf("RESULT {\"model\":\"%s\",\"C\":%u,\"arm\":\"%s\",\"ms_per_lc\":%.6f,\"walk_ms\":%.4f,\"lc\":%u}\n",
                 m.tag, C, tw[i].name.c_str(), w / nlc, w, nlc);
+  }
+  // ---- the gates of phase 3 Task 1, per layer-chunk (the record copies the verdicts) ----
+  std::map<std::string, double> per_lc;
+  for (size_t i = 0; i < tw.size(); ++i) per_lc[tw[i].name] = median(ms[i]) / nlc;
+  auto have = [&](const std::string& k) { return per_lc.count(k) > 0; };
+  const std::string ch = kChosen;
+  if (have(ch + ".gu") && have(ch + ".dn")) {
+    const double base = per_lc[ch + ".gu"] + per_lc[ch + ".dn"];
+    std::printf("GATE {\"C\":%u,\"what\":\"chosen gu+dn\",\"ms\":%.4f}\n", C, base);
+    for (const auto& [k, v] : per_lc) {
+      const size_t at = k.find(".gu");
+      if (k.rfind("F1.", 0) != 0 || at == std::string::npos || !have(k.substr(0, at) + ".dn") ||
+          k.find(".c4x") == std::string::npos)
+        continue;
+      const double tot = v + per_lc[k.substr(0, at) + ".dn"];
+      std::printf("GATE {\"C\":%u,\"task\":4,\"arm\":\"%s\",\"ms\":%.4f,\"ratio_vs_chosen\":%.3f,\"limit\":0.88,\"speed\":\"%s\"}\n",
+                  C, k.substr(0, at).c_str(), tot, tot / base, tot / base <= 0.88 ? "PASS" : "FAIL");
+    }
+    if (have("shd.total") && have("chosen.total"))
+      std::printf("GATE {\"C\":%u,\"task\":3,\"chosen_ms\":%.4f,\"shd_ms\":%.4f,\"routed_ms\":%.4f,\"dense_ms\":%.4f,\"saves_ms\":%.4f,\"limit_ms\":0.15,\"speed\":\"%s\"}\n",
+                  C, per_lc["chosen.total"], per_lc["shd.total"], per_lc["shd.routed"], per_lc["shd.dense"],
+                  per_lc["chosen.total"] - per_lc["shd.total"],
+                  per_lc["chosen.total"] - per_lc["shd.total"] >= 0.15 ? "PASS" : "FAIL");
+    const std::string o9 = "F1.a8b2m1n8.c2x0o9";
+    if (have(o9 + ".gu") && have("gather"))
+      std::printf("GATE {\"C\":%u,\"task\":6,\"chosen_gu_ms\":%.4f,\"gather_ms\":%.4f,\"indexed_gu_ms\":%.4f,\"saves_ms\":%.4f,\"limit_ms\":0.1,\"speed\":\"%s\"}\n",
+                  C, per_lc[ch + ".gu"], per_lc["gather"], per_lc[o9 + ".gu"],
+                  per_lc[ch + ".gu"] + per_lc["gather"] - per_lc[o9 + ".gu"],
+                  per_lc[ch + ".gu"] + per_lc["gather"] - per_lc[o9 + ".gu"] >= 0.1 ? "PASS" : "FAIL");
   }
   std::fflush(stdout);
   return failed.empty() ? 0 : 1;
