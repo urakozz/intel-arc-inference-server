@@ -58,7 +58,8 @@ int main(int argc, char** argv) {
       for (bool int8_head : {true, false})
         for (unsigned dv : {0u, 32768u, 65536u, 131072u})
           for (kernels::LinearKind k : {kernels::LinearKind::SmallM, kernels::LinearKind::Gemv})   // spec 28d + the override
-            for (const std::string& v : kd::draft_variants(v2, fmt, int8_head, dv, k)) bound.insert(v);
+            for (unsigned heads : {0u, 1u, 2u})
+              for (const std::string& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads)) bound.insert(v);
   int bad = 0;
   for (const std::string& v : bound)
     if (!fresh.count(v) && !reused.count(v)) {

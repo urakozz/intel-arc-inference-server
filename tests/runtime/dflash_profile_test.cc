@@ -1,5 +1,8 @@
 // Spec 19 v2: profiling observes the draft and projection lists without changing their results.
+#include <algorithm>
+#include <array>
 #include <cstdio>
+#include <memory>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -10,6 +13,46 @@
 #include "loader/loader.h"
 #include "loader/snapshot.h"
 #include "runtime/dflash/dflash_drafter.h"
+
+// Same real weights and ring, with only the attention grid changed. Interleave timestamp measurements.
+void check_attn_heads(runtime::Engine& e, runtime::dflash::DFlashDrafter& d, uint32_t K) {
+  std::array<std::unique_ptr<runtime::ProfileEvents>, 3> events;
+  std::array<std::unique_ptr<runtime::CapturedStep>, 3> lists;
+  for (unsigned h = 0; h < 3; ++h) {
+    events[h] = std::make_unique<runtime::ProfileEvents>(e.context());
+    runtime::CaptureOptions opt;
+    opt.dflash_attn_heads = h;
+    opt.profile = events[h].get();
+    lists[h] = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(
+        e.context(), d.weights(), runtime::dflash::dflash_target(e.model()), d.buffers(), e.buffers().control, opt));
+    CHECK_EQ(lists[h]->kernel_count, 87u);
+  }
+  const auto base = d.draft(e, K, 0.0f, 0);
+  l0::CmdList imm = l0::CmdList::immediate(e.context());
+  std::vector<uint8_t> hidden(d.buffers().h.size()), observed(hidden.size());
+  imm.copy(hidden.data(), d.buffers().h.ptr(), hidden.size());
+  std::array<std::vector<double>, 3> timings;
+  for (unsigned r = 0; r < 6; ++r)
+    for (unsigned a = 0; a < 3; ++a) {
+      const unsigned h = (a + r) % 3;
+      for (auto& event : events[h]->events) event.reset();
+      e.replay_aux(lists[h]->list);
+      CHECK(std::memcmp(&base, d.buffers().readback(), sizeof(base)) == 0);
+      imm.copy(observed.data(), d.buffers().h.ptr(), observed.size());
+      CHECK(hidden == observed);
+      double ms = 0;
+      for (size_t i = 0; i < lists[h]->labels.size(); ++i)
+        if (lists[h]->labels[i].find(" df_attn_part ") != std::string::npos)
+          ms += events[h]->events[i].duration_us() / 1000.0;
+      CHECK(ms > 0);
+      if (r) timings[h].push_back(ms);
+    }
+  for (unsigned h = 0; h < 3; ++h) {
+    std::sort(timings[h].begin(), timings[h].end());
+    std::printf("DFLASH_ATTN_HEADS pos=%u K=%u heads=%u ms=%.6f readback_hidden=bitwise\n",
+                e.pos(), K, h ? h : 4, timings[h][2]);
+  }
+}
 
 int main(int argc, char** argv) {
   std::string target, drafter;
@@ -53,6 +96,7 @@ int main(int argc, char** argv) {
     CHECK(draft_events.events.back().elapsed_us(draft_events.events.front()) >= kernel_us);
     CHECK(draft_events.events.front().elapsed_us(draft_events.events.front()) == draft_events.events.front().duration_us());
   }
+  check_attn_heads(e, d, 7);
   e.verify(0);
   e.commit(0, e.verify_ids()[0]);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
@@ -92,6 +136,7 @@ int main(int argc, char** argv) {
   e.prefill(std::vector<uint32_t>(4096, 760));
   e.save_state(state.ptr());
   const uint32_t deep_pos = e.pos(), deep_anchor = e.control()->cur_token[0];
+  check_attn_heads(e, d, 2);
   d.draft(e, 2, 0.0f, 0);
   e.verify(2);
   const std::vector<uint32_t> deep_ids(e.verify_ids(), e.verify_ids() + 3);
