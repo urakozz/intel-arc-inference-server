@@ -55,7 +55,8 @@ GEMM. Checkpoint addressing retains raw K; only int8 scratch and GEMM use the
 padded width. This leaves the dot product unchanged before quantisation and
 requires neither another activation crossing nor a persistent weight copy.
 Other per-card widths already fit whole 1024 blocks: out/o K=3072, and the
-column-parallel linears K=5120. Every output width is whole 1024-column slabs.
+column-parallel linears K=5120. Every output width is whole 1024-column slabs. Since 2026-11-13 only gate‖up and
+down run int8 under TP as on one card; the mixer linears take the bf16 slab walk on both cards.
 
 A 512-wide local rotation was tried and removed after f32-rejected differences
 of up to 30.67 bf16 ulps. Full-width rotation before splitting would require
@@ -143,6 +144,23 @@ Part of that 2x is spent rebuilding the rotated int8 weights every chunk: the
 requant is the one cost here that is not matrix math.
 
 ## Status
+
+- **The MLP-only form (2026-11-13, open-work item 17), dense model only.** Measured on one card, interleaved against
+  main's all-int8 form, median of 3 (the other card running a test, so a busy box):
+
+  | prompt | `l0` | `l0-int8`, all linears (main) | `l0-int8`, MLP only (now) | now vs `l0` |
+  |---|---:|---:|---:|---:|
+  | 4,096 | 1,739.9 | 2,256.3 | 2,082.5 | 1.20x |
+  | 16,384 | 1,568.7 | 1,980.5 | 1,844.6 | 1.18x |
+
+  It keeps about two thirds of the gain (1.30x / 1.26x before). Accuracy: the 2,820-token gate
+  (`prefill_gate_long_int8_test`) passes 32/32 with the worst logits cosine 0.947 against the CPU reference (`l0`:
+  0.935; the all-int8 form 31/32, 0.819), and the per-layer split test against bf16 moves closer everywhere
+  (logits 0.9998 against 0.9994-0.9997). On the short golden prompts one row changes: cjk row 9 is again the bf16
+  near-tie the operator accepted for `l0-int8` on 2026-09-24 (margin one bf16 ulp; main's form had it exact), so
+  those gates pass as 92/93 under the standing allowance of one. `l0` is unchanged bit for bit, and so is Ornith.
+  Also less memory: no rotated column scales for the mixer linears (0.074 GB of int8 state instead of 0.085), but the
+  bf16 slab (0.036 GB) is now needed on `l0-int8` too.
 
 - (closed) **The tool-call test**, 36 agentic prompts against the unquantised
   bf16 model: `l0-int8` matches **25 / 36**, the W4A16 prefill `l0` 23 / 36
