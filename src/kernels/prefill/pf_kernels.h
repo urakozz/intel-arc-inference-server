@@ -102,6 +102,10 @@ constexpr unsigned kPfFlashR32Rows = 32;
 inline std::string pf_flash_attn_r32_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn_r32" + fa_suffix(q, kv);
 }
+// ... with pf_attn_gate fused into its epilogue: two more arguments (qkv_partials, the o_proj input), pf_o not written.
+inline std::string pf_flash_attn_r32g_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_r32g" + fa_suffix(q, kv);
+}
 // Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
 // cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
 // attention reading int8 + scales, and the gate that un-rotates first. Additive.
