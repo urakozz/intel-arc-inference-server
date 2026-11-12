@@ -18,8 +18,9 @@
 //      gated (2026-09-24, plan 5b Task 2);
 //   3. (the replay check went with the experimental prefill replay, zero-config cleanup)
 //   4. the launch delta of the 2048-id int8 prefill is step_chunk_launches(model::qwen38(), L0Int8, 2048, kv)
-//      + the head's 5, i.e. l0's + 256, which is the proof the walk really ran the h8
-//      linears (on the bf16 walk it would be 256 short). `kv` is the engine's KV form (3j:
+//      + the head's 5, i.e. l0's + 128, which is the proof the walk really ran the h8
+//      linears (on the bf16 walk it would be 128 short; open-work 17: the MLP's two a layer, the
+//      mixer linears are l0's). `kv` is the engine's KV form (3j:
 //      B70_KV_CACHE=int8 adds the raw K/V widening, one launch per FA layer).
 //
 // `--first-cost <backend>`: a FRESH engine, three 4096-id prefills at chunk 2048, each
@@ -220,7 +221,7 @@ int main(int argc, char** argv) {
       const size_t want =
           runtime::prefill::step_chunk_launches(model::qwen38(), PrefillBackend::L0Int8, 2048, eng.kv_cache()) +
           runtime::prefill::kStepHeadLaunches;
-      std::printf("  launch delta %zu, predicted %zu (l0 + 256 + head)\n", delta, want);
+      std::printf("  launch delta %zu, predicted %zu (l0 + 128 + head)\n", delta, want);
       CHECK_EQ(delta, want);
     }
   }
