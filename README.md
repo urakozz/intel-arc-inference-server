@@ -28,10 +28,10 @@ Decode with MTP, t/s - one session, or several at once (the total, per request i
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
 | two cards, tensor parallel (the default for one session) | **123.1** | | | |
+| one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
 | two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
-| one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
 
 Time to the first token, new conversation / prefix cache hit:
 
