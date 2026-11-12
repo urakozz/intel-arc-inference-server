@@ -55,6 +55,20 @@ The drift is the int8 mixer linears as a group (out_proj as much as qkv||z); the
 FAILs (6 of 21 judged, 10-145 ulp, all long tool-call prompts) are consistent with that but **not yet shown to be
 caused by it**: Task 1 measures it.
 
+**Serving evidence, 2026-11-12 evening** (the judge re-run on the references built so far, `~/b70/logs/ornith-moe-prefill/
+t5c/serve_judge3.log`; all three forms have int8 mixer linears and differ only in the experts):
+
+| form of `l0-int8` | experts | requests judged | FAIL |
+|---|---|---:|---:|
+| the old rotated int8 gate\|\|up | rotated int8 | 20 | 6 |
+| bf16 experts | bf16 | 20 | 5 |
+| W4A8 (today's) | W4A8 | 21 | 6 |
+
+With bf16 experts the check still fails, on mostly the same tool-call requests (worst misses 18-47 ulp): the experts
+are not the cause, the int8 mixer linears are what the three forms share. It does not show that form A is clean -
+no run had bf16 mixer linears. The other 18-19 requests of each form wait for their f32 references (W4A8's 35
+contexts are building since 19:16).
+
 **Why it worked on dense Qwen3.8 and not here.**
 1. *The prize sits elsewhere.* On Qwen3.8 the int8 linears include the MLP's gate||up and down at K 17408, 1.37-1.52x
    each; the whole prefill went +28 % (spec 5 section 8). On Ornith the MLP is the experts, which are W4A8 anyway; the
@@ -147,8 +161,10 @@ and a||b (= form A).
     rule, `kCosSlack`); median <= 1.15x; no printed delta-net state above 1.3x `l0`'s own multiple for that layer.
   - **Short gates, A0 / A1 / A2:** `prefill_gate_ornith_l0-int8_test` and `_c16` pass with no more rule-passed rows
     than today's (one each); every such row printed with its f32 margin and both cosines.
-  - **Serving, A2 (and A0 if A2 fails):** 0 FAIL of 39. Control: a second `l0` run judged the same way (must be
-    identical or all-pass; any `l0` FAIL is reported and counted as the floor).
+  - **Serving, A2 (and A0 if A2 fails):** 0 FAIL of 39. Control, at no extra cost: at every first difference the judge
+    already has the f32 reference of `l0`'s own continuation. For each request, report whether `l0`'s continuation
+    from that point passes the same rule. A request where `l0`'s side is rejected too is reported as "both sides
+    rejected" and counted as the floor, not as form A's FAIL.
   - **Speed, A2 vs `l0`, pp4096 interleaved:** >= 1.08x; with `B70_PREFILL_PROFILE=1` the phase table.
   - Reported, not gated: which of today's six failing requests pass on A0 (the open cause question of item 16), the
     tool-call test's identical / invalid counts against bf16 (today 20 / 36, 1 invalid).
