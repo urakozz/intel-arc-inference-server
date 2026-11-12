@@ -389,6 +389,39 @@ int main(int argc, char** argv) {
         row("state (cos)", err(rf.S.size(), rf.S, [&](size_t i) { return double(oc.S[i]); }),
             err(rf.S.size(), rf.S, [&](size_t i) { return double(od.S[i]); }), true);
       }
+      // D2 (operator 2026-11-12): pf_gdn_intra_hl (Q1-Q4 in fp32, w / u as hi / lo planes) + pf_gdn_scan_hl,
+      // printed against the control (informational: D2 moves the arithmetic toward fp64 by design).
+      {
+        l0::Kernel& kHl = kc(kernels::pf_gdn_intra_hl_variant(sh.hk, sh.hv), "pf_gdn_intra");
+        l0::Kernel& kScanHl = kc(kernels::pf_gdn_scan_hl_variant(sh.hk, sh.hv), "pf_gdn_scan_hl");
+        l0::Mem d_wl(ctx, l0::MemKind::Device, size_t(C) * H * kDim * 2), d_ul(ctx, l0::MemKind::Device, size_t(C) * H * kDim * 2);
+        std::vector<float> zero(size_t(H) * kDim * kDim, 0.0f);
+        cx.copy(d_S.ptr(), zero.data(), zero.size() * 4);
+        cx.launch(kHl, H, nch, 1, {PtrArg(d_xb.ptr()), PtrArg(d_g.ptr()), PtrArg(d_b.ptr()), PtrArg(d_w.ptr()),
+                                   PtrArg(d_u.ptr()), PtrArg(d_A2.ptr()), arg_val(C), PtrArg(d_wl.ptr()), PtrArg(d_ul.ptr())});
+        cx.launch(kScanHl, H, 4, 1, {PtrArg(d_xb.ptr()), PtrArg(d_w.ptr()), PtrArg(d_wl.ptr()), PtrArg(d_u.ptr()),
+                                     PtrArg(d_ul.ptr()), PtrArg(d_A2.ptr()), PtrArg(d_g.ptr()), PtrArg(d_S.ptr()),
+                                     PtrArg(d_o.ptr()), arg_val(C)});
+        const size_t nw = rf.w.size();
+        std::vector<uint16_t> wh(nw), wlo(nw), uh(nw), ulo(nw);
+        std::vector<float> o2(nw), S2(zero.size());
+        cx.copy(wh.data(), d_w.ptr(), nw * 2);
+        cx.copy(wlo.data(), d_wl.ptr(), nw * 2);
+        cx.copy(uh.data(), d_u.ptr(), nw * 2);
+        cx.copy(ulo.data(), d_ul.ptr(), nw * 2);
+        cx.copy(o2.data(), d_o.ptr(), nw * 4);
+        cx.copy(S2.data(), d_S.ptr(), S2.size() * 4);
+        cx.wait();
+        std::printf("D2 (Q1-Q4 fp32) against the control:\n");
+        row("D2 w", err(nw, rf.w, [&](size_t i) { return double(f32(oc.w[i])); }),
+            err(nw, rf.w, [&](size_t i) { return double(f32(wh[i])) + double(f32(wlo[i])); }), false);
+        row("D2 u", err(nw, rf.u, [&](size_t i) { return double(f32(oc.u[i])); }),
+            err(nw, rf.u, [&](size_t i) { return double(f32(uh[i])) + double(f32(ulo[i])); }), false);
+        row("D2 o (cos)", err(nw, rf.o, [&](size_t i) { return double(oc.o[i]); }),
+            err(nw, rf.o, [&](size_t i) { return double(o2[i]); }), true);
+        row("D2 state (cos)", err(rf.S.size(), rf.S, [&](size_t i) { return double(oc.S[i]); }),
+            err(rf.S.size(), rf.S, [&](size_t i) { return double(S2[i]); }), true);
+      }
 
       if (!time) continue;
       l0::Mem d_stamp(ctx, l0::MemKind::Host, 64);

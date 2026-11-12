@@ -162,6 +162,7 @@ bool pf_phase2(const model::ModelDesc& d) {
 size_t gdn_chunk_launches(const model::ModelDesc& d) { return pf_phase2(d) ? kGdnChunkLaunches - 4 : kGdnChunkLaunches; }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
+const char* gdn_scan_entry_name(const model::ModelDesc& d) { return pf_phase2(d) ? "pf_gdn_scan_hl" : gdn_scan_entry(); }
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
 const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
 
@@ -198,6 +199,9 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   void* p_w = s.gdn_w.ptr();
   void* p_u = s.gdn_u.ptr();
   void* p_o = s.gdn_o.ptr();
+  // Phase 2 (D2): w's and u's lo planes, bf16 [C][v-heads][128] each, in gdn_A (sized for both on a MoE model).
+  void* p_wl = s.gdn_A.ptr();
+  void* p_ul = static_cast<uint8_t*>(s.gdn_A.ptr()) + size_t(s.chunk_cap()) * d.gdn_value_dim() * 2;
 
   const std::string conv = kernels::pf_gdn_conv_variant(k_heads, heads);
   const std::string wy = kernels::pf_gdn_wy_variant(k_heads, heads);
@@ -235,9 +239,11 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   if (pf_phase2(d)) {
     //  5-8 (phase 2 Task 3) - A, T, w / u and A2 in one launch: pf_gdn_intra.cl, one work-group per
     //      (v-head, sub-chunk). Judged, not bitwise: DPAS dots, a blocked solve, T as hi / lo limbs.
-    cx.launch(kc(kernels::pf_gdn_intra_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
+    //      Operator decision D2: Q1-Q4 in fp32 - w and u leave as hi / lo planes, the lo planes in gdn_A
+    //      (sized for both on a MoE model), and the scan reads both (pf_gdn_scan_hl.cl).
+    cx.launch(kc(kernels::pf_gdn_intra_hl_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
               {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2),
-               arg_val(C)});
+               arg_val(C), PtrArg(p_wl), PtrArg(p_ul)});
     profile_wait(cx, Phase::kGdnWu);
   } else {
     //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
@@ -268,10 +274,17 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
     profile_wait(cx, Phase::kGdnA2);
   }
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
-  cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
-            {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
-             PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
-  g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
+  if (pf_phase2(d)) {
+    cx.launch(kc(kernels::pf_gdn_scan_hl_variant(k_heads, heads), "pf_gdn_scan_hl"), heads, kStateColChunks, 1,
+              {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_wl), PtrArg(p_u), PtrArg(p_ul), PtrArg(p_A2), PtrArg(p_g),
+               PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
+    g_scan_launched.store("pf_gdn_scan_hl");
+  } else {
+    cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
+              {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
+               PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
+    g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
+  }
   profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
   cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,
