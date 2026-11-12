@@ -29,6 +29,7 @@
 
 #include "check.h"
 #include "loader/qwen4exp_layout.h"
+#include "runtime/buffer_sizes.h"
 #include "model/qwen4exp.h"
 #include "runtime/control.h"
 #include "runtime/qwen4exp/qwen4exp_sizes.h"
@@ -250,10 +251,15 @@ int main(int argc, char** argv) {
   {
     // the launches per chunk (the formula, asserted; printed): a gated residual 4, a GDN layer 84, a QSA layer 73 +
     // score / select (sparse rows) + flash (dense rows) + sparse (sparse rows), the PLE layer + 31, device 0 + 1
-    // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch)
-    const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + 27, qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + 27, ple = 1 + 1 + 26 + 3;
-    CHECK_EQ(gdn, size_t(74) + rq::gdn_chunk_q4_launches());
-    CHECK_EQ(qsa, size_t(73));
+    // phase 2: gdn_chunk_q4_launches() is 9 (conv + l2norm in one launch). The MoE block: 27 on today's walk (sort,
+    // 7 + 4 dequant + GEMM batch pairs); plan 2026-11-12: 9 (the sort's three launches and one fused GEMM a
+    // projection; our int4 shared expert)
+    const bool old_walk = runtime::moe_pf_old_walk();
+    const size_t moe = old_walk ? 27 : 9;
+    const size_t gdn = 2 * 4 + 32 + 1 + rq::gdn_chunk_q4_launches() + 6 + moe,
+                 qsa = 2 * 4 + 26 + 2 + 3 + 1 + 6 + moe, ple = 1 + 1 + 26 + 3;
+    CHECK_EQ(gdn, size_t(old_walk ? 74 : 56) + rq::gdn_chunk_q4_launches());
+    CHECK_EQ(qsa, size_t(old_walk ? 73 : 55));
     CHECK_EQ(rq::pf_batches_gu(ours), 7u);
     CHECK_EQ(rq::pf_batches_dn(ours), 4u);
     CHECK_EQ(rq::pf_batch_blocks_gu(ours), 81u);
@@ -292,10 +298,15 @@ int main(int argc, char** argv) {
     const rq::PrefillSizes p32 = rq::prefill_sizes(i18, 32768), p128 = rq::prefill_sizes(i18, 131072);
     CHECK_EQ(p128.scores, size_t(2048) * 32768 * 4);
     CHECK_EQ(p128.total() - p32.total(), p128.scores - p32.scores);
-    CHECK_EQ(p32.w, size_t(512) << 20);
+    // plan 2026-11-12 Task 7: the weight batch only on B70_PF_MOE=old; else one gate||up block (Intel's bf16 shared
+    // expert's copy) - and the mw sort's counts and work items
+    CHECK_EQ(p32.w, old_walk ? size_t(512) << 20 : rq::pf_block_gu_bytes(i18));
+    CHECK_EQ(p32.cnt, size_t(32) * 512 * 4);
+    CHECK_EQ(rq::pf_items(i18, 2048), uint32_t(856));   // (20480 + 512 x 63) / 64 + 32
+    CHECK_EQ(p32.items, size_t(856) * 16);
     CHECK_EQ(p32.lists, size_t(4) * 2048 * rq::kListRow * 4);   // --layers 18: QSA layers 3, 7, 11, 15
-    CHECK(p32.w >= p32.xg && p32.w >= p32.scores);
-    CHECK(p32.total() > size_t(1.3e9) && p128.total() < size_t(2.2e9));
+    if (old_walk) CHECK(p32.w >= p32.xg && p32.w >= p32.scores);
+    CHECK(p32.total() > size_t(old_walk ? 1.3e9 : 0.8e9) && p128.total() < size_t(2.2e9));
     CHECK_EQ(rq::pf_landing_layout(ours).resid_bytes, size_t(2048) * 10240 * 2);
     CHECK_EQ(rq::pf_landing_layout(ours).sumsq_bytes, size_t(0));
     // the plan with prefill (Intel's forms, 32768): the prefill scratch is planned; the N that fit

@@ -335,12 +335,13 @@ class Walk {
 
   // One weight batch group: `dequant` (q4_pf_dequant_*(w, w_sh, hdr, out, b0, b1), grid (N / 16, K / 64, b1 - b0))
   // then pf_moe_gemm(tiles, A, -, B, -, out, b0, b1, 0) over the tile table, grid (tmax, N / 256).
+  // `first`: the first block walked (plan 2026-11-12: d_.experts walks the shared block alone).
   void grouped(const char* dequant, const void* blocks, const void* shared, uint32_t per, uint32_t K, uint32_t N, bool silu,
-               const void* A, void* out, uint32_t tmax) {
+               const void* A, void* out, uint32_t tmax, uint32_t first = 0) {
     l0::Kernel& gemm = kc_(silu ? kq::pf_gemm_gu_variant() : kq::pf_gemm_dn_variant(), "pf_moe_gemm");
     l0::Kernel& dq = kc_(kq::pf_moe_variant(), dequant);
     const uint32_t B = d_.experts + 1;   // + the shared expert, block 512
-    for (uint32_t b0 = 0; b0 < B; b0 += per) {
+    for (uint32_t b0 = first; b0 < B; b0 += per) {
       const uint32_t b1 = std::min(B, b0 + per);
       launch(dq, N / 16, K / 64, b1 - b0,
              {PtrArg(blocks), PtrArg(shared), PtrArg(s_.hdr.ptr()), PtrArg(s_.w.ptr()), arg_val(b0), arg_val(b1)});
@@ -364,21 +365,55 @@ class Walk {
     prefill::profile_wait(cx_, Phase::kMoeRoute);
     const uint32_t tmax = pf_tiles(d_, C_);
     const std::string v = kq::pf_moe_variant();
-    // q4_pf_sort(route, hdr, tiles, row_tok, pair_row, C, tmax) - grid (1)
-    launch(kc_(v, "q4_pf_sort"), 1, 1, 1,
-           {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.tiles.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.pair_row.ptr()),
-            arg_val(C_), arg_val(tmax)});
+    const bool old = runtime::moe_pf_old_walk();
+    if (old) {
+      // q4_pf_sort(route, hdr, tiles, row_tok, pair_row, C, tmax) - grid (1)
+      launch(kc_(v, "q4_pf_sort"), 1, 1, 1,
+             {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.tiles.ptr()), PtrArg(s_.row_tok.ptr()),
+              PtrArg(s_.pair_row.ptr()), arg_val(C_), arg_val(tmax)});
+    } else {
+      // plan 2026-11-12 Task 7: pf_moe_sort_mw (bitwise q4_pf_sort's buffers) + its work items
+      const std::string sv = kernels::pf_moe_sort_mw_variant(d_.experts, d_.top_k);
+      const uint32_t nblk = (C_ + 63) / 64, ib = pf_items(d_, C_);
+      launch(kc_(sv, "pf_moe_hist"), nblk, 1, 1, {PtrArg(rt), PtrArg(s_.cnt.ptr()), arg_val(C_)});
+      launch(kc_(sv, "pf_moe_scan"), 1, 1, 1,
+             {PtrArg(s_.cnt.ptr()), PtrArg(s_.hdr.ptr()), PtrArg(s_.tiles.ptr()), PtrArg(s_.row_tok.ptr()),
+              PtrArg(s_.items.ptr()), arg_val(C_), arg_val(tmax), arg_val(ib)});
+      launch(kc_(sv, "pf_moe_scatter"), nblk, 1, 1,
+             {PtrArg(rt), PtrArg(s_.cnt.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.pair_row.ptr()), arg_val(C_)});
+    }
     prefill::profile_wait(cx_, Phase::kMoeSort);
     // q4_pf_gather(x, hdr, row_tok, xg) - grid (tmax x TM)
     launch(kc_(v, "q4_pf_gather"), tmax * kPfTm, 1, 1,
            {PtrArg(s_.x.ptr()), PtrArg(s_.hdr.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.xg.ptr())});
     prefill::profile_wait(cx_, Phase::kMoeGather);
     const bool shb = d_.forms.shared == model::Q4Form::Bf16;
-    grouped(shb ? "q4_pf_dequant_gu_shb" : "q4_pf_dequant_gu", L.gate_up->ptr(), L.shared->ptr(), pf_batch_blocks_gu(d_),
-            d_.hidden, 2 * d_.moe_inter, true, s_.xg.ptr(), s_.h.ptr(), tmax);
-    // down: A = h [rows][640], y = rne(down) into xg (the gathered A is consumed)
-    grouped(shb ? "q4_pf_dequant_dn_shb" : "q4_pf_dequant_dn", L.down->ptr(), at(*L.shared, L.shared_down_offset),
-            pf_batch_blocks_dn(d_), d_.moe_inter, d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax);
+    if (old) {
+      grouped(shb ? "q4_pf_dequant_gu_shb" : "q4_pf_dequant_gu", L.gate_up->ptr(), L.shared->ptr(),
+              pf_batch_blocks_gu(d_), d_.hidden, 2 * d_.moe_inter, true, s_.xg.ptr(), s_.h.ptr(), tmax);
+      // down: A = h [rows][640], y = rne(down) into xg (the gathered A is consumed)
+      grouped(shb ? "q4_pf_dequant_dn_shb" : "q4_pf_dequant_dn", L.down->ptr(), at(*L.shared, L.shared_down_offset),
+              pf_batch_blocks_dn(d_), d_.moe_inter, d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax);
+    } else {
+      // plan 2026-11-12 Task 7: pf_moe_q4gemm over the work items, the int4 blocks read in place (bitwise the batch
+      // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
+      const uint32_t ib = pf_items(d_, C_);
+      const uint32_t NG = 2 * d_.moe_inter;
+      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.hidden, NG, true), "pf_moe_q4gemm"), NG / kernels::pf_moe::kQ4WgN,
+             ib, 1,
+             {PtrArg(s_.items.ptr()), PtrArg(s_.xg.ptr()), PtrArg(L.gate_up->ptr()),
+              PtrArg(shb ? nullptr : L.shared->ptr()), PtrArg(s_.h.ptr())});
+      prefill::profile_wait(cx_, Phase::kMoeGemm);
+      if (shb) grouped("q4_pf_dequant_gu_shb", L.gate_up->ptr(), L.shared->ptr(), 1, d_.hidden, NG, true, s_.xg.ptr(),
+                       s_.h.ptr(), tmax, d_.experts);
+      launch(kc_(kernels::pf_moe_q4gemm_variant(d_.moe_inter, d_.hidden, false), "pf_moe_q4gemm"),
+             d_.hidden / kernels::pf_moe::kQ4WgN, ib, 1,
+             {PtrArg(s_.items.ptr()), PtrArg(s_.h.ptr()), PtrArg(L.down->ptr()),
+              PtrArg(shb ? nullptr : at(*L.shared, L.shared_down_offset)), PtrArg(s_.xg.ptr())});
+      prefill::profile_wait(cx_, Phase::kMoeGemm);
+      if (shb) grouped("q4_pf_dequant_dn_shb", L.down->ptr(), at(*L.shared, L.shared_down_offset), 1, d_.moe_inter,
+                       d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax, d_.experts);
+    }
     // q4_pf_moe_combine(route, hdr, pair_row, y, out, C) - grid (2560 / 256, C): the block's y (NOT folded into H)
     launch(kc_(v, "q4_pf_moe_combine"), d_.hidden / kq::kPfCombineWg, C_, 1,
            {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.pair_row.ptr()), PtrArg(s_.xg.ptr()), PtrArg(s_.y.ptr()), arg_val(C_)});
@@ -512,6 +547,8 @@ Qwen4ExpPrefillScratch::Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qw
       y(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).y),
       w(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).w),
       ple_ids(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).ple_ids),
+      cnt(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).cnt),
+      items(ctx, l0::MemKind::Device, prefill_sizes(d, max_len_).items),
       desc(d),
       max_len(max_len_) {}
 
@@ -519,7 +556,8 @@ size_t Qwen4ExpPrefillScratch::bytes() const {
   return ids.size() + H.size() + xn.size() + x.size() + down_f32.size() + inj.size() + partials.size() + slab.size() +
          idx_f32.size() + idx_q.size() + scores.size() + lists.size() + diag.size() + q16.size() + o.size() +
          attn_out.size() + ab.size() + gdn.size() + logits.size() + routes.size() + hdr.size() + tiles.size() +
-         row_tok.size() + pair_row.size() + xg.size() + h.size() + y.size() + w.size() + ple_ids.size();
+         row_tok.size() + pair_row.size() + xg.size() + h.size() + y.size() + w.size() + ple_ids.size() + cnt.size() +
+         items.size();
 }
 
 void prefill_chunk(prefill::Context& cx, prefill::KernelCache& kc, Qwen4ExpPrefillScratch& s, const loader::Q4LoadedModel& m,

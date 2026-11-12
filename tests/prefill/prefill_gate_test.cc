@@ -375,6 +375,18 @@ int main(int argc, char** argv) {
       if (jr.near)
         std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
                     !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
+      if (J) {   // plan 2026-11-12 Task 8's margin table: the judge's top-1 lead and the engine's lead of that token,
+                 // both in bf16 ulps of the judge's top logit (negative engine: another token is ahead)
+        float j2 = -INFINITY, e2 = -INFINITY;
+        for (uint32_t i = 0; i < Qwen35::kVocabUsed; ++i)
+          if (i != want) j2 = std::max(j2, jrow[i]), e2 = std::max(e2, dec[i]);
+        const float u = jr.ulp > 0 ? jr.ulp : 1.0f;
+        std::printf("\nMARGIN %s %u det %d f32 %.2f eng %.2f ok %d", pname.c_str(), p, jd.determined() ? 1 : 0,
+                    (jrow[want] - j2) / u, (dec[want] - e2) / u, jok ? 1 : 0);
+      }
+      if (J && !jok)   // a miss's margins: the judge's lead of its token over the engine's, the engine's the other way
+        std::printf("  margins: f32 %.4f (1 bf16 ulp %.4f), engine %.4f", jrow[want] - jrow[id], jr.ulp,
+                    dec[id] - dec[want]);
       if (accept.has(pname, p) && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
       if (accept.has(pname, p) && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");
