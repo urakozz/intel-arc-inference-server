@@ -416,7 +416,7 @@ inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit
 // gemv.cl (int4 g64, LAYOUT 1 or 0 - the same sums), ascending slices folded in the consumer: qweight [K/8][N] (word (r, n)
 // holds k = 8r .. 8r + 7, k = 8r lowest) and f16 scales [K/64][N] - loader::rtn_int4_g64's output.
 inline void gemv_int4(const uint32_t* qw, const uint16_t* scales, uint32_t K, uint32_t N, const uint16_t* x,
-                      uint32_t M, float* out, uint32_t slices = 1) {
+                      uint32_t M, float* out, uint32_t slices = 1, bool contracted = false) {
   std::vector<float> xf(size_t(M) * K);
   for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
   parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
@@ -435,7 +435,8 @@ inline void gemv_int4(const uint32_t* qw, const uint16_t* scales, uint32_t K, ui
                 a = a + float(int((word >> (4 * t)) & 0xFu) - 8) * xr[g * 64 + j * 8 + t];
               gacc = gacc + a;
             }
-            acc = acc + gacc * common::f16_to_f32(scales[size_t(g) * N + n]);
+            const float scale = common::f16_to_f32(scales[size_t(g) * N + n]);
+            acc = contracted ? std::fma(gacc, scale, acc) : acc + gacc * scale;
           }
           sum = sum + acc;
         }
@@ -466,6 +467,7 @@ struct Dims {
 // A linear in either device form (one of bf16 / i8 non-empty) or, for Numerics::Reference, row-major fp32 [N][K].
 struct Lin {
   uint32_t K = 0, N = 0, ksplit = 1, slices = 1;
+  bool contracted = false;   // the Qwen int4 GEMV contracts group x scale + accumulator
   std::vector<uint16_t> bf16;
   std::vector<int8_t> i8;
   std::vector<float> scales;
@@ -486,7 +488,7 @@ struct Lin {
     } else if (!i8.empty()) {
       gemv_i8w(i8.data(), scales.data(), K, N, xb, M, y);
     } else if (!q4.empty()) {
-      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y, split_override ? split_override : slices);
+      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y, split_override ? split_override : slices, contracted);
     } else {
       gemv_bf16(bf16.data(), K, N, ksplit, xb, M, y);
     }

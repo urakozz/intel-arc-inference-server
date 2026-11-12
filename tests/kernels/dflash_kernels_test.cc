@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "check.h"
+#include "common/repack.h"
 #include "kernels/dflash_kernels.h"
 #include "kernels/dflash_ref.h"
 #include "l0/cmdlist.h"
@@ -130,6 +131,41 @@ std::vector<float> split_input(std::vector<float>& plain, unsigned slices, unsig
       plain[g * n + i] = sum;
     }
   return partial;
+}
+
+// Isolate the split producer from the consumers: compare separate multiply/add and contracted group sums.
+int check_int4_groups(Dev& d) {
+  constexpr unsigned K = 5120, N = 2048, slices = 8;
+  std::mt19937 g(71);
+  std::vector<uint32_t> q(size_t(K / 8) * N), tiled(size_t(N / 16) * (K / 64) * 136);
+  for (auto& v : q) v = g();
+  const auto sf = rnd_f32(size_t(K / 64) * N, 0.00013f, 0.08f, 72);
+  std::vector<uint16_t> scales(sf.size());
+  for (size_t i = 0; i < sf.size(); ++i) scales[i] = common::f32_to_f16(sf[i]);
+  common::repack_int4_layout1(q.data(), scales.data(), K, N, tiled.data());
+  const auto x = rnd_bf16(size_t(M) * K, -3, 3, 73);
+  auto bw = d.up(tiled), bx = d.up(x), out = d.zeros(size_t(slices) * M * N * 4);
+  l0::Module mod(d.ctx, kernels::path(kernels::gemv_variant(M, K, N, slices, 1)));
+  l0::Kernel k(mod, "gemv");
+  k.group_size(64);
+  k.arg_ptr(0, bw.ptr());
+  k.arg_ptr(1, bw.ptr());
+  k.arg_ptr(2, bx.ptr());
+  k.arg_ptr(3, out.ptr());
+  d.run(k, N / 64, slices);
+  const auto partial = d.read<float>(out, size_t(slices) * M * N);
+  std::vector<float> plain(size_t(M) * N), contracted(plain.size());
+  dfref::gemv_int4(q.data(), scales.data(), K, N, x.data(), M, plain.data(), slices);
+  dfref::gemv_int4(q.data(), scales.data(), K, N, x.data(), M, contracted.data(), slices, true);
+  size_t nofma = 0, fma = 0;
+  for (size_t i = 0; i < plain.size(); ++i) {
+    float v = 0;
+    for (unsigned s = 0; s < slices; ++s) v = v + partial[size_t(s) * plain.size() + i];
+    nofma += v != plain[i];
+    fma += v != contracted[i];
+  }
+  std::printf("int4 split group accumulation: separate mul/add %zu mismatches, fma %zu (bitwise bar)\n", nofma, fma);
+  return int(fma != 0);
 }
 
 int check_prep(Dev& d, Bins& b) {
@@ -537,7 +573,8 @@ int main() {
   Bins b(d);
   const std::vector<float> rope = dfref::rope_table(1e7, HD, 131072 + 16);
   l0::Mem brope = d.up(rope);
-  int bad = check_prep(d, b);
+  int bad = check_int4_groups(d);
+  bad += check_prep(d, b);
   bad += check_heads(d, b, rope, brope);
   bad += check_attn(d, b);
   bad += check_topk(d, b);
