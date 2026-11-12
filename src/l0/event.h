@@ -54,6 +54,8 @@ class Event {
   // Returns microseconds. Query AFTER the fence that covers the launch:
   // an unsignalled event makes the driver return NOT_READY, which throws.
   double duration_us() const;
+  // First kernel's start through this kernel's end, on the same device after the covering fence.
+  double elapsed_us(const Event& first) const;
   void reset();  // zeEventHostReset
   ze_event_handle_t handle() const { return e_; }
 

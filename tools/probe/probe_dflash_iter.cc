@@ -164,20 +164,24 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
 }
 
 void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds) {
+  if (!depth) throw std::runtime_error("cost depth must be positive");
   std::ifstream input("tests/golden/prompts/long32k.ids");
   std::vector<uint32_t> file;
   for (uint32_t id; input >> id;) file.push_back(id);
   if (file.empty()) throw std::runtime_error("no long32k.ids");
   std::vector<uint32_t> prompt(depth);
   for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = file[i % file.size()];
-  e.prefill(prompt);
+  if (depth > 1) e.prefill(std::vector<uint32_t>(prompt.begin(), prompt.end() - 1));
+  else e.reset();
   l0::Mem saved(e.context(), l0::MemKind::Host, e.state_bytes());
   e.save_state(saved.ptr());
-  const uint32_t anchor = e.control()->cur_token[0];
-  auto restore = [&]() {
-    e.load_state(saved.ptr(), depth);
-    e.control()->cur_token[0] = anchor;
+  // Recreate the last prompt row outside the clock, leaving its projection pending for a steady-state batch.
+  auto restore = [&](bool defer = false) {
+    e.load_state(saved.ptr(), depth - 1);
+    e.control()->cur_token[0] = prompt.back();
     e.control()->n_active = 1;
+    e.verify(0);
+    e.commit(0, e.verify_ids()[0], defer);
   };
   auto plain = runtime::build(e.context(), e.model(), e.buffers());
   restore();
@@ -201,19 +205,17 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
       e.verify(m - 1);
     });
   }
-  // Get a real tap row for the projection arm, outside every timed interval.
-  e.verify(0);
-  e.commit(0, e.verify_ids()[0]);
   names.push_back("projection");
-  arms.push_back([&]() { e.replay_aux(d.projection(depth, 1)); });
+  arms.push_back([&]() { e.replay_aux(d.projection(depth - 1, 1)); });
   names.push_back("submit_fence");
   arms.push_back([&]() { queue.execute(empty, &fence); fence.wait(); });
   names.push_back("iteration7");
   arms.push_back([&]() {
-    const auto out = d.draft(e, 7, 0.0f, 0);
-    e.verify(7);
+    const uint64_t before = e.queue_submissions();
+    const auto out = d.draft_with([&](l0::CmdList& list) { e.verify(7, &list); }, 7, 0.0f, 0);
     const auto accept = server::accept_greedy(e.verify_ids(), out.ids, 7);
-    e.commit(accept.accepted, accept.next_token);
+    e.commit(accept.accepted, accept.next_token, true);
+    if (e.queue_submissions() != before + 1) throw std::runtime_error("DFlash iteration used more than one submit");
   });
   std::printf("DFLASH_ITER depth=%u calls=%u rounds=%u draft_launches=%zu projection_launches=%zu\n",
               depth, calls, rounds, d.draft_step()->kernel_count, d.project_step().kernel_count);
@@ -223,7 +225,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
       double av = 0, pv = 0;
       for (unsigned c = 0; c < calls; ++c) {
         auto one = [&](bool baseline) {
-          restore();
+          restore(!baseline && names[a] == "iteration7");
           const double ms = timed([&]() { if (baseline) e.replay_aux(plain.list); else arms[a](); });
           (baseline ? pv : av) += ms;
         };
@@ -257,7 +259,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
     for (unsigned r = 0; r <= rounds; ++r) {
       restore();
       d.buffers().ctl()->k = 7;
-      d.projection(depth, 1);
+      d.projection(depth - 1, 1);
       for (auto& event : prof.events) event.reset();
       const double wall = timed([&]() { e.replay_aux(list.list); });
       std::map<std::string, double> sums;
@@ -288,18 +290,19 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   opt.profile = &vp;
   opt.profile_m = 8;
   opt.profile_keys = depth + 1;
+  opt.profile_projection = &project.list;
   e.recapture_verify(opt);
-  std::vector<double> gap, projection_host;
+  std::vector<double> gap, projection_host, outside, projection_outside;
   for (unsigned r = 0; r <= rounds; ++r) {
-    restore();
+    restore(true);
     d.buffers().ctl()->k = 7;
-    d.projection(depth, 1);
     for (auto* prof : {&dp, &vp, &pp})
       for (auto& event : prof->events) event.reset();
     const double wall = timed([&]() {
-      e.replay_aux(draft.list);
-      e.verify(7);
-      e.replay_aux(project.list);
+      e.verify(7, &draft.list);
+      const auto& out = *d.buffers().readback();
+      const auto accept = server::accept_greedy(e.verify_ids(), out.ids, 7);
+      e.commit(accept.accepted, accept.next_token, true);
     });
     double device = 0, projection_ms = 0;
     for (auto* prof : {&dp, &vp, &pp})
@@ -311,10 +314,18 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
     if (r) {
       gap.push_back(wall - device);
       projection_host.push_back(projection_ms + wall - device);
+      const double dp_ms = dp.events.back().elapsed_us(dp.events.front()) / 1000.0;
+      const double vp_ms = vp.events.back().elapsed_us(vp.events.front()) / 1000.0;
+      const double pp_ms = pp.events.back().elapsed_us(pp.events.front()) / 1000.0;
+      outside.push_back(wall - dp_ms - vp_ms - pp_ms);
+      projection_outside.push_back(pp_ms + outside.back());
     }
   }
   std::printf("DFLASH_GAP depth=%u host_upper_ms=%.6f projection_plus_host_upper_ms=%.6f "
               "(instrumented signals include host-scope flush overhead)\n", depth, median(gap), median(projection_host));
+  std::printf("DFLASH_HOST depth=%u outside_lists_ms=%.6f projection_plus_host_ms=%.6f "
+              "(wall minus device-list intervals; instrumented, intervals include dispatch and signal flushes)\n",
+              depth, median(outside), median(projection_outside));
   e.recapture_verify({});   // the engine's lists must release vp's events before it dies
 }
 }  // namespace

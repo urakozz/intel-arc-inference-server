@@ -21,6 +21,8 @@
 #include "kernels/linear_kind.h"
 #include "runtime/verify_attn.h"
 
+namespace l0 { class CmdList; }
+
 namespace runtime {
 
 struct ProfileEvents;
@@ -44,6 +46,8 @@ struct CaptureOptions {
   ProfileEvents* profile = nullptr;
   uint32_t profile_m = 0;   // tap verify: instrument this width only; 0 leaves verify uninstrumented
   uint32_t profile_keys = 1;   // select its shallow/deep list at this row-0 key count
+  // Test / probe: the same projection with timestamps, used instead of a pending production projection.
+  l0::CmdList* profile_projection = nullptr;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

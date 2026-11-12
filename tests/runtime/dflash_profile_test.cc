@@ -45,7 +45,13 @@ int main(int argc, char** argv) {
     for (auto& event : draft_events.events) event.reset();
     e.replay_aux(draft.list);
     CHECK(std::memcmp(&plain, d.buffers().readback(), sizeof(plain)) == 0);
-    for (const auto& event : draft_events.events) CHECK(event.duration_us() > 0);
+    double kernel_us = 0;
+    for (const auto& event : draft_events.events) {
+      CHECK(event.duration_us() > 0);
+      kernel_us += event.duration_us();
+    }
+    CHECK(draft_events.events.back().elapsed_us(draft_events.events.front()) >= kernel_us);
+    CHECK(draft_events.events.front().elapsed_us(draft_events.events.front()) == draft_events.events.front().duration_us());
   }
   e.verify(0);
   e.commit(0, e.verify_ids()[0]);

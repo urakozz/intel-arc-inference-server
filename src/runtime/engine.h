@@ -502,6 +502,7 @@ class Engine {
   TapVerify df_tv_;
   std::unique_ptr<l0::Mem> df_pf_taps_;
   mutable l0::CmdList* pending_projection_ = nullptr;
+  l0::CmdList* profile_projection_ = nullptr;   // CaptureOptions test/probe override, borrowed
   // Snapshots materialize a deferred projection without changing the logical session.
   mutable l0::Queue queue_;
   mutable l0::Fence fence_;
