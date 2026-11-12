@@ -14,7 +14,7 @@ case "$mode" in
       "$HOME/b70/logs/opencode-session-2" "$target/generation_config.json" "$out/sources.json"
     ;;
   gpu)
-    build/tools/probe/probe_dflash_iter "$target" "$drafter" --engine-taps "$out/sources.json" "$out/engine"
+    build/tools/probe/probe_dflash_iter "$target" "$drafter" --format int8 --candidate-head --engine-taps "$out/sources.json" "$out/engine"
     ;;
   ref)
     exec 9> /tmp/b70-cpu-model.lock

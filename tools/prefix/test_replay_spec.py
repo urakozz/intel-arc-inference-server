@@ -72,6 +72,9 @@ class ReplaySpecTest(unittest.TestCase):
         self.bin = self.root / 'serve'
         self.bin.write_text(f'#!{sys.executable}\n' + FAKE)
         self.bin.chmod(0o755)
+        self.kernels = self.root/'kernels'
+        self.kernels.mkdir()
+        (self.kernels/'step.bin').write_bytes(b'shader-v1')
         with socket.socket() as s:
             s.bind(('127.0.0.1', 0))
             self.port = s.getsockname()[1]
@@ -79,7 +82,7 @@ class ReplaySpecTest(unittest.TestCase):
     def args(self, rounds=1):
         return SimpleNamespace(log=self.recording, out=self.root / 'out', model='/target', drafter='/drafter',
                                rounds=rounds, card=None, port=self.port, wait=5,
-                               judge=self.root / 'judge', bf16=self.root / 'bf16')
+                               judge=self.root / 'judge', bf16=self.root / 'bf16', kernel_dir=self.kernels)
 
     def run_replay(self, args, **env):
         with patch.dict(os.environ, dict(B70_SERVE=str(self.bin), B70_MTP_STEP_K='0', **env)), \
@@ -164,6 +167,21 @@ class ReplaySpecTest(unittest.TestCase):
         args.resume = True
         with self.assertRaises(RuntimeError):self.run_replay(args)
         self.assertEqual((args.out/'mtp.r1/server.log').read_bytes(), saved)
+
+    def test_resume_refuses_changed_external_shaders_with_the_same_server(self):
+        args = self.args()
+        self.assertEqual(self.run_replay(args), 0)
+        args.resume = True
+        shader = self.kernels/'step.bin'
+        shader.write_bytes(b'shader-v2')
+        with self.assertRaises(RuntimeError):self.run_replay(args)
+        shader.write_bytes(b'shader-v1')
+        added = self.kernels/'new.bin'
+        added.write_bytes(b'new-shader')
+        with self.assertRaises(RuntimeError):self.run_replay(args)
+        added.unlink()
+        shader.unlink()
+        with self.assertRaises(RuntimeError):self.run_replay(args)
 
     def test_legacy_replay_preserves_existing_user_without_a_prefix(self):
         p = self.recording/'000001.json'

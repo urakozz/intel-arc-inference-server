@@ -47,9 +47,11 @@ judge result, selected card and resource grade. Missing f32 references leave for
 not establish Task 8's other-corpus or prefill regression bars.
 
 After an operator pause, rerun the same command with `--resume`. The saved `config.json` must match the binary,
-recording hash, models and serving settings. Each complete arm is rebuilt from its reply/server logs and checked
+recording hash, models, serving settings and the complete content manifest of compiled `.bin` kernels.
+The kernel directory defaults to the server build's `kernels/`; `--kernel-dir` names it for a custom layout. Each complete arm is rebuilt from its reply/server logs and checked
 against the saved requests before reuse; an incomplete arm must be moved outside the arm directories first.
 `arm.json` and `run.json` retain each arm's card when continuing on a different card. Completed results are never
-overwritten by a new server run.
+overwritten by a new server run. Legacy configurations without the kernel manifest are refused for resume;
+their existing requests remain usable as archived measurements.
 
 Host-only stand-in tests: `python3 tools/prefix/test_replay_spec.py`.

@@ -8,7 +8,7 @@ For a card run beside another GPU job, first confirm more than 16 CPU threads ar
 the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
 'adaptive per step'. Writes serve_client-compatible requests.jsonl per arm/round, table.txt and the f32 judge's
 judge.log/forced contexts. Missing f32 references return 77, never a pass. Final G-speed also needs Task 8's
-other corpora and prefill checks. --resume reuses complete arms only after checking the binary, recording and
+other corpora and prefill checks. --resume reuses complete arms only after checking the executable, kernels, recording and
 settings against config.json and rebuilding the saved rows from their original reply/server logs. Incomplete
 arms must be archived before resuming. Each arm records its card, so a pause and card change remain visible.
 """
@@ -77,12 +77,21 @@ def run(a):
         binary = ROOT / binary
     with binary.open('rb') as f:
         binary_sha = hashlib.file_digest(f, 'sha256').hexdigest()
+    kernel_dir = getattr(a, 'kernel_dir', None) or binary.parents[2]/'kernels'
+    kernel_dir = Path(kernel_dir).resolve()
+    kernels = {}
+    for path in sorted(kernel_dir.rglob('*.bin')):
+        with path.open('rb') as f:
+            kernels[str(path.relative_to(kernel_dir))] = hashlib.file_digest(f, 'sha256').hexdigest()
+    if not kernels:
+        raise RuntimeError(f'no compiled kernels in {kernel_dir}')
     digest = hashlib.sha256()
     for name, _ in source:
         digest.update(name.encode() + b'\0' + (a.log/name).read_bytes())
     config = {'orders': orders, 'model': a.model, 'drafter': a.drafter,
               'recording': str(a.log.resolve()), 'recording_sha256': digest.hexdigest(),
-              'binary_sha256': binary_sha, 'prefix_cache_gb': 32, 'parallel': 1,
+              'binary_sha256': binary_sha, 'kernel_directory': str(kernel_dir), 'kernel_sha256': kernels,
+              'prefix_cache_gb': 32, 'parallel': 1,
               'max_len': 131072, 'kv_cache': 'bf16', 'mtp_policy': 'per-step default'}
     config_path = a.out/'config.json'
     cards = {}
@@ -172,6 +181,7 @@ def main(argv=None):
     ap.add_argument('--draft-model', dest='drafter', default='z-lab/Qwen3.8-27B-DFlash2')
     ap.add_argument('--rounds', type=int, default=3)
     ap.add_argument('--resume', action='store_true', help='validate and reuse completed arms in OUT')
+    ap.add_argument('--kernel-dir', type=Path, help='compiled kernels (default: beside the server build)')
     ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve the box')
     ap.add_argument('--port', type=int, default=8218)
     ap.add_argument('--wait', type=float, default=900)
