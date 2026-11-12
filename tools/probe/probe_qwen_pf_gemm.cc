@@ -10,15 +10,20 @@
 //   bs_dq      pf_dequant_slab BLOCK_STORE=1 alone (2D block stores, the same values)
 //   r1_gemm    pf_gemm RASTER=1 alone (the work-group order N-fastest, the same tiles)
 //   new        bs_dq + r1_gemm as a walk
+//   p1_gemm / p3_gemm / p4_gemm   pf_gemm PF_DIST=1/3/4 alone (k-tiles prefetched ahead; production 2)
+//   nb_gemm    pf_gemm NO_BARRIER=1 alone (no per-k-tile work-group barrier)
+// --gemm r1,p1,p3,p4,nb picks the GEMM arms (default all); --no-dq drops bs_dq / new / ctl_dq.
 // Checks before any timing, layer 0 at every row count: every slab of bs_dq equals ctl_dq's byte for
-// byte, and the new walk's output equals the control walk's byte for byte.
+// byte, and the new walk's output (and every GEMM arm's, after the control's dequant) equals the
+// control walk's byte for byte.
 //
 // Timing: the GPU span between two global timestamps around each arm's whole layer walk on the
 // in-order list; one warm-up pass of every arm, then `rounds` rounds with the arm order rotating
 // (interleaved). Medians. TFLOP/s = 2 M K N layers / span; % of the 183.45 TFLOP/s bf16 DPAS peak.
 //
-//   probe_qwen_pf_gemm [--rounds 5] [--rows 4096,2048] [--shape all|gu,down,qkvz,out,faqkv]
+//   probe_qwen_pf_gemm [--rounds 5] [--rows 4096,2048] [--shape all|gu,down,qkvz,out,faqkv] [--gemm ...] [--no-dq]
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -103,7 +108,8 @@ std::string slab_name(const char* stem, const Shape& sh) {
 using Table = std::map<std::string, std::map<uint32_t, double>>;   // arm -> rows -> median GPU ms
 
 Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefill::KernelCache& kc, const Shape& sh,
-                const std::vector<uint32_t>& rows, int rounds, std::mt19937& rng) {
+                const std::vector<uint32_t>& rows, const std::vector<std::string>& garms, bool with_dq, int rounds,
+                std::mt19937& rng) {
   const uint32_t K = sh.K, N = sh.N;
   const size_t w_u32 = sh.layout == 0 ? size_t(K / 8) * N : size_t(N / 16) * (K / 64) * 136;
   const size_t sc_n = sh.layout == 0 ? size_t(K / 64) * N : 0;
@@ -140,7 +146,12 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
 
   l0::Kernel& dq = kc(kernels::pf_dequant_slab_variant(K, N, sh.layout), "pf_dequant_slab");
   l0::Kernel& dq_bs = kc(slab_name("qpg_dqbs", sh), "pf_dequant_slab");
-  l0::Kernel& g_r1 = kc(sh.silu ? "qpg_gemm_T0_SILU_R1" : "qpg_gemm_T0_R1", "pf_gemm");
+  std::map<std::string, l0::Kernel*> gk;
+  for (const std::string& a : garms) {
+    std::string up = a;
+    for (char& c : up) c = char(std::toupper(c));
+    gk[a] = &kc(std::string(sh.silu ? "qpg_gemm_T0_SILU_" : "qpg_gemm_T0_") + up, "pf_gemm");
+  }
 
   auto deq = [&](l0::Kernel& k, uint32_t n0, uint32_t l, l0::Mem& s) {
     cx.launch(k, kNs / 16, K / 64, 1,
@@ -156,12 +167,12 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
       runtime::prefill::gemm_l0(cx, kc, b, dx.as<uint16_t>(), slab.as<uint16_t>(), o.as<float>() + n0, false);
     }
   };
-  auto gemm_r1 = [&](uint32_t M, uint32_t n0, l0::Mem& o) {
+  auto gemm_v = [&](l0::Kernel& g, uint32_t M, uint32_t n0, l0::Mem& o) {
     const uint32_t Mp = pad256(M);
     void* c = sh.silu ? static_cast<void*>(o.as<uint16_t>() + n0 / 2) : static_cast<void*>(o.as<float>() + n0);
     const uint32_t ldc = sh.silu ? N / 2 : N;
     const uint64_t z = 0;
-    cx.launch(g_r1, Mp / 256, kNs / 256, 1,
+    cx.launch(g, Mp / 256, kNs / 256, 1,
               {PtrArg(dx.ptr()), PtrArg(slab.ptr()), PtrArg(c), arg_val(Mp), arg_val(K), arg_val(kNs), arg_val(K),
                arg_val(kNs), arg_val(ldc), arg_val(z), arg_val(z), arg_val(z)});
   };
@@ -174,12 +185,12 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   auto walk_new = [&](uint32_t M, uint32_t l, l0::Mem& o) {
     for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
       deq(dq_bs, n0, l, slab);
-      gemm_r1(M, n0, o);
+      gemm_v(*gk.at("r1"), M, n0, o);
     }
   };
 
   // --- checks: layer 0, bitwise ---------------------------------------------------------------------
-  {
+  if (with_dq) {
     std::vector<uint8_t> a(slab_bytes), b(slab_bytes);
     size_t bad = 0;
     for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
@@ -194,12 +205,22 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
                 size_t(N) * K);
     if (bad) throw std::runtime_error(std::string(sh.tag) + ": bs_dq is not bitwise the production dequant");
   }
+  std::vector<std::pair<std::string, std::function<void(uint32_t, l0::Mem&)>>> checks;
+  if (with_dq && gk.count("r1")) checks.push_back({"new walk", [&](uint32_t M, l0::Mem& o) { walk_new(M, 0, o); }});
+  for (const auto& [a, k] : gk)
+    checks.push_back({a + "_gemm walk", [&, k = k](uint32_t M, l0::Mem& o) {
+                        for (uint32_t n0 = 0; n0 < N; n0 += kNs) {
+                          deq(dq, n0, 0, slab);
+                          gemm_v(*k, M, n0, o);
+                        }
+                      }});
+  for (const auto& [what, run] : checks)
   for (uint32_t M : rows) {
     const size_t n = size_t(pad256(M)) * N * 4 / (sh.silu ? 4 : 1);   // silu: bf16 [M][N/2]
     copy(ctx, out_a.ptr(), std::vector<uint8_t>(n, 0x5A).data(), n);
     copy(ctx, out_b.ptr(), std::vector<uint8_t>(n, 0xA5).data(), n);
     walk_ctl(M, 0, out_a);
-    walk_new(M, 0, out_b);
+    run(M, out_b);
     cx.wait();
     const size_t live = size_t(M) * N * (sh.silu ? 1 : 4);   // rows < M only
     std::vector<uint8_t> a(live), b(live);
@@ -208,9 +229,9 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
     const size_t elem = sh.silu ? 2 : 4;
     size_t bad = 0;
     for (size_t i = 0; i < live; i += elem) bad += std::memcmp(&a[i], &b[i], elem) != 0;
-    std::printf("CHECK {\"shape\":\"%s\",\"what\":\"new walk output\",\"rows\":%u,\"differ\":%zu,\"of\":%zu}\n",
-                sh.tag, M, bad, live / elem);
-    if (bad) throw std::runtime_error(std::string(sh.tag) + ": the new walk is not bitwise the control walk");
+    std::printf("CHECK {\"shape\":\"%s\",\"what\":\"%s output\",\"rows\":%u,\"differ\":%zu,\"of\":%zu}\n",
+                sh.tag, what.c_str(), M, bad, live / elem);
+    if (bad) throw std::runtime_error(std::string(sh.tag) + ": " + what + " is not bitwise the control walk");
   }
 
   struct Arm {
@@ -221,13 +242,17 @@ Table run_shape(l0::Context& ctx, runtime::prefill::Context& cx, runtime::prefil
   std::vector<Arm> arms;
   const uint32_t L = sh.layers;
   for (uint32_t M : rows) {
-    arms.push_back({"ctl", M, [&, M] { for (uint32_t l = 0; l < L; ++l) walk_ctl(M, l, out_a); }});
-    arms.push_back({"new", M, [&, M] { for (uint32_t l = 0; l < L; ++l) walk_new(M, l, out_b); }});
     arms.push_back({"ctl_gemm", M, [&, M] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) gemm_ctl(M, n0, out_a); }});
-    arms.push_back({"r1_gemm", M, [&, M] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) gemm_r1(M, n0, out_b); }});
+    for (const auto& [a, k] : gk)
+      arms.push_back({a + "_gemm", M, [&, M, k = k] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) gemm_v(*k, M, n0, out_b); }});
+    if (!with_dq) continue;
+    arms.push_back({"ctl", M, [&, M] { for (uint32_t l = 0; l < L; ++l) walk_ctl(M, l, out_a); }});
+    if (gk.count("r1")) arms.push_back({"new", M, [&, M] { for (uint32_t l = 0; l < L; ++l) walk_new(M, l, out_b); }});
   }
-  arms.push_back({"ctl_dq", 0, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(dq, n0, l, slab); }});
-  arms.push_back({"bs_dq", 0, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(dq_bs, n0, l, slab); }});
+  if (with_dq) {
+    arms.push_back({"ctl_dq", 0, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(dq, n0, l, slab); }});
+    arms.push_back({"bs_dq", 0, [&] { for (uint32_t l = 0; l < L; ++l) for (uint32_t n0 = 0; n0 < N; n0 += kNs) deq(dq_bs, n0, l, slab); }});
+  }
 
   auto timed = [&](const std::function<void()>& launches) {
     cx.timestamp(stamp);
@@ -274,15 +299,18 @@ std::vector<std::string> split(const std::string& s) {
 int main(int argc, char** argv) {
   try {
     int rounds = 5;
-    std::string want = "all", rows_s = "4096,2048";
+    std::string want = "all", rows_s = "4096,2048", gemm_s = "r1,p1,p3,p4,nb";
+    bool with_dq = true;
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--rounds" && i + 1 < argc) rounds = std::max(1, std::atoi(argv[++i]));
       else if (a == "--shape" && i + 1 < argc) want = argv[++i];
       else if (a == "--rows" && i + 1 < argc) rows_s = argv[++i];
+      else if (a == "--gemm" && i + 1 < argc) gemm_s = argv[++i];
+      else if (a == "--no-dq") with_dq = false;
       else {
         std::fprintf(stderr, "usage: probe_qwen_pf_gemm [--rounds 5] [--rows 4096,2048] "
-                             "[--shape all|gu,down,qkvz,out,faqkv]\n");
+                             "[--shape all|gu,down,qkvz,out,faqkv] [--gemm r1,p1,p3,p4,nb] [--no-dq]\n");
         return 2;
       }
     }
@@ -305,7 +333,7 @@ int main(int argc, char** argv) {
     Table sum;
     for (const Shape& sh : kShapes) {
       if (want != "all" && !selected.count(sh.tag)) continue;
-      const Table tab = run_shape(ctx, cx, kc, sh, rows, rounds, rng);
+      const Table tab = run_shape(ctx, cx, kc, sh, rows, split(gemm_s), with_dq, rounds, rng);
       for (const auto& [arm, by_m] : tab)
         for (const auto& [M, ms] : by_m) sum[arm][M] += ms;
       std::fflush(stdout);

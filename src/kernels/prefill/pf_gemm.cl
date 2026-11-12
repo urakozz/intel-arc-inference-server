@@ -68,6 +68,12 @@
 #ifndef RASTER
 #define RASTER 0
 #endif
+#ifndef PF_DIST
+#define PF_DIST 2   // k-tiles prefetched ahead
+#endif
+#ifndef NO_BARRIER
+#define NO_BARRIER 0
+#endif
 #if SILU_EPI && TRANSB
 #error "pf_gemm: the SiLU epilogue belongs to the gate||up slab GEMM, whose B is [K][N]"
 #endif
@@ -167,7 +173,7 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
   // 256 x 32 tile. B (T0): 8 k-rows x 32 n per subgroup over the 32 x 256 tile.
   // B (T1): the tile is 256 n-rows x 32 k; subgroup s takes rows n0+8s..+7.
 #pragma unroll
-  for (int pf = 0; pf < 2; ++pf) {
+  for (int pf = 0; pf < PF_DIST; ++pf) {
     const int k_pf = pf * WG_K;
     intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)A, a_w, a_h, a_p,
                                                   (int2)(k_pf, (int)(m0 + 8u * s)));
@@ -183,7 +189,9 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
 
   for (uint t = 0; t < num_k_tiles; ++t) {
     const uint k0 = t * WG_K;
+#if !NO_BARRIER
     intel_work_group_barrier_arrive(CLK_LOCAL_MEM_FENCE);
+#endif
 
     // A: 32 m x 32 k, one message. afrag[c*32 + r] = A[m0+32sm+r][k0+16c+lane].
     ushort afrag[64];
@@ -217,8 +225,8 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
         (__global void*)B, b_w, b_h, b_p, (int2)((int)(n0 + 64u * sn + 32u), (int)k0), bfrag[1]);
 #endif
 
-    if (t + 2 < num_k_tiles) {   // prefetch k-tile t+2
-      const int k_pf = (int)((t + 2) * WG_K);
+    if (t + PF_DIST < num_k_tiles) {   // prefetch k-tile t+2
+      const int k_pf = (int)((t + PF_DIST) * WG_K);
       intel_sub_group_2d_block_prefetch_16b_8r16x2c((__global void*)A, a_w, a_h, a_p,
                                                     (int2)(k_pf, (int)(m0 + 8u * s)));
 #if TRANSB
@@ -251,7 +259,9 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
           acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
       }
     }
+#if !NO_BARRIER
     intel_work_group_barrier_wait(CLK_LOCAL_MEM_FENCE);
+#endif
   }
 
 #if SILU_EPI
