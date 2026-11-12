@@ -29,11 +29,13 @@ class Int8State;
 //   l0:      pf_moe_gather, pf_moe_q4gemm (SiLU)                               -> h
 //   pf_moe_q4gemm (down)                                                         -> y
 //   pf_moe_combine                                   resid += the block's output
+//   (or, `next_norm` given, pf_moe_combine_norm: that and the next layer's leading norm into s.x - phase 3 Task 5)
 //
 // (plan 2026-11-12: the GEMMs read the int4 blocks in place - no per-chunk weight pass.) `layer` picks the route
 // rows' slice (kept per layer for R2).
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
-               uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q);
+               uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q,
+               const void* next_norm = nullptr);
 
 // What one moe_chunk appends (a function of the backend, never of C): 10 on l0-int8, 9 on l0.
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b);

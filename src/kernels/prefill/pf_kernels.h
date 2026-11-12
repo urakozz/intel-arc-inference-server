@@ -228,6 +228,13 @@ inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hid
   return "pf_moe_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
          std::to_string(hidden) + "_I" + std::to_string(inter);
 }
+// Phase 3 Task 5: pf_moe.cl built with FOLD_G - entry pf_moe_combine_norm, the combine and the next layer's
+// pf_res_norm (S_PREV 0, G fold groups) in one launch.
+inline std::string pf_moe_combine_norm_variant(unsigned experts, unsigned top_k, unsigned hidden, unsigned inter,
+                                               unsigned G) {
+  return "pf_moe_combine_norm_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
+         std::to_string(hidden) + "_I" + std::to_string(inter) + "_G" + std::to_string(G);
+}
 // pf_moe_sort_mw.cl (plan 2026-11-12 Task 2): the multi-work-group sort, pf_moe_hist / pf_moe_scan /
 // pf_moe_scatter, at one (experts, top_k).
 inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {

@@ -406,6 +406,9 @@ if(B70_ORNITH)
                    DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
                    DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048)
+  # Phase 3 Task 5: the combine + the next layer's leading norm (pf_res_norm at S_PREV 0) in one launch, bitwise.
+  add_ocloc_kernel(pf_moe_combine_norm_E256_T8_D2048_I512_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
+                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048 FOLD_G=20)
   set(PF_MOE_GEMM_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_gemm.cl)
   add_ocloc_kernel(pf_moe_gemm_K2048_N1024_SILU SOURCE ${PF_MOE_GEMM_CL}
                    DEFINES K=2048 N=1024 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)

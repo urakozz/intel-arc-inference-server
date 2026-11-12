@@ -204,6 +204,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   uint8_t* const ring_base = static_cast<uint8_t*>(slot && slot->conv_ring ? slot->conv_ring : conv_ring_mem.ptr());
   const uint32_t kv_base = slot ? slot->kv_base : 0;
   bool resume = w.resume;
+  bool normed = false;   // phase 3 Task 5: the previous layer's combine already wrote this layer's x
   for (const model::LayerDesc& L : d.layer_descs()) {
     const uint32_t l = L.index;
     if (l < w.first || l >= w.last) continue;
@@ -217,7 +218,7 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
       pf_norm_finish(cx, kc, s, in_norm, s.resid.ptr(), s.x.ptr(), C);
       profile_wait(cx, Phase::kNorm);
       resume = false;
-    } else {
+    } else if (!normed) {
       // S_PREV: nothing to fold before layer 0, and nothing after a MoE layer either - its
       // combine folded the block's output into resid itself (ModelDesc::ffn_fold_s() == 0).
       pf_res_norm(cx, kc, s, l == 0 || d.ffn_fold_s() == 0 ? 0u : 1u, in_norm, s.partials.ptr(),
@@ -241,7 +242,12 @@ void walk_layers(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
     if (d.is_moe()) {
       pf_res_norm(cx, kc, s, 1u, at_const(small.norms, s.desc().small_layout().norms_off_post),
                   s.partials.ptr(), s.resid.ptr(), s.x.ptr(), C);
-      moe_chunk(cx, kc, s, m.moe[l - w.first], l, C, backend, q);
+      // Phase 3 Task 5: when the next layer is in this walk, its leading norm (S_PREV 0) runs inside the combine.
+      // The walk's last layer keeps the lone combine: the final norm, or the cut's fold, reads resid as before.
+      normed = l + 1 < w.last;
+      const void* const next_norm =
+          normed ? at_const(m.layer_small[l + 1 - w.first].norms, s.desc().small_layout().norms_off_input) : nullptr;
+      moe_chunk(cx, kc, s, m.moe[l - w.first], l, C, backend, q, next_norm);
       continue;
     }
 
@@ -716,7 +722,8 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_
 // the post-attention norm 2 and moe_chunk_launches. Ornith at C <= 2048, flash:
 // GDN 2 + 24 + 1 + 10 + 4 + 2 + 11 = 54, FA 2 + 18 + 1 + 1 + 1 + 4 + 2 + 11 = 40 on l0,
 // so 1 + 30 x 54 + 10 x 40 = 2021; l0-int8 2 more per layer (the quantisers) and 1 fewer
-// (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived).
+// (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived). Phase 3 Task 5: a walk's every layer but its last
+// runs the next layer's input norm inside its combine, so a chunk is layers - 1 fewer: 1982 / 2022.
 namespace {
 // A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
 size_t res_norm_launches(const model::ModelDesc& d) { return d.is_moe() ? 1 : 2; }
@@ -729,7 +736,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
   const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
   const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
-  return 1 + d.gdn_layers * gdn + d.fa_layers * fa;
+  return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
 }
 }  // namespace
 
@@ -772,6 +779,8 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   // layer `first`'s pf_res_fold ran on the previous device: its norm is the lone pf_norm_finish
   n -= st.has_embed() ? 0 : res_norm_launches(d) - 1;
   n += st.has_head(d) ? 0 : 1;   // the cut: layer `last`'s pf_res_fold
+  // a MoE stage's layers but its last: the next layer's input norm ran inside the combine (phase 3 Task 5)
+  n -= d.is_moe() ? (st.last - st.first - 1) * res_norm_launches(d) : 0;
   return n;
 }
 
