@@ -341,7 +341,7 @@ target_include_directories(attn_chunk_test PRIVATE ${CMAKE_SOURCE_DIR}/src
                            ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/kernels)
 target_link_libraries(attn_chunk_test PRIVATE b70_prefill_host b70_runtime b70_l0)
 b70_target_kernel_dir(attn_chunk_test)
-add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn
+add_dependencies(attn_chunk_test kernel_pf_attn kernel_pf_attn_prep_q16 kernel_pf_flash_attn kernel_pf_flash_attn_r32
                  kernel_pf_gemm_T0 kernel_pf_gemm_T1)
 add_test(NAME attn_chunk_test COMMAND attn_chunk_test)
 set_tests_properties(attn_chunk_test PROPERTIES TIMEOUT 3600)
@@ -988,7 +988,8 @@ set(B70_PREFILL_KERNELS
   kernel_pf_embed_gather kernel_pf_res_fold_K5120_SP0_G20
   kernel_pf_res_fold_K5120_SP1_G20 kernel_pf_norm_finish_K5120_G20_W20
   kernel_pf_silu_mul kernel_pf_gated_head kernel_pf_ab_proj
-  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_split kernel_pf_flash_merge
+  kernel_pf_attn_prep_q16 kernel_pf_attn kernel_pf_flash_attn kernel_pf_flash_attn_r32 kernel_pf_flash_attn_split
+  kernel_pf_flash_merge
   kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan
   kernel_pf_dequant_tile_K5120_N16384_L1_T0
   kernel_pf_dequant_tile_K6144_N5120_L0_T0
@@ -1729,7 +1730,7 @@ if(B70_KV8)
     ${CMAKE_SOURCE_DIR}/tests/prefill)
   target_link_libraries(flash_split_test PRIVATE b70_l0)
   b70_target_kernel_dir(flash_split_test)
-  add_dependencies(flash_split_test kernel_pf_flash_attn kernel_pf_flash_attn_split kernel_pf_flash_merge
+  add_dependencies(flash_split_test kernel_pf_flash_attn kernel_pf_flash_attn_r32 kernel_pf_flash_attn_split kernel_pf_flash_merge
     kernel_pf_flash_attn_kv8_raw kernel_pf_flash_attn_kv8_raw_split kernel_pf_flash_attn_kv8_split)
   add_test(NAME flash_split_test COMMAND flash_split_test)
   set_tests_properties(flash_split_test PROPERTIES LABELS kv8 TIMEOUT 1800)
@@ -1925,7 +1926,7 @@ if(B70_ORNITH)
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
     kernel_pf_gated_head_GK16V32 kernel_pf_gdn_intra_GK16V32 kernel_pf_gdn_front_GK16V32 kernel_pf_route_ab_D2048 kernel_pf_route_router_K2048_N272 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20
     kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
-    kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
     kernel_pf_moe_combine_norm_E256_T8_D2048_I512_G20
     kernel_pf_route_slab_K2048_N272_P512 kernel_pf_route_slab_K2048_N128_P256 kernel_moe_M1_E256_T8_D2048_I512_R512
     kernel_pf_gdn_conv_GK16V32_AB256 kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
@@ -1961,6 +1962,7 @@ if(B70_ORNITH)
   target_link_libraries(pf_moe_test PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(pf_moe_test)
   add_dependencies(pf_moe_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_dependencies(attn_chunk_test kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2)
   add_test(NAME pf_moe_test COMMAND pf_moe_test)
   set_tests_properties(pf_moe_test PROPERTIES LABELS "ornith;prefill" TIMEOUT 1800)
 
