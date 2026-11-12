@@ -298,7 +298,6 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gdn_wy_variant(),
       pf_gdn_scan_variant(),
       pf_gdn_front_variant(),       // MoE-model prefill phase 2: conv + l2norm in one launch
-      pf_gdn_intra_variant(),       // ... A / T / w, u / A2 in one launch
       pf_route_ab_variant(),
       pf_route_router_variant(),
       pf_gated_head_sig_variant(),
