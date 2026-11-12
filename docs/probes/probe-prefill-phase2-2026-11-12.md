@@ -147,3 +147,8 @@ on phase 1's 66b7b234): **pp4096 l0 6,553 -> 7,035 t/s (+7.4 %, -42 ms)**.
 Ornith set 12 / 12 PASS, host / kernel / Flash-Next tests 17 / 17 PASS; l0-int8 (prefill_gate_ornith_l0-int8 and
 _c16) and Flash-Next (qwen4exp_prefill_synth_ours) print the same logs as main's build (bitwise unchanged). Speed
 (card 0, interleaved, 3 rounds, unprofiled, busy box): **pp4096 l0 6,953 -> 7,668 t/s (+10.3 %, -54 ms)** over main.
+
+Retried on l0-int8 after phase 1's W4A8 experts and the near-miss rule (main e31116e5): prefill_gate_ornith_l0-int8,
+prefill_split_ornith_l0-int8 and ornith_prefill_l0-int8 pass; prefill_gate_ornith_l0-int8_c16 fails cjk step 15 (f32
+margin 3.0 ulp, but the engine's logits cosine vs f32 0.999025 < the bf16 twin's 0.999467 - 1e-5, so the near-miss rule
+does not apply). l0-int8 stays on the four launches.

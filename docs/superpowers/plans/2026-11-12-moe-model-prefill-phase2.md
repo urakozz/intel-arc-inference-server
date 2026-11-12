@@ -185,7 +185,8 @@ test.cc`'s band printed for the new arm.
     determined row missed. D2 (Q1-Q4 fp32, u / w hi / lo, pf_gdn_scan_hl; 37.4 + 31.1 ms): per-layer far closer to
     fp64, yet l0 cjk and three l0-int8 rows missed. Operator ruling (2026-11-12): the bf16-Q form is the
     default on l0, where every gate passes; l0-int8 keeps the four launches (not supported yet: it flips a determined
-    row). D2 (pf_gdn_intra_hl / pf_gdn_scan_hl) removed.
+    row). D2 (pf_gdn_intra_hl / pf_gdn_scan_hl) removed. Retried on l0-int8 under phase 1's near-miss rule
+    (2026-11-12, W4A8 experts): the _c16 gate misses cjk step 15 outside the rule; l0-int8 stays on the old path.
 
 ### Task 4: the scan and the gated head (box, then Mac) - per arm
 
