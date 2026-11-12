@@ -33,7 +33,7 @@ tools/probe/detach.sh ~/b70/logs/dflash-v2/card1.log \
 The script takes `gpu_lock.sh card N` itself with `--card N`; without it, the script takes the whole-box lock.
 Do not wrap it in another GPU lock. Card-only runs carry a busy-box grade; record CPU availability and concurrent
 work with the results. It forces one card with
-`--parallel 1` and replays `--spec off`, `--spec mtp --mtp auto`, and `--spec dflash`, in three rotated rounds.
+`--parallel 1` and replays `--spec off`, `--spec mtp`, and `--spec dflash`, in three rotated rounds.
 Every arm keeps the prefix cache on (32 GiB), context 131072, bf16 KV, int8 target head, greedy sampling and the
 recorded output cap. The MTP arm must report `adaptive per step`; an inherited `B70_MTP_STEP_K=0` is cleared.
 Servers stop through `box_stop.sh child` and are waited for before the next arm starts. No device affinity is
@@ -45,5 +45,11 @@ Use a new output directory for each recording; repeat on `opencode-session` and 
 filenames reflect a different completion order. `run.json` records the binary hash, policy, shape, order and
 judge result, selected card and resource grade. Missing f32 references leave forced contexts and return **77**, not PASS. This replay alone does
 not establish Task 8's other-corpus or prefill regression bars.
+
+After an operator pause, rerun the same command with `--resume`. The saved `config.json` must match the binary,
+recording hash, models and serving settings. Each complete arm is rebuilt from its reply/server logs and checked
+against the saved requests before reuse; an incomplete arm must be moved outside the arm directories first.
+`arm.json` and `run.json` retain each arm's card when continuing on a different card. Completed results are never
+overwritten by a new server run.
 
 Host-only stand-in tests: `python3 tools/prefix/test_replay_spec.py`.
