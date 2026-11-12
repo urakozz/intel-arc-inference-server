@@ -1,7 +1,7 @@
 # b70-inference-server
 
-**A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Its own GPU kernels, no PyTorch,
-no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
+**A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-crafted GPU kernels,
+optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
 - **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
 - **258 tokens per second in total** with 8 requests running at once.
