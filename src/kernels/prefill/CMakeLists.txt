@@ -377,6 +377,14 @@ if(B70_ORNITH)
                    DEFINES ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN})
+  # Phase 2 Task 5: the residual fold + RMSNorm in one launch, bitwise the pair above.
+  foreach(SP 0 1)
+    add_ocloc_kernel(pf_res_norm_K2048_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                     DEFINES K=2048 S_PREV=${SP} FOLD_G=20)
+  endforeach()
+  # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
+  add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
+                   DEFINES ${PF_ORNITH_GDN})
   # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
   add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
                    DEFINES ${PF_ORNITH_GDN})
