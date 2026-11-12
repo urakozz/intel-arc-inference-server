@@ -3696,6 +3696,26 @@ st_r83_probe() {
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5" "probe_moe_prefill ornith"
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/flashnext.routes --model flashnext --C 2048,4096 --rounds 5" "probe_moe_prefill flashnext"
   grab_all result '^(RESULT|# checks|# FAILED|\| check)' 400
+# ======================================================================================
+row 84 "phase 2 of the MoE-model prefill - Ornith's GDN prompt pass, the small kernels (plan 2026-11-12-moe-model-prefill-phase2 Task 1)"
+rownote 84 "Opt-in probes. r84.trace: B70_PREFILL_PROFILE=2's (phase, entry) trace at pp4096, l0 and l0-int8. r84.dump + r84.probe: the GDN intra-chunk inputs of layers 0 / 12 / 28 (B70_PF_GDN_DUMP) and probe_gdn_intra on them - each stage's error against fp64 for today's four kernels and the one-launch DPAS kernel, then their times. Record: docs/probes/probe-prefill-phase2-2026-11-12.md."
+stage r84.trace 84 optin card ornith - "B70_PREFILL_PROFILE=2 b70-decode <ornith> --prefill-length 4096 on l0 and l0-int8, two rounds: every launch named in its phase bucket"
+st_r84_trace() {
+  chk "tools/probe/pf_phase2_trace.sh 4096 $SNAP_ORNITH" "the per-launch prefill trace"
+  grab_all pp '^pp: ' 4
+  finish
+}
+stage r84.dump 84 optin card ornith - "B70_PF_GDN_DUMP: one pp4096 prefill's GDN intra-chunk inputs (calls 0 / 9 / 21 = layers 0 / 12 / 28) into \$STATE/r84.gdn"
+st_r84_dump() {
+  chk "mkdir -p $STATE/r84.gdn && B70_PF_GDN_DUMP=$STATE/r84.gdn build/src/cli/b70-decode $SNAP_ORNITH --bench --prefill-length 4096 --tg 4 --max-len 8192 --parallel 1" "the GDN dump"
+  finish
+}
+stage r84.probe 84 optin card ornith r84.dump "probe_gdn_intra on r84.dump's inputs: the D-a arm's per-stage error within 2x the control's (A, T, A2, w, u, o and state against fp64), then control vs D-a ms at C = 2048 / 4096"
+st_r84_probe() {
+  chk "build/tools/probe/probe_gdn_intra --dump $STATE/r84.gdn" "the GDN intra-chunk arms"
+  grab_all stage '^\\| ' 30
+  grab_all time '^TIME ' 6
+  grab_all gate '^GATE ' 1
   finish
 }
 
