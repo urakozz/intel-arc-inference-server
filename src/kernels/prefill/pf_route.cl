@@ -96,7 +96,8 @@ __kernel void pf_gemv_rows(__global const ushort* restrict w,
 
 #ifdef ROUTE_SLAB
 // pf_route_slab (phase 3 Task 2; built only with ROUTE_SLAB = the padded width NP, kernels::pf_route_slab_variant) -
-// the weight pf_gemv_rows reads (gemv_bf16's tiled [N][K]: tile n / 16, k8 group, lane n % 16, eight k) re-laid as
+// the weight pf_gemv_rows reads (gemv_bf16's tiled [N][K], common::repack_bf16_tiled: W[n][k] at
+// ((n / 16 * K8 + k / 8) * 8 + k % 8) * 16 + n % 16) re-laid as
 // pf_gemm's untransposed B, bf16 [K][NP] (ldb NP), columns N..NP-1 zero, so the dense GEMM writes the logits (or
 // a||b) rows [M][NP] at row pitch NP. Its sums are DPAS's, not the GEMV's order: judged, not bitwise.
 //
@@ -109,10 +110,12 @@ __attribute__((reqd_work_group_size(256, 1, 1)))
 __kernel void pf_route_slab(__global const ushort* restrict w, __global ushort* restrict slab) {
   const uint n = get_global_id(0);
   const uint k8 = get_group_id(1);
-  ushort8 v = (ushort8)(0);
-  if (n < N) v = vload8(0, w + (size_t)(n / SG) * K8 * 128 + (size_t)k8 * 128 + (n % SG) * 8);
   __global ushort* restrict o = slab + (size_t)k8 * 8 * NP + n;
-  o[0] = v.s0; o[NP] = v.s1; o[2 * NP] = v.s2; o[3 * NP] = v.s3;
-  o[4 * NP] = v.s4; o[5 * NP] = v.s5; o[6 * NP] = v.s6; o[7 * NP] = v.s7;
+  if (n < N) {
+    __global const ushort* restrict blk = w + ((size_t)(n / SG) * K8 + k8) * 128 + n % SG;
+    for (uint j = 0; j < 8; ++j) o[j * NP] = blk[j * SG];
+  } else {
+    for (uint j = 0; j < 8; ++j) o[j * NP] = 0;
+  }
 }
 #endif
