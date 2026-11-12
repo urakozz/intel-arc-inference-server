@@ -267,6 +267,8 @@ PpPlan pp_plan(const model::ModelDesc& d, uint32_t split, uint32_t max_len, cons
     if (pf.prefill) {   // spec 16c: memory_plan.cc's prefill terms, per device
       const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, d, pf.chunk_cap);
       dp.prefill_scratch = s.eager() + (pf.backend == PrefillBackend::L0 ? s.slab : 0);
+      // Phase 3 Task 2: the stage's router / a||b B slabs (a MoE model on l0).
+      if (pf.backend == PrefillBackend::L0) dp.prefill_scratch += route_slab_bytes(d, st[i].first, st[i].last);
       if (kv == KvCache::Int8) dp.prefill_scratch += s.kv8_raw;
       if (pf.backend == PrefillBackend::L0Int8)
         dp.int8 = int8_scratch_sizes(prefill_int8_max_k(d), pf.chunk_cap).total() +

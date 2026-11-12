@@ -21,7 +21,7 @@
 //      reads row `m0` rather than out of bounds, and this is what catches it
 //      reaching the wrong row.
 //   5. **ab_gemm** (phase 3 Task 2; Ornith builds only, B70_PF_AB_GEMM): Ornith's a||b
-//      (K 2048, N 128) by runtime::prefill::tiled_gemm, what the l0 walk binds - at C 2048
+//      (K 2048, N 128) by runtime::prefill::route_slab + tiled_gemm, what the l0 walk binds - at C 2048
 //      and 37 the slab exactly the weight with zero columns past 128, every output of a row
 //      < C within 1e-5 x sum|w x| of the host's double sum of the same bf16 operands, and
 //      pf_gdn_gate at row pitch 256 with the pad columns poisoned (NaN) every g and beta
@@ -106,7 +106,8 @@ void ab_gemm_case(Dev& d, uint32_t C) {
   l0::Mem slab(d.ctx, l0::MemKind::Device, size_t(K) * P * 2), out(d.ctx, l0::MemKind::Device, size_t(Mp) * P * 4);
   d.imm.fill(slab.ptr(), 0x7F7F7F7Fu, slab.size());
   d.imm.fill(out.ptr(), 0x7FC00000u, out.size());
-  runtime::prefill::tiled_gemm(cx, kc, wb.ptr(), N, K, xb.as<uint16_t>(), C, slab.as<uint16_t>(), out.as<float>());
+  runtime::prefill::route_slab(cx, kc, wb.ptr(), N, K, slab.as<uint16_t>());
+  runtime::prefill::tiled_gemm(cx, kc, slab.as<uint16_t>(), N, K, xb.as<uint16_t>(), C, out.as<float>());
   cx.wait();
   std::vector<uint16_t> sl(size_t(K) * P);
   download(d.imm, sl, slab);

@@ -646,6 +646,12 @@ void PipelineEngine::prepare_prefill() {
   if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
   if (kv_ == KvCache::Int8)
     for (auto& dev : as_pf(*pf_).dev) dev->scratch.kv8_raw_buffer();
+  // Phase 3 Task 2: each device's router / a||b B slabs over its layers, once (pipeline_plan counts them).
+  if (b == PrefillBackend::L0)
+    for (uint32_t i = 0; i < kPpDevices; ++i) {
+      PfDevice& D = *as_pf(*pf_).dev[i];
+      prefill::make_route_slabs(D.cx, D.kc, D.scratch, st(i).model, stage(i).first, stage(i).last);
+    }
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
   // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every int4

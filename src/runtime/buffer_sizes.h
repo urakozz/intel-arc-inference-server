@@ -248,10 +248,10 @@ struct MoePrefillLayout {
          items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
          xsg_tok_off = 0,        // W4A8 (l0-int8): the chunk's per-token 64-k group scales, fp32 [C][hidden / 64]
          xsg_off = 0,            // and the sorted rows', fp32 [rows][hidden / 64]
-         // Phase 3 Task 2 (l0): the router || shared gate's and the a||b's dense GEMM, INSIDE xg (no bytes of its
-         // own): fp32 [pad256(kC)][gemm_pitch] rows, then the bf16 [hidden][gemm_pitch] B slab. The router's rows
-         // are consumed by moe_route before the gather writes xg, the a||b's by pf_gdn_gate before the layer's MoE.
-         gemm_out_off = 0, gemm_slab_off = 0;
+         // Phase 3 Task 2 (l0): the router || shared gate's and the a||b's dense GEMM output, INSIDE xg (no bytes
+         // of its own): fp32 [pad256(kC)][gemm_pitch]. The router's rows are consumed by moe_route before the
+         // gather writes xg, the a||b's by pf_gdn_gate before the layer's MoE block.
+         gemm_out_off = 0;
   uint32_t gemm_pitch = 0;       // the wider of the two GEMMs' padded N (pf_route_slab_pitch)
   uint32_t ibound = 0;           // at the chunk cap
   size_t total = 0;
@@ -261,6 +261,10 @@ struct MoePrefillLayout {
 MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap = 2048);
 // tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
 uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
+// Phase 3 Task 2: the l0 backend's persistent pf_gemm B slabs of a MoE model's layers [first, last) - every layer's
+// router || shared gate, bf16 [hidden][pf_route_slab_pitch(router_n)], and every GDN layer's a||b, bf16
+// [hidden][pf_route_slab_pitch(128)] (PrefillScratch::gemm_slab; Ornith 40 x 2 MiB + 30 x 1 MiB). 0 when dense.
+size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
 // GEMMs' grid, a function of C alone.
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C);

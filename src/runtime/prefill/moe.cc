@@ -6,6 +6,7 @@
 #include "kernels/kernels.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "runtime/buffer_sizes.h"
+#include "loader/loader.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8.h"
@@ -28,9 +29,9 @@ T* at(l0::Mem& m, size_t off) {
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   (void)d;
   // router GEMV + moe_route + combine, the sort's three launches, the down GEMM; gate||up: the gather and one GEMM
-  // (l0), or the W4A8 quantiser, gather and GEMM (l0-int8). Phase 3 Task 2: on l0 the router is two launches (its
-  // slab, the dense GEMM).
-  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 3 : 2) + (b == PrefillBackend::L0 ? 1 : 0);
+  // (l0), or the W4A8 quantiser, gather and GEMM (l0-int8). Phase 3 Task 2: on l0 the router GEMV is the dense GEMM
+  // (its B slab made once, by prepare_prefill).
+  return 3 + 3 + 1 + (b == PrefillBackend::L0Int8 ? 3 : 2);
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
@@ -77,7 +78,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
     // Phase 3 Task 2: the router by the dense GEMM (judged by the f32 judge; its last bits are not decode's), rows
     // at pitch gemm_pitch, and moe_route built at that pitch.
     float* glog = at<float>(*s.moe, L.gemm_out_off);
-    tiled_gemm(cx, kc, rw.mem.ptr(), m.router_n(), H, s.x.as<uint16_t>(), C, at<uint16_t>(*s.moe, L.gemm_slab_off),
+    tiled_gemm(cx, kc, tiled_slab(cx, kc, s, rw.mem.ptr(), m.router_n(), H), m.router_n(), H, s.x.as<uint16_t>(), C,
                glog);
     cx.launch(kc(kernels::pf_moe_route_gemm_variant(E, m.top_k, H, I, kernels::pf_route_slab_pitch(m.router_n())),
                  "moe_route"),
@@ -155,6 +156,20 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
               {PtrArg(route), PtrArg(hdr), PtrArg(pair_row), PtrArg(xg), PtrArg(s.resid.ptr()),
                arg_val(C)});
   profile_wait(cx, Phase::kMoeCombine);
+}
+
+void make_route_slabs(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::LoadedModel& m, uint32_t first,
+                      uint32_t last) {
+  const model::ModelDesc& d = *m.desc;
+  if (!d.is_moe()) return;
+  for (const model::LayerDesc& L : d.layer_descs()) {
+    if (L.index < first || L.index >= last) continue;
+    tiled_slab(cx, kc, s, m.moe[L.index - first].router.mem.ptr(), d.moe.router_n(), d.hidden);
+    if (L.kind == model::LayerKind::GDN) {
+      const loader::DeviceWeight& ab = loader::prefill_ab(m, L.index);
+      tiled_slab(cx, kc, s, ab.mem.ptr(), ab.shape.N, d.hidden);
+    }
+  }
 }
 
 }  // namespace runtime::prefill

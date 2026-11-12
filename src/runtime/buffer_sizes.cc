@@ -441,6 +441,16 @@ namespace {
 size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 }  // namespace
 
+size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last) {
+  if (!desc.is_moe()) return 0;
+  const size_t router = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.moe.router_n()) * kBf16;
+  const size_t ab = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.shape(model::LinearId::AB).N) * kBf16;
+  size_t b = 0;
+  for (const model::LayerDesc& L : desc.layer_descs())
+    if (L.index >= first && L.index < last) b += router + (L.kind == model::LayerKind::GDN ? ab : 0);
+  return b;
+}
+
 MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap) {
   MoePrefillLayout l;
   if (!desc.is_moe()) return l;
@@ -471,9 +481,8 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
   l.xsg_off = region(size_t{l.rows} * (desc.hidden / 64) * kFp32);
   l.gemm_pitch = kernels::pf_route_slab_pitch(std::max(m.router_n(), desc.shape(model::LinearId::AB).N));
   l.gemm_out_off = l.xg_off;
-  l.gemm_slab_off = l.xg_off + align256((kC + 255) / 256 * 256 * l.gemm_pitch * kFp32);
-  if (l.gemm_slab_off + size_t{desc.hidden} * l.gemm_pitch * kBf16 > l.xg_off + size_t{l.rows} * desc.hidden * kBf16)
-    throw std::logic_error("runtime::moe_prefill_layout: the router / a||b GEMM's rows and slab overflow xg");
+  if ((kC + 255) / 256 * 256 * l.gemm_pitch * kFp32 > size_t{l.rows} * desc.hidden * kBf16)
+    throw std::logic_error("runtime::moe_prefill_layout: the router / a||b GEMM's rows overflow xg");
   l.total = at;
   return l;
 }
