@@ -214,6 +214,11 @@ inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hid
 inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
   return "pf_moe_sort_mw_E" + std::to_string(experts) + "_T" + std::to_string(top_k);
 }
+// pf_moe_q4gemm.cl (plan 2026-11-12 Task 3): the grouped GEMM read straight from the int4 blocks, at one expert
+// block's K x N; SiLU epilogue (gate||up) or the plain bf16 one (down). Entry `pf_moe_q4gemm`.
+inline std::string pf_moe_q4gemm_variant(unsigned K, unsigned N, bool silu) {
+  return "pf_moe_q4gemm_K" + std::to_string(K) + "_N" + std::to_string(N) + (silu ? "_SILU" : "");
+}
 // pf_moe_gemm.cl at one expert block's K x N: bf16 or int8 (h8), SiLU epilogue (gate||up)
 // or the plain bf16 one (down). Entry `pf_moe_gemm`.
 inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool silu) {
@@ -225,6 +230,7 @@ inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool sil
 namespace pf_moe {
 inline constexpr unsigned kTileM = 32;           // TM: rows per grouped-GEMM tile
 inline constexpr unsigned kItemM = 64;           // MI: rows per fused-GEMM work item (pf_moe_sort_mw's items)
+inline constexpr unsigned kQ4WgN = 256;          // columns per pf_moe_q4gemm work-group (16 NB WGN)
 inline constexpr unsigned kNone = 0xFFFFFFFFu;   // a padding tile's block / row's token
 inline constexpr unsigned kHdrTiles = 0, kHdrSharedRow = 1, kHdrRows = 2, kHdrC = 3,
                           kHdrCount = 4;         // [kHdrCount + e]: expert e's rows

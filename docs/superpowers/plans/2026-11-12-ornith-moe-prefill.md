@@ -1,6 +1,7 @@
 # Ornith 1.5 MoE prefill rework - about 2x prefill (design targets Ornith and Flash-Next)
 
-**Status (2026-11-12): Tasks 1-2 DONE (probe GO; the sort bound, bitwise), Task 3 in progress.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
+**Status (2026-11-12): Tasks 1-3 DONE (probe GO; the sort and the fused int4 GEMM bound, bitwise; Ornith 4k l0
+3,377 -> 6,552 t/s), Task 5 in progress.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
 238f0582). Earlier evidence this plan builds on: `docs/probes/probe-fused-dequant-2026-09-22.md` (fused dequant on a
 DENSE shape: bitwise, but rejected at 3.3x the cost of the pass it removed), `docs/probes/probe-w4a8-2026-09-23.md`
 (W4A8 rejected: 2.79 % error), open-work 3b's `pf_gemm_q4.cl` (int4 read in registers, bitwise the slab walk). Box
@@ -172,9 +173,16 @@ batch, no dequant); `src/runtime/buffer_sizes.cc` (`moe_prefill_layout`: the wei
 still needs it - l0 alone frees ~0.54 GB); `memory_plan` / `memory_plan_test`; `tests/kernels/pf_moe_test.cc` (fused
 == today's grouped, bitwise, both batches' experts, the shared block, C = 37 / 2048, the reversed chunk).
 
-- [ ] **Step 1 (Mac):** the kernel, the binding (l0 only; l0-int8 keeps today's gate||up and takes the fused down,
+- [x] **Step 1 (Mac):** the kernel, the binding (l0 only; l0-int8 keeps today's gate||up and takes the fused down,
   which is bf16 on both backends today), the scratch sizes, the tests. `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `pf_moe_test`, `ornith_prefill_{l0,l0-int8}_test`, `prefill_gate_ornith_*`,
+- [x] **Step 2 (box, card 0):** **Done 2026-11-12**: `pf_moe_q4gemm` (the probe's F1.a8b2m1n8.c2: 64-row
+  sub-groups, MI 64 work items from the sort's scan, the magic-exponent conversion, n-blocks on grid dimension 0).
+  pf_moe_test 4b: h and y bitwise today's grouped GEMM at C 2048 and 37; the whole Ornith prefill of
+  long32k[0, 4096) on l0 AND l0-int8 (its down is fused): every layer's routes and the logits BITWISE today's walk
+  (`B70_PF_MOE` A/B, card 1). Card 0, 3 interleaved rounds, pp4096 tg32: **l0 3,377 -> 6,552 t/s (1.94x)**, l0-int8
+  3,910 -> 5,267 (down only). `B70_PREFILL_PROFILE=1` 4k l0: moe_weights 0, moe_gemm 194.5 ms (gate <= 534, target
+  334: both met), moe_sort 3.7 ms. (The weight batch region stays until Task 5 removes its last user.)
+  `pf_moe_test`, `ornith_prefill_{l0,l0-int8}_test`, `prefill_gate_ornith_*`,
   `prefill_split_ornith_*`, `memory_plan_test`.
   - **Gates:**
     - fused h / y bitwise today's grouped GEMM on the card (every row);
