@@ -222,8 +222,7 @@ def wide_model():
     return m
 
 
-H8 = {"linear_attn": ("in_proj_qkv", "in_proj_z", "out_proj"), "self_attn": ("q_proj", "k_proj", "v_proj", "o_proj"),
-      "mlp": ("gate_proj", "up_proj", "down_proj")}
+H8 = {"mlp": ("gate_proj", "up_proj", "down_proj")}   # open-work 17: l0-int8's mixer linears are bf16
 
 
 def ref_hidden_pfi8(m, ids, P, i8):

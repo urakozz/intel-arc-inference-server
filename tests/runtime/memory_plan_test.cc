@@ -90,13 +90,13 @@ void check_sizes_qwen38() {
   // (kC + 1) x 5120 x 2 B.
   CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 5120 * 2);
   // Int8State: xq 2048 x 17408 + xs 2048 x 4 + w8 (17408 / 4) x 1024 x 4, and the
-  // column scales: 2 x 4 B x the int4 N of every layer - 48 GDN layers x (16384 +
-  // 5120 + 34816 + 5120) + 16 FA layers x (14336 + 5120 + 34816 + 5120).
+  // column scales: 2 x 4 B x the N of every h8 linear - the MLP's gate||up 34816 and down
+  // 5120 in each of the 64 layers (open-work 17: the mixer linears are the l0 walk's).
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total(), size_t{35651584 + 8192 + 17825792});
-  CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * (48 * 61440 + 16 * 59392));
-  // = 84,680,704 B: spec 6 §8.4's measured "int8 0.085 GB".
+  CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * 64 * (34816 + 5120));
+  // = 73,932,800 B (spec 6 §8.4 measured 84,680,704, "int8 0.085 GB", with all four int4 linears h8).
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total() + runtime::int8_scale_bytes(q),
-           size_t{84680704});
+           size_t{73932800});
 }
 
 // Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor and - spec
@@ -217,14 +217,16 @@ void check_spec6_line() {
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
   CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 6340608));
   CHECK_EQ(p.decode_state, size_t{190992320});
-  CHECK_EQ(p.prefill_scratch, size_t{699514776});
-  CHECK_EQ(p.prefill_lazy, size_t{0});         // flash attention, no MTP: nothing lazy
-  CHECK_EQ(p.int8, size_t{84680704});
+  // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
+  // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
+  CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
+  CHECK_EQ(p.prefill_lazy, size_t{35651584});   // flash attention, no MTP: the slab only
+  CHECK_EQ(p.int8, size_t{73932800});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.700 GB,"
-        " int8 0.085 GB, total 27.681 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.735 GB,"
+        " int8 0.074 GB, total 27.706 GB of 32.530 GB");
 }
 
 void check_paths() {

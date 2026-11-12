@@ -48,9 +48,11 @@ const void* at_const(const l0::Mem& m, size_t off) {
 // One int4 linear on the prefill path -- THE seam of spec 2.1 §3.2. The l0 side is S2's
 // slab walk; the l0-int8 side is spec 5's h8 walk (quantiser, then requant + i8 GEMM per slab).
 // `out` (spec 17c): the row-parallel linears' output buffer under tensor parallel (linear_l0's); null is partials.
-void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const DeviceWeight& w,
+// Open-work 17: a dense model's four mixer linears take the l0 side on l0-int8 too (l0_int8_bf16_linear).
+void pf_linear(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel& m, uint32_t l, LinearId id,
                const uint16_t* x, uint32_t M, PrefillBackend backend, Int8State* q, float* out = nullptr) {
-  if (backend == PrefillBackend::L0Int8) {
+  const DeviceWeight& w = m.linears.at({l, id});
+  if (backend == PrefillBackend::L0Int8 && !l0_int8_bf16_linear(*m.desc, id)) {
     linear_i8(cx, kc, s, *q, w, x, M, out);
     return;
   }
@@ -106,7 +108,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
       size_t(d.gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim * 4;
   const size_t conv_ring_stride = size_t(PersistentBuffers::kConvRing) * d.gdn_conv_dim() * 2;
   if (L.kind == model::LayerKind::GDN) {
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::QkvZ}), s.x.as<uint16_t>(), C, backend, q);
+    pf_linear(cx, kc, s, m, l, LinearId::QkvZ, s.x.as<uint16_t>(), C, backend, q);
     float* ab = s.ab_out.as<float>();
     {   // a||b: a bf16 GEMV, not a linear -- 128 columns is no DPAS shape. The bf16
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
@@ -132,11 +134,10 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
               reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
               small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend);   // y stride v-heads x 128
     ++gdn;
-    pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
-              backend, q, out);
+    pf_linear(cx, kc, s, m, l, LinearId::OutProj, s.mixer_out.as<uint16_t>(), C, backend, q, out);
     return;
   }
-  pf_linear(cx, kc, s, m.linears.at({l, LinearId::Qkv}), s.x.as<uint16_t>(), C, backend, q);
+  pf_linear(cx, kc, s, m, l, LinearId::Qkv, s.x.as<uint16_t>(), C, backend, q);
   const KvLayer lay = kv.at_base(kv.layer(kv_k_mem.ptr(), kv_v_mem.ptr(), fa), kv_base);
   uint16_t* kk = static_cast<uint16_t*>(lay.k);
   uint16_t* vv = static_cast<uint16_t*>(lay.v);
@@ -162,8 +163,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
   }
   profile_wait(cx, Phase::kAttnGate);
   ++fa;
-  pf_linear(cx, kc, s, m.linears.at({l, LinearId::OProj}), s.mixer_out.as<uint16_t>(), C,
-            backend, q, out);
+  pf_linear(cx, kc, s, m, l, LinearId::OProj, s.mixer_out.as<uint16_t>(), C, backend, q, out);
 }
 
 // The MLP half after its post-attention norm (`mixer_out` holds the normed rows), identical in both layer kinds:
@@ -190,7 +190,7 @@ void mlp_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedModel
     linear_l0_silu(cx, kc, s, m.linears.at({l, LinearId::GateUp}),
                    static_cast<const uint16_t*>(mlp_x), C, s.x.as<uint16_t>(),
                    d.intermediate);
-  pf_linear(cx, kc, s, m.linears.at({l, LinearId::Down}), s.x.as<uint16_t>(), C, backend, q, out);
+  pf_linear(cx, kc, s, m, l, LinearId::Down, s.x.as<uint16_t>(), C, backend, q, out);
 }
 
 // The layers [w.first, w.last) of one chunk - step_chunk's whole model, or (spec 16c) one
@@ -693,19 +693,21 @@ size_t step_mtp_kv_launches(uint32_t pos, uint32_t C) {
 // so EVERY layer loses exactly one launch.
 // L0 (spec 6, plan 6b): in Flash mode -- the default, `attn_mode()` -- attention is ONE
 // `pf_flash_attn` launch per FA layer, so an FA layer is 123 launches whatever C is, and a
-// chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8705).
+// chunk is 1 + 48 x 135 + 16 x 123 = 8449 at every C (derived; l0-int8 8577 above C = 384, 6081 below).
 // The composed reference (a test's set_attn_mode_for_test) gives 8625 at C <= 256 and 9073 at C = 2048 (derived).
 // L0 (open-work 3b): an int4 linear of C <= kPfQ4MaxRows rows (gate||up's SiLU form: C <=
 // kPfQ4SiluMaxRows) is ONE pf_gemm_q4 launch instead of its slab walk (pf_q4_tile), so the count
 // depends on C again: Flash, C <= 320: 1 + 48 x 19 + 16 x 11 = 1089. Open-work 3d's SLM
 // gate/up epilogue keeps one launch at 193..320. At 321..384 gate||up returns to its 68 slab
 // launches, 1 + 48 x 86 + 16 x 78 = 5377; above, 8449 as before (derived). l0-int8's
-// linears are its own walk (linear_i8) and keep the slab count.
+// h8 linears are its own walk (linear_i8) and keep the slab count; its mixer linears on a dense model are the
+// l0 walk's (open-work 17), pf_gemm_q4 included.
 namespace {
 constexpr size_t kGdnLayerFixed = 2 + 1 + kGdnChunkLaunches + 2 + 1;
 // One int4 linear's launches on backend b at C rows: the slab walk's 2 x N / 1024, or 1 when L0
 // runs it as pf_gemm_q4 (including SLM gate/up). l0-int8's quantiser is counted by the callers.
 size_t linear_launches(const model::ModelDesc& d, LinearId id, PrefillBackend b, uint32_t C) {
+  if (l0_int8_bf16_linear(d, id)) b = PrefillBackend::L0;   // pf_linear's binding
   if (b == PrefillBackend::L0 && pf_q4_tile(C, id == LinearId::GateUp) != nullptr) return 1;
   return 2 * size_t(d.shape(id).N / 1024);
 }
@@ -746,6 +748,9 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
                     attn_gate_launches(d, C, 0, kv) + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
 }
+// spec 5: l0-int8's activation quantisers (pf_quant_had) in one dense layer, one per h8 linear: gate||up and down
+// (open-work 17: the four mixer linears are the l0 walk's).
+constexpr size_t kDenseQuantisers = 2;
 }  // namespace
 
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos) {
@@ -755,9 +760,8 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   const size_t base =
       1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C, pos) + widen;
   if (b != PrefillBackend::L0Int8) return base;
-  // spec 5: +1 launch (the activation quantiser, pf_quant_had) per int4 linear, 4 per
-  // layer, the slab walk being the same 2 x N/1024 launches.
-  return base + size_t(d.layers) * 4;
+  // spec 5: +1 launch (the activation quantiser) per h8 linear, the slab walk being the same 2 x N/1024 launches.
+  return base + size_t(d.layers) * kDenseQuantisers;
 }
 // Spec 16c: one layer's launches, the terms step_chunk_launches adds up.
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
@@ -775,7 +779,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
                      attn_gate_launches(d, C, pos, kv) + lin(LinearId::OProj) + ffn + widen;
   }
   const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C, pos);
-  return (b == PrefillBackend::L0Int8 ? l0n + 4 : l0n) + widen;
+  return (b == PrefillBackend::L0Int8 ? l0n + kDenseQuantisers : l0n) + widen;
 }
 
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,

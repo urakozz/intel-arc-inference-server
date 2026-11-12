@@ -59,15 +59,15 @@ MemoryPlan plan(const model::ModelDesc& desc, uint32_t max_len, bool mtp, size_t
 
   if (path.prefill) {
     const PrefillScratchSizes s = PrefillScratchDims::sizes(max_len, desc, path.chunk_cap);
-    // linear_l0 walks the slab for every int4 linear; on l0-int8 only the MTP head's
-    // bf16 linears do (step_mtp_kv).
-    if (path.backend == PrefillBackend::L0 || mtp) p.prefill_lazy += s.slab;
+    // linear_l0 walks the slab for every int4 linear; on l0-int8 a dense model's mixer linears
+    // (open-work 17, l0_int8_bf16_linear) and the MTP head's bf16 linears do (step_mtp_kv).
+    if (path.backend == PrefillBackend::L0 || mtp || !desc.is_moe()) p.prefill_lazy += s.slab;
     // Phase 3 Task 2: a MoE model's router / a||b B slabs, made by Engine::prepare_prefill on l0.
     if (path.backend == PrefillBackend::L0) p.prefill_lazy += route_slab_bytes(desc, 0, desc.layers);
     if (kv == KvCache::Int8) p.prefill_lazy += s.kv8_raw;
     p.prefill_scratch = s.eager() + p.prefill_lazy;
     // Engine::prepare_prefill: Int8State for the MLP intermediate (down's K), then every
-    // int4 linear's rotated column scales, all before the first chunk.
+    // h8 linear's rotated column scales, all before the first chunk.
     if (path.backend == PrefillBackend::L0Int8)
       p.int8 = int8_scratch_sizes(prefill_int8_max_k(desc), path.chunk_cap).total() + int8_scale_bytes(desc);
     p.moe_prefill = s.moe;   // spec 15d: inside s.eager(), 0 when dense
