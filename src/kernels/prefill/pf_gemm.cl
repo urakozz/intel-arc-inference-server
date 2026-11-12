@@ -65,6 +65,9 @@
 #ifndef SILU_EPI
 #define SILU_EPI 0
 #endif
+#ifndef RASTER
+#define RASTER 0
+#endif
 #if SILU_EPI && TRANSB
 #error "pf_gemm: the SiLU epilogue belongs to the gate||up slab GEMM, whose B is [K][N]"
 #endif
@@ -107,8 +110,18 @@ __kernel void pf_gemm(__global const ushort* restrict A_base,
                       __global float* restrict C_base,
                       uint M, uint K, uint N, uint lda, uint ldb, uint ldc,
                       ulong strideA, ulong strideB, ulong strideC) {
+#if RASTER
+  // The work-group order with the N axis fastest: the dispatch walks group ids x-first, so
+  // consecutive work-groups take the same row block's column blocks (a 1024-column slab is 4
+  // of them) and a wave of 32 holds 8 row blocks x 4 column blocks of the tile grid instead
+  // of 16 x 2 - each A row block is read from memory once per slab, not once per wave.
+  const uint wid = get_group_id(0) + get_num_groups(0) * get_group_id(1);
+  const uint gx = wid / get_num_groups(1);   // M axis
+  const uint gy = wid % get_num_groups(1);   // N axis
+#else
   const uint gx = get_group_id(0);   // M axis: consecutive ids share a B column block
   const uint gy = get_group_id(1);   // N axis
+#endif
   const ulong l = get_group_id(2);   // batch
   __global const ushort* restrict A = A_base + l * strideA;
   __global const ushort* restrict B = B_base + l * strideB;
