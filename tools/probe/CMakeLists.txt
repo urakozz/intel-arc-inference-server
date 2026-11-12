@@ -1238,12 +1238,17 @@ endif()
 # define each: pf_gemm.cl RASTER=1 (the work-group order N-fastest) and pf_dequant_slab.cl BLOCK_STORE=1 (2D
 # block stores). Checked bitwise against the production binaries, then timed interleaved.
 set(_qpg_targets)
+# GEMM arms: R1 RASTER=1; P1 / P3 / P4 PF_DIST (k-tiles prefetched ahead, production 2); NB NO_BARRIER=1.
 foreach(V "T0;TRANSB=0" "T0_SILU;TRANSB=0;SILU_EPI=1")
   list(GET V 0 TAG)
   list(SUBLIST V 1 -1 DEFS)
-  add_ocloc_kernel(qpg_gemm_${TAG}_R1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gemm.cl
-                   DEFINES ${DEFS} RASTER=1 OPTIONS -cl-intel-256-GRF-per-thread)
-  list(APPEND _qpg_targets kernel_qpg_gemm_${TAG}_R1)
+  foreach(A "R1;RASTER=1" "P1;PF_DIST=1" "P3;PF_DIST=3" "P4;PF_DIST=4" "NB;NO_BARRIER=1")
+    list(GET A 0 ARM)
+    list(GET A 1 ADEF)
+    add_ocloc_kernel(qpg_gemm_${TAG}_${ARM} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gemm.cl
+                     DEFINES ${DEFS} ${ADEF} OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND _qpg_targets kernel_qpg_gemm_${TAG}_${ARM})
+  endforeach()
 endforeach()
 foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
   separate_arguments(f UNIX_COMMAND "${row}")

@@ -72,3 +72,11 @@ equal to the control walk's byte for byte (all rows, all columns).
 - Task 3 builds only what passes, and only if the sum is >= 3 % of the whole prefill.
 
 PROBE_RESULTS
+
+**Second round (gates written before it):** the tiling knobs `pf_gemm.cl` exposes without a new register budget (the
+256 x 256 x 32 tile already holds 224 of 256 registers, so a deeper k-tile or a bigger sub-group tile does not fit):
+`p1` / `p3` / `p4` (`PF_DIST`, k-tiles prefetched ahead; production 2) and `nb` (`NO_BARRIER=1`, no per-k-tile
+work-group barrier). Each bitwise (same DPAS chain), GEMM alone, 2048 rows. **Gate: <= 0.97x `ctl_gemm` summed over the
+five families.**
+
+PROBE2_RESULTS
