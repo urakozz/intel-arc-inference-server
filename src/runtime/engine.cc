@@ -465,6 +465,7 @@ const CapturedStep& Engine::verify_step_at(uint32_t M, uint32_t keys) const {
 }
 
 void Engine::reset() {
+  pending_projection_ = nullptr;
   if (slots() > 1) {
     // Spec 13c: the selected slot only; the shared scratch (dh, the draft logits) is written before it is read.
     zero_slot();
@@ -557,8 +558,16 @@ uint32_t Engine::gdn_slots() const {
 }
 
 void Engine::replay_aux(l0::CmdList& list) {
+  flush_projection();
   queue_.execute(list, &fence_);
   fence_.wait();
+}
+
+void Engine::flush_projection() const {
+  if (!pending_projection_) return;
+  queue_.execute(*pending_projection_, &fence_);
+  fence_.wait();
+  pending_projection_ = nullptr;
 }
 
 uint32_t Engine::max_verify_k() const {
@@ -626,8 +635,9 @@ void Engine::draft(uint32_t k, const std::function<uint32_t(uint32_t)>& pick,
 
 bool Engine::draft_probs() const { return mtp_ && !seq().draft_prob_steps.empty(); }
 
-void Engine::verify(uint32_t k) {
+void Engine::verify(uint32_t k, l0::CmdList* draft) {
   require_spec("verify");
+  if (!draft) flush_projection();
   Seq& s = seq();
   const uint32_t pos = control_->pos;
   if (k > max_draft() || (mtp_ && pos == 0) || size_t(pos) + k + 1 > max_len())
@@ -636,7 +646,8 @@ void Engine::verify(uint32_t k) {
                              std::to_string(max_verify_k()) + "; k <= " + std::to_string(max_draft()) +
                              ", pos >= 1 with the MTP head, and pos + k + 1 <= max_len " +
                              std::to_string(max_len()) + ")");
-  for (uint32_t r = 0; r <= k; ++r)
+  // df_select writes the other rows on the device in the batched path.
+  for (uint32_t r = 0; r <= (draft ? 0 : k); ++r)
     if (control_->cur_token[r] >= Qwen35::kVocab)
       throw std::runtime_error("runtime::Engine::verify: id " +
                                std::to_string(control_->cur_token[r]) + " in row " +
@@ -655,11 +666,21 @@ void Engine::verify(uint32_t k) {
   // Spec 28c: the deep list (DPAS bound) once row 0's keys reach the table's threshold.
   CapturedStep& list =
       s.verify_deep[k] && pos + 1 >= s.verify_deep_from[k] ? *s.verify_deep[k] : s.verify_steps[k];
-  queue_.execute(list.list, &fence_);
+  if (draft) {
+    ze_command_list_handle_t lists[3];
+    uint32_t count = 0;
+    if (pending_projection_) lists[count++] = pending_projection_->handle();
+    lists[count++] = draft->handle();
+    lists[count++] = list.list.handle();
+    queue_.execute(count, lists, &fence_);
+  } else {
+    queue_.execute(list.list, &fence_);
+  }
   fence_.wait();
+  pending_projection_ = nullptr;
 }
 
-void Engine::commit(uint32_t j, uint32_t next_token) {
+void Engine::commit(uint32_t j, uint32_t next_token, bool defer_projection) {
   Seq& s = seq();
   // Spec 13c: a slot of a verify_rows step commits without a proposer too (its plain row, j = 0).
   if (s.verify_k == kNoVerify || (!mtp_ && !drafter_ && slots() == 1)) require_spec("commit");
@@ -683,7 +704,10 @@ void Engine::commit(uint32_t j, uint32_t next_token) {
   // Spec 19c: the committed rows' taps (rows 0..j: positions verify_pos .. + j) into the drafter's ring. The
   // projection list reads only the taps and its own control block, so Control's new pos / cur_token above do not
   // reach it; it runs before anything can rewrite the taps (the next verify).
-  if (drafter_) replay_aux(drafter_->projection(s.verify_pos, j + 1));
+  if (drafter_) {
+    pending_projection_ = &drafter_->projection(s.verify_pos, j + 1);
+    if (!defer_projection) flush_projection();
+  }
 }
 
 void Engine::mtp_step1() {
@@ -742,6 +766,7 @@ size_t Engine::kv_bytes(uint32_t n_pos) const {
 }
 
 void Engine::save_state(void* host) const {
+  flush_projection();
   auto* h = static_cast<uint8_t*>(host);
   const Seq& s = seq();
   // The LIVE GDN slot (spec 8: after a commit it may be one of gdn_spec's; spec 19c: of the
@@ -758,6 +783,7 @@ void Engine::load_state(const void* host, uint32_t pos) {
   if (pos > max_len())
     throw std::runtime_error("runtime::Engine::load_state: pos " + std::to_string(pos) +
                              " exceeds max_len " + std::to_string(max_len()));
+  pending_projection_ = nullptr;
   const auto* h = static_cast<const uint8_t*>(host);
   Seq& s = seq();
   imm_.copy(s.state0, h, persist_.gdn_state.size());
@@ -814,6 +840,7 @@ std::vector<KvRun> kv_runs(const PersistentBuffers& p, const MtpBuffers* mtp, ui
 }  // namespace
 
 void Engine::save_kv(uint32_t begin, uint32_t end, void* host) const {
+  flush_projection();
   check_range(begin, end, max_len(), "save_kv");
   if (begin == end) return;
   auto* h = static_cast<uint8_t*>(host);

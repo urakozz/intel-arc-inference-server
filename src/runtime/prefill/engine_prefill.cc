@@ -150,6 +150,7 @@ void Engine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
           "runtime::Engine::prefill: id " + std::to_string(id) +
           " is outside the vocabulary (" + std::to_string(model::Qwen35::kVocab) +
           " rows) -- pf_embed_gather has no debug_flag channel, so the host is the only bound");
+  flush_projection();
   const uint32_t base = control_->pos;
   if (size_t(base) + ids.size() > size_t(max_len()))
     throw std::runtime_error(

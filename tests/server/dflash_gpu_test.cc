@@ -17,6 +17,7 @@
 // usage: dflash_gpu_test <target snapshot> <drafter>   (cwd = the source tree). SKIP 77 without either.
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -145,6 +146,45 @@ int main(int argc, char** argv) {
   nlohmann::json generation;
   gen_config >> generation;
   const auto eos = server::generation_eos_ids(generation);
+
+  // The last burst stays truncatable; request-end snapshots flush its projection exactly once.
+  {
+    a.reset();
+    a.prefill(read_ids("tests/golden/prompts/code.ids"));
+    const uint32_t pos = e.pos(), anchor = e.control()->cur_token[0];
+    l0::Mem initial(ctx, l0::MemKind::Host, e.state_bytes()), kv(ctx, l0::MemKind::Host, e.kv_bytes(pos));
+    l0::Mem expected(ctx, l0::MemKind::Host, e.state_bytes()), actual(ctx, l0::MemKind::Host, e.state_bytes());
+    a.save_state(initial.ptr());
+    a.save_kv(0, pos, kv.ptr());
+    auto restore = [&] {
+      a.load_state(initial.ptr(), pos);
+      a.load_kv(0, pos, kv.ptr());
+      e.control()->cur_token[0] = anchor;
+    };
+    for (bool truncate : {false, true}) {
+      restore();
+      const auto out = d.draft(e, kK, 0.0f, 0);
+      e.verify(kK);
+      uint32_t accepted = 0;
+      while (accepted < kK && out.ids[accepted] == e.verify_ids()[accepted]) ++accepted;
+      if (truncate) accepted = 0;
+      const uint32_t next = e.verify_ids()[accepted];
+      e.commit(accepted, next);
+      e.save_state(expected.ptr());
+      restore();
+      const uint64_t before = e.queue_submissions();
+      (void)a.step_many(greedy, kK);
+      CHECK(e.queue_submissions() == before + 1);
+      if (truncate) a.truncate_to(pos + 1);
+      a.save_state(actual.ptr());
+      CHECK(e.queue_submissions() == before + 2);
+      CHECK(a.pos() == pos + accepted + 1 && e.control()->cur_token[0] == next);
+      CHECK(std::memcmp(expected.ptr(), actual.ptr(), e.state_bytes()) == 0);
+      a.flush_commit();
+      CHECK(e.queue_submissions() == before + 2);
+    }
+    std::printf("BATCH: truncated and complete request-end snapshots bitwise; one final projection\n");
+  }
 
   // --- D2 -------------------------------------------------------------------------------------------------
   uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0, beyond = 0, judged = 0;

@@ -27,7 +27,8 @@
 //   - spec 19d (decision 5, as ruled there): Engine::save_state / load_state carry the ring - save_ring / load_ring,
 //     ring_bytes() of it after the target's state - so a prefix-cache restore resumes the drafter exactly where the
 //     snapshot left it; and key() names the drafter in the prefix store's keys (server::store_root).
-// Everything runs on the Engine's queue (Engine::replay_aux), synchronously, between the Engine's own replays.
+// Everything runs on the Engine's queue. A deferred commit's projection may precede the next draft and verify
+// in one submit; snapshots and plain/prefill boundaries materialize it first. No public call leaves work in flight.
 namespace runtime {
 
 class Engine;
@@ -80,7 +81,8 @@ class TapDrafter : public TapSink {
   // `draft_vocab` the compact one - on the drafter's device) and that device's Control block `control` (the anchor
   // pos / cur_token[0]; the drafts go to its cur_token[1..k]); the drafter's buffers must be at `max_len`.
   // draft_with drafts k ids (1 .. max_k(); the caller bounds k by its own max_verify_k) by handing the draft list to
-  // `replay`, which runs it on the drafter's device and waits; it returns the readback.
+  // `replay`, which runs it on the drafter's device and waits (it may also submit the target's verify); it returns
+  // the draft readback after that fence.
   virtual void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control,
                              uint32_t max_len, bool draft_vocab) = 0;
   virtual const dflash::DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k,
