@@ -453,6 +453,20 @@ foreach(arm "32 16 6 1" "32 32 6 1" "64 16 6 1" "32 16 3 1" "32 16 1 1" "32 16 6
   list(APPEND PFA_TARGETS kernel_pfa_KT${KT}_R${R}_H${H}_Q${QR})
 endforeach()
 
+# Phase 3 Task 1 (Ornith, `--heads 16x2`): today's tile text (KT 64, HPW 8 = the GQA group, EXP2 1) at RPW 8 / 16 / 32
+# with and without Q held in registers; the R8 Q0 arm is pf_flash_attn's own source line for line and must be bitwise it.
+if(B70_ORNITH)
+  foreach(arm "8 0" "8 1" "16 0" "16 1" "32 0" "32 1")
+    separate_arguments(f UNIX_COMMAND "${arm}")
+    list(GET f 0 R)
+    list(GET f 1 QR)
+    add_ocloc_kernel(pfao_KT64_R${R}_H8_Q${QR} SOURCE ${PFA_CL}
+                     DEFINES KT=64 RPW=${R} HPW=8 QREG=${QR} EXP2=1 FA_Q_HEADS=16 FA_KV_HEADS=2
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFA_TARGETS kernel_pfao_KT64_R${R}_H8_Q${QR})
+  endforeach()
+endif()
+
 add_executable(probe_flash_attn probe_flash_attn.cc)
 target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
