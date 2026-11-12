@@ -76,9 +76,9 @@ struct Dev {
     imm.copy(v.data(), static_cast<const uint8_t*>(m.ptr()) + off, n * sizeof(T));
     return v;
   }
-  void run(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
+  void run(l0::Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1) {
     l0::CmdList list = l0::CmdList::regular(ctx);
-    list.launch(k, gx, gy);
+    list.launch(k, gx, gy, gz);
     list.close();
     q.execute(list, &f);
     f.wait();
@@ -105,11 +105,11 @@ int ulps(uint16_t a, uint16_t b) {
 
 struct Bins {
   bool split;
-  unsigned attn_heads;
+  unsigned attn_heads, attn_rows;
   l0::Module prep, attn, topk, topk_c, sel;
-  Bins(Dev& d, bool split_k = false, unsigned heads = 0)
-      : split(split_k), attn_heads(heads), prep(d.ctx, kernels::path(kd::prep_variant(S, split))),
-        attn(d.ctx, kernels::path(kd::attn_variant(S, heads))),
+  Bins(Dev& d, bool split_k = false, unsigned heads = 0, unsigned rows = 0)
+      : split(split_k), attn_heads(heads), attn_rows(rows), prep(d.ctx, kernels::path(kd::prep_variant(S, split))),
+        attn(d.ctx, kernels::path(kd::attn_variant(S, heads, rows))),
         topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used, false))),
         topk_c(d.ctx, kernels::path(kd::topk_variant(32768, 32768, true))),
         sel(d.ctx, kernels::path(kd::select_variant(true, S, split))) {}
@@ -423,7 +423,7 @@ int check_attn(Dev& d, Bins& b) {
     k2.arg_ptr(5, bvb.ptr());
     k2.arg(6, scale);
     k2.arg_ptr(7, out.ptr());
-    d.run(k1, b.attn_heads ? NH / b.attn_heads : NKV, tgt);
+    d.run(k1, b.attn_heads ? NH / b.attn_heads : NKV, tgt, b.attn_rows ? M / b.attn_rows : 1);
     d.run(k2, NH, M);
     std::vector<float> want(size_t(M) * QN);
     dfref::attention({NH, NKV, HD, M, RING, S.win, kd::kAttnPb, scale}, q.data(), kb.data(), vb.data(), fk.data(),
@@ -585,6 +585,10 @@ int main() {
   bad += check_select(d, split);
   for (unsigned heads : {1u, 2u}) {
     Bins grouped(d, false, heads);
+    bad += check_attn(d, grouped);
+  }
+  for (unsigned rows : {1u, 2u, 4u}) {
+    Bins grouped(d, false, 1, rows);
     bad += check_attn(d, grouped);
   }
   if (bad) {

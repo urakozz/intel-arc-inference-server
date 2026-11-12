@@ -388,6 +388,33 @@ inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t 
     }
   });
 }
+// C3: exact int8 rows, four contiguous dot slices, then the best 16 real ids (before logit processing).
+inline std::vector<Cand> rerank_candidates(const int8_t* w, const float* scales, uint32_t K, uint32_t N,
+                                           const uint16_t* x, const uint32_t* ids, float mult, float cap) {
+  std::vector<Cand> scores;
+  for (unsigned c = 0; c < 64; ++c) {
+    const uint32_t id = ids[c];
+    if (id >= N) continue;
+    float sum = 0;
+    for (unsigned s = 0; s < 4; ++s) {
+      float a = 0;
+      for (unsigned k = s * (K / 4); k < (s + 1) * (K / 4); ++k)
+        a = a + float(w[i8_index(K, k, id)]) * bf(x[k]);
+      sum = sum + a;
+    }
+    const float v = sum * scales[id];
+    if (!std::isnan(v)) scores.push_back({v, id});
+  }
+  std::sort(scores.begin(), scores.end(), better);
+  scores.resize(std::min<size_t>(16, scores.size()));
+  for (auto& c : scores) {
+    c.v *= mult;
+    if (cap > 0) c.v = std::tanh(c.v / cap) * cap;
+  }
+  while (scores.size() < 16) scores.push_back({-INFINITY, kNoIdx});
+  return scores;
+}
+
 inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit, const uint16_t* x, uint32_t M,
                       float* out) {
   const uint32_t k8_per = K / 8 / ksplit;

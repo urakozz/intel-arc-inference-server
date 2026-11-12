@@ -35,14 +35,17 @@ inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
          (split ? "_F8Q4R4U8C16H16K8" : "");
 }
-inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0) {
+inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, unsigned rows = 0) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "");
+         s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "") +
+         (rows ? "_B" + s_(rows) : "");
 }
 // N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
+inline std::string candidate_topk_variant() { return "df_candidate_R7_N248320_U248077_K64"; }
+inline std::string rerank_variant() { return "df_rerank_R7_K5120_U248077_C64_Q4"; }
 inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
   return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
                    (split ? "_H16" : "")
@@ -72,9 +75,9 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
-                                               LinearKind k, LinearKind head, unsigned attn_heads = 0) {
+                                               LinearKind k, LinearKind head, unsigned attn_heads = 0, unsigned attn_rows = 0) {
   const Shape& s = kQwen38;
-  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads), select_variant(v2, s, fmt == 2)};
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows), select_variant(v2, s, fmt == 2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
