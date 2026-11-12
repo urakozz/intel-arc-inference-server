@@ -47,7 +47,7 @@ context with the bf16 cache:
 | | without MTP | with MTP |
 |---|---:|---:|
 | decode, one request | 142.8 t/s | **234.9 t/s** |
-| prefill, 4,096-token prompt | **7,668 t/s** (bf16 prompt pass), 5,263 t/s (int8, being reworked) | |
+| prefill, 4,096-token prompt | **7,668 t/s** (bf16 prompt pass), 5,516 t/s (int8, being reworked) | |
 
 ## Install
 
