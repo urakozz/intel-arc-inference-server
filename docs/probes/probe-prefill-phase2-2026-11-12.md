@@ -152,3 +152,43 @@ Retried on l0-int8 after phase 1's W4A8 experts and the near-miss rule (main e31
 prefill_split_ornith_l0-int8 and ornith_prefill_l0-int8 pass; prefill_gate_ornith_l0-int8_c16 fails cjk step 15 (f32
 margin 3.0 ulp, but the engine's logits cosine vs f32 0.999025 < the bf16 twin's 0.999467 - 1e-5, so the near-miss rule
 does not apply). l0-int8 stays on the four launches.
+
+## 8. The l0-int8 serving misses (part 1's W4A8 arm), checked 2026-11-12
+
+Part 1's serving check judged 6 of 21 tool-call requests FAIL on `l0-int8` (W4A8 experts), worst speculative miss
+104 ulp. **W4A8 runs on the prefill walk only** (`moe.cc`; no decode, verify or MTP-head kernel binds
+`pf_moe_w4a8`), so a miss in a speculative or plain id comes from the context the prefill wrote, not from the verify.
+The smallest test that shows it is `prefill_split_ornith_l0-int8_test` (long32k[0, 2600) against the f32 reference,
+DIAGNOSTIC on `l0-int8`). I ran it with the experts on W4A8 and again with them forced to bf16 (a local diagnostic
+build, not committed). The bf16 reference's own cosine distance to f32 is 1.0x.
+
+| one call vs f32 (bf16 reference = 1.0x) | logits | all-rows median | fa0-3 worst | gdn L0 state |
+|---|---:|---:|---:|---:|
+| `l0` | x0.48 | x1.01 | 0.920 | x1.57 |
+| `l0-int8`, W4A8 experts | x0.59 | x1.39 | 0.744 | x6.38 |
+| `l0-int8`, bf16 experts (diagnostic) | x0.82 | x1.38 | 0.870 | x6.38 |
+
+The deviation on long prompts is the **int8 dense linears'** (the rotated W8A8 qkv / out / o linears of spec 5): layer
+0's GDN state is 6.4x the reference's distance before any expert runs, and the median moves by the same 1.38-1.39x
+with or without W4A8. W4A8 adds the lower fa0-3 worst row (0.744 vs 0.870). That is no defect, only the backend's
+accuracy on long prompts, which the short-prompt gates do not see. bf16 (`l0`) is the default. Nothing was changed.
+
+## 9. Task 9: the record (main 5a78d023, card 0, profiled, busy box)
+
+Ornith pp4096: `l0` 7,557 t/s (542 ms instrumented), `l0-int8` 7,641 (536 ms); unprofiled main is 8,080 / 8,518
+(part 1's record). Phase ms at 4k (`l0` / `l0-int8`) against this plan's budget:
+
+| phase | budget | `l0` | `l0-int8` |
+|---|---:|---:|---:|
+| norm | 12 / 15 | 16.5 | 16.3 |
+| route (router + moe_route) | 8 | 27.9 | 27.5 |
+| GDN (a\|\|b, front, gate, intra or A..A2, scan, head) | 65 | 92.9 | 151.5 |
+| dense linears (+ quantiser) | 80 / 55 | 85.7 | 68.5 |
+| attention | 48 | 46.9 | 45.9 |
+| MoE sort + gather + GEMM + combine | 38 + 145 / 35 + 110 | 203.6 | 153.8 |
+| head | - | 0.9 | 0.9 |
+| sum | ~400 / ~340 | 474.6 | 464.5 |
+
+The targets (9,500 / 11,000 t/s) are missed. The largest overruns are the MoE expert GEMM on `l0` (169 against 145),
+the `l0-int8` GDN (the four intra launches, 84 ms, where `l0` runs one of 23 ms), the route (27.9 against 8) and the
+scan (28 ms on both).
