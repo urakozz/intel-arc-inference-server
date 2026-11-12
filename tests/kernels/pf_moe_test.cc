@@ -371,6 +371,45 @@ uint32_t expert_of(const Run& r, uint32_t t, uint32_t k) {
   return k < kS.top_k ? r.route[size_t(t) * 32 + k] : kS.shared_block();
 }
 
+// 4b. plan 2026-11-12 Task 3: pf_moe_q4gemm (B straight from the int4 blocks, over the sort's work items) ==
+// today's grouped GEMM over pf_moe_dequant_*'s bf16 blocks, every used row bitwise - gate||up + SiLU on the walk's
+// gathered rows, down on the walk's bf16 h.
+void fused_vs_grouped(Dev& d, Layer& L, Bufs& b, const Run& r) {
+  l0::Module mgu(d.ctx, kernels::path(kernels::pf_moe_q4gemm_variant(kH, kNG, true))),
+      mdn(d.ctx, kernels::path(kernels::pf_moe_q4gemm_variant(kI, kH, false)));
+  l0::Kernel gu(mgu, "pf_moe_q4gemm"), dn(mdn, "pf_moe_q4gemm");
+  gu.group_size(16 * (kernels::pf_moe::kQ4WgN / 32));
+  dn.group_size(16 * (kernels::pf_moe::kQ4WgN / 32));
+  pf_moe_ref::Sorted st;
+  st.hdr = r.hdr;
+  st.tiles = r.tiles;
+  const std::vector<uint32_t> it = pf_moe_ref::items(st, kS, r.C, kernels::pf_moe::kItemM);
+  const uint32_t nit = uint32_t(it.size() / 4), used = r.hdr[kernels::pf_moe::kHdrRows];
+  l0::Mem itd = d.upload(it), hf = d.zeros(size_t(used) * kI * 2), yf = d.zeros(size_t(used) * kH * 2);
+  d.imm.copy(b.xg.ptr(), r.xg.data(), size_t(used) * kH * 2);
+  d.imm.copy(b.h.ptr(), r.h_bf.data(), size_t(used) * kI * 2);
+  gu.arg_ptr(0, itd.ptr());
+  gu.arg_ptr(1, b.xg.ptr());
+  gu.arg_ptr(2, L.gu.ptr());
+  gu.arg_ptr(3, L.gu.as<uint32_t>() + kS.gate_up_words() * kS.experts);
+  gu.arg_ptr(4, hf.ptr());
+  d.run(gu, kNG / kernels::pf_moe::kQ4WgN, nit);
+  dn.arg_ptr(0, itd.ptr());
+  dn.arg_ptr(1, b.h.ptr());
+  dn.arg_ptr(2, L.dn.ptr());
+  dn.arg_ptr(3, L.dn.as<uint32_t>() + kS.down_words() * kS.experts);
+  dn.arg_ptr(4, yf.ptr());
+  d.run(dn, kH / kernels::pf_moe::kQ4WgN, nit);
+  const std::vector<uint16_t> h = d.read<uint16_t>(hf, size_t(used) * kI), y = d.read<uint16_t>(yf, size_t(used) * kH);
+  size_t bh = 0, by = 0;
+  for (size_t i = 0; i < h.size(); ++i) bh += h[i] != r.h_bf[i];
+  for (size_t i = 0; i < y.size(); ++i) by += y[i] != r.y[i];
+  std::printf("  4b. fused int4 GEMM == grouped, C %u (%u items): h %zu of %zu, y %zu of %zu values differ\n", r.C,
+              nit, bh, h.size(), by, y.size());
+  CHECK_EQ(bh, size_t(0));
+  CHECK_EQ(by, size_t(0));
+}
+
 // 4: grouped == dense, bitwise, for expert e (all three GEMMs).
 void grouped_vs_dense(Dev& d, Kernels& k, Layer& L, Bufs& b, const Run& r, uint32_t e) {
   const uint32_t C = r.C, Mp = pad256(C);
@@ -701,6 +740,7 @@ int main() {
   d.imm.copy(b.pair_row.ptr(), a.pair_row.data(), a.pair_row.size() * 4);
   std::puts("  4. grouped == dense, bitwise, per (token, expert):");
   for (uint32_t e : sample_experts(a)) grouped_vs_dense(d, k, L, b, a, e);
+  fused_vs_grouped(d, L, b, a);
   // 6. the combine
   check_combine(a, resid0);
   // 5. row independence: the reversed chunk
@@ -746,6 +786,7 @@ int main() {
     check_sort(c.route, c);
     std::printf("  8. ragged C = %u: %u tiles\n", Cr, c.hdr[kernels::pf_moe::kHdrTiles]);
     for (uint32_t e : sample_experts(c)) grouped_vs_dense(d, k, L, b, c, e);
+    fused_vs_grouped(d, L, b, c);
     check_combine(c, r0);
     // the same 37 tokens inside the full chunk: every (token, slot) result bitwise
     size_t bad = 0;

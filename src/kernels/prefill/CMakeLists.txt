@@ -401,6 +401,12 @@ if(B70_ORNITH)
   # Plan 2026-11-12 Task 2: the multi-work-group sort (blocks of TB = 64 tokens; no chunk cap of its own).
   add_ocloc_kernel(pf_moe_sort_mw_E256_T8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_sort_mw.cl
                    DEFINES EXPERTS=256 TOP_K=8 TM=32 TB=64 MI=64)
+  # Plan 2026-11-12 Task 3: the grouped GEMMs read straight from the int4 blocks (kernels::pf_moe::kQ4WgN columns a
+  # work-group, kItemM rows a work item - the sort's MI).
+  add_ocloc_kernel(pf_moe_q4gemm_K2048_N1024_SILU SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
+                   DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  add_ocloc_kernel(pf_moe_q4gemm_K512_N2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
+                   DEFINES K=512 N=2048 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
 
 # ==== Spec 15e: Ornith's MTP head KV fill during prefill (runtime/prefill/step.cc) == (begin) ==
