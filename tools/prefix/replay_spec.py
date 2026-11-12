@@ -8,7 +8,9 @@ For a card run beside another GPU job, first confirm more than 16 CPU threads ar
 the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
 'adaptive per step'. Writes serve_client-compatible requests.jsonl per arm/round, table.txt and the f32 judge's
 judge.log/forced contexts. Missing f32 references return 77, never a pass. Final G-speed also needs Task 8's
-other corpora and prefill checks. Existing output is refused so stale request records cannot enter the result.
+other corpora and prefill checks. --resume reuses complete arms only after checking the binary, recording and
+settings against config.json and rebuilding the saved rows from their original reply/server logs. Incomplete
+arms must be archived before resuming. Each arm records its card, so a pause and card change remain visible.
 """
 import argparse
 import hashlib
@@ -57,11 +59,13 @@ def records(report, server_log, arm, round_, corpus):
 
 
 def run(a):
-    if not replay_log.load_log(a.log):
+    source = replay_log.load_log(a.log)
+    if not source:
         raise RuntimeError('empty recording')
     if a.rounds < 1:
         raise ValueError('rounds must be positive')
-    if a.out.exists() and any(a.out.iterdir()):
+    resume = getattr(a, 'resume', False)
+    if not resume and a.out.exists() and any(a.out.iterdir()):
         raise RuntimeError('output directory must be empty')
     a.out.mkdir(parents=True, exist_ok=True)
     orders = [ARMS[i % 3:] + ARMS[:i % 3] for i in range(a.rounds)]
@@ -73,11 +77,44 @@ def run(a):
         binary = ROOT / binary
     with binary.open('rb') as f:
         binary_sha = hashlib.file_digest(f, 'sha256').hexdigest()
+    digest = hashlib.sha256()
+    for name, _ in source:
+        digest.update(name.encode() + b'\0' + (a.log/name).read_bytes())
+    config = {'orders': orders, 'model': a.model, 'drafter': a.drafter,
+              'recording': str(a.log.resolve()), 'recording_sha256': digest.hexdigest(),
+              'binary_sha256': binary_sha, 'prefix_cache_gb': 32, 'parallel': 1,
+              'max_len': 131072, 'kv_cache': 'bf16', 'mtp_policy': 'per-step default'}
+    config_path = a.out/'config.json'
+    cards = {}
+    if resume:
+        if not config_path.is_file() or json.loads(config_path.read_text()) != config:
+            raise RuntimeError('resume configuration changed or is missing')
+        for round_, order in enumerate(orders, 1):
+            for arm in order:
+                d = a.out/f'{arm}.r{round_}'
+                if not d.exists():
+                    continue
+                if not all((d/f).is_file() for f in ('replay.json','requests.jsonl','arm.json','server.log')):
+                    raise RuntimeError(f'{d.name}: incomplete arm; archive it before resuming')
+                replies = json.loads((d/'replay.json').read_text())
+                saved = [json.loads(line) for line in (d/'requests.jsonl').read_text().splitlines()]
+                if ([r['name'] for r in replies] != [name for name, _ in source] or
+                    saved != records(d/'replay.json', d/'server-log', arm, round_, Path(a.log).name)):
+                    raise RuntimeError(f'{d.name}: saved requests do not match the recording and server logs')
+                if arm == 'mtp' and 'adaptive per step' not in (d/'server.log').read_text():
+                    raise RuntimeError('saved MTP arm did not enable the default per-step policy')
+                cards[d.name] = json.loads((d/'arm.json').read_text())['card']
+    else:
+        config_path.write_text(json.dumps(config, indent=2)+'\n')
     for round_, order in enumerate(orders, 1):
         for arm in order:
             d = a.out / f'{arm}.r{round_}'
+            if d.name in cards:
+                print(f'REPLAY_SPEC reuse {arm} round {round_}, card {cards[d.name]}', flush=True)
+                continue
             logs = d / 'server-log'
             logs.mkdir(parents=True)
+            (d/'arm.json').write_text(json.dumps({'card': a.card})+'\n')
             spec = ['--spec', arm]
             if arm == 'dflash':
                 spec += ['--draft-model', a.drafter]
@@ -112,6 +149,7 @@ def run(a):
             with (d/'requests.jsonl').open('w') as f:
                 for row in rows:
                     f.write(json.dumps(row)+'\n')
+            cards[d.name] = a.card
     with (a.out/'table.txt').open('w') as f:
         subprocess.run([sys.executable, str(ROOT/'tools/box_validate/serve_client.py'), 'table', '--dir', str(a.out),
                         '--ref', 'off', '--ratio', 'dflash/mtp'], stdout=f, stderr=subprocess.STDOUT, check=True)
@@ -119,11 +157,9 @@ def run(a):
         verdict = subprocess.run([sys.executable, str(ROOT/'tools/box_validate/serve_judge.py'), '--dir', str(a.out),
                                   '--ref', 'off', '--dump', str(a.out/'forced'), '--judge', str(a.judge),
                                   '--bf16', str(a.bf16)], stdout=f, stderr=subprocess.STDOUT)
-    (a.out/'run.json').write_text(json.dumps({'orders': orders, 'model': a.model, 'drafter': a.drafter,
-                                             'recording': str(a.log.resolve()), 'binary_sha256': binary_sha,
-                                             'prefix_cache_gb': 32, 'parallel': 1, 'max_len': 131072,
-                                             'card': a.card, 'grade': 'busy box' if a.card is not None else 'quiet box',
-                                             'mtp_policy': 'per-step default', 'judge_rc': verdict.returncode}, indent=2)+'\n')
+    (a.out/'run.json').write_text(json.dumps({**config, 'card': a.card, 'cards': cards,
+                                             'grade': 'busy box' if any(c is not None for c in cards.values()) else 'quiet box',
+                                             'judge_rc': verdict.returncode}, indent=2)+'\n')
     print(f'REPLAY_SPEC complete: timings in table.txt; f32 judge rc={verdict.returncode}', flush=True)
     return verdict.returncode
 
@@ -135,6 +171,7 @@ def main(argv=None):
     ap.add_argument('--model', default='urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ')
     ap.add_argument('--draft-model', dest='drafter', default='z-lab/Qwen3.8-27B-DFlash2')
     ap.add_argument('--rounds', type=int, default=3)
+    ap.add_argument('--resume', action='store_true', help='validate and reuse completed arms in OUT')
     ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve the box')
     ap.add_argument('--port', type=int, default=8218)
     ap.add_argument('--wait', type=float, default=900)

@@ -131,6 +131,40 @@ class ReplaySpecTest(unittest.TestCase):
     def test_missing_f32_reference_is_pending_not_pass(self):
         self.assertEqual(self.run_replay(self.args(), FAKE_DIFF='1'),77)
 
+    def test_resume_keeps_completed_arms_and_records_the_new_card(self):
+        args = self.args()
+        args.card = 0
+        with self.assertRaises(RuntimeError):self.run_replay(args, FAKE_FAIL_MTP='1')
+        saved = (args.out/'off.r1/requests.jsonl').read_bytes()
+        (args.out/'mtp.r1').rename(args.out/'interrupted-mtp')
+        args.resume, args.card = True, 1
+        with patch.object(replay_spec.subprocess, 'Popen', wraps=replay_spec.subprocess.Popen) as start:
+            self.assertEqual(self.run_replay(args), 0)
+        self.assertEqual(sum(c.args[0][0] == str(self.bin) for c in start.call_args_list), 2)
+        self.assertEqual((args.out/'off.r1/requests.jsonl').read_bytes(), saved)
+        self.assertEqual(json.loads((args.out/'run.json').read_text())['cards'],
+                         {'off.r1':0,'mtp.r1':1,'dflash.r1':1})
+
+    def test_resume_refuses_changed_binary_recording_or_completed_rows(self):
+        args = self.args()
+        self.assertEqual(self.run_replay(args), 0)
+        args.resume = True
+        for path in (self.bin, self.recording/'000001.json', args.out/'off.r1/requests.jsonl'):
+            saved = path.read_bytes()
+            path.write_bytes(saved + b'\n' if path != args.out/'off.r1/requests.jsonl' else b'')
+            with patch.object(replay_spec.subprocess, 'Popen') as start:
+                with self.assertRaises(RuntimeError):self.run_replay(args)
+                start.assert_not_called()
+            path.write_bytes(saved)
+
+    def test_resume_refuses_incomplete_arm_without_overwriting_it(self):
+        args = self.args()
+        with self.assertRaises(RuntimeError):self.run_replay(args, FAKE_FAIL_MTP='1')
+        saved = (args.out/'mtp.r1/server.log').read_bytes()
+        args.resume = True
+        with self.assertRaises(RuntimeError):self.run_replay(args)
+        self.assertEqual((args.out/'mtp.r1/server.log').read_bytes(), saved)
+
     def test_legacy_replay_preserves_existing_user_without_a_prefix(self):
         p = self.recording/'000001.json'
         source = json.loads(p.read_text())
