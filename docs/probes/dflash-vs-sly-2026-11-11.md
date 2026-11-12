@@ -183,3 +183,17 @@ gate is still unmet. At 32k it is 8.29017 ms. Projection is 0.33730/0.45911 ms, 
 At 4k, sums of per-launch medians are 1.91240 ms for the int4 body, 2.16833 ms for the full int8 head,
 2.76844 ms for attention-part, and 0.23677 ms for both top-k stages. Attention is the next measured non-GEMM target.
 Evidence: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`.
+
+Task 6's 32k ranking also **fails out of sample**, measured on the unchanged int8 body to isolate the head.
+Training excludes the whole `opencode-session-2`; ranked-id SHA256 is
+`11a38d7470b3a2f47d75d703dcfd10e49af21aa44f6a8f7e650ccb333d18cb0e`.
+The cached-tap path first reproduced all 4256 original int8/full-head engine drafts exactly. K7 A4 then falls
+7.08025 → 6.29054, code 5.875 → 5.750, CJK 1.500 → 1.250; held-out opencode rises 3.68750 → 3.87500.
+The ranking stays disabled. C3's next arm is the int4 candidate head with top-64 exact int8-row reranking.
+Evidence: `~/b70/logs/dflash-v2/task6/{cached-taps-calibration,ranked32-int8}/` and
+`task6-cached-calibration.log`, `task6-ranked-head.log`.
+
+Task 7's fewer-heads geometry is bitwise the real drafter at short and full-window contexts. At pos4096/K7,
+H4/H1/H2 attention-part sums are 2.700417/2.525833/2.872083 ms (interleaved timestamp medians, five launches,
+busy box/card1). H1 saves only 0.174584 ms here, despite a larger short-context saving. Splitting rows as well
+is the next experiment; the runtime geometry stays unchanged until its gates pass.

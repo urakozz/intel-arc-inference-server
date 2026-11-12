@@ -168,6 +168,9 @@ deferred projection equals today's at every flush point: plain step, request end
 - [ ] **Step 3 (box):** `r82.accept`, `r82.iter`.
   - **Gates:** E_K within 0.05 of the full head out of sample; the draft pass's head share down to <= 0.5 ms; G-D2.
   - FAIL on acceptance -> Step 4.
+- **32k acceptance FAIL measured (2026-11-12):** isolated on the accepted int8 body, original baseline/all K/corpora.
+  K7 A4 7.08025 → 6.29054, code 5.875 → 5.750, CJK 1.500 → 1.250. The ranked vocabulary remains disabled;
+  continue Step 4. Cached-tap fast path first matched all 4256 original engine drafts exactly.
 - [ ] **Step 4 (only on Step 3's FAIL):** the int4 g64 candidate head (made at load), top-64, exact re-rank against
   the int8 head rows, top-16 to the selector. A new small kernel `df_rerank`, with its twin test. Same gates.
 
