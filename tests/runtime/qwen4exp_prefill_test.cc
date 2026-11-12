@@ -980,7 +980,7 @@ int run_gdn() {
       b.o = base + off;
       cx.reset_launches();
       rq::gdn_chunk_q4(cx, kc, b, p, std::min(width, P - p));
-      CHECK_EQ(cx.launches(), rq::kGdnChunkLaunches);
+      CHECK_EQ(cx.launches(), rq::gdn_chunk_q4_launches());
       cx.wait();
       imm.copy(ys.data() + size_t(p) * MIX, y.ptr(), size_t(std::min(width, P - p)) * MIX * 2);
     }
