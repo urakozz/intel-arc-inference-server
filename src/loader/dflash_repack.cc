@@ -10,6 +10,7 @@
 #include "common/bf16.h"
 #include "common/json.h"
 #include "common/repack.h"
+#include "kernels/dflash_dims.h"
 #include "loader/lm_head_int8.h"
 #include "loader/rtn.h"
 #include "loader/snapshot.h"
@@ -234,6 +235,7 @@ DFlashHostLinear DFlashCheckpoint::make_linear(const std::vector<std::string>& p
   } else if (f == DraftFormat::Int4G64) {
     if (K % 64) refuse(dir_, "an int4 g64 linear's K is not a multiple of 64: " + parts[0]);
     h.kind = model::WeightKind::Int4;
+    h.slices = kernels::dflash::int4_slices(K, h.N);
     std::vector<uint32_t> q(size_t(K / 8) * h.N);
     std::vector<uint16_t> scales(size_t(K / 64) * h.N);
     rtn_int4_g64(rows.data(), K, h.N, q.data(), scales.data());

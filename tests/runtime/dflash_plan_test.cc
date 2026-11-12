@@ -59,6 +59,13 @@ int main(int argc, char** argv) {
   CHECK_EQ(s.hid, size_t(8) * 256 * 4);
   CHECK_EQ(s.out, size_t(1616));
   const rd::DFlashSizes s32 = rd::sizes(d, 5120, 32768, 16384);
+  const auto s4 = rd::sizes(d, 5120, V, 16384, loader::DraftFormat::Int4G64);
+  CHECK_EQ(s4.gout, 8 * s.gout);
+  CHECK_EQ(s4.co, 16 * s.co);
+  CHECK_EQ(s4.kv, 8 * s.kv);
+  CHECK_EQ(s4.hid, 16 * s.hid);
+  CHECK_EQ(s4.ring_k, s.ring_k);
+  CHECK_EQ(s4.ring_v, s.ring_v);
   CHECK_EQ(s.total() - s32.total(), (s.logits - s32.logits) + (s.tpart - s32.tpart));
   std::printf("buffers at max_len 16384: %zu B (ring %zu, taps %zu, rope %zu, logits %zu); with a 32k draft "
               "vocabulary %zu B\n",
@@ -70,7 +77,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(p.weights, loader::dflash_weight_bytes(d, 5120, f).total());
     CHECK_EQ(p.per_position, size_t(512));
     for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-      CHECK_EQ(p.fixed + p.per_position * L, rd::sizes(d, 5120, V, L).total());
+      CHECK_EQ(p.fixed + p.per_position * L, rd::sizes(d, 5120, V, L, f).total());
     std::printf("drafter %s: weights %zu B + buffers %zu B + 512 B / position = %.3f GB at 131072\n",
                 loader::draft_format_name(f), p.weights, p.fixed, p.bytes(131072) / 1e9);
   }

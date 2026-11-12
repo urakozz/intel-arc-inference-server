@@ -103,13 +103,32 @@ int ulps(uint16_t a, uint16_t b) {
 }
 
 struct Bins {
+  bool split;
   l0::Module prep, attn, topk, topk_c, sel;
-  Bins(Dev& d)
-      : prep(d.ctx, kernels::path(kd::prep_variant())), attn(d.ctx, kernels::path(kd::attn_variant())),
+  Bins(Dev& d, bool split_k = false)
+      : split(split_k), prep(d.ctx, kernels::path(kd::prep_variant(S, split))), attn(d.ctx, kernels::path(kd::attn_variant())),
         topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used, false))),
         topk_c(d.ctx, kernels::path(kd::topk_variant(32768, 32768, true))),
-        sel(d.ctx, kernels::path(kd::select_variant(true))) {}
+        sel(d.ctx, kernels::path(kd::select_variant(true, S, split))) {}
 };
+
+// All partials are nonzero; compute the expectation by folding them on the CPU in slice order.
+std::vector<float> split_input(std::vector<float>& plain, unsigned slices, unsigned groups = 1) {
+  const size_t n = plain.size() / groups;
+  std::vector<float> partial(plain.size() * slices);
+  for (unsigned g = 0; g < groups; ++g)
+    for (size_t i = 0; i < n; ++i) {
+      const float v = plain[g * n + i];
+      float sum = 0;
+      for (unsigned s = 0; s < slices; ++s) {
+        const float p = v / float(slices) + float(int(s % 3) - 1) * 0.015625f;
+        partial[(size_t(g) * slices + s) * n + i] = p;
+        sum = sum + p;
+      }
+      plain[g * n + i] = sum;
+    }
+  return partial;
+}
 
 int check_prep(Dev& d, Bins& b) {
   int bad = 0;
@@ -138,11 +157,14 @@ int check_prep(Dev& d, Bins& b) {
     std::printf("df_embed: %d of %u values differ\n", e, M * H);
     bad += e;
   }
-  // df_norm
-  {
-    const std::vector<float> src = rnd_f32(size_t(M) * H, -3, 3, 3), w = rnd_f32(H, 0.5f, 1.5f, 4);
-    l0::Mem bs = d.up(src), bw = d.up(w), bh = d.zeros(size_t(M) * H * 4), bx = d.zeros(size_t(M) * H * 2);
-    l0::Kernel k(b.prep, "df_norm");
+  // df_norm and the split FC projection
+  for (bool fc : {false, true}) {
+    if (fc && !b.split) continue;
+    std::vector<float> src = rnd_f32(size_t(M) * H, -3, 3, 3);
+    const auto input = fc ? split_input(src, 8) : src;
+    const auto w = rnd_f32(H, 0.5f, 1.5f, 4);
+    l0::Mem bs = d.up(input), bw = d.up(w), bh = d.zeros(size_t(M) * H * 4), bx = d.zeros(size_t(M) * H * 2);
+    l0::Kernel k(b.prep, fc ? "df_norm_fc" : "df_norm");
     k.group_size(kd::kWg);
     k.arg_ptr(0, bs.ptr());
     k.arg_ptr(1, bw.ptr());
@@ -163,10 +185,12 @@ int check_prep(Dev& d, Bins& b) {
   }
   // df_conv_prep / df_conv_add
   {
-    const std::vector<float> src = rnd_f32(size_t(M) * H, -2, 2, 5), co = rnd_f32(size_t(M) * KPN, -0.3f, 0.3f, 6),
+    std::vector<float> src = rnd_f32(size_t(M) * H, -2, 2, 5), co = rnd_f32(size_t(M) * KPN, -0.3f, 0.3f, 6),
                              base = rnd_f32(size_t(2) * S.ctaps * H, 0, 1, 7),
                              r0 = rnd_f32(size_t(M) * H, -1, 1, 8);
-    l0::Mem bs = d.up(src), bc = d.up(co), bb = d.up(base), bo = d.zeros(size_t(M) * H * 2), br = d.up(r0);
+    const auto si = b.split ? split_input(src, 4) : src;
+    const auto ci = b.split ? split_input(co, 16) : co;
+    l0::Mem bs = d.up(src), ba = d.up(si), bc = d.up(ci), bb = d.up(base), bo = d.zeros(size_t(M) * H * 2), br = d.up(r0);
     l0::Kernel kp(b.prep, "df_conv_prep"), ka(b.prep, "df_conv_add");
     for (l0::Kernel* k : {&kp, &ka}) {
       k->group_size(kd::kWg);
@@ -174,6 +198,7 @@ int check_prep(Dev& d, Bins& b) {
       k->arg_ptr(1, bc.ptr());
       k->arg_ptr(2, bb.ptr());
     }
+    ka.arg_ptr(0, ba.ptr());
     kp.arg_ptr(3, bo.ptr());
     ka.arg_ptr(3, br.ptr());
     d.run(kp, (H + kd::kWg - 1) / kd::kWg, M);
@@ -189,10 +214,25 @@ int check_prep(Dev& d, Bins& b) {
     std::printf("df_conv_prep / df_conv_add: %d of %u values differ (bitwise bar)\n", e, 2 * M * H);
     bad += e;
   }
+  // df_add (v1): a different row/column partial layout must not mix rows.
+  {
+    auto src = rnd_f32(size_t(M) * H, -2, 2, 51);
+    const auto input = b.split ? split_input(src, 4) : src;
+    const auto r0 = rnd_f32(size_t(M) * H, -1, 1, 52);
+    auto bs = d.up(input), br = d.up(r0);
+    l0::Kernel k(b.prep, "df_add");
+    k.group_size(kd::kWg);
+    k.arg_ptr(0, bs.ptr());
+    k.arg_ptr(1, br.ptr());
+    d.run(k, (H + kd::kWg - 1) / kd::kWg, M);
+    const auto got = d.read<float>(br, size_t(M) * H);
+    for (size_t i = 0; i < got.size(); ++i) bad += got[i] != r0[i] + src[i];
+  }
   // df_silu_mul
   {
-    const std::vector<float> gu = rnd_f32(size_t(M) * 2 * I, -6, 6, 9);
-    l0::Mem bg = d.up(gu), ba = d.zeros(size_t(M) * I * 2);
+    std::vector<float> gu = rnd_f32(size_t(M) * 2 * I, -6, 6, 9);
+    const auto input = b.split ? split_input(gu, 8) : gu;
+    l0::Mem bg = d.up(input), ba = d.zeros(size_t(M) * I * 2);
     l0::Kernel k(b.prep, "df_silu_mul");
     k.group_size(kd::kWg);
     k.arg_ptr(0, bg.ptr());
@@ -217,12 +257,13 @@ int check_heads(Dev& d, Bins& b, const std::vector<float>& rope, const l0::Mem& 
   const std::vector<float> qkn = rnd_f32(size_t(2) * HD, 0.5f, 1.5f, 10);
   l0::Mem bq = d.up(qkn);
   for (uint32_t p : {2041u, 131065u}) {
-    const std::vector<float> qkv = rnd_f32(size_t(M) * QKVN, -2, 2, 11 + p);
+    std::vector<float> qkv = rnd_f32(size_t(M) * QKVN, -2, 2, 11 + p);
     runtime::Control c{};
     c.pos = p;
     l0::Mem ctrl(d.ctx, l0::MemKind::Shared, sizeof c);
     std::memcpy(ctrl.ptr(), &c, sizeof c);
-    l0::Mem bin = d.up(qkv), q = d.zeros(size_t(M) * QN * 4), kb = d.zeros(size_t(M) * KVN * 4),
+    const auto input = b.split ? split_input(qkv, 4) : qkv;
+    l0::Mem bin = d.up(input), q = d.zeros(size_t(M) * QN * 4), kb = d.zeros(size_t(M) * KVN * 4),
             vb = d.zeros(size_t(M) * KVN * 4);
     l0::Kernel k(b.prep, "df_qkv_prep");
     k.group_size(HD);
@@ -258,7 +299,7 @@ int check_heads(Dev& d, Bins& b, const std::vector<float>& rope, const l0::Mem& 
   // df_ctx_store: 5 rows from 2045 across the wrap; the projection's k||v rows [L][M][2 KVN]
   {
     const uint32_t L = 5, pos0 = 2045, n = 5;
-    const std::vector<float> kv = rnd_f32(size_t(L) * M * 2 * KVN, -2, 2, 12), qk = rnd_f32(size_t(L) * 2 * HD, 0.5f, 1.5f, 13);
+    std::vector<float> kv = rnd_f32(size_t(L) * M * 2 * KVN, -2, 2, 12), qk = rnd_f32(size_t(L) * 2 * HD, 0.5f, 1.5f, 13);
     runtime::dflash::DFlashCtl dc{};
     dc.proj_pos = pos0;
     dc.proj_n = n;
@@ -266,7 +307,8 @@ int check_heads(Dev& d, Bins& b, const std::vector<float>& rope, const l0::Mem& 
     std::memcpy(dctl.ptr(), &dc, sizeof dc);
     const size_t ring_elems = size_t(L) * RING * KVN;
     std::vector<uint16_t> init(ring_elems, 0x1234);
-    l0::Mem bkv = d.up(kv), bqk = d.up(qk), rk = d.up(init), rv = d.up(init);
+    const auto input = b.split ? split_input(kv, 8, L) : kv;
+    l0::Mem bkv = d.up(input), bqk = d.up(qk), rk = d.up(init), rv = d.up(init);
     l0::Kernel k(b.prep, "df_ctx_store");
     k.group_size(HD);
     k.arg_ptr(0, dctl.ptr());
@@ -426,7 +468,7 @@ int check_select(Dev& d, Bins& b) {
     std::mt19937 g(42);
     std::vector<uint32_t> cand(size_t(R) * kd::kTopK);
     for (uint32_t& c : cand) c = g() % V;
-    const std::vector<float> unary = rnd_f32(cand.size(), 5, 15, 43), hid = rnd_f32(size_t(M) * RK, -1, 1, 44);
+    std::vector<float> unary = rnd_f32(cand.size(), 5, 15, 43), hid = rnd_f32(size_t(M) * RK, -1, 1, 44);
     runtime::Control c{};
     c.pos = 3000;
     c.cur_token[0] = 123456;
@@ -439,7 +481,8 @@ int check_select(Dev& d, Bins& b) {
         out(d.ctx, l0::MemKind::Shared, sizeof(runtime::dflash::DFlashDraftOut));
     std::memcpy(ctrl.ptr(), &c, sizeof c);
     std::memcpy(dctl.ptr(), &dc, sizeof dc);
-    l0::Mem bc = d.up(cand), bu = d.up(unary), bh = d.up(hid);
+    const auto input = b.split ? split_input(hid, 16) : hid;
+    l0::Mem bc = d.up(cand), bu = d.up(unary), bh = d.up(input);
     l0::Kernel k(b.sel, "df_select");
     k.group_size(kd::kWg);
     k.arg_ptr(0, ctrl.ptr());
@@ -497,6 +540,10 @@ int main() {
   bad += check_attn(d, b);
   bad += check_topk(d, b);
   bad += check_select(d, b);
+  Bins split(d, true);
+  bad += check_prep(d, split);
+  bad += check_heads(d, split, rope, brope);
+  bad += check_select(d, split);
   if (bad) {
     std::printf("dflash_kernels_test: FAIL (%d)\n", bad);
     return 1;

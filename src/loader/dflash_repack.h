@@ -38,7 +38,7 @@ std::string dflash_canon(const std::string& name);
 // rtn's GPTQ words and f16 scales repacked into gemv.cl's layout-1 tiles [N/16][K/64][136] u32.
 struct DFlashHostLinear {
   model::WeightKind kind = model::WeightKind::Bf16;
-  uint32_t K = 0, N = 0;
+  uint32_t K = 0, N = 0, slices = 1;
   std::vector<uint16_t> bf16;   // Bf16
   std::vector<int8_t> i8;       // Int8
   std::vector<float> scales;    // Int8
@@ -49,7 +49,7 @@ struct DFlashHostLinear {
   size_t bytes() const {
     return bf16.size() * 2 + i8.size() + scales.size() * 4 + int4.size() * 4 + gs.size() * 4;
   }
-  model::GemvShape shape() const { return {K, N, 1, kind == model::WeightKind::Int4 ? 1u : 0u}; }
+  model::GemvShape shape() const { return {K, N, slices, kind == model::WeightKind::Int4 ? 1u : 0u}; }
 };
 
 enum class DFlashLinear { Qkv, O, GateUp, Down, AttnKproj, MlpKproj };

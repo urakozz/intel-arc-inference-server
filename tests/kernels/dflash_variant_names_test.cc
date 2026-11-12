@@ -4,6 +4,7 @@
 // Host only (names, no device).
 //
 //   dflash_variant_names_test <config.json> kernel_<new>... -- kernel_<reused>...
+#include <array>
 #include <cstdio>
 #include <fstream>
 #include <set>
@@ -43,10 +44,12 @@ int main(int argc, char** argv) {
     (after ? reused : fresh).insert(a.substr(7));
   }
   std::set<std::string> bound;
-  for (auto [K, N] : {std::pair<unsigned, unsigned>{5120, 6144}, {4096, 5120}, {5120, 34816}, {17408, 5120},
-                      {25600, 5120}, {5120, 2048}, {5120, 1280}, {5120, 256}}) {
-    const auto* t = kernels::small_m_tuning(K, N, 1, 1);
-    CHECK(t && kernels::gemm_sm_out_s(*t) == 1);
+  for (const auto& shape : {std::array<unsigned, 3>{5120, 6144, 4}, {4096, 5120, 4}, {5120, 34816, 8},
+                            {17408, 5120, 4}, {25600, 5120, 8}, {5120, 2048, 8}, {5120, 1280, 16}, {5120, 256, 16}}) {
+    const auto [K, N, S] = shape;
+    CHECK_EQ(kd::int4_slices(K, N), S);
+    const auto* t = kernels::small_m_tuning(K, N, S, 1);
+    CHECK(t && kernels::gemm_sm_out_s(*t) == S);
     CHECK_EQ(kernels::gemm_sm_built_m(*t), std::vector<unsigned>{8});
     CHECK_EQ(kd::linear_variant(2u, 8, K, N), kernels::gemm_sm_variant(8, *t));
   }

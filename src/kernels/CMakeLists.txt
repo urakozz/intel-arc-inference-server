@@ -495,6 +495,9 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320 SOURCE ${DF_DIR}/df_prep.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
+  add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep_split.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
+                           INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128 SOURCE ${DF_DIR}/df_attn.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0)
@@ -509,6 +512,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     endif()
   endforeach()
   add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320 SOURCE ${DF_DIR}/df_select.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
+  add_ocloc_kernel(df_select_M8_K16_Q16_RK256_V248320_H16 SOURCE ${DF_DIR}/df_select_split.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=1 RANK=256 VROWS=248320)
   add_ocloc_kernel(df_select_v1_M8_K16 SOURCE ${DF_DIR}/df_select.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} MAXR=8 TOPK=16 QS=16 V2=0)
@@ -2073,13 +2078,22 @@ set(GEMM_SM_DFLASH "5120 6144 1 2 WG" "4096 5120 1 2 WG" "5120 34816 1 2 WG" "17
                    "5120 2048 1 2 WG" "5120 1280 1 2 WG" "5120 256 1 2 WG")
 set(GEMM_SM_DFLASH_HEAD "5120 32768 1 2 WG" "5120 65536 1 2 WG" "5120 131072 1 2 WG")
 set(GEMM_SM_DFLASH_INT4 "5120 6144 1 1 MG" "4096 5120 1 1 MG" "5120 34816 1 1 MG" "17408 5120 1 1 MG"
-                      "25600 5120 1 1 MG" "5120 2048 1 1 MG" "5120 1280 1 1 MG" "5120 256 1 1 MG")
+                      "25600 5120 1 1 MG" "5120 2048 1 1 MG" "5120 1280 1 1 MG" "5120 256 1 1 MG"
+                      "5120 6144 4 1 MG" "4096 5120 4 1 MG" "5120 34816 8 1 MG" "17408 5120 4 1 MG" "25600 5120 8 1 MG" "5120 2048 8 1 MG" "5120 1280 16 1 MG" "5120 256 16 1 MG")
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set(_m8 8)
   set(_m7 7)
   gemm_sm_rows(GEMM_SM_DFLASH _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_INT4 _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
+  foreach(row "5120 6144 4" "4096 5120 4" "5120 34816 8" "17408 5120 4" "25600 5120 8"
+              "5120 2048 8" "5120 1280 16" "5120 256 16")
+    separate_arguments(parts UNIX_COMMAND "${row}")
+    list(GET parts 0 K)
+    list(GET parts 1 N)
+    list(GET parts 2 S)
+    add_gemv_variant(8 ${K} ${N} ${S} 1)
+  endforeach()
   foreach(KN "5120 6144" "4096 5120" "5120 34816" "17408 5120" "25600 5120" "5120 2048" "5120 1280" "5120 256")
     separate_arguments(KN)
     add_gemv_variant(8 ${KN} 1 1)   # int4 g64 drafter, the forced-GEMV reference
