@@ -213,3 +213,10 @@ The H1/B4 row split subsequently passes all primitive and real-model bitwise che
 falls 2.696458 → 2.084063 ms; at K2, 1.595521 → 1.227500 ms. Parallel-exp is slower at steady K7 despite
 passing bitwise checks; both local K-cache representations fail and are rejected. H1/B4 policy integration
 is the next step. Full cost targets and Task 8 remain unpassed.
+
+H1/B4 policy integration subsequently passes four device checks with no skips (kernel, profile, engine,
+golden/A4 greedy identity); the full numerical check remains queued. The int8-body candidate arm measures
+8.429809 ms draft / 1.558631 plain-step iteration at 4k, and 8.527476 ms / 1.530302 at 32k. C7 targets still
+fail; resource grade is exclusive card1/busy box with concurrent CPU references. See BENCHMARKS for the full
+paired full-head/candidate table. The operator deferred proper AutoRound conversion to a later follow-up;
+finish the RTN cost diagnostics, but use the quality-safe int8 body for Task 8.

@@ -1088,8 +1088,21 @@ launches are 2.084063 ms versus 2.696458 ms for H4/B8 at pos4096/K7; 1.227500 ve
 
 Parallel exponentials remain a probe control: bitwise checks pass, but steady K7 slows to 2.393125 ms versus
 2.074167 ms for serial H1/B4 in the paired experiment. Both 16-bit and packed-32-bit local K-cache experiments
-fail the bitwise gate and are rejected before timing. Production-policy integration and full cost gates are
-still pending; no Task 7 completion or final speed claim follows from these component results.
+fail the bitwise gate and are rejected before timing. H1/B4 is now selected. Its kernel/profile/engine/greedy-identity
+integration checks pass 4/4 with no skips (21.42 / 29.17 / 309.71 / 1075.73 seconds). The full numerical check
+remains pending. The later real-list profiles, exclusive card1/busy box with CPU reference work, are:
+
+| int8 body / head mode | depth | draft ms / plain steps | verify(8), plain steps | iteration, plain steps |
+|---|---:|---:|---:|---:|
+| full int8 head | 4096 | 8.712270 / 0.298136 | 1.246703 | 1.557816 |
+| candidate64 + exact rerank | 4096 | 8.429809 / 0.287036 | 1.242865 | 1.558631 |
+| full int8 head | 32768 | 8.788698 / 0.265708 | 1.271189 | 1.548661 |
+| candidate64 + exact rerank | 32768 | 8.527476 / 0.257115 | 1.271936 | 1.530302 |
+
+C7 remains **FAIL**. The 4k candidate profile's instrumented host time outside lists is 1.860053 ms and
+projection + host is 2.247761 ms; concurrent CPU reference work makes these busy-box diagnostics. The final
+speed bar is still a separate rotated serving comparison. All five profiled attention launches bind H1/B4.
+Evidence: `~/b70/logs/dflash-v2/task7/policy-h1b4/{device.xml,iter-{full,candidate}-{4096,32768}.log}`.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 

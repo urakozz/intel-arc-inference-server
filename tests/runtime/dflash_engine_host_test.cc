@@ -153,7 +153,7 @@ void cost_case() {
               "0.1 -> K %u; draft row %.3f (32k V': %.3f)\n", hi, mid, lo, c.draft[0], v.draft[0]);
   // Spec 19 v2's measured rows keep the widest block worthwhile at high acceptance.
   CHECK(hi == 6 || hi == 7);
-  CHECK(c.verify[7] == 1.245386 && c.verify[4] == 1.168254);
+  CHECK(c.verify[7] == 1.246703 && c.verify[4] == 1.170806);
   CHECK(mid >= 1 && mid <= 4);
   CHECK(lo == 0);
 }

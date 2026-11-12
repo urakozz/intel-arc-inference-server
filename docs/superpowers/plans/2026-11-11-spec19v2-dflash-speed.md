@@ -157,7 +157,7 @@ deferred projection equals today's at every flush point: plain step, request end
   - FAIL on acceptance -> record and ask the operator for the AutoRound-exported drafter (spec v2 C2) instead of RTN.
   - **RTN FAIL measured at `39d54ad1` (2026-11-12):** K=7 A4 7.08025 → 7.00551, prose 2.28646 → 2.22727,
     held-out opencode 3.68750 → 3.25000; all losses exceed 0.05. Original int8 baseline recalibrates exactly.
-    AutoRound export requested; default remains int8. Split-K and independent small-kernel work continue as
+    Operator deferred proper AutoRound conversion to a follow-up; default remains int8. Split-K and independent small-kernel work continue as
     diagnostics, with their numerical and final combined acceptance gates still required.
 
 ### Task 6: the draft head (Mac + CPU, then box) - C3
@@ -207,6 +207,9 @@ bitwise and are rejected. The detached policy integration/numerical/cost round i
   server the way `tools/box_validate/serve_run.sh` does (its own child, wait for exit), not a bare `kill`.
 - [ ] **Step 2 (cost table):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
   medians; **Gate:** the table equals the new medians, so Task 8 does not run on Task 3's pre-optimisation costs.
+**Operator 2026-11-12:** finish RTN cost diagnostics, defer proper AutoRound conversion. Evaluate the quality-safe
+int8 body with the selected head/geometry in Task 8; this does not close C2 or qualify the failed RTN arm.
+
 - [ ] **Step 3 (combined acceptance):** measure E_K of the final drafter (int4 + the chosen draft head) against Task 1's
   **original int8 / full-head baseline** on A4, code, prose and the held-out opencode slice. **Gate:** within 0.05 of that
   baseline in total - the per-task gates of Tasks 5 and 6 must not add up to an unnoticed loss.
