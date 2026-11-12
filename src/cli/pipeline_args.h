@@ -16,9 +16,9 @@
 //                               wavefront (17c), --spec mtp / auto / lookup with the MTP head whole
 //                               on each card, b70-serve with the prefix cache (17d); no DFlash, no
 //                               draft vocabulary, no l0-int8 prefill (refused by name).
-//                               replica (b70-serve, Qwen3.8 only - spec 13 §11, plan 13b): the model
-//                               on both cards, one engine each, two requests served at once (each
-//                               bitwise what it is alone on its card); every other model and
+//                               replica (b70-serve, Qwen3.8 and Ornith - spec 13 §11, plan 13b): the
+//                               model on both cards, one engine each, two requests served at once
+//                               (each bitwise what it is alone on its card); every other model and
 //                               b70-decode refuse it by name, one visible card is refused.
 //   --max-num-seqs N            b70-serve: requests at once (check_max_num_seqs / resolve_max_num_seqs below).
 //   --pipeline-split auto|N     the override, for experiments: device 0 runs layers [0, N), device 1
@@ -177,16 +177,33 @@ inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
 }
 
 // Plan 13b: --parallel replica's refusals that need no device.
-// The architecture (config.json's architectures[0]) of the one model with a replica engine.
-inline bool replica_architecture(const std::string& architecture) {
+// The architecture (config.json's architectures[0]) of the one model with sequence slots (plan 13c: several requests
+// on one card).
+inline bool slots_architecture(const std::string& architecture) {
   return architecture == "Qwen3_5ForConditionalGeneration";   // Qwen3.8 (model::qwen38)
+}
+// The architectures with a replica engine: runtime::Engine's models, one engine per card (Ornith: one request a card,
+// its engine has no slots).
+inline bool replica_architecture(const std::string& architecture) {
+  return slots_architecture(architecture) || architecture == "Qwen3_5MoeForConditionalGeneration";   // + Ornith
 }
 // `model` names the checkpoint in the refusal ("" when its config.json could not be read).
 inline void check_replica_model(const std::string& architecture, const std::string& model) {
   if (replica_architecture(architecture)) return;
-  throw std::runtime_error("--parallel replica serves Qwen3.8 only (spec 13b: one engine per card, two requests at "
-                           "once); " + (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
+  throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (spec 13b: one engine per card, two "
+                           "requests at once); " +
+                           (model.empty() ? std::string("this checkpoint (no readable config.json)") : model) +
                            " has no replica engine - --parallel auto, 1 or pp");
+}
+// A model without sequence slots (Ornith) runs one request a card: --max-num-seqs 2 on two cards (replica, or auto
+// that becomes replica), else 1. `a.mode` as given before the hardware gate, as resolved after it.
+inline void check_one_request_a_card(const PipelineArgs& a, uint32_t n, const std::string& architecture,
+                                     const std::string& model) {
+  if (n <= 1 || slots_architecture(architecture)) return;
+  if (n <= (a.replica() || a.mode == Parallel::Auto ? 2u : 1u)) return;
+  throw std::runtime_error("--max-num-seqs " + std::to_string(n) + " gives a card several requests (sequence slots, "
+                           "built for Qwen3.8 only); " + model + " runs one request a card - --max-num-seqs 2 on two "
+                           "cards (--parallel replica), or 1");
 }
 // The override flags belong to pp; DFlash per card is spec 19's (not built for replica).
 inline void check_replica_flags(const PipelineArgs& a, bool dflash) {
@@ -218,8 +235,9 @@ inline void require_two_devices_for_replica(uint32_t gpus) {
 // --max-num-seqs N (operator 2026-11-11; vLLM's flag, the same meaning): how many requests run at once - the user's
 // choice, and the context follows (slot 0 the largest that fits beside N - 1 slots of 32768 on its card,
 // cli::settle_slots). N = 1 (the default): one slot. N > 1: two cards run replica, each card its slots (card 0 the
-// odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Qwen3.8 only (b70_serve.cc refuses
-// the others by config.json, DFlash and a draft vocabulary beside slots).
+// odd one), one card its slots (plan 13c); at most kSlotsPerCard slots a card. Several slots a card are Qwen3.8's
+// (b70_serve.cc refuses the others by config.json - Ornith runs N = 2 as replica, one request a card - and DFlash and
+// a draft vocabulary beside slots).
 inline constexpr uint32_t kSlotsPerCard = runtime::SlotDims::kMaxSeqs;
 // Before the device: --parallel tp keeps one slot (TP + slots was ruled out, 2026-11-11) and pp runs one request;
 // replica runs a request on each card, so N is 2 to 8 there and 2 (one slot a card) when not given. Returns N.

@@ -2916,10 +2916,17 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p
     EXPECT "--pipeline-handoff expects copy or peer")
-  # Plan 13b: --parallel replica is Qwen3.8's - other models by name (their config.json), an unreadable checkpoint,
-  # the pp override flags; all before the device.
+  # Plan 13b: --parallel replica is Qwen3.8's and Ornith's - other models by name (their config.json), an unreadable
+  # checkpoint, the pp override flags, more than one Ornith request a card (tests/model/ornith: config.json only); all
+  # before the device.
   b70_serve_reject(cli_reject_serve_replica_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel replica
-    EXPECT "--parallel replica serves Qwen3.8 only")
+    EXPECT "--parallel replica serves Qwen3.8 and Ornith only")
+  b70_serve_reject(cli_reject_serve_replica_ornith_slots ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel replica
+    --max-num-seqs 4 EXPECT "runs one request a card")
+  b70_serve_reject(cli_reject_serve_replica_ornith_auto ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --max-num-seqs 3
+    EXPECT "--max-num-seqs 3 gives a card several requests")
+  b70_serve_reject(cli_reject_serve_replica_ornith_one ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel 1
+    --max-num-seqs 2 EXPECT "--max-num-seqs 2 on two cards")
   b70_serve_reject(cli_reject_serve_replica_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --parallel replica
     EXPECT "has no replica engine")
   b70_serve_reject(cli_reject_serve_replica_no_model ${B70_NO_MODEL} --parallel replica
@@ -2929,7 +2936,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
     cli_reject_serve_replica_k2 cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
-    cli_reject_serve_replica_split
+    cli_reject_serve_replica_split cli_reject_serve_replica_ornith_slots cli_reject_serve_replica_ornith_auto
+    cli_reject_serve_replica_ornith_one
     PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
