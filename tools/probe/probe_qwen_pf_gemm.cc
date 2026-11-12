@@ -10,9 +10,8 @@
 //   bs_dq      pf_dequant_slab BLOCK_STORE=1 alone (2D block stores, the same values)
 //   r1_gemm    pf_gemm RASTER=1 alone (the work-group order N-fastest, the same tiles)
 //   new        bs_dq + r1_gemm as a walk
-//   p1_gemm / p3_gemm / p4_gemm   pf_gemm PF_DIST=1/3/4 alone (k-tiles prefetched ahead; production 2)
-//   nb_gemm    pf_gemm NO_BARRIER=1 alone (no per-k-tile work-group barrier)
-// --gemm r1,p1,p3,p4,nb picks the GEMM arms (default all); --no-dq drops bs_dq / new / ctl_dq.
+// --gemm picks the GEMM arms by tag (qpg_gemm_T0[_SILU]_<TAG> binaries; this build has r1 - round 2's
+// p1 / p3 / p4 / nb arms were removed after the record); --no-dq drops bs_dq / new / ctl_dq.
 // Checks before any timing, layer 0 at every row count: every slab of bs_dq equals ctl_dq's byte for
 // byte, and the new walk's output (and every GEMM arm's, after the control's dequant) equals the
 // control walk's byte for byte.
@@ -299,7 +298,7 @@ std::vector<std::string> split(const std::string& s) {
 int main(int argc, char** argv) {
   try {
     int rounds = 5;
-    std::string want = "all", rows_s = "4096,2048", gemm_s = "r1,p1,p3,p4,nb";
+    std::string want = "all", rows_s = "4096,2048", gemm_s = "r1";
     bool with_dq = true;
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
@@ -310,7 +309,7 @@ int main(int argc, char** argv) {
       else if (a == "--no-dq") with_dq = false;
       else {
         std::fprintf(stderr, "usage: probe_qwen_pf_gemm [--rounds 5] [--rows 4096,2048] "
-                             "[--shape all|gu,down,qkvz,out,faqkv] [--gemm r1,p1,p3,p4,nb] [--no-dq]\n");
+                             "[--shape all|gu,down,qkvz,out,faqkv] [--gemm r1] [--no-dq]\n");
         return 2;
       }
     }
