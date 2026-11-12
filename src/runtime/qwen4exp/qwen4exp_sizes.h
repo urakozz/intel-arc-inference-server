@@ -177,6 +177,10 @@ struct GdnScratchSizes {
 GdnScratchSizes gdn_scratch_sizes(uint32_t C);
 // The grouped GEMMs' padded tile count of a C-row chunk (q4_pf_moe.cl's header has the bound): 1200 at C = 2048.
 uint32_t pf_tiles(const model::Qwen4ExpDesc& d, uint32_t C);
+// Plan 2026-11-12 Task 7: the multi-work-group sort's work-item bound (MI = kernels::pf_moe::kItemM rows an item) -
+// the fused GEMMs' grid; 856 at C = 2048.
+uint32_t pf_items(const model::Qwen4ExpDesc& d, uint32_t C);
+// B70_PF_MOE=old puts this family's MoE back on q4_pf_sort + the weight batches (runtime::moe_pf_old_walk).
 // The expert weight batches: blocks of [K][N] bf16 (513 a layer: 512 routed + the shared) in kPfBatchBytes regions -
 // gate||up 6,553,600 B a block, 81 a batch, 7 batches; down 3,276,800 B, 163, 4 (derived).
 size_t pf_block_gu_bytes(const model::Qwen4ExpDesc& d);
@@ -212,15 +216,18 @@ uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d);
 //                                                gn rows: 2 x [kPfC][10240] fit)
 //   h          bf16 [tmax x 32][640]             the gate||up GEMM's SiLU output
 //   y          bf16 [kPfC][2560]                 the MoE block's output (the next combine folds it)
-//   w          bf16 kPfBatchBytes                the expert weight batch
+//   w          bf16 kPfBatchBytes                the expert weight batch (B70_PF_MOE=old; else one gate||up block:
+//                                                Intel's bf16 shared expert's copy, plan 2026-11-12)
+//   cnt, items u32 [kPfC / 64][512], [items][4]  pf_moe_sort_mw's block counts and work items
 //   ple_ids    u64  [kPfC][16]                   the PLE row ids of the chunk's rows
 struct PrefillSizes {
   size_t ids = 0, H = 0, xn = 0, x = 0, down_f32 = 0, inj = 0, partials = 0, slab = 0, idx_f32 = 0, idx_q = 0, scores = 0,
          lists = 0, diag = 0, q16 = 0, o = 0, attn_out = 0, ab = 0, gdn = 0, logits = 0, routes = 0, hdr = 0, tiles = 0,
-         row_tok = 0, pair_row = 0, xg = 0, h = 0, y = 0, w = 0, ple_ids = 0;
+         row_tok = 0, pair_row = 0, xg = 0, h = 0, y = 0, w = 0, ple_ids = 0, cnt = 0, items = 0;
   size_t total() const {
     return ids + H + xn + x + down_f32 + inj + partials + slab + idx_f32 + idx_q + scores + lists + diag + q16 + o +
-           attn_out + ab + gdn + logits + routes + hdr + tiles + row_tok + pair_row + xg + h + y + w + ple_ids;
+           attn_out + ab + gdn + logits + routes + hdr + tiles + row_tok + pair_row + xg + h + y + w + ple_ids + cnt +
+           items;
   }
 };
 PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);

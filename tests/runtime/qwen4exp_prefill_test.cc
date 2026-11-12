@@ -1108,6 +1108,10 @@ int main(int argc, char** argv) {
     CHECK(std::fwrite("B70ROUTE", 1, 8, f) == 8 && std::fwrite(hdr, 4, 4, f) == 4 &&
           std::fwrite(rows.data(), 4, rows.size(), f) == rows.size());
     std::fclose(f);
+    const std::vector<float> lg = e.read_logits();   // and the last row's logits (an A/B compares both bitwise)
+    std::FILE* fl = std::fopen((dump_path + ".logits").c_str(), "wb");
+    CHECK(fl != nullptr && std::fwrite(lg.data(), 4, lg.size(), fl) == lg.size());
+    std::fclose(fl);
     std::printf("dump-routes: %u layers x %u tokens (chunks of %u) -> %s\n", L, n2, rq::kPfC, dump_path.c_str());
     return 0;
   }

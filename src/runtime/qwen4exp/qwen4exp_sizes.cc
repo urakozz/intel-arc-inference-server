@@ -6,7 +6,9 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "kernels/prefill/pf_kernels.h"
 #include "loader/qwen4exp_layout.h"
+#include "runtime/buffer_sizes.h"
 #include "runtime/control.h"
 
 namespace runtime::qwen4exp {
@@ -173,6 +175,10 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
 uint32_t pf_tiles(const model::Qwen4ExpDesc& d, uint32_t C) {
   return (C * d.top_k + d.experts * (kPfTm - 1)) / kPfTm + (C + kPfTm - 1) / kPfTm;
 }
+uint32_t pf_items(const model::Qwen4ExpDesc& d, uint32_t C) {
+  const uint32_t mi = kernels::pf_moe::kItemM;
+  return (C * d.top_k + d.experts * (mi - 1)) / mi + (C + mi - 1) / mi;
+}
 size_t pf_block_gu_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.hidden) * 2 * d.moe_inter * 2; }
 size_t pf_block_dn_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.moe_inter) * d.hidden * 2; }
 uint32_t pf_batch_blocks_gu(const model::Qwen4ExpDesc& d) { return uint32_t(kPfBatchBytes / pf_block_gu_bytes(d)); }
@@ -226,8 +232,10 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.xg = std::max(R * d.hidden * 2, 2 * C * d.hc_n() * 2);   // also the PLE gate's gated / gn rows
   s.h = R * d.moe_inter * 2;
   s.y = C * d.hidden * 2;
-  s.w = kPfBatchBytes;
+  s.w = runtime::moe_pf_old_walk() ? kPfBatchBytes : pf_block_gu_bytes(d);
   s.ple_ids = C * d.ple_heads * 8;
+  s.cnt = (C + 63) / 64 * d.experts * 4;
+  s.items = size_t(pf_items(d, kPfC)) * 16;
   return s;
 }
 
@@ -244,7 +252,11 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
   const uint32_t dense = pf_dense_rows(pos, C), sparse = C - dense;
   const auto lin = [&](uint32_t N) { return size_t(2) * pf_slabs(N); };   // a slab kernel + pf_gemm per slab
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
-  const size_t moe = 4 + 2 * size_t(pf_batches_gu(d)) + 2 * size_t(pf_batches_dn(d)) + 1;
+  // router, route, sort, gather, the batches' dequant + GEMM pairs, combine; plan 2026-11-12: the sort's three
+  // launches, one fused GEMM a projection, and Intel's bf16 shared expert's dequant + GEMM pair a projection
+  const size_t moe = runtime::moe_pf_old_walk()
+                         ? 4 + 2 * size_t(pf_batches_gu(d)) + 2 * size_t(pf_batches_dn(d)) + 1
+                         : 9 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
   const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
   size_t qsa = 2 * hc + lin(d.qkvg_n()) + lin(d.idx_n()) + 3 + 1 + lin(d.linear(model::Q4LinearId::QsaO).shape.N) + moe;
   if (sparse > 0 && !injected) qsa += 2;          // q4_qsa_score, q4_qsa_select

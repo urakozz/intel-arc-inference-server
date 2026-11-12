@@ -306,6 +306,9 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_moe_variant(),
       pf_gemm_gu_variant(),
       pf_gemm_dn_variant(),
+      pf_moe_sort_mw_variant(kExperts, kTopK),            // plan 2026-11-12 Task 7: the sort and the fused GEMMs
+      pf_moe_q4gemm_variant(kHidden, 2 * kInter, true),
+      pf_moe_q4gemm_variant(kInter, kHidden, false),
       pf_ple_gather_variant(ple_bf16_scale),
       pf_bf16_slab_variant(kHidden, kPleKvN),
       pf_ple_variant(),
