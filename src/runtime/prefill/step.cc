@@ -791,4 +791,6 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   return n;
 }
 
+size_t step_cut_extra_launches(const model::ModelDesc& d) { return 2 - res_norm_launches(d); }
+
 }  // namespace runtime::prefill
