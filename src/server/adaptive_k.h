@@ -54,8 +54,9 @@ struct MtpCost {
   static constexpr double kDFlashDrafterInt8 = 0.298136 - kDFlashHeadInt8;
   static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.185105 / 29.222498;
   static constexpr double kDFlashDraftCandidateInt8 = 0.287036;
-  // Int4 PRE-H1/B4 provisional rows; Task7b replaces these before the serving bar. Candidate is DERIVED from
-  // the measured full-head int4 row and the pre-H1/B4 int8 candidate saving, until the combined probe measures it.
+  // Experimental PRE-H1/B4 RTN estimates; this form failed acceptance and is not selected by the CLI.
+  // Candidate is DERIVED from that full-head row and int8 candidate saving. Re-measure after the calibrated
+  // AutoRound export passes acceptance; the operator deferred that conversion.
   static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
   static constexpr double kDFlashDraftCandidateInt4 = 0.257769;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
