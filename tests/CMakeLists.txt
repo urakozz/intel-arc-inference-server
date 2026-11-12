@@ -999,6 +999,11 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
+  # Open-work 18: the walk of a chunk wider than 2048 rows.
+  kernel_pf_gemm_T0_R kernel_pf_gemm_T0_SILU_R
+  kernel_pf_dequant_slab_K5120_N16384_L1_BS kernel_pf_dequant_slab_K6144_N5120_L0_BS
+  kernel_pf_dequant_slab_K5120_N34816_L0_BS kernel_pf_dequant_slab_K17408_N5120_L0_BS
+  kernel_pf_dequant_slab_K5120_N14336_L0_BS
   # Spec 5's h8 path, which `--prefill-backend l0-int8` runs (pf_colmax_rot is in the
   # pf_requant_rot binaries).
   kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
