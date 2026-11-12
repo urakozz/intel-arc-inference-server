@@ -390,6 +390,11 @@ void set_default_prefill_chunk_cap(uint32_t cap) {
 }
 }  // namespace testing
 
+bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id) {
+  return !desc.is_moe() && (id == model::LinearId::QkvZ || id == model::LinearId::OutProj ||
+                             id == model::LinearId::Qkv || id == model::LinearId::OProj);
+}
+
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {
   if (chunk_cap != PrefillScratchDims::kCDefault && chunk_cap != PrefillScratchDims::kCMax)
     throw std::invalid_argument("int8_scratch_sizes: chunk cap " + std::to_string(chunk_cap) +
@@ -410,7 +415,7 @@ size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t l
   for (const model::LayerDesc& ld : desc.layer_descs()) {
     if (ld.index < first || ld.index >= last) continue;
     for (const model::FusedLinear& fl : ld.linears)
-      if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id))
+      if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id) && !l0_int8_bf16_linear(desc, fl.id))
         b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
   }
   // Spec 15d: a MoE layer's expert gate||up array (every block, the shared expert's too)

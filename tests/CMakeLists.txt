@@ -1504,8 +1504,10 @@ if(B70_MTP)
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
   # The judge by prefill form (operator ruling 2026-10-23): the tests that prefill with l0-int8 (every mtp_gpu_test
   # registration) are judged by references whose prompt pass applies the same int8 rounding - f32_refs.sh
-  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form).
-  set(B70_QWEN_FORCED_JUDGE_PFI8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8-forced" CACHE PATH
+  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). Open-work 17:
+  # int8 on the MLP's linears only (the mixer linears bf16), so a new dir and variable name - the old ones hold the
+  # all-int8 form's references, and a build tree's cache would keep the old path.
+  set(B70_QWEN_FORCED_JUDGE_PFI8MLP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts with the l0-int8 prompt pass (the mtp_gpu_test registrations)")
   # The operator's bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
   # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
@@ -1548,7 +1550,7 @@ if(B70_MTP)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
-      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
     # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
@@ -1561,7 +1563,7 @@ if(B70_MTP)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
       LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
@@ -1594,7 +1596,7 @@ exec "$@"
       # their own contexts' bf16 top-k files come from f32_refs.sh bf16top-qwen over r69.forced_dumps' longctx dumps).
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
         SKIP_RETURN_CODE 77
-        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     endif()
   endforeach()
@@ -1892,7 +1894,7 @@ if(B70_KV8)
     add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     b70_kv8_twin(mtp_gpu)
     set_property(TEST mtp_gpu_kv8_test APPEND PROPERTY ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   if(TEST prefix_gpu_int8_test)
     add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}

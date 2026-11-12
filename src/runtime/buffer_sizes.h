@@ -407,10 +407,16 @@ size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap
 // The three scratch buffers Int8State's constructor allocates for its `max_k` (the
 // MLP intermediate: down's K), and - separately, because they are built per weight
 // on first use - the rotated column scales: ws and 1/ws, fp32 [N] each, for every
-// int4 linear of every layer (lm_head excluded: it is never an h8 linear). Both are
+// h8 linear of every layer (lm_head excluded: it is never an h8 linear; a dense model's
+// mixer linears neither, l0_int8_bf16_linear). Both are
 // what `Int8State::bytes()` counts. The per-K sign tables (`signs_f32`, `sign_bits`:
 // K x 4 + K / 8 bytes for each of the 3-4 distinct K, ~0.1 MB) are NOT in bytes() and
 // so are not here either; they are inside the reserve (memory_plan.h).
+//
+// Open-work 17: on a dense model `l0-int8` runs the four mixer linears (qkv||z, out_proj, q||k||v, o_proj) on the
+// bf16 l0 walk and keeps int8 for the MLP (gate||up, down) - the rotated int8 mixer linears carried the long-prompt
+// miss. A MoE model keeps every dense int4 linear on h8 (open-work 16). True for those four on a dense model.
+bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id);
 struct Int8ScratchSizes {
   size_t xq, xs, w8;
   size_t total() const { return xq + xs + w8; }

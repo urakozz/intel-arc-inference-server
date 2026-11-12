@@ -18,10 +18,11 @@ for the keys --i8head-re matches (the tests that load LmHeadForm::Int8) - the en
 Qwen3.8): for the keys it matches (PFI8_RE: every mtp_gpu_ key - mtp_gpu_test and its twins run `l0-int8`) the
 positions of the TEST'S OWN prompt (tests/golden/prompts or tests/golden/toolcall <name>.ids, checked to be the key's
 prefix - the dumped context's prompt also holds the ids decoded before the divergence) take spec 5's int8 prefill
-linears: every int4 linear the h8 walk runs on Qwen3.8 (runtime/prefill/step.cc pf_linear / linear_i8_silu: GDN
-in_proj_qkv || in_proj_z and out_proj, FA q || k || v and o_proj, the MLP's gate || up and down) computes those rows
-as int8_sim.fq_x(x) . fq_w(w) (the rotation, per-token / per-column int8 codes, de-quantised; each weight's fq_w once
-per layer). What the walk keeps bf16 stays exact (in_proj_a / in_proj_b: pf_ab_proj; the head). The positions after
+linears: every int4 linear the h8 walk runs on Qwen3.8 (runtime/prefill/step.cc pf_linear / linear_i8_silu: the MLP's
+gate || up and down; open-work 17: the mixer linears - GDN in_proj_qkv || in_proj_z and out_proj, FA q || k || v and
+o_proj - are the bf16 l0 walk's) computes those rows as int8_sim.fq_x(x) . fq_w(w) (the rotation, per-token /
+per-column int8 codes, de-quantised; each weight's fq_w once per layer). What the walk keeps bf16 stays exact (the
+mixer linears; in_proj_a / in_proj_b: pf_ab_proj; the head). The positions after
 the test's prompt are the engine's M = 1 decode rows and stay plain f32. A trie node is a (token, prompt pass) pair, so
 a position is shared only by contexts that computed it the same way.
 
@@ -521,10 +522,10 @@ def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
     """One decoder layer over every trie position; `i8_mask` (bool [N]): the positions of the int8 prompt pass."""
     q8 = Int8Pass(i8_mask)
     h = _rows(lay.input_layernorm, X)
-    if lay.block_type == "linear_attention":
-        X = X + gdn(lay.linear_attn, h, trie, M, q8)
+    if lay.block_type == "linear_attention":   # the mixer linears plain: l0-int8 runs them bf16 (open-work 17)
+        X = X + gdn(lay.linear_attn, h, trie, M)
     else:
-        X = X + attention(lay.self_attn, h, trie, cos, sin, M, q8)
+        X = X + attention(lay.self_attn, h, trie, cos, sin, M)
     del h
     if q8.mask is None:
         return X + _rows(lambda x: lay.mlp(lay.post_attention_layernorm(x)), X)
@@ -550,8 +551,7 @@ def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask):
         b = min(N, a + chunk_rows)
         halo = min(a, lay.linear_attn.conv1d.kernel_size[0] - 1) if lay.block_type == "linear_attention" else 0
         h = lay.input_layernorm(X[a - halo:b])
-        mask = None if i8_mask is None else i8_mask[a - halo:b]
-        q8 = Int8Pass(mask)
+        q8 = Int8Pass(None)   # the mixer linears plain: l0-int8 runs them bf16 (open-work 17)
         if lay.block_type == "linear_attention":
             local = Trie([trie.tok[a - halo:b]])
             mix, state = gdn(lay.linear_attn, h, local, M, q8, state, halo, True)
