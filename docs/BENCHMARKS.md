@@ -1008,7 +1008,8 @@ The production DFlash path submits the pending projection, draft and verify toge
 passed with no skips: `dflash_profile_test`, `dflash_engine_test`, `dflash_gpu_test` and
 `dflash_prefix_gpu_test` (1620 s total). They check one submission per iteration, bitwise draft/readback,
 verify rows and ring, and projection materialization at snapshots, truncate and request end. The two-card
-`pp_dflash_test` remains pending while card 0 is occupied; Task 4 is not fully complete.
+`pp_dflash_test` passed in 114.02 s when both cards became idle (fresh rebuild, no skip). All five Task 4
+device checks and both calibrated host-gap bars pass; the full C7 cost targets below remain unmet.
 
 **Busy box, exclusive card 1**, paired medians with calibrated active plain rows at both depths. The steady-state
 probe prepares the last prompt row through verify/commit outside timing, leaving its projection pending for the
