@@ -136,7 +136,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     // composed path's ([24][rows][256], stride rows * 256, rows = pad256(C)), so
     // pf_attn_gate is unchanged. The kernel reads the cache rows [0, pos + C) only and masks
     // past `depth` itself, so neither max_len's padding nor stale cache rows can reach it.
-    // Spec 6c: RPW 8, grid (ceil(C / 8), 4, 1); phase 3 Task 7: RPW 32 below.
+    // Spec 6c: RPW 8, grid (ceil(C / 8), 4, 1); phase 3 Task 7: RPW 32 for Ornith below.
     // The WG size comes from the kernel's reqd_work_group_size (Context::launch).
     const uint32_t rows = attn_rows(C, backend);
     require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float),
@@ -150,9 +150,9 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
       profile_wait(cx, Phase::kAttnFlash);
       return;
     }
-    // MoE prefill phase 3 Task 7: 32 rows a work-group, Q in registers - bitwise the RPW 8 binary, which the TP
-    // card's 12 / 2 heads keep (not built there).
-    const bool r32 = !(q_heads == 12 && kv_heads == 2);
+    // MoE prefill phase 3 Task 7: Ornith's 16 / 2 heads take 32 rows a work-group, Q in registers - bitwise the RPW 8
+    // binary, which Qwen3.8 keeps (slower there at HPW 6) and the TP card's 12 / 2.
+    const bool r32 = q_heads == 16 && kv_heads == 2;
     const uint32_t rpw = r32 ? kernels::kPfFlashR32Rows : 8u;
     cx.launch(kc(r32 ? kernels::pf_flash_attn_r32_variant(q_heads, kv_heads)
                      : kernels::pf_flash_attn_variant(q_heads, kv_heads), "pf_flash_attn"), (C + rpw - 1u) / rpw, kv_heads,
