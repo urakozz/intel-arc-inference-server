@@ -21,8 +21,20 @@
 //   1  the same float, rounded by the hardware f32 -> bf16 conversion (RNE; cl_intel_bfloat16_conversions)
 //   2  the magic exponent: as_float(0x41800000 | q << 19) = 16 + q, fma(that, scale, -24 scale) = (q - 8) scale
 //      exactly (both products exact: 4-bit x 11-bit significands), then the hardware conversion
+//   4  (phase 3 Task 1, FORM 1 only) the EXACT integer (q - 8) as bf16, no scale: the same magic exponent, 16 + q - 24
+//      = q - 8 exactly, and the bf16 bits are the float's top half. The group's scale is applied to the group's DPAS
+//      partial sum instead (below), so the weight the model sees is the checkpoint's integer exactly.
 // EPI 1: gate||up's SiLU epilogue (pf_moe_gemm.cl's chain, verbatim) -> h bf16 [rows][N/2]; EPI 0: down,
-// y = rne(acc) bf16 [rows][N]; EPI 2 (FORM 3 only): the fp32 result before any epilogue -> [rows][N], the check.
+// y = rne(acc) bf16 [rows][N]; EPI 2 (FORM 3, and CVT 4): the fp32 result before any epilogue -> [rows][N], the check.
+//
+// CVT 4's group loop (pf_moe_w4a8.cl's, with a bf16 A): a zeroed fp32 tile per 64-k group takes the group's four k16
+// DPAS steps, then acc = fma(tile, scale[group][column], acc) - the scale is per lane (lane = column). The tile and
+// A for the whole group are live together, so the register budget allows NA 4 (32 rows) only.
+//
+// OPT bit 8 (FORM 1, EPI 1; `o8` in the plan): A is read through the sorted row table instead of the gathered xg -
+// `A` is the chunk's x [C][K] and the `xs` argument carries row_tok. One block read of a row's 32 k a message (the DPAS
+// A operand needs lane = k, row = register, which a 2D block read gives only for consecutive rows); a NONE row reads
+// zeros, rows past the item's last are clamped to it (their results are dropped by the store surface).
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -86,6 +98,16 @@ inline uint8 slab_read(__local const uint* p, uint lane) {
 #if N % WG_N != 0 || K % GROUP != 0
 #error "probe_moe_prefill: N whole work-group blocks, K whole 64-k groups"
 #endif
+#define INDEXED_A (((OPT) & 8) && EPI == 1)
+#if ((OPT) & 8) && FORM != 1
+#error "probe_moe_prefill: the indexed A (OPT bit 8) is FORM 1"
+#endif
+#if CVT == 4 && FORM != 1
+#error "probe_moe_prefill: CVT 4 (exact integer weights) is FORM 1"
+#endif
+#if CVT == 4 && NA != 4
+#error "probe_moe_prefill: CVT 4 holds a whole 64-k group of A and a tile per atom: NA 4"
+#endif
 #if EPI == 1 && NB % 2
 #error "probe_moe_prefill: the SiLU epilogue pairs atoms (NB even)"
 #endif
@@ -145,6 +167,13 @@ inline uint q4_pair(uint w, int p, float scale) {
   else Q4V(24, 28);
 #undef Q4V
   return r;
+#elif CVT == 4
+  (void)scale;   // the integer, not the product: the scale is applied to the group's partial sum
+  const uint blo = 8 * p <= 19 ? (w << (19 - 8 * p)) : (w >> (8 * p - 19));
+  const uint bhi = 8 * p + 4 <= 19 ? (w << (15 - 8 * p)) : (w >> (8 * p + 4 - 19));
+  const float flo = as_float((blo & 0x00780000u) | 0x41800000u) - 24.0f;   // 16 + q - 24 = q - 8, exact
+  const float fhi = as_float((bhi & 0x00780000u) | 0x41800000u) - 24.0f;
+  return (as_uint(fhi) & 0xFFFF0000u) | (as_uint(flo) >> 16);   // small integers: the low 16 bits are zero
 #elif CVT == 9
   (void)scale;   // DIAGNOSTIC: no conversion (the words as B bits) - prices the conversion; not a B value
   return w ^ (0x01010101u * (uint)p);
@@ -202,8 +231,13 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
 #if FORM == 1
   if (!live) return;                                  // no barrier in FORM 1
 #endif
+#if INDEXED_A
+  __global const uint* restrict rt = (__global const uint*)xs;   // row_tok
+  const uint row_last = row0 + rows - 1u;
+#else
   __global const ushort* restrict Ab = A + (size_t)mb * K;
   const int a_w = K * 2, a_h = R, a_p = K * 2;
+#endif
   float8 acc[NA][NB];
 #pragma unroll
   for (int a = 0; a < NA; ++a)
@@ -226,19 +260,66 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
     uint wn[NB][8];
     float sn_[NB];
     if (g + 1 < G) { LOAD_GROUP(g + 1, wn, sn_) }
+#if CVT == 4
+    ushort afrag[2][NA / 4][64];   // the group's A: 32 rows x 64 k
+#pragma unroll
+    for (int h = 0; h < 2; ++h)
+#pragma unroll
+      for (int r = 0; r < NA / 4; ++r) {
+        const uint k0 = g * GROUP + (uint)h * 32u;
+        intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
+                                                   a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[h][r]);
+      }
+#pragma unroll
+    for (int b = 0; b < NB; ++b) {
+      int8 bv[4];   // the four k16 steps of the group, exact integers
+#pragma unroll
+      for (int s4 = 0; s4 < 4; ++s4) bv[s4] = q4_half(wq[b][2 * s4], wq[b][2 * s4 + 1], sc[b]);
+#pragma unroll
+      for (int a = 0; a < NA; ++a) {
+        float8 tile = (float8)(0.0f);
+#pragma unroll
+        for (int s4 = 0; s4 < 4; ++s4) {
+          const short8 af = as_short8(vload8(0, afrag[s4 / 2][a / 4] + (uint)((s4 % 2) * 32 + 8 * (a % 4))));
+          tile = BF16_MAD(af, bv[s4], tile);
+        }
+        acc[a][b] = fma(tile, (float8)(sc[b]), acc[a][b]);
+      }
+    }
+#else
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
       const uint k0 = g * GROUP + (uint)h * 32u;
+#if INDEXED_A
+      ushort rv[NA][8][2];   // row (a, r)'s k0 .. k0 + 31 as two k16 steps, lane = k
+#pragma unroll
+      for (int a = 0; a < NA; ++a)
+#pragma unroll
+        for (int r = 0; r < 8; ++r) {
+          const uint t = rt[min(mb + 8u * (uint)a + (uint)r, row_last)];
+          const ushort2 v = t == NONE ? (ushort2)(0) : intel_sub_group_block_read_us2(A + (size_t)t * K + k0);
+          rv[a][r][0] = v.s0;
+          rv[a][r][1] = v.s1;
+        }
+#else
       ushort afrag[NA / 4][64];
 #pragma unroll
       for (int r = 0; r < NA / 4; ++r)
         intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
                                                    a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
+#endif
 #pragma unroll
       for (int ks = 0; ks < 2; ++ks) {
         short8 af[NA];
+#if INDEXED_A
+#pragma unroll
+        for (int a = 0; a < NA; ++a)
+          af[a] = (short8)((short)rv[a][0][ks], (short)rv[a][1][ks], (short)rv[a][2][ks], (short)rv[a][3][ks],
+                           (short)rv[a][4][ks], (short)rv[a][5][ks], (short)rv[a][6][ks], (short)rv[a][7][ks]);
+#else
 #pragma unroll
         for (int a = 0; a < NA; ++a) af[a] = as_short8(vload8(0, afrag[a / 4] + (uint)(ks * 32 + 8 * (a % 4))));
+#endif
 #pragma unroll
         for (int b = 0; b < NB; ++b) {
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
@@ -247,6 +328,7 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
         }
       }
     }
+#endif
 #pragma unroll
     for (int b = 0; b < NB; ++b) {
 #pragma unroll
@@ -341,6 +423,15 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
       intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)X, x_w, x_h, x_p, (int2)((int)(ng >> 1), 8 * a), xv);
     }
 #undef PF_SILU_ROW
+#elif EPI == 2
+  __global float* restrict Cf = (__global float*)out + (size_t)mb * N;   // the fp32 result, the check's
+  const int c_w = N * 4, c_h = min((int)R, (int)(rows - R * sm)), c_p = N * 4;
+#pragma unroll
+  for (int a = 0; a < NA; ++a)
+#pragma unroll
+    for (int b = 0; b < NB; ++b)
+      intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Cf, c_w, c_h, c_p,
+                                                 (int2)((int)(nb + 16u * (uint)b), 8 * a), (__private uint*)&acc[a][b]);
 #else
   __global ushort* restrict Y = (__global ushort*)out + (size_t)mb * N;
   // The surface ends at the item's last row: a 64-row sub-group whose second half is past the item would

@@ -3752,6 +3752,25 @@ st_r84_probe() {
   finish
 }
 
+# ======================================================================================
+row 85 "phase 3 of the MoE-model prefill - the router on the dense GEMM, exact-integer expert weights, the shared expert as dense, the indexed A, the attention tile (plan 2026-11-12-moe-model-prefill-phase3 Task 1)"
+rownote 85 "Opt-in probes. r85.probe: probe_route (router N 272 and a||b N 128 on pf_gemm against the bound GEMV, M 2048 / 4096), probe_moe_prefill on Ornith's route dump (the c4 exact-integer arms, shd = the shared expert as dense, o9 = the indexed A, each after its check; the GATE lines), probe_flash_attn --heads 16x2 (RPW 8 / 16 / 32 x QREG against today's pf_flash_attn at pos 0 and 12288, C 4096). r85.span: gdn_gate_span.py over r84.dump's gate sums. Record: docs/probes/probe-prefill-phase3-2026-11-13.md."
+stage r85.probe 85 optin card ornith r83.routes "the phase 3 Task 1 probes on card 0: probe_route, probe_moe_prefill (Ornith, C = 2048 and 4096), probe_flash_attn (Ornith heads, pos 0 and 12288)"
+st_r85_probe() {
+  chk "build/tools/probe/probe_route --rounds 9 --rows 2048,4096" "probe_route (the router and a||b on pf_gemm)"
+  chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5 --arms F1.a8b2m1n8.c2x0o1,F1.a4b2m1n8.c4x0o1,F1.a4b4m1n4.c4x0o1,F1.a8b2m1n8.c2x0o9" "probe_moe_prefill (c4, shd, o9 beside the chosen arm)"
+  chk "build/tools/probe/probe_flash_attn 0 4096 --heads 16x2 --time" "probe_flash_attn, Ornith heads, C 4096 at pos 0"
+  chk "build/tools/probe/probe_flash_attn 12288 4096 --heads 16x2 --time" "probe_flash_attn, Ornith heads, C 4096 at pos 12288"
+  grab_all result '^(RESULT|GATE|GEMMCHECK|TIME|BITWISE|# checks|# FAILED|\| check|\| pfao_|\| today|pfao_|today)' 400
+  finish
+}
+stage r85.span 85 optin card ornith r84.dump "gdn_gate_span.py over r84.dump: the largest gate span inside one 64-row sub-chunk (nats) for Ornith's layers 0 / 12 / 28; above 80 is reported to the operator"
+st_r85_span() {
+  chk "python3 tools/probe/gdn_gate_span.py $STATE/r84.gdn" "the gate span check"
+  grab_all span '^SPAN' 8
+  finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
