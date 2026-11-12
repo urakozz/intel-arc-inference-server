@@ -398,6 +398,9 @@ if(B70_ORNITH)
                    DEFINES K=2048 N=1024 TM=32 I8=1 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_gemm_K512_N2048 SOURCE ${PF_MOE_GEMM_CL}
                    DEFINES K=512 N=2048 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
+  # Plan 2026-11-12 Task 2: the multi-work-group sort (blocks of TB = 64 tokens; no chunk cap of its own).
+  add_ocloc_kernel(pf_moe_sort_mw_E256_T8 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_sort_mw.cl
+                   DEFINES EXPERTS=256 TOP_K=8 TM=32 TB=64 MI=64)
 endif()
 
 # ==== Spec 15e: Ornith's MTP head KV fill during prefill (runtime/prefill/step.cc) == (begin) ==

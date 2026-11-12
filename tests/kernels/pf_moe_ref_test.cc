@@ -437,10 +437,37 @@ void test_chunk_vs_decode() {
   std::puts("  chunk boundary: 70 tokens as one chunk and as 37 + 33, bitwise equal");
 }
 
+// Plan 2026-11-12 Task 2: the blocked walk (pf_moe_sort_mw.cl's) == the serial one, every buffer, at Ornith's
+// shape and Flash-Next's (512 experts, top 10): random routes, every token on the same top_k experts, one-row
+// experts (the tile bound's adversary), and C = 1 / 37 / 2048 / 4096 / 16384.
+void test_sort_blocked() {
+  const moe_ref::Shape shapes[] = {moe_ref::ornith_shape(), moe_ref::Shape{512, 10, 2560, 640, 528}};
+  size_t runs = 0;
+  for (const moe_ref::Shape& sh : shapes)
+    for (uint32_t C : {1u, 37u, 2048u, 4096u, 16384u})
+      for (int kind = 0; kind < 3; ++kind) {
+        std::vector<uint32_t> rt(size_t(C) * moe_ref::kWords, 0);
+        std::mt19937 rng(C * 7 + uint32_t(kind));
+        uint32_t single = sh.top_k;
+        for (uint32_t t = 0; t < C; ++t) {
+          std::vector<uint32_t> ids(sh.experts);
+          std::iota(ids.begin(), ids.end(), 0u);
+          if (kind == 0) std::shuffle(ids.begin(), ids.end(), rng);
+          for (uint32_t j = 0; j < sh.top_k; ++j) rt[size_t(t) * moe_ref::kWords + j] = ids[j];
+          if (kind == 2 && single < sh.experts) rt[size_t(t) * moe_ref::kWords] = single++;
+        }
+        const pf_moe_ref::Sorted a = pf_moe_ref::sort(rt.data(), C, sh), b = pf_moe_ref::sort_blocked(rt.data(), C, sh);
+        CHECK(a.hdr == b.hdr && a.tiles == b.tiles && a.row_tok == b.row_tok && a.pair_row == b.pair_row);
+        ++runs;
+      }
+  std::printf("  the blocked sort (64-token blocks) == the serial one: %zu routes, both shapes, C up to 16384\n", runs);
+}
+
 }  // namespace
 
 int main() {
   test_sort();
+  test_sort_blocked();
   test_row_independence();
   test_combine_is_decode();
   test_chunk_vs_decode();
