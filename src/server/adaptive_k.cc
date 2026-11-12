@@ -37,7 +37,7 @@ MtpCost MtpCost::tp_int8_head() {
 MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
   MtpCost c;
   // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md).
-  // The bf16 verify rows are derived equal to int8; int4 rows await the combined profile.
+  // The bf16 and experimental RTN int4 verify rows are derived equal to int8.
   c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
   if (candidate_head)
     c.verify = {0.997314, 1.045223, 1.094038, 1.114742, 1.161674, 1.208605, 1.230177, 1.242865};

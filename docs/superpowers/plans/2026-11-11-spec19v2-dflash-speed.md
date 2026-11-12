@@ -194,7 +194,8 @@ deferred projection equals today's at every flush point: plain step, request end
 H1/B4 attention geometry is selected at `f0a3261e` after primitive and real-model bitwise checks: five-launch
 attention sum 2.696458 → 2.084063 ms at pos4096/K7. Norms account for only ~0.1275 ms; the ledger records the
 profile-driven choice. Parallel-exp passes bitwise but regresses steady K7; both local K-cache controls fail
-bitwise and are rejected. The detached policy integration/numerical/cost round is running; C7 is not passed.
+bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The full numerical and
+combined acceptance checks are pending. GPU work is paused for the operator; card1 released at 15:23 UTC.
 
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
@@ -205,8 +206,11 @@ bitwise and are rejected. The detached policy integration/numerical/cost round i
   the prefix cache with `--spec off` fixed; Task 8 needs `--spec off` / `--mtp auto` / `--spec dflash` with the prefix
   cache ON in every arm. Take the cards through `tools/gpu_lock.sh` (never set `ZE_AFFINITY_MASK` by hand) and stop the
   server the way `tools/box_validate/serve_run.sh` does (its own child, wait for exit), not a bare `kill`.
-- [ ] **Step 2 (cost table):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
+- [x] **Step 2 (current int8 arm):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
   medians; **Gate:** the table equals the new medians, so Task 8 does not run on Task 3's pre-optimisation costs.
+  - `6196c30a`: H1/B4 int8 full/candidate verify and draft rows match the paired 4k medians; numeric regression
+    RED→GREEN, three host checks and serve/decode build PASS. BF16 rows remain explicitly derived. RTN is not
+    selected by the CLI; its noisy candidate 4k wall result is not used as a policy table. AutoRound is deferred.
 **Operator 2026-11-12:** finish RTN cost diagnostics, defer proper AutoRound conversion. Evaluate the quality-safe
 int8 body with the selected head/geometry in Task 8; this does not close C2 or qualify the failed RTN arm.
 

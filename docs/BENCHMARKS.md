@@ -1104,6 +1104,27 @@ projection + host is 2.247761 ms; concurrent CPU reference work makes these busy
 speed bar is still a separate rotated serving comparison. All five profiled attention launches bind H1/B4.
 Evidence: `~/b70/logs/dflash-v2/task7/policy-h1b4/{device.xml,iter-{full,candidate}-{4096,32768}.log}`.
 
+The RTN int4 H1/B4 diagnostic completed all four profiles before the operator reclaimed card1:
+
+| RTN body / head mode | depth | draft ms / plain steps | iteration, plain steps |
+|---|---:|---:|---:|
+| full int8 head | 4096 | 7.784417 / 0.265500 | 1.542619 |
+| candidate64 + exact rerank | 4096 | 11.264767 / 0.350649 | 1.554384 |
+| full int8 head | 32768 | 7.109450 / 0.215375 | 1.546868 |
+| candidate64 + exact rerank | 32768 | 6.565448 / 0.198730 | 1.498815 |
+
+**The candidate 4k wall profile is noisy and is not a policy calibration:** its empty submit/fence costs
+0.751771 ms versus 0.012662–0.014936 ms in the other three arms, projection is 3.248991 ms, and verify(3)
+appears more expensive than verify(4). The saved measurements remain busy-box diagnostics. They do not repair
+RTN's failed acceptance; no RTN arm is enabled for serving. AdaptiveK uses the new measured int8 full/candidate
+rows; experimental RTN estimates remain explicitly unqualified pending the deferred AutoRound follow-up.
+Evidence: `~/b70/logs/dflash-v2/task7b/h1b4-candidate-int8/iter-int4-{full,candidate}-{4096,32768}.log`.
+
+At the GPU handoff, the next baseline calibration was interrupted: 2463 complete rows match the original
+4256-row baseline, with one truncated line. This is **partial, not a passed calibration**; it is archived under
+`paused-2026-11-12T1523/` beside `calibration-status.json`. Combined H1/B4/candidate acceptance, the full numerical
+check and Task 8 remain pending. Card1 was released for the operator at 15:23 UTC; no queued DFlash job remains.
+
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
 **`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,
