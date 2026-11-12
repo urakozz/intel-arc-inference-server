@@ -13,6 +13,9 @@ gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82
 > (`- [ ]`) syntax. **Commit after every step** (signed, no trailers; a step that does not build or pass yet goes in as a
 > `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop. Box jobs: every GPU job
 > through `tools/gpu_lock.sh`, long jobs detached, checked at most every 30 min.
+> Keep the implementation turn active while a detached job runs: use completion notifications and continue
+> independent work, then resume from the result. Answer status questions in commentary; a detached job continuing
+> after a final response does not mean implementation is continuing. Stop when the operator pauses or input is required.
 
 **Goal:** an iteration at K = 7 of <= 1.35 plain steps, and `--spec dflash` >= 1.10x `--mtp auto` on the opencode
 recording with no loss > 3 % elsewhere. Greedy output stays identical to `--spec off` under the f32 judge.
@@ -138,6 +141,11 @@ deferred projection equals today's at every flush point: plain step, request end
 - int8 stays reachable through `CaptureOptions` / the loader's test entry for the A/B.
 
 - [ ] **Step 1 (Mac):** loader + capture + host twin tests, `mac_check` green. Commit.
+  - Source checkpoints `70d66833` / `a8c213b7`: RTN int4 layout-1 loader/upload, distinct prefix key, all eight
+    drafter shapes on M=8 `gemm_sm`, forced-GEMV twin and f32 judge. Four host checks, GPU/probe syntax and
+    app/kernel build PASS on the box. Device precision/cost gates are running; serving default remains int8.
+    The existing byte formula reports 843,439,104 B saved. Nine acceptance-comparator unit tests PASS; it reuses
+    the original int8 baseline without loading a CPU model and requires matching anchors and all K/corpora.
 - [ ] **Step 2 (box):** `dflash_draft_test`, `r82.accept` with the int4 arm, `r82.iter`.
   - **Gates:**
     - G-drafter: E_K within 0.05 of int8 on A4, code, prose and the held-out opencode slice;
