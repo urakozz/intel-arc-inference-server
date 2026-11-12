@@ -245,19 +245,20 @@ struct PrefillScratchSizes {
 // (moe_prefill_tiles). Ornith at kC 2048: 824 tiles, 26,368 rows; ~0.69 GB in all, 0.54 of
 // it the weight batch.
 struct MoePrefillLayout {
-  uint32_t tmax = 0, rows = 0;   // at kC
+  uint32_t tmax = 0, rows = 0;   // at the chunk cap
   size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
          row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0,
          cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
          items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
          xsg_tok_off = 0,        // W4A8 (l0-int8): the chunk's per-token 64-k group scales, fp32 [C][hidden / 64]
          xsg_off = 0;            // and the sorted rows', fp32 [rows][hidden / 64]
-  uint32_t ibound = 0;           // at kC
+  uint32_t ibound = 0;           // at the chunk cap
   size_t w = 0;                  // the weight batch's bytes
   size_t total = 0;
   size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
 };
-MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc);   // all zero when dense
+// At the session's chunk cap (plan 2026-11-12 Task 6: 2048 or 4096 on the new walk); all zero when dense.
+MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap = 2048);
 // tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
 uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
 // The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
@@ -279,8 +280,8 @@ struct PrefillScratchDims {
   // Plan 5d: the chunk's row count is a SESSION value, the chunk cap - kCDefault (ruling
   // A13's 2048) or kCMax (4096) - and every per-chunk buffer is sized by it. There is no
   // single kC any more: a site that bounds a chunk asks the scratch it writes
-  // (PrefillScratch::chunk_cap(), Int8State::chunk_cap()). A MoE model stays at 2048
-  // (check_prefill_chunk_cap below).
+  // (PrefillScratch::chunk_cap(), Int8State::chunk_cap()). A MoE model takes either since plan
+  // 2026-11-12 (2048 only on B70_PF_MOE=old: check_prefill_chunk_cap below).
   static constexpr uint32_t kCDefault = 2048;        // ruling A13 (was 4096)
   static constexpr uint32_t kCMax = 4096;            // plan 5d
   static constexpr uint32_t kGdnChunk = 64;          // the FLA intra-chunk size
@@ -293,9 +294,9 @@ struct PrefillScratchDims {
 };
 
 // Plan 5d: the chunk caps a model may run. Throws std::invalid_argument unless `chunk_cap`
-// is kCDefault or kCMax, and - naming the model - for kCMax on a MoE model: pf_moe bakes
-// KC = 2048 into its SLM sort staging (src/kernels/prefill/pf_moe.cl), and a KC 4096
-// variant is not built.
+// is kCDefault or kCMax, and - naming the model - for kCMax on a MoE model on today's walk
+// (B70_PF_MOE=old): pf_moe_sort bakes KC = 2048 into its SLM staging (src/kernels/prefill/pf_moe.cl).
+// The multi-work-group sort has no KC (plan 2026-11-12 Task 6).
 void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap);
 // The cap a `--prefill-chunk C` width needs: 0 for C = 0 (nothing asked), kCDefault for
 // C <= 2048, kCMax for C <= 4096; above 4096, or a cap the model refuses, throws
