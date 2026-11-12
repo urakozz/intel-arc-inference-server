@@ -511,6 +511,11 @@ int main(int argc, char** argv) {
       if (jr.near)
         std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
                     !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
+      if (J && !jok) {   // a miss's margins: the judge's lead of its token over the engine's, the engine's the other way
+        const float* jrow = J.row(jrow_i);
+        std::printf("  margins: f32 %.4f (1 bf16 ulp %.4f), engine %.4f", jrow[want] - jrow[id], jr.ulp,
+                    dec[id] - dec[want]);
+      }
       if (acc && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
       if (acc && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");

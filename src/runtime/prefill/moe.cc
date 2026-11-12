@@ -34,21 +34,23 @@ T* at(l0::Mem& m, size_t off) {
 
 }  // namespace
 
-bool moe_old_walk() {
-  static const bool old = [] {
-    const char* v = std::getenv("B70_PF_MOE");
-    return v != nullptr && std::string(v) == "old";
-  }();
-  return old;
-}
+bool moe_old_walk() { return moe_pf_old_walk(); }
+
+namespace {
+// l0-int8's gate||up as spec 5's rotated int8 (pf_requant_rot + pf_moe_gemm_i8, the default): neither experiment
+// switch is set. Plan 2026-11-12 Task 5: both candidates (W4A8, bf16 experts) missed the f32 judge's token gate.
+bool int8_requant(PrefillBackend b) { return b == PrefillBackend::L0Int8 && !moe_pf_w4a8() && !moe_pf_i8bf16(); }
+}  // namespace
 
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
   // router GEMV + moe_route + combine; the sort (one launch, or the multi-work-group sort's three); down: the
   // fused GEMM (one launch) or the batches' dequant + GEMM pairs.
   const bool old = moe_old_walk();
   size_t n = 3 + (old ? 1 : 3) + (old ? 2 * size_t(batches(d, MoeWeightForm::DownBf16)) : 1);
-  if (b == PrefillBackend::L0Int8)
+  if (int8_requant(b))
     n += 4;   // quantiser, gather_i8, requant (the whole array), the i8 GEMM
+  else if (b == PrefillBackend::L0Int8 && moe_pf_w4a8())
+    n += 3;   // W4A8 (experiment): quantiser, gather, GEMM
   else
     n += 1 + (old ? 2 * size_t(batches(d, MoeWeightForm::GateUpBf16)) : 1);   // gather, the gate||up GEMM(s)
   return n;
@@ -56,7 +58,7 @@ size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
 
 void moe_prepare_int8(Context& cx, KernelCache& kc, Int8State& q, const loader::LoadedModel& m) {
   const model::ModelDesc& d = *m.desc;
-  if (!d.is_moe()) return;
+  if (!d.is_moe() || !int8_requant(PrefillBackend::L0Int8)) return;   // the rotated int8 form's column scales
   for (const loader::MoeLayer& w : m.moe)
     q.scales_layout1(cx, kc, w.gate_up.ptr(), d.hidden, d.moe.blocks() * 2 * d.moe.expert_intermediate);
 }
@@ -131,7 +133,24 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   profile_wait(cx, Phase::kMoeSort);
 
   // 3. gate||up, SiLU fused -> h [rows][I].
-  if (backend == PrefillBackend::L0Int8) {
+  if (backend == PrefillBackend::L0Int8 && moe_pf_w4a8()) {
+    // plan 2026-11-12 Task 5, EXPERIMENT (B70_PF_MOE=w4a8): W4A8 - the chunk's rows to int8 per token and 64-k group
+    // (pf_quant_g64, no rotation), gathered with their group scales, x the int4 blocks as the s4 DPAS operand. It
+    // failed the f32 judge's token gate on 2026-11-12 (89 / 92 determined rows against today's 90, the c16 gate 91
+    // against 92), so l0-int8's experts run the bf16 fused path below - D1 as first ruled.
+    require(H <= q->max_k() && C <= q->chunk_cap(), "the int8 state's rows do not hold the chunk");
+    float* xs_tok = at<float>(*s.moe, L.xsg_tok_off);
+    float* xs_row = at<float>(*s.moe, L.xsg_off);
+    const std::string wv = kernels::pf_moe_w4a8_variant(H, NG);
+    cx.launch(kc(wv, "pf_quant_g64"), C, 1, 1, {PtrArg(s.x.ptr()), PtrArg(q->xq().ptr()), PtrArg(xs_tok), arg_val(C)});
+    cx.launch(kc(wv, "pf_moe_gather_i8g"), rows, 1, 1,
+              {PtrArg(q->xq().ptr()), PtrArg(xs_tok), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg), PtrArg(xs_row)});
+    profile_wait(cx, Phase::kMoeGather);
+    cx.launch(kc(wv, "pf_moe_w4a8"), NG / kernels::pf_moe::kQ4WgN, ibound, 1,
+              {PtrArg(items), PtrArg(xg), PtrArg(xs_row), PtrArg(w.gate_up.ptr()),
+               PtrArg(w.gate_up.as<uint32_t>() + size_t(E) * gu_words), PtrArg(h)});
+    profile_wait(cx, Phase::kMoeGemm);
+  } else if (int8_requant(backend)) {
     // spec 5's h8: the chunk's x rotated and quantised ONCE per token (pf_quant_had at the
     // hidden size), the int8 rows and their scales gathered into sorted order, the layer's
     // whole gate||up array requantised into the VNNI-4 batch (one launch over every block:
@@ -158,8 +177,10 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
               {PtrArg(tiles), PtrArg(xg), PtrArg(xs), PtrArg(wb), PtrArg(sc.first.ptr()), PtrArg(h),
                arg_val(0u), arg_val(B), arg_val(nall)});
     profile_wait(cx, Phase::kMoeGemm);
-  } else if (!moe_old_walk()) {
-    // plan 2026-11-12 Task 3: one launch over the work items, B read from the int4 blocks (no weight pass)
+  } else if (!moe_old_walk() && (backend == PrefillBackend::L0 || moe_pf_i8bf16())) {
+    // plan 2026-11-12 Task 3: one launch over the work items, B read from the int4 blocks (no weight pass). Task 5,
+    // EXPERIMENT (B70_PF_MOE=i8bf16): l0-int8's experts here too (operator D1 as first ruled: int8 dense linears,
+    // bf16 experts) - it missed the f32 judge's token gate on 2026-11-12 (90 / 92 and the c16 gate 90 / 92)
     cx.launch(kc(pv, "pf_moe_gather"), rows, 1, 1,
               {PtrArg(s.x.ptr()), PtrArg(hdr), PtrArg(row_tok), PtrArg(xg)});
     profile_wait(cx, Phase::kMoeGather);
