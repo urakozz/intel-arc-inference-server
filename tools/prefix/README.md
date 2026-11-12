@@ -22,14 +22,17 @@ Tests: `python3 tools/prefix/test_analyze_log.py`.
 
 ## DFlash's final speculation replay (spec 19 v2 Task 7b)
 
-Run in the quiet-box session after the final cost and combined acceptance gates:
+Run after the final cost and combined acceptance gates. One idle GPU is sufficient. The operator permits the
+other card to be busy when more than 16 of 44 CPU threads are available; check that before a card-only run:
 
 ```bash
-tools/probe/detach.sh ~/b70/logs/dflash-v2/quiet.log \
-  python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 ~/b70/logs/dflash-v2/quiet/session-int8
+tools/probe/detach.sh ~/b70/logs/dflash-v2/card1.log \
+  python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 ~/b70/logs/dflash-v2/card1/session-int8 --card 1
 ```
 
-The script takes `gpu_lock.sh box` itself; do not wrap it in another GPU lock. It forces one card with
+The script takes `gpu_lock.sh card N` itself with `--card N`; without it, the script takes the whole-box lock.
+Do not wrap it in another GPU lock. Card-only runs carry a busy-box grade; record CPU availability and concurrent
+work with the results. It forces one card with
 `--parallel 1` and replays `--spec off`, `--spec mtp --mtp auto`, and `--spec dflash`, in three rotated rounds.
 Every arm keeps the prefix cache on (32 GiB), context 131072, bf16 KV, int8 target head, greedy sampling and the
 recorded output cap. The MTP arm must report `adaptive per step`; an inherited `B70_MTP_STEP_K=0` is cleared.
@@ -40,7 +43,7 @@ Use a new output directory for each recording; repeat on `opencode-session` and 
 `table.txt` uses the server's decode spans and reports median ratios, including DFlash/MTP. Per-arm
 `requests.jsonl` retains prompt/output ids for `serve_judge.py`; unique request tags pair the logs even if their
 filenames reflect a different completion order. `run.json` records the binary hash, policy, shape, order and
-judge result. Missing f32 references leave forced contexts and return **77**, not PASS. This replay alone does
+judge result, selected card and resource grade. Missing f32 references leave forced contexts and return **77**, not PASS. This replay alone does
 not establish Task 8's other-corpus or prefill regression bars.
 
 Host-only stand-in tests: `python3 tools/prefix/test_replay_spec.py`.

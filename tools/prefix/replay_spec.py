@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Task 7b: three rotated speculation arms with the prefix cache on; run only in the quiet-box session.
+"""Task 7b: three rotated speculation arms with the prefix cache on, using one idle GPU.
 
   python3 tools/prefix/replay_spec.py RECORDING OUT [--model SNAPSHOT] [--draft-model SNAPSHOT]
 
-Takes the whole-box GPU lock and forces --parallel 1, without setting device affinity. All arms use bf16 KV,
+Takes the whole-box GPU lock, or only --card N, and forces --parallel 1. The lock helper sets device affinity.
+For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use bf16 KV,
 int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
 'adaptive per step'. Writes serve_client-compatible requests.jsonl per arm/round, table.txt and the f32 judge's
 judge.log/forced contexts. Missing f32 references return 77, never a pass. Final G-speed also needs Task 8's
@@ -123,6 +124,7 @@ def run(a):
     (a.out/'run.json').write_text(json.dumps({'orders': orders, 'model': a.model, 'drafter': a.drafter,
                                              'recording': str(a.log.resolve()), 'binary_sha256': binary_sha,
                                              'prefix_cache_gb': 32, 'parallel': 1, 'max_len': 131072,
+                                             'card': a.card, 'grade': 'busy box' if a.card is not None else 'quiet box',
                                              'mtp_policy': 'per-step default', 'judge_rc': verdict.returncode}, indent=2)+'\n')
     print(f'REPLAY_SPEC complete: timings in table.txt; f32 judge rc={verdict.returncode}', flush=True)
     return verdict.returncode
@@ -135,6 +137,7 @@ def main(argv=None):
     ap.add_argument('--model', default='urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ')
     ap.add_argument('--draft-model', dest='drafter', default='z-lab/Qwen3.8-27B-DFlash2')
     ap.add_argument('--rounds', type=int, default=3)
+    ap.add_argument('--card', type=int, choices=(0, 1), help='reserve only this idle card; otherwise reserve the box')
     ap.add_argument('--port', type=int, default=8218)
     ap.add_argument('--wait', type=float, default=900)
     ap.add_argument('--judge', type=Path, default=ROOT/'oracle-out-qwen-f32-i8head-forced')
@@ -142,7 +145,8 @@ def main(argv=None):
     ap.add_argument('--under-lock', action='store_true', help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
     if not a.under_lock:
-        command = [str(ROOT/'tools/gpu_lock.sh'), 'box', '--', sys.executable, str(Path(__file__).resolve()),
+        lock = ['box'] if a.card is None else ['card', str(a.card)]
+        command = [str(ROOT/'tools/gpu_lock.sh'), *lock, '--', sys.executable, str(Path(__file__).resolve()),
                    '--under-lock', *(sys.argv[1:] if argv is None else argv)]
         return subprocess.run(command, cwd=ROOT).returncode
     for sig in (signal.SIGTERM, signal.SIGINT):

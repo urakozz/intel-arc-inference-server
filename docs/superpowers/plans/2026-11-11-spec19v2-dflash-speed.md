@@ -2,8 +2,9 @@
 
 **Status (2026-11-12): IN PROGRESS, operator resumed.** Tasks 1-2 complete: calibrated costs, G0, GPU profiling,
 CPU G-accept and 39/39 serving correctness PASS. The **80.5 t/s early bar PASSED** at 88.806 t/s. Continue Tasks
-3-7 and 7b. Task 8 belongs to the quiet-box session and must compare against main's per-step MTP (`f65ae50e` or
-later), enabled by default for `--mtp auto`. Further GPU validation uses an available, idle card; card 0 is busy
+3-7 and 7b. Operator update: Task 8 may use one idle card while the other is busy, provided more than 16 of
+44 CPU threads are available. Label those measurements "busy box". Compare against main's per-step MTP (`f65ae50e`
+or later), enabled by default for `--mtp auto`. Further GPU validation uses an available, idle card; card 0 is busy
 with prefill work. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
@@ -167,8 +168,8 @@ deferred projection equals today's at every flush point: plain step, request end
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
 - [x] **Step 1 (harness):** `tools/prefix/replay_spec.py` uses three rotated speculation arms, prefix cache on,
-  whole-box lock and one-card serving, default per-step MTP, controlled child shutdown, server-clock metrics
-  and f32 judging. Five stand-in tests PASS; no real replay run. Implemented independently while Task 4's
+  whole-box lock or explicit `--card N` and one-card serving, default per-step MTP, controlled child shutdown,
+  server-clock metrics and f32 judging. Stand-in tests cover both lock modes; no real replay run. Implemented independently while Task 4's
   frozen C++ build waits for GPU validation. Adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
   the prefix cache with `--spec off` fixed; Task 8 needs `--spec off` / `--mtp auto` / `--spec dflash` with the prefix
   cache ON in every arm. Take the cards through `tools/gpu_lock.sh` (never set `ZE_AFFINITY_MASK` by hand) and stop the
@@ -179,10 +180,12 @@ deferred projection equals today's at every flush point: plain step, request end
   **original int8 / full-head baseline** on A4, code, prose and the held-out opencode slice. **Gate:** within 0.05 of that
   baseline in total - the per-task gates of Tasks 5 and 6 must not add up to an unnoticed loss.
 
-### Task 8: the bar (box, idle) - G-speed
+### Task 8: the bar (one idle GPU) - G-speed
 
-- [ ] **Step 1 (quiet-box session, deferred by operator):** Task 7b's three-arm replay harness on the branch
-  head, idle box, both other recordings as checks. The MTP arm includes main `f65ae50e` or later and uses the
+- [ ] **Step 1:** Task 7b's three-arm replay harness on the branch head, one idle GPU, both other recordings as
+  checks. Operator permits the other card to be busy if more than 16 of 44 CPU threads are available; verify
+  that before the run and record the resource conditions with the busy-box grade. Use `--card N` for that run;
+  omitting it reserves the whole box for a quiet-box grade. The MTP arm includes main `f65ae50e` or later and uses the
   default per-step policy for `--mtp auto` (no disabling `B70_MTP_STEP_K`). Task 2's slim `r82.d5` screen is not
   this final replay bar. All final DFlash speed numbers require an idle card.
 - [ ] **Gate (spec 19 D5, unchanged):**
@@ -208,6 +211,6 @@ deferred projection equals today's at every flush point: plain step, request end
 | 5 | step 1 | step 2 | - |
 | 6 | steps 2, 4 | step 3 | step 1 |
 | 7 | step 1 | step 2 | - |
-| 8 | - | yes (idle) | - |
+| 8 | - | yes (one idle card; >16 free CPU threads if the other card is busy) | - |
 
 Test and benchmark runs (Tasks 1-2, 8 measurements) go to a Sonnet agent; implementation (Tasks 3-7) to Opus.
