@@ -51,10 +51,6 @@ and the full 262,144 context per card, bf16 cache, bf16 prompt pass), measured t
 | decode, without MTP | 140.4 t/s | 274.5 t/s | 125.5 t/s | 214.2 t/s |
 | decode, with MTP | **179.8 t/s** | **359.3 t/s** | 147.3 t/s | 289.7 t/s |
 
-The prompt pass alone, one card, 4,096 tokens: **9,263 t/s** (device-side; the server's figure adds HTTP and
-tokenisation). llama-benchy's prompts are random text, the hardest case for MTP's guesses; real coding sessions accept
-more of them.
-
 ## Install
 
 You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and
