@@ -539,8 +539,8 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::int8_scratch_sizes(17408, 2048).total(), size_t{35651584 + 8192 + 17825792});
   CHECK_EQ(runtime::TapVerifyDims::prefill_taps_bytes(q, 5, 4096), size_t{4096} * 5 * 5120 * 2);
 
-  // Refusals: a cap is 2048 or 4096, and Ornith (pf_moe bakes KC = 2048 into its SLM
-  // sort staging) stays at 2048, refused by name above it.
+  // Refusals: a cap is 2048 or 4096; Ornith takes 4096 since plan 2026-11-12 (the multi-work-group sort has no KC),
+  // refused by name above 2048 only on today's walk (B70_PF_MOE=old: pf_moe_sort's KC = 2048).
   auto throws = [](auto&& f, const char* needle) {
     try {
       f();
@@ -556,8 +556,17 @@ void check_chunk_cap() {
   for (uint32_t bad : {0u, 1024u, 3072u, 8192u})
     CHECK(throws([&] { D::sizes(16384, q, bad); }, nullptr));
   const model::ModelDesc& o = model::ornith();
-  CHECK(throws([&] { D::sizes(16384, o, 4096); }, "pf_moe"));
-  CHECK(throws([&] { runtime::check_prefill_chunk_cap(o, 4096); }, o.name.c_str()));
+  if (runtime::moe_pf_old_walk()) {
+    CHECK(throws([&] { D::sizes(16384, o, 4096); }, "pf_moe"));
+    CHECK(throws([&] { runtime::check_prefill_chunk_cap(o, 4096); }, o.name.c_str()));
+  } else {
+    runtime::check_prefill_chunk_cap(o, 4096);
+    // the MoE scratch at 4096 rows: tmax (32768 + 7936) / 32 + 128 = 1400, items (32768 + 16128) / 64 + 64 = 828
+    const runtime::MoePrefillLayout m4 = runtime::moe_prefill_layout(o, 4096);
+    CHECK_EQ(m4.tmax, uint32_t(1400));
+    CHECK_EQ(m4.ibound, uint32_t(828));
+    CHECK_EQ(D::sizes(16384, o, 4096).moe, m4.total);
+  }
   runtime::check_prefill_chunk_cap(o, 2048);
   runtime::check_prefill_chunk_cap(q, 4096);
   // A --prefill-chunk width to the cap it needs: 0 = none asked; up to 2048 -> 2048; up to
@@ -569,7 +578,8 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::prefill_chunk_cap_for(4096, q), 4096u);
   CHECK_EQ(runtime::prefill_chunk_cap_for(2048, o), 2048u);
   CHECK(throws([&] { runtime::prefill_chunk_cap_for(4097, q); }, "4096"));
-  CHECK(throws([&] { runtime::prefill_chunk_cap_for(4096, o); }, o.name.c_str()));
+  if (runtime::moe_pf_old_walk()) CHECK(throws([&] { runtime::prefill_chunk_cap_for(4096, o); }, o.name.c_str()));
+  else CHECK_EQ(runtime::prefill_chunk_cap_for(4096, o), 4096u);
   // The engines' default cap: 2048, read from no environment variable (operator, 2026-11-03);
   // only the test seam moves it (tests/chunk_cap_arg.h), and only to a cap.
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
@@ -625,12 +635,12 @@ void check_chunk_cap() {
       at.chunk_cap = cap;
       // Whatever the rule picks, the session's max_len still fits with its reserve.
       CHECK(runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
-      if (r.d->is_moe()) CHECK_EQ(cap, 2048u);
+      if (r.d->is_moe() && runtime::moe_pf_old_walk()) CHECK_EQ(cap, 2048u);
       // Below the trained context, auto leaves less than one quantum of slack: 2048.
       if (L < kTrained) CHECK_EQ(cap, 2048u);
       // 4096 exactly when its plan fits.
       at.chunk_cap = 4096;
-      if (!r.d->is_moe())
+      if (!r.d->is_moe() || !runtime::moe_pf_old_walk())
         CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
       std::printf("chunk cap %-26s %-7s auto max_len %6u -> cap %u\n", r.what,
                   b == PrefillBackend::L0 ? "l0" : "l0-int8", L, cap);

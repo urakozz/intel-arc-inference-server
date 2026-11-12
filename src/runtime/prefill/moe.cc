@@ -72,7 +72,7 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   require(layer < d.layers, "layer " + std::to_string(layer) + " is past the model's layers");
   const model::MoeDesc& m = d.moe;
-  const MoePrefillLayout L = moe_prefill_layout(d);
+  const MoePrefillLayout L = moe_prefill_layout(d, s.chunk_cap());
   require(s.moe->size() == L.total, "the MoE scratch is not moe_prefill_layout's size");
   const uint32_t H = d.hidden, I = m.expert_intermediate, E = m.experts, B = m.blocks();
   const uint32_t NG = 2 * I;                  // one block's gate||up columns
