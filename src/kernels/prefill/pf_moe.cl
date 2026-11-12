@@ -9,6 +9,7 @@
 //   pf_moe_gather_i8(xq, xs, hdr, row_tok, xg, xsg)             grid (rows),     WG 64
 //   pf_moe_dequant_gu / _dn(w, hdr, out, b0)                    grid (N/16, K/64, nb), WG 16
 //   pf_moe_combine(route, hdr, pair_row, y, resid, C)           grid (HIDDEN/256, C), WG 256
+//   pf_moe_combine_norm(..., resid, norm_w, x, C)               grid (1, C),     WG 256 (FOLD_G builds only)
 //
 // Before them the chunk's walk runs the router || shared-gate GEMV over all C rows
 // (pf_gemv_bf16.cl at N = router_n, the {16, 16} tiling decode's gemv_bf16 binds, so row
@@ -278,3 +279,91 @@ __kernel void pf_moe_combine(__global const uint* restrict route, __global const
   __global ushort* restrict rp = resid + (size_t)t * HIDDEN + n;
   *rp = rne_bf16(bf16f(*rp) + bf16f(o_b));
 }
+
+// ---------------------------------------------------------------------------
+// pf_moe_combine_norm (phase 3 Task 5; built only with FOLD_G, kernels::pf_moe_combine_norm_variant) - token
+// t = grid.y, one work-group of 256 lanes the whole row: pf_moe_combine's chain per column, element for element,
+// then the next layer's leading norm exactly as pf_norm_fused.cl's pf_res_norm at S_PREV 0 reads that residual -
+// each square fma(v, v, 0.0f) parked in SLM, the FOLD_G group sums in pf_res_fold's tree, added in ascending g,
+// x = rne(f32(r) * rstd * w[n]). The residual and x are the two launches' bytes (tests/kernels/pf_moe_test.cc).
+#ifdef FOLD_G
+#define CN_SG 16
+#define CN_CHUNK ((HIDDEN + FOLD_G - 1) / FOLD_G)
+#define CN_PER (HIDDEN / WG_COMBINE)
+#if CN_CHUNK > WG_COMBINE
+#error "pf_moe_combine_norm: a fold group wider than the work-group (pf_res_fold's lanes would add twice)"
+#endif
+__attribute__((reqd_work_group_size(WG_COMBINE, 1, 1)))
+__attribute__((intel_reqd_sub_group_size(CN_SG)))
+__kernel void pf_moe_combine_norm(__global const uint* restrict route, __global const uint* restrict hdr,
+                                  __global const uint* restrict pair_row,
+                                  __global const ushort* restrict y, __global ushort* restrict resid,
+                                  __global const float* restrict norm_w, __global ushort* restrict x_out,
+                                  uint C) {
+  const uint t = get_group_id(1);
+  if (t >= C) return;
+  const uint lid = get_local_id(0);
+  const uint sg = lid / CN_SG, lane = lid % CN_SG;
+  __local float sq[HIDDEN];
+  __local float gs[FOLD_G];
+  __global const uint* restrict rr = route + (size_t)t * RW;
+  __global ushort* restrict rp = resid + (size_t)t * HIDDEN;
+  const uint srow = hdr[H_SHARED_ROW] + t;
+
+  ushort rb[CN_PER];
+#pragma unroll
+  for (uint i = 0; i < CN_PER; ++i) {
+    const uint n = lid + i * WG_COMBINE;
+    float sum = 0.0f;
+    for (uint k = 0; k < TOP_K; ++k) {
+      const uint row = pair_row[t * TOP_K + k];
+      const ushort d_b = y[(size_t)row * HIDDEN + n];
+      sum += bf16f(rne_bf16(bf16f(d_b) * as_float(rr[R_W + k])));
+    }
+    const ushort r_b = rne_bf16(sum);
+    const ushort ds_b = y[(size_t)srow * HIDDEN + n];
+    const ushort sh_b = rne_bf16(bf16f(ds_b) * as_float(rr[R_SG]));
+    const ushort o_b = rne_bf16(bf16f(r_b) + bf16f(sh_b));
+    const ushort res_b = rne_bf16(bf16f(rp[n]) + bf16f(o_b));
+    rp[n] = res_b;
+    rb[i] = res_b;
+    const float v = bf16f(res_b);
+    sq[n] = fma(v, v, 0.f);
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  for (uint g = sg; g < FOLD_G; g += WG_COMBINE / CN_SG) {
+    const uint k0 = g * CN_CHUNK;
+    const uint n = min((uint)CN_CHUNK, (uint)HIDDEN - k0);
+    float a[8];
+#pragma unroll
+    for (uint j = 0; j < 8; ++j) {   // stride 128
+      const uint i = lane + CN_SG * j;
+      const float lo = i < n ? sq[k0 + i] : 0.0f;
+      const float hi = i + 128 < n ? sq[k0 + i + 128] : 0.0f;
+      a[j] = lo + hi;
+    }
+    float b[4];
+#pragma unroll
+    for (uint j = 0; j < 4; ++j) b[j] = a[j] + a[j + 4];   // stride 64
+    const float c0 = b[0] + b[2], c1 = b[1] + b[3];        // stride 32
+    float d = c0 + c1;                                     // stride 16
+    d = d + intel_sub_group_shuffle(d, (lane + 8) & 15);   // 8 (lanes < 8 matter)
+    d = d + intel_sub_group_shuffle(d, (lane + 4) & 15);   // 4
+    d = d + intel_sub_group_shuffle(d, (lane + 2) & 15);   // 2
+    d = d + intel_sub_group_shuffle(d, (lane + 1) & 15);   // 1
+    if (lane == 0) gs[g] = d;
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+
+  float total = 0.f;
+  for (uint g = 0; g < FOLD_G; ++g) total += gs[g];
+  const float mean = total / (float)HIDDEN;
+  const float rstd = 1.0f / sqrt(mean + 1e-6f);
+#pragma unroll
+  for (uint i = 0; i < CN_PER; ++i) {
+    const uint n = lid + i * WG_COMBINE;
+    x_out[(size_t)t * HIDDEN + n] = rne_bf16(bf16f(rb[i]) * rstd * norm_w[n]);
+  }
+}
+#endif

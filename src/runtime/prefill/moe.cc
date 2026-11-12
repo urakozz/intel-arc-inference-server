@@ -32,7 +32,7 @@ size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
 }
 
 void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::MoeLayer& w,
-               uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q) {
+               uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q, const void* next_norm) {
   const model::ModelDesc& d = s.desc();
   require(d.is_moe() && s.moe != nullptr, "the prefill scratch has no MoE region (a dense model?)");
   require((q != nullptr) == (backend == PrefillBackend::L0Int8),
@@ -129,10 +129,18 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   profile_wait(cx, Phase::kMoeGemm);
 
   // 5. The weighted sum in fixed slot order, the shared expert by its gate, the residual
-  //    fold - moe_down's epilogue over the sorted rows.
-  cx.launch(kc(pv, "pf_moe_combine"), H / kernels::pf_moe::kCombineWg, C, 1,
-            {PtrArg(route), PtrArg(hdr), PtrArg(pair_row), PtrArg(xg), PtrArg(s.resid.ptr()),
-             arg_val(C)});
+  //    fold - moe_down's epilogue over the sorted rows. Phase 3 Task 5: with the next layer's input-norm weight,
+  //    one work-group a row also runs that layer's pf_res_norm (S_PREV 0) into x, bitwise the two launches.
+  if (next_norm)
+    cx.launch(kc(kernels::pf_moe_combine_norm_variant(E, m.top_k, H, I, PrefillScratch::kNormGroups),
+                 "pf_moe_combine_norm"),
+              1, C, 1,
+              {PtrArg(route), PtrArg(hdr), PtrArg(pair_row), PtrArg(xg), PtrArg(s.resid.ptr()), PtrArg(next_norm),
+               PtrArg(s.x.ptr()), arg_val(C)});
+  else
+    cx.launch(kc(pv, "pf_moe_combine"), H / kernels::pf_moe::kCombineWg, C, 1,
+              {PtrArg(route), PtrArg(hdr), PtrArg(pair_row), PtrArg(xg), PtrArg(s.resid.ptr()),
+               arg_val(C)});
   profile_wait(cx, Phase::kMoeCombine);
 }
 

@@ -25,7 +25,9 @@
 //      slot)'s h (both paths), y and the combined residual are bitwise the forward run's;
 //   6. the combine: exactly pf_moe_ref::combine_token over the device's y and route rows;
 //   7. replay: the whole walk again from the same inputs, every buffer bitwise;
-//   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6.
+//   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6;
+//   9. combine_norm (phase 3 Task 5): pf_moe_combine_norm's residual and x every byte pf_moe_combine then
+//      pf_res_norm (S_PREV 0), at C 2048 and 37, and the rows past C untouched.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -639,6 +641,64 @@ void check_combine(const Run& r, const std::vector<uint16_t>& resid0) {
   CHECK_EQ(bad, size_t(0));
 }
 
+// 9: combine_norm - the fused launch against the two it replaces, on the walk's own route rows, header, pair_row
+// and y (fresh copies: the sections between rewrite the walk's buffers), every byte of the residual and of x.
+void check_combine_norm(Dev& d, Kernels& k, const Run& r, const std::vector<uint16_t>& resid0) {
+  const uint32_t C = r.C, G = 20;
+  l0::Module nm(d.ctx, kernels::path(kernels::pf_res_norm_variant(kH, 0, G)));
+  l0::Module cm(d.ctx, kernels::path(kernels::pf_moe_combine_norm_variant(256, 8, kH, kI, G)));
+  l0::Kernel norm(nm, "pf_res_norm"), cn(cm, "pf_moe_combine_norm");
+  norm.group_size(256);
+  cn.group_size(256);
+  std::vector<float> w(kH);
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> wd(0.5f, 1.5f);
+  for (float& e : w) e = wd(rng);
+  const std::vector<uint16_t> r0(resid0.begin(), resid0.begin() + size_t(C) * kH);
+  const std::vector<uint16_t> fill(size_t(C + 1) * kH, uint16_t(0x7F7F));   // row C: a sentinel no row may reach
+  l0::Mem route = d.upload(r.route), hdr = d.upload(r.hdr), pr = d.upload(r.pair_row), y = d.upload(r.y),
+          wn = d.upload(w), ra = d.upload(fill), rb = d.upload(fill), xa = d.upload(fill), xb = d.upload(fill);
+  d.imm.copy(ra.ptr(), r0.data(), r0.size() * 2);
+  d.imm.copy(rb.ptr(), r0.data(), r0.size() * 2);
+  k.combine.arg_ptr(0, route.ptr());
+  k.combine.arg_ptr(1, hdr.ptr());
+  k.combine.arg_ptr(2, pr.ptr());
+  k.combine.arg_ptr(3, y.ptr());
+  k.combine.arg_ptr(4, ra.ptr());
+  k.combine.arg(5, C);
+  d.run(k.combine, kH / kernels::pf_moe::kCombineWg, C);
+  norm.arg_ptr(0, nullptr);
+  norm.arg_ptr(1, ra.ptr());
+  norm.arg_ptr(2, wn.ptr());
+  norm.arg_ptr(3, xa.ptr());
+  norm.arg(4, C);
+  d.run(norm, 1, C);
+  cn.arg_ptr(0, route.ptr());
+  cn.arg_ptr(1, hdr.ptr());
+  cn.arg_ptr(2, pr.ptr());
+  cn.arg_ptr(3, y.ptr());
+  cn.arg_ptr(4, rb.ptr());
+  cn.arg_ptr(5, wn.ptr());
+  cn.arg_ptr(6, xb.ptr());
+  cn.arg(7, C);
+  d.run(cn, 1, C);
+  const size_t n = size_t(C + 1) * kH;
+  const std::vector<uint16_t> va = d.read<uint16_t>(ra, n), vb = d.read<uint16_t>(rb, n),
+                              wa = d.read<uint16_t>(xa, n), wb = d.read<uint16_t>(xb, n);
+  size_t bad_r = 0, bad_x = 0, past = 0;
+  for (size_t i = 0; i < size_t(C) * kH; ++i) {
+    bad_r += va[i] != vb[i];
+    bad_x += wa[i] != wb[i];
+  }
+  for (size_t i = size_t(C) * kH; i < n; ++i) past += vb[i] != 0x7F7F || wb[i] != 0x7F7F;
+  std::printf("  9. combine_norm C %u: %zu residual and %zu x values of %zu differ from combine + pf_res_norm; "
+              "%zu past row C written\n", C, bad_r, bad_x, size_t(C) * kH, past);
+  CHECK_EQ(bad_r, size_t(0));
+  CHECK_EQ(bad_x, size_t(0));
+  CHECK_EQ(past, size_t(0));
+  CHECK(std::memcmp(vb.data(), r.resid.data(), size_t(C) * kH * 2) == 0);   // and the walk's own combine
+}
+
 void check_sort(const std::vector<uint32_t>& route, const Run& r) {
   const pf_moe_ref::Sorted want = pf_moe_ref::sort(route.data(), r.C, kS);
   CHECK(r.hdr == want.hdr);
@@ -853,6 +913,7 @@ int main() {
   w4a8_check(d, L, b, a);
   // 6. the combine
   check_combine(a, resid0);
+  check_combine_norm(d, k, a, resid0);
   // 5. row independence: the reversed chunk
   {
     std::vector<uint16_t> xr(x.size()), rr(resid0.size());
@@ -899,6 +960,7 @@ int main() {
     fused_vs_grouped(d, L, b, c);
     w4a8_check(d, L, b, c);
     check_combine(c, r0);
+    check_combine_norm(d, k, c, r0);
     // the same 37 tokens inside the full chunk: every (token, slot) result bitwise
     size_t bad = 0;
     for (uint32_t t = 0; t < Cr; ++t)
