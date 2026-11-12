@@ -1032,6 +1032,30 @@ to the last kernel end, including dispatch and timestamp signal flushes within e
 instrumented wall time minus those intervals; the older wall-minus-kernel-sums residual remains an upper bound.
 Evidence: `~/b70/logs/dflash-v2/task4/{device.xml,iter-4096.log,iter-32768.log}` and `task4-device.log`.
 
+### Task 5: RTN int4 diagnostics (2026-11-12)
+
+**Acceptance FAIL**, source `39d54ad1`, full int8 head, all original anchors/K and exact original-baseline
+recalibration. K7 A4 falls 7.08025 → 7.00551, prose 2.28646 → 2.22727, held-out opencode 3.68750 → 3.25000;
+these losses exceed 0.05. C2 therefore requires an AutoRound-exported drafter before promotion; int8 stays default.
+Full table and provenance: [DFlash record](probes/dflash-vs-sly-2026-11-11.md#7-spec-19v2-measurements-2026-11-12).
+
+`8a16f5a4` splits the int4 producers across K and folds their partials inside the existing consumers (87 draft /
+8 projection launches). **Exclusive card 1, busy box; diagnostics only, numerical gates outstanding.**
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| draft, ms | 7.849702 | 8.290171 |
+| projection wall, ms | 0.337303 | 0.459109 |
+| verify(8), paired plain steps | 1.252052 | 1.276792 |
+| K7 iteration, paired plain steps | 1.528099 | 1.527929 |
+| instrumented projection + host outside lists, ms | 0.665543 | 0.940995 |
+
+The 4k draft saves 1.128320 ms against Task 1, below Task 5's 2.5 ms gate. The 4k profile has body GEMMs
+1.912396 ms, full head 2.168333 ms, attention-part 2.768438 ms, and top-k stages 0.208125 / 0.028646 ms.
+New split consumers and H1/H2 attention geometry pass the bitwise kernel tests; end-to-end f32/corpus gates
+remain separate. Logs: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`,
+`task5-split-kernels-card1.log`. These numbers do not refresh AdaptiveK or establish the final speed bar.
+
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
 **`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,

@@ -175,3 +175,11 @@ Evidence: `~/b70/logs/dflash-v2/task5-real-39d54ad1.log` and
 at this source. Int4 S1 draft cost is 8.94586 ms at depth 4096 versus 8.97802 ms for the original int8 arm: memory
 savings alone did not deliver the Task 5 speed gate. Split-K producer/consumer experiments continue separately;
 their quality and performance are not established by this result.
+
+The `8a16f5a4` grid split-K diagnostic (same int4 weights/head, fused consumer folds, unchanged 87/8 launches)
+reduces the 4k draft to **7.84970 ms**, saving 1.12832 ms against the original int8 baseline; the 2.5 ms Task 5
+gate is still unmet. At 32k it is 8.29017 ms. Projection is 0.33730/0.45911 ms, and K7 iteration is
+1.52810/1.52793 plain steps (4k/32k). These are idle-card/busy-box diagnostics, with precision gates outstanding.
+At 4k, sums of per-launch medians are 1.91240 ms for the int4 body, 2.16833 ms for the full int8 head,
+2.76844 ms for attention-part, and 0.23677 ms for both top-k stages. Attention is the next measured non-GEMM target.
+Evidence: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`.
