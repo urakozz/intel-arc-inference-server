@@ -195,8 +195,9 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
                            model::LayerKind kind, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            const PpStage& st, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
-// What the cut adds over one card: a MoE model's input norm is one fused pf_res_norm on one card,
-// but at the cut it is the fold on stage 0 plus the norm-finish on stage 1 - one launch more.
+// What the cut adds over one card on a MoE model: the input norm is one fused pf_res_norm on one card,
+// at the cut the fold on stage 0 plus the norm-finish on stage 1 - one launch more; and stage 0's last
+// combine runs without the next layer's norm (phase 3 Task 5) - one more. 0 on other models.
 size_t step_cut_extra_launches(const model::ModelDesc& d);
 
 }  // namespace runtime::prefill
