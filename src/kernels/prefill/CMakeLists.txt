@@ -416,6 +416,11 @@ if(B70_ORNITH)
   add_ocloc_kernel(pf_flash_attn_r32_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
+  # The same with pf_attn_gate fused into the epilogue (GATE_EPI: its arithmetic statement for statement, bitwise), the
+  # prefill walk's form for a bf16 cache; the line above stays for attn_chunk's callers that gate apart (the tests).
+  add_ocloc_kernel(pf_flash_attn_r32g_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 GATE_EPI=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
   # The MoE block. TM (the tile rows) and KC (PrefillScratchDims::kCDefault, the sort's SLM
   # staging) are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kCDefault
   # (plan 5d: a MoE model's chunk cap stays 2048 - check_prefill_chunk_cap).

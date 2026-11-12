@@ -418,6 +418,64 @@ bool case_flash_r32_bitwise(l0::Context& ctx, l0::CmdList& imm, const model::Mod
   return ok;
 }
 
+// MoE prefill phase 3: the gate fused into the 32-row flash launch (attn_chunk with the gate's source and target)
+// against attn_chunk then attn_gate_chunk on the same inputs. Bar: the o_proj input's bf16 words bitwise equal on every
+// row [0, C), and nothing written past row C.
+bool case_flash_gate_fused(l0::Context& ctx, l0::CmdList& imm, const model::ModelDesc& desc, uint32_t pos, uint32_t C) {
+  const uint32_t qh = desc.fa_q_heads, kvh = desc.fa_kv_heads;
+  const uint32_t depth = pos + C, rows = runtime::prefill::attn_rows(C, runtime::PrefillBackend::L0);
+  const uint32_t max_len = runtime::prefill::pad256(depth);
+  const size_t qkv_n = size_t(2 * qh + 2 * kvh) * kHD, out_n = size_t(qh) * kHD;
+  runtime::prefill::Context cx(ctx);
+  runtime::prefill::KernelCache kc(ctx);
+  runtime::PrefillScratch s(ctx, max_len, desc, runtime::PrefillScratchDims::kCMax);
+  const std::vector<float> qf = random_f32(size_t(C) * qh * kHD, 2300 + pos + C, 0.f, 1.f);
+  const std::vector<float> kvf = random_f32(size_t(depth) * kvh * kHD * 2, 2301 + pos + C, 0.f, 1.f);
+  const std::vector<float> gate = random_f32(size_t(C) * qkv_n, 2302 + pos + C, 0.f, 3.f);
+  std::vector<uint16_t> q(qf.size()), kk(size_t(depth) * kvh * kHD), vv(kk.size());
+  for (size_t i = 0; i < qf.size(); ++i) q[i] = rne(qf[i]);
+  for (size_t i = 0; i < kk.size(); ++i) {
+    kk[i] = rne(kvf[i]);
+    vv[i] = rne(kvf[i + kk.size()]);
+  }
+  imm.copy(s.pf_q.ptr(), q.data(), q.size() * 2);
+  imm.copy(s.partials.ptr(), gate.data(), gate.size() * 4);
+  l0::Mem dk(ctx, l0::MemKind::Device, kk.size() * 2), dv(ctx, l0::MemKind::Device, vv.size() * 2);
+  imm.copy(dk.ptr(), kk.data(), kk.size() * 2);
+  imm.copy(dv.ptr(), vv.data(), vv.size() * 2);
+  // One spare row past C in each target: the fused store must leave it alone (0xBEEF stays).
+  const std::vector<uint16_t> fill((size_t(C) + 1) * out_n, 0xBEEF);
+  l0::Mem dsep(ctx, l0::MemKind::Device, fill.size() * 2), dfus(ctx, l0::MemKind::Device, fill.size() * 2);
+  imm.copy(dsep.ptr(), fill.data(), fill.size() * 2);
+  imm.copy(dfus.ptr(), fill.data(), fill.size() * 2);
+  runtime::prefill::set_attn_mode_for_test(runtime::prefill::AttnMode::Flash);
+  runtime::prefill::attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), dk.as<uint16_t>(), dv.as<uint16_t>(),
+                               runtime::PrefillBackend::L0);
+  runtime::prefill::attn_gate_chunk(cx, kc, s, C, rows, s.partials.as<float>(), dsep.as<uint16_t>());
+  const bool fused = runtime::prefill::attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), dk.as<uint16_t>(),
+                                                  dv.as<uint16_t>(), runtime::PrefillBackend::L0,
+                                                  s.partials.as<float>(), dfus.as<uint16_t>());
+  cx.wait();
+  std::vector<uint16_t> sep(fill.size()), fus(fill.size());
+  imm.copy(sep.data(), dsep.ptr(), sep.size() * 2);
+  imm.copy(fus.data(), dfus.ptr(), fus.size() * 2);
+  size_t differ = 0, first = SIZE_MAX, past = 0;
+  for (size_t i = 0; i < size_t(C) * out_n; ++i)
+    if (fus[i] != sep[i]) {
+      if (first == SIZE_MAX) first = i;
+      ++differ;
+    }
+  for (size_t i = size_t(C) * out_n; i < fus.size(); ++i) past += fus[i] != 0xBEEF;
+  const bool ok = fused && differ == 0 && past == 0;
+  std::printf("\n--- flash r32 with the fused gate vs flash + pf_attn_gate (%u q / %u kv heads), pos %u C %u: fused %s, "
+              "%zu of %zu words differ, %zu written past row C -- %s\n", qh, kvh, pos, C, fused ? "yes" : "NO", differ,
+              size_t(C) * out_n, past, ok ? "PASS" : "FAIL");
+  if (first != SIZE_MAX)
+    std::printf("  first differing word: row %zu col %zu: fused 0x%04x separate 0x%04x\n", first / out_n, first % out_n,
+                fus[first], sep[first]);
+  return ok;
+}
+
 }  // namespace
 
 // Every case prints before anything is judged, so a failure leaves the whole
@@ -441,6 +499,16 @@ int main(int argc, char** argv) {
       ok &= case_flash_r32_bitwise(d.ctx, d.imm, model::ornith(), pos, C);
     if (!ok) {
       std::fprintf(stderr, "GATE FAILED: pf_flash_attn_r32 is not bitwise today's pf_flash_attn\n");
+      return 1;
+    }
+  }
+  // Phase 3: the gate fused into that launch, bitwise the separate pf_attn_gate.
+  {
+    bool ok = true;
+    for (const auto& [pos, C] : {std::pair{0u, 4096u}, std::pair{5000u, 300u}, std::pair{0u, 37u}})
+      ok &= case_flash_gate_fused(d.ctx, d.imm, model::ornith(), pos, C);
+    if (!ok) {
+      std::fprintf(stderr, "GATE FAILED: the fused gate is not bitwise pf_attn_gate\n");
       return 1;
     }
   }

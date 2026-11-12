@@ -105,9 +105,11 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
 //     pf_gemm per QK^T ROW BLOCK (spec S3), one softmax, one P·V, and no wait --
 //     `attn_chunk_launches(C, backend)` below, the one term of the prefill
 //     launch arithmetic that depends on C.
-void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
+//     MoE prefill phase 3: with `gate_src` / `gate_out` given and attn_gate_fused(), the flash launch also does
+//     (3) below in its epilogue and writes `gate_out` instead of pf_o; it returns whether it did.
+bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
-                PrefillBackend backend);
+                PrefillBackend backend, const float* gate_src = nullptr, uint16_t* gate_out = nullptr);
 
 // (3) The output gate (ruling A16): `out[m][h*256+d] =
 //     rne_bf16(f32(rne_bf16(o)) . sigmoid(f32(rne_bf16(gate))))`, with the gate
@@ -156,6 +158,15 @@ inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, Prefill
 }
 inline size_t attn_chunk_launches(const model::ModelDesc& d, uint32_t C, PrefillBackend b, uint32_t pos = 0) {
   return attn_chunk_launches(d, C, b, attn_mode(), pos);
+}
+// MoE prefill phase 3: Ornith's 16 / 2 heads gate inside the 32-row flash launch on a bf16 cache (the prefill walk), so
+// the walk's gate launch is 0 there; the int8 cache keeps pf_attn_gate_kv8.
+inline bool attn_gate_fused(const model::ModelDesc& d, uint32_t C, uint32_t pos, KvCache kv) {
+  return kv == KvCache::Bf16 && attn_mode() == AttnMode::Flash && d.fa_q_heads == 16 && d.fa_kv_heads == 2 &&
+         flash_split_span(d, pos, C) == 0;
+}
+inline size_t attn_gate_launches(const model::ModelDesc& d, uint32_t C, uint32_t pos, KvCache kv) {
+  return attn_gate_fused(d, C, pos, kv) ? 0 : kAttnGateLaunches;
 }
 
 }  // namespace runtime::prefill

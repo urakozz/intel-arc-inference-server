@@ -155,9 +155,10 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     attn_prep_chunk(cx, kc, s, C, ctrl, s.partials.as<float>(),
                     small.gdn.as<float>(), m.rope.as<float>(), kk, vv);
     profile_wait(cx, Phase::kAttnPrep);
-    attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend);
-    attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
-                    s.mixer_out.as<uint16_t>());
+    if (!attn_chunk(cx, kc, s, pos, C, s.pf_q.as<uint16_t>(), kk, vv, backend, s.partials.as<float>(),
+                    s.mixer_out.as<uint16_t>()))
+      attn_gate_chunk(cx, kc, s, C, attn_rows(C, backend), s.partials.as<float>(),
+                      s.mixer_out.as<uint16_t>());
   }
   profile_wait(cx, Phase::kAttnGate);
   ++fa;
@@ -734,7 +735,7 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_
 namespace {
 // A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
 size_t res_norm_launches(const model::ModelDesc& d) { return d.is_moe() ? 1 : 2; }
-size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
+size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv) {
   auto lin = [&](LinearId id) {
     return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
   };
@@ -742,7 +743,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
   const size_t ffn = nrm + moe_chunk_launches(d, b);
   const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
   const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
-                    kAttnGateLaunches + lin(LinearId::OProj) + ffn;
+                    attn_gate_launches(d, C, 0, kv) + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa - (d.layers - 1) * nrm;
 }
 }  // namespace
@@ -750,7 +751,7 @@ size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint
 size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C, KvCache kv, uint32_t pos) {
   // 3l (2): an int8 split read in place widens nothing.
   const size_t widen = kv == KvCache::Int8 && !kv8_split_in_place(d, pos, C) ? d.fa_layers : 0;
-  if (d.is_moe()) return moe_step_chunk_launches(d, b, C) + widen;
+  if (d.is_moe()) return moe_step_chunk_launches(d, b, C, kv) + widen;
   const size_t base =
       1 + d.gdn_layers * l0_gdn_layer_launches(d, b, C) + d.fa_layers * l0_fa_layer_launches(d, b, C, pos) + widen;
   if (b != PrefillBackend::L0Int8) return base;
@@ -771,7 +772,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     const size_t ffn = nrm + moe_chunk_launches(d, b);
     return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
                : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
-                     kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
+                     attn_gate_launches(d, C, pos, kv) + lin(LinearId::OProj) + ffn + widen;
   }
   const size_t l0n = gdn ? l0_gdn_layer_launches(d, b, C) : l0_fa_layer_launches(d, b, C, pos);
   return (b == PrefillBackend::L0Int8 ? l0n + 4 : l0n) + widen;
