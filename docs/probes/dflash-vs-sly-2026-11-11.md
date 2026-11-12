@@ -152,3 +152,26 @@ No.
 
 Design and plan: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md`,
 `docs/superpowers/plans/2026-11-11-spec19v2-dflash-speed.md`.
+
+## 7. Spec 19v2 measurements, 2026-11-12
+
+Task 5's RTN int4 g64 layout-1 arm at `39d54ad1`, with the original full int8 head and original engine-tap
+anchors, **fails the acceptance gate**. This measures our at-load RTN form; the published quantized checkpoint's
+P0 result above does not establish its quality. All 35 corpus/K rows recalibrate the original int8 baseline on
+the new dumps before comparison (zero baseline drift).
+
+| corpus, K=7 | original int8 E_K | RTN int4 E_K | change |
+|---|---:|---:|---:|
+| A4 | 7.08025 | 7.00551 | −0.07474 |
+| code | 5.87500 | 5.93750 | +0.06250 |
+| prose | 2.28646 | 2.22727 | −0.05919 |
+| CJK | 1.50000 | 1.62500 | +0.12500 |
+| held-out opencode | 3.68750 | 3.25000 | −0.43750 |
+
+A4, prose and held-out opencode exceed the allowed 0.05 loss at K=7; code also loses 0.125 at K=2.
+Per C2, request an AutoRound-exported drafter before promoting int4. The serving default remains int8.
+Evidence: `~/b70/logs/dflash-v2/task5-real-39d54ad1.log` and
+`~/b70/logs/dflash-v2/task5-real-39d54ad1/acceptance.json`. The synthetic f32 body-set gate also remains unresolved
+at this source. Int4 S1 draft cost is 8.94586 ms at depth 4096 versus 8.97802 ms for the original int8 arm: memory
+savings alone did not deliver the Task 5 speed gate. Split-K producer/consumer experiments continue separately;
+their quality and performance are not established by this result.

@@ -154,6 +154,10 @@ deferred projection equals today's at every flush point: plain step, request end
     - G-D2;
     - `--max-len auto` with the drafter rises (printed).
   - FAIL on acceptance -> record and ask the operator for the AutoRound-exported drafter (spec v2 C2) instead of RTN.
+  - **RTN FAIL measured at `39d54ad1` (2026-11-12):** K=7 A4 7.08025 → 7.00551, prose 2.28646 → 2.22727,
+    held-out opencode 3.68750 → 3.25000; all losses exceed 0.05. Original int8 baseline recalibrates exactly.
+    AutoRound export requested; default remains int8. Split-K and independent small-kernel work continue as
+    diagnostics, with their numerical and final combined acceptance gates still required.
 
 ### Task 6: the draft head (Mac + CPU, then box) - C3
 
