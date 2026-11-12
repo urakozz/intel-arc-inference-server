@@ -209,6 +209,11 @@ inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hid
   return "pf_moe_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
          std::to_string(hidden) + "_I" + std::to_string(inter);
 }
+// pf_moe_sort_mw.cl (plan 2026-11-12 Task 2): the multi-work-group sort, pf_moe_hist / pf_moe_scan /
+// pf_moe_scatter, at one (experts, top_k).
+inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
+  return "pf_moe_sort_mw_E" + std::to_string(experts) + "_T" + std::to_string(top_k);
+}
 // pf_moe_gemm.cl at one expert block's K x N: bf16 or int8 (h8), SiLU epilogue (gate||up)
 // or the plain bf16 one (down). Entry `pf_moe_gemm`.
 inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool silu) {
