@@ -365,13 +365,7 @@ class Walk {
     prefill::profile_wait(cx_, Phase::kMoeRoute);
     const uint32_t tmax = pf_tiles(d_, C_);
     const std::string v = kq::pf_moe_variant();
-    const bool old = runtime::moe_pf_old_walk();
-    if (old) {
-      // q4_pf_sort(route, hdr, tiles, row_tok, pair_row, C, tmax) - grid (1)
-      launch(kc_(v, "q4_pf_sort"), 1, 1, 1,
-             {PtrArg(rt), PtrArg(s_.hdr.ptr()), PtrArg(s_.tiles.ptr()), PtrArg(s_.row_tok.ptr()),
-              PtrArg(s_.pair_row.ptr()), arg_val(C_), arg_val(tmax)});
-    } else {
+    {
       // plan 2026-11-12 Task 7: pf_moe_sort_mw (bitwise q4_pf_sort's buffers) + its work items
       const std::string sv = kernels::pf_moe_sort_mw_variant(d_.experts, d_.top_k);
       const uint32_t nblk = (C_ + 63) / 64, ib = pf_items(d_, C_);
@@ -388,13 +382,7 @@ class Walk {
            {PtrArg(s_.x.ptr()), PtrArg(s_.hdr.ptr()), PtrArg(s_.row_tok.ptr()), PtrArg(s_.xg.ptr())});
     prefill::profile_wait(cx_, Phase::kMoeGather);
     const bool shb = d_.forms.shared == model::Q4Form::Bf16;
-    if (old) {
-      grouped(shb ? "q4_pf_dequant_gu_shb" : "q4_pf_dequant_gu", L.gate_up->ptr(), L.shared->ptr(),
-              pf_batch_blocks_gu(d_), d_.hidden, 2 * d_.moe_inter, true, s_.xg.ptr(), s_.h.ptr(), tmax);
-      // down: A = h [rows][640], y = rne(down) into xg (the gathered A is consumed)
-      grouped(shb ? "q4_pf_dequant_dn_shb" : "q4_pf_dequant_dn", L.down->ptr(), at(*L.shared, L.shared_down_offset),
-              pf_batch_blocks_dn(d_), d_.moe_inter, d_.hidden, false, s_.h.ptr(), s_.xg.ptr(), tmax);
-    } else {
+    {
       // plan 2026-11-12 Task 7: pf_moe_q4gemm over the work items, the int4 blocks read in place (bitwise the batch
       // walk); Intel's bf16 shared expert (no int4 form) keeps its one-block dequant + GEMM after
       const uint32_t ib = pf_items(d_, C_);

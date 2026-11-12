@@ -1969,9 +1969,11 @@ if(B70_ORNITH)
     set(_acc_one "")
     set(_acc_c16 "prose:18,cjk:15")
     if(b STREQUAL "l0-int8")
-      set(_judge ${B70_ORNITH_F32_PFI8_DIR})   # the quantisation-aware f32 judge (int8_sim.py, 2026-10-23)
+      # Plan 2026-11-12 (operator): l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
+      # simulates the rotated int8 form it replaced) under the gate's near-miss rule (prefill_gate_test.cc), no
+      # per-row accept lists.
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
-      set(_acc_one "prose:22,cjk:15")
+      set(_acc_one "")
       set(_acc_c16 "")
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test

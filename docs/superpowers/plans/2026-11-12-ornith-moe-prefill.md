@@ -197,7 +197,12 @@ Only what Task 1 left open: MI per shape, persistent vs plain grid, prefetch dep
 prefetch of the int4 stream 2-4 k-steps ahead, shared across the work-group). Each variant is a define of
 `pf_moe_q4gemm.cl`, compared in situ, not a new kernel.
 
-- [ ] **Step 1 (box, card 0):** interleaved pairs of the Task 3 binary against each variant on the 4k and 16k l0
+- [x] **Step 1 (box, card 0):** **2026-11-12**: the probe's rounds 2-5 (docs/probes/probe-moe-prefill-2026-11-12.md)
+  measured the variants in situ on real routes (grid order, SLM block IO, 64-row sub-groups, 128 / 256-row SLM
+  items, the vISA conversion - not bitwise, dropped); the chosen arm is Task 3's. One change landed: a 64-row
+  sub-group over a 32-row item runs half its DPAS (bitwise: the skipped rows are never stored). The 40-50 % of
+  bf16 peak goal is not reached (MoE GEMMs 167 ms at 4k with cap 4096 = ~55 TFLOP/s useful): the conversion's
+  ALU does not overlap the XMX pipe (the diagnostic arms). Interleaved pairs of the Task 3 binary against each variant on the 4k and 16k l0
   bench (`b70-decode --bench --prefill-length N --tg 32`, `B70_PREFILL_PROFILE` off for the t/s, on for the phase
   row). Record in the probe doc.
 - [ ] **Step 2 (Mac, then box):** the winner becomes the built variant (the others deleted); `pf_moe_test` and the
@@ -247,8 +252,11 @@ change `PrefillScratchDims` for every model and is not in this plan.
 `qwen4exp_sizes.h` untouched for K2; Flash-Next's `kPfC` follows in Task 7; `memory_plan_test`; `cli_reject_*` tests
 that expect the 2048 refusal for Ornith.
 
-- [ ] **Step 1 (Mac):** the cap, the scratch, the tests. Commit.
-- [ ] **Step 2 (box, card 0):** `--prefill-chunk 4096` vs 2048 interleaved at 4k and 16k (l0, l0-int8);
+- [x] **Step 1 (Mac):** the cap, the scratch, the tests. Commit.
+- [x] **Step 2 (box, card 0):** **2026-11-12** (3 interleaved rounds): l0 4k 6,570 -> 6,944 (+5.7 %), 16k 5,665 ->
+  5,904 (+4.2 %); l0-int8 4k 5,263 -> 6,571 (+25 %: the requant pass runs once per 4096 rows), 16k 4,642 -> 5,620
+  (+21 %); prefill scratch 1.040 -> 1.495 GB; `--max-len auto` still 262144 and the auto cap picks 4096 (D2). Profile
+  4k l0 at 4096: moe_gemm 167 ms, sort 1.9 ms. `--prefill-chunk 4096` vs 2048 interleaved at 4k and 16k (l0, l0-int8);
   `prefill_gate_ornith_*`, `prefill_split_ornith_*` at cap 4096.
   - **Gates:** judged as Task 5 (the chunk boundaries move, so GDN state and attention rounding move); scratch +
     `--max-len auto` printed (the freed weight batch should pay for the larger rows).
@@ -268,10 +276,15 @@ work item. The address line stays the one hook; when 21v2a lands, a cold expert 
 (4x fewer bytes than today's bf16 pass writes) into a VRAM staging slot before the GEMM. This task only keeps the hook
 in one place; 21v2a's tasks own the copy.
 
-- [ ] **Step 1 (Mac):** the binding behind `B70_PF_MOE`, the kernel test's fused arm (fused == today's grouped,
+- [x] **Step 1 (Mac):** the binding behind `B70_PF_MOE`, the kernel test's fused arm (fused == today's grouped,
   bitwise, both shared forms, at the real shapes on synthetic weights; the sort at C = 2048 / 4096 on the 512-expert
   adversaries). Commit.
-- [ ] **Step 2 (box, card 0):** `r33.k1`, `r33.prefill` (both synthetic forms), `r33.golden`, `r33.golden_real`
+- [x] **Step 2 (box, card 0):** **2026-11-12**: the mw sort + the fused GEMMs bound (Intel's bf16 shared expert keeps a
+  one-block dequant + GEMM); the weight batch shrinks from 512 MiB to one block. Whole prefills of 4096 ids, every
+  layer's routes and the logits BITWISE today's walk on the synthetic ours / intel checkpoints and Intel's at
+  --layers 18; qwen4exp_pf_kernels_test, qwen4exp_prefill_synth_{ours,intel}_test PASS; pp4096 at --layers 18:
+  2,772 -> 4,459 t/s (1.61x, gate 1.3x). The cap 4096 for Flash-Next is not done (kPfC is a compile-time 2048 across
+  its scratch). `r33.k1`, `r33.prefill` (both synthetic forms), `r33.golden`, `r33.golden_real`
   (`--layers 18`, Intel's checkpoint), `r33.speed`'s pp4096 at `--layers 18` interleaved against main.
   - **Gates:** at cap 2048 every r33 output bitwise main's (the extended G0 compare with the r33 tests); pp4096 at
     `--layers 18` >= main's x 1.3 (derived from the same sinks; Flash-Next's sort and pass were never profiled - the

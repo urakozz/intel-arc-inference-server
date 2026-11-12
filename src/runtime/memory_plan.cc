@@ -126,7 +126,7 @@ uint32_t prefill_chunk_cap_that_fits(const model::ModelDesc& desc, bool mtp, siz
   try {
     check_prefill_chunk_cap(desc, wide.chunk_cap);
   } catch (const std::invalid_argument&) {
-    return PrefillScratchDims::kCDefault;   // a MoE model: pf_moe's KC
+    return PrefillScratchDims::kCDefault;   // a model that refuses 4096-row chunks
   }
   return plan(desc, max_len, mtp, model_bytes, wide, dv, kv, drafter).total() + reserve_bytes <= device_bytes
              ? PrefillScratchDims::kCMax

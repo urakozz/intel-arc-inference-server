@@ -658,7 +658,6 @@ void PipelineEngine::prepare_prefill() {
       if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
           w.kind == model::WeightKind::Int4)
         D.int8->scales(D.cx, D.kc, w);
-    prefill::moe_prepare_int8(D.cx, D.kc, *D.int8, m);
   }
 }
 
