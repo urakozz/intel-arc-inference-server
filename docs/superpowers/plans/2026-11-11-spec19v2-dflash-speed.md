@@ -1,9 +1,10 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-12): PAUSED before the next GPU test round, at the operator's request.** Task 1's calibrated
-costs, G0 and GPU profiling checks pass; the Task 2 serving screen is 88.806 t/s and correctness is 39/39 f32-judge
-PASS. CPU engine-tap acceptance continues unattended; the 80.5 t/s early bar remains pending until that gate
-clears. Then Tasks 3-7 and 7b, and Task 8 against the updated MTP arm, as already authorized. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
+**Status (2026-11-12): IN PROGRESS, operator resumed.** Tasks 1-2 complete: calibrated costs, G0, GPU profiling,
+CPU G-accept and 39/39 serving correctness PASS. The **80.5 t/s early bar PASSED** at 88.806 t/s. Continue Tasks
+3-7 and 7b. Task 8 belongs to the quiet-box session and must compare against main's per-step MTP (`f65ae50e` or
+later), enabled by default for `--mtp auto`. Further GPU validation uses an available, idle card; card 0 is busy
+with prefill work. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
@@ -67,7 +68,9 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
   Record the table in BENCHMARKS "DFlash (spec 19)" as a new
   "v2 baseline" block. **Gate (objective, recorded):** every C7 row has a measured value with its grade; verify(8) shows
   whether 28c's DPAS attention brought it to ~1.1.
-- [ ] **Step 3 (box + CPU): `r82.accept`.** The engine's taps over the A4 / golden recorded continuations and one
+- [x] **Step 3 (box + CPU): `r82.accept`.** G-accept PASS: A4 E7 7.080252 on both sides (544 anchors);
+  code engine/reference 5.875/5.750, gap 0.125 <= 0.15 (16 anchors). All K=1..7 and five corpora recorded.
+  The engine's taps over the A4 / golden recorded continuations and one
   held-out opencode slice, drafted by the CPU reference at K = 1..7, against the engine's in-loop ids an iteration
   (EOS-stopped).
   - **Gate G-accept:** engine-taps E_7 within 0.15 of the reference on A4 and code.
@@ -84,7 +87,7 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
     same prompt, output length and prefix-cache shape. One sequence slot (DFlash does not support slots).
   - One golden + A4 greedy correctness round, using the existing references; no repeated plain/MTP serving arms.
   - Skip llama-benchy and rotated rounds here. The opencode replay with all three arms belongs to Tasks 7b/8.
-- [ ] **Early bar:** 88.806 > 80.5 t/s; record PASS once baseline gates clear. Operator chose to continue
+- [x] **Early bar PASS:** 88.806 > 80.5 t/s; all baseline gates cleared, including CPU G-accept. Operator chose to continue
   Tasks 3-7 (2026-11-12), then 7b and Task 8 against a freshly measured, updated MTP arm. If DFlash exceeds
   **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
   Tasks 3-7. This shape is an early screen, not a substitute for Task 8's final G-speed gate.
@@ -173,7 +176,10 @@ deferred projection equals today's at every flush point: plain step, request end
 
 ### Task 8: the bar (box, idle) - G-speed
 
-- [ ] **Step 1:** `r82.d5` on the branch head, idle box, both other recordings as checks.
+- [ ] **Step 1 (quiet-box session, deferred by operator):** Task 7b's three-arm replay harness on the branch
+  head, idle box, both other recordings as checks. The MTP arm includes main `f65ae50e` or later and uses the
+  default per-step policy for `--mtp auto` (no disabling `B70_MTP_STEP_K`). Task 2's slim `r82.d5` screen is not
+  this final replay bar. All final DFlash speed numbers require an idle card.
 - [ ] **Gate (spec 19 D5, unchanged):**
   - `--spec dflash` >= 1.10x `--mtp auto` on `opencode-session-int8`;
   - no loss > 3 % on A4, golden, llama-benchy tg128 / tg128 @ d32768 and pp4096;

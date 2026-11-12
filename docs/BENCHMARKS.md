@@ -911,8 +911,9 @@ Both saved requests contain **identical 3,425 prompt ids** and each generates **
 The earlier 2,820-token shape label was stale. Both warm requests restore the prefix at token 2048, with the
 remaining prompt tail prefilling; prefix cache budget 32 GiB. MTP's recorded slot had context 32768. DFlash is
 **1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. The operator chose to
-continue Tasks 3-7 after baseline gates clear; that is when this early bar is recorded as passed. Task 8 will
-rerun against the updated MTP arm. This single shape does **not** establish its replay/regression G-speed gate.
+continue Tasks 3-7 after baseline gates clear. **The 80.5 t/s early bar PASSED** once CPU G-accept cleared below.
+Task 8 is deferred to the quiet-box session and must compare against main's per-step MTP (`f65ae50e` or later),
+the default for `--mtp auto`. This single shape does **not** establish its replay/regression G-speed gate.
 
 Provenance on the box: `~/b70/logs/brag-speed/20261111-1536/card-bf16/{bench.jsonl,server-log/000003.json}`
 and `~/b70/logs/dflash-v2/baseline/slots/{bench.jsonl,server-log/000003.json,server.log}`. The DFlash command is
@@ -922,8 +923,21 @@ One golden/A4 serving round: **39/39 pass the f32 judge**, 37 bitwise identical 
 golden cjk (first difference 16) and prose (74) each have zero f32-rejected ids on either suffix. No missing
 references or skipped requests. Logs: `~/b70/logs/dflash-v2/{identity.log,baseline/identity/}`; saved plain
 reference: validation state `e88ce65d57d8-vs-e88ce65d57d8`, `r55.serve/off.r1/requests.jsonl`.
-Engine-tap CPU acceptance remains pending. Initial cost-probe ratios were invalid because its restored plain
-row was inactive; those ratios are excluded. The corrected probe requires its plain replay to consume one row
+**CPU G-accept PASS** (2026-11-12): the engine and reference use the same taps, anchors and active widths.
+Existing 19a batched drafting is checked against a single real-model anchor at every K=1..7 before proceeding;
+the parity check passes. The complete baseline is `~/b70/logs/dflash-v2/baseline/acceptance.json`, with all
+K=1..7 counts and draft ids on five corpora; the completed driver ends `ALLDONE rc=0`.
+
+| corpus | anchors | engine E7 | CPU reference E7 | absolute gap | G-accept |
+|---|---:|---:|---:|---:|---|
+| A4 | 544 | 7.080252 | 7.080252 | 0.000000 | PASS |
+| golden code | 16 | 5.875000 | 5.750000 | 0.125000 | PASS (<=0.15) |
+| golden prose | 16 | 2.286458 | 2.286458 | 0.000000 | recorded |
+| golden cjk | 16 | 1.500000 | 1.500000 | 0.000000 | recorded |
+| held-out opencode | 16 | 3.687500 | 3.687500 | 0.000000 | recorded |
+
+Initial cost-probe ratios were invalid because its restored plain row was inactive; those ratios are excluded.
+The corrected probe requires its plain replay to consume one row
 and match verify(1)'s greedy id before timing. Both depths pass that calibration.
 
 Uninstrumented production lists, interleaved pairs with a restored snapshot before every call; one warm-up
