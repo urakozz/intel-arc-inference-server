@@ -27,6 +27,7 @@ Several requests at once - decode with MTP, total t/s over all requests (per req
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
+| two cards, tensor parallel (the default for one session) | **123.1** | | | |
 | two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
 | two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
@@ -36,6 +37,7 @@ Time to the first token, new conversation / prefix cache hit:
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |
 |---|---:|---:|---:|---:|
+| two cards, tensor parallel (the default for one session) | **1.84 / 1.34 s** | | | |
 | two cards, `--max-num-seqs 8` | 2.30 / 1.08 s | 2.36 / 1.10 s | 3.61 / 1.65 s | 7.27 / 2.79 s |
 | two cards, `--max-num-seqs 8 --kv-cache int8` | 2.33 / 1.09 s | 2.37 / 1.11 s | 3.63 / 1.64 s | 7.30 / 2.81 s |
 | two cards, `--max-num-seqs 8 --prefill-backend l0-int8` | **1.80 / 0.86 s** | 1.88 / 0.89 s | 2.82 / 1.33 s | 5.76 / 2.24 s |
