@@ -1,7 +1,7 @@
 # Ornith 1.5 MoE prefill rework - about 2x prefill (design targets Ornith and Flash-Next)
 
-**Status (2026-11-12): Tasks 1-3 DONE (probe GO; the sort and the fused int4 GEMM bound, bitwise; Ornith 4k l0
-3,377 -> 6,552 t/s), Task 5 in progress.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
+**Status (2026-11-12): Tasks 1-7 DONE; Task 8 switch-over committed, its two l0-int8 gates FAIL the near-miss rule
+on cosine (cjk 15, c16 prose 18) - waiting on the operator; see `handoff.md` beside this plan.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
 238f0582). Earlier evidence this plan builds on: `docs/probes/probe-fused-dequant-2026-09-22.md` (fused dequant on a
 DENSE shape: bitwise, but rejected at 3.3x the cost of the pass it removed), `docs/probes/probe-w4a8-2026-09-23.md`
 (W4A8 rejected: 2.79 % error), open-work 3b's `pf_gemm_q4.cl` (int4 read in registers, bitwise the slab walk). Box

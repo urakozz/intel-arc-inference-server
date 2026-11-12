@@ -403,6 +403,10 @@ int main(int argc, char** argv) {
       if (J && !jok)   // a miss's margins: the judge's lead of its token over the engine's, the engine's the other way
         std::printf("  margins: f32 %.4f (1 bf16 ulp %.4f), engine %.4f", jrow[want] - jrow[id], jr.ulp,
                     dec[id] - dec[want]);
+      if (near_miss_rule && !jok && jd.determined())   // the rule's cosine half: the engine's and the bf16 twin's vs f32
+        std::printf("  cos vs f32: engine %.6f, bf16 twin %.6f",
+                    compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos,
+                    compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos);
       if (accept.has(pname, p) && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
       if (accept.has(pname, p) && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");
