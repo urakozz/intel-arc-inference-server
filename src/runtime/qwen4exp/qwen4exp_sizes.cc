@@ -152,7 +152,7 @@ constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwe
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
 }  // namespace
 
-size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 4; }   // phase 2: conv + l2norm one launch, A..A2 one
+size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 1; }   // phase 2: conv + l2norm in one launch
 
 GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   // Qwen3.8's GDN shape (the family's): 16 k / 48 v heads x 128, 10240 conv channels.
