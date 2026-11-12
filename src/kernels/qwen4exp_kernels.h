@@ -293,6 +293,9 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gdn_conv_variant(),
       pf_gdn_wy_variant(),
       pf_gdn_scan_variant(),
+      pf_gdn_front_variant(),       // phase 2 (B70_PF_PHASE2=old binds the three above)
+      pf_gdn_intra_hl_variant(),
+      pf_gdn_scan_hl_variant(),
       pf_gated_head_sig_variant(),
       pf_bf16_slab_variant(kHidden, kIdxN),
       pf_attn_prep_q4_variant(),

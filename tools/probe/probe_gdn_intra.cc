@@ -196,11 +196,13 @@ int main(int argc, char** argv) {
     std::vector<int> calls = {0, 9, 21};
     int rounds = 9;
     bool time = true;
+    uint32_t c_override = 0;   // --c N: probe the first N rows only (a ragged tail sub-chunk)
     for (int i = 1; i < argc; ++i) {
       const std::string a = argv[i];
       if (a == "--dump" && i + 1 < argc) dir = argv[++i];
       else if (a == "--rounds" && i + 1 < argc) rounds = std::max(1, std::atoi(argv[++i]));
       else if (a == "--no-time") time = false;
+      else if (a == "--c" && i + 1 < argc) c_override = uint32_t(std::atoi(argv[++i]));
       else if (a == "--calls" && i + 1 < argc) {
         calls.clear();
         std::stringstream ss(argv[++i]);
@@ -231,6 +233,8 @@ int main(int argc, char** argv) {
       const std::vector<float> g = read_bin<float>(base + "_g.bin"), beta = read_bin<float>(base + "_beta.bin");
       if (xb.size() != size_t(sh.C) * sh.conv || g.size() != size_t(sh.C) * sh.hv || beta.size() != g.size())
         throw std::runtime_error(base + ": sizes do not match the .txt");
+      const uint32_t c_file = sh.C;
+      if (c_override > 0 && c_override < sh.C) sh.C = c_override;
       const uint32_t H = sh.hv;
       const std::string wy = kernels::pf_gdn_wy_variant(sh.hk, sh.hv);
       const std::string scanv = kernels::pf_gdn_scan_variant(sh.hk, sh.hv);
@@ -244,7 +248,7 @@ int main(int argc, char** argv) {
       l0::Kernel& kInD = kc("pf_gdn_intra_dbg" + kernels::gdn_suffix(sh.hk, sh.hv), "pf_gdn_intra");
 
       // 2C rows for the timing's second width: the dump tiled twice (the same values each half).
-      const uint32_t C2 = 2 * sh.C, nch2 = (C2 + kCt - 1) / kCt;
+      const uint32_t C2 = 2 * c_file, nch2 = (C2 + kCt - 1) / kCt;
       const size_t tri = size_t(nch2) * H * kCt * kCt;
       l0::Mem d_xb(ctx, l0::MemKind::Device, size_t(C2) * sh.conv * 2),
           d_g(ctx, l0::MemKind::Device, size_t(C2) * H * 4), d_b(ctx, l0::MemKind::Device, size_t(C2) * H * 4),

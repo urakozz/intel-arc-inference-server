@@ -75,9 +75,11 @@ void pf_norm_finish(Context& cx, KernelCache& kc, PrefillScratch& s, const void*
   cx.launch(kc(kernels::pf_norm_finish_variant(s.desc().hidden, g, g), "pf_norm_finish"), g, M, 1,
             {PtrArg(s.norm_sumsq.ptr()), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
 }
+// `fused` false: the two launches whatever the model (step_head's one row and step_mtp_kv keep their counts).
 void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_prev,
-                 const void* norm_w, const void* partials, void* resid, void* x, uint32_t M) {
-  if (pf_phase2(s.desc())) {
+                 const void* norm_w, const void* partials, void* resid, void* x, uint32_t M,
+                 bool fused = true) {
+  if (fused && pf_phase2(s.desc())) {
     // Phase 2 Task 5: the pair in one launch (pf_norm_fused.cl), bitwise; no norm sums written.
     cx.launch(kc(kernels::pf_res_norm_variant(s.desc().hidden, s_prev, PrefillScratch::kNormGroups), "pf_res_norm"),
               1, M, 1, {PtrArg(partials), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
@@ -457,7 +459,7 @@ void step_head(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMode
     pf_res_norm(cx, kc, s, m.desc->ffn_fold_s() == 0 ? 0u : 1u, m.final_norm.ptr(),
                 at(s.partials, size_t(last_row) * s.desc().hidden * 4),
                 at(s.resid, size_t(last_row) * s.desc().hidden * 2),
-                at(s.x, size_t(last_row) * s.desc().hidden * 2), 1u);
+                at(s.x, size_t(last_row) * s.desc().hidden * 2), 1u, /*fused=*/false);
 
   // lm_head at M = 1 through the EXISTING decode binary, chosen off the loaded
   // weight's kind exactly as capture.cc:625-631 chooses it. It writes straight
@@ -541,7 +543,7 @@ void step_mtp_kv(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMo
   // 1. The main model's final norm on every row (what decode's b.x holds after a
   //    step), into hid rows 1..C. step_head's own single-row norm is then skipped.
   pf_res_norm(cx, kc, s, m.desc->ffn_fold_s() == 0 ? 0u : 1u, m.final_norm.ptr(),
-              s.partials.ptr(), s.resid.ptr(), hid + H, C);
+              s.partials.ptr(), s.resid.ptr(), hid + H, C, /*fused=*/false);
   const uint32_t rows = mtp_kv_rows(pos, C);
   if (rows == 0) return;
   const uint32_t r0 = C - rows;   // 1 at pos 0 (no h_{-1}), else 0

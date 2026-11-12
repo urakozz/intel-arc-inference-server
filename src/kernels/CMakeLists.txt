@@ -1262,6 +1262,11 @@ endif()
 if(B70_Q4EXP)
   set(Q4_PF_REUSE ${CMAKE_CURRENT_SOURCE_DIR}/prefill)
   add_ocloc_kernel(pf_gated_head_SIG SOURCE ${Q4_PF_REUSE}/pf_gated_head.cl DEFINES GDN_GATE_SIGMOID=1)
+  # MoE-model prefill phase 2 (Task 8): the GDN front, the intra-chunk kernel (D2 form) and its scan at Qwen3.8's
+  # GDN shape, which this family shares.
+  add_ocloc_kernel(pf_gdn_front SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl)
+  add_ocloc_kernel(pf_gdn_intra_hl SOURCE ${Q4_PF_REUSE}/pf_gdn_intra.cl DEFINES WU_HILO=1)
+  add_ocloc_kernel(pf_gdn_scan_hl SOURCE ${Q4_PF_REUSE}/pf_gdn_scan_hl.cl)
   add_ocloc_kernel(pf_embed_gather_D2560 SOURCE ${Q4_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=248320)
   add_ocloc_kernel(pf_ab_proj_D2560 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl
