@@ -136,6 +136,7 @@ int main(int argc, char** argv) {
   e.prefill(std::vector<uint32_t>(4096, 760));
   e.save_state(state.ptr());
   const uint32_t deep_pos = e.pos(), deep_anchor = e.control()->cur_token[0];
+  check_attn_heads(e, d, 7);
   check_attn_heads(e, d, 2);
   d.draft(e, 2, 0.0f, 0);
   e.verify(2);
