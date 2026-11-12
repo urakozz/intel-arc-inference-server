@@ -309,20 +309,28 @@ __kernel void pf_moe_combine_norm(__global const uint* restrict route, __global 
   __global const uint* restrict rr = route + (size_t)t * RW;
   __global ushort* restrict rp = resid + (size_t)t * HIDDEN;
   const uint srow = hdr[H_SHARED_ROW] + t;
+  const float sg_w = as_float(rr[R_SG]);
+  uint rows[TOP_K];   // the row's slots and weights, read once for its CN_PER columns
+  float wk[TOP_K];
+#pragma unroll
+  for (uint k = 0; k < TOP_K; ++k) {
+    rows[k] = pair_row[t * TOP_K + k];
+    wk[k] = as_float(rr[R_W + k]);
+  }
 
   ushort rb[CN_PER];
 #pragma unroll
   for (uint i = 0; i < CN_PER; ++i) {
     const uint n = lid + i * WG_COMBINE;
     float sum = 0.0f;
+#pragma unroll
     for (uint k = 0; k < TOP_K; ++k) {
-      const uint row = pair_row[t * TOP_K + k];
-      const ushort d_b = y[(size_t)row * HIDDEN + n];
-      sum += bf16f(rne_bf16(bf16f(d_b) * as_float(rr[R_W + k])));
+      const ushort d_b = y[(size_t)rows[k] * HIDDEN + n];
+      sum += bf16f(rne_bf16(bf16f(d_b) * wk[k]));
     }
     const ushort r_b = rne_bf16(sum);
     const ushort ds_b = y[(size_t)srow * HIDDEN + n];
-    const ushort sh_b = rne_bf16(bf16f(ds_b) * as_float(rr[R_SG]));
+    const ushort sh_b = rne_bf16(bf16f(ds_b) * sg_w);
     const ushort o_b = rne_bf16(bf16f(r_b) + bf16f(sh_b));
     const ushort res_b = rne_bf16(bf16f(rp[n]) + bf16f(o_b));
     rp[n] = res_b;
