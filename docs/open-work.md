@@ -8,6 +8,13 @@ Merges go in after the Mac checks; the full box validation runs on main on deman
 Last updated: 2026-11-12. Order of focus: Qwen3.8-27B, then Flash-Next (implemented, tuned, fused, fast), then Bolt.
 Low-priority and ruled-out work that may come back: [low-priority-work.md](low-priority-work.md).
 
+## Both cards first - short runs under the whole-box lock, before the Flash-Next quant takes card 1
+
+| # | what | run | state / what it decides |
+|---|---|---|---|
+| B1 | **Ornith on `--parallel replica`: a proper speed number.** The 2026-11-12 check used 128-token replies on ~180-token prompts (238 t/s two at a time against 153 one at a time with MTP), not comparable with the README's one-card 142.8 / 234.9 t/s at 4k depth | the README's bench on both cards at once: decode at depth 4096, with and without MTP, each card's t/s and the total, against one card alone; interleaved, median of 3, `tools/gpu_lock.sh box` (a few minutes) | not run. Its numbers go into the README's Ornith table and BENCHMARKS |
+| B2 | **Qwen3.8 pipeline parallel hand-off:** is `--pipeline-handoff peer` worth keeping? The hand-off is one hidden-state row a token (a few KB), `copy` is the default, and `peer` is refused with DFlash on `pp` and with Bolt's proposer. No recorded gain for `peer` | Qwen3.8 decode on `--parallel pp`, `copy` against `peer`, interleaved pairs, median of 3, `tools/gpu_lock.sh box` (a few minutes) | not run (2026-11-12). No gain: drop the flag and its code path (and those refusals). Clearly faster: make it the automatic choice where allowed, and still drop the flag |
+
 ## Now, in order
 
 | # | what | state | closes when |
@@ -51,7 +58,6 @@ A calibrated int4 head (GPTQ codes) is a separate later job in `docs/low-priorit
 
 | spec | what | proved by | state |
 |---|---|---|---|
-| **Qwen3.8** pipeline parallel hand-off - FIRST of the both-card runs | is `--pipeline-handoff peer` worth keeping? The hand-off is one hidden-state row a token (a few KB), `copy` is the default, and `peer` is refused with DFlash on `pp` and with Bolt's proposer. No recorded gain for `peer` | Qwen3.8 decode on `--parallel pp`, `copy` against `peer`, interleaved pairs, median of 3, `tools/gpu_lock.sh box` (a few minutes) | not run (2026-11-12). No gain: drop the flag and its code path (and those refusals). Clearly faster: make it the automatic choice where allowed, and still drop the flag |
 | **Flash-Next** (next after Qwen3.8) | the golden-set remake with block scores (`r30.golden` / `r30.golden_layers`), which `r32.partial` and `r33.golden_real` wait for (`qwen4exp_partial_test`, `qwen4exp_golden_prefill_intel_test` FAIL on the old 1e-3 gap rule until then); `r34.fixture` / `r34.accept` / `r34.a4_ref` (CPU), then `r34.a4` (needs the whole model: item 4); `r31.load_real`. Passed since 2026-11-07: `r31.load`, `r32.k3` / `golden` / `pp` / `cli`, `r33.prefill` / `pp`. What comes after these is [plan 21v2a](superpowers/plans/2026-11-11-spec21v2a-whole-model-tiering.md) | CPU references (the remake ~90 GB RAM, holds both cards; plan 21v2a Task 7 adds the 48-layer f32 reference of our export to the same job), item 4 | held in the CPU queue (`#HOLD-sj q4exp-golden-scores`) until the Qwen3.8 and TP + slots references are done |
 | **Bolt / LiLiCorr** (parked, operator 2026-11-11: until Flash-Next is implemented, tuned, fused and speed-optimised) | `r60.golden` / `r61.golden` judged by Bolt's f32 reference (the tooling is on branch `bolt-f32-ref`; its CPU job held as `#HOLD-bolt-parked-until-flash-next`); `r61.golden`'s conv-column drift (0.987 vs 0.999); `r64.draft` (LiLiCorr's exp now `df_exp`: confirm on a card); `r65.prefill`'s one-position ring cosine (likely a routing near-tie flip); `r65.serve`, `r57.*`, `r62.a4` / `agentic`, `r60.golden32k`, `r61.golden32k` | Bolt's f32 reference, a card run | parked |
 | **K2 / Kolibri** (parked) | `r25.a4_ref` / `r25.a4` (waits for K2 bf16 hot, 75 GB), `r21.passkey` (FAILed: read its log first), `r28.a4` (Kolibri's 156 GB bf16 download), `r28.passkey`. Spec 28m (the MoE draft-checking probe) waits for an MoE model in focus | the models back in focus | parked |
