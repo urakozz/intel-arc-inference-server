@@ -45,23 +45,19 @@ struct MtpCost {
   // the verify list covers.
   MtpCost with_free_drafts() const;
 
-  // Spec 19c (`--spec dflash`, spec 19 decision 4): the verify rows to M = 8 and the DFlash drafter's draft row,
-  // FLAT in K - one pass of the drafter drafts the whole block (`--spec-cost` replaces either part):
-  //   verify M = 1..8   Task 1's measured paired ratios (docs/BENCHMARKS.md, DFlash v2 baseline).
-  //   draft             measured int8 total 0.309880; head's per-launch 2.165104 ms / its paired plain 28.972533 ms,
-  //                     remainder assigned to the body. BF16 is DERIVED: double the int8 head and body GEMM
-  //                     shares (body GEMMs 3.225104 ms), retaining attention, small kernels and host overhead.
-  // The bf16-head verify ratios are derived equal to int8; these constants do not change MTP's tables.
+  // Spec 19v2: one block drafts all K rows. The int8 H1/B4 full/candidate totals and per-mode verify rows are
+  // measured paired medians at depth4096 (2026-11-12, busy box); docs/BENCHMARKS.md. The full-head decomposition
+  // uses that profile's head GEMM, and BF16 doubles its head/body GEMM shares, retaining non-linear/host cost.
   // drafter_format: 0 bf16, 1 int8, 2 int4 g64; candidate_head is C3's top64/exact-rerank path.
   static MtpCost dflash(bool i8_head, unsigned drafter_format, bool candidate_head = false);
-  static constexpr double kDFlashHeadInt8 = 2.165104 / 28.972533, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
-  static constexpr double kDFlashDrafterInt8 = 0.309880 - kDFlashHeadInt8;
-  static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.225104 / 28.972533;
-  // Pre-H1/B4 profiles; Task7b replaces these before the serving bar. Int4 candidate is DERIVED from the
-  // measured full-head int4 row and the measured int8 candidate saving, until the combined probe measures it.
+  static constexpr double kDFlashHeadInt8 = 2.166354 / 29.222498, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterInt8 = 0.298136 - kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.185105 / 29.222498;
+  static constexpr double kDFlashDraftCandidateInt8 = 0.287036;
+  // Int4 PRE-H1/B4 provisional rows; Task7b replaces these before the serving bar. Candidate is DERIVED from
+  // the measured full-head int4 row and the pre-H1/B4 int8 candidate saving, until the combined probe measures it.
   static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
-  static constexpr double kDFlashDraftCandidateInt8 = 0.298123;
-  static constexpr double kDFlashDraftCandidateInt4 = 0.269526 - (0.309880 - kDFlashDraftCandidateInt8);
+  static constexpr double kDFlashDraftCandidateInt4 = 0.257769;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
   static double dflash_head_share(bool i8_head, unsigned drafter_format);
 
