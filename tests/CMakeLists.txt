@@ -3805,6 +3805,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     kernel_df_select_M8_K16_Q16_RK256_V248320 kernel_df_select_v1_M8_K16 kernel_gemv_bf16_M7_K5120_N248320)
   list(APPEND B70_DFLASH_KERNELS kernel_df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8
        kernel_df_select_M8_K16_Q16_RK256_V248320_H16)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1
+       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H2)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
   endforeach()
@@ -3852,8 +3854,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_include_directories(dflash_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(dflash_kernels_test PRIVATE b70_l0)
   b70_target_kernel_dir(dflash_kernels_test)
-  add_dependencies(dflash_kernels_test ${B70_DFLASH_KERNELS}
-    kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1 kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H2)
+  add_dependencies(dflash_kernels_test ${B70_DFLASH_KERNELS})
   add_test(NAME dflash_kernels_test COMMAND dflash_kernels_test)
   set_tests_properties(dflash_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
 endif()

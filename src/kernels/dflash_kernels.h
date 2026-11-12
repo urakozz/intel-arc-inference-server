@@ -72,9 +72,9 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
-                                               LinearKind k, LinearKind head) {
+                                               LinearKind k, LinearKind head, unsigned attn_heads = 0) {
   const Shape& s = kQwen38;
-  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(), select_variant(v2, s, fmt == 2)};
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads), select_variant(v2, s, fmt == 2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
