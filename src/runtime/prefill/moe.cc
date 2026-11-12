@@ -10,7 +10,6 @@
 #include "runtime/buffer_sizes.h"
 #include "runtime/prefill/backend.h"
 #include "runtime/prefill/int8.h"
-#include "runtime/prefill/gdn.h"   // pf_phase2
 #include "runtime/prefill/profile.h"
 
 namespace runtime::prefill {
@@ -108,14 +107,11 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const loader::DeviceWeight& rw = w.router;
   require(rw.kind == model::WeightKind::Bf16 && rw.shape.N == m.router_n() && rw.shape.K == H,
           "the router is not bf16 [router_n][hidden]");
-  if (pf_phase2(d))   // phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles), bitwise pf_ab_proj
-    cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
-              (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-              (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-              {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
-  else
-    cx.launch(kc(kernels::pf_moe_router_variant(H, m.router_n()), "pf_ab_proj"), m.router_n() / 16,
-              (C + 7) / 8, 1, {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
+  // Phase 2 Task 6: pf_route.cl's tiling (16 rows x 2 column tiles a work-group), bitwise pf_ab_proj.
+  cx.launch(kc(kernels::pf_route_router_variant(H, m.router_n()), "pf_gemv_rows"),
+            (m.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
+            (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
+            {PtrArg(rw.mem.ptr()), PtrArg(s.x.ptr()), PtrArg(logits), arg_val(C)});
   cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
             {PtrArg(logits), PtrArg(route)});
   profile_wait(cx, Phase::kMoeRoute);

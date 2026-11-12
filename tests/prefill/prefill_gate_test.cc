@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
   kHid = model.desc->hidden;
   kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
   const bool kMoe = model.desc->is_moe();
-  const char* const scan_entry = runtime::prefill::gdn_scan_entry_name(*model.desc);   // phase 2: per model
+  const char* const scan_entry = runtime::prefill::gdn_scan_entry_name();
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));

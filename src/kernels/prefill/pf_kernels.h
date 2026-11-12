@@ -157,13 +157,6 @@ inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
 }
-// Phase 2 Task 3 under D2: pf_gdn_intra.cl's WU_HILO build and pf_gdn_scan_hl.cl (w / u as hi / lo planes).
-inline std::string pf_gdn_intra_hl_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
-  return "pf_gdn_intra_hl" + gdn_suffix(gdn_k, gdn_v);
-}
-inline std::string pf_gdn_scan_hl_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
-  return "pf_gdn_scan_hl" + gdn_suffix(gdn_k, gdn_v);
-}
 // Phase 2 Task 6: pf_route.cl's pf_gemv_rows at a||b's shape (MT 16, TC 2), bitwise pf_ab_proj.
 inline std::string pf_route_ab_variant(unsigned hidden = kRefHidden) { return "pf_route_ab" + hidden_suffix(hidden); }
 inline constexpr unsigned kPfRouteMt = 16, kPfRouteTc = 2;

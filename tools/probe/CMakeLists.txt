@@ -1184,7 +1184,6 @@ if(B70_ORNITH)
   target_link_libraries(probe_gdn_intra PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
   b70_target_kernel_dir(probe_gdn_intra)
   add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg_GK16V32 kernel_pf_gdn_intra_GK16V32
-                   kernel_pf_gdn_intra_hl_GK16V32 kernel_pf_gdn_scan_hl_GK16V32
                    kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
 endif()
 

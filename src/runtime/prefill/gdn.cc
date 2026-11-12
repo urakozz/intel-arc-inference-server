@@ -12,7 +12,6 @@
 #include "kernels/prefill/pf_kernels.h"
 #include "loader/small_layout.h"
 #include "model/qwen35.h"
-#include "runtime/prefill/phase2.h"
 #include "runtime/prefill/profile.h"
 
 // The ten launches of one GDN layer's chunk, in order. Every one takes `C` as a
@@ -152,16 +151,15 @@ static const char* gdn_a2_entry() { return "pf_gdn_A2_hilo"; }
 // writer stores the same entry, so the value read is unchanged.
 static std::atomic<const char*> g_scan_launched{nullptr};
 
-bool pf_phase2(const model::ModelDesc& d) { return d.is_moe() && pf_phase2_on(); }
-// Phase 2: launches 2-3 become one (Task 2), 5-8 one (Task 3).
-size_t gdn_chunk_launches(const model::ModelDesc& d) {
-  return kGdnChunkLaunches - (pf_phase2(d) ? 1 : 0) - (pf_phase2(d) && pf_gdn_intra_on() ? 3 : 0);
+// Phase 2: a MoE model's launches 2-3 are one (Task 2) and, on l0, 5-8 one (Task 3).
+static bool intra_one_launch(const model::ModelDesc& d, PrefillBackend b) {
+  return d.is_moe() && b == PrefillBackend::L0;
+}
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
+  return kGdnChunkLaunches - (d.is_moe() ? 1 : 0) - (intra_one_launch(d, b) ? 3 : 0);
 }
 
 const char* gdn_scan_entry_name() { return gdn_scan_entry(); }
-const char* gdn_scan_entry_name(const model::ModelDesc& d) {
-  return pf_phase2(d) && pf_gdn_intra_on() ? "pf_gdn_scan_hl" : gdn_scan_entry();
-}
 const char* gdn_scan_launched_entry() { return g_scan_launched.load(); }
 const char* gdn_a2_entry_name() { return gdn_a2_entry(); }
 
@@ -172,7 +170,7 @@ static const char* gdn_solve_entry() { return "pf_gdn_solve"; }
 
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
-               uint16_t* conv_ring, const void* small, uint16_t* y) {
+               uint16_t* conv_ring, const void* small, uint16_t* y, PrefillBackend backend) {
   require(C > 0, "C must be > 0");
   require(C <= s.chunk_cap(),
           "C = " + std::to_string(C) + " exceeds the scratch's chunk cap " +
@@ -198,9 +196,6 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   void* p_w = s.gdn_w.ptr();
   void* p_u = s.gdn_u.ptr();
   void* p_o = s.gdn_o.ptr();
-  // Phase 2 (D2): w's and u's lo planes, bf16 [C][v-heads][128] each, in gdn_A (sized for both on a MoE model).
-  void* p_wl = s.gdn_A.ptr();
-  void* p_ul = static_cast<uint8_t*>(s.gdn_A.ptr()) + size_t(s.chunk_cap()) * d.gdn_value_dim() * 2;
 
   const std::string conv = kernels::pf_gdn_conv_variant(k_heads, heads);
   const std::string wy = kernels::pf_gdn_wy_variant(k_heads, heads);
@@ -210,7 +205,7 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1,
             {PtrArg(conv_ring), PtrArg(p_seed), arg_val(pos)});
   profile_wait(cx, Phase::kGdnSeed);
-  if (pf_phase2(d)) {
+  if (d.is_moe()) {
     //  2-3 (phase 2 Task 2) - the conv1d + SiLU and the q / k l2norm in one launch (pf_gdn_front.cl),
     //      bitwise the pair below; FB = 32 positions a work-group.
     cx.launch(kc(kernels::pf_gdn_front_variant(k_heads, heads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
@@ -235,14 +230,14 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
             {PtrArg(ab_out), PtrArg(small), PtrArg(p_g), PtrArg(p_beta), arg_val(C)});
   profile_wait(cx, Phase::kGdnGate);
   dump_gdn_inputs(cx, s, C);
-  if (pf_phase2(d) && pf_gdn_intra_on()) {
+  if (intra_one_launch(d, backend)) {
     //  5-8 (phase 2 Task 3) - A, T, w / u and A2 in one launch: pf_gdn_intra.cl, one work-group per
-    //      (v-head, sub-chunk). Judged, not bitwise: DPAS dots, a blocked solve, T as hi / lo limbs.
-    //      Operator decision D2: Q1-Q4 in fp32 - w and u leave as hi / lo planes, the lo planes in gdn_A
-    //      (sized for both on a MoE model), and the scan reads both (pf_gdn_scan_hl.cl).
-    cx.launch(kc(kernels::pf_gdn_intra_hl_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
+    //      (v-head, sub-chunk), the scan's inputs in its layouts. Judged, not bitwise: DPAS dots, a blocked
+    //      solve, T as hi / lo limbs (Q1-Q4 bf16 as before). l0 only: on l0-int8 it flips a determined row of
+    //      prefill_gate_ornith_l0-int8 (2026-11-12 record), so l0-int8 is not supported yet and keeps 5-8.
+    cx.launch(kc(kernels::pf_gdn_intra_variant(k_heads, heads), "pf_gdn_intra"), heads, nch, 1,
               {PtrArg(p_xb), PtrArg(p_g), PtrArg(p_beta), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2),
-               arg_val(C), PtrArg(p_wl), PtrArg(p_ul)});
+               arg_val(C)});
     profile_wait(cx, Phase::kGdnWu);
   } else {
     //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. Grid.z is A28's
@@ -273,17 +268,10 @@ void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, ui
     profile_wait(cx, Phase::kGdnA2);
   }
   //  9 - the sequential chunk-to-chunk state scan; the only writer of gdn_state.
-  if (pf_phase2(d) && pf_gdn_intra_on()) {
-    cx.launch(kc(kernels::pf_gdn_scan_hl_variant(k_heads, heads), "pf_gdn_scan_hl"), heads, kStateColChunks, 1,
-              {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_wl), PtrArg(p_u), PtrArg(p_ul), PtrArg(p_A2), PtrArg(p_g),
-               PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
-    g_scan_launched.store("pf_gdn_scan_hl");
-  } else {
-    cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
-              {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
-               PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
-    g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
-  }
+  cx.launch(kc(scan, scan_entry), heads, kStateColChunks, 1,
+            {PtrArg(p_xb), PtrArg(p_w), PtrArg(p_u), PtrArg(p_A2), PtrArg(p_g),
+             PtrArg(gdn_state), PtrArg(p_o), arg_val(C)});
+  g_scan_launched.store(scan_entry);     // the dispatch proof, after the append
   profile_wait(cx, Phase::kGdnScan);
   // 10 - the gated head. Ruling R3: it belongs to the mixer, not to the caller.
   cx.launch(kc.get(kernels::pf_gated_head_variant(k_heads, heads), "pf_gated_head"), heads, C, 1,

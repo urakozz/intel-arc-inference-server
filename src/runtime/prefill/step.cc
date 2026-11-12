@@ -79,7 +79,7 @@ void pf_norm_finish(Context& cx, KernelCache& kc, PrefillScratch& s, const void*
 void pf_res_norm(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t s_prev,
                  const void* norm_w, const void* partials, void* resid, void* x, uint32_t M,
                  bool fused = true) {
-  if (fused && pf_phase2(s.desc())) {
+  if (fused && s.desc().is_moe()) {
     // Phase 2 Task 5: the pair in one launch (pf_norm_fused.cl), bitwise; no norm sums written.
     cx.launch(kc(kernels::pf_res_norm_variant(s.desc().hidden, s_prev, PrefillScratch::kNormGroups), "pf_res_norm"),
               1, M, 1, {PtrArg(partials), PtrArg(resid), PtrArg(norm_w), PtrArg(x), arg_val(M)});
@@ -110,7 +110,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
         // weight: the checkpoint's own, or (spec 15 §13) an int4 a||b's copy the loader
         // dequantised with the prefill dequant's arithmetic (loader::prefill_ab).
       const DeviceWeight& w = loader::prefill_ab(m, l);
-      if (pf_phase2(d))   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
+      if (d.is_moe())   // phase 2 Task 6: more rows and columns a work-group, bitwise pf_ab_proj (pf_route.cl)
         cx.launch(kc(kernels::pf_route_ab_variant(d.hidden), "pf_gemv_rows"),
                   (w.shape.N / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
                   (C + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
@@ -123,7 +123,7 @@ void mixer_body(Context& cx, KernelCache& kc, PrefillScratch& s, const LoadedMod
     gdn_chunk(cx, kc, s, pos, C, s.partials.as<float>(), s.ab_out.as<float>(),
               reinterpret_cast<float*>(gdn_base + size_t(gdn) * gdn_state_stride),
               reinterpret_cast<uint16_t*>(ring_base + size_t(gdn) * conv_ring_stride),
-              small.gdn.ptr(), s.mixer_out.as<uint16_t>());   // y stride v-heads x 128
+              small.gdn.ptr(), s.mixer_out.as<uint16_t>(), backend);   // y stride v-heads x 128
     ++gdn;
     pf_linear(cx, kc, s, m.linears.at({l, LinearId::OutProj}), s.mixer_out.as<uint16_t>(), C,
               backend, q, out);
@@ -719,14 +719,14 @@ size_t l0_fa_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_
 // (the MoE block's 10): 1 + 30 x 55 + 10 x 41 = 2061 (derived).
 namespace {
 // A pf_res_norm's launches: the fold and the finish, or phase 2 Task 5's one.
-size_t res_norm_launches(const model::ModelDesc& d) { return pf_phase2(d) ? 1 : 2; }
+size_t res_norm_launches(const model::ModelDesc& d) { return d.is_moe() ? 1 : 2; }
 size_t moe_step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C) {
   auto lin = [&](LinearId id) {
     return linear_launches(d, id, b, C) + (b == PrefillBackend::L0Int8 ? 1 : 0);
   };
   const size_t nrm = res_norm_launches(d);
   const size_t ffn = nrm + moe_chunk_launches(d, b);
-  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn;
+  const size_t gdn = nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn;
   const size_t fa = nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b) +
                     kAttnGateLaunches + lin(LinearId::OProj) + ffn;
   return 1 + d.gdn_layers * gdn + d.fa_layers * fa;
@@ -755,7 +755,7 @@ size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
     };
     const size_t nrm = res_norm_launches(d);
     const size_t ffn = nrm + moe_chunk_launches(d, b);
-    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d) + lin(LinearId::OutProj) + ffn
+    return gdn ? nrm + lin(LinearId::QkvZ) + 1 + gdn_chunk_launches(d, b) + lin(LinearId::OutProj) + ffn
                : nrm + lin(LinearId::Qkv) + kAttnPrepLaunches + attn_chunk_launches(d, C, b, pos) +
                      kAttnGateLaunches + lin(LinearId::OProj) + ffn + widen;
   }

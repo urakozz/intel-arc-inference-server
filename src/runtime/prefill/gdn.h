@@ -4,6 +4,7 @@
 #include "runtime/buffers.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill_backend.h"
 
 namespace runtime::prefill {
 
@@ -44,23 +45,24 @@ namespace runtime::prefill {
 //
 // Ten launches per call, in the order `gdn.cc` lists them. `C` must be in
 // (0, s.chunk_cap()]; anything else throws.
+//
+// `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 (and every
+// dense model) keeps the four launches.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
-               uint16_t* conv_ring, const void* small, uint16_t* y);
+               uint16_t* conv_ring, const void* small, uint16_t* y,
+               PrefillBackend backend = PrefillBackend::L0);
 
 // What one `gdn_chunk` call appends to the L0 list. Asserted through
 // `Context::launches()` rather than restated in prose; Task 14's launch
 // arithmetic reads it.
 inline constexpr size_t kGdnChunkLaunches = 10;
 
-// MoE-model prefill phase 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): a MoE
-// model's walk (Ornith) binds the phase 2 kernels - Task 2's pf_gdn_front for conv + l2norm, Task 5's
-// pf_res_norm (step.cc), and only with B70_PF_GDN_INTRA=hl Task 3's pf_gdn_intra_hl / pf_gdn_scan_hl
-// (runtime/prefill/phase2.h) - unless B70_PF_PHASE2=old (env, tests and probes only: today's kernels). Dense
-// models (Qwen3.8, its TP card) keep today's walk, bitwise.
-bool pf_phase2(const model::ModelDesc& d);
-// The launches one gdn_chunk call appends for `d`: kGdnChunkLaunches on today's walk.
-size_t gdn_chunk_launches(const model::ModelDesc& d);
+// MoE-model prefill phase 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): a MoE model's
+// gdn_chunk (Ornith) runs the conv + l2norm as one launch (pf_gdn_front, bitwise) and, on the l0 backend, A / T /
+// w, u / A2 as one launch (pf_gdn_intra, judged). Dense models (Qwen3.8, its TP card) keep the ten launches.
+// The launches one gdn_chunk call appends for `d` on backend `b`.
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
 
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a
@@ -78,8 +80,6 @@ size_t gdn_chunk_launches(const model::ModelDesc& d);
 //
 // Neither is a configuration API: the selector stays private to `gdn.cc`.
 const char* gdn_scan_entry_name();
-// The entry gdn_chunk binds for `d`: phase 2's pf_gdn_scan_hl on a MoE model (pf_phase2), else the above.
-const char* gdn_scan_entry_name(const model::ModelDesc& d);
 const char* gdn_scan_launched_entry();
 
 // The `pf_gdn_wy` entry that makes the scan's A2 (launch 8). Open-work 3n: the scan reads A2 as
