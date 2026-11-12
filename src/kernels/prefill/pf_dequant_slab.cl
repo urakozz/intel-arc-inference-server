@@ -18,6 +18,9 @@
 #ifndef LAYOUT
 #error "pf_dequant_slab: LAYOUT must be defined (0 GPTQ-native, 1 tiled)"
 #endif
+#ifndef BLOCK_STORE
+#define BLOCK_STORE 0
+#endif
 #define NS 1024
 #define SG 16
 #define GROUP 64
@@ -59,6 +62,20 @@ __kernel void pf_dequant_slab(__global const uint* restrict w,
   const ushort scale_bits = intel_sub_group_block_read_us((__global const ushort*)(tile + 128));
   scale = (float)as_half(scale_bits);
 #endif
+#if BLOCK_STORE
+  // The same values, stored as one 2D block message per word (8 rows x 16 columns, lane =
+  // column) instead of eight 32-byte row messages.
+  for (int j = 0; j < 8; ++j) {
+    const uint u = wv[j] ^ 0x88888888u;
+    ushort v[8];
+    for (int i = 0; i < 8; ++i) {
+      const int qm8 = ((int)(u << (28 - 4 * i))) >> 28;
+      v[i] = rne_bf16((float)qm8 * scale);
+    }
+    intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)out, NS * 2, K, NS * 2,
+                                               (int2)((int)(n_tile * SG), (int)(g * GROUP + (uint)j * 8u)), v);
+  }
+#else
   for (int j = 0; j < 8; ++j) {
     const uint u = wv[j] ^ 0x88888888u;
     for (int i = 0; i < 8; ++i) {
@@ -67,4 +84,5 @@ __kernel void pf_dequant_slab(__global const uint* restrict w,
       out[(size_t)k * NS + n_local] = rne_bf16((float)qm8 * scale);
     }
   }
+#endif
 }

@@ -1232,3 +1232,30 @@ if(B70_ORNITH)
   b70_target_kernel_dir(probe_route)
   add_dependencies(probe_route ${_pfr_targets} kernel_pf_moe_router_K2048_N272 kernel_pf_ab_proj_D2048 kernel_pf_gemm_T0)
 endif()
+
+# --- probe_qwen_pf_gemm: Qwen3.8's bf16 slab walk at a full chunk, candidate arms -----------------------
+# Record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md. Arms built from the production sources with one extra
+# define each: pf_gemm.cl RASTER=1 (the work-group order N-fastest) and pf_dequant_slab.cl BLOCK_STORE=1 (2D
+# block stores). Checked bitwise against the production binaries, then timed interleaved.
+set(_qpg_targets)
+foreach(V "T0;TRANSB=0" "T0_SILU;TRANSB=0;SILU_EPI=1")
+  list(GET V 0 TAG)
+  list(SUBLIST V 1 -1 DEFS)
+  add_ocloc_kernel(qpg_gemm_${TAG}_R1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gemm.cl
+                   DEFINES ${DEFS} RASTER=1 OPTIONS -cl-intel-256-GRF-per-thread)
+  list(APPEND _qpg_targets kernel_qpg_gemm_${TAG}_R1)
+endforeach()
+foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 L)
+  add_ocloc_kernel(qpg_dqbs_K${K}_N${N}_L${L} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
+                   DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
+  list(APPEND _qpg_targets kernel_qpg_dqbs_K${K}_N${N}_L${L})
+endforeach()
+add_executable(probe_qwen_pf_gemm probe_qwen_pf_gemm.cc)
+target_include_directories(probe_qwen_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_qwen_pf_gemm PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_qwen_pf_gemm)
+add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
