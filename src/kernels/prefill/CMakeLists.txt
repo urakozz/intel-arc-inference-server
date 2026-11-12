@@ -115,6 +115,13 @@ endforeach()
 # is what makes "every other linear is untouched" a build fact.
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+# Open-work 18: the slab GEMM of a chunk wider than 2048 rows with the work-groups numbered
+# N-fastest (RASTER=1: the same tiles and DPAS chain, so bit-identical;
+# docs/probes/probe-qwen-pf-gemm-2026-11-13.md). Additive: the binaries above keep their command lines.
+add_ocloc_kernel(pf_gemm_T0_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 RASTER=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pf_gemm_T0_SILU_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1 RASTER=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
 # Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
 # NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the two tiles
@@ -248,6 +255,10 @@ foreach(row IN LISTS PF_SLAB_ROWS)
   list(GET f 2 L)
   add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
                    DEFINES K=${K} N=${N} LAYOUT=${L})
+  # Open-work 18: the same values stored as 2D block messages (BLOCK_STORE=1), for the chunks
+  # wider than 2048 rows that run pf_gemm_T0_R. Additive: the binary above keeps its command line.
+  add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L}_BS SOURCE ${PF_SLAB_CL}
+                   DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
 endforeach()
 
 # Spec 5 (plan 5a): the int8 prefill linears, one source, per-family defines.
@@ -495,7 +506,11 @@ if(B70_TP)
     list(GET f 1 N)
     list(GET f 2 L)
     add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL} DEFINES K=${K} N=${N} LAYOUT=${L})
-    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K${K}_N${N}_L${L})
+    # Open-work 18: the block-store form a sub-chunk wider than 2048 rows walks with (linear_l0).
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L}_BS SOURCE ${PF_SLAB_CL}
+                     DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
+    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K${K}_N${N}_L${L}
+         kernel_pf_dequant_slab_K${K}_N${N}_L${L}_BS)
   endforeach()
   add_ocloc_kernel(pf_gdn_conv_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 ${PF_TP_GDN})

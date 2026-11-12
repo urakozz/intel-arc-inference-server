@@ -62,8 +62,10 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
 // Throws on any 2D block-IO rule the kernel header states: K % 32, 64-byte bases (per batch),
 // 16-byte pitches, leading dimensions that cover the matrix. An untransposed L = 1 problem whose
 // M has a pf_small_tile runs pf_gemm_small instead, over pad(M, 8 NA) rows only.
+// `raster` (open-work 18, untransposed only): pf_gemm_T0_R, the work-groups numbered N-fastest -
+// the same tiles, bit-identical; linear_l0's walk takes it for chunks wider than 2048 rows.
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-             const uint16_t* B, float* C, bool transB);
+             const uint16_t* B, float* C, bool transB, bool raster = false);
 
 // Parity program S2(a): the same GEMM with `pf_silu_mul`'s chain fused into the
 // epilogue. `b` describes ONE 1024-column slab of gate||up (L = 1, B is [K][N]),
@@ -71,9 +73,9 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
 // block becomes 16 x columns -- and `ldx` is the whole x row pitch (17408), NOT
 // the slab's. `b.ldc` is ignored: no fp32 C exists. The slab's GLOBAL column
 // base must be a multiple of 32 or the gate/up parity the kernel assumes flips;
-// `linear_l0_silu` is the only caller and walks 1024-column slabs.
+// `linear_l0_silu` is the only caller and walks 1024-column slabs. `raster` as gemm_l0's.
 void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-                  const uint16_t* B, uint16_t* X, uint32_t ldx);
+                  const uint16_t* B, uint16_t* X, uint32_t ldx, bool raster = false);
 
 // Phase 3 Task 2: a bf16 GEMV weight in gemv_bf16's tiled layout, N rows of K (the MoE router || shared gate, the
 // GDN a||b), as a dense GEMM. route_slab launches pf_route_slab: the weight re-laid into `slab`, bf16 [K][P],
