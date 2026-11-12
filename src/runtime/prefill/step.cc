@@ -791,6 +791,9 @@ size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
   return n;
 }
 
-size_t step_cut_extra_launches(const model::ModelDesc& d) { return 2 - res_norm_launches(d); }
+size_t step_cut_extra_launches(const model::ModelDesc& d) {
+  // the input norm split into fold + norm-finish, and (phase 3 Task 5) stage 0's last combine without the norm
+  return 2 - res_norm_launches(d) + (d.is_moe() ? res_norm_launches(d) : 0);
+}
 
 }  // namespace runtime::prefill
