@@ -332,19 +332,19 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--depth N] [--calls N] [--rounds N] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false;
-    auto format = loader::DraftFormat::Int4G64;
+    auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
+      if (arg == "--candidate-head") { candidate_head = true; continue; }
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
       else if (arg == "--rounds") rounds = std::stoul(argv[++i]);
-      else if (arg == "--candidate-head") candidate_head = true;
       else if (arg == "--format") {
         const std::string f = argv[++i];
         if (f == "int4") format = loader::DraftFormat::Int4G64;

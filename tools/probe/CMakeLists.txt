@@ -680,6 +680,11 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_link_libraries(probe_dflash_iter PRIVATE b70_dflash_runtime b70_prefill_host b70_server b70_third_party_json)
   b70_target_kernel_dir(probe_dflash_iter)
   add_dependencies(probe_dflash_iter ${D1_KERNELS})
+  add_test(NAME dflash_probe_cli_test COMMAND ${CMAKE_COMMAND} -E env
+    "DFLASH_PROBE=$<TARGET_FILE:probe_dflash_iter>" python3
+    "${CMAKE_SOURCE_DIR}/tools/box_validate/test_dflash_modes.py")
+  set_tests_properties(dflash_probe_cli_test PROPERTIES LABELS "host;dflash"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 # --- probe_bolt_step: spec 25c P0 (plan 25c Task 1) ---

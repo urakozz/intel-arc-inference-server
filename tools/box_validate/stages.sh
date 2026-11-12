@@ -3701,7 +3701,7 @@ stage r82.iter 82 default gpu qwen,dflash r82.profile "unprofiled interleaved li
 st_r82_iter() {
   idle before
   for depth in 4096 32768; do
-    chk "build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --depth $depth" "DFlash costs at $depth"
+    chk "build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --format int8 --candidate-head --depth $depth" "DFlash costs at $depth"
   done
   idle after
   grab_all costs '^DFLASH_' 120
