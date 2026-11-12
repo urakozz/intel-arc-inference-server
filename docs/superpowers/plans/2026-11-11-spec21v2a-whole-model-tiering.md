@@ -103,7 +103,9 @@ layers, 512 experts, random weights) on card 1: one GDN block **57 min**, peak V
 ### Task 4: the hit-rate curve on the recorded traces (box CPU, no GPU; may run during Task 3)
 
 The 2026-11-09 traces (`$DATA/oracle-out-q4exp-traces/`, 39 sources, Intel's checkpoint; the routers are bf16 in both)
-exist; `r36.curve` has never run.
+exist; `r36.curve` has never run. **Early run 2026-11-12** ([probe record](../../probes/probe-flash-next-tier-2026-11-12.md)): `offload_curve.py` as it is, static
+placement, held-out half - h = 0.976 at f = 0.80. Steps 1-3 (our forms, the `tp` layout, the swap policies) and the
+run on our export's routes are still to do.
 
 - [ ] **Step 1: rebase the curve and the projection on our forms.** `tools/oracle/offload_curve.py`: the judged budget
   row is ours (int4 dense, int8 head: D = 3.76 GB, spec 21 v2 §3), Intel's bf16 row printed beside it;
@@ -127,9 +129,10 @@ exist; `r36.curve` has never run.
   cards at 4 GiB (2 GiB pieces for the multi-range arm), run the one-range arm on one card only; the target is the
   whole-model host side: the PLE table (51.8 GB) + each card's own misses mirror (~13 GB in all), with the ~30 GiB per
   process limit XeStrata saw as the question.
-- [ ] **Step 2: add a `peer` arm** to `probe_offload`: card 0's table kernel reading expert blocks that live in card 1's
+- [x] **Step 2: add a `peer` arm** to `probe_offload`: card 0's table kernel reading expert blocks that live in card 1's
   VRAM over P2P, and a copy-engine peer copy, at the expert sizes of P0.2 (spec 22 §3) - the evidence for spec 21 v2
-  §5 (c).
+  §5 (c). Done 2026-11-12 (`8e617ef8`), and run with `copy`: host 11.2-12.1 GB/s, peer read 1.8 GB/s - (c) is out.
+  Not run yet: `zc`, `pin`, `alias`, `replay`, `hostbw`, the `r36.links*` stages.
 - [ ] **Step 3: build** (`tools/box.sh build`), the probe's two kernels' first compile (`r36.build`).
 - [ ] **Step 4 (box, both cards): run** `r36.links`, `r36.links_load` (stop and report below Gen3 x8), `r36.copy`,
   `r36.zc` (each card, then both cards at once - the `tp` case), `r36.replay`, `r36.hostbw`, `r36.pin`, `r36.alias`,
