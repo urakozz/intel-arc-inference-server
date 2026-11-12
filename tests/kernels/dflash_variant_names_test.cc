@@ -18,9 +18,16 @@
 #include "kernels/dflash_kernels.h"
 #include "model/dflash.h"
 #include "model/model_desc.h"
+#include "runtime/gemv_kind.h"
 
 int main(int argc, char** argv) {
   namespace kd = kernels::dflash;
+  const runtime::CaptureOptions defaults;
+  CHECK_EQ(defaults.dflash_attn_heads, 1u);
+  CHECK_EQ(defaults.dflash_attn_rows, 4u);
+  CHECK(!defaults.dflash_attn_parallel_exp);
+  const auto default_names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM);
+  CHECK(std::find(default_names.begin(), default_names.end(), kd::attn_variant(kd::kQwen38, 1, 4)) != default_names.end());
   CHECK(argc > 2);
   std::ifstream f(argv[1]);
   std::stringstream ss;
@@ -62,7 +69,11 @@ int main(int argc, char** argv) {
             for (unsigned heads : {0u, 1u, 2u})
               for (unsigned rows : {0u, 1u, 2u, 4u}) {
                 if (rows && heads != 1) continue;
-                for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows)) bound.insert(v);
+                for (bool parallel : {false, true}) {
+                  if (parallel && (heads != 1 || rows != 4)) continue;
+                  for (const auto& v : kd::draft_variants(v2, fmt, int8_head, dv, k, k, heads, rows, false, parallel))
+                    bound.insert(v);
+                }
               }
   const auto* candidate = kernels::small_m_tuning(5120, 248320, 1, 1);
   CHECK(candidate && kernels::gemm_sm_built_m(*candidate) == std::vector<unsigned>{7});
