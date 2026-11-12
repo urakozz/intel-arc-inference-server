@@ -469,6 +469,11 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk
   l.items_off = region(size_t{l.ibound} * 4 * sizeof(uint32_t));
   l.xsg_tok_off = region(kC * (desc.hidden / 64) * kFp32);
   l.xsg_off = region(size_t{l.rows} * (desc.hidden / 64) * kFp32);
+  l.gemm_pitch = kernels::pf_route_slab_pitch(std::max(m.router_n(), desc.shape(model::LinearId::AB).N));
+  l.gemm_out_off = l.xg_off;
+  l.gemm_slab_off = l.xg_off + align256((kC + 255) / 256 * 256 * l.gemm_pitch * kFp32);
+  if (l.gemm_slab_off + size_t{desc.hidden} * l.gemm_pitch * kBf16 > l.xg_off + size_t{l.rows} * desc.hidden * kBf16)
+    throw std::logic_error("runtime::moe_prefill_layout: the router / a||b GEMM's rows and slab overflow xg");
   l.total = at;
   return l;
 }

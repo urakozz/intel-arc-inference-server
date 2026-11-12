@@ -71,4 +71,12 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
 void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
                   const uint16_t* B, uint16_t* X, uint32_t ldx);
 
+// Phase 3 Task 2: a bf16 GEMV weight in gemv_bf16's tiled layout, N rows of K (the MoE router || shared gate, the
+// GDN a||b), run over C rows of A [C][K] as a dense GEMM: pf_route_slab re-lays it into `slab` (bf16 [K][P],
+// P = kernels::pf_route_slab_pitch(N), columns past N zero), then gemm_l0 writes out fp32 [rows][P] at pitch P -
+// rows pad256(C), or the short-chunk tile's: the caller's buffers hold them; rows >= C and columns >= N are
+// computed and never read. Both launches on cx's list, no host wait.
+void tiled_gemm(Context& cx, KernelCache& kc, const void* w, uint32_t N, uint32_t K, const uint16_t* A, uint32_t C,
+                uint16_t* slab, float* out);
+
 }  // namespace runtime::prefill
