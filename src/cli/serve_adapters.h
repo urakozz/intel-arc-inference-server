@@ -206,8 +206,8 @@ struct EngineAdapter : server::EngineIface {
   // `k_req` (spec 8 §10): the iteration's K, <= mtp_k(); `--spec mtp` varies it per
   // iteration, 0 is one plain step.
   std::vector<uint32_t> step_many(const server::Sampling& sampling, uint32_t k_req) override {
-    flush_commit();
     if (df_) return step_dflash(sampling, k_req);   // spec 19c
+    flush_commit();
     const uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
     ++mtp_iters_at_k[k];
     if (k == 0) return {step(sampling)};   // K = 0, or the last positions of max_len: plain
@@ -287,6 +287,7 @@ struct EngineAdapter : server::EngineIface {
   // (truncate_to may commit fewer) - and it replays the drafter's projection of the committed rows. A v1 drafter
   // (greedy only) serves a sampled request with plain steps.
   std::vector<uint32_t> step_dflash(const server::Sampling& sampling, uint32_t k_req) {
+    flush_commit(true);
     uint32_t k = std::min({k_req, k_, eng.max_verify_k()});
     if (!sampling.greedy && !df_->samples()) k = 0;
     ++mtp_iters_at_k[k];
@@ -297,9 +298,9 @@ struct EngineAdapter : server::EngineIface {
     server::AcceptResult a{};
     std::vector<uint32_t> drafts;
     if (sampling.greedy) {
-      const runtime::dflash::DFlashDraftOut& o = df_->draft(eng, k, 0.0f, 0);
+      const runtime::dflash::DFlashDraftOut& o =
+          df_->draft_with([&](l0::CmdList& list) { eng.verify(k, &list); }, k, 0.0f, 0);
       drafts.assign(o.ids, o.ids + k);
-      eng.verify(k);
       a = server::accept_greedy(eng.verify_ids(), drafts.data(), k);
     } else {
       a = dflash_sampled(sampling, k, drafts);
@@ -326,13 +327,13 @@ struct EngineAdapter : server::EngineIface {
     seed_rng(sampling);
     const uint64_t seed = rng();   // the walk's Gumbel key: fresh every iteration, reproducible from the request's seed
     const float T = server::dflash_temperature(sampling);
-    const runtime::dflash::DFlashDraftOut& o = df_->draft(eng, k, T, seed);
+    const runtime::dflash::DFlashDraftOut& o =
+        df_->draft_with([&](l0::CmdList& list) { eng.verify(k, &list); }, k, T, seed);
     drafts.assign(o.ids, o.ids + k);
     // q_j = softmax(scores_j / T) over row j's 16 candidates - what the walk drew d_j from (spec 19 §2)
     server::SparseQ q[kMaxIterK];
     for (uint32_t j = 0; j < k; ++j)
       q[j] = server::dflash_q(o.cand[j], o.scores[j], runtime::dflash::DFlashDraftOut::kTopK, T);
-    eng.verify(k);
     constexpr size_t V = model::Qwen35::kVocab;
     float* p = spec_logits_->as<float>();
     imm.copy(p, eng.verify_logits_device(), (k + 1) * V * sizeof(float));
@@ -441,6 +442,7 @@ struct EngineAdapter : server::EngineIface {
   // Keep x_n, d_1 .. d_m of the last iteration (pos = n + m + 1), pending d_{m+1} (or the
   // accepted run's next id when m = j): the session is what m + 1 plain steps leave.
   void truncate_to(uint32_t p) override {
+    eng.flush_projection();
     if (!pending_) {
       if (p == eng.pos()) return;
       throw std::logic_error("EngineAdapter::truncate_to: no speculative run to shorten");
@@ -457,11 +459,13 @@ struct EngineAdapter : server::EngineIface {
     eng.commit(m, m < pending_j_ ? pending_drafts_[m] : pending_next_);
   }
 
-  void flush_commit() {
-    if (!pending_) return;
-    pending_ = false;
-    pending_lookup_ = false;
-    eng.commit(pending_j_, pending_next_);
+  void flush_commit(bool defer_projection = false) {
+    if (pending_) {
+      pending_ = false;
+      pending_lookup_ = false;
+      eng.commit(pending_j_, pending_next_, defer_projection);
+    }
+    if (!defer_projection) eng.flush_projection();
   }
 
   void seed_rng(const server::Sampling& sampling) {

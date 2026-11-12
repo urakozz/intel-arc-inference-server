@@ -18,7 +18,11 @@ Queue::~Queue() {
 }
 void Queue::execute(CmdList& list, Fence* fence) {
   ze_command_list_handle_t h = list.handle();
-  ZE_CHECK(zeCommandQueueExecuteCommandLists(q_, 1, &h, fence ? fence->handle() : nullptr));
+  execute(1, &h, fence);
+}
+void Queue::execute(uint32_t count, ze_command_list_handle_t* lists, Fence* fence) {
+  ZE_CHECK(zeCommandQueueExecuteCommandLists(q_, count, lists, fence ? fence->handle() : nullptr));
+  ++submissions_;
 }
 void Queue::synchronize() { ZE_CHECK(zeCommandQueueSynchronize(q_, UINT64_MAX)); }
 }  // namespace l0
