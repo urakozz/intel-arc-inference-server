@@ -192,3 +192,13 @@ Ornith pp4096: `l0` 7,557 t/s (542 ms instrumented), `l0-int8` 7,641 (536 ms); u
 The targets (9,500 / 11,000 t/s) are missed. The largest overruns are the MoE expert GEMM on `l0` (169 against 145),
 the `l0-int8` GDN (the four intra launches, 84 ms, where `l0` runs one of 23 ms), the route (27.9 against 8) and the
 scan (28 ms on both).
+
+**The full validation on main (Task 9 Step 4)** runs unattended on the box: state
+`~/b70-validate/b70-inference-server-validate/1d9aa029be1b-vs-ce36d2d786ee` (main 5a78d023 plus this record), with the
+speculative-serving opt-ins `r2.auto_rows, r12.a4, r6.greedy_long, r8.auto_rows, r16.mtp_rows, r27.cli_mtp, r55.serve,
+r55.decode, r56.pp_serve, r70.d2, r70.speed`. G0 against the default baseline ce36d2d: `g0.sha` FAIL (only
+`pf_gdn_scan.bin` and `pf_gdn_wy.bin` differ, from open-work 3n's A2 entry of 2026-11-10, not this plan), `g0.bitwise`
+FAIL on text only (log wording, the decode scratch sizes in buffers_test; every token, logit and state number
+identical), `g0.suite` PASS - so it was re-launched with `--force`. Read it with
+`tools/box_validate.sh --status` (the PASS / FAIL / SKIP per stage) and `tools/box_validate.sh --summary` (fetches
+and writes box-validation-<date>.md), both with the same `--with` list.

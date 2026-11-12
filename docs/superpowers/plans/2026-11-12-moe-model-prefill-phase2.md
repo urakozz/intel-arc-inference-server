@@ -1,14 +1,8 @@
 # MoE-model prefill, phase 2 - the GDN prompt pass, the small kernels, the dense linears (Ornith, then Flash-Next)
 
-**Status (2026-11-12): IN PROGRESS** - Task 1 done; Tasks 2 and 5 done (bitwise, +2.3 % pp4096 l0); Task 3 STOPPED
-(its gate failed in both forms, opt-in `B70_PF_GDN_INTRA=hl`, waits for the operator); Task 6 done bitwise
-(+7.4 % with Tasks 2 and 5 on phase 1's walk); D3 tried and not taken. Record: docs/probes/probe-prefill-phase2-2026-11-12.md. Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
-MoE path's sort, fused int4 grouped GEMM, l0-int8 experts as W4A8 and the 4096 chunk. This plan is everything phase 1
-leaves out. Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0); the scout's code read of vLLM's
-XPU kernels (vllm-xpu-kernels @1f31a8e: `csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp`,
-`chunk_causal_conv1d_tiled_xe2.hpp`, `csrc/layernorm.cpp`, `csrc/moe/topk.cpp`; no timings in that repo - every vLLM
-ms is derived); our GDN history in `pf_gdn_scan.cl`'s header (the single-bf16 DPAS scan cost a token on 2026-09-05;
-the hi / lo split-bf16 scan passed and is the default since 2026-09-23). Box row **84** (new, Task 1 adds it).
+**Status (2026-11-12): CLOSED** after Task 9 (operator: bf16 is the main target). Done: Tasks 1, 2, 3 (`l0`), 5, 6, 8
+(router / a||b); not taken: Task 4, Task 7, the intra kernel on `l0-int8` and Flash-Next. Targets missed; the phase table
+and the gap list are in the record (docs/probes/probe-prefill-phase2-2026-11-12.md, section 9) and open-work item 15.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox
