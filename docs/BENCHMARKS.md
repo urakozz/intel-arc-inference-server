@@ -1115,6 +1115,8 @@ M-row crossings, its draft reads the whole head's layer on each card and half th
 
 ## Ornith 1.5 MoE (spec 15)
 
+**Prefill after the MoE prefill plan (2026-11-12, one card, card 0 while card 1 ran another agent's jobs and a CPU job ran, median of 3, `b70-decode --bench --max-len auto`, 4096-row chunks):** 4k **8,080** t/s (`l0`, bf16 prompt pass) / **8,518** (`l0-int8`, W4A8 experts); 16k 6,800 / 7,059. The same run's main (7cfbf058, 2048-row chunks): 7,578 / 5,460 at 4k, 6,509 / 4,869 at 16k. Record and per-phase times: [probes/probe-moe-prefill-2026-11-12.md](probes/probe-moe-prefill-2026-11-12.md), "Task 8". The prefill numbers in the next paragraph predate it.
+
 **Measured on one card (2026-11-11, main, idle box between validation stages, median of 3):** prefill 3,362 / 3,259 t/s at 4k / 16k (bf16 prompt pass), 3,937 / 3,676 t/s (`--prefill-backend l0-int8`); plain decode 142.8 t/s at depth 4096 (`b70-decode --bench`); through `b70-serve` with MTP at the full 262,144 context, bf16 KV (`--max-len auto`, 27.3 GB planned of 32.5), one request, a 2,820-token prompt and 512 generated tokens (`tools/box_validate/slots_serve_bench.sh`): **234.9 t/s**, first token 1.28 s cold / 0.59 s as a prefix cache hit. Ornith's MTP cost table is still Qwen3.8's (startup note). The rows below predate these numbers. Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
 the int4 checkpoint, spec 15 §13) was built without the card (specs 15c-15e); this section is the
 record's skeleton (plan 15e Task 3 Step 3), each cell filled from the box-validation-queue stage

@@ -1,7 +1,8 @@
 # Ornith 1.5 MoE prefill rework - about 2x prefill (design targets Ornith and Flash-Next)
 
-**Status (2026-11-12): Tasks 1-7 DONE; Task 8 switch-over committed, its two l0-int8 gates FAIL the near-miss rule
-on cosine (cjk 15, c16 prose 18) - waiting on the operator; see `handoff.md` beside this plan.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
+**Status (2026-11-12): DONE (Tasks 1-8). Ornith 4k: `l0` 8,080 t/s, `l0-int8` (W4A8) 8,518; record in
+`docs/probes/probe-moe-prefill-2026-11-12.md`, "Task 8". Left: the W4A8 serving check (open-work item 16) and the
+old Ornith grouped-GEMM binaries (Task 8 Step 3, below).** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
 238f0582). Earlier evidence this plan builds on: `docs/probes/probe-fused-dequant-2026-09-22.md` (fused dequant on a
 DENSE shape: bitwise, but rejected at 3.3x the cost of the pass it removed), `docs/probes/probe-w4a8-2026-09-23.md`
 (W4A8 rejected: 2.79 % error), open-work 3b's `pf_gemm_q4.cl` (int4 read in registers, bitwise the slab walk). Box
@@ -292,16 +293,22 @@ in one place; 21v2a's tasks own the copy.
 
 ### Task 8: the record, the clean-up and the final gates (box idle, then Mac)
 
-- [ ] **Step 1 (box, card 0, idle):** interleaved pairs, main's build (control) against the branch head (candidate),
+- [x] **Step 1 (box, card 0, idle):** **2026-11-12** (card 0, card 1 busy, not idle): 4k `l0` 7,578 -> 8,080,
+  `l0-int8` 5,460 -> 8,518; 16k 6,509 -> 6,800, 4,869 -> 7,059 - 2.40x / 2.09x the start, gate passed. Interleaved pairs, main's build (control) against the branch head (candidate),
   median of 3, `b70-decode --bench --tg 32`: Ornith pp4096 and pp16384 on `l0` and `l0-int8`.
   - **Gate (final):** against today's 3,362 / 3,259 (l0) and 3,937 / 3,676 (l0-int8) - 4k l0 >= 1.7x (6,000 t/s),
     16k l0 >= 1.5x; l0-int8 no slower than l0 at either length. The derived target (~2x at 4k) is reported beside the
     measured one; a miss below the gate keeps the item open with the measured phase table.
-- [ ] **Step 2 (box):** **Ornith decode unchanged:** no decode binary moved (`g0.sha`), `ornith_decode_test` PASS
+- [x] **Step 2 (box):** **2026-11-12:** `ornith_decode_test` PASS, tg 32 within the busy box's noise; G0 not run
+  (merge without box check, operator 2026-11-07): no K2 / Kolibri / Bolt file or kernel they build changed; the
+  Ornith gates and Flash-Next synthetic tests PASS. **Ornith decode unchanged:** no decode binary moved (`g0.sha`), `ornith_decode_test` PASS
   (replay bitwise, R2), plain decode at depth 4096 within 1 % of 142.8 t/s (interleaved pairs). **Other models:** G0
   (row 0) PASS against `--baseline main` - Qwen3.8 bitwise and every K2 / Kolibri / Bolt binary identical (their
   host code is untouched); the Ornith prefill gates (r13.gates, r13.split, r13.prefill) and Flash-Next's r33 rows PASS.
-- [ ] **Step 3 (Mac):** delete the losing path and `B70_PF_MOE`: Ornith's `pf_moe_sort`, `pf_moe_dequant_*` and its
+- [x] **Step 3 (Mac):** **2026-11-12:** the old walk, the rotated int8 gate||up and `B70_PF_MOE` deleted; docs
+  updated. NOT deleted: `pf_moe_gemm_K2048_N1024_SILU` / `_i8_` / `_K512_N2048` and `pf_moe.cl`'s sort / dequant
+  entries - only `pf_moe_test` still builds them (the fused GEMM's bitwise reference, and the removed int8 form's
+  sections); Flash-Next's `q4_pf_dequant_*` stays for Intel's bf16 shared expert. Delete the losing path and `B70_PF_MOE`: Ornith's `pf_moe_sort`, `pf_moe_dequant_*` and its
   three `pf_moe_gemm_K2048_N1024*` / `_K512_N2048` binaries (Ornith-only shapes); Flash-Next's `q4_pf_sort` and
   `q4_pf_dequant_*` if Task 7 passed. `pf_moe_gemm.cl` and `pf_moe.cl`'s gather / combine stay (K2 / Kolibri bind the
   GEMM source; the combine is unchanged). Then: BENCHMARKS "Ornith 1.5 MoE (spec 15)" prefill rows, the profile doc's
