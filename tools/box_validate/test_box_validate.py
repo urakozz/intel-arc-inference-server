@@ -318,6 +318,19 @@ class ReuseTest(Tmp):
         self.assertEqual(self.claim(self.tree), {}, "two cards: not the same test")
         del os.environ["ZE_AFFINITY_MASK"]
 
+    def test_kernel_series(self):
+        """A release candidate or patch release of one kernel series is the same machine; an old entry's full
+        release string is read as its series."""
+        self.assertEqual(reuse.kernel_series("7.4.0-070400rc2-generic"), "7.4")
+        self.assertEqual(reuse.kernel_series("7.4.3-generic"), "7.4")
+        self.assertEqual(reuse.kernel_series("7.5.0-070500rc1-generic"), "7.5")
+        self.assertEqual(reuse.machine(), {"kernel": reuse.kernel_series(reuse.platform.release())})
+        mach = {"kernel": "7.4"}
+        self.assertNotIn("the machine", str(reuse.matches({"machine": {"kernel": "7.4.0-070400rc1-generic"},
+                                                           "command": ["x"]}, {"command": ["y"]}, ".", "b", mach)))
+        self.assertIn("the machine", reuse.matches({"machine": {"kernel": "7.3.9-generic"}, "command": ["x"]},
+                                                   {"command": ["x"]}, ".", "b", mach))
+
     def test_no_reuse(self):
         self.run_test(self.tree)
         os.environ["BV_NO_REUSE"] = "1"
