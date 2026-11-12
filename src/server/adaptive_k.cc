@@ -35,9 +35,10 @@ MtpCost MtpCost::tp_int8_head() {
 }
 
 MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
-  MtpCost c = i8_head ? int8_head() : bf16_head();
-  // Spec 28b: M = 5..8 measured (int8 head; the bf16 head's taken equal - adaptive_k.h)
-  for (double v : {1.18, 1.30, 1.35, 1.56}) c.verify.push_back(v);
+  MtpCost c;
+  // docs/BENCHMARKS.md, DFlash v2 baseline: paired medians at depth 4096, 2026-11-11, busy box.
+  // The unmeasured bf16-head verify ratios are taken equal (derived).
+  c.verify = {1.000578, 1.047126, 1.091869, 1.121579, 1.168254, 1.205641, 1.229004, 1.245386};
   const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +
                    (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
   c.draft.assign(7, d);

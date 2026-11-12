@@ -47,17 +47,15 @@ struct MtpCost {
 
   // Spec 19c (`--spec dflash`, spec 19 decision 4): the verify rows to M = 8 and the DFlash drafter's draft row,
   // FLAT in K - one pass of the drafter drafts the whole block (`--spec-cost` replaces either part):
-  //   verify M = 1..4   the head form's rows above; M = 5..8 MEASURED since spec 28b (probe_mtp_steps' interleaved
-  //                     pairs, int8 head, depth 4096, busy-box timing): 1.18 / 1.30 / 1.35 / 1.56 - the bf16 head's
-  //                     the same rows (derived: its M = 2..4 rows equal the int8 head's within 0.01). M = 8's step
-  //                     is the attention build's (spec 28c), not the GEMM's. (Before 28b: M = 3 -> 4's slope,
-  //                     0.22 a row, docs/probes/probe-dflash-2026-10-08.md §3.)
-  //   draft             the drafter's weights read once (int8 ~1.8 GB -> 0.10, bf16 ~3.6 GB -> 0.19 of the 32.65 ms
-  //                     int8 plain step) plus the target's head over the K mask rows, read once (int8 1.27 GB ->
-  //                     0.07, bf16 2.54 GB -> 0.14), whatever K (spec 19 §3).
+  //   verify M = 1..8   Task 1's measured paired ratios (docs/BENCHMARKS.md, DFlash v2 baseline).
+  //   draft             measured int8 total 0.309880; head's per-launch 2.165104 ms / its paired plain 28.972533 ms,
+  //                     remainder assigned to the body. BF16 is DERIVED: double the int8 head and body GEMM
+  //                     shares (body GEMMs 3.225104 ms), retaining attention, small kernels and host overhead.
+  // The bf16-head verify ratios are derived equal to int8; these constants do not change MTP's tables.
   static MtpCost dflash(bool i8_head, bool int8_drafter);
-  static constexpr double kDFlashDrafterInt8 = 0.10, kDFlashDrafterBf16 = 0.19;
-  static constexpr double kDFlashHeadInt8 = 0.07, kDFlashHeadBf16 = 0.14;
+  static constexpr double kDFlashHeadInt8 = 2.165104 / 28.972533, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterInt8 = 0.309880 - kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.225104 / 28.972533;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
   static double dflash_head_share(bool i8_head, bool int8_drafter);
 

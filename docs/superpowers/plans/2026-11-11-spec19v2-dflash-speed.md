@@ -98,7 +98,9 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
 **Files:** `src/server/adaptive_k.{h,cc}` (`MtpCost::dflash`: verify rows M = 5..8 and the draft row from Task 1;
 the bf16-head arm as measured or marked derived), `tests/server/adaptive_k_test.cc`.
 
-- [ ] **Step 1:** test first (the K the policy picks at alpha 0.5 / 0.8 / 0.95 under the new table), implement, green.
+- [x] **Step 1:** RED on the old verify table, GREEN on the measured medians. K=4 / 7 / 7 at alpha 0.5 / 0.8 /
+  0.95. Box host tests (AdaptiveK, DFlash host, per-step MTP) 3/3 PASS; no MTP table changes. BF16 arms marked
+  derived in code and BENCHMARKS. Test first (the K the policy picks at alpha 0.5 / 0.8 / 0.95 under the new table), implement, green.
   **Gate:** the table's entries equal Task 1's recorded medians (a comment cites the BENCHMARKS block); D2 unaffected
   (host-only). Commit.
 

@@ -978,6 +978,14 @@ The host-gap upper bounds are 1.401320 / 1.282363 ms, and projection + host uppe
 per-launch timestamp signals add host-scope flushes and device dispatch gaps remain in the residual. These
 instrumented bounds are diagnostics, not exact uninstrumented host costs or the benchmark timings above.
 
+Task 3 uses the measured verify ratios above and a flat int8 draft row of 0.309880 in AdaptiveK. Its head share
+is 0.241156 (2.165104 ms divided by the paired 28.972533 ms plain step, then by 0.309880); the remaining draft
+cost is assigned to the body. The unmeasured bf16 arms are explicitly **derived**: double the head's cost and
+the body's GEMM cost, keeping attention, other kernels and host overhead unchanged. Their body/head costs are
+0.346466 / 0.149459 plain steps, and their verify ratios are taken equal to int8. MTP's tables are unchanged.
+At acceptance alpha 0.5 / 0.8 / 0.95, this DFlash table chooses K=4 / 7 / 7. Task 7b will refresh these costs
+after the GPU optimizations.
+
 EOS-stopped free runs (capped at 256 ids), separate from the teacher-forced acceptance anchors:
 
 | corpus | requests | ids / iterations | ids per iteration | requests reaching EOS |
