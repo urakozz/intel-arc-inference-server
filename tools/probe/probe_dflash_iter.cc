@@ -357,7 +357,7 @@ int main(int argc, char** argv) {
     }
     l0::Context ctx(0);
     auto model = loader::load(ctx, argv[1], max_len, false, loader::LmHeadForm::Int8);
-    auto weights = loader::load_drafter(ctx, argv[2], model, loader::DraftFormat::Int8);
+    auto weights = loader::load_drafter(ctx, argv[2], model, loader::DraftFormat::Int4G64);
     const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     df::DFlashDrafter drafter(ctx, std::move(weights), rows, max_len, 7);
     runtime::Engine e(ctx, std::move(model), max_len, false, runtime::KvCache::Bf16, &drafter);

@@ -2,6 +2,7 @@
 """Spec 19 v2 G-accept: GPU and CPU drafts on the engine's taps and the same anchors.
 
   dflash_engine_accept.py --engine DIR --drafter SNAPSHOT --target SNAPSHOT [--out FILE] [--threads 16]
+  dflash_engine_accept.py --engine DIR --baseline ORIGINAL_ACCEPTANCE_JSON [--out FILE]
 
 The captured lists allocate eight rows, but noncausal attention masks the block at K + 1. Draft each K separately
 on both sides. A recorded continuation which disagrees with the target's greedy id censors later rows, as in
@@ -40,6 +41,63 @@ def expected(counted, accepted):
         product *= a / n if n else 0.0
         total += product
     return total
+
+
+def compare_baseline(engine_dir, baseline_path, out_path):
+    """G-drafter: same anchors, all widths/corpora, within 0.05 of the original int8 engine; no CPU model load."""
+    with open(baseline_path) as f:
+        baseline = json.load(f)
+    with open(os.path.join(engine_dir, 'engine.jsonl')) as f:
+        lines = [json.loads(s) for s in f if s.strip()]
+    original = {(r['name'], r['p'], r['k']): r['engine'] for r in baseline['drafts']}
+    current = {(r['dump'], r['p'], r['k']): r['ids'] for r in lines[1:]}
+    if not original or not baseline['pass'] or set(original) != set(current) or len(current) != len(lines) - 1:
+        raise ValueError('need the complete original baseline and exactly the same anchors/K')
+    from safetensors import safe_open
+    totals = {}
+    seen = set()
+    for path in glob.glob(os.path.join(engine_dir, '*.taps.safetensors')):
+        with safe_open(path, framework='np') as f:
+            meta = f.metadata()
+            name, tap_from = meta['name'], int(meta['tap_from'])
+            ids, greedy = f.get_tensor('ids').tolist(), f.get_tensor('greedy').tolist()
+        for key, drafts in current.items():
+            if key[0] != name:
+                continue
+            if key in seen:
+                raise ValueError(f'{name}: duplicate tap dump')
+            seen.add(key)
+            _, p, k = key
+            if len(drafts) != k or len(original[key]) != k:
+                raise ValueError(f'{name}: draft width differs from K')
+            row = totals.setdefault((name.split('/')[0], k),
+                                    {'engine_counted': [0]*k, 'engine_accepted': [0]*k,
+                                     'baseline_counted': [0]*k, 'baseline_accepted': [0]*k, 'anchors': 0})
+            for arm, values in [('engine', drafts), ('baseline', original[key])]:
+                counted, accepted = prefix_counts(ids, values, greedy, p, tap_from)
+                for j in range(k):
+                    row[arm+'_counted'][j] += counted[j]
+                    row[arm+'_accepted'][j] += accepted[j]
+            row['anchors'] += 1
+    if seen != set(current):
+        raise ValueError('missing tap dumps for the recorded anchors')
+    report = {'run': lines[0]['run'], 'baseline': os.path.abspath(baseline_path), 'corpora': {}}
+    passed = True
+    for (corpus, k), row in sorted(totals.items()):
+        row['engine_E'] = expected(row['engine_counted'], row['engine_accepted'])
+        row['baseline_E'] = expected(row['baseline_counted'], row['baseline_accepted'])
+        if abs(row['baseline_E'] - baseline['corpora'][corpus][str(k)]['engine_E']) > 1e-9:
+            raise ValueError(f'{corpus} K={k}: original acceptance does not calibrate on these taps/greedy ids')
+        row['gap'] = abs(row['engine_E'] - row['baseline_E'])
+        ok = row['gap'] <= 0.05
+        passed &= ok
+        report['corpora'].setdefault(corpus, {})[str(k)] = row
+        print(f"G_DRAFTER corpus={corpus} K={k} engine_E={row['engine_E']:.5f} "
+              f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:.5f} {'PASS' if ok else 'FAIL'}", flush=True)
+    report['pass'] = passed
+    with open(out_path, 'w') as f:
+        json.dump(report, f, indent=2)
+    return passed
 
 
 def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
@@ -139,12 +197,19 @@ def evaluate(engine_dir, drafter_dir, target_dir, out_path, threads):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--engine', required=True)
-    ap.add_argument('--drafter', required=True)
-    ap.add_argument('--target', required=True)
+    ap.add_argument('--drafter')
+    ap.add_argument('--target')
+    ap.add_argument('--baseline', help='original int8 acceptance report; compare engines without loading a CPU model')
     ap.add_argument('--out')
     ap.add_argument('--threads', type=int, default=16)
     a = ap.parse_args()
-    ok = evaluate(a.engine, a.drafter, a.target, a.out or os.path.join(a.engine, 'acceptance.json'), a.threads)
+    out = a.out or os.path.join(a.engine, 'acceptance.json')
+    if a.baseline:
+        ok = compare_baseline(a.engine, a.baseline, out)
+    else:
+        if not a.drafter or not a.target:
+            ap.error('--drafter and --target are required without --baseline')
+        ok = evaluate(a.engine, a.drafter, a.target, out, a.threads)
     sys.exit(0 if ok else 1)
 
 

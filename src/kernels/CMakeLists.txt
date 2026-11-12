@@ -2072,11 +2072,18 @@ endif()
 set(GEMM_SM_DFLASH "5120 6144 1 2 WG" "4096 5120 1 2 WG" "5120 34816 1 2 WG" "17408 5120 1 2 WG" "25600 5120 1 2 WG"
                    "5120 2048 1 2 WG" "5120 1280 1 2 WG" "5120 256 1 2 WG")
 set(GEMM_SM_DFLASH_HEAD "5120 32768 1 2 WG" "5120 65536 1 2 WG" "5120 131072 1 2 WG")
+set(GEMM_SM_DFLASH_INT4 "5120 6144 1 1 WG MG" "4096 5120 1 1 WG MG" "5120 34816 1 1 WG MG" "17408 5120 1 1 WG MG"
+                      "25600 5120 1 1 WG MG" "5120 2048 1 1 WG MG" "5120 1280 1 1 WG MG" "5120 256 1 1 WG MG")
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set(_m8 8)
   set(_m7 7)
   gemm_sm_rows(GEMM_SM_DFLASH _m8)
+  gemm_sm_rows(GEMM_SM_DFLASH_INT4 _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
+  foreach(KN "5120 6144" "4096 5120" "5120 34816" "17408 5120" "25600 5120" "5120 2048" "5120 1280" "5120 256")
+    separate_arguments(KN)
+    add_gemv_variant(8 ${KN} 1 1)   # int4 g64 drafter, the forced-GEMV reference
+  endforeach()
 endif()
 # Spec 28d: Qwen3.8-Flash-Next's dense int4 projections and int8 head at its verify lists' M = 2..4 (spec 21e's block
 # builds the lists' gemv; its own capture binds these at M >= 2).

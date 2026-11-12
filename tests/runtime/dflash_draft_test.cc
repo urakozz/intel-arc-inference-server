@@ -3,7 +3,7 @@
 // embedding and a random int8 (and bf16) head of Qwen3.8's shapes, so no 17 GB checkpoint is needed - against the
 // host twin tests/kernels/dflash_ref.h fed the same weights (the loader's own host forms) and the card's ring.
 //
-//   dflash_draft_test <drafter repo or dir> [int8|bf16]       (both formats when none is given; SKIP 77 without it)
+//   dflash_draft_test <drafter repo or dir> [int8|bf16|int4]  (all formats when none is given; SKIP 77 without it)
 //
 //   1. The lists capture to their formulas' launch counts (87 draft, 8 projection); 2053 positions of random taps
 //      are projected 8 a replay (the ring wraps at 2048); the last replay's rows equal the twin's projection
@@ -80,6 +80,16 @@ dfref::Lin host_lin(const loader::DFlashHostLinear& h) {
   l.bf16 = h.bf16;
   l.i8 = h.i8;
   l.scales = h.scales;
+  if (!h.int4.empty()) {
+    l.q4.resize(size_t(h.K / 8) * h.N);
+    l.s4.resize(size_t(h.K / 64) * h.N);
+    for (uint32_t n = 0; n < h.N; ++n)
+      for (uint32_t g = 0; g < h.K / 64; ++g) {
+        const uint32_t* tile = h.int4.data() + (size_t(n / 16) * (h.K / 64) + g) * 136;
+        for (uint32_t j = 0; j < 8; ++j) l.q4[size_t(g * 8 + j) * h.N + n] = tile[j * 16 + n % 16];
+        l.s4[size_t(g) * h.N + n] = uint16_t(tile[128 + n % 16 / 2] >> (16 * (n % 2)));
+      }
+  }
   return l;
 }
 
@@ -270,6 +280,8 @@ void fill_f32(dfref::Lin& l) {
         l.f32[size_t(n) * l.K + k] =
             !l.i8.empty() ? float(l.i8[size_t(n / 16) * (l.K / 16) * 256 + size_t(k / 16) * 256 + (k % 16) * 16 + n % 16]) *
                                 l.scales[n]
+            : !l.q4.empty() ? common::f16_to_f32(l.s4[size_t(k / 64) * l.N + n]) *
+                                  float(int((l.q4[size_t(k / 8) * l.N + n] >> (4 * (k % 8))) & 15u) - 8)
                           : dfref::bf(l.bf16[size_t(n / 16) * (l.K / 8) * 128 + size_t(k / 8) * 128 + (k % 8) * 16 + n % 16]);
   });
 }
@@ -339,10 +351,12 @@ int main(int argc, char** argv) {
     std::printf("SKIP: no DFlash drafter (%s)\n", e.what());
     return 77;
   }
-  std::vector<loader::DraftFormat> formats = {loader::DraftFormat::Int8, loader::DraftFormat::Bf16};
+  std::vector<loader::DraftFormat> formats = {loader::DraftFormat::Int8, loader::DraftFormat::Bf16,
+                                           loader::DraftFormat::Int4G64};
   if (argc > 2) {
     loader::DraftFormat f;
-    CHECK(loader::parse_draft_format(argv[2], f));
+    if (std::string(argv[2]) == "int4") f = loader::DraftFormat::Int4G64;
+    else CHECK(loader::parse_draft_format(argv[2], f));
     formats = {f};
   }
   dfref::threads = std::max(1u, std::thread::hardware_concurrency());
@@ -371,6 +385,7 @@ int main(int argc, char** argv) {
   int bad = 0;
 
   for (loader::DraftFormat f : formats) {
+    g_sets_sm = g_sets_gv = 0;
     std::printf("== drafter %s\n", loader::draft_format_name(f));
     const loader::DFlashWeights w = loader::load_drafter(e.ctx, snap, q, V, embed_d, f);
     dfref::Weights tw = twin_weights(ck, f);
@@ -395,12 +410,12 @@ int main(int argc, char** argv) {
     std::printf("launches: draft %zu, projection %zu\n", draft.kernel_count, proj.kernel_count);
     bad += draft.kernel_count != 87 || proj.kernel_count != 8;
     // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
-    const bool i8 = f == loader::DraftFormat::Int8;
+    const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
     runtime::CaptureOptions gvo;
     gvo.force_linear = runtime::LinearForce::Gemv;
     std::unique_ptr<runtime::CapturedStep> dg, pg;
     dfref::Weights tj;
-    if (i8) {
+    if (quantised) {
       dg = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, gvo));
       pg = std::make_unique<runtime::CapturedStep>(runtime::dflash::build_dflash_project(e.ctx, w, b, gvo));
       bad += dg->kernel_count != 87 || pg->kernel_count != 8;
@@ -438,9 +453,9 @@ int main(int argc, char** argv) {
             }
         }
       std::printf("projection of positions %u..%u: %d ring values off by a bf16 ulp, %d further (%s)\n", pos0,
-                  P - 1, off, far, i8 ? "gemm_sm: recorded, the f32 judge below decides" : "bar 0");
-      if (!i8) bad += far;
-      if (i8) {
+                  P - 1, off, far, quantised ? "gemm_sm: recorded, the f32 judge below decides" : "bar 0");
+      if (!quantised) bad += far;
+      if (quantised) {
         // the f32 judge's projection of the last block; gemm_sm's ring rows (above) and gemv_i8w's (the forced list
         // over the same taps; the rows depend only on the taps), then gemm_sm's restored
         dfref::Ring jr = dfref::make_ring(tw.d);
@@ -486,9 +501,9 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     e.run(draft);
     const double ms = 1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.0f, 0, draft, *dg, "greedy")
+    bad += quantised ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.0f, 0, draft, *dg, "greedy")
               : compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy");
-    if (i8) compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, gemm_sm against the gemv_i8w twin (recorded)");
+    if (quantised) compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.0f, 0, "greedy, gemm_sm against the gemv_i8w twin (recorded)");
     for (uint32_t j = 0; j < 7; ++j) bad += c->cur_token[1 + j] != b.readback()->ids[j];
     const runtime::dflash::DFlashDraftOut first = *b.readback();
 
@@ -504,7 +519,7 @@ int main(int argc, char** argv) {
     // 4. K 3 by the control block alone
     b.ctl()->k = 3;
     e.run(draft);
-    bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 3, 0.0f, 0, draft, *dg, "K 3")
+    bad += quantised ? judge_draft(e, b, tj, ring, rope, 1234, P, 3, 0.0f, 0, draft, *dg, "K 3")
               : compare_draft(e, b, tw, ring, rope, 1234, P, 3, 0.0f, 0, "K 3");
 
     // 5. sampled
@@ -515,7 +530,7 @@ int main(int argc, char** argv) {
     e.run(draft);
     {
       const uint64_t seed = (uint64_t(0x89ABCDEFu) << 32) | 0x01234567u;
-      bad += i8 ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.8f, seed, draft, *dg, "sampled")
+      bad += quantised ? judge_draft(e, b, tj, ring, rope, 1234, P, 7, 0.8f, seed, draft, *dg, "sampled")
                 : compare_draft(e, b, tw, ring, rope, 1234, P, 7, 0.8f, seed, "sampled");
     }
     b.ctl()->temperature = 0.0f;
@@ -631,12 +646,12 @@ int main(int argc, char** argv) {
                   "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
                   med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
-  }
-  if (g_sets_sm + g_sets_gv > 0) {
-    const bool ok = g_sets_sm <= g_sets_gv;
-    std::printf("top-16 candidates off the f32 judge's sets, summed over the judged cases: gemm_sm %d / gemv_i8w %d %s\n",
-                g_sets_sm, g_sets_gv, ok ? "ok" : "FAIL");
-    bad += !ok;
+    if (g_sets_sm + g_sets_gv > 0) {
+      const bool ok = g_sets_sm <= g_sets_gv;
+      std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d %s\n",
+                  loader::draft_format_name(f), g_sets_sm, g_sets_gv, ok ? "ok" : "FAIL");
+      bad += !ok;
+    }
   }
   if (bad) {
     std::printf("dflash_draft_test: FAIL (%d)\n", bad);
