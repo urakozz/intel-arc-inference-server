@@ -68,16 +68,19 @@ decode (2026-09-05, same binary, same hour).
 The README's "Against vLLM" table. vLLM numbers are the operator's (vLLM XPU image `p314-t215-vxkp0` /
 `p314-t214-vxkp0`, one B70, TP 1, prefix caching on, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`),
 benched with `llama-benchy --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation`.
-Ours: Ornith from the replica record (one request = one card's engine, the same llama-benchy command, mean of 6 runs);
-Qwen3.8's decode is the one-card `--max-num-seqs 4` row at 1 request (73.2), its prefill the one-card
-`--prefill-backend l0-int8` 4k row (2,205; the bf16 prompt pass is 1,709, below vLLM's 1,973).
+Ours, the same llama-benchy command through b70-serve: Ornith from the replica record (one request = one card's
+engine, mean of 6 runs); Qwen3.8 on one card (`--parallel 1 --max-num-seqs 1`, 3 runs each): `--prefill-backend
+l0-int8` pp 2,470 / tg with MTP 62.3; the default bf16 prompt pass pp 1,647 / tg with MTP 67.9 (decode with MTP is
+the mean of those 6 runs, 65.1: the prompt pass does not change decode); `--spec off` pp 1,658 / tg 33.6 (all three
+runs 33.6). The bf16 prompt pass is below vLLM's prefill; the README's row names the int8 one.
 
-| model, one B70, 1 request | ours | vLLM (MTP 2 tokens) |
+| model, one B70, 1 request | ours | vLLM |
 |---|---:|---:|
-| Ornith 1.5 35B-A3B, pp4096 | 8,877 | 7,723.17 ± 46.08 |
-| Ornith 1.5 35B-A3B, tg256 | 180.5 | 115.77 ± 4.34 |
-| Qwen3.8-27B, tg256 | 73.2 | 45.23 ± 2.68 |
-| Qwen3.8-27B, pp4096 | 2,205 (l0-int8) | 1,918 (with MTP) / 1,973 (without) |
+| Ornith 1.5 35B-A3B, pp4096 | 8,877 | 7,723.17 ± 46.08 (MTP 2) |
+| Ornith 1.5 35B-A3B, tg256, MTP | 180.5 | 115.77 ± 4.34 (MTP 2) |
+| Qwen3.8-27B, pp4096 | 2,470 (l0-int8) / 1,647 (bf16) | 1,973 (no spec) / 1,918 (MTP 2) |
+| Qwen3.8-27B, tg256, MTP | 65.1 | 45.23 ± 2.68 (MTP 2) |
+| Qwen3.8-27B, tg256, no speculation | 33.6 | 31.50 |
 
 ## vLLM: how the baseline is served and benched
 
