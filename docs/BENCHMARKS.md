@@ -63,6 +63,22 @@ Prefill does not care either way. `lm_head` runs once per prompt, and the two
 checkpoints measured **0.17% apart** on prefill where they were 9.9% apart on
 decode (2026-09-05, same binary, same hour).
 
+## vLLM: the README's comparison
+
+The README's "Against vLLM" table. vLLM numbers are the operator's (vLLM XPU image `p314-t215-vxkp0` /
+`p314-t214-vxkp0`, one B70, TP 1, prefix caching on, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`),
+benched with `llama-benchy --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation`.
+Ours: Ornith from the replica record (one request = one card's engine, the same llama-benchy command, mean of 6 runs);
+Qwen3.8's decode is the one-card `--max-num-seqs 4` row at 1 request (73.2), its prefill the one-card
+`--prefill-backend l0-int8` 4k row (2,205; the bf16 prompt pass is 1,709, below vLLM's 1,973).
+
+| model, one B70, 1 request | ours | vLLM (MTP 2 tokens) |
+|---|---:|---:|
+| Ornith 1.5 35B-A3B, pp4096 | 8,877 | 7,723.17 ± 46.08 |
+| Ornith 1.5 35B-A3B, tg256 | 180.5 | 115.77 ± 4.34 |
+| Qwen3.8-27B, tg256 | 73.2 | 45.23 ± 2.68 |
+| Qwen3.8-27B, pp4096 | 2,205 (l0-int8) | 1,918 (with MTP) / 1,973 (without) |
+
 ## vLLM: how the baseline is served and benched
 
 ```bash

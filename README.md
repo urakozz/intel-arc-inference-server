@@ -49,13 +49,14 @@ Prefill, t/s:
 | two cards | 2,939 | 2,686 |
 | two cards, `--prefill-backend l0-int8` | **3,323** | **3,048** |
 
-**Against vLLM** - same model file, one card, a 4,096-token prompt:
+**Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt, MTP on in both:
 
-| | this engine | vLLM |
-|---|---:|---:|
-| prefill | **2,205 t/s** | 1,610 t/s (`0.29.1rc1.dev380`) |
-| decode, no speculative decoding | 29.45 t/s | 31.01 t/s (`0.28.1rc1.dev396`) |
-| decode with MTP (the default here) | **73 t/s** | - |
+| t/s | this engine | vLLM | |
+|---|---:|---:|---:|
+| Ornith 1.5 35B-A3B, prefill | **8,877** | 7,723 | +15 % |
+| Ornith 1.5 35B-A3B, decode | **180.5** | 115.8 | +56 % |
+| Qwen3.8-27B, decode | **73.2** | 45.2 | +62 % |
+| Qwen3.8-27B, prefill (`--prefill-backend l0-int8`) | **2,205** | 1,918 | +15 % |
 
 ### Ornith 1.5 35B-A3B
 
