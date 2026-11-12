@@ -92,3 +92,29 @@ global timestamps around the launches):
 - Flash-Next's dumps (`--layers 18`): card 1 holds the operator's quantisation; Task 8 runs them.
 - The dense arm (Task 7): not probed. The dense GEMMs run at 75 % (bf16) / 57 % (int8) of peak (the profile); the
   arm is low priority in the plan and Task 7 stays closed unless a later probe shows >= 10 %.
+
+## 4. Tasks 2, 3 and 5 on the walk (2026-11-12, branch moe-pf-phase2)
+
+**Task 2 (`pf_gdn_front`) and Task 5 (`pf_res_norm`): bitwise.** Kernel tests on card 1: `gdn_front_test` (xb and
+the ring, C 2048 / 37 / 1, pos 0 and 4093) and `pf_norm_fused_test` (residual and x, SP 0 / 1, M 2048 / 37): 0
+differing words. End to end: `prefill_gate_ornith_{l0,l0-int8,l0_c16}_test` run verbose with
+`B70_PF_PHASE2=old` and with the branch print identical logs (every logit / state cosine to 9 digits, every token;
+only the ctest timing lines differ) - `tools/probe/pf_phase2_bitwise.sh`. The Ornith set
+(`pf_phase2_gates.sh`: golden_gate_ornith, prefill_gate_ornith_* incl. c16, prefill_split_ornith_*,
+ornith_prefill_* incl. the launch counts, ornith_mtp_names): 12 / 12 PASS.
+
+Speed (card 0, interleaved, 3 rounds, unprofiled, busy box): pp4096 l0 **3,363 -> 3,439 t/s (+2.3 %)**; profiled
+phase rows: norm 41.5 -> 15.8 ms (budget 12), GDN conv + l2norm 24.8 -> 20.5 ms (budget for the front <= 12: missed;
+the fp32 qkv||z read is the floor, ~6 GB at 4k, and a bf16 qkv||z was measured a wash in 2026-09 - pf_gemm.cl's note).
+
+**Task 3 (`pf_gdn_intra`): gate FAILED in both forms; not bound (opt-in `B70_PF_GDN_INTRA=hl`).**
+- bf16 Q1-Q4 (D-a, 23.6 ms for the 4 stages' 80.6): l0 gates all PASS; `prefill_gate_ornith_l0-int8_test` FAILS one
+  determined row (prose step 0: f32 198 by 0.16 over 271, engine 271 by 0.03; today's kernels pass).
+- D2 (Q1-Q4 in fp32: `pf_gdn_intra` WU_HILO, u / w as hi / lo planes, `pf_gdn_scan_hl`), per the operator's D2:
+  far closer to fp64 per layer (probe: state rel L2 1e-3 -> 5e-6, o 2-4x lower; the gate's gdn_state-vs-f32 cosines
+  higher on layers 0-30), but deep layers 34-38 diverge further on `code` (L36 0.977 vs today's 0.992) and the
+  token gates fail more: l0 cjk step 15 (engine misses 2 determined rows vs the bf16 golden's 1), l0-int8 prose
+  steps 18 / 21 and cjk. Cost 37.4 ms intra + 31.1 ms scan (vs 80.6 + 26.4 today).
+- Reading: the GDN error is no longer the dominant term; a determined-row flip follows from deep-layer routing
+  (MoE near-ties) moving with any perturbation, in either direction. That is a judgement for the operator, not a
+  bug to fix here (the probe's per-stage numbers, tails included at C = 42 / 2026, show no defect).

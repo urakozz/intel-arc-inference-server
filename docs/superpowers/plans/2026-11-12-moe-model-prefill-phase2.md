@@ -1,6 +1,8 @@
 # MoE-model prefill, phase 2 - the GDN prompt pass, the small kernels, the dense linears (Ornith, then Flash-Next)
 
-**Status (2026-11-12): PLANNED.** Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
+**Status (2026-11-12): IN PROGRESS** - Task 1 done; Tasks 2 and 5 done (bitwise, +2.3 % pp4096 l0); Task 3 STOPPED
+(its gate failed in both forms, opt-in `B70_PF_GDN_INTRA=hl`, waits for the operator); Task 6 waits for phase 1's Task 3
+on main. Record: docs/probes/probe-prefill-phase2-2026-11-12.md. Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
 MoE path's sort, fused int4 grouped GEMM, l0-int8 experts as W4A8 and the 4096 chunk. This plan is everything phase 1
 leaves out. Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0); the scout's code read of vLLM's
 XPU kernels (vllm-xpu-kernels @1f31a8e: `csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp`,

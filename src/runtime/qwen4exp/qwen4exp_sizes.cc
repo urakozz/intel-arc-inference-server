@@ -166,7 +166,7 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   s.g = size_t(C) * kVHeads * 4;
   s.beta = size_t(C) * kVHeads * 4;
   s.A2 = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
-  s.A = 2 * s.A2;   // phase 2 (D2): w's and u's lo planes, bf16 [C][48][128] each (A / T stay in the intra kernel)
+  s.A = s.A2 * (prefill::pf_gdn_intra_on() ? 2 : 1);   // phase 2 D2 (opt-in): w's / u's lo planes, bf16 [C][48][128] each
   s.w = size_t(C) * kVHeads * kHd * 2;
   s.u = s.w;
   s.o = size_t(C) * kVHeads * kHd * 4;
