@@ -180,12 +180,13 @@ int main(int argc, char** argv) {
   const bool kMoe = model.desc->is_moe();
   // Operator ruling 2026-11-12 (plan 2026-11-12, W4A8 on l0-int8): on a MoE model's l0-int8 gate, judged by the f32
   // reference, a determined row the engine misses passes when the judge's margin of its token over the engine's is
-  // under 8 bf16 ulps AND the engine's logits row is no further from f32 (cosine) than the bf16 twin's (the
-  // golden) - 2026-10-31's near-miss rule, as the gate's rule rather than per-row --accept lists. Every row that
-  // passes only by it is printed.
+  // under 8 bf16 ulps AND either the bf16 twin (the golden) misses the row too (not an extra miss) or the engine's
+  // logits row is no further from f32 (cosine) than the twin's, less 1e-5 - 2026-10-31's near-miss rule, as the
+  // gate's rule rather than per-row --accept lists (both relaxations: operator, 2026-11-12). Every row that passes
+  // only by it is printed.
   const bool near_miss_rule = kMoe && backend == runtime::PrefillBackend::L0Int8 && !judge_dir.empty();
-  if (near_miss_rule) std::printf("near-miss rule (l0-int8 on a MoE model): f32 margin < 8 bf16 ulps and logits "
-                                  "cosine vs f32 >= the bf16 twin's\n");
+  if (near_miss_rule) std::printf("near-miss rule (l0-int8 on a MoE model): f32 margin < 8 bf16 ulps and (the bf16 "
+                                  "twin misses it too, or logits cosine vs f32 >= the twin's - 1e-5)\n");
   const char* const scan_entry = runtime::prefill::gdn_scan_entry_name();
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
@@ -343,7 +344,7 @@ int main(int argc, char** argv) {
       if (J && want != gam) ++bf16_vs_f32;
       if (J && gd.determined() && id != gam) ++bf16_det_bad;
       if (jok) ++v.exact;
-      bool accepted_near_tie = false, accepted_near_miss = false;
+      bool accepted_near_tie = false, accepted_near_miss = false, twin_misses = false;
       if (jd.determined()) {
         ++v.n_determined;
         uint32_t second = 0;
@@ -354,8 +355,9 @@ int main(int argc, char** argv) {
           ++v.near_tie;
           accepted_near_tie = true;
         } else if (near_miss_rule && jr.ulp > 0 && (jrow[want] - jrow[id]) / jr.ulp < 8.0f &&
-                   compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos >=
-                       compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos) {
+                   ((twin_misses = gam != want) ||
+                    compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos >=
+                        compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos - 1e-5)) {
           ++v.near_miss;
           accepted_near_miss = true;
         } else if (accept.has(pname, p)) {
@@ -377,7 +379,9 @@ int main(int argc, char** argv) {
       const char* mark =
           jok ? ""
               : accepted_near_miss
-                    ? "  <== PASSES ONLY BY THE NEAR-MISS RULE (f32 margin < 8 bf16 ulps, cosine >= the bf16 twin's)"
+                    ? (twin_misses ? "  <== PASSES ONLY BY THE NEAR-MISS RULE (f32 margin < 8 bf16 ulps, twin misses it too)"
+                                   : "  <== PASSES ONLY BY THE NEAR-MISS RULE (f32 margin < 8 bf16 ulps, cosine >= the "
+                                     "bf16 twin's - 1e-5)")
               : accepted_near_tie
                     ? "  <== near-tie ACCEPTED (engine = golden runner-up, margin <= 1 bf16 ulp)"
                     : (jd.determined() ? "  <== MISMATCH (determined - GATE)"
