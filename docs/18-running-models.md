@@ -85,7 +85,8 @@ is not finished is listed in [open-work.md](open-work.md).
 |---|---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours, spec 15 §13) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
 | `b70-serve` | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model is refused, naming spec 22) |
-| `--parallel tp`, `replica`, `--max-num-seqs` | yes | refused | refused | refused | refused |
+| `--parallel tp` | yes | refused | refused | refused | refused |
+| `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused | refused |
 | `--parallel pp` (two cards, spec 16d) | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
 | `b70-decode` | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22) |
 | speed rows in BENCHMARKS | yes | no | no | no | no |
@@ -265,6 +266,8 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 # every command below: no speed row yet
 # agentic session: the full trained context, 262144, fits with or without MTP (derived)
 ./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --prefix-split-last
+# two sessions at once on two cards (replica: a model copy per card, one request each, full context each)
+./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --max-num-seqs 2 --prefix-split-last
 
 ./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
@@ -275,6 +278,10 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 **Limits.**
 
+- Two cards serve two requests at once as `replica` (`--max-num-seqs 2`, or `--parallel replica`): each card
+  runs its own engine with the full context, MTP and the prefix cache, and a prompt cached by one card is a
+  prefix cache hit on the other. Several requests on one card (sequence slots) are built for Qwen3.8 only, so
+  `--max-num-seqs` above 2, or 2 on one card, is refused. `--parallel tp` is Qwen3.8's.
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
 - Prefill runs on `l0` (the default) and `l0-int8` (opt-in). On this MoE model `l0-int8` loses routing

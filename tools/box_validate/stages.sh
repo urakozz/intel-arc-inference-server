@@ -3384,7 +3384,7 @@ st_r77_host() {
   run_tests '^(scheduler_test|dflash_scheduler_test|replica_engine_test|replica_server_test|pipeline_args_test|protocol_test|prefix_server_test|mtp_server_test|lookup_server_test|dflash_lookup_server_test)$'
   finish
 }
-stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (K2, Kolibri test configs), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
+stage r77.reject  77 default gpu  qwen r77.host                   "the refusals: another model by name (K2, Kolibri test configs), more than one Ornith request a card (its test config), no config, the pp flags, b70-decode; one visible card (ZE_AFFINITY_MASK=0) refused before any context"
 st_r77_reject() {
   run_tests '^(cli_reject_serve_replica_.*|cli_reject_pipeline_replica_decode)$'
   chk "out=\$(ZE_AFFINITY_MASK=0 timeout 120 build/src/cli/b70-serve $SNAP_QWEN --parallel replica 2>&1); rc=\$?; echo \"\$out\" | tail -3; [ \$rc -eq 1 ] && echo \"\$out\" | grep -q 'parallel replica needs two GPUs' && ! echo \"\$out\" | grep -q '^device'" "one visible card: refused"
@@ -3441,6 +3441,22 @@ st_r77_batch() {
   done
   grab_all identical '^(IDENTICAL|NOT IDENTICAL)|^JUDGED|^SKIP_REASON|card [01]: slots' 40
   judged_finish
+}
+stage r77.ornith  77 default gpu  ornith r77.reject               "Ornith on --parallel replica (one request a card: no slots): R1 - every request sent two at a time equals it alone on the card that served it (--parallel 1 on card 0 and on card 1), bitwise; --spec off and mtp, --max-len 65536; then B3 - a snapshot from card 0 used as a prefix cache hit on card 1"
+st_r77_ornith() {
+  local sp
+  for sp in off mtp; do
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/replica 0,1 $SNAP_ORNITH --parallel replica --max-num-seqs 2 --spec $sp --max-len 65536 -- --mode pairs" "Ornith --spec $sp: pairs on the replica server"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card0 0 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 0"
+    chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/$sp/card1 1 $SNAP_ORNITH --parallel 1 --spec $sp --max-len 65536 -- --mode alone" "Ornith --spec $sp: alone on card 1"
+    chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/$STAGE/$sp/replica/requests.jsonl --server-log $STATE/$STAGE/$sp/replica/server-log --card0 $STATE/$STAGE/$sp/card0/requests.jsonl --card1 $STATE/$STAGE/$sp/card1/requests.jsonl" "Ornith --spec $sp: R1"
+  done
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/b3/replica 0,1 $SNAP_ORNITH --parallel replica --spec off --max-len 65536 -- --mode b3" "Ornith b3 on the replica server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/b3/card0 0 $SNAP_ORNITH --parallel 1 --spec off --max-len 65536 -- --mode b3" "Ornith b3 alone on card 0"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/b3/card1 1 $SNAP_ORNITH --parallel 1 --spec off --max-len 65536 -- --mode b3" "Ornith b3 alone on card 1"
+  chk "python3 tools/box_validate/replica_check.py b3 --replica $STATE/$STAGE/b3/replica/requests.jsonl --server-log $STATE/$STAGE/b3/replica/server-log --card0 $STATE/$STAGE/b3/card0/requests.jsonl --card1 $STATE/$STAGE/b3/card1/requests.jsonl" "Ornith B3"
+  grab_all r1 '^R1 |^B3|card [01]: max_len|^devices:' 120
+  finish
 }
 stage r77.serial  77 default card qwen r77.host                  "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
 st_r77_serial() {
