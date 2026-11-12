@@ -95,7 +95,9 @@
 #define K_OFF 2048
 #define V_OFF 4096
 #define RING 16           /* conv ring depth (runtime::PersistentBuffers::kConvRing) */
+#ifndef AB_STRIDE         /* phase 3 Task 8: Flash-Next's _AB256 build reads the dense GEMM's rows at pitch 256 */
 #define AB_STRIDE 128     /* ab_out row: a at [0,48), b at [48,96), zero-padded to 128 */
+#endif
 #define B_OFF 48
 #define CT 64             /* the FLA intra-chunk size (PrefillScratch::kGdnChunk) */
 #define K_HEADS 16        /* q and k heads: CONV_ROWS = (2*16 + 48) * 128 */

@@ -58,7 +58,8 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
             {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnConv);
   //  4 - head scalars and the intra-chunk cumulative gate.
-  cx.launch(kc(conv, "pf_gdn_gate"), kVHeads, nch, 1,
+  require(b.ab_pitch == 128 || b.ab_pitch == kq::kPfAbPitch, "a||b's row pitch is neither 128 nor the GEMM's");
+  cx.launch(kc(b.ab_pitch == 128 ? conv : kq::pf_gdn_gate_gemm_variant(), "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
   //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. (gdn.cc's one-launch pf_gdn_intra for 5-8 is not bound here

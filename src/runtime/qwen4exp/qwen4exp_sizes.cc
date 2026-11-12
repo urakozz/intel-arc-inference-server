@@ -220,9 +220,9 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.q16 = C * d.q_n() * 2;
   s.o = size_t(d.q_heads) * C * d.head_dim * 4;
   s.attn_out = C * d.q_n() * 2;
-  s.ab = C * model::Qwen4ExpDesc::kAbPaddedN * 4;
+  s.ab = C * kernels::pf_route_slab_pitch(model::Qwen4ExpDesc::kAbPaddedN) * 4;   // phase 3 Task 8: the GEMM's rows, pitch 256
   s.gdn = gdn_scratch_sizes(kPfC).total();
-  s.logits = C * d.router_n() * 4;
+  s.logits = C * kernels::pf_route_slab_pitch(d.router_n()) * 4;                  // ... and the router's, pitch 768
   s.routes = size_t(d.layers) * C * kRouteWords * 4;
   s.hdr = size_t(kPfHdrWords) * 4;
   s.tiles = T * 2 * 4;
@@ -252,9 +252,10 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
   const auto lin = [&](uint32_t N) { return size_t(2) * pf_slabs(N); };   // a slab kernel + pf_gemm per slab
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
   // router, route, sort, gather, the batches' dequant + GEMM pairs, combine; plan 2026-11-12: the sort's three
-  // launches, one fused GEMM a projection, and Intel's bf16 shared expert's dequant + GEMM pair a projection
-  const size_t moe = 9 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
-  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
+  // launches, one fused GEMM a projection, and Intel's bf16 shared expert's dequant + GEMM pair a projection;
+  // phase 3 Task 8: the router and a||b are a slab re-lay + pf_gemm each (one launch more than the GEMV)
+  const size_t moe = 10 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
+  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 2 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
   size_t qsa = 2 * hc + lin(d.qkvg_n()) + lin(d.idx_n()) + 3 + 1 + lin(d.linear(model::Q4LinearId::QsaO).shape.N) + moe;
   if (sparse > 0 && !injected) qsa += 2;          // q4_qsa_score, q4_qsa_select
   if (dense > 0) qsa += 1;                        // pf_flash_attn
