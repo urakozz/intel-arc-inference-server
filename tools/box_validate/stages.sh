@@ -3688,11 +3688,13 @@ rownote 83 "The numerics half of Task 1 (tools/probe/moe_w4a8_accuracy.py: the W
 stage r83.routes 83 default card ornith - "the route dump: ornith_prefill_test --dump-routes (every layer's route rows after a real prefill of long32k[0, 4096) in chunks of 2048, l0) -> \$STATE/ornith.routes"
 st_r83_routes() {
   chk "build/tests/ornith_prefill_test $SNAP_ORNITH tests/golden/prompts l0 --dump-routes=$STATE/ornith.routes --dump-ids=tests/golden/prompts/long32k.ids" "the Ornith route dump"
+  chk "build/tests/qwen4exp_prefill_test ${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound} tests/golden/prompts/q4exp_4k.ids layers:18 int8 dump-routes:$STATE/flashnext.routes" "the Flash-Next route dump (Intel's checkpoint, --layers 18)"
   finish
 }
 stage r83.probe 83 optin card ornith r83.routes "probe_moe_prefill on Ornith's dump at C = 2048 and 4096: the bitwise / integer-oracle checks, then every arm's ms a layer and chunk, interleaved (card 0; the record: docs/probes/probe-moe-prefill-2026-11-12.md)"
 st_r83_probe() {
   chk "build/tools/probe/probe_moe_prefill --routes $STATE/ornith.routes --model ornith --C 2048,4096 --rounds 5" "probe_moe_prefill ornith"
+  chk "build/tools/probe/probe_moe_prefill --routes $STATE/flashnext.routes --model flashnext --C 2048,4096 --rounds 5" "probe_moe_prefill flashnext"
   grab_all result '^(RESULT|# checks|# FAILED|\| check)' 400
   finish
 }

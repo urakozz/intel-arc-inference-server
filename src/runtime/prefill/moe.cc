@@ -1,6 +1,7 @@
 #include "runtime/prefill/moe.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 
@@ -33,9 +34,18 @@ T* at(l0::Mem& m, size_t off) {
 
 }  // namespace
 
+bool moe_old_walk() {
+  static const bool old = [] {
+    const char* v = std::getenv("B70_PF_MOE");
+    return v != nullptr && std::string(v) == "old";
+  }();
+  return old;
+}
+
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b) {
-  // router GEMV + moe_route + sort + combine, and the down batches' dequant + GEMM pairs.
-  size_t n = 4 + 2 * size_t(batches(d, MoeWeightForm::DownBf16));
+  // router GEMV + moe_route + sort (one launch, or the multi-work-group sort's three) + combine, and the down
+  // batches' dequant + GEMM pairs.
+  size_t n = (moe_old_walk() ? 4 : 6) + 2 * size_t(batches(d, MoeWeightForm::DownBf16));
   if (b == PrefillBackend::L0Int8)
     n += 4;   // quantiser, gather_i8, requant (the whole array), the i8 GEMM
   else
@@ -66,6 +76,9 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   const uint32_t tmax = moe_prefill_tiles(d, C);
   const uint32_t rows = tmax * kernels::pf_moe::kTileM;
   require(tmax <= L.tmax, "tmax(C) exceeds the scratch's tile table");
+  const uint32_t ibound = moe_prefill_items(d, C);
+  require(ibound <= L.ibound, "the work items' bound at C exceeds the scratch's item table");
+  uint32_t* items = at<uint32_t>(*s.moe, L.items_off);
   require(NG % kernels::pf_moe::kGemmWgN == 0 && H % kernels::pf_moe::kGemmWgN == 0 &&
               H % kernels::pf_moe::kCombineWg == 0,
           "the expert shape is not whole 256-column work-groups");
@@ -93,10 +106,24 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
   cx.launch(kc(kernels::moe_variant(1, E, m.top_k, H, I), "moe_route"), 1, C, 1,
             {PtrArg(logits), PtrArg(route)});
   profile_wait(cx, Phase::kMoeRoute);
-  // 2. The sort: one work-group, the header, the tile table padded to tmax, the rows.
-  cx.launch(kc(pv, "pf_moe_sort"), 1, 1, 1,
-            {PtrArg(route), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(pair_row),
-             arg_val(C), arg_val(tmax)});
+  // 2. The sort: the header, the tile table padded to tmax, the rows - by pf_moe_sort_mw's histogram, scan and
+  //    scatter over 64-token blocks (plan 2026-11-12 Task 2, bitwise the one-work-group pf_moe_sort, which
+  //    B70_PF_MOE=old binds).
+  if (moe_old_walk()) {
+    cx.launch(kc(pv, "pf_moe_sort"), 1, 1, 1,
+              {PtrArg(route), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(pair_row),
+               arg_val(C), arg_val(tmax)});
+  } else {
+    const std::string sv = kernels::pf_moe_sort_mw_variant(E, m.top_k);
+    uint32_t* cnt = at<uint32_t>(*s.moe, L.cnt_off);
+    const uint32_t nblk = (C + 63) / 64;
+    cx.launch(kc(sv, "pf_moe_hist"), nblk, 1, 1, {PtrArg(route), PtrArg(cnt), arg_val(C)});
+    cx.launch(kc(sv, "pf_moe_scan"), 1, 1, 1,
+              {PtrArg(cnt), PtrArg(hdr), PtrArg(tiles), PtrArg(row_tok), PtrArg(items), arg_val(C), arg_val(tmax),
+               arg_val(ibound)});
+    cx.launch(kc(sv, "pf_moe_scatter"), nblk, 1, 1,
+              {PtrArg(route), PtrArg(cnt), PtrArg(row_tok), PtrArg(pair_row), arg_val(C)});
+  }
   profile_wait(cx, Phase::kMoeSort);
 
   // 3. gate||up, SiLU fused -> h [rows][I].

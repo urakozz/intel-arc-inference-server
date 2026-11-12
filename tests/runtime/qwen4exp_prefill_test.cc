@@ -1042,6 +1042,7 @@ int main(int argc, char** argv) {
   }
   std::string mode = "all";
   std::string judge_path;
+  std::string dump_path;   // dump-routes:<file> - plan 2026-11-12 Task 1's route dump (no gate runs)
   qwen4exp_rig::Options o;
   o.max_len = kMaxLen;
   o.timeout_ms = 60000;
@@ -1053,6 +1054,7 @@ int main(int argc, char** argv) {
     else if (a == "int8") o.int8_head = true;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
     else if (a.rfind("judge:", 0) == 0) judge_path = a.substr(6);
+    else if (a.rfind("dump-routes:", 0) == 0) dump_path = a.substr(12);
     else {
       std::fprintf(stderr, "qwen4exp_prefill_test: unknown argument %s\n", a.c_str());
       return 2;
@@ -1085,6 +1087,30 @@ int main(int argc, char** argv) {
   std::printf("%s: %u layers, %s dense, %s attention (B70_Q4_ATTN), %u device(s), max_len %u; prompt %u ids\n",
               snap_dir.c_str(), rig.eng->model().desc.layers, model::q4_form_name(rig.eng->model().desc.forms.dense),
               rq::q4_attn_name(rig.eng->attention()), rig.eng->devices(), rig.eng->max_len(), kN);
+  if (!dump_path.empty()) {
+    // every layer's route rows after a prefill of the first two chunks of the ids (kPfC each), for
+    // probe_moe_prefill: "B70ROUTE", u32 version 1, layers, tokens, words (32), then [layers][tokens][32] u32
+    auto& e = *rig.eng;
+    const uint32_t L = e.model().desc.layers, n2 = 2 * rq::kPfC;
+    CHECK(src.size() >= n2);
+    std::vector<uint32_t> rows(size_t(L) * n2 * rq::kRouteWords);
+    e.reset();
+    for (uint32_t c0 = 0; c0 < n2; c0 += rq::kPfC) {
+      e.prefill(Ids(src.begin() + c0, src.begin() + c0 + rq::kPfC));
+      const std::vector<uint32_t> r = e.read_prefill_routes();
+      for (uint32_t l = 0; l < L; ++l)
+        std::memcpy(rows.data() + (size_t(l) * n2 + c0) * rq::kRouteWords, r.data() + rq::pf_route_at(l) / 4,
+                    size_t(rq::kPfC) * rq::kRouteWords * 4);
+    }
+    std::FILE* f = std::fopen(dump_path.c_str(), "wb");
+    CHECK(f != nullptr);
+    const uint32_t hdr[4] = {1, L, n2, rq::kRouteWords};
+    CHECK(std::fwrite("B70ROUTE", 1, 8, f) == 8 && std::fwrite(hdr, 4, 4, f) == 4 &&
+          std::fwrite(rows.data(), 4, rows.size(), f) == rows.size());
+    std::fclose(f);
+    std::printf("dump-routes: %u layers x %u tokens (chunks of %u) -> %s\n", L, n2, rq::kPfC, dump_path.c_str());
+    return 0;
+  }
   std::unique_ptr<F32Judge> judge;
   if (!judge_path.empty()) {
     if (golden::exists(judge_path)) judge = std::make_unique<F32Judge>(judge_path, rig.eng->model().desc, prompt,

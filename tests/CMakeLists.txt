@@ -1901,6 +1901,7 @@ if(B70_ORNITH)
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
     kernel_pf_gated_head_GK16V32 kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
     kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_moe_sort_mw_E256_T8
     kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
     kernel_pf_moe_gemm_K512_N2048
     kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU

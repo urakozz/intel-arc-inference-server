@@ -1,6 +1,6 @@
 # Ornith 1.5 MoE prefill rework - about 2x prefill (design targets Ornith and Flash-Next)
 
-**Status (2026-11-12): PLANNED.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
+**Status (2026-11-12): Tasks 1-2 DONE (probe GO; the sort bound, bitwise), Task 3 in progress.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
 238f0582). Earlier evidence this plan builds on: `docs/probes/probe-fused-dequant-2026-09-22.md` (fused dequant on a
 DENSE shape: bitwise, but rejected at 3.3x the cost of the pass it removed), `docs/probes/probe-w4a8-2026-09-23.md`
 (W4A8 rejected: 2.79 % error), open-work 3b's `pf_gemm_q4.cl` (int4 read in registers, bitwise the slab walk). Box
@@ -110,10 +110,14 @@ real sort's tile table; C = 2048 and 4096 from the 4096-id dump):
 - Flash-Next: the same arms at its shapes (gate||up 2560 x 1280, down 640 x 2560, 512 + 1 blocks, top-10) on the
   `--layers 18` dumps.
 
-- [ ] **Step 1 (Mac):** the probe, the dump mode, row 83; `tools/box_validate.sh --dry-run --only r83` prints the
+- [x] **Step 1 (Mac):** the probe, the dump mode, row 83; `tools/box_validate.sh --dry-run --only r83` prints the
   commands; host tests green. Commit `probe_moe_prefill: fused grouped GEMM arms and the sort on real routes (Ornith
   MoE prefill Task 1)`.
-- [ ] **Step 2 (box, card 0):** `r83.routes`, then `r83.probe`. Record `docs/probes/probe-moe-prefill-2026-11-xx.md`:
+- [x] **Step 2 (box, card 0):** `r83.routes`, then `r83.probe`. **Done 2026-11-12: GO** - the chosen arm (F1, 64-row
+  sub-groups, magic-exponent conversion, MI 64) 2.74 ms a layer-chunk at C 2048 (break-even 6.7, target 4.2; this
+  harness's control 10.66), 4.35 at C 4096 (control 12.20); sort 1.50 -> 0.048 ms; Flash-Next 27.1 -> 5.65 ms,
+  sort 2.94 -> 0.078; all arms bitwise (W4A8 integer-oracle exact). Record:
+  `docs/probes/probe-moe-prefill-2026-11-12.md` (numerics of the W4A8 forms included). Record `docs/probes/probe-moe-prefill-2026-11-xx.md`:
   per arm ms a layer and chunk at C = 2048 / 4096, TFLOP/s, items, bitwise verdict, register spill from the shader
   dump (`-cl-intel-256-GRF-per-thread`).
   - **Gate (pre-registered, written into the record before the run):** today's weights + GEMM per layer and chunk is
@@ -142,10 +146,15 @@ Three launches, no atomics, no SLM staging of the whole chunk (so no KC):
 Rows inside an expert stay in ascending (token, slot) order, so header, tiles, `row_tok` and `pair_row` are byte for
 byte today's.
 
-- [ ] **Step 1 (Mac):** host twin first (`pf_moe_ref_test`: the blocked walk == `pf_moe_ref::sort` on random routes,
+- [x] **Step 1 (Mac):** host twin first (`pf_moe_ref_test`: the blocked walk == `pf_moe_ref::sort` on random routes,
   the adversaries - all tokens to 8 / 10 experts, one-row experts, C = 1, 37, 2048, 4096, 16384), then the kernel and
   its binding. `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `pf_moe_test` (sort arm: every buffer exact against `pf_moe_sort` at C = 37 / 2048 and
+- [x] **Step 2 (box, card 1 - correctness):** **Done 2026-11-12**: pf_moe_test's mw arm exact (device routes, the
+  crafted ones, C 1 / 37 / 2048, random 4096 / 16384, its work items the host's); the whole Ornith prefill of
+  long32k[0, 4096) old sort vs mw sort: every layer's routes and the logits BITWISE (the G0 compare's content,
+  run as an A/B of `B70_PF_MOE`); ornith_prefill_{l0,l0-int8}_test PASS; pf_moe_ref_test, memory_plan_test PASS.
+  The scan also writes the work items (MI 64) Task 3's GEMM walks. Sort a layer-chunk 0.048 ms (probe) = ~4 ms
+  at 4k. `pf_moe_test` (sort arm: every buffer exact against `pf_moe_sort` at C = 37 / 2048 and
   against the host twin at 4096 / 16384), `ornith_prefill_l0_test` (new launch count), `r83.probe`'s sort arm in situ.
   - **Gates:** sort buffers bitwise the old kernel's; Ornith's prefill logits and routes bitwise main's (G0 mechanism:
     `G0_BITWISE_RE` extended for this run with `prefill_gate_ornith_l0_test`, `prefill_gate_ornith_l0_c16_test`,

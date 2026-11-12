@@ -75,6 +75,7 @@ struct Arm {
   uint32_t mi() const { return 8u * na * wgm; }          // rows a work item
   uint32_t wg_n() const { return 16u * nb * wgn; }
   bool nfirst() const { return opt & 1; }
+  bool diag() const { return cvt == 9 || (opt & 4); }   // the DIAGNOSTIC forms: timed, not values
   std::string variant(uint32_t K, uint32_t N, int epi) const {
     char b[96];
     std::snprintf(b, sizeof b, "pmp_F%d_A%dB%dM%dN%d_C%dX%dO%d_K%u_N%u_E%d", form, na, nb, wgm, wgn, cvt, xsg, opt,
@@ -89,6 +90,12 @@ const Arm kArms[] = {
     {2, 4, 4, 4, 4, 2, 0, 1}, {2, 4, 4, 4, 4, 2, 0, 2}, {2, 4, 4, 4, 4, 2, 0, 3}, {2, 4, 4, 8, 4, 2, 0, 3},
     {2, 4, 4, 2, 4, 2, 0, 3}, {3, 4, 4, 1, 4, 0, 0, 0}, {3, 4, 4, 1, 4, 0, 0, 1}, {3, 4, 2, 4, 8, 0, 0, 0},
     {3, 4, 2, 4, 8, 0, 0, 1}, {3, 4, 4, 1, 4, 0, 1, 1}, {3, 4, 2, 4, 8, 0, 1, 1},
+    // DIAGNOSTIC (not checked): c9 = no conversion, o4 = no DPAS
+    {1, 4, 4, 1, 4, 9, 0, 1}, {1, 4, 4, 1, 4, 2, 0, 5}, {2, 4, 4, 4, 4, 9, 0, 3}, {2, 4, 4, 4, 4, 2, 0, 7},
+    // round 3: 64-row sub-groups again (A's row offset in the base: bitwise now), half the conversion per DPAS
+    {1, 8, 2, 1, 8, 2, 0, 1}, {1, 8, 2, 2, 8, 2, 0, 1}, {2, 8, 2, 2, 8, 2, 0, 3}, {1, 8, 2, 1, 8, 9, 0, 1},
+    // round 4: the inline-vISA conversion (bfe, int -> f32, one mixed-mode bf16 multiply)
+    {1, 4, 4, 1, 4, 3, 0, 1}, {1, 8, 2, 1, 8, 3, 0, 1}, {2, 4, 4, 4, 4, 3, 0, 3},
 };
 
 uint16_t f32_to_bf16(float f) {
@@ -247,7 +254,9 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   const uint32_t hw = kernels::pf_moe::hdr_words(E);
   l0::Mem hdr(ctx, l0::MemKind::Device, hw * 4), tiles(ctx, l0::MemKind::Device, size_t(T) * 8),
       row_tok(ctx, l0::MemKind::Device, size_t(rows) * 4), pair_row(ctx, l0::MemKind::Device, size_t(C) * TK * 4),
-      cnt(ctx, l0::MemKind::Device, size_t((C + 63) / 64) * E * 4);
+      cnt(ctx, l0::MemKind::Device, size_t((C + 63) / 64) * E * 4),
+      ditems(ctx, l0::MemKind::Device, size_t(items_bound(m, C, kernels::pf_moe::kItemM)) * 16);
+  const uint32_t ib64 = items_bound(m, C, kernels::pf_moe::kItemM);
   l0::Mem A(ctx, l0::MemKind::Device, size_t(rows) * H * 2), h_c(ctx, l0::MemKind::Device, size_t(rows) * I * 2),
       h_f(ctx, l0::MemKind::Device, size_t(rows) * I * 2), y_c(ctx, l0::MemKind::Device, size_t(rows) * H * 2),
       y_f(ctx, l0::MemKind::Device, size_t(rows) * H * 2), cf(ctx, l0::MemKind::Device, size_t(rows) * std::max(NG, H) * 4),
@@ -286,7 +295,7 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
   auto sort_mw = [&](const uint32_t* r) {
     cx.launch(k_hist, nblk, 1, 1, {PtrArg(r), PtrArg(cnt.ptr()), arg_val(C)});
     cx.launch(k_scan, 1, 1, 1, {PtrArg(cnt.ptr()), PtrArg(hdr.ptr()), PtrArg(tiles.ptr()), PtrArg(row_tok.ptr()),
-                                arg_val(C), arg_val(T)});
+                                PtrArg(ditems.ptr()), arg_val(C), arg_val(T), arg_val(ib64)});
     cx.launch(k_scat, nblk, 1, 1, {PtrArg(r), PtrArg(cnt.ptr()), PtrArg(row_tok.ptr()), PtrArg(pair_row.ptr()),
                                    arg_val(C)});
   };
@@ -366,8 +375,11 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
       download(ctx, rtk.data(), row_tok.ptr(), rtk.size() * 4);
       download(ctx, prw.data(), pair_row.ptr(), prw.size() * 4);
       const uint32_t used = ref.rows_used();
+      std::vector<uint32_t> its(size_t(ib64) * 4);
+      download(ctx, its.data(), ditems.ptr(), its.size() * 4);
       const bool ok = std::equal(L.hdr.begin(), L.hdr.end(), ref.hdr.begin()) && L.tiles == ref.tiles &&
-                      std::equal(rtk.begin(), rtk.begin() + used, ref.row_tok.begin()) && prw == ref.pair_row;
+                      std::equal(rtk.begin(), rtk.begin() + used, ref.row_tok.begin()) && prw == ref.pair_row &&
+                      its == make_items(L.tiles, L.hdr[0], kernels::pf_moe::kItemM, ib64);
       ++sort_checks;
       if (!ok) throw std::runtime_error("layer-chunk " + std::to_string(lc) + ": the mw sort is not the host twin");
       if (have_old) {
@@ -408,7 +420,7 @@ int run(const Model& m, const Routes& rt, uint32_t C, int rounds, uint32_t check
     download(ctx, hc.data(), h_c.ptr(), hc.size() * 4);
     download(ctx, yc.data(), y_c.ptr(), yc.size() * 4);
     for (const Built& b : arms) {
-      if (b.a.form == 3 || failed.count(b.a.tag())) continue;
+      if (b.a.form == 3 || b.a.diag() || failed.count(b.a.tag())) continue;
       const uint32_t nit = bound[b.a.mi()];
       std::vector<uint8_t> poison(hc.size() * 4, 0xA5);
       upload(ctx, h_f.ptr(), poison.data(), poison.size());
