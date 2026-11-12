@@ -435,6 +435,11 @@ uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C) {
   const uint32_t tm = kernels::pf_moe::kTileM;
   return (C * desc.moe.top_k + desc.moe.experts * (tm - 1)) / tm + (C + tm - 1) / tm;
 }
+uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C) {
+  if (!desc.is_moe()) return 0;
+  const uint32_t mi = kernels::pf_moe::kItemM;
+  return (C * desc.moe.top_k + desc.moe.experts * (mi - 1)) / mi + (C + mi - 1) / mi;
+}
 
 namespace {
 // One expert weight block in each grouped-GEMM B form (pf_moe_gemm.cl).
@@ -482,6 +487,9 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
   l.h_off = region(size_t{l.rows} * m.expert_intermediate * kBf16);
   l.xg_off = region(size_t{l.rows} * desc.hidden * kBf16);
   l.w_off = region(l.w);
+  l.cnt_off = region((kC + 63) / 64 * m.experts * sizeof(uint32_t));
+  l.ibound = moe_prefill_items(desc, PrefillScratchDims::kCDefault);
+  l.items_off = region(size_t{l.ibound} * 4 * sizeof(uint32_t));
   l.total = at;
   return l;
 }

@@ -224,6 +224,7 @@ inline std::string pf_moe_gemm_variant(unsigned K, unsigned N, bool i8, bool sil
 // passes TM and KC). tests/kernels/pf_moe_ref.h reads them by name.
 namespace pf_moe {
 inline constexpr unsigned kTileM = 32;           // TM: rows per grouped-GEMM tile
+inline constexpr unsigned kItemM = 64;           // MI: rows per fused-GEMM work item (pf_moe_sort_mw's items)
 inline constexpr unsigned kNone = 0xFFFFFFFFu;   // a padding tile's block / row's token
 inline constexpr unsigned kHdrTiles = 0, kHdrSharedRow = 1, kHdrRows = 2, kHdrC = 3,
                           kHdrCount = 4;         // [kHdrCount + e]: expert e's rows

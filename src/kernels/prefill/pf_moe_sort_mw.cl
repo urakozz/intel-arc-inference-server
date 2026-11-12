@@ -6,7 +6,7 @@
 // (experts, top_k) (`pf_moe_sort_mw_E<experts>_T<top_k>`, kernels::pf_moe_sort_mw_variant), three entry points:
 //
 //   pf_moe_hist(route, cnt, C)                                   grid (nblk), WG LANES
-//   pf_moe_scan(cnt, hdr, tiles, row_tok, C, tmax)                grid (1),    WG LANES
+//   pf_moe_scan(cnt, hdr, tiles, row_tok, items, C, tmax, ibound) grid (1),    WG LANES
 //   pf_moe_scatter(route, cnt, row_tok, pair_row, C)              grid (nblk), WG LANES
 //
 // nblk = ceil(C / TB) blocks of TB tokens; cnt is u32 [nblk][EXPERTS] scratch. LANES = min(EXPERTS, 256) and lane l
@@ -18,7 +18,10 @@
 //      ceil(c_e / TM) (the same sum; r0(e) = TM x it); then lane l replaces cnt[b][e] by expert e's first row of
 //      block b - r0(e) plus the pairs of e in the blocks before b - walking b ascending. It writes the tile table (each expert's tiles, the
 //      shared expert's after the last routed one, NONE to tmax), the expert tails' padding rows (row_tok NONE), the
-//      shared expert's rows (token t at Rs + t) and the header.
+//      shared expert's rows (token t at Rs + t), the header, and the WORK ITEMS of pf_moe_q4gemm.cl: each
+//      block's tiles taken MI rows at a time, items[4 i] = (block, first row, rows <= MI, 0), the routed experts'
+//      in e order, the shared expert's after them, NONE to ibound = (C TOP_K + EXPERTS (MI - 1)) / MI +
+//      ceil(C / MI) (sum_e ceil(c_e / MI) is at most that; runtime::moe_prefill_items is its host home).
 //   3. scatter: block b's ids staged again; lane l walks the block's pairs in ascending (token, slot) order and gives
 //      each pair of its experts the next row of that expert: row_tok[row] = t, pair_row[t][k] = row.
 //
@@ -30,8 +33,11 @@
 // writes one). tests/kernels/pf_moe_ref.h's blocked walk is this, on the host.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 
-#if !defined(EXPERTS) || !defined(TOP_K) || !defined(TM) || !defined(TB)
-#error "pf_moe_sort_mw: EXPERTS, TOP_K, TM and TB must be defined (src/kernels/prefill/CMakeLists.txt)"
+#if !defined(EXPERTS) || !defined(TOP_K) || !defined(TM) || !defined(TB) || !defined(MI)
+#error "pf_moe_sort_mw: EXPERTS, TOP_K, TM, TB and MI must be defined (src/kernels/prefill/CMakeLists.txt)"
+#endif
+#if MI % TM != 0
+#error "pf_moe_sort_mw: a work item is whole TM-row tiles"
 #endif
 #if EXPERTS < 16 || EXPERTS > 1024 || EXPERTS % 16 != 0
 #error "pf_moe_sort_mw: EXPERTS is a multiple of 16 up to 1024 (ids staged as ushort)"
@@ -83,9 +89,11 @@ __kernel void pf_moe_hist(__global const uint* restrict route, __global uint* re
 
 __attribute__((reqd_work_group_size(LANES, 1, 1)))
 __kernel void pf_moe_scan(__global uint* restrict cnt, __global uint* restrict hdr, __global uint* restrict tiles,
-                          __global uint* restrict row_tok, uint C, uint tmax) {
+                          __global uint* restrict row_tok, __global uint* restrict items, uint C, uint tmax,
+                          uint ibound) {
   __local uint cnts[EXPERTS];
   __local uint toff[EXPERTS + 1];
+  __local uint ioff[EXPERTS + 1];
   const uint l = get_local_id(0);
   const uint nblk = (C + TB - 1) / TB;
   uint tot[EPL];
@@ -98,13 +106,17 @@ __kernel void pf_moe_scan(__global uint* restrict cnt, __global uint* restrict h
     cnts[e] = run;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
-  if (l == 0) {   // pf_moe_sort's serial prefix of the experts' tiles
-    uint acc = 0;
+  if (l == 0) {   // pf_moe_sort's serial prefix of the experts' tiles, and of their work items
+    uint acc = 0, ia = 0;
     for (uint e = 0; e < EXPERTS; ++e) {
       toff[e] = acc;
-      acc += (cnts[e] + TM - 1) / TM;
+      ioff[e] = ia;
+      const uint nt = (cnts[e] + TM - 1) / TM;
+      acc += nt;
+      ia += (nt + MI / TM - 1) / (MI / TM);
     }
     toff[EXPERTS] = acc;
+    ioff[EXPERTS] = ia;
   }
   barrier(CLK_LOCAL_MEM_FENCE);
   const uint ts = toff[EXPERTS];                 // the shared expert's first tile
@@ -130,6 +142,32 @@ __kernel void pf_moe_scan(__global uint* restrict cnt, __global uint* restrict h
       }
     for (uint p = tot[j]; p < nt * TM; ++p) row_tok[r0 + p] = NONE;
     hdr[H_COUNT + e] = tot[j];
+    for (uint i = 0; i < ioff[e + 1] - ioff[e]; ++i)   // item i: rows [r0 + i MI, + min(MI, the rest))
+      if (ioff[e] + i < ibound) {
+        __global uint* it = items + 4 * (ioff[e] + i);
+        it[0] = e;
+        it[1] = r0 + i * MI;
+        it[2] = min((uint)MI, nt * TM - i * MI);
+        it[3] = 0;
+      }
+  }
+  {   // the shared expert's items after the routed ones, then NONE to ibound
+    const uint is = ioff[EXPERTS], ni = (st * TM + MI - 1) / MI;
+    for (uint i = l; i < ni; i += LANES)
+      if (is + i < ibound) {
+        __global uint* it = items + 4 * (is + i);
+        it[0] = SHARED;
+        it[1] = rs + i * MI;
+        it[2] = min((uint)MI, st * TM - i * MI);
+        it[3] = 0;
+      }
+    for (uint i = is + ni + l; i < ibound; i += LANES) {
+      __global uint* it = items + 4 * i;
+      it[0] = NONE;
+      it[1] = 0;
+      it[2] = 0;
+      it[3] = 0;
+    }
   }
   for (uint i = l; i < st; i += LANES)
     if (ts + i < tmax) {

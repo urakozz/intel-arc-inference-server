@@ -589,6 +589,82 @@ int main() {
     sort_only(rt, 1, "C = 1");
   }
   std::puts("  2. pf_moe_sort: header, padded tile table, pair_row, rows exactly the host walk's");
+  // 2b. plan 2026-11-12 Task 2: pf_moe_sort_mw (hist + scan + scatter) - every buffer exactly the host walk's (so
+  // pf_moe_sort's), and its work items the host's, on the device routes, the crafted ones, C = 1 / 37, and random routes past the old KC (4096,
+  // 16384), in its own buffers
+  {
+    l0::Module mw(d.ctx, kernels::path(kernels::pf_moe_sort_mw_variant(256, 8)));
+    l0::Kernel hist(mw, "pf_moe_hist"), scan(mw, "pf_moe_scan"), scat(mw, "pf_moe_scatter");
+    hist.group_size(256);
+    scan.group_size(256);
+    scat.group_size(256);
+    constexpr uint32_t kCx = 16384;
+    const uint32_t Tx = pf_moe_ref::tmax(kS, kCx);
+    l0::Mem rt_d = d.zeros(size_t(kCx) * 32 * 4), hdr_d = d.zeros(size_t(kernels::pf_moe::hdr_words(256)) * 4),
+            tl_d = d.zeros(size_t(Tx) * 8), rtk_d = d.zeros(size_t(Tx) * kTm * 4),
+            pr_d = d.zeros(size_t(kCx) * 8 * 4), cnt_d = d.zeros(size_t(kCx / 64) * 256 * 4),
+            it_d = d.zeros(size_t(pf_moe_ref::items_bound(kS, kCx, kernels::pf_moe::kItemM)) * 16);
+    auto mw_sort = [&](const std::vector<uint32_t>& route, uint32_t Cc, const char* what) {
+      d.imm.copy(rt_d.ptr(), route.data(), size_t(Cc) * 32 * 4);
+      Run r;
+      r.C = Cc;
+      r.tmax = pf_moe_ref::tmax(kS, Cc);
+      const uint32_t nb = (Cc + 63) / 64;
+      hist.arg_ptr(0, rt_d.ptr());
+      hist.arg_ptr(1, cnt_d.ptr());
+      hist.arg(2, Cc);
+      d.run(hist, nb);
+      scan.arg_ptr(0, cnt_d.ptr());
+      scan.arg_ptr(1, hdr_d.ptr());
+      scan.arg_ptr(2, tl_d.ptr());
+      scan.arg_ptr(3, rtk_d.ptr());
+      scan.arg_ptr(4, it_d.ptr());
+      scan.arg(5, Cc);
+      scan.arg(6, r.tmax);
+      const uint32_t ib = pf_moe_ref::items_bound(kS, Cc, kernels::pf_moe::kItemM);
+      scan.arg(7, ib);
+      d.run(scan, 1);
+      scat.arg_ptr(0, rt_d.ptr());
+      scat.arg_ptr(1, cnt_d.ptr());
+      scat.arg_ptr(2, rtk_d.ptr());
+      scat.arg_ptr(3, pr_d.ptr());
+      scat.arg(4, Cc);
+      d.run(scat, nb);
+      r.hdr = d.read<uint32_t>(hdr_d, kernels::pf_moe::hdr_words(256));
+      r.tiles = d.read<uint32_t>(tl_d, size_t(r.tmax) * 2);
+      r.row_tok = d.read<uint32_t>(rtk_d, size_t(r.tmax) * kTm);
+      r.pair_row = d.read<uint32_t>(pr_d, size_t(Cc) * 8);
+      check_sort(route, r);
+      CHECK(d.read<uint32_t>(it_d, size_t(ib) * 4) ==
+            pf_moe_ref::items(pf_moe_ref::sort(route.data(), Cc, kS), kS, Cc, kernels::pf_moe::kItemM));
+      std::printf("     mw sort %-22s C %5u: %4u tiles of %4u - exact\n", what, Cc, r.hdr[kernels::pf_moe::kHdrTiles],
+                  r.tmax);
+    };
+    mw_sort(a.route, C, "the device routes");
+    std::vector<uint32_t> rt(size_t(C) * 32, 0);
+    for (uint32_t t = 0; t < C; ++t)
+      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = 7 - s;
+    mw_sort(rt, C, "all to experts 0..7");
+    uint32_t single = 8;
+    for (uint32_t t = 0; t < C; ++t) {
+      for (uint32_t s = 0; s < 8; ++s) rt[size_t(t) * 32 + s] = s;
+      if (single < 256) rt[size_t(t) * 32] = single++;
+    }
+    mw_sort(rt, C, "one-row experts");
+    mw_sort(rt, 1, "C = 1");
+    mw_sort(a.route, 37, "the device routes");
+    for (uint32_t Cc : {4096u, kCx}) {
+      std::vector<uint32_t> big(size_t(Cc) * 32, 0);
+      std::mt19937 rng(Cc);
+      std::vector<uint32_t> ids(256);
+      for (uint32_t t = 0; t < Cc; ++t) {
+        std::iota(ids.begin(), ids.end(), 0u);
+        std::shuffle(ids.begin(), ids.end(), rng);
+        for (uint32_t s = 0; s < 8; ++s) big[size_t(t) * 32 + s] = ids[s];
+      }
+      mw_sort(big, Cc, "random routes");
+    }
+  }
   // 3. the gathers of the device's own inputs
   {
     // The walk reads the WHOLE buffers (tmax x TM rows); the gathers write rows

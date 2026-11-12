@@ -48,6 +48,12 @@
 #endif
 #define NFIRST (OPT & 1)
 #define SLMIO ((OPT >> 1) & 1)
+// OPT bit 4, DIAGNOSTIC: no DPAS (one add keeps the operands live) - prices the loads and the conversion alone.
+#if OPT & 4
+#define BF16_MAD(a, b, c) ((c) + (float8)((float)((int)(a).s0 + (b).s0)))
+#else
+#define BF16_MAD(a, b, c) intel_sub_group_bf16_bf16_matrix_mad_k16((a), (b), (c))
+#endif
 #if SLMIO
 #define SLAB_WRITE(p, v) intel_sub_group_block_write8((__local uint*)(p), (v));
 #define SLAB_READ(p) intel_sub_group_block_read8((__local const uint*)(p))
@@ -112,6 +118,36 @@ inline uint q4_pair(uint w, int p, float scale) {
   const int hi = ((int)(u << (24 - 8 * p))) >> 28;
   return ((uint)intel_convert_bfloat16_as_ushort((float)hi * scale) << 16) |
          (uint)intel_convert_bfloat16_as_ushort((float)lo * scale);
+#elif CVT == 3
+  // Inline vISA: the signed nibble pair (q - 8: bfe on the xored word, sign-extended) into one register pair
+  // interleaved lo / hi, int -> f32, then ONE mixed-mode multiply by the scale with a bf16 destination - the
+  // hardware rounds the exact product (q - 8) x scale (a 15-bit significand) once, to nearest even: the same bf16
+  // as rne_bf16((float)(q - 8) * scale), written straight into the VNNI pair (lo half = even k).
+  const uint u = w ^ 0x88888888u;
+  uint r;
+#define Q4V(LO, HI)                                                                     \
+  __asm__("{\n"                                                                         \
+          ".decl PR_BF v_type=G type=BF num_elts=32 alias=<%0,0>\n"                     \
+          ".decl PU_D v_type=G type=D num_elts=16 alias=<%1,0>\n"                       \
+          ".decl PS_F v_type=G type=F num_elts=16 alias=<%2,0>\n"                       \
+          ".decl PT_D v_type=G type=D num_elts=32 align=GRF\n"                          \
+          ".decl PT_F v_type=G type=F num_elts=32 alias=<PT_D,0>\n"                     \
+          "bfe (M1, 16) PT_D(0,0)<2> 0x4:d " #LO ":d PU_D(0,0)<1;1,0>\n"                \
+          "bfe (M1, 16) PT_D(0,1)<2> 0x4:d " #HI ":d PU_D(0,0)<1;1,0>\n"                \
+          "mov (M1, 32) PT_F(0,0)<1> PT_D(0,0)<1;1,0>\n"                                \
+          "mul (M1, 32) PR_BF(0,0)<1> PT_F(0,0)<1;1,0> PS_F(0,0)<1;2,0>\n"              \
+          "}\n"                                                                         \
+          : "=rw"(r)                                                                    \
+          : "rw"(u), "rw"(scale))
+  if (p == 0) Q4V(0, 4);
+  else if (p == 1) Q4V(8, 12);
+  else if (p == 2) Q4V(16, 20);
+  else Q4V(24, 28);
+#undef Q4V
+  return r;
+#elif CVT == 9
+  (void)scale;   // DIAGNOSTIC: no conversion (the words as B bits) - prices the conversion; not a B value
+  return w ^ (0x01010101u * (uint)p);
 #else
   const float c = -24.0f * scale;
   const uint blo = 8 * p <= 19 ? (w << (19 - 8 * p)) : (w >> (8 * p - 19));
@@ -196,8 +232,8 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
       ushort afrag[NA / 4][64];
 #pragma unroll
       for (int r = 0; r < NA / 4; ++r)
-        intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + k0), a_w - (int)(2u * k0), a_h, a_p,
-                                                   (int2)(0, 32 * r), afrag[r]);
+        intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
+                                                   a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
 #pragma unroll
       for (int ks = 0; ks < 2; ++ks) {
         short8 af[NA];
@@ -207,7 +243,7 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
         for (int b = 0; b < NB; ++b) {
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
 #pragma unroll
-          for (int a = 0; a < NA; ++a) acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
+          for (int a = 0; a < NA; ++a) acc[a][b] = BF16_MAD(af[a], bv, acc[a][b]);
         }
       }
     }
@@ -231,9 +267,10 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
     const uint c = s + NSG * (uint)i;                                                 \
     if (c < NCH) {                                                                    \
       __global const uint* tl = q4_tile(W, e, nwg + 16u * (c / 4u), (gg));            \
-      cw[i][0] = tl[(2u * (c % 4u)) * 16u + lane];                                    \
-      cw[i][1] = tl[(2u * (c % 4u) + 1u) * 16u + lane];                               \
-      cs[i] = vload_half(lane, (__global const half*)(tl + 128));                      \
+      const uint2 w2 = intel_sub_group_block_read2(tl + 32u * (c % 4u));             \
+      cw[i][0] = w2.s0;                                                               \
+      cw[i][1] = w2.s1;                                                               \
+      cs[i] = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tl + 128))); \
     }                                                                                 \
   }
 #define CONVERT_CHUNKS(buf)                                                          \
@@ -257,8 +294,8 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
         ushort afrag[NA / 4][64];
 #pragma unroll
         for (int r = 0; r < NA / 4; ++r)
-          intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + k0), a_w - (int)(2u * k0), a_h, a_p,
-                                                     (int2)(0, 32 * r), afrag[r]);
+          intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
+                                                     a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
 #pragma unroll
         for (int ks = 0; ks < 2; ++ks) {
           short8 af[NA];
@@ -268,7 +305,7 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
           for (int b = 0; b < NB; ++b) {
             const int8 bv = as_int8(SLAB_READ(bs + ((sn * NB + (uint)b) * 4u + 2u * (uint)h + (uint)ks) * 128u));
 #pragma unroll
-            for (int a = 0; a < NA; ++a) acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
+            for (int a = 0; a < NA; ++a) acc[a][b] = BF16_MAD(af[a], bv, acc[a][b]);
           }
         }
       }
@@ -283,7 +320,9 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
 
 #if EPI == 1
   __global ushort* restrict X = (__global ushort*)out + (size_t)mb * (N / 2);
-  const int x_w = N, x_h = R, x_p = N;
+  // The surface ends at the item's last row: a 64-row sub-group whose second half is past the item would
+  // otherwise write the next item's rows (the hardware drops writes outside the surface).
+  const int x_w = N, x_h = min((int)R, (int)(rows - R * sm)), x_p = N;
 #define PF_SILU_ROW(r)                                             \
   do {                                                             \
     const ushort g_b = rne_bf16(gv.s##r), u_b = rne_bf16(uv.s##r); \
@@ -304,7 +343,9 @@ __kernel void pmp_gemm(__global const uint* restrict items, __global const ushor
 #undef PF_SILU_ROW
 #else
   __global ushort* restrict Y = (__global ushort*)out + (size_t)mb * N;
-  const int y_w = N * 2, y_h = R, y_p = N * 2;
+  // The surface ends at the item's last row: a 64-row sub-group whose second half is past the item would
+  // otherwise write the next item's rows (the hardware drops writes outside the surface).
+  const int y_w = N * 2, y_h = min((int)R, (int)(rows - R * sm)), y_p = N * 2;
 #pragma unroll
   for (int a = 0; a < NA; ++a)
 #pragma unroll

@@ -1314,7 +1314,7 @@ if(B70_Q4EXP)
                    DEFINES K=640 N=2560 TM=32 OPTIONS -cl-intel-256-GRF-per-thread)
   # plan 2026-11-12 Task 2: the multi-work-group sort at this family's 512 experts, top 10 (bound in Task 7)
   add_ocloc_kernel(pf_moe_sort_mw_E512_T10 SOURCE ${Q4_PF_REUSE}/pf_moe_sort_mw.cl
-                   DEFINES EXPERTS=512 TOP_K=10 TM=32 TB=64)
+                   DEFINES EXPERTS=512 TOP_K=10 TM=32 TB=64 MI=64)
   # the PLE block over a chunk
   add_ocloc_kernel(q4_pf_ple_C2048 SOURCE ${Q4_CL}/q4_pf_ple.cl DEFINES ${CTRL_DEFINES} PF_C=2048)
 endif()

@@ -38,8 +38,11 @@ void moe_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::Mo
                uint32_t layer, uint32_t C, PrefillBackend backend, Int8State* q);
 
 // What one moe_chunk appends (a function of the shape and the backend, never of C):
-// Ornith 10 on l0-int8, 11 on l0.
+// Ornith 12 on l0-int8, 13 on l0 (B70_PF_MOE=old: 10 / 11).
 size_t moe_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
+
+// Plan 2026-11-12: B70_PF_MOE=old (env; tests and probes only) puts the walk back on today's kernels. Read once.
+bool moe_old_walk();
 
 // Engine::prepare_prefill on l0-int8: every layer's expert gate||up array's rotated column
 // scales (Int8State::scales_layout1, cached; one pf_colmax_rot and a host finish each).

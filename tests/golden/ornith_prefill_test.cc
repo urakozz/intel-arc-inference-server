@@ -238,6 +238,12 @@ int main(int argc, char** argv) {
     CHECK(std::fwrite("B70ROUTE", 1, 8, f) == 8 && std::fwrite(hdr, 4, 4, f) == 4 &&
           std::fwrite(rows.data(), 4, rows.size(), f) == rows.size());
     std::fclose(f);
+    // and the prefill head's logits row, <file>.logits (f32 [vocab]): an A/B of two walks compares both bitwise
+    std::vector<float> lg(Qwen35::kVocab);
+    imm.copy(lg.data(), eng.prefill_scratch()->logits.ptr(), lg.size() * 4);
+    std::FILE* fl = std::fopen((dump_routes + ".logits").c_str(), "wb");
+    CHECK(fl != nullptr && std::fwrite(lg.data(), 4, lg.size(), fl) == lg.size());
+    std::fclose(fl);
     std::printf("dump-routes: %u layers x %u tokens (chunks of %u, %s) -> %s\n", d.layers, n2, C,
                 runtime::prefill_backend_name(backend), dump_routes.c_str());
     return 0;
