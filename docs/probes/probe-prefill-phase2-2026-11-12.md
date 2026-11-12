@@ -118,3 +118,25 @@ the fp32 qkv||z read is the floor, ~6 GB at 4k, and a bf16 qkv||z was measured a
 - Reading: the GDN error is no longer the dominant term; a determined-row flip follows from deep-layer routing
   (MoE near-ties) moving with any perturbation, in either direction. That is a judgement for the operator, not a
   bug to fix here (the probe's per-stage numbers, tails included at C = 42 / 2026, show no defect).
+
+## 5. Task 6: the route GEMVs (2026-11-12)
+
+`probe_route` (card 0, M = 2048, K = 2048, interleaved, median of 9): `pf_route.cl`'s `pf_gemv_rows` keeps
+`pf_ab_proj`'s per-output arithmetic (16 K slices, k ascending inside a slice, the same `a += w * x`, the same
+pairwise tree) and changes only the tiling. Every arm bitwise the control (0 differing words).
+
+| shape | control ms | MT16 TC2 | MT32 TC1 | MT32 TC2 | MT16 TC4 | MT64 TC1 |
+|---|---:|---:|---:|---:|---:|---:|
+| router N 272 | 0.359 | **0.248 (0.69x)** | 0.375 | 0.382 | 0.354 | 0.416 |
+| a\|\|b N 128 | 0.175 | **0.113 (0.65x)** | 0.172 | 0.144 | 0.144 | 0.192 |
+
+MT16 TC2 is bound for both (Ornith; `B70_PF_PHASE2=old` reverts). Bitwise end to end (the verify logs below). The
+gate (route + a||b <= 12 ms at 4k, today ~47) is missed: ~33 ms. D3's DPAS router (`B70_PF_ROUTE=dpas`, opt-in):
+the first build measured 29.2 ms for router + moe_route against 29.3 bitwise - no gain as built - and it missed the f32 judge on l0-int8 (prefill_gate_ornith_l0-int8: cjk step 24; _c16: prose step 0); l0 passed. Not taken; the kernel was removed (reverted commit).
+
+## 6. Landing check (rebased on main 90f1c2ae: phase 1 Tasks 1-5)
+
+Ornith set 12 / 12 PASS; host / kernel / Flash-Next tests 15 / 15 PASS; end to end against `B70_PF_PHASE2=old`
+(prefill_gate_ornith l0 / l0-int8 / l0_c16, ornith_prefill_l0, qwen4exp_prefill_synth_ours, the Flash-Next golden
+prefill): identical but for timing, memory and launch-count lines. Speed (card 0, interleaved, unprofiled, busy box,
+on phase 1's 66b7b234): **pp4096 l0 6,553 -> 7,035 t/s (+7.4 %, -42 ms)**.

@@ -1,8 +1,8 @@
 # MoE-model prefill, phase 2 - the GDN prompt pass, the small kernels, the dense linears (Ornith, then Flash-Next)
 
 **Status (2026-11-12): IN PROGRESS** - Task 1 done; Tasks 2 and 5 done (bitwise, +2.3 % pp4096 l0); Task 3 STOPPED
-(its gate failed in both forms, opt-in `B70_PF_GDN_INTRA=hl`, waits for the operator); Task 6 waits for phase 1's Task 3
-on main. Record: docs/probes/probe-prefill-phase2-2026-11-12.md. Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
+(its gate failed in both forms, opt-in `B70_PF_GDN_INTRA=hl`, waits for the operator); Task 6 done bitwise
+(+7.4 % with Tasks 2 and 5 on phase 1's walk); D3 tried and not taken. Record: docs/probes/probe-prefill-phase2-2026-11-12.md. Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
 MoE path's sort, fused int4 grouped GEMM, l0-int8 experts as W4A8 and the 4096 chunk. This plan is everything phase 1
 leaves out. Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0); the scout's code read of vLLM's
 XPU kernels (vllm-xpu-kernels @1f31a8e: `csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp`,
@@ -239,6 +239,9 @@ them), `tests/prefill/pf_gemv_test.cc`.
 - [ ] **Step 2 (box, card 0):** `pf_moe_test`, `pf_gemv_test`, `ornith_prefill_*` (prefill-vs-decode routes), the
   extended G0 compare.
   - **Gates:** bitwise; route + a||b <= 12 ms at 4k (today ~47).
+  - **Result (2026-11-12):** bitwise tiling (pf_route.cl, 16 rows x 2 column tiles a work-group) bound for the router
+    and a||b: 0.69x / 0.65x, end to end bitwise; ~47 -> ~33 ms, the 12 ms bar missed. D3 (DPAS router) built and
+    tried: no faster as built and it missed the f32 judge on l0-int8 - not taken, removed.
 
 ### Task 7: the dense linears (Mac, then box) - only if Task 1's dense arm passed its gate - JUDGED
 
