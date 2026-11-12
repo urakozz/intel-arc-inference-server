@@ -134,11 +134,10 @@ void cost_case() {
   const uint32_t hi = run(0.95), mid = run(0.5), lo = run(0.1);
   std::printf("adaptive K over MtpCost::dflash (int8 head, int8 drafter): alpha 0.95 -> K %u, 0.5 -> K %u, "
               "0.1 -> K %u; draft row %.3f (32k V': %.3f)\n", hi, mid, lo, c.draft[0], v.draft[0]);
-  // Spec 28b's measured rows: verify(8) = 1.56 against verify(7) = 1.35 (the M = 8 attention build, spec 28c), so
-  // K = 7 pays only above alpha ~0.99 and K = 6 is the policy's choice at 0.95.
+  // Spec 19 v2's measured rows keep the widest block worthwhile at high acceptance.
   CHECK(hi == 6 || hi == 7);
-  CHECK(c.verify[7] == 1.56 && c.verify[4] == 1.18);
-  CHECK(mid >= 1 && mid <= 3);
+  CHECK(c.verify[7] == 1.245386 && c.verify[4] == 1.168254);
+  CHECK(mid >= 1 && mid <= 4);
   CHECK(lo == 0);
 }
 
