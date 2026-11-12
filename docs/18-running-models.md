@@ -281,7 +281,9 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 - Two cards serve two requests at once as `replica` (`--max-num-seqs 2`, or `--parallel replica`): each card
   runs its own engine with the full context, MTP and the prefix cache, and a prompt cached by one card is a
   prefix cache hit on the other. Several requests on one card (sequence slots) are built for Qwen3.8 only, so
-  `--max-num-seqs` above 2, or 2 on one card, is refused. `--parallel tp` is Qwen3.8's.
+  `--max-num-seqs` above 2, or 2 on one card, is refused. `--parallel tp` is Qwen3.8's. Each request is
+  bitwise what it is alone on its card. Rough speed (2026-11-12, golden prompts, 128-id replies, not a record):
+  two at a time 238 t/s in total with MTP (225 without) against 153 (127) one at a time on one card.
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
 - Prefill runs on `l0` (the default) and `l0-int8` (opt-in). On this MoE model `l0-int8` loses routing
