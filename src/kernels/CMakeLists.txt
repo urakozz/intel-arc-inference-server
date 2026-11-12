@@ -1267,6 +1267,15 @@ if(B70_Q4EXP)
   add_ocloc_kernel(pf_gdn_front SOURCE ${Q4_PF_REUSE}/pf_gdn_front.cl)
   add_ocloc_kernel(pf_route_ab_D2560 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=128 MT=16 TC=2)
   add_ocloc_kernel(pf_route_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=528 MT=16 TC=2)
+  # MoE-model prefill phase 3 Task 8: the router and a||b by pf_gemm_T0, as Ornith's (prefill/CMakeLists.txt) - the
+  # weights re-laid as zero-padded [K][P] slabs each chunk, and the two consumers at the GEMM's row pitch P (decode's
+  # q4_route and Qwen3.8's pf_gdn_conv keep theirs).
+  add_ocloc_kernel(pf_route_slab_K2560_N528_P768 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=528 ROUTE_SLAB=768)
+  add_ocloc_kernel(pf_route_slab_K2560_N128_P256 SOURCE ${Q4_PF_REUSE}/pf_route.cl DEFINES K=2560 N=128 ROUTE_SLAB=256)
+  add_ocloc_kernel(q4_route_M1_E512_T10_N528_L256_P768 SOURCE ${Q4_CL}/q4_moe.cl
+                   DEFINES M=1 ROUTE_E=512 ROUTE_K=10 ROUTE_WG=256 ROUTE_LN=768)
+  add_ocloc_kernel(pf_gdn_conv_AB256 SOURCE ${Q4_PF_REUSE}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=40960 DTBIAS_OFF=41008 AB_STRIDE=256)
   add_ocloc_kernel(pf_embed_gather_D2560 SOURCE ${Q4_PF_REUSE}/pf_embed.cl DEFINES HIDDEN=2560 VOCAB=248320)
   add_ocloc_kernel(pf_ab_proj_D2560 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl DEFINES K=2560 N=128 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_router_K2560_N528 SOURCE ${Q4_PF_REUSE}/pf_gemv_bf16.cl

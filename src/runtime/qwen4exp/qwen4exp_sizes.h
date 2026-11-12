@@ -244,12 +244,12 @@ size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 // excluded): they depend on the chunk's dense / sparse rows (pf_dense_rows):
 //   device 0     pf_embed_gather                                                                              1
 //   a gated residual  combine_norm, the HC down slab + pf_gemm, up_mix                                         4
-//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b, gdn_chunk_q4's 10, out_proj 3 slabs x 2 + the MoE's 27      84
+//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b (slab + GEMM), gdn_chunk_q4's 10, out_proj 3 slabs x 2 + the MoE's 27      84
 //   a QSA layer  2 HC + q||gate||k||v 13 x 2, the indexer 1 x 2, pf_attn_prep_q16, q4_qsa_prep, q4_qsa_ring,
 //                pf_attn_gate, o_proj 3 x 2 + the MoE's 27                                                    73
 //                + q4_qsa_score / _select when the chunk has sparse rows (not injected)                       + 2
 //                + pf_flash_attn when it has dense rows, + q4_pf_sparse_attn when it has sparse ones        + 1 / + 1
-//   the MoE      router GEMV, q4_route, sort, gather, gate||up 7 batches x 2, down 4 x 2, combine            27
+//   the MoE      router (slab + GEMM), q4_route, sort, gather, gate||up 7 batches x 2, down 4 x 2, combine            27
 //   the PLE layer + combine_norm _Y_NN (not when it is device 1's first layer: H landed materialised), the gather,
 //                key||value 13 slabs x 2, q4_pf_ple_gate / _conv / _ring                                    31 (30)
 //   two cards    device 0 ends with combine_norm _Y_NN (the materialised H crosses)                          + 1

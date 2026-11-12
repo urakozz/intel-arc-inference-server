@@ -145,6 +145,18 @@ class Walk {
       n0 += ns;
     }
   }
+  // MoE-model prefill phase 3 Task 8: a bf16 tiled [N][K] weight (the router, a||b) by pf_gemm_T0 - pf_route_slab
+  // re-lays it into the slab buffer, then rows_ rows of x at pitch pf_route_slab_pitch(N) into out. Judged, not
+  // bitwise: the sums are DPAS's, not the GEMV's order (Ornith's Task 2 passed its f32 judge the same way).
+  void tiled_gemm(const loader::DeviceWeight& w, float* out) {
+    const uint32_t N = w.shape.N, K = w.shape.K;
+    require(w.kind == model::WeightKind::Bf16 && s_.slab.size() >= size_t(K) * kernels::pf_route_slab_pitch(N) * 2,
+            "a tiled GEMM's weight is not bf16 or does not fit the slab buffer");
+    prefill::route_slab(cx_, kc_, w.mem.ptr(), N, K, s_.slab.as<uint16_t>());
+    ++n_;
+    prefill::tiled_gemm(cx_, kc_, s_.slab.as<uint16_t>(), N, K, s_.x.as<uint16_t>(), rows_, out);
+    ++n_;
+  }
   void linear(const loader::DeviceWeight& w, const void* x, void* out, uint32_t ld) {
     const bool i4 = w.kind == model::WeightKind::Int4;
     require(i4 ? (w.shape.layout == 0 && bool(w.scales)) : w.kind == model::WeightKind::Bf16,
@@ -238,16 +250,13 @@ class Walk {
                 L.gdn_ab->shape.K == d_.hidden,
             "a||b is not bf16 {2560, 128} (pf_ab_proj's tiles)");
     linear(*L.gdn_qkvz, s_.x.ptr(), s_.partials.ptr(), pf_ld(d_.qkvz_n()));
-    // pf_gemv_rows(w, x, out, m_count) - phase 2 Task 8: pf_ab_proj's arithmetic at 16 rows x 2 column tiles a
-    // work-group (pf_route.cl), bitwise it; grid (ceil(128 / 16 / 2), ceil(C / 16))
-    launch(kc_(kq::pf_route_ab_variant(), "pf_gemv_rows"),
-           (model::Qwen4ExpDesc::kAbPaddedN / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-           (C_ + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-           {PtrArg(L.gdn_ab->mem.ptr()), PtrArg(s_.x.ptr()), PtrArg(s_.ab.ptr()), arg_val(C_)});
+    // phase 3 Task 8: a||b by the dense GEMM, rows at pitch kPfAbPitch (256) read by pf_gdn_gate's _AB256 build
+    tiled_gemm(*L.gdn_ab, s_.ab.as<float>());
     const GdnScratchSizes g = gdn_scratch_sizes(kPfC);
     GdnChunkBuffers gb;
     gb.qkvz = s_.partials.as<float>();
     gb.ab = s_.ab.as<float>();
+    gb.ab_pitch = kq::kPfAbPitch;
     gb.state = static_cast<float*>(b_.gdn_state_layer(l));
     gb.ring = static_cast<uint16_t*>(b_.conv_ring_layer(l));
     gb.small = L.gdn_small->ptr();
@@ -360,14 +369,10 @@ class Walk {
     require(L.router->shape.N == d_.router_n() && L.router->shape.K == d_.hidden && L.router->kind == model::WeightKind::Bf16,
             "the router is not bf16 [528][2560]");
     void* rt = at(s_.routes, pf_route_at(l));
-    // pf_gemv_rows(w, x, out, m_count) at {2560, 528} - phase 2 Task 8: decode's {16, 16} rows, bitwise, at 16 rows
-    // x 2 column tiles a work-group (pf_route.cl); grid (ceil(528 / 16 / 2), ceil(C / 16))
-    launch(kc_(kq::pf_route_router_variant(), "pf_gemv_rows"),
-           (d_.router_n() / 16 + kernels::kPfRouteTc - 1) / kernels::kPfRouteTc,
-           (C_ + kernels::kPfRouteMt - 1) / kernels::kPfRouteMt, 1,
-           {PtrArg(L.router->mem.ptr()), PtrArg(s_.x.ptr()), PtrArg(s_.logits.ptr()), arg_val(C_)});
-    // q4_route(logits, route) - decode's binary, row m of [C][528]
-    launch(kc_(kq::route_variant(1), "q4_route"), 1, C_, 1, {PtrArg(s_.logits.ptr()), PtrArg(rt)});
+    // phase 3 Task 8: the router by the dense GEMM, rows at pitch kPfRouterPitch (768); q4_route's _P768 build
+    // (decode's arithmetic, ROUTE_LN = 768) reads row m
+    tiled_gemm(*L.router, s_.logits.as<float>());
+    launch(kc_(kq::pf_route_gemm_variant(), "q4_route"), 1, C_, 1, {PtrArg(s_.logits.ptr()), PtrArg(rt)});
     prefill::profile_wait(cx_, Phase::kMoeRoute);
     const uint32_t tmax = pf_tiles(d_, C_);
     const std::string v = kq::pf_moe_variant();
