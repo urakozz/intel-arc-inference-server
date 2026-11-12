@@ -120,10 +120,10 @@ the record (Task 9).
   distance 3 (the w4a16 policy the scout read), bitwise checked against the control where the arithmetic allows.
 - Modify `tools/box_validate/stages.sh`: row 84, stages `r84.trace`, `r84.dump`, `r84.probe` (opt-in, timed).
 
-- [ ] **Step 1 (Mac):** the profile level, the dump mode, the probes, row 84; `tools/box_validate.sh --dry-run --only
+- [x] **Step 1 (Mac):** the profile level, the dump mode, the probes, row 84; `tools/box_validate.sh --dry-run --only
   r84` prints the commands; host tests green. Commit `probes: the per-launch prefill trace, the GDN intra-chunk DPAS
   arms on real inputs, the small kernels (phase 2 Task 1)`.
-- [ ] **Step 2 (box, card 0):** `r84.trace` (4k, l0 and l0-int8), `r84.dump`, `r84.probe`. Record
+- [x] **Step 2 (box, card 0):** `r84.trace` (4k, l0 and l0-int8), `r84.dump`, `r84.probe`. Record
   `docs/probes/probe-prefill-phase2-2026-11-xx.md`: the per-launch table (what the 114 ms is), each arm's error and ms.
   - **Gate (pre-registered, written into the record before the run):**
     - D-arms: every stage's max relative error and the state / o cosine against fp64 within 2x the control's own (the

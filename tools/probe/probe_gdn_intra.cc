@@ -343,8 +343,8 @@ int main(int argc, char** argv) {
 
       const Ref rf = reference(sh, xb, g, beta);
       // T on its live lower triangle (the control leaves rows >= L zero, D-a the identity there).
-      auto mask_live = [&](std::vector<double>& ref, const std::vector<float>& x, bool lower_incl) {
-        std::vector<double> v(ref.size(), 0.0);
+      auto mask_live = [&](const std::vector<float>& x, bool lower_incl) {
+        std::vector<double> v(x.size(), 0.0);
         for (uint32_t t = 0; t < nch; ++t) {
           const uint32_t L = std::min(kCt, C - t * kCt);
           for (uint32_t h = 0; h < H; ++h)
@@ -354,7 +354,6 @@ int main(int argc, char** argv) {
                 v[p] = x[p];
               }
         }
-        (void)ref;
         return v;
       };
       std::printf("\ndump %d: C %u, heads %u / %u\n", call, C, sh.hk, sh.hv);
@@ -373,9 +372,8 @@ int main(int argc, char** argv) {
                     ok ? "true" : "false");
       };
       {
-        std::vector<double> dummy;
-        const auto cA = mask_live(dummy, oc.A, false), dA = mask_live(dummy, od.A, false);
-        const auto cT = mask_live(dummy, oc.T, true), dT = mask_live(dummy, od.T, true);
+        const auto cA = mask_live(oc.A, false), dA = mask_live(od.A, false);
+        const auto cT = mask_live(oc.T, true), dT = mask_live(od.T, true);
         const size_t nt = rf.A.size();
         row("A", err(nt, rf.A, [&](size_t i) { return cA[i]; }), err(nt, rf.A, [&](size_t i) { return dA[i]; }), false);
         row("T", err(nt, rf.T, [&](size_t i) { return cT[i]; }), err(nt, rf.T, [&](size_t i) { return dT[i]; }), false);
