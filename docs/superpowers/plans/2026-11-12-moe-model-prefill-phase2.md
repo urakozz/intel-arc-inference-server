@@ -261,6 +261,9 @@ The winning dense arm made production for Ornith's (and Flash-Next's) linear sha
 
 - [ ] **Step 1 (Mac):** kernel, bindings, `pf_gemm_test` / `linear_i8_test` arms. Commit.
 - [ ] **Step 2 (box, card 0):** Task 3's judged gates; dense row >= 10 % below Task 6's at 4k on the backend it targets.
+- **Result (2026-11-12): not run.** Task 1's dense arm was not built (the operator asked for no probes beyond a gate's
+  needs). The slab walk's GEMMs run at 75 % of the bf16 peak on l0 and 57 % of the int8 peak on l0-int8 (the profile),
+  so a >= 10 % arm is unlikely on l0. The int8 side's headroom (57 %) is the one place a probe could still pay.
 
 ### Task 8: Flash-Next on the phase 2 kernels (Mac, then box)
 
