@@ -161,6 +161,18 @@ every merge since the last run together. The command for that is `tools/box_vali
 (`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
 reuse every unchanged PASS.
 
+**The quick run, for every change.** `tools/box_validate.sh --quick` takes about an hour instead of many: G0
+as in the full run, except that the suite runs only the tests that load no model (no `checkpoint` label), then a
+fixed sample of each model's kernel, decode, prefill and serving stages - a few with a smaller input (the 32k MTP
+test, not 128k; one server round over 2 golden and 3 tool-call prompts). Every other stage is recorded SKIP
+"full only": the speed rows, the CPU reference builds, the long-context and many-prompt runs, Bolt and LiLiCorr.
+The gates and bars are the full run's; only the input is smaller. `--list` shows each stage's quick form (the
+QUICK column), `--dry-run --quick` what it runs; the block at the end of `tools/box_validate/stages.sh` is the
+list. A quick run keeps its own state (`<sha>-quick-vs-<baseline>`), so its PASSes never stand for a full run's
+(a test's own reuse is shared: the same test with the same inputs); `--status` and `--summary` with `--quick`
+read it, and its summary is headed "(quick)". It does not tidy the box at launch. Run it from a branch's own
+tree (`REMOTE_DIR=b70/trees/<branch>`) when the validation tree is busy.
+
 **A test whose inputs did not change keeps its PASS.** Every test runs through
 `tools/test_launcher.sh`; under box_check and box_validate it runs under `strace`, which records every
 file the test - and every program it starts - opened, ran, checked or found missing, and the

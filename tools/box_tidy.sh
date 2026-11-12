@@ -8,7 +8,7 @@
 #                                    and any a running box_validate uses;
 #                                then print the trash's size (only the operator's rm frees it).
 #   tools/box_tidy.sh --dry-run  print what would move, move nothing.
-# Nothing is deleted. tools/box_validate.sh runs it (quietly) at every launch.
+# Nothing is deleted. A full tools/box_validate.sh launch runs it with --dry-run (the list only).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.."
 _box_env="$PWD/tools/box.env"

@@ -34,6 +34,10 @@
 //                 the PLE pointer table; then freed), then one device arena of --arena-gb (22): po_page_tag writes a
 //                 salted tag at every 2 MiB page, po_page_check gathers them, the host compares; a second salt
 //                 confirms. A page holding another page's tag is an alias, printed with both addresses.
+//   peer    P0.2  (always both cards) card 0 and card 1 read 1 / 10 / 64 / 256 experts and 1 GiB in place with po_read_sum
+//                 from their own VRAM, pinned host USM and the other card's VRAM over P2P (one card, then both at once);
+//                 the copy engine moving the same bytes card 1 -> card 0, card 0 -> card 1 and host -> card 0, on the
+//                 compute ordinal and the copy-only group. Arms interleaved, median of --reps. Host ranges: 2 x 1 GiB.
 //   hold    P0.1  copy's 1 GiB copy in a loop for --seconds on the named cards (offload_links.sh's LnkSta under load)
 //
 // Options: --dev 0|1|both (0), --pairs 1,2,7,26, --reps 5, --n 10000, --replay-pairs 7, --arena-gb 22, --seconds 20,
@@ -1399,6 +1403,170 @@ int alias_mode() {
   return g_fail ? 1 : 0;
 }
 
+// --- peer (plan 21v2a Task 5 Step 2) ---------------------------------------------------------------------------------
+// What a card can pull per expert-sized read from: its own VRAM, pinned host USM and the other card's VRAM over P2P -
+// by a kernel (po_read_sum, in place) and by the copy engine. Interleaved over the arms, median of --reps.
+struct PeerRead {   // one card's kernel reading `ptr`
+  Card* card;
+  const void* ptr;
+};
+struct PeerArm {
+  std::string name;
+  std::vector<PeerRead> rd;
+  size_t bytes = 0;
+  std::vector<std::unique_ptr<l0::Kernel>> ks;
+  std::vector<std::unique_ptr<l0::Mem>> outs, tss;
+  std::vector<std::unique_ptr<l0::CmdList>> lists;
+  std::vector<std::unique_ptr<l0::Queue>> qs;
+  std::vector<std::unique_ptr<l0::Fence>> fs;
+  PeerArm(std::string n, std::vector<PeerRead> r, size_t b, l0::Module& mod0, l0::Module& mod1)
+      : name(std::move(n)), rd(std::move(r)), bytes(b) {
+    for (const PeerRead& x : rd) {
+      l0::Module& m = x.card->index == 0 ? mod0 : mod1;
+      outs.push_back(std::make_unique<l0::Mem>(x.card->ctx, l0::MemKind::Device, 1 << 20));
+      tss.push_back(std::make_unique<l0::Mem>(x.card->ctx, l0::MemKind::Host, 16));
+      ks.push_back(std::make_unique<l0::Kernel>(m, "po_read_sum"));
+      ks.back()->group_size(256);
+      ks.back()->arg_ptr(0, x.ptr);
+      ks.back()->arg(1, uint64_t(bytes / 16));
+      ks.back()->arg_ptr(2, outs.back()->ptr());
+      lists.push_back(std::make_unique<l0::CmdList>(l0::CmdList::regular(x.card->ctx, x.card->ord.compute)));
+      append_ts(*lists.back(), tss.back()->as<uint64_t>());
+      lists.back()->launch(*ks.back(), x.card->ctx.eu_count() * 8 * 16 / 256 * 4);
+      append_ts(*lists.back(), tss.back()->as<uint64_t>() + 1);
+      lists.back()->close();
+      qs.push_back(std::make_unique<l0::Queue>(x.card->ctx, x.card->ord.compute));
+      fs.push_back(std::make_unique<l0::Fence>(*qs.back()));
+    }
+  }
+  // wall seconds of all readers launched together; dev_us[i] = reader i's kernel time
+  double once(std::vector<double>& dev_us) {
+    const double t0 = now_s();
+    for (size_t i = 0; i < rd.size(); ++i) qs[i]->execute(*lists[i], fs[i].get());
+    for (size_t i = 0; i < rd.size(); ++i) wait_fence(*fs[i], "peer " + name);
+    const double wall = now_s() - t0;
+    dev_us.assign(rd.size(), 0.0);
+    for (size_t i = 0; i < rd.size(); ++i) {
+      const uint64_t* t = tss[i]->as<uint64_t>();
+      const l0::TimerCalib& c = rd[i].card->calib;
+      dev_us[i] = double((t[1] & c.mask()) - (t[0] & c.mask())) / c.cycles_per_us;
+    }
+    return wall;
+  }
+};
+struct PeerCopy {   // the copy engine moving `count` pieces of `bytes` (stride apart) from src to dst
+  std::string name;
+  std::unique_ptr<l0::CmdList> list;
+  std::unique_ptr<l0::Queue> q;
+  std::unique_ptr<l0::Fence> f;
+  PeerCopy(std::string n, Card& on, uint32_t ordinal, void* dst, const void* src, size_t bytes, size_t count, size_t stride)
+      : name(std::move(n)) {
+    list = std::make_unique<l0::CmdList>(l0::CmdList::regular(on.ctx, ordinal));
+    for (size_t i = 0; i < count; ++i)
+      list->copy(static_cast<uint8_t*>(dst) + i * stride, static_cast<const uint8_t*>(src) + i * stride, bytes);
+    list->close();
+    q = std::make_unique<l0::Queue>(on.ctx, ordinal);
+    f = std::make_unique<l0::Fence>(*q);
+  }
+  double once() {
+    const double t0 = now_s();
+    q->execute(*list, f.get());
+    wait_fence(*f, "peer copy " + name);
+    return now_s() - t0;
+  }
+};
+
+int peer_mode() {
+  const Sizes s = sizes();
+  Devices dv = open_devices("both");
+  if (!dv.c0->can_access_peer(*dv.c1) || !dv.c1->can_access_peer(*dv.c0)) throw Skip("the driver refuses peer access");
+  Card& a = *dv.cards[0];
+  Card& b = *dv.cards[1];
+  const size_t gib = size_t(1) << 30;
+  l0::Mem host0(*dv.c0, l0::MemKind::Host, gib, kPage), host1(*dv.c0, l0::MemKind::Host, gib, kPage);   // 2 GiB < 4 GiB
+  l0::Mem va(a.ctx, l0::MemKind::Device, gib, kPage), vb(b.ctx, l0::MemKind::Device, gib, kPage);
+  l0::Mem va2(a.ctx, l0::MemKind::Device, gib, kPage);   // card 0's destination for copies
+  uint64_t x = 0x22A0777;
+  for (l0::Mem* h : {&host0, &host1}) {
+    uint32_t* p = h->as<uint32_t>();
+    for (size_t i = 0; i < gib / 4; ++i) p[i] = uint32_t(splitmix(x));
+  }
+  a.copy(va.ptr(), host0.ptr(), gib, "va fill");
+  b.copy(vb.ptr(), host1.ptr(), gib, "vb fill");
+  l0::Module mod0(a.ctx, kernels::path(kHelperVariant)), mod1(b.ctx, kernels::path(kHelperVariant));
+  struct Shape {
+    std::string name;
+    size_t bytes, count, stride;
+  };
+  const size_t E = s.expert;
+  const std::vector<Shape> shapes = {{"1_expert", E, 1, E},           {"10_experts_each", E, 10, size_t(64) << 20},
+                                     {"10_experts_one", 10 * E, 1, 0}, {"64_experts_one", 64 * E, 1, 0},
+                                     {"256_experts_one", 256 * E, 1, 0}, {"1gib", gib, 1, 0}};
+  for (const Shape& sh : shapes) {
+    const size_t total = sh.bytes * sh.count;   // kernel reads: the same total from one contiguous range
+    std::vector<std::unique_ptr<PeerArm>> arms;
+    arms.push_back(std::make_unique<PeerArm>("a_reads_own_vram", std::vector<PeerRead>{{&a, va.ptr()}}, total, mod0, mod1));
+    arms.push_back(std::make_unique<PeerArm>("a_reads_host", std::vector<PeerRead>{{&a, host0.ptr()}}, total, mod0, mod1));
+    arms.push_back(std::make_unique<PeerArm>("a_reads_peer_vram", std::vector<PeerRead>{{&a, vb.ptr()}}, total, mod0, mod1));
+    arms.push_back(std::make_unique<PeerArm>("b_reads_peer_vram", std::vector<PeerRead>{{&b, va.ptr()}}, total, mod0, mod1));
+    arms.push_back(std::make_unique<PeerArm>("both_read_host", std::vector<PeerRead>{{&a, host0.ptr()}, {&b, host1.ptr()}},
+                                             total, mod0, mod1));
+    arms.push_back(std::make_unique<PeerArm>("both_read_peer_vram", std::vector<PeerRead>{{&a, vb.ptr()}, {&b, va.ptr()}},
+                                             total, mod0, mod1));
+    std::vector<std::vector<double>> wall(arms.size()), dev(arms.size());
+    std::vector<double> d;
+    for (uint32_t rep = 0; rep < g_opt.reps + 3; ++rep)
+      for (size_t i = 0; i < arms.size(); ++i) {
+        const double w = arms[i]->once(d);
+        if (rep < 3) continue;   // warm-up
+        wall[i].push_back(w);
+        dev[i].push_back(*std::max_element(d.begin(), d.end()));
+      }
+    for (size_t i = 0; i < arms.size(); ++i) {
+      const Stat sw = stat(wall[i]), sd = stat(dev[i]);
+      const size_t all = total * arms[i]->rd.size();
+      std::printf("po peer arm=%s shape=%s bytes=%zu readers=%zu dev_us=%.1f range=%.1f-%.1f dev_gbps=%.3f wall_us=%.1f "
+                  "wall_gbps=%.3f\n",
+                  arms[i]->name.c_str(), sh.name.c_str(), all, arms[i]->rd.size(), sd.med, sd.lo, sd.hi,
+                  all / sd.med / 1e3, sw.med * 1e6, all / sw.med / 1e9);
+    }
+    // the copy engine: peer copy (card 1 -> card 0 and back) on each card's compute and copy-only ordinals, and host
+    // -> card 0 beside them
+    struct CopySpec {
+      const char* name;
+      Card* on;
+      bool copy_group;
+      void* dst;
+      const void* src;
+    };
+    const CopySpec specs[] = {{"copy_peer_b_to_a_on_a", &a, false, va2.ptr(), vb.ptr()},
+                              {"copy_peer_b_to_a_on_a_copyq", &a, true, va2.ptr(), vb.ptr()},
+                              {"copy_peer_b_to_a_on_b", &b, false, va2.ptr(), vb.ptr()},
+                              {"copy_peer_b_to_a_on_b_copyq", &b, true, va2.ptr(), vb.ptr()},
+                              {"copy_peer_a_to_b_on_a", &a, false, vb.ptr(), va.ptr()},
+                              {"copy_host_to_a_on_a", &a, false, va2.ptr(), host0.ptr()},
+                              {"copy_host_to_a_on_a_copyq", &a, true, va2.ptr(), host0.ptr()}};
+    std::vector<std::unique_ptr<PeerCopy>> cps;
+    for (const CopySpec& c : specs) {
+      if (c.copy_group && c.on->ord.copy < 0) continue;
+      cps.push_back(std::make_unique<PeerCopy>(c.name, *c.on, c.copy_group ? uint32_t(c.on->ord.copy) : c.on->ord.compute,
+                                               c.dst, c.src, sh.bytes, sh.count, sh.stride));
+    }
+    std::vector<std::vector<double>> cw(cps.size());
+    for (uint32_t rep = 0; rep < g_opt.reps + 3; ++rep)
+      for (size_t i = 0; i < cps.size(); ++i) {
+        const double w = cps[i]->once();
+        if (rep >= 3) cw[i].push_back(w);
+      }
+    for (size_t i = 0; i < cps.size(); ++i) {
+      const Stat st = stat(cw[i]);
+      std::printf("po peer arm=%s shape=%s bytes=%zu wall_us=%.1f range=%.1f-%.1f wall_gbps=%.3f\n", cps[i]->name.c_str(),
+                  sh.name.c_str(), total, st.med * 1e6, st.lo * 1e6, st.hi * 1e6, total / st.med / 1e9);
+    }
+  }
+  return 0;
+}
+
 std::vector<uint32_t> parse_list(const std::string& v) {
   std::vector<uint32_t> out;
   size_t i = 0;
@@ -1414,7 +1582,7 @@ std::vector<uint32_t> parse_list(const std::string& v) {
 
 int usage() {
   std::fprintf(stderr,
-               "usage: probe_offload copy|zc|replay|hostbw|pin|alias|hold [--dev 0|1|both] [--pairs 1,2,7,26] [--reps 5] "
+               "usage: probe_offload copy|zc|replay|hostbw|pin|alias|hold|peer [--dev 0|1|both] [--pairs 1,2,7,26] [--reps 5] "
                "[--n 10000] [--replay-pairs 7] [--arena-gb 22] [--seconds 20] [--max-gb G] [--timeout-s 20]\n");
   return 2;
 }
@@ -1453,6 +1621,7 @@ int main(int argc, char** argv) {
     if (g_opt.mode == "pin") return pin_mode();
     if (g_opt.mode == "alias") return alias_mode();
     if (g_opt.mode == "hold") return hold_mode();
+    if (g_opt.mode == "peer") return peer_mode();
     return usage();
   } catch (const Skip& e) {
     std::printf("po %s dev=%s SKIP %s\n", g_opt.mode.c_str(), g_opt.dev.c_str(), e.what());
