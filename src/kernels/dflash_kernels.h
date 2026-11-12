@@ -35,9 +35,9 @@ inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
          s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
          (split ? "_F8Q4R4U8C16H16K8" : "");
 }
-inline std::string attn_variant(const Shape& s = kQwen38) {
+inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb);
+         s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "");
 }
 // N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {

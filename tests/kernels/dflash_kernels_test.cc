@@ -104,9 +104,11 @@ int ulps(uint16_t a, uint16_t b) {
 
 struct Bins {
   bool split;
+  unsigned attn_heads;
   l0::Module prep, attn, topk, topk_c, sel;
-  Bins(Dev& d, bool split_k = false)
-      : split(split_k), prep(d.ctx, kernels::path(kd::prep_variant(S, split))), attn(d.ctx, kernels::path(kd::attn_variant())),
+  Bins(Dev& d, bool split_k = false, unsigned heads = 0)
+      : split(split_k), attn_heads(heads), prep(d.ctx, kernels::path(kd::prep_variant(S, split))),
+        attn(d.ctx, kernels::path(kd::attn_variant(S, heads))),
         topk(d.ctx, kernels::path(kd::topk_variant(S.vocab, S.used, false))),
         topk_c(d.ctx, kernels::path(kd::topk_variant(32768, 32768, true))),
         sel(d.ctx, kernels::path(kd::select_variant(true, S, split))) {}
@@ -385,7 +387,7 @@ int check_attn(Dev& d, Bins& b) {
     k2.arg_ptr(5, bvb.ptr());
     k2.arg(6, scale);
     k2.arg_ptr(7, out.ptr());
-    d.run(k1, NKV, tgt);
+    d.run(k1, b.attn_heads ? NH / b.attn_heads : NKV, tgt);
     d.run(k2, NH, M);
     std::vector<float> want(size_t(M) * QN);
     dfref::attention({NH, NKV, HD, M, RING, S.win, kd::kAttnPb, scale}, q.data(), kb.data(), vb.data(), fk.data(),
@@ -544,6 +546,10 @@ int main() {
   bad += check_prep(d, split);
   bad += check_heads(d, split, rope, brope);
   bad += check_select(d, split);
+  for (unsigned heads : {1u, 2u}) {
+    Bins grouped(d, false, heads);
+    bad += check_attn(d, grouped);
+  }
   if (bad) {
     std::printf("dflash_kernels_test: FAIL (%d)\n", bad);
     return 1;
