@@ -19,3 +19,28 @@ match ends (an earlier prompt's end, inside earlier generated ids, or elsewhere)
 and the prompt tokens a perfect prefix cache could reuse; then the total fraction.
 
 Tests: `python3 tools/prefix/test_analyze_log.py`.
+
+## DFlash's final speculation replay (spec 19 v2 Task 7b)
+
+Run in the quiet-box session after the final cost and combined acceptance gates:
+
+```bash
+tools/probe/detach.sh ~/b70/logs/dflash-v2/quiet.log \
+  python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 ~/b70/logs/dflash-v2/quiet/session-int8
+```
+
+The script takes `gpu_lock.sh box` itself; do not wrap it in another GPU lock. It forces one card with
+`--parallel 1` and replays `--spec off`, `--spec mtp --mtp auto`, and `--spec dflash`, in three rotated rounds.
+Every arm keeps the prefix cache on (32 GiB), context 131072, bf16 KV, int8 target head, greedy sampling and the
+recorded output cap. The MTP arm must report `adaptive per step`; an inherited `B70_MTP_STEP_K=0` is cleared.
+Servers stop through `box_stop.sh child` and are waited for before the next arm starts. No device affinity is
+set by the harness.
+
+Use a new output directory for each recording; repeat on `opencode-session` and `opencode-session-2` as checks.
+`table.txt` uses the server's decode spans and reports median ratios, including DFlash/MTP. Per-arm
+`requests.jsonl` retains prompt/output ids for `serve_judge.py`; unique request tags pair the logs even if their
+filenames reflect a different completion order. `run.json` records the binary hash, policy, shape, order and
+judge result. Missing f32 references leave forced contexts and return **77**, not PASS. This replay alone does
+not establish Task 8's other-corpus or prefill regression bars.
+
+Host-only stand-in tests: `python3 tools/prefix/test_replay_spec.py`.
