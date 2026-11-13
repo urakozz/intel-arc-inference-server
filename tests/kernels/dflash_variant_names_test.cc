@@ -87,6 +87,12 @@ int main(int argc, char** argv) {
         bound.insert(names.begin(), names.end());
       }
   bound.insert(kd::proj_wide_variant());   // DFlashDrafter::project_wide
+  {   // spec 19 v3d Task 6: the DPAS part beside the H1 / B4 reduce
+    const auto names = kd::draft_variants(true, 1u, true, 0u, kernels::LinearKind::SmallM, kernels::LinearKind::SmallM, 1,
+                                          4, true, false, true);
+    CHECK(std::find(names.begin(), names.end(), kd::attn_dpas_variant()) != names.end());
+    bound.insert(names.begin(), names.end());
+  }
   int bad = 0;
   for (const std::string& v : bound)
     if (!fresh.count(v) && !reused.count(v)) {
