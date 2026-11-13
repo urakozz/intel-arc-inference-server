@@ -1,6 +1,7 @@
 # Spec 19 v2 - DFlash for Qwen3.8-27B, made fast
 
-**Status:** design, 2026-11-11, for operator review. Open decisions are marked **(decide)**.
+**Status:** measured implementation, 2026-11-13; full G-speed and C7 are not met. The design below retains its
+original targets; §5 records what was built. Remaining design choices are marked **(decide)**.
 
 **Continues** spec 19 (`2026-10-05-spec19-draft-model-speculative-decoding-design.md`, implemented: 19a-19f on main).
 Spec 19 stays the record of what was built. This spec changes only what the evidence below shows was wrong or is now
@@ -183,3 +184,34 @@ Each item names the spec 19 point it replaces. Everything not named stands as sp
 - **`--parallel tp` and `--max-num-seqs` slots with DFlash.** Refused today. A DFlash slot needs a ring per slot and
   batched draft lists (spec 19 §5 "Batching"). Their own spec after this one meets its bar.
 - **The DPAS verify attention's thresholds.** Spec 28c's table is used as built. C6 measures verify(8) through it.
+
+## 5. As built (2026-11-13)
+
+Branch `spec19v2-dflash-speed`, main `0b5ef628` merged at `b5bb4044`, measured code `a83322bb`.
+
+- **C1:** block8 / K<=7 retained.
+- **C2:** RTN int4 is implemented and numerically tested, but fails the corpus acceptance bar; int8 remains the
+  serving body. Proper AutoRound is deferred by the operator.
+- **C3:** ranked32k fails acceptance. The full-vocabulary int4 candidate64 head with exact int8-row reranking
+  preserves all 35 baseline acceptance rows / 4256 draft IDs on the selected int8 arm. The head cost is 1.789 ms,
+  above 0.5 ms.
+- **C4:** one-card decode batches pending projection, draft and verify in one submit. Ring/flush/snapshot tests
+  pass; isolated host gaps 0.423 / 0.381 ms pass. Combined projection plus host remains above 0.5 ms.
+- **C5:** H1/B4 is selected after primitive and real-model numerical checks; the five attention-part launches
+  fall 2.696 → 2.084 ms at 4k/K7. Slower or numerically failing controls are not selected.
+- **C6:** before/after costs, CPU acceptance, profiling and refreshed AdaptiveK tables are implemented. A further
+  request-cost defect is fixed: immutable RoPE is generated/uploaded once at construction rather than at every
+  reset (focused reset 244.426 → 0.179 ms, regression RED→GREEN).
+- **C7:** still fails; selected int8 draft 8.430 ms / iteration 1.559 plain steps at 4k.
+
+Task8's three-round main replay passes its 10% bar at **1.193x default per-step MTP**; controls measure
+1.227x / 1.320x. Golden, A4 and tg128 at both depths pass their speed bars. **Full G-speed fails on pp4096:**
+0.9551x MTP, a 4.49% loss against the allowed 3%. Saved logs locate most of that gap inside prompt processing;
+the 8-row staged projection needs profiling/batching work, or the deferred quantised drafter follow-up.
+
+G0 passes 2703 common kernels (254 path-only differences normalised), with 44 drafter additions and no removals.
+Main, golden/A4 and actual candidate-head PP f32 judgments pass with no failures or skips; 94 new references
+are complete. The two long-context control judgments await 32 references (current planner 140.6 CPU hours,
+excluding chunk/stream overhead), held for the operator's budget choice. Those are not counted as passed.
+The serving default is unchanged; item12 stays open. Detailed tables and evidence are in BENCHMARKS and the
+DFlash probe record.

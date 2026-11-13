@@ -24,6 +24,8 @@ arrives faster. A **prefix cache hit** is a follow-up turn whose earlier convers
 One session on two cards (the default) with TP 2: **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
 on a prefix cache hit.
 
+The serving-bench requests contain 3,425 prompt tokens and generate 512 tokens.
+
 Decode with MTP, t/s - one session, or several at once (the total, per request in brackets):
 
 | setup | 1 request | 2 requests | 4 requests | 8 requests |

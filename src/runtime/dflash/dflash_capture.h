@@ -48,6 +48,8 @@ DFlashTarget dflash_target(const loader::LoadedModel& m, bool draft_vocab = fals
 // Spec 28d: the int8 linears (the block's M = 8, the int8 head's 7 rows) bind gemm_sm_i8w (gemm_sm.cl, kSmallMTuning's
 // kSmDraft8 / kSmDraft7 rows and Qwen3.8's head row) - the lists are M >= 2, runtime::gemv_kind's rule; the bf16 forms
 // stay gemv_bf16. `opt.force_linear` Gemv (tests and probes only) binds gemv_i8w as before 28d.
+// `opt.profile`: per-launch timestamps, reset by the caller before each replay. One ProfileEvents per live list;
+// signals add overhead, so profile families separately from the uninstrumented lists' wall timings.
 CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w, const DFlashTarget& t,
                                 DFlashBuffers& b, const l0::Mem& control, const CaptureOptions& opt = {});
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,

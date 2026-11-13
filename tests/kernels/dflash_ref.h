@@ -41,6 +41,7 @@
 #include <vector>
 
 #include "common/bf16.h"
+#include "kernels/dflash_dims.h"
 
 // No fma contraction in the twin. clang honours the ISO pragma; g++ does not know it (an
 // error under -Werror=unknown-pragmas) and needs none: the tree builds in ISO mode
@@ -387,6 +388,33 @@ inline void gemv_i8w(const int8_t* q, const float* scales, uint32_t K, uint32_t 
     }
   });
 }
+// C3: exact int8 rows, four contiguous dot slices, then the best 16 real ids (before logit processing).
+inline std::vector<Cand> rerank_candidates(const int8_t* w, const float* scales, uint32_t K, uint32_t N,
+                                           const uint16_t* x, const uint32_t* ids, float mult, float cap) {
+  std::vector<Cand> scores;
+  for (unsigned c = 0; c < 64; ++c) {
+    const uint32_t id = ids[c];
+    if (id >= N) continue;
+    float sum = 0;
+    for (unsigned s = 0; s < 4; ++s) {
+      float a = 0;
+      for (unsigned k = s * (K / 4); k < (s + 1) * (K / 4); ++k)
+        a = a + float(w[i8_index(K, k, id)]) * bf(x[k]);
+      sum = sum + a;
+    }
+    const float v = sum * scales[id];
+    if (!std::isnan(v)) scores.push_back({v, id});
+  }
+  std::sort(scores.begin(), scores.end(), better);
+  scores.resize(std::min<size_t>(16, scores.size()));
+  for (auto& c : scores) {
+    c.v *= mult;
+    if (cap > 0) c.v = std::tanh(c.v / cap) * cap;
+  }
+  while (scores.size() < 16) scores.push_back({-INFINITY, kNoIdx});
+  return scores;
+}
+
 inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit, const uint16_t* x, uint32_t M,
                       float* out) {
   const uint32_t k8_per = K / 8 / ksplit;
@@ -412,29 +440,34 @@ inline void gemv_bf16(const uint16_t* w, uint32_t K, uint32_t N, uint32_t ksplit
   });
 }
 
-// gemv.cl (int4 g64, LAYOUT 1 or 0 - the same sums) at S 1 from the GPTQ-native form: qweight [K/8][N] (word (r, n)
+// gemv.cl (int4 g64, LAYOUT 1 or 0 - the same sums), ascending slices folded in the consumer: qweight [K/8][N] (word (r, n)
 // holds k = 8r .. 8r + 7, k = 8r lowest) and f16 scales [K/64][N] - loader::rtn_int4_g64's output.
 inline void gemv_int4(const uint32_t* qw, const uint16_t* scales, uint32_t K, uint32_t N, const uint16_t* x,
-                      uint32_t M, float* out) {
+                      uint32_t M, float* out, uint32_t slices = 1, bool contracted = false) {
   std::vector<float> xf(size_t(M) * K);
   for (size_t i = 0; i < xf.size(); ++i) xf[i] = bf(x[i]);
   parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
     for (uint32_t n = n0; n < n1; ++n)
       for (uint32_t m = 0; m < M; ++m) {
         const float* xr = &xf[size_t(m) * K];
-        float acc = 0.0f;
-        for (uint32_t g = 0; g < K / 64; ++g) {
-          float gacc = 0.0f;
-          for (uint32_t j = 0; j < 8; ++j) {
-            const uint32_t word = qw[size_t(g * 8 + j) * N + n];
-            float a = 0.0f;
-            for (uint32_t t = 0; t < 8; ++t)
-              a = a + float(int((word >> (4 * t)) & 0xFu) - 8) * xr[g * 64 + j * 8 + t];
-            gacc = gacc + a;
+        float sum = 0.0f;
+        for (uint32_t s = 0; s < slices; ++s) {
+          float acc = 0.0f;
+          for (uint32_t g = s * (K / 64 / slices); g < (s + 1) * (K / 64 / slices); ++g) {
+            float gacc = 0.0f;
+            for (uint32_t j = 0; j < 8; ++j) {
+              const uint32_t word = qw[size_t(g * 8 + j) * N + n];
+              float a = 0.0f;
+              for (uint32_t t = 0; t < 8; ++t)
+                a = a + float(int((word >> (4 * t)) & 0xFu) - 8) * xr[g * 64 + j * 8 + t];
+              gacc = gacc + a;
+            }
+            const float scale = common::f16_to_f32(scales[size_t(g) * N + n]);
+            acc = contracted ? std::fma(gacc, scale, acc) : acc + gacc * scale;
           }
-          acc = acc + gacc * common::f16_to_f32(scales[size_t(g) * N + n]);
+          sum = sum + acc;
         }
-        out[size_t(m) * N + n] = acc;
+        out[size_t(m) * N + n] = sum;
       }
   });
 }
@@ -460,7 +493,8 @@ struct Dims {
 
 // A linear in either device form (one of bf16 / i8 non-empty) or, for Numerics::Reference, row-major fp32 [N][K].
 struct Lin {
-  uint32_t K = 0, N = 0, ksplit = 1;
+  uint32_t K = 0, N = 0, ksplit = 1, slices = 1;
+  bool contracted = false;   // the Qwen int4 GEMV contracts group x scale + accumulator
   std::vector<uint16_t> bf16;
   std::vector<int8_t> i8;
   std::vector<float> scales;
@@ -468,7 +502,7 @@ struct Lin {
   std::vector<uint32_t> q4; // spec 26b: int4 g64 qweight [K/8][N] + f16 scales [K/64][N] (gemv_int4)
   std::vector<uint16_t> s4;
   // y [M][N] = W x for M rows; xb the bf16 rows (Engine), xf the fp32 rows (Reference).
-  void apply(const uint16_t* xb, const float* xf, uint32_t M, float* y) const {
+  void apply(const uint16_t* xb, const float* xf, uint32_t M, float* y, uint32_t split_override = 0) const {
     if (!f32.empty()) {
       parallel_cols(N, [&](uint32_t n0, uint32_t n1) {
         for (uint32_t m = 0; m < M; ++m)
@@ -481,7 +515,7 @@ struct Lin {
     } else if (!i8.empty()) {
       gemv_i8w(i8.data(), scales.data(), K, N, xb, M, y);
     } else if (!q4.empty()) {
-      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y);
+      gemv_int4(q4.data(), s4.data(), K, N, xb, M, y, split_override ? split_override : slices, contracted);
     } else {
       gemv_bf16(bf16.data(), K, N, ksplit, xb, M, y);
     }
@@ -530,7 +564,8 @@ inline void project(const Weights& w, Numerics nm, const uint16_t* taps, uint32_
   const bool eng = nm == Numerics::Engine;
   for (uint32_t l = 0; l < d.layers; ++l) {
     std::vector<float> qkv(size_t(n) * d.qkvn());
-    w.layers[l].qkv.apply(x.data(), h.data(), n, qkv.data());   // the k||v rows are the q||k||v rows [qn, qkvn)
+    w.layers[l].qkv.apply(x.data(), h.data(), n, qkv.data(),
+                          kernels::dflash::int4_slices(d.H, 2 * d.kvn()));   // the k||v rows are the q||k||v rows [qn, qkvn)
     for (uint32_t r = 0; r < n; ++r) {
       const uint32_t pos = pos0 + r, slot = pos % d.ring;
       for (uint32_t kh = 0; kh < d.NKV; ++kh) {

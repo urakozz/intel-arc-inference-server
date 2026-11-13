@@ -21,7 +21,11 @@
 #include "kernels/linear_kind.h"
 #include "runtime/verify_attn.h"
 
+namespace l0 { class CmdList; }
+
 namespace runtime {
+
+struct ProfileEvents;
 
 using kernels::LinearKind;
 using kernels::gemv_kind;   // constexpr LinearKind gemv_kind(unsigned M): Gemv at M = 1, SmallM at M >= 2
@@ -38,6 +42,18 @@ struct CaptureOptions {
   // attn_gate (fp32 [8][6144]) and attn_out (bf16 [8][6144]); rows past the list's M are left as they were. Null
   // (every production capture): nothing is appended.
   void* attn_dump = nullptr;
+  // DFlash tests / probes only: one event per launch; one pool per live profiled list.
+  ProfileEvents* profile = nullptr;
+  uint32_t profile_m = 0;   // tap verify: instrument this width only; 0 leaves verify uninstrumented
+  uint32_t profile_keys = 1;   // select its shallow/deep list at this row-0 key count
+  // Test / probe: the same projection with timestamps, used instead of a pending production projection.
+  l0::CmdList* profile_projection = nullptr;
+  // Test / probe: isolate the DFlash target head from its body when comparing linear arithmetic.
+  LinearForce force_dflash_head = LinearForce::Auto;
+  // DFlash H1/B4 measured geometry; tests/probes may force the original H4/B8 with zeros.
+  uint32_t dflash_attn_heads = 1;
+  bool dflash_attn_parallel_exp = false;
+  uint32_t dflash_attn_rows = 4;
 };
 // One FA layer's slice of CaptureOptions::attn_dump (Qwen3.8's 24 x 256 q heads, 8 rows).
 inline constexpr size_t kAttnDumpRow = 24 * 256;

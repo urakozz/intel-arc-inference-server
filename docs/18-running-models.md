@@ -201,7 +201,7 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 # one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last \
     --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
-# one card with int8 KV (spec 19v3a): the planner gives at least 200,000 tokens of context on a 32.530 GB card
+# one card with int8 KV (spec 19v3a): host planner 246528 tokens at 32.530 GB, including candidate64
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto
 # two cards, pipeline parallel: the drafter on the second card beside lm_head (the copy hand-off only)
 ./build/src/cli/b70-serve $Q --parallel pp --spec dflash
@@ -213,9 +213,10 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 - **Defaults:** the drafter quantised to int8 at load (same acceptance as bf16 at half the bytes),
   `--spec-max 7`, `--draft-vocab off` (a ranked 32k vocabulary was ranked in-sample; by id it loses up to
   1.4 tokens at K = 7).
-- **KV cache:** bf16 and int8 are wired for one card and `--parallel pp` (spec 19v3a). With int8 the
-  planner gives at least 200,000 tokens on a 32.530 GB card with a 1.5 GB reserve (int8 head and drafter).
-  No int8 speed number is recorded yet.
+- **KV cache:** bf16 and int8 are wired for one card and `--parallel pp` (spec 19v3a). The int8 mode
+  host planner gives **246,528 tokens** on a 32.530 GB card with a 1.5 GB reserve (int8 head/drafter and
+  candidate64). Allocation at that length, full acceptance, f32 serving and speed gates are pending;
+  no int8 speed claim is made yet.
 - **Refused, by name:** `--parallel pp --pipeline-handoff peer`, `--parallel tp` and `replica`, several slots a card
   (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation that gets a prefix cache hit

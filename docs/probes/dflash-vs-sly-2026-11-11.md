@@ -152,3 +152,120 @@ No.
 
 Design and plan: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md`,
 `docs/superpowers/plans/2026-11-11-spec19v2-dflash-speed.md`.
+
+## 7. Spec 19v2 measurements, 2026-11-12
+
+Task 5's RTN int4 g64 layout-1 arm at `39d54ad1`, with the original full int8 head and original engine-tap
+anchors, **fails the acceptance gate**. This measures our at-load RTN form; the published quantized checkpoint's
+P0 result above does not establish its quality. All 35 corpus/K rows recalibrate the original int8 baseline on
+the new dumps before comparison (zero baseline drift).
+
+| corpus, K=7 | original int8 E_K | RTN int4 E_K | change |
+|---|---:|---:|---:|
+| A4 | 7.08025 | 7.00551 | −0.07474 |
+| code | 5.87500 | 5.93750 | +0.06250 |
+| prose | 2.28646 | 2.22727 | −0.05919 |
+| CJK | 1.50000 | 1.62500 | +0.12500 |
+| held-out opencode | 3.68750 | 3.25000 | −0.43750 |
+
+A4, prose and held-out opencode exceed the allowed 0.05 loss at K=7; code also loses 0.125 at K=2.
+Per C2, request an AutoRound-exported drafter before promoting int4. The serving default remains int8.
+Evidence: `~/b70/logs/dflash-v2/task5-real-39d54ad1.log` and
+`~/b70/logs/dflash-v2/task5-real-39d54ad1/acceptance.json`. The synthetic f32 body-set gate also remains unresolved
+at this source. Int4 S1 draft cost is 8.94586 ms at depth 4096 versus 8.97802 ms for the original int8 arm: memory
+savings alone did not deliver the Task 5 speed gate. Split-K producer/consumer experiments continue separately;
+their quality and performance are not established by this result.
+
+The `8a16f5a4` grid split-K diagnostic (same int4 weights/head, fused consumer folds, unchanged 87/8 launches)
+reduces the 4k draft to **7.84970 ms**, saving 1.12832 ms against the original int8 baseline; the 2.5 ms Task 5
+gate is still unmet. At 32k it is 8.29017 ms. Projection is 0.33730/0.45911 ms, and K7 iteration is
+1.52810/1.52793 plain steps (4k/32k). These are idle-card/busy-box diagnostics.
+At 4k, sums of per-launch medians are 1.91240 ms for the int4 body, 2.16833 ms for the full int8 head,
+2.76844 ms for attention-part, and 0.23677 ms for both top-k stages. Attention is the next measured non-GEMM target.
+Evidence: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`.
+
+Task 6's 32k ranking also **fails out of sample**, measured on the unchanged int8 body to isolate the head.
+Training excludes the whole `opencode-session-2`; ranked-id SHA256 is
+`11a38d7470b3a2f47d75d703dcfd10e49af21aa44f6a8f7e650ccb333d18cb0e`.
+The cached-tap path first reproduced all 4256 original int8/full-head engine drafts exactly. K7 A4 then falls
+7.08025 → 6.29054, code 5.875 → 5.750, CJK 1.500 → 1.250; held-out opencode rises 3.68750 → 3.87500.
+The ranking stays disabled. C3's next arm is the int4 candidate head with top-64 exact int8-row reranking.
+Evidence: `~/b70/logs/dflash-v2/task6/{cached-taps-calibration,ranked32-int8}/` and
+`task6-cached-calibration.log`, `task6-ranked-head.log`.
+
+Task 7's fewer-heads geometry is bitwise the real drafter at short and full-window contexts. At pos4096/K7,
+H4/H1/H2 attention-part sums are 2.700417/2.525833/2.872083 ms (interleaved timestamp medians, five launches,
+busy box/card1). H1 saves only 0.174584 ms here, despite a larger short-context saving. Splitting rows as well
+is the next experiment; the runtime geometry stays unchanged until its gates pass.
+
+The later split-K numerical regression passes after the CPU twin mirrors GEMV's verified fused multiply-add
+order (zero projection differences for both paths, aggregate f32 sets 5 versus 6 misses). RTN corpus loss remains;
+this arithmetic-reference correction does not qualify RTN for promotion. Evidence: `task5-contracted-twin.log`.
+
+C3's full-vocabulary int4 candidate head plus exact top-64 int8 rerank **passes isolated quality**: all 35
+corpus/K acceptance values equal the original int8/full-head baseline (gap zero). One-load `--all-k` first
+reproduced all 4256 original engine drafts. At depth4096 the head path costs 1.789271 ms (candidate GEMM
+1.214896, top-64 0.365000/0.073750, rerank 0.135625), so the plan's 0.5 ms head-share gate **fails**.
+Draft wall is 8.723402/8.618562 ms and iteration 1.591323/1.556495 plain steps (4k/32k), original H4 attention,
+exclusive card1/busy box. Source `18d366bf`; `task6/candidate64-int8/{acceptance.json,iter-*.log}`.
+
+The H1/B4 row split subsequently passes all primitive and real-model bitwise checks. At pos4096/K7 attention
+falls 2.696458 → 2.084063 ms; at K2, 1.595521 → 1.227500 ms. Parallel-exp is slower at steady K7 despite
+passing bitwise checks; both local K-cache representations fail and are rejected. H1/B4 policy integration
+is the next step. Full cost targets and Task 8 remain unpassed.
+
+H1/B4 policy integration subsequently passes four device checks with no skips (kernel, profile, engine,
+golden/A4 greedy identity); the full int8 H1/B4 numerical check subsequently passes on card0
+(`resume-numerical-card0.log`, DONE rc0). The int8-body candidate arm measures
+8.429809 ms draft / 1.558631 plain-step iteration at 4k, and 8.527476 ms / 1.530302 at 32k. C7 targets still
+fail; resource grade is exclusive card1/busy box with concurrent CPU references. See BENCHMARKS for the full
+paired full-head/candidate table. The operator deferred proper AutoRound conversion to a later follow-up;
+RTN cost diagnostics are complete, with the candidate 4k wall result explicitly noisy. The pre-merge main
+recording's three rotations measure 0.7986995x default per-step MTP and 1.1629667x plain decode (busy box,
+mixed cards; the last MTP arm overlaps CPU references). This is not a passed speed gate.
+
+**2026-11-13:** main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass. Fresh G0
+precedes a new Task 8 dataset (`~/b70/logs/dflash-v2/task8/main-0b5ef628`), with all three recordings,
+rotated arms, corpora and the actual candidate-head PP path. The old timings are not reused across the binary
+change. The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26);
+overlapping timings are busy-box even though both GPUs are reserved.
+
+A further cold-request bottleneck is isolated before the new collection: DFlash rebuilds its immutable
+131072-row RoPE table in every reset. Historical prefix logs show cold reset 324–332 ms versus MTP 7–8 ms,
+while prompt processing is nearly equal (96 versus 93 ms). Moving table generation/upload to construction
+reduces the focused buffer reset 244.426 → 0.179 ms. A new device regression fails before the change and
+passes after it, checking initial RoPE against the independent twin, immutable-table preservation across
+reset and zeroed ring/control/readback. Seven selected checks pass; the real-engine regression subsequently passes in 297.36 s. This addresses cold-request overhead; the measured draft/verify C7 costs remain failed.
+
+The completed main replay (three rotated rounds, all 78 requests) measures **1.193081621x default per-step
+MTP** and **1.774903067x plain decode**. All six speculative-arm/round comparisons pass the f32 judge with
+0 FAIL and 0 SKIPPED after the 88 new references finish. Whole-box GPU reservation, physical card0, CPU
+references active at eight threads: busy-box grade. Source `a83322bb`, merged main `0b5ef628`; evidence
+`~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/judge-mid-refs.log` and the nine saved arms.
+G0 passes 2703 common compiled kernels (254 differ only in the normalised tree path), 44 drafter additions,
+zero removals. This clears the main recording's 10% bar; the other recordings and corpus/benchy judgments
+still gate the full result. The actual candidate-head PP check subsequently passes 39/39 requests
+(37 identical, 0 FAIL / 0 SKIPPED); its four short references take 137 s at eight threads. The C7 draft/iteration targets remain failed; the default is unchanged.
+
+The first round of the 21-request long-context control recording needs 26 new contexts of up to 102k tokens.
+The current planner estimates about 138 CPU hours before chunking overhead; the operator's budget choice
+is pending. The 88 main and four PP references are complete. GPU collection continues independently.
+
+### Completed GPU collection and current verdict (2026-11-13)
+
+All 27 recording arms and nine corpus/benchy arms finished; GPU locks are released. Main/controls DFlash/MTP
+ratios are 1.193081621 / 1.226568536 / 1.319626438. Golden 1.058189106, A4 1.826279459, tg128 1.382364965 and
+tg128 at depth32768 1.486807750 pass. **pp4096 fails:** 0.955104041 (1489.321 versus MTP 1559.328 t/s), a
+4.49% loss against the allowed 3%. The primary speed gain does not make the full G-speed gate pass.
+
+Saved pp4096 round-1 logs: prompt processing ~2629 versus 2510 ms, prefix storage ~65 versus 57 ms, cold reset
+~3.4 versus 2.8 ms. About 42.23 ms must be removed from the median DFlash prompt time to reach the 3% limit.
+The staged 8-row tail projection is the next profiling target; attribution is an inference from the path
+and earlier component costs. C7 remains failed, and proper AutoRound remains deferred.
+
+Main, all golden/A4 comparisons and candidate-head PP pass f32 judging with zero failures/skips. **94 new
+references** are complete (88 main, four PP, two corpus); the corpus pair takes 74 s. The complete remaining
+plan is 32 references / 26 groups, estimated 140.6 CPU hours before chunk/stream overhead, held for the
+operator's budget choice. No model or GPU job is left running. No default promotion; item12 stays open.
+Final machine result: `~/b70/logs/dflash-v2/task8/main-0b5ef628/gates-after-core-refs.json`. Full tables are in
+BENCHMARKS; the missing-reference plan is `task8-final-ref-plan-v7/{plan.log,summary.json}` in the same log topic.

@@ -84,6 +84,8 @@ def cmd_run(a):
         body = dict(r["request"])
         body["temperature"] = 0
         body["seed"] = a.seed
+        if getattr(a, 'user_prefix', None):
+            body['user'] = a.user_prefix + '.' + name
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
         logged = len(r.get("out_ids") or []) or r.get("max_tokens_logged") or a.cap
@@ -94,6 +96,7 @@ def cmd_run(a):
         endpoint = r.get("endpoint", "/v1/chat/completions")
         res = stream_request(url + endpoint, body)
         res["name"] = name
+        res['user'] = body.get('user')
         res["cached_tokens"] = ((res["usage"] or {}).get("prompt_tokens_details") or {}).get(
             "cached_tokens")
         res["prompt_tokens"] = (res["usage"] or {}).get("prompt_tokens")
@@ -198,6 +201,7 @@ def main():
     r.add_argument("out")
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--cap", type=int, default=0)
+    r.add_argument('--user-prefix', help='tag each request so server records can be paired independently of log order')
     c = sub.add_parser("compare")
     c.add_argument("a")
     c.add_argument("b")

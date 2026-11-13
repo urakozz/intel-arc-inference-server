@@ -96,6 +96,30 @@ void test_model() {
   std::printf("model: E(K), rates and the K boundaries per table\n");
 }
 
+void test_dflash_measured_cost() {
+  const MtpCost c = MtpCost::dflash(true, true);
+  const double verify[] = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
+  CHECK(c.verify.size() == 8 && c.draft.size() == 7);
+  for (size_t i = 0; i < 8; ++i) CHECK_NEAR(c.verify[i], verify[i], 1e-12);
+  for (double d : c.draft) CHECK_NEAR(d, 0.298136, 1e-12);
+  CHECK_NEAR(c.draft[0] * MtpCost::dflash_head_share(true, true), 2.166354 / 29.222498, 1e-12);
+  const auto candidate = MtpCost::dflash(true, 1u, true);
+  const double verify_candidate[] = {0.997314, 1.045223, 1.094038, 1.114742, 1.161674, 1.208605, 1.230177, 1.242865};
+  for (size_t i = 0; i < 8; ++i) CHECK_NEAR(candidate.verify[i], verify_candidate[i], 1e-12);
+  for (double d : candidate.draft) CHECK_NEAR(d, 0.287036, 1e-12);
+  const auto int4 = MtpCost::dflash(true, 2u);
+  CHECK(int4.draft[0] < c.draft[0]);
+  CHECK(int4.draft[0] != MtpCost::dflash(true, 0u).draft[0]);
+  AdaptiveKOptions o;
+  o.cost = c;
+  o.max_k = 7;
+  const AdaptiveK p(o);
+  CHECK(p.best(0.5) == 3);
+  CHECK(p.best(0.8) == 7);
+  CHECK(p.best(0.95) == 7);
+  std::printf("DFlash measured costs: K 3 / 7 / 7 at alpha 0.5 / 0.8 / 0.95\n");
+}
+
 void test_cost_parse() {
   const MtpCost base = MtpCost::bf16_head();
   const MtpCost c = MtpCost::parse("verify=1,1.2,1.5,1.8;draft=0.1,0.2,0.3", base);
@@ -275,6 +299,7 @@ void test_draft_vocab_cost() {
 
 int main() {
   test_model();
+  test_dflash_measured_cost();
   test_cost_parse();
   test_draft_vocab_cost();
   test_up_on_high_acceptance();

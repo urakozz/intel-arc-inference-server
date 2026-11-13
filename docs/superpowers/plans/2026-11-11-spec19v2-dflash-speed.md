@@ -1,13 +1,25 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-11): PLANNED.** Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
-gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
+**Status (2026-11-13): GPU validation complete; full G-speed fails, item12 stays open.** Main `0b5ef628` is
+merged at `b5bb4044`; measured code `a83322bb`. The early 80.5 t/s bar passed at 88.806 t/s. Fresh G0, full
+int8 numerical checks, real-engine regression, main golden/A4 and actual candidate-head PP correctness pass.
+The three-round main replay passes at **1.193x default per-step MTP** (78 requests, f32 0 FAIL / 0 SKIPPED);
+the two controls measure 1.227x / 1.320x. Golden, A4 and tg128 at both depths pass; **pp4096 fails at 0.9551x
+MTP**, below the unchanged 0.97 limit. C7 draft/iteration targets also remain failed. No default promotion.
+94 new main/PP/corpus references are complete. Long-control correctness still needs 32 references (planner
+140.6 CPU hours, excluding chunk/stream overhead), held for the operator's budget choice. GPU locks are released;
+no model job remains running. Collection is graded busy-box because CPU references overlap the main replay.
+Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md`; evidence: BENCHMARKS and
+`docs/probes/dflash-vs-sly-2026-11-11.md`. Box row82.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox
 > (`- [ ]`) syntax. **Commit after every step** (signed, no trailers; a step that does not build or pass yet goes in as a
 > `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop. Box jobs: every GPU job
 > through `tools/gpu_lock.sh`, long jobs detached, checked at most every 30 min.
+> Keep the implementation turn active while a detached job runs: use completion notifications and continue
+> independent work, then resume from the result. Answer status questions in commentary; a detached job continuing
+> after a final response does not mean implementation is continuing. Stop when the operator pauses or input is required.
 
 **Goal:** an iteration at K = 7 of <= 1.35 plain steps, and `--spec dflash` >= 1.10x `--mtp auto` on the opencode
 recording with no loss > 3 % elsewhere. Greedy output stays identical to `--spec off` under the f32 judge.
@@ -55,33 +67,48 @@ acceptance check fails G-accept, Tasks 3+ wait for its root cause.
 - Modify `tools/box_validate/stages.sh`: row 82 and its stages `r82.k0` (G0), `r82.iter` (the probe), `r82.accept`
   (engine taps -> `tools/oracle/dflash_d1.py`'s reference drafting -> E_K per corpus), `r82.d5` (Task 2).
 
-- [ ] **Step 1 (Mac): the probe, the profile option, the EOS line.** `tools/mac_check.sh` / host tests green.
+- [x] **Step 1: the probe, the profile option, the EOS line.** Built on the box; 7 selected host/oracle tests pass.
+  `tools/mac_check.sh` is absent in this checkout; no C++ was compiled on the Mac.
   Commit `probe_dflash_iter: draft / verify(1..8) / projection / host round trip, the draft list per launch (spec 19 v2 Task 1)`.
-- [ ] **Step 2 (box): `r82.iter` at 4096 and 32768.** Record the table in BENCHMARKS "DFlash (spec 19)" as a new
+- [x] **Step 2 (box): `r82.iter` at 4096 and 32768.** Calibrated plain replay passes both depths. At 4096:
+  draft 8.978 ms, verify(8) 1.245386 plain, iteration 1.579196 plain; C7 targets not met. Per-launch host-gap
+  residual is an upper bound, with the limitation recorded. Table and grades in BENCHMARKS's "v2 baseline".
+  Record the table in BENCHMARKS "DFlash (spec 19)" as a new
   "v2 baseline" block. **Gate (objective, recorded):** every C7 row has a measured value with its grade; verify(8) shows
   whether 28c's DPAS attention brought it to ~1.1.
-- [ ] **Step 3 (box + CPU): `r82.accept`.** The engine's taps over the A4 / golden recorded continuations and one
+- [x] **Step 3 (box + CPU): `r82.accept`.** G-accept PASS: A4 E7 7.080252 on both sides (544 anchors);
+  code engine/reference 5.875/5.750, gap 0.125 <= 0.15 (16 anchors). All K=1..7 and five corpora recorded.
+  The engine's taps over the A4 / golden recorded continuations and one
   held-out opencode slice, drafted by the CPU reference at K = 1..7, against the engine's in-loop ids an iteration
   (EOS-stopped).
   - **Gate G-accept:** engine-taps E_7 within 0.15 of the reference on A4 and code.
   - FAIL -> root-cause (tap layer, ring position, RoPE position, anchor row) with a failing test, before Task 3.
 
-### Task 2: D5 again on today's main - the baseline and the bar's first reading (box)
+### Task 2: DFlash against today's recorded baselines (box; operator 2026-11-12)
 
-- [ ] **Step 1: `r82.d5`.** `tools/prefix/replay_ab.sh` on `opencode-session-int8`:
-  - arms off / `--mtp auto` / `--spec dflash`, 3 rotated rounds, prefix cache on;
-  - A4 + golden through `b70-serve` (as the old `r56.d5_a4`);
-  - llama-benchy tg128 and tg128 @ d32768, pp4096 (as the old `r56.d5_benchy`).
-  - Greedy outputs judged as G-D2.
-- [ ] **Gate:** the numbers recorded (BENCHMARKS, spec v2 §1.2's "today" column replaced by measured values). If G-speed
-  already passes, stop and ask the operator (the stop rule).
+- [x] **Step 1: `r82.d5`.** DFlash 88.806 t/s; golden/A4 39/39 f32-judge PASS (37 identical).
+  Saved MTP/DFlash prompts match exactly at 3,425 ids; the nominal 2,820 label was stale.
+  Do not re-run `--spec off` or `--mtp auto` for performance. Reuse today's main:
+  - one card, MTP auto, slots_bench shape (2,820-token prompt, 512 ids, prefix cache hits): **73.2 t/s** (README);
+  - plain decode at depth 4096: **33.5 t/s** (BENCHMARKS).
+  - Run only `--spec dflash` through `tools/box_validate/slots_serve_bench.sh ... --spec dflash -- --counts 1`,
+    same prompt, output length and prefix-cache shape. One sequence slot (DFlash does not support slots).
+  - One golden + A4 greedy correctness round, using the existing references; no repeated plain/MTP serving arms.
+  - Skip llama-benchy and rotated rounds here. The opencode replay with all three arms belongs to Tasks 7b/8.
+- [x] **Early bar PASS:** 88.806 > 80.5 t/s; all baseline gates cleared, including CPU G-accept. Operator chose to continue
+  Tasks 3-7 (2026-11-12), then 7b and Task 8 against a freshly measured, updated MTP arm. If DFlash exceeds
+  **80.5 t/s** (73.2 x 1.10, rounded), pause for the operator's decision about
+  Tasks 3-7. This shape is an early screen, not a substitute for Task 8's final G-speed gate.
+- [x] Record the result and the provenance of the reused baselines in BENCHMARKS.
 
 ### Task 3: AdaptiveK on measured costs (Mac)
 
 **Files:** `src/server/adaptive_k.{h,cc}` (`MtpCost::dflash`: verify rows M = 5..8 and the draft row from Task 1;
 the bf16-head arm as measured or marked derived), `tests/server/adaptive_k_test.cc`.
 
-- [ ] **Step 1:** test first (the K the policy picks at alpha 0.5 / 0.8 / 0.95 under the new table), implement, green.
+- [x] **Step 1:** RED on the old verify table, GREEN on the measured medians. K=4 / 7 / 7 at alpha 0.5 / 0.8 /
+  0.95. Box host tests (AdaptiveK, DFlash host, per-step MTP) 3/3 PASS; no MTP table changes. BF16 arms marked
+  derived in code and BENCHMARKS. Test first (the K the policy picks at alpha 0.5 / 0.8 / 0.95 under the new table), implement, green.
   **Gate:** the table's entries equal Task 1's recorded medians (a comment cites the BENCHMARKS block); D2 unaffected
   (host-only). Commit.
 
@@ -93,13 +120,18 @@ moved to the front of the next submit; one `zeCommandQueueExecuteCommandLists` o
 path shares the call (keep pp bitwise its one-card form), `tests/runtime/dflash_engine_test.cc` (the ring after a
 deferred projection equals today's at every flush point: plain step, request end, snapshot, truncate).
 
-- [ ] **Step 1 (Mac):** failing host test on the mock (the projection is flushed before every snapshot and truncate),
-  implement, green. Commit.
-- [ ] **Step 2 (box):** `dflash_engine_test`, `dflash_gpu_test`, `dflash_prefix_gpu_test`, `pp_dflash_test`,
+- [x] **Step 1:** projection deferral/batching implemented. Regression first failed on the missing Engine API;
+  box host/syntax checks and the real GPU ring/snapshot/truncate/request-end checks pass. Ruling: use the actual
+  queue and device buffers instead of adding a single-use host queue mock to the concrete Engine.
+- [x] **Step 2 (box):** `dflash_engine_test`, `dflash_gpu_test`, `dflash_prefix_gpu_test`, `pp_dflash_test`,
   `r82.iter`.
   - **Gates:** G-D2; the ring and snapshots bitwise today's; host gap (iteration wall minus the lists' device time)
     <= 0.5 ms at K = 7.
   - Commit the numbers.
+  - One-card checks PASS (four actual passes, no skips); host gap 0.422639 / 0.381236 ms at 4096 / 32768,
+    below 0.5 ms. Combined projection + host still 0.804514 / 0.766757 ms; iteration 1.577007 / 1.558300 plain
+    steps. Full table in BENCHMARKS. PP regression PASS (114.02 s, no skip); five device gates and both calibrated
+    host gaps audited PASS. Task 4 complete; C7 combined costs remain unmet.
 
 ### Task 5: the int4 g64 drafter (Mac, then box) - C2
 
@@ -114,6 +146,12 @@ deferred projection equals today's at every flush point: plain step, request end
 - int8 stays reachable through `CaptureOptions` / the loader's test entry for the A/B.
 
 - [ ] **Step 1 (Mac):** loader + capture + host twin tests, `mac_check` green. Commit.
+  - Source checkpoints `70d66833` / `a8c213b7`: RTN int4 layout-1 loader/upload, distinct prefix key, all eight
+    drafter shapes on M=8 `gemm_sm`, forced-GEMV twin and f32 judge. Four host checks, GPU/probe syntax and
+    app/kernel build PASS on the box. The split-K numerical regression later passes, but RTN corpus acceptance
+    and the 2.5 ms saving gate fail (below); serving format remains int8.
+    The existing byte formula reports 843,439,104 B saved. Nine acceptance-comparator unit tests PASS; it reuses
+    the original int8 baseline without loading a CPU model and requires matching anchors and all K/corpora.
 - [ ] **Step 2 (box):** `dflash_draft_test`, `r82.accept` with the int4 arm, `r82.iter`.
   - **Gates:**
     - G-drafter: E_K within 0.05 of int8 on A4, code, prose and the held-out opencode slice;
@@ -121,6 +159,10 @@ deferred projection equals today's at every flush point: plain step, request end
     - G-D2;
     - `--max-len auto` with the drafter rises (printed).
   - FAIL on acceptance -> record and ask the operator for the AutoRound-exported drafter (spec v2 C2) instead of RTN.
+  - **RTN FAIL measured at `39d54ad1` (2026-11-12):** K=7 A4 7.08025 → 7.00551, prose 2.28646 → 2.22727,
+    held-out opencode 3.68750 → 3.25000; all losses exceed 0.05. Original int8 baseline recalibrates exactly.
+    Operator deferred proper AutoRound conversion to a follow-up; default remains int8. Split-K and independent small-kernel work continue as
+    diagnostics, with their numerical and final combined acceptance gates still required.
 
 ### Task 6: the draft head (Mac + CPU, then box) - C3
 
@@ -131,8 +173,16 @@ deferred projection equals today's at every flush point: plain step, request end
 - [ ] **Step 3 (box):** `r82.accept`, `r82.iter`.
   - **Gates:** E_K within 0.05 of the full head out of sample; the draft pass's head share down to <= 0.5 ms; G-D2.
   - FAIL on acceptance -> Step 4.
+- **32k acceptance FAIL measured (2026-11-12):** isolated on the accepted int8 body, original baseline/all K/corpora.
+  K7 A4 7.08025 → 6.29054, code 5.875 → 5.750, CJK 1.500 → 1.250. The ranked vocabulary remains disabled;
+  continue Step 4. Cached-tap fast path first matched all 4256 original engine drafts exactly.
 - [ ] **Step 4 (only on Step 3's FAIL):** the int4 g64 candidate head (made at load), top-64, exact re-rank against
   the int8 head rows, top-16 to the selector. A new small kernel `df_rerank`, with its twin test. Same gates.
+  - `18d366bf`: primitive/host checks pass; candidate64/exact rerank preserves all 35 original acceptance rows
+    exactly on the int8 body. Measured head path 1.789271 ms at 4k, so the 0.5 ms component gate fails.
+    `e7404f8d` wires the quality-safe fallback into serving and both planner paths; 18 host/CLI checks pass.
+    Serving G-D2 and final combined/cost refresh remain pending. No global DFlash default or int4 promotion.
+
 
 ### Task 7: the draft list's small kernels (Mac, then box) - C5
 
@@ -145,21 +195,54 @@ deferred projection equals today's at every flush point: plain step, request end
 - [ ] **Step 2 (box):** `r82.iter`. **Gate:** draft pass <= 4.5 ms (0.15 plain steps) at depth 4096 with Tasks 5-6;
   iteration at K = 7 <= 1.35 plain steps; launches per draft printed.
 
+H1/B4 attention geometry is selected at `f0a3261e` after primitive and real-model bitwise checks: five-launch
+attention sum 2.696458 → 2.084063 ms at pos4096/K7. Norms account for only ~0.1275 ms; the ledger records the
+profile-driven choice. Parallel-exp passes bitwise but regresses steady K7; both local K-cache controls fail
+bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The combined int8 acceptance and full int8 H1/B4 numerical checks pass. Task 8 is being repeated after merging main; C7 remains failed.
+
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 
-- [ ] **Step 1 (harness):** adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
+- [x] **Step 1 (harness):** `tools/prefix/replay_spec.py` uses three rotated speculation arms, prefix cache on,
+  whole-box lock or explicit `--card N` and one-card serving, default per-step MTP, controlled child shutdown,
+  server-clock metrics and f32 judging. Checked `--resume` validates binary/recording/settings and saved
+  replies/server logs before reusing a complete arm; incomplete arms must be archived. Thirteen prefix tests
+  pass, including changed-input refusals and per-arm card provenance; real Task 8 replay is collecting. Adapt `tools/prefix/replay_ab.sh` (or a sibling script) for the bar: its arms today toggle
   the prefix cache with `--spec off` fixed; Task 8 needs `--spec off` / `--mtp auto` / `--spec dflash` with the prefix
   cache ON in every arm. Take the cards through `tools/gpu_lock.sh` (never set `ZE_AFFINITY_MASK` by hand) and stop the
   server the way `tools/box_validate/serve_run.sh` does (its own child, wait for exit), not a bare `kill`.
-- [ ] **Step 2 (cost table):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
+- [x] **Step 2 (current int8 arm):** re-run Task 1's probe after Tasks 4-7 and refresh AdaptiveK's DFlash cost table from those
   medians; **Gate:** the table equals the new medians, so Task 8 does not run on Task 3's pre-optimisation costs.
-- [ ] **Step 3 (combined acceptance):** measure E_K of the final drafter (int4 + the chosen draft head) against Task 1's
-  **original int8 / full-head baseline** on A4, code, prose and the held-out opencode slice. **Gate:** within 0.05 of that
-  baseline in total - the per-task gates of Tasks 5 and 6 must not add up to an unnoticed loss.
+  - `6196c30a`: H1/B4 int8 full/candidate verify and draft rows match the paired 4k medians; numeric regression
+    RED→GREEN, three host checks and serve/decode build PASS. BF16 rows remain explicitly derived. RTN is not
+    selected by the CLI; its noisy candidate 4k wall result is not used as a policy table. AutoRound is deferred.
+**Operator 2026-11-12:** finish RTN cost diagnostics, defer proper AutoRound conversion. Evaluate the quality-safe
+int8 body with the selected head/geometry in Task 8; this does not close C2 or qualify the failed RTN arm.
 
-### Task 8: the bar (box, idle) - G-speed
+- [x] **Step 3 (current int8 arm):** H1/B4 plus the candidate64/exact-rerank head matches Task 1's **original
+  int8/full-head baseline** exactly on all 35 corpus/K acceptance rows (A4, code, prose, CJK and held-out opencode).
+  Card0 replay first reproduced all 4256 original draft IDs exactly; report `task7b/h1b4-candidate-int8/acceptance.json`.
+  **Gate PASS:** total acceptance gap 0, within 0.05. The combined int4 check remains part of the operator-deferred
+  AutoRound follow-up; this pass does not qualify the failed RTN arm.
 
-- [ ] **Step 1:** `r82.d5` on the branch head, idle box, both other recordings as checks.
+### Task 8: the bar (one idle GPU) - G-speed
+
+A pre-collection reset fix (2026-11-13) moves the immutable RoPE table out of `DFlashBuffers::zero()` and
+into construction. The new device regression fails before the fix and passes after it; reset at 131072 rows
+measures 244.426 → 0.179 ms in that focused check, with initial RoPE bitwise the independent twin and mutable
+ring/control/readback still cleared. Seven selected checks pass; the real-engine regression passes in 297.36 s.
+The main recording passes at 1.193x MTP over three rounds, f32 judge 0 FAIL / 0 SKIPPED. The remaining gates follow.
+
+- [ ] **Step 1:** Task 7b's three-arm replay harness on the branch head, one idle GPU, both other recordings as
+  checks. Operator permits the other card to be busy if more than 16 of 44 CPU threads are available; verify
+  that before the run and record the resource conditions with the busy-box grade. Use `--card N` for that run;
+  omitting it reserves the whole box for a quiet-box grade. The MTP arm includes main `f65ae50e` or later and uses the
+  default per-step policy for `--mtp auto` (no disabling `B70_MTP_STEP_K`). The current CLI spells this arm
+  `--spec mtp`; `--mtp auto` and `--lm-head` were removed in the zero-config cleanup. The replay uses the fixed
+  int8-head default, clears the step-policy override, and verifies the startup's adaptive-per-step line. Task 2's slim `r82.d5` screen is not
+  this final replay bar. All final DFlash speed numbers require an idle card.
+- [x] **GPU collection complete (2026-11-13):** all 27 recording arms and nine corpus/benchy arms; both cards released.
+- [x] **Core f32 judging:** main replay, all golden/A4 arms and actual candidate-head PP pass, no failures/skips.
+- [ ] **Long-control f32 judging:** 32 missing references, planner 140.6 CPU hours; held for the operator's budget choice.
 - [ ] **Gate (spec 19 D5, unchanged):**
   - `--spec dflash` >= 1.10x `--mtp auto` on `opencode-session-int8`;
   - no loss > 3 % on A4, golden, llama-benchy tg128 / tg128 @ d32768 and pp4096;
@@ -171,6 +254,10 @@ deferred projection equals today's at every flush point: plain step, request end
   - spec v2 "as built";
   - open-work item 12 -> Closed recently.
   - If not passed: record the measured decomposition and what is left, item 12 stays open with the numbers.
+  - [x] Current failure recorded: pp4096 median 1489.321 versus MTP 1559.328 t/s (−4.49%); ~42.23 ms
+    saving is needed for the 3% limit. Prompt processing accounts for ~120 ms of the saved pair's gap.
+    Profile/batch the staged tail projection or qualify the deferred AutoRound arm; C7 also remains open.
+    The default and all acceptance bars stay unchanged.
 
 **Which tasks need the box:**
 
@@ -183,6 +270,6 @@ deferred projection equals today's at every flush point: plain step, request end
 | 5 | step 1 | step 2 | - |
 | 6 | steps 2, 4 | step 3 | step 1 |
 | 7 | step 1 | step 2 | - |
-| 8 | - | yes (idle) | - |
+| 8 | - | yes (one idle card; >16 free CPU threads if the other card is busy) | - |
 
 Test and benchmark runs (Tasks 1-2, 8 measurements) go to a Sonnet agent; implementation (Tasks 3-7) to Opus.

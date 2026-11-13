@@ -97,6 +97,23 @@ void plan_case() {
   std::printf("plan with a drafter at 32768: %s\n", runtime::describe(with, 32'530'000'000ull, 1'500'000'000ull).c_str());
 }
 
+void head_policy_case() {
+  CHECK(cli::dflash::candidate_head(true, 0));
+  CHECK(!cli::dflash::candidate_head(false, 0));
+  for (uint32_t n : {32768u, 65536u, 131072u}) {
+    CHECK(!cli::dflash::candidate_head(true, n));
+    CHECK(!cli::dflash::candidate_head(false, n));
+  }
+  CHECK(cli::dflash::Args{}.format == loader::DraftFormat::Int8);
+  const auto full = server::MtpCost::dflash(true, true);
+  CHECK(cli::dflash::cost({}, loader::LmHeadForm::Int8, 0).draft[0] < full.draft[0]);
+  cli::dflash::Args int4;
+  int4.format = loader::DraftFormat::Int4G64;
+  CHECK(cli::dflash::cost(int4, loader::LmHeadForm::Int8, 32768).draft[0] <
+        cli::dflash::cost({}, loader::LmHeadForm::Int8, 32768).draft[0]);
+
+}
+
 void engine_flags_case() {
   cli::dflash::Args a;
   a.on = true;
@@ -153,11 +170,10 @@ void cost_case() {
   const uint32_t hi = run(0.95), mid = run(0.5), lo = run(0.1);
   std::printf("adaptive K over MtpCost::dflash (int8 head, int8 drafter): alpha 0.95 -> K %u, 0.5 -> K %u, "
               "0.1 -> K %u; draft row %.3f (32k V': %.3f)\n", hi, mid, lo, c.draft[0], v.draft[0]);
-  // Spec 28b's measured rows: verify(8) = 1.56 against verify(7) = 1.35 (the M = 8 attention build, spec 28c), so
-  // K = 7 pays only above alpha ~0.99 and K = 6 is the policy's choice at 0.95.
+  // Spec 19 v2's measured rows keep the widest block worthwhile at high acceptance.
   CHECK(hi == 6 || hi == 7);
-  CHECK(c.verify[7] == 1.56 && c.verify[4] == 1.18);
-  CHECK(mid >= 1 && mid <= 3);
+  CHECK(c.verify[7] == 1.246703 && c.verify[4] == 1.170806);
+  CHECK(mid >= 1 && mid <= 4);
   CHECK(lo == 0);
 }
 
@@ -168,6 +184,7 @@ int main() {
   dims_case();
   plan_case();
   cost_case();
+  head_policy_case();
   engine_flags_case();
   std::printf("dflash_engine_host_test OK\n");
   return 0;

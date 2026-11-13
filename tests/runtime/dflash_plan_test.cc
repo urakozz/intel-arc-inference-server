@@ -59,18 +59,35 @@ int main(int argc, char** argv) {
   CHECK_EQ(s.hid, size_t(8) * 256 * 4);
   CHECK_EQ(s.out, size_t(1616));
   const rd::DFlashSizes s32 = rd::sizes(d, 5120, 32768, 16384);
+  const auto s4 = rd::sizes(d, 5120, V, 16384, loader::DraftFormat::Int4G64);
+  CHECK_EQ(s4.gout, 8 * s.gout);
+  CHECK_EQ(s4.co, 16 * s.co);
+  CHECK_EQ(s4.kv, 8 * s.kv);
+  CHECK_EQ(s4.hid, 16 * s.hid);
+  CHECK_EQ(s4.ring_k, s.ring_k);
+  CHECK_EQ(s4.ring_v, s.ring_v);
+  const auto hc = rd::sizes(d, 5120, V, 16384, loader::DraftFormat::Int8, true);
+  CHECK_EQ(hc.tpart, 4 * s.tpart);
+  CHECK_EQ(hc.candidate, size_t(7) * 64 * 4);
+  CHECK_EQ(hc.logits, s.logits);
+  CHECK_EQ(hc.ring_k + hc.ring_v, s.ring_k + s.ring_v);
+  const auto hp = rd::drafter_plan(d, 5120, V, loader::DraftFormat::Int8, true);
+  CHECK_EQ(hp.weights, loader::dflash_weight_bytes(d, 5120, loader::DraftFormat::Int8).total() +
+                          loader::dflash_linear_bytes(5120, V, loader::DraftFormat::Int4G64));
+  CHECK_EQ(hp.fixed + hp.per_position * 16384, hc.total());
+  CHECK_EQ(rd::draft_launches(d, true), 88u);
   CHECK_EQ(s.total() - s32.total(), (s.logits - s32.logits) + (s.tpart - s32.tpart));
   std::printf("buffers at max_len 16384: %zu B (ring %zu, taps %zu, rope %zu, logits %zu); with a 32k draft "
               "vocabulary %zu B\n",
               s.total(), s.ring_k + s.ring_v, s.taps, s.rope, s.logits, s32.total());
 
   // 2. the planner's term
-  for (loader::DraftFormat f : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16}) {
+  for (loader::DraftFormat f : {loader::DraftFormat::Int8, loader::DraftFormat::Bf16, loader::DraftFormat::Int4G64}) {
     const runtime::DrafterPlan p = rd::drafter_plan(d, 5120, V, f);
     CHECK_EQ(p.weights, loader::dflash_weight_bytes(d, 5120, f).total());
     CHECK_EQ(p.per_position, size_t(512));
     for (uint32_t L : {4096u, 16384u, 131072u, 262144u})
-      CHECK_EQ(p.fixed + p.per_position * L, rd::sizes(d, 5120, V, L).total());
+      CHECK_EQ(p.fixed + p.per_position * L, rd::sizes(d, 5120, V, L, f).total());
     std::printf("drafter %s: weights %zu B + buffers %zu B + 512 B / position = %.3f GB at 131072\n",
                 loader::draft_format_name(f), p.weights, p.fixed, p.bytes(131072) / 1e9);
   }
@@ -104,12 +121,12 @@ int main(int argc, char** argv) {
                   .total() + reserve > device);
   std::printf("max_len auto on 32 GB with a 17 GB target: %u without the drafter, %u with it (int8)\n", a_off, a_on);
 
-  // Spec 19v3a: the loaded target with its int8 head (memory_plan_test's derived weights), the unchanged
-  // drafter and eight GDN slots. Only the target's KV and its prefill widening change form.
+  // Spec 19v3a: the loaded target with its int8 head (memory_plan_test's derived weights), candidate64 head,
+  // unchanged drafter and eight GDN slots. Only the target's KV and its prefill widening change form.
   {
     constexpr size_t target = 16'812'371'968ull, card = 32'530'000'000ull;
-    const auto bf = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Bf16, dr);
-    const auto i8 = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Int8, dr);
+    const auto bf = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Bf16, hp);
+    const auto i8 = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Int8, hp);
     CHECK_EQ(i8.drafter, bf.drafter);
     CHECK_EQ(i8.drafter_slots, bf.drafter_slots);
     CHECK_EQ(i8.drafter_taps, bf.drafter_taps);
@@ -117,12 +134,12 @@ int main(int argc, char** argv) {
     CHECK_EQ(i8.kv, persistent.kv_k + persistent.kv_v);   // each int8 allocation includes its scales
     CHECK(i8.kv < bf.kv);
     const uint32_t len = runtime::max_len_that_fits(q, false, target, card, reserve, 262144, {}, {},
-                                                  runtime::KvCache::Int8, dr);
+                                                  runtime::KvCache::Int8, hp);
     CHECK(len >= 200000);
-    CHECK(runtime::plan(q, len, false, target, {}, {}, runtime::KvCache::Int8, dr).total() + reserve <= card);
+    CHECK(runtime::plan(q, len, false, target, {}, {}, runtime::KvCache::Int8, hp).total() + reserve <= card);
     CHECK(len == 262144 || runtime::plan(q, len + runtime::kMaxLenQuantum, false, target, {}, {},
-                                       runtime::KvCache::Int8, dr).total() + reserve > card);
-    std::printf("DFlash int8 KV --max-len auto on 32.530 GB: %u (target %zu B, reserve %zu B)\n",
+                                       runtime::KvCache::Int8, hp).total() + reserve > card);
+    std::printf("DFlash int8 KV + candidate64 --max-len auto on 32.530 GB: %u (target %zu B, reserve %zu B)\n",
                 len, target, reserve);
   }
 
@@ -169,6 +186,8 @@ int main(int argc, char** argv) {
     std::vector<float> norms(2 * 5120, 1.0f);
     const uint64_t k8 = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
     const uint64_t k16 = rd::drafter_key(d, loader::DraftFormat::Bf16, norms.data(), norms.size() * 4);
+    const uint64_t k4 = rd::drafter_key(d, loader::DraftFormat::Int4G64, norms.data(), norms.size() * 4);
+    CHECK(k4 != 0 && k4 != k8 && k4 != k16);
     norms[17] = 1.0078125f;   // one norm weight another checkpoint has
     const uint64_t k8b = rd::drafter_key(d, loader::DraftFormat::Int8, norms.data(), norms.size() * 4);
     model::DFlashDesc other = d;

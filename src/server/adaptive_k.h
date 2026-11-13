@@ -45,21 +45,22 @@ struct MtpCost {
   // the verify list covers.
   MtpCost with_free_drafts() const;
 
-  // Spec 19c (`--spec dflash`, spec 19 decision 4): the verify rows to M = 8 and the DFlash drafter's draft row,
-  // FLAT in K - one pass of the drafter drafts the whole block (`--spec-cost` replaces either part):
-  //   verify M = 1..4   the head form's rows above; M = 5..8 MEASURED since spec 28b (probe_mtp_steps' interleaved
-  //                     pairs, int8 head, depth 4096, busy-box timing): 1.18 / 1.30 / 1.35 / 1.56 - the bf16 head's
-  //                     the same rows (derived: its M = 2..4 rows equal the int8 head's within 0.01). M = 8's step
-  //                     is the attention build's (spec 28c), not the GEMM's. (Before 28b: M = 3 -> 4's slope,
-  //                     0.22 a row, docs/probes/probe-dflash-2026-10-08.md §3.)
-  //   draft             the drafter's weights read once (int8 ~1.8 GB -> 0.10, bf16 ~3.6 GB -> 0.19 of the 32.65 ms
-  //                     int8 plain step) plus the target's head over the K mask rows, read once (int8 1.27 GB ->
-  //                     0.07, bf16 2.54 GB -> 0.14), whatever K (spec 19 §3).
-  static MtpCost dflash(bool i8_head, bool int8_drafter);
-  static constexpr double kDFlashDrafterInt8 = 0.10, kDFlashDrafterBf16 = 0.19;
-  static constexpr double kDFlashHeadInt8 = 0.07, kDFlashHeadBf16 = 0.14;
+  // Spec 19v2: one block drafts all K rows. The int8 H1/B4 full/candidate totals and per-mode verify rows are
+  // measured paired medians at depth4096 (2026-11-12, busy box); docs/BENCHMARKS.md. The full-head decomposition
+  // uses that profile's head GEMM, and BF16 doubles its head/body GEMM shares, retaining non-linear/host cost.
+  // drafter_format: 0 bf16, 1 int8, 2 int4 g64; candidate_head is C3's top64/exact-rerank path.
+  static MtpCost dflash(bool i8_head, unsigned drafter_format, bool candidate_head = false);
+  static constexpr double kDFlashHeadInt8 = 2.166354 / 29.222498, kDFlashHeadBf16 = 2 * kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterInt8 = 0.298136 - kDFlashHeadInt8;
+  static constexpr double kDFlashDrafterBf16 = kDFlashDrafterInt8 + 3.185105 / 29.222498;
+  static constexpr double kDFlashDraftCandidateInt8 = 0.287036;
+  // Experimental PRE-H1/B4 RTN estimates; this form failed acceptance and is not selected by the CLI.
+  // Candidate is DERIVED from that full-head row and int8 candidate saving. Re-measure after the calibrated
+  // AutoRound export passes acceptance; the operator deferred that conversion.
+  static constexpr double kDFlashDrafterInt4 = 0.269526 - kDFlashHeadInt8;
+  static constexpr double kDFlashDraftCandidateInt4 = 0.257769;
   // The head's share of that draft row - what a draft vocabulary scales (with_draft_vocab).
-  static double dflash_head_share(bool i8_head, bool int8_drafter);
+  static double dflash_head_share(bool i8_head, unsigned drafter_format);
 
   // Spec 26c: Nemotron 3.5 Bolt's rows, DERIVED (spec 26 §11's table over spec 25 §14's layout bytes, depth 4096; box row 63's
   // r63.cost measures them, `--spec-cost` replaces either part). The verify at M = 1..8 with the plain M-row MoE: 1 + 0.1933 a

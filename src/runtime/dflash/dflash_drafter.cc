@@ -26,7 +26,7 @@ uint32_t checked_max_k(const model::DFlashDesc& d, uint32_t k) {
 DFlashDrafter::DFlashDrafter(l0::Context& ctx, loader::DFlashWeights w, uint32_t head_rows, uint32_t max_len,
                              uint32_t max_k)
     : w_(std::move(w)),
-      b_(ctx, w_.desc, w_.target_hidden, head_rows, max_len),
+      b_(ctx, w_.desc, w_.target_hidden, head_rows, max_len, w_.format, bool(w_.candidate_head)),
       max_k_(checked_max_k(w_.desc, max_k)),
       project_(build_dflash_project(ctx, w_, b_)) {
   // Spec 19d: the store's name for this drafter - its shapes, format and the two norms' weights as loaded.

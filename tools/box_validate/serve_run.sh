@@ -28,7 +28,7 @@ echo "serve_run: [$label r$round] $bin $model --port $port --spec off --log-requ
 "$bin" "$model" --port "$port" --spec off --log-requests "$out/server-log" ${serve[@]+"${serve[@]}"} \
   > "$out/server.log" 2>&1 &
 srv=$!
-stop() { kill "$srv" 2>/dev/null; wait "$srv" 2>/dev/null; }
+stop() { tools/box_stop.sh child "$srv"; wait "$srv" 2>/dev/null; }
 trap stop EXIT
 up=0
 for _ in $(seq 1 "${WAIT:-900}"); do

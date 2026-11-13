@@ -687,6 +687,20 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_dependencies(dflash_d1 ${D1_KERNELS})
 endif()
 
+# Spec 19 v2: production DFlash timings and engine-tap acceptance dumps.
+if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(probe_dflash_iter probe_dflash_iter.cc)
+  target_include_directories(probe_dflash_iter PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_dflash_iter PRIVATE b70_dflash_runtime b70_prefill_host b70_server b70_third_party_json)
+  b70_target_kernel_dir(probe_dflash_iter)
+  add_dependencies(probe_dflash_iter ${D1_KERNELS})
+  add_test(NAME dflash_probe_cli_test COMMAND ${CMAKE_COMMAND} -E env
+    "DFLASH_PROBE=$<TARGET_FILE:probe_dflash_iter>" python3
+    "${CMAKE_SOURCE_DIR}/tools/box_validate/test_dflash_modes.py")
+  set_tests_properties(dflash_probe_cli_test PROPERTIES LABELS "host;dflash"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
+
 # --- probe_bolt_step: spec 25c P0 (plan 25c Task 1) ---
 # Nemotron 3.5 Bolt's decode step from EXISTING kernels at its shapes (tools/probe/bolt_step_shapes.h: 653 / 533 /
 # GEMV-only / noop lists and the SSM state's read-modify-write floor, interleaved; --sweep-s times every int4 shape at

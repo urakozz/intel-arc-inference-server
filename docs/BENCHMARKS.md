@@ -941,6 +941,305 @@ drafts with `z-lab/Qwen3.8-27B-DFlash2` (5 layers, int8 at load, beside the gate
 target's own hidden states and verifies up to 8 rows at once (specs 19b-19d; box queue rows 54-56). The acceptance in
 "P0" is measured on the Mac CPU (spec 19a, `docs/probes/probe-dflash-2026-10-08.md`); "D5" below is measured on the card. Spec: `docs/superpowers/specs/2026-10-05-spec19-draft-model-speculative-decoding-design.md`.
 
+### V2 baseline (2026-11-11, spec 19 v2 Tasks 1-2)
+
+Branch `spec19v2-dflash-speed`, base `8d21b9f9`, int8 drafter and full int8 head; no speed changes yet.
+Card 0, **busy box** (another card job ran concurrently). The operator's slim Task 2 reuses today's main baselines:
+MTP auto **73.2 t/s** (README's one-card row), plain decode **33.5 t/s** at depth 4096. Neither baseline was rerun.
+
+| slots_bench, one request | warm decode | cold / warm first token |
+|---|---:|---:|
+| recorded main, MTP auto, four sequence slots | 73.181 t/s | 2.316 / 1.091 s |
+| DFlash, one sequence slot, context 32768, bf16 KV | **88.806 t/s** | 2.502 / 1.171 s |
+
+Both saved requests contain **identical 3,425 prompt ids** and each generates **512 ids**, greedy with `ignore_eos`.
+The earlier 2,820-token shape label was stale. Both warm requests restore the prefix at token 2048, with the
+remaining prompt tail prefilling; prefix cache budget 32 GiB. MTP's recorded slot had context 32768. DFlash is
+**1.213x** the operator's rounded 73.2 baseline, above the 80.5 t/s early decision point. The operator chose to
+continue Tasks 3-7 after baseline gates clear. **The 80.5 t/s early bar PASSED** once CPU G-accept cleared below.
+Task 8 compares against freshly measured main per-step MTP (`f65ae50e` or later), the default for `--mtp auto`.
+The operator subsequently allowed one idle GPU with >16/44 CPU threads available, graded busy box. This single shape does **not** establish its replay/regression G-speed gate.
+
+Provenance on the box: `~/b70/logs/brag-speed/20261111-1536/card-bf16/{bench.jsonl,server-log/000003.json}`
+and `~/b70/logs/dflash-v2/baseline/slots/{bench.jsonl,server-log/000003.json,server.log}`. The DFlash command is
+`tools/box_validate/dflash_v2.sh d5`; its driver log is `~/b70/logs/dflash-v2/d5.log`.
+
+One golden/A4 serving round: **39/39 pass the f32 judge**, 37 bitwise identical to the saved plain stream;
+golden cjk (first difference 16) and prose (74) each have zero f32-rejected ids on either suffix. No missing
+references or skipped requests. Logs: `~/b70/logs/dflash-v2/{identity.log,baseline/identity/}`; saved plain
+reference: validation state `e88ce65d57d8-vs-e88ce65d57d8`, `r55.serve/off.r1/requests.jsonl`.
+**CPU G-accept PASS** (2026-11-12): the engine and reference use the same taps, anchors and active widths.
+Existing 19a batched drafting is checked against a single real-model anchor at every K=1..7 before proceeding;
+the parity check passes. The complete baseline is `~/b70/logs/dflash-v2/baseline/acceptance.json`, with all
+K=1..7 counts and draft ids on five corpora; the completed driver ends `ALLDONE rc=0`.
+
+| corpus | anchors | engine E7 | CPU reference E7 | absolute gap | G-accept |
+|---|---:|---:|---:|---:|---|
+| A4 | 544 | 7.080252 | 7.080252 | 0.000000 | PASS |
+| golden code | 16 | 5.875000 | 5.750000 | 0.125000 | PASS (<=0.15) |
+| golden prose | 16 | 2.286458 | 2.286458 | 0.000000 | recorded |
+| golden cjk | 16 | 1.500000 | 1.500000 | 0.000000 | recorded |
+| held-out opencode | 16 | 3.687500 | 3.687500 | 0.000000 | recorded |
+
+Initial cost-probe ratios were invalid because its restored plain row was inactive; those ratios are excluded.
+The corrected probe requires its plain replay to consume one row
+and match verify(1)'s greedy id before timing. Both depths pass that calibration.
+
+Uninstrumented production lists, interleaved pairs with a restored snapshot before every call; one warm-up
+round, then medians of three rounds of 16 calls. **Busy box:** another card job and the CPU reference ran
+concurrently. Plain normalization is each arm's paired plain replay (about 29.0 / 32.8 ms), not the reused
+33.5 t/s decode baseline above. The iteration includes live greedy acceptance and its commit.
+
+| arm | depth 4096, ms | / paired plain | depth 32768, ms | / paired plain |
+|---|---:|---:|---:|---:|
+| draft, K=7 | 8.978022 | 0.309880 | 8.963257 | 0.273906 |
+| verify(1) | 28.966064 | 1.000578 | 32.852369 | 1.000564 |
+| verify(2) | 30.350444 | 1.047126 | 33.445930 | 1.020956 |
+| verify(3) | 31.751969 | 1.091869 | 35.302113 | 1.077380 |
+| verify(4) | 32.644368 | 1.121579 | 36.335702 | 1.108764 |
+| verify(5) | 33.865681 | 1.168254 | 38.812380 | 1.183860 |
+| verify(6) | 35.023325 | 1.205641 | 40.052069 | 1.221439 |
+| verify(7) | 35.741238 | 1.229004 | 41.244214 | 1.256987 |
+| verify(8) | 36.254194 | 1.245386 | 41.750586 | 1.272373 |
+| projection | 0.567761 | 0.019453 | 0.563306 | 0.017169 |
+| empty submit + fence | 0.020969 | 0.000723 | 0.019653 | 0.000600 |
+| K=7 iteration | 45.830047 | 1.579196 | 51.413898 | 1.562625 |
+
+The C7 grades at depth 4096:
+
+| quantity | measured | target | grade |
+|---|---:|---:|---|
+| draft | 8.978 ms / 0.309880 plain | <=4.5 ms / <=0.15 | FAIL |
+| verify(8) | 1.245386 plain | <=1.15 | FAIL; faster than the older 1.57, still above target |
+| projection + host gaps | instrumented upper bound 1.797466 ms; projection alone 0.567761 ms wall | <=0.5 ms | NOT PASSED; exact host gap not isolated |
+| iteration | 1.579196 plain | <=1.35 | FAIL |
+
+Separate timestamped lists have **87 draft / 8 projection launches**. At depth 4096 the draft's device sum is
+8.605521 ms: GEMMs 5.390208 ms (full int8 head **2.165104 ms**, remaining GEMMs 3.225104 ms), attention part
+2.711250 ms, attention reduce 0.047396 ms, norms 0.127500 ms, top-k stages 0.204375 / 0.028333 ms. The
+projection's device sum is 0.436563 ms (GEMMs 0.421042 ms). Per-launch details are retained in
+`~/b70/logs/dflash-v2/iter-{4096,32768}.log`. Device draft/projection sums at 32768 are 8.621875 / 0.438646 ms.
+The host-gap upper bounds are 1.401320 / 1.282363 ms, and projection + host upper bounds 1.797466 / 1.664446 ms:
+per-launch timestamp signals add host-scope flushes and device dispatch gaps remain in the residual. These
+instrumented bounds are diagnostics, not exact uninstrumented host costs or the benchmark timings above.
+
+Task 3 uses the measured verify ratios above and a flat int8 draft row of 0.309880 in AdaptiveK. Its head share
+is 0.241156 (2.165104 ms divided by the paired 28.972533 ms plain step, then by 0.309880); the remaining draft
+cost is assigned to the body. The unmeasured bf16 arms are explicitly **derived**: double the head's cost and
+the body's GEMM cost, keeping attention, other kernels and host overhead unchanged. Their body/head costs are
+0.346466 / 0.149459 plain steps, and their verify ratios are taken equal to int8. MTP's tables are unchanged.
+At acceptance alpha 0.5 / 0.8 / 0.95, this DFlash table chooses K=4 / 7 / 7. Task 7b will refresh these costs
+after the GPU optimizations.
+
+EOS-stopped free runs (capped at 256 ids), separate from the teacher-forced acceptance anchors:
+
+| corpus | requests | ids / iterations | ids per iteration | requests reaching EOS |
+|---|---:|---:|---:|---:|
+| A4 | 34 | 2622 / 394 | 6.65482 | 32 |
+| golden code | 1 | 146 / 24 | 6.08333 | 1 |
+| golden prose | 1 | 256 / 99 | 2.58586 | 0 |
+| golden cjk | 1 | 256 / 124 | 2.06452 | 0 |
+| held-out opencode | 1 | 97 / 23 | 4.21739 | 1 |
+
+The original engine-tap baseline is `~/b70/logs/dflash-v2/baseline/engine/`: 38 tap files and 4256 draft records
+(16 anchors per source at each K=1..7). The CPU comparison drafts every active K separately: allocated eight-row
+lists still mask noncausal attention at K+1, so smaller K's are not prefixes of K=7. Two A4 recordings with fewer
+than eight EOS-stopped continuation ids cannot supply these anchors and are excluded. The separate serving
+correctness round above covers all 36 A4 requests.
+
+### Task 4: one-submit iteration (2026-11-12, `882989b8`)
+
+The production DFlash path submits the pending projection, draft and verify together. Four device regressions
+passed with no skips: `dflash_profile_test`, `dflash_engine_test`, `dflash_gpu_test` and
+`dflash_prefix_gpu_test` (1620 s total). They check one submission per iteration, bitwise draft/readback,
+verify rows and ring, and projection materialization at snapshots, truncate and request end. The two-card
+`pp_dflash_test` passed in 114.02 s when both cards became idle (fresh rebuild, no skip). All five Task 4
+device checks and both calibrated host-gap bars pass; the full C7 cost targets below remain unmet.
+
+**Busy box, exclusive card 1**, paired medians with calibrated active plain rows at both depths. The steady-state
+probe prepares the last prompt row through verify/commit outside timing, leaving its projection pending for the
+batched iteration; plain pairs use the same preparation. This is not a final serving speed measurement.
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| draft, ms | 9.039839 | 9.080943 |
+| verify(8), paired plain steps | 1.254267 | 1.274542 |
+| projection wall, ms | 0.490908 | 0.506852 |
+| K=7 iteration, ms | 45.939428 | 51.677500 |
+| K=7 iteration, paired plain steps | 1.577007 | 1.558300 |
+| instrumented host outside device lists, ms | **0.422639** | **0.381236** |
+| projection + host outside device lists, ms | 0.804514 | 0.766757 |
+| old kernel-sum host residual upper bound, ms | 1.371910 | 1.323840 |
+
+Task 4's host-only gap bar (<=0.5 ms) passes at both depths. C7's combined projection + host bar (<=0.5 ms)
+and full iteration bar (<=1.35 plain steps) remain unmet. Device-list intervals run from the first kernel start
+to the last kernel end, including dispatch and timestamp signal flushes within each list. The host figure is
+instrumented wall time minus those intervals; the older wall-minus-kernel-sums residual remains an upper bound.
+Evidence: `~/b70/logs/dflash-v2/task4/{device.xml,iter-4096.log,iter-32768.log}` and `task4-device.log`.
+
+### Task 5: RTN int4 diagnostics (2026-11-12)
+
+**Acceptance FAIL**, source `39d54ad1`, full int8 head, all original anchors/K and exact original-baseline
+recalibration. K7 A4 falls 7.08025 → 7.00551, prose 2.28646 → 2.22727, held-out opencode 3.68750 → 3.25000;
+these losses exceed 0.05. C2 therefore requires an AutoRound-exported drafter before promotion; int8 stays default.
+Full table and provenance: [DFlash record](probes/dflash-vs-sly-2026-11-11.md#7-spec-19v2-measurements-2026-11-12).
+
+`8a16f5a4` splits the int4 producers across K and folds their partials inside the existing consumers (87 draft /
+8 projection launches). **Exclusive card 1, busy box; cost diagnostics only.**
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| draft, ms | 7.849702 | 8.290171 |
+| projection wall, ms | 0.337303 | 0.459109 |
+| verify(8), paired plain steps | 1.252052 | 1.276792 |
+| K7 iteration, paired plain steps | 1.528099 | 1.527929 |
+| instrumented projection + host outside lists, ms | 0.665543 | 0.940995 |
+
+The 4k draft saves 1.128320 ms against Task 1, below Task 5's 2.5 ms gate. The 4k profile has body GEMMs
+1.912396 ms, full head 2.168333 ms, attention-part 2.768438 ms, and top-k stages 0.208125 / 0.028646 ms.
+New split consumers pass the bitwise kernel tests. The later contracted-CPU-twin regression passes the full
+int4 numerical test: both projection paths have zero differing values, ring f32 cosine is 0.9999978, and the
+aggregate f32 candidate-set gate is 5 misses versus 6 for forced GEMV. The CPU twin now mirrors the verified
+GEMV fused multiply-add order; GPU arithmetic and judge bars are unchanged. This does not repair RTN corpus loss. Logs: `~/b70/logs/dflash-v2/task5-split-cost/iter-{4096,32768}.log`,
+`task5-split-kernels-card1.log`. These numbers do not refresh AdaptiveK or establish the final speed bar.
+
+### Task 6: candidate head and exact rerank (2026-11-12)
+
+At `18d366bf`, the full-vocabulary int4 candidate head selects 64 candidates per row, then reranks their
+original int8 rows exactly. The unchanged int8 body isolates head quality. All 35 corpus/K acceptance values
+match the original baseline exactly; the one-load `--all-k` harness first reproduced all 4256 original drafts.
+This passes isolated head quality, including the held-out opencode session, but does not pass the cost gate.
+
+| quantity | depth 4096 | depth 32768 |
+|---|---:|---:|
+| candidate GEMM, ms | 1.214896 | 1.199167 |
+| top-64 stages 1 / 2, ms | 0.365000 / 0.073750 | 0.367812 / 0.074375 |
+| exact rerank, ms | 0.135625 | 0.134167 |
+| sum of head-path launch medians, ms | 1.789271 | 1.775521 |
+| draft wall, ms | 8.723402 | 8.618562 |
+| K7 iteration, paired plain steps | 1.591323 | 1.556495 |
+
+The Task 6 head-share target of 0.5 ms **fails**. These are exclusive-card-1/busy-box diagnostics with the
+original H4/B8 attention geometry, not final AdaptiveK costs or the Task 8 speed bar. Capture has 88 draft /
+8 projection launches. No serving default changed. Evidence: `~/b70/logs/dflash-v2/task6/candidate64-int8/`
+(`acceptance.json`, `iter-{4096,32768}.log`) and `task6-candidate-{pilot,cost}.log`.
+
+### Task 7: attention geometry (2026-11-12)
+
+Random wrap/mask/long-position tests and real-model readback/hidden-state comparisons pass bitwise for H1/B4
+(one query head and four block rows per workgroup). Interleaved timestamp medians for the five attention-part
+launches are 2.084063 ms versus 2.696458 ms for H4/B8 at pos4096/K7; 1.227500 versus 1.595521 ms at K2;
+0.554583 versus 1.144688 ms at pos16/K7. Evidence: `task7-attn-rows.log`.
+
+Parallel exponentials remain a probe control: bitwise checks pass, but steady K7 slows to 2.393125 ms versus
+2.074167 ms for serial H1/B4 in the paired experiment. Both 16-bit and packed-32-bit local K-cache experiments
+fail the bitwise gate and are rejected before timing. H1/B4 is now selected. Its kernel/profile/engine/greedy-identity
+integration checks pass 4/4 with no skips (21.42 / 29.17 / 309.71 / 1075.73 seconds). The full int8 numerical check
+subsequently passes (`resume-numerical-card0.log`, DONE rc0). The later real-list profiles, exclusive card1/busy box with CPU reference work, are:
+
+| int8 body / head mode | depth | draft ms / plain steps | verify(8), plain steps | iteration, plain steps |
+|---|---:|---:|---:|---:|
+| full int8 head | 4096 | 8.712270 / 0.298136 | 1.246703 | 1.557816 |
+| candidate64 + exact rerank | 4096 | 8.429809 / 0.287036 | 1.242865 | 1.558631 |
+| full int8 head | 32768 | 8.788698 / 0.265708 | 1.271189 | 1.548661 |
+| candidate64 + exact rerank | 32768 | 8.527476 / 0.257115 | 1.271936 | 1.530302 |
+
+C7 remains **FAIL**. The 4k candidate profile's instrumented host time outside lists is 1.860053 ms and
+projection + host is 2.247761 ms; concurrent CPU reference work makes these busy-box diagnostics. The final
+speed bar is still a separate rotated serving comparison. All five profiled attention launches bind H1/B4.
+Evidence: `~/b70/logs/dflash-v2/task7/policy-h1b4/{device.xml,iter-{full,candidate}-{4096,32768}.log}`.
+
+The RTN int4 H1/B4 diagnostic completed all four profiles before the operator reclaimed card1:
+
+| RTN body / head mode | depth | draft ms / plain steps | iteration, plain steps |
+|---|---:|---:|---:|
+| full int8 head | 4096 | 7.784417 / 0.265500 | 1.542619 |
+| candidate64 + exact rerank | 4096 | 11.264767 / 0.350649 | 1.554384 |
+| full int8 head | 32768 | 7.109450 / 0.215375 | 1.546868 |
+| candidate64 + exact rerank | 32768 | 6.565448 / 0.198730 | 1.498815 |
+
+**The candidate 4k wall profile is noisy and is not a policy calibration:** its empty submit/fence costs
+0.751771 ms versus 0.012662–0.014936 ms in the other three arms, projection is 3.248991 ms, and verify(3)
+appears more expensive than verify(4). The saved measurements remain busy-box diagnostics. They do not repair
+RTN's failed acceptance; no RTN arm is enabled for serving. AdaptiveK uses the new measured int8 full/candidate
+rows; experimental RTN estimates remain explicitly unqualified pending the deferred AutoRound follow-up.
+Evidence: `~/b70/logs/dflash-v2/task7b/h1b4-candidate-int8/iter-int4-{full,candidate}-{4096,32768}.log`.
+
+At the GPU handoff, the next baseline calibration was interrupted: 2463 complete rows match the original
+4256-row baseline, with one truncated line. This is **partial, not a passed calibration**; it is archived under
+`paused-2026-11-12T1523/` beside `calibration-status.json`. That partial run is superseded by the complete 4256-row calibration and all 35 acceptance rows below.
+The full int8 H1/B4 numerical check also passes. Main `0b5ef628` is merged at `b5bb4044`; fresh G0 and a new
+Task 8 collection follow the successful merged build and six host checks. Pre-merge serving timings
+remain historical. The operator restarted CPU judging during G0 (69 GiB, eight threads, saved layer 26);
+overlapping timings are busy-box despite the whole-box GPU reservation.
+
+### Cold-request reset (2026-11-13)
+
+The pre-merge replay contains 30 one-token requests among its 78 requests. Their median DFlash TTFT is
+507.9 ms versus MTP's 151.1 ms in round 1. Saved prefix logs isolate DFlash's cold reset at 324–332 ms,
+versus 7–8 ms for MTP; prompt processing itself is 96 ms versus 93 ms. `DFlashBuffers::zero()` was rebuilding
+and uploading the entire 131072-row RoPE table on every cold request.
+
+Generating and uploading that immutable table once at construction reduces the focused buffer reset from
+244.426 to **0.179 ms** on card0 (whole-box GPU reservation, CPU references/compiler active). The device
+regression first fails when reset overwrites guards in the immutable allocation, then passes after the move;
+initial RoPE matches the independent twin bitwise and the ring, control and readback still reset to zero.
+Seven selected checks pass. This is a buffer measurement, not an end-to-end serving speed claim; the new
+real-engine check passes (297.36 s); the main rotated replay and its f32 judging pass below. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
+and the preserved full test output `~/b70/logs/dflash-v2/reset-v7-green-detail.log`.
+
+### Task 8: serving validation after the reset fix (2026-11-13)
+
+Source `a83322bb`, main `0b5ef628` merged at `b5bb4044`, server SHA256
+`83d62ae7749afb3a81184fce2d0ab2de8ef601badb8172482257a9de653d6deb`.
+Selected arm: int8 body / candidate64 exact int8 rerank / H1B4, physical card0. All three speculation arms
+run three rotated rounds, prefix cache on, bf16 KV, int8 target head; MTP's startup confirms its default
+adaptive per-step policy. Whole-box GPU reservation; CPU references overlap the main recording, so the
+collection retains the **busy-box** grade. The executable and all 2747 kernel files are fingerprinted.
+
+Ratios use raw per-request medians and their geometric mean; all requests, including the main recording's
+30 one-token requests, remain in the gate.
+
+| recording | requests | DFlash / MTP | DFlash / plain | f32 judgment |
+|---|---:|---:|---:|---|
+| opencode-session-int8 | 78 | 1.193081621 | 1.774903067 | PASS, no failures/skips |
+| opencode-session | 21 | 1.226568536 | 2.849522724 | pending long-context references |
+| opencode-session-2 | 4 | 1.319626438 | 2.844003544 | pending long-context references |
+
+| remaining speed gate | DFlash / MTP | result |
+|---|---:|---|
+| golden | 1.058189106 | PASS |
+| A4 / toolcall | 1.826279459 | PASS |
+| llama-benchy tg128 | 1.382364965 | PASS |
+| llama-benchy tg128 at depth32768 | 1.486807750 | PASS |
+| llama-benchy pp4096 | 0.955104041 | **FAIL**, below 0.97 |
+
+The main recording's >=1.10 speed bar passes, but **full G-speed fails**: pp4096 is **4.49% slower** than MTP.
+Its three-round median is 1489.321 t/s versus 1559.328 for MTP (plain 1576.465). This corresponds to about
+2750.25 versus 2626.77 ms for 4096 ids; about **42.23 ms** must be removed to reach the unchanged 3% limit.
+The saved round-1 server logs place about 120 ms of the gap inside prompt processing (2629 versus 2510 ms),
+about 8 ms in prefix snapshot storage (65 versus 57 ms), and less than 1 ms in cold reset. The existing
+8-row staged tail projection is the next profiling target; attribution to it is an inference from that path
+and the component profiles, not a new isolated measurement. No serving default changes.
+
+Core correctness passes: the main recording's six speculative-arm/round comparisons and all six golden/A4
+comparisons have **0 FAIL / 0 SKIPPED**. Actual candidate-head PP passes **39/39** (37 identical, two f32-judged
+passes). **94 new references** are complete: 88 main, four PP (137 s), two corpus (74 s), all at eight threads
+under the 69 GiB cap. The full numerical, selected seven checks and real-engine regression pass; the latter
+runs 297.36 s without skipping. G0 passes 2703 common kernels: 2449 byte-identical, 254 equal section by section
+after normalising only the tree path in build options, 44 additive drafter variants and zero removals.
+
+Both control recordings still need f32 judgments. The complete missing-reference plan has **32 contexts /
+26 groups, estimated 140.6 CPU hours**, excluding chunk/stream overhead. This is a planner estimate, not an
+observed duration. That batch is held for the operator's budget choice; no CPU model or GPU job is left
+running. C7 remains failed (4k draft 8.430 ms, iteration 1.559 plain steps); RTN acceptance failed and proper
+AutoRound remains the operator-deferred follow-up. Open-work item12 stays open.
+
+Evidence under `~/b70/logs/dflash-v2/`: `task8/main-0b5ef628/gates-after-core-refs.json`, all 27 replay arms and
+nine complete corpus arms, `opencode-session-int8/judge-mid-refs.log` and `corpora/judge-after-short-refs.log`
+inside that dataset, `pp-candidate-main-0b5ef628/judge-after-short-refs.log`, `g0-main-0b5ef628/comparison/`,
+`reset-v7-engine.log`, the three CPU logs and `task8-final-ref-plan-v7/{plan.log,summary.json}`.
+
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
 **`dflash-bars` (2026-10-27, against main 0fb0cb9):** G0 - sha the same 49 path-embedding `nb_*` only, bitwise PASS,
@@ -1016,6 +1315,19 @@ PASS on all three arms.**
 | int8 drafter, int8 head | 592 | 585 | 592 | 592 | 0.9999663 | 7 | 1 |
 | bf16 drafter, bf16 head | 592 | 587 | 592 | 592 | 0.9999682 | 5 | 4 |
 | int8, V' 32768 | 592 | 586 | 592 | 592 | 0.9999666 | 6 | 1 |
+
+### int8 KV (spec 19v3a, 2026-11-13)
+
+Implementation branch `spec19v3a-dflash-int8-kv` adds the M5..8 int8 writer/reduce/DPAS binaries and all-depth
+verify dispatch. The operator requested only a quick final check. **No new speed measurements**: paired real-list
+costs at 4096/32768, replay against default per-step MTP, tg128 at 32768 and decode at 120000 are pending (row 86).
+Host planner: **246,528 tokens** at 32.530 GB, 1.5 GB reserve, target weights 16,812,371,968 B, int8 drafter
+and candidate64 head; allocation at that context is untested. The policy costs and `--spec auto` are unchanged.
+The spec's ~1.15–1.18x is derived, not a measured result. Focused check: five host tests, three GPU kernel tests
+(no skips, 33.51 s on card 1), twelve replay-harness tests and two validation regressions passed. All twelve
+new kernel commands are additive, existing commands unchanged. Full G0 binary comparison remains pending.
+Evidence: `~/b70/logs/dflash-int8-v3a/{quick,quick-final}.log` (kernel check rc0); validation regression logs
+are in the branch's local plan workspace.
 
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
@@ -1405,3 +1717,20 @@ generation phase only. vLLM's figures are HTTP-inclusive where they come from
   gate this engine must reproduce exactly. Dumping them follows
   `model.safetensors.index.json` so the oracle reads the same shard set the
   engine loads, rather than a stale set sitting beside it.
+
+### Combined int8 acceptance after H1/B4 (2026-11-12)
+
+On card0, the int8-body H1/B4/candidate64/exact-rerank arm matches the original int8/full-head baseline on
+**all 35 corpus/K acceptance rows, gap zero**. Its cached-tap mode first reproduced all **4256 original draft IDs
+exactly**. The earlier interrupted 2463-row run remains archived; `calibration-status.json` now records the
+completed calibration. Evidence: `~/b70/logs/dflash-v2/resume-accept-card0.log` (DONE rc0) and
+`task7b/h1b4-candidate-int8/{calibration-status.json,acceptance.json}`. The int8 cost table is already refreshed;
+the full int8 H1/B4 numerical check subsequently passes (`resume-numerical-card0.log`, DONE rc0). Forced-GV
+projection has zero differences, ring cosine is 0.9999978, and the existing aggregate f32-set criterion passes
+4 misses versus 8 for forced GV. The individual BF16-head diagnostic (3 versus 2) remains recorded; no bar changed.
+
+Task 8 is collecting on card1 (`task8-card1-continue.log`): the complete first rotation on card0 (78 requests per
+arm) was checked against the original server logs and recording before reuse. Binary SHA remains
+`9afaed8f866f1e7ba824ce97485ae78353a237d4b25bc6202535cd4ddb9c2f03`; each arm records its card. The resumed
+CPU guard measured 19.59–20.07 available threads out of 44. Final speed and serving correctness gates remain
+pending. This does not promote RTN int4 or change the speculation default.

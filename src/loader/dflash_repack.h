@@ -34,11 +34,11 @@ std::vector<std::string> dflash_expected_names(const model::DFlashDesc& d);
 std::string dflash_canon(const std::string& name);
 
 // One linear in its device form: Bf16 - gemv_bf16's tiles [N/16][K/8][8][16] as uint16; Int8 - gemv_i8w's tiles
-// [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 26b, the LiLiCorr drafter's DraftFormat::Int4G64) -
+// [N/16][K/16][16][16] as int8 + fp32 row scales [N]; Int4 (spec 19v2 / 26b, DraftFormat::Int4G64) -
 // rtn's GPTQ words and f16 scales repacked into gemv.cl's layout-1 tiles [N/16][K/64][136] u32.
 struct DFlashHostLinear {
   model::WeightKind kind = model::WeightKind::Bf16;
-  uint32_t K = 0, N = 0;
+  uint32_t K = 0, N = 0, slices = 1;
   std::vector<uint16_t> bf16;   // Bf16
   std::vector<int8_t> i8;       // Int8
   std::vector<float> scales;    // Int8
@@ -49,8 +49,12 @@ struct DFlashHostLinear {
   size_t bytes() const {
     return bf16.size() * 2 + i8.size() + scales.size() * 4 + int4.size() * 4 + gs.size() * 4;
   }
-  model::GemvShape shape() const { return {K, N, 1, kind == model::WeightKind::Int4 ? 1u : 0u}; }
+  model::GemvShape shape() const { return {K, N, slices, kind == model::WeightKind::Int4 ? 1u : 0u}; }
 };
+
+// Spec 19v2 C3: an int4 candidate copy of the loaded int8 head. Quantise its effective fp32 weights directly;
+// the original int8 rows remain the exact rerank source. K%64=0, N%16=0, as for every target head.
+DFlashHostLinear dflash_candidate_head(const int8_t* tiled, const float* row_scales, uint32_t K, uint32_t N);
 
 enum class DFlashLinear { Qkv, O, GateUp, Down, AttnKproj, MlpKproj };
 
