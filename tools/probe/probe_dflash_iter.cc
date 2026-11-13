@@ -1,7 +1,7 @@
 // Spec 19 v2: production DFlash list costs, and engine taps on recorded continuations.
 // probe_dflash_iter TARGET DRAFTER [--depth 4096] [--calls 16] [--rounds 3]
 // probe_dflash_iter TARGET DRAFTER --verify-profile [--depth 4096]: spec 19 v3d Task 1, verify at 1 / 2 / 4 / 8 rows
-//   by kernel family (VPROFILE_* lines)
+//   by kernel family (VPROFILE_* lines); --verify-pairs: only the uninstrumented pairs (VPROFILE_PAIR)
 // probe_dflash_iter TARGET DRAFTER --engine-taps SOURCES.json OUT_DIR [--anchors 16]
 // SOURCES: [{name, prompt_ids, cont_ids}]. Taps use dump_taps.py's safetensors format.
 #include <algorithm>
@@ -374,7 +374,8 @@ std::vector<std::string> verify_families(const std::vector<std::string>& labels)
 // input norm of every tapped layer's successor, and after the final norm). The widths are captured in turn inside
 // every round, each after a warm-up, so clock drift spreads over all of them. Then the same widths uninstrumented
 // as interleaved pairs against verify at 1 row (the decision numbers).
-void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds) {
+void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds,
+                    bool pairs_only) {
   std::ifstream input("tests/golden/prompts/long32k.ids");
   std::vector<uint32_t> file;
   for (uint32_t id; input >> id;) file.push_back(id);
@@ -403,7 +404,7 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
   std::map<uint32_t, std::map<std::string, std::vector<double>>> fam;   // width -> family -> per-round ms
   std::map<uint32_t, std::vector<double>> walls, devices, gaps, spans;
   std::map<uint32_t, size_t> launches;
-  for (unsigned r = 0; r <= rounds; ++r) {
+  for (unsigned r = 0; !pairs_only && r <= rounds; ++r) {   // --verify-pairs: no instrumented round
     for (uint32_t m : widths) {
       runtime::ProfileEvents vp(e.context());
       runtime::CaptureOptions opt;
@@ -459,17 +460,17 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
       launches[m] = count;
     }
   }
-  std::printf("VPROFILE depth=%u calls=%u rounds=%u (instrumented: per-launch timestamps)\n", depth, calls, rounds);
-  for (const auto& [f, ms] : fam[8]) {
+  if (!pairs_only) std::printf("VPROFILE depth=%u calls=%u rounds=%u (instrumented: per-launch timestamps)\n", depth, calls, rounds);
+  if (!pairs_only) for (const auto& [f, ms] : fam[8]) {
     std::printf("VPROFILE_FAMILY depth=%u family=\"%s\"", depth, f.c_str());
     for (uint32_t m : widths) std::printf(" m%u=%.4f", m, fam[m].count(f) ? median(fam[m][f]) : 0.0);
     std::printf(" excess8=%.4f\n", median(fam[8][f]) - (fam[1].count(f) ? median(fam[1][f]) : 0.0));
   }
-  for (uint32_t m : widths)
+  if (!pairs_only) for (uint32_t m : widths)
     std::printf("VPROFILE_TOTAL depth=%u m=%u launches=%zu wall_ms=%.4f device_ms=%.4f gaps_ms=%.4f span_ms=%.4f "
                 "host_ms=%.4f\n", depth, m, launches[m], median(walls[m]), median(devices[m]), median(gaps[m]),
                 median(spans[m]), median(walls[m]) - median(spans[m]));
-  std::printf("VPROFILE_EXCESS depth=%u wall8_minus_wall1=%.4f device_plus_gaps=%.4f\n", depth,
+  if (!pairs_only) std::printf("VPROFILE_EXCESS depth=%u wall8_minus_wall1=%.4f device_plus_gaps=%.4f\n", depth,
               median(walls[8]) - median(walls[1]),
               median(devices[8]) + median(gaps[8]) - median(devices[1]) - median(gaps[1]));
   // Uninstrumented: each width against verify at 1 row, interleaved pairs, the order flipped every round.
@@ -498,16 +499,17 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] [--verify-profile] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
-    bool candidate_head = false, vprofile = false;
+    bool candidate_head = false, vprofile = false, vpairs = false;
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--candidate-head") { candidate_head = true; continue; }
       if (arg == "--verify-profile") { vprofile = true; continue; }
+      if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -539,7 +541,7 @@ int main(int argc, char** argv) {
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
-    if (vprofile) verify_profile(e, drafter, depth, calls, rounds);
+    if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs);
     else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
     else engine_taps(e, drafter, sources, out, anchors);
   } catch (const std::exception& ex) {
