@@ -1,5 +1,7 @@
 // Spec 19 v2: production DFlash list costs, and engine taps on recorded continuations.
 // probe_dflash_iter TARGET DRAFTER [--depth 4096] [--calls 16] [--rounds 3]
+// probe_dflash_iter TARGET DRAFTER --verify-profile [--depth 4096]: spec 19 v3d Task 1, verify at 1 / 2 / 4 / 8 rows
+//   by kernel family (VPROFILE_* lines)
 // probe_dflash_iter TARGET DRAFTER --engine-taps SOURCES.json OUT_DIR [--anchors 16]
 // SOURCES: [{name, prompt_ids, cont_ids}]. Taps use dump_taps.py's safetensors format.
 #include <algorithm>
@@ -328,19 +330,183 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
               depth, median(outside), median(projection_outside));
   e.recapture_verify({});   // the engine's lists must release vp's events before it dies
 }
+
+// Spec 19 v3d Task 1: a verify list's launch -> its kernel family. Linears are named by their order in the layer
+// (a GDN layer: qkv||z, a||b, out_proj, gate||up, down; an FA layer: q||k||v, o_proj, gate||up, down).
+std::vector<std::string> verify_families(const std::vector<std::string>& labels) {
+  std::vector<std::string> out(labels.size());
+  for (size_t i = 0; i < labels.size();) {
+    const std::string layer = labels[i].substr(0, labels[i].find(' '));
+    size_t end = i;
+    bool gdn = false;
+    while (end < labels.size() && labels[end].compare(0, layer.size() + 1, layer + " ") == 0) {
+      gdn |= labels[end].find(" gdn_step ") != std::string::npos;
+      ++end;
+    }
+    static const char* gdn_linears[] = {"qkv||z", "a||b", "out_proj", "gate||up", "down"};
+    static const char* fa_linears[] = {"q||k||v", "o_proj", "gate||up", "down"};
+    unsigned linear = 0;
+    for (size_t j = i; j < end; ++j) {
+      const auto start = labels[j].find(' ') + 1;
+      const std::string entry = labels[j].substr(start, labels[j].find(' ', start) - start);
+      std::string& f = out[j];
+      if (entry.rfind("gemv", 0) == 0 || entry.rfind("gemm_sm", 0) == 0)
+        f = layer == "--" ? "head" : (gdn ? gdn_linears : fa_linears)[std::min(linear++, gdn ? 4u : 3u)];
+      else if (entry == "prep_res_fold") f = "residual fold";
+      else if (entry == "prep_norm_finish") f = "norm";
+      else if (entry == "prep_silu_mul") f = "silu";
+      else if (entry == "prep_gated_head") f = "gated head";
+      else if (entry == "gdn_step") f = "gdn";
+      else if (entry.rfind("attn_prep", 0) == 0) f = "attn prepare";
+      else if (entry.rfind("attn_reduce", 0) == 0) f = "attn reduce";
+      else if (entry.rfind("attn_", 0) == 0) f = "attention";
+      else if (entry.rfind("argmax", 0) == 0) f = "argmax";
+      else if (entry == "embed_gather") f = "embedding";
+      else f = entry;
+    }
+    i = end;
+  }
+  return out;
+}
+
+// --verify-profile: the tap verify lists at 1 / 2 / 4 / 8 rows with per-launch events, summed by family, plus the
+// gaps between launches (a launch's start minus its predecessor's end; the tap copies sit in the gaps after the
+// input norm of every tapped layer's successor, and after the final norm). The widths are captured in turn inside
+// every round, each after a warm-up, so clock drift spreads over all of them. Then the same widths uninstrumented
+// as interleaved pairs against verify at 1 row (the decision numbers).
+void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds) {
+  std::ifstream input("tests/golden/prompts/long32k.ids");
+  std::vector<uint32_t> file;
+  for (uint32_t id; input >> id;) file.push_back(id);
+  if (file.empty()) throw std::runtime_error("no long32k.ids");
+  std::vector<uint32_t> prompt(depth);
+  for (size_t i = 0; i < prompt.size(); ++i) prompt[i] = file[i % file.size()];
+  e.prefill(std::vector<uint32_t>(prompt.begin(), prompt.end() - 1));
+  l0::Mem saved(e.context(), l0::MemKind::Host, e.state_bytes());
+  e.save_state(saved.ptr());
+  auto restore = [&]() {
+    e.load_state(saved.ptr(), depth - 1);
+    e.control()->cur_token[0] = prompt.back();
+    e.control()->n_active = 1;
+    e.verify(0);
+    e.commit(0, e.verify_ids()[0]);
+  };
+  auto verify = [&](uint32_t m) {
+    for (uint32_t j = 1; j < m; ++j) e.control()->cur_token[j] = file[j % file.size()];
+    e.verify(m - 1);
+  };
+  // The sites after which build_verify_taps appends the tap copies: layer t + 1's input norm, or the final norm.
+  std::vector<std::string> tap_sites;
+  for (uint32_t t : d.tap_layers())
+    tap_sites.push_back(t + 1 < e.model().desc->layers ? "L" + std::to_string(t + 1) + " " : std::string("-- "));
+  const std::vector<uint32_t> widths = {1, 2, 4, 8};
+  std::map<uint32_t, std::map<std::string, std::vector<double>>> fam;   // width -> family -> per-round ms
+  std::map<uint32_t, std::vector<double>> walls, devices, gaps, spans;
+  std::map<uint32_t, size_t> launches;
+  for (unsigned r = 0; r <= rounds; ++r) {
+    for (uint32_t m : widths) {
+      runtime::ProfileEvents vp(e.context());
+      runtime::CaptureOptions opt;
+      opt.profile = &vp;
+      opt.profile_m = m;
+      opt.profile_keys = depth + 1;
+      e.recapture_verify(opt);
+      const runtime::CapturedStep& step = e.verify_step_at(m, depth + 1);
+      if (vp.events.size() != step.kernel_count) throw std::runtime_error("the profiled list is not the one verify submits");
+      const auto families = verify_families(step.labels);
+      std::vector<bool> after_tap(step.labels.size(), false);
+      for (const auto& site : tap_sites)
+        for (size_t i = 0; i + 1 < step.labels.size(); ++i)
+          if (step.labels[i].rfind(site, 0) == 0 && families[i] == "norm") { after_tap[i + 1] = true; break; }
+      // Every replay of the instrumented list starts from reset events - restore() replays the 1-row list too.
+      auto reset = [&]() { for (auto& event : vp.events) event.reset(); };
+      for (unsigned w = 0; w < 4; ++w) {   // warm-up after the capture's idle host time
+        reset();
+        restore();
+        reset();
+        verify(m);
+      }
+      std::map<std::string, double> sums;
+      double wall = 0, device = 0, gap = 0, span = 0;
+      for (unsigned c = 0; c < calls; ++c) {
+        reset();
+        restore();
+        reset();
+        wall += timed([&]() { verify(m); });
+        double prev_end = 0;
+        for (size_t i = 0; i < vp.events.size(); ++i) {
+          const double dur = vp.events[i].duration_us() / 1000.0;
+          const double end = vp.events[i].elapsed_us(vp.events.front()) / 1000.0;
+          sums[families[i]] += dur;
+          device += dur;
+          if (i) {
+            const double g = end - dur - prev_end;
+            sums[after_tap[i] ? "gap: tap copies" : "gap: between launches"] += g;
+            gap += g;
+          }
+          prev_end = end;
+        }
+        span += prev_end;
+      }
+      e.recapture_verify({});   // release vp's events before it dies
+      if (!r) continue;
+      for (const auto& [f, ms] : sums) fam[m][f].push_back(ms / calls);
+      walls[m].push_back(wall / calls);
+      devices[m].push_back(device / calls);
+      gaps[m].push_back(gap / calls);
+      spans[m].push_back(span / calls);
+      launches[m] = step.kernel_count;
+    }
+  }
+  std::printf("VPROFILE depth=%u calls=%u rounds=%u (instrumented: per-launch timestamps)\n", depth, calls, rounds);
+  for (const auto& [f, ms] : fam[8]) {
+    std::printf("VPROFILE_FAMILY depth=%u family=\"%s\"", depth, f.c_str());
+    for (uint32_t m : widths) std::printf(" m%u=%.4f", m, fam[m].count(f) ? median(fam[m][f]) : 0.0);
+    std::printf(" excess8=%.4f\n", median(fam[8][f]) - (fam[1].count(f) ? median(fam[1][f]) : 0.0));
+  }
+  for (uint32_t m : widths)
+    std::printf("VPROFILE_TOTAL depth=%u m=%u launches=%zu wall_ms=%.4f device_ms=%.4f gaps_ms=%.4f span_ms=%.4f "
+                "host_ms=%.4f\n", depth, m, launches[m], median(walls[m]), median(devices[m]), median(gaps[m]),
+                median(spans[m]), median(walls[m]) - median(spans[m]));
+  std::printf("VPROFILE_EXCESS depth=%u wall8_minus_wall1=%.4f device_plus_gaps=%.4f\n", depth,
+              median(walls[8]) - median(walls[1]),
+              median(devices[8]) + median(gaps[8]) - median(devices[1]) - median(gaps[1]));
+  // Uninstrumented: each width against verify at 1 row, interleaved pairs, the order flipped every round.
+  for (uint32_t m : {2u, 4u, 8u}) {
+    std::vector<double> one_ms, m_ms, excess, ratio;
+    for (unsigned r = 0; r <= rounds; ++r) {
+      double a = 0, b = 0;
+      for (unsigned c = 0; c < calls; ++c)
+        for (unsigned side = 0; side < 2; ++side) {
+          const bool one = (side == 0) == (r % 2 == 0);
+          restore();
+          (one ? a : b) += timed([&]() { verify(one ? 1 : m); });
+        }
+      if (r) {
+        one_ms.push_back(a / calls);
+        m_ms.push_back(b / calls);
+        excess.push_back((b - a) / calls);
+        ratio.push_back(b / a);
+      }
+    }
+    std::printf("VPROFILE_PAIR depth=%u m=%u ms=%.4f m1_ms=%.4f excess=%.4f ratio=%.4f (uninstrumented)\n", depth, m,
+                median(m_ms), median(one_ms), median(excess), median(ratio));
+  }
+}
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] [--verify-profile] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
-    bool candidate_head = false;
+    bool candidate_head = false, vprofile = false;
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--candidate-head") { candidate_head = true; continue; }
+      if (arg == "--verify-profile") { vprofile = true; continue; }
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
       if (arg == "--depth") depth = std::stoul(argv[++i]);
       else if (arg == "--calls") calls = std::stoul(argv[++i]);
@@ -372,7 +538,8 @@ int main(int argc, char** argv) {
     runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
-    if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
+    if (vprofile) verify_profile(e, drafter, depth, calls, rounds);
+    else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
     else engine_taps(e, drafter, sources, out, anchors);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_dflash_iter: %s\n", ex.what());
