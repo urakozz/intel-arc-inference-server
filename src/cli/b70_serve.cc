@@ -959,7 +959,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
       max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache);
       slot_lens = {max_len};
     }
-    const uint32_t chunk_cap = cli::settle_chunk_cap(c, model, slot_lens[0], a.mem_reserve, pf, a.kv_cache, {}, 0);
+    const uint32_t chunk_cap = cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, {}, 0);
     std::fprintf(stderr, "card %u: slots: %zu (%s)\n", i, slot_lens.size(),
                  runtime::slot_layout_name(slot_lens).c_str());
     auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache,
@@ -1527,7 +1527,7 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  // Plan 5d: the prefill chunk cap - the default, or kPrefillChunkCapRule's choice (cli/max_len.h) -
+  // Plan 5d: the prefill chunk cap - 4096 when the plan has room for it (cli/max_len.h) -
   // planned with max_len and given to the engine.
   pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
@@ -1544,7 +1544,7 @@ int run(int argc, char** argv) {
     slot_lens = {max_len};
   }
   const uint32_t chunk_cap =
-      cli::settle_chunk_cap(context, model, slot_lens[0], mem_reserve, pp_path, kv_cache, drafter_plan, 0);
+      cli::settle_chunk_cap(context, model, slot_lens, mem_reserve, pp_path, kv_cache, drafter_plan, 0);
   std::fprintf(stderr, "slots: %zu (%s) - %s\n", slot_lens.size(), runtime::slot_layout_name(slot_lens).c_str(),
                slot_lens.size() > 1 ? "several requests at once on this card" : "one request at a time");
   std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;

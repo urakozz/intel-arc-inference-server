@@ -33,6 +33,8 @@
 //           and builds EngineAdapter with --mtp K (spec 8 M5: C2 with MTP on). The turns
 //           still decode by step(), so the rows compared are the same; what changes is
 //           the engine: prefill fills the head's KV and the snapshots carry it.
+//       --chunk-cap 4096 anywhere (tests/chunk_cap_arg.h): the same sequences at 4096-row chunks
+//           (open-work 18), the hook every 4096 positions.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -43,6 +45,7 @@
 #include <vector>
 
 #include "check.h"
+#include "chunk_cap_arg.h"
 #include "cli/serve_adapters.h"
 #include "forced_judge.h"
 #include "golden_common.h"
@@ -312,6 +315,7 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
 }  // namespace
 
 int main(int argc, char** argv) {
+  b70test::take_chunk_cap_arg(argc, argv);
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();

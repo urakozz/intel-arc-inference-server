@@ -1446,8 +1446,11 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 0 1)
   add_test(NAME prefix_gpu_split_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
+  # Open-work 18: the same sequences at 4096-row chunks (Qwen3.8's default where the plan has room).
+  add_test(NAME prefix_gpu_l0_cap4096_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 1 --chunk-cap 4096)
   set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test prefix_gpu_split_l0_test
-    prefix_gpu_split_int8_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
+    prefix_gpu_split_int8_test prefix_gpu_l0_cap4096_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
   # Spec 8 M5 (plan 8c): C2 with the MTP head loaded and the adapter at --spec mtp.
   if(B70_MTP)
     add_test(NAME prefix_gpu_mtp_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
