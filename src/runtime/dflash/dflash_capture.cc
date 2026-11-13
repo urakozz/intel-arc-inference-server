@@ -164,7 +164,8 @@ class Walk {
     layer_ = -1;
     norm(b_.resid.ptr(), w_.final_norm->as<float>());
     if (w_.candidate_head) {
-      i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
+      i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr(),
+                w_.candidate_bits == 2 ? 3u : 1u);
       {
         auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
         k.arg_ptr(0, b_.logits.ptr());
@@ -381,11 +382,12 @@ class Walk {
       launch(k, N / kernels::kGemvI8wCols);
   }
   // Int4 g64 layout 1, grid split-K, at the block's M rows; scales travel inside the weight tiles.
-  void i4_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* x, const void* out) {
-    const unsigned S = kd::int4_slices(K, N);
+  // layout 3: spec 19 v3d's 2-bit candidate head (gemm_sm only, one slice).
+  void i4_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* x, const void* out, unsigned layout = 1) {
+    const unsigned S = layout == 3 ? 1 : kd::int4_slices(K, N);
     const auto kind = M == kd::kR ? hkind() : lkind();
     const kernels::SmallMTuning* t =
-        kind == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, 1) : nullptr;
+        kind == kernels::LinearKind::SmallM || layout == 3 ? kernels::small_m_tuning(K, N, S, layout) : nullptr;
     require(kind == kernels::LinearKind::Gemv || t, "no gemm_sm row for the int4 linear " + std::to_string(K) +
                                                        " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))

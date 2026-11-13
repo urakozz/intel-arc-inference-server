@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "check.h"
+#include "common/kv8.h"
 #include "common/bf16.h"
 #include "common/int4.h"
 #include "gemm_sm_levers.h"
@@ -83,6 +84,13 @@ Weights make_weights(const kernels::SmallMTuning& t, uint32_t seed) {
     for (auto& q : w.q8) q = int8_t(int(g() % 255) - 127);
     std::uniform_real_distribution<float> sd(1e-4f, 2e-3f);
     for (auto& s : w.cs) s = sd(g);
+  } else if (t.layout == 3) {   // random 2-bit codes, f16 scales of an int4 group's size
+    std::mt19937 g(seed);
+    std::uniform_real_distribution<float> sd(2e-3f, 2e-2f);
+    w.words.resize(size_t(t.N / 16) * (t.K / 64) * 72);
+    for (size_t i = 0; i < w.words.size(); ++i)
+      w.words[i] = i % 72 < 64 ? uint32_t(g()) : (uint32_t(common::kv8::f32_to_f16_rne(sd(g))) |
+                                                  uint32_t(common::kv8::f32_to_f16_rne(sd(g))) << 16);
   } else {
     w.i4 = common::Int4Gptq::random(t.K, t.N, seed);
     w.words = t.layout == 1 ? w.i4.tiled() : w.i4.qweight;

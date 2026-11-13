@@ -499,15 +499,17 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-2bit]] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
+    unsigned candidate_bits = 4;
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
       if (arg == "--candidate-head") { candidate_head = true; continue; }
+      if (arg == "--candidate-2bit") { candidate_bits = 2; continue; }   // spec 19 v3d Task 7
       if (arg == "--verify-profile") { vprofile = true; continue; }
       if (arg == "--verify-pairs") { vprofile = vpairs = true; continue; }
       if (i + 1 >= argc) throw std::runtime_error(arg + ": missing value");
@@ -534,7 +536,7 @@ int main(int argc, char** argv) {
     }
     l0::Context ctx(0);
     auto model = loader::load(ctx, argv[1], max_len, false, loader::LmHeadForm::Int8);
-    auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head);
+    auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head, candidate_bits);
     const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     df::DFlashDrafter drafter(ctx, std::move(weights), rows, max_len, 7);
     const runtime::KvCache kv = runtime::default_kv_cache();
