@@ -6,7 +6,7 @@
 //
 // Part S (synthetic, always): random bf16 KV of 4096 rows (and its int8 form through src/common/kv8.h), random q /
 // gate, at the positions attn_v2_test walks (depth 0 -> 1, tiny pos, the 64-block edges, the stride's first step
-// 2048 -> 2049 keys inside one launch, the end of the cache), M = 2..8 bf16 and M = 2..4 int8:
+// 2048 -> 2049 keys inside one launch, the end of the cache), M = 2..8 bf16 and int8:
 //   N1   every gated row against tests/kernels/attn_verify_ref.h (fp64): cosine >= kN1 = 0.999997 per (q head, row),
 //        finite (spec 28c §4's 0.99999, tightened 2026-11-04: see kN1);
 //        v2's own worst cosine on the same inputs printed beside it;
@@ -246,11 +246,52 @@ std::vector<T> read_file(const std::string& p, size_t n) {
   return v;
 }
 
+// Spec 19v3a: the new int8 rows, without a checkpoint or optional dump. Also a bounded smoke run on their own.
+bool kv8_m8(l0::Context& ctx) {
+  constexpr uint32_t L = 32768 + 8;
+  std::mt19937 rng(193);
+  std::normal_distribution<float> nd(0.f, 1.f);
+  std::vector<uint16_t> hk(size_t(L) * kKvH * kHD), hv(hk.size());
+  for (auto& x : hk) x = common::f32_to_bf16(nd(rng));
+  for (auto& x : hv) x = common::f32_to_bf16(nd(rng));
+  Rig r(ctx, L, true, std::move(hk), std::move(hv));
+  const std::vector<uint32_t> Ms{5, 6, 7, 8};
+  bool ok = true;
+  for (uint32_t keys : {512u, 4096u, 32768u}) {
+    std::vector<float> q(size_t(8) * kRow), g(q.size());
+    for (auto& x : q) x = nd(rng);
+    for (auto& x : g) x = nd(rng);
+    for (uint32_t i = 0; i < 8 * kQH; ++i) {
+      float y[kHD];
+      common::kv8::rotate(&q[size_t(i) * kHD], y);
+      std::memcpy(&q[size_t(i) * kHD], y, sizeof y);
+    }
+    for (uint32_t M : Ms) {
+      Worst w;
+      check(r, keys - 1, M, q, g, w);
+      const bool pass = w.n1 >= kN1 && w.n2b >= kN1 && w.rep;
+      ok &= pass;
+      std::printf("KV8 M=%u keys=%u: N1 %.8f N2b %.8f repeat %d -- %s\n", M, keys, w.n1, w.n2b,
+                  w.rep, pass ? "PASS" : "FAIL");
+    }
+    uint32_t done = 0;
+    const uint32_t same = prop_r(r, keys - 1, Ms, q.data(), g.data(), 100, rng, &done);
+    ok &= done == 100 && same == done;
+    std::printf("KV8 keys=%u: property R %u/%u bitwise\n", keys, same, done);
+  }
+  return ok;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   l0::Context ctx;
   std::printf("attn_verify_dpas_test on %s\n", ctx.name().c_str());
+  if (argc > 1 && std::string(argv[1]) == "--kv8-m8") {
+    const bool pass = kv8_m8(ctx);
+    std::printf("attn_verify_dpas_kv8_m8_test: %s\n", pass ? "PASS" : "FAIL");
+    return pass ? 0 : 1;
+  }
   std::mt19937 rng(28);
   bool ok = true;
   // ---- part S ----
@@ -262,7 +303,7 @@ int main(int argc, char** argv) {
     for (auto& x : hv) x = common::f32_to_bf16(nd(rng));
     for (bool kv8 : {false, true}) {
       Rig r(ctx, L, kv8, hk, hv);
-      const std::vector<uint32_t> Ms = kv8 ? std::vector<uint32_t>{2, 3, 4} : std::vector<uint32_t>{2, 3, 4, 5, 6, 7, 8};
+      const std::vector<uint32_t> Ms{2, 3, 4, 5, 6, 7, 8};
       for (uint32_t pos : {0u, 1u, 5u, 63u, 64u, 127u, 2041u, 2044u, 2047u, 3000u, 4088u}) {
         Worst w;
         for (uint32_t M : Ms) {
@@ -343,7 +384,7 @@ int main(int argc, char** argv) {
       const std::vector<uint16_t> hv = read_file<uint16_t>(dir + "/kv_v.bin", rows * kKvH * kHD);
       for (bool kv8 : {false, true}) {
         Rig r(ctx, 131072, kv8, hk, hv);
-        const std::vector<uint32_t> Ms = kv8 ? std::vector<uint32_t>{2, 3, 4} : std::vector<uint32_t>{2, 3, 4, 5, 6, 7, 8};
+        const std::vector<uint32_t> Ms{2, 3, 4, 5, 6, 7, 8};
         for (uint32_t d : {512u, 4096u, 32768u, 130816u}) {
           std::vector<float> q = read_file<float>(dir + "/q_" + std::to_string(d) + ".bin", size_t(8) * kRow);
           const std::vector<float> g = read_file<float>(dir + "/g_" + std::to_string(d) + ".bin", size_t(8) * kRow);
