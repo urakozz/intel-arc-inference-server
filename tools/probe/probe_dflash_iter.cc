@@ -368,7 +368,9 @@ int main(int argc, char** argv) {
     auto weights = loader::load_drafter(ctx, argv[2], model, format, 0, candidate_head);
     const auto rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     df::DFlashDrafter drafter(ctx, std::move(weights), rows, max_len, 7);
-    runtime::Engine e(ctx, std::move(model), max_len, false, runtime::KvCache::Bf16, &drafter);
+    const runtime::KvCache kv = runtime::default_kv_cache();
+    runtime::Engine e(ctx, std::move(model), max_len, false, kv, &drafter);
+    std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
     if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
     else engine_taps(e, drafter, sources, out, anchors);

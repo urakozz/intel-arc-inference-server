@@ -11,6 +11,7 @@ Mac and on the box.
 """
 import json
 import os
+from pathlib import Path
 import re
 import shutil
 import socket
@@ -1233,6 +1234,37 @@ class TokDiffTest(Tmp):
         self.assertEqual(self.run_diff(a, self.p("absent.json")).returncode, 2)
 
 
+class DflashIdentityTest(Tmp):
+    def test_incomplete_int8_baseline_is_archived_before_append_writer_retries(self):
+        tools = self.p("tools", "box_validate")
+        os.makedirs(tools)
+        shutil.copy(os.path.join(HERE, "dflash_v2.sh"), os.path.join(tools, "dflash_v2.sh"))
+        write(os.path.join(tools, "data.sh"), '#!/bin/bash\nprintf "%s\\n" "$2"\n', 0o755)
+        write(os.path.join(tools, "serve_run.sh"), """#!/bin/bash
+mkdir -p "$1"
+python3 - "$1/requests.jsonl" <<'PYCODE'
+import json,sys
+with open(sys.argv[1], 'a') as f:
+ for i in range(39): f.write(json.dumps({'set':'golden' if i<3 else 'toolcall','out_ids':[1]})+'\\n')
+PYCODE
+""", 0o755)
+        for name in ("serve_client.py", "serve_judge.py"):
+            write(os.path.join(tools, name), "pass\n")
+        out = self.p("out")
+        original = '{"set":"golden","out_ids":[8]}\n'
+        write(os.path.join(out, "identity", "kv_cache"), "int8\n")
+        baseline = os.path.join(out, "identity", "off.r1", "requests.jsonl")
+        write(baseline, original)
+        result = subprocess.run(["bash", os.path.join(tools, "dflash_v2.sh"), "identity", out, "/target", "/drafter"],
+                                env=dict(os.environ, B70_KV_CACHE="int8"), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with open(baseline) as f:
+            self.assertEqual(len([json.loads(line) for line in f]), 39)
+        archives = list(Path(out).glob("incomplete/off.*/off.r1/requests.jsonl"))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(archives[0].read_text(), original)
+
+
 @unittest.skipUnless(os.path.exists(os.path.join(ROOT, ".git")),
                      "validation driver needs checkout git metadata (.git is absent in rsync box trees)")
 class DriverTest(unittest.TestCase):
@@ -1547,6 +1579,23 @@ class DriverTest(unittest.TestCase):
                 self.assertIn("lock: holds the whole box", out)
         out = self.run_driver("--dry-run", "--only", "r65.serve", "--device", "1").stdout
         self.assertIn("WAIT=3600 ZE_AFFINITY_MASK=0,1 PORT=", out)
+
+    def test_row86_dependencies_and_pp_visibility(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = os.path.join(tmp, "registry.tsv")
+            self.run_driver("--registry", registry)
+            with open(registry) as f:
+                rows = [line for line in f if line.startswith("stage\tr86.")]
+            with open(os.path.join(HERE, "data.sh")) as f:
+                available = set(re.findall(r"\bhave ([a-z0-9_]+) ", f.read()))
+            self.assertEqual(len(rows), 8)
+            for row in rows:
+                for need in row.split("\t")[5].split(","):
+                    self.assertTrue(need == "-" or need in available, (row, need))
+        out = self.run_driver("--dry-run", "--only", "r86.pp", "--device", "1").stdout
+        self.assertIn("env -u ZE_AFFINITY_MASK B70_TRACE_DIR=", out)
+        self.assertIn("--re '^pp_dflash_kv8_test$'", out)
+        self.assertIn("lock: holds the whole box", out)
 
     def test_row75_pp_sees_both_cards(self):
         out = self.run_driver("--dry-run", "--only", "r75.pp", "--device", "1").stdout

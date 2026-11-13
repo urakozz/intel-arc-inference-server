@@ -202,3 +202,35 @@ FAIL on text only (log wording, the decode scratch sizes in buffers_test; every 
 identical), `g0.suite` PASS - so it was re-launched with `--force`. Read it with
 `tools/box_validate.sh --status` (the PASS / FAIL / SKIP per stage) and `tools/box_validate.sh --summary` (fetches
 and writes box-validation-<date>.md), both with the same `--with` list.
+
+## 10. Which int8 linears carry the long-prompt drift (open-work 16, 2026-11-12, branch int8-mixer-bf16)
+
+The test switch `B70_PF_I8_MIXER_IN` moves some of `l0-int8`'s mixer linears to the l0 (bf16) walk, everything else
+as today (W4A8 experts): `bf16` the delta-net input projection (qkv||z) only, `gdn` qkv||z and out_proj, `dense` all
+four mixer linears (qkv||z, out_proj, q||k||v, o_proj). `prefill_split_test` one call on long32k[0, 2600) against the
+f32 reference, `B70_SPLIT_VERBOSE=1` (now prints each layer), card 1. x = the distance to f32 over the bf16
+reference's; every run twice bitwise equal.
+
+| x vs the bf16 reference | `l0` | `l0-int8` | `bf16` | `gdn` | `dense` |
+|---|---:|---:|---:|---:|---:|
+| logits | 0.48 | 0.59 | 0.65 | 0.60 | 0.66 |
+| all-rows median | 1.01 | 1.39 | 1.29 | 1.13 | 1.06 |
+| fa0-3 worst row | 0.73 | 2.35 | 1.01 | 0.50 | 0.58 |
+| GDN state L0 | 1.57 | 6.38 | 1.57 | 1.57 | 1.57 |
+| GDN state L1 | 0.94 | 5.95 | 4.92 | 0.95 | 0.95 |
+| GDN state L3 | 0.84 | 4.66 | 4.00 | 1.75 | 0.78 |
+| GDN state L4 | 2.30 | 4.94 | 4.16 | 1.47 | 2.02 |
+| GDN state L5 | 1.63 | 4.67 | 3.65 | 2.66 | 1.50 |
+| GDN state L10 | 0.96 | 2.09 | 1.76 | 1.30 | 1.01 |
+| GDN state L29 | 1.02 | 1.29 | 1.29 | 1.12 | 1.02 |
+
+**qkv||z alone fixes layer 0 and nothing after it.** Layer 0's state falls 6.38x -> 1.57x (exactly `l0`'s: its
+inputs are then identical), but layer 1 stays at 4.92x: layer 0's int8 out_proj writes the residual that layer 1's
+state reads. With both delta-net linears in bf16 (`gdn`) the early states follow `l0` (L1 0.95x) and the median falls
+to 1.13x; with all four mixer linears in bf16 (`dense`) every state is within `l0`'s spread and the median is 1.06x -
+the W4A8 experts add little, as section 8 found. So the drift is the int8 dense linears' as a group (out_proj as much
+as qkv||z), not the state recurrence amplifying one projection.
+
+Ornith pp4096 on the same build, card 1, interleaved (order rotated), 3 rounds, median, busy box (card 0 ran the
+validation): `l0-int8` 8,546 t/s, `bf16` 8,344, `gdn` 8,125, `dense` 8,089, `l0` 7,974 (round 1 ran ~7 % slow for every
+arm; the spread is ~5 %). Nothing bound: the switch stays for the debugging (open-work 16).

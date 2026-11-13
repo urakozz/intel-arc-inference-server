@@ -639,7 +639,7 @@ endif()
 # cache, from ONE new source (kv8.cl, per-family defines as pf_int8.cl). Additive only:
 # no existing source changes, so every existing binary keeps its name, its command line
 # and its bytes, and a `--kv-cache bf16` engine (the default) binds none of these.
-#   attn_prep_M<M>_KV8        the decode writer at M = 1..4 (QKV_S = 2: the main FA layers)
+#   attn_prep_M<M>_KV8        the decode writer at M = 1..8 (QKV_S = 2: the main FA layers)
 #   attn_prep_M<M>_S1_KV8     the MTP head's writer (its bf16 qkv: QKV_S = 1), B70_MTP
 #   attn_v2_M<M>_T<TGT>_KV8   decode attention v2 over int8 + scales, the un-rotating reduce
 # The prefill three are in prefill/CMakeLists.txt. Shapes are Qwen3.8's;
@@ -658,6 +658,14 @@ if(B70_KV8)
                        DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=1)
     endif()
   endforeach()
+  if(B70_VERIFY_M8)
+    foreach(MM 5 6 7 8)
+      add_ocloc_kernel(attn_prep_M${MM}_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${KV8_PREP_DEFINES} M=${MM} QKV_S=2)
+      add_ocloc_kernel(attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${KV8_CL}
+                       DEFINES ${CTRL_DEFINES} KV8_DEC=1 M=${MM} TGT=${ATTN_V2_TGT})
+    endforeach()
+  endif()
 endif()
 
 # ==== Spec 17b: tensor parallel decode over two cards (`--parallel tp`, Qwen3.8) ============= (begin) ====
@@ -731,7 +739,7 @@ endif()
 # Spec 28c (plan 28c Task 2): the verify step's attention on DPAS (attn_verify_dpas.cl), in v2's blocking
 # and partials, so the reduce is the attn_v2_M<M>_T32[_KV8] binary's attn_reduce_v2[_kv8] (no new reduce).
 #   attn_verify_dpas_M<M>_T<TGT>       bf16 KV at the verify lists' M = 2..4 (B70_MTP) and 5..8 (B70_VERIFY_M8)
-#   attn_verify_dpas_M<M>_T<TGT>_KV8   int8 KV at M = 2..4 (the int8 decode lists that exist)
+#   attn_verify_dpas_M<M>_T<TGT>_KV8   int8 KV at M = 2..8 (5..8 with B70_VERIFY_M8)
 # One value lever setting per KV form for every M (property R, the kernel's header). Additive only: a new source,
 # new names; nothing binds them until the capture's rule (src/runtime/verify_attn.h) says so.
 option(B70_VERIFY_DPAS "build the DPAS verify attention (spec 28c)" ON)
@@ -773,6 +781,13 @@ if(B70_VERIFY_DPAS AND B70_MTP)
                                KV8=1
                        OPTIONS ${VDPAS_OPTIONS})
     endforeach()
+    if(B70_VERIFY_M8)
+      foreach(MM 5 6 7 8)
+        add_ocloc_kernel(attn_verify_dpas_M${MM}_T${ATTN_V2_TGT}_KV8 SOURCE ${VDPAS_CL}
+                         DEFINES ${CTRL_DEFINES} M=${MM} TGT=${ATTN_V2_TGT} ${VDPAS_LEVERS} KV8=1
+                         OPTIONS ${VDPAS_OPTIONS})
+      endforeach()
+    endif()
   endif()
 endif()
 
