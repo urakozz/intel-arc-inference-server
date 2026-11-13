@@ -4,7 +4,7 @@
 // fixed K = 7 (step_many, the last burst truncated). Turns: A = long32k[0:3000], B = the golden code prompt
 // repeated, a side request between turns that overwrites the engine's state and ring.
 //
-//   K    the drafter names the store: d.key() != 0 and the session's chain root is server::store_root(0, d.key());
+//   K    the drafter names the store: d.key() != 0 and the session's chain root is server::store_root(the KV form, d.key());
 //        the snapshot is the plain engine's state plus the ring (state_bytes, 41,943,040 B more).
 //   R1   restore-and-continue: turn 1 = A (96 ids), the side request, turn 2 = A + turn 1's ids + B[0:700] - restored
 //        from turn 1's request-end snapshot (pos 3096) - against the uninterrupted session (turn 1 then turn 2 by
@@ -161,8 +161,8 @@ int main(int argc, char** argv) {
     const size_t gdn = e.buffers().gdn_state.size(), conv = e.buffers().conv_ring.size();
     bool k_ok = d.key() != 0 && d.ring_bytes() == 41943040 && e.state_bytes() == gdn + conv + d.ring_bytes();
     server::PrefixSession s(ad, alloc.size(), &alloc);
-    k_ok &= s.cache()->kv_form() == server::store_root(0, d.key()) && s.cache()->kv_form() != 0;
-    std::printf("K: drafter key %016llx, state %zu B (+ the ring %zu B), the store's root = store_root(bf16, key): "
+    k_ok &= s.cache()->kv_form() == server::store_root(ad.kv_form(), d.key()) && s.cache()->kv_form() != 0;
+    std::printf("K: drafter key %016llx, state %zu B (+ the ring %zu B), the store's root = store_root(the KV form, key): "
                 "%s\n",
                 (unsigned long long)d.key(), e.state_bytes(), d.ring_bytes(), k_ok ? "ok" : "WRONG");
     ok &= k_ok;
