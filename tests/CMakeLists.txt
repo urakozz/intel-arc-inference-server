@@ -563,6 +563,9 @@ if(B70_MTP)
   b70_target_kernel_dir(gdn_step_slots_test)
   add_dependencies(gdn_step_slots_test kernel_gdn_step_M1 kernel_gdn_step_slots_M1
     kernel_gdn_step_slots_M2 kernel_gdn_step_slots_M3 kernel_gdn_step_slots_M4)
+  foreach(MM RANGE 1 8)   # spec 19 v3d: DFlash's 8-slot builds too (B70_VERIFY_M8, on with MTP by default)
+    add_dependencies(gdn_step_slots_test kernel_gdn_step_slots_M${MM}_N8)
+  endforeach()
   add_test(NAME gdn_step_slots_test COMMAND gdn_step_slots_test)
 endif()
 # Spec 19a (plan 19a Task 4): every name probe_mtp_steps' verify lists at M = 5..8 and
