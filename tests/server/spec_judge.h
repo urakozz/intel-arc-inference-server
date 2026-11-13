@@ -120,6 +120,10 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     {"mtp_gpu_bf16_t5_test-linear_l0_48240f936b6319ce", 58, 248046, 248045, 20.94, "2026-11-11", kInt8PrefillKvReason},
     {"mtp_gpu_bf16_t2_explain-openai_7aefc7634c90dcf3", 0, 248045, 248046, 23.86, "2026-11-11", kInt8PrefillKvReason},
     {"mtp_gpu_bf16_t4_comment-loader_fcc02a22cb3a07cd", 0, 74455, 846, 13.01, "2026-11-11", kInt8PrefillKvReason},
+    // dflash_gpu_kv8_test t1_define-rotation (K 4-7 and auto): DPAS verify attention + gemm_sm linears on a
+    // bf16-unstable row, no defect - the exact lists are bitwise the plain steps (dflash_verify_kv8_test); operator
+    // 2026-11-13 (docs/probes/probe-dflash-kv8-verify-m8-2026-11-13.md)
+    {"dflash_gpu_int8_t1_define-rotation_82e33a10f2dcba43", 0, 248046, 248068, 34.64, "2026-11-13", kReviewedReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
