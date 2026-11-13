@@ -77,7 +77,7 @@ st_g0_sha() {
   finish
 }
 
-stage g0.bitwise 0 g0 gpu qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
+stage g0.bitwise 0 g0 card qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
 st_g0_bitwise() {
   local reuse=1 rc
   x "python3 tools/box_validate/baseline.py gates-check --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --device $DEVICE --out $STATE/g0.bitwise.baseline.xml"; reuse=$?
@@ -105,10 +105,10 @@ st_g0_bitwise() {
   finish
 }
 
-stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
+stage g0.suite 0 g0 card qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside; the pp / tp labels are g0.suite_2card's) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
 st_g0_suite() {
   # --quick: the model-free tests only (no `checkpoint` label); g0.bitwise is the quick run's model check
-  local f="--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8$(quick_or '' ' --no-label checkpoint')"
+  local f="--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --no-label pp --no-label tp$(quick_or '' ' --no-label checkpoint')"
   xb "ctest --test-dir build --show-only=json-v1 > $STATE/tests.baseline.json"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
   reuse_claim "$STATE/tests.json" "$f"
@@ -116,6 +116,20 @@ st_g0_suite() {
   reuse_record "$STATE/tests.json"
   chk "python3 tools/box_validate/junit.py pick $STATE/tests.json $f --junit \"$STATE/*.junit.xml\"" \
     "the baseline's suite on the tree under test"
+  finish
+}
+
+stage g0.suite_2card 0 g0 gpu qwen,oracle_qwen g0.build "the two-card part of the baseline's suite: the tests labelled pp or tp (the rest is g0.suite, on one card) on the tree under test, the same rules as g0.suite"
+st_g0_suite_2card() {
+  # --quick: as g0.suite, the model-free tests only
+  local f="--also-in $STATE/$STAGE.tests.baseline.json --label-any pp --label-any tp --no-label ornith --no-label kv8$(quick_or '' ' --no-label checkpoint')"
+  xb "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.baseline.json"
+  x "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.json"
+  reuse_claim "$STATE/$STAGE.tests.json" "$f"
+  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/$STAGE.tests.json $f --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_record "$STATE/$STAGE.tests.json"
+  chk "python3 tools/box_validate/junit.py pick $STATE/$STAGE.tests.json $f --junit \"$STATE/*.junit.xml\"" \
+    "the baseline's two-card tests on the tree under test"
   finish
 }
 
@@ -1344,7 +1358,7 @@ st_r24_oracle_synth() {
   grab_all bench 'kolibri_bench.ids|re-bake' 4
   finish
 }
-stage r24.load 24 default gpu oracle_kolibri_synth r24.k1 "the loader on the card: kolibri1_load_synth_int4attn_test and _bf16attn_test (int8 head) - every part's bytes = kol_device_weight_bytes, 0 unconsumed, the last expert's block / the router's padded rows / the bias tail read back"
+stage r24.load 24 default card oracle_kolibri_synth r24.k1 "the loader on the card: kolibri1_load_synth_int4attn_test and _bf16attn_test (int8 head) - every part's bytes = kol_device_weight_bytes, 0 unconsumed, the last expert's block / the router's padded rows / the bias tail read back"
 st_r24_load() {
   run_tests '^kolibri1_load_synth_(int4attn|bf16attn)_test$'
   jgrab load '^kolibri1_load_synth' 'device 0|read/token|unconsumed|OK'
@@ -3901,9 +3915,14 @@ st_r86_replay() {
 }
 
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
+stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
+st_x_rest_2card() {
+  run_tests '.' pp "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  finish
+}
+stage x.rest x default card qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows; the pp-labelled ones are x.rest_2card's)"
 st_x_rest() {
-  run_tests '.' '' "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  run_tests '.' '' "pp $(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
   finish
 }
 
@@ -3913,6 +3932,7 @@ st_x_rest() {
 # variants (kv8, i8head, eager, two-card twins) the sample below stands for. Each stage's `after` must be here too.
 quick pre g0.build g0.sha g0.bitwise
 quick_form g0.suite "the baseline's model-free tests only (no checkpoint label)"
+quick_form g0.suite_2card "the baseline's model-free pp / tp tests only (no checkpoint label)"
 quick_form r2.suite "mtp_server, golden_server, prefix_gpu_l0, mtp_verify, scheduler, adaptive_k (no mtp_gpu_test, the other prefix_gpu twins)"
 quick_form r2.auto_rows "one round, --spec off and auto, 2 golden + 3 tool-call prompts (QUICK_PROMPTS)"
 quick r6.memory
@@ -3925,4 +3945,5 @@ quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
 quick r54.kernels r54.load r55.kernels
 quick r22.devices r22.p1 r79.host r79.k1 r79.decode
 quick r77.host r77.reject r77.r1 r77.ornith r78.host r78.engine
-quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr or tp label)"
+quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr, pp or tp label)"
+quick_form x.rest_2card "the model-free pp-labelled tests without a result (no checkpoint, bolt, lilicorr or tp label)"
