@@ -154,10 +154,19 @@ l0::Mem& PrefillScratch::kv8_raw_buffer() {
   }
   return *kv8_raw_;
 }
+l0::Mem& PrefillScratch::gemm_slab(const void* w, size_t bytes, bool& fresh) {
+  auto it = gemm_slabs_.find(w);
+  fresh = it == gemm_slabs_.end();
+  if (fresh) it = gemm_slabs_.try_emplace(w, *ctx_, l0::MemKind::Device, bytes).first;
+  if (it->second.size() != bytes) throw std::logic_error("runtime::PrefillScratch::gemm_slab: one weight, two sizes");
+  return it->second;
+}
 size_t PrefillScratch::lazy_bytes() const {
+  size_t g = 0;
+  for (const auto& [w, m] : gemm_slabs_) g += m.size();
   return (slab_ ? slab_->size() : 0) +
          (pf_s_ ? pf_s_->size() : 0) + (pf_p_ ? pf_p_->size() : 0) +
-         (kv8_raw_ ? kv8_raw_->size() : 0);
+         (kv8_raw_ ? kv8_raw_->size() : 0) + g;
 }
 
 // --- MtpBuffers (spec 8) -----------------------------------------------------

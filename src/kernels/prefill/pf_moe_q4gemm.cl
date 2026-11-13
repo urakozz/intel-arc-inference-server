@@ -25,7 +25,8 @@
 //
 // The expert address: block e < EXPERTS at W + e x BLK (the layer's block base and the id - q4_pf_moe.cl's
 // Q4_EXPERT_* line, spec 22's hook), the shared expert (e == EXPERTS) at W_sh (Ornith passes W + EXPERTS x BLK, its
-// 257th block; Flash-Next its separate int4 block).
+// 257th block; Flash-Next its separate int4 block, or null for Intel's bf16 shared expert: those items return and the
+// host runs that one block through q4_pf_dequant_*_shb + pf_moe_gemm).
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
@@ -106,7 +107,8 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
                             __global ushort* restrict out) {
   const uint it = get_group_id(1);
   const uint e = items[4 * it];
-  if (e == NONE) return;                              // uniform; no barrier below
+  if (e == NONE || (e == EXPERTS && W_sh == 0)) return;   // uniform; no barrier below (no W_sh: the shared block's
+                                                          // bf16 form runs the batch path, Flash-Next's Intel form)
   const uint row0 = items[4 * it + 1];
   const uint rows = items[4 * it + 2];
   const uint s = get_sub_group_id();
@@ -117,7 +119,9 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
   const int a_w = K * 2, a_p = K * 2;
   // The A reads are one 32-row block each, the row offset in the BASE and the k offset in the base too (IGC 2.41
   // kept a 2D read's first coordinate across a loop when it moved in the coordinate: pf_gemm_q4.cl, 2026-11-08).
-  const uint live_blocks = min((uint)(NA / 4), rows / 32u);   // 32-row blocks of this sub-group inside the item
+  // Task 4: a 64-row sub-group over a 32-row item (an expert's odd last tile) runs its first 32 rows' DPAS only -
+  // uniform across the work-group; the rows it skips are past the item and never stored.
+  const bool full = NA == 4 || rows >= 64u;
 
   float8 acc[NA][NB];
 #pragma unroll
@@ -146,8 +150,9 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
       ushort afrag[NA / 4][64];
 #pragma unroll
       for (int r = 0; r < NA / 4; ++r)
-        intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
-                                                   a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
+        if (r == 0 || full)
+          intel_sub_group_2d_block_read_16b_32r16x2c((__global void*)(Ab + (size_t)(32 * r) * K + k0),
+                                                     a_w - (int)(2u * k0), 32, a_p, (int2)(0, 0), afrag[r]);
 #pragma unroll
       for (int ks = 0; ks < 2; ++ks) {
         short8 af[NA];
@@ -157,7 +162,8 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
         for (int b = 0; b < NB; ++b) {
           const int8 bv = q4_half(wq[b][4 * h + 2 * ks], wq[b][4 * h + 2 * ks + 1], sc[b]);
 #pragma unroll
-          for (int a = 0; a < NA; ++a) acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
+          for (int a = 0; a < NA; ++a)
+            if (a < 4 || full) acc[a][b] = intel_sub_group_bf16_bf16_matrix_mad_k16(af[a], bv, acc[a][b]);
         }
       }
     }
@@ -169,7 +175,6 @@ __kernel void pf_moe_q4gemm(__global const uint* restrict items, __global const 
     }
   }
 #undef LOAD_GROUP
-  (void)live_blocks;
 
   // The surface ends at the item's last row: a 64-row sub-group over a 32-row item writes only its first half.
   const int live_rows = min((int)R, (int)rows);

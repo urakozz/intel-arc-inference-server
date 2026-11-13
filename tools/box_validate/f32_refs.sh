@@ -26,13 +26,15 @@
 #   tools/box_validate/f32_refs.sh <data tree> forced-qwen-pfi8 <dir> [<dir>...]
 #       the l0-int8 tests' judges (mtp_gpu_test and its twins prefill with l0-int8; operator ruling 2026-10-23):
 #       every mtp_gpu_ context of the dirs through qwen_forced.py --pfi8-re (the test's own prompt rows through
-#       int8_sim fq_x / fq_w on the h8 linears, decode rows plain), one pass, both heads into ONE dir (the keys carry
-#       the head form) -> <data tree>/oracle-out-qwen-f32-pfi8-forced/
+#       int8_sim fq_x / fq_w on the h8 linears - the MLP's since open-work 17, the mixer linears bf16 - decode rows
+#       plain), one pass, both heads into ONE dir (the keys carry the head form) ->
+#       <data tree>/oracle-out-qwen-f32-pfi8mlp-forced/ (a new name: oracle-out-qwen-f32-pfi8-forced holds the
+#       references of the form before open-work 17, int8 on every int4 linear, which the resume would otherwise reuse)
 #   tools/box_validate/f32_refs.sh <data tree> bf16top-qwen <dir> [<dir>...]
 #       the bf16-unstable rule's standard-bf16 top-k references (operator 2026-11-04, tests/server/spec_judge.h;
 #       B70_FORCED_BF16): tools/oracle/qwen_bf16_top.py plan on the host - the Qwen3.8 contexts of the dirs whose
 #       judge rejects a forced id by more than 8 bf16 ulp, each against the judge its test reads (mtp_gpu_ keys: the
-#       l0-int8 judges of oracle-out-qwen-f32-pfi8-forced; the rest: oracle-out-qwen-f32{,-i8head}-forced) - then
+#       l0-int8 judges of oracle-out-qwen-f32-pfi8mlp-forced; the rest: oracle-out-qwen-f32{,-i8head}-forced) - then
 #       qwen_bf16_top.py run in the oracle container under /tmp/b70-cpu-model.lock (its memory cap:
 #       run_in_container.sh, ORACLE_MEMORY) -> <data tree>/oracle-out-qwen-bf16top-forced/<key>.bf16top.safetensors.
 #       Resumable: keys already there are skipped. Run forced-qwen / forced-qwen-pfi8 first (no judge, no plan).
@@ -82,7 +84,7 @@ case "$what" in
     part="oracle-out-qwen-forced.partial"   # in the tree: the container sees only the tree (at /ws)
     keys="${QWEN_KEYS_RE:-^(mtp_verify_qwen3\.8_|mtp_gpu_|dflash_)}" pfi8=""
     if [ "$what" = forced-qwen-pfi8 ]; then
-      out="$data/oracle-out-qwen-f32-pfi8-forced" out8="$out" part="oracle-out-qwen-pfi8-forced.partial"
+      out="$data/oracle-out-qwen-f32-pfi8mlp-forced" out8="$out" part="oracle-out-qwen-pfi8mlp-forced.partial"
       keys="^mtp_gpu_" pfi8="--pfi8-re '^mtp_gpu_'" QWEN_FIRST_RE=""
     fi
     mkdir -p "$part/ctx" "$part/out" "$part/out-i8head" "$out" "$out8"
@@ -150,7 +152,7 @@ case "$what" in
     echo "f32_refs: bf16top-qwen: $(ls "$part/ctx-pfi8" | grep -c '\.prompt\.ids$') l0-int8 and" \
       "$(ls "$part/ctx" | grep -c '\.prompt\.ids$') other Qwen3.8 contexts"
     # the plan on the host (numpy; the judges are read where they are), one judge per key: the one its test reads
-    python3 tools/oracle/qwen_bf16_top.py plan --ctx "$part/ctx-pfi8" --judge "$data/oracle-out-qwen-f32-pfi8-forced" \
+    python3 tools/oracle/qwen_bf16_top.py plan --ctx "$part/ctx-pfi8" --judge "$data/oracle-out-qwen-f32-pfi8mlp-forced" \
       --out "$out" --plan "$part/plan-pfi8.json" &&
       python3 tools/oracle/qwen_bf16_top.py plan --ctx "$part/ctx" --judge "$data/oracle-out-qwen-f32-forced" \
         --judge "$data/oracle-out-qwen-f32-i8head-forced" --out "$out" --plan "$part/plan-rest.json" &&

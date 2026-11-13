@@ -218,9 +218,9 @@ struct PrefillScratchSizes {
 
 // Spec 15d: a mixture-of-experts model's PREFILL scratch - one allocation
 // (PrefillScratch::moe), regions at these offsets, sized here and nowhere else
-// (src/kernels/prefill/pf_moe.cl and pf_moe_gemm.cl say what each holds):
+// (src/kernels/prefill/pf_moe.cl, pf_moe_sort_mw.cl, pf_moe_q4gemm.cl and pf_moe_w4a8.cl say what each holds):
 //
-// (kC here is PrefillScratchDims::kCDefault: a MoE model's chunk cap is always 2048.)
+// (kC here is the session's chunk cap, 2048 or 4096.)
 //
 //   logits   fp32 [kC][router_n]            the router || shared-gate GEMV over the chunk
 //   route    u32  [layers][kC][32]          moe_route's rows, PER LAYER: after a prefill every
@@ -230,48 +230,51 @@ struct PrefillScratchSizes {
 //   tiles    u32  [tmax][2]                 the padded tile table: (weight block, first row)
 //   row_tok  u32  [rows]                    the token of every sorted row (NONE: padding)
 //   pair_row u32  [kC][top_k]               the sorted row of every (token, slot)
-//   xs       fp32 [rows]                    l0-int8: the gathered per-token activation scales
 //   h        bf16 [rows][expert_intermediate]   SiLU(gate) x up of every sorted row
 //   xg       bf16 [rows][hidden]            the gathered activations (l0-int8: int8 [rows][hidden]
 //                                           in its first half), then - gate||up having consumed
 //                                           them - the down GEMM's rne'd output y
-//   w        the expert weights of one layer in the grouped GEMMs' B form, rebuilt per chunk:
-//            int8 VNNI-4 [hidden/4][blocks x 2I] (l0-int8 gate||up, every block at once), bf16
-//            [blocks][I][hidden] (down, every block at once) or bf16 [nb][hidden][2I] (l0's
-//            gate||up, nb = ceil(blocks / 2) blocks per batch) - sized for the largest
+//   cnt, items, xsg_tok, xsg               the sort's block counts and work items, W4A8's group scales
+//   (no weight batch since plan 2026-11-12: the GEMMs read the int4 blocks in place)
 //
 // rows = TM x tmax(kC), tmax(C) = floor((C x top_k + experts x (TM - 1)) / TM) + ceil(C / TM):
 // every expert's rows padded to whole TM-row tiles, the shared expert's C rows last
-// (moe_prefill_tiles). Ornith at kC 2048: 824 tiles, 26,368 rows; ~0.69 GB in all, 0.54 of
-// it the weight batch.
+// (moe_prefill_tiles). Ornith at kC 2048: 824 tiles, 26,368 rows; ~0.15 GB in all.
 struct MoePrefillLayout {
-  uint32_t tmax = 0, rows = 0;   // at kC
+  uint32_t tmax = 0, rows = 0;   // at the chunk cap
   size_t logits_off = 0, route_off = 0, route_layer = 0, hdr_off = 0, tiles_off = 0,
-         row_tok_off = 0, pair_row_off = 0, xs_off = 0, h_off = 0, xg_off = 0, w_off = 0,
+         row_tok_off = 0, pair_row_off = 0, h_off = 0, xg_off = 0,
          cnt_off = 0,            // pf_moe_sort_mw's per-block counts, u32 [ceil(C / 64)][experts]
-         items_off = 0;          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
-  uint32_t ibound = 0;           // at kC
-  size_t w = 0;                  // the weight batch's bytes
+         items_off = 0,          // its work items, u32 [ibound][4] (the fused GEMMs' grid)
+         xsg_tok_off = 0,        // W4A8 (l0-int8): the chunk's per-token 64-k group scales, fp32 [C][hidden / 64]
+         xsg_off = 0,            // and the sorted rows', fp32 [rows][hidden / 64]
+         // Phase 3 Task 2 (l0): the router || shared gate's and the a||b's dense GEMM output, INSIDE xg (no bytes
+         // of its own): fp32 [pad256(kC)][gemm_pitch]. The router's rows are consumed by moe_route before the
+         // gather writes xg, the a||b's by pf_gdn_gate before the layer's MoE block.
+         gemm_out_off = 0;
+  uint32_t gemm_pitch = 0;       // the wider of the two GEMMs' padded N (pf_route_slab_pitch)
+  uint32_t ibound = 0;           // at the chunk cap
   size_t total = 0;
   size_t route_at(uint32_t layer) const { return route_off + size_t(layer) * route_layer; }
 };
-MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc);   // all zero when dense
+// At the session's chunk cap (plan 2026-11-12 Task 6: 2048 or 4096); all zero when dense.
+MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap = 2048);
 // tmax(C): the tile table's fixed length for a C-row chunk - the grouped GEMMs' grid.
 uint32_t moe_prefill_tiles(const model::ModelDesc& desc, uint32_t C);
+// Phase 3 Task 2: the l0 backend's persistent pf_gemm B slabs of a MoE model's layers [first, last) - every layer's
+// router || shared gate, bf16 [hidden][pf_route_slab_pitch(router_n)], and every GDN layer's a||b, bf16
+// [hidden][pf_route_slab_pitch(128)] (PrefillScratch::gemm_slab; Ornith 40 x 2 MiB + 30 x 1 MiB). 0 when dense.
+size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last);
 // The work items' bound at C (pf_moe_sort_mw.cl, MI = kernels::pf_moe::kItemM rows an item): the fused grouped
 // GEMMs' grid, a function of C alone.
 uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C);
-// How many expert weight blocks one rebuild of `w` holds, for each B form (Ornith: 257,
-// 257, 129), so the host walks the blocks in ceil(blocks / that) batches.
-enum class MoeWeightForm { GateUpInt8, GateUpBf16, DownBf16 };
-uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f);
 
 struct PrefillScratchDims {
   // Plan 5d: the chunk's row count is a SESSION value, the chunk cap - kCDefault (ruling
   // A13's 2048) or kCMax (4096) - and every per-chunk buffer is sized by it. There is no
   // single kC any more: a site that bounds a chunk asks the scratch it writes
-  // (PrefillScratch::chunk_cap(), Int8State::chunk_cap()). A MoE model stays at 2048
-  // (check_prefill_chunk_cap below).
+  // (PrefillScratch::chunk_cap(), Int8State::chunk_cap()). A MoE model takes either since plan
+  // 2026-11-12 (the multi-work-group sort has no chunk bound of its own).
   static constexpr uint32_t kCDefault = 2048;        // ruling A13 (was 4096)
   static constexpr uint32_t kCMax = 4096;            // plan 5d
   static constexpr uint32_t kGdnChunk = 64;          // the FLA intra-chunk size
@@ -284,9 +287,7 @@ struct PrefillScratchDims {
 };
 
 // Plan 5d: the chunk caps a model may run. Throws std::invalid_argument unless `chunk_cap`
-// is kCDefault or kCMax, and - naming the model - for kCMax on a MoE model: pf_moe bakes
-// KC = 2048 into its SLM sort staging (src/kernels/prefill/pf_moe.cl), and a KC 4096
-// variant is not built.
+// is kCDefault or kCMax (a MoE model takes either since plan 2026-11-12 Task 6).
 void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap);
 // The cap a `--prefill-chunk C` width needs: 0 for C = 0 (nothing asked), kCDefault for
 // C <= 2048, kCMax for C <= 4096; above 4096, or a cap the model refuses, throws
@@ -406,10 +407,16 @@ size_t mtp_prefill_hidden_bytes(const model::ModelDesc& desc, uint32_t chunk_cap
 // The three scratch buffers Int8State's constructor allocates for its `max_k` (the
 // MLP intermediate: down's K), and - separately, because they are built per weight
 // on first use - the rotated column scales: ws and 1/ws, fp32 [N] each, for every
-// int4 linear of every layer (lm_head excluded: it is never an h8 linear). Both are
+// h8 linear of every layer (lm_head excluded: it is never an h8 linear; a dense model's
+// mixer linears neither, l0_int8_bf16_linear). Both are
 // what `Int8State::bytes()` counts. The per-K sign tables (`signs_f32`, `sign_bits`:
 // K x 4 + K / 8 bytes for each of the 3-4 distinct K, ~0.1 MB) are NOT in bytes() and
 // so are not here either; they are inside the reserve (memory_plan.h).
+//
+// Open-work 17: on a dense model `l0-int8` runs the four mixer linears (qkv||z, out_proj, q||k||v, o_proj) on the
+// bf16 l0 walk and keeps int8 for the MLP (gate||up, down) - the rotated int8 mixer linears carried the long-prompt
+// miss. A MoE model keeps every dense int4 linear on h8 (open-work 16). True for those four on a dense model.
+bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id);
 struct Int8ScratchSizes {
   size_t xq, xs, w8;
   size_t total() const { return xq + xs + w8; }

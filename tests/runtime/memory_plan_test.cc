@@ -90,13 +90,13 @@ void check_sizes_qwen38() {
   // (kC + 1) x 5120 x 2 B.
   CHECK_EQ(runtime::mtp_prefill_hidden_bytes(q, runtime::PrefillScratchDims::kCDefault), size_t{2049} * 5120 * 2);
   // Int8State: xq 2048 x 17408 + xs 2048 x 4 + w8 (17408 / 4) x 1024 x 4, and the
-  // column scales: 2 x 4 B x the int4 N of every layer - 48 GDN layers x (16384 +
-  // 5120 + 34816 + 5120) + 16 FA layers x (14336 + 5120 + 34816 + 5120).
+  // column scales: 2 x 4 B x the N of every h8 linear - the MLP's gate||up 34816 and down
+  // 5120 in each of the 64 layers (open-work 17: the mixer linears are the l0 walk's).
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total(), size_t{35651584 + 8192 + 17825792});
-  CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * (48 * 61440 + 16 * 59392));
-  // = 84,680,704 B: spec 6 §8.4's measured "int8 0.085 GB".
+  CHECK_EQ(runtime::int8_scale_bytes(q), size_t{8} * 64 * (34816 + 5120));
+  // = 73,932,800 B (spec 6 §8.4 measured 84,680,704, "int8 0.085 GB", with all four int4 linears h8).
   CHECK_EQ(runtime::int8_scratch_sizes(17408, runtime::PrefillScratchDims::kCDefault).total() + runtime::int8_scale_bytes(q),
-           size_t{84680704});
+           size_t{73932800});
 }
 
 // Spec 15c: Ornith 1.5 35B-A3B with the int8 head, derived from the descriptor and - spec
@@ -160,20 +160,19 @@ void check_sizes_ornith() {
   CHECK_EQ(ml2.rows, uint32_t(26368));
   CHECK_EQ(ml2.route_layer, size_t{2048} * 32 * 4);
   CHECK_EQ(ml2.route_off, size_t{2048} * 272 * 4);                // after the logits
-  // The weight batch: the bf16 gate||up of ceil(257 / 2) = 129 blocks (2048 x 1024 x 2 B
-  // each) outgrows the int8 gate||up and the bf16 down of all 257 (2 MiB each).
-  CHECK_EQ(ml2.w, size_t{129} * 2048 * 1024 * 2);                  // 541,065,216
-  // plan 2026-11-12 Task 2: + the mw sort's counts (32 blocks x 256 experts) and its work items (540 x 4 u32)
+  // Plan 2026-11-12: no weight batch (the GEMMs read the int4 blocks in place); + the mw sort's counts (32 blocks
+  // x 256 experts), its work items (540 x 4 u32) and W4A8's group scales (2048 tokens and 26368 rows x 32 groups)
   CHECK_EQ(runtime::moe_prefill_items(o, 2048), uint32_t(540));     // (16384 + 256 x 63) / 64 + 32
-  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 105472 +
-                          27000832 + 108003328 + 541065216 + 32768 + 8704);   // 689,109,248
-  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpInt8), uint32_t(257));
-  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::DownBf16), uint32_t(257));
-  CHECK_EQ(runtime::moe_prefill_batch_blocks(o, runtime::MoeWeightForm::GateUpBf16), uint32_t(129));
+  CHECK_EQ(ml2.total, size_t{2228224} + 10485760 + 1280 + 6656 + 105472 + 65536 + 27000832 + 108003328 + 32768 +
+                          8704 + 262144 + 3375104);   // 151,575,808
   const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(16384, o, runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(ps.moe, ml2.total);
   CHECK_EQ(ps.slab, size_t{4096} * 1024 * 2);                       // out_proj / o_proj's K
   CHECK_EQ(ps.partials, size_t{2048} * 12288 * 4);                  // qkv||z's N
+  // Phase 3 Task 2: l0's router / a||b B slabs - 40 x [2048][512] + 30 x [2048][256] bf16, per stage by layer range.
+  CHECK_EQ(runtime::route_slab_bytes(o, 0, o.layers), size_t{40} * 2048 * 512 * 2 + size_t{30} * 2048 * 256 * 2);
+  CHECK_EQ(runtime::route_slab_bytes(o, 0, 4), size_t{4} * 2048 * 512 * 2 + size_t{3} * 2048 * 256 * 2);
+  CHECK_EQ(runtime::route_slab_bytes(model::qwen38(), 0, model::qwen38().layers), size_t{0});
   // Dense models carry none, and their slab / int8 K are what they were.
   CHECK_EQ(runtime::moe_prefill_layout(model::qwen38()).total, size_t{0});
   CHECK_EQ(runtime::PrefillScratchDims::sizes(16384, model::qwen38(), runtime::PrefillScratchDims::kCDefault).moe, size_t{0});
@@ -218,14 +217,16 @@ void check_spec6_line() {
   // gdn_state + conv_ring + control + DecodeScratch with v2's attn_part.
   CHECK_EQ(p.decode_state, size_t{150994944 + 15728640 + 128} + (68652864 - 50724864 + 6340608));
   CHECK_EQ(p.decode_state, size_t{190992320});
-  CHECK_EQ(p.prefill_scratch, size_t{699514776});
-  CHECK_EQ(p.prefill_lazy, size_t{0});         // flash attention, no MTP: nothing lazy
-  CHECK_EQ(p.int8, size_t{84680704});
+  // Open-work 17: l0-int8's mixer linears walk the slab (lazy) and have no int8 column scales - prefill scratch
+  // 0.700 -> 0.735 GB, int8 0.085 -> 0.074 GB against the measured line.
+  CHECK_EQ(p.prefill_scratch, size_t{699514776} + 35651584);
+  CHECK_EQ(p.prefill_lazy, size_t{35651584});   // flash attention, no MTP: the slab only
+  CHECK_EQ(p.int8, size_t{73932800});
   const std::string line = runtime::format_memory("memory", p, kDevice);
   std::printf("%s\n", line.c_str());
   CHECK(line ==
-        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.700 GB,"
-        " int8 0.085 GB, total 27.681 GB of 32.530 GB");
+        "memory: model 18.116 GB, kv 8.590 GB, decode state 0.191 GB, prefill scratch 0.735 GB,"
+        " int8 0.074 GB, total 27.706 GB of 32.530 GB");
 }
 
 void check_paths() {
@@ -538,8 +539,7 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::int8_scratch_sizes(17408, 2048).total(), size_t{35651584 + 8192 + 17825792});
   CHECK_EQ(runtime::TapVerifyDims::prefill_taps_bytes(q, 5, 4096), size_t{4096} * 5 * 5120 * 2);
 
-  // Refusals: a cap is 2048 or 4096, and Ornith (pf_moe bakes KC = 2048 into its SLM
-  // sort staging) stays at 2048, refused by name above it.
+  // Refusals: a cap is 2048 or 4096; Ornith takes 4096 since plan 2026-11-12 (the multi-work-group sort has no KC).
   auto throws = [](auto&& f, const char* needle) {
     try {
       f();
@@ -555,12 +555,17 @@ void check_chunk_cap() {
   for (uint32_t bad : {0u, 1024u, 3072u, 8192u})
     CHECK(throws([&] { D::sizes(16384, q, bad); }, nullptr));
   const model::ModelDesc& o = model::ornith();
-  CHECK(throws([&] { D::sizes(16384, o, 4096); }, "pf_moe"));
-  CHECK(throws([&] { runtime::check_prefill_chunk_cap(o, 4096); }, o.name.c_str()));
+  runtime::check_prefill_chunk_cap(o, 4096);
+  {   // the MoE scratch at 4096 rows: tmax (32768 + 7936) / 32 + 128 = 1400, items (32768 + 16128) / 64 + 64 = 828
+    const runtime::MoePrefillLayout m4 = runtime::moe_prefill_layout(o, 4096);
+    CHECK_EQ(m4.tmax, uint32_t(1400));
+    CHECK_EQ(m4.ibound, uint32_t(828));
+    CHECK_EQ(D::sizes(16384, o, 4096).moe, m4.total);
+  }
   runtime::check_prefill_chunk_cap(o, 2048);
   runtime::check_prefill_chunk_cap(q, 4096);
   // A --prefill-chunk width to the cap it needs: 0 = none asked; up to 2048 -> 2048; up to
-  // 4096 -> 4096; above, and Ornith above 2048, refused.
+  // 4096 -> 4096; above, refused.
   CHECK_EQ(runtime::prefill_chunk_cap_for(0, q), 0u);
   CHECK_EQ(runtime::prefill_chunk_cap_for(16, q), 2048u);
   CHECK_EQ(runtime::prefill_chunk_cap_for(2048, q), 2048u);
@@ -568,7 +573,7 @@ void check_chunk_cap() {
   CHECK_EQ(runtime::prefill_chunk_cap_for(4096, q), 4096u);
   CHECK_EQ(runtime::prefill_chunk_cap_for(2048, o), 2048u);
   CHECK(throws([&] { runtime::prefill_chunk_cap_for(4097, q); }, "4096"));
-  CHECK(throws([&] { runtime::prefill_chunk_cap_for(4096, o); }, o.name.c_str()));
+  CHECK_EQ(runtime::prefill_chunk_cap_for(4096, o), 4096u);
   // The engines' default cap: 2048, read from no environment variable (operator, 2026-11-03);
   // only the test seam moves it (tests/chunk_cap_arg.h), and only to a cap.
   CHECK_EQ(runtime::default_prefill_chunk_cap(), 2048u);
@@ -624,13 +629,11 @@ void check_chunk_cap() {
       at.chunk_cap = cap;
       // Whatever the rule picks, the session's max_len still fits with its reserve.
       CHECK(runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
-      if (r.d->is_moe()) CHECK_EQ(cap, 2048u);
       // Below the trained context, auto leaves less than one quantum of slack: 2048.
       if (L < kTrained) CHECK_EQ(cap, 2048u);
       // 4096 exactly when its plan fits.
       at.chunk_cap = 4096;
-      if (!r.d->is_moe())
-        CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
+      CHECK_EQ(cap == 4096u, runtime::plan(*r.d, L, r.mtp, r.w, at, {}, r.kv).total() + kReserve <= kDevice);
       std::printf("chunk cap %-26s %-7s auto max_len %6u -> cap %u\n", r.what,
                   b == PrefillBackend::L0 ? "l0" : "l0-int8", L, cap);
       // An explicit --max-len well below auto: 4096 (dense models).

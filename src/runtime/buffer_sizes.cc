@@ -258,7 +258,7 @@ PrefillScratchSizes PrefillScratchDims::sizes(uint32_t max_len, const model::Mod
   // The int8 flash path's widening is built at Qwen3.8's heads and (spec 17c) a tensor-parallel card's 12 / 2.
   if ((desc.fa_q_heads == 24 && desc.fa_kv_heads == 4) || (desc.fa_q_heads == 12 && desc.fa_kv_heads == 2))
     s.kv8_raw = size_t{max_len} * desc.fa_kv_n() * kBf16 * 2;
-  s.moe = moe_prefill_layout(desc).total;   // spec 15d: 0 on a dense model
+  s.moe = moe_prefill_layout(desc, chunk_cap).total;   // spec 15d: 0 on a dense model
   return s;
 }
 
@@ -361,11 +361,7 @@ void check_prefill_chunk_cap(const model::ModelDesc& desc, uint32_t chunk_cap) {
     throw std::invalid_argument("prefill chunk cap " + std::to_string(chunk_cap) + " is neither " +
                                 std::to_string(PrefillScratchDims::kCDefault) + " nor " +
                                 std::to_string(PrefillScratchDims::kCMax));
-  if (chunk_cap > PrefillScratchDims::kCDefault && desc.is_moe())
-    throw std::invalid_argument(desc.name + " prefills in chunks of at most " +
-                                std::to_string(PrefillScratchDims::kCDefault) +
-                                ": pf_moe bakes KC = 2048 into its SLM sort staging, and no KC " +
-                                std::to_string(chunk_cap) + " variant is built (plan 5d)");
+  (void)desc;   // every model takes either cap (a MoE model's sort has no chunk bound since plan 2026-11-12)
 }
 
 uint32_t prefill_chunk_cap_for(uint32_t chunk, const model::ModelDesc& desc) {
@@ -394,6 +390,11 @@ void set_default_prefill_chunk_cap(uint32_t cap) {
 }
 }  // namespace testing
 
+bool l0_int8_bf16_linear(const model::ModelDesc& desc, model::LinearId id) {
+  return !desc.is_moe() && (id == model::LinearId::QkvZ || id == model::LinearId::OutProj ||
+                             id == model::LinearId::Qkv || id == model::LinearId::OProj);
+}
+
 Int8ScratchSizes int8_scratch_sizes(uint32_t max_k, uint32_t chunk_cap) {
   if (chunk_cap != PrefillScratchDims::kCDefault && chunk_cap != PrefillScratchDims::kCMax)
     throw std::invalid_argument("int8_scratch_sizes: chunk cap " + std::to_string(chunk_cap) +
@@ -414,7 +415,7 @@ size_t int8_scale_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t l
   for (const model::LayerDesc& ld : desc.layer_descs()) {
     if (ld.index < first || ld.index >= last) continue;
     for (const model::FusedLinear& fl : ld.linears)
-      if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id))
+      if (fl.kind == model::WeightKind::Int4 && !moe_ffn_row(desc, fl.id) && !l0_int8_bf16_linear(desc, fl.id))
         b += 2 * size_t{fl.shape.N} * kFp32;   // ws, 1/ws
   }
   // Spec 15d: a MoE layer's expert gate||up array (every block, the shared expert's too)
@@ -442,34 +443,27 @@ uint32_t moe_prefill_items(const model::ModelDesc& desc, uint32_t C) {
 }
 
 namespace {
-// One expert weight block in each grouped-GEMM B form (pf_moe_gemm.cl).
-size_t moe_block_bytes(const model::ModelDesc& d, MoeWeightForm f) {
-  const size_t gu = size_t{d.hidden} * 2 * d.moe.expert_intermediate;   // elements
-  const size_t dn = size_t{d.moe.expert_intermediate} * d.hidden;
-  switch (f) {
-    case MoeWeightForm::GateUpInt8: return gu;            // int8 (VNNI-4 u32 words)
-    case MoeWeightForm::GateUpBf16: return gu * kBf16;
-    case MoeWeightForm::DownBf16: return dn * kBf16;
-  }
-  return 0;
-}
 size_t align256(size_t b) { return (b + 255) / 256 * 256; }
 }  // namespace
 
-MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
+size_t route_slab_bytes(const model::ModelDesc& desc, uint32_t first, uint32_t last) {
+  if (!desc.is_moe()) return 0;
+  const size_t router = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.moe.router_n()) * kBf16;
+  const size_t ab = size_t{desc.hidden} * kernels::pf_route_slab_pitch(desc.shape(model::LinearId::AB).N) * kBf16;
+  size_t b = 0;
+  for (const model::LayerDesc& L : desc.layer_descs())
+    if (L.index >= first && L.index < last) b += router + (L.kind == model::LayerKind::GDN ? ab : 0);
+  return b;
+}
+
+MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc, uint32_t chunk_cap) {
   MoePrefillLayout l;
   if (!desc.is_moe()) return l;
   const model::MoeDesc& m = desc.moe;
-  // A MoE model's chunk cap is always 2048 (check_prefill_chunk_cap): pf_moe's KC.
-  const size_t kC = PrefillScratchDims::kCDefault;
-  l.tmax = moe_prefill_tiles(desc, PrefillScratchDims::kCDefault);
+  check_prefill_chunk_cap(desc, chunk_cap);   // the session's chunk cap, 2048 or 4096
+  const size_t kC = chunk_cap;
+  l.tmax = moe_prefill_tiles(desc, chunk_cap);
   l.rows = l.tmax * kernels::pf_moe::kTileM;
-  // The weight batch: every block in the int8 gate||up and bf16 down forms, half the
-  // blocks (rounded up) in the bf16 gate||up form - whichever is largest.
-  const uint32_t half = (m.blocks() + 1) / 2;
-  l.w = std::max({moe_block_bytes(desc, MoeWeightForm::GateUpInt8) * m.blocks(),
-                  moe_block_bytes(desc, MoeWeightForm::DownBf16) * m.blocks(),
-                  moe_block_bytes(desc, MoeWeightForm::GateUpBf16) * half});
   size_t at = 0;
   auto region = [&](size_t bytes) {
     const size_t off = at;
@@ -483,21 +477,19 @@ MoePrefillLayout moe_prefill_layout(const model::ModelDesc& desc) {
   l.tiles_off = region(size_t{l.tmax} * 2 * sizeof(uint32_t));
   l.row_tok_off = region(size_t{l.rows} * sizeof(uint32_t));
   l.pair_row_off = region(kC * m.top_k * sizeof(uint32_t));
-  l.xs_off = region(size_t{l.rows} * kFp32);
   l.h_off = region(size_t{l.rows} * m.expert_intermediate * kBf16);
   l.xg_off = region(size_t{l.rows} * desc.hidden * kBf16);
-  l.w_off = region(l.w);
   l.cnt_off = region((kC + 63) / 64 * m.experts * sizeof(uint32_t));
-  l.ibound = moe_prefill_items(desc, PrefillScratchDims::kCDefault);
+  l.ibound = moe_prefill_items(desc, chunk_cap);
   l.items_off = region(size_t{l.ibound} * 4 * sizeof(uint32_t));
+  l.xsg_tok_off = region(kC * (desc.hidden / 64) * kFp32);
+  l.xsg_off = region(size_t{l.rows} * (desc.hidden / 64) * kFp32);
+  l.gemm_pitch = kernels::pf_route_slab_pitch(std::max(m.router_n(), desc.shape(model::LinearId::AB).N));
+  l.gemm_out_off = l.xg_off;
+  if ((kC + 255) / 256 * 256 * l.gemm_pitch * kFp32 > size_t{l.rows} * desc.hidden * kBf16)
+    throw std::logic_error("runtime::moe_prefill_layout: the router / a||b GEMM's rows overflow xg");
   l.total = at;
   return l;
-}
-
-uint32_t moe_prefill_batch_blocks(const model::ModelDesc& desc, MoeWeightForm f) {
-  if (!desc.is_moe()) return 0;
-  const size_t per = std::max<size_t>(moe_prefill_layout(desc).w / moe_block_bytes(desc, f), 1);
-  return uint32_t(std::min<size_t>(per, desc.moe.blocks()));
 }
 
 }  // namespace runtime

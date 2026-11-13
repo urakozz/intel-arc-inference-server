@@ -34,6 +34,13 @@ PREFILL, per linear layer, per chunk, on the fly:
   property of the weights. They are computed once, when the model loads.
 - **`--prefill-backend l0-int8`** is opt-in; `l0` (the bf16 prefill) is the default for
   every model since 2026-10-27 (operator ruling). The recipe is called "h8" (Hadamard rotation, int8 math) below.
+- **Which linears (since 2026-11-13, open-work item 17).** On the dense model Qwen3.8 only the MLP runs h8: gate‖up
+  and down, the two linears with K = 17,408 where most of the gain is. The four mixer linears (the delta-net input
+  and output projections, attention's q‖k‖v and o_proj) run bf16, exactly as on `l0`. Why: on a 2,820-token prompt
+  the int8 mixer linears made one row pick a token the f32 reference puts 7.9 logits below its own top (not a
+  near-tie); with them in bf16 the long gate passes 32/32 and the logits sit as close to f32 as `l0`'s. The price is
+  about a quarter of the gain (see the Status section). Mixture-of-experts models (Ornith) keep the earlier form,
+  every dense linear h8 and the experts W4A8, until open-work item 16 is decided.
 
 **Result:** pp4096 **2104.50 t/s**, against 1643.52 for the bf16 prefill in the
 same session, paired **1.28x**. Decode is unchanged at 29.40 t/s. Accuracy on
@@ -48,7 +55,8 @@ GEMM. Checkpoint addressing retains raw K; only int8 scratch and GEMM use the
 padded width. This leaves the dot product unchanged before quantisation and
 requires neither another activation crossing nor a persistent weight copy.
 Other per-card widths already fit whole 1024 blocks: out/o K=3072, and the
-column-parallel linears K=5120. Every output width is whole 1024-column slabs.
+column-parallel linears K=5120. Every output width is whole 1024-column slabs. Since 2026-11-13 only gate‖up and
+down run int8 under TP as on one card; the mixer linears take the bf16 slab walk on both cards.
 
 A 512-wide local rotation was tried and removed after f32-rejected differences
 of up to 30.67 bf16 ulps. Full-width rotation before splitting would require
@@ -76,7 +84,12 @@ bf16 KV, max_len 32768, tg 32):
 | 16384 | 2673.31 | 3047.73 | 14.0% |
 
 Both cards and the CPU model lane were locked; runs overlapping compiler work
-were excluded. The original ~3700 / ~3400 figures were estimates, not thresholds
+were excluded. With int8 in the MLP only (2026-11-13; whole-box lock, interleaved against main, median of 3): 3,217
+t/s at 4,096 and 2,937 at 16,384, against main's all-int8 3,327 / 3,052 (0.967x / 0.962x). The TP int8 quality gate
+then FAILs on one row: t2_explain-loader row 32 picks a token 30.67 bf16 ulps below the f32 top (main's form picked
+another one, 2.55 ulps below; its run passes all 40). In the same session the one-card int8 pass on the same
+contexts (`--one-card`) went from 3 rejected rows on main (two on the long prompt, 63.5 and 50.3 ulps; 27.5 on
+t2_explain-linear_l0) to 1 (8.55 ulps, t6_usage-step row 61). Open: open-work item 17. The original ~3700 / ~3400 figures were estimates, not thresholds
 (operator). See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
 
 ## Why decode stays int4 and bf16
@@ -136,6 +149,23 @@ Part of that 2x is spent rebuilding the rotated int8 weights every chunk: the
 requant is the one cost here that is not matrix math.
 
 ## Status
+
+- **The MLP-only form (2026-11-13, open-work item 17), dense model only.** Measured on one card, interleaved against
+  main's all-int8 form, median of 3 (the other card running a test, so a busy box):
+
+  | prompt | `l0` | `l0-int8`, all linears (main) | `l0-int8`, MLP only (now) | now vs `l0` |
+  |---|---:|---:|---:|---:|
+  | 4,096 | 1,739.9 | 2,256.3 | 2,082.5 | 1.20x |
+  | 16,384 | 1,568.7 | 1,980.5 | 1,844.6 | 1.18x |
+
+  It keeps about two thirds of the gain (1.30x / 1.26x before). Accuracy: the 2,820-token gate
+  (`prefill_gate_long_int8_test`) passes 32/32 with the worst logits cosine 0.947 against the CPU reference (`l0`:
+  0.935; the all-int8 form 31/32, 0.819), and the per-layer split test against bf16 moves closer everywhere
+  (logits 0.9998 against 0.9994-0.9997). On the short golden prompts one row changes: cjk row 9 is again the bf16
+  near-tie the operator accepted for `l0-int8` on 2026-09-24 (margin one bf16 ulp; main's form had it exact), so
+  those gates pass as 92/93 under the standing allowance of one. `l0` is unchanged bit for bit, and so is Ornith.
+  Also less memory: no rotated column scales for the mixer linears (0.074 GB of int8 state instead of 0.085), but the
+  bf16 slab (0.036 GB) is now needed on `l0-int8` too.
 
 - (closed) **The tool-call test**, 36 agentic prompts against the unquantised
   bf16 model: `l0-int8` matches **25 / 36**, the W4A16 prefill `l0` 23 / 36

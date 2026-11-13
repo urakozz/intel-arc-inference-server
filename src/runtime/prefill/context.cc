@@ -43,8 +43,13 @@ struct LaunchProfiler {
   double cycles_per_ms;
   uint64_t mask;
   Context::LaunchMetrics metrics;
+  // B70_PREFILL_PROFILE=2: the kernel of every pending event, named in collect().
+  bool named;
+  std::vector<ze_kernel_handle_t> kernels;
 
   LaunchProfiler(ze_context_handle_t c, ze_device_handle_t d) : ctx(c), dev(d) {
+    const char* v = std::getenv("B70_PREFILL_PROFILE");
+    named = v != nullptr && std::strcmp(v, "2") == 0;
     ze_device_properties_t prop{};
     prop.stype = ZE_STRUCTURE_TYPE_DEVICE_PROPERTIES_1_2;
     zc(zeDeviceGetProperties(dev, &prop), "profile device properties");
@@ -86,10 +91,13 @@ struct LaunchProfiler {
       zc(zeEventQueryKernelTimestamp(events[i], &ts), "profile timestamp");
       const uint64_t start = ts.global.kernelStart & mask;
       const uint64_t end = ts.global.kernelEnd & mask;
-      metrics.gpu_ms += double((end - start) & mask) / cycles_per_ms;
+      const double ms = double((end - start) & mask) / cycles_per_ms;
+      metrics.gpu_ms += ms;
+      if (named) metrics.each.emplace_back(kernel_name(kernels[i]), ms);
       zc(zeEventHostReset(events[i]), "profile event reset");
     }
     pending = 0;
+    kernels.clear();
   }
 };
 }  // namespace
@@ -116,7 +124,7 @@ Context::Context(ze_context_handle_t ze_ctx, ze_device_handle_t ze_dev) {
   zc(zeCommandListCreateImmediate(ze_ctx, ze_dev, &qd, &list), "zeCommandListCreateImmediate");
   p_ = new Impl{ze_ctx, ze_dev, list, 0, nullptr};
   const char* profile = std::getenv("B70_PREFILL_PROFILE");
-  if (profile && std::strcmp(profile, "1") == 0) {
+  if (profile && (std::strcmp(profile, "1") == 0 || std::strcmp(profile, "2") == 0)) {
     try {
       p_->profiler = std::make_unique<LaunchProfiler>(ze_ctx, ze_dev);
     } catch (...) {
@@ -175,6 +183,7 @@ void Context::launch(ze_kernel_handle_t k, uint32_t gx, uint32_t gy, uint32_t gz
      "zeCommandListAppendLaunchKernel");
   if (p_->profiler) {
     ++p_->profiler->pending;
+    if (p_->profiler->named) p_->profiler->kernels.push_back(k);
     ++p_->profiler->metrics.launches;
     p_->profiler->metrics.host_submit_ms +=
         std::chrono::duration<double, std::milli>(Clock::now() - begin).count();

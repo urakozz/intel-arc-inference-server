@@ -1237,7 +1237,7 @@ int run(int argc, char** argv) {
   max_len = cli::settle(ctx, model, max_len_arg, mem_reserve, pp_path, kv_cache, drafter_plan);
   if (max_len_arg.is_auto) check_len(max_len);
   const uint32_t chunk_cap =
-      cli::settle_chunk_cap(ctx, model, max_len, mem_reserve, pp_path, kv_cache, drafter_plan, asked_cap);
+      cli::settle_chunk_cap(ctx, model, {max_len}, mem_reserve, pp_path, kv_cache, drafter_plan, asked_cap);
 
   // --profile forks here: it replays an instrumented capture and has to reset
   // 774 events before every replay, which is the caller's job by design

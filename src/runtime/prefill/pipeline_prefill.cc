@@ -634,11 +634,11 @@ void PipelineEngine::prepare_prefill() {
   if (!pf_) {
     const uint32_t cap = prefill_chunk_cap();
     check_prefill_chunk_cap(d, cap);
-    // The two stages' walks add up to one card's, launch for launch (step.h).
+    // The two stages' walks add up to one card's, launch for launch, plus what the cut adds (step.h).
     for (uint32_t C : {1u, 256u, cap})
       if (prefill::step_stage_launches(d, b, C, stage(0), kv_) +
               prefill::step_stage_launches(d, b, C, stage(1), kv_) !=
-          prefill::step_chunk_launches(d, b, C, kv_))
+          prefill::step_chunk_launches(d, b, C, kv_) + prefill::step_cut_extra_launches(d))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
     pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff, cap);
@@ -646,19 +646,25 @@ void PipelineEngine::prepare_prefill() {
   if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
   if (kv_ == KvCache::Int8)
     for (auto& dev : as_pf(*pf_).dev) dev->scratch.kv8_raw_buffer();
+  // Phase 3 Task 2: each device's router / a||b B slabs over its layers, once (pipeline_plan counts them).
+  if (b == PrefillBackend::L0)
+    for (uint32_t i = 0; i < kPpDevices; ++i) {
+      PfDevice& D = *as_pf(*pf_).dev[i];
+      prefill::make_route_slabs(D.cx, D.kc, D.scratch, st(i).model, stage(i).first, stage(i).last);
+    }
   if (b != PrefillBackend::L0Int8) return;
   PipelinePrefill& p = as_pf(*pf_);
-  // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every int4
-  // linear's rotated column scales (not lm_head, not a||b), and a MoE layer's expert arrays.
+  // Engine::prepare_prefill's l0-int8 pass, per device over ITS linears: every h8
+  // linear's rotated column scales (not lm_head, not a||b, not a dense model's mixer linears), and a MoE layer's
+  // expert arrays.
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     PfDevice& D = *p.dev[i];
     const loader::LoadedModel& m = st(i).model;
     if (!D.int8) D.int8 = std::make_unique<prefill::Int8State>(D.ctx, prefill_int8_max_k(d), p.cap);
     for (const auto& [key, w] : m.linears)
       if (key.second != model::LinearId::LmHead && key.second != model::LinearId::AB &&
-          w.kind == model::WeightKind::Int4)
+          w.kind == model::WeightKind::Int4 && !l0_int8_bf16_linear(d, key.second))
         D.int8->scales(D.cx, D.kc, w);
-    prefill::moe_prepare_int8(D.cx, D.kc, *D.int8, m);
   }
 }
 

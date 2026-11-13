@@ -1035,6 +1035,14 @@ offsets A, B and C, so one launch serves a batched GEMM. Variants:
   with `n0` a multiple of 256, so atom `b = 2p` is a gate block and `2p+1` its up block, both already in this
   sub-group's registers one lane per column, with no cross-lane traffic. The epilogue runs `pf_silu_mul`'s whole
   chain and stores bf16; the fp32 `[M][34816]` intermediate is never written. It removes one launch a layer.
+- **`pf_gemm_T0_R` / `pf_gemm_T0_SILU_R`** (`RASTER=1`), with **`pf_dequant_slab_*_BS`** (`BLOCK_STORE=1`):
+  Qwen3.8's walk for a chunk wider than 2048 rows. The work-groups are numbered N-fastest, so a wave of 32 covers
+  8 row blocks x 4 column blocks of a slab and each row block of the activations is read once a slab instead of
+  once a wave (at 2048 rows a slab is one wave either way); the conversion stores each word's eight values as one
+  2D block message. The same tiles, DPAS chain and values, so bit-identical. With them Qwen3.8's 4096-row chunk
+  (`--prefill-chunk 4096`; the default stays 2048, open-work 18) makes the prompt pass 5.6 % faster at pp4096 to
+  pp32768 on `l0` ([record](probes/probe-qwen-pf-gemm-2026-11-13.md), section 6). The MoE models' dense linears
+  and every chunk up to 2048 rows keep the plain binaries.
 
 `runtime::prefill::gemm_l0` asserts every requirement before launching: `M % 256 == 0` and `N % 256 == 0` (the
 **caller** pads; the padding is computed and never read), `K % 32 == 0`, every base 64-byte aligned, leading
@@ -1063,7 +1071,7 @@ wait per slab (a 4096-token prompt, 7616 launches each) gave `slab_dequant` 274.
 
 ### Short chunks: `pf_gemm_small` and `pf_gemm_q4`
 
-A full chunk is 2048 rows; a chat turn's chunk is often a few hundred. `pf_gemm` gives each 256 × 256 output
+A full chunk is 2048 or 4096 rows; a chat turn's chunk is often a few hundred. `pf_gemm` gives each 256 × 256 output
 tile one work-group, so a 1024-column slab is only 4 work-groups for any chunk up to 256 rows (4 of 32 Xe-cores,
 each doing a whole tile's DPAS for the few rows the chunk has), and the slab dequant (about 110 ms of a
 Qwen3.8 chunk) is paid whatever the row count.
@@ -1158,6 +1166,25 @@ bf16 operand, measured harmless on three prompts of one checkpoint and not prove
   `pf_gdn_solve`. Deleting 64 of 128 barriers bought 1.7 ms of a 73.5 ms row, so the premise was wrong by about
   18×; both barrier-free variants were bit-identical and both were slower. The row is the serialised
   recurrence itself.
+
+**The MoE models' form (phase 2, 2026-11-12;
+[record](probes/probe-prefill-phase2-2026-11-12.md)).** Ornith and Flash-Next run `pf_gdn_front` in place of
+`pf_gdn_conv` + `pf_gdn_l2norm`. It is bitwise: each (position, head)'s 128-lane l2norm tree is evaluated by one
+sub-group, with the same pairs and the same adds. On l0, Ornith also runs `pf_gdn_intra` in place of `pf_gdn_A`,
+`pf_gdn_solve`, `pf_gdn_wu` and `pf_gdn_A2_hilo`: one work-group per (head, 64-position sub-chunk). Inside it:
+
+- A and A2 are bf16 DPAS dots, whose operands are exact.
+- T is a blocked 16 × 16 fp32 solve. The diagonal blocks use `pf_gdn_solve`'s own column chain; each
+  off-diagonal block is T_ij = −T_ii Σ A_ik T_kj.
+- W and U are DPAS with T as hi / lo bf16 limbs.
+
+That takes 80.6 ms to about 24 ms at 4k. It is judged rather than bitwise: per stage it is within 1.15× of the
+four kernels' fp64 error. On l0-int8 it misses one determined row of the f32-judged gate, so l0-int8 keeps the
+four launches. Carrying Q1-Q4 in fp32 (u and w as limb planes) brought the state error from 1e-3 to 5e-6, but
+it missed more token rows and was removed. The rest of a MoE model's layer is also bitwise:
+
+- `pf_res_norm` (`pf_norm_fused.cl`) is the residual fold and RMSNorm in one work-group per row.
+- `pf_gemv_rows` (`pf_route.cl`) is the router and a||b GEMVs at 16 rows × 2 column tiles a work-group.
 
 ### How the prefill kernels got here
 

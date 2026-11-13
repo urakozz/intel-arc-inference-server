@@ -121,17 +121,6 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::scales(Context& cx, KernelCache& k
                         w.shape);
 }
 
-const std::pair<l0::Mem, l0::Mem>& Int8State::scales_layout1(Context& cx, KernelCache& kc,
-                                                             const void* qw, uint32_t K,
-                                                             uint32_t N) {
-  auto it = scales_.find(qw);
-  if (it != scales_.end()) return it->second;
-  require(K % 1024 == 0 && K <= max_k_,
-          "the expert array's K = " + std::to_string(K) + " is not whole rotation blocks within " +
-              std::to_string(max_k_));
-  return compute_scales(cx, kc, qw, nullptr, model::GemvShape{K, N, 1, 1});
-}
-
 const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, KernelCache& kc,
                                                              const void* qw, const void* scales,
                                                              const model::GemvShape& sh) {
@@ -146,7 +135,9 @@ const std::pair<l0::Mem, l0::Mem>& Int8State::compute_scales(Context& cx, Kernel
             int8_padded_k(sh.K) / kRotBlock, 1,
             {PtrArg(qw), PtrArg(scales), PtrArg(bits.ptr()), PtrArg(colmax.ptr()),
              arg_val(0u), arg_val(sh.N), arg_val(sh.K)});
-  cx.wait();
+  // Profiled, its own bucket: a bare wait left these launches to the walk's first phase wait
+  // (73.9 of the 114.3 ms "norm" row at 4k l0-int8, phase 2 Task 1's trace). Unprofiled, cx.wait().
+  timed_wait(cx, Phase::kSetup);
   std::vector<uint32_t> mx(sh.N);
   imm_.copy(mx.data(), colmax.ptr(), mx.size() * 4);
   std::vector<float> ws(sh.N), inv(sh.N);

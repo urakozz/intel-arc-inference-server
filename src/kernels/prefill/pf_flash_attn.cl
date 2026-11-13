@@ -94,6 +94,17 @@ inline ushort rne_bf16(float f) {
 #ifndef SPLIT
 #define SPLIT 0
 #endif
+#ifndef GATE_EPI
+#define GATE_EPI 0
+#endif
+#if GATE_EPI
+// The output gate fused into the epilogue (MoE prefill phase 3): pf_attn.cl's pf_attn_gate, statement for statement -
+// out[m][h.256 + d] = rne_bf16(f32(rne_bf16(o)) . sigmoid_f32(f32(rne_bf16(gate)))), the gate read from qkv_partials.
+#define QKV_N ((2 * FA_Q_HEADS + 2 * FA_KV_HEADS) * HD)
+#define OUT_N (FA_Q_HEADS * HD)
+inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
+inline float sigmoid_f32(float x) { return 1.0f / (1.0f + exp(-x)); }
+#endif
 #ifndef FLASH_MERGE
 #define FLASH_MERGE 0
 #endif
@@ -112,7 +123,11 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
 #else
 __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const ushort* restrict Kc,
                   __global const ushort* restrict Vc, __global float* restrict O,
-                  uint pos, uint C, uint rows) {
+                  uint pos, uint C, uint rows
+#if GATE_EPI
+                  , __global const float* restrict G, __global ushort* restrict Out
+#endif
+                  ) {
   const uint s = get_sub_group_id(), l = get_sub_group_local_id();
   const uint j = get_group_id(1);                                  // kv head
   const uint h = j * FA_GQA + get_group_id(2) * HPW + s / (RPW / 8u);  // q head
@@ -228,8 +243,26 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
   }
 }
 #else
-  // O / l, into pf_o's layout [24][rows][256] fp32
   const float8 inv = 1.0f / lsum;
+#if GATE_EPI
+  // O / l gated straight into the o_proj input row [C][OUT_N] bf16; pf_o is not written. Rows past C are clipped by
+  // the surfaces' height C (the gate reads 0 there and nothing is stored).
+  const int g_w = QKV_N * 4, o_w = OUT_N * 2;
+#pragma unroll
+  for (uint dd = 0; dd < NDA; ++dd) {
+    const float8 w = o[dd] * inv;
+    float8 gt;
+    intel_sub_group_2d_block_read_32b_8r16x1c((__global void*)G, g_w, (int)C, g_w,
+                                              (int2)((int)(h * 2u * HD + HD + 16u * dd), (int)r0), (__private uint*)&gt);
+    ushort8 ov;
+#define GATE(r) ov.s##r = rne_bf16(bf16f(rne_bf16(w.s##r)) * sigmoid_f32(bf16f(rne_bf16(gt.s##r))));
+    GATE(0) GATE(1) GATE(2) GATE(3) GATE(4) GATE(5) GATE(6) GATE(7)
+#undef GATE
+    intel_sub_group_2d_block_write_16b_8r16x1c((__global void*)Out, o_w, (int)C, o_w,
+                                               (int2)((int)(h * HD + 16u * dd), (int)r0), (__private ushort*)&ov);
+  }
+#else
+  // O / l, into pf_o's layout [24][rows][256] fp32
   __global float* Oh = O + (size_t)h * rows * HD;
 #pragma unroll
   for (uint dd = 0; dd < NDA; ++dd) {
@@ -237,6 +270,7 @@ __kernel void pf_flash_attn(__global const ushort* restrict Q, __global const us
     intel_sub_group_2d_block_write_32b_8r16x1c((__global void*)Oh, HD * 4, (int)rows, HD * 4,
                                                (int2)((int)(16u * dd), (int)r0), (__private uint*)&w);
   }
+#endif  // GATE_EPI
 }
 #endif  // SPLIT
 #endif  // !FLASH_MERGE

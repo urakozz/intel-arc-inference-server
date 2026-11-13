@@ -5,6 +5,7 @@
 #include <string>
 
 #include "kernels/prefill/pf_kernels.h"
+#include "runtime/buffers.h"
 
 namespace runtime::prefill {
 namespace {
@@ -94,8 +95,9 @@ void gemm_q4(Context& cx, KernelCache& kc, const PfSmallTile& t, uint32_t layout
 }
 
 void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-             const uint16_t* B, float* C, bool transB) {
+             const uint16_t* B, float* C, bool transB, bool raster) {
   require(b.M > 0 && b.N > 0 && b.L > 0, "empty problem");
+  require(!(raster && transB), "the N-fastest order is built untransposed only");
   require(b.K >= 32 && b.K % 32 == 0, "K = " + std::to_string(b.K) + " is not a multiple of 32");
   const uint32_t M = pad256(b.M);
   const uint32_t N = transB ? pad256(b.N) : b.N;
@@ -116,7 +118,7 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
     launch_small(cx, kc, *t, /*silu=*/false, b.M, b.K, N, A, B, C, lda, ldb, ldc);
     return;
   }
-  l0::Kernel& k = kc(kernels::pf_gemm_variant(transB), "pf_gemm");
+  l0::Kernel& k = kc(kernels::pf_gemm_variant(transB, raster), "pf_gemm");
   const uint64_t sA = b.strideA, sB = b.strideB, sC = b.strideC;
   cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, b.L,
             {PtrArg(A), PtrArg(B), PtrArg(C), arg_val(M), arg_val(b.K), arg_val(N),
@@ -124,7 +126,7 @@ void gemm_l0(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A
 }
 
 void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16_t* A,
-                  const uint16_t* B, uint16_t* X, uint32_t ldx) {
+                  const uint16_t* B, uint16_t* X, uint32_t ldx, bool raster) {
   require(b.M > 0 && b.N > 0, "empty problem");
   require(b.L == 1, "the fused-SiLU epilogue is one gate||up slab: L must be 1");
   require(b.K >= 32 && b.K % 32 == 0, "K = " + std::to_string(b.K) + " is not a multiple of 32");
@@ -147,11 +149,30 @@ void gemm_l0_silu(Context& cx, KernelCache& kc, const GemmBatch& b, const uint16
     launch_small(cx, kc, *t, /*silu=*/true, b.M, b.K, N, A, B, X, lda, ldb, ldx);
     return;
   }
-  l0::Kernel& k = kc(kernels::pf_gemm_silu_variant(), "pf_gemm");
+  l0::Kernel& k = kc(kernels::pf_gemm_silu_variant(raster), "pf_gemm");
   const uint64_t sA = b.strideA, sB = b.strideB, sC = 0;
   cx.launch(k, M / kPfGemmTile, N / kPfGemmTile, 1,
             {PtrArg(A), PtrArg(B), PtrArg(X), arg_val(M), arg_val(b.K), arg_val(N),
              arg_val(lda), arg_val(ldb), arg_val(ldx), arg_val(sA), arg_val(sB), arg_val(sC)});
+}
+
+void route_slab(Context& cx, KernelCache& kc, const void* w, uint32_t N, uint32_t K, uint16_t* slab) {
+  require(K % 8 == 0, "K = " + std::to_string(K) + " is not whole 8-k groups");
+  cx.launch(kc(kernels::pf_route_slab_variant(K, N), "pf_route_slab"), kernels::pf_route_slab_pitch(N) / 256, K / 8, 1,
+            {PtrArg(w), PtrArg(slab)});
+}
+
+const uint16_t* tiled_slab(Context& cx, KernelCache& kc, PrefillScratch& s, const void* w, uint32_t N, uint32_t K) {
+  bool fresh = false;
+  l0::Mem& m = s.gemm_slab(w, size_t(K) * kernels::pf_route_slab_pitch(N) * 2, fresh);
+  if (fresh) route_slab(cx, kc, w, N, K, m.as<uint16_t>());
+  return m.as<uint16_t>();
+}
+
+void tiled_gemm(Context& cx, KernelCache& kc, const uint16_t* slab, uint32_t N, uint32_t K, const uint16_t* A,
+                uint32_t C, float* out) {
+  const uint32_t P = kernels::pf_route_slab_pitch(N);
+  gemm_l0(cx, kc, GemmBatch{C, K, P, 1, K, P, P, 0, 0, 0}, A, slab, out, /*transB=*/false);
 }
 
 }  // namespace runtime::prefill

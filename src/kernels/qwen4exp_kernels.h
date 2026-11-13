@@ -266,7 +266,15 @@ inline std::string pf_ple_gather_variant(bool bf16_scale) { return ple_gather_va
 // The reused prefill binaries at this family's shapes.
 inline std::string pf_embed_variant() { return pf_embed_gather_variant(kHidden); }          // pf_embed_gather_D2560
 inline std::string pf_ab_variant() { return pf_ab_proj_variant(kHidden); }                  // pf_ab_proj_D2560
-inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }  // pf_moe_router_K2560_N528
+inline std::string pf_router_variant() { return pf_moe_router_variant(kHidden, kRouterN); }
+// MoE-model prefill phase 3 Task 8: what the walk binds for the router and a||b now - their weights re-laid as
+// pf_gemm_T0's B slabs each chunk, the GEMM's rows at pitch P read by q4_route (ROUTE_LN = P) and pf_gdn_gate
+// (AB_STRIDE = P). The two GEMVs above stay for the kernel tests' decode-row references.
+inline constexpr unsigned kPfRouterPitch = 768, kPfAbPitch = 256;   // kernels::pf_route_slab_pitch(528 / 128)
+inline std::string pf_router_slab_variant() { return kernels::pf_route_slab_variant(kHidden, kRouterN); }
+inline std::string pf_ab_slab_variant() { return kernels::pf_route_slab_variant(kHidden, 128); }
+inline std::string pf_route_gemm_variant() { return route_variant(1) + "_P" + std::to_string(kPfRouterPitch); }
+inline std::string pf_gdn_gate_gemm_variant() { return kernels::pf_gdn_gate_gemm_variant(16, 48, kPfAbPitch); }
 inline std::string pf_gemm_gu_variant() { return pf_moe_gemm_variant(kHidden, 2 * kInter, false, true); }
 inline std::string pf_gemm_dn_variant() { return pf_moe_gemm_variant(kInter, kHidden, false, false); }
 inline std::string pf_gated_head_sig_variant() { return pf_gated_head_variant() + "_SIG"; }   // pf_gated_head_SIG
@@ -293,6 +301,11 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_gdn_conv_variant(),
       pf_gdn_wy_variant(),
       pf_gdn_scan_variant(),
+      pf_gdn_front_variant(),       // MoE-model prefill phase 2: conv + l2norm in one launch
+      pf_router_slab_variant(),     // phase 3 Task 8: the router and a||b on the dense GEMM
+      pf_ab_slab_variant(),
+      pf_route_gemm_variant(),
+      pf_gdn_gate_gemm_variant(),
       pf_gated_head_sig_variant(),
       pf_bf16_slab_variant(kHidden, kIdxN),
       pf_attn_prep_q4_variant(),
@@ -305,6 +318,9 @@ inline std::vector<std::string> prefill_variants(bool int4_dense, bool eager, bo
       pf_moe_variant(),
       pf_gemm_gu_variant(),
       pf_gemm_dn_variant(),
+      pf_moe_sort_mw_variant(kExperts, kTopK),            // plan 2026-11-12 Task 7: the sort and the fused GEMMs
+      pf_moe_q4gemm_variant(kHidden, 2 * kInter, true),
+      pf_moe_q4gemm_variant(kInter, kHidden, false),
       pf_ple_gather_variant(ple_bf16_scale),
       pf_bf16_slab_variant(kHidden, kPleKvN),
       pf_ple_variant(),

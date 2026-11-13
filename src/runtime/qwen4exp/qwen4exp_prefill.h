@@ -51,7 +51,7 @@ struct Qwen4ExpPrefillScratch {
   Qwen4ExpPrefillScratch(l0::Context& ctx, const model::Qwen4ExpDesc& d, uint32_t max_len);
   l0::Mem ids;   // host memory: the chunk's ids (the embedding on device 0, the PLE gather and ring on its device)
   l0::Mem H, xn, x, down_f32, inj, partials, slab, idx_f32, idx_q, scores, lists, diag, q16, o, attn_out, ab, gdn, logits,
-      routes, hdr, tiles, row_tok, pair_row, xg, h, y, w, ple_ids;
+      routes, hdr, tiles, row_tok, pair_row, xg, h, y, w, ple_ids, cnt, items;
   const model::Qwen4ExpDesc& desc;
   uint32_t max_len;
   size_t bytes() const;

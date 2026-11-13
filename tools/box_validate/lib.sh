@@ -16,7 +16,7 @@
 #   DEVICE (the orchestrator's card: ZE_AFFINITY_MASK), PORT (8013 + 100 x DEVICE), ...
 
 # ---- the registry ---------------------------------------------------------------------
-BV_IDS=(); BV_ROWS=(); BV_SELS=(); BV_KINDS=(); BV_NEEDS=(); BV_AFTERS=(); BV_TITLES=()
+BV_IDS=(); BV_ROWS=(); BV_SELS=(); BV_KINDS=(); BV_NEEDS=(); BV_AFTERS=(); BV_TITLES=(); BV_QUICKS=()
 BV_ROW_IDS=(); BV_ROW_TITLES=(); BV_NOTES=()
 
 # stage ID ROW SEL KIND NEEDS AFTER TITLE
@@ -46,8 +46,15 @@ BV_ROW_IDS=(); BV_ROW_TITLES=(); BV_NOTES=()
 #   AFTER stages that must be PASS first (comma list, or -)
 stage() {
   BV_IDS+=("$1"); BV_ROWS+=("$2"); BV_SELS+=("$3"); BV_KINDS+=("$4")
-  BV_NEEDS+=("$5"); BV_AFTERS+=("$6"); BV_TITLES+=("$7")
+  BV_NEEDS+=("$5"); BV_AFTERS+=("$6"); BV_TITLES+=("$7"); BV_QUICKS+=("")
 }
+# The quick run (box_validate.sh --quick, BV_QUICK=1) runs only the stages named here; every other stage is
+# full only and is recorded SKIP. `quick ID...` runs those stages as in the full run; `quick_form ID HOW` runs a
+# smaller input (its body reads BV_QUICK, usually through quick_or) - HOW says what, for --list.
+quick() { local id; for id in "$@"; do BV_QUICKS[$(bv_index "$id")]="same"; done; }
+quick_form() { BV_QUICKS[$(bv_index "$1")]="$2"; }
+# quick_or FULL QUICK - the value for this run
+quick_or() { if [ "${BV_QUICK:-0}" = 1 ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 # row N TITLE - a row of docs/superpowers/plans/box-validation-queue.md (0: the gate itself)
 row() { BV_ROW_IDS+=("$1"); BV_ROW_TITLES+=("$2"); }
 # rownote N TEXT - something the row asks for that no stage runs, and why
@@ -61,11 +68,12 @@ bv_index() {
   return 1
 }
 bv_fn() { echo "st_$(printf '%s' "$1" | tr '.-' '__')"; }
-bv_field() {   # bv_field ID FIELD  (row sel kind needs after title)
+bv_field() {   # bv_field ID FIELD  (row sel kind needs after title quick)
   local i; i=$(bv_index "$1") || return 1
   case "$2" in
     row) echo "${BV_ROWS[$i]}" ;; sel) echo "${BV_SELS[$i]}" ;; kind) echo "${BV_KINDS[$i]}" ;;
     needs) echo "${BV_NEEDS[$i]}" ;; after) echo "${BV_AFTERS[$i]}" ;; title) echo "${BV_TITLES[$i]}" ;;
+    quick) echo "${BV_QUICKS[$i]}" ;;
   esac
 }
 # bv_builds ID - the stage's body builds in the tree's build dir (cmake / ocloc): two
@@ -94,7 +102,8 @@ bv_defaults() {
   if bv_card_index "$DEVICE"; then : "${PORT:=$((8013 + 100 * DEVICE))}"; else : "${PORT:=8013}"; fi
   : "${CMAKE_ARGS:=}"
   : "${B70_GIT_SHA:=unknown}"
-  export SNAP_QWEN SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA
+  : "${BV_QUICK:=0}"
+  export SNAP_QWEN SNAP_ORNITH SNAP_K2 SNAP_KOLIBRI TOK_PYTHON JOBS DEVICE PORT CMAKE_ARGS B70_GIT_SHA BV_QUICK
 }
 
 # status_of ID - this run's recorded result of a stage (empty if none)

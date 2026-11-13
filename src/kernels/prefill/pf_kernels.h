@@ -49,6 +49,10 @@ inline std::string pf_res_fold_variant(unsigned K, unsigned SP, unsigned G) {
   return "pf_res_fold_K" + std::to_string(K) + "_SP" + std::to_string(SP) + "_G" +
          std::to_string(G);
 }
+// Phase 2 Task 5: pf_norm_fused.cl, pf_res_fold + pf_norm_finish (NORM_G = NORM_WGS = G) in one launch.
+inline std::string pf_res_norm_variant(unsigned K, unsigned SP, unsigned G) {
+  return "pf_res_norm_K" + std::to_string(K) + "_SP" + std::to_string(SP) + "_G" + std::to_string(G);
+}
 inline std::string pf_norm_finish_variant(unsigned K, unsigned G, unsigned W) {
   return "pf_norm_finish_K" + std::to_string(K) + "_G" + std::to_string(G) + "_W" +
          std::to_string(W);
@@ -91,6 +95,16 @@ inline std::string pf_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRef
 // It bakes HPW = 6, the GQA group (q-heads per kv-head), so it carries the FA suffix.
 inline std::string pf_flash_attn_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
   return "pf_flash_attn" + fa_suffix(q, kv);
+}
+// MoE prefill phase 3 Task 7: the same source at RPW 32 / QREG 1 (bitwise the above), built at Ornith's 16 / 2 only
+// (Qwen3.8 and the TP card keep pf_flash_attn); grid (ceil(C / kPfFlashR32Rows), kv-heads, 1).
+constexpr unsigned kPfFlashR32Rows = 32;
+inline std::string pf_flash_attn_r32_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_r32" + fa_suffix(q, kv);
+}
+// ... with pf_attn_gate fused into its epilogue: two more arguments (qkv_partials, the o_proj input), pf_o not written.
+inline std::string pf_flash_attn_r32g_variant(unsigned q = kRefFaQHeads, unsigned kv = kRefFaKvHeads) {
+  return "pf_flash_attn_r32g" + fa_suffix(q, kv);
 }
 // Spec 12b (`--kv-cache int8`, src/kernels/kv8.cl): the prefill path over the int8 KV
 // cache - the writer (pf_attn_prep_q16's chain, then rotate and quantise), the flash
@@ -153,16 +167,53 @@ inline std::string pf_gdn_scan_variant(unsigned gdn_k = kRefGdnKHeads,
                                        unsigned gdn_v = kRefGdnVHeads) {
   return "pf_gdn_scan" + gdn_suffix(gdn_k, gdn_v);
 }
+// Phase 2 Task 6: pf_route.cl's pf_gemv_rows at a||b's shape (MT 16, TC 2), bitwise pf_ab_proj.
+inline std::string pf_route_ab_variant(unsigned hidden = kRefHidden) { return "pf_route_ab" + hidden_suffix(hidden); }
+inline constexpr unsigned kPfRouteMt = 16, kPfRouteTc = 2;
+inline std::string pf_route_router_variant(unsigned K, unsigned N) {
+  return "pf_route_router_K" + std::to_string(K) + "_N" + std::to_string(N);
+}
+// Phase 3 Task 2 (Ornith l0): the router || shared gate and the a||b by the dense GEMM. pf_route.cl's pf_route_slab
+// re-lays the tiled bf16 [N][K] weight as pf_gemm's B [K][P], P = N padded to whole 256-column tiles; the two
+// consumers read the GEMM's rows at pitch P: moe.cl's moe_route built at ROUTER_N = P (decode's binary keeps 272)
+// and pf_gdn_conv.cl's pf_gdn_gate at AB_STRIDE = P.
+inline unsigned pf_route_slab_pitch(unsigned N) { return (N + 255) / 256 * 256; }
+inline std::string pf_route_slab_variant(unsigned K, unsigned N) {
+  return "pf_route_slab_K" + std::to_string(K) + "_N" + std::to_string(N) + "_P" +
+         std::to_string(pf_route_slab_pitch(N));
+}
+inline std::string pf_moe_route_gemm_variant(unsigned experts, unsigned top_k, unsigned hidden, unsigned inter,
+                                             unsigned pitch) {
+  return "moe_M1_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" + std::to_string(hidden) +
+         "_I" + std::to_string(inter) + "_R" + std::to_string(pitch);
+}
+inline std::string pf_gdn_gate_gemm_variant(unsigned gdn_k, unsigned gdn_v, unsigned pitch) {
+  return pf_gdn_conv_variant(gdn_k, gdn_v) + "_AB" + std::to_string(pitch);
+}
+// Phase 2 Task 2: pf_gdn_front.cl, pf_gdn_conv + pf_gdn_l2norm in one launch.
+inline std::string pf_gdn_front_variant(unsigned gdn_k = kRefGdnKHeads, unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_front" + gdn_suffix(gdn_k, gdn_v);
+}
+// Phase 2 Task 3: pf_gdn_intra.cl, the intra-chunk stages in one launch (replaces pf_gdn_wy's four).
+inline std::string pf_gdn_intra_variant(unsigned gdn_k = kRefGdnKHeads,
+                                        unsigned gdn_v = kRefGdnVHeads) {
+  return "pf_gdn_intra" + gdn_suffix(gdn_k, gdn_v);
+}
 
 // The execution-context probe (Task 2); bound by context_test.cc alone.
 inline std::string pf_probe_chain_variant() { return "pf_probe_chain"; }
 
 // Spec 2.1: the Level Zero prefill GEMM (pf_gemm.cl) and the slab dequant it pairs with.
-inline std::string pf_gemm_variant(bool transB) { return transB ? "pf_gemm_T1" : "pf_gemm_T0"; }
+// `raster` (open-work 18): the work-groups numbered N-fastest (RASTER=1), untransposed only.
+inline std::string pf_gemm_variant(bool transB, bool raster = false) {
+  return transB ? "pf_gemm_T1" : raster ? "pf_gemm_T0_R" : "pf_gemm_T0";
+}
 // Parity program S2(a): the same GEMM with pf_silu_mul fused into its epilogue.
 // Only gate||up is ever launched with it -- the fusion is a statement about that
 // linear's INTERLEAVED gate/up column layout, not about the GEMM.
-inline std::string pf_gemm_silu_variant() { return "pf_gemm_T0_SILU"; }
+inline std::string pf_gemm_silu_variant(bool raster = false) {
+  return raster ? "pf_gemm_T0_SILU_R" : "pf_gemm_T0_SILU";
+}
 // Open-work 3a: pf_gemm for a chunk of few rows (pf_gemm_small.cl) - NA 8-row blocks x NB 16-column
 // atoms a sub-group, SN sub-groups a work-group; bit-identical to pf_gemm_T0 / pf_gemm_T0_SILU.
 inline std::string pf_gemm_small_variant(unsigned NA, unsigned NB, unsigned SN, bool silu) {
@@ -183,9 +234,10 @@ inline std::string pf_gemm_q4_slm_variant(unsigned NA, unsigned SN) {
   return pf_gemm_q4_variant(NA, 1, SN, 0, false) + "_SLM_SILU";
 }
 inline constexpr unsigned kPfSlabWidth = 1024;   // columns per pf_dequant_slab / slab GEMM
-inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout) {
+// `block_store` (open-work 18): the same values stored as 2D block messages (BLOCK_STORE=1).
+inline std::string pf_dequant_slab_variant(unsigned K, unsigned N, unsigned layout, bool block_store = false) {
   return "pf_dequant_slab_K" + std::to_string(K) + "_N" + std::to_string(N) + "_L" +
-         std::to_string(layout);
+         std::to_string(layout) + (block_store ? "_BS" : "");
 }
 
 // Spec 5: the int8 prefill linears (pf_int8.cl).
@@ -209,6 +261,13 @@ inline std::string pf_moe_variant(unsigned experts, unsigned top_k, unsigned hid
   return "pf_moe_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
          std::to_string(hidden) + "_I" + std::to_string(inter);
 }
+// Phase 3 Task 5: pf_moe.cl built with FOLD_G - entry pf_moe_combine_norm, the combine and the next layer's
+// pf_res_norm (S_PREV 0, G fold groups) in one launch.
+inline std::string pf_moe_combine_norm_variant(unsigned experts, unsigned top_k, unsigned hidden, unsigned inter,
+                                               unsigned G) {
+  return "pf_moe_combine_norm_E" + std::to_string(experts) + "_T" + std::to_string(top_k) + "_D" +
+         std::to_string(hidden) + "_I" + std::to_string(inter) + "_G" + std::to_string(G);
+}
 // pf_moe_sort_mw.cl (plan 2026-11-12 Task 2): the multi-work-group sort, pf_moe_hist / pf_moe_scan /
 // pf_moe_scatter, at one (experts, top_k).
 inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
@@ -218,6 +277,11 @@ inline std::string pf_moe_sort_mw_variant(unsigned experts, unsigned top_k) {
 // block's K x N; SiLU epilogue (gate||up) or the plain bf16 one (down). Entry `pf_moe_q4gemm`.
 inline std::string pf_moe_q4gemm_variant(unsigned K, unsigned N, bool silu) {
   return "pf_moe_q4gemm_K" + std::to_string(K) + "_N" + std::to_string(N) + (silu ? "_SILU" : "");
+}
+// pf_moe_w4a8.cl (plan 2026-11-12 Task 5): l0-int8's W4A8 gate||up - pf_quant_g64, pf_moe_gather_i8g,
+// pf_moe_w4a8 - at hidden K and one block's gate||up N.
+inline std::string pf_moe_w4a8_variant(unsigned K, unsigned N) {
+  return "pf_moe_w4a8_K" + std::to_string(K) + "_N" + std::to_string(N);
 }
 // pf_moe_gemm.cl at one expert block's K x N: bf16 or int8 (h8), SiLU epilogue (gate||up)
 // or the plain bf16 one (down). Entry `pf_moe_gemm`.

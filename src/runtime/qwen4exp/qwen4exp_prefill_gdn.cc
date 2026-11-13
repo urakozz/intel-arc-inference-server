@@ -9,8 +9,8 @@
 #include "runtime/prefill/gdn.h"
 #include "runtime/prefill/profile.h"
 
-// gdn_chunk_q4 - runtime/prefill/gdn.cc's ten launches, statement for statement in their order, grids and
-// arguments, over GdnChunkBuffers instead of a PrefillScratch; the one binding that differs is the tenth
+// gdn_chunk_q4 - runtime/prefill/gdn.cc's launches (a MoE model's four-launch intra form: nine), statement for
+// statement in their order, grids and arguments, over GdnChunkBuffers instead of a PrefillScratch; the one binding that differs is the tenth
 // (pf_gated_head_SIG). The comments of gdn.cc hold for every launch here (ordering is the in-order list's alone;
 // launch 9 is the only writer of the state).
 namespace runtime::qwen4exp {
@@ -53,18 +53,18 @@ void gdn_chunk_q4(prefill::Context& cx, prefill::KernelCache& kc, const GdnChunk
   //  1 - lift the ring's three older slots (pos-3..pos-1) into a flat seed.
   cx.launch(kc(conv, "pf_gdn_seed"), conv_groups, 1, 1, {PtrArg(b.ring), PtrArg(b.seed), arg_val(pos)});
   prefill::profile_wait(cx, Phase::kGdnSeed);
-  //  2 - the batched conv1d + SiLU over the chunk, and the ring writeback.
-  cx.launch(kc(conv, "pf_gdn_conv"), conv_groups, (C + kConvBlock - 1) / kConvBlock, 1,
+  //  2-3 - conv + SiLU + q / k l2norm in one launch (phase 2 Task 2, gdn.cc's pf_gdn_front), bitwise.
+  cx.launch(kc(kernels::pf_gdn_front_variant(kKHeads, kVHeads), "pf_gdn_front"), conv_groups, (C + 31) / 32, 1,
             {PtrArg(b.qkvz), PtrArg(b.seed), PtrArg(b.small), PtrArg(b.xb), PtrArg(b.ring), arg_val(pos), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnConv);
-  //  3 - l2norm q and k in place.
-  cx.launch(kc(conv, "pf_gdn_l2norm"), 2 * kKHeads, C, 1, {PtrArg(b.xb), arg_val(C)});
-  prefill::profile_wait(cx, Phase::kGdnL2);
   //  4 - head scalars and the intra-chunk cumulative gate.
-  cx.launch(kc(conv, "pf_gdn_gate"), kVHeads, nch, 1,
+  require(b.ab_pitch == 128 || b.ab_pitch == kq::kPfAbPitch, "a||b's row pitch is neither 128 nor the GEMM's");
+  cx.launch(kc(b.ab_pitch == 128 ? conv : kq::pf_gdn_gate_gemm_variant(), "pf_gdn_gate"), kVHeads, nch, 1,
             {PtrArg(b.ab), PtrArg(b.small), PtrArg(b.g), PtrArg(b.beta), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnGate);
-  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j.
+  //  5 - A = beta_i (k_i . k_j) exp(gc_i - gc_j), i > j. (gdn.cc's one-launch pf_gdn_intra for 5-8 is not bound here
+  //      yet: it is judged, and qwen4exp_prefill_intel_test matches the routes against the engine trace recorded in
+  //      oracle-out-q4exp-f32-aligned-L18, which has to be re-made first - phase 2 Task 8, 2026-11-12.)
   cx.launch(kc(wy, "pf_gdn_A"), kVHeads, nch, 4, {PtrArg(b.xb), PtrArg(b.g), PtrArg(b.beta), PtrArg(b.A), arg_val(C)});
   prefill::profile_wait(cx, Phase::kGdnA);
   //  6 - T = (I + A)^-1 in place over A (gdn.cc's pf_gdn_solve).

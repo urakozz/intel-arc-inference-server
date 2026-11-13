@@ -20,6 +20,12 @@
 //      give an exactly-zero output row 40 -- the dead-lane activation load
 //      reads row `m0` rather than out of bounds, and this is what catches it
 //      reaching the wrong row.
+//   5. **ab_gemm** (phase 3 Task 2; Ornith builds only, B70_PF_AB_GEMM): Ornith's a||b
+//      (K 2048, N 128) by runtime::prefill::route_slab + tiled_gemm, what the l0 walk binds - at C 2048
+//      and 37 the slab exactly the weight with zero columns past 128, every output of a row
+//      < C within 1e-5 x sum|w x| of the host's double sum of the same bf16 operands, and
+//      pf_gdn_gate at row pitch 256 with the pad columns poisoned (NaN) every g and beta
+//      bit the pitch-128 binary gives on the same rows.
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -32,6 +38,14 @@
 #include "kernels/kernels.h"
 #include "kernels/prefill/pf_kernels.h"
 #include "pf_harness.h"
+#ifdef B70_PF_AB_GEMM
+#include <algorithm>
+#include <cmath>
+
+#include "runtime/prefill/context.h"
+#include "runtime/prefill/gemm_l0.h"
+#include "runtime/prefill/kernels.h"
+#endif
 
 namespace {
 using pf_harness::Dev;
@@ -76,6 +90,91 @@ std::vector<float> run_decode_ab(Dev& d, const common::Bf16Tiled& w,
   GemvResult r = run_gemv_bf16(d.ctx, d.q, d.fence, w, x, 1, 0, t);
   return r.out;
 }
+
+#ifdef B70_PF_AB_GEMM
+// 5. ab_gemm at Ornith's shape.
+void ab_gemm_case(Dev& d, uint32_t C) {
+  constexpr uint32_t K = 2048, N = 128, P = 256, kHeads = 32, kNegA = 32768, kDtBias = 32800, kCap = 2048;
+  CHECK_EQ(kernels::pf_route_slab_pitch(N), P);
+  const std::vector<uint16_t> w_rm = random_bf16(size_t(N) * K, 23, -0.05f, 0.05f);   // [N][K]
+  const common::Bf16Tiled w = common::Bf16Tiled::from_rowmajor(w_rm.data(), K, N);
+  const std::vector<uint16_t> x = random_bf16(size_t(kCap) * K, 29, -1.f, 1.f);       // the GEMM reads padded rows
+  const uint32_t Mp = (C + 255) / 256 * 256;
+  runtime::prefill::Context cx{d.ctx};
+  runtime::prefill::KernelCache kc{d.ctx};
+  l0::Mem wb = upload(d.ctx, d.imm, w.data), xb = upload(d.ctx, d.imm, x);
+  l0::Mem slab(d.ctx, l0::MemKind::Device, size_t(K) * P * 2), out(d.ctx, l0::MemKind::Device, size_t(Mp) * P * 4);
+  d.imm.fill(slab.ptr(), 0x7F7F7F7Fu, slab.size());
+  d.imm.fill(out.ptr(), 0x7FC00000u, out.size());
+  runtime::prefill::route_slab(cx, kc, wb.ptr(), N, K, slab.as<uint16_t>());
+  runtime::prefill::tiled_gemm(cx, kc, slab.as<uint16_t>(), N, K, xb.as<uint16_t>(), C, out.as<float>());
+  cx.wait();
+  std::vector<uint16_t> sl(size_t(K) * P);
+  download(d.imm, sl, slab);
+  size_t bad_slab = 0;
+  for (uint32_t k = 0; k < K; ++k)
+    for (uint32_t n = 0; n < P; ++n) bad_slab += sl[size_t(k) * P + n] != (n < N ? w_rm[size_t(n) * K + k] : uint16_t(0));
+  std::vector<float> ab(size_t(Mp) * P);
+  download(d.imm, ab, out);
+  double worst = 0;
+  size_t bad = 0;
+  for (uint32_t m = 0; m < C; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      double ref = 0, S = 0;
+      for (uint32_t k = 0; k < K; ++k) {
+        const double p = double(common::bf16_to_f32(w_rm[size_t(n) * K + k])) *
+                         double(common::bf16_to_f32(x[size_t(m) * K + k]));
+        ref += p;
+        S += std::fabs(p);
+      }
+      const double e = std::fabs(double(ab[size_t(m) * P + n]) - ref) / (S > 0 ? S : 1.0);
+      worst = std::max(worst, e);
+      bad += !(e <= 1e-5);
+    }
+  // pf_gdn_gate at pitch 256 (pad columns NaN) against the pitch-128 binary on the same rows
+  std::vector<float> poisoned(size_t(C) * P), compact(size_t(C) * N);
+  for (uint32_t m = 0; m < C; ++m)
+    for (uint32_t n = 0; n < P; ++n) {
+      poisoned[size_t(m) * P + n] = n < N ? ab[size_t(m) * P + n] : std::nanf("");
+      if (n < N) compact[size_t(m) * N + n] = ab[size_t(m) * P + n];
+    }
+  std::vector<float> small(kDtBias + kHeads, 0.f);
+  for (uint32_t h = 0; h < kHeads; ++h) {
+    small[kNegA + h] = -0.05f * float(h + 1);
+    small[kDtBias + h] = 0.02f * float(h) - 0.3f;
+  }
+  const uint32_t nch = (C + 63) / 64;
+  auto gate = [&](const std::string& variant, const std::vector<float>& rows) {
+    l0::Module mod(d.ctx, kernels::path(variant));
+    l0::Kernel k = mod.kernel("pf_gdn_gate");
+    k.group_size(64);
+    l0::Mem rb = upload(d.ctx, d.imm, rows), sb = upload(d.ctx, d.imm, small);
+    l0::Mem g(d.ctx, l0::MemKind::Device, size_t(C) * kHeads * 4), beta(d.ctx, l0::MemKind::Device, size_t(C) * kHeads * 4);
+    k.arg_ptr(0, rb.ptr());
+    k.arg_ptr(1, sb.ptr());
+    k.arg_ptr(2, g.ptr());
+    k.arg_ptr(3, beta.ptr());
+    k.arg<uint32_t>(4, C);
+    d.run(k, kHeads, nch);
+    std::vector<float> out2(size_t(2) * C * kHeads), b2(size_t(C) * kHeads);
+    std::vector<float> g2(size_t(C) * kHeads);
+    download(d.imm, g2, g);
+    download(d.imm, b2, beta);
+    std::copy(g2.begin(), g2.end(), out2.begin());
+    std::copy(b2.begin(), b2.end(), out2.begin() + g2.size());
+    return out2;
+  };
+  const std::vector<float> ga = gate(kernels::pf_gdn_gate_gemm_variant(16, kHeads, P), poisoned);
+  const std::vector<float> gb = gate(kernels::pf_gdn_conv_variant(16, kHeads), compact);
+  const bool same = std::memcmp(ga.data(), gb.data(), ga.size() * sizeof(float)) == 0;
+  std::printf("ab_gemm C %u: slab %zu words off; a||b max |err| / sum|w x| %.3g (%zu over 1e-5); pf_gdn_gate at "
+              "pitch %u (pad NaN) %s the pitch-128 binary's g and beta\n",
+              C, bad_slab, worst, bad, P, same ? "every bit" : "DIFFERS from");
+  CHECK_EQ(bad_slab, size_t(0));
+  CHECK_EQ(bad, size_t(0));
+  CHECK(same);
+}
+#endif
 
 }  // namespace
 
@@ -131,6 +230,10 @@ int main() {
     CHECK(tail_err <= tol_for(ref65));
   }
 
+#ifdef B70_PF_AB_GEMM
+  ab_gemm_case(d, 2048);
+  ab_gemm_case(d, 37);
+#endif
   std::puts("pf_gemv_test OK");
   return 0;
 }

@@ -189,10 +189,15 @@ size_t step_chunk_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t
 inline constexpr size_t kStepHeadLaunches = 5;   // 2 norm + lm_head + 2 argmax
 // Spec 16c: one layer's launches, and a stage's: its
 // layers, the embed on stage 0 and the cut's fold, less the fold stage 1 resumes after - so
-// the two stages add up to step_chunk_launches (the pipeline asserts it). `pos` as there (3l (2)).
+// the two stages add up to step_chunk_launches plus step_cut_extra_launches (the pipeline
+// asserts it). `pos` as there (3l (2)).
 size_t step_layer_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            model::LayerKind kind, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
 size_t step_stage_launches(const model::ModelDesc& d, PrefillBackend b, uint32_t C,
                            const PpStage& st, KvCache kv = KvCache::Bf16, uint32_t pos = 0);
+// What the cut adds over one card on a MoE model: the input norm is one fused pf_res_norm on one card,
+// at the cut the fold on stage 0 plus the norm-finish on stage 1 - one launch more; and stage 0's last
+// combine runs without the next layer's norm (phase 3 Task 5) - one more. 0 on other models.
+size_t step_cut_extra_launches(const model::ModelDesc& d);
 
 }  // namespace runtime::prefill

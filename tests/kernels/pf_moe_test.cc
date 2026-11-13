@@ -25,7 +25,14 @@
 //      slot)'s h (both paths), y and the combined residual are bitwise the forward run's;
 //   6. the combine: exactly pf_moe_ref::combine_token over the device's y and route rows;
 //   7. replay: the whole walk again from the same inputs, every buffer bitwise;
-//   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6.
+//   8. a ragged chunk (C = 37: most experts empty or one row) through 4 and 6;
+//   9. combine_norm (phase 3 Task 5): pf_moe_combine_norm's residual and x every byte pf_moe_combine then
+//      pf_res_norm (S_PREV 0), at C 2048 and 37, and the rows past C untouched.
+//  10. router_gemm (phase 3 Task 2): the router by runtime::prefill::route_slab + tiled_gemm (the B slab, the dense GEMM - what
+//      moe_chunk binds on l0) at C 2048 and 37 - the slab exactly the weight with zero columns past 272, every logit
+//      of a row < C within 1e-5 x sum|w x| of the host's double sum of the same bf16 operands, and moe_route at row
+//      pitch 512 with the pad columns poisoned (NaN) every route word decode's moe_route gives on the same logits at
+//      pitch 272.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -51,7 +58,10 @@
 #include "l0/module.h"
 #include "l0/queue.h"
 #include "pf_moe_ref.h"
+#include "runtime/prefill/context.h"
+#include "runtime/prefill/gemm_l0.h"
 #include "runtime/prefill/int8_signs.h"
+#include "runtime/prefill/kernels.h"
 
 namespace {
 
@@ -410,6 +420,115 @@ void fused_vs_grouped(Dev& d, Layer& L, Bufs& b, const Run& r) {
   CHECK_EQ(by, size_t(0));
 }
 
+// 4c. plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (pf_moe_w4a8.cl). The quantiser's codes and scales exactly
+// the host's (s = max|x| / 127 a token and 64-k group, rint(x / s)); the gather exactly the host gather; the GEMM's
+// h on every row of the first and the last item (a routed expert, the shared one) against the host's integer sums
+// rescaled in the kernel's fma order and the SiLU chain - within one bf16 ulp (std::exp against the device's exp),
+// the count of 1-ulp rows printed.
+void w4a8_check(Dev& d, Layer& L, Bufs& b, const Run& r) {
+  constexpr uint32_t G = kH / 64;
+  l0::Module mw(d.ctx, kernels::path(kernels::pf_moe_w4a8_variant(kH, kNG)));
+  l0::Kernel quant(mw, "pf_quant_g64"), gather(mw, "pf_moe_gather_i8g"), gemm(mw, "pf_moe_w4a8");
+  quant.group_size(16 * G);
+  gather.group_size(64);
+  gemm.group_size(16 * 2 * 8);
+  const uint32_t C = r.C, used = r.hdr[kernels::pf_moe::kHdrRows];
+  const std::vector<uint16_t> x = d.read<uint16_t>(b.x, size_t(C) * kH);
+  l0::Mem xq = d.zeros(size_t(C) * kH), xs = d.zeros(size_t(C) * G * 4), xg = d.zeros(size_t(used) * kH),
+          xsg = d.zeros(size_t(used) * G * 4), h = d.zeros(size_t(used) * kI * 2);
+  quant.arg_ptr(0, b.x.ptr());
+  quant.arg_ptr(1, xq.ptr());
+  quant.arg_ptr(2, xs.ptr());
+  quant.arg(3, C);
+  d.run(quant, C);
+  const std::vector<int8_t> q = d.read<int8_t>(xq, size_t(C) * kH);
+  const std::vector<float> s = d.read<float>(xs, size_t(C) * G);
+  size_t bad = 0;
+  for (uint32_t t = 0; t < C; ++t)
+    for (uint32_t g = 0; g < G; ++g) {
+      float m = 0;
+      for (uint32_t k = 0; k < 64; ++k) m = std::max(m, std::fabs(f32(x[size_t(t) * kH + g * 64 + k])));
+      const float sc = m > 0 ? m / 127.0f : 1.0f;
+      bad += std::memcmp(&sc, &s[size_t(t) * G + g], 4) != 0;
+      for (uint32_t k = 0; k < 64; ++k) {
+        const float v = std::nearbyint(f32(x[size_t(t) * kH + g * 64 + k]) / sc);
+        bad += q[size_t(t) * kH + g * 64 + k] != int8_t(std::max(-127.0f, std::min(127.0f, v)));
+      }
+    }
+  CHECK_EQ(bad, size_t(0));
+  gather.arg_ptr(0, xq.ptr());
+  gather.arg_ptr(1, xs.ptr());
+  gather.arg_ptr(2, b.hdr.ptr());
+  gather.arg_ptr(3, b.row_tok.ptr());
+  gather.arg_ptr(4, xg.ptr());
+  gather.arg_ptr(5, xsg.ptr());
+  d.imm.copy(b.hdr.ptr(), r.hdr.data(), r.hdr.size() * 4);
+  d.imm.copy(b.row_tok.ptr(), r.row_tok.data(), r.row_tok.size() * 4);
+  d.run(gather, used);
+  const std::vector<int8_t> ag = d.read<int8_t>(xg, size_t(used) * kH);
+  const std::vector<float> sg = d.read<float>(xsg, size_t(used) * G);
+  for (uint32_t row = 0; row < used; ++row) {
+    const uint32_t t = r.row_tok[row];
+    for (uint32_t k = 0; k < kH; ++k) bad += ag[size_t(row) * kH + k] != (t == kNone ? 0 : q[size_t(t) * kH + k]);
+    for (uint32_t g = 0; g < G; ++g) bad += sg[size_t(row) * G + g] != (t == kNone ? 0.0f : s[size_t(t) * G + g]);
+  }
+  CHECK_EQ(bad, size_t(0));
+  pf_moe_ref::Sorted st;
+  st.hdr = r.hdr;
+  st.tiles = r.tiles;
+  const std::vector<uint32_t> it = pf_moe_ref::items(st, kS, C, kernels::pf_moe::kItemM);
+  const uint32_t nit = uint32_t(it.size() / 4);
+  l0::Mem itd = d.upload(it);
+  gemm.arg_ptr(0, itd.ptr());
+  gemm.arg_ptr(1, xg.ptr());
+  gemm.arg_ptr(2, xsg.ptr());
+  gemm.arg_ptr(3, L.gu.ptr());
+  gemm.arg_ptr(4, L.gu.as<uint32_t>() + kS.gate_up_words() * kS.experts);
+  gemm.arg_ptr(5, h.ptr());
+  d.run(gemm, kNG / kernels::pf_moe::kQ4WgN, nit);
+  const std::vector<uint16_t> hd = d.read<uint16_t>(h, size_t(used) * kI);
+  size_t n = 0, ulp1 = 0;
+  uint32_t last = 0;
+  while (last + 1 < nit && it[4 * (last + 1)] != kNone) ++last;
+  for (uint32_t i : {0u, last}) {
+    const uint32_t e = it[4 * i], r0 = it[4 * i + 1], nr = it[4 * i + 2];
+    const uint32_t* blk = L.gu_h.data() + kS.gate_up_words() * e;
+    for (uint32_t row = r0; row < r0 + nr; ++row)
+      for (uint32_t col = 0; col < kNG; col += 32)
+        for (uint32_t l = 0; l < 16; ++l) {
+          float acc[2];
+          for (uint32_t half = 0; half < 2; ++half) {   // gate atom (col / 16 even), its up atom
+            const uint32_t nn = col + 16 * half + l;
+            float a = 0.0f;
+            for (uint32_t g = 0; g < G; ++g) {
+              const uint32_t* tile = blk + (size_t(nn / 16) * G + g) * 136;
+              int32_t tsum = 0;
+              for (uint32_t j = 0; j < 8; ++j)
+                for (uint32_t ii = 0; ii < 8; ++ii)
+                  tsum += int32_t(ag[size_t(row) * kH + g * 64 + j * 8 + ii]) *
+                          (int32_t((tile[j * 16 + nn % 16] >> (4 * ii)) & 0xF) - 8);
+              const float ws = common::f16_to_f32(reinterpret_cast<const uint16_t*>(tile + 128)[nn % 16]);
+              a = std::fma(float(tsum), ws * sg[size_t(row) * G + g], a);
+            }
+            acc[half] = a;
+          }
+          const uint16_t g_b = rne(acc[0]), u_b = rne(acc[1]);
+          const uint16_t s_b = rne(f32(g_b) / (1.0f + std::exp(-f32(g_b))));
+          const uint16_t want = rne(f32(s_b) * f32(u_b));
+          const uint16_t got = hd[size_t(row) * kI + col / 2 + l];
+          ++n;
+          if (got != want) {
+            const int du = std::abs(int(got) - int(want));
+            if (du == 1) ++ulp1;
+            else ++bad;
+          }
+        }
+  }
+  std::printf("  4c. W4A8 gate||up C %u: quantiser and gather exact; h %zu values of two items against the host's "
+              "integer sums: %zu one bf16 ulp off (exp), %zu further\n", C, n, ulp1, bad);
+  CHECK_EQ(bad, size_t(0));
+}
+
 // 4: grouped == dense, bitwise, for expert e (all three GEMMs).
 void grouped_vs_dense(Dev& d, Kernels& k, Layer& L, Bufs& b, const Run& r, uint32_t e) {
   const uint32_t C = r.C, Mp = pad256(C);
@@ -528,6 +647,124 @@ void check_combine(const Run& r, const std::vector<uint16_t>& resid0) {
   std::printf("    combine C %u: %zu of %zu residual values differ from the host chain\n", r.C, bad,
               size_t(r.C) * kH);
   CHECK_EQ(bad, size_t(0));
+}
+
+// 9: combine_norm - the fused launch against the two it replaces, on the walk's own route rows, header, pair_row
+// and y (fresh copies: the sections between rewrite the walk's buffers), every byte of the residual and of x.
+void check_combine_norm(Dev& d, Kernels& k, const Run& r, const std::vector<uint16_t>& resid0) {
+  const uint32_t C = r.C, G = 20;
+  l0::Module nm(d.ctx, kernels::path(kernels::pf_res_norm_variant(kH, 0, G)));
+  l0::Module cm(d.ctx, kernels::path(kernels::pf_moe_combine_norm_variant(256, 8, kH, kI, G)));
+  l0::Kernel norm(nm, "pf_res_norm"), cn(cm, "pf_moe_combine_norm");
+  norm.group_size(256);
+  cn.group_size(256);
+  std::vector<float> w(kH);
+  std::mt19937 rng(77);
+  std::uniform_real_distribution<float> wd(0.5f, 1.5f);
+  for (float& e : w) e = wd(rng);
+  const std::vector<uint16_t> r0(resid0.begin(), resid0.begin() + size_t(C) * kH);
+  const std::vector<uint16_t> fill(size_t(C + 1) * kH, uint16_t(0x7F7F));   // row C: a sentinel no row may reach
+  l0::Mem route = d.upload(r.route), hdr = d.upload(r.hdr), pr = d.upload(r.pair_row), y = d.upload(r.y),
+          wn = d.upload(w), ra = d.upload(fill), rb = d.upload(fill), xa = d.upload(fill), xb = d.upload(fill);
+  d.imm.copy(ra.ptr(), r0.data(), r0.size() * 2);
+  d.imm.copy(rb.ptr(), r0.data(), r0.size() * 2);
+  k.combine.arg_ptr(0, route.ptr());
+  k.combine.arg_ptr(1, hdr.ptr());
+  k.combine.arg_ptr(2, pr.ptr());
+  k.combine.arg_ptr(3, y.ptr());
+  k.combine.arg_ptr(4, ra.ptr());
+  k.combine.arg(5, C);
+  d.run(k.combine, kH / kernels::pf_moe::kCombineWg, C);
+  norm.arg_ptr(0, nullptr);
+  norm.arg_ptr(1, ra.ptr());
+  norm.arg_ptr(2, wn.ptr());
+  norm.arg_ptr(3, xa.ptr());
+  norm.arg(4, C);
+  d.run(norm, 1, C);
+  cn.arg_ptr(0, route.ptr());
+  cn.arg_ptr(1, hdr.ptr());
+  cn.arg_ptr(2, pr.ptr());
+  cn.arg_ptr(3, y.ptr());
+  cn.arg_ptr(4, rb.ptr());
+  cn.arg_ptr(5, wn.ptr());
+  cn.arg_ptr(6, xb.ptr());
+  cn.arg(7, C);
+  d.run(cn, 1, C);
+  const size_t n = size_t(C + 1) * kH;
+  const std::vector<uint16_t> va = d.read<uint16_t>(ra, n), vb = d.read<uint16_t>(rb, n),
+                              wa = d.read<uint16_t>(xa, n), wb = d.read<uint16_t>(xb, n);
+  size_t bad_r = 0, bad_x = 0, past = 0;
+  for (size_t i = 0; i < size_t(C) * kH; ++i) {
+    bad_r += va[i] != vb[i];
+    bad_x += wa[i] != wb[i];
+  }
+  for (size_t i = size_t(C) * kH; i < n; ++i) past += vb[i] != 0x7F7F || wb[i] != 0x7F7F;
+  std::printf("  9. combine_norm C %u: %zu residual and %zu x values of %zu differ from combine + pf_res_norm; "
+              "%zu past row C written\n", C, bad_r, bad_x, size_t(C) * kH, past);
+  CHECK_EQ(bad_r, size_t(0));
+  CHECK_EQ(bad_x, size_t(0));
+  CHECK_EQ(past, size_t(0));
+  CHECK(std::memcmp(vb.data(), r.resid.data(), size_t(C) * kH * 2) == 0);   // and the walk's own combine
+}
+
+// 10: router_gemm - the l0 router (tiled_gemm) against the host, and moe_route at the GEMM's pitch against decode's.
+void check_router_gemm(Dev& d, Kernels& k, const Layer& L, const std::vector<uint16_t>& x, uint32_t C) {
+  constexpr uint32_t N = 272, P = 512;
+  CHECK_EQ(kernels::pf_route_slab_pitch(N), P);
+  const uint32_t Mp = pad256(C);
+  runtime::prefill::Context cx{d.ctx};
+  runtime::prefill::KernelCache kc{d.ctx};
+  l0::Mem xb = d.upload(x);   // kKc rows: the GEMM reads rows up to its padded M, never writes them
+  l0::Mem slab(d.ctx, l0::MemKind::Device, size_t(kH) * P * 2), out(d.ctx, l0::MemKind::Device, size_t(Mp) * P * 4);
+  d.imm.fill(slab.ptr(), 0x7F7F7F7Fu, slab.size());
+  d.imm.fill(out.ptr(), 0x7FC00000u, out.size());
+  runtime::prefill::route_slab(cx, kc, L.router.ptr(), N, kH, slab.as<uint16_t>());
+  runtime::prefill::tiled_gemm(cx, kc, slab.as<uint16_t>(), N, kH, xb.as<uint16_t>(), C, out.as<float>());
+  cx.wait();
+  const std::vector<uint16_t> sl = d.read<uint16_t>(slab, size_t(kH) * P);
+  size_t bad_slab = 0;
+  for (uint32_t kk = 0; kk < kH; ++kk)
+    for (uint32_t n = 0; n < P; ++n)
+      bad_slab += sl[size_t(kk) * P + n] != (n < N ? L.rows[size_t(n) * kH + kk] : uint16_t(0));
+  const std::vector<float> lg = d.read<float>(out, size_t(C) * P);
+  double worst = 0;
+  size_t bad = 0;
+  for (uint32_t m = 0; m < C; ++m)
+    for (uint32_t n = 0; n < N; ++n) {
+      double ref = 0, S = 0;
+      for (uint32_t kk = 0; kk < kH; ++kk) {
+        const double p = double(f32(L.rows[size_t(n) * kH + kk])) * double(f32(x[size_t(m) * kH + kk]));
+        ref += p;
+        S += std::fabs(p);
+      }
+      const double e = std::fabs(double(lg[size_t(m) * P + n]) - ref) / (S > 0 ? S : 1.0);
+      worst = std::max(worst, e);
+      bad += !(e <= 1e-5);
+    }
+  // moe_route at pitch 512, pad columns poisoned, against decode's binary on the same logits at pitch 272
+  std::vector<float> poisoned(lg), compact(size_t(C) * N);
+  for (uint32_t m = 0; m < C; ++m) {
+    std::fill(poisoned.begin() + size_t(m) * P + N, poisoned.begin() + size_t(m + 1) * P, std::nanf(""));
+    std::copy(lg.begin() + size_t(m) * P, lg.begin() + size_t(m) * P + N, compact.begin() + size_t(m) * N);
+  }
+  l0::Module rm(d.ctx, kernels::path(kernels::pf_moe_route_gemm_variant(256, 8, kH, kI, P)));
+  l0::Kernel r512(rm, "moe_route");
+  r512.group_size(256);
+  l0::Mem lp = d.upload(poisoned), lc = d.upload(compact), ra = d.zeros(size_t(C) * 32 * 4),
+          rb = d.zeros(size_t(C) * 32 * 4);
+  r512.arg_ptr(0, lp.ptr());
+  r512.arg_ptr(1, ra.ptr());
+  d.run(r512, 1, C);
+  k.route.arg_ptr(0, lc.ptr());
+  k.route.arg_ptr(1, rb.ptr());
+  d.run(k.route, 1, C);
+  const std::vector<uint32_t> va = d.read<uint32_t>(ra, size_t(C) * 32), vb = d.read<uint32_t>(rb, size_t(C) * 32);
+  std::printf(" 10. router_gemm C %u: slab %zu words off; logits max |err| / sum|w x| %.3g (%zu over 1e-5); "
+              "moe_route at pitch %u (pad NaN) %s decode's at %u\n",
+              C, bad_slab, worst, bad, P, va == vb ? "every word" : "DIFFERS from", N);
+  CHECK_EQ(bad_slab, size_t(0));
+  CHECK_EQ(bad, size_t(0));
+  CHECK(va == vb);
 }
 
 void check_sort(const std::vector<uint32_t>& route, const Run& r) {
@@ -741,8 +978,10 @@ int main() {
   std::puts("  4. grouped == dense, bitwise, per (token, expert):");
   for (uint32_t e : sample_experts(a)) grouped_vs_dense(d, k, L, b, a, e);
   fused_vs_grouped(d, L, b, a);
+  w4a8_check(d, L, b, a);
   // 6. the combine
   check_combine(a, resid0);
+  check_combine_norm(d, k, a, resid0);
   // 5. row independence: the reversed chunk
   {
     std::vector<uint16_t> xr(x.size()), rr(resid0.size());
@@ -787,7 +1026,9 @@ int main() {
     std::printf("  8. ragged C = %u: %u tiles\n", Cr, c.hdr[kernels::pf_moe::kHdrTiles]);
     for (uint32_t e : sample_experts(c)) grouped_vs_dense(d, k, L, b, c, e);
     fused_vs_grouped(d, L, b, c);
+    w4a8_check(d, L, b, c);
     check_combine(c, r0);
+    check_combine_norm(d, k, c, r0);
     // the same 37 tokens inside the full chunk: every (token, slot) result bitwise
     size_t bad = 0;
     for (uint32_t t = 0; t < Cr; ++t)
@@ -799,6 +1040,9 @@ int main() {
     CHECK(std::memcmp(a.resid.data(), c.resid.data(), size_t(Cr) * kH * 2) == 0);
     std::puts("     the 37 tokens as their own chunk and inside the 2048-row one: bitwise equal");
   }
+  // 10. router_gemm
+  check_router_gemm(d, k, L, x, C);
+  check_router_gemm(d, k, L, x, 37);
   std::puts("pf_moe_test OK");
   return 0;
 }

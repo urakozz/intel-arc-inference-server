@@ -21,6 +21,8 @@ same sources with the same settings and compiler (box_check's tree vs the valida
 differ only by the tree path compiled into them). A test is never recorded when it changed directory, used a path
 the trace cannot resolve, or read a file that changed while the run was going; files a test created
 itself are its outputs, not inputs. Only PASS is kept: a failure or a skip always runs again.
+The machine is the kernel's series (7.4): a release candidate or patch release keeps the PASSes, a new series
+does not (--no-reuse runs everything after an update that should be checked in full).
 """
 import argparse
 import fcntl
@@ -275,8 +277,15 @@ def build_id(tree):
     return h.hexdigest()
 
 
+def kernel_series(release):
+    """7.4.0-070400rc2-generic -> 7.4: a release candidate or a patch release of one series is the same machine
+    (operator 2026-11-12: a kernel update must not cost a full re-run); a new series (7.5) is not."""
+    m = re.match(r"\d+\.\d+", release or "")
+    return m.group(0) if m else release
+
+
 def machine():
-    return {"kernel": platform.release()}
+    return {"kernel": kernel_series(platform.release())}
 
 
 # ---- the test's own settings ---------------------------------------------------------------------------
@@ -434,7 +443,9 @@ def cmd_record(a):
 # ---- claim ---------------------------------------------------------------------------------------------
 def matches(entry, d, tree, bid, mach):
     """-> None when the entry stands for this test now, else what differs"""
-    if entry.get("machine") != mach:
+    was = dict(entry.get("machine") or {})   # entries recorded before 2026-11-12 hold the full release string
+    was["kernel"] = kernel_series(was.get("kernel"))
+    if was != mach:
         return f"the machine ({entry.get('machine')} -> {mach})"
     if entry.get("command") != d["command"]:
         return "the command line"

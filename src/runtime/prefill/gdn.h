@@ -4,6 +4,7 @@
 #include "runtime/buffers.h"
 #include "runtime/prefill/context.h"
 #include "runtime/prefill/kernels.h"
+#include "runtime/prefill_backend.h"
 
 namespace runtime::prefill {
 
@@ -44,14 +45,30 @@ namespace runtime::prefill {
 //
 // Ten launches per call, in the order `gdn.cc` lists them. `C` must be in
 // (0, s.chunk_cap()]; anything else throws.
+//
+// `backend` (phase 2): on a MoE model the l0 backend binds the one-launch intra-chunk kernel; l0-int8 (and every
+// dense model) keeps the four launches.
 void gdn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                const float* qkvz_partials, const float* ab_out, float* gdn_state,
-               uint16_t* conv_ring, const void* small, uint16_t* y);
+               uint16_t* conv_ring, const void* small, uint16_t* y,
+               PrefillBackend backend = PrefillBackend::L0);
 
 // What one `gdn_chunk` call appends to the L0 list. Asserted through
 // `Context::launches()` rather than restated in prose; Task 14's launch
 // arithmetic reads it.
 inline constexpr size_t kGdnChunkLaunches = 10;
+
+// MoE-model prefill phase 2 (docs/superpowers/plans/2026-11-12-moe-model-prefill-phase2.md): a MoE model's
+// gdn_chunk (Ornith) runs the conv + l2norm as one launch (pf_gdn_front, bitwise) and, on the l0 backend, A / T /
+// w, u / A2 as one launch (pf_gdn_intra, judged). Dense models (Qwen3.8, its TP card) keep the ten launches.
+// The launches one gdn_chunk call appends for `d` on backend `b`.
+size_t gdn_chunk_launches(const model::ModelDesc& d, PrefillBackend b);
+
+// Phase 3 Task 2: on a MoE model's l0 backend the a||b runs as the dense GEMM (tiled_gemm on its B slab, made once
+// by make_route_slabs - still one launch) into rows at pitch pf_route_slab_pitch(128) = 256 in the MoE scratch's
+// GEMM region, and gdn_chunk's pf_gdn_gate reads that pitch (pf_gdn_conv _AB256). Elsewhere one pf_gemv_rows /
+// pf_ab_proj launch into ab_out.
+bool ab_on_gemm(const model::ModelDesc& d, PrefillBackend b);
 
 // --- the scan's DISPATCH PROOF ----------------------------------------------
 // `docs/superpowers/specs/2026-09-22-prefill-parity-program-design.md` §11: a

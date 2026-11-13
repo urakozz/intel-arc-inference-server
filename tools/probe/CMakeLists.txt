@@ -453,6 +453,20 @@ foreach(arm "32 16 6 1" "32 32 6 1" "64 16 6 1" "32 16 3 1" "32 16 1 1" "32 16 6
   list(APPEND PFA_TARGETS kernel_pfa_KT${KT}_R${R}_H${H}_Q${QR})
 endforeach()
 
+# Phase 3 Task 1 (Ornith, `--heads 16x2`): today's tile text (KT 64, HPW 8 = the GQA group, EXP2 1) at RPW 8 / 16 / 32
+# with and without Q held in registers; the R8 Q0 arm is pf_flash_attn's own source line for line and must be bitwise it.
+if(B70_ORNITH)
+  foreach(arm "8 0" "8 1" "16 0" "16 1" "32 0" "32 1")
+    separate_arguments(f UNIX_COMMAND "${arm}")
+    list(GET f 0 R)
+    list(GET f 1 QR)
+    add_ocloc_kernel(pfao_KT64_R${R}_H8_Q${QR} SOURCE ${PFA_CL}
+                     DEFINES KT=64 RPW=${R} HPW=8 QREG=${QR} EXP2=1 FA_Q_HEADS=16 FA_KV_HEADS=2
+                     OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND PFA_TARGETS kernel_pfao_KT64_R${R}_H8_Q${QR})
+  endforeach()
+endif()
+
 add_executable(probe_flash_attn probe_flash_attn.cc)
 target_include_directories(probe_flash_attn PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_flash_attn PRIVATE b70_prefill_host b70_runtime b70_loader
@@ -1138,7 +1152,7 @@ endif()
 # --- probe_moe_prefill: plan 2026-11-12 (Ornith MoE prefill) Task 1 - the fused int4 grouped GEMM arms and the ---------
 # multi-work-group sort on real routes. Record: docs/probes/probe-moe-prefill-2026-11-12.md. `probe_moe_prefill.cl`
 # is a PROBE kernel: no runtime path binds `pmp_gemm`; the control runs the production binaries. PMP_ARMS is
-# "FORM NA NB WGM WGN CVT XSG", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
+# "FORM NA NB WGM WGN CVT XSG OPT", the same list in the same order as kArms in probe_moe_prefill.cc; each arm is built
 # at Ornith's and Flash-Next's gate||up (SiLU epilogue) and down shapes, FORM 3 also with EPI 2 (the fp32 check).
 if(B70_ORNITH AND B70_Q4EXP)
   set(PMP_CL ${CMAKE_CURRENT_SOURCE_DIR}/probe_moe_prefill.cl)
@@ -1147,7 +1161,8 @@ if(B70_ORNITH AND B70_Q4EXP)
                "3 4 4 1 4 0 0 1" "3 4 2 4 8 0 0 0" "3 4 2 4 8 0 0 1" "3 4 4 1 4 0 1 1" "3 4 2 4 8 0 1 1"
                "1 4 4 1 4 9 0 1" "1 4 4 1 4 2 0 5" "2 4 4 4 4 9 0 3" "2 4 4 4 4 2 0 7"
                "1 8 2 1 8 2 0 1" "1 8 2 2 8 2 0 1" "2 8 2 2 8 2 0 3" "1 8 2 1 8 9 0 1"
-               "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3")
+               "1 4 4 1 4 3 0 1" "1 8 2 1 8 3 0 1" "2 4 4 4 4 3 0 3"
+               "1 4 2 1 8 4 0 1" "1 4 4 1 4 4 0 1" "1 8 2 1 8 2 0 9")
   set(PMP_SHAPES "2048 1024 1" "512 2048 0" "2560 1280 1" "640 2560 0")
   set(PMP_TARGETS "")
   foreach(arm ${PMP_ARMS})
@@ -1166,7 +1181,7 @@ if(B70_ORNITH AND B70_Q4EXP)
       list(GET s 1 N)
       list(GET s 2 EP)
       set(_epis ${EP})
-      if(F EQUAL 3)
+      if(F EQUAL 3 OR CV EQUAL 4)
         list(APPEND _epis 2)
       endif()
       foreach(E ${_epis})
@@ -1179,6 +1194,16 @@ if(B70_ORNITH AND B70_Q4EXP)
       endforeach()
     endforeach()
   endforeach()
+  # phase 3 Task 1, arm `shd`: the shared expert's two linears (block E, layout 1) through the production slab dequant
+  # and pf_gemm, at Ornith's shapes: gate||up K 2048 N 1024, down K 512 N 2048
+  foreach(shd "2048 1024" "512 2048")
+    separate_arguments(s UNIX_COMMAND "${shd}")
+    list(GET s 0 K)
+    list(GET s 1 N)
+    add_ocloc_kernel(pmp_shd_slab_K${K}_N${N}_L1 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
+                     DEFINES K=${K} N=${N} LAYOUT=1)
+    list(APPEND PMP_TARGETS kernel_pmp_shd_slab_K${K}_N${N}_L1)
+  endforeach()
   add_executable(probe_moe_prefill probe_moe_prefill.cc)
   target_include_directories(probe_moe_prefill PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
                              ${CMAKE_SOURCE_DIR}/tests/kernels)
@@ -1186,3 +1211,71 @@ if(B70_ORNITH AND B70_Q4EXP)
   b70_target_kernel_dir(probe_moe_prefill)
   add_dependencies(probe_moe_prefill ${PMP_TARGETS} ${PCR_PF_KERNELS} ${ALL_KERNELS})
 endif()
+
+# --- probe_gdn_intra: phase 2 Task 1, the GDN intra-chunk stages on real inputs (Ornith) ---------
+# Control: today's pf_gdn_wy entries; D-a: pf_gdn_intra (src/kernels/prefill/pf_gdn_intra.cl), and its
+# INTRA_DBG build (A and T written out for the per-stage error). Record: docs/probes/probe-prefill-phase2-2026-11-12.md.
+if(B70_ORNITH)
+  add_ocloc_kernel(pf_gdn_intra_dbg_GK16V32 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gdn_intra.cl
+                   DEFINES INTRA_DBG=1 GDN_K_HEADS=16 GDN_V_HEADS=32)
+  add_executable(probe_gdn_intra probe_gdn_intra.cc)
+  target_include_directories(probe_gdn_intra PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_gdn_intra PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+  b70_target_kernel_dir(probe_gdn_intra)
+  add_dependencies(probe_gdn_intra kernel_pf_gdn_intra_dbg_GK16V32 kernel_pf_gdn_intra_GK16V32
+                   kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32)
+endif()
+
+# --- probe_route: phase 2 Task 6, pf_route.cl's tilings against pf_ab_proj (bitwise, then time); phase 3 Task 1: + the
+# dense pf_gemm arm ---------------
+if(B70_ORNITH)
+  set(_pfr_targets)
+  foreach(N 272 128)
+    foreach(cfg "16 2" "32 1" "32 2" "16 4" "64 1")
+      separate_arguments(c UNIX_COMMAND "${cfg}")
+      list(GET c 0 MT)
+      list(GET c 1 TC)
+      add_ocloc_kernel(pfr_K2048_N${N}_MT${MT}_TC${TC} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_route.cl
+                       DEFINES K=2048 N=${N} MT=${MT} TC=${TC})
+      list(APPEND _pfr_targets kernel_pfr_K2048_N${N}_MT${MT}_TC${TC})
+    endforeach()
+  endforeach()
+  add_executable(probe_route probe_route.cc)
+  target_include_directories(probe_route PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(probe_route PRIVATE b70_prefill_host b70_l0)
+  b70_target_kernel_dir(probe_route)
+  add_dependencies(probe_route ${_pfr_targets} kernel_pf_moe_router_K2048_N272 kernel_pf_ab_proj_D2048 kernel_pf_gemm_T0)
+endif()
+
+# --- probe_qwen_pf_gemm: Qwen3.8's bf16 slab walk at a full chunk, candidate arms -----------------------
+# Record: docs/probes/probe-qwen-pf-gemm-2026-11-13.md. Arms built from the production sources with one extra
+# define each: pf_gemm.cl RASTER=1 (the work-group order N-fastest) and pf_dequant_slab.cl BLOCK_STORE=1 (2D
+# block stores). Checked bitwise against the production binaries, then timed interleaved.
+set(_qpg_targets)
+# GEMM arm R1: RASTER=1. (Round 2's PF_DIST 1/3/4 and NO_BARRIER arms were removed with their defines after
+# missing their gate; the record has their numbers.)
+foreach(V "T0;TRANSB=0" "T0_SILU;TRANSB=0;SILU_EPI=1")
+  list(GET V 0 TAG)
+  list(SUBLIST V 1 -1 DEFS)
+  foreach(A "R1;RASTER=1")
+    list(GET A 0 ARM)
+    list(GET A 1 ADEF)
+    add_ocloc_kernel(qpg_gemm_${TAG}_${ARM} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_gemm.cl
+                     DEFINES ${DEFS} ${ADEF} OPTIONS -cl-intel-256-GRF-per-thread)
+    list(APPEND _qpg_targets kernel_qpg_gemm_${TAG}_${ARM})
+  endforeach()
+endforeach()
+foreach(row "5120 16384 1" "6144 5120 0" "5120 34816 0" "17408 5120 0" "5120 14336 0")
+  separate_arguments(f UNIX_COMMAND "${row}")
+  list(GET f 0 K)
+  list(GET f 1 N)
+  list(GET f 2 L)
+  add_ocloc_kernel(qpg_dqbs_K${K}_N${N}_L${L} SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/prefill/pf_dequant_slab.cl
+                   DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
+  list(APPEND _qpg_targets kernel_qpg_dqbs_K${K}_N${N}_L${L})
+endforeach()
+add_executable(probe_qwen_pf_gemm probe_qwen_pf_gemm.cc)
+target_include_directories(probe_qwen_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_qwen_pf_gemm PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
+b70_target_kernel_dir(probe_qwen_pf_gemm)
+add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
