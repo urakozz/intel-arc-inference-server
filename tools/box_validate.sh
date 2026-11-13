@@ -22,11 +22,13 @@
 #   --nightly     the nightly run (docs/10-the-box.md): no run at all when nothing but documentation
 #                 changed since the newest finished run of this tree (tools/box_validate/changed_since.sh);
 #                 a full run (--no-reuse) when the newest finished full run is older than 7 days
-#   --merge-check the merge check (about 20 minutes, before a merge; the three tiers' times are below): the build of
+#   --merge-check the merge check (about 20-30 minutes, before a merge; the three tiers' times are below): the build of
 #                 the tree under test (the baseline's build reused), the kernel-binary comparison (g0.sha), the
 #                 model-free host stages, and merge.changed: only the tests whose inputs changed since their last
 #                 recorded PASS (reuse.py), the shortest first, up to 480 s of their recorded times. A changed test
 #                 over that budget is NOT run: the summary says so and lists it - it is left for the quick run.
+#                 Outside the budget, merge.dflash always runs a DFlash model sample (the engine test and the
+#                 prefix-cache test in both KV forms, ~9 min when their inputs changed; a kept PASS otherwise).
 #                 Every other stage is recorded SKIP "not in the merge check". Its own state
 #                 (<sha>-merge-vs-<baseline>, --state NAME must contain -merge): its PASS never stands for a quick
 #                 or a full one. No box tidy at launch. With --status / --summary / --dry-run: the merge state
@@ -35,7 +37,7 @@
 #                 recorded SKIP "full only". Its own state (<sha>-quick-vs-<baseline>, --state NAME must contain
 #                 -quick): a quick PASS never stands for a full one. No box tidy at launch. With --status /
 #                 --summary / --dry-run: the quick state
-#   How long: the merge check about 20 minutes (what its tests cost depends on what changed: the budget caps it);
+#   How long: the merge check about 20-30 minutes (its changed tests are capped; the DFlash sample is ~9 min when it runs);
 #   the quick run about 3 hours on a box shared with other jobs (measured 2026-11-13, the baseline rebuilt and
 #   G0's checks on both cards; the reused baseline and the one-card G0 stages take part of that off - not yet
 #   measured); the full run on demand, hours.
@@ -133,7 +135,7 @@ BASELINE_REF="${BASELINE_REF:-0f449db6}"
 [ "$NIGHTLY" = 0 ] || [ "$QUICK" = 0 ] || die "--nightly is a full run: drop --quick"
 [ "$MERGE" = 0 ] || [ "$QUICK" = 0 ] || die "--merge-check and --quick are two tiers: pick one"
 [ "$NIGHTLY" = 0 ] || [ "$MERGE" = 0 ] || die "--nightly is a full run: drop --merge-check"
-[ "$MERGE" = 0 ] || WITH="$WITH,merge.changed"   # the merge check's own stage is opt-in everywhere else
+[ "$MERGE" = 0 ] || WITH="$WITH,merge.changed,merge.dflash"   # the merge check's own stage is opt-in everywhere else
 BV_QUICK=$QUICK   # the stage bodies' quick_or, for --dry-run
 
 # ---- selection ------------------------------------------------------------------------

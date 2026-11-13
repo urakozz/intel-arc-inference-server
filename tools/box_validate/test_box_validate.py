@@ -1420,9 +1420,8 @@ class BaselineTest(Tmp):
     def stamp(self, cmake=""):
         return self.run_cmd("build-stamp", "--base", self.base, f"--cmake-args={cmake}")
 
-    def gates(self, what, device="0", re="^(a|b)$", snap=None, extra=()):
-        return self.run_cmd(f"gates-{what}", "--base", self.base, "--re", re, "--snap", snap or self.p("snap"),
-                            "--device", device, *extra)
+    def gates(self, what, re="^(a|b)$", snap=None, extra=()):
+        return self.run_cmd(f"gates-{what}", "--base", self.base, "--re", re, "--snap", snap or self.p("snap"), *extra)
 
     def test_a_build_with_no_stamp_is_rebuilt_then_reused(self):
         rc, out = self.check()
@@ -1498,8 +1497,7 @@ class BaselineTest(Tmp):
         self.assertIn("BASELINE gates reused", out)
         with open(self.p("out.xml")) as f:
             self.assertEqual(f.read(), "<testsuite/>")
-        for kw, why in ((dict(device="1"), "the card changed"), (dict(re="^(a)$"), "the gate list changed"),
-                        (dict(snap=self.p("other")), "the snapshot changed")):
+        for kw, why in ((dict(re="^(a)$"), "the gate list changed"), (dict(snap=self.p("other")), "the snapshot changed")):
             rc, out = self.gates("check", extra=("--out", self.p("o.xml")), **kw)
             self.assertEqual(rc, 1, kw)
             self.assertIn(why, out)
@@ -2034,7 +2032,7 @@ class DriverTest(unittest.TestCase):
         blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
         runs = [sid for sid, b in blocks.items() if "merge check: as in the full run" in b]
         self.assertEqual(runs[:3], ["pre", "g0.build", "g0.sha"])
-        self.assertEqual(runs[-1], "merge.changed")
+        self.assertEqual(runs[-2:], ["merge.changed", "merge.dflash"])
         for sid in ("g0.bitwise", "g0.suite", "g0.suite_2card", "x.rest", "r22.p1", "r2.suite"):
             self.assertIn("merge check: not in it - recorded SKIP", blocks[sid], sid)
         # the model-free host stages only: default, no device, no data
@@ -2045,7 +2043,7 @@ class DriverTest(unittest.TestCase):
         finally:
             if os.path.exists(reg):
                 os.remove(reg)
-        for sid in runs[3:-1]:
+        for sid in runs[3:-2]:
             self.assertEqual((stages[sid]["sel"], stages[sid]["kind"], stages[sid]["needs"]), ("default", "cpu", "-"), sid)
             self.assertRegex(sid, r"\.(host|reject|plan)$")
         self.assertGreater(len(runs), 30)
@@ -2057,10 +2055,17 @@ class DriverTest(unittest.TestCase):
         self.assertIn("--no-label pp --no-label tp", b)
         self.assertIn("--exclude-file", b)
         self.assertLess(b.index("reuse.py cap"), b.index("reuse.py record"))
+        # merge.dflash: the fixed DFlash model sample, outside the budget, on one card
+        b = blocks["merge.dflash"]
+        self.assertIn("lock: holds the card lock for device 0", b)
+        self.assertIn("dflash_engine_test|dflash_prefix_gpu_test|dflash_prefix_gpu_kv8_test", b)
+        self.assertNotIn("reuse.py cap", b)
         self.assertIn("-merge.md", re.search(r"summary\.py report .* --out (\S+)", out).group(1))
         # nothing else runs it: not the full run, not the quick run, not a named launch without it
         for args in ((), ("--quick",)):
-            self.assertNotIn("--- merge.changed", self.run_driver("--dry-run", *args).stdout)
+            dry = self.run_driver("--dry-run", *args).stdout
+            self.assertNotIn("--- merge.changed", dry)
+            self.assertNotIn("--- merge.dflash", dry)
         full = self.run_driver("--dry-run").stdout
         self.assertNotIn("merge check", full)
         self.assertIn(" BV_MERGE=0 ", full)
@@ -2078,7 +2083,7 @@ class DriverTest(unittest.TestCase):
     def test_usage_gives_the_tiers_times(self):
         text = self.run_driver("--help").stdout
         self.assertIn("--merge-check", text)
-        self.assertRegex(text, r"merge check about 20 minutes")
+        self.assertRegex(text, r"merge check about 20-30 minutes")
         self.assertRegex(text, r"quick run about 3 hours on a box shared")
         self.assertIn("measured 2026-11-13", text)
 

@@ -84,14 +84,14 @@ st_g0_sha() {
 stage g0.bitwise 0 g0 card qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
 st_g0_bitwise() {
   local reuse=1 rc
-  x "python3 tools/box_validate/baseline.py gates-check --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --device $DEVICE --out $STATE/g0.bitwise.baseline.xml"; reuse=$?
+  x "python3 tools/box_validate/baseline.py gates-check --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --out $STATE/g0.bitwise.baseline.xml"; reuse=$?
   note "the baseline's gates run only when gates-check says its recorded output is stale"
   if [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; then xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"; fi
   x "python3 tools/box_validate/junit.py verdict $STATE/g0.bitwise.baseline.xml"
   rc=$?
   step_rc "$rc" "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
   if [ "$rc" = 0 ] && { [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; }; then
-    x "python3 tools/box_validate/baseline.py gates-stamp --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --device $DEVICE --xml $STATE/g0.bitwise.baseline.xml"
+    x "python3 tools/box_validate/baseline.py gates-stamp --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --xml $STATE/g0.bitwise.baseline.xml"
   fi
   x "ctest --test-dir build --show-only=json-v1 > $STATE/g0.bitwise.tests.json"
   x "$(ctest_cmd) -R '$G0_BITWISE_RE'"
@@ -3750,12 +3750,12 @@ st_r81_speed() {
 # Spec 19 v2: the measured baseline, live acceptance, and the operator's slim serving screen.
 row 82 "spec 19 v2 - DFlash costs and engine-tap acceptance, then one-card DFlash against recorded main baselines"
 rownote 82 "Operator 2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
-stage r82.k0 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
-st_r82_k0() {
+stage r82.host 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
+st_r82_host() {
   run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test|dflash_prefix_test)$'
   finish
 }
-stage r82.profile 82 default card qwen,dflash r82.k0 "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
+stage r82.profile 82 default card qwen,dflash r82.host "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
 st_r82_profile() {
   run_tests '^dflash_profile_test$' dflash
   jgrab profile '^dflash_profile_test$' '^dflash_profile_test' 4
@@ -3856,12 +3856,12 @@ st_r85_span() {
 # ======================================================================================
 row 86 "spec 19v3a - DFlash with int8 KV: new M5..8 binaries, one-card and PP serving, acceptance and replay"
 rownote 86 "Implementation checked with a focused smoke run only (operator 2026-11-13). Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop for the operator below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
-stage r86.k0 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
-st_r86_k0() {
+stage r86.host 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
+st_r86_host() {
   run_tests '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'
   finish
 }
-stage r86.kernels 86 default card - r86.k0 "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
+stage r86.kernels 86 default card - r86.host "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
 st_r86_kernels() {
   run_tests '^(attn_verify_dpas_test|attn_verify_dpas_kv8_m8_test|kv8_kernels_test|attn_verify_bitwise_test)$'
   finish
@@ -3945,6 +3945,13 @@ st_merge_changed() {
   finish
 }
 
+stage merge.dflash x optin card qwen,dflash g0.sha "the merge check's DFlash sample, outside merge.changed's time budget (operator 2026-11-13): dflash_engine_test (the engine with the real drafter, ~6 min) and dflash_prefix_gpu_test in both KV forms (the snapshot with the ring, ~1.5 min each); a test whose inputs are unchanged keeps its recorded PASS"
+st_merge_dflash() {
+  run_tests '^(dflash_engine_test|dflash_prefix_gpu_test|dflash_prefix_gpu_kv8_test)$' '' '' \
+    "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  finish
+}
+
 # ======================================================================================
 # --quick: the stages the quick run runs (lib.sh `quick`, `quick_form`); every other stage is full only - the
 # speed rows, the CPU reference builds, the long-context and many-prompt runs, Bolt / LiLiCorr (parked), and the
@@ -3970,9 +3977,10 @@ quick_form x.rest_2card "the model-free pp-labelled tests without a result (no c
 # --merge-check: the stages the merge check runs (lib.sh `merge`), as in the full run; every other stage is recorded SKIP.
 # The build with the baseline reused (g0.build), the kernel-binary comparison (g0.sha), the model-free host stages
 # (no data, no device, no bolt / lilicorr: their tests keep a recorded PASS while their inputs are unchanged) and
-# merge.changed, which runs the changed tests of the baseline's suite up to its time budget. G0's bitwise gates and the
+# merge.changed, which runs the changed tests of the baseline's suite up to its time budget, and merge.dflash (a fixed DFlash
+# model sample outside that budget). G0's bitwise gates and the
 # suite are the quick run's: a gate whose inputs changed shows up in merge.changed.
-merge pre g0.build g0.sha merge.changed
+merge pre g0.build g0.sha merge.changed merge.dflash
 merge r5.host r13.host r14.host r15.host r16.host r17.host r18.host r19.host r21.host r22.host r23.host r24.host
 merge r25.host r25.reject r26.host r27.host r27.reject r28.host r28.reject r31.host r31.plan r32.host r33.host r34.host
 merge r54.host r55.host r56.host r69.host r70.host r71.host r75.host r77.host r78.host r79.host r80.host r81.host
