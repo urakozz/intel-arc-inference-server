@@ -3458,6 +3458,17 @@ st_r77_ornith() {
   grab_all r1 '^R1 |^B3|card [01]: max_len|^devices:' 120
   finish
 }
+stage r77.dflash  77 default gpu  qwen,dflash r77.reject          "--parallel replica --spec dflash (a drafter on each card, one request a card): its refusals (lookup inside DFlash, more than one request a card); R1 - every request sent two at a time equals it alone on the card that served it under one-card --spec dflash (--parallel 1 on card 0 and on card 1), bitwise; --max-len 65536; each card's 'spec dflash' policy line"
+st_r77_dflash() {
+  local dm="--draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  run_tests '^cli_reject_serve_dflash_replica_.*$'
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/replica 0,1 $SNAP_QWEN --parallel replica --max-num-seqs 2 --spec dflash $dm --max-len 65536 -- --mode pairs" "--spec dflash: pairs on the replica server"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card0 0 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 0"
+  chk "PORT=$PORT tools/box_validate/replica_run.sh $STATE/$STAGE/card1 1 $SNAP_QWEN --parallel 1 --spec dflash $dm --max-len 65536 -- --mode alone" "--spec dflash: alone on card 1"
+  chk "python3 tools/box_validate/replica_check.py compare --replica $STATE/$STAGE/replica/requests.jsonl --server-log $STATE/$STAGE/replica/server-log --card0 $STATE/$STAGE/card0/requests.jsonl --card1 $STATE/$STAGE/card1/requests.jsonl" "--spec dflash: R1"
+  grab_all r1 '^R1 |card [01]: max_len|card [01]: spec dflash|^devices:' 40
+  finish
+}
 stage r77.serial  77 default card qwen r77.host                  "the serial path on one card unchanged: golden_server_test (b70-serve --parallel 1, prefix cache on) against b70-decode"
 st_r77_serial() {
   run_tests '^golden_server_test$'
@@ -3908,5 +3919,5 @@ quick r24.k1 r24.load r24.k3 r24.golden r26.host r26.k1
 quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
 quick r54.kernels r54.load r55.kernels
 quick r22.devices r22.p1 r79.host r79.k1 r79.decode
-quick r77.host r77.reject r77.r1 r77.ornith r78.host r78.engine
+quick r77.host r77.reject r77.r1 r77.ornith r77.dflash r78.host r78.engine
 quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr or tp label)"
