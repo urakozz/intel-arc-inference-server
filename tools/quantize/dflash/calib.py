@@ -17,7 +17,8 @@ of the sample can see (dflash_ref's window rule) - padded with kpos -1 to `conte
 over the requests (seed-shuffled), so 128 samples cover every request when there are fewer than 128.
 
 Block-row inputs are the target's embedding rows (`mask_embedding.pt` beside the drafter replaces the mask row,
-as vLLM and dflash_ref do) times input_embedding_scale; RoPE cos / sin in float64, as dflash_ref.rope.
+as vLLM and dflash_ref do) times input_embedding_scale; RoPE cos | sin in float64, as dflash_ref.rope, kept float32
+as int32 bits (AutoRound casts floating block inputs to bf16; model.rope views them back).
 """
 from __future__ import annotations
 
@@ -77,10 +78,11 @@ def plan(metas: list[dict], nsamples: int, anchors: int, seed: int, span: int) -
     return out
 
 
-def rope_tables(pos: torch.Tensor, head_dim: int, theta: float):
+def rope_table(pos: torch.Tensor, head_dim: int, theta: float) -> torch.Tensor:
+    """[N, head_dim] cos | sin as float32 bits in int32."""
     inv = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float64) / head_dim))
     ang = pos.to(torch.float64)[:, None] * inv[None]
-    return ang.cos().float(), ang.sin().float()
+    return torch.cat([ang.cos(), ang.sin()], -1).float().view(torch.int32)
 
 
 class EmbedRows:
@@ -134,11 +136,10 @@ def build(entry: dict, cfg, embed: EmbedRows, context: int, dtype=torch.bfloat16
     emb = embed(block_ids)
     if cfg.version == 2:
         emb = emb * cfg.input_embedding_scale
-    q_cos, q_sin = rope_tables(qpos, cfg.head_dim, cfg.rope_theta)
-    k_cos, k_sin = rope_tables(kpos.clamp(min=0), cfg.head_dim, cfg.rope_theta)
     return {"input_ids": torch.tensor([block_ids]), "attention_mask": torch.ones(1, R, dtype=torch.long),
             "taps": x[None], "embeds": emb.to(dtype)[None], "qpos": qpos[None], "kpos": kpos[None],
-            "q_cos": q_cos[None], "q_sin": q_sin[None], "k_cos": k_cos[None], "k_sin": k_sin[None]}
+            "q_rope": rope_table(qpos, cfg.head_dim, cfg.rope_theta)[None],
+            "k_rope": rope_table(kpos.clamp(min=0), cfg.head_dim, cfg.rope_theta)[None]}
 
 
 class CalibData:
