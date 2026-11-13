@@ -31,9 +31,8 @@
 // One token is one replay of each list. The host submits list 0 and list 1 back to back
 // and waits on device 1's fence (then device 0's, already done): list 0 ends with the
 // hand-off out, list 1 starts with the hand-off in (runtime::build_stage, capture.h), so the
-// two devices order themselves - no host round trip between them. `--pipeline-handoff copy`
-// (default) or `peer` - spec 16 §2 option (a) or (b); 16a's probe, which would have chosen,
-// has not run.
+// two devices order themselves - no host round trip between them. The hand-off is spec 16 §2
+// option (a): copies into device 1's memory and a cross-device event.
 //
 // **The token's way back (spec 16b Review Focus 2).** argmax_stage2 on device 1 writes the
 // sampled id and advances `pos` in device 1's Control. After the fence the host copies
@@ -48,10 +47,10 @@
 // n_active and cur_token in both, every step ends with the mirror, load_state() sets pos in
 // both. tests/runtime/pp_decode_test.cc checks the equality after every phase.
 //
-// **Bounded (P4).** Every fence wait is bounded (PipelineOptions::timeout_ms); `peer`'s
-// pp_recv bounds its spin and reports in its state words. A failed hand-off throws, names
-// what did not arrive, releases a list still waiting on the copy event (host-signals it so
-// the queue drains), and marks the engine: every later step throws until reset().
+// **Bounded (P4).** Every fence wait is bounded (PipelineOptions::timeout_ms). A failed
+// hand-off throws, names what did not arrive, releases a list still waiting on the copy event
+// (host-signals it so the queue drains), and marks the engine: every later step throws until
+// reset().
 //
 // **Prefill (spec 16c)** - prefill() below: the chunk pipeline of
 // runtime/pipeline_prefill_plan.h. Each device has its own prefill context (immediate list,
@@ -80,7 +79,7 @@
 // cards. The drafter (runtime/tap_drafter.h) lives on device 1 with lm_head and the embedding replica its draft list
 // gathers; each device holds the verify slots of its own GDN layers for 8 slots (pp_gdn_spec_bytes(d, gdn, 8)), and
 // its verify lists at M = 1 .. max_k + 1 (build_stage_verify_taps) copy the taps of the sites it walks into the
-// drafter's tap buffer - device 0's straight into device 1's memory, before its hand-off (the copy hand-off only).
+// drafter's tap buffer - device 0's straight into device 1's memory, before its hand-off.
 // verify(k) is a replay of each device's tap list; commit(j, t) moves gdn_live (mod 8) and pos on both and replays
 // the drafter's projection of rows 0..j on device 1; draft_tap(k, T, seed) replays the draft list on device 1. With
 // a drafter, ingest() and generate() run verify(0) + commit(0) per id (pos 0 included), prefill() taps the prompt's
@@ -89,9 +88,7 @@
 namespace runtime {
 
 struct PipelineOptions {
-  PpHandoff handoff = kDefaultPpHandoff;
   uint32_t timeout_ms = 30000;      // one step's fence wait; a Qwen3.8 step is ~36 ms
-  uint32_t spin_limit = 1u << 24;   // peer: pp_recv's flag loads before it gives up
   // Spec 16c: one prefill wait's bound - the host waits for a device to finish a chunk it
   // appended up to two chunks earlier. A one-card 2048-row chunk is ~1 s at 4k and a few s
   // near 256k (derived from docs/BENCHMARKS.md's pp rows); the bound is for a hang, not a
@@ -114,7 +111,7 @@ struct PipelinePrefillBase {
   // Releases a list waiting on a hand-off that will not come and waits (bounded) for both
   // prefill lists to go idle: true when they did.
   virtual bool settle(uint32_t timeout_ms) = 0;
-  // The prefill hand-off's state back to a fresh session's: events reset, peer counters 0.
+  // The prefill hand-off's state back to a fresh session's: events reset.
   virtual void zero() = 0;
   // Its device bytes, in memory_line()'s components (prefill scratch, int8, decode state).
   virtual MemoryComponents memory(uint32_t dev) const = 0;
@@ -124,29 +121,26 @@ struct PipelinePrefillBase {
 
 // The hand-off buffers (pipeline_plan.h: pp_landing_layout).
 struct PipelineLink {
-  PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d, PpHandoff mode);
+  PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d);
   // Spec 20c: from a layout (pp_landing_layout(resid_bytes, sumsq_bytes)) - Kolibri-1's engine,
   // which has no ModelDesc. The form above delegates to this one.
-  PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& layout, PpHandoff mode);
-  PpHandoff mode;
+  PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& layout);
   PpLandingLayout layout;
   l0::Mem landing;      // device 1, written only by device 0
-  l0::Mem send_seq;     // device 0: pp_send's counter
-  l0::Mem recv_state;   // device 1, shared: pp_recv's state words, read by the host
-  std::unique_ptr<l0::SyncEvent> event;   // copy only
-  StageLink binding(uint32_t spin_limit) const;
+  std::unique_ptr<l0::SyncEvent> event;
+  StageLink binding() const;
   size_t bytes(uint32_t device) const;
-  // Zeroes the landing buffer, both counters and the flag; resets the event.
-  void zero(l0::CmdList& imm0, l0::CmdList& imm1);
+  // Zeroes the landing buffer; resets the event.
+  void zero(l0::CmdList& imm1);   // device 1's immediate list
 };
 
 class PipelineEngine {
  public:
   // `stages` is runtime::place_stages()'s pair (device 0's model, device 1's), both loaded at
   // `max_len`. `d1` is a view of `d0`'s context. Throws when device 0 cannot access device
-  // 1's memory (zeDeviceCanAccessPeer) - both hand-offs write it.
+  // 1's memory (zeDeviceCanAccessPeer) - the hand-off writes it.
   // `drafter` (spec 19d): a tap drafter on device 1 (its buffers at max_len), borrowed - it must outlive the engine;
-  // not with the MTP head; needs the copy hand-off and device 1's stage model holding the embedding replica
+  // not with the MTP head; needs device 1's stage model holding the embedding replica
   // (place_stages(..., drafter = true)). Attach it afterwards: drafter->attach_target(context(1), model(1),
   // buffers(1).control, max_len, draft_vocab).
   PipelineEngine(l0::Context& d0, l0::Context& d1, std::vector<loader::LoadedModel> stages,
@@ -171,7 +165,6 @@ class PipelineEngine {
   uint32_t max_len() const { return max_len_; }
   uint32_t split() const { return stage(0).last; }
   const PpStage& stage(uint32_t dev) const;
-  PpHandoff handoff() const { return opt_.handoff; }
   KvCache kv_cache() const { return kv_; }
   const CapturedStep& step(uint32_t dev) const;
   DecodeBuffers& buffers(uint32_t dev);
@@ -298,8 +291,8 @@ class PipelineEngine {
     double wall_ms = 0;
     std::array<double, kPpDevices> busy_ms{}, busy_max_ms{};
     std::array<size_t, kPpDevices> launches{};
-    // What the walk should have appended (step_stage_launches per chunk, the peer hand-off's
-    // pp_send / pp_recv, the head) - the box test holds `launches` to it.
+    // What the walk should have appended (step_stage_launches per chunk, the head) - the box
+    // test holds `launches` to it.
     std::array<size_t, kPpDevices> expected_launches{};
   };
   const PrefillStats& last_prefill() const { return pf_stats_; }

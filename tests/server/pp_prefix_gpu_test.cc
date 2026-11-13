@@ -8,7 +8,7 @@
 //
 //   one card    EngineAdapter over runtime::Engine on device 0 (b70-serve's --pp 1 adapter)
 //   two cards   cli::pp::PipelineEngineAdapterT<runtime::PipelineEngine> (b70-serve --pp 2),
-//               copy at the auto split (argv [4]: copy | peer)
+//               at the auto split
 //
 // Sequences (prefix_gpu_test's, L = long32k.ids, C = code.ids repeated): a continue, b prompt
 // end, c mid-block, d block boundary, e side request (every KV block from the host), f the same
@@ -16,9 +16,9 @@
 // turn decodes through step_many(greedy, K) (the server's loop), and the comparison is the ids
 // and the session (the speculative bursts do not leave a per-step logits row).
 //
-// argv: [1] snapshot, [2] prompts dir, [3] K (0 = no head), [4] copy | peer, [5] split_last
-// (1 = PrefixSession's opt-in split, b70-serve --prefix-split-last), [6] `int8` for the int8
-// head (b70-serve's default). B70_KV_CACHE selects the KV form. Exits 77 (SKIP) with fewer
+// argv: [1] snapshot, [2] prompts dir, [3] K (0 = no head), [4] split_last (1 = PrefixSession's
+// opt-in split, b70-serve --prefix-split-last), [5] `int8` for the int8 head (b70-serve's
+// default). B70_KV_CACHE selects the KV form. Exits 77 (SKIP) with fewer
 // than two GPUs or without peer access.
 #include <cstdint>
 #include <cstdio>
@@ -193,10 +193,8 @@ int main(int argc, char** argv) {
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   g_k = argc > 3 ? uint32_t(std::atoi(argv[3])) : 0u;
-  runtime::PpHandoff handoff = runtime::PpHandoff::Copy;
-  if (argc > 4) CHECK(runtime::parse_pp_handoff(argv[4], handoff));
-  g_split = argc > 5 && std::atoi(argv[5]) != 0;
-  const loader::LmHeadForm head = argc > 6 && std::string(argv[6]) == "int8" ? loader::LmHeadForm::Int8
+  g_split = argc > 4 && std::atoi(argv[4]) != 0;
+  const loader::LmHeadForm head = argc > 5 && std::string(argv[5]) == "int8" ? loader::LmHeadForm::Int8
                                                                              : loader::LmHeadForm::Checkpoint;
   const runtime::KvCache kv = runtime::default_kv_cache();
   const uint32_t gpus = l0::Context::gpu_count();
@@ -216,8 +214,8 @@ int main(int argc, char** argv) {
   const size_t cache_bytes = size_t(6) << 30;
   PinnedAlloc alloc(d0, cache_bytes);   // one context: both devices' copies reach it
   const char seqs[] = {'a', 'b', 'c', 'd', 'e', 'f'};
-  std::printf("pp_prefix_gpu_test: mtp K %u, %s, split_last %d, %s head, kv %s\n", g_k,
-              runtime::pp_handoff_name(handoff), int(g_split), loader::lm_head_form_name(head),
+  std::printf("pp_prefix_gpu_test: mtp K %u, split_last %d, %s head, kv %s\n", g_k, int(g_split),
+              loader::lm_head_form_name(head),
               runtime::kv_cache_name(kv));
 
   // --- one card, device 0 ----------------------------------------------------------------------
@@ -253,9 +251,7 @@ int main(int argc, char** argv) {
   x.mtp = g_k > 0;
   x.hook = true;
   const uint32_t split = runtime::pp_auto_split(*full.desc, w, kMaxLen, kv, runtime::PrefillPath{}, x);
-  runtime::PipelineOptions opt;
-  opt.handoff = handoff;
-  runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, opt, kv);
+  runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, {}, kv);
   e.prepare_prefill();
   cli::pp::PipelineEngineAdapterT<runtime::PipelineEngine> ad(e, Qwen35::kVocabUsed, Qwen35::kVocab, g_k);
   Side side{ad, [&] { ad.reset(); }, [&] { return e.read_logits(); }, [&] { return session_of(e); }};

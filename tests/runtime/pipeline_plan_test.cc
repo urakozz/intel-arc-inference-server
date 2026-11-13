@@ -213,32 +213,27 @@ void check_landing() {
     CHECK_EQ(l.sumsq_bytes, s.norm_sumsq);
     CHECK_EQ(l.sumsq_off % runtime::kPpPage, size_t{0});
     CHECK(l.sumsq_off >= l.resid_bytes);
-    CHECK_EQ(l.stamp_off, l.sumsq_off + l.sumsq_bytes);
-    CHECK_EQ(l.flag_off % runtime::kPpPage, size_t{0});   // the flag's own page
-    CHECK(l.flag_off > l.stamp_off);
-    CHECK_EQ(l.total, l.flag_off + runtime::kPpPage);
+    CHECK_EQ(l.total, l.sumsq_off + l.sumsq_bytes);
   }
   // Spec 20c: the descriptor-free form is the ModelDesc form at the same two sizes, field for
   // field (Qwen3.8, Ornith); at Kolibri-1's (one 2560-wide bf16 row, 20 fp32 sums) the
-  // regions are page-aligned and the flag has a page of its own.
+  // sums start on a page of their own.
   for (const model::ModelDesc* d : {&model::qwen38(), &model::ornith()}) {
     const runtime::PpLandingLayout a = runtime::pp_landing_layout(*d);
     const runtime::PpLandingLayout b = runtime::pp_landing_layout(a.resid_bytes, a.sumsq_bytes);
     CHECK(a.resid_bytes == b.resid_bytes && a.sumsq_bytes == b.sumsq_bytes && a.sumsq_off == b.sumsq_off &&
-          a.stamp_off == b.stamp_off && a.flag_off == b.flag_off && a.total == b.total);
+          a.total == b.total);
   }
   {
     const runtime::PpLandingLayout k = runtime::pp_landing_layout(size_t{2560} * 2, size_t{20} * 4);
     CHECK(k.sumsq_off % runtime::kPpPage == 0 && k.sumsq_off >= k.resid_bytes);
-    CHECK_EQ(k.stamp_off, k.sumsq_off + size_t{80});
-    CHECK(k.flag_off % runtime::kPpPage == 0 && k.flag_off > k.stamp_off);
-    CHECK_EQ(k.total, k.flag_off + runtime::kPpPage);
-    CHECK_EQ(k.total, size_t{4} * runtime::kPpPage);   // rows 5120 B -> sums at 8192, flag at 12288
+    CHECK_EQ(k.total, k.sumsq_off + size_t{80});
+    CHECK_EQ(k.total, size_t{8272});   // rows 5120 B -> sums at 8192
   }
   const runtime::PpLandingLayout q = runtime::pp_landing_layout(model::qwen38());
   CHECK_EQ(q.resid_bytes, size_t{8} * 5120 * 2);   // kM rows
   CHECK_EQ(q.sumsq_bytes, size_t{640});
-  CHECK_EQ(q.total, size_t{90112});
+  CHECK_EQ(q.total, size_t{82560});
 }
 
 // K2-Horizon: no ModelDesc and its own engine (runtime/k2), so PP does not apply to it in
@@ -274,14 +269,6 @@ void check_k2_balance() {
   CHECK_EQ(t.dev0, size_t{20});
   CHECK_EQ(t.dev1, size_t{25});
 }
-
-void check_handoff_names() {
-  runtime::PpHandoff h = runtime::PpHandoff::Peer;
-  CHECK(runtime::parse_pp_handoff("copy", h) && h == runtime::PpHandoff::Copy);
-  CHECK(runtime::parse_pp_handoff("peer", h) && h == runtime::PpHandoff::Peer);
-  CHECK(!runtime::parse_pp_handoff("p2p", h));
-  CHECK_EQ(std::string(runtime::pp_handoff_name(runtime::kDefaultPpHandoff)), std::string("copy"));
-}
 }  // namespace
 
 int main() {
@@ -292,7 +279,6 @@ int main() {
   check_auto_len();
   check_landing();
   check_k2_balance();
-  check_handoff_names();
   std::printf("pipeline_plan_test: OK\n");
   return 0;
 }

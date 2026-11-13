@@ -186,25 +186,23 @@ int main() {
     const model::BoltPlacement one = model::BoltPlacement::one(d), two = model::BoltPlacement::two(d, split);
     const BoltFuse none{}, all{true, true, true};
     const BoltFuse router{true, false, false}, route{false, true, false}, conv{false, false, true};
-    const runtime::PpHandoff copy = runtime::PpHandoff::Copy, peer = runtime::PpHandoff::Peer;
     // 40 Mamba x 6 + 8 attention x 6 + 40 MoE x 9 + the head's 5
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(40 * 6 + 8 * 6 + 40 * 9 + 5));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none, copy), size_t(653));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Eager, none, copy), size_t(653 - 8));   // spec 23c's eager: ONE launch
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, router, copy), size_t(653 - 40));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, route, copy), size_t(653 - 40));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, conv, copy), size_t(653 - 40));
-    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, all, copy), size_t(533));
-    CHECK_EQ(decode_launches(d, two, BoltAttn::Flash, none, copy), size_t(653));       // the cut adds no compute launch
-    CHECK_EQ(decode_launches(d, two, BoltAttn::Flash, none, peer), size_t(655));       // pp_send + pp_recv
-    CHECK_EQ(device_launches(d, two, 0, BoltAttn::Flash, none, copy) + device_launches(d, two, 1, BoltAttn::Flash, none, copy),
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none), size_t(40 * 6 + 8 * 6 + 40 * 9 + 5));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, none), size_t(653));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Eager, none), size_t(653 - 8));   // spec 23c's eager: ONE launch
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, router), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, route), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, conv), size_t(653 - 40));
+    CHECK_EQ(decode_launches(d, one, BoltAttn::Flash, all), size_t(533));
+    CHECK_EQ(decode_launches(d, two, BoltAttn::Flash, none), size_t(653));       // the cut adds no compute launch
+    CHECK_EQ(device_launches(d, two, 0, BoltAttn::Flash, none) + device_launches(d, two, 1, BoltAttn::Flash, none),
              size_t(653));
     // the synthetic N 12 (M E M E M E M * E M E M): 6 x 6 + 5 x 9 + 1 x 6 + 5 = 92; with every arm 92 - 6 - 10 = 76
     const model::BoltDesc t12 = model::bolt_truncated(d, 12);
-    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none, copy), size_t(92));
-    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, all, copy), size_t(76));
-    CHECK_EQ(decode_launches(t12, model::BoltPlacement::two(t12, 6), BoltAttn::Flash, none, peer), size_t(94));
-    CHECK(decode_launches(d, one, BoltAttn::Eager, none, copy) <= 1024);   // runtime::ProfileEvents::kProfileCapacity
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none), size_t(92));
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, all), size_t(76));
+    CHECK_EQ(decode_launches(t12, model::BoltPlacement::two(t12, 6), BoltAttn::Flash, none), size_t(92));
+    CHECK(decode_launches(d, one, BoltAttn::Eager, none) <= 1024);   // runtime::ProfileEvents::kProfileCapacity
     // the cut's hand-off: block 47 (attention) leaves o_proj's slices; a cut after a MoE block, both of its sources
     CHECK(d.is_attention(split - 1));
     CHECK_EQ(cut_pending(d, two).total(), 1u);
@@ -248,11 +246,11 @@ int main() {
         CHECK_EQ(pl.kv + pl.ssm + pl.conv_rings + pl.decode_scratch,
                  ps.total() + scratch_sizes(d, 65536, BoltAttn::Eager).total());
       }
-    std::printf("  decode: %zu launches (eager %zu, every arm %zu, two cards peer %zu), N 12: %zu; flash scratch %zu B, eager "
+    std::printf("  decode: %zu launches (eager %zu, every arm %zu, two cards %zu), N 12: %zu; flash scratch %zu B, eager "
                 "+%zu B at 262144\n",
-                decode_launches(d, one, BoltAttn::Flash, none, copy), decode_launches(d, one, BoltAttn::Eager, none, copy),
-                decode_launches(d, one, BoltAttn::Flash, all, copy), decode_launches(d, two, BoltAttn::Flash, none, peer),
-                decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none, copy), f.total(),
+                decode_launches(d, one, BoltAttn::Flash, none), decode_launches(d, one, BoltAttn::Eager, none),
+                decode_launches(d, one, BoltAttn::Flash, all), decode_launches(d, two, BoltAttn::Flash, none),
+                decode_launches(t12, model::BoltPlacement::one(t12), BoltAttn::Flash, none), f.total(),
                 e.attn_scores);
   }
 

@@ -223,25 +223,18 @@ CapturedStep build_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, D
 //            head (final norm, lm_head, the two argmax stages: the token lands in THIS
 //            device's control block).
 //
-// The hand-off (`link.mode`, spec 16 §2 decision 3):
-//   copy  out: two device-to-device copies into the landing buffer (peer writes by the copy
-//              path), then a barrier signalling `link.event`; in: a wait on `link.event`, then
-//              two local copies from the landing buffer into `resid` / `norm_sumsq`.
-//   peer  out: pp_send (pp_handoff.cl) as the last launch; in: pp_recv as the first.
+// The hand-off (spec 16 §2 decision 3): out, two device-to-device copies into the landing
+// buffer (peer writes by the copy path), then a barrier signalling `link.event`; in, a wait on
+// `link.event`, then two local copies from the landing buffer into `resid` / `norm_sumsq`.
 // The per-kind state indices are the stage's own (GDN slice g of `b.gdn_state` is the
 // model's GDN layer st.gdn_first + g), and `m.layer_small` / `m.moe` are indexed by
-// layer - st.first. The labels keep the model's layer numbers ("L32 ..."), the hand-off's
-// launches are "-- pp_send" / "-- pp_recv". No residual tap, no profiling events.
+// layer - st.first. The labels keep the model's layer numbers ("L32 ..."). No residual tap,
+// no profiling events.
 struct StageLink {
-  PpHandoff mode = PpHandoff::Copy;
   void* land_resid = nullptr;   // the landing buffer's rows (the next device's memory)
-  void* land_sumsq = nullptr;   // its norm sums; the stamp word follows them
-  void* flag = nullptr;         // peer: the flag word, a page of its own
+  void* land_sumsq = nullptr;   // its norm sums
   size_t resid_cap = 0, sumsq_cap = 0;   // what the landing regions hold
-  void* send_seq = nullptr;     // peer, out: pp_send's counter (this device's memory)
-  void* recv_state = nullptr;   // peer, in: pp_recv's state words (this device's memory)
-  uint32_t spin_limit = 0;      // peer, in: pp_recv's bound on flag loads
-  ze_event_handle_t event = nullptr;   // copy: the cross-device event (l0::SyncEvent)
+  ze_event_handle_t event = nullptr;   // the cross-device event (l0::SyncEvent)
 };
 CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                          const PpStage& st, const StageLink& link);
@@ -257,8 +250,7 @@ CapturedStep build_stage(l0::Context& ctx, const loader::LoadedModel& m, DecodeB
 // holds kM). The last stage then runs build_verify's tail on `mtp` (its device's MtpBuffers):
 // the rows' post-final-norm hidden into hh rows 1..M and the head's KV fill (its embed_gather
 // reads the device's replica of the embedding, spec 16d placement). `mtp` is null for the
-// other stage. Launches: pp_stage_verify_launches (+ pp_send / pp_recv under peer); the two
-// stages add up to verify_launches.
+// other stage. Launches: pp_stage_verify_launches; the two stages add up to verify_launches.
 //
 // build_stage_draft: build_draft on the last stage's device - the head at M = 1 over its own
 // buffers, the stage model's head weights, lm_head and embedding replica (no layer of the
@@ -277,8 +269,7 @@ CapturedStep build_stage_draft(l0::Context& ctx, const loader::LoadedModel& m, D
 // the hand-off of M rows, and the taps of THIS stage's sites (a tap whose site - the input fold of the tapped
 // layer's successor - lies in the stage) copied into `tv.taps`, the drafter's buffer on the last device: from device
 // 0 that is a device-to-device copy into the other card's memory, appended before the hand-off out and so ordered
-// before the cross-device event (the copy hand-off only - capture refuses peer). Launches: pp_stage_launches (the
-// taps are copies); the two stages' lists add up to build_verify_taps' decode_launches.
+// before the cross-device event. Launches: pp_stage_launches (the taps are copies); the two stages' lists add up to build_verify_taps' decode_launches.
 CapturedStep build_stage_verify_taps(l0::Context& ctx, const loader::LoadedModel& m, DecodeBuffers& b,
                                      const PpStage& st, const StageLink& link, const TapVerify& tv, uint32_t M,
                                      const CaptureOptions& opt = {});

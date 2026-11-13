@@ -22,11 +22,11 @@
 //                          pipeline, the remaining 1103 prefilled there = one card's 4103 in
 //                          two calls; `two -> one`: the pipeline's own 3000-id snapshot is the
 //                          one card's byte for byte, so restoring it on one card IS that run.
-//   configurations  --pp 2 with copy and peer at the auto split, and the extreme cuts
+//   configurations  --pp 2 at the auto split, and the extreme cuts
 //              (s = 5: one FA layer on device 0; s = 62: one FA layer on device 1).
 //
 // Also asserted: each device's prefill launches equal step_stage_launches' arithmetic (plus
-// the hand-off's kernels and the head), and the two Control blocks are one after every
+// the head), and the two Control blocks are one after every
 // prefill. argv: [1] the checkpoint, [2] the backend (l0 | l0-int8, default l0-int8), [3]
 // `int8` for the int8 lm_head. B70_KV_CACHE selects the KV form (pp_prefill_kv8_test).
 // Exits 77 (SKIP) with fewer than two GPUs or without peer access.
@@ -188,7 +188,6 @@ uint32_t g_stride = 2048;
 size_t hook_count() { return (kHookN - 1) / g_stride + 1; }
 
 struct Config {
-  runtime::PpHandoff handoff;
   uint32_t split;   // 0 = auto
   bool all;         // every case (else the short ones)
 };
@@ -273,20 +272,16 @@ int main(int argc, char** argv) {
   }
 
   const model::ModelDesc* desc = nullptr;
-  for (const Config cf : {Config{runtime::PpHandoff::Copy, 0, true}, Config{runtime::PpHandoff::Peer, 0, true},
-                          Config{runtime::PpHandoff::Copy, 5, false}, Config{runtime::PpHandoff::Peer, 62, false}}) {
+  for (const Config cf : {Config{0, true}, Config{5, false}, Config{62, false}}) {
     loader::LoadedModel full = loader::load(d0, checkpoint, kMaxLen, false, lm);
     desc = full.desc;
     const runtime::PpWeights w = runtime::pp_weights(full);
     const uint32_t split = cf.split ? cf.split : runtime::pp_auto_split(*desc, w, kMaxLen, kv);
-    runtime::PipelineOptions opt;
-    opt.handoff = cf.handoff;
-    runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, opt, kv);
+    runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, {}, kv);
     e.set_prefill_backend(backend);
     e.prepare_prefill();
-    const std::string what = std::string("--pp 2 ") + runtime::prefill_backend_name(backend) + ", " +
-                             runtime::pp_handoff_name(cf.handoff) + ", split " + std::to_string(split) +
-                             (cf.split ? "" : " (auto)");
+    const std::string what = std::string("--pp 2 ") + runtime::prefill_backend_name(backend) + ", split " +
+                             std::to_string(split) + (cf.split ? "" : " (auto)");
     for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
       std::printf("%s: %s\n", what.c_str(), e.memory_line(i).c_str());
 
@@ -354,7 +349,7 @@ int main(int argc, char** argv) {
     check_same(ref_restore, record(e), what + ", one card's 3000 -> two cards' 1103");
     // Two -> one (first configuration only: one more load of the whole model on device 0
     // needs the pipeline gone).
-    if (cf.handoff == runtime::PpHandoff::Copy && cf.split == 0) {
+    if (cf.split == 0) {
       e.reset();
       e.prefill(head(prompt, kRestoreAt));
       std::vector<uint8_t> s2(e.state_bytes()), k2(e.kv_bytes(kRestoreAt));

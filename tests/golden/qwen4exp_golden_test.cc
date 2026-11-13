@@ -56,7 +56,7 @@
 // (prefill writes none) and no PLE ids on the prompt rows (the decode rows after it check them). The 32 teacher-forced
 // steps after it are decode's, as before.
 //
-// argv: <checkpoint> <oracle dir> [int8] [inject] [pp2 | pp2:<split>] [copy | peer] [layers:<N>] [prefill[:<chunk>]]
+// argv: <checkpoint> <oracle dir> [int8] [inject] [pp2 | pp2:<split>] [layers:<N>] [prefill[:<chunk>]]
 // Exit 77 (SKIP) when the checkpoint, its PLE file or the golden set is absent.
 #include <algorithm>
 #include <cmath>
@@ -281,10 +281,9 @@ int main(int argc, char** argv) {
     else if (a.rfind("prefill:", 0) == 0) { prefill = true; chunk = uint32_t(std::strtoul(a.c_str() + 8, nullptr, 10)); }
     else if (a == "pp2") o.devices = 2;
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
-    else if (a == "copy" || a == "peer") o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
     else {
-      std::fprintf(stderr, "qwen4exp_golden_test: unknown flag %s (int8, inject, pp2[:split], copy, peer, layers:N, "
+      std::fprintf(stderr, "qwen4exp_golden_test: unknown flag %s (int8, inject, pp2[:split], layers:N, "
                    "prefill[:chunk])\n", a.c_str());
       return 2;
     }
@@ -321,8 +320,7 @@ int main(int argc, char** argv) {
               "tolerances: routing %.1e (B70_Q4_TIE_TOL), selection %.1e (B70_Q4_SEL_TOL)\n", snap.c_str(), d.layers,
               model::q4_form_name(d.forms.dense), o.int8_head ? "int8" : "bf16", rq::q4_attn_name(eng.attention()),
               eng.devices(),
-              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
-                                    runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
               eng.launches(), inject ? " (INJECTED selections)" : "", double(tie_tol), double(sel_tol));
   if (prefill) std::printf("the prompt through Qwen4ExpEngine::prefill (chunks of %u)\n", chunk ? chunk : rq::kPfC);
 

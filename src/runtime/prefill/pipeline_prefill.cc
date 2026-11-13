@@ -10,14 +10,13 @@
 //
 //   device 0  [Run0]  ids and Control j % 2, timestamp, step_stage(layers [0, s) + layer
 //             s's fold), timestamp, [hooked: GDN state + conv ring -> shadow j % 2], the
-//             hand-off out into landing slot j % 2 (copy: two device-to-device copies; peer:
-//             pp_send), signal ready j % 2, signal done0 j % 2.
+//             hand-off out into landing slot j % 2 (two device-to-device copies), signal
+//             ready j % 2, signal done0 j % 2.
 //   device 1  [Run1]  Control j % 2, [test: wait hold j % 2], wait ready j % 2, the
-//             hand-off in (copy: two copies from the slot; peer: pp_recv, which finds the flag
-//             already published - the event ordered it - and checks the stamp), timestamp,
-//             step_stage(layer s from its norm-finish, layers (s, L)), timestamp, [hooked:
-//             shadow j % 2], signal done1 j % 2.
-//   host      [WaitN] done N j % 2 with a bound; device 1 also reports pp_recv's status.
+//             hand-off in (two copies from the slot), timestamp, step_stage(layer s from its
+//             norm-finish, layers (s, L)), timestamp, [hooked: shadow j % 2], signal done1
+//             j % 2.
+//   host      [WaitN] done N j % 2 with a bound.
 //             [Hook] spec 7's hook from the shadows. [Head] step_head on device 1's list.
 //             [Drain] both lists idle, bounded.
 //
@@ -29,15 +28,6 @@
 // into hh row 0 - all in order on device 1's list, so chunk j + 1 reads chunk j's. With a
 // hook, that row is shadowed too (save_state's h_{end-1} at a mid-prompt block end). The head
 // reads the last row step_mtp_kv normalised, as on one card.
-//
-// **Why peer waits on the event too.** In 16b's decode the flag alone orders device 1 after
-// device 0: a step is ~18 ms, well inside pp_recv's bound of 2^24 flag loads. A prefill
-// stage is ~0.5 s at 4k and seconds near 256k, and pp_recv's bound counts loads, not time
-// (the per-load time is unmeasured - row 22 measures it). So under `peer` the rows still
-// move by pp_send's stores into device 1's memory (spec 16 §2 option (b)), and pp_recv
-// still checks the flag and the stamp with system-scope loads (the silent-hand-off check),
-// but device 1's list reaches pp_recv only after the ready event: the spin is then a check,
-// not a wait.
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -53,7 +43,6 @@
 #include <utility>
 #include <vector>
 
-#include "kernels/kernels.h"
 #include "l0/cmdlist.h"
 #include "l0/memory.h"
 #include "l0/sync_event.h"
@@ -82,11 +71,7 @@ uint64_t ns(uint32_t ms) { return uint64_t(ms) * 1000000ull; }
 double ms_since(Clock::time_point t0) {
   return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
-// pp_handoff.cl's state words (pp_recv), as pipeline_engine.cc reads them.
-constexpr uint32_t kStStatus = 1, kStFlag = 2, kStStamp = 3, kStWant = 4;
-constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
-
-// A failure the engine reports by name: a bound passed, or pp_recv saw a bad hand-off.
+// A failure the engine reports by name: a bound passed.
 struct PrefillFailure : std::runtime_error {
   using std::runtime_error::runtime_error;
 };
@@ -166,8 +151,8 @@ struct PfDevice {
   // Host USM, not Shared: the host writes chunk j + 1's Control and reads chunk j's stamps while
   // the device runs the other slot, and the B70 has no concurrent shared-USM access
   // (zeDeviceGetMemoryAccessProperties: sharedSingleDeviceAllocCapabilities lacks CONCURRENT) -
-  // under compute-runtime 26.35 such writes were lost (stamps never landing, pp_recv's state
-  // word stale: r23.p1's "flag at 3, expected 2"). The same for recv_state and mtp_ctl.
+  // under compute-runtime 26.35 such writes were lost (stamps never landing: r23.p1). The same
+  // for mtp_ctl.
   l0::Mem ctl;   // Control [kDepth]: chunk j's pos / n_active in j % 2
   l0::Mem ts;    // uint64 [kDepth][2]: chunk j's walk start / end, device timestamps
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> done;
@@ -185,15 +170,11 @@ struct PfDevice {
 
 struct PipelinePrefill final : PipelinePrefillBase {
   PipelinePrefill(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d, uint32_t max_len,
-                  PpHandoff m, uint32_t chunk_cap)
-      : mode(m),
-        cap(chunk_cap),
+                  uint32_t chunk_cap)
+      : cap(chunk_cap),
         lay(pp_prefill_link_layout(d, chunk_cap)),
         ids(d0, l0::MemKind::Host, size_t(kDepth) * chunk_cap * 4),
         landing(d1, l0::MemKind::Device, lay.total, kPpLandingAlign),
-        send_seq(d0, l0::MemKind::Device, size_t(kDepth) * kPpStateWords * 4),
-        recv_state(d1, l0::MemKind::Host, size_t(kDepth) * kPpStateWords * 4),
-        imm0(l0::CmdList::immediate(d0)),
         imm1(l0::CmdList::immediate(d1)) {
     dev[0] = std::make_unique<PfDevice>(d0, d, max_len, chunk_cap);
     dev[1] = std::make_unique<PfDevice>(d1, d, max_len, chunk_cap);
@@ -231,8 +212,6 @@ struct PipelinePrefill final : PipelinePrefillBase {
   }
   void zero() override {
     imm1.fill(landing.ptr(), 0u, landing.size());
-    imm0.fill(send_seq.ptr(), 0u, send_seq.size());
-    imm1.fill(recv_state.ptr(), 0u, recv_state.size());
     for (auto& e : ready) e->host_reset();
     for (auto& e : hold) e->host_reset();
     for (auto& d : dev)
@@ -246,7 +225,7 @@ struct PipelinePrefill final : PipelinePrefillBase {
                         (d == kPpDevices - 1 ? shadow_hh_bytes() + taps_bytes() : 0);
     c.int8 = p.int8 ? p.int8->bytes() : 0;
     c.decode_state = p.ctl.size() + p.ts.size() +
-                     (d == 0 ? send_seq.size() : landing.size() + recv_state.size()) + mtp_bytes(d);
+                     (d == 0 ? 0 : landing.size()) + mtp_bytes(d);
     return c;
   }
 
@@ -273,18 +252,13 @@ struct PipelinePrefill final : PipelinePrefillBase {
   }
 
   uint8_t* slot(uint32_t j) const { return landing.as<uint8_t>() + lay.slot(j); }
-  uint32_t* seq(uint32_t j) const { return send_seq.as<uint32_t>() + size_t(j % kDepth) * kPpStateWords; }
-  uint32_t* state(uint32_t j) const { return recv_state.as<uint32_t>() + size_t(j % kDepth) * kPpStateWords; }
   uint32_t* ids_of(uint32_t j) const { return ids.as<uint32_t>() + size_t(j % kDepth) * cap; }
 
-  PpHandoff mode;
   uint32_t cap;         // plan 5d: the chunk cap every per-chunk buffer here has
   PpPfLinkLayout lay;
   l0::Mem ids;          // Host [kDepth][cap] u32: device 0's embed input, by chunk parity
   l0::Mem landing;      // device 1, written only by device 0
-  l0::Mem send_seq;     // device 0: pp_send's counter per slot
-  l0::Mem recv_state;   // host USM (PfDevice::ctl's reason), device 1's: pp_recv's state words per slot
-  l0::CmdList imm0, imm1;
+  l0::CmdList imm1;
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> ready;   // device 0 -> 1, per slot
   std::array<std::unique_ptr<l0::SyncEvent>, kDepth> hold;    // the back-pressure test's hook
   bool in_flight = false;   // a prefill's lists may still hold work / waits
@@ -385,25 +359,13 @@ struct PipelineEngine::PrefillDriver {
       D.cx.timestamp(D.stamps(j) + 1);
       shadow(D, S, c, s);
       // drop_next_handoff() (P4's test): device 1 never hears of this chunk - no ready
-      // signal; under copy the rows are not copied either. Under peer pp_send still runs, so
-      // once the host releases device 1 its pp_recv finds the flag at once instead of spinning
-      // out its bound (16b's pp_fail_test owns that bound).
+      // signal, and the rows are not copied either.
       const bool dropped = int64_t(j) == drop_chunk;
-      if (!(dropped && p.mode == PpHandoff::Copy)) {
-        if (p.mode == PpHandoff::Copy) {
-          D.cx.copy(p.slot(j), D.scratch.resid.ptr(), rows_bytes);
-          D.cx.copy(p.slot(j) + L.sumsq_off, D.scratch.norm_sumsq.ptr(), L.sumsq_bytes);
-        } else {
-          // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words)
-          const uint32_t rw = uint32_t(rows_bytes / 4), sw = uint32_t(L.sumsq_bytes / 4);
-          D.cx.launch(D.kc(kernels::pp_handoff_variant(), "pp_send"), 1, 1, 1,
-                      {prefill::PtrArg(D.scratch.resid.ptr()), prefill::PtrArg(D.scratch.norm_sumsq.ptr()),
-                       prefill::PtrArg(p.slot(j)), prefill::PtrArg(p.slot(j) + L.sumsq_off),
-                       prefill::PtrArg(p.slot(j) + L.flag_off), prefill::PtrArg(p.seq(j)),
-                       prefill::arg_val(rw), prefill::arg_val(sw)});
-        }
+      if (!dropped) {
+        D.cx.copy(p.slot(j), D.scratch.resid.ptr(), rows_bytes);
+        D.cx.copy(p.slot(j) + L.sumsq_off, D.scratch.norm_sumsq.ptr(), L.sumsq_bytes);
+        D.cx.signal(p.ready[s]->handle());
       }
-      if (!dropped) D.cx.signal(p.ready[s]->handle());
       D.cx.signal(D.done[s]->handle());
       return;
     }
@@ -413,20 +375,8 @@ struct PipelineEngine::PrefillDriver {
       releaser->at(Clock::now() + std::chrono::milliseconds(e.opt_.prefill_hold_ms), p.hold[s].get());
     }
     D.cx.wait_event(p.ready[s]->handle());
-    if (p.mode == PpHandoff::Copy) {
-      D.cx.copy(D.scratch.resid.ptr(), p.slot(j), rows_bytes);
-      D.cx.copy(D.scratch.norm_sumsq.ptr(), p.slot(j) + L.sumsq_off, L.sumsq_bytes);
-    } else {
-      // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words,
-      // spin_limit): the flag is already published (the event), so this is the stamp check.
-      const uint32_t rw = uint32_t(rows_bytes / 4), sw = uint32_t(L.sumsq_bytes / 4);
-      const uint32_t spin = e.opt_.spin_limit;
-      D.cx.launch(D.kc(kernels::pp_handoff_variant(), "pp_recv"), 1, 1, 1,
-                  {prefill::PtrArg(p.slot(j)), prefill::PtrArg(p.slot(j) + L.sumsq_off),
-                   prefill::PtrArg(p.slot(j) + L.flag_off), prefill::PtrArg(p.state(j)),
-                   prefill::PtrArg(D.scratch.resid.ptr()), prefill::PtrArg(D.scratch.norm_sumsq.ptr()),
-                   prefill::arg_val(rw), prefill::arg_val(sw), prefill::arg_val(spin)});
-    }
+    D.cx.copy(D.scratch.resid.ptr(), p.slot(j), rows_bytes);
+    D.cx.copy(D.scratch.norm_sumsq.ptr(), p.slot(j) + L.sumsq_off, L.sumsq_bytes);
     D.cx.timestamp(D.stamps(j));
     const prefill::PrefillTaps tp1 = df_sites ? taps_of(c, j) : prefill::PrefillTaps{};
     prefill::step_stage(D.cx, D.kc, D.scratch, S.model, e.max_len_, ctl, c.pos, c.rows, nullptr,
@@ -486,22 +436,6 @@ struct PipelineEngine::PrefillDriver {
     const double busy = D.cx.timestamp_ms(t[0], t[1]);
     e.pf_stats_.busy_ms[d] += busy;
     e.pf_stats_.busy_max_ms[d] = std::max(e.pf_stats_.busy_max_ms[d], busy);
-    if (d == 1 && p.mode == PpHandoff::Peer) {
-      const uint32_t* w = p.state(j);
-      if (w[kStStatus] == kStatusTimeout)
-        throw PrefillFailure("chunk " + std::to_string(j) + ": pp_recv found slot " +
-                             std::to_string(s) + "'s flag at " + std::to_string(w[kStFlag]) +
-                             ", expected " + std::to_string(w[kStWant]) +
-                             " - device 0's rows never arrived although the event said so");
-      if (w[kStStatus] == kStatusStale)
-        throw PrefillFailure("chunk " + std::to_string(j) + ": slot " + std::to_string(s) +
-                             "'s flag reached " + std::to_string(w[kStWant]) +
-                             " but the stamp after the norm sums reads " +
-                             std::to_string(w[kStStamp]) +
-                             " - the rows did not arrive with the flag (a silent hand-off, spec 16 §2)");
-      if (w[kStStatus] != 0)
-        throw PrefillFailure("pp_recv reported status " + std::to_string(w[kStStatus]));
-    }
     // Spec 19d: both devices have finished chunk j (device 0's wait comes first in every order): its tapped rows into
     // the drafter's ring now - before its hook (save_state reads the ring) and before chunk j + 2 reuses the staging.
     if (d == 1 && df_sites) {
@@ -641,7 +575,7 @@ void PipelineEngine::prepare_prefill() {
           prefill::step_chunk_launches(d, b, C, kv_) + prefill::step_cut_extra_launches(d))
         throw std::logic_error("runtime::PipelineEngine::prepare_prefill: the two stages' launches "
                                "at C = " + std::to_string(C) + " do not add up to one card's");
-    pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, opt_.handoff, cap);
+    pf_ = std::make_unique<PipelinePrefill>(st(0).ctx, st(1).ctx, d, max_len_, cap);
   }
   if (mtp()) as_pf(*pf_).ensure_mtp(st(1).ctx, d);   // spec 16d
   if (kv_ == KvCache::Int8)
@@ -724,11 +658,10 @@ void PipelineEngine::prefill(const std::vector<uint32_t>& ids, uint32_t chunk) {
   pf_stats_ = PrefillStats{};
   pf_stats_.chunks = uint32_t(chunks.size());
   const std::array<size_t, kPpDevices> launches0{p.dev[0]->cx.launches(), p.dev[1]->cx.launches()};
-  const size_t peer = opt_.handoff == PpHandoff::Peer ? 1 : 0;   // pp_send / pp_recv per chunk
   for (const PpChunk& c : chunks)
     for (uint32_t i = 0; i < kPpDevices; ++i)
       pf_stats_.expected_launches[i] +=
-          prefill::step_stage_launches(*st(i).model.desc, backend, c.rows, stage(i), kv_, c.pos) + peer;
+          prefill::step_stage_launches(*st(i).model.desc, backend, c.rows, stage(i), kv_, c.pos);
   pf_stats_.expected_launches[1] += prefill::kStepHeadLaunches;
   if (mtp()) {   // spec 16d: step_mtp_kv per chunk; the head's two norm launches are skipped
     for (const PpChunk& c : chunks) pf_stats_.expected_launches[1] += prefill::step_mtp_kv_launches(c.pos, c.rows);

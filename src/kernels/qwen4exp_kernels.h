@@ -156,9 +156,8 @@ inline std::string attn_v2_q4_variant(unsigned M) { return attn_v2_variant(M, kA
 // Every binary an M = 1 decode list binds, for a dense arm (int4 / bf16), a shared-expert form, a head
 // form, an attention form (`eager`: B70_Q4_ATTN=eager binds q4_qsa_attn_eager for q4_qsa_attn + reduce) and
 // the PLE scale form. Two-card lists add nothing new (the materialising _Y_NN is in every list: the PLE
-// layer's prologue) but pp_handoff under --pipeline-handoff peer (16b's binary). Capture checks each exists
-// before appending a command; tests/kernels/qwen4exp_variant_names_test.cc holds the union to the CMake
-// block's list.
+// layer's prologue). Capture checks each exists before appending a command;
+// tests/kernels/qwen4exp_variant_names_test.cc holds the union to the CMake block's list.
 inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale = true) {
   const unsigned S = int4_dense ? 4u : 1u;
@@ -196,8 +195,7 @@ inline std::vector<std::string> decode_variants(bool int4_dense, bool shared_bf1
   return v;
 }
 // The descriptor's form (ours: int4 dense and shared; Intel's: bf16 both - 21b's q4_forms reads them all-or-
-// nothing). `two_cards` binds nothing new (the materialising _Y_NN is every list's: the PLE prologue); peer adds
-// 16b's pp_handoff, which is not this block's.
+// nothing). `two_cards` binds nothing new (the materialising _Y_NN is every list's: the PLE prologue).
 inline std::vector<std::string> decode_variants(const model::Qwen4ExpDesc& d, bool int8_head, bool eager, bool two_cards,
                                                 bool ple_bf16_scale = true) {
   (void)two_cards;
@@ -387,7 +385,7 @@ inline std::string lm_head_m_variant(unsigned M, bool int8, LinearKind k = Linea
 
 // Every binary a verify list at M binds (one device or the last of two: the union), for the dense arm, the shared
 // form, the head form, the attention form, the PLE scale form and the norm form. Two cards add nothing new (the
-// materialising _Y_NN is every list's) but pp_handoff under peer (16b's binary).
+// materialising _Y_NN is every list's).
 inline std::vector<std::string> verify_variants(unsigned M, bool int4_dense, bool shared_bf16, bool int8_head, bool eager,
                                                 bool ple_bf16_scale, bool single, LinearKind k) {
   const unsigned S = int4_dense ? 4u : 1u;

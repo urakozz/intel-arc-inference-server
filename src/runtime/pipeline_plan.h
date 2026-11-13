@@ -25,18 +25,12 @@
 // and GDN state, the decode scratch, the hand-off buffers.
 namespace runtime {
 
-// --- the hand-off (spec 16 §2 decision 3; 16a would have chosen, 16b builds both) --------
+// --- the hand-off (spec 16 §2 decision 3) -------------------------------------------------
 
-// copy: device 0's list ends with a device-to-device copy of the residual into device 1's
-//       landing buffer and a barrier signalling a cross-device event; device 1's list
-//       starts by waiting on it and copying the landing buffer into its own scratch.
-// peer: device 0's last kernel (pp_send) writes the residual into device 1's landing buffer
-//       and raises a flag with a system-scope release store; device 1's first kernel
-//       (pp_recv) spins on it with system-scope acquire loads, bounded.
-enum class PpHandoff { Copy, Peer };
-inline constexpr PpHandoff kDefaultPpHandoff = PpHandoff::Copy;
-const char* pp_handoff_name(PpHandoff h);
-bool parse_pp_handoff(const std::string& v, PpHandoff& out);   // "copy" | "peer"
+// Device 0's list ends with a device-to-device copy of the residual into device 1's landing
+// buffer and a barrier signalling a cross-device event; device 1's list starts by waiting on
+// it and copying the landing buffer into its own scratch. (The peer-write hand-off, pp_send /
+// pp_recv, measured no faster - 0.9963x, 2026-11-13 - and was removed.)
 
 // --- the stages --------------------------------------------------------------------------
 
@@ -61,9 +55,8 @@ PpStage pp_stage(const model::ModelDesc& d, uint32_t first, uint32_t last);
 void require_split(const model::ModelDesc& d, uint32_t split);
 std::array<PpStage, kPpDevices> pp_stages(const model::ModelDesc& d, uint32_t split);
 
-// The compute launches of a stage's decode list (the hand-off's own launches - pp_send /
-// pp_recv under `peer` - excluded): stage 0 is embed_gather, its layers, and layer s's
-// prep_res_fold (the cut: the fold needs no weight, so device 0 runs it and hands off the
+// The launches of a stage's decode list (the hand-off's copies are none): stage 0 is
+// embed_gather, its layers, and layer s's prep_res_fold (the cut: the fold needs no weight, so device 0 runs it and hands off the
 // folded residual and its sums - 10.9 KB on Qwen3.8 instead of 90 KB of split-K partials);
 // stage 1 is its layers less that fold, and the 5 head launches. The two add up to
 // runtime::decode_launches(d) (capture.cc asserts it at every stage capture).
@@ -96,19 +89,13 @@ PpWeights pp_weights(const model::ModelDesc& d, model::WeightKind lm_head);
 
 // The hand-off buffers (runtime::PipelineLink). One landing allocation on device 1 that only
 // device 0 writes: the residual rows (kM x hidden bf16), then on their own page the norm
-// sums (norm_sumsq's size) and the peer path's stamp word, then the flag on a page of its
-// own (spec 16 §2: the peer-written buffer is its own page-aligned allocation, nothing the
-// local device writes in it). Device 1 also keeps pp_recv's state words, device 0 its
-// send counter.
+// sums (norm_sumsq's size).
 inline constexpr size_t kPpPage = 4096;
 inline constexpr size_t kPpLandingAlign = 65536;
-inline constexpr size_t kPpStateWords = 16;   // pp_recv's state[] (pp_handoff.cl) and spare
 struct PpLandingLayout {
   size_t resid_bytes = 0;   // kM rows x hidden bf16 - the allocation; a step moves M rows
   size_t sumsq_bytes = 0;   // DecodeScratch::norm_sumsq's size
   size_t sumsq_off = 0;     // page-aligned, after the rows
-  size_t stamp_off = 0;     // the word right after the sums
-  size_t flag_off = 0;      // a page of its own
   size_t total = 0;
 };
 PpLandingLayout pp_landing_layout(const model::ModelDesc& d);
@@ -116,7 +103,7 @@ PpLandingLayout pp_landing_layout(const model::ModelDesc& d);
 // ModelDesc (Kolibri-1, its own engine) builds its hand-off with. The ModelDesc form above is
 // this one at (kM rows x hidden bf16, norm_sumsq's size), byte for byte.
 PpLandingLayout pp_landing_layout(size_t resid_bytes, size_t sumsq_bytes);
-// Device d's hand-off bytes: device 0 its send counter, device 1 the landing + state words.
+// Device d's hand-off bytes: device 0 none, device 1 the landing.
 size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device);
 
 // One device's plan, in memory_line()'s five components: model = its weights + the RoPE

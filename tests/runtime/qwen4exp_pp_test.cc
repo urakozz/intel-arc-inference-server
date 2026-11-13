@@ -1,19 +1,16 @@
 // Spec 21c Task 4: Qwen3.8-Flash-Next across two cards on spec 16b's pieces (box only; label checkpoint;qwen4exp;pp).
 //   qwen4exp_pp_test <synthetic checkpoint> <Intel's checkpoint> <ids> [prompt length]
 //
-//   (a) the synthetic checkpoint (4 layers): --pp 1 against --pp 2 --pipeline-split 2, under each hand-off (copy,
-//       peer): the prompt + 32 greedy tokens - the tokens and, after every phase, the logits, every route row,
+//   (a) the synthetic checkpoint (4 layers): --pp 1 against --pp 2 --pipeline-split 2: the prompt + 32 greedy tokens - the tokens and, after every phase, the logits, every route row,
 //       every QSA layer's selection and diagnostic, every layer's persistent bytes (KV, the compressed keys and tail
 //       rings, the GDN state and conv rings, the PLE rings) and the PLE ids BITWISE equal (plan 21c Review Focus 6:
 //       the cut is invisible - the materialised H crosses); both Control blocks equal after every phase; and
 //       --pipeline-split 1 (the cut AT the PLE layer: device 1's PLE prologue folds nothing) likewise
 //   (b) Intel's checkpoint at the planner's N for two cards (runtime::qwen4exp::layers_that_fit; 38 asked for
-//       59.0 GB and its split 20 did not fit device 0), split s against s + 1 (both fit), each hand-off: the same,
-//       bitwise (SKIPs alone without it)
+//       59.0 GB and its split 20 did not fit device 0), split s against s + 1 (both fit): the same, bitwise (SKIPs alone without it)
 //   (c) P4: drop_next_handoff() - the step throws within the bounds (never hangs), every later step throws until
 //       reset(), and after reset() the run is again bitwise (a)'s
-//   (d) the hand-off layout: pp_landing_layout(20480, 0) - the norm-sum region empty, the stamp right after H's
-//       page, the flag on a page of its own
+//   (d) the hand-off layout: pp_landing_layout(20480, 0) - the norm-sum region empty
 // The peer-access refusal (zeDeviceCanAccessPeer false -> refused naming it, Qwen4ExpEngine's constructor) cannot
 // be provoked on a P2P-capable pair; it is read, not run. Exit 77 (SKIP) with one GPU or without the synthetic
 // checkpoint.
@@ -87,12 +84,10 @@ int main(int argc, char** argv) {
     CHECK_EQ(l.sumsq_bytes, size_t(0));
     CHECK_EQ(l.sumsq_off % runtime::kPpPage, size_t(0));
     CHECK(l.sumsq_off >= l.resid_bytes);
-    CHECK_EQ(l.stamp_off, l.sumsq_off);
-    CHECK(l.flag_off % runtime::kPpPage == 0 && l.flag_off >= l.stamp_off + 4 && l.total == l.flag_off + runtime::kPpPage);
+    CHECK_EQ(l.total, l.sumsq_off);
     const runtime::PpLandingLayout q = rq::landing_layout(model::qwen4exp());
     CHECK(q.resid_bytes == l.resid_bytes && q.sumsq_bytes == 0 && q.total == l.total);
-    std::printf("(d) the landing layout: H %zu B, no norm sums, the stamp at %zu, the flag's page at %zu (%zu B)\n",
-                l.resid_bytes, l.stamp_off, l.flag_off, l.total);
+    std::printf("(d) the landing layout: H %zu B, no norm sums (%zu B)\n", l.resid_bytes, l.total);
   }
   if (argc < 4) {
     std::fprintf(stderr, "usage: %s <synthetic checkpoint> <Intel's checkpoint> <ids> [prompt length]\n", argv[0]);
@@ -122,43 +117,40 @@ int main(int argc, char** argv) {
   std::printf("(a) --pp 1: %zu launches, tokens", rig.eng->launches());
   for (uint32_t j = 0; j < 8; ++j) std::printf(" %u", one.tokens[j]);
   std::printf(" ...\n");
-  for (uint32_t split : {2u, 1u})
-    for (runtime::PpHandoff h : {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer}) {
-      o.devices = 2;
-      o.split = split;
-      o.handoff = h;
-      qwen4exp_rig::build(rig, synth, o);
-      CHECK_EQ(rig.eng->launches(), rq::decode_launches(rig.eng->model().desc, rig.eng->model().placement,
-                                                         rig.eng->attention(), h));
-      const Run two = run(*rig.eng, ids);
-      same(one, two, "--pp 2 split " + std::to_string(split) + " " + runtime::pp_handoff_name(h));
-      std::printf("(a) --pp 2 --pipeline-split %u --pipeline-handoff %s: %zu launches, bitwise --pp 1\n", split,
-                  runtime::pp_handoff_name(h), rig.eng->launches());
-      if (split == 2 && h == runtime::PpHandoff::Copy) {
-        // (c) P4: a lost hand-off throws within the bounds; every later step throws until reset()
-        rq::Qwen4ExpEngine& e = *rig.eng;
-        e.reset();
-        e.ingest({ids[0]});
-        e.drop_next_handoff();
-        bool threw = false;
-        try {
-          e.ingest({ids[1]});
-        } catch (const std::exception& ex) {
-          threw = true;
-          std::printf("(c) the lost hand-off: %s\n", ex.what());
-        }
-        CHECK(threw);
-        threw = false;
-        try {
-          e.ingest({ids[1]});
-        } catch (const std::exception&) {
-          threw = true;
-        }
-        CHECK(threw);
-        same(one, run(e, ids), "--pp 2 after a lost hand-off and reset()");
-        std::printf("(c) later steps refused until reset(); after it the run is bitwise again\n");
+  for (uint32_t split : {2u, 1u}) {
+    o.devices = 2;
+    o.split = split;
+    qwen4exp_rig::build(rig, synth, o);
+    CHECK_EQ(rig.eng->launches(), rq::decode_launches(rig.eng->model().desc, rig.eng->model().placement,
+                                                       rig.eng->attention()));
+    const Run two = run(*rig.eng, ids);
+    same(one, two, "--pp 2 split " + std::to_string(split));
+    std::printf("(a) --pp 2 --pipeline-split %u: %zu launches, bitwise --pp 1\n", split, rig.eng->launches());
+    if (split == 2) {
+      // (c) P4: a lost hand-off throws within the bounds; every later step throws until reset()
+      rq::Qwen4ExpEngine& e = *rig.eng;
+      e.reset();
+      e.ingest({ids[0]});
+      e.drop_next_handoff();
+      bool threw = false;
+      try {
+        e.ingest({ids[1]});
+      } catch (const std::exception& ex) {
+        threw = true;
+        std::printf("(c) the lost hand-off: %s\n", ex.what());
       }
+      CHECK(threw);
+      threw = false;
+      try {
+        e.ingest({ids[1]});
+      } catch (const std::exception&) {
+        threw = true;
+      }
+      CHECK(threw);
+      same(one, run(e, ids), "--pp 2 after a lost hand-off and reset()");
+      std::printf("(c) later steps refused until reset(); after it the run is bitwise again\n");
     }
+  }
 
   // (b) Intel's checkpoint at the planner's N for two cards, split s against s + 1
   const std::string intel = qwen4exp_rig::qwen4exp_snapshot(argv[2], &why);
@@ -193,20 +185,17 @@ int main(int argc, char** argv) {
     std::printf("(b) %s (the planner's N for two cards at max_len %u), splits %u and %u\n", tag.c_str(), o.max_len,
                 lo, lo + 1);
     std::vector<Run> runs;
-    for (uint32_t split : {lo, lo + 1})
-      for (runtime::PpHandoff h : {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer}) {
-        o.split = split;
-        o.handoff = h;
-        qwen4exp_rig::build(rig, intel, o);
-        runs.push_back(run(*rig.eng, ids));
-        std::printf("(b) %s split %u %s: %zu launches\n", tag.c_str(), split, runtime::pp_handoff_name(h),
-                    rig.eng->launches());
-      }
+    for (uint32_t split : {lo, lo + 1}) {
+      o.split = split;
+      qwen4exp_rig::build(rig, intel, o);
+      runs.push_back(run(*rig.eng, ids));
+      std::printf("(b) %s split %u: %zu launches\n", tag.c_str(), split, rig.eng->launches());
+    }
     for (size_t i = 1; i < runs.size(); ++i) {
       // the persistent bytes live on different cards per split but read back in layer order: bitwise
       same(runs[0], runs[i], tag + " run " + std::to_string(i));
     }
-    std::printf("(b) splits %u / %u under copy and peer bitwise\n", lo, lo + 1);
+    std::printf("(b) splits %u / %u bitwise\n", lo, lo + 1);
   }
   std::puts("qwen4exp_pp_test OK");
   return 0;

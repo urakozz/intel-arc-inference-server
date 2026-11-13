@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
       CHECK_EQ(got.kv, pl[dev].kv);
       CHECK_EQ(got.decode_state, pl[dev].decode_state);
     }
-    CHECK_EQ(e.launches(), runtime::kolibri::decode_launches(d, e.model().placement, e.attention(), e.handoff()));
+    CHECK_EQ(e.launches(), runtime::kolibri::decode_launches(d, e.model().placement, e.attention()));
     std::printf("plan == allocation; %zu launches a token (%s attention); %s\n", e.launches(),
                 runtime::kolibri::kol_attn_name(e.attention()), e.memory_line().c_str());
   }

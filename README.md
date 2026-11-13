@@ -164,7 +164,7 @@ Developer flags (`b70-decode`):
 | `--tg N` | `256` | ids to generate in `--bench` |
 | `--prefill-chunk C` | `2048` | positions per prefill chunk, at most 4096 |
 | `--profile`, `--steps N`, `--repeats R` | -, `32`, `1` | per-launch timing of the decode step |
-| `--pipeline-split auto\|N`, `--pipeline-handoff copy\|peer` | `auto`, `copy` | with `pp`: where the layers are cut, and how the hidden state crosses |
+| `--pipeline-split auto\|N` | `auto` | with `pp`: where the layers are cut |
 | `--draft-vocab off\|32k\|64k\|128k`, `--draft-vocab-ids FILE` | `off` | MTP guesses from a smaller vocabulary (also on `b70-serve`) |
 
 Environment variables (test switches, tool settings, the Hugging Face cache): [docs/environment-variables.md](docs/environment-variables.md).

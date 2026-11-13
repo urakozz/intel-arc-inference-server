@@ -15,7 +15,7 @@
 //                      weights at int4, one card 32.5 GB) or 1 - accepted only when the planner says the
 //                      model fits one card (a synthetic checkpoint, --layers N), else refused before the
 //                      device naming the bytes and --parallel pp
-//   --pipeline-split auto|N, --pipeline-handoff copy|peer   spec 16b's switches and parsers; auto is
+//   --pipeline-split auto|N   spec 16b's switch and parser; auto is
 //                      runtime::pp_balance over Kolibri's per-layer bytes at the session's max_len
 //   --layers N         development mode (spec 20 §4): load only layers [0, N) of the checkpoint
 //   --lm-head bf16|int8, --max-len N|auto (under the trained 262144; above it is spec 20 decision 3)
@@ -118,8 +118,6 @@ inline void check_args(const DecodeArgs& a, const model::Kolibri1Desc& d) {
   if (devs == 1) {
     if (a.pipe.have_split)
       throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-    if (a.pipe.have_handoff)
-      throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     if (!runtime::kolibri::fits_one_card(d, int8, a.card_bytes, a.reserve, a.prefills())) {
       const size_t w = loader::kol_device_weight_bytes(d, model::KolPlacement::one(d), 0, int8);
       char msg[400];
@@ -193,7 +191,7 @@ inline std::pair<model::KolPlacement, uint32_t> settle(const model::Kolibri1Desc
       throw std::runtime_error("--max-len " + std::to_string(len) + " exceeds Kolibri-1's trained context " +
                                std::to_string(cap) + " - a longer context is spec 20 decision 3");
     if (devs == 2 && a.pipe.split_auto)
-      p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, a.pipe.handoff, at, pf).split);
+      p = model::KolPlacement::two(d, rk::pp_split(d, len, int8, at, pf).split);
     const std::vector<rk::DevicePlan> pl = rk::plan(d, p, len, int8, false, at, pf);
     for (uint32_t i = 0; i < p.devices; ++i)
       if (pl[i].total() + a.reserve > dev[i])
@@ -243,7 +241,7 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
-                             "both hand-offs write it (docs/10-the-box.md)");
+                             "the hand-off writes it (docs/10-the-box.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = settle(pre, a, dev);
   const model::KolPlacement placement = pl.first;
   const uint32_t max_len = pl.second;
@@ -258,12 +256,10 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the head reads layer %u's "
                  "residual)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
-  opt.handoff = a.pipe.handoff;
   runtime::kolibri::KolibriEngine eng(ctx, std::move(model), max_len, /*debug_tap=*/false, opt);
   std::fprintf(stderr, "engine: Kolibri-1, %u device(s)%s, %zu launches a token (%s attention, B70_KOLIBRI_ATTN), "
                "max_len %u\n", eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split()) + ", hand-off " +
-                            runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
                eng.launches(), runtime::kolibri::kol_attn_name(eng.attention()), eng.max_len());
   // Spec 20d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check)
   // happens here, outside the timed window, which is then the whole prefill() call: first launch to the
@@ -314,8 +310,7 @@ int run_decode(const DecodeArgs& a) {
   std::printf("| b70-decode %s kolibri%s%s%s | %u | %u | %.2f | %.2f |\n", sha,
               a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "",
               eng.model().desc.attn == model::KolAttnForm::Bf16 ? " bf16-attn" : "",
-              devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
-                           std::to_string(eng.split())).c_str() : "",
+              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
   // Spec 20d: the pp row, a second line as the K2 / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)
