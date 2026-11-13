@@ -25,7 +25,7 @@ inline const std::vector<kernels::SmallMTuning>& lever_rows() {
       {6144, 5120, 4, 0, false, true, true, true},       // out_proj / o_proj  production + 256 GRF
       {6144, 5120, 4, 0, false, true, false, false},     // out_proj / o_proj  production without the 2D read
       {5120, 34816, 8, 0, true, true, true, false},      // gate||up  production (2x8) + 256 GRF
-      {5120, 34816, 8, 0, true, true, false, true},      // gate||up  production (2x8) + the 2D read
+      {5120, 34816, 8, 0, true, true, false, false},     // gate||up  2x8 without the 2D read (production before 19 v3d)
   };
   return v;
 }

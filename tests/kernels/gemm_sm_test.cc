@@ -10,6 +10,7 @@
 //       Columns: all of them up to N = 65536; above, one column of every 64-column work-group (a different
 //       lane each) plus the first and last 512 - every work-group is checked, not three windows (28a's
 //       deferred review item).
+//   (spec 19 v3d) a row with the 2D block read is bitwise its plain-read twin at every M, where that twin is built.
 //   N3  property R: every row of every M bitwise equal (every slice) to the same row at the largest built M;
 //       then `trials` trials (default 1000 a row) of a probe row at a random index among fresh random rows,
 //       at a random built M - row bitwise equal to its reference. The output buffer is filled with a NaN
@@ -290,6 +291,18 @@ int test_row(Dev& d, const kernels::SmallMTuning& t, uint32_t trials, uint32_t s
         std::printf("FAIL %s M=%u: N2 vs %s max ratio %.4g (%zu over)\n", name0.c_str(), M, gv.c_str(), eg.max_ratio,
                     eg.over);
         ++fails;
+      }
+    }
+    // Spec 19 v3d: the 2D block read is a load path only - bitwise its plain-read twin where that is built
+    kernels::SmallMTuning plain = t;
+    plain.blk2d = false;
+    if (t.blk2d && exists(kernels::gemm_sm_variant(M, plain))) {
+      Bound b2 = bind_gemm_sm(d, plain, M);
+      if (!bitwise(p, run(d, bf, b2, xm, t.N))) {
+        std::printf("FAIL %s M=%u: not bitwise %s\n", name0.c_str(), M, kernels::gemm_sm_variant(M, plain).c_str());
+        ++fails;
+      } else if (M == Mmax) {
+        std::printf("  %s: bitwise %s at every M\n", name0.c_str(), kernels::gemm_sm_variant(M, plain).c_str());
       }
     }
     // R, part 1: each row equals the same row at Mmax, every slice
