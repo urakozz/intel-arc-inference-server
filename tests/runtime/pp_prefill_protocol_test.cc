@@ -11,9 +11,7 @@
 // Control check and the reference states catch it (shown below with an order that drops the
 // waits: it corrupts, and the test sees it).
 //
-// What it proves: the rows of every chunk reach device 1 intact and in order, in both
-// hand-offs (copy: plain words; peer: runtime/pipeline_protocol.h's send / recv per slot, the
-// sequence numbers advancing per slot over 101 chunks); device 0 never starts chunk j before
+// What it proves: the rows of every chunk reach device 1 intact and in order; device 0 never starts chunk j before
 // device 1 has finished chunk j - 2 (the back-pressure rule), measured with a slowed device
 // 1; spec 7's hooks run in order, after both devices finished their chunk, read the shadows
 // while the next chunk runs, and a throwing hook leaves the state at its end; a lost hand-off
@@ -40,7 +38,6 @@
 
 #include "check.h"
 #include "runtime/pipeline_prefill_plan.h"
-#include "runtime/pipeline_protocol.h"
 
 #if defined(__has_feature)
 #if __has_feature(thread_sanitizer)
@@ -54,7 +51,6 @@
 namespace {
 using runtime::PpChunk;
 using Clock = std::chrono::steady_clock;
-namespace proto = runtime::pp_protocol;
 
 constexpr uint32_t kWords = 64;   // a chunk's "rows": kWords words per chunk
 constexpr uint32_t kSums = 8;
@@ -166,7 +162,6 @@ Reference reference(const std::vector<PpChunk>& chunks, const std::vector<uint32
 }
 
 struct Options {
-  bool peer = false;
   int jitter_us = 0;            // random per-chunk work on each device
   int slow1_us = 0;             // device 1's extra work per chunk (back-pressure)
   int64_t drop = -1;            // device 0 never hands off this chunk
@@ -181,7 +176,6 @@ class Driver {
          const Options& o)
       : ids_(ids), ref_(ref), o_(o) {
     (void)chunks;
-    for (auto& l : land_) l = std::make_unique<proto::Landing>(kWords, kSums);
   }
 
   // Run0 / Run1. Host-side writes go to resources of parity j % 2 only.
@@ -246,7 +240,6 @@ class Driver {
   uint32_t max_ahead() const { return max_ahead_.load(); }
   const std::vector<uint32_t>& hooks() const { return hooks_; }
   double waited1_ms() const { return waited1_ms_; }
-  uint32_t seq(uint32_t slot) const { return send_seq_[slot]; }
 
  private:
   bool drain_within() { return dev0_.idle_within(o_.bound) && dev1_.idle_within(o_.bound); }
@@ -272,12 +265,8 @@ class Driver {
     const std::vector<uint32_t> rows = rows_of(live_[0], j);
     if (c.hook) shadow_[0][p] = live_[0];
     if (int64_t(j) != o_.drop) {
-      if (o_.peer) {
-        proto::send(rows.data(), rows.data() + kWords, *land_[p], send_seq_[p]);
-      } else {
-        slot_[p].stamp = j;
-        std::copy(rows.begin(), rows.end(), slot_[p].words.begin());
-      }
+      slot_[p].stamp = j;
+      std::copy(rows.begin(), rows.end(), slot_[p].words.begin());
       ready_[p].signal();
     }
     finished0_.fetch_add(1);
@@ -288,13 +277,8 @@ class Driver {
     work(o_.slow1_us);
     ready_[p].wait();   // a list's wait: no bound - the host's wait is the bound
     std::vector<uint32_t> rows(kWords + kSums);
-    if (o_.peer) {
-      const uint32_t st = proto::recv(*land_[p], recv_state_[p], rows.data(), rows.data() + kWords, 1u << 20);
-      if (st != proto::kOk) ++corrupt_;
-    } else {
-      if (slot_[p].stamp != j) ++corrupt_;
-      std::copy(slot_[p].words.begin(), slot_[p].words.end(), rows.begin());
-    }
+    if (slot_[p].stamp != j) ++corrupt_;
+    std::copy(slot_[p].words.begin(), slot_[p].words.end(), rows.begin());
     if (int64_t(j) != o_.drop && rows != ref_.rows[j]) ++corrupt_;
     if (ctl_[1][p].pos != c.pos || ctl_[1][p].rows != c.rows) ++corrupt_;
     work(jitter());
@@ -314,9 +298,6 @@ class Driver {
     uint32_t stamp = ~0u;
     std::array<uint32_t, kWords + kSums> words{};
   } slot_[runtime::kPpPfDepth];
-  std::unique_ptr<proto::Landing> land_[runtime::kPpPfDepth];
-  uint32_t send_seq_[runtime::kPpPfDepth] = {0, 0};                 // device 0's, per slot
-  uint32_t recv_state_[runtime::kPpPfDepth][proto::kStateWords] = {};   // device 1's, per slot
   uint64_t shadow_[2][runtime::kPpPfDepth] = {};
   uint64_t live_[2] = {1, 2};   // each device's "persistent state"
   uint32_t token_ = 0;
@@ -373,11 +354,8 @@ Run run_case(const char* what, size_t n_ids, uint32_t chunk, bool hooked, const 
 int main() {
   Options base;
   base.jitter_us = 300;
-  // Copy and peer over many chunks; the peer path's per-slot sequence numbers advance 51 / 50.
+  // Many chunks.
   run_case("copy, jitter", 64 * 37 + 5, 64, false, base);
-  Options peer = base;
-  peer.peer = true;
-  run_case("peer, jitter (per-slot sequence numbers)", 64 * 101, 64, false, peer);
   // One chunk, two chunks: the schedule's edges.
   run_case("copy, one chunk", 10, 64, false, base);
   run_case("copy, two chunks", 100, 64, false, base);
@@ -387,9 +365,6 @@ int main() {
   const Run s = run_case("copy, device 1 slowed 3 ms a chunk", 64 * 24, 64, false, slow);
   CHECK(s.waited1_ms > 24 * 2.0);   // the host really waited on device 1
   CHECK_EQ(s.max_ahead, 2u);        // and device 0 really ran ahead by the two slots
-  Options slow_peer = slow;
-  slow_peer.peer = true;
-  run_case("peer, device 1 slowed", 64 * 24, 64, false, slow_peer);
   // Spec 7: a hook at every block end (block 64 here, chunk 64: every chunk), in order, each
   // from the shadows while the next chunk runs.
   const Run h = run_case("copy, hooks at every block end", 64 * 20 + 7, 64, true, base);
@@ -419,12 +394,11 @@ int main() {
 
   // A lost hand-off: device 0 never hands chunk 3 over. Device 1 waits without a bound (a
   // list's wait); the host's wait gives up within its bound, releases device 1, and throws.
-  for (bool peer_mode : {false, true}) {
+  {
     const std::vector<uint32_t> ids = prompt(64 * 10);
     const std::vector<PpChunk> chunks = runtime::pp_prefill_chunks(0, ids.size(), 64, false, 64);
     const Reference ref = reference(chunks, ids);
     Options o = base;
-    o.peer = peer_mode;
     o.drop = 3;
     o.bound = std::chrono::milliseconds(300);
     const Clock::time_point t0 = Clock::now();
@@ -441,9 +415,8 @@ int main() {
     CHECK(err.find("device 1's chunk 3") != std::string::npos);
     CHECK(s < 3.0);
     // A fresh run (the engine's reset()) is whole again.
-    run_case(peer_mode ? "peer, after a lost hand-off" : "copy, after a lost hand-off", ids.size(),
-             64, false, base);
-    std::printf("%s: a lost hand-off threw after %.2f s: %s\n", peer_mode ? "peer" : "copy", s, err.c_str());
+    run_case("copy, after a lost hand-off", ids.size(), 64, false, base);
+    std::printf("copy: a lost hand-off threw after %.2f s: %s\n", s, err.c_str());
   }
 
 #ifndef B70_TSAN

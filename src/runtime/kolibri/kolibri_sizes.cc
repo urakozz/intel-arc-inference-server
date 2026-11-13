@@ -77,23 +77,21 @@ PpLandingLayout landing_layout(const model::Kolibri1Desc& d) {
   return pp_landing_layout(size_t(kM) * d.hidden * 2, size_t(kNormG) * kM * 4);
 }
 size_t link_bytes(const model::Kolibri1Desc& d, uint32_t dev) {
-  return dev == 0 ? kPpStateWords * 4 : landing_layout(d).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : landing_layout(d).total;
 }
 
-size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, KolAttn a,
-                       PpHandoff h) {
+size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, KolAttn a) {
   (void)d;
   const size_t per_layer = a == KolAttn::Eager ? 17 : 15;
   size_t n = size_t(p.count(dev)) * per_layer;
   if (dev == 0) n += 2;                     // embed_gather, prep_res_fold SP0
   if (dev + 1 == p.devices) n += 4;         // the head
-  if (p.devices > 1 && h == PpHandoff::Peer) n += 1;   // pp_send (device 0) / pp_recv (device 1)
   return n;
 }
 
-size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a, PpHandoff h) {
+size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a) {
   size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, h);
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a);
   return n;
 }
 
@@ -151,7 +149,7 @@ PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d) {
   return pp_landing_layout(size_t(kPfC) * d.hidden * 2, size_t(kNormG) * kPfC * 4);
 }
 size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev) {
-  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : pf_landing_layout(d).total;
 }
 
 size_t prefill_device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev) {
@@ -190,9 +188,7 @@ size_t prefill_state(const model::Kolibri1Desc& d, uint32_t devices, uint32_t de
 }
 }  // namespace
 
-PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h, KolAttn a,
-                   bool prefill) {
-  (void)h;   // both hand-offs allocate the same buffers (PipelineLink: the event is not device memory)
+PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, KolAttn a, bool prefill) {
   if (d.layers < 2) throw std::invalid_argument(d.name + ": " + std::to_string(d.layers) + " layer(s), nothing to split");
   const size_t rope = d.rope_table_bytes(max_len), state = fixed_state(d, max_len, a);
   const size_t dev0 = loader::kol_embed_bytes(d) + rope + state + link_bytes(d, 0) + prefill_state(d, 2, 0, prefill);
@@ -260,7 +256,7 @@ PpChoice pp_split_and_len(const model::Kolibri1Desc& d, bool int8_head,
   }
   if (best_len == 0) return {};
   // At that length, the split by bytes - 16b's rule - among the splits that reach it.
-  const PpBalance b = pp_split(d, best_len, int8_head, kDefaultPpHandoff, kolibri_attn(), prefill);
+  const PpBalance b = pp_split(d, best_len, int8_head, kolibri_attn(), prefill);
   if (max_len_that_fits(d, model::KolPlacement::two(d, b.split), int8_head, device_bytes, reserve, cap, prefill) ==
       best_len)
     return {b.split, best_len};

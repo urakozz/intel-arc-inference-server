@@ -1418,10 +1418,8 @@ class Capture {
       layer_ = kBoundary;
       handoff_out();
     }
-    // The compute launches are the single-card list's, cut in two (pp_stage_launches); the
-    // peer hand-off adds its one kernel per side.
-    const size_t want = (verify ? pp_stage_verify_launches(d_, st) : pp_stage_launches(d_, st)) +
-                        (link_->mode == PpHandoff::Peer ? 1 : 0);
+    // The launches are the single-card list's, cut in two (pp_stage_launches).
+    const size_t want = verify ? pp_stage_verify_launches(d_, st) : pp_stage_launches(d_, st);
     require(step_.kernel_count == want,
             "the stage list has " + std::to_string(step_.kernel_count) + " launches, not " +
                 std::to_string(want));
@@ -1454,59 +1452,22 @@ class Capture {
                 link_->sumsq_cap == handoff_sumsq_bytes(),
             "the landing buffer does not hold " + std::to_string(handoff_resid_bytes()) +
                 " B of rows and exactly " + std::to_string(handoff_sumsq_bytes()) +
-                " B of norm sums (pp_send stamps the word after them)");
-    require(handoff_resid_bytes() % 4 == 0 && handoff_sumsq_bytes() % 4 == 0,
-            "the hand-off moves whole 32-bit words");
-    if (link_->mode == PpHandoff::Copy)
-      require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
+                " B of norm sums");
+    require(link_->event != nullptr, "the hand-off needs its cross-device event");
   }
 
   void handoff_out() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.copy(link_->land_resid, b_.resid.ptr(), handoff_resid_bytes());
-      step_.list.copy(link_->land_sumsq, b_.norm_sumsq.ptr(), handoff_sumsq_bytes());
-      step_.list.barrier_signal(link_->event);
-      return;
-    }
-    require(link_->flag && link_->send_seq, "the peer hand-off needs its flag and counter");
-    // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words) -
-    // pp_handoff.cl, grid (1), WG 256.
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
-    k.arg_ptr(0, b_.resid.ptr());
-    k.arg_ptr(1, b_.norm_sumsq.ptr());
-    k.arg_ptr(2, link_->land_resid);
-    k.arg_ptr(3, link_->land_sumsq);
-    k.arg_ptr(4, link_->flag);
-    k.arg_ptr(5, link_->send_seq);
-    k.arg<uint32_t>(6, static_cast<uint32_t>(handoff_resid_bytes() / 4));
-    k.arg<uint32_t>(7, static_cast<uint32_t>(handoff_sumsq_bytes() / 4));
-    launch(k, 1);
+    step_.list.copy(link_->land_resid, b_.resid.ptr(), handoff_resid_bytes());
+    step_.list.copy(link_->land_sumsq, b_.norm_sumsq.ptr(), handoff_sumsq_bytes());
+    step_.list.barrier_signal(link_->event);
   }
 
   void handoff_in() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.wait_event(link_->event);
-      step_.list.copy(b_.resid.ptr(), link_->land_resid, handoff_resid_bytes());
-      step_.list.copy(b_.norm_sumsq.ptr(), link_->land_sumsq, handoff_sumsq_bytes());
-      return;
-    }
-    require(link_->flag && link_->recv_state && link_->spin_limit > 0,
-            "the peer hand-off needs its flag, its state words and a spin bound");
-    // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words,
-    // spin_limit) - pp_handoff.cl, grid (1), WG 256.
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_recv", kernels::kPpHandoffWg);
-    k.arg_ptr(0, link_->land_resid);
-    k.arg_ptr(1, link_->land_sumsq);
-    k.arg_ptr(2, link_->flag);
-    k.arg_ptr(3, link_->recv_state);
-    k.arg_ptr(4, b_.resid.ptr());
-    k.arg_ptr(5, b_.norm_sumsq.ptr());
-    k.arg<uint32_t>(6, static_cast<uint32_t>(handoff_resid_bytes() / 4));
-    k.arg<uint32_t>(7, static_cast<uint32_t>(handoff_sumsq_bytes() / 4));
-    k.arg<uint32_t>(8, link_->spin_limit);
-    launch(k, 1);
+    step_.list.wait_event(link_->event);
+    step_.list.copy(b_.resid.ptr(), link_->land_resid, handoff_resid_bytes());
+    step_.list.copy(b_.norm_sumsq.ptr(), link_->land_sumsq, handoff_sumsq_bytes());
   }
 
   // Spec 16d: what a stage's verify list needs - its verify slots, sized for its own GDN
@@ -1568,13 +1529,10 @@ class Capture {
 
   // Spec 19d: a stage's tap verify list - its slots (pp_gdn_spec_bytes(d, stage gdn, 8): the whole model's slot
   // stride, the stage's slice), the taps (every row's taps of THIS stage's sites, into the drafter's buffer on the
-  // last device - a device-0 stage copies them across, ordered before its hand-off), the copy hand-off only (the
-  // peer hand-off's flag does not order the copy engine's earlier writes into the other device).
+  // last device - a device-0 stage copies them across, ordered before its hand-off).
   void check_stage_taps() {
     require(tv_ != nullptr && tv_->gdn_spec != nullptr && tv_->taps != nullptr,
             "a stage's tap verify list needs its GDN slots and the drafter's tap buffer");
-    require(link_->mode == PpHandoff::Copy,
-            "a stage's tap verify list runs on the copy hand-off only (--pipeline-handoff copy)");
     require(tv_->slots == TapVerifyDims::kSlots && kCapM <= tv_->slots,
             "a stage's tap verify list binds gdn_step_slots_M<M>_N" + std::to_string(TapVerifyDims::kSlots));
     require(tv_->gdn_spec->size() == pp_gdn_spec_bytes(d_, n_gdn_, tv_->slots),

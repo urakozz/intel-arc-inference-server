@@ -12,7 +12,7 @@
 //   the tokenizer          the snapshot's tokenizer.json, held to the original's (Qwen/Qwen3.8-Flash-Next): 21a found the
 //                          original's split regex adds \p{M}, and Intel's checkpoint ships Qwen3.8's file - a snapshot
 //                          tokenizer.json without \p{M} in its pre-tokenizer is refused (check_tokenizer)
-//   --parallel auto|1|pp, --pipeline-split auto|N, --pipeline-handoff copy|peer, --max-len N|auto   as b70-decode
+//   --parallel auto|1|pp, --pipeline-split auto|N, --max-len N|auto   as b70-decode
 //   the lm_head            int8 (spec 9), as every served model
 //   --spec mtp|lookup      the MTP head (spec 21e: draft / verify / commit through the adapter, a fixed K = --spec-max
 //                          (1..3, default 3); lookup's drafts through the same verify lists); the planner carries the
@@ -22,7 +22,7 @@
 //                          compressed-key blocks; with the head its tail, R, KV and keys)
 // Refused before the device, each by name (the adaptive K waits for spec 22's full-model cost numbers: cli::resolve_spec
 // gives this family a fixed K), --draft-vocab (spec 8 §11's compact head is not built for this head), --kv-cache int8 (decision 8),
-// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split / --pipeline-handoff on one card, the whole
+// --prefill-backend l0-int8 (b70-decode's message), --pipeline-split on one card, the whole
 // model without --layers.
 #include <cstdint>
 #include <fstream>

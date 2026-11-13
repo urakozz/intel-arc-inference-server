@@ -7,7 +7,7 @@
 
 #include "model/kolibri1.h"
 #include "runtime/memory_plan.h"
-#include "runtime/pipeline_plan.h"   // PpBalance, PpChoice, PpHandoff, kPpDevices, the landing layout
+#include "runtime/pipeline_plan.h"   // PpBalance, PpChoice, kPpDevices, the landing layout
 
 // Spec 20c: Kolibri-1's runtime allocations as device-free arithmetic, the planner over them
 // (`--max-len auto`, spec 6 §10) and the split by bytes (`--pipeline-split auto`, spec 16b's
@@ -96,12 +96,11 @@ struct DebugTap {
 };
 
 // The hand-off (spec 16b's buffers through the descriptor-free layout): the residual row and the
-// 20 norm sums cross. Device 0: pp_send's counter; device 1: the landing allocation + pp_recv's state.
+// 20 norm sums cross. Device 0: nothing; device 1: the landing allocation.
 PpLandingLayout landing_layout(const model::Kolibri1Desc& d);
 size_t link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
 
-// The decode list's launches on one device (the hand-off's copies and barriers excluded; peer's
-// pp_send / pp_recv included), and their sum:
+// The decode list's launches on one device (the hand-off's copies and barriers excluded), and their sum:
 //   device 0  embed_gather + prep_res_fold SP0, then its layers
 //   a layer   15 (flash) / 17 (eager): kol_norm_finish, q||k||v GEMV, kol_attn_prep, decode + reduce
 //             (eager: score, softmax, P·V, reduce), o_proj GEMV, prep_res_fold _Z (a, Σa²), kol_post_add
@@ -109,11 +108,9 @@ size_t link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
 //             prep_res_fold SP0 (Σmo²), kol_post_add (post_ffn_norm)
 //   last      kol_norm_finish (model.norm), lm_head, the two argmax stages
 // 756 / 856 at 50 layers on one card AND on two (the cut is 16b's: device 0 ends with layer s-1's
-// kol_post_add, which already wrote resid and the sums layer s's norm reads); peer adds pp_send and
-// pp_recv: 758 / 858.
-size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, KolAttn a,
-                       PpHandoff h);
-size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a, PpHandoff h);
+// kol_post_add, which already wrote resid and the sums layer s's norm reads).
+size_t device_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, uint32_t dev, KolAttn a);
+size_t decode_launches(const model::Kolibri1Desc& d, const model::KolPlacement& p, KolAttn a);
 
 // --- spec 20d: the prefill chunk ------------------------------------------------------------------
 // One chunk of at most kPfC positions (= kernels::kolibri::kPfC, checked in kolibri_prefill.cc): every
@@ -171,7 +168,7 @@ struct PrefillSizes {
 };
 PrefillSizes prefill_sizes(const model::Kolibri1Desc& d);
 inline size_t pf_route_at(uint32_t layer) { return size_t(layer) * kPfC * kRouteWords * 4; }
-// The two-card prefill hand-off: a second runtime::PipelineLink in `copy` mode over spec 16b's layout at
+// The two-card prefill hand-off: a second runtime::PipelineLink over spec 16b's layout at
 // chunk size - kPfC rows of the residual and the [kNormG][kPfC] sums (10.5 MB + 160 KB).
 PpLandingLayout pf_landing_layout(const model::Kolibri1Desc& d);
 size_t pf_link_bytes(const model::Kolibri1Desc& d, uint32_t dev);
@@ -195,8 +192,8 @@ std::vector<size_t> pp_layer_bytes(const model::Kolibri1Desc& d, uint32_t max_le
 // dev0_fixed = embedding + RoPE + decode scratch + control + link (device 0); dev1_fixed = final norm +
 // lm_head + RoPE + decode scratch + control + link (device 1) - then runtime::pp_balance. `prefill`
 // (spec 20d): both devices' fixed bytes also hold the prefill scratch and the prefill link.
-PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, PpHandoff h,
-                   KolAttn a = kolibri_attn(), bool prefill = false);
+PpBalance pp_split(const model::Kolibri1Desc& d, uint32_t max_len, bool int8_head, KolAttn a = kolibri_attn(),
+                   bool prefill = false);
 
 // --- the planner -----------------------------------------------------------------------------------
 // One device's plan in memory_line()'s components: model = its weights + its RoPE table; kv = its

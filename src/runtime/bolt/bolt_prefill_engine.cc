@@ -39,10 +39,10 @@ struct BoltPrefillState {
     Dev(l0::Context& c, const model::BoltDesc& d) : cx(c), kc(c), s(c, d) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
-  std::unique_ptr<PipelineLink> link;   // two devices: `copy` mode at chunk size (pf_landing_layout)
+  std::unique_ptr<PipelineLink> link;   // two devices: at chunk size (pf_landing_layout)
   uint64_t timeout_ns = 0;
   ~BoltPrefillState() {   // never free a scratch under a running list
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     for (auto& d : dev) {
       try {
         d->cx.wait_for(timeout_ns);
@@ -52,10 +52,10 @@ struct BoltPrefillState {
   }
   // reset()'s hook: release a list waiting on a hand-off that will not come; true when every list is idle.
   bool settle() {
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     bool ok = true;
     for (auto& d : dev) ok = d->cx.wait_for(timeout_ns) && ok;
-    if (link && link->event) link->event->host_reset();
+    if (link) link->event->host_reset();
     return ok;
   }
 };
@@ -105,8 +105,7 @@ void BoltEngine::prepare_prefill() {
   ps->timeout_ns = uint64_t(opt_.prefill_timeout_ms) * 1000000ull;
   for (uint32_t i = 0; i < devices(); ++i) ps->dev.push_back(std::make_unique<BoltPrefillState::Dev>(stage_ctx(i), d));
   if (devices() == 2)
-    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d, model_.place),
-                                              PpHandoff::Copy);
+    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d, model_.place));
   // The route rows are read back whole (read_prefill_routes): zero them once, so rows no chunk wrote (a Mamba / attention
   // block's, rows past the last chunk's C) read the same on every engine.
   for (uint32_t i = 0; i < devices(); ++i) stage_imm(i).fill(ps->dev[i]->s.routes.ptr(), 0u, ps->dev[i]->s.routes.size());

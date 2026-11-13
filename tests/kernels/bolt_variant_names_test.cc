@@ -1,6 +1,6 @@
 // Spec 25c: the binaries a Nemotron 3.5 Bolt decode list binds (kernels::bolt::decode_variants - the names
-// runtime/bolt/bolt_capture.cc forms) for every head form, attention form, one / two cards (copy, peer), fused arm and SSM
-// state precision, on the real descriptor and the synthetic N 12, against the ones src/kernels/CMakeLists.txt's spec 25c
+// runtime/bolt/bolt_capture.cc forms) for every head form, attention form, fused arm and SSM state precision, on the real
+// descriptor and the synthetic N 12, against the ones src/kernels/CMakeLists.txt's spec 25c
 // block builds (passed as arguments: tests/CMakeLists.txt's B70_BOLT_DECODE_KERNELS, `kernel_<name>`; after `--` the
 // reused binaries built outside the block). Host only: a name the capture would ask for that no CMake line builds fails
 // here on the Mac, not at capture on the box; and nothing in the list is dead.
@@ -47,16 +47,15 @@ int main(int argc, char** argv) {
   for (const model::BoltDesc* desc : {&d, &d12})
     for (bool int8 : {false, true})
       for (bool eager : {false, true})
-        for (bool peer : {false, true})
-          for (bool b16 : {false, true})
-            for (int arm = 0; arm < 8; ++arm) {   // the as-built list and every combination of the fused arms
-              kb::Arms arms;
-              arms.router = arm & 1;
-              arms.route = arm & 2;
-              arms.conv = arm & 4;
-              for (const std::string& v : kb::decode_variants(*desc, int8, eager, peer, b16, arms)) bound.insert(v);
-              ++lists;
-            }
+        for (bool b16 : {false, true})
+          for (int arm = 0; arm < 8; ++arm) {   // the as-built list and every combination of the fused arms
+            kb::Arms arms;
+            arms.router = arm & 1;
+            arms.route = arm & 2;
+            arms.conv = arm & 4;
+            for (const std::string& v : kb::decode_variants(*desc, int8, eager, b16, arms)) bound.insert(v);
+            ++lists;
+          }
   for (const std::string& v : bound)
     if (!built.count(v) && !reused.count(v)) {
       std::fprintf(stderr, "the Bolt decode list binds %s, which the CMake spec 25c block does not build\n", v.c_str());
@@ -68,7 +67,7 @@ int main(int argc, char** argv) {
       return 1;
     }
   // The names carry their shapes: one card, flash, int8 head, no arm, fp32 state on the real model binds these.
-  const std::vector<std::string> base = kb::decode_variants(d, true, false, false, false);
+  const std::vector<std::string> base = kb::decode_variants(d, true, false, false);
   auto has = [&](const char* n) {
     for (const std::string& v : base)
       if (v == n) return true;

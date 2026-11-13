@@ -294,8 +294,7 @@ size_t decode_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement
   return ps.control + scratch_sizes(d, max_len, a).total() + lines;
 }
 
-size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, BoltAttn a, BoltFuse f,
-                       PpHandoff h) {
+size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, BoltAttn a, BoltFuse f) {
   model::validate(p, d);
   size_t n = 0;
   for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
@@ -308,12 +307,11 @@ size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, 
   }
   if (dev == 0) n += 1;                                     // nb_embed_gather
   if (dev + 1 == p.devices) n += 4;                         // the final norm, the head, the two argmax stages
-  if (p.devices > 1 && h == PpHandoff::Peer) n += 1;        // pp_send (device 0) / pp_recv (device 1)
   return n;
 }
-size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f, PpHandoff h) {
+size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f) {
   size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, f, h);
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, f);
   return n;
 }
 
@@ -382,7 +380,7 @@ PpLandingLayout pf_landing_layout(const model::BoltDesc& d, const model::BoltPla
 }
 size_t pf_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
   if (p.devices < 2) return 0;
-  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d, p).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : pf_landing_layout(d, p).total;
 }
 size_t prefill_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
   return prefill_sizes(d).total() + pf_link_bytes(d, p, dev);
@@ -431,7 +429,7 @@ PpLandingLayout verify_landing_layout(const model::BoltDesc& d, const model::Bol
 }
 size_t verify_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev) {
   if (p.devices < 2) return 0;
-  return dev == 0 ? kPpStateWords * 4 : verify_landing_layout(d, p).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : verify_landing_layout(d, p).total;
 }
 size_t verify_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
                             BoltAttn a, BoltState st) {
@@ -442,7 +440,7 @@ size_t verify_device_launches(const model::BoltDesc& d, const model::BoltPlaceme
                               VerifyMoe m) {
   if (M == 0 || M > kVerifyRows)
     throw std::invalid_argument("runtime::bolt::verify_device_launches: M " + std::to_string(M) + " outside 1..8");
-  size_t n = device_launches(d, p, dev, a, BoltFuse{}, PpHandoff::Copy);
+  size_t n = device_launches(d, p, dev, a, BoltFuse{});
   if (M > 1 && m == VerifyMoe::Union) n += device_blocks(d, p, dev, model::BoltBlock::Moe);   // the combine
   return n;
 }

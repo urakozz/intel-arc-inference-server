@@ -6,7 +6,7 @@
 // decode binaries the head reuses -; after the second `--` the block's test-only builds: the second tiling). Host only.
 //
 // And 25c's decode names, pinned (plan 25d's B0: 25d adds binaries, it renames none): the decode list's union over every
-// head / attention / card / arm / state form is still 41 names, these among them.
+// head / attention / arm / state form is 40 names (41 until the peer hand-off's pp_handoff went), these among them.
 #include <cstdio>
 #include <set>
 #include <string>
@@ -80,25 +80,23 @@ int main(int argc, char** argv) {
   for (const model::BoltDesc* desc : {&d, &d12})
     for (bool int8 : {false, true})
       for (bool eager : {false, true})
-        for (bool peer : {false, true})
-          for (bool b16 : {false, true})
-            for (int arm = 0; arm < 8; ++arm) {
-              kb::Arms arms;
-              arms.router = arm & 1;
-              arms.route = arm & 2;
-              arms.conv = arm & 4;
-              for (const std::string& v : kb::decode_variants(*desc, int8, eager, peer, b16, arms)) dec.insert(v);
-            }
-  CHECK(dec.size() == 41);
+        for (bool b16 : {false, true})
+          for (int arm = 0; arm < 8; ++arm) {
+            kb::Arms arms;
+            arms.router = arm & 1;
+            arms.route = arm & 2;
+            arms.conv = arm & 4;
+            for (const std::string& v : kb::decode_variants(*desc, int8, eager, b16, arms)) dec.insert(v);
+          }
+  CHECK(dec.size() == 40);
   for (const char* n : {"nb_embed_gather_M1_K4096_V131072", "nb_res_norm_M1_K4096_W8_NF", "nb_res_norm_M1_K4096_W8_S1_T1",
                         "nb_res_norm_M1_K4096_W8_S1_R", "nb_conv_M1_C10240_S1", "nb_ssm_M1_H128_P64_N128_G8_S1_C_B16",
                         "nb_gnorm_M1_D8192_G1024_S1", "nb_router_M1_K4096", "nb_route_M1_T9",
                         "nb_moe_up_M1_I2304_L1024_T9_R", "nb_moe_down_M1_I1536_L1024_T9", "nb_sh_act_M1_L1024_SH5376_S1",
                         "nb_attn_prep_M1_KV2_S1", "mg_attn_M1_T64_Q32KV2_F", "mg_attn_eager_M1_T64_Q32KV2_F",
-                        "nb_argmax_stage1_M1_V131072", "nb_argmax_stage2_V131072", "gemv_M1_K4096_N18560_S1_L0",
-                        "pp_handoff"})
+                        "nb_argmax_stage1_M1_V131072", "nb_argmax_stage2_V131072", "gemv_M1_K4096_N18560_S1_L0"})
     CHECK(dec.count(n));
   std::printf("bolt_pf_variant_names_test OK: %zu prefill lists, %zu bound names, %zu binaries + %zu reused + %zu test-only; "
-              "25c's 41 decode names unchanged\n", lists, bound.size(), built.size(), reused.size(), test_only.size());
+              "25c's 40 decode names unchanged\n", lists, bound.size(), built.size(), reused.size(), test_only.size());
   return 0;
 }

@@ -13,7 +13,7 @@
 //      free run's own selections step by step, it reproduces the free run bitwise (logits and every state) - the
 //      injection path changes where the lists come from, nothing else
 //
-// argv: <checkpoint> <ids file> [prompt length] [pp2 | pp2:<split>] [copy | peer] [layers:<N>] [int8]
+// argv: <checkpoint> <ids file> [prompt length] [pp2 | pp2:<split>] [layers:<N>] [int8]
 // The prompt is the file's first <prompt length> ids (default all of them; > 2051 exercises the selection). Exit
 // 77 (SKIP) when the checkpoint, its PLE file or the ids are absent.
 #include <cstdint>
@@ -33,7 +33,7 @@ constexpr uint32_t kGen = 32;
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [prompt length] [pp2[:split]] [copy|peer] [layers:N] [int8]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <checkpoint> <ids> [prompt length] [pp2[:split]] [layers:N] [int8]\n", argv[0]);
     return 2;
   }
   qwen4exp_rig::Options o;
@@ -43,7 +43,6 @@ int main(int argc, char** argv) {
     const std::string a = argv[i];
     if (a == "pp2") o.devices = 2;
     else if (a.rfind("pp2:", 0) == 0) { o.devices = 2; o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10)); }
-    else if (a == "copy" || a == "peer") o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     else if (a.rfind("layers:", 0) == 0) o.layers = uint32_t(std::strtoul(a.c_str() + 7, nullptr, 10));
     else if (a == "int8") o.int8_head = true;
     else if (!a.empty() && a.find_first_not_of("0123456789") == std::string::npos) plen = uint32_t(std::stoul(a));
@@ -84,7 +83,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(m.kv, plan[dev].kv);
     CHECK_EQ(m.decode_state, plan[dev].decode_state);
   }
-  CHECK_EQ(eng.launches(), rq::decode_launches(d, p, eng.attention(), eng.handoff()));
+  CHECK_EQ(eng.launches(), rq::decode_launches(d, p, eng.attention()));
   std::printf("%s: %u layers on %u device(s), %zu launches a token (%s attention), %zu with injected selections; the "
               "PLE table's %zu host pages read back by the device; prompt %zu ids\n", snap.c_str(), d.layers,
               eng.devices(), eng.launches(), rq::q4_attn_name(eng.attention()), eng.injected_launches(),

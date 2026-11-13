@@ -152,7 +152,7 @@ void usage() {
                "                  (development mode); its PLE int8 file is <snapshot>-ple-int8/.\n"
                "\n"
                "  Still being measured (they go when their numbers decide, docs/open-work.md):\n"
-               "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8, --pipeline-handoff copy|peer,\n"
+               "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8,\n"
                "  --draft-vocab off|32k|64k|128k [--draft-vocab-ids FILE].\n");
 }
 
@@ -337,7 +337,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
                  c0->eu_count(), c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
-                             "and both hand-offs write it (docs/10-the-box.md)");
+                             "and the hand-off writes it (docs/10-the-box.md)");
   const std::pair<model::KolPlacement, uint32_t> pl = cli::kolibri::settle(pre, da, dev);
   const uint32_t max_len = pl.second;
   loader::KolLoadedModel model = [&] {
@@ -345,7 +345,6 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
     return loader::load_kolibri1(ctx, a.snapshot_dir, max_len, pl.first, da.lm_head, 0);
   }();
   runtime::PipelineOptions opt;
-  opt.handoff = da.pipe.handoff;
   runtime::kolibri::KolibriEngine engine(ctx, std::move(model), max_len, /*debug_tap=*/false, opt);
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
@@ -364,7 +363,7 @@ int serve_kolibri(const KolibriServe& a, server::Options options) {
   options.parallel_desc = "pp - the layers split over 2 cards (Kolibri-1 needs both)";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (split ") +
                       std::to_string(engine.split()) + ": device 0 layers [0, " + std::to_string(engine.split()) +
                       "), device 1 [" + std::to_string(engine.split()) + ", " +
                       std::to_string(engine.model().desc.layers) + "))"
@@ -413,7 +412,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   // Spec 26c: --spec dflash / lookup - the refusals that need the placement, the drafter's plan terms (its config.json and
   // safetensors header), all before the device. The verify's routed experts are the union-aware form (Decision 10).
   const cli::bolt::SpecArgs& sa = a.spec_args;
-  cli::bolt::check_spec(sa, cli::bolt::devices_of(da, pre), da.pipe.handoff);
+  cli::bolt::check_spec(sa);
   const rb::VerifyMoe vmoe = rb::VerifyMoe::Union;
   cli::bolt::DecodeArgs dplan = da;
   if (sa.on()) cli::bolt::plan_terms(sa, pre, da.max_len.is_auto ? pre.max_pos : da.max_len.value, dplan);
@@ -462,8 +461,8 @@ int serve_bolt(const BoltServe& a, server::Options options) {
     std::fprintf(stderr, "devices: 0 %s (%u EUs), 1 %s (%u EUs) [--parallel pp: one context]\n", c0->name().c_str(), c0->eu_count(),
                  c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
-                             "hand-offs write it (docs/10-the-box.md)");
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and the "
+                             "hand-off writes it (docs/10-the-box.md)");
   const rb::BoltPlan pl = cli::bolt::settle(pre, dplan, dev);
   loader::BoltLoadOptions lo;
   lo.int8_head = da.int8_head;
@@ -474,7 +473,6 @@ int serve_bolt(const BoltServe& a, server::Options options) {
     return loader::load_bolt(ctx, a.snapshot_dir, lo, pl.place);
   }();
   runtime::PipelineOptions opt;
-  opt.handoff = da.pipe.handoff;
   rb::BoltEngine engine(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, /*profile=*/false, attn, fuse, state);
   // Spec 26c: the verify lists (their buffers; the lists on first use) and the drafter, before the adapter: snapshots carry
   // its ring and anchor.
@@ -515,7 +513,7 @@ int serve_bolt(const BoltServe& a, server::Options options) {
   options.parallel_desc = "pp - the layers split over 2 cards (Nemotron 3.5 Bolt needs both)";
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (split ") +
                       std::to_string(engine.split()) + ": device 0 blocks [0, " + std::to_string(engine.split()) +
                       "), device 1 [" + std::to_string(engine.split()) + ", " + std::to_string(engine.model().desc.layers) +
                       "))"
@@ -574,7 +572,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
                  c0->eu_count(), c1->name().c_str(), c1->eu_count());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), "
-                             "and both hand-offs write it (docs/10-the-box.md)");
+                             "and the hand-off writes it (docs/10-the-box.md)");
   const cq::Settled s = cq::settle(full, da, dev);
   loader::Q4LoadedModel model = [&] {
     StdoutToStderr redirect;
@@ -583,7 +581,6 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode until spec 22)\n",
                model.desc.layers, model.checkpoint_layers);
   runtime::PipelineOptions opt;
-  opt.handoff = da.pipe.handoff;
   runtime::qwen4exp::Qwen4ExpEngine engine(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   engine.prepare_prefill();   // every card's prefill scratch and the binaries' check at load, not in a request
   std::fprintf(stderr, "%s\n", engine.memory_line().c_str());
@@ -599,7 +596,7 @@ int serve_qwen4exp(const cli::qwen4exp::ServeArgs& a, server::Options options) {
   const std::unique_ptr<PinnedAlloc> prefix_alloc = make_prefix_alloc(*c0, a.prefix_auto, a.prefix_cache_gb, options);
   server::Server server({tokenizer, chat_template, engine_adapter}, options);
   const std::string placement =
-      devs == 2 ? std::string("--parallel pp (hand-off ") + runtime::pp_handoff_name(engine.handoff()) + ", split " +
+      devs == 2 ? std::string("--parallel pp (split ") +
                       std::to_string(engine.split()) + ")"
                 : std::string("--parallel 1");
   std::fprintf(stderr, "b70-serve: %s on http://%s:%d, max_len %u, eos ", options.served_model.c_str(),
@@ -688,7 +685,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
         "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 is false), "
-        "and both hand-offs write it. Peer access needs the P2P-capable kernel and both cards "
+        "and the hand-off writes it. Peer access needs the P2P-capable kernel and both cards "
         "under one root complex (docs/10-the-box.md)");
   loader::LoadedModel full = [&] {
     StdoutToStderr redirect;
@@ -729,7 +726,6 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
                                                                a.dflash.max_k);
   }
   runtime::PipelineOptions opt;
-  opt.handoff = a.pipe.handoff;
   runtime::PipelineEngine engine(d0, d1, std::move(stages), settled.max_len, opt, a.kv_cache, drafter.get());
   if (drafter)
     drafter->attach_target(d1, engine.model(1), engine.buffers(1).control, settled.max_len, draft_vocab_on);
@@ -761,9 +757,9 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
                options.host.c_str(), options.port, settled.max_len);
   print_eos(a.eos);
   std::fprintf(stderr,
-               ", --parallel pp (hand-off %s, split %u: device 0 layers [0, %u), device 1 [%u, %u)), prefill "
+               ", --parallel pp (split %u: device 0 layers [0, %u), device 1 [%u, %u)), prefill "
                "backend %s, mtp %s%u%s, lm_head %s%s%s, kv cache %s\n",
-               runtime::pp_handoff_name(engine.handoff()), engine.split(), engine.split(),
+               engine.split(), engine.split(),
                engine.stage(1).first, engine.stage(1).last,
                runtime::prefill_backend_name(engine.prefill_backend()), a.mtp_auto ? "auto, max " : "",
                a.mtp_k,
@@ -1068,7 +1064,7 @@ int run(int argc, char** argv) {
   // Spec 8 §11: off until the box rows decide (§11 "Gates").
   uint32_t draft_vocab = 0;
   std::string draft_vocab_ids;
-  cli::PipelineArgs pipe;   // --parallel, --pipeline-split, --pipeline-handoff
+  cli::PipelineArgs pipe;   // --parallel, --pipeline-split
   // --max-num-seqs (operator 2026-11-11): requests at once, the user's choice; 1 by default (cli/pipeline_args.h).
   uint32_t max_num_seqs = 1;
   bool have_max_num_seqs = false;
@@ -1128,8 +1124,6 @@ int run(int argc, char** argv) {
       cli::parse_parallel(value(i, "--parallel"), pipe);
     } else if (arg == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
-    } else if (arg == "--pipeline-handoff") {
-      cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
     } else if (arg == "--layers") {   // spec 21e: Qwen3.8-Flash-Next only (also `auto`)
       const std::string v = value(i, "--layers");
       have_q4_layers = true;
@@ -1155,11 +1149,9 @@ int run(int argc, char** argv) {
   }
   if (options.host.empty()) throw std::runtime_error("--host must not be empty");
   options.served_model = cli::served_name(path);
-  cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  cli::resolve_overrides(pipe);   // --pipeline-split under --parallel auto: pp
   if (pipe.mode == cli::Parallel::One && pipe.have_split)   // before the model is even resolved
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-  if (pipe.mode == cli::Parallel::One && pipe.have_handoff)
-    throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses)");
   max_num_seqs = cli::check_max_num_seqs(pipe, max_num_seqs, have_max_num_seqs);
   // Plan 13b / spec 17d / --max-num-seqs above 1: Qwen3.8 (replica: and Ornith) only, by name, before any device or
   // weight file.
@@ -1289,9 +1281,8 @@ int run(int argc, char** argv) {
   cli::check_tp(pipe, {dflash.on, false, is_q4 || is_kol || is_k2,
                        draft_vocab != 0 || !draft_vocab_ids.empty()});
   cli::dflash::check_flags(dflash);
-  // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
-  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
-                            pipe.handoff == runtime::PpHandoff::Peer);
+  // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel.
+  cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true);
   cli::check_replica_flags(pipe, dflash_lookup);   // replica serves --spec dflash, not lookup inside it
   // --max-num-seqs: a card's several slots run beside no drafter and no draft vocabulary (not built).
   if (max_num_seqs > (pipe.replica() ? 2u : 1u) && (dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty()))
@@ -1506,7 +1497,7 @@ int run(int argc, char** argv) {
       if (hw.cards < 2)
         throw std::runtime_error("--parallel auto: this model at this --max-len does not fit one card and Level Zero "
                                  "shows one - a shorter --max-len, or both cards visible (ZE_AFFINITY_MASK=0,1)");
-      cli::dflash::check_engine(dflash, true, kv_cache, /*pipeline_served=*/true, pipe.handoff == runtime::PpHandoff::Peer);
+      cli::dflash::check_engine(dflash, true, kv_cache, /*pipeline_served=*/true);
       if (dflash_lookup)
         throw std::runtime_error("--spec dflash-lookup is built for one card (spec 19f), and this model and context "
                                  "need two: --spec dflash, or a shorter --max-len");

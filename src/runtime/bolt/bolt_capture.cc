@@ -75,10 +75,9 @@ class Walk {
     layer_ = -1;
     if (link_ && dev == 0) handoff_out();
     if (dev + 1 == b_.placement.devices) head();
-    const PpHandoff hm = link_ ? link_->mode : kDefaultPpHandoff;
     const size_t want = verify_ ? verify_device_launches(d_, b_.placement, dev, M_, b_.attn,
                                                          verify_->union_moe ? VerifyMoe::Union : VerifyMoe::Plain)
-                                : device_launches(d_, b_.placement, dev, b_.attn, fuse_, hm);
+                                : device_launches(d_, b_.placement, dev, b_.attn, fuse_);
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s " +
                                             (verify_ ? "M = " + std::to_string(M_) + " verify" : std::string("decode")) +
                                             " list has " + std::to_string(step_.kernel_count) + " launches, not the " +
@@ -148,8 +147,6 @@ class Walk {
     if (verify_) {
       require(!tap_ && !prof_, "a verify list carries no debug tap and no profile");
       require(!fuse_.any(), "a verify list binds no fused arm (each is bitwise the as-built list)");
-      require(!link_ || link_->mode == PpHandoff::Copy,
-              "a verify list crosses by the copy hand-off only (19d: the drafter's taps ride on its barrier) - peer is refused");
       const BoltVerifyBuffers& vb = *verify_->vb;
       require(vb.device == b_.device && vb.max_len == b_.max_len && vb.state == b_.state && vb.attn == b_.attn,
               "the verify buffers are another device's / length's / state's");
@@ -170,8 +167,7 @@ class Walk {
       arms.router = fuse_.router;
       arms.route = fuse_.route;
       arms.conv = fuse_.conv;
-      need = kb::decode_variants(d_, int8_, b_.attn == BoltAttn::Eager, link_ && link_->mode == PpHandoff::Peer,
-                                 b_.state == BoltState::Bf16, arms);
+      need = kb::decode_variants(d_, int8_, b_.attn == BoltAttn::Eager, b_.state == BoltState::Bf16, arms);
     }
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(), v + " is not compiled (" + kernels::path(v) + "): build with " +
@@ -530,54 +526,22 @@ class Walk {
             "the landing buffer does not hold " + std::to_string(h_bytes()) + " B of the rows and " +
                 std::string(verify_ ? "at least " : "exactly ") + std::to_string(cut_slices_bytes()) +
                 " B of pending slices");
-    if (link_->mode == PpHandoff::Copy) require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
+    require(link_->event != nullptr, "the hand-off needs its cross-device event");
   }
   void handoff_out() {
     check_link();
     const BoltPending cp = cut_pending(d_, b_.placement);
     require(pending_.s1 == cp.s1 && pending_.s2 == cp.s2, "device 0's list ends with other slices pending than the cut's");
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.copy(link_->land_resid, h(cur_).ptr(), h_bytes());
-      if (cut_slices_bytes()) step_.list.copy(link_->land_sumsq, s_.slices->ptr(), cut_slices_bytes());
-      step_.list.barrier_signal(link_->event);
-      return;
-    }
-    require(link_->flag && link_->send_seq, "the peer hand-off needs its flag and counter");
-    // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words), grid (1)
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
-    k.arg_ptr(0, h(cur_).ptr());
-    k.arg_ptr(1, s_.slices->ptr());
-    k.arg_ptr(2, link_->land_resid);
-    k.arg_ptr(3, link_->land_sumsq);
-    k.arg_ptr(4, link_->flag);
-    k.arg_ptr(5, link_->send_seq);
-    k.arg<uint32_t>(6, static_cast<uint32_t>(h_bytes() / 4));
-    k.arg<uint32_t>(7, static_cast<uint32_t>(cut_slices_bytes() / 4));
-    launch(k, 1);
+    step_.list.copy(link_->land_resid, h(cur_).ptr(), h_bytes());
+    if (cut_slices_bytes()) step_.list.copy(link_->land_sumsq, s_.slices->ptr(), cut_slices_bytes());
+    step_.list.barrier_signal(link_->event);
   }
   void handoff_in() {
     check_link();
     cur_ = 0;
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.wait_event(link_->event);
-      step_.list.copy(h(0).ptr(), link_->land_resid, h_bytes());
-      if (cut_slices_bytes()) step_.list.copy(s_.slices->ptr(), link_->land_sumsq, cut_slices_bytes());
-    } else {
-      require(link_->flag && link_->recv_state && link_->spin_limit > 0,
-              "the peer hand-off needs its flag, its state words and a spin bound");
-      // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words, spin_limit)
-      l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_recv", kernels::kPpHandoffWg);
-      k.arg_ptr(0, link_->land_resid);
-      k.arg_ptr(1, link_->land_sumsq);
-      k.arg_ptr(2, link_->flag);
-      k.arg_ptr(3, link_->recv_state);
-      k.arg_ptr(4, h(0).ptr());
-      k.arg_ptr(5, s_.slices->ptr());
-      k.arg<uint32_t>(6, static_cast<uint32_t>(h_bytes() / 4));
-      k.arg<uint32_t>(7, static_cast<uint32_t>(cut_slices_bytes() / 4));
-      k.arg<uint32_t>(8, link_->spin_limit);
-      launch(k, 1);
-    }
+    step_.list.wait_event(link_->event);
+    step_.list.copy(h(0).ptr(), link_->land_resid, h_bytes());
+    if (cut_slices_bytes()) step_.list.copy(s_.slices->ptr(), link_->land_sumsq, cut_slices_bytes());
     pending_ = cut_pending(d_, b_.placement);   // the first norm folds them
     pending_tap_ = int(b_.placement.split) - 1;  // device 0 could not tap its last block: its output is folded here
   }

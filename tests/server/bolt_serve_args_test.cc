@@ -102,9 +102,6 @@ int main() {
     a.pipe.devices = 1;
     a.pipe.have_split = true;
     CHECK(refuses([&] { check_args(a, d); }, "--pipeline-split belongs to --parallel pp"));
-    a.pipe.have_split = false;
-    a.pipe.have_handoff = true;
-    CHECK(refuses([&] { check_args(a, d); }, "--pipeline-handoff belongs to --parallel pp"));
   }
   {
     DecodeArgs a = served();
