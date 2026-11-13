@@ -2088,7 +2088,7 @@ function(add_gemm_sm_variant M K N S L)
 endfunction()
 # The production rows, kernels::kSmallMTuning's order: "K N S L flags...".
 # (S is the OUTPUT's slices: gate||up's 2x8 work-group row compiles at S 1 - kernels::gemm_sm_out_s.)
-set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG"
+set(GEMM_SM_QWEN38 "5120 16384 1 1 MG" "6144 5120 4 0 MG B2D" "5120 14336 2 0 MG B2D" "5120 34816 1 0 WG MG B2D"
                    "17408 5120 4 0 MG B2D" "5120 248320 1 2 WG")
 macro(gemm_sm_rows ROWS MLIST)
   foreach(row IN LISTS ${ROWS})
