@@ -1517,6 +1517,13 @@ if(B70_MTP)
   # all-int8 form's references, and a build tree's cache would keep the old path.
   set(B70_QWEN_FORCED_JUDGE_PFI8MLP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts with the l0-int8 prompt pass (the mtp_gpu_test registrations)")
+  # The judge by KV form: the int8 KV cache's twins (mtp_gpu_kv8_test, the DFlash *_kv8_test) are judged by references
+  # whose attention reads K / V through the same int8 rounding - f32_refs.sh forced-qwen-kv8 / forced-qwen-pfi8-kv8
+  # (qwen_forced.py --kv8: int8_sim.kv8_fq, bitwise kv8.h's codes, kv8_sim_test).
+  set(B70_QWEN_FORCED_JUDGE_PFI8MLP_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-kv8-forced" CACHE PATH
+    "Qwen3.8's f32 judges with the l0-int8 prompt pass and the int8 KV cache (mtp_gpu_kv8_test)")
+  set(B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-i8head-kv8-forced" CACHE PATH
+    "Qwen3.8's f32 judges with the int8 head and the int8 KV cache (the DFlash *_kv8_test)")
   # The operator's bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
   # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
   set(B70_QWEN_FORCED_BF16TOP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-bf16top-forced" CACHE PATH
@@ -1908,7 +1915,7 @@ if(B70_KV8)
     add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     b70_kv8_twin(mtp_gpu)
     set_property(TEST mtp_gpu_kv8_test APPEND PROPERTY ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP_KV8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   if(TEST prefix_gpu_int8_test)
     add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
@@ -4135,7 +4142,8 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set_tests_properties(pp_dflash_test PROPERTIES LABELS "checkpoint;dflash;pp" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
 endif()
-# Spec 19v3a: same checkpoint tests over the int8 cache. Keep the original judge environment and timeouts.
+# Spec 19v3a: same checkpoint tests over the int8 cache. Keep the original environment and timeouts; the judge is the
+# int8 KV cache's (B70_QWEN_FORCED_JUDGE_I8HEAD_KV8 in place of _I8HEAD).
 if(B70_KV8 AND B70_VERIFY_DPAS)
   foreach(t dflash_engine_test dflash_gpu_test dflash_prefix_gpu_test pp_dflash_test)
     if(TARGET ${t})
@@ -4147,6 +4155,7 @@ if(B70_KV8 AND B70_VERIFY_DPAS)
       set_tests_properties(${twin} PROPERTIES LABELS "${_df_labels};kv8" SKIP_RETURN_CODE 77
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT ${_df_timeout} ENVIRONMENT "B70_KV_CACHE=int8")
       if(_df_env)
+        string(REPLACE "${B70_QWEN_FORCED_JUDGE_I8HEAD}" "${B70_QWEN_FORCED_JUDGE_I8HEAD_KV8}" _df_env "${_df_env}")
         set_property(TEST ${twin} APPEND PROPERTY ENVIRONMENT ${_df_env})
       endif()
       foreach(MM 5 6 7 8)

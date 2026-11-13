@@ -9,7 +9,9 @@ under another key; then `run` end to end through the layer-streamed build - the 
 reference's logits through the bf16 head and the int8 head, the hard link, the key check and the resume. The l0-int8
 prompt pass (--pfi8-re) on a 1024-wide tiny model (int8_sim's rotation is 1024-k blocks): the trie forward against a
 per-context forward whose linears take int8_sim.fq_x / fq_w on the test prompt's rows only (ornith_ref.py
---sim-int8-prefill's style), with contexts where one position is prompt in one key and decode in another.
+--sim-int8-prefill's style), with contexts where one position is prompt in one key and decode in another. The int8
+KV cache (--kv8) on the same model (head_dim 256): the trie forward against a per-context forward whose eager attention
+reads K / V through int8_sim.kv8_fq.
 """
 import os
 import sys
@@ -331,6 +333,54 @@ def test_pfi8():
           f"{worst8:.1e}, boundary codes); a position is shared only by keys that computed it the same way")
 
 
+def ref_hidden_kv8(m, ids, kv):
+    """The per-context reference with the int8 KV cache: transformers' f32 forward of `ids`, the eager attention's
+    roped K and its V through `kv` (int8_sim.kv8_fq or a stand-in)."""
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as M
+    orig = M.eager_attention_forward
+
+    def fwd(module, q, k, v, *a, **kw):
+        return orig(module, q, kv(k), kv(v), *a, **kw)
+    M.eager_attention_forward = fwd
+    try:
+        return ref_hidden(m, ids)
+    finally:
+        M.eager_attention_forward = orig
+
+
+def test_kv8():
+    ctx = keyed(contexts())
+    trie, _ = QF.plan(ctx)
+    m = wide_model()                      # head_dim 256: the cache's row
+    i8 = QF._load("int8_sim")
+
+    def errors(kv):
+        with torch.no_grad():
+            final = QF.trie_forward(m, trie, kv8=True, log=lambda s: None)
+        out = {}
+        for k, (p, f) in ctx.items():
+            got = final[torch.tensor(trie.path(p + f))]
+            rel = [((got - w).abs().max() / w.abs().max()).item()
+                   for w in (ref_hidden_kv8(m, p + f, kv), ref_hidden(m, p + f))]
+            out[k] = rel
+        return out
+    # 1. The plumbing, exactly: a smooth row-local stand-in (no rounding boundary for the summation order to cross).
+    fq = i8.kv8_fq
+    i8.kv8_fq = lambda x: x + 0.25 * torch.tanh(3 * x)
+    try:
+        err = errors(i8.kv8_fq)
+    finally:
+        i8.kv8_fq = fq
+    assert max(e for e, _ in err.values()) < 5e-5 and min(w for _, w in err.values()) > 1e-2, err
+    # 2. kv8_fq itself: the same, up to the codes the two forwards' f32 orders put on opposite sides of a boundary.
+    err8 = errors(fq)
+    worst8 = max(e for e, _ in err8.values())
+    near8 = min(w for _, w in err8.values())
+    assert worst8 < 5e-3 and near8 > 5 * worst8, err8
+    print(f"--kv8: trie forward == the per-context forward with K / V through kv8_fq (smooth stand-in: worst "
+          f"{max(e for e, _ in err.values()):.1e}; kv8_fq: worst {worst8:.1e}, bf16 KV >= {near8:.1e} away)")
+
+
 def test_memory_plan():
     ctx = keyed(contexts())
     cap = QF.estimate_peak(160, 160, TD.TEXT)
@@ -387,7 +437,7 @@ def test_chunked_forward():
     print("chunked: f32 hidden states match one-shot, including resume and non-aligned chunks")
 
 
-TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8, test_memory_plan, test_branch_state_memory, test_chunked_forward]
+TESTS = [test_trie, test_forward_matches_transformers, test_run_end_to_end, test_resume, test_pfi8, test_kv8, test_memory_plan, test_branch_state_memory, test_chunked_forward]
 
 if __name__ == "__main__":
     want = set(sys.argv[1:])

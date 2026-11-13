@@ -30,6 +30,12 @@
 #       plain), one pass, both heads into ONE dir (the keys carry the head form) ->
 #       <data tree>/oracle-out-qwen-f32-pfi8mlp-forced/ (a new name: oracle-out-qwen-f32-pfi8-forced holds the
 #       references of the form before open-work 17, int8 on every int4 linear, which the resume would otherwise reuse)
+#   tools/box_validate/f32_refs.sh <data tree> forced-qwen-kv8 | forced-qwen-pfi8-kv8 <dir> [<dir>...]
+#       the same through the int8 KV cache (the *_kv8 twins: `--kv-cache int8`): qwen_forced.py --kv8 (every context's
+#       full-attention K / V through int8_sim.kv8_fq, bitwise kv8.h's codes) -> the -kv8 twins of the dirs above:
+#       oracle-out-qwen-f32-kv8-forced / oracle-out-qwen-f32-i8head-kv8-forced (dflash_gpu_kv8_test) and
+#       oracle-out-qwen-f32-pfi8mlp-kv8-forced (mtp_gpu_kv8_test). Dump the kv8 twin's own contexts (B70_DUMP_FORCED):
+#       a key does not carry the KV form, so a bf16-KV run's dumps are not these.
 #   tools/box_validate/f32_refs.sh <data tree> bf16top-qwen <dir> [<dir>...]
 #       the bf16-unstable rule's standard-bf16 top-k references (operator 2026-11-04, tests/server/spec_judge.h;
 #       B70_FORCED_BF16): tools/oracle/qwen_bf16_top.py plan on the host - the Qwen3.8 contexts of the dirs whose
@@ -77,15 +83,19 @@ case "$what" in
     DTYPE=bf16 tools/box_validate/f32_ref_job.sh "$m" oracle-out-f32-job.partial/split.prompt \
       oracle-out-f32-job.partial/split.none "$stem-bf16.golden.safetensors" --lean --dump-kv || rc=1
     ;;
-  forced-qwen|forced-qwen-pfi8)
+  forced-qwen|forced-qwen-pfi8|forced-qwen-kv8|forced-qwen-pfi8-kv8)
     shift 2
     [ $# -gt 0 ] || { echo "f32_refs: $what <dir> [<dir>...]" >&2; exit 2; }
     out="$data/oracle-out-qwen-f32-forced" out8="$data/oracle-out-qwen-f32-i8head-forced"
     part="oracle-out-qwen-forced.partial"   # in the tree: the container sees only the tree (at /ws)
     keys="${QWEN_KEYS_RE:-^(mtp_verify_qwen3\.8_|mtp_gpu_|dflash_)}" pfi8=""
-    if [ "$what" = forced-qwen-pfi8 ]; then
+    if [ "${what%-kv8}" = forced-qwen-pfi8 ]; then
       out="$data/oracle-out-qwen-f32-pfi8mlp-forced" out8="$out" part="oracle-out-qwen-pfi8mlp-forced.partial"
       keys="^mtp_gpu_" pfi8="--pfi8-re '^mtp_gpu_'" QWEN_FIRST_RE=""
+    fi
+    if [ "${what%-kv8}" != "$what" ]; then
+      out="${out%-forced}-kv8-forced" out8="${out8%-forced}-kv8-forced" part="${part%-forced.partial}-kv8-forced.partial"
+      pfi8="$pfi8 --kv8"
     fi
     mkdir -p "$part/ctx" "$part/out" "$part/out-i8head" "$out" "$out8"
     for d in "$@"; do
@@ -183,6 +193,6 @@ print(f"f32_refs: bf16top-qwen plan: {len(sel)} contexts")' "$part/plan.json" "$
     for f in "$part"/out/*.bf16top.safetensors; do [ -e "$f" ] && mv -f "$f" "$out/"; done
     echo "f32_refs: bf16top-qwen done ($(date '+%F %T')): $(ls "$out" | grep -c 'bf16top') bf16 top-k references"
     ;;
-  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem> | forced-qwen <dir>... | forced-qwen-pfi8 <dir>... | bf16top-qwen <dir>..." >&2; exit 2 ;;
+  *) echo "f32_refs: ornith-mtp | forced <model> <dir> [suffix [flags]] | split <model> <ids> <N> <stem> | forced-qwen[-pfi8][-kv8] <dir>... | bf16top-qwen <dir>..." >&2; exit 2 ;;
 esac
 exit "$rc"
