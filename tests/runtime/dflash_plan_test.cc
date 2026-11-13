@@ -131,7 +131,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(i8.drafter_slots, bf.drafter_slots);
     CHECK_EQ(i8.drafter_taps, bf.drafter_taps);
     const auto persistent = runtime::PersistentDims::sizes(32768, q, runtime::KvCache::Int8);
-    CHECK_EQ(i8.kv, persistent.kv_k + persistent.kv_v + persistent.kv_ks + persistent.kv_vs);
+    CHECK_EQ(i8.kv, persistent.kv_k + persistent.kv_v);   // each int8 allocation includes its scales
     CHECK(i8.kv < bf.kv);
     const uint32_t len = runtime::max_len_that_fits(q, false, target, card, reserve, 262144, {}, {},
                                                   runtime::KvCache::Int8, hp);

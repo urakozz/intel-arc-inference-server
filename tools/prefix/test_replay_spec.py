@@ -134,6 +134,23 @@ class ReplaySpecTest(unittest.TestCase):
     def test_missing_f32_reference_is_pending_not_pass(self):
         self.assertEqual(self.run_replay(self.args(), FAKE_DIFF='1'),77)
 
+    def test_int8_cache_reaches_every_arm_and_resume_rejects_mixed_forms(self):
+        args = self.args()
+        self.assertEqual(self.run_replay(args, B70_KV_CACHE='int8'), 0)
+        self.assertEqual(json.loads((args.out/'config.json').read_text())['kv_cache'], 'int8')
+        for arm in ('off', 'mtp', 'dflash'):
+            argv = json.loads((args.out/f'{arm}.r1/argv.json').read_text())['args']
+            self.assertEqual(argv[argv.index('--kv-cache')+1], 'int8')
+        args.resume = True
+        with self.assertRaisesRegex(RuntimeError, 'resume configuration changed'):
+            self.run_replay(args, B70_KV_CACHE='bf16')
+
+    def test_invalid_cache_form_stops_before_starting_servers(self):
+        with patch.object(replay_spec.subprocess, 'Popen') as start:
+            with self.assertRaisesRegex(ValueError, 'B70_KV_CACHE'):
+                self.run_replay(self.args(), B70_KV_CACHE='i8')
+        start.assert_not_called()
+
     def test_resume_keeps_completed_arms_and_records_the_new_card(self):
         args = self.args()
         args.card = 0
