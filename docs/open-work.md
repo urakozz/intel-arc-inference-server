@@ -44,15 +44,13 @@ difference is neither passed nor failed (the test reports SKIP). Each row: what 
 
 ## DFlash drafter quant (follow-up)
 
-**In work (2026-11-13, branch `dflash-quant`):** the runner, the calibration adapter and the export checker below; the engine's packed loader is not part of it and is still missing.
-
 Quantise `z-lab/Qwen3.8-27B-DFlash2` with **tuned AutoRound W4A16, group size 64, symmetric**, exported as
 `auto_round:auto_gptq` (4-bit weights, 16-bit activations; `w = (q - 8) * scale`, symmetric GPTQ zeros,
 no activation-order permutation). Start with 200 tuning iterations and 128 calibration samples, seed 42;
 record the pinned AutoRound commit and the actual recipe with the export. This replaces the failed at-load RTN
 experiment; int8 stays the serving format until the calibrated export passes acceptance.
 
-**The tooling is built (branch `dflash-quant`); the packed DFlash loader is still missing**, so the export cannot be
+**The tooling is on main (merge 2026-11-13; a real-drafter smoke run, 2 iterations, ended OK); the packed DFlash loader is still missing**, so the export cannot be
 served or accepted yet. On the box, in the repo tree:
 
 ```sh
