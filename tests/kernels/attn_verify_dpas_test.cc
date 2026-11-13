@@ -399,7 +399,17 @@ int main(int argc, char** argv) {
               std::memcpy(&q[size_t(i) * kHD], y, sizeof y);
             }
           Worst w;
-          for (uint32_t M : Ms) check(r, d, M, q, g, w);
+          for (uint32_t M : Ms) {   // per M, then folded into the depth's worst
+            Worst wm;
+            check(r, d, M, q, g, wm);
+            std::printf("  D %s depth %6u M=%u: N1 %.8f (v2 %.8f)  N2b %.8f (max abs %.3g)\n", kv8 ? "int8" : "bf16", d,
+                        M, wm.n1, wm.n1_v2, wm.n2b, wm.abs_n2b);
+            w.n1 = std::min(w.n1, wm.n1);
+            w.n1_v2 = std::min(w.n1_v2, wm.n1_v2);
+            w.n2b = std::min(w.n2b, wm.n2b);
+            w.abs_n2b = std::max(w.abs_n2b, wm.abs_n2b);
+            w.rep = w.rep && wm.rep;
+          }
           uint32_t done = 0;
           const uint32_t same = prop_r(r, d, Ms, q.data(), g.data(), 100, rng, &done);
           const bool pass = w.n1 >= kN1 && w.n2b >= kN1 && w.rep && same == done;
