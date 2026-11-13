@@ -1398,6 +1398,27 @@ verify at 8 rows 35.89 -> 35.71 ms (**-0.18 ms**, 1.2255 -> 1.2185), at 4 rows 3
 0.3 ms bar, so removed (spec 19 v3d's rule; the same words and DPAS chain, so a free gain if the bar is waived).
 Task 4 keeps no lever; the head and argmax have no excess at 8 rows.
 
+**Task 5, the verify half's record** (same day, branch head after Task 4, card 0, busy box: card 1 ran the drafter
+quant, CPU reference jobs ran; uninstrumented interleaved pairs, medians of 3 rounds of 16 calls; `box_validate
+--quick` not run - operator ruling). `probe_dflash_iter` (int8 drafter, candidate head), / paired plain step:
+
+| arm | depth 4096, ms | / plain | depth 32768, ms | / plain |
+|---|---:|---:|---:|---:|
+| verify at 2 rows | 30.58 | 1.047 | 33.71 | 1.012 |
+| verify at 4 rows | 32.52 | 1.112 | 36.49 | 1.095 |
+| verify at 8 rows | 35.96 | **1.229** (was 1.245) | 41.83 | **1.254** (was 1.272) |
+| draft, K = 7 | 7.72 | 0.265 | 7.87 | 0.237 |
+| projection | 0.50 | 0.017 | 0.49 | 0.015 |
+| one round (iteration7) | 44.19 | **1.508** (was 1.559) | 50.09 | 1.500 |
+
+`probe_mtp_steps` (int8 head, 4096): verify at 2 / 3 / 4 rows 1.039 / 1.073 / 1.100, drafts 0.134 / 0.266 / 0.400 a
+step. `probe_slots_speed` (4 x 32768 slots, 4096): 4 plain rows a step 1.199 x the lone plain step, 4 K = 1 rows
+(8 rows) 1.674 with 144.6 t/s aggregate. `MtpCost::dflash`'s candidate-head verify rows and `MtpCost::int8_head`'s
+verify rows (1.04 / 1.07 / 1.10; the K boundaries move from 0.477 / 0.620 to 0.445 / 0.607) are refreshed from these.
+**Gate missed:** verify at 8 rows 1.229, not <= 1.10. What is left of the excess at 8 rows (re-profile, instrumented,
+6.53 ms): the GDN step 1.70 (of it the per-row snapshot writes), gate\|\|up 1.38, out_proj 1.19 (in list only - the
+kernel has none standalone), attention 1.09, a\|\|b 0.47, o_proj 0.19, qkv\|\|z 0.18, down 0.10, the glue 0.13.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
