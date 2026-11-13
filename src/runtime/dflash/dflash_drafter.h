@@ -47,6 +47,8 @@ class DFlashDrafter final : public TapDrafter {
   // distribution q of row j is softmax(scores[j] / temperature) over cand[j] (server::dflash_q).
   const DFlashDraftOut& draft(Engine& e, uint32_t k, float temperature, uint64_t seed) override;
   bool samples() const override { return w_.desc.v2(); }
+  bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const void* taps, uint32_t pos,
+                    uint32_t n) override;
   // Spec 19d: the same beside any target (runtime::PipelineEngine's device 1) - runtime/tap_drafter.h.
   void attach_target(l0::Context& ctx, const loader::LoadedModel& target, const l0::Mem& control, uint32_t max_len,
                      bool draft_vocab) override;

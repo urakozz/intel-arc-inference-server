@@ -12,7 +12,9 @@
 #include "kernels/kernels.h"
 #include "loader/dflash_layout.h"
 #include "loader/draft_vocab.h"
+#include "runtime/buffers.h"
 #include "runtime/control.h"
+#include "runtime/prefill/gemm_l0.h"
 
 // dflash_capture.cc - the DFlash drafter's draft and projection lists (dflash_capture.h has both walks in order). Every
 // binding site names the kernel it honours; argument orders are each __kernel's in src/kernels/dflash/df_*.cl and the
@@ -481,6 +483,55 @@ CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
                                   const CaptureOptions& opt) {
   return Walk(ctx, w, b, opt).project();
+}
+
+// project_wide: the projection list's walk (Walk::project above) with every GEMM on pf_gemm - per
+// linear, slabs of its columns as bf16 B (df_w_slab_*), then the rows against each. fc's slab is 512 columns:
+// [25600][512] fits the scratch's slab ([17408][1024] on Qwen3.8), a 1024-column one does not.
+bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
+                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n) {
+  using prefill::PtrArg, prefill::arg_val;
+  if (w.format == loader::DraftFormat::Int4G64) return false;
+  const model::DFlashDesc& d = w.desc;
+  const uint32_t H = d.hidden, KV = 2 * d.kv_n(), cap = s.chunk_cap(), scaled = w.format == loader::DraftFormat::Int8;
+  require(n >= 1 && n <= cap, "a wide projection takes 1.." + std::to_string(cap) + " rows, not " + std::to_string(n));
+  require(size_t(pos) + n <= b.max_len, "positions " + std::to_string(pos) + " + " + std::to_string(n) +
+                                             " are past the RoPE table");
+  // partials [0, cap x H) holds the chunk's last linear, which step_head folds: fc's rows go after it, k||v's after.
+  float* const out = s.partials.as<float>() + size_t(cap) * H;
+  float* const kv = out + size_t(cap) * H;
+  l0::Mem& slab = s.slab_buffer();
+  require(s.partials.size() >= (size_t(cap) * (2 * H + KV)) * 4 && s.x.size() >= size_t(cap) * H * 2 &&
+              slab.size() >= size_t(w.fc->shape.K) * 512 * 2,
+          "the prefill scratch is smaller than the wide projection's rows (not Qwen3.8's)");
+  const std::string v = kernels::dflash::proj_wide_variant();
+  l0::Kernel& un = kc(v, scaled ? "df_w_slab_i8" : "df_w_slab_bf16");
+  // C [n][N] (pitch N) = A [n][K] x the N columns of `wt` (their first tile), ns columns a slab.
+  const auto linear = [&](const void* wt, const uint16_t* A, uint32_t K, uint32_t N, uint32_t ns, float* C) {
+    for (uint32_t n0 = 0; n0 < N; n0 += ns) {
+      cx.launch(un, ns / 256, K / (scaled ? 16 : 8), 1,
+                {PtrArg(wt), PtrArg(slab.ptr()), arg_val(n0), arg_val(K), arg_val(ns)});
+      prefill::gemm_l0(cx, kc, prefill::GemmBatch{n, K, ns, 1, K, ns, N, 0, 0, 0}, A, slab.as<uint16_t>(), C + n0,
+                       /*transB=*/false);
+    }
+  };
+  linear(w.fc->mem.ptr(), static_cast<const uint16_t*>(taps), w.fc->shape.K, H, 512, out);
+  const void* const fc_scales = scaled ? w.fc->scales->ptr() : out;   // unscaled: never read
+  cx.launch(kc(v, "df_w_norm"), 1, n, 1,
+            {PtrArg(out), PtrArg(fc_scales), PtrArg(w.hidden_norm->ptr()), PtrArg(s.x.ptr()), arg_val(scaled)});
+  const size_t ring_layer = size_t(d.window[0]) * d.kv_n() * 2, q_n = d.q_n();
+  for (uint32_t l = 0; l < d.layers; ++l) {
+    // the k||v rows [q_n, qkv_n) of q||k||v: n-tile-major layouts, so they are the weight from row q_n on
+    const loader::DeviceWeight& qkv = w.layers[l].qkv;
+    const auto* wm = static_cast<const uint8_t*>(qkv.mem.ptr()) + q_n * H * (scaled ? 1 : 2);
+    linear(wm, s.x.as<uint16_t>(), H, KV, 1024, kv);
+    const void* const scales = scaled ? static_cast<const void*>(qkv.scales->as<float>() + q_n) : kv;
+    cx.launch(kc(v, "df_w_ctx_store"), 2 * d.kv_heads, n, 1,
+              {PtrArg(kv), PtrArg(scales), PtrArg(w.qk_norm->as<float>() + (size_t(l) * 2 + 1) * d.head_dim),
+               PtrArg(b.rope.ptr()), PtrArg(static_cast<uint8_t*>(b.ring_k.ptr()) + l * ring_layer),
+               PtrArg(static_cast<uint8_t*>(b.ring_v.ptr()) + l * ring_layer), arg_val(pos), arg_val(scaled)});
+  }
+  return true;
 }
 
 }  // namespace runtime::dflash
