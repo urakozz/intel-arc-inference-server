@@ -250,3 +250,22 @@ still gate the full result. The actual candidate-head PP check subsequently pass
 The first round of the 21-request long-context control recording needs 26 new contexts of up to 102k tokens.
 The current planner estimates about 138 CPU hours before chunking overhead; the operator's budget choice
 is pending. The 88 main and four PP references are complete. GPU collection continues independently.
+
+### Completed GPU collection and current verdict (2026-11-13)
+
+All 27 recording arms and nine corpus/benchy arms finished; GPU locks are released. Main/controls DFlash/MTP
+ratios are 1.193081621 / 1.226568536 / 1.319626438. Golden 1.058189106, A4 1.826279459, tg128 1.382364965 and
+tg128 at depth32768 1.486807750 pass. **pp4096 fails:** 0.955104041 (1489.321 versus MTP 1559.328 t/s), a
+4.49% loss against the allowed 3%. The primary speed gain does not make the full G-speed gate pass.
+
+Saved pp4096 round-1 logs: prompt processing ~2629 versus 2510 ms, prefix storage ~65 versus 57 ms, cold reset
+~3.4 versus 2.8 ms. About 42.23 ms must be removed from the median DFlash prompt time to reach the 3% limit.
+The staged 8-row tail projection is the next profiling target; attribution is an inference from the path
+and earlier component costs. C7 remains failed, and proper AutoRound remains deferred.
+
+Main, all golden/A4 comparisons and candidate-head PP pass f32 judging with zero failures/skips. **94 new
+references** are complete (88 main, four PP, two corpus); the corpus pair takes 74 s. The complete remaining
+plan is 32 references / 26 groups, estimated 140.6 CPU hours before chunk/stream overhead, held for the
+operator's budget choice. No model or GPU job is left running. No default promotion; item12 stays open.
+Final machine result: `~/b70/logs/dflash-v2/task8/main-0b5ef628/gates-after-core-refs.json`. Full tables are in
+BENCHMARKS; the missing-reference plan is `task8-final-ref-plan-v7/{plan.log,summary.json}` in the same log topic.

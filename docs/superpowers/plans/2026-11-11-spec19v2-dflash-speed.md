@@ -1,20 +1,16 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-13): IN PROGRESS, operator resumed with the whole box.** Tasks 1-2 complete: calibrated costs, G0, GPU profiling,
-CPU G-accept and 39/39 serving correctness PASS. The **80.5 t/s early bar PASSED** at 88.806 t/s. Continue Tasks
-3-7 and 7b. Operator update: Task 8 may use one idle card while the other is busy, provided more than 16 of
-44 CPU threads are available. Label those measurements "busy box". Compare against main's per-step MTP (`f65ae50e`
-or later), enabled by default for `--mtp auto`. Main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass.
-Fresh G0 precedes a new Task 8 collection; the pre-merge timings remain historical.
-The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26); grade any
-overlapping timings busy-box, retaining the >16-free-thread guard and the whole-box GPU reservation.
-Fresh G0 and the real-engine regression pass. The main three-round replay now measures 1.193x per-step MTP
-(all 78 requests, f32 judge 0 FAIL / 0 SKIPPED). The actual candidate-head PP check passes 39/39,
-0 FAIL / 0 SKIPPED; the other recordings and corpus/benchy gates continue. The main/PP jobs completed
-92 new references. The long-context control judge needs a much larger new batch (planner ~138 CPU hours),
-held for the operator's budget choice.
-Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
-gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
+**Status (2026-11-13): GPU validation complete; full G-speed fails, item12 stays open.** Main `0b5ef628` is
+merged at `b5bb4044`; measured code `a83322bb`. The early 80.5 t/s bar passed at 88.806 t/s. Fresh G0, full
+int8 numerical checks, real-engine regression, main golden/A4 and actual candidate-head PP correctness pass.
+The three-round main replay passes at **1.193x default per-step MTP** (78 requests, f32 0 FAIL / 0 SKIPPED);
+the two controls measure 1.227x / 1.320x. Golden, A4 and tg128 at both depths pass; **pp4096 fails at 0.9551x
+MTP**, below the unchanged 0.97 limit. C7 draft/iteration targets also remain failed. No default promotion.
+94 new main/PP/corpus references are complete. Long-control correctness still needs 32 references (planner
+140.6 CPU hours, excluding chunk/stream overhead), held for the operator's budget choice. GPU locks are released;
+no model job remains running. Collection is graded busy-box because CPU references overlap the main replay.
+Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md`; evidence: BENCHMARKS and
+`docs/probes/dflash-vs-sly-2026-11-11.md`. Box row82.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox
@@ -244,6 +240,9 @@ The main recording passes at 1.193x MTP over three rounds, f32 judge 0 FAIL / 0 
   `--spec mtp`; `--mtp auto` and `--lm-head` were removed in the zero-config cleanup. The replay uses the fixed
   int8-head default, clears the step-policy override, and verifies the startup's adaptive-per-step line. Task 2's slim `r82.d5` screen is not
   this final replay bar. All final DFlash speed numbers require an idle card.
+- [x] **GPU collection complete (2026-11-13):** all 27 recording arms and nine corpus/benchy arms; both cards released.
+- [x] **Core f32 judging:** main replay, all golden/A4 arms and actual candidate-head PP pass, no failures/skips.
+- [ ] **Long-control f32 judging:** 32 missing references, planner 140.6 CPU hours; held for the operator's budget choice.
 - [ ] **Gate (spec 19 D5, unchanged):**
   - `--spec dflash` >= 1.10x `--mtp auto` on `opencode-session-int8`;
   - no loss > 3 % on A4, golden, llama-benchy tg128 / tg128 @ d32768 and pp4096;
@@ -255,6 +254,10 @@ The main recording passes at 1.193x MTP over three rounds, f32 judge 0 FAIL / 0 
   - spec v2 "as built";
   - open-work item 12 -> Closed recently.
   - If not passed: record the measured decomposition and what is left, item 12 stays open with the numbers.
+  - [x] Current failure recorded: pp4096 median 1489.321 versus MTP 1559.328 t/s (−4.49%); ~42.23 ms
+    saving is needed for the 3% limit. Prompt processing accounts for ~120 ms of the saved pair's gap.
+    Profile/batch the staged tail projection or qualify the deferred AutoRound arm; C7 also remains open.
+    The default and all acceptance bars stay unchanged.
 
 **Which tasks need the box:**
 

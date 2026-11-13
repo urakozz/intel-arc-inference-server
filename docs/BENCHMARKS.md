@@ -1188,36 +1188,57 @@ Seven selected checks pass. This is a buffer measurement, not an end-to-end serv
 real-engine check passes (297.36 s); the main rotated replay and its f32 judging pass below. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
 and the preserved full test output `~/b70/logs/dflash-v2/reset-v7-green-detail.log`.
 
-### Task 8: main replay after the reset fix (2026-11-13)
+### Task 8: serving validation after the reset fix (2026-11-13)
 
-Source `a83322bb`, main `0b5ef628` merged at `b5bb4044`, int8 body / candidate64 exact rerank / H1B4,
-physical card0. All three arms run three rotated rounds with prefix cache on, bf16 KV and the default int8
-head; MTP's startup confirms adaptive per-step selection. The whole box is GPU-reserved, with an eight-thread
-CPU reference job active: **busy box**. This is the unchanged 78-request opencode recording, including all
-30 one-token requests, evaluated from raw per-request medians and their geometric mean.
+Source `a83322bb`, main `0b5ef628` merged at `b5bb4044`, server SHA256
+`83d62ae7749afb3a81184fce2d0ab2de8ef601badb8172482257a9de653d6deb`.
+Selected arm: int8 body / candidate64 exact int8 rerank / H1B4, physical card0. All three speculation arms
+run three rotated rounds, prefix cache on, bf16 KV, int8 target head; MTP's startup confirms its default
+adaptive per-step policy. Whole-box GPU reservation; CPU references overlap the main recording, so the
+collection retains the **busy-box** grade. The executable and all 2747 kernel files are fingerprinted.
 
-| comparison | measured ratio | main replay's bar |
+Ratios use raw per-request medians and their geometric mean; all requests, including the main recording's
+30 one-token requests, remain in the gate.
+
+| recording | requests | DFlash / MTP | DFlash / plain | f32 judgment |
+|---|---:|---:|---:|---|
+| opencode-session-int8 | 78 | 1.193081621 | 1.774903067 | PASS, no failures/skips |
+| opencode-session | 21 | 1.226568536 | 2.849522724 | pending long-context references |
+| opencode-session-2 | 4 | 1.319626438 | 2.844003544 | pending long-context references |
+
+| remaining speed gate | DFlash / MTP | result |
 |---|---:|---|
-| DFlash / default per-step MTP | **1.193081621** | PASS, >=1.10 |
-| DFlash / plain decode | **1.774903067** | recorded |
+| golden | 1.058189106 | PASS |
+| A4 / toolcall | 1.826279459 | PASS |
+| llama-benchy tg128 | 1.382364965 | PASS |
+| llama-benchy tg128 at depth32768 | 1.486807750 | PASS |
+| llama-benchy pp4096 | 0.955104041 | **FAIL**, below 0.97 |
 
-All six speculative-arm/round comparisons against their plain round pass the f32 judge: **0 FAIL, 0 SKIPPED**.
-The CPU job completed 88 new references and reused the existing cache. The focused reset regression, seven
-selected checks and the real-engine regression pass. G0 against merged main passes: 2703 common compiled
-kernels, 2449 byte-identical and 254 equal section by section after normalising only the tree path in build
-options; 44 additive drafter variants, zero removed.
+The main recording's >=1.10 speed bar passes, but **full G-speed fails**: pp4096 is **4.49% slower** than MTP.
+Its three-round median is 1489.321 t/s versus 1559.328 for MTP (plain 1576.465). This corresponds to about
+2750.25 versus 2626.77 ms for 4096 ids; about **42.23 ms** must be removed to reach the unchanged 3% limit.
+The saved round-1 server logs place about 120 ms of the gap inside prompt processing (2629 versus 2510 ms),
+about 8 ms in prefix snapshot storage (65 versus 57 ms), and less than 1 ms in cold reset. The existing
+8-row staged tail projection is the next profiling target; attribution to it is an inference from that path
+and the component profiles, not a new isolated measurement. No serving default changes.
 
-This passes the main recording's speed and correctness checks. The candidate-head PP check subsequently passes **39/39 requests, 0 FAIL / 0 SKIPPED** (37 identical);
-its four new short references take 137 s at eight threads, peak RSS 35.7 GiB. Evidence: `cpu-pp-v8.log` and
-`pp-candidate-main-0b5ef628/judge-after-short-refs.log` in the same log topic. The other two recordings,
-golden/A4 and llama-benchy remain outstanding; the full G-speed gate and C7 are not passed,
-and the serving default is unchanged. The long-context replays take longer than the initial box estimate.
-A first-round preview of the 21-request control recording needs 26 missing long-context references (up to
-102k tokens). The current planner estimates about 138 CPU hours before chunking overhead. That new batch
-is held for the operator's budget choice; the 88 main-replay and four PP references are complete.
-Evidence: `~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/` (`requests.jsonl` in all nine arms,
-`judge-mid-refs.log`, `driver.rc`), `g0-main-0b5ef628/comparison/`, `reset-v7-engine.log`,
-and `cpu-resume-now-v7.log` under the same log topic.
+Core correctness passes: the main recording's six speculative-arm/round comparisons and all six golden/A4
+comparisons have **0 FAIL / 0 SKIPPED**. Actual candidate-head PP passes **39/39** (37 identical, two f32-judged
+passes). **94 new references** are complete: 88 main, four PP (137 s), two corpus (74 s), all at eight threads
+under the 69 GiB cap. The full numerical, selected seven checks and real-engine regression pass; the latter
+runs 297.36 s without skipping. G0 passes 2703 common kernels: 2449 byte-identical, 254 equal section by section
+after normalising only the tree path in build options, 44 additive drafter variants and zero removals.
+
+Both control recordings still need f32 judgments. The complete missing-reference plan has **32 contexts /
+26 groups, estimated 140.6 CPU hours**, excluding chunk/stream overhead. This is a planner estimate, not an
+observed duration. That batch is held for the operator's budget choice; no CPU model or GPU job is left
+running. C7 remains failed (4k draft 8.430 ms, iteration 1.559 plain steps); RTN acceptance failed and proper
+AutoRound remains the operator-deferred follow-up. Open-work item12 stays open.
+
+Evidence under `~/b70/logs/dflash-v2/`: `task8/main-0b5ef628/gates-after-core-refs.json`, all 27 replay arms and
+nine complete corpus arms, `opencode-session-int8/judge-mid-refs.log` and `corpora/judge-after-short-refs.log`
+inside that dataset, `pp-candidate-main-0b5ef628/judge-after-short-refs.log`, `g0-main-0b5ef628/comparison/`,
+`reset-v7-engine.log`, the three CPU logs and `task8-final-ref-plan-v7/{plan.log,summary.json}`.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
