@@ -20,10 +20,14 @@
 # Speed stages (timed: interleaved arms, cost tables, llama-benchy) are opt-in: their numbers count only in the
 # quiet-box session (docs/open-work.md, Now), which names them; a busy nightly run would only record noise.
 # No per-row recap of G0: a row's first stage waits on g0.sha (and G0's other stages gate every run anyway).
-# The quick run (--quick, about an hour; the block at the end of this file): G0 as in the full run but the suite's
+# The merge check (--merge-check, about 20 minutes; the `merge` block at the end of this file): the build, g0.sha, the
+# model-free host stages and merge.changed - only the tests whose inputs changed, up to a time budget.
+# The quick run (--quick, a few hours on a shared box; the block at the end of this file): G0 as in the full run but the suite's
 # model-free tests only, then a fixed sample of each model's kernel / decode / prefill / serving stages; every
 # other stage is full only. Same gates and bars, less input.
 
+# The merge check's budget (--merge-check, merge.changed): seconds of test time, estimated from each test's last recorded time
+MERGE_BUDGET_S=480
 # The quick run's server prompts: 2 golden, 3 tool-call (r2.auto_rows)
 QUICK_PROMPTS=prose,code,t1_define-linear_l0,t2_explain-linear_l0,t3_rename-linear_l0
 
@@ -52,12 +56,20 @@ st_pre() {
   finish
 }
 
-stage g0.build 0 g0 cpu - - "build the baseline tree and the tree under test, Release, -j\$JOBS (the device code's first real compile)"
+stage g0.build 0 g0 cpu - - "build the baseline tree and the tree under test, Release, -j\$JOBS (the device code's first real compile); a complete baseline build of the same commit, build settings, compiler, ocloc and kernel series from an earlier run is reused"
 st_g0_build() {
+  local reuse=1 rc
   chk "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS" "build of the tree under test"
   x "cat $BASE/.b70-baseline-ref"
-  xb "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS"
-  step_rc $? "build of the baseline tree"
+  x "python3 tools/box_validate/baseline.py build-check --base $BASE"; reuse=$?
+  note "the baseline is built (and stamped) only when build-check says rebuild"
+  if [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; then
+    xb "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS"
+    rc=$?
+    step_rc "$rc" "build of the baseline tree"
+    if [ "$rc" = 0 ]; then x "python3 tools/box_validate/baseline.py build-stamp --base $BASE"; fi
+  fi
+  grab_all baseline '^BASELINE '
   finish
 }
 
@@ -69,11 +81,18 @@ st_g0_sha() {
   finish
 }
 
-stage g0.bitwise 0 g0 gpu qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
+stage g0.bitwise 0 g0 card qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
 st_g0_bitwise() {
-  xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"
+  local reuse=1 rc
+  x "python3 tools/box_validate/baseline.py gates-check --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --out $STATE/g0.bitwise.baseline.xml"; reuse=$?
+  note "the baseline's gates run only when gates-check says its recorded output is stale"
+  if [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; then xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"; fi
   x "python3 tools/box_validate/junit.py verdict $STATE/g0.bitwise.baseline.xml"
-  step_rc $? "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
+  rc=$?
+  step_rc "$rc" "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
+  if [ "$rc" = 0 ] && { [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; }; then
+    x "python3 tools/box_validate/baseline.py gates-stamp --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --xml $STATE/g0.bitwise.baseline.xml"
+  fi
   x "ctest --test-dir build --show-only=json-v1 > $STATE/g0.bitwise.tests.json"
   x "$(ctest_cmd) -R '$G0_BITWISE_RE'"
   reuse_record "$STATE/g0.bitwise.tests.json"
@@ -82,6 +101,7 @@ st_g0_bitwise() {
   chk "python3 tools/box_validate/junit.py compare $STATE/g0.bitwise.baseline.xml $STATE/g0.bitwise.junit.xml --strip-a $BASE --strip-b $TREE --out $STATE/g0.bitwise.diff" \
     "gate output differs from the baseline's (g0.bitwise.diff)"
   grab compare '^COMPARE common='
+  grab_all baseline '^BASELINE ' 4
   jgrab golden '^golden_gate' 'golden_gate_test OK|TOTAL:'
   jgrab replay '^replay_determinism' 'kernel_count|launches|bitwise'
   jgrab prefill-smoke '^prefill_smoke_test$' '8449|8705|launch'
@@ -89,10 +109,10 @@ st_g0_bitwise() {
   finish
 }
 
-stage g0.suite 0 g0 gpu qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
+stage g0.suite 0 g0 card qwen,oracle_qwen g0.build "the baseline's full suite (every test registered at the baseline, Ornith / kv8 labels aside; the pp / tp labels are g0.suite_2card's) on the tree under test, B70_KV_CACHE unset; a test whose every input is byte-identical to a recorded PASS (box_check's on the same sources, an earlier run's) keeps that PASS (reuse.py)"
 st_g0_suite() {
   # --quick: the model-free tests only (no `checkpoint` label); g0.bitwise is the quick run's model check
-  local f="--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8$(quick_or '' ' --no-label checkpoint')"
+  local f="--also-in $STATE/tests.baseline.json --no-label ornith --no-label kv8 --no-label pp --no-label tp$(quick_or '' ' --no-label checkpoint')"
   xb "ctest --test-dir build --show-only=json-v1 > $STATE/tests.baseline.json"
   x "ctest --test-dir build --show-only=json-v1 > $STATE/tests.json"
   reuse_claim "$STATE/tests.json" "$f"
@@ -100,6 +120,20 @@ st_g0_suite() {
   reuse_record "$STATE/tests.json"
   chk "python3 tools/box_validate/junit.py pick $STATE/tests.json $f --junit \"$STATE/*.junit.xml\"" \
     "the baseline's suite on the tree under test"
+  finish
+}
+
+stage g0.suite_2card 0 g0 gpu qwen,oracle_qwen g0.build "the two-card part of the baseline's suite: the tests labelled pp or tp (the rest is g0.suite, on one card) on the tree under test, the same rules as g0.suite"
+st_g0_suite_2card() {
+  # --quick: as g0.suite, the model-free tests only
+  local f="--also-in $STATE/$STAGE.tests.baseline.json --label-any pp --label-any tp --no-label ornith --no-label kv8$(quick_or '' ' --no-label checkpoint')"
+  xb "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.baseline.json"
+  x "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.json"
+  reuse_claim "$STATE/$STAGE.tests.json" "$f"
+  x "re=\$(python3 tools/box_validate/junit.py todo $STATE/$STAGE.tests.json $f --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then echo 'every selected test already has a result in this run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_record "$STATE/$STAGE.tests.json"
+  chk "python3 tools/box_validate/junit.py pick $STATE/$STAGE.tests.json $f --junit \"$STATE/*.junit.xml\"" \
+    "the baseline's two-card tests on the tree under test"
   finish
 }
 
@@ -1328,7 +1362,7 @@ st_r24_oracle_synth() {
   grab_all bench 'kolibri_bench.ids|re-bake' 4
   finish
 }
-stage r24.load 24 default gpu oracle_kolibri_synth r24.k1 "the loader on the card: kolibri1_load_synth_int4attn_test and _bf16attn_test (int8 head) - every part's bytes = kol_device_weight_bytes, 0 unconsumed, the last expert's block / the router's padded rows / the bias tail read back"
+stage r24.load 24 default card oracle_kolibri_synth r24.k1 "the loader on the card: kolibri1_load_synth_int4attn_test and _bf16attn_test (int8 head) - every part's bytes = kol_device_weight_bytes, 0 unconsumed, the last expert's block / the router's padded rows / the bias tail read back"
 st_r24_load() {
   run_tests '^kolibri1_load_synth_(int4attn|bf16attn)_test$'
   jgrab load '^kolibri1_load_synth' 'device 0|read/token|unconsumed|OK'
@@ -3727,12 +3761,12 @@ st_r81_speed() {
 # Spec 19 v2: the measured baseline, live acceptance, and the operator's slim serving screen.
 row 82 "spec 19 v2 - DFlash costs and engine-tap acceptance, then one-card DFlash against recorded main baselines"
 rownote 82 "Operator 2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
-stage r82.k0 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
-st_r82_k0() {
+stage r82.host 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
+st_r82_host() {
   run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test|dflash_prefix_test)$'
   finish
 }
-stage r82.profile 82 default card qwen,dflash r82.k0 "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
+stage r82.profile 82 default card qwen,dflash r82.host "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
 st_r82_profile() {
   run_tests '^dflash_profile_test$' dflash
   jgrab profile '^dflash_profile_test$' '^dflash_profile_test' 4
@@ -3833,12 +3867,12 @@ st_r85_span() {
 # ======================================================================================
 row 86 "spec 19v3a - DFlash with int8 KV: new M5..8 binaries, one-card and PP serving, acceptance and replay"
 rownote 86 "Implementation checked with a focused smoke run only (operator 2026-11-13). Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop for the operator below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
-stage r86.k0 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
-st_r86_k0() {
+stage r86.host 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
+st_r86_host() {
   run_tests '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'
   finish
 }
-stage r86.kernels 86 default card - r86.k0 "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
+stage r86.kernels 86 default card - r86.host "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
 st_r86_kernels() {
   run_tests '^(attn_verify_dpas_test|attn_verify_dpas_kv8_m8_test|kv8_kernels_test|attn_verify_bitwise_test)$'
   finish
@@ -3896,9 +3930,36 @@ st_r86_replay() {
 }
 
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
-stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
+stage x.rest_2card x default gpu qwen,oracle_qwen - "x.rest's two-card part: the pp-labelled tests among them (the rest is x.rest, on one card)"
+st_x_rest_2card() {
+  run_tests '.' pp "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  finish
+}
+stage x.rest x default card qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows; the pp-labelled ones are x.rest_2card's)"
 st_x_rest() {
-  run_tests '.' '' "$(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  run_tests '.' '' "pp $(quick_or 'ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp' 'checkpoint bolt lilicorr tp')"
+  finish
+}
+
+stage merge.changed x optin card - g0.sha "the merge check's tests: the baseline's suite (the g0.suite set) cut to the tests whose inputs changed since their last recorded PASS or that were never recorded (reuse.py), the shortest first up to MERGE_BUDGET_S seconds of their recorded times; the rest are listed as left for the quick run"
+st_merge_changed() {
+  local tj="$STATE/$STAGE.tests.json" f="--also-in $STATE/$STAGE.tests.baseline.json --no-label ornith --no-label kv8 --no-label pp --no-label tp"
+  xb "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.baseline.json"
+  x "ctest --test-dir build --show-only=json-v1 > $tj"
+  reuse_claim "$tj" "$f"
+  x "re=\$(python3 tools/box_validate/junit.py todo $tj $f --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then : > $STATE/$STAGE.run.re; : > $STATE/$STAGE.left.txt; echo 'MERGE changed 0: every selected test keeps a recorded PASS'; else python3 tools/box_validate/reuse.py cap --tests $tj --re \"\$re\" --budget $MERGE_BUDGET_S --out-re $STATE/$STAGE.run.re --out-left $STATE/$STAGE.left.txt; fi"
+  x "re=\$(cat $STATE/$STAGE.run.re); if [ -z \"\$re\" ]; then echo 'no changed test to run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_record "$tj"
+  chk "python3 tools/box_validate/junit.py pick $tj $f --exclude-file $STATE/$STAGE.left.txt --junit \"$STATE/*.junit.xml\"" \
+    "the changed tests (all but those left for the quick run)"
+  grab_all merge '^MERGE ' 80
+  finish
+}
+
+stage merge.dflash x optin card qwen,dflash g0.sha "the merge check's DFlash sample, outside merge.changed's time budget (operator 2026-11-13): dflash_engine_test (the engine with the real drafter, ~6 min) and dflash_prefix_gpu_test in both KV forms (the snapshot with the ring, ~1.5 min each); a test whose inputs are unchanged keeps its recorded PASS"
+st_merge_dflash() {
+  run_tests '^(dflash_engine_test|dflash_prefix_gpu_test|dflash_prefix_gpu_kv8_test)$' '' '' \
+    "B70_DFLASH_SNAPSHOT=${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   finish
 }
 
@@ -3908,6 +3969,7 @@ st_x_rest() {
 # variants (kv8, i8head, eager, two-card twins) the sample below stands for. Each stage's `after` must be here too.
 quick pre g0.build g0.sha g0.bitwise
 quick_form g0.suite "the baseline's model-free tests only (no checkpoint label)"
+quick_form g0.suite_2card "the baseline's model-free pp / tp tests only (no checkpoint label)"
 quick_form r2.suite "mtp_server, golden_server, prefix_gpu_l0, mtp_verify, scheduler, adaptive_k (no mtp_gpu_test, the other prefix_gpu twins)"
 quick_form r2.auto_rows "one round, --spec off and auto, 2 golden + 3 tool-call prompts (QUICK_PROMPTS)"
 quick r6.memory
@@ -3920,4 +3982,16 @@ quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
 quick r54.kernels r54.load r55.kernels
 quick r22.devices r22.p1 r79.host r79.k1 r79.decode
 quick r77.host r77.reject r77.r1 r77.ornith r77.dflash r78.host r78.engine
-quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr or tp label)"
+quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr, pp or tp label)"
+quick_form x.rest_2card "the model-free pp-labelled tests without a result (no checkpoint, bolt, lilicorr or tp label)"
+
+# --merge-check: the stages the merge check runs (lib.sh `merge`), as in the full run; every other stage is recorded SKIP.
+# The build with the baseline reused (g0.build), the kernel-binary comparison (g0.sha), the model-free host stages
+# (no data, no device, no bolt / lilicorr: their tests keep a recorded PASS while their inputs are unchanged) and
+# merge.changed, which runs the changed tests of the baseline's suite up to its time budget, and merge.dflash (a fixed DFlash
+# model sample outside that budget). G0's bitwise gates and the
+# suite are the quick run's: a gate whose inputs changed shows up in merge.changed.
+merge pre g0.build g0.sha merge.changed merge.dflash
+merge r5.host r13.host r14.host r15.host r16.host r17.host r18.host r19.host r21.host r22.host r23.host r24.host
+merge r25.host r25.reject r26.host r27.host r27.reject r28.host r28.reject r31.host r31.plan r32.host r33.host r34.host
+merge r54.host r55.host r56.host r69.host r70.host r71.host r75.host r77.host r78.host r79.host r80.host r81.host

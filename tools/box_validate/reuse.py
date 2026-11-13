@@ -11,6 +11,11 @@
         every selected test with a store entry whose inputs all still match goes into FILE (JUnit, the old
         output behind a REUSED line), so junit.py todo leaves it out of the ctest run and pick counts it;
         nothing claimed with BV_NO_REUSE=1 (box_validate.sh --no-reuse) or a file named no-reuse in --state
+  reuse.py cap    --tests JSON --re ERE --budget SECONDS --out-re FILE --out-left FILE [--default-secs N] [--store DIR]
+        the merge check's cap: of the selected tests (the ones claim left to run: their inputs changed or were never
+        recorded), as many as fit SECONDS - each estimated by the time of its newest recorded PASS, else N (default
+        120), the shortest first - go into FILE --out-re as one anchored ctest -R alternation; the others, listed one a
+        line in --out-left, are left for the quick run. Says so: MERGE / NOTE lines, nothing dropped silently
   reuse.py build-id [--tree DIR]
         the build's identity: the tree's sources, the build's cache settings, the compiler
 
@@ -512,6 +517,45 @@ def cmd_claim(a):
     return 0
 
 
+def estimate(entries, default):
+    """-> (seconds, 'recorded' | 'estimated'): the newest entry that has a time, else the default"""
+    for e in entries:
+        try:
+            return float(e.get("time")), "recorded"
+        except (TypeError, ValueError):
+            continue
+    return float(default), "estimated"
+
+
+def cmd_cap(a):
+    import junit
+    tree = os.path.abspath(a.tree)
+    rx = re.compile(a.re)
+    names = sorted(n for n in test_defs(a.tests, tree) if rx.search(n))
+    est = {n: estimate(load(a.store, n), a.default_secs) for n in names}
+    run, left, total = [], [], 0.0
+    for n in sorted(names, key=lambda n: (est[n][0], n)):   # shortest first: the most tests checked
+        if not left and total + est[n][0] <= a.budget:
+            run.append(n)
+            total += est[n][0]
+        else:
+            left.append(n)
+    with open(a.out_re, "w", encoding="utf-8") as f:
+        f.write(junit.anchored(sorted(run)) + "\n" if run else "")
+    with open(a.out_left, "w", encoding="utf-8") as f:
+        f.write("".join(n + "\n" for n in sorted(left)))
+    print(f"MERGE changed {len(names)} (inputs differ from every recorded PASS, or never recorded): {len(run)} run, "
+          f"~{total:.0f} s of the {a.budget:.0f} s budget, {len(left)} left")
+    for n in sorted(run):
+        print(f"MERGE run {n} (~{est[n][0]:.0f} s {est[n][1]})")
+    for n in sorted(left, key=lambda n: (-est[n][0], n)):
+        print(f"MERGE left for the quick run: {n} (~{est[n][0]:.0f} s {est[n][1]})")
+    if left:
+        print(f"NOTE merge check: {len(left)} of {len(names)} changed tests are over the {a.budget:.0f} s budget and were "
+              f"NOT run - left for the quick run (--quick): " + ", ".join(sorted(left)[:12]) + (", ..." if len(left) > 12 else ""))
+    return 0
+
+
 def main(argv=None):
     sha_file.__defaults__[0].clear()            # one call's view of the files (the tests call main in-process)
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -525,6 +569,12 @@ def main(argv=None):
     p.add_argument("--tests", required=True); p.add_argument("--re", required=True)
     p.add_argument("--out", required=True); p.add_argument("--state")
     p.set_defaults(fn=cmd_claim)
+    p = sub.add_parser("cap")
+    p.add_argument("--tests", required=True); p.add_argument("--re", required=True)
+    p.add_argument("--budget", type=float, required=True)
+    p.add_argument("--out-re", required=True); p.add_argument("--out-left", required=True)
+    p.add_argument("--default-secs", type=float, default=120)
+    p.set_defaults(fn=cmd_cap)
     p = sub.add_parser("build-id")
     p.set_defaults(fn=lambda a: print(build_id(os.path.abspath(a.tree))) or 0)
     for p in sub.choices.values():

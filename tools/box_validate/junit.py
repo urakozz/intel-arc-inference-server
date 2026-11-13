@@ -2,7 +2,8 @@
 """ctest's test list and JUnit results, for tools/box_validate (stdlib only: runs on the box's
 host python3 and on the Mac).
 
-  junit.py names   TESTS_JSON [--re ERE] [--label L]... [--no-label L]... [--also-in JSON]
+  junit.py names   TESTS_JSON [--re ERE] [--label L]... [--label-any L]... [--no-label L]... [--also-in JSON]
+        (--label: every one of them; --label-any: at least one of them; --exclude-file: not the names listed in FILE)
   junit.py todo    TESTS_JSON --re ERE [filters] --done GLOB
         the selected tests with no result yet in the JUnit files GLOB matches (or whose latest result
         is a skip), as one anchored ctest -R alternation; empty output when every one has a result
@@ -61,11 +62,17 @@ def select(args):
     also = None
     if getattr(args, "also_in", None):
         also = {n for n, _ in tests_from_json(args.also_in)}
+    left = set()
+    if getattr(args, "exclude_file", None):
+        with open(args.exclude_file, encoding="utf-8") as f:
+            left = {l.strip() for l in f if l.strip()}
     names = []
     for name, labels in tests:
-        if not rx.search(name):
+        if not rx.search(name) or name in left:
             continue
         if any(l not in labels for l in args.label or []):
+            continue
+        if args.label_any and not any(l in labels for l in args.label_any):
             continue
         if any(l in labels for l in args.no_label or []):
             continue
@@ -247,8 +254,10 @@ def main(argv=None):
         p.add_argument("tests")
         p.add_argument("--re", default=".")
         p.add_argument("--label", action="append")
+        p.add_argument("--label-any", action="append")
         p.add_argument("--no-label", action="append")
         p.add_argument("--also-in")
+        p.add_argument("--exclude-file")
 
     p = sub.add_parser("names"); filters(p); p.set_defaults(fn=cmd_names)
     p = sub.add_parser("todo"); filters(p); p.add_argument("--done"); p.set_defaults(fn=cmd_todo)
