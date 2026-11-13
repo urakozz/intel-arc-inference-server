@@ -1329,6 +1329,49 @@ new kernel commands are additive, existing commands unchanged. Full G0 binary co
 Evidence: `~/b70/logs/dflash-int8-v3a/{quick,quick-final}.log` (kernel check rc0); validation regression logs
 are in the branch's local plan workspace.
 
+### Round cost (spec 19 v3d)
+
+**Task 1, verify at 1 / 2 / 4 / 8 rows by kernel family** (2026-11-13, branch `spec19v3d-dflash-round-cost`,
+`probe_dflash_iter --verify-profile`, card 0, bf16 KV, int8 drafter, candidate head). **Busy box:** card 0 idle,
+card 1 ran the drafter quant and CPU reference jobs ran. Per-launch timestamps (instrumented), the four widths
+captured in turn inside each round after a warm-up; medians of three rounds of 16 calls. The families' excess sums to
+the instrumented wall excess (7.170 / 7.171 ms) and is within 2.5 % of the uninstrumented interleaved pair's 7.354 ms,
+so the attribution is trusted.
+
+| family | 1 row | 2 rows | 4 rows | 8 rows | excess 8 - 1 | at 32768: 1 / 8 rows, excess | lever candidate (>= 0.5 ms) |
+|---|---:|---:|---:|---:|---:|---:|---|
+| GDN step (`gdn_step_slots`) | 0.734 | 1.045 | 1.679 | 3.091 | **2.356** | 0.746 / 3.142, 2.397 | **yes: Task 3** |
+| gate\|\|up | 11.088 | 11.438 | 11.849 | 12.454 | **1.366** | 11.126 / 12.380, 1.255 | **yes: Task 4** |
+| out_proj (GDN) | 1.615 | 1.777 | 2.159 | 2.814 | **1.199** | 1.597 / 2.785, 1.188 | **yes: Task 4** |
+| attention (v2 at 1 row, `attn_verify_dpas` at 2+) | 0.706 | 1.156 | 1.479 | 1.779 | **1.073** | 4.578 / 7.159, 2.581 | by size yes; no Task 2-4 lever (see below) |
+| a\|\|b (`gemv_bf16`) | 0.237 | 0.351 | 0.413 | 0.698 | 0.461 | 0.239 / 0.701, 0.462 | no (under the bar) |
+| o_proj (FA) | 0.519 | 0.524 | 0.550 | 0.715 | 0.196 | 0.517 / 0.619, 0.101 | no |
+| qkv\|\|z | 3.842 | 3.931 | 3.997 | 4.021 | 0.180 | 3.843 / 4.025, 0.182 | no |
+| down | 5.423 | 5.358 | 5.419 | 5.532 | 0.109 | 5.428 / 5.543, 0.115 | no |
+| residual fold | 0.241 | 0.275 | 0.334 | 0.324 | 0.083 | 0.249 / 0.330, 0.081 | no (Task 2) |
+| attention reduce | 0.076 | 0.083 | 0.112 | 0.133 | 0.057 | 0.122 / 0.227, 0.105 | no |
+| gated head | 0.086 | 0.092 | 0.100 | 0.121 | 0.034 | 0.088 / 0.118, 0.030 | no (Task 2) |
+| q\|\|k\|\|v | 1.097 | 1.098 | 1.113 | 1.132 | 0.034 | 1.095 / 1.134, 0.040 | no |
+| argmax | 0.007 | 0.010 | 0.018 | 0.034 | 0.027 | 0.007 / 0.034, 0.027 | no |
+| gaps after the tap copies | 0.012 | 0.017 | 0.024 | 0.040 | 0.027 | 0.012 / 0.040, 0.028 | no (Task 2) |
+| norm | 0.204 | 0.207 | 0.222 | 0.230 | 0.026 | 0.211 / 0.234, 0.023 | no (Task 2) |
+| other gaps between launches | 0.801 | 0.812 | 0.824 | 0.823 | 0.021 | 0.810 / 0.828, 0.018 | no |
+| attention prepare | 0.052 | 0.053 | 0.053 | 0.059 | 0.007 | 0.052 / 0.059, 0.007 | no |
+| embedding | 0.009 | 0.009 | 0.009 | 0.009 | 0.000 | 0.009 / 0.009, 0.000 | no |
+| head (int8, `gemv_i8w` / `gemm_sm_i8w`) | 2.211 | 2.149 | 2.161 | 2.199 | -0.011 | 2.208 / 2.199, -0.010 | no |
+| SiLU (the S1 build at 2+) | 0.692 | 0.633 | 0.634 | 0.629 | -0.063 | 0.704 / 0.638, -0.066 | no (Task 2) |
+| **sum (device + gaps)** | 29.661 | 31.015 | 33.155 | 36.832 | **7.171** | 33.658 / 42.200, 8.543 | |
+| wall, instrumented | 29.784 | 31.103 | 33.261 | 36.955 | 7.170 | 33.981 / 42.512, 8.530 | |
+| **wall, uninstrumented pair against 1 row** | 29.259 | 30.624 (1.048) | 32.816 (1.123) | 36.617 (**1.251**) | **7.354** | 33.605 / 42.461 (1.264), 8.856 | |
+
+**Stop / continue: continue.** Four families clear 0.5 ms and make 6.0 of the 7.2 ms: the GDN step (2.36, Task 3),
+gate\|\|up (1.37) and out_proj (1.20) at `gemm_sm` (Task 4), and the attention (1.07; 2.58 at 32768). **The glue is not
+where the excess is:** fold, norm, SiLU, gated head and the tap copies together are +0.13 ms at 8 rows, under Task 2's
+0.3 ms bar for any one of them, so Task 2 has no candidate. The head and argmax at 8 rows cost what they cost at 1 (no
+Task 4 head lever). The attention's excess is 1-row v2 against 8-row DPAS over the same keys; it is no Task 2-4
+lever and stays with the attention work (int8 KV, plan 19v3a). The instrumented 1-row list is 0.53 ms slower than
+the uninstrumented one (the per-launch signals); the excess is not.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,

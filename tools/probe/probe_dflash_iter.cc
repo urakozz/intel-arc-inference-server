@@ -448,14 +448,15 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
         }
         span += prev_end;
       }
-      e.recapture_verify({});   // release vp's events before it dies
+      const size_t count = step.kernel_count;
+      e.recapture_verify({});   // release vp's events before it dies (and `step` with them)
       if (!r) continue;
       for (const auto& [f, ms] : sums) fam[m][f].push_back(ms / calls);
       walls[m].push_back(wall / calls);
       devices[m].push_back(device / calls);
       gaps[m].push_back(gap / calls);
       spans[m].push_back(span / calls);
-      launches[m] = step.kernel_count;
+      launches[m] = count;
     }
   }
   std::printf("VPROFILE depth=%u calls=%u rounds=%u (instrumented: per-launch timestamps)\n", depth, calls, rounds);
