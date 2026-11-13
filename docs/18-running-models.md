@@ -92,7 +92,7 @@ is not finished is listed in [open-work.md](open-work.md).
 | speed rows in BENCHMARKS | yes | yes | no | no | no |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19) | yes, one card or `--parallel pp` (copy hand-off), bf16 KV | no | no drafter exists (refused) | refused | refused |
+| `--spec dflash` (spec 19) | yes, one card or `--parallel pp` (copy hand-off), bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes | not built | yes (spec 18e) | refused (bf16 only) | refused (bf16 only) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -201,6 +201,8 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 # one card: the drafter beside the target (int8 at load, 2.05 GB + 1.06 GB of verify slots), K per request (auto, <= 7)
 ./build/src/cli/b70-serve $Q --parallel 1 --prefix-split-last \
     --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
+# one card with int8 KV (spec 19v3a): auto plans the longer context, including the candidate head
+./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto
 # two cards, pipeline parallel: the drafter on the second card beside lm_head (the copy hand-off only)
 ./build/src/cli/b70-serve $Q --parallel pp --spec dflash
 # greedy without the server (one card), K <= 7 per step
@@ -211,8 +213,9 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
 - **Defaults:** the drafter quantised to int8 at load (same acceptance as bf16 at half the bytes),
   `--spec-max 7`, `--draft-vocab off` (a ranked 32k vocabulary was ranked in-sample; by id it loses up to
   1.4 tokens at K = 7).
-- **Refused, by name:** `--kv-cache int8` (the int8 attention is built for M <= 4 verify rows, DFlash needs
-  8), `--parallel pp --pipeline-handoff peer`, `--parallel tp` and `replica`, several slots a card
+- **KV cache:** bf16 and int8 are wired for one card and `--parallel pp` (spec 19v3a). The int8 mode
+  still needs its full acceptance, f32 serving and speed gates; no int8 speed claim is made yet.
+- **Refused, by name:** `--parallel pp --pipeline-handoff peer`, `--parallel tp` and `replica`, several slots a card
   (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation that gets a prefix cache hit
   from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one. **Caveat:** a
