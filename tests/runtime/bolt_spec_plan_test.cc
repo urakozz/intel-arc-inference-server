@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(L.sumsq_bytes, size_t(rb::cut_pending(d, two).total()) * 8 * 4096 * 4);
     const auto U = rb::VerifyMoe::Union, P = rb::VerifyMoe::Plain;
     CHECK_EQ(rb::verify_launches(d, two, 1, rb::BoltAttn::Flash, U), size_t(653));
-    CHECK_EQ(rb::decode_launches(d, two, rb::BoltAttn::Flash, rb::BoltFuse{}, runtime::PpHandoff::Copy), size_t(653));
+    CHECK_EQ(rb::decode_launches(d, two, rb::BoltAttn::Flash, rb::BoltFuse{}), size_t(653));
     for (uint32_t M = 2; M <= 8; ++M) {
       CHECK_EQ(rb::verify_launches(d, two, M, rb::BoltAttn::Flash, U), size_t(693));
       CHECK_EQ(rb::verify_launches(d, two, M, rb::BoltAttn::Flash, P), size_t(653));
@@ -153,24 +153,21 @@ int main(int argc, char** argv) {
   {
     using cli::bolt::SpecArgs;
     using cli::bolt::spec_args;
-    const auto copy = runtime::PpHandoff::Copy, peer = runtime::PpHandoff::Peer;
     {
       for (const char* a : {"auto", "off"}) {   // Bolt's auto is off until box row 65's D5 (spec 26 §7)
         const SpecArgs s = spec_args(a, false, 0, false, "");
         CHECK(!s.on());
-        cli::bolt::check_spec(s, 2, peer);   // no proposer: any hand-off
+        cli::bolt::check_spec(s);
       }
       const SpecArgs s = spec_args("dflash", false, 0, false, "");
       CHECK(s.dflash() && s.draft_model == cli::bolt::kDefaultDrafter && !s.have_model);
       CHECK(s.format == loader::DraftFormat::Int8 && s.q == cli::bolt::BoltDraftQ::Lattice && s.max_k == 7);   // PROVISIONAL
-      cli::bolt::check_spec(s, 2, copy);
-      CHECK(refuses([&] { cli::bolt::check_spec(s, 2, peer); }, "copy hand-off only"));
-      cli::bolt::check_spec(s, 1, peer);   // one card: no hand-off
+      cli::bolt::check_spec(s);
       const SpecArgs m = spec_args("dflash", true, 3, true, "/snap/lilicorr");
       CHECK(m.max_k == 3 && m.have_model && m.draft_model == "/snap/lilicorr");
       const SpecArgs l = spec_args("lookup", false, 0, false, "");
       CHECK(l.lookup() && l.max_k == 7);
-      CHECK(refuses([&] { cli::bolt::check_spec(l, 2, peer); }, "copy hand-off only"));
+      cli::bolt::check_spec(l);
     }
     {   // cli::resolve_spec's refusals, by name
       CHECK(refuses([&] { spec_args("mtp", false, 0, false, ""); }, "Nemotron 3.5 Bolt has no MTP head"));
@@ -185,7 +182,7 @@ int main(int argc, char** argv) {
       SpecArgs t;   // a test seam's K outside the block, past spec_args
       t.spec = "lookup";
       t.max_k = 8;
-      CHECK(refuses([&] { cli::bolt::check_spec(t, 1, copy); }, "expects 1..7"));
+      CHECK(refuses([&] { cli::bolt::check_spec(t); }, "expects 1..7"));
     }
     {   // the tests' format seam: the LiLiCorr spellings
       for (const char* f : {"exact", "int8", "int4", "int4g64"}) {

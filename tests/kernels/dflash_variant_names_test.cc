@@ -86,6 +86,7 @@ int main(int argc, char** argv) {
         CHECK(std::find(names.begin(), names.end(), kd::topk_variant(248320, 248077, false)) == names.end());
         bound.insert(names.begin(), names.end());
       }
+  bound.insert(kd::proj_wide_variant());   // DFlashDrafter::project_wide
   int bad = 0;
   for (const std::string& v : bound)
     if (!fresh.count(v) && !reused.count(v)) {

@@ -21,8 +21,9 @@
 //   - Engine::commit(j, t) replays projection(pos, j + 1): rows 0..j of taps() - the committed positions - into the
 //     drafter's ring. Rows past j (the rejected drafts) are never projected; the newest token (t) has no tap yet - it
 //     is the next block's row 0;
-//   - Engine::prefill writes the taps of the prompt positions inside window() of its end and projects them, at most
-//     kernels' 8 rows a replay, through the same projection(pos, n) with taps() refilled per group;
+//   - Engine::prefill writes the taps of the prompt positions inside window() of its end and projects them a chunk's
+//     rows at once (project_wide), or where that is not built at most kernels' 8 rows a replay through the same
+//     projection(pos, n) with taps() refilled per group;
 //   - Engine::reset() calls reset(): the drafter's ring holds no position afterwards (a cold drafter);
 //   - spec 19d (decision 5, as ruled there): Engine::save_state / load_state carry the ring - save_ring / load_ring,
 //     ring_bytes() of it after the target's state - so a prefix-cache restore resumes the drafter exactly where the
@@ -32,6 +33,11 @@
 namespace runtime {
 
 class Engine;
+struct PrefillScratch;
+namespace prefill {
+class Context;
+class KernelCache;
+}
 
 // Spec 23f / 26c: the target engine's side of a drafter, apart from the proposer's - what an engine's verify lists,
 // commit, prefill, reset and snapshots need (the methods below up to key()). runtime::bolt::BoltEngine holds a TapSink
@@ -87,6 +93,14 @@ class TapDrafter : public TapSink {
                              uint32_t max_len, bool draft_vocab) = 0;
   virtual const dflash::DFlashDraftOut& draft_with(const std::function<void(l0::CmdList&)>& replay, uint32_t k,
                                                   float temperature, uint64_t seed) = 0;
+  // The prefill tail at prefill width: rows 0..n-1 of `taps` (bf16 [row][tap][hidden], the engine's staging - its
+  // rows up to n padded to 256 are read) are positions pos .. pos + n - 1, projected into the ring on `cx`'s list
+  // in one pass over the weights, in the chunk's dead scratch `s` (x, the slab, partials past the rows step_head
+  // still reads). Nothing is waited for: the caller waits before the ring is read. The ring rows agree with
+  // projection()'s within the GEMM's summation order, not bitwise. False, with nothing appended, when it is not
+  // built for the drafter's format (int4) - the caller projects through projection().
+  virtual bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const void* taps,
+                            uint32_t pos, uint32_t n) = 0;
   // False when the drafter drafts greedily only (a DFlash v1 drafter: its sampled q is a full-vocabulary softmax
   // the readback cannot carry) - a sampled request then decodes plainly.
   virtual bool samples() const = 0;

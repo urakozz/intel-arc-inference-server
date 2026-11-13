@@ -90,23 +90,22 @@ int main(int argc, char** argv) {
   const model::Qwen4ExpDesc& full = model::qwen4exp();
   const model::Q4Placement one = model::Q4Placement::one(full), two = model::Q4Placement::two(full, 24);
   const rq::Q4Attn fl = rq::Q4Attn::Flash, eg = rq::Q4Attn::Eager;
-  const runtime::PpHandoff cp = runtime::PpHandoff::Copy;
-  CHECK_EQ(rq::decode_launches(full, one, fl, cp), size_t(779));
+  CHECK_EQ(rq::decode_launches(full, one, fl), size_t(779));
   for (uint32_t M = 1; M <= rq::kVerifyRows; ++M) {
     const size_t want = 779 + (M > 1 ? 2 : 0) + 10 + M;
-    CHECK_EQ(rq::verify_launches(full, one, M, fl, cp), want);
-    CHECK_EQ(rq::verify_launches(full, one, M, eg, cp), want - 12);   // eager: one launch fewer a QSA layer
+    CHECK_EQ(rq::verify_launches(full, one, M, fl), want);
+    CHECK_EQ(rq::verify_launches(full, one, M, eg), want - 12);   // eager: one launch fewer a QSA layer
     // two cards: device 0 holds the PLE layer (+2 at M > 1) and ends with _Y_NN; device 1 the head pass
-    CHECK_EQ(rq::verify_device_launches(full, two, 0, M, fl, cp), rq::device_launches(full, two, 0, fl, cp) + (M > 1 ? 2 : 0));
-    CHECK_EQ(rq::verify_device_launches(full, two, 1, M, fl, cp), rq::device_launches(full, two, 1, fl, cp) + 10 + M);
+    CHECK_EQ(rq::verify_device_launches(full, two, 0, M, fl), rq::device_launches(full, two, 0, fl) + (M > 1 ? 2 : 0));
+    CHECK_EQ(rq::verify_device_launches(full, two, 1, M, fl), rq::device_launches(full, two, 1, fl) + 10 + M);
     std::printf("verify at M = %u: %zu launches at 48 layers on one card (%zu eager), %zu + %zu on two\n", M,
-                rq::verify_launches(full, one, M, fl, cp), rq::verify_launches(full, one, M, eg, cp),
-                rq::verify_device_launches(full, two, 0, M, fl, cp), rq::verify_device_launches(full, two, 1, M, fl, cp));
+                rq::verify_launches(full, one, M, fl), rq::verify_launches(full, one, M, eg),
+                rq::verify_device_launches(full, two, 0, M, fl), rq::verify_device_launches(full, two, 1, M, fl));
   }
   const model::Qwen4ExpDesc d4 = rq::truncated(full, 4);
-  CHECK_EQ(rq::decode_launches(d4, model::Q4Placement::one(d4), fl, cp), size_t(75));
-  CHECK_EQ(rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl, cp), size_t(75 + 11));
-  CHECK_EQ(rq::verify_launches(d4, model::Q4Placement::one(d4), 4, fl, cp), size_t(75 + 2 + 14));
+  CHECK_EQ(rq::decode_launches(d4, model::Q4Placement::one(d4), fl), size_t(75));
+  CHECK_EQ(rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl), size_t(75 + 11));
+  CHECK_EQ(rq::verify_launches(d4, model::Q4Placement::one(d4), 4, fl), size_t(75 + 2 + 14));
   CHECK_EQ(rq::draft_launches(fl, true), size_t(29));
   CHECK_EQ(rq::draft_launches(fl, false), size_t(27));
   CHECK_EQ(rq::draft_launches(eg, true), size_t(28));
@@ -119,10 +118,10 @@ int main(int argc, char** argv) {
   CHECK_EQ(rq::prefill_chunk_launches(d4, model::Q4Placement::one(d4), 0, 2048, false, true),
            rq::prefill_chunk_launches(d4, model::Q4Placement::one(d4), 0, 2048) + 26);
   std::printf("--layers 4: decode 75, verify at M = 1 / 4: %zu / %zu; a draft step 29 / 27 (step 0 / later, flash); "
-              "the prefill's head pass 26 a chunk\n", rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl, cp),
-              rq::verify_launches(d4, model::Q4Placement::one(d4), 4, fl, cp));
+              "the prefill's head pass 26 a chunk\n", rq::verify_launches(d4, model::Q4Placement::one(d4), 1, fl),
+              rq::verify_launches(d4, model::Q4Placement::one(d4), 4, fl));
   // an iteration at K drafts: K draft steps + the verify at M = K + 1 (K = 3 at 48 layers, one card, flash)
-  const size_t it3 = rq::draft_launches(fl, true) + 2 * rq::draft_launches(fl, false) + rq::verify_launches(full, one, 4, fl, cp);
+  const size_t it3 = rq::draft_launches(fl, true) + 2 * rq::draft_launches(fl, false) + rq::verify_launches(full, one, 4, fl);
   std::printf("an iteration at K = 3 (48 layers, one card, flash): %zu launches for up to 4 tokens (plain: 779 a token)\n", it3);
   std::puts("qwen4exp_mtp_names_test OK");
   return 0;

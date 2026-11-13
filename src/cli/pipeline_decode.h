@@ -76,7 +76,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
         "--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer 0 -> 1 "
-        "is false), and both hand-offs write it. Peer access needs the P2P-capable kernel and "
+        "is false), and the hand-off writes it. Peer access needs the P2P-capable kernel and "
         "both cards under one root complex (docs/10-the-box.md)");
 
   loader::LoadedModel full = [&] {
@@ -102,13 +102,12 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
     loader::set_max_len(d1, stages[1], len);
   }
   runtime::PipelineOptions opt;
-  opt.handoff = a.pipe.handoff;
   runtime::PipelineEngine eng(d0, d1, std::move(stages), len, opt, a.kv);
   std::fprintf(stderr,
-               "engine: --parallel pp, hand-off %s, split %u; device 0 layers [0, %u): %zu launches,"
+               "engine: --parallel pp, split %u; device 0 layers [0, %u): %zu launches,"
                " %zu modules; device 1 layers [%u, %u): %zu launches, %zu modules; max_len %u,"
                " decode attention %s, kv cache %s\n",
-               runtime::pp_handoff_name(eng.handoff()), eng.split(), eng.split(),
+               eng.split(), eng.split(),
                eng.step(0).kernel_count, eng.step(0).modules.size(), eng.stage(1).first,
                eng.stage(1).last, eng.step(1).kernel_count, eng.step(1).modules.size(),
                eng.max_len(), "v2",
@@ -186,8 +185,7 @@ int run_pipeline_decode(const PipelineDecodeArgs& a) {
   // The single-card row's columns; the tag names the configuration, so the rows of an
   // interleaved one-card / --parallel pp pair sort apart (spec 16b S1).
   const std::string tags = std::string(a.lm_head == loader::LmHeadForm::Int8 ? " int8-head" : "") +
-                           (a.kv == runtime::KvCache::Int8 ? " int8-kv" : "") + " pipeline2-" +
-                           runtime::pp_handoff_name(eng.handoff()) + "-s" +
+                           (a.kv == runtime::KvCache::Int8 ? " int8-kv" : "") + " pipeline2-copy-s" +
                            std::to_string(eng.split());
   std::printf("| b70-decode %s%s | %u | %u | %.2f | %.2f |\n", sha, tags.c_str(), a.depth, a.tg,
               eng.last_tok_per_s(), ms_per_token);

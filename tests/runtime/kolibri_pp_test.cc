@@ -1,11 +1,10 @@
 // Spec 20c Task 6: Kolibri-1 across two cards on spec 16b's pieces (box only; label checkpoint;kolibri;pp).
 //   kolibri_pp_test <synthetic checkpoint> <real checkpoint> <ids>
 //
-//   (a) the synthetic checkpoint: --pp 1 against --pp 2 --pipeline-split 3, under each hand-off (copy,
-//       peer): the prompt + 32 greedy tokens - the tokens, logits, route rows, every full layer's KV and
+//   (a) the synthetic checkpoint: --pp 1 against --pp 2 --pipeline-split 3: the prompt + 32 greedy tokens - the tokens, logits, route rows, every full layer's KV and
 //       every ring BITWISE equal (plan 20c Review Focus 5: the cut is invisible; a stale hand-off buffer -
 //       spec 16 §2's silent receive - shows here); both Control blocks equal after every phase
-//   (b) the real checkpoint (spec 20b), --pipeline-split 25 against 20, each hand-off: the same, bitwise
+//   (b) the real checkpoint (spec 20b), --pipeline-split 25 against 20: the same, bitwise
 //   (c) P4: drop_next_handoff() - the step throws within the bounds (never hangs), every later step
 //       throws until reset(), and after reset() the run is again bitwise (a)'s
 //   (d) replay determinism on two cards: two runs bitwise
@@ -65,18 +64,16 @@ Snapshot run(runtime::kolibri::KolibriEngine& e, const std::vector<uint32_t>& id
 }
 
 Snapshot with(kolibri_rig::Rig& rig, const std::string& snap, const std::vector<uint32_t>& ids, uint32_t devices,
-              uint32_t split, runtime::PpHandoff h) {
+              uint32_t split) {
   kolibri_rig::Options o;
   o.max_len = kMaxLen;
   o.devices = devices;
   o.split = split;
-  o.handoff = h;
   o.timeout_ms = 5000;   // P4's lost hand-off fails within 5 s, not the default 30
   kolibri_rig::build(rig, snap, o);
   const Snapshot s = run(*rig.eng, ids);
   std::printf("  %s: %u device(s)%s, %zu launches, tokens", snap.c_str(), devices,
-              devices == 2 ? (std::string(", split ") + std::to_string(rig.eng->split()) + " " +
-                              runtime::pp_handoff_name(rig.eng->handoff())).c_str() : "",
+              devices == 2 ? (std::string(", split ") + std::to_string(rig.eng->split())).c_str() : "",
               rig.eng->launches());
   for (uint32_t i = 0; i < 6; ++i) std::printf(" %u", s.tokens[i]);
   std::printf(" ...\n");
@@ -98,13 +95,12 @@ int main(int argc, char** argv) {
   const std::vector<uint32_t> ids = kolibri_rig::read_ids(argc > 3 ? argv[3] : "", 128000);
   CHECK(!ids.empty());
   kolibri_rig::Rig rig;
-  const runtime::PpHandoff hs[] = {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer};
 
-  // (a) one card against two, each hand-off
+  // (a) one card against two
   std::printf("(a) synthetic: --pp 1 against --pp 2 --pipeline-split 3\n");
-  const Snapshot one = with(rig, synth, ids, 1, 0, runtime::kDefaultPpHandoff);
-  for (runtime::PpHandoff h : hs) {
-    const Snapshot two = with(rig, synth, ids, 2, 3, h);
+  const Snapshot one = with(rig, synth, ids, 1, 0);
+  {
+    const Snapshot two = with(rig, synth, ids, 2, 3);
     CHECK(two == one);
     // (d) replay determinism on two cards
     CHECK(run(*rig.eng, ids) == two);
@@ -116,7 +112,7 @@ int main(int argc, char** argv) {
       rig.eng->ingest({ids[1]});
     } catch (const std::runtime_error& e) {
       threw = true;
-      std::printf("  P4 (%s): %s\n", runtime::pp_handoff_name(h), e.what());
+      std::printf("  P4: %s\n", e.what());
     }
     CHECK(threw);
     threw = false;
@@ -133,11 +129,9 @@ int main(int argc, char** argv) {
     std::printf("(b) SKIP: no real Kolibri-1 checkpoint at '%s' (spec 20b)\n", argc > 2 ? argv[2] : "");
   } else {
     std::printf("(b) real: --pipeline-split 25 against 20\n");
-    for (runtime::PpHandoff h : hs) {
-      const Snapshot a = with(rig, real, ids, 2, 25, h);
-      const Snapshot b = with(rig, real, ids, 2, 20, h);
-      CHECK(a == b);
-    }
+    const Snapshot a = with(rig, real, ids, 2, 25);
+    const Snapshot b = with(rig, real, ids, 2, 20);
+    CHECK(a == b);
   }
   std::puts("kolibri_pp_test OK");
   return 0;

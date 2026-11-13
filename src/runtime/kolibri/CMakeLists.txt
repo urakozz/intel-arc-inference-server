@@ -10,7 +10,7 @@ target_include_directories(b70_kolibri_plan PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_kolibri_plan PUBLIC b70_kolibri_model b70_plan)
 
 # b70_kolibri_runtime: the buffers, the capture and the decode loop on one or two devices - Level Zero.
-# It links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink, the pp_handoff binary).
+# It links b70_runtime for spec 16b's pieces (runtime::PipelineLink, StageLink).
 add_library(b70_kolibri_runtime STATIC kolibri_buffers.cc kolibri_capture.cc kolibri_engine.cc)
 target_include_directories(b70_kolibri_runtime PUBLIC ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(b70_kolibri_runtime PUBLIC b70_l0 b70_kolibri_loader b70_kolibri_plan b70_runtime)

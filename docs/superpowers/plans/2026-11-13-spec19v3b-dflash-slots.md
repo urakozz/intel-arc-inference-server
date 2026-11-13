@@ -23,7 +23,16 @@ equal to `--spec off` in the same mode.
 - with several requests active, one batched draft pass whose 8 rows are shared by the active slots' blocks, the
   taps of every row of the row list, and a rows projection that stores each committed row in its own slot's ring.
 
-**Order and why:** Task 1 is arithmetic on numbers already on the box and decides whether the plan runs at all. Tasks
+**The slots' KV in large pages (operator 2026-11-13; Task 0):** each slot's full-attention KV is held as 2048-token
+pages listed in a per-slot page table on the card, instead of one contiguous range at a slot base. 2048 is the
+prefill chunk and the prefix cache's snapshot stride, so a page boundary is a chunk boundary. With slots the table is
+filled once at startup and never changes, so behaviour is today's. The point is the next step: a shared context
+pool in the style of vLLM's then becomes an allocator and scheduler change: pages handed out on demand, reference
+counts for shared prefix pages, preemption by recompute. It is not a kernel rewrite. Only the 16 full-attention layers' KV is paged; the GDN
+states, the conv ring and the drafter's ring stay fixed per slot. The pool itself is not in this plan.
+
+**Order and why:** Task 0 is the KV layout. It is independent of DFlash and runs first, and it is not covered by
+Task 1's stop rule. Task 1 is arithmetic on numbers already on the box and decides whether the plan runs at all. Tasks
 2-4 make a lone request work in a slots server (the gain). Tasks 5-6 add the batched draft (so several requests are
 not slower than MTP). Task 7 is serving and the record.
 
@@ -54,6 +63,38 @@ not slower than MTP). Task 7 is serving and the record.
   warm-up, median of rounds, the grade written next to the number.
 
 ---
+
+### Task 0: the slots' KV in 2048-token pages (box; independent of the DFlash tasks)
+
+**Files (the agent confirms the list with a grep for the KV base binding first):**
+- `src/runtime/buffer_sizes.{h,cc}`, `src/runtime/memory_plan.{h,cc}`: every slot's KV rounded to whole pages; the
+  page-table buffer (one table a slot, shared by the 16 full-attention layers: page p of layer l is at
+  `layer_base[l] + table[p] * page_bytes`).
+- `src/runtime/engine.{h,cc}`, `src/runtime/capture.{h,cc}`: captured lists bind the slot's page table instead of a
+  KV base. `setup_slots` fills each table once (slot q's pages are today's contiguous range, so the table is the
+  identity at q's offset).
+- The kernels that read or write the full-attention KV, in bf16 and in the `kv8` int8 forms: the KV append, decode
+  attention (`attn_v2`), the verify kernels (`attn_prep` / `attn_v2` / `attn_verify_dpas` at M 1..8), and the prefill
+  flash attention. Each looks up a page base once per 2048 keys. A work-group's key range must not cross a page,
+  so any key split is aligned to 2048.
+- The prefix cache: store and restore walk pages. The snapshot format and cache key are unchanged while one slot's
+  pages are contiguous.
+- Tests: `slots_test` and `slot_plan_test` gain a scattered page table (pages of slot 1 interleaved with slot 0's)
+  that must give the same ids as the contiguous one.
+
+- [ ] **Step 1:** the plan and the table, host tests first (`slot_plan_test`, `memory_plan_test`): the layouts
+  printed for 1/2/4 slots, bf16 and int8, lose at most one page a slot to rounding.
+- [ ] **Step 2 (box):** the kernels and the bindings. Run the slot, MTP, DFlash, int8 KV, prefix cache, TP and
+  replica GPU tests (`slots_test`, `mtp_gpu_test`, `mtp_gpu_kv8_test`, `dflash_gpu_test`, `dflash_prefix_gpu_test`,
+  `dflash_prefix_gpu_kv8_test`, the TP slots tests).
+  - **Gate:**
+    - **bitwise ids** against main for one request, and for each slot with an identity table and with a scattered
+      one. If a kernel's key split cannot be aligned without changing its summation order, its tests go to the f32
+      judge and the record says which kernel.
+    - decode and the 8-row check at 4k / 32k / 128k context **not slower than 1 %**, measured as interleaved pairs
+      after a warm-up, on one card.
+  - Commit `kv: the slots' full-attention KV in 2048-token pages behind a per-slot page table`.
+- [ ] **Step 3:** merge on its own: it does not wait for the DFlash tasks.
 
 ### Task 1: is it worth it? (host arithmetic, no GPU)
 

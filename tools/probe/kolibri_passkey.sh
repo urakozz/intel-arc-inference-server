@@ -12,7 +12,7 @@
 # 3/3 (the gate: 3/3 with the int8 head).
 # Env: MODEL (the int4 checkpoint, spec 20b), ORACLE_MODEL (its HF cache dir, for the tokenizer), MAX_LEN
 # (262144: spec 20 decision 3's ceiling), N_TARGET (260000 prompt ids: 8 generated fit under MAX_LEN),
-# DECODE_ARGS (extra b70-decode flags, e.g. '--pipeline-handoff peer'), ZE_AFFINITY_MASK (0,1: both cards).
+# DECODE_ARGS (extra b70-decode flags, e.g. '--pipeline-split 25'), ZE_AFFINITY_MASK (0,1: both cards).
 # Hold ~/b70-gpu.lock (flock) around it on a shared box; it runs for a while (three ~260k prefills).
 cd "$(dirname "$0")/../.." || exit 2
 MODEL="${MODEL:-urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ}"

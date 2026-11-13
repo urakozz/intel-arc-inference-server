@@ -119,17 +119,14 @@ void engine_flags_case() {
   a.on = true;
   for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
     cli::dflash::check_engine(a, false, kv);
-    cli::dflash::check_engine(a, true, kv, true, false);
-    for (bool peer : {false, true}) {
-      bool threw = false;
-      try {
-        cli::dflash::check_engine(a, true, kv, peer, peer);
-      } catch (const std::runtime_error& e) {
-        threw = std::string(e.what()).find(peer ? "needs --pipeline-handoff copy" : "runs on one card") !=
-                std::string::npos;
-      }
-      CHECK(threw);
+    cli::dflash::check_engine(a, true, kv, true);
+    bool threw = false;
+    try {
+      cli::dflash::check_engine(a, true, kv, false);
+    } catch (const std::runtime_error& e) {
+      threw = std::string(e.what()).find("runs on one card") != std::string::npos;
     }
+    CHECK(threw);
   }
 }
 

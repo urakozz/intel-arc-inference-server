@@ -269,3 +269,15 @@ plan is 32 references / 26 groups, estimated 140.6 CPU hours before chunk/stream
 operator's budget choice. No model or GPU job is left running. No default promotion; item12 stays open.
 Final machine result: `~/b70/logs/dflash-v2/task8/main-0b5ef628/gates-after-core-refs.json`. Full tables are in
 BENCHMARKS; the missing-reference plan is `task8-final-ref-plan-v7/{plan.log,summary.json}` in the same log topic.
+
+**pp4096 fixed (2026-11-13, branch `dflash-pf-projection`).** The cause is measured: `Engine::drafter_project_staged`
+projected the drafter's 2,048 prompt rows 8 at a time (256 submits), 131.93 ms median per 4,097-token prompt - the
+whole gap. It now runs once per prefill chunk through the prefill GEMM (`runtime::dflash::project_wide`,
+`df_proj_wide.cl`). The resulting drafter context matches the 8-row path within bf16 rounding (worst row relative
+L2 1.33e-3, about 99 % of the values bitwise; `dflash_draft_test` bar 2e-3). Interleaved arms after a warm-up,
+3 rounds of 3 runs each, server prompt-pass medians: DFlash before 2617.75 ms, DFlash after 2497.05 ms, MTP
+2498.65 ms; projection 131.93 → 13.43 ms; llama-benchy pp4096 medians 1494.58 / 1588.04 / 1566.64 t/s. DFlash's
+prompt pass is now level with MTP (0.9994x its time), inside the 3 % bar. The measurement held the whole box, with
+the server on device 0. The box was busy: CPU reference work was running (a `qwen_forced.py` docker job was up at
+the end), and other trees' card jobs waited for the lock. Evidence: `~/b70/logs/dflash-pf-projection/timing.log`,
+`timing/`, `timing-context.log`.

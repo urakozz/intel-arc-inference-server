@@ -191,8 +191,8 @@ a first-class path in Intel's own kernel library either.
 The box has two B70s on PCIe 3.0 x16, in a Broadwell-EP host with 121 GB of RAM. Peer-to-peer access (P2P: one
 card writing straight into the other's memory over PCIe, without bouncing through host RAM) works natively on
 the mainline Linux 7.4.0-rc2 kernel; earlier kernels needed a local patch. The engine uses it for the
-pipeline-parallel hand-off of the hidden state (`--pipeline-handoff peer`; `copy` is the default) and for the
-two-card tensor-parallel runs. The second card is not interchangeable with the first: prefill runs 3.2-3.4%
+pipeline-parallel hand-off of the hidden state (a device-to-device copy into the second card's memory) and for
+the two-card tensor-parallel runs. The second card is not interchangeable with the first: prefill runs 3.2-3.4%
 slower on it ([10-the-box.md](10-the-box.md)).
 
 The card's firmware caps each card's BAR (the window the CPU sees its memory through) at 16 GB (ReBarState 14;
