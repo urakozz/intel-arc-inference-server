@@ -21,6 +21,11 @@ inline const std::vector<kernels::SmallMTuning>& lever_rows() {
       {5120, 34816, 8, 0, false, true, false, false},    // gate||up  grid S 8 + magic (the first table's row)
       {17408, 5120, 4, 0, false, false, false, true},    // down  base
       {5120, 248320, 1, 2, false, false, false, false},  // the int8 head  base (grid, 4 x 16 columns)
+      // Spec 19 v3d Task 4: the two shapes whose excess at 8 rows clears 0.3 ms, around their production rows
+      {6144, 5120, 4, 0, false, true, true, true},       // out_proj / o_proj  production + 256 GRF
+      {6144, 5120, 4, 0, false, true, false, false},     // out_proj / o_proj  production without the 2D read
+      {5120, 34816, 8, 0, true, true, true, false},      // gate||up  production (2x8) + 256 GRF
+      {5120, 34816, 8, 0, true, true, false, true},      // gate||up  production (2x8) + the 2D read
   };
   return v;
 }
