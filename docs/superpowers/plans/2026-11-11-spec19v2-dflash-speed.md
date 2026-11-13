@@ -5,8 +5,9 @@ CPU G-accept and 39/39 serving correctness PASS. The **80.5 t/s early bar PASSED
 3-7 and 7b. Operator update: Task 8 may use one idle card while the other is busy, provided more than 16 of
 44 CPU threads are available. Label those measurements "busy box". Compare against main's per-step MTP (`f65ae50e`
 or later), enabled by default for `--mtp auto`. Main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass.
-Fresh G0 precedes a new quiet-box Task 8 collection; the pre-merge busy-box timings remain historical.
-Heavy CPU references resume from their persistent checkpoint after GPU collection and lock release.
+Fresh G0 precedes a new Task 8 collection; the pre-merge timings remain historical.
+The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26); grade any
+overlapping timings busy-box, retaining the >16-free-thread guard and the whole-box GPU reservation.
 Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
@@ -223,6 +224,11 @@ int8 body with the selected head/geometry in Task 8; this does not close C2 or q
   AutoRound follow-up; this pass does not qualify the failed RTN arm.
 
 ### Task 8: the bar (one idle GPU) - G-speed
+
+A pre-collection reset fix (2026-11-13) moves the immutable RoPE table out of `DFlashBuffers::zero()` and
+into construction. The new device regression fails before the fix and passes after it; reset at 131072 rows
+measures 244.426 → 0.179 ms in that focused check, with initial RoPE bitwise the independent twin and mutable
+ring/control/readback still cleared. Seven selected checks pass. Real-engine and final serving gates follow.
 
 - [ ] **Step 1:** Task 7b's three-arm replay harness on the branch head, one idle GPU, both other recordings as
   checks. Operator permits the other card to be busy if more than 16 of 44 CPU threads are available; verify

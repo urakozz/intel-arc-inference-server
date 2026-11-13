@@ -225,6 +225,15 @@ recording's three rotations measure 0.7986995x default per-step MTP and 1.162966
 mixed cards; the last MTP arm overlaps CPU references). This is not a passed speed gate.
 
 **2026-11-13:** main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass. Fresh G0
-precedes a new quiet-box Task 8 dataset (`~/b70/logs/dflash-v2/task8/main-0b5ef628`), with all three recordings,
+precedes a new Task 8 dataset (`~/b70/logs/dflash-v2/task8/main-0b5ef628`), with all three recordings,
 rotated arms, corpora and the actual candidate-head PP path. The old timings are not reused across the binary
-change. Heavy CPU references resume from the persistent checkpoint only after GPU collection and lock release.
+change. The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26);
+overlapping timings are busy-box even though both GPUs are reserved.
+
+A further cold-request bottleneck is isolated before the new collection: DFlash rebuilds its immutable
+131072-row RoPE table in every reset. Historical prefix logs show cold reset 324–332 ms versus MTP 7–8 ms,
+while prompt processing is nearly equal (96 versus 93 ms). Moving table generation/upload to construction
+reduces the focused buffer reset 244.426 → 0.179 ms. A new device regression fails before the change and
+passes after it, checking initial RoPE against the independent twin, immutable-table preservation across
+reset and zeroed ring/control/readback. Seven selected checks pass; real-engine and final serving gates
+remain pending. This addresses cold-request overhead; the measured draft/verify C7 costs remain failed.

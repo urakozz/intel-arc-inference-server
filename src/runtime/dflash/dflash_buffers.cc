@@ -41,6 +41,8 @@ DFlashBuffers::DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint3
   if (sz.hid) hid = std::make_unique<l0::Mem>(ctx, l0::MemKind::Device, sz.hid);
   l0::CmdList imm = l0::CmdList::immediate(ctx);
   zero(imm);
+  const std::vector<float> t = rope_table(desc.theta, desc.head_dim, max_len + kernels::dflash::kM);
+  imm.copy(rope.ptr(), t.data(), t.size() * 4);
 }
 
 size_t DFlashBuffers::bytes() const {
@@ -63,8 +65,6 @@ void DFlashBuffers::zero(l0::CmdList& imm) {
   if (candidate) imm.fill(candidate->ptr(), 0u, candidate->size());
   std::memset(dctl.ptr(), 0, dctl.size());
   std::memset(out.ptr(), 0, out.size());
-  const std::vector<float> t = rope_table(desc.theta, desc.head_dim, max_len + kernels::dflash::kM);
-  imm.copy(rope.ptr(), t.data(), t.size() * 4);
 }
 
 }  // namespace runtime::dflash

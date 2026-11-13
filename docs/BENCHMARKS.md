@@ -1169,8 +1169,24 @@ At the GPU handoff, the next baseline calibration was interrupted: 2463 complete
 4256-row baseline, with one truncated line. This is **partial, not a passed calibration**; it is archived under
 `paused-2026-11-12T1523/` beside `calibration-status.json`. That partial run is superseded by the complete 4256-row calibration and all 35 acceptance rows below.
 The full int8 H1/B4 numerical check also passes. Main `0b5ef628` is merged at `b5bb4044`; fresh G0 and a new
-quiet-box Task 8 collection follow the successful merged build and six host checks. Pre-merge serving timings
-remain historical. Heavy CPU judging resumes only after GPU collection and lock release.
+Task 8 collection follow the successful merged build and six host checks. Pre-merge serving timings
+remain historical. The operator restarted CPU judging during G0 (69 GiB, eight threads, saved layer 26);
+overlapping timings are busy-box despite the whole-box GPU reservation.
+
+### Cold-request reset (2026-11-13)
+
+The pre-merge replay contains 30 one-token requests among its 78 requests. Their median DFlash TTFT is
+507.9 ms versus MTP's 151.1 ms in round 1. Saved prefix logs isolate DFlash's cold reset at 324–332 ms,
+versus 7–8 ms for MTP; prompt processing itself is 96 ms versus 93 ms. `DFlashBuffers::zero()` was rebuilding
+and uploading the entire 131072-row RoPE table on every cold request.
+
+Generating and uploading that immutable table once at construction reduces the focused buffer reset from
+244.426 to **0.179 ms** on card0 (whole-box GPU reservation, CPU references/compiler active). The device
+regression first fails when reset overwrites guards in the immutable allocation, then passes after the move;
+initial RoPE matches the independent twin bitwise and the ring, control and readback still reset to zero.
+Seven selected checks pass. This is a buffer measurement, not an end-to-end serving speed claim; the new
+real-engine check and full rotated replay remain pending. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
+and the completed test's `build/Testing/Temporary/LastTest.log`.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
