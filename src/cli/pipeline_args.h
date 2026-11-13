@@ -205,8 +205,8 @@ inline void check_one_request_a_card(const PipelineArgs& a, uint32_t n, const st
                            "built for Qwen3.8 only); " + model + " runs one request a card - --max-num-seqs 2 on two "
                            "cards (--parallel replica), or 1");
 }
-// The override flags belong to pp; DFlash per card is spec 19's (not built for replica).
-inline void check_replica_flags(const PipelineArgs& a, bool dflash) {
+// The override flags belong to pp; --spec dflash runs a drafter on each card, lookup inside DFlash is one card's.
+inline void check_replica_flags(const PipelineArgs& a, bool dflash_lookup) {
   if (!a.replica()) return;
   if (a.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel "
@@ -214,9 +214,9 @@ inline void check_replica_flags(const PipelineArgs& a, bool dflash) {
   if (a.have_handoff)
     throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses); --parallel "
                              "replica's cards exchange nothing");
-  if (dflash)
-    throw std::runtime_error("--parallel replica serves --spec off, mtp or lookup (spec 13b); --spec dflash / "
-                             "dflash-lookup run on one card or --parallel pp");
+  if (dflash_lookup)
+    throw std::runtime_error("--parallel replica serves --spec off, mtp, lookup or dflash; --spec dflash-lookup is "
+                             "built for one card (spec 19f) - --spec dflash, or --parallel 1");
 }
 // b70-decode runs one sequence: two requests at once is the server's.
 inline void refuse_replica_in_decode(const PipelineArgs& a) {

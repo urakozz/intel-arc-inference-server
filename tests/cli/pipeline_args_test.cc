@@ -82,7 +82,7 @@ void check_parse() {
   CHECK(says([] { cli::require_two_devices_for_replica(1); }, "--parallel replica needs two GPUs"));
   cli::require_two_devices_for_replica(2);
   cli::check_replica_flags(p, false);
-  CHECK(says([&] { cli::check_replica_flags(p, true); }, "--parallel replica serves --spec off, mtp or lookup"));
+  CHECK(says([&] { cli::check_replica_flags(p, true); }, "--spec dflash-lookup is built for one card"));
   cli::PipelineArgs rs = p;
   cli::parse_pipeline_split("20", rs);
   cli::resolve_overrides(rs);

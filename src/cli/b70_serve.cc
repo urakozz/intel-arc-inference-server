@@ -135,7 +135,8 @@ void usage() {
                "                  Nemotron 3.5 Bolt run on two cards by default (the model needs both).\n"
                "                  replica (Qwen3.8, Ornith): the model on both cards, one engine each -\n"
                "                  --max-num-seqs 2 to 8 (Ornith: 2; 2 when not given: one request a card), each\n"
-               "                  exactly what it is alone.\n"
+               "                  exactly what it is alone; Qwen3.8's --spec dflash: a drafter on each card,\n"
+               "                  --max-num-seqs 2.\n"
                "                  tp (Qwen3.8, spec 17): every layer split over both cards (needs peer\n"
                "                  access) - one request at a time, faster; --spec auto / mtp / lookup.\n"
                "  --pipeline-split auto|N   pp: device 0 runs layers [0, N) (auto: the split whose heavier card\n"
@@ -900,7 +901,8 @@ int serve_tp(const TpServe& a, server::Options options) {
 // server::Scheduler: two requests at once, each bitwise what it is alone on its card. Both cards are views of ONE
 // Level Zero context (spec 16 decision 1) so the prefix cache's pinned host store is device-visible to both - a
 // snapshot saved by card 0 gives a prefix cache hit on card 1; nothing else crosses (no peer access is used). The refusals
-// (another model, one visible card, the pp override flags, DFlash) ran in run(), before the device.
+// (another model, one visible card, the pp override flags, lookup inside DFlash) ran in run(), before the device.
+// --spec dflash: each card loads its own drafter beside its engine, as on one card (one slot a card).
 // Replica x slots (2026-11-10; --max-num-seqs, operator 2026-11-11): --max-num-seqs N splits between the cards (card 0
 // the odd one); a card's slots are plan 13c's (cli::settle_slots over that card's own memory), and a card with
 // several is a cli::SlotsEngine behind the replica engine - N requests at once.
@@ -922,6 +924,7 @@ struct ReplicaServe {
   uint32_t prefix_cache_gb = 0;
   std::vector<uint32_t> eos;
   uint32_t max_num_seqs = 2;
+  cli::dflash::Args dflash;   // --spec dflash: a drafter on each card
 };
 
 int serve_replica(const ReplicaServe& a, server::Options options) {
@@ -932,6 +935,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
                        "context; no peer access used]\n",
                d0.name().c_str(), d0.eu_count(), d1.name().c_str(), d1.eu_count());
   std::array<l0::Context*, 2> ctx{&d0, &d1};
+  std::vector<std::unique_ptr<runtime::dflash::DFlashDrafter>> drafters;   // outlive the engines, as on one card
   std::vector<std::unique_ptr<runtime::Engine>> engines;
   std::vector<uint32_t> lens, caps;
   std::vector<std::vector<uint32_t>> layouts;   // per card: its slots' lengths
@@ -946,6 +950,10 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     if (!cli::replica_architecture(model.desc->architecture))   // run() read config.json; the loader is the truth
       throw std::runtime_error("--parallel replica serves Qwen3.8 and Ornith only (spec 13b); this checkpoint loads as " +
                                model.desc->name);
+    // Spec 19c on this card: the drafter beside the target, before the card's plan.
+    std::unique_ptr<cli::dflash::Loaded> drafter_load;
+    if (a.dflash.on) drafter_load = std::make_unique<cli::dflash::Loaded>(cli::dflash::load(c, a.dflash, model));
+    const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
     runtime::PrefillPath pf = a.pp_path;
     pf.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
     const uint32_t seqs = (a.max_num_seqs + 1 - i) / 2;   // card 0 the odd one
@@ -956,15 +964,22 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
       slot_lens = cli::settle_slots(c, model, a.max_len_arg, seqs, a.mem_reserve, pf, a.kv_cache);
       for (uint32_t l : slot_lens) max_len += l;   // one RoPE table, one KV allocation at the slots' sum
     } else {
-      max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache);
+      max_len = cli::settle(c, model, a.max_len_arg, a.mem_reserve, pf, a.kv_cache, drafter_plan);
       slot_lens = {max_len};
     }
-    const uint32_t chunk_cap = cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, {}, 0);
+    const uint32_t chunk_cap =
+        cli::settle_chunk_cap(c, model, slot_lens, a.mem_reserve, pf, a.kv_cache, drafter_plan, 0);
     std::fprintf(stderr, "card %u: slots: %zu (%s)\n", i, slot_lens.size(),
                  runtime::slot_layout_name(slot_lens).c_str());
+    std::unique_ptr<runtime::dflash::DFlashDrafter> drafter;
+    if (drafter_load)
+      drafter = std::make_unique<runtime::dflash::DFlashDrafter>(c, std::move(drafter_load->w), drafter_load->head_rows,
+                                                                 max_len, a.dflash.max_k);
+    const bool draft_vocab_on = model.draft_vocab != nullptr;
     auto engine = std::make_unique<runtime::Engine>(c, std::move(model), max_len, /*debug_resid=*/false, a.kv_cache,
-                                                    /*drafter=*/nullptr,
+                                                    drafter.get(),
                                                     slot_lens.size() > 1 ? slot_lens : std::vector<uint32_t>{});
+    if (drafter) drafter->attach(*engine, draft_vocab_on);
     if (a.have_pp_backend) engine->set_prefill_backend(a.pp_backend);
     engine->set_prefill_chunk_cap(chunk_cap);   // plan 5d
     engine->prepare_prefill();
@@ -973,6 +988,7 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
     lens.push_back(slot_lens[0]);
     caps.push_back(chunk_cap);
     layouts.push_back(slot_lens);
+    drafters.push_back(std::move(drafter));
     engines.push_back(std::move(engine));
   }
   TokAdapter tokenizer(a.snapshot_dir + "tokenizer.json");
@@ -994,7 +1010,9 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
           std::make_unique<cli::SlotsEngine>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup, hooked));
       cards.push_back({nullptr, caps[i], slots_engines.back().get()});
     } else {
-      adapters.push_back(std::make_unique<EngineAdapter>(e, tokenizer.vocab_used(), a.mtp_k, a.spec_lookup));
+      adapters.push_back(std::make_unique<EngineAdapter>(e, tokenizer.vocab_used(),
+                                                         a.dflash.on ? a.dflash.max_k : a.mtp_k, a.spec_lookup,
+                                                         a.dflash.on));
       cards.push_back({adapters.back().get(), caps[i], nullptr});
     }
     requests += e.slots();
@@ -1015,6 +1033,15 @@ int serve_replica(const ReplicaServe& a, server::Options options) {
                loader::lm_head_form_name(a.lm_head), runtime::kv_cache_name(engines[0]->kv_cache()));
   print_proposer(options, a.spec_lookup, options.lookup_min_match, a.spec_max, options.lookup_history, a.mtp_auto,
                  engines[0]->model().desc->is_moe(), engines[0]->model().desc->name);
+  for (uint32_t i = 0; a.dflash.on && i < 2; ++i) {   // spec 19c: each card's drafter policy line, as on one card
+    const server::MtpCost& c = options.mtp_adaptive.cost;
+    std::fprintf(stderr, "card %u: spec dflash: %s drafter, K <= %u, cost verify M=1..%zu", i,
+                 loader::draft_format_name(a.dflash.format), a.dflash.max_k, c.verify.size());
+    for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
+    for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
+    std::fprintf(stderr, " (plain steps)\n");
+  }
   return listen_until_stopped(server, options);
 }
 
@@ -1138,7 +1165,7 @@ int run(int argc, char** argv) {
   // weight file.
   std::string architecture, name;
   if (pipe.replica() || pipe.tp() || max_num_seqs > 1) {
-    if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash=*/false);
+    if (pipe.replica()) cli::check_replica_flags(pipe, /*dflash_lookup=*/false);
     try {
       const std::string snap = loader::resolve_snapshot(path);
       if (std::ifstream cf(snap + "config.json"); cf) {
@@ -1265,7 +1292,7 @@ int run(int argc, char** argv) {
   // Spec 19c: bf16 KV, attention v2; spec 19d: pipeline parallel on the copy hand-off.
   cli::dflash::check_engine(dflash, pipe.on(), kv_cache, /*pipeline_served=*/true,
                             pipe.handoff == runtime::PpHandoff::Peer);
-  cli::check_replica_flags(pipe, dflash.on);   // plan 13b: --spec dflash / dflash-lookup are not built for replica
+  cli::check_replica_flags(pipe, dflash_lookup);   // replica serves --spec dflash, not lookup inside it
   // --max-num-seqs: a card's several slots run beside no drafter and no draft vocabulary (not built).
   if (max_num_seqs > (pipe.replica() ? 2u : 1u) && (dflash.on || draft_vocab != 0 || !draft_vocab_ids.empty()))
     throw std::runtime_error("--max-num-seqs " + std::to_string(max_num_seqs) +
@@ -1465,6 +1492,7 @@ int run(int argc, char** argv) {
     rs.prefix_cache_gb = prefix_cache_gb;
     rs.eos = eos;
     rs.max_num_seqs = max_num_seqs;
+    rs.dflash = dflash;
     return serve_replica(rs, options);
   }
   // --parallel auto (the zero-config cleanup): one card when the model and the asked context fit it, else
