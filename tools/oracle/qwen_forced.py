@@ -2,7 +2,7 @@
 """Qwen3.8's f32 judges of the forced contexts (spec 28 N4 / N6, tests/server/spec_judge.h), on the CPU.
 
     qwen_forced.py run <snapshot> --ctx DIR [--ctx DIR ...] --out DIR --out-i8head DIR
-                   [--memory-gib 64] [--chunk-rows 256] [--i8head-re REGEX] [--pfi8-re REGEX] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
+                   [--memory-gib 64] [--chunk-rows 256] [--i8head-re REGEX] [--pfi8-re REGEX] [--kv8] [--match REGEX] [--done FILE] [--work DIR] [--dry-run]
     qwen_forced.py plan --ctx DIR [--ctx DIR ...] [--pfi8-re REGEX] [--match REGEX] [--done FILE]
 
 A context is tests/golden/forced_judge.h's dump: <key>.prompt.ids and <key>.force.ids (B70_DUMP_FORCED). Its judge
@@ -25,6 +25,13 @@ per-column int8 codes, de-quantised; each weight's fq_w once per layer). What th
 mixer linears; in_proj_a / in_proj_b: pf_ab_proj; the head). The positions after
 the test's prompt are the engine's M = 1 decode rows and stay plain f32. A trie node is a (token, prompt pass) pair, so
 a position is shared only by contexts that computed it the same way.
+
+--kv8 (the int8 KV cache's tests: mtp_gpu_kv8_test, dflash_gpu_kv8_test - `--kv-cache int8`): every context of the
+run reads its full-attention K and V as the int8 cache gives them back - int8_sim.kv8_fq on each (position, kv head)
+row of the roped K and of V: rounded to bf16, rotated, int8 with an fp16 scale, de-quantised, un-rotated (bitwise
+src/common/kv8.h's codes and scales: tests/common/kv8_sim_test.cc). Every position, prompt and decode alike: the
+prefill's flash and the decode / verify attention all read the int8 rows. The rest (q, scores, softmax, GDN) stays
+f32. A whole run is one KV form - its outputs go to their own dirs (f32_refs.sh forced-qwen-kv8 / -pfi8-kv8).
 
 Why not one teacher-forced run per context (f32_ref_job.sh / ornith_ref.py): the spec tests' ~250 contexts are
 ~450k ids, but they are a few prompts each continued a few ways - a token TRIE of all of them holds ~48k distinct
@@ -423,9 +430,10 @@ def _anc_index(trie, s):
     return torch.cat(parts) if parts else torch.zeros(0, dtype=torch.long)
 
 
-def attention(A, h, trie, cos, sin, M, q8=None):
+def attention(A, h, trie, cos, sin, M, q8=None, kv8=False):
     """Qwen3_5Attention over the trie: q / k / v / gate token-parallel, softmax(q k^T * scale) v per segment over
-    its ancestors' and its own (causal) positions, f32. `q8`: the int8 prompt pass's linears (Int8Pass)."""
+    its ancestors' and its own (causal) positions, f32. `q8`: the int8 prompt pass's linears (Int8Pass); `kv8`: K and V
+    through the int8 cache (int8_sim.kv8_fq)."""
     import torch
     q8 = q8 or Int8Pass(None)
     N, hd = h.shape[0], A.head_dim
@@ -437,6 +445,9 @@ def attention(A, h, trie, cos, sin, M, q8=None):
     v = q8.rows(A.v_proj, h).view(N, -1, hd)
     q, k = M.apply_rotary_pos_emb(q.transpose(0, 1)[None], k.transpose(0, 1)[None], cos, sin)
     q, k, v = q[0], k[0], v.transpose(0, 1).contiguous()        # [heads, N, hd]
+    if kv8:
+        I8 = _load("int8_sim")
+        k, v = I8.kv8_fq(k), I8.kv8_fq(v)
     nH, nKV = q.shape[0], k.shape[0]
     out = torch.empty(nH, N, hd, dtype=q.dtype)
     for s in range(len(trie.seg_start)):
@@ -518,14 +529,15 @@ def gdn(G, h, trie, M, q8=None, initial_state=None, prefix=0, return_state=False
     return (out, fin) if return_state else out
 
 
-def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
-    """One decoder layer over every trie position; `i8_mask` (bool [N]): the positions of the int8 prompt pass."""
+def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None, kv8=False):
+    """One decoder layer over every trie position; `i8_mask` (bool [N]): the positions of the int8 prompt pass; `kv8`:
+    the int8 KV cache's K / V."""
     q8 = Int8Pass(i8_mask)
     h = _rows(lay.input_layernorm, X)
     if lay.block_type == "linear_attention":   # the mixer linears plain: l0-int8 runs them bf16 (open-work 17)
         X = X + gdn(lay.linear_attn, h, trie, M)
     else:
-        X = X + attention(lay.self_attn, h, trie, cos, sin, M)
+        X = X + attention(lay.self_attn, h, trie, cos, sin, M, kv8=kv8)
     del h
     if q8.mask is None:
         return X + _rows(lambda x: lay.mlp(lay.post_attention_layernorm(x)), X)
@@ -537,7 +549,7 @@ def layer_forward(lay, X, trie, cos, sin, M, i8_mask=None):
     return X + _rows_m(block, X, q8.mask)
 
 
-def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask):
+def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask, kv8=False):
     """One unbranched context, layer-major: f32 KV for this FA layer only, GDN state + conv halo.
     X/Y hold the whole layer's hidden rows; all projection/GDN work is bounded by chunk_rows + halo.
     FA runs one query head at a time without expanded KV or an all-head score tensor.
@@ -565,6 +577,9 @@ def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask):
             q, k = M.apply_rotary_pos_emb(q, k, cos[:, a:b], sin[:, a:b])
             v = q8.rows(A.v_proj, h).view(L, -1, hd).transpose(0, 1)
             k = k[0]
+            if kv8:
+                I8 = _load("int8_sim")
+                k, v = I8.kv8_fq(k), I8.kv8_fq(v)
             K = k if K is None else torch.cat([K, k], dim=1)
             V = v if V is None else torch.cat([V, v], dim=1)
             nH, nKV = q.shape[1], K.shape[0]
@@ -590,16 +605,16 @@ def chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask):
     return Y
 
 
-def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log=print, chunk_rows=0):
+def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log=print, chunk_rows=0, kv8=False):
     """The final hidden state (after the last norm) of every trie position, f32 [N, H]. `load_layer(i)` makes layer
     i's weights present (streamed runs), `unload_layer(i)` drops them; `work`: a directory for the per-layer
-    checkpoint (resume)."""
+    checkpoint (resume); `kv8`: the int8 KV cache's K / V."""
     import torch
     from transformers.models.qwen3_5 import modeling_qwen3_5 as M
     tok = torch.tensor(trie.tok)
     pos = torch.tensor(trie.depth)
     i8_mask = torch.tensor(trie.i8, dtype=torch.bool) if any(trie.i8) else None
-    fp = trie.fingerprint() + (f"-chunk{chunk_rows}" if chunk_rows else "")
+    fp = trie.fingerprint() + (f"-chunk{chunk_rows}" if chunk_rows else "") + ("-kv8" if kv8 else "")
     start, X = 0, None
     ck = os.path.join(work, "hidden.pt") if work else None
     if ck and os.path.exists(ck):
@@ -618,9 +633,9 @@ def trie_forward(model, trie, load_layer=None, unload_layer=None, work=None, log
         lay = layers[i].float()
         with torch.no_grad():
             if chunk_rows:
-                X = chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask)
+                X = chunked_layer(lay, X, trie, cos, sin, M, chunk_rows, i8_mask, kv8)
             else:
-                X = layer_forward(lay, X, trie, cos, sin, M, i8_mask)
+                X = layer_forward(lay, X, trie, cos, sin, M, i8_mask, kv8)
         if unload_layer:
             unload_layer(i)
         if ck:
@@ -750,12 +765,12 @@ def cmd_run(a):
         layers[i].to_empty(device="meta")
     meta = {"snapshot": os.path.abspath(a.snapshot), "dtype": "f32", "lean": "1", "dump_kv": "False",
             "vocab_used": str(a.vocab_used), "model": "qwen3.8 (tools/oracle/qwen_forced.py: f32)",
-            "pfi8_re": a.pfi8_re or ""}
+            "pfi8_re": a.pfi8_re or "", "kv": "int8 rotkv" if a.kv8 else "bf16"}
     for trie, jobs, chunk, peak in groups:
         work = os.path.join(a.work, trie.fingerprint() + f"-chunk{chunk}") if a.work else None
         if work:
             os.makedirs(work, exist_ok=True)
-        final = trie_forward(model, trie, load_layer, unload_layer, work, chunk_rows=chunk,
+        final = trie_forward(model, trie, load_layer, unload_layer, work, chunk_rows=chunk, kv8=a.kv8,
                              log=lambda s: print(s + f" (wall {time.time() - t0:.0f} s)", flush=True))
         write_outputs(final, jobs, model.lm_head.weight, {"bf16": a.out, "int8": a.out_i8head}, meta,
                       log=lambda s: print(s, flush=True))
@@ -778,6 +793,7 @@ def main():
             p.add_argument("--work", help="the per-layer checkpoint's directory (resume)")
             p.add_argument("--vocab-used", type=int, default=248077)
             p.add_argument("--dry-run", action="store_true")
+            p.add_argument("--kv8", action="store_true", help="K / V through the int8 KV cache (int8_sim.kv8_fq)")
         if name == "plan":
             p.add_argument("--snapshot", help="config for the memory estimate (default Qwen3.8)")
         p.add_argument("--memory-gib", type=float, default=64, help="peak cap, also bounded by the cgroup cap")
