@@ -215,10 +215,26 @@ def cmd_report(a):
         res[sid] = r
 
     quick = meta.get("quick") == "1"
-    out = [f"# Box validation{' (quick)' if quick else ''} - {a.date or meta.get('finished', '')[:10] or 'run'}", ""]
+    merge = meta.get("merge") == "1"
+    tier = " (quick)" if quick else " (merge check)" if merge else ""
+    out = [f"# Box validation{tier} - {a.date or meta.get('finished', '')[:10] or 'run'}", ""]
     if quick:
         out += ["A quick run (box_validate.sh --quick): a sample of the stages, some with a smaller input; the rest are "
                 "SKIP \"full only\". It does not stand for a full run.", ""]
+    if merge:
+        out += ["A merge check (box_validate.sh --merge-check): the build, the kernel-binary comparison, the model-free host "
+                "stages and the tests whose inputs changed (up to a time budget); the rest are SKIP \"not in the merge "
+                "check\". It does not stand for a quick or a full run.", ""]
+        left_path = os.path.join(a.state, "merge.changed.left.txt")
+        left = []
+        if os.path.exists(left_path):
+            with open(left_path, encoding="utf-8") as f:
+                left = [l.strip() for l in f if l.strip()]
+        if left:
+            out += [f"**{len(left)} changed test(s) were over the merge check's budget and were NOT run - left for the quick "
+                    f"run:** " + ", ".join(f"`{n}`" for n in left), ""]
+        else:
+            out += ["Every changed test fit the merge check's budget (none left for the quick run).", ""]
     keys = ["tree_sha", "baseline_sha", "baseline_ref", "state", "tree", "baseline_tree"]
     if len(per_device) <= 1:
         keys += ["started", "finished", "selected"]
@@ -230,8 +246,12 @@ def cmd_report(a):
             out.append(f"- device {d}: started `{kv.get('started', '?')}`, finished `{kv.get('finished', '-')}`, "
                        f"selected `{kv.get('selected', '')}`")
     g0 = [sid for sid, s in stages.items() if s["sel"] == "g0"]
-    g0_ok = all(res[s]["result"] == "PASS" for s in g0)
-    out += ["", f"**G0 (bitwise neutrality, stop-the-line): {'PASS' if g0_ok else 'NOT PASSED'}** - "
+    # a merge check skips the G0 stages it does not name: those are not its gates
+    g0_ok = all(res[s]["result"] == "PASS" or (merge and res[s].get("reason", "").startswith("not in the merge check"))
+                for s in g0)
+    g0_what = "G0 in the merge check (build and kernel binaries; the bitwise gates are the quick run's)" if merge \
+        else "G0 (bitwise neutrality, stop-the-line)"
+    out += ["", f"**{g0_what}: {'PASS' if g0_ok else 'NOT PASSED'}** - "
             + ", ".join(f"{s} {res[s]['result']}" for s in g0), ""]
 
     out += ["| row | what | PASS | FAIL | SKIP | other |", "|---|---|---:|---:|---:|---|"]
