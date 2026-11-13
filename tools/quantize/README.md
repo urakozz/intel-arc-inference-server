@@ -40,8 +40,10 @@ them.
 | `quantize_qwen38_rtn.sh` | **0.17.0 @ `6afaecdb` + `auto-round-local.patch`, with `--disable_low_cpu_mem_usage`** (since 2026-10-06; 0.14.2 before) | that flag takes the path that packs `lm_head`; the default low-CPU-memory RTN path still drops it on 0.17.0 (below). Holds the whole bf16 model in RAM: refuses below `RTN_MIN_RAM_GB` (64) available |
 | `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
 | `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
-| `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the operator's fork commit `a6cf748739f2dd58e6c16b0ac849e92af7396e32`** = intel/auto-round main `b58069ea` (2026-11-11, version string 0.17.0) + the cached-OpenCodeInstruct commit, **no patch file** (`AR_PATCH=0`), only in the clone `~/auto-round` (`AR_REPO`) | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; see "Qwen3.8-Flash-Next: our AutoRound export" below |
-| `quantize/quantize_dflash.sh` (the DFlash 2 drafter) | the same fork commit `a6cf7487`, `AR_PATCH=0` | the newest pin on the box; the calibration rows are our own tensors, so neither fix of the patch is on its path; see "The DFlash 2 drafter" below |
+| `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the LATEST of the operator's fork: the hash branch `local-patches-v2` of `~/auto-round` (`AR_REPO`, `AR_REF`) has when the run starts** (2026-11-13: `8186d8b66af4bd56c9c352951786216bff7281f5` = intel/auto-round main `42db5d3a` + the cached-OpenCodeInstruct commit; version string 0.17.0), **no patch file** (`AR_PATCH=0`); the resolved hash and its upstream base go into the export's README and `qwen4exp_recipe.json`; `tools/quantize/ar_latest.sh` | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; the old pin `a6cf7487` (= `b58069ea` + the same commit) is the branch `pin-a6cf7487-2026-11-13`; see "Qwen3.8-Flash-Next: our AutoRound export" below |
+| `quantize/quantize_dflash.sh` (the DFlash 2 drafter) | the same: the latest `local-patches-v2` head, hash and upstream base recorded in `dflash_recipe.json` and the README, `AR_PATCH=0` | the calibration rows are our own tensors, so neither fix of the patch is on its path; see "The DFlash 2 drafter" below |
+
+**Latest, not a pin (Flash-Next and DFlash scripts).** `ar_latest.sh` runs `git rev-parse` on `AR_REF` in `AR_REPO` once when `start` / `run` begins and exports the 40-hex hash as `AR_COMMIT` (the detached run builds that same hash even if the branch moves); it never fetches, pulls or rebases `~/auto-round`. `ar_pin.sh` keys the package cache on the hash (`~/.cache/auto-round-<hash8>-plain-pkg`), so a moved branch rebuilds. A run records its hash in `ar_commit` (Flash-Next: `<OUT>/ar_commit`; DFlash: `<OUT>.work/ar_commit`) and never switches: `start` or `run` on a run whose branch has moved refuses and names the recorded hash; `AR_COMMIT=<recorded hash>` resumes on the old build (an old run with progress but no record needs the same).
 
 **Install (Qwen3.8 scripts, `tools/quantize/ar_pin.sh`).** Clones `AR_REPO` (default
 `https://github.com/intel/auto-round`, or any local clone that contains the commit) into
@@ -282,12 +284,13 @@ tools/quantize/quantize_qwen4exp.sh selftest         # the whole pipeline on the
   room; AutoRound runs inside `systemd-run --user --scope -p MemoryMax=115G -p MemorySwapMax=0`, so running out of
   RAM kills the run (then `start` resumes it), never the box.
 
-### What the pinned AutoRound needed (each found on the tiny model or the real-width probe)
+### What the AutoRound of `~/auto-round` needed (each found on the tiny model or the real-width probe)
 
-The operator's clone `~/auto-round` (branch `local-patches-v2`) is upstream main `b58069ea` + one local commit,
-`a6cf7487`: `calib_dataset.py` reads OpenCodeInstruct's cached parquet shards (`_load_cached_parquet_dataset`, before
-its hub fallback) and the model loaders try the local snapshot first. The script builds `a6cf7487` through
-`ar_pin.sh` (`AR_COMMIT`, `AR_PATCH=0`, `AR_REPO=~/auto-round`: the commit is only in that clone). Against the Qwen3.8
+The operator's clone `~/auto-round` (branch `local-patches-v2`; rebased 2026-11-13 to upstream main `42db5d3a` + one
+local commit, head `8186d8b6`; before that `b58069ea` + `a6cf7487`, now the branch `pin-a6cf7487-2026-11-13`): the local commit's
+`calib_dataset.py` reads OpenCodeInstruct's cached parquet shards (`_load_cached_parquet_dataset`, before
+its hub fallback) and the model loaders try the local snapshot first. The script builds the branch head through
+`ar_latest.sh` + `ar_pin.sh` (`AR_COMMIT`, `AR_PATCH=0`, `AR_REPO=~/auto-round`: the commit is only in that clone). The table below was measured on `a6cf7487`. Against the Qwen3.8
 scripts' 0.17.0 `6afaecdb`:
 
 | | 0.17.0 `6afaecdb` | `a6cf7487` (`b58069ea` 2026-11-11 + the local commit) |

@@ -72,7 +72,7 @@ def readme(recipe: dict, source: str) -> str:
 
 ## Quantisation provenance
 
-- tool: auto-round {ar['version']} at commit `{ar['commit']}` (AR_PATCH={ar['patched']}, from {ar['repo']})
+- tool: auto-round {ar['version']} at commit `{ar['commit']}` (AR_PATCH={ar['patched']}, from {ar['repo']}, branch {ar.get('ref', '?')}, upstream base `{ar.get('base', '?')}`)
 - recipe: scheme {s['scheme']}, group_size {s['group_size']}, sym {s['sym']}, iters {s['iters']}, nsamples
   {s['nsamples']}, batch_size {s['batch_size']}, seed {s['seed']}, format {s['format']}, quant_lm_head
   {s['quant_lm_head']} (the embedding and head are the target's); the full call is in dflash_recipe.json
