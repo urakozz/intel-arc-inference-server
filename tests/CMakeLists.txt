@@ -4028,6 +4028,17 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME dflash_engine_test COMMAND dflash_engine_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_engine_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77
     ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_I8HEAD}" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+  # The DFlash verify at M = 2..8 on the int8 KV cache against the plain loop: v2 + gemv lists bitwise (ids and the
+  # KV rows they wrote) at every K, the production / gemm_sm / DPAS arms' first difference recorded.
+  add_executable(dflash_verify_kv8_test runtime/dflash_verify_kv8_test.cc)
+  target_include_directories(dflash_verify_kv8_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+    ${CMAKE_SOURCE_DIR}/tests/golden)
+  target_link_libraries(dflash_verify_kv8_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader
+    b70_l0 b70_model)
+  add_dependencies(dflash_verify_kv8_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
+  add_test(NAME dflash_verify_kv8_test COMMAND dflash_verify_kv8_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_verify_kv8_test PROPERTIES LABELS "checkpoint;dflash;kv8" SKIP_RETURN_CODE 77
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
 endif()
 # Through EngineAdapter (what b70-serve's loop calls): D2 at K 7 / 3 / auto against the plain loop on the golden and A4
 # prompts, truncate_to inside a burst, seeded sampling reproducible. SKIP 77 without either checkpoint.
