@@ -137,7 +137,7 @@ int main(int argc, char** argv) {
   loader::DFlashWeights w = loader::load_drafter(ctx, dsnap, model, loader::DraftFormat::Int8);
   const uint32_t head_rows = model.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
   runtime::dflash::DFlashDrafter d(ctx, std::move(w), head_rows, kMaxLen, kK);
-  runtime::Engine e(ctx, std::move(model), kMaxLen, /*debug_resid=*/false, runtime::KvCache::Bf16, &d);
+  runtime::Engine e(ctx, std::move(model), kMaxLen, /*debug_resid=*/false, runtime::default_kv_cache(), &d);
   d.attach(e, false);
   EngineAdapter a(e, model::Qwen35::kVocabUsed, kK, /*lookup=*/false, /*dflash=*/true);
   bool ok = true;
