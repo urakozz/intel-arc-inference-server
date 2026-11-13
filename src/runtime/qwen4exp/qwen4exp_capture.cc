@@ -76,11 +76,10 @@ class Walk {
       if (last) head();
       if (last && spec_.kind == ListKind::Verify) head_kv_pass();
     }
-    const PpHandoff h = link_ ? link_->mode : kDefaultPpHandoff;
     size_t want = 0;
     switch (spec_.kind) {
-      case ListKind::Decode: want = device_launches(d_, b_.placement, dev, b_.attn, h, injected_ != nullptr); break;
-      case ListKind::Verify: want = verify_device_launches(d_, b_.placement, dev, M_, b_.attn, h); break;
+      case ListKind::Decode: want = device_launches(d_, b_.placement, dev, b_.attn, injected_ != nullptr); break;
+      case ListKind::Verify: want = verify_device_launches(d_, b_.placement, dev, M_, b_.attn); break;
       case ListKind::Draft: want = draft_launches(b_.attn, spec_.select); break;
     }
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s " + kind_name() + " list has " +
@@ -179,7 +178,6 @@ class Walk {
       need = kq::verify_variants(d_, M_, int8, eager, bf16s, mtp_->single, lkind());
     else
       need = kq::draft_variants(int8, eager, mtp_->single);
-    if (link_ && link_->mode == PpHandoff::Peer) need.push_back(kernels::pp_handoff_variant());
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_Q4EXP=ON" +
@@ -718,50 +716,17 @@ class Walk {
   void check_link() const {
     require(link_->land_resid && link_->resid_cap >= h_bytes() && link_->sumsq_cap == 0,
             "the landing buffer does not hold " + std::to_string(h_bytes()) + " B of H and no norm sums");
-    if (link_->mode == PpHandoff::Copy) require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
+    require(link_->event != nullptr, "the hand-off needs its cross-device event");
   }
   void handoff_out() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.copy(link_->land_resid, b_.H.ptr(), h_bytes());
-      step_.list.barrier_signal(link_->event);
-      return;
-    }
-    require(link_->flag && link_->send_seq && link_->land_sumsq, "the peer hand-off needs its flag, counter and stamp");
-    // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words): 0 sum words - the stamp
-    // lands at land_sumsq[0]
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
-    k.arg_ptr(0, b_.H.ptr());
-    k.arg_ptr(1, b_.H.ptr());
-    k.arg_ptr(2, link_->land_resid);
-    k.arg_ptr(3, link_->land_sumsq);
-    k.arg_ptr(4, link_->flag);
-    k.arg_ptr(5, link_->send_seq);
-    k.arg<uint32_t>(6, static_cast<uint32_t>(h_bytes() / 4));
-    k.arg<uint32_t>(7, 0u);
-    launch(k, 1);
+    step_.list.copy(link_->land_resid, b_.H.ptr(), h_bytes());
+    step_.list.barrier_signal(link_->event);
   }
   void handoff_in() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.wait_event(link_->event);
-      step_.list.copy(b_.H.ptr(), link_->land_resid, h_bytes());
-      return;
-    }
-    require(link_->flag && link_->recv_state && link_->spin_limit > 0 && link_->land_sumsq,
-            "the peer hand-off needs its flag, its state words and a spin bound");
-    // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words, spin_limit)
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_recv", kernels::kPpHandoffWg);
-    k.arg_ptr(0, link_->land_resid);
-    k.arg_ptr(1, link_->land_sumsq);
-    k.arg_ptr(2, link_->flag);
-    k.arg_ptr(3, link_->recv_state);
-    k.arg_ptr(4, b_.H.ptr());
-    k.arg_ptr(5, b_.H.ptr());
-    k.arg<uint32_t>(6, static_cast<uint32_t>(h_bytes() / 4));
-    k.arg<uint32_t>(7, 0u);
-    k.arg<uint32_t>(8, link_->spin_limit);
-    launch(k, 1);
+    step_.list.wait_event(link_->event);
+    step_.list.copy(b_.H.ptr(), link_->land_resid, h_bytes());
   }
 
   l0::Context& ctx_;

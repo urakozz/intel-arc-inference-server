@@ -25,9 +25,9 @@
 //
 // **Two cards** (`link` non-null; spec 16b's cut and hand-offs): device 0's list ends after layer s-1's
 // kol_post_add, which already wrote `resid` and `sumsq_r` - exactly what layer s's kol_norm_finish
-// reads - and hands those off: `copy` two device-to-device copies into the landing buffer and a
-// barrier signalling the cross-device event; `peer` pp_send. Device 1's list starts with the wait
-// (copy) or pp_recv (peer), the copies into its own `resid` / `sumsq_r`, then layer s. The compute
+// reads - and hands those off: two device-to-device copies into the landing buffer and a barrier
+// signalling the cross-device event. Device 1's list starts with the wait, the copies into its own
+// `resid` / `sumsq_r`, then layer s. The compute
 // launches of the two lists add up to the one-card count.
 //
 // tap (debug): `resid` copied to tap row l after each layer's last launch (layer l's output), or after its

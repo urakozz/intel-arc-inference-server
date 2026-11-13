@@ -42,10 +42,10 @@ struct KolibriPrefillState {
     Dev(l0::Context& c, const model::Kolibri1Desc& d) : cx(c), kc(c), s(c, d) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
-  std::unique_ptr<PipelineLink> link;   // two devices: `copy` mode at chunk size (pf_landing_layout)
+  std::unique_ptr<PipelineLink> link;   // two devices: at chunk size (pf_landing_layout)
   uint64_t timeout_ns = 0;
   ~KolibriPrefillState() {   // never free a scratch under a running list
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     for (auto& d : dev) {
       try {
         d->cx.wait_for(timeout_ns);
@@ -55,10 +55,10 @@ struct KolibriPrefillState {
   }
   // reset()'s hook: release a list waiting on a hand-off that will not come; true when every list is idle.
   bool settle() {
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     bool ok = true;
     for (auto& d : dev) ok = d->cx.wait_for(timeout_ns) && ok;
-    if (link && link->event) link->event->host_reset();
+    if (link) link->event->host_reset();
     return ok;
   }
 };
@@ -89,7 +89,7 @@ void KolibriEngine::prepare_prefill() {
                                                   size_t(model_.placement.count(i)) * kPfC * d.hidden * 2);
   }
   if (devices() == 2)
-    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d), PpHandoff::Copy);
+    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d));
   pf_dev_bytes_.assign(devices(), 0);
   pf_bytes_ = 0;
   for (uint32_t i = 0; i < devices(); ++i) {

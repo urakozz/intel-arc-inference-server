@@ -23,7 +23,6 @@ struct Options {
   bool int8_head = false;
   uint32_t devices = 1;
   uint32_t split = 0;   // 0 with two devices: runtime::qwen4exp::pp_split at max_len
-  runtime::PpHandoff handoff = runtime::kDefaultPpHandoff;
   uint32_t layers = 0;  // development mode (0: the checkpoint's)
   bool debug_tap = false;
   uint32_t timeout_ms = 60000;
@@ -78,7 +77,6 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
                                                   o.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint,
                                                   o.layers, o.mtp);
   runtime::PipelineOptions po;
-  po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;
   runtime::CaptureOptions cap;

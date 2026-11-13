@@ -1134,11 +1134,11 @@ st_r21_speed() {
 # ======================================================================================
 row 22 "spec 16b - pipeline parallel decode across two B70s (--parallel pp; spec 16 §8, plan 16b)"
 rownote 22 "Every GPU stage of this row needs BOTH cards: its commands set ZE_AFFINITY_MASK=0,1 themselves (the run exports DEVICE's one card); the GPU lock is the one lock for both. Both cards must be free of other DRM holders for r22.s1."
-rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b ships both hand-offs behind --pipeline-handoff (copy default) and the split by bytes; r22.s1 is where the two hand-offs are first compared."
+rownote 22 "16a's probe (P0: peer bandwidth both ways, the three hand-offs at 10 KB / 20 MB, the TP remote-partial arm) has not run - it is plan 16a's own probe, not a stage. 16b shipped both hand-offs and the split by bytes; the peer hand-off measured no gain (0.9963x, 2026-11-13) and was removed - the copy hand-off is the only one."
 rownote 22 "S1 at 32k depth is opt-in (r22.s1_32k): --parallel pp ingests through the decode lists (prefill across two cards is 16c), ~20 min per arm at depth 32768."
-stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Ornith; K2's bytes per card), pp_protocol_test (the peer hand-off's protocol on two threads), pipeline_args_test"
+stage r22.host 22 default cpu - - "host: pipeline_plan_test (stages; weights by device = the measured Qwen3.8 load; the per-device plan; auto split and auto length for Qwen3.8 / Ornith; K2's bytes per card), pipeline_args_test"
 st_r22_host() {
-  run_tests '^(pipeline_plan_test|pp_protocol_test|pipeline_args_test)$'
+  run_tests '^(pipeline_plan_test|pipeline_args_test)$'
   jgrab splits '^pipeline_plan_test$' 'split|auto|k2-horizon'
   finish
 }
@@ -1150,7 +1150,7 @@ st_r22_devices() {
   run_tests '^cli_reject_pipeline_' '' '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r22.p1 22 default gpu qwen r22.devices "P1 (Review Focus 1-3, 5): pp_decode_test and _i8head - ingest + 64 ids and a spec 7 prefix cache hit at 4395 under copy and peer, the auto split and the cuts at 5 and 62: ids, logits, GDN state, conv ring, KV and both Control blocks bitwise one card on device 0; a reset and the run again, bitwise"
+stage r22.p1 22 default gpu qwen r22.devices "P1 (Review Focus 1-3, 5): pp_decode_test and _i8head - ingest + 64 ids and a spec 7 prefix cache hit at 4395, the auto split and the cuts at 5 and 62: ids, logits, GDN state, conv ring, KV and both Control blocks bitwise one card on device 0; a reset and the run again, bitwise"
 st_r22_p1() {
   run_tests '^(pp_decode_test|pp_decode_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab p1 '^pp_decode' 'bitwise|memory, device|OK|differ'
@@ -1161,20 +1161,17 @@ st_r22_p1_kv8() {
   run_tests '^pp_decode_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r22.p4 22 default gpu qwen r22.devices "P4 (Review Focus 4): pp_fail_test - a lost hand-off under copy (the fence bound; the event host-signalled so device 1 drains) and under peer (pp_recv's spin bound) throws within its bound, never hangs; reset() recovers"
+stage r22.p4 22 default gpu qwen r22.devices "P4 (Review Focus 4): pp_fail_test - a lost hand-off (the fence bound; the event host-signalled so device 1 drains) throws within its bound, never hangs; reset() recovers"
 st_r22_p4() {
   run_tests '^pp_fail_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab p4 '^pp_fail_test$' 'threw after|recovered|OK'
   finish
 }
-stage r22.cli 22 default gpu qwen r22.p1 "b70-decode --parallel pp on Qwen3.8: --ids prose.ids --n 64 under copy and peer equal the one-card ids; --max-len auto plans both cards (262144, derived) and runs; the plan and both memory lines"
+stage r22.cli 22 default gpu qwen r22.p1 "b70-decode --parallel pp on Qwen3.8: --ids prose.ids --n 64 equal the one-card ids; --max-len auto plans both cards (262144, derived) and runs; the plan and both memory lines"
 st_r22_cli() {
   chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 > $STATE/r22-one.ids" "one card"
-  local h
-  for h in copy peer; do
-    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel pp --pipeline-handoff $h > $STATE/r22-$h.ids && cmp $STATE/r22-one.ids $STATE/r22-$h.ids" \
-      "--parallel pp --pipeline-handoff $h: the one-card ids"
-  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --parallel pp > $STATE/r22-pp.ids && cmp $STATE/r22-one.ids $STATE/r22-pp.ids" \
+    "--parallel pp: the one-card ids"
   chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 16 --parallel pp --max-len auto > /dev/null" \
     "--max-len auto across two cards"
   grab_all auto 'max_len: auto ->|split: auto ->'
@@ -1190,28 +1187,26 @@ st_r22_ornith() {
   grab_all split 'split: auto ->|^engine: --parallel pp'
   finish
 }
-stage r22.s1 22 optin gpu qwen r22.p1 "S1: decode at depth 4096, tg 256 - one card against --parallel pp copy and peer, interleaved after a warm-up, median of 3; the bar is within 2 % (ratio >= 0.98)"
+stage r22.s1 22 optin gpu qwen r22.p1 "S1: decode at depth 4096, tg 256 - one card against --parallel pp, interleaved after a warm-up, median of 3; the bar is within 2 % (ratio >= 0.98)"
 st_r22_s1() {
   idle before
   local arms
   arms=" one@4096 '$(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256)'"
   arms="$arms copy@4096 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256 --parallel pp)'"
-  arms="$arms peer@4096 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 4096 --tg 256 --parallel pp --pipeline-handoff peer)'"
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@4096/one@4096 --ratio peer@4096/one@4096 --$arms" \
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@4096/one@4096 --$arms" \
     "the S1 arms at 4096"
   idle after
   grab_all ratio '^RATIO '
   grab_all idle '^IDLE '
   finish
 }
-stage r22.s1_32k 22 optin gpu qwen r22.p1 "S1 at depth 32768 (max_len 40960): the same three arms (~20 min per --parallel pp arm: it ingests through the decode lists)"
+stage r22.s1_32k 22 optin gpu qwen r22.p1 "S1 at depth 32768 (max_len 40960): the same two arms (~20 min per --parallel pp arm: it ingests through the decode lists)"
 st_r22_s1_32k() {
   idle before
   local arms
   arms=" one@32768 '$(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960)'"
   arms="$arms copy@32768 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960 --parallel pp)'"
-  arms="$arms peer@32768 'ZE_AFFINITY_MASK=0,1 $(bench_cmd "$SNAP_QWEN" --depth 32768 --tg 256 --max-len 40960 --parallel pp --pipeline-handoff peer)'"
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@32768/one@32768 --ratio peer@32768/one@32768 --$arms" \
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@32768/one@32768 --$arms" \
     "the S1 arms at 32768"
   idle after
   grab_all ratio '^RATIO '
@@ -1221,17 +1216,17 @@ st_r22_s1_32k() {
 
 # ======================================================================================
 row 23 "spec 16c - pipeline parallel PREFILL across two B70s (--parallel pp --prefill / --prefill-length; spec 16 §9, plan 16c)"
-rownote 23 "After row 22: 16c's prefill hands off at 16b's cut (layer s's fold on device 0) through 16b's two hand-offs, so r22.devices and r22.p1 must pass first. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both cards free of other DRM holders for the speed stages."
+rownote 23 "After row 22: 16c's prefill hands off at 16b's cut (layer s's fold on device 0) through 16b's hand-off, so r22.devices and r22.p1 must pass first. Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both cards free of other DRM holders for the speed stages."
 rownote 23 "S2 (spec 16 §5): pp32768 and pp65536 >= 1.7x one card, pp4096 >= 1.2x (estimates). Each --parallel pp arm prints each card's busy time ('pp: device N busy ...'): the pipeline runs at the slower card's rate, so the busy line says whether the byte-balanced auto split also balances time (the second card is ~3 % slower on prefill, docs/10); r23.split_sweep (opt-in) times the neighbouring splits."
 rownote 23 "pp131072 is opt-in (r23.s2_128k): one card at --max-len 131328 (the most it holds with the bf16 head at that length), --parallel pp at --max-len 262144 (the P3 / S3 configuration only two cards hold); ~2.5 min per one-card run."
-stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: copy and peer, a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal)"
+stage r23.host 23 default cpu - - "host: pipeline_prefill_plan_test (the chunks = Engine::prefill's, the host's order and every rule it keeps - each single-step drop of it caught -, the landing slots, the per-device plan with a prefill path), pp_prefill_protocol_test (that order run by its one executor over two host threads: a slowed device 1, spec 7 hooks from the shadows, a throwing hook, a lost hand-off; TSan-clean on the Mac), pipeline_args_test (the lifted refusal)"
 st_r23_host() {
   run_tests '^(pipeline_prefill_plan_test|pp_prefill_protocol_test|pipeline_args_test)$'
   jgrab plan '^pipeline_prefill_plan_test$' 'chunks:|schedule:|landing:|split'
   jgrab protocol '^pp_prefill_protocol_test$' 'chunks:|threw|hook|OK'
   finish
 }
-stage r23.p1 23 default gpu qwen r22.p1 "P1 / P2 (Review Focus 1-4): pp_prefill_test, _l0 and _i8head - 4103 ids (3 chunks), 32768 (16), 2 ids, a prefill_split continuation (2500 | 1603, chunk 1000), spec 7's hooks at 2048 / 4096 (from the shadows, the next chunk running) and 5000, a hook throwing at 2048, a one-card snapshot at 3000 continued on two cards - logits row, every layer's GDN state / conv ring / KV, both Control blocks and 16 decoded ids bitwise one card on device 0; copy and peer at the auto split, and the cuts at 5 and 62; each card's launches = step_stage_launches' arithmetic"
+stage r23.p1 23 default gpu qwen r22.p1 "P1 / P2 (Review Focus 1-4): pp_prefill_test, _l0 and _i8head - 4103 ids (3 chunks), 32768 (16), 2 ids, a prefill_split continuation (2500 | 1603, chunk 1000), spec 7's hooks at 2048 / 4096 (from the shadows, the next chunk running) and 5000, a hook throwing at 2048, a one-card snapshot at 3000 continued on two cards - logits row, every layer's GDN state / conv ring / KV, both Control blocks and 16 decoded ids bitwise one card on device 0; the auto split, and the cuts at 5 and 62; each card's launches = step_stage_launches' arithmetic"
 st_r23_p1() {
   run_tests '^(pp_prefill_test|pp_prefill_l0_test|pp_prefill_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab p1 '^pp_prefill' 'bitwise|hooks|throws|busy|differs|memory, device|OK'
@@ -1242,21 +1237,19 @@ st_r23_p1_kv8() {
   run_tests '^pp_prefill_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r23.p4 23 default gpu qwen r22.devices "Back-pressure and P4 (Review Focus 2): pp_prefill_fail_test - device 1 held back 150 ms a chunk (a host thread releases its event): bitwise the clean run, the wall >= the holds; a lost hand-off (no ready signal) throws within the 5 s bound naming the chunk, device 1 is released and drains, the next prefill says reset() first, after reset() bitwise again; copy and peer"
+stage r23.p4 23 default gpu qwen r22.devices "Back-pressure and P4 (Review Focus 2): pp_prefill_fail_test - device 1 held back 150 ms a chunk (a host thread releases its event): bitwise the clean run, the wall >= the holds; a lost hand-off (no ready signal) throws within the 5 s bound naming the chunk, device 1 is released and drains, the next prefill says reset() first, after reset() bitwise again"
 st_r23_p4() {
   run_tests '^pp_prefill_fail_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab p4 '^pp_prefill_fail_test$' 'held|threw after|recovered|bitwise|OK'
   finish
 }
-stage r23.cli 23 default gpu qwen r23.p1 "b70-decode --parallel pp --prefill on Qwen3.8: --ids prose.ids --n 64 under copy and peer, l0-int8 and l0, and --prefill-chunk 1000, equal the one-card --prefill ids; --max-len auto with --prefill plans each card's prefill scratch; the pp lines (each card's busy time) and both memory lines"
+stage r23.cli 23 default gpu qwen r23.p1 "b70-decode --parallel pp --prefill on Qwen3.8: --ids prose.ids --n 64 under l0-int8 and l0, and --prefill-chunk 1000, equal the one-card --prefill ids; --max-len auto with --prefill plans each card's prefill scratch; the pp lines (each card's busy time) and both memory lines"
 st_r23_cli() {
-  local b h
+  local b
   for b in l0-int8 l0; do
     chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --prefill --prefill-backend $b > $STATE/r23-one-$b.ids" "one card, --prefill, $b"
-    for h in copy peer; do
-      chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --prefill --prefill-backend $b --parallel pp --pipeline-handoff $h > $STATE/r23-$h-$b.ids && cmp $STATE/r23-one-$b.ids $STATE/r23-$h-$b.ids" \
-        "--parallel pp --prefill $b, $h: the one-card ids"
-    done
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 64 --prefill --prefill-backend $b --parallel pp > $STATE/r23-pp-$b.ids && cmp $STATE/r23-one-$b.ids $STATE/r23-pp-$b.ids" \
+      "--parallel pp --prefill $b: the one-card ids"
   done
   chk "build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 32 --prefill --prefill-chunk 1000 > $STATE/r23-one-c1000.ids" "one card, --prefill-chunk 1000"
   chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN --ids tests/golden/prompts/prose.ids --n 32 --prefill --prefill-chunk 1000 --parallel pp > $STATE/r23-pp-c1000.ids && cmp $STATE/r23-one-c1000.ids $STATE/r23-pp-c1000.ids" \
@@ -1279,17 +1272,16 @@ st_r23_ornith() {
   grab_all pp '^pp: |split: auto ->' 6
   finish
 }
-# S2: one prefill length per stage - one card against --parallel pp copy and peer, interleaved after a
+# S2: one prefill length per stage - one card against --parallel pp, interleaved after a
 # warm-up, median of 3 (tools/box_validate/interleave.sh), the pp t/s ratio per arm.
 s2_arms() {   # s2_arms LEN MAXLEN_ONE MAXLEN_PP
   local n="$1" one="$2" pp="$3"
   printf " one@%s '%s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$one")"
   printf " copy@%s 'ZE_AFFINITY_MASK=0,1 %s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$pp" --parallel pp)"
-  printf " peer@%s 'ZE_AFFINITY_MASK=0,1 %s'" "$n" "$(bench_cmd "$SNAP_QWEN" --prefill-length "$n" --tg 16 --max-len "$pp" --parallel pp --pipeline-handoff peer)"
 }
 s2_stage() {   # s2_stage LEN MAXLEN_ONE MAXLEN_PP
   idle before
-  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@$1/one@$1 --ratio peer@$1/one@$1 --$(s2_arms "$1" "$2" "$3")" \
+  chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3 --ratio copy@$1/one@$1 --$(s2_arms "$1" "$2" "$3")" \
     "the S2 arms at pp$1"
   idle after
   grab_all ratio '^RATIO '
@@ -1297,13 +1289,13 @@ s2_stage() {   # s2_stage LEN MAXLEN_ONE MAXLEN_PP
   grab_all idle '^IDLE '
   finish
 }
-stage r23.s2_4k 23 optin gpu qwen r23.p1 "S2 at pp4096 (two chunks: little overlap; bar >= 1.2x): one card vs --parallel pp copy and peer, --tg 16, max_len 16384, interleaved, median of 3; each card's busy time"
+stage r23.s2_4k 23 optin gpu qwen r23.p1 "S2 at pp4096 (two chunks: little overlap; bar >= 1.2x): one card vs --parallel pp, --tg 16, max_len 16384, interleaved, median of 3; each card's busy time"
 st_r23_s2_4k() { s2_stage 4096 16384 16384; }
-stage r23.s2_32k 23 optin gpu qwen r23.p1 "S2 at pp32768 (16 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 40960, interleaved, median of 3; each card's busy time"
+stage r23.s2_32k 23 optin gpu qwen r23.p1 "S2 at pp32768 (16 chunks; bar >= 1.7x): one card vs --parallel pp, max_len 40960, interleaved, median of 3; each card's busy time"
 st_r23_s2_32k() { s2_stage 32768 40960 40960; }
-stage r23.s2_64k 23 optin gpu qwen r23.p1 "S2 at pp65536 (32 chunks; bar >= 1.7x): one card vs --parallel pp copy and peer, max_len 69632, interleaved, median of 3; each card's busy time"
+stage r23.s2_64k 23 optin gpu qwen r23.p1 "S2 at pp65536 (32 chunks; bar >= 1.7x): one card vs --parallel pp, max_len 69632, interleaved, median of 3; each card's busy time"
 st_r23_s2_64k() { s2_stage 65536 69632 69632; }
-stage r23.s2_128k 23 optin gpu qwen r23.p1 "S2 at pp131072 (64 chunks): one card at max_len 131328 vs --parallel pp copy and peer at max_len 262144 (the length only two cards hold, spec 16 P3 / S3), interleaved, median of 3"
+stage r23.s2_128k 23 optin gpu qwen r23.p1 "S2 at pp131072 (64 chunks): one card at max_len 131328 vs --parallel pp at max_len 262144 (the length only two cards hold, spec 16 P3 / S3), interleaved, median of 3"
 st_r23_s2_128k() { s2_stage 131072 131328 262144; }
 stage r23.split_sweep 23 optin gpu qwen r23.p1 "Review Focus 5: pp32768 --parallel pp copy at the splits 30 / 32 / 34 (and auto), interleaved, median of 3 - each card's busy time per split, to see where the second card's ~3 % slower prefill puts the time-balanced cut"
 st_r23_split_sweep() {
@@ -1326,7 +1318,7 @@ rownote 24 "Written blind: no Kolibri binary was ever compiled by ocloc, nothing
 rownote 24 "Everything on the REAL checkpoint (r24.oracle_real, r24.partial, r24.pp_real, r24.speed) needs spec 20b's urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ (SNAP_KOLIBRI) and oracle-out-kolibri (--with r24.oracle_real, ~48 GB RAM): SKIP 'missing data' until spec 20 decision 1 is made and 20b has run."
 rownote 24 "Set B70_KOL_TIE_TOL from the gap distribution r24.oracle_synth / r24.oracle_real print (kolibri_golden_test.cc proposes 1e-2); the partial-forward bars (median cosine 0.9998, min 0.99) are proposals too - r24.partial prints them per layer."
 rownote 24 "tests/golden/prompts/kolibri_bench.ids (and cli/kolibri_decode.h's kKolibriBenchPrompt) are the first 42 ids of de_prose through Kolibri's tokenizer since spec 20e (20c's placeholders re-baked on the Mac from the BF16 release's tokenizer.json): r24.oracle_synth writes the same 42 (kolibri_bench.ids in oracle-out-kolibri-synth) and says NOTE if they differ."
-rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); spec 18 §10.1's rule decides the default. Two cards (r24.pp) need row 22's hand-offs proven first."
+rownote 24 "If determined rows fail under flash, the first suspect is flash's fp32 probabilities against the reference's eager bf16 chain: r24.golden_eager runs the eager variant (B70_KOLIBRI_ATTN=eager, 856 launches at 50 layers); spec 18 §10.1's rule decides the default. Two cards (r24.pp) need row 22's hand-off proven first."
 stage r24.host 24 default cpu - - "host: kolibri1_test, kolibri1_repack_test, kolibri1_rope_test (bitwise torch's cos / sin), kolibri_ref_test (the kernels' twin bitwise against kolibri_ref.py's fixture), kolibri_variant_names_test, kolibri_plan_test (756 / 856 launches, the split 25 by pp_balance), pipeline_plan_test (the overload == the ModelDesc form)"
 st_r24_host() {
   run_tests '^(kolibri1_test|kolibri1_repack_test|kolibri1_rope_test|kolibri_ref_test|kolibri_variant_names_test|kolibri_plan_test|pipeline_plan_test)$'
@@ -1386,20 +1378,18 @@ st_r24_golden_eager() {
   jgrab golden '^kolibri_golden_synth' 'gate:|routing:|OK'
   finish
 }
-stage r24.pp 24 default gpu oracle_kolibri_synth r24.k3,r22.p1 "two cards (Review Focus 5): kolibri_pp_test - --parallel 1 against --parallel pp --pipeline-split 3 on the synthetic checkpoint under copy and peer: tokens, logits, routes, full KV and rings bitwise, both Control blocks equal; P4 (a lost hand-off throws within 5 s, reset recovers); replay; the real checkpoint's split 25 vs 20 when present"
+stage r24.pp 24 default gpu oracle_kolibri_synth r24.k3,r22.p1 "two cards (Review Focus 5): kolibri_pp_test - --parallel 1 against --parallel pp --pipeline-split 3 on the synthetic checkpoint: tokens, logits, routes, full KV and rings bitwise, both Control blocks equal; P4 (a lost hand-off throws within 5 s, reset recovers); replay; the real checkpoint's split 25 vs 20 when present"
 st_r24_pp() {
   run_tests '^kolibri_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^kolibri_pp_test$' 'device|P4|SKIP|OK'
   finish
 }
-stage r24.cli 24 default gpu oracle_kolibri_synth r24.pp "CLI: b70-decode <synthetic int4attn> --parallel 1 --ids prose.ids --n 32 against --parallel pp (the default; copy, peer, --pipeline-split 3): the same ids; --max-len auto plans both cards; the plan and both memory lines"
+stage r24.cli 24 default gpu oracle_kolibri_synth r24.pp "CLI: b70-decode <synthetic int4attn> --parallel 1 --ids prose.ids --n 32 against --parallel pp (the default, and --pipeline-split 3): the same ids; --max-len auto plans both cards; the plan and both memory lines"
 st_r24_cli() {
-  local ck="oracle-out-kolibri-synth/int4attn/ckpt" ids="oracle-out-kolibri-synth/int4attn/prose.ids" h
+  local ck="oracle-out-kolibri-synth/int4attn/ckpt" ids="oracle-out-kolibri-synth/int4attn/prose.ids"
   chk "build/src/cli/b70-decode $ck --parallel 1 --ids $ids --n 32 > $STATE/r24-one.ids" "one card"
-  for h in copy peer; do
-    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --pipeline-handoff $h > $STATE/r24-$h.ids && cmp $STATE/r24-one.ids $STATE/r24-$h.ids" \
-      "--parallel pp (the default), $h: the one-card ids"
-  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 > $STATE/r24-pp.ids && cmp $STATE/r24-one.ids $STATE/r24-pp.ids" \
+    "--parallel pp (the default): the one-card ids"
   chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 32 --pipeline-split 3 > $STATE/r24-s3.ids && cmp $STATE/r24-one.ids $STATE/r24-s3.ids" \
     "--pipeline-split 3: the one-card ids"
   chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --ids $ids --n 8 --max-len auto > /dev/null" "--max-len auto on two cards"
@@ -1422,22 +1412,21 @@ st_r24_partial() {
   jgrab partial 'kolibri_partial' 'layer|BELOW|routing:|OK'
   finish
 }
-stage r24.pp_real 24 default gpu kolibri,oracle_kolibri r24.pp "KL2 / K3 on the real checkpoint across two cards (needs spec 20b): kolibri_golden_test (flash, copy), _i8head, _eager, _peer and kolibri_decode_test (pp2: plan == allocation per device, replay bitwise)"
+stage r24.pp_real 24 default gpu kolibri,oracle_kolibri r24.pp "KL2 / K3 on the real checkpoint across two cards (needs spec 20b): kolibri_golden_test (flash), _i8head, _eager and kolibri_decode_test (pp2: plan == allocation per device, replay bitwise)"
 st_r24_pp_real() {
-  run_tests '^(kolibri_golden_test|kolibri_golden_i8head_test|kolibri_golden_eager_test|kolibri_golden_peer_test|kolibri_decode_test)$' \
+  run_tests '^(kolibri_golden_test|kolibri_golden_i8head_test|kolibri_golden_eager_test|kolibri_decode_test)$' \
     '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab golden '^kolibri_(golden|decode)' 'gate:|routing:|plan ==|K3|OK'
   finish
 }
-stage r24.speed 24 optin gpu kolibri r24.pp_real "Task 8 (needs spec 20b): decode on two cards at depth 4096 / 32768, tg 256, max_len 40960 - the int8 head, copy and peer, flash and eager - interleaved, median of 3; launches per token, each card's memory; against the derived roofline (~250 t/s int4 attention + int8 head at ~600 GB/s; ~120 t/s bf16 attention)"
+stage r24.speed 24 optin gpu kolibri r24.pp_real "Task 8 (needs spec 20b): decode on two cards at depth 4096 / 32768, tg 256, max_len 40960 - the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's memory; against the derived roofline (~250 t/s int4 attention + int8 head at ~600 GB/s; ~120 t/s bf16 attention)"
 st_r24_speed() {
   idle before
   local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1"
   for d in 4096 32768; do
     arms="$arms d$d-int8 '$k $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960)'"
-    arms="$arms d$d-int8-peer '$k $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960 --pipeline-handoff peer)'"
     arms="$arms d$d-int8-eager '$k B70_KOLIBRI_ATTN=eager $(bench_cmd "$SNAP_KOLIBRI" --depth $d --tg 256 --max-len 40960)'"
-    ratios="$ratios --ratio d$d-int8-peer/d$d-int8 --ratio d$d-int8-eager/d$d-int8"
+    ratios="$ratios --ratio d$d-int8-eager/d$d-int8"
   done
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Kolibri-1 decode arms"
   idle after
@@ -1537,7 +1526,7 @@ st_r25_benchy() {
 
 # ======================================================================================
 row 26 "spec 20d - Kolibri-1 prefill: grouped MoE over 384 experts, windowed flash over the ring, one hand-off per chunk (spec 20 §12, plan 20d)"
-rownote 26 "Written blind on the Mac, after row 24 (20c's decode on the card) and rows 22 / 23 (16b's / 16c's hand-offs): none of the 17 new binaries of the 20d block was ever compiled by ocloc - the DPAS flash at GQA 12 with the 513-key window over the 4096-slot ring (kol_pf_flash_attn_Q48KV4_{W513_R4096,F}[_EAGER]), the 384-expert sort on 256 lanes (kol_pf_moe_E384_T6_D2560_I512_L256), the grouped GEMMs at Kolibri's shapes (pf_moe_gemm_K2560_N1024_SILU, _K512_N2560), kol_prep.cl at M 2048. The 2252-launch walk and the sequential two-card chunk hand-off never ran."
+rownote 26 "Written blind on the Mac, after row 24 (20c's decode on the card) and rows 22 / 23 (16b's / 16c's hand-off): none of the 17 new binaries of the 20d block was ever compiled by ocloc - the DPAS flash at GQA 12 with the 513-key window over the 4096-slot ring (kol_pf_flash_attn_Q48KV4_{W513_R4096,F}[_EAGER]), the 384-expert sort on 256 lanes (kol_pf_moe_E384_T6_D2560_I512_L256), the grouped GEMMs at Kolibri's shapes (pf_moe_gemm_K2560_N1024_SILU, _K512_N2560), kol_prep.cl at M 2048. The 2252-launch walk and the sequential two-card chunk hand-off never ran."
 rownote 26 "The synthetic checkpoints (oracle-out-kolibri-synth, row 24's r24.oracle_synth) carry KL2 / K3 before spec 20b; everything on the real checkpoint (r26.real, r26.speed) SKIPs 'missing data' until 20b. The near-tie tolerance and the prefill-vs-decode KV bars (row >= 0.999 on layer 0, median >= 0.9998, p01 >= 0.99) are PROPOSED: the tests print the distributions."
 rownote 26 "If KL2 on prefill fails determined rows under flash, compare r26.golden_eager (B70_KOLIBRI_ATTN=eager: the eager prefill flash and decode's eager attention) before reading the kernels (spec 18 §10.1's rule)."
 stage r26.host 26 default cpu - - "host: kolibri_pf_ref_test (the 384-expert sort and its adversaries, == pf_moe_ref::sort; the combine == decode's chain and torch's row; the windowed flash walk == the direct softmax through the ring; eager_window == torch's eager rows bitwise; the bf16 slab tail), kolibri_pf_variant_names_test, kolibri_plan_test (2252 launches one card and two, 4 + 2 weight batches, 0.905 GB scratch, 262144 on two cards with prefill planned)"
@@ -1632,7 +1621,7 @@ st_r26_speed() {
 
 # ======================================================================================
 row 27 "spec 16d - pipeline parallel integration: b70-serve --parallel pp, MTP across the split, the prefix cache on two cards, P3 / S3 at 262144 (spec 16 §10, plan 16d)"
-rownote 27 "After rows 22 and 23 (16b's hand-offs and 16c's prefill must pass first: r22.p1, r23.p1). Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both free of other DRM holders for r27.benchy."
+rownote 27 "After rows 22 and 23 (16b's hand-off and 16c's prefill must pass first: r22.p1, r23.p1). Every GPU stage needs BOTH cards (ZE_AFFINITY_MASK=0,1 in its commands, the one GPU lock); both free of other DRM holders for r27.benchy."
 rownote 27 "16d adds no kernel binary (the stage verify / draft lists bind the one-card MTP binaries; gdn_step_slots keeps the whole model's slot stride): G0's g0.sha is the 'nothing moved' check, and G0's suite (mtp_verify_test, prefix_gpu_*, golden_server_test) is --parallel 1's 'unchanged' check - capture.cc's verify walk now binds its slots through spec_mem(), the same pointer."
 rownote 27 "The embedding for the drafts on device 1 is REPLICATED (2.54 GB on Qwen3.8; spec 16 §3.1's open decision, taken as 16b's placement anticipated): the memory lines show it ('MTP: head ... + embedding replica ...'); P2P row gathers are the alternative if device 1's bytes ever bind."
 rownote 27 "P3 (r27.p3) needs the oracle image (passkey.py builds the prompt): 250000 ids at --max-len 262144, ~1 h per placement on two cards (derived). The llama-benchy rows (r27.benchy) are opt-in: one card vs --parallel pp at pp4096 and at depth 32k / 128k, plan 16d Task 2."
@@ -1643,12 +1632,12 @@ st_r27_host() {
   jgrab serve '^pp_serve_test$' 'one device|snapshots move|M2|restore|server|OK'
   finish
 }
-stage r27.reject 27 default cpu - - "b70-serve's --parallel refusals before the device: a bad --parallel value (4096), --pipeline-split alone, a bad --pipeline-handoff (K2-Horizon's --parallel pp is r25.reject's)"
+stage r27.reject 27 default cpu - - "b70-serve's --parallel refusals before the device: a bad --parallel value (4096), --pipeline-split alone, the removed --pipeline-handoff (K2-Horizon's --parallel pp is r25.reject's)"
 st_r27_reject() {
-  run_tests '^cli_reject_serve_pp_(value|split_alone|handoff_value)$'
+  run_tests '^cli_reject_serve_pp_(value|split_alone|handoff_removed)$'
   finish
 }
-stage r27.mtp 27 default gpu qwen r23.p1 "Review Focus 1-3: pp_mtp_test and _i8head - MTP across the split bitwise one card on device 0: the prose prefill (the head's KV filled on device 1), 64 speculative iterations (K 3, 1, 2, 0: every draft and verify logits row, the ids, the session incl. the live verify slot, the head's hidden row and KV layer), M2 on both engines (4 plain rows == one M = 4 verify), a 4103-id hooked prefill (spec 7 from the shadows), a one-card snapshot continued on two cards; copy and peer at the auto split, the cuts at 5 and 62; both Control blocks equal after every call; both memory lines (the embedding replica)"
+stage r27.mtp 27 default gpu qwen r23.p1 "Review Focus 1-3: pp_mtp_test and _i8head - MTP across the split bitwise one card on device 0: the prose prefill (the head's KV filled on device 1), 64 speculative iterations (K 3, 1, 2, 0: every draft and verify logits row, the ids, the session incl. the live verify slot, the head's hidden row and KV layer), M2 on both engines (4 plain rows == one M = 4 verify), a 4103-id hooked prefill (spec 7 from the shadows), a one-card snapshot continued on two cards; the auto split, the cuts at 5 and 62; both Control blocks equal after every call; both memory lines (the embedding replica)"
 st_r27_mtp() {
   run_tests '^(pp_mtp_test|pp_mtp_i8head_test)$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab mtp '^pp_mtp' 'bitwise|M2|memory, device|differs|OK'
@@ -1659,9 +1648,9 @@ st_r27_mtp_kv8() {
   run_tests '^pp_mtp_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r27.prefix 27 default gpu qwen r23.p1 "Review Focus 2 / 5, spec 16 P2 (C2 with --parallel pp): pp_prefix_gpu_test, _peer, _split (the int8 head, split_last) and _mtp (K 3) - spec 7's sequences a-f through b70-serve's adapters, two cards bitwise one card: every plan, the final turn's ids and rows, the session"
+stage r27.prefix 27 default gpu qwen r23.p1 "Review Focus 2 / 5, spec 16 P2 (C2 with --parallel pp): pp_prefix_gpu_test, _split (the int8 head, split_last) and _mtp (K 3) - spec 7's sequences a-f through b70-serve's adapters, two cards bitwise one card: every plan, the final turn's ids and rows, the session"
 st_r27_prefix() {
-  run_tests '^pp_prefix_gpu(_peer|_split|_mtp)?_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
+  run_tests '^pp_prefix_gpu(_split|_mtp)?_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab c2 '^pp_prefix_gpu' 'final turn|bitwise|DIFFER|OK|FAILED'
   finish
 }
@@ -1670,19 +1659,17 @@ st_r27_prefix_kv8() {
   run_tests '^pp_prefix_gpu_kv8_test$' kv8 '' 'ZE_AFFINITY_MASK=0,1'
   finish
 }
-stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto under copy and peer, against the one-card plain ids: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the mtp line and both memory lines"
+stage r27.cli_mtp 27 default gpu qwen r27.mtp "b70-decode --parallel pp with MTP (16b's refusal lifted): --ids prose.ids --n 64 --prefill with --spec mtp --spec-max 3 and --spec auto, against the one-card plain ids: identity to --spec off a recorded number, the bar the f32 judge on each first difference (serve_judge.py, spec_judge.h's rule; a difference without its reference SKIPs 'awaiting f32 reference', never passes - operator 2026-11-07); the mtp line and both memory lines"
 st_r27_cli_mtp() {
   local args="--ids tests/golden/prompts/prose.ids --n 64 --prefill"
   chk "build/src/cli/b70-decode $SNAP_QWEN $args > $STATE/r27-one.ids" "one card, plain"
   decode_record "$STATE/$STAGE" one prose tests/golden/prompts/prose.ids "$STATE/r27-one.ids"
-  local h m s
-  for h in copy peer; do
-    for m in 3 auto; do
-      s="--spec auto"; [ "$m" = 3 ] && s="--spec mtp --spec-max 3"
-      chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN $args $s --parallel pp --pipeline-handoff $h > $STATE/r27-$h-$m.ids" \
-        "--parallel pp $s, $h"
-      decode_record "$STATE/$STAGE" "$h-$m" prose tests/golden/prompts/prose.ids "$STATE/r27-$h-$m.ids"
-    done
+  local m s
+  for m in 3 auto; do
+    s="--spec auto"; [ "$m" = 3 ] && s="--spec mtp --spec-max 3"
+    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $SNAP_QWEN $args $s --parallel pp > $STATE/r27-pp-$m.ids" \
+      "--parallel pp $s"
+    decode_record "$STATE/$STAGE" "pp-$m" prose tests/golden/prompts/prose.ids "$STATE/r27-pp-$m.ids"
   done
   x "python3 tools/box_validate/serve_client.py compare --dir $STATE/$STAGE --ref one"
   serve_judge "$STATE/$STAGE" one "each two-card MTP arm's first difference from one card's plain ids by the f32 judge"
@@ -1698,8 +1685,8 @@ st_r27_serve() {
   step_rc $? "b70-serve --parallel pp, seeded sampling"
   x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $SNAP_QWEN --parallel pp --spec auto --prefix-split-last"
   step_rc $? "b70-serve --parallel pp --spec auto --prefix-split-last, seeded sampling"
-  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $SNAP_QWEN --parallel pp --spec auto --kv-cache int8 --pipeline-handoff peer"
-  step_rc $? "b70-serve --parallel pp --spec auto --kv-cache int8, peer"
+  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $SNAP_QWEN --parallel pp --spec auto --kv-cache int8"
+  step_rc $? "b70-serve --parallel pp --spec auto --kv-cache int8"
   grab_all auto 'max_len: auto ->|split: auto ->' 6
   grab_all plan '^  device [01]:' 6
   grab_all memory '^memory, device' 6
@@ -1707,14 +1694,14 @@ st_r27_serve() {
   grab_all seeded '^SEEDED ' 2
   finish
 }
-stage r27.golden 27 default gpu qwen r27.serve "Review Focus 5, one request end to end: golden_server_test with B70_SERVE_ARGS - b70-serve --parallel pp (prefix cache on, the server's default) against b70-decode on ONE card (--prefill): prose / code / cjk, prompt ids and 32 generated ids identical; again with --parallel pp --spec mtp --spec-max 3, --parallel pp --spec lookup and --parallel pp --pipeline-handoff peer"
+stage r27.golden 27 default gpu qwen r27.serve "Review Focus 5, one request end to end: golden_server_test with B70_SERVE_ARGS - b70-serve --parallel pp (prefix cache on, the server's default) against b70-decode on ONE card (--prefill): prose / code / cjk, prompt ids and 32 generated ids identical; again with --parallel pp --spec mtp --spec-max 3, and --parallel pp --spec lookup"
 st_r27_golden() {
   local a
-  for a in "--parallel pp" "--parallel pp --spec mtp --spec-max 3" "--parallel pp --spec lookup" "--parallel pp --pipeline-handoff peer"; do
+  for a in "--parallel pp" "--parallel pp --spec mtp --spec-max 3" "--parallel pp --spec lookup"; do
     chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $SNAP_QWEN" \
       "golden_server_test, b70-serve $a"
   done
-  grab_all golden 'generated ids identical' 12
+  grab_all golden 'generated ids identical' 9
   finish
 }
 stage r27.ornith 27 default gpu ornith r27.golden "b70-serve --parallel pp on a MoE model: Ornith (40 layers, the MoE MTP head on device 1) golden_server_test --chat, plain and --spec mtp --spec-max 3"
@@ -1786,13 +1773,11 @@ st_r28_snapshot() {
   jgrab snapshot '^kolibri_snapshot_gpu' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
   finish
 }
-stage r28.serve 28 default gpu oracle_kolibri_synth r28.snapshot "b70-serve <synthetic int4attn> startup and requests: --parallel pp by default (the startup line: Kolibri-1, kolibri1 chat format, the split, prefill l0, mtp none, lm_head int8, kv cache bf16, sampling defaults sampled T 1.00 top-p 0.97 top-k 128, the rings' last 512 positions), --max-len auto planned over both cards; --parallel 1 (the synthetic fits) and --pipeline-handoff peer; a seeded sampled request twice, identical"
+stage r28.serve 28 default gpu oracle_kolibri_synth r28.snapshot "b70-serve <synthetic int4attn> startup and requests: --parallel pp by default (the startup line: Kolibri-1, kolibri1 chat format, the split, prefill l0, mtp none, lm_head int8, kv cache bf16, sampling defaults sampled T 1.00 top-p 0.97 top-k 128, the rings' last 512 positions), --max-len auto planned over both cards; --parallel 1 (the synthetic fits); a seeded sampled request twice, identical"
 st_r28_serve() {
   local ck="oracle-out-kolibri-synth/int4attn/ckpt"
   x "ZE_AFFINITY_MASK=0,1 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck"
   step_rc $? "b70-serve <synthetic>, --parallel pp (default), seeded sampling"
-  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --pipeline-handoff peer --max-len 16384"
-  step_rc $? "b70-serve <synthetic> --pipeline-handoff peer"
   x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck --parallel 1 --max-len 16384"
   step_rc $? "b70-serve <synthetic> --parallel 1, seeded sampling"
   grab_all auto 'max_len: auto ->|^split: ' 6
@@ -1801,14 +1786,14 @@ st_r28_serve() {
   grab_all seeded '^SEEDED ' 4
   finish
 }
-stage r28.chat 28 default gpu oracle_kolibri_synth r28.serve "plan 20e Task 3 Step 4: one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill, both on --parallel pp), with B70_SERVE_ARGS '--max-len 16384', '... --pipeline-handoff peer' and '... --parallel 1' (one card vs b70-decode's two: bitwise by 20c / 20d's --parallel rule); run directly (not registered: without a checkpoint it would fail, not SKIP)"
+stage r28.chat 28 default gpu oracle_kolibri_synth r28.serve "plan 20e Task 3 Step 4: one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill, both on --parallel pp), with B70_SERVE_ARGS '--max-len 16384' and '... --parallel 1' (one card vs b70-decode's two: bitwise by 20c / 20d's --parallel rule); run directly (not registered: without a checkpoint it would fail, not SKIP)"
 st_r28_chat() {
   local ck="oracle-out-kolibri-synth/int4attn/ckpt" a
-  for a in "--max-len 16384" "--max-len 16384 --pipeline-handoff peer" "--max-len 16384 --parallel 1"; do
+  for a in "--max-len 16384" "--max-len 16384 --parallel 1"; do
     chk "ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $ck --chat" \
       "Kolibri synthetic, golden_server_test --chat, b70-serve $a"
   done
-  grab_all chat 'chat of [0-9]+ prompt ids' 9
+  grab_all chat 'chat of [0-9]+ prompt ids' 6
   finish
 }
 stage r28.real 28 default gpu kolibri r28.chat "after spec 20b, two cards: kolibri_snapshot_gpu_test (pp2: Review Focus 4 on 50 layers); b70-serve <int4> startup (--max-len auto -> 262144 at split 25 with the int8 head and the prefill scratch, derived) with a seeded request twice; golden_server_test --chat (the server's greedy chat = b70-decode on its prompt_token_ids)"
@@ -1844,11 +1829,10 @@ st_r28_a4() {
   grab_all a4 'match|/ 36|parse failure' 6
   finish
 }
-stage r28.benchy 28 optin gpu-self kolibri,uvx - "plan 20e Task 5's speed rows through b70-serve <kolibri> on two cards (SERVE_AFFINITY=0,1; b70-serve's --parallel auto picks two cards for Kolibri-1 - llama-benchy's --pp is its prompt length): pp4096 tg256 depth 1 at 262144 under copy and peer (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the cards, the attention arm (decision 2), the int8 head and bf16 KV"
+stage r28.benchy 28 optin gpu-self kolibri,uvx - "plan 20e Task 5's speed rows through b70-serve <kolibri> on two cards (SERVE_AFFINITY=0,1; b70-serve's --parallel auto picks two cards for Kolibri-1 - llama-benchy's --pp is its prompt length): pp4096 tg256 depth 1 at 262144 (the operator's flags: --no-cache --exact-tg --latency-mode generation); prefix caching at depth 4k / 16k / 32k; decode at depth 4k / 32k / 128k - every row with the cards, the attention arm (decision 2), the int8 head and bf16 KV"
 st_r28_benchy() {
   local f="--concurrency 1 --no-cache --exact-tg --latency-mode generation"
-  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards (copy), pp4096 tg256"
-  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 SERVE_ARGS='--pipeline-handoff peer' tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards (peer), pp4096 tg256"
+  chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 4096 --tg 256 --depth 1 $f" "two cards, pp4096 tg256"
   chk "MODEL=$SNAP_KOLIBRI MAX_LEN=65536 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 1024 --tg 64 --depth 0 4096 16384 32768 --enable-prefix-caching --exact-tg --latency-mode generation --runs 3" "prefix cache on, depth 4k / 16k / 32k"
   chk "MODEL=$SNAP_KOLIBRI MAX_LEN=262144 SERVE_AFFINITY=0,1 tools/probe/serve_benchy.sh --pp 512 --tg 128 --depth 4096 32768 131072 $f" "decode at depth 4k / 32k / 128k"
   grab_all benchy '^\| ' 80
@@ -1959,7 +1943,7 @@ rownote 32 "Written on the Mac: every 21c binary's first ocloc compile is here (
 rownote 32 "Data: r32.oracle_synth needs the synthetic checkpoints (r31.synth) and writes their golden sets (~0.5-1 h each on the box CPU, ESTIMATED); r32.golden / r32.k3 need them; r32.partial needs 21a's real sets on Intel's checkpoint (row 30: qwen4exp_oracle.sh intel and intel-layers 18) and the PLE int8 file (r31.ple_convert); r32.pp and the two-card CLI need two GPUs (after r22.p1)."
 rownote 32 "Tolerances PROPOSED until row 30 prints the gap distributions: B70_Q4_TIE_TOL 1e-3 (the router's 10th / 11th p) and B70_Q4_SEL_TOL 1e-3 (the 512th / 513th block score); a gap of exactly 0 is undetermined whatever the tolerance (torch's topk does not prefer the lower index: spec 21 §12 finding 2). The partial forward's bars (tap median cosine >= 0.9998, min >= 0.99) are PROPOSED too."
 rownote 32 "r32.ple_rate's numbers (us per token, the implied bus rate, one card / the other / both) are spec 22 P0's first host-USM measurement: hand them back with the row (spec 22 §1 records where)."
-stage r32.host 32 default cpu - - "host: qwen4exp_ref_test (the kernels' twin against qwen4exp_ref.py / transformers 5.19.0's fixture: HC, PLE ids and block, indexer, scores, selection, route, combine, the sigmoid gated norm; Review Focus 1-3), qwen4exp_variant_names_test (the bound names = the CMake block), qwen4exp_plan_test (779 / 767 / 755 launches, 75 at --layers 4, +1 two cards, +3 peer; the scratch; --layers 18 / 38 fit at 32k)"
+stage r32.host 32 default cpu - - "host: qwen4exp_ref_test (the kernels' twin against qwen4exp_ref.py / transformers 5.19.0's fixture: HC, PLE ids and block, indexer, scores, selection, route, combine, the sigmoid gated norm; Review Focus 1-3), qwen4exp_variant_names_test (the bound names = the CMake block), qwen4exp_plan_test (779 / 767 / 755 launches, 75 at --layers 4, +1 two cards; the scratch; --layers 18 / 38 fit at 32k)"
 st_r32_host() {
   run_tests '^(qwen4exp_ref_test|qwen4exp_variant_names_test|qwen4exp_plan_test)$'
   jgrab host '^qwen4exp_(ref|variant_names|plan)_test$' 'HC:|PLE:|indexer:|select:|route:|21c:|OK'
@@ -2012,20 +1996,18 @@ st_r32_partial() {
   jgrab partial '^qwen4exp_partial_test$' 'tokens|tap cosine|routing:|OK'
   finish
 }
-stage r32.pp 32 default gpu oracle_q4exp_synth r32.k3,r22.p1 "two cards (Review Focus 6): qwen4exp_pp_test - --parallel 1 against --parallel pp --pipeline-split 2 and 1 (the cut at the PLE layer) on the ours synthetic under copy and peer: tokens, logits, routes, selections, every layer's persistent bytes and the PLE ids bitwise, both Control blocks equal; P4 (a lost hand-off throws within 10 s, reset recovers); Intel's checkpoint when present at the planner's layer count for two cards (layers_that_fit, stepped down until the planned split and a neighbour both fit: 38, splits 18 / 19 on these cards - 38 at split 20 did not fit device 0), the two splits bitwise under copy and peer"
+stage r32.pp 32 default gpu oracle_q4exp_synth r32.k3,r22.p1 "two cards (Review Focus 6): qwen4exp_pp_test - --parallel 1 against --parallel pp --pipeline-split 2 and 1 (the cut at the PLE layer) on the ours synthetic: tokens, logits, routes, selections, every layer's persistent bytes and the PLE ids bitwise, both Control blocks equal; P4 (a lost hand-off throws within 10 s, reset recovers); Intel's checkpoint when present at the planner's layer count for two cards (layers_that_fit, stepped down until the planned split and a neighbour both fit: 38, splits 18 / 19 on these cards - 38 at split 20 did not fit device 0), the two splits bitwise"
 st_r32_pp() {
   run_tests '^qwen4exp_pp_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab pp '^qwen4exp_pp_test$' '\(a\)|\(b\)|\(c\)|\(d\)|SKIP|OK'
   finish
 }
-stage r32.cli 32 default gpu oracle_q4exp_synth r32.pp "CLI: b70-decode <ours synthetic> --layers 4 --ids q4exp_short.ids --n 32 on one card against --parallel pp (copy, peer): the same ids; --layers auto and --max-len auto plan; the memory lines"
+stage r32.cli 32 default gpu oracle_q4exp_synth r32.pp "CLI: b70-decode <ours synthetic> --layers 4 --ids q4exp_short.ids --n 32 on one card against --parallel pp: the same ids; --layers auto and --max-len auto plan; the memory lines"
 st_r32_cli() {
-  local ck="oracle-out-q4exp-synth/ours/ckpt" ids="tests/golden/prompts/q4exp_short.ids" h
+  local ck="oracle-out-q4exp-synth/ours/ckpt" ids="tests/golden/prompts/q4exp_short.ids"
   chk "build/src/cli/b70-decode $ck --layers 4 --ids $ids --n 32 > $STATE/r32-one.ids" "one card"
-  for h in copy peer; do
-    chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --layers 4 --parallel pp --ids $ids --n 32 --pipeline-handoff $h > $STATE/r32-$h.ids && cmp $STATE/r32-one.ids $STATE/r32-$h.ids" \
-      "--parallel pp, $h: the one-card ids"
-  done
+  chk "ZE_AFFINITY_MASK=0,1 build/src/cli/b70-decode $ck --layers 4 --parallel pp --ids $ids --n 32 > $STATE/r32-pp.ids && cmp $STATE/r32-one.ids $STATE/r32-pp.ids" \
+    "--parallel pp: the one-card ids"
   chk "build/src/cli/b70-decode $ck --layers auto --max-len auto --ids $ids --n 8 > /dev/null" "--layers auto --max-len auto"
   grab_all plan 'layers: |max_len: |plan at|^engine:' 8
   grab_all memory '^memory' 6
@@ -2047,7 +2029,7 @@ st_r32_bench_attn() {
   grab_all bench 'depth|us|median' 12
   finish
 }
-stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two (copy, peer), --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21 §3)"
+stage r32.speed 32 optin gpu q4exp_intel,q4exp_intel_ple r32.partial "Task 7: decode on what fits - Intel's checkpoint --layers 18 on one card and 38 on two, --bench --depth 1024 / 4096 / 32768 --tg 256, the int8 head, flash and eager - interleaved, median of 3; launches per token, each card's step time, against the derived roofline per layer (spec 21 §3)"
 st_r32_speed() {
   idle before
   local d arms="" ratios="" k="ZE_AFFINITY_MASK=0,1" s="${SNAP_Q4EXP_INTEL:-Intel/Qwen3.8-Flash-Next-W4A16-AutoRound}"
@@ -2055,8 +2037,7 @@ st_r32_speed() {
     arms="$arms d$d-L18 '$(bench_cmd "$s" --layers 18 --depth $d --tg 256 --max-len 40960)'"
     arms="$arms d$d-L18-eager 'B70_Q4_ATTN=eager $(bench_cmd "$s" --layers 18 --depth $d --tg 256 --max-len 40960)'"
     arms="$arms d$d-L38 '$k $(bench_cmd "$s" --layers 38 --parallel pp --depth $d --tg 256 --max-len 40960)'"
-    arms="$arms d$d-L38-peer '$k $(bench_cmd "$s" --layers 38 --parallel pp --depth $d --tg 256 --max-len 40960 --pipeline-handoff peer)'"
-    ratios="$ratios --ratio d$d-L18-eager/d$d-L18 --ratio d$d-L38-peer/d$d-L38"
+    ratios="$ratios --ratio d$d-L18-eager/d$d-L18"
   done
   chk "tools/box_validate/interleave.sh -o $STATE/$STAGE.rows -r 3$ratios --$arms" "the Qwen3.8-Flash-Next decode arms"
   idle after
@@ -2566,7 +2547,7 @@ row 56 "spec 19d - DFlash in the server: the drafter's ring in the prefix cache'
 rownote 56 "Written blind on the Mac after rows 54 / 55 (themselves unvalidated): nothing of 19d has run on a card. No new binary (kernel_cmdlines +0 / -0 / ~0): the --parallel pp tap verify stage lists bind 19c's gdn_step_slots_M<M>_N8 and B70_VERIFY_M8's M = 5..8 variants per stage. Nothing changes without --spec dflash: D0 is G0 (shared edits: Engine's snapshots gain the ring only with a drafter, PipelineEngine / place_stages / pp_plan gain defaulted drafter arguments, capture.cc a new mode, step_stage a defaulted PrefillTaps*, the prefix store's root store_root(kv_form, 0) = kv_form)."
 rownote 56 "Decision 5 as ruled in 19d (spec 19 §12): every snapshot carries the drafter's WHOLE ring (41,943,040 B, +25 % a snapshot) - a prefix cache hit is a copy, bitwise by construction; a mid-call block end's snapshot holds the ring as that call left it (positions outside the call's last 2048 not yet projected): lower acceptance after a prefix cache hit there with a short tail, never another output (r56.prefix's R2 caveat line counts it)."
 rownote 56 "Data: the gate checkpoint (qwen), the drafter (dflash), both cards for r56.pp / r56.pp_serve. Hand back: every stage's lines - the K / R1 / R2 lines of dflash_prefix_gpu_test, dflash_engine_test's SR and L lines, pp_dflash_test's bitwise lines per split, the serve rows' judged tables and 'dflash:' lines. D5 (the speed verdict) is closed (spec 19, 2026-10-28: --spec dflash is an option, not the default; the numbers are in docs/BENCHMARKS.md), so its stages are gone."
-stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession prefix cache hit, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a prefix cache hit onto another slot), pp_dflash_serve_test (the --parallel pp adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --parallel pp refusals (peer, b70-decode)"
+stage r56.host 56 default cpu - - "host: dflash_prefix_test (the ring across a PrefixSession prefix cache hit, the store key; the ring-less mutant caught), dflash_scheduler_test (speculation under the batching scheduler: lossless, per-request records, ends inside a run, a prefix cache hit onto another slot), pp_dflash_serve_test (the --parallel pp adapter's DFlash path), pp_serve_plan_test (the drafter's terms on two cards), dflash_plan_test (the ring and key rows), scheduler_test / prefix_cache_test / pp_serve_test unchanged; the --spec dflash --parallel pp refusal (b70-decode)"
 st_r56_host() {
   run_tests '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test|pp_serve_plan_test|dflash_plan_test|scheduler_test|prefix_cache_test|pp_serve_test|cli_reject_(serve_)?dflash_pp)$'
   jgrab host '^(dflash_prefix_test|dflash_scheduler_test|pp_dflash_serve_test)$' '^(K|R1|R2|S[1-5]|[1-4])[:.] |OK$|FAIL' 40
@@ -2713,7 +2694,7 @@ rownote 60 "Written blind on the Mac (spec 25 §15): NO nb_* binary has been com
 rownote 60 "P0 first (Decision 16): r60.p0 runs probe_bolt_step before any engine stage - the 653-launch skeleton from EXISTING kernels at Bolt's shapes, the 533-launch fused skeleton, the GEMV-only list, 653 noops and the SSM-state floor (nb_state_rmw: 4 MiB fp32 / 2 MiB bf16 a Mamba block), interleaved, at depth 4096 and 65536, --sweep-s (every int4 shape at S 1/2/4/8/16 x L 0/1, probe_gemv's 3 % rule) and --pair (the two-launch norm). Stand-ins, PROPOSED scales: moe.cl at E 64 (a 64-block pool + the shared slot a MoE block; up x I*544/2,228,224, down x I*544/1,114,112), gdn_step at Qwen3.8's shape (x 4/3), lfm_res_norm as the one-launch norm; conv / gnorm / route / sh_act / attn_prep / embed are noops. Write the table into docs/probes/probe-bolt-2026-10-21.md (a 'P0' section). The S picks become model::BoltDesc::linears' {S, layout} (25b's PROVISIONAL S 1 until then; the block already builds every cell); every arm whose skeleton saving is >= 1 % of the step is A/B'd in r60.fuse / r60.speed (Decision 16, PROPOSED)."
 rownote 60 "Every stage on the REAL checkpoint needs BOTH cards (Decision 4; split 48 by bytes): its commands set ZE_AFFINITY_MASK=0,1 themselves. The N 12 synthetics (row 59's r59.synth, data key bolt_synth) run on one card, --pp 6,4 and pp2:6 on two. Their golden sets come from r60.synth_golden (bolt_oracle.sh export on n12-g128 / n12-g64x -> \$DATA/oracle-out-bolt-n12-{g128,g64x}, short / 4k / agentic, CPU, hours ESTIMATED; data key oracle_bolt_synth). Our export's golden sets are row 57's r57.golden (oracle_bolt: SNAPSHOT names ours)."
 rownote 60 "Tolerances (all PROPOSED): B70_BOLT_TIE_TOL = 1e-3 on the 9th / 10th sel until row 57's gap distribution on the real weights (an exact 0 gap is undetermined); h taps median >= 0.9998 / min >= 0.99 a block; the SSM state and the conv columns after the prompt cosine >= 0.999 a block (not bitwise: the int4 GEMV's fp32 order vs the reference's bf16 linear); flash against fp64 at cosine 0.99999. Decision 2's A4 subset needs b70-serve (spec 25e, not built): r60.state_arm records B3 only."
-rownote 60 "Hand back: P0's tables (step per list, gap per launch, the floors, the S picks, the PROPOSED corrected step); bolt_kernels_test's lines; every plan == allocation / launches line (653 / 645 eager / 533 all arms / 655 peer; the synthetic 92); the B3 gate / routing / SSM / h lines per prompt; the arms' bitwise lines and their A/B ratios; the speed rows and the --profile table."
+rownote 60 "Hand back: P0's tables (step per list, gap per launch, the floors, the S picks, the PROPOSED corrected step); bolt_kernels_test's lines; every plan == allocation / launches line (653 / 645 eager / 533 all arms; the synthetic 92); the B3 gate / routing / SSM / h lines per prompt; the arms' bitwise lines and their A/B ratios; the speed rows and the --profile table."
 stage r60.host      60 default cpu -                         -        "host: probe_bolt_step_shapes_test, bolt_ref_test (the twin against the fixture), bolt_variant_names_test, bolt_plan_test (the launch counts, the decode scratch)"
 st_r60_host() {
   run_tests '^(probe_bolt_step_shapes_test|bolt_ref_test|bolt_variant_names_test|bolt_plan_test)$'
@@ -2773,13 +2754,13 @@ st_r60_synth_b3() {
   jgrab synth-b3 '^bolt_golden_synth' 'gate:|routing:|SSM state|conv|^  h |step [0-9]+:|OK'
   finish
 }
-stage r60.synth_pp  60 default gpu  bolt_synth               r60.synth "two cards on the synthetic: bolt_decode_test --pp 6,4 (copy at 6, peer at 4: bitwise each other AND bitwise one card) + the golden gate across split 6 (peer)"
+stage r60.synth_pp  60 default gpu  bolt_synth               r60.synth "two cards on the synthetic: bolt_decode_test --pp 6,4 (splits 6 and 4: bitwise each other AND bitwise one card) + the golden gate across split 6"
 st_r60_synth_pp() {
   run_tests '^bolt_decode_synth_pp_test$|^bolt_golden_synth_short_pp2_test$' '' '' 'ZE_AFFINITY_MASK=0,1'
   jgrab synth-pp '^bolt_(decode_synth_pp|golden_synth_short_pp2)' 'two cards|split|Review Focus 6|gate:|OK'
   finish
 }
-stage r60.golden    60 default gpu  bolt_int4,oracle_bolt    r60.k1   "our g64 export, two cards: bolt_decode_test --pp 48,40 (653 launches, B4, split 48 copy bitwise 40 peer); B3 short / 4k / agentic, split 40, bf16 head, eager"
+stage r60.golden    60 default gpu  bolt_int4,oracle_bolt    r60.k1   "our g64 export, two cards: bolt_decode_test --pp 48,40 (653 launches, B4, split 48 bitwise 40); B3 short / 4k / agentic, split 40, bf16 head, eager"
 st_r60_golden() {
   run_tests '^bolt_decode_real_test$|^bolt_golden_real_(bolt_(short|4k|agentic)|short_split40|short_bf16head|short_eager)_test$' \
     '' '' 'ZE_AFFINITY_MASK=0,1'
@@ -2959,30 +2940,28 @@ st_r62_snapshot() {
   jgrab snapshot '^bolt_snapshot_gpu_real_test$' 'state|restore|snapshot restored|bitwise|DIFFER|OK|FAILED'
   finish
 }
-stage r62.serve     62 default gpu  bolt_synth              r62.snap_synth "b70-serve <synthetic n12-g128> startup and requests: one card by default (the startup line: Nemotron 3.5 Bolt, bolt chat format, template sha256 6521afc7 = Bolt's, --parallel 1, prefill l0, mtp none, lm_head int8, kv cache bf16, the sampling defaults - the snapshot's generation_config.json names no sampling key, so the published T 1.00 top-p 0.95 top-k none and EOS [2, 11] - and the snapshot's size), --max-len auto planned with the prefill scratch; --parallel pp (--pipeline-split 6) and --pipeline-handoff peer; a seeded sampled request twice, identical"
+stage r62.serve     62 default gpu  bolt_synth              r62.snap_synth "b70-serve <synthetic n12-g128> startup and requests: one card by default (the startup line: Nemotron 3.5 Bolt, bolt chat format, template sha256 6521afc7 = Bolt's, --parallel 1, prefill l0, mtp none, lm_head int8, kv cache bf16, the sampling defaults - the snapshot's generation_config.json names no sampling key, so the published T 1.00 top-p 0.95 top-k none and EOS [2, 11] - and the snapshot's size), --max-len auto planned with the prefill scratch; --parallel pp (--pipeline-split 6); a seeded sampled request twice, identical"
 st_r62_serve() {
   local ck="oracle-out-bolt-synth/n12-g128"
   x "ZE_AFFINITY_MASK=0 PORT=$PORT SEEDED=1 tools/box_validate/serve_probe.sh $ck --max-len 16384"
   step_rc $? "b70-serve <synthetic n12-g128>, one card (the default), seeded sampling"
   x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --parallel pp --pipeline-split 6 --max-len 16384"
   step_rc $? "b70-serve <synthetic n12-g128> --parallel pp --pipeline-split 6"
-  x "ZE_AFFINITY_MASK=0,1 PORT=$PORT tools/box_validate/serve_probe.sh $ck --parallel pp --pipeline-split 6 --pipeline-handoff peer --max-len 16384"
-  step_rc $? "b70-serve <synthetic n12-g128> --parallel pp --pipeline-handoff peer"
   grab_all auto 'max_len: auto ->|^split: ' 6
   grab_all memory '^memory' 8
   grab_all startup '^b70-serve: .*Nemotron 3.5 Bolt' 4
   grab_all seeded '^SEEDED ' 4
   finish
 }
-stage r62.chat_synth 62 default gpu bolt_synth              r62.serve   "one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic n12-g128 (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill), one card, --parallel pp split 6 and peer"
+stage r62.chat_synth 62 default gpu bolt_synth              r62.serve   "one greedy chat through b70-serve equal to b70-decode on the same ids - golden_server_test --chat on the synthetic n12-g128 (prose / code / cjk as one user message, 32 ids, temperature 0; b70-decode --ids <prompt_token_ids> --n 32 --prefill), one card and --parallel pp split 6"
 st_r62_chat_synth() {
   local ck="oracle-out-bolt-synth/n12-g128" a z
-  for a in "--max-len 16384" "--max-len 16384 --parallel pp --pipeline-split 6" "--max-len 16384 --parallel pp --pipeline-split 6 --pipeline-handoff peer"; do
+  for a in "--max-len 16384" "--max-len 16384 --parallel pp --pipeline-split 6"; do
     z=0; case "$a" in *"--parallel pp"*) z=0,1 ;; esac
     chk "ZE_AFFINITY_MASK=$z B70_SERVE_ARGS='$a' timeout 3600 build/tests/golden_server_test build/src/cli/b70-serve build/src/cli/b70-decode tests/golden/prompts $ck --chat" \
       "Bolt synthetic, golden_server_test --chat, b70-serve $a"
   done
-  grab_all chat 'chat of [0-9]+ prompt ids' 9
+  grab_all chat 'chat of [0-9]+ prompt ids' 6
   finish
 }
 stage r62.chat      62 default gpu  bolt_int4               -           "golden_server_test --chat on b70-serve <bolt> == b70-decode (B70_SERVE_DECODE_AFTER=1: the chats are collected, b70-serve is stopped, THEN b70-decode runs on each saved prompt - two copies of 41 GB do not fit two cards)"
@@ -3083,9 +3062,9 @@ st_r65_host() {
   jgrab host '^(bolt_spec_test|bolt_spec_plan_test)$' 'greedy|D4|p-value|mutant|snapshots|deferred|plan with|cost rows|verify launches|OK|PASS'
   finish
 }
-stage r65.reject  65 default gpu  -                          -        "the --spec refusals before the device: b70-serve cli_reject_serve_bolt_{lookup,dflash_lookup,spec_max,dflash_peer,draft_model,draft_vocab,spec_mtp}, b70-decode cli_reject_bolt_spec (under the GPU lock: a refusal that regressed would open the devices)"
+stage r65.reject  65 default gpu  -                          -        "the --spec refusals before the device: b70-serve cli_reject_serve_bolt_{lookup,dflash_lookup,spec_max,draft_model,draft_vocab,spec_mtp}, b70-decode cli_reject_bolt_spec (under the GPU lock: a refusal that regressed would open the devices)"
 st_r65_reject() {
-  run_tests '^cli_reject_(serve_bolt_(lookup|dflash_lookup|spec_max|dflash_peer|draft_model|draft_vocab|spec_mtp)|bolt_spec)$'
+  run_tests '^cli_reject_(serve_bolt_(lookup|dflash_lookup|spec_max|draft_model|draft_vocab|spec_mtp)|bolt_spec)$'
   finish
 }
 stage r65.d3      65 default gpu  bolt_synth                 g0.sha   "D3 + Review Focus 1 + Decision 10 on the cards: the verify binaries' first ocloc build; bolt_moe_union_test (union = plain M-row, bitwise, every I; the counting build); bolt_verify_synth{,_plain,_b16,_eager}_test (N 12, one card) and bolt_verify_real{,_plain}_test (our g64 export's, two cards: SKIP without bolt_g128) - verify rows at M = 1..8 bitwise 25c's decode steps (logits, KV rows, ring columns, SSM slots, taps), the launches per M; bolt_commit_{synth,synth_b16,real}_test - the live slot after commit j = the state after j + 1 steps on both cards, 64 ids after it, 3dc6def360's M 1 and ragged cases"

@@ -2043,11 +2043,6 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
 endif()
 # ==== Spec 13a / 13c ==== (end) ====
 
-# Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
-# the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
-# first). No defines: the word counts are kernel arguments, so one binary serves every model.
-add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
-
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-27-spec28b-small-m-build.md. Additive only: no existing variant's name or
 # command line moves (tools/kernel_cmdlines: +N / -0 / ~0), every M = 1 list binds what it bound before. Every list

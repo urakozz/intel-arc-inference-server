@@ -141,7 +141,7 @@ void usage() {
       "  B70_PREFILL_PROFILE=1   per-phase prefill timings on stderr (diagnostic)\n"
       "\n"
       "still being measured (they go when their numbers decide, docs/open-work.md):\n"
-      "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8, --pipeline-handoff copy|peer\n");
+      "  --kv-cache bf16|int8, --prefill-backend l0|l0-int8\n");
 }
 
 // The loader reports itself with std::printf - to stdout, which is this CLI's
@@ -755,7 +755,7 @@ int run(int argc, char** argv) {
   bool have_spec_max = false;
   cli::dflash::Args dflash;
   runtime::KvCache kv_cache = runtime::default_kv_cache();   // spec 12b: --kv-cache
-  cli::PipelineArgs pipe;   // --parallel, --pipeline-split, --pipeline-handoff
+  cli::PipelineArgs pipe;   // --parallel, --pipeline-split
   uint32_t layers = 0;      // spec 20c: --layers N (Kolibri-1's development mode)
   bool have_layers = false;
   bool layers_auto = false; // spec 21c: --layers auto (Qwen3.8-Flash-Next's planner N)
@@ -819,8 +819,6 @@ int run(int argc, char** argv) {
       }
     } else if (a == "--pipeline-split") {
       cli::parse_pipeline_split(value(i, "--pipeline-split"), pipe);
-    } else if (a == "--pipeline-handoff") {
-      cli::parse_pipeline_handoff(value(i, "--pipeline-handoff"), pipe);
     } else if (a == "--spec") {   // --ids only: mtp or dflash (cli/spec_args.h); Bolt refuses it by name
       spec_arg = cli::parse_spec(value(i, "--spec"));
       have_spec = true;
@@ -877,7 +875,7 @@ int run(int argc, char** argv) {
                              " --profile time the plain list (mtp_gpu_test --bench times MTP)");
   if (have_spec_max && !have_spec) throw std::runtime_error("--spec-max caps a proposer's drafts: name it with --spec");
   cli::refuse_replica_in_decode(pipe);   // plan 13b: two requests at once is b70-serve's
-  cli::resolve_overrides(pipe);   // --pipeline-split / --pipeline-handoff under --parallel auto: pp
+  cli::resolve_overrides(pipe);   // --pipeline-split under --parallel auto: pp
   const bool pp_given = pipe.given();
   // The model family decides which proposers exist (cli/spec_args.h); --spec lookup is b70-serve's (it verifies
   // a request's own repeats), so b70-decode has mtp and dflash.

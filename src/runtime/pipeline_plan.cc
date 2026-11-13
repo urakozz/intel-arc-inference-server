@@ -42,20 +42,6 @@ constexpr size_t kEmbedLaunches = 1, kHeadLaunches = 5;
 
 }  // namespace
 
-const char* pp_handoff_name(PpHandoff h) { return h == PpHandoff::Peer ? "peer" : "copy"; }
-
-bool parse_pp_handoff(const std::string& v, PpHandoff& out) {
-  if (v == "copy") {
-    out = PpHandoff::Copy;
-    return true;
-  }
-  if (v == "peer") {
-    out = PpHandoff::Peer;
-    return true;
-  }
-  return false;
-}
-
 PpStage pp_stage(const model::ModelDesc& d, uint32_t first, uint32_t last) {
   if (first >= last || last > d.layers)
     throw std::invalid_argument("runtime::pp_stage: layers [" + std::to_string(first) + ", " +
@@ -161,15 +147,13 @@ PpLandingLayout pp_landing_layout(size_t resid_bytes, size_t sumsq_bytes) {
   l.resid_bytes = resid_bytes;
   l.sumsq_bytes = sumsq_bytes;
   l.sumsq_off = round_up(l.resid_bytes, kPpPage);
-  l.stamp_off = l.sumsq_off + l.sumsq_bytes;
-  l.flag_off = round_up(l.stamp_off + 4, kPpPage);
-  l.total = l.flag_off + kPpPage;
+  l.total = l.sumsq_off + l.sumsq_bytes;
   return l;
 }
 
 size_t pp_link_bytes(const model::ModelDesc& d, uint32_t device) {
-  // Device 0: pp_send's counter; device 1: the landing allocation and pp_recv's state.
-  return device == 0 ? kPpStateWords * 4 : pp_landing_layout(d).total + kPpStateWords * 4;
+  // Device 1: the landing allocation; device 0 holds nothing of the hand-off.
+  return device == 0 ? 0 : pp_landing_layout(d).total;
 }
 
 size_t PpPlan::max_total() const {

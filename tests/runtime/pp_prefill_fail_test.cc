@@ -13,7 +13,7 @@
 //                  prefill throws naming the chunk and the event, within the bound plus slack.
 //                  The next prefill throws "reset() first"; after reset() the prefill is
 //                  bitwise the clean run's again.
-// Each under copy and peer. The other P4 refusals (a missing card, no peer access) are 16b's.
+// The other P4 refusals (a missing card, no peer access) are 16b's.
 //
 // argv: [1] the checkpoint. Exits 77 (SKIP) with fewer than two GPUs or without peer access.
 #include <chrono>
@@ -77,14 +77,13 @@ int main(int argc, char** argv) {
   const std::vector<uint32_t> prompt = repeat_to(golden::read_ids("tests/golden/prompts/long32k.ids"), kN);
   using Clock = std::chrono::steady_clock;
 
-  for (const runtime::PpHandoff h : {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer}) {
+  {
     loader::LoadedModel full = loader::load(d0, checkpoint, kMaxLen);
     const uint32_t split = runtime::pp_auto_split(*full.desc, runtime::pp_weights(full), kMaxLen);
     runtime::PipelineOptions opt;
-    opt.handoff = h;
     opt.prefill_timeout_ms = kBoundMs;
     runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, opt);
-    const char* name = runtime::pp_handoff_name(h);
+    const char* name = "copy";
     e.prepare_prefill();
 
     e.prefill(prompt);

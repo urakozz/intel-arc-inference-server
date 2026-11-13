@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
     else prompts.push_back(a);
   }
   try {
-    cli::bolt::check_spec(sa, 2, runtime::PpHandoff::Copy);
+    cli::bolt::check_spec(sa);
     (void)loader::LiliCheckpoint(sa.draft_model);
   } catch (const std::exception& e) {
     std::printf("SKIP: the drafter: %s\n", e.what());

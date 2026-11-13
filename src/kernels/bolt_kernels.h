@@ -105,12 +105,12 @@ inline Pending pending_of(const model::BoltDesc& d, uint32_t l) {
   return {linear_shape(d, l, model::BoltLinearId::Fc2).S, linear_shape(d, l, model::BoltLinearId::SharedDown).S};
 }
 
-// Every binary an M = 1 decode list of `d` binds for a head form, an attention form, a peer hand-off (spec 16b's
-// pp_handoff, built outside this block), the fused arms and the SSM state's precision (Decision 2)
+// Every binary an M = 1 decode list of `d` binds for a head form, an attention form, the fused arms and the SSM state's
+// precision (Decision 2)
 // (runtime/bolt/bolt_capture.cc forms the same names). tests/kernels/bolt_variant_names_test.cc holds the union to the CMake
 // block's list.
-inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool int8_head, bool eager, bool peer,
-                                                bool bf16_state, Arms arms = {}) {
+inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool int8_head, bool eager, bool bf16_state,
+                                                Arms arms = {}) {
   std::vector<std::string> v = {embed_variant(1), head_variant(int8_head), argmax1_variant(1), argmax2_variant()};
   auto add = [&](const std::string& s) {
     for (const std::string& x : v)
@@ -148,7 +148,6 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
   }
   const Pending last = d.layers ? pending_of(d, d.layers - 1) : Pending{};
   add(res_norm_variant(1, last.s1, last.s2, false));   // norm_f folds the last block's slices
-  if (peer) add(pp_handoff_variant());
   return v;
 }
 
@@ -159,7 +158,7 @@ inline std::vector<std::string> decode_variants(const model::BoltDesc& d, bool i
 // is the M-free binary: it writes out_token[0..M-1]); nb_ssm in its SLOT form at every M (`_SL8`: the state after row m into
 // slot (live + m) % 8, live = Control::gdn_live - spec 26 §5.3, Decision 4); the routed experts union-aware (Decision 10:
 // `_U`, three launches - up, down, the combine) or plain at M rows (VerifyMoe::Plain, the tests' arm; M = 1 is always plain). The
-// fused arms are not bound (each is bitwise the as-built list, Decision 16). The copy hand-off only (peer is refused by name).
+// fused arms are not bound (each is bitwise the as-built list, Decision 16).
 inline constexpr unsigned kVerifyRows = 8, kSpecSlots = 8;
 inline constexpr unsigned kSlotStride = kMHeads * kMHeadDim * kMState;   // one Mamba block's state, elements (1,048,576)
 inline std::string ssm_slots_variant(unsigned M, unsigned S, bool bf16_state) {

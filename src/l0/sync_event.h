@@ -4,7 +4,7 @@
 #include "l0/context.h"
 
 namespace l0 {
-// Spec 16b (pipeline parallel, `--pipeline-handoff copy`): one event that a list on one
+// Spec 16b (pipeline parallel, the hand-off): one event that a list on one
 // device signals and a list on another device waits on. Its own pool of one slot, created
 // for every device in `devices` (all views of one context - l0::Context's view
 // constructor), HOST_VISIBLE so the host can reset it before a step, query it, and signal

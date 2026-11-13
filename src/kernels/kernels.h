@@ -460,9 +460,6 @@ inline std::string argmax_stage2_variant() { return "argmax_stage2"; }
 inline std::string draft_prob_variant(unsigned rows, unsigned used) {
   return "draft_prob_N" + std::to_string(rows) + "_U" + std::to_string(used);
 }
-// Spec 16b: the pipeline stages' peer hand-off (pp_handoff.cl: pp_send, pp_recv), one binary.
-inline std::string pp_handoff_variant() { return "pp_handoff"; }
-inline constexpr unsigned kPpHandoffWg = 256;   // pp_handoff.cl WG
 
 // Spec 15c: the mixture-of-experts block's three kernels (src/kernels/moe.cl) -
 // moe_route, moe_gate_up, moe_down - in ONE binary per (M, shape), as prep.cl's entry

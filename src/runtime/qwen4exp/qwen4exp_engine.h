@@ -123,7 +123,6 @@ class Qwen4ExpEngine {
   size_t launches(uint32_t dev) const;
   uint32_t devices() const { return uint32_t(st_.size()); }
   uint32_t split() const { return model_.placement.split; }
-  PpHandoff handoff() const { return opt_.handoff; }
   Q4Attn attention() const { return attn_; }
   const loader::Q4LoadedModel& model() const { return model_; }
   const CapturedStep& step(uint32_t dev) const;
@@ -139,9 +138,8 @@ class Qwen4ExpEngine {
   // generated id pending in cur_token (Engine::prefill's contract). The state it writes (KV, compressed keys and tail
   // rings, GDN state and conv rings, the PLE rings) is decode's to a cosine bar (the GEMMs' sum orders, the chunked GDN,
   // the flash walks), not bitwise (plan 21d Review Focus 5). A prompt may be continued by another prefill. Two
-  // devices: each chunk runs layers [0, s) on device 0, crosses by spec 16b's `copy` hand-off at chunk size (a second
-  // PipelineLink; the chunk always crosses by copy, whatever --pipeline-handoff says for decode: pp_handoff.cl's peer
-  // kernels are sized for a 20 KB row, not 42 MB), then layers [s, L) on device 1 - sequentially (spec 16c's
+  // devices: each chunk runs layers [0, s) on device 0, crosses by spec 16b's hand-off at chunk size (a second
+  // PipelineLink), then layers [s, L) on device 1 - sequentially (spec 16c's
   // overlapped chunk pipeline is a later lever). A lost hand-off host-signals the event, throws naming it and marks
   // the engine until reset(). B70_Q4_ATTN=eager runs the eager sparse attention in prefill too (one switch, read at
   // construction). With injected() on, the sparse rows read the lists set_prefill_injector's callback writes before

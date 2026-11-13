@@ -120,29 +120,28 @@ ScratchSizes scratch_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len, Q4Att
 
 PpLandingLayout landing_layout(const model::Qwen4ExpDesc& d) { return pp_landing_layout(size_t(kM) * d.hc_n() * 2, 0); }
 size_t link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
-  return dev == 0 ? kPpStateWords * 4 : landing_layout(d).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : landing_layout(d).total;
 }
 
 size_t device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, Q4Attn a,
-                       PpHandoff h, bool injected) {
+                       bool injected) {
   model::validate(p, d);
   if (dev >= p.devices) throw std::out_of_range("qwen4exp::device_launches: device " + std::to_string(dev));
   const size_t gdn = 15, qsa = (a == Q4Attn::Eager ? 18 : 19) - (injected ? 2 : 0);
   const bool two = p.devices == 2;
   size_t n = 0;
   if (dev == 0) n += 1;                                  // embed_gather
-  if (two && dev == 1 && h == PpHandoff::Peer) n += 1;   // pp_recv
   for (uint32_t l = p.first(dev); l < p.end(dev); ++l) {
     n += d.is_qsa(l) ? qsa : gdn;
     if (l == d.ple_layer) n += (two && dev == 1 && l == p.first(1)) ? 3 : 4;
   }
-  if (two && dev == 0) n += 1 + (h == PpHandoff::Peer ? 1 : 0);   // combine_norm _Y_NN (+ pp_send)
+  if (two && dev == 0) n += 1;                           // combine_norm _Y_NN
   if (dev + 1 == p.devices) n += 6;                      // the final mixer's 3, lm_head, argmax x 2
   return n;
 }
-size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, PpHandoff h, bool injected) {
+size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, bool injected) {
   size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, h, injected);
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += device_launches(d, p, dev, a, injected);
   return n;
 }
 
@@ -240,7 +239,7 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
 
 PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d) { return pp_landing_layout(size_t(kPfC) * d.hc_n() * 2, 0); }
 size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev) {
-  return dev == 0 ? kPpStateWords * 4 : pf_landing_layout(d).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : pf_landing_layout(d).total;
 }
 
 size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t pos,
@@ -568,7 +567,7 @@ PpLandingLayout landing_layout_rows(const model::Qwen4ExpDesc& d, uint32_t rows)
   return pp_landing_layout(size_t(rows) * d.hc_n() * 2, 0);
 }
 size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows) {
-  return dev == 0 ? kPpStateWords * 4 : landing_layout_rows(d, rows).total + kPpStateWords * 4;
+  return dev == 0 ? 0 : landing_layout_rows(d, rows).total;
 }
 
 size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t max_len) {
@@ -580,16 +579,16 @@ size_t mtp_device_state(const model::Qwen4ExpDesc& d, const model::Q4Placement& 
 }
 
 size_t verify_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t M,
-                              Q4Attn a, PpHandoff h) {
+                              Q4Attn a) {
   if (M == 0 || M > kVerifyRows) throw std::invalid_argument("qwen4exp::verify_device_launches: M = " + std::to_string(M));
-  size_t n = device_launches(d, p, dev, a, h, false);
+  size_t n = device_launches(d, p, dev, a, false);
   if (M > 1 && d.ple_layer >= p.first(dev) && d.ple_layer < p.end(dev)) n += 2;   // q4_pf_ple's three for the block
   if (dev + 1 == p.devices) n += 10 + M;                                           // the head's KV pass
   return n;
 }
-size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a, PpHandoff h) {
+size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a) {
   size_t n = 0;
-  for (uint32_t dev = 0; dev < p.devices; ++dev) n += verify_device_launches(d, p, dev, M, a, h);
+  for (uint32_t dev = 0; dev < p.devices; ++dev) n += verify_device_launches(d, p, dev, M, a);
   return n;
 }
 size_t draft_launches(Q4Attn a, bool select) { return (a == Q4Attn::Eager ? 26 : 27) + (select ? 2 : 0); }

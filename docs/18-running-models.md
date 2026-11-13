@@ -92,7 +92,7 @@ is not finished is listed in [open-work.md](open-work.md).
 | speed rows in BENCHMARKS | yes | yes | no | no | no |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
-| `--spec dflash` (spec 19) | yes, one card or `--parallel pp` (copy hand-off), bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
+| `--spec dflash` (spec 19) | yes, one card or `--parallel pp`, bf16 or int8 KV | no | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes | not built | yes (spec 18e) | refused (bf16 only) | refused (bf16 only) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
@@ -151,7 +151,8 @@ python3 tools/oracle/tokenize.py <snapshot> decode $(cat out.ids)
 split over GPUs 0 and 1: `b70-decode --parallel pp` (decode; the two-card prefill with `--prefill`;
 `--spec mtp`) and `b70-serve --parallel pp` (everything the server does on one card). `--parallel auto`
 picks pp by itself when the model and the asked `--max-len` do not fit one card and tp does not apply.
-One answer is not faster than on one card; each card holds about half the model, so `--max-len auto`
+The hidden state crosses from the first card to the second by a device-to-device copy (there is no
+option for it). One answer is not faster than on one card; each card holds about half the model, so `--max-len auto`
 reaches the trained 262144 tokens, with MTP too (derived, int8 head). The MTP head runs on the second
 card with its own copy of the embedding (2.54 GB). K2-Horizon is one card only; Kolibri-1 runs on two
 cards by default in `b70-decode` (spec 20c / 20d) and `b70-serve` (spec 20e, its own engine).
@@ -160,8 +161,6 @@ cards by default in `b70-decode` (spec 20c / 20d) and `b70-serve` (spec 20e, its
 Q=urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 # an agentic session over both cards as pipeline parallel: 262144 tokens with MTP and the int8 cache
 ./build/src/cli/b70-serve $Q --kv-cache int8 --host 0.0.0.0 --port 8000 --parallel pp --prefix-split-last
-# the peer hand-off (the first card's last kernel writes the hidden state into the second card)
-./build/src/cli/b70-serve $Q --parallel pp --kv-cache int8 --pipeline-handoff peer
 # b70-decode: the same ids as one card, greedy, with MTP across the split
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/prose.ids --n 64 --prefill --parallel pp --spec mtp
 ```
@@ -203,7 +202,7 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
     --spec dflash --draft-model z-lab/Qwen3.8-27B-DFlash2
 # one card with int8 KV (spec 19v3a): host planner 246528 tokens at 32.530 GB, including candidate64
 ./build/src/cli/b70-serve $Q --parallel 1 --spec dflash --kv-cache int8 --max-len auto
-# two cards, pipeline parallel: the drafter on the second card beside lm_head (the copy hand-off only)
+# two cards, pipeline parallel: the drafter on the second card beside lm_head
 ./build/src/cli/b70-serve $Q --parallel pp --spec dflash
 # greedy without the server (one card), K <= 7 per step
 ./build/src/cli/b70-decode $Q --ids tests/golden/prompts/code.ids --n 256 --prefill \
@@ -217,7 +216,7 @@ The drafter's int8 linears run on the small-batch GEMM `gemm_sm_i8w` (draft step
   host planner gives **246,528 tokens** on a 32.530 GB card with a 1.5 GB reserve (int8 head/drafter and
   candidate64). Allocation at that length, full acceptance, f32 serving and speed gates are pending;
   no int8 speed claim is made yet.
-- **Refused, by name:** `--parallel pp --pipeline-handoff peer`, `--parallel tp` and `replica`, several slots a card
+- **Refused, by name:** `--parallel tp` and `replica`, several slots a card
   (`--max-num-seqs` above 1 on one card), `b70-decode --parallel pp`, every other model.
 - **The prefix cache** keeps the drafter's ring (41.9 MB) with every snapshot, so a conversation that gets a prefix cache hit
   from a request's prompt-end or request-end snapshot drafts exactly as an unbroken one. **Caveat:** a
@@ -390,7 +389,7 @@ K=urakozz/Kolibri-1-W4A16-g64-AutoRound-GPTQ          # spec 20b
 
 # every command below: no speed row yet; needs two cards
 ./build/src/cli/b70-decode $K --ids k.ids --n 32                                  # two cards, split by bytes
-./build/src/cli/b70-decode $K --ids k.ids --n 32 --pipeline-handoff peer --pipeline-split 25
+./build/src/cli/b70-decode $K --ids k.ids --n 32 --pipeline-split 25
 ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256 --max-len 40960
 ./build/src/cli/b70-decode $K --parallel 1 --layers 30 --ids k.ids --n 8          # one card, 30 layers
 B70_KOLIBRI_ATTN=eager ./build/src/cli/b70-decode $K --bench --depth 4096 --tg 256
@@ -414,7 +413,7 @@ beside the full layers' KV (20 KiB a position). `--max-len auto` reaches 262144 
 ```sh
 # every command below: no speed row yet; needs two cards
 ./build/src/cli/b70-serve $K                                    # two cards, --max-len auto (262144), int8 head
-./build/src/cli/b70-serve $K --pipeline-handoff peer --max-len 131072
+./build/src/cli/b70-serve $K --max-len 131072
 ./build/src/cli/b70-serve $K --prefix-split-last                # agentic sessions: the next turn is a prefix cache hit at len - 1
 curl -s localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages":
   [{"role": "user", "content": "Wie spät ist es in Berlin?"}], "chat_template_kwargs": {"reasoning_effort": "low"}}'
@@ -513,8 +512,7 @@ loader also reads the GPTQ g128 spelling through its exact g64 expansion (the sy
 spec 25 §15 / §16 / §17). The real model runs on **two cards** (two cards are its `--parallel auto`, split 48
 by bytes; `--parallel 1` is refused naming the bytes); the N 12 synthetic checkpoints and `--layers N` fit one card. Without `--prefill`
 a prompt goes through the decode list one replay per id; `--prefill` / `--bench --prefill-length N` run the `l0` prefill
-(spec 25d). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with `B70_BOLT_FUSE=all`, +2 with
-`--pipeline-handoff peer`). P0 (`probe_bolt_step`) runs first on the box and decides the GEMV `{S, layout}` picks and which
+(spec 25d). Expected (derived): 653 launches a token (645 with `B70_BOLT_ATTN=eager`, 533 with `B70_BOLT_FUSE=all`). P0 (`probe_bolt_step`) runs first on the box and decides the GEMV `{S, layout}` picks and which
 arms are worth keeping.
 
 ```sh
@@ -532,7 +530,7 @@ B70_BOLT_SSM=bf16 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-decode <snapshot> --b
 ```
 
 **Serving (spec 25e).** `b70-serve <snapshot>` runs the engine on **two cards by default** (`--parallel 1` only for a synthetic /
-small checkpoint; `--pipeline-split`, `--pipeline-handoff` as `b70-decode` takes them), `--max-len auto` up to 262144 with
+small checkpoint; `--pipeline-split` as `b70-decode` takes it), `--max-len auto` up to 262144 with
 the prefill scratch planned in, the int8 head by default, prefill on `l0` only:
 
 ```sh
@@ -582,8 +580,7 @@ is the plain run's), and two proposers feed it on `b70-serve`:
 else is the engine's: the draft model's linears int8 per row (exact bf16 and int4 g64 are test arms), its draft distribution
 vLLM's (the candidate lattice), the verify's experts read once per block for all rows (the union form; the plain M-row form
 is its bitwise test reference). Bolt's `--spec auto` stays **off** until row 65's D5 measures `dflash` >= 10 % faster than
-both `off` and `lookup` on the agentic set (and nowhere > 3 % slower). Two cards cross by the copy hand-off only
-(`--pipeline-handoff peer` is refused with a proposer). `b70-decode` decodes Bolt plainly (`--spec` there is refused).
+both `off` and `lookup` on the agentic set (and nowhere > 3 % slower). `b70-decode` decodes Bolt plainly (`--spec` there is refused).
 
 ```sh
 ZE_AFFINITY_MASK=0,1 ./build/src/cli/b70-serve <snapshot> --spec dflash      # the LiLiCorr drafter, K <= 7 adaptive

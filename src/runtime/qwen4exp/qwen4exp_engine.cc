@@ -20,11 +20,6 @@ namespace runtime::qwen4exp {
 namespace {
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
-
-// pp_handoff.cl's state words (pp_recv): [1] status, [2] the flag read at the failure, [3] the stamp read, [4]
-// the sequence expected (runtime/pipeline_engine.cc's).
-constexpr uint32_t kStStatus = 1, kStFlag = 2, kStStamp = 3, kStWant = 4;
-constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 }  // namespace
 
 struct Qwen4ExpEngine::Stage {
@@ -70,9 +65,9 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
                                   "context (spec 16 decision 1)");
     if (!devices[0]->can_access_peer(*devices[1]))
       throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
-                               "(zeDeviceCanAccessPeer is false), and both hand-offs write it. Peer access needs the "
+                               "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs the "
                                "P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
-    if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
+    if (opt.timeout_ms == 0)
       throw std::invalid_argument("runtime::qwen4exp::Qwen4ExpEngine: a hand-off needs a non-zero bound");
   }
   // Spec 21e: the MTP head (the loader's, on the last device) - read the switches before anything is allocated.
@@ -89,9 +84,8 @@ Qwen4ExpEngine::Qwen4ExpEngine(std::vector<l0::Context*> devices, loader::Q4Load
   }
   pending_.assign(p.devices, false);
   if (p.devices == 2) {
-    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout_rows(d, mtp ? kVerifyRows : kM),
-                                           opt.handoff);
-    binding_ = link_->binding(opt.spin_limit);
+    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout_rows(d, mtp ? kVerifyRows : kM));
+    binding_ = link_->binding();
   }
   ple_init();
   for (uint32_t i = 0; i < p.devices; ++i)
@@ -220,7 +214,7 @@ void Qwen4ExpEngine::reset() {
       throw std::runtime_error("runtime::qwen4exp::Qwen4ExpEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);
-  if (link_) link_->zero(st(0).imm, st(1).imm);
+  if (link_) link_->zero(st(1).imm);
   if (mtp_) mtp_->zero(st(uint32_t(st_.size()) - 1).imm);   // spec 21e: the head's Control, KV, keys, tail, R rows
   verify_k_ = kNoVerify;
   draft_ids_.clear();
@@ -256,7 +250,7 @@ void Qwen4ExpEngine::submit(const std::vector<CapturedStep*>& lists) {
     st(0).fence.wait();
     return;
   }
-  if (link_->event) link_->event->host_reset();
+  link_->event->host_reset();
   const bool send = !drop_next_;
   drop_next_ = false;
   if (send) {
@@ -266,29 +260,16 @@ void Qwen4ExpEngine::submit(const std::vector<CapturedStep*>& lists) {
   st(1).queue.execute(lists[1]->list, &st(1).fence);
   pending_[1] = true;
   if (!settle(1)) {
-    if (link_->event) link_->event->host_signal();
+    link_->event->host_signal();
     const bool drained = settle(1);
     settle(0);
     fail(std::string("device 1's step did not finish within ") + std::to_string(opt_.timeout_ms) +
          " ms - device 0's residual never arrived" +
-         (link_->event ? std::string(" (the cross-device event was not signalled; device 1 ") +
-                             (drained ? "released" : "did not drain either") + ")"
-                       : std::string(drained ? "" : " (device 1 did not drain)")) +
+         " (the cross-device event was not signalled; device 1 " +
+         (drained ? "released" : "did not drain either") + ")" +
          (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
   }
   if (!settle(0)) fail("device 0's step did not finish within " + std::to_string(opt_.timeout_ms) + " ms");
-  if (link_->mode == PpHandoff::Peer) {
-    const uint32_t* w = link_->recv_state.as<uint32_t>();
-    const uint32_t status = w[kStStatus];
-    if (status == kStatusTimeout)
-      fail("device 1's pp_recv gave up after " + std::to_string(opt_.spin_limit) + " loads of the flag: it read " +
-           std::to_string(w[kStFlag]) + ", expected " + std::to_string(w[kStWant]) +
-           " (device 0 never published H)" + (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
-    if (status == kStatusStale)
-      fail("the flag reached " + std::to_string(w[kStWant]) + " but the stamp reads " + std::to_string(w[kStStamp]) +
-           " - the data did not arrive with the flag (a silent hand-off, spec 16 §2)");
-    if (status != 0) fail("pp_recv reported status " + std::to_string(status));
-  }
   // The token's way back: device 1's argmax advanced pos and wrote the id; device 0 reads both from its own block.
   std::memcpy(st(0).ctl, st(1).ctl, sizeof(Control));
 }
@@ -370,7 +351,7 @@ uint32_t* Qwen4ExpEngine::injected_list(uint32_t qsa_index) {
   return reinterpret_cast<uint32_t*>(static_cast<uint8_t*>(inj_rows_[dev]->ptr()) + list_at(qsa_index));
 }
 size_t Qwen4ExpEngine::injected_launches() const {
-  return decode_launches(model_.desc, model_.placement, attn_, opt_.handoff, true);
+  return decode_launches(model_.desc, model_.placement, attn_, true);
 }
 
 size_t Qwen4ExpEngine::launches(uint32_t dev) const { return active(dev).kernel_count; }

@@ -13,7 +13,7 @@
 //              spec 28b (gemm_sm at M >= 2) not bitwise on one card: recorded, mtp_verify_test grades it.
 //              Spec 7 with MTP: a 4103-id hooked prefill (block hooks at 2048 and 4096, the
 //              state and KV saved inside each hook, then at the end).
-//   each configuration  --pp 2 copy and peer at the auto split, and the cuts at 5 and 62: the
+//   each configuration  --pp 2 at the auto split, and the cuts at 5 and 62: the
 //              same three runs on runtime::PipelineEngine, everything above bitwise one card's;
 //              both Control blocks equal after every call (Review Focus 3); M2's rows on the
 //              pipeline bitwise the one card's (spec 28b: not plain == verify any more); the one card's snapshot after the prefill restored into the pipeline and
@@ -247,7 +247,6 @@ std::vector<uint32_t> repeat_to(const std::vector<uint32_t>& src, size_t n) {
 }
 
 struct Config {
-  runtime::PpHandoff handoff;
   uint32_t split;   // 0 = auto
 };
 }  // namespace
@@ -312,8 +311,7 @@ int main(int argc, char** argv) {
   }
 
   bool first = true;
-  for (const Config c : {Config{runtime::PpHandoff::Copy, 0}, Config{runtime::PpHandoff::Peer, 0},
-                         Config{runtime::PpHandoff::Copy, 5}, Config{runtime::PpHandoff::Peer, 62}}) {
+  for (const Config c : {Config{0}, Config{5}, Config{62}}) {
     loader::LoadedModel full = loader::load(d0, checkpoint, kMaxLen, /*mtp=*/true, head);
     const runtime::PpWeights wts = runtime::pp_weights(full);
     runtime::PpExtras x;
@@ -321,20 +319,16 @@ int main(int argc, char** argv) {
     const uint32_t split = c.split ? c.split
                                    : runtime::pp_auto_split(*full.desc, wts, kMaxLen, kv,
                                                             runtime::PrefillPath{}, x);
-    runtime::PipelineOptions opt;
-    opt.handoff = c.handoff;
-    runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, opt, kv);
+    runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen, {}, kv);
     CHECK(e.mtp());
     TwoCards w{e};
-    const std::string what = std::string("--pp 2 --mtp, ") + runtime::pp_handoff_name(c.handoff) +
-                             ", split " + std::to_string(split);
+    const std::string what = std::string("--pp 2 --mtp, split ") + std::to_string(split);
     // The lists: the stages' verify launches add up to one card's at every M (capture asserts
     // it too), the draft lists are one card's.
     for (uint32_t M = 1; M <= 4; ++M)
       CHECK_EQ(e.verify_step(0, M).kernel_count + e.verify_step(1, M).kernel_count,
                runtime::pp_stage_verify_launches(*e.model(0).desc, e.stage(0)) +
-                   runtime::pp_stage_verify_launches(*e.model(0).desc, e.stage(1)) +
-                   (c.handoff == runtime::PpHandoff::Peer ? 2u : 0u));
+                   runtime::pp_stage_verify_launches(*e.model(0).desc, e.stage(1)));
     for (uint32_t d = 0; d < 2; ++d) std::printf("  %s\n", e.memory_line(d).c_str());
     Record got;
     e.prepare_prefill();

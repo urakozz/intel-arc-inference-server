@@ -24,11 +24,10 @@
 //   --pipeline-split auto|N     the override, for experiments: device 0 runs layers [0, N), device 1
 //                               [N, layers); auto (default) balances the bytes each card holds
 //                               (runtime::pp_auto_split). Given under --parallel auto, it means pp.
-//   --pipeline-handoff copy|peer  how the residual crosses (runtime::PpHandoff); copy (default) or
-//                               peer. Given under --parallel auto, it means pp.
 //
 // (The zero-config cleanup, operator 2026-11-06, replaced `--pp N` / `--pipeline-parallel-size N`
-// with --parallel and dropped the refusals of the 2026-10-06 rename's old spellings.)
+// with --parallel and dropped the refusals of the 2026-10-06 rename's old spellings. --pipeline-handoff
+// copy|peer went on 2026-11-13: the peer hand-off measured no gain, the host copy is the only one.)
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -47,8 +46,7 @@ struct PipelineArgs {
   uint32_t devices = 1;
   bool split_auto = true;
   uint32_t split = 0;   // the explicit N; 0 with split_auto
-  runtime::PpHandoff handoff = runtime::kDefaultPpHandoff;
-  bool have_split = false, have_handoff = false;
+  bool have_split = false;
   bool on() const { return devices > 1; }   // pipeline parallel (replica keeps devices 1: one engine per card)
   bool replica() const { return mode == Parallel::Replica; }
   bool tp() const { return mode == Parallel::Tp; }   // spec 17b (devices stays 1: on() is pipeline parallel's)
@@ -90,9 +88,6 @@ inline void check_tp(const PipelineArgs& a, const TpContext& c) {
   if (a.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel tp "
                              "splits every layer");
-  if (a.have_handoff)
-    throw std::runtime_error("--pipeline-handoff belongs to --parallel pp; --parallel tp's cards add their halves by "
-                             "P2P writes");
   if (c.other_family)
     throw std::runtime_error("--parallel tp is built for Qwen3.8 (spec 17b); this model runs --parallel auto, 1 or pp");
   if (c.dflash)
@@ -118,9 +113,9 @@ inline void require_two_devices_for_tp(uint32_t gpus) {
                              " - is ZE_AFFINITY_MASK hiding the second card (docs/10-the-box.md)?");
 }
 
-// The override flags under --parallel auto mean pipeline parallel (they have no meaning on one card).
+// The override flag under --parallel auto means pipeline parallel (it has no meaning on one card).
 inline void resolve_overrides(PipelineArgs& a) {
-  if (a.mode == Parallel::Auto && (a.have_split || a.have_handoff)) {
+  if (a.mode == Parallel::Auto && a.have_split) {
     a.mode = Parallel::Pp;
     a.devices = 2;
   }
@@ -143,13 +138,6 @@ inline void parse_pipeline_split(const std::string& v, PipelineArgs& a) {
   a.split = static_cast<uint32_t>(n);
 }
 
-inline runtime::PpHandoff parse_pipeline_handoff(const std::string& v, PipelineArgs& a) {
-  a.have_handoff = true;
-  if (!runtime::parse_pp_handoff(v, a.handoff))
-    throw std::runtime_error("--pipeline-handoff expects copy or peer, got '" + v + "'");
-  return a.handoff;
-}
-
 // What else b70-decode was asked for, for the refusals below.
 struct PipelineContext {
   bool prefill = false;      // --prefill
@@ -158,14 +146,12 @@ struct PipelineContext {
   bool profile = false;      // --profile
 };
 
-// Every refusal that needs no device. One card refuses nothing; the two override flags belong
-// to --parallel pp.
+// Every refusal that needs no device. One card refuses nothing; the override flag belongs to
+// --parallel pp.
 inline void check_pipeline(const PipelineArgs& a, const PipelineContext& c) {
   if (!a.on()) {
     if (a.have_split)
       throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-    if (a.have_handoff)
-      throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     return;
   }
   // Spec 16c: --prefill and --bench --prefill-length run the two-card chunk pipeline (the flash
@@ -205,15 +191,12 @@ inline void check_one_request_a_card(const PipelineArgs& a, uint32_t n, const st
                            "built for Qwen3.8 only); " + model + " runs one request a card - --max-num-seqs 2 on two "
                            "cards (--parallel replica), or 1");
 }
-// The override flags belong to pp; --spec dflash runs a drafter on each card, lookup inside DFlash is one card's.
+// The override flag belongs to pp; --spec dflash runs a drafter on each card, lookup inside DFlash is one card's.
 inline void check_replica_flags(const PipelineArgs& a, bool dflash_lookup) {
   if (!a.replica()) return;
   if (a.have_split)
     throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at); --parallel "
                              "replica loads the whole model on each card");
-  if (a.have_handoff)
-    throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the hidden state crosses); --parallel "
-                             "replica's cards exchange nothing");
   if (dflash_lookup)
     throw std::runtime_error("--parallel replica serves --spec off, mtp, lookup or dflash; --spec dflash-lookup is "
                              "built for one card (spec 19f) - --spec dflash, or --parallel 1");

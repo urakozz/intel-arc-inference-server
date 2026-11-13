@@ -32,9 +32,9 @@
 // in the list (2 launches fewer a QSA layer).
 //
 // **Two cards** (`link` non-null; spec 16b's cut and hand-offs): device 0's list ends with a combine-only _Y_NN
-// (the MATERIALISED H, as vLLM's PP carries it) and hands H off - `copy`: a device-to-device copy into the
-// landing buffer and a barrier signalling the cross-device event; `peer`: pp_send with 0 norm-sum words. Device
-// 1's list starts with the wait (copy) or pp_recv (peer), the copy into its own H, then its first layer with
+// (the MATERIALISED H, as vLLM's PP carries it) and hands H off: a device-to-device copy into the landing buffer
+// and a barrier signalling the cross-device event. Device 1's list starts with the wait, the copy into its own H,
+// then its first layer with
 // nothing pending (_X; the PLE layer's prologue skips its _Y_NN when it is device 1's first layer).
 //
 // tap (debug): H copied to tap row l right after the combine that materialises layer l's output (the next

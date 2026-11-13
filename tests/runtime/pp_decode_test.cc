@@ -8,7 +8,7 @@
 //              (save_state), every FA layer's KV over [0, pos) (save_kv) and the Control
 //              block. And a spec 7 restore: a 4395-id prefill, the snapshot at 4395, one id
 //              ingested after it, 64 greedy ids - the same five things.
-//   each configuration  --pp 2 with copy and peer, the auto split, and two uneven
+//   each configuration  --pp 2 at the auto split, and two uneven
 //              cuts (s = 5: one FA layer on device 0; s = 62: one FA layer on device 1):
 //              the same ingest + 64 ids, everything above bitwise, both Controls equal after
 //              every phase (pos in step); then the restore - the SAME snapshot bytes loaded
@@ -135,7 +135,6 @@ void check_same(const Result& ref, const Result& got, const std::string& what) {
 }
 
 struct Config {
-  runtime::PpHandoff handoff;
   uint32_t split;   // 0 = auto
   bool replay;
 };
@@ -185,26 +184,19 @@ int main(int argc, char** argv) {
   }
 
   const model::ModelDesc* desc = nullptr;
-  for (const Config c : {Config{runtime::PpHandoff::Copy, 0, true},
-                         Config{runtime::PpHandoff::Peer, 0, true},
-                         Config{runtime::PpHandoff::Copy, 5, false},
-                         Config{runtime::PpHandoff::Peer, 62, false}}) {
+  for (const Config c : {Config{0, true}, Config{5, false}, Config{62, false}}) {
     loader::LoadedModel full = loader::load(d0, checkpoint, kMaxLen, false, head);
     desc = full.desc;
     const runtime::PpWeights w = runtime::pp_weights(full);
     const uint32_t split = c.split ? c.split : runtime::pp_auto_split(*desc, w, kMaxLen, kv);
-    runtime::PipelineOptions opt;
-    opt.handoff = c.handoff;
     runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split), kMaxLen,
-                              opt, kv);
-    const std::string what = std::string("--pp 2, ") + runtime::pp_handoff_name(c.handoff) +
-                             ", split " + std::to_string(split) + (c.split ? "" : " (auto)");
+                              {}, kv);
+    const std::string what = std::string("--pp 2, split ") + std::to_string(split) + (c.split ? "" : " (auto)");
     // Review Focus 5: the split is the descriptor's, the launches the single card's.
     CHECK_EQ(e.split(), split);
     CHECK_EQ(e.stage(0).gdn + e.stage(1).gdn, desc->gdn_layers);
     CHECK_EQ(e.stage(0).fa + e.stage(1).fa, desc->fa_layers);
-    const size_t peer = c.handoff == runtime::PpHandoff::Peer ? 2 : 0;
-    CHECK_EQ(e.step(0).kernel_count + e.step(1).kernel_count, runtime::decode_launches(*desc) + peer);
+    CHECK_EQ(e.step(0).kernel_count + e.step(1).kernel_count, runtime::decode_launches(*desc));
     for (uint32_t i = 0; i < runtime::kPpDevices; ++i)
       std::printf("%s: %s\n", what.c_str(), e.memory_line(i).c_str());
 

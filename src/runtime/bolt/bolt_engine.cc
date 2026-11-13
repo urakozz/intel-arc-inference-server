@@ -16,11 +16,6 @@ namespace runtime::bolt {
 namespace {
 using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) { return std::chrono::duration<double, std::milli>(Clock::now() - t0).count(); }
-
-// pp_handoff.cl's state words (pp_recv): [1] status, [2] the flag read at the failure, [3] the stamp read, [4] the
-// sequence expected (runtime/pipeline_engine.cc's).
-constexpr uint32_t kStStatus = 1, kStFlag = 2, kStStamp = 3, kStWant = 4;
-constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 }  // namespace
 
 struct BoltEngine::Stage {
@@ -73,8 +68,8 @@ BoltEngine::BoltEngine(std::vector<l0::Context*> devices, loader::BoltLoaded mod
                                   "(spec 16 decision 1)");
     if (!devices[0]->can_access_peer(*devices[1]))
       throw std::runtime_error("--parallel pp: device 0 (" + devices[0]->name() + ") cannot access device 1's memory "
-                               "(zeDeviceCanAccessPeer is false), and both hand-offs write it (docs/10-the-box.md)");
-    if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
+                               "(zeDeviceCanAccessPeer is false), and the hand-off writes it (docs/10-the-box.md)");
+    if (opt.timeout_ms == 0)
       throw std::invalid_argument("runtime::bolt::BoltEngine: a hand-off needs a non-zero bound");
   }
   for (uint32_t i = 0; i < p.devices; ++i) {
@@ -84,8 +79,8 @@ BoltEngine::BoltEngine(std::vector<l0::Context*> devices, loader::BoltLoaded mod
   pending_.assign(p.devices, false);
   StageLink binding;
   if (p.devices == 2) {
-    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout(d, p), opt.handoff);
-    binding = link_->binding(opt.spin_limit);
+    link_ = std::make_unique<PipelineLink>(*devices[0], *devices[1], landing_layout(d, p));
+    binding = link_->binding();
   }
   for (uint32_t i = 0; i < p.devices; ++i)
     st(i).step.emplace(build(st(i).ctx, model_.parts[i], d, st(i).buffers, fuse_, model_.int8_head,
@@ -117,8 +112,8 @@ void BoltEngine::reset() {
       throw std::runtime_error("runtime::bolt::BoltEngine::reset: device " + std::to_string(i) +
                                "'s last step is still running after " + std::to_string(opt_.timeout_ms) + " ms");
   for (uint32_t i = 0; i < st_.size(); ++i) st(i).buffers.zero(st(i).imm);   // Control::gdn_live 0: slot 0 live
-  if (link_) link_->zero(st(0).imm, st(1).imm);
-  if (vlink_) vlink_->zero(st(0).imm, st(1).imm);                      // spec 26c
+  if (link_) link_->zero(st(1).imm);
+  if (vlink_) vlink_->zero(st(1).imm);                      // spec 26c
   if (drafter_) drafter_->reset(st(uint32_t(st_.size()) - 1).imm);    // spec 26c: a cold drafter
   verify_k_ = kNoVerify;
   logits_row_ = -1;
@@ -150,7 +145,7 @@ void BoltEngine::step_once() {
     if (profile_) accumulate_profile(ms_since(t0) * 1e3);
     return;
   }
-  if (link_->event) link_->event->host_reset();
+  link_->event->host_reset();
   const bool send = !drop_next_;
   drop_next_ = false;
   if (send) {
@@ -160,29 +155,16 @@ void BoltEngine::step_once() {
   st(1).queue.execute(st(1).step->list, &st(1).fence);
   pending_[1] = true;
   if (!settle(1)) {
-    if (link_->event) link_->event->host_signal();   // release device 1 so its queue drains on garbage, then report
+    link_->event->host_signal();   // release device 1 so its queue drains on garbage, then report
     const bool drained = settle(1);
     settle(0);
     fail(std::string("device 1's step did not finish within ") + std::to_string(opt_.timeout_ms) +
          " ms - device 0's residual never arrived" +
-         (link_->event ? std::string(" (the cross-device event was not signalled; device 1 ") +
-                             (drained ? "released" : "did not drain either") + ")"
-                       : std::string(drained ? "" : " (device 1 did not drain)")) +
+         " (the cross-device event was not signalled; device 1 " +
+         (drained ? "released" : "did not drain either") + ")" +
          (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
   }
   if (!settle(0)) fail("device 0's step did not finish within " + std::to_string(opt_.timeout_ms) + " ms");
-  if (link_->mode == PpHandoff::Peer) {
-    const uint32_t* w = link_->recv_state.as<uint32_t>();
-    const uint32_t status = w[kStStatus];
-    if (status == kStatusTimeout)
-      fail("device 1's pp_recv gave up after " + std::to_string(opt_.spin_limit) + " loads of the flag: it read " +
-           std::to_string(w[kStFlag]) + ", expected " + std::to_string(w[kStWant]) +
-           " (device 0 never published the residual)" + (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
-    if (status == kStatusStale)
-      fail("the flag reached " + std::to_string(w[kStWant]) + " but the stamp after the slices reads " +
-           std::to_string(w[kStStamp]) + " - the data did not arrive with the flag (a silent hand-off, spec 16 §2)");
-    if (status != 0) fail("pp_recv reported status " + std::to_string(status));
-  }
   // The token's way back: device 1's argmax advanced pos and wrote the id; device 0 reads both from its own block.
   std::memcpy(st(0).ctl, st(1).ctl, sizeof(Control));
   if (profile_) accumulate_profile(ms_since(t0) * 1e3);
@@ -522,10 +504,6 @@ std::string BoltEngine::memory_line() const {
 // --- spec 26c: speculative decoding -----------------------------------------------------------------------------------------
 void BoltEngine::enable_spec(VerifyMoe moe) {
   if (spec_on()) throw std::logic_error("runtime::bolt::BoltEngine::enable_spec: the verify lists are already on");
-  if (st_.size() == 2 && opt_.handoff != PpHandoff::Copy)
-    throw std::invalid_argument("--spec dflash / lookup on Nemotron 3.5 Bolt crosses the cards by the copy hand-off only "
-                                "(19d: the drafter's taps ride on its barrier; peer has no place for them) - drop "
-                                "--pipeline-handoff peer");
   settle_all("enable_spec");
   const model::BoltDesc& d = model_.desc;
   for (uint32_t i = 0; i < st_.size(); ++i) {
@@ -535,11 +513,11 @@ void BoltEngine::enable_spec(VerifyMoe moe) {
                              "'s verify buffers are not verify_sizes()'");
   }
   if (st_.size() == 2) {
-    vlink_ = std::make_unique<PipelineLink>(st(0).ctx, st(1).ctx, verify_landing_layout(d, model_.place), PpHandoff::Copy);
+    vlink_ = std::make_unique<PipelineLink>(st(0).ctx, st(1).ctx, verify_landing_layout(d, model_.place));
     for (uint32_t i = 0; i < 2; ++i)
       if (vlink_->bytes(i) != verify_link_bytes(d, model_.place, i))
         throw std::logic_error("runtime::bolt::BoltEngine::enable_spec: the verify link is not verify_link_bytes()'");
-    vlink_->zero(st(0).imm, st(1).imm);
+    vlink_->zero(st(1).imm);
   }
   vsteps_.resize(st_.size());
   for (auto& dev : vsteps_) dev.resize(kVerifyRows);
@@ -582,7 +560,7 @@ void BoltEngine::run_verify(uint32_t M) {
   const model::BoltDesc& d = model_.desc;
   const uint32_t nd = uint32_t(st_.size());
   StageLink binding;
-  if (vlink_) binding = vlink_->binding(opt_.spin_limit);
+  if (vlink_) binding = vlink_->binding();
   for (uint32_t i = 0; i < nd; ++i) {
     std::optional<CapturedStep>& s = vsteps_[i].at(M - 1);
     if (s) continue;
