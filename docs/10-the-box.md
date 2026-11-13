@@ -161,7 +161,7 @@ every merge since the last run together. The command for that is `tools/box_vali
 (`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
 reuse every unchanged PASS.
 
-**The merge check, before a merge.** `tools/box_validate.sh --merge-check` is meant to take about 20 minutes: the
+**The merge check, before a merge.** `tools/box_validate.sh --merge-check` is meant to take about 20-30 minutes (a fixed DFlash model sample, merge.dflash, runs outside the changed tests' time cap): the
 build of the tree under test (the baseline's build is kept between runs and reused while its commit, build settings,
 compiler, ocloc and kernel series are the same: `tools/box_validate/baseline.py`), the kernel-binary comparison, the
 model-free host stages, and only the tests whose inputs changed since their last recorded PASS, the shortest first,

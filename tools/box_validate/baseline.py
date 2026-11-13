@@ -7,11 +7,12 @@
         "BASELINE rebuild: <why>" otherwise (the stamp is moved aside first: a build that is interrupted
         leaves none). A reused baseline's directory is touched: tools/box_tidy.sh keeps the newest ones.
   baseline.py build-stamp --base DIR [--cmake-args S]       the build in DIR finished: record its identity
-  baseline.py gates-check --base DIR --re ERE --snap DIR --device N --out FILE [--cmake-args S]
+  baseline.py gates-check --base DIR --re ERE --snap DIR --out FILE [--cmake-args S]
         exit 0 and the baseline's recorded gate output (g0.bitwise's JUnit) copied to FILE when the build
-        identity, the gate regex, the device and the data the gates read (the golden sets, the snapshot) are
+        identity, the gate regex and the data the gates read (the golden sets, the snapshot; not the card - the
+        cards are equal, operator 2026-11-13) are
         what they were when it was recorded; exit 1 and "BASELINE gates rerun: <why>" otherwise
-  baseline.py gates-stamp --base DIR --re ERE --snap DIR --device N --xml FILE [--cmake-args S]
+  baseline.py gates-stamp --base DIR --re ERE --snap DIR --xml FILE [--cmake-args S]
 
 The identity of a build: the baseline commit, the CMake arguments, tools/box_validate/reuse.py's build_id
 (the tree's sources, the build's cache settings, the compiler's version) and machine() (the kernel series),
@@ -157,7 +158,7 @@ def tree_fingerprint(paths):
 
 def gates_key(a):
     golden = sorted(os.path.join(a.base, n) for n in os.listdir(a.base) if n.startswith("oracle-out"))
-    return {"identity": identity(a.base, a.cmake_args), "re": a.re, "device": a.device,
+    return {"identity": identity(a.base, a.cmake_args), "re": a.re,
             "snap": a.snap, "data": tree_fingerprint(golden + ([a.snap] if os.path.isdir(a.snap) else []))}
 
 
@@ -172,7 +173,7 @@ def cmd_gates_check(a):
     else:
         now = gates_key(a)
         why = differs(rec["key"]["identity"], now["identity"])
-        for k, what in (("re", "the gate list"), ("device", "the card"), ("snap", "the snapshot"),
+        for k, what in (("re", "the gate list"), ("snap", "the snapshot"),
                         ("data", "the golden sets or the snapshot's files")):
             if why is None and rec["key"].get(k) != now[k]:
                 why = f"{what} changed"
@@ -181,7 +182,7 @@ def cmd_gates_check(a):
         return 1
     shutil.copyfile(xml, a.out)
     print(f"BASELINE gates reused: the baseline's own gate output recorded {rec['recorded']} "
-          f"(same build, gate list, card {rec['key']['device']} and data)")
+          "(same build, gate list and data; the cards are equal, operator 2026-11-13)")
     return 0
 
 
@@ -202,7 +203,6 @@ def main(argv=None):
         p.add_argument("--cmake-args", default=os.environ.get("CMAKE_ARGS", ""))
         if name.startswith("gates"):
             p.add_argument("--re", required=True); p.add_argument("--snap", required=True)
-            p.add_argument("--device", default="0")
         if name == "gates-check":
             p.add_argument("--out", required=True)
         if name == "gates-stamp":
