@@ -228,15 +228,15 @@ would take 4096.
 
 **The served short turn deep in a session: slower - the stop.** llama-benchy through b70-serve `--kv-cache int8`
 (one card, the server's own chunk cap), a 64-id turn after a 32,768-id context with the prefix cache
-(`--depth 32768 --pp 64 --enable-prefix-caching`, 3 runs a server; `tools/probe/qwen_chunk4096_turn.sh`,
+(`--depth 32768 --pp 64 --enable-prefix-caching`, 3 runs a server, interleaved main / branch; `tools/probe/qwen_chunk4096_turn.sh`,
 `turn-*.log`, `turn-serve-*.log`), time to the first token, ms:
 
 | server | context pass (cold, 32,770 ids) | the 64-id turn | the turn's restart point |
 |---|---:|---:|---|
 | main (2048) | 24,455 | 2,093 | 30,720 (2,112 rows prefilled) |
 | branch (4096) | **22,983 (-6.0 %)** | **3,682 (1.76x)** | 28,672 (4,160 rows) |
-| main, `--prefix-split-last` | 24,502 | 2,161 | 30,720 |
-| branch, `--prefix-split-last` | **23,075 (-5.8 %)** | **3,734 (1.73x)** | 28,672 |
+| main, `--prefix-split-last` (2 rounds) | 24,502 | 2,161 / 2,207 | 30,720 |
+| branch, `--prefix-split-last` (2 rounds) | **23,075 (-5.8 %)** | **3,734 / 3,706 (1.7x)** | 28,672 |
 
 The cache's state snapshots sit at chunk ends, so with 4096-row chunks they are 4096 positions apart (plan 5d's
 ruling for a chunk wider than a block). A hit that restores from a block snapshot - here every time: the client's
