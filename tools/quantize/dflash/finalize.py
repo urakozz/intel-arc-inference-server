@@ -53,11 +53,12 @@ def rename_qc(qc: dict) -> dict:
     qc = dict(qc)
     if isinstance(qc.get("extra_config"), dict):
         qc["extra_config"] = {M.export_name(k): v for k, v in qc["extra_config"].items()}
-    b = qc.get("block_name_to_quantize")
-    if isinstance(b, str):
-        qc["block_name_to_quantize"] = ",".join("fc" if s == "encoder" else s for s in b.split(","))
-    elif isinstance(b, list):
-        qc["block_name_to_quantize"] = ["fc" if s == "encoder" else s for s in b]
+    def fc(b):
+        if isinstance(b, list):
+            return [fc(x) for x in b]
+        return ",".join("fc" if s == "encoder" else s for s in b.split(","))
+    if qc.get("block_name_to_quantize") is not None:
+        qc["block_name_to_quantize"] = fc(qc["block_name_to_quantize"])
     return qc
 
 
