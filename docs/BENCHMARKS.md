@@ -1372,6 +1372,19 @@ Task 4 head lever). The attention's excess is 1-row v2 against 8-row DPAS over t
 lever and stays with the attention work (int8 KV, plan 19v3a). The instrumented 1-row list is 0.53 ms slower than
 the uninstrumented one (the per-launch signals); the excess is not.
 
+**Task 3, the GDN step at 8 rows** (same day, card 0, busy box). `probe_gdn_slots` (48 launches of one layer's step
+over a 48-layer state, standalone, medians of 7 interleaved rounds) splits the step's excess: the row chain (the
+same source without per-row slots at M = 8, against the 1-row slots build) **1.78 ms**, the 7 extra snapshot writes
+(8 x 151 MB a verify) **1.35 ms**. The chain was barrier-bound: 20 work-group barriers a row (the two l2norm trees
+and the kv / o band trees). The kept lever: the slots builds at M >= 2 take every row's l2norm before the recurrence
+(one set of trees for all rows, spread over the work-group) and each band tree in registers (2 barriers a row), the
+kv / o buffers double-buffered by row parity. Bitwise the per-row form (`gdn_step_slots_test`, 4 and 8 slots, 92
+rows); only the 19 SPEC_SLOTS M >= 2 binaries change, every other binary is byte-identical. **Verify at 8 rows
+36.59 -> 35.88 ms (1.250 -> 1.225 plain steps, -0.70 ms)**, four interleaved process pairs against the pre-lever
+build (uninstrumented, each a median of 3 rounds of 16 calls). The snapshot stores in other forms, standalone
+against the kept lever: block writes -0.02 ms, LSC L1UC_L3WB -0.02, L1S_L3WB -0.08, the uncached forms +8.7 to
++15 ms - none kept.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
