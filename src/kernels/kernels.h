@@ -128,8 +128,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 16384, 1, 1, false, true, false, false},   // qkv||z      48 layers
     {6144, 5120, 4, 0, false, true, false, true},     // out_proj, o_proj
     {5120, 14336, 2, 0, false, true, false, true},    // q||k||v
-    {5120, 34816, 8, 0, true, true, false, true},     // gate||up (2x8 work-group: one slice, SiLU at S 1; the 2D read:
-                                                      // spec 19 v3d Task 4)
+    {5120, 34816, 8, 0, true, true, false, false},    // gate||up (2x8 work-group: one slice, SiLU at S 1)
     {17408, 5120, 4, 0, false, true, false, true},    // down
     {5120, 248320, 1, 2, true, false, false, false},  // the int8 lm_head
     // Ornith 1.5 35B-A3B's dense projections (spec 15; the operator's 28b addition, 2026-11-01) at its verify

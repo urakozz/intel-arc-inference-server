@@ -1388,6 +1388,16 @@ fails the same 2 near-tie prompts as main's kernels (all 60 f32-judge verdicts i
 (`probe_mtp_steps`, int8 head, depth 4096, four process pairs) **33.83 -> 33.34 ms (1.112 -> 1.100 x verify at 1
 row)**, at 2 rows 31.66 -> 31.42 ms.
 
+**Task 4, the linears at 8 rows.** Re-profiled after Task 3: the GDN step at 8 rows 3.09 -> 2.44 ms; verify at 8
+rows 1.227 plain steps (uninstrumented pair). `probe_small_m prod` (standalone, medians of 7 interleaved rounds):
+out_proj's `gemm_sm` at 8 rows is 30.7 us against `gemv`'s 30.5 at 1 row - no excess of the kernel's own, so its
+in-list +1.19 ms is not a tuning row's to remove (256 GRF 1.32x, without the 2D read 1.01x); gate\|\|up's
+production at 8 rows 178.0 us against 171 at 1 row, with the 2D block read 0.975x production at 2 / 4 / 8 rows,
+256 GRF 1.10x. **The 2D read on gate\|\|up in list** (four process pairs against the post-Task-3 build, depth 4096):
+verify at 8 rows 35.89 -> 35.71 ms (**-0.18 ms**, 1.2255 -> 1.2185), at 4 rows 32.49 -> 32.32 ms (-0.17) - under the
+0.3 ms bar, so removed (spec 19 v3d's rule; the same words and DPAS chain, so a free gain if the bar is waived).
+Task 4 keeps no lever; the head and argmax have no excess at 8 rows.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
