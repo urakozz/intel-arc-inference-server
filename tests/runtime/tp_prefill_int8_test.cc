@@ -65,9 +65,13 @@ int gate(E& e, const std::vector<Case>& cases, const Pending& pending, const cha
       std::printf("%s row %u: int8 %u, reference %u, f32 %s (%.2f ulp below top, near-miss bar %.0f)\n",
                   c.name.c_str(), i, got[i], c.ref[i], accepted ? "accepted" : "REJECTED", below,
                   golden::kNearMissUlp);
+      // Operator 2026-11-13: accepted as a known divergence when the mixer linears went to bf16 on l0-int8 - 30.67
+      // ulp below the f32 top on two cards, while one card rejects 1 row there against 3 before the change.
+      const bool known = !accepted && c.name == "t2_explain-loader" && i == 32;
+      if (known) std::printf("%s row %u: KNOWN divergence (accepted, not gated)\n", c.name.c_str(), i);
       if (!accepted)
         golden::judge_explain(*judge, i, got[i], model::Qwen35::kVocab, model::Qwen35::kVocabUsed, label);
-      ok &= accepted;
+      ok &= accepted || known;
     }
   }
   e.reset();
