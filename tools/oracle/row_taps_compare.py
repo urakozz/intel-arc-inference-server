@@ -2,11 +2,13 @@
 """Spec 28: the engine's plain row (probe_row_taps) against the CPU references (row_taps_ref.py) and the f32 judge.
 
     row_taps_compare.py <eng stem> <ref dir/label> <judge.golden.safetensors> <row> <id a> <id b> [--head bf16|int8]
+                        [--base TAG]
 
 Prints the two ids' logits and their gap in bf16 ulps (of the row's top logit) in the engine, each reference present
-(<ref>.bf16 / .bf16x / .f32 / .f32x.safetensors: row_taps_ref.py --dtype, x = --exact-dequant) and the judge; then, per
-layer, the relative L2 distance of the engine's tap and of each reference's from the f32 reference with the engine's
-own weights (f32x; f32 when absent). Numpy only (no torch): runs on the box host."""
+(<ref>.bf16 / .bf16x / .f32 / .f32x / .f32p / .f32xp.safetensors: row_taps_ref.py --dtype, x = --exact-dequant, p =
+--pfi8) and the judge; then, per layer, the relative L2 distance of the engine's tap and of each reference's from the
+f32 reference with the engine's own weights (f32x; f32 when absent; --base names another, e.g. f32p for an l0-int8
+engine row). Numpy only (no torch): runs on the box host."""
 import json
 import math
 import os
@@ -52,10 +54,11 @@ def gap(row, a, b, VU=248077):
 
 def main():
     eng, ref, judge, r, a, b = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
-    head = sys.argv[8] if len(sys.argv) > 8 and sys.argv[7] == "--head" else "bf16"
-    refs = {t: st_load(f"{ref}.{t}.safetensors") for t in ("bf16", "bf16x", "f32", "f32x")
+    opt = dict(zip(sys.argv[7::2], sys.argv[8::2]))
+    head = opt.get("--head", "bf16")
+    refs = {t: st_load(f"{ref}.{t}.safetensors") for t in ("bf16", "bf16x", "f32", "f32x", "f32p", "f32xp")
             if os.path.exists(f"{ref}.{t}.safetensors")}
-    L, H = refs["f32"]["mid"].shape
+    L, H = next(iter(refs.values()))["mid"].shape
     e = {"logits": np.fromfile(eng + ".logits.f32", dtype=np.float32), "mid": bf16_file(eng + ".taps.bf16", (L, H)),
          "x": bf16_file(eng + ".x.bf16", (H,)), "pre": bf16_file(eng + ".resid.bf16", (H,))}
     j = st_load(judge)["logits"][r]
@@ -65,7 +68,7 @@ def main():
     for name, row in rows:
         la, lb, g, t = gap(row, a, b)
         print(f"  {name:10s} {la:9.4f} {lb:9.4f} {g:+8.2f} ulp   top {t}")
-    base = "f32x" if "f32x" in refs else "f32"
+    base = opt.get("--base", "f32x" if "f32x" in refs else "f32")
     others = [("eng", e)] + [(t, refs[t]) for t in refs if t != base]
     print(f"relative L2 distance to hf {base} (the mid-layer tap = the residual after layer L's mixer):")
     print("  layer   " + "  ".join(f"{n:>8s}" for n, _ in others))

@@ -2,10 +2,10 @@
 """Spec 28 (the special-token logit gap): a CPU reference of single rows of Qwen3.8's forced contexts, per layer, for a
 bisection against the engine's plain row (tools/probe/probe_row_taps.cc).
 
-    row_taps_ref.py <snapshot> --cases FILE --out DIR [--dtype bf16|f32] [--exact-dequant] [--batch-tokens N]
+    row_taps_ref.py <snapshot> --cases FILE --out DIR [--dtype bf16|f32] [--exact-dequant] [--pfi8] [--batch-tokens N]
 
-Cases file, one a line: "<label> <prompt ids file> <force ids file> <row>" - the row that decides force[row] after
-prompt + force[0, row) (spec_judge.h / forced_judge.h's row numbering). The model is transformers' Qwen3_5ForCausalLM
+Cases file, one a line: "<label> <prompt ids file> <force ids file> <row> [<P>]" - the row that decides force[row] after
+prompt + force[0, row) (spec_judge.h / forced_judge.h's row numbering); P: the l0-int8 test's own prompt length. The model is transformers' Qwen3_5ForCausalLM
 (eager attention, layer-streamed as dump_taps.py builds it) on the int4 checkpoint dequantised as every oracle
 dequantises it:
   --dtype bf16  bf16 weights and activations, standard transformers bf16 semantics; the bf16 GEMMs run as fp32 GEMMs of
@@ -15,6 +15,9 @@ dequantises it:
                 them once; the engine's kernels never do: gemv.cl accumulates (q - 8) x and scales in fp32). With
                 --dtype bf16 the activations stay bf16: such a linear is the fp32 GEMM of the bf16 input and the f32
                 weight, rounded once to bf16 - the engine's arithmetic. The output files are <label>.<dtype>x.
+  --pfi8        (--dtype f32) the l0-int8 prompt pass as qwen_forced.py --pfi8-re simulates it: the MLP's gate / up /
+                down on the case's first P positions through int8_sim.fq_x(x) . fq_w(w), the rest plain f32 (the
+                judge of the mtp_gpu_ tests). The output files are <label>.<dtype>[x]p.
 Per case, DIR/<label>.<dtype>.safetensors at the row's position:
   mid    [64][H]  the residual after layer L's mixer (post_attention_layernorm's input) - the engine's tap[L]
   out    [64][H]  the residual after layer L (transformers' hidden_states[L + 1])
@@ -104,8 +107,11 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--dtype", choices=("bf16", "f32"), default="bf16")
     ap.add_argument("--exact-dequant", action="store_true")
+    ap.add_argument("--pfi8", action="store_true", help="the l0-int8 prompt pass on each case's first P positions")
     ap.add_argument("--batch-tokens", type=int, default=16384)
     a = ap.parse_args()
+    if a.pfi8 and a.dtype != "f32":
+        ap.error("--pfi8 simulates the int8 prompt pass on the f32 reference only")
     import torch
     from safetensors.torch import save_file
     torch.set_grad_enabled(False)
@@ -116,12 +122,15 @@ def main():
     with open(a.cases, encoding="utf-8") as f:
         for line in f:
             p = line.split()
-            if len(p) != 4:
+            if len(p) not in (4, 5):
                 continue
             ids = read_ids(p[1])
             force = read_ids(p[2])
             r = int(p[3])
-            cases.append({"label": p[0], "seq": ids + force[:r], "pos": len(ids) + r - 1})
+            P = int(p[4]) if len(p) == 5 else 0
+            if a.pfi8 and not 0 < P <= len(ids):
+                raise SystemExit(f"{p[0]}: --pfi8 needs the test prompt's length P (0 < P <= {len(ids)})")
+            cases.append({"label": p[0], "seq": ids + force[:r], "pos": len(ids) + r - 1, "P": P})
     os.makedirs(a.out, exist_ok=True)
     cases.sort(key=lambda c: -len(c["seq"]))
     batches, cur = [], []
@@ -136,7 +145,23 @@ def main():
     print(f"torch {torch.__version__}, threads {torch.get_num_threads()}, dtype {a.dtype}, exact dequant {a.exact_dequant}; {len(cases)} cases in "
           f"{len(batches)} forwards", flush=True)
     model, tc, pf = build(a.snapshot, a.dtype, a.exact_dequant)
-    tag = a.dtype + ("x" if a.exact_dequant else "")
+    tag = a.dtype + ("x" if a.exact_dequant else "") + ("p" if a.pfi8 else "")
+    pf_mask = {}   # --pfi8: the batch's [B, T] mask of the int8 prompt pass's positions
+    if a.pfi8:
+        import torch.nn.functional as F
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as M
+        orig_mlp = M.Qwen3_5MLP.forward
+
+        def mlp_forward(self, x):            # qwen_forced.layer_forward's block on the masked rows
+            out = orig_mlp(self, x)
+            m = pf_mask["m"]
+
+            def lin(mod, v):
+                return F.linear(I8.fq_x(v), I8.fq_w(mod.weight.float()), mod.bias)
+            xm = x[m]
+            out[m] = lin(self.down_proj, self.act_fn(lin(self.gate_proj, xm)) * lin(self.up_proj, xm)).to(out.dtype)
+            return out
+        M.Qwen3_5MLP.forward = mlp_forward
     L = tc.num_hidden_layers
     for b in batches:
         B, T = len(b), len(b[0]["seq"])
@@ -145,6 +170,7 @@ def main():
             x[i, :len(c["seq"])] = torch.tensor(c["seq"], dtype=torch.long)
         pos = torch.tensor([c["pos"] for c in b])
         ar = torch.arange(B)
+        pf_mask["m"] = torch.arange(T)[None, :] < torch.tensor([c["P"] for c in b])[:, None]
         mid, out, fin = {}, {}, {}
 
         def pre_hook(i):
@@ -187,7 +213,7 @@ def main():
                  "logits_bf16head": lg_b[i].contiguous(), "logits_i8head": lg_8[i].contiguous(),
                  "seq": torch.tensor(c["seq"], dtype=torch.int32)}
             save_file(t, os.path.join(a.out, f"{c['label']}.{tag}.safetensors"),
-                      metadata={"pos": str(c["pos"]), "dtype": tag, "snapshot": a.snapshot})
+                      metadata={"pos": str(c["pos"]), "dtype": tag, "snapshot": a.snapshot, "pfi8": str(c["P"] if a.pfi8 else 0)})
             print(f"[{c['label']}] {len(c['seq'])} ids, row at position {c['pos']}: bf16-head top "
                   f"{int(lg_b[i, :248077].argmax())}", flush=True)
         print(f"forward B={B} T={T}: {time.time() - tb:.0f} s (wall {time.time() - t0:.0f} s)", flush=True)
