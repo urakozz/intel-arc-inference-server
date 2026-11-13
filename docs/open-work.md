@@ -12,7 +12,7 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 
 | # | what | run | state / what it decides |
 |---|---|---|---|
-| B2 | **Qwen3.8 pipeline parallel hand-off:** is `--pipeline-handoff peer` worth keeping? The hand-off is one hidden-state row a token (a few KB), `copy` is the default, and `peer` is refused with DFlash on `pp` and with Bolt's proposer. No recorded gain for `peer` | Qwen3.8 decode on `--parallel pp`, `copy` against `peer`, interleaved pairs, median of 3, `tools/gpu_lock.sh box` (a few minutes) | not run (2026-11-12). No gain: drop the flag and its code path (and those refusals). Clearly faster: make it the automatic choice where allowed, and still drop the flag |
+| B2 | **Qwen3.8 pipeline parallel hand-off:** is `--pipeline-handoff peer` worth keeping? The hand-off is one hidden-state row a token (a few KB), `copy` is the default, and `peer` is refused with DFlash on `pp` and with Bolt's proposer. No recorded gain for `peer` | Qwen3.8 decode on `--parallel pp`, `copy` against `peer`, interleaved pairs, median of 3, `tools/gpu_lock.sh box` (a few minutes) | **Measured 2026-11-13: no gain** - Qwen3.8 decode on `--parallel pp` at depth 4,096, warm-up + three interleaved rounds under the both-cards lock (busy box, load ~12-15): copy 34.74 / 34.82 / 34.82 t/s, peer 34.69 / 34.66 / 34.76, **peer/copy 0.9963**. Dropping the flag, its code path and the refusals it caused (branch `drop-peer-handoff`, in work) |
 
 ## CPU reference jobs (f32 judge references, box CPU, one model job at a time)
 
