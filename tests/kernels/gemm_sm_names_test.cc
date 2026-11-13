@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
   // The naming rule, spelled out.
   const kernels::SmallMTuning* gu = kernels::small_m_tuning(5120, 34816, 8, 0);
   CHECK(gu != nullptr);
-  CHECK_EQ(kernels::gemm_sm_variant(8, *gu), std::string("gemm_sm_M8_K5120_N34816_S1_L0_wg_mg_b2d"));
+  CHECK_EQ(kernels::gemm_sm_variant(8, *gu), std::string("gemm_sm_M8_K5120_N34816_S1_L0_wg_mg"));
   CHECK_EQ(kernels::gemm_sm_silu_variant(8, 17408, kernels::gemm_sm_out_s(*gu), 8), std::string("prep_silu_mul_M8_S1"));
   CHECK_EQ(kernels::gemm_sm_silu_variant(8, 17408, 8, 8), std::string("prep_silu_mul_M8"));
   const kernels::SmallMTuning* qz = kernels::small_m_tuning(5120, 16384, 1, 1);
@@ -79,7 +79,7 @@ int main(int argc, char** argv) {
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::Gemv, 4, 5120, 34816, 8, 0),
            kernels::gemv_variant(4, 5120, 34816, 8, 0));
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 5120, 34816, 8, 0),
-           std::string("gemm_sm_M4_K5120_N34816_S1_L0_wg_mg_b2d"));
+           std::string("gemm_sm_M4_K5120_N34816_S1_L0_wg_mg"));
   CHECK_EQ(kernels::int4_linear_variant(kernels::LinearKind::SmallM, 4, 2048, 128, 1, 1),
            std::string("gemm_sm_M4_K2048_N128_S1_L1_mg"));   // Ornith's a||b (M 2..4)
   CHECK_EQ(kernels::int8_linear_variant(kernels::LinearKind::SmallM, 2, 2048, 248320),
