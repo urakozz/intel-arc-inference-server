@@ -63,8 +63,11 @@ else
 fi
 
 # The f32 reference runner (tools/oracle/qwen_forced.py): its group, its layer, a rough time left.
-for log in $(ls -t "$main"/oracle-out-*.partial/run.log 2>/dev/null | head -1); do
-  pgrep -f qwen_forced.py > /dev/null || break
+# The running job's tree (a branch tree runs its own f32_refs.sh), not always the main one.
+ref_tree="$main"
+rp="$(pgrep -of 'box_validate/f32_refs.sh')" && ref_tree="$(readlink "/proc/$rp/cwd" 2>/dev/null || echo "$main")"
+for log in $(ls -t "$ref_tree"/oracle-out-*.partial/run.log 2>/dev/null | head -1); do
+  pgrep -f 'qwen_forced.py|qwen_bf16_top.py' > /dev/null || break
   awk -v L="$log" '
     /^memory group 1\// { cur = 0; k = 0; lay = 0; w = 0 }   # the log appends run after run: the last plan counts
     /^memory group [0-9]+\/[0-9]+/ { split($3, g, "/"); n = g[2] }
