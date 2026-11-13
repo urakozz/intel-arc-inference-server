@@ -1316,6 +1316,13 @@ PASS on all three arms.**
 | bf16 drafter, bf16 head | 592 | 587 | 592 | 592 | 0.9999682 | 5 | 4 |
 | int8, V' 32768 | 592 | 586 | 592 | 592 | 0.9999666 | 6 | 1 |
 
+### int8 KV (spec 19v3a, 2026-11-13)
+
+Implementation branch `spec19v3a-dflash-int8-kv` adds the M5..8 int8 writer/reduce/DPAS binaries and all-depth
+verify dispatch. The operator requested only a quick final check. **No new speed measurements**: paired real-list
+costs at 4096/32768, replay against default per-step MTP, tg128 at 32768 and decode at 120000 are pending (row 86).
+The policy costs and `--spec auto` are unchanged. The spec's ~1.15–1.18x is derived, not a measured result.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,

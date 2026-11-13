@@ -56,7 +56,9 @@ PY
     fi
     printf '%s\n' "$kv" > "$out/identity/kv_cache"
     if [ "$kv" = int8 ]; then
-      if [ ! -s "$out/identity/off.r1/requests.jsonl" ]; then
+      if [ ! -s "$out/identity/off.r1/requests.jsonl" ] || ! python3 -c \
+        'import json,sys; r=[json.loads(s) for s in open(sys.argv[1]) if s.strip()]; sys.exit(not (len(r)==39 and {x["set"] for x in r}=={"golden","toolcall"} and all(x.get("out_ids") for x in r)))' \
+        "$out/identity/off.r1/requests.jsonl"; then
         PORT=${PORT:-8213} tools/box_validate/serve_run.sh "$out/identity/off.r1" off 1 "$target" \
           --max-len 16384 --kv-cache int8 --spec off \
           -- --set toolcall --set golden --max-tokens 192 --stop-at-eos

@@ -1,6 +1,6 @@
 # Spec 19 v3 - DFlash in the modes we serve: the int8 KV cache, request slots, tensor parallel
 
-**Status:** design, 2026-11-13. Nothing here is built. Every speed number for a new mode is **derived** from numbers
+**Status:** 2026-11-13: mode A implemented on `spec19v3a-dflash-int8-kv`, focused check pending; modes B/C remain design. Every speed number for a new mode is **derived** from numbers
 already measured; each plan starts by measuring the one number its mode hinges on.
 
 **Continues** spec 19 v2 (`2026-11-11-spec19v2-dflash-v2-design.md`), whose §4 parked these modes. Spec 19 v2 stays
@@ -123,6 +123,10 @@ re-ranked exactly; on whenever the head is int8), 7 more GDN slots 1.06 GB, buff
 - On `--parallel pp` with int8 KV the full context fits (each card holds half the target).
 - The planner prints the real figure; the plan records it and gates on >= 200,000.
 
+**As built (2026-11-13):** mode A keeps the int8 drafter, candidate64/exact-int8 head and bf16 drafter ring.
+The host planner's printed int8 context is recorded after the focused check; allocation at that context and the
+full checkpoint gates remain pending.
+
 ### 2.4 Expected speed (derived)
 
 - At ~4k keys a round grows by 0.7 ms on 45.5 ms: -1.5 %. MTP's own int8 loss there is ~1 % (71.7 against 72.3 t/s,
@@ -131,6 +135,9 @@ re-ranked exactly; on whenever the head is int8), 7 more GDN slots 1.06 GB, buff
 - Past 100k keys the 8-row int8 attention is ~42 ms a verify against MTP's ~25 ms at 4 rows; DFlash still commits
   more tokens a round, but the ratio there is **estimated**, not derived. The plan measures 120,000 keys.
 - **Least sure:** the int8 numbers predate `PSPLIT=1` and ran on a busy box.
+
+**As built:** no new int8-KV DFlash speed measurements yet. The derived expectations above are unchanged;
+paired costs, acceptance, serving/f32, PP and replay gates are pending under the operator's quick-check-only scope.
 
 ## 3. Mode B - several request slots on one card
 

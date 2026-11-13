@@ -1,6 +1,6 @@
 # Spec 19 v3a - `--spec dflash` with `--kv-cache int8` (open-work item 12)
 
-**Status (2026-11-13): planned.** Spec: `docs/superpowers/specs/2026-11-13-spec19v3-dflash-modes-design.md` §2
+**Status (2026-11-13): implemented on `spec19v3a-dflash-int8-kv`; focused final check pending.** Spec: `docs/superpowers/specs/2026-11-13-spec19v3-dflash-modes-design.md` §2
 (mode A). Short by design: the kernel sources exist; this plan builds three binaries at 5..8 rows, adds four table
 rows and removes one refusal.
 
@@ -9,6 +9,11 @@ rows and removes one refusal.
 > (`- [ ]`) syntax. **Commit after every step** (signed, no trailers; a step that does not build or pass yet goes in as a
 > `WIP:` commit) and keep a short handoff file at the worktree root (untracked) when you stop. Box jobs: every GPU job
 > through `tools/gpu_lock.sh`, long jobs detached, checked at most every 30 min in one blocking wait.
+
+**Operator override (2026-11-13):** implement immediately and run only a quick test after implementation. The
+per-step builds, RED/GREEN runs, paired-cost stop decision, full checkpoint/PP/quick-validation, CPU acceptance,
+f32 serving and speed runs below remain unrun gates. Their commands and bars are retained for later; implementation
+is not a claim that this mode has passed them. Validation stages are registered as row 86. `--spec auto` is unchanged.
 
 **Goal:** `b70-serve --spec dflash --kv-cache int8` serves on one card and on `--parallel pp`, greedy output judged
 equal to `--spec off --kv-cache int8`, with `--max-len auto` at or above 200,000 on one card and a derived
