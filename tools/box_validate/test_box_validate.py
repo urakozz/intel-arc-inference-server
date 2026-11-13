@@ -121,6 +121,18 @@ class JunitTest(Tmp):
         r = run("pick", self.p("tests.json"), "--re", "^nothing$", "--junit", self.p("*.junit.xml"))
         self.assertEqual(r.returncode, 1)                  # selecting nothing is an error
 
+    def test_label_any_is_an_or(self):
+        write(self.p("tests.json"), tests_json([("a_test", []), ("b_test", ["pp"]), ("c_test", ["checkpoint", "tp"]),
+                                                ("d_test", ["pp", "tp"]), ("e_test", ["checkpoint"])]))
+        run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), *a],
+                                        capture_output=True, text=True).stdout.split()
+        self.assertEqual(run("names", self.p("tests.json"), "--label-any", "pp", "--label-any", "tp"),
+                         ["b_test", "c_test", "d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--label", "pp", "--label", "tp"), ["d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--label-any", "pp", "--label-any", "tp",
+                             "--no-label", "checkpoint"), ["b_test", "d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--no-label", "pp", "--no-label", "tp"), ["a_test", "e_test"])
+
     def test_latest_result_wins(self):
         write(self.p("tests.json"), tests_json([("a_test", [])]))
         write(self.p("1.junit.xml"), junit_xml([("a_test", "fail", "Failed", "")]))
@@ -1451,7 +1463,7 @@ class DriverTest(unittest.TestCase):
             self.assertNotIn(addr, self.run_driver("--dry-run", "--with", "optin").stdout)
         # G0 first, row 11's kernels before its gate twins
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order[:5], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite"])
+        self.assertEqual(order[:6], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite", "g0.suite_2card"])
         self.assertLess(order.index("r11.kernels"), order.index("r11.q2"))
         self.assertEqual(order[-1], "x.rest")
         for first, later in (("r13.host", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
@@ -1827,13 +1839,15 @@ class DriverTest(unittest.TestCase):
                r"benchy", r"--ratio", r"\bflock\b", r"\bcmake\b", r"(^|\s)ocloc ", r"passkey\.sh", r"free -g",
                r"matching /\^\\\| b70-decode", r"(>|tee( -a)?)\s*(~|\$HOME)/(?!b70-validate/)"]
         for sid in card:
-            self.assertNotIn(stages[sid]["sel"], ("always", "g0", "manual"), sid)
+            self.assertNotIn(stages[sid]["sel"], ("always", "manual"), sid)
             self.assertIn("--- " + sid + " ", out, sid)
             body = out.split("--- " + sid + " ")[1].split("\n--- ")[0].split("\n== ")[0]
             body = body.split("\n    log: ", 1)[1].partition("\n")[2]      # the commands, not the header
             for b in bad:
                 self.assertNotRegex(body, b, sid)
-            for rx in re.findall(r"--re '([^']*)'", body):
+            for rx, flags in re.findall(r"--re '([^']*)'((?: --(?:no-)?label \w+)*)", body):
+                if " --no-label pp" in flags:      # the label filter leaves the pp-labelled tests out
+                    continue
                 self.assertEqual([t for t in pp if re.search(rx, t)], [], (sid, rx))
 
     def test_g0_keeps_the_baseline_between_runs(self):
@@ -1849,6 +1863,58 @@ class DriverTest(unittest.TestCase):
         self.assertLess(w.index("baseline.py gates-check"), w.index("--output-junit"))
         self.assertLess(w.index("g0.bitwise.baseline.xml\n"), w.index("baseline.py gates-stamp"))
         self.assertEqual(self.run_driver("--registry", "/dev/null").returncode, 0)
+
+    def selection_of(self, out, sid, tests):
+        """the names the first `junit.py todo` of stage SID's printed body selects out of TESTS [(name, labels)]"""
+        d = tempfile.mkdtemp(prefix="bv-test-")
+        self.addCleanup(shutil.rmtree, d, True)
+        listing = os.path.join(d, "tests.json")
+        write(listing, tests_json(tests))
+        blk = out.split("--- " + sid + " ")[1].split("\n--- ")[0]
+        args = re.search(r"junit\.py todo \S+ (.*?) --done", blk).group(1)
+        args = re.sub(r"--also-in \S+", "--also-in " + listing, args).replace("'", "")
+        r = subprocess.run(["python3", os.path.join(HERE, "junit.py"), "names", listing, *args.split()],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return set(r.stdout.split())
+
+    def test_g0_and_the_rest_run_on_one_card_except_pp_and_tp(self):
+        """g0.bitwise, g0.suite, x.rest and r24.load hold one card; the pp / tp-labelled tests of the suite and of
+        x.rest are stages of their own that hold the whole box. The two halves together select what the old stage did."""
+        reg = tempfile.mktemp(suffix=".tsv")
+        try:
+            self.run_driver("--registry", reg)
+            stages = summary.read_registry(reg)[2]
+        finally:
+            if os.path.exists(reg):
+                os.remove(reg)
+        for sid in ("g0.bitwise", "g0.suite", "x.rest", "r24.load"):
+            self.assertEqual(stages[sid]["kind"], "card", sid)
+        for sid in ("g0.suite_2card", "x.rest_2card"):
+            self.assertEqual(stages[sid]["kind"], "gpu", sid)
+        self.assertEqual(stages["g0.suite_2card"]["sel"], "g0")
+        with open(os.path.join(HERE, "stages.sh")) as f:
+            gates = re.compile(re.search(r'^: "\$\{G0_BITWISE_RE:=(.*)\}"$', f.read(), re.M).group(1))
+        self.assertEqual([t for t in pp_labelled_tests() if gates.search(t)], [], "a G0 bitwise gate that needs two cards")
+        labels = ["", "checkpoint", "pp", "checkpoint;pp", "tp", "checkpoint;tp", "ornith", "checkpoint;k2", "pp;kv8",
+                  "bolt", "pp;bolt", "checkpoint;golden;pp", "kv8;tp", "pp;ornith"]
+        tests = [(f"t{i}_test", l.split(";") if l else []) for i, l in enumerate(labels)]
+        lab = {n: set(l) for n, l in tests}
+
+        def old(excluded):
+            return {n for n in lab if not lab[n] & excluded}
+        for flags, suite_ex, rest_ex in (
+                ((), {"ornith", "kv8"}, set("ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp".split())),
+                (("--quick",), {"ornith", "kv8", "checkpoint"}, set("checkpoint bolt lilicorr tp".split()))):
+            out = self.run_driver("--dry-run", "--only", "g0.suite,g0.suite_2card,x.rest,x.rest_2card", *flags).stdout
+            one, two = (self.selection_of(out, s, tests) for s in ("g0.suite", "g0.suite_2card"))
+            self.assertEqual((one & two, one | two), (set(), old(suite_ex)), flags)
+            self.assertEqual(two, {n for n in old(suite_ex) if lab[n] & {"pp", "tp"}}, flags)
+            self.assertEqual(one, {n for n in old(suite_ex) if not lab[n] & {"pp", "tp"}}, flags)
+            one, two = (self.selection_of(out, s, tests) for s in ("x.rest", "x.rest_2card"))
+            self.assertEqual((one & two, one | two), (set(), old(rest_ex)), flags)
+            self.assertEqual(two, {n for n in old(rest_ex) if "pp" in lab[n]}, flags)
+            self.assertNotEqual(two, set(), flags)
 
 
 def pp_labelled_tests():

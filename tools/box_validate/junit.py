@@ -2,7 +2,8 @@
 """ctest's test list and JUnit results, for tools/box_validate (stdlib only: runs on the box's
 host python3 and on the Mac).
 
-  junit.py names   TESTS_JSON [--re ERE] [--label L]... [--no-label L]... [--also-in JSON]
+  junit.py names   TESTS_JSON [--re ERE] [--label L]... [--label-any L]... [--no-label L]... [--also-in JSON]
+        (--label: every one of them; --label-any: at least one of them)
   junit.py todo    TESTS_JSON --re ERE [filters] --done GLOB
         the selected tests with no result yet in the JUnit files GLOB matches (or whose latest result
         is a skip), as one anchored ctest -R alternation; empty output when every one has a result
@@ -66,6 +67,8 @@ def select(args):
         if not rx.search(name):
             continue
         if any(l not in labels for l in args.label or []):
+            continue
+        if args.label_any and not any(l in labels for l in args.label_any):
             continue
         if any(l in labels for l in args.no_label or []):
             continue
@@ -247,6 +250,7 @@ def main(argv=None):
         p.add_argument("tests")
         p.add_argument("--re", default=".")
         p.add_argument("--label", action="append")
+        p.add_argument("--label-any", action="append")
         p.add_argument("--no-label", action="append")
         p.add_argument("--also-in")
 
