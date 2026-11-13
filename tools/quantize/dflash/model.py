@@ -19,8 +19,8 @@ Three block lists for AutoRound (`BLOCKS`), each tuned on its own cached inputs:
 So every drafter linear is tuned, `fc` and the selector projection included; norms, the conv bases and the
 selector codebooks are parameters outside any linear and stay as loaded. `encoder` is the one module that is
 not in the checkpoint: `ENCODER_RENAME` maps its tensors back to `fc.*` / `hidden_norm.*` (finalize.py).
-RoPE comes in as cos / sin tables (calib.py computes them in float64, as dflash_ref.rope does): the card has
-no float64.
+RoPE comes in as cos | sin tables (calib.py computes them in float64, as dflash_ref.rope does: the card has no
+float64), float32 carried as int32 bits (`q_rope`, `k_rope`): AutoRound casts every floating block input to bf16.
 """
 from __future__ import annotations
 
@@ -66,10 +66,10 @@ class RMSNorm(nn.Module):
         return y.to(x.dtype)
 
 
-def rope(x, cos, sin, neox: bool):
-    """x [B, N, heads, hd] at the tables' positions: cos / sin [B, N, hd / 2] (dflash_ref.rope)."""
+def rope(x, table, neox: bool):
+    """x [B, N, heads, hd] at the table's positions: cos | sin [B, N, hd] float32 as int32 bits (dflash_ref.rope)."""
     hd = x.shape[-1]
-    c, s = cos[:, :, None].float(), sin[:, :, None].float()
+    c, s = table.view(torch.float32)[:, :, None].chunk(2, -1)
     y = x.float()
     if neox:
         a, b = y[..., : hd // 2], y[..., hd // 2:]
@@ -125,9 +125,9 @@ class Attention(nn.Module):
         self.q_norm = RMSNorm(c.head_dim, c.eps)
         self.k_norm = RMSNorm(c.head_dim, c.eps)
 
-    def _kv(self, x, cos, sin):
+    def _kv(self, x, table):
         B, N, _ = x.shape
-        k = rope(self.k_norm(self.k_proj(x).view(B, N, self.nkv, self.hd)), cos, sin, self.neox)
+        k = rope(self.k_norm(self.k_proj(x).view(B, N, self.nkv, self.hd)), table, self.neox)
         v = self.v_proj(x).view(B, N, self.nkv, self.hd)
         if self.v_scale is not None:
             v = v * self.v_scale
@@ -149,11 +149,11 @@ class Attention(nn.Module):
             vis = vis & (d >= 0)
         return vis
 
-    def forward(self, x, ctx, qpos, kpos, q_cos, q_sin, k_cos, k_sin):
+    def forward(self, x, ctx, qpos, kpos, q_rope, k_rope):
         B, R, _ = x.shape
-        q = rope(self.q_norm(self.q_proj(x).view(B, R, self.nh, self.hd)), q_cos, q_sin, self.neox)
-        kb, vb = self._kv(x, q_cos, q_sin)
-        kc, vc = self._kv(ctx, k_cos, k_sin)
+        q = rope(self.q_norm(self.q_proj(x).view(B, R, self.nh, self.hd)), q_rope, self.neox)
+        kb, vb = self._kv(x, q_rope)
+        kc, vc = self._kv(ctx, k_rope)
         g = self.nh // self.nkv
         k = torch.cat([kc, kb], 1).repeat_interleave(g, dim=2).float()
         v = torch.cat([vc, vb], 1).repeat_interleave(g, dim=2).float()
@@ -187,10 +187,10 @@ class Layer(nn.Module):
         self.attention_conv = GroupedConv(c)
         self.mlp_conv = GroupedConv(c)
 
-    def forward(self, hidden_states, ctx, qpos, kpos, q_cos, q_sin, k_cos, k_sin):
+    def forward(self, hidden_states, ctx, qpos, kpos, q_rope, k_rope):
         x, n = hidden_states, self.block_len
         h, co = self.attention_conv.prepare(self.input_layernorm(x), n)
-        h = self.self_attn(h, ctx, qpos, kpos, q_cos, q_sin, k_cos, k_sin)
+        h = self.self_attn(h, ctx, qpos, kpos, q_rope, k_rope)
         x = x + self.attention_conv.finish(h, co, n)
         h, co = self.mlp_conv.prepare(self.post_attention_layernorm(x), n)
         return x + self.mlp_conv.finish(self.mlp(h), co, n)
@@ -241,12 +241,12 @@ def _calib_classes():
             self.candidate_selector = CandidateSelector(c)
 
         def forward(self, input_ids=None, attention_mask=None, taps=None, embeds=None, qpos=None, kpos=None,
-                    q_cos=None, q_sin=None, k_cos=None, k_sin=None, use_cache=None, **_):
+                    q_rope=None, k_rope=None, use_cache=None, **_):
             """`input_ids` / `attention_mask` are AutoRound's bookkeeping (the block ids, all valid)."""
             ctx = self.encoder(taps)
             h = embeds
             for layer in self.layers:
-                h = layer(h, ctx=ctx, qpos=qpos, kpos=kpos, q_cos=q_cos, q_sin=q_sin, k_cos=k_cos, k_sin=k_sin)
+                h = layer(h, ctx=ctx, qpos=qpos, kpos=kpos, q_rope=q_rope, k_rope=k_rope)
             h = self.norm(h)
             B, R, H = h.shape
             n = self.dflash.block_size
