@@ -154,3 +154,56 @@ prefetch useful (without it, -25 %). Their defines were removed from `pf_gemm.cl
 - `src/kernels/prefill/pf_gemm.cl` `RASTER`, `src/kernels/prefill/pf_dequant_slab.cl` `BLOCK_STORE` - probe defines,
   default 0.
 - Logs: `~/b70/logs/qwen-pf-gemm/` (`profile-l0-*.log`, `plain-l0-*.log`, `probe1.log`, `probe2.log`, `chunk4096.out`).
+
+## 6. Built: the 4096-row walk in the engine (open-work 18, branch `qwen-chunk-4096`)
+
+**What is built.** Two variants beside the plain binaries, each one define (bit-identical by construction: the same
+tiles, DPAS chain and stored values): `pf_gemm_T0_R` / `pf_gemm_T0_SILU_R` (`RASTER=1`) and
+`pf_dequant_slab_K*_N*_L*_BS` (`BLOCK_STORE=1`) at the five one-card shapes and the five tensor-parallel card shapes.
+`runtime::prefill::linear_l0` / `linear_l0_silu` bind them for a dense model (Qwen3.8) when the chunk is wider than
+2048 rows; a chunk up to 2048 rows, the MoE models' dense linears and every other model keep the plain binaries.
+
+### Task 1: the engine measurement (before any default moved)
+
+One B70 (card 1, `tools/gpu_lock.sh card 1`), `b70-decode --bench --prefill-backend l0 --max-len 34816 --tg 16`,
+bf16 KV. **Busy box**: another session's tests on card 0 throughout. Main's build (e7e3c5bb, its own tree) at
+`--prefill-chunk 2048` against the branch's at `--prefill-chunk 4096`, interleaved pairs after one warm-up pair, three
+rounds (`tools/probe/qwen_chunk4096_bench.sh`, logs `~/b70/logs/qwen-chunk-4096/r*-l0-010239-*.log`). ms, medians of 3:
+
+| prompt | main, 2048-row chunks | branch, 4096-row chunks | change | rounds (main / branch) |
+|---|---:|---:|---:|---|
+| 4096 | 2369.0 (1,729 t/s) | **2235.2 (1,832 t/s)** | **-5.6 %** | 2360.3 2369.0 2369.2 / 2227.8 2238.3 2235.2 |
+| 16384 | 10466.8 (1,565 t/s) | **9882.5 (1,658 t/s)** | **-5.6 %** | 10452.1 10466.8 10472.3 / 9878.0 9882.5 9888.5 |
+| 32768 | 23522.0 (1,393 t/s) | **22190.3 (1,477 t/s)** | **-5.7 %** | 23524.3 23515.6 23522.0 / 22190.3 22187.7 22197.3 |
+
+**Gate (>= 3 % faster at pp4096, no slower at pp16384, repeatable): PASS** - every pair faster, by 5.5-5.7 %.
+
+**Control** (where the gain comes from): main's build at `--prefill-chunk 4096` against the branch's, one round
+(`bench-ctl.out`): pp4096 2354.8 / 2357.1 against 2231.9 / 2230.3 ms (main's 4096-row chunk is its 2048-row time, as
+section 3 found); pp16384 10357.7 against 9876.3. So the 4096-row chunk alone is ~0.5 % at pp4096 (~1 % at pp16384,
+half the attention launches), and the two variants are the rest.
+
+**The phase table** (`B70_PREFILL_PROFILE=1`, one run each; L0 kernel ms; the instrumented walls 2537.9 / 2316.2 and
+11012.9 / 10160.6 ms):
+
+| phase | pp4096 main (2048) | pp4096 branch (4096) | pp16384 main | pp16384 branch |
+|---|---:|---:|---:|---:|
+| `slab_gemm` (`pf_gemm`) | 1382.6 | 1418.2 | 5534.9 | 5661.5 |
+| `slab_dequant` (int4 -> bf16 slab) | 249.2 | **114.9** | 999.5 | **459.7** |
+| norms | 103.3 | 115.6 | 415.0 | 463.0 |
+| delta net (`ab_proj` + `gdn_*`) | 427.8 | 432.4 | 1727.1 | 1732.1 |
+| attention (`attn_prep` + `attn_flash` + `attn_gate`) | 104.5 | 102.1 | 1468.5 | 1362.7 |
+| **total** | 2269.7 | **2185.4** | 10147.5 | **9681.4** |
+| launches | 16903 | 8454 | 67597 | 33801 |
+
+The conversion is paid once per 4096 ids instead of twice (-134 ms at pp4096) and its block stores take it below
+half; the 4096-row GEMM with the N-fastest order is 2.6 % over two 2048-row GEMMs (without the order +6 % in the
+probe, section 3); flash attention gains from half the chunks at depth.
+
+**Bitwise:** `prefill_split_l0_cap4096_test` PASS on the branch (the engine's own rule: a chunk boundary at a multiple
+of 64 is bitwise; the 4096-row chunks run the new binaries).
+
+**`l0-int8`** (the int8 prompt pass, which follows the same session cap; its int8 GEMMs do not use these variants),
+same protocol (`r*-l0-int8-011501-*.log`), medians of 3: pp4096 1817.4 -> **1753.8 ms (-3.5 %)**, pp16384 8273.8 ->
+**7934.6 (-4.1 %)**, pp32768 19214.9 -> **18341.3 (-4.5 %)**; every pair faster (the h8 quantiser and the slab of the
+head's linears amortise over twice the rows).

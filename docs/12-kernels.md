@@ -1035,6 +1035,14 @@ offsets A, B and C, so one launch serves a batched GEMM. Variants:
   with `n0` a multiple of 256, so atom `b = 2p` is a gate block and `2p+1` its up block, both already in this
   sub-group's registers one lane per column, with no cross-lane traffic. The epilogue runs `pf_silu_mul`'s whole
   chain and stores bf16; the fp32 `[M][34816]` intermediate is never written. It removes one launch a layer.
+- **`pf_gemm_T0_R` / `pf_gemm_T0_SILU_R`** (`RASTER=1`), with **`pf_dequant_slab_*_BS`** (`BLOCK_STORE=1`):
+  Qwen3.8's walk for a chunk wider than 2048 rows. The work-groups are numbered N-fastest, so a wave of 32 covers
+  8 row blocks x 4 column blocks of a slab and each row block of the activations is read once a slab instead of
+  once a wave (at 2048 rows a slab is one wave either way); the conversion stores each word's eight values as one
+  2D block message. The same tiles, DPAS chain and values, so bit-identical. Qwen3.8 runs 4096-row chunks by
+  default where the memory plan has room (open-work 18): the prompt pass 5.6 % faster at pp4096 to pp32768 on
+  `l0` ([record](probes/probe-qwen-pf-gemm-2026-11-13.md), section 6). The MoE models' dense linears and every
+  chunk up to 2048 rows keep the plain binaries.
 
 `runtime::prefill::gemm_l0` asserts every requirement before launching: `M % 256 == 0` and `N % 256 == 0` (the
 **caller** pads; the padding is computed and never read), `K % 32 == 0`, every base 64-byte aligned, leading
@@ -1063,7 +1071,7 @@ wait per slab (a 4096-token prompt, 7616 launches each) gave `slab_dequant` 274.
 
 ### Short chunks: `pf_gemm_small` and `pf_gemm_q4`
 
-A full chunk is 2048 rows; a chat turn's chunk is often a few hundred. `pf_gemm` gives each 256 × 256 output
+A full chunk is 2048 or 4096 rows; a chat turn's chunk is often a few hundred. `pf_gemm` gives each 256 × 256 output
 tile one work-group, so a 1024-column slab is only 4 work-groups for any chunk up to 256 rows (4 of 32 Xe-cores,
 each doing a whole tile's DPAS for the few rows the chunk has), and the slab dequant (about 110 ms of a
 Qwen3.8 chunk) is paid whatever the row count.
