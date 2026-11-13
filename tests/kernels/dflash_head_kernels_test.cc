@@ -53,6 +53,9 @@ void check_candidates(Env& e) {
     logits[size_t(r) * N + 5] = NAN;
     for (unsigned i = used; i < N; ++i) logits[size_t(r) * N + i] = INFINITY;
   }
+  // Spec 19 v3d: a chunk with more ties at the 64th place than places (row 2, chunk 5: 300 x 3.0, row 2's best after
+  // its 8 x 10.0) - the lowest ids among the ties win.
+  for (unsigned i = 0; i < 300; ++i) logits[size_t(2) * N + 5 * 4096 + 13 * i] = 3.0f;
   auto in = e.up(logits);
   auto part = e.up(std::vector<float>(size_t(R) * chunks * C * 2));
   auto cand = e.up(std::vector<uint32_t>(size_t(R) * C));
@@ -64,8 +67,12 @@ void check_candidates(Env& e) {
   k2.group_size(256);
   k2.arg_ptr(0, part.ptr());
   k2.arg_ptr(1, cand.ptr());
-  for (unsigned repeat = 0; repeat < 2; ++repeat) {
-    e.run(k1, chunks, R);
+  l0::Kernel k1r(mod, "df_candidate_select1");   // spec 19 v3d Task 7: stage 1 by radix select, the same cand
+  k1r.group_size(256);
+  k1r.arg_ptr(0, in.ptr());
+  k1r.arg_ptr(1, part.ptr());
+  for (unsigned repeat = 0; repeat < 4; ++repeat) {
+    e.run(repeat < 2 ? k1 : k1r, chunks, R);
     e.run(k2, R);
     const auto got = e.read<uint32_t>(cand, size_t(R) * C);
     for (unsigned r = 0; r < R; ++r) {
@@ -73,7 +80,8 @@ void check_candidates(Env& e) {
       for (unsigned c = 0; c < C; ++c) CHECK_EQ(got[r * C + c], want[c].i);
     }
   }
-  std::puts("candidate top64 OK: real shape, padding mask, NaN, ties and deterministic replay");
+  std::puts("candidate top64 OK: real shape, padding mask, NaN, ties and deterministic replay; the radix-select stage 1 "
+            "the same");
 }
 
 void check_rerank(Env& e) {
