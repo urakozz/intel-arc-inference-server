@@ -1207,9 +1207,14 @@ selected checks and the real-engine regression pass. G0 against merged main pass
 kernels, 2449 byte-identical and 254 equal section by section after normalising only the tree path in build
 options; 44 additive drafter variants, zero removed.
 
-This passes the main recording's speed and correctness checks. The other two recordings, golden/A4,
-llama-benchy and candidate-head PP judging remain outstanding; the full G-speed gate and C7 are not passed,
+This passes the main recording's speed and correctness checks. The candidate-head PP check subsequently passes **39/39 requests, 0 FAIL / 0 SKIPPED** (37 identical);
+its four new short references take 137 s at eight threads, peak RSS 35.7 GiB. Evidence: `cpu-pp-v8.log` and
+`pp-candidate-main-0b5ef628/judge-after-short-refs.log` in the same log topic. The other two recordings,
+golden/A4 and llama-benchy remain outstanding; the full G-speed gate and C7 are not passed,
 and the serving default is unchanged. The long-context replays take longer than the initial box estimate.
+A first-round preview of the 21-request control recording needs 26 missing long-context references (up to
+102k tokens). The current planner estimates about 138 CPU hours before chunking overhead. That new batch
+is held for the operator's budget choice; the 88 main-replay and four PP references are complete.
 Evidence: `~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/` (`requests.jsonl` in all nine arms,
 `judge-mid-refs.log`, `driver.rc`), `g0-main-0b5ef628/comparison/`, `reset-v7-engine.log`,
 and `cpu-resume-now-v7.log` under the same log topic.

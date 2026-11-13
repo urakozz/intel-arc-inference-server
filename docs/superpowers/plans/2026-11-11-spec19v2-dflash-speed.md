@@ -9,7 +9,10 @@ Fresh G0 precedes a new Task 8 collection; the pre-merge timings remain historic
 The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26); grade any
 overlapping timings busy-box, retaining the >16-free-thread guard and the whole-box GPU reservation.
 Fresh G0 and the real-engine regression pass. The main three-round replay now measures 1.193x per-step MTP
-(all 78 requests, f32 judge 0 FAIL / 0 SKIPPED); the other recordings and corpus/benchy/PP gates continue.
+(all 78 requests, f32 judge 0 FAIL / 0 SKIPPED). The actual candidate-head PP check passes 39/39,
+0 FAIL / 0 SKIPPED; the other recordings and corpus/benchy gates continue. The main/PP jobs completed
+92 new references. The long-context control judge needs a much larger new batch (planner ~138 CPU hours),
+held for the operator's budget choice.
 Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 

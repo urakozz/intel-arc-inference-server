@@ -243,5 +243,10 @@ MTP** and **1.774903067x plain decode**. All six speculative-arm/round compariso
 references active at eight threads: busy-box grade. Source `a83322bb`, merged main `0b5ef628`; evidence
 `~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/judge-mid-refs.log` and the nine saved arms.
 G0 passes 2703 common compiled kernels (254 differ only in the normalised tree path), 44 drafter additions,
-zero removals. This clears the main recording's 10% bar; the other recordings, corpus/benchy and PP judgments
-still gate the full result. The C7 draft/iteration targets remain failed; the default is unchanged.
+zero removals. This clears the main recording's 10% bar; the other recordings and corpus/benchy judgments
+still gate the full result. The actual candidate-head PP check subsequently passes 39/39 requests
+(37 identical, 0 FAIL / 0 SKIPPED); its four short references take 137 s at eight threads. The C7 draft/iteration targets remain failed; the default is unchanged.
+
+The first round of the 21-request long-context control recording needs 26 new contexts of up to 102k tokens.
+The current planner estimates about 138 CPU hours before chunking overhead; the operator's budget choice
+is pending. The 88 main and four PP references are complete. GPU collection continues independently.
