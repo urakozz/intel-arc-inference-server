@@ -102,7 +102,6 @@ class BoltEngine {
   size_t launches(uint32_t dev) const;
   uint32_t devices() const { return uint32_t(st_.size()); }
   uint32_t split() const { return model_.place.split; }
-  PpHandoff handoff() const { return opt_.handoff; }
   BoltAttn attention() const { return attn_; }
   BoltFuse fuse() const { return fuse_; }
   BoltState state() const { return state_; }
@@ -127,7 +126,7 @@ class BoltEngine {
   // 25 §6.2); a prompt cut at multiples of 64 - any chunk width this takes - is bitwise one chunk (Review Focus 1: every
   // kernel is row-local or keyed to absolute positions). A prompt may be continued by another prefill or by decode, and a
   // prefill may follow decode steps (its first chunk then starts off the grid: its first sub-chunk is partial). Two devices
-  // (Decision 4): each chunk runs blocks [0, s) on device 0, crosses by a second PipelineLink in copy mode at chunk size
+  // (Decision 4): each chunk runs blocks [0, s) on device 0, crosses by a second PipelineLink at chunk size
   // (h [C][4096] and block s - 1's pending GEMM rows), then blocks [s, L) and the head on device 1 - sequentially (Kolibri's
   // hand-off). A lost hand-off host-signals the event, throws naming it and marks the engine until reset().
   // B70_BOLT_ATTN=eager runs the eager prefill attention; B70_BOLT_SSM=bf16 the bf16-state scan (rounded once a chunk).
@@ -173,7 +172,7 @@ class BoltEngine {
   // Mamba block, the union MoE's down rows) and, two cards, the verify link (a copy hand-off sized for 8 rows); the verify lists
   // are captured on first use per M (runtime/bolt/bolt_capture.h build_verify). Before it nothing of this exists: a plain run
   // allocates, captures and replays exactly 25c's (D0). `moe`: the routed experts at M > 1 (union - b70-serve's - the
-  // default, Decision 10; plain the tests' arm). Two cards: the copy hand-off only (peer is refused by name - the taps ride on its barrier).
+  // default, Decision 10; plain the tests' arm). Two cards: the taps ride on the hand-off's barrier.
   // At pos = n with x_n pending:
   //   verify(drafts, k)  rows [x_n, d_1 .. d_k] at n .. n + k (device 0's Control::cur_token[1..k] = the drafts, n_active
   //                      k + 1 on both cards); row r's argmax in verify_ids()[r], its raw fp32 logits row in the last

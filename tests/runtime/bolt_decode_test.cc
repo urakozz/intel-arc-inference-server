@@ -13,7 +13,7 @@
 //      capture)
 //   3. --fuse <arms> (Task 5, Review Focus 5): an engine with the arms against the as-built engine - the same tokens, logits,
 //      routes, rings, states, KV and taps, bitwise
-//   4. --pp a,b (Review Focus 6): the model on two cards at split a (copy) and split b (peer) - bitwise each other and, when
+//   4. --pp a,b (Review Focus 6): the model on two cards at split a and split b - bitwise each other and, when
 //      the model fits one card, bitwise the one-card run
 // Exit 77 (SKIP) when the checkpoint is absent or the placement cannot run (one GPU for --pp, a model too large).
 #include <cstdio>
@@ -146,7 +146,7 @@ int main(int argc, char** argv) {
     CHECK_EQ(got.model, pl.weights);
     CHECK_EQ(e.persistent_bytes(dev) + e.scratch_bytes(dev), pl.kv + pl.ssm + pl.conv_rings + pl.decode_scratch);
   }
-  CHECK_EQ(e.launches(), rb::decode_launches(d, e.model().place, e.attention(), e.fuse(), e.handoff()));
+  CHECK_EQ(e.launches(), rb::decode_launches(d, e.model().place, e.attention(), e.fuse()));
   if (d.layers == 88) CHECK_EQ(e.launches(), size_t(e.attention() == rb::BoltAttn::Eager ? 645 : 653));
   if (d.layers == 12 && e.devices() == 1 && e.attention() == rb::BoltAttn::Flash) CHECK_EQ(e.launches(), size_t(92));
   std::printf("plan == allocation; %zu launches a token (%s attention, fuse %s, %s state); %s\n", e.launches(),
@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
     of.fuse = arms;
     bolt_rig::build(rig, snap, of);
     rb::BoltEngine& f = *rig.eng;
-    CHECK_EQ(f.launches(), rb::decode_launches(f.model().desc, f.model().place, f.attention(), arms, f.handoff()));
+    CHECK_EQ(f.launches(), rb::decode_launches(f.model().desc, f.model().place, f.attention(), arms));
     if (layers == 88 && devices == 2 && f.attention() == rb::BoltAttn::Flash) {
       const int n = int(arms.router) + int(arms.route) + int(arms.conv);
       CHECK_EQ(f.launches(), size_t(653 - 40 * n));   // spec 25 §6.1: 613 a single arm, 533 all three
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
                 " launches against " + std::to_string(base_launches) + ")").c_str());
   }
 
-  // 4. the two-card cut at two splits, copy and peer (and against one card when it fits)
+  // 4. the two-card cut at two splits (and against one card when it fits)
   if (pp_a && pp_b) {
     if (l0::Context::gpu_count() < 2) {
       std::printf("SKIP (part 4): --pp needs two GPUs, Level Zero shows %u\n", l0::Context::gpu_count());
@@ -190,15 +190,13 @@ int main(int argc, char** argv) {
         bolt_rig::Options op = o;
         op.devices = 2;
         op.split = k ? pp_b : pp_a;
-        op.handoff = k ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
         bolt_rig::build(rig, snap, op);
         rb::BoltEngine& p = *rig.eng;
-        CHECK_EQ(p.launches(), rb::decode_launches(p.model().desc, p.model().place, p.attention(), p.fuse(), p.handoff()));
+        CHECK_EQ(p.launches(), rb::decode_launches(p.model().desc, p.model().place, p.attention(), p.fuse()));
         pp.push_back(run(p, ids));
-        std::printf("    two cards, split %u (%s), %zu launches\n", op.split, k ? "peer" : "copy", p.launches());
+        std::printf("    two cards, split %u, %zu launches\n", op.split, p.launches());
       }
-      same(pp[0], pp[1], ("Review Focus 6: split " + std::to_string(pp_a) + " (copy) against split " + std::to_string(pp_b) +
-                          " (peer)").c_str());
+      same(pp[0], pp[1], ("Review Focus 6: split " + std::to_string(pp_a) + " against split " + std::to_string(pp_b)).c_str());
       if (devices == 1) same(a, pp[0], "Review Focus 6: two cards against one");
     }
   }

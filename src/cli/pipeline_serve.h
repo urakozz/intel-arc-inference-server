@@ -4,7 +4,7 @@
 // box tests, cli_reject_serve_pp_*). The device flow is b70_serve.cc's serve_pipeline().
 //
 // b70-serve takes b70-decode's flags (cli/pipeline_args.h): --parallel auto|1|pp, and the overrides
-// --pipeline-split auto|N and --pipeline-handoff copy|peer (pp's). Under pp:
+// --pipeline-split auto|N (pp's). Under pp:
 //
 //   served   Qwen3.8 and Ornith (runtime::PipelineEngine: the descriptor gives the
 //            split), with --max-len auto|N (both cards, each with the reserve), --prefill-backend
@@ -31,7 +31,7 @@ struct ServePipelineContext {
 };
 
 inline void check_serve_pipeline(const PipelineArgs& a, const ServePipelineContext& c) {
-  // One card: the override flags alone are refused, as b70-decode refuses them.
+  // One card: the override flag alone is refused, as b70-decode refuses it.
   PipelineContext pc;
   pc.prefill = true;   // the server prefills every request
   pc.mtp = c.mtp;

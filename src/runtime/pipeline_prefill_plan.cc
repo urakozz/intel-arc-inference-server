@@ -158,17 +158,14 @@ PpPfLinkLayout pp_prefill_link_layout(const model::ModelDesc& d, uint32_t chunk_
   l.resid_bytes = s.resid;
   l.sumsq_bytes = s.norm_sumsq;
   l.sumsq_off = round_up(l.resid_bytes, kPpPage);
-  l.stamp_off = l.sumsq_off + l.sumsq_bytes;
-  l.flag_off = round_up(l.stamp_off + 4, kPpPage);
-  l.slot_bytes = round_up(l.flag_off + kPpPage, kPpLandingAlign);
+  l.slot_bytes = round_up(l.sumsq_off + l.sumsq_bytes, kPpLandingAlign);
   l.total = l.slot_bytes * kPpPfDepth;
   return l;
 }
 
 size_t pp_prefill_link_bytes(const model::ModelDesc& d, uint32_t device, uint32_t chunk_cap) {
   const size_t common = size_t(kPpPfDepth) * sizeof(Control) + kTimestampBytes;
-  const size_t peer_words = size_t(kPpPfDepth) * kPpStateWords * 4;
-  return device == 0 ? common + peer_words : pp_prefill_link_layout(d, chunk_cap).total + common + peer_words;
+  return device == 0 ? common : pp_prefill_link_layout(d, chunk_cap).total + common;
 }
 
 size_t pp_prefill_shadow_bytes(const model::ModelDesc& d, const PpStage& st) {

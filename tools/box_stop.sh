@@ -16,6 +16,8 @@
 #                                       ~/b70/hdd/quant/dflash-current): its process group; `start` resumes
 #   tools/box_stop.sh tree <branch>      jobs whose working directory is that branch's ~/b70/trees tree, plus its oracle containers
 #   tools/box_stop.sh job <branch> <pid> one process tree, verified to be working in that branch
+#   tools/box_stop.sh main-job <pid>    one process tree working in the main tree (~/b70-inference-server: CPU
+#                                       reference runs, test chains); its oracle container too, when it started one
 # Anything else is refused. Signals are TERM, then KILL after 10 s for what is left.
 # On the box itself (Linux with ~/b70 and no BOX set) the same snippets run locally, without ssh.
 set -euo pipefail
@@ -38,12 +40,13 @@ else
   remote=(ssh -o ConnectTimeout=20 "$BOX" bash -s --)
 fi
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 what="${1:-}"; arg="${2:-}"; job_pid="${3:-}"
 case "$what" in
   list|cpu-chain|hf-tier|validation|q4exp-count-wait|dflash-quant) [ -z "$arg" ] || usage ;;
   cpu-job|tree) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ ]] || usage ;;
   job) [[ "$arg" =~ ^[A-Za-z0-9._-]+$ && "$job_pid" =~ ^[1-9][0-9]*$ ]] || usage ;;
+  main-job) [[ "$arg" =~ ^[1-9][0-9]*$ ]] || usage ;;
   *) usage ;;
 esac
 
@@ -55,6 +58,7 @@ what=$1; arg=${2:-}; job_pid=${3:-}
 CPU_TREE=$HOME/b70/trees/cpu-refs
 CPU_LOG=$HOME/b70/logs/cpu-refs
 VROOT=$HOME/b70-validate/b70-inference-server-validate
+MAIN=$HOME/b70-inference-server
 
 tree_pids() {  # $1 and every descendant, children first
   local p
@@ -114,6 +118,15 @@ case "$what" in
     echo "== hf-tier";     pgrep -af 'hf-tier-chain|tools/hf_tier.py' | grep -v pgrep || echo "  not running"
     echo "== validation";  pgrep -af 'box_validate/remote.sh' | grep -v pgrep | cut -c1-160 || echo "  not running"
     echo "== dflash-quant"; pgrep -af 'quantize_dflash.sh run' | grep -v pgrep || echo "  not running"
+    echo "== main-tree jobs (stop one with main-job <pid>)"
+    for f in /proc/[0-9]*/cwd; do
+      wd=$(readlink "$f" 2>/dev/null || true)
+      case "$wd" in "$MAIN"|"$MAIN"/*) ;; *) continue ;; esac
+      p=${f#/proc/}; p=${p%/cwd}; [ "$p" = "$$" ] && continue
+      pp=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+      case "$(readlink "/proc/$pp/cwd" 2>/dev/null)" in "$MAIN"|"$MAIN"/*) continue ;; esac   # shown by its parent
+      echo "  $p $(ps -o etime=,args= -p "$p" | cut -c1-150)"
+    done
     ;;
   job)
     tree="$HOME/b70/trees/$arg"
@@ -122,6 +135,21 @@ case "$what" in
       "$tree"|"$tree"/*) stop_pids $(tree_pids "$job_pid") ;;
       *) echo "refused: process $job_pid is not working in branch '$arg'"; exit 2 ;;
     esac
+    ;;
+  main-job)
+    wd=$(readlink "/proc/$arg/cwd" 2>/dev/null || true)
+    case "$wd" in "$MAIN"|"$MAIN"/*) ;; *) echo "refused: process $arg is not working in the main tree"; exit 2 ;; esac
+    pids=$(tree_pids "$arg")
+    # A `docker run` in the tree: its container lives under dockerd, not under the job, and its main
+    # process (a shell) ignores the TERM docker run passes on - stop it by id, but only when it is
+    # the one main-tree container (otherwise name the candidates and leave them).
+    drun=0; for p in $pids; do case "$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)" in "docker run "*) drun=1 ;; esac; done
+    c=""; [ "$drun" = 1 ] && c=$(docker ps -q --filter "volume=$MAIN")
+    stop_pids $pids
+    if [ -n "$c" ]; then
+      if [ "$(printf '%s\n' $c | wc -l)" = 1 ]; then echo "stopping its oracle container $c"; docker stop "$c" >/dev/null
+      else echo "several main-tree containers ($c): not stopped, check with docker ps"; fi
+    fi
     ;;
   tree)
     tree="$HOME/b70/trees/$arg"

@@ -40,6 +40,10 @@ inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, un
          s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "") +
          (rows ? "_B" + s_(rows) : "") + (parallel_exp ? "_Ep" : "");
 }
+// The context projection at prefill width (df_proj_wide.cl; runtime::dflash::DFlashDrafter::project_wide).
+inline std::string proj_wide_variant(const Shape& s = kQwen38) {
+  return "df_proj_wide_H" + s_(s.H) + "_KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring);
+}
 // N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");

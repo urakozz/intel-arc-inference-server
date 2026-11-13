@@ -48,7 +48,7 @@
 // The EAGER attention (B70_KOLIBRI_ATTN=eager; flash is Kolibri's default) is DIAGNOSTIC under the judge, as K2's
 // (operator ruling 2026-10-29: eager prints, never binds) - the verdicts printed, the test does not fail on them.
 //
-// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [copy | peer] [prefill | prefill:<chunk>] [--judge=<dir>]
+// argv: <checkpoint> <oracle dir> [int8] [pp2 | pp2:<split>] [prefill | prefill:<chunk>] [--judge=<dir>]
 //       [--tap-at=layer | attn] [--tap-dump=<dir>]
 // (debug: --tap-at=attn taps the residual after each layer's attention half instead of its output - the tap gate then
 // compares other points than the golden's resid.L{l} and is not meaningful; --tap-dump writes every tapped row)
@@ -180,10 +180,8 @@ int main(int argc, char** argv) {
     } else if (a.rfind("pp2:", 0) == 0) {
       o.devices = 2;
       o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10));
-    } else if (a == "copy" || a == "peer") {
-      o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "kolibri_golden_test: unknown flag %s (int8, pp2[:split], copy, peer, prefill[:chunk])\n",
+      std::fprintf(stderr, "kolibri_golden_test: unknown flag %s (int8, pp2[:split], prefill[:chunk])\n",
                    a.c_str());
       return 2;
     }
@@ -220,8 +218,7 @@ int main(int argc, char** argv) {
               "launches a token, near-tie tolerance %.1e, the prompt by %s\n", snap.c_str(), d.layers,
               model::kol_attn_form_name(d.attn),
               o.int8_head ? "int8" : "bf16", runtime::kolibri::kol_attn_name(eng.attention()), eng.devices(),
-              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
-                                    runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
               eng.launches(), double(tie_tol()), prefill ? "KolibriEngine::prefill" : "decode replays");
 
   bool gate_ok = true;

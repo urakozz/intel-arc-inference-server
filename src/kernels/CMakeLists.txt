@@ -485,6 +485,7 @@ endif()
 #   df_topk.cl    the 16 best head logits per draft row, two stages; the full head masks ids >= 248077, a draft
 #                 vocabulary's (COMPACT) maps its indices through the id table
 #   df_select.cl  DFlash 2's candidate-selector walk (V2), or v1's per-row pick
+#   df_proj_wide.cl  the projection at prefill width: df_w_slab_i8 / df_w_slab_bf16, df_w_norm, df_w_ctx_store
 # and the reused GEMVs: the drafter's linears at M = 8 (B70_VERIFY_M8's drafter shapes - built there - plus the
 # context k||v at N 2048), the target's head at M = 7 rows (int8 from B70_VERIFY_M8; the bf16 head and the compact
 # heads at 64k / 128k / bf16 added here). The block reads the ring (the projection's bf16 rows) and its own fp32 K / V.
@@ -498,6 +499,10 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_ocloc_kernel(df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8 SOURCE ${DF_DIR}/df_prep_split.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 H=5120 WG=256 EPS=1e-06f VOCAB=248320 GROUP=16 CTAPS=2
                            INTER=17408 NH=32 NKV=8 HD=128 RING=2048)
+  # The prompt's staged rows projected at prefill width (DFlashDrafter::project_wide): slabs for pf_gemm, the norm
+  # and the ring store at any row count.
+  add_ocloc_kernel(df_proj_wide_H5120_KV8_D128_R2048 SOURCE ${DF_DIR}/df_proj_wide.cl
+                   DEFINES H=5120 WG=256 EPS=1e-06f NKV=8 HD=128 RING=2048)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128 SOURCE ${DF_DIR}/df_attn.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0)
@@ -2037,11 +2042,6 @@ if(B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   endforeach()
 endif()
 # ==== Spec 13a / 13c ==== (end) ====
-
-# Spec 16b (pipeline parallel, `--pipeline-handoff peer`): the peer-write hand-off between
-# the two stages' decode lists - pp_send (device 0's last launch) and pp_recv (device 1's
-# first). No defines: the word counts are kernel arguments, so one binary serves every model.
-add_ocloc_kernel(pp_handoff SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pp_handoff.cl)
 
 # ==== Spec 28b: the small-M GEMM (gemm_sm.cl) ==== (begin) ====
 # Plan: docs/superpowers/plans/2026-10-27-spec28b-small-m-build.md. Additive only: no existing variant's name or

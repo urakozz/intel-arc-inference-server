@@ -29,9 +29,9 @@
 // norm + nb_router; `route` binds nb_moe_up ..._R for nb_route + nb_moe_up; `conv` binds nb_ssm ..._C for nb_conv + nb_ssm.
 // Each arm is the same arithmetic in another launch: bitwise the as-built list (bolt_decode_test --fuse).
 // **Two cards** (`link` non-null; spec 16b's cut, spec 25 §4.1): device 0's list ends after block s-1 and hands off h[cur]
-// AND block s-1's pending slices (always: no block folds its own) by `copy` (device-to-device copies into the landing
-// buffer and a barrier signalling the cross-device event) or `peer` (pp_send). Device 1's list starts with the wait (copy)
-// or pp_recv (peer) into its own h0 and slices, then block s, whose norm folds them. The compute launches of the two lists
+// AND block s-1's pending slices (always: no block folds its own) by device-to-device copies into the landing buffer and
+// a barrier signalling the cross-device event. Device 1's list starts with the wait and the copies into its own h0 and
+// slices, then block s, whose norm folds them. The compute launches of the two lists
 // add up to the one-card count (runtime::bolt::device_launches, asserted per device).
 // tap (debug): block l's output -> tap row l. prof (--profile): launch i signals prof->events[i] (runtime/capture.h).
 namespace runtime::bolt {
@@ -52,7 +52,7 @@ CapturedStep build(l0::Context& ctx, const loader::BoltDevicePart& part, const m
 //   advances the last device's Control::pos / cur_token[0], which BoltEngine::verify puts back (the host commits);
 //   with a drafter (`taps`), after the fold that produces block l's output (l in tap_layers) every row's residual is copied
 //   into taps [row][tap][hidden] - device 0's three sites write device 1's buffer, in its list BEFORE the hand-off's
-//   barrier signals (19d: the copy hand-off only; peer is refused by name);
+//   barrier signals (19d);
 //   two cards: the hand-off moves M rows of h and of the cut's pending slices through `link` (the verify link: a landing
 //   sized for kVerifyRows).
 // The launch count is runtime::bolt::verify_device_launches' (asserted).

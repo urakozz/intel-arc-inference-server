@@ -1698,12 +1698,12 @@ class DriverTest(unittest.TestCase):
                                  "r27.prefix_kv8", "r27.cli_mtp", "r27.serve", "r27.golden",
                                  "r27.ornith", "r27.s3", "r27.p3"])
         self.assertIn("--re '^(pp_serve_plan_test|pp_serve_test|pipeline_args_test|pipeline_plan_test)$'", out)
-        self.assertIn("--re '^cli_reject_serve_pp_(value|split_alone|handoff_value)$'", out)
+        self.assertIn("--re '^cli_reject_serve_pp_(value|split_alone|handoff_removed)$'", out)
         self.assertRegex(out, r"env ZE_AFFINITY_MASK=0,1 B70_TRACE_DIR=\S+ ctest")
         self.assertIn("ZE_AFFINITY_MASK=0,1 B70_SERVE_ARGS='--parallel pp --spec mtp --spec-max 3' timeout 3600 build/tests/golden_server_test", out)
         self.assertRegex(out, r"ZE_AFFINITY_MASK=0,1 PORT=\d+ SEEDED=1 tools/box_validate/serve_probe\.sh \S+ --parallel pp --spec auto --prefix-split-last")
         self.assertIn("MAX_LEN=262144 N_TARGET=250000 DECODE_ARGS='--parallel pp' tools/probe/passkey.sh l0-int8", out)
-        self.assertIn("--spec auto --parallel pp --pipeline-handoff peer", out)
+        self.assertIn("--spec auto --parallel pp > ", out)
         out = self.run_driver("--dry-run", "--only", "r27", "--with", "r27.p3_mtp,r27.benchy").stdout
         order = re.findall(r"^--- (\S+)", out, re.M)
         self.assertEqual(order[-2:], ["r27.p3_mtp", "r27.benchy"])

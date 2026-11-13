@@ -119,13 +119,11 @@ inline size_t tap_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.layers) 
 inline size_t injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kM * kListRow * 4; }
 
 // The hand-off (spec 16b's buffers through the descriptor-free layout): the MATERIALISED 4-stream H crosses -
-// 10240 bf16, 20 KB, as vLLM's PP carries it - and no norm sums (pp_landing_layout's second region empty; the
-// stamp word still follows it, the flag its own page).
+// 10240 bf16, 20 KB, as vLLM's PP carries it - and no norm sums (pp_landing_layout's second region empty).
 PpLandingLayout landing_layout(const model::Qwen4ExpDesc& d);
 size_t link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 
-// The decode list's launches on one device (the hand-off's copies and barriers excluded; peer's pp_send /
-// pp_recv included), and their sum:
+// The decode list's launches on one device (the hand-off's copies and barriers excluded), and their sum:
 //   device 0     embed_gather
 //   a GDN layer  15: combine_norm, hc down, up_mix, qkv||z GEMV, a||b, gdn_step, prep_gated_head _SIG, out_proj
 //                GEMV, combine_norm, hc down, up_mix, router GEMV, q4_route, q4_moe_gate_up, q4_moe_down
@@ -136,13 +134,11 @@ size_t link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 //                is device 1's first layer: the landed H is already materialised)
 //   last device  the final mixer's combine_norm, its down GEMV, up_mix, lm_head, argmax x 2
 // 779 at 48 layers on one card (1 + 36 x 15 + 12 x 19 + 4 + 6), 767 under eager; two cards +1 (device 0 ends with
-// combine_norm _Y_NN: the materialised H crosses; device 1 starts at its first layer's norm-only _X), peer +2
-// (pp_send, pp_recv). `injected` (spec 21 F3's run with the reference's selections fed in): every QSA layer
+// combine_norm _Y_NN: the materialised H crosses; device 1 starts at its first layer's norm-only _X). `injected` (spec 21 F3's run with the reference's selections fed in): every QSA layer
 // without q4_qsa_score / _select, 2 fewer.
 size_t device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, Q4Attn a,
-                       PpHandoff h, bool injected = false);
-size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, PpHandoff h,
                        bool injected = false);
+size_t decode_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, Q4Attn a, bool injected = false);
 
 // --- spec 21d: the prefill chunk ------------------------------------------------------------------------------
 // One chunk of at most kPfC positions (= kernels::qwen4exp::kPfC, checked in qwen4exp_prefill.cc): every allocation
@@ -236,7 +232,7 @@ inline size_t pf_diag_at(uint32_t qsa_index) { return size_t(qsa_index) * kPfC *
 // The injected selection on prefill (spec 21 F3's debug input): host USM [qsa layers][kPfC][kListRow] u32 per device,
 // filled by the caller's injector before each chunk (Qwen4ExpEngine::set_prefill_injector).
 inline size_t pf_injected_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.qsa_before(d.layers)) * kPfC * kListRow * 4; }
-// The two-card prefill hand-off: a second runtime::PipelineLink in `copy` mode over spec 16b's layout at chunk size -
+// The two-card prefill hand-off: a second runtime::PipelineLink over spec 16b's layout at chunk size -
 // kPfC rows of the materialised H (42 MB) and no norm sums.
 PpLandingLayout pf_landing_layout(const model::Qwen4ExpDesc& d);
 size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
@@ -328,8 +324,8 @@ size_t link_bytes_rows(const model::Qwen4ExpDesc& d, uint32_t dev, uint32_t rows
 //     fc_hidden as bf16 slabs + pf_gemm (3 slabs each), q4_mtp_fuse, the attn side's gated residual (4), the k||v slab
 //     of q||gate||k||v (one slab + pf_gemm), the indexer (2), pf_attn_prep_q16, q4_qsa_prep _PF, q4_qsa_ring: 1 + 25
 size_t verify_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t dev, uint32_t M,
-                              Q4Attn a, PpHandoff h);
-size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a, PpHandoff h);
+                              Q4Attn a);
+size_t verify_launches(const model::Qwen4ExpDesc& d, const model::Q4Placement& p, uint32_t M, Q4Attn a);
 size_t draft_launches(Q4Attn a, bool select);
 inline uint32_t mtp_prefill_rows(uint32_t pos, uint32_t C) { return pos == 0 ? C - 1 : C; }
 size_t mtp_prefill_launches(uint32_t pos, uint32_t C);

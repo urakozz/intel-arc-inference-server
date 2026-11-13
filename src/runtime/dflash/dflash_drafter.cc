@@ -102,4 +102,9 @@ l0::CmdList& DFlashDrafter::projection(uint32_t pos, uint32_t n) {
   return project_.list;
 }
 
+bool DFlashDrafter::project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const void* taps,
+                                 uint32_t pos, uint32_t n) {
+  return dflash::project_wide(cx, kc, s, w_, b_, taps, pos, n);
+}
+
 }  // namespace runtime::dflash

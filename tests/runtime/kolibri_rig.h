@@ -22,7 +22,6 @@ struct Options {
   bool int8_head = false;
   uint32_t devices = 1;
   uint32_t split = 0;   // 0 with two devices: runtime::kolibri::pp_split at max_len
-  runtime::PpHandoff handoff = runtime::kDefaultPpHandoff;
   uint32_t layers = 0;  // development mode
   bool debug_tap = false;
   runtime::kolibri::TapAt tap_at = runtime::kolibri::TapAt::LayerOut;   // the debug tap's point
@@ -60,12 +59,11 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   const model::Kolibri1Desc d = loader::kolibri1_checkpoint_desc(snap, o.layers);
   model::KolPlacement p = model::KolPlacement::one(d);
   if (o.devices == 2)
-    p = model::KolPlacement::two(d, o.split ? o.split : runtime::kolibri::pp_split(d, o.max_len, o.int8_head, o.handoff).split);
+    p = model::KolPlacement::two(d, o.split ? o.split : runtime::kolibri::pp_split(d, o.max_len, o.int8_head).split);
   loader::KolLoadedModel m = loader::load_kolibri1(r.ctx, snap, o.max_len, p,
                                                    o.int8_head ? loader::LmHeadForm::Int8 : loader::LmHeadForm::Checkpoint,
                                                    o.layers);
   runtime::PipelineOptions po;
-  po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
   po.prefill_timeout_ms = o.prefill_timeout_ms;
   r.eng = std::make_unique<runtime::kolibri::KolibriEngine>(

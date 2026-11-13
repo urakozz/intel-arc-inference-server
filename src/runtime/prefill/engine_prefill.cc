@@ -130,6 +130,10 @@ void Engine::prepare_prefill() {
 }
 
 void Engine::drafter_project_staged(uint32_t pos, uint32_t n) {
+  if (drafter_->project_wide(pfx_->cx, pfx_->kc, *pf_, df_pf_taps_->ptr(), pos, n)) {
+    pfx_->cx.wait();   // the ring's rows have landed: a block hook's snapshot, the next draft
+    return;
+  }
   const size_t row = drafter_->tap_layers().size() * size_t(model_.desc->hidden) * 2;
   for (uint32_t r = 0; r < n; r += 8) {
     const uint32_t g = std::min<uint32_t>(8, n - r);

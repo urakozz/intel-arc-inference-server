@@ -16,7 +16,6 @@
 #include "runtime/pipeline_plan.h"
 
 namespace {
-using runtime::PpHandoff;
 using runtime::kolibri::KolAttn;
 template <class F>
 bool throws(F f) {
@@ -36,14 +35,11 @@ int main() {
 
   // --- launches: 15 / 17 a layer, + embed + fold, + 4 at the head; the cut adds nothing ----------------
   for (const model::KolPlacement* p : {&one, &two}) {
-    CHECK_EQ(rk::decode_launches(d, *p, KolAttn::Flash, PpHandoff::Copy), size_t(756));
-    CHECK_EQ(rk::decode_launches(d, *p, KolAttn::Eager, PpHandoff::Copy), size_t(856));
+    CHECK_EQ(rk::decode_launches(d, *p, KolAttn::Flash), size_t(756));
+    CHECK_EQ(rk::decode_launches(d, *p, KolAttn::Eager), size_t(856));
   }
-  CHECK_EQ(rk::decode_launches(d, two, KolAttn::Flash, PpHandoff::Peer), size_t(758));
-  CHECK_EQ(rk::decode_launches(d, two, KolAttn::Eager, PpHandoff::Peer), size_t(858));
-  CHECK_EQ(rk::decode_launches(d, one, KolAttn::Flash, PpHandoff::Peer), size_t(756));   // no hand-off on one card
-  CHECK_EQ(rk::device_launches(d, two, 0, KolAttn::Flash, PpHandoff::Copy), size_t(2 + 25 * 15));
-  CHECK_EQ(rk::device_launches(d, two, 1, KolAttn::Flash, PpHandoff::Copy), size_t(25 * 15 + 4));
+  CHECK_EQ(rk::device_launches(d, two, 0, KolAttn::Flash), size_t(2 + 25 * 15));
+  CHECK_EQ(rk::device_launches(d, two, 1, KolAttn::Flash), size_t(25 * 15 + 4));
 
   // --- the per-device plan at 262144, int4 attention, int8 head, split 25 ------------------------------
   const uint32_t L = 262144;
@@ -64,7 +60,7 @@ int main() {
 
   // --- the split: runtime::pp_balance over pp_layer_bytes, 16b's rule and no second one ----------------
   {
-    const runtime::PpBalance b = rk::pp_split(d, L, true, PpHandoff::Copy, KolAttn::Flash);
+    const runtime::PpBalance b = rk::pp_split(d, L, true, KolAttn::Flash);
     CHECK_EQ(b.split, 25u);
     const std::vector<size_t> lb = rk::pp_layer_bytes(d, L);
     CHECK_EQ(lb.size(), size_t(50));
@@ -174,7 +170,7 @@ int main() {
     const runtime::PpLandingLayout ll = rk::pf_landing_layout(d);
     CHECK_EQ(ll.resid_bytes, C * 2560 * 2);
     CHECK_EQ(ll.sumsq_bytes, size_t(20) * C * 4);
-    CHECK(rk::pf_link_bytes(d, 1) > ll.resid_bytes + ll.sumsq_bytes && rk::pf_link_bytes(d, 0) < 4096);
+    CHECK(rk::pf_link_bytes(d, 1) >= ll.resid_bytes + ll.sumsq_bytes && rk::pf_link_bytes(d, 0) == 0);
     // planned only when a run prefills, on both devices
     const std::vector<rk::DevicePlan> pp = rk::plan(d, two, L, true, false, KolAttn::Flash, true);
     CHECK_EQ(pp[0].prefill_scratch, ps.total() + rk::pf_link_bytes(d, 0));
@@ -188,7 +184,7 @@ int main() {
   {
     const runtime::PpChoice c = rk::pp_split_and_len(d, true, cards, reserve, 0, true);
     CHECK(c.max_len == 262144u && c.split == 25u);
-    const runtime::PpBalance b = rk::pp_split(d, L, true, PpHandoff::Copy, KolAttn::Flash, true);
+    const runtime::PpBalance b = rk::pp_split(d, L, true, KolAttn::Flash, true);
     CHECK_EQ(b.split, 25u);
     std::printf("with prefill planned: max_len 262144 on two cards, split 25 (device 0 %.3f GB, device 1 %.3f GB)\n",
                 b.dev0 / 1e9, b.dev1 / 1e9);

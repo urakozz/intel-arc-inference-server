@@ -29,8 +29,8 @@
 // **Two cards** (spec 16 §8's rules, PipelineEngine's, here for a model PipelineEngine cannot run):
 // layers [0, s) on device 0 with the embedding, [s, L) plus the head on device 1 (KolPlacement). The
 // host submits list 0 then list 1 and waits on device 1's fence (bounded: PipelineOptions::timeout_ms);
-// the lists order themselves through the hand-off (`copy`: a device-to-device copy and a cross-device
-// event; `peer`: pp_send / pp_recv). **The token's way back:** argmax on device 1 writes the id and
+// the lists order themselves through the hand-off (a device-to-device copy and a cross-device event).
+// **The token's way back:** argmax on device 1 writes the id and
 // advances pos in device 1's Control; after the fence the host copies device 1's Control block into
 // device 0's. set_token writes both. **Bounded:** a lost hand-off host-signals the event (so the queue
 // drains), throws naming it, and marks the engine until reset().
@@ -48,7 +48,7 @@ class KolibriEngine {
   // `devices[i]` is the context of placement device i (device 1 a view of device 0's context,
   // l0::Context(const Context&, 1)); `model` was loaded onto them at `max_len`. debug_tap: the
   // per-layer resid copy the partial-forward gate reads (off for speed). Two devices: throws when
-  // device 0 cannot access device 1's memory (zeDeviceCanAccessPeer) - both hand-offs write it.
+  // device 0 cannot access device 1's memory (zeDeviceCanAccessPeer) - the hand-off writes it.
   KolibriEngine(std::vector<l0::Context*> devices, loader::KolLoadedModel model, uint32_t max_len,
                 bool debug_tap = false, const PipelineOptions& opt = {});
   // The debug tap's full form (a test's: on, and its point - kolibri_sizes.h DebugTap).
@@ -119,7 +119,6 @@ class KolibriEngine {
   size_t launches() const;           // every device's list
   size_t launches(uint32_t dev) const;
   uint32_t split() const { return model_.placement.split; }
-  PpHandoff handoff() const { return opt_.handoff; }
   KolAttn attention() const { return attn_; }
   const loader::KolLoadedModel& model() const { return model_; }
   const CapturedStep& step(uint32_t dev) const;
@@ -134,9 +133,8 @@ class KolibriEngine {
   // every device and the first generated id pending in cur_token (Engine::prefill's contract). The KV and
   // ring rows it writes are decode's to a cosine bar (the GEMMs' sum order), not bitwise (plan 20d Review
   // Focus 4). A prompt may be continued by another prefill. Two devices: each chunk runs layers [0, s) on
-  // device 0, crosses by spec 16b's `copy` hand-off at chunk size (a second PipelineLink; the chunk always
-  // crosses by copy, whatever --pipeline-handoff says for decode: pp_handoff.cl's peer kernels are one
-  // 256-lane work-group sized for a 5 KB row, not 10.5 MB), then layers [s, L) on device 1 - sequentially
+  // device 0, crosses by spec 16b's hand-off at chunk size (a second PipelineLink), then layers [s, L) on
+  // device 1 - sequentially
   // (spec 16c's overlapped chunk pipeline is a later lever). A lost hand-off host-signals the event, throws
   // naming it and marks the engine until reset(). B70_KOLIBRI_ATTN=eager runs the eager prefill attention
   // too (the engine's attention(), read once at construction).

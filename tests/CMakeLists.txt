@@ -2602,18 +2602,13 @@ endif()
 # `pp` labels the device ones: `ctest -L pp`.
 #
 # Host, no device: the planner (stages, weights by device, the per-device plan, auto split
-# and auto length for Qwen3.8 / Ornith, K2-Horizon's bytes per card), the peer
-# hand-off's protocol on two threads (runtime/pipeline_protocol.h, pp_handoff.cl's mirror),
-# and b70-decode's --parallel flag.
+# and auto length for Qwen3.8 / Ornith, K2-Horizon's bytes per card), and b70-decode's
+# --parallel flag.
 add_executable(pipeline_plan_test runtime/pipeline_plan_test.cc)
 target_include_directories(pipeline_plan_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 target_link_libraries(pipeline_plan_test PRIVATE b70_plan b70_k2_plan)
 add_test(NAME pipeline_plan_test COMMAND pipeline_plan_test)
-add_executable(pp_protocol_test runtime/pp_protocol_test.cc)
-target_include_directories(pp_protocol_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
 find_package(Threads REQUIRED)
-target_link_libraries(pp_protocol_test PRIVATE Threads::Threads)
-add_test(NAME pp_protocol_test COMMAND pp_protocol_test)
 # Spec 17a (plan 17a Task 1): the TP all-reduce's crossing protocol (tools/probe/tp_protocol.h, the host mirror of
 # probe_tp.cl's tp_send / tp_wait and probe_tp's CPU-sum thread) on host threads - every route, stamps, the two-slot
 # landing, the fixed-order sum bitwise on both "cards", a skipped data write caught, a dropped write timed out.
@@ -2628,22 +2623,22 @@ add_test(NAME pipeline_args_test COMMAND pipeline_args_test)
 
 # On the box, both cards and the checkpoint; SKIP (77) with fewer than two GPUs or without
 # peer access. P1 (pp_decode_test): ingest + 64 greedy ids and a spec 7 restore at 4395,
-# --parallel pp with copy and peer, the auto split and the cuts at 5 and 62 - ids, logits,
+# --parallel pp, the auto split and the cuts at 5 and 62 - ids, logits,
 # every layer's GDN state / conv ring / KV and both Control blocks BITWISE the single card on
-# device 0; a reset and the whole run again, bitwise. P4 (pp_fail_test): a lost hand-off under
-# copy and under peer throws within its bound, never hangs, and reset() recovers.
+# device 0; a reset and the whole run again, bitwise. P4 (pp_fail_test): a lost hand-off
+# throws within its bound, never hangs, and reset() recovers.
 add_executable(pp_decode_test runtime/pp_decode_test.cc)
 target_include_directories(pp_decode_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_decode_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-add_dependencies(pp_decode_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_dependencies(pp_decode_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 add_test(NAME pp_decode_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT})
 add_test(NAME pp_decode_i8head_test COMMAND pp_decode_test ${B70_TEST_SNAPSHOT} int8)
 add_executable(pp_fail_test runtime/pp_fail_test.cc)
 target_include_directories(pp_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_fail_test PRIVATE b70_runtime b70_loader b70_l0 b70_model)
-add_dependencies(pp_fail_test ${B70_DECODE_LIST_KERNELS} kernel_pp_handoff)
+add_dependencies(pp_fail_test ${B70_DECODE_LIST_KERNELS})
 add_test(NAME pp_fail_test COMMAND pp_fail_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(pp_decode_test pp_decode_i8head_test pp_fail_test PROPERTIES
   LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -2665,8 +2660,9 @@ b70_cli_reject(cli_reject_pipeline_replica_decode ${B70_NO_MODEL} --ids ${B70_OK
   EXPECT "--parallel replica is b70-serve's")
 b70_cli_reject(cli_reject_pipeline_split_alone ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel 1
   --pipeline-split 32 EXPECT "--pipeline-split belongs to --parallel pp")
-b70_cli_reject(cli_reject_pipeline_handoff_value ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel pp
-  --pipeline-handoff p2p EXPECT "--pipeline-handoff expects copy or peer")
+# --pipeline-handoff went 2026-11-13 (the peer hand-off measured no gain): an unknown option now.
+b70_cli_reject(cli_reject_pipeline_handoff_removed ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --parallel pp
+  --pipeline-handoff copy EXPECT "unknown option '--pipeline-handoff'")
 b70_cli_reject(cli_reject_pipeline_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --ids ${B70_OK_IDS} --n 4 --parallel pp
   EXPECT "K2 across two cards is future work")
 add_test(NAME cli_reject_pipeline_one_gpu COMMAND sh -c [==[
@@ -2813,7 +2809,7 @@ set_tests_properties(cli_reject_tp_one_gpu PROPERTIES LABELS tp TIMEOUT 60)
 # Host, no device: the chunks (Engine::prefill's, exactly), the host's order and its rules
 # (every mutation that drops one caught), the landing slots and the per-device plan with a
 # prefill path (runtime/pipeline_prefill_plan.h); and that order run by its one executor over
-# two host threads standing in for the devices - copy and peer, a slowed device 1
+# two host threads standing in for the devices - a slowed device 1
 # (back-pressure), spec 7's hooks from the shadows, a throwing hook, a lost hand-off. Clean
 # under ThreadSanitizer (measured on the retired Mac tooling, 2026-10).
 add_executable(pipeline_prefill_plan_test runtime/pipeline_prefill_plan_test.cc)
@@ -2831,7 +2827,7 @@ set_tests_properties(pp_prefill_protocol_test PROPERTIES TIMEOUT 120)
 # continuation at 2500 with chunk 1000, spec 7's hooks at 2048 / 4096 (from the shadows) and
 # 5000, a hook that throws, a one-card snapshot continued on two cards - logits, every layer's
 # GDN state / conv ring / KV, the Control blocks and 16 decoded ids BITWISE one card on device
-# 0, under copy and peer at the auto split and the cuts at 5 and 62; l0-int8 (default), l0, the
+# 0, at the auto split and the cuts at 5 and 62; l0-int8 (default), l0, the
 # int8 head, the int8 KV cache. Back-pressure and P4 (pp_prefill_fail_test): device 1 held back
 # artificially - bitwise the clean run; a lost hand-off throws within its bound and reset()
 # recovers.
@@ -2839,7 +2835,7 @@ add_executable(pp_prefill_test runtime/pp_prefill_test.cc)
 target_include_directories(pp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_prefill_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-add_dependencies(pp_prefill_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_dependencies(pp_prefill_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 add_test(NAME pp_prefill_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8)
 add_test(NAME pp_prefill_l0_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0)
 add_test(NAME pp_prefill_i8head_test COMMAND pp_prefill_test ${B70_TEST_SNAPSHOT} l0-int8 int8)
@@ -2848,7 +2844,7 @@ add_executable(pp_prefill_fail_test runtime/pp_prefill_fail_test.cc)
 target_include_directories(pp_prefill_fail_test PRIVATE ${CMAKE_SOURCE_DIR}/src
   ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
 target_link_libraries(pp_prefill_fail_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-add_dependencies(pp_prefill_fail_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+add_dependencies(pp_prefill_fail_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
 add_test(NAME pp_prefill_fail_test COMMAND pp_prefill_fail_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(pp_prefill_test pp_prefill_l0_test pp_prefill_i8head_test pp_prefill_cap4096_test pp_prefill_fail_test
   PROPERTIES LABELS "checkpoint;pp" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" SKIP_RETURN_CODE 77
@@ -2888,14 +2884,14 @@ set_tests_properties(pp_serve_test PROPERTIES TIMEOUT 300)
 # 1, 2, 0: every draft and verify logits row, the ids, the session with the live verify slot,
 # the head's hidden row and KV layer), M2 on both engines (4 plain rows == one M = 4 verify),
 # a 4103-id hooked prefill (spec 7 at 2048 / 4096 from the shadows, with the head's row), a
-# one-card snapshot continued on two cards; copy and peer at the auto split, the cuts at 5 and
+# one-card snapshot continued on two cards; the auto split, the cuts at 5 and
 # 62; both Control blocks equal after every call. The int8 head and the int8 KV twins.
 if(B70_MTP)
   add_executable(pp_mtp_test runtime/pp_mtp_test.cc)
   target_include_directories(pp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_mtp_test PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
-  add_dependencies(pp_mtp_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels} kernel_pp_handoff)
+  add_dependencies(pp_mtp_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
   add_test(NAME pp_mtp_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT})
   add_test(NAME pp_mtp_i8head_test COMMAND pp_mtp_test ${B70_TEST_SNAPSHOT} int8)
   set_tests_properties(pp_mtp_test pp_mtp_i8head_test PROPERTIES
@@ -2907,7 +2903,7 @@ if(B70_MTP)
 endif()
 # Review Focus 2 / 5 and spec 16 P2 (spec 7's C2 with --parallel pp): the prefix cache's request path
 # through b70-serve's adapters, two cards BITWISE one card - the plans, the final turn's ids and
-# rows, the session - on sequences a-f; copy, peer, the split_last path, MTP (K 3, step_many),
+# rows, the session - on sequences a-f; the split_last path, MTP (K 3, step_many),
 # the int8 head; the int8 KV twin.
 if(B70_TOKENIZER_ENABLED)
   add_executable(pp_prefix_gpu_test server/pp_prefix_gpu_test.cc)
@@ -2915,15 +2911,14 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_prefix_gpu_test PRIVATE b70_server b70_tokenizer b70_runtime b70_loader
     b70_model b70_l0 b70_prefill_host)
-  add_dependencies(pp_prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS} kernel_pp_handoff)
+  add_dependencies(pp_prefix_gpu_test ${B70_DECODE_LIST_KERNELS} ${B70_PREFILL_KERNELS})
   set(_pp_prompts ${CMAKE_SOURCE_DIR}/tests/golden/prompts)
-  add_test(NAME pp_prefix_gpu_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 0)
-  add_test(NAME pp_prefix_gpu_peer_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 peer 0)
-  add_test(NAME pp_prefix_gpu_split_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 copy 1 int8)
-  set(_pp_prefix pp_prefix_gpu_test pp_prefix_gpu_peer_test pp_prefix_gpu_split_test)
+  add_test(NAME pp_prefix_gpu_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 0)
+  add_test(NAME pp_prefix_gpu_split_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 0 1 int8)
+  set(_pp_prefix pp_prefix_gpu_test pp_prefix_gpu_split_test)
   if(B70_MTP)
     add_dependencies(pp_prefix_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
-    add_test(NAME pp_prefix_gpu_mtp_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 3 copy 1 int8)
+    add_test(NAME pp_prefix_gpu_mtp_test COMMAND pp_prefix_gpu_test ${B70_TEST_SNAPSHOT} ${_pp_prompts} 3 1 int8)
     list(APPEND _pp_prefix pp_prefix_gpu_mtp_test)
   endif()
   set_tests_properties(${_pp_prefix} PROPERTIES
@@ -2943,8 +2938,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--parallel expects auto, 1, pp, replica or tp")
   b70_serve_reject(cli_reject_serve_pp_split_alone ${B70_NO_MODEL} --parallel 1 --pipeline-split 20
     EXPECT "--pipeline-split belongs to --parallel pp")
-  b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p
-    EXPECT "--pipeline-handoff expects copy or peer")
+  b70_serve_reject(cli_reject_serve_pp_handoff_removed ${B70_NO_MODEL} --parallel pp --pipeline-handoff copy
+    EXPECT "unknown option '--pipeline-handoff'")
   # Plan 13b: --parallel replica is Qwen3.8's and Ornith's - other models by name (their config.json), an unreadable
   # checkpoint, the pp override flags, more than one Ornith request a card (tests/model/ornith: config.json only); all
   # before the device.
@@ -2963,7 +2958,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_replica_split ${B70_NO_MODEL} --parallel replica --pipeline-split 20
     EXPECT "--pipeline-split belongs to --parallel pp")
   set_tests_properties(cli_reject_serve_pp_value
-    cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
+    cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_removed
     cli_reject_serve_replica_k2 cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
     cli_reject_serve_replica_split cli_reject_serve_replica_ornith_slots cli_reject_serve_replica_ornith_auto
     cli_reject_serve_replica_ornith_one
@@ -3071,7 +3066,7 @@ if(B70_KOLIBRI)
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(${t} PRIVATE b70_kolibri_runtime b70_l0)
     b70_target_kernel_dir(${t})
-    add_dependencies(${t} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+    add_dependencies(${t} ${B70_KOLIBRI_DECODE_KERNELS})
   endforeach()
   set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
   add_test(NAME kolibri_decode_synth_test COMMAND kolibri_decode_test ${_kol_synth}/int4attn/ckpt
@@ -3100,14 +3095,14 @@ if(B70_KOLIBRI)
     PROPERTIES LABELS "checkpoint;golden;kolibri" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # Task 6: two cards on spec 16b's pieces - --parallel 1 against --parallel pp bitwise on the synthetic checkpoint
-# under both hand-offs, the real one across splits 25 / 20, P4's lost hand-off, replay (kolibri_pp_test);
+# (the synthetic), the real one across splits 25 / 20, P4's lost hand-off, replay (kolibri_pp_test);
 # KL2 and K3 on the real checkpoint across two cards (needs spec 20b). SKIP 77 with one GPU or no data.
 if(B70_KOLIBRI)
   add_executable(kolibri_pp_test runtime/kolibri_pp_test.cc)
   target_include_directories(kolibri_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(kolibri_pp_test PRIVATE b70_kolibri_runtime b70_l0)
-  add_dependencies(kolibri_pp_test ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(kolibri_pp_test ${B70_KOLIBRI_DECODE_KERNELS})
   add_test(NAME kolibri_pp_test COMMAND kolibri_pp_test ${B70_KOLIBRI_SYNTH_DIR}/int4attn/ckpt ${B70_KOLIBRI_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
   set_tests_properties(kolibri_pp_test PROPERTIES LABELS "checkpoint;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -3117,11 +3112,9 @@ if(B70_KOLIBRI)
   add_test(NAME kolibri_golden_eager_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR} pp2)
   set_tests_properties(kolibri_golden_eager_test PROPERTIES ENVIRONMENT "B70_KOLIBRI_ATTN=eager")
   set_property(TEST kolibri_golden_eager_test APPEND PROPERTY LABELS diagnostic)   # operator ruling 2026-10-29
-  add_test(NAME kolibri_golden_peer_test COMMAND kolibri_golden_test ${B70_KOLIBRI_SNAPSHOT} ${B70_KOLIBRI_ORACLE_DIR} --judge=${B70_KOLIBRI_F32_DIR}
-    pp2 peer)
   add_test(NAME kolibri_decode_test COMMAND kolibri_decode_test ${B70_KOLIBRI_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids pp2)
-  set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test kolibri_golden_peer_test
+  set_tests_properties(kolibri_golden_test kolibri_golden_i8head_test kolibri_golden_eager_test
     kolibri_decode_test PROPERTIES LABELS "checkpoint;golden;kolibri;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
 endif()
 # b70-decode's model_type dispatch and Kolibri's refusals, before the device: tests/model/kolibri1/ holds
@@ -3189,7 +3182,7 @@ if(B70_KOLIBRI)
   target_include_directories(kolibri_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(kolibri_prefill_test PRIVATE b70_kolibri_prefill b70_l0)
-  add_dependencies(kolibri_prefill_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(kolibri_prefill_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS})
   set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
   set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
   add_test(NAME kolibri_prefill_synth_int4attn_test COMMAND kolibri_prefill_test ${_kol_synth}/int4attn/ckpt ${_kol_ids} all)
@@ -3315,7 +3308,7 @@ if(B70_KOLIBRI)
   target_include_directories(kolibri_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(kolibri_snapshot_gpu_test PRIVATE b70_kolibri_prefill b70_l0)
-  add_dependencies(kolibri_snapshot_gpu_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(kolibri_snapshot_gpu_test ${B70_KOLIBRI_PREFILL_KERNELS} ${B70_KOLIBRI_DECODE_KERNELS})
   set(_kol_synth ${B70_KOLIBRI_SYNTH_DIR})
   set(_kol_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/kolibri_bench.ids)
   add_test(NAME kolibri_snapshot_gpu_synth_test COMMAND kolibri_snapshot_gpu_test ${_kol_synth}/int4attn/ckpt ${_kol_ids})
@@ -3467,7 +3460,7 @@ if(B70_Q4EXP)
       ${CMAKE_SOURCE_DIR}/tests/runtime)
     target_link_libraries(${t} PRIVATE b70_qwen4exp_runtime b70_l0)
     b70_target_kernel_dir(${t})
-    add_dependencies(${t} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+    add_dependencies(${t} ${B70_Q4EXP_DECODE_KERNELS})
   endforeach()
   set(_q4s ${B70_Q4EXP_SYNTH_DIR})
   set(_q4tests "")
@@ -3486,14 +3479,14 @@ if(B70_Q4EXP)
     ${B70_Q4EXP_ORACLE_DIR}-L18 18 int8)
   set_tests_properties(${_q4tests} qwen4exp_partial_test
     PROPERTIES LABELS "checkpoint;golden;qwen4exp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
-  # Task 4: two cards on spec 16b's pieces - --parallel 1 against --parallel pp (splits 2 and 1, copy and peer) bitwise on the
+  # Task 4: two cards on spec 16b's pieces - --parallel 1 against --parallel pp (splits 2 and 1) bitwise on the
   # ours synthetic, Intel's at the planner's N for two cards (layers_that_fit) split s against s + 1, P4's lost
   # hand-off, the landing layout. SKIP 77 with one GPU or no data.
   add_executable(qwen4exp_pp_test runtime/qwen4exp_pp_test.cc)
   target_include_directories(qwen4exp_pp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_pp_test PRIVATE b70_qwen4exp_runtime b70_l0)
-  add_dependencies(qwen4exp_pp_test ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(qwen4exp_pp_test ${B70_Q4EXP_DECODE_KERNELS})
   add_test(NAME qwen4exp_pp_test COMMAND qwen4exp_pp_test ${_q4s}/ours/ckpt ${B70_Q4EXP_INTEL_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_short.ids)
   set_tests_properties(qwen4exp_pp_test PROPERTIES LABELS "checkpoint;qwen4exp;pp" SKIP_RETURN_CODE 77 TIMEOUT 3600)
@@ -3568,12 +3561,12 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_prefill_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_prefill_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(qwen4exp_prefill_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
   add_executable(qwen4exp_route_capture ${CMAKE_SOURCE_DIR}/tools/probe/qwen4exp_route_capture.cc)
   b70_target_kernel_dir(qwen4exp_route_capture)
   target_include_directories(qwen4exp_route_capture PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(qwen4exp_route_capture PRIVATE b70_qwen4exp_prefill b70_l0)
-  add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(qwen4exp_route_capture ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
   set(_q4s ${B70_Q4EXP_SYNTH_DIR})
   set(_q4ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
   set(_q4pf "")
@@ -3691,7 +3684,7 @@ if(B70_Q4EXP)
   target_include_directories(qwen4exp_snapshot_gpu_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime)
   target_link_libraries(qwen4exp_snapshot_gpu_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS} kernel_pp_handoff)
+  add_dependencies(qwen4exp_snapshot_gpu_test ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
   set(_q4snap_ids ${CMAKE_SOURCE_DIR}/tests/golden/prompts/q4exp_4k.ids)
   add_test(NAME qwen4exp_snapshot_gpu_synth_test COMMAND qwen4exp_snapshot_gpu_test ${B70_Q4EXP_SYNTH_DIR}/ours/ckpt
     ${_q4snap_ids})
@@ -3767,8 +3760,7 @@ if(B70_Q4EXP AND B70_MTP)
   target_include_directories(qwen4exp_mtp_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
     ${CMAKE_SOURCE_DIR}/tests/runtime ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(qwen4exp_mtp_test PRIVATE b70_qwen4exp_prefill b70_l0)
-  add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS}
-    kernel_pp_handoff)
+  add_dependencies(qwen4exp_mtp_test ${B70_Q4EXP_MTP_KERNELS} ${B70_Q4EXP_PREFILL_KERNELS} ${B70_Q4EXP_DECODE_KERNELS})
   set(B70_Q4EXP_MTP_FIXTURE_DIR "${CMAKE_SOURCE_DIR}/oracle-out-q4exp-mtp" CACHE PATH
     "tools/oracle/qwen4exp_mtp_fixture.py's M1 data: <dir>/<ours|intel>/mtp_{single,per_stream}.safetensors (box: r34.fixture)")
   set(_q4m ${B70_Q4EXP_MTP_FIXTURE_DIR})
@@ -3882,6 +3874,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K64
        kernel_df_rerank_R7_K5120_U248077_C64_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_proj_wide_H5120_KV8_D128_R2048)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
   endforeach()
@@ -4063,16 +4056,13 @@ set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "needs --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
-  # spec 19d: --parallel pp serves the drafter on device 1, on the copy hand-off only
-  b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --parallel pp --pipeline-handoff peer
-    EXPECT "needs --pipeline-handoff copy")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
     EXPECT "no DFlash drafter exists for K2-Horizon")
   set_tests_properties(cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
-    cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
+    cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
-    --pipeline-handoff copy EXPECT "--spec dflash-lookup is built for one card")
+    EXPECT "--spec dflash-lookup is built for one card")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
     --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
@@ -4134,7 +4124,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
     ${CMAKE_SOURCE_DIR}/tests/golden)
   target_link_libraries(pp_dflash_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime b70_loader b70_l0
     b70_model)
-  add_dependencies(pp_dflash_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS} kernel_pp_handoff)
+  add_dependencies(pp_dflash_test ${B70_DFLASH_KERNELS} ${_v19b_reused} ${B70_DFLASH_VERIFY_KERNELS})
   add_test(NAME pp_dflash_test COMMAND pp_dflash_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(pp_dflash_test PROPERTIES LABELS "checkpoint;dflash;pp" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
@@ -4260,8 +4250,7 @@ set_tests_properties(bolt_ref_test PROPERTIES LABELS bolt TIMEOUT 600)
 if(B70_BOLT)
   # Task 3: every binary a Bolt decode list binds, any head / attention / card count / arm / state precision
   # (src/kernels/CMakeLists.txt's spec 25c block; the reused gemv / gemv_i8w / gemv_bf16 lines of the block are bound by
-  # name). After `--`: the binaries built outside the block that a list binds (mg_attn - Decision 15 - and
-  # spec 16b's pp_handoff).
+  # name). After `--`: the binaries built outside the block that a list binds (mg_attn - Decision 15).
   set(B70_BOLT_DECODE_KERNELS
     kernel_nb_embed_gather_M1_K4096_V131072 kernel_nb_argmax_stage1_M1_V131072 kernel_nb_argmax_stage2_V131072
     kernel_gemv_i8w_M1_K4096_N131072 kernel_gemv_bf16_M1_K4096_N131072
@@ -4277,7 +4266,7 @@ if(B70_BOLT)
     list(APPEND B70_BOLT_DECODE_KERNELS kernel_nb_moe_up_M1_I${I}_L1024_T9 kernel_nb_moe_up_M1_I${I}_L1024_T9_R
       kernel_nb_moe_down_M1_I${I}_L1024_T9)
   endforeach()
-  set(B70_BOLT_REUSED_KERNELS kernel_mg_attn_M1_T64_Q32KV2_F kernel_mg_attn_eager_M1_T64_Q32KV2_F kernel_pp_handoff)
+  set(B70_BOLT_REUSED_KERNELS kernel_mg_attn_M1_T64_Q32KV2_F kernel_mg_attn_eager_M1_T64_Q32KV2_F)
   add_executable(bolt_variant_names_test kernels/bolt_variant_names_test.cc)
   target_include_directories(bolt_variant_names_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(bolt_variant_names_test PRIVATE b70_bolt_model)
@@ -4341,7 +4330,7 @@ if(B70_BOLT)
   add_test(NAME bolt_golden_synth_short_eager_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
     bolt_short eager)
   add_test(NAME bolt_golden_synth_short_pp2_test COMMAND bolt_golden_test ${_bs} ${B70_BOLT_SYNTH_ORACLE}-n12-g128
-    bolt_short pp2:6 peer)
+    bolt_short pp2:6)
   list(APPEND _bolt_tests bolt_decode_synth_eager_test bolt_decode_synth_bf16head_test bolt_decode_synth_b16state_test
     bolt_decode_synth_pp_test bolt_golden_synth_short_bf16head_test bolt_golden_synth_short_eager_test
     bolt_golden_synth_short_pp2_test)
@@ -4351,7 +4340,7 @@ if(B70_BOLT)
     add_test(NAME bolt_decode_real_fuse_${arm}_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --fuse ${arm})
     list(APPEND _bolt_tests bolt_decode_synth_fuse_${arm}_test bolt_decode_real_fuse_${arm}_test)
   endforeach()
-  # Task 6: our g64 export on two cards - B4 with split 48 (copy) and 40 (peer) bitwise each other; B3 short / 4k /
+  # Task 6: our g64 export on two cards - B4 with split 48 and 40 bitwise each other; B3 short / 4k /
   # agentic (32k opt-in); the int8 head (default), the bf16 head, eager
   add_test(NAME bolt_decode_real_test COMMAND bolt_decode_test ${B70_BOLT_SNAPSHOT} ${_bolt_ids} --pp 48,40)
   list(APPEND _bolt_tests bolt_decode_real_test)
@@ -4360,7 +4349,7 @@ if(B70_BOLT)
     list(APPEND _bolt_tests bolt_golden_real_${p}_test)
   endforeach()
   add_test(NAME bolt_golden_real_short_split40_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
-    bolt_short pp2:40 peer --judge=${B70_BOLT_F32_DIR})
+    bolt_short pp2:40 --judge=${B70_BOLT_F32_DIR})
   add_test(NAME bolt_golden_real_short_bf16head_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
     bolt_short bf16 --judge=${B70_BOLT_F32_DIR})
   add_test(NAME bolt_golden_real_short_eager_test COMMAND bolt_golden_test ${B70_BOLT_SNAPSHOT} ${B70_BOLT_ORACLE_DIR}
@@ -4568,11 +4557,9 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_lookup ${_bolt_serve_cfg} --spec lookup --spec-max 9 EXPECT "expects 1..7")
   b70_serve_reject(cli_reject_serve_bolt_dflash_lookup ${_bolt_serve_cfg} --spec dflash-lookup EXPECT "built for Qwen3.8")
   b70_serve_reject(cli_reject_serve_bolt_spec_max ${_bolt_serve_cfg} --spec-max 2 EXPECT "--spec off has none")
-  b70_serve_reject(cli_reject_serve_bolt_dflash_peer ${_bolt_serve_cfg} --spec dflash --pipeline-handoff peer
-    EXPECT "copy hand-off only")
   b70_serve_reject(cli_reject_serve_bolt_draft_model ${_bolt_serve_cfg} --spec lookup --draft-model /nonexistent
     EXPECT "--draft-model needs --spec dflash")
-  set_tests_properties(cli_reject_serve_bolt_dflash_peer cli_reject_serve_bolt_draft_model PROPERTIES LABELS "bolt;lilicorr")
+  set_tests_properties(cli_reject_serve_bolt_draft_model PROPERTIES LABELS "bolt;lilicorr")
   b70_serve_reject(cli_reject_serve_bolt_draft_vocab ${_bolt_serve_cfg} --draft-vocab 32k EXPECT "has neither")
   b70_serve_reject(cli_reject_serve_bolt_kv8 ${_bolt_serve_cfg} --kv-cache int8 EXPECT "Decision 17")
   b70_serve_reject(cli_reject_serve_bolt_prefill_int8 ${_bolt_serve_cfg} --prefill-backend l0-int8
@@ -4583,7 +4570,7 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_bolt_split ${_bolt_serve_cfg} --parallel 1 --pipeline-split 3
     EXPECT "--pipeline-split belongs to --parallel pp")
   set_tests_properties(cli_reject_serve_bolt_spec_mtp
-    cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash_lookup cli_reject_serve_bolt_dflash_peer
+    cli_reject_serve_bolt_lookup cli_reject_serve_bolt_dflash_lookup
     cli_reject_serve_bolt_draft_model cli_reject_serve_bolt_spec_max cli_reject_serve_bolt_draft_vocab
     cli_reject_serve_bolt_kv8 cli_reject_serve_bolt_prefill_int8 cli_reject_serve_bolt_layers
     cli_reject_serve_bolt_max_len cli_reject_serve_bolt_split PROPERTIES LABELS bolt)

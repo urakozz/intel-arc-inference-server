@@ -15,54 +15,34 @@ using Clock = std::chrono::steady_clock;
 double ms_since(Clock::time_point t0) {
   return std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
 }
-
-// pp_handoff.cl's state words (pp_recv): [0] last sequence consumed, [1] status, [2] the flag
-// read at the failure, [3] the stamp read, [4] the sequence expected.
-constexpr uint32_t kStStatus = 1, kStFlag = 2, kStStamp = 3, kStWant = 4;
-constexpr uint32_t kStatusTimeout = 1, kStatusStale = 2;
 }  // namespace
 
 // --- PipelineLink ------------------------------------------------------------------------
 
-PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d,
-                           PpHandoff m)
-    : PipelineLink(d0, d1, pp_landing_layout(d), m) {}
+PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const model::ModelDesc& d)
+    : PipelineLink(d0, d1, pp_landing_layout(d)) {}
 
-PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& l, PpHandoff m)
-    : mode(m),
-      layout(l),
+PipelineLink::PipelineLink(l0::Context& d0, l0::Context& d1, const PpLandingLayout& l)
+    : layout(l),
       landing(d1, l0::MemKind::Device, layout.total, kPpLandingAlign),
-      send_seq(d0, l0::MemKind::Device, kPpStateWords * 4),
-      recv_state(d1, l0::MemKind::Shared, kPpStateWords * 4),
-      event(m == PpHandoff::Copy
-                ? std::make_unique<l0::SyncEvent>(d0, std::vector<const l0::Context*>{&d0, &d1})
-                : nullptr) {}
+      event(std::make_unique<l0::SyncEvent>(d0, std::vector<const l0::Context*>{&d0, &d1})) {}
 
-StageLink PipelineLink::binding(uint32_t spin_limit) const {
+StageLink PipelineLink::binding() const {
   StageLink s;
-  s.mode = mode;
   uint8_t* base = landing.as<uint8_t>();
   s.land_resid = base;
   s.land_sumsq = base + layout.sumsq_off;
-  s.flag = base + layout.flag_off;
   s.resid_cap = layout.resid_bytes;
   s.sumsq_cap = layout.sumsq_bytes;
-  s.send_seq = send_seq.ptr();
-  s.recv_state = recv_state.ptr();
-  s.spin_limit = spin_limit;
-  s.event = event ? event->handle() : nullptr;
+  s.event = event->handle();
   return s;
 }
 
-size_t PipelineLink::bytes(uint32_t device) const {
-  return device == 0 ? send_seq.size() : landing.size() + recv_state.size();
-}
+size_t PipelineLink::bytes(uint32_t device) const { return device == 0 ? 0 : landing.size(); }
 
-void PipelineLink::zero(l0::CmdList& imm0, l0::CmdList& imm1) {
+void PipelineLink::zero(l0::CmdList& imm1) {
   imm1.fill(landing.ptr(), 0u, landing.size());
-  imm0.fill(send_seq.ptr(), 0u, send_seq.size());
-  imm1.fill(recv_state.ptr(), 0u, recv_state.size());
-  if (event) event->host_reset();
+  event->host_reset();
 }
 
 // --- one device's half: runtime/pipeline_stage.h -------------------------------------
@@ -84,12 +64,12 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
   if (d1.handle() != d0.handle())
     throw std::invalid_argument("runtime::PipelineEngine: device 1 is not a view of device 0's "
                                 "Level Zero context (spec 16 decision 1)");
-  // P4: both hand-offs write device 1's memory from device 0 (the copy path's peer copy,
-  // pp_send's stores). Refused here, by name, rather than as a fault on the first token.
+  // P4: the hand-off writes device 1's memory from device 0 (the copy path's peer copy).
+  // Refused here, by name, rather than as a fault on the first token.
   if (!d0.can_access_peer(d1))
     throw std::runtime_error(
         "--parallel pp: device 0 (" + d0.name() + ") cannot access device 1's memory "
-        "(zeDeviceCanAccessPeer is false), and both hand-offs write it. Peer access needs "
+        "(zeDeviceCanAccessPeer is false), and the hand-off writes it. Peer access needs "
         "the P2P-capable kernel and both cards under one root complex (docs/10-the-box.md)");
   const model::ModelDesc* desc = stages[0].desc;
   if (!desc || stages[1].desc != desc)
@@ -108,9 +88,6 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
     if (stages[1].mtp)
       throw std::invalid_argument("runtime::PipelineEngine: a tap drafter and the MTP head are two proposers - "
                                   "load the model without its head (spec 19 decision 3)");
-    if (opt.handoff != PpHandoff::Copy)
-      throw std::invalid_argument("runtime::PipelineEngine: a tap drafter across the split needs the copy "
-                                  "hand-off (device 0's taps are copies into device 1, ordered by its event)");
     if (drafter->max_k() == 0 || drafter->max_k() + 1 > TapVerifyDims::kSlots)
       throw std::invalid_argument("runtime::PipelineEngine: the drafter drafts " + std::to_string(drafter->max_k()) +
                                   " ids a block; the verify lists take 1.." + std::to_string(TapVerifyDims::kSlots - 1));
@@ -118,7 +95,7 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
       throw std::invalid_argument("runtime::PipelineEngine: device 1's stage holds no embedding replica for the "
                                   "drafter's draft list (runtime::place_stages(..., drafter = true))");
   }
-  if (opt.timeout_ms == 0 || (opt.handoff == PpHandoff::Peer && opt.spin_limit == 0))
+  if (opt.timeout_ms == 0)
     throw std::invalid_argument("runtime::PipelineEngine: a hand-off needs a non-zero bound");
   const uint32_t split = static_cast<uint32_t>(stages[0].layer_small.size());
   const std::array<PpStage, kPpDevices> ranges = pp_stages(*desc, split);
@@ -130,16 +107,15 @@ PipelineEngine::PipelineEngine(l0::Context& d0, l0::Context& d1,
                                 std::to_string(desc->layers) + ")");
   stages_[0] = std::make_unique<Stage>(d0, std::move(stages[0]), max_len, ranges[0], kv);
   stages_[1] = std::make_unique<Stage>(d1, std::move(stages[1]), max_len, ranges[1], kv);
-  link_ = std::make_unique<PipelineLink>(d0, d1, *desc, opt.handoff);
-  const StageLink binding = link_->binding(opt.spin_limit);
+  link_ = std::make_unique<PipelineLink>(d0, d1, *desc);
+  const StageLink binding = link_->binding();
   for (uint32_t i = 0; i < kPpDevices; ++i) {
     Stage& s = st(i);
     s.step.emplace(build_stage(s.ctx, s.model, s.buffers, s.range, binding));
   }
   // Spec 16d: the head's buffers on device 1, device 0's verify slots, both devices' verify
   // lists at M = 1..kSlots and device 1's draft lists. Every list pair shares the one link:
-  // only one pair runs at a time, the copy event is host-reset before each, and the peer
-  // counters advance in submission order whichever pair it is.
+  // only one pair runs at a time and the copy event is host-reset before each.
   if (st(1).model.mtp) {
     Stage& s0 = st(0);
     Stage& s1 = st(1);
@@ -207,8 +183,8 @@ PipelineEngine::~PipelineEngine() {
 }
 
 void PipelineEngine::reset() {
-  // A failed step may have left a list running (a peer spin past the fence bound): it must
-  // finish before its buffers are rewritten under it.
+  // A failed step may have left a list running past the fence bound: it must finish before
+  // its buffers are rewritten under it.
   for (uint32_t d = 0; d < kPpDevices; ++d)
     if (!settle(d))
       throw std::runtime_error("runtime::PipelineEngine::reset: device " + std::to_string(d) +
@@ -234,7 +210,7 @@ void PipelineEngine::reset() {
   if (drafter_) drafter_->reset(st(1).imm);   // a cold drafter
   verify_k_ = kNoVerify;
   draft_ids_.clear();
-  link_->zero(st(0).imm, st(1).imm);
+  link_->zero(st(1).imm);
   broken_ = false;
   drop_next_ = false;
 }
@@ -273,7 +249,7 @@ void PipelineEngine::run_pair(l0::CmdList& list0, l0::CmdList& list1, const char
         std::to_string(n) + " exceeds max_len " + std::to_string(max_len_) +
         " - the KV cache and the RoPE table stop there. Start a new session with reset(), or"
         " load with a larger max_len.");
-  if (link_->event) link_->event->host_reset();
+  link_->event->host_reset();
   const bool send = !drop_next_;
   drop_next_ = false;
   if (send) {
@@ -283,34 +259,19 @@ void PipelineEngine::run_pair(l0::CmdList& list0, l0::CmdList& list1, const char
   s1.queue.execute(list1, &s1.fence);
   pending_[1] = true;
   if (!settle(1)) {
-    // Device 1 is still waiting (copy: on the event device 0 never signalled). Release it so
-    // its queue drains on garbage instead of holding the device, then report.
-    if (link_->event) link_->event->host_signal();
+    // Device 1 is still waiting (on the event device 0 never signalled). Release it so its
+    // queue drains on garbage instead of holding the device, then report.
+    link_->event->host_signal();
     const bool drained = settle(1);
     settle(0);
     fail(std::string("device 1's ") + what + " did not finish within " + std::to_string(opt_.timeout_ms) +
          " ms - device 0's residual never arrived" +
-         (link_->event ? std::string(" (the cross-device event was not signalled; device 1 ") +
-                             (drained ? "released" : "did not drain either") + ")"
-                       : std::string(drained ? "" : " (device 1 did not drain)")) +
+         " (the cross-device event was not signalled; device 1 " +
+         (drained ? "released" : "did not drain either") + ")" +
          (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
   }
   if (!settle(0))
     fail(std::string("device 0's ") + what + " did not finish within " + std::to_string(opt_.timeout_ms) + " ms");
-  if (link_->mode == PpHandoff::Peer) {
-    const uint32_t* w = link_->recv_state.as<uint32_t>();
-    const uint32_t status = w[kStStatus];
-    if (status == kStatusTimeout)
-      fail("device 1's pp_recv gave up after " + std::to_string(opt_.spin_limit) +
-           " loads of the flag: it read " + std::to_string(w[kStFlag]) + ", expected " +
-           std::to_string(w[kStWant]) + " (device 0 never published the residual)" +
-           (send ? "" : " [device 0's list was not submitted: drop_next_handoff()]"));
-    if (status == kStatusStale)
-      fail("the flag reached " + std::to_string(w[kStWant]) + " but the stamp after the norm sums"
-           " reads " + std::to_string(w[kStStamp]) +
-           " - the data did not arrive with the flag (a silent hand-off, spec 16 §2)");
-    if (status != 0) fail("pp_recv reported status " + std::to_string(status));
-  }
   // The token's way back (Review Focus 2): device 1's argmax advanced pos and wrote the id;
   // device 0 reads both from its own block on the next step.
   std::memcpy(s0.ctl, s1.ctl, sizeof(Control));

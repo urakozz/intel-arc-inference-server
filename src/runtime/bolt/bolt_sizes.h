@@ -197,18 +197,16 @@ std::vector<SnapRun> kv_runs(const model::BoltDesc& d, const model::BoltPlacemen
 size_t decode_scratch_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len,
                             BoltAttn a, BoltState s);
 
-// The decode list's launches on one device (the hand-off's copies and barriers excluded; peer's pp_send / pp_recv
-// included), and their sum (spec 25 §6.1):
+// The decode list's launches on one device (the hand-off's copies and barriers excluded), and their sum (spec 25 §6.1):
 //   device 0     nb_embed_gather
 //   a block      Mamba 6 (norm, in_proj, conv, ssm, gnorm, out_proj); attention 6 (norm, q||k||v, prep, decode, reduce,
 //                o) - eager 5 (spec 23c's mg_attn_eager is ONE launch, Decision 15); MoE 9 (norm, router, route,
 //                fc1||shared_up, sh_act, up, down, fc2, shared_down); the arms: conv -1 a Mamba block, router -1 and route
 //                -1 a MoE block
 //   last device  the final norm (norm_f, folding the last block), the head GEMV, the two argmax stages
-// 653 on the real model (40 x 6 + 8 x 6 + 40 x 9 + 5), 645 eager, 533 with every arm; two cards +0 (copy) / +2 (peer).
-size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, BoltAttn a, BoltFuse f,
-                       PpHandoff h);
-size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f, PpHandoff h);
+// 653 on the real model (40 x 6 + 8 x 6 + 40 x 9 + 5), 645 eager, 533 with every arm; two cards +0.
+size_t device_launches(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, BoltAttn a, BoltFuse f);
+size_t decode_launches(const model::BoltDesc& d, const model::BoltPlacement& p, BoltAttn a, BoltFuse f);
 // ==== spec 25c (end) ===================================================================================================
 
 // ==== spec 25d: the prefill chunk's scratch, launches and cuts (begin) =================================================
@@ -270,7 +268,7 @@ struct PrefillSizes {
   }
 };
 PrefillSizes prefill_sizes(const model::BoltDesc& d);
-// The prefill hand-off between two cards (a second PipelineLink in copy mode, at chunk size): h [kPfC][4096] bf16 and the
+// The prefill hand-off between two cards (a second PipelineLink, at chunk size): h [kPfC][4096] bf16 and the
 // pending GEMM rows of block split - 1 ([kPfC][4096] fp32 each: o_proj's / out_proj's, or fc2's and shared_down's).
 PpLandingLayout pf_landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p);
 size_t pf_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev);
@@ -317,7 +315,7 @@ struct VerifySizes {
 };
 VerifySizes verify_sizes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev, uint32_t max_len, BoltAttn a,
                          BoltState s);
-// The verify lists' hand-off (a second PipelineLink in copy mode): h [8][hidden] bf16 and the cut's pending slices at 8 rows.
+// The verify lists' hand-off (a second PipelineLink): h [8][hidden] bf16 and the cut's pending slices at 8 rows.
 PpLandingLayout verify_landing_layout(const model::BoltDesc& d, const model::BoltPlacement& p);
 size_t verify_link_bytes(const model::BoltDesc& d, const model::BoltPlacement& p, uint32_t dev);
 // What BoltReserve::decode_scratch adds for device `dev` with the verify lists: the scratch, the union's down rows and the

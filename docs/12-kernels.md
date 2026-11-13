@@ -1268,7 +1268,6 @@ live in a directory of `src/kernels/` and are described in their source headers 
 | `dflash/` | the DFlash draft model (spec 19) and LiLiCorr (`ll_*`, spec 26) |
 | `draft_vocab.cl` | the MTP draft's argmax over a reduced vocabulary (spec 8) |
 | `tp.cl`, `prefill/pf_tp.cl` | tensor parallel: the all-reduce after each row-parallel linear by P2P writes, and one card's half of the argmax (spec 17) |
-| `pp_handoff.cl` | the pipeline-parallel hand-off of the residual between the two cards (spec 16) |
 | `noop.cl`, `ctrl_read.cl`, `bw_sum.cl` | measurement helpers: per-launch fixed cost, a control-block read, a read-only bandwidth probe |
 
 Bolt's attention (`mg_attn_decode` + `mg_attn_reduce`, `mg_attn_eager`, `mg_pf_flash_attn`) is `kol_attn.cl`'s
