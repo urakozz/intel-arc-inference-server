@@ -247,7 +247,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   // Profile separate lists: timestamp signals must not contaminate the wall-time medians above.
   runtime::ProfileEvents dp(e.context()), pp(e.context());
   runtime::CaptureOptions opt;
-  opt.dflash_attn_ks = attn_ks;   // the profiled draft list's DPAS key split (--attn-ks)
+  if (attn_ks) opt.dflash_attn_ks = attn_ks;   // the profiled draft list's DPAS key split (--attn-ks; 0: production)
   opt.profile = &dp;
   auto draft = df::build_dflash_draft(e.context(), d.weights(), df::dflash_target(e.model()), d.buffers(),
                                      e.buffers().control, opt);
@@ -505,7 +505,7 @@ int main(int argc, char** argv) {
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
-    unsigned candidate_bits = 4, attn_ks = 1;
+    unsigned candidate_bits = 4, attn_ks = 0;
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
