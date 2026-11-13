@@ -84,9 +84,9 @@ inline std::string lm_head_variant(bool int8) {
 
 // Every binary a Kolibri M = 1 decode list binds (runtime/kolibri/kolibri_capture.cc forms the same
 // names), for an attention arm, a head form and an attention form (`eager`: B70_KOLIBRI_ATTN=eager
-// binds kol_attn_eager.cl's four kernels for kol_attn.cl's two). The two-card lists add pp_handoff
-// under --pipeline-handoff peer (16b's binary). Capture checks each exists before appending a command;
-// tests/kernels/kolibri_variant_names_test.cc holds the union to the CMake block's list.
+// binds kol_attn_eager.cl's four kernels for kol_attn.cl's two). The two-card lists add nothing. Capture
+// checks each exists before appending a command; tests/kernels/kolibri_variant_names_test.cc holds the
+// union to the CMake block's list.
 inline std::vector<std::string> decode_variants(model::KolAttnForm a, bool int8_head, bool eager) {
   const bool i4 = a == model::KolAttnForm::Int4;
   const unsigned S = i4 ? 2u : 1u, OS = i4 ? 4u : 1u;

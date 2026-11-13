@@ -23,7 +23,6 @@ struct Options {
   uint32_t devices = 1;
   uint32_t split = 0;      // 0 with two devices: runtime::bolt::pp_split
   uint32_t layers = 0;     // --layers N (0: the checkpoint's)
-  runtime::PpHandoff handoff = runtime::kDefaultPpHandoff;
   bool debug_tap = false;
   bool profile = false;
   uint32_t timeout_ms = 60000;
@@ -71,7 +70,6 @@ inline void build(Rig& r, const std::string& snap, const Options& o) {
   lo.layers = o.layers;
   loader::BoltLoaded m = loader::load_bolt(r.ctx, snap, lo, placement(d, o));
   runtime::PipelineOptions po;
-  po.handoff = o.handoff;
   po.timeout_ms = o.timeout_ms;
   r.eng = std::make_unique<runtime::bolt::BoltEngine>(r.ctx, std::move(m), o.max_len, o.debug_tap, po, o.profile, o.attn,
                                                       o.fuse, o.state);

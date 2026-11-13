@@ -12,7 +12,7 @@
 //              side) with the drafter on device 1 (place_stages(..., drafter = true), attach_target): the same runs,
 //              everything above bitwise one card's; then the one card's snapshot after the prefill restored into
 //              the pipeline and the loop continued from it, bitwise (a snapshot moves between --pp 1 and 2 with the
-//              drafter's ring). (The peer hand-off's refusal is the CLI's host test: cli_reject_serve_dflash_pp.)
+//              drafter's ring).
 //
 // usage: pp_dflash_test <target snapshot> <drafter>   (cwd = the source tree). SKIP 77 with fewer than two GPUs,
 // without peer access, or without either checkpoint.

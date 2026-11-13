@@ -50,7 +50,7 @@
 // bolt_oracle.sh golden-f32 <dump-dir> builds both aligned companions. Missing files SKIP "awaiting f32 reference".
 // The absolute bars above remain diagnostics. Synthetics retain the first-flip cut-off unchanged.
 //
-// argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>] [copy | peer]
+// argv: <checkpoint> <oracle dir> <prompt> [bf16] [eager] [b16] [layers:<N>] [pp2 | pp2:<split>]
 //       [prefill | prefill:<chunk>] [--judge <f32 dir> | --judge=<f32 dir>]
 // Exit 77 (SKIP) when the checkpoint or the golden set is absent, or the placement cannot run.
 #include <algorithm>
@@ -208,10 +208,8 @@ int main(int argc, char** argv) {
       o.devices = 2;
       devices_given = true;
       o.split = uint32_t(std::strtoul(a.c_str() + 4, nullptr, 10));
-    } else if (a == "copy" || a == "peer") {
-      o.handoff = a == "peer" ? runtime::PpHandoff::Peer : runtime::PpHandoff::Copy;
     } else {
-      std::fprintf(stderr, "bolt_golden_test: unknown flag %s (bf16, int8, eager, b16, layers:N, pp2[:split], copy, peer, "
+      std::fprintf(stderr, "bolt_golden_test: unknown flag %s (bf16, int8, eager, b16, layers:N, pp2[:split], "
                    "prefill[:chunk])\n", a.c_str());
       return 2;
     }
@@ -253,7 +251,7 @@ int main(int argc, char** argv) {
   std::vector<uint32_t> force(gtok, gtok + kGen);
   const std::string context = pname + "_h" + std::to_string(o.int8_head) + "_a" + rb::bolt_attn_name(o.attn) +
       "_s" + rb::bolt_state_name(o.state) + "_d" + std::to_string(o.devices) + "_split" +
-      std::to_string(bolt_rig::placement(pre, o).split) + "_" + runtime::pp_handoff_name(o.handoff) +
+      std::to_string(bolt_rig::placement(pre, o).split) + "_copy" +
       "_f" + rb::bolt_fuse_name(o.fuse) + "_pf" + std::to_string(prefill ? (chunk ? chunk : rb::kPfC) : 0) +
       "_L" + std::to_string(pre.layers);
   const std::string key = golden::ForcedJudge::key(context, ids, force);
@@ -300,8 +298,7 @@ int main(int argc, char** argv) {
   std::printf("%s: %u blocks, %s head, %s attention, fuse %s, %s state, %u device(s)%s, %zu launches a token, near-tie "
               "tolerance %.1e\n", snap.c_str(), d.layers, o.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()),
               rb::bolt_fuse_name(eng.fuse()).c_str(), rb::bolt_state_name(eng.state()), eng.devices(),
-              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split()) + " " +
-                                    runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+              eng.devices() == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
               eng.launches(), double(tie_tol()));
 
   const uint32_t T = uint32_t(ids.size()), rows = T + kGen;

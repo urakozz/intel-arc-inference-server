@@ -1,13 +1,10 @@
 // Spec 16b P4 (plan 16b Review Focus 4): a hand-off that never arrives is a clear error
 // within its bound, never a hang - and the engine recovers after reset().
 //
-//   copy  device 1's list waits on the cross-device event device 0 never signals
-//         (drop_next_handoff: device 0's list is not submitted). The fence wait gives up
-//         after the timeout, the host signals the event so device 1's queue drains, and the
-//         step throws naming the event. The next step throws "reset() first".
-//   peer  the same lost step: pp_recv gives up after its spin bound and records the flag it
-//         read; the step throws naming pp_recv.
-// Each: the throw arrives within the bound plus slack; reset(); the prompt and 16 greedy ids
+// Device 1's list waits on the cross-device event device 0 never signals (drop_next_handoff:
+// device 0's list is not submitted). The fence wait gives up after the timeout, the host
+// signals the event so device 1's queue drains, and the step throws naming the event. The
+// next step throws "reset() first". The throw arrives within the bound plus slack; reset(); the prompt and 16 greedy ids
 // again equal a clean run's (a failed step leaves nothing behind that reset() does not clear).
 // The other two P4 refusals: a missing second card is `cli_reject_pipeline_one_gpu`
 // (ZE_AFFINITY_MASK=0, the shipped binary); no peer access cannot be produced on the box -
@@ -61,21 +58,15 @@ int main(int argc, char** argv) {
   }
   const std::vector<uint32_t> prompt = golden::read_ids("tests/golden/prompts/prose.ids");
 
-  for (const runtime::PpHandoff h : {runtime::PpHandoff::Copy, runtime::PpHandoff::Peer}) {
+  {
     loader::LoadedModel full = loader::load(d0, checkpoint, kMaxLen);
     const runtime::PpWeights w = runtime::pp_weights(full);
     const uint32_t split = runtime::pp_auto_split(*full.desc, w, kMaxLen);
     runtime::PipelineOptions opt;
-    opt.handoff = h;
-    // copy: the host's fence bound is the only one. peer: the device's spin bound must give
-    // up first, yet outlast a clean step's wait for device 0's half (~18 ms on Qwen3.8) - the
-    // engine's default 2^24 system-scope loads (the per-load time is unmeasured, 16a would
-    // have: 0.17 s at 10 ns a load, 17 s at 1 us) against a 120 s fence bound.
-    opt.timeout_ms = h == runtime::PpHandoff::Copy ? 3000 : 120000;
-    opt.spin_limit = 1u << 24;
+    opt.timeout_ms = 3000;   // the host's fence bound is the only one
     runtime::PipelineEngine e(d0, d1, runtime::place_stages(d0, d1, std::move(full), split),
                               kMaxLen, opt);
-    const char* name = runtime::pp_handoff_name(h);
+    const char* name = "copy";
 
     e.ingest(prompt);
     const std::vector<uint32_t> clean = e.generate(16);
@@ -88,8 +79,7 @@ int main(int argc, char** argv) {
     std::printf("%s, lost hand-off: threw after %.2f s: %s\n", name, s, err.c_str());
     CHECK(!err.empty());
     CHECK(s < 3 * opt.timeout_ms / 1000.0 + 5.0);   // bounded: two fence waits at most, + slack
-    CHECK(err.find(h == runtime::PpHandoff::Copy ? "cross-device event was not signalled"
-                                                 : "pp_recv gave up") != std::string::npos);
+    CHECK(err.find("cross-device event was not signalled") != std::string::npos);
     // Marked: the next step refuses until reset().
     const std::string again = step_error(e, &s);
     CHECK(again.find("reset() first") != std::string::npos);

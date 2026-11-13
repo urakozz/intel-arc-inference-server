@@ -55,8 +55,7 @@ class Walk {
     layer_ = -1;
     if (link_ && dev == 0) handoff_out();
     if (dev + 1 == b_.placement.devices) head();
-    const PpHandoff h = link_ ? link_->mode : kDefaultPpHandoff;
-    const size_t want = device_launches(d_, b_.placement, dev, b_.attn, h);
+    const size_t want = device_launches(d_, b_.placement, dev, b_.attn);
     require(step_.kernel_count == want, "device " + std::to_string(dev) + "'s decode list has " +
                                             std::to_string(step_.kernel_count) + " launches, not the " +
                                             std::to_string(want) + " runtime::kolibri::device_launches gives (" +
@@ -100,8 +99,7 @@ class Walk {
     // The int4 arm's {S, layout} are the names' (decode_variants spells S2 / S4).
     if (d_.attn == model::KolAttnForm::Int4) require(d_.qkv_s == 2 && d_.oproj_s == 4, "the int4 cells moved from S2 / S4");
     const bool int8 = part_.lm_head ? part_.lm_head->kind == model::WeightKind::Int8 : false;
-    std::vector<std::string> need = kk::decode_variants(d_.attn, int8, b_.attn == KolAttn::Eager);
-    if (link_ && link_->mode == PpHandoff::Peer) need.push_back(kernels::pp_handoff_variant());
+    const std::vector<std::string> need = kk::decode_variants(d_.attn, int8, b_.attn == KolAttn::Eager);
     for (const std::string& v : need)   // a missing binary is named before a command is appended
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_KOLIBRI=ON");
@@ -357,52 +355,20 @@ class Walk {
     require(link_->land_resid && link_->land_sumsq && link_->resid_cap >= resid_bytes() &&
                 link_->sumsq_cap == sumsq_bytes(),
             "the landing buffer does not hold " + std::to_string(resid_bytes()) + " B of the row and exactly " +
-                std::to_string(sumsq_bytes()) + " B of norm sums (pp_send stamps the word after them)");
-    if (link_->mode == PpHandoff::Copy) require(link_->event != nullptr, "the copy hand-off needs its cross-device event");
+                std::to_string(sumsq_bytes()) + " B of norm sums");
+    require(link_->event != nullptr, "the hand-off needs its cross-device event");
   }
   void handoff_out() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.copy(link_->land_resid, b_.resid.ptr(), resid_bytes());
-      step_.list.copy(link_->land_sumsq, b_.sumsq_r.ptr(), sumsq_bytes());
-      step_.list.barrier_signal(link_->event);
-      return;
-    }
-    require(link_->flag && link_->send_seq, "the peer hand-off needs its flag and counter");
-    // pp_send(resid, sumsq, land_resid, land_sumsq, flag, seq, resid_words, sumsq_words), grid (1)
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_send", kernels::kPpHandoffWg);
-    k.arg_ptr(0, b_.resid.ptr());
-    k.arg_ptr(1, b_.sumsq_r.ptr());
-    k.arg_ptr(2, link_->land_resid);
-    k.arg_ptr(3, link_->land_sumsq);
-    k.arg_ptr(4, link_->flag);
-    k.arg_ptr(5, link_->send_seq);
-    k.arg<uint32_t>(6, static_cast<uint32_t>(resid_bytes() / 4));
-    k.arg<uint32_t>(7, static_cast<uint32_t>(sumsq_bytes() / 4));
-    launch(k, 1);
+    step_.list.copy(link_->land_resid, b_.resid.ptr(), resid_bytes());
+    step_.list.copy(link_->land_sumsq, b_.sumsq_r.ptr(), sumsq_bytes());
+    step_.list.barrier_signal(link_->event);
   }
   void handoff_in() {
     check_link();
-    if (link_->mode == PpHandoff::Copy) {
-      step_.list.wait_event(link_->event);
-      step_.list.copy(b_.resid.ptr(), link_->land_resid, resid_bytes());
-      step_.list.copy(b_.sumsq_r.ptr(), link_->land_sumsq, sumsq_bytes());
-      return;
-    }
-    require(link_->flag && link_->recv_state && link_->spin_limit > 0,
-            "the peer hand-off needs its flag, its state words and a spin bound");
-    // pp_recv(land_resid, land_sumsq, flag, state, resid, sumsq, resid_words, sumsq_words, spin_limit)
-    l0::Kernel& k = kernel(kernels::pp_handoff_variant(), "pp_recv", kernels::kPpHandoffWg);
-    k.arg_ptr(0, link_->land_resid);
-    k.arg_ptr(1, link_->land_sumsq);
-    k.arg_ptr(2, link_->flag);
-    k.arg_ptr(3, link_->recv_state);
-    k.arg_ptr(4, b_.resid.ptr());
-    k.arg_ptr(5, b_.sumsq_r.ptr());
-    k.arg<uint32_t>(6, static_cast<uint32_t>(resid_bytes() / 4));
-    k.arg<uint32_t>(7, static_cast<uint32_t>(sumsq_bytes() / 4));
-    k.arg<uint32_t>(8, link_->spin_limit);
-    launch(k, 1);
+    step_.list.wait_event(link_->event);
+    step_.list.copy(b_.resid.ptr(), link_->land_resid, resid_bytes());
+    step_.list.copy(b_.sumsq_r.ptr(), link_->land_sumsq, sumsq_bytes());
   }
 
   l0::Context& ctx_;

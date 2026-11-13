@@ -13,7 +13,7 @@
 //                        at most the trained 262144 (Decision 14)
 //   --parallel auto|1|pp   2 the default for the whole model, 1 for a truncated one; --parallel 1 on the whole
 //                        model is refused by the plan naming the bytes and Decision 4
-//   --pipeline-split auto|N, --pipeline-handoff copy|peer   --parallel pp's (auto = runtime::bolt::pp_split: 48)
+//   --pipeline-split auto|N   --parallel pp's (auto = runtime::bolt::pp_split: 48)
 //   --layers N           development mode: load only blocks [0, N) (the head reads block N-1's residual)
 //   --prefill            (--ids) spec 25d: the prompt through BoltEngine::prefill in chunks, then --n greedy ids
 //   --bench --prefill-length N    depth N PREFILLED and timed (the pp row, a second stdout line, with its TFLOP/s against
@@ -125,7 +125,6 @@ inline void check_args(const DecodeArgs& a, const model::BoltDesc& d) {
   const uint32_t devs = devices_of(a, d);
   if (devs == 1) {
     if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the block device 1 starts at)");
-    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how the residual crosses)");
     return;
   }
   if (d.layers < 2) throw std::runtime_error("--parallel pp needs at least two blocks to split (--layers " + std::to_string(d.layers) + ")");
@@ -270,8 +269,8 @@ int run_decode(const DecodeArgs& a) {
   else
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
-    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and both "
-                             "hand-offs write it (docs/10-the-box.md)");
+    throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and the "
+                             "hand-off writes it (docs/10-the-box.md)");
   const rb::BoltPlan pl = settle(pre, a, dev);
   if (need > pl.max_len)
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds max_len " +
@@ -285,13 +284,11 @@ int run_decode(const DecodeArgs& a) {
     return loader::load_bolt(ctx, a.path, lo, pl.place);
   }();
   runtime::PipelineOptions opt;
-  opt.handoff = a.pipe.handoff;
   rb::BoltEngine eng(ctx, std::move(model), pl.max_len, /*debug_tap=*/false, opt, a.profile, attn, fuse, state);
   std::fprintf(stderr, "engine: Nemotron 3.5 Bolt, %u block(s), %u device(s)%s, %zu launches a token (%s attention "
                "B70_BOLT_ATTN, fuse %s B70_BOLT_FUSE, %s SSM state B70_BOLT_SSM), %s head, max_len %u\n",
                eng.model().desc.layers, eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split()) + ", hand-off " +
-                            runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
                eng.launches(), rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
                rb::bolt_state_name(eng.state()), a.int8_head ? "int8" : "bf16", eng.max_len());
   if (a.layers)
@@ -359,8 +356,7 @@ int run_decode(const DecodeArgs& a) {
   std::printf("| b70-decode %s bolt %s-head %s fuse-%s ssm-%s%s | %u | %u | %.2f | %.2f |\n", sha,
               a.int8_head ? "int8" : "bf16", rb::bolt_attn_name(eng.attention()), rb::bolt_fuse_name(eng.fuse()).c_str(),
               rb::bolt_state_name(eng.state()),
-              devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
-                           std::to_string(eng.split())).c_str() : "",
+              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), eng.last_gen_ms() / double(a.tg));
   // Spec 25d: the pp row, a second line as the Kolibri / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)

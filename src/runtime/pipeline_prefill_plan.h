@@ -121,24 +121,20 @@ void pp_prefill_run(const std::vector<PpChunk>& chunks, const std::vector<PpPfSt
 //
 // Device 1's prefill landing allocation: kPpPfDepth slots, each the rows of one chunk
 // (chunk_cap x hidden bf16 - a chunk moves rows x hidden), then on its own page the norm sums
-// (PrefillScratch::norm_sumsq, whole: [kNormGroups][chunk_cap] fp32) and the peer path's stamp
-// word, then the peer flag on a page of its own; each slot a multiple of kPpLandingAlign.
-// Only device 0 writes it (the copy engine or pp_send), device 1 only reads it - spec 16
-// §2's rules for the peer-written buffer, as 16b's decode landing keeps them.
+// (PrefillScratch::norm_sumsq, whole: [kNormGroups][chunk_cap] fp32); each slot a multiple of
+// kPpLandingAlign. Only device 0 writes it (the copy engine), device 1 only reads it.
 struct PpPfLinkLayout {
   size_t resid_bytes = 0;   // chunk_cap x hidden bf16
   size_t sumsq_bytes = 0;   // PrefillScratch::norm_sumsq's size
   size_t sumsq_off = 0;     // in a slot: page-aligned, after the rows
-  size_t stamp_off = 0;     // the word right after the sums
-  size_t flag_off = 0;      // a page of its own
   size_t slot_bytes = 0;    // one slot, a multiple of kPpLandingAlign
   size_t total = 0;         // kPpPfDepth slots
   size_t slot(uint32_t chunk) const { return size_t(chunk % kPpPfDepth) * slot_bytes; }
 };
 PpPfLinkLayout pp_prefill_link_layout(const model::ModelDesc& d, uint32_t chunk_cap);   // plan 5d: rows = the cap
 // The prefill pipeline's own device bytes beyond the prefill scratch, per device: device 0
-// its two Control blocks, the chunk timestamps and pp_send's per-slot counters; device 1 the
-// landing slots, its two Control blocks, the timestamps and pp_recv's per-slot state words.
+// its two Control blocks and the chunk timestamps; device 1 the landing slots, its two Control
+// blocks and the timestamps.
 size_t pp_prefill_link_bytes(const model::ModelDesc& d, uint32_t device, uint32_t chunk_cap);
 // One device's block-end shadows (allocated only with a block hook): kPpPfDepth copies of
 // its GDN state and conv ring.

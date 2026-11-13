@@ -201,16 +201,11 @@ void check_link() {
     CHECK_EQ(l.resid_bytes, size_t{runtime::PrefillScratchDims::kCDefault} * d->hidden * 2);
     CHECK_EQ(l.sumsq_off % runtime::kPpPage, size_t{0});
     CHECK(l.sumsq_off >= l.resid_bytes);
-    CHECK_EQ(l.stamp_off, l.sumsq_off + l.sumsq_bytes);
-    CHECK_EQ(l.flag_off % runtime::kPpPage, size_t{0});
-    CHECK(l.flag_off > l.stamp_off);
-    CHECK(l.slot_bytes >= l.flag_off + runtime::kPpPage);
+    CHECK(l.slot_bytes >= l.sumsq_off + l.sumsq_bytes);
     CHECK_EQ(l.slot_bytes % runtime::kPpLandingAlign, size_t{0});
     CHECK_EQ(l.total, 2 * l.slot_bytes);
     CHECK_EQ(l.slot(0), size_t{0});
     CHECK_EQ(l.slot(7), l.slot_bytes);
-    // pp_send's word counts are 32-bit kernel arguments.
-    CHECK(l.resid_bytes / 4 < (size_t{1} << 32));
   }
   const runtime::PpPfLinkLayout q = runtime::pp_prefill_link_layout(model::qwen38(), runtime::PrefillScratchDims::kCDefault);
   CHECK_EQ(q.resid_bytes, size_t{20971520});   // 2048 x 5120 bf16
@@ -218,8 +213,8 @@ void check_link() {
   CHECK_EQ(q.slot_bytes, size_t{21168128});
   CHECK_EQ(q.total, size_t{42336256});         // spec 16 §3.3's ~40 MB, derived
   const size_t common = 2 * sizeof(runtime::Control) + 32;
-  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 0, runtime::PrefillScratchDims::kCDefault), common + 2 * runtime::kPpStateWords * 4);
-  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 1, runtime::PrefillScratchDims::kCDefault), q.total + common + 2 * runtime::kPpStateWords * 4);
+  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 0, runtime::PrefillScratchDims::kCDefault), common);
+  CHECK_EQ(runtime::pp_prefill_link_bytes(model::qwen38(), 1, runtime::PrefillScratchDims::kCDefault), q.total + common);
   // The shadows: two copies of each device's GDN state + conv ring; together, two of the
   // model's (Qwen3.8 166.72 MB once).
   const std::array<runtime::PpStage, 2> st = runtime::pp_stages(model::qwen38(), 32);

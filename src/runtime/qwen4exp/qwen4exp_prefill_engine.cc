@@ -42,10 +42,10 @@ struct Qwen4ExpPrefillState {
     Dev(l0::Context& c, const model::Qwen4ExpDesc& d, uint32_t max_len) : cx(c), kc(c), s(c, d, max_len) {}
   };
   std::vector<std::unique_ptr<Dev>> dev;
-  std::unique_ptr<PipelineLink> link;   // two devices: `copy` mode at chunk size (pf_landing_layout)
+  std::unique_ptr<PipelineLink> link;   // two devices: at chunk size (pf_landing_layout)
   uint64_t timeout_ns = 0;
   ~Qwen4ExpPrefillState() {   // never free a scratch under a running list
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     for (auto& d : dev) {
       try {
         d->cx.wait_for(timeout_ns);
@@ -55,10 +55,10 @@ struct Qwen4ExpPrefillState {
   }
   // reset()'s hook: release a list waiting on a hand-off that will not come; true when every list is idle.
   bool settle() {
-    if (link && link->event) link->event->host_signal();
+    if (link) link->event->host_signal();
     bool ok = true;
     for (auto& d : dev) ok = d->cx.wait_for(timeout_ns) && ok;
-    if (link && link->event) link->event->host_reset();
+    if (link) link->event->host_reset();
     return ok;
   }
 };
@@ -89,7 +89,7 @@ void Qwen4ExpEngine::prepare_prefill() {
   for (uint32_t i = 0; i < devices(); ++i)
     ps->dev.push_back(std::make_unique<Qwen4ExpPrefillState::Dev>(stage_ctx(i), d, max_len_));
   if (devices() == 2)
-    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d), PpHandoff::Copy);
+    ps->link = std::make_unique<PipelineLink>(stage_ctx(0), stage_ctx(1), pf_landing_layout(d));
   if (mtp_)
     ps->dev[devices() - 1]->mtp_R =
         std::make_unique<l0::Mem>(stage_ctx(devices() - 1), l0::MemKind::Device, mtp_prefill_R_bytes(d));

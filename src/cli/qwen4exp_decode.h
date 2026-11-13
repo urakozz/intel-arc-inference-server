@@ -11,7 +11,7 @@
 //                      bytes and spec 22 (the expert-offload tier): 512 experts x 48 layers do not fit two B70s
 //   the PLE int8 file  <snapshot>-ple-int8/, beside the checkpoint (loader::q4_ple_dir; no flag)
 //   --parallel auto|1|pp   1 (the default) or 2 (spec 16b's pieces: the materialised H crosses);
-//   --pipeline-split auto|N, --pipeline-handoff copy|peer   16b's switches and parsers; auto is
+//   --pipeline-split auto|N   16b's switch and parser; auto is
 //                      runtime::qwen4exp::pp_split (pp_balance over the per-layer bytes at the session's max_len)
 //   --lm-head bf16|int8 (bf16 by default, as b70-decode's other paths), --max-len N|auto (<= the trained 262144)
 //   --bench [--depth N] [--tg N]; B70_Q4_ATTN=flash|eager picks the decode attention (and the prefill's)
@@ -137,11 +137,8 @@ inline void check_args(const DecodeArgs& a, const char* tool = "b70-decode") {
                              "hard-codes 24 q / 4 kv heads and this model has 2)");
   if (a.profile)
     throw std::runtime_error("--profile is not built for Qwen3.8-Flash-Next (spec 21c Task 7 times it with --bench)");
-  const uint32_t devs = devices_of(a);
-  if (devs == 1) {
-    if (a.pipe.have_split) throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
-    if (a.pipe.have_handoff) throw std::runtime_error("--pipeline-handoff belongs to --parallel pp (how H crosses)");
-  }
+  if (devices_of(a) == 1 && a.pipe.have_split)
+    throw std::runtime_error("--pipeline-split belongs to --parallel pp (the layer device 1 starts at)");
   if (a.layers == 0 && !a.layers_auto) refuse_whole(a, tool);
 }
 
@@ -257,7 +254,7 @@ int run_decode(const DecodeArgs& a) {
     std::fprintf(stderr, "devices: %s + %s (--parallel pp)\n", c0->name().c_str(), c1->name().c_str());
   if (devs == 2 && !c0->can_access_peer(*c1))
     throw std::runtime_error("--parallel pp: device 0 cannot access device 1's memory (zeDeviceCanAccessPeer is false), and "
-                             "both hand-offs write it (docs/10-the-box.md)");
+                             "the hand-off writes it (docs/10-the-box.md)");
   const Settled s = settle(full, a, dev);
   if (need > s.max_len)
     throw std::runtime_error("the prompt / --depth plus " + std::to_string(after) + " generated ids exceeds max_len " +
@@ -269,12 +266,10 @@ int run_decode(const DecodeArgs& a) {
   std::fprintf(stderr, "layers: %u of the checkpoint's %u (--layers: development mode; the final mixer reads layer %u's "
                "H)\n", model.desc.layers, model.checkpoint_layers, model.desc.layers - 1);
   runtime::PipelineOptions opt;
-  opt.handoff = a.pipe.handoff;
   runtime::qwen4exp::Qwen4ExpEngine eng(ctx, std::move(model), s.max_len, /*debug_tap=*/false, opt);
   std::fprintf(stderr, "engine: Qwen3.8-Flash-Next, %u device(s)%s, %zu launches a token (%s attention, B70_Q4_ATTN), "
                "max_len %u; the PLE table's %zu host pages read back by the device\n", eng.devices(),
-               devs == 2 ? (std::string(", split ") + std::to_string(eng.split()) + ", hand-off " +
-                            runtime::pp_handoff_name(eng.handoff())).c_str() : "",
+               devs == 2 ? (std::string(", split ") + std::to_string(eng.split())).c_str() : "",
                eng.launches(), runtime::qwen4exp::q4_attn_name(eng.attention()), eng.max_len(), eng.ple_pages_checked());
   // Spec 21d: the prefill setup (every device's scratch, Context, the prefill hand-off, the binaries' check) happens
   // here, outside the timed window, which is then the whole prefill() call: first launch to the first generated id in
@@ -327,8 +322,7 @@ int run_decode(const DecodeArgs& a) {
               a.int8_head() ? " int8-head" : "",
               eng.model().desc.forms.dense == model::Q4Form::Bf16 ? " bf16-dense" : "",
               runtime::qwen4exp::q4_attn_name(eng.attention()),
-              devs == 2 ? (std::string(" pipeline2-") + runtime::pp_handoff_name(eng.handoff()) + "-s" +
-                           std::to_string(eng.split())).c_str() : "",
+              devs == 2 ? (std::string(" pipeline2-copy-s") + std::to_string(eng.split())).c_str() : "",
               a.depth, a.tg, eng.last_tok_per_s(), ms_per_token);
   // Spec 21d: the pp row, a second line as the Kolibri / K2 / Qwen paths print it (depth, chunk, ms, t/s).
   if (a.pp)

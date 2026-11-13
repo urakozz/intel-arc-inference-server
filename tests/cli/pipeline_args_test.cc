@@ -62,9 +62,6 @@ void check_parse() {
     cli::resolve_overrides(ts);
     CHECK(ts.tp());   // an override does not turn tp into pp
     CHECK(says([&] { cli::check_tp(ts, {}); }, "--pipeline-split belongs to --parallel pp"));
-    cli::PipelineArgs th = p;
-    (void)cli::parse_pipeline_handoff("peer", th);
-    CHECK(says([&] { cli::check_tp(th, {}); }, "--pipeline-handoff belongs to --parallel pp"));
   }
   cli::PipelineArgs not_tp;
   cli::check_tp(not_tp, {true, true, true, true});   // not tp: nothing to refuse here
@@ -88,9 +85,6 @@ void check_parse() {
   cli::resolve_overrides(rs);
   CHECK(rs.replica());   // an override does not turn replica into pp
   CHECK(says([&] { cli::check_replica_flags(rs, false); }, "--pipeline-split belongs to --parallel pp"));
-  cli::PipelineArgs rh = p;
-  (void)cli::parse_pipeline_handoff("peer", rh);
-  CHECK(says([&] { cli::check_replica_flags(rh, false); }, "--pipeline-handoff belongs to --parallel pp"));
   cli::PipelineArgs none;
   cli::refuse_replica_in_decode(none);
   cli::check_replica_flags(none, true);   // not replica: nothing to refuse here
@@ -101,12 +95,12 @@ void check_parse() {
   CHECK(o.mode == cli::Parallel::Pp && o.on());
   cli::PipelineArgs o1;
   cli::parse_parallel("1", o1);
-  cli::parse_pipeline_handoff("peer", o1);
+  cli::parse_pipeline_split("30", o1);
   cli::resolve_overrides(o1);
   CHECK(o1.mode == cli::Parallel::One && !o1.on());
 
   cli::PipelineArgs a;
-  CHECK(a.split_auto && !a.on() && a.handoff == runtime::PpHandoff::Copy);
+  CHECK(a.split_auto && !a.on());
   cli::parse_pipeline_split("33", a);
   CHECK(a.have_split && !a.split_auto && a.split == 33u);
   cli::parse_pipeline_split("auto", a);
@@ -114,11 +108,6 @@ void check_parse() {
   CHECK(says([&] { cli::parse_pipeline_split("0", a); }, "--pipeline-split 0"));
   for (const char* bad : {"", "-3", "1e3", "half", "123456"})
     CHECK(says([&] { cli::parse_pipeline_split(bad, a); }, "--pipeline-split expects auto"));
-
-  cli::PipelineArgs h;
-  CHECK(cli::parse_pipeline_handoff("peer", h) == runtime::PpHandoff::Peer && h.have_handoff);
-  CHECK(cli::parse_pipeline_handoff("copy", h) == runtime::PpHandoff::Copy);
-  CHECK(says([&] { cli::parse_pipeline_handoff("p2p", h); }, "--pipeline-handoff expects copy or peer"));
 }
 
 // The served name (cli/served_name.h) and the --spec rule (cli/spec_args.h).
@@ -158,9 +147,6 @@ void check_refusals() {
   cli::PipelineArgs sub = one;
   sub.have_split = true;
   CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-split belongs to --parallel pp"));
-  sub = one;
-  sub.have_handoff = true;
-  CHECK(says([&] { cli::check_pipeline(sub, {}); }, "--pipeline-handoff belongs to --parallel pp"));
 
   cli::PipelineArgs two;
   two.devices = 2;
@@ -202,12 +188,10 @@ void check_serve() {
     c.model_type = mt;
     cli::check_serve_pipeline(one, c);
   }
-  // ... but the sub-flags alone are refused, as b70-decode refuses them.
-  cli::PipelineArgs split_only, handoff_only;
+  // ... but the sub-flag alone is refused, as b70-decode refuses it.
+  cli::PipelineArgs split_only;
   cli::parse_pipeline_split("30", split_only);
-  cli::parse_pipeline_handoff("peer", handoff_only);
   CHECK(says([&] { cli::check_serve_pipeline(split_only, {}); }, "--pipeline-split belongs to --parallel pp"));
-  CHECK(says([&] { cli::check_serve_pipeline(handoff_only, {}); }, "--pipeline-handoff belongs to --parallel pp"));
   // pp serves the Qwen family with everything else on: MTP, either backend.
   for (const char* mt : {"qwen3_5", "qwen3_5_moe", ""})
     for (bool mtp : {false, true}) {

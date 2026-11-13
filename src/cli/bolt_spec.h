@@ -22,8 +22,7 @@
 // Refused before the device, each by name (tests/server/bolt_serve_args_test.cc, tests/runtime/bolt_spec_plan_test.cc; through
 // the binary the box's cli_reject_serve_bolt_*): by cli::resolve_spec --spec mtp, --spec dflash-lookup, --spec-max outside 1..7,
 // --spec-max with --spec off, --draft-model without --spec dflash; by check_serve_flags --draft-vocab (LiLiCorr reads the whole
-// lm_head); here --pipeline-handoff peer with a proposer (the taps ride on the copy hand-off's barrier, 19d). By the loader: a
-// drafter that is not LiLiCorr's shapes or does not fit Bolt (model::check_lilicorr, check_target).
+// lm_head). By the loader: a drafter that is not LiLiCorr's shapes or does not fit Bolt (model::check_lilicorr, check_target).
 #include <algorithm>
 #include <cstdint>
 #include <memory>
@@ -47,7 +46,6 @@
 #include "runtime/bolt/bolt_sizes.h"
 #include "runtime/dflash/lilicorr_drafter.h"
 #include "runtime/dflash/lilicorr_sizes.h"
-#include "runtime/pipeline_plan.h"   // PpHandoff
 #include "server/adaptive_k.h"
 
 namespace cli::bolt {
@@ -80,12 +78,9 @@ inline SpecArgs spec_args(const std::string& spec_arg, bool have_max, uint32_t m
 }
 
 // The refusals that need the placement (the header's list), after spec_args.
-inline void check_spec(const SpecArgs& s, uint32_t devices, runtime::PpHandoff handoff) {
+inline void check_spec(const SpecArgs& s) {
   if (s.on() && (s.max_k == 0 || s.max_k > kSpecMaxK))
     throw std::runtime_error("--spec-max with Nemotron 3.5 Bolt expects 1..7 (LiLiCorr's block of 8 - 1, spec 26 Decision 5)");
-  if (s.on() && devices == 2 && handoff != runtime::PpHandoff::Copy)
-    throw std::runtime_error("--spec " + s.spec + " on Nemotron 3.5 Bolt crosses the cards by the copy hand-off only (19d: "
-                             "the drafter's taps ride on its barrier) - drop --pipeline-handoff peer");
 }
 
 inline unsigned format_index(loader::DraftFormat f) {   // MtpCost::bolt_lilicorr's: 0 exact, 1 int8, 2 int4 g64
