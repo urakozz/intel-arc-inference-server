@@ -207,3 +207,46 @@ of 64 is bitwise; the 4096-row chunks run the new binaries).
 same protocol (`r*-l0-int8-011501-*.log`), medians of 3: pp4096 1817.4 -> **1753.8 ms (-3.5 %)**, pp16384 8273.8 ->
 **7934.6 (-4.1 %)**, pp32768 19214.9 -> **18341.3 (-4.5 %)**; every pair faster (the h8 quantiser and the slab of the
 head's linears amortise over twice the rows).
+
+### Task 2: the default, and what it costs
+
+**Context and slots: nothing.** The rule is the MoE models' (max_len and every slot planned at 2048, 4096 taken only
+when the plan at those lengths has room; with `--max-num-seqs` the slots' plan, not slot 0's alone). b70-serve's
+start-up on one card, main against the branch with the rule on (`tools/probe/qwen_chunk4096_plans.sh`,
+`~/b70/logs/qwen-chunk-4096/plan-*.log`):
+
+| recipe | context / slots (main = branch) | chunk with the rule |
+|---|---|---:|
+| default (bf16 cache) | 171,008 | 2048 (no room) |
+| `--kv-cache int8` | 262,144 | **4096** (0.70 GB more scratch; 2.48 GB left, the 1.5 GB reserve inside it) |
+| `--prefill-backend l0-int8` | 169,984 | 2048 |
+| `--max-num-seqs 4` | 46,080 + 3 x 32,768 | 2048 |
+| `--max-num-seqs 4 --kv-cache int8` | 167,936 + 3 x 32,768 | 2048 |
+
+So only the full-context int8-cache recipe (and replica cards in that form, and any shorter explicit `--max-len`)
+would take 4096.
+
+**The served short turn deep in a session: slower - the stop.** llama-benchy through b70-serve `--kv-cache int8`
+(one card, the server's own chunk cap), a 64-id turn after a 32,768-id context with the prefix cache
+(`--depth 32768 --pp 64 --enable-prefix-caching`, 3 runs a server; `tools/probe/qwen_chunk4096_turn.sh`,
+`turn-*.log`, `turn-serve-*.log`), time to the first token, ms:
+
+| server | context pass (cold, 32,770 ids) | the 64-id turn | the turn's restart point |
+|---|---:|---:|---|
+| main (2048) | 24,455 | 2,093 | 30,720 (2,112 rows prefilled) |
+| branch (4096) | **22,983 (-6.0 %)** | **3,682 (1.76x)** | 28,672 (4,160 rows) |
+| main, `--prefix-split-last` | 24,502 | 2,161 | 30,720 |
+| branch, `--prefix-split-last` | **23,075 (-5.8 %)** | **3,734 (1.73x)** | 28,672 |
+
+The cache's state snapshots sit at chunk ends, so with 4096-row chunks they are 4096 positions apart (plan 5d's
+ruling for a chunk wider than a block). A hit that restores from a block snapshot - here every time: the client's
+second request is not an extension of the first prompt's end, so even `--prefix-split-last`'s prompt-end snapshot
+does not apply - restarts up to 4,095 rows back instead of 2,047, and those rows cost more than the 4096-row chunk
+saves. In an agentic session (long context, a prefix hit every turn) that is the common case. **The default stays
+2048 for Qwen3.8**; the variants stay built and bound for any 4096-row chunk (`--prefill-chunk 4096`, the cap4096
+tests), bit-identical. The slot-aware fit check stays (it is what a MoE model beside `--max-num-seqs` now uses).
+
+**Open question (for the operator).** (a) Keep 2048 (as built). (b) 4096-row chunks for the bulk of a long prompt
+and 2048-row chunks with a snapshot at every block end over its last ~6k positions - the restart points near a
+prompt's end as today, the cold pass most of the -5.6 % (derived; a change to `runtime/prefill_chunks.h`'s stride
+rule, which Ornith and the two-card pipeline share). (c) Take 4096 with the coarser restarts (the MoE models' choice).

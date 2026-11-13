@@ -1039,10 +1039,10 @@ offsets A, B and C, so one launch serves a batched GEMM. Variants:
   Qwen3.8's walk for a chunk wider than 2048 rows. The work-groups are numbered N-fastest, so a wave of 32 covers
   8 row blocks x 4 column blocks of a slab and each row block of the activations is read once a slab instead of
   once a wave (at 2048 rows a slab is one wave either way); the conversion stores each word's eight values as one
-  2D block message. The same tiles, DPAS chain and values, so bit-identical. Qwen3.8 runs 4096-row chunks by
-  default where the memory plan has room (open-work 18): the prompt pass 5.6 % faster at pp4096 to pp32768 on
-  `l0` ([record](probes/probe-qwen-pf-gemm-2026-11-13.md), section 6). The MoE models' dense linears and every
-  chunk up to 2048 rows keep the plain binaries.
+  2D block message. The same tiles, DPAS chain and values, so bit-identical. With them Qwen3.8's 4096-row chunk
+  (`--prefill-chunk 4096`; the default stays 2048, open-work 18) makes the prompt pass 5.6 % faster at pp4096 to
+  pp32768 on `l0` ([record](probes/probe-qwen-pf-gemm-2026-11-13.md), section 6). The MoE models' dense linears
+  and every chunk up to 2048 rows keep the plain binaries.
 
 `runtime::prefill::gemm_l0` asserts every requirement before launching: `M % 256 == 0` and `N % 256 == 0` (the
 **caller** pads; the padding is computed and never read), `K % 32 == 0`, every base 64-byte aligned, leading
