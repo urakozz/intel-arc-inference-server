@@ -70,7 +70,7 @@ beginning after a stop), `export` (checkpoint names, unpacked tensors bitwise th
 `quantization_config`, `dflash_recipe.json` with the AutoRound commit and the recipe, README provenance), `check`
 (`check_gptq_export.py --dflash --source`). The export lands in
 `~/b70/hdd/quant/Qwen3.8-27B-DFlash2-W4A16-g64-<date>/`, the work beside it in `<...>.work/`. AutoRound is the
-Flash-Next pin `a6cf7487` (`AR_PATCH=0`). Smoke-tested 2026-11-13: a tiny random drafter on the box CPU (50
+latest `local-patches-v2` head of `~/auto-round` (hash recorded in the recipe; `AR_PATCH=0`; was the Flash-Next pin `a6cf7487`). Smoke-tested 2026-11-13: a tiny random drafter on the box CPU (50
 iterations cut every block's loss 2.3-8x), and the real drafter end to end through `start` on card 0 with two
 requests, 4 samples and 2 iterations (`DFLASH QUANT: OK`: 47/47 linears packed, 34 tensors bitwise the source's;
 peak 9.8 GiB RAM, 7.3 GiB VRAM). The `sources` stage finds 69 requests in the two recordings. The full run (69
