@@ -52,12 +52,20 @@ st_pre() {
   finish
 }
 
-stage g0.build 0 g0 cpu - - "build the baseline tree and the tree under test, Release, -j\$JOBS (the device code's first real compile)"
+stage g0.build 0 g0 cpu - - "build the baseline tree and the tree under test, Release, -j\$JOBS (the device code's first real compile); a complete baseline build of the same commit, build settings, compiler, ocloc and kernel series from an earlier run is reused"
 st_g0_build() {
+  local reuse=1 rc
   chk "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS" "build of the tree under test"
   x "cat $BASE/.b70-baseline-ref"
-  xb "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS"
-  step_rc $? "build of the baseline tree"
+  x "python3 tools/box_validate/baseline.py build-check --base $BASE"; reuse=$?
+  note "the baseline is built (and stamped) only when build-check says rebuild"
+  if [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; then
+    xb "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release $CMAKE_ARGS > /dev/null && cmake --build build -j$JOBS"
+    rc=$?
+    step_rc "$rc" "build of the baseline tree"
+    if [ "$rc" = 0 ]; then x "python3 tools/box_validate/baseline.py build-stamp --base $BASE"; fi
+  fi
+  grab_all baseline '^BASELINE '
   finish
 }
 
@@ -71,9 +79,16 @@ st_g0_sha() {
 
 stage g0.bitwise 0 g0 gpu qwen,oracle_qwen g0.build "the golden / prefill / replay gates, buffers_test, prefill_smoke_test, load_checkpoint_test on both builds: output identical line for line (timings dropped)"
 st_g0_bitwise() {
-  xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"
+  local reuse=1 rc
+  x "python3 tools/box_validate/baseline.py gates-check --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --device $DEVICE --out $STATE/g0.bitwise.baseline.xml"; reuse=$?
+  note "the baseline's gates run only when gates-check says its recorded output is stale"
+  if [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; then xb "$(ctest_cmd_base) -R '$G0_BITWISE_RE'"; fi
   x "python3 tools/box_validate/junit.py verdict $STATE/g0.bitwise.baseline.xml"
-  step_rc $? "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
+  rc=$?
+  step_rc "$rc" "the BASELINE build's own gates (a failure here is the box or the data, not the change)"
+  if [ "$rc" = 0 ] && { [ "${DRY:-0}" = 1 ] || [ "$reuse" != 0 ]; }; then
+    x "python3 tools/box_validate/baseline.py gates-stamp --base $BASE --re '$G0_BITWISE_RE' --snap $SNAP_QWEN --device $DEVICE --xml $STATE/g0.bitwise.baseline.xml"
+  fi
   x "ctest --test-dir build --show-only=json-v1 > $STATE/g0.bitwise.tests.json"
   x "$(ctest_cmd) -R '$G0_BITWISE_RE'"
   reuse_record "$STATE/g0.bitwise.tests.json"
@@ -82,6 +97,7 @@ st_g0_bitwise() {
   chk "python3 tools/box_validate/junit.py compare $STATE/g0.bitwise.baseline.xml $STATE/g0.bitwise.junit.xml --strip-a $BASE --strip-b $TREE --out $STATE/g0.bitwise.diff" \
     "gate output differs from the baseline's (g0.bitwise.diff)"
   grab compare '^COMPARE common='
+  grab_all baseline '^BASELINE ' 4
   jgrab golden '^golden_gate' 'golden_gate_test OK|TOTAL:'
   jgrab replay '^replay_determinism' 'kernel_count|launches|bitwise'
   jgrab prefill-smoke '^prefill_smoke_test$' '8449|8705|launch'

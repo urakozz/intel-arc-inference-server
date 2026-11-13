@@ -22,10 +22,12 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+import baseline  # noqa: E402
 import junit  # noqa: E402
 import reuse  # noqa: E402
 import summary  # noqa: E402
@@ -1267,6 +1269,137 @@ PYCODE
 
 @unittest.skipUnless(os.path.exists(os.path.join(ROOT, ".git")),
                      "validation driver needs checkout git metadata (.git is absent in rsync box trees)")
+class BaselineTest(Tmp):
+    """baseline.py: the baseline build and its recorded gate output kept while the key holds, rebuilt otherwise"""
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.p("g0-abc")
+        write(os.path.join(self.base, ".b70-baseline-ref"), "abc123\n")
+        write(os.path.join(self.base, "src", "a.cc"), "int main() {}\n")
+        write(os.path.join(self.base, "build", "CMakeCache.txt"), "CMAKE_BUILD_TYPE:STRING=Release\n")
+        write(os.path.join(self.base, "build", "kernels", "k1.bin"), "x")
+        write(os.path.join(self.base, "build", "kernels", "k2.bin"), "y")
+        write(os.path.join(self.base, "build", "CTestTestfile.cmake"), "")
+        write(os.path.join(self.base, "build", "src", "cli", "b70-decode"), "")
+        write(os.path.join(self.base, "oracle-out", "g.txt"), "golden\n")
+        write(os.path.join(self.p("snap"), "model.safetensors"), "w")
+        self.patches = [mock.patch.object(baseline.reuse, "machine", lambda: {"kernel": "7.4"}),
+                        mock.patch.object(baseline, "ocloc_version", lambda: "ocloc 1.0")]
+        for m in self.patches:
+            m.start()
+        self.addCleanup(lambda: [m.stop() for m in self.patches])
+
+    def run_cmd(self, *args):
+        with mock.patch("sys.stdout") as out:
+            rc = baseline.main(list(args))
+        return rc, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def check(self, cmake=""):
+        return self.run_cmd("build-check", "--base", self.base, f"--cmake-args={cmake}")
+
+    def stamp(self, cmake=""):
+        return self.run_cmd("build-stamp", "--base", self.base, f"--cmake-args={cmake}")
+
+    def gates(self, what, device="0", re="^(a|b)$", snap=None, extra=()):
+        return self.run_cmd(f"gates-{what}", "--base", self.base, "--re", re, "--snap", snap or self.p("snap"),
+                            "--device", device, *extra)
+
+    def test_a_build_with_no_stamp_is_rebuilt_then_reused(self):
+        rc, out = self.check()
+        self.assertEqual(rc, 1)
+        self.assertIn("BASELINE rebuild: no build stamp", out)
+        self.stamp()
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertIn("BASELINE reused: abc123", out)
+        self.assertIn("2 kernel binaries", out)
+
+    def test_every_part_of_the_key_rebuilds(self):
+        def rebuilds(why, cmake="", **patches):
+            self.stamp()
+            with mock.patch.object(baseline.reuse, "machine", patches.get("machine", lambda: {"kernel": "7.4"})), \
+                    mock.patch.object(baseline, "ocloc_version", patches.get("ocloc", lambda: "ocloc 1.0")):
+                rc, out = self.check(cmake)
+            self.assertEqual(rc, 1, why)
+            self.assertIn("BASELINE rebuild: " + why, out)
+        self.stamp()
+        self.assertEqual(self.check()[0], 0)
+        rebuilds("the CMake arguments changed ('' -> '-DX=1')", cmake="-DX=1")
+        rebuilds("the machine (kernel series) changed ({'kernel': '7.4'} -> {'kernel': '7.5'})",
+                 machine=lambda: {"kernel": "7.5"})
+        rebuilds("ocloc's version changed", ocloc=lambda: "ocloc 2.0")
+        self.stamp()
+        with open(os.path.join(self.base, "build", "CMakeCache.txt"), "a") as f:
+            f.write("B70_FOO:BOOL=ON\n")
+        self.assertIn("the sources, the build's cache settings or the compiler changed", self.check()[1])
+        self.stamp()
+        write(os.path.join(self.base, "src", "a.cc"), "int main() { return 1; }\n")
+        self.assertIn("the sources, the build's cache settings or the compiler changed", self.check()[1])
+        self.stamp()
+        write(os.path.join(self.base, ".b70-baseline-ref"), "def456\n")
+        self.assertIn("rebuild: the baseline commit changed", self.check()[1])
+
+    def test_a_kernel_kind_of_change_in_the_kernel_series_does_not_rebuild(self):
+        """reuse.py's rule: a release candidate or patch release of a series is the same machine"""
+        self.stamp()
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(baseline.reuse.kernel_series("7.4.0-070400rc2-generic"), baseline.reuse.kernel_series("7.4.3"))
+
+    def test_an_incomplete_tree_is_rebuilt(self):
+        self.stamp()
+        os.remove(os.path.join(self.base, "build", "kernels", "k2.bin"))
+        self.assertRegex(self.check()[1], "rebuild: the tree is incomplete: 1 kernel binaries, the stamp counted 2")
+        self.assertTrue(os.path.exists(os.path.join(self.base, baseline.STAMP + ".prev")), "the stamp is moved aside")
+        self.assertFalse(os.path.exists(os.path.join(self.base, baseline.STAMP)))
+        self.stamp()
+        os.remove(os.path.join(self.base, "build", "CTestTestfile.cmake"))
+        self.assertRegex(self.check()[1], "no build/CTestTestfile.cmake")
+
+    def test_a_reused_baseline_is_the_newest_for_the_tidy(self):
+        """box_tidy.sh keeps the KEEP_G0 newest baseline trees by modification time: reusing one touches it"""
+        self.stamp()
+        os.utime(self.base, (1000, 1000))
+        self.assertEqual(self.check()[0], 0)
+        self.assertGreater(os.stat(self.base).st_mtime, 1e9)
+        with open(os.path.join(ROOT, "tools", "box_tidy.sh")) as f:
+            tidy = f.read()
+        self.assertIn('ls -td ~/b70-inference-server-g0-*', tidy)
+        self.assertIn('${KEEP_G0:-2}', tidy)
+
+    def test_gate_output_is_reused_only_for_the_same_key(self):
+        xml = self.p("baseline.xml")
+        write(xml, "<testsuite/>")
+        self.stamp()
+        rc, out = self.gates("check", extra=("--out", self.p("out.xml")))
+        self.assertEqual((rc, out.strip()), (1, "BASELINE gates rerun: no recorded gate output"))
+        self.gates("stamp", extra=("--xml", xml))
+        rc, out = self.gates("check", extra=("--out", self.p("out.xml")))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("BASELINE gates reused", out)
+        with open(self.p("out.xml")) as f:
+            self.assertEqual(f.read(), "<testsuite/>")
+        for kw, why in ((dict(device="1"), "the card changed"), (dict(re="^(a)$"), "the gate list changed"),
+                        (dict(snap=self.p("other")), "the snapshot changed")):
+            rc, out = self.gates("check", extra=("--out", self.p("o.xml")), **kw)
+            self.assertEqual(rc, 1, kw)
+            self.assertIn(why, out)
+        write(os.path.join(self.base, "oracle-out", "g.txt"), "a different golden\n")
+        rc, out = self.gates("check", extra=("--out", self.p("o.xml")))
+        self.assertEqual(rc, 1)
+        self.assertIn("the golden sets or the snapshot's files changed", out)
+
+    def test_a_rebuild_drops_the_recorded_gates(self):
+        xml = self.p("baseline.xml")
+        write(xml, "<testsuite/>")
+        self.stamp()
+        self.gates("stamp", extra=("--xml", xml))
+        write(os.path.join(self.base, "src", "a.cc"), "int main() { return 2; }\n")
+        self.assertEqual(self.check()[0], 1)
+        rc, out = self.gates("check", extra=("--out", self.p("o.xml")))
+        self.assertEqual((rc, out.strip()), (1, "BASELINE gates rerun: no recorded gate output"))
+
+
 class DriverTest(unittest.TestCase):
     """tools/box_validate.sh without a box: --list, --dry-run, --registry, selection."""
 
@@ -1702,6 +1835,20 @@ class DriverTest(unittest.TestCase):
                 self.assertNotRegex(body, b, sid)
             for rx in re.findall(r"--re '([^']*)'", body):
                 self.assertEqual([t for t in pp if re.search(rx, t)], [], (sid, rx))
+
+    def test_g0_keeps_the_baseline_between_runs(self):
+        """g0.build builds the baseline only when build-check says so; g0.bitwise runs the baseline's gates only when
+        gates-check says so; both are stamped after a good run"""
+        out = self.run_driver("--dry-run", "--only", "g0").stdout
+        blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
+        b = blocks["g0.build"]
+        self.assertLess(b.index("baseline.py build-check"), b.rindex("cmake --build build"))
+        self.assertLess(b.rindex("cmake --build build"), b.index("baseline.py build-stamp"))
+        self.assertIn("record baseline", b)
+        w = blocks["g0.bitwise"]
+        self.assertLess(w.index("baseline.py gates-check"), w.index("--output-junit"))
+        self.assertLess(w.index("g0.bitwise.baseline.xml\n"), w.index("baseline.py gates-stamp"))
+        self.assertEqual(self.run_driver("--registry", "/dev/null").returncode, 0)
 
 
 def pp_labelled_tests():
