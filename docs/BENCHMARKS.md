@@ -1186,7 +1186,7 @@ regression first fails when reset overwrites guards in the immutable allocation,
 initial RoPE matches the independent twin bitwise and the ring, control and readback still reset to zero.
 Seven selected checks pass. This is a buffer measurement, not an end-to-end serving speed claim; the new
 real-engine check and full rotated replay remain pending. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
-and the completed test's `build/Testing/Temporary/LastTest.log`.
+and the preserved full test output `~/b70/logs/dflash-v2/reset-v7-green-detail.log`.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 
