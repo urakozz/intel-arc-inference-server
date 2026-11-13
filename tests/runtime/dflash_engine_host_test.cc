@@ -114,6 +114,25 @@ void head_policy_case() {
 
 }
 
+void engine_flags_case() {
+  cli::dflash::Args a;
+  a.on = true;
+  for (runtime::KvCache kv : {runtime::KvCache::Bf16, runtime::KvCache::Int8}) {
+    cli::dflash::check_engine(a, false, kv);
+    cli::dflash::check_engine(a, true, kv, true, false);
+    for (bool peer : {false, true}) {
+      bool threw = false;
+      try {
+        cli::dflash::check_engine(a, true, kv, peer, peer);
+      } catch (const std::runtime_error& e) {
+        threw = std::string(e.what()).find(peer ? "needs --pipeline-handoff copy" : "runs on one card") !=
+                std::string::npos;
+      }
+      CHECK(threw);
+    }
+  }
+}
+
 void cost_case() {
   using server::MtpCost;
   const MtpCost c = MtpCost::dflash(/*int8_head=*/true, /*int8_drafter=*/true);
@@ -166,6 +185,7 @@ int main() {
   plan_case();
   cost_case();
   head_policy_case();
+  engine_flags_case();
   std::printf("dflash_engine_host_test OK\n");
   return 0;
 }

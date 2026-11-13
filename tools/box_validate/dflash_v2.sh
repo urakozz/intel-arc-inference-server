@@ -46,7 +46,30 @@ print(f'DFLASH_EARLY tps={rate:.5f} mtp_baseline=73.2 ratio={rate / 73.2:.5f} pa
 PY
     ;;
   identity)
-    reference=$(python3 - <<'PY'
+    kv=${B70_KV_CACHE:-bf16}
+    case "$kv" in bf16|int8) ;; *) echo 'B70_KV_CACHE must be bf16 or int8'; exit 2 ;; esac
+    mkdir -p "$out/identity"
+    if [ -f "$out/identity/kv_cache" ]; then
+      [ "$(cat "$out/identity/kv_cache")" = "$kv" ] || { echo 'identity KV form changed'; exit 2; }
+    elif [ -e "$out/identity/off.r1/requests.jsonl" ] && [ "$kv" != bf16 ]; then
+      echo 'identity baseline has no int8 provenance'; exit 2
+    fi
+    printf '%s\n' "$kv" > "$out/identity/kv_cache"
+    if [ "$kv" = int8 ]; then
+      if [ ! -s "$out/identity/off.r1/requests.jsonl" ] || ! python3 -c \
+        'import json,sys; r=[json.loads(s) for s in open(sys.argv[1]) if s.strip()]; sys.exit(not (len(r)==39 and {x["set"] for x in r}=={"golden","toolcall"} and all(x.get("out_ids") for x in r)))' \
+        "$out/identity/off.r1/requests.jsonl"; then
+        if [ -d "$out/identity/off.r1" ]; then
+          mkdir -p "$out/incomplete"
+          archive=$(mktemp -d "$out/incomplete/off.XXXXXX")
+          mv "$out/identity/off.r1" "$archive/"
+        fi
+        PORT=${PORT:-8213} tools/box_validate/serve_run.sh "$out/identity/off.r1" off 1 "$target" \
+          --max-len 16384 --kv-cache int8 --spec off \
+          -- --set toolcall --set golden --max-tokens 192 --stop-at-eos
+      fi
+    else
+      reference=$(python3 - <<'PY'
 import glob, json, os
 paths = glob.glob(os.path.expanduser('~/b70-validate/b70-inference-server-validate/*/r55.serve/off.r1/requests.jsonl'))
 for path in sorted(paths, key=os.path.getmtime, reverse=True):
@@ -56,12 +79,13 @@ for path in sorted(paths, key=os.path.getmtime, reverse=True):
         break
 PY
 )
-    [ -n "$reference" ] || { echo 'SKIP: no recorded 39-prompt plain correctness baseline'; exit 77; }
-    mkdir -p "$out/identity/off.r1"
-    cp "$reference" "$out/identity/off.r1/requests.jsonl"
-    printf '%s\n' "$reference" > "$out/identity/reference.path"
+      [ -n "$reference" ] || { echo 'SKIP: no recorded 39-prompt plain correctness baseline'; exit 77; }
+      mkdir -p "$out/identity/off.r1"
+      cp "$reference" "$out/identity/off.r1/requests.jsonl"
+      printf '%s\n' "$reference" > "$out/identity/reference.path"
+    fi
     PORT=${PORT:-8213} tools/box_validate/serve_run.sh "$out/identity/dflash.r1" dflash 1 "$target" \
-      --max-len 16384 --spec dflash --draft-model "$drafter" \
+      --max-len 16384 --kv-cache "$kv" --spec dflash --draft-model "$drafter" \
       -- --set toolcall --set golden --max-tokens 192 --stop-at-eos
     python3 tools/box_validate/serve_client.py compare --dir "$out/identity" --ref off || true
     python3 tools/box_validate/serve_judge.py --dir "$out/identity" --ref off \

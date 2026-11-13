@@ -1,7 +1,7 @@
 // kv8_kernels_test - spec 12b: src/kernels/kv8.cl on the card against tests/kernels/kv8_ref.h.
 // Written blind on the Mac (2026-10-05); the box runs it first (box-validation-queue).
 //
-//   W   the writers, BITWISE: attn_prep_kv8 at M = 1..4 (QKV_S = 2; n_active < M too), the
+//   W   the writers, BITWISE: attn_prep_kv8 at M = 1..8 (QKV_S = 2; n_active < M too), the
 //       MTP head's S1 build (B70_MTP), and the prefill build (PF = 1) at C = 37 - attn_q
 //       (rotated, fp32 / bf16), attn_gate, the int8 K and V rows and their fp16 scales;
 //       rows outside [pos, pos + rows) keep their canary.
@@ -44,6 +44,11 @@ using kv8_ref::kKvH;
 using kv8_ref::kQH;
 constexpr uint32_t kQkvN = attn_ref::kQkvN, kRow = kQH * kHD, kKvRow = kKvH * kHD;
 constexpr uint32_t kTgt = runtime::DecodeScratch::kAttnV2Blocks;
+#ifdef B70_TEST_VERIFY_M8
+constexpr uint32_t kMaxM = 8;
+#else
+constexpr uint32_t kMaxM = 4;
+#endif
 constexpr int8_t kCanary = 0x5A;
 constexpr uint16_t kCanaryScale = 0xBEEF;
 
@@ -194,7 +199,7 @@ size_t check_writer(const WriterOut& o, uint32_t M, uint32_t n_act, uint32_t pos
 bool part_w(pf_harness::Dev& d) {
   size_t bad = 0;
   constexpr uint32_t kL = 128;
-  for (uint32_t M = 1; M <= 4; ++M) {
+  for (uint32_t M = 1; M <= kMaxM; ++M) {
     const PrepInputs in(2, M, kL, 100 + M);
     for (uint32_t n_act : {M, M > 1 ? M - 1 : M}) {
       const uint32_t pos = 37 + M;
@@ -202,6 +207,7 @@ bool part_w(pf_harness::Dev& d) {
                                      false, in);
       bad += check_writer(o, M, n_act, pos, kL, false, in, 2, kernels::attn_prep_kv8_variant(M).c_str());
     }
+    if (M > 4) continue;   // the MTP head's writer stays at M = 1..4
     const std::string s1 = kernels::attn_prep_s1_kv8_variant(M);
     if (have(s1)) {   // B70_MTP: the head's bf16 qkv, one slice
       const PrepInputs in1(1, M, kL, 200 + M);
@@ -287,14 +293,14 @@ bool part_d(pf_harness::Dev& d) {
   const kv8_ref::Cache c = random_cache(L, 7);
   DevCache dc(d, c);
   std::vector<std::unique_ptr<l0::Module>> mods;
-  for (uint32_t M = 1; M <= 4; ++M)
+  for (uint32_t M = 1; M <= kMaxM; ++M)
     mods.push_back(
         std::make_unique<l0::Module>(d.ctx, kernels::path(kernels::attn_v2_kv8_variant(M, kTgt))));
   // q (already rotated: any fp32 row is a valid rotated q) at a scale that makes the
   // softmax peaked as well as flat; the gate bf16-valued, as attn_prep writes it.
-  std::vector<float> q = pf_harness::random_f32(size_t(4) * kRow, 11, 0.0f, 1.0f);
+  std::vector<float> q = pf_harness::random_f32(size_t(kMaxM) * kRow, 11, 0.0f, 1.0f);
   for (size_t i = 0; i < q.size(); ++i) q[i] *= (i / kHD) % 3 == 0 ? 3.0f : 1.0f;
-  std::vector<float> g = pf_harness::random_f32(size_t(4) * kRow, 12, 0.0f, 1.5f);
+  std::vector<float> g = pf_harness::random_f32(size_t(kMaxM) * kRow, 12, 0.0f, 1.5f);
   for (float& v : g) v = common::bf16_to_f32(common::f32_to_bf16(v));
   bool ok = true;
   for (uint32_t pos : {0u, 1u, 63u, 64u, 2047u, 2048u, 2049u, 4092u, 4095u}) {
@@ -319,8 +325,8 @@ bool part_d(pf_harness::Dev& d) {
     std::printf("D M=1 pos %4u: worst head cosine %.9f, max abs %.3e, finite %d, repeat bitwise %d"
                 " -- %s\n", pos, worst, maxabs, finite, repeat, pass ? "PASS" : "FAIL");
     ok &= pass;
-    // Verify rows: M = 2..4 from pos, row m bitwise the M = 1 step at pos + m.
-    for (uint32_t M = 2; M <= 4; ++M) {
+    // Verify rows: M = 2..8 from pos, row m bitwise the M = 1 step at pos + m.
+    for (uint32_t M = 2; M <= kMaxM; ++M) {
       if (pos + M > L) continue;
       const std::vector<uint16_t> r = run_decode(d, *mods[M - 1], dc, M, pos, q, g, 0);
       bool same = true;

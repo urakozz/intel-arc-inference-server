@@ -4,7 +4,8 @@
   python3 tools/prefix/replay_spec.py RECORDING OUT [--model SNAPSHOT] [--draft-model SNAPSHOT]
 
 Takes the whole-box GPU lock, or only --card N, and forces --parallel 1. The lock helper sets device affinity.
-For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use bf16 KV,
+For a card run beside another GPU job, first confirm more than 16 CPU threads are available. All arms use the same KV
+form (B70_KV_CACHE, bf16 by default),
 the CLI's fixed int8 target head, context 131072, prefix budget 32 GiB and greedy, recorded-length requests. MTP must print
 'adaptive per step'. Writes serve_client-compatible requests.jsonl per arm/round, table.txt and the f32 judge's
 judge.log/forced contexts. Missing f32 references return 77, never a pass. Final G-speed also needs Task 8's
@@ -71,6 +72,9 @@ def run(a):
     orders = [ARMS[i % 3:] + ARMS[:i % 3] for i in range(a.rounds)]
     env = dict(os.environ)
     env.pop('B70_MTP_STEP_K', None)   # measure main's default per-step policy, even after an earlier A/B shell
+    kv_cache = env.get('B70_KV_CACHE', 'bf16')
+    if kv_cache not in ('bf16', 'int8'):
+        raise ValueError('B70_KV_CACHE must be bf16 or int8')
     url = f'http://127.0.0.1:{a.port}'
     binary = Path(env.get('B70_SERVE', str(ROOT/'build/src/cli/b70-serve')))
     if not binary.is_absolute():
@@ -92,7 +96,7 @@ def run(a):
               'recording': str(a.log.resolve()), 'recording_sha256': digest.hexdigest(),
               'binary_sha256': binary_sha, 'kernel_directory': str(kernel_dir), 'kernel_sha256': kernels,
               'prefix_cache_gb': 32, 'parallel': 1,
-              'max_len': 131072, 'kv_cache': 'bf16', 'mtp_policy': 'per-step default'}
+              'max_len': 131072, 'kv_cache': kv_cache, 'mtp_policy': 'per-step default'}
     config_path = a.out/'config.json'
     cards = {}
     if resume:
@@ -128,7 +132,7 @@ def run(a):
             if arm == 'dflash':
                 spec += ['--draft-model', a.drafter]
             command = [str(binary), a.model,
-                       '--parallel', '1', '--max-num-seqs', '1', '--max-len', '131072', '--kv-cache', 'bf16',
+                       '--parallel', '1', '--max-num-seqs', '1', '--max-len', '131072', '--kv-cache', kv_cache,
                        '--prefix-cache-gb', '32', '--port', str(a.port),
                        '--log-requests', str(logs), *spec]
             print(f'REPLAY_SPEC {arm} round {round_}, cache on', flush=True)
