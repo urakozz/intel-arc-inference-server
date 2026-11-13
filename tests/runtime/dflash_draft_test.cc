@@ -410,14 +410,20 @@ int main(int argc, char** argv) {
     runtime::dflash::DFlashBuffers b(e.ctx, d, w.target_hidden, V, 8192, w.format);
     l0::Mem control(e.ctx, l0::MemKind::Shared, sizeof(runtime::Control));
     std::memset(control.ptr(), 0, sizeof(runtime::Control));
-    runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control);
+    // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
+    const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
+    // Spec 19 v3d Task 6: the twin (Numerics::Engine) is the scalar attention part's order, so the lists compared
+    // with it - the bf16 drafter's and the forced gemv_i8w ones - bind the scalar part; the quantised drafters'
+    // production lists bind the DPAS part (dflash_kernels_test holds it to the twin by cosine) and face the f32 judge.
+    runtime::CaptureOptions lo;
+    lo.dflash_attn_dpas = quantised;
+    runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, lo);
     runtime::CapturedStep proj = runtime::dflash::build_dflash_project(e.ctx, w, b);
     std::printf("launches: draft %zu, projection %zu\n", draft.kernel_count, proj.kernel_count);
     bad += draft.kernel_count != 87 || proj.kernel_count != 8;
-    // spec 28d: the int8 drafter's lists forced onto gemv_i8w (the pre-28d binding) and the f32 judge
-    const bool quantised = f != loader::DraftFormat::Bf16;   // both quantised forms use the f32 judge
     runtime::CaptureOptions gvo;
     gvo.force_linear = runtime::LinearForce::Gemv;
+    gvo.dflash_attn_dpas = false;
     std::unique_ptr<runtime::CapturedStep> dg, pg;
     dfref::Weights tj;
     if (quantised) {
@@ -626,7 +632,7 @@ int main(int argc, char** argv) {
       runtime::dflash::DFlashBuffers bc(e.ctx, d, w.target_hidden, NV, 8192, w.format);
       e.imm.copy(bc.ring_k.ptr(), b.ring_k.ptr(), b.ring_k.size());
       e.imm.copy(bc.ring_v.ptr(), b.ring_v.ptr(), b.ring_v.size());
-      runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control);
+      runtime::CapturedStep dc = runtime::dflash::build_dflash_draft(e.ctx, w, tc, bc, control, lo);
       bc.ctl()->k = 7;
       bc.ctl()->temperature = 0.0f;
       e.run(dc);
@@ -716,12 +722,11 @@ int main(int argc, char** argv) {
                   "(%.3f ms saved); projection gemm_sm %.3f ms / gemv_i8w %.3f ms (%.3f ms saved)\n",
                   med(td), med(tg), med(tg) - med(td), med(tp), med(tq), med(tq) - med(tp));
     }
-    if (g_sets_sm + g_sets_gv > 0) {
-      const bool ok = g_sets_sm <= g_sets_gv;
-      std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d %s\n",
-                  loader::draft_format_name(f), g_sets_sm, g_sets_gv, ok ? "ok" : "FAIL");
-      bad += !ok;
-    }
+    // Recorded, not gated (operator go 2026-11-13 night): the count swings by 3-6 under attention changes at the
+    // 1e-7 cosine level; the rows' cosine against the f32 judge gates.
+    if (g_sets_sm + g_sets_gv > 0)
+      std::printf("top-16 candidates off the f32 judge's sets, summed for %s: gemm_sm %d / gemv %d (recorded)\n",
+                  loader::draft_format_name(f), g_sets_sm, g_sets_gv);
   }
   if (bad) {
     std::printf("dflash_draft_test: FAIL (%d)\n", bad);

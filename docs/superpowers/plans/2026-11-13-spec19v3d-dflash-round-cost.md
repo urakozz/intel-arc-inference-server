@@ -153,6 +153,14 @@ stays reachable through `CaptureOptions` for the A/B), `tests/kernels/dflash_ker
     identity on golden + tool calls.
   - Acceptance lost: the rounding is the suspect (the target's kernel needed the two-halves P for the same reason,
     `attn_verify_dpas.cl`'s header); fix with a failing test, do not widen the bar.
+- **Operator go 2026-11-13 night, recommendations applied (revisit in the morning):** (1) the DPAS part (q and p as
+  three bf16 terms) stays the default although it misses the 0.9 ms gate - measured 2.14 -> 1.54 ms for the 5
+  parts, a saving of 0.60 ms, the round 1.508 -> 1.486 plain steps; (2) the acceptance comparison is one-sided as
+  spec §3.2 words it - a row fails only when the engine is lower than the baseline by more than 0.05
+  (`dflash_engine_accept.py`, signed gap printed; cjk K = 3's +0.0625 passes); (3) `dflash_draft_test`'s count of
+  top-16 candidates off the f32 judge is recorded, not gated - the rows' cosine against the judge gates at its bar;
+  (4) next for the attention: occupancy first (64-key blocks, more work-groups), Step 3 only if more than 0.6 ms
+  is left and time allows.
 - [ ] **Step 3 (only if Step 2 leaves > 0.6 ms):** the ring in int8 by the target's rotation scheme (`kv8`). It
   changes `ring_bytes()` and the drafter's key, so old prefix cache entries are not restored beside it (the key
   already guards that). Same gates.
