@@ -31,8 +31,8 @@ struct DFlashBuffers {
   DFlashCtl* ctl() const { return dctl.as<DFlashCtl>(); }
   const DFlashDraftOut* readback() const { return out.as<DFlashDraftOut>(); }
   size_t bytes() const;   // == sz.total()
-  // Zero the ring and every scratch, reset the control block and the readback, and upload the RoPE table: what
-  // construction leaves and what a session reset restores (the ring then holds no position - a cold drafter).
+  // Zero the ring and every scratch, reset the control block and the readback. The immutable RoPE table is
+  // uploaded once at construction; a session reset leaves it alone (the ring then holds no position).
   void zero(l0::CmdList& imm);
 };
 

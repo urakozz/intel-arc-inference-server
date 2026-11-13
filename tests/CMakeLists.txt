@@ -3946,6 +3946,11 @@ set_tests_properties(dflash_plan_test PROPERTIES LABELS dflash)
 # the projection across the ring's wrap, a draft at p 2053, determinism, K by the control block, a sampled walk, a
 # 32768-id draft vocabulary bitwise the full head (Review Focus 3). SKIP 77 without the drafter.
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dflash_buffers_test runtime/dflash_buffers_test.cc)
+  target_include_directories(dflash_buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_buffers_test PRIVATE b70_dflash_runtime)
+  add_test(NAME dflash_buffers_test COMMAND dflash_buffers_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
+  set_tests_properties(dflash_buffers_test PROPERTIES LABELS dflash TIMEOUT 60)
   add_executable(dflash_draft_test runtime/dflash_draft_test.cc)
   b70_target_kernel_dir(dflash_draft_test)
   target_include_directories(dflash_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
