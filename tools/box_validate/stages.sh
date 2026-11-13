@@ -3850,14 +3850,14 @@ st_r86_cost() {
   grab_all costs '^DFLASH_KV|^DFLASH_COST|^DFLASH_HOST' 200
   finish
 }
-stage r86.engine 86 default card qwen,dflash,oracle_qwen_forced r86.kernels "int8 engine deferred projections, greedy K7/K3/auto, prefix ring and restored continuations"
+stage r86.engine 86 default card qwen,dflash r86.kernels "int8 engine deferred projections, greedy K7/K3/auto, prefix ring and restored continuations"
 st_r86_engine() {
   run_tests '^(dflash_engine_kv8_test|dflash_gpu_kv8_test|dflash_prefix_gpu_kv8_test)$' kv8
   finish
 }
 stage r86.pp 86 default gpu qwen,dflash r86.engine "two-card PP int8 DFlash bitwise the one-card engine"
 st_r86_pp() {
-  run_tests '^pp_dflash_kv8_test$' kv8
+  run_tests '^pp_dflash_kv8_test$' kv8 '' '-u ZE_AFFINITY_MASK'
   finish
 }
 stage r86.accept_gpu 86 optin card qwen,dflash,oracle_dflash_dumps r86.engine "int8 engine taps and EOS-stopped acceptance; compare tool calls 6.65 / code 6.08 within 0.15"
@@ -3867,14 +3867,14 @@ st_r86_accept_gpu() {
   grab_all acceptance '^DFLASH_EOS|^ENGINE_TAPS|^DFLASH_KV' 40
   finish
 }
-stage r86.identity 86 optin card qwen,dflash,oracle_qwen_forced r86.engine "one golden/toolcall round against the same int8 plain baseline, f32-judged"
+stage r86.identity 86 optin card qwen,dflash r86.engine "one golden/toolcall round against the same int8 plain baseline, f32-judged"
 st_r86_identity() {
   x "B70_KV_CACHE=int8 PORT=$PORT tools/box_validate/dflash_v2.sh identity $STATE/r86.identity $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
   BV_JUDGE_RC=$?
   step_rc "$BV_JUDGE_RC" "int8 golden/toolcall correctness"
   judged_finish
 }
-stage r86.replay 86 optin gpu qwen,dflash,oracle_qwen_forced r86.engine "three rotated int8 replay arms against default per-step MTP, prefix cache on (idle grade)"
+stage r86.replay 86 optin gpu qwen,dflash r86.engine "three rotated int8 replay arms against default per-step MTP, prefix cache on (idle grade)"
 st_r86_replay() {
   idle before
   x "B70_KV_CACHE=int8 python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 $STATE/r86.replay --model $SNAP_QWEN --draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --under-lock"
