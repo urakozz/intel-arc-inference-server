@@ -53,27 +53,34 @@ no activation-order permutation). Start with 200 tuning iterations and 128 calib
 record the pinned AutoRound commit and the actual recipe with the export. This replaces the failed at-load RTN
 experiment; int8 stays the serving format until the calibrated export passes acceptance.
 
-**Queued, not runnable yet:** implement and validate the DFlash calibration adapter, export checker and packed
-DFlash loader first. The intended operator commands are:
+**The tooling is built (branch `dflash-quant`); the packed DFlash loader is still missing**, so the export cannot be
+served or accepted yet. On the box, in the repo tree:
 
 ```sh
-# Planned entry point: tools/quantize/quantize_dflash.sh does not exist yet.
-tools/quantize/quantize_dflash.sh start    # detached; one card through gpu_lock, logs under ~/b70/logs/dflash-quant/
-tools/quantize/quantize_dflash.sh status
-tools/quantize/quantize_dflash.sh stop     # through box_stop; start should resume
+tools/quantize/quantize_dflash.sh start    # detached; card 1 (CARD=0 for the other) through gpu_lock, logs under ~/b70/logs/dflash-quant/
+tools/quantize/quantize_dflash.sh status   # stages done, taps dumped, the AutoRound block, the result
+tools/quantize/quantize_dflash.sh stop     # through tools/box_stop.sh dflash-quant; `start` again resumes
 ```
 
-The runner must calibrate the actual non-causal `DFlash2DraftModel` with block size 8 and the quantised target's
-hidden-state taps (layers 5/19/33/47/61). Use the training opencode recordings; keep A4/golden and the whole
-`opencode-session-2` out of calibration. Quantise the drafter linears, including `fc` and the selector projection;
-preserve norms, conv bases, selector codebooks and mask embedding at their source precision. Embedding and
-output head remain shared with the target, so the drafter job does not use `--quant_lm_head`. Store the export
-under `~/b70/hdd/quant/Qwen3.8-27B-DFlash2-W4A16-g64-<date>/`.
+Stages: `sources` (the requests of `opencode-session-int8` and `opencode-session` with >= 8 continuation ids, cut at
+256 ids and EOS; `opencode-session-2` is refused, A4/golden never enter), `taps` (`probe_dflash_iter --engine-taps`
+on the quantised target `urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`: layers 5/19/33/47/61 over the last 2048
+prompt positions and the continuation, 69 requests, ~8 GB, resumable per request; the probe is built if missing),
+`quant` (AutoRound on `tools/quantize/dflash/model.py`, `dflash_ref.py`'s non-causal forward batched: block size 8,
+32 blocks a sample, 128 samples, 200 iterations, seed 42, batch 8; three block lists `fc` + `hidden_norm`, the five
+layers, the selector projection, so every drafter linear is tuned; no `--quant_lm_head`; restarts from the
+beginning after a stop), `export` (checkpoint names, unpacked tensors bitwise the source's, the source's config +
+`quantization_config`, `dflash_recipe.json` with the AutoRound commit and the recipe, README provenance), `check`
+(`check_gptq_export.py --dflash --source`). The export lands in
+`~/b70/hdd/quant/Qwen3.8-27B-DFlash2-W4A16-g64-<date>/`, the work beside it in `<...>.work/`. AutoRound is the
+Flash-Next pin `a6cf7487` (`AR_PATCH=0`). Smoke-tested 2026-11-13 on a tiny random drafter (box CPU: the whole
+`quant`/`export`/`check` path, 50 iterations cut every block's loss 2.3-8x) and the `sources` stage on the real
+recordings; the `taps` stage and a real-size `quant` have not run yet.
 
 The generic `MODEL=... tools/quantize_qwen38_tuned.sh` is not a DFlash conversion command: the source config
 says `model_type=qwen3` but `architectures=[DFlash2DraftModel]`, and our current DFlash checkpoint reader accepts
-BF16 tensors rather than packed GPTQ linears. The follow-up needs both the custom calibration forward and the
-packed loader. Before promotion: validate packing/unquantised tensors, run the f32 numerical checks, compare
+BF16 tensors rather than packed GPTQ linears. The calibration forward exists now (above); the packed loader
+does not. Before promotion: validate packing/unquantised tensors, run the f32 numerical checks, compare
 all K/corpora against the original int8/full-head acceptance baseline (loss <= 0.05 tokens/verify), then G-D2
 and the updated-MTP serving comparison. Sources: [drafter config](https://huggingface.co/z-lab/Qwen3.8-27B-DFlash2/blob/main/config.json),
 [AutoRound schemes/API](https://github.com/intel/auto-round/blob/main/docs/step_by_step.md),
