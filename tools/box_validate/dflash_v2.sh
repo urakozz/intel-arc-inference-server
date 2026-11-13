@@ -62,7 +62,7 @@ PY
           -- --set toolcall --set golden --max-tokens 192 --stop-at-eos
       fi
     else
-    reference=$(python3 - <<'PY'
+      reference=$(python3 - <<'PY'
 import glob, json, os
 paths = glob.glob(os.path.expanduser('~/b70-validate/b70-inference-server-validate/*/r55.serve/off.r1/requests.jsonl'))
 for path in sorted(paths, key=os.path.getmtime, reverse=True):
@@ -72,10 +72,10 @@ for path in sorted(paths, key=os.path.getmtime, reverse=True):
         break
 PY
 )
-    [ -n "$reference" ] || { echo 'SKIP: no recorded 39-prompt plain correctness baseline'; exit 77; }
-    mkdir -p "$out/identity/off.r1"
-    cp "$reference" "$out/identity/off.r1/requests.jsonl"
-    printf '%s\n' "$reference" > "$out/identity/reference.path"
+      [ -n "$reference" ] || { echo 'SKIP: no recorded 39-prompt plain correctness baseline'; exit 77; }
+      mkdir -p "$out/identity/off.r1"
+      cp "$reference" "$out/identity/off.r1/requests.jsonl"
+      printf '%s\n' "$reference" > "$out/identity/reference.path"
     fi
     PORT=${PORT:-8213} tools/box_validate/serve_run.sh "$out/identity/dflash.r1" dflash 1 "$target" \
       --max-len 16384 --kv-cache "$kv" --spec dflash --draft-model "$drafter" \
