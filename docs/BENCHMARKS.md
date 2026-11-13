@@ -1420,6 +1420,22 @@ verify rows (1.04 / 1.07 / 1.10; the K boundaries move from 0.477 / 0.620 to 0.4
 6.53 ms): the GDN step 1.70 (of it the per-row snapshot writes), gate\|\|up 1.38, out_proj 1.19 (in list only - the
 kernel has none standalone), attention 1.09, a\|\|b 0.47, o_proj 0.19, qkv\|\|z 0.18, down 0.10, the glue 0.13.
 
+**Task 6, the drafter's attention on DPAS** (`df_attn_dpas.cl`: the part kernel on the matrix unit, q and p as three
+bf16 terms; the reduce unchanged; card 0, busy box, four process pairs against the scalar part, depth 4096): the
+5 attention parts 2.14 -> 1.54 ms, the draft pass 7.77 -> 7.25 ms (0.267 -> 0.249 plain steps), a round 44.16 ->
+43.47 ms (1.508 -> 1.486). **The 0.9 ms gate is missed** (a saving of 0.60, bar 1.2). Acceptance on the v2
+baseline's anchors: 34 of 35 corpus / K rows within 0.002, cjk K = 3 1.6875 against 1.6250 (one of 16 anchors
+accepting one more draft). The identity round: 37 of 39 requests bitwise the plain stream, 0 judged FAIL, 2 awaiting
+f32 references. `dflash_draft_test`'s count of top-16 candidates off the f32 judge (gemm_sm / gemv): scalar int8
+4 / 8, int4 5 / 6; two-term DPAS 9 / 5, 6 / 5; three-term 5 / 5, 4 / 2 - deterministic per build, swinging 3-6 under
+attention changes at the 1e-7 cosine level. The operator's rulings on the bar, the cjk row and keeping the form are
+pending.
+
+**Task 7 Step 1, the candidate selection** (same conditions, against the Task 6 build): stage 1 by a radix select
+(`df_candidate_select1`, the same 64 of each chunk; the candidates bitwise the serial picks', a 300-way tie
+included) - stage 1 0.369 -> 0.111 ms, the selection 0.444 -> **0.187 ms** (bar 0.2, a saving of 0.26), the draft
+pass 7.25 -> 6.99 ms (0.249 -> 0.240 plain steps). Kept.
+
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
 **Busy-box timing, one card (card 1), 8+ agents on the box (load 13-45); re-check on a quiet box.** b70-serve,
