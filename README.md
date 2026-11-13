@@ -5,8 +5,8 @@ optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenA
 
 - **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
 - **258 tokens per second in total** with 8 requests running at once.
-- **3,323 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**
-  (both with the int8 prompt pass as it was before 2026-11-13; re-measurement pending, see below).
+- **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**
+  (measured with the int8 prompt pass as it was before 2026-11-13; re-measurement pending, see below).
 - **Ornith 1.5 35B-A3B:** prompts read at **8,877 t/s**, answers written at **180.5 t/s on one card, 351.9 t/s on two**.
 - The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
 - **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
@@ -51,11 +51,11 @@ Prefill, t/s:
 | one card | 1,709 | 1,539 |
 | one card, `--prefill-backend l0-int8` | 2,083 | 1,845 |
 | two cards, TP | 2,939 | 2,686 |
-| two cards, TP, `--prefill-backend l0-int8` † | **3,323** | **3,048** |
+| two cards, TP, `--prefill-backend l0-int8` | **3,217** | **2,937** |
 
 Since 2026-11-13 `l0-int8` on Qwen3.8 runs int8 only in the MLP; the four attention / delta-net projections stay
 bf16, because in int8 they changed a token on a 2,820-token prompt ([docs/17](docs/17-int8-prefill.md)). The one-card
-row above is measured with it (interleaved against main: 0.92x the old form at 4,096 tokens, 1.20x bf16). Rows
+and TP rows above are measured with it (interleaved against main: 0.92x / 0.97x the old form at 4,096 tokens). Rows
 marked † were measured with the old form and are expected to come down; they wait for a quiet-box re-run.
 
 **Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt:

@@ -84,7 +84,12 @@ bf16 KV, max_len 32768, tg 32):
 | 16384 | 2673.31 | 3047.73 | 14.0% |
 
 Both cards and the CPU model lane were locked; runs overlapping compiler work
-were excluded. The original ~3700 / ~3400 figures were estimates, not thresholds
+were excluded. With int8 in the MLP only (2026-11-13; whole-box lock, interleaved against main, median of 3): 3,217
+t/s at 4,096 and 2,937 at 16,384, against main's all-int8 3,327 / 3,052 (0.967x / 0.962x). The TP int8 quality gate
+then FAILs on one row: t2_explain-loader row 32 picks a token 30.67 bf16 ulps below the f32 top (main's form picked
+another one, 2.55 ulps below; its run passes all 40). In the same session the one-card int8 pass on the same
+contexts (`--one-card`) went from 3 rejected rows on main (two on the long prompt, 63.5 and 50.3 ulps; 27.5 on
+t2_explain-linear_l0) to 1 (8.55 ulps, t6_usage-step row 61). Open: open-work item 17. The original ~3700 / ~3400 figures were estimates, not thresholds
 (operator). See the [validation record](probes/tp-int8-prefill-2026-11-11.md).
 
 ## Why decode stays int4 and bf16

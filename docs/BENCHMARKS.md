@@ -275,6 +275,11 @@ against branch `int8-mlp-only`, three rounds with the order changed each round, 
 `l0-int8` against `l0`: 1.20x / 1.18x (main's all-int8 form 1.30x / 1.26x); against main's form 0.923x / 0.931x.
 `l0` is the same build either side (its logs bitwise main's). Logs on the box: `~/b70/logs/int8-mlp-only/speed1.log`.
 
+Tensor parallel, `--parallel tp --prefill-backend l0-int8`, the same flags, whole-box lock, main and branch
+alternating, median of 3: pp4096 main 3326.71 (3321.90, 3330.55, 3326.71), branch **3216.84** (3216.84, 3211.37,
+3220.44), 0.967x; pp16384 main 3051.82 (3051.36, 3053.30, 3051.82), branch **2937.33** (2940.09, 2933.36, 2937.33),
+0.962x. Launches 22158 -> 21646 / 88602 -> 86554 (both cards). Log `~/b70/logs/int8-mlp-only/box1.log`.
+
 ### The Level Zero backend, and what it was worth
 
 Before 2026-09-18 the prefill GEMM was sycl-tla's, called from SYCL, with a
