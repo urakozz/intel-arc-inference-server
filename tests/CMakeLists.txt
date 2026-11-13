@@ -3874,6 +3874,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K64
        kernel_df_rerank_R7_K5120_U248077_C64_Q4)
   list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_proj_wide_H5120_KV8_D128_R2048)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
   endforeach()
