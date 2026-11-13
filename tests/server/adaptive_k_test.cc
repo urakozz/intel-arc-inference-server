@@ -85,13 +85,15 @@ void test_model() {
   CHECK_EQ(bf.best(0.70), 3U);
   CHECK_EQ(bf.best(0.97), 3U);   // tool-call output
   o.cost = MtpCost::int8_head();
-  const AdaptiveK i8(o);   // int8: 0 | 0.171 | 1 | 0.477 | 2 | 0.620 | 3
+  // int8 on spec 19 v3d's rows (1.04 / 1.07 / 1.10): 0 | 0.170 | 1 | 0.445 | 2 | 0.607 | 3 (on 28b's 1.04 / 1.09 /
+  // 1.13: 0 | 0.171 | 1 | 0.477 | 2 | 0.620 | 3)
+  const AdaptiveK i8(o);
   CHECK_EQ(i8.best(0.16), 0U);
   CHECK_EQ(i8.best(0.18), 1U);
-  CHECK_EQ(i8.best(0.47), 1U);
-  CHECK_EQ(i8.best(0.49), 2U);
-  CHECK_EQ(i8.best(0.61), 2U);
-  CHECK_EQ(i8.best(0.63), 3U);
+  CHECK_EQ(i8.best(0.43), 1U);
+  CHECK_EQ(i8.best(0.46), 2U);
+  CHECK_EQ(i8.best(0.60), 2U);
+  CHECK_EQ(i8.best(0.62), 3U);
   CHECK_EQ(i8.best(0.97), 3U);
   std::printf("model: E(K), rates and the K boundaries per table\n");
 }
@@ -104,7 +106,7 @@ void test_dflash_measured_cost() {
   for (double d : c.draft) CHECK_NEAR(d, 0.298136, 1e-12);
   CHECK_NEAR(c.draft[0] * MtpCost::dflash_head_share(true, true), 2.166354 / 29.222498, 1e-12);
   const auto candidate = MtpCost::dflash(true, 1u, true);
-  const double verify_candidate[] = {0.997314, 1.045223, 1.094038, 1.114742, 1.161674, 1.208605, 1.230177, 1.242865};
+  const double verify_candidate[] = {1.000724, 1.046551, 1.085038, 1.111966, 1.158179, 1.189338, 1.213403, 1.228606};
   for (size_t i = 0; i < 8; ++i) CHECK_NEAR(candidate.verify[i], verify_candidate[i], 1e-12);
   for (double d : candidate.draft) CHECK_NEAR(d, 0.287036, 1e-12);
   const auto int4 = MtpCost::dflash(true, 2u);
