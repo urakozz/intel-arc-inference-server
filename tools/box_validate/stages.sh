@@ -3819,6 +3819,71 @@ st_r85_span() {
   finish
 }
 
+# ======================================================================================
+row 86 "spec 19v3a - DFlash with int8 KV: new M5..8 binaries, one-card and PP serving, acceptance and replay"
+rownote 86 "Implementation checked with a focused smoke run only (operator 2026-11-13). Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop for the operator below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
+stage r86.k0 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
+st_r86_k0() {
+  run_tests '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'
+  finish
+}
+stage r86.kernels 86 default card - r86.k0 "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
+st_r86_kernels() {
+  run_tests '^(attn_verify_dpas_test|attn_verify_dpas_kv8_m8_test|kv8_kernels_test|attn_verify_bitwise_test)$'
+  finish
+}
+stage r86.cost 86 optin gpu qwen,dflash r86.kernels "paired real-list costs over bf16/int8 KV at 4096/32768; no policy calibration without measurements"
+st_r86_cost() {
+  idle before
+  local depth round kv order
+  for depth in 4096 32768; do
+    for round in 0 1 2 3; do
+      order='bf16 int8'
+      [ "$round" = 2 ] && order='int8 bf16'
+      for kv in $order; do
+        chk "B70_KV_CACHE=$kv build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --format int8 --candidate-head --depth $depth --rounds 1 > $STATE/r86.cost.$depth.$round.$kv.log" "cost $kv depth $depth pair $round (0 = warm-up)"
+        x "cat $STATE/r86.cost.$depth.$round.$kv.log"
+      done
+    done
+  done
+  idle after
+  grab_all costs '^DFLASH_KV|^DFLASH_COST|^DFLASH_HOST' 200
+  finish
+}
+stage r86.engine 86 default card qwen,dflash,oracle_qwen_forced r86.kernels "int8 engine deferred projections, greedy K7/K3/auto, prefix ring and restored continuations"
+st_r86_engine() {
+  run_tests '^(dflash_engine_kv8_test|dflash_gpu_kv8_test|dflash_prefix_gpu_kv8_test)$' kv8
+  finish
+}
+stage r86.pp 86 default gpu qwen,dflash r86.engine "two-card PP int8 DFlash bitwise the one-card engine"
+st_r86_pp() {
+  run_tests '^pp_dflash_kv8_test$' kv8
+  finish
+}
+stage r86.accept_gpu 86 optin card qwen,dflash,oracle_dflash_dumps r86.engine "int8 engine taps and EOS-stopped acceptance; compare tool calls 6.65 / code 6.08 within 0.15"
+st_r86_accept_gpu() {
+  chk "tools/box_validate/dflash_v2.sh sources $STATE/r86.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "int8 acceptance sources"
+  chk "B70_KV_CACHE=int8 tools/box_validate/dflash_v2.sh gpu $STATE/r86.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "int8 engine taps and live drafts"
+  grab_all acceptance '^DFLASH_EOS|^ENGINE_TAPS|^DFLASH_KV' 40
+  finish
+}
+stage r86.identity 86 optin card qwen,dflash,oracle_qwen_forced r86.engine "one golden/toolcall round against the same int8 plain baseline, f32-judged"
+st_r86_identity() {
+  x "B70_KV_CACHE=int8 PORT=$PORT tools/box_validate/dflash_v2.sh identity $STATE/r86.identity $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "int8 golden/toolcall correctness"
+  judged_finish
+}
+stage r86.replay 86 optin gpu qwen,dflash,oracle_qwen_forced r86.engine "three rotated int8 replay arms against default per-step MTP, prefix cache on (idle grade)"
+st_r86_replay() {
+  idle before
+  x "B70_KV_CACHE=int8 python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 $STATE/r86.replay --model $SNAP_QWEN --draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --under-lock"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "int8 replay speed and f32 judgments"
+  idle after
+  judged_finish
+}
+
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
 stage x.rest x default gpu qwen,oracle_qwen - "ctest over every registered test without a result in this run (Ornith / kv8 / k2 / longctx / kolibri / qwen4exp / dflash / bolt / lilicorr / tp labels belong to their rows)"
 st_x_rest() {
