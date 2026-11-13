@@ -34,7 +34,9 @@ const uint8_t* at(const void* p, size_t off) { return static_cast<const uint8_t*
 class Walk {
  public:
   Walk(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b, const CaptureOptions& opt)
-      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {}
+      : ctx_(ctx), w_(w), d_(w.desc), b_(b), opt_(opt), step_{l0::CmdList::regular(ctx), 0, {}, {}, {}} {
+    if (opt_.profile) opt_.profile->events.clear();
+  }
 
   CapturedStep draft(const DFlashTarget& t, const l0::Mem& control) {
     check_common();
@@ -45,6 +47,8 @@ class Walk {
     require(t.vocab_rows == d_.vocab && t.embed->size() >= size_t(t.vocab_rows) * d_.hidden * 2,
             "the target's embedding / vocabulary is not the drafter's (vocab_size " + std::to_string(d_.vocab) + ")");
     const bool compact = t.ids != nullptr;
+    require(!w_.candidate_head || (!compact && t.head->kind == model::WeightKind::Int8),
+            "the int4 candidate head requires a full int8 target head for exact rerank");
     const uint32_t N = t.head->shape.N;
     if (compact) {
       bool known = false;
@@ -57,9 +61,9 @@ class Walk {
     require(b_.head_rows == N, "the buffers were sized for a head of " + std::to_string(b_.head_rows) + " rows, not " +
                                    std::to_string(N));
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
-    const bool int8 = w_.format == loader::DraftFormat::Int8;
-    for (const std::string& v : kd::draft_variants(d_.v2(), int8, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind()))
+    const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
+    for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
+                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -67,7 +71,8 @@ class Walk {
 
     layer_ = -1;
     {   // df_embed(ctrl, embed, mask_row, in_scale, resid), grid (1, M)
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_embed", kd::kWg);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_embed", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, t.embed->ptr());
       k.arg_ptr(2, w_.mask_row->ptr());
@@ -92,7 +97,8 @@ class Walk {
       }
       gemv(L.qkv, qkv_in, b_.gout.ptr());
       {   // df_qkv_prep(ctrl, qkv, qn_kn, rope, q, kb, vb), grid (NH + 2 NKV, M), WG HD
-        l0::Kernel& k = kernel(kd::prep_variant(), "df_qkv_prep", d_.head_dim);
+        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_qkv_prep", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.gout.ptr());
         k.arg_ptr(2, at(w_.qk_norm->ptr(), loader::dflash_qk_norm_off(d_, l, 0) * 4));
@@ -103,7 +109,7 @@ class Walk {
         launch(k, d_.q_heads + 2 * d_.kv_heads, M);
       }
       {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128
-        l0::Kernel& k = kernel(kd::attn_variant(), "df_attn_part", kd::kAttnWg);
+        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -111,10 +117,11 @@ class Walk {
         k.arg_ptr(4, at(b_.ring_v.ptr(), l * ring_layer));
         k.arg(5, scale_);
         k.arg_ptr(6, b_.part.ptr());
-        launch(k, d_.kv_heads, d_.window[l] / kd::kAttnPb);
+        launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
+               d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
       {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
-        l0::Kernel& k = kernel(kd::attn_variant(), "df_attn_reduce", d_.head_dim);
+        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.part.ptr());
@@ -137,7 +144,8 @@ class Walk {
       }
       gemv(L.gate_up, mlp_in, b_.gout.ptr());
       {   // df_silu_mul(gu, a), grid (ceil(I / 256), M)
-        l0::Kernel& k = kernel(kd::prep_variant(), "df_silu_mul", kd::kWg);
+        l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_silu_mul", kd::kWg);
         k.arg_ptr(0, b_.gout.ptr());
         k.arg_ptr(1, b_.xa.ptr());
         launch(k, (d_.inter + kd::kWg - 1) / kd::kWg, M);
@@ -147,40 +155,68 @@ class Walk {
     }
     layer_ = -1;
     norm(b_.resid.ptr(), w_.final_norm->as<float>());
-    // the target's head over rows 1..7 (the mask rows), at M 7
-    {
-      const loader::DeviceWeight& hw = *t.head;
-      if (hw.kind == model::WeightKind::Int8) {
-        i8_linear(kd::kR, H, N, hw.mem.ptr(), hw.scales->ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
-      } else {
-        const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(N);
-        l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kR, H, N, tl), "gemv_bf16", tl.cols * tl.ksplit);
-        k.arg_ptr(0, hw.mem.ptr());
-        k.arg_ptr(1, at(b_.x.ptr(), size_t(H) * 2));
-        k.arg_ptr(2, b_.logits.ptr());
-        launch(k, N / tl.cols);
+    if (w_.candidate_head) {
+      i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
+      {
+        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage1", kd::kWg);
+        k.arg_ptr(0, b_.logits.ptr());
+        k.arg_ptr(1, b_.tpart.ptr());
+        launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
       }
-    }
-    const std::string tv = kd::topk_variant(N, compact ? N : t.vocab_used, compact);
-    {   // df_topk_stage1(logits, part), grid (chunks, R)
-      l0::Kernel& k = kernel(tv, "df_topk_stage1", kd::kWg);
-      k.arg_ptr(0, b_.logits.ptr());
-      k.arg_ptr(1, b_.tpart.ptr());
-      launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
-    }
-    {   // df_topk_stage2(part, ids, out_mult, softcap, cand, unary), grid (R)
-      l0::Kernel& k = kernel(tv, "df_topk_stage2", kd::kWg);
-      k.arg_ptr(0, b_.tpart.ptr());
-      k.arg_ptr(1, compact ? t.ids->ptr() : b_.cand.ptr());   // the full head's build never reads it
-      k.arg(2, d_.out_mult);
-      k.arg(3, d_.softcap);
-      k.arg_ptr(4, b_.cand.ptr());
-      k.arg_ptr(5, b_.unary.ptr());
-      launch(k, kd::kR);
+      {
+        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage2", kd::kWg);
+        k.arg_ptr(0, b_.tpart.ptr());
+        k.arg_ptr(1, b_.candidate->ptr());
+        launch(k, kd::kR);
+      }
+      {
+        auto& k = kernel(kd::rerank_variant(), "df_rerank", kd::kWg);
+        k.arg_ptr(0, t.head->mem.ptr());
+        k.arg_ptr(1, t.head->scales->ptr());
+        k.arg_ptr(2, at(b_.x.ptr(), size_t(H) * 2));
+        k.arg_ptr(3, b_.candidate->ptr());
+        k.arg(4, d_.out_mult);
+        k.arg(5, d_.softcap);
+        k.arg_ptr(6, b_.cand.ptr());
+        k.arg_ptr(7, b_.unary.ptr());
+        launch(k, kd::kR);
+      }
+    } else {
+      // the target's head over rows 1..7 (the mask rows), at M 7
+      {
+        const loader::DeviceWeight& hw = *t.head;
+        if (hw.kind == model::WeightKind::Int8) {
+          i8_linear(kd::kR, H, N, hw.mem.ptr(), hw.scales->ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
+        } else {
+          const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(N);
+          l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kR, H, N, tl), "gemv_bf16", tl.cols * tl.ksplit);
+          k.arg_ptr(0, hw.mem.ptr());
+          k.arg_ptr(1, at(b_.x.ptr(), size_t(H) * 2));
+          k.arg_ptr(2, b_.logits.ptr());
+          launch(k, N / tl.cols);
+        }
+      }
+      const std::string tv = kd::topk_variant(N, compact ? N : t.vocab_used, compact);
+      {   // df_topk_stage1(logits, part), grid (chunks, R)
+        l0::Kernel& k = kernel(tv, "df_topk_stage1", kd::kWg);
+        k.arg_ptr(0, b_.logits.ptr());
+        k.arg_ptr(1, b_.tpart.ptr());
+        launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
+      }
+      {   // df_topk_stage2(part, ids, out_mult, softcap, cand, unary), grid (R)
+        l0::Kernel& k = kernel(tv, "df_topk_stage2", kd::kWg);
+        k.arg_ptr(0, b_.tpart.ptr());
+        k.arg_ptr(1, compact ? t.ids->ptr() : b_.cand.ptr());   // the full head's build never reads it
+        k.arg(2, d_.out_mult);
+        k.arg(3, d_.softcap);
+        k.arg_ptr(4, b_.cand.ptr());
+        k.arg_ptr(5, b_.unary.ptr());
+        launch(k, kd::kR);
+      }
     }
     if (d_.v2()) gemv(*w_.sel_proj, b_.x.ptr(), b_.hid->ptr());
     {   // df_select(ctrl, dctl, cand, unary, hid, pred, succ, out), grid (1), WG 256
-      l0::Kernel& k = kernel(kd::select_variant(d_.v2()), "df_select", kd::kWg);
+      l0::Kernel& k = kernel(kd::select_variant(d_.v2(), kd::kQwen38, w_.format == loader::DraftFormat::Int4G64), "df_select", kd::kWg);
       k.arg_ptr(0, ctrl);
       k.arg_ptr(1, b_.dctl.ptr());
       k.arg_ptr(2, b_.cand.ptr());
@@ -192,21 +228,22 @@ class Walk {
       k.arg_ptr(7, b_.out.ptr());
       launch(k, 1);
     }
-    return finish(draft_launches(d_), "draft");
+    return finish(draft_launches(d_, bool(w_.candidate_head)), "draft");
   }
 
   CapturedStep project() {
     check_common();
-    const bool int8 = w_.format == loader::DraftFormat::Int8;
-    for (const std::string& v : {kd::prep_variant(),
-                                 kd::linear_variant(int8, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
-                                 kd::linear_variant(int8, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
+    const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
+    for (const std::string& v : {kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                                 kd::linear_variant(fmt, kd::kM, d_.fc_k(w_.target_hidden), d_.hidden, lkind()),
+                                 kd::linear_variant(fmt, kd::kM, d_.hidden, 2 * d_.kv_n(), lkind())})
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     layer_ = -1;
     gemv(*w_.fc, b_.taps.ptr(), b_.gout.ptr());
     {   // df_norm(src, w, h, x) with hidden_norm
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_norm", kd::kWg);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             w_.format == loader::DraftFormat::Int4G64 ? "df_norm_fc" : "df_norm", kd::kWg);
       k.arg_ptr(0, b_.gout.ptr());
       k.arg_ptr(1, w_.hidden_norm->ptr());
       k.arg_ptr(2, b_.h.ptr());
@@ -218,8 +255,12 @@ class Walk {
       layer_ = int(l);
       const loader::DeviceWeight& qkv = w_.layers[l].qkv;
       const size_t K = d_.hidden, rows = d_.q_n(), n = 2 * d_.kv_n();
-      void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * kd::kM * n * 4));
-      if (qkv.kind == model::WeightKind::Int8) {
+      const unsigned S = w_.format == loader::DraftFormat::Int4G64 ? kd::int4_slices(uint32_t(K), uint32_t(n)) : 1;
+      void* out = const_cast<uint8_t*>(at(b_.kv.ptr(), size_t(l) * S * kd::kM * n * 4));
+      if (qkv.kind == model::WeightKind::Int4) {
+        i4_linear(kd::kM, uint32_t(K), uint32_t(n),
+                  at(qkv.mem.ptr(), loader::dflash_linear_bytes(uint32_t(K), uint32_t(rows), w_.format)), b_.x.ptr(), out);
+      } else if (qkv.kind == model::WeightKind::Int8) {
         // the int8 tiles are [N/16][K/16][16][16]: row q_n (a multiple of 16) starts tile q_n / 16
         i8_linear(kd::kM, uint32_t(K), uint32_t(n), at(qkv.mem.ptr(), rows * K), at(qkv.scales->ptr(), rows * 4),
                   b_.x.ptr(), out);
@@ -235,7 +276,8 @@ class Walk {
     }
     layer_ = -1;
     {   // df_ctx_store(dctl, kv, qk_norm, rope, ring_k, ring_v), grid (L x 2 NKV, M), WG HD
-      l0::Kernel& k = kernel(kd::prep_variant(), "df_ctx_store", d_.head_dim);
+      l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_ctx_store", d_.head_dim);
       k.arg_ptr(0, b_.dctl.ptr());
       k.arg_ptr(1, b_.kv.ptr());
       k.arg_ptr(2, w_.qk_norm->ptr());
@@ -273,7 +315,8 @@ class Walk {
   }
 
   void norm(const void* src, const float* w) {   // df_norm(src, w, h, x), grid (1, M)
-    l0::Kernel& k = kernel(kd::prep_variant(), "df_norm", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_norm", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, w);
     k.arg_ptr(2, b_.h.ptr());
@@ -282,7 +325,8 @@ class Walk {
   }
   // df_conv_prep(src, co, base, out) (prepare: out bf16) - only the prepare side goes through here.
   void conv(bool prep, const void* src, const void* base, const void* out) {
-    l0::Kernel& k = kernel(kd::prep_variant(), prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                           prep ? "df_conv_prep" : "df_conv_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.co->ptr());
     k.arg_ptr(2, base);
@@ -295,20 +339,27 @@ class Walk {
       conv(false, src, base, b_.resid.ptr());
       return;
     }
-    l0::Kernel& k = kernel(kd::prep_variant(), "df_add", kd::kWg);
+    l0::Kernel& k = kernel(kd::prep_variant(kd::kQwen38, w_.format == loader::DraftFormat::Int4G64),
+                             "df_add", kd::kWg);
     k.arg_ptr(0, src);
     k.arg_ptr(1, b_.resid.ptr());
     launch(k, (d_.hidden + kd::kWg - 1) / kd::kWg, kd::kM);
   }
   // The int8 linears' kernel (runtime/gemv_kind.h): the lists are M >= 2, so SmallM unless a test forces gemv.
   kernels::LinearKind lkind() const { return linear_kind(kd::kM, opt_); }
+  kernels::LinearKind hkind() const {
+    CaptureOptions head = opt_;
+    if (head.force_dflash_head != LinearForce::Auto) head.force_linear = head.force_dflash_head;
+    return linear_kind(kd::kR, head);
+  }
   // An int8 linear at M rows (spec 28d): gemm_sm_i8w(w, scales, x, out) at the shape's kSmallMTuning row - the
   // in-work-group split-K, grid N / 32, WG 256 - or, forced, gemv_i8w(w, scales, x, out), grid N / 64, WG 64. The same
   // arguments, the same [M][N] fp32 output, scaled.
   void i8_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* scales, const void* x, const void* out) {
+    const auto kind = M == kd::kR ? hkind() : lkind();
     const kernels::SmallMTuning* t =
-        lkind() == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
-    require(lkind() == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 linear " + std::to_string(K) +
+        kind == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, 1, 2) : nullptr;
+    require(kind == kernels::LinearKind::Gemv || t, "no gemm_sm_i8w row for the int8 linear " + std::to_string(K) +
                                                            " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
     l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
                       : kernel(kernels::gemv_i8w_variant(M, K, N), "gemv_i8w", kernels::kGemvI8wCols);
@@ -321,13 +372,34 @@ class Walk {
     else
       launch(k, N / kernels::kGemvI8wCols);
   }
-  // A drafter linear at the block's M rows: the int8 linear above or gemv_bf16(w, x, out).
+  // Int4 g64 layout 1, grid split-K, at the block's M rows; scales travel inside the weight tiles.
+  void i4_linear(uint32_t M, uint32_t K, uint32_t N, const void* w, const void* x, const void* out) {
+    const unsigned S = kd::int4_slices(K, N);
+    const auto kind = M == kd::kR ? hkind() : lkind();
+    const kernels::SmallMTuning* t =
+        kind == kernels::LinearKind::SmallM ? kernels::small_m_tuning(K, N, S, 1) : nullptr;
+    require(kind == kernels::LinearKind::Gemv || t, "no gemm_sm row for the int4 linear " + std::to_string(K) +
+                                                       " x " + std::to_string(N) + " (kernels::kSmallMTuning)");
+    l0::Kernel& k = t ? kernel(kernels::gemm_sm_variant(M, *t), kernels::gemm_sm_entry(*t), kernels::gemm_sm_wg_size(*t))
+                      : kernel(kernels::gemv_variant(M, K, N, S, 1), "gemv", 64);
+    k.arg_ptr(0, w);
+    k.arg_ptr(1, w);
+    k.arg_ptr(2, x);
+    k.arg_ptr(3, out);
+    if (t)
+      launch(k, N / kernels::gemm_sm_cols(*t), kernels::gemm_sm_grid_y(*t));
+    else
+      launch(k, N / 64, S);
+  }
+  // A drafter linear at the block's M rows: a quantised linear above or gemv_bf16(w, x, out).
   void gemv(const loader::DeviceWeight& w, const void* x, const void* out) {
     const model::GemvShape& s = w.shape;
-    if (w.kind == model::WeightKind::Int8) {
+    if (w.kind == model::WeightKind::Int4) {
+      i4_linear(kd::kM, s.K, s.N, w.mem.ptr(), x, out);
+    } else if (w.kind == model::WeightKind::Int8) {
       i8_linear(kd::kM, s.K, s.N, w.mem.ptr(), w.scales->ptr(), x, out);
     } else {
-      require(w.kind == model::WeightKind::Bf16, "a drafter linear is neither int8 nor bf16");
+      require(w.kind == model::WeightKind::Bf16, "a drafter linear is not int4, int8 or bf16");
       const kernels::GemvBf16Tiling tl = kernels::gemv_bf16_tiling(s.N);
       l0::Kernel& k = kernel(kernels::gemv_bf16_variant(kd::kM, s.K, s.N, tl), "gemv_bf16", tl.cols * tl.ksplit);
       k.arg_ptr(0, w.mem.ptr());
@@ -348,9 +420,15 @@ class Walk {
     pending_variant_ = variant;
     return k;
   }
-  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1) {
+  void launch(l0::Kernel& k, uint32_t gx, uint32_t gy = 1, uint32_t gz = 1) {
     require(!pending_entry_.empty(), "launch() without a preceding kernel()");
-    step_.list.launch(k, gx, gy, 1, nullptr);
+    l0::Event* event = nullptr;
+    if (opt_.profile) {
+      require(step_.kernel_count < opt_.profile->pool.capacity(), "the profile event pool is full");
+      opt_.profile->events.emplace_back(opt_.profile->pool, uint32_t(step_.kernel_count));
+      event = &opt_.profile->events.back();
+    }
+    step_.list.launch(k, gx, gy, gz, event);
     step_.labels.push_back((layer_ < 0 ? std::string("--") : "D" + std::to_string(layer_)) + " " + pending_entry_ +
                            " " + pending_variant_);
     pending_entry_.clear();

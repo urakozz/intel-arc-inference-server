@@ -17,6 +17,7 @@
 // usage: dflash_gpu_test <target snapshot> <drafter>   (cwd = the source tree). SKIP 77 without either.
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -38,6 +39,7 @@
 #include "runtime/dflash/dflash_drafter.h"
 #include "runtime/engine.h"
 #include "server/adaptive_k.h"
+#include "server/openai.h"
 
 namespace {
 using golden::read_ids;
@@ -71,7 +73,7 @@ struct Gen {
 // `steps` (the plain run only): after every step() the row that decided the next id; steps[i] belongs to ids[i].
 Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, const server::Sampling& s,
              uint32_t k_fixed, bool policy, std::vector<greedy_tie::RefStep>* steps = nullptr,
-             runtime::Engine* eng = nullptr) {
+             runtime::Engine* eng = nullptr, const std::vector<uint32_t>* eos = nullptr) {
   a.reset();
   a.prefill(prompt);
   Gen g;
@@ -103,9 +105,18 @@ Gen generate(EngineAdapter& a, const std::vector<uint32_t>& prompt, uint32_t n, 
     ++g.iters;
     g.drafted += k;
     g.accepted += burst.size() - 1;
-    const size_t keep = std::min<size_t>(burst.size(), n - g.ids.size());
+    size_t keep = std::min<size_t>(burst.size(), n - g.ids.size());
+    bool stopped = false;
+    if (eos)
+      for (size_t j = 0; j < keep; ++j)
+        if (std::find(eos->begin(), eos->end(), burst[j]) != eos->end()) {
+          keep = j + 1;
+          stopped = true;
+          break;
+        }
     g.ids.insert(g.ids.end(), burst.begin(), burst.begin() + keep);
     if (keep < burst.size()) a.truncate_to(a.pos() - uint32_t(burst.size() - keep));
+    if (stopped) break;
   }
   return g;
 }
@@ -131,6 +142,49 @@ int main(int argc, char** argv) {
   EngineAdapter a(e, model::Qwen35::kVocabUsed, kK, /*lookup=*/false, /*dflash=*/true);
   bool ok = true;
   server::Sampling greedy;   // greedy = true by default
+  std::ifstream gen_config(snap + "/generation_config.json");
+  nlohmann::json generation;
+  gen_config >> generation;
+  const auto eos = server::generation_eos_ids(generation);
+
+  // The last burst stays truncatable; request-end snapshots flush its projection exactly once.
+  {
+    a.reset();
+    a.prefill(read_ids("tests/golden/prompts/code.ids"));
+    const uint32_t pos = e.pos(), anchor = e.control()->cur_token[0];
+    l0::Mem initial(ctx, l0::MemKind::Host, e.state_bytes()), kv(ctx, l0::MemKind::Host, e.kv_bytes(pos));
+    l0::Mem expected(ctx, l0::MemKind::Host, e.state_bytes()), actual(ctx, l0::MemKind::Host, e.state_bytes());
+    a.save_state(initial.ptr());
+    a.save_kv(0, pos, kv.ptr());
+    auto restore = [&] {
+      a.load_state(initial.ptr(), pos);
+      a.load_kv(0, pos, kv.ptr());
+      e.control()->cur_token[0] = anchor;
+    };
+    for (bool truncate : {false, true}) {
+      restore();
+      const auto out = d.draft(e, kK, 0.0f, 0);
+      e.verify(kK);
+      uint32_t accepted = 0;
+      while (accepted < kK && out.ids[accepted] == e.verify_ids()[accepted]) ++accepted;
+      if (truncate) accepted = 0;
+      const uint32_t next = e.verify_ids()[accepted];
+      e.commit(accepted, next);
+      e.save_state(expected.ptr());
+      restore();
+      const uint64_t before = e.queue_submissions();
+      (void)a.step_many(greedy, kK);
+      CHECK(e.queue_submissions() == before + 1);
+      if (truncate) a.truncate_to(pos + 1);
+      a.save_state(actual.ptr());
+      CHECK(e.queue_submissions() == before + 2);
+      CHECK(a.pos() == pos + accepted + 1 && e.control()->cur_token[0] == next);
+      CHECK(std::memcmp(expected.ptr(), actual.ptr(), e.state_bytes()) == 0);
+      a.flush_commit();
+      CHECK(e.queue_submissions() == before + 2);
+    }
+    std::printf("BATCH: truncated and complete request-end snapshots bitwise; one final projection\n");
+  }
 
   // --- D2 -------------------------------------------------------------------------------------------------
   uint64_t tot_iters[3] = {}, tot_ids[3] = {}, fails = 0, ties = 0, beyond = 0, judged = 0;
@@ -157,6 +211,10 @@ int main(int argc, char** argv) {
       tot_iters[i] += g.iters;
       tot_ids[i] += kGen;
     }
+    const Gen stopped = generate(a, p.ids, kGen, greedy, kK, false, nullptr, nullptr, &eos);
+    std::printf("EOS %-28s K=7 %zu ids, %llu iterations, %.3f ids an iteration\n", p.name.c_str(),
+                stopped.ids.size(), (unsigned long long)stopped.iters,
+                double(stopped.ids.size()) / double(std::max<uint64_t>(1, stopped.iters)));
   }
   std::printf("D2: %llu failing runs (spec 28 N6); tie census %llu near-ties, %llu beyond the 1-ulp rule, %llu judged by "
               "f32; ids an iteration K=7 %.2f, K=3 %.2f, auto %.2f\n",

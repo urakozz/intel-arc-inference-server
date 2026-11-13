@@ -780,7 +780,7 @@ int serve_pipeline(l0::Context& d0, const PipeServe& a, server::Options options)
     for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, " (plain steps; derived until the box measures them)\n");
+    std::fprintf(stderr, " (plain steps)\n");
   }
   return listen_until_stopped(server, options);
 }
@@ -1614,7 +1614,7 @@ int run(int argc, char** argv) {
     for (double v : c.verify) std::fprintf(stderr, " %.3f", v);
     std::fprintf(stderr, ", draft k=1..%zu", c.draft.size());
     for (double v : c.draft) std::fprintf(stderr, " %.3f", v);
-    std::fprintf(stderr, " (plain steps; derived until the box measures them)\n");
+    std::fprintf(stderr, " (plain steps)\n");
     if (dflash_lookup)   // spec 19f
       std::fprintf(stderr,
                    "spec dflash-lookup: prompt lookup inside DFlash - ENTER a match of >= %u ids beyond the drafter's "

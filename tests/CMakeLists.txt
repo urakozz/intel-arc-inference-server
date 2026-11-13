@@ -3841,6 +3841,11 @@ target_link_libraries(dflash_loader_test PRIVATE b70_dflash_loader)
 add_test(NAME dflash_loader_test COMMAND dflash_loader_test
   ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
 set_tests_properties(dflash_loader_test PROPERTIES LABELS dflash)
+add_executable(dflash_head_test loader/dflash_head_test.cc)
+target_include_directories(dflash_head_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+target_link_libraries(dflash_head_test PRIVATE b70_dflash_loader)
+add_test(NAME dflash_head_test COMMAND dflash_head_test)
+set_tests_properties(dflash_head_test PROPERTIES LABELS dflash)
 # Task 1 (device half): load_drafter beside the int4 gate checkpoint (int8 head), both formats - the bytes against
 # the layout formula, linears / norms / codebook rows / the mask row read back from the card. SKIP 77 without either
 # snapshot. B70_DFLASH_SNAPSHOT: a repo id (resolved in the HF cache) or a directory.
@@ -3867,6 +3872,16 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   set(B70_DFLASH_KERNELS kernel_df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320
     kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128 kernel_df_topk_R7_N248320_U248077
     kernel_df_select_M8_K16_Q16_RK256_V248320 kernel_df_select_v1_M8_K16 kernel_gemv_bf16_M7_K5120_N248320)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_prep_M8_H5120_I17408_Q32KV8_D128_G16T2_R2048_V248320_F8Q4R4U8C16H16K8
+       kernel_df_select_M8_K16_Q16_RK256_V248320_H16)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1
+       kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H2)
+  foreach(RPW 1 2 4)
+    list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B${RPW})
+  endforeach()
+  list(APPEND B70_DFLASH_KERNELS kernel_df_candidate_R7_N248320_U248077_K64
+       kernel_df_rerank_R7_K5120_U248077_C64_Q4)
+  list(APPEND B70_DFLASH_KERNELS kernel_df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep)
   foreach(NV 32768 65536 131072)
     list(APPEND B70_DFLASH_KERNELS kernel_df_topk_R7_N${NV}_U${NV}_C kernel_gemv_bf16_M7_K5120_N${NV})
   endforeach()
@@ -3882,10 +3897,20 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   # under the tests' override, CaptureOptions::force_linear).
   foreach(KN K5120_N6144 K4096_N5120 K5120_N34816 K17408_N5120 K25600_N5120 K5120_N2048 K5120_N1280 K5120_N256)
     list(APPEND _v19b_reused kernel_gemm_sm_i8w_M8_${KN}_wg)
+    list(APPEND _v19b_reused kernel_gemm_sm_M8_${KN}_S1_L1_mg kernel_gemv_M8_${KN}_S1_L1)
   endforeach()
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N6144_S4_L1_mg kernel_gemv_M8_K5120_N6144_S4_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K4096_N5120_S4_L1_mg kernel_gemv_M8_K4096_N5120_S4_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N34816_S8_L1_mg kernel_gemv_M8_K5120_N34816_S8_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K17408_N5120_S4_L1_mg kernel_gemv_M8_K17408_N5120_S4_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K25600_N5120_S8_L1_mg kernel_gemv_M8_K25600_N5120_S8_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N2048_S8_L1_mg kernel_gemv_M8_K5120_N2048_S8_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N1280_S16_L1_mg kernel_gemv_M8_K5120_N1280_S16_L1)
+  list(APPEND _v19b_reused kernel_gemm_sm_M8_K5120_N256_S16_L1_mg kernel_gemv_M8_K5120_N256_S16_L1)
   foreach(NV 32768 65536 131072 248320)
     list(APPEND _v19b_reused kernel_gemm_sm_i8w_M7_K5120_N${NV}_wg)
   endforeach()
+  list(APPEND _v19b_reused kernel_gemm_sm_M7_K5120_N248320_S1_L1_mg kernel_gemv_M7_K5120_N248320_S1_L1)
   foreach(t ${B70_DFLASH_KERNELS} ${_v19b_reused})
     if(NOT TARGET ${t})
       message(FATAL_ERROR "spec 19b: ${t} is not built (src/kernels/CMakeLists.txt)")
@@ -3905,7 +3930,15 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   target_include_directories(dflash_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
   target_link_libraries(dflash_kernels_test PRIVATE b70_l0)
   b70_target_kernel_dir(dflash_kernels_test)
-  add_dependencies(dflash_kernels_test ${B70_DFLASH_KERNELS})
+  add_dependencies(dflash_kernels_test ${B70_DFLASH_KERNELS} kernel_gemv_M8_K5120_N2048_S8_L1)
+  add_executable(dflash_head_kernels_test kernels/dflash_head_kernels_test.cc)
+  target_include_directories(dflash_head_kernels_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_head_kernels_test PRIVATE b70_l0)
+  b70_target_kernel_dir(dflash_head_kernels_test)
+  add_dependencies(dflash_head_kernels_test kernel_df_candidate_R7_N248320_U248077_K64
+                   kernel_df_rerank_R7_K5120_U248077_C64_Q4)
+  add_test(NAME dflash_head_kernels_test COMMAND dflash_head_kernels_test)
+  set_tests_properties(dflash_head_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
   add_test(NAME dflash_kernels_test COMMAND dflash_kernels_test)
   set_tests_properties(dflash_kernels_test PROPERTIES LABELS dflash TIMEOUT 900)
 endif()
@@ -3921,6 +3954,11 @@ set_tests_properties(dflash_plan_test PROPERTIES LABELS dflash)
 # the projection across the ring's wrap, a draft at p 2053, determinism, K by the control block, a sampled walk, a
 # 32768-id draft vocabulary bitwise the full head (Review Focus 3). SKIP 77 without the drafter.
 if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
+  add_executable(dflash_buffers_test runtime/dflash_buffers_test.cc)
+  target_include_directories(dflash_buffers_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_buffers_test PRIVATE b70_dflash_runtime)
+  add_test(NAME dflash_buffers_test COMMAND dflash_buffers_test ${CMAKE_CURRENT_SOURCE_DIR}/model/dflash/qwen38_dflash2_config.json)
+  set_tests_properties(dflash_buffers_test PROPERTIES LABELS dflash TIMEOUT 60)
   add_executable(dflash_draft_test runtime/dflash_draft_test.cc)
   b70_target_kernel_dir(dflash_draft_test)
   target_include_directories(dflash_draft_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
@@ -3928,6 +3966,12 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_dependencies(dflash_draft_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
   add_test(NAME dflash_draft_test COMMAND dflash_draft_test ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(dflash_draft_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 3600)
+  add_executable(dflash_profile_test runtime/dflash_profile_test.cc)
+  target_include_directories(dflash_profile_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
+  target_link_libraries(dflash_profile_test PRIVATE b70_dflash_runtime b70_prefill_host b70_runtime)
+  add_dependencies(dflash_profile_test ${B70_DFLASH_KERNELS} ${_v19b_reused})
+  add_test(NAME dflash_profile_test COMMAND dflash_profile_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+  set_tests_properties(dflash_profile_test PROPERTIES LABELS "checkpoint;dflash" SKIP_RETURN_CODE 77 TIMEOUT 900)
 endif()
 # ==== Spec 19b ==== (end) ====
 
@@ -3962,6 +4006,9 @@ target_include_directories(dflash_engine_host_test PRIVATE ${CMAKE_SOURCE_DIR}/s
 target_link_libraries(dflash_engine_host_test PRIVATE b70_plan b70_server PkgConfig::ZE)
 add_test(NAME dflash_engine_host_test COMMAND dflash_engine_host_test)
 set_tests_properties(dflash_engine_host_test PROPERTIES LABELS dflash)
+add_test(NAME dflash_engine_accept_oracle_test COMMAND python3
+  ${CMAKE_SOURCE_DIR}/tools/oracle/test_dflash_engine_accept.py)
+set_tests_properties(dflash_engine_accept_oracle_test PROPERTIES LABELS dflash)
 # The engine with the real drafter beside the gate checkpoint (int8 head, bf16 KV): the lists' counts, the taps and
 # the commit projection (Task 1), D3 at M = 1..8, partial acceptance (the GDN state at the last accepted row, the
 # ring), D2 on the card at K 7 / 3 / 1, the last positions of max_len. SKIP 77 without either checkpoint.

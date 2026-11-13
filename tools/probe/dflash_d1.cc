@@ -5,7 +5,7 @@
 // (top-16 sets tie-aware, scores cosine >= 0.9999 bf16 / >= 0.999 int8, walk ids equal at T = 0).
 //
 //   dflash_d1 <target snapshot> <drafter> <out.jsonl> [--model lilicorr] [--format int8|bf16 | exact|int8|int4] [--head int8|bf16]
-//             [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] [--anchors N] [--k K] [--max-len L]
+//             [--draft-vocab 32k|64k|128k [--draft-vocab-ids FILE]] [--anchors N] [--k K|--all-k] [--candidate-head] [--max-len L]
 //             <dump.taps.safetensors>...
 //
 // Per dump (monotonic anchors, one ring): the projection list fills the ring with the dump's taps (8 positions a
@@ -245,6 +245,7 @@ int main(int argc, char** argv) {
   uint32_t dv = 0, anchors = 16, K = 0, max_len = 8192;
   std::string dv_ids, model_flag, fmt_text;
   std::vector<std::string> dumps;
+  bool candidate_head = false, all_k = false;
   for (int i = 4; i < argc; ++i) {
     const std::string a = argv[i];
     auto next = [&]() -> std::string {
@@ -257,6 +258,10 @@ int main(int argc, char** argv) {
     } else if (a == "--model") {
       model_flag = next();
       if (model_flag != "lilicorr") throw std::runtime_error("--model lilicorr (the only named model, spec 26b)");
+    } else if (a == "--all-k") {
+      all_k = true;
+    } else if (a == "--candidate-head") {
+      candidate_head = true;
     } else if (a == "--head") {
       if (!loader::parse_lm_head_form(next(), head)) throw std::runtime_error("--head int8|bf16");
     } else if (a == "--draft-vocab") {
@@ -275,7 +280,8 @@ int main(int argc, char** argv) {
   }
   const std::string snap = loader::resolve_snapshot(target);
   l0::Context ctx(0);
-  if (model_flag == "lilicorr") {   // spec 26b
+  if (model_flag == "lilicorr") {
+    if (candidate_head || all_k) throw std::runtime_error("--candidate-head/--all-k are Qwen DFlash probes");   // spec 26b
     if (dv) throw std::runtime_error("--draft-vocab is not built for the LiLiCorr drafter (its candidates need the whole "
                                      "vocabulary)");
     if (K != 0 && K != 7) throw std::runtime_error("--k: the LiLiCorr draft is always the whole block (7)");
@@ -284,7 +290,12 @@ int main(int argc, char** argv) {
     return run_lilicorr(ctx, snap, drafter, out_path, fmt_given ? fmt : loader::DraftFormat::Int8, head, anchors,
                         max_len, dumps);
   }
-  if (fmt_given && !loader::parse_draft_format(fmt_text, fmt)) throw std::runtime_error("--format int8|bf16");
+  if (fmt_given) {
+    if (fmt_text == "int4") fmt = loader::DraftFormat::Int4G64;
+    else if (!loader::parse_draft_format(fmt_text, fmt)) throw std::runtime_error("--format int8|bf16|int4");
+  }
+  if (candidate_head && dv) throw std::runtime_error("--candidate-head uses the full vocabulary");
+  if (all_k && K) throw std::runtime_error("--all-k cannot be combined with --k");
   if (K == 0) K = kernels::dflash::kR;
   if (K < 1 || K > kernels::dflash::kR) throw std::runtime_error("--k is 1..7");
   loader::DraftVocabSpec dvs;
@@ -295,9 +306,9 @@ int main(int argc, char** argv) {
   }
   // A draft vocabulary needs the MTP head loaded (loader::load's rule, spec 8 §11; 19c relaxes it for a drafter).
   const loader::LoadedModel m = loader::load(ctx, snap, max_len, dv != 0, head, dvs);
-  const loader::DFlashWeights w = loader::load_drafter(ctx, drafter, m, fmt);
+  const loader::DFlashWeights w = loader::load_drafter(ctx, drafter, m, fmt, 0, candidate_head);
   const runtime::dflash::DFlashTarget t = runtime::dflash::dflash_target(m, dv != 0);
-  runtime::dflash::DFlashBuffers b(ctx, w.desc, w.target_hidden, t.head_rows(), max_len);
+  runtime::dflash::DFlashBuffers b(ctx, w.desc, w.target_hidden, t.head_rows(), max_len, w.format, bool(w.candidate_head));
   l0::Mem control(ctx, l0::MemKind::Shared, sizeof(runtime::Control));
   std::memset(control.ptr(), 0, sizeof(runtime::Control));
   runtime::CapturedStep draft = runtime::dflash::build_dflash_draft(ctx, w, t, b, control);
@@ -310,8 +321,9 @@ int main(int argc, char** argv) {
     std::string v_ids = "[]";
     if (m.draft_vocab) v_ids = arr(m.draft_vocab->host_ids.data(), m.draft_vocab->size());
     out << "{\"run\": {\"format\": \"" << loader::draft_format_name(fmt) << "\", \"head\": \""
-        << loader::lm_head_form_name(head) << "\", \"draft_vocab\": " << dv << ", \"vocab_used\": " << t.vocab_used
-        << ", \"k\": " << K << ", \"launches\": [" << draft.kernel_count << ", " << project.kernel_count
+        << loader::lm_head_form_name(head) << "\", \"draft_vocab\": " << dv
+        << ", \"candidate_head\": " << (candidate_head ? "true" : "false") << ", \"vocab_used\": " << t.vocab_used
+        << ", \"k\": " << (all_k ? 0 : K) << ", \"all_k\": " << (all_k ? "true" : "false") << ", \"launches\": [" << draft.kernel_count << ", " << project.kernel_count
         << "], \"load\": \"" << w.line << "\", \"v_ids\": " << v_ids << "}}\n";
   }
   const uint32_t H = w.desc.hidden, ntap = uint32_t(w.desc.taps.size()), M = kernels::dflash::kM;
@@ -350,22 +362,24 @@ int main(int argc, char** argv) {
       c->pos = p;
       c->n_active = 1;
       c->cur_token[0] = uint32_t(d.ids[p]);
-      runtime::dflash::set_draft_params(*b.ctl(), w.desc, K, 0.0f, 0);
-      const auto t0 = std::chrono::steady_clock::now();
-      q.execute(draft.list, &fence);
-      fence.wait();
-      t_draft += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-      ++n_draft;
-      const runtime::dflash::DFlashDraftOut& o = *b.readback();
-      std::string cand = "[", un = "[", sc = "[";
-      for (uint32_t j = 0; j < K; ++j) {
-        cand += (j ? "," : "") + arr(o.cand[j], 16);
-        un += (j ? "," : "") + farr(o.unary[j], 16);
-        sc += (j ? "," : "") + farr(o.scores[j], 16);
+      for (uint32_t width = all_k ? 1u : K; width <= K; ++width) {
+        runtime::dflash::set_draft_params(*b.ctl(), w.desc, width, 0.0f, 0);
+        const auto t0 = std::chrono::steady_clock::now();
+        q.execute(draft.list, &fence);
+        fence.wait();
+        t_draft += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        ++n_draft;
+        const runtime::dflash::DFlashDraftOut& o = *b.readback();
+        std::string cand = "[", un = "[", sc = "[";
+        for (uint32_t j = 0; j < width; ++j) {
+          cand += (j ? "," : "") + arr(o.cand[j], 16);
+          un += (j ? "," : "") + farr(o.unary[j], 16);
+          sc += (j ? "," : "") + farr(o.scores[j], 16);
+        }
+        out << "{\"dump\": \"" << d.name << "\", \"p\": " << p << ", \"anchor\": " << d.ids[p] << ", \"k\": " << o.k
+            << ", \"ids\": " << arr(o.ids, width) << ", \"chosen\": " << arr(o.chosen, width) << ", \"cand\": " << cand
+            << "], \"unary\": " << un << "], \"scores\": " << sc << "]}\n";
       }
-      out << "{\"dump\": \"" << d.name << "\", \"p\": " << p << ", \"anchor\": " << d.ids[p] << ", \"k\": " << o.k
-          << ", \"ids\": " << arr(o.ids, K) << ", \"chosen\": " << arr(o.chosen, K) << ", \"cand\": " << cand
-          << "], \"unary\": " << un << "], \"scores\": " << sc << "]}\n";
     }
     std::printf("%s: %zu anchors\n", d.name.c_str(), ps.size());
   }

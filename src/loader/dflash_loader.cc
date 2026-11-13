@@ -25,6 +25,8 @@ std::unique_ptr<l0::Mem> upload_u(l0::Context& ctx, l0::CmdList& imm, const void
 }
 DeviceWeight upload_linear(l0::Context& ctx, l0::CmdList& imm, const DFlashHostLinear& h, size_t& bytes) {
   bytes += h.bytes();
+  if (h.kind == model::WeightKind::Int4)
+    return DeviceWeight{upload(ctx, imm, h.int4.data(), h.int4.size() * 4), nullptr, h.shape(), model::WeightKind::Int4};
   if (h.kind == model::WeightKind::Int8) {
     DeviceWeight w{upload(ctx, imm, h.i8.data(), h.i8.size()), upload_u(ctx, imm, h.scales.data(), h.scales.size() * 4),
                    h.shape(), model::WeightKind::Int8};
@@ -44,10 +46,33 @@ l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>&
 }  // namespace
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
-                           DraftFormat format, unsigned threads) {
+                           DraftFormat format, unsigned threads, bool candidate_head) {
   if (!target.desc) throw std::runtime_error("load_drafter: the target model is not loaded");
-  return load_drafter(ctx, snapshot_or_repo, *target.desc,
-                      target.linears.at({kTopLevel, model::LinearId::LmHead}).shape.N, target.embed, format, threads);
+  const auto& head = target.linears.at({kTopLevel, model::LinearId::LmHead});
+  if (candidate_head && head.kind != model::WeightKind::Int8)
+    throw std::runtime_error("DFlash candidate head needs the target's int8 head for exact rerank");
+  auto w = load_drafter(ctx, snapshot_or_repo, *target.desc, head.shape.N, target.embed, format, threads);
+  if (candidate_head) {
+    const auto start = std::chrono::steady_clock::now();
+    l0::CmdList imm = l0::CmdList::immediate(ctx);
+    l0::Mem rows(ctx, l0::MemKind::Host, head.mem.size());
+    std::vector<float> scales(head.shape.N);
+    imm.copy(rows.ptr(), head.mem.ptr(), rows.size());
+    imm.copy(scales.data(), head.scales->ptr(), scales.size() * 4);
+    const auto quant_start = std::chrono::steady_clock::now();
+    const auto h = dflash_candidate_head(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N);
+    w.quant_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - quant_start).count();
+    w.candidate_head = upload_linear_u(ctx, imm, h, w.bytes);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    w.seconds += seconds;
+    char line[192];
+    std::snprintf(line, sizeof line, "DFlash candidate head: int4 g64, top64 with exact int8 rerank, %zu B, %.1f s",
+                  h.bytes(), seconds);
+    w.line += "; ";
+    w.line += line;
+    std::printf("%s\n", line);
+  }
+  return w;
 }
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const model::ModelDesc& target,
@@ -126,7 +151,7 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
   std::snprintf(buf, sizeof buf,
                 "DFlash drafter: %s, %u layers, taps %s, block %u, %s (%s %.1f s), mask row from the %s, %zu B, %.1f s",
                 d.architecture.c_str(), d.layers, taps.c_str(), d.block, draft_format_name(format),
-                format == DraftFormat::Int8 ? "quantised at load" : "tiled at load", quant,
+                format == DraftFormat::Bf16 ? "tiled at load" : "quantised at load", quant,
                 w.mask_from_checkpoint ? "checkpoint" : "target's embedding", bytes, w.seconds);
   w.line = buf;
   std::printf("%s\n", buf);

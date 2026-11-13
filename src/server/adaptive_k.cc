@@ -34,19 +34,29 @@ MtpCost MtpCost::tp_int8_head() {
   return c;
 }
 
-MtpCost MtpCost::dflash(bool i8_head, bool int8_drafter) {
-  MtpCost c = i8_head ? int8_head() : bf16_head();
-  // Spec 28b: M = 5..8 measured (int8 head; the bf16 head's taken equal - adaptive_k.h)
-  for (double v : {1.18, 1.30, 1.35, 1.56}) c.verify.push_back(v);
-  const double d = (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16) +
-                   (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
+MtpCost MtpCost::dflash(bool i8_head, unsigned drafter_format, bool candidate_head) {
+  MtpCost c;
+  // H1/B4 paired medians at depth4096, busy box, 2026-11-12 (docs/BENCHMARKS.md).
+  // The bf16 and experimental RTN int4 verify rows are derived equal to int8.
+  c.verify = {1.000091, 1.048509, 1.102680, 1.123232, 1.170806, 1.199997, 1.228823, 1.246703};
+  if (candidate_head)
+    c.verify = {0.997314, 1.045223, 1.094038, 1.114742, 1.161674, 1.208605, 1.230177, 1.242865};
+  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
+                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
+  double d = body + (i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16);
+  if (candidate_head) {
+    d = drafter_format == 2 ? kDFlashDraftCandidateInt4 : kDFlashDraftCandidateInt8;
+    if (drafter_format == 0) d += kDFlashDrafterBf16 - kDFlashDrafterInt8;
+  }
   c.draft.assign(7, d);
   return c;
 }
 
-double MtpCost::dflash_head_share(bool i8_head, bool int8_drafter) {
+double MtpCost::dflash_head_share(bool i8_head, unsigned drafter_format) {
   const double h = i8_head ? kDFlashHeadInt8 : kDFlashHeadBf16;
-  return h / (h + (int8_drafter ? kDFlashDrafterInt8 : kDFlashDrafterBf16));
+  const double body = drafter_format == 2 ? kDFlashDrafterInt4 :
+                       drafter_format == 1 ? kDFlashDrafterInt8 : kDFlashDrafterBf16;
+  return h / (h + body);
 }
 
 MtpCost MtpCost::with_draft_vocab(double head_share, double fraction) const {

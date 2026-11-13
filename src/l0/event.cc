@@ -77,5 +77,14 @@ double Event::duration_us() const {
   return static_cast<double>((end - start) & m) / calib_.cycles_per_us;
 }
 
+double Event::elapsed_us(const Event& first) const {
+  ze_kernel_timestamp_result_t begin{}, end{};
+  ZE_CHECK(zeEventQueryKernelTimestamp(first.e_, &begin));
+  ZE_CHECK(zeEventQueryKernelTimestamp(e_, &end));
+  const uint64_t m = calib_.mask();
+  return static_cast<double>(((end.global.kernelEnd & m) - (begin.global.kernelStart & m)) & m) /
+         calib_.cycles_per_us;
+}
+
 void Event::reset() { ZE_CHECK(zeEventHostReset(e_)); }
 }  // namespace l0

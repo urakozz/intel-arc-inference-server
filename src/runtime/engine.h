@@ -270,10 +270,13 @@ class Engine {
   // then run the compact head and draft only V' ids; mtp_logits_device() rows hold -inf
   // outside V'), 0 when the full head drafts. The verify lists are the same either way.
   uint32_t draft_vocab() const { return model_.draft_vocab ? model_.draft_vocab->size() : 0; }
-  void verify(uint32_t k);
+  // A tap drafter may supply its list: pending projection, draft and verify run in one submit.
+  void verify(uint32_t k, l0::CmdList* draft = nullptr);
   const uint32_t* verify_ids() const { return control_->out_token; }
   const float* verify_logits_device() const;   // [k + 1][kVocab] fp32, device memory
-  void commit(uint32_t j, uint32_t next_token);
+  void commit(uint32_t j, uint32_t next_token, bool defer_projection = false);
+  void flush_projection() const;
+  uint64_t queue_submissions() const { return queue_.submissions(); }
   uint32_t max_verify_k() const;
   // Tests and the record: the MTP buffers and lists (null / throw when MTP is off).
   MtpBuffers* mtp_buffers() { return mtp_.get(); }
@@ -305,8 +308,9 @@ class Engine {
   //   - the drafts are whatever the caller (the drafter's draft list) wrote into cur_token[1..k]; there is no
   //     draft() / draft_ids() (those are the MTP head's);
   //   - commit(j, t) then replays the drafter's projection of verify rows 0..j - the committed positions
-  //     n .. n + j - into its ring (TapDrafter::projection), before it returns. The rejected rows' taps are never
-  //     projected; t has no tap (it is the next block's row 0).
+  //     n .. n + j - into its ring (TapDrafter::projection). With defer_projection it runs at the front of the next
+  //     batched verify, or flushes before snapshots, plain steps and prefill. Reset/restore discard it. Otherwise
+  //     commit projects before returning. Rejected rows are never projected; t has no tap (the next row 0).
   // verify(0) + commit(0, verify_ids()[0]) is one plain token and, with a drafter, is what ingest() and generate()
   // run (pos 0 included: nothing here needs h_{-1}). prefill() fills the ring from the prompt's last window()
   // positions (spec 19c Task 3).
@@ -497,8 +501,11 @@ class Engine {
   std::unique_ptr<l0::Mem> df_slots_;
   TapVerify df_tv_;
   std::unique_ptr<l0::Mem> df_pf_taps_;
-  l0::Queue queue_;
-  l0::Fence fence_;
+  mutable l0::CmdList* pending_projection_ = nullptr;
+  l0::CmdList* profile_projection_ = nullptr;   // CaptureOptions test/probe override, borrowed
+  // Snapshots materialize a deferred projection without changing the logical session.
+  mutable l0::Queue queue_;
+  mutable l0::Fence fence_;
   // Uploads, readbacks and snapshot copies only, never a token. `mutable`: the
   // save_* calls are const on the session and still append to it.
   mutable l0::CmdList imm_;

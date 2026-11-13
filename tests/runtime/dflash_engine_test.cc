@@ -151,7 +151,7 @@ struct Snap {
   uint32_t pos, pending;
   explicit Snap(Ctx& c)
       : st(c.ctx, l0::MemKind::Host, c.e.state_bytes()),
-        kv(c.ctx, l0::MemKind::Host, c.e.kv_bytes(c.e.pos())),
+        kv(c.ctx, l0::MemKind::Host, std::max(size_t(1), c.e.kv_bytes(c.e.pos()))),
         pos(c.e.pos()),
         pending(c.ctl->cur_token[0]) {
     c.e.save_state(st.ptr());
@@ -211,6 +211,85 @@ struct M8 {
   std::vector<std::vector<uint16_t>> taps;
   std::vector<uint16_t> ring;
 };
+// Spec 19 v2: the real queues and buffers, including flushes that must precede a tap overwrite.
+void batched_case(Ctx& c, const Snap& s0) {
+  struct Frame {
+    runtime::dflash::DFlashDraftOut draft;
+    std::vector<uint32_t> ids;
+    std::vector<float> logits;
+    std::vector<uint16_t> ring;
+    uint32_t accepted, next;
+  };
+  std::vector<Frame> frames;
+  s0.restore(c);
+  const auto initial_ring = ring_rows(c, 0, c.d.window());
+  for (unsigned i = 0; i < 2; ++i) {
+    Frame f;
+    f.draft = c.d.draft(c.e, kK, 0.0f, 0);
+    c.e.verify(kK);
+    f.ids.assign(c.e.verify_ids(), c.e.verify_ids() + kK + 1);
+    f.logits = logits_rows(c, kK + 1);
+    f.accepted = 0;
+    while (f.accepted < kK && f.draft.ids[f.accepted] == f.ids[f.accepted]) ++f.accepted;
+    f.next = f.ids[f.accepted];
+    c.e.commit(f.accepted, f.next);
+    f.ring = ring_rows(c, 0, c.d.window());
+    frames.push_back(std::move(f));
+  }
+  const Snap committed(c);
+  auto batched = [&] {
+    s0.restore(c);
+    for (size_t i = 0; i < frames.size(); ++i) {
+      const Frame& f = frames[i];
+      const uint64_t before = c.e.queue_submissions();
+      const auto& draft = c.d.draft_with([&](l0::CmdList& list) { c.e.verify(kK, &list); }, kK, 0.0f, 0);
+      CHECK(c.e.queue_submissions() == before + 1);
+      CHECK(std::memcmp(&draft, &f.draft, sizeof draft) == 0);
+      CHECK(f.ids == std::vector<uint32_t>(c.e.verify_ids(), c.e.verify_ids() + kK + 1));
+      const auto logits = logits_rows(c, kK + 1);
+      CHECK(std::memcmp(logits.data(), f.logits.data(), logits.size() * sizeof(float)) == 0);
+      c.e.commit(f.accepted, f.next, true);
+      CHECK(c.e.queue_submissions() == before + 1);   // projection rides on the next iteration
+      CHECK(ring_rows(c, 0, c.d.window()) == (i ? frames[i - 1].ring : initial_ring));
+    }
+  };
+  batched();
+  const uint64_t before = c.e.queue_submissions();
+  const Snap saved(c);   // a snapshot materializes the deferred projection
+  CHECK(c.e.queue_submissions() == before + 1);
+  CHECK(std::memcmp(saved.st.ptr(), committed.st.ptr(), c.e.state_bytes()) == 0);
+  c.e.flush_projection();
+  CHECK(c.e.queue_submissions() == before + 1);
+
+  l0::Mem state(c.ctx, l0::MemKind::Host, c.e.state_bytes());
+  l0::Mem kv(c.ctx, l0::MemKind::Host, c.e.kv_bytes(committed.pos));
+  for (unsigned mode = 0; mode < 7; ++mode) {
+    auto boundary = [&] {
+      switch (mode) {
+        case 0: c.e.save_state(state.ptr()); break;
+        case 1: c.e.save_kv(0, c.e.pos(), kv.ptr()); break;
+        case 2: (void)c.e.generate(1); break;
+        case 3: c.e.ingest({760}); break;
+        case 4: c.e.prefill({760}); break;
+        case 5: c.e.reset(); break;
+        case 6: s0.restore(c); break;
+      }
+    };
+    committed.restore(c);
+    boundary();
+    const auto expected_ring = ring_rows(c, 0, c.d.window());
+    const Snap expected(c);
+    batched();
+    boundary();
+    CHECK(ring_rows(c, 0, c.d.window()) == expected_ring);
+    const Snap actual(c);
+    CHECK(actual.pos == expected.pos && actual.pending == expected.pending);
+    CHECK(std::memcmp(actual.st.ptr(), expected.st.ptr(), c.e.state_bytes()) == 0);
+  }
+  s0.restore(c);
+  std::printf("BATCH: one submit per iteration; draft/verify, snapshots, plain/ingest/prefill, reset/restore bitwise\n");
+}
+
 M8 m8_reference(Ctx& c, const Snap& s0, const Ref& ref) {
   M8 m;
   s0.restore(c);
@@ -436,6 +515,7 @@ int main(int argc, char** argv) {
     e.prefill(head(ids, n));
     std::printf("n = %u (n %% 16 = %u)\n", n, n % 16);
     const Snap s0(c);
+    batched_case(c, s0);
     {   // SR (spec 19d): the snapshot carries the ring - a reset zeroes it, the restore brings it back bitwise
       const std::vector<uint16_t> before = ring_rows(c, 0, d.window());
       e.reset();

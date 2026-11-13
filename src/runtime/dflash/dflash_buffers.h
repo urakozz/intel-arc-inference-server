@@ -19,20 +19,20 @@ namespace runtime::dflash {
 struct DFlashBuffers {
   // head_rows: the target's lm_head rows, or a draft vocabulary's |V'| (the head GEMV's N).
   DFlashBuffers(l0::Context& ctx, const model::DFlashDesc& d, uint32_t target_hidden, uint32_t head_rows,
-                uint32_t max_len);
+                uint32_t max_len, loader::DraftFormat format = loader::DraftFormat::Int8, bool candidate_head = false);
 
   model::DFlashDesc desc;
   uint32_t target_hidden, head_rows, max_len;
   DFlashSizes sz;
   l0::Mem dctl, out;   // shared
   l0::Mem rope, ring_k, ring_v, taps, resid, h, x, xa, gout, q, kb, vb, part, kv, logits, tpart, cand, unary;
-  std::unique_ptr<l0::Mem> co, hid;   // DFlash 2 only
+  std::unique_ptr<l0::Mem> co, hid, candidate;   // DFlash 2 only
 
   DFlashCtl* ctl() const { return dctl.as<DFlashCtl>(); }
   const DFlashDraftOut* readback() const { return out.as<DFlashDraftOut>(); }
   size_t bytes() const;   // == sz.total()
-  // Zero the ring and every scratch, reset the control block and the readback, and upload the RoPE table: what
-  // construction leaves and what a session reset restores (the ring then holds no position - a cold drafter).
+  // Zero the ring and every scratch, reset the control block and the readback. The immutable RoPE table is
+  // uploaded once at construction; a session reset leaves it alone (the ring then holds no position).
   void zero(l0::CmdList& imm);
 };
 

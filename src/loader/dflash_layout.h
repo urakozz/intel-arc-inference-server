@@ -28,8 +28,7 @@
 // v2: the codebooks, bf16 [vocab][sel_rank] each.
 namespace loader {
 
-// Spec 26b (the LiLiCorr drafter only - parse_lilicorr_draft_format; the other drafters' `--draft-format` spellings are
-// bf16 / int8): Int4G64 - our int4 g64 symmetric RTN, quantised at load by loader/rtn.h, stored in gemv.cl's layout 1
+// Spec 19v2 / 26b: Int4G64 - our int4 g64 symmetric RTN, quantised at load by loader/rtn.h, stored in gemv.cl's layout 1
 // (common/repack.h repack_int4_layout1; S 1: the GEMV writes the [M][N] rows the df_* kernels read); Exact - the
 // drafter's NVFP4 linears as W' (bf16, exact) in gemv_bf16's tiles plus the tensor's global g as an fp32 output scale per
 // column (loader/nvfp4.h, src/kernels/dflash/ll_gemv_bf16_g.cl); its BF16 linears are Bf16's tiles.

@@ -30,28 +30,34 @@ struct Shape {
 inline constexpr Shape kQwen38{};
 
 inline std::string s_(unsigned v) { return std::to_string(v); }
-inline std::string prep_variant(const Shape& s = kQwen38) {
+inline std::string prep_variant(const Shape& s = kQwen38, bool split = false) {
   return "df_prep_M" + s_(kM) + "_H" + s_(s.H) + "_I" + s_(s.I) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" +
-         s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab);
+         s_(s.HD) + "_G" + s_(s.group) + "T" + s_(s.ctaps) + "_R" + s_(s.ring) + "_V" + s_(s.vocab) +
+         (split ? "_F8Q4R4U8C16H16K8" : "");
 }
-inline std::string attn_variant(const Shape& s = kQwen38) {
+inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, unsigned rows = 0, bool parallel_exp = false) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb);
+         s_(s.win) + "_P" + s_(s.pb) + (heads ? "_H" + s_(heads) : "") +
+         (rows ? "_B" + s_(rows) : "") + (parallel_exp ? "_Ep" : "");
 }
 // N: the head's rows (the full head, or a draft vocabulary's |V'|); used: indices below it are candidates.
 inline std::string topk_variant(unsigned N, unsigned used, bool compact) {
   return "df_topk_R" + s_(kR) + "_N" + s_(N) + "_U" + s_(used) + (compact ? "_C" : "");
 }
-inline std::string select_variant(bool v2, const Shape& s = kQwen38) {
-  return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab)
+inline std::string candidate_topk_variant() { return "df_candidate_R7_N248320_U248077_K64"; }
+inline std::string rerank_variant() { return "df_rerank_R7_K5120_U248077_C64_Q4"; }
+inline std::string select_variant(bool v2, const Shape& s = kQwen38, bool split = false) {
+  return v2 ? "df_select_M" + s_(kM) + "_K" + s_(kTopK) + "_Q" + s_(kQs) + "_RK" + s_(s.rank) + "_V" + s_(s.vocab) +
+                   (split ? "_H16" : "")
             : "df_select_v1_M" + s_(kM) + "_K" + s_(kTopK);
 }
 
 // The drafter's linears at the block's M rows, in their form (`int8`: gemm_sm_i8w at kSmallMTuning's row of the shape
 // since spec 28d - gemv_i8w under `k` Gemv, the test / probe override runtime::CaptureOptions::force_linear; else
 // gemv_bf16 at the tiling kernels::gemv_bf16_tiling gives N). The target's int8 head at the 7 draft rows: the same.
-inline std::string linear_variant(bool int8, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
-  return int8 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
+inline std::string linear_variant(unsigned fmt, unsigned M, unsigned K, unsigned N, LinearKind k = LinearKind::SmallM) {
+  if (fmt == 2) return int4_linear_variant(k, M, K, N, int4_slices(K, N), 1);
+  return fmt == 1 ? int8_linear_variant(k, M, K, N) : gemv_bf16_variant(M, K, N, gemv_bf16_tiling(N));
 }
 // Spec 23f (kept for spec 26b's LiLiCorr drafter): the three formats (`fmt` 0 bf16, 1 int8, 2 int4 g64: gemv.cl
 // layout 1 at S 1, the [M][N] rows the df_* kernels read).
@@ -68,25 +74,36 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 // Every binary the draft list and the projection list bind for Qwen3.8's drafter: `v2` (DFlash 2 or v1), `int8`
 // (the drafter's linears), `int8_head` (the target's lm_head int8, else bf16), `dv` (|V'|, 0 = the full head).
 // Capture checks each exists; tests/kernels/dflash_variant_names_test.cc holds the union to the CMake block.
-inline std::vector<std::string> draft_variants(bool v2, bool int8, bool int8_head, unsigned dv,
-                                               LinearKind k = LinearKind::SmallM) {
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
+                                               LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
+                                               bool candidate_head = false, bool parallel_exp = false) {
   const Shape& s = kQwen38;
-  std::vector<std::string> v = {prep_variant(), attn_variant(), select_variant(v2)};
+  std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows, parallel_exp), select_variant(v2, s, fmt == 2)};
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up
                       {s.I, s.H},                                                            // down
                       {5 * s.H, s.H},                                                        // fc (5 taps)
                       {s.H, 2 * s.NKV * s.HD}})                                              // the context's k||v
-    v.push_back(linear_variant(int8, kM, K, N, k));
+    v.push_back(linear_variant(fmt, kM, K, N, k));
   if (v2) {
-    v.push_back(linear_variant(int8, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
-    v.push_back(linear_variant(int8, kM, s.H, s.rank, k));                          // the selector's projection
+    v.push_back(linear_variant(fmt, kM, s.H, 2 * s.ctaps * (s.H / s.group), k));   // the conv kernel projections
+    v.push_back(linear_variant(fmt, kM, s.H, s.rank, k));                          // the selector's projection
   }
   const unsigned N = dv ? dv : s.vocab;
-  v.push_back(linear_variant(int8_head, kR, s.H, N, k));
-  v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
+  if (candidate_head) {
+    v.push_back(linear_variant(2u, kR, s.H, s.vocab, head));
+    v.push_back(candidate_topk_variant());
+    v.push_back(rerank_variant());
+  } else {
+    v.push_back(linear_variant(int8_head, kR, s.H, N, head));
+    v.push_back(topk_variant(N, dv ? dv : s.used, dv != 0));
+  }
   return v;
+}
+inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
+                                               LinearKind k = LinearKind::SmallM) {
+  return draft_variants(v2, fmt, int8_head, dv, k, k);
 }
 
 // ==== Spec 26b: the LiLiCorr drafter (nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr beside Bolt) ====

@@ -16,6 +16,15 @@
 #   tools/box_stop.sh job <branch> <pid> one process tree, verified to be working in that branch
 # Anything else is refused. Signals are TERM, then KILL after 10 s for what is left.
 set -euo pipefail
+# Server harnesses stop their own child on the box, without another ssh hop.
+if [ "${1:-}" = child ]; then
+  [ "$#" = 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || { echo "usage: box_stop.sh child <pid>" >&2; exit 2; }
+  child_parent=$(ps -o ppid= -p "$2" 2>/dev/null | tr -d ' ') || exit 0
+  [ -n "$child_parent" ] || exit 0
+  [ "$child_parent" = "$PPID" ] || { echo "refused: process $2 is not the caller's child" >&2; exit 2; }
+  kill -TERM "$2" 2>/dev/null || true
+  exit 0
+fi
 _box_env="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)/box.env"
 # shellcheck source=/dev/null
 [ -r "$_box_env" ] && . "$_box_env"

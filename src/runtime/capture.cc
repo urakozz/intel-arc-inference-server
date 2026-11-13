@@ -247,6 +247,7 @@ class Capture {
   // Spec 28c: the test / probe override of the verify-attention rule (runtime/verify_attn.h).
   Capture& options(const CaptureOptions& o) {
     opt_ = o;
+    if (mode_ == Mode::VerifyTaps && kCapM == o.profile_m) prof_ = o.profile;
     return *this;
   }
   // Spec 13c: the sequence slot the list binds (capture.h, SlotBind).
@@ -1539,8 +1540,8 @@ class Capture {
   void check_taps() {
     require(tv_ != nullptr && tv_->gdn_spec != nullptr && tv_->taps != nullptr,
             "a tap verify list needs its GDN slots and its tap buffer");
-    require(stage_ == nullptr && tap_ == nullptr && prof_ == nullptr,
-            "a tap verify list is single-card, with no residual tap and no profiling events");
+    require(stage_ == nullptr && tap_ == nullptr,
+            "a tap verify list is single-card, with no residual tap");
     require(tv_->slots == TapVerifyDims::kSlots,
             "a tap verify list binds gdn_step_slots_M<M>_N" + std::to_string(TapVerifyDims::kSlots) +
                 ": " + std::to_string(tv_->slots) + " slots are not built");

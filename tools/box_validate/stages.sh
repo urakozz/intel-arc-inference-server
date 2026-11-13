@@ -3713,6 +3713,54 @@ st_r81_speed() {
   finish
 }
 
+# Spec 19 v2: the measured baseline, live acceptance, and the operator's slim serving screen.
+row 82 "spec 19 v2 - DFlash costs and engine-tap acceptance, then one-card DFlash against recorded main baselines"
+rownote 82 "Operator 2026-11-12 Task 2: no plain/MTP serving performance reruns; MTP 73.2 t/s at the slots shape and plain 33.5 t/s at 4096 are recorded baselines. Pause above 80.5 t/s. Full three-arm replay belongs to Task 8. Held-out recording: opencode-session-2, excluded entirely from Task 6 training."
+stage r82.k0 82 default cpu - g0.sha "DFlash host checks and unchanged non-DFlash binaries (G0)"
+st_r82_k0() {
+  run_tests '^(adaptive_k_test|dflash_engine_host_test|dflash_plan_test|dflash_prefix_test)$'
+  finish
+}
+stage r82.profile 82 default card qwen,dflash r82.k0 "profiled draft and projection readback/ring bitwise; every launch has a timestamp"
+st_r82_profile() {
+  run_tests '^dflash_profile_test$' dflash
+  jgrab profile '^dflash_profile_test$' '^dflash_profile_test' 4
+  finish
+}
+stage r82.iter 82 default gpu qwen,dflash r82.profile "unprofiled interleaved list costs at 4096/32768; separate instrumented per-family costs"
+st_r82_iter() {
+  idle before
+  for depth in 4096 32768; do
+    chk "build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --format int8 --candidate-head --depth $depth" "DFlash costs at $depth"
+  done
+  idle after
+  grab_all costs '^DFLASH_' 120
+  finish
+}
+stage r82.accept_gpu 82 default card qwen,dflash,oracle_dflash_dumps r82.profile "engine taps and in-loop drafts at the same anchors, K=1..7, EOS-stopped continuations"
+st_r82_accept_gpu() {
+  chk "tools/box_validate/dflash_v2.sh sources $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "recorded sources and held-out slice"
+  chk "tools/box_validate/dflash_v2.sh gpu $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "engine-tap dumps and live drafts"
+  grab_all taps '^ENGINE_TAPS' 40
+  finish
+}
+stage r82.accept 82 default cpu qwen,dflash,oracle_image r82.accept_gpu "CPU reference on the engine's taps: E_7 gap <= 0.15 on A4/code, E_K recorded per corpus"
+st_r82_accept() {
+  chk "tools/box_validate/dflash_v2.sh ref $STATE/r82.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "G-accept on identical anchors"
+  grab_all acceptance '^G_ACCEPT' 40
+  finish
+}
+stage r82.d5 82 optin gpu qwen,dflash r82.iter "DFlash-only slots_bench count 1; existing MTP baseline 73.2 t/s, early stop above 80.5"
+st_r82_d5() {
+  idle before
+  chk "PORT=$PORT tools/box_validate/dflash_v2.sh d5 $STATE/r82.d5 $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "DFlash one-request serving screen"
+  x "PORT=$PORT tools/box_validate/dflash_v2.sh identity $STATE/r82.d5 $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "one golden/A4 round against the recorded plain outputs"
+  idle after
+  grab_all speed '^SLOTS_BENCH|^DFLASH_EARLY' 4
+  judged_finish
+}
 row 83 "plan 2026-11-12 - Ornith / Flash-Next MoE prefill: the fused int4 grouped GEMM arms (bf16 per sub-group and SLM-shared, W4A8 on the s4 DPAS operand) and the multi-work-group sort on real routes (probe_moe_prefill, Task 1)"
 rownote 83 "The numerics half of Task 1 (tools/probe/moe_w4a8_accuracy.py: the W4A8 forms against f32 on real Ornith activations, rotated-checkpoint arm included) is a CPU reference job under /tmp/b70-cpu-model.lock in the oracle container, run by hand: tools/oracle/run_in_container.sh 'python3 tools/probe/moe_w4a8_accuracy.py \"\$SNAP\" --prompt tests/golden/prompts/prose.ids' with ORACLE_MODEL the Ornith cache name."
 stage r83.routes 83 default card ornith - "the route dump: ornith_prefill_test --dump-routes (every layer's route rows after a real prefill of long32k[0, 4096) in chunks of 2048, l0) -> \$STATE/ornith.routes"
@@ -3769,6 +3817,71 @@ st_r85_span() {
   chk "python3 tools/probe/gdn_gate_span.py $STATE/r84.gdn" "the gate span check"
   grab_all span '^SPAN' 8
   finish
+}
+
+# ======================================================================================
+row 86 "spec 19v3a - DFlash with int8 KV: new M5..8 binaries, one-card and PP serving, acceptance and replay"
+rownote 86 "Implementation checked with a focused smoke run only (operator 2026-11-13). Full checkpoint twins, two-card PP, f32 identity, acceptance and paired costs/replay remain pending. Card 0 is the plan's card. r86.cost records warm-up + three interleaved pairs at each depth; derive 1.19 * (bf16 round / int8 round) * (72.3 / 71.7), stop for the operator below 1.05 at 4096. CPU acceptance comparison: dflash_v2.sh ref on r86.accept; new f32 references use the CPU model mutex and at most eight threads. No default change."
+stage r86.k0 86 default cpu - g0.sha "host acceptance, int8 planner >=200k, verify dispatch; G0 compares unchanged binaries"
+st_r86_k0() {
+  run_tests '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'
+  finish
+}
+stage r86.kernels 86 default card - r86.k0 "int8 M5..8 writer bitwise, attention fp64, property R and unchanged attention binaries"
+st_r86_kernels() {
+  run_tests '^(attn_verify_dpas_test|attn_verify_dpas_kv8_m8_test|kv8_kernels_test|attn_verify_bitwise_test)$'
+  finish
+}
+stage r86.cost 86 optin gpu qwen,dflash r86.kernels "paired real-list costs over bf16/int8 KV at 4096/32768; no policy calibration without measurements"
+st_r86_cost() {
+  idle before
+  local depth round kv order
+  for depth in 4096 32768; do
+    for round in 0 1 2 3; do
+      order='bf16 int8'
+      [ "$round" = 2 ] && order='int8 bf16'
+      for kv in $order; do
+        chk "B70_KV_CACHE=$kv build/tools/probe/probe_dflash_iter $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --format int8 --candidate-head --depth $depth --rounds 1 > $STATE/r86.cost.$depth.$round.$kv.log" "cost $kv depth $depth pair $round (0 = warm-up)"
+        x "cat $STATE/r86.cost.$depth.$round.$kv.log"
+      done
+    done
+  done
+  idle after
+  grab_all costs '^DFLASH_KV|^DFLASH_COST|^DFLASH_HOST' 200
+  finish
+}
+stage r86.engine 86 default card qwen,dflash r86.kernels "int8 engine deferred projections, greedy K7/K3/auto, prefix ring and restored continuations"
+st_r86_engine() {
+  run_tests '^(dflash_engine_kv8_test|dflash_gpu_kv8_test|dflash_prefix_gpu_kv8_test)$' kv8
+  finish
+}
+stage r86.pp 86 default gpu qwen,dflash r86.engine "two-card PP int8 DFlash bitwise the one-card engine"
+st_r86_pp() {
+  run_tests '^pp_dflash_kv8_test$' kv8 '' '-u ZE_AFFINITY_MASK'
+  finish
+}
+stage r86.accept_gpu 86 optin card qwen,dflash,oracle_dflash_dumps r86.engine "int8 engine taps and EOS-stopped acceptance; compare tool calls 6.65 / code 6.08 within 0.15"
+st_r86_accept_gpu() {
+  chk "tools/box_validate/dflash_v2.sh sources $STATE/r86.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "int8 acceptance sources"
+  chk "B70_KV_CACHE=int8 tools/box_validate/dflash_v2.sh gpu $STATE/r86.accept $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}" "int8 engine taps and live drafts"
+  grab_all acceptance '^DFLASH_EOS|^ENGINE_TAPS|^DFLASH_KV' 40
+  finish
+}
+stage r86.identity 86 optin card qwen,dflash r86.engine "one golden/toolcall round against the same int8 plain baseline, f32-judged"
+st_r86_identity() {
+  x "B70_KV_CACHE=int8 PORT=$PORT tools/box_validate/dflash_v2.sh identity $STATE/r86.identity $SNAP_QWEN ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2}"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "int8 golden/toolcall correctness"
+  judged_finish
+}
+stage r86.replay 86 optin gpu qwen,dflash r86.engine "three rotated int8 replay arms against default per-step MTP, prefix cache on (idle grade)"
+st_r86_replay() {
+  idle before
+  x "B70_KV_CACHE=int8 python3 tools/prefix/replay_spec.py ~/b70/logs/opencode-session-int8 $STATE/r86.replay --model $SNAP_QWEN --draft-model ${SNAP_DFLASH:-z-lab/Qwen3.8-27B-DFlash2} --under-lock"
+  BV_JUDGE_RC=$?
+  step_rc "$BV_JUDGE_RC" "int8 replay speed and f32 judgments"
+  idle after
+  judged_finish
 }
 
 row x "the rest of the suite: every registered test no stage above ran (new host tests, the routed tests' twins)"
