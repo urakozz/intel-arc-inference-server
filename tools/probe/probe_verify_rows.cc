@@ -127,14 +127,15 @@ int main(int argc, char** argv) {
   da.on = true;
   cli::dflash::Loaded dl = cli::dflash::load(ctx, da, model);
   auto drafter = std::make_unique<runtime::dflash::DFlashDrafter>(ctx, std::move(dl.w), dl.head_rows, max_len, da.max_k);
-  runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, runtime::KvCache::Bf16, drafter.get());
+  runtime::Engine eng(ctx, std::move(model), max_len, /*debug_resid=*/false, runtime::default_kv_cache(), drafter.get());
   drafter->attach(eng, /*draft_vocab=*/false);
   eng.prepare_prefill();
   runtime::TapDrafter& d = *eng.tap_drafter();
   const uint32_t P = uint32_t(prompt.size()), H = 5120;
   const size_t n_taps = d.tap_layers().size(), tap_row = n_taps * H;
-  std::printf("probe_verify_rows on %s: lm_head %s, prompt %u ids, stream %zu ids, taps after layers", ctx.name().c_str(),
-              loader::lm_head_form_name(head), P, stream.size());
+  std::printf("probe_verify_rows on %s: lm_head %s, KV cache %s, prompt %u ids, stream %zu ids, taps after layers",
+              ctx.name().c_str(), loader::lm_head_form_name(head), runtime::kv_cache_name(eng.kv_cache()), P,
+              stream.size());
   for (uint32_t l : d.tap_layers()) std::printf(" %u", l);
   std::printf("\n");
 
@@ -181,6 +182,19 @@ int main(int argc, char** argv) {
       row.taps.resize(tap_row);
       imm.copy(row.logits.data(), eng.verify_logits_device(), size_t(kV) * 4);
       imm.copy(row.taps.data(), d.taps().ptr(), tap_row * 2);
+      if (watch && k > 0) {   // the later rows of the same verify: row r decides G + r (its top and the watched gap)
+        std::vector<float> all(size_t(k + 1) * kV);
+        imm.copy(all.data(), eng.verify_logits_device(), all.size() * 4);
+        std::printf("  G %u %-6s %-9s rows 1..%u:", g, state, a.name, k);
+        for (uint32_t r = 1; r <= k; ++r) {
+          const float* lr = all.data() + size_t(r) * kV;
+          uint32_t top = 0;
+          for (uint32_t t = 1; t < model::Qwen35::kVocabUsed; ++t)
+            if (lr[t] > lr[top]) top = t;
+          std::printf("  [%u] %u %+.2f", r, top, double(lr[wa] - lr[wb]) / ulp_at(lr[top]));
+        }
+        std::printf("\n");
+      }
       rows.push_back(std::move(row));
     }
     // back to the production lists and the kept state (the caller commits or resets next)
