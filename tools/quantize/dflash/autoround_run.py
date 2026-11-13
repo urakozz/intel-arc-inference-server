@@ -31,12 +31,17 @@ import model as M  # noqa: E402
 HELD_OUT = ["opencode-session-2 (the whole recording)", "A4", "golden"]
 
 
+class NoTokenizer:
+    """AutoRound wants a tokenizer for a model object; the samples are tensors, every row valid (no pad id)."""
+    pad_token = pad_token_id = eos_token_id = None
+
+
 def settings(a, rows: int, n_layers: int) -> dict:
     return {
         "scheme": "W4A16", "group_size": 64, "sym": True,
         "iters": a.iters, "nsamples": a.nsamples, "seqlen": rows, "batch_size": a.batch_size,
         "low_gpu_mem_usage": True, "device_map": a.device, "seed": a.seed, "disable_model_free": True,
-        "to_quant_block_names": M.blocks(n_layers),
+        "to_quant_block_names": M.blocks(n_layers), "enable_torch_compile": a.torch_compile,
     }
 
 
@@ -60,13 +65,14 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--context", type=int, default=C.context_rows(2048, 256))
+    ap.add_argument("--torch-compile", action="store_true", help="AutoRound's torch.compile of the blocks")
     ap.add_argument("--print-only", action="store_true")
     a = ap.parse_args()
     import torch
     dtype = torch.float32 if a.device == "cpu" else torch.bfloat16
     data = C.CalibData(a.taps, a.drafter, a.target, a.nsamples, a.anchors, a.seed, a.context, dtype)
     kw = settings(a, data.rows, data.cfg.n_layers)
-    call = "AutoRound(DFlash2Calib(" + repr(a.drafter) + "), tokenizer=None, dataset=CalibData(...), " + \
+    call = "AutoRound(DFlash2Calib(" + repr(a.drafter) + "), tokenizer=NoTokenizer(), dataset=CalibData(...), " + \
         ", ".join(f"{k}={v!r}" for k, v in kw.items()) + f").quantize_and_save({a.out!r}, format='auto_round:auto_gptq')"
     summary = data.summary()
     print(call, flush=True)
@@ -76,7 +82,7 @@ def main() -> None:
     from auto_round import AutoRound
     t0 = time.time()
     m = M.load(a.drafter, dtype=dtype)
-    ar = AutoRound(m, tokenizer=None, dataset=data, **kw)
+    ar = AutoRound(m, tokenizer=NoTokenizer(), dataset=data, **kw)
     ar.quantize_and_save(a.out, format="auto_round:auto_gptq")
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2**20
     recipe = {

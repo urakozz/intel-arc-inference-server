@@ -7,6 +7,7 @@
 - the sample plan: deterministic, anchors inside the continuation and the context, every request used;
 - sources.py: the held-out recording refused, EOS / --max-cont cuts, --done skips complete dumps only;
 - finalize.py + check_gptq_export.py --dflash on a hand-packed raw export: VERIFIED, then each refusal.
+`--make-tiny DIR` only writes the tiny drafter / target / taps (quantize_dflash.sh selftest).
 
     docker run --rm -v "$PWD":/ws -w /ws agnes-ref-img:latest python3 tools/quantize/dflash/test_dflash_quant.py
 """
@@ -92,6 +93,8 @@ def make_tiny(root):
     save_file({"model.embed_tokens.weight": torch.randn(VOCAB, H, generator=g).to(torch.bfloat16),
                "lm_head.weight": torch.randn(VOCAB, H, generator=g).to(torch.bfloat16)},
               os.path.join(target, "model.safetensors"))
+    with open(os.path.join(target, "config.json"), "w") as f:
+        json.dump({"vocab_size": VOCAB, "hidden_size": H}, f)
     for name, n_prompt, n_cont in (("rec-a/000001", 40, 20), ("rec-b/000007", 12, 9)):
         n = n_prompt + n_cont
         tap_from = max(0, n_prompt - WINDOW)
@@ -205,7 +208,7 @@ def raw_export(drafter, raw, commit="0123456789abcdef0123456789abcdef01234567", 
     os.makedirs(raw)
     save_file(t, os.path.join(raw, "model.safetensors"))
     qc = {"bits": 4, "group_size": 64, "sym": True, "quant_method": "auto-round", "packing_format": "auto_round:auto_gptq",
-          "block_name_to_quantize": "encoder,layers,candidate_selector",
+          "block_name_to_quantize": [["encoder"], ["layers.0", "layers.1"], ["candidate_selector"]],
           "autoround_version": "0.17.0"}
     with open(os.path.join(raw, "config.json"), "w") as f:
         json.dump({"model_type": "dflash2_calib", "quantization_config": qc}, f)
@@ -234,7 +237,7 @@ def test_finalize_and_check(root, drafter):
     names = set(M.ref._weight_map(out))
     assert "fc.qweight" in names and "hidden_norm.weight" in names and not any(n.startswith("encoder.") for n in names)
     qc = json.load(open(os.path.join(out, "config.json")))["quantization_config"]
-    assert qc["block_name_to_quantize"] == "fc,layers,candidate_selector"
+    assert qc["block_name_to_quantize"] == [["fc"], ["layers.0", "layers.1"], ["candidate_selector"]]
     rc, txt = check(out, drafter)
     assert rc == 0 and "VERIFIED DFLASH" in txt and "20 packed linears" in txt, txt
     print("finalize + check: " + txt.strip().splitlines()[-1][:160])
@@ -286,6 +289,9 @@ def test_finalize_and_check(root, drafter):
 
 
 def main():
+    if sys.argv[1:2] == ["--make-tiny"]:            # quantize_dflash.sh selftest's inputs
+        print("tiny drafter, target, taps: " + " ".join(make_tiny(sys.argv[2])))
+        return
     root = tempfile.mkdtemp(prefix="dflash-quant-test-")
     try:
         drafter, target, taps = make_tiny(root)
