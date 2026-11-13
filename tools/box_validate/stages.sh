@@ -20,10 +20,14 @@
 # Speed stages (timed: interleaved arms, cost tables, llama-benchy) are opt-in: their numbers count only in the
 # quiet-box session (docs/open-work.md, Now), which names them; a busy nightly run would only record noise.
 # No per-row recap of G0: a row's first stage waits on g0.sha (and G0's other stages gate every run anyway).
-# The quick run (--quick, about an hour; the block at the end of this file): G0 as in the full run but the suite's
+# The merge check (--merge-check, about 20 minutes; the `merge` block at the end of this file): the build, g0.sha, the
+# model-free host stages and merge.changed - only the tests whose inputs changed, up to a time budget.
+# The quick run (--quick, a few hours on a shared box; the block at the end of this file): G0 as in the full run but the suite's
 # model-free tests only, then a fixed sample of each model's kernel / decode / prefill / serving stages; every
 # other stage is full only. Same gates and bars, less input.
 
+# The merge check's budget (--merge-check, merge.changed): seconds of test time, estimated from each test's last recorded time
+MERGE_BUDGET_S=480
 # The quick run's server prompts: 2 golden, 3 tool-call (r2.auto_rows)
 QUICK_PROMPTS=prose,code,t1_define-linear_l0,t2_explain-linear_l0,t3_rename-linear_l0
 
@@ -3926,6 +3930,21 @@ st_x_rest() {
   finish
 }
 
+stage merge.changed x optin card - g0.sha "the merge check's tests: the baseline's suite (the g0.suite set) cut to the tests whose inputs changed since their last recorded PASS or that were never recorded (reuse.py), the shortest first up to MERGE_BUDGET_S seconds of their recorded times; the rest are listed as left for the quick run"
+st_merge_changed() {
+  local tj="$STATE/$STAGE.tests.json" f="--also-in $STATE/$STAGE.tests.baseline.json --no-label ornith --no-label kv8 --no-label pp --no-label tp"
+  xb "ctest --test-dir build --show-only=json-v1 > $STATE/$STAGE.tests.baseline.json"
+  x "ctest --test-dir build --show-only=json-v1 > $tj"
+  reuse_claim "$tj" "$f"
+  x "re=\$(python3 tools/box_validate/junit.py todo $tj $f --done \"$STATE/*.junit.xml\"); if [ -z \"\$re\" ]; then : > $STATE/$STAGE.run.re; : > $STATE/$STAGE.left.txt; echo 'MERGE changed 0: every selected test keeps a recorded PASS'; else python3 tools/box_validate/reuse.py cap --tests $tj --re \"\$re\" --budget $MERGE_BUDGET_S --out-re $STATE/$STAGE.run.re --out-left $STATE/$STAGE.left.txt; fi"
+  x "re=\$(cat $STATE/$STAGE.run.re); if [ -z \"\$re\" ]; then echo 'no changed test to run'; else $(ctest_cmd) -R \"\$re\"; fi"
+  reuse_record "$tj"
+  chk "python3 tools/box_validate/junit.py pick $tj $f --exclude-file $STATE/$STAGE.left.txt --junit \"$STATE/*.junit.xml\"" \
+    "the changed tests (all but those left for the quick run)"
+  grab_all merge '^MERGE ' 80
+  finish
+}
+
 # ======================================================================================
 # --quick: the stages the quick run runs (lib.sh `quick`, `quick_form`); every other stage is full only - the
 # speed rows, the CPU reference builds, the long-context and many-prompt runs, Bolt / LiLiCorr (parked), and the
@@ -3947,3 +3966,13 @@ quick r22.devices r22.p1 r79.host r79.k1 r79.decode
 quick r77.host r77.reject r77.r1 r77.ornith r78.host r78.engine
 quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr, pp or tp label)"
 quick_form x.rest_2card "the model-free pp-labelled tests without a result (no checkpoint, bolt, lilicorr or tp label)"
+
+# --merge-check: the stages the merge check runs (lib.sh `merge`), as in the full run; every other stage is recorded SKIP.
+# The build with the baseline reused (g0.build), the kernel-binary comparison (g0.sha), the model-free host stages
+# (no data, no device, no bolt / lilicorr: their tests keep a recorded PASS while their inputs are unchanged) and
+# merge.changed, which runs the changed tests of the baseline's suite up to its time budget. G0's bitwise gates and the
+# suite are the quick run's: a gate whose inputs changed shows up in merge.changed.
+merge pre g0.build g0.sha merge.changed
+merge r5.host r13.host r14.host r15.host r16.host r17.host r18.host r19.host r21.host r22.host r23.host r24.host
+merge r25.host r25.reject r26.host r27.host r27.reject r28.host r28.reject r31.host r31.plan r32.host r33.host r34.host
+merge r54.host r55.host r56.host r69.host r70.host r71.host r75.host r77.host r78.host r79.host r80.host r81.host

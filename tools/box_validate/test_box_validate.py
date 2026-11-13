@@ -121,6 +121,18 @@ class JunitTest(Tmp):
         r = run("pick", self.p("tests.json"), "--re", "^nothing$", "--junit", self.p("*.junit.xml"))
         self.assertEqual(r.returncode, 1)                  # selecting nothing is an error
 
+    def test_exclude_file(self):
+        write(self.p("tests.json"), tests_json([("a_test", []), ("b_test", []), ("c_test", [])]))
+        write(self.p("left.txt"), "b_test\n\n")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), "names", self.p("tests.json"),
+                            "--exclude-file", self.p("left.txt")], capture_output=True, text=True)
+        self.assertEqual(r.stdout.split(), ["a_test", "c_test"])
+        write(self.p("a.junit.xml"), junit_xml([("a_test", "run", None, ""), ("c_test", "run", None, "")]))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), "pick", self.p("tests.json"),
+                            "--exclude-file", self.p("left.txt"), "--junit", self.p("*.junit.xml")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)                  # b_test has no result, and is not asked for
+
     def test_label_any_is_an_or(self):
         write(self.p("tests.json"), tests_json([("a_test", []), ("b_test", ["pp"]), ("c_test", ["checkpoint", "tp"]),
                                                 ("d_test", ["pp", "tp"]), ("e_test", ["checkpoint"])]))
@@ -356,6 +368,53 @@ class ReuseTest(Tmp):
                            capture_output=True, text=True, env={k: v for k, v in os.environ.items()
                                                                  if k != "B70_TRACE_DIR"})
         self.assertEqual((r.returncode, r.stdout), (3, "hi\n"))
+
+
+class MergeCapTest(Tmp):
+    """reuse.py cap: the merge check's budget over the tests that claim left to run"""
+
+    def cap(self, budget, names=("a_test", "b_test", "c_test", "d_test"), times=None, re_="."):
+        store = self.p("store")
+        os.makedirs(store)
+        for n, t in (times or {"a_test": "10", "b_test": "100", "c_test": "300"}).items():
+            reuse.save(store, n, {"name": n, "time": t, "inputs": {}, "build_id": n})
+        write(self.p("tests.json"), json.dumps({"tests": [{"name": n} for n in names]}))
+        with mock.patch("sys.stdout") as out:
+            rc = reuse.main(["cap", "--tests", self.p("tests.json"), "--re", re_, "--budget", str(budget),
+                             "--out-re", self.p("run.re"), "--out-left", self.p("left.txt"), "--store", store])
+        self.assertEqual(rc, 0)
+        with open(self.p("run.re")) as f:
+            run = f.read().strip()
+        with open(self.p("left.txt")) as f:
+            left = f.read().split()
+        return run, left, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def test_the_shortest_first_up_to_the_budget(self):
+        # d_test was never recorded: the 120 s default
+        run, left, out = self.cap(250)
+        self.assertEqual(run, "^(a_test|b_test|d_test)$")      # 10 + 100 + 120 = 230 s
+        self.assertEqual(left, ["c_test"])
+        self.assertIn("MERGE changed 4 (inputs differ from every recorded PASS, or never recorded): 3 run, ~230 s of the 250 s "
+                      "budget, 1 left", out)
+        self.assertIn("MERGE left for the quick run: c_test (~300 s recorded)", out)
+        self.assertIn("MERGE run d_test (~120 s estimated)", out)
+        self.assertIn("NOTE merge check: 1 of 4 changed tests are over the 250 s budget and were NOT run - left for the "
+                      "quick run (--quick): c_test", out)
+
+    def test_over_budget_leaves_everything_and_says_so(self):
+        run, left, out = self.cap(5)
+        self.assertEqual((run, left), ("", ["a_test", "b_test", "c_test", "d_test"]))
+        self.assertIn("NOTE merge check: 4 of 4", out)
+
+    def test_all_fit_says_nothing_is_left(self):
+        run, left, out = self.cap(10000)
+        self.assertEqual((run, left), ("^(a_test|b_test|c_test|d_test)$", []))
+        self.assertNotIn("NOTE", out)
+        self.assertNotIn("left for the quick run:", out)
+
+    def test_only_the_selected_tests(self):
+        run, left, out = self.cap(10000, re_="^(a_test|c_test)$")
+        self.assertEqual(run, "^(a_test|c_test)$")
 
 
 class ChangedSinceTest(Tmp):
@@ -717,6 +776,54 @@ class OrchestratorTest(Tmp):
             self.assertEqual(f.read(), "full\n")
         with open(os.path.join(self.state, "meta-0.env")) as f:
             self.assertIn("quick=0\n", f.read())
+
+    def test_merge_check(self):
+        """BV_MERGE=1 (--merge-check): a stage the `merge` block does not name is SKIP, a G0 stage it does not name is
+        not a gate of it (a G0 stage it names is), the meta and the summary say merge check and list the tests left"""
+        write(self.p("stages.sh"), self.STUB + textwrap.dedent("""\
+            stage g0.b 0 g0 cpu - - "g0 b: not in the merge check"
+            st_g0_b() { chk false "g0 b must not run in a merge check"; finish; }
+            stage r1.m 1 default cpu - - "in the merge check"
+            st_r1_m() { chk "echo ran > $STATE/r1m.ran" "ran"; finish; }
+            stage r1.n 1 default cpu - - "not in it"
+            st_r1_n() { chk "echo ran > $STATE/r1n.ran" "ran"; finish; }
+            merge pre g0.a r1.m
+            """))
+        ids = ["pre", "g0.a", "g0.b", "r1.m", "r1.n"]
+        write(self.p("runs", "g0_ok"), "")
+        self.state = self.p("runs", "s1-merge-vs-abc")
+        self.run_remote(ids, BV_MERGE="1")
+        self.assertEqual(self.status("g0.a")[1], "PASS")
+        self.assertEqual(self.status("r1.m")[1], "PASS")           # g0.b is not a gate of the merge check
+        for s in ("g0.b", "r1.n"):
+            self.assertEqual(self.status(s)[1:3], ["SKIP", "77"], s)
+            self.assertIn("not in the merge check", self.status(s)[6])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "r1n.ran")))
+        with open(os.path.join(self.state, "meta-0.env")) as f:
+            self.assertIn("merge=1\n", f.read())
+        write(os.path.join(self.state, "merge.changed.left.txt"), "slow_test\nslower_test\n")
+        reg = self.p("registry.tsv")
+        write(reg, "row\t0\tgate\nrow\t1\tone\nstage\tg0.a\t0\tg0\tcpu\t-\t-\tg0 a\nstage\tg0.b\t0\tg0\tcpu\t-\t-\tg0 b\n"
+                   "stage\tr1.m\t1\tdefault\tcpu\t-\t-\tin it\n")
+        md = self.p("summary.md")
+        self.assertEqual(summary.main(["report", "--state", self.state, "--registry", reg, "--out", md]), 0)
+        with open(md) as f:
+            text = f.read()
+        self.assertIn("# Box validation (merge check) - ", text)
+        self.assertIn("2 changed test(s) were over the merge check's budget and were NOT run - left for the quick run:** "
+                      "`slow_test`, `slower_test`", text)
+        self.assertRegex(text, r"\*\*G0 in the merge check .*: PASS\*\*")
+        # a G0 stage the merge check names blocks the rest, as in every run
+        os.remove(self.p("runs", "g0_ok"))
+        self.run_remote(ids, BV_MERGE="1", BV_REDO="all")
+        self.assertEqual(self.status("g0.a")[1], "FAIL")
+        self.assertIn("blocked: G0 not passed ( g0.a=FAIL )", self.status("r1.m")[6])
+        # outside a merge check g0.b is a gate like any
+        self.state = self.p("runs", "s1")
+        write(self.p("runs", "g0_ok"), "")
+        self.run_remote(ids)
+        self.assertEqual(self.status("g0.b")[1], "FAIL")
+        self.assertIn("g0.b=FAIL", self.status("r1.m")[6])
 
 
 # flock(1) for the Mac (util-linux's on the box): flock(2) through fcntl - the same lock and the same
@@ -1915,6 +2022,65 @@ class DriverTest(unittest.TestCase):
             self.assertEqual((one & two, one | two), (set(), old(rest_ex)), flags)
             self.assertEqual(two, {n for n in old(rest_ex) if "pp" in lab[n]}, flags)
             self.assertNotEqual(two, set(), flags)
+
+    def test_merge_check(self):
+        """--merge-check: its own state; the stages it runs are the build, g0.sha, the model-free host stages and
+        merge.changed; every other stage prints as not in it; the full and the quick run are untouched"""
+        out = self.run_driver("--dry-run", "--merge-check").stdout
+        self.assertRegex(out, r"# state: \S+-merge-vs-[0-9a-f]{12} ")
+        self.assertRegex(out, r"# merge check: \d+ of these run, the rest are recorded SKIP \(not in the merge check\)")
+        self.assertIn(" BV_MERGE=1 ", out)
+        self.assertIn(" BV_QUICK=0 ", out)
+        blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
+        runs = [sid for sid, b in blocks.items() if "merge check: as in the full run" in b]
+        self.assertEqual(runs[:3], ["pre", "g0.build", "g0.sha"])
+        self.assertEqual(runs[-1], "merge.changed")
+        for sid in ("g0.bitwise", "g0.suite", "g0.suite_2card", "x.rest", "r22.p1", "r2.suite"):
+            self.assertIn("merge check: not in it - recorded SKIP", blocks[sid], sid)
+        # the model-free host stages only: default, no device, no data
+        reg = tempfile.mktemp(suffix=".tsv")
+        try:
+            self.run_driver("--registry", reg)
+            stages = summary.read_registry(reg)[2]
+        finally:
+            if os.path.exists(reg):
+                os.remove(reg)
+        for sid in runs[3:-1]:
+            self.assertEqual((stages[sid]["sel"], stages[sid]["kind"], stages[sid]["needs"]), ("default", "cpu", "-"), sid)
+            self.assertRegex(sid, r"\.(host|reject|plan)$")
+        self.assertGreater(len(runs), 30)
+        # merge.changed: the changed tests of the g0.suite set on one card, capped
+        b = blocks["merge.changed"]
+        self.assertIn("lock: holds the card lock for device 0", b)
+        self.assertIn("reuse.py cap", b)
+        self.assertIn("--budget 480", b)
+        self.assertIn("--no-label pp --no-label tp", b)
+        self.assertIn("--exclude-file", b)
+        self.assertLess(b.index("reuse.py cap"), b.index("reuse.py record"))
+        self.assertIn("-merge.md", re.search(r"summary\.py report .* --out (\S+)", out).group(1))
+        # nothing else runs it: not the full run, not the quick run, not a named launch without it
+        for args in ((), ("--quick",)):
+            self.assertNotIn("--- merge.changed", self.run_driver("--dry-run", *args).stdout)
+        full = self.run_driver("--dry-run").stdout
+        self.assertNotIn("merge check", full)
+        self.assertIn(" BV_MERGE=0 ", full)
+        out = self.run_driver("--list", "--merge-check").stdout
+        self.assertRegex(out, r"(?m)^g0\.sha\*? .* yes ")
+        self.assertRegex(out, r"(?m)^g0\.bitwise\*? .* - +qwen")
+        self.assertRegex(out, r"(?m)^merge\.changed\* +x +optin +card +card0 ")
+        # the tiers' states do not mix
+        for args in (("--merge-check", "--quick"), ("--merge-check", "--nightly"),
+                     ("--merge-check", "--state", "abc-vs-" + "0" * 12), ("--state", "abc-merge-vs-" + "0" * 12),
+                     ("--quick", "--state", "abc-merge-vs-" + "0" * 12)):
+            self.assertEqual(self.run_driver("--dry-run", *args, ok=False).returncode, 2, args)
+        self.run_driver("--dry-run", "--merge-check", "--state", "mine-merge")
+
+    def test_usage_gives_the_tiers_times(self):
+        text = self.run_driver("--help").stdout
+        self.assertIn("--merge-check", text)
+        self.assertRegex(text, r"merge check about 20 minutes")
+        self.assertRegex(text, r"quick run about 3 hours on a box shared")
+        self.assertIn("measured 2026-11-13", text)
 
 
 def pp_labelled_tests():

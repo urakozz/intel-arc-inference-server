@@ -30,6 +30,8 @@
 # times of this device's launch).
 # Env (from the driver): BV_TREE_LABEL, BV_BASE, BV_DATA, BV_REDO ("id ..." | all),
 #   BV_FORCE, BV_NO_REUSE, BV_QUICK (--quick: a stage without a quick form is SKIP "full only"),
+#   BV_MERGE (--merge-check: a stage the stages.sh `merge` block does not name is SKIP, and G0's stop-the-line
+#   looks at the G0 stages it names only),
 #   B70_GIT_SHA, BV_BASE_SHA, BV_BASE_REF, JOBS, CMAKE_ARGS, DEVICE, PORT, SNAP_*.
 set -u
 cd "$(dirname "$0")/../.." || exit 2
@@ -87,6 +89,7 @@ progress() {
   echo "selected=$*"
   echo "device=$DEVICE"
   echo "quick=$BV_QUICK"
+  echo "merge=${BV_MERGE:-0}"
 } > "$STATE/meta-$DEVICE.env"
 
 is_redo() { case " ${BV_REDO:-} " in *" all "*|*" $1 "*) return 0 ;; esac; return 1; }
@@ -101,6 +104,7 @@ g0_block() {   # prints the G0 stages that are not PASS
   local i out=""
   for i in "${!BV_IDS[@]}"; do
     if [ "${BV_SELS[$i]}" = g0 ]; then
+      [ "${BV_MERGE:-0}" = 1 ] && [ -z "${BV_MERGES[$i]}" ] && continue   # not in the merge check: not a gate of it
       local s; s=$(status_of "${BV_IDS[$i]}")
       [ "$s" = PASS ] || out="$out ${BV_IDS[$i]}=${s:-not-run}"
     fi
@@ -150,6 +154,10 @@ run_claimed() {
   if [ "$BV_QUICK" = 1 ] && [ -z "$(bv_field "$id" quick)" ]; then
     write_status "$id" SKIP 77 "$start" "$start" 0 "full only: not in the quick run (stages.sh, the --quick block)"
     progress "$id SKIP full only"; return
+  fi
+  if [ "${BV_MERGE:-0}" = 1 ] && [ -z "$(bv_field "$id" merge)" ]; then
+    write_status "$id" SKIP 77 "$start" "$start" 0 "not in the merge check (stages.sh, the --merge-check block)"
+    progress "$id SKIP not in the merge check"; return
   fi
   if [ "$sel" = g0 ]; then
     others=$(others_active)

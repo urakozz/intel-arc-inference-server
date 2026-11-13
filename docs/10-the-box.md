@@ -161,7 +161,19 @@ every merge since the last run together. The command for that is `tools/box_vali
 (`--no-reuse`) when the newest finished full run is older than 7 days - the weekly safety net; the nights between
 reuse every unchanged PASS.
 
-**The quick run, for every change.** `tools/box_validate.sh --quick` takes about an hour instead of many: G0
+**The merge check, before a merge.** `tools/box_validate.sh --merge-check` is meant to take about 20 minutes: the
+build of the tree under test (the baseline's build is kept between runs and reused while its commit, build settings,
+compiler, ocloc and kernel series are the same: `tools/box_validate/baseline.py`), the kernel-binary comparison, the
+model-free host stages, and only the tests whose inputs changed since their last recorded PASS, the shortest first,
+up to 480 s of their recorded times. A changed test over that budget is not run: the summary says so and lists it
+for the quick run. Own state (`<sha>-merge-vs-<baseline>`); it does not stand for a quick or a full run.
+
+**The quick run, for every change.** `tools/box_validate.sh --quick` was meant to take an hour; on a box shared with
+other jobs it took about 3 hours (2026-11-13: the baseline rebuilt 10 min, the kernel-binary check 3 min, G0's gate
+outputs 18 min and the suite more than an hour, both under the whole-box lock). Since then the baseline is reused, and
+G0's gates, the suite and the rest of the suite (x.rest) hold one card, so the other card stays free; only the tests
+labelled `pp` or `tp` (g0.suite_2card, x.rest_2card) and the stages that really use two cards hold the whole box. The
+saving is not measured yet. The run is G0
 as in the full run, except that the suite runs only the tests that load no model (no `checkpoint` label), then a
 fixed sample of each model's kernel, decode, prefill and serving stages - a few with a smaller input (the 32k MTP
 test, not 128k; one server round over 2 golden and 3 tool-call prompts). Every other stage is recorded SKIP
