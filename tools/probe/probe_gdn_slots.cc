@@ -1,5 +1,5 @@
 // Spec 19 v3d Task 3 Step 1: where the GDN step's excess at 8 rows goes - the row chain or the per-row snapshots.
-// probe_gdn_slots [--calls 16] [--rounds 5] [--ref-dir DIR]
+// probe_gdn_slots [--calls 16] [--rounds 5] [--ref-dir DIR] [--variant NAME]...
 // One list of 48 gdn_step launches (Qwen3.8's GDN layers, each at its own slice of a 48-layer state, ring and
 // slots, from live slot 0) per arm, interleaved by round after a warm-up:
 //   slots_M1   gdn_step_slots_M1_N8: the DFlash 1-row list's step (one state read, one write)
@@ -8,7 +8,8 @@
 //   slots_M8   gdn_step_slots_M8_N8: the verify list's step (8 snapshot writes)
 // chain = plain_M8 - slots_M1, snapshots = slots_M8 - plain_M8. Inputs are random: the step's cost does not depend
 // on the values. --ref-dir adds ref_M8: DIR's gdn_step_slots_M8_N8.bin (another build's kernel directory), the A/B
-// of a gdn_step change in the same rounds.
+// of a gdn_step change in the same rounds. --variant adds an M = 8 slots arm from another binary of this build
+// (probe_gdn_snap<k>_M8: Step 2's store forms), compared with slots_M8.
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -46,11 +47,13 @@ int main(int argc, char** argv) {
   try {
     unsigned calls = 16, rounds = 5;
     std::string ref_dir;
+    std::vector<std::string> variants;
     for (int i = 1; i + 1 < argc; i += 2) {
       const std::string a = argv[i];
       if (a == "--calls") calls = std::stoul(argv[i + 1]);
       else if (a == "--rounds") rounds = std::stoul(argv[i + 1]);
       else if (a == "--ref-dir") ref_dir = argv[i + 1];
+      else if (a == "--variant") variants.push_back(argv[i + 1]);
       else throw std::runtime_error("unknown option " + a);
     }
     l0::Context ctx(0);
@@ -93,6 +96,7 @@ int main(int argc, char** argv) {
                                    {"plain_M8", "probe_gdn_plain_M8", 8, false},
                                    {"slots_M8", kernels::gdn_step_slots_variant(8, 48, 16, 48, 8), 8, true}};
     if (!ref_dir.empty()) arms.push_back({"ref_M8", ref_dir + "/gdn_step_slots_M8_N8.bin", 8, true});
+    for (const auto& v : variants) arms.push_back({v, v, 8, true});
     std::vector<std::unique_ptr<l0::Module>> mods;
     std::vector<std::unique_ptr<l0::Kernel>> ks;
     std::vector<l0::CmdList> lists;
@@ -135,8 +139,8 @@ int main(int argc, char** argv) {
       std::printf("GDN_SLOTS arm=%s ms=%.4f (48 launches, wall per list)\n", arms[a].name.c_str(), median(ms[a]));
     std::printf("GDN_SLOTS_SPLIT excess8=%.4f chain=%.4f snapshots=%.4f\n", median(ms[2]) - median(ms[0]),
                 median(ms[1]) - median(ms[0]), median(ms[2]) - median(ms[1]));
-    if (arms.size() == 4)
-      std::printf("GDN_SLOTS_AB slots_M8 - ref_M8 = %.4f ms\n", median(ms[2]) - median(ms[3]));
+    for (size_t a = 3; a < arms.size(); ++a)
+      std::printf("GDN_SLOTS_AB slots_M8 - %s = %.4f ms\n", arms[a].name.c_str(), median(ms[2]) - median(ms[a]));
   } catch (const std::exception& e) {
     std::fprintf(stderr, "probe_gdn_slots: %s\n", e.what());
     return 2;

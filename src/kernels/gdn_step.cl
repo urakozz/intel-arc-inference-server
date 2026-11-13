@@ -325,6 +325,12 @@ inline void band_sum(__local float (*r)[CHUNK_V], uint lane, float* x0, float* x
 #define OR o_red
 #endif
 
+#if defined(PB_SNAP) && PB_SNAP > 1
+enum LSC_STCC { LSC_STCC_DEFAULT = 0, LSC_STCC_L1UC_L3UC = 1, LSC_STCC_L1UC_L3WB = 2, LSC_STCC_L1WT_L3UC = 3,
+                LSC_STCC_L1WT_L3WB = 4, LSC_STCC_L1S_L3UC = 5, LSC_STCC_L1S_L3WB = 6, LSC_STCC_L1WB_L3WB = 7 };
+void __builtin_IB_lsc_store_global_uint(__global uint* base, int off, uint val, enum LSC_STCC cc);
+#endif
+
 inline float bf16f(ushort h) { return as_float(((uint)h) << 16); }
 
 // f32 -> bf16, round-to-nearest-even. Same add-and-shift as common::f32_to_bf16
@@ -637,10 +643,25 @@ __kernel void gdn_step(__global const uint* restrict ctrl,
 #ifdef SPEC_SLOTS
     {   // the state after row m, into its slot (header, SPEC_SLOTS)
       __global float* restrict dst = slot_base(state, state_spec, (live + m) % N_SLOTS);
+#if defined(PB_SNAP) && PB_SNAP == 1   // probe: one 64 B block write a subgroup
+      __global uint* bw = (__global uint*)(dst + (size_t)h * DIM * DIM + (size_t)(sgid * BAND_K) * DIM + c * CHUNK_V);
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        intel_sub_group_block_write(bw + (size_t)kk * DIM, as_uint(S[kk][0]));
+        intel_sub_group_block_write(bw + (size_t)kk * DIM + SG, as_uint(S[kk][1]));
+      }
+#elif defined(PB_SNAP)   // probe: LSC store with cache control PB_SNAP - 1 (LSC_STCC)
+      for (uint kk = 0; kk < BAND_K; ++kk) {
+        __builtin_IB_lsc_store_global_uint((__global uint*)(dst + sbase + (size_t)kk * DIM), 0, as_uint(S[kk][0]),
+                                           (enum LSC_STCC)(PB_SNAP - 1));
+        __builtin_IB_lsc_store_global_uint((__global uint*)(dst + sbase + (size_t)kk * DIM + SG), 0,
+                                           as_uint(S[kk][1]), (enum LSC_STCC)(PB_SNAP - 1));
+      }
+#else
       for (uint kk = 0; kk < BAND_K; ++kk) {
         dst[sbase + (size_t)kk * DIM] = S[kk][0];
         dst[sbase + (size_t)kk * DIM + SG] = S[kk][1];
       }
+#endif
     }
 #endif
 #ifdef BATCH_ROWS
