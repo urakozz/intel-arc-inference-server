@@ -28,7 +28,7 @@ ar_run_guard() {
   if [ -f "$f" ]; then
     have=$(cut -d' ' -f1 "$f")
     [ "$have" = "$AR_COMMIT" ] || {
-      echo "this run started on AutoRound $have; $AR_REF is now at $AR_COMMIT." \
+      echo "this run started on AutoRound $have; this call would build $AR_COMMIT ($AR_REF)." \
            "A run never switches AutoRound: resume with AR_COMMIT=$have, or start a new run (OUT=<new dir>)." >&2
       return 2; }
   elif [ -n "$(ls -A "$d"/resume "$d"/.done-* 2>/dev/null)" ] && [ -z "$AR_EXPLICIT" ]; then
