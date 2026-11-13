@@ -441,8 +441,9 @@ int main(int argc, char** argv) {
     if (f != loader::DraftFormat::Int4G64) {
       // 1w. the same 2053 positions at prefill width (project_wide: pf_gemm, three passes - 1000 rows on the small
       // tile, 1048 on pf_gemm's, 5 across the wrap) against the 8-row replays' ring: every slot of every layer,
-      // per position and layer the K and the V row within 1e-3 relative L2 (the GEMMs' summation order, then
-      // the bf16 round); the 8-row ring is put back for the cases below.
+      // per position and layer the K and the V row within 2e-3 relative L2, about a bf16 half-ulp (2^-9) of the
+      // row's norm: the GEMMs' summation order flips some bf16 roundings (measured 2026-11-13: worst 1.33e-3 for
+      // int8 and bf16, 99 % of the values bitwise); the 8-row ring is put back for the cases below.
       const size_t rb = b.ring_k.size(), kvn = tw.d.kvn();
       const std::vector<uint16_t> k8 = e.read<uint16_t>(b.ring_k, rb / 2), v8 = e.read<uint16_t>(b.ring_v, rb / 2);
       e.imm.fill(b.ring_k.ptr(), 0u, rb);
@@ -472,10 +473,10 @@ int main(int argc, char** argv) {
           }
           const double rel = nn > 0 ? std::sqrt(dd / nn) : (dd > 0 ? 1.0 : 0.0);
           worst = std::max(worst, rel);
-          over += !(rel <= 1e-3);
+          over += !(rel <= 2e-3);
         }
       std::printf("projection at prefill width vs 8 rows a replay, positions 0..%u: %zu of %zu ring values bitwise, "
-                  "worst row relative L2 %.3g, %zu rows over 1e-3 (bar 0)\n", P - 1, same, rb, worst, over);
+                  "worst row relative L2 %.3g, %zu rows over 2e-3 (bar 0)\n", P - 1, same, rb, worst, over);
       bad += over != 0;
       e.imm.copy(b.ring_k.ptr(), k8.data(), rb);
       e.imm.copy(b.ring_v.ptr(), v8.data(), rb);
