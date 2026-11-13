@@ -65,7 +65,8 @@ class Walk {
     require(control.size() >= sizeof(Control), "the control block is smaller than runtime::Control");
     const unsigned fmt = w_.format == loader::DraftFormat::Int4G64 ? 2u : w_.format == loader::DraftFormat::Int8 ? 1u : 0u;
     for (const std::string& v : kd::draft_variants(d_.v2(), fmt, t.head->kind == model::WeightKind::Int8,
-                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp))
+                                                   compact ? N : 0, lkind(), hkind(), opt_.dflash_attn_heads, opt_.dflash_attn_rows, bool(w_.candidate_head), opt_.dflash_attn_parallel_exp,
+                                                   opt_.dflash_attn_dpas))
       require(std::ifstream(kernels::path(v)).good(),
               v + " is not compiled (" + kernels::path(v) + "): build with B70_DFLASH=ON");
     const void* ctrl = control.ptr();
@@ -110,8 +111,10 @@ class Walk {
         k.arg_ptr(6, b_.vb.ptr());
         launch(k, d_.q_heads + 2 * d_.kv_heads, M);
       }
-      {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128
-        l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
+      {   // df_attn_part(ctrl, dctl, q, ring_k, ring_v, scale, part), grid (NKV, ring / PB), WG 128 (DPAS: 16 a q head)
+        l0::Kernel& k = opt_.dflash_attn_dpas
+                            ? kernel(kd::attn_dpas_variant(kd::kQwen38), "df_attn_part", 16 * (d_.q_heads / d_.kv_heads))
+                            : kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_part", kd::kAttnWg);
         k.arg_ptr(0, ctrl);
         k.arg_ptr(1, b_.dctl.ptr());
         k.arg_ptr(2, b_.q.ptr());
@@ -119,8 +122,11 @@ class Walk {
         k.arg_ptr(4, at(b_.ring_v.ptr(), l * ring_layer));
         k.arg(5, scale_);
         k.arg_ptr(6, b_.part.ptr());
-        launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
-               d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
+        if (opt_.dflash_attn_dpas)
+          launch(k, d_.kv_heads, d_.window[l] / kd::kAttnPb, 1);
+        else
+          launch(k, opt_.dflash_attn_heads ? d_.q_heads / opt_.dflash_attn_heads : d_.kv_heads,
+                 d_.window[l] / kd::kAttnPb, opt_.dflash_attn_rows ? kd::kM / opt_.dflash_attn_rows : 1);
       }
       {   // df_attn_reduce(ctrl, dctl, part, q, kb, vb, scale, out), grid (NH, M), WG HD
         l0::Kernel& k = kernel(kd::attn_variant(kd::kQwen38, opt_.dflash_attn_heads, opt_.dflash_attn_rows, opt_.dflash_attn_parallel_exp), "df_attn_reduce", d_.head_dim);

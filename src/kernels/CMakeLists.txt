@@ -516,6 +516,9 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
                      DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                              CAUSAL=0 HPW=1 RPW=${RPW})
   endforeach()
+  # Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl); its reduce is the _H1_B4 binary's.
+  add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_dpas SOURCE ${DF_DIR}/df_attn_dpas.cl
+                   DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128)
   add_ocloc_kernel(df_attn_M8_Q32KV8_D128_R2048_W2048_P128_H1_B4_Ep SOURCE ${DF_DIR}/df_attn_exp.cl
                    DEFINES ${CTRL_DEFINES} ${DCTL_DEFINES} M=8 NH=32 NKV=8 HD=128 RING=2048 WIN=2048 PB=128 WGA=128
                            CAUSAL=0 HPW=1 RPW=4)
