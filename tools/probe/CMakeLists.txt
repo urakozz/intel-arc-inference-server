@@ -1279,3 +1279,13 @@ target_include_directories(probe_qwen_pf_gemm PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_qwen_pf_gemm PRIVATE b70_prefill_host b70_runtime b70_loader b70_l0 b70_model)
 b70_target_kernel_dir(probe_qwen_pf_gemm)
 add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
+# --- probe_gdn_slots: spec 19 v3d Task 3 Step 1, the GDN step's excess at 8 rows split into the row chain and the
+# per-row snapshots. probe_gdn_plain_M8 is the shipped gdn_step.cl without SPEC_SLOTS at M = 8 (gdn_step's
+# Qwen3.8 defines, src/kernels/CMakeLists.txt): no runtime path binds it.
+add_ocloc_kernel(probe_gdn_plain_M8 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
+                 DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=8)
+add_executable(probe_gdn_slots probe_gdn_slots.cc)
+target_include_directories(probe_gdn_slots PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(probe_gdn_slots PRIVATE b70_l0)
+b70_target_kernel_dir(probe_gdn_slots)
+add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8)
