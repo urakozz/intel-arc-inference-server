@@ -98,6 +98,8 @@ struct ReviewedRow {
 inline constexpr const char* kReviewedReason = "chaotic turn boundary, reviewed 2026-11-05, see spec 28 sec 10";
 inline constexpr const char* kInt8PrefillKvReason =
     "known fail of l0-int8 prefill with int8 KV, accepted 2026-11-10 (docs/probes/a4-int8-prefill-int8-kv-2026-11-10.md)";
+inline constexpr const char* kInt8KvNoiseReason =
+    "int8 KV cache noise under the operator's rule 2026-11-13: plain rejected too or verify-vs-plain <= 8 ulp";
 // How close a variant's f32 gap must be to the entry's (the entries keep two decimals) to be the same row.
 inline constexpr double kReviewedGapUlp = 0.01;
 // The graded logs of ~/b70/logs/spec28-int8-judge (main 0dc9b71). The same key serves every K of a test and both
@@ -124,6 +126,17 @@ inline constexpr ReviewedRow kReviewedRows[] = {
     // bf16-unstable row, no defect - the exact lists are bitwise the plain steps (dflash_verify_kv8_test); operator
     // 2026-11-13 (docs/probes/probe-dflash-kv8-verify-m8-2026-11-13.md)
     {"dflash_gpu_int8_t1_define-rotation_82e33a10f2dcba43", 0, 248046, 248068, 34.64, "2026-11-13", kReviewedReason},
+    // dflash_gpu_kv8_test t4_comment-linear_l0 K 3: verify-vs-plain gap 5.06 ulp, plain not rejected
+    {"dflash_gpu_int8_t4_comment-linear_l0_b5da87bdd96dd7e5", 0, 74455, 248068, 15.22, "2026-11-13", kInt8KvNoiseReason},
+    // dflash_gpu_kv8_test t2_explain-loader K 7: plain rejected too (2 ids)
+    {"dflash_gpu_int8_t2_explain-loader_ad0f46fdba65f454", 0, 248068, 61369, 70.10, "2026-11-13", kInt8KvNoiseReason},
+    // mtp_gpu_kv8_test t4_comment-linear_l0 K 1-3: verify-vs-plain gap 4.37 ulp, plain not rejected
+    {"mtp_gpu_bf16_t4_comment-linear_l0_b9725217706f86bb", 0, 74455, 248068, 8.88, "2026-11-13", kInt8KvNoiseReason},
+    // mtp_gpu_kv8_test t6_usage-step K 1-3: verify-vs-plain gap 4.68 ulp, plain not rejected
+    {"mtp_gpu_bf16_t6_usage-step_9773766fbdbc0a4e", 0, 74455, 248046, 12.40, "2026-11-13", kInt8KvNoiseReason},
+    // mtp_gpu_kv8_test t1_define-rotation K 1-3: first difference a 0.46 ulp near-tie, plain not rejected
+    // (row 195 passes by the bf16-unstable rule; row 199 is the rejected one)
+    {"mtp_gpu_bf16_t1_define-rotation_7d7630d760d6d025", 199, 248068, 846, 21.26, "2026-11-13", kInt8KvNoiseReason},
 };
 // The process's reviewed rows (kReviewedRows; spec_judge_test adds its own), how often each matched, and the test
 // tags streams() saw - an entry whose tag ran and never matched is stale.
