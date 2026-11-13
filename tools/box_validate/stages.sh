@@ -3854,5 +3854,5 @@ quick r24.k1 r24.load r24.k3 r24.golden r26.host r26.k1
 quick r31.host r31.load r32.k1 r32.k3 r33.host r33.k1
 quick r54.kernels r54.load r55.kernels
 quick r22.devices r22.p1 r79.host r79.k1 r79.decode
-quick r77.host r77.reject r77.r1 r77.ornith r78.host r78.engine
+quick r77.host r77.reject r77.r1 r77.ornith r77.dflash r78.host r78.engine
 quick_form x.rest "every model-free test without a result (no checkpoint, bolt, lilicorr or tp label)"
