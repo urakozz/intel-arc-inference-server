@@ -1,6 +1,6 @@
 # Spec 19 v3 - DFlash in the modes we serve: the int8 KV cache, request slots, tensor parallel
 
-**Status:** 2026-11-13: mode A implemented on `spec19v3a-dflash-int8-kv`, focused check pending; modes B/C remain design. Every speed number for a new mode is **derived** from numbers
+**Status:** 2026-11-13: mode A implemented on `spec19v3a-dflash-int8-kv`, focused kernel/host checks passed; modes B/C remain design. Every speed number for a new mode is **derived** from numbers
 already measured; each plan starts by measuring the one number its mode hinges on.
 
 **Continues** spec 19 v2 (`2026-11-11-spec19v2-dflash-v2-design.md`), whose §4 parked these modes. Spec 19 v2 stays
@@ -116,7 +116,7 @@ re-ranked exactly; on whenever the head is int8), 7 more GDN slots 1.06 GB, buff
 
 | one card | MTP (today) | DFlash, bf16 KV (today) | DFlash, int8 KV (this mode) |
 |---|---:|---:|---:|
-| `--max-len auto` | 171,008 bf16 / 262,144 int8 | ~130-140k | **~225-245k** |
+| `--max-len auto` | 171,008 bf16 / 262,144 int8 | ~130-140k | **246,528 (host planner)** |
 
 - **It does not reach the full 262,144 on one card.** It is short by ~0.7-1.4 GB. The tuned int4 drafter (open-work,
   "DFlash drafter quant") would free 0.84 GB.
@@ -124,7 +124,8 @@ re-ranked exactly; on whenever the head is int8), 7 more GDN slots 1.06 GB, buff
 - The planner prints the real figure; the plan records it and gates on >= 200,000.
 
 **As built (2026-11-13):** mode A keeps the int8 drafter, candidate64/exact-int8 head and bf16 drafter ring.
-The host planner's printed int8 context is recorded after the focused check; allocation at that context and the
+The host planner prints **246,528** at 32.530 GB, 1.5 GB reserve and target weights 16,812,371,968 B
+(the int8 target head included). New M5..8 kernels and focused host checks pass; allocation at that context and
 full checkpoint gates remain pending.
 
 ### 2.4 Expected speed (derived)

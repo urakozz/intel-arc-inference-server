@@ -1321,7 +1321,13 @@ PASS on all three arms.**
 Implementation branch `spec19v3a-dflash-int8-kv` adds the M5..8 int8 writer/reduce/DPAS binaries and all-depth
 verify dispatch. The operator requested only a quick final check. **No new speed measurements**: paired real-list
 costs at 4096/32768, replay against default per-step MTP, tg128 at 32768 and decode at 120000 are pending (row 86).
-The policy costs and `--spec auto` are unchanged. The spec's ~1.15–1.18x is derived, not a measured result.
+Host planner: **246,528 tokens** at 32.530 GB, 1.5 GB reserve, target weights 16,812,371,968 B, int8 drafter
+and candidate64 head; allocation at that context is untested. The policy costs and `--spec auto` are unchanged.
+The spec's ~1.15–1.18x is derived, not a measured result. Focused check: five host tests, three GPU kernel tests
+(no skips, 33.51 s on card 1), twelve replay-harness tests and two validation regressions passed. All twelve
+new kernel commands are additive, existing commands unchanged. Full G0 binary comparison remains pending.
+Evidence: `~/b70/logs/dflash-int8-v3a/{quick,quick-final}.log` (kernel check rc0); validation regression logs
+are in the branch's local plan workspace.
 
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 

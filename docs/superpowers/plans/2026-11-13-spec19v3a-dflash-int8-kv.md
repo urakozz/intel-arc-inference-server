@@ -1,6 +1,6 @@
 # Spec 19 v3a - `--spec dflash` with `--kv-cache int8` (open-work item 12)
 
-**Status (2026-11-13): implemented on `spec19v3a-dflash-int8-kv`; focused final check pending.** Spec: `docs/superpowers/specs/2026-11-13-spec19v3-dflash-modes-design.md` §2
+**Status (2026-11-13): implemented on `spec19v3a-dflash-int8-kv`; focused host/kernel check passed; long gates pending.** Spec: `docs/superpowers/specs/2026-11-13-spec19v3-dflash-modes-design.md` §2
 (mode A). Short by design: the kernel sources exist; this plan builds three binaries at 5..8 rows, adds four table
 rows and removes one refusal.
 
@@ -14,6 +14,15 @@ rows and removes one refusal.
 per-step builds, RED/GREEN runs, paired-cost stop decision, full checkpoint/PP/quick-validation, CPU acceptance,
 f32 serving and speed runs below remain unrun gates. Their commands and bars are retained for later; implementation
 is not a claim that this mode has passed them. Validation stages are registered as row 86. `--spec auto` is unchanged.
+
+**Focused check:** all twelve new kernels compile; kernel command lines show exactly twelve additions, no
+existing changes/removals. Five host tests pass; planner **246,528**. Replay harness 12/12 and validation
+regressions 2/2 pass. Three GPU kernel tests pass, no skipped tests (33.51 s on card 1 while card 0 was occupied): new int8 attention
+at 512/4096/32768 keys, writer/reduce and unchanged-attention control. Property R is bitwise in 100/100 trials
+at each depth. Evidence: `~/b70/logs/dflash-int8-v3a/{quick,quick-final}.log`; initial wrapper
+ended rc128 on a driver dry-run requiring git metadata, resumed kernel check ended `QUICK_PASS`, rc0.
+The driver dry-run/registry checks passed on the Mac checkout. Full CLI build, G0 binary comparison, checkpoint twins, PP,
+acceptance, f32 serving and speed remain pending.
 
 **Goal:** `b70-serve --spec dflash --kv-cache int8` serves on one card and on `--parallel pp`, greedy output judged
 equal to `--spec off --kv-cache int8`, with `--max-len auto` at or above 200,000 on one card and a derived
@@ -66,7 +75,7 @@ MTP at depth 4096 (its Step 3 has the formula). The result is recorded and the o
 - Modify `tools/box_validate/stages.sh`: a new row (86, or the next free one) with stages `.k0` (host checks and
   unchanged binaries), `.kernels` (this task's tests), `.cost` (Step 3), and later tasks' stages.
 
-- [ ] **Step 1: build.** The bound, the CMake lines, `tools/box.sh build`.
+- [x] **Step 1: build.** The bound, the CMake lines, `tools/box.sh build`.
   - **Gate:** all twelve new binaries compile; `tools/kernel_cmdlines` against the branch point shows only additions.
   - If `attn_v2_M<M>_T32_KV8` does not compile at 5..8 rows (register pressure in the decode kernel), record the
     compiler's message and build the reduce from the row-table form's source path instead; do not change the
@@ -107,7 +116,7 @@ MTP at depth 4096 (its Step 3 has the formula). The result is recorded and the o
 - Modify `tests/runtime/dflash_plan_test.cc` or `tests/runtime/memory_plan_test.cc`: the plan with a drafter and the
   int8 cache (the drafter's term unchanged, the KV term int8's, `max_len_that_fits` at the 32.53 GB card printed).
 
-- [ ] **Step 1 (host):** the refusal, the argument test, the plan test.
+- [x] **Step 1 (host):** the refusal, the argument test, the plan test.
   - Run: `tools/box.sh test '^(pipeline_args_test|dflash_plan_test|memory_plan_test|verify_attn_test|dflash_engine_host_test)$'`.
   - **Gate:** pass; the plan test prints `--max-len auto` for one card with the drafter, the candidate head and the
     int8 cache, and it is **>= 200,000** (derived 225-245k). Record the printed value in the spec's §2.3 table.
@@ -140,7 +149,7 @@ MTP at depth 4096 (its Step 3 has the formula). The result is recorded and the o
   - New f32 references, if the judge asks for any, are CPU jobs: take `/tmp/b70-cpu-model.lock`, at most eight
     threads, and check the free RAM first.
   - **Gate:** every request passes: identical, or its first difference judged a near tie. No failure, no skip.
-- [ ] **Step 3: docs for the mode.** `docs/18-running-models.md` (the DFlash section's "Refused" list, the feature
+- [x] **Step 3: docs for the mode.** `docs/18-running-models.md` (the DFlash section's "Refused" list, the feature
   table's row, a one-card int8 recipe with the planner's context), `README.md`'s flag table only if a line there says
   bf16 only. Commit.
 
