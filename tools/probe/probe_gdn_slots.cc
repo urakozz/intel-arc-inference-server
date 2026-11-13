@@ -8,8 +8,9 @@
 //   slots_M8   gdn_step_slots_M8_N8: the verify list's step (8 snapshot writes)
 // chain = plain_M8 - slots_M1, snapshots = slots_M8 - plain_M8. Inputs are random: the step's cost does not depend
 // on the values. --ref-dir adds ref_M8: DIR's gdn_step_slots_M8_N8.bin (another build's kernel directory), the A/B
-// of a gdn_step change in the same rounds. --variant adds an M = 8 slots arm from another binary of this build
-// (probe_gdn_snap<k>_M8: Step 2's store forms), compared with slots_M8.
+// of a gdn_step change in the same rounds. --variant adds an M = 8 slots arm from another binary of this build,
+// compared with slots_M8 (Step 2's store forms - block writes, LSC cache controls - measured this way 2026-11-13:
+// none saved more than 0.08 ms, the uncached ones cost 8-15 ms; removed).
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
