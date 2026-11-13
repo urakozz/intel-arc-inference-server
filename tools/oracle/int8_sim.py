@@ -18,6 +18,17 @@ variant's quantisation. Both are the engine's rules, op for op where an op decid
   computes it. Not bitwise the device: the FWHT's fp32 sum order and the weights' values (the
   reference's bf16-rounded dequant, the device's fp32 (q - 8) x scale) can move a code that sits
   on a rounding boundary.
+
+* `kv8_encode(x)` / `kv8_dequant(q, s16)` / `kv8_fq(x)` - Qwen3.8's int8 KV cache (`--kv-cache int8`,
+  spec 12's rotkv: src/common/kv8.h, which src/kernels/kv8.cl repeats bitwise): per (position, kv
+  head) row of 256, y = s (.) FWHT(x) / 16 (fp32, stages h = 1..128 ascending), s16 = f16_rne(amax /
+  127), q = clamp(rint(y / f16f(s16)), +-127) (0 for a zero scale), deq = q f16f(s16). Bitwise kv8.h:
+  every op is one fp32 rounding in kv8.h's order (tests/common/kv8_sim_test.cc holds the codes, the
+  scales and deq to kv8.h on tools/oracle/kv8_sim_fixture.py's rows). kv8_fq is what the attention
+  reads, back in the original basis: the row rounded to bf16 first (the cache stores what the bf16
+  cache would), encoded, de-quantised, un-rotated - in fp64, where the un-rotation of one row's deq
+  (a common scale times integer sums) is exact - and rounded once to fp32. q . kv8_fq(k) is the
+  engine's (q R) . deq up to fp32 rounding (R R^T = I).
 """
 import os
 
@@ -175,3 +186,74 @@ def int8_head_weight(w: torch.Tensor) -> torch.Tensor:
     """The int8 head as an f32 weight, q x s per row (gemv_i8w's (x . q) s up to one f32 rounding)."""
     q, s = int8_rows(w)
     return q.float() * s[:, None]
+
+
+# kv8.h kSignWords: bit j of word j / 32 set when s[j] = -1 (the 12a probe's hadamard(256, 0)).
+KV8_SIGN_WORDS = (0xA197D809, 0xA6850592, 0xB205A73E, 0x20AFA769, 0x45C2CF64, 0xBEAEAACB, 0x75F39ADD, 0x2385A70C)
+KV8_HD = 256
+
+
+def kv8_signs() -> torch.Tensor:
+    """s[j] = +-1, fp32 [256]."""
+    return torch.tensor([-1.0 if (KV8_SIGN_WORDS[j >> 5] >> (j & 31)) & 1 else 1.0 for j in range(KV8_HD)])
+
+
+def kv8_fwht(v: torch.Tensor) -> torch.Tensor:
+    """kv8.h fwht256 over the last dim in v's dtype: stages h = 1, 2, ..., 128 ascending, the pair (i, i + h) with
+    i & h == 0 becoming (a + c, a - c) - one rounding per op, kv8.h's order."""
+    shp = v.shape
+    r = v.reshape(-1, KV8_HD)
+    h = 1
+    while h < KV8_HD:
+        r = r.reshape(r.shape[0], KV8_HD // (2 * h), 2, h)
+        a, c = r[..., 0, :], r[..., 1, :]
+        r = torch.stack([a + c, a - c], dim=-2).reshape(-1, KV8_HD)
+        h *= 2
+    return r.reshape(shp)
+
+
+def kv8_f16_rne(f: torch.Tensor) -> torch.Tensor:
+    """kv8.h f32_to_f16_rne on a finite, non-negative fp32 tensor (a scale): the binary16 bits as int32,
+    subnormals kept, >= 65504 saturating - op for op."""
+    u = f.float().contiguous().view(torch.int32).to(torch.int64) & 0x7FFFFFFF
+    sub = torch.round(f.float() * 16777216.0).to(torch.int64)          # x 2^24, exact; rint
+    e = (u >> 23) - 112
+    m = u & 0x7FFFFF
+    h = (e << 10) | (m >> 13)
+    rem = m & 0x1FFF
+    h = h + ((rem > 0x1000) | ((rem == 0x1000) & ((h & 1) == 1))).to(torch.int64)
+    h = torch.where(u < 0x38800000, sub, h)
+    h = torch.where(u >= 0x477FE000, torch.full_like(h, 0x7BFF), h)
+    return h.to(torch.int32)
+
+
+def kv8_f16f(h: torch.Tensor) -> torch.Tensor:
+    """kv8.h f16f: binary16 bits (non-negative) -> fp32, exact."""
+    h = h.to(torch.int64)
+    e, m = (h >> 10) & 0x1F, h & 0x3FF
+    normal = (((e + 112) << 23) | (m << 13)).to(torch.int32).view(torch.float32)
+    return torch.where(e == 0, m.to(torch.float32) * 5.9604644775390625e-08, normal)
+
+
+def kv8_encode(x: torch.Tensor):
+    """kv8.h encode over the last dim (256) of x, whose values are the cache's bf16 values in fp32: the int8 codes
+    [..., 256] and the fp16 scales' bits (int32 [...])."""
+    y = kv8_fwht(x.float()) * kv8_signs() * 0.0625
+    s16 = kv8_f16_rne(y.abs().amax(-1) / 127.0)
+    sf = kv8_f16f(s16)[..., None]
+    q = torch.clamp(torch.round(y / torch.where(sf == 0, torch.ones_like(sf), sf)), -127.0, 127.0)
+    q = torch.where(sf == 0, torch.zeros_like(q), q)
+    return q.to(torch.int8), s16
+
+
+def kv8_dequant(q: torch.Tensor, s16: torch.Tensor) -> torch.Tensor:
+    """kv8.h dequant: q f16f(s16), fp32 (exact), still rotated."""
+    return q.float() * kv8_f16f(s16)[..., None]
+
+
+def kv8_fq(x: torch.Tensor) -> torch.Tensor:
+    """A K or V tensor [..., 256] as the int8 cache gives it back to attention, in the original basis, fp32: rounded
+    to bf16 (what the cache would store), encoded, de-quantised, un-rotated (s (.) deq, FWHT, / 16) in fp64 - exact for
+    one row's deq - and rounded once to fp32."""
+    q, s16 = kv8_encode(x.to(torch.bfloat16).float())
+    return (kv8_fwht(kv8_dequant(q, s16).double() * kv8_signs().double()) * 0.0625).float()
