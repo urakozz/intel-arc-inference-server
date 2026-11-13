@@ -468,3 +468,9 @@ python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple 
   losses 4.3e-3 -> 1.9e-3 (encoder), 5.3e-2 -> 6.8e-3 and 5.7e-2 -> 9.6e-3 (layers), 7.8e-3 -> 1.8e-3 (selector); the
   export dequantised through the calibration forward is 9.5 % off the bf16 selector projection against 24 % for the
   2-iteration (RTN-start) export; `finalize` restored 16 fp32 widenings to the source's bf16 and the check VERIFIED.
+- **Real-drafter smoke (2026-11-13, card 0, `quantize_dflash.sh start`):** two opencode-session-int8 requests (taps
+  for 65 + 2358 positions), 4 samples x 32 blocks, 2 iterations: `DFLASH QUANT: OK`, 47/47 linears packed, 34 tensors
+  bitwise the source's (22 norms, 10 conv base kernels, 2 codebooks); AutoRound 88 s, peak 9.8 GiB RAM, 7.3 GiB
+  VRAM. The layer blocks' losses (5e1 .. 7e3) are MSEs of the residual stream, which grows layer by layer.
+  The `taps` stage needs the whole build (the probe loads the engine's kernel binaries); it builds it when the probe
+  is missing.

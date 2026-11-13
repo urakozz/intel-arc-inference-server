@@ -15,7 +15,8 @@
 #   taps     tools/probe/probe_dflash_iter --engine-taps on card CARD (tools/gpu_lock.sh card): the quantised
 #            target TARGET teacher-forced over each request, its taps at the drafter's layers 5/19/33/47/61
 #            over the last 2048 prompt positions and the continuation, one dump per request in $WORK/taps
-#            (~8 GB); resumable per request (a rerun dumps only what is missing). Built first if missing.
+#            (~8 GB); resumable per request (a rerun dumps only what is missing). The tree is built if the
+#            probe is missing.
 #   quant    AutoRound (tools/quantize/dflash/autoround_run.py) on the real non-causal DFlash2DraftModel
 #            forward (tools/quantize/dflash/model.py = tools/oracle/dflash_ref.py's, batched): W4A16, group 64,
 #            symmetric, auto_round:auto_gptq, ITERS (200) sign-SGD iterations, NSAMPLES (128) samples of
@@ -121,10 +122,10 @@ stage_taps() {
   mkdir -p "$TAPS"
   if [ "$(python3 -c 'import json, sys; print(len(json.load(open(sys.argv[1]))))' "$WORK/sources.json")" != 0 ]; then
     if [ ! -x "$PROBE" ]; then
-      echo "building probe_dflash_iter in $REPO/build"
+      echo "building $REPO/build (the probe loads the engine's kernel binaries, so the whole tree)"
       [ -f "$REPO/build/CMakeCache.txt" ] || cmake -S "$REPO" -B "$REPO/build" -DCMAKE_BUILD_TYPE=Release > /dev/null
-      cmake --build "$REPO/build" --target probe_dflash_iter -j44 > "$WORK/probe-build.log" 2>&1 ||
-        die "building probe_dflash_iter failed: $WORK/probe-build.log"
+      cmake --build "$REPO/build" -j44 > "$WORK/probe-build.log" 2>&1 ||
+        die "building $REPO/build failed: $WORK/probe-build.log"
     fi
     (cd "$REPO" && "$HERE/gpu_lock.sh" card "$CARD" -- "$PROBE" "$TSNAP" "$DSNAP" --format int8 \
       --engine-taps "$WORK/sources.json" "$TAPS" --anchors 1)
