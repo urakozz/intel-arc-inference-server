@@ -212,6 +212,7 @@ struct Measure {
   double hc = 1, sc = 1;          // rows cosine (min over 0..K), scores cosine over the shared candidates
   int sets_bad = 0, walk_bad = 0, near = 0;
   uint32_t walk_at = 0;           // the first draft index whose id differs from the twin's (K: none)
+  double walk_gap = 0;            // there: the twin's two keys' relative gap (the near-tie rule's measure, 1e-4)
 };
 Measure measure(const runtime::dflash::DFlashDraftOut& o, const std::vector<float>& h, const dfref::DraftOut& t,
                 uint32_t p, uint32_t K, float T, uint64_t seed) {
@@ -248,6 +249,7 @@ Measure measure(const runtime::dflash::DFlashDraftOut& o, const std::vector<floa
         ++m.near;
         break;   // the walks diverge from here
       }
+      m.walk_gap = std::fabs(a - bb) / std::fmax(1.0f, std::fabs(a));
       ++m.walk_bad;
       break;
     }
@@ -326,9 +328,10 @@ int judge_draft(Env& e, const runtime::dflash::DFlashBuffers& b, const dfref::We
   g_sets_gv += g.sets_bad;
   const bool walk = m.walk_bad == 0 || m.walk_at >= g.walk_at;
   std::printf("%s (p %u, K %u, T %.1f) against the f32 judge: rows cos gemm_sm %.7f / gemv %.7f %s, scores cos %.7f / "
-              "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s\n", what, p, K, double(T), m.hc, g.hc,
+              "%.7f %s, sets off %d / %d %s (recorded), walk to %u / %u of %u%s %s%s\n", what, p, K, double(T), m.hc, g.hc,
               rows ? "ok" : "FAIL", m.sc, g.sc, scores ? "ok" : "FAIL", m.sets_bad, g.sets_bad, sets ? "ok" : "FAIL",
-              m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL");
+              m.walk_at, g.walk_at, K, m.near ? " (a near tie)" : "", walk ? "ok" : "FAIL",
+              m.walk_bad ? (" (the twin's keys there " + std::to_string(m.walk_gap) + " apart, relative)").c_str() : "");
   int bad = !rows + !scores + !walk;
   bad += o.k != K || o.anchor != anchor || o.pos != p;
   return bad;
@@ -581,6 +584,7 @@ int main(int argc, char** argv) {
         runtime::CaptureOptions mixed;
         mixed.force_linear = body_gemv ? runtime::LinearForce::Gemv : runtime::LinearForce::SmallM;
         mixed.force_dflash_head = body_gemv ? runtime::LinearForce::SmallM : runtime::LinearForce::Gemv;
+        mixed.dflash_attn_dpas = !body_gemv;   // its base's attention part (dg binds the scalar one)
         auto step = runtime::dflash::build_dflash_draft(e.ctx, w, t, b, control, mixed);
         const auto& base = body_gemv ? *dg : draft;
         CHECK_EQ(step.labels.size(), base.labels.size());
