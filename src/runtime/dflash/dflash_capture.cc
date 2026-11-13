@@ -166,7 +166,7 @@ class Walk {
     if (w_.candidate_head) {
       i4_linear(kd::kR, H, N, w_.candidate_head->mem.ptr(), at(b_.x.ptr(), size_t(H) * 2), b_.logits.ptr());
       {
-        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_stage1", kd::kWg);
+        auto& k = kernel(kd::candidate_topk_variant(), "df_candidate_select1", kd::kWg);   // spec 19 v3d Task 7
         k.arg_ptr(0, b_.logits.ptr());
         k.arg_ptr(1, b_.tpart.ptr());
         launch(k, (N + kd::kTopkChunk - 1) / kd::kTopkChunk, kd::kR);
