@@ -22,10 +22,12 @@ import tempfile
 import textwrap
 import time
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+import baseline  # noqa: E402
 import junit  # noqa: E402
 import reuse  # noqa: E402
 import summary  # noqa: E402
@@ -118,6 +120,30 @@ class JunitTest(Tmp):
         self.assertEqual(r.returncode, 0)
         r = run("pick", self.p("tests.json"), "--re", "^nothing$", "--junit", self.p("*.junit.xml"))
         self.assertEqual(r.returncode, 1)                  # selecting nothing is an error
+
+    def test_exclude_file(self):
+        write(self.p("tests.json"), tests_json([("a_test", []), ("b_test", []), ("c_test", [])]))
+        write(self.p("left.txt"), "b_test\n\n")
+        r = subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), "names", self.p("tests.json"),
+                            "--exclude-file", self.p("left.txt")], capture_output=True, text=True)
+        self.assertEqual(r.stdout.split(), ["a_test", "c_test"])
+        write(self.p("a.junit.xml"), junit_xml([("a_test", "run", None, ""), ("c_test", "run", None, "")]))
+        r = subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), "pick", self.p("tests.json"),
+                            "--exclude-file", self.p("left.txt"), "--junit", self.p("*.junit.xml")],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)                  # b_test has no result, and is not asked for
+
+    def test_label_any_is_an_or(self):
+        write(self.p("tests.json"), tests_json([("a_test", []), ("b_test", ["pp"]), ("c_test", ["checkpoint", "tp"]),
+                                                ("d_test", ["pp", "tp"]), ("e_test", ["checkpoint"])]))
+        run = lambda *a: subprocess.run([sys.executable, os.path.join(HERE, "junit.py"), *a],
+                                        capture_output=True, text=True).stdout.split()
+        self.assertEqual(run("names", self.p("tests.json"), "--label-any", "pp", "--label-any", "tp"),
+                         ["b_test", "c_test", "d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--label", "pp", "--label", "tp"), ["d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--label-any", "pp", "--label-any", "tp",
+                             "--no-label", "checkpoint"), ["b_test", "d_test"])
+        self.assertEqual(run("names", self.p("tests.json"), "--no-label", "pp", "--no-label", "tp"), ["a_test", "e_test"])
 
     def test_latest_result_wins(self):
         write(self.p("tests.json"), tests_json([("a_test", [])]))
@@ -342,6 +368,53 @@ class ReuseTest(Tmp):
                            capture_output=True, text=True, env={k: v for k, v in os.environ.items()
                                                                  if k != "B70_TRACE_DIR"})
         self.assertEqual((r.returncode, r.stdout), (3, "hi\n"))
+
+
+class MergeCapTest(Tmp):
+    """reuse.py cap: the merge check's budget over the tests that claim left to run"""
+
+    def cap(self, budget, names=("a_test", "b_test", "c_test", "d_test"), times=None, re_="."):
+        store = self.p("store")
+        os.makedirs(store)
+        for n, t in (times or {"a_test": "10", "b_test": "100", "c_test": "300"}).items():
+            reuse.save(store, n, {"name": n, "time": t, "inputs": {}, "build_id": n})
+        write(self.p("tests.json"), json.dumps({"tests": [{"name": n} for n in names]}))
+        with mock.patch("sys.stdout") as out:
+            rc = reuse.main(["cap", "--tests", self.p("tests.json"), "--re", re_, "--budget", str(budget),
+                             "--out-re", self.p("run.re"), "--out-left", self.p("left.txt"), "--store", store])
+        self.assertEqual(rc, 0)
+        with open(self.p("run.re")) as f:
+            run = f.read().strip()
+        with open(self.p("left.txt")) as f:
+            left = f.read().split()
+        return run, left, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def test_the_shortest_first_up_to_the_budget(self):
+        # d_test was never recorded: the 120 s default
+        run, left, out = self.cap(250)
+        self.assertEqual(run, "^(a_test|b_test|d_test)$")      # 10 + 100 + 120 = 230 s
+        self.assertEqual(left, ["c_test"])
+        self.assertIn("MERGE changed 4 (inputs differ from every recorded PASS, or never recorded): 3 run, ~230 s of the 250 s "
+                      "budget, 1 left", out)
+        self.assertIn("MERGE left for the quick run: c_test (~300 s recorded)", out)
+        self.assertIn("MERGE run d_test (~120 s estimated)", out)
+        self.assertIn("NOTE merge check: 1 of 4 changed tests are over the 250 s budget and were NOT run - left for the "
+                      "quick run (--quick): c_test", out)
+
+    def test_over_budget_leaves_everything_and_says_so(self):
+        run, left, out = self.cap(5)
+        self.assertEqual((run, left), ("", ["a_test", "b_test", "c_test", "d_test"]))
+        self.assertIn("NOTE merge check: 4 of 4", out)
+
+    def test_all_fit_says_nothing_is_left(self):
+        run, left, out = self.cap(10000)
+        self.assertEqual((run, left), ("^(a_test|b_test|c_test|d_test)$", []))
+        self.assertNotIn("NOTE", out)
+        self.assertNotIn("left for the quick run:", out)
+
+    def test_only_the_selected_tests(self):
+        run, left, out = self.cap(10000, re_="^(a_test|c_test)$")
+        self.assertEqual(run, "^(a_test|c_test)$")
 
 
 class ChangedSinceTest(Tmp):
@@ -703,6 +776,54 @@ class OrchestratorTest(Tmp):
             self.assertEqual(f.read(), "full\n")
         with open(os.path.join(self.state, "meta-0.env")) as f:
             self.assertIn("quick=0\n", f.read())
+
+    def test_merge_check(self):
+        """BV_MERGE=1 (--merge-check): a stage the `merge` block does not name is SKIP, a G0 stage it does not name is
+        not a gate of it (a G0 stage it names is), the meta and the summary say merge check and list the tests left"""
+        write(self.p("stages.sh"), self.STUB + textwrap.dedent("""\
+            stage g0.b 0 g0 cpu - - "g0 b: not in the merge check"
+            st_g0_b() { chk false "g0 b must not run in a merge check"; finish; }
+            stage r1.m 1 default cpu - - "in the merge check"
+            st_r1_m() { chk "echo ran > $STATE/r1m.ran" "ran"; finish; }
+            stage r1.n 1 default cpu - - "not in it"
+            st_r1_n() { chk "echo ran > $STATE/r1n.ran" "ran"; finish; }
+            merge pre g0.a r1.m
+            """))
+        ids = ["pre", "g0.a", "g0.b", "r1.m", "r1.n"]
+        write(self.p("runs", "g0_ok"), "")
+        self.state = self.p("runs", "s1-merge-vs-abc")
+        self.run_remote(ids, BV_MERGE="1")
+        self.assertEqual(self.status("g0.a")[1], "PASS")
+        self.assertEqual(self.status("r1.m")[1], "PASS")           # g0.b is not a gate of the merge check
+        for s in ("g0.b", "r1.n"):
+            self.assertEqual(self.status(s)[1:3], ["SKIP", "77"], s)
+            self.assertIn("not in the merge check", self.status(s)[6])
+        self.assertFalse(os.path.exists(os.path.join(self.state, "r1n.ran")))
+        with open(os.path.join(self.state, "meta-0.env")) as f:
+            self.assertIn("merge=1\n", f.read())
+        write(os.path.join(self.state, "merge.changed.left.txt"), "slow_test\nslower_test\n")
+        reg = self.p("registry.tsv")
+        write(reg, "row\t0\tgate\nrow\t1\tone\nstage\tg0.a\t0\tg0\tcpu\t-\t-\tg0 a\nstage\tg0.b\t0\tg0\tcpu\t-\t-\tg0 b\n"
+                   "stage\tr1.m\t1\tdefault\tcpu\t-\t-\tin it\n")
+        md = self.p("summary.md")
+        self.assertEqual(summary.main(["report", "--state", self.state, "--registry", reg, "--out", md]), 0)
+        with open(md) as f:
+            text = f.read()
+        self.assertIn("# Box validation (merge check) - ", text)
+        self.assertIn("2 changed test(s) were over the merge check's budget and were NOT run - left for the quick run:** "
+                      "`slow_test`, `slower_test`", text)
+        self.assertRegex(text, r"\*\*G0 in the merge check .*: PASS\*\*")
+        # a G0 stage the merge check names blocks the rest, as in every run
+        os.remove(self.p("runs", "g0_ok"))
+        self.run_remote(ids, BV_MERGE="1", BV_REDO="all")
+        self.assertEqual(self.status("g0.a")[1], "FAIL")
+        self.assertIn("blocked: G0 not passed ( g0.a=FAIL )", self.status("r1.m")[6])
+        # outside a merge check g0.b is a gate like any
+        self.state = self.p("runs", "s1")
+        write(self.p("runs", "g0_ok"), "")
+        self.run_remote(ids)
+        self.assertEqual(self.status("g0.b")[1], "FAIL")
+        self.assertIn("g0.b=FAIL", self.status("r1.m")[6])
 
 
 # flock(1) for the Mac (util-linux's on the box): flock(2) through fcntl - the same lock and the same
@@ -1267,6 +1388,135 @@ PYCODE
 
 @unittest.skipUnless(os.path.exists(os.path.join(ROOT, ".git")),
                      "validation driver needs checkout git metadata (.git is absent in rsync box trees)")
+class BaselineTest(Tmp):
+    """baseline.py: the baseline build and its recorded gate output kept while the key holds, rebuilt otherwise"""
+
+    def setUp(self):
+        super().setUp()
+        self.base = self.p("g0-abc")
+        write(os.path.join(self.base, ".b70-baseline-ref"), "abc123\n")
+        write(os.path.join(self.base, "src", "a.cc"), "int main() {}\n")
+        write(os.path.join(self.base, "build", "CMakeCache.txt"), "CMAKE_BUILD_TYPE:STRING=Release\n")
+        write(os.path.join(self.base, "build", "kernels", "k1.bin"), "x")
+        write(os.path.join(self.base, "build", "kernels", "k2.bin"), "y")
+        write(os.path.join(self.base, "build", "CTestTestfile.cmake"), "")
+        write(os.path.join(self.base, "build", "src", "cli", "b70-decode"), "")
+        write(os.path.join(self.base, "oracle-out", "g.txt"), "golden\n")
+        write(os.path.join(self.p("snap"), "model.safetensors"), "w")
+        self.patches = [mock.patch.object(baseline.reuse, "machine", lambda: {"kernel": "7.4"}),
+                        mock.patch.object(baseline, "ocloc_version", lambda: "ocloc 1.0")]
+        for m in self.patches:
+            m.start()
+        self.addCleanup(lambda: [m.stop() for m in self.patches])
+
+    def run_cmd(self, *args):
+        with mock.patch("sys.stdout") as out:
+            rc = baseline.main(list(args))
+        return rc, "".join(c.args[0] for c in out.write.call_args_list)
+
+    def check(self, cmake=""):
+        return self.run_cmd("build-check", "--base", self.base, f"--cmake-args={cmake}")
+
+    def stamp(self, cmake=""):
+        return self.run_cmd("build-stamp", "--base", self.base, f"--cmake-args={cmake}")
+
+    def gates(self, what, re="^(a|b)$", snap=None, extra=()):
+        return self.run_cmd(f"gates-{what}", "--base", self.base, "--re", re, "--snap", snap or self.p("snap"), *extra)
+
+    def test_a_build_with_no_stamp_is_rebuilt_then_reused(self):
+        rc, out = self.check()
+        self.assertEqual(rc, 1)
+        self.assertIn("BASELINE rebuild: no build stamp", out)
+        self.stamp()
+        rc, out = self.check()
+        self.assertEqual(rc, 0)
+        self.assertIn("BASELINE reused: abc123", out)
+        self.assertIn("2 kernel binaries", out)
+
+    def test_every_part_of_the_key_rebuilds(self):
+        def rebuilds(why, cmake="", **patches):
+            self.stamp()
+            with mock.patch.object(baseline.reuse, "machine", patches.get("machine", lambda: {"kernel": "7.4"})), \
+                    mock.patch.object(baseline, "ocloc_version", patches.get("ocloc", lambda: "ocloc 1.0")):
+                rc, out = self.check(cmake)
+            self.assertEqual(rc, 1, why)
+            self.assertIn("BASELINE rebuild: " + why, out)
+        self.stamp()
+        self.assertEqual(self.check()[0], 0)
+        rebuilds("the CMake arguments changed ('' -> '-DX=1')", cmake="-DX=1")
+        rebuilds("the machine (kernel series) changed ({'kernel': '7.4'} -> {'kernel': '7.5'})",
+                 machine=lambda: {"kernel": "7.5"})
+        rebuilds("ocloc's version changed", ocloc=lambda: "ocloc 2.0")
+        self.stamp()
+        with open(os.path.join(self.base, "build", "CMakeCache.txt"), "a") as f:
+            f.write("B70_FOO:BOOL=ON\n")
+        self.assertIn("the sources, the build's cache settings or the compiler changed", self.check()[1])
+        self.stamp()
+        write(os.path.join(self.base, "src", "a.cc"), "int main() { return 1; }\n")
+        self.assertIn("the sources, the build's cache settings or the compiler changed", self.check()[1])
+        self.stamp()
+        write(os.path.join(self.base, ".b70-baseline-ref"), "def456\n")
+        self.assertIn("rebuild: the baseline commit changed", self.check()[1])
+
+    def test_a_kernel_kind_of_change_in_the_kernel_series_does_not_rebuild(self):
+        """reuse.py's rule: a release candidate or patch release of a series is the same machine"""
+        self.stamp()
+        self.assertEqual(self.check()[0], 0)
+        self.assertEqual(baseline.reuse.kernel_series("7.4.0-070400rc2-generic"), baseline.reuse.kernel_series("7.4.3"))
+
+    def test_an_incomplete_tree_is_rebuilt(self):
+        self.stamp()
+        os.remove(os.path.join(self.base, "build", "kernels", "k2.bin"))
+        self.assertRegex(self.check()[1], "rebuild: the tree is incomplete: 1 kernel binaries, the stamp counted 2")
+        self.assertTrue(os.path.exists(os.path.join(self.base, baseline.STAMP + ".prev")), "the stamp is moved aside")
+        self.assertFalse(os.path.exists(os.path.join(self.base, baseline.STAMP)))
+        self.stamp()
+        os.remove(os.path.join(self.base, "build", "CTestTestfile.cmake"))
+        self.assertRegex(self.check()[1], "no build/CTestTestfile.cmake")
+
+    def test_a_reused_baseline_is_the_newest_for_the_tidy(self):
+        """box_tidy.sh keeps the KEEP_G0 newest baseline trees by modification time: reusing one touches it"""
+        self.stamp()
+        os.utime(self.base, (1000, 1000))
+        self.assertEqual(self.check()[0], 0)
+        self.assertGreater(os.stat(self.base).st_mtime, 1e9)
+        with open(os.path.join(ROOT, "tools", "box_tidy.sh")) as f:
+            tidy = f.read()
+        self.assertIn('ls -td ~/b70-inference-server-g0-*', tidy)
+        self.assertIn('${KEEP_G0:-2}', tidy)
+
+    def test_gate_output_is_reused_only_for_the_same_key(self):
+        xml = self.p("baseline.xml")
+        write(xml, "<testsuite/>")
+        self.stamp()
+        rc, out = self.gates("check", extra=("--out", self.p("out.xml")))
+        self.assertEqual((rc, out.strip()), (1, "BASELINE gates rerun: no recorded gate output"))
+        self.gates("stamp", extra=("--xml", xml))
+        rc, out = self.gates("check", extra=("--out", self.p("out.xml")))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("BASELINE gates reused", out)
+        with open(self.p("out.xml")) as f:
+            self.assertEqual(f.read(), "<testsuite/>")
+        for kw, why in ((dict(re="^(a)$"), "the gate list changed"), (dict(snap=self.p("other")), "the snapshot changed")):
+            rc, out = self.gates("check", extra=("--out", self.p("o.xml")), **kw)
+            self.assertEqual(rc, 1, kw)
+            self.assertIn(why, out)
+        write(os.path.join(self.base, "oracle-out", "g.txt"), "a different golden\n")
+        rc, out = self.gates("check", extra=("--out", self.p("o.xml")))
+        self.assertEqual(rc, 1)
+        self.assertIn("the golden sets or the snapshot's files changed", out)
+
+    def test_a_rebuild_drops_the_recorded_gates(self):
+        xml = self.p("baseline.xml")
+        write(xml, "<testsuite/>")
+        self.stamp()
+        self.gates("stamp", extra=("--xml", xml))
+        write(os.path.join(self.base, "src", "a.cc"), "int main() { return 2; }\n")
+        self.assertEqual(self.check()[0], 1)
+        rc, out = self.gates("check", extra=("--out", self.p("o.xml")))
+        self.assertEqual((rc, out.strip()), (1, "BASELINE gates rerun: no recorded gate output"))
+
+
 class DriverTest(unittest.TestCase):
     """tools/box_validate.sh without a box: --list, --dry-run, --registry, selection."""
 
@@ -1318,7 +1568,7 @@ class DriverTest(unittest.TestCase):
             self.assertNotIn(addr, self.run_driver("--dry-run", "--with", "optin").stdout)
         # G0 first, row 11's kernels before its gate twins
         order = re.findall(r"^--- (\S+)", out, re.M)
-        self.assertEqual(order[:5], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite"])
+        self.assertEqual(order[:6], ["pre", "g0.build", "g0.sha", "g0.bitwise", "g0.suite", "g0.suite_2card"])
         self.assertLess(order.index("r11.kernels"), order.index("r11.q2"))
         self.assertEqual(order[-1], "x.rest")
         for first, later in (("r13.host", "r13.kernels"), ("r13.kernels", "r13.prefill"), ("r13.kernels", "r13.gates"),
@@ -1694,14 +1944,148 @@ class DriverTest(unittest.TestCase):
                r"benchy", r"--ratio", r"\bflock\b", r"\bcmake\b", r"(^|\s)ocloc ", r"passkey\.sh", r"free -g",
                r"matching /\^\\\| b70-decode", r"(>|tee( -a)?)\s*(~|\$HOME)/(?!b70-validate/)"]
         for sid in card:
-            self.assertNotIn(stages[sid]["sel"], ("always", "g0", "manual"), sid)
+            self.assertNotIn(stages[sid]["sel"], ("always", "manual"), sid)
             self.assertIn("--- " + sid + " ", out, sid)
             body = out.split("--- " + sid + " ")[1].split("\n--- ")[0].split("\n== ")[0]
             body = body.split("\n    log: ", 1)[1].partition("\n")[2]      # the commands, not the header
             for b in bad:
                 self.assertNotRegex(body, b, sid)
-            for rx in re.findall(r"--re '([^']*)'", body):
+            for rx, flags in re.findall(r"--re '([^']*)'((?: --(?:no-)?label \w+)*)", body):
+                if " --no-label pp" in flags:      # the label filter leaves the pp-labelled tests out
+                    continue
                 self.assertEqual([t for t in pp if re.search(rx, t)], [], (sid, rx))
+
+    def test_g0_keeps_the_baseline_between_runs(self):
+        """g0.build builds the baseline only when build-check says so; g0.bitwise runs the baseline's gates only when
+        gates-check says so; both are stamped after a good run"""
+        out = self.run_driver("--dry-run", "--only", "g0").stdout
+        blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
+        b = blocks["g0.build"]
+        self.assertLess(b.index("baseline.py build-check"), b.rindex("cmake --build build"))
+        self.assertLess(b.rindex("cmake --build build"), b.index("baseline.py build-stamp"))
+        self.assertIn("record baseline", b)
+        w = blocks["g0.bitwise"]
+        self.assertLess(w.index("baseline.py gates-check"), w.index("--output-junit"))
+        self.assertLess(w.index("g0.bitwise.baseline.xml\n"), w.index("baseline.py gates-stamp"))
+        self.assertEqual(self.run_driver("--registry", "/dev/null").returncode, 0)
+
+    def selection_of(self, out, sid, tests):
+        """the names the first `junit.py todo` of stage SID's printed body selects out of TESTS [(name, labels)]"""
+        d = tempfile.mkdtemp(prefix="bv-test-")
+        self.addCleanup(shutil.rmtree, d, True)
+        listing = os.path.join(d, "tests.json")
+        write(listing, tests_json(tests))
+        blk = out.split("--- " + sid + " ")[1].split("\n--- ")[0]
+        args = re.search(r"junit\.py todo \S+ (.*?) --done", blk).group(1)
+        args = re.sub(r"--also-in \S+", "--also-in " + listing, args).replace("'", "")
+        r = subprocess.run(["python3", os.path.join(HERE, "junit.py"), "names", listing, *args.split()],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return set(r.stdout.split())
+
+    def test_g0_and_the_rest_run_on_one_card_except_pp_and_tp(self):
+        """g0.bitwise, g0.suite, x.rest and r24.load hold one card; the pp / tp-labelled tests of the suite and of
+        x.rest are stages of their own that hold the whole box. The two halves together select what the old stage did."""
+        reg = tempfile.mktemp(suffix=".tsv")
+        try:
+            self.run_driver("--registry", reg)
+            stages = summary.read_registry(reg)[2]
+        finally:
+            if os.path.exists(reg):
+                os.remove(reg)
+        for sid in ("g0.bitwise", "g0.suite", "x.rest", "r24.load"):
+            self.assertEqual(stages[sid]["kind"], "card", sid)
+        for sid in ("g0.suite_2card", "x.rest_2card"):
+            self.assertEqual(stages[sid]["kind"], "gpu", sid)
+        self.assertEqual(stages["g0.suite_2card"]["sel"], "g0")
+        with open(os.path.join(HERE, "stages.sh")) as f:
+            gates = re.compile(re.search(r'^: "\$\{G0_BITWISE_RE:=(.*)\}"$', f.read(), re.M).group(1))
+        self.assertEqual([t for t in pp_labelled_tests() if gates.search(t)], [], "a G0 bitwise gate that needs two cards")
+        labels = ["", "checkpoint", "pp", "checkpoint;pp", "tp", "checkpoint;tp", "ornith", "checkpoint;k2", "pp;kv8",
+                  "bolt", "pp;bolt", "checkpoint;golden;pp", "kv8;tp", "pp;ornith"]
+        tests = [(f"t{i}_test", l.split(";") if l else []) for i, l in enumerate(labels)]
+        lab = {n: set(l) for n, l in tests}
+
+        def old(excluded):
+            return {n for n in lab if not lab[n] & excluded}
+        for flags, suite_ex, rest_ex in (
+                ((), {"ornith", "kv8"}, set("ornith kv8 k2 longctx kolibri qwen4exp dflash bolt lilicorr tp".split())),
+                (("--quick",), {"ornith", "kv8", "checkpoint"}, set("checkpoint bolt lilicorr tp".split()))):
+            out = self.run_driver("--dry-run", "--only", "g0.suite,g0.suite_2card,x.rest,x.rest_2card", *flags).stdout
+            one, two = (self.selection_of(out, s, tests) for s in ("g0.suite", "g0.suite_2card"))
+            self.assertEqual((one & two, one | two), (set(), old(suite_ex)), flags)
+            self.assertEqual(two, {n for n in old(suite_ex) if lab[n] & {"pp", "tp"}}, flags)
+            self.assertEqual(one, {n for n in old(suite_ex) if not lab[n] & {"pp", "tp"}}, flags)
+            one, two = (self.selection_of(out, s, tests) for s in ("x.rest", "x.rest_2card"))
+            self.assertEqual((one & two, one | two), (set(), old(rest_ex)), flags)
+            self.assertEqual(two, {n for n in old(rest_ex) if "pp" in lab[n]}, flags)
+            self.assertNotEqual(two, set(), flags)
+
+    def test_merge_check(self):
+        """--merge-check: its own state; the stages it runs are the build, g0.sha, the model-free host stages and
+        merge.changed; every other stage prints as not in it; the full and the quick run are untouched"""
+        out = self.run_driver("--dry-run", "--merge-check").stdout
+        self.assertRegex(out, r"# state: \S+-merge-vs-[0-9a-f]{12} ")
+        self.assertRegex(out, r"# merge check: \d+ of these run, the rest are recorded SKIP \(not in the merge check\)")
+        self.assertIn(" BV_MERGE=1 ", out)
+        self.assertIn(" BV_QUICK=0 ", out)
+        blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
+        runs = [sid for sid, b in blocks.items() if "merge check: as in the full run" in b]
+        self.assertEqual(runs[:3], ["pre", "g0.build", "g0.sha"])
+        self.assertEqual(runs[-2:], ["merge.changed", "merge.dflash"])
+        for sid in ("g0.bitwise", "g0.suite", "g0.suite_2card", "x.rest", "r22.p1", "r2.suite"):
+            self.assertIn("merge check: not in it - recorded SKIP", blocks[sid], sid)
+        # the model-free host stages only: default, no device, no data
+        reg = tempfile.mktemp(suffix=".tsv")
+        try:
+            self.run_driver("--registry", reg)
+            stages = summary.read_registry(reg)[2]
+        finally:
+            if os.path.exists(reg):
+                os.remove(reg)
+        for sid in runs[3:-2]:
+            self.assertEqual((stages[sid]["sel"], stages[sid]["kind"], stages[sid]["needs"]), ("default", "cpu", "-"), sid)
+            self.assertRegex(sid, r"\.(host|reject|plan)$")
+        self.assertGreater(len(runs), 30)
+        # merge.changed: the changed tests of the g0.suite set on one card, capped
+        b = blocks["merge.changed"]
+        self.assertIn("lock: holds the card lock for device 0", b)
+        self.assertIn("reuse.py cap", b)
+        self.assertIn("--budget 480", b)
+        self.assertIn("--no-label pp --no-label tp", b)
+        self.assertIn("--exclude-file", b)
+        self.assertLess(b.index("reuse.py cap"), b.index("reuse.py record"))
+        # merge.dflash: the fixed DFlash model sample, outside the budget, on one card
+        b = blocks["merge.dflash"]
+        self.assertIn("lock: holds the card lock for device 0", b)
+        self.assertIn("dflash_engine_test|dflash_prefix_gpu_test|dflash_prefix_gpu_kv8_test", b)
+        self.assertNotIn("reuse.py cap", b)
+        self.assertIn("-merge.md", re.search(r"summary\.py report .* --out (\S+)", out).group(1))
+        # nothing else runs it: not the full run, not the quick run, not a named launch without it
+        for args in ((), ("--quick",)):
+            dry = self.run_driver("--dry-run", *args).stdout
+            self.assertNotIn("--- merge.changed", dry)
+            self.assertNotIn("--- merge.dflash", dry)
+        full = self.run_driver("--dry-run").stdout
+        self.assertNotIn("merge check", full)
+        self.assertIn(" BV_MERGE=0 ", full)
+        out = self.run_driver("--list", "--merge-check").stdout
+        self.assertRegex(out, r"(?m)^g0\.sha\*? .* yes ")
+        self.assertRegex(out, r"(?m)^g0\.bitwise\*? .* - +qwen")
+        self.assertRegex(out, r"(?m)^merge\.changed\* +x +optin +card +card0 ")
+        # the tiers' states do not mix
+        for args in (("--merge-check", "--quick"), ("--merge-check", "--nightly"),
+                     ("--merge-check", "--state", "abc-vs-" + "0" * 12), ("--state", "abc-merge-vs-" + "0" * 12),
+                     ("--quick", "--state", "abc-merge-vs-" + "0" * 12)):
+            self.assertEqual(self.run_driver("--dry-run", *args, ok=False).returncode, 2, args)
+        self.run_driver("--dry-run", "--merge-check", "--state", "mine-merge")
+
+    def test_usage_gives_the_tiers_times(self):
+        text = self.run_driver("--help").stdout
+        self.assertIn("--merge-check", text)
+        self.assertRegex(text, r"merge check about 20-30 minutes")
+        self.assertRegex(text, r"quick run about 3 hours on a box shared")
+        self.assertIn("measured 2026-11-13", text)
 
 
 def pp_labelled_tests():
