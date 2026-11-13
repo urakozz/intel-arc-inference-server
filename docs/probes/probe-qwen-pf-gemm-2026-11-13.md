@@ -250,3 +250,23 @@ tests), bit-identical. The slot-aware fit check stays (it is what a MoE model be
 and 2048-row chunks with a snapshot at every block end over its last ~6k positions - the restart points near a
 prompt's end as today, the cold pass most of the -5.6 % (derived; a change to `runtime/prefill_chunks.h`'s stride
 rule, which Ornith and the two-card pipeline share). (c) Take 4096 with the coarser restarts (the MoE models' choice).
+
+### Task 3: the gates (box, card 1, `~/b70/logs/qwen-chunk-4096/gates.log`, `final.log`)
+
+All PASS on the branch: `pf_gemm_test`, `linear_l0_lazy_test`, `pf_dequant_slab_test`, `golden_gate_test`,
+`golden_gate_i8head_test`, `prefill_split_l0_test`, `prefill_split_l0_cap4096_test`,
+`prefill_split_l0-int8_cap4096_test`, `snapshot_test`, `prefill_gate_l0_test`, `prefill_gate_l0_i8head_test`,
+`prefill_gate_l0_c16_test`, `prefill_gate_l0_cap4096_test`, `prefill_gate_int8_cap4096_test`,
+`prefill_consistency_l0_cap4096_test`, `prefill_determinism_l0_cap4096_test`, `prefill_smoke_test`,
+`prefill_smoke_cap4096_test`, `prefill_gate_long_test`, `golden_server_test`, `prefix_gpu_l0_test`,
+`prefix_gpu_int8_test`, `mtp_prefill_cap4096_test`, `mtp_verify_test`, `slots_test`, `memory_plan_box_test`, and
+the new `prefix_gpu_l0_cap4096_test` (the prefix cache at 4096-row chunks: every sequence's 32 ids exact or within
+the one near-tie allowance, as at 2048; sequence f now expects a cold start - no block snapshot below 4096).
+
+**Kernel binaries against main's build** (`cmp`, the two trees): 2,437 identical, 12 new (the variants), and 254
+Bolt binaries that differ in both directions from every other tree too - they carry the tree's include path
+(`-I .../src/kernels/bolt`) in their build options, and their compiled code shifts with it (rebuilt in place they
+are byte-stable). Nothing of Bolt's sources or command lines changed.
+
+Not run: `--parallel tp` / `pp` prefill at 4096 (they stay 2048 by default; an explicit `--prefill-chunk 4096` under
+`tp` binds the tensor-parallel shapes' block-store conversions, bit-identical by construction, untested on the box).
