@@ -219,7 +219,7 @@ int main(int argc, char** argv) {
     loader::DFlashWeights w = loader::load_drafter(d0, dsnap, m, loader::DraftFormat::Int8);
     const uint32_t rows = m.linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     runtime::dflash::DFlashDrafter d(d0, std::move(w), rows, kMaxLen, kK);
-    runtime::Engine e(d0, std::move(m), kMaxLen, false, runtime::KvCache::Bf16, &d);
+    runtime::Engine e(d0, std::move(m), kMaxLen, false, runtime::default_kv_cache(), &d);
     d.attach(e, false);
     e.prepare_prefill();
     OneCard oc{e, d, l0::CmdList::immediate(d0)};
@@ -231,14 +231,14 @@ int main(int argc, char** argv) {
   for (uint32_t cut : {0u, 20u}) {
     loader::LoadedModel full = loader::load(d0, snap, kMaxLen, /*mtp=*/false, loader::LmHeadForm::Int8);
     const runtime::PpWeights wts = runtime::pp_weights(full);
-    const uint32_t split = cut ? cut : runtime::pp_auto_split(*full.desc, wts, kMaxLen, runtime::KvCache::Bf16,
+    const uint32_t split = cut ? cut : runtime::pp_auto_split(*full.desc, wts, kMaxLen, runtime::default_kv_cache(),
                                                              runtime::PrefillPath{}, runtime::PpExtras{});
     std::vector<loader::LoadedModel> stages = runtime::place_stages(d0, d1, std::move(full), split, /*drafter=*/true);
     loader::DFlashWeights w = loader::load_drafter(d1, dsnap, stages[1], loader::DraftFormat::Int8);
     const uint32_t rows = stages[1].linears.at({loader::kTopLevel, model::LinearId::LmHead}).shape.N;
     runtime::dflash::DFlashDrafter d(d1, std::move(w), rows, kMaxLen, kK);
     runtime::PipelineOptions opt;
-    runtime::PipelineEngine e(d0, d1, std::move(stages), kMaxLen, opt, runtime::KvCache::Bf16, &d);
+    runtime::PipelineEngine e(d0, d1, std::move(stages), kMaxLen, opt, runtime::default_kv_cache(), &d);
     d.attach_target(d1, e.model(1), e.buffers(1).control, kMaxLen, false);
     e.prepare_prefill();
     TwoCards tc{e, d, l0::CmdList::immediate(d1)};
