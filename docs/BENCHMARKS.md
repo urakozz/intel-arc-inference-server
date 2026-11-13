@@ -1395,8 +1395,9 @@ in-list +1.19 ms is not a tuning row's to remove (256 GRF 1.32x, without the 2D 
 production at 8 rows 178.0 us against 171 at 1 row, with the 2D block read 0.975x production at 2 / 4 / 8 rows,
 256 GRF 1.10x. **The 2D read on gate\|\|up in list** (four process pairs against the post-Task-3 build, depth 4096):
 verify at 8 rows 35.89 -> 35.71 ms (**-0.18 ms**, 1.2255 -> 1.2185), at 4 rows 32.49 -> 32.32 ms (-0.17) - under the
-0.3 ms bar, so removed (spec 19 v3d's rule; the same words and DPAS chain, so a free gain if the bar is waived).
-Task 4 keeps no lever; the head and argmax have no excess at 8 rows.
+0.3 ms bar - removed, then **kept** by the operator's ruling (2026-11-13: a bitwise lever stays when it is
+measurably faster): `gemm_sm_test` holds it bitwise its plain-read twin at every M. Task 4 keeps this one lever;
+the head and argmax have no excess at 8 rows.
 
 **Task 5, the verify half's record** (same day, branch head after Task 4, card 0, busy box: card 1 ran the drafter
 quant, CPU reference jobs ran; uninstrumented interleaved pairs, medians of 3 rounds of 16 calls; `box_validate

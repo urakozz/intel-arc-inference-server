@@ -114,6 +114,9 @@ Candidates, each its own commit, in Task 1's order:
 - [ ] The head: argmax and the logits rows at 8 rows, if named.
 - **Gate:** property R (a row's output does not depend on its neighbours) and the fp64 check of `gemm_sm_test` at
   every built M; the f32 judge on the golden and tool-call sets; the saving at its bar.
+- **Operator ruling (2026-11-13):** a lever that is bitwise the form it replaces stays when it is measurably faster,
+  under the bar too. Applied: gate||up's 2D block read (-0.18 ms at 8 rows, -0.17 at 4; bitwise its plain-read twin
+  at every M, `gemm_sm_test`).
 
 ### Task 5: the verify half's record (box)
 
