@@ -129,7 +129,8 @@ def require_opencode() -> None:
 def autoround_info() -> dict:
     import auto_round
     return {"version": auto_round.__version__, "path": os.path.dirname(auto_round.__file__),
-            "commit": os.environ.get("AR_COMMIT", "?"), "patched": os.environ.get("AR_PATCH", "?")}
+            "commit": os.environ.get("AR_COMMIT", "?"), "patched": os.environ.get("AR_PATCH", "?"),
+            "base": os.environ.get("AR_BASE", "?"), "ref": os.environ.get("AR_REF", "?")}
 
 
 def main() -> None:
