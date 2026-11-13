@@ -546,9 +546,9 @@ int check_attn(Dev& d, Bins& b) {
 }
 
 // Spec 19 v3d Task 6: df_attn_dpas.cl's part with `b`'s reduce (the H1 / B4 binary production pairs it with).
-int check_attn_dpas(Dev& d, Bins& b) {
+int check_attn_dpas(Dev& d, Bins& b, unsigned ks = 1) {
   int bad = 0;
-  l0::Module dpas(d.ctx, kernels::path(kd::attn_dpas_variant(S)));
+  l0::Module dpas(d.ctx, kernels::path(kd::attn_dpas_variant(S, ks)));
   const float scale = float(1.0 / std::sqrt(double(HD)));
   const size_t ring_elems = size_t(RING) * KVN;
   const std::vector<uint16_t> rk = rnd_bf16(ring_elems, -1, 1, 20), rv = rnd_bf16(ring_elems, -1, 1, 21);
@@ -574,7 +574,7 @@ int check_attn_dpas(Dev& d, Bins& b) {
     auto run = [&](const std::vector<float>& qv) {
       l0::Mem bq = d.up(qv), out = d.zeros(size_t(M) * QN * 2);
       l0::Kernel k1(dpas, "df_attn_part"), k2(b.attn, "df_attn_reduce");
-      k1.group_size(16 * (NH / NKV));
+      k1.group_size(16 * (NH / NKV) * ks);
       k1.arg_ptr(0, ctrl.ptr());
       k1.arg_ptr(1, dctl.ptr());
       k1.arg_ptr(2, bq.ptr());
@@ -620,8 +620,8 @@ int check_attn_dpas(Dev& d, Bins& b) {
     std::copy_n(q.begin() + size_t(3) * QN, QN, q2.begin() + size_t(3) * QN);
     const std::vector<uint16_t> got2 = run(q2);
     const bool row_r = std::equal(got.begin() + size_t(3) * QN, got.begin() + size_t(4) * QN, got2.begin() + size_t(3) * QN);
-    std::printf("df_attn_dpas at p %u, K %u: worst cosine %.9f per (head, row), worst %d bf16 ulp, %d nonzero past K, "
-                "row 3 independent of the others: %s\n", p, K, worst_cos, worst_ulp, nonzero, row_r ? "yes" : "NO");
+    std::printf("df_attn_dpas (KS %u) at p %u, K %u: worst cosine %.9f per (head, row), worst %d bf16 ulp, %d nonzero past K, "
+                "row 3 independent of the others: %s\n", ks, p, K, worst_cos, worst_ulp, nonzero, row_r ? "yes" : "NO");
     bad += (worst_cos < 0.99999) + (nonzero != 0) + !row_r;
   }
   return bad;
@@ -780,7 +780,7 @@ int main() {
   Bins parallel(d, false, 1, 4, true);
   bad += check_attn(d, parallel);
   Bins rows4(d, false, 1, 4);
-  bad += check_attn_dpas(d, rows4);
+  for (unsigned ks : {1u, 2u, 4u}) bad += check_attn_dpas(d, rows4, ks);
   if (bad) {
     std::printf("dflash_kernels_test: FAIL (%d)\n", bad);
     return 1;
