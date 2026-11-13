@@ -11,6 +11,9 @@
 //                LAYOUT 1 (544-byte tiles, common/repack.h) - gemv.cl's (w, scales, x, out); slice s
 //                writes out[(s M + m) N + n], the layout prep_res_fold / prep_silu_mul / attn_prep /
 //                gdn_step read.
+//                LAYOUT 3 (spec 19 v3d Task 7, the DFlash 2-bit candidate head): 288-byte tiles, a 16-column
+//                tile's g64 group as 16 lanes x 4 words of 16 two-bit codes (value (c - 1.5) x scale; word d holds
+//                k 16 d .. 16 d + 15) then its 16 f16 scales (loader/dflash_repack.h, dflash_candidate_head2)
 //   gemm_sm_i8w  LAYOUT 2: the int8 weights [N/16][K/16][16 k][16 n] + fp32 column scales [N]
 //                (loader/lm_head_int8.h; the int8 lm_head) -
 //                gemv_i8w.cl's (w, scales, x, out); writes out[m N + n], scaled.
@@ -92,6 +95,9 @@
 #if BLK2D && LAYOUT != 0
 #error "gemm_sm: BLK2D is layout 0 only"
 #endif
+#if (DEQ || SPLITK) && LAYOUT == 3
+#error "gemm_sm: the 2-bit form has one dequant and no in-work-group split-K"
+#endif
 #if DEQ && LAYOUT == 2
 #error "gemm_sm: DEQ is an int4 knob"
 #endif
@@ -125,6 +131,16 @@ inline uint nib_hi(uint word, uint i) { return as_uint(nib_f(word, i)) & 0xFFFF0
 // Nibbles 2p (low k) and 2p + 1 as one bf16 pair: the DPAS B operand's per-lane dword.
 inline int pair_bf16(uint word, uint p) {
   return (int)(nib_hi(word, 2u * p + 1u) | nib_lo(word, 2u * p));
+}
+#endif
+
+#if LAYOUT == 3
+// Spec 19 v3d Task 7: a 2-bit code c (index i of the word) as the bf16 c - 1.5 (exact), and codes 2p, 2p + 1 as the
+// B operand's dword (low k in the low half).
+#define TILE2_U32 72   /* 16 lanes x 4 words of 16 codes, then 16 f16 scales */
+inline uint c2_bits(uint word, uint i) { return as_uint((float)((word >> (2u * i)) & 3u) - 1.5f); }
+inline int pair2(uint word, uint p) {
+  return (int)((c2_bits(word, 2u * p + 1u) & 0xFFFF0000u) | (c2_bits(word, 2u * p) >> 16));
 }
 #endif
 
@@ -189,6 +205,25 @@ __kernel void gemm_sm(__global const uint* restrict w,
         acc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, acc[rb]);
       }
     }
+#elif LAYOUT == 3
+    // ---- 2-bit: the group's four u32 rows of this lane's column (word d = k 16 d .. 16 d + 15) and its scale --
+    __global const uint* tile = w + ((size_t)n_tile * G + g) * TILE2_U32;
+    const uint4 blk = intel_sub_group_block_read4(tile);
+    const float scale = (float)as_half(intel_sub_group_block_read_us((__global const ushort*)(tile + 64)));
+    float8 gacc[RB];
+    for (int rb = 0; rb < RB; ++rb) gacc[rb] = (float8)0.0f;
+    for (int d = 0; d < 4; ++d) {
+      const uint w0 = d == 0 ? blk.s0 : d == 1 ? blk.s1 : d == 2 ? blk.s2 : blk.s3;
+      int8 b;
+      b.s0 = pair2(w0, 0); b.s1 = pair2(w0, 1); b.s2 = pair2(w0, 2); b.s3 = pair2(w0, 3);
+      b.s4 = pair2(w0, 4); b.s5 = pair2(w0, 5); b.s6 = pair2(w0, 6); b.s7 = pair2(w0, 7);
+      for (int rb = 0; rb < RB; ++rb) {
+        short8 a;
+        A_OPERAND(a, xa, rb, d)
+        gacc[rb] = intel_sub_group_bf16_bf16_matrix_mad_k16(a, b, gacc[rb]);
+      }
+    }
+    for (int rb = 0; rb < RB; ++rb) acc[rb] += gacc[rb] * scale;
 #else
     // ---- int4: the group's eight u32 rows of this lane's column and its scale -----------------
     uint wv[8];

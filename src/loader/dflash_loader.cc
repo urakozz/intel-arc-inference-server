@@ -46,7 +46,7 @@ l0::Mem upload_f32(l0::Context& ctx, l0::CmdList& imm, const std::vector<float>&
 }  // namespace
 
 DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo, const LoadedModel& target,
-                           DraftFormat format, unsigned threads, bool candidate_head) {
+                           DraftFormat format, unsigned threads, bool candidate_head, unsigned candidate_bits) {
   if (!target.desc) throw std::runtime_error("load_drafter: the target model is not loaded");
   const auto& head = target.linears.at({kTopLevel, model::LinearId::LmHead});
   if (candidate_head && head.kind != model::WeightKind::Int8)
@@ -60,14 +60,17 @@ DFlashWeights load_drafter(l0::Context& ctx, const std::string& snapshot_or_repo
     imm.copy(rows.ptr(), head.mem.ptr(), rows.size());
     imm.copy(scales.data(), head.scales->ptr(), scales.size() * 4);
     const auto quant_start = std::chrono::steady_clock::now();
-    const auto h = dflash_candidate_head(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N);
+    if (candidate_bits != 4 && candidate_bits != 2) throw std::runtime_error("DFlash candidate head: 4 or 2 bits");
+    const auto h = candidate_bits == 2 ? dflash_candidate_head2(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N)
+                                       : dflash_candidate_head(rows.as<int8_t>(), scales.data(), head.shape.K, head.shape.N);
+    w.candidate_bits = candidate_bits;
     w.quant_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - quant_start).count();
     w.candidate_head = upload_linear_u(ctx, imm, h, w.bytes);
     const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     w.seconds += seconds;
     char line[192];
-    std::snprintf(line, sizeof line, "DFlash candidate head: int4 g64, top64 with exact int8 rerank, %zu B, %.1f s",
-                  h.bytes(), seconds);
+    std::snprintf(line, sizeof line, "DFlash candidate head: int%u g64, top64 with exact int8 rerank, %zu B, %.1f s",
+                  candidate_bits, h.bytes(), seconds);
     w.line += "; ";
     w.line += line;
     std::printf("%s\n", line);

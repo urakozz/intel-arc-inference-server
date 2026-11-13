@@ -177,6 +177,7 @@ inline constexpr SmallMTuning kSmallMTuning[] = {
     {5120, 256, 16, 1, false, true, false, false, kSmDraft8},
     // Spec 19v2 C3: full int4 candidate head, followed by exact int8-row reranking.
     {5120, 248320, 1, 1, false, true, false, false, kSmDraft7},
+    {5120, 248320, 1, 3, false, false, false, false, kSmDraft7},   // spec 19 v3d Task 7: the 2-bit candidate head
     // Spec 28d: Qwen3.8-Flash-Next's dense int4 projections (GPTQ layout 0, model::qwen4exp's S) and its int8 head at
     // its verify lists' M = 2..4 (runtime/qwen4exp/qwen4exp_capture.cc) - magic dequant (bit-identical to the shift
     // form), no lever swept; the head the in-work-group form (28b's int8-head choice). Its bf16 linears (a||b, the

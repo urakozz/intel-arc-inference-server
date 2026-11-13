@@ -2131,7 +2131,7 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   gemm_sm_rows(GEMM_SM_DFLASH _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_INT4 _m8)
   gemm_sm_rows(GEMM_SM_DFLASH_HEAD _m7)
-  set(GEMM_SM_DFLASH_CANDIDATE "5120 248320 1 1 MG")
+  set(GEMM_SM_DFLASH_CANDIDATE "5120 248320 1 1 MG" "5120 248320 1 3")   # 3: spec 19 v3d's 2-bit candidates
   gemm_sm_rows(GEMM_SM_DFLASH_CANDIDATE _m7)
   add_gemv_variant(7 5120 248320 1 1)
   foreach(row "5120 6144 4" "4096 5120 4" "5120 34816 8" "17408 5120 4" "25600 5120 8"
