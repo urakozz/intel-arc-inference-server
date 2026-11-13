@@ -1284,8 +1284,17 @@ add_dependencies(probe_qwen_pf_gemm ${PCR_PF_KERNELS} ${_qpg_targets})
 # Qwen3.8 defines, src/kernels/CMakeLists.txt): no runtime path binds it.
 add_ocloc_kernel(probe_gdn_plain_M8 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
                  DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008 M=8)
+# Spec 19 v3d Task 3 Step 2's store probe: the M = 8 slots build with its snapshot stores as block writes (1) or
+# LSC stores at cache control PB_SNAP - 1 (LSC_STCC: 2 L1UC_L3UC, 3 L1UC_L3WB, 6 L1S_L3UC, 7 L1S_L3WB).
+foreach(PB 1 2 3 6 7)
+  add_ocloc_kernel(probe_gdn_snap${PB}_M8 SOURCE ${CMAKE_SOURCE_DIR}/src/kernels/gdn_step.cl
+                   DEFINES CTRL_POS=0 CTRL_NACT=1 CTRL_CUR=2 CTRL_OUT=10 CTRL_DEBUG=18 NEGA_OFF=40960 DTBIAS_OFF=41008
+                           SPEC_SLOTS=1 CTRL_LIVE=19 SPEC_SLOT_STRIDE=37748736 N_SLOTS=8 M=8 PB_SNAP=${PB})
+  list(APPEND PROBE_GDN_SNAP kernel_probe_gdn_snap${PB}_M8)
+endforeach()
 add_executable(probe_gdn_slots probe_gdn_slots.cc)
 target_include_directories(probe_gdn_slots PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(probe_gdn_slots PRIVATE b70_l0)
 b70_target_kernel_dir(probe_gdn_slots)
-add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8)
+add_dependencies(probe_gdn_slots kernel_probe_gdn_plain_M8 kernel_gdn_step_slots_M1_N8 kernel_gdn_step_slots_M8_N8
+                 ${PROBE_GDN_SNAP})
