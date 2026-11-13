@@ -1134,8 +1134,8 @@ launches are 2.084063 ms versus 2.696458 ms for H4/B8 at pos4096/K7; 1.227500 ve
 Parallel exponentials remain a probe control: bitwise checks pass, but steady K7 slows to 2.393125 ms versus
 2.074167 ms for serial H1/B4 in the paired experiment. Both 16-bit and packed-32-bit local K-cache experiments
 fail the bitwise gate and are rejected before timing. H1/B4 is now selected. Its kernel/profile/engine/greedy-identity
-integration checks pass 4/4 with no skips (21.42 / 29.17 / 309.71 / 1075.73 seconds). The full numerical check
-remains pending. The later real-list profiles, exclusive card1/busy box with CPU reference work, are:
+integration checks pass 4/4 with no skips (21.42 / 29.17 / 309.71 / 1075.73 seconds). The full int8 numerical check
+subsequently passes (`resume-numerical-card0.log`, DONE rc0). The later real-list profiles, exclusive card1/busy box with CPU reference work, are:
 
 | int8 body / head mode | depth | draft ms / plain steps | verify(8), plain steps | iteration, plain steps |
 |---|---:|---:|---:|---:|
@@ -1168,7 +1168,9 @@ Evidence: `~/b70/logs/dflash-v2/task7b/h1b4-candidate-int8/iter-int4-{full,candi
 At the GPU handoff, the next baseline calibration was interrupted: 2463 complete rows match the original
 4256-row baseline, with one truncated line. This is **partial, not a passed calibration**; it is archived under
 `paused-2026-11-12T1523/` beside `calibration-status.json`. That partial run is superseded by the complete 4256-row calibration and all 35 acceptance rows below.
-The full int8 H1/B4 numerical check also passes; Task 8 is collecting on card1 after the operator pause.
+The full int8 H1/B4 numerical check also passes. Main `0b5ef628` is merged at `b5bb4044`; fresh G0 and a new
+quiet-box Task 8 collection follow the successful merged build and six host checks. Pre-merge serving timings
+remain historical. Heavy CPU judging resumes only after GPU collection and lock release.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 

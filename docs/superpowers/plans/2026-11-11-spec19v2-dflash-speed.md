@@ -1,11 +1,13 @@
 # Spec 19 v2 - make DFlash beat `--mtp auto` on Qwen3.8 (open-work item 12)
 
-**Status (2026-11-12): IN PROGRESS, operator resumed.** Tasks 1-2 complete: calibrated costs, G0, GPU profiling,
+**Status (2026-11-13): IN PROGRESS, operator resumed with the whole box.** Tasks 1-2 complete: calibrated costs, G0, GPU profiling,
 CPU G-accept and 39/39 serving correctness PASS. The **80.5 t/s early bar PASSED** at 88.806 t/s. Continue Tasks
 3-7 and 7b. Operator update: Task 8 may use one idle card while the other is busy, provided more than 16 of
 44 CPU threads are available. Label those measurements "busy box". Compare against main's per-step MTP (`f65ae50e`
-or later), enabled by default for `--mtp auto`. Task 8 is running on card 1 after an operator pause; the completed first rotation on card 0 is validated
-and reused, with per-arm card provenance. Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
+or later), enabled by default for `--mtp auto`. Main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass.
+Fresh G0 precedes a new quiet-box Task 8 collection; the pre-merge busy-box timings remain historical.
+Heavy CPU references resume from their persistent checkpoint after GPU collection and lock release.
+Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
@@ -194,7 +196,7 @@ deferred projection equals today's at every flush point: plain step, request end
 H1/B4 attention geometry is selected at `f0a3261e` after primitive and real-model bitwise checks: five-launch
 attention sum 2.696458 → 2.084063 ms at pos4096/K7. Norms account for only ~0.1275 ms; the ledger records the
 profile-driven choice. Parallel-exp passes bitwise but regresses steady K7; both local K-cache controls fail
-bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The combined int8 acceptance and full int8 H1/B4 numerical checks pass. Task 8 is collecting on card1; C7 remains failed.
+bitwise and are rejected. Four device checks pass and both-depth cost profiles are recorded; C7 is not passed. The combined int8 acceptance and full int8 H1/B4 numerical checks pass. Task 8 is being repeated after merging main; C7 remains failed.
 
 ### Task 7b: refresh before the bar (Mac, then box) - review 2026-11-12
 

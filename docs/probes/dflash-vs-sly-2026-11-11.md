@@ -220,6 +220,11 @@ golden/A4 greedy identity); the full int8 H1/B4 numerical check subsequently pas
 8.429809 ms draft / 1.558631 plain-step iteration at 4k, and 8.527476 ms / 1.530302 at 32k. C7 targets still
 fail; resource grade is exclusive card1/busy box with concurrent CPU references. See BENCHMARKS for the full
 paired full-head/candidate table. The operator deferred proper AutoRound conversion to a later follow-up;
-RTN cost diagnostics are complete, with the candidate 4k wall result explicitly noisy. Task 8 uses the
-quality-safe int8 body and is collecting on card1 against fresh default per-step MTP. Its completed first
-rotation on card0 is validated and reused with per-arm card provenance; no final speed gate is claimed.
+RTN cost diagnostics are complete, with the candidate 4k wall result explicitly noisy. The pre-merge main
+recording's three rotations measure 0.7986995x default per-step MTP and 1.1629667x plain decode (busy box,
+mixed cards; the last MTP arm overlaps CPU references). This is not a passed speed gate.
+
+**2026-11-13:** main `0b5ef628` is merged at `b5bb4044`; the merged build and six host checks pass. Fresh G0
+precedes a new quiet-box Task 8 dataset (`~/b70/logs/dflash-v2/task8/main-0b5ef628`), with all three recordings,
+rotated arms, corpora and the actual candidate-head PP path. The old timings are not reused across the binary
+change. Heavy CPU references resume from the persistent checkpoint only after GPU collection and lock release.
