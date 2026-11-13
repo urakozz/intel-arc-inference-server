@@ -235,5 +235,13 @@ A further cold-request bottleneck is isolated before the new collection: DFlash 
 while prompt processing is nearly equal (96 versus 93 ms). Moving table generation/upload to construction
 reduces the focused buffer reset 244.426 → 0.179 ms. A new device regression fails before the change and
 passes after it, checking initial RoPE against the independent twin, immutable-table preservation across
-reset and zeroed ring/control/readback. Seven selected checks pass; real-engine and final serving gates
-remain pending. This addresses cold-request overhead; the measured draft/verify C7 costs remain failed.
+reset and zeroed ring/control/readback. Seven selected checks pass; the real-engine regression subsequently passes in 297.36 s. This addresses cold-request overhead; the measured draft/verify C7 costs remain failed.
+
+The completed main replay (three rotated rounds, all 78 requests) measures **1.193081621x default per-step
+MTP** and **1.774903067x plain decode**. All six speculative-arm/round comparisons pass the f32 judge with
+0 FAIL and 0 SKIPPED after the 88 new references finish. Whole-box GPU reservation, physical card0, CPU
+references active at eight threads: busy-box grade. Source `a83322bb`, merged main `0b5ef628`; evidence
+`~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/judge-mid-refs.log` and the nine saved arms.
+G0 passes 2703 common compiled kernels (254 differ only in the normalised tree path), 44 drafter additions,
+zero removals. This clears the main recording's 10% bar; the other recordings, corpus/benchy and PP judgments
+still gate the full result. The C7 draft/iteration targets remain failed; the default is unchanged.

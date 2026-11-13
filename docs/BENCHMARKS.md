@@ -1185,8 +1185,34 @@ Generating and uploading that immutable table once at construction reduces the f
 regression first fails when reset overwrites guards in the immutable allocation, then passes after the move;
 initial RoPE matches the independent twin bitwise and the ring, control and readback still reset to zero.
 Seven selected checks pass. This is a buffer measurement, not an end-to-end serving speed claim; the new
-real-engine check and full rotated replay remain pending. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
+real-engine check passes (297.36 s); the main rotated replay and its f32 judging pass below. Evidence: `~/b70/logs/dflash-v2/reset-v7-{red,green}.log`
 and the preserved full test output `~/b70/logs/dflash-v2/reset-v7-green-detail.log`.
+
+### Task 8: main replay after the reset fix (2026-11-13)
+
+Source `a83322bb`, main `0b5ef628` merged at `b5bb4044`, int8 body / candidate64 exact rerank / H1B4,
+physical card0. All three arms run three rotated rounds with prefix cache on, bf16 KV and the default int8
+head; MTP's startup confirms adaptive per-step selection. The whole box is GPU-reserved, with an eight-thread
+CPU reference job active: **busy box**. This is the unchanged 78-request opencode recording, including all
+30 one-token requests, evaluated from raw per-request medians and their geometric mean.
+
+| comparison | measured ratio | main replay's bar |
+|---|---:|---|
+| DFlash / default per-step MTP | **1.193081621** | PASS, >=1.10 |
+| DFlash / plain decode | **1.774903067** | recorded |
+
+All six speculative-arm/round comparisons against their plain round pass the f32 judge: **0 FAIL, 0 SKIPPED**.
+The CPU job completed 88 new references and reused the existing cache. The focused reset regression, seven
+selected checks and the real-engine regression pass. G0 against merged main passes: 2703 common compiled
+kernels, 2449 byte-identical and 254 equal section by section after normalising only the tree path in build
+options; 44 additive drafter variants, zero removed.
+
+This passes the main recording's speed and correctness checks. The other two recordings, golden/A4,
+llama-benchy and candidate-head PP judging remain outstanding; the full G-speed gate and C7 are not passed,
+and the serving default is unchanged. The long-context replays take longer than the initial box estimate.
+Evidence: `~/b70/logs/dflash-v2/task8/main-0b5ef628/opencode-session-int8/` (`requests.jsonl` in all nine arms,
+`judge-mid-refs.log`, `driver.rc`), `g0-main-0b5ef628/comparison/`, `reset-v7-engine.log`,
+and `cpu-resume-now-v7.log` under the same log topic.
 
 ### On the card (measured 2026-10-27, card 0, branch `dflash-fix`, states `09c1cae8c97d-vs-01e9b51eca5b` / `e8f21f745c58-vs-01e9b51eca5b`; then branch `dflash-bars`, state `e89445916986-vs-0fb0cb914a37` - the operator's two bar rulings, rows 54-56 complete)
 

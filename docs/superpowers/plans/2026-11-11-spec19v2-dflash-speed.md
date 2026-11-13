@@ -8,6 +8,8 @@ or later), enabled by default for `--mtp auto`. Main `0b5ef628` is merged at `b5
 Fresh G0 precedes a new Task 8 collection; the pre-merge timings remain historical.
 The operator restarted detached CPU references during G0 (69 GiB, eight threads, saved layer 26); grade any
 overlapping timings busy-box, retaining the >16-free-thread guard and the whole-box GPU reservation.
+Fresh G0 and the real-engine regression pass. The main three-round replay now measures 1.193x per-step MTP
+(all 78 requests, f32 judge 0 FAIL / 0 SKIPPED); the other recordings and corpus/benchy/PP gates continue.
 Full int8 H1/B4 numerical validation passes. Spec: `docs/superpowers/specs/2026-11-11-spec19v2-dflash-v2-design.md` (C1-C7, the
 gates in §3). Evidence: `docs/probes/dflash-vs-sly-2026-11-11.md`. Box row **82** (new, Task 1 adds it).
 
@@ -228,7 +230,8 @@ int8 body with the selected head/geometry in Task 8; this does not close C2 or q
 A pre-collection reset fix (2026-11-13) moves the immutable RoPE table out of `DFlashBuffers::zero()` and
 into construction. The new device regression fails before the fix and passes after it; reset at 131072 rows
 measures 244.426 → 0.179 ms in that focused check, with initial RoPE bitwise the independent twin and mutable
-ring/control/readback still cleared. Seven selected checks pass. Real-engine and final serving gates follow.
+ring/control/readback still cleared. Seven selected checks pass; the real-engine regression passes in 297.36 s.
+The main recording passes at 1.193x MTP over three rounds, f32 judge 0 FAIL / 0 SKIPPED. The remaining gates follow.
 
 - [ ] **Step 1:** Task 7b's three-arm replay harness on the branch head, one idle GPU, both other recordings as
   checks. Operator permits the other card to be busy if more than 16 of 44 CPU threads are available; verify
