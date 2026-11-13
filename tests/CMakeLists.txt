@@ -430,12 +430,14 @@ if(B70_VERIFY_DPAS AND B70_MTP AND B70_VERIFY_M8 AND B70_KV8)
   foreach(MM 2 3 4 5 6 7 8)
     list(APPEND _vdpas_deps kernel_attn_verify_dpas_M${MM}_T32 kernel_attn_v2_M${MM}_T32)
   endforeach()
-  foreach(MM 2 3 4)
+  foreach(MM 2 3 4 5 6 7 8)
     list(APPEND _vdpas_deps kernel_attn_verify_dpas_M${MM}_T32_KV8 kernel_attn_v2_M${MM}_T32_KV8)
   endforeach()
   add_dependencies(attn_verify_dpas_test ${_vdpas_deps} kernel_attn_v2_M1_T32 kernel_attn_v2_M1_T32_KV8)
   add_test(NAME attn_verify_dpas_test COMMAND attn_verify_dpas_test ${B70_VERIFY_ATTN_DUMP})
   set_tests_properties(attn_verify_dpas_test PROPERTIES TIMEOUT 3600)
+  add_test(NAME attn_verify_dpas_kv8_m8_test COMMAND attn_verify_dpas_test --kv8-m8)
+  set_tests_properties(attn_verify_dpas_kv8_m8_test PROPERTIES LABELS "kv8;dflash" TIMEOUT 300)
 endif()
 
 # 3l: the production attn_verify_dpas[_kv8] against its frozen copy (kernels/attn_verify_control.cl, main 865da900's
@@ -1721,6 +1723,12 @@ if(B70_KV8)
   target_link_libraries(kv8_kernels_test PRIVATE b70_l0)
   b70_target_kernel_dir(kv8_kernels_test)
   add_dependencies(kv8_kernels_test ${B70_KV8_KERNELS})
+  if(B70_VERIFY_M8)
+    target_compile_definitions(kv8_kernels_test PRIVATE B70_TEST_VERIFY_M8=1)
+    foreach(MM 5 6 7 8)
+      add_dependencies(kv8_kernels_test kernel_attn_prep_M${MM}_KV8 kernel_attn_v2_M${MM}_T${ATTN_V2_TGT}_KV8)
+    endforeach()
+  endif()
   add_test(NAME kv8_kernels_test COMMAND kv8_kernels_test)
   set_tests_properties(kv8_kernels_test PROPERTIES LABELS kv8 TIMEOUT 1800)
 
@@ -3997,40 +4005,32 @@ endif()
 b70_cli_reject(cli_reject_dflash_bench ${B70_NO_MODEL} --bench --spec dflash EXPECT "--spec belongs to --ids")
 b70_cli_reject(cli_reject_dflash_spec_max ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --spec-max 9
   EXPECT "expects 1..7")
-b70_cli_reject(cli_reject_dflash_kv8 ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --kv-cache int8
-  EXPECT "--kv-cache bf16 with --spec dflash")
 b70_cli_reject(cli_reject_dflash_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --ids ${B70_OK_IDS} --n 4
   --spec dflash EXPECT "no DFlash drafter exists for Kolibri-1")
 # spec 19d: b70-decode stays one card (b70-serve --parallel pp serves the drafter).
 b70_cli_reject(cli_reject_dflash_pp ${B70_NO_MODEL} --ids ${B70_OK_IDS} --n 4 --spec dflash --parallel pp
   EXPECT "b70-decode --spec dflash runs on one card")
-set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max cli_reject_dflash_kv8
+set_tests_properties(cli_reject_dflash_bench cli_reject_dflash_spec_max
   cli_reject_dflash_kolibri cli_reject_dflash_pp PROPERTIES LABELS dflash)
 # b70-serve --spec dflash's refusals before the device (cli/dflash_args.h).
 if(TARGET b70-serve AND COMMAND b70_serve_reject)
   b70_serve_reject(cli_reject_serve_dflash_model_alone ${B70_NO_MODEL} --draft-model x EXPECT "needs --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_spec_max ${B70_NO_MODEL} --spec dflash --spec-max 8 EXPECT "expects 1..7")
-  b70_serve_reject(cli_reject_serve_dflash_kv8 ${B70_NO_MODEL} --spec dflash --kv-cache int8
-    EXPECT "--kv-cache bf16 with --spec dflash")
   # spec 19d: --parallel pp serves the drafter on device 1, on the copy hand-off only
   b70_serve_reject(cli_reject_serve_dflash_pp ${B70_NO_MODEL} --spec dflash --parallel pp --pipeline-handoff peer
     EXPECT "needs --pipeline-handoff copy")
   b70_serve_reject(cli_reject_serve_dflash_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --spec dflash
     EXPECT "no DFlash drafter exists for K2-Horizon")
   set_tests_properties(cli_reject_serve_dflash_model_alone cli_reject_serve_dflash_spec_max
-    cli_reject_serve_dflash_kv8
     cli_reject_serve_dflash_pp cli_reject_serve_dflash_k2 PROPERTIES LABELS dflash)
   # spec 19f: --spec dflash-lookup refuses as dflash does (it is dflash with lookup inside), and --parallel pp
-  b70_serve_reject(cli_reject_serve_dflash_lookup_kv8 ${B70_NO_MODEL} --spec dflash-lookup --kv-cache int8
-    EXPECT "--kv-cache bf16 with --spec dflash")
   b70_serve_reject(cli_reject_serve_dflash_lookup_pp ${B70_NO_MODEL} --spec dflash-lookup --parallel pp
     --pipeline-handoff copy EXPECT "--spec dflash-lookup is built for one card")
   b70_serve_reject(cli_reject_serve_dflash_lookup_other ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1
     --spec dflash-lookup EXPECT "built for Qwen3.8 beside its drafter")
   b70_serve_reject(cli_reject_serve_spec_value ${B70_NO_MODEL} --spec dflash-lookups
     EXPECT "--spec expects auto, off, mtp, lookup, dflash or dflash-lookup")
-  set_tests_properties(cli_reject_serve_dflash_lookup_kv8
-    cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
+  set_tests_properties(cli_reject_serve_dflash_lookup_pp cli_reject_serve_dflash_lookup_other
     cli_reject_serve_spec_value PROPERTIES LABELS dflash)
 endif()
 # ==== Spec 19c ==== (end) ====
@@ -4083,6 +4083,27 @@ if(B70_DFLASH AND B70_VERIFY_M8 AND B70_MTP)
   add_test(NAME pp_dflash_test COMMAND pp_dflash_test ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
   set_tests_properties(pp_dflash_test PROPERTIES LABELS "checkpoint;dflash;pp" SKIP_RETURN_CODE 77
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
+endif()
+# Spec 19v3a: same checkpoint tests over the int8 cache. Keep the original judge environment and timeouts.
+if(B70_KV8 AND B70_VERIFY_DPAS)
+  foreach(t dflash_engine_test dflash_gpu_test dflash_prefix_gpu_test pp_dflash_test)
+    if(TARGET ${t})
+      string(REPLACE "_test" "_kv8_test" twin ${t})
+      add_test(NAME ${twin} COMMAND ${t} ${B70_TEST_SNAPSHOT} ${B70_DFLASH_SNAPSHOT})
+      get_test_property(${t} TIMEOUT _df_timeout)
+      get_test_property(${t} LABELS _df_labels)
+      get_test_property(${t} ENVIRONMENT _df_env)
+      set_tests_properties(${twin} PROPERTIES LABELS "${_df_labels};kv8" SKIP_RETURN_CODE 77
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT ${_df_timeout} ENVIRONMENT "B70_KV_CACHE=int8")
+      if(_df_env)
+        set_property(TEST ${twin} APPEND PROPERTY ENVIRONMENT ${_df_env})
+      endif()
+      foreach(MM 5 6 7 8)
+        add_dependencies(${t} kernel_attn_prep_M${MM}_KV8 kernel_attn_v2_M${MM}_T32_KV8
+          kernel_attn_verify_dpas_M${MM}_T32_KV8)
+      endforeach()
+    endif()
+  endforeach()
 endif()
 # ==== Spec 19d ==== (end) ====
 

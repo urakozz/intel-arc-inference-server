@@ -18,7 +18,6 @@
 //   pipeline parallel      b70-decode: one card (b70-serve --parallel pp serves it); b70-serve --parallel pp: the
 //                          copy hand-off only (--pipeline-handoff peer: device 0's taps are copies into device 1
 //                          that only the copy hand-off's event orders)
-//   --kv-cache int8        the verify lists at M = 5..8 have no int8-KV attention binaries (kv8.cl builds M <= 4)
 // and by the loader / the capture (with the reason): a target the drafter is not trained for
 // (model::check_dflash_target), an int4 lm_head (the draft head reads int8 or bf16 rows).
 #include <cstdint>
@@ -60,7 +59,7 @@ inline void check_flags(const Args& a) {
 
 // The engine's refusals (see the header). Spec 19d: `pipeline_served` - the caller serves two cards with the drafter
 // (b70-serve); `peer` - its hand-off is --pipeline-handoff peer.
-inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, bool pipeline_served = false,
+inline void check_engine(const Args& a, bool pipeline, runtime::KvCache, bool pipeline_served = false,
                          bool peer = false) {
   if (!a.on) return;
   if (pipeline && !pipeline_served)
@@ -69,9 +68,6 @@ inline void check_engine(const Args& a, bool pipeline, runtime::KvCache kv, bool
   if (pipeline && peer)
     throw std::runtime_error("--spec dflash --parallel pp needs --pipeline-handoff copy: device 0's taps are copies into "
                              "device 1, which only the copy hand-off's event orders before device 1's rows");
-  if (kv == runtime::KvCache::Int8)
-    throw std::runtime_error("--spec dflash verifies up to 8 rows, and --kv-cache int8's attention is built for "
-                             "M <= 4 (kv8.cl): use --kv-cache bf16 with --spec dflash");
 }
 
 // The AdaptiveK cost table: MtpCost::dflash for the head and drafter forms, a draft vocabulary scaling the head's

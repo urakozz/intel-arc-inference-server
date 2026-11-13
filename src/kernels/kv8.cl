@@ -390,8 +390,8 @@ __kernel void attn_prep_kv8(__global const uint* restrict ctrl,
 #error "kv8 dec: TGT must be defined (runtime::DecodeScratch::kAttnV2Blocks)"
 #endif
 #ifndef BATCH_ROWS
-#if M < 1 || M > 4
-#error "kv8 dec: M is 1..4"
+#if M < 1 || M > 8
+#error "kv8 dec: M is 1..8"
 #endif
 #elif M < 1 || M > 8
 #error "kv8 dec BATCH_ROWS: M is 1..8"
