@@ -47,7 +47,8 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 
 With `--max-num-seqs N`, slot 0 is the largest context that fits beside N - 1 slots of 32,768; on two cards the
 slots are split between the cards (card 0 takes the odd one). An explicit `--max-len` that does not fit beside the
-other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,323 instead of 2,939 t/s at 4k).Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
+other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,323 instead of 2,939 t/s at 4k).
+Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
 Qwen3.8 fits one card even at full context, so it gains nothing there.
 
 ## Qwen3.8-27B: benchmarks and greedy runs
