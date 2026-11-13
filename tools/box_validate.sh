@@ -31,6 +31,9 @@
 #   --baseline REF   G0's reference build (default 0f449db6: main on 2026-11-12, after the MoE prefill phases;
 #                    the first baseline ce36d2d differed from it in report text and buffer sizes only, no token
 #                    or logit; `--baseline main` when validating a branch before merging)
+#                    A complete build of the baseline, with its recorded gate outputs, is kept in
+#                    ~/b70-inference-server-g0-<sha> and reused while the commit, build settings, compiler, ocloc
+#                    and kernel series are the same (tools/box_validate/baseline.py); g0.build's log says which
 #   --state NAME     results directory on the box (default <sha>-vs-<baseline sha>); a new
 #                    commit starts a new state, `--state <old>` continues an old one - with
 #                    the baseline it was started against (its meta-*.env, else the name's

@@ -5,7 +5,8 @@
 #                                    deleted), except the long-lived trees below, a live branch's companion trees
 #                                    (<branch>-base, <branch>-main: an agent's baselines) and any tree a process runs in;
 #                                  - ~/b70-inference-server-g0-<sha> baseline trees except the KEEP_G0 newest (default 2)
-#                                    and any a running box_validate uses;
+#                                    and any a running box_validate uses (newest by modification time: a baseline build
+#                                    that box_validate reuses is touched, tools/box_validate/baseline.py);
 #                                then print the trash's size (only the operator's rm frees it).
 #   tools/box_tidy.sh --dry-run  print what would move, move nothing.
 # Nothing is deleted. A full tools/box_validate.sh launch runs it with --dry-run (the list only).
