@@ -14,6 +14,21 @@ Low-priority and ruled-out work that may come back: [low-priority-work.md](low-p
 |---|---|---|---|
 | B2 | **Qwen3.8 pipeline parallel hand-off:** is `--pipeline-handoff peer` worth keeping? The hand-off is one hidden-state row a token (a few KB), `copy` is the default, and `peer` is refused with DFlash on `pp` and with Bolt's proposer. No recorded gain for `peer` | Qwen3.8 decode on `--parallel pp`, `copy` against `peer`, interleaved pairs, median of 3, `tools/gpu_lock.sh box` (a few minutes) | not run (2026-11-12). No gain: drop the flag and its code path (and those refusals). Clearly faster: make it the automatic choice where allowed, and still drop the flag |
 
+## CPU reference jobs (f32 judge references, box CPU, one model job at a time)
+
+A test that differs from its reference run is judged by an f32 reference built on the CPU; until that reference exists the
+difference is neither passed nor failed (the test reports SKIP). Each row: what it unblocks, its state, how to restart it.
+
+| for | what | state (2026-11-13 14:16) | restart / log |
+|---|---|---|---|
+| item 17 (Qwen3.8 int8 prompt pass) | the int8-aware judge in the MLP-only form: (1) 85 contexts -> `oracle-out-qwen-f32-pfi8mlp-forced`, (2) the bf16 twins over the same dumps, (3) 9 tensor-parallel prefill contexts | (1) done 72 min; (2) running since 12:09 (estimated 20-40 min - slow, check); (3) queued | `~/b70/logs/int8-mlp-only/refs/run.sh`, log `run.log` (ends `ALL_DONE`); then re-run `mtp_gpu_test`, `mtp_gpu_kv8_test`, `tp_prefill_int8_test` |
+| DFlash with int8 KV (closed item 12; **unconfirmed until this runs**) | the serving test `dflash_gpu_kv8_test` differs from bf16 in 17 places over 11 prompts: dump the 11 contexts on a card, build their f32 references, re-run the test judged | the dump run waits for a card (13:45); the references start after item 17's three jobs; then the judged run | `~/b70/logs/dflash-int8-kv-main/judge.sh`, log `judge.log` (ends `JUDGE_DONE`) |
+| item 16 (Ornith int8 prefill, parked) | the W4A8 serving check's references: 34 of 35 contexts (~4.5 h) | stopped 2026-11-12 for DFlash's judge; not restarted | the command in item 16 (from `~/b70-inference-server`) |
+| item 16 (parked) | the int8 probe session's batches (a2six 10, a0six 12, a2rest 61, a0rest 63 contexts; ~3 h + ~16 h) | stopped 2026-11-12; that session owns the restart | box tree `moe-int8-probes`, scripts in its `.pmp/` |
+| DFlash control recordings | 32 long-context references (26 groups, up to 102k tokens) for the two control recordings' f32 judgement | not started: **140.6 CPU hours, operator's budget choice** (the main recording, golden, tool-call and layer-split paths already pass) | plan `~/b70/logs/dflash-v2/task8-final-ref-plan-v7/` |
+| Flash-Next | the aligned f32 reference re-make at 18 layers (`oracle-out-q4exp-f32-aligned-L18`, lets the intra-chunk delta-net kernel bind on Flash-Next) and the golden-set remake (`r30.golden`) | not queued; after the weekend quant (it needs the CPU and RAM) | - |
+| parked models | `~/b70/logs/cpu-refs/queue.txt` HOLD lines: Bolt (parked until Flash-Next), K2 / Kolibri / Flash-Next tool-call references, the Flash-Next golden scores; two old lines (`qwen-a4-ref`, `serve-judge-f32`, 2026-11-07/08) of unknown state | held | the queue file; `~/b70/scripts/cpu-refs-chain.sh` runs it |
+
 ## Now, in order
 
 | # | what | state | closes when |
