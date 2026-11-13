@@ -28,6 +28,9 @@ each next turn a prefix cache hit exactly where it diverges. Leave it off for be
 ./build/src/cli/b70-serve $Q --parallel 1 --max-num-seqs 4 --kv-cache int8 --prefix-split-last # 4 requests
 ```
 
+The prompt runs in chunks of 4096 positions where the memory plan has room for the larger scratch beside the
+context `--max-len auto` chose (the full-context int8-cache recipe: the prompt pass ~5 % faster), else 2048 (the
+default and `--max-num-seqs 4` recipes fill the card); context and slots are planned first and never shrink for it.
 On a machine with one card `--parallel 1` can be left out. The int8 prompt pass and the int8 cache are not combined:
 together they round too much (about 3 % of tool calls that copy exact text from a long prompt come out wrong).
 
@@ -48,6 +51,8 @@ together they round too much (about 3 % of tool calls that copy exact text from 
 With `--max-num-seqs N`, slot 0 is the largest context that fits beside N - 1 slots of 32,768; on two cards the
 slots are split between the cards (card 0 takes the odd one). An explicit `--max-len` that does not fit beside the
 other slots is refused at startup with the numbers. `tp` runs one request at a time; add `--prefill-backend l0-int8` for the faster prompt pass (3,323 instead of 2,939 t/s at 4k).
+`replica` cards choose their prompt chunk as one card does (4096 positions at full context with the int8 cache); `tp`
+and `pp` prefill in 2048-position chunks.
 Pipeline parallel (`--parallel pp`, the layers split between the cards) is for models that do not fit one card -
 Qwen3.8 fits one card even at full context, so it gains nothing there.
 
