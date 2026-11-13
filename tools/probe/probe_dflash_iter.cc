@@ -165,7 +165,7 @@ void engine_taps(runtime::Engine& e, df::DFlashDrafter& d, const Json& sources, 
   }
 }
 
-void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds) {
+void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned calls, unsigned rounds, unsigned attn_ks) {
   if (!depth) throw std::runtime_error("cost depth must be positive");
   std::ifstream input("tests/golden/prompts/long32k.ids");
   std::vector<uint32_t> file;
@@ -247,6 +247,7 @@ void costs(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, unsigned ca
   // Profile separate lists: timestamp signals must not contaminate the wall-time medians above.
   runtime::ProfileEvents dp(e.context()), pp(e.context());
   runtime::CaptureOptions opt;
+  opt.dflash_attn_ks = attn_ks;   // the profiled draft list's DPAS key split (--attn-ks)
   opt.profile = &dp;
   auto draft = df::build_dflash_draft(e.context(), d.weights(), df::dflash_target(e.model()), d.buffers(),
                                      e.buffers().control, opt);
@@ -499,12 +500,12 @@ void verify_profile(runtime::Engine& e, df::DFlashDrafter& d, uint32_t depth, un
 
 int main(int argc, char** argv) {
   try {
-    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-2bit]] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
+    if (argc < 3) throw std::runtime_error("usage: probe_dflash_iter TARGET DRAFTER [--format int8|bf16|int4] [--candidate-head [--candidate-2bit]] [--attn-ks N] [--depth N] [--calls N] [--rounds N] [--verify-profile | --verify-pairs] | --engine-taps SOURCES OUT [--anchors N]");
     uint32_t depth = 4096;
     unsigned calls = 16, rounds = 3, anchors = 16;
     std::string sources_path, out;
     bool candidate_head = false, vprofile = false, vpairs = false;
-    unsigned candidate_bits = 4;
+    unsigned candidate_bits = 4, attn_ks = 1;
     auto format = loader::DraftFormat::Int8;
     for (int i = 3; i < argc; ++i) {
       const std::string arg = argv[i];
@@ -522,6 +523,7 @@ int main(int argc, char** argv) {
         else if (!loader::parse_draft_format(f, format)) throw std::runtime_error("--format int8|bf16|int4");
       }
       else if (arg == "--anchors") anchors = std::stoul(argv[++i]);
+      else if (arg == "--attn-ks") attn_ks = std::stoul(argv[++i]);   // spec 19 v3d: the profiled list's key split
       else if (arg == "--engine-taps" && i + 2 < argc) { sources_path = argv[++i]; out = argv[++i]; }
       else throw std::runtime_error("unknown option: " + arg);
     }
@@ -544,7 +546,7 @@ int main(int argc, char** argv) {
     std::printf("DFLASH_KV cache=%s\n", kv == runtime::KvCache::Int8 ? "int8" : "bf16");
     drafter.attach(e, false);
     if (vprofile) verify_profile(e, drafter, depth, calls, rounds, vpairs);
-    else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds);
+    else if (sources_path.empty()) costs(e, drafter, depth, calls, rounds, attn_ks);
     else engine_taps(e, drafter, sources, out, anchors);
   } catch (const std::exception& ex) {
     std::fprintf(stderr, "probe_dflash_iter: %s\n", ex.what());

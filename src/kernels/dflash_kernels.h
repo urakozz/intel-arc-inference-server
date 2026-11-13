@@ -41,9 +41,10 @@ inline std::string attn_variant(const Shape& s = kQwen38, unsigned heads = 0, un
          (rows ? "_B" + s_(rows) : "") + (parallel_exp ? "_Ep" : "");
 }
 // Spec 19 v3d Task 6: df_attn_part on DPAS (df_attn_dpas.cl), one sub-group a q head; its reduce is attn_variant(s, 1, 4)'s.
-inline std::string attn_dpas_variant(const Shape& s = kQwen38) {
+// ks > 1: the occupancy form, a head's block keys split ks ways (df_attn_dpas.cl's KS).
+inline std::string attn_dpas_variant(const Shape& s = kQwen38, unsigned ks = 1) {
   return "df_attn_M" + s_(s.M) + "_Q" + s_(s.NH) + "KV" + s_(s.NKV) + "_D" + s_(s.HD) + "_R" + s_(s.ring) + "_W" +
-         s_(s.win) + "_P" + s_(s.pb) + "_dpas";
+         s_(s.win) + "_P" + s_(s.pb) + "_dpas" + (ks > 1 ? "_k" + s_(ks) : "");
 }
 // The context projection at prefill width (df_proj_wide.cl; runtime::dflash::DFlashDrafter::project_wide).
 inline std::string proj_wide_variant(const Shape& s = kQwen38) {
@@ -86,10 +87,10 @@ inline const std::vector<unsigned>& draft_vocab_sizes() {
 inline std::vector<std::string> draft_variants(bool v2, unsigned fmt, bool int8_head, unsigned dv,
                                                LinearKind k, LinearKind head, unsigned attn_heads = 1, unsigned attn_rows = 4,
                                                bool candidate_head = false, bool parallel_exp = false,
-                                               bool attn_dpas = false) {
+                                               bool attn_dpas = false, unsigned attn_ks = 1) {
   const Shape& s = kQwen38;
   std::vector<std::string> v = {prep_variant(s, fmt == 2), attn_variant(s, attn_heads, attn_rows, parallel_exp), select_variant(v2, s, fmt == 2)};
-  if (attn_dpas) v.push_back(attn_dpas_variant(s));   // its part; the reduce stays attn_variant's
+  if (attn_dpas) v.push_back(attn_dpas_variant(s, attn_ks));   // its part; the reduce stays attn_variant's
   for (auto [K, N] : {std::pair<unsigned, unsigned>{s.H, s.NH * s.HD + 2 * s.NKV * s.HD},   // q||k||v
                       {s.NH * s.HD, s.H},                                                    // o
                       {s.H, 2 * s.I},                                                        // gate||up

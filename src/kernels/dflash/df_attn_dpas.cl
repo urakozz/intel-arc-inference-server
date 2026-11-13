@@ -36,6 +36,16 @@
 #define SG 16
 #define DA (HD / 16)   // dim atoms
 #define KA (PB / 16)   // key atoms
+// KS (spec 19 v3d Task 6, occupancy): the sub-groups a q head - its block's key atoms split KS ways for S and P V,
+// the row max taken over the whole block, the P V and l partials summed in SLM in sub-group order (KS 1: one
+// sub-group a head, nothing merged).
+#ifndef KS
+#define KS 1
+#endif
+#if (KA % KS) != 0
+#error "df_attn_dpas: KS must divide the block's key atoms"
+#endif
+#define KPS (KA / KS)
 #if M != 8 || (HD % 16) != 0 || (PB % 16) != 0 || (RING % PB) != 0 || RING < WIN
 #error "df_attn_dpas: M 8 (one DPAS row block), HD and PB multiples of 16, RING a multiple of PB and >= WIN"
 #endif
@@ -85,14 +95,19 @@ inline float f8(float8 v, int i) {
   }
 }
 
-__attribute__((reqd_work_group_size(SG * G, 1, 1)))
+__attribute__((reqd_work_group_size(SG * G * KS, 1, 1)))
 __attribute__((intel_reqd_sub_group_size(SG)))
 __kernel void df_attn_part(__global const uint* restrict ctrl, __global const uint* restrict dctl,
                            __global const float* restrict q, __global const ushort* restrict ring_k,
                            __global const ushort* restrict ring_v, const float scale, __global float* restrict part) {
   __local float s_all[G][M][PB];   // the scores, then read back by row for the max
+#if KS > 1
+  __local float o_x[G][KS - 1][M][HD];   // the other key slices' P V
+  __local float l_x[G][KS - 1][M];
+#endif
   const uint kvh = get_group_id(0), b = get_group_id(1);
-  const uint g = get_sub_group_id(), lane = get_sub_group_local_id(), h = kvh * G + g;
+  const uint sgi = get_sub_group_id(), g = sgi % G, kq = sgi / G;
+  const uint lane = get_sub_group_local_id(), h = kvh * G + g;
   const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
 
   // ---- q as the A operand, hi and lo, once: row i of dim atom a at lane = the atom's dim -------------------------
@@ -107,7 +122,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     }
 
   // ---- S: per key atom, the HD / 16 dim atoms, q hi then lo ----------------------------------------------------
-  for (uint ka = 0; ka < KA; ++ka) {
+  for (uint ka = kq * KPS; ka < (kq + 1) * KPS; ++ka) {
     const uint off = b * PB + ka * 16 + lane;   // this lane's key: ring offset
     const long pos = (long)p - (long)RING + (long)off;
     const uint slot = (uint)(((ulong)p + off) % RING);
@@ -125,7 +140,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
       s_all[g][i][ka * 16 + lane] = live ? f8(acc, i) * scale : -INFINITY;
     }
   }
-  sub_group_barrier(CLK_LOCAL_MEM_FENCE);
+  barrier(CLK_LOCAL_MEM_FENCE);
 
   // ---- each row's max over the block ----------------------------------------------------------------------------
   float mrow[8];
@@ -140,7 +155,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   for (uint a = 0; a < DA; ++a) o[a] = (float8)0.0f;
   float lsum[8];
   for (int i = 0; i < 8; ++i) lsum[i] = 0.0f;
-  for (uint ka = 0; ka < KA; ++ka) {
+  for (uint ka = kq * KPS; ka < (kq + 1) * KPS; ++ka) {
     short8 ph, pm, pl;
     for (int i = 0; i < 8; ++i) {
       const float sc = s_all[g][i][ka * 16 + lane];
@@ -171,14 +186,35 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     }
   }
 
+#if KS > 1
+  // ---- the key slices merged: slices 1.. into SLM, slice 0 adds them in order ----------------------------------
+  if (kq) {
+    for (int i = 0; i < 8; ++i) {
+      const float l = sub_group_reduce_add(lsum[i]);
+      if (lane == 0) l_x[g][kq - 1][i] = l;
+      for (uint a = 0; a < DA; ++a) o_x[g][kq - 1][i][a * 16 + lane] = f8(o[a], i);
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE);
+  if (kq) return;
+#endif
   // ---- the partials ----------------------------------------------------------------------------------------------
   for (int i = 0; i < 8; ++i) {
-    const float l = sub_group_reduce_add(lsum[i]);
+    float l = sub_group_reduce_add(lsum[i]);
+#if KS > 1
+    for (uint k = 0; k < KS - 1; ++k) l += l_x[g][k][i];
+#endif
     __global float* dst = part + (((size_t)h * TGT + b) * M + i) * PART;
     if (lane == 0) {
       dst[0] = mrow[i];
       dst[1] = l;
     }
-    for (uint a = 0; a < DA; ++a) dst[2 + a * 16 + lane] = f8(o[a], i);
+    for (uint a = 0; a < DA; ++a) {
+      float v = f8(o[a], i);
+#if KS > 1
+      for (uint k = 0; k < KS - 1; ++k) v += o_x[g][k][i][a * 16 + lane];
+#endif
+      dst[2 + a * 16 + lane] = v;
+    }
   }
 }
