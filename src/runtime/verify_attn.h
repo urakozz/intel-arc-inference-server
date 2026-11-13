@@ -36,7 +36,7 @@ struct VerifyAttnRow {
 // docs/probes/probe-verify-attn-2026-11-03.md §2 / §5 (busy-box timing, card 1; to be re-checked on a quiet box): v2 /
 // dpas paired at 512 | 1448 | 4096 | 11585 | 32768 | 130816 keys (the verdict: >= 1.03 with the range's low end > 1.00,
 // and N1); dpas_from = the smallest measured depth from which every verdict is dpas.
-// One row per built (M, KV form): bf16 at M = 2..8, int8 at M = 2..4 (production's int8 decode lists).
+// One row per built (M, KV form): bf16 and int8 at M = 2..8 (spec 19v3a adds the int8 DFlash rows).
 // 2026-11-04: the error that put every row on v2 for a day (DFlash K = 7, t6_usage-loader, position 103: f32 rank 3,
 // 4.0 below the top) was P's bf16 rounding in attn_verify_dpas, not a compiler (docs/07-open-questions.md, "Recently answered"); the
 // kernel now carries P as hi + lo (PSPLIT=1). Re-timed at that kernel (§5), every row's dpas_from is what it was.
@@ -53,6 +53,10 @@ inline constexpr VerifyAttnRow kVerifyAttnTable[] = {
     {2, true, 11585},   // 0.57 | 0.59 | 1.01 | 1.75 | 2.05 | 2.36
     {3, true, 4096},    // 0.74 | 0.69 | 1.32 | 1.50 | 1.83 | 2.02
     {4, true, 4096},    // 0.91 | 0.82 | 1.66 | 1.85 | 2.19 | 2.42
+    {5, true, 0},      // spec 19v3a: DPAS at every depth; one list, no shallow v2 arm
+    {6, true, 0},
+    {7, true, 0},
+    {8, true, 0},
 };
 
 inline const VerifyAttnRow* verify_attn_row(uint32_t M, bool kv8) {
