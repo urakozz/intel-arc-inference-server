@@ -27,11 +27,20 @@ void check_linear(const PrefillScratch& s, const loader::DeviceWeight& w, uint32
               "-row scratch (the chunk cap)");
 }
 
-l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w) {
+l0::Kernel& dequant_kernel(KernelCache& kc, PrefillScratch& s, const loader::DeviceWeight& w, bool wide) {
   const model::GemvShape& sh = w.shape;
   require(s.slab_buffer().size() >= size_t(sh.K) * kNs * 2,
           "the slab buffer is smaller than [K][1024] bf16");
-  return kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout), "pf_dequant_slab");
+  return kc(kernels::pf_dequant_slab_variant(sh.K, sh.N, sh.layout, wide), "pf_dequant_slab");
+}
+
+// Open-work 18: Qwen3.8's chunk wider than 2048 rows walks with the block-store conversion and
+// the N-fastest GEMM order - both bit-identical to the plain pair, which a 2048-row chunk and
+// the MoE models' dense linears keep (docs/probes/probe-qwen-pf-gemm-2026-11-13.md: past one
+// wave of work-groups a slab, the plain order reads each row block of x once a wave instead of
+// once a slab).
+bool wide_chunk(const PrefillScratch& s, uint32_t M) {
+  return !s.desc().is_moe() && pad256(M) > PrefillScratchDims::kCDefault;
 }
 }  // namespace
 
@@ -52,7 +61,8 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
-  l0::Kernel& dq = dequant_kernel(kc, s, w);
+  const bool wide = wide_chunk(s, M);
+  l0::Kernel& dq = dequant_kernel(kc, s, w, wide);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
@@ -60,7 +70,7 @@ void linear_l0(Context& cx, KernelCache& kc, PrefillScratch& s, const loader::De
     profile_wait(cx, Phase::kSlabDequant);   // only when B70_PREFILL_PROFILE=1
     // B = the slab [K][1024] (ldb 1024); C = partials from column n0 (ldc N). gemm_l0 pads M.
     const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, sh.N, 0, 0, 0};
-    gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false);
+    gemm_l0(cx, kc, b, x, slab.as<uint16_t>(), out + n0, /*transB=*/false, wide);
     profile_wait(cx, Phase::kSlabGemm);      // splits the old `linear_l0` row in two
   }
 }
@@ -86,7 +96,8 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
     profile_wait(cx, Phase::kSlabGemm);
     return;
   }
-  l0::Kernel& dq = dequant_kernel(kc, s, w);
+  const bool wide = wide_chunk(s, M);
+  l0::Kernel& dq = dequant_kernel(kc, s, w, wide);
   l0::Mem& slab = s.slab_buffer();
   for (uint32_t n0 = 0; n0 < sh.N; n0 += kNs) {
     cx.launch(dq, kNs / 16, sh.K / 64, 1,
@@ -95,7 +106,7 @@ void linear_l0_silu(Context& cx, KernelCache& kc, PrefillScratch& s,
     // No fp32 C: the slab's 1024 interleaved columns become x columns
     // [n0/2, n0/2 + 512) of every row. `b.ldc` is unused and left at 0.
     const GemmBatch b{M, sh.K, kNs, 1, sh.K, kNs, 0, 0, 0, 0};
-    gemm_l0_silu(cx, kc, b, x, slab.as<uint16_t>(), out + n0 / 2, ldx);
+    gemm_l0_silu(cx, kc, b, x, slab.as<uint16_t>(), out + n0 / 2, ldx, wide);
     profile_wait(cx, Phase::kSlabGemm);
   }
 }

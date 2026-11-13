@@ -318,6 +318,19 @@ class ReuseTest(Tmp):
         self.assertEqual(self.claim(self.tree), {}, "two cards: not the same test")
         del os.environ["ZE_AFFINITY_MASK"]
 
+    def test_kernel_series(self):
+        """A release candidate or patch release of one kernel series is the same machine; an old entry's full
+        release string is read as its series."""
+        self.assertEqual(reuse.kernel_series("7.4.0-070400rc2-generic"), "7.4")
+        self.assertEqual(reuse.kernel_series("7.4.3-generic"), "7.4")
+        self.assertEqual(reuse.kernel_series("7.5.0-070500rc1-generic"), "7.5")
+        self.assertEqual(reuse.machine(), {"kernel": reuse.kernel_series(reuse.platform.release())})
+        mach = {"kernel": "7.4"}
+        self.assertNotIn("the machine", str(reuse.matches({"machine": {"kernel": "7.4.0-070400rc1-generic"},
+                                                           "command": ["x"]}, {"command": ["y"]}, ".", "b", mach)))
+        self.assertIn("the machine", reuse.matches({"machine": {"kernel": "7.3.9-generic"}, "command": ["x"]},
+                                                   {"command": ["x"]}, ".", "b", mach))
+
     def test_no_reuse(self):
         self.run_test(self.tree)
         os.environ["BV_NO_REUSE"] = "1"
@@ -557,6 +570,10 @@ class OrchestratorTest(Tmp):
         st_r1_g() { need_ok r1.a r1.e r1.z; finish; }
         stage r1.h 1 default cpu - - "need_ok over a FAIL"
         st_r1_h() { need_ok r1.a r1.d; finish; }
+        stage r1.q 1 default cpu - - "a smaller input under --quick"
+        st_r1_q() { chk "echo $(quick_or full quick) > $STATE/r1q.input" "the input"; finish; }
+        quick pre g0.a r1.a
+        quick_form r1.q "the quick input"
         """)
 
     def setUp(self):
@@ -653,6 +670,38 @@ class OrchestratorTest(Tmp):
         self.assertIn("- m: `value 42`", text)
         self.assertIn("something no stage runs", text)
         self.assertIn("$ do it by hand", text)
+        self.assertNotIn("(quick)", text)
+
+    def test_quick(self):
+        """BV_QUICK=1 (--quick): a stage without a quick form is SKIP "full only"; a quick form gets its smaller
+        input; the state's meta and the summary say quick"""
+        write(self.p("runs", "g0_ok"), "")
+        self.state = self.p("runs", "s1-quick-vs-abc")
+        self.run_remote(["pre", "g0.a", "r1.a", "r1.c", "r1.d", "r1.q"], BV_QUICK="1")
+        self.assertEqual(self.status("g0.a")[1], "PASS")
+        self.assertEqual(self.status("r1.a")[1], "PASS")
+        for s in ("r1.c", "r1.d"):
+            self.assertEqual(self.status(s)[1:3], ["SKIP", "77"])
+            self.assertIn("full only", self.status(s)[6])
+        self.assertEqual(self.status("r1.q")[1], "PASS")
+        with open(os.path.join(self.state, "r1q.input")) as f:
+            self.assertEqual(f.read(), "quick\n")
+        with open(os.path.join(self.state, "meta-0.env")) as f:
+            self.assertIn("quick=1\n", f.read())
+        reg = self.p("registry.tsv")
+        write(reg, "row\t1\tone\nstage\tr1.a\t1\tdefault\tgpu\ta\t-\tneeds a\nstage\tr1.d\t1\tdefault\tcpu\t-\t-\tfails\n")
+        md = self.p("summary.md")
+        self.assertEqual(summary.main(["report", "--state", self.state, "--registry", reg, "--out", md]), 0)
+        with open(md) as f:
+            text = f.read()
+        self.assertIn("# Box validation (quick) - ", text)
+        self.assertIn("| `r1.d` | fails | **SKIP** | full only", text)
+        self.state = self.p("runs", "s1")                   # the full run: its own state, the full input
+        self.run_remote(["pre", "g0.a", "r1.q"])
+        with open(os.path.join(self.state, "r1q.input")) as f:
+            self.assertEqual(f.read(), "full\n")
+        with open(os.path.join(self.state, "meta-0.env")) as f:
+            self.assertIn("quick=0\n", f.read())
 
 
 # flock(1) for the Mac (util-linux's on the box): flock(2) through fcntl - the same lock and the same
@@ -1426,6 +1475,57 @@ class DriverTest(unittest.TestCase):
                 with open(os.path.join(d, f"meta-{dev}.env"), "w") as f:
                     f.write(f"tree_sha=abc123\nbaseline_sha={old}\nbaseline_ref=main\n")
             self.assertEqual(run(), old + "\n")
+
+    def test_quick(self):
+        """--quick: its own state, the quick stages' bodies, every other stage printed full only"""
+        out = self.run_driver("--dry-run", "--quick").stdout
+        self.assertRegex(out, r"# state: \S+-quick-vs-[0-9a-f]{12} ")
+        self.assertRegex(out, r"# quick run: \d+ of these run, the rest are recorded SKIP \(full only\)")
+        self.assertIn(" BV_QUICK=1 ", out)
+        blocks = {m.group(1): m.group(2) for m in re.finditer(r"(?ms)^--- (\S+) (.*?)(?=^--- |^== )", out)}
+        self.assertIn("quick: full only", blocks["r6.greedy_long"])
+        self.assertNotIn("build/src/cli/b70-decode", blocks["r6.greedy_long"])
+        self.assertIn("quick: as in the full run", blocks["g0.bitwise"])
+        self.assertIn("--no-label checkpoint", blocks["g0.suite"])
+        self.assertIn("--re '^mtp_verify_32k_test$'", blocks["r6.mtp_long"])
+        self.assertNotIn("mtp_gpu_test|", blocks["r2.suite"])
+        arms = re.findall(r"serve_run\.sh \S+/r2\.auto_rows/(\S+) ", out)
+        self.assertEqual(arms, ["off.r1", "auto.r1"])
+        self.assertIn("--only prose,code,", blocks["r2.auto_rows"])
+        full = self.run_driver("--dry-run").stdout                 # the full run is untouched
+        self.assertNotIn("quick:", full)
+        self.assertIn(" BV_QUICK=0 ", full)
+        self.assertNotIn("--no-label checkpoint", full.split("--- g0.suite ")[1].split("\n--- ")[0])
+        out = self.run_driver("--list").stdout
+        self.assertRegex(out, r"(?m)^r6\.mtp_long\*? .* less ")
+        self.assertRegex(out, r"(?m)^r6\.greedy_long\*? .* - ")
+        self.assertRegex(out, r"(?m)^g0\.bitwise\*? .* same ")
+        self.assertRegex(out, r"(?m)^  r6\.mtp_long +32k only")
+        # a quick PASS never stands for a full one: the states do not mix
+        for args in (("--quick", "--state", "abc-vs-" + "0" * 12), ("--state", "abc-quick-vs-" + "0" * 12),
+                     ("--quick", "--nightly")):
+            self.assertEqual(self.run_driver("--dry-run", *args, ok=False).returncode, 2, args)
+        self.run_driver("--dry-run", "--quick", "--state", "mine-quick")
+
+    def test_quick_set_closed(self):
+        """every stage the quick run runs is in the default selection, and so is every stage it waits on"""
+        r = subprocess.run(["bash", "-c", '. tools/box_validate/lib.sh; . tools/box_validate/stages.sh; '
+                            'for i in "${!BV_IDS[@]}"; do printf "%s\\t%s\\t%s\\t%s\\n" "${BV_IDS[$i]}" "${BV_SELS[$i]}" '
+                            '"${BV_AFTERS[$i]}" "${BV_QUICKS[$i]}"; done'], capture_output=True, text=True, cwd=ROOT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        rows = [l.split("\t") for l in r.stdout.splitlines()]
+        quick = {sid for sid, _, _, q in rows if q}
+        self.assertGreater(len(quick), 20)
+        for sid, sel, after, q in rows:
+            if not q:
+                continue
+            self.assertIn(sel, ("always", "g0", "default"), sid)
+            for d in after.split(","):
+                if d != "-":
+                    self.assertIn(d, quick, f"{sid} waits on {d}, which is full only")
+        for sid, sel, _, q in rows:
+            if sel == "g0":
+                self.assertTrue(q, f"{sid}: a G0 stage must run in the quick run (stop-the-line)")
 
     def test_list_and_bash32(self):
         out = self.run_driver("--list").stdout

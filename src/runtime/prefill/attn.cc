@@ -112,9 +112,9 @@ void attn_prep_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C
              PtrArg(s.pf_q.ptr()), PtrArg(nullptr), PtrArg(kv_k), PtrArg(kv_v)});
 }
 
-void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
+bool attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, uint32_t C,
                 const uint16_t* q, const uint16_t* kv_k, const uint16_t* kv_v,
-                PrefillBackend backend) {
+                PrefillBackend backend, const float* gate_src, uint16_t* gate_out) {
   require(C > 0 && C <= s.chunk_cap(), "C = " + std::to_string(C) + " is outside (0, " + std::to_string(s.chunk_cap()) + "], the scratch's chunk cap");
   // Spec 15b: the head counts are the descriptor's (Qwen3.8: 24 q-heads, 4 kv-heads,
   // groups of 6). Row pitches, named so a GemmBatch field says which buffer it
@@ -136,8 +136,8 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     // composed path's ([24][rows][256], stride rows * 256, rows = pad256(C)), so
     // pf_attn_gate is unchanged. The kernel reads the cache rows [0, pos + C) only and masks
     // past `depth` itself, so neither max_len's padding nor stale cache rows can reach it.
-    // Spec 6c: RPW 8, grid (ceil(C / 8), 4, 1).
-    // The WG size (96) comes from the kernel's reqd_work_group_size (Context::launch).
+    // Spec 6c: RPW 8, grid (ceil(C / 8), 4, 1); phase 3 Task 7: RPW 32 for Ornith below.
+    // The WG size comes from the kernel's reqd_work_group_size (Context::launch).
     const uint32_t rows = attn_rows(C, backend);
     require(s.pf_o.size() >= size_t(q_heads) * rows * kHeadDim * sizeof(float),
             "pf_o is undersized");
@@ -148,14 +148,29 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
                       PtrArg(a.ml), arg_val(span)});
       launch_merge(cx, kc, s, C, rows, a);
       profile_wait(cx, Phase::kAttnFlash);
-      return;
+      return false;
     }
-    cx.launch(kc(kernels::pf_flash_attn_variant(s.desc().fa_q_heads, s.desc().fa_kv_heads), "pf_flash_attn"), (C + 7u) / 8u, kv_heads,
+    // MoE prefill phase 3 Task 7: Ornith's 16 / 2 heads take 32 rows a work-group, Q in registers - bitwise the RPW 8
+    // binary, which Qwen3.8 keeps (slower there at HPW 6) and the TP card's 12 / 2.
+    const bool r32 = q_heads == 16 && kv_heads == 2;
+    const uint32_t rpw = r32 ? kernels::kPfFlashR32Rows : 8u;
+    // Phase 3: the walk passes the gate's source and target; r32 then gates in its epilogue (bitwise pf_attn_gate).
+    if (r32 && gate_out) {
+      require(gate_src != nullptr, "the fused gate needs qkv_partials");
+      cx.launch(kc(kernels::pf_flash_attn_r32g_variant(q_heads, kv_heads), "pf_flash_attn"), (C + rpw - 1u) / rpw,
+                kv_heads, 1,
+                {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos), arg_val(C), arg_val(rows),
+                 PtrArg(gate_src), PtrArg(gate_out)});
+      profile_wait(cx, Phase::kAttnFlash);
+      return true;
+    }
+    cx.launch(kc(r32 ? kernels::pf_flash_attn_r32_variant(q_heads, kv_heads)
+                     : kernels::pf_flash_attn_variant(q_heads, kv_heads), "pf_flash_attn"), (C + rpw - 1u) / rpw, kv_heads,
               1,
               {PtrArg(q), PtrArg(kv_k), PtrArg(kv_v), PtrArg(s.pf_o.ptr()), arg_val(pos),
                arg_val(C), arg_val(rows)});
     profile_wait(cx, Phase::kAttnFlash);
-    return;
+    return false;
   }
   // Spec 2.1 §3.4: the depth pads to 256 -- pf_gemm's tile -- and every per-head slot is
   // strided by the 256-padded row count.
@@ -253,6 +268,7 @@ void attn_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t pos, u
     gemm_l0(cx, kc, pv, P, vj, oj, /*transB=*/false);
     profile_wait(cx, Phase::kAttnPv);
   }
+  return false;
 }
 
 void attn_gate_chunk(Context& cx, KernelCache& kc, PrefillScratch& s, uint32_t C, uint32_t rows,

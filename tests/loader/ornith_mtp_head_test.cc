@@ -385,7 +385,9 @@ void check_figures() {
     CHECK_EQ(on.model, off.model + loader::mtp_head_bytes(o));
     // step_mtp_kv's bf16 linears walk the L0 slab: on l0-int8 it is built for MTP alone.
     const runtime::PrefillScratchSizes ps = runtime::PrefillScratchDims::sizes(262144, o, runtime::PrefillScratchDims::kCDefault);
-    CHECK_EQ(on.prefill_lazy, ps.slab);
+    // l0 also keeps the router / a||b slabs (phase 3: route_slab_bytes).
+    CHECK_EQ(on.prefill_lazy,
+             ps.slab + (b == runtime::PrefillBackend::L0 ? runtime::route_slab_bytes(o, 0, o.layers) : 0));
     CHECK(ps.slab >= size_t{4096} * 1024 * 2);   // fc's K 4096 fits the slab (step_mtp_kv)
     CHECK_EQ(runtime::max_len_that_fits(o, true, weights, kDevice, kReserve, 262144, path, {},
                                         runtime::KvCache::Bf16),

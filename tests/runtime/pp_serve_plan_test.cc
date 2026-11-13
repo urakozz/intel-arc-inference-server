@@ -168,7 +168,8 @@ void check_mtp_terms() {
           const size_t mtp_pf =
               pf.prefill ? runtime::mtp_prefill_hidden_bytes(*d, runtime::PrefillScratchDims::kCDefault) + runtime::kPpPfDepth * sizeof(runtime::Control) : 0;
           CHECK_EQ(p1.decode_state, b1.decode_state + runtime::MtpDims::sizes(len, *d, dv, kv).total() + mtp_pf);
-          const size_t slab = pf.prefill && pf.backend == runtime::PrefillBackend::L0Int8
+          // The head's slab on l0-int8: a dense model's mixer linears hold it already (open-work 17).
+          const size_t slab = pf.prefill && pf.backend == runtime::PrefillBackend::L0Int8 && d->is_moe()
                                   ? runtime::PrefillScratchDims::sizes(len, *d, runtime::PrefillScratchDims::kCDefault).slab
                                   : 0;
           CHECK_EQ(p1.prefill_scratch, b1.prefill_scratch + slab);

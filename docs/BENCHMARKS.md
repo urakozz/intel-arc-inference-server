@@ -63,6 +63,25 @@ Prefill does not care either way. `lm_head` runs once per prompt, and the two
 checkpoints measured **0.17% apart** on prefill where they were 9.9% apart on
 decode (2026-09-05, same binary, same hour).
 
+## vLLM: the README's comparison
+
+The README's "Against vLLM" table. vLLM numbers are the operator's (vLLM XPU image `p314-t215-vxkp0` /
+`p314-t214-vxkp0`, one B70, TP 1, prefix caching on, `--speculative-config '{"method":"mtp","num_speculative_tokens":2}'`),
+benched with `llama-benchy --pp 4096 --tg 256 --concurrency 1 --depth 1 --no-cache --exact-tg --latency-mode generation`.
+Ours, the same llama-benchy command through b70-serve: Ornith from the replica record (one request = one card's
+engine, mean of 6 runs); Qwen3.8 on one card (`--parallel 1 --max-num-seqs 1`, 3 runs each): `--prefill-backend
+l0-int8` pp 2,470 / tg with MTP 62.3; the default bf16 prompt pass pp 1,647 / tg with MTP 67.9 (decode with MTP is
+the mean of those 6 runs, 65.1: the prompt pass does not change decode); `--spec off` pp 1,658 / tg 33.6 (all three
+runs 33.6). The bf16 prompt pass is below vLLM's prefill; the README's row names the int8 one.
+
+| model, one B70, 1 request | ours | vLLM |
+|---|---:|---:|
+| Ornith 1.5 35B-A3B, pp4096 | 8,877 | 7,723.17 ± 46.08 (MTP 2) |
+| Ornith 1.5 35B-A3B, tg256, MTP | 180.5 | 115.77 ± 4.34 (MTP 2) |
+| Qwen3.8-27B, pp4096 | 2,470 (l0-int8) / 1,647 (bf16) | 1,973 (no spec) / 1,918 (MTP 2) |
+| Qwen3.8-27B, tg256, MTP | 65.1 | 45.23 ± 2.68 (MTP 2) |
+| Qwen3.8-27B, tg256, no speculation | 33.6 | 31.50 |
+
 ## vLLM: how the baseline is served and benched
 
 ```bash
@@ -234,6 +253,32 @@ Decode (B2): `tools/bench_decode.sh --runs 3` right after the four passes gave
 29.47, against the 29.45 record: within the day-scale drift this file records,
 and by construction, since the decode list is byte-identical on every prefill
 backend. **B2 passes.**
+
+#### 2026-11-13: int8 in the MLP only (open-work item 17)
+
+On the dense model `l0-int8` now runs only gate‖up and down int8; the four mixer linears take the bf16 slab walk
+(they carried the long-prompt miss, docs/17-int8-prefill.md). `b70-decode --bench --prefill-length N --tg 32
+--max-len 32768 --parallel 1`, Qwen3.8, one card (card 1; card 0 ran a test throughout: busy box), main (cf22d86a)
+against branch `int8-mlp-only`, three rounds with the order changed each round, median:
+
+| prompt | arm | t/s (3 rounds) | median | launches |
+|---|---|---|---:|---:|
+| 4096 | main `l0` | 1738.95, 1737.69, 1736.11 | 1737.69 | 16903 |
+| 4096 | branch `l0` | 1744.73, 1739.40, 1739.89 | 1739.89 | 16903 |
+| 4096 | main `l0-int8` | 2260.87, 2256.32, 2254.74 | 2256.32 | 17415 |
+| 4096 | branch `l0-int8` | 2082.52, 2083.80, 2080.13 | **2082.52** | 17159 |
+| 16384 | main `l0` | 1571.54, 1566.46, 1567.84 | 1567.84 | 67597 |
+| 16384 | branch `l0` | 1569.51, 1568.69, 1566.28 | 1568.69 | 67597 |
+| 16384 | main `l0-int8` | 1980.57, 1980.51, 1977.38 | 1980.51 | 69645 |
+| 16384 | branch `l0-int8` | 1844.60, 1844.74, 1844.60 | **1844.60** | 68621 |
+
+`l0-int8` against `l0`: 1.20x / 1.18x (main's all-int8 form 1.30x / 1.26x); against main's form 0.923x / 0.931x.
+`l0` is the same build either side (its logs bitwise main's). Logs on the box: `~/b70/logs/int8-mlp-only/speed1.log`.
+
+Tensor parallel, `--parallel tp --prefill-backend l0-int8`, the same flags, whole-box lock, main and branch
+alternating, median of 3: pp4096 main 3326.71 (3321.90, 3330.55, 3326.71), branch **3216.84** (3216.84, 3211.37,
+3220.44), 0.967x; pp16384 main 3051.82 (3051.36, 3053.30, 3051.82), branch **2937.33** (2940.09, 2933.36, 2937.33),
+0.962x. Launches 22158 -> 21646 / 88602 -> 86554 (both cards). Log `~/b70/logs/int8-mlp-only/box1.log`.
 
 ### The Level Zero backend, and what it was worth
 
@@ -1344,7 +1389,18 @@ M-row crossings, its draft reads the whole head's layer on each card and half th
 
 ## Ornith 1.5 MoE (spec 15)
 
-**Measured on one card (2026-11-11, main, idle box between validation stages, median of 3):** prefill 3,362 / 3,259 t/s at 4k / 16k (bf16 prompt pass), 3,937 / 3,676 t/s (`--prefill-backend l0-int8`); plain decode 142.8 t/s at depth 4096 (`b70-decode --bench`); through `b70-serve` with MTP at the full 262,144 context, bf16 KV (`--max-len auto`, 27.3 GB planned of 32.5), one request, a 2,820-token prompt and 512 generated tokens (`tools/box_validate/slots_serve_bench.sh`): **234.9 t/s**, first token 1.28 s cold / 0.59 s as a prefix cache hit. Ornith's MTP cost table is still Qwen3.8's (startup note). The rows below predate these numbers. Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
+**Prefill after the MoE prefill plan (2026-11-12, one card, card 0 while card 1 ran another agent's jobs and a CPU job ran, median of 3, `b70-decode --bench --max-len auto`, 4096-row chunks):** 4k **8,080** t/s (`l0`, bf16 prompt pass) / **8,518** (`l0-int8`, W4A8 experts); 16k 6,800 / 7,059. The same run's main (7cfbf058, 2048-row chunks): 7,578 / 5,460 at 4k, 6,509 / 4,869 at 16k. Record and per-phase times: [probes/probe-moe-prefill-2026-11-12.md](probes/probe-moe-prefill-2026-11-12.md), "Task 8". The prefill numbers in the next paragraph predate it.
+
+**Measured on one card (2026-11-11, main, idle box between validation stages, median of 3):** prefill 3,362 / 3,259 t/s at 4k / 16k (bf16 prompt pass), 3,937 / 3,676 t/s (`--prefill-backend l0-int8`); plain decode 142.8 t/s at depth 4096 (`b70-decode --bench`); through `b70-serve` with MTP at the full 262,144 context, bf16 KV (`--max-len auto`, 27.3 GB planned of 32.5), one request, a 2,820-token prompt and 512 generated tokens (`tools/box_validate/slots_serve_bench.sh`): **234.9 t/s**, first token 1.28 s cold / 0.59 s as a prefix cache hit. The rows below predate these numbers.
+
+**Ornith's MTP cost table (2026-11-12, one card, `probe_mtp_steps` at depth 4096, 64 calls x 9 rounds, `tools/gpu_lock.sh card`; two int8 runs agree within 0.01; r16.cost's commands, run directly):** in units of one plain step (verify M = 1 is 7.88 ms with the int8 head, 8.73 ms with the bf16 head), verify M = 1..4 and draft k = 1..3:
+
+| lm_head | verify M = 2 / 3 / 4 | draft k = 1 / 2 / 3 |
+|---|---|---|
+| int8 | 1.15 / 1.34 / 1.52 (9.05 / 10.61 / 12.03 ms) | 0.19 / 0.38 / 0.57 (1.52 / 3.00 / 4.49 ms) |
+| bf16 | 1.15 / 1.30 / 1.48 | 0.28 / 0.56 / 0.84 |
+
+Qwen3.8's int8 table is 1.04 / 1.09 / 1.13 and 0.13 / 0.26 / 0.38: Ornith's verify rows climb about four times as fast (a MoE layer reads up to 8 M distinct experts). **The table does not win:** `b70-serve --spec auto` with it wired in (after) against the same server on Qwen3.8's table (before), interleaved over 3 rounds, golden + tool-call prompts, 256 ids, `--max-len 16384`, ids identical, median decode t/s: golden prose / code / cjk 246.0 / 252.0 / 210.8 against 269.9 / 278.3 / 237.0 (geomean 0.90), the 36 tool-call prompts geomean 0.94 (about 185-240 t/s). The step-K policy drafts less under the dearer measured rows and loses more in accepted ids than it saves. So Ornith keeps Qwen3.8's table and K up to 3 (the startup note says so); the measured rows are recorded here, not wired. Open: why the probe's rows overstate the in-server cost (the probe times verify + commit one call at a time). Ornith 1.5 35B-A3B (`urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ`,
 the int4 checkpoint, spec 15 §13) was built without the card (specs 15c-15e); this section is the
 record's skeleton (plan 15e Task 3 Step 3), each cell filled from the box-validation-queue stage
 named beside it. Every row will state the card, the clocks if known, the quant and the `lm_head`
@@ -1357,7 +1413,7 @@ form (plan 15e Review Focus 5).
 | A4 tool calls, scenarios matching the reference's first call | Ornith's own set (36), the int4 checkpoint's CPU reference (`ornith_ref.py`), 192 ids; l0-int8 bf16 / int8 head, l0 | pending (Qwen3.8: 25/36) | r16.a4 |
 | prefix caching C2 | `prefix_gpu_test` l0-int8, l0, l0-int8 `--mtp 3` | pending | r16.prefix |
 | passkey | 120k (l0-int8, l0), 250k (l0-int8, max_len 262144) | pending | r16.passkey |
-| MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | pending | r16.mtp_rows |
+| MTP `--mtp off / 1 / 3 / auto` | b70-serve, golden + A4 prompts, 256 ids | auto on Qwen3.8's table 269.9 / 278.3 / 237.0 t/s (golden prose / code / cjk, 2026-11-12, `--max-len 16384`); the off / 1 / 3 arms and the f32 judge not run | r16.mtp_rows (partial) |
 | llama-benchy pp4096 tg256 depth 1 | b70-serve, `--no-cache --exact-tg --latency-mode generation` | pending | r16.benchy |
 | llama-benchy prefix caching, follow-up after 4k / 16k / 32k | cache on vs off | pending | r16.benchy |
 

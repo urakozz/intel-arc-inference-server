@@ -1,67 +1,105 @@
 # b70-inference-server
 
-An LLM inference engine built from scratch for **one or two Intel Arc Pro B70** cards. It talks straight to Level
-Zero with its own OpenCL C kernels - no PyTorch, no vLLM, no vendor kernel library on the hot path - and serves an
-OpenAI-compatible API made for long agentic coding sessions (opencode and similar).
+**A fast LLM server for one or two Intel Arc Pro B70 cards, written from scratch.** Hand-crafted GPU kernels,
+optimised for each model it runs - no PyTorch, no vLLM underneath - and an OpenAI-compatible API built for long coding-agent sessions (opencode and similar).
 
-It is tuned today for **Qwen3.8-27B**: speculative decoding with the model's own MTP head, a prefix cache in system
-RAM that turns every follow-up turn into a prefix cache hit, and the model's full 262,144-token context **on a single
-card** (with the int8 KV cache). On two cards: tensor parallel for one fast session, or a model copy per card for up
-to 8 requests at once.
+- **123 tokens per second** for one session of Qwen3.8-27B on two cards, at the model's full 262,144-token context.
+- **258 tokens per second in total** with 8 requests running at once.
+- **3,217 tokens per second** reading a prompt; the first token of a follow-up turn in as little as **0.86 s**
+  (measured with the int8 prompt pass as it was before 2026-11-13; re-measurement pending, see below).
+- **Ornith 1.5 35B-A3B:** prompts read at **8,877 t/s**, answers written at **180.5 t/s on one card, 351.9 t/s on two**.
+- The full 262,144-token context of Qwen3.8-27B fits on **a single card**.
+- **Faster than vLLM** on the same card and the same model files: up to **+56 %** writing and **+25 %** reading.
 
-## The model
+One choice to make - how many requests run at once. The engine sizes everything else.
 
-[`urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ`](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ):
-Qwen3.8-27B quantised with AutoRound to int4 weights, one scale per 64 input channels, bf16 activations, GPTQ
-packing; the output head and the MTP head stay bf16 in the file.
+## Speed
 
-Why group size 64 rather than the usual 128: better accuracy, at the price of about 2 % prefill speed.
+**Prefill** is the model reading your prompt, **decode** is the model writing its answer, both in tokens per second
+(t/s). **MTP** - the model drafts several tokens ahead and checks them in one step; the answer does not change, it
+arrives faster. A **prefix cache hit** is a follow-up turn whose earlier conversation is already cached.
 
-## Numbers
+### Qwen3.8-27B
 
-Qwen3.8-27B, MTP speculative decoding, each request a 3,425-token prompt and 512 generated tokens:
+One session on two cards (the default) with TP 2: **123.1 t/s**; first token in 1.84 s for a new conversation, 1.34 s
+on a prefix cache hit.
 
-| setup | requests at once | **total t/s** | per request t/s | first token, cold | first token, prefix cache hit |
-|---|---:|---:|---:|---:|---:|
-| two cards, `--parallel tp` (one session, the two-card default) | 1 | **123.1** | 123.1 | 1.84 s | 1.34 s |
-| two cards, `--max-num-seqs 8` (a model copy per card, 4 slots each) | 1 | 73.0 | 73.0 | 2.30 s | 1.08 s |
-| | 2 | 140.5 | 73.8 | 2.36 s | 1.10 s |
-| | 4 | 209.1 | 58.5 | 3.61 s | 1.65 s |
-| | 8 | **250.0** | 36.0 | 7.27 s | 2.79 s |
-| same, `--kv-cache int8` (slot 0 holds 167,936 tokens instead of 46,080) | 1 / 2 / 4 / 8 | 74.0 / 163.5 / 213.9 / **258.5** | 74.0 / 84.1 / 58.8 / 37.2 | 2.33 / 2.37 / 3.63 / 7.30 s | 1.09 / 1.11 / 1.64 / 2.81 s |
-| same, `--prefill-backend l0-int8` | 1 / 2 / 4 / 8 | 82.0 / 138.5 / 202.2 / 250.1 | 82.0 / 76.3 / 60.6 / 35.0 | **1.80** / 1.88 / 2.82 / 5.76 s | **0.86** / 0.89 / 1.33 / 2.24 s |
-| one card, `--max-num-seqs 4` | 1 / 2 / 4 | 73.2 / 107.5 / 126.6 | 73.2 / 59.5 / 35.6 | 2.32 / 3.52 / 5.91 s | 1.09 / 1.65 / 2.77 s |
+The serving-bench requests contain 3,425 prompt tokens and generate 512 tokens.
 
-**Prefill** (reading the prompt), t/s:
+Decode with MTP, t/s - one session, or several at once (the total, per request in brackets):
 
-| | 4,096-token prompt | 16,384-token prompt |
+| setup | 1 request | 2 requests | 4 requests | 8 requests |
+|---|---:|---:|---:|---:|
+| two cards, tensor parallel | **123.1** | - | - | - |
+| one card, `--max-num-seqs 4` | 73.2 | 107.5 (59.5) | 126.6 (35.6) | |
+| two cards, `--max-num-seqs 8` | 73.0 | 140.5 (73.8) | 209.1 (58.5) | **250.0** (36.0) |
+| two cards, `--max-num-seqs 8 --kv-cache int8` | 74.0 | 163.5 (84.1) | 213.9 (58.8) | **258.5** (37.2) |
+| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` † | 82.0 | 138.5 (76.3) | 202.2 (60.6) | 250.1 (35.0) |
+
+Time to the first token, new conversation / prefix cache hit:
+
+| setup | 1 request | 2 requests | 4 requests | 8 requests |
+|---|---:|---:|---:|---:|
+| two cards, tensor parallel (the default for one session) | **1.84 / 1.34 s** | | | |
+| two cards, `--max-num-seqs 8` | 2.30 / 1.08 s | 2.36 / 1.10 s | 3.61 / 1.65 s | 7.27 / 2.79 s |
+| two cards, `--max-num-seqs 8 --kv-cache int8` | 2.33 / 1.09 s | 2.37 / 1.11 s | 3.63 / 1.64 s | 7.30 / 2.81 s |
+| two cards, `--max-num-seqs 8 --prefill-backend l0-int8` † | **1.80 / 0.86 s** | 1.88 / 0.89 s | 2.82 / 1.33 s | 5.76 / 2.24 s |
+| one card, `--max-num-seqs 4` | 2.32 / 1.09 s | 3.52 / 1.65 s | 5.91 / 2.77 s | |
+
+Prefill, t/s:
+
+| setup | 4,096-token prompt | 16,384-token prompt |
 |---|---:|---:|
-| one card, bf16 prompt pass | 1,709 | 1,539 |
-| one card, int8 prompt pass (`--prefill-backend l0-int8`) | 2,205 | 1,940 |
-| two cards, `--parallel tp`, bf16 prompt pass | 2,939 | 2,686 |
-| two cards, `--parallel tp`, int8 prompt pass | **3,323** | **3,048** |
+| one card | 1,709 | 1,539 |
+| one card, `--prefill-backend l0-int8` | 2,083 | 1,845 |
+| two cards, TP | 2,939 | 2,686 |
+| two cards, TP, `--prefill-backend l0-int8` | **3,217** | **2,937** |
 
-**Ornith 1.5 35B-A3B** (Qwen3.5 MoE architecture, ~3B active parameters per token), one card, the full 262,144
-context with the bf16 cache:
+Since 2026-11-13 `l0-int8` on Qwen3.8 runs int8 only in the MLP; the four attention / delta-net projections stay
+bf16, because in int8 they changed a token on a 2,820-token prompt ([docs/17](docs/17-int8-prefill.md)). The one-card
+and TP rows above are measured with it (interleaved against main: 0.92x / 0.97x the old form at 4,096 tokens). Rows
+marked † were measured with the old form and are expected to come down; they wait for a quiet-box re-run.
 
-| | without MTP | with MTP |
-|---|---:|---:|
-| decode, one request | 142.8 t/s | **234.9 t/s** |
-| prefill, 4,096-token prompt | 3,362 t/s (bf16 prompt pass), **3,937 t/s** (int8) | |
+**Against vLLM** - the same model files on one B70, one request, a 4,096-token prompt:
+
+| t/s | this engine | vLLM | |
+|---|---:|---:|---:|
+| Ornith 1.5 35B-A3B, prefill | **8,877** | 7,723 | +15 % |
+| Ornith 1.5 35B-A3B, decode with MTP | **180.5** | 115.8 | +56 % |
+| Qwen3.8-27B, prefill (`--prefill-backend l0-int8`) † | **2,470** | 1,973 | +25 % |
+| Qwen3.8-27B, decode with MTP | **65.1** | 45.2 | +44 % |
+| Qwen3.8-27B, decode without MTP | **33.6** | 31.5 | +7 % |
+
+### Ornith 1.5 35B-A3B
+
+A mixture-of-experts model (Qwen3.5 35B A3B), with the full 262,144-token context on each card. One request runs on
+one card; two requests run one per card and the number is the total.
+
+| t/s | 4,096-token prompt, 1 request | 2 requests | 16,384-token prompt, 1 request | 2 requests |
+|---|---:|---:|---:|---:|
+| prefill | **8,877** | **15,223** | 7,135 | 12,116 |
+| decode | 140.7 | 274.2 | 126.1 | 222.7 |
+| decode with MTP | **180.5** | **351.9** | 157.0 | 260.2 |
+
+How every number was taken: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
 ## Install
 
 You need Linux with the `xe` driver, Intel's compute runtime with `ocloc` and the Level Zero loader, g++, CMake and
-Rust (for the tokenizer). Tensor parallel on two cards needs peer-to-peer between them (native from kernel 7.4).
+Rust (for the tokenizer). The fast single session on two cards needs peer-to-peer between them (native from kernel
+7.4).
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build
 
-# the engine never downloads; fetch the checkpoint into the Hugging Face cache once
+# the engine never downloads; fetch the model into the Hugging Face cache once
 uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ
 ```
+
+[The model](https://huggingface.co/urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ) is Qwen3.8-27B compressed to 4-bit
+weights with AutoRound, in groups of 64 rather than the usual 128 - better accuracy for about 2 % of prefill speed.
 
 ## Run
 
@@ -73,24 +111,16 @@ uvx --from huggingface_hub hf download urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-G
 You choose one thing: **how many requests run at once**, `--max-num-seqs N`. The engine sizes everything else
 from it - context, cards, cache - and refuses at startup, naming why, anything that does not fit.
 
-- **`N = 1` (the default):** one request with the largest context that fits. On two cards it runs tensor parallel,
-  the fastest single session, at the model's full 262,144 tokens. On one card add `--kv-cache int8` to get the full
-  context there too.
+- **`N = 1` (the default):** one request with the largest context that fits. On two cards every layer is split over
+  both (`--parallel tp`) - the fastest single session, at the model's full 262,144 tokens. On one card add
+  `--kv-cache int8` to get the full context there too.
 - **`N = 2` to `4` on one card, up to `8` on two:** shaped for a coding agent with subagents. The first slot (one
-  per card on two cards) is guaranteed the largest context that fits - the main session; the other slots get a
-  shorter context, enough for subagent tasks. On two cards every card runs its own copy of the model.
+  per card on two cards) gets the largest context that fits - the main session; the other slots get a shorter
+  context, enough for subagent tasks. On two cards every card runs its own copy of the model (`--parallel replica`).
 
-MTP speculative decoding and the prefix cache are on by default. Recipes with their contexts and speeds:
+MTP and the prefix cache are on by default. Ready-made recipes with their context sizes:
 [docs/18-running-models.md](docs/18-running-models.md). Other models load too (Ornith 1.5, Qwen3.8-Flash-Next,
-Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); only Qwen3.8 is tuned.
-
-Two cards run in one of three modes (`--parallel`):
-
-| mode | for | Qwen3.8 |
-|---|---|---|
-| `tp` - every layer split over both cards (needs peer-to-peer) | one session at maximum speed | the default: 123 t/s, full context |
-| `replica` - a model copy per card | several sessions at once (`--max-num-seqs 2` to `8`) | up to 258 t/s total |
-| `pp` - the layers split between the cards | models that do not fit one card | not needed: the full context fits one card |
+Kolibri-1, K2-Horizon, Nemotron 3.5 Bolt); Qwen3.8 is the one everything is tuned for.
 
 ## Flags
 

@@ -33,6 +33,8 @@
 //           and builds EngineAdapter with --mtp K (spec 8 M5: C2 with MTP on). The turns
 //           still decode by step(), so the rows compared are the same; what changes is
 //           the engine: prefill fills the head's KV and the snapshots carry it.
+//       --chunk-cap 4096 anywhere (tests/chunk_cap_arg.h): the same sequences at 4096-row chunks
+//           (open-work 18), the hook every 4096 positions.
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -43,6 +45,7 @@
 #include <vector>
 
 #include "check.h"
+#include "chunk_cap_arg.h"
 #include "cli/serve_adapters.h"
 #include "forced_judge.h"
 #include "golden_common.h"
@@ -312,6 +315,8 @@ bool run_seq(Rig& rig, const Seq& want, const Ids& L, const Ids& C, uint32_t all
 }  // namespace
 
 int main(int argc, char** argv) {
+  // At 4096-row chunks the hook runs every 4096 positions, so f's 3500-id prompt has no block snapshot: cold.
+  const bool wide = b70test::take_chunk_cap_arg(argc, argv) > runtime::PrefillScratchDims::kCDefault;
   const std::string snap = argc > 1 ? argv[1] : "urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ";
   const std::string pdir = argc > 2 ? argv[2] : "tests/golden/prompts";
   runtime::PrefillBackend backend = runtime::prefill::default_prefill_backend();
@@ -343,7 +348,9 @@ int main(int argc, char** argv) {
                                  {"c mid-block", K::Restore, 4096},
                                  {"d block boundary", K::Restore, 4096},
                                  {"e side request", K::Restore, 5064},
-                                 {"f same prompt", K::Restore, g_split ? 3499u : 2048u},
+                                 g_split ? Seq{"f same prompt", K::Restore, 3499u}
+                                 : wide  ? Seq{"f same prompt", K::Cold, 0u}
+                                         : Seq{"f same prompt", K::Restore, 2048u},
                                  {"g control for b: its split, no cache", K::Cold, 0}};
   bool all = true;
   for (const Seq& s : seqs) all = run_seq(rig, s, L, C, allowed) && all;

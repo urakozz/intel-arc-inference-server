@@ -99,6 +99,7 @@ struct Verdict {
   uint32_t n_prompt = 0, exact = 0;
   uint32_t n_determined = 0, det_exact = 0;
   uint32_t near_tie = 0;   // determined rows accepted under argv[7]'s near-tie rule
+  uint32_t near_miss = 0;  // determined rows accepted under the l0-int8 MoE near-miss rule (operator 2026-11-12)
   uint32_t acc_det = 0, acc_tie = 0;   // failing rows on the --accept list (known)
   uint32_t n_tie = 0, tie_agree = 0, tie_member = 0;
   int first_bad = -1, first_diverge = -1;
@@ -177,13 +178,23 @@ int main(int argc, char** argv) {
   kHid = model.desc->hidden;
   kGdnElems = size_t(model.desc->gdn_v_heads) * Qwen35::kGdnHeadDim * Qwen35::kGdnHeadDim;
   const bool kMoe = model.desc->is_moe();
+  // Operator ruling 2026-11-12 (plan 2026-11-12, W4A8 on l0-int8): on a MoE model's l0-int8 gate, judged by the f32
+  // reference, a determined row the engine misses passes when the judge's margin of its token over the engine's is
+  // under 8 bf16 ulps AND either the bf16 twin (the golden) misses the row too (not an extra miss) or the engine's
+  // logits row is no further from f32 (cosine) than the twin's, less 1e-5 - 2026-10-31's near-miss rule, as the
+  // gate's rule rather than per-row --accept lists (both relaxations: operator, 2026-11-12). Every row that passes
+  // only by it is printed.
+  const bool near_miss_rule = kMoe && backend == runtime::PrefillBackend::L0Int8 && !judge_dir.empty();
+  if (near_miss_rule) std::printf("near-miss rule (l0-int8 on a MoE model): f32 margin < 8 bf16 ulps and (the bf16 "
+                                  "twin misses it too, or logits cosine vs f32 >= the twin's - 1e-5)\n");
+  const char* const scan_entry = runtime::prefill::gdn_scan_entry_name();
   runtime::Engine eng(ctx, std::move(model), kMaxLen);
   eng.set_prefill_backend(backend);
   std::printf("prefill backend: %s\n", runtime::prefill_backend_name(backend));
   // The scan selector's DISPATCH PROOF (parity-program design §11). A gate run
   // under a scan selector (gone since the zero-config cleanup) was not evidence unless it said which kernel it
   // launched: the 2026-09-21 "green" split record was executing `pf_gdn_scan`.
-  std::printf("gdn scan entry: %s\n", runtime::prefill::gdn_scan_entry_name());
+  std::printf("gdn scan entry: %s\n", scan_entry);
   // The decode list is 12 launches per layer + 6 at the boundary: 774 on Qwen3.8
   // (645 + lever L1's 129); 13 per MoE
   // layer, 526 on Ornith (spec 15c).
@@ -222,8 +233,7 @@ int main(int argc, char** argv) {
     // The other half of the dispatch proof: the entry a scan launch was really
     // built with, read back after the walk rather than before it.
     CHECK(runtime::prefill::gdn_scan_launched_entry() != nullptr);
-    CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()),
-             std::string(runtime::prefill::gdn_scan_entry_name()));
+    CHECK_EQ(std::string(runtime::prefill::gdn_scan_launched_entry()), std::string(scan_entry));
     std::printf("gdn scan entry LAUNCHED: %s\n",
                 runtime::prefill::gdn_scan_launched_entry());
 
@@ -334,7 +344,7 @@ int main(int argc, char** argv) {
       if (J && want != gam) ++bf16_vs_f32;
       if (J && gd.determined() && id != gam) ++bf16_det_bad;
       if (jok) ++v.exact;
-      bool accepted_near_tie = false;
+      bool accepted_near_tie = false, accepted_near_miss = false, twin_misses = false;
       if (jd.determined()) {
         ++v.n_determined;
         uint32_t second = 0;
@@ -344,6 +354,12 @@ int main(int argc, char** argv) {
                    bf16_near_tie(jrow, Qwen35::kVocabUsed, want, &second) && id == second) {
           ++v.near_tie;
           accepted_near_tie = true;
+        } else if (near_miss_rule && jr.ulp > 0 && (jrow[want] - jrow[id]) / jr.ulp < 8.0f &&
+                   ((twin_misses = gam != want) ||
+                    compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos >=
+                        compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos - 1e-5)) {
+          ++v.near_miss;
+          accepted_near_miss = true;
         } else if (accept.has(pname, p)) {
           ++v.acc_det;
         } else if (v.first_bad < 0) {
@@ -357,11 +373,15 @@ int main(int argc, char** argv) {
         else if (accept.has(pname, p)) ++v.acc_tie;
         else if (v.first_bad < 0) v.first_bad = int(p);
       }
-      const bool row_fails = jd.determined() ? !(jok || accepted_near_tie) : !jd.contains(id);
+      const bool row_fails = jd.determined() ? !(jok || accepted_near_tie || accepted_near_miss) : !jd.contains(id);
       if (!jok && v.first_diverge < 0) v.first_diverge = int(p);
 
       const char* mark =
           jok ? ""
+              : accepted_near_miss
+                    ? (twin_misses ? "  <== PASSES ONLY BY THE NEAR-MISS RULE (f32 margin < 8 bf16 ulps, twin misses it too)"
+                                   : "  <== PASSES ONLY BY THE NEAR-MISS RULE (f32 margin < 8 bf16 ulps, cosine >= the "
+                                     "bf16 twin's - 1e-5)")
               : accepted_near_tie
                     ? "  <== near-tie ACCEPTED (engine = golden runner-up, margin <= 1 bf16 ulp)"
                     : (jd.determined() ? "  <== MISMATCH (determined - GATE)"
@@ -375,6 +395,22 @@ int main(int argc, char** argv) {
       if (jr.near)
         std::printf("  f32 near-tie: gap %.4f <= 1 bf16 ulp %.4f, %zu ids%s", jr.gap, jr.ulp, jd.set.size(),
                     !jok && jd.contains(id) ? " - PASSES ONLY BY THE NEAR-TIE RULE" : "");
+      if (J) {   // plan 2026-11-12 Task 8's margin table: the judge's top-1 lead and the engine's lead of that token,
+                 // both in bf16 ulps of the judge's top logit (negative engine: another token is ahead)
+        float j2 = -INFINITY, e2 = -INFINITY;
+        for (uint32_t i = 0; i < Qwen35::kVocabUsed; ++i)
+          if (i != want) j2 = std::max(j2, jrow[i]), e2 = std::max(e2, dec[i]);
+        const float u = jr.ulp > 0 ? jr.ulp : 1.0f;
+        std::printf("\nMARGIN %s %u det %d f32 %.2f eng %.2f ok %d", pname.c_str(), p, jd.determined() ? 1 : 0,
+                    (jrow[want] - j2) / u, (dec[want] - e2) / u, jok ? 1 : 0);
+      }
+      if (J && !jok)   // a miss's margins: the judge's lead of its token over the engine's, the engine's the other way
+        std::printf("  margins: f32 %.4f (1 bf16 ulp %.4f), engine %.4f", jrow[want] - jrow[id], jr.ulp,
+                    dec[id] - dec[want]);
+      if (near_miss_rule && !jok && jd.determined())   // the rule's cosine half: the engine's and the bf16 twin's vs f32
+        std::printf("  cos vs f32: engine %.6f, bf16 twin %.6f",
+                    compare_f32(dec.data(), jrow, std::min(Vj, Vcmp), sa, sb).cos,
+                    compare_f32(grow, jrow, std::min(Vj, Vcmp), sa, sb).cos);
       if (accept.has(pname, p) && row_fails) std::printf("  %s, gap %.4f", golden::kAcceptNote, jr.gap);
       if (accept.has(pname, p) && !row_fails) std::printf("  accepted row now passes - remove it");
       std::printf("\n");
@@ -414,6 +450,8 @@ int main(int argc, char** argv) {
     if (v.near_tie)
       std::printf("  %s: %u determined row(s) accepted as bf16 near-ties (argv[7] allows %u)\n",
                   pname.c_str(), v.near_tie, near_tie_allowed);
+    if (v.near_miss)
+      std::printf("  %s: %u determined row(s) pass only by the near-miss rule\n", pname.c_str(), v.near_miss);
     if (J)
       std::printf("  bf16 golden (diagnostic, not the gate): its argmax differs from the f32 judge on %u of %u "
                   "decision rows; against it the engine misses %u determined row(s)\n",
@@ -443,7 +481,7 @@ int main(int argc, char** argv) {
     tot_tie += v.n_tie;
     tot_agree += v.tie_agree;
     tot_member += v.tie_member;
-    if (v.det_exact + v.near_tie + v.acc_det != v.n_determined) {
+    if (v.det_exact + v.near_tie + v.near_miss + v.acc_det != v.n_determined) {
       std::fprintf(stderr,
                    "GATE FAILED: %s got %u of %u DETERMINED rows exact (first bad row %d) - a row"
                    " whose golden argmax is unique is not a judgement call\n",

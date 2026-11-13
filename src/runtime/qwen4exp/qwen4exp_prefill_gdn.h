@@ -33,6 +33,7 @@ namespace runtime::qwen4exp {
 struct GdnChunkBuffers {
   const float* qkvz = nullptr;
   const float* ab = nullptr;
+  uint32_t ab_pitch = 128;   // a||b's row pitch: 128 (the GEMV's), or 256 (phase 3 Task 8: the dense GEMM's rows)
   float* state = nullptr;
   uint16_t* ring = nullptr;
   const void* small = nullptr;

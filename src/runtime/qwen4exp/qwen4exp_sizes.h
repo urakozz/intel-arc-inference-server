@@ -167,6 +167,8 @@ inline uint32_t pf_dense_rows(uint32_t pos, uint32_t C) {
 //   xb bf16 [C][10240], seed bf16 [3][10240], g / beta fp32 [C][48], A / A2 fp32 [C/64][48][64][64],
 //   w / u bf16 [C][48][128], o fp32 [C][48][128]   (PrefillScratch's gdn_* fields at this family's - Qwen3.8's - shape)
 inline constexpr size_t kGdnChunkLaunches = 10;
+// MoE-model prefill phase 2: conv + l2norm in one launch (pf_gdn_front) - 9.
+size_t gdn_chunk_q4_launches();
 inline constexpr uint32_t kGdnChunk = 64;   // the WY sub-chunk (PrefillScratchDims::kGdnChunk)
 struct GdnScratchSizes {
   size_t xb = 0, seed = 0, g = 0, beta = 0, A = 0, A2 = 0, w = 0, u = 0, o = 0;
@@ -175,6 +177,9 @@ struct GdnScratchSizes {
 GdnScratchSizes gdn_scratch_sizes(uint32_t C);
 // The grouped GEMMs' padded tile count of a C-row chunk (q4_pf_moe.cl's header has the bound): 1200 at C = 2048.
 uint32_t pf_tiles(const model::Qwen4ExpDesc& d, uint32_t C);
+// Plan 2026-11-12 Task 7: the multi-work-group sort's work-item bound (MI = kernels::pf_moe::kItemM rows an item) -
+// the fused GEMMs' grid; 856 at C = 2048.
+uint32_t pf_items(const model::Qwen4ExpDesc& d, uint32_t C);
 // The expert weight batches: blocks of [K][N] bf16 (513 a layer: 512 routed + the shared) in kPfBatchBytes regions -
 // gate||up 6,553,600 B a block, 81 a batch, 7 batches; down 3,276,800 B, 163, 4 (derived).
 size_t pf_block_gu_bytes(const model::Qwen4ExpDesc& d);
@@ -210,15 +215,18 @@ uint32_t pf_batches_dn(const model::Qwen4ExpDesc& d);
 //                                                gn rows: 2 x [kPfC][10240] fit)
 //   h          bf16 [tmax x 32][640]             the gate||up GEMM's SiLU output
 //   y          bf16 [kPfC][2560]                 the MoE block's output (the next combine folds it)
-//   w          bf16 kPfBatchBytes                the expert weight batch
+//   w          bf16 one gate||up block           Intel's bf16 shared expert's copy (plan 2026-11-12: the routed
+//                                                experts are read in place)
+//   cnt, items u32 [kPfC / 64][512], [items][4]  pf_moe_sort_mw's block counts and work items
 //   ple_ids    u64  [kPfC][16]                   the PLE row ids of the chunk's rows
 struct PrefillSizes {
   size_t ids = 0, H = 0, xn = 0, x = 0, down_f32 = 0, inj = 0, partials = 0, slab = 0, idx_f32 = 0, idx_q = 0, scores = 0,
          lists = 0, diag = 0, q16 = 0, o = 0, attn_out = 0, ab = 0, gdn = 0, logits = 0, routes = 0, hdr = 0, tiles = 0,
-         row_tok = 0, pair_row = 0, xg = 0, h = 0, y = 0, w = 0, ple_ids = 0;
+         row_tok = 0, pair_row = 0, xg = 0, h = 0, y = 0, w = 0, ple_ids = 0, cnt = 0, items = 0;
   size_t total() const {
     return ids + H + xn + x + down_f32 + inj + partials + slab + idx_f32 + idx_q + scores + lists + diag + q16 + o +
-           attn_out + ab + gdn + logits + routes + hdr + tiles + row_tok + pair_row + xg + h + y + w + ple_ids;
+           attn_out + ab + gdn + logits + routes + hdr + tiles + row_tok + pair_row + xg + h + y + w + ple_ids + cnt +
+           items;
   }
 };
 PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len);
@@ -236,12 +244,12 @@ size_t pf_link_bytes(const model::Qwen4ExpDesc& d, uint32_t dev);
 // excluded): they depend on the chunk's dense / sparse rows (pf_dense_rows):
 //   device 0     pf_embed_gather                                                                              1
 //   a gated residual  combine_norm, the HC down slab + pf_gemm, up_mix                                         4
-//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b, gdn_chunk_q4's 10, out_proj 3 slabs x 2 + the MoE's 27      84
+//   a GDN layer  2 HC + qkv||z 16 slabs x 2, a||b (slab + GEMM), gdn_chunk_q4's 10, out_proj 3 slabs x 2 + the MoE's 27      84
 //   a QSA layer  2 HC + q||gate||k||v 13 x 2, the indexer 1 x 2, pf_attn_prep_q16, q4_qsa_prep, q4_qsa_ring,
 //                pf_attn_gate, o_proj 3 x 2 + the MoE's 27                                                    73
 //                + q4_qsa_score / _select when the chunk has sparse rows (not injected)                       + 2
 //                + pf_flash_attn when it has dense rows, + q4_pf_sparse_attn when it has sparse ones        + 1 / + 1
-//   the MoE      router GEMV, q4_route, sort, gather, gate||up 7 batches x 2, down 4 x 2, combine            27
+//   the MoE      router (slab + GEMM), q4_route, sort, gather, gate||up 7 batches x 2, down 4 x 2, combine            27
 //   the PLE layer + combine_norm _Y_NN (not when it is device 1's first layer: H landed materialised), the gather,
 //                key||value 13 slabs x 2, q4_pf_ple_gate / _conv / _ring                                    31 (30)
 //   two cards    device 0 ends with combine_norm _Y_NN (the materialised H crosses)                          + 1

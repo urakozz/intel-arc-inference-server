@@ -1,7 +1,8 @@
 # Ornith 1.5 MoE prefill rework - about 2x prefill (design targets Ornith and Flash-Next)
 
-**Status (2026-11-12): Tasks 1-3 DONE (probe GO; the sort and the fused int4 GEMM bound, bitwise; Ornith 4k l0
-3,377 -> 6,552 t/s), Task 5 in progress.** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
+**Status (2026-11-12): DONE (Tasks 1-8). Ornith 4k: `l0` 8,080 t/s, `l0-int8` (W4A8) 8,518; record in
+`docs/probes/probe-moe-prefill-2026-11-12.md`, "Task 8". Left: the W4A8 serving check (open-work item 16) and the
+old Ornith grouped-GEMM binaries (Task 8 Step 3, below).** Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0, main
 238f0582). Earlier evidence this plan builds on: `docs/probes/probe-fused-dequant-2026-09-22.md` (fused dequant on a
 DENSE shape: bitwise, but rejected at 3.3x the cost of the pass it removed), `docs/probes/probe-w4a8-2026-09-23.md`
 (W4A8 rejected: 2.79 % error), open-work 3b's `pf_gemm_q4.cl` (int4 read in registers, bitwise the slab walk). Box
@@ -197,7 +198,12 @@ Only what Task 1 left open: MI per shape, persistent vs plain grid, prefetch dep
 prefetch of the int4 stream 2-4 k-steps ahead, shared across the work-group). Each variant is a define of
 `pf_moe_q4gemm.cl`, compared in situ, not a new kernel.
 
-- [ ] **Step 1 (box, card 0):** interleaved pairs of the Task 3 binary against each variant on the 4k and 16k l0
+- [x] **Step 1 (box, card 0):** **2026-11-12**: the probe's rounds 2-5 (docs/probes/probe-moe-prefill-2026-11-12.md)
+  measured the variants in situ on real routes (grid order, SLM block IO, 64-row sub-groups, 128 / 256-row SLM
+  items, the vISA conversion - not bitwise, dropped); the chosen arm is Task 3's. One change landed: a 64-row
+  sub-group over a 32-row item runs half its DPAS (bitwise: the skipped rows are never stored). The 40-50 % of
+  bf16 peak goal is not reached (MoE GEMMs 167 ms at 4k with cap 4096 = ~55 TFLOP/s useful): the conversion's
+  ALU does not overlap the XMX pipe (the diagnostic arms). Interleaved pairs of the Task 3 binary against each variant on the 4k and 16k l0
   bench (`b70-decode --bench --prefill-length N --tg 32`, `B70_PREFILL_PROFILE` off for the t/s, on for the phase
   row). Record in the probe doc.
 - [ ] **Step 2 (Mac, then box):** the winner becomes the built variant (the others deleted); `pf_moe_test` and the
@@ -217,8 +223,18 @@ weights inside the GEMM costs more than the pass.
 int8` and the requant scratch go), `buffer_sizes.cc` (the weight batch region goes for Ornith entirely), tests' launch
 counts, `tools/box_validate/stages.sh` r13 descriptions.
 
-- [ ] **Step 1 (Mac):** implement behind D1; `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `prefill_gate_ornith_l0-int8_test` (+ `_c16`), `prefill_split_ornith_l0-int8_test`,
+- [x] **Step 1 (Mac):** implement behind D1; `mac_check` green. Commit. **Done 2026-11-12**: `pf_moe_w4a8.cl`
+  (pf_quant_g64 per token and 64-k group, pf_moe_gather_i8g, the s4 DPAS GEMM over the work items, SiLU epilogue)
+  and the bf16 experts (`pf_moe_q4gemm`) for l0-int8, both as test switches (`B70_PF_MOE=w4a8` / `=i8bf16`);
+  pf_moe_test 4c: quantiser and gather exact, h exact against the host's integer sums.
+- [x] **Step 2 (box, card 0):** **Done 2026-11-12 - neither candidate passes the f32 judge's token gate; l0-int8 keeps
+  the rotated int8 gate||up (its down is fused since Task 3).** R3 (determined rows exact, one chunk / chunks of 16):
+  today 90/92 (one accepted) / 92/92 PASS; W4A8 89/92 / 91/92 FAIL; bf16 experts 90/92 (row 18 not accepted) /
+  90/92 FAIL. R2 differing sets (f32 judge, bf16 golden 1140): today 1314, W4A8 1264, bf16 experts 1326.
+  pp4096 / pp16384 (card 0, 3 rounds): today's l0-int8 3,913; W4A8 7,593; bf16 experts 6,804 / 5,879 (l0 6,538 /
+  5,676). The operator's further evidence (2026-11-12: the misses' margins, A4, the f32-judged serving rows, all
+  three forms on card 1) decides whether W4A8 becomes the default. `prefill_gate_ornith_l0-int8_test` (+ `_c16`),
+  `prefill_split_ornith_l0-int8_test`,
   `ornith_prefill_l0-int8_test`, interleaved 4k / 16k l0-int8 bench.
   - **Gates (judged):** by the plain f32 reference, the engine's differing MoE sets and token misses no more than
     today's l0-int8 (printed beside the bf16 golden's); 4k l0-int8 t/s >= today's l0-int8 x 1.5 (derived: ~1.6x).
@@ -237,8 +253,11 @@ change `PrefillScratchDims` for every model and is not in this plan.
 `qwen4exp_sizes.h` untouched for K2; Flash-Next's `kPfC` follows in Task 7; `memory_plan_test`; `cli_reject_*` tests
 that expect the 2048 refusal for Ornith.
 
-- [ ] **Step 1 (Mac):** the cap, the scratch, the tests. Commit.
-- [ ] **Step 2 (box, card 0):** `--prefill-chunk 4096` vs 2048 interleaved at 4k and 16k (l0, l0-int8);
+- [x] **Step 1 (Mac):** the cap, the scratch, the tests. Commit.
+- [x] **Step 2 (box, card 0):** **2026-11-12** (3 interleaved rounds): l0 4k 6,570 -> 6,944 (+5.7 %), 16k 5,665 ->
+  5,904 (+4.2 %); l0-int8 4k 5,263 -> 6,571 (+25 %: the requant pass runs once per 4096 rows), 16k 4,642 -> 5,620
+  (+21 %); prefill scratch 1.040 -> 1.495 GB; `--max-len auto` still 262144 and the auto cap picks 4096 (D2). Profile
+  4k l0 at 4096: moe_gemm 167 ms, sort 1.9 ms. `--prefill-chunk 4096` vs 2048 interleaved at 4k and 16k (l0, l0-int8);
   `prefill_gate_ornith_*`, `prefill_split_ornith_*` at cap 4096.
   - **Gates:** judged as Task 5 (the chunk boundaries move, so GDN state and attention rounding move); scratch +
     `--max-len auto` printed (the freed weight batch should pay for the larger rows).
@@ -258,10 +277,15 @@ work item. The address line stays the one hook; when 21v2a lands, a cold expert 
 (4x fewer bytes than today's bf16 pass writes) into a VRAM staging slot before the GEMM. This task only keeps the hook
 in one place; 21v2a's tasks own the copy.
 
-- [ ] **Step 1 (Mac):** the binding behind `B70_PF_MOE`, the kernel test's fused arm (fused == today's grouped,
+- [x] **Step 1 (Mac):** the binding behind `B70_PF_MOE`, the kernel test's fused arm (fused == today's grouped,
   bitwise, both shared forms, at the real shapes on synthetic weights; the sort at C = 2048 / 4096 on the 512-expert
   adversaries). Commit.
-- [ ] **Step 2 (box, card 0):** `r33.k1`, `r33.prefill` (both synthetic forms), `r33.golden`, `r33.golden_real`
+- [x] **Step 2 (box, card 0):** **2026-11-12**: the mw sort + the fused GEMMs bound (Intel's bf16 shared expert keeps a
+  one-block dequant + GEMM); the weight batch shrinks from 512 MiB to one block. Whole prefills of 4096 ids, every
+  layer's routes and the logits BITWISE today's walk on the synthetic ours / intel checkpoints and Intel's at
+  --layers 18; qwen4exp_pf_kernels_test, qwen4exp_prefill_synth_{ours,intel}_test PASS; pp4096 at --layers 18:
+  2,772 -> 4,459 t/s (1.61x, gate 1.3x). The cap 4096 for Flash-Next is not done (kPfC is a compile-time 2048 across
+  its scratch). `r33.k1`, `r33.prefill` (both synthetic forms), `r33.golden`, `r33.golden_real`
   (`--layers 18`, Intel's checkpoint), `r33.speed`'s pp4096 at `--layers 18` interleaved against main.
   - **Gates:** at cap 2048 every r33 output bitwise main's (the extended G0 compare with the r33 tests); pp4096 at
     `--layers 18` >= main's x 1.3 (derived from the same sinks; Flash-Next's sort and pass were never profiled - the
@@ -269,16 +293,22 @@ in one place; 21v2a's tasks own the copy.
 
 ### Task 8: the record, the clean-up and the final gates (box idle, then Mac)
 
-- [ ] **Step 1 (box, card 0, idle):** interleaved pairs, main's build (control) against the branch head (candidate),
+- [x] **Step 1 (box, card 0, idle):** **2026-11-12** (card 0, card 1 busy, not idle): 4k `l0` 7,578 -> 8,080,
+  `l0-int8` 5,460 -> 8,518; 16k 6,509 -> 6,800, 4,869 -> 7,059 - 2.40x / 2.09x the start, gate passed. Interleaved pairs, main's build (control) against the branch head (candidate),
   median of 3, `b70-decode --bench --tg 32`: Ornith pp4096 and pp16384 on `l0` and `l0-int8`.
   - **Gate (final):** against today's 3,362 / 3,259 (l0) and 3,937 / 3,676 (l0-int8) - 4k l0 >= 1.7x (6,000 t/s),
     16k l0 >= 1.5x; l0-int8 no slower than l0 at either length. The derived target (~2x at 4k) is reported beside the
     measured one; a miss below the gate keeps the item open with the measured phase table.
-- [ ] **Step 2 (box):** **Ornith decode unchanged:** no decode binary moved (`g0.sha`), `ornith_decode_test` PASS
+- [x] **Step 2 (box):** **2026-11-12:** `ornith_decode_test` PASS, tg 32 within the busy box's noise; G0 not run
+  (merge without box check, operator 2026-11-07): no K2 / Kolibri / Bolt file or kernel they build changed; the
+  Ornith gates and Flash-Next synthetic tests PASS. **Ornith decode unchanged:** no decode binary moved (`g0.sha`), `ornith_decode_test` PASS
   (replay bitwise, R2), plain decode at depth 4096 within 1 % of 142.8 t/s (interleaved pairs). **Other models:** G0
   (row 0) PASS against `--baseline main` - Qwen3.8 bitwise and every K2 / Kolibri / Bolt binary identical (their
   host code is untouched); the Ornith prefill gates (r13.gates, r13.split, r13.prefill) and Flash-Next's r33 rows PASS.
-- [ ] **Step 3 (Mac):** delete the losing path and `B70_PF_MOE`: Ornith's `pf_moe_sort`, `pf_moe_dequant_*` and its
+- [x] **Step 3 (Mac):** **2026-11-12:** the old walk, the rotated int8 gate||up and `B70_PF_MOE` deleted; docs
+  updated. NOT deleted: `pf_moe_gemm_K2048_N1024_SILU` / `_i8_` / `_K512_N2048` and `pf_moe.cl`'s sort / dequant
+  entries - only `pf_moe_test` still builds them (the fused GEMM's bitwise reference, and the removed int8 form's
+  sections); Flash-Next's `q4_pf_dequant_*` stays for Intel's bf16 shared expert. Delete the losing path and `B70_PF_MOE`: Ornith's `pf_moe_sort`, `pf_moe_dequant_*` and its
   three `pf_moe_gemm_K2048_N1024*` / `_K512_N2048` binaries (Ornith-only shapes); Flash-Next's `q4_pf_sort` and
   `q4_pf_dequant_*` if Task 7 passed. `pf_moe_gemm.cl` and `pf_moe.cl`'s gather / combine stay (K2 / Kolibri bind the
   GEMM source; the combine is unchanged). Then: BENCHMARKS "Ornith 1.5 MoE (spec 15)" prefill rows, the profile doc's

@@ -271,6 +271,13 @@ target_include_directories(pf_gemv_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_
 target_link_libraries(pf_gemv_test PRIVATE b70_l0)
 b70_target_kernel_dir(pf_gemv_test)
 add_dependencies(pf_gemv_test kernel_pf_ab_proj kernel_gemv_bf16_M1_K5120_N128_C16_S16)
+if(B70_ORNITH)   # phase 3 Task 2: the ab_gemm case (Ornith's a||b by tiled_gemm, pf_gdn_gate at pitch 256)
+  target_compile_definitions(pf_gemv_test PRIVATE B70_PF_AB_GEMM=1)
+  target_link_libraries(pf_gemv_test PRIVATE b70_prefill_host)
+  add_dependencies(pf_gemv_test kernel_pf_route_slab_K2048_N128_P256 kernel_pf_gemm_T0
+                   kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
+                   kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_conv_GK16V32_AB256)
+endif()
 add_test(NAME pf_gemv_test COMMAND pf_gemv_test)
 
 add_executable(pf_attn_test prefill/pf_attn_test.cc)
@@ -992,6 +999,11 @@ set(B70_PREFILL_KERNELS
   kernel_pf_dequant_slab_K5120_N16384_L1 kernel_pf_dequant_slab_K6144_N5120_L0
   kernel_pf_dequant_slab_K5120_N34816_L0 kernel_pf_dequant_slab_K17408_N5120_L0
   kernel_pf_dequant_slab_K5120_N14336_L0
+  # Open-work 18: the walk of a chunk wider than 2048 rows.
+  kernel_pf_gemm_T0_R kernel_pf_gemm_T0_SILU_R
+  kernel_pf_dequant_slab_K5120_N16384_L1_BS kernel_pf_dequant_slab_K6144_N5120_L0_BS
+  kernel_pf_dequant_slab_K5120_N34816_L0_BS kernel_pf_dequant_slab_K17408_N5120_L0_BS
+  kernel_pf_dequant_slab_K5120_N14336_L0_BS
   # Spec 5's h8 path, which `--prefill-backend l0-int8` runs (pf_colmax_rot is in the
   # pf_requant_rot binaries).
   kernel_pf_quant_had_K5120 kernel_pf_quant_had_K6144 kernel_pf_quant_had_K17408
@@ -1066,7 +1078,7 @@ add_test(NAME snapshot_test COMMAND snapshot_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(snapshot_test PROPERTIES LABELS checkpoint
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 900)
 # Spec 5 T3 (plan 5b Task 2): l0-int8 on the engine - a smoke cosine against l0 and the
-# l0 + 256 launch delta. The int8 kernels are in
+# l0 + 128 launch delta (open-work 17: two quantisers a layer, the MLP's). The int8 kernels are in
 # B70_PREFILL_KERNELS above.
 add_test(NAME prefill_int8_test COMMAND prefill_int8_test ${B70_TEST_SNAPSHOT})
 set_tests_properties(prefill_int8_test PROPERTIES LABELS "checkpoint;prefill"
@@ -1434,8 +1446,11 @@ if(B70_TOKENIZER_ENABLED)
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 0 1)
   add_test(NAME prefix_gpu_split_int8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
     ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0-int8 1 1)
+  # Open-work 18: the same sequences at 4096-row chunks (Qwen3.8's default where the plan has room).
+  add_test(NAME prefix_gpu_l0_cap4096_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
+    ${CMAKE_SOURCE_DIR}/tests/golden/prompts l0 1 --chunk-cap 4096)
   set_tests_properties(prefix_gpu_l0_test prefix_gpu_int8_test prefix_gpu_split_l0_test
-    prefix_gpu_split_int8_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
+    prefix_gpu_split_int8_test prefix_gpu_l0_cap4096_test PROPERTIES LABELS checkpoint TIMEOUT 1800)
   # Spec 8 M5 (plan 8c): C2 with the MTP head loaded and the adapter at --spec mtp.
   if(B70_MTP)
     add_test(NAME prefix_gpu_mtp_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
@@ -1489,8 +1504,10 @@ if(B70_MTP)
     "Qwen3.8's f32 judges of the forced contexts, the engine's int8 head")
   # The judge by prefill form (operator ruling 2026-10-23): the tests that prefill with l0-int8 (every mtp_gpu_test
   # registration) are judged by references whose prompt pass applies the same int8 rounding - f32_refs.sh
-  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form).
-  set(B70_QWEN_FORCED_JUDGE_PFI8 "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8-forced" CACHE PATH
+  # forced-qwen-pfi8 (qwen_forced.py --pfi8-re), both head forms in one dir (the keys carry the form). Open-work 17:
+  # int8 on the MLP's linears only (the mixer linears bf16), so a new dir and variable name - the old ones hold the
+  # all-int8 form's references, and a build tree's cache would keep the old path.
+  set(B70_QWEN_FORCED_JUDGE_PFI8MLP "${CMAKE_SOURCE_DIR}/oracle-out-qwen-f32-pfi8mlp-forced" CACHE PATH
     "Qwen3.8's f32 judges of the forced contexts with the l0-int8 prompt pass (the mtp_gpu_test registrations)")
   # The operator's bf16-unstable rule (2026-11-04, spec_judge.h): standard transformers bf16 references, top-k only
   # (tools/oracle/qwen_bf16_top.py: <key>.bf16top.safetensors, both head forms in one dir), read as B70_FORCED_BF16.
@@ -1533,7 +1550,7 @@ if(B70_MTP)
     add_dependencies(mtp_gpu_test ${_b70_mtp_kernels} ${_b70_mtp_pf_kernels})
     add_test(NAME mtp_gpu_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     set_tests_properties(mtp_gpu_test PROPERTIES LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77
-      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+      ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     # Spec 8 §11's M3 gate: drafts over a 128k draft vocabulary, greedy output identical to
     # the plain loop (= --draft-vocab off) on the golden and A4 prompts at every K, and the
@@ -1546,7 +1563,7 @@ if(B70_MTP)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES
       LABELS "checkpoint;mtp" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 5400)
     set_tests_properties(mtp_gpu_dv128k_test mtp_gpu_dv128k_bf16_test PROPERTIES ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   # Spec 8 §12 (MTP at every context length; box queue row 6): mtp_verify_test (M2, RF3 at
   # max_len - 4, RF4 deep - spec 7 C1 with MTP at ~70k on the 131072 run) and mtp_gpu_test's
@@ -1579,7 +1596,7 @@ exec "$@"
       # their own contexts' bf16 top-k files come from f32_refs.sh bf16top-qwen over r69.forced_dumps' longctx dumps).
       set_tests_properties(mtp_gpu_${_tag}_test PROPERTIES LABELS "checkpoint;mtp;longctx"
         SKIP_RETURN_CODE 77
-        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
+        ENVIRONMENT "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP};B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 7200)
     endif()
   endforeach()
@@ -1877,7 +1894,7 @@ if(B70_KV8)
     add_test(NAME mtp_gpu_kv8_test COMMAND mtp_gpu_test ${B70_TEST_SNAPSHOT} l0-int8)
     b70_kv8_twin(mtp_gpu)
     set_property(TEST mtp_gpu_kv8_test APPEND PROPERTY ENVIRONMENT
-      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
+      "B70_FORCED_JUDGE=${B70_QWEN_FORCED_JUDGE_PFI8MLP}" "B70_FORCED_BF16=${B70_QWEN_FORCED_BF16TOP}")
   endif()
   if(TEST prefix_gpu_int8_test)
     add_test(NAME prefix_gpu_int8_kv8_test COMMAND prefix_gpu_test ${B70_TEST_SNAPSHOT}
@@ -1916,20 +1933,45 @@ if(B70_ORNITH)
     kernel_pf_dequant_slab_K2048_N12288_L1 kernel_pf_dequant_slab_K4096_N2048_L0
     kernel_pf_dequant_slab_K2048_N9216_L0 kernel_pf_quant_had_K2048 kernel_pf_quant_had_K4096
     kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_wy_GK16V32 kernel_pf_gdn_scan_GK16V32
-    kernel_pf_gated_head_GK16V32 kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
-    kernel_pf_flash_attn_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_gated_head_GK16V32 kernel_pf_gdn_intra_GK16V32 kernel_pf_gdn_front_GK16V32 kernel_pf_route_ab_D2048 kernel_pf_route_router_K2048_N272 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20
+    kernel_pf_attn_prep_q16_Q16KV2 kernel_pf_attn_Q16KV2
+    kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2 kernel_pf_moe_router_K2048_N272 kernel_pf_moe_E256_T8_D2048_I512
+    kernel_pf_moe_combine_norm_E256_T8_D2048_I512_G20
+    kernel_pf_route_slab_K2048_N272_P512 kernel_pf_route_slab_K2048_N128_P256 kernel_moe_M1_E256_T8_D2048_I512_R512
+    kernel_pf_gdn_conv_GK16V32_AB256 kernel_pf_gemm_small_A2_B2_S4 kernel_pf_gemm_small_A4_B2_S4
     kernel_pf_moe_sort_mw_E256_T8 kernel_pf_moe_q4gemm_K2048_N1024_SILU kernel_pf_moe_q4gemm_K512_N2048
+    kernel_pf_moe_w4a8_K2048_N1024
     kernel_pf_moe_gemm_K2048_N1024_SILU kernel_pf_moe_gemm_i8_K2048_N1024_SILU
     kernel_pf_moe_gemm_K512_N2048
     kernel_pf_requant_rot_L0 kernel_pf_requant_rot_L1 kernel_pf_gemm_T0 kernel_pf_gemm_T0_SILU
     kernel_pf_gemm_i8 kernel_pf_gemm_i8_SILU
     ${B70_ORNITH_DECODE_KERNELS})
 
+  add_executable(gdn_front_test prefill/gdn_front_test.cc)
+  target_include_directories(gdn_front_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(gdn_front_test PRIVATE b70_l0)
+  b70_target_kernel_dir(gdn_front_test)
+  add_dependencies(gdn_front_test kernel_pf_gdn_conv_GK16V32 kernel_pf_gdn_front_GK16V32)
+  add_test(NAME gdn_front_test COMMAND gdn_front_test)
+  set_tests_properties(gdn_front_test PROPERTIES LABELS "ornith;prefill")
+
+  add_executable(pf_norm_fused_test prefill/pf_norm_fused_test.cc)
+  target_include_directories(pf_norm_fused_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests
+                             ${CMAKE_SOURCE_DIR}/tests/kernels)
+  target_link_libraries(pf_norm_fused_test PRIVATE b70_l0)
+  b70_target_kernel_dir(pf_norm_fused_test)
+  add_dependencies(pf_norm_fused_test kernel_pf_res_fold_K2048_SP0_G20 kernel_pf_res_fold_K2048_SP1_G20
+                   kernel_pf_norm_finish_K2048_G20_W20 kernel_pf_res_norm_K2048_SP0_G20 kernel_pf_res_norm_K2048_SP1_G20)
+  add_test(NAME pf_norm_fused_test COMMAND pf_norm_fused_test)
+  set_tests_properties(pf_norm_fused_test PROPERTIES LABELS "ornith;prefill")
+
   add_executable(pf_moe_test kernels/pf_moe_test.cc)
   target_include_directories(pf_moe_test PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-  target_link_libraries(pf_moe_test PRIVATE b70_l0)
+  target_link_libraries(pf_moe_test PRIVATE b70_prefill_host b70_l0)
   b70_target_kernel_dir(pf_moe_test)
   add_dependencies(pf_moe_test ${B70_ORNITH_PREFILL_KERNELS})
+  add_dependencies(attn_chunk_test kernel_pf_flash_attn_Q16KV2 kernel_pf_flash_attn_r32_Q16KV2)
   add_test(NAME pf_moe_test COMMAND pf_moe_test)
   set_tests_properties(pf_moe_test PROPERTIES LABELS "ornith;prefill" TIMEOUT 1800)
 
@@ -1948,9 +1990,11 @@ if(B70_ORNITH)
     set(_acc_one "")
     set(_acc_c16 "prose:18,cjk:15")
     if(b STREQUAL "l0-int8")
-      set(_judge ${B70_ORNITH_F32_PFI8_DIR})   # the quantisation-aware f32 judge (int8_sim.py, 2026-10-23)
+      # Plan 2026-11-12 (operator): l0-int8's experts are W4A8, judged by the PLAIN f32 reference (the pfi8 judge
+      # simulates the rotated int8 form it replaced) under the gate's near-miss rule (prefill_gate_test.cc), no
+      # per-row accept lists.
       set(_near 1)   # the l0-int8 gate's standing near-tie allowance (spec 5), as Qwen3.8's
-      set(_acc_one "prose:22,cjk:15")
+      set(_acc_one "")
       set(_acc_c16 "")
     endif()
     add_test(NAME prefill_gate_ornith_${b}_test COMMAND prefill_gate_test
@@ -2893,10 +2937,17 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
     EXPECT "--pipeline-split belongs to --parallel pp")
   b70_serve_reject(cli_reject_serve_pp_handoff_value ${B70_NO_MODEL} --parallel pp --pipeline-handoff p2p
     EXPECT "--pipeline-handoff expects copy or peer")
-  # Plan 13b: --parallel replica is Qwen3.8's - other models by name (their config.json), an unreadable checkpoint,
-  # the pp override flags; all before the device.
+  # Plan 13b: --parallel replica is Qwen3.8's and Ornith's - other models by name (their config.json), an unreadable
+  # checkpoint, the pp override flags, more than one Ornith request a card (tests/model/ornith: config.json only); all
+  # before the device.
   b70_serve_reject(cli_reject_serve_replica_k2 ${CMAKE_CURRENT_SOURCE_DIR}/model/k2 --parallel replica
-    EXPECT "--parallel replica serves Qwen3.8 only")
+    EXPECT "--parallel replica serves Qwen3.8 and Ornith only")
+  b70_serve_reject(cli_reject_serve_replica_ornith_slots ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel replica
+    --max-num-seqs 4 EXPECT "runs one request a card")
+  b70_serve_reject(cli_reject_serve_replica_ornith_auto ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --max-num-seqs 3
+    EXPECT "--max-num-seqs 3 gives a card several requests")
+  b70_serve_reject(cli_reject_serve_replica_ornith_one ${CMAKE_CURRENT_SOURCE_DIR}/model/ornith --parallel 1
+    --max-num-seqs 2 EXPECT "--max-num-seqs 2 on two cards")
   b70_serve_reject(cli_reject_serve_replica_kolibri ${CMAKE_CURRENT_SOURCE_DIR}/model/kolibri1 --parallel replica
     EXPECT "has no replica engine")
   b70_serve_reject(cli_reject_serve_replica_no_model ${B70_NO_MODEL} --parallel replica
@@ -2906,7 +2957,8 @@ if(TARGET b70-serve AND COMMAND b70_serve_reject)
   set_tests_properties(cli_reject_serve_pp_value
     cli_reject_serve_pp_split_alone cli_reject_serve_pp_handoff_value
     cli_reject_serve_replica_k2 cli_reject_serve_replica_kolibri cli_reject_serve_replica_no_model
-    cli_reject_serve_replica_split
+    cli_reject_serve_replica_split cli_reject_serve_replica_ornith_slots cli_reject_serve_replica_ornith_auto
+    cli_reject_serve_replica_ornith_one
     PROPERTIES LABELS pp)
 endif()
 # ==== Spec 16d ============================================================= (end) ====
@@ -3468,7 +3520,11 @@ if(B70_Q4EXP)
     kernel_pf_embed_gather_D2560 kernel_q4_hc_combine_norm_M2048_E kernel_q4_hc_combine_norm_M2048_S1
     kernel_q4_hc_combine_norm_M2048_Y kernel_q4_hc_combine_norm_M2048_X kernel_q4_hc_combine_norm_M2048_Y_NN
     kernel_q4_pf_bf16_slab_K10240_N336 kernel_pf_gemm_T0 kernel_q4_hc_up_mix_M2048_I_D512 kernel_pf_ab_proj_D2560
-    kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
+    kernel_pf_gdn_conv kernel_pf_gdn_wy kernel_pf_gdn_scan kernel_pf_gdn_front
+    kernel_pf_route_slab_K2560_N528_P768 kernel_pf_route_slab_K2560_N128_P256
+    kernel_q4_route_M1_E512_T10_N528_L256_P768 kernel_pf_gdn_conv_AB256
+    kernel_pf_moe_sort_mw_E512_T10 kernel_pf_moe_q4gemm_K2560_N1280_SILU kernel_pf_moe_q4gemm_K640_N2560
+    kernel_pf_gated_head_SIG kernel_q4_pf_bf16_slab_K2560_N640
     kernel_pf_attn_prep_q16_Q24KV2 kernel_q4_qsa_M2048_T512_W1024_PF kernel_pf_flash_attn_Q24KV2
     kernel_q4_pf_sparse_attn_Q24KV2 kernel_q4_pf_sparse_attn_Q24KV2_EAGER kernel_pf_attn_Q24KV2
     kernel_pf_moe_router_K2560_N528 kernel_q4_route_M1_E512_T10_N528_L256 kernel_q4_pf_moe_E512_T10_D2560_I640_L256

@@ -71,7 +71,7 @@ is not finished is listed in [open-work.md](open-work.md).
 
 - **Qwen3.8-27B** is the model in focus, with the full set of measured rows (prefill, decode, depth,
   prefix cache, MTP, DFlash, tensor parallel).
-- **Ornith 1.5** is supported and its box tests pass; it has no speed row yet.
+- **Ornith 1.5** is supported and its box tests pass; its speed rows (decode, prefill, MTP cost table) are in BENCHMARKS.
 - **Qwen3.8-Flash-Next** is next. It runs only truncated (`--layers N`) because the whole model does not
   fit two cards; open-work.md has the plan for the full size.
 - **K2-Horizon and Kolibri-1** are supported by the code and parked (out of focus); no speed rows.
@@ -85,17 +85,18 @@ is not finished is listed in [open-work.md](open-work.md).
 |---|---|---|---|---|---|
 | checkpoint | published (ours, int4 g64) | published (ours, spec 15 §13) | published (ours) | published (ours, int4 g64) | Intel's interim W4A16 (181 GB); our own is not made |
 | `b70-serve` | yes | yes | yes (spec 18d) | yes (spec 20e), **two cards** by default | `--layers N` only (spec 21e; the whole model is refused, naming spec 22) |
-| `--parallel tp`, `replica`, `--max-num-seqs` | yes | refused | refused | refused | refused |
+| `--parallel tp` | yes | refused | refused | refused | refused |
+| `replica`, `--max-num-seqs` | yes | `replica` at `--max-num-seqs 2` (one request a card); more refused | refused | refused | refused |
 | `--parallel pp` (two cards, spec 16d) | yes | yes | **refused** (one card) | its default (its own engine, spec 20e) | yes, `--layers N` (spec 21e) |
 | `b70-decode` | yes | yes | yes | decode and prefill (spec 20d), **two cards** (the default) | decode (spec 21c) and prefill (spec 21d), **`--layers N` required** (the whole model needs spec 22) |
-| speed rows in BENCHMARKS | yes | no | no | no | no |
+| speed rows in BENCHMARKS | yes | yes | no | no | no |
 | MTP head (`--spec mtp`; `--spec auto` = adaptive MTP) | yes | yes (MoE head) | none (`auto` = off) | none (`auto` = off) | `b70-serve --spec mtp`, a fixed K = `--spec-max` 1..3 (`auto` = off until spec 22's numbers); `b70-decode` refuses it |
 | `--spec lookup` | yes | yes (needs the head) | no | no | yes (needs the head; spec 21e) |
 | `--spec dflash` (spec 19) | yes, one card or `--parallel pp` (copy hand-off), bf16 KV | no | no drafter exists (refused) | refused | refused |
 | `--kv-cache int8` | yes | not built | yes (spec 18e) | refused (bf16 only) | refused (bf16 only) |
 | prefill backends | `l0` (default), `l0-int8` | `l0` (default); `l0-int8` opt-in, accuracy gates diagnostic (MoE routing) | `l0` only | `l0` only (spec 20d) | `l0` only (spec 21d; `l0-int8` refused) |
 | KV per position (bf16) | 64 KiB | 20 KiB | 192 KiB | 20 KiB (+ 335.5 MB of sliding rings) | 24.75 KiB (12 QSA layers: K + V 2 KiB + 64 B of indexer keys each) |
-| `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP | ~46k served; `b70-decode` ~50k decode-only | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
+| `--max-len auto`, one card, int8 head (derived) | 171008 with MTP (the default); ~201k with `--spec off` | 262144, with or without MTP (measured by the operator, bf16 KV, 27.3 GB planned of 32.5) | ~46k served; `b70-decode` ~50k decode-only | 262144 on two cards (split 25) | at `--layers 19` (Intel's forms, one card) 78336 decode-only; at `--layers 18` 70144 with the prefill planned |
 | with `--kv-cache int8` (derived) | 262144, with or without MTP | - | ~90k served; `b70-decode` ~98k decode-only | - | - |
 
 The `--max-len auto` lengths are the planner's at the default 1.5 GB reserve on the 32.53 GB card.
@@ -251,9 +252,10 @@ hidden 2048, 256 experts with top-8 plus a shared expert, ~3 B parameters active
 Decode (15c), prefill (15d) and serving with its own chat template (Qwen3.5's), Qwen XML
 tool calls and the MoE MTP head (15e) are built.
 
-**Status: built; no speed row yet.** Expected (derived): ~1.86 GB
-read per token, so the bandwidth ceiling is far above Qwen3.8's (~270 t/s), and launches,
-not bytes, will set the decode rate; 526 launches per token. Prefill estimated at 3-6k t/s.
+**Status: built and measured on one card** (README, BENCHMARKS): decode 142.8 t/s, 234.9 t/s with MTP at the
+full 262,144 context; prefill 8,080 t/s (bf16 prompt pass) and 8,518 t/s (`l0-int8`) at 4k. ~1.86 GB
+read per token (derived), so the bandwidth ceiling is far above Qwen3.8's (~270 t/s), and launches,
+not bytes, set the decode rate; 526 launches per token.
 Weights 19.45 GB with the int8 head (derived), +0.50 GB for the MTP head. For comparison,
 the checkpoint's model card reports vLLM XPU on a B70 at 99.8 t/s decode (tg256, c1) and
 7090 t/s prefill (pp4096, c1) - not measured here.
@@ -262,9 +264,10 @@ the checkpoint's model card reports vLLM XPU on a B70 at 99.8 t/s decode (tg256,
 O=urakozz/Ornith-1.5-35B-A3B-W4A16-AutoRound-GPTQ
 uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
-# every command below: no speed row yet
-# agentic session: the full trained context, 262144, fits with or without MTP (derived)
+# agentic session: the full trained context, 262144, fits in bf16 with or without MTP (measured: 27.3 GB planned of 32.5)
 ./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --prefix-split-last
+# two sessions at once on two cards (replica: a model copy per card, one request each, full context each)
+./build/src/cli/b70-serve $O --host 0.0.0.0 --port 8000 --max-num-seqs 2 --prefix-split-last
 
 ./build/src/cli/b70-decode $O --bench --depth 4096 --tg 256
 ./build/src/cli/b70-decode $O --bench --prefill-length 4096 --tg 256
@@ -275,6 +278,12 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
 
 **Limits.**
 
+- Two cards serve two requests at once as `replica` (`--max-num-seqs 2`, or `--parallel replica`): each card
+  runs its own engine with the full context, MTP and the prefix cache, and a prompt cached by one card is a
+  prefix cache hit on the other. Several requests on one card (sequence slots) are built for Qwen3.8 only, so
+  `--max-num-seqs` above 2, or 2 on one card, is refused. `--parallel tp` is Qwen3.8's. Each request is
+  bitwise what it is alone on its card. Rough speed (2026-11-12, golden prompts, 128-id replies, not a record):
+  two at a time 238 t/s in total with MTP (225 without) against 153 (127) one at a time on one card.
 - `--kv-cache int8` is not built at Ornith's attention shape (capture names the missing
   binary); it is not needed for context, since 262144 fits in bf16.
 - Prefill runs on `l0` (the default) and `l0-int8` (opt-in). On this MoE model `l0-int8` loses routing
@@ -282,8 +291,9 @@ uvx --from huggingface_hub hf download $O                 # 22.99 GB
   bf16 reference's 1140), and no 8-bit activation scheme studied won it back, so its accuracy gates are
   diagnostic - printed, not gated (operator ruling 2026-10-31); use it for speed only. Its kernels'
   own gate (`prefill_gate_ornith_l0-int8`, judged by the quantisation-aware f32 reference) still binds.
-- The adaptive MTP (`--spec auto`) decides with Qwen3.8's cost table until the card measures Ornith's (the
-  startup line says so); no default K is chosen for Ornith. The head's bf16 experts are
+- The adaptive MTP (`--spec auto`) decides with Qwen3.8's cost table, K up to 3. Ornith's own measured table (a
+  verify of 2 / 3 / 4 rows costs 1.15 / 1.34 / 1.52 plain steps, a draft 0.19 each) decoded 6-10 % slower in the
+  speed A/B, so it is recorded in BENCHMARKS and not used (the startup line says so). The head's bf16 experts are
   quantised to int4 at load (round to nearest), which can change acceptance, never output.
 - The checkpoint's `tokenizer.json` defines Qwen3.8's 248077 ids, the count the greedy
   argmax masks from, so `b70-serve` prints no vocabulary note. It tokenises the committed

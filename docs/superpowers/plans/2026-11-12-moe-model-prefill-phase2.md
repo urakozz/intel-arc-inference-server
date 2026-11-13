@@ -1,12 +1,8 @@
 # MoE-model prefill, phase 2 - the GDN prompt pass, the small kernels, the dense linears (Ornith, then Flash-Next)
 
-**Status (2026-11-12): PLANNED.** Phase 1 is `2026-11-12-ornith-moe-prefill.md` (cf5ed009, being implemented): the
-MoE path's sort, fused int4 grouped GEMM, l0-int8 experts as W4A8 and the 4096 chunk. This plan is everything phase 1
-leaves out. Evidence: `docs/probes/ornith-prefill-profile-2026-11-12.md` (card 0); the scout's code read of vLLM's
-XPU kernels (vllm-xpu-kernels @1f31a8e: `csrc/xpu/gdn_attn/xe_2/chunk_gated_delta_rule_kernels_xe2.hpp`,
-`chunk_causal_conv1d_tiled_xe2.hpp`, `csrc/layernorm.cpp`, `csrc/moe/topk.cpp`; no timings in that repo - every vLLM
-ms is derived); our GDN history in `pf_gdn_scan.cl`'s header (the single-bf16 DPAS scan cost a token on 2026-09-05;
-the hi / lo split-bf16 scan passed and is the default since 2026-09-23). Box row **84** (new, Task 1 adds it).
+**Status (2026-11-12): CLOSED** after Task 9 (operator: bf16 is the main target). Done: Tasks 1, 2, 3 (`l0`), 5, 6, 8
+(router / a||b); not taken: Task 4, Task 7, the intra kernel on `l0-int8` and Flash-Next. Targets missed; the phase table
+and the gap list are in the record (docs/probes/probe-prefill-phase2-2026-11-12.md, section 9) and open-work item 15.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. One
 > implementing agent for the whole plan; the gates below are the review (no per-task reviewer). Steps use checkbox
@@ -78,7 +74,9 @@ the record (Task 9).
   G0**, unless the operator switches it (D1) with its own gates. **K2, Kolibri and Bolt are untouched** (host and
   binaries; G0).
 - **A/B switch:** `B70_PF_PHASE2=old` (env, tests and probes only) puts Ornith / Flash-Next back on today's kernels. No
-  user-facing flag. Task 9 deletes the losers and the variable.
+  user-facing flag. Task 9 deletes the losers and the variable. **Done early (operator 2026-11-12):** the variable,
+  `B70_PF_GDN_INTRA` and the old paths they selected are gone; A/B runs compare a control build against the branch's
+  (`tools/probe/pf_phase2_ab.sh`, `pf_phase2_bitwise.sh`).
 - **Numerics:** bitwise tasks are checked by the G0 mechanism extended for the run (`G0_BITWISE_RE` plus
   `prefill_gate_ornith_{l0,l0-int8}_test`, `_c16`, `ornith_prefill_{l0,l0-int8}_test`, `--baseline main`). Judged tasks
   use the f32 judge with the 1-bf16-ulp near-tie rule (memory: moe-gates-f32-judge): the engine's differing MoE sets and
@@ -120,10 +118,10 @@ the record (Task 9).
   distance 3 (the w4a16 policy the scout read), bitwise checked against the control where the arithmetic allows.
 - Modify `tools/box_validate/stages.sh`: row 84, stages `r84.trace`, `r84.dump`, `r84.probe` (opt-in, timed).
 
-- [ ] **Step 1 (Mac):** the profile level, the dump mode, the probes, row 84; `tools/box_validate.sh --dry-run --only
+- [x] **Step 1 (Mac):** the profile level, the dump mode, the probes, row 84; `tools/box_validate.sh --dry-run --only
   r84` prints the commands; host tests green. Commit `probes: the per-launch prefill trace, the GDN intra-chunk DPAS
   arms on real inputs, the small kernels (phase 2 Task 1)`.
-- [ ] **Step 2 (box, card 0):** `r84.trace` (4k, l0 and l0-int8), `r84.dump`, `r84.probe`. Record
+- [x] **Step 2 (box, card 0):** `r84.trace` (4k, l0 and l0-int8), `r84.dump`, `r84.probe`. Record
   `docs/probes/probe-prefill-phase2-2026-11-xx.md`: the per-launch table (what the 114 ms is), each arm's error and ms.
   - **Gate (pre-registered, written into the record before the run):**
     - D-arms: every stage's max relative error and the state / o cosine against fp64 within 2x the control's own (the
@@ -150,11 +148,13 @@ The qkv||z GEMM writing bf16 instead of fp32 (rounded in its epilogue by the sam
 (the conv and `pf_gated_head`'s z) rounds the fp32 value once with rne and nothing else reads it - checked in Step 1
 by reading both kernels; then it is bitwise too and halves the front's read.
 
-- [ ] **Step 1 (Mac):** the kernel, the binding, the test; the qkv||z bf16 check written down in the commit message
+- [x] **Step 1 (Mac):** the kernel, the binding, the test; the qkv||z bf16 check written down in the commit message
   (and done, or not, by its result). `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `gdn_conv_test`, `gdn_chunk_test`, the extended G0 compare (Ornith l0 and l0-int8
+- [x] **Step 2 (box, card 0):** `gdn_conv_test`, `gdn_chunk_test`, the extended G0 compare (Ornith l0 and l0-int8
   bitwise main's), `B70_PREFILL_PROFILE=1` 4k l0.
   - **Gates:** bitwise; the GDN front rows <= 12 ms at 4k l0 (today ~26); Qwen3.8's G0 untouched.
+  - **Result (2026-11-12):** bitwise (kernel test and end to end); front 24.8 -> 20.5 ms (the 12 ms bar missed: the
+    fp32 qkv||z read is the floor; the bf16 qkv||z was not taken - pf_gemm.cl records it as a wash). Landed.
 
 ### Task 3: the GDN intra-chunk kernel (Mac, then box) - JUDGED
 
@@ -175,6 +175,12 @@ test.cc`'s band printed for the new arm.
   - **Gates (judged):** the f32 judge as in Global constraints, on every Ornith prefill gate; `prefill_split_ornith`'s
     near-miss rule; replay bitwise; GDN intra rows <= 28 ms at 4k l0 (today 80.6).
   - FAIL on numerics with Q1-Q4 as bf16: D2.
+  - **Result (2026-11-12): STOPPED.** bf16 Q1-Q4 (23.6 ms for 80.6): l0 gates PASS, prefill_gate_ornith_l0-int8 one
+    determined row missed. D2 (Q1-Q4 fp32, u / w hi / lo, pf_gdn_scan_hl; 37.4 + 31.1 ms): per-layer far closer to
+    fp64, yet l0 cjk and three l0-int8 rows missed. Operator ruling (2026-11-12): the bf16-Q form is the
+    default on l0, where every gate passes; l0-int8 keeps the four launches (not supported yet: it flips a determined
+    row). D2 (pf_gdn_intra_hl / pf_gdn_scan_hl) removed. Retried on l0-int8 under phase 1's near-miss rule
+    (2026-11-12, W4A8 experts): the _c16 gate misses cjk step 15 outside the rule; l0-int8 stays on the old path.
 
 ### Task 4: the scan and the gated head (box, then Mac) - per arm
 
@@ -190,6 +196,12 @@ commit and its own verdict:
 - [ ] **Step 2 (Mac, then box):** the winners built, the rest deleted; the gates of the candidate's kind (bitwise: the
   extended G0 compare; judged: Task 3's).
   - **Gate:** a candidate is taken only if it saves >= 3 ms at 4k l0 and passes its numerics gate.
+  - **Result (2026-11-12): nothing taken.** The gated head with one sub-group a (position, head) (bitwise end to end:
+    prefill_gate_ornith l0 / l0-int8 and ornith_prefill_l0 print main's logs) saved 1.5 ms (13.1 -> 11.6, 3 pairs):
+    under the 3 ms bar, removed. The scan with 8 column chunks was not built: at 30 KB of SLM and 256 lanes the
+    128 work-groups already fill every Xe-core's 64 thread slots, so 256 would run in two waves of half the work.
+    The bf16-z head needs a bf16 qkv||z (recorded as a wash in pf_gemm.cl); the fwd_o form needs a trace showing the
+    scan's traffic as the cost, which the profile does not.
 
 ### Task 5: residual + RMSNorm in one launch, l0-int8's quantiser folded in (Mac, then box) - BITWISE
 
@@ -207,9 +219,12 @@ launches them apart); CMake at hidden 2048 / 2560; `tests/prefill/pf_prep_test.c
 Before the code: Task 1's trace names what fills l0-int8's 114 ms. If it is a launch timed in the wrong bucket, the
 fix is its `profile_wait` and the real cost goes to its own row; the fold then targets whatever that launch is.
 
-- [ ] **Step 1 (Mac):** the kernel, the binding, the test. `mac_check` green. Commit.
-- [ ] **Step 2 (box, card 0):** `pf_prep_test`, `pf_int8_test`, the extended G0 compare.
+- [x] **Step 1 (Mac):** the kernel, the binding, the test. `mac_check` green. Commit.
+- [x] **Step 2 (box, card 0):** `pf_prep_test`, `pf_int8_test`, the extended G0 compare.
   - **Gates:** bitwise; the norm row (with the folded quantisers) <= 12 ms at 4k l0 and <= 15 ms at 4k l0-int8.
+  - **Result (2026-11-12):** bitwise; norm 41.5 -> 15.8 ms at 4k l0 (12 missed by 3.8; l0-int8's 114 was the setup
+    pass mis-bucketed, its real row is the same 41 -> 16). The int8 quantiser fold (I8_OUT) was not built: 5.5 ms at
+    stake. Landed.
 
 ### Task 6: the route in one pass (Mac, then box) - BITWISE first; JUDGED only by D3
 
@@ -229,6 +244,9 @@ them), `tests/prefill/pf_gemv_test.cc`.
 - [ ] **Step 2 (box, card 0):** `pf_moe_test`, `pf_gemv_test`, `ornith_prefill_*` (prefill-vs-decode routes), the
   extended G0 compare.
   - **Gates:** bitwise; route + a||b <= 12 ms at 4k (today ~47).
+  - **Result (2026-11-12):** bitwise tiling (pf_route.cl, 16 rows x 2 column tiles a work-group) bound for the router
+    and a||b: 0.69x / 0.65x, end to end bitwise; ~47 -> ~33 ms, the 12 ms bar missed. D3 (DPAS router) built and
+    tried: no faster as built and it missed the f32 judge on l0-int8 - not taken, removed.
 
 ### Task 7: the dense linears (Mac, then box) - only if Task 1's dense arm passed its gate - JUDGED
 
@@ -237,6 +255,9 @@ The winning dense arm made production for Ornith's (and Flash-Next's) linear sha
 
 - [ ] **Step 1 (Mac):** kernel, bindings, `pf_gemm_test` / `linear_i8_test` arms. Commit.
 - [ ] **Step 2 (box, card 0):** Task 3's judged gates; dense row >= 10 % below Task 6's at 4k on the backend it targets.
+- **Result (2026-11-12): not run.** Task 1's dense arm was not built (the operator asked for no probes beyond a gate's
+  needs). The slab walk's GEMMs run at 75 % of the bf16 peak on l0 and 57 % of the int8 peak on l0-int8 (the profile),
+  so a >= 10 % arm is unlikely on l0. The int8 side's headroom (57 %) is the one place a probe could still pay.
 
 ### Task 8: Flash-Next on the phase 2 kernels (Mac, then box)
 
@@ -253,6 +274,14 @@ and stays), its route Task 6's at 512 experts top-10.
   `r33.speed`'s pp4096 at `--layers 18` interleaved against main.
   - **Gates:** bitwise tasks bitwise main's Flash-Next output; Task 3's GDN judged by r33.golden's gate and
     r33.golden_real; pp4096 at `--layers 18` faster than main's (the phase table printed and recorded).
+  - **Result (2026-11-12):** Flash-Next binds the GDN front (bitwise, on main since Task 2) and the router (K 2560,
+    N 528) and a||b on pf_route.cl's tiling (bitwise). k1 / prefill / golden synthetic and qwen4exp_prefill_intel_test
+    (routes against the recorded engine trace) 19 / 19 PASS, the synthetic logs identical to main's. pp4096 at
+    --layers 18 (card 1, 2 interleaved pairs): 4,663 -> 4,698 t/s (+0.7 %, within noise). The intra-chunk kernel is
+    not bound for Flash-Next: it passed the synthetic and golden gates (golden_real 77 vs main's 74 determined rows
+    over three prompts, a test main fails too), but qwen4exp_prefill_intel_test matches routes bitwise against the
+    engine trace recorded in oracle-out-q4exp-f32-aligned-L18. That reference has to be re-made on the CPU first.
+    The one-sub-group gated head (Task 4) saved under 3 ms on Ornith, so it was not bound here either.
 
 ### Task 9: the record, the clean-up, the final gate (box idle, then Mac)
 
@@ -270,6 +299,14 @@ and stays), its route Task 6's at 512 experts top-10.
   `pf_gdn_*` binaries stay while Qwen3.8 binds them); BENCHMARKS "Ornith 1.5 MoE (spec 15)" and Flash-Next rows, the
   profile doc's "after phase 2" table, docs/12-kernels.md's GDN section, open-work -> Closed recently. Commit; offer
   the ff-merge to main.
+
+- [ ] **Step 4 (box, idle, both cards; operator 2026-11-12):** once plan 1 and this plan are both on main, a full
+  validation run on main, unattended: `tools/box_validate.sh` with the opt-in stages of open-work's "28 speculative
+  serving" row added (r2.auto_rows, r12.a4, r6.greedy_long, r8.auto_rows, r16.mtp_rows, r27.cli_mtp, r55.serve,
+  r55.decode, r56.pp_serve, r70.d2, r70.speed - the exact names and the `--with` syntax from `--list`). Report PASS /
+  FAIL / SKIP per row. The f32 judge decides each first difference; one with no reference yet SKIPs with its context
+  dumped, and `tools/box_validate/f32_refs.sh <data> forced-qwen` makes the reference on the CPU afterwards. This
+  closes open-work item 15 and the speculative-serving row together.
 
 **Which tasks need the box:**
 

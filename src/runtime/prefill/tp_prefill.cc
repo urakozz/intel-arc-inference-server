@@ -264,13 +264,13 @@ void TpEngine::prepare_prefill() {
       k.int8 = std::make_unique<prefill::Int8State>(k.ctx, prefill_int8_max_k(d), pf_cap_);
       for (const auto& [key, w] : cd(r).model.linears) {
         if (key.second == model::LinearId::LmHead || key.second == model::LinearId::AB) continue;
+        if (l0_int8_bf16_linear(d, key.second)) continue;   // open-work 17: the mixer linears are the l0 walk's
         if (w.shape.N % kernels::kPfSlabWidth != 0)
           throw std::runtime_error("runtime::TpEngine::prepare_prefill: int8 N is not whole 1024-column slabs");
         k.int8->scales(k.cx, k.kc, w);
       }
-    } else {
-      k.s.slab_buffer();   // the l0 linears' slab: outside the first timed chunk
     }
+    k.s.slab_buffer();   // the l0 linears' slab (l0-int8's mixer linears too): outside the first timed chunk
     if (mtp_) k.make_mtp(pf_cap_);   // spec 17d
     pf_int8_bytes_[r] = k.int8 ? k.int8->bytes() : 0;
     pf_bytes_[r] = k.device_bytes() - pf_int8_bytes_[r];

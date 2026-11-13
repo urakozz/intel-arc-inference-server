@@ -173,7 +173,9 @@ bits a weight with its f16 g64 scales); 512 of them are 1,336,934,400 B a layer.
 - **Hit rate h (estimated before the curve):** routing is flat - basalt measured the hit share at about f^(1/6)
   (25 % resident -> ~79 % of reads, 50 % -> ~89 %), so f ≈ 0.80 gives h ≈ 0.96 static; saber's online policy reached
   93.7 % resident hits on held-out traffic where a static placement got 79.7 %. Plan 21v2a Task 4 measures it on our
-  traces.
+  traces. **Measured 2026-11-12** (static placement, held-out half of the 2026-11-09 traces, Intel's checkpoint,
+  teacher-forced; [probe record](../../probes/probe-flash-next-tier-2026-11-12.md)): h = 0.839 / 0.945 / 0.976 / 0.994 at f = 0.50 / 0.70 / 0.80 / 0.90 (code 0.954 at
+  f = 0.80, 61 rows). To be re-recorded on our export.
 - **KV:** 25,344 B a position (12 QSA layers + indexer keys): 0.83 GB at 32k, 6.6 GB at 262,144 - each GB of KV is a GB
   of experts (spec 22 decision 5, still true).
 
@@ -218,7 +220,9 @@ What we cannot change: PCIe 3.0 (12 GB/s a link, measured host-to-device on devi
 ## 5. The second card: layer split first, then tensor parallel with the expert split
 
 The cost model is spec 22 §2's with the VRAM part at Qwen3.8's 77.6 % of roofline (457.8 GB/s), P = 12 GB/s per PCIe
-3.0 x16 link, D and R from §3 (ours), h the share of routed bytes found in VRAM:
+3.0 x16 link, D and R from §3 (ours), h the share of routed bytes found in VRAM (measured 2026-11-12: P = 11.2 GB/s a
+2.6 MB expert read in place by a kernel, 12.1 by the copy engine, CPU jobs beside it; with h = 0.976 and P = 11.2 the
+formulas give (a) 73.6 and (b) 116.9 t/s):
 
 - **(a) layer split + tier (`pp`, built; first by §0.2).** Each card caches its own layers' experts; misses stream from
   pinned host memory over that card's link; the cards decode one after the other, so one link works at a time.
@@ -236,7 +240,9 @@ The cost model is spec 22 §2's with the VRAM part at Qwen3.8's 77.6 % of roofli
   are read over P2P, or card 1 computes the experts it holds). basalt measured this beating a layer split on NVIDIA
   with a small dense part; with our int4 dense part (3.76 GB) it is closer than it was with Intel's 8 GB, but every
   token still sends most routed bytes or activations across the bus, and (b) uses both cards' bandwidth on every
-  layer. Not built unless the probe's P2P read rate (plan 21v2a Task 5) is far above the host link's.
+  layer. Not built unless the probe's P2P read rate (plan 21v2a Task 5) is far above the host link's. **Ruled out
+  2026-11-12:** a card reads the other card's VRAM at 1.8 GB/s (a push by the owning card 9.4-9.9), against 11.2-12.1
+  GB/s from pinned host RAM, and both cards read the host at once with no contention (21-25 GB/s total).
 
 | h | (a) `pp` + tier t/s | (b) `tp` + tier t/s |
 |---:|---:|---:|

@@ -115,6 +115,13 @@ endforeach()
 # is what makes "every other linear is untouched" a build fact.
 add_ocloc_kernel(pf_gemm_T0_SILU SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1
                  OPTIONS -cl-intel-256-GRF-per-thread)
+# Open-work 18: the slab GEMM of a chunk wider than 2048 rows with the work-groups numbered
+# N-fastest (RASTER=1: the same tiles and DPAS chain, so bit-identical;
+# docs/probes/probe-qwen-pf-gemm-2026-11-13.md). Additive: the binaries above keep their command lines.
+add_ocloc_kernel(pf_gemm_T0_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 RASTER=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
+add_ocloc_kernel(pf_gemm_T0_SILU_R SOURCE ${PF_GEMM_CL} DEFINES TRANSB=0 SILU_EPI=1 RASTER=1
+                 OPTIONS -cl-intel-256-GRF-per-thread)
 
 # Open-work 3a: pf_gemm for a short chunk (pf_gemm_small.cl), bit-identical to the two above:
 # NA 8-row blocks x NB 16-column atoms a sub-group, SN sub-groups a work-group - the two tiles
@@ -248,6 +255,10 @@ foreach(row IN LISTS PF_SLAB_ROWS)
   list(GET f 2 L)
   add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL}
                    DEFINES K=${K} N=${N} LAYOUT=${L})
+  # Open-work 18: the same values stored as 2D block messages (BLOCK_STORE=1), for the chunks
+  # wider than 2048 rows that run pf_gemm_T0_R. Additive: the binary above keeps its command line.
+  add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L}_BS SOURCE ${PF_SLAB_CL}
+                   DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
 endforeach()
 
 # Spec 5 (plan 5a): the int8 prefill linears, one source, per-family defines.
@@ -377,12 +388,49 @@ if(B70_ORNITH)
                    DEFINES ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_gated_head_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gated_head.cl
                    DEFINES ${PF_ORNITH_GDN})
+  # Phase 2 Task 5: the residual fold + RMSNorm in one launch, bitwise the pair above.
+  foreach(SP 0 1)
+    add_ocloc_kernel(pf_res_norm_K2048_SP${SP}_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_norm_fused.cl
+                     DEFINES K=2048 S_PREV=${SP} FOLD_G=20)
+  endforeach()
+  # Phase 2 Task 6: the a||b GEMV over a chunk at 16 rows x 2 column tiles a work-group, bitwise pf_ab_proj_D2048.
+  add_ocloc_kernel(pf_route_ab_D2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl DEFINES K=2048 N=128 MT=16 TC=2)
+  add_ocloc_kernel(pf_route_router_K2048_N272 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=272 MT=16 TC=2)
+  # Phase 3 Task 2 (l0): the router and a||b by pf_gemm_T0 - their weights re-laid as zero-padded [K][P] slabs, and
+  # the two consumers at the GEMM's row pitch P (decode's moe_M1 binary and pf_gdn_conv_GK16V32 keep theirs).
+  add_ocloc_kernel(pf_route_slab_K2048_N272_P512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=272 ROUTE_SLAB=512)
+  add_ocloc_kernel(pf_route_slab_K2048_N128_P256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_route.cl
+                   DEFINES K=2048 N=128 ROUTE_SLAB=256)
+  add_ocloc_kernel(moe_M1_E256_T8_D2048_I512_R512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/../moe.cl
+                   DEFINES ${MOE_DEFINES} M=1 EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 ROUTER_N=512)
+  add_ocloc_kernel(pf_gdn_conv_GK16V32_AB256 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
+                   DEFINES NEGA_OFF=32768 DTBIAS_OFF=32800 ${PF_ORNITH_GDN} AB_STRIDE=256)
+  # Phase 2 Task 2: the GDN front's conv + SiLU and q / k l2norm in one launch, bitwise.
+  add_ocloc_kernel(pf_gdn_front_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_front.cl
+                   DEFINES ${PF_ORNITH_GDN})
+  # Phase 2 Task 3: the GDN intra-chunk stages in one launch (A, T, W / U, A2), judged.
+  add_ocloc_kernel(pf_gdn_intra_GK16V32 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_intra.cl
+                   DEFINES ${PF_ORNITH_GDN})
   add_ocloc_kernel(pf_attn_prep_q16_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn_prep.cl
                    DEFINES ${CTRL_DEFINES} QNORM_OFF=0 KNORM_OFF=256 Q_BF16=1 ${PF_ORNITH_FA})
   add_ocloc_kernel(pf_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_attn.cl
                    DEFINES ${PF_ORNITH_FA})
   add_ocloc_kernel(pf_flash_attn_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
                    DEFINES KT=64 RPW=8 HPW=8 QREG=0 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # MoE prefill phase 3 Task 7 (docs/probes/probe-prefill-phase3-2026-11-13.md, arm pfao_KT64_R32_H8_Q1): 32 query rows
+  # a work-group (4 sub-groups a head share each K / V tile), Q held in registers across key tiles. A sub-group's
+  # arithmetic and key order are the line above's, so the output is bitwise; attn_chunk binds it. Ornith only: at
+  # Qwen3.8's HPW 6 the same form was slower (plan Task 7 record).
+  add_ocloc_kernel(pf_flash_attn_r32_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 ${PF_ORNITH_FA}
+                   OPTIONS -cl-intel-256-GRF-per-thread)
+  # The same with pf_attn_gate fused into the epilogue (GATE_EPI: its arithmetic statement for statement, bitwise), the
+  # prefill walk's form for a bf16 cache; the line above stays for attn_chunk's callers that gate apart (the tests).
+  add_ocloc_kernel(pf_flash_attn_r32g_Q16KV2 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_flash_attn.cl
+                   DEFINES KT=64 RPW=32 HPW=8 QREG=1 EXP2=1 GATE_EPI=1 ${PF_ORNITH_FA}
                    OPTIONS -cl-intel-256-GRF-per-thread)
   # The MoE block. TM (the tile rows) and KC (PrefillScratchDims::kCDefault, the sort's SLM
   # staging) are mirrored by kernels::pf_moe::kTileM and runtime::PrefillScratchDims::kCDefault
@@ -391,6 +439,9 @@ if(B70_ORNITH)
                    DEFINES K=2048 N=272 COLS_PER_WG=16 KSPLIT=16)
   add_ocloc_kernel(pf_moe_E256_T8_D2048_I512 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
                    DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048)
+  # Phase 3 Task 5: the combine + the next layer's leading norm (pf_res_norm at S_PREV 0) in one launch, bitwise.
+  add_ocloc_kernel(pf_moe_combine_norm_E256_T8_D2048_I512_G20 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe.cl
+                   DEFINES EXPERTS=256 TOP_K=8 HIDDEN=2048 INTER=512 TM=32 KC=2048 FOLD_G=20)
   set(PF_MOE_GEMM_CL ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_gemm.cl)
   add_ocloc_kernel(pf_moe_gemm_K2048_N1024_SILU SOURCE ${PF_MOE_GEMM_CL}
                    DEFINES K=2048 N=1024 TM=32 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
@@ -407,6 +458,9 @@ if(B70_ORNITH)
                    DEFINES K=2048 N=1024 EXPERTS=256 SILU_EPI=1 OPTIONS -cl-intel-256-GRF-per-thread)
   add_ocloc_kernel(pf_moe_q4gemm_K512_N2048 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_q4gemm.cl
                    DEFINES K=512 N=2048 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
+  # Plan 2026-11-12 Task 5: l0-int8's W4A8 gate||up (per-token-and-group int8 rows x the s4 blocks).
+  add_ocloc_kernel(pf_moe_w4a8_K2048_N1024 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_moe_w4a8.cl
+                   DEFINES K=2048 N=1024 EXPERTS=256 OPTIONS -cl-intel-256-GRF-per-thread)
 endif()
 
 # ==== Spec 15e: Ornith's MTP head KV fill during prefill (runtime/prefill/step.cc) == (begin) ==
@@ -452,7 +506,11 @@ if(B70_TP)
     list(GET f 1 N)
     list(GET f 2 L)
     add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L} SOURCE ${PF_SLAB_CL} DEFINES K=${K} N=${N} LAYOUT=${L})
-    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K${K}_N${N}_L${L})
+    # Open-work 18: the block-store form a sub-chunk wider than 2048 rows walks with (linear_l0).
+    add_ocloc_kernel(pf_dequant_slab_K${K}_N${N}_L${L}_BS SOURCE ${PF_SLAB_CL}
+                     DEFINES K=${K} N=${N} LAYOUT=${L} BLOCK_STORE=1)
+    list(APPEND B70_TP_PREFILL_KERNELS kernel_pf_dequant_slab_K${K}_N${N}_L${L}
+         kernel_pf_dequant_slab_K${K}_N${N}_L${L}_BS)
   endforeach()
   add_ocloc_kernel(pf_gdn_conv_GK8V24 SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/pf_gdn_conv.cl
                    DEFINES NEGA_OFF=20480 DTBIAS_OFF=20504 ${PF_TP_GDN})

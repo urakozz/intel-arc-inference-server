@@ -4,7 +4,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
+#include <string>
+#include <utility>
 
 namespace runtime::prefill {
 namespace {
@@ -18,12 +21,15 @@ const char* const kName[kN] = {
     "gdn_conv",   "gdn_l2norm",  "gdn_gate",    "gdn_A",       "gdn_solve", "gdn_wu",
     "gdn_A2",     "gdn_scan",    "gdn_head",    "silu",        "attn_prep", "attn_QK^T",
     "attn_softmax", "attn_PV",   "attn_gate",   "attn_flash", "head",
-    "moe_route",  "moe_sort",    "moe_gather",  "moe_weights", "moe_gemm",  "moe_combine"};
+    "moe_route",  "moe_sort",    "moe_gather",  "moe_weights", "moe_gemm",  "moe_combine",
+    "setup"};
 
 struct Acc {
   double ms[kN] = {};
   size_t waits[kN] = {};
   Context::LaunchMetrics launch[kN] = {};
+  // B70_PREFILL_PROFILE=2: (phase, entry) -> (launches, device ms).
+  std::map<std::pair<uint32_t, std::string>, std::pair<size_t, double>> trace;
 };
 Acc g_acc;
 // Plan 13b: two engines (--parallel replica) may prefill at once; the accumulators are guarded
@@ -35,7 +41,7 @@ std::mutex g_acc_mu;
 bool profile_enabled() {
   static const bool on = [] {
     const char* v = std::getenv("B70_PREFILL_PROFILE");
-    return v != nullptr && std::strcmp(v, "1") == 0;
+    return v != nullptr && (std::strcmp(v, "1") == 0 || std::strcmp(v, "2") == 0);
   }();
   return on;
 }
@@ -56,6 +62,11 @@ void timed_wait(Context& cx, Phase p) {
   g_acc.launch[i].gpu_ms += metrics.gpu_ms;
   g_acc.launch[i].host_submit_ms += metrics.host_submit_ms;
   g_acc.launch[i].launches += metrics.launches;
+  for (const auto& [name, gms] : metrics.each) {
+    auto& t = g_acc.trace[{i, name}];
+    ++t.first;
+    t.second += gms;
+  }
 }
 
 void profile_wait(Context& cx, Phase p) {
@@ -94,6 +105,12 @@ void profile_report(const char* label, double wall_ms) {
   if (wall_ms > 0.0)
     std::fprintf(stderr, "  instrumented prefill call wall: %.1f ms (includes setup and host work)\n",
                  wall_ms);
+  if (!g_acc.trace.empty()) {
+    std::fprintf(stderr, "  per-launch trace (B70_PREFILL_PROFILE=2): phase, entry, launches, L0_gpu_ms\n");
+    for (const auto& [key, t] : g_acc.trace)
+      std::fprintf(stderr, "    %-13s %-36s %8zu %10.2f\n", kName[key.first], key.second.c_str(), t.first,
+                   t.second);
+  }
   std::fprintf(stderr,
                "  wait_ms is residual host synchronization time, not phase execution time.\n"
                "  L0_gpu_ms is kernel timestamp duration.\n"

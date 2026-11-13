@@ -6,6 +6,7 @@
 #include <cstring>
 #include <stdexcept>
 
+#include "kernels/prefill/pf_kernels.h"
 #include "loader/qwen4exp_layout.h"
 #include "runtime/control.h"
 
@@ -151,6 +152,8 @@ constexpr uint32_t kPfHdrWords = (4 + 512 + 1 + 15) / 16 * 16;   // kernels::qwe
 constexpr uint32_t kPfIdxLd = 768, kPfHcDownLd = 512;            // kernels::qwen4exp::kPfIdxLd / kPfHcDownLd
 }  // namespace
 
+size_t gdn_chunk_q4_launches() { return kGdnChunkLaunches - 1; }   // phase 2: conv + l2norm in one launch
+
 GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   // Qwen3.8's GDN shape (the family's): 16 k / 48 v heads x 128, 10240 conv channels.
   constexpr uint32_t kVHeads = 48, kHd = 128, kConvDim = 10240;
@@ -160,8 +163,8 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
   s.seed = size_t(3) * kConvDim * 2;
   s.g = size_t(C) * kVHeads * 4;
   s.beta = size_t(C) * kVHeads * 4;
-  s.A = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
-  s.A2 = s.A;
+  s.A2 = nch * kVHeads * kGdnChunk * kGdnChunk * 4;
+  s.A = s.A2;
   s.w = size_t(C) * kVHeads * kHd * 2;
   s.u = s.w;
   s.o = size_t(C) * kVHeads * kHd * 4;
@@ -170,6 +173,10 @@ GdnScratchSizes gdn_scratch_sizes(uint32_t C) {
 
 uint32_t pf_tiles(const model::Qwen4ExpDesc& d, uint32_t C) {
   return (C * d.top_k + d.experts * (kPfTm - 1)) / kPfTm + (C + kPfTm - 1) / kPfTm;
+}
+uint32_t pf_items(const model::Qwen4ExpDesc& d, uint32_t C) {
+  const uint32_t mi = kernels::pf_moe::kItemM;
+  return (C * d.top_k + d.experts * (mi - 1)) / mi + (C + mi - 1) / mi;
 }
 size_t pf_block_gu_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.hidden) * 2 * d.moe_inter * 2; }
 size_t pf_block_dn_bytes(const model::Qwen4ExpDesc& d) { return size_t(d.moe_inter) * d.hidden * 2; }
@@ -213,9 +220,9 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.q16 = C * d.q_n() * 2;
   s.o = size_t(d.q_heads) * C * d.head_dim * 4;
   s.attn_out = C * d.q_n() * 2;
-  s.ab = C * model::Qwen4ExpDesc::kAbPaddedN * 4;
+  s.ab = C * kernels::pf_route_slab_pitch(model::Qwen4ExpDesc::kAbPaddedN) * 4;   // phase 3 Task 8: the GEMM's rows, pitch 256
   s.gdn = gdn_scratch_sizes(kPfC).total();
-  s.logits = C * d.router_n() * 4;
+  s.logits = C * kernels::pf_route_slab_pitch(d.router_n()) * 4;                  // ... and the router's, pitch 768
   s.routes = size_t(d.layers) * C * kRouteWords * 4;
   s.hdr = size_t(kPfHdrWords) * 4;
   s.tiles = T * 2 * 4;
@@ -224,8 +231,10 @@ PrefillSizes prefill_sizes(const model::Qwen4ExpDesc& d, uint32_t max_len) {
   s.xg = std::max(R * d.hidden * 2, 2 * C * d.hc_n() * 2);   // also the PLE gate's gated / gn rows
   s.h = R * d.moe_inter * 2;
   s.y = C * d.hidden * 2;
-  s.w = kPfBatchBytes;
+  s.w = pf_block_gu_bytes(d);   // Intel's bf16 shared expert's one-block copy (plan 2026-11-12)
   s.ple_ids = C * d.ple_heads * 8;
+  s.cnt = (C + 63) / 64 * d.experts * 4;
+  s.items = size_t(pf_items(d, kPfC)) * 16;
   return s;
 }
 
@@ -242,8 +251,11 @@ size_t prefill_device_launches(const model::Qwen4ExpDesc& d, const model::Q4Plac
   const uint32_t dense = pf_dense_rows(pos, C), sparse = C - dense;
   const auto lin = [&](uint32_t N) { return size_t(2) * pf_slabs(N); };   // a slab kernel + pf_gemm per slab
   const size_t hc = 1 + lin(d.hc_down_rows()) + 1;
-  const size_t moe = 4 + 2 * size_t(pf_batches_gu(d)) + 2 * size_t(pf_batches_dn(d)) + 1;
-  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 1 + kGdnChunkLaunches + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
+  // router, route, sort, gather, the batches' dequant + GEMM pairs, combine; plan 2026-11-12: the sort's three
+  // launches, one fused GEMM a projection, and Intel's bf16 shared expert's dequant + GEMM pair a projection;
+  // phase 3 Task 8: the router and a||b are a slab re-lay + pf_gemm each (one launch more than the GEMV)
+  const size_t moe = 10 + (d.forms.shared == model::Q4Form::Bf16 ? 4 : 0);
+  const size_t gdn = 2 * hc + lin(d.qkvz_n()) + 2 + gdn_chunk_q4_launches() + lin(d.linear(model::Q4LinearId::GdnOut).shape.N) + moe;
   size_t qsa = 2 * hc + lin(d.qkvg_n()) + lin(d.idx_n()) + 3 + 1 + lin(d.linear(model::Q4LinearId::QsaO).shape.N) + moe;
   if (sparse > 0 && !injected) qsa += 2;          // q4_qsa_score, q4_qsa_select
   if (dense > 0) qsa += 1;                        // pf_flash_attn
