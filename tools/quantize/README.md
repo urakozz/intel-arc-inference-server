@@ -41,6 +41,7 @@ them.
 | `quantize_kolibri1.sh` | 0.17.0 @ `6afaecdb` | the operator's ruling of 2026-10-05; Kolibri keeps lm_head bf16, so the bug is not exercised |
 | `quantize_qwen38_mxfp4.sh` | none - llm-compressor `model_free_ptq` | only borrows the auto-round venv's python |
 | `quantize/quantize_qwen4exp.sh` (Flash-Next) | **the operator's fork commit `a6cf748739f2dd58e6c16b0ac849e92af7396e32`** = intel/auto-round main `b58069ea` (2026-11-11, version string 0.17.0) + the cached-OpenCodeInstruct commit, **no patch file** (`AR_PATCH=0`), only in the clone `~/auto-round` (`AR_REPO`) | per-block resume, the vectorised QSA indexer, its own MTP export, OpenCodeInstruct from the cache; see "Qwen3.8-Flash-Next: our AutoRound export" below |
+| `quantize/quantize_dflash.sh` (the DFlash 2 drafter) | the same fork commit `a6cf7487`, `AR_PATCH=0` | the newest pin on the box; the calibration rows are our own tensors, so neither fix of the patch is on its path; see "The DFlash 2 drafter" below |
 
 **Install (Qwen3.8 scripts, `tools/quantize/ar_pin.sh`).** Clones `AR_REPO` (default
 `https://github.com/intel/auto-round`, or any local clone that contains the commit) into
@@ -441,3 +442,29 @@ python3 tools/quantize/qwen4exp/make_synth.py oracle-out-q4exp-synth/ours/ckpt -
 python3 tools/quantize/qwen4exp/ple_int8.py oracle-out-q4exp-synth/ours/ckpt oracle-out-q4exp-synth/ours/ckpt-ple-int8
 python3 tools/quantize/qwen4exp/check.py oracle-out-q4exp-synth/ours/ckpt --ple oracle-out-q4exp-synth/ours/ckpt-ple-int8
 ```
+
+## The DFlash 2 drafter (`tools/quantize/quantize_dflash.sh`, docs/open-work.md "DFlash drafter quant")
+
+`z-lab/Qwen3.8-27B-DFlash2` -> W4A16 g64 symmetric `auto_round:auto_gptq`, tuned (200 iterations, 128 samples, seed
+42, batch 8). The commands and stages are in the script's header and in docs/open-work.md. What is particular:
+
+- **The model AutoRound tunes** is `dflash/model.py`: `tools/oracle/dflash_ref.py`'s non-causal forward as torch
+  modules, batched (`test_dflash_quant.py` checks it equal to `dflash_ref` / `dflash_accept.forward_blocks` in
+  float32). Three block lists, tuned in order on their own cached inputs: `encoder` (`fc` + `hidden_norm`: the
+  taps -> the context plane), `layers.0-4` (the context plane is an input of every layer: `k_proj` / `v_proj` project
+  it too), `candidate_selector` (`hidden_projection` of the final-norm mask rows). So `fc` and the selector projection
+  are tuned like the layers; norms, conv base kernels and the codebooks are plain parameters and stay as loaded.
+  `encoder.*` is the one name not in the checkpoint; `dflash/finalize.py` maps it back.
+- **Samples** (`dflash/calib.py`): one recorded request and 32 anchors from its continuation, each a block of 8
+  (anchor + 7 mask rows, positions p .. p + 7), over the quantised target's taps at positions [min p - 2047, max p)
+  (2304 rows, padded). The block rows are the target's embedding rows (or `mask_embedding.pt`) times
+  `input_embedding_scale`. RoPE tables are float64-computed float32 values carried as int32 bits: AutoRound casts
+  every floating block input to bf16. AutoRound gets a stub tokenizer (it requires one for a model object; every row
+  is valid, no pad id).
+- **torch.compile is off** (`--torch-compile` turns it on): on the tiny drafter (box CPU, 50 iterations) the layer
+  blocks' backward fails under it ("modified by an inplace operation", a [hidden] float tensor); the encoder block
+  passes. Not chased further: the drafter is small.
+- **Tiny-drafter smoke (2026-11-13, box CPU, 4 threads):** 20/20 linears quantised; 50 iterations cut the blocks'
+  losses 4.3e-3 -> 1.9e-3 (encoder), 5.3e-2 -> 6.8e-3 and 5.7e-2 -> 9.6e-3 (layers), 7.8e-3 -> 1.8e-3 (selector); the
+  export dequantised through the calibration forward is 9.5 % off the bf16 selector projection against 24 % for the
+  2-iteration (RTN-start) export; `finalize` restored 16 fp32 widenings to the source's bf16 and the check VERIFIED.
