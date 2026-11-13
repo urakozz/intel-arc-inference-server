@@ -362,6 +362,7 @@ int main(int argc, char** argv) {
       in >> sources;
       for (const auto& s : sources)
         max_len = std::max(max_len, uint32_t(s.at("prompt_ids").size() + s.at("cont_ids").size() + 8));
+      max_len = (max_len + 7) & ~7u;   // the prefill's row pitch needs a multiple of 8
     }
     l0::Context ctx(0);
     auto model = loader::load(ctx, argv[1], max_len, false, loader::LmHeadForm::Int8);
