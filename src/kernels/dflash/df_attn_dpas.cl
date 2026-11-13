@@ -9,16 +9,17 @@
 //
 // Inside a work-group (kv head kvh, ring block b): sub-group g is q head kvh G + g and its M = 8 rows - one DPAS row
 // block. Per key atom (16 keys, lane = key):
-//   S (8 rows x 16 keys) = sum over the HD / 16 dim atoms of DPAS(q atom, K atom) with q = hi + lo (hi = rne_bf16(q),
-//     lo = rne_bf16(q - hi); hi first, then lo - attn_verify_dpas.cl's QSPLIT); K straight from the ring row (a key's
+//   S (8 rows x 16 keys) = sum over the HD / 16 dim atoms of DPAS(q atom, K atom) with q = hi + mid + lo (split3: an
+//     fp32 q's 24 bits in three bf16 terms; hi, mid, lo in that order); K straight from the ring row (a key's
 //     16 dims are its lane's 8 packed words, the B operand's layout); s = S * scale, -INF outside the row's window or
 //     the block's live positions, or for a row past K - df_attn.cl's masks.
 // The scores go to SLM; each row's max over the block; then per key atom p = df_exp(s - m) (0 for a dead score),
-// l += p (per lane, summed over the lanes at the end), and O += P V with P = hi + lo of p (attn_verify_dpas.cl's
-// PSPLIT, hi first), P in S's layout as the A operand and V's key pairs packed per lane (lane = output dim).
-// Against the scalar form the products are DPAS's (fp32 accumulation of bf16 pairs, ~16 significant bits of q and
-// p) and the sums' order differs: a cosine bar, not bitwise (tests/kernels/dflash_kernels_test.cc). A row's result
-// depends only on its own q row (a DPAS output row is its A row's): property R.
+// l += p (per lane, summed over the lanes at the end), and O += P V with P = hi + mid + lo of p (split3), P in S's layout as the A operand and V's key pairs packed per lane (lane = output dim).
+// Against the scalar form the products are DPAS's (fp32 accumulation of bf16 pairs, q and p carried as three bf16
+// terms - two, the target's QSPLIT / PSPLIT, moved more top-16 candidates off the drafter's f32 judge than the scalar
+// part: dflash_draft_test) and the sums' order differs: a cosine bar, not bitwise
+// (tests/kernels/dflash_kernels_test.cc). A row's result depends only on its own q row (a DPAS output row is its A
+// row's): property R.
 #pragma OPENCL EXTENSION cl_intel_subgroups : enable
 #pragma OPENCL EXTENSION cl_intel_subgroups_short : enable
 #pragma OPENCL FP_CONTRACT OFF
@@ -63,6 +64,20 @@ inline float df_exp(float x) {
   return y * as_float((uint)((int)n + 127) << 23);
 }
 
+// x = hi + mid + lo in bf16 (each the rne of what the previous left): ~24 significant bits, an fp32 value's.
+inline void split3(float x, ushort* hi, ushort* mid, ushort* lo) {
+  *hi = f2bf(x);
+  const float r1 = x - bf16f(*hi);
+  *mid = f2bf(r1);
+  *lo = f2bf(r1 - bf16f(*mid));
+}
+inline void set8(short8* v, int i, ushort x) {
+  switch (i) {
+    case 0: v->s0 = x; break; case 1: v->s1 = x; break; case 2: v->s2 = x; break; case 3: v->s3 = x; break;
+    case 4: v->s4 = x; break; case 5: v->s5 = x; break; case 6: v->s6 = x; break; default: v->s7 = x; break;
+  }
+}
+
 inline float f8(float8 v, int i) {
   switch (i) {
     case 0: return v.s0; case 1: return v.s1; case 2: return v.s2; case 3: return v.s3;
@@ -81,18 +96,14 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   const uint p = ctrl[CTRL_POS], K = dctl[DCTL_K];
 
   // ---- q as the A operand, hi and lo, once: row i of dim atom a at lane = the atom's dim -------------------------
-  short8 qh[DA], ql[DA];
+  short8 qh[DA], qm[DA], ql[DA];
   for (uint a = 0; a < DA; ++a)
     for (int i = 0; i < 8; ++i) {
-      const float x = q[((size_t)i * NH + h) * HD + a * 16 + lane];
-      const ushort hi = f2bf(x);
-      const ushort lo = f2bf(x - bf16f(hi));
-      switch (i) {
-        case 0: qh[a].s0 = hi; ql[a].s0 = lo; break; case 1: qh[a].s1 = hi; ql[a].s1 = lo; break;
-        case 2: qh[a].s2 = hi; ql[a].s2 = lo; break; case 3: qh[a].s3 = hi; ql[a].s3 = lo; break;
-        case 4: qh[a].s4 = hi; ql[a].s4 = lo; break; case 5: qh[a].s5 = hi; ql[a].s5 = lo; break;
-        case 6: qh[a].s6 = hi; ql[a].s6 = lo; break; default: qh[a].s7 = hi; ql[a].s7 = lo; break;
-      }
+      ushort hi, mid, lo;
+      split3(q[((size_t)i * NH + h) * HD + a * 16 + lane], &hi, &mid, &lo);
+      set8(&qh[a], i, hi);
+      set8(&qm[a], i, mid);
+      set8(&ql[a], i, lo);
     }
 
   // ---- S: per key atom, the HD / 16 dim atoms, q hi then lo ----------------------------------------------------
@@ -105,6 +116,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
     for (uint a = 0; a < DA; ++a) {
       const int8 kb = as_int8(vload8(0, krow + a * 8));
       acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qh[a], kb, acc);
+      acc = intel_sub_group_bf16_bf16_matrix_mad_k16(qm[a], kb, acc);
       acc = intel_sub_group_bf16_bf16_matrix_mad_k16(ql[a], kb, acc);
     }
     for (int i = 0; i < 8; ++i) {
@@ -129,19 +141,16 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
   float lsum[8];
   for (int i = 0; i < 8; ++i) lsum[i] = 0.0f;
   for (uint ka = 0; ka < KA; ++ka) {
-    short8 ph, pl;
+    short8 ph, pm, pl;
     for (int i = 0; i < 8; ++i) {
       const float sc = s_all[g][i][ka * 16 + lane];
       const float e = (mrow[i] == -INFINITY || sc == -INFINITY) ? 0.0f : df_exp(sc - mrow[i]);
       lsum[i] += e;
-      const ushort hi = f2bf(e);
-      const ushort lo = f2bf(e - bf16f(hi));
-      switch (i) {
-        case 0: ph.s0 = hi; pl.s0 = lo; break; case 1: ph.s1 = hi; pl.s1 = lo; break;
-        case 2: ph.s2 = hi; pl.s2 = lo; break; case 3: ph.s3 = hi; pl.s3 = lo; break;
-        case 4: ph.s4 = hi; pl.s4 = lo; break; case 5: ph.s5 = hi; pl.s5 = lo; break;
-        case 6: ph.s6 = hi; pl.s6 = lo; break; default: ph.s7 = hi; pl.s7 = lo; break;
-      }
+      ushort hi, mid, lo;
+      split3(e, &hi, &mid, &lo);
+      set8(&ph, i, hi);
+      set8(&pm, i, mid);
+      set8(&pl, i, lo);
     }
     uint vslot[16];
     for (int t = 0; t < 16; ++t) vslot[t] = (uint)(((ulong)p + b * PB + ka * 16 + t) % RING);
@@ -157,6 +166,7 @@ __kernel void df_attn_part(__global const uint* restrict ctrl, __global const ui
         }
       }
       o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(ph, vb, o[a]);
+      o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pm, vb, o[a]);
       o[a] = intel_sub_group_bf16_bf16_matrix_mad_k16(pl, vb, o[a]);
     }
   }
