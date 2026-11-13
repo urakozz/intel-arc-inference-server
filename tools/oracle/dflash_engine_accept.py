@@ -44,7 +44,7 @@ def expected(counted, accepted):
 
 
 def compare_baseline(engine_dir, baseline_path, out_path):
-    """G-drafter: same anchors, all widths/corpora, within 0.05 of the original int8 engine; no CPU model load."""
+    """G-drafter: same anchors, all widths/corpora, not below the original int8 engine by more than 0.05; no CPU model load."""
     with open(baseline_path) as f:
         baseline = json.load(f)
     with open(os.path.join(engine_dir, 'engine.jsonl')) as f:
@@ -88,12 +88,14 @@ def compare_baseline(engine_dir, baseline_path, out_path):
         row['baseline_E'] = expected(row['baseline_counted'], row['baseline_accepted'])
         if abs(row['baseline_E'] - baseline['corpora'][corpus][str(k)]['engine_E']) > 1e-9:
             raise ValueError(f'{corpus} K={k}: original acceptance does not calibrate on these taps/greedy ids')
-        row['gap'] = abs(row['engine_E'] - row['baseline_E'])
-        ok = row['gap'] <= 0.05
+        # One-sided, as spec 19 v3 §3.2 words it (operator go 2026-11-13 night): fail only when the engine is
+        # lower than the original by more than 0.05; the gap is signed (engine - baseline).
+        row['gap'] = row['engine_E'] - row['baseline_E']
+        ok = row['gap'] >= -0.05
         passed &= ok
         report['corpora'].setdefault(corpus, {})[str(k)] = row
         print(f"G_DRAFTER corpus={corpus} K={k} engine_E={row['engine_E']:.5f} "
-              f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:.5f} {'PASS' if ok else 'FAIL'}", flush=True)
+              f"baseline_E={row['baseline_E']:.5f} gap={row['gap']:+.5f} {'PASS' if ok else 'FAIL'}", flush=True)
     report['pass'] = passed
     with open(out_path, 'w') as f:
         json.dump(report, f, indent=2)

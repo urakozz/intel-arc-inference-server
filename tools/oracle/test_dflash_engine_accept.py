@@ -65,8 +65,24 @@ class AcceptanceTest(unittest.TestCase):
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertFalse(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
             report = json.loads((root/'report.json').read_text())
-            self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
+            self.assertEqual(report['corpora']['code']['1']['gap'], -1.0)
             self.assertEqual(report['corpora']['code']['7']['gap'], 0.0)
+
+    def test_precision_gate_is_one_sided(self):
+        # Spec 19 v3 §3.2: acceptance may rise; only a drop of more than 0.05 fails (the gap is engine - baseline).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dump, _ = self.baseline_fixture(root)
+            base = json.loads((root/'baseline.json').read_text())
+            for d in base['drafts']:
+                if d['name'] == 'code' and d['k'] == 1: d['engine'] = [99]
+            base['corpora']['code']['1']['engine_E'] = 1.0
+            (root/'baseline.json').write_text(json.dumps(base))
+            with patch.dict(sys.modules, {'safetensors': SimpleNamespace(safe_open=dump)}), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(m.compare_baseline(tmp, str(root/'baseline.json'), str(root/'report.json')))
+            report = json.loads((root/'report.json').read_text())
+            self.assertEqual(report['corpora']['code']['1']['gap'], 1.0)
 
     def test_precision_gate_rejects_missing_anchors(self):
         with tempfile.TemporaryDirectory() as tmp:
