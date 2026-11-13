@@ -33,16 +33,19 @@
 # model.safetensors, dflash_recipe.json, README.md); the work beside it in $OUT.work/ (sources.json, taps/, raw/,
 # .done-*, RESULT, run.pid, run.log -> LOGDIR/run-<time>.log); QUANT_ROOT/dflash-current points at OUT.
 #
-# AutoRound: AR_COMMIT a6cf7487 of the operator's fork ~/auto-round (AR_REPO), the Flash-Next script's pin
-# (tools/quantize/README.md): upstream main b58069ea + the cached-OpenCodeInstruct commit, no patch file
-# (AR_PATCH=0: auto-round-local.patch's BOS/EOS fix is upstream, #2591, and the calibration rows here are our own
-# tensors). Installed by tools/quantize/ar_pin.sh beside VENVPY, transformers 5.19.0 in SITE.
+# AutoRound: the LATEST of the operator's fork ~/auto-round (AR_REPO), not a fixed pin (operator 2026-11-13): the
+# hash branch AR_REF (local-patches-v2 = upstream main + the cached-OpenCodeInstruct commit) has when `start` or
+# `run` begins, resolved by tools/quantize/ar_latest.sh and recorded (hash + upstream base) in the recipe and the
+# README. No patch file (AR_PATCH=0: auto-round-local.patch's BOS/EOS fix is upstream, #2591, and the calibration
+# rows here are our own tensors). A run keeps the hash it started with ($OUT.work/ar_commit): `start` on a run
+# whose branch has moved refuses (AR_COMMIT=<recorded hash> resumes it on the old build). The old pin is the
+# branch pin-a6cf7487-2026-11-13. Installed by tools/quantize/ar_pin.sh beside VENVPY, transformers 5.19.0 in SITE.
 #
 # Overridables (environment): DRAFTER (z-lab/Qwen3.8-27B-DFlash2 or a snapshot dir), TARGET
 # (urakozz/Qwen3.8-27B-W4A16-g64-AutoRound-GPTQ or a dir), RECORDINGS (space-separated dirs), QUANT_ROOT
 # ($HOME/b70/hdd/quant), OUT (default: the run `dflash-current` points at, else a new dated one), TAPS ($WORK/taps;
 # another run's taps dir to reuse it), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, ANCHORS, BATCH,
-# CONTEXT (2304 context rows), RAM_CAP_GB (64), RAM_MIN_GB (40), DISK_MIN_GB (20), PROBE, VENVPY, SITE, AR_REPO,
+# CONTEXT (2304 context rows), RAM_CAP_GB (64), RAM_MIN_GB (40), DISK_MIN_GB (20), PROBE, VENVPY, SITE, AR_REPO, AR_REF,
 # LOGDIR ($HOME/b70/logs/dflash-quant).
 set -euo pipefail
 
@@ -69,7 +72,7 @@ DISK_MIN_GB="${DISK_MIN_GB:-20}"
 PROBE="${PROBE:-$REPO/build/tools/probe/probe_dflash_iter}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"
 SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
-export AR_COMMIT=a6cf748739f2dd58e6c16b0ac849e92af7396e32 AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
+. "$HERE/quantize/ar_latest.sh"     # AR_COMMIT = the latest AutoRound (branch AR_REF of AR_REPO), see there
 CURRENT="$QUANT_ROOT/dflash-current"
 STAGES=(sources taps quant export check)
 
@@ -82,7 +85,8 @@ snapshot() {   # $1 = repo id or dir -> its snapshot directory (refs/main of the
   echo "$e/snapshots/$(cat "$e/refs/main")"
 }
 
-env_py() {     # the pinned AutoRound beside VENVPY, transformers 5.19.0 in SITE; sets PKG
+env_py() {     # the latest AutoRound beside VENVPY, transformers 5.19.0 in SITE; sets PKG
+  ar_resolve || exit 2
   [ -x "$VENVPY" ] || die "VENVPY=$VENVPY is not an executable python"
   if [ ! -d "$SITE/transformers-5.19.0.dist-info" ]; then
     local uv; uv=$(command -v uv || echo "$HOME/.local/bin/uv")
@@ -174,10 +178,11 @@ run_stages() {
   [ -n "$OUT" ] || die "OUT is not set and $CURRENT does not exist - use start"
   WORK="$OUT.work"; TAPS="${TAPS:-$WORK/taps}"
   mkdir -p "$WORK"
+  ar_resolve || exit 2; ar_run_guard "$WORK" || exit 2
   DSNAP=$(snapshot "$DRAFTER"); TSNAP=$(snapshot "$TARGET")
   echo "quantize_dflash: $(date -u +%FT%TZ) DRAFTER=$DRAFTER ($DSNAP) TARGET=$TARGET ($TSNAP) OUT=$OUT" \
        "TAPS=$TAPS DEVICE=$DEVICE CARD=$CARD ITERS=$ITERS NSAMPLES=$NSAMPLES ANCHORS=$ANCHORS BATCH=$BATCH" \
-       "auto-round ${AR_COMMIT:0:8}"
+       "auto-round $AR_COMMIT (base ${AR_BASE:0:8}, $AR_REF)"
   for s in "${STAGES[@]}"; do
     [ "$s" = "$from" ] && hit=1
     if [ -n "$only" ] && [ "$s" != "$only" ]; then continue; fi
@@ -202,6 +207,8 @@ case "${1:-}" in
       die "the run in $OUT is finished ($(cat "$OUT.work/RESULT")); for a new one: OUT=<new dir> $SELF start"
     fi
     snapshot "$DRAFTER" > /dev/null; snapshot "$TARGET" > /dev/null
+    ar_resolve || exit 2
+    [ -z "$OUT" ] || ar_run_guard "$OUT.work" || exit 2
     for r in $RECORDINGS; do [ -d "$r" ] || die "recording $r does not exist"; done
     m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB - something else is using the RAM"
     d=$(disk_free_gb "$QUANT_ROOT"); [ "$d" -ge "$DISK_MIN_GB" ] || die "$QUANT_ROOT has ${d} GB free < DISK_MIN_GB $DISK_MIN_GB"

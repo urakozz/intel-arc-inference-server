@@ -37,10 +37,14 @@
 # >= DISK_MIN_GB (300) and PLE_DIR's disk >= 110 GB free (or holds the file already); AutoRound runs in a systemd scope capped at RAM_CAP_GB
 # (115) with no swap, so a memory overrun kills the run (resumable) instead of the box.
 #
-# AutoRound: AR_COMMIT a6cf7487 of the operator's fork ~/auto-round (AR_REPO; the commit is only there): upstream
-# main b58069ea (2026-11-11, version string 0.17.0) + one local commit that reads OpenCodeInstruct's cached parquet
-# and loads snapshots local-only; no patch file (AR_PATCH=0): the BOS/EOS fix of auto-round-local.patch is
-# upstream (#2591) and nothing on this path reads WrapperLinear.in_features. Why not the Qwen3.8 scripts' 6afaecdb: b58069ea adds the per-block resume
+# AutoRound: the LATEST of the operator's fork ~/auto-round (AR_REPO), not a fixed pin (operator 2026-11-13): the hash
+# branch AR_REF (local-patches-v2) has when `start` or `run` begins, resolved by tools/quantize/ar_latest.sh: upstream
+# main + one local commit that reads OpenCodeInstruct's cached parquet and loads snapshots local-only (the commit
+# is only in that clone); no patch file (AR_PATCH=0): the BOS/EOS fix of auto-round-local.patch is
+# upstream (#2591) and nothing on this path reads WrapperLinear.in_features. The hash and its upstream base are
+# recorded in the export's README and qwen4exp_recipe.json. A run keeps the hash it started with ($OUT/ar_commit):
+# `start` (the per-block resume) on a run whose branch has moved REFUSES - AR_COMMIT=<recorded hash> resumes it on
+# the old build; the old pin is the branch pin-a6cf7487-2026-11-13. Why not the Qwen3.8 scripts' 6afaecdb: b58069ea (since then in upstream main) adds the per-block resume
 # (AR_RESUME_DIR), the vectorised QSA indexer (#2579, the 12 QSA blocks) and routed MoE forward (#2615);
 # both commits pin Qwen4's ngram table on the CPU and export the MTP head (tools/quantize/README.md,
 # "Qwen3.8-Flash-Next: our AutoRound export"). Installed by tools/quantize/ar_pin.sh beside VENVPY
@@ -50,7 +54,7 @@
 # Overridables (environment): MODEL (Qwen/Qwen3.8-Flash-Next or a snapshot dir), QUANT_ROOT
 # ($HOME/b70/hdd/quant), OUT (default: the run `current` points at, else QUANT_ROOT/Qwen3.8-Flash-Next-
 # W4A16-g64-<date>), PLE_DIR ($HOME/b70/scratch/flash-next-ple), DEVICE (xpu: card CARD | cpu), CARD (1), ITERS, NSAMPLES, SEQLEN, BATCH (8), RAM_CAP_GB, RAM_MIN_GB,
-# DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, LOGDIR ($HOME/b70/logs/flash-next-quant).
+# DISK_MIN_GB, DATASET, VENVPY, SITE, AR_REPO, AR_REF, LOGDIR ($HOME/b70/logs/flash-next-quant).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"         # tools/
@@ -72,7 +76,7 @@ PLE_DIR="${PLE_DIR:-$HOME/b70/scratch/flash-next-ple}"
 VENVPY="${VENVPY:-$HOME/auto-round/.venv/bin/python}"
 SITE="${SITE:-$HOME/.cache/q4exp-site-py312}"
 DATASET="${DATASET:-nvidia/OpenCodeInstruct:apply_chat_template}"
-export AR_COMMIT=a6cf748739f2dd58e6c16b0ac849e92af7396e32 AR_PATCH=0 AR_REPO="${AR_REPO:-$HOME/auto-round}"
+. "$HERE/quantize/ar_latest.sh"     # AR_COMMIT = the latest AutoRound (branch AR_REF of AR_REPO), see there
 CURRENT="$QUANT_ROOT/flash-next-current"
 # HEAD=bf16 (default, operator 2026-11-12): lm_head stays bf16 in the export and the engine builds its int8 head at load,
 # as for Qwen3.8 - no RTN int4 head; HEAD=int4 runs the head stage (RTN g64, head_rtn.py) instead.
@@ -89,7 +93,8 @@ snapshot() {   # MODEL -> its snapshot directory (refs/main of the HF cache entr
   echo "$e/snapshots/$(cat "$e/refs/main")"
 }
 
-env_py() {     # the pinned AutoRound beside VENVPY, transformers 5.19.0 in SITE; sets PKG
+env_py() {     # the latest AutoRound beside VENVPY, transformers 5.19.0 in SITE; sets PKG
+  ar_resolve || exit 2
   [ -x "$VENVPY" ] || die "VENVPY=$VENVPY is not an executable python"
   if [ ! -d "$SITE/transformers-5.19.0.dist-info" ]; then
     local uv; uv=$(command -v uv || echo "$HOME/.local/bin/uv")
@@ -147,7 +152,7 @@ stage_check() {
 
 ## Quantisation provenance
 
-- tool: auto-round at \`$AR_COMMIT\` (the operator's fork: intel/auto-round \`b58069ea\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
+- tool: auto-round at \`$AR_COMMIT\` (the operator's fork, branch \`$AR_REF\`: intel/auto-round main \`$AR_BASE\` + the cached-OpenCodeInstruct commit; version string $("$VENVPY" -c 'import auto_round; print(auto_round.__version__)'))
 - recipe: \`tools/quantize/quantize_qwen4exp.sh\` - W4A16, group 64, symmetric, format
   auto_round:auto_gptq, tuned: $ITERS iterations, $NSAMPLES x $SEQLEN rows of \`$DATASET\`, batch $BATCH;
   kept bf16: routers, hyper-connections, shared_expert_gate, GDN in_proj_a / in_proj_b, the QSA indexer, the
@@ -175,8 +180,9 @@ run_stages() {
   [ -n "$OUT" ] || die "OUT is not set and $CURRENT does not exist - use start"
   SNAP=$(snapshot)
   env_py
+  ar_run_guard "$OUT" || exit 2
   echo "quantize_qwen4exp: $(date -u +%FT%TZ) MODEL=$MODEL ($SNAP) OUT=$OUT DEVICE=$DEVICE CARD=$CARD ITERS=$ITERS" \
-       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH DATASET=$DATASET auto-round ${AR_COMMIT:0:8}"
+       "NSAMPLES=$NSAMPLES SEQLEN=$SEQLEN BATCH=$BATCH DATASET=$DATASET auto-round $AR_COMMIT (base ${AR_BASE:0:8}, $AR_REF)"
   for s in "${STAGES[@]}"; do
     [ "$s" = "$from" ] && hit=1
     if [ -n "$only" ] && [ "$s" != "$only" ]; then continue; fi
@@ -208,6 +214,8 @@ case "${1:-}" in
       n=$(ls "$HOME"/.cache/huggingface/hub/datasets--nvidia--OpenCodeInstruct/snapshots/*/data/train-*.parquet 2>/dev/null | wc -l)
       [ "$n" = 50 ] || die "calibration data: $n of 50 nvidia/OpenCodeInstruct parquet shards in the HF cache"
     fi
+    ar_resolve || exit 2
+    [ -z "$OUT" ] || ar_run_guard "$OUT" || exit 2
     m=$(mem_avail_gb); [ "$m" -ge "$RAM_MIN_GB" ] || die "MemAvailable ${m} GB < RAM_MIN_GB $RAM_MIN_GB - something else is using the RAM"
     d=$(disk_free_gb "$QUANT_ROOT"); [ "$d" -ge "$DISK_MIN_GB" ] || die "$QUANT_ROOT has ${d} GB free < DISK_MIN_GB $DISK_MIN_GB"
     mkdir -p "$PLE_DIR"
