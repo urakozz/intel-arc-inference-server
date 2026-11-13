@@ -7,6 +7,7 @@
 #include "loader/loader.h"
 #include "runtime/capture.h"   // CapturedStep - the same record
 #include "runtime/dflash/dflash_buffers.h"
+#include "runtime/tap_drafter.h"   // the prefill types project_wide takes
 
 // Spec 19b Task 3: the DFlash drafter's two lists, each captured once and replayed (spec 19 §5 "Per iteration"):
 //
@@ -31,6 +32,11 @@
 // RoPE, bf16, slot pos % ring; rows past proj_n are not stored). 8 launches. It is 19c's commit-side projection of
 // the committed rows and its prefill tail; here it is how a test or the D1 tool fills the ring.
 //
+// **The projection at prefill width** (project_wide; runtime/tap_drafter.h has the contract): a prompt's staged tap
+// rows, any count up to the prefill chunk cap, in one pass over the weights - the same walk with every linear on
+// pf_gemm (slabs of its columns from df_w_slab_i8 / df_w_slab_bf16) and df_w_norm / df_w_ctx_store
+// (src/kernels/dflash/df_proj_wide.cl) around them. int8 and bf16; false for the int4 drafter.
+//
 // The drafter's embedding and head are the TARGET's (Review Focus 3): DFlashTarget points at them.
 namespace runtime::dflash {
 
@@ -54,5 +60,7 @@ CapturedStep build_dflash_draft(l0::Context& ctx, const loader::DFlashWeights& w
                                 DFlashBuffers& b, const l0::Mem& control, const CaptureOptions& opt = {});
 CapturedStep build_dflash_project(l0::Context& ctx, const loader::DFlashWeights& w, DFlashBuffers& b,
                                   const CaptureOptions& opt = {});
+bool project_wide(prefill::Context& cx, prefill::KernelCache& kc, PrefillScratch& s, const loader::DFlashWeights& w,
+                  DFlashBuffers& b, const void* taps, uint32_t pos, uint32_t n);
 
 }  // namespace runtime::dflash

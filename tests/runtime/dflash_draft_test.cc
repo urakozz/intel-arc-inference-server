@@ -51,9 +51,12 @@
 #include "loader/lm_head_int8.h"
 #include "loader/snapshot.h"
 #include "model/model_desc.h"
+#include "runtime/buffers.h"
 #include "runtime/control.h"
 #include "runtime/dflash/dflash_buffers.h"
 #include "runtime/dflash/dflash_capture.h"
+#include "runtime/prefill/context.h"
+#include "runtime/prefill/kernels.h"
 
 namespace {
 
@@ -435,6 +438,48 @@ int main(int argc, char** argv) {
       e.run(proj);
     }
     const dfref::Ring ring = read_ring(e, b);
+    if (f != loader::DraftFormat::Int4G64) {
+      // 1w. the same 2053 positions at prefill width (project_wide: pf_gemm, three passes - 1000 rows on the small
+      // tile, 1048 on pf_gemm's, 5 across the wrap) against the 8-row replays' ring: every slot of every layer,
+      // per position and layer the K and the V row within 1e-3 relative L2 (the GEMMs' summation order, then
+      // the bf16 round); the 8-row ring is put back for the cases below.
+      const size_t rb = b.ring_k.size(), kvn = tw.d.kvn();
+      const std::vector<uint16_t> k8 = e.read<uint16_t>(b.ring_k, rb / 2), v8 = e.read<uint16_t>(b.ring_v, rb / 2);
+      e.imm.fill(b.ring_k.ptr(), 0u, rb);
+      e.imm.fill(b.ring_v.ptr(), 0u, rb);
+      runtime::PrefillScratch ps(e.ctx, 8192, q, 2048);
+      runtime::prefill::Context cx(e.ctx);
+      runtime::prefill::KernelCache kc(e.ctx);
+      l0::Mem staged(e.ctx, l0::MemKind::Device, size_t(2048) * width * 2);
+      for (const auto [pos, n] : {std::pair<uint32_t, uint32_t>{0, 1000}, {1000, 1048}, {2048, P - 2048}}) {
+        for (uint32_t r = 0; r < n; ++r)
+          e.imm.copy(static_cast<uint8_t*>(staged.ptr()) + size_t(r) * width * 2, taps_rows(pos + r, 1, width).data(),
+                     size_t(width) * 2);
+        CHECK(runtime::dflash::project_wide(cx, kc, ps, w, b, staged.ptr(), pos, n));
+        cx.wait();
+      }
+      const std::vector<uint16_t> kw = e.read<uint16_t>(b.ring_k, rb / 2), vw = e.read<uint16_t>(b.ring_v, rb / 2);
+      size_t same = 0, over = 0;
+      double worst = 0;
+      for (const auto& [a8, aw] : {std::pair{&k8, &kw}, {&v8, &vw}})
+        for (size_t row = 0; row < a8->size() / kvn; ++row) {
+          double dd = 0, nn = 0;
+          for (size_t i = row * kvn; i < (row + 1) * kvn; ++i) {
+            const double x = dfref::bf((*a8)[i]), y = dfref::bf((*aw)[i]);
+            same += (*a8)[i] == (*aw)[i];
+            dd += (x - y) * (x - y);
+            nn += x * x;
+          }
+          const double rel = nn > 0 ? std::sqrt(dd / nn) : (dd > 0 ? 1.0 : 0.0);
+          worst = std::max(worst, rel);
+          over += !(rel <= 1e-3);
+        }
+      std::printf("projection at prefill width vs 8 rows a replay, positions 0..%u: %zu of %zu ring values bitwise, "
+                  "worst row relative L2 %.3g, %zu rows over 1e-3 (bar 0)\n", P - 1, same, rb, worst, over);
+      bad += over != 0;
+      e.imm.copy(b.ring_k.ptr(), k8.data(), rb);
+      e.imm.copy(b.ring_v.ptr(), v8.data(), rb);
+    }
     {
       dfref::Ring tr = dfref::make_ring(tw.d);
       const uint32_t pos0 = (P - 1) / M * M, n = P - pos0;

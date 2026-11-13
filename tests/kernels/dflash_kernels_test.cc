@@ -9,6 +9,8 @@
 //   df_qkv_prep    q / k / v at positions 2041..2048 and 131065..131072: bitwise
 //   df_ctx_store   5 rows at proj_pos 2045 (slots 2045, 2046, 2047, 0, 1: the ring's wrap) bitwise; the 3 rows past
 //                  proj_n and every other slot untouched (Review Focus 1)
+//   df_w_*         the projection at prefill width (df_proj_wide.cl): the int8 / bf16 slabs exact; df_w_norm and
+//                  df_w_ctx_store (11 rows from 2040 across the wrap, scaled and plain) bitwise the same twin
 //   df_attn        at p 5, 2046, 2047, 2048, 2049, 4100, 131000 and K 7 / 3 / 1: bitwise the twin (both use df_exp /
 //                  dfref::attn_exp, not the device's exp - spec 19f: outputs that cancel toward 0 turned the device
 //                  exp's 1-2 fp32 ulps into up to 45 bf16 ulps), rows past K zero
@@ -380,6 +382,104 @@ int check_heads(Dev& d, Bins& b, const std::vector<float>& rope, const l0::Mem& 
   return bad;
 }
 
+// df_proj_wide.cl: the projection at prefill width - the slabs exact, df_w_norm / df_w_ctx_store bitwise the twin's
+// norm / head_prep over the column-scaled (int8) or plain (bf16) GEMM rows, 11 rows from 2040 across the wrap.
+int check_wide(Dev& d, const std::vector<float>& rope, const l0::Mem& brope) {
+  int bad = 0;
+  l0::Module wide(d.ctx, kernels::path(kd::proj_wide_variant()));
+  const uint32_t R = 11, K = H, N = 2 * KVN, NS = 1024, n0 = 1024;
+  {
+    std::mt19937 g(31);
+    std::vector<int8_t> q(size_t(K) * N);
+    for (int8_t& v : q) v = int8_t(int(g() % 255) - 127);
+    const std::vector<uint16_t> wb = rnd_bf16(size_t(K) * N, -1, 1, 32);
+    for (bool i8 : {true, false}) {
+      l0::Mem bw = i8 ? d.up(q) : d.up(wb), out = d.zeros(size_t(K) * NS * 2);
+      l0::Kernel k(wide, i8 ? "df_w_slab_i8" : "df_w_slab_bf16");
+      k.group_size(256);
+      k.arg_ptr(0, bw.ptr());
+      k.arg_ptr(1, out.ptr());
+      k.arg(2, n0);
+      k.arg(3, K);
+      k.arg(4, NS);
+      d.run(k, NS / 256, K / (i8 ? 16 : 8));
+      const std::vector<uint16_t> got = d.read<uint16_t>(out, size_t(K) * NS);
+      size_t e = 0;
+      for (uint32_t kk = 0; kk < K; ++kk)
+        for (uint32_t j = 0; j < NS; ++j)
+          e += got[size_t(kk) * NS + j] != (i8 ? rne(float(q[dfref::i8_index(K, kk, n0 + j)]))
+                                               : wb[dfref::bf16_tiled_index(K, kk, n0 + j)]);
+      std::printf("%s: columns %u..%u of [%u][%u] - %zu slab values differ\n", i8 ? "df_w_slab_i8" : "df_w_slab_bf16",
+                  n0, n0 + NS - 1, N, K, e);
+      bad += int(e != 0);
+    }
+  }
+  for (uint32_t scaled : {1u, 0u}) {
+    const std::vector<float> src = rnd_f32(size_t(R) * H, -3, 3, 33), sc = rnd_f32(H, 0.01f, 0.03f, 34),
+                             w = rnd_f32(H, 0.5f, 1.5f, 35);
+    l0::Mem bs = d.up(src), bsc = d.up(sc), bw = d.up(w), bx = d.zeros(size_t(R) * H * 2);
+    l0::Kernel k(wide, "df_w_norm");
+    k.group_size(kd::kWg);
+    k.arg_ptr(0, bs.ptr());
+    k.arg_ptr(1, bsc.ptr());
+    k.arg_ptr(2, bw.ptr());
+    k.arg_ptr(3, bx.ptr());
+    k.arg(4, scaled);
+    d.run(k, 1, R);
+    const std::vector<uint16_t> x = d.read<uint16_t>(bx, size_t(R) * H);
+    std::vector<float> in(H), wh(H);
+    std::vector<uint16_t> wx(H);
+    int e = 0;
+    for (uint32_t r = 0; r < R; ++r) {
+      for (uint32_t i = 0; i < H; ++i) in[i] = scaled ? src[size_t(r) * H + i] * sc[i] : src[size_t(r) * H + i];
+      dfref::norm(in.data(), w.data(), H, 1e-6f, wh.data(), wx.data());
+      for (uint32_t i = 0; i < H; ++i) e += x[size_t(r) * H + i] != wx[i];
+    }
+    std::printf("df_w_norm (%s): %d of %u values differ (bitwise bar)\n", scaled ? "scaled" : "plain", e, R * H);
+    bad += e;
+  }
+  for (uint32_t scaled : {1u, 0u}) {
+    const uint32_t pos0 = 2040;
+    const std::vector<float> kv = rnd_f32(size_t(R) * 2 * KVN, -2, 2, 36), sc = rnd_f32(2 * KVN, 0.5f, 2, 37),
+                             kn = rnd_f32(HD, 0.5f, 1.5f, 38);
+    const size_t ring_elems = size_t(RING) * KVN;
+    const std::vector<uint16_t> init(ring_elems, 0x1234);
+    l0::Mem bkv = d.up(kv), bsc = d.up(sc), bkn = d.up(kn), rk = d.up(init), rv = d.up(init);
+    l0::Kernel k(wide, "df_w_ctx_store");
+    k.group_size(HD);
+    k.arg_ptr(0, bkv.ptr());
+    k.arg_ptr(1, bsc.ptr());
+    k.arg_ptr(2, bkn.ptr());
+    k.arg_ptr(3, brope.ptr());
+    k.arg_ptr(4, rk.ptr());
+    k.arg_ptr(5, rv.ptr());
+    k.arg(6, pos0);
+    k.arg(7, scaled);
+    d.run(k, 2 * NKV, R);
+    const std::vector<uint16_t> gk = d.read<uint16_t>(rk, ring_elems), gv = d.read<uint16_t>(rv, ring_elems);
+    std::vector<uint16_t> wk = init, wv = init;
+    std::vector<float> in(2 * KVN), tmp(HD);
+    for (uint32_t r = 0; r < R; ++r) {
+      const uint32_t pos = pos0 + r, slot = pos % RING;
+      for (uint32_t i = 0; i < 2 * KVN; ++i)
+        in[i] = scaled ? kv[size_t(r) * 2 * KVN + i] * sc[i] : kv[size_t(r) * 2 * KVN + i];
+      for (uint32_t h = 0; h < NKV; ++h) {
+        dfref::head_prep(&in[h * HD], kn.data(), HD, 1e-6f, rope.data(), pos, tmp.data());
+        for (uint32_t i = 0; i < HD; ++i) {
+          wk[(size_t(slot) * NKV + h) * HD + i] = rne(tmp[i]);
+          wv[(size_t(slot) * NKV + h) * HD + i] = rne(in[KVN + h * HD + i]);
+        }
+      }
+    }
+    size_t e = 0;
+    for (size_t i = 0; i < ring_elems; ++i) e += gk[i] != wk[i] || gv[i] != wv[i];
+    std::printf("df_w_ctx_store (%s): rows 2040..2050 into slots 2040..2047, 0..2 - %zu of %zu ring values differ "
+                "(bitwise; every other slot untouched)\n", scaled ? "scaled" : "plain", e, 2 * ring_elems);
+    bad += int(e != 0);
+  }
+  return bad;
+}
+
 int check_attn(Dev& d, Bins& b) {
   int bad = 0;
   const float scale = float(1.0 / std::sqrt(double(HD)));
@@ -576,6 +676,7 @@ int main() {
   int bad = check_int4_groups(d);
   bad += check_prep(d, b);
   bad += check_heads(d, b, rope, brope);
+  bad += check_wide(d, rope, brope);
   bad += check_attn(d, b);
   bad += check_topk(d, b);
   bad += check_select(d, b);
