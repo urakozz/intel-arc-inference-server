@@ -1527,7 +1527,7 @@ int run(int argc, char** argv) {
   model::require_prefill(*model.desc);
   // Spec 6 §10: auto plans the largest max_len that fits and re-tables the model; an
   // explicit N is held to the same plan. Both print the plan's breakdown.
-  // Plan 5d: the prefill chunk cap - 4096 when the plan has room for it (cli/max_len.h) -
+  // Plan 5d: the prefill chunk cap - the default, or kPrefillChunkCapRule's choice (cli/max_len.h) -
   // planned with max_len and given to the engine.
   pp_path.chunk_cap = cli::planned_chunk_cap(0, *model.desc);
   const runtime::DrafterPlan drafter_plan = drafter_load ? drafter_load->plan : runtime::DrafterPlan{};
