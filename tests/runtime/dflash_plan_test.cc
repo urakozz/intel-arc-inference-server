@@ -121,6 +121,28 @@ int main(int argc, char** argv) {
                   .total() + reserve > device);
   std::printf("max_len auto on 32 GB with a 17 GB target: %u without the drafter, %u with it (int8)\n", a_off, a_on);
 
+  // Spec 19v3a: the loaded target with its int8 head (memory_plan_test's derived weights), candidate64 head,
+  // unchanged drafter and eight GDN slots. Only the target's KV and its prefill widening change form.
+  {
+    constexpr size_t target = 16'812'371'968ull, card = 32'530'000'000ull;
+    const auto bf = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Bf16, hp);
+    const auto i8 = runtime::plan(q, 32768, false, target, {}, {}, runtime::KvCache::Int8, hp);
+    CHECK_EQ(i8.drafter, bf.drafter);
+    CHECK_EQ(i8.drafter_slots, bf.drafter_slots);
+    CHECK_EQ(i8.drafter_taps, bf.drafter_taps);
+    const auto persistent = runtime::PersistentDims::sizes(32768, q, runtime::KvCache::Int8);
+    CHECK_EQ(i8.kv, persistent.kv_k + persistent.kv_v + persistent.kv_ks + persistent.kv_vs);
+    CHECK(i8.kv < bf.kv);
+    const uint32_t len = runtime::max_len_that_fits(q, false, target, card, reserve, 262144, {}, {},
+                                                  runtime::KvCache::Int8, hp);
+    CHECK(len >= 200000);
+    CHECK(runtime::plan(q, len, false, target, {}, {}, runtime::KvCache::Int8, hp).total() + reserve <= card);
+    CHECK(len == 262144 || runtime::plan(q, len + runtime::kMaxLenQuantum, false, target, {}, {},
+                                       runtime::KvCache::Int8, hp).total() + reserve > card);
+    std::printf("DFlash int8 KV + candidate64 --max-len auto on 32.530 GB: %u (target %zu B, reserve %zu B)\n",
+                len, target, reserve);
+  }
+
   // 4. the table and the launches
   const std::vector<float> t = rd::rope_table(1e7, 128, 131072);
   const std::vector<float> tw = dfref::rope_table(1e7, 128, 131072);
