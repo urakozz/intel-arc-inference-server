@@ -1383,7 +1383,10 @@ rows); only the 19 SPEC_SLOTS M >= 2 binaries change, every other binary is byte
 36.59 -> 35.88 ms (1.250 -> 1.225 plain steps, -0.70 ms)**, four interleaved process pairs against the pre-lever
 build (uninstrumented, each a median of 3 rounds of 16 calls). The snapshot stores in other forms, standalone
 against the kept lever: block writes -0.02 ms, LSC L1UC_L3WB -0.02, L1S_L3WB -0.08, the uncached forms +8.7 to
-+15 ms - none kept.
++15 ms - none kept. **MTP's lists bind the same builds:** `mtp_verify_test` and `slots_test` pass, `mtp_gpu_test`
+fails the same 2 near-tie prompts as main's kernels (all 60 f32-judge verdicts identical); MTP verify at 4 rows
+(`probe_mtp_steps`, int8 head, depth 4096, four process pairs) **33.83 -> 33.34 ms (1.112 -> 1.100 x verify at 1
+row)**, at 2 rows 31.66 -> 31.42 ms.
 
 ### Lookup inside DFlash (`--spec dflash-lookup`, spec 19 §13.1, plan 19f, measured 2026-11-01)
 
