@@ -3,7 +3,8 @@
 //
 //   plain   --parallel tp without a proposer: per case, prefill and 64 greedy ids one replay at a time, each deciding
 //           row kept - the reference the bars judge against.
-//   dflash  --parallel tp with the split drafter (z-lab/Qwen3.8-27B-DFlash2, int8, the 2-bit candidate head):
+//   dflash  --parallel tp with the split drafter (argv[2]: int4 g64 when it is an AutoRound export, else int8 at load;
+//           the 2-bit candidate head):
 //             G1  greedy speculative decoding at K = 7, 3, 1 (draft_tap -> verify(K) -> the longest agreeing prefix ->
 //                 commit, its projection deferred to the next draft) against `plain`: identical, or each first
 //                 difference a near-tie (<= 1 bf16 ulp) or accepted by the f32 judge of its context (forced_judge.h:
@@ -42,6 +43,7 @@
 #include "l0/cmdlist.h"
 #include "l0/context.h"
 #include "loader/dflash_loader.h"
+#include "loader/dflash_repack.h"
 #include "loader/loader.h"
 #include "model/qwen35.h"
 #include "runtime/control.h"
@@ -79,9 +81,11 @@ struct Tp {
   std::unique_ptr<runtime::TpEngine> e;
   Tp(l0::Context& d0, l0::Context& d1, uint32_t max_len) {
     std::array<loader::LoadedModel, 2> cards = load_cards(d0, d1, max_len);
-    std::array<loader::DFlashWeights, 2> halves{
-        loader::load_drafter(d0, g_drafter, cards[0], loader::DraftFormat::Int8, 0, true, 2, 80, 0),
-        loader::load_drafter(d1, g_drafter, cards[1], loader::DraftFormat::Int8, 0, true, 2, 80, 1)};
+    // The drafter's own form: an AutoRound int4 export's packed linears (int4 g64 layout 1), else int8 at load.
+    const loader::DraftFormat f =
+        loader::DFlashCheckpoint(g_drafter).packed() ? loader::DraftFormat::Int4G64 : loader::DraftFormat::Int8;
+    std::array<loader::DFlashWeights, 2> halves{loader::load_drafter(d0, g_drafter, cards[0], f, 0, true, 2, 80, 0),
+                                                loader::load_drafter(d1, g_drafter, cards[1], f, 0, true, 2, 80, 1)};
     drafter = std::make_unique<runtime::dflash::TpDFlashDrafter>(std::array<l0::Context*, 2>{&d0, &d1},
                                                                   std::move(halves), max_len, 7);
     e = std::make_unique<runtime::TpEngine>(d0, d1, std::move(cards), max_len, runtime::TpOptions{},
