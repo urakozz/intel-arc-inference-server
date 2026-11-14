@@ -43,7 +43,7 @@ difference is neither passed nor failed (the test reports SKIP). Each row: what 
 
 ## DFlash drafter quant (follow-up)
 
-**The packed drafter loader is built and the packed drafter is the default** (branch `dflash-packed-loader`, operator ruling 2026-11-14; BENCHMARKS "The packed drafter"): draft pass 4.41 ms at 4,096 (item 21's 5.0 ms target met; int8 6.20), a round 1.398 plain steps; acceptance pooled -0.016, code -0.054 accepted. One card, busy box: opencode replay 96.2 t/s (MTP 65.9, int8 drafter 92.9). Open: the golden/prose identity context's f32 reference.
+**The packed drafter loader is built and the packed drafter is the default** (merge `ca14f0fc`, operator ruling 2026-11-14; BENCHMARKS "The packed drafter"): draft pass 4.41 ms at 4,096 (item 21's 5.0 ms target met; int8 6.20), a round 1.398 plain steps; acceptance pooled -0.016, code -0.054 accepted. One card, busy box: opencode replay 96.2 t/s (MTP 65.9, int8 drafter 92.9). Open: the golden/prose identity context's f32 reference (CPU job queued); the wide prompt projection has no int4 path, so the drafter's prompt pass falls back to 8 rows (~+0.1 s first token at 4k) and the prefix-cache drafter key must include the linear format (both on branch `dflash-packed-wide`).
 
 Quantise `z-lab/Qwen3.8-27B-DFlash2` with **tuned AutoRound W4A16, group size 64, symmetric**, exported as
 `auto_round:auto_gptq` (4-bit weights, 16-bit activations; `w = (q - 8) * scale`, symmetric GPTQ zeros,
